@@ -38,11 +38,16 @@ async function fetchRoots(): Promise<FilesRootsResponse | FilesUnavailable> {
   return (await res.json()) as FilesRootsResponse;
 }
 
-export function useFilesRoots() {
+export function useFilesRoots(opts?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ["files", "roots"],
     queryFn: fetchRoots,
     staleTime: 60_000,
+    // OPR.0.4.6.MH2 FR-7/guard-B1 — /api/files/* is LOCAL-filesystem-only
+    // and deliberately excluded from the remote read-through; file-backed
+    // surfaces pass enabled:false under a remote host selection so the
+    // request never FIRES (a render-gate alone still issues the fetch).
+    enabled: opts?.enabled ?? true,
   });
 }
 

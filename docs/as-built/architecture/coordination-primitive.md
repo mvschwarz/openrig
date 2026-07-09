@@ -109,6 +109,78 @@ Tier→SLA mapping for `closure_required_at` also lives in
 enforced at the daemon transaction boundary — the workflow runtime
 *projects* on closure but does not gate it (see `workflow-runtime.md`).
 
+## 3b. Cross-host queue routing (v0.4.6 — OPR.0.4.6.MH3)
+
+The queue's two coordination WRITE verbs — **create + handoff(-and-complete)
+only** — are host-aware: a write body may carry an out-of-band `hostId`
+envelope (BR-1 — session strings stay `member@rig` everywhere; the 3-part
+`agent@rig@host` form is CLI input sugar that never leaves the CLI edge).
+The mechanism **generalizes the shipped mission-control forward-then-strip
+WRITE template** (`routes/mission-control.ts` § remote action): one shared
+route-layer helper (`forwardQueueWrite`, `routes/queue.ts`) resolves the
+host registry daemon-side (bearers never reach the caller), rejects
+ssh-declared hosts (`unsupported-transport` — the daemon→daemon path is
+http-only, because it is what fires the remote nudge), strips `hostId`, and
+forwards the WHOLE body via `remoteJsonRequest` under a named write-class
+deadline (`QUEUE_FORWARD_TIMEOUT_MS`). The origin's response returns
+verbatim; transport failures map to a structured host-named taxonomy
+(`remote_queue_write_failed`: unknown-host / unsupported-transport /
+unreachable / auth-failed / remote-error). No local row is ever written on
+the cross-host path.
+
+**The model: origin-owns-the-record, at-least-once + idempotent,
+message-passing closure (never 2PC).**
+
+- **Origin-owns-the-record.** The qitem lives in the TARGET host's DB; that
+  row is THE record. The target daemon's OWN `maybeNudge` fires on ITS local
+  tmux (the forwarded body includes the `nudge` flag) — the sending daemon
+  never reaches across a host boundary.
+- **Idempotency (arch Q-a).** The forwarding daemon MINTS the `qitemId`
+  before the first forward, so every retry carries the same id; dedup rides
+  the existing `qitem_id TEXT PRIMARY KEY`. On PK conflict the origin
+  returns the stored row when identity fields match (idempotent absorb) and
+  a structured `qitem_id_reuse` error when they differ
+  (`QueueRepository.create()` catch-path + `isQitemPrimaryKeyConflict`).
+- **Cross-host handoff choreography (arch Q-c).** The local atomic
+  close+create cannot span two DBs, so the route-layer choreography
+  (`crossHostHandoff`, `routes/queue.ts`) runs: successor-create on the
+  target host FIRST (via the one forward helper), local source-close SECOND
+  (`QueueRepository.closeCrossHostHandoffSource`) — never the reverse. A
+  crash between the two leaves a live duplicate that the idempotent re-drive
+  converges; the reverse order would leave a closed source pointing at a
+  successor that does not exist (a dropped potato — the one forbidden
+  outcome). The successor id is DERIVED, not minted:
+  `deriveCrossHostSuccessorId(source, destination, host)` →
+  `qitem-xh-<sha256[:16]>` — a pure stateless function, so a re-drive
+  re-derives the same id across daemon restarts and absorbs on the target
+  PK. *(Named residual, inherent to the at-least-once/no-2PC fence: a
+  re-drive naming a DIFFERENT destination derives a different id and cannot
+  absorb the earlier successor — that orphan stays visible via the chain +
+  provenance tags; the source-close conflict check surfaces the
+  disagreement.)*
+- **Closure across the boundary.** The source closes with
+  `closure_reason=handed_off_to` and `closure_target=member@rig@<host>` —
+  the 3-part form is legal THERE because `closure_target` is OPAQUE
+  audit/display metadata, presence-checked and never parsed for routing
+  (arch R1; any PR parsing it as a session string is a spec violation).
+  The exemption spans exactly the `closure_target` column on `queue_items`
+  and its verbatim mirror on `queue_transitions` — nothing else. In
+  particular the transition log's free-text `transition_note` is a durable
+  carrier too: the minted cross-host close note names the 2-part
+  `toSession` only (rev1-r2 B1). `handed_off_to` and every other
+  session-string carrier stay 2-part.
+  Re-drive semantics: already-terminal + MATCHING `closure_target` = absorb;
+  MISMATCH = structured `cross_host_close_conflict` (409). The successor
+  carries `chain_of_record = [...source.chain, source.qitemId]` — A-side ids
+  are opaque lineage identifiers on B (arch R2b; they do not dereference in
+  B's DB) — plus provenance tags `cross-host` + `from-host:<self-declared
+  name>` (honest best-effort, not authenticated identity).
+- **Boundary discipline.** Claim / update / inbox stay local-by-principle
+  (after a cross-host handoff the successor lives where its worker lives);
+  sender-side ops on a forwarded item are a named follow-up. The local
+  (no-host) paths are byte-identical to pre-MH-3 behavior; the hot-potato
+  validation contract (§3) is unweakened across the boundary.
+
 ## 4. Coordination events
 
 > Drift-fix D8 / OPEN-4 (carried verbatim, slice-00): `architecture.md`

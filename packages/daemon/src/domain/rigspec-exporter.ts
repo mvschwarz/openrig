@@ -158,6 +158,9 @@ export class RigSpecExporter {
         if (node.label) member.label = node.label;
         if (node.codexConfigProfile) member.codexConfigProfile = node.codexConfigProfile;
         if (node.model) member.model = node.model;
+        // OPR.0.4.6.FAC1: a declared seat role exports with the pod
+        // member (round-trip fidelity — export→import keeps the role).
+        if (node.role) member.role = node.role;
         const rp = getRestorePolicy(node.id);
         if (rp) member.restorePolicy = rp;
         return member;

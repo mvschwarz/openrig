@@ -1066,6 +1066,16 @@ export class PodRigInstantiator {
         let nodeId: string;
         try {
           const node = this.deps.rigRepo.addNode(rigId, qualifiedId, {
+            // OPR.0.4.6.FAC1 (VM-caught): the pod-aware bootstrap
+            // instantiate-from-YAML path (`rig up <spec>`) creates agent
+            // nodes via this INLINE addNode, NOT createMemberNode — so
+            // it needs its own role wire or every up'd rig persists
+            // role=NULL and role→seat resolution can never match. This
+            // is the FOURTH node-creation site (materialize/expand/
+            // add_member share createMemberNode; this one does not); the
+            // C1 sibling-layer sweep missed it because its tests
+            // exercised the createMemberNode paths, not bootstrap.
+            role: member.role,
             runtime: member.runtime,
             model: member.model,
             codexConfigProfile: member.codexConfigProfile,
@@ -1367,6 +1377,7 @@ export class PodRigInstantiator {
   }) {
     const effectiveCwd = resolveLaunchCwd(input.member.cwd, input.rigRoot, input.cwdOverride);
     const node = this.deps.rigRepo.addNode(input.rigId, input.qualifiedId, {
+      role: input.member.role,
       runtime: input.member.runtime,
       model: input.member.model,
       codexConfigProfile: input.member.codexConfigProfile,

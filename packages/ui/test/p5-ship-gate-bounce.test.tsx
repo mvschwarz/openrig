@@ -33,8 +33,23 @@ afterEach(() => {
   cleanup();
 });
 
-function withQueryClient(ui: React.ReactNode) {
+function withQueryClient(ui: React.ReactNode, opts: { selectedHost?: string } = {}) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  if (opts.selectedHost) {
+    queryClient.setQueryData(["hosts"], {
+      ownName: "localhost",
+      selected: opts.selectedHost,
+      hosts: [
+        {
+          id: opts.selectedHost,
+          transport: "http",
+          url: `http://${opts.selectedHost}:7433`,
+          selected: true,
+          status: "reachable",
+        },
+      ],
+    });
+  }
   return render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>);
 }
 
@@ -81,6 +96,28 @@ describe("TopologyTableView P0-1 regression: no rules-of-hooks crash on first-re
       // Component still alive after rigs resolution.
       expect(container.querySelector("[data-testid='topology-table-view']")).toBeTruthy();
     });
+  });
+
+  it("remote selection threads host param through table node-inventory fan-out", async () => {
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url === "/api/rigs/summary?host=vps-a") {
+        return new Response(JSON.stringify([{ id: "rig-1", name: "remote-rig" }]));
+      }
+      if (url === "/api/rigs/rig-1/nodes?host=vps-a") {
+        return new Response(JSON.stringify([]));
+      }
+      return new Response("[]");
+    });
+
+    const { container } = withQueryClient(<TopologyTableView />, { selectedHost: "vps-a" });
+    expect(container.querySelector("[data-testid='topology-table-view']")).toBeTruthy();
+    await waitFor(() => {
+      expect(mockFetch).toHaveBeenCalledWith("/api/rigs/summary?host=vps-a");
+      expect(mockFetch).toHaveBeenCalledWith("/api/rigs/rig-1/nodes?host=vps-a");
+    });
+    expect(
+      mockFetch.mock.calls.some(([url]) => String(url) === "/api/rigs/rig-1/nodes"),
+    ).toBe(false);
   });
 
   it("source asserts useQueries replaces the .map(useNodeInventory) loop (ritual #9)", () => {

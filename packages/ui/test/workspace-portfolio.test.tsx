@@ -47,6 +47,8 @@ function installMock(opts: { emptySlices?: boolean } = {}) {
   mockFetch.mockImplementation(async (input: unknown) => {
     const url = String(input);
     calls.push(url);
+    // MH-2: the selection-known files gate needs the hosts payload (local).
+    if (url.includes("/api/hosts")) return json({ ownName: "localhost", selected: "local", hosts: [] });
     if (url.includes("/api/slices?")) {
       return json(opts.emptySlices ? { slices: [], totalCount: 0, filter: "all" } : SLICES);
     }

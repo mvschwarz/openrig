@@ -61,10 +61,15 @@ function relativeUnder(rootPath: string, absChild: string): string {
   return c;
 }
 
-export function useMissionDiscovery(): UseMissionDiscoveryResult {
+export function useMissionDiscovery(opts?: { enabled?: boolean }): UseMissionDiscoveryResult {
+  // OPR.0.4.6.MH2 guard-B1 — discovery walks the LOCAL filesystem
+  // (/api/files/roots + /api/files/list). Under a remote host selection
+  // the caller passes enabled:false and NO file request fires (a post-hoc
+  // result wrapper is not a gate — the hooks would already have fetched).
+  const enabled = opts?.enabled ?? true;
   const workspace = useWorkspaceName();
-  const rootsQuery = useFilesRoots();
-  const rootsResp = rootsQuery.data;
+  const rootsQuery = useFilesRoots({ enabled });
+  const rootsResp = enabled ? rootsQuery.data : undefined;
 
   // Resolution: pick the best-matching root for workspace.root, if any.
   let chosenRoot: { name: string; path: string } | null = null;
@@ -98,6 +103,17 @@ export function useMissionDiscovery(): UseMissionDiscoveryResult {
     chosenRoot ? chosenRoot.name : null,
     missionsRelPath,
   );
+
+  // Disabled (remote selection): honest unavailable, zero file requests
+  // issued above (roots disabled ⇒ chosenRoot null ⇒ list disabled).
+  if (!enabled) {
+    return {
+      missions: [],
+      unavailable: true,
+      isLoading: false,
+      hint: null,
+    };
+  }
 
   const isLoading =
     workspace.isLoading ||

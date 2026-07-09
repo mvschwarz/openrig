@@ -15,6 +15,7 @@ import {
   Navigate,
   Outlet,
   useParams,
+  useSearch,
 } from "@tanstack/react-router";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { DaemonHealthProvider } from "./components/DaemonHealthProvider.js";
@@ -63,6 +64,9 @@ import {
   SliceScopePage,
 } from "./components/project/ScopePages.js";
 import { RigAgentsPage } from "./components/review/RigAgentsPage.js";
+import { FleetPage } from "./components/review/FleetPage.js";
+import { WorkflowsPage } from "./components/workflow/WorkflowsPage.js";
+import { WorkflowInstancePage } from "./components/workflow/WorkflowInstancePage.js";
 import { ProjectGraphicsPreview } from "./components/lab/ProjectGraphicsPreview.js";
 import { CardPreviewsLab } from "./components/lab/CardPreviewsLab.js";
 import { VellumLab } from "./components/lab/VellumLab.js";
@@ -156,6 +160,43 @@ const rigAgentsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/agents",
   component: RigAgentsPage,
+});
+
+// OPR.0.4.6.MH5 (C3) — the FLEET attention altitude ABOVE host (placement
+// option A of the founder LOCK = BOTH; the band is option B on the per-host
+// surfaces). Zoom-addressed like /agents (ADDRESSING, not nav chrome);
+// reached from the FLEET band's OPEN FLEET →. Expanded-exception state
+// rides ?open=<fleetKey> (read window-side per this family's idiom) so
+// every state is deep-link addressable.
+const fleetRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/fleet",
+  component: FleetPage,
+});
+
+// OPR.0.4.6.WF4 (C4) — the workflow surfaces. BOTH are zoom-addressed like
+// /agents above (routes exist for ADDRESSING, not nav chrome): reached from
+// NEEDS-YOU workflow rows, Library instance bands, and instance deep-links;
+// deliberately NOT added to any nav rail (pm/founder confirmed v1).
+const workflowsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/workflows",
+  component: WorkflowsPage,
+});
+
+const workflowInstanceRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/workflow/instance/$instanceId",
+  // FR-3 `?step=<id>` deep-link anchor (the gated/failed step the attention row
+  // points at). Optional; validated to a string so the typed Link is honest.
+  validateSearch: (search: Record<string, unknown>): { step?: string } => ({
+    step: typeof search.step === "string" ? search.step : undefined,
+  }),
+  component: () => {
+    const { instanceId } = useParams({ from: "/workflow/instance/$instanceId" });
+    const { step } = useSearch({ from: "/workflow/instance/$instanceId" });
+    return <WorkflowInstancePage instanceId={instanceId} anchorStepId={step ?? null} />;
+  },
 });
 
 const specsLibraryRoute = createRoute({
@@ -507,6 +548,9 @@ export const routeTree = rootRoute.addChildren([
   projectMissionRoute,
   projectSliceRoute,
   rigAgentsRoute,
+  fleetRoute,
+  workflowsRoute,
+  workflowInstanceRoute,
   specsLibraryRoute,
   specsApplicationsRoute,
   specsSkillsIndexRoute,

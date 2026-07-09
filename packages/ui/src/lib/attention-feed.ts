@@ -18,8 +18,9 @@
 import type { FeedCard } from "./feed-classifier.js";
 import type { ActivityEvent } from "../hooks/useActivityFeed.js";
 import type { AttentionQueueItem } from "../hooks/useAttentionItems.js";
-
-const HUMAN_SEAT_PATTERN = /^human(?:-[A-Za-z0-9._-]+)?@(kernel|host)$/;
+// OPR.0.4.6.MH1 FR-8: the human-seat predicate rides the shared
+// session-name contract (was a local regex copy of the same pattern).
+import { isHumanSeatSessionRef } from "./session-name.js";
 
 /**
  * Classify a queue item's attention kind. Mirrors the mission-control
@@ -35,7 +36,7 @@ const HUMAN_SEAT_PATTERN = /^human(?:-[A-Za-z0-9._-]+)?@(kernel|host)$/;
  */
 function attentionKindFor(item: AttentionQueueItem): "approval" | "action-required" {
   if (item.tier === "human-gate") return "approval";
-  if (HUMAN_SEAT_PATTERN.test(item.destinationSession ?? "")) return "action-required";
+  if (isHumanSeatSessionRef(item.destinationSession ?? "")) return "action-required";
   // Fallback — daemon guarantees one of the two for items it returns
   // with attention=1; defensive default keeps the type union tight.
   return "action-required";

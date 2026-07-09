@@ -6,6 +6,38 @@ import type { CrossHostResult } from "./cross-host-executor.js";
  * `capture.ts` (and any future v1 cross-host command) format identically.
  */
 
+/**
+ * OPR.0.4.6.MH4 — structured failure surface for the http transport branch.
+ * Each branch names its OWN step taxonomy: the http branch surfaces
+ * `runRemoteHttpOp`'s steps (registry/unknown-host/permission-gate/
+ * remote-daemon-unreachable/remote-command-failed) with the host named and
+ * the remote route's own error text as the detail — never a generic
+ * "failed", never a locally-invented message.
+ */
+export function emitRemoteHttpFailure(
+  hostId: string,
+  target: string,
+  result: { failedStep: string; error?: string; data?: unknown },
+  json?: boolean,
+  hint?: string,
+): void {
+  const remoteError = (result.data as { error?: string } | undefined)?.error;
+  const detail = [result.error, remoteError].filter(Boolean).join(" — ");
+  if (json) {
+    console.log(JSON.stringify({
+      ok: false,
+      cross_host: { host: hostId, target, transport: "http" },
+      failedStep: result.failedStep,
+      error: detail,
+      ...(hint ? { hint } : {}),
+    }));
+  } else {
+    console.error(`cross-host (host=${hostId}, ${target}): http ${result.failedStep}: ${detail}`);
+    if (hint) console.error(`hint: ${hint}`);
+  }
+  process.exitCode = 1;
+}
+
 export function emitCrossHostError(hostId: string, code: string, message: string, json?: boolean): void {
   if (json) {
     console.log(JSON.stringify({ ok: false, cross_host: { host: hostId }, failedStep: code, error: message }));

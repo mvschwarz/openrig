@@ -82,7 +82,13 @@ describe("SettingsStore (User Settings v0)", () => {
 
   it("SETTINGS_VALID_KEYS matches the documented settings key set", () => {
     expect([...SETTINGS_VALID_KEYS]).toEqual([
-      "daemon.port", "daemon.host", "db.path",
+      "daemon.port", "daemon.host",
+      // OPR.0.4.6.MH1 FR-1/FR-4 — host-selection pointer + own-host name.
+      "host.selected",
+      "host.name",
+      // OPR.0.4.6.WF5 FR-2 — the host-level maturity-dial default.
+      "workflow.exception_routing",
+      "db.path",
       "transcripts.enabled", "transcripts.path",
       // V1 pre-release CLI/daemon Item 1 — capture-pane rotation tunables.
       "transcripts.lines", "transcripts.poll_interval_seconds",
@@ -120,6 +126,14 @@ describe("SettingsStore (User Settings v0)", () => {
       "snapshots.periodic.enabled",
       "snapshots.periodic.interval_seconds",
       "snapshots.periodic.retention_keep",
+      // OPR.0.4.6.02 S1 — inner-tmux status-bar launch default (static bool).
+      "terminal.status_bar",
+      // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs.
+      "retention.enabled",
+      "retention.transitions_days",
+      "retention.watchdog_days",
+      "retention.watchdog_keep_per_job",
+      "retention.batch_size",
     ]);
   });
 

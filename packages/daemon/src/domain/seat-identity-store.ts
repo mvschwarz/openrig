@@ -92,6 +92,30 @@ export class SeatIdentityStore {
     return out;
   }
 
+  /**
+   * FS-1 W1.2 — all rigs' verdicts in ONE query, keyed rigId → (nodeId →
+   * verdict). Same JOIN + `rowToVerdict` as `getForRig`, minus the per-rig
+   * WHERE — so a per-rig `getForAllRigs().get(rigId)` is equivalent to
+   * `getForRig(rigId)` (empty map when a rig has no verdicts). Defensive.
+   */
+  getForAllRigs(): Map<string, Map<string, SeatIdentityVerdict>> {
+    const out = new Map<string, Map<string, SeatIdentityVerdict>>();
+    try {
+      const rows = this.db.prepare(`
+        SELECT v.*, n.rig_id as owning_rig_id FROM seat_identity_verdicts v
+        JOIN nodes n ON n.id = v.node_id
+      `).all() as Array<VerdictRow & { owning_rig_id: string }>;
+      for (const row of rows) {
+        let m = out.get(row.owning_rig_id);
+        if (!m) { m = new Map<string, SeatIdentityVerdict>(); out.set(row.owning_rig_id, m); }
+        m.set(row.node_id, rowToVerdict(row));
+      }
+    } catch {
+      // Table absent (partial fixture) — degrade to no verdicts.
+    }
+    return out;
+  }
+
   /** Read a single node's verdict, or null. Defensive. */
   getForNode(nodeId: string): SeatIdentityVerdict | null {
     try {

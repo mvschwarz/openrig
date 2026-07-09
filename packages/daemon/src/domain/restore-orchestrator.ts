@@ -11,6 +11,7 @@ import type { NodeLauncher } from "./node-launcher.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { ClaudeResumeAdapter } from "../adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../adapters/codex-resume.js";
+import type { PiResumeAdapter } from "../adapters/pi-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { assessNativeResumeProbe } from "./native-resume-probe.js";
 import type {
@@ -95,6 +96,9 @@ interface RestoreOrchestratorDeps {
   tmuxAdapter: TmuxAdapter;
   claudeResume: ClaudeResumeAdapter;
   codexResume: CodexResumeAdapter;
+  /** OPR.0.4.6.PI1 FR-6 — optional so older wiring/tests keep working; a Pi
+   *  resume without the adapter falls through to the honest no-adapter error. */
+  piResume?: PiResumeAdapter;
   transcriptStore?: TranscriptStore;
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
 }
@@ -111,6 +115,7 @@ export class RestoreOrchestrator {
   private tmuxAdapter: TmuxAdapter;
   private claudeResume: ClaudeResumeAdapter;
   private codexResume: CodexResumeAdapter;
+  private piResume: PiResumeAdapter | null;
   private transcriptStore: TranscriptStore | null;
   private serviceOrchestrator: import("./service-orchestrator.js").ServiceOrchestrator | null;
 
@@ -147,6 +152,7 @@ export class RestoreOrchestrator {
     this.tmuxAdapter = deps.tmuxAdapter;
     this.claudeResume = deps.claudeResume;
     this.codexResume = deps.codexResume;
+    this.piResume = deps.piResume ?? null;
     this.transcriptStore = deps.transcriptStore ?? null;
     this.serviceOrchestrator = deps.serviceOrchestrator ?? null;
   }
@@ -977,7 +983,7 @@ export class RestoreOrchestrator {
         await this.rollbackToZeroSession(node.id, sessionName, launchResult?.session.id, priorState);
         return { nodeId: node.id, logicalId: node.logicalId, status: "awaiting-decision", error: `Original session unresumable: resume requested but no token available. No session is running. Re-run with --fresh ${node.logicalId} for a deliberate fresh-primed seat, or restore the original session manually.` };
       } else {
-        const resumeOutcome = await this.attemptResume(sessionName, resumeType, resumeToken, node.cwd ?? "/", node.codexConfigProfile);
+        const resumeOutcome = await this.attemptResume(sessionName, resumeType, resumeToken, node.cwd ?? "/", node.codexConfigProfile, node.model);
         if (resumeOutcome.kind === "resumed") {
           baseStatus = "resumed";
         } else if (resumeOutcome.kind === "attention_required") {
@@ -1098,6 +1104,13 @@ export class RestoreOrchestrator {
             ...launchResult.binding,
             cwd: node.cwd ?? ".",
             codexConfigProfile: node.codexConfigProfile ?? undefined,
+            // OPR.0.4.6.PI1 VM leg finding: the restore binding dropped the
+            // node's model declaration, so a resumed Pi seat relaunched with
+            // no --model — and the runner's provider-key allowlist (keyed off
+            // the declared provider) passed nothing through ("No API key
+            // found" on every resumed Pi seat). Claude/Codex silently lost
+            // their -m/--model on restore the same way.
+            model: node.model ?? undefined,
           };
 
           try {
@@ -1228,6 +1241,7 @@ export class RestoreOrchestrator {
     resumeToken: string | null,
     cwd: string,
     codexConfigProfile?: string | null,
+    model?: string | null,
   ): Promise<
     | { kind: "resumed" }
     | { kind: "retry_fresh" }
@@ -1257,6 +1271,23 @@ export class RestoreOrchestrator {
       // Recoverable — operator runs `codex login` and the seat continues.
       // Per-node mapping at lines 725-735 emits `status: "attention_required"`
       // with `attentionEvidence` for both runtimes; no further wiring needed.
+      if (result.code === "attention_required") {
+        return {
+          kind: "attention_required",
+          message: result.message,
+          evidence: (result as { evidence?: string }).evidence,
+        };
+      }
+      return { kind: "failed", message: result.message };
+    }
+
+    // OPR.0.4.6.PI1 FR-6 — honest session-file continuation. A missing
+    // session file returns retry_fresh, which the caller maps to the
+    // awaiting-decision stop-and-ask — never a silent fresh start (BR-6).
+    if (this.piResume?.canResume(resumeType, resumeToken)) {
+      const result = await this.piResume.resume(sessionName, resumeType, resumeToken, cwd, model);
+      if (result.ok) return { kind: "resumed" };
+      if (result.code === "retry_fresh") return { kind: "retry_fresh" };
       if (result.code === "attention_required") {
         return {
           kind: "attention_required",

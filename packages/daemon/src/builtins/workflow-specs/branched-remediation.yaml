@@ -1,0 +1,31 @@
+# OpenRig 0.4.6 spec-language example — the BRANCHED REMEDIATION shape.
+# `failed` branches to a remediation step (branch keys = the recorded
+# exit enum ONLY); the remediate → verify → remediate loop is a
+# branch-created cycle, legitimate ONLY under the declared max_hops
+# (remove loop_guards and validation fails naming the cycle + the fix).
+workflow:
+  id: branched-remediation
+  version: 1
+  objective: Build with a bounded failed-path remediation loop.
+  loop_guards:
+    max_hops: 8
+  roles:
+    builder:
+      preferred_targets: [flow-builder@acme-flow]
+    fixer:
+      preferred_targets: [flow-fixer@acme-flow]
+    prover:
+      preferred_targets: [flow-prover@acme-flow]
+  steps:
+    - id: build
+      actor_role: builder
+      next_hop:
+        on: { failed: remediate }
+    - id: verify
+      actor_role: prover
+      next_hop:
+        on: { failed: remediate }
+    - id: remediate
+      actor_role: fixer
+      next_hop:
+        suggested_roles: [prover]

@@ -9,8 +9,11 @@
 
 import { useState, useMemo } from "react";
 import { Link } from "@tanstack/react-router";
-import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
+import { ChevronDown, ChevronRight, Globe, RefreshCw } from "lucide-react";
+import { cn } from "../../lib/utils.js";
 import { useSlices, useRefreshSlices, type SliceListEntry } from "../../hooks/useSlices.js";
+import { useHosts, useSelectHost, useLocalFilesAllowed } from "../../hooks/useHosts.js";
+import { LOCAL_HOST_ID } from "../../lib/host-param.js";
 import { useWorkspaceName } from "../../hooks/useWorkspaceName.js";
 import {
   useMissionDiscovery,
@@ -29,27 +32,32 @@ import {
   type ProjectSliceRow,
 } from "../../lib/project-mission-state.js";
 
-function ProjectTreeRefreshHeader() {
+function ProjectTreeRefreshHeader({ remoteReadonly }: { remoteReadonly: boolean }) {
   const refresh = useRefreshSlices();
   return (
     <div className="flex items-center justify-between px-2 pb-2 border-b border-outline-variant">
       <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-on-surface-variant">
         Project
       </span>
-      <button
-        type="button"
-        data-testid="project-tree-refresh"
-        title="Refresh slice + file caches"
-        onClick={() => refresh.mutate()}
-        disabled={refresh.isPending}
-        className="flex items-center gap-1 px-1 py-0.5 text-on-surface-variant hover:text-on-surface disabled:opacity-50"
-      >
-        <RefreshCw
-          className={`h-3 w-3 ${refresh.isPending ? "animate-spin" : ""}`}
-          aria-hidden="true"
-        />
-        <span className="font-mono text-[9px] uppercase tracking-wide">refresh</span>
-      </button>
+      {/* OPR.0.4.6.MH2 rev1-r2 re-verdict B1 (same-class, enumerated): the
+          refresh POSTs the LOCAL slice/file rescan — a local mutation
+          affordance never renders on the remote-labeled tree. */}
+      {remoteReadonly ? null : (
+        <button
+          type="button"
+          data-testid="project-tree-refresh"
+          title="Refresh slice + file caches"
+          onClick={() => refresh.mutate()}
+          disabled={refresh.isPending}
+          className="flex items-center gap-1 px-1 py-0.5 text-on-surface-variant hover:text-on-surface disabled:opacity-50"
+        >
+          <RefreshCw
+            className={`h-3 w-3 ${refresh.isPending ? "animate-spin" : ""}`}
+            aria-hidden="true"
+          />
+          <span className="font-mono text-[9px] uppercase tracking-wide">refresh</span>
+        </button>
+      )}
     </div>
   );
 }
@@ -85,7 +93,24 @@ function LiveMissionStatusBadge({ mission }: { mission: GroupedMission }) {
 export function ProjectTreeView() {
   const { data: slicesResp } = useSlices("all");
   const workspace = useWorkspaceName();
-  const discovery = useMissionDiscovery();
+  // OPR.0.4.6.MH2 FR-4 — the selected host + registry drive the project
+  // explorer's HOST level (fr4a ruling). Discovery walks LOCAL workspace
+  // files, so for a remote selection it is GATED OFF AT THE HOOK
+  // (enabled:false ⇒ zero /api/files requests — guard-B1: a post-hoc
+  // result wrapper is not a gate) and missions derive from the host-keyed
+  // slice list only — local folders are never labeled as the remote
+  // host's (the twin's mock-seam rule, kept in the build).
+  const { data: hostsData } = useHosts();
+  const selectHost = useSelectHost();
+  const selectedHost = hostsData?.selected ?? LOCAL_HOST_ID;
+  const isRemote = selectedHost !== LOCAL_HOST_ID;
+  const remoteHosts = hostsData?.hosts ?? [];
+  // Discovery waits for the selection to be KNOWN (hosts payload landed):
+  // gating on !isRemote alone raced — the first render defaults local and
+  // fired /api/files/roots before a remote selection resolved. The ONE
+  // shared gate (useLocalFilesAllowed) encodes both conditions.
+  const filesAllowed = useLocalFilesAllowed();
+  const discovery = useMissionDiscovery({ enabled: filesAllowed });
   const [expanded, setExpanded] = useState<Record<string, boolean>>({
     workspace: true,
   });
@@ -154,7 +179,9 @@ export function ProjectTreeView() {
   // A5 bounce-fix: replace hardcoded "openrig-work" with live-wired
   // workspace name from ConfigStore. When unset/unreachable: render an
   // honest empty-state node ("No workspace connected" + Link to /settings).
-  if (!workspace.isLoading && workspace.name === null) {
+  // MH-2: local-only — the workspace name is LOCAL config; a remote
+  // selection renders the remote tree regardless of local workspace state.
+  if (!isRemote && !workspace.isLoading && workspace.name === null) {
     return (
       <div
         data-testid="project-tree-view"
@@ -182,7 +209,11 @@ export function ProjectTreeView() {
     );
   }
 
-  const workspaceLabel = workspace.name ?? "loading…";
+  // MH-2 honest label: a remote host's workspace NAME is not readable in
+  // v1 (config is not on the read allowlist; /api/hosts carries no remote
+  // workspaceName) — the HOST level above names the host, the workspace
+  // node stays generic. Recorded as a named twin deviation.
+  const workspaceLabel = isRemote ? "workspace" : (workspace.name ?? "loading…");
   const isExpanded = (key: string, defaultValue = false) => expanded[key] ?? defaultValue;
 
   const renderMission = (m: GroupedMission, bucket: ProjectMissionBucket) => {
@@ -266,19 +297,7 @@ export function ProjectTreeView() {
     );
   };
 
-  return (
-    <div data-testid="project-tree-view" className="flex-1 overflow-y-auto py-2">
-      {/*
-        V0.3.1 slice 17 founder-walk-workspace-state-correctness — walk item 8 (Explorer auto-show). Manual refresh button drops the
-        daemon-side indexer cache and react-query slice/file caches so
-        newly-created slice / mission folders appear without restarting
-        the daemon. Window-focus refetch in useSlices / useFilesList
-        handles the common "switched away to mkdir + came back" case;
-        this button is the explicit fallback when window-focus doesn't
-        fire (e.g., a fast operator who never blurs the tab).
-      */}
-      <ProjectTreeRefreshHeader />
-      <ul>
+  const workspaceNode = (
         <li data-testid="project-workspace-node">
           <button
             type="button"
@@ -360,6 +379,71 @@ export function ProjectTreeView() {
             </ul>
           ) : null}
         </li>
+  );
+
+  // OPR.0.4.6.MH2 FR-4 (fr4a RULED) — HOST → WORKSPACE → MISSION → SLICE.
+  // The host level renders only when the registry is non-empty (FR-1's
+  // "GIVEN one or more added hosts") — an empty registry keeps today's
+  // exact tree (zero-regression). Expand = select, mirroring the topology
+  // tree: exactly one host's workspace on screen, indicator + data atomic.
+  const showHostLevel = remoteHosts.length > 0 || isRemote;
+  const ownName = hostsData?.ownName && hostsData.ownName.trim() !== "" ? hostsData.ownName : "localhost";
+  const hostRow = (opts: { hostId: string; label: string; isLocal: boolean }) => {
+    const isSelected = selectedHost === opts.hostId;
+    const chip = isSelected ? "viewing" : opts.isLocal ? "local" : null;
+    return (
+      <li
+        key={opts.hostId}
+        data-testid={`project-host-${opts.isLocal ? "localhost" : opts.hostId}`}
+        data-selected={isSelected}
+      >
+        <button
+          type="button"
+          onClick={() => {
+            if (!isSelected) selectHost.mutate({ hostId: opts.hostId });
+          }}
+          className="w-full flex items-center gap-1 px-2 py-1 hover:bg-surface-low text-left"
+        >
+          {isSelected ? <ChevronDown className="h-3 w-3 text-on-surface-variant" /> : <ChevronRight className="h-3 w-3 text-on-surface-variant" />}
+          <Globe className="h-3 w-3 text-on-surface-variant" />
+          <span className="font-mono text-[11px] uppercase tracking-wide text-on-surface flex-1 truncate">{opts.label}</span>
+          {chip ? (
+            <span
+              className={cn(
+                "font-mono text-[9px] uppercase tracking-[0.12em]",
+                chip === "viewing" ? "bg-inverse-surface px-1 text-background" : "text-on-surface-variant",
+              )}
+            >
+              {chip}
+            </span>
+          ) : null}
+        </button>
+        {isSelected ? <ul className="ml-4 border-l border-outline-variant">{workspaceNode}</ul> : null}
+      </li>
+    );
+  };
+
+  return (
+    <div data-testid="project-tree-view" className="flex-1 overflow-y-auto py-2">
+      {/*
+        V0.3.1 slice 17 founder-walk-workspace-state-correctness — walk item 8 (Explorer auto-show). Manual refresh button drops the
+        daemon-side indexer cache and react-query slice/file caches so
+        newly-created slice / mission folders appear without restarting
+        the daemon. Window-focus refetch in useSlices / useFilesList
+        handles the common "switched away to mkdir + came back" case;
+        this button is the explicit fallback when window-focus doesn't
+        fire (e.g., a fast operator who never blurs the tab).
+      */}
+      <ProjectTreeRefreshHeader remoteReadonly={isRemote} />
+      <ul>
+        {showHostLevel ? (
+          <>
+            {hostRow({ hostId: LOCAL_HOST_ID, label: ownName, isLocal: true })}
+            {remoteHosts.map((h) => hostRow({ hostId: h.id, label: h.id, isLocal: false }))}
+          </>
+        ) : (
+          workspaceNode
+        )}
       </ul>
     </div>
   );

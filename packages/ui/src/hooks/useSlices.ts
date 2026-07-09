@@ -6,7 +6,9 @@
 // instead of the raw 503.
 
 import { useMemo } from "react";
-import { useQueries, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useQueries, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { withHostParam } from "../lib/host-param.js";
+import { useSelectedHostId } from "./useHosts.js";
 
 export type SliceStatus = "active" | "done" | "blocked" | "draft";
 export type SliceFilter = "all" | "active" | "done" | "blocked";
@@ -58,6 +60,7 @@ export interface BoundToWorkflowFilter {
 async function fetchSlicesList(
   filter: SliceFilter,
   boundToWorkflow: BoundToWorkflowFilter | null,
+  hostId: string,
 ): Promise<SliceListResponse | SlicesUnavailable> {
   // Explorer auto-show needs a daemon-side cache bypass as well as a
   // React Query refetch. Otherwise a focus refetch can still receive the
@@ -67,7 +70,9 @@ async function fetchSlicesList(
   if (boundToWorkflow) {
     params.set("boundToWorkflow", `${boundToWorkflow.specName}:${boundToWorkflow.specVersion}`);
   }
-  const res = await fetch(`/api/slices?${params.toString()}`);
+  // OPR.0.4.6.MH2 FR-2 — selected-host envelope; origin shape verbatim;
+  // local path unchanged (withHostParam is identity for local).
+  const res = await fetch(withHostParam(`/api/slices?${params.toString()}`, hostId));
   if (res.status === 503) {
     const body = (await res.json().catch(() => ({}))) as Partial<SlicesUnavailable> & { error?: string; hint?: string };
     return {
@@ -81,15 +86,18 @@ async function fetchSlicesList(
 }
 
 export function useSlices(filter: SliceFilter, boundToWorkflow: BoundToWorkflowFilter | null = null) {
+  const hostId = useSelectedHostId();
   return useQuery({
     queryKey: [
       "slices",
       "list",
       filter,
       boundToWorkflow ? `${boundToWorkflow.specName}:${boundToWorkflow.specVersion}` : "all",
+      hostId,
     ],
-    queryFn: () => fetchSlicesList(filter, boundToWorkflow),
+    queryFn: () => fetchSlicesList(filter, boundToWorkflow, hostId),
     staleTime: 30_000,
+    placeholderData: keepPreviousData,
     // V0.3.1 slice 17 walk-item 8 (Explorer auto-show): refetch on
     // window focus so an operator who switches away to `mkdir slices/...`
     // and comes back sees the new folder without manually clicking
@@ -277,18 +285,21 @@ export interface SliceDetail {
   };
 }
 
-async function fetchSliceDetail(name: string): Promise<SliceDetail> {
-  const res = await fetch(`/api/slices/${encodeURIComponent(name)}`);
+async function fetchSliceDetail(name: string, hostId: string): Promise<SliceDetail> {
+  // OPR.0.4.6.MH2 FR-2 — selected-host envelope; origin shape verbatim.
+  const res = await fetch(withHostParam(`/api/slices/${encodeURIComponent(name)}`, hostId));
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return (await res.json()) as SliceDetail;
 }
 
 export function useSliceDetail(name: string | null) {
+  const hostId = useSelectedHostId();
   return useQuery({
-    queryKey: ["slices", "detail", name],
-    queryFn: () => fetchSliceDetail(name!),
+    queryKey: ["slices", "detail", name, hostId],
+    queryFn: () => fetchSliceDetail(name!, hostId),
     enabled: !!name,
     staleTime: 30_000,
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -299,14 +310,15 @@ export interface SliceDetailsMapResult {
 }
 
 export function useSliceDetails(names: string[]): SliceDetailsMapResult {
+  const hostId = useSelectedHostId();
   const uniqueNames = useMemo(
     () => Array.from(new Set(names.filter((name) => name.length > 0))).sort(),
     [names],
   );
   const queries = useQueries({
     queries: uniqueNames.map((name) => ({
-      queryKey: ["slices", "detail", name],
-      queryFn: () => fetchSliceDetail(name),
+      queryKey: ["slices", "detail", name, hostId],
+      queryFn: () => fetchSliceDetail(name, hostId),
       staleTime: 30_000,
     })),
   });
@@ -337,18 +349,21 @@ export interface SliceDocResponse {
   content: string;
 }
 
-async function fetchSliceDoc(name: string, relPath: string): Promise<SliceDocResponse> {
-  const res = await fetch(`/api/slices/${encodeURIComponent(name)}/doc/${encodeURI(relPath)}`);
+async function fetchSliceDoc(name: string, relPath: string, hostId: string): Promise<SliceDocResponse> {
+  // OPR.0.4.6.MH2 FR-2 — selected-host envelope; origin shape verbatim.
+  const res = await fetch(withHostParam(`/api/slices/${encodeURIComponent(name)}/doc/${encodeURI(relPath)}`, hostId));
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return (await res.json()) as SliceDocResponse;
 }
 
 export function useSliceDoc(name: string | null, relPath: string | null) {
+  const hostId = useSelectedHostId();
   return useQuery({
-    queryKey: ["slices", "doc", name, relPath],
-    queryFn: () => fetchSliceDoc(name!, relPath!),
+    queryKey: ["slices", "doc", name, relPath, hostId],
+    queryFn: () => fetchSliceDoc(name!, relPath!, hostId),
     enabled: !!name && !!relPath,
     staleTime: 60_000,
+    placeholderData: keepPreviousData,
   });
 }
 

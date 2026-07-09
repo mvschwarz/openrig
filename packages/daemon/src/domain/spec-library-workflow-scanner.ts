@@ -23,7 +23,7 @@ import * as path from "node:path";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
-import type { WorkflowSpec } from "./workflow-types.js";
+import type { WorkflowSpec, WorkflowExitKind, WorkflowAgentHarness, WorkflowGateSpec } from "./workflow-types.js";
 import type { WorkflowSpecCache } from "./workflow-spec-cache.js";
 import type { EventBus } from "./event-bus.js";
 
@@ -72,7 +72,15 @@ export interface SpecLibraryWorkflowReview {
   /** Topology graph projection: nodes from `roles`, edges derived from
    *  each step's next_hop.suggested_roles → next-step ids. Same shape
    *  Slice Story View v1 uses for its Topology tab — consumers reuse
-   *  the same UI primitives for rendering. */
+   *  the same UI primitives for rendering.
+   *
+   *  OPR.0.4.6.WF4 Q1 (arch-ruled): the projection ADDS branch edges
+   *  from `next_hop.on` (routingType 'branch' + the triggering exit),
+   *  corrects the false-terminal defect (a step with on-targets is not
+   *  terminal), and projects optional harness/host/gate node fields —
+   *  all byte-identity-by-omission: a suggested-roles-only spec with no
+   *  on/harness/host/gate projects EXACTLY as before (no 'branch' edge,
+   *  no branchOn key, no optional node key). */
   topology: {
     nodes: Array<{
       stepId: string;
@@ -81,11 +89,18 @@ export interface SpecLibraryWorkflowReview {
       preferredTarget: string | null;
       isEntry: boolean;
       isTerminal: boolean;
+      /** OPR.0.4.6.WF4 Q1-P1 — OMITTED when the step declares none. */
+      harness?: WorkflowAgentHarness;
+      host?: string;
+      gate?: WorkflowGateSpec;
     }>;
     edges: Array<{
       fromStepId: string;
       toStepId: string;
-      routingType: "direct";
+      /** OPR.0.4.6.WF4 Q1-P2 — closed-vocabulary extension of 'direct'. */
+      routingType: "direct" | "branch";
+      /** The triggering exit; present on 'branch' edges ONLY. */
+      branchOn?: WorkflowExitKind;
     }>;
   };
   /** Per-step list rendered below the graph. */
@@ -241,15 +256,24 @@ export function getWorkflowReview(opts: ScanWorkflowSpecsOpts & { name: string; 
     ?? steps?.[0]?.actor_role;
   const entryStepId = entryRole ? stepByRole.get(entryRole)?.id : undefined;
 
+  const stepIds = new Set((steps ?? []).map((s) => s.id));
   const topologyNodes = (steps ?? []).map((step) => {
     const roleSpec = (roles as Record<string, { preferred_targets?: string[] }>)[step.actor_role] ?? {};
+    // OPR.0.4.6.WF4 Q1-P3: a step with next_hop.on targets is NOT terminal
+    // (the false-terminal defect for branch-only steps like build/verify).
+    const hasOnTargets = Object.keys(step.next_hop?.on ?? {}).length > 0;
     return {
       stepId: step.id,
       role: step.actor_role,
       objective: step.objective ?? null,
       preferredTarget: roleSpec.preferred_targets?.[0] ?? null,
       isEntry: step.id === entryStepId,
-      isTerminal: !(step.next_hop?.suggested_roles?.length),
+      isTerminal: !(step.next_hop?.suggested_roles?.length) && !hasOnTargets,
+      // OPR.0.4.6.WF4 Q1-P1: optional node fields, OMITTED when absent
+      // (byte-identity-by-omission — a step with none adds no key).
+      ...(step.harness ? { harness: step.harness } : {}),
+      ...(step.host ? { host: step.host } : {}),
+      ...(step.gate ? { gate: step.gate } : {}),
     };
   });
 
@@ -259,6 +283,18 @@ export function getWorkflowReview(opts: ScanWorkflowSpecsOpts & { name: string; 
       const target = stepByRole.get(role);
       if (!target) continue;
       topologyEdges.push({ fromStepId: step.id, toStepId: target.id, routingType: "direct" });
+    }
+    // OPR.0.4.6.WF4 Q1-P2: branch edges from next_hop.on (exit → successor
+    // STEP ID). Absent `on` pushes nothing ⇒ suggested-roles-only specs
+    // project a byte-identical edge array. The exit label rides `branchOn`.
+    for (const [exit, targetStepId] of Object.entries(step.next_hop?.on ?? {})) {
+      if (!targetStepId || !stepIds.has(targetStepId)) continue;
+      topologyEdges.push({
+        fromStepId: step.id,
+        toStepId: targetStepId,
+        routingType: "branch",
+        branchOn: exit as WorkflowExitKind,
+      });
     }
   }
 

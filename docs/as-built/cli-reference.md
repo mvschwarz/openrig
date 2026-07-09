@@ -331,6 +331,7 @@ Current behavior notes:
 - `local:` `agent_ref` values resolve relative to the rig spec directory, not the caller shell cwd.
 - If you copy a built-in spec to a new directory, keep its `agents/` tree beside it or rewrite those refs to `path:/absolute/path`.
 - Managed apps are first-class `up` targets. `rig up secrets-manager` launches the shipped Vault example from the library.
+- **`rig up factory-rsi` (OPR.0.4.6.FAC2)** launches the single-rig recursive-self-improvement factory MVP starter — seven seats (`plan`/`build`/`check`/`review`/`dogfood`/`release`/`orch`) that run the `factory-rsi` builtin workflow (inner loop plan→build→check→review→release); the dogfood seat runs out-of-band against the shipped product and feeds its findings back into the next plan. Workspace-agnostic: `rig up factory-rsi --cwd <repo>` points the loop at the repo to improve.
 - v0.3.2 paper-cut fix-round (slice-22): pre-launch failures now return structured HTTP 4xx (`cycle_error` / `preflight_failed` / `validation_failed` / `service_boot_failed`) instead of bare 500; failed boots no longer leave orphan rig records on disk.
 - **v0.4.4 (OPR.0.4.4.11) — whole-topology sources**: a `.rigtopology` manifest (or a YAML file whose body declares the topology form) boots MULTIPLE rigs in one staged spin-up. v0 manifest entries are **spec paths only** (a closed-key manifest: `.rigbundle` and bare library-name entries are rejected at parse time with per-entry what/why/fix naming the v0 boundary). Per-entry `host: <id>` is the ONLY placement mechanism for topology entries — `rig up --host <id> <topology>` is REJECTED pre-dispatch (two placement mechanisms must not coexist). The launcher acquires per-rig launch locks route-side and reports a CLOSED per-entry aggregate `{ok | failed | skipped}` (skipped is explicit — a lock conflict or upstream failure never reads as silent success). Source: `packages/cli/src/commands/up.ts` (`.rigtopology` sniff + `--host` rejection), `packages/daemon/src/domain/topology/{topology-manifest,multi-rig-launcher,remote-up-leaf}.ts`, `packages/daemon/src/routes/up.ts`.
 - v0.3.4: `rig up` is resume-original-by-default for existing rigs. Per-seat opt-in to deliberate fresh-prime is via `--fresh <seats...>`. The five-term restore status vocabulary surfaced per-node is `resumed` / `fresh-primed` / `awaiting-decision` / `attention_required` / `failed`. On TTY, `awaiting-decision` nodes trigger an interactive [y/N] ASK; in headless mode they are reported honestly with the exact `rig up --existing <rig> --fresh <logicalId>` follow-up command.
@@ -634,6 +635,7 @@ Arguments:
 Notes:
 - The `add_member` converge op verb: adds a member to an existing pod in a running rig from a YAML/JSON member-fragment file.
 - Member fragment accepts both the bare form (top-level member fields) and the wrapper form (`{ member: {...}, edges?: [...] }`). A top-level `edges:` field in the bare form is lifted as pod-local edges and is NOT silently dropped.
+- **OPR.0.4.6.FAC1**: the fragment accepts an optional `role: <name>` (charset `A-Za-z0-9_.-`; rejected on `runtime: terminal`). A role-declared seat becomes eligible for workflow role→seat capability resolution on this rig — scale-out = add a member under the role (this verb IS the growth path). Role is opt-in per seat: a role-less member stays reachable only via explicit `preferred_targets`; a PROVIDED role is validated, never silently dropped.
 - A present-but-non-array `edges` field is rejected with an honest error (no silent drop).
 - `--rig-root <path>` controls agent resolution.
 - HTTP outcomes: `201` on success (with the new node + persisted edges + optional warnings); `409 member_conflict`; `400 validation_failed` / `preflight_failed`; `404 pod_not_found` (lists existing pods).
@@ -753,7 +755,7 @@ Notes:
 
 ### `rig transcript`
 
-Usage: `rig transcript <session> [--tail <lines>] [--grep <pattern>] [--json]`
+Usage: `rig transcript <session> [--tail <lines>] [--grep <pattern>] [--host <id>] [--json]`
 
 Defaults:
 - `--tail 50`
@@ -761,6 +763,12 @@ Defaults:
 Notes:
 - Reads transcript files, not pane scrollback.
 - `--grep` treats the pattern as regex.
+- **v0.4.6 (OPR.0.4.6.MH4)** — `--host <id>` / the `agent@rig@host` session form reads the
+  transcript from a remote host, CLI-direct against that daemon's shipped
+  `GET /api/transcripts/:session/tail|grep` routes (http-registered hosts only — an
+  ssh-declared host is a structured transport-requirement error; there is no ssh path for this
+  verb). Output shape is the origin's, verbatim, under the `[via host=…]` banner. Precedence:
+  explicit `--host` > target sugar > the persisted host selection. See "Cross-host execution".
 
 ### `rig send`
 
@@ -774,7 +782,7 @@ Notes:
 - `--raw` sends exact text/keystrokes without the From/To messaging envelope; still guarded against interactive prompts.
 - `--dangerously-interact` is the ONLY override of the prompt/permission guard — it deliberately drives an interactive prompt/permission block (e.g. selects an option). It implies `--raw`, requires `--reason <text>`, and is recorded in the audit log. Cannot be combined with `--wait-for-idle`.
 - `--reason <text>` records why the prompt is being driven (required with `--dangerously-interact`).
-- `--host <id>` routes the same command to a remote host declared in `~/.openrig/hosts.yaml` via single-hop ssh; see "Cross-host execution" below. SSH success is NOT verify success — the remote rig's `Verified: yes/no` is what counts and is surfaced verbatim.
+- `--host <id>` sends on a remote host declared in `~/.openrig/hosts.yaml`; see "Cross-host execution" below. **v0.4.6 (OPR.0.4.6.MH4)** — the host entry's transport decides the path: ssh hosts keep the single-hop ssh shell-out byte-verbatim (SSH success is NOT verify success — the remote rig's `Verified: yes/no` is what counts and is surfaced verbatim); http hosts (e.g. pair-registered) go CLI-direct to the remote daemon's `POST /api/transport/send` with the same body a local send posts (wrap parity by construction) — `--verify` prints the REMOTE route's `verified`/`outcome` verbatim, never a locally synthesized verdict. The `agent@rig@host` target form is sugar for `--host` when the suffix is a REGISTERED host id (explicit `--host` > sugar > persisted selection; a conflict between `--host` and the sugar is a structured error).
 
 ### `rig capture`
 
@@ -787,7 +795,7 @@ Default:
 - `--lines 20`
 
 Notes:
-- `--host <id>` routes the same command to a remote host declared in `~/.openrig/hosts.yaml` via single-hop ssh; see "Cross-host execution" below.
+- `--host <id>` captures on a remote host declared in `~/.openrig/hosts.yaml`; see "Cross-host execution" below. **v0.4.6 (OPR.0.4.6.MH4)** — ssh hosts keep the shell-out verbatim; http hosts go CLI-direct to the remote daemon's `POST /api/transport/capture` with the local body shape (lines/rig/pod/session), rendering single/multi results exactly as a local capture under the `[via host=…]` banner. The `agent@rig@host` session form is sugar for `--host` when the suffix is a REGISTERED host id (`--rig`/`--pod` values are names, never sugar-parsed).
 
 ### Cross-host execution (`--host <id>`)
 
@@ -804,7 +812,7 @@ hosts:
     transport: ssh
     target: vm-claude-test.local
     user: your-username  # optional
-    notes: "Tart VM"     # optional
+    notes: "test VM"     # optional
   - id: factory-http
     transport: http
     url: http://100.64.1.2:7433
@@ -832,20 +840,69 @@ actionable error per mode; JSON output preserves the `failedStep` enum):
 partition is the intended posture, not an accident of history: **ssh carries interactive pane
 ops, http-bearer carries daemon REST ops, `ps`/`whoami` follow the host's DECLARED transport.**
 There is NO cross-transport fallback, and NO http parity for `send`/`capture` ships in 0.4.4
-(parity would be new attack surface with no scope-locked need). Per-command:
+(parity would be new attack surface with no scope-locked need). **v0.4.6 UPDATE (OPR.0.4.6.MH4,
+pm-RULED IN as fulfilling-confirmed-intent):** `send`/`capture` gain the http branch — the
+founder's `pair` front door registers HTTP hosts, and without the branch a pair-registered demo
+host could not receive send/capture at all. The mechanism is CLI-DIRECT via the shipped
+`runRemoteHttpOp` to the remote daemon's EXISTING transport routes (zero daemon-side changes;
+the ssh path is kept byte-verbatim for ssh hosts — coverage, not a rewrite, and still no
+cross-transport fallback: the host entry's declared transport dictates the path). `transcript`
+and `broadcast` gain their first cross-host affordance the same way (http-only — there is no
+ssh path for them). Per-command:
 
 | Command | ssh transport | http transport | Fan-out (`--all-hosts`/`--hosts`) |
 | --- | --- | --- | --- |
-| `rig send` | ✓ (ssh-ONLY) | ✗ | ✗ |
-| `rig capture` | ✓ (ssh-ONLY) | ✗ | ✗ |
+| `rig send` | ✓ (shell-out, byte-verbatim) | ✓ (v0.4.6 MH-4 — CLI-direct `POST /api/transport/send`) | ✗ |
+| `rig capture` | ✓ (shell-out, byte-verbatim) | ✓ (v0.4.6 MH-4 — CLI-direct `POST /api/transport/capture`) | ✗ |
+| `rig transcript --host` (v0.4.6, OPR.0.4.6.MH4) | ✗ (structured transport error) | ✓ (CLI-direct `GET /api/transcripts/:session/tail\|grep`) | ✗ |
+| `rig broadcast --host` (v0.4.6, OPR.0.4.6.MH4) | ✗ (structured transport error) | ✓ (CLI-direct `POST /api/transport/broadcast`; remote fan-out, per-target passthrough) | ✗ |
 | `rig up` / `rig down` / `rig launch` | ✗ | ✓ (http-ONLY) | ✗ |
 | `rig file copy` (v0.4.4) | ✓ (ssh-ONLY, rsync-over-ssh) | ✗ | ✗ |
 | `rig ps --host` | ✓ (declared) | ✓ (declared) | http-only; non-http hosts appear as STRUCTURED `unsupported-transport` statuses in `hosts[]` |
 | `rig whoami --host` | ✓ (declared) | ✓ (declared) | http-only; non-http hosts are currently SILENTLY FILTERED from the fan-out (a shipped gap, routed for 0.4.5 triage — differs from ps's structured status) |
 | `rig host doctor` | ✓ | ✓ | n/a (single host) |
+| `rig queue create/handoff/handoff-and-complete --host` (v0.4.6, OPR.0.4.6.MH3) | ✗ | ✓ (http-ONLY, daemon→daemon forward — an ssh-declared host is a structured `unsupported-transport` error) | ✗ |
 
-Out of scope in 0.4.4: cross-transport fallback; http parity for `send`/`capture`; connection
-pooling; multi-hop SSH; cross-host queue routing; cross-host seat handover.
+Out of scope in 0.4.4: cross-transport fallback; http parity for `send`/`capture` *(shipped in
+0.4.6 — OPR.0.4.6.MH4, pm-ruled fulfilling-confirmed-intent; see the v0.4.6 update above)*;
+connection pooling; multi-hop SSH; cross-host queue routing *(shipped in 0.4.6 — OPR.0.4.6.MH3;
+see `rig queue` § Cross-host queue routing)*; cross-host seat handover.
+
+**The http branch's failure taxonomy (v0.4.6 — OPR.0.4.6.MH4).** The http branch names its OWN
+steps (never the ssh enum, never a generic "failed"): registry-load-failed / unknown-host (the
+same class across all four verbs) / `permission-gate` (bearer resolution failed locally, or the
+remote returned 401/403 — including the terminal-bearer posture below) / `remote-daemon-unreachable`
+(network/timeout) / `remote-command-failed` (remote 4xx/5xx, with the remote route's own error
+text surfaced beside the step). **Terminal-bearer posture (named, v0 — applies to
+`/api/transport/*` ONLY, i.e. send/capture/broadcast):** the remote's transport routes gate on
+ITS terminal bearer class, while the CLI presents the host's REGISTRY bearer. Default (no
+terminal bearer) + tailnet binds = pass-through by design (the mesh is the auth boundary); a
+remote enforcing a DIFFERENT terminal bearer surfaces as the structured `permission-gate` step —
+remedy: set the remote's terminal bearer equal to the paired registry bearer, or rely on the
+tailnet boundary. **`rig transcript --host` is NOT in this class (arch n2):** the remote's
+`/api/transcripts/*` routes are the shipped UNGATED transcript-read posture (open route,
+daemon-local trust boundary, route-level credential redaction as the protective primitive) — a
+wrong terminal bearer that permission-gates a cross-host send does NOT gate a cross-host
+transcript read; transcript keeps succeeding. A coherent transcript-read auth policy across
+tail/grep/full is a named future slice per the route's own comment
+(`routes/transcripts.ts`, orch decision approved-option-a), out of scope here. No new auth
+machinery ships with this slice.
+
+**Destination parse rules — the two-family contract (OPR.0.4.6.MH3, arch-ruled).** The
+`agent@rig@host` three-part form is INPUT SUGAR at the CLI edge, never grammar: session strings
+stay `member@rig` everywhere (BR-1), and the host always travels out-of-band. TWO parse rules
+ship, per verb family, BY DESIGN — one canonical rule would either break adopted targets or
+degrade queue error honesty:
+
+| Verb family | 3-part trailing segment | Why |
+| --- | --- | --- |
+| Queue coordination writes (`rig queue create/handoff/handoff-and-complete`) | **Always stripped** into the out-of-band `hostId` envelope (after the human-seat classifier) | Queue destinations are canonical-only by construction (the daemon's `validateRig` rejects any non-canonical parse), so the unconditional strip loses nothing — and a mistyped host dies loud as an unknown-HOST error instead of a misleading rig-shaped `unknown_destination_rig`. |
+| Session-target interactive/observe verbs (`rig send/capture/transcript`) | **Stripped only if the segment matches a REGISTERED host id** | Interactive verbs legitimately target raw/adopted tmux session names that may contain `@`; strip-iff-registered preserves them, with the unregistered-suffix host hint keeping mistypes loud. |
+| `rig broadcast` | **No sugar** — the positional is MESSAGE TEXT, never parsed as a target | Sugar-parsing a message body would corrupt text containing `@`; cross-host broadcast routes on `--host` or the persisted selection only (v0.4.6 — OPR.0.4.6.MH4). |
+
+Both families converge on the same outcome: a mistyped host dies loud with the host named. The
+`RESERVED_HOST_IDS` set (`kernel`, `host`, `local` — rejected at `rig host add`) guarantees no
+registered host can ever shadow the human-seat `@kernel`/`@host` classification family.
 
 ### `rig file` (v0.4.4 — OPR.0.4.4.18)
 
@@ -895,10 +952,18 @@ the path for exotica, and the factory bootstrap ships as script + runbook at
 
 ### `rig broadcast`
 
-Usage: `rig broadcast <text> [--rig <name>] [--pod <name>] [--force] [--json]`
+Usage: `rig broadcast <text> [--rig <name>] [--pod <name>] [--force] [--host <id>] [--json]`
 
 Notes:
 - Without `--rig` or `--pod`, broadcasts across all running sessions in all rigs.
+- **v0.4.6 (OPR.0.4.6.MH4)** — `--host <id>` broadcasts on a remote host, CLI-direct to that
+  daemon's shipped `POST /api/transport/broadcast` (http-registered hosts only; an ssh-declared
+  host is a structured transport-requirement error). The REMOTE daemon resolves `--rig`/`--pod`
+  on ITS topology; its per-target results print verbatim and a partial fan-out exits non-zero
+  exactly as a local one. The remote call carries its own named fan-out deadline
+  (`BROADCAST_REMOTE_TIMEOUT_MS`, 30s — a full per-target loop outlives the 5s read default).
+  The `<text>` positional is message text and is NEVER parsed as a target, so broadcast takes
+  `--host` or the persisted host selection — not the `agent@rig@host` sugar.
 
 ### `rig ask`
 
@@ -960,11 +1025,12 @@ Notes:
 Usage: `rig queue <subcommand>` — L3 owned-work queue plus inbox/outbox.
 
 Subcommands:
-- `create --source <session> --destination <session> (--body <text> | --body-file <path>) [--mission <id>] [--slice <id>] [--priority <p>] [--tier <t>] [--tags <csv>] [--target-repo <name>] [--no-nudge] [--expires-at <iso>] [--id <qitemId>] [--json]` — v0.3.2 slice-21 FR-4 adds `--body-file <path>` (use `-` for stdin) which kills the backtick-shell-corruption class for multiline bodies, and first-class `--mission <id>` / `--slice <id>` flags that translate to `mission:<id>` / `slice:<id>` tags (compose with `--tags`). Exactly one of `--body` / `--body-file` must be provided.
+- `create --source <session> --destination <session> (--body <text> | --body-file <path>) [--mission <id>] [--slice <id>] [--priority <p>] [--tier <t>] [--tags <csv>] [--target-repo <name>] [--host <id>] [--no-nudge] [--expires-at <iso>] [--id <qitemId>] [--json]` — v0.3.2 slice-21 FR-4 adds `--body-file <path>` (use `-` for stdin) which kills the backtick-shell-corruption class for multiline bodies, and first-class `--mission <id>` / `--slice <id>` flags that translate to `mission:<id>` / `slice:<id>` tags (compose with `--tags`). Exactly one of `--body` / `--body-file` must be provided. v0.4.6 (OPR.0.4.6.MH3) adds `--host <id>` / the `agent@rig@host` destination form — see § Cross-host queue routing below.
 - `claim <qitemId> --destination <session> [--json]` — pending → in-progress; computes closure_required_at from tier
 - `unclaim <qitemId> --destination <session> [--reason <text>] [--json]` — in-progress → pending
 - `update <qitemId> --actor <session> --state <state> [--closure-reason <r>] [--closure-target <t>] [--note <text>] [--json]`
-- `handoff <qitemId> --from <session> --to <session> [--body <text>] [--note <text>] [--priority <p>] [--tier <t>] [--tags <csv>] [--json]` — transactional close-as-handed-off + create-new
+- `handoff <qitemId> --from <session> --to <session> [--body <text>] [--note <text>] [--priority <p>] [--tier <t>] [--tags <csv>] [--host <id>] [--json]` — transactional close-as-handed-off + create-new; v0.4.6 (OPR.0.4.6.MH3) adds `--host <id>` / the `agent@rig@host` `--to` form (§ Cross-host queue routing)
+- `handoff-and-complete <qitemId> --from <session> --to <session> [--body <text>] [--note <text>] [--priority <p>] [--tier <t>] [--tags <csv>] [--host <id>] [--json]` — variant of `handoff` that closes the source as `done` (terminal) instead of `handed-off`; same atomic close+create, chain_of_record, default-nudge, and cross-host contracts
 - `fallback <qitemId> --destination <session> [--reason <text>] [--json]` — reroute to fallback seat
 - `show <qitemId> [--json]`
 - `transitions <qitemId> [--json]` — append-only transition log
@@ -998,6 +1064,54 @@ Closure-reason semantics:
 - `canceled` — sender or receiver withdrew.
 - `no-follow-on` — terminal completion, nothing else needed.
 - `escalation` — kicked up to a higher tier (target = escalation target).
+
+### Cross-host queue routing (v0.4.6 — OPR.0.4.6.MH3)
+
+`rig queue create`, `handoff`, and `handoff-and-complete` can target a destination on ANOTHER
+registered host: `--host <id>` or the host-qualified destination form `member@rig@<host>` (both
+resolve to the same out-of-band `hostId` request envelope; naming both with DIFFERENT hosts is a
+structured ambiguity error). The mechanism generalizes the shipped mission-control
+forward-then-strip WRITE: the local daemon resolves the host registry server-side (bearers never
+reach the caller), strips the host at the edge, and forwards the WHOLE body over HTTP to the
+target daemon — see `docs/as-built/architecture/coordination-primitive.md` § Cross-host queue
+routing for the full model. Load-bearing contract points:
+
+- **Explicit-only (no selection follow).** Queue verbs route cross-host ONLY on `--host` / the
+  3-part form — they NEVER consult the persisted `rig host select` selection (a durable write and
+  a hot-potato close must not silently re-home on yesterday's sticky selection). This is a
+  deliberate asymmetry with the observe/interactive verbs, which do follow selection.
+- **Origin-owns-the-record.** The qitem lives in the TARGET host's DB; that row is THE record.
+  No local ghost row is ever written, and the target daemon's OWN nudge fires on ITS local tmux
+  (the whole body — including the `nudge` flag — is forwarded).
+- **At-least-once + idempotent, never exactly-once.** The forwarding daemon MINTS the qitem id
+  before the first forward (a retry carries the same id by construction); a cross-host handoff's
+  successor id is DERIVED deterministically from (source qitem, destination, host) — namespaced
+  `qitem-xh-…`, so a re-driven forward absorbs on the target's primary key. Retrying is safe;
+  a same-id create whose identity fields differ is a structured `qitem_id_reuse` error.
+- **Never-drop ordering.** A cross-host handoff creates the successor on the target host FIRST
+  and closes the local source SECOND. A crash between the two leaves a live duplicate that the
+  idempotent re-drive converges — never a source closed toward a successor that doesn't exist.
+  Re-drives: an already-closed source with the MATCHING `closure_target` absorbs as success; a
+  MISMATCH is a structured `cross_host_close_conflict` (409) — surfaced, never overwritten.
+  *(Named residual, inherent to at-least-once/no-2PC: a re-drive naming a DIFFERENT destination
+  is a NEW handoff decision and can leave the earlier successor live on the target host — visible
+  via the chain + provenance tags, not a dedup bug.)*
+- **Closure fields.** The cross-host source close records `closure_reason=handed_off_to` and
+  `closure_target=member@rig@<host>` — `closure_target` is OPAQUE audit/display metadata,
+  presence-checked and NEVER parsed for routing (any PR parsing it as a session string is a spec
+  violation). Session-string carriers (`destination_session`, `source_session`, `blocked_on`,
+  `handed_off_to`) stay 2-part `member@rig` (BR-1). The forwarded successor carries the continued
+  `chain_of_record`; those A-side ids are OPAQUE lineage identifiers on the target host (they do
+  not dereference in the target's DB). Provenance: the forwarded item is tagged `cross-host` +
+  `from-host:<sender's self-declared name>` (honest best-effort, not authenticated identity).
+- **Failure honesty.** Unknown host / ssh-declared host / unreachable / auth-failed each surface
+  as a distinct structured `remote_queue_write_failed` error naming the host — nothing is written
+  on either side. Transport is http-ONLY (the daemon→daemon path is what fires the remote nudge;
+  the `rig send --host` ssh shell-out is a different mechanism, untouched).
+- **Local zero-regression.** No `--host` (or `local`) = today's local path, byte-identical.
+  Claim / update / inbox verbs stay local-by-principle: after a cross-host handoff the successor
+  lives on the target host where its worker lives. Sender-side operations on an already-forwarded
+  item (cancel/update from the sending host) are a named follow-up, out of v1.
 
 ## Coordination Project / Classifier and View (PL-004 Phase B)
 
@@ -1059,8 +1173,9 @@ Phase D extends the policy enum with `workflow-keepalive` (the policy deferred f
 
 ### `rig workflow`
 
-- `validate <specPath>` — validate a workflow spec file; returns structured ok/error report (role resolution, step uniqueness, allowed-exits consistency, optional seat liveness).
-- `instantiate <specPath> --root-objective <text> --created-by <session>` — create a new instance + entry-step qitem in the same daemon transaction; `--entry-owner <session>` overrides the default entry owner.
+- `validate <specPath>` — validate a workflow spec file; returns structured ok/error report (role resolution, step uniqueness, allowed-exits consistency, optional seat liveness). Spec-only: it takes no rig context (OPR.0.4.6.FAC1 arch ruling — rig-coverage checks happen at instantiate).
+- `instantiate <specPath> --root-objective <text> --created-by <session>` — create a new instance + entry-step qitem in the same daemon transaction; `--entry-owner <session>` overrides the default entry owner. **OPR.0.4.6.FAC1**: `--rig <name>` binds the instance to a rig (overrides the spec's `target.rig` DEFAULT; persists as `boundRig` on the instance, rendered by `show`/`trace` and carried in `--json`). On a bound instance, a role with **no `preferred_targets`** resolves to a live capable SEAT on that rig by the pure capability policy (running agents declaring the role, managed seats only, required runtime, least pending backlog, deterministic coordinate tiebreak). Unknown rig = structured `bound_rig_unknown`; a bound-rig role no seat structurally declares = `bound_rig_role_uncovered` (existence at any lifecycle state satisfies it — liveness is checked when the step projects). No `--rig` and no spec default = unbound, byte-identical pre-FAC-1 behavior.
+- `run <specPath> …` — accepts the same `--rig <name>` binding (run instantiates too).
 - `project --instance <id> --current-packet <qitem-id> --exit <handoff|waiting|done|failed> --actor-session <session>` — close the current packet AND project the next-step packet IN THE SAME daemon transaction (transactional-scribe; lost handoffs impossible by design). `--result-note <text>`, `--blocked-on <ref>`, `--next-owner <session>` modify behavior.
 - `list [--status <s>]` — list instances; optionally filter by status (`active`/`waiting`/`completed`/`failed`).
 - `show <instanceId>` — show one instance.

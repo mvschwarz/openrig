@@ -7,6 +7,7 @@ import type { RigRepository } from "./domain/rig-repository.js";
 import type { SessionRegistry } from "./domain/session-registry.js";
 import type { EventBus } from "./domain/event-bus.js";
 import type { NodeLauncher } from "./domain/node-launcher.js";
+import type { TmuxOptionDefaultsApplier } from "./domain/tmux-option-defaults.js";
 import type { TmuxAdapter } from "./adapters/tmux.js";
 import type { CmuxAdapter } from "./adapters/cmux.js";
 import type { SnapshotCapture } from "./domain/snapshot-capture.js";
@@ -68,6 +69,8 @@ import type { PluginDiscoveryService } from "./domain/plugin-discovery-service.j
 import { skillsRoutes } from "./routes/skills.js";
 import type { SkillLibraryDiscoveryService } from "./domain/skill-library-discovery.js";
 import { configRoutes } from "./routes/config.js";
+import { hostsRoutes } from "./routes/hosts.js";
+import { hostReadThrough } from "./domain/hosts/read-through.js";
 import { contextPacksRoutes } from "./routes/context-packs.js";
 import { agentImagesRoutes } from "./routes/agent-images.js";
 import type { SpecReviewService } from "./domain/spec-review-service.js";
@@ -89,6 +92,7 @@ import { reviewRoutes } from "./routes/review.js";
 import { rigPolicyRoutes } from "./routes/rig-policy.js";
 import { missionsRoutes } from "./routes/missions.js";
 import { rigCmuxRoutes } from "./routes/rig-cmux.js";
+import { terminalRoutes, rigTerminalRoutes } from "./routes/terminal.js";
 import { CmuxLayoutService } from "./domain/cmux-layout-service.js";
 import { getNodeInventory } from "./domain/node-inventory.js";
 import { filesRoutes } from "./routes/files.js";
@@ -122,6 +126,9 @@ export interface AppDeps {
   eventBus: EventBus;
   nodeLauncher: NodeLauncher;
   tmuxAdapter: TmuxAdapter;
+  /** OPR.0.4.6.02 S1 — the shared tmux option-defaults applier, exposed to
+   *  the seat-handover route so a fresh successor gets launch-only defaults. */
+  tmuxOptionDefaults?: TmuxOptionDefaultsApplier;
   cmuxAdapter: CmuxAdapter;
   snapshotCapture: SnapshotCapture;
   snapshotRepo: SnapshotRepository;
@@ -203,6 +210,8 @@ export interface AppDeps {
   // "slices_root_not_configured" 503 so the UI can surface a setup hint.
   sliceIndexer?: import("./domain/slices/slice-indexer.js").SliceIndexer;
   reviewGatherer?: import("./domain/review/gather.js").ReviewGatherer;
+  // OPR.0.4.6.02 C3 — the terminal-provider-ride composer (herdr/cmux views).
+  terminalService?: import("./domain/terminal/terminal-service.js").TerminalService;
   sliceDetailProjector?: import("./domain/slices/slice-detail-projector.js").SliceDetailProjector;
   /** User Settings v0 — daemon-side settings store (env > file > default). */
   settingsStore?: import("./domain/user-settings/settings-store.js").SettingsStore;
@@ -413,6 +422,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("eventBus" as never, deps.eventBus);
     c.set("nodeLauncher" as never, deps.nodeLauncher);
     c.set("tmuxAdapter" as never, deps.tmuxAdapter);
+    c.set("tmuxOptionDefaults" as never, deps.tmuxOptionDefaults);
     c.set("sessionEnv" as never, deps.sessionEnv);
     c.set("cmuxAdapter" as never, deps.cmuxAdapter);
     // Slice 24 — per-rig CMUX workspace launcher wiring.
@@ -475,6 +485,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("sliceIndexer" as never, deps.sliceIndexer);
     c.set("sliceDetailProjector" as never, deps.sliceDetailProjector);
     c.set("reviewGatherer" as never, deps.reviewGatherer);
+    c.set("terminalService" as never, deps.terminalService);
     c.set("filesAllowlist" as never, deps.filesAllowlist);
     c.set("settingsStore" as never, deps.settingsStore);
     c.set("previewRateLimiter" as never, deps.previewRateLimiter);
@@ -519,6 +530,14 @@ export function createApp(deps: AppDeps): Hono {
   if (deps.routeTimingRecorder) {
     app.use("*", createRouteTimingMiddleware(deps.routeTimingRecorder));
   }
+
+  // OPR.0.4.6.MH2 FR-2/FR-7 — the single-host READ-THROUGH edge (the read
+  // twin of the mission-control remote-forward). Consumes a `?host=<id>`
+  // envelope on allowlisted GET reads; refuses non-GET / non-allowlisted
+  // requests carrying a remote envelope with a structured MH-3-boundary
+  // error, never forwarding them. Absent/local host param falls through to
+  // the existing handlers untouched (the FR-2 zero-regression negative).
+  app.use("/api/*", hostReadThrough());
 
   app.get("/healthz", (c) => {
     // OPR.0.4.3.21 — enrich the health surface with event-loop wedge evidence
@@ -603,10 +622,23 @@ export function createApp(deps: AppDeps): Hono {
     "/api/mission-control",
     missionControlRoutes({ bearerToken: deps.missionControlBearerToken ?? null }),
   );
+  // OPR.0.4.6.MH1 FR-5/FR-6 — THE narrow named host add/pair route family
+  // (arch P1: add + pair handshake only). Same operator-bearer posture as
+  // mission-control for the write seams; the pair-request issuance legs
+  // are deliberately open (pre-token bootstrap).
+  app.route(
+    "/api/hosts",
+    hostsRoutes({ bearerToken: deps.missionControlBearerToken ?? null }),
+  );
   // Slice Story View v0 — slice indexer + per-tab payload routes.
   app.route("/api/slices", slicesRoutes());
   // Living Notes Packet 2 (OPR.0.4.4.20) — composed-review read contract.
   app.route("/api/review", reviewRoutes());
+  // OPR.0.4.6.02 C3 — the canonical non-rig-scoped terminal composer + the
+  // rig-scoped thin alias (composes view=rig:<rigId>, delegates to the same
+  // TerminalService; arch R1 / guard b1).
+  app.route("/api/terminal", terminalRoutes());
+  app.route("/api/rigs/:rigId/terminal", rigTerminalRoutes);
   // V0.3.1 slice 12 walk-item 1 — mission scope data layer
   // (aggregated mission metadata + slices filter; pairs with
   // useScopeMarkdown for README / PROGRESS content via /api/files/read).

@@ -232,13 +232,16 @@ describe("AppShell — Phase 2 chrome", () => {
       expect(brand.textContent).toContain("OPENRIG");
     });
 
-    it("right-slot env indicator present (V1 = 'localhost')", async () => {
+    it("right-slot carries the MH-2 host indicator (quiet local register, defaults to 'localhost')", async () => {
+      // OPR.0.4.6.MH2 FR-3 — the reserved V2 slot now renders HostIndicator;
+      // with no hosts payload the truthful default is the local state.
       const { container } = await renderAt("/");
-      const envIndicator = container.querySelector(
-        "[data-testid='topbar-env-indicator']",
+      const indicator = container.querySelector(
+        "[data-testid='host-indicator']",
       ) as HTMLElement;
-      expect(envIndicator).toBeTruthy();
-      expect(envIndicator.textContent).toContain("localhost");
+      expect(indicator).toBeTruthy();
+      expect(indicator.getAttribute("data-state")).toBe("local");
+      expect(indicator.textContent?.toLowerCase()).toContain("localhost");
     });
 
     it("hamburger button is mobile-only (lg:hidden) — preserved Phase 2 behavior", async () => {

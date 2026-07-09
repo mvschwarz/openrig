@@ -121,7 +121,9 @@ export type RigEvent =
   // prompt / permission block. overrideReason = caller's --reason; detectedReason/evidenceSource =
   // what the classifier saw (kept distinct so permission_prompt vs selection_prompt vs unknown stays visible).
   | { type: "transport.prompt_override"; rigId: string; nodeId: string; sessionName: string; actorSession: string | null; detectedState: string; detectedReason: string; evidenceSource: string; overrideReason: string | null }
-  | { type: "agent.session_identity"; rigId: string; nodeId: string; sessionName: string; runtime: string; sessionId: string; provenance: "hook" | "scrape" }
+  // OPR.0.4.6.PI1 FR-5 — "rpc" provenance is ADDITIVE: Pi session identity comes
+  // from the pi-runner's RPC get_state / typed events, never pane scraping.
+  | { type: "agent.session_identity"; rigId: string; nodeId: string; sessionName: string; runtime: string; sessionId: string; provenance: "hook" | "scrape" | "rpc" }
   // OPR.0.4.0.22 — append-only audit of a managed resume-token write. Emitted
   // on an operator set (`operator_set`) and on reconcile capture-on-adopt
   // (`reconcile_capture`). NEVER carries the raw token (credential-class);
@@ -250,7 +252,11 @@ export type RigEvent =
   | { type: "workflow.next_qitem_projected"; instanceId: string; nextQitemId: string; nextOwner: string; nextStepId: string }
   | { type: "workflow.completed"; instanceId: string; workflowName: string }
   | { type: "workflow.failed"; instanceId: string; workflowName: string; reason: string }
-  | { type: "workflow.routing_table_changed"; rigName: string; cause: string }
+  | { type: "workflow.resumed"; instanceId: string; workflowName: string; stepId: string; resumedBy: string; decision: string | null; resumeCount: number }
+  // OPR.0.4.6.WF3 FR-4 (arch R1): extended ADDITIVELY for the route
+  // verb — the shipped {rigName, cause} consumers are untouched; route
+  // emissions carry the re-route detail in the optional fields.
+  | { type: "workflow.routing_table_changed"; rigName: string; cause: string; instanceId?: string; stepId?: string | null; from?: string; to?: string }
   // Slice 11 (release-0.3.1 workflow-spec-folder-discovery): folder-scan
   // deletion path. Emitted once per workflow_specs cache row removed
   // because its source file disappeared from the scanned workflows folder.
@@ -508,6 +514,12 @@ export interface NodeInventoryEntry {
   logicalId: string;
   podId: string | null;
   podNamespace?: string | null;
+  /**
+   * OPR.0.4.6.FAC1: the seat's declared role (`nodes.role`, written by
+   * the pod-member path). The workflow binding layer's role→seat
+   * candidate filter reads exactly this. null = role-less.
+   */
+  role: string | null;
   canonicalSessionName: string | null;
   attachmentType?: "tmux" | "external_cli" | null;
   nodeKind: "agent" | "infrastructure";
@@ -887,6 +899,14 @@ export interface RigSpecPodMember {
   runtime: string;
   codexConfigProfile?: string;
   model?: string;
+  /**
+   * OPR.0.4.6.FAC1: optional seat-side role declaration (writes the
+   * existing `nodes.role` column via createMemberNode → addNode). The
+   * workflow binding layer resolves workflow roles to seats by this
+   * dimension. Opt-in: a role-less member is never role-resolved and
+   * stays reachable only via explicit preferred_targets.
+   */
+  role?: string;
   cwd: string;
   restorePolicy?: string;
   startup?: StartupBlock;
@@ -1132,6 +1152,13 @@ export interface ExpansionPodFragment {
     codexConfigProfile?: string;
     restorePolicy?: string;
     label?: string;
+    /**
+     * OPR.0.4.6.FAC1: optional seat-side role; threaded through
+     * buildExpansionSpecObject → the pod-member schema → nodes.role
+     * (a provided role is never silently dropped — the sibling-layer
+     * rule).
+     */
+    role?: string;
     /** Optional session source declaration; threaded through to launch. */
     sessionSource?: SessionSourceSpec;
     /**

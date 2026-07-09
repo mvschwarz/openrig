@@ -44,6 +44,8 @@ import { HotPotatoEdge } from "./HotPotatoEdge.js";
 import { useTopologyOverlay } from "./topology-overlay-context.js";
 import { useTopologyActivity } from "../../hooks/useTopologyActivity.js";
 import { usePrefersReducedMotion } from "../../hooks/usePrefersReducedMotion.js";
+import { useSelectedHostId } from "../../hooks/useHosts.js";
+import { withHostParam } from "../../lib/host-param.js";
 import {
   HYBRID_COLLAPSED_RIG_HEIGHT,
   HYBRID_COLLAPSED_RIG_WIDTH,
@@ -61,8 +63,8 @@ interface GraphData {
   edges: unknown[];
 }
 
-async function fetchGraph(rigId: string): Promise<GraphData> {
-  const res = await fetch(`/api/rigs/${encodeURIComponent(rigId)}/graph`);
+async function fetchGraph(rigId: string, hostId: string): Promise<GraphData> {
+  const res = await fetch(withHostParam(`/api/rigs/${encodeURIComponent(rigId)}/graph`, hostId));
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -85,6 +87,7 @@ const HOST_GRAPH_FIT_PADDING = 0.08;
 export function HostMultiRigGraph() {
   const navigate = useNavigate();
   const { data: psEntries } = usePsEntries();
+  const hostId = useSelectedHostId();
   const reducedMotion = usePrefersReducedMotion();
 
   // V1 polish slice Phase 5.2 bounce-fix: rig-expanded state lifted to
@@ -110,8 +113,8 @@ export function HostMultiRigGraph() {
   const rigList = psEntries ?? [];
   const graphQueries = useQueries({
     queries: rigList.map((rig) => ({
-      queryKey: ["rig", rig.rigId, "graph"] as const,
-      queryFn: () => fetchGraph(rig.rigId),
+      queryKey: ["rig", rig.rigId, "graph", hostId] as const,
+      queryFn: () => fetchGraph(rig.rigId, hostId),
       enabled: isRigExpanded(rig.rigId),
       refetchInterval: 30_000,
     })),

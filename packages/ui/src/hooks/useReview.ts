@@ -62,13 +62,27 @@ export interface DeliveredItem {
 }
 
 export interface DerivedException {
-  kind: "stuck" | "overdue" | "insufficient-proof" | "stale-after-change";
+  // OPR.0.4.6.WF4 Q6 — re-synced with the daemon (review/types.ts): the WF-5
+  // kinds workflow-failed | awareness | anomaly were missing from this mirror.
+  kind: "stuck" | "overdue" | "insufficient-proof" | "stale-after-change" | "workflow-failed" | "awareness" | "anomaly";
   evidence: string;
   threshold: string;
 }
 
+/** OPR.0.4.6.WF4 Q6 — UI mirror of the daemon WorkflowRowRef (review/types.ts):
+ *  the ONE structured workflow-identity join. The UI consumes ONLY this pointer
+ *  for workflow routing/deep-links — never prose from identity/evidenceRef/
+ *  summary. Present only on workflow-sourced rows (omit-when-absent). */
+export interface WorkflowRowRef {
+  instanceId: string;
+  workflowName: string;
+  stepId?: string;
+}
+
 export interface NeedsYouItem {
   source: "agent" | "derived";
+  /** OPR.0.4.6.WF4 Q6 — present ONLY on workflow-sourced rows (omit-when-absent). */
+  workflow?: WorkflowRowRef;
   identity: string;
   summary: string;
   leg: string;

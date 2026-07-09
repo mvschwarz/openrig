@@ -6,14 +6,19 @@ import type {
   QueuePriority,
   QueueState,
 } from "../domain/queue-repository.js";
-import { QueueRepositoryError } from "../domain/queue-repository.js";
+import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId } from "../domain/queue-repository.js";
+import type { QueueItem } from "../domain/queue-repository.js";
 import { isHumanSeatSession } from "../domain/human-route-enforcer.js";
+import { parseSessionName } from "../domain/session-name.js";
+import { hostname as osHostname } from "node:os";
 import type { InboxHandler } from "../domain/inbox-handler.js";
 import { InboxHandlerError } from "../domain/inbox-handler.js";
 import type { OutboxHandler } from "../domain/outbox-handler.js";
 import { aggregateAttention } from "../domain/feed/attention-aggregator.js";
 import type { AttentionItem } from "../domain/feed/attention-aggregator.js";
-import { loadHostRegistry } from "../domain/hosts/hosts-registry-reader.js";
+import { loadHostRegistry, resolveHost } from "../domain/hosts/hosts-registry-reader.js";
+import { LOCAL_HOST_ID } from "../domain/hosts/fanout-contract.js";
+import { remoteJsonRequest } from "../domain/hosts/remote-daemon-http.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 
 /**
@@ -23,6 +28,29 @@ import type { SettingsStore } from "../domain/user-settings/settings-store.js";
  * Hot-potato strict-rejection happens in the domain layer; routes surface
  * structured errors with the validReasons enum so CLIs can render help.
  */
+
+// OPR.0.4.6.MH3 D-5: the cross-host FORWARD write-class deadline, named at
+// the call site (the S15 rule). The 5s READ budget is not the write budget;
+// a forwarded coordination WRITE gets its own generous-but-bounded window
+// (same class as mission-control's REMOTE_ACTION_TIMEOUT_MS). remoteJsonRequest
+// never hangs — a timeout surfaces as a structured host-named failure.
+const QUEUE_FORWARD_TIMEOUT_MS = 10_000;
+
+// OPR.0.4.6.MH3 D-4 (FR-2/R2a): the cross-host provenance shape appended to a
+// FORWARDED body's tags — a marker (`cross-host`) + the forwarding daemon's
+// self-declared name (`from-host:<name>`). Honest best-effort provenance, not
+// authenticated identity (host ids are per-registry local aliases). Without it
+// the successor's source_session (recorded as given) is indistinguishable from
+// a local one. The self-declared name is the daemon's own OS hostname — the
+// shipped registry has no canonical own-alias reader, and D-4 frames this name
+// as free-text best-effort by design.
+export const CROSS_HOST_TAG = "cross-host";
+export function crossHostProvenanceTags(existing: string[] | undefined): string[] {
+  const base = existing ?? [];
+  const fromHost = `from-host:${osHostname()}`;
+  const additions = [CROSS_HOST_TAG, fromHost].filter((t) => !base.includes(t));
+  return [...base, ...additions];
+}
 
 /**
  * OPR.0.3.2.20 — attention-class predicate for the `/list?attention=1`
@@ -77,9 +105,11 @@ export function queueRoutes(): Hono {
   ): { ok: true } | { ok: false; error: string; message: string; meta?: Record<string, unknown> } {
     const rigRepo = c.get("rigRepo" as never) as import("../domain/rig-repository.js").RigRepository | undefined;
     if (!rigRepo) return { ok: true };
-    const m = /^[^@]+@(.+)$/.exec(sourceSession);
-    if (!m) return { ok: true };
-    const rigName = m[1]!;
+    // OPR.0.4.6.MH1 FR-8: the shared parse contract (this regex WAS the
+    // contract's canonical shape — behavior-identical for every input).
+    const parsedSource = parseSessionName(sourceSession);
+    if (parsedSource.kind !== "canonical") return { ok: true };
+    const rigName = parsedSource.rig;
     const rigs = rigRepo.findRigsByName(rigName);
     if (rigs.length === 0) return { ok: true };
     const rigId = rigs[0]!.id;
@@ -108,8 +138,20 @@ export function queueRoutes(): Hono {
         : err.code === "qitem_not_claimable" ? 409
         : err.code === "qitem_not_in_progress" ? 409
         : err.code === "qitem_already_terminal" ? 409
+        // OPR.0.4.6.MH3 Q-a: same minted id, different destination/source =
+        // caller id-reuse (a bug, not an idempotent retry) — surface as a
+        // conflict, never overwrite.
+        : err.code === "qitem_id_reuse" ? 409
+        // OPR.0.4.6.MH3 FR-4 (C2): a cross-host source-close re-drive naming a
+        // DIFFERENT closure_target than the recorded one — someone else closed
+        // the source meanwhile; surfaced, never overwritten.
+        : err.code === "cross_host_close_conflict" ? 409
         : err.code === "unknown_destination_rig" ? 400
         : err.code === "human_route_fields_required" ? 400
+        // OPR.0.4.6.WF3 FR-6: the frontier close-path guard — operator
+        // misuse of a queue verb on a live workflow packet; structured
+        // 400 with the what/why/fix message, never a 500.
+        : err.code === "workflow_frontier_packet" ? 400
         : 500;
       return c.json({ error: err.code, message: err.message, ...(err.meta ?? {}) }, status as 200);
     }
@@ -127,6 +169,212 @@ export function queueRoutes(): Hono {
     return c.json({ error: "internal_error", message }, 500);
   }
 
+  // OPR.0.4.6.MH3 (FR-2, C1; return shape generalized in C2): the ONE shared
+  // forward-then-strip helper for the queue's cross-host coordination WRITES
+  // (create + handoff both route through it — one mechanism, not two).
+  // Generalizes the shipped mission-control write template
+  // (routes/mission-control.ts:340-388): resolve the registry daemon-side,
+  // reject ssh/unsupported-transport, forward the WHOLE body (already minted +
+  // provenance-tagged + hostId-stripped by the caller) to the origin daemon
+  // over the bearer, and map transport failures to the structured host-named
+  // taxonomy. Bearers resolve server-side and never reach the caller (the
+  // shipped posture).
+  //
+  // Returns a discriminated union rather than a Response so the HANDOFF
+  // choreography (C2) can compose: on success it needs the origin's verbatim
+  // payload to pair with the local source-close result; /create just unwraps.
+  // Either way the origin's row is THE record — no local write in here, ever.
+  async function forwardQueueWrite(
+    c: {
+      get: (key: string) => unknown;
+      json: (body: unknown, status?: number) => Response;
+    },
+    hostId: string,
+    path: string,
+    forwardBody: Record<string, unknown>,
+  ): Promise<
+    | { ok: true; payload: unknown; status: number }
+    | { ok: false; response: Response }
+  > {
+    const registryLoader =
+      (c.get("hostRegistryLoader" as never) as (() => ReturnType<typeof loadHostRegistry>) | undefined) ??
+      loadHostRegistry;
+    const fetchImpl = c.get("remoteFetchImpl" as never) as typeof fetch | undefined;
+    const fail = (detail: string, failureClass: string, remoteStatus?: number): { ok: false; response: Response } => ({
+      ok: false,
+      response: c.json(
+        { error: "remote_queue_write_failed", hostId, failureClass, ...(remoteStatus !== undefined ? { remoteStatus } : {}), detail },
+        502,
+      ),
+    });
+    const reg = registryLoader();
+    if (!reg.ok) return fail(reg.error, "registry");
+    const resolved = resolveHost(reg.registry, hostId);
+    if (!resolved.ok) return fail(resolved.error, "unknown-host");
+    if (resolved.host.transport !== "http") {
+      return fail(
+        `host '${hostId}' is SSH-declared; cross-host queue writes require an http-transport registry entry (url + bearer)`,
+        "unsupported-transport",
+      );
+    }
+    const res = await remoteJsonRequest(resolved.host, path, {
+      method: "POST",
+      body: forwardBody,
+      timeoutMs: QUEUE_FORWARD_TIMEOUT_MS,
+      fetchImpl,
+    });
+    if (res.ok) {
+      // The origin daemon's structured response, verbatim — its row is the
+      // record; no optimistic local re-shaping, no local write.
+      return { ok: true, payload: res.payload, status: res.status ?? 200 };
+    }
+    switch (res.kind) {
+      case "bearer":
+        return fail(res.detail, "auth-failed");
+      case "timeout":
+        return fail(
+          res.phase === "body"
+            ? `remote queue write timed out: response headers arrived (HTTP ${res.status}) but the body never completed`
+            : `remote queue write timed out after ${QUEUE_FORWARD_TIMEOUT_MS}ms`,
+          "unreachable",
+          res.status,
+        );
+      case "network":
+        return fail(res.detail, "unreachable");
+      case "http":
+        // The origin refused (its own validation/auth/conflict) — its
+        // structured error rides through; NO fake success.
+        return fail(
+          res.detail || `HTTP ${res.status}`,
+          res.status === 401 || res.status === 403 ? "auth-failed" : "remote-error",
+          res.status,
+        );
+    }
+  }
+
+  /**
+   * OPR.0.4.6.MH3 FR-4 (C2): the cross-host HANDOFF choreography — shared by
+   * /handoff (source closes `handed-off`) and /handoff-and-complete (source
+   * closes `done`); the ONLY difference is the terminal state.
+   *
+   * The local atomic close+create cannot span two DBs, so the boundary is
+   * bridged by message-passing in the arch-ruled Q-c order:
+   *
+   *   (1) read the LOCAL source row + pre-flight the re-drive state — a
+   *       source already closed toward a DIFFERENT closure_target conflicts
+   *       BEFORE any forward (never manufacture an orphan on the target host
+   *       for a re-drive that cannot complete);
+   *   (2) derive the successor id (D-1 — same source+destination+host →
+   *       same id, stateless) and build the successor-create body: the
+   *       local handoff's inheritance rules (body/priority/tier/tags from
+   *       input ?? source), `chainOfRecord = [...source.chain, source.id]`
+   *       (opaque lineage ids on the target — arch R2b), D-4 provenance
+   *       tags, the forwarded `nudge` flag;
+   *   (3) forward the successor-create FIRST via the ONE forwardQueueWrite
+   *       helper — a failed forward returns the structured host-named error
+   *       with the source UNTOUCHED (never-drop: the potato stays live);
+   *       a re-driven forward absorbs on the target's PK (Q-a + D-1);
+   *   (4) close the LOCAL source SECOND via the bounded repo method —
+   *       `closure_target` = the opaque 3-part `<member@rig>@<host>` (R1),
+   *       `handed_off_to` = the 2-part session (BR-1); an already-closed
+   *       source with the MATCHING target absorbs idempotently.
+   *
+   * NOTE (disclosed): the target-side successor carries lineage via
+   * `chain_of_record` + the provenance tags; the local-only
+   * `handed_off_from` column is not part of the create body and stays NULL
+   * on the target — R2b's opaque-lineage contract, not a gap.
+   */
+  async function crossHostHandoff(
+    c: {
+      get: (key: string) => unknown;
+      json: (body: unknown, status?: number) => Response;
+    },
+    qitemId: string,
+    hostId: string,
+    terminalState: "handed-off" | "done",
+    body: {
+      fromSession: string;
+      toSession: string;
+      body?: string;
+      transitionNote?: string;
+      priority?: QueuePriority;
+      tier?: string;
+      tags?: string[];
+      targetRepo?: string;
+      summary?: string | null;
+      evidenceRef?: string | null;
+      nudge?: boolean;
+    },
+  ): Promise<Response> {
+    const repo = getRepo(c);
+    const source = repo.getById(qitemId);
+    if (!source) return c.json({ error: "qitem_not_found", message: `qitem ${qitemId} not found` }, 404);
+
+    // The opaque 3-part closure target (R1 — display/audit metadata, never
+    // parsed). Session-string carriers keep the 2-part form (BR-1).
+    const closureTarget = `${body.toSession}@${hostId}`;
+
+    // (1) Pre-flight the re-drive state BEFORE any forward.
+    const sourceTerminal = source.state === "done" || source.state === "handed-off";
+    if (sourceTerminal && source.closureTarget !== closureTarget) {
+      return c.json(
+        {
+          error: "cross_host_close_conflict",
+          message: `qitem ${qitemId} is already closed toward ${source.closureTarget ?? "<no closure_target>"} — this re-drive names ${closureTarget}; surfacing the conflict, never overwriting`,
+          existingClosureTarget: source.closureTarget,
+          attemptedClosureTarget: closureTarget,
+        },
+        409,
+      );
+    }
+
+    // (2) The deterministic successor identity + forwarded body.
+    const successorId = deriveCrossHostSuccessorId(source.qitemId, body.toSession, hostId);
+    const effectiveTags = body.tags ?? source.tags ?? undefined;
+    const forwardBody: Record<string, unknown> = {
+      qitemId: successorId,
+      sourceSession: body.fromSession,
+      destinationSession: body.toSession,
+      body: body.body ?? source.body,
+      priority: body.priority ?? source.priority,
+      ...(body.tier ?? source.tier ? { tier: body.tier ?? source.tier } : {}),
+      tags: crossHostProvenanceTags(effectiveTags),
+      chainOfRecord: [...(source.chainOfRecord ?? []), source.qitemId],
+      ...(body.targetRepo !== undefined
+        ? { targetRepo: body.targetRepo }
+        : source.targetRepo
+          ? { targetRepo: source.targetRepo }
+          : {}),
+      ...(body.summary !== undefined ? { summary: body.summary } : {}),
+      ...(body.evidenceRef !== undefined ? { evidenceRef: body.evidenceRef } : {}),
+      ...(body.nudge !== undefined ? { nudge: body.nudge } : {}),
+    };
+
+    // (3) Successor-create FIRST — origin-owns-the-record; failure leaves the
+    // source untouched (never-drop).
+    const fwd = await forwardQueueWrite(c, hostId, "/api/queue/create", forwardBody);
+    if (!fwd.ok) return fwd.response;
+
+    // (4) Source-close SECOND (idempotent absorb / structured conflict).
+    let closed: { item: QueueItem; absorbed: boolean };
+    try {
+      closed = repo.closeCrossHostHandoffSource({
+        qitemId: source.qitemId,
+        fromSession: body.fromSession,
+        toSession: body.toSession,
+        closureTarget,
+        terminalState,
+        transitionNote: body.transitionNote,
+      });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+
+    // Same {closed, created} shape as the local transactional handoff;
+    // `created` is the origin daemon's row, verbatim.
+    return c.json({ closed: closed.item, created: fwd.payload }, 201);
+  }
+
   // POST /create
   app.post("/create", async (c) => {
     const body = await c.req.json<{
@@ -142,16 +390,46 @@ export function queueRoutes(): Hono {
       targetRepo?: string;
       summary?: string | null;
       evidenceRef?: string | null;
+      nudge?: boolean;
+      // OPR.0.4.6.MH3 FR-1: the out-of-band host envelope (BR-1 — the
+      // session string stays member@rig; the host is NEVER in-string).
+      // Absent / "" / "local" = today's local path, byte-identical.
+      hostId?: string;
     }>().catch(() => ({} as never));
 
     if (!body.sourceSession) return c.json({ error: "sourceSession is required" }, 400);
     if (!body.destinationSession) return c.json({ error: "destinationSession is required" }, 400);
     if (!body.body) return c.json({ error: "body is required" }, 400);
 
+    // OPR.0.4.6.MH3 FR-2 (C1): cross-host CREATE. A registered remote host id
+    // forwards the write to that host's daemon; the qitem lives in the origin
+    // host's DB (origin-owns-the-record) and its OWN maybeNudge fires on its
+    // local tmux (FR-3 — forward the WHOLE body incl. nudge). Delivery is
+    // at-least-once + idempotent: the FORWARDING daemon MINTS the qitemId
+    // before the first forward (Q-a) so every retry carries the same id. No
+    // local row is ever written on the cross-host path.
     // PL-007: validate target_repo against source rig's workspace.repos[].
+    // GUARD FIXBACK (OPR.0.4.6.MH3 review of 86ba8b42, Finding 1): this runs
+    // BEFORE the cross-host branch — the validation authority is the SOURCE
+    // rig's typed workspace, which lives on THIS host; the target daemon
+    // passes-through when it doesn't know the source rig, so a post-forward
+    // check cannot recover it. Local ordering is unchanged (the cross-host
+    // branch is a no-op without hostId).
     if (body.targetRepo) {
       const validation = validateTargetRepo(c, body.sourceSession, body.targetRepo);
       if (!validation.ok) return c.json({ error: validation.error, message: validation.message, ...(validation.meta ?? {}) }, 400);
+    }
+
+    if (typeof body.hostId === "string" && body.hostId !== "" && body.hostId !== LOCAL_HOST_ID) {
+      const mintedId = body.qitemId ?? newQitemId();
+      const { hostId: _dropped, ...rest } = body;
+      const forwardBody: Record<string, unknown> = {
+        ...rest,
+        qitemId: mintedId,
+        tags: crossHostProvenanceTags(body.tags),
+      };
+      const fwd = await forwardQueueWrite(c, body.hostId, "/api/queue/create", forwardBody);
+      return fwd.ok ? c.json(fwd.payload as Record<string, unknown>, fwd.status as 200) : fwd.response;
     }
 
     try {
@@ -260,7 +538,9 @@ export function queueRoutes(): Hono {
     }
   });
 
-  // POST /:qitemId/handoff — transactional close+create
+  // POST /:qitemId/handoff — transactional close+create (local); cross-host
+  // message-passing choreography when a registered hostId is enveloped
+  // (OPR.0.4.6.MH3 FR-4, C2).
   app.post("/:qitemId/handoff", async (c) => {
     const qitemId = c.req.param("qitemId");
     const body = await c.req.json<{
@@ -274,13 +554,37 @@ export function queueRoutes(): Hono {
       targetRepo?: string;
       summary?: string | null;
       evidenceRef?: string | null;
+      nudge?: boolean;
+      // OPR.0.4.6.MH3 FR-1: the out-of-band host envelope (BR-1). Absent /
+      // "" / "local" = today's local transactional path, byte-identical.
+      hostId?: string;
     }>().catch(() => ({} as never));
     if (!body.fromSession) return c.json({ error: "fromSession is required" }, 400);
     if (!body.toSession) return c.json({ error: "toSession is required" }, 400);
 
+    // PL-007 — GUARD FIXBACK (Finding 1): an EXPLICIT targetRepo validates
+    // against the SOURCE host's authority BEFORE the cross-host branch (see
+    // the create-route note). An inherited source.targetRepo (no override)
+    // is NOT re-validated — it was already accepted on the source row.
     if (body.targetRepo) {
       const validation = validateTargetRepo(c, body.fromSession, body.targetRepo);
       if (!validation.ok) return c.json({ error: validation.error, message: validation.message, ...(validation.meta ?? {}) }, 400);
+    }
+
+    if (typeof body.hostId === "string" && body.hostId !== "" && body.hostId !== LOCAL_HOST_ID) {
+      return crossHostHandoff(c, qitemId, body.hostId, "handed-off", {
+        fromSession: body.fromSession,
+        toSession: body.toSession,
+        body: body.body,
+        transitionNote: body.transitionNote,
+        priority: body.priority,
+        tier: body.tier,
+        tags: body.tags,
+        targetRepo: body.targetRepo,
+        summary: body.summary,
+        evidenceRef: body.evidenceRef,
+        nudge: body.nudge,
+      });
     }
 
     try {
@@ -307,6 +611,7 @@ export function queueRoutes(): Hono {
   // POST /:qitemId/handoff-and-complete — variant of handoff that closes
   // source as `done` (terminal) instead of `handed-off` (intermediate).
   // Same atomic close+create + chain_of_record + default-nudge contract.
+  // Cross-host: same C2 choreography with the `done` terminal state.
   app.post("/:qitemId/handoff-and-complete", async (c) => {
     const qitemId = c.req.param("qitemId");
     const body = await c.req.json<{
@@ -321,13 +626,33 @@ export function queueRoutes(): Hono {
       targetRepo?: string;
       summary?: string | null;
       evidenceRef?: string | null;
+      // OPR.0.4.6.MH3 FR-1: the out-of-band host envelope (BR-1).
+      hostId?: string;
     }>().catch(() => ({} as never));
     if (!body.fromSession) return c.json({ error: "fromSession is required" }, 400);
     if (!body.toSession) return c.json({ error: "toSession is required" }, 400);
 
+    // PL-007 — GUARD FIXBACK (Finding 1): same source-host-authority ordering
+    // as handoff — explicit targetRepo validates BEFORE the cross-host branch.
     if (body.targetRepo) {
       const validation = validateTargetRepo(c, body.fromSession, body.targetRepo);
       if (!validation.ok) return c.json({ error: validation.error, message: validation.message, ...(validation.meta ?? {}) }, 400);
+    }
+
+    if (typeof body.hostId === "string" && body.hostId !== "" && body.hostId !== LOCAL_HOST_ID) {
+      return crossHostHandoff(c, qitemId, body.hostId, "done", {
+        fromSession: body.fromSession,
+        toSession: body.toSession,
+        body: body.body,
+        transitionNote: body.transitionNote,
+        priority: body.priority,
+        tier: body.tier,
+        tags: body.tags,
+        targetRepo: body.targetRepo,
+        summary: body.summary,
+        evidenceRef: body.evidenceRef,
+        nudge: body.nudge,
+      });
     }
 
     try {

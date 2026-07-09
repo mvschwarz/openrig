@@ -5,6 +5,7 @@ import type { SessionRegistry } from "./session-registry.js";
 import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
+import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
 import { SeatStatusService, type SeatStatus, type SeatStatusResult } from "./seat-status-service.js";
 import { SeatHandoverPlanner, parseHandoverSource, type SeatHandoverPlan, type SeatHandoverSource } from "./seat-handover-planner.js";
 import { SuccessorSessionLauncher } from "./successor-session-launcher.js";
@@ -93,10 +94,18 @@ interface SeatHandoverServiceDeps {
   contextUsageStore?: ResumeTokenCaptureDeps["contextUsageStore"];
   /** Codex thread-id capturer for discovered-mode resume-token capture (B2). */
   resumeTokenCapturer?: ResumeTokenCaptureDeps["resumeTokenCapturer"];
+  /** OPR.0.4.6.PI1 FR-6 — pi-runner sidecar reader for Pi resume-token capture. */
+  piRunnerStateStore?: ResumeTokenCaptureDeps["piRunnerStateStore"];
   /** Readiness timeout for the successor launch (tests shorten it). */
   readinessTimeoutMs?: number;
   /** Injectable sleep for the successor readiness backoff (tests). */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * OPR.0.4.6.02 S1 — the SHARED tmux option-defaults applier, threaded into
+   * the successor launcher so a FRESH handover successor gets the same
+   * mouse/status/clipboard defaults as a NodeLauncher-launched seat.
+   */
+  tmuxOptionDefaults?: TmuxOptionDefaultsApplier;
 }
 
 export class SeatHandoverService {
@@ -132,10 +141,12 @@ export class SeatHandoverService {
       runtimeAdapters: deps.runtimeAdapters,
       readinessTimeoutMs: deps.readinessTimeoutMs,
       sleep: deps.sleep,
+      tmuxOptionDefaults: deps.tmuxOptionDefaults,
     });
     this.captureDeps = {
       contextUsageStore: deps.contextUsageStore ?? null,
       resumeTokenCapturer: deps.resumeTokenCapturer ?? null,
+      piRunnerStateStore: deps.piRunnerStateStore ?? null,
     };
   }
 

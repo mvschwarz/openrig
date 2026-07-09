@@ -1,17 +1,27 @@
-// OPR.0.4.4.13 — the host-registry verbs. CAPPED at exactly three
-// (add / list / doctor — arch R13-2a): no edit/remove/tunnel/bootstrap
-// verbs; hand-editing hosts.yaml remains the path for everything else,
-// and the bootstrap ships as script + runbook.
+// OPR.0.4.4.13 — the host-registry verbs (add / list / doctor — arch
+// R13-2a: no edit/remove/tunnel/bootstrap verbs; hand-editing hosts.yaml
+// remains the path for exotica; the bootstrap ships as script + runbook).
+// OPR.0.4.6.MH1 FR-1 extends the family with `select` — the persisted
+// host-selection pointer (kubectl current-context shape). The pointer
+// lives in the config twins as `host.selected`; this verb is a THIN
+// CLIENT of the daemon config write (one write path for CLI+UI
+// convergence, arch ruling); reads resolve from the local ConfigStore
+// (env > file > default — zero new daemon lookups on read paths).
 //
 // Secret hygiene (FR-1): every render carries bearer POINTERS (env var /
 // file NAMES) only — no code path in this file resolves a bearer value
 // for display.
 
 import { Command } from "commander";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { hostname as osHostname, userInfo } from "node:os";
 import { connect } from "node:net";
-import { addHostEntry, defaultHostRegistryPath, loadHostRegistry, hostDisplayTarget, resolveHost, resolveRemoteBearer, type HostEntry, type HttpHostEntry } from "../host-registry.js";
+import { getOpenRigHome } from "../openrig-compat.js";
+import { addHostEntry, defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, hostDisplayTarget, resolveHost, resolveRemoteBearer, type HostEntry, type HttpHostEntry } from "../host-registry.js";
 import { runCrossHostCommand, type CrossHostResult } from "../cross-host-executor.js";
+import { DaemonClient } from "../client.js";
+import { readOwnHostName, readSelectedHost } from "../host-selection.js";
 
 // ---------------------------------------------------------------------------
 // rig host doctor — stepwise, honest, three-valued (FR-1 + FR-2).
@@ -30,6 +40,10 @@ export interface CheckRow {
 export interface DoctorDeps {
   run: (host: HostEntry, argv: readonly string[]) => Promise<CrossHostResult>;
   httpGet: (url: string, headers?: Record<string, string>) => Promise<{ status: number; body: string }>;
+  /** OPR.0.4.6.MH1 FR-6: bounded JSON POST for the pair handshake.
+   *  Optional so existing DoctorDeps fixtures keep compiling; the pair
+   *  verb falls back to plain fetch when absent. */
+  httpPost?: (url: string, body: unknown) => Promise<{ status: number; body: string }>;
   /** TCP connect probe: "open" (connected) | "closed" (refused/filtered/timeout) | "unknown" (probe itself failed). */
   tcpProbe: (target: string, port: number, timeoutMs: number) => Promise<"open" | "closed" | "unknown">;
 }
@@ -58,6 +72,15 @@ function defaultDoctorDeps(): DoctorDeps {
       const res = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
       return { status: res.status, body: await res.text() };
     },
+    httpPost: async (url, body) => {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(10_000),
+      });
+      return { status: res.status, body: await res.text() };
+    },
     tcpProbe: (target, port, timeoutMs) =>
       new Promise((resolve) => {
         const sock = connect({ host: target, port, timeout: timeoutMs });
@@ -71,6 +94,35 @@ function defaultDoctorDeps(): DoctorDeps {
 /** FR-1 doctor legs — each failing step maps to a DISTINCT actionable error:
  *  "SSH works but daemon is down" ≠ "daemon works but registry is wrong" ≠
  *  "remote rig binary missing/old". */
+/** OPR.0.4.6.MH1 FR-3 — the coarse ls status word: a BOUNDED tcp dial
+ *  against the host's transport endpoint (ssh: target:22; http: the
+ *  URL's host:port). Coarse by design (the kubectl STATUS / docker
+ *  context ls precedent): reachable | unreachable | unknown — never a
+ *  hang (hard timeout), never a guess (dial failure = unreachable,
+ *  probe error/unparseable endpoint = unknown). */
+export async function probeHostStatus(
+  host: HostEntry,
+  tcpProbe: DoctorDeps["tcpProbe"],
+  timeoutMs = 1500,
+): Promise<"reachable" | "unreachable" | "unknown"> {
+  try {
+    let target: string;
+    let port: number;
+    if (host.transport === "ssh") {
+      target = host.target;
+      port = 22;
+    } else {
+      const u = new URL(host.url);
+      target = u.hostname;
+      port = u.port ? Number(u.port) : u.protocol === "https:" ? 443 : 80;
+    }
+    const r = await tcpProbe(target, port, timeoutMs);
+    return r === "open" ? "reachable" : r === "closed" ? "unreachable" : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 export async function doctorLegs(host: HostEntry, deps: DoctorDeps): Promise<CheckRow[]> {
   const rows: CheckRow[] = [];
 
@@ -393,17 +445,282 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
     });
 
   cmd
-    .command("list")
-    .description("List registered hosts (config pointers only — never secret values)")
+    .command("select")
+    .description("Select which host you are viewing/acting on (persisted; 'local' returns to this host)")
+    .argument("<id>", "A registered host id, or 'local'")
     .option("--json", "JSON output")
-    .action((opts: { json?: boolean }) => {
+    .action(async (id: string, opts: { json?: boolean }) => {
+      // Validate BEFORE persisting: 'local' is always legal; anything
+      // else must be a registered host id.
+      if (id !== "local") {
+        const registryPath = defaultHostRegistryPath();
+        const loaded = existsSync(registryPath) ? loadHostRegistry(registryPath) : null;
+        if (!loaded || !loaded.ok) {
+          console.error(
+            loaded && !loaded.ok
+              ? loaded.error
+              : `cannot select '${id}': no hosts registered (no registry at ${registryPath}). Add one first: rig host add --id <id> --transport <ssh|http> ...`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const ids = loaded.registry.hosts.map((h) => h.id);
+        if (!ids.includes(id)) {
+          console.error(
+            `cannot select '${id}': not a registered host id. Registered: ${ids.length > 0 ? ids.join(", ") : "(none)"}. Add it first: rig host add --id ${id} --transport <ssh|http> ... (or select 'local').`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+      }
+      // ONE write path: the daemon config write (the CLI is a thin
+      // client — arch FR-1 ruling). Daemon-down surfaces the existing
+      // structured connection error (trade named in the PRD).
+      const client = new DaemonClient();
+      let res: { status: number; data: { ok?: boolean; error?: string } };
+      try {
+        res = await client.post<{ ok?: boolean; error?: string }>(
+          `/api/config/${encodeURIComponent("host.selected")}`,
+          { value: id },
+        );
+      } catch (err) {
+        // Daemon down: the existing structured connection error, named
+        // trade in the PRD (selection writes need the local daemon up).
+        console.error((err as Error).message);
+        process.exitCode = 1;
+        return;
+      }
+      if (res.status !== 200 || res.data?.error) {
+        console.error(res.data?.error ?? `daemon config write failed (HTTP ${res.status})`);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.json) {
+        console.log(JSON.stringify({ ok: true, selected: id }));
+        return;
+      }
+      console.log(id === "local" ? "Selected host: local (this host)" : `Selected host: ${id}`);
+      console.log(id === "local" ? "Commands run against this host." : `Flagless commands that support --host now run against '${id}'. Return with: rig host select local`);
+    });
+
+  cmd
+    .command("rename")
+    .description("Rename THIS host's display name (renders in dashboard, explorer, ls, whoami)")
+    .argument("<name>", 'The new display name, e.g. "Mac mini 2"')
+    .option("--json", "JSON output")
+    .action(async (name: string, opts: { json?: boolean }) => {
+      // OPR.0.4.6.MH1 FR-4 — one stored name (the settings twins, arch
+      // Ruling 1), one write path (the daemon config write, same as
+      // select). The name is free text; only emptiness is rejected.
+      const trimmed = name.trim();
+      if (!trimmed) {
+        console.error("host name must not be empty");
+        process.exitCode = 1;
+        return;
+      }
+      const client = new DaemonClient();
+      let res: { status: number; data: { ok?: boolean; error?: string } };
+      try {
+        res = await client.post<{ ok?: boolean; error?: string }>(
+          `/api/config/${encodeURIComponent("host.name")}`,
+          { value: trimmed },
+        );
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+        return;
+      }
+      if (res.status !== 200 || res.data?.error) {
+        console.error(res.data?.error ?? `daemon config write failed (HTTP ${res.status})`);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.json) {
+        console.log(JSON.stringify({ ok: true, name: trimmed }));
+        return;
+      }
+      console.log(`This host is now named: ${trimmed}`);
+    });
+
+  cmd
+    .command("pair")
+    .description("Pair with a remote host from one pasted address — one approval on the target, done (FR-6)")
+    .argument("<url>", "The target daemon's address (http[s]://host:port, or host:port)")
+    .option("--id <id>", "Registry id for the new host (default: derived from the hostname)")
+    .option("--timeout <seconds>", "How long to wait for the target-side approval", "600")
+    .option("--json", "JSON output")
+    .action(async (rawUrl: string, opts: { id?: string; timeout?: string; json?: boolean }) => {
+      // OPR.0.4.6.MH1 FR-6 — THE founder-simple add path: one pasted
+      // address, one approval ON the target, done. The flag-heavy
+      // `rig host add` stays as the unchanged advanced path. B1: the CLI
+      // keeps its direct-fs write (addHostEntry); the browser surface
+      // pairs through its local daemon — both converge on the ONE write
+      // contract.
+      let target: URL;
+      try {
+        target = new URL(/^https?:\/\//.test(rawUrl.trim()) ? rawUrl.trim() : `http://${rawUrl.trim()}`);
+      } catch {
+        console.error(`'${rawUrl}' is not a usable address. Paste the target daemon's URL, e.g. http://vps-a:7433`);
+        process.exitCode = 1;
+        return;
+      }
+      const targetBase = target.origin;
+      const deps = doctorDepsOverride ?? defaultDoctorDeps();
+
+      // B1 fixback (guard code-review 2026-07-07): PREFLIGHT before any
+      // network call or credential mutation. The candidate entry runs the
+      // SAME validation contract the add will use (duplicate ids, reserved
+      // ids, invalid existing registry all fail HERE — before the target
+      // is asked for approval), and a pre-existing token file is
+      // pre-existing CREDENTIAL STATE: rejected, never overwritten, and
+      // never deleted by this request's cleanup.
+      const id = (opts.id ?? "").trim() || target.hostname.toLowerCase().replace(/[^a-z0-9.-]/g, "-").replace(/\./g, "-").replace(/^-+|-+$/g, "") || "paired-host";
+      const secretsDir = join(getOpenRigHome(), "secrets");
+      const tokenPath = join(secretsDir, `host-${id}.token`);
+      {
+        const registryPath = defaultHostRegistryPath();
+        let existing: HostEntry[] = [];
+        if (existsSync(registryPath)) {
+          const loaded = loadHostRegistry(registryPath);
+          if (!loaded.ok) {
+            console.error(`cannot pair: ${loaded.error}`);
+            process.exitCode = 1;
+            return;
+          }
+          existing = loaded.registry.hosts;
+        }
+        const preflight = validateHostRegistry(
+          { hosts: [...existing, { id, transport: "http", url: targetBase, bearer_file: tokenPath }] },
+          registryPath,
+        );
+        if (!preflight.ok) {
+          console.error(`cannot pair as '${id}': ${preflight.error}`);
+          process.exitCode = 1;
+          return;
+        }
+        if (existsSync(tokenPath)) {
+          console.error(`a credential file already exists at ${tokenPath} — pre-existing credential state is never overwritten. Pass --id <different-id>, or remove the file yourself if you know it is stale.`);
+          process.exitCode = 1;
+          return;
+        }
+      }
+
+      const httpPost = deps.httpPost ?? (async (url: string, payload: unknown) => {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(10_000),
+        });
+        return { status: res.status, body: await res.text() };
+      });
+      const parseJson = (s: string): Record<string, unknown> => {
+        try { return JSON.parse(s) as Record<string, unknown>; } catch { return {}; }
+      };
+
+      let issued: { pairId?: string; code?: string; approvalQitemId?: string; error?: string; message?: string };
+      try {
+        const res = await httpPost(`${targetBase}/api/hosts/pair-request`, {
+          requester: `${userInfo().username}@${osHostname()}`,
+        });
+        issued = parseJson(res.body) as typeof issued;
+        if (res.status !== 200 || !issued.pairId || !issued.code) {
+          console.error(issued.message ?? `pairing refused: target responded HTTP ${res.status}${issued.error ? ` (${issued.error})` : ""}`);
+          process.exitCode = 1;
+          return;
+        }
+      } catch (err) {
+        console.error(`could not reach ${targetBase}: ${(err as Error).message}`);
+        process.exitCode = 1;
+        return;
+      }
+
+      if (!opts.json) {
+        console.log(`Pairing code: ${issued.code}`);
+        console.log(`Waiting for approval on the target (its attention queue carries item ${issued.approvalQitemId ?? "?"}).`);
+        console.log(`On the target: rig queue update ${issued.approvalQitemId ?? "<qitem-id>"} --state done --closure-reason no-follow-on`);
+      }
+
+      const timeoutMs = Math.max(1, Number(opts.timeout ?? "600") || 600) * 1000;
+      const deadline = Date.now() + timeoutMs;
+      let outcome: { status?: string; token?: string } = {};
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000));
+        try {
+          const res = await deps.httpGet(`${targetBase}/api/hosts/pair-request/${issued.pairId}`);
+          outcome = parseJson(res.body) as typeof outcome;
+        } catch {
+          continue; // transient poll failure: keep waiting until the deadline
+        }
+        if (outcome.status && outcome.status !== "pending") break;
+      }
+
+      if (outcome.status !== "approved" || !outcome.token) {
+        const why = outcome.status === "denied" ? "the target DENIED the pairing"
+          : outcome.status === "expired" ? "the pairing EXPIRED on the target"
+          : "no approval arrived before the timeout";
+        console.error(`pairing failed: ${why}. Nothing was persisted (no registry entry, no token file).`);
+        process.exitCode = 1;
+        return;
+      }
+
+      // Approved: token → EXCLUSIVE-CREATE 0600 file (open flag "wx" —
+      // rev1-r2 B3: check-then-rename had a window where a concurrent
+      // same-id pair could clobber the winner's file and then delete it
+      // on its own add failure; "wx" is atomic at the filesystem, so
+      // creation SUCCESS is the proof of ownership the cleanup relies
+      // on), then the registry entry via the ONE shipped write path.
+      // addHostEntry re-validates authoritatively (the registry may have
+      // changed since preflight).
+      try {
+        mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
+        writeFileSync(tokenPath, `${outcome.token}\n`, { mode: 0o600, flag: "wx" });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+          console.error(`a credential file appeared at ${tokenPath} during pairing — refusing to overwrite it. Nothing was persisted by this request.`);
+        } else {
+          console.error(`failed to store the pairing token: ${(err as Error).message}`);
+        }
+        process.exitCode = 1;
+        return;
+      }
+      const added = addHostEntry({
+        id,
+        transport: "http",
+        url: targetBase,
+        bearer_file: tokenPath,
+        notes: `paired ${new Date().toISOString().slice(0, 10)}`,
+      });
+      if (!added.ok) {
+        rmSync(tokenPath, { force: true });
+        console.error(`pairing approved but the registry write failed: ${added.error}. The token file (created by this request) was removed — nothing persisted.`);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.json) {
+        console.log(JSON.stringify({ ok: true, entry: added.entry }));
+        return;
+      }
+      console.log(`Paired. Host '${id}' registered (${targetBase}, bearer_file ${tokenPath}).`);
+      console.log(`Verify it: rig host doctor ${id}`);
+    });
+
+  cmd
+    .command("list")
+    // OPR.0.4.6.MH1 QA fixback: the PRD/proof contract spells the verb
+    // `rig host ls` (FR-3); `list` stays the canonical name, `ls` is the
+    // contract-required alias (same action, same --json).
+    .alias("ls")
+    .description("List registered hosts w/ status + selected marker (config pointers only — never secret values)")
+    .option("--json", "JSON output")
+    .action(async (opts: { json?: boolean }) => {
       const registryPath = defaultHostRegistryPath();
       if (!existsSync(registryPath)) {
         if (opts.json) {
           console.log(JSON.stringify([]));
           return;
         }
-        console.log(`No hosts registered in ${registryPath}. Add one: rig host add --id <id> --transport <ssh|http> ...`);
+        console.log(`No hosts registered in ${registryPath}. Pair one from a single address: rig host pair <url> (advanced/manual path: rig host add --id <id> --transport <ssh|http> ...)`);
         return;
       }
       const loaded = loadHostRegistry(registryPath);
@@ -412,19 +729,45 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
         process.exitCode = 1;
         return;
       }
+      // OPR.0.4.6.MH1 FR-1/FR-3: selected marker (local ConfigStore read —
+      // env > file > default; zero daemon dependency) + a bounded status
+      // probe per host (parallel; hard per-host timeout — never a hang).
+      const selected = readSelectedHost();
+      const probeDeps: DoctorDeps = doctorDepsOverride ?? defaultDoctorDeps();
+      const statuses = await Promise.all(
+        loaded.registry.hosts.map((h) => probeHostStatus(h, probeDeps.tcpProbe)),
+      );
       if (opts.json) {
         // Entries as validated: bearer fields are NAMES by construction.
-        console.log(JSON.stringify(loaded.registry.hosts));
+        // ADDITIVE ONLY (the shipped bare-array shape is a contract —
+        // pre-MH1 consumers keep working): each row gains `selected` +
+        // `status`; the scriptable selection pointer is the true row (or
+        // `rig config get host.selected`).
+        console.log(JSON.stringify(loaded.registry.hosts.map((h, i) => ({ ...h, selected: h.id === selected, status: statuses[i] }))));
         return;
       }
       if (loaded.registry.hosts.length === 0) {
-        console.log(`No hosts registered in ${registryPath}. Add one: rig host add --id <id> --transport <ssh|http> ...`);
+        console.log(`No hosts registered in ${registryPath}. Pair one from a single address: rig host pair <url> (advanced/manual path: rig host add --id <id> --transport <ssh|http> ...)`);
         return;
       }
+      // OPR.0.4.6.MH1 FR-4: the own-host name renders here when RENAMED;
+      // unnamed (default "localhost") keeps today's output byte-identical
+      // (the FR-4 zero-regression AC). Scriptable read: rig config get
+      // host.name — the --json array stays registry rows only (shipped
+      // bare-array contract).
+      const ownName = readOwnHostName();
+      if (ownName !== "localhost") {
+        console.log(`This host: ${ownName}\n`);
+      }
       const pad = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + "…" : s.padEnd(n));
-      console.log(`${pad("ID", 20)} ${pad("TRANSPORT", 10)} ${pad("TARGET", 36)} ${pad("AUTH", 24)} NOTES`);
-      for (const h of loaded.registry.hosts) {
-        console.log(`${pad(h.id, 20)} ${pad(h.transport, 10)} ${pad(hostDisplayTarget(h), 36)} ${pad(authPointer(h), 24)} ${h.notes ?? "—"}`);
+      console.log(`${pad("", 2)}${pad("ID", 20)} ${pad("TRANSPORT", 10)} ${pad("TARGET", 30)} ${pad("STATUS", 12)} ${pad("AUTH", 24)} NOTES`);
+      for (let i = 0; i < loaded.registry.hosts.length; i++) {
+        const h = loaded.registry.hosts[i]!;
+        const marker = h.id === selected ? "* " : "  ";
+        console.log(`${marker}${pad(h.id, 20)} ${pad(h.transport, 10)} ${pad(hostDisplayTarget(h), 30)} ${pad(statuses[i]!, 12)} ${pad(authPointer(h), 24)} ${h.notes ?? "—"}`);
+      }
+      if (selected !== "local") {
+        console.log(`\nSelected host: ${selected} (return with: rig host select local)`);
       }
     });
 

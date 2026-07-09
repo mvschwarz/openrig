@@ -26,6 +26,7 @@ import { Link } from "@tanstack/react-router";
 import { useSlices } from "../../hooks/useSlices.js";
 import { useMission } from "../../hooks/useMission.js";
 import { useScopeMarkdown } from "../../hooks/useScopeMarkdown.js";
+import { useHostSelection, useLocalFilesAllowed } from "../../hooks/useHosts.js";
 import {
   projectSliceFromListEntry,
   deriveMissionStatusFromSlices,
@@ -72,11 +73,26 @@ function briefSection(markdown: string, header: string): string | null {
  *  Building + Needs-you. Mounts only when the row is expanded → lazy by construction. */
 function MissionGlance({ missionId }: { missionId: string }) {
   const mission = useMission(missionId);
+  // OPR.0.4.6.MH2 guard-B1 — useMission is selected-host retargeted, so
+  // under a remote selection missionPath is a REMOTE path: it must never
+  // resolve against LOCAL allowlist roots (zero /api/files/* + honest copy).
+  const { known: selectionKnown, isLocal } = useHostSelection();
+  const filesAllowed = useLocalFilesAllowed();
   const missionPath =
-    mission.data && "missionPath" in mission.data ? mission.data.missionPath : null;
+    filesAllowed && mission.data && "missionPath" in mission.data ? mission.data.missionPath : null;
   const brief = useScopeMarkdown(missionPath, "MISSION_BRIEF.md");
 
-  if (mission.isLoading || brief.isLoading) {
+  if (selectionKnown && !isLocal) {
+    // Known-REMOTE only — unknown renders the loading branch (fetches stay
+    // gated either way; no misleading gated flash on local cold start).
+    return (
+      <div data-testid={`portfolio-glance-remote-gated-${missionId}`} className="font-mono text-[11px] text-on-surface-variant">
+        Local files not shown — the steering glance reads MISSION_BRIEF.md from the selected host&apos;s filesystem, which the remote read view does not browse.
+      </div>
+    );
+  }
+
+  if (!selectionKnown || mission.isLoading || brief.isLoading) {
     return <div data-testid={`portfolio-glance-loading-${missionId}`} className="font-mono text-[11px] text-on-surface-variant">Loading steering…</div>;
   }
 

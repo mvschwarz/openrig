@@ -7,14 +7,12 @@ metadata:
     last_verified: "2026-07-06"
     distribution_scope: product-bound
     source_evidence: |
-      Authored + embedded in release-0.4.3 slice 32 (mission-slice-sop);
-      moved into the canonical product skill source and updated in
-      release-0.4.4 slice 23 (operationalize the SDLC control plane) to
-      teach the full SDLC flow the Living Notes UI projects: the convention
-      sections, the proof-contract pairing, the two staged-approval locks,
-      C1 proof drops, and the three role contracts. Conventions SSOT:
-      docs/reference/sdlc-conventions.md (shipped with the CLI package).
-      The deterministic backstop is the `rig scope audit` classifier.
+      The canonical product SDLC skill: it teaches the full SDLC flow the
+      Living Notes UI projects — the convention sections, the proof-contract
+      pairing, the two staged-approval locks, C1 proof drops, and the three
+      role contracts. Conventions SSOT: docs/reference/sdlc-conventions.md
+      (shipped with the CLI package). The deterministic backstop is the
+      `rig scope audit` classifier.
     sibling_skills:
       - queue-handoff
       - seat-continuity-and-handover

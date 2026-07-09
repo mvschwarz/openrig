@@ -1,5 +1,6 @@
 import type { RigRepository } from "./rig-repository.js";
 import { getNodeInventory } from "./node-inventory.js";
+import { parseSessionName } from "./session-name.js";
 import type { NodeInventoryEntry } from "./types.js";
 
 const SEAT_LOOKUP_GUIDANCE = "List seats with: rig ps --nodes";
@@ -67,10 +68,11 @@ export class SeatStatusService {
   }
 
   private findMatches(ref: string): SeatMatch[] {
-    const atIndex = ref.lastIndexOf("@");
-    if (atIndex > 0 && atIndex < ref.length - 1) {
-      const localRef = ref.slice(0, atIndex);
-      const rigName = ref.slice(atIndex + 1);
+    // OPR.0.4.6.MH1 FR-8: the shared parse contract (greedy first-@ rig).
+    const parsed = parseSessionName(ref);
+    if (parsed.kind === "canonical") {
+      const localRef = parsed.member;
+      const rigName = parsed.rig;
       const rigs = this.rigRepo.findRigsByName(rigName);
       return rigs.flatMap((rig) => this.entriesForRig(rig.id).filter((entry) =>
         entry.canonicalSessionName === ref || entry.logicalId === localRef

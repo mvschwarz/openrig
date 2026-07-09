@@ -13,6 +13,7 @@
 import { Link } from "@tanstack/react-router";
 import { useCmuxLaunch } from "../../hooks/useCmuxLaunch.js";
 import { ActorMark, isHumanActor } from "../graphics/RuntimeMark.js";
+import { parseSessionName } from "../../lib/session-name.js";
 
 interface AuthorAgentTagProps {
   authorSession: string;
@@ -22,12 +23,11 @@ interface AuthorAgentTagProps {
 }
 
 function parseSeat(authorSession: string): { logicalId: string; rigId: string | null } {
-  const at = authorSession.indexOf("@");
-  if (at === -1) return { logicalId: authorSession, rigId: null };
-  return {
-    logicalId: authorSession.slice(0, at),
-    rigId: authorSession.slice(at + 1),
-  };
+  // OPR.0.4.6.MH1 FR-8: the shared parse contract; non-canonical names
+  // render whole as the logical id (no rig link target).
+  const parsed = parseSessionName(authorSession);
+  if (parsed.kind !== "canonical") return { logicalId: authorSession, rigId: null };
+  return { logicalId: parsed.member, rigId: parsed.rig };
 }
 
 export function AuthorAgentTag({ authorSession, rigId, className, testId }: AuthorAgentTagProps) {

@@ -14,6 +14,9 @@ import {
 
 export interface RiggedConfig {
   daemon: { port: number; host: string };
+  // OPR.0.4.6.MH1 FR-1 — the persisted host-selection pointer.
+  // OPR.0.4.6.MH1 FR-4 — the own-host display name (default "localhost").
+  host: { selected: string; name: string };
   db: { path: string };
   transcripts: {
     enabled: boolean;
@@ -123,6 +126,22 @@ export interface RiggedConfig {
       retentionKeep: number;
     };
   };
+  // OPR.0.4.6.02 S1 — inner-tmux status-bar default at session launch.
+  // Static boolean (default off), lockstep with the daemon settings-store
+  // twin. Consumed by the daemon NodeLauncher; the CLI carries it for the
+  // `rig config get/set terminal.status_bar` surface + twin parity.
+  terminal: {
+    statusBar: boolean;
+  };
+  // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs (twin of the daemon
+  // settings-store): enabled + the four bounded numeric tunables.
+  retention: {
+    enabled: boolean;
+    transitionsDays: number;
+    watchdogDays: number;
+    watchdogKeepPerJob: number;
+    batchSize: number;
+  };
 }
 
 const DEFAULT_WORKSPACE_ROOT = getDefaultOpenRigPath("workspace");
@@ -144,6 +163,9 @@ const DEFAULT_CLAUDE_COMPACTION_EXTRA_INSTRUCTION_FILE_PATH = getDefaultOpenRigP
 
 const DEFAULTS = {
   daemon: { port: 7433, host: "127.0.0.1" },
+  // OPR.0.4.6.MH1 FR-1 — "local" ≡ no remote selection (LOCAL_HOST_ID).
+  // FR-4 — own-host display name; default "localhost" (PRD-named).
+  host: { selected: "local", name: "localhost" },
   db: { path: getDefaultOpenRigPath("openrig.sqlite") },
   transcripts: { enabled: true, path: getDefaultOpenRigPath("transcripts"), lines: 1000, pollIntervalSeconds: 2 },
   workspace: {
@@ -217,11 +239,41 @@ const DEFAULTS = {
       retentionKeep: 10,
     },
   },
+  // OPR.0.4.6.02 S1 — inner-tmux status bar OFF at launch by default.
+  terminal: {
+    statusBar: false,
+  },
+  // OPR.0.4.6.FS-1 W2 — retention defaults (twin of daemon getDefaultValue).
+  retention: {
+    enabled: true,
+    transitionsDays: 30,
+    watchdogDays: 14,
+    watchdogKeepPerJob: 50,
+    batchSize: 500,
+  },
 } as const;
 
 export const VALID_KEYS = [
   "daemon.port",
   "daemon.host",
+  // OPR.0.4.6.MH1 FR-1 — the persisted host-selection pointer (the
+  // kubectl current-context shape). ONE static key, lockstep with the
+  // daemon settings-store twin (parity test pins both). Registry-
+  // membership validation of the VALUE happens at the `rig host select`
+  // verb layer (the store stays value-agnostic); the daemon config
+  // write is the one write path — the CLI verb is a thin client.
+  // Default "local" (unset ≡ the local host — the FR-2 zero-regression
+  // posture by construction).
+  "host.selected",
+  // OPR.0.4.6.MH1 FR-4 — the own-host display name (arch Ruling 1: home =
+  // the settings twins, never hosts.yaml). One stored name, every surface
+  // reads it (dashboard/explorer/ls/whoami). Write path = the daemon
+  // config write via `rig host rename` (thin client, same as select).
+  "host.name",
+  // OPR.0.4.6.WF5 FR-2 — the host-level maturity-dial default (lockstep
+  // with the daemon settings twin). "orchestrator" | "human_only";
+  // unset ≡ orchestrator-first.
+  "workflow.exception_routing",
   "db.path",
   "transcripts.enabled",
   "transcripts.path",
@@ -270,6 +322,17 @@ export const VALID_KEYS = [
   "snapshots.periodic.enabled",
   "snapshots.periodic.interval_seconds",
   "snapshots.periodic.retention_keep",
+  // OPR.0.4.6.02 S1 — inner-tmux status-bar launch default. ONE static
+  // boolean (default off), lockstep with the daemon settings-store twin
+  // (the parity test pins both). Flip is future-launches-only (BR-1).
+  "terminal.status_bar",
+  // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs; CLI-settable twin,
+  // lockstep with the daemon settings-store SETTINGS_VALID_KEYS.
+  "retention.enabled",
+  "retention.transitions_days",
+  "retention.watchdog_days",
+  "retention.watchdog_keep_per_job",
+  "retention.batch_size",
 ] as const;
 
 export type ValidKey = typeof VALID_KEYS[number];
@@ -278,6 +341,11 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   // Only the original runtime keys keep RIGGED_* aliases for upgrade
   // compatibility. New typed keys use OPENRIG_* only.
   "daemon.port": { primary: "OPENRIG_PORT", legacy: "RIGGED_PORT" },
+  // OPR.0.4.6.MH1 FR-1/FR-4 — new keys, OPENRIG_* only (no RIGGED_* legacy).
+  "host.selected": { primary: "OPENRIG_HOST_SELECTED" },
+  "host.name": { primary: "OPENRIG_HOST_NAME" },
+  // OPR.0.4.6.WF5 FR-2 — new key, OPENRIG_* only.
+  "workflow.exception_routing": { primary: "OPENRIG_WORKFLOW_EXCEPTION_ROUTING" },
   "daemon.host": { primary: "OPENRIG_HOST", legacy: "RIGGED_HOST" },
   "db.path": { primary: "OPENRIG_DB", legacy: "RIGGED_DB" },
   "transcripts.enabled": { primary: "OPENRIG_TRANSCRIPTS_ENABLED", legacy: "RIGGED_TRANSCRIPTS_ENABLED" },
@@ -323,6 +391,14 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "snapshots.periodic.enabled": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_ENABLED" },
   "snapshots.periodic.interval_seconds": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_INTERVAL_SECONDS" },
   "snapshots.periodic.retention_keep": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_RETENTION_KEEP" },
+  // OPR.0.4.6.02 S1 — net-new key; OPENRIG_* primary only (no RIGGED_* legacy).
+  "terminal.status_bar": { primary: "OPENRIG_TERMINAL_STATUS_BAR" },
+  // OPR.0.4.6.FS-1 W2 — retention knobs; net-new keys, OPENRIG_* primary only.
+  "retention.enabled": { primary: "OPENRIG_RETENTION_ENABLED" },
+  "retention.transitions_days": { primary: "OPENRIG_RETENTION_TRANSITIONS_DAYS" },
+  "retention.watchdog_days": { primary: "OPENRIG_RETENTION_WATCHDOG_DAYS" },
+  "retention.watchdog_keep_per_job": { primary: "OPENRIG_RETENTION_WATCHDOG_KEEP_PER_JOB" },
+  "retention.batch_size": { primary: "OPENRIG_RETENTION_BATCH_SIZE" },
 };
 
 // Maps dotted-string config keys to the camelCase RiggedConfig path.
@@ -331,6 +407,9 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
 // to match TS conventions.
 const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "daemon.port": ["daemon", "port"],
+  "host.selected": ["host", "selected"],
+  "host.name": ["host", "name"],
+  "workflow.exception_routing": ["workflow", "exceptionRouting"],
   "daemon.host": ["daemon", "host"],
   "db.path": ["db", "path"],
   "transcripts.enabled": ["transcripts", "enabled"],
@@ -369,6 +448,12 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "snapshots.periodic.enabled": ["snapshots", "periodic", "enabled"],
   "snapshots.periodic.interval_seconds": ["snapshots", "periodic", "intervalSeconds"],
   "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
+  "terminal.status_bar": ["terminal", "statusBar"],
+  "retention.enabled": ["retention", "enabled"],
+  "retention.transitions_days": ["retention", "transitionsDays"],
+  "retention.watchdog_days": ["retention", "watchdogDays"],
+  "retention.watchdog_keep_per_job": ["retention", "watchdogKeepPerJob"],
+  "retention.batch_size": ["retention", "batchSize"],
 };
 
 function isValidKey(key: string): key is ValidKey {
@@ -551,6 +636,29 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
       );
     }
   },
+  // OPR.0.4.6.FS-1 W2 — retention numeric bounds. Lockstep with the daemon
+  // settings-store KEY_CONSTRAINTS twin (same messages/bounds). retention.enabled
+  // is a boolean (coerceValue enforces true/false) — no constraint entry.
+  "retention.transitions_days": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(`Invalid value for retention.transitions_days: must be an integer >= 1, got "${raw}"`);
+    }
+  },
+  "retention.watchdog_days": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(`Invalid value for retention.watchdog_days: must be an integer >= 1, got "${raw}"`);
+    }
+  },
+  "retention.watchdog_keep_per_job": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 0) {
+      throw new Error(`Invalid value for retention.watchdog_keep_per_job: must be an integer >= 0, got "${raw}"`);
+    }
+  },
+  "retention.batch_size": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(`Invalid value for retention.batch_size: must be an integer >= 1, got "${raw}"`);
+    }
+  },
 };
 
 function validateKeyConstraints(key: ValidKey, raw: string, coerced: string | number | boolean): void {
@@ -611,6 +719,10 @@ export class ConfigStore {
       daemon: {
         port: v("daemon.port") as number,
         host: v("daemon.host") as string,
+      },
+      host: {
+        selected: v("host.selected") as string,
+        name: v("host.name") as string,
       },
       db: {
         path: v("db.path") as string,
@@ -682,6 +794,16 @@ export class ConfigStore {
           intervalSeconds: v("snapshots.periodic.interval_seconds") as number,
           retentionKeep: v("snapshots.periodic.retention_keep") as number,
         },
+      },
+      terminal: {
+        statusBar: v("terminal.status_bar") as boolean,
+      },
+      retention: {
+        enabled: v("retention.enabled") as boolean,
+        transitionsDays: v("retention.transitions_days") as number,
+        watchdogDays: v("retention.watchdog_days") as number,
+        watchdogKeepPerJob: v("retention.watchdog_keep_per_job") as number,
+        batchSize: v("retention.batch_size") as number,
       },
     };
   }

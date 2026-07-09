@@ -1,15 +1,11 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import {
-  ReactFlow,
-  type Node,
-  type Edge,
-  Background,
-  Controls,
-} from "@xyflow/react";
-import "@xyflow/react/dist/style.css";
 import { Button } from "@/components/ui/button";
 import { WorkspacePage } from "./WorkspacePage.js";
+// OPR.0.4.6.WF4 (C3b) — the workflow shape renderer now lives in its own module
+// (extracted from this file); this page imports it. SliceWorkflowGraph untouched.
+import { WorkflowTopologyGraph } from "./workflow/WorkflowTopologyGraph.js";
+import { WorkflowInstancesBand } from "./workflow/WorkflowInstancesBand.js";
 // V1 attempt-3 Phase 5 P5-1: file references in context-pack + agent-image
 // "Files" / "Supplementary files" lists become FileReferenceTrigger-wrapped
 // rows so click → FileViewer in drawer. Per content-drawer.md L23-L34
@@ -268,127 +264,6 @@ function LibrarySpecReview({ entryId }: LibraryReviewProps) {
 
 // --- Workflows in Spec Library v0: workflow review variant ---
 
-const WF_NODE_WIDTH = 180;
-const WF_NODE_HEIGHT = 56;
-const WF_H_SPACING = 220;
-const WF_V_SPACING = 110;
-
-function WorkflowTopologyGraph({
-  topology,
-  testId,
-}: {
-  topology: LibraryWorkflowReview["topology"];
-  testId?: string;
-}) {
-  const { nodes, edges } = useMemo(() => {
-    // Simple BFS-based depth assignment from entry nodes.
-    const adj = new Map<string, string[]>();
-    for (const e of topology.edges) {
-      if (!adj.has(e.fromStepId)) adj.set(e.fromStepId, []);
-      adj.get(e.fromStepId)!.push(e.toStepId);
-    }
-    const depth = new Map<string, number>();
-    const queue: Array<{ id: string; d: number }> = [];
-    for (const n of topology.nodes) {
-      if (n.isEntry) {
-        depth.set(n.stepId, 0);
-        queue.push({ id: n.stepId, d: 0 });
-      }
-    }
-    while (queue.length > 0) {
-      const { id, d } = queue.shift()!;
-      const next = adj.get(id) ?? [];
-      for (const child of next) {
-        // Only assign depth on first visit. The `< d+1` relaxation
-        // condition the prior version used loops forever on cyclic
-        // specs (e.g. a review step routing back to intake). Standard
-        // BFS visit-once handles cycles correctly + still produces a
-        // shortest-path-from-entry depth assignment.
-        if (!depth.has(child)) {
-          depth.set(child, d + 1);
-          queue.push({ id: child, d: d + 1 });
-        }
-      }
-    }
-    // Fallback for orphan nodes.
-    let fallbackDepth = 0;
-    for (const n of topology.nodes) {
-      if (!depth.has(n.stepId)) {
-        depth.set(n.stepId, fallbackDepth++);
-      }
-    }
-    // Group by depth → assign x by index within depth.
-    const byDepth = new Map<number, string[]>();
-    for (const n of topology.nodes) {
-      const d = depth.get(n.stepId) ?? 0;
-      if (!byDepth.has(d)) byDepth.set(d, []);
-      byDepth.get(d)!.push(n.stepId);
-    }
-    const positions = new Map<string, { x: number; y: number }>();
-    for (const [d, ids] of byDepth) {
-      ids.forEach((id, idx) => {
-        positions.set(id, { x: idx * WF_H_SPACING, y: d * WF_V_SPACING });
-      });
-    }
-
-    const rfNodes: Node[] = topology.nodes.map((n) => {
-      const pos = positions.get(n.stepId) ?? { x: 0, y: 0 };
-      const accent = n.isEntry ? "#a8c8d4" : n.isTerminal ? "#d4b8a8" : "#d4c4a8";
-      return {
-        id: n.stepId,
-        type: "default",
-        position: pos,
-        data: {
-          label: (
-            <div className="font-mono text-[10px] leading-tight">
-              <div className="flex items-center justify-between gap-2 font-bold">
-                <span>{n.stepId}</span>
-                {n.isTerminal ? <ToolMark tool="terminal" size="xs" title="Terminal step" decorative /> : null}
-              </div>
-              <div className="text-on-surface-variant">{n.role}</div>
-              {n.preferredTarget && <div className="text-[8px] text-on-surface-variant">→ {n.preferredTarget}</div>}
-            </div>
-          ),
-        },
-        style: {
-          backgroundColor: accent,
-          border: "1px solid #8a8577",
-          fontSize: 11,
-          fontFamily: "monospace",
-          width: WF_NODE_WIDTH,
-          height: WF_NODE_HEIGHT,
-          padding: 6,
-        },
-      };
-    });
-
-    const rfEdges: Edge[] = topology.edges.map((e, i) => ({
-      id: `e-${i}`,
-      source: e.fromStepId,
-      target: e.toStepId,
-      style: { stroke: "#8a8577" },
-    }));
-
-    return { nodes: rfNodes, edges: rfEdges };
-  }, [topology]);
-
-  return (
-    <div data-testid={testId ?? "workflow-topology-graph"} className="w-full h-[400px] bg-background border border-outline-variant">
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        fitView
-        nodesDraggable={false}
-        nodesConnectable={false}
-        elementsSelectable={false}
-        proOptions={{ hideAttribution: true }}
-      >
-        <Background gap={20} size={0.5} color="#d4d0c8" />
-        <Controls showInteractive={false} />
-      </ReactFlow>
-    </div>
-  );
-}
 
 function LibraryWorkflowReviewPage({ review }: { review: LibraryWorkflowReview }) {
   const navigate = useNavigate();
@@ -480,6 +355,11 @@ function LibraryWorkflowReviewPage({ review }: { review: LibraryWorkflowReview }
         </div>
 
         <WorkflowTopologyGraph topology={review.topology} />
+
+        {/* OPR.0.4.6.WF4 (C4) — the A-lite "runs of THIS spec" instances band.
+            quietWhenEmpty: renders NOTHING at zero instances, so a spec with no
+            live runs is byte-identical to the shipped Library page (zero-regression). */}
+        <WorkflowInstancesBand workflowName={review.name} workflowVersion={review.version} testId="library-instances-band" />
 
         <div className="space-y-2">
           <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-on-surface-variant">Steps</div>

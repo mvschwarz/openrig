@@ -77,6 +77,17 @@ export type HostResolution =
   | { ok: true; host: HostEntry }
   | { ok: false; error: string };
 
+// OPR.0.4.6.MH1 FR-7 — reserved host ids (the cheap collision guard,
+// arch rail 4): `kernel` and `host` are lexically claimed by the
+// human-seat regex family (`@(kernel|host)$` — a host id reusing them
+// would make host-qualified surfaces ambiguous with human-seat
+// classification), and `local` is the shipped LOCAL_HOST_ID constant
+// (a registered remote named "local" would shadow the local host in
+// every selection/fan-out surface). Rejected at add/pair AND surfaced
+// as a load-time finding on pre-existing files (fail loud, never
+// silent). Mirrored verbatim in the daemon reader twin (parity test).
+export const RESERVED_HOST_IDS = new Set(["kernel", "host", "local"]);
+
 const KNOWN_TRANSPORTS = new Set(["ssh", "http"]);
 
 export function defaultHostRegistryPath(): string {
@@ -143,6 +154,21 @@ export function validateHostRegistry(parsed: unknown, sourcePath: string): HostR
     }
     if (seenIds.has(id)) {
       return { ok: false, error: `${prefix}.id: duplicate host id '${id}' (each host id must be unique within the registry)` };
+    }
+    if (RESERVED_HOST_IDS.has(id)) {
+      return {
+        ok: false,
+        error: `${prefix}.id: '${id}' is a reserved host id (reserved set: ${[...RESERVED_HOST_IDS].sort().join(", ")}). 'kernel' and 'host' collide with human-seat session classification (@kernel/@host), and 'local' is the local host itself — pick a different id.`,
+      };
+    }
+    // OPR.0.4.6.MH1 rev1-r2 B1 — host ids name FILES (the pair verb's
+    // bearer_file path embeds the id) and render in tables: path-bearing
+    // ids are rejected at the registry door, same home as reserved ids.
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) {
+      return {
+        ok: false,
+        error: `${prefix}.id: '${id}' is not a valid host id — allowed: letters, digits, dot, underscore, dash (starting with a letter or digit). Host ids name credential files; path characters are not allowed.`,
+      };
     }
     seenIds.add(id);
     const transport = entry["transport"];
@@ -243,6 +269,13 @@ export type AddHostResult =
   | { ok: true; path: string; entry: HostEntry }
   | { ok: false; error: string };
 
+/** OPR.0.4.6.MH1 (arch P3/P4): the CLI half of the ONE registry write
+ *  contract — the daemon twin (packages/daemon/src/domain/hosts/
+ *  hosts-registry-writer.ts) mirrors this verbatim, byte-parity-pinned by
+ *  test. Concurrency ceiling (P4): atomic tmp+rename, whole-file
+ *  LAST-WRITE-WINS on a concurrent add — one operator-scale registry
+ *  file, NO locking machinery by design; a dropped concurrent entry
+ *  re-converges by re-running the add. */
 export function addHostEntry(rawEntry: Record<string, unknown>, path: string = defaultHostRegistryPath()): AddHostResult {
   // Load what exists; a MISSING file is a valid starting point for `add`
   // (the verb exists so operators never hand-create the YAML), but a present-

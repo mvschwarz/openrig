@@ -1,11 +1,14 @@
 import { Command } from "commander";
+import { resolveEffectiveHost } from "../host-selection.js";
 import { DaemonClient, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
-import { loadHostRegistry, resolveHost, hostDisplayTarget } from "../host-registry.js";
+import { loadHostRegistry, resolveHost, hostDisplayTarget, type HttpHostEntry } from "../host-registry.js";
 import { runCrossHostCommand, type RunCrossHostCommandOpts } from "../cross-host-executor.js";
-import { emitCrossHostError, emitCrossHostFailure } from "../cross-host-cli-helpers.js";
+import { emitCrossHostError, emitCrossHostFailure, emitRemoteHttpFailure } from "../cross-host-cli-helpers.js";
+import { resolveCrossHostTarget } from "../cross-host-target.js";
+import { runRemoteHttpOp } from "../remote-host-ops.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 
 const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
@@ -88,7 +91,7 @@ export function sendCommand(depsOverride?: SendDeps): Command {
     .option("--raw", "Send exact text/keystrokes without the From/To messaging envelope (still guarded against interactive prompts)")
     .option("--dangerously-interact", "DANGEROUS: deliberately drive an interactive prompt/permission block (implies --raw; requires --reason). The ONLY override of the prompt/permission guard.")
     .option("--reason <text>", "Why the prompt is being driven (required with --dangerously-interact; recorded in the audit log)")
-    .option("--host <id>", "Run on a remote host declared in ~/.openrig/hosts.yaml (CLI-side ssh shell-out)")
+    .option("--host <id>", "Send on a remote host declared in ~/.openrig/hosts.yaml (ssh hosts shell out; http hosts go CLI-direct to the remote daemon)")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
@@ -101,6 +104,7 @@ Examples:
   rig send dev-impl@my-rig "Stop and read the spec." --force
   rig send dev-impl@my-rig "message" --json
   rig send --host vm-claude-test dev-impl@my-rig "remote message" --verify
+  rig send dev-impl@my-rig@vps-b "host-qualified target sugar (suffix must be a registered host id)"
 
 Targeting: a bare seat (single send), OR one of --to / --pod / --rig (fan-out).
 Fan-out reports per-recipient results + an "N/M delivered" summary; one recipient's
@@ -124,10 +128,23 @@ without the From/To envelope (e.g. a slash command); it is still guarded. Use
 option, approve a permission, send /compact to a blocked pane) — the only override
 of the prompt guard; it implies --raw and is audit-logged.
 
---host runs the same command on a remote host declared in ~/.openrig/hosts.yaml
-via single-hop ssh. SSH success is NOT verify success: the remote rig's
-'Verified: yes/no' line is what counts and is surfaced verbatim.`)
+--host sends on a remote host declared in ~/.openrig/hosts.yaml. The host
+entry's transport decides the path: ssh hosts run the same command via
+single-hop ssh (SSH success is NOT verify success: the remote rig's
+'Verified: yes/no' line is what counts and is surfaced verbatim); http hosts
+(e.g. pair-registered) go CLI-direct to the remote daemon's send route — the
+result and verify verdict are the REMOTE's, verbatim. A target of the form
+agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
+(explicit --host > target sugar > persisted selection; a conflict between
+--host and the sugar is an error).`)
     .action(async (session: string | undefined, text: string | undefined, opts: { to?: string[]; pod?: string; rig?: string; verify?: boolean; force?: boolean; waitForIdle?: string; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; host?: string; json?: boolean }) => {
+      // OPR.0.4.6.MH1 FR-2: selected-host routing — explicit --host wins;
+      // else the persisted selection feeds the SHIPPED --host path; no
+      // selection = today exactly. OPR.0.4.6.MH4 §4: the raw flag is kept
+      // so the single-seat target sugar can slot BETWEEN explicit and
+      // selection (explicit > sugar > selection).
+      const explicitHost = opts.host;
+      opts.host = resolveEffectiveHost(opts.host);
       const waitForIdleMs = parseWaitForIdleMs(opts.waitForIdle);
       if (opts.force && waitForIdleMs !== undefined) {
         console.error("--wait-for-idle cannot be combined with --force");
@@ -199,9 +216,24 @@ via single-hop ssh. SSH success is NOT verify success: the remote rig's
         return;
       }
 
-      // --- Cross-host short-circuit (CLI-side ssh shell-out; daemon untouched) ---
+      // OPR.0.4.6.MH4 §4 — the `agent@rig@host` target sugar (single-seat
+      // only; the fan-out positional is message text). Suffix must match a
+      // REGISTERED host id, else the target passes through unchanged and
+      // the hint rides any later failure. Precedence: explicit --host >
+      // sugar > persisted selection (already folded into opts.host above).
+      const targetResolution = resolveCrossHostTarget(session, explicitHost, deps.hostRegistryLoader);
+      if (!targetResolution.ok) {
+        console.error(targetResolution.error);
+        process.exitCode = 1;
+        return;
+      }
+      session = targetResolution.target;
+      const crossHostHint = targetResolution.hint;
+      opts.host = explicitHost ?? targetResolution.sugarHost ?? opts.host;
+
+      // --- Cross-host short-circuit (CLI-side; ssh shell-out or the MH-4 http branch; daemon untouched) ---
       if (opts.host) {
-        await runCrossHostSend(opts.host, session, text, opts, deps);
+        await runCrossHostSend(opts.host, session, text, opts, deps, waitForIdleMs, crossHostHint);
         return;
       }
 
@@ -232,6 +264,9 @@ via single-hop ssh. SSH success is NOT verify success: the remote rig's
       if (res.status >= 400) {
         const error = res.data["error"] as string | undefined;
         console.error(error ?? `Send failed (HTTP ${res.status})`);
+        // MH-4 §4 loud-failure hint: the target was 3-part-shaped but its
+        // suffix matched no registered host — name the near-miss.
+        if (crossHostHint) console.error(`hint: ${crossHostHint}`);
         process.exitCode = res.status >= 500 ? 2 : 1;
         return;
       }
@@ -268,6 +303,8 @@ async function runCrossHostSend(
   text: string,
   opts: { verify?: boolean; force?: boolean; waitForIdle?: string; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; json?: boolean },
   deps: SendDeps,
+  waitForIdleMs?: number,
+  hint?: string,
 ): Promise<void> {
   const loader = deps.hostRegistryLoader ?? loadHostRegistry;
   const runner = deps.crossHostRun ?? runCrossHostCommand;
@@ -279,10 +316,20 @@ async function runCrossHostSend(
   }
   const resolved = resolveHost(registry.registry, hostId);
   if (!resolved.ok) {
-    emitCrossHostError(hostId, "unknown-host", resolved.error, opts.json);
+    emitCrossHostError(hostId, "unknown-host", hint ? `${resolved.error} (${hint})` : resolved.error, opts.json);
     return;
   }
   const host = resolved.host;
+
+  // OPR.0.4.6.MH4 — the http transport branch: an http-registered host (the
+  // founder's `pair` front door) takes the CLI-direct path to the remote
+  // daemon's shipped /api/transport/send. The ssh path below stays
+  // byte-verbatim for ssh hosts (transport is dictated by the host entry —
+  // ssh XOR http, never a fallback).
+  if (host.transport === "http") {
+    await runHttpHostSend(host, session, text, opts, deps, waitForIdleMs, hint);
+    return;
+  }
 
   // Reconstruct argv for the remote `rig send` invocation. Order is positional
   // first so the remote Commander parses it the same way local does.
@@ -313,6 +360,78 @@ async function runCrossHostSend(
     return;
   }
   emitCrossHostFailure(host.id, hostDisplayTarget(host), result, opts.json);
+}
+
+/**
+ * OPR.0.4.6.MH4 C1 — cross-host send over http, CLI-DIRECT to the remote
+ * daemon's shipped POST /api/transport/send (zero daemon-side changes).
+ * Wrap parity BY CONSTRUCTION: the body is built exactly as the LOCAL path
+ * builds it (same wrapSendBody call, same fields), so the remote daemon
+ * receives what its own local CLI would post. `actorSession` is the local
+ * sender verbatim — honest provenance; unknown on the remote it degrades to
+ * the shipped non-blocking advisory, never a refusal. `--verify` prints the
+ * REMOTE route's verified/outcome verbatim (remote-authoritative, never
+ * locally synthesized). Deadline: the read-class client default, or
+ * waitForIdleMs + overhead when --wait-for-idle (the local path's math).
+ *
+ * Auth posture (named, v0): runRemoteHttpOp presents the REGISTRY bearer;
+ * /api/transport/* is gated by the remote's TERMINAL bearer class. Default
+ * (null) + tailnet binds = pass-through by design; a remote enforcing a
+ * DIFFERENT terminal bearer surfaces as the structured permission-gate step
+ * (never a hang, never silent). Remedy documented in cli-reference.md.
+ */
+async function runHttpHostSend(
+  host: HttpHostEntry,
+  session: string,
+  text: string,
+  opts: { verify?: boolean; force?: boolean; waitForIdle?: string; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; json?: boolean },
+  deps: SendDeps,
+  waitForIdleMs?: number,
+  hint?: string,
+): Promise<void> {
+  const senderSession = resolveSenderSession();
+  const raw = Boolean(opts.raw || opts.dangerouslyInteract);
+  const outboundText = raw ? text : wrapSendBody(senderSession, session, text);
+
+  const result = await runRemoteHttpOp(host.id, "POST", "/api/transport/send", {
+    session, text: outboundText, verify: opts.verify, force: opts.force, waitForIdleMs,
+    dangerouslyInteract: opts.dangerouslyInteract, reason: opts.reason, actorSession: senderSession ?? null,
+  }, deps, waitForIdleMs !== undefined ? { timeoutMs: waitForIdleMs + WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS } : {});
+
+  if (opts.json) {
+    console.log(JSON.stringify({
+      cross_host: { host: host.id, target: hostDisplayTarget(host), transport: "http" },
+      result,
+      ...(!result.ok && hint ? { hint } : {}),
+    }));
+    if (!result.ok) process.exitCode = 1;
+    return;
+  }
+
+  if (!result.ok) {
+    emitRemoteHttpFailure(host.id, hostDisplayTarget(host), result, false, hint);
+    return;
+  }
+
+  console.log(`[via host=${host.id} (${hostDisplayTarget(host)})]`);
+  const data = (result.data ?? {}) as Record<string, unknown>;
+  console.log(`Sent to ${session}`);
+  const advisory = data["warning"] as string | undefined;
+  if (advisory) {
+    console.log(`Advisory: ${advisory}`);
+  }
+  if (opts.verify) {
+    // The REMOTE route's verdict, verbatim — mirrors the local render so
+    // scripts grepping `Verified:` behave identically across hosts.
+    const verified = data["verified"] as boolean | undefined;
+    console.log(`Verified: ${verified ? "yes" : "no"}`);
+    const outcome = data["outcome"] as string | undefined;
+    if (outcome === "delivered") {
+      console.log("Delivery: delivered (message landed; render confirmed)");
+    } else if (outcome === "rendered-unconfirmed") {
+      console.log(`Delivery: rendered-unconfirmed (landed; pane re-render not confirmed - confirm with: rig capture ${session})`);
+    }
+  }
 }
 
 // OPR.0.4.3.30 — fan-out send (`--to` / `--pod` / `--rig`). Reuses the DAEMON's broadcast

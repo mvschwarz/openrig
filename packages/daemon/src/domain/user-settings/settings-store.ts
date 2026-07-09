@@ -32,6 +32,19 @@ const DEFAULT_WORKSPACE_ROOT = path.join(
 export const SETTINGS_VALID_KEYS = [
   "daemon.port",
   "daemon.host",
+  // OPR.0.4.6.MH1 FR-1 — the persisted host-selection pointer, ONE
+  // static key, lockstep with cli/src/config-store.ts VALID_KEYS (the
+  // twins parity test pins both). Default "local" (unset ≡ local host).
+  // Value registry-validation lives at the `rig host select` verb.
+  "host.selected",
+  // OPR.0.4.6.MH1 FR-4 — the own-host display name (arch Ruling 1: home =
+  // the settings twins, never hosts.yaml). Default "localhost".
+  "host.name",
+  // OPR.0.4.6.WF5 FR-2 — the host-level maturity-dial default (arch config
+  // ruling: the MH-1 dynamic-key pattern class). "orchestrator" |
+  // "human_only"; unset ≡ the orchestrator-first engine default. Consumed
+  // at exception-item creation only — dial flips are never retroactive.
+  "workflow.exception_routing",
   "db.path",
   "transcripts.enabled",
   "transcripts.path",
@@ -106,6 +119,23 @@ export const SETTINGS_VALID_KEYS = [
   "snapshots.periodic.enabled",
   "snapshots.periodic.interval_seconds",
   "snapshots.periodic.retention_keep",
+  // OPR.0.4.6.02 S1 — the inner-tmux status-bar default applied to a
+  // session at LAUNCH. ONE static boolean key (default off), lockstep
+  // with cli/src/config-store.ts VALID_KEYS (the parity test pins both
+  // twins). Consumed by NodeLauncher at session-create only; a flip is
+  // future-launches-only and never retroactive (BR-1 never-retro).
+  "terminal.status_bar",
+  // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs (arch D3; closed-set,
+  // arch-safe defaults BAKED in getDefaultValue, bounded validation in
+  // KEY_CONSTRAINTS). CLI-settable twin: lockstep with cli/src/config-store.ts
+  // VALID_KEYS (each side's exact-equality parity test pins its own list). A
+  // flip is read at the next daily maintenance tick — never retroactive to an
+  // in-flight sweep.
+  "retention.enabled",
+  "retention.transitions_days",
+  "retention.watchdog_days",
+  "retention.watchdog_keep_per_job",
+  "retention.batch_size",
 ] as const;
 
 export type SettingsValidKey = typeof SETTINGS_VALID_KEYS[number];
@@ -135,6 +165,10 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "recovery.auto_drive_provider_prompts": { primary: "OPENRIG_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS" },
   "recovery.provider_auth_env_allowlist": { primary: "OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST" },
   "agents.advisor_session": { primary: "OPENRIG_AGENTS_ADVISOR_SESSION" },
+  "host.selected": { primary: "OPENRIG_HOST_SELECTED" },
+  "host.name": { primary: "OPENRIG_HOST_NAME" },
+  // OPR.0.4.6.WF5 FR-2 — new key, OPENRIG_* only.
+  "workflow.exception_routing": { primary: "OPENRIG_WORKFLOW_EXCEPTION_ROUTING" },
   "agents.operator_session": { primary: "OPENRIG_AGENTS_OPERATOR_SESSION" },
   "workspace.operator_seat_name": { primary: "OPENRIG_WORKSPACE_OPERATOR_SEAT_NAME" },
   "feed.subscriptions.action_required": { primary: "OPENRIG_FEED_SUBSCRIPTIONS_ACTION_REQUIRED" },
@@ -158,6 +192,14 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "snapshots.periodic.enabled": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_ENABLED" },
   "snapshots.periodic.interval_seconds": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_INTERVAL_SECONDS" },
   "snapshots.periodic.retention_keep": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_RETENTION_KEEP" },
+  // OPR.0.4.6.02 S1 — net-new key; OPENRIG_* primary only (no RIGGED_* legacy).
+  "terminal.status_bar": { primary: "OPENRIG_TERMINAL_STATUS_BAR" },
+  // OPR.0.4.6.FS-1 W2 — retention knobs; net-new keys, OPENRIG_* primary only.
+  "retention.enabled": { primary: "OPENRIG_RETENTION_ENABLED" },
+  "retention.transitions_days": { primary: "OPENRIG_RETENTION_TRANSITIONS_DAYS" },
+  "retention.watchdog_days": { primary: "OPENRIG_RETENTION_WATCHDOG_DAYS" },
+  "retention.watchdog_keep_per_job": { primary: "OPENRIG_RETENTION_WATCHDOG_KEEP_PER_JOB" },
+  "retention.batch_size": { primary: "OPENRIG_RETENTION_BATCH_SIZE" },
 };
 
 const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
@@ -183,6 +225,9 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "recovery.auto_drive_provider_prompts": ["recovery", "autoDriveProviderPrompts"],
   "recovery.provider_auth_env_allowlist": ["recovery", "providerAuthEnvAllowlist"],
   "agents.advisor_session": ["agents", "advisorSession"],
+  "host.selected": ["host", "selected"],
+  "host.name": ["host", "name"],
+  "workflow.exception_routing": ["workflow", "exceptionRouting"],
   "agents.operator_session": ["agents", "operatorSession"],
   "workspace.operator_seat_name": ["workspace", "operatorSeatName"],
   "feed.subscriptions.action_required": ["feed", "subscriptions", "actionRequired"],
@@ -201,6 +246,12 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "snapshots.periodic.enabled": ["snapshots", "periodic", "enabled"],
   "snapshots.periodic.interval_seconds": ["snapshots", "periodic", "intervalSeconds"],
   "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
+  "terminal.status_bar": ["terminal", "statusBar"],
+  "retention.enabled": ["retention", "enabled"],
+  "retention.transitions_days": ["retention", "transitionsDays"],
+  "retention.watchdog_days": ["retention", "watchdogDays"],
+  "retention.watchdog_keep_per_job": ["retention", "watchdogKeepPerJob"],
+  "retention.batch_size": ["retention", "batchSize"],
 };
 
 export type SettingSource = "env" | "file" | "default";
@@ -375,6 +426,11 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // username at resolution time; operator override via `rig config
     // set` persists to ~/.openrig/config.json.
     case "workspace.operator_seat_name": return `operator-${os.userInfo().username}@kernel`;
+    // OPR.0.4.6.MH1 FR-1 — "local" ≡ no remote selection (LOCAL_HOST_ID);
+    // the FR-2 zero-regression posture by construction.
+    case "host.selected": return "local";
+    // OPR.0.4.6.MH1 FR-4 — the own-host display-name default (PRD-named).
+    case "host.name": return "localhost";
     case "workspace.root": return DEFAULT_WORKSPACE_ROOT;
     // Preview Terminal v0 (PL-018) defaults — match cli/src/config-store.ts.
     case "ui.preview.refresh_interval_seconds": return 3;
@@ -415,6 +471,18 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "snapshots.periodic.enabled": return true;
     case "snapshots.periodic.interval_seconds": return 300;
     case "snapshots.periodic.retention_keep": return 10;
+    // OPR.0.4.6.02 S1 — inner-tmux status bar OFF at launch by default
+    // (herdr's pane label already carries identity; the inner tmux status
+    // is redundant chrome). Operator flip is future-launches-only.
+    case "terminal.status_bar": return false;
+    // OPR.0.4.6.FS-1 W2 — retention defaults (arch D3 safe values: archive
+    // terminal+aged transitions >30d; prune watchdog_history >14d keep-50/job;
+    // 500 rows/qitems per bounded batch; enabled by default).
+    case "retention.enabled": return true;
+    case "retention.transitions_days": return 30;
+    case "retention.watchdog_days": return 14;
+    case "retention.watchdog_keep_per_job": return 50;
+    case "retention.batch_size": return 500;
     default: return "";
   }
 }
@@ -484,6 +552,30 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
       throw new Error(
         `Invalid value for snapshots.periodic.retention_keep: must be >= 1, got ${raw}`,
       );
+    }
+  },
+  // OPR.0.4.6.FS-1 W2 — retention numeric bounds (arch D3). Lockstep with the
+  // cli/src/config-store.ts KEY_CONSTRAINTS twin so the daemon HTTP write
+  // surface rejects exactly what the CLI rejects. `retention.enabled` is a
+  // boolean (coerceValue enforces true/false) — no constraint entry needed.
+  "retention.transitions_days": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(`Invalid value for retention.transitions_days: must be an integer >= 1, got "${raw}"`);
+    }
+  },
+  "retention.watchdog_days": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(`Invalid value for retention.watchdog_days: must be an integer >= 1, got "${raw}"`);
+    }
+  },
+  "retention.watchdog_keep_per_job": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 0) {
+      throw new Error(`Invalid value for retention.watchdog_keep_per_job: must be an integer >= 0, got "${raw}"`);
+    }
+  },
+  "retention.batch_size": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(`Invalid value for retention.batch_size: must be an integer >= 1, got "${raw}"`);
     }
   },
 };

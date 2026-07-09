@@ -19,6 +19,8 @@ import type { TopologyActivityVisual } from "../../lib/topology-activity.js";
 import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "../../lib/token-format.js";
 import { formatRuntimeModel } from "../../lib/runtime-brand.js";
 import { RuntimeBadge, ToolMark } from "../graphics/RuntimeMark.js";
+import { useSelectedHostId } from "../../hooks/useHosts.js";
+import { LOCAL_HOST_ID } from "../../lib/host-param.js";
 
 interface HybridPodGroupNodeData {
   podDisplayName?: string | null;
@@ -113,6 +115,10 @@ export const HybridPodGroupNode = memo(
 HybridPodGroupNode.displayName = "HybridPodGroupNode";
 
 function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
+  // OPR.0.4.6.MH2 rev1-r2 B1 — terminal preview + cmux-open are LOCAL
+  // affordances (local session reads / bare local POST); gated off when a
+  // remote host's data is on the canvas (FR-7 read-only remote views).
+  const nodeIsRemote = useSelectedHostId() !== LOCAL_HOST_ID;
   const cmuxLaunch = useCmuxLaunch();
   const core = isCoreRole(data.role);
   const isInfra = data.nodeKind === "infrastructure";
@@ -179,7 +185,7 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
           aria-label={`activity: ${activityLabel}${timeInState ? ` ${timeInState.label}` : ""}${activitySource !== "hook" && activitySource !== "none" ? " (activity-grade)" : ""}`}
         />
       </div>
-      {data.rigId ? (
+      {data.rigId && !nodeIsRemote ? (
         <TerminalPreviewPopover
           rigId={data.rigId}
           logicalId={data.logicalId}
@@ -191,7 +197,7 @@ function HybridAgentNodeInner({ data }: { data: HybridAgentNodeData }) {
           progressive
         />
       ) : null}
-      {data.rigId ? (
+      {data.rigId && !nodeIsRemote ? (
         <>
         <button
           type="button"

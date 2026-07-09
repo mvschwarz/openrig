@@ -21,6 +21,9 @@ import { FileWriteService, sha256Hex } from "../domain/files/file-write-service.
 import type { AllowlistRoot } from "../domain/files/path-safety.js";
 import { freezeSliceExport, resolveAllowlisted } from "../domain/review/freeze.js";
 import { applyBriefSpine } from "../domain/review/brief-spine.js";
+import { composeFleet } from "../domain/review/fleet-compose.js";
+import { defaultHostRegistryPath, loadHostRegistry } from "../domain/hosts/hosts-registry-reader.js";
+import type { HostRegistryLoadResult } from "../domain/hosts/hosts-registry-reader.js";
 
 function getGatherer(c: { get(key: string): unknown }): ReviewGatherer | null {
   return (c.get("reviewGatherer") as ReviewGatherer | undefined) ?? null;
@@ -64,6 +67,30 @@ export function reviewRoutes(): Hono {
     const gatherer = getGatherer(c);
     if (!gatherer) return c.json({ error: "review_composer_unavailable" }, 503);
     return c.json(gatherer.composeRig());
+  });
+
+  // OPR.0.4.6.MH5 — the FLEET aggregate root (arch Q2: a SIBLING aggregate
+  // beside this family, never a fourth AgentsScope value). Fans out each
+  // registered host's OWN composed rig root and unions + host-dimensions +
+  // counts (arch Q1 — exception truth is never recomputed here); the LOCAL
+  // host joins in-process via the same gatherer this family uses (D-1).
+  // Read + surface only (FR-5); bearers stay server-side (the fan-out is
+  // daemon-side like the shipped feed aggregate). Registry access rides the
+  // same DI style as /api/queue/attention-aggregate — tests inject a
+  // loader/probe; production falls back to the shared S11 reader.
+  app.get("/fleet", async (c) => {
+    const gatherer = getGatherer(c);
+    if (!gatherer) return c.json({ error: "review_composer_unavailable" }, 503);
+    const registryLoader = (c.get("hostRegistryLoader" as never) as (() => HostRegistryLoadResult) | undefined) ?? loadHostRegistry;
+    const registryProbe = (c.get("hostRegistryExists" as never) as (() => boolean) | undefined) ?? (() => fs.existsSync(defaultHostRegistryPath()));
+    const fleet = await composeFleet({
+      composeLocalRig: () => gatherer.composeRig(),
+      loadRegistry: registryLoader,
+      registryExists: registryProbe,
+      // The view-time fact enters at the edge — the composer stays clock-free.
+      nowIso: new Date().toISOString(),
+    });
+    return c.json(fleet);
   });
 
   app.get("/slice/:name", (c) => {

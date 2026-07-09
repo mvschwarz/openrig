@@ -132,7 +132,10 @@ describe("useScopeMarkdown — production wire honors arbitrary filename", () =>
     expect(result.current.content).toContain("## Done");
   });
 
-  it("returns unavailable=true when scopePath is null (no scope selected)", async () => {
+  it("returns unavailable=true when scopePath is null (no scope selected) — and issues ZERO file requests", async () => {
+    // OPR.0.4.6.MH2 guard-B1 — a null scope path must not even fetch
+    // /api/files/roots (remote-selected surfaces pass null; /api/files/*
+    // is local-only and excluded from the read-through).
     fetchSpy.mockImplementation(async () => new Response(JSON.stringify({ roots: [] }), { status: 200 }));
     const { result } = renderHook(
       () => useScopeMarkdown(null, "README.md"),
@@ -142,6 +145,7 @@ describe("useScopeMarkdown — production wire honors arbitrary filename", () =>
     expect(result.current.unavailable).toBe(true);
     expect(result.current.content).toBeNull();
     expect(result.current.resolved).toBeNull();
+    expect(fetchSpy.mock.calls.filter(([u]) => String(u).startsWith("/api/files/"))).toEqual([]);
   });
 
   it("returns unavailable=true when file is missing on disk (404 from /api/files/read)", async () => {

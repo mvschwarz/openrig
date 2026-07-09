@@ -34,6 +34,7 @@ import { streamCommand, type StreamDeps } from "./commands/stream.js";
 import { queueCommand, type QueueDeps } from "./commands/queue.js";
 import { projectCommand, type ProjectDeps } from "./commands/project.js";
 import { viewCommand, type ViewDeps } from "./commands/view.js";
+import { terminalCommand, type TerminalDeps } from "./commands/terminal.js";
 import { watchdogCommand, type WatchdogDeps } from "./commands/watchdog.js";
 import { workflowCommand, type WorkflowDeps } from "./commands/workflow.js";
 import { startCommand, type StartDeps } from "./commands/start.js";
@@ -107,6 +108,7 @@ export interface ProgramDeps {
   queueDeps?: QueueDeps;
   projectDeps?: ProjectDeps;
   viewDeps?: ViewDeps;
+  terminalDeps?: TerminalDeps;
   watchdogDeps?: WatchdogDeps;
   workflowDeps?: WorkflowDeps;
   captureDeps?: StatusDeps;
@@ -182,6 +184,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(queueCommand(depsOverride?.queueDeps));
   program.addCommand(projectCommand(depsOverride?.projectDeps));
   program.addCommand(viewCommand(depsOverride?.viewDeps));
+  program.addCommand(terminalCommand(depsOverride?.terminalDeps));
   program.addCommand(watchdogCommand(depsOverride?.watchdogDeps));
   program.addCommand(workflowCommand(depsOverride?.workflowDeps));
   program.addCommand(captureCommand(depsOverride?.captureDeps));

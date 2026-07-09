@@ -12,6 +12,7 @@ import {
 } from "../../hooks/useSteering.js";
 import { useMission } from "../../hooks/useMission.js";
 import { useScopeMarkdown } from "../../hooks/useScopeMarkdown.js";
+import { useHostSelection, useLocalFilesAllowed } from "../../hooks/useHosts.js";
 import { MarkdownViewer } from "../markdown/MarkdownViewer.js";
 import { SectionHeader } from "../ui/section-header.js";
 import { EmptyState } from "../ui/empty-state.js";
@@ -152,12 +153,30 @@ function BriefSectionBlock({ header, body }: { header: string; body: string | un
 
 function BriefPanel({ missionId }: { missionId: string | null }) {
   const mission = useMission(missionId ?? "");
+  // OPR.0.4.6.MH2 guard-B1 — useMission is selected-host retargeted, so
+  // under a remote selection missionPath is a REMOTE path: it must never
+  // resolve against LOCAL allowlist roots (zero /api/files/* + honest copy).
+  const { known: selectionKnown, isLocal } = useHostSelection();
+  const filesAllowed = useLocalFilesAllowed();
   const missionPath =
-    mission.data && "missionPath" in mission.data ? mission.data.missionPath : null;
+    filesAllowed && mission.data && "missionPath" in mission.data ? mission.data.missionPath : null;
   const brief = useScopeMarkdown(missionPath, "MISSION_BRIEF.md");
 
   let body: ReactNode;
-  if (mission.isLoading || brief.isLoading) {
+  if (selectionKnown && !isLocal) {
+    // Known-REMOTE only — an unknown selection renders the loading branch
+    // below (fetches stay gated either way; no misleading gated flash).
+    body = (
+      <div data-testid="brief-panel-remote-gated">
+        <EmptyState
+          label="LOCAL FILES NOT SHOWN"
+          description="The mission brief lives on the selected host's filesystem, which the remote read view does not browse. Select the local host to read local briefs."
+          variant="card"
+          testId="brief-panel-remote-gated-state"
+        />
+      </div>
+    );
+  } else if (!selectionKnown || mission.isLoading || brief.isLoading) {
     body = (
       <div data-testid="brief-panel-loading" className="font-mono text-[11px] text-on-surface-variant">
         Loading…

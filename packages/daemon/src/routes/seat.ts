@@ -41,9 +41,22 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
     sessionEnv: (c.get("sessionEnv" as never) as Record<string, string | undefined> | undefined) ?? undefined,
     // B1 — launch a fresh successor into a live agent via the runtime adapters.
     runtimeAdapters: (c.get("runtimeAdapters" as never) as Record<string, import("../domain/runtime-adapter.js").RuntimeAdapter> | undefined) ?? undefined,
+    // OPR.0.4.6.02 S1 — the shared tmux option-defaults applier, so a FRESH
+    // handover successor gets the same mouse/status/clipboard defaults as a
+    // launched seat (orch C1 scope ruling).
+    tmuxOptionDefaults: (c.get("tmuxOptionDefaults" as never) as import("../domain/tmux-option-defaults.js").TmuxOptionDefaultsApplier | undefined) ?? undefined,
     // B2 — discovered-mode resume-token capture derive-helper deps.
     contextUsageStore: (c.get("contextUsageStore" as never) as import("../domain/resume-token-capture.js").ResumeTokenCaptureDeps["contextUsageStore"]) ?? undefined,
     resumeTokenCapturer: (c.get("resumeMetadataRefresher" as never) as import("../domain/resume-token-capture.js").ResumeTokenCaptureDeps["resumeTokenCapturer"]) ?? undefined,
+    // OPR.0.4.6.PI1 FR-6 — the Pi adapter in the runtime-adapter map exposes
+    // the pi-runner sidecar reader; reuse it structurally (no new context var).
+    piRunnerStateStore: (() => {
+      const adapters = c.get("runtimeAdapters" as never) as Record<string, unknown> | undefined;
+      const pi = adapters?.["pi"] as { readSessionFile?: (sessionName: string) => { ok: true; sessionFile: string } | { ok: false; reason: string } } | undefined;
+      return typeof pi?.readSessionFile === "function"
+        ? { readSessionFile: pi.readSessionFile.bind(pi) as (sessionName: string) => { ok: true; sessionFile: string } | { ok: false; reason: string } }
+        : undefined;
+    })(),
   });
   const result = await service.handover({
     seatRef: decodeURIComponent(c.req.param("seatRef")!),

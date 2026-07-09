@@ -40,6 +40,7 @@ import {
   type LockedArtifact,
   type NeedsYouBand,
   type NeedsYouItem,
+  type WorkflowRowRef,
   type ProofArtifact,
   type ReviewMedia,
   type ReviewPhase,
@@ -484,6 +485,9 @@ export interface AttentionInput {
   unblocks: string | null;
   destinationSession: string | null;
   closureRequiredAtIso: string | null;
+  /** OPR.0.4.6.WF4 Q6 — set by the gatherer when the item carries an
+   *  `instance:<id>` workflow-exception tag; carried verbatim to the row. */
+  workflow?: WorkflowRowRef;
 }
 
 export interface AgentInput {
@@ -608,6 +612,9 @@ export function composeNeedsYou(
 ): NeedsYouBand {
   const agentItems: NeedsYouItem[] = attention.map((q) => ({
     source: "agent",
+    // OPR.0.4.6.WF4 Q6 — carry the gatherer's pointer verbatim; OMITTED for
+    // non-workflow items (byte-identity-by-omission).
+    ...(q.workflow ? { workflow: q.workflow } : {}),
     identity: q.qitemId,
     summary: q.summary ?? q.qitemId,
     leg: q.leg,
@@ -646,6 +653,146 @@ export function composeNeedsYou(
 }
 
 // --- OPR.0.4.4.22 (slice 22): agent-scope exceptions + the rig read root (KEEP) ---
+
+/** OPR.0.4.6.WF5 FR-3 — one recorded workflow-instance view for the ▲
+ *  band. The GATHERER assembles these from recorded state only
+ *  (workflow_instances + queue rows + the WF-1 evaluator verdict + the
+ *  open exception item by tag query); this module derives rows PURELY. */
+export interface WorkflowExceptionInput {
+  instanceId: string;
+  workflowName: string;
+  status: string;
+  currentStepId: string | null;
+  /** The WF-1 evaluator's verdict state for the frontier ("healthy" or
+   *  the overdue states) + its evidence line, precomposed by the
+   *  gatherer. Never recomputed here (one-threshold-home). */
+  deadlineState: string;
+  deadlineEvidence: string | null;
+  /** True when a frontier id resolves to a NON-OPEN packet (the
+   *  out-of-band corruption state — WF-3 FR-6's guard is the
+   *  prevention; this row is the detection backstop). */
+  frontierRefsNonOpenPacket: boolean;
+  /** The OPEN exception item for this instance (tag query), if any. */
+  openItem: {
+    qitemId: string;
+    destinationSession: string;
+    humanRouted: boolean;
+    createdAtIso: string | null;
+    summary: string | null;
+  } | null;
+}
+
+/**
+ * OPR.0.4.6.WF5 FR-3 — the workflow_instances ▲ source + THE AWARENESS
+ * CHANNEL. One-count across channels (BR-3): an exception with a live
+ * HUMAN-routed ● item renders NOTHING here (the item IS the human's
+ * row); an ORCHESTRATOR-routed ● item renders exactly ONE awareness row
+ * (same identity, second projection — the human KNOWS at altitude); a
+ * failed instance with NO item renders the ▲ backstop naming BOTH the
+ * exception AND the missing-item anomaly (the backstop firing is itself
+ * evidence of a bug). Healthy instances render zero rows (the band's
+ * zero-noise negative). Durable-by-derivation: recomputed from recorded
+ * state on every composition; rows clear on state-exit (recomposition,
+ * never hand-clearing).
+ */
+export function deriveWorkflowExceptions(
+  workflows: WorkflowExceptionInput[],
+  scopeLabel: string,
+  nowIso: string,
+): NeedsYouItem[] {
+  const items: NeedsYouItem[] = [];
+  const push = (
+    identity: string,
+    summary: string,
+    d: DerivedException,
+    evidenceRef: string | null,
+    workflow: WorkflowRowRef,
+  ) => {
+    items.push({
+      source: "derived",
+      // OPR.0.4.6.WF4 Q6 — every derived workflow row carries the pointer.
+      workflow,
+      identity,
+      summary,
+      leg: d.kind,
+      where: scopeLabel,
+      ageIso: null,
+      priority: null,
+      tier: null,
+      evidenceRef,
+      unblocks: null,
+      qitemId: null,
+      destinationSession: null,
+      derived: d,
+    });
+  };
+  for (const w of workflows) {
+    const trace = `rig workflow trace ${w.instanceId}`;
+    // OPR.0.4.6.WF4 Q6 — the pointer for every row this instance emits;
+    // identity derived exactly once, here (never from prose downstream).
+    const wref: WorkflowRowRef = {
+      instanceId: w.instanceId,
+      workflowName: w.workflowName,
+      ...(w.currentStepId ? { stepId: w.currentStepId } : {}),
+    };
+    // The anomaly backstop fires regardless of item state — the
+    // corruption is orthogonal to exception routing.
+    if (w.frontierRefsNonOpenPacket) {
+      push(
+        `${w.instanceId}|anomaly|frontier-non-open`,
+        `${w.workflowName} instance frontier references a closed packet`,
+        {
+          kind: "anomaly",
+          evidence: `instance ${w.instanceId} frontier points at a non-open packet — out-of-band closure got past the WF-3 close-path guard`,
+          threshold: "frontier packet must be open",
+        },
+        trace,
+        wref,
+      );
+    }
+    const exceptional =
+      w.status === "failed" || (w.deadlineState !== "healthy" && w.deadlineEvidence !== null);
+    if (!exceptional) continue;
+    const kindLabel = w.status === "failed" ? "failed" : w.deadlineState;
+    if (w.openItem && w.openItem.humanRouted) {
+      // The ● item already sits in the human attention legs — a row
+      // here would double-render (one-count).
+      continue;
+    }
+    if (w.openItem) {
+      // ORCHESTRATOR-routed: the awareness row — holder + age +
+      // evidence; awareness, not assignment. Same recorded identity as
+      // the ● item, projected into the human band.
+      const ageMin = w.openItem.createdAtIso ? minutesBetween(w.openItem.createdAtIso, nowIso) : null;
+      push(
+        `${w.instanceId}|awareness|${w.openItem.qitemId}`,
+        `awareness: ${w.workflowName} ${kindLabel} — held by ${w.openItem.destinationSession}`,
+        {
+          kind: "awareness",
+          evidence: `exception item ${w.openItem.qitemId} on ${w.openItem.destinationSession}${ageMin !== null ? ` for ${ageMin}m` : ""}${w.openItem.summary ? ` — ${w.openItem.summary}` : ""}`,
+          threshold: "awareness (orchestrator acting; step in any time)",
+        },
+        trace,
+        wref,
+      );
+      continue;
+    }
+    // NO item: the ▲ backstop — names the exception AND the anomaly of
+    // the missing item.
+    push(
+      `${w.instanceId}|workflow-${kindLabel}|no-item`,
+      `${w.workflowName} instance ${kindLabel} with NO exception item`,
+      {
+        kind: w.status === "failed" ? "workflow-failed" : "stuck",
+        evidence: `${w.deadlineEvidence ?? `instance ${w.instanceId} is ${kindLabel} at step ${w.currentStepId ?? "?"}`} · MISSING-ITEM ANOMALY: the never-lost channel produced no item (itself a bug — report it)`,
+        threshold: w.status === "failed" ? "failed instances carry an exception item" : "past the WF-1 deadline evaluator threshold",
+      },
+      trace,
+      wref,
+    );
+  }
+  return items;
+}
 
 /** The third NAMED ▲ heuristic's visible v1 default (slice-22 FR-3:
  *  too-long-in-state — no transition beyond threshold). Lives HERE because
@@ -710,6 +857,8 @@ export interface RigComposeInputs {
   /** The FR-1 roster display window, named on-surface in provenance
    *  (plan-review ruling: "computed from queue+ps · window: today"). */
   rosterWindow: string;
+  /** OPR.0.4.6.WF5 FR-3: recorded workflow-instance views (optional). */
+  workflows?: WorkflowExceptionInput[];
   nowIso: string;
 }
 
@@ -718,7 +867,10 @@ export interface RigComposeInputs {
 export function composeRigAgents(inputs: RigComposeInputs): ComposedRigAgents {
   const { nowIso } = inputs;
   const scopeLabel = "rig";
-  const derived = deriveAgentScopeExceptions(inputs.agents, inputs.overdue, scopeLabel, nowIso);
+  const derived = [
+    ...deriveAgentScopeExceptions(inputs.agents, inputs.overdue, scopeLabel, nowIso),
+    ...deriveWorkflowExceptions(inputs.workflows ?? [], scopeLabel, nowIso),
+  ];
   const needsYou = composeNeedsYou(
     inputs.attention,
     derived,
@@ -799,6 +951,9 @@ export interface SliceComposeInputs {
   proofDirExists: boolean;
   attention: AttentionInput[];
   agents: AgentInput[];
+  /** OPR.0.4.6.WF5 FR-3: recorded workflow-instance views (optional —
+   *  absent renders byte-identically to pre-WF-5). */
+  workflows?: WorkflowExceptionInput[];
   activeQitemPresent: boolean;
   git: GitFacts;
   approval: ApprovalFacts;
@@ -894,7 +1049,8 @@ export function composeSliceReview(inputs: SliceComposeInputs): ComposedSliceRev
     latestArtifactIso,
     inputs.approval.delivery?.at ?? null,
   );
-  const needsYou = composeNeedsYou(inputs.attention, derived, confirmFaithful, "queue+artifacts", nowIso);
+  const workflowDerived = deriveWorkflowExceptions(inputs.workflows ?? [], sliceRef, nowIso);
+  const needsYou = composeNeedsYou(inputs.attention, [...derived, ...workflowDerived], confirmFaithful, "queue+artifacts", nowIso);
   const agents = composeAgentsBand(inputs.agents, `slice:${slice.name}`, derived, nowIso);
 
   // FR-5: an out-of-slice media ref = a defect finding, never a silent

@@ -855,3 +855,77 @@ describe("identity-honesty literal contract", () => {
     expect(["restored", "resumed", "snapshot", "snapshot_copy"]).not.toContain(fork.mode as string);
   });
 });
+
+// ============================================================================
+// OPR.0.4.6.PI1 — Pi rows: runtime "pi" + session_source fork, launch-command
+// shape via the runner (CLI --fork whole-session fork, NEW child token rule)
+// ============================================================================
+
+describe("session_source Pi rows (OPR.0.4.6.PI1)", () => {
+  const PI_STATE_ROOT = "/openrig-home/state/pi";
+  const PI_RUNNER = "/daemon-dist/adapters/pi-runner.js";
+  const PI_SESSION = "dev-impl@fork-test-rig";
+  const PI_PARENT = "/prior-seat/sessions/parent_0196.jsonl";
+  const PI_CHILD = `${PI_STATE_ROOT}/${PI_SESSION}/sessions/child_0197.jsonl`;
+
+  it("accepts runtime pi + fork + native_id (schema)", () => {
+    const spec = withMember(baseValidSpec(), {
+      runtime: "pi",
+      session_source: { mode: "fork", ref: { kind: "native_id", value: PI_PARENT } },
+    });
+    const result = RigSpecSchema.validate(spec);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("builds the runner command with --fork <parent> and persists the NEW child token", async () => {
+    const { PiRuntimeAdapter } = await import("../src/adapters/pi-runtime-adapter.js");
+    const { piSeatPaths } = await import("../src/adapters/pi-runner-protocol.js");
+
+    const files: Record<string, string> = {};
+    const dirs = new Set<string>();
+    let typedCommand = "";
+    const tmux = {
+      sendText: vi.fn(async (_t: string, text: string) => {
+        typedCommand = text;
+        const launchId = /--launch-id '([^']+)'/.exec(text)![1];
+        // The runner "starts" and reports the CHILD session file via the
+        // launch-stamped sidecar.
+        files[piSeatPaths(PI_STATE_ROOT, PI_SESSION).runnerStatePath] = JSON.stringify({
+          ready: true, launchId, sessionFile: PI_CHILD, sessionId: "0197c", updatedAt: "t",
+        });
+        return { ok: true as const };
+      }),
+      sendKeys: vi.fn(async () => ({ ok: true as const })),
+      capturePaneContent: vi.fn(async () => ""),
+      hasSession: vi.fn(async () => true),
+    } as unknown as TmuxAdapter;
+
+    const adapter = new PiRuntimeAdapter({
+      tmux,
+      fsOps: {
+        readFile: (p: string) => { if (!(p in files)) throw new Error("ENOENT"); return files[p]!; },
+        writeFile: (p: string, c: string) => { files[p] = c; },
+        exists: (p: string) => p in files || dirs.has(p),
+        mkdirp: (p: string) => { dirs.add(p); },
+      },
+      stateRoot: PI_STATE_ROOT,
+      runnerEntryPath: PI_RUNNER,
+      sleep: async () => {},
+    });
+
+    const result = await adapter.launchHarness(
+      { tmuxSession: PI_SESSION, cwd: "/work" } as NodeBinding,
+      { name: PI_SESSION, forkSource: { kind: "native_id", value: PI_PARENT } },
+    );
+
+    // Launch-command shape: the runner is typed into the pane with --fork.
+    expect(typedCommand).toContain("pi-runner.js");
+    expect(typedCommand).toContain(`--fork '${PI_PARENT}'`);
+    expect(typedCommand).not.toContain("--session '");
+    expect(typedCommand).toMatch(/--(no-)?approve/); // explicit trust, always
+
+    // Post-fork token rule: the NEW child file is persisted, never the parent.
+    expect(result).toEqual({ ok: true, resumeToken: PI_CHILD, resumeType: "pi_session_file" });
+  });
+});

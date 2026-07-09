@@ -1,6 +1,7 @@
 import { serve, type ServerType } from "@hono/node-server";
 import { readOpenRigEnv } from "./openrig-compat.js";
 import { createDaemon } from "./startup.js";
+import { runQueueRetentionSweep, RETENTION_DEFAULTS } from "./domain/queue-retention.js";
 import {
   assertBindAuthInvariant,
   detectTailscaleInterface,
@@ -24,6 +25,41 @@ export function startPeriodicSnapshotScheduler(deps: {
   const retentionKeep = settingsStore ? (settingsStore.resolveOne("snapshots.periodic.retention_keep").value as number) : 10;
   deps.periodicSnapshotScheduler.start(intervalS * 1000, retentionKeep);
   deps.psProjectionService.setPeriodicSnapshotState(true, intervalS);
+}
+
+/** OPR.0.4.6.FS-1 W2 — start the queue-retention maintenance sweep (arch D3): a
+ *  boot sweep + a daily tick that archives aged terminal `queue_transitions`
+ *  (never-delete) and prunes `watchdog_history`, both in bounded batches with
+ *  event-loop yields. Reads the `retention.*` settings (baked defaults via
+ *  RETENTION_DEFAULTS). Fire-and-forget with error logging — a sweep failure must
+ *  never crash the daemon. Returns the daily interval handle (cleared on
+ *  shutdown), or null when disabled. */
+export function startQueueRetentionScheduler(deps: {
+  rigRepo: { db: import("better-sqlite3").Database };
+  settingsStore?: { resolveOne(key: string): { value: unknown } };
+}): ReturnType<typeof setInterval> | null {
+  const store = deps.settingsStore;
+  const enabled = store ? store.resolveOne("retention.enabled").value === true : true;
+  if (!enabled) return null;
+  const db = deps.rigRepo.db;
+  const num = (key: string, fallback: number): number => {
+    const v = store ? store.resolveOne(key).value : fallback;
+    return typeof v === "number" ? v : fallback;
+  };
+  const runOnce = (): void => {
+    void runQueueRetentionSweep(db, {
+      nowIso: new Date().toISOString(),
+      transitionsRetentionDays: num("retention.transitions_days", RETENTION_DEFAULTS.transitionsRetentionDays),
+      watchdogRetentionDays: num("retention.watchdog_days", RETENTION_DEFAULTS.watchdogRetentionDays),
+      watchdogKeepPerJob: num("retention.watchdog_keep_per_job", RETENTION_DEFAULTS.watchdogKeepPerJob),
+      batchSize: num("retention.batch_size", RETENTION_DEFAULTS.batchSize),
+    }).catch((err: unknown) => {
+      console.error(`[queue-retention] sweep error: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  };
+  runOnce(); // boot sweep (fire-and-forget)
+  const DAILY_MS = 24 * 60 * 60 * 1000;
+  return setInterval(runOnce, DAILY_MS);
 }
 
 async function isTrustedLocalOrTailnetBind(host: string): Promise<boolean> {
@@ -79,6 +115,7 @@ export async function startServer(port?: number) {
   // one per host. The contextMonitor + watchdog scheduler only start
   // once after the first successful bind callback fires.
   let monitorsStarted = false;
+  let retentionTimer: ReturnType<typeof setInterval> | null = null;
   const servers: ServerType[] = [];
   for (const host of bindHosts) {
     const srv = serve({ fetch: app.fetch, port: p, hostname: host }, (info) => {
@@ -100,6 +137,9 @@ export async function startServer(port?: number) {
         // gates the running/active projection on verified process identity.
         deps.seatIdentityReconciler?.start();
         startPeriodicSnapshotScheduler(deps);
+        // OPR.0.4.6.FS-1 W2 — boot sweep + daily retention tick (bounded,
+        // yields between batches; a sweep failure is logged, never fatal).
+        retentionTimer = startQueueRetentionScheduler(deps);
       }
     });
     injectWebSocket(srv);
@@ -130,6 +170,11 @@ export async function startServer(port?: number) {
       deps.periodicSnapshotScheduler?.stop();
     } catch (err) {
       console.error("[periodic-snapshot] shutdown error", err);
+    }
+    try {
+      if (retentionTimer) clearInterval(retentionTimer);
+    } catch (err) {
+      console.error("[queue-retention] shutdown error", err);
     }
     try {
       // OPR.0.4.3.21 — disable the event-loop histogram + clear its tick interval.

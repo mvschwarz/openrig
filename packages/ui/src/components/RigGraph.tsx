@@ -14,6 +14,8 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { displayPodName, inferPodName } from "../lib/display-name.js";
 import { useTopologyActivity } from "../hooks/useTopologyActivity.js";
 import { usePrefersReducedMotion } from "../hooks/usePrefersReducedMotion.js";
+import { useSelectedHostId } from "../hooks/useHosts.js";
+import { LOCAL_HOST_ID } from "../lib/host-param.js";
 import {
   applyHotPotatoEdges,
   buildTopologySessionIndex,
@@ -158,6 +160,10 @@ export function RigGraph({
   const error = queryError?.message ?? null;
   const { reconnecting } = useRigEvents(rigId);
   const reducedMotion = usePrefersReducedMotion();
+  // OPR.0.4.6.MH2 rev1-r2 B1: cmux focus is a LOCAL session action; under a
+  // remote selection the node click still navigates (read drill-in) but the
+  // bare-local focus POST must never fire.
+  const graphIsRemote = useSelectedHostId() !== LOCAL_HOST_ID;
   const [focusMessage, setFocusMessage] = useState<FocusMessage | null>(null);
   const dismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -348,9 +354,13 @@ export function RigGraph({
         ...(node.data ?? {}),
         activityRing: topologyActivity.getNodeActivity(node.id, data),
         reducedMotion,
+        // OPR.0.4.6.MH2 rev1-r2 B1: rides the same enrichment channel as
+        // reducedMotion so RigNode stays hook-free (standalone harnesses
+        // need no QueryClientProvider).
+        remoteReadonly: graphIsRemote,
       },
     };
-  }), [rfNodes, topologyActivity, reducedMotion]);
+  }), [rfNodes, topologyActivity, reducedMotion, graphIsRemote]);
 
   const activityEdges = useMemo(
     () => applyHotPotatoEdges(rfEdges, topologyActivity.packets, { reducedMotion }),
@@ -369,6 +379,12 @@ export function RigGraph({
       if (!rigId) return;
 
       if (placementMode) {
+        // OPR.0.4.6.MH2 rev1-r2 re-verdict B1: placement targets feed the
+        // LOCAL discovery bind/adopt mutation — a remote-rendered node/pod
+        // must never become a placement target.
+        if (graphIsRemote) {
+          return;
+        }
         if (node.type === "podGroup" || node.type === "group") {
           const podData = node.data as { podId?: string | null };
           const podId = podData?.podId ?? null;
@@ -424,6 +440,10 @@ export function RigGraph({
         params: { rigId, logicalId: encodeURIComponent(nodeData.logicalId) },
       });
 
+      if (graphIsRemote) {
+        return;
+      }
+
       if (!nodeData.binding?.cmuxSurface) {
         showFocusMessage({ text: "Not bound to cmux surface", type: "info" });
         return;
@@ -453,7 +473,7 @@ export function RigGraph({
         showFocusMessage({ text: "Focus failed", type: "error" });
       }
     },
-    [placementMode, podMetaById, rigId, setPlacementTarget, navigate, setSelection, showFocusMessage]
+    [placementMode, podMetaById, rigId, setPlacementTarget, navigate, setSelection, showFocusMessage, graphIsRemote]
   );
 
   if (rigId === null) {
@@ -511,7 +531,7 @@ export function RigGraph({
           {focusMessage.text}
         </div>
       )}
-      {placementMode && (
+      {placementMode && !graphIsRemote && (
         <div
           data-testid="graph-placement-banner"
           className="absolute top-spacing-4 left-1/2 z-20 -translate-x-1/2 border border-emerald-300/90 bg-[rgba(236,253,245,0.92)] px-3.5 py-2 font-mono text-[10px] text-emerald-950 shadow-[0_12px_28px_rgba(34,197,94,0.14)] backdrop-blur-sm"

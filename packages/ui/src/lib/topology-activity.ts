@@ -1,6 +1,7 @@
 import type { Edge, Node } from "@xyflow/react";
 import type { AgentActivitySummary, CurrentQitemSummary } from "../hooks/useNodeInventory.js";
 import { HYBRID_CROSS_RIG_STROKE_DASH } from "./hybrid-layout.js";
+import { parseSessionName, sessionMemberLabel } from "./session-name.js";
 
 const SESSION_PAIR_DELIMITER = "\u0000";
 
@@ -132,7 +133,8 @@ export function buildTopologySessionIndex(entries: readonly TopologySessionIndex
       if (!rigToken) continue;
       addKey(`${entry.logicalId ?? localId}@${rigToken}`, entry);
       if (entry.canonicalSessionName?.includes("@")) {
-        const [sessionLocal] = entry.canonicalSessionName.split("@");
+        // OPR.0.4.6.MH1 FR-8: the shared parse contract's display helper.
+        const sessionLocal = sessionMemberLabel(entry.canonicalSessionName);
         addKey(`${sessionLocal}@${rigToken}`, entry);
       }
     }
@@ -151,13 +153,14 @@ export function resolveTopologySession(
   if (direct) return { ...direct, session: clean };
   if (direct === null) return null;
 
-  const at = clean.lastIndexOf("@");
-  if (at < 0) return null;
-  const local = clean.slice(0, at);
-  const rigToken = clean.slice(at + 1);
+  // OPR.0.4.6.MH1 FR-8: the shared parse contract (greedy first-@ rig).
+  const parsed = parseSessionName(clean);
+  if (parsed.kind !== "canonical") return null;
+  const local = parsed.member;
+  const rigToken = parsed.rig;
   for (const entry of index.byNodeId.values()) {
     const entryLocal = entry.logicalId ?? localNodeId(entry.nodeId);
-    const canonicalLocal = entry.canonicalSessionName?.split("@")[0] ?? null;
+    const canonicalLocal = entry.canonicalSessionName ? sessionMemberLabel(entry.canonicalSessionName) : null;
     const localMatches = entryLocal === local || canonicalLocal === local || localNodeId(entry.nodeId) === local;
     const rigMatches = entry.rigName === rigToken || entry.rigId === rigToken;
     if (localMatches && rigMatches) return { ...entry, session: clean };

@@ -14,13 +14,16 @@
 // sees where the agent lives in the tree. Implemented via
 // useRouterState pathname parsing inside RigBranch + PodBranch.
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { Archive, ChevronDown, ChevronRight, Globe } from "lucide-react";
 import { cn } from "../../lib/utils.js";
 import { useRigSummary } from "../../hooks/useRigSummary.js";
 import { useArchivedRigs } from "../../hooks/useArchivedRigs.js";
 import { useNodeInventory } from "../../hooks/useNodeInventory.js";
+import { useSettings } from "../../hooks/useSettings.js";
+import { useHosts, useSelectHost } from "../../hooks/useHosts.js";
+import { LOCAL_HOST_ID } from "../../lib/host-param.js";
 import { displayPodName, inferPodName } from "../../lib/display-name.js";
 import { RuntimeMark } from "../graphics/RuntimeMark.js";
 
@@ -260,62 +263,175 @@ function ArchiveSection({ activeRigId, activePodName, activeLogicalId }: {
   );
 }
 
+// OPR.0.4.6.MH2 FR-1 — one host node in the enumerated host level. The
+// SELECTED host is the expanded one (expand = select: one selection
+// retargets every read screen, so exactly one host's workspace is on
+// screen at a time — indicator + tree + data move together). Collapsed
+// hosts render as rows; clicking one writes the selection through the
+// same one write path as the CLI. Honest v1 deviation from the twin
+// frames (recorded in the plan log): collapsed hosts carry NO rig-count
+// badge — counting an unselected host's rigs would need per-host fan-out
+// reads, which is MH-5 fleet altitude, not single-selected-host
+// read-through.
+function HostBranch({ hostId, label, chip, isSelected, isLocal, onSelect, rigs, rigsError, rigsLoading, children }: {
+  hostId: string;
+  label: string;
+  chip: string | null;
+  isSelected: boolean;
+  isLocal: boolean;
+  onSelect: () => void;
+  rigs: Array<{ id: string; name: string }> | undefined;
+  rigsError: string | null;
+  rigsLoading: boolean;
+  children?: ReactNode;
+}) {
+  return (
+    <li data-testid={isLocal ? "topology-host-localhost" : `topology-host-${hostId}`} data-selected={isSelected}>
+      <button
+        type="button"
+        onClick={onSelect}
+        className="w-full flex items-center gap-1 px-2 py-1 hover:bg-surface-low text-left"
+      >
+        {isSelected ? <ChevronDown className="h-3 w-3 text-on-surface-variant" /> : <ChevronRight className="h-3 w-3 text-on-surface-variant" />}
+        <Globe className="h-3 w-3 text-on-surface-variant" />
+        {isSelected ? (
+          <Link
+            to="/topology"
+            onClick={(e) => e.stopPropagation()}
+            className="font-mono text-[11px] uppercase text-on-surface flex-1 truncate hover:underline"
+          >
+            {label}
+          </Link>
+        ) : (
+          <span className="font-mono text-[11px] uppercase text-on-surface flex-1 truncate">{label}</span>
+        )}
+        {chip ? (
+          <span
+            data-testid={`topology-host-chip-${hostId}`}
+            className={cn(
+              "font-mono text-[9px] uppercase tracking-[0.12em]",
+              chip === "viewing" ? "bg-inverse-surface px-1 text-background" : "text-on-surface-variant",
+            )}
+          >
+            {chip}
+          </span>
+        ) : null}
+        {isSelected ? (
+          <span className="font-mono text-[9px] text-on-surface-variant">{rigs?.length ?? 0}</span>
+        ) : null}
+      </button>
+      {isSelected ? (
+        <ul className="ml-5">
+          {rigsError ? (
+            // FR-6 — the honest inline unreachable note (fr6-unreachable
+            // tree leg): what happened + where the retry lives.
+            <li
+              data-testid={`topology-host-error-${hostId}`}
+              className="px-2 py-1 font-mono text-[10px] text-error"
+            >
+              Host unreachable — its rigs can&apos;t be listed. See the page for retry.
+            </li>
+          ) : rigsLoading && (rigs === undefined || rigs.length === 0) ? (
+            <li className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic">
+              Pulling {label}&apos;s workspace…
+            </li>
+          ) : (
+            children
+          )}
+        </ul>
+      ) : null}
+    </li>
+  );
+}
+
 export function TopologyTreeView() {
-  const { data: rigs } = useRigSummary();
-  const [hostOpen, setHostOpen] = useState(true);
+  const { data: rigs, error: rigsQueryError, isFetching: rigsFetching } = useRigSummary();
+  const { data: hostsData } = useHosts();
+  const selectHost = useSelectHost();
+  // OPR.0.4.6.MH1 FR-4: the own-host display name (one stored name, every
+  // surface reads it). Default/unset renders "localhost" exactly as today.
+  const { data: settingsData } = useSettings();
+  const ownHostNameRaw = (settingsData?.settings?.["host.name" as never] as { value?: unknown } | undefined)?.value;
+  const ownHostName = typeof ownHostNameRaw === "string" && ownHostNameRaw.trim() !== "" ? ownHostNameRaw : "localhost";
   // P5.1-2 auto-expand: pull active route context once at the tree root
   // and thread down through RigBranch + PodBranch.
   const { rigId: activeRigId, podName: activePodName, logicalId: activeLogicalId } =
     useActiveTopologyContext();
 
+  const selected = hostsData?.selected ?? LOCAL_HOST_ID;
+  const remoteHosts = hostsData?.hosts ?? [];
+  const rigList = rigs ?? [];
+
+  const rigTree = (
+    <>
+      {rigList.length > 0 ? (
+        rigList.map((r) => (
+          <RigBranch
+            key={r.id}
+            rigId={r.id}
+            rigName={r.name}
+            activeRigId={activeRigId}
+            activePodName={activePodName}
+            activeLogicalId={activeLogicalId}
+          />
+        ))
+      ) : (
+        <li className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic">
+          No rigs.
+        </li>
+      )}
+      {/* OPR.0.3.3.19 - archived rigs nest under the LOCAL host only: the
+          archived-rigs read is not on the MH-2 read allowlist, so a remote
+          host's archive is honestly absent rather than silently local. */}
+      {selected === LOCAL_HOST_ID ? (
+        <ArchiveSection
+          activeRigId={activeRigId}
+          activePodName={activePodName}
+          activeLogicalId={activeLogicalId}
+        />
+      ) : null}
+    </>
+  );
+
   return (
     <div data-testid="topology-tree-view" className="flex-1 overflow-y-auto py-2">
       <ul>
-        <li data-testid="topology-host-localhost">
-          <button
-            type="button"
-            onClick={() => setHostOpen((o) => !o)}
-            className="w-full flex items-center gap-1 px-2 py-1 hover:bg-surface-low text-left"
+        <HostBranch
+          hostId={LOCAL_HOST_ID}
+          label={ownHostName}
+          // Zero-regression: with an empty registry the local node renders
+          // chip-less, exactly as today; the LOCAL/viewing chips appear only
+          // once the host level is real (registry non-empty).
+          chip={remoteHosts.length === 0 ? null : selected === LOCAL_HOST_ID ? "viewing" : "local"}
+          isSelected={selected === LOCAL_HOST_ID}
+          isLocal
+          onSelect={() => {
+            if (selected !== LOCAL_HOST_ID) selectHost.mutate({ hostId: LOCAL_HOST_ID });
+          }}
+          rigs={rigList}
+          rigsError={null}
+          rigsLoading={rigsFetching}
+        >
+          {rigTree}
+        </HostBranch>
+        {remoteHosts.map((h) => (
+          <HostBranch
+            key={h.id}
+            hostId={h.id}
+            label={h.id}
+            chip={selected === h.id ? "viewing" : h.status === "unreachable" ? "unreachable" : null}
+            isSelected={selected === h.id}
+            isLocal={false}
+            onSelect={() => {
+              if (selected !== h.id) selectHost.mutate({ hostId: h.id });
+            }}
+            rigs={rigList}
+            rigsError={selected === h.id && rigsQueryError ? String((rigsQueryError as Error).message ?? rigsQueryError) : null}
+            rigsLoading={rigsFetching}
           >
-            {hostOpen ? <ChevronDown className="h-3 w-3 text-on-surface-variant" /> : <ChevronRight className="h-3 w-3 text-on-surface-variant" />}
-            <Globe className="h-3 w-3 text-on-surface-variant" />
-            <Link
-              to="/topology"
-              onClick={(e) => e.stopPropagation()}
-              className="font-mono text-[11px] uppercase text-on-surface flex-1 hover:underline"
-            >
-              localhost
-            </Link>
-            <span className="font-mono text-[9px] text-on-surface-variant">{rigs?.length ?? 0}</span>
-          </button>
-          {hostOpen ? (
-            <ul className="ml-5">
-              {rigs && rigs.length > 0 ? (
-                rigs.map((r) => (
-                  <RigBranch
-                    key={r.id}
-                    rigId={r.id}
-                    rigName={r.name}
-                    activeRigId={activeRigId}
-                    activePodName={activePodName}
-                    activeLogicalId={activeLogicalId}
-                  />
-                ))
-              ) : (
-                <li className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic">
-                  No rigs.
-                </li>
-              )}
-              {/* OPR.0.3.3.19 - archived rigs nest under this host, below the
-                  active rigs, keeping the model host-scoped for multi-host. */}
-              <ArchiveSection
-                activeRigId={activeRigId}
-                activePodName={activePodName}
-                activeLogicalId={activeLogicalId}
-              />
-            </ul>
-          ) : null}
-        </li>
+            {rigTree}
+          </HostBranch>
+        ))}
       </ul>
     </div>
   );

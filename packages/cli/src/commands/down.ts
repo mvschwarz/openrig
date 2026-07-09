@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { resolveEffectiveHost } from "../host-selection.js";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
@@ -107,6 +108,10 @@ export function downCommand(depsOverride?: StatusDeps): Command {
     .option("--json", "JSON output for agents")
     .option("--host <id>", "Run on a remote host declared in ~/.openrig/hosts.yaml")
     .action(async (rigHandle: string, opts: { delete?: boolean; force?: boolean; snapshot?: boolean; json?: boolean; host?: string }) => {
+      // OPR.0.4.6.MH1 FR-2: selected-host routing — explicit --host wins;
+      // else the persisted selection feeds the SHIPPED --host path; no
+      // selection = today exactly.
+      opts.host = resolveEffectiveHost(opts.host);
       const deps = getDepsF();
 
       if (opts.host) {

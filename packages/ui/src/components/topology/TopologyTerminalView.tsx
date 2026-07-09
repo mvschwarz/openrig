@@ -21,6 +21,8 @@
 import { useMemo, useState } from "react";
 import { useRigSummary, type RigSummary } from "../../hooks/useRigSummary.js";
 import { useNodeInventory, type NodeInventoryEntry } from "../../hooks/useNodeInventory.js";
+import { useSelectedHostId } from "../../hooks/useHosts.js";
+import { LOCAL_HOST_ID } from "../../lib/host-param.js";
 import { displayAgentName } from "../../lib/display-name.js";
 import { ProgressiveTerminal } from "../terminal/ProgressiveTerminal.js";
 import { EmptyState } from "../ui/empty-state.js";
@@ -265,6 +267,24 @@ export function TopologyTerminalView({ scope, rigId, podName }: TopologyTerminal
     () => rigs?.find((rig) => rig.id === selectedHostRigId) ?? null,
     [rigs, selectedHostRigId],
   );
+  // OPR.0.4.6.MH2 rev1-r2 B1: every terminal card is a LOCAL session surface
+  // (session-name preview reads + click-to-live typeable xterm) — under a
+  // remote selection none of them may mount. The list hooks above are
+  // retargeted reads (harmless); the honest gate replaces the grid.
+  const terminalsAreRemote = useSelectedHostId() !== LOCAL_HOST_ID;
+
+  if (terminalsAreRemote) {
+    return (
+      <div className="p-6">
+        <EmptyState
+          label="TERMINALS NOT AVAILABLE FOR REMOTE HOSTS"
+          description="Terminal streams are this host's local sessions. Viewing a remote host is read-only; acting on it arrives with MH-3/MH-4."
+          variant="card"
+          testId="topology-terminal-remote-gated"
+        />
+      </div>
+    );
+  }
 
   if (scope === "host") {
     if (!rigs || rigs.length === 0) {

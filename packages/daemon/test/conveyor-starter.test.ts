@@ -56,9 +56,17 @@ describe("0.3.0 conveyor starter workflow specs", () => {
     expect(result.errors).toEqual([]);
     // Keep this list in sync with
     // packages/daemon/src/builtins/workflow-specs/*.yaml.
+    // OPR.0.4.6.WF2: + the three spec-language example shapes
+    // (linear / gated / branched — the FR-6 hand-authorability set).
+    // OPR.0.4.6.FAC2: + factory-rsi (the canonical single-rig RSI
+    // factory workflow — the demo/dogfood vehicle).
     expect(result.loaded.map((s) => s.name).sort()).toEqual([
       "basic-loop",
+      "branched-remediation",
       "conveyor",
+      "gated-release",
+      "linear-build",
+      "factory-rsi",
     ]);
     expect(result.skipped).toEqual([]);
   });

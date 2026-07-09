@@ -97,8 +97,12 @@ export function projectSpecGraph(
     if (!stepByRole.has(step.actor_role)) stepByRole.set(step.actor_role, step);
   }
 
-  const entryRole = spec.entry?.role ?? spec.steps[0]?.actor_role;
-  const entryStepId = entryRole ? stepByRole.get(entryRole)?.id : undefined;
+  // OPR.0.4.6.WF1 (guard blocker 3): steps[0] is THE authoritative
+  // entry — the runtime instantiates from it (workflow-runtime.ts) and
+  // the validator rejects a disagreeing entry.role. The graph must
+  // mark the SAME node the runtime routes first, never entry.role's
+  // claim (pre-fix specs could make this projection lie).
+  const entryStepId = spec.steps[0]?.id;
 
   const nodes: SpecGraphNode[] = spec.steps.map((step) => {
     const roleSpec = (spec.roles as Record<string, { preferred_targets?: string[] }>)[step.actor_role] ?? {};

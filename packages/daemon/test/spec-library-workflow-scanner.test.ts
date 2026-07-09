@@ -5,9 +5,10 @@
 // projects the topology graph in the review payload.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -226,6 +227,127 @@ describe("getWorkflowReview (Workflows in Spec Library v0)", () => {
       version: "1",
     });
     expect(review).toBeNull();
+  });
+});
+
+// OPR.0.4.6.WF4 C1 (arch Q1) — the scanner projection now ADDS branch edges
+// from next_hop.on, corrects the false-terminal defect, and projects optional
+// harness/host/gate node fields, all byte-identity-by-omission.
+describe("getWorkflowReview — WF-4 C1 branch/terminal/optional-field projection", () => {
+  let db: Database.Database;
+  let tmp: string;
+  let cache: WorkflowSpecCache;
+
+  const BUILTINS_DIR = fileURLToPath(new URL("../src/builtins/workflow-specs/", import.meta.url));
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [coreSchema, workflowSpecsSchema]);
+    cache = new WorkflowSpecCache(db);
+    tmp = mkdtempSync(join(tmpdir(), "wf-c1-"));
+  });
+  afterEach(() => {
+    db.close();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  /** Load a REAL shipped builtin through the cache and project it. */
+  function reviewBuiltin(name: string) {
+    const yaml = readFileSync(join(BUILTINS_DIR, `${name}.yaml`), "utf8");
+    const p = join(tmp, `${name}.yaml`);
+    writeFileSync(p, yaml);
+    cache.readThrough(p);
+    // builtin YAMLs are `id: <name>` version 1
+    const review = getWorkflowReview({ db, workflowBuiltinSpecsDir: null, name, version: "1" });
+    expect(review, `builtin ${name} projected`).not.toBeNull();
+    return review!;
+  }
+
+  it("SYNTHETIC branch: a step with next_hop.on is NOT terminal and emits a labeled 'branch' edge", () => {
+    const spec = `workflow:
+  id: c1-branch
+  version: 1
+  objective: branch fixture
+  target: { rig: r }
+  entry: { role: builder }
+  roles:
+    builder: { preferred_targets: [b@r] }
+    fixer: { preferred_targets: [f@r] }
+  steps:
+    - id: build
+      actor_role: builder
+      allowed_exits: [failed, done]
+      next_hop:
+        on: { failed: remediate }
+    - id: remediate
+      actor_role: fixer
+      allowed_exits: [done]
+  invariants:
+    allowed_exits: [failed, done]
+`;
+    const p = join(tmp, "c1-branch.yaml");
+    writeFileSync(p, spec);
+    cache.readThrough(p);
+    const review = getWorkflowReview({ db, workflowBuiltinSpecsDir: null, name: "c1-branch", version: "1" })!;
+
+    const build = review.topology.nodes.find((n) => n.stepId === "build")!;
+    expect(build.isTerminal).toBe(false); // the false-terminal defect, fixed
+    const branchEdges = review.topology.edges.filter((e) => e.routingType === "branch");
+    expect(branchEdges).toEqual([
+      { fromStepId: "build", toStepId: "remediate", routingType: "branch", branchOn: "failed" },
+    ]);
+    // omit-when-absent: a step declaring no harness/host/gate carries no such key
+    expect(Object.keys(build)).not.toContain("harness");
+    expect(Object.keys(build)).not.toContain("host");
+    expect(Object.keys(build)).not.toContain("gate");
+    // a dangling `on` target (no matching step) is dropped, never a phantom edge
+  });
+
+  it("BUILTINS suggested-roles-only (conveyor, basic-loop): every edge is 'direct', ZERO branch edges, ZERO optional node keys (byte-identity class)", () => {
+    for (const name of ["conveyor", "basic-loop"]) {
+      const review = reviewBuiltin(name);
+      expect(review.topology.edges.length, `${name} has edges`).toBeGreaterThan(0);
+      for (const e of review.topology.edges) {
+        expect(e.routingType, `${name} edge ${e.fromStepId}→${e.toStepId}`).toBe("direct");
+        expect(Object.keys(e)).not.toContain("branchOn");
+      }
+      for (const n of review.topology.nodes) {
+        expect(Object.keys(n), `${name} node ${n.stepId}`).not.toContain("harness");
+        expect(Object.keys(n)).not.toContain("host");
+        expect(Object.keys(n)).not.toContain("gate");
+      }
+    }
+  });
+
+  it("BUILTIN linear-build (no next_hop): zero edges, unchanged", () => {
+    const review = reviewBuiltin("linear-build");
+    expect(review.topology.edges).toEqual([]);
+  });
+
+  it("BUILTIN branched-remediation: gains labeled branch edges + build/verify are no longer false terminals", () => {
+    const review = reviewBuiltin("branched-remediation");
+    const branchEdges = review.topology.edges.filter((e) => e.routingType === "branch");
+    // build→remediate and verify→remediate, both on the `failed` exit
+    expect(branchEdges).toEqual(
+      expect.arrayContaining([
+        { fromStepId: "build", toStepId: "remediate", routingType: "branch", branchOn: "failed" },
+        { fromStepId: "verify", toStepId: "remediate", routingType: "branch", branchOn: "failed" },
+      ]),
+    );
+    const build = review.topology.nodes.find((n) => n.stepId === "build")!;
+    const verify = review.topology.nodes.find((n) => n.stepId === "verify")!;
+    expect(build.isTerminal).toBe(false);
+    expect(verify.isTerminal).toBe(false);
+  });
+
+  it("BUILTIN gated-release: projects the gate + harness node fields (present-when-declared)", () => {
+    const review = reviewBuiltin("gated-release");
+    const signoff = review.topology.nodes.find((n) => n.stepId === "ship-signoff")!;
+    expect(signoff.gate).toBeDefined();
+    const build = review.topology.nodes.find((n) => n.stepId === "build")!;
+    expect(build.harness).toBe("claude-code");
+    // a node without a gate still omits the key entirely
+    expect(Object.keys(build)).not.toContain("gate");
   });
 });
 

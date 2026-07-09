@@ -49,8 +49,23 @@ const ThemeContext = createContext<ThemeContextValue>({
   },
 });
 
-export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setThemeState] = useState<ThemeId>(() => readStoredTheme());
+export function ThemeProvider({
+  children,
+  initialTheme,
+}: {
+  children: ReactNode;
+  /**
+   * OPR.0.4.6.2 (FR-5) — seed the theme from a prop instead of localStorage.
+   * An opaque-origin capture (headless Chrome on a file:// page) silently
+   * no-ops localStorage, so `readStoredTheme()` returns the default and a dark
+   * capture renders light. A driver that renders the launcher for a themed
+   * screenshot passes `initialTheme` to theme WITHOUT any localStorage
+   * dependence. Omitted (the production path) → the stored/system choice, as
+   * before — fully backward-compatible.
+   */
+  initialTheme?: ThemeId;
+}) {
+  const [theme, setThemeState] = useState<ThemeId>(() => initialTheme ?? readStoredTheme());
   const [resolved, setResolved] = useState<ResolvedTheme>(() => resolveTheme(theme));
 
   const setTheme = useCallback((next: ThemeId) => {

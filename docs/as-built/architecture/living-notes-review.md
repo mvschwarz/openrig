@@ -8,11 +8,13 @@ applies-when: |
   Working on or consuming the composed slice/mission review surface — the
   /api/review/* routes, the ComposedSliceReview contract, the on-disk SDLC
   convention it projects, staged-approval locks, proof artifacts and the C1
-  header, the freeze export, or media serving for review evidence.
+  header, the freeze export, media serving for review evidence, or the
+  cross-host FLEET aggregate (/api/review/fleet, the fleet composer's
+  union/one-count seam, v0.4.6 MH-5).
 siblings: [content-surfaces.md, workspace-primitive.md, mission-control.md]
 prerequisite-reads: [workspace-primitive.md]
-last-verified-against-source: bb5ad219
-last-updated: 2026-07-06
+last-verified-against-source: c8341f72
+last-updated: 2026-07-08
 ---
 
 # Living Notes review surface (v0.4.4)
@@ -150,7 +152,47 @@ altitudes is one item). `composeRigAgents` serves the standalone rig
 altitude (roster ∪ recently-holding, park/health/settled from the queue
 transitions log).
 
-## 7. The on-disk convention it projects (SDLC control plane)
+## 7. The FLEET altitude — the cross-host aggregate SIBLING (v0.4.6, OPR.0.4.6.MH5)
+
+`GET /api/review/fleet` aggregates every registered host's composed ▲/● set
+into one manage-by-exception glance. It is a **sibling aggregate endpoint**,
+never a fourth `AgentsScope` value (arch Q2): the scope grammar stays
+exactly `slice:* | mission:* | rig`, and the local composer stays a pure
+function over local state. `domain/review/fleet-compose.ts` is the ONE
+review-domain module allowed to import hosts transport/registry — a
+boundary enforced mechanically by the `review-import-audit` static test
+(the zero-I/O `fanout-contract` types module is the sole allowlisted
+hosts import elsewhere).
+
+**Fan-out-the-composed-set (arch Q1):** the ▲ kinds are time-derived on
+their own host's clock, so the fleet root fans out each host's
+ALREADY-COMPOSED rig root (`GET /api/review/rig` over `remoteJsonRequest`,
+concurrent under the named read-class deadline; the local host joins
+in-process via the same gatherer — zero self-transport) and only **unions +
+host-dimensions + counts**. It never recomputes exception truth (the
+composer is clock-free by test pin), so cross-host clock skew can never
+distort a ▲. Per-host failures degrade to the closed `PerHostStatus`
+honesty contract; a failed host's counts are ABSENT from its
+`FleetHostRollup` — absent-not-zero, in the type.
+
+**One-count across the fleet (arch Q4):** the dedup `Set` lives in the
+fleet composer — the one place — keyed `hostId|identity` (rendered verbatim
+on the expanded drawer); within-host multi-altitude visibility collapses to
+one row with `seenFrom` provenance; an MH-3-forwarded qitem lives only in
+its origin host's DB, so no double-count by construction.
+
+**Composition pins the seam (arch Q3, the rule of thumb):** sidedness and
+caller pick the TRANSPORT seam (MH-4's CLI-direct verbs); when COMPOSITION
+exists — the fleet union/one-count is a correctness rule — the seam pins
+daemon-side: ONE composer, one endpoint, every consumer (the `/fleet` route
+page and the FLEET band today via the shared `useFleet` hook; the TUI/CLI
+fleet consumers as named follow-ups) reads the same one. UI cadence is the
+bounded named `FLEET_POLL_INTERVAL_MS` with the feed-cadence-class floor,
+and the ambient band gates its FETCH on fleet existence (the FS-1 amplifier
+discipline; enable-at-scale remains the FS-1 release-validation gate). Read
++ surface only: acting on a remote host's item rides MH-3/MH-4.
+
+## 8. The on-disk convention it projects (SDLC control plane)
 
 The surface projects the markdown-control-plane shapes operationalized by
 OPR.0.4.4.23 — conventions SSOT `docs/reference/sdlc-conventions.md`:

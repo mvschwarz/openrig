@@ -144,6 +144,9 @@ export class RigExpansionService {
             ...(member.codexConfigProfile ? { codex_config_profile: member.codexConfigProfile } : {}),
             ...(member.cwd ? { cwd: member.cwd } : {}),
             ...(member.model ? { model: member.model } : {}),
+            // OPR.0.4.6.FAC1: role rides the fragment→spec map (a
+            // provided role must never be silently dropped here).
+            ...(member.role ? { role: member.role } : {}),
             ...(member.restorePolicy ? { restore_policy: member.restorePolicy } : {}),
             ...(member.label ? { label: member.label } : {}),
             ...(member.sessionSource ? {

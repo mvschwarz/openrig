@@ -3,6 +3,15 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, printDaemonNotRunning } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import { followInstance } from "./workflow-follow.js";
+import {
+  composeAttentionRollup,
+  renderInstanceList,
+  renderInstanceShow,
+  renderStatus,
+  renderTraceTree,
+} from "./workflow-render.js";
+import { describeDaemonRejection, formatThreePart } from "./workflow-errors.js";
 
 /**
  * `rig workflow` — daemon-native Workflow Runtime (PL-004 Phase D).
@@ -34,6 +43,17 @@ async function withClient<T>(
 function printResult(json: boolean, body: unknown, status: number): void {
   if (json) {
     console.log(JSON.stringify(body));
+  } else if (status >= 400) {
+    // WF3 FR-5: named daemon rejections render the house what/why/fix
+    // 3-part in human mode; unrecognized bodies keep the raw-JSON
+    // fallback. --json (above) stays the RAW body byte-identically;
+    // exit codes below are unchanged.
+    const rejection = describeDaemonRejection(body);
+    if (rejection) {
+      for (const line of formatThreePart(rejection)) process.stderr.write(`${line}\n`);
+    } else {
+      console.log(JSON.stringify(body, null, 2));
+    }
   } else {
     console.log(JSON.stringify(body, null, 2));
   }
@@ -84,6 +104,19 @@ function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+// OPR.0.4.6.FAC1 (arch ruling 2026-07-07): instantiate-time advisories
+// (currently the spec-default-target.rig degrade-to-unbound notice) MUST
+// be LOUD. Always write to STDERR — even in --json mode the structured
+// body already carries `advisories`, but an operator piping stdout to a
+// consumer still needs to see the warning, so it lands on stderr in both
+// modes. Non-fatal: never sets a non-zero exit code.
+export function printWorkflowAdvisories(advisories: string[] | undefined): void {
+  if (!advisories || advisories.length === 0) return;
+  for (const line of advisories) {
+    process.stderr.write(`⚠ workflow advisory: ${line}\n`);
+  }
+}
+
 export function workflowCommand(depsOverride?: WorkflowDeps): Command {
   const cmd = new Command("workflow").description(
     "Daemon-native Workflow Runtime — declarative spec + transactional-scribe step projection (PL-004 Phase D)",
@@ -117,6 +150,7 @@ Examples:
     .requiredOption("--root-objective <text>", "Root objective for the run")
     .requiredOption("--created-by <session>", "Session creating the instance (canonical <member>@<rig>)")
     .option("--entry-owner <session>", "Override default entry-step owner")
+    .option("--rig <name>", "Bind the instance to this rig (overrides the spec's target.rig default; roles resolve to seats on this rig)")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
@@ -133,6 +167,7 @@ Examples:
       rootObjective: string;
       createdBy: string;
       entryOwner?: string;
+      rig?: string;
       json?: boolean;
     }) => {
       const deps = getDeps();
@@ -142,20 +177,25 @@ Examples:
           entryStepId?: string;
           entryOwnerSession?: string;
           status?: string;
+          instance?: { boundRig?: string | null };
+          advisories?: string[];
         }>("/api/workflow/instantiate", {
           specPath,
           rootObjective: opts.rootObjective,
           createdBySession: opts.createdBy,
           entryOwnerSession: opts.entryOwner,
+          targetRig: opts.rig,
         });
         printResult(opts.json ?? false, res.data, res.status);
+        printWorkflowAdvisories(res.data?.advisories);
         const body = res.data ?? {};
         const instanceId = asString(body.instanceId) ?? "(no instance id)";
         const entryStepId = asString(body.entryStepId);
         const owner = asString(body.entryOwnerSession) ?? opts.entryOwner ?? "(default from spec)";
+        const boundRig = asString(body.instance?.boundRig ?? undefined);
         printOutcomeSummary(opts.json ?? false, res.status, {
           what: `Instantiated workflow from ${specPath} (instance ${instanceId})`,
-          state: `${body.status ?? "active"}; entry packet ${entryStepId ?? "pending"} owned by ${owner}`,
+          state: `${body.status ?? "active"}${boundRig ? `; bound to rig ${boundRig}` : ""}; entry packet ${entryStepId ?? "pending"} owned by ${owner}`,
           next: entryStepId
             ? `Inspect: rig workflow show ${instanceId} | Open packet: rig queue show ${entryStepId}`
             : `Inspect: rig workflow show ${instanceId}`,
@@ -271,7 +311,14 @@ Examples:
       const qs = params.toString();
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>(`/api/workflow/list${qs ? `?${qs}` : ""}`);
-        printResult(opts.json ?? false, res.data, res.status);
+        // WF3 FR-2: human mode renders the table; --json byte-identical (BR-2).
+        if (opts.json || res.status >= 400) {
+          printResult(opts.json ?? false, res.data, res.status);
+          return;
+        }
+        const body = res.data as { instances?: unknown[] } | unknown[];
+        const rows = (Array.isArray(body) ? body : body?.instances ?? []) as Parameters<typeof renderInstanceList>[0];
+        for (const line of renderInstanceList(rows)) console.log(line);
       });
     });
 
@@ -334,7 +381,12 @@ Examples:
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>(`/api/workflow/${encodeURIComponent(instanceId)}`);
-        printResult(opts.json ?? false, res.data, res.status);
+        // WF3 FR-2: human summary headed by the status line; --json byte-identical (BR-2).
+        if (opts.json || res.status >= 400) {
+          printResult(opts.json ?? false, res.data, res.status);
+          return;
+        }
+        for (const line of renderInstanceShow(res.data as Parameters<typeof renderInstanceShow>[0])) console.log(line);
       });
     });
 
@@ -350,16 +402,39 @@ Examples:
     .action(async (instanceId: string, opts: { json?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
-        const res = await client.get<unknown>(`/api/workflow/${encodeURIComponent(instanceId)}/trace`);
-        printResult(opts.json ?? false, res.data, res.status);
+        const res = await client.get<{ instance?: unknown; trail?: unknown[] }>(
+          `/api/workflow/${encodeURIComponent(instanceId)}/trace`,
+        );
+        // WF3 FR-2: human mode renders the per-step tree (mini-req 2's
+        // one-screen bar); --json byte-identical (BR-2).
+        if (opts.json || res.status >= 400 || !res.data?.instance) {
+          printResult(opts.json ?? false, res.data, res.status);
+          return;
+        }
+        const instance = res.data.instance as Parameters<typeof renderTraceTree>[0];
+        const trail = (res.data.trail ?? []) as Parameters<typeof renderTraceTree>[1];
+        for (const line of renderTraceTree(instance, trail)) console.log(line);
       });
     });
 
+  // OPR.0.4.6.WF1 FR-8 (G6): `continue` RELABELED to its real
+  // inspector semantics. The wire has been a read-only frontier+trail
+  // inspector since Phase D v1, but the label said "Mechanically
+  // advance" and the summary printed "Advanced instance ..." — the
+  // label-vs-wire lie dies here. A true mechanical advance would mint
+  // a closure without the owner's truthful exit, violating
+  // owner-as-author + BR-2 (project is the sole advance write path) —
+  // arch-endorsed as architecture, not just wording.
   cmd
     .command("continue <instanceId>")
-    .description("Mechanically advance an instance after truthful closure (idempotent inspector in v1)")
+    .description("Inspect an instance's current frontier + step trail (read-only; advancing happens via 'rig workflow project')")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
+Read-only: reports where the instance is and how it got there so the
+frontier owner can continue truthfully. To actually advance, the packet
+OWNER closes it via:
+  $ rig workflow project --instance <id> --current-packet <qitem> --exit <exit> --actor-session <you>
+
 Examples:
   $ rig workflow continue WF01ABC
   $ rig workflow continue WF01ABC --json
@@ -368,24 +443,250 @@ Examples:
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.post<{
-          advanced?: boolean;
-          nextPacketId?: string;
-          nextOwnerSession?: string;
-          instanceStatus?: string;
+          instance?: { status?: string; currentFrontier?: string[]; currentStepId?: string | null };
+          trail?: unknown[];
         }>(`/api/workflow/${encodeURIComponent(instanceId)}/continue`, {});
         printResult(opts.json ?? false, res.data, res.status);
         const body = res.data ?? {};
-        const advanced = body.advanced !== false;
-        const nextId = asString(body.nextPacketId);
-        const nextOwner = asString(body.nextOwnerSession) ?? "(unknown)";
-        const status = body.instanceStatus ?? "(unknown)";
+        const status = body.instance?.status ?? "(unknown)";
+        const frontier = body.instance?.currentFrontier ?? [];
+        const stepId = body.instance?.currentStepId ?? null;
+        const trailLen = body.trail?.length ?? 0;
         printOutcomeSummary(opts.json ?? false, res.status, {
-          what: advanced
-            ? `Advanced instance ${instanceId}${nextId ? ` to packet ${nextId}` : ""}`
-            : `No advance for instance ${instanceId} (already at frontier or terminal)`,
-          state: `instance status = ${status}${nextId ? `; next owner = ${nextOwner}` : ""}`,
-          next: nextId ? `Inspect: rig queue show ${nextId}` : `Inspect: rig workflow trace ${instanceId}`,
+          what: `Inspected instance ${instanceId} (read-only; no state changed)`,
+          state: `status = ${status}; step = ${stepId ?? "(terminal)"}; frontier = [${frontier.join(", ")}]; trail rows = ${trailLen}`,
+          next: frontier.length > 0
+            ? `The frontier owner advances via: rig workflow project --instance ${instanceId} --current-packet ${frontier[0]} --exit <handoff|waiting|done|failed> --actor-session <owner>`
+            : `Terminal or empty frontier - see: rig workflow trace ${instanceId}`,
         });
+      });
+    });
+
+  // OPR.0.4.6.WF3 FR-1 — the follow verbs. Two verbs, ONE renderer
+  // (workflow-follow.ts). BR-1 verb honesty: `run` instantiates AND
+  // follows; `watch` ONLY watches — neither advances a step (project
+  // remains the sole advance path). Outcome-as-exit-code by default
+  // (the kubectl choice): completed=0, workflow-failed=3 (distinct
+  // from the shipped 1=4xx / 2=5xx transport codes), so
+  // `rig workflow run … && next-thing` is honest in scripts.
+  cmd
+    .command("run <specPath>")
+    .description("Instantiate a workflow AND follow it live to a terminal state (exit 0 completed / 3 failed)")
+    .requiredOption("--root-objective <text>", "Root objective for the run")
+    .requiredOption("--created-by <session>", "Session creating the instance (canonical <member>@<rig>)")
+    .option("--entry-owner <session>", "Override default entry-step owner")
+    .option("--rig <name>", "Bind the instance to this rig (overrides the spec's target.rig default; roles resolve to seats on this rig)")
+    .option("--json", "Stream events as JSON lines for agents")
+    .addHelpText("after", `
+Streams each step event as it happens; exits when the workflow reaches
+a terminal state. Exit codes: 0 = completed, 3 = workflow failed,
+1/2 = transport errors (4xx/5xx). If the event stream drops, the
+command reconnects, then degrades to polling — announced, never a
+silent freeze.
+
+Examples:
+  $ rig workflow run workflows/conveyor.workflow.md \\
+      --root-objective "Ship it" --created-by orch-lead@my-rig
+  $ rig workflow run ./spec.yaml --root-objective x --created-by a@b --json
+`)
+    .action(async (specPath: string, opts: {
+      rootObjective: string;
+      createdBy: string;
+      entryOwner?: string;
+      rig?: string;
+      json?: boolean;
+    }) => {
+      const deps = getDeps();
+      await withClient(deps, async (client) => {
+        const res = await client.post<{
+          instanceId?: string;
+          instance?: { instanceId?: string };
+          advisories?: string[];
+        }>("/api/workflow/instantiate", {
+          specPath,
+          rootObjective: opts.rootObjective,
+          createdBySession: opts.createdBy,
+          entryOwnerSession: opts.entryOwner,
+          targetRig: opts.rig,
+        });
+        printWorkflowAdvisories(res.data?.advisories);
+        // The daemon returns the nested InstantiateResult shape
+        // ({instance:{instanceId}}); tolerate a flattened {instanceId}
+        // too (walk-caught: reading only the flat field made `run`
+        // print-and-exit-0 without ever following — the same
+        // flattening confusion as the pre-existing instantiate
+        // summary polish note from WF-1 rev1-r2).
+        const instanceId =
+          asString(res.data?.instance?.instanceId) ?? asString(res.data?.instanceId);
+        if (res.status >= 400 || !instanceId) {
+          printResult(opts.json ?? false, res.data, res.status);
+          return;
+        }
+        if (!opts.json) console.log(`● instance ${instanceId} created — following`);
+        const code = await followInstance(client, instanceId, { json: opts.json ?? false });
+        if (code !== 0) process.exitCode = code;
+      });
+    });
+
+  cmd
+    .command("watch <instanceId>")
+    .description("Attach to an in-flight instance and follow it live (read-only; exit mirrors the outcome)")
+    .option("--json", "Stream events as JSON lines for agents")
+    .addHelpText("after", `
+Read-only: renders the instance's current state (snapshot), then
+streams live events until a terminal state. Attaching to an already
+fast-moving instance is safe — steps that closed before attach render
+from the snapshot exactly once. Exit codes: 0 = completed, 3 =
+workflow failed, 1/2 = transport errors.
+
+Examples:
+  $ rig workflow watch WF01ABC
+  $ rig workflow watch WF01ABC --json
+`)
+    .action(async (instanceId: string, opts: { json?: boolean }) => {
+      const deps = getDeps();
+      await withClient(deps, async (client) => {
+        const code = await followInstance(client, instanceId, { json: opts.json ?? false });
+        if (code !== 0) process.exitCode = code;
+      });
+    });
+
+  // OPR.0.4.6.WF3 FR-4 — the ONE WF-3 mutation. BR-1: `route` routes;
+  // it NEVER advances a step (hop count untouched; project remains the
+  // sole advance path). Exception-lane by usage, not by gate.
+  cmd
+    .command("route <instanceId>")
+    .description("Re-route the current frontier step to a new owner (same step, honest handoff closure; never advances)")
+    .requiredOption("--to <session>", "New owner session (canonical <member>@<rig>)")
+    .requiredOption("--actor-session <session>", "Session performing the re-route (recorded as provenance)")
+    .option("--reason <text>", "Why the step is being re-routed (recorded in the audit trail)")
+    .option("--json", "JSON output for agents")
+    .addHelpText("after", `
+Use when a step's owner is unresponsive (dead seat, compaction) and the
+work should continue from the SAME step under a new owner. The old
+owner's stale close attempts are structurally rejected afterwards
+(packet_not_on_frontier).
+
+Examples:
+  $ rig workflow route WF01ABC --to dev2-driver@my-rig \\
+      --actor-session orch-lead@my-rig --reason "owner seat dead"
+`)
+    .action(async (instanceId: string, opts: {
+      to: string;
+      actorSession: string;
+      reason?: string;
+      json?: boolean;
+    }) => {
+      const deps = getDeps();
+      await withClient(deps, async (client) => {
+        const res = await client.post<{
+          stepId?: string | null;
+          closedPacketId?: string;
+          newPacketId?: string;
+          fromSession?: string;
+          toSession?: string;
+          instanceStatus?: string;
+        }>(`/api/workflow/${encodeURIComponent(instanceId)}/route`, {
+          toSession: opts.to,
+          actorSession: opts.actorSession,
+          reason: opts.reason,
+        });
+        printResult(opts.json ?? false, res.data, res.status);
+        const body = res.data ?? {};
+        printOutcomeSummary(opts.json ?? false, res.status, {
+          what: `Re-routed step ${body.stepId ?? "?"} from ${body.fromSession ?? "?"} to ${body.toSession ?? opts.to} (packet ${body.closedPacketId ?? "?"} → ${body.newPacketId ?? "?"})`,
+          state: `instance ${instanceId} = ${body.instanceStatus ?? "active"}; same step, new owner; no step advanced`,
+          next: `The new owner advances via: rig workflow project --instance ${instanceId} --current-packet ${body.newPacketId ?? "<packet>"} --exit <exit> --actor-session ${opts.to}`,
+        });
+      });
+    });
+
+  // OPR.0.4.6.WF5 FR-4 — resume: redrive a FAILED instance from the
+  // failed step (BR-1 verb honesty: resume re-drives, it never advances
+  // a step itself and never re-runs completed steps; waiting instances
+  // resume via the shipped project path, not this verb).
+  cmd
+    .command("resume <instanceId>")
+    .description("Redrive a FAILED instance from its failed step (completed steps never re-run; one fresh max_hops window)")
+    .requiredOption("--actor-session <session>", "Session performing the resume (recorded as provenance)")
+    .option("--decision <text>", "Durable instruction for the step owner (lands in the redrive packet)")
+    .option("--json", "JSON output for agents")
+    .addHelpText("after", `
+Use after diagnosing an exception item: the instance returns to active,
+REBOUND to the step that failed, with a fresh packet routed to that
+step's re-resolved owner. The trail is preserved and extended; the
+resolved exception occurrence closes; a NEW failure of the same step
+raises a NEW occurrence honestly.
+
+Examples:
+  $ rig workflow resume WF01ABC --actor-session orch-lead@my-rig \\
+      --decision "flaky fixture fixed in commit abc123 — retry"
+`)
+    .action(async (instanceId: string, opts: {
+      actorSession: string;
+      decision?: string;
+      json?: boolean;
+    }) => {
+      const deps = getDeps();
+      await withClient(deps, async (client) => {
+        const res = await client.post<{
+          stepId?: string;
+          newPacketId?: string;
+          ownerSession?: string;
+          resumeCount?: number;
+          exceptionItemsClosed?: number;
+        }>(`/api/workflow/${encodeURIComponent(instanceId)}/resume`, {
+          actorSession: opts.actorSession,
+          decision: opts.decision,
+        });
+        printResult(opts.json ?? false, res.data, res.status);
+        const body = res.data ?? {};
+        printOutcomeSummary(opts.json ?? false, res.status, {
+          what: `Redrove instance ${instanceId} from step ${body.stepId ?? "?"} (redrive #${body.resumeCount ?? "?"}; packet ${body.newPacketId ?? "?"} → ${body.ownerSession ?? "?"}; ${body.exceptionItemsClosed ?? 0} exception item(s) resolved)`,
+          state: `instance ${instanceId} = active, rebound to ${body.stepId ?? "?"}; completed steps untouched; fresh max_hops window`,
+          next: `The owner advances via: rig workflow project --instance ${instanceId} --current-packet ${body.newPacketId ?? "<packet>"} --exit <exit> --actor-session ${body.ownerSession ?? "<owner>"}`,
+        });
+      });
+    });
+
+  // OPR.0.4.6.WF3 FR-3 part B — the needs-attention rollup. CLI-SIDE
+  // composition per the arch ruling (Rev-4 rails): consumes the
+  // API-carried instance.deadline classification + instance.status
+  // from the SHIPPED read surface; counting/grouping/rendering only —
+  // NO threshold or class is ever computed here, NO daemon route was
+  // added (the WF-4-era web UI adds a daemon rollup endpoint under its
+  // own authorization when it needs one; this verb is not the
+  // permanent home of that composition).
+  cmd
+    .command("status")
+    .description("Which instances need attention: counts + one row per failed/stuck/waiting instance with reason + next action (read-only)")
+    .option("--json", "Rollup as JSON for agents")
+    .addHelpText("after", `
+Answers "what needs me" (list answers "what exists"). Every
+attention-worthy instance appears exactly once with ALL its classes
+(failed / stuck / waiting) and the actionable next step. A clean fleet
+renders the proven-empty statement with counts — never a blank.
+
+Examples:
+  $ rig workflow status
+  $ rig workflow status --json | jq '.attention[] | {instanceId, classes}'
+`)
+    .action(async (opts: { json?: boolean }) => {
+      const deps = getDeps();
+      await withClient(deps, async (client) => {
+        const res = await client.get<unknown>("/api/workflow/list");
+        if (res.status >= 400) {
+          printResult(opts.json ?? false, res.data, res.status);
+          return;
+        }
+        const body = res.data as { instances?: unknown[] } | unknown[];
+        const rows = (Array.isArray(body) ? body : body?.instances ?? []) as Parameters<typeof composeAttentionRollup>[0];
+        const rollup = composeAttentionRollup(rows);
+        if (opts.json) {
+          console.log(JSON.stringify(rollup));
+          return;
+        }
+        for (const line of renderStatus(rollup)) console.log(line);
       });
     });
 

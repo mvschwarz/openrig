@@ -10,6 +10,7 @@
 // U4 provenance line, never a blank band.
 
 import { useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { cn } from "../../lib/utils.js";
 import { VELLUM_CARD } from "./vellum.js";
 import type { NeedsYouBand, NeedsYouItem } from "../../hooks/useReview.js";
@@ -61,6 +62,22 @@ function ExpandedCard({
         <p data-testid="derived-evidence" className="font-mono text-[10px] text-amber-800">
           ▲ {item.derived.evidence} · threshold: {item.derived.threshold}
         </p>
+      ) : null}
+      {/* OPR.0.4.6.WF4 FR-3 — the WEB DESTINATION for workflow-sourced rows. The
+          join is the Q6 structured `item.workflow` pointer ONLY (stamped
+          daemon-side) — NEVER prose from identity/evidenceRef/summary (the
+          anti-prose rule; P3 test). The ?step= anchor opens the gated/failed
+          step. Absent on non-workflow rows → renders nothing. */}
+      {item.workflow ? (
+        <Link
+          to="/workflow/instance/$instanceId"
+          params={{ instanceId: item.workflow.instanceId }}
+          search={item.workflow.stepId ? { step: item.workflow.stepId } : {}}
+          data-testid={`needs-you-workflow-link-${item.identity}`}
+          className="inline-block border border-outline px-3 py-1 font-mono text-[11px] uppercase hover:bg-surface-variant"
+        >
+          View Instance →
+        </Link>
       ) : null}
       {item.evidenceRef ? (
         <div>

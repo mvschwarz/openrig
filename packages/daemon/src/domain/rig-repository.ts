@@ -22,12 +22,12 @@ import type {
  * Used by node-inventory and ps-projection to derive `lifecycleState=recoverable`
  * post-L1 cold-start. Distinct from `findLatestAutoPreDown`, which filters by kind.
  */
-export function findLatestUsableSnapshot(db: Database.Database, rigId: string): Snapshot | null {
-  const row = db.prepare(
-    "SELECT * FROM snapshots WHERE rig_id = ? ORDER BY created_at DESC, id DESC LIMIT 1"
-  ).get(rigId) as { id: string; rig_id: string; kind: string; status: string; data: string; created_at: string } | undefined;
-  if (!row) return null;
+interface SnapshotRow { id: string; rig_id: string; kind: string; status: string; data: string; created_at: string }
 
+/** Shared row → usable-Snapshot mapping (single source of truth for the parse +
+ *  the ≥1-resume-token usability rule), used by both the single-rig and the
+ *  FS-1 W1.2 all-rigs batched reads so their semantics are byte-identical. */
+function snapshotFromRowIfUsable(row: SnapshotRow): Snapshot | null {
   let data: SnapshotData;
   try {
     data = JSON.parse(row.data) as SnapshotData;
@@ -49,6 +49,37 @@ export function findLatestUsableSnapshot(db: Database.Database, rigId: string): 
     data,
     createdAt: row.created_at,
   };
+}
+
+export function findLatestUsableSnapshot(db: Database.Database, rigId: string): Snapshot | null {
+  const row = db.prepare(
+    "SELECT * FROM snapshots WHERE rig_id = ? ORDER BY created_at DESC, id DESC LIMIT 1"
+  ).get(rigId) as SnapshotRow | undefined;
+  if (!row) return null;
+  return snapshotFromRowIfUsable(row);
+}
+
+/**
+ * FS-1 W1.2 — the all-rigs batched form of `findLatestUsableSnapshot`: the
+ * latest snapshot per rig in ONE query (same `created_at DESC, id DESC` order),
+ * each mapped through the shared `snapshotFromRowIfUsable`. Rigs with no usable
+ * snapshot are simply absent from the map (callers default to null). Rides the
+ * arch-D1.1 sibling-audit `snapshots(rig_id, created_at)` index candidate.
+ */
+export function findLatestUsableSnapshotsForAllRigs(db: Database.Database): Map<string, Snapshot> {
+  const rows = db.prepare(`
+    SELECT s.* FROM snapshots s
+    WHERE s.id = (
+      SELECT s2.id FROM snapshots s2 WHERE s2.rig_id = s.rig_id
+      ORDER BY s2.created_at DESC, s2.id DESC LIMIT 1
+    )
+  `).all() as SnapshotRow[];
+  const out = new Map<string, Snapshot>();
+  for (const row of rows) {
+    const snap = snapshotFromRowIfUsable(row);
+    if (snap) out.set(row.rig_id, snap);
+  }
+  return out;
 }
 
 /**

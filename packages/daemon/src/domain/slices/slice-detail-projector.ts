@@ -24,6 +24,7 @@ import * as path from "node:path";
 import type Database from "better-sqlite3";
 import type { SliceIndexer, SliceRecord, SliceProofPacket } from "./slice-indexer.js";
 import type { WorkflowSpecCache } from "../workflow-spec-cache.js";
+import { sessionRigOf } from "../session-name.js";
 import {
   findSliceWorkflowBinding,
   type SliceWorkflowBinding,
@@ -699,10 +700,9 @@ function truncate(s: string, n: number): string {
 
 function sessionRigKey(session: string): string {
   // Sessions are usually "<member>@<rig>" — the rig portion is the key.
-  // Sessions without an @ are treated as their own rig key.
-  const idx = session.lastIndexOf("@");
-  if (idx === -1) return session;
-  return session.slice(idx + 1);
+  // Non-canonical names (no @, legacy, malformed) are their own rig key.
+  // OPR.0.4.6.MH1 FR-8: the shared parse contract (greedy first-@ rig).
+  return sessionRigOf(session) ?? session;
 }
 
 function inferPassFailBadge(content: string): "pass" | "fail" | "partial" | "unknown" {

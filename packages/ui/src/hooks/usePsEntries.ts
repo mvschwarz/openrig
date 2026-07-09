@@ -1,4 +1,6 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { withHostParam } from "../lib/host-param.js";
+import { useSelectedHostId } from "./useHosts.js";
 
 export interface PsEntry {
   rigId: string;
@@ -28,16 +30,20 @@ export interface PsEntry {
   latestSnapshot: string | null;
 }
 
-async function fetchPsEntries(): Promise<PsEntry[]> {
-  const res = await fetch("/api/ps");
+async function fetchPsEntries(hostId: string): Promise<PsEntry[]> {
+  // OPR.0.4.6.MH2 FR-2 — selected-host envelope; origin shape verbatim;
+  // local path unchanged (withHostParam is identity for local).
+  const res = await fetch(withHostParam("/api/ps", hostId));
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
 export function usePsEntries() {
+  const hostId = useSelectedHostId();
   return useQuery({
-    queryKey: ["ps"],
-    queryFn: fetchPsEntries,
+    queryKey: ["ps", hostId],
+    queryFn: () => fetchPsEntries(hostId),
     refetchInterval: 3_000,
+    placeholderData: keepPreviousData,
   });
 }

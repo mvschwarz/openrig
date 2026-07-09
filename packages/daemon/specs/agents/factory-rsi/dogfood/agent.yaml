@@ -1,0 +1,29 @@
+name: factory-rsi-dogfood
+version: "1.0"
+description: Dogfood agent — continuously uses the SHIPPED product out-of-band and records findings that feed the next RSI plan cycle
+
+defaults:
+  runtime: claude-code
+
+imports:
+  - ref: local:../../shared
+
+profiles:
+  default:
+    uses:
+      skills: [using-superpowers, openrig-user, mission-slice-sop, dogfood, systematic-debugging, verification-before-completion]
+      guidance: []
+      subagents: []
+      runtime_resources: [shared:claude-default-settings, shared:claude-default-mcp, shared:codex-default-config]
+
+resources:
+  guidance:
+    - id: role
+      path: guidance/role.md
+
+startup:
+  files:
+    - path: guidance/role.md
+      delivery_hint: send_text
+      required: true
+  actions: []

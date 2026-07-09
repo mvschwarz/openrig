@@ -218,11 +218,15 @@ export function verifyStartupProof(
  * the current challenge was rejected; `n-a` = never challenged (resumed /
  * non-agent / skip-harness). NEVER derived from startup_status.
  */
-export function deriveOriented(db: Database.Database, nodeId: string): NodeOriented {
-  const rows = db.prepare(
-    "SELECT type, payload, seq FROM events WHERE node_id = ? AND type IN ('node.startup_challenged','node.startup_proof_verified','node.startup_proof_rejected') ORDER BY seq DESC"
-  ).all(nodeId) as Array<{ type: string; payload: string; seq: number }>;
+type OrientedEventRow = { type: string; payload: string; seq: number };
 
+/**
+ * The pure oriented fold over ONE node's proof events (seq DESC). Extracted
+ * verbatim from the prior inline `deriveOriented` body so the per-node reader
+ * and the FS-1 W1.3 S2 batched builder (`buildOrientedMap`) share ONE
+ * implementation — same verdicts by construction, no drift.
+ */
+function orientedFromRows(rows: OrientedEventRow[]): NodeOriented {
   // Latest challenge governs.
   const challengeRow = rows.find((r) => r.type === "node.startup_challenged");
   if (!challengeRow) return "n-a";
@@ -243,4 +247,36 @@ export function deriveOriented(db: Database.Database, nodeId: string): NodeOrien
     return row.type === "node.startup_proof_verified" ? "verified" : "rejected";
   }
   return "missing";
+}
+
+export function deriveOriented(db: Database.Database, nodeId: string): NodeOriented {
+  const rows = db.prepare(
+    "SELECT type, payload, seq FROM events WHERE node_id = ? AND type IN ('node.startup_challenged','node.startup_proof_verified','node.startup_proof_rejected') ORDER BY seq DESC"
+  ).all(nodeId) as OrientedEventRow[];
+  return orientedFromRows(rows);
+}
+
+/**
+ * FS-1 W1.3 S2 — batch `deriveOriented` for the whole fleet in ONE query
+ * instead of one query per node (the ~175-query-per-poll residual). Fetches all
+ * proof events, groups by `node_id` (ORDER BY node_id, seq DESC preserves each
+ * node's seq-DESC order exactly), and runs the SAME `orientedFromRows` fold per
+ * node. Byte-identical to per-node `deriveOriented`: `deriveOriented` is
+ * node-scoped, so the per-node subset of rows + the identical fold yield the
+ * identical verdict. Nodes with no proof events are simply absent (caller
+ * defaults to "n-a", matching the no-challenge branch).
+ */
+export function buildOrientedMap(db: Database.Database): Map<string, NodeOriented> {
+  const rows = db.prepare(
+    "SELECT node_id, type, payload, seq FROM events WHERE type IN ('node.startup_challenged','node.startup_proof_verified','node.startup_proof_rejected') ORDER BY node_id, seq DESC"
+  ).all() as Array<{ node_id: string; type: string; payload: string; seq: number }>;
+  const byNode = new Map<string, OrientedEventRow[]>();
+  for (const r of rows) {
+    let list = byNode.get(r.node_id);
+    if (!list) { list = []; byNode.set(r.node_id, list); }
+    list.push({ type: r.type, payload: r.payload, seq: r.seq });
+  }
+  const out = new Map<string, NodeOriented>();
+  for (const [nodeId, nodeRows] of byNode) out.set(nodeId, orientedFromRows(nodeRows));
+  return out;
 }

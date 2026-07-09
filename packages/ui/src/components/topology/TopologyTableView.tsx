@@ -33,6 +33,8 @@ import { inferPodName } from "../../lib/display-name.js";
 import { useCmuxLaunch } from "../../hooks/useCmuxLaunch.js";
 import { useTopologyActivity } from "../../hooks/useTopologyActivity.js";
 import { usePrefersReducedMotion } from "../../hooks/usePrefersReducedMotion.js";
+import { useSelectedHostId } from "../../hooks/useHosts.js";
+import { LOCAL_HOST_ID, withHostParam } from "../../lib/host-param.js";
 import {
   buildTopologySessionIndex,
   type TopologyActivityBaseline,
@@ -45,8 +47,8 @@ import { RuntimeBadge, ToolMark } from "../graphics/RuntimeMark.js";
 import { formatCompactTokenCount, formatTokenTotalTitle, sumTokenCounts } from "../../lib/token-format.js";
 import { contextUsageTextClass } from "../ContextUsageRing.js";
 
-async function fetchNodeInventory(rigId: string): Promise<NodeInventoryEntry[]> {
-  const res = await fetch(`/api/rigs/${encodeURIComponent(rigId)}/nodes`);
+async function fetchNodeInventory(rigId: string, hostId: string): Promise<NodeInventoryEntry[]> {
+  const res = await fetch(withHostParam(`/api/rigs/${encodeURIComponent(rigId)}/nodes`, hostId));
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -298,24 +300,45 @@ function agentColumns(): ColumnDef<AgentRow>[] {
       // V0.3.1 slice 14 walk-item 16: action column shows cmux +
       // terminal-preview side-by-side, no hover gate. Both buttons
       // render at all times for predictable affordances.
-      cell: ({ row }) => (
-        <span className="inline-flex items-center gap-1.5" data-testid={`topology-table-actions-${row.original.logicalId}`}>
-          <CmuxButton row={row.original} />
-          {row.original.rigId ? (
-            <TerminalPreviewPopover
-              rigId={row.original.rigId}
-              logicalId={row.original.logicalId}
-              sessionName={row.original.sessionName ?? null}
-              reducedMotion={false}
-              testIdPrefix={`topology-table-${row.original.logicalId}`}
-              buttonClassName="inline-flex h-7 w-7 items-center justify-center border border-outline-variant bg-surface-lowest/65 text-on-surface shadow-[1px_1px_0_rgba(46,52,46,0.12)] transition-colors hover:bg-surface-low hover:text-on-surface focus:outline-none focus:ring-2 focus:ring-on-surface/20"
-              progressive
-            />
-          ) : null}
-        </span>
-      ),
+      cell: ({ row }) => <TopologyActionsCell row={row.original} />,
     },
   ];
+}
+
+/** OPR.0.4.6.MH2 rev1-r2 B1 — cmux launch + terminal preview are LOCAL
+ *  actions (bare local POST / local session reads); with a remote host
+ *  selected the row data is the REMOTE host's, so the local affordances
+ *  are gated behind an honest read-only marker (FR-7: no cross-host
+ *  mutation offered on remote views). */
+function TopologyActionsCell({ row }: { row: AgentRow }) {
+  const isRemote = useSelectedHostId() !== LOCAL_HOST_ID;
+  if (isRemote) {
+    return (
+      <span
+        data-testid={`topology-table-actions-${row.logicalId}`}
+        data-remote-readonly="true"
+        className="font-mono text-[9px] uppercase tracking-wide text-on-surface-variant"
+      >
+        read-only
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1.5" data-testid={`topology-table-actions-${row.logicalId}`}>
+      <CmuxButton row={row} />
+      {row.rigId ? (
+        <TerminalPreviewPopover
+          rigId={row.rigId}
+          logicalId={row.logicalId}
+          sessionName={row.sessionName ?? null}
+          reducedMotion={false}
+          testIdPrefix={`topology-table-${row.logicalId}`}
+          buttonClassName="inline-flex h-7 w-7 items-center justify-center border border-outline-variant bg-surface-lowest/65 text-on-surface shadow-[1px_1px_0_rgba(46,52,46,0.12)] transition-colors hover:bg-surface-low hover:text-on-surface focus:outline-none focus:ring-2 focus:ring-on-surface/20"
+          progressive
+        />
+      ) : null}
+    </span>
+  );
 }
 
 export function TopologyTableView({ rigIdScope, podNameScope }: { rigIdScope?: string; podNameScope?: string }) {
@@ -323,6 +346,7 @@ export function TopologyTableView({ rigIdScope, podNameScope }: { rigIdScope?: s
   // center page (parity with graph node click + Explorer tree click +
   // Topology Tree details-icon-retired contract).
   const navigate = useNavigate();
+  const hostId = useSelectedHostId();
   const { data: rigs } = useRigSummary();
   const reducedMotion = usePrefersReducedMotion();
   const scopedRigs = useMemo(
@@ -338,8 +362,8 @@ export function TopologyTableView({ rigIdScope, podNameScope }: { rigIdScope?: s
   // stable across renders even when rigs grows from undefined to [N].
   const inventoryResults = useQueries({
     queries: scopedRigs.map((r) => ({
-      queryKey: ["rig", r.id, "nodes"] as const,
-      queryFn: () => fetchNodeInventory(r.id),
+      queryKey: ["rig", r.id, "nodes", hostId] as const,
+      queryFn: () => fetchNodeInventory(r.id, hostId),
       refetchInterval: 30_000,
     })),
   });

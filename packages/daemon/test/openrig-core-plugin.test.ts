@@ -31,6 +31,8 @@ const EXPECTED_SKILLS = [
   "forming-an-openrig-mental-model",
   "mission-slice-sop",
   "openrig-architect",
+  "openrig-cmux",
+  "openrig-herdr",
   "openrig-operator",
   "openrig-user",
   "queue-handoff",
@@ -110,7 +112,7 @@ describe("openrig-core plugin — skills (HG-2.1 skill content per agentskills.i
     expect(desc.length).toBeLessThanOrEqual(1024);
   });
 
-  it("ships exactly the 9 expected skills (no drift; no missing skills; slice 29 deleted 4, slice 32 added mission-slice-sop)", () => {
+  it("ships exactly the 11 expected skills (no drift; no missing skills; slice 29 deleted 4, slice 32 added mission-slice-sop, OPR.0.4.6.02 added openrig-herdr/openrig-cmux)", () => {
     const skillsDir = nodePath.join(PLUGIN_ROOT, "skills");
     const actual = fs.readdirSync(skillsDir).filter((f) =>
       fs.statSync(nodePath.join(skillsDir, f)).isDirectory()

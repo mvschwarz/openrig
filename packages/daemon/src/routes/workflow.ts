@@ -42,15 +42,26 @@ export function workflowRoutes(): Hono {
     err: unknown,
   ): Response {
     if (err instanceof WorkflowSpecError) {
+      // OPR.0.4.6.WF1 FR-7 (guard round-2 blocker): the new strict-
+      // validation rejections (spec_unknown_key, spec_field_invalid)
+      // are operator/spec misuse — structured 400s, never 500s (the
+      // same class as the FR-5 conflict mapping, on the spec branch).
       const status =
         err.code === "spec_file_missing" ? 404
         : err.code === "spec_yaml_invalid" || err.code === "spec_shape_invalid" || err.code === "spec_field_missing" ? 400
+        : err.code === "spec_unknown_key" || err.code === "spec_field_invalid" ? 400
         : err.code === "spec_not_found" ? 404
         : 500;
       return c.json({ error: err.code, message: err.message, ...(err.details ?? {}) }, status as 200);
     }
     if (err instanceof WorkflowInstanceError) {
-      const status = err.code === "instance_not_found" ? 404 : 500;
+      // OPR.0.4.6.WF1 FR-5 (guard blocker 1): the optimistic-concurrency
+      // loser gets the STRUCTURED conflict class — HTTP 409 with
+      // expectedVersion/actualVersion in the body — never a 500.
+      const status =
+        err.code === "instance_not_found" ? 404
+        : err.code === "instance_version_conflict" ? 409
+        : 500;
       return c.json({ error: err.code, message: err.message, ...(err.details ?? {}) }, status as 200);
     }
     if (err instanceof WorkflowProjectorError) {
@@ -64,6 +75,30 @@ export function workflowRoutes(): Hono {
         // honest about operator/spec misuse instead of falsifying it
         // as 500 internal-server-error.
         : err.code === "exit_not_allowed" ? 400
+        // OPR.0.4.6.WF2 (guard blocker 2): the new language/routing
+        // failures are EXPECTED operator/spec errors, never 500s.
+        // Authoring-time boundaries -> 400; live-state conflicts -> 409.
+        : err.code === "host_pin_remote_unsupported" ? 400
+        : err.code === "gate_target_unresolved" || err.code === "gate_handler_unresolved" ? 400
+        : err.code === "gate_human_fields_missing" || err.code === "gate_owner_unresolved" || err.code === "gate_missing" ? 400
+        : err.code === "harness_pin_unsatisfied" ? 409
+        // OPR.0.4.6.WF5 FR-4: resume rejections — live-state conflicts
+        // -> 409 (wrong instance state), unrecoverable-binding /
+        // spec-drift -> 409 (state-vs-spec conflict, operator-fixable).
+        : err.code === "instance_not_failed" ? 409
+        : err.code === "resume_step_unrecoverable" || err.code === "resume_step_missing_from_spec" ? 409
+        : err.code === "branch_target_missing" ? 409
+        // OPR.0.4.6.FAC1 (guard code-review blocker at 6e991a9d): the new
+        // bound-rig errors are EXPECTED operator/spec rejections, not 500s
+        // — the same authoring-boundary(400)/live-state-conflict(409) split.
+        // bound_rig_unknown = explicit --rig names an unregistered rig
+        // (authoring misuse → 400); bound_rig_role_uncovered = the bound
+        // rig structurally declares no seat for a required role at
+        // instantiate (spec/rig mismatch → 400); bound_rig_not_found = a
+        // persisted bound rig vanished mid-run (live state-vs-instance
+        // conflict → 409, the harness_pin/instance_version_conflict class).
+        : err.code === "bound_rig_unknown" || err.code === "bound_rig_role_uncovered" ? 400
+        : err.code === "bound_rig_not_found" ? 409
         : err.code === "packet_not_found" ? 404
         : 500;
       return c.json({ error: err.code, message: err.message, ...(err.details ?? {}) }, status as 200);
@@ -72,6 +107,7 @@ export function workflowRoutes(): Hono {
       const status =
         err.code === "unknown_destination_rig" ? 400
         : err.code === "qitem_not_found" ? 404
+        : err.code === "workflow_frontier_packet" ? 400
         : 500;
       return c.json({ error: err.code, message: err.message, ...(err.meta ?? {}) }, status as 200);
     }
@@ -97,6 +133,8 @@ export function workflowRoutes(): Hono {
         rootObjective?: string;
         createdBySession?: string;
         entryOwnerSession?: string;
+        /** OPR.0.4.6.FAC1: overrides the spec's target.rig default. */
+        targetRig?: string;
       }>()
       .catch(() => ({} as never));
     if (!body.specPath) return c.json({ error: "specPath is required" }, 400);
@@ -108,6 +146,7 @@ export function workflowRoutes(): Hono {
         rootObjective: body.rootObjective,
         createdBySession: body.createdBySession,
         entryOwnerSession: body.entryOwnerSession,
+        targetRig: body.targetRig,
       });
       return c.json(result, 201);
     } catch (err) {
@@ -149,12 +188,19 @@ export function workflowRoutes(): Hono {
     }
   });
 
+  // OPR.0.4.6.WF1 FR-2 COMPLETION FIXBACK (qitem-20260706211220-279039f5):
+  // list/show/trace carry the derived deadline verdict — the ratified
+  // FR-2 queryability clause ("queryable via list/show/trace … with
+  // the evidence (step, owner, deadline, age)"). Additive field,
+  // recomputed per read, never stored; one evaluator home
+  // (workflow-deadline.ts). trace/continue inherit it via
+  // runtime.continue()'s enriched instance.
   app.get("/list", (c) => {
     const status = c.req.query("status");
     if (status === "active" || status === "waiting" || status === "completed" || status === "failed") {
-      return c.json(getRuntime(c).instanceStore.listByStatus(status));
+      return c.json(getRuntime(c).listInstancesWithDeadline(status));
     }
-    return c.json(getRuntime(c).instanceStore.listAll());
+    return c.json(getRuntime(c).listInstancesWithDeadline());
   });
 
   // Lists every cached workflow_spec with an `isBuiltIn` flag computed
@@ -190,6 +236,9 @@ export function workflowRoutes(): Hono {
           event.type !== "workflow.next_qitem_projected" &&
           event.type !== "workflow.completed" &&
           event.type !== "workflow.failed" &&
+          // OPR.0.4.6.WF5 (rev1-r2 B2 fold): resumes stream live —
+          // run/watch followers see the redrive, not a silent gap.
+          event.type !== "workflow.resumed" &&
           event.type !== "workflow.routing_table_changed"
         ) return;
         const sse = { id: String(event.seq), data: JSON.stringify(event) };
@@ -204,6 +253,47 @@ export function workflowRoutes(): Hono {
   };
   app.get("/sse", sseHandler);
   app.get("/watch", sseHandler);
+
+  // OPR.0.4.6.WF3 FR-4 — the ONE WF-3 mutation: re-route the current
+  // frontier step (close+recreate+rebind, one scribe txn, in the
+  // runtime).
+  app.post("/:instance_id/route", async (c) => {
+    const instanceId = c.req.param("instance_id");
+    const body = await c.req
+      .json<{ toSession?: string; actorSession?: string; reason?: string }>()
+      .catch(() => ({}) as never);
+    if (!body.toSession) return c.json({ error: "toSession is required" }, 400);
+    if (!body.actorSession) return c.json({ error: "actorSession is required" }, 400);
+    try {
+      const result = await getRuntime(c).route({
+        instanceId,
+        toSession: body.toSession,
+        actorSession: body.actorSession,
+        reason: body.reason,
+      });
+      return c.json(result);
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  app.post("/:instance_id/resume", async (c) => {
+    const instanceId = c.req.param("instance_id");
+    const body = await c.req
+      .json<{ decision?: string; actorSession?: string }>()
+      .catch(() => ({}) as never);
+    if (!body.actorSession) return c.json({ error: "actorSession is required" }, 400);
+    try {
+      const result = await getRuntime(c).resume({
+        instanceId,
+        decision: body.decision,
+        actorSession: body.actorSession,
+      });
+      return c.json(result);
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
 
   app.get("/:instance_id/trace", (c) => {
     const instanceId = c.req.param("instance_id");
@@ -227,9 +317,11 @@ export function workflowRoutes(): Hono {
 
   app.get("/:instance_id", (c) => {
     const instanceId = c.req.param("instance_id");
-    const inst = getRuntime(c).instanceStore.getById(instanceId);
+    const runtime = getRuntime(c);
+    const inst = runtime.instanceStore.getById(instanceId);
     if (!inst) return c.json({ error: "instance_not_found", instanceId }, 404);
-    return c.json(inst);
+    // WF-1 FR-2 completion fixback: show carries the deadline verdict.
+    return c.json(runtime.withDeadline(inst));
   });
 
   return app;

@@ -23,6 +23,8 @@ import { useState } from "react";
 import type { SliceDetail, SpecGraphPayload } from "../../../hooks/useSlices.js";
 import { ProgressiveTerminal } from "../../terminal/ProgressiveTerminal.js";
 import { SliceWorkflowGraph } from "./SliceWorkflowGraph.js";
+import { useSelectedHostId } from "../../../hooks/useHosts.js";
+import { LOCAL_HOST_ID } from "../../../lib/host-param.js";
 
 export function TopologyTab({ topology }: { topology: SliceDetail["topology"] }) {
   const { affectedRigs, totalSeats, specGraph } = topology;
@@ -123,6 +125,25 @@ function deriveRuntimeGraph(affectedRigs: SliceDetail["topology"]["affectedRigs"
 // pins from the node-detail drawer (separate flow).
 function SeatRow({ session }: { session: string }) {
   const [open, setOpen] = useState(false);
+  // OPR.0.4.6.MH2 rev1-r2 B1: the inline preview is a LOCAL session-name
+  // read (ProgressiveTerminal, click-to-live typeable) — under a remote
+  // selection the seat renders as plain read data with no preview
+  // affordance, so a same-named LOCAL session never renders under the
+  // remote label.
+  const seatIsRemote = useSelectedHostId() !== LOCAL_HOST_ID;
+  if (seatIsRemote) {
+    return (
+      <li
+        data-testid={`topology-seat-${session}`}
+        data-remote-readonly="true"
+        className="px-3 py-1"
+      >
+        <span className="flex w-full items-baseline gap-2 font-mono text-[10px] text-on-surface">
+          <span className="flex-1 truncate">{session}</span>
+        </span>
+      </li>
+    );
+  }
   return (
     <li
       data-testid={`topology-seat-${session}`}

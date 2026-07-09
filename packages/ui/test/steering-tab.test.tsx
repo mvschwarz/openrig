@@ -60,6 +60,10 @@ function routeFetch(opts: RouteOpts = {}) {
   const { steering = STEERING_PAYLOAD, steeringStatus = 200, briefContent = BRIEF_MD } = opts;
   return (input: unknown) => {
     const url = String(input);
+    // MH-2: the selection-known files gate needs the hosts payload (local).
+    if (url.includes("/api/hosts")) {
+      return Promise.resolve(jsonResponse({ ownName: "localhost", selected: "local", hosts: [] }));
+    }
     if (url.includes("/api/steering")) {
       return Promise.resolve(
         jsonResponse(

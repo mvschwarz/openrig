@@ -19,6 +19,7 @@ import {
   UserCheck,
 } from "lucide-react";
 import { cn } from "../../lib/utils.js";
+import { parseSessionName } from "../../lib/session-name.js";
 import { proofAssetUrl } from "../../hooks/useSlices.js";
 import { ActorMark, ToolMark } from "../graphics/RuntimeMark.js";
 
@@ -166,9 +167,11 @@ export function humanizeCodeLabel(value: string): string {
 export function compactSessionLabel(session: string | undefined | null): string {
   if (!session) return "unknown";
   if (session === "human@host") return "human@host";
-  const [name, rig] = session.split("@");
-  if (!rig) return session;
-  return `${name}@${rig}`;
+  // OPR.0.4.6.MH1 FR-8: the shared parse contract (greedy first-@ rig —
+  // no silent truncation of anything after a second "@").
+  const parsed = parseSessionName(session);
+  if (parsed.kind !== "canonical") return session;
+  return `${parsed.member}@${parsed.rig}`;
 }
 
 export function formatFriendlyDate(value: string | undefined | null): string {

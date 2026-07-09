@@ -12,6 +12,7 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
+import type { TmuxOptionDefaultsApplier } from "../src/domain/tmux-option-defaults.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import type { PersistedEvent } from "../src/domain/types.js";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -53,7 +54,11 @@ describe("NodeLauncher", () => {
     db.close();
   });
 
-  function createLauncher(tmux?: TmuxAdapter, sessionEnv?: Record<string, string | undefined>) {
+  function createLauncher(
+    tmux?: TmuxAdapter,
+    sessionEnv?: Record<string, string | undefined>,
+    tmuxOptionDefaults?: TmuxOptionDefaultsApplier,
+  ) {
     return new NodeLauncher({
       db,
       rigRepo,
@@ -61,6 +66,7 @@ describe("NodeLauncher", () => {
       eventBus,
       tmuxAdapter: tmux ?? mockTmuxAdapter(),
       sessionEnv,
+      tmuxOptionDefaults,
     });
   }
 
@@ -478,6 +484,34 @@ describe("NodeLauncher", () => {
       expect(envArg).toBeDefined();
       expect(envArg!.OPENRIG_NODE_ID).toBe(node.id);
       expect(envArg!.OPENRIG_SESSION_NAME).toContain("dev1-impl");
+    });
+  });
+
+  // OPR.0.4.6.02 S1 — the shared tmux option-defaults applier is invoked on the
+  // JUST-CREATED session, and its warnings fold into the launch result.
+  describe("tmux option defaults (OPR.0.4.6.02 S1)", () => {
+    it("applies option defaults to the created session and folds applier warnings", async () => {
+      const { rig } = seedRigWithNode();
+      const applyToFreshSession = vi.fn(async () => ['tmux "mouse" option not set for r01-dev1-impl: boom']);
+      const applier = { applyToFreshSession } as unknown as TmuxOptionDefaultsApplier;
+
+      const result = await createLauncher(undefined, undefined, applier).launchNode(rig.id, "dev1-impl");
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("expected ok");
+      // Applied exactly once, to the just-created session name (never a pre-existing one).
+      expect(applyToFreshSession).toHaveBeenCalledTimes(1);
+      expect(applyToFreshSession).toHaveBeenCalledWith(result.sessionName);
+      // The applier's non-fatal warnings ride the launch result.
+      expect(result.warnings).toContain('tmux "mouse" option not set for r01-dev1-impl: boom');
+    });
+
+    it("without an applier injected, launch succeeds and applies nothing (existing-behavior safety)", async () => {
+      const { rig } = seedRigWithNode();
+      const result = await createLauncher().launchNode(rig.id, "dev1-impl");
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("expected ok");
+      expect(result.warnings).toBeUndefined();
     });
   });
 

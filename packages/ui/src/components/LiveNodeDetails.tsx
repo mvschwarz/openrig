@@ -38,6 +38,8 @@ import { SeatNotificationBanner } from "./SeatNotificationBanner.js";
 import { FileReferenceTrigger } from "./drawer-triggers/FileReferenceTrigger.js";
 import { displayPodName, inferPodName } from "../lib/display-name.js";
 import { copyText } from "../lib/copy-text.js";
+import { useSelectedHostId } from "../hooks/useHosts.js";
+import { LOCAL_HOST_ID } from "../lib/host-param.js";
 // V0.3.1 slice 25 follow-on — activity helpers no longer imported here
 // (LiveNodeCurrentState was removed; SeatOverviewTable + StatusSection
 // own their own activity rendering paths).
@@ -183,6 +185,11 @@ function extractAgentPluginIds(review: unknown): string[] {
 }
 
 function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId: string; data: NodeDetailData }) {
+  // OPR.0.4.6.MH2 rev1-r2 B1: every button here is a LOCAL action (cmux-open
+  // POST; tmux-attach / resume commands for THIS host's sessions). Under a
+  // remote selection the row renders an honest read-only marker instead —
+  // acting on a remote host is MH-3/MH-4.
+  const actionsAreRemote = useSelectedHostId() !== LOCAL_HOST_ID;
   const handleCopyAttach = async () => {
     if (data.tmuxAttachCommand) await copyText(data.tmuxAttachCommand);
   };
@@ -196,6 +203,17 @@ function ActionButtonsRow({ rigId, logicalId, data }: { rigId: string; logicalId
   const handleCopyResume = async () => {
     if (data.resumeCommand) await copyText(data.resumeCommand);
   };
+  if (actionsAreRemote) {
+    return (
+      <div
+        data-testid="live-node-actions-remote-readonly"
+        data-remote-readonly="true"
+        className="font-mono text-[9px] uppercase tracking-wide text-on-surface-variant"
+      >
+        read-only — remote host
+      </div>
+    );
+  }
   return (
     <div data-testid="live-node-actions" className="flex flex-wrap gap-2">
       <button
@@ -478,6 +496,22 @@ function DetailsTab({
 // chrome class is preserved verbatim so the visual feel matches the
 // pre-slice-25 terminal tab.
 function InlineTerminal({ data }: { data: NodeDetailData }) {
+  // OPR.0.4.6.MH2 rev1-r2 B1: the inline terminal is a LOCAL session surface
+  // (session-name preview + click-to-live typeable xterm). Under a remote
+  // selection a same-named LOCAL session must never render beneath the
+  // remote seat's label — honest gate instead.
+  const terminalIsRemote = useSelectedHostId() !== LOCAL_HOST_ID;
+  if (terminalIsRemote) {
+    return (
+      <div
+        data-testid="node-detail-terminal-remote-gated"
+        className="font-mono text-[10px] text-on-surface-variant p-4"
+      >
+        Terminal not available for remote hosts — terminal streams are this
+        host&apos;s local sessions. Viewing a remote host is read-only.
+      </div>
+    );
+  }
   if (!data.canonicalSessionName) {
     return (
       <div className="font-mono text-[10px] text-on-surface-variant p-4">

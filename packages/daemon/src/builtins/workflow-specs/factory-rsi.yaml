@@ -1,0 +1,152 @@
+# OpenRig 0.4.6 canonical single-rig RSI factory MVP (OPR.0.4.6.FAC2).
+#
+# ONE rig + ONE workflow = the recursive-self-improvement factory MVP. The
+# in-band INNER LOOP is a bounded, engine-routed SDLC:
+#   plan → implement → qa_check → review → release
+# under the enforceable max_hops guard (WF-1 sanction); a failing check or
+# review routes back to implement for bounded remediation; exceptions route via
+# the WF-5 dial (orchestrator-first); the release leg PREPARES and holds the ship
+# decision at a human gate (publish is a human act). Runs on the shipped engine
+# with the v0 hardcode seam (target.rig baked + preferred_targets) — no binding
+# layer needed.
+#
+# The RSI recursion is the DECOUPLED dogfood edge: the dogfood seat runs
+# out-of-band and continuously against the SHIPPED product (not a second QA on
+# the build artifact) and feeds its findings into the next plan — ungated, with
+# no loop-stop in the MVP. The exact continuous out-of-band runtime mechanism is
+# refined in a later release; here the inner loop is in-band and dogfood is the
+# out-of-band feed, referenced by the `dogfood` role below.
+workflow:
+  id: factory-rsi
+  version: 1
+  objective: >
+    Plan, build, check, review, and release one slice as a bounded,
+    deterministic, engine-routed inner loop on a single rig. Dogfood runs
+    out-of-band against the shipped product and feeds its findings into the next
+    plan — the RSI edge, with no human required.
+  target:
+    rig: factory-rsi
+  entry:
+    role: planner
+  coordination_terminal_turn_rule: hot_potato
+  # Exceptions route orchestrator-first (the WF-5 v1.3 dial); the human knows
+  # at altitude via the awareness row. The orchestrator role below is the dial
+  # target — resolved through the same role→preferred_targets mechanism.
+  exception_routing:
+    default: orchestrator
+    orchestrator_role: orchestrator
+  roles:
+    planner:
+      skill_refs: [openrig-user, requirements-writer, writing-plans]
+      preferred_targets: [plan-planner@factory-rsi]
+    implementer:
+      skill_refs: [openrig-user, development-team, test-driven-development]
+      preferred_targets: [build-implementer@factory-rsi]
+    qa:
+      skill_refs: [openrig-user, verification-before-completion]
+      preferred_targets: [check-qa@factory-rsi]
+    reviewer:
+      skill_refs: [openrig-user, review-team, plan-review]
+      preferred_targets: [review-reviewer@factory-rsi]
+    release_manager:
+      skill_refs: [openrig-user, release-manager]
+      preferred_targets: [release-manager@factory-rsi]
+    orchestrator:
+      skill_refs: [openrig-user, orchestration-team]
+      preferred_targets: [orch-lead@factory-rsi]
+    # The dogfood role is DECOUPLED from the inner loop: it runs out-of-band
+    # against the SHIPPED product and feeds findings into the next plan (the RSI
+    # edge). It is intentionally NOT an inner-loop step here; the continuous
+    # out-of-band runtime mechanism is refined in a later release.
+    dogfood:
+      skill_refs: [openrig-user, dogfood, systematic-debugging]
+      preferred_targets: [dogfood-tester@factory-rsi]
+  steps:
+    - id: plan
+      actor_role: planner
+      objective: >
+        Turn the current input — the product corpus on cycle 1, or the recorded
+        out-of-band dogfood findings thereafter — into ONE buildable slice spec.
+        The findings arrive as recorded closure evidence, never chat.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        mode: require
+        suggested_roles: [implementer]
+    - id: implement
+      actor_role: implementer
+      objective: Build the slice per the plan and produce proof for the check.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        mode: require
+        suggested_roles: [qa]
+    - id: qa_check
+      actor_role: qa
+      objective: >
+        Check the built artifact. Passing hands to review; a FAILING check (the
+        artifact's verdict, not the step's dysfunction) routes back to implement
+        for bounded remediation.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        mode: require
+        suggested_roles: [reviewer]
+        on:
+          failed: implement
+    - id: review
+      actor_role: reviewer
+      objective: >
+        Review the artifact (cross-runtime diversity vs the builder). Passing
+        hands to the release prep; a failing review routes back to implement.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        mode: require
+        suggested_roles: [release_manager]
+        on:
+          failed: implement
+    - id: release_prep
+      actor_role: release_manager
+      objective: >
+        Prepare the release notes, docs/website updates, and the release PR, and
+        record the cycle's release evidence at `proof/PROOF.md` in the workspace
+        (the `evidence_ref` the sign-off gate points at). This is the
+        release-manager's ACTUAL work and it runs BEFORE any gate — the prepared
+        artifacts exist first; publish stays a human act (held at release_signoff).
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        # Explicit step-id route (NOT suggested_roles): release_prep and
+        # release_signoff share the release_manager actor_role, so a role-based
+        # hop would be ambiguous (it would match the first release_manager step).
+        # The prepared artifacts therefore exist BEFORE the human gate below.
+        on:
+          handoff: release_signoff
+    - id: release_signoff
+      actor_role: release_manager
+      objective: >
+        Hold the ship decision at the human gate, against the release artifacts
+        already prepared in release_prep. Approval lets the human proceed to
+        publish; nothing is published automatically.
+      allowed_exits: [done, waiting, failed]
+      gate:
+        target: human@kernel
+        summary: "RSI cycle clean; release artifacts prepared — sign off to publish (publish is a human act)."
+        # Workspace-relative pointer to the release evidence release_prep records
+        # (the same convention the shipped gated-release.yaml example uses); it is
+        # produced in the running workspace per cycle, not a slice file.
+        evidence_ref: proof/PROOF.md
+      next_hop:
+        mode: forbid
+  invariants:
+    continuation_required: true
+    preserve_lineage: true
+    closure_required: true
+    allowed_exits: [handoff, waiting, done, failed]
+  loop_guards:
+    # ENFORCEABLE (integer >= 1) — sanctions the bounded remediation loops
+    # (qa_check→implement, review→implement); the WF-1 validator requires it and
+    # the Argo unbounded-recursion lesson demands it. A trip becomes a WF-5
+    # exception; a resume grants one more bounded window (WF-5 FR-4 livelock rail).
+    max_hops: 20
+    spawn_budget: 0
+  closure:
+    success: RSI cycle clean; release candidate prepared and held at the human ship gate.
+    degraded: Cycle stopped with a named blocker or a bounded max_hops trip awaiting resume.
+    failed: Step failed as an exception; preserve the finding and route via the dial.

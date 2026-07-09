@@ -1,5 +1,5 @@
 /** Runtime hint from fingerprinting */
-export type RuntimeHint = "claude-code" | "codex" | "terminal" | "unknown";
+export type RuntimeHint = "claude-code" | "codex" | "pi" | "terminal" | "unknown";
 
 /** Confidence level of the runtime detection */
 export type Confidence = "highest" | "high" | "medium" | "low";

@@ -52,6 +52,23 @@ export interface RemoteJsonFailure {
 
 export type RemoteJsonResult = { ok: true; status: number; payload: unknown } | RemoteJsonFailure;
 
+export interface RemoteRawOptions extends RemoteJsonDeps {
+  /** REQUIRED — the caller names its deadline class explicitly. */
+  timeoutMs: number;
+}
+
+// OPR.0.4.6.MH2 FR-2/FR-7 — the read-through's transport leg. Verbatim
+// passthrough means STATUS + CONTENT-TYPE + BODY (arch P3): the origin's own
+// 404/500 IS the answer, so unlike remoteJsonRequest this variant returns the
+// full body TEXT for EVERY origin status and never collapses error bodies to
+// a detail string. Failure kinds stay transport-only (bearer/timeout/network)
+// — an origin that ANSWERED is always ok:true here. Text-only by design: the
+// v1 read allowlist carries JSON endpoints; binary surfaces (proof-asset)
+// are deliberately not allowlisted.
+export type RemoteRawResult =
+  | { ok: true; status: number; contentType: string; bodyText: string }
+  | { ok: false; kind: Exclude<RemoteJsonFailureKind, "http">; phase?: "request" | "body"; status?: number; detail: string };
+
 /** Mirrors the CLI's resolveRemoteBearer (host-registry.ts): exactly-one of
  *  bearer_env / bearer_file, resolved at call time. */
 function resolveBearer(host: HttpHostEntry, deps: RemoteJsonDeps): { ok: true; token: string } | { ok: false; detail: string } {
@@ -128,4 +145,50 @@ export async function remoteJsonRequest(host: HttpHostEntry, path: string, opts:
     ? (payload as { error: string }).error
     : "";
   return { ok: false, kind: "http", status: res.status, detail: remoteError };
+}
+
+/** One bounded daemon→daemon GET, body passed through as text for ANY origin
+ *  status (arch P3 verbatim rule). Same bearer resolution + single-deadline +
+ *  explicit body race discipline as remoteJsonRequest; never hangs, never
+ *  throws. */
+export async function remoteRawRequest(host: HttpHostEntry, path: string, opts: RemoteRawOptions): Promise<RemoteRawResult> {
+  const bearer = resolveBearer(host, opts);
+  if (!bearer.ok) return { ok: false, kind: "bearer", detail: bearer.detail };
+
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const url = `${host.url.replace(/\/$/, "")}${path}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
+
+  let res: Response;
+  try {
+    res = await fetchImpl(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${bearer.token}` },
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    if (controller.signal.aborted) return { ok: false, kind: "timeout", phase: "request", detail: "" };
+    return { ok: false, kind: "network", detail: (err as Error).message };
+  }
+
+  const abortRace = new Promise<never>((_resolve, reject) => {
+    const onAbort = () => reject(new Error("body read aborted"));
+    if (controller.signal.aborted) onAbort();
+    else controller.signal.addEventListener("abort", onAbort, { once: true });
+  });
+
+  let bodyText = "";
+  let bodyTimedOut = false;
+  try {
+    bodyText = await Promise.race([res.text(), abortRace]);
+  } catch {
+    if (controller.signal.aborted) bodyTimedOut = true;
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (bodyTimedOut) return { ok: false, kind: "timeout", phase: "body", status: res.status, detail: "" };
+  return { ok: true, status: res.status, contentType: res.headers.get("content-type") ?? "application/json", bodyText };
 }

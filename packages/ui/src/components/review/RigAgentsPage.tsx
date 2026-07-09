@@ -19,7 +19,15 @@ import { Link } from "@tanstack/react-router";
 import { useRigAgents } from "../../hooks/useReview.js";
 import { NeedsYouAccordion } from "./NeedsYouAccordion.js";
 import { AgentsBandView } from "./AgentsBandView.js";
+// OPR.0.4.6.MH5 (C4) — the FLEET band, placement option B of the founder
+// LOCK (= BOTH). v1 MOUNT ENUMERATION (the LOCK's "wherever the per-host
+// surfaces render" read as ALLOWING a single mount; the pm coherence leg
+// confirms): this /agents rig-altitude root is the ONE v1 mount. The band
+// renders NOTHING for a single-host operator, so this page stays
+// byte-identical pre-fleet (the leg-7 zero-regression pin).
+import { FleetBand } from "./FleetBand.js";
 import type { EvidenceContext } from "./EvidenceOpener.js";
+import { sessionMemberLabel } from "../../lib/session-name.js";
 
 const SURFACE_ACTOR = "human@host";
 
@@ -80,6 +88,8 @@ export function RigAgentsPage() {
 
   return (
     <div data-testid="rig-agents-page" className="mx-auto max-w-4xl space-y-5 p-4">
+      {/* MH-5: the fleet altitude's ambient band above the rig altitude. */}
+      <FleetBand />
       {/* Breadcrumb up the spine — one unbroken gesture both directions. */}
       <nav className="flex items-center gap-2 font-mono text-[10px] uppercase text-on-surface-variant">
         <Link to="/project" className="hover:underline">
@@ -142,9 +152,9 @@ export function RigAgentsPage() {
             <ul className="divide-y divide-outline-variant/50 border border-outline-variant">
               {data.settled.map((row) => (
                 <li key={`${row.qitemId}-${row.closedAtIso}`} className="flex items-center gap-2 px-2 py-1.5">
-                  <span className="font-mono text-[10px] text-on-surface-variant">{row.fromSession.split("@")[0]}</span>
+                  <span className="font-mono text-[10px] text-on-surface-variant">{sessionMemberLabel(row.fromSession)}</span>
                   <span className="text-on-surface-variant">→</span>
-                  <span className="font-mono text-[10px] text-on-surface-variant">{row.toSession.split("@")[0]}</span>
+                  <span className="font-mono text-[10px] text-on-surface-variant">{sessionMemberLabel(row.toSession)}</span>
                   <span className="min-w-0 flex-1 truncate text-[11px]" data-testid={`settled-summary-${row.qitemId}`}>
                     {row.summary ?? row.qitemId}
                   </span>

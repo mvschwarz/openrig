@@ -367,6 +367,23 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
     errors.push(`${prefix}.cwd: required non-empty string`);
   }
 
+  // OPR.0.4.6.FAC1: optional seat-side role declaration — the workflow
+  // binding layer's candidate dimension (roles bind to SEATS; a member
+  // without a role is never role-resolved, only explicitly addressable).
+  // Opt-in per seat: absent is fully legal everywhere. A PROVIDED role
+  // must validate — never silently dropped. Rejected on terminal
+  // runtime: a terminal node is not an agent seat (mirrors the
+  // session_source/starter_ref terminal rejections).
+  if (member["role"] !== undefined) {
+    if (typeof member["role"] !== "string" || !member["role"].trim()) {
+      errors.push(`${prefix}.role: must be a non-empty string`);
+    } else if (!/^[A-Za-z0-9_.-]+$/.test(member["role"])) {
+      errors.push(`${prefix}.role: must contain only letters, numbers, underscores, dots, or hyphens`);
+    } else if (member["runtime"] === "terminal") {
+      errors.push(`${prefix}.role: not valid on terminal members (a terminal node is not an agent seat and cannot be role-resolved)`);
+    }
+  }
+
   // Terminal sentinel validation: exact triple required
   const isTerminalRuntime = member["runtime"] === "terminal";
   const isTerminalRef = member["agent_ref"] === "builtin:terminal";
@@ -980,6 +997,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     runtime: m["runtime"] as string,
     codexConfigProfile: m["codex_config_profile"] as string | undefined,
     model: m["model"] as string | undefined,
+    role: m["role"] as string | undefined,
     cwd: m["cwd"] as string,
     restorePolicy: m["restore_policy"] as string | undefined,
     startup: m["startup"] ? normalizeStartupBlock(m["startup"]) : undefined,
@@ -1023,7 +1041,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
 // -- Legacy flat-node RigSpec validation (pre-reboot) --
 // TODO: Remove when AS-T08b/AS-T12 migrate all consumers
 
-const LEGACY_KNOWN_RUNTIMES = new Set(["claude-code", "codex"]);
+const LEGACY_KNOWN_RUNTIMES = new Set(["claude-code", "codex", "pi"]);
 const LEGACY_KNOWN_RESTORE_POLICIES = new Set(["resume_if_possible", "relaunch_fresh", "checkpoint_only"]);
 const LEGACY_KNOWN_EDGE_KINDS = new Set(["delegates_to", "spawned_by", "can_observe"]);
 

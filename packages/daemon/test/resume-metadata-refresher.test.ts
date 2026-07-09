@@ -231,6 +231,42 @@ describe("ResumeMetadataRefresher", () => {
     expect(sessionRegistry.updateResumeToken).not.toHaveBeenCalled();
   });
 
+  // OPR.0.4.6.02 S1 EXCLUSION — the ephemeral native-resume PROBE session
+  // (`rigged-refresh-*`) is NOT a real operator/agent seat, so it must NEVER
+  // receive the tmux option defaults. The refresher is deliberately not wired
+  // with the shared applier; this pins that the refresh path calls no tmux
+  // option-setter across a run (mouse/status/set-clipboard/copy-command).
+  it("EXCLUSION: the probe/refresh path never applies tmux option defaults", async () => {
+    const sessionRegistry = {
+      updateResumeToken: vi.fn(),
+      clearResumeToken: vi.fn(),
+      markResumeProbeResult: vi.fn(),
+    } as unknown as SessionRegistry;
+    const setSessionOption = vi.fn(async () => ({ ok: true as const }));
+    const setServerOption = vi.fn(async () => ({ ok: true as const }));
+    const refresher = new ResumeMetadataRefresher({
+      sessionRegistry,
+      tmuxAdapter: mockTmux({ setSessionOption, setServerOption } as Partial<TmuxAdapter>),
+      // deterministic probe verdict so we exercise the refresh path without a
+      // brittle live native-probe; the exclusion is about option-setters.
+      probeClaudeResume: async () => "not_resumable" as const,
+      sleep: async () => {},
+    });
+
+    await refresher.refresh([
+      {
+        sessionId: "sess-1",
+        sessionName: "dev-design@demo-rig",
+        runtime: "claude-code",
+        resumeType: "claude_native",
+        resumeToken: "abc-123",
+      },
+    ]);
+
+    expect(setSessionOption).not.toHaveBeenCalled();
+    expect(setServerOption).not.toHaveBeenCalled();
+  });
+
   // OPR.0.4.3.20 FR-6 §2.1b — the default (teardown/legacy) validate path now MARKS
   // STALE instead of clearing: a present-but-not-resumable token stays in the ledger.
   it("marks a not-resumable Claude token STALE without clearing it (FR-6 §2.1b)", async () => {

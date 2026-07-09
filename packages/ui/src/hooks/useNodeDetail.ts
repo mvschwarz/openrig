@@ -1,4 +1,6 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { withHostParam } from "../lib/host-param.js";
+import { useSelectedHostId } from "./useHosts.js";
 import type { AgentActivitySummary, CurrentQitemSummary } from "./useNodeInventory.js";
 
 export interface NodeDetailPeer {
@@ -87,17 +89,22 @@ export interface NodeDetailData {
   };
 }
 
-async function fetchNodeDetail(rigId: string, logicalId: string): Promise<NodeDetailData> {
-  const res = await fetch(`/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(logicalId)}`);
+async function fetchNodeDetail(rigId: string, logicalId: string, hostId: string): Promise<NodeDetailData> {
+  // OPR.0.4.6.MH2 rev1-r2 B2 (arch-ruled Option A) — the seat-detail leaf
+  // rides the selected-host envelope like its /nodes sibling; local path
+  // unchanged (withHostParam is identity for local).
+  const res = await fetch(withHostParam(`/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(logicalId)}`, hostId));
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
 export function useNodeDetail(rigId: string | null, logicalId: string | null) {
+  const hostId = useSelectedHostId();
   return useQuery({
-    queryKey: ["rig", rigId, "nodes", logicalId],
-    queryFn: () => fetchNodeDetail(rigId!, logicalId!),
+    queryKey: ["rig", rigId, "nodes", logicalId, hostId],
+    queryFn: () => fetchNodeDetail(rigId!, logicalId!, hostId),
     enabled: !!rigId && !!logicalId,
     refetchInterval: 30_000, // Refetch every 30s for context usage updates
+    placeholderData: keepPreviousData,
   });
 }

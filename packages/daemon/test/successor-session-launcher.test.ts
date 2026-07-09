@@ -5,6 +5,7 @@ import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { SuccessorSessionLauncher } from "../src/domain/successor-session-launcher.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
+import type { TmuxOptionDefaultsApplier } from "../src/domain/tmux-option-defaults.js";
 
 describe("SuccessorSessionLauncher", () => {
   let db: Database.Database;
@@ -34,7 +35,7 @@ describe("SuccessorSessionLauncher", () => {
     return { runtime, launchHarness, checkReady } as unknown as RuntimeAdapter;
   }
 
-  function launcher(): SuccessorSessionLauncher {
+  function launcher(tmuxOptionDefaults?: TmuxOptionDefaultsApplier): SuccessorSessionLauncher {
     const tmux = { createSession, listPanes, killSession } as unknown as TmuxAdapter;
     return new SuccessorSessionLauncher(tmux, discoveryRepo, {
       sessionEnv: { OPENRIG_HOME: "/home" },
@@ -42,6 +43,7 @@ describe("SuccessorSessionLauncher", () => {
       runtimeAdapters: { codex: fakeAdapter("codex") },
       readinessTimeoutMs: 50,
       sleep: async () => {},
+      tmuxOptionDefaults,
     });
   }
 
@@ -173,5 +175,61 @@ describe("SuccessorSessionLauncher", () => {
     await launcher().cleanup(res.tmuxSession, res.discoveredId);
     expect(killSession).toHaveBeenCalledWith("a@r-h1ABCDEFG");
     expect(discoveryRepo.getDiscoveredSession(res.discoveredId)?.status).toBe("vanished");
+  });
+
+  // OPR.0.4.6.02 S1 — a FRESH successor is the same launch-only class as a
+  // NodeLauncher seat, so it gets the tmux option defaults; the exclusions
+  // (probe sessions, DISCOVERED/pre-existing successors) never reach this seam.
+  describe("tmux option defaults on the fresh successor (OPR.0.4.6.02 S1)", () => {
+    it("applies option defaults to the JUST-CREATED successor session (never the departing/pre-existing one)", async () => {
+      const applyToFreshSession = vi.fn(async () => [] as string[]);
+      const applier = { applyToFreshSession } as unknown as TmuxOptionDefaultsApplier;
+
+      const res = await launcher(applier).createSuccessor({
+        node: { id: "node-1", runtime: "codex", cwd: "/w" },
+        departingSessionName: "dev-impl@rig",
+      });
+
+      expect(res.ok).toBe(true);
+      // Applied exactly once, to the FRESH distinct successor name…
+      expect(applyToFreshSession).toHaveBeenCalledTimes(1);
+      expect(applyToFreshSession).toHaveBeenCalledWith("dev-impl@rig-h1ABCDEFG");
+      // …and NEVER to the departing (pre-existing) seat — the never-retro-flip rail.
+      expect(applyToFreshSession).not.toHaveBeenCalledWith("dev-impl@rig");
+    });
+
+    it("folds non-fatal option warnings into the ok result (omitted when clean)", async () => {
+      const withWarn = { applyToFreshSession: vi.fn(async () => ['tmux "mouse" option not set for s: boom']) } as unknown as TmuxOptionDefaultsApplier;
+      const res = await launcher(withWarn).createSuccessor({
+        node: { id: "n", runtime: "codex", cwd: "/w" },
+        departingSessionName: "dev-impl@rig",
+      });
+      expect(res.ok).toBe(true);
+      if (!res.ok) throw new Error("expected ok");
+      expect(res.warnings).toContain('tmux "mouse" option not set for s: boom');
+
+      // No applier → no warnings field (byte-compatible with pre-02 successors).
+      const clean = await launcher().createSuccessor({
+        node: { id: "n2", runtime: "codex", cwd: "/w" },
+        departingSessionName: "dev-impl@rig",
+      });
+      expect(clean.ok).toBe(true);
+      if (!clean.ok) throw new Error("expected ok");
+      expect(clean.warnings).toBeUndefined();
+    });
+
+    it("EXCLUSION: a failed createSession never applies option defaults (nothing to defaults on a session that was not created)", async () => {
+      createSession = vi.fn(async () => ({ ok: false, code: "unknown", message: "create failed" }));
+      const applyToFreshSession = vi.fn(async () => [] as string[]);
+      const applier = { applyToFreshSession } as unknown as TmuxOptionDefaultsApplier;
+
+      const res = await launcher(applier).createSuccessor({
+        node: { id: "node-1", runtime: "codex", cwd: "/w" },
+        departingSessionName: "dev-impl@rig",
+      });
+
+      expect(res.ok).toBe(false);
+      expect(applyToFreshSession).not.toHaveBeenCalled();
+    });
   });
 });

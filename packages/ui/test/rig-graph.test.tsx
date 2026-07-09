@@ -346,6 +346,78 @@ describe("RigGraph", () => {
     });
   });
 
+  // OPR.0.4.6.MH2 rev1-r2 re-verdict B1: placement targets feed the LOCAL
+  // discovery bind/adopt mutation — under a REMOTE selection a rendered node
+  // must never become a target and the placement banner must not advertise.
+  // (The test above is the local-positive control for this exact flow.)
+  it("remote-selected: placement-mode click sets NO target and the placement banner is absent (rev1-r2 B1)", async () => {
+    mockFetch.mockResolvedValueOnce(mockGraphResponse([
+      {
+        id: "n1",
+        type: "rigNode",
+        position: { x: 0, y: 0 },
+        data: {
+          logicalId: "dev.impl",
+          rigId: "rig-1",
+          role: "worker",
+          runtime: "claude-code",
+          model: null,
+          status: null,
+          binding: null,
+          nodeKind: "agent",
+          startupStatus: null,
+          canonicalSessionName: null,
+          podId: "dev",
+          restoreOutcome: "n-a",
+          resumeToken: null,
+        },
+      },
+    ], []));
+
+    const setPlacementTarget = vi.fn();
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 5 * 60_000 } },
+    });
+    qc.setQueryData(["hosts"], {
+      ownName: "Linkpix Proof Host",
+      selected: "vps-a",
+      hosts: [{ id: "vps-a", transport: "http", url: "http://vps-a:7433", selected: true, status: "reachable" }],
+    });
+
+    const { container } = render(
+      <QueryClientProvider client={qc}>
+        <DrawerSelectionContext.Provider value={{ selection: { type: "discovery" }, setSelection: vi.fn() }}>
+          <DiscoveryPlacementContext.Provider
+            value={{
+              selectedDiscoveredId: "disc-1",
+              setSelectedDiscoveredId: vi.fn(),
+              placementTarget: null,
+              setPlacementTarget,
+              clearPlacement: vi.fn(),
+            }}
+          >
+            <RigGraph showDiscovered={false} rigId="rig-1" />
+          </DiscoveryPlacementContext.Provider>
+        </DrawerSelectionContext.Provider>
+      </QueryClientProvider>
+    );
+
+    await waitFor(() => {
+      expect(container.querySelector(".react-flow__node-rigNode")).not.toBeNull();
+    });
+
+    // the banner never advertises placement on remote data
+    expect(container.querySelector("[data-testid='graph-placement-banner']")).toBeNull();
+
+    fireEvent.click(container.querySelector(".react-flow__node-rigNode")!);
+
+    expect(setPlacementTarget).not.toHaveBeenCalled();
+    const postCalls = mockFetch.mock.calls.filter(
+      ([, init]) => (init as RequestInit | undefined)?.method === "POST",
+    );
+    expect(postCalls).toEqual([]);
+  });
+
   it("clicking a pod group in discovery placement mode selects it as an add-to-pod target", async () => {
     mockFetch.mockResolvedValueOnce(mockGraphResponse([
       {
@@ -1449,6 +1521,76 @@ describe("RigGraph node selection (P5.1-2 navigate)", () => {
         }),
       );
     });
+
+    // OPR.0.4.6.MH2 rev1-r2 B1 local CONTROL: on the local host the bound
+    // node's click ALSO fires the focus POST (consumed by the second mock)
+    // and the hover toolbar affordances are mounted.
+    await waitFor(() => {
+      expect(
+        mockFetch.mock.calls.some(
+          ([url, init]) =>
+            String(url).includes("/focus") && (init as RequestInit | undefined)?.method === "POST",
+        ),
+      ).toBe(true);
+    });
+    expect(container.querySelector("[data-testid='node-toolbar']")).not.toBeNull();
+  });
+
+  // OPR.0.4.6.MH2 rev1-r2 B1: under a REMOTE selection the node click keeps
+  // the read drill-in (navigate) but the bare-local focus POST never fires and
+  // the RigNode hover toolbar (cmux-open + terminal preview) never mounts.
+  it("remote-selected: click node navigates but fires ZERO POSTs; node toolbar absent (rev1-r2 B1)", async () => {
+    navigateSpy.mockClear();
+
+    mockFetch.mockResolvedValueOnce(mockGraphResponse(sampleNodes(), sampleEdges()));
+
+    // gcTime kept finite-large (NOT the shared 0) so the primed entry survives
+    // until the disabled observers subscribe.
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 5 * 60_000 } },
+    });
+    // The gate primitive is the useSelectedHostId CACHE OBSERVER — prime the
+    // ["hosts"] entry directly (no /api/hosts fetch rides the sequenced mock).
+    qc.setQueryData(["hosts"], {
+      ownName: "Linkpix Proof Host",
+      selected: "vps-a",
+      hosts: [{ id: "vps-a", transport: "http", url: "http://vps-a:7433", selected: true, status: "reachable" }],
+    });
+
+    const { container } = render(
+      <QueryClientProvider client={qc}>
+        <RigGraph showDiscovered={false} rigId="rig-1" />
+      </QueryClientProvider>
+    );
+
+    await waitFor(() => {
+      expect(container.querySelector("[data-testid='rf__node-n1']")).not.toBeNull();
+    });
+
+    // RigNode gate: no local action toolbar on remote graph nodes.
+    expect(container.querySelector("[data-testid='node-toolbar']")).toBeNull();
+
+    // Click the bound orchestrator node (n1 — would focus-POST when local).
+    const node = container.querySelector("[data-testid='rf__node-n1']")!;
+    await act(async () => {
+      node.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    // The read drill-in stands…
+    await waitFor(() => {
+      expect(navigateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          to: "/topology/seat/$rigId/$logicalId",
+          params: { rigId: "rig-1", logicalId: encodeURIComponent("orchestrator") },
+        }),
+      );
+    });
+
+    // …but NO POST of any kind fired (the focus leg is gated).
+    const postCalls = mockFetch.mock.calls.filter(
+      ([, init]) => (init as RequestInit | undefined)?.method === "POST",
+    );
+    expect(postCalls).toEqual([]);
   });
 });
 

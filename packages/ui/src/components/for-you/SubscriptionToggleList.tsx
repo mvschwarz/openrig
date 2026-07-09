@@ -7,7 +7,18 @@
 // (L145 — load-bearing human-gate items cannot be disabled) and renders
 // as a disabled-looking row with "forced ON" label.
 
+// OPR.0.4.6.MH2 FR-5 (pm-RULED: BOTH placements) — the left-panel HOSTS
+// section: persistent per-host subscriptions over the SHIPPED-but-
+// unsurfaced OPR.0.4.4.15 write path (hostSubscriptions /
+// setHostSubscription — complete, don't rebuild). The in-page chip filter
+// (the transient "what am I looking at now") already ships in Feed.tsx;
+// these toggles answer the other question: what FEEDS the consolidated
+// view. Local items are forced ON (fr5a). The section renders only when
+// there is at least one remote host to govern — an empty registry keeps
+// today's exact panel (zero-regression).
+
 import { useFeedSubscriptions } from "../../hooks/useFeedSubscriptions.js";
+import { useHosts } from "../../hooks/useHosts.js";
 
 interface ToggleRow {
   toggleKey: "approvals" | "shipped" | "progress" | "auditLog" | null;
@@ -52,7 +63,16 @@ const ROWS: ToggleRow[] = [
 ];
 
 export function SubscriptionToggleList() {
-  const { state, toggle, isMutating, unavailable } = useFeedSubscriptions();
+  const { state, toggle, isMutating, unavailable, hostSubscriptions, setHostSubscription } =
+    useFeedSubscriptions();
+  const { data: hostsData } = useHosts();
+
+  // The governed set = registry hosts ∪ persisted subscription rows (a
+  // row may outlive its registry entry — rendered honestly, never dropped).
+  const subByHost = new Map(hostSubscriptions.map((h) => [h.hostId, h.enabled]));
+  const hostIds = Array.from(
+    new Set([...(hostsData?.hosts ?? []).map((h) => h.id), ...hostSubscriptions.map((h) => h.hostId)]),
+  ).sort();
 
   return (
     <div data-testid="subscription-toggle-list" className="font-mono text-xs">
@@ -109,6 +129,68 @@ export function SubscriptionToggleList() {
           );
         })}
       </ul>
+      {hostIds.length > 0 ? (
+        <div data-testid="subscription-host-toggle-list" className="mt-4">
+          <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface-variant mb-2">
+            Hosts
+          </div>
+          <ul className="space-y-1">
+            <li
+              data-testid="subscription-host-toggle-local"
+              data-on="true"
+              className="flex items-center justify-between gap-2"
+            >
+              <div className="min-w-0">
+                <div className="text-on-surface truncate">This host</div>
+                <div className="font-mono text-[9px] text-on-surface-variant truncate">
+                  Local items always show
+                </div>
+              </div>
+              <span className="font-mono text-[9px] uppercase tracking-wide text-on-surface-variant shrink-0">
+                forced ON
+              </span>
+            </li>
+            {hostIds.map((hostId) => {
+              const enabled = subByHost.get(hostId) ?? false;
+              const interactive = !unavailable;
+              return (
+                <li
+                  key={hostId}
+                  data-testid={`subscription-host-toggle-${hostId}`}
+                  data-on={enabled ? "true" : "false"}
+                  className="flex items-center justify-between gap-2"
+                >
+                  <div className="min-w-0">
+                    <div className="text-on-surface truncate">{hostId}</div>
+                    <div className="font-mono text-[9px] text-on-surface-variant truncate">
+                      {enabled ? "Feeding the consolidated view" : "Hidden from the feed"}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={enabled}
+                    disabled={!interactive || isMutating}
+                    data-testid={`subscription-host-toggle-${hostId}-button`}
+                    onClick={() => setHostSubscription(hostId, !enabled)}
+                    className={
+                      "shrink-0 px-2 py-0.5 border font-mono text-[9px] uppercase tracking-wide " +
+                      (enabled
+                        ? "border-success text-success"
+                        : "border-outline-variant text-on-surface-variant") +
+                      (interactive
+                        ? " hover:bg-surface-low/60"
+                        : " opacity-60 cursor-not-allowed")
+                    }
+                  >
+                    {enabled ? "on" : "off"}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      ) : null}
       {unavailable ? (
         <p
           data-testid="subscription-toggle-unavailable"

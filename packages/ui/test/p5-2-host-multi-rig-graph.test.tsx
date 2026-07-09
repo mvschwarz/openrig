@@ -49,8 +49,23 @@ afterEach(() => {
   cleanup();
 });
 
-function withQueryClient(ui: React.ReactNode) {
+function withQueryClient(ui: React.ReactNode, opts: { selectedHost?: string } = {}) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  if (opts.selectedHost) {
+    queryClient.setQueryData(["hosts"], {
+      ownName: "localhost",
+      selected: opts.selectedHost,
+      hosts: [
+        {
+          id: opts.selectedHost,
+          transport: "http",
+          url: `http://${opts.selectedHost}:7433`,
+          selected: true,
+          status: "reachable",
+        },
+      ],
+    });
+  }
   // Wrap in TanStack Router with memory history so <Link> resolves the
   // route context without crashing inside RigGroupNode.
   // V1 polish slice Phase 5.2 bounce-fix: TopologyOverlayProvider wraps
@@ -119,10 +134,10 @@ function setupFetchOk(opts: {
   graphsByRigId?: Record<string, { nodes: unknown[]; edges: unknown[] }>;
 }) {
   mockFetch.mockImplementation(async (url: string) => {
-    if (url === "/api/ps") {
+    if (url.split("?")[0] === "/api/ps") {
       return new Response(JSON.stringify(opts.ps ?? PS_RESPONSE));
     }
-    const m = url.match(/\/api\/rigs\/([^/]+)\/graph/);
+    const m = url.split("?")[0]!.match(/\/api\/rigs\/([^/]+)\/graph/);
     if (m) {
       const rigId = decodeURIComponent(m[1]!);
       return new Response(
@@ -264,6 +279,21 @@ describe("HostMultiRigGraph (P5.2-1 reachability — ritual #6)", () => {
       expect(mockFetch).toHaveBeenCalledWith("/api/rigs/rig-2/graph");
       expect(mockFetch).toHaveBeenCalledWith("/api/rigs/rig-3/graph");
     });
+  });
+
+  it("remote selection threads host param through /api/ps and per-rig graph fan-out", async () => {
+    setupFetchOk({});
+    const { findByTestId } = withQueryClient(<HostMultiRigGraph />, { selectedHost: "vps-a" });
+    expect(await findByTestId("host-multi-rig-graph")).toBeTruthy();
+    await waitFor(() => {
+      expect(mockFetch).toHaveBeenCalledWith("/api/ps?host=vps-a");
+      expect(mockFetch).toHaveBeenCalledWith("/api/rigs/rig-1/graph?host=vps-a");
+      expect(mockFetch).toHaveBeenCalledWith("/api/rigs/rig-2/graph?host=vps-a");
+      expect(mockFetch).toHaveBeenCalledWith("/api/rigs/rig-3/graph?host=vps-a");
+    });
+    expect(
+      mockFetch.mock.calls.some(([url]) => String(url) === "/api/rigs/rig-1/graph"),
+    ).toBe(false);
   });
 
   it("rig group body click toggles collapse state (P5.2-5)", async () => {

@@ -53,8 +53,11 @@ import {
 import { ThemeSelector } from "./ThemeSelector.js";
 import { useSettings } from "../hooks/useSettings.js";
 import { useActivityFeed } from "../hooks/useActivityFeed.js";
+import { useClearPlacementOnHostSwitch } from "../hooks/useHosts.js";
 import { useGlobalEvents } from "../hooks/useGlobalEvents.js";
 import { cn } from "../lib/utils.js";
+import { parseSessionName } from "../lib/session-name.js";
+import { HostIndicator } from "./HostIndicator.js";
 
 // =====================================================================
 // Contexts (preserved per DRIFT P2-B + active consumers in Dashboard, RigGraph)
@@ -218,15 +221,11 @@ function readSettingString(
  *  (one-click navigation; not popup-then-CTA two-click). */
 function resolveChatTo(session: string, role: "advisor" | "operator"): string {
   if (!session) return `/settings#agents-${role}-session`;
-  const at = session.indexOf("@");
-  if (at === -1) {
-    // Malformed; fall back to /settings.
-    return `/settings#agents-${role}-session`;
-  }
-  const logicalId = session.slice(0, at);
-  const rigId = session.slice(at + 1);
-  if (!rigId || !logicalId) return `/settings#agents-${role}-session`;
-  return `/topology/seat/${encodeURIComponent(rigId)}/${encodeURIComponent(logicalId)}`;
+  // OPR.0.4.6.MH1 FR-8: the shared parse contract; non-canonical
+  // (malformed/legacy) falls back to /settings.
+  const parsed = parseSessionName(session);
+  if (parsed.kind !== "canonical") return `/settings#agents-${role}-session`;
+  return `/topology/seat/${encodeURIComponent(parsed.rig)}/${encodeURIComponent(parsed.member)}`;
 }
 
 // =====================================================================
@@ -423,6 +422,12 @@ function AppShellInner({ children }: AppShellProps) {
     if (selectionState?.type !== "discovery") clearPlacement();
   }, [selectionState, clearPlacement]);
 
+  // OPR.0.4.6.MH2 rev1-r2 re-re-verdict B1: a placement target created while
+  // local must not survive a host switch — ANY selected-host change clears
+  // the target + discovered-session selection (the panel-side brace
+  // additionally suppresses the adopt UI under remote).
+  useClearPlacementOnHostSwitch(clearPlacement);
+
   // SC-3a — drawer content does NOT persist across reload (it's contextual).
   // Mobile-narrow viewports: close drawer + close explorer when route changes
   // unless the route specifically handles the drawer (none in Phase 2).
@@ -546,19 +551,15 @@ function AppShellInner({ children }: AppShellProps) {
                   OPENRIG
                 </Link>
               </div>
-              {/* Right-slot — reserved for V2 global affordances. V1 carries
-                  a minimal env indicator. Hidden on narrow viewports to
-                  preserve mobile space. */}
+              {/* Right-slot — the V2 global affordance this slot was
+                  reserved for: the MH-2 which-host indicator (FR-3),
+                  truthful to the selected data source. Hidden on narrow
+                  viewports to preserve mobile space. */}
               <div
                 data-testid="topbar-right-slot"
                 className="hidden sm:flex items-center gap-3"
               >
-                <span
-                  data-testid="topbar-env-indicator"
-                  className="font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface-variant"
-                >
-                  localhost
-                </span>
+                <HostIndicator />
                 {/* OPR.0.4.3.29 — theme selector (placement founder-taste-gated). */}
                 <ThemeSelector />
               </div>

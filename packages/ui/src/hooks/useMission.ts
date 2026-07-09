@@ -5,7 +5,9 @@
 // with useScopeMarkdown for README / PROGRESS content via
 // /api/files/read.
 
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { withHostParam } from "../lib/host-param.js";
+import { useSelectedHostId } from "./useHosts.js";
 import type { SliceListEntry } from "./useSlices.js";
 import type { SpecGraphPayload } from "./useSlices.js";
 
@@ -43,8 +45,10 @@ export interface MissionUnavailable {
   hint?: string;
 }
 
-async function fetchMission(missionId: string): Promise<MissionDataResponse | MissionUnavailable> {
-  const res = await fetch(`/api/missions/${encodeURIComponent(missionId)}`);
+async function fetchMission(missionId: string, hostId: string): Promise<MissionDataResponse | MissionUnavailable> {
+  // OPR.0.4.6.MH2 FR-2 — selected-host envelope; origin shape verbatim;
+  // local path unchanged (withHostParam is identity for local).
+  const res = await fetch(withHostParam(`/api/missions/${encodeURIComponent(missionId)}`, hostId));
   if (res.status === 503) {
     const body = (await res.json().catch(() => ({}))) as { error?: string; hint?: string };
     return {
@@ -64,10 +68,12 @@ async function fetchMission(missionId: string): Promise<MissionDataResponse | Mi
 }
 
 export function useMission(missionId: string | null) {
+  const hostId = useSelectedHostId();
   return useQuery({
-    queryKey: ["mission", "detail", missionId],
-    queryFn: () => fetchMission(missionId!),
+    queryKey: ["mission", "detail", missionId, hostId],
+    queryFn: () => fetchMission(missionId!, hostId),
     enabled: !!missionId,
+    placeholderData: keepPreviousData,
     staleTime: 30_000,
     // V0.3.1 slice 17 workspace-state-correctness pattern: refetch on
     // window focus so the operator who creates a slice folder + comes

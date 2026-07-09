@@ -9,6 +9,7 @@ import { deriveSessionName, validateSessionName, validateSessionComponents } fro
 const RUNTIME_COMMANDS: Record<string, string> = {
   "claude-code": "claude --version",
   "codex": "codex --version",
+  "pi": "pi --version",
 };
 
 interface RigSpecPreflightDeps {
@@ -122,7 +123,7 @@ import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { resolveNodeConfig, type ResolutionContext } from "./profile-resolver.js";
 import { getOpenRigInstallCwdError, resolveLaunchCwd } from "./cwd-resolution.js";
 
-const SUPPORTED_RUNTIMES = new Set(["claude-code", "codex", "terminal"]);
+const SUPPORTED_RUNTIMES = new Set(["claude-code", "codex", "pi", "terminal"]);
 
 export interface RigPreflightInput {
   rigSpecYaml: string;
@@ -285,9 +286,37 @@ export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: 
   if (errors.length === 0 && preflightCtx.exec) {
     const profileErrors = await verifyCodexProfiles(rigSpec, preflightCtx.exec);
     errors.push(...profileErrors);
+    // OPR.0.4.6.PI1 FR-1 — Pi binary probe: a spec with a pi member fails
+    // preflight (what/why/fix) when the binary is absent, never a
+    // launch-time surprise.
+    const piErrors = await verifyPiRuntimeAvailable(rigSpec, preflightCtx.exec);
+    errors.push(...piErrors);
   }
 
   return { ready: errors.length === 0, errors, warnings };
+}
+
+/**
+ * OPR.0.4.6.PI1 FR-1 — async post-preflight probe: when the spec declares any
+ * `runtime: "pi"` member, verify the `pi` binary answers `pi --version`.
+ * Returns a single what/why/fix error naming the install surface on failure.
+ */
+export async function verifyPiRuntimeAvailable(
+  rigSpec: PodRigSpec,
+  exec: ExecFn,
+): Promise<string[]> {
+  const hasPiMember = (rigSpec.pods ?? []).some((pod: RigSpecPod) =>
+    (pod.members ?? []).some((member: RigSpecPodMember) => member.runtime === "pi"),
+  );
+  if (!hasPiMember) return [];
+  try {
+    await exec(RUNTIME_COMMANDS["pi"]!);
+    return [];
+  } catch {
+    return [
+      `Runtime "pi" not available ('pi --version' failed). The spec declares a pi member, so the launch would fail. Fix: install the Pi coding agent (npm install -g @earendil-works/pi-coding-agent, or the pi.dev install script) and ensure 'pi' is on PATH.`,
+    ];
+  }
 }
 
 /**

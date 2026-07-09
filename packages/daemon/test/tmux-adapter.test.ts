@@ -495,6 +495,68 @@ describe("TmuxAdapter", () => {
     });
   });
 
+  // OPR.0.4.6.02 S1 (guard b2) — the SERVER-scope writer/reader + the
+  // scope-discipline teeth: server options use `-s` and NEVER a `-t` session
+  // target; session options use `-t` and NEVER `-s`. The two are never crossed.
+  describe("setServerOption / showServerOption (OPR.0.4.6.02 S1)", () => {
+    it("setServerOption emits `set-option -s` with the option quoted — has -s, NO -t", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+
+      await adapter.setServerOption("set-clipboard", "on");
+
+      expect(exec).toHaveBeenCalledOnce();
+      const cmd = exec.mock.calls[0]![0];
+      expect(cmd).toBe("tmux set-option -s 'set-clipboard' 'on'");
+      expect(cmd).toContain(" -s ");
+      expect(cmd).not.toContain(" -t ");
+    });
+
+    it("setServerOption quotes a copy-command value with spaces safely", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+      await adapter.setServerOption("copy-command", "xclip -selection clipboard -i");
+      expect(exec.mock.calls[0]![0]).toBe(
+        "tmux set-option -s 'copy-command' 'xclip -selection clipboard -i'"
+      );
+    });
+
+    it("setServerOption returns ok:false via classifyWriteError (no throw)", async () => {
+      const adapter = new TmuxAdapter(mockExec({ "set-option": { error: new Error("no server running") } }));
+      const result = await adapter.setServerOption("set-clipboard", "on");
+      expect(result.ok).toBe(false);
+    });
+
+    it("showServerOption reads via `show-options -sv`", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("on\n");
+      const adapter = new TmuxAdapter(exec);
+      const v = await adapter.showServerOption("set-clipboard");
+      expect(exec.mock.calls[0]![0]).toBe("tmux show-options -sv 'set-clipboard'");
+      expect(v).toBe("on");
+    });
+
+    it("showServerOption returns null when unset/empty or on error", async () => {
+      const empty = new TmuxAdapter(vi.fn<ExecFn>().mockResolvedValue("  \n"));
+      expect(await empty.showServerOption("copy-command")).toBeNull();
+      const errored = new TmuxAdapter(mockExec({ "show-options": { error: new Error("no server running") } }));
+      expect(await errored.showServerOption("copy-command")).toBeNull();
+    });
+
+    it("SCOPE CROSS-CHECK: session writer uses -t (no -s); server writer uses -s (no -t)", async () => {
+      const sessExec = vi.fn<ExecFn>().mockResolvedValue("");
+      await new TmuxAdapter(sessExec).setSessionOption("sess", "mouse", "on");
+      const sessCmd = sessExec.mock.calls[0]![0];
+      expect(sessCmd).toContain(" -t ");
+      expect(sessCmd).not.toContain(" -s ");
+
+      const srvExec = vi.fn<ExecFn>().mockResolvedValue("");
+      await new TmuxAdapter(srvExec).setServerOption("mouse", "on");
+      const srvCmd = srvExec.mock.calls[0]![0];
+      expect(srvCmd).toContain(" -s ");
+      expect(srvCmd).not.toContain(" -t ");
+    });
+  });
+
   describe("getSessionOption", () => {
     it("calls exec with exact tmux show-option -v command", async () => {
       const exec = vi.fn<ExecFn>().mockResolvedValue("node-abc123\n");

@@ -230,9 +230,25 @@ function FolderFileList({ root, path }: { root: string; path: string }) {
  *   (root, relPath) via the same resolver useScopeMarkdown uses.
  * @param scopeLabel the tree-root label (e.g. the mission or slice name).
  */
-export function ArtifactsNavigator({ scopePath, scopeLabel }: { scopePath: string | null; scopeLabel: string }) {
-  const rootsQuery = useFilesRoots();
+export function ArtifactsNavigator({ scopePath, scopeLabel, remoteGated }: { scopePath: string | null; scopeLabel: string; remoteGated?: boolean }) {
+  // OPR.0.4.6.MH2 guard-B1 — under a remote host selection the scope path
+  // belongs to the REMOTE filesystem and must never resolve against LOCAL
+  // allowlist roots: remoteGated issues ZERO file requests and renders the
+  // honest note. The local null-path flow is byte-preserved (roots fetched,
+  // OUT OF SCOPE rendered) — the gate is the explicit prop, not null-ness.
+  const rootsQuery = useFilesRoots({ enabled: remoteGated !== true });
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
+
+  if (remoteGated) {
+    return (
+      <EmptyState
+        label="LOCAL FILES NOT SHOWN"
+        description={`Artifacts for ${scopeLabel} live on the selected host's filesystem, which the remote read view does not browse. Select the local host to browse local artifacts.`}
+        variant="card"
+        testId="artifacts-navigator-remote-gated"
+      />
+    );
+  }
 
   if (rootsQuery.isLoading) {
     return (

@@ -30,7 +30,9 @@ import { useRigSummary } from "../../hooks/useRigSummary.js";
 import { usePsEntries } from "../../hooks/usePsEntries.js";
 import { useSettings } from "../../hooks/useSettings.js";
 import { useDaemonVersion } from "../../hooks/useDaemonVersion.js";
+import { parseSessionName } from "../../lib/session-name.js";
 import { KernelStatusCard } from "../KernelStatusCard.js";
+import { HostConfigCard } from "./HostConfigCard.js";
 import { ErrorBoundary } from "../ui/ErrorBoundary.js";
 import {
   TopologyGlyph,
@@ -95,9 +97,10 @@ export function Dashboard() {
   // Operator identity from the configured operator seat (logicalId@rigId), with
   // an honest "OPERATOR" fallback when unset — the best-available real source.
   const operatorSession = readSetting(settings, "agents.operator_session");
-  const at = operatorSession.indexOf("@");
+  // OPR.0.4.6.MH1 FR-8: the shared parse contract.
+  const parsedOperator = parseSessionName(operatorSession);
   const operatorId =
-    at > 0 ? operatorSession.slice(0, at).toUpperCase() : "OPERATOR";
+    parsedOperator.kind === "canonical" ? parsedOperator.member.toUpperCase() : "OPERATOR";
 
   // Running daemon version (real, via useDaemonVersion). Honest em-dash fallback
   // while the query is loading or on a fetch failure; the daemon itself already
@@ -143,6 +146,12 @@ export function Dashboard() {
             <KernelStatusCard />
           </ErrorBoundary>
         </section>
+
+        {/* OPR.0.4.6.MH1 FR-5 — the host-config component (own host +
+            added hosts + add affordance + switcher). */}
+        <ErrorBoundary label="Hosts">
+          <HostConfigCard />
+        </ErrorBoundary>
 
         <div className="df-grid" data-testid="dashboard-launcher-grid">
           {DESTINATIONS.map((d) => (

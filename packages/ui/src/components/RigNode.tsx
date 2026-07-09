@@ -63,6 +63,12 @@ interface RigNodeData {
   currentQitems?: CurrentQitemSummary[];
   activityRing?: TopologyActivityVisual;
   reducedMotion?: boolean;
+  // OPR.0.4.6.MH2 rev1-r2 B1: set by RigGraph's enrichment (the same channel
+  // as reducedMotion) when a REMOTE host is selected — the hover toolbar's
+  // cmux-open POST + terminal preview are LOCAL actions and never mount on
+  // remote data. A data prop (not a hook) so standalone RigNode harnesses
+  // need no QueryClientProvider.
+  remoteReadonly?: boolean;
 }
 
 /** Core roles get dark header stripe, workers get light */
@@ -331,7 +337,7 @@ export function RigNode({ data }: { data: RigNodeData }) {
           </div>
         )}
 
-        {(terminalSessionName ?? data.rigId) && (
+        {!data.remoteReadonly && (terminalSessionName ?? data.rigId) && (
           <div
             data-testid="node-toolbar"
             className="absolute right-2 top-8 z-20 flex flex-wrap justify-end gap-1 opacity-0 transition-opacity group-hover:!opacity-100 group-hover:opacity-100 group-focus-within:!opacity-100 group-focus-within:opacity-100"

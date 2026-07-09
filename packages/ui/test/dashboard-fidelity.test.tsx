@@ -28,9 +28,21 @@ vi.mock("../src/hooks/useSettings.js", () => ({
   useSettings: () => ({
     data: { settings: { "agents.operator_session": { value: "orch-lead@openrig-delivery" } } },
   }),
+  // OPR.0.4.6.MH1 FR-5: the HostConfigCard (mounted in Dashboard) imports
+  // the settings write hook from this module — the module mock must carry
+  // it or the import resolves undefined.
+  useSetSetting: () => ({ mutateAsync: async () => ({}) }),
 }));
 vi.mock("../src/hooks/useDaemonVersion.js", () => ({
   useDaemonVersion: () => ({ data: { version: "0.4.0" } }),
+}));
+// OPR.0.4.6.MH1 FR-5: HostConfigCard's data hooks — mocked so Dashboard
+// renders without a QueryClientProvider (this test's concern is the
+// field-environment wiring; the card has its own test).
+vi.mock("../src/hooks/useHosts.js", () => ({
+  useHosts: () => ({ data: { ownName: "localhost", selected: "local", hosts: [] }, error: null }),
+  usePairHost: () => ({ mutateAsync: async () => ({}), data: undefined, error: null, isPending: false, reset: () => {} }),
+  usePairPoll: () => ({ data: undefined }),
 }));
 
 import { Dashboard } from "../src/components/dashboard/Dashboard.js";

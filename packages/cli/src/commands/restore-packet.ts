@@ -16,6 +16,7 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import { detectRuntime } from "../restore-packet/runtime-detect.js";
+import { parseSessionName } from "../session-name.js";
 import { parseCodexJsonl } from "../restore-packet/codex-jsonl-parser.js";
 import { parseClaudeTranscript } from "../restore-packet/claude-transcript-parser.js";
 import { writePacket, type WritePacketOptions } from "../restore-packet/packet-writer.js";
@@ -104,8 +105,18 @@ function deriveProvenance(
   if (typeof opts.sourceRigOverride === "string" && opts.sourceRigOverride.length > 0) {
     sourceRig = opts.sourceRigOverride;
   } else {
-    const m = /^[^@]+@([^@]+)$/.exec(sourceSessionId);
-    const captured = m?.[1];
+    // OPR.0.4.6.MH1 FR-8 + rev1-r2 B2: the shared parse contract, with
+    // this site's OWN strictness on top. The contract's greedy rig is the
+    // QUEUE GATE's shape — where an in-band host fails the registry
+    // lookup loudly. THIS site persists provenance with no lookup, so a
+    // multi-@ rig would be silently recorded (BR-1 keeps host out of the
+    // session string; the honest-provenance policy forbids silent
+    // acceptance). Canonical member@rig with a PLAIN rig derives; anything
+    // else throws the explicit override error below.
+    const parsedSource = parseSessionName(sourceSessionId);
+    const captured = parsedSource.kind === "canonical" && !parsedSource.rig.includes("@")
+      ? parsedSource.rig
+      : undefined;
     if (!captured) {
       throw new Error(
         `could not derive source_rig from session id '${sourceSessionId}' (does not match <seat>@<rig> shape); supply --source-rig-override <rig> explicitly. Silent fallback to source_rig:"unknown" is not allowed (M2c-CLI R2 honest-provenance policy).`,

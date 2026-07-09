@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { createHash } from "node:crypto";
 import type { EventBus } from "./event-bus.js";
 import type { PersistedEvent } from "./types.js";
 import { QueueTransitionLog } from "./queue-transition-log.js";
@@ -21,6 +22,18 @@ export const QUEUE_STATES = [
   "handed-off",
 ] as const;
 export type QueueState = (typeof QUEUE_STATES)[number];
+
+/** OPR.0.4.6.FS-1 (W2 P1): the queue's terminal state set, named ONCE. The
+ *  archiver (queue-retention.ts) AND the inline closure guards below all consume
+ *  THIS predicate, so a future terminal-state addition can never silently
+ *  diverge the archiver from the queue (arch D3-REFINEMENT P1; widen-never-sibling).
+ *  `['done','handed-off']` is the full terminal set — workflow step closures exit
+ *  `handoff -> state=handed-off`, the highest-volume terminal class. The `satisfies`
+ *  clause is the compile guard: removing a state from QUEUE_STATES fails here. */
+export const TERMINAL_QUEUE_STATES = ["done", "handed-off"] as const satisfies readonly QueueState[];
+export function isTerminalState(state: string): boolean {
+  return (TERMINAL_QUEUE_STATES as readonly string[]).includes(state);
+}
 
 export const QUEUE_PRIORITIES = ["routine", "urgent", "critical"] as const;
 export type QueuePriority = (typeof QUEUE_PRIORITIES)[number];
@@ -142,6 +155,13 @@ export interface QueueUpdateInput {
   qitemId: string;
   actorSession: string;
   state: QueueState;
+  /**
+   * OPR.0.4.6.WF3 FR-6 — set ONLY by the workflow domain's own write
+   * paths (projector close, route close): they hold the frontier
+   * invariant, so the close-path guard exempts them. Not a security
+   * boundary — a correctness foot-gun guard (pm ruling: prevention).
+   */
+  viaWorkflowVerb?: boolean;
   transitionNote?: string;
   closureReason?: string;
   closureTarget?: string;
@@ -230,12 +250,64 @@ export class QueueRepositoryError extends Error {
   }
 }
 
-function newQitemId(): string {
+/** OPR.0.4.6.WF5 (guard-named fix shape): exported so the workflow
+ *  domain can PREALLOCATE a gate packet's id — the class-(c) exception
+ *  identity tags need occurrence:<gatePacketId> ON the packet at create
+ *  (one item, tagged in its own create — never a second item, never a
+ *  post-create tag rewrite). The queue still mints ids for every caller
+ *  that does not preallocate. */
+export function newQitemId(): string {
   const ts = new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14);
   const hex = Math.floor(Math.random() * 0xffffffff)
     .toString(16)
     .padStart(8, "0");
   return `qitem-${ts}-${hex}`;
+}
+
+/**
+ * OPR.0.4.6.MH3 Q-a: is this the SQLite PRIMARY KEY conflict on
+ * queue_items.qitem_id? better-sqlite3 sets `.code` on its SqliteError; the
+ * message check is a defensive twin so a driver-name change never silently
+ * turns an idempotent absorb into a 500.
+ */
+export function isQitemPrimaryKeyConflict(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const code = (err as { code?: string }).code ?? "";
+  if (code === "SQLITE_CONSTRAINT_PRIMARYKEY" || code === "SQLITE_CONSTRAINT_UNIQUE") return true;
+  return /UNIQUE constraint failed: queue_items\.qitem_id/.test(err.message);
+}
+
+/**
+ * OPR.0.4.6.MH3 D-1 (FR-4/FR-5): the deterministic cross-host SUCCESSOR id.
+ *
+ * A cross-host handoff exposes no caller `--id`, so the successor's dedup
+ * identity must come from the operation itself: the id is a PURE, STATELESS
+ * function of (source qitemId, destination session, destination host). Same
+ * arguments → same id on every re-drive, across daemon restarts, with zero
+ * local state — so the origin-side PRIMARY KEY absorb (Q-a) converges every
+ * interrupted-close re-drive. Source→successor is 1:1 by construction (a
+ * closed source is terminal; nothing re-opens it). The `qitem-xh-` namespace
+ * makes collision with organic `qitem-<ts>-<hex>` ids structurally impossible
+ * (plan R-2). The compound key is JSON-encoded — no hand-rolled separators.
+ *
+ * n1 residual (arch-named, inherent to the ratified at-least-once/no-2PC
+ * fence — NOT a dedup bug): a re-drive naming a DIFFERENT destination before
+ * the source close lands is a NEW handoff decision and derives a DIFFERENT
+ * id, so it cannot absorb the earlier successor — that earlier successor can
+ * remain live on the target host. The chain_of_record + cross-host provenance
+ * tags keep such an orphan visible/traceable; the source-close conflict check
+ * surfaces the disagreement rather than overwriting it.
+ */
+export function deriveCrossHostSuccessorId(
+  sourceQitemId: string,
+  destinationSession: string,
+  hostId: string,
+): string {
+  const digest = createHash("sha256")
+    .update(JSON.stringify([sourceQitemId, destinationSession, hostId]))
+    .digest("hex")
+    .slice(0, 16);
+  return `qitem-xh-${digest}`;
 }
 
 /** PL-007 — defensive column probe. Older test fixtures bypass the
@@ -273,6 +345,11 @@ export class QueueRepository {
   private readonly hasTargetRepoColumn: boolean;
   private readonly hasSummaryColumn: boolean;
   private readonly hasEvidenceRefColumn: boolean;
+  /** OPR.0.4.6.WF3 FR-6 — injected by startup (never imported): the
+   *  workflow domain's is-live-frontier-packet predicate. */
+  private readonly workflowFrontierPredicate:
+    | ((qitemId: string) => { instanceId: string; workflowName: string } | null)
+    | undefined;
 
   constructor(
     db: Database.Database,
@@ -288,6 +365,15 @@ export class QueueRepository {
        * a test or daemon-bootstrap path where transport is not yet wired).
        */
       transport?: QueueNudgeTransport;
+      /**
+       * OPR.0.4.6.WF3 FR-6 — the frontier close-path guard's INJECTED
+       * predicate (the validateRig injection precedent: the queue is
+       * the lower primitive and NEVER imports the workflow domain;
+       * startup wires the workflow domain's exported predicate in).
+       * Absent (tests, bootstrap, pre-workflow schemas) = zero new
+       * behavior.
+       */
+      workflowFrontierPredicate?: (qitemId: string) => { instanceId: string; workflowName: string } | null;
     }
   ) {
     this.db = db;
@@ -295,6 +381,7 @@ export class QueueRepository {
     this.transitionLog = new QueueTransitionLog(db);
     this.validateRig = opts?.validateRig ?? (() => true);
     this.transport = opts?.transport;
+    this.workflowFrontierPredicate = opts?.workflowFrontierPredicate;
     this.hasTargetRepoColumn = detectQueueColumn(db, "target_repo");
     this.hasSummaryColumn = detectQueueColumn(db, "summary");
     this.hasEvidenceRefColumn = detectQueueColumn(db, "evidence_ref");
@@ -384,7 +471,41 @@ export class QueueRepository {
     }
 
     const txn = this.db.transaction(() => this.createInTransactionalContext(input));
-    const { qitemId: id, persistedEvent } = txn();
+    let id: string;
+    let persistedEvent: PersistedEvent;
+    try {
+      ({ qitemId: id, persistedEvent } = txn());
+    } catch (err) {
+      // OPR.0.4.6.MH3 Q-a (FR-5): at-least-once cross-host forwards retry with
+      // the SAME minted qitemId, so a PK conflict on an EXISTING row is an
+      // idempotent RE-DELIVERY when the identity fields match — return the
+      // stored row (no second insert, no second event/nudge). A conflict whose
+      // identity fields DIFFER (same id, different destination/source) is a
+      // caller id-reuse bug — a structured error, never a silent overwrite.
+      // Local (non-forwarded) creates that pass an explicit --id keep the same
+      // safety for free.
+      if (input.qitemId && isQitemPrimaryKeyConflict(err)) {
+        const existing = this.getById(input.qitemId);
+        if (existing) {
+          if (
+            existing.destinationSession === input.destinationSession &&
+            existing.sourceSession === input.sourceSession
+          ) {
+            return existing;
+          }
+          throw new QueueRepositoryError(
+            "qitem_id_reuse",
+            `qitem ${input.qitemId} already exists with a different destination/source — id reuse is a caller bug, not an idempotent retry`,
+            {
+              qitemId: input.qitemId,
+              existingDestination: existing.destinationSession,
+              existingSource: existing.sourceSession,
+            },
+          );
+        }
+      }
+      throw err;
+    }
     this.eventBus.notifySubscribers(persistedEvent);
     await this.maybeNudge(id, input.destinationSession, input.nudge, input.sourceSession);
     return this.getByIdOrThrow(id);
@@ -519,7 +640,7 @@ export class QueueRepository {
         `qitem ${input.qitemId} not found`
       );
     }
-    if (source.state === "done" || source.state === "handed-off") {
+    if (isTerminalState(source.state)) {
       throw new QueueRepositoryError(
         "qitem_already_terminal",
         `qitem ${input.qitemId} is already in terminal state ${source.state}`
@@ -660,7 +781,7 @@ export class QueueRepository {
         `qitem ${input.qitemId} not found`
       );
     }
-    if (source.state === "done" || source.state === "handed-off") {
+    if (isTerminalState(source.state)) {
       throw new QueueRepositoryError(
         "qitem_already_terminal",
         `qitem ${input.qitemId} is already in terminal state ${source.state}`
@@ -782,6 +903,111 @@ export class QueueRepository {
       closed: this.getByIdOrThrow(source.qitemId),
       created: this.getByIdOrThrow(newId),
     };
+  }
+
+  /**
+   * OPR.0.4.6.MH3 FR-4 (C2, arch Q-c): the LOCAL half of a cross-host
+   * handoff — close the source row AFTER the successor-create was forwarded
+   * to (and accepted by) the target host. The two sides live in two DBs, so
+   * this is deliberately NOT the atomic close+create of {@link handoff}: the
+   * boundary is bridged by message-passing (successor-create FIRST on the
+   * origin host, this source-close SECOND — never the reverse, so a crash
+   * between the two leaves a live duplicate the idempotent re-drive
+   * converges, never a dropped potato).
+   *
+   * Re-drive semantics (FR-4/FR-5, the interrupted-close case):
+   *   - source already terminal WITH a MATCHING closureTarget → idempotent
+   *     absorb: return the stored row unchanged (`absorbed: true`) — no
+   *     second close, no second event.
+   *   - source already terminal with a MISMATCHED closureTarget → structured
+   *     `cross_host_close_conflict` (someone else closed it meanwhile —
+   *     surface, never overwrite).
+   *   - otherwise → close exactly like the local handoff's close leg:
+   *     `closure_reason=handed_off_to`; `closure_target` carries the OPAQUE
+   *     three-part `<member@rig>@<host>` form (arch R1 — presence-checked
+   *     display/audit metadata, NEVER parsed for routing); `handed_off_to`
+   *     stays the two-part `member@rig` (BR-1 — session-string carriers
+   *     never gain `@host`).
+   */
+  closeCrossHostHandoffSource(input: {
+    qitemId: string;
+    fromSession: string;
+    /** Two-part `member@rig` destination — the session-string carrier (BR-1). */
+    toSession: string;
+    /** Opaque three-part `<member@rig>@<host>` closure target (arch R1). */
+    closureTarget: string;
+    /** `handed-off` for /handoff; `done` for /handoff-and-complete. */
+    terminalState: "handed-off" | "done";
+    transitionNote?: string;
+  }): { item: QueueItem; absorbed: boolean } {
+    const source = this.getById(input.qitemId);
+    if (!source) {
+      throw new QueueRepositoryError(
+        "qitem_not_found",
+        `qitem ${input.qitemId} not found`
+      );
+    }
+    if (isTerminalState(source.state)) {
+      if (source.closureTarget === input.closureTarget) {
+        return { item: source, absorbed: true };
+      }
+      throw new QueueRepositoryError(
+        "cross_host_close_conflict",
+        `qitem ${input.qitemId} is already closed toward ${source.closureTarget ?? "<no closure_target>"} — this re-drive names ${input.closureTarget}; surfacing the conflict, never overwriting`,
+        {
+          qitemId: input.qitemId,
+          existingClosureTarget: source.closureTarget,
+          attemptedClosureTarget: input.closureTarget,
+        },
+      );
+    }
+
+    const ts = new Date().toISOString();
+    const events: Array<import("./types.js").RigEvent> = [];
+
+    const txn = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE queue_items
+             SET state = ?,
+                 ts_updated = ?,
+                 handed_off_to = ?,
+                 closure_reason = 'handed_off_to',
+                 closure_target = ?
+           WHERE qitem_id = ?`
+        )
+        .run(input.terminalState, ts, input.toSession, input.closureTarget, input.qitemId);
+
+      this.transitionLog.append({
+        qitemId: input.qitemId,
+        state: input.terminalState,
+        actorSession: input.fromSession,
+        // BR-1: the minted note carries the TWO-PART toSession only — the
+        // host-qualified 3-part form is allowed in closure_target and nowhere
+        // else, and transition_note is a durable carrier.
+        transitionNote: input.transitionNote ?? `cross-host handoff to ${input.toSession}`,
+        closureReason: "handed_off_to",
+        closureTarget: input.closureTarget,
+      });
+
+      const handoffEvent = this.eventBus.persistWithinTransaction({
+        type: "queue.handed_off",
+        qitemId: input.qitemId,
+        fromSession: input.fromSession,
+        // The event body is a session-string carrier — two-part only (BR-1).
+        toSession: input.toSession,
+        closureReason: "handed_off_to",
+        summary: source.summary ?? null,
+      });
+      events.push(handoffEvent);
+    });
+
+    txn();
+    for (const e of events) {
+      this.eventBus.notifySubscribers(e as PersistedEvent);
+    }
+
+    return { item: this.getByIdOrThrow(input.qitemId), absorbed: false };
   }
 
   /**
@@ -1015,6 +1241,28 @@ export class QueueRepository {
       throw new QueueRepositoryError(validation.code, validation.message, {
         validReasons: "validReasons" in validation ? validation.validReasons : undefined,
       });
+    }
+
+    // OPR.0.4.6.WF3 FR-6 — the frontier close-path guard (pm ruling:
+    // PREVENTION over detection). A TERMINAL closure (done/handed-off)
+    // of a LIVE workflow-frontier packet from a NON-workflow verb
+    // would strand the instance: the frontier would reference a
+    // closed packet and the workflow's own bookkeeping (trail,
+    // rebind, events) would never happen. Reject LOUD with
+    // what/why/fix naming the workflow verbs. The workflow domain's
+    // own writers pass viaWorkflowVerb (they hold the invariant);
+    // non-workflow qitems return null from the predicate — closure
+    // behavior byte-identical (the zero-friction negative).
+    const isTerminalClosure = isTerminalState(input.state);
+    if (isTerminalClosure && !input.viaWorkflowVerb && this.workflowFrontierPredicate) {
+      const binding = this.workflowFrontierPredicate(input.qitemId);
+      if (binding) {
+        throw new QueueRepositoryError(
+          "workflow_frontier_packet",
+          `qitem ${input.qitemId} is the LIVE frontier packet of workflow instance ${binding.instanceId} (${binding.workflowName}). Closing it out-of-band would strand the workflow. Use the workflow verbs instead: rig workflow project (advance) | rig workflow route (re-target the owner).`,
+          { instanceId: binding.instanceId, workflowName: binding.workflowName, qitemId: input.qitemId },
+        );
+      }
     }
 
     // OPR.0.4.4.19 FR-6 — leg-1 park (state=blocked on a HUMAN-seat blocker):

@@ -627,3 +627,57 @@
   background: #1e211e;
   box-shadow: 6px 6px 0 -1px rgba(0, 0, 0, 0.35), 0 0 0 1px var(--df-line);
 }
+
+/* OPR.0.4.6.MH1 FR-5 — the host-config component (own host + added hosts
+   + add affordance + switcher). Same paper-draft discipline as the rest
+   of the surface; monospace rows, no chrome. */
+.df-root .df-hosts {
+  margin: 0 0 24px;
+  max-width: 640px;
+}
+.df-root .df-hosts-own,
+.df-root .df-hosts-row,
+.df-root .df-hosts-add,
+.df-root .df-hosts-pairing,
+.df-root .df-hosts-rename {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11px;
+  padding: 4px 0;
+}
+.df-root .df-hosts-name { font-weight: 600; }
+.df-root .df-hosts-tag,
+.df-root .df-hosts-transport,
+.df-root .df-hosts-status { font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; opacity: 0.7; }
+.df-root .df-hosts-status-unreachable { color: #a33d2e; opacity: 1; }
+.df-root .df-hosts-selected { font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; border: 1px solid var(--df-line); padding: 1px 6px; }
+.df-root .df-hosts-marker { width: 10px; }
+.df-root .df-hosts-addr { opacity: 0.8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.df-root .df-hosts-list { border-top: 1px solid var(--df-line); margin-top: 4px; }
+.df-root .df-hosts-row { border-bottom: 1px dashed var(--df-line); }
+.df-root .df-hosts-btn {
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border: 1px solid var(--df-line);
+  padding: 2px 8px;
+  background: transparent;
+  cursor: pointer;
+}
+.df-root .df-hosts-btn:hover { background: rgba(0, 0, 0, 0.05); }
+.df-root .df-hosts-input {
+  font-family: inherit;
+  font-size: 11px;
+  border: 1px solid var(--df-line);
+  padding: 3px 6px;
+  background: transparent;
+  flex: 1;
+  max-width: 320px;
+}
+.df-root .df-hosts-empty { font-size: 11px; opacity: 0.7; padding: 6px 0; }
+.df-root .df-hosts-banner { font-size: 10px; padding: 4px 0; opacity: 0.85; }
+.df-root .df-hosts-error { color: #a33d2e; font-size: 10px; }
+.dark .df-root .df-hosts-btn:hover { background: rgba(255, 255, 255, 0.08); }

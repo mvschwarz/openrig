@@ -4,6 +4,7 @@ import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { RuntimeHint } from "./discovery-types.js";
 import type { RuntimeAdapter, NodeBinding, ReadinessResult } from "./runtime-adapter.js";
 import { isAttentionRequiredReadinessCode } from "./runtime-adapter.js";
+import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
 
 /**
  * OPR.0.4.3.04 — the explicit successor-creation seam for the seat-handover
@@ -40,7 +41,21 @@ export interface SuccessorNode {
 }
 
 export type SuccessorLaunchResult =
-  | { ok: true; discoveredId: string; tmuxSession: string; tmuxPane: string; resumeToken?: string; resumeType?: string }
+  | {
+      ok: true;
+      discoveredId: string;
+      tmuxSession: string;
+      tmuxPane: string;
+      resumeToken?: string;
+      resumeType?: string;
+      /**
+       * OPR.0.4.6.02 S1 — non-fatal tmux option-default warnings from the
+       * fresh successor's launch (mouse/status/clipboard). Present only when
+       * an option-set degraded; omitted (undefined) on the clean path so the
+       * shape stays byte-compatible with pre-02 successors.
+       */
+      warnings?: string[];
+    }
   | { ok: false; code: string; step: "create_successor" | "resolve_pane" | "start_agent"; message: string };
 
 export class SuccessorSessionLauncher {
@@ -51,6 +66,7 @@ export class SuccessorSessionLauncher {
   private runtimeAdapters: Record<string, RuntimeAdapter>;
   private readinessTimeoutMs: number;
   private sleep: (ms: number) => Promise<void>;
+  private tmuxOptionDefaults: TmuxOptionDefaultsApplier | null;
 
   constructor(
     tmuxAdapter: TmuxAdapter,
@@ -65,6 +81,13 @@ export class SuccessorSessionLauncher {
       readinessTimeoutMs?: number;
       /** Injectable sleep (tests). */
       sleep?: (ms: number) => Promise<void>;
+      /**
+       * OPR.0.4.6.02 S1 — the SHARED tmux option-defaults applier. A FRESH
+       * successor is a new operator/agent seat (same launch-only class as
+       * NodeLauncher), so it gets the same mouse/status/clipboard defaults on
+       * its just-created session. Omitted → option application is skipped.
+       */
+      tmuxOptionDefaults?: TmuxOptionDefaultsApplier;
     } = {},
   ) {
     this.tmuxAdapter = tmuxAdapter;
@@ -74,6 +97,7 @@ export class SuccessorSessionLauncher {
     this.runtimeAdapters = opts.runtimeAdapters ?? {};
     this.readinessTimeoutMs = opts.readinessTimeoutMs ?? 30_000;
     this.sleep = opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.tmuxOptionDefaults = opts.tmuxOptionDefaults ?? null;
   }
 
   /**
@@ -112,6 +136,17 @@ export class SuccessorSessionLauncher {
       }
       return { ok: false, code: created.code, step: "create_successor", message: created.message };
     }
+
+    // OPR.0.4.6.02 S1 — a FRESH successor is a brand-new operator/agent seat
+    // (the same launch-only class as NodeLauncher), so apply the daemon's tmux
+    // option defaults (mouse/status/clipboard) to its JUST-CREATED session via
+    // the shared applier. `createSuccessor` only ever makes fresh sessions —
+    // DISCOVERED (pre-existing) successors never reach this seam — so the
+    // never-retro-flip rail (BR-1) holds. Failures are non-fatal (a handover
+    // must not die over a cosmetic option); the warnings ride the ok result.
+    const optionWarnings = this.tmuxOptionDefaults
+      ? await this.tmuxOptionDefaults.applyToFreshSession(distinctName)
+      : [];
 
     // Driver note 2: resolve the real tmux pane AFTER create, BEFORE upsertDiscoveredSession —
     // upsert requires a pane, and createSession returns only { ok: true }.
@@ -171,6 +206,7 @@ export class SuccessorSessionLauncher {
       tmuxPane: pane.id,
       resumeToken: started.resumeToken,
       resumeType: started.resumeType,
+      warnings: optionWarnings.length > 0 ? optionWarnings : undefined,
     };
   }
 

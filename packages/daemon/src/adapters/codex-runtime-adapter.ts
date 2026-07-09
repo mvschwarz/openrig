@@ -19,6 +19,7 @@ import {
 } from "../domain/codex-thread-id.js";
 import { assessNativeResumeProbe, buildCodexResumeCore, type NativeResumeProbeResult } from "../domain/native-resume-probe.js";
 import { mergeManagedBlock } from "../domain/managed-blocks.js";
+import { parseSessionName } from "../domain/session-name.js";
 import { shellQuote } from "./shell-quote.js";
 
 export interface CodexAdapterFsOps {
@@ -966,17 +967,20 @@ export function upsertCodexHookTrust(content: string, key: string, hash: string)
 }
 
 function parseCanonicalSessionName(sessionName: string): { pod: string; member: string; rig: string } | null {
+  // OPR.0.4.6.MH1 FR-8: the member/rig split rides the shared parse
+  // contract. A multi-@ name now parses with a greedy rig ("rig@x"),
+  // which isSafeQueueSegment rejects ("@" is unsafe) — the same null this
+  // site returned via its old single-@ check.
   const trimmed = sessionName.trim();
-  const atIndex = trimmed.indexOf("@");
-  if (atIndex <= 0 || atIndex !== trimmed.lastIndexOf("@") || atIndex === trimmed.length - 1) return null;
+  const parsed = parseSessionName(trimmed);
+  if (parsed.kind !== "canonical") return null;
 
-  const local = trimmed.slice(0, atIndex);
-  const rig = trimmed.slice(atIndex + 1);
-  const separatorIndex = local.indexOf("-");
-  if (separatorIndex <= 0 || separatorIndex === local.length - 1) return null;
+  const rig = parsed.rig;
+  const separatorIndex = parsed.member.indexOf("-");
+  if (separatorIndex <= 0 || separatorIndex === parsed.member.length - 1) return null;
 
-  const pod = local.slice(0, separatorIndex);
-  const member = local.slice(separatorIndex + 1);
+  const pod = parsed.member.slice(0, separatorIndex);
+  const member = parsed.member.slice(separatorIndex + 1);
   if (!isSafeQueueSegment(pod) || !isSafeQueueSegment(member) || !isSafeQueueSegment(rig)) return null;
 
   return { pod, member, rig };

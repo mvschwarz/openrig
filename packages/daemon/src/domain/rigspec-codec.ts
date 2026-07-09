@@ -69,6 +69,8 @@ export class RigSpecCodec {
         if (m.label) member["label"] = m.label;
         if (m.codexConfigProfile) member["codex_config_profile"] = m.codexConfigProfile;
         if (m.model) member["model"] = m.model;
+        // OPR.0.4.6.FAC1: role round-trips through spec serialization.
+        if (m.role) member["role"] = m.role;
         if (m.restorePolicy) member["restore_policy"] = m.restorePolicy;
         if (m.startup) member["startup"] = serializeStartupBlock(m.startup);
         if (m.sessionSource) {

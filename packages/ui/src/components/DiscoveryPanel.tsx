@@ -6,6 +6,8 @@ import { cn } from "@/lib/utils";
 import { displayAgentName } from "../lib/display-name.js";
 import { shortId } from "../lib/display-id.js";
 import { RuntimeBadge, ToolMark } from "./graphics/RuntimeMark.js";
+import { useSelectedHostId } from "../hooks/useHosts.js";
+import { LOCAL_HOST_ID } from "../lib/host-param.js";
 import {
   useAdoptSession,
   useDiscoveredSessions,
@@ -134,6 +136,10 @@ export function DiscoveryPanel({
 }: DiscoveryPanelProps) {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const currentRigId = parseCurrentRigId(pathname);
+  // OPR.0.4.6.MH2 rev1-r2 re-re-verdict B1: adopt is a LOCAL mutation — the
+  // target/adopt flow never renders under a remote selection (the shell also
+  // clears placement on any host switch; this is the panel-side brace).
+  const panelIsRemote = useSelectedHostId() !== LOCAL_HOST_ID;
   const { data: sessions = [] } = useDiscoveredSessions({
     status: "active",
     runtimeHint: ["claude-code", "codex"],
@@ -313,7 +319,17 @@ export function DiscoveryPanel({
                       </div>
                     ) : null}
 
-                    {placementTarget && !placementTarget.eligible ? (
+                    {placementTarget && panelIsRemote ? (
+                      <div
+                        data-testid="discovery-remote-readonly"
+                        data-remote-readonly="true"
+                        className="border border-outline-variant bg-surface-lowest/70 px-2.5 py-2 font-mono text-[9px] uppercase tracking-wide text-on-surface-variant"
+                      >
+                        adopt is a local action — read-only while viewing a remote host
+                      </div>
+                    ) : null}
+
+                    {placementTarget && !panelIsRemote && !placementTarget.eligible ? (
                       <div
                         data-testid="discovery-target-error"
                         className="border border-red-200 bg-red-50/80 px-2.5 py-2 font-mono text-[9px] text-red-700"
@@ -322,7 +338,7 @@ export function DiscoveryPanel({
                       </div>
                     ) : null}
 
-                    {placementTarget?.eligible ? (
+                    {placementTarget?.eligible && !panelIsRemote ? (
                       <div className="space-y-2 border border-emerald-300/80 bg-surface-lowest/70 px-3 py-2" data-testid="discovery-target-card">
                         <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-emerald-800">Target</div>
                         <div data-testid="discovery-target-summary" className="font-mono text-[10px] text-on-surface">

@@ -10,6 +10,7 @@ import {
   startTranscriptRotation,
   getTranscriptRotationOptionsFromEnv,
 } from "./transcript-rotation.js";
+import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
 
 import type { Session, Binding } from "./types.js";
 
@@ -41,6 +42,15 @@ interface NodeLauncherDeps {
    *  SeatActivityService global default (3s). Per-seat override via
    *  LaunchOpts is currently inert. */
   defaultSilenceWindowSeconds?: number;
+  /**
+   * OPR.0.4.6.02 S1 — the SHARED tmux option-defaults applier (mouse/status
+   * session-scope + set-clipboard/copy-command server-scope), applied to the
+   * just-created session at launch. Injected from startup so the same
+   * instance (and its once-per-daemon server-defaults memo) is shared with
+   * SuccessorSessionLauncher. When omitted (most unit tests), the launch path
+   * skips option application entirely.
+   */
+  tmuxOptionDefaults?: TmuxOptionDefaultsApplier;
 }
 
 export class NodeLauncher {
@@ -52,6 +62,7 @@ export class NodeLauncher {
   private transcriptStore: TranscriptStore | null;
   private sessionEnv: Record<string, string>;
   private defaultSilenceWindowSeconds: number;
+  private tmuxOptionDefaults: TmuxOptionDefaultsApplier | null;
 
   constructor(deps: NodeLauncherDeps) {
     // Hard runtime invariant: all domain services must share the same db handle.
@@ -74,6 +85,7 @@ export class NodeLauncher {
     this.transcriptStore = deps.transcriptStore ?? null;
     this.sessionEnv = compactEnv(deps.sessionEnv ?? {});
     this.defaultSilenceWindowSeconds = deps.defaultSilenceWindowSeconds ?? 3;
+    this.tmuxOptionDefaults = deps.tmuxOptionDefaults ?? null;
   }
 
   async launchNode(
@@ -124,6 +136,15 @@ export class NodeLauncher {
     }
 
     const launchWarnings: string[] = [];
+
+    // 3a2. OPR.0.4.6.02 S1 — apply the daemon's tmux option defaults to the
+    // JUST-CREATED session via the shared applier (mouse/status session-scope
+    // + set-clipboard/copy-command server-scope). Touches only this new
+    // session, never an existing one (BR-1 never-retro). Option-set failures
+    // come back as non-fatal launch warnings.
+    if (this.tmuxOptionDefaults) {
+      launchWarnings.push(...(await this.tmuxOptionDefaults.applyToFreshSession(sessionName)));
+    }
 
     // 3b. Start transcript rotation (V1 pre-release CLI/daemon Item 1:
     // bounded capture-pane overwrite replaces the unbounded pipe-pane

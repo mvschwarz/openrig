@@ -493,7 +493,14 @@ export class TmuxAdapter {
     }
   }
 
-  /** Set a session-scoped user option (@-prefixed key). */
+  /**
+   * Set a SESSION-scoped option via `set-option -t <session>` (OPR.0.4.6.02
+   * N1 JSDoc fix, arch): this is the GENERIC session-scope writer — it takes
+   * ANY session option, not only `@`-prefixed user options (it is how the
+   * launcher sets built-in session options like `mouse` and `status`). For
+   * SERVER-scope options use `setServerOption` (`set-option -s`); the two
+   * scopes are never crossed (guard b2).
+   */
   async setSessionOption(sessionName: string, key: string, value: string): Promise<TmuxResult> {
     const cmd = `tmux set-option -t ${shellQuote(sessionName)} ${shellQuote(key)} ${shellQuote(value)}`;
     try {
@@ -501,6 +508,38 @@ export class TmuxAdapter {
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
+    }
+  }
+
+  /**
+   * OPR.0.4.6.02 S1 (guard b2): set a SERVER-scoped option via
+   * `set-option -s <option> <value>` — the daemon configuring its OWN tmux
+   * server (NOT a live-flip of anyone's session). NEVER targets a session
+   * (`-t`): server scope and session scope are distinct and never crossed.
+   * Used for `set-clipboard` / `copy-command`.
+   */
+  async setServerOption(option: string, value: string): Promise<TmuxResult> {
+    const cmd = `tmux set-option -s ${shellQuote(option)} ${shellQuote(value)}`;
+    try {
+      await this.exec(cmd);
+      return { ok: true };
+    } catch (err) {
+      return classifyWriteError(err);
+    }
+  }
+
+  /**
+   * OPR.0.4.6.02 S1: read a SERVER-scoped option value via
+   * `show-options -sv <option>` (the `-s` server-scope reader — mirrors
+   * `setServerOption`). Returns null if unset or on error. For tests/proof.
+   */
+  async showServerOption(option: string): Promise<string | null> {
+    try {
+      const output = await this.exec(`tmux show-options -sv ${shellQuote(option)}`);
+      const v = output.trim();
+      return v.length > 0 ? v : null;
+    } catch {
+      return null;
     }
   }
 

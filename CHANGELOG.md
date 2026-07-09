@@ -8,6 +8,139 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.4.6] - 2026-07-09
+
+**Status**: shipped; workflows + multi-host coordination + factory foundations theme. 0.4.5 was skipped (no cut).
+
+### Summary For Installing Agents
+
+- **Package version**: bumps from `0.4.4`. 0.4.5 was skipped.
+- **Migrations**: additive only — `049_workflow_instance_version`, `050_workflow_spec_json`, `051_workflow_resume`, `052_workflow_instance_bound_rig`, `053_sessions_node_id_index`, `054_queue_transitions_archive`. Existing v0.4.4 databases upgrade by running `rig daemon start` on the new daemon.
+- **Node engines**: unchanged.
+- **New bundled skills**: `openrig-herdr` and `openrig-cmux` ship in canonical shared source + bundled openrig-core plugin, byte-parity guarded.
+
+### Headline
+
+**Workflows + multi-host coordination + factory foundations.** OpenRig gains a rock-solid deterministic workflow engine — spec language, CLI, web UI, exception + human-gate model — plus the self-driving factory starter that runs on top of it. Multi-host coordination lands the full happy path: hosts register + select, remote workspaces read, cross-host queue routing, cross-host direct coordination verbs (`rig send` / `rig capture` / `rig transcript` / `rig broadcast`), and a fleet-attention rollup. Terminal provider first-class treatment and daemon read-path hardening ride alongside; a new Pi agent runtime adapter joins Claude and Codex as a first-class runtime.
+
+### The rock-solid deterministic workflow engine
+
+- **Migrations**: additive only — 049 `workflow_instances.version` (optimistic concurrency, default 0), 050 `workflow_specs.spec_json` (full parsed spec at cache time; legacy rows self-heal on next read-through and degrade with a visible advisory until then).
+- **Behavioral**: `loop_guards.max_hops` is now ENFORCED at projection (exceeding converts the handoff to an honest structured failure — instances that silently looped will now fail loud at the guard); workflow spec validation is STRICT (unknown keys reject at parse; unreachable steps and unguarded cycles fail validation — declare `loop_guards.max_hops` to sanction a loop); waiting-exit replays are absorbed (exact duplicates return the stored outcome with zero writes); `rig workflow continue` is relabeled to its real read-only inspector semantics (the wire was always read-only; the label lied).
+- **New**: per-instance workflow-keepalive watchdog jobs auto-arm in the routing transaction and disarm at terminal (deadline-gated: quiet while healthy, stuck-steering nudge when a step is overdue — 4h threshold on the routine-tier SLA); a startup sweep re-arms keepalives, reissues nudges lost to the commit-then-crash window, and surfaces stuck instances.
+- **Advisories (fail-open)**: declared-but-unenforced spec keys (`invariants.*` except `allowed_exits`, `closure.*`, `gates[]`, `skill_refs`, `next_hop.mode: prefer`, `spawn_budget`) warn `declared_not_enforced_v1` at validation; exit code unchanged.
+
+### The full-featured workflow spec language
+
+- **The workflow spec DSL** the engine parses ships full-featured: step definitions with `role`/`target.rig`/`preferred_targets`, `next_hop.on` branch semantics, `invariants.allowed_exits`, `loop_guards.max_hops`, `exception_routing`, `closure.*`, `gates[]`, `skill_refs`, `spawn_budget`. Strict-keyset validation at parse (unknown keys reject; unreachable steps + unguarded cycles fail); shipped-spec compat pinned by fixture round-trip. Composes with the workflow-to-rig binding + the exception model.
+
+### The workflow CLI
+
+- **Migrations**: none.
+- **New verbs**: `rig workflow run <spec>` (instantiate + follow live to a terminal state; exit 0 = completed, exit 3 = workflow failed — distinct from transport 1/2, so `run && next-thing` is honest) · `rig workflow watch <instance>` (read-only mid-flight attach; snapshot-first so fast early steps still render exactly once; drops reconnect then degrade to an announced poll fallback) · `rig workflow status` (the needs-attention rollup: counts + one row per failed/stuck/waiting instance with combined reasons and the next action; proven-empty on a clean fleet) · `rig workflow route <instance> --to <session>` (re-target the current frontier step: honest handed_off_to closure + successor recreate + frontier rebind in one transaction; the step does NOT advance; the old owner's stale project is structurally rejected with `packet_not_on_frontier`).
+- **Behavioral**: `trace`/`list`/`show` human output is now formatted (per-step tree, columns, status glyphs, ATTN markers) — `--json` payloads are byte-identical to before; named daemon rejections render as what/why/fix in human mode (`--json` keeps the raw body).
+- **Guard**: out-of-band TERMINAL closure of a live workflow-frontier packet (raw `rig queue update`, Mission Control route/handoff) now rejects with `workflow_frontier_packet` (HTTP 400) naming the correct workflow verbs. Non-workflow queue items are unaffected. The predicate is injected at startup (the queue layer does not import the workflow domain).
+- **Events**: `workflow.routing_table_changed` extended additively with `{instanceId, stepId, from, to}` on route emissions; existing `{rigName, cause}` consumers unaffected.
+
+### The workflow web UI
+
+- **New pages + components**: `WorkflowsPage` (workflow catalog + instantiate flow), `WorkflowInstancePage` (per-instance detail + trail), `WorkflowInstancesBand` (in-band rollup surface), `WorkflowTopologyGraph` (visual topology renderer), `InstanceTrailTimeline` (packet + step trail).
+- **New hooks**: `useWorkflow`, `useWorkflowSse` (workflow SSE stream, unscoped by rig — never `?rigId=`); workflow events cross-rig aggregate.
+- **Behavioral**: workflow layout math is extracted as pure exports (`buildLauncherViews` / `suggestLayout`) for unit tests; permutation-invariant edge-handle assignment (`computeStepDepths` / `assignEdgeHandles`); post-merge borderRadius design-compliance fix landed. Twin fixture backfill for these routes is routed as a non-blocking 0.4.7 hygiene fast-follow; UI acceptance is carried by per-cut real screenshots + the two-host integration proof.
+
+### The exception + human-gate model
+
+- **Migrations**: `051_workflow_resume` — two additive columns on `workflow_instances` (`resume_count`, `hops_baseline`, both NOT NULL DEFAULT 0; no backfill; behavior byte-identical until the first resume).
+- **New verb**: `rig workflow resume <instance> [--decision <text>]` — redrive a FAILED instance from its failed step: back to active, rebound, fresh packet to the step's RE-RESOLVED owner (a replaced dead seat receives the redrive — the recorded stale destination is never copied); completed steps never re-run; one fresh `max_hops` window per resume (`hops_baseline`); the resolved exception occurrence closes; a repeat failure raises a NEW occurrence-distinct item.
+- **Exceptions are durable attention items now**: an unmapped `failed` close creates the item IN THE SAME transaction as the failure (no item-less failed window); stuck/overdue instances get their item at sweep/keepalive detection, occurrence-deduped. Items carry plain-language summary, a trace evidence pointer, the resume affordance, and structured tags (`workflow:`/`instance:`/`step:`/`exception:`/`occurrence:`) for query-side joins.
+- **The maturity dial**: exception routing is configurable per class / per workflow (`exception_routing:` in the spec — strict-keyset validated) and per host (`rig config set workflow.exception_routing orchestrator|human_only`). Default = ORCHESTRATOR-FIRST: the item routes to the workflow's declared `orchestrator_role` target while the human band shows an AWARENESS row (holder + age — visibility, not a to-do). `human_only` classes/workflows route `human@host` first and gate there. No resolvable target = `human@host`, never lost. Orchestrator-routed items carry an ordinary tier — they never leak into the human attention legs; the shipped attention predicate is unchanged.
+- **The attention band is workflow-aware**: failed/stuck instances with no item render a backstop row naming the missing-item anomaly; a frontier referencing a closed packet renders an anomaly row (the detection twin of the CLI close-path guard); healthy fleets render zero workflow rows.
+- **Happy-path guarantee unchanged**: a healthy run creates zero exception items of any routing and involves no orchestrator — pinned by test and proof.
+- **Events**: additive `workflow.resumed` (`{instanceId, workflowName, stepId, resumedBy, decision, resumeCount}`).
+
+### Add / select hosts — host registry + dashboard
+
+- **Host registry verbs** (shipped at 0.4.4) gain the dashboard-side complement: `HostConfigCard` surfaces each registered host's declared transport, health, and identity; `HostIndicator` shows the current selection at the operator field of view. New hooks: `useHosts`, `useFleet` (registry read + fleet-wide rollup).
+- **`rig host select` persists a sticky selection** consumed by the observe/interactive verbs (see cross-host coordination verbs, below); durable writes never follow the selection (deliberate asymmetry — see cross-host queue routing, below).
+
+### View remote workspace
+
+- **A remote host's workspace surfaces are readable from a local operator** — the workspace observability tabs shipped at 0.4.1 gain `--host <id>` scope; the registry + bearer path fans out per-host reads. Read-only for this pass; cross-host writes are the queue-routing and coordination-verb sections below.
+
+### Cross-host queue routing
+
+- **A queue item can now be sent — and a hot-potato handed off — to a destination on ANOTHER host.** `rig queue create/handoff/handoff-and-complete` gain `--host <id>` and the host-qualified destination form `member@rig@<host>` (both resolve to the same out-of-band `hostId` envelope; the session string stays `member@rig`). The local daemon forwards the write to the target host's daemon over the host registry + bearer (the shipped mission-control forward-then-strip WRITE, generalized); **the qitem lives in the target host's DB** and that host's own nudge wakes the destination agent on ITS tmux.
+- **Explicit-only routing**: queue verbs never follow the persisted `rig host select` selection — a durable write does not silently re-home on a sticky selection (deliberate asymmetry with the observe/interactive verbs).
+- **At-least-once + idempotent, never exactly-once**: the forwarding daemon mints the qitem id before the first forward; a cross-host handoff's successor id is derived deterministically (`qitem-xh-…`) from (source, destination, host) so retries absorb on the target's primary key. Cross-host handoffs create the successor FIRST and close the local source SECOND (never-drop); the source close records the opaque three-part `closure_target=member@rig@<host>` (audit metadata, never parsed) and the successor carries the continued `chain_of_record` (opaque lineage ids on the target). Re-drives absorb on a matching `closure_target`; a mismatch is a structured `cross_host_close_conflict` (409).
+- **Failure honesty**: unknown / ssh-declared / unreachable / auth-failed hosts each surface a distinct structured `remote_queue_write_failed` error naming the host; nothing is written on either side. Transport is http-only (daemon→daemon); the `rig send --host` ssh shell-out is untouched.
+- **No migrations. Local (no-host) queue behavior is byte-identical.** Claim/update/inbox stay local-by-principle; sender-side ops on a forwarded item are a named follow-up.
+
+### Cross-host agent coordination
+
+- **The direct coordination verbs now cross hosts — send, observe, coordinate JUST WORK.** `rig send` and `rig capture` gain an **http transport branch**: an http-registered host (the kind the shipped `rig host pair` front door creates) is reached CLI-DIRECT via the shipped `runRemoteHttpOp` against the remote daemon's EXISTING `/api/transport/send|capture` routes — **zero daemon-side changes**; the ssh path stays byte-verbatim for ssh-registered hosts (the host entry's declared transport dictates the path; never a fallback). `rig transcript` and `rig broadcast` gain their FIRST cross-host affordance the same way (`--host <id>`, http-only): transcript reads the remote daemon's tail/grep routes with origin output verbatim; broadcast posts to the remote daemon's own fan-out engine, printing its per-target results verbatim (a partial fan-out exits non-zero, exactly as local) under its own named 30s deadline.
+- **The `agent@rig@host` target form is CLI-edge sugar, uniform on the session-target verbs** (send/capture/transcript): the suffix is host-qualified IFF it matches a REGISTERED host id, else the target passes through unchanged with a loud host hint on failure (adopted/raw names containing `@` keep working — deliberately different from the queue verbs' always-strip rule; both documented side-by-side in cli-reference). Precedence: explicit `--host` > target sugar > the persisted host selection; a `--host`-vs-sugar conflict is a structured error. Broadcast's positional is message text (never parsed as a target), so it takes `--host`/selection only. Every session string that reaches any daemon stays `member@rig`.
+- **Failure honesty per branch:** the http branch names its own steps (unknown-host / permission-gate / remote-daemon-unreachable / remote-command-failed, with the remote route's own error text surfaced); the ssh branch keeps its shipped taxonomy. `send --verify` over http prints the REMOTE route's verdict verbatim — never a locally synthesized "Verified: yes". Named terminal-bearer posture: default/tailnet = pass-through; a remote enforcing a different terminal bearer surfaces as the structured permission-gate step (remedy documented; no new auth machinery).
+- **No migrations. No daemon changes. Local (no-host, no-selection) behavior of all four verbs is byte-identical.** Durable cross-host coordination remains the queue; the coordination verbs add no queue surface.
+
+### Fleet-attention altitude
+
+- **A fleet-altitude attention surface** — the attention band gains a fleet-wide altitude rollup (`FleetBand` + `FleetPage`): aggregates attention counts across every registered host, per-host status, drill-down to the per-host attention list. Composes with the host registry + the remote-workspace read. New hooks: `useFleet`, `useReviewAgents`.
+
+### The workflow-to-rig binding layer
+
+- **Migrations**: `052_workflow_instance_bound_rig` — one additive nullable column on `workflow_instances` (`bound_rig` TEXT; NULL = unbound = byte-identical prior behavior; no backfill).
+- **Point a workflow at a rig at INSTANTIATION**: `rig workflow instantiate|run … --rig <name>` overrides the spec's `target.rig` DEFAULT; the binding persists on the instance (`boundRig` in `--json`, rendered by `show`/`trace`). Unknown-rig validation splits by provenance: an explicit `--rig <unknown>` is a hard `bound_rig_unknown` naming the registered rigs; an unknown spec-default `target.rig` DEGRADES to unbound with a loud instantiate advisory (surfaced in `--json` `advisories` + on stderr) — shipped/example specs that carry a descriptive `target.rig` and route via `preferred_targets` (e.g. `conveyor`) instantiate byte-identically to prior behavior (zero-regression).
+- **Roles resolve to SEATS by capability**: pod members may declare `role: <name>` (rig.yaml, `rig expand` fragments, `rig add` fragments — opt-in per seat; charset-validated; rejected on terminal members; round-trips through export). On a bound instance, a workflow role with **no `preferred_targets`** resolves at step-close to a live capable seat on that rig: running agents declaring the role, managed seats only (adopted seats excluded loudly with `adopted_seat_not_role_resolvable_v1`), harness-pin-aware runtime match, least pending backlog, deterministic coordinate tiebreak. Declared `preferred_targets` stay the explicit override tier, byte-identical and never liveness-filtered; every previously-shipped spec behaves identically.
+- **Resolve-once, record-in-the-packet**: resolution happens once inside the close+create transaction and records as the packet destination; replays consume the record (zero inventory reads); `rig workflow resume` re-resolves by design and is now capability-aware. Roles bind to the stable seat coordinate `{pod}-{member}@{rig}` — an agent handover behind the seat never strands the workflow.
+- **Honest failures**: no live capable seat = structured `next_owner_unresolved` with per-candidate disqualifiers + fix line; zero-declaring rigs get a named message; instantiate hard-fails only on STRUCTURAL zero-role coverage (`bound_rig_role_uncovered`) — a declared-but-not-yet-running seat is fine (factory rigs warm up). Never a spawn, never auto-`add_member`, never a dead-seat route.
+- **Exception routing rides the binding**: the exception model's orchestrator-role position resolves capability-aware on the bound rig (never-lost human@host fallback unchanged).
+- **Scale-out = add a member under a role** (`rig add` fragments carry `role`); auto-scale-out is explicitly NOT built.
+
+### The self-driving factory starter (`factory-rsi`)
+
+- **New shipped starter: `rig up factory-rsi`** — the single-rig recursive-self-improvement factory MVP. One rig, seven seats (`plan-planner`, `build-implementer`, `check-qa`, `review-reviewer`, `dogfood-tester`, `release-manager`, `orch-lead`), running the new `factory-rsi` workflow. A launch-tier product starter (a `product-team` sibling), workspace-agnostic — point `--cwd <repo>` at whatever the loop should improve.
+- **New builtin workflow: `factory-rsi`** — the inner loop `plan → implement → qa_check → review → release`, with `qa_check`/`review` `failed` → `implement` (bounded remediation), engine-routed — never an orchestrator relay. Dogfood is **decoupled** from this gated loop: the dogfood seat runs out-of-band against the **shipped** product and feeds its findings into the next plan (the RSI edge, ungated — no loop-stop in the MVP; the continuous out-of-band runtime mechanism is refined in a later release). The remediation loops are sanctioned only by the enforceable `loop_guards.max_hops`; a trip is an exception routed orchestrator-first (`exception_routing`), and `rig workflow resume` grants one more bounded window.
+- **Recorded-state cycles**: the next plan's input is the *recorded* dogfood findings (`evidence_ref` / the packet trail), never a seat's chat memory — the RSI feedback is durable recorded state.
+- **Publish stays a human act**: the release leg is two steps — `release_prep` (the release-manager PREPARES notes/docs/PR and records the evidence; un-gated, runs first) hands off to `release_signoff`, which holds the ship decision at a human gate (`gate.target: human@kernel`). Prepared artifacts exist before sign-off; no seat pushes, tags, publishes, or upgrades a host.
+- **Rides the merged engine, no new machinery**: runs on the workflow engine + spec language + exception model as shipped, with the v0 hardcode seam (`target.rig: factory-rsi` + `preferred_targets` pin each role 1:1 to a seat) — no binding-layer dependency, no engine change. Runtime config: seats inherit their runtime's default model (no per-seat pin); plan/build/release/orch run on claude-code, and qa/review/dogfood run on codex for cross-runtime diversity against the builder.
+- **No migrations. No breaking changes.**
+
+### The member-exists instantiate advisory + cross-rig wrapping workflow
+
+- **Mis-routed workflow destinations are caught loudly at instantiate, never silently orphaned.** A declared `preferred_target` that names a rig registered on this daemon but a MEMBER that does not exist (a typo or a stale seat name) now surfaces **ONE loud, aggregated advisory** on the shipped instantiate `advisories` list — naming the destination, every declaring step/role pair, the consequence (the work will not be claimed; it will surface as a stuck exception), and the fix hint (`rig ps` / add the member). Rendered exactly where advisories already render: the route body + CLI stderr. **No new surface, no new flag** — the shipped `target.rig`-degrade list simply gains a second producer.
+- **ADVISORY, never a deny**: instantiate always proceeds; the queue transport gate stays rig-exists-only (unchanged). Scope guards: human-seat refs are classified before parse and skipped; raw/adopted (non-canonical) destinations are skipped (legitimate — the inventory cannot vouch for them); an unregistered rig keeps its existing loud transport rejection (no double advisory). Existence is structural — any lifecycle state, any member kind (a declared-but-not-launched seat or an explicitly named terminal member is a legitimate destination; liveness stays a projection-time concern).
+- **Cross-rig wrapping workflow**: workflows declared on one rig may `preferred_target` a seat on another registered rig; the routing packet travels via the cross-host queue routing path (host-qualified destination form) and lands in the target host's DB. Local-rig-only workflows are byte-identical.
+- **No migrations. No CLI changes. No breaking changes.** Advisory-free specs instantiate byte-identically.
+
+### Pi agent runtime adapter
+
+- **New runtime adapter: Pi** — an agent runtime beyond Claude/Codex, joining the shipped runtime dial as a first-class option in rig specs (`runtime: pi`) and pod member declarations. The adapter honors the standard runtime contract (identity via `rig whoami`, startup guidance, hooks, transcript path). Pi runtime seats participate in all workflow / role / queue / send / capture surfaces exactly like Claude/Codex seats.
+
+### Terminal provider first-class treatment
+
+- **The terminal provider dial gets first-class treatment across the terminal-facing surfaces** — the terminal launcher (`TerminalLauncher`), send/capture/broadcast surfaces, and the new `openrig-cmux` skill's `--provider cmux` seam honor a declared terminal provider per member with best-effort fallback. Existing seats using cmux keep their behavior byte-identical; declared-provider seats now route deterministically.
+
+### Daemon read-path hardening
+
+- **The daemon's read-path is hardened for the multi-host + workflow load** — SSE stream backpressure guards, projection caches, and additive indices for read-side query performance. **No functional behavior change** — reads that returned correct results before return the same results now, faster.
+- **Migrations**: `053_sessions_node_id_index` (additive index) + `054_queue_transitions_archive` (archive table for read-side query performance). Additive only.
+
+### New bundled skills (canonical + plugin, byte-parity guard)
+
+- **`openrig-herdr`** — the full rig terminal open/views/status model: verbs, view grammar (`rig | pod:<rig>/<pod> | mission:<id> | slice:<id> | saved`), honest-partial/degrade reading, read-only policy (rig/pod interactive, mission/slice read-only-by-construction, saved per-member), scroll/copy + never-retroactive-flip honesty, same-size-only duplicate limit, terminal-views.yaml schema. AGPL clean-room rail — no herdr source text vendored. Ships in `skills/_canonical/core/openrig-herdr/` + `packages/daemon/assets/plugins/openrig-core/skills/openrig-herdr/`.
+- **`openrig-cmux`** — the provider-agnostic vs cmux-specific delta (`--provider cmux`) with shipped-integration open-or-focus rule, patterns only (no arm's-length constraint pointing at openrig-herdr for the shared model). Ships in `skills/_canonical/core/openrig-cmux/` + `packages/daemon/assets/plugins/openrig-core/skills/openrig-cmux/`.
+
+### Known Follow-ons
+
+- **Save-verb** — did not land in 0.4.6; rides 0.4.7.
+- **Twin fixture backfill** for the new workflow + multi-host UI routes (WorkflowsPage, WorkflowInstancePage, FleetPage, FleetBand, TerminalLauncher, HostConfigCard, HostIndicator, etc.) — non-blocking 0.4.7 hygiene fast-follow; UI acceptance carried by per-cut real screenshots + the two-host integration proof.
+- **Carry-forwards from 0.4.4**: `openrig-user` bundled plugin stale-copy sweep, `whoami --all-hosts` silent host filter, managed-stop SIGTERM-escalation brittleness (recurred at 0.4.4 cutover), post-cutover reconcile-settle-visibility signal on `/healthz`.
+- **iOS Safari** (Living Notes composer verification) — carry-forward from 0.4.4.
+- **Wider mission-template prose sweep** — post-cut sequencing.
+- **Continuous out-of-band dogfood runtime** — the factory-rsi RSI edge ships ungated in the MVP; the continuous mechanism is refined in a later release.
+
+---
+
 ## [0.4.4] - 2026-07-06
 
 **Status**: shipped; multi-host + Living Notes theme.
@@ -36,7 +169,7 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 - **New verbs (capped at exactly three)**: `rig host add` (registry writes validated by the loader's own rules — no more hand-edited YAML for the standard path), `rig host list` (config pointers, never secret values), `rig host doctor <id>` (stepwise distinct errors: transport → remote rig binary → daemon health → identity) with `--posture product-factory-vps` — the ONE built-in security baseline, three-valued per item (UNKNOWN is never pass).
 - **Transport posture DECIDED + documented** (no behavior change): ssh carries pane ops (`send`/`capture`), http-bearer carries daemon REST (`up`/`down`/`launch`), `ps`/`whoami` follow the host's declared transport, fan-out is http-only; NO cross-transport fallback; NO http parity for send/capture in 0.4.4. Per-command table in cli-reference §Cross-host execution.
-- **Product-factory bootstrap**: `scripts/bootstrap-product-factory-vps.sh` + `docs/reference/product-factory-vps-runbook.md` (fresh Ubuntu VPS → factory-ready; the 2026-06-23 OVH smoke-test posture as encoded defaults; safe UI tunnel + restricted fail-closed reverse-path recipes).
+- **Product-factory bootstrap**: `scripts/bootstrap-product-factory-vps.sh` + `docs/reference/product-factory-vps-runbook.md` (fresh Ubuntu VPS → factory-ready; smoke-tested VPS posture as encoded defaults; safe UI tunnel + restricted fail-closed reverse-path recipes).
 
 ### BREAKING: `rig ps` consolidated all-rigs default + explicit disclosure ladder (OPR.0.4.4.21)
 
@@ -49,7 +182,7 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 ### Multi-host foundation (OPR.0.4.4.11 + 13 + 15 + 18)
 
 - **Shareable whole-topology staged spin-up (S11)** — a rig topology can be brought up in stages across multiple hosts; the spec + the daemon coordinate to reach a green whole-fleet state without requiring single-host bring-up.
-- **VPS product-factory multi-host hardening (S13)** — `rig host` verbs (above) + the documented transport posture harden the fresh-Ubuntu-VPS → factory-ready flow. Product-factory bootstrap script + runbook ship for the OVH-smoke-tested posture.
+- **VPS product-factory multi-host hardening (S13)** — `rig host` verbs (above) + the documented transport posture harden the fresh-Ubuntu-VPS → factory-ready flow. Product-factory bootstrap script + runbook ship for the smoke-tested VPS posture.
 - **Multi-host consolidated For-You feed (S15)** — the For-You feed aggregates activity across all registered hosts in the topology. Real-host feed-subscription capture is sequenced as a lifecycle-post-publish belt-and-suspenders proof.
 - **`rig file` cross-host movement (S18)** — files move across registered hosts via the `rig file` surface. Real registered-host two-host round-trip proves the flow on top of the VM stand-ins already merged.
 
@@ -90,7 +223,7 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ### Headline
 
-**Rigs actually survive.** Crash-restore ledger (FR-3 → FR-7) survived a real hard power-off (`Tart stop --timeout 0`) → reboot → `rig start`: both Claude and Codex seats restored to their **original** sessions with recalled pre-crash markers, zero fresh-prime. That's the load-bearing "rigs survive" claim, and it's proven at the operating-system level, not just in unit tests.
+**Rigs actually survive.** Crash-restore ledger (FR-3 → FR-7) survived a real hard power-off → reboot → `rig start`: both Claude and Codex seats restored to their **original** sessions with recalled pre-crash markers, zero fresh-prime. That's the load-bearing "rigs survive" claim, and it's proven at the operating-system level, not just in unit tests.
 
 ### Survival Backbone
 

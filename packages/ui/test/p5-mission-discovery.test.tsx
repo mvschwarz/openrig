@@ -86,6 +86,10 @@ interface RenderTreeOpts {
 
 function setupFetch(opts: RenderTreeOpts) {
   mockFetch.mockImplementation(async (url: string) => {
+    // MH-2: the selection-known files gate needs the hosts payload (local).
+    if (url.includes("/api/hosts")) {
+      return new Response(JSON.stringify({ ownName: "localhost", selected: "local", hosts: [] }), { status: 200 });
+    }
     // /api/config (settings)
     if (url.includes("/api/config")) {
       if (opts.settingsAvailable === false) {

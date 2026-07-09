@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import type { AgentActivity, NodeInventoryEntry, NodeLifecycleState, RigLifecycleState } from "./types.js";
-import { getNodeInventory } from "./node-inventory.js";
+import { getNodeInventoryForAllRigs, readPendingWorkBySession } from "./node-inventory.js";
 import { archiveWhereClause, type RigArchiveFilter } from "./rig-repository.js";
 import type { SeatActivityService } from "./seat-activity-service.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
@@ -174,6 +174,15 @@ export class PsProjectionService {
 
     const now = Date.now();
 
+    // FS-1 W1.2 (rig-level N+1 collapse): the pending-work map is host-global and
+    // bounded by distinct destination sessions (seat count), so read it ONCE here
+    // instead of one countNodesWithPendingWork query per rig. Per-rig hasWorkCount
+    // is then a pure JS derivation over the already-fetched inventory below.
+    const pendingByDest = readPendingWorkBySession(this.db);
+    // FS-1 W1.2: node inventory for ALL rigs built in ONE batched pass (was one
+    // getNodeInventory query-set PER RIG — the rig-level N+1); indexed per rig below.
+    const inventoryByRig = getNodeInventoryForAllRigs(this.db);
+
     return rows.map((r) => {
       const status: PsEntry["status"] =
         r.node_count === 0 ? "stopped"
@@ -181,9 +190,10 @@ export class PsProjectionService {
         : r.running_count > 0 ? "partial"
         : "stopped";
 
-      // Derive rig-level lifecycleState by folding per-node states. The cost is one
-      // node-inventory pass per rig; this matches the v0 "derive, no migration" decision.
-      const inventory = getNodeInventory(this.db, r.rig_id);
+      // Derive rig-level lifecycleState by folding per-node states. FS-1 W1.2:
+      // inventory for ALL rigs was built in ONE batched pass above (previously one
+      // getNodeInventory query-set per rig — the rig-level N+1); index it here.
+      const inventory = inventoryByRig.get(r.rig_id) ?? [];
       const lifecycleState = deriveRigLifecycleState(inventory.map((e) => e.lifecycleState));
 
       // Slice 15 — `terminal-active` count. Subset of running tmux-bound
@@ -204,7 +214,29 @@ export class PsProjectionService {
       // least one pending qitem whose `destination_session` matches the
       // node's `canonicalSessionName`. Sourced ONLY from the queue
       // projection; never from tmux output.
-      const hasWorkCount = countNodesWithPendingWork(this.db, r.rig_id);
+      // FS-1 W1.2: derived in JS from the single global `pendingByDest` map,
+      // byte-identical to the deleted per-rig `countNodesWithPendingWork` query.
+      // That query matched `q.destination_session = s.session_name` (SINGLE-KEY)
+      // where `s` is the node's latest session; `canonicalSessionName` IS that
+      // latest `session_name` (node-inventory.ts return), and the map is
+      // `destination_session -> pending count`, so `> 0` reproduces its `EXISTS`.
+      // NAMED DIVERGENCE (arch pin, FS-1): this derivation DELIBERATELY keeps the
+      // legacy rollup's SINGLE-KEY match (canonicalSessionName == the latest
+      // session_name) and does NOT use the per-node DUAL-KEY sibling
+      // `countPendingForEntry` (node-inventory.ts) — the canonical + derived
+      // `{pod}-{member}@{rig}` match that is the BLOCKING-A2 adopted-seat fix.
+      // The rollup and the per-node enrichment already diverged here BEFORE FS-1;
+      // FS-1 is a perf slice whose proof spine is byte-identity, so it preserves
+      // the rollup's exact prior semantics on purpose — this is preserved, not a
+      // bug. KNOWN CONSEQUENCE: the rollup undercounts pending work for adopted
+      // seats. The future correctness fix now sits ONE LINE away — swap this loop
+      // for the shared dual-key `countPendingForEntry` derivation + update the
+      // byte-identity harness. Arch-routed to pm as a named small correctness
+      // candidate (a glance-layer undercount).
+      let hasWorkCount = 0;
+      for (const node of inventory) {
+        if (node.canonicalSessionName && (pendingByDest.get(node.canonicalSessionName) ?? 0) > 0) hasWorkCount++;
+      }
 
       // OPR.0.4.4.21 — attention fold, same inventory pass. Hook activity
       // is a synchronous events lookup by session name (NodeInventoryEntry
@@ -240,28 +272,6 @@ export class PsProjectionService {
       };
     });
   }
-}
-
-/**
- * Slice 15 — count nodes in this rig that have at least one pending
- * qitem assigned to them (queue.destination_session matches a node's
- * latest session_name). Pure SQL query — does NOT consult tmux output
- * or SeatActivity (non-inference contract).
- */
-function countNodesWithPendingWork(db: Database.Database, rigId: string): number {
-  const row = db.prepare(`
-    SELECT COUNT(DISTINCT n.id) as c
-    FROM nodes n
-    JOIN sessions s ON s.node_id = n.id
-      AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
-    WHERE n.rig_id = ?
-      AND EXISTS (
-        SELECT 1 FROM queue_items q
-        WHERE q.destination_session = s.session_name
-          AND q.state = 'pending'
-      )
-  `).get(rigId) as { c: number } | undefined;
-  return row?.c ?? 0;
 }
 
 /**

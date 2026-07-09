@@ -70,6 +70,10 @@ interface ClaimServiceDeps {
   resumeTokenCapturer?: {
     captureCodexThreadId(sessionName: string): Promise<string | undefined>;
   };
+  /** OPR.0.4.6.PI1 FR-6 — pi-runner sidecar reader for Pi resume-token capture. */
+  piRunnerStateStore?: {
+    readSessionFile(sessionName: string): { ok: true; sessionFile: string } | { ok: false; reason: string };
+  };
 }
 
 interface BindOptions {
@@ -102,6 +106,7 @@ export class ClaimService {
   private claudeContextProvisioner: ClaimServiceDeps["claudeContextProvisioner"] | null;
   private contextUsageStore: ClaimServiceDeps["contextUsageStore"] | null;
   private resumeTokenCapturer: ClaimServiceDeps["resumeTokenCapturer"] | null;
+  private piRunnerStateStore: ClaimServiceDeps["piRunnerStateStore"] | null;
 
   constructor(deps: ClaimServiceDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("ClaimService: rigRepo must share the same db handle");
@@ -118,6 +123,7 @@ export class ClaimService {
     this.claudeContextProvisioner = deps.claudeContextProvisioner ?? null;
     this.contextUsageStore = deps.contextUsageStore ?? null;
     this.resumeTokenCapturer = deps.resumeTokenCapturer ?? null;
+    this.piRunnerStateStore = deps.piRunnerStateStore ?? null;
   }
 
   /** Best-effort: set OpenRig-owned tmux metadata on an adopted session. */
@@ -184,7 +190,7 @@ export class ClaimService {
       // FR-3's adoption provenance/audit semantics are unchanged.
       const derived = await deriveResumeToken(
         { runtime: input.runtime, sessionName: input.sessionName },
-        { contextUsageStore: this.contextUsageStore, resumeTokenCapturer: this.resumeTokenCapturer },
+        { contextUsageStore: this.contextUsageStore, resumeTokenCapturer: this.resumeTokenCapturer, piRunnerStateStore: this.piRunnerStateStore },
       );
       if (derived.outcome === "exempt" || derived.outcome === "noop") return;
       const runtime = input.runtime as string; // non-null past exempt

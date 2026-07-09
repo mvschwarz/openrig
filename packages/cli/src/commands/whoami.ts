@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { readOwnHostName, resolveEffectiveHost } from "../host-selection.js";
 import { execSync } from "node:child_process";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
@@ -215,6 +216,10 @@ complete payload (contextUsage, command examples, runtime token detail,
 workspace block). The compact form omits the Context line; use 'rig context' or
 'rig whoami --full' for usage.`)
     .action(async (opts: WhoamiCliOptions) => {
+      // OPR.0.4.6.MH1 FR-2: selected-host routing — explicit --host wins;
+      // else the persisted selection feeds the SHIPPED --host path; no
+      // selection = today exactly.
+      opts.host = resolveEffectiveHost(opts.host);
       const deps = getDeps();
       const full = Boolean(opts.full || opts.verbose);
 
@@ -297,6 +302,12 @@ workspace block). The compact form omits the Context line; use 'rig context' or
       // Human-readable output
       const data = res.data as unknown as WhoamiResult;
       const id = data.identity;
+      // OPR.0.4.6.MH1 FR-4: the own-host name renders here when RENAMED;
+      // unnamed (default "localhost") keeps today's output byte-identical.
+      const ownHostName = readOwnHostName();
+      if (ownHostName !== "localhost") {
+        console.log(`Host:       ${ownHostName}`);
+      }
       console.log(`Rig:        ${id.rigName}`);
       console.log(`Logical ID: ${id.logicalId}`);
       console.log(`Pod:        ${(id.podNamespace ?? id.podId) ?? "—"} / ${id.memberId}`);

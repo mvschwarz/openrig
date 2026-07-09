@@ -25,6 +25,12 @@ export interface ResumeTokenCaptureDeps {
   resumeTokenCapturer?: {
     captureCodexThreadId(sessionName: string): Promise<string | undefined>;
   } | null;
+  /** OPR.0.4.6.PI1 FR-6 — reads the pi-runner's session-state sidecar (the
+   *  runner persists sessionFile/sessionId from RPC get_state; a file read,
+   *  same posture as the claude-code status-line sidecar). */
+  piRunnerStateStore?: {
+    readSessionFile(sessionName: string): { ok: true; sessionFile: string } | { ok: false; reason: string };
+  } | null;
 }
 
 export type ResumeTokenDeriveResult =
@@ -41,6 +47,7 @@ export type ResumeTokenDeriveResult =
  * Derive a runtime's resume token from live, read-only sources:
  *   claude-code → the status-line sidecar's session_id (a file read)
  *   codex       → the thread id derived from live pid-keyed logs
+ *   pi          → the pi-runner state sidecar's sessionFile (a file read)
  * Returns a structured outcome; never throws for a missing/invalid token
  * (those are honest skips). ANY unexpected throw from a dependency is the
  * caller's to swallow (capture must never fail or block its lifecycle op).
@@ -52,7 +59,7 @@ export async function deriveResumeToken(
   const resumeType = resumeTypeForRuntime(input.runtime);
   if (!resumeType) return { outcome: "exempt" }; // terminal / unknown — exempt, not a failure
 
-  const runtime = input.runtime as string; // non-null: resumeType is set only for claude-code / codex
+  const runtime = input.runtime as string; // non-null: resumeType is set only for claude-code / codex / pi
 
   let token: string | undefined;
   if (runtime === "claude-code") {
@@ -68,6 +75,14 @@ export async function deriveResumeToken(
     if (!deps.resumeTokenCapturer) return { outcome: "noop" }; // dep absent — silent no-op
     token = await deps.resumeTokenCapturer.captureCodexThreadId(input.sessionName);
     if (!token) return { outcome: "skipped", reason: "probe_timeout" };
+  } else if (runtime === "pi") {
+    if (!deps.piRunnerStateStore) return { outcome: "noop" }; // dep absent — silent no-op
+    const state = deps.piRunnerStateStore.readSessionFile(input.sessionName);
+    if (!state.ok) {
+      return { outcome: "skipped", reason: state.reason === "parse_error" ? "parse_error" : "missing_sidecar" };
+    }
+    if (state.sessionFile.trim().length > 0) token = state.sessionFile.trim();
+    else return { outcome: "skipped", reason: "missing_sidecar" };
   } else {
     return { outcome: "noop" }; // resumeType set but runtime is not one we derive — defensive
   }

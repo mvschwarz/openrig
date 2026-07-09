@@ -34,23 +34,23 @@ const RSI_LIKE_SPEC: WorkflowSpec = {
     {
       id: "discovery", actor_role: "discovery-router", objective: "scope candidates",
       allowed_exits: ["handoff", "waiting", "failed"],
-      next_hop: { mode: "prefer", suggested_roles: ["product-lab-planner"] },
+      next_hop: { suggested_roles: ["product-lab-planner"] },
     },
     {
       id: "product-lab", actor_role: "product-lab-planner", objective: "shape slice",
       allowed_exits: ["handoff", "waiting", "failed"],
-      next_hop: { mode: "prefer", suggested_roles: ["delivery-driver"] },
+      next_hop: { suggested_roles: ["delivery-driver"] },
     },
     {
       id: "delivery", actor_role: "delivery-driver", objective: "implement",
       allowed_exits: ["handoff", "waiting", "failed"],
-      next_hop: { mode: "prefer", suggested_roles: ["qa-tester"] },
+      next_hop: { suggested_roles: ["qa-tester"] },
     },
     {
       id: "qa", actor_role: "qa-tester", objective: "dogfood + fix-loop",
       allowed_exits: ["handoff", "done", "waiting", "failed"],
       // loop edge — qa can hand back to discovery for follow-up signal
-      next_hop: { mode: "prefer", suggested_roles: ["discovery-router"] },
+      next_hop: { suggested_roles: ["discovery-router"] },
     },
   ],
 };

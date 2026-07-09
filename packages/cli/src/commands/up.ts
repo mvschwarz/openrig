@@ -1,4 +1,5 @@
 import nodePath from "node:path";
+import { resolveEffectiveHost } from "../host-selection.js";
 import { existsSync, readFileSync } from "node:fs";
 import { parse as parseYamlDoc } from "yaml";
 import { Command } from "commander";
@@ -83,6 +84,13 @@ Examples:
     .option("--json", "JSON output for agents")
     .option("--host <id>", "Run on a remote host declared in ~/.openrig/hosts.yaml")
     .action(async (source: string, opts: { plan?: boolean; yes?: boolean; cwd?: string; target?: string; existing?: boolean; fresh?: string[]; json?: boolean; host?: string }) => {
+      // OPR.0.4.6.MH1 FR-2: selected-host routing — explicit --host wins;
+      // else the persisted selection feeds the SHIPPED --host path; no
+      // selection = today exactly. Topology
+      // sources are EXEMPT: per-entry host: is the only topology placement
+      // (shipped R11-2); implicit selection must not turn a flagless
+      // topology up into the rejected --host form.
+      if (!sourceLooksLikeTopology(source)) opts.host = resolveEffectiveHost(opts.host);
       const deps = getDepsF();
 
       if (opts.host) {

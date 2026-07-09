@@ -41,6 +41,16 @@ const SHARED_FIXTURES: Array<{ label: string; parsed: unknown; ok: boolean }> = 
   { label: "invalid: http with NO bearer (exactly-one rule)", parsed: { hosts: [{ id: "x", transport: "http", url: "http://x" }] }, ok: false },
   { label: "invalid: http with BOTH bearers (exactly-one rule)", parsed: { hosts: [{ id: "x", transport: "http", url: "http://x", bearer_env: "T", bearer_file: "/f" }] }, ok: false },
   { label: "invalid: empty id", parsed: { hosts: [{ id: "  ", transport: "ssh", target: "a" }] }, ok: false },
+  // OPR.0.4.6.MH1 FR-7 — reserved host ids rejected in BOTH twins.
+  { label: "invalid: reserved id 'kernel' (human-seat collision)", parsed: { hosts: [{ id: "kernel", transport: "ssh", target: "a" }] }, ok: false },
+  { label: "invalid: reserved id 'host' (human-seat collision)", parsed: { hosts: [{ id: "host", transport: "ssh", target: "a" }] }, ok: false },
+  { label: "invalid: reserved id 'local' (LOCAL_HOST_ID shadow)", parsed: { hosts: [{ id: "local", transport: "http", url: "http://x", bearer_env: "T" }] }, ok: false },
+  // OPR.0.4.6.MH1 rev1-r2 B1 — path-bearing ids rejected in BOTH twins
+  // (ids name credential files; the pair token path embeds the id).
+  { label: "invalid: path-traversal id '../escape'", parsed: { hosts: [{ id: "../escape", transport: "ssh", target: "a" }] }, ok: false },
+  { label: "invalid: slash-bearing id 'a/b'", parsed: { hosts: [{ id: "a/b", transport: "ssh", target: "a" }] }, ok: false },
+  { label: "invalid: dot-leading id '.hidden'", parsed: { hosts: [{ id: ".hidden", transport: "ssh", target: "a" }] }, ok: false },
+  { label: "valid: hostname-shaped id keeps working", parsed: { hosts: [{ id: "vm-a.local", transport: "ssh", target: "a" }] }, ok: true },
 ];
 
 describe("hosts-registry reader — CLI/daemon validator parity (shared fixtures)", () => {

@@ -56,6 +56,29 @@ activityRoutes.post("/hooks", async (c) => {
       return c.json({ ok: false, code: "session_not_found", error: `No session found for ${sessionName}` }, 404);
     }
 
+    // OPR.0.4.6.PI1 FR-5 — Pi session identity arrives from the pi-runner's
+    // RPC get_state (provenance "rpc" on the bus, never scrape). The resume
+    // TOKEN for Pi is the session FILE (body.sessionFile), not the session id;
+    // it is format-validated before the persist and never echoed on failure.
+    if (runtime === "pi") {
+      const { validateResumeToken } = await import("../domain/resume-token-validation.js");
+      const sessionFile = stringOrNull(body.sessionFile);
+      const validation = validateResumeToken("pi", sessionFile);
+      if (validation.ok) {
+        sessionRegistry.updateResumeToken(resolved.sessionId, "pi_session_file", validation.token, "hook");
+      }
+      eventBus.emit({
+        type: "agent.session_identity",
+        rigId: resolved.rigId,
+        nodeId: resolved.nodeId,
+        sessionName: resolved.sessionName,
+        runtime: "pi",
+        sessionId,
+        provenance: "rpc",
+      });
+      return c.json({ ok: true, sessionId, provenance: "rpc", tokenPersisted: validation.ok });
+    }
+
     sessionRegistry.updateResumeToken(resolved.sessionId, "codex_id", sessionId, "hook");
     eventBus.emit({
       type: "agent.session_identity",

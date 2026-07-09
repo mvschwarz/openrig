@@ -25,6 +25,32 @@ interface InstanceRow {
   fallback_synthesis: string | null;
   last_continuation_decision_json: string | null;
   completed_at: string | null;
+  /** OPR.0.4.6.WF1 FR-5 — optimistic-concurrency version (migration
+   *  049). Optional at the row layer: legacy fixtures without the
+   *  migration read undefined and map to 0. */
+  version?: number;
+  /** OPR.0.4.6.WF5 FR-4 (migration 051) — optional at the row layer
+   *  like version: legacy fixtures map to 0. */
+  resume_count?: number;
+  hops_baseline?: number;
+  /** OPR.0.4.6.FAC1 (migration 052) — optional at the row layer like
+   *  version: legacy fixtures map to null (unbound). */
+  bound_rig?: string | null;
+}
+
+/** Defensive column probe (the detectQueueColumn house pattern) —
+ *  older test fixtures bypass the canonical migration list, so the
+ *  version column (migration 049) may be absent; the guard degrades
+ *  to legacy unguarded updates there. Production always migrates. */
+function detectInstanceColumn(db: Database.Database, columnName: string): boolean {
+  try {
+    return db
+      .prepare("PRAGMA table_info(workflow_instances)")
+      .all()
+      .some((row) => (row as { name?: string }).name === columnName);
+  } catch {
+    return false;
+  }
 }
 
 export interface CreateWorkflowInstanceInput {
@@ -34,6 +60,12 @@ export interface CreateWorkflowInstanceInput {
   initialFrontier?: string[];
   /** R2: durable current-step binding set at instantiate time. */
   currentStepId?: string;
+  /**
+   * OPR.0.4.6.FAC1: the rig NAME this instance binds to (already
+   * resolved by the runtime: targetRig override ?? spec.target.rig).
+   * null/absent = unbound (today's behavior byte-identical).
+   */
+  boundRig?: string | null;
 }
 
 export class WorkflowInstanceError extends Error {
@@ -48,31 +80,46 @@ export class WorkflowInstanceError extends Error {
 }
 
 export class WorkflowInstanceStore {
+  private readonly hasVersionColumn: boolean;
+  private readonly hasResumeColumns: boolean;
+  private readonly hasBoundRigColumn: boolean;
+
   constructor(
     private readonly db: Database.Database,
     private readonly now: () => Date = () => new Date(),
-  ) {}
+  ) {
+    this.hasVersionColumn = detectInstanceColumn(db, "version");
+    this.hasResumeColumns = detectInstanceColumn(db, "resume_count");
+    this.hasBoundRigColumn = detectInstanceColumn(db, "bound_rig");
+  }
 
   create(input: CreateWorkflowInstanceInput): WorkflowInstance {
     const instanceId = ulid();
     const createdAt = this.now().toISOString();
     const frontier = input.initialFrontier ?? [];
+    // OPR.0.4.6.FAC1: bound_rig rides the same defensive column probe
+    // as version/resume (legacy fixtures without migration 052 keep the
+    // legacy INSERT; production always migrates).
+    const boundRigCol = this.hasBoundRigColumn ? ", bound_rig" : "";
+    const boundRigVal = this.hasBoundRigColumn ? ", ?" : "";
+    const params: unknown[] = [
+      instanceId,
+      input.workflowName,
+      input.workflowVersion,
+      input.createdBySession,
+      createdAt,
+      JSON.stringify(frontier),
+      input.currentStepId ?? null,
+    ];
+    if (this.hasBoundRigColumn) params.push(input.boundRig ?? null);
     this.db
       .prepare(
         `INSERT INTO workflow_instances (
            instance_id, workflow_name, workflow_version, created_by_session,
-           created_at, status, current_frontier_json, current_step_id, hop_count
-         ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, 0)`,
+           created_at, status, current_frontier_json, current_step_id, hop_count${boundRigCol}
+         ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, 0${boundRigVal})`,
       )
-      .run(
-        instanceId,
-        input.workflowName,
-        input.workflowVersion,
-        input.createdBySession,
-        createdAt,
-        JSON.stringify(frontier),
-        input.currentStepId ?? null,
-      );
+      .run(...(params as never[]));
     return this.getByIdOrThrow(instanceId);
   }
 
@@ -134,9 +181,32 @@ export class WorkflowInstanceStore {
        * the symbol "clear-current-step" (typed as the literal below).
        */
       currentStepId?: string | "preserve" | "clear";
+      /**
+       * OPR.0.4.6.WF1 FR-5 — the optimistic-concurrency guard. When
+       * provided, the UPDATE is qualified `WHERE version = ?` and bumps
+       * `version = version + 1`; zero rows changed throws the
+       * structured `instance_version_conflict` naming expected/actual
+       * (the caller's transaction rolls back whole). When omitted,
+       * legacy unguarded behavior (no version read, no bump) — the
+       * projector ALWAYS provides it.
+       */
+      expectedVersion?: number;
+      /**
+       * OPR.0.4.6.WF5 FR-4 — the resume stamp: sets the recorded
+       * redrive count AND the livelock-rail hops baseline atomically
+       * with the frontier rebind. Only resume() passes it.
+       */
+      resumeStamp?: { resumeCount: number; hopsBaseline: number };
     } = {},
   ): void {
     const setHop = opts.bumpHopCount ? "hop_count = hop_count + 1, " : "";
+    const setResume =
+      opts.resumeStamp && this.hasResumeColumns
+        ? `resume_count = ${Number(opts.resumeStamp.resumeCount)}, hops_baseline = ${Number(opts.resumeStamp.hopsBaseline)}, `
+        : "";
+    const guardVersion = opts.expectedVersion !== undefined && this.hasVersionColumn;
+    const setVersion = guardVersion ? "version = version + 1, " : "";
+    const versionWhere = guardVersion ? " AND version = ?" : "";
     let currentStepClause = "";
     let currentStepValue: string | null | undefined;
     if (opts.currentStepId === "preserve" || opts.currentStepId === undefined) {
@@ -149,30 +219,34 @@ export class WorkflowInstanceStore {
       currentStepValue = opts.currentStepId;
     }
     const sql = `UPDATE workflow_instances SET
-           ${setHop}${currentStepClause}status = ?, current_frontier_json = ?,
+           ${setVersion}${setHop}${setResume}${currentStepClause}status = ?, current_frontier_json = ?,
            last_continuation_decision_json = COALESCE(?, last_continuation_decision_json),
            fallback_synthesis = COALESCE(?, fallback_synthesis),
            completed_at = COALESCE(?, completed_at)
-         WHERE instance_id = ?`;
+         WHERE instance_id = ?${versionWhere}`;
     const stmt = this.db.prepare(sql);
-    if (currentStepValue !== undefined) {
-      stmt.run(
-        currentStepValue,
-        nextStatus,
-        JSON.stringify(nextFrontier),
-        opts.lastContinuationDecision ? JSON.stringify(opts.lastContinuationDecision) : null,
-        opts.fallbackSynthesis ?? null,
-        opts.completedAt ?? null,
-        instanceId,
-      );
-    } else {
-      stmt.run(
-        nextStatus,
-        JSON.stringify(nextFrontier),
-        opts.lastContinuationDecision ? JSON.stringify(opts.lastContinuationDecision) : null,
-        opts.fallbackSynthesis ?? null,
-        opts.completedAt ?? null,
-        instanceId,
+    const params: unknown[] = [];
+    if (currentStepValue !== undefined) params.push(currentStepValue);
+    params.push(
+      nextStatus,
+      JSON.stringify(nextFrontier),
+      opts.lastContinuationDecision ? JSON.stringify(opts.lastContinuationDecision) : null,
+      opts.fallbackSynthesis ?? null,
+      opts.completedAt ?? null,
+      instanceId,
+    );
+    if (guardVersion) params.push(opts.expectedVersion);
+    const info = stmt.run(...(params as never[]));
+    if (guardVersion && info.changes === 0) {
+      const current = this.getById(instanceId);
+      throw new WorkflowInstanceError(
+        "instance_version_conflict",
+        `workflow instance ${instanceId} advanced concurrently: expected version ${opts.expectedVersion}, actual ${current ? current.version : "(instance missing)"} — the losing writer's transaction rolls back whole; re-read and re-project against current state`,
+        {
+          instanceId,
+          expectedVersion: opts.expectedVersion,
+          actualVersion: current?.version ?? null,
+        },
       );
     }
   }
@@ -194,5 +268,9 @@ function rowToInstance(row: InstanceRow): WorkflowInstance {
       ? (JSON.parse(row.last_continuation_decision_json) as Record<string, unknown>)
       : null,
     completedAt: row.completed_at,
+    version: row.version ?? 0,
+    resumeCount: row.resume_count ?? 0,
+    hopsBaseline: row.hops_baseline ?? 0,
+    boundRig: row.bound_rig ?? null,
   };
 }

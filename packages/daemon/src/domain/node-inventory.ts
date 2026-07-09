@@ -1,15 +1,15 @@
 import type Database from "better-sqlite3";
-import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot, WorkspaceSpec, SeatIdentityVerdict, SeatIdentityVerdictKind } from "./types.js";
+import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeOriented, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot, WorkspaceSpec, SeatIdentityVerdict, SeatIdentityVerdictKind } from "./types.js";
 import { identityVerdictDownranksRunning } from "./types.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
-import { deriveOriented } from "./startup-proof.js";
+import { buildOrientedMap } from "./startup-proof.js";
 import type { RuntimeAdapter } from "./runtime-adapter.js";
 import type { ContextUsageStore } from "./context-usage-store.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
 import type { SeatActivityService } from "./seat-activity-service.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { probeSessionActivity } from "./session-transport.js";
-import { findLatestUsableSnapshot } from "./rig-repository.js";
+import { findLatestUsableSnapshot, findLatestUsableSnapshotsForAllRigs } from "./rig-repository.js";
 import { resolveNodeWorkspace } from "./workspace/workspace-resolver.js";
 import { deriveCanonicalSessionName } from "./session-name.js";
 import { buildNativeResumeCommand, buildCodexResumeCore } from "./native-resume-probe.js";
@@ -23,6 +23,7 @@ interface InventoryRow {
   logical_id: string;
   pod_id: string | null;
   pod_namespace: string | null;
+  role: string | null;
   runtime: string | null;
   model: string | null;
   codex_config_profile: string | null;
@@ -250,33 +251,46 @@ function deriveContinuityOutcome(
   return restoreOutcome;
 }
 
-function deriveRestoreOutcome(db: Database.Database, rigId: string, nodeId: string): NodeRestoreOutcome {
-  // OPR.0.3.4.11 + 0.4.0.16: per-node-latest across restore.completed,
-  // restore.subset_completed, AND restore.outcome_reconciled.
-  // restore.outcome_reconciled has a different shape: top-level nodeId/to,
-  // not result.nodes[]. A newer reconcile overrides an older failure; an
-  // older reconcile must not override a newer failure.
-  const rows = db.prepare(
-    "SELECT type, payload, seq FROM events WHERE rig_id = ? AND type IN ('restore.completed', 'restore.subset_completed', 'restore.outcome_reconciled') ORDER BY seq DESC"
-  ).all(rigId) as { type: string; payload: string; seq: number }[];
-
+// FS-1 W1.3 S1 — hoist restore-outcome derivation to ONCE-PER-RIG.
+// Prior shape: deriveRestoreOutcome(db, rigId, nodeId) fetched + JSON-parsed the
+// rig's ENTIRE restore-event set once PER NODE inside buildInventoryEntry (K
+// nodes x E events per rig per poll = the dominant W3 residual). This builds a
+// nodeId->outcome map in ONE seq-DESC pass and buildInventoryEntry does an O(1)
+// lookup.
+//   OPR.0.3.4.11 + 0.4.0.16: per-node-latest across restore.completed,
+//   restore.subset_completed, AND restore.outcome_reconciled. reconciled has a
+//   different shape (top-level nodeId/to, not result.nodes[]).
+// BYTE-IDENTICAL BY CONSTRUCTION: the prior per-node reader returned the FIRST
+// event in seq-DESC order that referenced the node. This single seq-DESC pass
+// sets a node's outcome ONLY IF ABSENT — so the first (highest-seq) event
+// referencing a node wins, reproducing exactly that (incl.
+// newer-reconcile-overrides-older-failure). rigId given -> WHERE rig_id=? (the
+// prior single-rig filter); rigId omitted -> all rigs in one pass (a nodeId is
+// referenced only by its own rig's events, so the per-node value is identical).
+// [GUARD AT CODE REVIEW: the only-if-absent set is the one load-bearing
+//  semantics cell — it is what preserves first/newest-wins.]
+function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<string, NodeRestoreOutcome> {
+  const stmt = db.prepare(
+    `SELECT type, payload, seq FROM events WHERE type IN ('restore.completed', 'restore.subset_completed', 'restore.outcome_reconciled')${rigId ? " AND rig_id = ?" : ""} ORDER BY seq DESC`
+  );
+  const rows = (rigId ? stmt.all(rigId) : stmt.all()) as { type: string; payload: string; seq: number }[];
+  const map = new Map<string, NodeRestoreOutcome>();
   for (const row of rows) {
     try {
       if (row.type === "restore.outcome_reconciled") {
         const event = JSON.parse(row.payload) as { nodeId: string; to: string };
-        if (event.nodeId !== nodeId) continue;
-        return mapStatus(event.to);
+        if (!map.has(event.nodeId)) map.set(event.nodeId, mapStatus(event.to));
+        continue;
       }
-
       const event = JSON.parse(row.payload) as { result: RestoreResult };
-      const nodeResult = event.result.nodes.find((n) => n.nodeId === nodeId);
-      if (!nodeResult) continue;
-      return mapStatus(nodeResult.status);
+      for (const nodeResult of event.result.nodes) {
+        if (!map.has(nodeResult.nodeId)) map.set(nodeResult.nodeId, mapStatus(nodeResult.status));
+      }
     } catch {
       continue;
     }
   }
-  return "n-a";
+  return map;
 }
 
 function mapStatus(status: string): NodeRestoreOutcome {
@@ -396,7 +410,32 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
   // per projection (cheap indexed read, defensive to a missing table). Gates
   // the running/active green derivations below.
   const identityVerdicts = new SeatIdentityStore(db).getForRig(rigId);
+  // FS-1 W1.3 S1/S2 — the per-node restore-outcome + oriented reads built ONCE
+  // for the rig (was a query per node inside the rows.map). rig-scoped restore
+  // map = the prior WHERE rig_id=? filter; oriented map is node-scoped/global.
+  const restoreOutcomes = buildRestoreOutcomeMap(db, rigId);
+  const orienteds = buildOrientedMap(db);
 
+  const rows = queryInventoryRows(db, rigId);
+
+  return rows.map((row) =>
+    buildInventoryEntry(db, row, { usableSnapshot, workspaceSpec, identityVerdicts, restoreOutcomes, orienteds }),
+  );
+}
+
+/**
+ * FS-1 W1.2 — the shared inventory-row query. Extracted verbatim from the prior
+ * inline `getNodeInventory` SELECT so the single-rig and all-rigs paths run the
+ * IDENTICAL query.
+ *   - `rigId` given → one rig (`WHERE n.rig_id = ?`, `ORDER BY n.created_at`) —
+ *     byte-identical to the prior per-rig read.
+ *   - `rigId` omitted → ALL rigs in one pass (no WHERE; `ORDER BY n.rig_id,
+ *     n.created_at` so JS grouping preserves each rig's `created_at` order,
+ *     matching the per-rig ordering exactly).
+ * The latest-session subquery (`s2.node_id = n.id ORDER BY id DESC LIMIT 1`)
+ * rides the W1.1 index (051, idx_sessions_node_created_id).
+ */
+function queryInventoryRows(db: Database.Database, rigId?: string): InventoryRow[] {
   // Join nodes with newest session (max ULID = max session.id string comparison)
   // and the rig name
   const hasCodexConfigProfile = db.prepare("PRAGMA table_info(nodes)").all()
@@ -404,7 +443,7 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
   const codexConfigProfileSelect = hasCodexConfigProfile
     ? "n.codex_config_profile"
     : "NULL";
-  const rows = db.prepare(`
+  const stmt = db.prepare(`
     SELECT
       n.id as node_id,
       n.rig_id,
@@ -412,6 +451,7 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
       n.logical_id,
       n.pod_id,
       p.namespace as pod_namespace,
+      n.role,
       n.runtime,
       n.model,
       ${codexConfigProfileSelect} as codex_config_profile,
@@ -441,83 +481,167 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
     LEFT JOIN sessions s ON s.node_id = n.id
       AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
     LEFT JOIN bindings b ON b.node_id = n.id
-    WHERE n.rig_id = ?
-    ORDER BY n.created_at
-  `).all(rigId) as InventoryRow[];
+    ${rigId ? "WHERE n.rig_id = ?" : ""}
+    ORDER BY ${rigId ? "n.created_at" : "n.rig_id, n.created_at"}
+  `);
+  return (rigId ? stmt.all(rigId) : stmt.all()) as InventoryRow[];
+}
 
-  return rows.map((row) => {
-    const restoreOutcome = deriveRestoreOutcome(db, rigId, row.node_id);
-    // OPR.0.4.3.19 rev1-r2 B1 — a durable verdict is keyed only by node_id, so
-    // after a rebind/relaunch (same node, NEW session + NEW pane) a stale
-    // `verified` verdict for the OLD pane would otherwise be served for the new
-    // pane until the next 5s reconcile tick, suppressing down-rank and rendering
-    // a fresh squat/orphan false-green. Make applicability LOAD-BEARING at read
-    // time: a stored verdict applies ONLY when it was computed against the
-    // current binding (its sessionName === the latest session AND its
-    // registeredPane === the current binding pane). Otherwise treat it as ABSENT
-    // (null) — a STALE verdict becomes fail-open (never down-ranks a running
-    // seat), it does NOT itself down-rank. Only a MATCHING mismatch/pane_missing
-    // verdict down-ranks.
-    const identityVerdict = applicableVerdict(identityVerdicts.get(row.node_id) ?? null, row);
-    const lifecycleState = deriveNodeLifecycleState({
-      sessionStatus: row.session_status,
-      restoreOutcome,
-      nodeId: row.node_id,
-      usableSnapshot,
-      identityVerdict: identityVerdict?.verdict ?? null,
-    });
-    return {
-      rigId: row.rig_id,
-      rigName: row.rig_name,
-      logicalId: row.logical_id,
-      podId: row.pod_id,
-      podNamespace: row.pod_namespace,
-      canonicalSessionName: row.session_name,
-      attachmentType: (row.binding_attachment_type as NodeInventoryEntry["attachmentType"]) ?? null,
-      nodeKind: deriveNodeKind(row.runtime),
-      runtime: row.runtime,
-      sessionStatus: row.session_status,
-      startupStatus: row.startup_status as NodeInventoryEntry["startupStatus"],
-      restoreOutcome,
-      oriented: deriveOriented(db, row.node_id),
-      lifecycleState,
-      occupantLifecycle: deriveOccupantLifecycle(row, identityVerdict?.verdict ?? null),
-      continuityOutcome: deriveContinuityOutcome(row, restoreOutcome),
-      handoverResult: row.handover_result as NodeInventoryEntry["handoverResult"] ?? null,
-      previousOccupant: row.previous_occupant,
-      handoverAt: row.handover_at,
-      tmuxAttachCommand: row.binding_attachment_type === "tmux" && row.session_name ? `tmux attach -t ${row.session_name}` : null,
-      resumeCommand: computeResumeCommand(row.runtime, row.resume_token, row.codex_config_profile),
-      // OPR.0.4.0.26: recoveryGuidance is NOT inlined per node in the LIST
-      // payload. It duplicated ~47KB of templated prose across all nodes and
-      // no node-list consumer reads it. The full guidance is recomputed on
-      // the single-node detail path (getNodeDetail / GET
-      // /api/rigs/:rigId/nodes/:logicalId) — relocation, not loss.
-      recoveryGuidance: null,
-      latestError: row.startup_status === "ready" ? null : getLatestError(db, rigId, row.node_id),
-      // Extended fields
-      model: row.model,
-      agentRef: row.agent_ref,
-      profile: row.profile,
-      codexConfigProfile: row.codex_config_profile,
-      resolvedSpecName: row.resolved_spec_name,
-      resolvedSpecVersion: row.resolved_spec_version,
-      resolvedSpecHash: row.resolved_spec_hash,
-      cwd: row.cwd,
-      restorePolicy: row.restore_policy,
-      resumeType: row.resume_type,
-      resumeToken: row.resume_token,
-      startupCompletedAt: row.startup_completed_at,
-      // PL-007 Workspace Primitive — per-node workspace summary derived
-      // from cwd against the rig's typed workspace block. null when the
-      // rig has no workspace declaration.
-      workspace: resolveNodeWorkspace({ spec: workspaceSpec, cwd: row.cwd }),
-      // OPR.0.4.3.19 — the liveness identity verdict (third axis). null when
-      // never observed; carries evidence on mismatch/missing.
-      identityVerdict,
-      heldReason: deriveHeldReason(db, rigId, row.node_id, row.session_status),
-    };
+/** Per-rig setup context an inventory row is built against. FS-1 W1.2: the
+ *  single-rig (`getNodeInventory`) and all-rigs (`getNodeInventoryForAllRigs`)
+ *  paths both build entries through THIS one function, so their output is
+ *  byte-identical by construction — the collapse changes only HOW the context +
+ *  rows are fetched (per-rig vs batched), never how an entry is derived. */
+interface InventoryBuildContext {
+  usableSnapshot: Snapshot | null;
+  workspaceSpec: WorkspaceSpec | null;
+  identityVerdicts: Map<string, SeatIdentityVerdict>;
+  // FS-1 W1.3 S1/S2 — the once-per-rig-batched per-node reads, keyed by node_id.
+  // Built ONCE per projection (rig-scoped for single-rig, all-rigs for the
+  // batched path) and looked up O(1) here instead of a query per node.
+  restoreOutcomes: Map<string, NodeRestoreOutcome>;
+  orienteds: Map<string, NodeOriented>;
+}
+
+function buildInventoryEntry(
+  db: Database.Database,
+  row: InventoryRow,
+  ctx: InventoryBuildContext,
+): NodeInventoryEntry {
+  const { usableSnapshot, workspaceSpec, identityVerdicts, restoreOutcomes, orienteds } = ctx;
+  // FS-1 W1.3 S1 — O(1) lookup into the once-per-rig restore-outcome map
+  // (byte-identical to the prior per-node deriveRestoreOutcome; "n-a" when a node
+  // is referenced by no restore event, matching the prior fall-through).
+  const restoreOutcome = restoreOutcomes.get(row.node_id) ?? "n-a";
+  // OPR.0.4.3.19 rev1-r2 B1 — a durable verdict is keyed only by node_id, so
+  // after a rebind/relaunch (same node, NEW session + NEW pane) a stale
+  // `verified` verdict for the OLD pane would otherwise be served for the new
+  // pane until the next 5s reconcile tick, suppressing down-rank and rendering
+  // a fresh squat/orphan false-green. Make applicability LOAD-BEARING at read
+  // time: a stored verdict applies ONLY when it was computed against the
+  // current binding (its sessionName === the latest session AND its
+  // registeredPane === the current binding pane). Otherwise treat it as ABSENT
+  // (null) — a STALE verdict becomes fail-open (never down-ranks a running
+  // seat), it does NOT itself down-rank. Only a MATCHING mismatch/pane_missing
+  // verdict down-ranks.
+  const identityVerdict = applicableVerdict(identityVerdicts.get(row.node_id) ?? null, row);
+  const lifecycleState = deriveNodeLifecycleState({
+    sessionStatus: row.session_status,
+    restoreOutcome,
+    nodeId: row.node_id,
+    usableSnapshot,
+    identityVerdict: identityVerdict?.verdict ?? null,
   });
+  return {
+    rigId: row.rig_id,
+    rigName: row.rig_name,
+    logicalId: row.logical_id,
+    podId: row.pod_id,
+    podNamespace: row.pod_namespace,
+    // OPR.0.4.6.FAC1: the seat-side role dimension (nodes.role,
+    // declared in the pod-member spec) — the workflow binding layer's
+    // candidate filter. null = role-less (never role-resolved).
+    role: row.role,
+    canonicalSessionName: row.session_name,
+    attachmentType: (row.binding_attachment_type as NodeInventoryEntry["attachmentType"]) ?? null,
+    nodeKind: deriveNodeKind(row.runtime),
+    runtime: row.runtime,
+    sessionStatus: row.session_status,
+    startupStatus: row.startup_status as NodeInventoryEntry["startupStatus"],
+    restoreOutcome,
+    // FS-1 W1.3 S2 — O(1) lookup into the fleet-batched oriented map
+    // (byte-identical to the prior per-node deriveOriented; "n-a" when a node has
+    // no proof events, matching deriveOriented's no-challenge branch).
+    oriented: orienteds.get(row.node_id) ?? "n-a",
+    lifecycleState,
+    occupantLifecycle: deriveOccupantLifecycle(row, identityVerdict?.verdict ?? null),
+    continuityOutcome: deriveContinuityOutcome(row, restoreOutcome),
+    handoverResult: row.handover_result as NodeInventoryEntry["handoverResult"] ?? null,
+    previousOccupant: row.previous_occupant,
+    handoverAt: row.handover_at,
+    tmuxAttachCommand: row.binding_attachment_type === "tmux" && row.session_name ? `tmux attach -t ${row.session_name}` : null,
+    resumeCommand: computeResumeCommand(row.runtime, row.resume_token, row.codex_config_profile),
+    // OPR.0.4.0.26: recoveryGuidance is NOT inlined per node in the LIST
+    // payload. It duplicated ~47KB of templated prose across all nodes and
+    // no node-list consumer reads it. The full guidance is recomputed on
+    // the single-node detail path (getNodeDetail / GET
+    // /api/rigs/:rigId/nodes/:logicalId) — relocation, not loss.
+    recoveryGuidance: null,
+    latestError: row.startup_status === "ready" ? null : getLatestError(db, row.rig_id, row.node_id),
+    // Extended fields
+    model: row.model,
+    agentRef: row.agent_ref,
+    profile: row.profile,
+    codexConfigProfile: row.codex_config_profile,
+    resolvedSpecName: row.resolved_spec_name,
+    resolvedSpecVersion: row.resolved_spec_version,
+    resolvedSpecHash: row.resolved_spec_hash,
+    cwd: row.cwd,
+    restorePolicy: row.restore_policy,
+    resumeType: row.resume_type,
+    resumeToken: row.resume_token,
+    startupCompletedAt: row.startup_completed_at,
+    // PL-007 Workspace Primitive — per-node workspace summary derived
+    // from cwd against the rig's typed workspace block. null when the
+    // rig has no workspace declaration.
+    workspace: resolveNodeWorkspace({ spec: workspaceSpec, cwd: row.cwd }),
+    // OPR.0.4.3.19 — the liveness identity verdict (third axis). null when
+    // never observed; carries evidence on mismatch/missing.
+    identityVerdict,
+    heldReason: deriveHeldReason(db, row.rig_id, row.node_id, row.session_status),
+  };
+}
+
+/** FS-1 W1.2 — all-rigs batched form of `readRigWorkspaceJson`: one query,
+ *  `rigId → WorkspaceSpec`. Rigs with no/malformed workspace are absent (callers
+ *  default to null — byte-identical to `readRigWorkspaceJson`'s null return). */
+function readAllRigWorkspaceJson(db: Database.Database): Map<string, WorkspaceSpec> {
+  const out = new Map<string, WorkspaceSpec>();
+  try {
+    const rows = db.prepare("SELECT id, workspace_json FROM rigs").all() as Array<{ id: string; workspace_json: string | null }>;
+    for (const row of rows) {
+      if (!row.workspace_json) continue;
+      try { out.set(row.id, JSON.parse(row.workspace_json) as WorkspaceSpec); } catch { /* malformed → absent → caller null (matches per-rig) */ }
+    }
+  } catch { /* column/table absent → empty → caller null (matches per-rig defensive path) */ }
+  return out;
+}
+
+/**
+ * FS-1 W1.2 — the rig-level N+1 collapse. Builds inventory for ALL rigs in a
+ * bounded, rig-count-INDEPENDENT set of queries: 3 batched setup reads
+ * (snapshots / workspaces / identity verdicts) + 1 all-rigs node SELECT, grouped
+ * by rig_id. Every entry is built through the SAME `buildInventoryEntry` that the
+ * per-rig `getNodeInventory` uses, so `getNodeInventoryForAllRigs(db).get(rigId)`
+ * is byte-identical to `getNodeInventory(db, rigId)` — the collapse changes only
+ * HOW the context + rows are fetched (batched vs per-rig), never how an entry is
+ * derived. Per-node reads inside `buildInventoryEntry` (`deriveRestoreOutcome`
+ * etc.) remain per-node and ride the 047 index — NOT the rig-level N+1 removed here.
+ */
+export function getNodeInventoryForAllRigs(db: Database.Database): Map<string, NodeInventoryEntry[]> {
+  const snapshotByRig = findLatestUsableSnapshotsForAllRigs(db);
+  const workspaceByRig = readAllRigWorkspaceJson(db);
+  const verdictsByRig = new SeatIdentityStore(db).getForAllRigs();
+  // FS-1 W1.3 S1/S2 — the per-node reads built ONCE for ALL rigs (O(1) queries,
+  // not O(nodes)). Restore map unscoped: a nodeId is referenced only by its own
+  // rig's restore events, so each node's value equals the single-rig path.
+  const restoreOutcomes = buildRestoreOutcomeMap(db);
+  const orienteds = buildOrientedMap(db);
+  const rows = queryInventoryRows(db);
+  const out = new Map<string, NodeInventoryEntry[]>();
+  for (const row of rows) {
+    const entry = buildInventoryEntry(db, row, {
+      usableSnapshot: snapshotByRig.get(row.rig_id) ?? null,
+      workspaceSpec: workspaceByRig.get(row.rig_id) ?? null,
+      identityVerdicts: verdictsByRig.get(row.rig_id) ?? new Map(),
+      restoreOutcomes,
+      orienteds,
+    });
+    let list = out.get(row.rig_id);
+    if (!list) { list = []; out.set(row.rig_id, list); }
+    list.push(entry);
+  }
+  return out;
 }
 
 /** PL-007 — read the rig's typed workspace block from `rigs.workspace_json`
@@ -848,7 +972,11 @@ function countPendingForEntry(
   return count;
 }
 
-function deriveCanonicalFromEntry(entry: NodeInventoryEntry): string | null {
+/** EXPORTED (OPR.0.4.6.FAC1): the derived canonical coordinate
+ *  `{pod}-{member}@{rig}` for an inventory entry — the binding layer's
+ *  ONE string rule (tiebreak key AND recorded destination) reuses
+ *  exactly this dual-key derivation, never a parallel one. */
+export function deriveCanonicalFromEntry(entry: NodeInventoryEntry): string | null {
   if (!entry.rigName || !entry.logicalId) return null;
   const dotIdx = entry.logicalId.indexOf(".");
   if (dotIdx <= 0 || dotIdx === entry.logicalId.length - 1) return null;
@@ -857,7 +985,7 @@ function deriveCanonicalFromEntry(entry: NodeInventoryEntry): string | null {
   return deriveCanonicalSessionName(pod, member, entry.rigName);
 }
 
-function readPendingWorkBySession(db: Database.Database): Map<string, number> {
+export function readPendingWorkBySession(db: Database.Database): Map<string, number> {
   const rows = db.prepare(`
     SELECT destination_session, COUNT(*) as c
     FROM queue_items

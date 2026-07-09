@@ -12,6 +12,7 @@ import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import YAML from "yaml";
 import type Database from "better-sqlite3";
+import { sessionMemberLabel } from "../session-name.js";
 import type { SliceIndexer, SliceRecord } from "../slices/slice-indexer.js";
 import {
   composeMissionReview,
@@ -28,9 +29,11 @@ import {
   type GitFacts,
   type MissionSliceEntry,
   type SliceComposeInputs,
+  type WorkflowExceptionInput,
 } from "./compose.js";
-import type { AgentsBand, AgentsScope, ComposedMissionReview, ComposedRigAgents, ComposedSliceReview, LockedArtifact, SettledRow } from "./types.js";
+import type { AgentsBand, AgentsScope, ComposedMissionReview, ComposedRigAgents, ComposedSliceReview, LockedArtifact, SettledRow, WorkflowRowRef } from "./types.js";
 import { composeAgentsBand, composeRigAgents } from "./compose.js";
+import { evaluateStepDeadline } from "../workflow-deadline.js";
 import type { AgentActivityStore } from "../agent-activity-store.js";
 import { isHumanSeatSession } from "../human-route-enforcer.js";
 
@@ -62,6 +65,33 @@ interface QitemRow {
 }
 
 const ACTIVE_STATES = ["pending", "in-progress", "claimed", "blocked", "handed-off"];
+
+/** OPR.0.4.6.WF4 Q6 — the ● (agent-leg) workflow-identity stamp, derived from
+ *  the item's OWN STRUCTURED TAGS (`workflow:<name>` / `instance:<id>` /
+ *  `step:<id>` — the WF-5-ratified queryable identity), NEVER from summary /
+ *  identity / evidenceRef prose. Returns the pointer only when BOTH required
+ *  keys are present; a non-workflow row (no `instance:`/`workflow:` tag) →
+ *  `undefined`, so its AttentionInput stays byte-identical (omit-when-absent).
+ *  Pointer-only: the three identity keys, never status/deadline/class. */
+export function workflowRefFromTags(tagsJson: string | null): WorkflowRowRef | undefined {
+  if (!tagsJson) return undefined;
+  let tags: string[];
+  try {
+    tags = (JSON.parse(tagsJson) as string[]) ?? [];
+  } catch {
+    return undefined;
+  }
+  let instanceId: string | undefined;
+  let workflowName: string | undefined;
+  let stepId: string | undefined;
+  for (const t of tags) {
+    if (t.startsWith("instance:")) instanceId = t.slice("instance:".length);
+    else if (t.startsWith("workflow:")) workflowName = t.slice("workflow:".length);
+    else if (t.startsWith("step:")) stepId = t.slice("step:".length);
+  }
+  if (!instanceId || !workflowName) return undefined;
+  return { instanceId, workflowName, ...(stepId ? { stepId } : {}) };
+}
 
 export class ReviewGatherer {
   private readonly db: Database.Database;
@@ -140,6 +170,7 @@ export class ReviewGatherer {
       handoffsToday,
       overdueCount: overdue.length,
       rosterWindow: "today",
+      workflows: this.gatherWorkflowExceptions(nowIso),
       nowIso,
     });
   }
@@ -194,6 +225,7 @@ export class ReviewGatherer {
       proofDirExists: fs.existsSync(path.join(slice.slicePath, "proof")),
       attention,
       agents,
+      workflows: this.gatherWorkflowExceptions(this.now()),
       activeQitemPresent: this.hasActiveQitem(name, slice),
       git: this.gatherGitFacts(frontmatter, candidateRef),
       approval,
@@ -323,6 +355,113 @@ export class ReviewGatherer {
   /** Human-routed attention rows carrying the given tag (the §5 predicate is
    *  Packet 1's; until it lands, human-tier/human-dest/park-on-human rows are
    *  selected with the same shape). */
+  /** OPR.0.4.6.WF5 FR-3 — recorded workflow-instance views for the ▲
+   *  band: failed + in-flight instances, the WF-1 evaluator verdict
+   *  (consumed, never recomputed — the module import IS the single
+   *  home), the open exception item by TAG QUERY (never summary
+   *  parsing), and the non-open-frontier anomaly check. Read-only;
+   *  absent tables (pre-workflow DBs) return []. */
+  private gatherWorkflowExceptions(nowIso: string): WorkflowExceptionInput[] {
+    try {
+      const instances = this.db
+        .prepare(
+          `SELECT instance_id, workflow_name, status, current_step_id, current_frontier_json
+           FROM workflow_instances WHERE status IN ('failed','active','waiting')`,
+        )
+        .all() as Array<{
+        instance_id: string;
+        workflow_name: string;
+        status: string;
+        current_step_id: string | null;
+        current_frontier_json: string;
+      }>;
+      const now = new Date(nowIso);
+      const out: WorkflowExceptionInput[] = [];
+      for (const row of instances) {
+        let frontier: string[] = [];
+        try {
+          frontier = (JSON.parse(row.current_frontier_json) as string[]) ?? [];
+        } catch {
+          frontier = [];
+        }
+        const packets = frontier.map(
+          (id) =>
+            this.db
+              .prepare(
+                `SELECT qitem_id, state, destination_session, ts_created, claimed_at, closure_required_at
+                 FROM queue_items WHERE qitem_id = ?`,
+              )
+              .get(id) as
+              | { qitem_id: string; state: string; destination_session: string; ts_created: string; claimed_at: string | null; closure_required_at: string | null }
+              | undefined,
+        );
+        const frontierRefsNonOpenPacket =
+          (row.status === "active" || row.status === "waiting") &&
+          packets.some((p) => p && !["pending", "in-progress", "blocked"].includes(p.state));
+        const verdict = evaluateStepDeadline(
+          {
+            instanceId: row.instance_id,
+            status: row.status,
+            currentFrontier: frontier,
+            currentStepId: row.current_step_id,
+          },
+          packets.map((p) =>
+            p
+              ? {
+                  qitemId: p.qitem_id,
+                  state: p.state,
+                  destinationSession: p.destination_session,
+                  tsCreated: p.ts_created,
+                  claimedAt: p.claimed_at,
+                  closureRequiredAt: p.closure_required_at,
+                }
+              : null,
+          ),
+          now,
+        );
+        const item = this.db
+          .prepare(
+            `SELECT qitem_id, destination_session, tier, ts_created, summary
+             FROM queue_items
+             WHERE state IN ('pending','in-progress','blocked')
+               AND tags LIKE ? AND tags LIKE ?
+             ORDER BY ts_created DESC LIMIT 1`,
+          )
+          .get(`%"instance:${row.instance_id}"%`, `%"workflow-exception"%`) as
+          | { qitem_id: string; destination_session: string; tier: string | null; ts_created: string; summary: string | null }
+          | undefined;
+        out.push({
+          instanceId: row.instance_id,
+          workflowName: row.workflow_name,
+          status: row.status,
+          currentStepId: row.current_step_id,
+          deadlineState: verdict.state,
+          deadlineEvidence: verdict.evidence
+            ? `step ${verdict.evidence.stepId ?? "?"} packet ${verdict.evidence.packetId} held by ${verdict.evidence.ownerSession} — ${verdict.evidence.overdueBySeconds}s past the ${verdict.evidence.anchor} anchor`
+            : null,
+          frontierRefsNonOpenPacket,
+          openItem: item
+            ? {
+                qitemId: item.qitem_id,
+                destinationSession: item.destination_session,
+                humanRouted:
+                  item.tier === "human-gate" || /^human(?:-[A-Za-z0-9._-]+)?@(kernel|host)$/.test(item.destination_session),
+                createdAtIso: item.ts_created,
+                summary: item.summary,
+              }
+            : null,
+        });
+      }
+      return out;
+    } catch (err) {
+      // Pre-workflow DBs (no tables) compose byte-identically to
+      // pre-WF-5; anything else fails LOUD (the WF-3 narrowed-catch
+      // lesson — a broad catch here would silently blind the band).
+      if (err instanceof Error && /no such table/i.test(err.message)) return [];
+      throw err;
+    }
+  }
+
   private attentionForTag(tag: string, excludeTagPrefix?: string): AttentionInput[] {
     if (!this.tableExists("queue_items")) return [];
     const hasEvidenceRef = this.columnExists("queue_items", "evidence_ref");
@@ -349,19 +488,25 @@ export class ReviewGatherer {
           return true;
         }
       })
-      .map((r) => ({
-        qitemId: r.qitem_id,
-        summary: r.summary,
-        leg: r.state === "blocked" ? "park-on-human" : "human-routed",
-        where: r.destination_session,
-        createdAtIso: r.ts_created,
-        priority: r.priority,
-        tier: r.tier,
-        evidenceRef: r.evidence_ref ?? null,
-        unblocks: r.state === "blocked" ? r.qitem_id : null,
-        destinationSession: r.destination_session,
-        closureRequiredAtIso: r.closure_required_at,
-      }));
+      .map((r) => {
+        // OPR.0.4.6.WF4 Q6 — stamp the ● workflow pointer from the item's own
+        // tags; OMITTED for non-workflow rows (byte-identity-by-omission).
+        const workflow = workflowRefFromTags(r.tags);
+        return {
+          qitemId: r.qitem_id,
+          summary: r.summary,
+          leg: r.state === "blocked" ? "park-on-human" : "human-routed",
+          where: r.destination_session,
+          createdAtIso: r.ts_created,
+          priority: r.priority,
+          tier: r.tier,
+          evidenceRef: r.evidence_ref ?? null,
+          unblocks: r.state === "blocked" ? r.qitem_id : null,
+          destinationSession: r.destination_session,
+          closureRequiredAtIso: r.closure_required_at,
+          ...(workflow ? { workflow } : {}),
+        };
+      });
   }
 
   /** Sessions holding active work on the named slices (null = rig-wide).
@@ -402,7 +547,7 @@ export class ReviewGatherer {
           .filter((r) => !!r.blocked_on)
           .reduce<QitemRow | null>((acc, r) => (!acc || r.ts_updated > acc.ts_updated ? r : acc), null);
         return {
-          agentName: session.split("@")[0] ?? session,
+          agentName: sessionMemberLabel(session), // OPR.0.4.6.MH1 FR-8: shared contract
           sessionName: session,
           runtime: "unknown" as const,
           parkedOn: parked?.blocked_on ?? null,
@@ -459,7 +604,7 @@ export class ReviewGatherer {
     const recentInputs: AgentInput[] = [...recent.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([session, e]) => ({
-        agentName: session.split("@")[0] ?? session,
+        agentName: sessionMemberLabel(session), // OPR.0.4.6.MH1 FR-8: shared contract
         sessionName: session,
         runtime: "unknown" as const,
         parkedOn: null,
@@ -539,19 +684,25 @@ export class ReviewGatherer {
                 OR (state = 'blocked' AND blocked_on LIKE 'human%'))`,
       )
       .all(...ACTIVE_STATES) as Array<QitemRow & { evidence_ref?: string | null }>;
-    return rows.map((r) => ({
-      qitemId: r.qitem_id,
-      summary: r.summary,
-      leg: r.state === "blocked" ? "park-on-human" : "human-routed",
-      where: r.destination_session,
-      createdAtIso: r.ts_created,
-      priority: r.priority,
-      tier: r.tier,
-      evidenceRef: r.evidence_ref ?? null,
-      unblocks: r.state === "blocked" ? r.qitem_id : null,
-      destinationSession: r.destination_session,
-      closureRequiredAtIso: r.closure_required_at,
-    }));
+    return rows.map((r) => {
+      // OPR.0.4.6.WF4 Q6 — stamp the ● workflow pointer from the item's own
+      // tags; OMITTED for non-workflow rows (byte-identity-by-omission).
+      const workflow = workflowRefFromTags(r.tags);
+      return {
+        qitemId: r.qitem_id,
+        summary: r.summary,
+        leg: r.state === "blocked" ? "park-on-human" : "human-routed",
+        where: r.destination_session,
+        createdAtIso: r.ts_created,
+        priority: r.priority,
+        tier: r.tier,
+        evidenceRef: r.evidence_ref ?? null,
+        unblocks: r.state === "blocked" ? r.qitem_id : null,
+        destinationSession: r.destination_session,
+        closureRequiredAtIso: r.closure_required_at,
+        ...(workflow ? { workflow } : {}),
+      };
+    });
   }
 
   /** FR-4: today's closed handoffs from the transitions log — the SETTLED
@@ -603,19 +754,25 @@ export class ReviewGatherer {
              AND tags LIKE '%"slice:%'`,
         )
         .all(nowIso) as QitemRow[];
-      return rows.map((r) => ({
-        qitemId: r.qitem_id,
-        summary: r.summary,
-        leg: "overdue",
-        where: r.destination_session,
-        createdAtIso: r.ts_created,
-        priority: r.priority,
-        tier: r.tier,
-        evidenceRef: null,
-        unblocks: null,
-        destinationSession: r.destination_session,
-        closureRequiredAtIso: r.closure_required_at,
-      }));
+      return rows.map((r) => {
+        // OPR.0.4.6.WF4 Q6 — stamp the ● workflow pointer from the item's own
+        // tags; OMITTED for non-workflow rows (byte-identity-by-omission).
+        const workflow = workflowRefFromTags(r.tags);
+        return {
+          qitemId: r.qitem_id,
+          summary: r.summary,
+          leg: "overdue",
+          where: r.destination_session,
+          createdAtIso: r.ts_created,
+          priority: r.priority,
+          tier: r.tier,
+          evidenceRef: null,
+          unblocks: null,
+          destinationSession: r.destination_session,
+          closureRequiredAtIso: r.closure_required_at,
+          ...(workflow ? { workflow } : {}),
+        };
+      });
     } catch {
       return [];
     }

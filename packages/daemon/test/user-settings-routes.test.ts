@@ -80,14 +80,21 @@ describe("config routes (User Settings v0)", () => {
     // + 1 V0.3.1 slice 05 (workspace.operator_seat_name)
     // + 7 slice 27 (policies.claude_compaction.*)
     // + 3 OPR.0.3.4.9 (snapshots.periodic.*)
-    // + 1 OPR.0.4.0.1 (ui.terminal.max_live_terminals) → 40 total.
-    expect(Object.keys(body.settings).length).toBe(40);
+    // + 1 OPR.0.4.0.1 (ui.terminal.max_live_terminals)
+    // + 2 OPR.0.4.6.MH1 (host.selected / host.name)
+    // + 1 OPR.0.4.6.WF5 (workflow.exception_routing)
+    // + 1 OPR.0.4.6.02 (terminal.status_bar — the ratified sole v1 terminal key)
+    // + 5 OPR.0.4.6.FS-1 W2 (retention.enabled / transitions_days / watchdog_days /
+    //   watchdog_keep_per_job / batch_size — the CLI-settable queue-retention knobs) → 49 total.
+    expect(Object.keys(body.settings).length).toBe(49);
     expect(body.settings["daemon.port"]?.source).toBe("default");
     expect(body.settings["ui.preview.refresh_interval_seconds"]?.value).toBe(3);
     expect(body.settings["ui.preview.max_pins"]?.value).toBe(4);
     expect(body.settings["ui.preview.default_lines"]?.value).toBe(50);
     expect(body.settings["recovery.auto_drive_provider_prompts"]?.value).toBe(false);
     expect(body.settings["recovery.provider_auth_env_allowlist"]?.value).toBe("");
+    expect(body.settings["host.selected"]).toMatchObject({ value: "local", source: "default" });
+    expect(body.settings["host.name"]).toMatchObject({ value: "localhost", source: "default" });
     expect(String(body.settings["workspace.dogfood_evidence_root"]?.value)).toMatch(/dogfood-evidence$/);
   });
 

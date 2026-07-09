@@ -28,7 +28,7 @@ the receipt and move on.
 Example:
 
 ```bash
-rig send velocity-guard@openrig-velocity "Heads up — filing per-commit handoff on slice-22 Bug 1 BONUS at tip 6b8673b6." --verify
+rig send reviewer@acme-web "Heads up — filing the per-commit handoff on the search-filters slice at the current tip." --verify
 ```
 
 ### `rig queue create --source <X> --destination <Y> --tags <...> --body "<...>"` — durable work item
@@ -47,9 +47,9 @@ Example:
 
 ```bash
 rig queue create \
-  --source redo-driver-2@openrig-velocity \
-  --destination redo-guard-2@openrig-velocity \
-  --tags "mission:release-0.3.2,slice:22-rig-up-paper-cut-fix-round,gate:guard,handoff:per-commit,checkpoint:bug-1-bonus" \
+  --source builder@acme-web \
+  --destination reviewer@acme-web \
+  --tags "mission:site-relaunch,slice:02-search-filters,gate:guard,handoff:per-commit,checkpoint:bug-1" \
   --body "$(cat /tmp/per-commit-body.txt)"
 ```
 
@@ -64,8 +64,8 @@ Example:
 
 ```bash
 rig queue handoff qitem-20260601012431-d78aa805 \
-  --to velocity-qa@openrig-velocity \
-  --tags "mission:release-0.3.2,slice:22-rig-up-paper-cut-fix-round,gate:qa,handoff:adversarial-dogfood"
+  --to qa@acme-web \
+  --tags "mission:site-relaunch,slice:02-search-filters,gate:qa,handoff:adversarial-dogfood"
 ```
 
 ### §1b doctrine — turn ends by passing the ball

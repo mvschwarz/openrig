@@ -84,8 +84,14 @@ export function resolveScopePathToAllowlist(
 export function useScopeMarkdown(
   absoluteScopePath: string | null,
   filename: string,
+  opts?: { enabled?: boolean },
 ): UseScopeMarkdownResult {
-  const rootsQuery = useFilesRoots();
+  // OPR.0.4.6.MH2 guard-B1 — /api/files/* is local-only: a null/disabled
+  // scope path must issue ZERO file requests (roots included), not merely
+  // render unavailable. Remote-selected surfaces pass null paths and/or
+  // enabled:false; the query below never fires for them.
+  const enabled = (opts?.enabled ?? true) && absoluteScopePath !== null;
+  const rootsQuery = useFilesRoots({ enabled });
   const rootsResp = rootsQuery.data;
   const rootsList: AllowlistRoot[] | null =
     rootsResp && "roots" in rootsResp ? rootsResp.roots : null;

@@ -5,6 +5,7 @@
 // (SC-29). SHIPPED cards built from queue.close + git events.
 
 import type { ActivityEvent } from "../hooks/useActivityFeed.js";
+import { isHumanSeatSessionRef } from "./session-name.js";
 
 export type FeedCardKind =
   | "action-required"
@@ -159,7 +160,9 @@ function queueBody(payload: Record<string, unknown>): string | undefined {
 // OPR.0.4.4.19 FR-3: exported so Feed.tsx's card-kind hydration uses the same
 // strict human-seat predicate instead of a prefix guess.
 export function isHumanSeat(session: string | undefined): boolean {
-  return /^human(?:-[A-Za-z0-9._-]+)?@(kernel|host)$/.test(session ?? "");
+  // OPR.0.4.6.MH1 FR-8: delegates to the shared session-name contract
+  // (was a local regex copy — the drift this comment always feared).
+  return isHumanSeatSessionRef(session ?? "");
 }
 
 function classifyEvent(evt: ActivityEvent): FeedCard | null {

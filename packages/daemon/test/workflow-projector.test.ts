@@ -271,7 +271,6 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
       allowed_exits:
         - handoff
       next_hop:
-        mode: prefer
         suggested_roles:
           - qa-tester
     - id: qa
@@ -280,13 +279,14 @@ describe("WorkflowProjector + WorkflowRuntime (PL-004 Phase D; transactional-scr
         - handoff
         - done
       next_hop:
-        mode: prefer
         suggested_roles:
           - discovery-router
   invariants:
     allowed_exits:
       - handoff
       - done
+  loop_guards:
+    max_hops: 10
 `;
     const loopSpecPath = join(tmp, "loop-regression.yaml");
     writeFileSync(loopSpecPath, loopSpec);

@@ -8,6 +8,21 @@ interface RuntimeVerifierDeps {
   db: Database.Database;
 }
 
+// OPR.0.4.6.PI1 — Pi's documented Node engine floor (package.json engines).
+export const PI_NODE_ENGINE_FLOOR = "22.19.0";
+
+export function meetsPiNodeEngineFloor(version: string): boolean {
+  const parts = version.replace(/^v/, "").split(".").map((p) => parseInt(p, 10));
+  const floor = PI_NODE_ENGINE_FLOOR.split(".").map((p) => parseInt(p, 10));
+  for (let i = 0; i < floor.length; i++) {
+    const have = parts[i] ?? 0;
+    const need = floor[i]!;
+    if (have > need) return true;
+    if (have < need) return false;
+  }
+  return true;
+}
+
 /**
  * Verifies runtimes are usable — not just present on PATH.
  * Persists results to runtime_verifications table automatically.
@@ -66,9 +81,35 @@ export class RuntimeVerifier {
     return result;
   }
 
+  /** OPR.0.4.6.PI1 FR-1 — Verify Pi: `pi --version` (fallback `pi --help`)
+   *  plus the Node engine floor Pi requires (>= 22.19.0). Provider/model
+   *  resolvability is member-scoped and verified at launch, not here. */
+  async verifyPi(): Promise<RuntimeVerification> {
+    let result = await this.verifyVersionOrHelp("pi", "pi");
+    if (result.status === "verified") {
+      try {
+        const nodeVersion = this.parseVersion(await this.exec("node --version"));
+        if (nodeVersion && !meetsPiNodeEngineFloor(nodeVersion)) {
+          result = this.buildVerification(
+            "pi",
+            "error",
+            result.version,
+            null,
+            `Pi requires Node >= ${PI_NODE_ENGINE_FLOOR}; found ${nodeVersion}. Upgrade Node to run pi seats.`,
+          );
+        }
+      } catch {
+        // `node` unresolvable from the daemon's exec context — leave the
+        // binary verification standing; the engine floor re-checks at launch.
+      }
+    }
+    this.persist(result);
+    return result;
+  }
+
   /**
    * Verify multiple runtimes. Returns results in input order.
-   * @param runtimes - canonical runtime names: 'tmux', 'cmux', 'claude-code', 'codex'
+   * @param runtimes - canonical runtime names: 'tmux', 'cmux', 'claude-code', 'codex', 'pi'
    */
   async verifyAll(runtimes: string[]): Promise<RuntimeVerification[]> {
     const results: RuntimeVerification[] = [];
@@ -78,6 +119,7 @@ export class RuntimeVerifier {
         case "cmux": results.push(await this.verifyCmux()); break;
         case "claude-code": results.push(await this.verifyClaude()); break;
         case "codex": results.push(await this.verifyCodex()); break;
+        case "pi": results.push(await this.verifyPi()); break;
         default: {
           const v = this.buildVerification(runtime, "not_found", null, null, `unknown runtime: ${runtime}`);
           this.persist(v);

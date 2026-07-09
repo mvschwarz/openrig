@@ -318,6 +318,10 @@ describe("MissionProgressHeatmap (slice 13.5)", () => {
 describe("MissionScopePage Progress tab composes heat-map (slice 13.5)", () => {
   function installMissionFetchMock() {
     mockFetch.mockImplementation(async (url: string) => {
+      // MH-2: the selection-known files gate needs the hosts payload (local).
+      if (url.includes("/api/hosts")) {
+        return new Response(JSON.stringify({ ownName: "localhost", selected: "local", hosts: [] }), { status: 200 });
+      }
       if (url.includes("/api/config")) {
         return new Response(
           JSON.stringify({

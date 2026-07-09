@@ -25,12 +25,14 @@ describe("polish-8 demo-readiness source guards", () => {
 
   it("Slice Overview and Artifacts are distinct surfaces", () => {
     const src = read("../src/components/project/ScopePages.tsx");
-    expect(src).toContain("function SliceOverviewTab({ detail }");
+    // OPR.0.4.6.MH2 guard-B1: the signature gained the remoteGated gate.
+    expect(src).toContain("function SliceOverviewTab({ detail, remoteGated }");
     expect(src).toContain("slice-overview-summary");
     // OPR.0.4.1 AC-4-FF: the slice Artifacts surface IS the ArtifactsNavigator (file
     // navigator at slice altitude); the prior Files/Commits/Docs/Decisions card wall
     // (SliceArtifactsTab) is removed — Commits flagged 0.4.2, Decisions live in Story.
-    expect(src).toContain("<ArtifactsNavigator scopePath={detail.slicePath}");
+    // OPR.0.4.6.MH2 guard-B1: the mount gained the selection-known files gate.
+    expect(src).toContain("<ArtifactsNavigator scopePath={filesAllowed ? detail.slicePath : null}");
     expect(src).not.toContain("function SliceArtifactsTab");
     expect(src).not.toContain("slice-artifacts-commits");
   });

@@ -20,7 +20,9 @@ export async function runRemoteHttpOp(
   apiPath: string,
   body: unknown | undefined,
   deps: RemoteHostDeps,
-  opts: { json?: boolean },
+  // OPR.0.4.6.MH4 — optional per-call deadline (additive; absent = the
+  // DaemonClient default). Every remote call site names its own budget.
+  opts: { json?: boolean; timeoutMs?: number },
 ): Promise<RemoteOpResult> {
   const loader = deps.hostRegistryLoader ?? loadHostRegistry;
   const registry = loader();
@@ -45,15 +47,19 @@ export async function runRemoteHttpOp(
 
   const client = deps.clientFactory(httpHost.url);
   const headers = { Authorization: `Bearer ${bearerResult.token}` };
+  const requestOptions = opts.timeoutMs !== undefined ? { headers, timeoutMs: opts.timeoutMs } : { headers };
 
   try {
     const res = method === "POST"
-      ? await client.post<unknown>(apiPath, body, { headers })
-      : await client.get<unknown>(apiPath, { headers });
+      ? await client.post<unknown>(apiPath, body, requestOptions)
+      : await client.get<unknown>(apiPath, requestOptions);
 
     const failedStep = classifyHttpFailedStep(res.status);
     if (failedStep !== "none") {
-      return { ok: false, failedStep, error: `HTTP ${res.status}` };
+      // Carry the origin response body on failures too (additive): the
+      // remote route's own error text is the honest detail a caller
+      // surfaces beside the step class.
+      return { ok: false, failedStep, error: `HTTP ${res.status}`, data: res.data };
     }
     return { ok: true, failedStep: "none", data: res.data };
   } catch (err) {

@@ -369,3 +369,73 @@ describe("transcript drill-in (FR-6)", () => {
     expect(err.textContent).toContain("No transcript for 'dev44-qa1@openrig-delivery'");
   });
 });
+
+// OPR.0.4.6.MH5 C4/C5 — the FLEET band's ONE v1 mount is THIS page. The
+// mount pin + both no-fleet behaviors (render NOTHING + FETCH nothing) at
+// the mount site; band anatomy depth lives in fleet-band.test.tsx.
+describe("MH-5 — the FLEET band mount (v1 single mount, enumerated)", () => {
+  function renderWithHostAwareStub(hosts: unknown[], fleet: unknown | null) {
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      const u = String(url);
+      urls.push(u);
+      if (u.includes("/api/hosts")) {
+        return new Response(JSON.stringify({ ownName: "studio", selected: "local", hosts }), { status: 200 });
+      }
+      if (u.includes("/api/review/fleet")) {
+        return new Response(JSON.stringify(fleet ?? {}), { status: fleet ? 200 : 500 });
+      }
+      return new Response(JSON.stringify(composed()), { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const utils = render(
+      <QueryClientProvider client={client}>
+        <RigAgentsPage />
+      </QueryClientProvider>,
+    );
+    return { urls, ...utils };
+  }
+
+  const FLEET_MIN = {
+    rollup: { needsYouCount: 0, exceptionCount: 1, exceptionsByKind: [{ kind: "stuck", count: 1 }], hostCount: 2, unreachableCount: 0 },
+    needsYou: {
+      items: [
+        {
+          source: "derived", identity: "qi|stuck|t0", fleetKey: "vps-a|qi|stuck|t0", hostId: "vps-a", seenFrom: ["rig"],
+          summary: "packer2 idle 47m", leg: "stuck", where: "rig", ageIso: null, priority: null, tier: null,
+          evidenceRef: null, unblocks: null, qitemId: null, destinationSession: null,
+          derived: { kind: "stuck", evidence: "idle 47m >= 30m", threshold: "stuck >= 30m idle" },
+        },
+      ],
+      provenance: "fleet union · 2/2 hosts composing",
+    },
+    hosts: [
+      { hostId: "local", kind: "local", status: { hostId: "local", status: "ok" }, needsYouCount: 0, exceptionsByKind: [], seatCount: 3, rigCount: 1, topLine: "quiet" },
+      { hostId: "vps-a", kind: "remote", status: { hostId: "vps-a", status: "ok" }, needsYouCount: 0, exceptionsByKind: [{ kind: "stuck", count: 1 }], seatCount: 2, rigCount: 1, topLine: "▲ stuck — packer2 idle 47m" },
+    ],
+    settled: [],
+    settledProvenance: "0 settled",
+    composedAt: NOW,
+  };
+
+  it("with a registered remote host the band renders ABOVE the per-host bands, and the per-host content is untouched", async () => {
+    renderWithHostAwareStub(
+      [{ id: "vps-a", transport: "http", url: "http://vps-a:7433", bearer_env: "A", selected: false, status: "reachable" }],
+      FLEET_MIN,
+    );
+    const page = await screen.findByTestId("rig-agents-page");
+    const bandEl = await screen.findByTestId("fleet-band");
+    expect(page.contains(bandEl)).toBe(true);
+    // The band precedes the per-host NEEDS YOU content in document order.
+    expect(bandEl.compareDocumentPosition(screen.getByText("waiting on your follow-mode call")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The per-host bands still render fully (the LOCK: untouched below).
+    expect(screen.getByTestId("agents-health").textContent).toBe("2 handoffs today · 0 overdue");
+  });
+
+  it("single-host operator: NO band in the DOM and NO fleet request from this page (byte-identical pre-MH5 + the FS-1 fetch gate)", async () => {
+    const { urls } = renderWithHostAwareStub([], null);
+    await screen.findByTestId("rig-agents-page");
+    expect(screen.queryByTestId("fleet-band")).toBeNull();
+    expect(urls.some((u) => u.includes("/api/review/fleet"))).toBe(false);
+  });
+});

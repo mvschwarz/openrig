@@ -106,6 +106,55 @@ present @HEAD.
 Architecture Rule 18 (carried, `architecture.md` §7): tmux is transport, not
 truth — `send/capture/broadcast` wrap tmux reliably with honest errors.
 
+### 3b. Cross-host coordination verbs (v0.4.6 — OPR.0.4.6.MH4)
+
+`rig send/capture/transcript/broadcast --host <id>` (and the `agent@rig@host`
+target sugar on the session-target verbs) cross the host boundary with **zero
+daemon-side changes** — the remote daemon's existing local routes do all the
+work; the only net-new is the CLI transport branch.
+
+- **The seam principle (arch-ruled): SIDEDNESS + CALLER pick the seam.**
+  ONE-SIDED remote ops from a BEARER-CAPABLE caller (the CLI resolves the
+  registry bearer locally) go **CLI-DIRECT** via the shipped
+  `runRemoteHttpOp` — one hop, no local-daemon involvement (the
+  `ps --all-hosts` precedent). TWO-SIDED ops (MH-3's queue handoff closes the
+  local source and creates the remote successor — the local daemon owns half
+  the transaction) or BEARER-INCAPABLE callers (the browser: MC-action,
+  MH-2's read-through) use the **daemon-side forward-then-strip**. MH-4's
+  four verbs are pure one-sided remote ops from the CLI.
+- **Transport is dictated by the host entry (ssh XOR http), never a
+  per-call choice:** ssh hosts keep the shipped shell-out byte-verbatim for
+  send/capture; http hosts (the `pair` front door's kind) take the
+  CLI-direct branch to `POST /api/transport/send|capture|broadcast` /
+  `GET /api/transcripts/*` with the SAME bodies/paths the local CLI builds
+  (one route, two callers = wrap parity by construction). transcript and
+  broadcast are http-only (no ssh path exists for them); a wrong-transport
+  verb dies with the structured requirement error — never a fallback.
+- **Terminal-bearer posture (named limitation, v0 — `/api/transport/*`
+  ONLY):** the remote's transport routes (send/capture/broadcast) gate on
+  ITS TERMINAL bearer class (`OPENRIG_TERMINAL_BEARER_TOKEN`, default null →
+  pass-through; the tailnet is the auth boundary by design), while the CLI
+  presents the REGISTRY bearer from `hosts.yaml`. A remote enforcing a
+  DIFFERENT terminal bearer surfaces as the structured `permission-gate`
+  step (never a hang, never silent). Remedy: set the remote terminal bearer
+  equal to the paired registry bearer, or rely on the tailnet boundary.
+  **The transcript read is DELIBERATELY outside this class (arch n2):**
+  `/api/transcripts/*` mounts UNGATED (`server.ts` — the shipped open-route
+  posture; daemon-local trust boundary with route-level credential
+  redaction as the protective primitive), so a wrong terminal bearer that
+  permission-gates `send --host` does NOT gate `transcript --host` — the
+  read keeps succeeding, and the proof matrix must not treat the auth-fail
+  class as uniform across the four verbs. A coherent transcript-read auth
+  policy across tail/grep/full is a named future slice per
+  `routes/transcripts.ts`'s own comment (orch approved-option-a).
+  Bearer-class unification is likewise a NAMED follow-up, not v0 (no
+  un-asked auth machinery).
+- **BR-1 holds:** the 3-part form is CLI-edge sugar only (suffix must match
+  a REGISTERED host id, else passthrough + a loud host hint); every session
+  string that reaches any daemon stays `member@rig`; the host travels
+  out-of-band. Durable cross-host coordination stays MH-3's queue — MH-4
+  adds no queue surface.
+
 ## 4. Transcript flow
 
 (`architecture.md` §6 "Transcript flow")
@@ -180,7 +229,12 @@ The intentional limits in this layer:
   detail (whoami/adopt).
 - `lifecycle-snapshot-restore.md` §3 — restore-side transcript boundary
   markers.
+- `coordination-primitive.md` §3b — MH-3's cross-host QUEUE routing (the
+  two-sided daemon-forward twin of §3b's one-sided CLI-direct verbs).
+- `cli-reference.md` § Cross-host execution — the per-verb transport
+  capability table, parse rules, and http failure taxonomy (MH-3 + MH-4).
 - Source roots: `packages/daemon/src/domain/{session-transport,
   transcript-store,history-query,ask-service,chat-repository}.ts`,
   `packages/daemon/src/routes/{transport,transcripts,ask,chat}.ts`,
-  `packages/cli/src/mcp-server.ts`.
+  `packages/cli/src/mcp-server.ts`,
+  `packages/cli/src/{remote-host-ops,cross-host-target,cross-host-executor}.ts` (v0.4.6 MH-4).

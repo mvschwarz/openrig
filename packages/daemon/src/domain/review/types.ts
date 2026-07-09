@@ -139,16 +139,37 @@ export const PHASE_LANE_LABELS: Record<ReviewPhase, string> = {
 // --- FR-4: NEEDS YOU + AGENTS (KEEP — orthogonal, already sound) ---
 
 export interface DerivedException {
-  kind: "stuck" | "overdue" | "insufficient-proof" | "stale-after-change";
+  /** OPR.0.4.6.WF5 FR-3 adds the workflow-sourced kinds: "workflow-failed"
+   *  (the ▲ backstop for an item-less failed instance — itself evidence of
+   *  a bug), "awareness" (the human-KNOWS row for an ORCHESTRATOR-routed
+   *  exception: holder + age, distinct from a to-do, derived never
+   *  minted), "anomaly" (frontier references a non-open packet — the
+   *  detection backstop behind WF-3 FR-6's prevention guard). */
+  kind: "stuck" | "overdue" | "insufficient-proof" | "stale-after-change" | "workflow-failed" | "awareness" | "anomaly";
   /** The inline evidence — never a bare accusation ("idle 47m >= 30m default · holds 2"). */
   evidence: string;
   /** The visible v1 threshold it crossed. */
   threshold: string;
 }
 
+/** OPR.0.4.6.WF4 Q6 (arch-ruled) — the ONE structured workflow-identity join
+ *  for every attention row that belongs to a workflow instance. Stamped
+ *  daemon-side exactly once; the UI consumes ONLY this pointer for workflow
+ *  routing (never prose from identity/evidenceRef/summary). Pointer-only:
+ *  the three identity keys, NO status/deadline/class (those live on the
+ *  instance payload). OMITTED when the row is not workflow-sourced
+ *  (byte-identity-by-omission). */
+export interface WorkflowRowRef {
+  instanceId: string;
+  workflowName: string;
+  stepId?: string;
+}
+
 export interface NeedsYouItem {
   /** "agent" = ● (agent-initiated leg); "derived" = ▲ (composer exception). Equal rank. */
   source: "agent" | "derived";
+  /** OPR.0.4.6.WF4 Q6 — present ONLY on workflow-sourced rows (omit-when-absent). */
+  workflow?: WorkflowRowRef;
   /** One-count identity: qitem id, or the ▲ tuple key "seat-or-slice|kind|since". */
   identity: string;
   summary: string;
@@ -225,6 +246,94 @@ export interface ComposedRigAgents {
   settled: SettledRow[];
   /** BR-11: proven-empty carries provenance too — never a blank region. */
   settledProvenance: string;
+  composedAt: string;
+}
+
+// --- OPR.0.4.6.MH5: the FLEET aggregate contract (arch Q2 — a SIBLING
+// aggregate surface ABOVE the per-host ladder, never a fourth AgentsScope
+// value; AgentsScope stays exactly 3-valued). The contract HOME is here
+// beside ComposedRigAgents (plan D-3 — the twin's fixture module was the
+// mock stand-in). The fleet root only UNIONS + HOST-DIMENSIONS + COUNTS
+// each host's own composed set (arch Q1 — each host is authoritative for
+// its own time-derived ▲; the fleet never recomputes exception truth). ---
+
+import type { PerHostStatus } from "../hosts/fanout-contract.js";
+
+/** One fleet NEEDS-YOU row: the per-host row carried VERBATIM (kind-agnostic
+ *  — whatever DerivedException the host composed flows through; the WF-4 Q6
+ *  `workflow` pointer passes through untouched, omit-when-absent) plus the
+ *  host dimension and the one-count provenance. */
+export interface FleetNeedsYouItem extends NeedsYouItem {
+  hostId: string;
+  /** The Q4 one-count key `${hostId}|${identity}` — the fleet Set's key,
+   *  rendered VERBATIM on the expanded drawer (the inspectable identity). */
+  fleetKey: string;
+  /** FR-3 provenance: the altitude scopes this identity was visible from on
+   *  its host — recorded from what the fan-out actually READ (v1 reads each
+   *  host's rig root, D-1), so the one-count is INSPECTABLE, not asserted. */
+  seenFrom: string[];
+}
+
+/** Per-host rollup for the HOSTS band. The count fields are PRESENT ONLY
+ *  when this host's composed set was read (status.status === "ok") — an
+ *  unreachable host's items are ABSENT from the glance, NOT ZERO (the
+ *  k9s-stale-header anti-pattern designed against). `status` is the shipped
+ *  CLOSED per-host reachability contract, untouched (per-item exceptions
+ *  are the separate DerivedException axis — never conflated). */
+export interface FleetHostRollup {
+  hostId: string;
+  kind: "local" | "remote";
+  status: PerHostStatus;
+  /** Counts computed FROM this host's deduped fleet rows (union math only). */
+  needsYouCount?: number;
+  /** ▲ counts grouped by the row's own kind string (kind-agnostic carry). */
+  exceptionsByKind?: Array<{ kind: string; count: number }>;
+  /** From the host's own composed agents band. */
+  seatCount?: number;
+  /** Distinct rig names across the host's agent rows (the BR-1 member@rig
+   *  session grammar — a structured parse, never prose). */
+  rigCount?: number;
+  /** The worst line — what you'd say out loud about this factory; derived
+   *  deterministically from the host's deduped rows ("quiet" at zero). */
+  topLine?: string;
+}
+
+/** The header rollup math, computed FROM the deduped fleet rows (the twin's
+ *  header-math-checkable-against-bands property). */
+export interface ComposedFleetRollup {
+  /** ● rows (source: "agent") across the deduped fleet union. */
+  needsYouCount: number;
+  /** ▲ rows (source: "derived") across the deduped fleet union. */
+  exceptionCount: number;
+  exceptionsByKind: Array<{ kind: string; count: number }>;
+  /** Every fleet member in the payload (local + every registered host). */
+  hostCount: number;
+  /** Hosts whose status is not "ok" (their items are absent, not zero). */
+  unreachableCount: number;
+}
+
+/** SETTLED at fleet altitude — minimal per the placement-lock ride-item
+ *  default (D-5), host-chipped. */
+export interface FleetSettledRow extends SettledRow {
+  hostId: string;
+}
+
+/** The composed fleet read root (`GET /api/review/fleet`) — ONE aggregate,
+ *  BOTH founder-locked surfaces (the /fleet route page and the FLEET band)
+ *  render it. Read + surface only (FR-5): acting rides MH-3/MH-4. */
+export interface ComposedFleet {
+  rollup: ComposedFleetRollup;
+  needsYou: { items: FleetNeedsYouItem[]; provenance: string };
+  /** One entry per fleet member — local first, then registry order. EVERY
+   *  member appears with its status (omission-proof, the AggregatedPayload
+   *  convention); counts present only on "ok" rows (absent-not-zero). */
+  hosts: FleetHostRollup[];
+  settled: FleetSettledRow[];
+  settledProvenance: string;
+  /** Present ONLY when the host registry exists but failed to load/parse —
+   *  surfaced honestly (never a silently-local-only fleet). Omitted when
+   *  the registry is absent (a single-host operator) or loads cleanly. */
+  registryError?: string;
   composedAt: string;
 }
 

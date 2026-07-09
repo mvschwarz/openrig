@@ -1,0 +1,115 @@
+version: "0.2"
+name: factory-rsi
+culture_file: CULTURE.md
+summary: >
+  The single-rig RSI factory MVP (OPR.0.4.6.FAC2): ONE rig whose seats map 1:1
+  to the `factory-rsi` workflow — the inner loop plans, builds, checks, and
+  reviews one slice, then prepares its release. Dogfood is decoupled: it
+  continuously uses the SHIPPED product out-of-band and feeds findings back into
+  the next plan — the recursive-self-improvement edge, with no human required in
+  the loop. Run it with `rig up factory-rsi`, then instantiate the `factory-rsi`
+  workflow and watch the loop close. Seats inherit their runtime's default
+  model; qa, review, and dogfood run on the alternate runtime for cross-runtime
+  diversity against the builder.
+
+# Seven pods, one member each, so every canonical session name is
+# `<pod>-<member>@factory-rsi` and matches the workflow's preferred_targets 1:1.
+pods:
+  - id: plan
+    label: Planning
+    members:
+      - id: planner
+        agent_ref: "local:../../../agents/conveyor/planner"
+        runtime: claude-code
+        profile: default
+        cwd: "."
+    edges: []
+
+  - id: build
+    label: Build
+    members:
+      - id: implementer
+        agent_ref: "local:../../../agents/development/implementer"
+        runtime: claude-code
+        profile: default
+        cwd: "."
+    edges: []
+
+  - id: check
+    label: Check
+    members:
+      - id: qa
+        agent_ref: "local:../../../agents/development/qa"
+        runtime: codex
+        profile: default
+        cwd: "."
+    edges: []
+
+  - id: review
+    label: Review
+    members:
+      - id: reviewer
+        agent_ref: "local:../../../agents/review/independent-reviewer"
+        runtime: codex
+        profile: default
+        cwd: "."
+    edges: []
+
+  - id: dogfood
+    label: Dogfood
+    members:
+      - id: tester
+        agent_ref: "local:../../../agents/factory-rsi/dogfood"
+        runtime: codex
+        profile: default
+        cwd: "."
+    edges: []
+
+  - id: release
+    label: Release
+    members:
+      - id: manager
+        agent_ref: "local:../../../agents/factory-rsi/release-manager"
+        runtime: claude-code
+        profile: default
+        cwd: "."
+    edges: []
+
+  - id: orch
+    label: Orchestration
+    members:
+      - id: lead
+        agent_ref: "local:../../../agents/orchestration/orchestrator"
+        runtime: claude-code
+        profile: default
+        cwd: "."
+    edges: []
+
+# The orchestrator delegates across the pipeline; review and check can observe
+# the build. Workflow ROUTING is the `factory-rsi` spec's job (the engine
+# routes the loop-close); these edges are topology hints, not the routing.
+edges:
+  - kind: delegates_to
+    from: orch.lead
+    to: plan.planner
+  - kind: delegates_to
+    from: orch.lead
+    to: build.implementer
+  - kind: delegates_to
+    from: orch.lead
+    to: check.qa
+  - kind: delegates_to
+    from: orch.lead
+    to: review.reviewer
+  - kind: delegates_to
+    from: orch.lead
+    to: dogfood.tester
+  - kind: delegates_to
+    from: orch.lead
+    to: release.manager
+  - kind: can_observe
+    from: check.qa
+    to: build.implementer
+  - kind: can_observe
+    from: review.reviewer
+    to: build.implementer

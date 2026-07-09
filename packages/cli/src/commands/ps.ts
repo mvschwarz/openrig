@@ -1,4 +1,6 @@
 import { Command } from "commander";
+import { resolveEffectiveHost } from "../host-selection.js";
+import { sessionRigOf } from "../session-name.js";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
@@ -98,9 +100,8 @@ interface NodeEntry {
 // with realistic agent counts. `--full` opts out. JSON output remains
 // unbounded by default for back-compat (Decision C hybrid).
 function extractRigName(sessionName: string): string | undefined {
-  const atIdx = sessionName.lastIndexOf("@");
-  if (atIdx < 0 || atIdx === sessionName.length - 1) return undefined;
-  return sessionName.slice(atIdx + 1);
+  // OPR.0.4.6.MH1 FR-8: the shared parse contract (greedy first-@ rig).
+  return sessionRigOf(sessionName);
 }
 
 const HUMAN_RIG_BUDGET = 50;
@@ -757,6 +758,11 @@ Exit codes:
     .option("--all-hosts", "Fan out to all registered HTTP hosts (observation-only)")
     .option("--hosts <ids>", "Fan out to specific hosts (comma-separated)")
     .action(async (opts: PsCliOptions) => {
+      // OPR.0.4.6.MH1 FR-2: selected-host routing — explicit --host wins;
+      // else the persisted selection feeds the SHIPPED --host path; no
+      // selection = today exactly. Fan-out
+      // flags are their OWN explicit scope — never mixed with selection.
+      if (!opts.allHosts && !opts.hosts) opts.host = resolveEffectiveHost(opts.host);
       if (opts.verbose) opts.full = true;
       if (opts.running) opts.active = true;
       const isRemote = !!(opts.host || opts.allHosts || opts.hosts);

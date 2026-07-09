@@ -1322,6 +1322,54 @@ describe("M2c-CLI R2 --source-jsonl provenance from parsed session_meta", () => 
     expect(fs.existsSync(path.join(target, "transcript.md"))).toBe(true);
   });
 
+  // OPR.0.4.6.MH1 rev1-r2 B2: the parse contract's greedy rig is the
+  // queue gate's shape (where an unknown rig fails the lookup); this site
+  // persists provenance with NO lookup, so a multi-@ session id must be
+  // REJECTED with the explicit override guidance — never silently
+  // recorded as source_rig="rig@host" (BR-1: host stays out-of-band).
+  it("B2 (rev1-r2): a member@rig@host session id is rejected, never silently persisted as source_rig", async () => {
+    // The JSONL path reaches deriveProvenance without a daemon (the
+    // --source-session path fetches the transcript via the daemon first,
+    // which is not what B2 is about). A parsed session_meta id carrying
+    // an in-band host is exactly the silently-wrong-provenance risk.
+    const { createProgram } = await import("../src/index.js");
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const src = path.join(tmpRoot, "b2-multi-at.jsonl");
+    fs.writeFileSync(src, [
+      JSON.stringify({ type: "session_meta", payload: { cwd: "/tmp", id: "member@rig@host" } }),
+      JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: "hi" } }),
+    ].join("\n"), "utf8");
+    const target = path.join(tmpRoot, "packet-b2");
+
+    const stderr: string[] = [];
+    const origConsoleError = console.error;
+    const origExitCode = process.exitCode;
+    console.error = (...args: unknown[]) => stderr.push(args.join(" "));
+    process.exitCode = undefined;
+    try {
+      const program = createProgram();
+      program.exitOverride();
+      await program.parseAsync([
+        "node", "rig", "restore-packet", "write",
+        "--source-jsonl", src,
+        "--target", target,
+        "--target-rig", "openrig-velocity-claude",
+        "--target-runtime", "codex",
+        "--current-work-summary", "B2 provenance strictness check.",
+        "--authority-boundaries", "B2 check only.",
+      ]);
+    } finally {
+      console.error = origConsoleError;
+    }
+    expect(process.exitCode).not.toBe(0);
+    process.exitCode = origExitCode;
+    const errStr = stderr.join("\n");
+    expect(errStr).toMatch(/source-rig-override|could not derive source_rig/);
+    // Never silently persisted: no packet written, no rig@host value.
+    expect(fs.existsSync(target)).toBe(false);
+  });
+
   it("--source-jsonl with NO session_meta and NO override flags fails with explicit guidance", async () => {
     const { createProgram } = await import("../src/index.js");
     const fs = await import("node:fs");

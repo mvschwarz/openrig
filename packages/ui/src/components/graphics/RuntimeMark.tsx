@@ -38,6 +38,7 @@ const inlineSizeClass = {
 const toneClass: Record<RuntimeBrandId, string> = {
   "claude-code": "border-[#9f5f4e]/40 bg-[#b06a57]/[0.12] text-[#62392f]",
   codex: "border-outline/50 bg-surface-lowest/75 text-on-surface",
+  pi: "border-[#4c5b9e]/45 bg-[#5b6bb5]/[0.10] text-[#33406e]",
   terminal: "border-outline/45 bg-inverse-surface/[0.08] text-on-surface",
   unknown: "border-outline-variant bg-surface-lowest/55 text-on-surface-variant",
 };
@@ -45,6 +46,7 @@ const toneClass: Record<RuntimeBrandId, string> = {
 const inlineToneClass: Record<RuntimeBrandId, string> = {
   "claude-code": "text-[#62392f]",
   codex: "text-on-surface",
+  pi: "text-[#33406e]",
   terminal: "text-on-surface",
   unknown: "text-on-surface-variant",
 };
@@ -96,6 +98,18 @@ function CodexGlyph({ className, title, decorative }: { className?: string; titl
       <circle cx="8" cy="8" r="5.7" fill="#fafaf9" stroke="#0c0a09" strokeWidth="1.25" />
       <path d="M5.8 6.35 7.25 8 5.8 9.65" fill="none" stroke="#0c0a09" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M8.65 9.65h2.25" fill="none" stroke="#0c0a09" strokeWidth="1.25" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+// OPR.0.4.6.PI1 — the Pi coding agent mark: a pixel-simple lowercase pi on a
+// rounded tile, tinted the indigo family so it reads apart from Claude's clay
+// and Codex's mono circle at 16px.
+function PiGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
+      <rect x="2" y="2" width="12" height="12" rx="2.4" fill="#5b6bb5" />
+      <path d="M4.4 5.6h7.2M6.2 5.6v5M9.8 5.6v4.2c0 .5.3.8.8.8h.8" fill="none" stroke="#fafaf9" strokeWidth="1.2" strokeLinecap="round" />
     </svg>
   );
 }
@@ -336,6 +350,7 @@ export function RuntimeMark({ runtime, size = "sm", className, title, decorative
   const cls = cn(sizeClass[size], "shrink-0", className);
   if (id === "claude-code") return <ClaudeGlyph className={cls} title={label} decorative={decorative} />;
   if (id === "codex") return <CodexGlyph className={cls} title={label} decorative={decorative} />;
+  if (id === "pi") return <PiGlyph className={cls} title={label} decorative={decorative} />;
   if (id === "terminal") return <TerminalGlyph className={cls} title={label} decorative={decorative} />;
   return <UnknownGlyph className={cls} title={label} decorative={decorative} />;
 }

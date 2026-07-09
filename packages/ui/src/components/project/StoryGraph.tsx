@@ -14,6 +14,7 @@ import type { QueueItemViewerData } from "../drawer-viewers/QueueItemViewer.js";
 import { FileLink } from "../ui/FileLink.js";
 import { formatStoryDate, type StoryForest, type StoryNode } from "../../lib/story-graph-model.js";
 import { EmptyState } from "../ui/empty-state.js";
+import { sessionMemberLabel } from "../../lib/session-name.js";
 import "./StoryGraph.css";
 
 const TOPLINE_H = 54;
@@ -24,7 +25,8 @@ const NODE_R_BIG = 6.5;
 
 function shortSeat(session: string | null | undefined): string {
   if (!session) return "unknown";
-  return session.split("@")[0] ?? session;
+  // OPR.0.4.6.MH1 FR-8: the shared parse contract's display helper.
+  return sessionMemberLabel(session);
 }
 
 /** Map the REAL qitem state to a badge class + label. No invented states. */

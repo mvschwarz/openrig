@@ -28,6 +28,8 @@ import { cn } from "../../lib/utils.js";
 import { SectionHeader } from "../ui/section-header.js";
 import { EmptyState } from "../ui/empty-state.js";
 import { useWorkspaceName } from "../../hooks/useWorkspaceName.js";
+import { useHosts, useHostSelection, useLocalFilesAllowed } from "../../hooks/useHosts.js";
+import { LOCAL_HOST_ID } from "../../lib/host-param.js";
 import {
   useQueueItemMap,
   useSliceDetails,
@@ -159,9 +161,35 @@ function TabNav<T extends string>({
   );
 }
 
+
+/** OPR.0.4.6.MH2 guard-B1 round 2 — the LOCAL-only review composer
+ *  (/api/review is not read-through-allowlisted) gets the same
+ *  selection-known treatment as local files: unknown ⇒ this pending state
+ *  (the tab component never mounts, so zero /api/review fires);
+ *  known-remote ⇒ the honest not-available state below. */
+function ReviewSelectionPending({ testId }: { testId: string }) {
+  return (
+    <div data-testid={testId} className="font-mono text-[11px] text-on-surface-variant">
+      Resolving host selection…
+    </div>
+  );
+}
+
+function ReviewRemoteGated({ testId }: { testId: string }) {
+  return (
+    <EmptyState
+      label="REVIEW NOT AVAILABLE FOR REMOTE HOSTS"
+      description="Review composition reads this host's local records. Select the local host to review local work; remote review lands with the MH-3/MH-4 acting lanes."
+      variant="card"
+      testId={testId}
+    />
+  );
+}
+
 function ScopeShell({
   eyebrow,
   title,
+  hostChip,
   tabs,
   active,
   onSelect,
@@ -169,6 +197,9 @@ function ScopeShell({
 }: {
   eyebrow: string;
   title: string;
+  /** OPR.0.4.6.MH2 FR-4 — the `ON <HOST>` header chip (fr4a's free FR-3
+   *  reinforcement); null/absent renders nothing (local today-shape). */
+  hostChip?: string | null;
   tabs: { id: string; label: string }[];
   active: string;
   onSelect: (id: string) => void;
@@ -188,6 +219,14 @@ function ScopeShell({
         <SectionHeader tone="muted">{eyebrow}</SectionHeader>
         <h1 className="font-headline text-headline-md font-bold tracking-tight uppercase text-on-surface mt-1">
           {title}
+          {hostChip ? (
+            <span
+              data-testid="scope-host-chip"
+              className="ml-3 inline-flex translate-y-[-0.15em] items-center bg-inverse-surface px-2 py-0.5 align-middle font-mono text-[11px] font-bold uppercase tracking-[0.14em] text-background"
+            >
+              on {hostChip}
+            </span>
+          ) : null}
         </h1>
       </header>
       <TabNav tabs={tabs} active={active} onSelect={onSelect} />
@@ -651,9 +690,24 @@ export function WorkspaceScopePage() {
   const [active, setActive] = useState<SharedTab>("overview");
   const workspace = useWorkspaceName();
   const rollup = useProjectScopeRollup(null, active !== "overview");
+  // OPR.0.4.6.MH2 FR-4 — the selected host owns this workspace view. A
+  // remote host's workspace NAME is not readable in v1 (honest generic
+  // title); the ON <host> chip names the owner (fr4a ruling).
+  const { data: hostsData } = useHosts();
+  const selectedHost = hostsData?.selected ?? LOCAL_HOST_ID;
+  const isRemote = selectedHost !== LOCAL_HOST_ID;
+  // OPR.0.4.6.MH5 FR-4 drill continuity: reached FROM the fleet altitude
+  // the eyebrow shows the spine above (FLEET ▸ host); everything below is
+  // unchanged MH-2. Window-side read = this family's query-param idiom.
+  const fromFleet =
+    typeof window !== "undefined" && new URLSearchParams(window.location.search).get("from") === "fleet";
+  // guard-B1: the ONE shared local-files gate (selection-known && local).
+  const filesAllowed = useLocalFilesAllowed();
 
   // A5 bounce-fix: live-wired workspace name; honest empty-state when unset.
-  if (!workspace.isLoading && workspace.name === null) {
+  // MH-2: local-only — workspace.name is LOCAL config; a remote selection
+  // renders the remote view regardless of local workspace state.
+  if (!isRemote && !workspace.isLoading && workspace.name === null) {
     return (
       <div className="mx-auto w-full max-w-[960px] px-6 py-12">
         <EmptyState
@@ -669,8 +723,9 @@ export function WorkspaceScopePage() {
 
   return (
     <ScopeShell
-      eyebrow="Workspace"
-      title={workspace.name ?? "loading…"}
+      eyebrow={fromFleet ? `Fleet ▸ ${selectedHost} · Workspace` : "Workspace"}
+      title={isRemote ? "workspace" : (workspace.name ?? "loading…")}
+      hostChip={isRemote ? selectedHost : null}
       tabs={SHARED_TABS}
       active={active}
       onSelect={(id) => setActive(id as SharedTab)}
@@ -704,7 +759,9 @@ export function WorkspaceScopePage() {
           rows={rollup.rows.map((r) => ({
             name: r.name,
             displayName: r.displayName,
-            slicePath: r.slicePath ?? null,
+            // MH-2 guard-B1: remote/unknown-selection slice paths never
+            // resolve locally.
+            slicePath: filesAllowed ? (r.slicePath ?? null) : null,
           }))}
         />
       ) : null}
@@ -741,8 +798,19 @@ export function MissionScopePage() {
   // by rollup). README + PROGRESS render via useScopeMarkdown above
   // the existing slice rail.
   const missionData = useMission(missionId);
+  // OPR.0.4.6.MH2 FR-4 — README/PROGRESS render via /api/files/read, a
+  // LOCAL filesystem read. For a remote selection the path is GATED OFF
+  // (null) so local folders are never rendered under the remote host's
+  // label; the remote mission view derives from the read-through data.
+  const { data: hostsData } = useHosts();
+  const selectedHost = hostsData?.selected ?? LOCAL_HOST_ID;
+  const isRemote = selectedHost !== LOCAL_HOST_ID;
+  // guard-B1: the ONE shared local-files gate (selection-known && local).
+  const filesAllowed = useLocalFilesAllowed();
+  // guard-B1 round 2: the review composer is LOCAL-only — same treatment.
+  const { known: hostSelectionKnown, isLocal: hostIsLocal } = useHostSelection();
   const missionPath =
-    missionData.data && "missionPath" in missionData.data ? missionData.data.missionPath : null;
+    filesAllowed && missionData.data && "missionPath" in missionData.data ? missionData.data.missionPath : null;
   const missionReadme = useScopeMarkdown(missionPath, "README.md");
   const missionProgress = useScopeMarkdown(missionPath, "PROGRESS.md");
   const scopeAudit = useScopeAudit(missionId);
@@ -750,12 +818,23 @@ export function MissionScopePage() {
     <ScopeShell
       eyebrow="Mission"
       title={missionId}
+      hostChip={isRemote ? selectedHost : null}
       tabs={MISSION_TABS}
       active={active}
       onSelect={(id) => setActive(id as SharedTab)}
     >
       {active === "steering" ? <SteeringTab missionId={missionId} /> : null}
-      {active === "review" ? <MissionReviewTab missionId={missionId} /> : null}
+      {active === "review" ? (
+        // guard-B1 round 2: /api/review is LOCAL-only — selection-known
+        // three-way branch (unknown ⇒ pending, remote ⇒ honest gate).
+        !hostSelectionKnown ? (
+          <ReviewSelectionPending testId="mission-review-selection-pending" />
+        ) : !hostIsLocal ? (
+          <ReviewRemoteGated testId="mission-review-remote-gated" />
+        ) : (
+          <MissionReviewTab missionId={missionId} />
+        )
+      ) : null}
       {active === "overview" ? (
         <div data-testid="mission-overview-panel" className="space-y-6">
           {missionReadme.content && (
@@ -868,14 +947,16 @@ export function MissionScopePage() {
         // OPR.0.4.1.21 — mission Artifacts is now the altitude-scoped file
         // navigator (rooted at the mission dir = all mission artifacts),
         // replacing the per-slice ScopeArtifactsRollup card wall.
-        <ArtifactsNavigator scopePath={missionPath} scopeLabel={missionId} />
+        <ArtifactsNavigator scopePath={missionPath} scopeLabel={missionId} remoteGated={isRemote} />
       ) : null}
       {active === "proof" ? (
         <ScopeProofRollup
           rows={rollup.rows.map((r) => ({
             name: r.name,
             displayName: r.displayName,
-            slicePath: r.slicePath ?? null,
+            // MH-2 guard-B1: remote/unknown-selection slice paths never
+            // resolve locally.
+            slicePath: filesAllowed ? (r.slicePath ?? null) : null,
           }))}
         />
       ) : null}
@@ -1022,13 +1103,14 @@ function SliceMetric({ label, value }: { label: string; value: string | number }
   );
 }
 
-function SliceOverviewTab({ detail }: { detail: SliceDetail }) {
+function SliceOverviewTab({ detail, remoteGated }: { detail: SliceDetail; remoteGated?: boolean }) {
   const currentStep = detail.acceptance.currentStep;
   // V0.3.1 slice 12 walk-item 1 — render slice README via the
   // generalized scope-markdown reader; the Primary Docs filename
   // duplication section is dropped (the README itself + the Docs tab
   // tree are sufficient).
-  const readmeMd = useScopeMarkdown(detail.slicePath ?? null, "README.md");
+  // MH-2 guard-B1: remote slicePath never resolves against local roots.
+  const readmeMd = useScopeMarkdown(remoteGated ? null : (detail.slicePath ?? null), "README.md");
 
   return (
     <div data-testid="slice-overview-tab" className="space-y-6">
@@ -1102,6 +1184,17 @@ export function SliceScopePage() {
   // NEEDS YOU). One reversible line — flip back to "overview" to restore
   // the v0.3.1 landing.
   const [active, setActive] = useState<SliceTab>("review");
+  // OPR.0.4.6.MH2 guard-B1 — under a remote selection detail.slicePath is
+  // a REMOTE filesystem path; the file-backed tabs below must never
+  // resolve it against LOCAL allowlist roots (null/remoteGated ⇒ zero
+  // /api/files/* requests + honest absence states). File reads wait for
+  // the selection to be KNOWN — !isRemote alone raced on first render.
+  const { data: sliceHostsData } = useHosts();
+  const isRemote = (sliceHostsData?.selected ?? LOCAL_HOST_ID) !== LOCAL_HOST_ID;
+  // guard-B1: the ONE shared local-files gate (selection-known && local).
+  const filesAllowed = useLocalFilesAllowed();
+  // guard-B1 round 2: the review composer is LOCAL-only — same treatment.
+  const { known: hostSelectionKnown, isLocal: hostIsLocal } = useHostSelection();
   const detailQuery = useSliceDetail(sliceId);
   const queueItems = useQueueItemMap(detailQuery.data?.qitemIds ?? []);
   const queueItemsById = useMemo(() => queueItems.itemsById, [queueItems.itemsById]);
@@ -1161,13 +1254,24 @@ export function SliceScopePage() {
       onSelect={(id) => setActive(id as SliceTab)}
     >
       {active === "review" ? (
+        // guard-B1 round 2: the review COMPOSER reads LOCAL /api/review
+        // (not read-through-allowlisted) — selection-known three-way
+        // branch, same as local files: unknown ⇒ pending (zero /api/review
+        // fires — the isRemote-only gate raced on first render),
+        // known-remote ⇒ honest gate, known-local ⇒ the real tab.
+        !hostSelectionKnown ? (
+          <ReviewSelectionPending testId="slice-review-selection-pending" />
+        ) : !hostIsLocal ? (
+          <ReviewRemoteGated testId="slice-review-remote-gated" />
+        ) : (
         <SliceReviewTab
           sliceName={detail.name}
-          slicePath={detail.slicePath}
+          slicePath={filesAllowed ? detail.slicePath : null}
           anchorIdentity={typeof window !== "undefined" && window.location.hash.startsWith("#needs-you-")
             ? window.location.hash.slice("#needs-you-".length)
             : null}
         />
+        )
       ) : null}
       {active === "story" ? (
         <ScopeStoryRollup
@@ -1178,7 +1282,7 @@ export function SliceScopePage() {
         />
       ) : null}
       {active === "overview" ? (
-        <SliceOverviewTab detail={detail} />
+        <SliceOverviewTab detail={detail} remoteGated={!filesAllowed} />
       ) : null}
       {active === "progress" ? (
         <div className="space-y-6">
@@ -1216,13 +1320,13 @@ export function SliceScopePage() {
         // The prior Files/Commits/Proof/Docs/Decisions card wall is dropped; commits
         // are flagged 0.4.2 (no qitem->commit linkage), decisions live in the Story
         // DAG + decision docs surface in this navigator tree.
-        <ArtifactsNavigator scopePath={detail.slicePath} scopeLabel={detail.displayName || detail.name} />
+        <ArtifactsNavigator scopePath={filesAllowed ? detail.slicePath : null} scopeLabel={detail.displayName || detail.name} remoteGated={isRemote} />
       ) : null}
       {active === "proof" ? (
         <SliceProofTab
           sliceId={detail.displayName}
           title={detail.name}
-          slicePath={detail.slicePath}
+          slicePath={filesAllowed ? detail.slicePath : null}
         />
       ) : null}
       {active === "queue" ? (

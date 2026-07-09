@@ -1,0 +1,21 @@
+# OpenRig 0.4.6 spec-language example — the LINEAR PIPELINE shape.
+# Zero WF-2 features: declaration-order routing, byte-identical to the
+# WF-1 engine's behavior (the zero-regression reference shape).
+workflow:
+  id: linear-build
+  version: 1
+  objective: Move one packet through plan, build, prove in declaration order.
+  roles:
+    planner:
+      preferred_targets: [flow-planner@acme-flow]
+    builder:
+      preferred_targets: [flow-builder@acme-flow]
+    prover:
+      preferred_targets: [flow-prover@acme-flow]
+  steps:
+    - id: plan
+      actor_role: planner
+    - id: build
+      actor_role: builder
+    - id: prove
+      actor_role: prover
