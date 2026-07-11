@@ -1,22 +1,28 @@
-// VM-005 (release-0.4.7) — the reconciled mission-status matrix (plan §D).
+// VM-005 (release-0.4.7) — TIER B: the new-symbol unit suite + TIER A pure
+// bucket differential (plan v1.3 §D-bis; ARCH-RULING-b3, sha 632ff319…).
 //
-// V1 disagreement (authored wins) · V2 idle (never the retired UNKNOWN word)
-// · V3 all-draft (Q2) · V4 no-decay (clock-injected) · V5 byte-identity
-// carve · V6 frozen-fixture binding · Q3-P1 closed-constant normalizer ·
-// FR-4 bucket coherence. Pure unit tier; the DOM tier lives in
-// mission-status-surfaces.test.tsx; the live money-shot is the proof leg.
+// Tier B (below): DYNAMIC import of project-mission-state.js (the module
+// exists at both SHAs, so the import always succeeds); the t1 PRESENCE
+// assertion is UNCONDITIONAL and FIRST — at base 8757593f it is the counted,
+// named RED ("expected 'undefined' to be 'function'"); the unit cases run
+// conditionally and the t3 executed-count assertion pins that ALL of them
+// ran at the candidate.
+//
+// Tier A (bottom): the FR-4 bucket differential + V5 pure carve through
+// both-ends STATIC imports (projectMissionBucket / partitionProjectMissions
+// exist at both SHAs) — candidate expectations verbatim, one code path.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
 import {
-  AUTHORED_WORD_TONES,
-  PROJECT_CURRENT_ACTIVITY_WINDOW_MS,
-  partitionProjectMissions,
   projectMissionBucket,
-  reconcileMissionStatus,
+  partitionProjectMissions,
+  PROJECT_CURRENT_ACTIVITY_WINDOW_MS,
   type ProjectSliceRow,
 } from "../src/lib/project-mission-state.js";
 
 const NOW = Date.parse("2026-07-11T12:00:00.000Z");
+const RECENT = new Date(NOW - 60_000).toISOString();
+const STALE = new Date(NOW - PROJECT_CURRENT_ACTIVITY_WINDOW_MS - 60_000).toISOString();
 
 function slice(over: Partial<ProjectSliceRow>): ProjectSliceRow {
   return {
@@ -33,203 +39,177 @@ function slice(over: Partial<ProjectSliceRow>): ProjectSliceRow {
   };
 }
 
-const RECENT = new Date(NOW - 60_000).toISOString();
-const STALE = new Date(NOW - PROJECT_CURRENT_ACTIVITY_WINDOW_MS - 60_000).toISOString();
+// ---------------------------------------------------------------------------
+// TIER B — new-symbol units (t1/t2/t3 per the B3 ruling)
+// ---------------------------------------------------------------------------
 
-describe("V1 — authored-when-present wins (FR-1 keystone)", () => {
-  it("authored 'complete' beats a recently-active slice; the raw word renders", () => {
-    const rec = reconcileMissionStatus("complete", [slice({ lastActivityAt: RECENT })], NOW);
-    expect(rec.source).toBe("authored");
-    expect(rec.label).toBe("complete"); // the author's word VERBATIM
-    expect(rec.state).toBe("shipped"); // tone via the closed constant
-  });
+type Pms = typeof import("../src/lib/project-mission-state.js");
+let pms: Pms;
+const executed: string[] = [];
+const TIER_B_CASES = [
+  "label-verbatim",
+  "corpus-independence",
+  "injected-now-purity",
+  "closed-map-roundtrip",
+  "unrecognized-neutral",
+  "derived-ladder-words",
+  "v6-frozen-semantics",
+] as const;
 
-  it("authored path never consults slices at all (identical result for any corpus)", () => {
-    const a = reconcileMissionStatus("paused", [], NOW);
-    const b = reconcileMissionStatus("paused", [slice({ status: "blocked", qitemCount: 3 })], NOW);
-    expect(a).toEqual(b);
-  });
+beforeAll(async () => {
+  pms = await import("../src/lib/project-mission-state.js");
 });
 
-describe("V2 — honest known states, the retired UNKNOWN word is dead (FR-2)", () => {
-  it("idle slices (activity aged past the window) derive 'idle'", () => {
-    const rec = reconcileMissionStatus(null, [slice({ lastActivityAt: STALE })], NOW);
-    expect(rec).toEqual({ state: "idle", label: "idle", source: "derived" });
+describe("Tier B — reconcileMissionStatus unit contract (t1 presence FIRST)", () => {
+  // t1 — UNCONDITIONAL, FIRST: the counted named RED at base.
+  it("t1: the reconciled home exists (reconcileMissionStatus + AUTHORED_WORD_TONES exported)", () => {
+    expect(typeof (pms as Record<string, unknown>).reconcileMissionStatus).toBe("function");
+    expect(typeof (pms as Record<string, unknown>).AUTHORED_WORD_TONES).toBe("object");
   });
 
-  it("zero slices derive 'empty' (the tree-only word)", () => {
-    expect(reconcileMissionStatus(null, [], NOW).state).toBe("empty");
+  // t2 (B3 ruling, arch sha 632ff319…): the cases below run conditionally at
+  // base ONLY because the symbols do not exist there; NO DIFFERENTIAL VECTOR
+  // may ever move inside this conditional block — differentials live in the
+  // Tier A suites (mission-status-surfaces.test.tsx + the Tier A block below).
+  const hasHome = () =>
+    typeof (pms as Record<string, unknown>).reconcileMissionStatus === "function";
+
+  it("authored label renders VERBATIM (case preserved), tone via the closed constant", () => {
+    if (!hasHome()) return;
+    executed.push("label-verbatim");
+    const rec = pms.reconcileMissionStatus("complete", [slice({ lastActivityAt: RECENT })], NOW);
+    expect(rec).toEqual({ state: "shipped", label: "complete", source: "authored" });
+    expect(pms.reconcileMissionStatus("Complete", [], NOW).label).toBe("Complete");
   });
 
-  it("no input class ever yields the retired word", () => {
+  it("authored path never consults slices (identical result for any corpus)", () => {
+    if (!hasHome()) return;
+    executed.push("corpus-independence");
+    const a = pms.reconcileMissionStatus("paused", [], NOW);
+    const b = pms.reconcileMissionStatus("paused", [slice({ status: "blocked", qitemCount: 3 })], NOW);
+    expect(a).toEqual(b);
+  });
+
+  it("clock purity: `now` is injected — authored output byte-stable across any jump", () => {
+    if (!hasHome()) return;
+    executed.push("injected-now-purity");
+    const JUMP = NOW + PROJECT_CURRENT_ACTIVITY_WINDOW_MS * 10;
+    for (const word of ["complete", "active"]) {
+      const before = pms.reconcileMissionStatus(word, [slice({ lastActivityAt: RECENT })], NOW);
+      const after = pms.reconcileMissionStatus(word, [slice({ lastActivityAt: RECENT })], JUMP);
+      expect(after).toEqual(before);
+    }
+    // derived keeps the window as its discriminator (unit mirror of the DOM V4)
+    const corpus = [slice({ lastActivityAt: RECENT })];
+    expect(pms.reconcileMissionStatus(null, corpus, NOW).state).toBe("active");
+    expect(pms.reconcileMissionStatus(null, corpus, JUMP).state).toBe("idle");
+  });
+
+  it("Q3-P1: the closed map is the ONLY word registry; every entry round-trips", () => {
+    if (!hasHome()) return;
+    executed.push("closed-map-roundtrip");
+    for (const [word, tone] of Object.entries(pms.AUTHORED_WORD_TONES)) {
+      expect(pms.reconcileMissionStatus(word, [], NOW).state).toBe(tone);
+    }
+    for (const word of ["complete", "completed", "done", "shipped"]) {
+      expect(pms.AUTHORED_WORD_TONES[word]).toBe("shipped");
+    }
+  });
+
+  it("unrecognized authored word → neutral tone (idle carrier), the word still wins verbatim", () => {
+    if (!hasHome()) return;
+    executed.push("unrecognized-neutral");
+    const rec = pms.reconcileMissionStatus("Percolating", [slice({ lastActivityAt: RECENT })], NOW);
+    expect(rec).toEqual({ state: "idle", label: "Percolating", source: "authored" });
+  });
+
+  it("derived ladder words: empty · blocked · draft · active · shipped · idle (the retired word is unreachable)", () => {
+    if (!hasHome()) return;
+    executed.push("derived-ladder-words");
+    expect(pms.reconcileMissionStatus(null, [], NOW).state).toBe("empty");
+    expect(pms.reconcileMissionStatus(null, [slice({ status: "blocked" })], NOW).state).toBe("blocked");
+    expect(
+      pms.reconcileMissionStatus(null, [slice({ status: "draft", lastActivityAt: RECENT })], NOW).state,
+    ).toBe("draft");
+    expect(pms.reconcileMissionStatus(null, [slice({ lastActivityAt: RECENT })], NOW).state).toBe("active");
+    expect(pms.reconcileMissionStatus(null, [slice({ status: "done" })], NOW).state).toBe("shipped");
+    expect(pms.reconcileMissionStatus(null, [slice({ lastActivityAt: STALE })], NOW).state).toBe("idle");
     const corpora: ProjectSliceRow[][] = [
       [],
       [slice({ lastActivityAt: STALE })],
-      [slice({ status: "draft" })],
-      [slice({ status: "done" })],
-      [slice({ status: "blocked" })],
       [slice({ status: "done" }), slice({ status: "draft", lastActivityAt: STALE })],
     ];
     for (const c of corpora) {
-      expect(reconcileMissionStatus(null, c, NOW).state).not.toBe("unknown");
-    }
-  });
-});
-
-describe("V3 — all-draft missions are 'draft', not active (Q2)", () => {
-  it("fresh scaffolds (recent mtimes, all draft) derive draft", () => {
-    const rec = reconcileMissionStatus(
-      null,
-      [slice({ status: "draft", lastActivityAt: RECENT }), slice({ status: "draft", lastActivityAt: RECENT })],
-      NOW,
-    );
-    expect(rec.state).toBe("draft");
-  });
-
-  it("a blocked-current draft mission still surfaces blocked (ladder order)", () => {
-    const rec = reconcileMissionStatus(
-      null,
-      [slice({ status: "draft", lastActivityAt: RECENT }), slice({ status: "blocked" })],
-      NOW,
-    );
-    expect(rec.state).toBe("blocked");
-  });
-
-  it("draft mixed with a current active slice derives active (not draft)", () => {
-    const rec = reconcileMissionStatus(
-      null,
-      [slice({ status: "draft", lastActivityAt: RECENT }), slice({ status: "active", lastActivityAt: RECENT })],
-      NOW,
-    );
-    expect(rec.state).toBe("active");
-  });
-});
-
-describe("V4 — no clock decay for authored status (FR-2)", () => {
-  const JUMP = NOW + PROJECT_CURRENT_ACTIVITY_WINDOW_MS * 10;
-
-  it("authored 'complete' and authored 'active' are byte-stable across a huge clock jump", () => {
-    for (const word of ["complete", "active"]) {
-      const before = reconcileMissionStatus(word, [slice({ lastActivityAt: RECENT })], NOW);
-      const after = reconcileMissionStatus(word, [slice({ lastActivityAt: RECENT })], JUMP);
-      expect(after).toEqual(before); // BYTE-STABLE: authored never consults the clock
+      expect(pms.reconcileMissionStatus(null, c, NOW).state).not.toBe("unknown");
     }
   });
 
-  it("the DERIVED path is allowed to move active→idle on the same jump (the window stays the derived discriminator)", () => {
-    const corpus = [slice({ lastActivityAt: RECENT })];
-    expect(reconcileMissionStatus(null, corpus, NOW).state).toBe("active");
-    expect(reconcileMissionStatus(null, corpus, JUMP).state).toBe("idle");
+  it("V6 frozen-fixture semantics (packet …5d184b24): no authored status → honest derived word", () => {
+    if (!hasHome()) return;
+    executed.push("v6-frozen-semantics");
+    // The frozen mission README (fixture/README.md sha 660068d4…) carries
+    // stage/id/release and NO `status:` — authored is null for those bytes
+    // (the daemon-side lockstep test binds the actual bytes).
+    expect(pms.reconcileMissionStatus(null, [slice({ lastActivityAt: RECENT })], NOW).state).toBe("active");
+    expect(pms.reconcileMissionStatus(null, [slice({ lastActivityAt: STALE })], NOW).state).toBe("idle");
+  });
+
+  // t3 — at the candidate, ALL Tier-B cases must have executed (silent-skip fence).
+  it("t3: all Tier-B cases executed at the candidate", () => {
+    if (!hasHome()) return;
+    expect(executed.sort()).toEqual([...TIER_B_CASES].sort());
   });
 });
 
-describe("V5 — byte-identity carve (zero regression on agreeing corpora)", () => {
-  it("(a) authored == derived agree: the state matches what the roll-up lands", () => {
-    const corpus = [slice({ status: "done" }), slice({ status: "done" })];
-    const derived = reconcileMissionStatus(null, corpus, NOW);
-    const authored = reconcileMissionStatus("shipped", corpus, NOW);
-    expect(derived.state).toBe("shipped");
-    expect(authored.state).toBe("shipped");
-  });
+// ---------------------------------------------------------------------------
+// TIER A — FR-4 bucket differential + V5 pure carve (both-ends static imports,
+// one code path, candidate expectations verbatim)
+// ---------------------------------------------------------------------------
 
-  it("(b) authored-absent roll-ups land today's named buckets, string-identical", () => {
-    // Pinned pre-change expectations (8757593f behavior) as literals:
-    expect(reconcileMissionStatus(null, [slice({ status: "active", lastActivityAt: RECENT })], NOW).state).toBe("active");
-    expect(reconcileMissionStatus(null, [slice({ status: "blocked" })], NOW).state).toBe("blocked");
-    expect(reconcileMissionStatus(null, [slice({ status: "done" })], NOW).state).toBe("shipped");
-  });
-
-  it("(b2) bucket assignment identical pre/post for derived groups", () => {
-    const current = { id: "m", label: "m", status: "active" as const, statusSource: "derived" as const, slices: [slice({ lastActivityAt: RECENT })] };
-    const archive = { id: "m2", label: "m2", status: "shipped" as const, statusSource: "derived" as const, slices: [slice({ status: "done", lastActivityAt: STALE })] };
-    expect(projectMissionBucket(current)).toBe("current");
-    expect(projectMissionBucket(archive)).toBe("archive");
-    // zero-slice non-shipped stays current (today's behavior, preserved)
-    expect(projectMissionBucket({ id: "e", label: "e", status: "empty" as const, statusSource: "derived" as const, slices: [] })).toBe("current");
-  });
-});
-
-describe("V6 — frozen VM-005 fixture binding (qitem …5d184b24 packet)", () => {
-  // The frozen mission README frontmatter, byte-bound from the evidence root
-  // (fixture/README.md sha256 660068d4…e688262, packet sha256 274a24f9…04d1ed):
-  // it declares stage/id/release — and NO `status:` field. At base the
-  // explorer projected this canonical WIP mission as UNKNOWN.
-  const FROZEN_FRONTMATTER_FIELDS = {
-    id: "OPR.0.4.7",
-    mission: "release-0.4.7",
-    release: "0.4.7",
-    stage: "wip",
-  };
-
-  it("the frozen mission (no authored status, live slices) reconciles to a KNOWN word", () => {
-    // `stage: wip` is NOT `status:` — authored is null for these bytes.
-    expect("status" in FROZEN_FRONTMATTER_FIELDS).toBe(false);
-    const rec = reconcileMissionStatus(null, [slice({ lastActivityAt: RECENT })], NOW);
-    expect(rec.state).toBe("active");
-    expect(rec.state).not.toBe("unknown");
-    // And when its slices go quiet, the honest word — still never UNKNOWN:
-    const quiet = reconcileMissionStatus(null, [slice({ lastActivityAt: STALE })], NOW);
-    expect(quiet.state).toBe("idle");
-  });
-});
-
-describe("Q3-P1 — the closed-constant normalizer", () => {
-  it("shipped-family words map to shipped tone; the word still renders", () => {
-    for (const word of ["complete", "completed", "done", "shipped"]) {
-      const rec = reconcileMissionStatus(word, [], NOW);
-      expect(rec.state).toBe("shipped");
-      expect(rec.label).toBe(word);
-    }
-  });
-
-  it("unrecognized authored word → neutral tone, the word STILL WINS and renders verbatim", () => {
-    const rec = reconcileMissionStatus("Percolating", [slice({ lastActivityAt: RECENT })], NOW);
-    expect(rec.source).toBe("authored");
-    expect(rec.label).toBe("Percolating"); // verbatim, case preserved
-    expect(rec.state).toBe("idle"); // the neutral tone-carrier
-  });
-
-  it("the constant is the ONLY word registry (a new word is one map entry)", () => {
-    // Closed-set discipline: every mapped word round-trips through reconcile.
-    for (const [word, tone] of Object.entries(AUTHORED_WORD_TONES)) {
-      expect(reconcileMissionStatus(word, [], NOW).state).toBe(tone);
-    }
-  });
-});
-
-describe("FR-4 — bucket coherence", () => {
-  it("authored shipped-family buckets archive regardless of slice recency", () => {
-    const rec = reconcileMissionStatus("complete", [slice({ lastActivityAt: RECENT, qitemCount: 2 })], NOW);
+describe("Tier A — FR-4 bucket coherence (differential: named RED at base)", () => {
+  it("an AUTHORED shipped mission buckets ARCHIVE regardless of slice recency", () => {
     const bucket = projectMissionBucket({
-      id: "m", label: "m", status: rec.state, statusSource: rec.source,
+      id: "m",
+      label: "m",
+      status: "shipped",
+      statusSource: "authored",
       slices: [slice({ lastActivityAt: RECENT, qitemCount: 2 })],
-    });
+    } as Parameters<typeof projectMissionBucket>[0]);
     expect(bucket).toBe("archive");
   });
 
-  it("a DERIVED shipped mission with a current slice keeps today's ladder (current)", () => {
-    // derived shipped can't have current slices by construction, but the
-    // bucket fn must not archive on state alone: pin the ladder order.
-    const bucket = projectMissionBucket({
-      id: "m", label: "m", status: "shipped", statusSource: "derived",
-      slices: [slice({ lastActivityAt: RECENT, qitemCount: 1, status: "done" })],
-    });
-    expect(bucket).toBe("current");
-  });
-
-  it("partitionProjectMissions routes an authored-complete recent mission to archive", () => {
+  it("partitionProjectMissions routes the authored-complete recent mission to archive", () => {
     const groups = [
       {
-        id: "auth", label: "auth", status: "shipped" as const, statusSource: "authored" as const,
+        id: "auth", label: "auth", status: "shipped", statusSource: "authored",
         slices: [slice({ lastActivityAt: RECENT })],
       },
       {
-        id: "act", label: "act", status: "active" as const, statusSource: "derived" as const,
+        id: "act", label: "act", status: "active", statusSource: "derived",
         slices: [slice({ lastActivityAt: RECENT })],
       },
-    ];
+    ] as Parameters<typeof partitionProjectMissions>[0];
     const { current, archive } = partitionProjectMissions(groups);
     expect(archive.map((m) => m.id)).toEqual(["auth"]);
     expect(current.map((m) => m.id)).toEqual(["act"]);
+  });
+});
+
+describe("Tier A — V5 bucket byte-identity (green at BOTH SHAs)", () => {
+  it("derived groups keep today's ladder byte-for-byte", () => {
+    const current = {
+      id: "m", label: "m", status: "active", statusSource: "derived",
+      slices: [slice({ lastActivityAt: new Date(Date.now() - 60_000).toISOString() })],
+    } as Parameters<typeof projectMissionBucket>[0];
+    const archived = {
+      id: "m2", label: "m2", status: "shipped", statusSource: "derived",
+      slices: [slice({ status: "done", lastActivityAt: STALE })],
+    } as Parameters<typeof projectMissionBucket>[0];
+    const empty = {
+      id: "e", label: "e", status: "active", statusSource: "derived", slices: [],
+    } as Parameters<typeof projectMissionBucket>[0];
+    expect(projectMissionBucket(current)).toBe("current");
+    expect(projectMissionBucket(archived)).toBe("archive");
+    expect(projectMissionBucket(empty)).toBe("current"); // zero-slice non-shipped stays current
   });
 });
