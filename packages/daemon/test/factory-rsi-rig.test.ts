@@ -68,17 +68,31 @@ describe("OPR.0.4.6.FAC2 factory-rsi rig starter", () => {
     );
   });
 
-  it("per-seat runtime/model follows FR-3 (Sonnet Claude seats; Codex builder+checker)", () => {
+  it("per-seat runtime follows the 0.4.6 FAC2 design (builder on claude-code; qa/review/dogfood on the alternate runtime; every seat inherits the runtime default model)", () => {
+    // DRIFT VERDICT: STALE ASSERTION (intentional 0.4.6 change), not a
+    // regression. The prior assertion pinned "Sonnet Claude seats; Codex
+    // builder+checker" with model: sonnet. Release 0.4.6 (commit 8250d702)
+    // shipped `specs/rigs/launch/factory-rsi/rig.yaml` + CULTURE.md with a
+    // deliberately different design, documented verbatim in the rig.yaml
+    // summary: "Seats inherit their runtime's default model; qa, review, and
+    // dogfood run on the alternate runtime for cross-runtime diversity against
+    // the builder." (also CULTURE.md:34 `review-reviewer | codex` and :41).
+    // The builder therefore runs claude-code, qa/review/dogfood run codex, and
+    // NO seat carries a model pin. This test now tracks the shipped spec.
     const bySeat = new Map<string, RigMember>();
     for (const pod of loadRig().pods) bySeat.set(`${pod.id}-${pod.members[0]!.id}`, pod.members[0]!);
 
-    for (const seat of ["plan-planner", "review-reviewer", "dogfood-tester", "release-manager", "orch-lead"]) {
+    // The builder + planner/release/orch seats run claude-code.
+    for (const seat of ["plan-planner", "build-implementer", "release-manager", "orch-lead"]) {
       expect(bySeat.get(seat)!.runtime).toBe("claude-code");
-      expect(bySeat.get(seat)!.model).toBe("sonnet");
     }
-    for (const seat of ["build-implementer", "check-qa"]) {
+    // qa, review, and dogfood run on the alternate runtime (codex) for
+    // cross-runtime diversity against the builder.
+    for (const seat of ["check-qa", "review-reviewer", "dogfood-tester"]) {
       expect(bySeat.get(seat)!.runtime).toBe("codex");
-      // The low-cost codex profile is an operator VM-config residue — not pinned here.
+    }
+    // Every seat inherits its runtime's default model — no per-seat model pin.
+    for (const seat of bySeat.keys()) {
       expect(bySeat.get(seat)!.model).toBeUndefined();
     }
   });

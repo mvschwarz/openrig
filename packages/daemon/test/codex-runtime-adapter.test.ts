@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import nodePath from "node:path";
 import Database from "better-sqlite3";
-import { afterEach, describe, it, expect, vi } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
 import type { NodeBinding, ResolvedStartupFile } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-planner.js";
@@ -86,6 +86,20 @@ function expectedProfileResumeCommand(profile: string, token = "sess-456", queue
   return `codex -p ${quote(profile)} resume ${queueDirArg}${quote(token)}`;
 }
 
+beforeEach(() => {
+  // ENV-COUPLING HARDEN (housekeeping, qitem-20260711131501-e43707b0). DRIFT
+  // VERDICT for the two launchHarness profile/model tests: ENV-SENSITIVITY,
+  // NOT a stale assertion and NOT a product regression. launchHarness
+  // CORRECTLY honors OPENRIG_SHARED_DOCS_ROOT for the Codex queue-state
+  // writable root — that behavior is proven by the dedicated
+  // "uses OPENRIG_SHARED_DOCS_ROOT" test, which stubs it explicitly. But the
+  // profile/model launch-command tests assume the unset-fallback that
+  // testQueueRoot() encodes (os.homedir()/.openrig/shared-docs). Some run
+  // environments (the substrate host, provisioned VMs) export the var, which
+  // flapped those two tests pass/fail while byte-identical. Neutralize the
+  // ambient value so the default is deterministic; unstubAllEnvs() restores.
+  vi.stubEnv("OPENRIG_SHARED_DOCS_ROOT", undefined);
+});
 afterEach(() => {
   vi.unstubAllEnvs();
 });

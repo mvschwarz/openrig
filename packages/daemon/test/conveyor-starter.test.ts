@@ -60,13 +60,19 @@ describe("0.3.0 conveyor starter workflow specs", () => {
     // (linear / gated / branched — the FR-6 hand-authorability set).
     // OPR.0.4.6.FAC2: + factory-rsi (the canonical single-rig RSI
     // factory workflow — the demo/dogfood vehicle).
+    // DRIFT VERDICT: STALE ASSERTION (test-ordering), not a product change —
+    // all six specs correctly ship and load. When 0.4.6 FAC2 (commit 8250d702)
+    // added factory-rsi.yaml + this expected entry, the literal APPENDED
+    // "factory-rsi" at the end, but the assertion compares against a `.sort()`ed
+    // actual, where factory-rsi sorts between "conveyor" and "gated-release".
+    // Restored to sorted order to match the shipped, correctly-loaded set.
     expect(result.loaded.map((s) => s.name).sort()).toEqual([
       "basic-loop",
       "branched-remediation",
       "conveyor",
+      "factory-rsi",
       "gated-release",
       "linear-build",
-      "factory-rsi",
     ]);
     expect(result.skipped).toEqual([]);
   });
