@@ -364,6 +364,14 @@ export function hasAuthoredMiniReqs(miniReqs: string | null): boolean {
  *  the same checkbox line (`- [ ] drawer opens right ![mockup](mockups/x.png)`). */
 export interface PromisedItem {
   text: string;
+  /** VM-006 (arch PIN-C, Option-A raw-key join): the authored contract line
+   *  body exactly as written, trim-only — captured BEFORE the inline-image
+   *  strip that produces `text`. Acceptance rows on the Progress tab keep
+   *  their RAW checkbox text, so this is the carrier that lets the two tabs
+   *  join on the SAME relation the acceptance dedup already uses. `text`
+   *  stays stripped and byte-unchanged, so `refMatches` and every DELIVERED
+   *  render are untouched. */
+  rawText: string;
   plannedRef: string | null;
 }
 
@@ -380,13 +388,17 @@ export function extractProofContract(prd: string | null): PromisedItem[] {
     // honest empty copy instead of "missing" rows (shared grammar:
     // ../scope/scaffold-placeholder.ts).
     if (isScaffoldPlaceholderText(text)) continue;
+    // The authored bytes, captured BEFORE the image strip below. Trim-only —
+    // no whitespace collapse — because this key must EQUAL the acceptance
+    // dedup expression it is joined against.
+    const rawText = text;
     let plannedRef: string | null = null;
     const img = text.match(/!\[[^\]]*\]\(([^)]+)\)/);
     if (img) {
       plannedRef = img[1]!.trim();
       text = text.replace(img[0], "").replace(/\s{2,}/g, " ").trim();
     }
-    items.push({ text, plannedRef });
+    items.push({ text, rawText, plannedRef });
   }
   return items;
 }

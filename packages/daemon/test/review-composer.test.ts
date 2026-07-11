@@ -405,7 +405,14 @@ describe("§3.1 DELIVERED — the redesigned join (planned ↔ curated proof ↔
   it("plannedRef: a markdown image on the contract line pairs the mockup with the deliverable", () => {
     const prd = "## Proof contract\n\n- [ ] drawer opens right ![mockup](mockups/drawer.png)\n- [ ] range probe 206\n";
     const items = extractProofContract(prd);
-    expect(items[0]).toEqual({ text: "drawer opens right", plannedRef: "mockups/drawer.png" });
+    // VM-006: `rawText` carries the authored bytes (image markup intact) while
+    // `text` stays stripped — the two carriers the Progress↔Review join and the
+    // DELIVERED render read respectively.
+    expect(items[0]).toEqual({
+      text: "drawer opens right",
+      rawText: "drawer opens right ![mockup](mockups/drawer.png)",
+      plannedRef: "mockups/drawer.png",
+    });
     const d = composeDelivered(items, []);
     expect(d.items[0]!.promised.plannedRef).toEqual({ kind: "image", src: "mockups/drawer.png", caption: "mockups/drawer.png" });
     expect(d.items[1]!.promised.plannedRef).toBeUndefined();

@@ -22,7 +22,6 @@ import {
   deriveCandidateSha,
   extractMediaRefs,
   extractSection,
-  parseC1Header,
   type AgentInput,
   type ApprovalFacts,
   type ApprovalStampFacts,
@@ -34,6 +33,7 @@ import {
 } from "./compose.js";
 import type { AgentsBand, AgentsScope, ComposedMissionReview, ComposedRigAgents, ComposedSliceReview, LockedArtifact, SettledRow, WorkflowRowRef } from "./types.js";
 import { composeAgentsBand, composeRigAgents } from "./compose.js";
+import { readProofArtifacts } from "./proof-io.js";
 import { evaluateStepDeadline } from "../workflow-deadline.js";
 import type { AgentActivityStore } from "../agent-activity-store.js";
 import { isHumanSeatSession } from "../human-route-enforcer.js";
@@ -212,7 +212,7 @@ export class ReviewGatherer {
     const prd = this.readFile(path.join(slice.slicePath, "IMPLEMENTATION-PRD.md"));
     const proofMd = this.readFile(path.join(slice.slicePath, "PROOF.md"));
 
-    const artifacts = this.readProofArtifacts(slice.slicePath);
+    const artifacts = readProofArtifacts(slice.slicePath);
     const attention = this.attentionForTag(`slice:${name}`);
     const agents = this.agentsForSlices([name]);
     const frontmatter = this.parseFrontmatter(readme);
@@ -316,28 +316,8 @@ export class ReviewGatherer {
     }
   }
 
-  private readProofArtifacts(sliceDir: string) {
-    const proofDir = path.join(sliceDir, "proof");
-    let entries: string[] = [];
-    try {
-      entries = fs.readdirSync(proofDir).filter((f) => f.endsWith(".md"));
-    } catch {
-      return [];
-    }
-    return entries
-      .sort()
-      .map((f) => {
-        const full = path.join(proofDir, f);
-        try {
-          const content = fs.readFileSync(full, "utf8");
-          const mtime = fs.statSync(full).mtime.toISOString();
-          return parseC1Header(content, `proof/${f}`, mtime);
-        } catch {
-          return null;
-        }
-      })
-      .filter((a): a is NonNullable<typeof a> => a !== null);
-  }
+  // VM-006 (A1): readProofArtifacts moved VERBATIM to ./proof-io.ts — the one
+  // home shared with the slice-detail projector; gather delegates to it.
 
   /** Markdown image/video refs across the composed sources (FR-5 defect scan). */
   private collectMediaRefs(sources: Array<string | null>): string[] {

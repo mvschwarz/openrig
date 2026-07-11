@@ -33,6 +33,13 @@ import {
   isScaffoldPlaceholderText,
   GENERIC_SCAFFOLD_ACCEPTANCE,
 } from "../scope/scaffold-placeholder.js";
+// VM-006 (progress-review-done-coherence): the QA-verdict union reuses
+// Review's OWN exported derivation pair + the ONE proof-artifact reader
+// (arch A1 one-home) — never a second derivation. Cycle-free: compose is
+// pure and proof-io imports only compose + node; nothing in review imports
+// slices.
+import { extractProofContract, composeDelivered } from "../review/compose.js";
+import { readProofArtifacts } from "../review/proof-io.js";
 import {
   projectSpecGraph,
   projectPhaseDefinitions,
@@ -60,6 +67,25 @@ export interface AcceptanceItem {
   text: string;
   done: boolean;
   source: { file: string; line: number };
+  /** VM-006 (FR-4, additive): how `done` was derived on a slice with an
+   *  authored proof contract — the author's tick vs the QA-verdict lift.
+   *  Omitted entirely when the slice has no authored contract or the row is
+   *  not done; no consumer is required to read it. */
+  doneVia?: "checkbox" | "qa-verdict";
+}
+
+/** VM-006 (arch PIN-C): the ONE key behind the acceptance dedup, the
+ *  Progress↔Review join, and the FS-1 guard. VERBATIM the historical dedup
+ *  expression — trim + casefold, and deliberately NO whitespace collapse.
+ *
+ *  Sharing a single helper across all three is what makes join-relation ==
+ *  dedup-relation a fact of the code rather than a claim. A join key that is
+ *  COARSER than the dedup key (e.g. one that strips inline images, so that
+ *  `X ![shot](a.png)` and a plain `X` collapse together) maps two distinct
+ *  acceptance rows onto one obligation and silently lifts the wrong row —
+ *  that is the B1 collision this successor exists to kill. */
+function textKey(text: string): string {
+  return text.trim().toLowerCase();
 }
 
 export interface AcceptancePayload {
@@ -445,10 +471,14 @@ export class SliceDetailProjector {
     // Source citation = file + 1-based line number so the operator can jump.
     const candidateFiles = ["README.md", "IMPLEMENTATION-PRD.md", "PROGRESS.md", "IMPLEMENTATION.md"];
     const sliceDir = slice.slicePath;
+    // VM-006: the PRD bytes are captured during this existing scan — zero new
+    // IO for the proof-contract extraction below.
+    let prdContent: string | null = null;
     for (const fname of candidateFiles) {
       const full = path.join(sliceDir, fname);
       if (!fs.existsSync(full)) continue;
       const content = fs.readFileSync(full, "utf8");
+      if (fname === "IMPLEMENTATION-PRD.md") prdContent = content;
       const lines = content.split("\n");
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i]!;
@@ -473,7 +503,7 @@ export class SliceDetailProjector {
     const seenText = new Set<string>();
     const deduped: AcceptanceItem[] = [];
     for (const item of items) {
-      const key = item.text.trim().toLowerCase();
+      const key = textKey(item.text);
       if (seenText.has(key)) continue;
       seenText.add(key);
       deduped.push(item);
@@ -493,6 +523,76 @@ export class SliceDetailProjector {
     const finalItems = pristineTriple
       ? deduped.filter((i) => i.source.file !== "PROGRESS.md")
       : deduped;
+    // VM-006 (progress-review-done-coherence): union the done-state for
+    // proof-contract rows — done = checkboxTicked OR qaVerified. Review
+    // derives `verified` from the QA passing verdict while the tick-state
+    // here never moves (`rig proof add` does not tick the authored box), so
+    // the two tabs disagreed about the same obligations.
+    //
+    // The join is a MULTIPLICITY-GATED 1:1 association on `textKey`, taken
+    // over the RAW authored text on BOTH sides (`promised.rawText` vs
+    // `item.text`). Raw-on-both is precisely what keeps the join relation
+    // identical to the dedup relation above. Joining the STRIPPED promised
+    // text against the raw row text would need a coarser comparator, and a
+    // coarser relation collapses two distinct rows onto one obligation — the
+    // B1 collision that false-lifted a non-contract row (guard BLOCKING on
+    // predecessor 0ec6411c).
+    //
+    // The 1:1 gate — a key reaching >1 obligation OR >1 row lifts NOTHING —
+    // makes pm's FR-2 invariants structural rather than argued: (1) lift only
+    // via a 1:1 association to a single verified obligation, and (2) the
+    // Progress verified-lift count can never exceed Review's verified count.
+    // Under raw keys the guard's two collisions become distinctions, so the
+    // gate is armed-but-vacuous on real slices; its live purpose is the
+    // degenerate case of two byte-identical authored contract lines, where
+    // fail-closed (stay ACTIVE) beats a coin-flip lift (arch AR-6).
+    //
+    // NEVER sets done=false — the author's record is never reversed (FR-3).
+    const promised = extractProofContract(prdContent);
+    if (promised.length > 0) {
+      const promisedByKey = new Map<string, number[]>();
+      promised.forEach((p, i) => {
+        const k = textKey(p.rawText);
+        const at = promisedByKey.get(k);
+        if (at) at.push(i);
+        else promisedByKey.set(k, [i]);
+      });
+      const rowsByKey = new Map<string, AcceptanceItem[]>();
+      for (const item of finalItems) {
+        const k = textKey(item.text);
+        const at = rowsByKey.get(k);
+        if (at) at.push(item);
+        else rowsByKey.set(k, [item]);
+      }
+      // FS-1 guard (arch-endorsed): buildAcceptance runs per slice across a
+      // whole mission on the Progress tab, so the proof-dir read fires ONLY
+      // when an authored contract still has an unticked row — the union can
+      // only lift, so all-ticked and contract-free slices do ZERO extra IO.
+      // Keyed by the SAME textKey as the join: a guard on a different relation
+      // could skip the read for a row the join would then have lifted.
+      const hasUntickedContractRow = finalItems.some(
+        (i) => !i.done && promisedByKey.has(textKey(i.text)),
+      );
+      if (hasUntickedContractRow) {
+        // The ONE reader Review uses (arch A1 one-home) + Review's OWN join:
+        // composeDelivered binds `verified` to the promised INDEX, and we read
+        // items[i].verified back — the verdict is never re-derived here.
+        const delivered = composeDelivered(promised, readProofArtifacts(sliceDir));
+        for (const item of finalItems) {
+          if (item.done) continue;
+          const k = textKey(item.text);
+          const at = promisedByKey.get(k);
+          if (!at || at.length !== 1) continue;
+          if (rowsByKey.get(k)?.length !== 1) continue;
+          if (delivered.items[at[0]!]!.verified !== "verified") continue;
+          item.done = true;
+          item.doneVia = "qa-verdict";
+        }
+      }
+      for (const item of finalItems) {
+        if (item.done && item.doneVia === undefined) item.doneVia = "checkbox";
+      }
+    }
     const total = finalItems.length;
     const done = finalItems.filter((i) => i.done).length;
     const pct = total === 0 ? 0 : Math.round((done / total) * 100);
