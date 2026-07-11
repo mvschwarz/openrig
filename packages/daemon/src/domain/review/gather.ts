@@ -236,7 +236,7 @@ export class ReviewGatherer {
       attention,
       agents,
       workflows: this.gatherWorkflowExceptions(this.now()),
-      activeQitemPresent: this.hasActiveQitem(name, slice),
+      activeQitemPresent: this.hasActiveQitem(name),
       git: this.gatherGitFacts(frontmatter, candidateRef),
       approval,
       nowIso: this.now(),
@@ -511,7 +511,6 @@ export class ReviewGatherer {
         // intent — "rows that carry a slice tag") so comma-legacy rows are
         // excluded like clean ones; unknown prefixes keep raw semantics.
         if (excludeTagPrefix === "slice:") return scopes.slices.size === 0;
-        if (excludeTagPrefix === "mission:") return scopes.missions.size === 0;
         if (excludeTagPrefix) {
           try {
             const tags = (JSON.parse(r.tags ?? "[]") as string[]) ?? [];
@@ -821,34 +820,35 @@ export class ReviewGatherer {
     }
   }
 
-  private hasActiveQitem(name: string, slice: SliceRecord): boolean {
+  private hasActiveQitem(name: string): boolean {
     if (!this.tableExists("queue_items")) return false;
-    // Leg 1 (canonical): unquoted prefilter now catches comma-legacy rows;
-    // each candidate is confirmed against the shared membership predicate,
-    // short-circuiting on the first true. Post-fix, leg 2 (qitemIds, which
-    // inherits matchQitems) converges on the same answer.
-    const prefiltered = this.db
-      .prepare(
-        `SELECT tags FROM queue_items WHERE state IN (${ACTIVE_STATES.map(() => "?").join(",")}) AND tags LIKE ?`,
-      )
-      .all(...ACTIVE_STATES, `%slice:${name}%`) as Array<{ tags: string | null }>;
-    for (const r of prefiltered) {
+    // TWO-TIER DOCTRINE: this is a SIGNAL-tier answer (phase / band /
+    // attention) — it answers from canonical membership ONLY. The DISPLAY
+    // tier (the queue-tab's qitemIds) may carry the gated legacy substring
+    // fallback; never promote a display-tier match into a signal. (P3)
+    //
+    // B1 fix: the qitemIds (leg 2) membership check is DROPPED. It inherited
+    // matchQitems' sanctioned legacy substring/body fallback, so in a
+    // zero-typed corpus a body-mention-only row promoted activeQitemPresent
+    // to true (phase BUILD) while the strict band was empty — the exact
+    // one-compose-two-answers divergence this slice kills. Equivalence: any
+    // canonically-confirmable row necessarily contains the literal
+    // `slice:<name>` substring (P1 construction), so leg 1's UNTRUNCATED
+    // prefilter finds every canonical member; leg 2 could only ever ADD
+    // non-canonical (display-tier) ids — precisely the class that must not
+    // reach the phase signal.
+    //
+    // Leg 1 streams: iterate() + break on the FIRST canonical confirm. NO SQL
+    // LIMIT — a pre-confirmation LIMIT would recreate B2 here (a suffix-storm
+    // could hide the true member and flip the phase signal); streaming + break
+    // gives the same bounded cost with no truncation hole.
+    const stmt = this.db.prepare(
+      `SELECT tags FROM queue_items WHERE state IN (${ACTIVE_STATES.map(() => "?").join(",")}) AND tags LIKE ?`,
+    );
+    for (const r of stmt.iterate(...ACTIVE_STATES, `%slice:${name}%`) as Iterable<{ tags: string | null }>) {
       if (parseScopeTags(r.tags).slices.has(name)) return true;
     }
-    if (slice.qitemIds.length === 0) return false;
-    const placeholders = slice.qitemIds.map(() => "?").join(",");
-    try {
-      return this.db
-        .prepare(
-          `SELECT 1 FROM queue_items
-           WHERE qitem_id IN (${placeholders})
-             AND state IN (${ACTIVE_STATES.map(() => "?").join(",")})
-           LIMIT 1`,
-        )
-        .get(...slice.qitemIds, ...ACTIVE_STATES) !== undefined;
-    } catch {
-      return false;
-    }
+    return false;
   }
 
   /** §4 — the two staged-approval stamps (arch F-A: the SHIPPED verb's

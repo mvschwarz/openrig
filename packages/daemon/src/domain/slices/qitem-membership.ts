@@ -17,7 +17,12 @@ export interface QitemScopeTags {
  *  comma-split (the legacy CLI form, per the matchQitems contract comment)
  *  and trimmed; exact `slice:`/`mission:` prefix match per token. No
  *  substring semantics live here — the legacy substring tier remains a
- *  matchQitems-local concern behind its zero-typed-rows condition. */
+ *  matchQitems-local concern behind its zero-typed-rows condition.
+ *
+ *  TWO-TIER DOCTRINE: the SIGNAL tier (phase / band / attention) answers
+ *  from canonical membership ONLY — this function. The DISPLAY tier (the
+ *  queue-tab's qitemIds) may carry the gated legacy substring fallback.
+ *  Never promote a display-tier match into a signal. */
 export function parseScopeTags(rawTags: string | null | undefined): QitemScopeTags {
   const slices = new Set<string>();
   const missions = new Set<string>();

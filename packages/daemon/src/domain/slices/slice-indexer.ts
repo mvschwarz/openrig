@@ -451,18 +451,33 @@ export class SliceIndexer {
       // form (legacy CLI tags) are caught by a wildcard on the slice id.
       let typedTagMatchCount = 0;
       try {
-        const rows = this.db.prepare(
-          `SELECT qitem_id, tags FROM queue_items WHERE tags LIKE ? LIMIT 500`,
-        ).all(`%slice:${sliceName}%`) as Array<{ qitem_id: string; tags: string | null }>;
-        // The unquoted LIKE stays a PREFILTER (catches comma-legacy AND the
+        // TWO-TIER DOCTRINE: the SIGNAL tier (phase / band / attention)
+        // answers from canonical membership ONLY; this DISPLAY tier (the
+        // queue-tab's qitemIds) may carry the gated legacy substring fallback
+        // below. Never promote a display-tier match into a signal. (P3)
+        //
+        // B2 fix: cap on CONFIRMED matches, never the prefilter window. The
+        // unquoted LIKE stays a PREFILTER (catches comma-legacy AND the
         // suffix/sibling over-matches); parseScopeTags is the authoritative
-        // row-level confirm. typedTagMatchCount counts CONFIRMED rows only,
-        // so the substring gate below reflects real typed membership — this
-        // kills the VM-004 `slice:X-suffix` over-match at the typed tier.
-        for (const r of rows) {
+        // row-level confirm. We iterate() ORDER BY ts_created DESC, qitem_id
+        // DESC (P2: the id tiebreak makes the confirmed set fully deterministic
+        // under equal timestamps — byte-consistent with the id-lex tail
+        // fallback below, since the id encodes the ts prefix), confirm per
+        // row, and break at 500 CONFIRMED. There is NO pre-confirmation SQL
+        // LIMIT: with one, >500 suffix/sibling over-match rows could hide a
+        // true typed member and un-gate the fallback (VM-004 returns).
+        // Streaming keeps memory bounded, and the leading-wildcard LIKE never
+        // used an index anyway (the old LIMIT saved materialization only,
+        // which iterate+break also saves). typedTagMatchCount counts CONFIRMED
+        // rows only, so the substring gate reflects real typed membership.
+        const stmt = this.db.prepare(
+          `SELECT qitem_id, tags FROM queue_items WHERE tags LIKE ? ORDER BY ts_created DESC, qitem_id DESC`,
+        );
+        for (const r of stmt.iterate(`%slice:${sliceName}%`) as Iterable<{ qitem_id: string; tags: string | null }>) {
           if (parseScopeTags(r.tags).slices.has(sliceName)) {
             ids.add(r.qitem_id);
             typedTagMatchCount++;
+            if (typedTagMatchCount >= 500) break;
           }
         }
       } catch {

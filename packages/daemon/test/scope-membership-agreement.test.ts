@@ -223,3 +223,81 @@ describe("scope-membership byte-identity carve (clean corpus, zero regression)",
     expect(band?.provenance).toBe(`no agents holding or recently holding work — computed from queue at ${NOW}`);
   });
 });
+
+// v1.4 fixback regressions — the two-tier doctrine made observable.
+describe("scope-membership B1/B2/P2 blocker regressions (fixback)", () => {
+  let missionsRoot: string;
+  let cleanup: string;
+  let db: Database.Database;
+
+  beforeEach(() => {
+    cleanup = fs.mkdtempSync(path.join(os.tmpdir(), "scope-fixback-"));
+    missionsRoot = path.join(cleanup, "missions");
+    fs.mkdirSync(missionsRoot, { recursive: true });
+    for (const s of ["target", "sibling", "legacyonly", "tie-slice"]) {
+      writeSlice(missionsRoot, path.join("relx", "slices"), s);
+    }
+    db = createDb(":memory:");
+    migrate(db, [coreSchema, eventsSchema, streamItemsSchema, queueItemsSchema, queueItemSummarySchema]);
+  });
+
+  afterEach(() => {
+    db.close();
+    fs.rmSync(cleanup, { recursive: true, force: true });
+  });
+
+  function harness() {
+    const indexer = new SliceIndexer({ slicesRoot: missionsRoot, additionalSliceRoots: [], dogfoodEvidenceRoot: null, db });
+    const gatherer = new ReviewGatherer({ db, indexer, gitRepoPath: null, now: () => NOW });
+    return { indexer, gatherer };
+  }
+
+  it("§3.9 B1: zero-typed body-only row shows in the DISPLAY tier but NOT the SIGNAL tier (phase/band agree)", () => {
+    // legacyonly has zero typed slice: rows; one ACTIVE body-mention-only qitem.
+    insertQitem(db, { id: "q-body-legacy", dest: "leg@rig", tags: [], body: "advance the legacyonly rollout" });
+    const { indexer, gatherer } = harness();
+    // DISPLAY tier (queue-tab qitemIds): the legacy substring fallback keeps it.
+    const ids = new Set(indexer.get("legacyonly")?.qitemIds ?? []);
+    expect(ids.has("q-body-legacy")).toBe(true);
+    // SIGNAL tier: hasActiveQitem FALSE (leg 2 dropped) AND band empty -> AGREE.
+    const active = (gatherer as unknown as { hasActiveQitem(n: string): boolean }).hasActiveQitem("legacyonly");
+    const band = gatherer.composeAgents("slice:legacyonly");
+    expect(active).toBe(false); // was TRUE at 302036aa via the dropped leg-2 -> phase BUILD divergence
+    expect(band?.rows).toEqual([]);
+  });
+
+  it("§3.10 B2 suffix-storm: >500 slice:target-extra decoys ahead of the true row — true member kept, fallback gated, phase TRUE", () => {
+    // Decoys FIRST (they'd fill a pre-confirmation LIMIT-500 window and hide the true row at 302036aa).
+    const seedDecoys = db.transaction((n: number) => {
+      for (let i = 0; i < n; i++) {
+        insertQitem(db, { id: `q-decoy-${String(i).padStart(3, "0")}`, dest: "decoy@rig", tags: ["slice:target-extra"] });
+      }
+    });
+    seedDecoys(550);
+    insertQitem(db, { id: "q-true-target", dest: "truebuilder@rig", tags: ["slice:target"] });
+    insertQitem(db, { id: "q-body-target", dest: "bodyer@rig", tags: [], body: "notes about target here" });
+    const { indexer, gatherer } = harness();
+    const ids = new Set(indexer.get("target")?.qitemIds ?? []);
+    expect(ids.has("q-true-target")).toBe(true); // retained despite the storm (no truncation before confirm)
+    expect(ids.has("q-body-target")).toBe(false); // typed confirmed >=1 -> substring fallback GATED off
+    expect(ids.has("q-decoy-000")).toBe(false); // suffix over-match rejected by canonical confirm
+    // SIGNAL tier immune to truncation: hasActiveQitem TRUE, band shows the true seat only.
+    const active = (gatherer as unknown as { hasActiveQitem(n: string): boolean }).hasActiveQitem("target");
+    expect(active).toBe(true);
+    const sessions = new Set((gatherer.composeAgents("slice:target")?.rows ?? []).map((r) => r.sessionName));
+    expect(sessions.has("truebuilder@rig")).toBe(true);
+    expect(sessions.has("decoy@rig")).toBe(false);
+    expect(sessions.has("bodyer@rig")).toBe(false);
+  });
+
+  it("§3.10a P2 tie-vector: two confirmable rows sharing one ts_created — deterministic id-DESC order across re-runs", () => {
+    insertQitem(db, { id: "qtie-a", dest: "a@rig", tags: ["slice:tie-slice"] });
+    insertQitem(db, { id: "qtie-b", dest: "b@rig", tags: ["slice:tie-slice"] }); // same ts_created (NOW)
+    const { indexer } = harness();
+    const mq = indexer as unknown as { matchQitems(s: string, r: string | null, m: string | null): string[] };
+    const first = mq.matchQitems("tie-slice", null, "relx");
+    const second = mq.matchQitems("tie-slice", null, "relx");
+    expect(first).toEqual(second); // deterministic under equal timestamps
+    expect(first).toEqual(["qtie-b", "qtie-a"]); // qitem_id DESC tiebreak (P2)
+  });
+});
