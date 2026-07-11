@@ -109,9 +109,36 @@ export interface FilesReadResponse {
   totalBytes?: number;
 }
 
+/**
+ * R1 (release-0.4.7) — a typed, discriminated read failure.
+ *
+ * The daemon already distinguishes the causes in the HTTP status
+ * (`routes/files.ts`: `stat_failed → 404`, `root_unknown`/path errors → 400,
+ * fallthrough → 500). Pre-R1, `fetchRead` collapsed all of them into an opaque
+ * `new Error("HTTP <status>")`, so every consumer saw only `isError` and
+ * rendered disk-absence copy for what might be an infra or config failure.
+ * `FilesReadError` carries the distinction as `code` WITHOUT changing the
+ * `message` text — consumers that render only `err.message` (FileViewer,
+ * FilesWorkspace) stay byte-identical with zero edits (message-compat pin).
+ */
+export class FilesReadError extends Error {
+  readonly code: "absent" | "read_error" | "bad_path";
+  readonly status: number;
+  constructor(status: number) {
+    super(`HTTP ${status}`); // message BYTE-SAME as the pre-R1 `new Error("HTTP <status>")` (arch pin)
+    // DELIBERATE byte-compat (arch ruling P2): name stays "Error" so any
+    // `${err}` / err.name render is byte-identical to pre-split output. Do NOT
+    // "fix" this to "FilesReadError" in a cleanup pass — it would change every
+    // name-rendering site's output.
+    this.name = "Error";
+    this.status = status;
+    this.code = status === 404 ? "absent" : status === 400 ? "bad_path" : "read_error";
+  }
+}
+
 async function fetchRead(root: string, path: string): Promise<FilesReadResponse> {
   const res = await fetch(`/api/files/read?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw new FilesReadError(res.status);
   return (await res.json()) as FilesReadResponse;
 }
 

@@ -103,6 +103,34 @@ function ProofSliceCard({
   }
 
   if (!populated) {
+    // R1 (release-0.4.7): the empty-state stops lying. `absent`/`idle` keep
+    // today's "awaiting proof" + "NO PROOF YET" bytes EXACTLY; a mis-rooted
+    // scope (`unresolved`) or an infra read failure (`read_error`) each get an
+    // honest copy so a real config/read problem isn't shown as an empty proof.
+    const empty =
+      proofMd.state === "read_error"
+        ? {
+            micro: null as string | null,
+            label: "PROOF.MD READ FAILED",
+            description:
+              "The daemon could not read PROOF.md — this is a read failure, not an empty proof. Check daemon logs and file permissions.",
+            testId: `proof-read-error-${sliceId}`,
+          }
+        : proofMd.state === "unresolved"
+          ? {
+              micro: null as string | null,
+              label: "PROOF.MD OUTSIDE FILE ROOTS",
+              description:
+                "This slice's path is not under any of the daemon's allowlisted file roots, so PROOF.md cannot be read. Check OPENRIG_FILES_ALLOWLIST / the daemon's file-roots settings.",
+              testId: `proof-unresolved-${sliceId}`,
+            }
+          : {
+              micro: "awaiting proof" as string | null,
+              label: "NO PROOF YET",
+              description:
+                "This slice has a scaffolded proof/ location that no closeout has populated. Proof-of-work captures (screenshots / videos) and a PROOF.md verdict land here when the closing agent drops them in at slice closeout — no curator required.",
+              testId: `proof-empty-state-${sliceId}`,
+            };
     return (
       <section
         data-testid={`proof-slice-empty-${sliceId}`}
@@ -110,14 +138,16 @@ function ProofSliceCard({
       >
         <div className="flex items-baseline justify-between border-b border-outline-variant/60 pb-2">
           <span className="font-mono text-[12px] uppercase tracking-[0.12em] text-on-surface-variant">{sliceId}</span>
-          <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-on-surface-variant">awaiting proof</span>
+          {empty.micro ? (
+            <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-on-surface-variant">{empty.micro}</span>
+          ) : null}
         </div>
         <div className="mt-3">
           <EmptyState
-            label="NO PROOF YET"
-            description="This slice has a scaffolded proof/ location that no closeout has populated. Proof-of-work captures (screenshots / videos) and a PROOF.md verdict land here when the closing agent drops them in at slice closeout — no curator required."
+            label={empty.label}
+            description={empty.description}
             variant="card"
-            testId={`proof-empty-state-${sliceId}`}
+            testId={empty.testId}
           />
         </div>
       </section>

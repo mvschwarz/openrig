@@ -912,10 +912,42 @@ export function MissionScopePage() {
               testId="mission-progress-rail-status"
               action={{ label: `rig scope audit --mission ${missionId}` }}
             />
+          ) : hostSelectionKnown && !hostIsLocal ? (
+            // R1 (release-0.4.7) req-5 (G16; v1.2 gate fix): a KNOWN-remote selection
+            // gates the LOCAL /api/files read off (missionPath is null above). Say so
+            // honestly instead of falling through to "NO PROGRESS YET" — a remote read
+            // must never masquerade as a local absence. Gate on KNOWN-remote ONLY (not
+            // !filesAllowed, which includes the UNKNOWN cold-start window and would
+            // flash this notice locally — the misleading-gated-flash the SteeringTab +
+            // WorkspacePortfolioPanel precedents forbid); an unknown selection falls
+            // through to the loading/absence treatment. The data-level null-path gating
+            // via filesAllowed (missionPath above) is unchanged.
+            <EmptyState
+              label="LOCAL FILES NOT SHOWN"
+              description="Local files not shown — mission progress markdown reads this host's local filesystem, which the remote read view does not browse."
+              variant="card"
+              testId="mission-progress-remote-gated"
+            />
           ) : missionProgress.content ? (
             <section data-testid="mission-progress-readme" className="border border-outline-variant bg-surface-lowest/20 p-4">
               <MarkdownViewer content={missionProgress.content} hideFrontmatter hideRawToggle />
             </section>
+          ) : missionProgress.state === "read_error" ? (
+            // R1: the read failed — NOT an empty progress file.
+            <EmptyState
+              label="PROGRESS READ FAILED"
+              description="The daemon could not read PROGRESS.md — this is a read failure, not an empty progress file. Check daemon logs and file permissions."
+              variant="card"
+              testId="mission-progress-read-error"
+            />
+          ) : missionProgress.state === "unresolved" ? (
+            // R1: the mission path is outside the allowlisted file roots (config).
+            <EmptyState
+              label="PROGRESS OUTSIDE FILE ROOTS"
+              description="The mission path is not under any allowlisted file root, so PROGRESS.md cannot be read. Check OPENRIG_FILES_ALLOWLIST / the daemon's file-roots settings."
+              variant="card"
+              testId="mission-progress-unresolved"
+            />
           ) : !scopeAudit.isLoading ? (
             <EmptyState
               label="NO PROGRESS YET"

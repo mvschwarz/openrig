@@ -182,6 +182,31 @@ function BriefPanel({ missionId }: { missionId: string | null }) {
         Loading…
       </div>
     );
+  } else if (brief.state === "read_error") {
+    // R1 (release-0.4.7): a read failure is NOT a missing brief.
+    body = (
+      <div data-testid="brief-panel-read-error">
+        <EmptyState
+          label="BRIEF READ FAILED"
+          description="The daemon could not read MISSION_BRIEF.md — this is a read failure, not a missing brief. Check daemon logs and file permissions."
+          variant="card"
+          testId="brief-panel-read-error-state"
+        />
+      </div>
+    );
+  } else if (brief.state === "unresolved") {
+    // R1: the mission path is outside the allowlisted file roots (config), not
+    // a missing brief.
+    body = (
+      <div data-testid="brief-panel-unresolved">
+        <EmptyState
+          label="BRIEF OUTSIDE FILE ROOTS"
+          description="The mission path is not under any allowlisted file root, so MISSION_BRIEF.md cannot be read. Check OPENRIG_FILES_ALLOWLIST / the daemon's file-roots settings."
+          variant="card"
+          testId="brief-panel-unresolved-state"
+        />
+      </div>
+    );
   } else if (brief.unavailable || brief.content === null) {
     body = (
       <div data-testid="brief-panel-empty">
