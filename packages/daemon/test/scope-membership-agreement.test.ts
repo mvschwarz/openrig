@@ -257,12 +257,18 @@ describe("scope-membership B1/B2/P2 blocker regressions (fixback)", () => {
     insertQitem(db, { id: "q-body-legacy", dest: "leg@rig", tags: [], body: "advance the legacyonly rollout" });
     const { indexer, gatherer } = harness();
     // DISPLAY tier (queue-tab qitemIds): the legacy substring fallback keeps it.
-    const ids = new Set(indexer.get("legacyonly")?.qitemIds ?? []);
-    expect(ids.has("q-body-legacy")).toBe(true);
+    const rec = indexer.get("legacyonly")!;
+    expect(new Set(rec.qitemIds).has("q-body-legacy")).toBe(true);
     // SIGNAL tier: hasActiveQitem FALSE (leg 2 dropped) AND band empty -> AGREE.
-    const active = (gatherer as unknown as { hasActiveQitem(n: string): boolean }).hasActiveQitem("legacyonly");
+    // Pass the indexed record as an OPTIONAL second arg so this is a REAL
+    // behavioral differential on BOTH candidates (not a signature crash): the
+    // frozen 302036aa signature hasActiveQitem(name, slice) CONSUMES it — leg 2
+    // reads rec.qitemIds, which carries the display-tier body-only id, so it
+    // returns TRUE (the phase-BUILD-while-band-empty divergence); the fixed
+    // cab26bb0 hasActiveQitem(name) IGNORES the extra arg and returns FALSE.
+    const active = (gatherer as unknown as { hasActiveQitem(n: string, s?: unknown): boolean }).hasActiveQitem("legacyonly", rec);
     const band = gatherer.composeAgents("slice:legacyonly");
-    expect(active).toBe(false); // was TRUE at 302036aa via the dropped leg-2 -> phase BUILD divergence
+    expect(active).toBe(false); // 302036aa returns TRUE (received); the B1 fix makes it false
     expect(band?.rows).toEqual([]);
   });
 
