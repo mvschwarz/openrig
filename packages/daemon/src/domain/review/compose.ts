@@ -49,6 +49,7 @@ import {
   type VerdictTone,
   type VerifyLineage,
 } from "./types.js";
+import { isScaffoldPlaceholderText } from "../scope/scaffold-placeholder.js";
 
 // --- Fixed, visible v1 thresholds (markdown-steered tuning is a named fast-follow) ---
 export const IDLE_WITH_WORK_THRESHOLD_MIN = 30;
@@ -335,6 +336,23 @@ export function extractMiniReqs(prd: string | null): string | null {
   return extractSection(prd, "Mini-requirements(?:[^\\n]*)?");
 }
 
+/** release-0.4.7 intent-stage — true when the (already-extracted) mini-reqs
+ *  section carries at least one numbered item whose text is NOT a scaffold
+ *  placeholder (the template scaffolds `1. [...]`).
+ *
+ *  SINGLE-PARSE PIN (arch AR-2): the derivePhase `prdAuthored` signal AND the
+ *  PLAN concise render decision MUST both derive from this ONE parse of the
+ *  ONE extractMiniReqs extraction — a second mini-reqs grammar anywhere in
+ *  this file would recreate the seam map's R3 divergence class intra-file. */
+export function hasAuthoredMiniReqs(miniReqs: string | null): boolean {
+  if (miniReqs === null) return false;
+  for (const line of miniReqs.split("\n")) {
+    const m = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (m && !isScaffoldPlaceholderText(m[1]!.trim())) return true;
+  }
+  return false;
+}
+
 /** One promised deliverable from the D2 `## Proof contract` (§3.1): the item
  *  text plus an optional planned-mockup ref written as a markdown image on
  *  the same checkbox line (`- [ ] drawer opens right ![mockup](mockups/x.png)`). */
@@ -351,6 +369,11 @@ export function extractProofContract(prd: string | null): PromisedItem[] {
     const m = line.match(/^\s*-?\s*\[(?:\s|x|X)\]\s+(.+)$/);
     if (!m) continue;
     let text = m[1]!.trim();
+    // release-0.4.7 intent-stage: a scaffold-template placeholder row is not
+    // a promise — a pristine contract extracts to [] so DELIVERED renders its
+    // honest empty copy instead of "missing" rows (shared grammar:
+    // ../scope/scaffold-placeholder.ts).
+    if (isScaffoldPlaceholderText(text)) continue;
     let plannedRef: string | null = null;
     const img = text.match(/!\[[^\]]*\]\(([^)]+)\)/);
     if (img) {
@@ -367,23 +390,38 @@ export function extractProofContract(prd: string | null): PromisedItem[] {
 // ---------------------------------------------------------------------------
 
 export interface PhaseSignals {
-  prdPresent: boolean;
-  /** ANY delivery signal: a proof artifact OR a claimed/in-progress slice-tagged qitem. */
-  proofArtifactPresent: boolean;
+  /** The PRD carries authored STRUCTURE (arch AR-2): a post-placeholder-filter
+   *  promised item, or an authored (non-placeholder) mini-reqs numbered item.
+   *  Replaces the old file-presence `prdPresent` — a pristine scaffold PRD is
+   *  not a spec. */
+  prdAuthored: boolean;
+  /** REAL dropped proof artifacts only (`artifacts.length > 0`). PROOF.md is
+   *  scaffolded at slice birth, so its file-presence is NOT construction
+   *  evidence — its VERDICT content already feeds the review tier via
+   *  `verdictOrEvidenceSetPresent` (release-0.4.7 intent-stage). */
+  realProofArtifactsPresent: boolean;
   activeQitemPresent: boolean;
   /** Evidence/verdict set present (any recorded verdict OR a claimed PROOF.md + media set). */
   verdictOrEvidenceSetPresent: boolean;
+  /** The PLAN plan-lock stamp (`--scope spec`) — authored by fiat: the honest
+   *  operator override that promotes a slice to spec regardless of content. */
+  specLocked: boolean;
   /** The delivery approval stamp. */
   approved: boolean;
 }
 
 /** Top-down by precedence — locked > review > building > spec > intent —
- *  stated explicitly because one signal can satisfy two lanes. */
+ *  stated explicitly because one signal can satisfy two lanes.
+ *
+ *  The phase chip describes SDLC ARTIFACT progression, not coordination
+ *  activity (arch AR-3): a bare tracking qitem is coordination and counts
+ *  toward building only when paired with an authored/locked spec;
+ *  coordination itself renders in the queue/agents bands. */
 export function derivePhase(s: PhaseSignals): ReviewPhase {
   if (s.approved) return "locked";
   if (s.verdictOrEvidenceSetPresent) return "review";
-  if (s.proofArtifactPresent || s.activeQitemPresent) return "building";
-  if (s.prdPresent) return "spec";
+  if (s.realProofArtifactsPresent || (s.activeQitemPresent && (s.specLocked || s.prdAuthored))) return "building";
+  if (s.prdAuthored || s.specLocked) return "spec";
   return "intent";
 }
 
@@ -1007,11 +1045,17 @@ export function composeSliceReview(inputs: SliceComposeInputs): ComposedSliceRev
   const anyRecordedVerdict = gateCells.some((c) => c.state !== "missing");
   const evidencePresent = inputs.artifacts.length > 0 || claimedPass;
 
+  // release-0.4.7 intent-stage: `promised` is the POST-placeholder-filter
+  // contract (extracted ONCE above, consumed by both DELIVERED and this
+  // signal); `miniReqsIsAuthored` derives from the ONE extractMiniReqs parse
+  // and also drives the PLAN concise render below (the single-parse pin).
+  const miniReqsIsAuthored = hasAuthoredMiniReqs(miniReqs);
   const phase = derivePhase({
-    prdPresent: inputs.prd !== null,
-    proofArtifactPresent: inputs.artifacts.length > 0 || inputs.proofMd !== null,
+    prdAuthored: inputs.prd !== null && (promised.length > 0 || miniReqsIsAuthored),
+    realProofArtifactsPresent: inputs.artifacts.length > 0,
     activeQitemPresent: inputs.activeQitemPresent,
     verdictOrEvidenceSetPresent: anyRecordedVerdict || claimedPass,
+    specLocked: planLock !== null,
     approved: deliveredLock !== null,
   });
 
@@ -1087,7 +1131,11 @@ export function composeSliceReview(inputs: SliceComposeInputs): ComposedSliceRev
       degrade: intentText === null ? "no intent recorded" : null,
     },
     plan: {
-      concise: { text: miniReqs, media: planMedia },
+      // release-0.4.7 intent-stage (S5 fold-in): a mini-reqs section with no
+      // authored numbered item (placeholder-only or prose-only, per arch AR-2)
+      // renders as ABSENT so the existing "— not planned yet" degrade fires —
+      // same boolean as the phase signal (the single-parse pin).
+      concise: { text: miniReqsIsAuthored ? miniReqs : null, media: planMedia },
       lockedArtifacts: inputs.lockedArtifacts,
       lock: planLock,
       ssotPath: inputs.prd !== null ? `${sliceRef}/IMPLEMENTATION-PRD.md` : null,

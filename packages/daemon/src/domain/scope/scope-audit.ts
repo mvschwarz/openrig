@@ -1,5 +1,6 @@
 import * as YAML from "yaml";
 import { isMissionDotId, isSliceDotId } from "./dot-id.js";
+import { isScaffoldPlaceholderText } from "./scaffold-placeholder.js";
 
 export type RailStatus = "present" | "missing" | "malformed" | "readme-only";
 export type FindingSeverity = "high" | "medium" | "low" | "info";
@@ -433,8 +434,17 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
       }
 
       const contractBody = h2Body(contractSource.content, "Proof contract");
-      const hasCheckboxItem = contractBody !== null && /^\s*-\s*\[[ xX]\]/m.test(contractBody);
-      if (!hasCheckboxItem) {
+      // release-0.4.7 intent-stage: an AUTHORED checkbox item — a scaffold
+      // placeholder row is not a contract (shared grammar:
+      // ./scaffold-placeholder.js — the same helper review compose and the
+      // slice-detail projector consume; the R3 pin). A text-less checkbox row
+      // still counts, exactly as before.
+      const hasAuthoredCheckboxItem =
+        contractBody !== null &&
+        [...contractBody.matchAll(/^\s*-\s*\[[ xX]\]\s*(.*)$/gm)].some(
+          (m) => !isScaffoldPlaceholderText((m[1] ?? "").trim()),
+        );
+      if (!hasAuthoredCheckboxItem) {
         findings.push({
           kind: "proof_contract_missing_or_malformed",
           severity: "low",

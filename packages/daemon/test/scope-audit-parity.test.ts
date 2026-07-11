@@ -13,6 +13,9 @@ const CLASSIFIER_FILES = [
   { cli: "packages/cli/src/lib/scope/scope-audit.ts", daemon: "packages/daemon/src/domain/scope/scope-audit.ts" },
   { cli: "packages/cli/src/lib/scope/dot-id.ts", daemon: "packages/daemon/src/domain/scope/dot-id.ts" },
   { cli: "packages/cli/src/lib/scope/types.ts", daemon: "packages/daemon/src/domain/scope/types.ts" },
+  // release-0.4.7 intent-stage: the shared scaffold-placeholder grammar twin
+  // (arch AR-1 ruling — one grammar, twin-pinned; see the module header).
+  { cli: "packages/cli/src/lib/scope/scaffold-placeholder.ts", daemon: "packages/daemon/src/domain/scope/scaffold-placeholder.ts" },
 ];
 
 const SHARED_FIXTURES: Array<{ label: string; input: ScopeAuditInput }> = [

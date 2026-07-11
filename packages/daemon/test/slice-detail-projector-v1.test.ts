@@ -264,3 +264,162 @@ describe("PL-slice-story-view-v1 SliceDetailProjector — bound workflow_instanc
     expect(payload.topology.specGraph).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// release-0.4.7 intent-stage/scaffold-projection — T4 (buildAcceptance
+// placeholder-filter / dedup / pristine-triple edits, incl. the AR-6
+// added-4th-row vector) + T7 (byte-identity carve, acceptance half).
+//
+// Fixtures are TEMPLATE-DERIVED via the real CLI renderers (dynamic import,
+// same pattern as scope-audit-parity.test.ts) — a pristine `rig scope slice
+// create` output is the canonical intent-stage fixture, and template drift
+// breaks these tests honestly.
+// ---------------------------------------------------------------------------
+
+import { beforeAll as beforeAllAccept } from "vitest";
+import * as nodePath from "node:path";
+
+const ACCEPT_REPO_ROOT = nodePath.resolve(import.meta.dirname, "..", "..", "..");
+
+let acceptTpl: { readme: string; prd: string; progress: string; proof: string };
+
+beforeAllAccept(async () => {
+  const mod = await import(
+    nodePath.join(ACCEPT_REPO_ROOT, "packages/cli/src/lib/scope/templates.ts")
+  );
+  const opts = {
+    id: "OPR.T.98",
+    slice_number: "98",
+    slug: "accept",
+    mission: "release-t",
+    title: "Accept",
+    created_date: "2026-07-11",
+  };
+  acceptTpl = {
+    readme: mod.renderSliceTemplate("placeholder", opts),
+    prd: mod.renderImplementationPrdTemplate(opts),
+    progress: mod.renderSliceProgressTemplate("Accept"),
+    proof: mod.renderSliceProofTemplate({ id: "OPR.T.98", title: "Accept" }),
+  };
+});
+
+describe("release-0.4.7 intent-stage — buildAcceptance edits (T4) + byte-identity (T7)", () => {
+  let db: Database.Database;
+  let slicesRoot: string;
+  let cleanupRoot: string;
+  let indexer: SliceIndexer;
+  let projector: SliceDetailProjector;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [
+      coreSchema, eventsSchema, streamItemsSchema,
+      queueItemsSchema, queueTransitionsSchema,
+      workflowSpecsSchema, workflowInstancesSchema, workflowStepTrailsSchema,
+      missionControlActionsSchema,
+    ]);
+    db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
+    cleanupRoot = mkdtempSync(join(tmpdir(), "slice-projector-accept-"));
+    slicesRoot = join(cleanupRoot, "slices");
+    mkdirSync(slicesRoot, { recursive: true });
+    indexer = new SliceIndexer({ slicesRoot, dogfoodEvidenceRoot: null, db });
+    projector = new SliceDetailProjector({ db, indexer, workflowSpecCache: new WorkflowSpecCache(db) });
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(cleanupRoot, { recursive: true, force: true });
+  });
+
+  function writeSlice(name: string, files: Record<string, string>): void {
+    const dir = join(slicesRoot, name);
+    mkdirSync(dir, { recursive: true });
+    for (const [fname, content] of Object.entries(files)) {
+      writeFileSync(join(dir, fname), content);
+    }
+  }
+
+  function acceptanceOf(name: string) {
+    const slice = indexer.get(name);
+    expect(slice, `slice ${name} must index`).toBeTruthy();
+    return projector.project(slice!).acceptance;
+  }
+
+  it("T4a: a PRISTINE scaffold (fresh slice create) counts ZERO acceptance items — the bogus 0/5 dies", () => {
+    writeSlice("98-accept", {
+      "README.md": acceptTpl.readme,
+      "IMPLEMENTATION-PRD.md": acceptTpl.prd,
+      "PROGRESS.md": acceptTpl.progress,
+    });
+    const a = acceptanceOf("98-accept");
+    expect(a.totalItems).toBe(0);
+    expect(a.doneItems).toBe(0);
+    expect(a.percentage).toBe(0);
+    expect(a.items).toEqual([]);
+  });
+
+  it("T4b: README+PRD duplicate counts ONCE — first file wins for source AND done-state", () => {
+    writeSlice("98-accept", {
+      "README.md": acceptTpl.readme + "\n## Acceptance\n\n- [x] Ship the gizmo\n",
+      "IMPLEMENTATION-PRD.md": acceptTpl.prd + "\n## Extra\n\n- [ ] ship the gizmo  \n",
+    });
+    const a = acceptanceOf("98-accept");
+    expect(a.totalItems).toBe(1);
+    expect(a.items[0]!.text).toBe("Ship the gizmo");
+    expect(a.items[0]!.done).toBe(true);
+    expect(a.items[0]!.source.file).toBe("README.md");
+  });
+
+  it("T4c: ONE checked generic row makes all three real (engagement breaks pristine)", () => {
+    writeSlice("98-accept", {
+      "README.md": acceptTpl.readme,
+      "PROGRESS.md": acceptTpl.progress.replace("- [ ] Implementation complete", "- [x] Implementation complete"),
+    });
+    const a = acceptanceOf("98-accept");
+    const progressItems = a.items.filter((i) => i.source.file === "PROGRESS.md");
+    expect(progressItems).toHaveLength(3);
+    expect(a.doneItems).toBe(1);
+  });
+
+  it("T4d (AR-6): an ADDED PROGRESS row with the triple untouched makes all four real", () => {
+    writeSlice("98-accept", {
+      "README.md": acceptTpl.readme,
+      "PROGRESS.md": acceptTpl.progress.replace(
+        "- [ ] Review approved",
+        "- [ ] Review approved\n- [ ] Wire the modal",
+      ),
+    });
+    const a = acceptanceOf("98-accept");
+    const progressItems = a.items.filter((i) => i.source.file === "PROGRESS.md");
+    expect(progressItems).toHaveLength(4);
+    expect(progressItems.map((i) => i.text)).toContain("Wire the modal");
+  });
+
+  it("T4e: an EDITED generic-row text breaks pristine — all rows count", () => {
+    writeSlice("98-accept", {
+      "README.md": acceptTpl.readme,
+      "PROGRESS.md": acceptTpl.progress.replace("- [ ] Tests passing", "- [ ] Tests passing in CI"),
+    });
+    const a = acceptanceOf("98-accept");
+    expect(a.items.filter((i) => i.source.file === "PROGRESS.md")).toHaveLength(3);
+  });
+
+  it("T7 (acceptance half): fully-AUTHORED rows project identically — filter never eats a real item", () => {
+    writeSlice("98-accept", {
+      "README.md": "---\nslice: 98-accept\n---\n# 98-accept\n\n## Acceptance\n\n- [x] Drawer opens right\n- [ ] [P0] range probe 206\n",
+      "IMPLEMENTATION-PRD.md": "## Proof contract\n\n- [ ] phone journey video\n",
+      "PROGRESS.md": "# Accept\n\n## Rail\n\n- [x] Landed the fix\n",
+    });
+    const a = acceptanceOf("98-accept");
+    expect(a.totalItems).toBe(4);
+    expect(a.doneItems).toBe(2);
+    expect(a.percentage).toBe(50);
+    expect(a.items.map((i) => i.text)).toEqual([
+      "Drawer opens right",
+      "[P0] range probe 206",
+      "phone journey video",
+      "Landed the fix",
+    ]);
+    expect(a.items[1]!.text).toBe("[P0] range probe 206");
+  });
+});

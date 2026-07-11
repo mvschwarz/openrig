@@ -314,16 +314,33 @@ describe("FR-1 — verbatim intent, section media, idempotence", () => {
 });
 
 describe("FR-3 — five-way derived phase, top-down precedence", () => {
+  // release-0.4.7 intent-stage: signal shape reshaped (prdPresent →
+  // prdAuthored; proofArtifactPresent → realProofArtifactsPresent; NEW
+  // specLocked). Same five-way precedence; the building lane now needs real
+  // artifacts OR (qitem AND authored/locked spec).
+  const NONE = { prdAuthored: false, realProofArtifactsPresent: false, activeQitemPresent: false, verdictOrEvidenceSetPresent: false, specLocked: false, approved: false };
+
   it("derives each phase from layer completeness alone", () => {
-    expect(derivePhase({ prdPresent: false, proofArtifactPresent: false, activeQitemPresent: false, verdictOrEvidenceSetPresent: false, approved: false })).toBe("intent");
-    expect(derivePhase({ prdPresent: true, proofArtifactPresent: false, activeQitemPresent: false, verdictOrEvidenceSetPresent: false, approved: false })).toBe("spec");
-    expect(derivePhase({ prdPresent: true, proofArtifactPresent: false, activeQitemPresent: true, verdictOrEvidenceSetPresent: false, approved: false })).toBe("building");
-    expect(derivePhase({ prdPresent: true, proofArtifactPresent: true, activeQitemPresent: false, verdictOrEvidenceSetPresent: true, approved: false })).toBe("review");
-    expect(derivePhase({ prdPresent: true, proofArtifactPresent: true, activeQitemPresent: false, verdictOrEvidenceSetPresent: true, approved: true })).toBe("locked");
+    expect(derivePhase({ ...NONE })).toBe("intent");
+    expect(derivePhase({ ...NONE, prdAuthored: true })).toBe("spec");
+    expect(derivePhase({ ...NONE, prdAuthored: true, activeQitemPresent: true })).toBe("building");
+    expect(derivePhase({ ...NONE, prdAuthored: true, realProofArtifactsPresent: true, verdictOrEvidenceSetPresent: true })).toBe("review");
+    expect(derivePhase({ ...NONE, prdAuthored: true, realProofArtifactsPresent: true, verdictOrEvidenceSetPresent: true, approved: true })).toBe("locked");
+  });
+
+  it("a bare tracking qitem is coordination, not construction (AR-3)", () => {
+    expect(derivePhase({ ...NONE, activeQitemPresent: true })).toBe("intent");
+    expect(derivePhase({ ...NONE, activeQitemPresent: true, specLocked: true })).toBe("building");
+    expect(derivePhase({ ...NONE, activeQitemPresent: true, prdAuthored: true })).toBe("building");
+  });
+
+  it("specLocked alone promotes to spec (authored by fiat); real artifacts alone build", () => {
+    expect(derivePhase({ ...NONE, specLocked: true })).toBe("spec");
+    expect(derivePhase({ ...NONE, realProofArtifactsPresent: true })).toBe("building");
   });
 
   it("one signal satisfying two lanes resolves by precedence, deterministically", () => {
-    const s = { prdPresent: true, proofArtifactPresent: true, activeQitemPresent: false, verdictOrEvidenceSetPresent: true, approved: false };
+    const s = { ...NONE, prdAuthored: true, realProofArtifactsPresent: true, verdictOrEvidenceSetPresent: true };
     expect(derivePhase(s)).toBe("review");
     expect(derivePhase(s)).toBe(derivePhase({ ...s }));
   });
@@ -499,5 +516,148 @@ describe("candidate derivation", () => {
       artifact({ artifactType: "adjudication", verdict: "CLEAR", candidateSha: "adj3", droppedAt: "2026-07-04T09:30:00.000Z", relPath: "proof/a3.md" }),
     ];
     expect(deriveCandidateSha(arts)).toBe("new2");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// release-0.4.7 intent-stage/scaffold-projection — T2 (placeholder-only
+// contract → []), T3 (regime matrix, composer-level), T7 (byte-identity
+// carve, compose half).
+//
+// Fixtures are TEMPLATE-DERIVED: rendered with the REAL CLI renderers
+// (dynamic-imported exactly like scope-audit-parity.test.ts does) so a
+// template drift breaks these tests honestly. A pristine `rig scope slice
+// create` output is the canonical intent-stage fixture.
+// ---------------------------------------------------------------------------
+
+import * as nodePath from "node:path";
+import { beforeAll as beforeAllIntent } from "vitest";
+
+const INTENT_REPO_ROOT = nodePath.resolve(import.meta.dirname, "..", "..", "..");
+
+interface PristineFixture {
+  readme: string;
+  prd: string;
+  proof: string;
+}
+
+let pristine: PristineFixture;
+
+beforeAllIntent(async () => {
+  const mod = await import(
+    nodePath.join(INTENT_REPO_ROOT, "packages/cli/src/lib/scope/templates.ts")
+  );
+  const opts = {
+    id: "OPR.T.99",
+    slice_number: "99",
+    slug: "pristine",
+    mission: "release-t",
+    title: "Pristine",
+    created_date: "2026-07-11",
+  };
+  pristine = {
+    readme: mod.renderSliceTemplate("placeholder", opts),
+    prd: mod.renderImplementationPrdTemplate(opts),
+    proof: mod.renderSliceProofTemplate({ id: "OPR.T.99", title: "Pristine" }),
+  };
+});
+
+describe("T2 — extractProofContract filters scaffold placeholders", () => {
+  it("a pristine template PRD's contract extracts to [] (placeholder-only)", () => {
+    expect(extractProofContract(pristine.prd)).toEqual([]);
+  });
+
+  it("an authored line survives byte-exact next to the placeholder; bracket-edge text survives", () => {
+    const prd = pristine.prd.replace(
+      /^## Proof contract\s*$/m,
+      "## Proof contract\n\n- [ ] phone journey video\n- [ ] [P0] ship the drawer",
+    );
+    const items = extractProofContract(prd);
+    expect(items.map((i) => i.text)).toEqual(["phone journey video", "[P0] ship the drawer"]);
+  });
+
+  it("the pristine template PROOF.md does NOT claim a pass (verdict is a placeholder)", () => {
+    expect(proofClaimsPass(pristine.proof)).toBe(false);
+  });
+});
+
+describe("T3 — regime matrix (multi-regime preserved, don't-collapse)", () => {
+  function pristineInputs(over: Partial<SliceComposeInputs> = {}): SliceComposeInputs {
+    return baseInputs({
+      readme: pristine.readme,
+      prd: pristine.prd,
+      proofMd: pristine.proof,
+      proofDirExists: true,
+      ...over,
+    });
+  }
+
+  it("row 1: pristine scaffold + tracking qitem → INTENT, with all three honest empties", () => {
+    const r = composeSliceReview(pristineInputs({ activeQitemPresent: true }));
+    expect(r.phase).toBe("intent");
+    // DELIVERED honest empty (VM-002): no placeholder promises survive.
+    expect(r.delivered.items).toHaveLength(0);
+    // PLAN honest empty (S5 fold-in): placeholder-only mini-reqs renders as not planned.
+    expect(r.plan.concise.text).toBeNull();
+  });
+
+  it("row 2: pristine scaffold + zero qitems → INTENT", () => {
+    expect(composeSliceReview(pristineInputs()).phase).toBe("intent");
+  });
+
+  it("row 3: authored PRD + qitem + no plan-lock → BUILDING (prdAuthored leg)", () => {
+    const r = composeSliceReview(baseInputs({ activeQitemPresent: true }));
+    expect(r.phase).toBe("building");
+  });
+
+  it("row 4: plan-locked pristine + qitem → BUILDING (specLocked leg — authored by fiat)", () => {
+    const r = composeSliceReview(
+      pristineInputs({ activeQitemPresent: true, approval: { spec: DELIVERY_STAMP, delivery: null } }),
+    );
+    expect(r.phase).toBe("building");
+  });
+
+  it("row 5: verdict-bearing PROOF.md → REVIEW (tier logic untouched — the non-goal held)", () => {
+    const r = composeSliceReview(
+      pristineInputs({ proofMd: "Closed by: qa@rig   Date: 2026-07-11   Verdict: PASS\n\nProven.\n" }),
+    );
+    expect(r.phase).toBe("review");
+  });
+
+  it("row 6: a real C1 drop moves the pristine scaffold out of INTENT (BUILDING/REVIEW)", () => {
+    const r = composeSliceReview(pristineInputs({ artifacts: [artifact({ artifactType: "qa" })] }));
+    expect(["building", "review"]).toContain(r.phase);
+  });
+
+  it("row 7: authored mini-reqs + placeholder-only contract → SPEC and PLAN text renders (independent sections)", () => {
+    const prd = pristine.prd.replace(
+      /^1\. \[.*\]$/m,
+      "1. One real observable outcome.",
+    );
+    const r = composeSliceReview(pristineInputs({ prd }));
+    expect(r.phase).toBe("spec");
+    expect(r.plan.concise.text).toContain("1. One real observable outcome.");
+    expect(r.delivered.items).toHaveLength(0);
+  });
+
+  it("row 3b: a bare tracking qitem with NO authored/locked spec is coordination, not construction → INTENT", () => {
+    const r = composeSliceReview(pristineInputs({ activeQitemPresent: true, proofMd: null }));
+    expect(r.phase).toBe("intent");
+  });
+});
+
+describe("T7 — byte-identity carve (compose half): authored slices project identically", () => {
+  it("the fully-authored fixture keeps its exact pre-change projection", () => {
+    const r = composeSliceReview(baseInputs());
+    expect(r.phase).toBe("spec");
+    expect(r.delivered.items.map((i) => i.promised.text)).toEqual(["phone journey video", "range probe 206"]);
+    expect(r.plan.concise.text).toContain("1. One surface.");
+    expect(r.plan.concise.text).toContain("2. Verified from recorded QA comparisons only.");
+    expect(r.intent.text).toContain("The founder's exact words.");
+  });
+
+  it("an authored slice with artifacts + qitem keeps its phase behavior", () => {
+    expect(composeSliceReview(baseInputs({ activeQitemPresent: true })).phase).toBe("building");
+    expect(composeSliceReview(baseInputs({ artifacts: fullGate() })).phase).toBe("review");
   });
 });
