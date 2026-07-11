@@ -40,11 +40,11 @@ import {
   type SliceListEntry,
 } from "../../hooks/useSlices.js";
 import {
-  deriveMissionStatusFromSlices,
   latestProjectMissionActivity,
   partitionProjectMissions,
   projectSliceFromListEntry,
   projectSliceMeta,
+  reconcileMissionStatus,
   type ProjectMissionGroup,
 } from "../../lib/project-mission-state.js";
 import { StoryGraph } from "./StoryGraph.js";
@@ -555,12 +555,20 @@ function WorkspaceOverviewPanel() {
       if (!buckets.has(key)) buckets.set(key, []);
       buckets.get(key)!.push(row);
     }
-    return Array.from(buckets.entries()).map(([key, slices]) => ({
-      id: key,
-      label: key === "unsorted" ? "Unsorted" : key,
-      status: deriveMissionStatusFromSlices(slices),
-      slices,
-    }));
+    // VM-005: authored-wins precedence via the daemon's missions sidecar;
+    // railItem/unsorted keys have no sidecar entry and fall to derived.
+    const authored = data.missions ?? {};
+    return Array.from(buckets.entries()).map(([key, slices]) => {
+      const rec = reconcileMissionStatus(authored[key]?.authoredStatus ?? null, slices);
+      return {
+        id: key,
+        label: key === "unsorted" ? "Unsorted" : key,
+        status: rec.state,
+        statusLabel: rec.label,
+        statusSource: rec.source,
+        slices,
+      };
+    });
   }, [data]);
   const sections = useMemo(() => partitionProjectMissions(missions), [missions]);
 
@@ -604,7 +612,7 @@ function WorkspaceOverviewPanel() {
           </p>
         </div>
         <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">
-          {mission.status}
+          {mission.statusLabel ?? mission.status}
         </span>
       </div>
       <ul className="mt-2 space-y-1">

@@ -37,6 +37,12 @@ export interface SliceListResponse {
   slices: SliceListEntry[];
   totalCount: number;
   filter: SliceFilter;
+  /** VM-005 (release-0.4.7): additive authored mission-status sidecar —
+   *  keyed by missionId (missions with at least one indexed slice), carrying
+   *  the raw README frontmatter `status:` (null when absent). Chip surfaces
+   *  feed it to reconcileMissionStatus so authored-wins precedence holds
+   *  without a second round-trip. Optional: older daemons omit it. */
+  missions?: Record<string, { authoredStatus: string | null }>;
   // Workflows in Spec Library v0 — present only when boundToWorkflow filter applied.
   boundToWorkflow?: {
     specName: string;

@@ -10,12 +10,20 @@
 import * as React from "react";
 import { cn } from "../lib/utils.js";
 
+// VM-005 (release-0.4.7): "unknown" is deleted — mission status is never
+// genuinely unknowable (every derivation input is known), so every state
+// names an honest word. New known states: idle (slices exist, nothing
+// currently moving, not all done) · empty (zero slices — a tree-only word
+// by construction) · draft (all-draft mission). Labels/tones are
+// founder-relabelable with zero logic change.
 export type MissionStatus =
   | "active"
   | "paused"
   | "shipped"
   | "blocked"
-  | "unknown";
+  | "idle"
+  | "empty"
+  | "draft";
 
 export interface MissionStatusBadgeProps {
   status: MissionStatus;
@@ -29,7 +37,9 @@ const toneClass: Record<MissionStatus, string> = {
   paused: "border-outline text-on-surface-variant",
   shipped: "border-secondary text-secondary",
   blocked: "border-warning text-warning",
-  unknown: "border-outline-variant text-on-surface-variant",
+  idle: "border-outline-variant text-on-surface-variant",
+  empty: "border-outline-variant text-on-surface-variant",
+  draft: "border-outline text-on-surface-variant",
 };
 
 const toneDot: Record<MissionStatus, string> = {
@@ -37,7 +47,9 @@ const toneDot: Record<MissionStatus, string> = {
   paused: "bg-outline-variant",
   shipped: "bg-secondary",
   blocked: "bg-warning",
-  unknown: "bg-surface-highest",
+  idle: "bg-surface-highest",
+  empty: "bg-surface-highest",
+  draft: "bg-outline-variant",
 };
 
 export function MissionStatusBadge({
@@ -66,10 +78,18 @@ export function MissionStatusBadge({
 /**
  * Parse a mission `status:` field from PROGRESS.md frontmatter content.
  * Returns "unknown" if the file content can't be parsed or no status
- * field is found. Per project-tree.md L132–L133 — the source of truth
- * for mission status is the PROGRESS.md frontmatter.
+ * field is found.
+ *
+ * VM-005: this PROGRESS.md family widens its OWN return locally — "unknown"
+ * is no longer a MissionStatus (chip surfaces go through the reconciled
+ * home in project-mission-state.ts). SC-26's "PROGRESS.md is the source of
+ * truth for mission status" is SUPERSEDED for mission-status CHIPS by
+ * VM-005 FR-1 (authored README frontmatter wins); it survives scoped to
+ * the Progress tab/rail, which this parser family still serves.
  */
-export function parseMissionStatus(progressMdContent: string | null | undefined): MissionStatus {
+export function parseMissionStatus(
+  progressMdContent: string | null | undefined,
+): MissionStatus | "unknown" {
   if (!progressMdContent) return "unknown";
   // Match a YAML frontmatter status field at the top of the file.
   const fmMatch = progressMdContent.match(/^---\s*\n([\s\S]*?)\n---/);

@@ -7,7 +7,7 @@
 // Promotes the founder-approved twin mockup (digital-twin/opr-0.4.1.24/) to real
 // data, REUSING the existing project-mission machinery:
 //   - missions DERIVED from useSlices (group SliceListEntry by missionId via
-//     projectSliceFromListEntry; status via deriveMissionStatusFromSlices),
+//     projectSliceFromListEntry; status via the VM-005 reconciled home),
 //   - sorted most-recently-modified via sortProjectMissions
 //     (latestProjectMissionActivity desc), COLLAPSED by default.
 //   - PER-MISSION STEERING GLANCE = the shipped MISSION_BRIEF.md path
@@ -29,7 +29,7 @@ import { useScopeMarkdown } from "../../hooks/useScopeMarkdown.js";
 import { useHostSelection, useLocalFilesAllowed } from "../../hooks/useHosts.js";
 import {
   projectSliceFromListEntry,
-  deriveMissionStatusFromSlices,
+  reconcileMissionStatus,
   sortProjectMissions,
   latestProjectMissionActivity,
   type ProjectMissionGroup,
@@ -157,7 +157,7 @@ function MissionRow({ mission, expanded, onToggle }: { mission: ProjectMissionGr
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-mono text-[13px] uppercase tracking-[0.06em] text-on-surface">{mission.label}</span>
-              <MissionStatusBadge status={mission.status} />
+              <MissionStatusBadge status={mission.status} label={mission.statusLabel} />
             </div>
             <div className="mt-1 font-mono text-[10px] uppercase tracking-[0.06em] text-on-surface-variant">
               {provenCount} proven · {activeCount} active · {sliceCount} slice{sliceCount === 1 ? "" : "s"} · {formatActivity(recency)}
@@ -195,13 +195,20 @@ export function WorkspacePortfolioPanel() {
       if (!buckets.has(key)) buckets.set(key, []);
       buckets.get(key)!.push(row);
     }
+    // VM-005: authored-wins precedence via the daemon's missions sidecar.
+    const authored = data.missions ?? {};
     return Array.from(buckets.entries())
-      .map(([key, slices]) => ({
-        id: key,
-        label: key === "unsorted" ? "Unsorted" : key,
-        status: deriveMissionStatusFromSlices(slices),
-        slices,
-      }))
+      .map(([key, slices]) => {
+        const rec = reconcileMissionStatus(authored[key]?.authoredStatus ?? null, slices);
+        return {
+          id: key,
+          label: key === "unsorted" ? "Unsorted" : key,
+          status: rec.state,
+          statusLabel: rec.label,
+          statusSource: rec.source,
+          slices,
+        };
+      })
       .sort(sortProjectMissions); // most-recently-modified first
   }, [data]);
 

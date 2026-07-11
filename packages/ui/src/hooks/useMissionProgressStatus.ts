@@ -17,7 +17,7 @@ import { useFilesRead, FilesReadError } from "./useFiles.js";
 import { parseMissionStatus, type MissionStatus } from "../components/MissionStatusBadge.js";
 
 export interface UseMissionProgressStatusResult {
-  status: MissionStatus;
+  status: MissionStatus | "unknown";
   isLoading: boolean;
   /** When true, PROGRESS.md does not exist for this mission (or the read
    *  failed); status is "unknown" and the UI may surface a hint. */

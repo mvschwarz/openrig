@@ -19,6 +19,13 @@ export type ProjectMissionGroup = {
   id: string;
   label: string;
   status: MissionStatus;
+  /** VM-005: the rendered word — authored missions render the author's raw
+   *  word verbatim; derived missions render the enum word. Consumers that
+   *  build groups via reconcileMissionStatus set this from `label`. */
+  statusLabel?: string;
+  /** VM-005: whether `status` came from authored frontmatter or the derived
+   *  roll-up — projectMissionBucket's FR-4 shipped-family test reads it. */
+  statusSource?: MissionStatusSource;
   slices: ProjectSliceRow[];
 };
 
@@ -57,18 +64,94 @@ export function isCurrentProjectSlice(slice: ProjectSliceRow, now = Date.now()):
   return false;
 }
 
-export function deriveMissionStatusFromSlices(slices: ProjectSliceRow[]): MissionStatus {
-  if (slices.length === 0) return "unknown";
-  const now = Date.now();
+// VM-005 (release-0.4.7) — the ONE reconciled mission-status home.
+// Mission status was answered four independent ways (authored README
+// frontmatter · this file's roll-up · the bucket test · a PROGRESS.md live
+// override) with no precedence rule, and the roll-up labeled its taxonomy
+// hole UNKNOWN — a status that DECAYED by wall clock. reconcileMissionStatus
+// is the single answer every chip surface consumes: authored-when-present is
+// authoritative (and never consults slices or the clock — no-decay by
+// construction); the derived ladder serves only missions with no authored
+// status, and every path names a KNOWN state.
+
+export type MissionStatusSource = "authored" | "derived";
+
+export interface ReconciledMissionStatus {
+  state: MissionStatus;
+  /** The rendered word. Authored-present → the author's raw word VERBATIM
+   *  (chip tone via AUTHORED_WORD_TONES); derived → the enum word. */
+  label: string;
+  source: MissionStatusSource;
+}
+
+/** PIN Q3-P1 (arch, VM-005): the authored word→tone normalizer is ONE
+ *  exported CLOSED constant — adding a word is one map entry, never new
+ *  logic. Unrecognized words get a neutral tone ("idle", the tone-carrier
+ *  only) and the authored word still wins and renders verbatim. */
+export const AUTHORED_WORD_TONES: Record<string, MissionStatus> = {
+  complete: "shipped",
+  completed: "shipped",
+  done: "shipped",
+  shipped: "shipped",
+  active: "active",
+  "in-progress": "active",
+  in_progress: "active",
+  "in-flight": "active",
+  wip: "active",
+  paused: "paused",
+  "on-hold": "paused",
+  on_hold: "paused",
+  blocked: "blocked",
+  stalled: "blocked",
+  draft: "draft",
+  idle: "idle",
+};
+
+function normalizeAuthored(authored: string): { state: MissionStatus; label: string } {
+  const word = authored.trim();
+  const state = AUTHORED_WORD_TONES[word.toLowerCase()] ?? "idle";
+  return { state, label: word };
+}
+
+/** The reconciled mission status. `now` is injected (never read internally)
+ *  so the derived recency window is testable and the authored path is
+ *  clock-free by construction. */
+export function reconcileMissionStatus(
+  authored: string | null,
+  slices: ProjectSliceRow[],
+  now = Date.now(),
+): ReconciledMissionStatus {
+  if (authored !== null && authored.trim().length > 0) {
+    const { state, label } = normalizeAuthored(authored);
+    return { state, label, source: "authored" };
+  }
+  const state = deriveMissionStatusFromSlices(slices, now);
+  return { state, label: state, source: "derived" };
+}
+
+/** The derived ladder (fallback-only; pm's ratified vocabulary
+ *  empty · blocked · draft · active · shipped · idle — no path returns
+ *  the retired UNKNOWN word: every input here is fully known). Internal;
+ *  chip consumers go through reconcileMissionStatus. */
+function deriveMissionStatusFromSlices(slices: ProjectSliceRow[], now: number): MissionStatus {
+  if (slices.length === 0) return "empty";
   if (slices.some((s) => s.status === "blocked" && isCurrentProjectSlice(s, now))) {
     return "blocked";
   }
+  // Q2 (VM-005): a mission that is nothing but drafts is honestly "draft",
+  // not "active" — fresh scaffolds have recent mtimes and would otherwise
+  // read as current. Lands after blocked, before any-current.
+  if (slices.every((s) => s.status === "draft")) return "draft";
   if (slices.some((s) => isCurrentProjectSlice(s, now))) return "active";
   if (slices.every((s) => s.status === "done")) return "shipped";
-  return "unknown";
+  return "idle";
 }
 
 export function projectMissionBucket(mission: ProjectMissionGroup): ProjectMissionBucket {
+  // VM-005 FR-4: an AUTHORED shipped-family status buckets archive regardless
+  // of slice recency (normalizeAuthored maps complete/completed/done/shipped
+  // → "shipped", so source+state is exactly the shipped-family test).
+  if (mission.statusSource === "authored" && mission.status === "shipped") return "archive";
   if (mission.slices.some((s) => isCurrentProjectSlice(s))) return "current";
   if (mission.slices.length === 0 && mission.status !== "shipped") return "current";
   return "archive";

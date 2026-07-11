@@ -155,7 +155,7 @@ function computeMissionPath(slice: SliceListEntry): string {
  *  workflow states may appear), or null when the README is missing /
  *  the field is absent. Powers the durable storytelling-filter for
  *  Getting Started complete-and-hide. */
-function readMissionStatus(missionPath: string): string | null {
+export function readMissionStatus(missionPath: string): string | null {
   const readmePath = path.join(missionPath, "README.md");
   if (!fs.existsSync(readmePath)) return null;
   const raw = fs.readFileSync(readmePath, "utf-8");

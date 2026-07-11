@@ -1,11 +1,13 @@
 // V1 attempt-3 Phase 3 — Project tree per project-tree.md L13–L46 + SC-24.
 //
 // V1 attempt-3 Phase 5 P5-5 + P5-6: filesystem-based mission discovery via
-// useMissionDiscovery (walks workspace.root/missions/ over /api/files/list)
-// and live MissionStatusBadge derived from PROGRESS.md frontmatter via
-// useMissionProgressStatus (over /api/files/read). When the allowlist
-// doesn't expose workspace.root, the tree falls back to the legacy
-// railItem/missionId-grouped slice listing.
+// useMissionDiscovery (walks workspace.root/missions/ over /api/files/list).
+// When the allowlist doesn't expose workspace.root, the tree falls back to
+// the legacy railItem/missionId-grouped slice listing.
+// VM-005 (release-0.4.7): mission-status chips come from the reconciled home
+// (authored README frontmatter via the slices-payload sidecar, derived
+// roll-up as fallback) — the P5-6 PROGRESS.md live status override is
+// retired (see the MissionChipBadge comment below).
 
 import { useState, useMemo } from "react";
 import { Link } from "@tanstack/react-router";
@@ -19,17 +21,17 @@ import {
   useMissionDiscovery,
   type DiscoveredMission,
 } from "../../hooks/useMissionDiscovery.js";
-import { useMissionProgressStatus } from "../../hooks/useMissionProgressStatus.js";
 import { MissionStatusBadge, type MissionStatus } from "../MissionStatusBadge.js";
 import { QueueCountIcon, StatusDot, sliceStatusTone } from "./ProjectMetaPrimitives.js";
 import {
-  deriveMissionStatusFromSlices,
   isCurrentProjectSlice,
   partitionProjectMissions,
   projectSliceFromListEntry,
   projectSliceMeta,
+  reconcileMissionStatus,
   type ProjectMissionBucket,
   type ProjectSliceRow,
+  type MissionStatusSource,
 } from "../../lib/project-mission-state.js";
 
 function ProjectTreeRefreshHeader({ remoteReadonly }: { remoteReadonly: boolean }) {
@@ -66,6 +68,8 @@ type GroupedMission = {
   id: string;
   label: string;
   status: MissionStatus;
+  statusLabel: string;
+  statusSource: MissionStatusSource;
   slices: ProjectSliceRow[];
   // P5-5: filesystem-discovered missions carry root + path so the live
   // PROGRESS.md status fetcher knows where to read.
@@ -73,18 +77,18 @@ type GroupedMission = {
   fsPath?: string;
 };
 
-/** Live mission-status badge: when the mission was discovered on disk,
- *  fetches PROGRESS.md frontmatter; otherwise falls back to the heuristic
- *  derived from constituent slices' statuses. */
-function LiveMissionStatusBadge({ mission }: { mission: GroupedMission }) {
-  const live = useMissionProgressStatus(mission.fsRoot ?? null, mission.fsPath ?? null);
-  // When filesystem-discovered AND the read succeeded, prefer the live status;
-  // otherwise the slice-derived fallback.
-  const status =
-    mission.fsRoot && !live.unavailable && !live.isLoading ? live.status : mission.status;
+// VM-005 FR-1 (Q1 Option A, PIN Q1-P1): the PROGRESS.md live mission-status
+// override (LiveMissionStatusBadge / useMissionProgressStatus) is REMOVED —
+// SC-26's "PROGRESS.md is the source of truth for mission status" is
+// SUPERSEDED for mission-status CHIPS by the reconciled home
+// (authored README frontmatter wins, derived roll-up is fallback-only).
+// SC-26's PROGRESS.md authority survives scoped to its real domain, the
+// Progress tab/rail. The hook itself stays (consumer-dormant, PIN Q1-P2).
+function MissionChipBadge({ mission }: { mission: GroupedMission }) {
   return (
     <MissionStatusBadge
-      status={status}
+      status={mission.status}
+      label={mission.statusLabel}
       testId={`project-mission-${mission.id}-badge`}
     />
   );
@@ -119,6 +123,14 @@ export function ProjectTreeView() {
 
   const sliceList: SliceListEntry[] =
     slicesResp && "slices" in slicesResp ? slicesResp.slices : [];
+  // VM-005: the daemon's authored mission-status sidecar (authored-wins
+  // precedence). Keys with no entry (railItem groups, zero-slice discovered
+  // missions, older daemons) reconcile from the derived roll-up. Memoized so
+  // the missions memo below keeps a stable dep identity.
+  const authoredStatuses = useMemo(
+    () => (slicesResp && "slices" in slicesResp ? (slicesResp.missions ?? {}) : {}),
+    [slicesResp],
+  );
 
   // Group slices by missionId first, then railItem for legacy flat roots.
   const slicesByMissionKey = useMemo(() => {
@@ -140,10 +152,16 @@ export function ProjectTreeView() {
       const discovered: GroupedMission[] = discovery.missions.map((m: DiscoveredMission) => {
         const matchedSlices = slicesByMissionKey.get(m.name) ?? [];
         if (matchedSlices.length > 0) consumedKeys.add(m.name);
+        const rec = reconcileMissionStatus(
+          authoredStatuses[m.name]?.authoredStatus ?? null,
+          matchedSlices,
+        );
         return {
           id: m.name,
           label: m.name,
-          status: deriveMissionStatusFromSlices(matchedSlices), // baseline; live overrides via badge
+          status: rec.state,
+          statusLabel: rec.label,
+          statusSource: rec.source,
           slices: matchedSlices,
           fsRoot: m.root,
           fsPath: m.path,
@@ -154,23 +172,34 @@ export function ProjectTreeView() {
       // collapsed into one mixed current/archive bucket.
       for (const [missionKey, slices] of slicesByMissionKey.entries()) {
         if (consumedKeys.has(missionKey)) continue;
+        const rec = reconcileMissionStatus(
+          authoredStatuses[missionKey]?.authoredStatus ?? null,
+          slices,
+        );
         discovered.push({
           id: missionKey,
           label: missionKey === "unsorted" ? "Unsorted" : missionKey,
-          status: deriveMissionStatusFromSlices(slices),
+          status: rec.state,
+          statusLabel: rec.label,
+          statusSource: rec.source,
           slices,
         });
       }
       return discovered;
     }
     // Fallback: missionId/railItem grouping only.
-    return Array.from(slicesByMissionKey.entries()).map(([k, slices]) => ({
-      id: k,
-      label: k === "unsorted" ? "Unsorted" : k,
-      status: deriveMissionStatusFromSlices(slices),
-      slices,
-    }));
-  }, [discovery.unavailable, discovery.missions, slicesByMissionKey]);
+    return Array.from(slicesByMissionKey.entries()).map(([k, slices]) => {
+      const rec = reconcileMissionStatus(authoredStatuses[k]?.authoredStatus ?? null, slices);
+      return {
+        id: k,
+        label: k === "unsorted" ? "Unsorted" : k,
+        status: rec.state,
+        statusLabel: rec.label,
+        statusSource: rec.source,
+        slices,
+      };
+    });
+  }, [discovery.unavailable, discovery.missions, slicesByMissionKey, authoredStatuses]);
 
   const missionSections = useMemo(() => {
     return partitionProjectMissions(missions);
@@ -252,7 +281,7 @@ export function ProjectTreeView() {
           >
             {m.label}
           </Link>
-          <LiveMissionStatusBadge mission={m} />
+          <MissionChipBadge mission={m} />
         </div>
         {missionExpanded ? (
           <ul className="ml-4 border-l border-outline-variant">

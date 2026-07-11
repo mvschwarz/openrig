@@ -146,6 +146,12 @@ const STATUS_TO_BUCKET: Record<string, SliceStatus> = {
   ratified: "active",
   "draft-pending-orch-ratification": "draft",
   draft: "draft",
+  // VM-005 (release-0.4.7): the scaffold-template frontmatter status TOKEN —
+  // a fresh `rig scope` slice is honestly a draft, not active (it previously
+  // fell through to mapStatus's terminal default). Distinct grammar from the
+  // scaffold-placeholder twin modules, which classify bracket-wrapped body
+  // TEXT — a cousin of, not a home for, this frontmatter token literal.
+  placeholder: "draft",
   done: "done",
   shipped: "done",
   promoted: "done",
@@ -167,6 +173,11 @@ export class SliceIndexer {
   private readonly cacheTtlMs: number;
   private listingCache: CachedListing | null = null;
   private detailCache: Map<string, CachedSlice> = new Map();
+  // VM-005: authored mission-status sidecar cache (same TTL as the listing).
+  private missionStatusCache: {
+    statuses: Record<string, { authoredStatus: string | null }>;
+    expiresAt: number;
+  } | null = null;
 
   constructor(opts: SliceIndexerOpts) {
     this.slicesRoot = opts.slicesRoot;
@@ -185,6 +196,61 @@ export class SliceIndexer {
   invalidate(): void {
     this.listingCache = null;
     this.detailCache.clear();
+    this.missionStatusCache = null;
+  }
+
+  /** VM-005 (release-0.4.7) — the authored mission-status sidecar for the
+   *  slices list payload: one mission-README frontmatter read per indexed
+   *  mission, inside the same 60s cache discipline as the listing. Keys are
+   *  missions with at least one INDEXED slice (zero-slice missions have no
+   *  indexed slices and never appear here — the tree's discovery walk owns
+   *  that population). Read semantics are LOCKSTEP with
+   *  routes/missions.ts readMissionStatus (README.md only, raw string, no
+   *  enum validation, non-empty-or-null) — pinned by test. */
+  missionAuthoredStatuses(): Record<string, { authoredStatus: string | null }> {
+    if (!this.isReady()) return {};
+    const now = Date.now();
+    if (this.missionStatusCache && this.missionStatusCache.expiresAt > now) {
+      return this.missionStatusCache.statuses;
+    }
+    const indexedMissionIds = new Set<string>();
+    for (const entry of this.list()) {
+      if (entry.missionId) indexedMissionIds.add(entry.missionId);
+    }
+    const statuses: Record<string, { authoredStatus: string | null }> = {};
+    for (const root of this.sliceRoots()) {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(root, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+        if (!indexedMissionIds.has(entry.name)) continue;
+        if (entry.name in statuses) continue; // first root wins, matching the slice walk
+        statuses[entry.name] = {
+          authoredStatus: this.readMissionAuthoredStatus(path.join(root, entry.name)),
+        };
+      }
+    }
+    this.missionStatusCache = { statuses, expiresAt: now + this.cacheTtlMs };
+    return statuses;
+  }
+
+  /** Lockstep twin of routes/missions.ts readMissionStatus (see the sidecar
+   *  doc above; the lockstep test pins both reads agree on the same bytes). */
+  private readMissionAuthoredStatus(missionPath: string): string | null {
+    const readmePath = path.join(missionPath, "README.md");
+    let raw: string;
+    try {
+      raw = fs.readFileSync(readmePath, "utf8");
+    } catch {
+      return null;
+    }
+    const fm = parseFrontmatter(raw);
+    const value = fm["status"];
+    return typeof value === "string" && value.length > 0 ? value : null;
   }
 
   list(): SliceListEntry[] {

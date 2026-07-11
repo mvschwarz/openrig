@@ -92,6 +92,10 @@ export function slicesRoutes(): Hono {
       totalCount: filtered.length,
       filter,
       boundToWorkflow: boundDiagnostic,
+      // VM-005 (release-0.4.7): additive authored mission-status sidecar so
+      // chip surfaces can honor authored-wins precedence without a second
+      // round-trip. The `slices` array itself is byte-untouched.
+      missions: deps.indexer.missionAuthoredStatuses(),
     });
   });
 
