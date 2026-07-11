@@ -49,7 +49,11 @@ import {
   type VerdictTone,
   type VerifyLineage,
 } from "./types.js";
-import { isScaffoldPlaceholderText } from "../scope/scaffold-placeholder.js";
+import {
+  isScaffoldPlaceholderText,
+  hasAuthoredNumberedItem,
+  isPlaceholderOnlyBlock,
+} from "../scope/scaffold-placeholder.js";
 
 // --- Fixed, visible v1 thresholds (markdown-steered tuning is a named fast-follow) ---
 export const IDLE_WITH_WORK_THRESHOLD_MIN = 30;
@@ -343,14 +347,16 @@ export function extractMiniReqs(prd: string | null): string | null {
  *  SINGLE-PARSE PIN (arch AR-2): the derivePhase `prdAuthored` signal AND the
  *  PLAN concise render decision MUST both derive from this ONE parse of the
  *  ONE extractMiniReqs extraction — a second mini-reqs grammar anywhere in
- *  this file would recreate the seam map's R3 divergence class intra-file. */
+ *  this file would recreate the seam map's R3 divergence class intra-file.
+ *
+ *  release-0.4.7 micro-bundle A: the LINE grammar now lives in the twin
+ *  module's `hasAuthoredNumberedItem` (shared with both scope-audit mini-reqs
+ *  arms — the IF-3 dot/paren heal, arch MB-AR-1); this function keeps the
+ *  parse-side contract above and delegates the grammar. Prose/bullet-only is
+ *  deliberately not-authored — reviewer-L1 ruling 2026-07-11, intent-stage
+ *  gate: the numbered tier is where approval starts. */
 export function hasAuthoredMiniReqs(miniReqs: string | null): boolean {
-  if (miniReqs === null) return false;
-  for (const line of miniReqs.split("\n")) {
-    const m = line.match(/^\s*\d+[.)]\s+(.+)$/);
-    if (m && !isScaffoldPlaceholderText(m[1]!.trim())) return true;
-  }
-  return false;
+  return hasAuthoredNumberedItem(miniReqs);
 }
 
 /** One promised deliverable from the D2 `## Proof contract` (§3.1): the item
@@ -1027,7 +1033,13 @@ export function composeSliceReview(inputs: SliceComposeInputs): ComposedSliceRev
   const deliveredLock = lockFrom(inputs.approval.delivery);
 
   const escaping = new Set<string>();
-  const intentText = extractSection(inputs.readme, "Intent");
+  // release-0.4.7 micro-bundle B: a placeholder-only Intent section (the
+  // shipped template scaffolds it as one fully-bracket-wrapped line) is
+  // treated as ABSENT at the source, so the EXISTING "no intent recorded"
+  // degrade fires — no new string, UI/freeze inherit (R7). Any authored line
+  // in the block keeps the section verbatim (byte-identity carve).
+  const intentTextRaw = extractSection(inputs.readme, "Intent");
+  const intentText = intentTextRaw !== null && !isPlaceholderOnlyBlock(intentTextRaw) ? intentTextRaw : null;
   const intentMedia = sectionMedia(intentText, escaping);
   const miniReqs = extractMiniReqs(inputs.prd);
   const planMedia = dedupMedia([

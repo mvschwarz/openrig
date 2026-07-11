@@ -122,3 +122,68 @@ describe("T6 — GENERIC_SCAFFOLD_ACCEPTANCE stays in sync with the shipped slic
     expect(checkboxTexts(body!)).toEqual([...GENERIC_SCAFFOLD_ACCEPTANCE]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// release-0.4.7 placeholder-suppression completeness micro-bundle —
+// T-B2 (isPlaceholderOnlyBlock unit vectors), T-A grammar
+// (hasAuthoredNumberedItem unit vectors), T-C (prose/bullet-only suppression
+// pin — asserts the arch-ruled, reviewer-L1 behavior).
+// ---------------------------------------------------------------------------
+
+import {
+  hasAuthoredNumberedItem,
+  isPlaceholderOnlyBlock,
+} from "../src/domain/scope/scaffold-placeholder.js";
+
+describe("T-B2 — isPlaceholderOnlyBlock (block-level 'nothing authored here')", () => {
+  it("null/empty → false (absence is its own state; callers keep null handling)", () => {
+    expect(isPlaceholderOnlyBlock(null)).toBe(false);
+    expect(isPlaceholderOnlyBlock("")).toBe(false);
+    expect(isPlaceholderOnlyBlock("   \n  \n")).toBe(false);
+  });
+
+  it("single fully-bracket-wrapped line → true (the shipped template Intent scaffold)", () => {
+    expect(isPlaceholderOnlyBlock("[The recorded intent, verbatim — what was asked for and why.]")).toBe(true);
+    expect(isPlaceholderOnlyBlock("\n  [padded placeholder]  \n")).toBe(true);
+  });
+
+  it("multi-line per-LINE case: `[a]\\n[b]` → true (the whole-string trim would miss this)", () => {
+    expect(isPlaceholderOnlyBlock("[a]\n[b]")).toBe(true);
+  });
+
+  it("blank lines are ignored between placeholder lines", () => {
+    expect(isPlaceholderOnlyBlock("[a]\n\n[b]\n")).toBe(true);
+  });
+
+  it("ANY authored line makes the block authored (mixed → false)", () => {
+    expect(isPlaceholderOnlyBlock("[a]\nreal authored words")).toBe(false);
+    expect(isPlaceholderOnlyBlock("The founder's exact words.")).toBe(false);
+  });
+});
+
+describe("T-A grammar — hasAuthoredNumberedItem (the ONE authored-numbered-item grammar)", () => {
+  it("dot-form and paren-form authored items both count (`1.` / `1)`)", () => {
+    expect(hasAuthoredNumberedItem("1. Drawer opens from the right side.")).toBe(true);
+    expect(hasAuthoredNumberedItem("1) Drawer opens from the right side.")).toBe(true);
+  });
+
+  it("placeholder-only numbered item → false (template `1. [...]` scaffold)", () => {
+    expect(hasAuthoredNumberedItem("1. [The concise one-glance requirement tier.]")).toBe(false);
+  });
+
+  it("null → false", () => {
+    expect(hasAuthoredNumberedItem(null)).toBe(false);
+  });
+
+  it("T-C: prose-only body → false (reviewer-L1 ruling — deliberately not-authored)", () => {
+    expect(hasAuthoredNumberedItem("Some prose describing intent without structure.")).toBe(false);
+  });
+
+  it("T-C: bullet-only body → false (bullets are not the numbered requirement tier)", () => {
+    expect(hasAuthoredNumberedItem("- bullet item one\n- bullet item two")).toBe(false);
+  });
+
+  it("T-C: mixed prose + one authored numbered item → true", () => {
+    expect(hasAuthoredNumberedItem("Context prose first.\n\n1. One real observable outcome.")).toBe(true);
+  });
+});

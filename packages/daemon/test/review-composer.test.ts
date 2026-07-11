@@ -661,3 +661,59 @@ describe("T7 — byte-identity carve (compose half): authored slices project ide
     expect(composeSliceReview(baseInputs({ artifacts: fullGate() })).phase).toBe("review");
   });
 });
+
+// ---------------------------------------------------------------------------
+// release-0.4.7 placeholder-suppression completeness — T-B1 (INTENT section:
+// placeholder-only projects the existing honest degrade; authored intent
+// byte-identical) + T-C compose leg (prose/bullet-only mini-reqs suppression
+// pin — asserts shipped b8c11535 behavior, zero behavior change intended).
+// ---------------------------------------------------------------------------
+
+describe("T-B1 — INTENT placeholder-only projects the honest degrade (micro-bundle B)", () => {
+  it("pristine template README (bracket-wrapped Intent) → intent.text null + 'no intent recorded'", () => {
+    const r = composeSliceReview(baseInputs({ readme: pristine.readme, prd: pristine.prd, proofMd: pristine.proof }));
+    expect(r.intent.text).toBeNull();
+    expect(r.intent.degrade).toBe("no intent recorded");
+  });
+
+  it("two-line `[a]\\n[b]` placeholder Intent → degrade (per-line block grammar)", () => {
+    const readme = "---\ntitle: t\n---\n\n# F\n\n## Intent\n\n[a]\n[b]\n";
+    const r = composeSliceReview(baseInputs({ readme }));
+    expect(r.intent.text).toBeNull();
+    expect(r.intent.degrade).toBe("no intent recorded");
+  });
+
+  it("AUTHORED intent projects byte-identically (the carve — filter never eats a real intent)", () => {
+    const r = composeSliceReview(baseInputs());
+    expect(r.intent.text).toContain("The founder's exact words.");
+    expect(r.intent.degrade).toBeNull();
+    const mixed = composeSliceReview(baseInputs({ readme: baseInputs().readme!.replace("The founder's exact words.", "[looks-bracketed] but authored words follow") }));
+    expect(mixed.intent.text).toContain("[looks-bracketed] but authored words follow");
+  });
+
+  it("ABSENT Intent section keeps its own state (null → same degrade, unchanged contract)", () => {
+    const r = composeSliceReview(baseInputs({ readme: "---\nt: 1\n---\n\n# F\n\nno intent heading here\n" }));
+    expect(r.intent.text).toBeNull();
+    expect(r.intent.degrade).toBe("no intent recorded");
+  });
+});
+
+describe("T-C — prose/bullet-only mini-reqs suppression pin (reviewer-L1 ruling; shipped behavior)", () => {
+  it("prose-only mini-reqs → PLAN '— not planned yet' (concise text null)", () => {
+    const prd = "## Mini-requirements\n\nJust prose, no numbered tier.\n\n## Proof contract\n\n- [ ] real item\n";
+    const r = composeSliceReview(baseInputs({ prd }));
+    expect(r.plan.concise.text).toBeNull();
+  });
+
+  it("bullet-only mini-reqs → concise text null", () => {
+    const prd = "## Mini-requirements\n\n- bullet one\n- bullet two\n\n## Proof contract\n\n- [ ] real item\n";
+    const r = composeSliceReview(baseInputs({ prd }));
+    expect(r.plan.concise.text).toBeNull();
+  });
+
+  it("mixed prose + ONE authored numbered item → renders", () => {
+    const prd = "## Mini-requirements\n\nContext prose.\n\n1. One real outcome.\n\n## Proof contract\n\n- [ ] real item\n";
+    const r = composeSliceReview(baseInputs({ prd }));
+    expect(r.plan.concise.text).toContain("1. One real outcome.");
+  });
+});

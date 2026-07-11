@@ -128,3 +128,50 @@ describe("T5 — shared-helper agreement across the three readers (the R3 pin, p
     expect(extractProofContract(prd).map((i) => i.text)).toEqual(["phone journey video"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// release-0.4.7 placeholder-suppression completeness — T-A1 (audit mini-reqs
+// arm learns the merged grammar) + T-A2 (the IF-3 paren-grammar HEAL:
+// RED at base b8c11535 proves today's audit-absent/review-present divergence;
+// green post-change proves audit joined compose's already-ratified grammar —
+// an arch-framed expected-change disclosure, not a regression).
+// ---------------------------------------------------------------------------
+
+function auditFor(prd: string) {
+  return classifyScopeItem({
+    id: "OPR.T.96",
+    path: "/fixture/96-minireqs",
+    readmeFrontmatterRaw: "id: OPR.T.96",
+    progressFileExists: true,
+    readmeOnlyMarker: false,
+    isActiveRelease: true,
+    level: "slice",
+    readmeContent: "# 96\n\n## Intent\n\nauthored\n",
+    implementationPrdContent: prd,
+  });
+}
+
+describe("T-A1 — audit mini-reqs arm counts only AUTHORED numbered items", () => {
+  it("placeholder-only mini-reqs → mini_requirements finding FIRES (was: silent)", () => {
+    const audit = auditFor(tpl.prd); // pristine template: `1. [...]` placeholder + placeholder contract
+    expect(audit.findings.map((f) => f.kind)).toContain("mini_requirements_missing_or_malformed");
+  });
+
+  it("authored dot-form mini-reqs → no mini_requirements finding", () => {
+    const prd = tpl.prd.replace(/^1\. \[.*\]$/m, "1. One real observable outcome.");
+    const audit = auditFor(prd);
+    expect(audit.findings.map((f) => f.kind)).not.toContain("mini_requirements_missing_or_malformed");
+  });
+});
+
+describe("T-A2 — the IF-3 heal: `1)` paren-form authored items — audit joins compose's grammar", () => {
+  it("paren-form authored mini-reqs: audit finding ABSENT and compose reads authored (agreement)", async () => {
+    const prd = tpl.prd.replace(/^1\. \[.*\]$/m, "1) One real observable outcome.");
+    // Reader 1 — audit: no malformed finding (RED at base: dot-only regex misses `1)`).
+    const audit = auditFor(prd);
+    expect(audit.findings.map((f) => f.kind)).not.toContain("mini_requirements_missing_or_malformed");
+    // Reader 2 — compose: authored TRUE via the same shared grammar.
+    const { extractMiniReqs, hasAuthoredMiniReqs } = await import("../src/domain/review/compose.js");
+    expect(hasAuthoredMiniReqs(extractMiniReqs(prd))).toBe(true);
+  });
+});

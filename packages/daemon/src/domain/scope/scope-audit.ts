@@ -1,6 +1,6 @@
 import * as YAML from "yaml";
 import { isMissionDotId, isSliceDotId } from "./dot-id.js";
-import { isScaffoldPlaceholderText } from "./scaffold-placeholder.js";
+import { isScaffoldPlaceholderText, hasAuthoredNumberedItem } from "./scaffold-placeholder.js";
 
 export type RailStatus = "present" | "missing" | "malformed" | "readme-only";
 export type FindingSeverity = "high" | "medium" | "low" | "info";
@@ -420,7 +420,12 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
       // at least one numbered list item; a heading over prose-only is
       // malformed (no usable requirements projection).
       const miniBody = h2Body(contractSource.content, "Mini-requirements");
-      const hasNumberedItem = miniBody !== null && /^\s*\d+\.\s+\S/m.test(miniBody);
+      // release-0.4.7 micro-bundle A: an AUTHORED numbered item — the twin
+      // module's ONE authored-numbered-item grammar, shared with review
+      // compose (heals the dot/paren grammar split AND the placeholder
+      // blindness in one predicate; the finding message below already reads
+      // honestly for both and stays unchanged).
+      const hasNumberedItem = hasAuthoredNumberedItem(miniBody);
       if (!hasNumberedItem) {
         findings.push({
           kind: "mini_requirements_missing_or_malformed",
