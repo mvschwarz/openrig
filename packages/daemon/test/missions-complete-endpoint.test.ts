@@ -17,6 +17,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { SliceIndexer } from "../src/domain/slices/slice-indexer.js";
 import { missionsRoutes } from "../src/routes/missions.js";
+import { slicesRoutes } from "../src/routes/slices.js";
 
 function buildApp(indexer: SliceIndexer): Hono {
   const app = new Hono();
@@ -223,5 +224,73 @@ describe("POST /api/missions/:missionId/complete", () => {
     expect(readme).toContain("label: keep me");
     expect(readme).toContain("status: complete");
     expect(readme).toContain("id: preserves");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// VM-005 B1 — write-side cache coherence (the narrow C-vii exception;
+// arch ruling b8d91aee…, plan v1.6.1 §J-1d, guard's repro shape verbatim).
+// Out-of-band file writes remain the 60s TTL regime by design — this seam
+// covers the daemon's OWN write path only (no watchers, no write-through).
+// ---------------------------------------------------------------------------
+
+type SidecarBody = { missions: Record<string, { authoredStatus: string | null }> };
+
+function buildAppWithSlices(ix: SliceIndexer): Hono {
+  const app = new Hono();
+  app.use("*", async (c, next) => {
+    c.set("sliceIndexer" as never, ix);
+    // the list path touches only the indexer; a stub satisfies getDeps
+    c.set("sliceDetailProjector" as never, {} as never);
+    await next();
+  });
+  app.route("/api/missions", missionsRoutes());
+  app.route("/api/slices", slicesRoutes());
+  return app;
+}
+
+describe("VM-005 B1 — read-after-write coherence at the daemon's own API", () => {
+  it("hot GET /api/slices → POST complete → IMMEDIATE detail + slices BOTH read complete; second POST idempotent", async () => {
+    writeMissionReadme(missionsRoot, "relx", "---\nid: relx\nstatus: active\n---\n# Relx\n");
+    writeSliceInMission(missionsRoot, "relx", "target");
+    const app = buildAppWithSlices(indexer);
+
+    // Prime the sidecar HOT — deliberately NO ?refresh=1 (refresh would
+    // full-invalidate and mask the seam; the defect lives on the hot path).
+    const primed = await app.request("/api/slices?filter=all");
+    expect(primed.status).toBe(200);
+    expect(((await primed.json()) as SidecarBody).missions["relx"]).toEqual({ authoredStatus: "active" });
+
+    const post = await app.request("/api/missions/relx/complete", { method: "POST" });
+    expect(post.status).toBe(200);
+
+    // IMMEDIATELY (no refresh, no TTL wait): both payloads carry the new word.
+    const detail = await app.request("/api/missions/relx");
+    expect(detail.status).toBe(200);
+    expect(((await detail.json()) as { status?: string | null }).status).toBe("complete");
+    const hot = await app.request("/api/slices?filter=all");
+    expect(((await hot.json()) as SidecarBody).missions["relx"]).toEqual({ authoredStatus: "complete" });
+
+    // Idempotent second POST: still 200, sidecar still coherent.
+    const again = await app.request("/api/missions/relx/complete", { method: "POST" });
+    expect(again.status).toBe(200);
+    const hot2 = await app.request("/api/slices?filter=all");
+    expect(((await hot2.json()) as SidecarBody).missions["relx"]).toEqual({ authoredStatus: "complete" });
+  });
+
+  it("NEGATIVE: listing + detail caches SURVIVE the complete-write invalidation (drop-the-blob, never full-flush)", async () => {
+    writeMissionReadme(missionsRoot, "relx", "---\nstatus: active\n---\n# Relx\n");
+    writeSliceInMission(missionsRoot, "relx", "target");
+    const app = buildAppWithSlices(indexer);
+    const listBefore = indexer.list(); // primes the listing cache
+    const recordBefore = indexer.get("target"); // primes the detail cache
+    indexer.missionAuthoredStatuses(); // primes the sidecar
+    const post = await app.request("/api/missions/relx/complete", { method: "POST" });
+    expect(post.status).toBe(200);
+    // Reference equality: the SAME cached instances = those caches survived.
+    expect(indexer.list()).toBe(listBefore);
+    expect(indexer.get("target")).toBe(recordBefore);
+    // ...while the sidecar rebuilt from disk with the new word.
+    expect(indexer.missionAuthoredStatuses()["relx"]).toEqual({ authoredStatus: "complete" });
   });
 });

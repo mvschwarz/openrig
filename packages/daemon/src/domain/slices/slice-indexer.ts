@@ -199,6 +199,20 @@ export class SliceIndexer {
     this.missionStatusCache = null;
   }
 
+  /** VM-005 B1 (the narrow C-vii exception; arch ruling b8d91aee…) — the
+   *  READ-AFTER-WRITE seam: POST /:missionId/complete writes the mission
+   *  README status, and the sidecar's 60s TTL would otherwise keep serving
+   *  the pre-write word to /api/slices while /api/missions/:id reads the
+   *  new word from disk. This drops the WHOLE missionStatusCache blob and
+   *  nothing else (listing/detail caches untouched — drop-the-blob, never
+   *  full-flush: zero coherence gain and a 60s registry churn were the
+   *  ruling's reasons to reject the alternatives). The sole write path
+   *  calls it post-success; the next read rebuilds from disk (README =
+   *  SSOT). Out-of-band file writes remain the TTL regime by design. */
+  invalidateMissionStatusCache(): void {
+    this.missionStatusCache = null;
+  }
+
   /** VM-005 (release-0.4.7) — the authored mission-status sidecar for the
    *  slices list payload: one mission-README frontmatter read per indexed
    *  mission, inside the same 60s cache discipline as the listing. Keys are

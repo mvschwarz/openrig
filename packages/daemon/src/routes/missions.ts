@@ -111,6 +111,11 @@ export function missionsRoutes(): Hono {
         500,
       );
     }
+    // VM-005 B1 (narrow C-vii exception): the write succeeded — drop the
+    // authored-status sidecar cache so the very next /api/slices read serves
+    // the new word (read-after-write coherence). Any future daemon
+    // mission-status mutation route calls this same method.
+    indexer.invalidateMissionStatusCache();
     return c.json({ missionId, status: "complete" });
   });
 
