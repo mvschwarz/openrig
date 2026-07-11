@@ -326,17 +326,22 @@ describe("PL-slice-story-view-v0 SliceIndexer", () => {
     // mission-tagged-only qitems no longer pollute the slice's queue.
     // Substring fallback is preserved for slices without typed-tag
     // qitems (legacy corpus compatibility — HG-2).
-    it("when typed slice:<name> tag matches exist, mission-tagged-only qitems are NOT included", () => {
+    it("when typed slice:<name> tag matches exist, typed tags are authoritative: mission-only AND body-substring-only qitems are NOT included (VM-004)", () => {
       // Production shape: slices/missions root with a mission folder
       // containing the slice. missionId resolves to the mission folder
       // name; railItem defaults to missionId when frontmatter doesn't
-      // specify one. The over-match bug was about the missionId
-      // substring term polluting per-slice queue results.
+      // specify one.
+      //
+      // VM-004 (canonical scope-membership matcher): typed tags are
+      // AUTHORITATIVE. When ANY confirmed `slice:<name>` typed row exists,
+      // the substring fallback tier is gated OFF entirely — so neither the
+      // mission-only qitem NOR the body-substring-only qitem leaks into the
+      // slice queue. (Pre-VM-004 the substring tier always ran and kept the
+      // sliceName body-substring match; that leak is exactly what VM-004
+      // closes. Legacy zero-typed corpora keep the full substring fallback —
+      // see the sibling "preserves legacy substring fallback" test.)
       const missionsRoot = path.join(cleanup, "missions");
       writeSlice(path.join(missionsRoot, "release-fake", "slices"), "fake-slice-17", {
-        // Explicit rail-item disambiguates from missionId so the fix's
-        // "drop missionId, keep railItem" branch can be exercised
-        // without the railItem-equals-missionId collision.
         "README.md": "---\nstatus: active\nrail-item: WALK-17\n---\n# Fake 17\n",
       });
       insertQitem(db, {
@@ -356,8 +361,9 @@ describe("PL-slice-story-view-v0 SliceIndexer", () => {
       });
       const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
       const slice = indexer.get("fake-slice-17")!;
-      expect(slice.qitemIds.sort()).toEqual(["q-by-slice-name-body", "q-typed-slice-tag"]);
+      expect(slice.qitemIds).toEqual(["q-typed-slice-tag"]);
       expect(slice.qitemIds).not.toContain("q-mission-tag-only");
+      expect(slice.qitemIds).not.toContain("q-by-slice-name-body");
     });
 
     it("does not re-include mission-only qitems when railItem defaults to missionId", () => {

@@ -16,6 +16,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type Database from "better-sqlite3";
+import { parseScopeTags } from "./qitem-membership.js";
 
 export type SliceStatus = "active" | "done" | "blocked" | "draft";
 
@@ -451,37 +452,49 @@ export class SliceIndexer {
       let typedTagMatchCount = 0;
       try {
         const rows = this.db.prepare(
-          `SELECT qitem_id FROM queue_items WHERE tags LIKE ? LIMIT 500`,
-        ).all(`%slice:${sliceName}%`) as Array<{ qitem_id: string }>;
-        for (const r of rows) ids.add(r.qitem_id);
-        typedTagMatchCount = rows.length;
+          `SELECT qitem_id, tags FROM queue_items WHERE tags LIKE ? LIMIT 500`,
+        ).all(`%slice:${sliceName}%`) as Array<{ qitem_id: string; tags: string | null }>;
+        // The unquoted LIKE stays a PREFILTER (catches comma-legacy AND the
+        // suffix/sibling over-matches); parseScopeTags is the authoritative
+        // row-level confirm. typedTagMatchCount counts CONFIRMED rows only,
+        // so the substring gate below reflects real typed membership — this
+        // kills the VM-004 `slice:X-suffix` over-match at the typed tier.
+        for (const r of rows) {
+          if (parseScopeTags(r.tags).slices.has(sliceName)) {
+            ids.add(r.qitem_id);
+            typedTagMatchCount++;
+          }
+        }
       } catch {
         // queue_items present but `tags` column missing (older test
         // harness): fall through to substring path with full term set.
       }
 
-      // 2. Substring matches. Terms are chosen so the missionId term
-      // is INCLUDED only when no typed-tag rows exist (legacy
-      // compatibility); otherwise the slice-specific terms drive
-      // matching. In mission-folder workspaces, railItem defaults to
-      // missionId when no explicit rail item is authored, so the typed-tag
-      // branch must not blindly keep that fallback or mission-only qitems
-      // leak back into every slice in the mission.
-      const substringTerms = (typedTagMatchCount > 0
-        ? [sliceName, railItem === missionId ? null : railItem]
-        : [sliceName, railItem, missionId]
-      ).filter((v): v is string => !!v);
-      for (const term of Array.from(new Set(substringTerms))) {
-        try {
-          const rows = this.db.prepare(
-            `SELECT qitem_id FROM queue_items WHERE body LIKE ? OR tags LIKE ? LIMIT 500`,
-          ).all(`%${term}%`, `%${term}%`) as Array<{ qitem_id: string }>;
-          for (const r of rows) ids.add(r.qitem_id);
-        } catch {
-          const rows = this.db.prepare(
-            `SELECT qitem_id FROM queue_items WHERE body LIKE ? LIMIT 500`,
-          ).all(`%${term}%`) as Array<{ qitem_id: string }>;
-          for (const r of rows) ids.add(r.qitem_id);
+      // 2. Substring fallback. Now that typed membership is canonical and
+      // authoritative, the substring tier executes ONLY when zero CONFIRMED
+      // typed-tag rows exist — the deliberate VM-004 behavior change for
+      // typed corpora (it used to ALWAYS run, leaking sibling-name and
+      // body-mention matches into typed slices). Legacy zero-typed corpora
+      // keep today's full term set, including the missionId term (mission-
+      // folder railItem defaults to missionId when no rail item is authored,
+      // so it must be included for legacy mission-aware workspaces). LIMIT
+      // 500 preserved.
+      if (typedTagMatchCount === 0) {
+        const substringTerms = [sliceName, railItem, missionId].filter(
+          (v): v is string => !!v,
+        );
+        for (const term of Array.from(new Set(substringTerms))) {
+          try {
+            const rows = this.db.prepare(
+              `SELECT qitem_id FROM queue_items WHERE body LIKE ? OR tags LIKE ? LIMIT 500`,
+            ).all(`%${term}%`, `%${term}%`) as Array<{ qitem_id: string }>;
+            for (const r of rows) ids.add(r.qitem_id);
+          } catch {
+            const rows = this.db.prepare(
+              `SELECT qitem_id FROM queue_items WHERE body LIKE ? LIMIT 500`,
+            ).all(`%${term}%`) as Array<{ qitem_id: string }>;
+            for (const r of rows) ids.add(r.qitem_id);
+          }
         }
       }
     } catch {

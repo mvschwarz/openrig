@@ -14,6 +14,7 @@ import YAML from "yaml";
 import type Database from "better-sqlite3";
 import { sessionMemberLabel } from "../session-name.js";
 import type { SliceIndexer, SliceRecord } from "../slices/slice-indexer.js";
+import { parseScopeTags } from "../slices/qitem-membership.js";
 import {
   composeMissionReview,
   composeRecordedGreenForSlice,
@@ -143,7 +144,7 @@ export class ReviewGatherer {
       mission: { name: mission, id: missionMeta.id, title: missionMeta.title, intent: missionMeta.intent },
       slices: composed,
       missionAttention: this.attentionForTag(`mission:${mission}`, `slice:`),
-      agents: this.agentsForSlices(slices.map((s) => s.name)),
+      agents: this.agentsForSlices(slices.map((s) => s.name), { missionName: mission }),
       nowIso,
     });
   }
@@ -189,7 +190,16 @@ export class ReviewGatherer {
     const mission = scope.slice("mission:".length);
     const slices = this.indexer.list().filter((s) => s.missionId === mission);
     if (slices.length === 0 && !this.missionDirExists(mission)) return null;
-    return composeAgentsBand(this.agentsForSlices(slices.map((s) => s.name)), scope, [], nowIso);
+    // C3 (pm ruling i): mission-tag-DIRECT membership — `mission:X`-tagged
+    // active work counts even when its slice tag isn't indexed, so a
+    // dir-exists/zero-indexed mission no longer composes a confident-empty
+    // band from an always-empty name list.
+    return composeAgentsBand(
+      this.agentsForSlices(slices.map((s) => s.name), { missionName: mission }),
+      scope,
+      [],
+      nowIso,
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -464,6 +474,19 @@ export class ReviewGatherer {
 
   private attentionForTag(tag: string, excludeTagPrefix?: string): AttentionInput[] {
     if (!this.tableExists("queue_items")) return [];
+    // Canonical membership: parse the queried tag once; the SQL LIKE is an
+    // unquoted PREFILTER (now catches comma-legacy rows), and parseScopeTags
+    // is the authoritative row-level confirm (rejects the prefilter's
+    // substring/suffix over-matches). attentionForTag's real defect was the
+    // comma-legacy UNDER-match — the old JSON-quoted `%"slice:X"%` never
+    // appears inside a comma-joined element.
+    const tagIsSlice = tag.startsWith("slice:");
+    const tagIsMission = tag.startsWith("mission:");
+    const tagName = tagIsSlice
+      ? tag.slice("slice:".length)
+      : tagIsMission
+        ? tag.slice("mission:".length)
+        : null;
     const hasEvidenceRef = this.columnExists("queue_items", "evidence_ref");
     const summaryCol = this.columnExists("queue_items", "summary") ? "summary" : "NULL AS summary";
     const rows = this.db
@@ -477,16 +500,27 @@ export class ReviewGatherer {
                 OR destination_session LIKE 'human%'
                 OR (state = 'blocked' AND blocked_on LIKE 'human%'))`,
       )
-      .all(...ACTIVE_STATES, `%"${tag}"%`) as Array<QitemRow & { evidence_ref?: string | null }>;
+      .all(...ACTIVE_STATES, `%${tag}%`) as Array<QitemRow & { evidence_ref?: string | null }>;
     return rows
       .filter((r) => {
-        if (!excludeTagPrefix) return true;
-        try {
-          const tags = (JSON.parse(r.tags ?? "[]") as string[]) ?? [];
-          return !tags.some((t) => t.startsWith(excludeTagPrefix));
-        } catch {
-          return true;
+        // Row-level canonical confirm (authoritative over the prefilter).
+        const scopes = parseScopeTags(r.tags);
+        if (tagIsSlice && !scopes.slices.has(tagName!)) return false;
+        if (tagIsMission && !scopes.missions.has(tagName!)) return false;
+        // d2: excludeTagPrefix aligned to the canonical set (its documented
+        // intent — "rows that carry a slice tag") so comma-legacy rows are
+        // excluded like clean ones; unknown prefixes keep raw semantics.
+        if (excludeTagPrefix === "slice:") return scopes.slices.size === 0;
+        if (excludeTagPrefix === "mission:") return scopes.missions.size === 0;
+        if (excludeTagPrefix) {
+          try {
+            const tags = (JSON.parse(r.tags ?? "[]") as string[]) ?? [];
+            return !tags.some((t) => t.startsWith(excludeTagPrefix));
+          } catch {
+            return true;
+          }
         }
+        return true;
       })
       .map((r) => {
         // OPR.0.4.6.WF4 Q6 — stamp the ● workflow pointer from the item's own
@@ -512,7 +546,11 @@ export class ReviewGatherer {
   /** Sessions holding active work on the named slices (null = rig-wide).
    *  Region membership derives from work-on-scope, never rig co-residency.
    *  Runtime/idle telemetry is honest-unknown at v1 (queue-derived only). */
-  private agentsForSlices(sliceNames: string[] | null): AgentInput[] {
+  private agentsForSlices(
+    sliceNames: string[] | null,
+    opts: { missionName?: string | null } = {},
+  ): AgentInput[] {
+    const missionName = opts.missionName ?? null;
     if (!this.tableExists("queue_items")) return [];
     const summaryCol = this.columnExists("queue_items", "summary") ? "summary" : "NULL AS summary";
     const rows = this.db
@@ -526,14 +564,19 @@ export class ReviewGatherer {
     const bySession = new Map<string, { rows: QitemRow[]; slices: Set<string> }>();
     for (const r of rows) {
       if (isHumanSeatSession(r.destination_session)) continue;
-      let tags: string[] = [];
-      try {
-        tags = (JSON.parse(r.tags ?? "[]") as string[]) ?? [];
-      } catch {
-        tags = [];
-      }
-      const rowSlices = tags.filter((t) => t.startsWith("slice:")).map((t) => t.slice("slice:".length));
-      if (sliceNames !== null && !rowSlices.some((s) => sliceNames.includes(s))) continue;
+      const scopes = parseScopeTags(r.tags);
+      const rowSlices = [...scopes.slices];
+      // Membership (canonical): a row belongs when it carries one of the
+      // named slices OR — for the mission band (C3, pm ruling i) — the
+      // mission tag directly, so `mission:X`-tagged work counts even when
+      // its slice tag isn't indexed. missionName is null for rig/slice
+      // flows (byte-identical to pre-fix).
+      if (
+        sliceNames !== null &&
+        !rowSlices.some((s) => sliceNames.includes(s)) &&
+        !(missionName !== null && scopes.missions.has(missionName))
+      )
+        continue;
       const entry = bySession.get(r.destination_session) ?? { rows: [], slices: new Set<string>() };
       entry.rows.push(r);
       for (const s of rowSlices) entry.slices.add(s);
@@ -780,12 +823,18 @@ export class ReviewGatherer {
 
   private hasActiveQitem(name: string, slice: SliceRecord): boolean {
     if (!this.tableExists("queue_items")) return false;
-    const row = this.db
+    // Leg 1 (canonical): unquoted prefilter now catches comma-legacy rows;
+    // each candidate is confirmed against the shared membership predicate,
+    // short-circuiting on the first true. Post-fix, leg 2 (qitemIds, which
+    // inherits matchQitems) converges on the same answer.
+    const prefiltered = this.db
       .prepare(
-        `SELECT 1 FROM queue_items WHERE state IN (${ACTIVE_STATES.map(() => "?").join(",")}) AND tags LIKE ? LIMIT 1`,
+        `SELECT tags FROM queue_items WHERE state IN (${ACTIVE_STATES.map(() => "?").join(",")}) AND tags LIKE ?`,
       )
-      .get(...ACTIVE_STATES, `%"slice:${name}"%`);
-    if (row) return true;
+      .all(...ACTIVE_STATES, `%slice:${name}%`) as Array<{ tags: string | null }>;
+    for (const r of prefiltered) {
+      if (parseScopeTags(r.tags).slices.has(name)) return true;
+    }
     if (slice.qitemIds.length === 0) return false;
     const placeholders = slice.qitemIds.map(() => "?").join(",");
     try {
