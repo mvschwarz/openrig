@@ -448,6 +448,10 @@ describe("Codex runtime adapter", () => {
       fsOps: mockFs(),
       listProcesses: () => [],
       sleep: async () => {},
+      // Housekeeping B1 fixback: inject a controlled preflight so no real
+      // `codex -p fleet mcp list` subprocess runs. Assertions below unchanged —
+      // they were always about launch-command shape, now tested hermetically.
+      verifyProfilePreflight: async (profile) => ({ ok: true, profile }),
     });
     const binding = { ...makeBinding(), codexConfigProfile: "fleet" };
 
@@ -779,6 +783,8 @@ describe("Codex runtime adapter", () => {
       fsOps: mockFs(),
       listProcesses: () => [],
       sleep: async () => {},
+      // Housekeeping B1 fixback: controlled preflight (no real codex subprocess).
+      verifyProfilePreflight: async (profile) => ({ ok: true, profile }),
     });
     const binding = { ...makeBinding(), codexConfigProfile: "fleet" };
 
@@ -787,6 +793,41 @@ describe("Codex runtime adapter", () => {
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText).toHaveBeenCalledWith("r01-qa", expectedProfileResumeCommand("fleet"));
+  });
+
+  // Housekeeping B1 fixback (S-3) — adapter-boundary failure contract. When the
+  // injected profile preflight fails, launchHarness must reject with the adapter's
+  // composed error (probe error + "\n  Fix: " + migrationHint) BEFORE constructing
+  // or sending any launch command — i.e. tmux.sendText is never called. The rich
+  // real-probe failure vectors (legacy table, TOML, timeout, quoting) stay owned by
+  // codex-profile-preflight.test.ts; this pins only the adapter's join + ordering.
+  it("launchHarness rejects with the composed error and sends nothing when the profile preflight fails", async () => {
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [],
+      sleep: async () => {},
+      verifyProfilePreflight: async (profile) => ({
+        ok: false,
+        profile,
+        error: `Codex profile '${profile}' failed to load: legacy [profiles.fleet] table present`,
+        migrationHint: "Move the profile settings into ~/.codex/fleet.config.toml and remove the legacy [profiles.fleet] table.",
+      }),
+    });
+    const binding = { ...makeBinding(), codexConfigProfile: "fleet" };
+
+    const result = await adapter.launchHarness(binding, { name: "dev-qa@test-rig" });
+
+    expect(result).toEqual({
+      ok: false,
+      error:
+        "Codex profile 'fleet' failed to load: legacy [profiles.fleet] table present" +
+        "\n  Fix: Move the profile settings into ~/.codex/fleet.config.toml and remove the legacy [profiles.fleet] table.",
+    });
+    // Rejection is BEFORE command construction — no launch text ever sent.
+    const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
+    expect(sendText).not.toHaveBeenCalled();
   });
 
   // Pre-rip 'provisions project-local Codex hooks and feature flag without

@@ -10,6 +10,9 @@ import type {
   InstalledResource, ProjectionResult, StartupDeliveryResult, ReadinessResult,
   HarnessLaunchResult,
 } from "../domain/runtime-adapter.js";
+// Type-only — keeps the profile-preflight module's dynamic import lazy for
+// production (no runtime import cost from this line).
+import type { CodexProfileProbeResult } from "../domain/codex-profile-preflight.js";
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
 import {
@@ -43,6 +46,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private readThreadIdByPid: (pid: number) => string | undefined;
   private sleep: (ms: number) => Promise<void>;
   private resolveHomeDirByPid: ResolveHomeDirByPid;
+  // Housekeeping B1 fixback (guard-blocking, arch HK-AR-1 = whole-probe DI):
+  // the Codex profile-LOAD probe is an injectable dep in the adapter's
+  // established optional-deps shape. Default = the REAL probe
+  // (defaultProfilePreflight, module-private); tests inject a controlled probe
+  // so no real codex subprocess runs. Contract not weakened — production uses
+  // the real probe by default.
+  private verifyProfilePreflight: (profile: string) => Promise<CodexProfileProbeResult>;
   // OPR.0.4.1.10 FR-B — absolute path to the daemon's own shipped activity-relay.cjs,
   // resolved by startup from import.meta.dirname. Used by ensureCodexActivityHooks
   // (FR-A) to write config-layer [hooks] command entries that are cwd-independent and
@@ -57,6 +67,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     resolveHomeDirByPid?: ResolveHomeDirByPid;
     sleep?: (ms: number) => Promise<void>;
     activityRelayPath?: string;
+    verifyProfilePreflight?: (profile: string) => Promise<CodexProfileProbeResult>;
   }) {
     this.tmux = deps.tmux;
     this.fs = deps.fsOps;
@@ -65,6 +76,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.readThreadIdByPid = deps.readThreadIdByPid ?? ((pid) => this.readThreadIdFromLogs(pid));
     this.resolveHomeDirByPid = deps.resolveHomeDirByPid ?? defaultResolveHomeDirByPid;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.verifyProfilePreflight = deps.verifyProfilePreflight ?? defaultProfilePreflight;
   }
 
   /**
@@ -299,10 +311,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // `codex -p <profile> resume` failure. An absent .config.toml passes
     // (Codex default-layers it; advisor Option B).
     if (profile) {
-      const { verifyCodexProfileLoads } = await import("../domain/codex-profile-preflight.js");
-      const { execSync } = await import("node:child_process");
-      const execFn = async (cmd: string) => execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000 });
-      const probeResult = await verifyCodexProfileLoads(profile, execFn);
+      const probeResult = await this.verifyProfilePreflight(profile);
       if (!probeResult.ok) {
         return {
           ok: false,
@@ -1143,6 +1152,19 @@ function upsertManagedCodexConfigFragment(content: string, id: string, fragment:
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Module-private (P1 pin — NEVER exported). The REAL Codex profile-LOAD probe,
+// extracted verbatim from launchHarness: dynamic imports keep it lazy for
+// production, execFn runs the real `codex -p <profile> mcp list` via execSync
+// (utf-8, piped stdio, 10s timeout). Injected as the adapter's default
+// verifyProfilePreflight; tests substitute a controlled stub.
+async function defaultProfilePreflight(profile: string): Promise<CodexProfileProbeResult> {
+  const { verifyCodexProfileLoads } = await import("../domain/codex-profile-preflight.js");
+  const { execSync } = await import("node:child_process");
+  const execFn = async (cmd: string) =>
+    execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000 });
+  return verifyCodexProfileLoads(profile, execFn);
 }
 
 function defaultListProcesses(): Array<{ pid: number; ppid: number; command: string }> {
