@@ -34,14 +34,22 @@
 //    control socket answering — NOT a daemon server ping; HERDR-FINDINGS #3's
 //    intent, carried to the socket transport). No "layout command" probe: the
 //    CLI help surface is irrelevant to the socket API.
-//  - SAME-SIZE panes only. The BSP tree below splits 0.5/0.5 alternating
-//    right/down; asymmetric pane layouts are a DOCUMENTED limitation, not
-//    faked here (the inherent tmux multi-client resize limit).
+//  - EQUAL auto-grid cells (OPR.0.4.7.1). The layout tree matches the UI
+//    TerminalLauncher suggestLayout shape exactly — cols=ceil(sqrt(N)),
+//    rows=ceil(N/cols): N=2 → 2×1, N=5 → 3×2, N=7 → 3×3 (cols×rows) — built
+//    as equal right-strips per row combined by equal down-strips, using
+//    first-vs-rest ratios (1/N, then 1/(N-1), …; VM pane.layout-verified).
+//    The prior alternating-0.5 BSP is retired: it rendered N=7 as 4×2 with
+//    one double-width cell. Incomplete rectangles are padded with inert
+//    blank panes (cmux's blank-surface precedent); blanks are never
+//    reported as opened seats.
 //
-// The `workspace.create` response envelope was NOT captured verbatim (only
-// layout.apply/ping were); the workspace id is therefore extracted
-// DEFENSIVELY (see extractWorkspaceId) — to be confirmed by the fresh VM
-// re-proof (unproven until that proof artifact lands).
+// The `workspace.create` response envelope is VM-confirmed (OPR.0.4.7.1):
+// `result.workspace.workspace_id` + `result.tab.tab_id` + `result.root_pane`.
+// Extraction stays null-safe/defensive for older builds (extractWorkspaceId).
+// The create's default tab (a blank pane) is deliberately LEFT ALONE — PM
+// ruling: no tab.close unless live evidence shows a user visibly landing on
+// the blank tab (current evidence shows the populated view tab focused).
 
 import type {
   AbsentSeat,
@@ -58,6 +66,7 @@ import type {
   HerdrTransport,
   HerdrTransportFactory,
 } from "./herdr-transport.js";
+import { autoGridCols } from "../cmux-layout-service.js";
 
 /** Sentinel host for herdr-surface degrades (a pane herdr itself failed to render). */
 const HERDR_SURFACE_HOST = "herdr";
@@ -81,25 +90,53 @@ export interface HerdrSplitNode {
 export type HerdrLayoutNode = HerdrPaneNode | HerdrSplitNode;
 
 /**
- * Build the balanced BSP layout tree for one page of panes. PURE. Splits
- * alternate right/down by depth at ratio 0.5 → same-size tiles (the documented
- * v1 layout; asymmetric layouts are out of scope). Each leaf runs the
- * composer's shell `paneCommand` via `["sh","-c",…]` so the composed quoting
- * (read-only `-r`, ssh-wrap) is preserved untouched.
+ * Combine N nodes into an equal N-way strip along one direction. PURE.
+ * Equal N-way BSP is first-vs-rest at ratio 1/N, recursively 1/(N-1) —
+ * NOT midpoint 0.5 (the VM-reproduced defect: alternating 0.5 splits gave
+ * N=7 a 4×2 layout with one double-width cell instead of the promised 3×3).
  */
-export function buildBspRoot(panes: ComposedPane[], depth = 0): HerdrLayoutNode {
-  if (panes.length === 1) {
-    const pane = panes[0]!;
-    return { type: "pane", label: pane.label, command: ["sh", "-c", pane.paneCommand] };
-  }
-  const mid = Math.ceil(panes.length / 2);
+export function equalStrip(nodes: HerdrLayoutNode[], direction: "right" | "down"): HerdrLayoutNode {
+  if (nodes.length === 1) return nodes[0]!;
   return {
     type: "split",
-    direction: depth % 2 === 0 ? "right" : "down",
-    ratio: 0.5,
-    first: buildBspRoot(panes.slice(0, mid), depth + 1),
-    second: buildBspRoot(panes.slice(mid), depth + 1),
+    direction,
+    ratio: 1 / nodes.length,
+    first: nodes[0]!,
+    second: equalStrip(nodes.slice(1), direction),
   };
+}
+
+/** An inert blank pane — pads an incomplete grid rectangle (cmux's blank-surface precedent). */
+function blankPane(): HerdrPaneNode {
+  return { type: "pane", label: "", command: ["sh"] };
+}
+
+/**
+ * Build the EQUAL auto-grid layout tree for one page of panes. PURE. The grid
+ * shape matches the UI TerminalLauncher `suggestLayout` exactly —
+ * cols = ceil(sqrt(N)), rows = ceil(N/cols): N=2 → 2×1, N=5 → 3×2, N=7 → 3×3
+ * (cols×rows). An incomplete rectangle is padded with inert blank panes so
+ * every cell is the same size; blanks are layout filler only — they are never
+ * reported as opened seats. Each real leaf runs the composer's shell
+ * `paneCommand` via `["sh","-c",…]` so the composed quoting (read-only `-r`,
+ * ssh-wrap) is preserved untouched. Rows are built as equal `right` strips,
+ * then combined with equal `down` strips.
+ */
+export function buildGridRoot(panes: ComposedPane[]): { root: HerdrLayoutNode; blanks: number } {
+  const cols = autoGridCols(panes.length);
+  const rows = Math.ceil(panes.length / cols);
+  const blanks = rows * cols - panes.length;
+  const leaves: HerdrLayoutNode[] = panes.map((pane) => ({
+    type: "pane",
+    label: pane.label,
+    command: ["sh", "-c", pane.paneCommand],
+  }));
+  for (let i = 0; i < blanks; i++) leaves.push(blankPane());
+  const rowStrips: HerdrLayoutNode[] = [];
+  for (let r = 0; r < rows; r++) {
+    rowStrips.push(equalStrip(leaves.slice(r * cols, (r + 1) * cols), "right"));
+  }
+  return { root: equalStrip(rowStrips, "down"), blanks };
 }
 
 /** The per-page socket request plan — pure, so it is asserted directly in tests. */
@@ -108,6 +145,8 @@ export interface HerdrPagePlan {
   tabLabel: string;
   /** The whole page's layout tree — ONE atomic layout.apply request body. */
   root: HerdrLayoutNode;
+  /** Inert blank leaves padding the grid rectangle (never reported as opened). */
+  blanks: number;
 }
 
 export interface HerdrLayoutPlan {
@@ -128,19 +167,24 @@ export function planHerdrLayout(
   tabPrefix: string = "openrig",
 ): HerdrLayoutPlan {
   const base = `${tabPrefix}:${view.id}#${launchToken}`;
-  const pages: HerdrPagePlan[] = view.pages.map((page, pageIndex) => ({
-    tabLabel: view.pages.length > 1 ? `${base}/${pageIndex + 1}` : base,
-    root: buildBspRoot(page),
-  }));
+  const pages: HerdrPagePlan[] = view.pages.map((page, pageIndex) => {
+    const grid = buildGridRoot(page);
+    return {
+      tabLabel: view.pages.length > 1 ? `${base}/${pageIndex + 1}` : base,
+      root: grid.root,
+      blanks: grid.blanks,
+    };
+  });
   return { workspaceLabel: base, pages };
 }
 
 /**
  * Extract the created workspace's id from a `workspace.create` result body.
- * DEFENSIVE — this envelope was not captured verbatim, so the known plausible
- * homes are tried in order: a top-level `workspace_id`, then a nested
- * `workspace`/`layout` object's `workspace_id`/`id`, then a top-level string
- * `id`. Returns null when nothing string-shaped is found (the caller degrades
+ * The live envelope is VM-confirmed (OPR.0.4.7.1): `result.workspace.
+ * workspace_id` + `result.tab.tab_id` + `result.root_pane` — covered by the
+ * nested-`workspace` home below. The other defensive homes are retained
+ * (top-level `workspace_id`, nested `layout`, bare `id`) for older builds.
+ * Returns null when nothing string-shaped is found (the caller degrades
  * honestly rather than guessing).
  */
 export function extractWorkspaceId(result: HerdrResult): string | null {
@@ -252,9 +296,8 @@ export class HerdrAdapter implements TerminalProvider {
     }
 
     // A fresh workspace per open (BR-5 fresh-on-relaunch, strongest form).
-    // The labeled create is tried first; because the label param is an
-    // uncaptured assumption, a failure falls back ONCE to a bare create
-    // before degrading (defensive; to be confirmed by the fresh VM re-proof).
+    // The labeled create is tried first; a failure falls back ONCE to a bare
+    // create before degrading.
     let workspaceId: string | null = null;
     let createErr: unknown = null;
     try {
