@@ -225,6 +225,26 @@ export class CmuxAdapter {
     }
   }
 
+  /**
+   * `equalized` echoes cmux's own verdict: true = frames were rebalanced,
+   * false = cmux made no change (nothing to equalize, or the workspace was
+   * still settling). Callers MUST read it — a discarded false is exactly the
+   * silent 2:1:1 grid the VM diagnostic caught.
+   */
+  async equalizeSplits(workspaceId?: string): Promise<CmuxResult<{ equalized: boolean }>> {
+    if (!this.transport) {
+      return { ok: false, code: "unavailable", message: "cmux is not connected" };
+    }
+    try {
+      const params: Record<string, unknown> = {};
+      if (workspaceId != null) params["workspace_id"] = workspaceId;
+      const raw = (await this.transport.request("workspace.equalize_splits", params)) as Record<string, unknown>;
+      return { ok: true, data: { equalized: raw["equalized"] === true } };
+    } catch (err) {
+      return { ok: false, code: "request_failed", message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
   async createWorkspace(name: string, cwd?: string): Promise<CmuxResult<string>> {
     if (!this.transport) {
       return { ok: false, code: "unavailable", message: "cmux is not connected" };

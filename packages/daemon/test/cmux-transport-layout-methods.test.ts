@@ -175,6 +175,46 @@ describe("cmux CLI transport — layout RPC method pass-through (slice 24.A repa
     });
   });
 
+  // OPR.0.4.7.1 regression — the equalize miss: the adapter shipped
+  // equalizeSplits but this allowlist omitted the RPC name, so every
+  // production call threw Unknown cmux method (request_failed, silently
+  // absorbed by the non-fatal layout path → 2:1:1 grids), while adapter
+  // unit tests rode a fake transport and never noticed. This test pins the
+  // PRODUCTION command path.
+  describe("workspace.equalize_splits", () => {
+    it("emits `cmux rpc workspace.equalize_splits` with workspace_id (snake_case JSON)", async () => {
+      const captured: string[] = [];
+      const exec = mockExec(captured, {});
+      const factory = createCmuxCliTransport(exec);
+      const transport = await factory();
+
+      await transport.request("workspace.equalize_splits", { workspace_id: "workspace:3" });
+
+      const cmd = captured.find((c) => c.startsWith("cmux rpc workspace.equalize_splits"));
+      expect(cmd).toBeTruthy();
+      expect(cmd).toMatch(/"workspace_id"/);
+      expect(cmd).toMatch(/"workspace:3"/);
+    });
+
+    it("parses the equalized verdict from the cmux rpc JSON response", async () => {
+      const customExec = vi.fn(async (cmd: string) => {
+        if (cmd === "cmux --help") return helpText();
+        if (cmd === "cmux capabilities --json") return '{"capabilities":[]}';
+        if (cmd.startsWith("cmux rpc workspace.equalize_splits")) {
+          return '{"workspace_id":"workspace:3","equalized":true}';
+        }
+        return "{}";
+      }) as unknown as ExecFn;
+      const factory = createCmuxCliTransport(customExec);
+      const transport = await factory();
+
+      const result = (await transport.request("workspace.equalize_splits", {
+        workspace_id: "workspace:3",
+      })) as Record<string, unknown>;
+      expect(result["equalized"]).toBe(true);
+    });
+  });
+
   describe("unknown methods still throw (regression guard)", () => {
     it("throws Unknown cmux method for an unmapped method name", async () => {
       const captured: string[] = [];

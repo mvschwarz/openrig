@@ -9,7 +9,8 @@
 //  - herdr fresh-tab-on-relaunch decision (not-replace) + the FB4 socket shapes
 //    (probe=ping; fresh workspace.create → ONE atomic layout.apply per page;
 //    the no-CLI-strings regression — the VM-RED `herdr layout apply` class);
-//  - cmux facade delegates to the shipped NodeCmuxService and degrades honestly.
+//  - cmux provider renders ONE gridded workspace per page (never a window per
+//    seat) via CmuxLayoutService.buildWorkspacePanes and degrades honestly.
 
 import { describe, it, expect } from "vitest";
 import fs from "node:fs";
@@ -548,7 +549,7 @@ describe("herdr socket transport — ping probe, envelope unwrap, socket path (F
   });
 });
 
-describe("cmux facade — delegates to NodeCmuxService, degrades honestly", () => {
+describe("cmux provider — ONE gridded workspace per page (never a window per seat), degrades honestly", () => {
   function fakeCmuxAdapter(available: boolean) {
     return {
       getStatus: () => ({ available, capabilities: { rpc: true } }),
@@ -556,46 +557,140 @@ describe("cmux facade — delegates to NodeCmuxService, degrades honestly", () =
     } as unknown as import("../src/adapters/cmux.js").CmuxAdapter;
   }
 
-  const pane = { seat: "a@r", label: "pod.a · s02", paneCommand: "x", readOnly: false };
+  /** Records buildWorkspacePanes calls; per-name outcome override for failure vectors. */
+  function fakeLayoutService(failFor: (name: string) => string | null = () => null) {
+    const builds: Array<{ name: string; commands: string[]; cols?: number }> = [];
+    const layoutService = {
+      buildWorkspacePanes: async (name: string, _cwd: string | undefined, commands: string[], cols?: number) => {
+        builds.push({ name, commands, cols });
+        const fail = failFor(name);
+        if (fail) return { ok: false as const, code: "request_failed", message: fail };
+        return {
+          ok: true as const,
+          data: { workspaceId: `ws:${name}`, workspaceName: name, paneCount: commands.length, blanks: 0 },
+        };
+      },
+    } as unknown as import("../src/domain/cmux-layout-service.js").CmuxLayoutService;
+    return { layoutService, builds };
+  }
+
+  const pane = { seat: "a@r", label: "pod.a · s02", paneCommand: "tmux attach -t 'a@r'", readOnly: false };
+  const paneB = { ...pane, seat: "b@r", paneCommand: "tmux attach -r -t 'b@r'", readOnly: true };
   const view: ComposedView = {
     id: "v",
-    opened: [pane, { ...pane, seat: "b@r" }],
+    opened: [pane, paneB],
     absent: [{ seat: "z@r", host: null, reason: "dead" }],
     degraded: [{ seat: "h@r", host: "factory", reason: "http-registered" }],
-    pages: [[pane, { ...pane, seat: "b@r" }]],
+    pages: [[pane, paneB]],
   };
 
-  it("delegates each pane to openOrFocusNodeSurface; unmappable/failed seats degrade, absents carried", async () => {
-    const opened: Array<[string, string]> = [];
-    const nodeCmuxService = {
-      openOrFocusNodeSurface: async (rigId: string, logicalId: string) => {
-        opened.push([rigId, logicalId]);
-        return logicalId === "pod.b" ? { ok: false, error: "surface refused" } : { ok: true };
-      },
-    } as unknown as import("../src/domain/node-cmux-service.js").NodeCmuxService;
-
+  it("renders the page as ONE workspace; paneCommands carried verbatim; absents/degrades carried", async () => {
+    const { layoutService, builds } = fakeLayoutService();
     const adapter = new CmuxProviderAdapter({
       cmuxAdapter: fakeCmuxAdapter(true),
-      nodeCmuxService,
-      resolveSeatNode: (seat) =>
-        seat === "a@r" ? { rigId: "r", logicalId: "pod.a" } : seat === "b@r" ? { rigId: "r", logicalId: "pod.b" } : null,
+      layoutService,
+      newLaunchToken: () => "t1",
     });
 
     const res = await adapter.openView(view);
-    expect(res.ok).toBe(true); // non-gating
-    expect(res.opened).toEqual(["a@r"]);
-    expect(opened).toEqual([["r", "pod.a"], ["r", "pod.b"]]);
-    // Original absent carried, plus b@r's cmux failure degraded — composer's http degrade preserved.
+    expect(res.ok).toBe(true);
+    expect(res.opened).toEqual(["a@r", "b@r"]);
+    expect(res.pages).toBe(1);
+    // THE bug-fix invariant: one grid build for the whole page — never one
+    // window per seat — and the composed commands (incl. read-only -r) verbatim.
+    expect(builds).toHaveLength(1);
+    expect(builds[0]!.commands).toEqual(["tmux attach -t 'a@r'", "tmux attach -r -t 'b@r'"]);
     expect(res.absent).toEqual([{ seat: "z@r", host: null, reason: "dead" }]);
-    expect(res.degraded.map((d) => d.seat).sort()).toEqual(["b@r", "h@r"]);
-    expect(res.degraded.find((d) => d.seat === "b@r")!.reason).toContain("surface refused");
+    expect(res.degraded).toEqual([{ seat: "h@r", host: "factory", reason: "http-registered" }]);
+  });
+
+  it.each([
+    { n: 2, cols: 2 },
+    { n: 5, cols: 3 },
+    { n: 7, cols: 3 }, // the founder's 7-seat repro: modal promises 3×3 — cmux must apply it
+  ])("passes the modal Auto-grid column count for N=$n (cols=$cols) — PM ruling", async ({ n, cols }) => {
+    const panes = Array.from({ length: n }, (_, i) => ({
+      ...pane,
+      seat: `s${i + 1}@r`,
+      paneCommand: `tmux attach -t 's${i + 1}@r'`,
+    }));
+    const { layoutService, builds } = fakeLayoutService();
+    const adapter = new CmuxProviderAdapter({
+      cmuxAdapter: fakeCmuxAdapter(true),
+      layoutService,
+      newLaunchToken: () => "t1",
+    });
+
+    const res = await adapter.openView({ id: "v", opened: panes, absent: [], degraded: [], pages: [panes] });
+    expect(res.opened).toHaveLength(n);
+    expect(builds).toHaveLength(1); // ONE new workspace — never appended surfaces
+    expect(builds[0]!.cols).toBe(cols);
+  });
+
+  it("multi-page view → one workspace per page with /N suffixes; a failed page degrades its seats, others open", async () => {
+    const paneC = { ...pane, seat: "c@r", paneCommand: "tmux attach -t 'c@r'" };
+    const multiView: ComposedView = {
+      id: "v",
+      opened: [pane, paneB, paneC],
+      absent: [],
+      degraded: [],
+      pages: [[pane, paneB], [paneC]],
+    };
+    const { layoutService, builds } = fakeLayoutService((name) =>
+      name.endsWith("/2") ? "cmux daemon not ready" : null,
+    );
+    const adapter = new CmuxProviderAdapter({
+      cmuxAdapter: fakeCmuxAdapter(true),
+      layoutService,
+      newLaunchToken: () => "t1",
+    });
+
+    const res = await adapter.openView(multiView);
+    expect(builds.map((b) => b.name)).toEqual(["openrig:v#t1/1", "openrig:v#t1/2"]);
+    expect(res.ok).toBe(true); // honest-partial: page 1 opened
+    expect(res.opened).toEqual(["a@r", "b@r"]);
+    expect(res.pages).toBe(1);
+    expect(res.degraded).toEqual([
+      { seat: "c@r", host: "local", reason: "cmux: cmux daemon not ready" },
+    ]);
+  });
+
+  it("cmux not connected → honest refuse cmux_unavailable; nothing is built", async () => {
+    const { layoutService, builds } = fakeLayoutService();
+    const adapter = new CmuxProviderAdapter({
+      cmuxAdapter: fakeCmuxAdapter(false),
+      layoutService,
+    });
+    const res = await adapter.openView(view);
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe("cmux_unavailable");
+    expect(res.opened).toEqual([]);
+    expect(builds).toHaveLength(0);
+  });
+
+  it("an all-absent/degraded view (no pages) → no workspace side effect", async () => {
+    const { layoutService, builds } = fakeLayoutService();
+    const adapter = new CmuxProviderAdapter({
+      cmuxAdapter: fakeCmuxAdapter(true),
+      layoutService,
+    });
+    const res = await adapter.openView({
+      id: "v",
+      opened: [],
+      absent: [{ seat: "z@r", host: null, reason: "dead" }],
+      degraded: [],
+      pages: [],
+    });
+    expect(res.ok).toBe(true);
+    expect(res.pages).toBe(0);
+    expect(builds).toHaveLength(0);
   });
 
   it("status/liveness reflect the shipped CmuxAdapter", async () => {
+    const { layoutService } = fakeLayoutService();
     const adapter = new CmuxProviderAdapter({
       cmuxAdapter: fakeCmuxAdapter(false),
-      nodeCmuxService: {} as unknown as import("../src/domain/node-cmux-service.js").NodeCmuxService,
-      resolveSeatNode: () => null,
+      layoutService,
     });
     expect((await adapter.status()).available).toBe(false);
     expect((await adapter.liveness()).alive).toBe(false);

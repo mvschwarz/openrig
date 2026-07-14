@@ -140,17 +140,24 @@ function buildCommand(
   }
 
   // Slice 24 — generic RPC pass-through for layout methods (splitSurface,
-  // createWorkspace, closeWorkspace, listPaneSurfaces). cmux exposes a
+  // createWorkspace, closeWorkspace, listPaneSurfaces; OPR.0.4.7.1 adds
+  // equalizeSplits). cmux exposes a
   // `cmux rpc <method> '<json-params>'` subcommand that delegates directly
   // to the daemon RPC. Spike confirmed these methods accept snake_case
   // params (the adapter passes them in already snake_cased). Generic
   // path is cleaner than per-method CLI mapping for methods that have a
   // 1:1 RPC correspondence; reserves the version-adaptive buildCommand
   // branches above for legacy methods that have CLI-only shapes.
+  // NOTE: an adapter RPC whose method name is missing from this allowlist
+  // throws Unknown cmux method AT RUNTIME ONLY — adapter unit tests ride a
+  // fake transport and cannot catch the omission (the OPR.0.4.7.1 equalize
+  // miss). Every new adapter RPC needs its cmux-transport exact-command
+  // regression test alongside this entry.
   if (
     method === "surface.split" ||
     method === "workspace.create" ||
     method === "workspace.close" ||
+    method === "workspace.equalize_splits" ||
     method === "pane.surfaces"
   ) {
     const paramsJson = params ? JSON.stringify(params) : "";

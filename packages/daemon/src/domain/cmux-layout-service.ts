@@ -1,11 +1,13 @@
 // Slice 24 — CmuxLayoutService.
 //
 // Algorithmic core of the "Launch in CMUX" feature. Three pure helpers
-// (computeLayout / chunkAgents / orderAgentsFromRigSpec) + one
-// coordinated method (buildWorkspace) that drives the CmuxAdapter
-// through workspace.create + N-1 surface.split + N surface.sendText
-// calls to populate a freshly-created cmux workspace with one tmux-
-// attach panel per agent.
+// (computeLayout / chunkAgents / orderAgentsFromRigSpec) + the
+// coordinated grid builder (buildWorkspacePanes, with buildWorkspace as
+// its tmux-attach wrapper) that drives the CmuxAdapter through
+// workspace.create + N-1 surface.split + N surface.sendText calls to
+// populate a freshly-created cmux workspace with one panel per agent.
+// The terminal-provider ride reuses the same core with composer-built
+// pane commands (read-only -r / ssh-wrap preserved).
 //
 // Timing strategy (per slice 24 README §Daemon-side + cmux-rig-layout
 // skill §5 gotchas):
@@ -37,8 +39,20 @@ export const OP_DELAY_MS = 500;
 export const FINAL_SETTLE_MS = 1000;
 export const LIST_SURFACES_RETRY_DELAY_MS = 100;
 export const LIST_SURFACES_MAX_ATTEMPTS = 5;
+export const EQUALIZE_PASSES = 2;
+export const EQUALIZE_SETTLE_MS = 1200;
 
 export type SleepFn = (ms: number) => Promise<void>;
+
+/**
+ * The modal Auto-grid column count for N panes. MUST mirror the UI's
+ * TerminalLauncher `suggestLayout` (PM ruling: the applied cmux grid matches
+ * the modal preview — N=7 → 3×3, never 2×4). Kept here because the daemon
+ * cannot import from packages/ui; a drift is a bug in whichever side changed.
+ */
+export function autoGridCols(n: number): number {
+  return Math.max(1, Math.ceil(Math.sqrt(n)));
+}
 
 const defaultSleep: SleepFn = (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -53,6 +67,21 @@ export interface BuildWorkspaceResult {
   workspaceName: string;
   agents: string[];
   blanks: number;
+}
+
+export interface BuildWorkspacePanesResult {
+  workspaceId: string;
+  workspaceName: string;
+  paneCount: number;
+  blanks: number;
+  /**
+   * Observability only — NOT the acceptance signal (VM-proven: cmux can
+   * report equalized:true while later layout churn restores binary sizes;
+   * final pane frames are the acceptance). True = at least one equalize pass
+   * reported a rebalance; false = no pass did. Absent = not applicable
+   * (no equalize needed for this shape).
+   */
+  equalized?: boolean;
 }
 
 export interface RigSpecLike {
@@ -74,6 +103,15 @@ export class CmuxLayoutService {
   }
 
   static computeLayout(n: number): LayoutShape {
+    if (n === 1) {
+      // Guard n here so the 1×1 fast path still rejects non-integers upstream.
+      return CmuxLayoutService.computeGridLayout(n, 1);
+    }
+    return CmuxLayoutService.computeGridLayout(n, MAX_COLS);
+  }
+
+  /** Grid shape for N panes at an explicit column count (clamped to N). */
+  static computeGridLayout(n: number, cols: number): LayoutShape {
     if (!Number.isInteger(n) || n <= 0) {
       throw new Error(`CmuxLayoutService.computeLayout: N must be a positive integer (got ${n})`);
     }
@@ -82,13 +120,13 @@ export class CmuxLayoutService {
         `CmuxLayoutService.computeLayout: N=${n} exceeds MAX_PER_WORKSPACE=${MAX_PER_WORKSPACE}; caller should chunk first`,
       );
     }
-    if (n === 1) {
-      return { rows: 1, cols: 1, blanks: 0 };
+    if (!Number.isInteger(cols) || cols <= 0) {
+      throw new Error(`CmuxLayoutService.computeGridLayout: cols must be a positive integer (got ${cols})`);
     }
-    const cols = MAX_COLS;
-    const rows = Math.ceil(n / cols);
-    const blanks = rows * cols - n;
-    return { rows, cols, blanks };
+    const effectiveCols = Math.min(cols, n);
+    const rows = Math.ceil(n / effectiveCols);
+    const blanks = rows * effectiveCols - n;
+    return { rows, cols: effectiveCols, blanks };
   }
 
   static chunkAgents<T>(agents: T[]): T[][] {
@@ -115,24 +153,60 @@ export class CmuxLayoutService {
     cwd: string | undefined,
     agentSessions: string[],
   ): Promise<CmuxResult<BuildWorkspaceResult>> {
-    if (agentSessions.length === 0) {
+    const built = await this.buildWorkspacePanes(
+      workspaceName,
+      cwd,
+      agentSessions.map((session) => `tmux attach -t ${session}`),
+    );
+    if (!built.ok) return built;
+    return {
+      ok: true,
+      data: {
+        workspaceId: built.data.workspaceId,
+        workspaceName,
+        agents: agentSessions.slice(),
+        blanks: built.data.blanks,
+      },
+    };
+  }
+
+  /**
+   * Command-level grid builder (the shared core). Same one-workspace grid as
+   * buildWorkspace, but each pane runs an arbitrary caller-composed shell
+   * command verbatim (+ trailing newline) — the terminal-provider ride's
+   * `paneCommand` contract (read-only `-r`, ssh-wrap, quoting preserved).
+   *
+   * `cols` overrides the column count (the terminal launcher passes the modal
+   * Auto-grid `autoGridCols(N)` — PM ruling: the applied grid must match the
+   * modal preview). Omitted → the legacy 2-column rig-launch shape.
+   */
+  async buildWorkspacePanes(
+    workspaceName: string,
+    cwd: string | undefined,
+    paneCommands: string[],
+    cols?: number,
+  ): Promise<CmuxResult<BuildWorkspacePanesResult>> {
+    if (paneCommands.length === 0) {
       const ws = await this.cmuxAdapter.createWorkspace(workspaceName, cwd);
       if (!ws.ok) return ws;
       return {
         ok: true,
-        data: { workspaceId: ws.data, workspaceName, agents: [], blanks: 0 },
+        data: { workspaceId: ws.data, workspaceName, paneCount: 0, blanks: 0 },
       };
     }
 
-    if (agentSessions.length > MAX_PER_WORKSPACE) {
+    if (paneCommands.length > MAX_PER_WORKSPACE) {
       return {
         ok: false,
         code: "invalid_input",
-        message: `buildWorkspace: ${agentSessions.length} agents exceeds MAX_PER_WORKSPACE=${MAX_PER_WORKSPACE}; caller should chunk first`,
+        message: `buildWorkspace: ${paneCommands.length} agents exceeds MAX_PER_WORKSPACE=${MAX_PER_WORKSPACE}; caller should chunk first`,
       };
     }
 
-    const layout = CmuxLayoutService.computeLayout(agentSessions.length);
+    const layout =
+      cols != null
+        ? CmuxLayoutService.computeGridLayout(paneCommands.length, cols)
+        : CmuxLayoutService.computeLayout(paneCommands.length);
 
     // 1. Create the workspace.
     const wsResult = await this.cmuxAdapter.createWorkspace(workspaceName, cwd);
@@ -149,15 +223,16 @@ export class CmuxLayoutService {
 
     // 3. Build the grid. grid[col][row] holds the surface id. Layout
     //    shape determines the split sequence:
-    //    - col 1: 1 initial surface + (rows-1) down splits below it
-    //    - col 2: 1 right split off initial + (rows-1) down splits
+    //    - col 1: the initial surface + (rows-1) down splits below it
+    //    - each further column: 1 right split off the previous column's
+    //      top surface + (rows-1) down splits
     //    Sleep OP_DELAY_MS after every split so the freshly created
     //    surface's shell reaches its prompt before the next op.
     const grid: string[][] = [[initialSurface.data]];
 
-    if (layout.cols === 2) {
+    for (let c = 1; c < layout.cols; c++) {
       const rightSplit = await this.cmuxAdapter.splitSurface(
-        initialSurface.data,
+        grid[c - 1]![0]!,
         "right",
         workspaceId,
       );
@@ -180,25 +255,25 @@ export class CmuxLayoutService {
       }
     }
 
-    // 4. Send tmux-attach to each agent's surface in COLUMN-MAJOR
+    // 4. Send each pane's command to its surface in COLUMN-MAJOR
     //    order: fill column 0 top-to-bottom first, then column 1
     //    top-to-bottom. Matches README §52 "Fill ... (top-to-bottom,
     //    left-to-right)" — each column's contents in reading order,
     //    moving left-to-right across columns.
     //    Any unpopulated surfaces in column 1's last row(s) remain
     //    as "blanks" (cmux still shows them as empty terminals).
-    let agentIndex = 0;
-    for (let c = 0; c < layout.cols && agentIndex < agentSessions.length; c++) {
-      for (let r = 0; r < layout.rows && agentIndex < agentSessions.length; r++) {
+    let paneIndex = 0;
+    for (let c = 0; c < layout.cols && paneIndex < paneCommands.length; c++) {
+      for (let r = 0; r < layout.rows && paneIndex < paneCommands.length; r++) {
         const surface = grid[c]![r]!;
-        const session = agentSessions[agentIndex]!;
+        const command = paneCommands[paneIndex]!;
         const sendResult = await this.cmuxAdapter.sendText(
           surface,
-          `tmux attach -t ${session}\n`,
+          `${command}\n`,
           workspaceId,
         );
         if (!sendResult.ok) return sendResult;
-        agentIndex += 1;
+        paneIndex += 1;
       }
     }
 
@@ -207,13 +282,37 @@ export class CmuxLayoutService {
     //    guarantees the terminal flushes the Enter character.
     await this.sleep(FINAL_SETTLE_MS);
 
+    // 6. Equalize — explicit-cols Auto-grid only (legacy 2-col rig-launch
+    //    stays byte-identical), for grids beyond 2 in either dimension
+    //    (successive 50/50 binary splits land 50/25/25). VM-proven (PM
+    //    ruling): equalization must run AFTER every pane command has landed
+    //    and the workspace settled — an early call can even report
+    //    equalized:true and still end 2:1:1 once later layout churn restores
+    //    binary sizes. So: a fixed number of passes with a settle delay
+    //    between them, never early-exiting on the RPC boolean. The boolean is
+    //    observability only; acceptance is final pane-frame geometry.
+    //    Non-fatal by design: an unequalized grid degrades sizing only,
+    //    never the panes.
+    let equalized: boolean | undefined;
+    if (cols != null && (layout.cols > 2 || layout.rows > 2)) {
+      equalized = false;
+      for (let pass = 0; pass < EQUALIZE_PASSES; pass++) {
+        const eq = await this.cmuxAdapter.equalizeSplits(workspaceId);
+        if (eq.ok && eq.data.equalized) equalized = true;
+        if (pass < EQUALIZE_PASSES - 1) {
+          await this.sleep(EQUALIZE_SETTLE_MS);
+        }
+      }
+    }
+
     return {
       ok: true,
       data: {
         workspaceId,
         workspaceName,
-        agents: agentSessions.slice(),
+        paneCount: paneCommands.length,
         blanks: layout.blanks,
+        ...(equalized !== undefined ? { equalized } : {}),
       },
     };
   }
