@@ -1346,6 +1346,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       "./domain/terminal/herdr-transport.js"
     );
     const { CmuxProviderAdapter } = await import("./domain/terminal/cmux-provider-adapter.js");
+    const { CmuxLayoutService } = await import("./domain/cmux-layout-service.js");
     const { TerminalViewsStore } = await import("./domain/terminal/terminal-views-store.js");
     const { getNodeInventory } = await import("./domain/node-inventory.js");
     const { loadHostRegistry, resolveHost: resolveHostInRegistry } = await import(
@@ -1367,21 +1368,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       logicalId: e.logicalId,
     });
 
-    // Resolve a seat (canonical session name) → its rig + node, for the cmux facade.
-    const resolveSeatNode = (seat: string): { rigId: string; logicalId: string } | null => {
-      for (const rig of rigRepo.listRigs()) {
-        for (const e of getNodeInventory(db, rig.id)) {
-          if (e.canonicalSessionName === seat) return { rigId: rig.id, logicalId: e.logicalId };
-        }
-      }
-      return null;
-    };
-
     const herdrProvider = new HerdrAdapter({
       // FB4: herdr speaks its unix control socket (there is no `layout` CLI).
       transportFactory: createHerdrSocketTransport(createHerdrSocketRpc()),
     });
-    const cmuxProvider = new CmuxProviderAdapter({ cmuxAdapter, nodeCmuxService, resolveSeatNode });
+    const cmuxProvider = new CmuxProviderAdapter({
+      cmuxAdapter,
+      // One gridded workspace per composed page — the same grid machinery as
+      // the rig-scope /cmux/launch endpoint, never one window per seat.
+      layoutService: new CmuxLayoutService(cmuxAdapter),
+    });
     const providerMap: Record<string, typeof herdrProvider | typeof cmuxProvider> = {
       herdr: herdrProvider,
       cmux: cmuxProvider,

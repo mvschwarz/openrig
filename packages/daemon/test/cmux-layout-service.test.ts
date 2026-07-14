@@ -5,12 +5,15 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   CmuxLayoutService,
+  autoGridCols,
   MAX_COLS,
   MAX_PER_WORKSPACE,
   OP_DELAY_MS,
   FINAL_SETTLE_MS,
   LIST_SURFACES_RETRY_DELAY_MS,
   LIST_SURFACES_MAX_ATTEMPTS,
+  EQUALIZE_PASSES,
+  EQUALIZE_SETTLE_MS,
 } from "../src/domain/cmux-layout-service.js";
 import type { CmuxResult } from "../src/adapters/cmux.js";
 
@@ -42,6 +45,7 @@ function makeMockAdapter(overrides: Partial<{
   sendTextFn: (surfaceId: string, text: string, workspaceId?: string) => Promise<CmuxResult<void>>;
   listSurfacesFn: (workspaceId?: string) => Promise<CmuxResult<unknown[]>>;
   closeWorkspaceFn: (workspaceId: string) => Promise<CmuxResult<void>>;
+  equalizeSplitsFn: (workspaceId?: string) => Promise<CmuxResult<{ equalized: boolean }>>;
 }> = {}): { adapter: { [k: string]: unknown }; calls: MockAdapterRecord[] } {
   const calls: MockAdapterRecord[] = [];
   let surfaceSeq = 0;
@@ -79,6 +83,12 @@ function makeMockAdapter(overrides: Partial<{
       return overrides.closeWorkspaceFn
         ? overrides.closeWorkspaceFn(workspaceId)
         : { ok: true, data: undefined };
+    }),
+    equalizeSplits: vi.fn(async (workspaceId?: string) => {
+      calls.push({ method: "equalizeSplits", args: [workspaceId] });
+      return overrides.equalizeSplitsFn
+        ? overrides.equalizeSplitsFn(workspaceId)
+        : { ok: true, data: { equalized: true } };
     }),
   };
 
@@ -202,6 +212,114 @@ describe("CmuxLayoutService.orderAgentsFromRigSpec", () => {
     };
     const ordered = CmuxLayoutService.orderAgentsFromRigSpec(rigSpec);
     expect(ordered).toEqual(["zulu.z1", "alpha.a1"]);
+  });
+});
+
+describe("CmuxLayoutService.buildWorkspacePanes (terminal-provider paneCommand core)", () => {
+  it("sends each caller-composed command verbatim + newline (read-only -r / ssh-wrap preserved)", async () => {
+    const { adapter, calls } = makeMockAdapter();
+    const { sleep } = makeSleepRecorder();
+    const service = new CmuxLayoutService(adapter as never, { sleep });
+    const result = await service.buildWorkspacePanes("openrig:v#l1", undefined, [
+      "tmux attach -t 'a@r'",
+      "ssh 'user@host' tmux attach -r -t 'b@r'",
+    ]);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.paneCount).toBe(2);
+      expect(result.data.blanks).toBe(0);
+    }
+    const creates = calls.filter((c) => c.method === "createWorkspace");
+    expect(creates).toHaveLength(1); // ONE workspace for the whole page
+    const sends = calls.filter((c) => c.method === "sendText");
+    expect(sends.map((s) => s.args[1])).toEqual([
+      "tmux attach -t 'a@r'\n",
+      "ssh 'user@host' tmux attach -r -t 'b@r'\n",
+    ]);
+  });
+
+  // PM ruling: the applied grid must match the modal Auto-grid preview
+  // (TerminalLauncher suggestLayout: cols = ceil(sqrt(N))). Direct vectors at
+  // the acceptance sizes — shape, split count, send count, equalize, ONE
+  // workspace.
+  const commands = (n: number) => Array.from({ length: n }, (_, i) => `cmd-${i + 1}`);
+  const gridCases: Array<{
+    n: number; cols: number; rights: number; downs: number; equalizes: number; blanks: number;
+  }> = [
+    // N=2 → 1×2: one right split, no equalize (2-col is 50/50 already).
+    { n: 2, cols: 2, rights: 1, downs: 0, equalizes: 0, blanks: 0 },
+    // N=5 → 2 rows × 3 cols: 2 rights + 3 downs, EQUALIZE_PASSES equalizes.
+    { n: 5, cols: 3, rights: 2, downs: 3, equalizes: EQUALIZE_PASSES, blanks: 1 },
+    // N=7 → 3×3: 2 rights + 6 downs, EQUALIZE_PASSES equalizes, 2 blanks.
+    { n: 7, cols: 3, rights: 2, downs: 6, equalizes: EQUALIZE_PASSES, blanks: 2 },
+  ];
+
+  it.each(gridCases)(
+    "modal Auto-grid N=$n → cols=$cols: $rights right + $downs down splits, $equalizes equalize passes, ONE workspace",
+    async ({ n, cols, rights, downs, equalizes, blanks }) => {
+      expect(autoGridCols(n)).toBe(cols); // the daemon mirror of suggestLayout
+      const { adapter, calls } = makeMockAdapter();
+      const { sleep } = makeSleepRecorder();
+      const service = new CmuxLayoutService(adapter as never, { sleep });
+      const result = await service.buildWorkspacePanes("ws", undefined, commands(n), autoGridCols(n));
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.data.paneCount).toBe(n);
+        expect(result.data.blanks).toBe(blanks);
+        expect(result.data.equalized).toBe(equalizes > 0 ? true : undefined);
+      }
+      expect(calls.filter((c) => c.method === "createWorkspace")).toHaveLength(1);
+      const splits = calls.filter((c) => c.method === "splitSurface");
+      expect(splits.filter((s) => s.args[1] === "right")).toHaveLength(rights);
+      expect(splits.filter((s) => s.args[1] === "down")).toHaveLength(downs);
+      expect(calls.filter((c) => c.method === "equalizeSplits")).toHaveLength(equalizes);
+      const sends = calls.filter((c) => c.method === "sendText");
+      expect(sends).toHaveLength(n);
+      expect(sends.map((s) => s.args[1])).toEqual(commands(n).map((c) => `${c}\n`));
+    },
+  );
+
+  // The VM-diagnosed timing bug (PM ruling): an equalize fired before pane
+  // commands land can report equalized:true and still end 2:1:1 after layout
+  // churn. So equalization runs AFTER the last send + final settle, and a
+  // SECOND pass always follows a settle delay — never early-exited on the
+  // RPC boolean.
+  it("equalizes only AFTER the last pane command, and runs a second pass even when the first reports true", async () => {
+    const { adapter, calls } = makeMockAdapter();
+    const { sleep, sleeps } = makeSleepRecorder();
+    const service = new CmuxLayoutService(adapter as never, { sleep });
+    const result = await service.buildWorkspacePanes("ws", undefined, commands(7), autoGridCols(7));
+
+    expect(result.ok).toBe(true);
+    const lastSendIdx = calls.map((c) => c.method).lastIndexOf("sendText");
+    const firstEqIdx = calls.map((c) => c.method).indexOf("equalizeSplits");
+    expect(firstEqIdx).toBeGreaterThan(lastSendIdx); // after ALL pane commands
+    // Mock reports equalized:true on the FIRST pass — the second pass still runs.
+    expect(calls.filter((c) => c.method === "equalizeSplits")).toHaveLength(EQUALIZE_PASSES);
+    // The final-settle sleep precedes pass 1; the equalize-settle delay separates passes.
+    expect(sleeps).toContain(FINAL_SETTLE_MS);
+    expect(sleeps.filter((ms) => ms === EQUALIZE_SETTLE_MS)).toHaveLength(EQUALIZE_PASSES - 1);
+  });
+
+  it("reports equalized:false honestly when no pass rebalances (acceptance stays pane-frame geometry)", async () => {
+    const { adapter, calls } = makeMockAdapter({
+      equalizeSplitsFn: async () => ({ ok: true, data: { equalized: false } }),
+    });
+    const { sleep } = makeSleepRecorder();
+    const service = new CmuxLayoutService(adapter as never, { sleep });
+    const result = await service.buildWorkspacePanes("ws", undefined, commands(7), autoGridCols(7));
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.data.equalized).toBe(false);
+    expect(calls.filter((c) => c.method === "equalizeSplits")).toHaveLength(EQUALIZE_PASSES);
+  });
+
+  it("computeGridLayout clamps cols to N and rejects non-positive cols", () => {
+    expect(CmuxLayoutService.computeGridLayout(2, 3)).toEqual({ rows: 1, cols: 2, blanks: 0 });
+    expect(CmuxLayoutService.computeGridLayout(7, 3)).toEqual({ rows: 3, cols: 3, blanks: 2 });
+    expect(() => CmuxLayoutService.computeGridLayout(3, 0)).toThrow(/cols/);
   });
 });
 

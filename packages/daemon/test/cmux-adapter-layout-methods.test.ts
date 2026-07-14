@@ -211,6 +211,79 @@ describe("CmuxAdapter — layout method extensions (slice 24 Checkpoint A)", () 
     });
   });
 
+  describe("equalizeSplits", () => {
+    it("passes workspace_id as snake_case param and parses cmux's equalized verdict", async () => {
+      const calls: Array<{ method: string; params?: unknown }> = [];
+      const adapter = adapterWithTransport({
+        request: async (method, params) => {
+          calls.push({ method, params });
+          if (method === "capabilities") return { capabilities: [] };
+          if (method === "workspace.current") return { workspace_id: "workspace:1" };
+          if (method === "workspace.equalize_splits") return { workspace_id: "workspace:6", equalized: true };
+          return {};
+        },
+        close: () => {},
+      });
+      await adapter.connect();
+      const result = await adapter.equalizeSplits("workspace:6");
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.data.equalized).toBe(true);
+      const eqCall = calls.find((c) => c.method === "workspace.equalize_splits");
+      expect(eqCall).toBeTruthy();
+      expect((eqCall!.params as Record<string, unknown>)["workspace_id"]).toBe("workspace:6");
+    });
+
+    it("reports equalized:false when cmux says no change was made (or omits the field)", async () => {
+      const adapter = adapterWithTransport({
+        request: async (method: string) => {
+          if (method === "capabilities") return { capabilities: [] };
+          if (method === "workspace.current") return { workspace_id: "workspace:1" };
+          if (method === "workspace.equalize_splits") return { workspace_id: "workspace:1", equalized: false };
+          return {};
+        },
+        close: () => {},
+      });
+      await adapter.connect();
+      const noChange = await adapter.equalizeSplits("workspace:1");
+      expect(noChange.ok).toBe(true);
+      if (noChange.ok) expect(noChange.data.equalized).toBe(false);
+
+      const bare = adapterWithTransport({
+        request: async (method: string) => {
+          if (method === "capabilities") return { capabilities: [] };
+          if (method === "workspace.current") return { workspace_id: "workspace:1" };
+          return {}; // no equalized field at all → false, never assumed true
+        },
+        close: () => {},
+      });
+      await bare.connect();
+      const absent = await bare.equalizeSplits("workspace:1");
+      expect(absent.ok).toBe(true);
+      if (absent.ok) expect(absent.data.equalized).toBe(false);
+    });
+
+    it("returns request_failed when transport throws; unavailable when not connected", async () => {
+      const throwing = adapterWithTransport({
+        request: async (method: string) => {
+          if (method === "capabilities") return { capabilities: [] };
+          if (method === "workspace.current") return { workspace_id: "workspace:1" };
+          if (method === "workspace.equalize_splits") throw new Error("no such method");
+          return {};
+        },
+        close: () => {},
+      });
+      await throwing.connect();
+      const failed = await throwing.equalizeSplits("workspace:1");
+      expect(failed.ok).toBe(false);
+      if (!failed.ok) expect(failed.code).toBe("request_failed");
+
+      const disconnected = adapterWithTransport({ request: async () => ({}), close: () => {} });
+      const refused = await disconnected.equalizeSplits("workspace:1");
+      expect(refused.ok).toBe(false);
+      if (!refused.ok) expect(refused.code).toBe("unavailable");
+    });
+  });
+
   describe("listPaneSurfaces", () => {
     it("returns surfaces array from pane.surfaces", async () => {
       const adapter = await connectAdapter({
