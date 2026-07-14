@@ -9,6 +9,9 @@
 //  - herdr fresh-tab-on-relaunch decision (not-replace) + the FB4 socket shapes
 //    (probe=ping; fresh workspace.create → ONE atomic layout.apply per page;
 //    the no-CLI-strings regression — the VM-RED `herdr layout apply` class);
+//  - herdr equal auto-grid root (2×1 / 3×2 / 3×3 matching UI suggestLayout;
+//    first-vs-rest ratios; inert blank padding — the OPR.0.4.7.1 fix for the
+//    alternating-0.5 double-width-cell defect);
 //  - cmux provider renders ONE gridded workspace per page (never a window per
 //    seat) via CmuxLayoutService.buildWorkspacePanes and degrades honestly.
 
@@ -32,10 +35,12 @@ import {
 } from "../src/domain/terminal/terminal-views-store.js";
 import {
   planHerdrLayout,
-  buildBspRoot,
+  buildGridRoot,
   extractWorkspaceId,
   HerdrAdapter,
   type HerdrLayoutNode,
+  type HerdrPaneNode,
+  type HerdrSplitNode,
 } from "../src/domain/terminal/herdr-adapter.js";
 import {
   createHerdrSocketTransport,
@@ -262,7 +267,7 @@ describe("terminal-views store — round-trip byte-stable + atomic write + A3", 
   });
 });
 
-describe("herdr layout plan — fresh-tab-on-relaunch (BR-5) + BSP root + labels", () => {
+describe("herdr layout plan — fresh-tab-on-relaunch (BR-5) + equal auto-grid root + labels", () => {
   const view: ComposedView = {
     id: "acme-build",
     opened: [
@@ -290,10 +295,12 @@ describe("herdr layout plan — fresh-tab-on-relaunch (BR-5) + BSP root + labels
     expect(first.workspaceLabel).toBe("openrig:acme-build#l1");
   });
 
-  it("one BSP root per page — pane leaves carry <agent> · <slice> AND the composed shell command via sh -c", () => {
+  it("one grid root per page (N=2 → 2×1) — pane leaves carry <agent> · <slice> AND the composed shell command via sh -c", () => {
     const plan = planHerdrLayout(view, "l1");
     expect(plan.pages).toHaveLength(1);
-    // The capture-verified layout.apply root shape: split/pane tree, argv command.
+    expect(plan.pages[0]!.blanks).toBe(0);
+    // N=2 is a single equal right strip at ratio 1/2 (argv command shape
+    // capture-verified for layout.apply).
     expect(plan.pages[0]!.root).toEqual({
       type: "split",
       direction: "right",
@@ -303,32 +310,72 @@ describe("herdr layout plan — fresh-tab-on-relaunch (BR-5) + BSP root + labels
     });
   });
 
-  it("buildBspRoot alternates right/down at ratio 0.5 (same-size tiles) and keeps every pane in order", () => {
-    const panes = ["a", "b", "c", "d"].map((s) => ({
-      seat: s,
-      label: s,
-      paneCommand: `attach ${s}`,
+  // The VM-reproduced defect: alternating-0.5 BSP rendered N=7 as 4 columns ×
+  // 2 rows with one double-width cell. The grid root must match the UI
+  // suggestLayout shape (cols=ceil(sqrt(N)), rows=ceil(N/cols)) with EQUAL
+  // cells: equal right-strips per row (first-vs-rest ratios 1/N, 1/(N-1), …)
+  // combined by equal down-strips, padding the rectangle with inert blanks.
+  function walkLeaves(n: HerdrLayoutNode, out: HerdrPaneNode[] = []): HerdrPaneNode[] {
+    if (n.type === "pane") out.push(n);
+    else {
+      walkLeaves(n.first, out);
+      walkLeaves(n.second, out);
+    }
+    return out;
+  }
+
+  it.each([
+    { n: 2, cols: 2, rows: 1, blanks: 0 },
+    { n: 5, cols: 3, rows: 2, blanks: 1 },
+    { n: 7, cols: 3, rows: 3, blanks: 2 }, // the founder repro size
+  ])("buildGridRoot N=$n → $cols×$rows with $blanks inert blank(s), panes in order", ({ n, cols, rows, blanks }) => {
+    const panes = Array.from({ length: n }, (_, i) => ({
+      seat: `s${i + 1}`,
+      label: `s${i + 1}`,
+      paneCommand: `attach s${i + 1}`,
       readOnly: false,
     }));
-    const root = buildBspRoot(panes);
-    if (root.type !== "split") throw new Error("expected a split root");
-    expect(root.direction).toBe("right");
-    expect(root.ratio).toBe(0.5);
-    if (root.first.type !== "split") throw new Error("expected a nested split");
-    expect(root.first.direction).toBe("down");
-    // Every pane appears exactly once, in page order.
-    const labels: string[] = [];
-    const walk = (n: HerdrLayoutNode): void => {
-      if (n.type === "pane") {
-        labels.push(n.label);
-        expect(n.command.slice(0, 2)).toEqual(["sh", "-c"]);
-      } else {
-        walk(n.first);
-        walk(n.second);
+    const grid = buildGridRoot(panes);
+    expect(grid.blanks).toBe(blanks);
+
+    const leaves = walkLeaves(grid.root);
+    expect(leaves).toHaveLength(rows * cols); // full rectangle: N real + blanks
+    // Real panes first, in page order, running their composed command via sh -c.
+    expect(leaves.slice(0, n).map((l) => l.label)).toEqual(panes.map((p) => p.label));
+    for (const leaf of leaves.slice(0, n)) expect(leaf.command.slice(0, 2)).toEqual(["sh", "-c"]);
+    // Blanks pad the rectangle tail and are inert (no composed attach command).
+    for (const leaf of leaves.slice(n)) {
+      expect(leaf.label).toBe("");
+      expect(leaf.command).toEqual(["sh"]);
+    }
+
+    // Equal-cells geometry: the root combines `rows` down-strips at ratio
+    // 1/rows (then 1/(rows-1), …); each row combines `cols` leaves right at
+    // ratio 1/cols (then 1/(cols-1), …) — first-vs-rest, never midpoint 0.5.
+    const root = grid.root;
+    if (rows > 1) {
+      if (root.type !== "split") throw new Error("expected a split root");
+      expect(root.direction).toBe("down");
+      expect(root.ratio).toBeCloseTo(1 / rows, 10);
+      if (rows > 2) {
+        const restRows = root.second;
+        if (restRows.type !== "split") throw new Error("expected nested down split");
+        expect(restRows.direction).toBe("down");
+        expect(restRows.ratio).toBeCloseTo(1 / (rows - 1), 10);
       }
-    };
-    walk(root);
-    expect(labels).toEqual(["a", "b", "c", "d"]);
+    }
+    const firstRow: HerdrLayoutNode = rows > 1 ? (root as HerdrSplitNode).first : root;
+    if (cols > 1) {
+      if (firstRow.type !== "split") throw new Error("expected a row split");
+      expect(firstRow.direction).toBe("right");
+      expect(firstRow.ratio).toBeCloseTo(1 / cols, 10);
+      if (cols > 2) {
+        const restCols = firstRow.second;
+        if (restCols.type !== "split") throw new Error("expected nested right split");
+        expect(restCols.direction).toBe("right");
+        expect(restCols.ratio).toBeCloseTo(1 / (cols - 1), 10);
+      }
+    }
   });
 
   it("multi-page views get one fresh tab label per page", () => {
