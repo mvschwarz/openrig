@@ -307,7 +307,10 @@ export function RigScopePage() {
           </div>
         </div>
       ) : (
-        <div className="px-6 pt-4 max-w-md">
+        // OPR.0.4.7.1 — compact control, RIGHT-aligned: the explorer overlay
+        // anchors left, so right alignment keeps the launch control fully
+        // visible in graph-overlay mode (the reproduced obscured-card bug).
+        <div className="px-6 pt-4 flex justify-end">
           <ErrorBoundary label="Rig status">
             <RigStatusControl rigId={rigId} rigName={rig?.name ?? rigId} />
           </ErrorBoundary>

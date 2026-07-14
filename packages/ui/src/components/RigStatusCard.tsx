@@ -15,7 +15,9 @@ import { Button } from "./ui/button.js";
 import { cn } from "../lib/utils.js";
 import type { RigAggStatus } from "../hooks/useRigStatus.js";
 
-const statusToPip: Record<RigAggStatus, StatusPipStatus> = {
+// Shared status vocabulary — also consumed by the compact topology
+// RigStatusControl (OPR.0.4.7.1) so both surfaces render one verdict language.
+export const statusToPip: Record<RigAggStatus, StatusPipStatus> = {
   up: "running",
   partial: "warning",
   down: "stopped",
@@ -23,7 +25,7 @@ const statusToPip: Record<RigAggStatus, StatusPipStatus> = {
   unknown: "info",
 };
 
-const statusBadgeTone: Record<RigAggStatus, string> = {
+export const statusBadgeTone: Record<RigAggStatus, string> = {
   up: "border-success text-success",
   partial: "border-warning text-warning",
   down: "border-stone-400 text-stone-500",
@@ -31,7 +33,7 @@ const statusBadgeTone: Record<RigAggStatus, string> = {
   unknown: "border-stone-300 text-stone-400",
 };
 
-const statusHelp: Record<RigAggStatus, string> = {
+export const statusHelp: Record<RigAggStatus, string> = {
   up: "All managed seats are running.",
   partial: "Some seats running, some stopped / detached / attention-required.",
   down: "No seats running — recoverable from snapshot.",
