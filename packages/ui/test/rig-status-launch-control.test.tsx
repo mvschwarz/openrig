@@ -3,6 +3,7 @@ import { render, screen, cleanup, fireEvent, waitFor, renderHook, act } from "@t
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { RigStatusCard } from "../src/components/RigStatusCard.js";
+import { RigStatusControl } from "../src/components/RigStatusControl.js";
 import { LaunchRecoveryModal } from "../src/components/LaunchRecoveryModal.js";
 import { KernelStatusCard } from "../src/components/KernelStatusCard.js";
 import { useStartRig, useLaunchRig } from "../src/hooks/mutations.js";
@@ -91,6 +92,73 @@ describe("RigStatusCard — consumes the backend verdict in the render (19/21 le
     const primary = screen.getByTestId("rig-primary-action-rig1") as HTMLButtonElement;
     expect(primary.disabled).toBe(true);
     expect(primary.textContent).toContain("RUNNING");
+  });
+});
+
+// OPR.0.4.7.1 — the topology control is a COMPACT badge + button that opens
+// the launch/recovery modal; the giant inline card (obscured by the explorer
+// overlay at /topology/rig/*) is gone from this surface. RigStatusCard itself
+// is unchanged (dashboard kernel card still uses it — covered above).
+describe("RigStatusControl — compact modal-launch button (no inline card)", () => {
+  beforeEach(() => mockFetch.mockReset());
+  afterEach(cleanup);
+
+  const RIG_STATUS_UP = {
+    rigId: "r9",
+    rigName: "demo",
+    isKernel: false,
+    status: "up",
+    seatsTotal: 7,
+    seatsRunning: 7,
+    recoverable: false,
+    perSeat: [],
+    src: ["ps: 7/7 running · lifecycle=running"],
+  };
+
+  function routeFetch(status: unknown) {
+    mockFetch.mockImplementation((url: unknown, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("/launch-plan")) return jsonResponse(MIXED_PLAN);
+      if (u.includes("/status")) return jsonResponse(status);
+      if (u.endsWith("/up") && init?.method === "POST") return jsonResponse({ status: "restored" });
+      return jsonResponse({});
+    });
+  }
+
+  it("renders compact (no rig-status-card) with the verdict badge + seats + primary button", async () => {
+    routeFetch({ ...RIG_STATUS_UP, status: "partial", seatsRunning: 5 });
+    renderWithClient(<RigStatusControl rigId="r9" rigName="demo" />);
+
+    await waitFor(() => expect(screen.getByTestId("rig-primary-action-r9")).toBeTruthy());
+    // The compact contract: the giant card is GONE from this surface.
+    expect(screen.queryByTestId("rig-status-card-r9")).toBeNull();
+    const control = screen.getByTestId("rig-status-control-r9");
+    expect(control.getAttribute("data-status")).toBe("partial");
+    expect(screen.getByTestId("rig-status-badge-r9").textContent).toContain("partial");
+    expect(screen.getByTestId("seats-r9").textContent).toBe("5/7");
+  });
+
+  it("clicking the primary action opens LaunchRecoveryModal (plan-before-mutation fetch fires)", async () => {
+    routeFetch({ ...RIG_STATUS_UP, status: "down", seatsRunning: 0, recoverable: true });
+    renderWithClient(<RigStatusControl rigId="r9" rigName="demo" />);
+
+    await waitFor(() => expect(screen.getByTestId("rig-primary-action-r9")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("rig-primary-action-r9"));
+
+    await waitFor(() => expect(screen.getByTestId("launch-recovery-modal")).toBeTruthy());
+    const planCalls = mockFetch.mock.calls.map(([u]) => String(u)).filter((u) => u.includes("/launch-plan"));
+    expect(planCalls.length).toBeGreaterThan(0);
+  });
+
+  it("stays a live button when status is up (opens the read-only modal, never a disabled RUNNING)", async () => {
+    routeFetch(RIG_STATUS_UP);
+    renderWithClient(<RigStatusControl rigId="r9" rigName="demo" />);
+
+    await waitFor(() => expect(screen.getByTestId("rig-primary-action-r9")).toBeTruthy());
+    const primary = screen.getByTestId("rig-primary-action-r9") as HTMLButtonElement;
+    expect(primary.disabled).toBe(false);
+    fireEvent.click(primary);
+    await waitFor(() => expect(screen.getByTestId("launch-recovery-modal")).toBeTruthy());
   });
 });
 
