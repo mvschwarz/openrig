@@ -8,7 +8,9 @@ export type { FailedStep };
 
 export interface RemoteBearerResolution {
   ok: true;
-  token: string;
+  /** Absent for an anonymous (URL-only) host — a tokenless daemon, no
+   *  Authorization header is sent. Present when bearer_env/bearer_file resolves. */
+  token?: string;
 }
 
 export interface RemoteBearerFailure {
@@ -32,7 +34,17 @@ export function resolveRemoteBearer(host: HttpHostEntry): RemoteBearerResolution
       return { ok: false, failedStep: "permission-gate", error: `bearer file ${host.bearer_file} not readable for host ${host.id}` };
     }
   }
-  return { ok: false, failedStep: "permission-gate", error: `host ${host.id} has no bearer_env or bearer_file configured` };
+  // No bearer configured is now a VALID anonymous host — a tokenless daemon
+  // (host+VM are one founder-owned trust domain; the mesh is the auth
+  // boundary). No token means no Authorization header downstream. A
+  // configured-but-unresolvable pointer still fails above (fail-closed).
+  return { ok: true };
+}
+
+/** Build the Authorization header for a resolved remote bearer. An anonymous
+ *  (URL-only) host resolves to no token → no header (tokenless daemon). */
+export function bearerAuthHeaders(token: string | undefined): Record<string, string> {
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 export function classifyHttpFailedStep(status: number, body?: { error?: string }): FailedStep {
@@ -111,7 +123,7 @@ export function loadHostRegistry(path: string = defaultHostRegistryPath()): Host
   if (!existsSync(path)) {
     return {
       ok: false,
-      error: `host registry not found at ${path}. Create it with a 'hosts:' array; transport: ssh (target + user) or http (url + bearer_env/bearer_file).`,
+      error: `host registry not found at ${path}. Create it with a 'hosts:' array; transport: ssh (target + user) or http (url; optional bearer_env or bearer_file — omit both for a tokenless daemon).`,
     };
   }
   let raw: string;
@@ -208,11 +220,11 @@ export function validateHostRegistry(parsed: unknown, sourcePath: string): HostR
       const bearerFile = entry["bearer_file"];
       const hasEnv = bearerEnv !== undefined;
       const hasFile = bearerFile !== undefined;
-      if (!hasEnv && !hasFile) {
-        return { ok: false, error: `${prefix}: http transport requires exactly one of bearer_env or bearer_file` };
-      }
+      // bearer_env / bearer_file are OPTIONAL: omit both for an
+      // anonymous/tokenless daemon (no Authorization sent). At most one may
+      // be set — never both.
       if (hasEnv && hasFile) {
-        return { ok: false, error: `${prefix}: specify exactly one of bearer_env or bearer_file, not both` };
+        return { ok: false, error: `${prefix}: specify at most one of bearer_env or bearer_file, not both (omit both for an anonymous/tokenless daemon)` };
       }
       if (hasEnv && (typeof bearerEnv !== "string" || bearerEnv.trim() === "")) {
         return { ok: false, error: `${prefix}.bearer_env: must be a non-empty env var name` };
@@ -260,7 +272,8 @@ export function resolveHost(registry: HostRegistry, id: string): HostResolution 
 // ONE validation source: the candidate registry (existing entries + the new
 // raw entry) is validated by the SAME validateHostRegistry the loader uses —
 // add-time errors are load-time errors, verbatim (incl. duplicate ids,
-// transport-appropriate fields, exactly-one-bearer). The standard path never
+// transport-appropriate fields, at-most-one-bearer — bearer optional for a
+// tokenless daemon, never both). The standard path never
 // hand-edits YAML; note: add REWRITES the file canonically (hand-authored
 // comments are not preserved — hand-editing remains the path for exotica).
 // ---------------------------------------------------------------------------

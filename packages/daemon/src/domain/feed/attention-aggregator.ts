@@ -69,7 +69,7 @@ async function readHostAttention(hostId: string, reg: HostRegistryLoadResult, de
     // R15-2 (the whoami --all-hosts precedent): SSH-declared hosts are a
     // structured per-host status, never a silently thinner feed.
     return {
-      status: { hostId, status: "unsupported-transport", error: `host '${hostId}' is SSH-declared; the aggregated feed read requires an http-transport registry entry (url + bearer)` },
+      status: { hostId, status: "unsupported-transport", error: `host '${hostId}' is SSH-declared; the aggregated feed read requires an http-transport registry entry (url; bearer optional)` },
       items: [],
     };
   }

@@ -55,7 +55,7 @@ describe("rig host add/list", () => {
   it("add surfaces the loader's own validation error at add-time (both bearers)", async () => {
     const { err, exitCode } = await capture(() => run(["add", "--id", "h1", "--transport", "http", "--url", "http://x", "--bearer-env", "A", "--bearer-file", "/b"]));
     expect(exitCode).toBe(1);
-    expect(err.join("\n")).toContain("exactly one of bearer_env or bearer_file");
+    expect(err.join("\n")).toContain("not both");
   });
 
   it("list renders pointers and NEVER a resolved secret value (qa1 hygiene guard)", async () => {
@@ -264,6 +264,38 @@ describe("rig host doctor — stepwise distinct errors + three-valued posture", 
     const rows = await postureCheck(httpHost, { run: async () => okRun(""), httpGet: async () => ({ status: 200, body: "" }), tcpProbe: async () => "closed" });
     expect(rows.length).toBeGreaterThan(0);
     expect(rows.every((r: CheckRow) => r.status === "unknown")).toBe(true);
+  });
+
+  it("doctor over http: anonymous (URL-only) host with an answering daemon passes auth-neutrally (no 'authenticated' claim)", async () => {
+    const anonHost: HostEntry = { id: "anon-h", transport: "http", url: "http://x" };
+    const rows = await doctorLegs(anonHost, { run: async () => okRun(""), httpGet: async () => ({ status: 200, body: "ok" }), tcpProbe: async () => "closed" });
+    const reach = rows.find((r) => r.step === "transport-reachability")!;
+    expect(reach.status).toBe("pass");
+    const identity = rows.find((r) => r.step === "remote-identity")!;
+    expect(identity.status).toBe("pass");
+    expect(identity.detail).toContain("anonymous");
+    expect(identity.detail).not.toContain("authenticated");
+  });
+
+  it("doctor over http: anonymous host that gets 401 is told to add a bearer to the hosts.yaml entry, NOT that a token is wrong", async () => {
+    const anonHost: HostEntry = { id: "anon-h", transport: "http", url: "http://x" };
+    const rows = await doctorLegs(anonHost, { run: async () => okRun(""), httpGet: async () => ({ status: 401, body: "no" }), tcpProbe: async () => "closed" });
+    const reach = rows.find((r) => r.step === "transport-reachability")!;
+    expect(reach.status).toBe("fail");
+    expect(reach.detail).toContain("requires Authorization");
+    expect(reach.fix).toContain("hosts.yaml");
+    expect(reach.fix).not.toContain("token is wrong");
+    expect(reach.fix).not.toContain("rig host add");
+  });
+
+  it("doctor over http: a CONFIGURED-token host that gets 401 keeps the wrong-token guidance (unchanged branch)", async () => {
+    vi.stubEnv("DOCTOR_TOK", "tok-1");
+    const cfgHost: HostEntry = { id: "cfg-h", transport: "http", url: "http://x", bearer_env: "DOCTOR_TOK" };
+    const rows = await doctorLegs(cfgHost, { run: async () => okRun(""), httpGet: async () => ({ status: 401, body: "no" }), tcpProbe: async () => "closed" });
+    const reach = rows.find((r) => r.step === "transport-reachability")!;
+    expect(reach.status).toBe("fail");
+    expect(reach.detail).toContain("rejected the bearer");
+    expect(reach.fix).toContain("token is wrong");
   });
 
   it("doctor CLI: unknown host id is the DISTINCT registry error", async () => {

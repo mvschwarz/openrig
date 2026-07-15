@@ -6,7 +6,7 @@ import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
-import { loadHostRegistry, resolveHost, hostDisplayTarget, resolveRemoteBearer, classifyHttpFailedStep, classifyHttpError, type HttpHostEntry } from "../host-registry.js";
+import { loadHostRegistry, resolveHost, hostDisplayTarget, resolveRemoteBearer, bearerAuthHeaders, classifyHttpFailedStep, classifyHttpError, type HttpHostEntry } from "../host-registry.js";
 import { runCrossHostCommand, type RunCrossHostCommandOpts } from "../cross-host-executor.js";
 import { emitCrossHostError, emitCrossHostFailure } from "../cross-host-cli-helpers.js";
 
@@ -427,7 +427,7 @@ async function runHttpWhoami(
 
   const { classifyHttpFailedStep: classifyStatus } = await import("../host-registry.js");
   const client = deps.clientFactory(host.url);
-  const headers = { Authorization: `Bearer ${bearerResult.token}` };
+  const headers = bearerAuthHeaders(bearerResult.token);
 
   try {
     const infoRes = await client.get<{ installRoot?: string }>("/api/info", { headers });
@@ -511,7 +511,7 @@ async function runFanOutWhoami(opts: WhoamiCliOptions, deps: WhoamiDeps): Promis
         return { host: id, ok: false, failedStep: bearerResult.failedStep, error: bearerResult.error };
       }
       const client = deps.clientFactory(httpHost.url);
-      const headers = { Authorization: `Bearer ${bearerResult.token}` };
+      const headers = bearerAuthHeaders(bearerResult.token);
       try {
         const { classifyHttpFailedStep: classifyStatus } = await import("../host-registry.js");
         const infoRes = await client.get<{ installRoot?: string }>("/api/info", { headers });

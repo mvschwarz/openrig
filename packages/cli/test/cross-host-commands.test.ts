@@ -22,6 +22,12 @@ let originalStdoutWrite: typeof process.stdout.write;
 let originalStderrWrite: typeof process.stderr.write;
 
 beforeEach(() => {
+  // Hermetic sender provenance: the ambient OPENRIG_SESSION_NAME (set when
+  // the suite runs inside a rig seat) would otherwise make the SSH send
+  // reconstruction auto-append `--from <origin>`. Clear it so the exact-argv
+  // assertions below are deterministic; the provenance test stubs it explicitly.
+  vi.stubEnv("OPENRIG_SESSION_NAME", "");
+  vi.stubEnv("RIGGED_SESSION_NAME", "");
   captured = { stdoutLines: [], stderrLines: [], stdoutWrites: [], stderrWrites: [], exitCode: undefined };
   originalLog = console.log;
   originalError = console.error;
@@ -41,6 +47,7 @@ afterEach(() => {
   process.stderr.write = originalStderrWrite;
   captured.exitCode = process.exitCode;
   process.exitCode = undefined;
+  vi.unstubAllEnvs();
 });
 
 const KNOWN_REGISTRY: HostRegistryLoadResult = {
@@ -80,6 +87,29 @@ describe("send --host (cross-host short-circuit)", () => {
     const stdoutText = captured.stdoutWrites.join("");
     expect(stdoutText).toContain("Verified: yes");
     expect(process.exitCode).toBeUndefined();
+  });
+
+  it("sender provenance: SSH reconstruction appends --from <origin> when an origin session resolves", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "orch-lead@rig-a");
+    const captureCalls: { argv?: readonly string[] } = {};
+    const cmd = sendCommand(deps({
+      run: async (_h, argv) => { captureCalls.argv = argv; return { ok: true, failedStep: "none", stdout: "", stderr: "", remoteExitCode: 0 }; },
+    }));
+    await cmd.parseAsync(["--host", "vm-a", "dev-impl@my-rig", "hi"], { from: "user" });
+    const argv = captureCalls.argv!;
+    expect(argv).toContain("--from");
+    expect(argv[argv.indexOf("--from") + 1]).toBe("orch-lead@rig-a");
+  });
+
+  it("explicit --from wins over the ambient origin in the reconstructed argv", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "orch-lead@rig-a");
+    const captureCalls: { argv?: readonly string[] } = {};
+    const cmd = sendCommand(deps({
+      run: async (_h, argv) => { captureCalls.argv = argv; return { ok: true, failedStep: "none", stdout: "", stderr: "", remoteExitCode: 0 }; },
+    }));
+    await cmd.parseAsync(["--host", "vm-a", "dev-impl@my-rig", "hi", "--from", "worker@rig-a"], { from: "user" });
+    const argv = captureCalls.argv!;
+    expect(argv[argv.indexOf("--from") + 1]).toBe("worker@rig-a");
   });
 
   it("--verify honesty: SSH success + remote 'Verified: no' surfaces in output, NOT collapsed into success+silence", async () => {

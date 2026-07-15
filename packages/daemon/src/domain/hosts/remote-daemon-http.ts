@@ -69,9 +69,12 @@ export type RemoteRawResult =
   | { ok: true; status: number; contentType: string; bodyText: string }
   | { ok: false; kind: Exclude<RemoteJsonFailureKind, "http">; phase?: "request" | "body"; status?: number; detail: string };
 
-/** Mirrors the CLI's resolveRemoteBearer (host-registry.ts): exactly-one of
- *  bearer_env / bearer_file, resolved at call time. */
-function resolveBearer(host: HttpHostEntry, deps: RemoteJsonDeps): { ok: true; token: string } | { ok: false; detail: string } {
+/** Mirrors the CLI's resolveRemoteBearer (host-registry.ts): at-most-one of
+ *  bearer_env / bearer_file, resolved at call time. Neither configured is an
+ *  anonymous (URL-only) host — a tokenless daemon; ok with no token, so no
+ *  Authorization header is sent. A configured-but-unresolvable pointer still
+ *  fails (fail-closed). */
+function resolveBearer(host: HttpHostEntry, deps: RemoteJsonDeps): { ok: true; token?: string } | { ok: false; detail: string } {
   const env = deps.env ?? process.env;
   const readFile = deps.readFile ?? ((p: string) => readFileSync(p, "utf-8"));
   if (host.bearer_env) {
@@ -88,7 +91,7 @@ function resolveBearer(host: HttpHostEntry, deps: RemoteJsonDeps): { ok: true; t
       return { ok: false, detail: `bearer file ${host.bearer_file} not readable for host ${host.id}` };
     }
   }
-  return { ok: false, detail: `host ${host.id} has no bearer_env or bearer_file configured` };
+  return { ok: true };
 }
 
 /** One bounded daemon→daemon JSON exchange. The single deadline covers
@@ -109,7 +112,7 @@ export async function remoteJsonRequest(host: HttpHostEntry, path: string, opts:
       method: opts.method,
       headers: {
         ...(opts.body !== undefined ? { "Content-Type": "application/json" } : {}),
-        Authorization: `Bearer ${bearer.token}`,
+        ...(bearer.token ? { Authorization: `Bearer ${bearer.token}` } : {}),
       },
       ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
       signal: controller.signal,
@@ -164,7 +167,7 @@ export async function remoteRawRequest(host: HttpHostEntry, path: string, opts: 
   try {
     res = await fetchImpl(url, {
       method: "GET",
-      headers: { Authorization: `Bearer ${bearer.token}` },
+      headers: bearer.token ? { Authorization: `Bearer ${bearer.token}` } : {},
       signal: controller.signal,
     });
   } catch (err) {

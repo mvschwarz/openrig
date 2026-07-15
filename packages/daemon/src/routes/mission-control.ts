@@ -353,7 +353,7 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
       const resolved = resolveHost(reg.registry, hostId);
       if (!resolved.ok) return fail(resolved.error, "unknown-host");
       if (resolved.host.transport !== "http") {
-        return fail(`host '${hostId}' is SSH-declared; remote actions require an http-transport registry entry (url + bearer)`, "unsupported-transport");
+        return fail(`host '${hostId}' is SSH-declared; remote actions require an http-transport registry entry (url; bearer optional)`, "unsupported-transport");
       }
       const { hostId: _dropped, ...forwardBody } = body as Record<string, unknown>;
       const res = await remoteJsonRequest(resolved.host, "/api/mission-control/action", {

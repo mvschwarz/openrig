@@ -213,7 +213,7 @@ export function queueRoutes(): Hono {
     if (!resolved.ok) return fail(resolved.error, "unknown-host");
     if (resolved.host.transport !== "http") {
       return fail(
-        `host '${hostId}' is SSH-declared; cross-host queue writes require an http-transport registry entry (url + bearer)`,
+        `host '${hostId}' is SSH-declared; cross-host queue writes require an http-transport registry entry (url; bearer optional)`,
         "unsupported-transport",
       );
     }

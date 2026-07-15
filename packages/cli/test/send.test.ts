@@ -297,6 +297,17 @@ describe("Send CLI", () => {
     expect(String(lastSendBody?.text)).toContain("---\nhello\n---");
   });
 
+  // Sender provenance (addendum): an explicit --from names the originating
+  // session in BOTH the wrapped envelope and the actorSession field, so a
+  // reconstructed cross-host send does not degrade the sender to "unknown".
+  it("send --from <origin> sets From: <origin> in the envelope and actorSession=<origin>", async () => {
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--from", "orch-lead@rig-a"]);
+    });
+    expect(String(lastSendBody?.text)).toContain("From: orch-lead@rig-a");
+    expect(lastSendBody?.actorSession).toBe("orch-lead@rig-a");
+  });
+
   it("send --dangerously-interact --reason posts the override fields with raw (exact) text", async () => {
     await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "1", "--dangerously-interact", "--reason", "unblock stuck prompt"]);

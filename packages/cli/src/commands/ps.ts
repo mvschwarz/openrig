@@ -1300,8 +1300,8 @@ async function runCrossHostPs(
   emitCrossHostFailure(host.id, hostDisplayTarget(host), result, false);
 }
 
-function buildRemoteHeaders(token: string): Record<string, string> {
-  return { Authorization: `Bearer ${token}` };
+function buildRemoteHeaders(token: string | undefined): Record<string, string> {
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 async function runHttpPs(

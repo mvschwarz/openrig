@@ -121,7 +121,7 @@ export function hostReadThrough() {
     const resolved = resolveHost(reg.registry, hostId);
     if (!resolved.ok) return fail(resolved.error, "unknown-host");
     if (resolved.host.transport !== "http") {
-      return fail(`host '${hostId}' is SSH-declared; the read-through requires an http-transport registry entry (url + bearer)`, "unsupported-transport");
+      return fail(`host '${hostId}' is SSH-declared; the read-through requires an http-transport registry entry (url; bearer optional)`, "unsupported-transport");
     }
 
     // Arch P2 leg 2: STRIP IS TOTAL — the forwarded request carries no host

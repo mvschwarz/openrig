@@ -824,7 +824,7 @@ Validation rules:
 - `hosts` is required and must be a non-null array.
 - Each entry: `id` required (non-empty, unique), `transport` required (`ssh` or `http`).
 - SSH entries require `target` (non-empty — DNS name, SSH config alias, or IP); `user` and `notes` are optional.
-- HTTP entries require `url` plus exactly one bearer pointer (`bearer_env` or `bearer_file`); pointers are config names/paths, never resolved token values.
+- HTTP entries require `url`; a bearer pointer (`bearer_env` or `bearer_file`) is OPTIONAL — omit both for an anonymous/tokenless daemon (no `Authorization` header is sent; host+VM are one founder-owned trust domain and the mesh is the auth boundary). At most one bearer pointer may be set, never both. Pointers are config names/paths, never resolved token values; a configured-but-unresolvable pointer is a permission failure before any request.
 - `rig host add/list/doctor` covers the standard path; hand-editing remains the path for exotica.
 - A missing or invalid file returns a clear error pointing at the canonical path.
 
@@ -946,7 +946,7 @@ exactly these three — no edit/remove/tunnel/bootstrap verbs; hand-editing `hos
 the path for exotica, and the factory bootstrap ships as script + runbook at
 `docs/reference/product-factory-vps-runbook.md`).
 
-- `add --id <id> --transport <ssh|http> [--target <t> --user <u> | --url <u> --bearer-env <n>|--bearer-file <p>] [--notes <text>] [--json]` — writes the entry validated by the registry loader's OWN rules (add-time errors are load-time errors, verbatim; duplicate ids refused). Rewrites `hosts.yaml` canonically (hand-authored comments are not preserved).
+- `add --id <id> --transport <ssh|http> [--target <t> --user <u> | --url <u> [--bearer-env <n>|--bearer-file <p>]] [--notes <text>] [--json]` — writes the entry validated by the registry loader's OWN rules (add-time errors are load-time errors, verbatim; duplicate ids refused; the http bearer pointer is optional — omit both for a tokenless daemon, never both). Rewrites `hosts.yaml` canonically (hand-authored comments are not preserved).
 - `list [--json]` — id/transport/target plus AUTH as a config POINTER (`env:NAME` / `file:PATH` / `ssh-key`); never a resolved secret value.
 - `doctor <id> [--posture product-factory-vps] [--public-addr <ip>] [--json]` — stepwise, honest verification: transport reachability → remote `rig` binary (+version) → remote daemon health → remote identity; each failing step is a DISTINCT actionable error, and unknown host ids surface as the registry error class. `--posture` runs the ONE built-in baseline (`product-factory-vps`): every item reports pass/fail/**unknown** individually with a fix per non-pass — UNKNOWN is never pass; the public `:7433`/`:22` probes need `--public-addr` (outside vantage) and a reachable public daemon port FAILS loudly. Exit `1` on any fail.
 

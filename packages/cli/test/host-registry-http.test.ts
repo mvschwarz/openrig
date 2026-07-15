@@ -26,20 +26,24 @@ describe("host-registry HTTP transport validation", () => {
     expect(r.ok).toBe(true);
   });
 
-  it("rejects http entry with no bearer source", () => {
+  it("accepts http entry with NO bearer source (anonymous/tokenless daemon)", () => {
     const r = validateHostRegistry({
       hosts: [{ id: "host-b", transport: "http", url: "http://192.168.64.97:7433" }],
     }, "test.yaml");
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error).toContain("exactly one of bearer_env or bearer_file");
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      const h = r.registry.hosts[0] as HttpHostEntry;
+      expect(h.bearer_env).toBeUndefined();
+      expect(h.bearer_file).toBeUndefined();
+    }
   });
 
-  it("rejects http entry with both bearer sources", () => {
+  it("rejects http entry with both bearer sources (never both)", () => {
     const r = validateHostRegistry({
       hosts: [{ id: "host-b", transport: "http", url: "http://192.168.64.97:7433", bearer_env: "TOK", bearer_file: "/tmp/tok" }],
     }, "test.yaml");
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error).toContain("exactly one of bearer_env or bearer_file");
+    if (!r.ok) expect(r.error).toContain("not both");
   });
 
   it("rejects http entry with empty url", () => {
@@ -89,10 +93,10 @@ describe("resolveRemoteBearer", () => {
     }
   });
 
-  it("returns permission-gate when no source configured", () => {
+  it("returns anonymous ok (no token) when no source configured", () => {
     const r = resolveRemoteBearer({ id: "b", transport: "http", url: "http://x" });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.failedStep).toBe("permission-gate");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.token).toBeUndefined();
   });
 
   it("no token appears in error output", () => {

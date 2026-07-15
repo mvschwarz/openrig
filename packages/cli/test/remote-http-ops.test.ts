@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Command } from "commander";
 import type { DaemonClient, DaemonResponse } from "../src/client.js";
+import { runRemoteHttpOp } from "../src/remote-host-ops.js";
 
 function mockClient(responses: Record<string, { status: number; data: unknown }>): DaemonClient & { _calls: Array<{ method: string; path: string; body?: unknown; headers?: Record<string, string>; timeoutMs?: number }> } {
   const calls: Array<{ method: string; path: string; body?: unknown; headers?: Record<string, string>; timeoutMs?: number }> = [];
@@ -492,5 +493,43 @@ describe("SSH fallback", () => {
     );
     expect(result.ok).toBe(false);
     expect(result.failedStep).toBe("ssh-unreachable");
+  });
+});
+
+describe("runRemoteHttpOp — anonymous (URL-only) host omits Authorization", () => {
+  it("URL-only http host: request carries NO Authorization header; still succeeds", async () => {
+    const client = mockClient({ "/api/ps": { status: 200, data: [] } });
+    const res = await runRemoteHttpOp("anon-b", "GET", "/api/ps", undefined, {
+      clientFactory: () => client,
+      hostRegistryLoader: mockRegistry([{ id: "anon-b", transport: "http", url: "http://anon-b:7433" }]),
+    }, {});
+    expect(res.ok).toBe(true);
+    const call = client._calls.find((c) => c.path === "/api/ps");
+    expect(call).toBeDefined();
+    expect(call!.headers && "Authorization" in call!.headers).toBeFalsy();
+  });
+
+  it("configured bearer_env host: still sends Authorization", async () => {
+    vi.stubEnv("ANON_CFG_TOKEN", "tok-xyz");
+    const client = mockClient({ "/api/ps": { status: 200, data: [] } });
+    const res = await runRemoteHttpOp("cfg-b", "GET", "/api/ps", undefined, {
+      clientFactory: () => client,
+      hostRegistryLoader: mockRegistry([{ id: "cfg-b", transport: "http", url: "http://cfg-b:7433", bearer_env: "ANON_CFG_TOKEN" }]),
+    }, {});
+    expect(res.ok).toBe(true);
+    const call = client._calls.find((c) => c.path === "/api/ps");
+    expect(call!.headers?.Authorization).toBe("Bearer tok-xyz");
+  });
+
+  it("configured-but-missing bearer_env: fails BEFORE any request (fail-closed)", async () => {
+    delete process.env.ANON_MISSING_TOKEN;
+    const client = mockClient({ "/api/ps": { status: 200, data: [] } });
+    const res = await runRemoteHttpOp("cfg-miss", "GET", "/api/ps", undefined, {
+      clientFactory: () => client,
+      hostRegistryLoader: mockRegistry([{ id: "cfg-miss", transport: "http", url: "http://cfg-miss:7433", bearer_env: "ANON_MISSING_TOKEN" }]),
+    }, {});
+    expect(res.ok).toBe(false);
+    expect(res.failedStep).toBe("permission-gate");
+    expect(client._calls.length).toBe(0);
   });
 });

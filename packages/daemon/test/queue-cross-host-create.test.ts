@@ -32,6 +32,7 @@ import type { HostRegistry } from "../src/domain/hosts/hosts-registry-reader.js"
 const REGISTRY: HostRegistry = {
   hosts: [
     { id: "vps-b", transport: "http", url: "http://vps-b:7433", bearer_env: "MH3B" },
+    { id: "anon-b", transport: "http", url: "http://anon-b:7433" },
     { id: "ssh-1", transport: "ssh", target: "x.local" },
   ],
 };
@@ -135,6 +136,34 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
     expect(capture.body?.["tags"]).toContain("existing");
     // NO local row (origin-owns-the-record).
     expect(rowCount(db)).toBe(0);
+  });
+
+  it("cross-host create to a URL-only (anonymous) host: forward omits Authorization; bearer host still sends it", async () => {
+    const anonHeaders: { value?: HeadersInit } = {};
+    const anonApp = makeApp({
+      db,
+      bus,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => {
+        anonHeaders.value = init?.headers;
+        return jsonResponse({ qitemId: "qitem-anon-1", destinationSession: "dev@rig-b", state: "pending" }, 201);
+      }) as unknown as typeof fetch,
+    });
+    const anonRes = await post(anonApp, { ...BASE, hostId: "anon-b" });
+    expect(anonRes.status).toBe(201);
+    expect("Authorization" in ((anonHeaders.value ?? {}) as Record<string, string>)).toBe(false);
+
+    const bearerHeaders: { value?: HeadersInit } = {};
+    const bearerApp = makeApp({
+      db,
+      bus,
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => {
+        bearerHeaders.value = init?.headers;
+        return jsonResponse({ qitemId: "qitem-b-1", destinationSession: "dev@rig-b", state: "pending" }, 201);
+      }) as unknown as typeof fetch,
+    });
+    const bearerRes = await post(bearerApp, { ...BASE, hostId: "vps-b" });
+    expect(bearerRes.status).toBe(201);
+    expect((bearerHeaders.value as Record<string, string>)["Authorization"]).toBe("Bearer remote-token");
   });
 
   it("cross-host create with a caller --id: forwards THAT id (mint only if absent)", async () => {

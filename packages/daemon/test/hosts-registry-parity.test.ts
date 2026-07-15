@@ -38,8 +38,8 @@ const SHARED_FIXTURES: Array<{ label: string; parsed: unknown; ok: boolean }> = 
   { label: "invalid: unknown transport", parsed: { hosts: [{ id: "x", transport: "carrier-pigeon", target: "a" }] }, ok: false },
   { label: "invalid: ssh missing target", parsed: { hosts: [{ id: "x", transport: "ssh" }] }, ok: false },
   { label: "invalid: http missing url", parsed: { hosts: [{ id: "x", transport: "http", bearer_env: "T" }] }, ok: false },
-  { label: "invalid: http with NO bearer (exactly-one rule)", parsed: { hosts: [{ id: "x", transport: "http", url: "http://x" }] }, ok: false },
-  { label: "invalid: http with BOTH bearers (exactly-one rule)", parsed: { hosts: [{ id: "x", transport: "http", url: "http://x", bearer_env: "T", bearer_file: "/f" }] }, ok: false },
+  { label: "valid: http with NO bearer (anonymous/tokenless daemon)", parsed: { hosts: [{ id: "x", transport: "http", url: "http://x" }] }, ok: true },
+  { label: "invalid: http with BOTH bearers (never both)", parsed: { hosts: [{ id: "x", transport: "http", url: "http://x", bearer_env: "T", bearer_file: "/f" }] }, ok: false },
   { label: "invalid: empty id", parsed: { hosts: [{ id: "  ", transport: "ssh", target: "a" }] }, ok: false },
   // OPR.0.4.6.MH1 FR-7 — reserved host ids rejected in BOTH twins.
   { label: "invalid: reserved id 'kernel' (human-seat collision)", parsed: { hosts: [{ id: "kernel", transport: "ssh", target: "a" }] }, ok: false },

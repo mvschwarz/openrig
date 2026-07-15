@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { hostname as osHostname, userInfo } from "node:os";
 import { connect } from "node:net";
 import { getOpenRigHome } from "../openrig-compat.js";
-import { addHostEntry, defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, hostDisplayTarget, resolveHost, resolveRemoteBearer, type HostEntry, type HttpHostEntry } from "../host-registry.js";
+import { addHostEntry, defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, hostDisplayTarget, resolveHost, resolveRemoteBearer, bearerAuthHeaders, type HostEntry, type HttpHostEntry } from "../host-registry.js";
 import { runCrossHostCommand, type CrossHostResult } from "../cross-host-executor.js";
 import { DaemonClient } from "../client.js";
 import { readOwnHostName, readSelectedHost } from "../host-selection.js";
@@ -188,9 +188,11 @@ export async function doctorLegs(host: HostEntry, deps: DoctorDeps): Promise<Che
     return rows;
   }
   try {
-    const health = await deps.httpGet(`${(host as HttpHostEntry).url}/healthz`, { Authorization: `Bearer ${bearer.token}` });
+    const health = await deps.httpGet(`${(host as HttpHostEntry).url}/healthz`, bearerAuthHeaders(bearer.token));
     if (health.status === 401 || health.status === 403) {
-      rows.push({ step: "transport-reachability", status: "fail", detail: `daemon reachable but rejected the bearer (HTTP ${health.status})`, fix: "registry is reachable but the token is wrong — rotate/set the bearer the entry points at" });
+      rows.push(bearer.token
+        ? { step: "transport-reachability", status: "fail", detail: `daemon reachable but rejected the bearer (HTTP ${health.status})`, fix: "registry is reachable but the token is wrong — rotate/set the bearer the entry points at" }
+        : { step: "transport-reachability", status: "fail", detail: `daemon reachable but requires Authorization (HTTP ${health.status}); this host entry is anonymous (no bearer configured)`, fix: "the remote daemon enforces a bearer — add a bearer_env or bearer_file pointer to this host's entry in ~/.openrig/hosts.yaml, then set that env var / file" });
       return rows;
     }
     if (health.status < 200 || health.status >= 300) {
@@ -210,9 +212,9 @@ export async function doctorLegs(host: HostEntry, deps: DoctorDeps): Promise<Che
     fix: "verify via an ssh-transport entry for this host, or on the host directly: rig --version",
   });
   try {
-    const ps = await deps.httpGet(`${(host as HttpHostEntry).url}/api/ps`, { Authorization: `Bearer ${bearer.token}` });
+    const ps = await deps.httpGet(`${(host as HttpHostEntry).url}/api/ps`, bearerAuthHeaders(bearer.token));
     rows.push(ps.status >= 200 && ps.status < 300
-      ? { step: "remote-identity", status: "pass", detail: "authenticated daemon API answers (/api/ps)" }
+      ? { step: "remote-identity", status: "pass", detail: bearer.token ? "authenticated daemon API answers (/api/ps)" : "daemon API answers (/api/ps; anonymous — no bearer configured)" }
       : { step: "remote-identity", status: "fail", detail: `/api/ps returned HTTP ${ps.status}`, fix: "daemon healthz is up but the API is unhealthy — check remote daemon logs" });
   } catch (err) {
     rows.push({ step: "remote-identity", status: "fail", detail: `/api/ps unreachable: ${(err as Error).message}`, fix: "check remote daemon logs" });
@@ -417,8 +419,8 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
     .option("--target <target>", "SSH target (DNS name, ssh-config alias, or IP) — ssh transport")
     .option("--user <user>", "SSH user — ssh transport")
     .option("--url <url>", "Remote daemon base URL — http transport")
-    .option("--bearer-env <name>", "Env var NAME holding the bearer token — http transport (pointer, never a value)")
-    .option("--bearer-file <path>", "File PATH holding the bearer token — http transport (pointer, never a value)")
+    .option("--bearer-env <name>", "Env var NAME holding the bearer token — http transport (optional pointer, never a value; omit both bearer flags for a tokenless daemon)")
+    .option("--bearer-file <path>", "File PATH holding the bearer token — http transport (optional pointer, never a value; at most one bearer flag)")
     .option("--notes <text>", "Free-form operator note")
     .option("--json", "JSON output")
     .action((opts: { id: string; transport: string; target?: string; user?: string; url?: string; bearerEnv?: string; bearerFile?: string; notes?: string; json?: boolean }) => {

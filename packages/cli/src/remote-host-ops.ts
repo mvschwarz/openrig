@@ -1,5 +1,5 @@
 import { DaemonClient } from "./client.js";
-import { loadHostRegistry, resolveHost, resolveRemoteBearer, classifyHttpFailedStep, classifyHttpError, type HttpHostEntry } from "./host-registry.js";
+import { loadHostRegistry, resolveHost, resolveRemoteBearer, bearerAuthHeaders, classifyHttpFailedStep, classifyHttpError, type HttpHostEntry } from "./host-registry.js";
 import type { FailedStep } from "./cross-host-types.js";
 
 export interface RemoteHostDeps {
@@ -46,7 +46,7 @@ export async function runRemoteHttpOp(
   }
 
   const client = deps.clientFactory(httpHost.url);
-  const headers = { Authorization: `Bearer ${bearerResult.token}` };
+  const headers = bearerAuthHeaders(bearerResult.token);
   const requestOptions = opts.timeoutMs !== undefined ? { headers, timeoutMs: opts.timeoutMs } : { headers };
 
   try {

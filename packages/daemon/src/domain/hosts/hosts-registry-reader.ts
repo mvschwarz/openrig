@@ -4,10 +4,12 @@
 // SAME module. Land once, here; P4 must not re-implement it.
 //
 // READ-ONLY FOREVER (arch ruling 3): the registry is operator-managed YAML at
-// ~/.openrig/hosts.yaml; nothing in the daemon ever writes it. This module
-// MIRRORS the CLI's packages/cli/src/host-registry.ts schema + validation
-// (incl. the exactly-one-bearer rule) — the CLI copy is deliberately
-// untouched this slice (no-unification boundary); the twin is held in sync by
+// ~/.openrig/hosts.yaml; nothing in the daemon ever writes it. This module is
+// a deliberate SEPARATE TWIN of the CLI's packages/cli/src/host-registry.ts
+// schema + validation (incl. the at-most-one-bearer rule — bearer optional
+// for a tokenless daemon, never both): the two copies are NOT unified, and
+// any schema/validation change must land in BOTH twins together. They are
+// held verdict-for-verdict in sync by
 // packages/daemon/test/hosts-registry-parity.test.ts, the same discipline as
 // the scope-audit CLI/daemon twins.
 
@@ -63,7 +65,7 @@ export function loadHostRegistry(path: string = defaultHostRegistryPath()): Host
   if (!existsSync(path)) {
     return {
       ok: false,
-      error: `host registry not found at ${path}. Create it with a 'hosts:' array; transport: ssh (target + user) or http (url + bearer_env/bearer_file).`,
+      error: `host registry not found at ${path}. Create it with a 'hosts:' array; transport: ssh (target + user) or http (url; optional bearer_env or bearer_file — omit both for a tokenless daemon).`,
     };
   }
   let raw: string;
@@ -160,11 +162,11 @@ export function validateHostRegistry(parsed: unknown, sourcePath: string): HostR
       const bearerFile = entry["bearer_file"];
       const hasEnv = bearerEnv !== undefined;
       const hasFile = bearerFile !== undefined;
-      if (!hasEnv && !hasFile) {
-        return { ok: false, error: `${prefix}: http transport requires exactly one of bearer_env or bearer_file` };
-      }
+      // bearer_env / bearer_file are OPTIONAL: omit both for an
+      // anonymous/tokenless daemon (no Authorization sent). At most one may
+      // be set — never both. MIRRORS the CLI twin (host-registry.ts).
       if (hasEnv && hasFile) {
-        return { ok: false, error: `${prefix}: specify exactly one of bearer_env or bearer_file, not both` };
+        return { ok: false, error: `${prefix}: specify at most one of bearer_env or bearer_file, not both (omit both for an anonymous/tokenless daemon)` };
       }
       if (hasEnv && (typeof bearerEnv !== "string" || bearerEnv.trim() === "")) {
         return { ok: false, error: `${prefix}.bearer_env: must be a non-empty env var name` };
@@ -212,7 +214,7 @@ export function resolvePlacementHost(registry: HostRegistry, id: string): HostRe
   if (res.host.transport !== "http") {
     return {
       ok: false,
-      error: `host '${id}' uses transport '${res.host.transport}', which cannot carry remote rig-up. Placement requires an http-transport host (url + bearer_env/bearer_file) — update the registry entry or launch that rig locally.`,
+      error: `host '${id}' uses transport '${res.host.transport}', which cannot carry remote rig-up. Placement requires an http-transport host (url; optional bearer_env or bearer_file) — update the registry entry or launch that rig locally.`,
     };
   }
   return res;

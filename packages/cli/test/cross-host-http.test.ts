@@ -55,6 +55,7 @@ const REGISTRY: HostRegistryLoadResult = {
     hosts: [
       { id: "vps-b", transport: "http", url: "http://vps-b:7433", bearer_env: "MH4_TEST_BEARER" },
       { id: "vps-c", transport: "http", url: "http://vps-c:7433", bearer_env: "MH4_TEST_BEARER" },
+      { id: "anon-b", transport: "http", url: "http://anon-b:7433" },
       { id: "vm-ssh", transport: "ssh", target: "vm-ssh.local" },
     ],
   },
@@ -208,6 +209,17 @@ describe("send --host (http branch)", () => {
     expect(body.text).toBe("/compact");
   });
 
+  it("anonymous (URL-only) http host: POSTs with NO Authorization header; still succeeds", async () => {
+    const h = mockClient(() => ({ status: 200, data: { ok: true } }));
+    const cmd = sendCommand(httpDeps(h));
+    await cmd.parseAsync(["--host", "anon-b", "dev-impl@my-rig", "hello"], { from: "user" });
+    expect(h.calls.length).toBe(1);
+    const headers = h.calls[0]!.options?.headers ?? {};
+    expect("Authorization" in headers).toBe(false);
+    expect(captured.stdoutLines).toContain("Sent to dev-impl@my-rig");
+    expect(process.exitCode).toBeUndefined();
+  });
+
   it("sugar target dev-impl@my-rig@vps-b routes http with the STRIPPED session", async () => {
     const h = mockClient(() => ({ status: 200, data: {} }));
     const cmd = sendCommand(httpDeps(h));
@@ -349,6 +361,16 @@ describe("capture --host (http branch)", () => {
     expect(call.path).toBe("/api/transport/capture");
     expect(call.body).toEqual({ lines: 50, session: "dev-impl@my-rig" });
     expect(captured.stdoutLines).toContain("[via host=vps-b (http://vps-b:7433)]");
+    expect(captured.stdoutLines).toContain("pane content here");
+  });
+
+  it("anonymous (URL-only) http host: capture POSTs with NO Authorization header; still succeeds", async () => {
+    const h = mockClient(() => ({ status: 200, data: { content: "pane content here" } }));
+    const cmd = captureCommand(httpDeps(h));
+    await cmd.parseAsync(["--host", "anon-b", "dev-impl@my-rig"], { from: "user" });
+    expect(h.calls.length).toBe(1);
+    const headers = h.calls[0]!.options?.headers ?? {};
+    expect("Authorization" in headers).toBe(false);
     expect(captured.stdoutLines).toContain("pane content here");
   });
 

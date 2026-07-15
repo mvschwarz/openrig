@@ -76,13 +76,14 @@ describe("hosts-registry writer twin — P3 byte parity with the CLI addHostEntr
     expect(readFileSync(pathB, "utf8")).toBe(readFileSync(pathA, "utf8"));
   });
 
-  it("identical validation verdicts: reserved id + exactly-one-bearer rejected by BOTH, same error text", () => {
+  it("identical validation verdicts: reserved id + both-bearer rejected by BOTH, same error text", () => {
     const pathA = join(dirA, "hosts.yaml");
     const pathB = join(dirB, "hosts.yaml");
     for (const bad of [
       { id: "local", transport: "ssh", target: "a" },
       { id: "../escape", transport: "ssh", target: "a" },
-      { id: "x", transport: "http", url: "http://x" },
+      // NOTE: a URL-only http entry (no bearer) is now VALID (anonymous/
+      // tokenless daemon) — only BOTH pointers together is rejected.
       { id: "x", transport: "http", url: "http://x", bearer_env: "T", bearer_file: "/f" },
     ]) {
       const a = cliAddHostEntry(bad, pathA);

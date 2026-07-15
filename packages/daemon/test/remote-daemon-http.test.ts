@@ -6,7 +6,7 @@
 // proves the consumer formatting; these tests pin the structured result.
 
 import { describe, it, expect } from "vitest";
-import { remoteJsonRequest } from "../src/domain/hosts/remote-daemon-http.js";
+import { remoteJsonRequest, remoteRawRequest } from "../src/domain/hosts/remote-daemon-http.js";
 import { LOCAL_HOST_ID, hostsCovered } from "../src/domain/hosts/fanout-contract.js";
 import type { AggregatedPayload } from "../src/domain/hosts/fanout-contract.js";
 import type { HttpHostEntry } from "../src/domain/hosts/hosts-registry-reader.js";
@@ -128,5 +128,46 @@ describe("fanout-contract — the shared intra-P4 payload (arch adjudication: 15
     expect(hostsCovered(payload, [LOCAL_HOST_ID, "vps-b", "ssh-1"])).toBe(true);
     expect(hostsCovered(payload, [LOCAL_HOST_ID, "vps-b", "ssh-1", "missing"])).toBe(false); // silent thinning caught
     expect(hostsCovered({ items: [], hosts: [...payload.hosts, { hostId: "vps-b", status: "ok" }] }, [LOCAL_HOST_ID, "vps-b", "ssh-1"])).toBe(false); // duplicates caught
+  });
+});
+
+describe("anonymous (URL-only) http host — no Authorization header, no request short-circuit", () => {
+  const ANON: HttpHostEntry = { id: "anon-b", transport: "http", url: "http://anon-b:7433/" };
+
+  it("remoteJsonRequest: URL-only host sends NO Authorization header; 2xx still returns payload", async () => {
+    const capture: { url?: string; init?: RequestInit } = {};
+    const res = await remoteJsonRequest(ANON, "/api/queue/list", {
+      method: "GET",
+      timeoutMs: 1000,
+      env: {},
+      fetchImpl: fetchStub(200, { items: [] }, capture),
+    });
+    expect(res).toMatchObject({ ok: true, status: 200 });
+    const headers = capture.init?.headers as Record<string, string>;
+    expect("Authorization" in headers).toBe(false);
+  });
+
+  it("remoteRawRequest: URL-only host sends NO Authorization header; origin answer is ok:true", async () => {
+    const capture: { url?: string; init?: RequestInit } = {};
+    const res = await remoteRawRequest(ANON, "/api/ps", {
+      timeoutMs: 1000,
+      env: {},
+      fetchImpl: fetchStub(200, { rigs: [] }, capture),
+    });
+    expect(res).toMatchObject({ ok: true, status: 200 });
+    const headers = capture.init?.headers as Record<string, string>;
+    expect("Authorization" in headers).toBe(false);
+  });
+
+  it("configured bearer_env host still carries Authorization (fail-closed path unchanged)", async () => {
+    const capture: { url?: string; init?: RequestInit } = {};
+    await remoteJsonRequest(HOST, "/api/x", {
+      method: "GET",
+      timeoutMs: 1000,
+      env: ENV,
+      fetchImpl: fetchStub(200, {}, capture),
+    });
+    const headers = capture.init?.headers as Record<string, string>;
+    expect(headers["Authorization"]).toBe("Bearer tok-1");
   });
 });

@@ -92,6 +92,7 @@ export function sendCommand(depsOverride?: SendDeps): Command {
     .option("--dangerously-interact", "DANGEROUS: deliberately drive an interactive prompt/permission block (implies --raw; requires --reason). The ONLY override of the prompt/permission guard.")
     .option("--reason <text>", "Why the prompt is being driven (required with --dangerously-interact; recorded in the audit log)")
     .option("--host <id>", "Send on a remote host declared in ~/.openrig/hosts.yaml (ssh hosts shell out; http hosts go CLI-direct to the remote daemon)")
+    .option("--from <session>", "Originating session for the envelope sender/actor (provenance; defaults to $OPENRIG_SESSION_NAME). Plumbed through cross-host ssh sends so the remote envelope names the origin, not the relay.")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
@@ -137,7 +138,7 @@ result and verify verdict are the REMOTE's, verbatim. A target of the form
 agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
 (explicit --host > target sugar > persisted selection; a conflict between
 --host and the sugar is an error).`)
-    .action(async (session: string | undefined, text: string | undefined, opts: { to?: string[]; pod?: string; rig?: string; verify?: boolean; force?: boolean; waitForIdle?: string; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; host?: string; json?: boolean }) => {
+    .action(async (session: string | undefined, text: string | undefined, opts: { to?: string[]; pod?: string; rig?: string; verify?: boolean; force?: boolean; waitForIdle?: string; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; host?: string; from?: string; json?: boolean }) => {
       // OPR.0.4.6.MH1 FR-2: selected-host routing — explicit --host wins;
       // else the persisted selection feeds the SHIPPED --host path; no
       // selection = today exactly. OPR.0.4.6.MH4 §4: the raw flag is kept
@@ -246,7 +247,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       }
 
       const client = deps.clientFactory(getDaemonUrl(status));
-      const senderSession = resolveSenderSession();
+      const senderSession = opts.from ?? resolveSenderSession();
       // --raw (and --dangerously-interact, which implies it) send EXACT text with no messaging envelope.
       const raw = Boolean(opts.raw || opts.dangerouslyInteract);
       const outboundText = raw ? text : wrapSendBody(senderSession, session, text);
@@ -301,7 +302,7 @@ async function runCrossHostSend(
   hostId: string,
   session: string,
   text: string,
-  opts: { verify?: boolean; force?: boolean; waitForIdle?: string; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; json?: boolean },
+  opts: { verify?: boolean; force?: boolean; waitForIdle?: string; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; from?: string; json?: boolean },
   deps: SendDeps,
   waitForIdleMs?: number,
   hint?: string,
@@ -340,6 +341,12 @@ async function runCrossHostSend(
   if (opts.raw) argv.push("--raw");
   if (opts.dangerouslyInteract) argv.push("--dangerously-interact");
   if (opts.reason !== undefined) argv.push("--reason", opts.reason);
+  // Sender provenance: the ssh relay re-runs `rig send` on the remote, which
+  // would otherwise resolve ITS OWN session and degrade the envelope sender
+  // to "unknown". Carry the origin (explicit --from, else $OPENRIG_SESSION_NAME)
+  // so the remote envelope names the originating session. Plumbing, not a gate.
+  const originSender = opts.from ?? resolveSenderSession();
+  if (originSender) argv.push("--from", originSender);
   if (opts.json) argv.push("--json");
 
   const result = await runner(host, argv);
@@ -384,12 +391,12 @@ async function runHttpHostSend(
   host: HttpHostEntry,
   session: string,
   text: string,
-  opts: { verify?: boolean; force?: boolean; waitForIdle?: string; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; json?: boolean },
+  opts: { verify?: boolean; force?: boolean; waitForIdle?: string; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; from?: string; json?: boolean },
   deps: SendDeps,
   waitForIdleMs?: number,
   hint?: string,
 ): Promise<void> {
-  const senderSession = resolveSenderSession();
+  const senderSession = opts.from ?? resolveSenderSession();
   const raw = Boolean(opts.raw || opts.dangerouslyInteract);
   const outboundText = raw ? text : wrapSendBody(senderSession, session, text);
 

@@ -6,8 +6,9 @@
 // of packages/cli/src/host-registry.ts addHostEntry, byte-parity-pinned
 // by packages/daemon/test/hosts-add-pair-routes.test.ts (same entries in
 // → identical yaml bytes out; P3) and sharing the reader twin's
-// validateHostRegistry (identical validation: exactly-one-bearer,
-// reserved ids, duplicate ids — P3). The reader module stays READ-ONLY
+// validateHostRegistry (identical validation: at-most-one-bearer — bearer
+// optional for a tokenless daemon, never both — reserved ids, duplicate ids
+// — P3). The reader module stays READ-ONLY
 // FOREVER; writes flow ONLY through the single parity-pinned write
 // contract (CLI addHostEntry + this twin), reachable daemon-side solely
 // via the narrow named add/pair routes (P1 — no generic registry-write

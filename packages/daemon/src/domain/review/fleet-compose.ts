@@ -262,7 +262,7 @@ async function readHostComposedRig(hostId: string, reg: HostRegistryLoadResult, 
   }
   if (resolved.host.transport !== "http") {
     return {
-      status: { hostId, status: "unsupported-transport", error: `host '${hostId}' is SSH-declared; the fleet composed read requires an http-transport registry entry (url + bearer)` },
+      status: { hostId, status: "unsupported-transport", error: `host '${hostId}' is SSH-declared; the fleet composed read requires an http-transport registry entry (url; bearer optional)` },
       input: null,
     };
   }
