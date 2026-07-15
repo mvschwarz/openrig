@@ -117,7 +117,7 @@ Examples:
           existing: opts.existing,
           freshLogicalIds: opts.fresh,
         };
-        const result = await runRemoteHttpOp(opts.host, "POST", "/api/up", body, deps, opts);
+        const result = await runRemoteHttpOp(opts.host, "POST", "/api/up", body, deps, { ...opts, timeoutMs: opts.plan ? undefined : LONG_RUNNING_UP_TIMEOUT_MS });
         if (opts.json) {
           console.log(JSON.stringify(result));
           if (!result.ok) process.exitCode = 1;

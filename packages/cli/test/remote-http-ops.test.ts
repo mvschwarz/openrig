@@ -2,17 +2,17 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { Command } from "commander";
 import type { DaemonClient, DaemonResponse } from "../src/client.js";
 
-function mockClient(responses: Record<string, { status: number; data: unknown }>): DaemonClient & { _calls: Array<{ method: string; path: string; body?: unknown; headers?: Record<string, string> }> } {
-  const calls: Array<{ method: string; path: string; body?: unknown; headers?: Record<string, string> }> = [];
+function mockClient(responses: Record<string, { status: number; data: unknown }>): DaemonClient & { _calls: Array<{ method: string; path: string; body?: unknown; headers?: Record<string, string>; timeoutMs?: number }> } {
+  const calls: Array<{ method: string; path: string; body?: unknown; headers?: Record<string, string>; timeoutMs?: number }> = [];
   return {
     baseUrl: "http://remote:7433",
-    get: async <T>(path: string, options?: { headers?: Record<string, string> }) => {
-      calls.push({ method: "GET", path, headers: options?.headers });
+    get: async <T>(path: string, options?: { headers?: Record<string, string>; timeoutMs?: number }) => {
+      calls.push({ method: "GET", path, headers: options?.headers, timeoutMs: options?.timeoutMs });
       const r = responses[path] ?? { status: 404, data: { error: "not found" } };
       return { status: r.status, data: r.data as T } as DaemonResponse<T>;
     },
-    post: async <T>(path: string, body?: unknown, options?: { headers?: Record<string, string> }) => {
-      calls.push({ method: "POST", path, body, headers: options?.headers });
+    post: async <T>(path: string, body?: unknown, options?: { headers?: Record<string, string>; timeoutMs?: number }) => {
+      calls.push({ method: "POST", path, body, headers: options?.headers, timeoutMs: options?.timeoutMs });
       const r = responses[path] ?? { status: 200, data: { ok: true } };
       return { status: r.status, data: r.data as T } as DaemonResponse<T>;
     },
@@ -50,7 +50,7 @@ async function captureLogs(fn: () => Promise<void>): Promise<{ stdout: string[];
 afterEach(() => { vi.unstubAllEnvs(); });
 
 describe("rig up --host HTTP", () => {
-  it("sends correct body shape with remote bearer", async () => {
+  it("sends correct body shape with remote bearer and the long-running timeout", async () => {
     vi.stubEnv("HOST_B_TOKEN", "remote-tok");
     const client = mockClient({ "/api/up": { status: 200, data: { ok: true, rigId: "r1" } } });
     const { upCommand } = await import("../src/commands/up.js");
@@ -70,6 +70,7 @@ describe("rig up --host HTTP", () => {
     expect(postCalls.length).toBe(1);
     expect(postCalls[0]!.body).toMatchObject({ sourceRef: "my-rig.yaml", autoApprove: true, cwdOverride: "/work" });
     expect(postCalls[0]!.headers?.Authorization).toBe("Bearer remote-tok");
+    expect(postCalls[0]!.timeoutMs).toBe(120_000);
   });
 
   it("sends all body fields including plan/targetRoot/existing/freshLogicalIds", async () => {
