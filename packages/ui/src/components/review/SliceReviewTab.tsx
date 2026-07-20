@@ -287,7 +287,7 @@ export function SliceReviewTab({
       <section data-testid="intent-section" className={cn(VELLUM_CARD, "p-3")}>
         <h3 className="mb-1 font-mono text-[11px] font-bold uppercase tracking-wide text-on-surface">Intent</h3>
         {data.intent.text ? (
-          <p className="text-[13px] leading-relaxed text-on-surface">{data.intent.text}</p>
+          <MarkdownViewer content={data.intent.text} hideFrontmatter hideRawToggle />
         ) : (
           <p className="font-mono text-[11px] text-on-surface-variant">— {data.intent.degrade ?? "no intent recorded"}</p>
         )}

@@ -423,3 +423,92 @@ describe("release-0.4.7 intent-stage — buildAcceptance edits (T4) + byte-ident
     expect(a.items[1]!.text).toBe("[P0] range probe 206");
   });
 });
+
+// ---------------------------------------------------------------------------
+// qitem-render-driver B — the projector must consume the SAME shared
+// logical-checkbox relation the composer does. compose's rawText is the VM-006
+// join key (textKey = trim+lowercase over rawText); the projector today
+// re-parses acceptance rows with its OWN single-line regex. If only the
+// composer learns continuations, the two sides key off DIFFERENT bytes and the
+// QA-verdict lift silently stops matching.
+//
+// Pinned: AcceptanceItem.text is rawText UNCHANGED (image-bearing rows keep
+// their bytes), `done` comes from the checkbox's checked state, and
+// source.line remains the CHECKBOX line — never the continuation.
+// ---------------------------------------------------------------------------
+
+describe("qitem-render-driver B — projector acceptance rows share the composer's logical-checkbox bytes", () => {
+  let db: Database.Database;
+  let slicesRoot: string;
+  let cleanupRoot: string;
+  let indexer: SliceIndexer;
+  let projector: SliceDetailProjector;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [
+      coreSchema, eventsSchema, streamItemsSchema,
+      queueItemsSchema, queueTransitionsSchema,
+      workflowSpecsSchema, workflowInstancesSchema, workflowStepTrailsSchema,
+      missionControlActionsSchema,
+    ]);
+    db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
+    cleanupRoot = mkdtempSync(join(tmpdir(), "slice-projector-continuation-"));
+    slicesRoot = join(cleanupRoot, "slices");
+    mkdirSync(slicesRoot, { recursive: true });
+    indexer = new SliceIndexer({ slicesRoot, dogfoodEvidenceRoot: null, db });
+    projector = new SliceDetailProjector({ db, indexer, workflowSpecCache: new WorkflowSpecCache(db) });
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(cleanupRoot, { recursive: true, force: true });
+  });
+
+  /** PRD whose contract has a continuation on line 6 (checkbox on line 5). */
+  const PRD = [
+    "---",
+    "id: OPR.T.90",
+    "---",
+    "## Proof contract",
+    "- [ ] the drawer opens on the right",
+    "      and stays open across a reload",
+    "- [x] the ticked promise",
+  ].join("\n");
+
+  it("RED: an acceptance row carries the FULL joined logical text (same bytes the composer keys on)", () => {
+    const dir = join(slicesRoot, "90-continuation");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "README.md"), "---\nid: OPR.T.90\nstatus: active\n---\n# c\n");
+    writeFileSync(join(dir, "IMPLEMENTATION-PRD.md"), PRD);
+    const slice = indexer.get("90-continuation")!;
+    const acceptance = projector.project(slice).acceptance;
+    const joined = acceptance.items.find((i) => i.text.startsWith("the drawer opens on the right"));
+    expect(joined, "the continuation row must be present").toBeTruthy();
+    expect(joined!.text, "acceptance text must be the joined rawText, byte-identical to the composer's key")
+      .toBe("the drawer opens on the right and stays open across a reload");
+  });
+
+  it("RED: source.line points at the CHECKBOX line, never the continuation", () => {
+    const dir = join(slicesRoot, "91-line");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "README.md"), "---\nid: OPR.T.91\nstatus: active\n---\n# c\n");
+    writeFileSync(join(dir, "IMPLEMENTATION-PRD.md"), PRD);
+    const slice = indexer.get("91-line")!;
+    const acceptance = projector.project(slice).acceptance;
+    const joined = acceptance.items.find((i) => i.text.startsWith("the drawer opens on the right"))!;
+    expect(joined.source.file).toBe("IMPLEMENTATION-PRD.md");
+    expect(joined.source.line, "the checkbox line (1-based), not the continuation line").toBe(5);
+  });
+
+  it("GREEN: checked state still drives `done` per row", () => {
+    const dir = join(slicesRoot, "92-checked");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "README.md"), "---\nid: OPR.T.92\nstatus: active\n---\n# c\n");
+    writeFileSync(join(dir, "IMPLEMENTATION-PRD.md"), PRD);
+    const slice = indexer.get("92-checked")!;
+    const acceptance = projector.project(slice).acceptance;
+    const ticked = acceptance.items.find((i) => i.text === "the ticked promise")!;
+    expect(ticked.done).toBe(true);
+  });
+});

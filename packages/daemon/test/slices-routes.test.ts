@@ -398,3 +398,62 @@ describe("PL-slice-story-view-v0 slices routes", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// qitem-render-driver #3 — the HTTP contract behind the sidebar badge.
+//
+// Host evidence: GET /api/slices emits qitemCount=355 for placeholder slices
+// while siblings emit 1/1/2. The indexer-level discriminator lives in
+// slice-indexer.test.ts; THIS pins the observable the UI actually consumes —
+// the route response — on a MODERN multi-slice mission (a sibling carries
+// typed `slice:` membership) where the zero-typed target authors no rail item
+// (railItem therefore defaults to missionId).
+// ---------------------------------------------------------------------------
+
+describe("qitem-render-driver #3 — GET /api/slices qitemCount does not leak mission-wide rows", () => {
+  let db: Database.Database;
+  let cleanup: string;
+  let missionsRoot: string;
+  let app: Hono;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [coreSchema, eventsSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, missionControlActionsSchema]);
+    db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-leak', 'rig')`).run();
+    cleanup = fs.mkdtempSync(path.join(os.tmpdir(), "slices-routes-leak-"));
+    missionsRoot = path.join(cleanup, "missions");
+    const slices = path.join(missionsRoot, "release-x", "slices");
+    writeSlice(slices, "01-typed-sibling", { "README.md": "---\nstatus: active\n---\n# sibling\n" });
+    writeSlice(slices, "02-placeholder", { "README.md": "---\nstatus: placeholder\n---\n# placeholder\n" });
+    // Modern signal: typed membership exists in this mission.
+    db.prepare(
+      `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tags, body)
+       VALUES ('q-typed-sibling', '2026-07-20T00:00:00.000Z', '2026-07-20T00:00:00.000Z', 'a@r', 'b@r', 'in-progress', 'routine', ?, 'no name mention')`,
+    ).run(JSON.stringify(["slice:01-typed-sibling"]));
+    // Mission-scope rows — the 355-class rows.
+    db.prepare(
+      `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tags, body)
+       VALUES ('q-mission-tag', '2026-07-20T00:00:00.000Z', '2026-07-20T00:00:00.000Z', 'a@r', 'b@r', 'in-progress', 'routine', ?, 'no slice mention')`,
+    ).run(JSON.stringify(["mission:release-x"]));
+    insertQitem(db, { qitemId: "q-mission-body", body: "advance the release-x mission" });
+    const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
+    const projector = new SliceDetailProjector({ db, indexer });
+    app = buildApp({ indexer, projector });
+  });
+
+  afterEach(() => {
+    db.close();
+    fs.rmSync(cleanup, { recursive: true, force: true });
+  });
+
+  it("RED: the zero-typed target's qitemCount is 0 in the /api/slices response, while the typed sibling keeps its own count", async () => {
+    const res = await app.request("/api/slices?filter=all");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { slices: Array<{ name: string; qitemCount: number }> };
+    const byName = new Map(body.slices.map((s) => [s.name, s.qitemCount]));
+    expect(byName.get("02-placeholder"), "the number the sidebar badge renders for the placeholder slice").toBe(0);
+    // Sibling semantics preserved: typed membership still counted, and the
+    // mission-scope rows do not inflate it either.
+    expect(byName.get("01-typed-sibling"), "typed sibling keeps exactly its typed membership").toBe(1);
+  });
+});

@@ -149,6 +149,8 @@ interface SliceLocation {
 interface MembershipIndex {
   /** slice name -> CONFIRMED typed qitem ids (scan order = ts DESC, id DESC; capped 500/slice). */
   typedBySlice: Map<string, string[]>;
+  /** slice name -> its eligible fallback terms in authored precedence order. */
+  fallbackTermsBySlice: Map<string, string[]>;
   /** fallback term -> qitem ids in row (rowid) order, capped 500/term. */
   fallbackByTerm: Map<string, string[]>;
   /** location names the index was built from — a get() on a folder created
@@ -509,7 +511,7 @@ export class SliceIndexer {
     const frontmatter = this.readPrimaryFrontmatter(slicePath);
     const status = this.mapStatus(frontmatter["status"] as string | undefined);
     const railItem = this.extractRailItem(frontmatter, missionId);
-    const qitemIds = this.matchQitems(name, railItem, missionId);
+    const qitemIds = this.matchQitems(name);
     const proofPacket = this.findProofPacket(name);
     const lastActivityAt = this.computeLastActivity(slicePath, qitemIds, proofPacket);
 
@@ -539,7 +541,7 @@ export class SliceIndexer {
     const frontmatter = this.readPrimaryFrontmatter(slicePath);
     const status = this.mapStatus(frontmatter["status"] as string | undefined);
     const railItem = this.extractRailItem(frontmatter, missionId);
-    const qitemIds = this.matchQitems(name, railItem, missionId);
+    const qitemIds = this.matchQitems(name);
     const proofPacket = this.findProofPacket(name);
     const lastActivityAt = this.computeLastActivity(slicePath, qitemIds, proofPacket);
     const commitRefs = this.extractCommitRefs(frontmatter);
@@ -609,6 +611,10 @@ export class SliceIndexer {
   }
 
   private extractRailItem(frontmatter: Record<string, unknown>, missionId: string | null): string | null {
+    return this.extractExplicitRailItem(frontmatter) ?? missionId;
+  }
+
+  private extractExplicitRailItem(frontmatter: Record<string, unknown>): string | null {
     const raw = frontmatter["rail-item"];
     if (typeof raw === "string") {
       // Strip array brackets if YAML parser dropped them as a string ("[PL-008]").
@@ -622,7 +628,7 @@ export class SliceIndexer {
       if (stripped.length > 0) return stripped.split(",")[0]!.trim();
     }
     if (Array.isArray(related) && related.length > 0 && typeof related[0] === "string") return related[0];
-    return missionId;
+    return null;
   }
 
   private extractCommitRefs(frontmatter: Record<string, unknown>): string[] {
@@ -650,7 +656,7 @@ export class SliceIndexer {
     return "active";
   }
 
-  private matchQitems(sliceName: string, railItem: string | null, missionId: string | null): string[] {
+  private matchQitems(sliceName: string): string[] {
     // V0.3.1 slice 17 founder-walk-workspace-state-correctness (walk item 3): the previous implementation unioned substring matches on
     // [sliceName, railItem, missionId]. The missionId term over-matched
     // — every qitem tagged `mission:<id>` appeared under EVERY slice in
@@ -683,14 +689,11 @@ export class SliceIndexer {
         for (const id of typed) ids.add(id);
       } else {
         // 2. Substring fallback — executes ONLY when zero CONFIRMED typed
-        // rows exist (the deliberate VM-004 gating). Term-first assembly in
-        // the original deduped term order [sliceName, railItem, missionId]
-        // keeps equal-timestamp output byte-identical to the per-slice path
-        // (the final sort below is stable on equals).
-        const substringTerms = [sliceName, railItem, missionId].filter(
-          (v): v is string => !!v,
-        );
-        for (const term of Array.from(new Set(substringTerms))) {
+        // rows exist (the deliberate VM-004 gating). The builder records the
+        // exact per-slice eligible terms after it knows whether this mission
+        // has adopted typed membership. Term-first assembly preserves the
+        // original stable ordering/caps for every eligible term.
+        for (const term of index.fallbackTermsBySlice.get(sliceName) ?? []) {
           const bucket = index.fallbackByTerm.get(term);
           if (bucket) for (const id of bucket) ids.add(id);
         }
@@ -758,21 +761,28 @@ export class SliceIndexer {
     }
 
     const typedBySlice = new Map<string, string[]>();
+    const fallbackTermsBySlice = new Map<string, string[]>();
     const fallbackByTerm = new Map<string, string[]>();
     const knownSlices = new Set<string>();
 
-    // Term universe: every location's deduped [sliceName, railItem,
-    // missionId], derived with the SAME helpers toListEntry/buildRecord use.
+    // Capture each indexed slice's authored/default rail distinction before
+    // scanning membership. The distinction matters only for modern missions:
+    // a default-derived rail is the mission id and must not reintroduce the
+    // mission-wide fallback that typed sibling membership disables.
     const locations = this.readSliceLocations();
-    const termsBySlice = new Map<string, string[]>();
+    const locationInputs = new Map<string, {
+      missionId: string | null;
+      railItem: string | null;
+      explicitRailItem: string | null;
+    }>();
     for (const location of locations) {
       knownSlices.add(location.name);
       const frontmatter = this.readPrimaryFrontmatter(location.slicePath);
-      const railItem = this.extractRailItem(frontmatter, location.missionId);
-      const terms = Array.from(new Set(
-        [location.name, railItem, location.missionId].filter((v): v is string => !!v),
-      ));
-      termsBySlice.set(location.name, terms);
+      locationInputs.set(location.name, {
+        missionId: location.missionId,
+        railItem: this.extractRailItem(frontmatter, location.missionId),
+        explicitRailItem: this.extractExplicitRailItem(frontmatter),
+      });
     }
 
     // Scan 1 — typed membership. A thrown error here (tags column missing)
@@ -794,11 +804,30 @@ export class SliceIndexer {
       tagsColumnAvailable = false;
     }
 
-    // Scan 2 — fallback buckets for the zero-typed slices' term universe.
+    // Scan 2 — fallback buckets for the zero-typed slices' eligible term
+    // universe. A typed sibling marks a mission modern: its zero-typed slices
+    // retain their own name and any explicitly authored rail, but omit both
+    // missionId and a rail value merely defaulted from missionId. Legacy
+    // missions with no typed slice preserve the complete old term order.
+    const typedMissions = new Set<string>();
+    for (const location of locations) {
+      if (location.missionId && (typedBySlice.get(location.name)?.length ?? 0) > 0) {
+        typedMissions.add(location.missionId);
+      }
+    }
     const fallbackTerms = new Set<string>();
-    for (const [slice, terms] of termsBySlice) {
+    for (const [slice, input] of locationInputs) {
       const typed = typedBySlice.get(slice);
       if (typed && typed.length > 0) continue;
+      const modernMission = input.missionId !== null && typedMissions.has(input.missionId);
+      const terms = Array.from(new Set(
+        [
+          slice,
+          modernMission ? input.explicitRailItem : input.railItem,
+          modernMission ? null : input.missionId,
+        ].filter((v): v is string => !!v),
+      ));
+      fallbackTermsBySlice.set(slice, terms);
       for (const term of terms) fallbackTerms.add(term);
     }
     if (fallbackTerms.size > 0) {
@@ -831,7 +860,7 @@ export class SliceIndexer {
       }
     }
 
-    this.membershipIndex = { typedBySlice, fallbackByTerm, knownSlices };
+    this.membershipIndex = { typedBySlice, fallbackTermsBySlice, fallbackByTerm, knownSlices };
     return this.membershipIndex;
   }
 

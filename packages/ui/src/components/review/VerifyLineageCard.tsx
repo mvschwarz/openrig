@@ -28,7 +28,7 @@ export function VerifyLineageCard({ lineage }: { lineage: VerifyLineage }) {
         {" · "}main tip <code>{lineage.mainTip}</code>
         {" · "}
         <span data-testid="lineage-freshness">
-          {lineage.freshness}
+          freshness {lineage.freshness}
           {lineage.staleBehind !== null ? ` (${lineage.staleBehind} behind)` : ""}
         </span>
       </p>

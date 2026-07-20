@@ -449,4 +449,49 @@ describe("ProjectTreeView P5-5/P5-6 mission discovery", () => {
     expect((await findByTestId("project-mission-RELEASE-PROOF")).getAttribute("data-mission-bucket")).toBe("current");
     expect((await findByTestId("project-mission-unsorted")).getAttribute("data-mission-bucket")).toBe("archive");
   });
+
+  // qitem-render-driver #3 characterization — the sidebar badge renders the
+  // API's per-slice qitemCount VERBATIM. The observed host 355 is a DAEMON
+  // producer defect (matchQitems' zero-typed fallback unions missionId, and
+  // railItem defaults to missionId), not a UI fallback: with a nonzero
+  // mission aggregate present, a zero-count slice must still visibly show 0.
+  it("#3 pin: a slice whose API qitemCount is 0 visibly stays 0 even alongside nonzero-count siblings in the same mission", async () => {
+    const { findByTestId } = renderTree({
+      workspaceRoot: "/Users/admin/.openrig/workspace",
+      roots: [],
+      slices: [
+        {
+          name: "zero-slice",
+          missionId: "release-x",
+          displayName: "Zero Slice",
+          railItem: "release-x",
+          status: "active",
+          rawStatus: "placeholder",
+          qitemCount: 0,
+          hasProofPacket: false,
+          lastActivityAt: null,
+        },
+        {
+          name: "busy-sibling",
+          missionId: "release-x",
+          displayName: "Busy Sibling",
+          railItem: "release-x",
+          status: "active",
+          rawStatus: "active",
+          qitemCount: 7,
+          hasProofPacket: false,
+          lastActivityAt: null,
+        },
+      ],
+    });
+    const badge = await findByTestId("project-slice-zero-slice-qitems");
+    const shown = (badge.textContent ?? "").trim();
+    // Exact visible zero — never empty, never the sibling/mission aggregate.
+    expect(shown, "zero-count badge must render a visible 0").toBe("0");
+    expect(badge.getAttribute("aria-label"), "accessible label must state 0 qitems").toBe("0 qitems");
+    expect(badge.getAttribute("title")).toBe("0 qitems");
+    const sibling = await findByTestId("project-slice-busy-sibling-qitems");
+    expect((sibling.textContent ?? "").trim(), "sibling keeps its own count").toBe("7");
+  });
+
 });

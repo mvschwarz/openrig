@@ -38,7 +38,11 @@ import {
 // (arch A1 one-home) — never a second derivation. Cycle-free: compose is
 // pure and proof-io imports only compose + node; nothing in review imports
 // slices.
-import { extractProofContractSelected, composeDelivered } from "../review/compose.js";
+import {
+  extractProofContractSelected,
+  composeDelivered,
+  parseLogicalCheckboxes,
+} from "../review/compose.js";
 import { readProofArtifacts } from "../review/proof-io.js";
 import {
   projectSpecGraph,
@@ -483,20 +487,22 @@ export class SliceDetailProjector {
       const content = fs.readFileSync(full, "utf8");
       if (fname === "IMPLEMENTATION-PRD.md") prdContent = content;
       if (fname === "README.md") readmeContent = content;
-      const lines = content.split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i]!;
-        const m = line.match(/^\s*-?\s*\[(\s|x|X)\]\s+(.+)$/);
-        if (!m) continue;
-        const text = m[2]!.trim();
+      // qitem-render-driver B — the SHARED logical-checkbox relation (the
+      // same parser Review's proof contract consumes). rawText carries any
+      // joined continuation and IS the VM-006 join key, so acceptance rows
+      // and promised items key off identical bytes by construction; a second
+      // parser here would silently desynchronize the QA-verdict lift.
+      for (const logical of parseLogicalCheckboxes(content)) {
         // release-0.4.7 intent-stage (edit 1): scaffold-template placeholder
         // rows are not acceptance items (shared grammar:
         // ../scope/scaffold-placeholder.ts).
-        if (isScaffoldPlaceholderText(text)) continue;
+        if (isScaffoldPlaceholderText(logical.rawText)) continue;
         items.push({
-          text,
-          done: m[1]!.toLowerCase() === "x",
-          source: { file: fname, line: i + 1 },
+          // rawText UNCHANGED — image-bearing rows keep their authored bytes,
+          // preserving the join relation.
+          text: logical.rawText,
+          done: logical.checked,
+          source: { file: fname, line: logical.sourceLine },
         });
       }
     }

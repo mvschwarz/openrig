@@ -793,3 +793,102 @@ describe("PM dogfood #1 — compose projects authored README sections over prist
     expect(b.phase).toEqual(a.phase);
   });
 });
+
+// ---------------------------------------------------------------------------
+// qitem-render-driver B — checkbox CONTINUATION lines are dropped from the
+// payload before the UI ever sees them (QA: DELIVERED strings are truncated at
+// continuation boundaries, with no CSS overflow involved).
+//
+// Root: extractProofContract iterates body.split("\n") and matches a SINGLE
+// line (/^\s*-?\s*\[( |x|X)\]\s+(.+)$/), so an indented continuation of a
+// checkbox is discarded.
+//
+// Contract pinned here (guard-corrected): the shared logical-checkbox record
+// carries {checked, rawText, sourceLine}; rawText joins an ELIGIBLE indented
+// continuation with exactly ONE U+0020 and IS the VM-006 join key; compose
+// derives display text/plannedRef FROM rawText. Eligible continuation =
+// nonblank, non-checkbox, indentation strictly deeper than the checkbox line.
+// A next checkbox, a blank line, or same/shallower prose terminates the item.
+// sourceLine stays the CHECKBOX line.
+// ---------------------------------------------------------------------------
+
+describe("qitem-render-driver B — proof-contract continuation joins into one logical item", () => {
+  const contract = (body: string) => `# PRD\n\n## Proof contract\n\n${body}\n`;
+
+  it("RED: an indented continuation joins its checkbox into ONE item with a single-space join", () => {
+    const items = extractProofContract(contract("- [ ] the drawer opens on the right\n      and stays open across a reload"));
+    expect(items).toHaveLength(1);
+    expect(items[0]!.rawText).toBe("the drawer opens on the right and stays open across a reload");
+    expect(items[0]!.text).toBe("the drawer opens on the right and stays open across a reload");
+  });
+
+  it("RED: multiple continuation lines all join, each with exactly one space", () => {
+    const items = extractProofContract(contract("- [ ] first fragment\n    second fragment\n      third fragment"));
+    expect(items).toHaveLength(1);
+    expect(items[0]!.rawText).toBe("first fragment second fragment third fragment");
+  });
+
+  it("GREEN boundary: the NEXT checkbox terminates the previous item (no cross-item absorption)", () => {
+    const items = extractProofContract(contract("- [ ] alpha promise\n- [x] beta promise"));
+    expect(items.map((i) => i.rawText)).toEqual(["alpha promise", "beta promise"]);
+  });
+
+  it("GREEN boundary: a BLANK line terminates the item", () => {
+    const items = extractProofContract(contract("- [ ] alpha promise\n\n      orphaned prose"));
+    expect(items).toHaveLength(1);
+    expect(items[0]!.rawText).toBe("alpha promise");
+  });
+
+  it("RED: eligibility is RELATIVE depth — with an INDENTED checkbox, a DEEPER-indented line joins", () => {
+    // The checkbox itself sits at 2 spaces; the continuation at 6 (strictly
+    // deeper) must join. A column-zero-only fixture cannot tell "any leading
+    // whitespace" from true relative-depth semantics.
+    const items = extractProofContract(contract("  - [ ] indented promise\n      deeper continuation"));
+    expect(items).toHaveLength(1);
+    expect(items[0]!.rawText).toBe("indented promise deeper continuation");
+  });
+
+  it("GREEN boundary: with an INDENTED checkbox, SAME-indent prose does NOT join", () => {
+    // Same 2-space indent as the checkbox => not strictly deeper => terminates.
+    const items = extractProofContract(contract("  - [ ] indented promise\n  same-depth prose"));
+    expect(items).toHaveLength(1);
+    expect(items[0]!.rawText).toBe("indented promise");
+  });
+
+  it("GREEN boundary: with an INDENTED checkbox, SHALLOWER prose does NOT join", () => {
+    const items = extractProofContract(contract("    - [ ] deeply indented promise\n  shallower prose"));
+    expect(items).toHaveLength(1);
+    expect(items[0]!.rawText).toBe("deeply indented promise");
+  });
+
+  it("GREEN boundary: NON-indented (same/shallower) prose does NOT join", () => {
+    const items = extractProofContract(contract("- [ ] alpha promise\nplain prose at column zero"));
+    expect(items).toHaveLength(1);
+    expect(items[0]!.rawText).toBe("alpha promise");
+  });
+
+  it("RED: checked state is carried per item AND its continuation joins", () => {
+    const items = extractProofContract(contract("- [x] done promise\n      with a continuation\n- [ ] open promise"));
+    expect(items).toHaveLength(2);
+    expect(items[0]!.rawText).toBe("done promise with a continuation");
+    expect(items[1]!.rawText).toBe("open promise");
+  });
+
+  it("RED: plannedRef/text derive from rawText (image kept in rawText, stripped from text) WITH the continuation joined", () => {
+    const items = extractProofContract(contract("- [ ] the panel renders ![planned](mockups/panel.png)\n      after a reload"));
+    expect(items).toHaveLength(1);
+    expect(items[0]!.plannedRef).toBe("mockups/panel.png");
+    expect(items[0]!.rawText).toContain("![planned](mockups/panel.png)");
+    expect(items[0]!.rawText).toContain("after a reload");
+    expect(items[0]!.text).not.toContain("![planned]");
+    expect(items[0]!.text).toContain("after a reload");
+  });
+
+  it("GREEN: malformed / missing / placeholder contracts stay honest", () => {
+    expect(extractProofContract(null)).toEqual([]);
+    expect(extractProofContract("# PRD\n\n## Notes\n\nno contract here\n")).toEqual([]);
+    expect(extractProofContract(contract("prose only, no checkboxes"))).toEqual([]);
+    // Scaffold placeholder row (bracket-wrapped) still filtered, continuation or not.
+    expect(extractProofContract(contract("- [ ] [One promised deliverable]\n      [with a placeholder continuation]"))).toEqual([]);
+  });
+});

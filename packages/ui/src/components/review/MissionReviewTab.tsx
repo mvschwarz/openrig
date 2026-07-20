@@ -29,6 +29,7 @@ import { buildChatPreamble } from "./chat.js";
 import { ProgressiveTerminal } from "../terminal/ProgressiveTerminal.js";
 import { useInvalidateReview } from "../../hooks/useReview.js";
 import { EmptyState } from "../ui/empty-state.js";
+import { MarkdownViewer } from "../markdown/MarkdownViewer.js";
 
 const LANES = ["INTENT", "PLAN", "BUILD", "REVIEW", "LOCKED"] as const;
 const COLLAPSE_THRESHOLD = 12;
@@ -71,7 +72,7 @@ function BoardRowExpansion({ slot }: { slot: BoardSlot }) {
     <div data-testid={`board-expansion-${slot.slice}`} className="space-y-2 border-t border-outline-variant/60 bg-surface p-2">
       <div className="min-w-0 border border-outline-variant p-2">
         <h5 className="font-mono text-[10px] uppercase text-on-surface-variant">INTENT</h5>
-        <pre className="whitespace-pre-wrap break-words font-serif text-[12px]">{d.intent.text ?? d.intent.degrade}</pre>
+        <MarkdownViewer content={d.intent.text ?? d.intent.degrade ?? ""} hideFrontmatter hideRawToggle />
       </div>
       <div className="min-w-0 border border-outline-variant p-2">
         <h5 className="font-mono text-[10px] uppercase text-on-surface-variant">DELIVERED</h5>
@@ -303,7 +304,7 @@ export function MissionReviewTab({ missionId }: { missionId: string }) {
       {data.intent ? (
         <section data-testid="mission-intent" className="border border-outline-variant p-3">
           <h3 className="font-mono text-[10px] uppercase tracking-wide text-on-surface-variant">WHAT &amp; WHY</h3>
-          <pre className="mt-1 whitespace-pre-wrap break-words font-serif text-[12px] leading-snug">{data.intent}</pre>
+          <MarkdownViewer content={data.intent} hideFrontmatter hideRawToggle />
         </section>
       ) : null}
 
@@ -321,6 +322,9 @@ export function MissionReviewTab({ missionId }: { missionId: string }) {
               const inner = (
                 <span className="flex w-full items-center gap-2 px-2 py-1.5">
                   <span className={item.source === "derived" ? "text-amber-700" : "text-on-surface"}>{item.source === "derived" ? "▲" : "●"}</span>
+                  {sliceName ? (
+                    <span className="shrink-0 font-mono text-[10px] text-on-surface-variant">{sliceName}</span>
+                  ) : null}
                   <span className="min-w-0 flex-1 truncate text-[12px]">{item.summary}</span>
                   <span className="hidden font-mono text-[10px] text-on-surface-variant sm:inline">{item.leg}</span>
                   {item.priority ? <span className="font-mono text-[10px] uppercase">{item.priority}</span> : null}

@@ -126,9 +126,14 @@ type Block =
   | { type: "heading"; level: 1 | 2 | 3 | 4; text: string }
   | { type: "paragraph"; text: string }
   | { type: "code"; language: string | null; text: string; isMermaid: boolean }
-  | { type: "list"; ordered: boolean; items: Array<{ depth: number; text: string }> }
+  | { type: "list"; ordered: boolean; items: Array<{ depth: number; text: string; ordinal: number | null }> }
   | { type: "table"; headers: string[]; rows: string[][] }
   | { type: "blank" };
+
+// One grammar owns list-item recognition and capture. Requiring authored text
+// keeps a bare marker out of the list branch, so it advances once through the
+// ordinary paragraph path and remains visible instead of looping or vanishing.
+const LIST_ITEM_LINE = /^(\s*)(?:([-*])|(\d+)\.)\s+(.+)$/;
 
 function parseMarkdown(content: string): ParsedDocument {
   const { frontmatter, body } = stripFrontmatter(content);
@@ -162,15 +167,33 @@ function parseMarkdown(content: string): ParsedDocument {
     }
 
     // List (bulleted or ordered).
-    if (line.match(/^\s*([-*]|\d+\.)\s+/)) {
-      const items: Array<{ depth: number; text: string }> = [];
-      const ordered = !!line.match(/^\s*\d+\./);
-      while (i < lines.length && lines[i]!.match(/^\s*([-*]|\d+\.)\s+/)) {
-        const m = lines[i]!.match(/^(\s*)([-*]|\d+\.)\s+(.+)$/);
+    const firstListItem = line.match(LIST_ITEM_LINE);
+    if (firstListItem) {
+      const items: Array<{ depth: number; text: string; ordinal: number | null }> = [];
+      const ordered = firstListItem[3] !== undefined;
+      while (i < lines.length) {
+        const m = lines[i]!.match(LIST_ITEM_LINE);
         if (!m) break;
-        const depth = Math.floor((m[1]?.length ?? 0) / 2);
-        items.push({ depth, text: m[3]! });
+        const indent = m[1]!.length;
+        const parts = [m[4]!.trim()];
+        const ordinal = m[3] === undefined ? null : Number(m[3]);
         i++;
+        // A nonblank, non-item line belongs to this item only when it is
+        // strictly deeper than the authored marker. Joined display text uses
+        // one space, retaining containment without inventing another item.
+        while (i < lines.length) {
+          const continuation = lines[i]!;
+          if (continuation.trim() === "" || LIST_ITEM_LINE.test(continuation)) break;
+          const continuationIndent = continuation.length - continuation.trimStart().length;
+          if (continuationIndent <= indent) break;
+          parts.push(continuation.trim());
+          i++;
+        }
+        items.push({
+          depth: Math.floor(indent / 2),
+          text: parts.join(" "),
+          ordinal,
+        });
       }
       blocks.push({ type: "list", ordered, items });
       continue;
@@ -202,7 +225,7 @@ function parseMarkdown(content: string): ParsedDocument {
     while (i < lines.length) {
       const next = lines[i]!;
       if (next.trim() === "") break;
-      if (next.match(/^```/) || next.match(/^#{1,4}\s/) || next.match(/^\s*([-*]|\d+\.)\s/) || next.match(/^\s*\|.*\|\s*$/)) break;
+      if (next.match(/^```/) || next.match(/^#{1,4}\s/) || LIST_ITEM_LINE.test(next) || next.match(/^\s*\|.*\|\s*$/)) break;
       paragraph.push(next);
       i++;
     }
@@ -304,7 +327,11 @@ function BlockRenderer({ block, assetBasePath }: { block: Block; assetBasePath?:
     return (
       <ListTag data-testid={`md-list-${block.ordered ? "ol" : "ul"}`} className={`${block.ordered ? "list-decimal" : "list-disc"} ml-5 space-y-1 text-[12px] text-on-surface`}>
         {block.items.map((item, idx) => (
-          <li key={idx} style={{ marginLeft: `${item.depth * 1}rem` }}>
+          <li
+            key={idx}
+            value={block.ordered && item.ordinal !== null ? item.ordinal : undefined}
+            style={{ marginLeft: `${item.depth * 1}rem` }}
+          >
             {renderInline(item.text, assetBasePath)}
           </li>
         ))}

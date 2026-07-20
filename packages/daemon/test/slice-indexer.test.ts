@@ -1059,3 +1059,94 @@ describe("qitem-ccf87c0d — withMembershipBatch scope API (RED: API missing)", 
     expect(indexer.get("sc-01-topic")!.qitemIds).toEqual(["q-post-throw"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// qitem-render-driver #3 — mission-wide qitemCount leak on a MODERN mission.
+//
+// Host evidence: /api/slices emits qitemCount=355 for placeholder slices 02/03
+// while siblings report 1/1/2. Root: for a ZERO-TYPED slice, matchQitems falls
+// back to a substring union over [sliceName, railItem, missionId], and
+// extractRailItem DEFAULTS railItem to missionId when no rail item is authored
+// — so a placeholder slice in a canonical multi-slice mission substring-matches
+// every mission-tagged qitem in the corpus.
+//
+// The legacy doctrine is NOT deleted: on a mission whose corpus predates typed
+// membership, the mission-body fallback still applies (pinned by the existing
+// "preserves legacy substring fallback (including mission body)" test above).
+// The discriminator here is a MODERN mission — a sibling slice carries typed
+// `slice:` membership — where a mission-only row must NOT be credited to a
+// zero-typed target, while that target's own NAME and an EXPLICIT rail-item
+// still match.
+// ---------------------------------------------------------------------------
+
+describe("qitem-render-driver #3 — modern mission: mission-only rows must not leak into a zero-typed slice", () => {
+  let db: Database.Database;
+  let cleanup: string;
+  let missionsRoot: string;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [coreSchema, eventsSchema, streamItemsSchema, queueItemsSchema]);
+    db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
+    cleanup = fs.mkdtempSync(path.join(os.tmpdir(), "slice-indexer-leak-"));
+    missionsRoot = path.join(cleanup, "missions");
+    fs.mkdirSync(missionsRoot, { recursive: true });
+  });
+
+  afterEach(() => {
+    db.close();
+    fs.rmSync(cleanup, { recursive: true, force: true });
+  });
+
+  /** A canonical MODERN mission: a typed sibling proves the corpus has adopted
+   *  typed membership; the target slice authors no rail item (so railItem
+   *  defaults to missionId) and carries no typed rows. */
+  function seedModernMission(): void {
+    const slices = path.join(missionsRoot, "release-x", "slices");
+    writeSlice(slices, "01-typed-sibling", { "README.md": "---\nstatus: active\n---\n# sibling\n" });
+    writeSlice(slices, "02-placeholder", { "README.md": "---\nstatus: placeholder\n---\n# placeholder\n" });
+    // Typed membership exists in this mission (the modern signal).
+    insertQitem(db, { qitemId: "q-typed-sibling", body: "no name mention", tags: ["slice:01-typed-sibling"] });
+    // Mission-scope rows: tagged/mentioning the MISSION only — these are the
+    // 355-class rows that must not be credited to 02-placeholder.
+    insertQitem(db, { qitemId: "q-mission-tag", body: "no slice mention", tags: ["mission:release-x"] });
+    insertQitem(db, { qitemId: "q-mission-body", body: "advance the release-x mission", tags: [] });
+  }
+
+  it("RED: a zero-typed slice in a modern mission does NOT absorb mission-only rows", () => {
+    seedModernMission();
+    const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
+    const target = indexer.get("02-placeholder")!;
+    expect(target.qitemIds, "mission-only rows must not be credited to a zero-typed slice").toEqual([]);
+  });
+
+  it("RED (route-observable): the /api/slices qitemCount for that slice is 0, not the mission aggregate", () => {
+    seedModernMission();
+    const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
+    const entry = indexer.list().find((e) => e.name === "02-placeholder")!;
+    expect(entry.qitemCount, "the count the sidebar badge renders").toBe(0);
+  });
+
+  it("GREEN pin: the target's OWN NAME in a body still matches (name-legacy match preserved)", () => {
+    seedModernMission();
+    insertQitem(db, { qitemId: "q-by-target-name", body: "work on 02-placeholder today", tags: [] });
+    const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
+    expect(indexer.get("02-placeholder")!.qitemIds).toContain("q-by-target-name");
+  });
+
+  it("GREEN pin: an EXPLICIT authored rail-item still matches (explicit-rail legacy match preserved)", () => {
+    const slices = path.join(missionsRoot, "release-y", "slices");
+    writeSlice(slices, "01-typed-sib", { "README.md": "---\nstatus: active\n---\n" });
+    writeSlice(slices, "02-railed", { "README.md": "---\nstatus: active\nrail-item: PL-777\n---\n" });
+    insertQitem(db, { qitemId: "q-typed-y", body: "x", tags: ["slice:01-typed-sib"] });
+    insertQitem(db, { qitemId: "q-by-explicit-rail", body: "PL-777 follow-up", tags: [] });
+    const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
+    expect(indexer.get("02-railed")!.qitemIds).toContain("q-by-explicit-rail");
+  });
+
+  it("GREEN pin: the typed sibling keeps its own typed membership unchanged", () => {
+    seedModernMission();
+    const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
+    expect(indexer.get("01-typed-sibling")!.qitemIds).toEqual(["q-typed-sibling"]);
+  });
+});

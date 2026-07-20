@@ -536,4 +536,37 @@ describe("VM-006 — Progress↔Review done coherence (union in buildAcceptance)
     acceptanceOf();
     expect(proofReaddirCount()).toBe(1);
   });
+
+  // qitem-render-driver B — DESYNC GUARD for the shared logical-checkbox
+  // relation. The VM-006 lift joins Review's promised rawText against
+  // Progress's acceptance row text via textKey (trim+lowercase). Both sides
+  // truncate at continuation boundaries today, so they agree by accident;
+  // after the fix both must JOIN the continuation and still agree.
+  //
+  // The assertions target the EXACT modified obligation (not aggregate counts,
+  // which unrelated rows could satisfy): the row must carry the joined
+  // continuation AND still lift via qa-verdict. RED today (no join); RED again
+  // if only ONE parser learns continuations — the silent-desync class.
+  it("B desync guard: the CONTINUED obligation carries its joined text AND still lifts via qa-verdict", () => {
+    const CONT = "and the label survives a reload";
+    const addContinuation = (c: string) =>
+      c.replace(
+        /^(- \[[ xX]\] \*\*1\. Shared card label\*\*.*)$/m,
+        (line) => `${line}\n      ${CONT}`,
+      );
+    editFile("IMPLEMENTATION-PRD.md", addContinuation);
+    editFile("README.md", addContinuation);
+
+    const a = acceptanceOf();
+    // Locate the EXACT obligation by its authored head, then require the join.
+    const row = a.items.find((i) => i.text.includes("Shared card label"));
+    expect(row, "the shared-card-label obligation must be present").toBeTruthy();
+    expect(row!.text, "the continued obligation must carry its joined continuation").toContain(CONT);
+    // ...and that same row must still be lifted by the QA verdict.
+    expect(row!.done, "the continued obligation must still be lifted").toBe(true);
+    expect(row!.doneVia, "lifted by the recorded QA verdict, not a checkbox tick").toBe("qa-verdict");
+    // Global ceiling retained (pm FR-2 invariant 2).
+    expect(a.items.filter((i) => i.doneVia === "qa-verdict").length).toBeLessThanOrEqual(reviewVerifiedCount());
+  });
+
 });
