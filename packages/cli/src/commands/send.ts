@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { resolveEffectiveHost } from "../host-selection.js";
-import { DaemonClient, terminalAuthHeaders } from "../client.js";
-import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
+import { DaemonClient, DaemonConnectionError, terminalAuthHeaders } from "../client.js";
+import { getDaemonStatus, getDaemonUrl, type DaemonStatus } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { loadHostRegistry, resolveHost, hostDisplayTarget, type HttpHostEntry } from "../host-registry.js";
@@ -43,6 +43,25 @@ export function wrapSendBody(sender: string | undefined, recipient: string, body
 
 function resolveSenderSession(): string | undefined {
   return readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+}
+
+/** qitem-c113bd41 — the LOCAL send target. The status probe is advisory,
+ *  never authoritative: a busy/wedged daemon fails the probe while the
+ *  transport would succeed (the false-daemon-down incident). Resolution:
+ *  the configured env alias FIRST (exact string, custom port preserved;
+ *  OPENRIG_URL wins over legacy RIGGED_URL), else the status/state-derived
+ *  host:port when the probe found one, else the configured file/default
+ *  target (arg-less DaemonClient resolution).
+ *  The ACTUAL transport call decides success — its DaemonConnectionError
+ *  is the honest failure surface. */
+function resolveLocalDaemonUrl(status: DaemonStatus): string {
+  const envUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
+  if (envUrl) return envUrl;
+  if (status.state === "running" && status.port !== undefined) return getDaemonUrl(status);
+  // Configured-target resolution reused verbatim from the arg-less
+  // DaemonClient (env alias > ConfigStore file > default) — never a
+  // hardcoded literal, so a config-file custom daemon.host/port is honored.
+  return new DaemonClient().baseUrl;
 }
 
 /**
@@ -238,23 +257,33 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         return;
       }
 
+      // qitem-c113bd41 — the status probe is ADVISORY (target discovery
+      // only); the actual transport is authoritative. A probe-timeout or
+      // running/unhealthy verdict no longer refuses the send.
       const status = await getDaemonStatus(deps.lifecycleDeps);
 
-      if (status.state !== "running" || status.healthy === false) {
-        console.error("Daemon not running. Start it with: rig daemon start");
-        process.exitCode = 1;
-        return;
-      }
-
-      const client = deps.clientFactory(getDaemonUrl(status));
+      const client = deps.clientFactory(resolveLocalDaemonUrl(status));
       const senderSession = opts.from ?? resolveSenderSession();
       // --raw (and --dangerously-interact, which implies it) send EXACT text with no messaging envelope.
       const raw = Boolean(opts.raw || opts.dangerouslyInteract);
       const outboundText = raw ? text : wrapSendBody(senderSession, session, text);
-      const res = await client.post<Record<string, unknown>>("/api/transport/send", {
-        session, text: outboundText, verify: opts.verify, force: opts.force, waitForIdleMs,
-        dangerouslyInteract: opts.dangerouslyInteract, reason: opts.reason, actorSession: senderSession ?? null,
-      }, transportRequestOptions(waitForIdleMs));
+      let res: { status: number; data: Record<string, unknown> };
+      try {
+        res = await client.post<Record<string, unknown>>("/api/transport/send", {
+          session, text: outboundText, verify: opts.verify, force: opts.force, waitForIdleMs,
+          dangerouslyInteract: opts.dangerouslyInteract, reason: opts.reason, actorSession: senderSession ?? null,
+        }, transportRequestOptions(waitForIdleMs));
+      } catch (err) {
+        if (err instanceof DaemonConnectionError) {
+          // The REAL transport outcome, honestly surfaced (names the
+          // configured target + the underlying error) — never the bare
+          // probe-derived restart line.
+          console.error(err.message);
+          process.exitCode = 1;
+          return;
+        }
+        throw err;
+      }
 
       if (opts.json) {
         console.log(JSON.stringify(res.data));
@@ -457,14 +486,11 @@ async function runFanOutSend(params: {
 }): Promise<void> {
   const { toList, pod, rig, message, opts, deps } = params;
 
+  // qitem-c113bd41 — same advisory-probe/transport-authoritative contract
+  // as the single-seat path (see resolveLocalDaemonUrl).
   const status = await getDaemonStatus(deps.lifecycleDeps);
-  if (status.state !== "running" || status.healthy === false) {
-    console.error("Daemon not running. Start it with: rig daemon start");
-    process.exitCode = 1;
-    return;
-  }
 
-  const client = deps.clientFactory(getDaemonUrl(status));
+  const client = deps.clientFactory(resolveLocalDaemonUrl(status));
   const senderSession = resolveSenderSession();
   const raw = Boolean(opts.raw || opts.dangerouslyInteract);
 
@@ -485,7 +511,17 @@ async function runFanOutSend(params: {
     body.envelopeSender = senderSession && senderSession.trim().length > 0 ? senderSession : SENDER_FALLBACK;
   }
 
-  const res = await client.post<Record<string, unknown>>("/api/transport/broadcast", body, transportRequestOptions());
+  let res: { status: number; data: Record<string, unknown> };
+  try {
+    res = await client.post<Record<string, unknown>>("/api/transport/broadcast", body, transportRequestOptions());
+  } catch (err) {
+    if (err instanceof DaemonConnectionError) {
+      console.error(err.message);
+      process.exitCode = 1;
+      return;
+    }
+    throw err;
+  }
 
   if (opts.json) {
     console.log(JSON.stringify(res.data));

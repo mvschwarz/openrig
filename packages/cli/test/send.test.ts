@@ -1,5 +1,8 @@
-import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import http from "node:http";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Command } from "commander";
 import { sendCommand, type SendDeps } from "../src/commands/send.js";
 import { DaemonClient } from "../src/client.js";
@@ -493,4 +496,201 @@ describe("Send CLI", () => {
     // The positive-picker refusal contract is still documented.
     expect(helpText.toLowerCase()).toContain("refused");
   });
+
+  // -------------------------------------------------------------------------
+  // qitem-c113bd41 — local-send honesty: the ACTUAL transport is
+  // authoritative. Preflight (getDaemonStatus) may inform target fallback but
+  // never refuses a send by itself: a busy/wedged daemon (probe timeout or
+  // running/unhealthy) must still receive the POST/broadcast; a REAL down
+  // fails honestly from the actual connection error, naming the target —
+  // never the bare preflight restart line. Guard matrix: single + fan-out;
+  // stopped + running/unhealthy; OPENRIG_URL/RIGGED_URL custom ports +
+  // precedence; honest failure; cross-host untouched (pinned in the
+  // cross-host suites).
+  // -------------------------------------------------------------------------
+
+  describe("qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal)", () => {
+    afterEach(() => { vi.unstubAllEnvs(); });
+
+    /** lifecycleDeps whose PROBE always fails (instant, injected sleep) and
+     *  which carries NO daemon state — the env-URL/stopped shape. */
+    function probeFailNoStateDeps(clientFactory: StatusDeps["clientFactory"]): StatusDeps {
+      return {
+        lifecycleDeps: {
+          ...mockLifecycleDeps(),
+          exists: vi.fn(() => false),
+          readFile: vi.fn(() => null),
+          fetch: vi.fn(async () => { throw new Error("probe timed out"); }),
+          sleep: async () => {},
+        } as LifecycleDeps,
+        clientFactory,
+      };
+    }
+
+    function recordingRealClient(): { factory: StatusDeps["clientFactory"]; seen: () => string | null } {
+      let seenUrl: string | null = null;
+      return {
+        factory: (baseUrl: string) => { seenUrl = baseUrl; return new DaemonClient(baseUrl); },
+        seen: () => seenUrl,
+      };
+    }
+
+    it("R1 RED: single-seat + OPENRIG_URL custom port + probe-stopped -> actual POST lands, exact env target passed to clientFactory", async () => {
+      vi.stubEnv("OPENRIG_URL", `http://127.0.0.1:${port}`);
+      vi.stubEnv("RIGGED_URL", "");
+      lastSendBody = null;
+      const rc = recordingRealClient();
+      const { logs } = await captureLogs(async () => {
+        await makeCmd(probeFailNoStateDeps(rc.factory)).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello"]);
+      });
+      expect(logs.join("\n")).toContain("Sent to dev-impl@my-rig");
+      expect(rc.seen()).toBe(`http://127.0.0.1:${port}`);
+      expect(String(lastSendBody?.text)).toContain("To: dev-impl@my-rig");
+    });
+
+    it("R2 RED: fan-out --to + OPENRIG_URL + probe-stopped -> actual /broadcast lands with per-recipient results", async () => {
+      vi.stubEnv("OPENRIG_URL", `http://127.0.0.1:${port}`);
+      vi.stubEnv("RIGGED_URL", "");
+      lastBroadcastBody = null;
+      const rc = recordingRealClient();
+      const { logs } = await captureLogs(async () => {
+        await makeCmd(probeFailNoStateDeps(rc.factory)).parseAsync(["node", "rig", "send", "--to", "dev-impl@my-rig,dev-qa@my-rig", "hi team"]);
+      });
+      expect(lastBroadcastBody).not.toBeNull();
+      expect(logs.join("\n")).toContain("dev-impl@my-rig");
+      expect(rc.seen()).toBe(`http://127.0.0.1:${port}`);
+    });
+
+    it("R3 RED: legacy RIGGED_URL custom port honored when OPENRIG_URL unset (probe-stopped)", async () => {
+      vi.stubEnv("OPENRIG_URL", "");
+      vi.stubEnv("RIGGED_URL", `http://127.0.0.1:${port}`);
+      const rc = recordingRealClient();
+      const { logs } = await captureLogs(async () => {
+        await makeCmd(probeFailNoStateDeps(rc.factory)).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello"]);
+      });
+      expect(logs.join("\n")).toContain("Sent to dev-impl@my-rig");
+      expect(rc.seen()).toBe(`http://127.0.0.1:${port}`);
+    });
+
+    it("R4 RED: precedence — OPENRIG_URL wins over RIGGED_URL on the transport-authoritative path", async () => {
+      vi.stubEnv("OPENRIG_URL", `http://127.0.0.1:${port}`);
+      vi.stubEnv("RIGGED_URL", "http://127.0.0.1:59999");
+      const rc = recordingRealClient();
+      const { logs } = await captureLogs(async () => {
+        await makeCmd(probeFailNoStateDeps(rc.factory)).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello"]);
+      });
+      expect(rc.seen()).toBe(`http://127.0.0.1:${port}`);
+      expect(logs.join("\n")).toContain("Sent to dev-impl@my-rig");
+    });
+
+    it("R5 RED: RUNNING-but-UNHEALTHY (event-loop-starved healthz body) must still send (single-seat + fan-out)", async () => {
+      vi.stubEnv("OPENRIG_URL", `http://127.0.0.1:${port}`);
+      vi.stubEnv("RIGGED_URL", "");
+      const unhealthyProbeDeps = (clientFactory: StatusDeps["clientFactory"]): StatusDeps => ({
+        lifecycleDeps: {
+          ...mockLifecycleDeps(),
+          fetch: vi.fn(async () => ({
+            ok: true,
+            json: async () => ({ eventLoop: { healthy: false, lagMeanMs: 9000, lagP99Ms: 9000, utilization: 1, lastTickAgeMs: 9000 } }),
+          })),
+          sleep: async () => {},
+        } as LifecycleDeps,
+        clientFactory,
+      });
+      const rc = recordingRealClient();
+      const { logs } = await captureLogs(async () => {
+        await makeCmd(unhealthyProbeDeps(rc.factory)).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello"]);
+      });
+      expect(logs.join("\n")).toContain("Sent to dev-impl@my-rig");
+      const rc2 = recordingRealClient();
+      lastBroadcastBody = null;
+      await captureLogs(async () => {
+        await makeCmd(unhealthyProbeDeps(rc2.factory)).parseAsync(["node", "rig", "send", "--to", "dev-impl@my-rig,dev-qa@my-rig", "hi"]);
+      });
+      expect(lastBroadcastBody).not.toBeNull();
+    });
+
+    const rcHolder = { seenUrl: null as string | null, factory: ((baseUrl: string) => { rcHolder.seenUrl = baseUrl; return new DaemonClient(baseUrl); }) as StatusDeps["clientFactory"], seen: () => rcHolder.seenUrl };
+
+    it("R6 RED: NO env + live-pid state file (custom port) + healthz probe failing -> POST attempted against the state-derived target", async () => {
+      vi.stubEnv("OPENRIG_URL", "");
+      vi.stubEnv("RIGGED_URL", "");
+      const deps: StatusDeps = {
+        lifecycleDeps: {
+          ...mockLifecycleDeps(),
+          exists: vi.fn((p: string) => p === STATE_FILE),
+          readFile: vi.fn((p: string) => p === STATE_FILE
+            ? JSON.stringify({ pid: 123, port, db: "test.sqlite", startedAt: "2026-04-01T00:00:00Z" } as DaemonState)
+            : null),
+          fetch: vi.fn(async () => { throw new Error("healthz timed out"); }),
+          sleep: async () => {},
+          isProcessAlive: vi.fn(() => true),
+        } as LifecycleDeps,
+        clientFactory: rcHolder.factory,
+      };
+      const { logs } = await captureLogs(async () => {
+        await makeCmd(deps).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello"]);
+      });
+      expect(logs.join("\n")).toContain("Sent to dev-impl@my-rig");
+      expect(rcHolder.seen()).toBe(`http://127.0.0.1:${port}`);
+    });
+
+    it("R6b RED: NO env + NO daemon state + probe-stopped -> POST attempted against the configured DEFAULT target (injected client succeeds)", async () => {
+      vi.stubEnv("OPENRIG_URL", "");
+      vi.stubEnv("RIGGED_URL", "");
+      // Config isolation without touching disk: a nonexistent home means no
+      // daemon config, so the configured target resolves to the default.
+      vi.stubEnv("OPENRIG_HOME", "/nonexistent/send-r6b-home");
+      let seenUrl: string | null = null;
+      const postFn = vi.fn(async () => ({ status: 200, data: { ok: true, sessionName: "dev-impl@my-rig" } }));
+      const stubFactory = ((baseUrl: string) => { seenUrl = baseUrl; return { post: postFn } as unknown as DaemonClient; }) as StatusDeps["clientFactory"];
+      const { logs } = await captureLogs(async () => {
+        await makeCmd(probeFailNoStateDeps(stubFactory)).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello"]);
+      });
+      expect(logs.join("\n")).toContain("Sent to dev-impl@my-rig");
+      expect(seenUrl).toBe("http://127.0.0.1:7433");
+      expect(postFn).toHaveBeenCalledTimes(1);
+    });
+
+    it("R6c RED: NO env + NO state + probe-stopped + ConfigStore CUSTOM daemon host/port -> POST attempted against the CONFIGURED-FILE target exactly (no hardcoded default)", async () => {
+      vi.stubEnv("OPENRIG_URL", "");
+      vi.stubEnv("RIGGED_URL", "");
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), "send-r6c-home-"));
+      try {
+        fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({ daemon: { host: "127.0.0.9", port: 7599 } }));
+        vi.stubEnv("OPENRIG_HOME", home);
+        let seenUrl: string | null = null;
+        const postFn = vi.fn(async () => ({ status: 200, data: { ok: true, sessionName: "dev-impl@my-rig" } }));
+        const stubFactory = ((baseUrl: string) => { seenUrl = baseUrl; return { post: postFn } as unknown as DaemonClient; }) as StatusDeps["clientFactory"];
+        const { logs } = await captureLogs(async () => {
+          await makeCmd(probeFailNoStateDeps(stubFactory)).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello"]);
+        });
+        expect(logs.join("\n")).toContain("Sent to dev-impl@my-rig");
+        // The configured file target, byte-exact — a literal-default fallback
+        // (http://127.0.0.1:7433) is a contract violation here.
+        expect(seenUrl).toBe("http://127.0.0.9:7599");
+        expect(postFn).toHaveBeenCalledTimes(1);
+      } finally {
+        // Exception-safe: a failing assertion must not leave temp state.
+        fs.rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    it("R7 RED: REAL down fails honestly — actual connection error names the target; the bare preflight restart line never appears", async () => {
+      vi.stubEnv("OPENRIG_URL", "http://127.0.0.1:1");
+      vi.stubEnv("RIGGED_URL", "");
+      const rc = recordingRealClient();
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd(probeFailNoStateDeps(rc.factory)).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello"]);
+      });
+      const out = logs.join("\n");
+      expect(exitCode).toBe(1);
+      // The ACTUAL transport failure must be surfaced — the DaemonClient's
+      // own connection-error prefix, naming the configured target — not a
+      // preflight-derived guess.
+      expect(out).toContain("Cannot connect to the OpenRig daemon at http://127.0.0.1:1:");
+      expect(out).not.toContain("Daemon not running. Start it with: rig daemon start");
+    });
+  });
+
 });

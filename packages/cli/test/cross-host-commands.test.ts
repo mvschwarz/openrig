@@ -294,14 +294,22 @@ describe("compat regression: no --host means no cross-host annotation", () => {
   it("send without --host does NOT call the cross-host executor (registry loader untouched, executor untouched)", async () => {
     const loaderSpy = vi.fn();
     const runSpy = vi.fn();
+    // qitem-c113bd41: the local probe is advisory now — the send proceeds to
+    // the ACTUAL local transport even when the probe fails, so the client
+    // stub must answer the POST (the old empty stub relied on the removed
+    // "Daemon not running" short-circuit).
+    const postSpy = vi.fn(async (..._args: unknown[]) => ({ status: 200, data: { ok: true, sessionName: "s@r" } }));
     const cmd = sendCommand({
       lifecycleDeps: makeFailingLifecycleDeps(),
-      clientFactory: () => ({} as never),
+      clientFactory: () => ({ post: postSpy } as never),
       hostRegistryLoader: loaderSpy as never,
       crossHostRun: runSpy as never,
     });
     await cmd.parseAsync(["s@r", "msg"], { from: "user" });
-    // local path short-circuits at "Daemon not running" without consulting cross-host machinery.
+    // The local transport was attempted exactly once — and the cross-host
+    // machinery stayed untouched.
+    expect(postSpy).toHaveBeenCalledTimes(1);
+    expect(postSpy.mock.calls[0]![0]).toBe("/api/transport/send");
     expect(loaderSpy).not.toHaveBeenCalled();
     expect(runSpy).not.toHaveBeenCalled();
   });
