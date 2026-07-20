@@ -419,7 +419,9 @@ async function runCrossHostSend(
  * locally synthesized). Deadline: the read-class client default, or
  * waitForIdleMs + overhead when --wait-for-idle (the local path's math).
  *
- * Auth posture (named, v0): runRemoteHttpOp presents the REGISTRY bearer;
+ * Auth posture (named, v0): runRemoteHttpOp presents the REGISTRY bearer
+ * WHEN ONE IS CONFIGURED; for a URL-only anonymous host the Authorization
+ * header is omitted entirely (optional-bearer, a0c17305).
  * /api/transport/* is gated by the remote's TERMINAL bearer class. Default
  * (null) + tailnet binds = pass-through by design; a remote enforcing a
  * DIFFERENT terminal bearer surfaces as the structured permission-gate step
@@ -490,7 +492,10 @@ async function runFanOutSend(params: {
   pod: string | undefined;
   rig: string | undefined;
   message: string;
-  opts: { verify?: boolean; force?: boolean; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; json?: boolean };
+  // ba41fea2 — `from` was omitted here while the caller already forwarded it
+  // at runtime, so an explicit --from was silently dropped on fan-out only
+  // (single-seat + both cross-host paths always honored it).
+  opts: { verify?: boolean; force?: boolean; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; from?: string; json?: boolean };
   deps: SendDeps;
 }): Promise<void> {
   const { toList, pod, rig, message, opts, deps } = params;
@@ -499,7 +504,11 @@ async function runFanOutSend(params: {
   // as the single-seat path, including ff13bcdf's lazy probe (see
   // resolveLocalDaemonUrl).
   const client = deps.clientFactory(await resolveLocalDaemonUrl(deps));
-  const senderSession = resolveSenderSession();
+  // ba41fea2 — explicit provenance wins, ambient identity is the fallback:
+  // identical to the single-seat and cross-host paths. Feeds BOTH
+  // actorSession (audit attribution) and envelopeSender (what each
+  // recipient sees), so one resolution corrects both surfaces.
+  const senderSession = opts.from ?? resolveSenderSession();
   const raw = Boolean(opts.raw || opts.dangerouslyInteract);
 
   const body: Record<string, unknown> = {

@@ -772,7 +772,7 @@ Notes:
 
 ### `rig send`
 
-Usage: `rig send <session> <text> [--verify] [--force] [--raw] [--dangerously-interact --reason <text>] [--wait-for-idle <s>] [--host <id>] [--json]`
+Usage: `rig send <session> <text> [--verify] [--force] [--raw] [--dangerously-interact --reason <text>] [--wait-for-idle <s>] [--from <session>] [--host <id>] [--json]`
 
 Notes:
 - Uses the two-step send pattern automatically: paste text, wait, submit Enter.
@@ -838,7 +838,7 @@ actionable error per mode; JSON output preserves the `failedStep` enum):
 
 **The transport posture (OPR.0.4.4.13 FR-4 — DECIDED, pm-ruled: document, no parity).** The
 partition is the intended posture, not an accident of history: **ssh carries interactive pane
-ops, http-bearer carries daemon REST ops, `ps`/`whoami` follow the host's DECLARED transport.**
+ops, http carries daemon REST ops, `ps`/`whoami` follow the host's DECLARED transport.**
 There is NO cross-transport fallback, and NO http parity for `send`/`capture` ships in 0.4.4
 (parity would be new attack surface with no scope-locked need). **v0.4.6 UPDATE (OPR.0.4.6.MH4,
 pm-RULED IN as fulfilling-confirmed-intent):** `send`/`capture` gain the http branch — the
@@ -875,7 +875,8 @@ remote returned 401/403 — including the terminal-bearer posture below) / `remo
 (network/timeout) / `remote-command-failed` (remote 4xx/5xx, with the remote route's own error
 text surfaced beside the step). **Terminal-bearer posture (named, v0 — applies to
 `/api/transport/*` ONLY, i.e. send/capture/broadcast):** the remote's transport routes gate on
-ITS terminal bearer class, while the CLI presents the host's REGISTRY bearer. Default (no
+ITS terminal bearer class, while the CLI presents the host's REGISTRY bearer when one is
+configured; for a URL-only anonymous host the `Authorization` header is omitted. Default (no
 terminal bearer) + tailnet binds = pass-through by design (the mesh is the auth boundary); a
 remote enforcing a DIFFERENT terminal bearer surfaces as the structured `permission-gate` step —
 remedy: set the remote's terminal bearer equal to the paired registry bearer, or rely on the

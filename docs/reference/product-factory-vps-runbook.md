@@ -65,7 +65,7 @@ that verifies it from the right vantage.
 
 See the per-command transport table in `docs/as-built/cli-reference.md`
 (§Cross-host execution). The partition IS the intended posture: ssh carries
-interactive pane ops (`send`/`capture`); http-bearer carries daemon REST ops
+interactive pane ops (`send`/`capture`); http carries daemon REST ops
 (`up`/`down`/`launch`); `ps`/`whoami` follow the host's DECLARED transport;
 fan-out (`--all-hosts`) is http-only. There is NO cross-transport fallback and
 NO http parity for send/capture in 0.4.4 (parity = new attack surface with no

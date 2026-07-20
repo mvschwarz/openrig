@@ -134,7 +134,9 @@ work; the only net-new is the CLI transport branch.
   ONLY):** the remote's transport routes (send/capture/broadcast) gate on
   ITS TERMINAL bearer class (`OPENRIG_TERMINAL_BEARER_TOKEN`, default null →
   pass-through; the tailnet is the auth boundary by design), while the CLI
-  presents the REGISTRY bearer from `hosts.yaml`. A remote enforcing a
+  presents the REGISTRY bearer from `hosts.yaml` when one is configured;
+  for a URL-only anonymous host the `Authorization` header is omitted.
+  A remote enforcing a
   DIFFERENT terminal bearer surfaces as the structured `permission-gate`
   step (never a hang, never silent). Remedy: set the remote terminal bearer
   equal to the paired registry bearer, or rely on the tailnet boundary.

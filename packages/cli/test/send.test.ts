@@ -795,4 +795,67 @@ describe("Send CLI", () => {
     });
   });
 
+  // -------------------------------------------------------------------------
+  // ba41fea2 — fan-out provenance. `--from` is a GLOBAL option and reaches the
+  // action's opts, but runFanOutSend's local params type omits it, so the
+  // fan-out path resolves AMBIENT identity and writes that into both
+  // actorSession (audit attribution) and envelopeSender (what each recipient
+  // sees). An explicit operator instruction is silently dropped — the sibling
+  // paths (single-seat, cross-host ssh, cross-host http) all honor it.
+  //
+  // NOTE ON CLEANUP: these tests deliberately sit OUTSIDE the
+  // qitem-c113bd41 describe block above, so its afterEach(vi.unstubAllEnvs)
+  // does NOT cover them. Each test restores its own env in a local
+  // try/finally — an un-restored vi.stubEnv would leak into every later test
+  // in this file (the same ambient-env class ff13bcdf finding 2 fixed).
+  // -------------------------------------------------------------------------
+  describe("ba41fea2 — fan-out honors explicit --from provenance", () => {
+    it("F1 RED: --from is threaded into fan-out — BOTH envelopeSender and actorSession name the explicit origin, not the ambient relay", async () => {
+      vi.stubEnv("OPENRIG_URL", `http://127.0.0.1:${port}`);
+      vi.stubEnv("RIGGED_URL", "");
+      // Ambient identity is STUBBED, never inherited from the surrounding
+      // managed seat — otherwise the discriminator would silently compare
+      // against whatever the runner happens to export.
+      vi.stubEnv("OPENRIG_SESSION_NAME", "ambient-relay@my-rig");
+      vi.stubEnv("RIGGED_SESSION_NAME", "");
+      try {
+        lastBroadcastBody = null;
+        await captureLogs(async () => {
+          await makeCmd().parseAsync([
+            "node", "rig", "send", "--from", "origin@my-rig",
+            "--to", "dev-impl@my-rig,dev-qa@my-rig", "hi team",
+          ]);
+        });
+        expect(lastBroadcastBody).not.toBeNull();
+        // The send SUCCEEDS today; only the attribution is wrong. Asserting
+        // delivery alone would pass against the defect — these two fields are
+        // the whole discriminator.
+        expect(lastBroadcastBody?.actorSession).toBe("origin@my-rig");
+        expect(lastBroadcastBody?.envelopeSender).toBe("origin@my-rig");
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("F2 GREEN-characterization: with NO --from, fan-out still falls back to ambient identity (the flag is additive, not a behavior change)", async () => {
+      vi.stubEnv("OPENRIG_URL", `http://127.0.0.1:${port}`);
+      vi.stubEnv("RIGGED_URL", "");
+      vi.stubEnv("OPENRIG_SESSION_NAME", "ambient-relay@my-rig");
+      vi.stubEnv("RIGGED_SESSION_NAME", "");
+      try {
+        lastBroadcastBody = null;
+        await captureLogs(async () => {
+          await makeCmd().parseAsync([
+            "node", "rig", "send", "--to", "dev-impl@my-rig,dev-qa@my-rig", "hi team",
+          ]);
+        });
+        expect(lastBroadcastBody).not.toBeNull();
+        expect(lastBroadcastBody?.actorSession).toBe("ambient-relay@my-rig");
+        expect(lastBroadcastBody?.envelopeSender).toBe("ambient-relay@my-rig");
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+  });
+
 });
