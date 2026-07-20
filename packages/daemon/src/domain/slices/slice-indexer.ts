@@ -152,11 +152,9 @@ interface MembershipIndex {
   /** fallback term -> qitem ids in row (rowid) order, capped 500/term. */
   fallbackByTerm: Map<string, string[]>;
   /** location names the index was built from — a get() on a folder created
-   *  mid-generation (not in this set) forces a rebuild so fresh folders
-   *  resolve membership without waiting for invalidate/TTL, exactly like
-   *  the per-slice path did. */
+   *  mid-operation (not in this set) forces a rebuild so fresh folders
+   *  resolve membership exactly like the per-slice path did. */
   knownSlices: Set<string>;
-  expiresAt: number;
 }
 
 // --- SQL-LIKE-equivalent matching (qitem-ccf87c0d) -------------------------
@@ -178,16 +176,51 @@ function asciiFold(s: string): string {
   return s.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
 }
 
-/** Translate one LIKE term (already ascii-folded) to a RegExp source.
- *  Compile the result with LIKE_REGEXP_FLAGS. */
-function likeTermToRegExpSource(term: string): string {
+/** qitem-18f3300d — SQLite LIKE stops matching at the first raw U+0000 in
+ *  the haystack (guard-reproduced against the parent per-slice SQL; a NUL
+ *  is production-reachable via POST /api/queue/create JSON bodies). Apply
+ *  BEFORE asciiFold/prefilter/confirm so a term occurring only after a NUL
+ *  never matches, exactly like the parent. */
+function sqliteVisiblePrefix(s: string): string {
+  const i = s.indexOf("\u0000");
+  return i === -1 ? s : s.slice(0, i);
+}
+
+/** Translate a run of LIKE-pattern characters (%/_ wildcards, everything
+ *  else literal with regex specials escaped). No anchors — callers add
+ *  them only where LIKE full-match semantics diverge from contains. */
+function likePatternBodyToRegExpSource(patternBody: string): string {
   let out = "";
-  for (const ch of term) {
+  for (const ch of patternBody) {
     if (ch === "%") out += ".*";
     else if (ch === "_") out += ".";
     else out += ch.replace(/[.*+?^${}()|[\]\\]/, "\\$&");
   }
   return out;
+}
+
+/** qitem-18f3300d pattern-side facet — translate the FULL bound LIKE
+ *  pattern for one fallback term, exactly as the parent SQL saw it:
+ *  build `%<term>%` and truncate THE PATTERN at the first U+0000 (SQLite
+ *  truncates patterns too — a NUL inside the term LOSES the trailing
+ *  wildcard, leaving an end-anchored `%prefix`).
+ *  - Untruncated pattern (the overwhelmingly common no-NUL case):
+ *    `%term%` is exactly a contains-match, so the term translates
+ *    UNANCHORED — a wildcard-free term compiles to a pure literal, which
+ *    keeps the combined prefilter alternation on the regex engine's fast
+ *    literal path (an anchored `^.*x.*$` form measured a ~80x benchmark
+ *    regression: every non-matching row pays a greedy scan per branch).
+ *  - Truncated pattern: LIKE full-match semantics now matter (the lost
+ *    trailing `%` end-anchors the remainder), so translate the truncated
+ *    pattern verbatim and anchor `^...$`.
+ *  Compile with LIKE_REGEXP_FLAGS. */
+function likeBoundPatternToRegExpSource(term: string): string {
+  const bound = `%${term}%`;
+  const pattern = sqliteVisiblePrefix(bound);
+  if (pattern === bound) {
+    return likePatternBodyToRegExpSource(asciiFold(term));
+  }
+  return "^" + likePatternBodyToRegExpSource(asciiFold(pattern)) + "$";
 }
 
 const FRONTMATTER_DELIM = "---";
@@ -330,7 +363,15 @@ export class SliceIndexer {
       return this.listingCache.entries;
     }
     const locations = this.readSliceLocations();
-    const entries: SliceListEntry[] = locations.map((location) => this.toListEntry(location));
+    // ONE batch membership index serves this whole rebuild (the <=4 LIKE-
+    // execution load contract), then drops so later uncached operations
+    // read current queue state (qitem-18f3300d operation scoping).
+    let entries: SliceListEntry[];
+    try {
+      entries = locations.map((location) => this.toListEntry(location));
+    } finally {
+      this.membershipIndex = null;
+    }
     this.listingCache = { entries, expiresAt: now + this.cacheTtlMs };
     return entries;
   }
@@ -345,7 +386,14 @@ export class SliceIndexer {
     const location = this.findSliceLocation(name);
     if (!location) return null;
 
-    const record = this.buildRecord(location);
+    // Uncached get(): its own operation-scoped batch, dropped afterward so
+    // the next uncached operation sees current queue state (qitem-18f3300d).
+    let record: SliceRecord;
+    try {
+      record = this.buildRecord(location);
+    } finally {
+      this.membershipIndex = null;
+    }
     this.detailCache.set(name, { record, expiresAt: now + this.cacheTtlMs });
     return record;
   }
@@ -668,8 +716,12 @@ export class SliceIndexer {
    *  Degradations preserved: tags column missing -> typed tier empty + body-
    *  only fallback scan; queue_items absent -> throws to matchQitems' catch. */
   private ensureMembershipIndex(): MembershipIndex {
-    const now = Date.now();
-    if (this.membershipIndex && this.membershipIndex.expiresAt > now) {
+    // qitem-18f3300d — OPERATION-scoped, never TTL-scoped: the index lives
+    // only for the duration of one public cold list() or one uncached
+    // get() (the public entry points clear it), so separate uncached
+    // operations always see current queue state — parent-equivalent
+    // freshness — while one cold list still shares one batch.
+    if (this.membershipIndex) {
       return this.membershipIndex;
     }
 
@@ -722,16 +774,16 @@ export class SliceIndexer {
         const termList = Array.from(fallbackTerms);
         const matchers = termList.map((term) => ({
           term,
-          re: new RegExp(likeTermToRegExpSource(asciiFold(term)), LIKE_REGEXP_FLAGS),
+          re: new RegExp(likeBoundPatternToRegExpSource(term), LIKE_REGEXP_FLAGS),
         }));
-        const prefilter = new RegExp(matchers.map((m) => m.re.source).join("|"), LIKE_REGEXP_FLAGS);
+        const prefilter = new RegExp(matchers.map((m) => `(?:${m.re.source})`).join("|"), LIKE_REGEXP_FLAGS);
         for (const term of termList) fallbackByTerm.set(term, []);
         const scan = tagsColumnAvailable
           ? this.db.prepare(`SELECT qitem_id, body, tags FROM queue_items`)
           : this.db.prepare(`SELECT qitem_id, body FROM queue_items`);
         for (const r of scan.iterate() as Iterable<{ qitem_id: string; body: string; tags?: string | null }>) {
-          const hayBody = asciiFold(r.body);
-          const hayTags = r.tags != null ? asciiFold(r.tags) : null;
+          const hayBody = asciiFold(sqliteVisiblePrefix(r.body));
+          const hayTags = r.tags != null ? asciiFold(sqliteVisiblePrefix(r.tags)) : null;
           if (!prefilter.test(hayBody) && !(hayTags !== null && prefilter.test(hayTags))) continue;
           for (const m of matchers) {
             if (m.re.test(hayBody) || (hayTags !== null && m.re.test(hayTags))) {
@@ -747,7 +799,7 @@ export class SliceIndexer {
       }
     }
 
-    this.membershipIndex = { typedBySlice, fallbackByTerm, knownSlices, expiresAt: now + this.cacheTtlMs };
+    this.membershipIndex = { typedBySlice, fallbackByTerm, knownSlices };
     return this.membershipIndex;
   }
 

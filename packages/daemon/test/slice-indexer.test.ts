@@ -864,3 +864,80 @@ describe("qitem-ccf87c0d — LIKE '_' Unicode code-point parity (guard blocker p
     expect(indexer.get("emoji_probe")!.qitemIds).toEqual(["q-astral"]);
   });
 });
+
+// qitem-18f3300d — guard's two candidate-blocking regressions vs parent
+// 7b19b73e, RED against sealed candidate c8f85802 (test-only gate).
+describe("qitem-18f3300d — NUL parity + cross-operation membership freshness (RED vs candidate)", () => {
+  let db: Database.Database;
+  let cleanup: string;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [coreSchema, eventsSchema, streamItemsSchema, queueItemsSchema]);
+    db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
+    cleanup = fs.mkdtempSync(path.join(os.tmpdir(), "slice-indexer-gate2-"));
+  });
+
+  afterEach(() => {
+    db.close();
+    fs.rmSync(cleanup, { recursive: true, force: true });
+  });
+
+  it("RED: SQLite LIKE truncates the haystack at raw U+0000 — a fallback term occurring ONLY AFTER a NUL must be EXCLUDED (parent behavior); before-NUL control stays included", () => {
+    // Production-reachable: POST /api/queue/create JSON-decodes
+    // "before\u0000slice-after" to a JS string with a raw NUL and stores it
+    // in queue_items.body unrejected. Parent per-slice SQL (body LIKE
+    // '%<term>%') returns NO row when the term sits after the NUL; the
+    // candidate's JS regex scans through NUL and wrongly includes it.
+    const flatRoot = path.join(cleanup, "flat-nul");
+    writeSlice(flatRoot, "nul-term-slice", { "README.md": "---\nstatus: active\n---\n" });
+    insertQitem(db, { qitemId: "q-after-nul", body: "prefix\u0000nul-term-slice suffix", tags: [] });
+    insertQitem(db, { qitemId: "q-before-nul", body: "nul-term-slice mentioned\u0000trailing junk", tags: [] });
+    const indexer = new SliceIndexer({ slicesRoot: flatRoot, dogfoodEvidenceRoot: null, db });
+    expect(indexer.get("nul-term-slice")!.qitemIds).toEqual(["q-before-nul"]);
+  });
+
+  it("RED: NUL in the PATTERN side — rail-item 'RAIL\\u0000TAIL' binds %RAIL\\u0000TAIL%; SQLite truncates the PATTERN to %RAIL, LOSING the trailing wildcard: body ENDING in RAIL matches, RAIL mid-body does NOT", () => {
+    // Parent SQL binds the full pattern '%RAIL\u0000TAIL%'; SQLite truncates
+    // it at the NUL to '%RAIL' — now END-ANCHORED because the trailing '%'
+    // was lost. The railItem reaches the bound pattern through the minimal
+    // frontmatter parser with no NUL rejection (production-reachable).
+    const flatRoot = path.join(cleanup, "flat-nul-pattern");
+    writeSlice(flatRoot, "plain-slice", {
+      "README.md": "---\nstatus: active\nrail-item: RAIL\u0000TAIL\n---\n",
+    });
+    insertQitem(db, { qitemId: "q-parent-match", body: "ends with RAIL", tags: [] });
+    insertQitem(db, { qitemId: "q-mid-rail", body: "RAIL in middle stuff", tags: [] });
+    const indexer = new SliceIndexer({ slicesRoot: flatRoot, dogfoodEvidenceRoot: null, db });
+    // Parent: q-parent-match via truncated '%RAIL' (ends-with); q-mid-rail
+    // excluded (the lost trailing wildcard matters).
+    expect(indexer.get("plain-slice")!.qitemIds).toEqual(["q-parent-match"]);
+  });
+
+  it("RED: cross-operation freshness (TYPED) — a typed qitem written for ALREADY-KNOWN B is visible on B's FIRST uncached get(), no invalidate/TTL", () => {
+    // Parent ran per-slice SQL on every uncached get(), so a row written
+    // after get(A) was immediately visible to the first get(B). The
+    // candidate's generation-scoped index (B already in knownSlices) serves
+    // stale empty membership until invalidate/TTL.
+    const flatRoot = path.join(cleanup, "flat-fresh-typed");
+    writeSlice(flatRoot, "fresh-a", { "README.md": "---\nstatus: active\n---\n" });
+    writeSlice(flatRoot, "fresh-b-typed", { "README.md": "---\nstatus: active\n---\n" });
+    const indexer = new SliceIndexer({ slicesRoot: flatRoot, dogfoodEvidenceRoot: null, db });
+    expect(indexer.get("fresh-a")!.qitemIds).toEqual([]); // builds the index generation
+    insertQitem(db, { qitemId: "q-b-typed", body: "no name mention", tags: ["slice:fresh-b-typed"] });
+    expect(indexer.get("fresh-b-typed")!.qitemIds).toEqual(["q-b-typed"]);
+  });
+
+  it("RED: cross-operation freshness (FALLBACK) — a body-mention qitem written for ALREADY-KNOWN C is visible on C's FIRST uncached get(), no invalidate/TTL", () => {
+    // Isolated from the typed vector (own indexer + fixture) so this
+    // assertion executes and fails independently on c8f85802 — a
+    // typed-triggered rebuild elsewhere must not mask the fallback tier.
+    const flatRoot = path.join(cleanup, "flat-fresh-fallback");
+    writeSlice(flatRoot, "fresh-a2", { "README.md": "---\nstatus: active\n---\n" });
+    writeSlice(flatRoot, "fresh-c-fallback", { "README.md": "---\nstatus: active\n---\n" });
+    const indexer = new SliceIndexer({ slicesRoot: flatRoot, dogfoodEvidenceRoot: null, db });
+    expect(indexer.get("fresh-a2")!.qitemIds).toEqual([]); // builds the index generation
+    insertQitem(db, { qitemId: "q-c-fallback", body: "fresh-c-fallback body mention", tags: [] });
+    expect(indexer.get("fresh-c-fallback")!.qitemIds).toEqual(["q-c-fallback"]);
+  });
+});
