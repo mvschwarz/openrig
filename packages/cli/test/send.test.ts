@@ -527,6 +527,38 @@ describe("Send CLI", () => {
       };
     }
 
+    /** ff13bcdf finding 2 — stub every daemon host/port alias empty so the
+     *  configured-target discriminators read the config FILE, not whatever
+     *  the surrounding managed seat happens to export. Paired with the
+     *  block's afterEach(vi.unstubAllEnvs) for restore. */
+    function scrubDaemonHostPortAliases(): void {
+      vi.stubEnv("OPENRIG_HOST", "");
+      vi.stubEnv("OPENRIG_PORT", "");
+      vi.stubEnv("RIGGED_HOST", "");
+      vi.stubEnv("RIGGED_PORT", "");
+    }
+
+    /** ff13bcdf finding 1 — deps whose lifecycle probe is COUNTABLE. The
+     *  probe throws so any accidental call is also visibly useless work.  */
+    function probeCountingDeps(clientFactory: StatusDeps["clientFactory"]): {
+      deps: StatusDeps; probeCalls: () => number;
+    } {
+      const fetchSpy = vi.fn(async (): Promise<{ ok: boolean }> => { throw new Error("probe should not be needed"); });
+      return {
+        deps: {
+          lifecycleDeps: {
+            ...mockLifecycleDeps(),
+            exists: vi.fn(() => false),
+            readFile: vi.fn(() => null),
+            fetch: fetchSpy,
+            sleep: async () => {},
+          } as LifecycleDeps,
+          clientFactory,
+        },
+        probeCalls: () => fetchSpy.mock.calls.length,
+      };
+    }
+
     function recordingRealClient(): { factory: StatusDeps["clientFactory"]; seen: () => string | null } {
       let seenUrl: string | null = null;
       return {
@@ -638,6 +670,12 @@ describe("Send CLI", () => {
     it("R6b RED: NO env + NO daemon state + probe-stopped -> POST attempted against the configured DEFAULT target (injected client succeeds)", async () => {
       vi.stubEnv("OPENRIG_URL", "");
       vi.stubEnv("RIGGED_URL", "");
+      // ff13bcdf finding 2 — ConfigStore maps these aliases to
+      // daemon.host/daemon.port with env winning over file (config-store.ts
+      // :343,349). A managed seat carries ambient OPENRIG_PORT, so without
+      // this scrub the test measures the AMBIENT ENVIRONMENT, not the
+      // contract. Restored by the block's afterEach(vi.unstubAllEnvs).
+      scrubDaemonHostPortAliases();
       // Config isolation without touching disk: a nonexistent home means no
       // daemon config, so the configured target resolves to the default.
       vi.stubEnv("OPENRIG_HOME", "/nonexistent/send-r6b-home");
@@ -655,6 +693,11 @@ describe("Send CLI", () => {
     it("R6c RED: NO env + NO state + probe-stopped + ConfigStore CUSTOM daemon host/port -> POST attempted against the CONFIGURED-FILE target exactly (no hardcoded default)", async () => {
       vi.stubEnv("OPENRIG_URL", "");
       vi.stubEnv("RIGGED_URL", "");
+      // ff13bcdf finding 2 — without this scrub an ambient OPENRIG_PORT
+      // (e.g. 7433 in a managed seat) overrides the config FILE's 7599 via
+      // ConfigStore env-over-file precedence, and this test silently asserts
+      // 127.0.0.9:7433 — the exact leak R2 observed.
+      scrubDaemonHostPortAliases();
       const home = fs.mkdtempSync(path.join(os.tmpdir(), "send-r6c-home-"));
       try {
         fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({ daemon: { host: "127.0.0.9", port: 7599 } }));
@@ -690,6 +733,65 @@ describe("Send CLI", () => {
       // preflight-derived guess.
       expect(out).toContain("Cannot connect to the OpenRig daemon at http://127.0.0.1:1:");
       expect(out).not.toContain("Daemon not running. Start it with: rig daemon start");
+    });
+
+    // ff13bcdf finding 3 — GREEN CHARACTERIZATION, not a RED. The fan-out
+    // catch (send.ts) already behaves correctly at this parent; R7 simply
+    // never asserted it. This pins the behavior so a future refactor cannot
+    // silently regress fan-out back to a preflight-derived guess. It is
+    // honestly classified: it passes on the parent by design — no artificial
+    // sabotage was introduced to manufacture a RED.
+    it("R7b GREEN-characterization: fan-out REAL down fails honestly too — target-specific connection error, exit 1, no restart line", async () => {
+      vi.stubEnv("OPENRIG_URL", "http://127.0.0.1:1");
+      vi.stubEnv("RIGGED_URL", "");
+      const rc = recordingRealClient();
+      const { logs, exitCode } = await captureLogs(async () => {
+        // NOTE: with --to the FIRST positional IS the message (a bare seat
+        // name alongside --to is rejected) — getting this wrong yields a
+        // false RED rather than exercising the fan-out catch.
+        await makeCmd(probeFailNoStateDeps(rc.factory)).parseAsync(["node", "rig", "send", "--to", "dev-impl@my-rig", "hello"]);
+      });
+      const out = logs.join("\n");
+      expect(exitCode).toBe(1);
+      expect(out).toContain("Cannot connect to the OpenRig daemon at http://127.0.0.1:1:");
+      expect(out).not.toContain("Daemon not running. Start it with: rig daemon start");
+    });
+
+    // ff13bcdf finding 1 — the load-bearing latency discriminator. An
+    // explicit URL alias ALREADY determines the target, so the advisory
+    // probe is pure cost on the incident path (818ms failing / ~2.05s
+    // timeout-shaped). A latency claim without a call-count assertion is
+    // unfalsifiable, so these assert the probe count directly.
+    // RED on this parent: getDaemonStatus takes the openrigUrl branch and
+    // burns STATUS_PROBE_MAX_ATTEMPTS (5) fetches before the resolver reads
+    // the same alias. The POST assertions pass today; ONLY the count fails.
+    it("R8 RED: explicit OPENRIG_URL (single-seat) -> exact target POSTed and ZERO lifecycle probe calls", async () => {
+      vi.stubEnv("OPENRIG_URL", `http://127.0.0.1:${port}`);
+      vi.stubEnv("RIGGED_URL", "");
+      lastSendBody = null;
+      const rc = recordingRealClient();
+      const { deps, probeCalls } = probeCountingDeps(rc.factory);
+      const { logs } = await captureLogs(async () => {
+        await makeCmd(deps).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello"]);
+      });
+      expect(logs.join("\n")).toContain("Sent to dev-impl@my-rig");
+      expect(rc.seen()).toBe(`http://127.0.0.1:${port}`);
+      expect(lastSendBody).not.toBeNull();
+      expect(probeCalls()).toBe(0);
+    });
+
+    it("R8b RED: explicit OPENRIG_URL (fan-out) -> exact target broadcast and ZERO lifecycle probe calls", async () => {
+      vi.stubEnv("OPENRIG_URL", `http://127.0.0.1:${port}`);
+      vi.stubEnv("RIGGED_URL", "");
+      lastBroadcastBody = null;
+      const rc = recordingRealClient();
+      const { deps, probeCalls } = probeCountingDeps(rc.factory);
+      await captureLogs(async () => {
+        await makeCmd(deps).parseAsync(["node", "rig", "send", "--to", "dev-impl@my-rig,dev-qa@my-rig", "hi team"]);
+      });
+      expect(lastBroadcastBody).not.toBeNull();
+      expect(rc.seen()).toBe(`http://127.0.0.1:${port}`);
+      expect(probeCalls()).toBe(0);
     });
   });
 

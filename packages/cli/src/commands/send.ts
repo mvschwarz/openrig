@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { resolveEffectiveHost } from "../host-selection.js";
 import { DaemonClient, DaemonConnectionError, terminalAuthHeaders } from "../client.js";
-import { getDaemonStatus, getDaemonUrl, type DaemonStatus } from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { loadHostRegistry, resolveHost, hostDisplayTarget, type HttpHostEntry } from "../host-registry.js";
@@ -53,10 +53,19 @@ function resolveSenderSession(): string | undefined {
  *  host:port when the probe found one, else the configured file/default
  *  target (arg-less DaemonClient resolution).
  *  The ACTUAL transport call decides success — its DaemonConnectionError
- *  is the honest failure surface. */
-function resolveLocalDaemonUrl(status: DaemonStatus): string {
+ *  is the honest failure surface.
+ *
+ *  ff13bcdf — the probe is taken LAZILY, by this resolver, because an
+ *  explicit env alias already determines the target: probing first cost
+ *  ~818ms (instantly-failing probe) to ~2.05s (timeout-shaped: 5x250ms
+ *  bounds + 4x200ms backoff) of pure latency on the incident path, then
+ *  threw the result away at the first branch. Owning the probe here also
+ *  keeps the single-seat and fan-out callers from having to sequence it
+ *  identically in two places. */
+async function resolveLocalDaemonUrl(deps: SendDeps): Promise<string> {
   const envUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
   if (envUrl) return envUrl;
+  const status = await getDaemonStatus(deps.lifecycleDeps);
   if (status.state === "running" && status.port !== undefined) return getDaemonUrl(status);
   // Configured-target resolution reused verbatim from the arg-less
   // DaemonClient (env alias > ConfigStore file > default) — never a
@@ -259,10 +268,10 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
 
       // qitem-c113bd41 — the status probe is ADVISORY (target discovery
       // only); the actual transport is authoritative. A probe-timeout or
-      // running/unhealthy verdict no longer refuses the send.
-      const status = await getDaemonStatus(deps.lifecycleDeps);
-
-      const client = deps.clientFactory(resolveLocalDaemonUrl(status));
+      // running/unhealthy verdict no longer refuses the send. ff13bcdf —
+      // the resolver takes that probe lazily, and skips it entirely when an
+      // explicit env alias already names the target.
+      const client = deps.clientFactory(await resolveLocalDaemonUrl(deps));
       const senderSession = opts.from ?? resolveSenderSession();
       // --raw (and --dangerously-interact, which implies it) send EXACT text with no messaging envelope.
       const raw = Boolean(opts.raw || opts.dangerouslyInteract);
@@ -487,10 +496,9 @@ async function runFanOutSend(params: {
   const { toList, pod, rig, message, opts, deps } = params;
 
   // qitem-c113bd41 — same advisory-probe/transport-authoritative contract
-  // as the single-seat path (see resolveLocalDaemonUrl).
-  const status = await getDaemonStatus(deps.lifecycleDeps);
-
-  const client = deps.clientFactory(resolveLocalDaemonUrl(status));
+  // as the single-seat path, including ff13bcdf's lazy probe (see
+  // resolveLocalDaemonUrl).
+  const client = deps.clientFactory(await resolveLocalDaemonUrl(deps));
   const senderSession = resolveSenderSession();
   const raw = Boolean(opts.raw || opts.dangerouslyInteract);
 
