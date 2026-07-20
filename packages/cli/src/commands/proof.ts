@@ -93,7 +93,7 @@ function isVideoFile(filePath: string): boolean {
 
 export function proofCommand(): Command {
   const cmd = new Command("proof").description(
-    "Proof artifacts — drop gate/proof evidence into a slice's proof/ dir with the machine-readable C1 header, validated at the natural moment (OPR.0.4.4.19 FR-8). The drop is the SDLC's proof leg: --evidences joins it to the slice's ## Proof contract items (what the Living Notes DELIVERED section pairs + renders); proof-lock afterwards via rig scope slice approve --scope delivery. Conventions SSOT: docs/reference/sdlc-conventions.md."
+    "Proof artifacts — drop gate/proof evidence into a slice's proof/ dir with the machine-readable C1 header, validated at the natural moment (OPR.0.4.4.19 FR-8). The drop is the SDLC's proof leg: --evidences joins it to the slice's ## Proof contract items (what the Living Notes DELIVERED section pairs + renders); proof-lock afterwards via rig scope slice approve --scope delivery. Conventions SSOT: docs/reference/sdlc-conventions.md (installed: $OPENRIG_HOME/reference/sdlc-conventions.md)."
   );
   cmd.option("--workspace <path>", "Override workspace root (else cwd walk or $OPENRIG_WORK_ROOT)");
 

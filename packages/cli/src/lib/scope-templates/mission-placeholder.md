@@ -24,7 +24,7 @@ created: {{created_date}}
 
 ## Mission/Slice SOP — how you work this mission & slice
 
-> The canonical files below are the **operating surface of the work** — you track on them, prove on them, hand off through them, and survive compaction on them. They are NOT side-artifacts to "maintain"; keeping them current *is* the work. Load the `mission-slice-sop` skill for the full operating procedure. **Conventions SSOT: `docs/reference/sdlc-conventions.md`** — the slice section names (`## Intent` / `## Mini-requirements` / `## Proof contract`), the proof-contract format, the two locks (`rig scope slice approve --scope spec|delivery`), and the C1 proof headers all live there.
+> The canonical files below are the **operating surface of the work** — you track on them, prove on them, hand off through them, and survive compaction on them. They are NOT side-artifacts to "maintain"; keeping them current *is* the work. Load the `mission-slice-sop` skill for the full operating procedure. **Conventions SSOT: `docs/reference/sdlc-conventions.md`** (installed: `$OPENRIG_HOME/reference/sdlc-conventions.md`) — the slice section names (`## Intent` / `## Mini-requirements` / `## Proof contract`), the proof-contract format, the two locks (`rig scope slice approve --scope spec|delivery`), and the C1 proof headers all live there.
 
 ### The canonical files (the operating surface)
 

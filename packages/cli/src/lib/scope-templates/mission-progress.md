@@ -1,6 +1,6 @@
 # Progress — {{missionName}}
 
-> **WHO/WHEN:** the orchestrator owns the current-state summary; every agent logs its own outcomes here after every slice-done AND every commit. One line per outcome, link down for detail. See the `mission-slice-sop` skill + the conventions SSOT (`docs/reference/sdlc-conventions.md`).
+> **WHO/WHEN:** the orchestrator owns the current-state summary; every agent logs its own outcomes here after every slice-done AND every commit. One line per outcome, link down for detail. See the `mission-slice-sop` skill + the conventions SSOT (`docs/reference/sdlc-conventions.md` in the repo, `$OPENRIG_HOME/reference/sdlc-conventions.md` on an installed package).
 
 ## Milestones
 

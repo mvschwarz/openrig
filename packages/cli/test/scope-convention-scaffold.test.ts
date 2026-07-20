@@ -21,6 +21,25 @@ import { renderMissionTemplate } from "../src/lib/scope/templates.js";
 const CONVENTION_SECTIONS = ["## Intent", "## Mini-requirements", "## Proof contract"] as const;
 const SSOT_POINTER = "docs/reference/sdlc-conventions.md";
 
+// aa922842 — the dual-context pointer contract.
+//
+// Scaffolded output lands in a USER's workspace, so it is installed-facing: the reader may
+// have no repo at all. The same doc reaches them by three different paths and only two may
+// ever be taught:
+//   repo source      docs/reference/sdlc-conventions.md          — correct for repo readers
+//   installed stable $OPENRIG_HOME/reference/sdlc-conventions.md — correct for installed agents
+//                                                                  (default ~/.openrig/…)
+//   packed internal  daemon/docs/reference/…                     — assembly input, NEVER taught
+//
+// Two failure modes this guards, both of which look fine in a repo checkout:
+//   1. teaching ONLY the repo path — an installed agent looks somewhere that does not exist;
+//   2. teaching the DEFAULT home as the only path — wrong for any operator with a custom
+//      OPENRIG_HOME (this rig runs one). Naming `$OPENRIG_HOME/...` is MANDATORY; mentioning
+//      `~/.openrig/...` alongside it as the default is honest and explicitly allowed, so this
+//      does NOT ban the default — requiring the env-aware pointer already covers the risk.
+const INSTALLED_POINTER_ENV = "$OPENRIG_HOME/reference/sdlc-conventions.md";
+const INTERNAL_PACKED_PATH = "daemon/docs/reference/";
+
 const RENDER_OPTS = {
   id: "OPR.0.4.4.99",
   slice_number: "99",
@@ -80,6 +99,31 @@ describe("OPR.0.4.4.23 convention scaffold — exhaustive over SliceTemplateKind
       }
       expect(rendered, `template kind "${kind}" is missing the SSOT pointer`).toContain(SSOT_POINTER);
       expect(rendered, `template kind "${kind}" is missing the mission-slice-sop skill pointer`).toContain("mission-slice-sop");
+    }
+  });
+
+  // aa922842 — dual-context pointer discriminator. Scaffolded output is installed-facing.
+  it("every slice template teaches BOTH contexts: the repo path AND the OPENRIG_HOME-aware installed path", () => {
+    for (const kind of SLICE_TEMPLATE_KINDS) {
+      const rendered = renderSliceTemplate(kind, RENDER_OPTS);
+      // Repo context retained — a repo reader must not be sent to an installed-only path.
+      expect(rendered, `template kind "${kind}" dropped the repo-source pointer`).toContain(SSOT_POINTER);
+      // Installed context added — without this an agent on an installed package is told to
+      // read a path that does not exist on their machine.
+      expect(
+        rendered,
+        `template kind "${kind}" never names the installed stable path; an installed agent cannot find the conventions doc from this scaffold`,
+      ).toContain(INSTALLED_POINTER_ENV);
+    }
+  });
+
+  it("no template leaks the internal packed path as if it were a user path", () => {
+    for (const kind of SLICE_TEMPLATE_KINDS) {
+      const rendered = renderSliceTemplate(kind, RENDER_OPTS);
+      expect(
+        rendered.includes(INTERNAL_PACKED_PATH),
+        `template kind "${kind}" teaches the internal assembly path ${INTERNAL_PACKED_PATH} as if it were a user path`,
+      ).toBe(false);
     }
   });
 

@@ -21,7 +21,7 @@ Load those too. This shared overlay is only the common bootstrap floor, not the 
 
 If your seat works missions or slices, load the packaged `mission-slice-sop` skill BEFORE authoring or building — it teaches the flow the Living Notes UI projects: intent → mini-requirements + proof contract (→ mockups for UI slices) → plan-lock (`rig scope slice approve --scope spec`) → build the locked set → QA visual compare → `rig proof add … --media` drops (the C1 drop verb — never hand-place proof files) → proof-lock (`--scope delivery`).
 
-The conventions themselves (section names, proof-contract format, the two locks, C1 proof headers) live in ONE shipped document: `docs/reference/sdlc-conventions.md` (in the CLI package). `rig scope slice create` scaffolds the convention sections for every template kind; `rig scope audit` is the advisory backstop — it records and advises, it never blocks your work.
+The conventions themselves (section names, proof-contract format, the two locks, C1 proof headers) live in ONE shipped document: `docs/reference/sdlc-conventions.md` in the repo, materialized at `$OPENRIG_HOME/reference/sdlc-conventions.md` (default `~/.openrig/reference/sdlc-conventions.md`) on an installed package. `rig scope slice create` scaffolds the convention sections for every template kind; `rig scope audit` is the advisory backstop — it records and advises, it never blocks your work.
 
 ## Identity
 

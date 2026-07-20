@@ -1,6 +1,6 @@
 ---
 name: mission-slice-sop
-description: Use when working a mission or slice — the full SDLC flow (intent → mini-requirements + proof contract → mockups → plan-lock → build → QA visual compare → `rig proof` drops → proof-lock) plus how to track, prove, hand off, and carry state across agents and compaction via the canonical files (PROGRESS.md / PROOF.md / MISSION_NOTES.md / MISSION_BRIEF.md / README.md / IMPLEMENTATION-PRD.md). Covers the convention sections the Living Notes UI projects, the two locks, the three role contracts, per-file WHO/WHEN/HOW rules, the four-legs lifecycle, hot-potato queue handoffs, the moment-of-truth checklist, the deterministic `rig scope audit` backstop, and the ghost-text capture gotcha.
+description: "Use when working a mission or slice: the SDLC flow (intent -> mini-requirements + proof contract -> mockups -> plan-lock -> build -> QA -> `rig proof` drops -> proof-lock), and how to track, prove, and hand off state across agents and compaction via PROGRESS.md / PROOF.md / MISSION_NOTES.md. Covers the two locks, role contracts, hot-potato queue handoff, and the `rig scope audit` backstop."
 metadata:
   openrig:
     stage: shipped
@@ -11,8 +11,10 @@ metadata:
       Living Notes UI projects — the convention sections, the proof-contract
       pairing, the two staged-approval locks, C1 proof drops, and the three
       role contracts. Conventions SSOT: docs/reference/sdlc-conventions.md
-      (shipped with the CLI package). The deterministic backstop is the
-      `rig scope audit` classifier.
+      in the repo; on an installed package the daemon materializes the same
+      document at $OPENRIG_HOME/reference/sdlc-conventions.md (default
+      ~/.openrig/reference/sdlc-conventions.md). The deterministic backstop
+      is the `rig scope audit` classifier.
     sibling_skills:
       - queue-handoff
       - seat-continuity-and-handover
@@ -21,7 +23,7 @@ metadata:
 
 # Mission/Slice SOP — how you work a mission & slice
 
-Use this skill to actually **do** mission/slice work the way OpenRig expects: author the convention sections, track on the canonical files, prove on them, hand off through them, and survive compaction on them. **Do the work described here; do not merely explain the protocol.** The deterministic backstop is `rig scope audit` — the audit classifier is the source of truth for adherence. The conventions themselves live in ONE place: **`docs/reference/sdlc-conventions.md`** (shipped with the CLI package) — this skill teaches the flow; the SSOT defines the formats.
+Use this skill to actually **do** mission/slice work the way OpenRig expects: author the convention sections, track on the canonical files, prove on them, hand off through them, and survive compaction on them. **Do the work described here; do not merely explain the protocol.** The deterministic backstop is `rig scope audit` — the audit classifier is the source of truth for adherence. The conventions themselves live in ONE document: **`docs/reference/sdlc-conventions.md`** in the repo, materialized by the daemon at **`$OPENRIG_HOME/reference/sdlc-conventions.md`** (default `~/.openrig/reference/sdlc-conventions.md`) on an installed package — this skill teaches the flow; the SSOT defines the formats.
 
 ## The SDLC flow (intent → proof)
 
@@ -110,4 +112,4 @@ When you `rig capture` a pane, **greyed / ghost autocomplete suggestions are NOT
 - **Finishing a slice?** → every proof-contract item has curated evidence via `rig proof add … --evidences --media` (C1 drops — never only hand-placed files)? PROGRESS updated? MISSION_NOTES `§1` refreshed? proof locked (`--scope delivery`)? Handed off via queue?
 - **Committing?** → PROGRESS updated?
 - **Compacting?** → filed your state in MISSION_NOTES?
-- **Starting on a mission?** → read the mission README (incl. this SOP) + MISSION_NOTES + `docs/reference/sdlc-conventions.md`?
+- **Starting on a mission?** → read the mission README (incl. this SOP) + MISSION_NOTES + the conventions SSOT (`docs/reference/sdlc-conventions.md` in the repo, `$OPENRIG_HOME/reference/sdlc-conventions.md` on an installed package)?

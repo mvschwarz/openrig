@@ -535,7 +535,7 @@ ${slice.objective}
 - [ ] Queue items include enough body or tag context to link back to \`${slice.id}\`.
 - [ ] Proof artifacts are referenced from the slice before closure (drop via \`rig proof add\`).
 
-> Conventions SSOT: \`docs/reference/sdlc-conventions.md\` — section names, proof-contract format, the two locks, C1 headers. For a small slice the mini-requirements may BE the whole PRD.
+> Conventions SSOT: \`docs/reference/sdlc-conventions.md (installed: $OPENRIG_HOME/reference/sdlc-conventions.md)\` — section names, proof-contract format, the two locks, C1 headers. For a small slice the mini-requirements may BE the whole PRD.
 `;
 }
 

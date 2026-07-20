@@ -535,7 +535,7 @@ export function checkSdlcConventionSections(opts: CheckSliceDocsInput): DoctorCh
     status: "warn",
     message: `${offenders.length} slice README${offenders.length === 1 ? " is" : "s are"} missing SDLC convention sections (Intent / Mini-requirements / Proof contract) and will not fully project in the Living Notes UI`,
     fixHint:
-      "add the missing sections per docs/reference/sdlc-conventions.md (rig scope slice create scaffolds them); run rig scope audit <mission> for per-slice findings — advisory only, nothing is blocked",
+      "add the missing sections per docs/reference/sdlc-conventions.md (installed: $OPENRIG_HOME/reference/sdlc-conventions.md) (rig scope slice create scaffolds them); run rig scope audit <mission> for per-slice findings — advisory only, nothing is blocked",
     evidence: { missionsRoot, slicesChecked, offenders },
   };
 }

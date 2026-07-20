@@ -565,7 +565,7 @@ Composes with slice 33's `progress` + scaffolding to make `rig scope` the **dete
 
 ### The SDLC control plane — convention sections, the two locks, `rig proof` (v0.4.4)
 
-The Living Notes UI is a plain projection of well-formed on-disk markdown. The conventions live in ONE shipped document — **`docs/reference/sdlc-conventions.md`** (in the CLI package) — and the operating procedure is the **`mission-slice-sop`** skill. The command surface:
+The Living Notes UI is a plain projection of well-formed on-disk markdown. The conventions live in ONE shipped document — **`docs/reference/sdlc-conventions.md`** in the repo, materialized by the daemon at **`$OPENRIG_HOME/reference/sdlc-conventions.md`** (default `~/.openrig/reference/sdlc-conventions.md`) on an installed package — and the operating procedure is the **`mission-slice-sop`** skill. The command surface:
 
 ```bash
 rig scope slice create <mission> <slug> [--template <kind>]   # scaffolds ## Intent / ## Mini-requirements / ## Proof contract

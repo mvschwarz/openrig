@@ -259,7 +259,7 @@ function buildSliceShowCommand(): Command {
 
 function buildSliceCreateCommand(): Command {
   return new Command("create")
-    .description("Create a new slice in a mission. Scaffolds the SDLC convention sections (## Intent / ## Mini-requirements / ## Proof contract) + proof/ + PROOF.md + IMPLEMENTATION-PRD.md for EVERY template kind — the shapes the Living Notes UI projects. Conventions SSOT: docs/reference/sdlc-conventions.md.")
+    .description("Create a new slice in a mission. Scaffolds the SDLC convention sections (## Intent / ## Mini-requirements / ## Proof contract) + proof/ + PROOF.md + IMPLEMENTATION-PRD.md for EVERY template kind — the shapes the Living Notes UI projects. Conventions SSOT: docs/reference/sdlc-conventions.md (installed: $OPENRIG_HOME/reference/sdlc-conventions.md).")
     .argument("<mission>", "Mission name")
     .argument("<slug>", "Short slug (becomes the folder name's suffix)")
     .option("--template <kind>", `Template: ${SLICE_TEMPLATE_KINDS.join(" | ")}`, "placeholder")
@@ -1596,7 +1596,7 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
   return new Command("approve")
     .description(
       tier === "slice"
-        ? "Approve a slice: writes the frontmatter stamp + an append-only audit row (daemon-side, one operation). --scope spec = the PLAN-LOCK (PRD-matches-intent; this artifact set gets built); delivery (default) = the PROOF-LOCK (terminal sign-off). Approval is freeze/sign-off, never proven-green. Conventions SSOT: docs/reference/sdlc-conventions.md."
+        ? "Approve a slice: writes the frontmatter stamp + an append-only audit row (daemon-side, one operation). --scope spec = the PLAN-LOCK (PRD-matches-intent; this artifact set gets built); delivery (default) = the PROOF-LOCK (terminal sign-off). Approval is freeze/sign-off, never proven-green. Conventions SSOT: docs/reference/sdlc-conventions.md (installed: $OPENRIG_HOME/reference/sdlc-conventions.md)."
         : "Approve a mission: same staged/delegated semantics as slice approve, at mission tier."
     )
     .argument(tier === "slice" ? "<slice-path>" : "<mission>", tier === "slice" ? "Slice path (absolute, relative, or NN-slug)" : "Mission name")

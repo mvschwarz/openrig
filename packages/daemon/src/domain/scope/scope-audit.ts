@@ -403,7 +403,7 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
         severity: "low",
         path: childPath(input.path, "README.md"),
         message: "Slice README has no `## Intent` section, so the Living Notes UI cannot project its INTENT section.",
-        remediation: "Add `## Intent` carrying the recorded intent verbatim (conventions SSOT: docs/reference/sdlc-conventions.md; `rig scope slice create` scaffolds it).",
+        remediation: "Add `## Intent` carrying the recorded intent verbatim (conventions SSOT: docs/reference/sdlc-conventions.md (installed: $OPENRIG_HOME/reference/sdlc-conventions.md); `rig scope slice create` scaffolds it).",
       });
     }
 
@@ -456,7 +456,7 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
           message: miniBody === null
             ? "No `## Mini-requirements` section — the Living Notes PLAN section has no concise requirements tier to project."
             : "`## Mini-requirements` carries no numbered items (`1. …`) — the one-glance requirement tier is where approval starts.",
-          remediation: "Add `## Mini-requirements` with a numbered list of observable outcomes (conventions SSOT: docs/reference/sdlc-conventions.md; for a small slice this may BE the whole PRD).",
+          remediation: "Add `## Mini-requirements` with a numbered list of observable outcomes (conventions SSOT: docs/reference/sdlc-conventions.md (installed: $OPENRIG_HOME/reference/sdlc-conventions.md); for a small slice this may BE the whole PRD).",
         });
       }
     }
@@ -482,7 +482,7 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
           message: contractBody === null
             ? "No `## Proof contract` section — the DELIVERED pairing has no promised-deliverables source to join proof against."
             : "`## Proof contract` carries no checkbox deliverables (`- [ ] …`) — the DELIVERED pairing joins proof against those items.",
-          remediation: "Add `## Proof contract` with one checkbox line per promised deliverable, written as an observable outcome (conventions SSOT: docs/reference/sdlc-conventions.md).",
+          remediation: "Add `## Proof contract` with one checkbox line per promised deliverable, written as an observable outcome (conventions SSOT: docs/reference/sdlc-conventions.md (installed: $OPENRIG_HOME/reference/sdlc-conventions.md)).",
         });
       }
 
@@ -503,7 +503,7 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
             severity: "info",
             path: childPath(input.path, "README.md"),
             message: "Slice declares an Intent visual (UI slice) but no mockup reference is present — a UI slice with no mockup in its locked set is an incomplete plan.",
-            remediation: "Attach the planned mockup: an image ref in `## Intent visual` or a plannedRef on the proof-contract deliverable (conventions SSOT: docs/reference/sdlc-conventions.md §3).",
+            remediation: "Attach the planned mockup: an image ref in `## Intent visual` or a plannedRef on the proof-contract deliverable (conventions SSOT: docs/reference/sdlc-conventions.md §3 (installed: $OPENRIG_HOME/reference/sdlc-conventions.md §3)).",
           });
         }
       }

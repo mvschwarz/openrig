@@ -12,7 +12,7 @@ created: {{created_date}}
      proof. Everything between is ELASTIC. For a small slice the
      mini-requirements below may BE the whole PRD; add depth only where the
      work demands it. The scaffold must not mint ceremony.
-     Conventions SSOT: docs/reference/sdlc-conventions.md -->
+     Conventions SSOT: docs/reference/sdlc-conventions.md (installed: $OPENRIG_HOME/reference/sdlc-conventions.md) -->
 
 # Slice {{slice_number}} — {{title}}
 
