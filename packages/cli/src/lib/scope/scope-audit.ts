@@ -1,6 +1,6 @@
 import * as YAML from "yaml";
 import { isMissionDotId, isSliceDotId } from "./dot-id.js";
-import { isScaffoldPlaceholderText, hasAuthoredNumberedItem } from "./scaffold-placeholder.js";
+import { isScaffoldPlaceholderText, hasAuthoredNumberedItem, isPristineScaffoldSection } from "./scaffold-placeholder.js";
 
 export type RailStatus = "present" | "missing" | "malformed" | "readme-only";
 export type FindingSeverity = "high" | "medium" | "low" | "info";
@@ -407,19 +407,41 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
       });
     }
 
-    const contractSource = typeof input.implementationPrdContent === "string"
-      ? { content: input.implementationPrdContent, path: childPath(input.path, "IMPLEMENTATION-PRD.md") }
-      : typeof input.readmeContent === "string"
-        ? { content: input.readmeContent, path: childPath(input.path, "README.md") }
-        : null;
-    if (contractSource) {
+    // PM dogfood #1 (qitem-20260720015700-630eef64) — per-SECTION source
+    // selection, decided independently for `## Mini-requirements` and
+    // `## Proof contract`: an authored PRD section is canonical, but a
+    // PRESENT-and-PRISTINE scaffold-only PRD section yields to an authored
+    // (non-pristine) README section. Missing / prose-malformed / mixed-
+    // authored PRD sections stay PRD-canonical and visible. Status-blind by
+    // construction (lifecycle status is never read here). PRD absent keeps
+    // the file-level README fallback byte-identically.
+    const prdContentStr = typeof input.implementationPrdContent === "string" ? input.implementationPrdContent : null;
+    const readmeContentStr = typeof input.readmeContent === "string" ? input.readmeContent : null;
+    const pickSectionSource = (heading: string): { body: string | null; path: string } | null => {
+      if (prdContentStr !== null) {
+        const prdBody = h2Body(prdContentStr, heading);
+        if (isPristineScaffoldSection(prdBody) && readmeContentStr !== null) {
+          const readmeBody = h2Body(readmeContentStr, heading);
+          if (readmeBody !== null && !isPristineScaffoldSection(readmeBody)) {
+            return { body: readmeBody, path: childPath(input.path, "README.md") };
+          }
+        }
+        return { body: prdBody, path: childPath(input.path, "IMPLEMENTATION-PRD.md") };
+      }
+      if (readmeContentStr !== null) {
+        return { body: h2Body(readmeContentStr, heading), path: childPath(input.path, "README.md") };
+      }
+      return null;
+    };
+    const miniSource = pickSectionSource("Mini-requirements");
+    const contractSource = pickSectionSource("Proof contract");
+    if (miniSource) {
       // OPR.0.4.4.23 rev1-r2 B1 (PRD L34 guard F-3): well-formed
       // `## Mini-requirements` — the PLAN leg of the Living Notes
-      // projection. Same source-selection policy as the proof contract
-      // (PRD preferred, README fallback). Well-formed = the heading plus
-      // at least one numbered list item; a heading over prose-only is
-      // malformed (no usable requirements projection).
-      const miniBody = h2Body(contractSource.content, "Mini-requirements");
+      // projection, checked on this section's SELECTED source. Well-formed =
+      // the heading plus at least one numbered list item; a heading over
+      // prose-only is malformed (no usable requirements projection).
+      const miniBody = miniSource.body;
       // release-0.4.7 micro-bundle A: an AUTHORED numbered item — the twin
       // module's ONE authored-numbered-item grammar, shared with review
       // compose (heals the dot/paren grammar split AND the placeholder
@@ -430,20 +452,23 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
         findings.push({
           kind: "mini_requirements_missing_or_malformed",
           severity: "low",
-          path: contractSource.path,
+          path: miniSource.path,
           message: miniBody === null
             ? "No `## Mini-requirements` section — the Living Notes PLAN section has no concise requirements tier to project."
             : "`## Mini-requirements` carries no numbered items (`1. …`) — the one-glance requirement tier is where approval starts.",
           remediation: "Add `## Mini-requirements` with a numbered list of observable outcomes (conventions SSOT: docs/reference/sdlc-conventions.md; for a small slice this may BE the whole PRD).",
         });
       }
+    }
 
-      const contractBody = h2Body(contractSource.content, "Proof contract");
+    if (contractSource) {
+      const contractBody = contractSource.body;
       // release-0.4.7 intent-stage: an AUTHORED checkbox item — a scaffold
       // placeholder row is not a contract (shared grammar:
       // ./scaffold-placeholder.js — the same helper review compose and the
       // slice-detail projector consume; the R3 pin). A text-less checkbox row
-      // still counts, exactly as before.
+      // still counts, exactly as before. Checked on this section's SELECTED
+      // source (independent of the mini-reqs decision).
       const hasAuthoredCheckboxItem =
         contractBody !== null &&
         [...contractBody.matchAll(/^\s*-\s*\[[ xX]\]\s*(.*)$/gm)].some(

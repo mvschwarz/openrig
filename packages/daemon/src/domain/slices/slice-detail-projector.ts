@@ -38,7 +38,7 @@ import {
 // (arch A1 one-home) — never a second derivation. Cycle-free: compose is
 // pure and proof-io imports only compose + node; nothing in review imports
 // slices.
-import { extractProofContract, composeDelivered } from "../review/compose.js";
+import { extractProofContractSelected, composeDelivered } from "../review/compose.js";
 import { readProofArtifacts } from "../review/proof-io.js";
 import {
   projectSpecGraph,
@@ -472,13 +472,17 @@ export class SliceDetailProjector {
     const candidateFiles = ["README.md", "IMPLEMENTATION-PRD.md", "PROGRESS.md", "IMPLEMENTATION.md"];
     const sliceDir = slice.slicePath;
     // VM-006: the PRD bytes are captured during this existing scan — zero new
-    // IO for the proof-contract extraction below.
+    // IO for the proof-contract extraction below. PM dogfood #1: the README
+    // bytes are captured the same way (this scan already reads them) so the
+    // contract extraction can apply the per-section selection.
     let prdContent: string | null = null;
+    let readmeContent: string | null = null;
     for (const fname of candidateFiles) {
       const full = path.join(sliceDir, fname);
       if (!fs.existsSync(full)) continue;
       const content = fs.readFileSync(full, "utf8");
       if (fname === "IMPLEMENTATION-PRD.md") prdContent = content;
+      if (fname === "README.md") readmeContent = content;
       const lines = content.split("\n");
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i]!;
@@ -548,7 +552,11 @@ export class SliceDetailProjector {
     // fail-closed (stay ACTIVE) beats a coin-flip lift (arch AR-6).
     //
     // NEVER sets done=false — the author's record is never reversed (FR-3).
-    const promised = extractProofContract(prdContent);
+    // PM dogfood #1 — the SAME per-section selection Review compose uses
+    // (one selection rule, one grammar home): an authored README contract
+    // wins over a pristine scaffold-only PRD contract, so the VM-006 lift
+    // joins against the contract the author actually wrote.
+    const promised = extractProofContractSelected(prdContent, readmeContent).items;
     if (promised.length > 0) {
       const promisedByKey = new Map<string, number[]>();
       promised.forEach((p, i) => {

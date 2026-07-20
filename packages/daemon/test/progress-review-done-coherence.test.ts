@@ -359,19 +359,24 @@ describe("VM-006 — Progress↔Review done coherence (union in buildAcceptance)
     }
   });
 
-  it("V8d: placeholder-only contract extracts to [] ⇒ no-op, no doneVia", () => {
+  it("V8d: pristine PRD contract + authored README contract ⇒ README selection; the six rows lift via qa-verdict (PM dogfood #1 expected-change)", () => {
     // Replace the PRD's six authored contract rows with one scaffold
-    // placeholder row (the bracket-wrapped template grammar).
+    // placeholder row (the bracket-wrapped template grammar). The README's
+    // AUTHORED `## Proof contract` (the same six rows) now wins the
+    // per-section selection, so the existing QA evidence lifts all six —
+    // the old placeholder-⇒-no-op expectation is false by design on this
+    // fixture shape; the no-authored-contract no-op pins live in V8a (no
+    // PRD) and V8b (missing section), both unchanged.
     editFile("IMPLEMENTATION-PRD.md", (c) => {
       const head = c.slice(0, c.indexOf("## Proof contract"));
       const tail = c.slice(c.indexOf("## Surface"));
       return head + "## Proof contract\n\n- [ ] [Observable outcome the operator can verify]\n\n" + tail;
     });
     const a = acceptanceOf();
-    // The README still carries the six real rows as plain unticked items.
     expect(a.totalItems).toBe(13);
-    expect(a.doneItems).toBe(7);
-    expect(a.items.every((i) => i.doneVia === undefined)).toBe(true);
+    expect(a.doneItems).toBe(13);
+    expect(a.items.filter((i) => i.doneVia === "qa-verdict")).toHaveLength(6);
+    expect(a.items.filter((i) => i.doneVia === "checkbox")).toHaveLength(7);
   });
 
   // --- B1 COLLISION REGRESSIONS (RED at frozen predecessor 0ec6411c) -------

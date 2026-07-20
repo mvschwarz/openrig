@@ -577,3 +577,154 @@ describe("OPR.0.4.4.23 rev1-r2 fixback — mini-requirements + mockup-ref tighte
     expect(result.findings.some((f) => f.kind === "ui_slice_missing_mockup")).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// PM dogfood #1 (qitem-20260720015700-630eef64) — per-section source
+// selection: an authored README convention section must not be shadowed by
+// the corresponding PRISTINE scaffold-only PRD section. The decision is made
+// INDEPENDENTLY for ## Mini-requirements and ## Proof contract; authored /
+// missing / prose-only / mixed-authored PRD sections stay PRD-canonical and
+// visible (guard boundary). Selection never reads lifecycle status.
+// ---------------------------------------------------------------------------
+
+describe("PM dogfood #1 — authored README sections vs pristine scaffold PRD", () => {
+  const AUTHORED_README = [
+    "# Slice 01 — Placeholder conventions",
+    "",
+    "## Intent",
+    "",
+    "make the review tab honest",
+    "",
+    "## Mini-requirements",
+    "",
+    "1. first authored requirement",
+    "2. second authored requirement",
+    "",
+    "## Proof contract",
+    "",
+    "- [ ] authored deliverable one — captured",
+    "- [ ] authored deliverable two — captured",
+  ].join("\n");
+
+  // Template-grammar pristine rows (structural marker + fully bracket-wrapped
+  // text), mirroring scope-templates/implementation-prd.md.
+  const PRISTINE_PRD = [
+    "# Slice 01 — PRD",
+    "",
+    "## Intent",
+    "",
+    "[The recorded intent, verbatim — kept in sync with the slice README.]",
+    "",
+    "## Mini-requirements",
+    "",
+    "1. [The concise one-glance requirement tier — this is where approval starts.]",
+    "",
+    "## Proof contract",
+    "",
+    "- [ ] [One promised deliverable, written as an observable outcome — captured.]",
+    "",
+    "## Notes (elastic)",
+    "",
+    "[Design, seams, risks, sequencing — only as much as the slice needs.]",
+  ].join("\n");
+
+  function sliceInput(overrides: Partial<ScopeAuditInput>): ScopeAuditInput {
+    return {
+      id: null,
+      path: "/w/missions/dogfood/slices/01-placeholder-conventions",
+      readmeFrontmatterRaw: "id: OPR.99.0.2.1\nstatus: placeholder",
+      progressFileExists: true,
+      readmeOnlyMarker: false,
+      isActiveRelease: true,
+      level: "slice",
+      ...overrides,
+    };
+  }
+
+  const conventionFindings = (input: ScopeAuditInput) =>
+    classifyScopeItem(input).findings.filter(
+      (f) => f.kind === "mini_requirements_missing_or_malformed" || f.kind === "proof_contract_missing_or_malformed",
+    );
+
+  it("authored README + pristine PRD: NEITHER convention finding fires (the dogfood fixture)", () => {
+    const findings = conventionFindings(sliceInput({
+      readmeContent: AUTHORED_README,
+      implementationPrdContent: PRISTINE_PRD,
+    }));
+    expect(findings).toEqual([]);
+  });
+
+  it("mixed per-section: PRD contract AUTHORED + PRD mini pristine + README mini authored -> neither finding (independent decisions)", () => {
+    const prd = PRISTINE_PRD.replace(
+      "- [ ] [One promised deliverable, written as an observable outcome — captured.]",
+      "- [ ] prd-authored deliverable — captured",
+    );
+    const findings = conventionFindings(sliceInput({
+      readmeContent: AUTHORED_README,
+      implementationPrdContent: prd,
+    }));
+    expect(findings).toEqual([]);
+  });
+
+  it("PIN: PRD mini section authored-but-malformed (prose only) stays PRD-canonical — finding fires with the PRD path, never hidden by the README", () => {
+    const prd = PRISTINE_PRD.replace(
+      "1. [The concise one-glance requirement tier — this is where approval starts.]",
+      "authored prose, deliberately no numbered items",
+    );
+    const findings = conventionFindings(sliceInput({
+      readmeContent: AUTHORED_README,
+      implementationPrdContent: prd,
+    }));
+    const mini = findings.find((f) => f.kind === "mini_requirements_missing_or_malformed");
+    expect(mini).toBeDefined();
+    expect(mini!.path.endsWith("IMPLEMENTATION-PRD.md")).toBe(true);
+  });
+
+  it("PIN: PRD MISSING the mini section stays PRD-canonical — finding fires with the PRD path (missing is not pristine)", () => {
+    const prd = PRISTINE_PRD
+      .replace("## Mini-requirements", "## Somewhere else")
+      .replace("1. [The concise one-glance requirement tier — this is where approval starts.]", "nothing here");
+    const findings = conventionFindings(sliceInput({
+      readmeContent: AUTHORED_README,
+      implementationPrdContent: prd,
+    }));
+    const mini = findings.find((f) => f.kind === "mini_requirements_missing_or_malformed");
+    expect(mini).toBeDefined();
+    expect(mini!.path.endsWith("IMPLEMENTATION-PRD.md")).toBe(true);
+  });
+
+  it("PIN: README sections ALSO pristine (nothing authored anywhere) -> findings fire with the PRD path", () => {
+    const pristineReadme = [
+      "# Slice",
+      "## Intent",
+      "[The recorded intent, verbatim.]",
+      "## Mini-requirements",
+      "1. [The concise one-glance requirement tier.]",
+      "## Proof contract",
+      "- [ ] [One promised deliverable.]",
+    ].join("\n");
+    const findings = conventionFindings(sliceInput({
+      readmeContent: pristineReadme,
+      implementationPrdContent: PRISTINE_PRD,
+    }));
+    expect(findings.map((f) => f.kind).sort()).toEqual([
+      "mini_requirements_missing_or_malformed",
+      "proof_contract_missing_or_malformed",
+    ]);
+    expect(findings.every((f) => f.path.endsWith("IMPLEMENTATION-PRD.md"))).toBe(true);
+  });
+
+  it("STATUS-INVARIANCE: placeholder vs planned frontmatter yields byte-identical findings (selection never reads status)", () => {
+    const asPlaceholder = classifyScopeItem(sliceInput({
+      readmeContent: AUTHORED_README,
+      implementationPrdContent: PRISTINE_PRD,
+      readmeFrontmatterRaw: "id: OPR.99.0.2.1\nstatus: placeholder",
+    }));
+    const asPlanned = classifyScopeItem(sliceInput({
+      readmeContent: AUTHORED_README,
+      implementationPrdContent: PRISTINE_PRD,
+      readmeFrontmatterRaw: "id: OPR.99.0.2.1\nstatus: planned",
+    }));
+    expect(asPlanned.findings).toEqual(asPlaceholder.findings);
+  });
+});

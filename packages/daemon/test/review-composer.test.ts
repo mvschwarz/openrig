@@ -724,3 +724,72 @@ describe("T-C — prose/bullet-only mini-reqs suppression pin (reviewer-L1 rulin
     expect(r.plan.concise.text).toContain("1. One real outcome.");
   });
 });
+
+// ---------------------------------------------------------------------------
+// PM dogfood #1 (qitem-20260720015700-630eef64) — Review projection: authored
+// README convention sections must project on PLAN/DELIVERED when the
+// corresponding PRD section is PRISTINE scaffold-only. Authored PRD stays
+// canonical. Selection is per-section and never reads lifecycle status.
+// ---------------------------------------------------------------------------
+
+describe("PM dogfood #1 — compose projects authored README sections over pristine PRD sections", () => {
+  const AUTHORED_README = [
+    "---",
+    "id: OPR.99.0.2.1",
+    "status: placeholder",
+    "---",
+    "",
+    "# Slice 01 — Placeholder conventions",
+    "",
+    "## Intent",
+    "",
+    "make the review tab honest",
+    "",
+    "## Mini-requirements",
+    "",
+    "1. first authored requirement",
+    "2. second authored requirement",
+    "",
+    "## Proof contract",
+    "",
+    "- [ ] authored deliverable one — captured",
+    "- [ ] authored deliverable two — captured",
+  ].join("\n");
+
+  it("pristine PRD + authored README: PLAN renders the authored mini-reqs; DELIVERED joins the authored contract; ssotPath names the README; phase derives spec", () => {
+    // pristine.prd = the real renderer output (file-scoped intent-stage fixture).
+    const r = composeSliceReview(baseInputs({ readme: AUTHORED_README, prd: pristine.prd }));
+    expect(r.plan.concise.text).not.toBeNull(); // RED pre-fix: no projection
+    expect(r.plan.concise.text!).toContain("first authored requirement");
+    expect(r.delivered.items.map((i) => i.promised.text)).toEqual([
+      "authored deliverable one — captured",
+      "authored deliverable two — captured",
+    ]);
+    expect(r.plan.ssotPath?.endsWith("README.md")).toBe(true);
+    // The single-parse pin: the same selected parse drives render AND signal —
+    // authored structured requirements project, so the derived phase is spec
+    // (a projection; no stored status is read or written by the selection).
+    expect(r.phase).toBe("spec");
+  });
+
+  it("PIN: authored PRD stays canonical even when the README sections are ALSO authored (differently)", () => {
+    const r = composeSliceReview(baseInputs({ readme: AUTHORED_README })); // baseInputs' default prd is authored
+    expect(r.plan.concise.text).not.toBeNull();
+    expect(r.plan.concise.text!).toContain("One surface.");
+    expect(r.plan.concise.text!).not.toContain("first authored requirement");
+    expect(r.delivered.items.map((i) => i.promised.text)).toEqual([
+      "phone journey video",
+      "range probe 206",
+    ]);
+    expect(r.plan.ssotPath?.endsWith("IMPLEMENTATION-PRD.md")).toBe(true);
+  });
+
+  it("STATUS-INVARIANCE: README frontmatter status placeholder vs planned projects identically", () => {
+    const asPlanned = AUTHORED_README.replace("status: placeholder", "status: planned");
+    const a = composeSliceReview(baseInputs({ readme: AUTHORED_README, prd: pristine.prd }));
+    const b = composeSliceReview(baseInputs({ readme: asPlanned, prd: pristine.prd }));
+    expect(b.plan).toEqual(a.plan);
+    expect(b.delivered).toEqual(a.delivered);
+    expect(b.phase).toEqual(a.phase);
+  });
+});

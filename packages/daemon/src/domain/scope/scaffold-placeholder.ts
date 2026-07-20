@@ -62,6 +62,29 @@ export function isPlaceholderOnlyBlock(block: string | null): boolean {
   return lines.every((l) => isScaffoldPlaceholderText(l));
 }
 
+/** PM dogfood #1 (qitem-20260720015700-630eef64) — true when `body` is a
+ *  PRESENT section whose EVERY non-blank line is scaffold-placeholder
+ *  content: either a bare placeholder line, or a structural list row
+ *  (numbered `1.`/`1)`, checkbox `- [ ]`, or bullet `-`/`*`) whose text is a
+ *  placeholder — i.e. exactly what the shipped templates scaffold, nothing
+ *  authored. This is the SECTION-level pristine test behind per-section
+ *  source selection: only a pristine PRD section may yield to an authored
+ *  README section; authored/prose/mixed content is NOT pristine and stays
+ *  canonical wherever it lives. `null`/blank-only → false (absence is its
+ *  own state; a missing section never triggers fallback). */
+export function isPristineScaffoldSection(body: string | null): boolean {
+  if (body === null) return false;
+  const lines = body
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  if (lines.length === 0) return false;
+  return lines.every((l) => {
+    const stripped = l.replace(/^(?:\d+[.)]\s+|-\s*\[[ xX]\]\s*|[-*]\s+)/, "");
+    return isScaffoldPlaceholderText(stripped);
+  });
+}
+
 /** The generic acceptance triple scaffolded by
  *  `packages/cli/src/lib/scope-templates/slice-progress.md` — exact trimmed
  *  literals, sync-tested against the shipped template so constant/template

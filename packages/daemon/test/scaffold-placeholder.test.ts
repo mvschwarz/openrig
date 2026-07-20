@@ -187,3 +187,57 @@ describe("T-A grammar — hasAuthoredNumberedItem (the ONE authored-numbered-ite
     expect(hasAuthoredNumberedItem("Context prose first.\n\n1. One real observable outcome.")).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// PM dogfood #1 (qitem-20260720015700-630eef64) — isPristineScaffoldSection:
+// the SECTION-level pristine test (every non-blank line is scaffold
+// placeholder content, allowing the template's structural list markers).
+// Dynamic import so this file still collects while the predicate is unbuilt
+// (the RED phase reads as assertion failures, not a module-load crash).
+// ---------------------------------------------------------------------------
+
+describe("isPristineScaffoldSection — section-level pristine grammar (PM dogfood #1)", () => {
+  type Fn = (body: string | null) => boolean;
+  const load = async (): Promise<Fn> => {
+    const mod = (await import("../src/domain/scope/scaffold-placeholder.js")) as Record<string, unknown>;
+    expect(typeof mod.isPristineScaffoldSection, "isPristineScaffoldSection must be exported from the twin module").toBe("function");
+    return mod.isPristineScaffoldSection as Fn;
+  };
+
+  it("template mini-reqs row (numbered marker + bracket text) is pristine", async () => {
+    const fn = await load();
+    expect(fn("1. [The concise one-glance requirement tier — this is where approval starts.]")).toBe(true);
+  });
+
+  it("template proof-contract row (checkbox marker + bracket text) is pristine", async () => {
+    const fn = await load();
+    expect(fn("- [ ] [One promised deliverable, written as an observable outcome — captured.]")).toBe(true);
+  });
+
+  it("multi-row all-placeholder section (bare + bulleted + numbered) is pristine", async () => {
+    const fn = await load();
+    expect(fn("[intro placeholder]\n\n1. [one]\n- [ ] [two]\n- [three]")).toBe(true);
+  });
+
+  it("an authored numbered row makes the section NOT pristine", async () => {
+    const fn = await load();
+    expect(fn("1. first authored requirement")).toBe(false);
+  });
+
+  it("MIXED placeholder + authored rows is NOT pristine (mixed-authored stays canonical)", async () => {
+    const fn = await load();
+    expect(fn("1. [placeholder row]\n2. real authored outcome")).toBe(false);
+  });
+
+  it("authored prose is NOT pristine (malformed authored stays visible)", async () => {
+    const fn = await load();
+    expect(fn("authored prose, deliberately no numbered items")).toBe(false);
+  });
+
+  it("null and blank-only are NOT pristine (absence is its own state — never triggers fallback)", async () => {
+    const fn = await load();
+    expect(fn(null)).toBe(false);
+    expect(fn("")).toBe(false);
+    expect(fn("   \n \n")).toBe(false);
+  });
+});

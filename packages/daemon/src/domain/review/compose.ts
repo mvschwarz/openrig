@@ -53,6 +53,7 @@ import {
   isScaffoldPlaceholderText,
   hasAuthoredNumberedItem,
   isPlaceholderOnlyBlock,
+  isPristineScaffoldSection,
 } from "../scope/scaffold-placeholder.js";
 
 // --- Fixed, visible v1 thresholds (markdown-steered tuning is a named fast-follow) ---
@@ -404,14 +405,44 @@ export function extractProofContract(prd: string | null): PromisedItem[] {
 }
 
 // ---------------------------------------------------------------------------
+// PM dogfood #1 (qitem-20260720015700-630eef64) — per-SECTION source
+// selection, shared by this composer and the slice-detail projector: an
+// authored PRD section is canonical, but a PRESENT-and-PRISTINE scaffold-only
+// PRD section yields to an authored (non-pristine) README section. Missing /
+// prose-malformed / mixed-authored PRD sections stay PRD-canonical
+// (isPristineScaffoldSection(null) is false — a missing section never
+// triggers fallback). Status-blind: no lifecycle status is read. The
+// existing extractors are unchanged; these wrap them.
+// ---------------------------------------------------------------------------
+
+export function extractMiniReqsSelected(prd: string | null, readme: string | null): { body: string | null; fromReadme: boolean } {
+  const prdBody = extractMiniReqs(prd);
+  if (isPristineScaffoldSection(prdBody)) {
+    const readmeBody = extractMiniReqs(readme);
+    if (readmeBody !== null && !isPristineScaffoldSection(readmeBody)) return { body: readmeBody, fromReadme: true };
+  }
+  return { body: prdBody, fromReadme: false };
+}
+
+export function extractProofContractSelected(prd: string | null, readme: string | null): { items: PromisedItem[]; fromReadme: boolean } {
+  const prdBody = extractSection(prd, "Proof contract");
+  if (isPristineScaffoldSection(prdBody)) {
+    const readmeBody = extractSection(readme, "Proof contract");
+    if (readmeBody !== null && !isPristineScaffoldSection(readmeBody)) return { items: extractProofContract(readme), fromReadme: true };
+  }
+  return { items: extractProofContract(prd), fromReadme: false };
+}
+
+// ---------------------------------------------------------------------------
 // FR-3 — derived phase (five-way, top-down precedence — KEEP)
 // ---------------------------------------------------------------------------
 
 export interface PhaseSignals {
-  /** The PRD carries authored STRUCTURE (arch AR-2): a post-placeholder-filter
-   *  promised item, or an authored (non-placeholder) mini-reqs numbered item.
-   *  Replaces the old file-presence `prdPresent` — a pristine scaffold PRD is
-   *  not a spec. */
+  /** The spec carries authored STRUCTURE (arch AR-2): a post-placeholder-filter
+   *  promised item, or an authored (non-placeholder) mini-reqs numbered item —
+   *  read from the per-section SELECTED source (PM dogfood #1: an authored
+   *  README section riding the selection counts; a pristine scaffold PRD
+   *  still is not a spec). Replaces the old file-presence `prdPresent`. */
   prdAuthored: boolean;
   /** REAL dropped proof artifacts only (`artifacts.length > 0`). PROOF.md is
    *  scaffolded at slice birth, so its file-presence is NOT construction
@@ -1053,7 +1084,12 @@ export function composeSliceReview(inputs: SliceComposeInputs): ComposedSliceRev
   const intentTextRaw = extractSection(inputs.readme, "Intent");
   const intentText = intentTextRaw !== null && !isPlaceholderOnlyBlock(intentTextRaw) ? intentTextRaw : null;
   const intentMedia = sectionMedia(intentText, escaping);
-  const miniReqs = extractMiniReqs(inputs.prd);
+  // PM dogfood #1 — the per-section SELECTED sources (authored PRD canonical;
+  // a pristine scaffold-only PRD section yields to an authored README
+  // section). ONE selected parse per section drives BOTH the render and the
+  // phase signal below (the single-parse pin, AR-2/S5, preserved).
+  const miniSel = extractMiniReqsSelected(inputs.prd, inputs.readme);
+  const miniReqs = miniSel.body;
   const planMedia = dedupMedia([
     ...sectionMedia(miniReqs, escaping),
     ...inputs.lockedArtifacts
@@ -1061,7 +1097,7 @@ export function composeSliceReview(inputs: SliceComposeInputs): ComposedSliceRev
       .filter((m): m is ReviewMedia => m !== null),
   ]);
 
-  const promised = extractProofContract(inputs.prd);
+  const promised = extractProofContractSelected(inputs.prd, inputs.readme).items;
   const delivered = composeDelivered(promised, inputs.artifacts);
   delivered.escapingRefs.forEach((r) => escaping.add(r));
 
@@ -1070,9 +1106,12 @@ export function composeSliceReview(inputs: SliceComposeInputs): ComposedSliceRev
   const evidencePresent = inputs.artifacts.length > 0 || claimedPass;
 
   // release-0.4.7 intent-stage: `promised` is the POST-placeholder-filter
-  // contract (extracted ONCE above, consumed by both DELIVERED and this
-  // signal); `miniReqsIsAuthored` derives from the ONE extractMiniReqs parse
-  // and also drives the PLAN concise render below (the single-parse pin).
+  // contract (extracted ONCE above from the SELECTED source, consumed by both
+  // DELIVERED and this signal); `miniReqsIsAuthored` derives from the ONE
+  // selected mini-reqs parse and also drives the PLAN concise render below
+  // (the single-parse pin). PM dogfood #1: authored README sections riding
+  // the selection count as authored structure — the render and the signal
+  // move together, never apart.
   const miniReqsIsAuthored = hasAuthoredMiniReqs(miniReqs);
   const phase = derivePhase({
     prdAuthored: inputs.prd !== null && (promised.length > 0 || miniReqsIsAuthored),
@@ -1162,7 +1201,12 @@ export function composeSliceReview(inputs: SliceComposeInputs): ComposedSliceRev
       concise: { text: miniReqsIsAuthored ? miniReqs : null, media: planMedia },
       lockedArtifacts: inputs.lockedArtifacts,
       lock: planLock,
-      ssotPath: inputs.prd !== null ? `${sliceRef}/IMPLEMENTATION-PRD.md` : null,
+      // PM dogfood #1 — the ssot pointer follows the SELECTED mini-reqs
+      // source (README when its authored section won over a pristine PRD
+      // section); absent-source behavior unchanged.
+      ssotPath: miniSel.fromReadme
+        ? `${sliceRef}/README.md`
+        : inputs.prd !== null ? `${sliceRef}/IMPLEMENTATION-PRD.md` : null,
     },
     delivered: {
       items: delivered.items,

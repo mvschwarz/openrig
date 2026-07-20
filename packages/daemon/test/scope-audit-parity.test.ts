@@ -169,3 +169,47 @@ describeFr10("FR-10 backstops (OPR.0.4.4.19)", () => {
     expectFr10(result.findings.some((f) => f.kind === "proof_artifact_c1_invalid" || f.kind === "missing_impl_prd")).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// PM dogfood #1 (qitem-20260720015700-630eef64) — the per-section selection
+// must land in BOTH twins identically (byte-parity above already pins the
+// classifier + scaffold-placeholder twin files; this pins the VERDICT).
+// ---------------------------------------------------------------------------
+
+import { describe as describeDf, it as itDf, expect as expectDf } from "vitest";
+
+describeDf("PM dogfood #1 — twin verdict parity: authored README vs pristine PRD", () => {
+  const AUTHORED_README = "# S\n## Intent\nauthored intent\n## Mini-requirements\n1. first authored requirement\n## Proof contract\n- [ ] authored deliverable one — captured\n";
+  const PRISTINE_PRD = [
+    "# PRD",
+    "## Intent",
+    "[The recorded intent, verbatim — kept in sync with the slice README.]",
+    "## Mini-requirements",
+    "1. [The concise one-glance requirement tier — this is where approval starts.]",
+    "## Proof contract",
+    "- [ ] [One promised deliverable, written as an observable outcome — captured.]",
+  ].join("\n");
+
+  const input: ScopeAuditInput = {
+    id: null,
+    path: "/fix/dogfood/slices/01-placeholder-conventions",
+    readmeFrontmatterRaw: "id: OPR.99.0.2.1\nstatus: placeholder",
+    progressFileExists: true,
+    readmeOnlyMarker: false,
+    isActiveRelease: true,
+    level: "slice",
+    readmeContent: AUTHORED_README,
+    implementationPrdContent: PRISTINE_PRD,
+  };
+
+  itDf("both twins agree AND neither emits a convention finding for the authored-README/pristine-PRD fixture", async () => {
+    const mod = await import(path.join(REPO_ROOT, "packages/cli/src/lib/scope/scope-audit.ts"));
+    const cliResult = (mod.classifyScopeItem as typeof daemonClassifier)(input);
+    const daemonResult = daemonClassifier(input);
+    expectDf(daemonResult).toEqual(cliResult); // twin parity, verdict-for-verdict
+    const conventionKinds = daemonResult.findings
+      .filter((f) => f.kind === "mini_requirements_missing_or_malformed" || f.kind === "proof_contract_missing_or_malformed")
+      .map((f) => f.kind);
+    expectDf(conventionKinds).toEqual([]); // RED pre-fix: both findings fire
+  });
+});
