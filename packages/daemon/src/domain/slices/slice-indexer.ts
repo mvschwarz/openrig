@@ -145,7 +145,12 @@ interface SliceLocation {
  *  pinned by test: typed-authoritative gating (VM-004), per-slice 500
  *  confirmed cap in ts_created DESC/qitem_id DESC order, term-first fallback
  *  assembly, SQL-LIKE ASCII-only case folding, %/_ wildcards spanning
- *  newline, per-term 500 cap, and the tags-column/table-absent degradations. */
+ *  newline, and the per-term 500 cap. Schema shape is INSPECTED up front
+ *  (qitem-18110994): queue_items absent => a structurally empty index that is
+ *  still published with its location metadata; the tags column absent => the
+ *  typed scan is skipped and the body-only fallback is used; and any PRAGMA /
+ *  typed / fallback EXECUTION failure propagates to the caller rather than
+ *  being degraded or cached. */
 interface MembershipIndex {
   /** slice name -> CONFIRMED typed qitem ids (scan order = ts DESC, id DESC; capped 500/slice). */
   typedBySlice: Map<string, string[]>;
@@ -401,7 +406,8 @@ export class SliceIndexer {
     // an enclosing withMembershipBatch scope owns the batch lifetime.
     let entries: SliceListEntry[];
     try {
-      entries = locations.map((location) => this.toListEntry(location));
+      // list() answers every location: served = ALL (null).
+      entries = locations.map((location) => this.toListEntry(location, null));
     } finally {
       if (this.batchDepth === 0) this.membershipIndex = null;
     }
@@ -424,7 +430,10 @@ export class SliceIndexer {
     // — unless an enclosing withMembershipBatch scope owns the batch lifetime.
     let record: SliceRecord;
     try {
-      record = this.buildRecord(location);
+      // A standalone uncached get() answers exactly ONE slice, so it serves
+      // {name}; inside an open withMembershipBatch scope the operation is
+      // composite and serves ALL (null).
+      record = this.buildRecord(location, this.batchDepth > 0 ? null : new Set([name]));
     } finally {
       if (this.batchDepth === 0) this.membershipIndex = null;
     }
@@ -506,12 +515,12 @@ export class SliceIndexer {
     return out;
   }
 
-  private toListEntry(location: SliceLocation): SliceListEntry {
+  private toListEntry(location: SliceLocation, served: Set<string> | null): SliceListEntry {
     const { name, missionId, slicePath } = location;
     const frontmatter = this.readPrimaryFrontmatter(slicePath);
     const status = this.mapStatus(frontmatter["status"] as string | undefined);
     const railItem = this.extractRailItem(frontmatter, missionId);
-    const qitemIds = this.matchQitems(name);
+    const qitemIds = this.matchQitems(name, served);
     const proofPacket = this.findProofPacket(name);
     const lastActivityAt = this.computeLastActivity(slicePath, qitemIds, proofPacket);
 
@@ -536,12 +545,12 @@ export class SliceIndexer {
     };
   }
 
-  private buildRecord(location: SliceLocation): SliceRecord {
+  private buildRecord(location: SliceLocation, served: Set<string> | null): SliceRecord {
     const { name, missionId, slicePath } = location;
     const frontmatter = this.readPrimaryFrontmatter(slicePath);
     const status = this.mapStatus(frontmatter["status"] as string | undefined);
     const railItem = this.extractRailItem(frontmatter, missionId);
-    const qitemIds = this.matchQitems(name);
+    const qitemIds = this.matchQitems(name, served);
     const proofPacket = this.findProofPacket(name);
     const lastActivityAt = this.computeLastActivity(slicePath, qitemIds, proofPacket);
     const commitRefs = this.extractCommitRefs(frontmatter);
@@ -656,7 +665,7 @@ export class SliceIndexer {
     return "active";
   }
 
-  private matchQitems(sliceName: string): string[] {
+  private matchQitems(sliceName: string, served: Set<string> | null): string[] {
     // V0.3.1 slice 17 founder-walk-workspace-state-correctness (walk item 3): the previous implementation unioned substring matches on
     // [sliceName, railItem, missionId]. The missionId term over-matched
     // — every qitem tagged `mission:<id>` appeared under EVERY slice in
@@ -673,13 +682,13 @@ export class SliceIndexer {
     // carries the gated legacy substring fallback. Never promote a
     // display-tier match into a signal. (P3)
     const ids = new Set<string>();
-    try {
-      let index = this.ensureMembershipIndex();
+    {
+      let index = this.ensureMembershipIndex(served);
       if (!index.knownSlices.has(sliceName)) {
         // Folder created mid-generation: rebuild so the fresh slice resolves
         // membership immediately (parity with the old per-slice queries).
         this.membershipIndex = null;
-        index = this.ensureMembershipIndex();
+        index = this.ensureMembershipIndex(served);
       }
       // 1. Typed-tag matches (VM-004 authoritative): confirmed rows for this
       // slice, in ts_created DESC/qitem_id DESC scan order, capped at 500
@@ -698,10 +707,13 @@ export class SliceIndexer {
           if (bucket) for (const id of bucket) ids.add(id);
         }
       }
-    } catch {
-      // queue_items table absent (test harness without the migration); return empty.
-      return [];
     }
+    // qitem-18110994 (item 2) — the broad catch that used to wrap this block
+    // is REMOVED. It existed for "queue_items table absent", which the schema
+    // probe in ensureMembershipIndex now answers structurally. Left in place
+    // it would re-swallow a REFUSED build and cache the refusal as an empty
+    // detail, defeating the propagation contract: a genuine scan fault must
+    // reach the caller, not masquerade as a slice with no membership.
     // V0.3.1 slice 17 walk item 10 — forward-fix #1. Sort qitemIds DESC
     // by ts_created so the slice-detail Queue tab renders newest first
     // (HG-5). The ScopePages.ScopeQueueRollup frontend sort still runs
@@ -735,22 +747,43 @@ export class SliceIndexer {
 
   /** qitem-ccf87c0d — build (or reuse) the per-generation membership index.
    *  TWO queue_items scans per generation, replacing O(slices) per-slice
-   *  scans:
+   *  scans.
+   *
+   *  SCHEMA IS INSPECTED UP FRONT (qitem-18110994), never inferred from a
+   *  swallowed error:
+   *   - queue_items absent -> a structurally EMPTY index that is still
+   *     PUBLISHED with its location metadata (knownSlices/terms), so get/list
+   *     keep their semantics and no rebuild loop occurs;
+   *   - tags column absent -> the typed scan is SKIPPED and Scan 2 uses the
+   *     body-only query shape;
+   *   - any PRAGMA / typed / fallback EXECUTION failure PROPAGATES to the
+   *     caller and NOTHING is published (buckets accumulate locally and are
+   *     published only on full success), so an interrupted build can never be
+   *     cached as a plausible-but-incomplete answer.
+   *
    *   Scan 1 (typed): `tags LIKE '%slice:%'` prefilter, ORDER BY ts_created
    *     DESC, qitem_id DESC (P2 determinism preserved), parseScopeTags as the
    *     authoritative row-level confirm; a row credits EVERY slice it tags;
    *     cap after 500 CONFIRMED per slice (never a pre-confirmation LIMIT —
-   *     the B2/VM-004 rule).
+   *     the B2/VM-004 rule). Global: every location, regardless of `served`.
    *   Scan 2 (fallback): one streamed pass over (body, tags) evaluated
-   *     against the term universe of all ZERO-TYPED locations. A combined
-   *     regex is a PREFILTER only; every term is then confirmed per row so
-   *     overlapping terms all credit (no consuming-alternation loss). Terms
-   *     use SQL-LIKE-equivalent matching (asciiFold + %/_ translation);
-   *     bucket order is row (rowid) order — the same order the un-ORDERed
-   *     per-term `LIMIT 500` queries returned; cap 500 per term.
-   *  Degradations preserved: tags column missing -> typed tier empty + body-
-   *  only fallback scan; queue_items absent -> throws to matchQitems' catch. */
-  private ensureMembershipIndex(): MembershipIndex {
+   *     against the term universe of the SERVED zero-typed locations — all of
+   *     them for list() and any open withMembershipBatch scope, exactly one
+   *     for a standalone uncached get(). A combined regex is a PREFILTER
+   *     only; every term is then confirmed per row so overlapping terms all
+   *     credit (no consuming-alternation loss). Terms use SQL-LIKE-equivalent
+   *     matching (asciiFold + %/_ translation); bucket order is row (rowid)
+   *     order — the same order the un-ORDERed per-term `LIMIT 500` queries
+   *     returned; cap 500 per term.
+   *
+   *  `served` (qitem-18110994 item 1) is the EXPLICIT scope of the current
+   *  public operation — the slice names actually being answered, or null for
+   *  "all known locations" — threaded through the call chain (get/list ->
+   *  buildRecord/toListEntry -> matchQitems -> here), never ambient state. It
+   *  narrows FRONTMATTER READS ONLY: locations, knownSlices, the typed scan
+   *  and the all-location typedMissions verdict are established FIRST, so the
+   *  cross-slice modern/legacy rule stays byte-identical (R5 differential). */
+  private ensureMembershipIndex(served: Set<string> | null): MembershipIndex {
     // qitem-18f3300d — OPERATION-scoped, never TTL-scoped: the index lives
     // only for the duration of one public cold list() or one uncached
     // get() (the public entry points clear it), so separate uncached
@@ -765,31 +798,31 @@ export class SliceIndexer {
     const fallbackByTerm = new Map<string, string[]>();
     const knownSlices = new Set<string>();
 
-    // Capture each indexed slice's authored/default rail distinction before
-    // scanning membership. The distinction matters only for modern missions:
-    // a default-derived rail is the mission id and must not reintroduce the
-    // mission-wide fallback that typed sibling membership disables.
-    const locations = this.readSliceLocations();
-    const locationInputs = new Map<string, {
-      missionId: string | null;
-      railItem: string | null;
-      explicitRailItem: string | null;
-    }>();
-    for (const location of locations) {
-      knownSlices.add(location.name);
-      const frontmatter = this.readPrimaryFrontmatter(location.slicePath);
-      locationInputs.set(location.name, {
-        missionId: location.missionId,
-        railItem: this.extractRailItem(frontmatter, location.missionId),
-        explicitRailItem: this.extractExplicitRailItem(frontmatter),
-      });
-    }
+    // qitem-18110994 (items 2+4) — SCHEMA TRUTH UP FRONT. The queue_items
+    // shape is INSPECTED, never inferred from a swallowed scan error: a
+    // failing scan used to be recorded as "tags column missing", silently
+    // degrading membership under a false structural label. PRAGMA answers
+    // the structural question; every EXECUTION failure below then propagates.
+    const columns = this.db.prepare(`PRAGMA table_info(queue_items)`).all() as Array<{ name: string }>;
+    // Zero columns is the ONE structural degradation: the table does not
+    // exist (a harness without the migration). Membership is structurally
+    // empty — but the index is still PUBLISHED with its location metadata so
+    // get/list keep today's semantics and no rebuild loop occurs.
+    const tableAbsent = columns.length === 0;
+    const tagsColumnPresent = columns.some((c) => c.name === "tags");
 
-    // Scan 1 — typed membership. A thrown error here (tags column missing)
-    // leaves the typed map empty; a missing queue_items table throws from
-    // scan 2's body-only retry too, surfacing to matchQitems' catch.
-    let tagsColumnAvailable = true;
-    try {
+    // GLOBAL facts first — locations and knownSlices are cheap (a directory
+    // walk, no file reads) and must cover EVERY location regardless of scope:
+    // the typed scan and the mission-level verdict below depend on them.
+    const locations = this.readSliceLocations();
+    for (const location of locations) knownSlices.add(location.name);
+
+    // Scan 1 — typed membership. Runs ONLY when the schema probe found the
+    // tags column; its absence is structural and skips the scan (no catch
+    // needed to discover it). An EXECUTION failure here propagates: it is a
+    // real fault, not a shape fact, and must not be laundered into a
+    // "tags column missing" degrade nor allow a later fallback scan.
+    if (!tableAbsent && tagsColumnPresent) {
       const stmt = this.db.prepare(
         `SELECT qitem_id, tags FROM queue_items WHERE tags LIKE '%slice:%' ORDER BY ts_created DESC, qitem_id DESC`,
       );
@@ -800,8 +833,6 @@ export class SliceIndexer {
           else if (bucket.length < 500) bucket.push(r.qitem_id);
         }
       }
-    } catch {
-      tagsColumnAvailable = false;
     }
 
     // Scan 2 — fallback buckets for the zero-typed slices' eligible term
@@ -815,49 +846,69 @@ export class SliceIndexer {
         typedMissions.add(location.missionId);
       }
     }
+    // qitem-18110994 (item 1) — frontmatter is read HERE and only here, and
+    // only for locations that can actually consult fallback terms: those the
+    // current operation SERVES and that have no confirmed typed membership.
+    // A served slice with typed rows returns from typedBySlice and never
+    // touches these terms, so it needs no membership frontmatter at all.
+    // Everything the eligibility rule depends on (locations, typedBySlice,
+    // typedMissions over ALL locations) is already fixed above, so narrowing
+    // these reads cannot move the modern/legacy verdict.
+    //
+    // The authored/default rail distinction is drawn HERE, where the terms are
+    // built: it matters only for modern missions, because a default-derived
+    // rail IS the mission id and must not reintroduce the mission-wide
+    // fallback that typed sibling membership disables.
     const fallbackTerms = new Set<string>();
-    for (const [slice, input] of locationInputs) {
+    for (const location of locations) {
+      const slice = location.name;
+      if (served !== null && !served.has(slice)) continue;
       const typed = typedBySlice.get(slice);
       if (typed && typed.length > 0) continue;
-      const modernMission = input.missionId !== null && typedMissions.has(input.missionId);
+      const frontmatter = this.readPrimaryFrontmatter(location.slicePath);
+      const railItem = this.extractRailItem(frontmatter, location.missionId);
+      const explicitRailItem = this.extractExplicitRailItem(frontmatter);
+      const modernMission = location.missionId !== null && typedMissions.has(location.missionId);
       const terms = Array.from(new Set(
         [
           slice,
-          modernMission ? input.explicitRailItem : input.railItem,
-          modernMission ? null : input.missionId,
+          modernMission ? explicitRailItem : railItem,
+          modernMission ? null : location.missionId,
         ].filter((v): v is string => !!v),
       ));
       fallbackTermsBySlice.set(slice, terms);
       for (const term of terms) fallbackTerms.add(term);
     }
-    if (fallbackTerms.size > 0) {
-      try {
-        const termList = Array.from(fallbackTerms);
-        const matchers = termList.map((term) => ({
-          term,
-          re: new RegExp(likeBoundPatternToRegExpSource(term), LIKE_REGEXP_FLAGS),
-        }));
-        const prefilter = new RegExp(matchers.map((m) => `(?:${m.re.source})`).join("|"), LIKE_REGEXP_FLAGS);
-        for (const term of termList) fallbackByTerm.set(term, []);
-        const scan = tagsColumnAvailable
-          ? this.db.prepare(`SELECT qitem_id, body, tags FROM queue_items`)
-          : this.db.prepare(`SELECT qitem_id, body FROM queue_items`);
-        for (const r of scan.iterate() as Iterable<{ qitem_id: string; body: string; tags?: string | null }>) {
-          const hayBody = asciiFold(sqliteVisiblePrefix(r.body));
-          const hayTags = r.tags != null ? asciiFold(sqliteVisiblePrefix(r.tags)) : null;
-          if (!prefilter.test(hayBody) && !(hayTags !== null && prefilter.test(hayTags))) continue;
-          for (const m of matchers) {
-            if (m.re.test(hayBody) || (hayTags !== null && m.re.test(hayTags))) {
-              const bucket = fallbackByTerm.get(m.term)!;
-              if (bucket.length < 500) bucket.push(r.qitem_id);
-            }
+    if (!tableAbsent && fallbackTerms.size > 0) {
+      const termList = Array.from(fallbackTerms);
+      const matchers = termList.map((term) => ({
+        term,
+        re: new RegExp(likeBoundPatternToRegExpSource(term), LIKE_REGEXP_FLAGS),
+      }));
+      const prefilter = new RegExp(matchers.map((m) => `(?:${m.re.source})`).join("|"), LIKE_REGEXP_FLAGS);
+      // qitem-18110994 (item 2) — buckets accumulate LOCALLY and are published
+      // to the index only after the scan completes. Previously they were
+      // pre-seeded on the published map and a broad catch let a partially
+      // filled result be cached as authoritative: an interrupted build served
+      // a plausible-but-incomplete membership. An execution failure now
+      // propagates and NOTHING is published.
+      const localBuckets = new Map<string, string[]>();
+      for (const term of termList) localBuckets.set(term, []);
+      const scan = tagsColumnPresent
+        ? this.db.prepare(`SELECT qitem_id, body, tags FROM queue_items`)
+        : this.db.prepare(`SELECT qitem_id, body FROM queue_items`);
+      for (const r of scan.iterate() as Iterable<{ qitem_id: string; body: string; tags?: string | null }>) {
+        const hayBody = asciiFold(sqliteVisiblePrefix(r.body));
+        const hayTags = r.tags != null ? asciiFold(sqliteVisiblePrefix(r.tags)) : null;
+        if (!prefilter.test(hayBody) && !(hayTags !== null && prefilter.test(hayTags))) continue;
+        for (const m of matchers) {
+          if (m.re.test(hayBody) || (hayTags !== null && m.re.test(hayTags))) {
+            const bucket = localBuckets.get(m.term)!;
+            if (bucket.length < 500) bucket.push(r.qitem_id);
           }
         }
-      } catch {
-        // queue_items table absent entirely: empty buckets — matchQitems
-        // yields [] for every slice, byte-matching the old catch path,
-        // while the built index still caches (no per-call rebuild churn).
       }
+      for (const [term, ids] of localBuckets) fallbackByTerm.set(term, ids);
     }
 
     this.membershipIndex = { typedBySlice, fallbackTermsBySlice, fallbackByTerm, knownSlices };

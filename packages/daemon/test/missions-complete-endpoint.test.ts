@@ -15,6 +15,8 @@ import { Hono } from "hono";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type Database from "better-sqlite3";
+import { createDb } from "../src/db/connection.js";
 import { SliceIndexer } from "../src/domain/slices/slice-indexer.js";
 import { missionsRoutes } from "../src/routes/missions.js";
 import { slicesRoutes } from "../src/routes/slices.js";
@@ -59,15 +61,24 @@ function writeSliceInMission(
 let cleanupRoot: string;
 let missionsRoot: string;
 let indexer: SliceIndexer;
+let db: Database.Database;
 
 beforeEach(() => {
   cleanupRoot = fs.mkdtempSync(path.join(os.tmpdir(), "missions-complete-"));
   missionsRoot = path.join(cleanupRoot, "missions");
   fs.mkdirSync(missionsRoot, { recursive: true });
-  indexer = new SliceIndexer({ slicesRoot: missionsRoot });
+  // SliceIndexerOpts declares `db` (and dogfoodEvidenceRoot) as REQUIRED and
+  // startup always supplies them; this fixture previously omitted db and was
+  // only tolerated because the indexer swallowed the resulting error. A real
+  // in-memory DB satisfies the constructor contract. It is deliberately NOT
+  // migrated: an empty database exercises the structurally-absent
+  // queue_items degradation, which is the state this endpoint expects.
+  db = createDb(":memory:");
+  indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
 });
 
 afterEach(() => {
+  db.close();
   fs.rmSync(cleanupRoot, { recursive: true, force: true });
 });
 

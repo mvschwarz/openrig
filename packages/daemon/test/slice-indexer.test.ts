@@ -12,7 +12,17 @@
 //   - cache TTL invalidation
 //   - graceful degradation when slicesRoot is unset / queue_items missing
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+
+// qitem-18110994 R4 — the established hoisted node:fs importOriginal
+// passthrough (same shape as progress-review-done-coherence.test.ts): every
+// export stays the real implementation, only readFileSync is wrapped so the
+// R4 scoping pin can observe which Markdown files a standalone get() reads.
+// Behavior is unchanged; the wrapper only records calls.
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, readFileSync: vi.fn(actual.readFileSync) };
+});
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -1148,5 +1158,256 @@ describe("qitem-render-driver #3 — modern mission: mission-only rows must not 
     seedModernMission();
     const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
     expect(indexer.get("01-typed-sibling")!.qitemIds).toEqual(["q-typed-sibling"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// qitem-18110994 — SliceIndexer membership hardening (guard-locked acceptance).
+//
+// R1/R2/R4 WERE genuine REDs at the test-only gate (they failed against the
+// pre-hardening indexer) and are now REGRESSION pins guarding the shipped
+// behavior; R3/R5 are GREEN characterization/differential pins throughout.
+//
+// Advisory roots at fccce9ac: fallback buckets are pre-seeded before the scan
+// and a broad catch lets a partially-filled map be published + cached (item 2);
+// the typed-scan catch records ANY failure as "tags column missing" (item 4);
+// neither 500 cap is boundary-pinned (item 3); and fallback-term derivation
+// reads frontmatter for EVERY known location even when a standalone detail op
+// serves one slice (item 1).
+// ---------------------------------------------------------------------------
+
+/** Arms/disarms faults on prepared statements by SQL substring, and counts
+ *  executions. The DB layer is the only realistic interruption source: the
+ *  canonical `body` column is TEXT NOT NULL, so a row-time null throw is
+ *  noncanonical. */
+function instrumentDb(target: Database.Database) {
+  const state = {
+    faultOn: null as string | null,
+    faultAfterRows: 0,
+    counts: new Map<string, number>(),
+  };
+  const origPrepare = target.prepare.bind(target);
+  (target as unknown as { prepare: (sql: string) => unknown }).prepare = (sql: string) => {
+    const stmt = origPrepare(sql) as unknown as Record<string, (...a: unknown[]) => unknown>;
+    const flat = sql.replace(/\s+/g, " ");
+    const bump = () => state.counts.set(flat, (state.counts.get(flat) ?? 0) + 1);
+    return {
+      ...stmt,
+      all: (...a: unknown[]) => { bump(); return stmt.all!(...a); },
+      get: (...a: unknown[]) => { bump(); return stmt.get!(...a); },
+      run: (...a: unknown[]) => stmt.run!(...a),
+      iterate: (...a: unknown[]) => {
+        bump();
+        const inner = stmt.iterate!(...a) as Iterable<unknown>;
+        const armed = state.faultOn !== null && flat.includes(state.faultOn);
+        if (!armed) return inner;
+        const after = state.faultAfterRows;
+        return (function* () {
+          let n = 0;
+          for (const row of inner) {
+            if (n >= after) throw new Error("injected scan fault");
+            n++;
+            yield row;
+          }
+          throw new Error("injected scan fault");
+        })();
+      },
+    };
+  };
+  return {
+    state,
+    countFor: (needle: string) => {
+      let total = 0;
+      for (const [sql, n] of state.counts) if (sql.includes(needle)) total += n;
+      return total;
+    },
+    reset: () => state.counts.clear(),
+  };
+}
+
+const TYPED_SCAN_SQL = "WHERE tags LIKE '%slice:%'";
+// Covers BOTH fallback shapes via their common prefix: the tags-bearing
+// `SELECT qitem_id, body, tags FROM queue_items` and the body-only
+// `SELECT qitem_id, body FROM queue_items` chosen when the typed scan is
+// (mis)classified as a missing tags column. Counting only the tags-bearing
+// form would falsely report 0 for exactly the misclassification under test.
+const FALLBACK_SCAN_SQL = "SELECT qitem_id, body";
+
+describe("qitem-18110994 — membership build integrity + scoping", () => {
+  let db: Database.Database;
+  let cleanup: string;
+  let missionsRoot: string;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [coreSchema, eventsSchema, streamItemsSchema, queueItemsSchema]);
+    db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
+    cleanup = fs.mkdtempSync(path.join(os.tmpdir(), "slice-indexer-harden-"));
+    missionsRoot = path.join(cleanup, "missions");
+    fs.mkdirSync(missionsRoot, { recursive: true });
+  });
+
+  afterEach(() => {
+    db.close();
+    fs.rmSync(cleanup, { recursive: true, force: true });
+    vi.mocked(fs.readFileSync).mockClear();
+  });
+
+  /** A LEGACY mission (no typed membership anywhere) so the fallback tier runs. */
+  function seedLegacy(): void {
+    const slices = path.join(missionsRoot, "legacy-mission", "slices");
+    writeSlice(slices, "01-target", { "README.md": "---\nstatus: active\n---\n# t\n" });
+    insertQitem(db, { qitemId: "q-a", body: "work on 01-target now", tags: [] });
+    insertQitem(db, { qitemId: "q-b", body: "more 01-target work", tags: [] });
+    insertQitem(db, { qitemId: "q-c", body: "unrelated packet", tags: [] });
+  }
+
+  it("R1 regression: an interrupted fallback scan refuses to answer — no partial membership, no detail cache; a later clean get returns the COMPLETE set", () => {
+    seedLegacy();
+    const probe = instrumentDb(db);
+    const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
+
+    // Fault mid-iteration: one row consumed, then throw.
+    probe.state.faultOn = FALLBACK_SCAN_SQL;
+    probe.state.faultAfterRows = 1;
+    expect(
+      () => indexer.get("01-target"),
+      "an interrupted fallback build must REFUSE to answer, not serve a subset",
+    ).toThrow("injected scan fault");
+
+    // Disarm: the SAME indexer must rebuild and return the complete set —
+    // proving neither a partial membership index nor a detail cache entry was
+    // published by the failed attempt.
+    probe.state.faultOn = null;
+    const record = indexer.get("01-target");
+    expect(record, "a clean retry must succeed on the same indexer").toBeTruthy();
+    expect(record!.qitemIds.sort(), "complete membership, never the partial subset").toEqual(["q-a", "q-b"]);
+  });
+
+  it("R2 regression: with tags PRESENT, a typed-scan fault throws, runs NO fallback scan, and the same indexer rebuilds cleanly on retry", () => {
+    seedLegacy();
+    const probe = instrumentDb(db);
+    const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
+
+    probe.state.faultOn = TYPED_SCAN_SQL;
+    probe.state.faultAfterRows = 0;
+    expect(
+      () => indexer.get("01-target"),
+      "a typed-scan failure with the tags column PRESENT must propagate, not be recorded as a missing tags column",
+    ).toThrow("injected scan fault");
+    expect(
+      probe.countFor(FALLBACK_SCAN_SQL),
+      "a refused build must not proceed to the fallback scan",
+    ).toBe(0);
+
+    probe.state.faultOn = null;
+    probe.reset();
+    const record = indexer.get("01-target");
+    expect(record!.qitemIds.sort()).toEqual(["q-a", "q-b"]);
+  });
+
+  it("R3 GREEN (typed cap): the 500th confirmed row is accepted, the 501st rejected, and false prefilter candidates ahead of them in scan order do not consume the cap", () => {
+    const slices = path.join(missionsRoot, "cap-mission", "slices");
+    writeSlice(slices, "01-capped", { "README.md": "---\nstatus: active\n---\n" });
+    // Typed scan order is ts_created DESC, qitem_id DESC. Put the FALSE
+    // prefilter candidates FIRST in that order (latest ts) so that if they
+    // consumed the confirmed cap the target would fall short of 500.
+    for (let i = 0; i < 50; i++) {
+      insertQitem(db, {
+        qitemId: `q-other-${String(i).padStart(4, "0")}`,
+        body: "x",
+        tags: ["slice:99-elsewhere"],
+        tsCreated: "2026-07-21T00:00:00.000Z",
+      });
+    }
+    // 501 CONFIRMED rows sharing ONE ts, so scan order is fully determined by
+    // qitem_id DESC: q-typed-0500 first ... q-typed-0000 last.
+    for (let i = 0; i <= 500; i++) {
+      insertQitem(db, {
+        qitemId: `q-typed-${String(i).padStart(4, "0")}`,
+        body: "no name mention",
+        tags: ["slice:01-capped"],
+        tsCreated: "2026-07-20T00:00:00.000Z",
+      });
+    }
+    const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
+    const ids = indexer.get("01-capped")!.qitemIds;
+    expect(ids.length, "exactly the 500-confirmed cap").toBe(500);
+    // Exact boundary: q-typed-0001 is the 500th confirmed in scan order and is
+    // ACCEPTED; q-typed-0000 is the 501st and is REJECTED.
+    expect(ids, "the 500th confirmed row must be accepted").toContain("q-typed-0001");
+    expect(ids, "the 501st confirmed row must be rejected").not.toContain("q-typed-0000");
+    expect(ids.some((id) => id.startsWith("q-other-")), "no foreign-slice prefilter candidate may be credited").toBe(false);
+  });
+
+  it("R3 GREEN (fallback cap): the 500th matching row is accepted, the 501st rejected, and sibling-term prefilter hits inserted BEFORE them do not consume the cap", () => {
+    const slices = path.join(missionsRoot, "legacy-cap", "slices");
+    writeSlice(slices, "01-alpha", { "README.md": "---\nstatus: active\n---\n" });
+    writeSlice(slices, "02-beta", { "README.md": "---\nstatus: active\n---\n" });
+    // The fallback scan iterates in ROWID order, so the sibling-term rows must
+    // be inserted FIRST: if they consumed 01-alpha's per-term cap, the target
+    // would fall short of 500.
+    for (let i = 0; i < 50; i++) {
+      insertQitem(db, { qitemId: `q-beta-${String(i).padStart(4, "0")}`, body: "touching 02-beta here", tags: [] });
+    }
+    for (let i = 0; i <= 500; i++) {
+      insertQitem(db, { qitemId: `q-alpha-${String(i).padStart(4, "0")}`, body: "touching 01-alpha here", tags: [] });
+    }
+    const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
+    const ids = indexer.get("01-alpha")!.qitemIds;
+    expect(ids.length, "exactly the 500 per-term cap").toBe(500);
+    // Exact boundary in rowid order: q-alpha-0499 is the 500th match (accepted);
+    // q-alpha-0500 is the 501st (rejected).
+    expect(ids, "the 500th matching row must be accepted").toContain("q-alpha-0499");
+    expect(ids, "the 501st matching row must be rejected").not.toContain("q-alpha-0500");
+    expect(ids.some((id) => id.startsWith("q-beta-")), "no sibling-term prefilter hit may be credited").toBe(false);
+  });
+
+  it("R4 regression: a standalone get(X) reads NO Markdown under unrelated slice paths", () => {
+    const slices = path.join(missionsRoot, "wide-mission", "slices");
+    for (let i = 0; i < 6; i++) {
+      writeSlice(slices, `s-${i}-topic`, {
+        "README.md": "---\nstatus: active\n---\n# s\n",
+        "IMPLEMENTATION-PRD.md": "---\nrail-item: PL-1\n---\n# prd\n",
+        "PROGRESS.md": "---\nstatus: active\n---\n# p\n",
+      });
+    }
+    insertQitem(db, { qitemId: "q-only", body: "unrelated", tags: [] });
+    const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
+
+    // Clear AFTER fixture creation so only the served operation is observed.
+    vi.mocked(fs.readFileSync).mockClear();
+    indexer.get("s-0-topic");
+
+    const readPaths = vi.mocked(fs.readFileSync).mock.calls
+      .map((c) => String(c[0]))
+      .filter((p) => p.endsWith(".md"));
+    const foreign = readPaths.filter((p) => !p.includes(`${path.sep}s-0-topic${path.sep}`));
+    expect(
+      foreign,
+      `a standalone detail op must not read frontmatter for unrelated slices; read ${foreign.length}: ${foreign.slice(0, 3).join(", ")}`,
+    ).toEqual([]);
+  });
+
+  it("R5 GREEN: full-scope batch get and standalone narrowed get return BYTE-IDENTICAL qitemIds on a modern mission", () => {
+    const slices = path.join(missionsRoot, "modern-mission", "slices");
+    writeSlice(slices, "01-typed-sib", { "README.md": "---\nstatus: active\n---\n" });
+    // Zero-typed target WITH an explicit authored rail: own-name + explicit rail
+    // must be retained; missionId and a mission-defaulted rail must be excluded.
+    writeSlice(slices, "02-target", { "README.md": "---\nstatus: active\nrail-item: PL-777\n---\n" });
+    insertQitem(db, { qitemId: "q-typed", body: "x", tags: ["slice:01-typed-sib"] });
+    insertQitem(db, { qitemId: "q-by-name", body: "work on 02-target", tags: [] });
+    insertQitem(db, { qitemId: "q-by-rail", body: "PL-777 follow-up", tags: [] });
+    insertQitem(db, { qitemId: "q-mission-only", body: "advance the modern-mission mission", tags: [] });
+
+    const a = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
+    const fullScope = a.withMembershipBatch(() => a.get("02-target")!.qitemIds);
+
+    const b = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
+    const standalone = b.get("02-target")!.qitemIds;
+
+    expect(standalone, "narrowing reads must not move the eligibility verdict").toEqual(fullScope);
+    expect(standalone.sort(), "own-name + explicit-rail retained; mission/default rail excluded")
+      .toEqual(["q-by-name", "q-by-rail"]);
   });
 });
