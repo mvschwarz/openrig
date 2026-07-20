@@ -730,18 +730,36 @@ describe("Send CLI", () => {
       expect(exitCode).toBe(1);
       // The ACTUAL transport failure must be surfaced — the DaemonClient's
       // own connection-error prefix, naming the configured target — not a
-      // preflight-derived guess.
+      // preflight-derived guess. (Also covers 1b45cf21's explicit/custom
+      // target-preservation pin: the resolved target survives verbatim into
+      // the fact line rather than being flattened into a generic message.)
       expect(out).toContain("Cannot connect to the OpenRig daemon at http://127.0.0.1:1:");
       expect(out).not.toContain("Daemon not running. Start it with: rig daemon start");
+      // 1b45cf21 — a real transport failure must also carry the repo's
+      // fact/consequence/action remediation. The fact line above is the
+      // actual cause; these are the consequence and the action.
+      expect(out).toContain("The message was not sent.");
+      expect(out).toContain("Inspect the configured target with 'rig status'; a failed health probe does not prove the daemon is stopped.");
+      expect(out).toContain("If the target is wrong, check OPENRIG_URL / RIGGED_URL or daemon.host + daemon.port.");
+      expect(out).toContain("If the daemon is confirmed stopped, run 'rig daemon start'.");
+      // ABSENCE PIN: remediation must never assert daemon STATE derived from
+      // the failed send or an advisory probe. A connection failure proves the
+      // target was unreachable — not why.
+      expect(out).not.toContain("Daemon not running");
+      expect(out).not.toContain("unhealthy");
     });
 
-    // ff13bcdf finding 3 — GREEN CHARACTERIZATION, not a RED. The fan-out
-    // catch (send.ts) already behaves correctly at this parent; R7 simply
-    // never asserted it. This pins the behavior so a future refactor cannot
-    // silently regress fan-out back to a preflight-derived guess. It is
-    // honestly classified: it passes on the parent by design — no artificial
-    // sabotage was introduced to manufacture a RED.
-    it("R7b GREEN-characterization: fan-out REAL down fails honestly too — target-specific connection error, exit 1, no restart line", async () => {
+    // HISTORY (ff13bcdf finding 3): this test entered the suite as a GREEN
+    // characterization — the fan-out catch already behaved correctly, R7 just
+    // never asserted it, so it pinned existing behavior with no manufactured
+    // failure.
+    // NOW (1b45cf21): it is a deliberate RED. This lane requires fan-out to
+    // carry the same fact/consequence/action remediation as single-seat, which
+    // does not exist yet, so the remediation assertions below fail by design
+    // until the helper lands. Retitled accordingly — a test labelled
+    // "characterization" while it is an intentional RED is exactly the kind of
+    // stale label this slice keeps finding elsewhere.
+    it("R7b RED: fan-out REAL down fails honestly too — target-specific connection error, exit 1, no restart line, and the same remediation as single-seat", async () => {
       vi.stubEnv("OPENRIG_URL", "http://127.0.0.1:1");
       vi.stubEnv("RIGGED_URL", "");
       const rc = recordingRealClient();
@@ -755,6 +773,15 @@ describe("Send CLI", () => {
       expect(exitCode).toBe(1);
       expect(out).toContain("Cannot connect to the OpenRig daemon at http://127.0.0.1:1:");
       expect(out).not.toContain("Daemon not running. Start it with: rig daemon start");
+      // 1b45cf21 — SYMMETRY PIN. Fan-out must carry byte-identical
+      // remediation to single-seat; divergence between the two paths is the
+      // regression this asserts against.
+      expect(out).toContain("The message was not sent.");
+      expect(out).toContain("Inspect the configured target with 'rig status'; a failed health probe does not prove the daemon is stopped.");
+      expect(out).toContain("If the target is wrong, check OPENRIG_URL / RIGGED_URL or daemon.host + daemon.port.");
+      expect(out).toContain("If the daemon is confirmed stopped, run 'rig daemon start'.");
+      expect(out).not.toContain("Daemon not running");
+      expect(out).not.toContain("unhealthy");
     });
 
     // ff13bcdf finding 1 — the load-bearing latency discriminator. An

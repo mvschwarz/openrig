@@ -45,6 +45,36 @@ function resolveSenderSession(): string | undefined {
   return readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
 }
 
+/**
+ * 1b45cf21 — remediation after an ACTUAL transport failure, in the repo's
+ * fact / consequence / action shape (`daemon-lifecycle.ts:61-73`).
+ *
+ * Deliberately NOT `daemonNotRunningError()`: that helper's text ("Daemon not
+ * running." + restart advice) is the probe-derived claim qitem-c113bd41
+ * removed. The SHAPE is reused; the TEXT is not.
+ *
+ * A `DaemonConnectionError` proves the resolved target was UNREACHABLE — not
+ * why. Daemon down, wrong port, wrong host, firewall, and a wedged event loop
+ * are all live explanations, so the action stays diagnostic and asserts no
+ * daemon state. It also refuses to oversell `rig status`: with an env URL set,
+ * that command's own probe can report `stopped` for a mere timeout
+ * (`daemon-lifecycle.ts:575-585`) — the same false-stopped class this slice
+ * exists to remove — so the copy names that limitation instead of hiding it,
+ * and gates `rig daemon start` behind operator confirmation.
+ *
+ * Shared by both local paths so single-seat and fan-out remediation are
+ * IDENTICAL BY CONSTRUCTION rather than by hand-maintained duplication.
+ */
+function printTransportFailure(err: DaemonConnectionError): void {
+  console.error(err.message);
+  console.error("  The message was not sent.");
+  console.error(
+    "  Inspect the configured target with 'rig status'; a failed health probe does not prove the daemon is stopped. " +
+    "If the target is wrong, check OPENRIG_URL / RIGGED_URL or daemon.host + daemon.port. " +
+    "If the daemon is confirmed stopped, run 'rig daemon start'.",
+  );
+}
+
 /** qitem-c113bd41 — the LOCAL send target. The status probe is advisory,
  *  never authoritative: a busy/wedged daemon fails the probe while the
  *  transport would succeed (the false-daemon-down incident). Resolution:
@@ -286,8 +316,9 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         if (err instanceof DaemonConnectionError) {
           // The REAL transport outcome, honestly surfaced (names the
           // configured target + the underlying error) — never the bare
-          // probe-derived restart line.
-          console.error(err.message);
+          // probe-derived restart line. 1b45cf21 adds the actionable next
+          // step after that real failure.
+          printTransportFailure(err);
           process.exitCode = 1;
           return;
         }
@@ -533,7 +564,9 @@ async function runFanOutSend(params: {
     res = await client.post<Record<string, unknown>>("/api/transport/broadcast", body, transportRequestOptions());
   } catch (err) {
     if (err instanceof DaemonConnectionError) {
-      console.error(err.message);
+      // 1b45cf21 — same helper as single-seat, so the remediation is
+      // byte-identical across both local paths by construction.
+      printTransportFailure(err);
       process.exitCode = 1;
       return;
     }
