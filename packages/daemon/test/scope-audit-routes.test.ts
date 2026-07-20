@@ -237,3 +237,87 @@ describe("GET /api/scope/audit", () => {
     expect(body.totalFindings).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// qitem-43d69e17 — /api/scope/audit composite-operation load contract. The
+// route loops mission slice dirs calling indexer.get(entry) per slice
+// (routes/scope-audit.ts:148) with NO prior list(): on 5c95a8ee each
+// uncached get builds its own membership batch — 2N scans (80 at 40
+// slices, guard-measured). Contract: one audit request = a CONSTANT number
+// of queue_items scan executions. This route performs no other queue reads
+// (verified by source grep), so the count-EVERYTHING rule applies cleanly
+// (LIKE and non-LIKE; INSERTs and PK point lookups WHERE qitem_id IN
+// excluded).
+// ---------------------------------------------------------------------------
+
+describe("qitem-43d69e17 — audit route total queue-scan load contract", () => {
+  function instrumentQueueScans(target: Database.Database): () => number {
+    let n = 0;
+    const origPrepare = target.prepare.bind(target);
+    (target as unknown as { prepare: (sql: string) => unknown }).prepare = (sql: string) => {
+      const stmt = origPrepare(sql) as unknown as Record<string, (...a: unknown[]) => unknown>;
+      const isScan = /from\s+queue_items/i.test(sql)
+        && !/^\s*insert/i.test(sql)
+        && !/where\s+qitem_id\s+in/i.test(sql);
+      if (!isScan) return stmt;
+      return {
+        all: (...a: unknown[]) => { n++; return stmt.all!(...a); },
+        iterate: (...a: unknown[]) => { n++; return stmt.iterate!(...a); },
+        get: (...a: unknown[]) => { n++; return stmt.get!(...a); },
+        run: (...a: unknown[]) => stmt.run!(...a),
+      };
+    };
+    return () => n;
+  }
+
+  it("one GET /api/scope/audit over 40 valid slices executes <= 4 total queue_items scans; response semantics fully retained", async () => {
+    const missionDir = path.join(missionsRoot, "load-mission");
+    fs.mkdirSync(missionDir, { recursive: true });
+    fs.writeFileSync(path.join(missionDir, "README.md"), "---\nid: OPR.99.0.9\n---\n# load mission\n", "utf8");
+    fs.writeFileSync(path.join(missionDir, "PROGRESS.md"), "# Progress\n", "utf8");
+    fs.writeFileSync(path.join(missionDir, "MISSION_BRIEF.md"), VALID_MISSION_BRIEF, "utf8");
+    fs.writeFileSync(path.join(missionDir, "MISSION_NOTES.md"), "# Notes\n", "utf8");
+    const sliceNames: string[] = [];
+    for (let i = 0; i < 40; i++) {
+      const name = `${String(i + 1).padStart(2, "0")}-load-topic`;
+      sliceNames.push(name);
+      const sliceDir = path.join(missionDir, "slices", name);
+      fs.mkdirSync(sliceDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(sliceDir, "README.md"),
+        validSliceReadme(`---\nid: OPR.99.0.9.${i + 1}\nstatus: active\n---`, name),
+        "utf8",
+      );
+      fs.writeFileSync(path.join(sliceDir, "PROGRESS.md"), "# Progress\n", "utf8");
+    }
+    // One queue row matching nothing: membership scans dominate; no
+    // per-slice IN lookups fire.
+    db.prepare(
+      `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, body)
+       VALUES ('q-lone', '2026-07-20T00:00:00.000Z', '2026-07-20T00:00:00.000Z', 'a@r', 'b@r', 'done', 'routine', 'fixture')`,
+    ).run();
+
+    const scans = instrumentQueueScans(db);
+    const res = await app.request("/api/scope/audit?mission=load-mission");
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      ok: boolean;
+      mission: { name: string; railStatus: string };
+      slices: Array<{ name: string; railStatus: string; findings: Array<{ kind: string }> }>;
+      totalFindings: number;
+    };
+    // Semantic parity: every slice audited and retained, shapes intact.
+    expect(body.mission.name).toBe("load-mission");
+    expect(body.slices.map((s) => s.name).sort()).toEqual([...sliceNames].sort());
+    expect(body.slices).toHaveLength(40);
+    for (const s of body.slices) {
+      expect(s.railStatus).toBe("present"); // README + PROGRESS both exist
+    }
+    // Valid convention slices + populated mission files: no findings at all.
+    expect(body.totalFindings).toBe(0);
+    expect(body.ok).toBe(true);
+    // Pre-fix on 5c95a8ee: 40 uncached gets x 2 membership scans = 80.
+    // Contract: constant.
+    expect(scans()).toBeLessThanOrEqual(4);
+  });
+});
