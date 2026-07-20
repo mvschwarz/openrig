@@ -574,3 +574,293 @@ describe("PL-slice-story-view-v0 SliceIndexer", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// qitem-ccf87c0d — Project mission-index LOAD CONTRACT (guard-amended RED).
+// Forensic root cause: matchQitems runs O(slices) full-table queue_items LIKE
+// scans per cold rebuild (tier-1 wildcard+ORDER BY always; up to 3 more
+// body-LIKE scans per zero-typed slice) — 353 slices at host scale = ~10s
+// cold, synchronously blocking the daemon event loop. The contract below
+// counts EXECUTIONS of queue_items LIKE statements (not prepare calls):
+// a cold rebuild must run a CONSTANT number of scan-shaped statements,
+// independent of slice count. Behavior pins ride alongside so the batch
+// rewrite cannot drift membership semantics.
+// ---------------------------------------------------------------------------
+
+describe("qitem-ccf87c0d — mission-index load contract + membership pins", () => {
+  let db: Database.Database;
+  let cleanup: string;
+  let missionsRoot: string;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [coreSchema, eventsSchema, streamItemsSchema, queueItemsSchema]);
+    db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
+    cleanup = fs.mkdtempSync(path.join(os.tmpdir(), "slice-indexer-load-"));
+    missionsRoot = path.join(cleanup, "missions");
+    fs.mkdirSync(missionsRoot, { recursive: true });
+  });
+
+  afterEach(() => {
+    db.close();
+    fs.rmSync(cleanup, { recursive: true, force: true });
+  });
+
+  /** Count EXECUTIONS (.all/.iterate/.get calls) of statements that both
+   *  name queue_items and carry a LIKE — the scan-shaped statements. run()
+   *  passes through uncounted (INSERT seeding). Non-LIKE statements are
+   *  returned unwrapped. */
+  function instrumentLikeExecutions(target: Database.Database): () => number {
+    let n = 0;
+    const origPrepare = target.prepare.bind(target);
+    (target as unknown as { prepare: (sql: string) => unknown }).prepare = (sql: string) => {
+      const stmt = origPrepare(sql) as unknown as Record<string, (...a: unknown[]) => unknown>;
+      if (!/queue_items/i.test(sql) || !/\bLIKE\b/i.test(sql)) return stmt;
+      return {
+        all: (...a: unknown[]) => { n++; return stmt.all!(...a); },
+        iterate: (...a: unknown[]) => { n++; return stmt.iterate!(...a); },
+        get: (...a: unknown[]) => { n++; return stmt.get!(...a); },
+        run: (...a: unknown[]) => stmt.run!(...a),
+      };
+    };
+    return () => n;
+  }
+
+  /** Exact seed: 2 missions x 20 slices = 40 slices; the first 12 (30%) are
+   *  typed (one confirmed `slice:` row each); 60 qitems total (12 typed rows
+   *  + 48 zero-typed rows with 200-byte bodies). */
+  function seedFixture(): { typedSlices: string[]; untypedSlices: string[] } {
+    const typedSlices: string[] = [];
+    const untypedSlices: string[] = [];
+    const filler = "b".repeat(200);
+    let idx = 0;
+    for (let m = 0; m < 2; m++) {
+      const mission = `load-mission-${m}`;
+      for (let s = 0; s < 20; s++, idx++) {
+        const slice = `ld-${String(idx).padStart(2, "0")}-topic`;
+        writeSlice(path.join(missionsRoot, mission, "slices"), slice, {
+          "README.md": `---\nstatus: active\n---\n# ${slice}\n`,
+        });
+        if (idx < 12) typedSlices.push(slice);
+        else untypedSlices.push(slice);
+      }
+    }
+    for (let i = 0; i < 12; i++) {
+      insertQitem(db, {
+        qitemId: `q-typed-${String(i).padStart(2, "0")}`,
+        body: `typed packet ${i} ${filler}`,
+        tags: [`slice:${typedSlices[i]!}`],
+        tsCreated: `2026-07-01T00:${String(i).padStart(2, "0")}:00.000Z`,
+      });
+    }
+    for (let i = 0; i < 48; i++) {
+      insertQitem(db, {
+        qitemId: `q-plain-${String(i).padStart(2, "0")}`,
+        body: `generic packet ${i} ${filler}`,
+        tags: ["release:0.4.7"],
+        tsCreated: `2026-07-02T00:${String(i % 60).padStart(2, "0")}:00.000Z`,
+      });
+    }
+    return { typedSlices, untypedSlices };
+  }
+
+  it("LOAD CONTRACT (RED): one cold list() over 40 slices executes a CONSTANT number of queue_items LIKE statements (<= 4), independent of slice count", () => {
+    const { typedSlices } = seedFixture();
+    const likeCount = instrumentLikeExecutions(db);
+    const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
+    const entries = indexer.list();
+    expect(entries).toHaveLength(40);
+    // Membership sanity inside the same rebuild: a typed slice carries its row.
+    const typed0 = entries.find((e) => e.name === typedSlices[0])!;
+    expect(typed0.qitemCount).toBe(1);
+    // The contract: constant scan count. Pre-fix this executes
+    // 40 tier-1 LIKE iterations + 2 dedup'd fallback LIKEs for each of the
+    // 28 zero-typed slices (= 96 total). Post-fix: bounded constant.
+    expect(likeCount()).toBeLessThanOrEqual(4);
+  });
+
+  it("PIN: invalidate() picks up a fresh slice folder AND its typed membership (Explorer auto-show read-after-write)", () => {
+    seedFixture();
+    const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
+    expect(indexer.list()).toHaveLength(40);
+    writeSlice(path.join(missionsRoot, "load-mission-0", "slices"), "ld-fresh-folder", {
+      "README.md": "---\nstatus: active\n---\n# Fresh\n",
+    });
+    insertQitem(db, {
+      qitemId: "q-fresh-typed",
+      body: "fresh dispatch",
+      tags: ["slice:ld-fresh-folder"],
+    });
+    indexer.invalidate();
+    const after = indexer.list();
+    expect(after).toHaveLength(41);
+    expect(after.find((e) => e.name === "ld-fresh-folder")!.qitemCount).toBe(1);
+    expect(indexer.get("ld-fresh-folder")!.qitemIds).toEqual(["q-fresh-typed"]);
+  });
+
+  it("PIN: cold direct get() BEFORE any list() resolves correct typed membership", () => {
+    const { typedSlices } = seedFixture();
+    const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db });
+    // No list() call first — the detail path must build whatever index it
+    // needs lazily.
+    const record = indexer.get(typedSlices[3]!)!;
+    expect(record.qitemIds).toEqual(["q-typed-03"]);
+  });
+
+  it("PIN: TTL expiry refreshes membership WITHOUT an explicit invalidate", async () => {
+    const { typedSlices } = seedFixture();
+    const indexer = new SliceIndexer({ slicesRoot: missionsRoot, dogfoodEvidenceRoot: null, db, cacheTtlMs: 40 });
+    expect(indexer.get(typedSlices[0]!)!.qitemIds).toEqual(["q-typed-00"]);
+    insertQitem(db, {
+      qitemId: "q-typed-00-later",
+      body: "late dispatch",
+      tags: [`slice:${typedSlices[0]!}`],
+      tsCreated: "2026-07-03T00:00:00.000Z",
+    });
+    await new Promise((r) => setTimeout(r, 60));
+    expect(indexer.get(typedSlices[0]!)!.qitemIds).toEqual(["q-typed-00-later", "q-typed-00"]);
+  });
+
+  it("PIN: overlapping zero-typed fallback terms credit ONE row to EVERY matching slice (no consuming-alternation loss)", () => {
+    // Flat root: railItem/missionId are null, so each slice's only fallback
+    // term is its name. The two names OVERLAP inside one body string —
+    // "alpha-beta-gamma" contains both "alpha-beta" and "beta-gamma" with a
+    // shared "beta" segment. A naive single consuming alternation would
+    // credit only the first.
+    const flatRoot = path.join(cleanup, "flat-slices");
+    writeSlice(flatRoot, "alpha-beta", { "README.md": "---\nstatus: active\n---\n" });
+    writeSlice(flatRoot, "beta-gamma", { "README.md": "---\nstatus: active\n---\n" });
+    insertQitem(db, { qitemId: "q-overlap", body: "work on alpha-beta-gamma today", tags: [] });
+    const indexer = new SliceIndexer({ slicesRoot: flatRoot, dogfoodEvidenceRoot: null, db });
+    expect(indexer.get("alpha-beta")!.qitemIds).toEqual(["q-overlap"]);
+    expect(indexer.get("beta-gamma")!.qitemIds).toEqual(["q-overlap"]);
+  });
+
+  it("PIN: SQL-LIKE ASCII case-insensitivity is preserved in the fallback tier", () => {
+    const flatRoot = path.join(cleanup, "flat-ci");
+    writeSlice(flatRoot, "case-probe", { "README.md": "---\nstatus: active\n---\n" });
+    insertQitem(db, { qitemId: "q-upper", body: "Ref: CASE-PROBE follow-up", tags: [] });
+    const indexer = new SliceIndexer({ slicesRoot: flatRoot, dogfoodEvidenceRoot: null, db });
+    expect(indexer.get("case-probe")!.qitemIds).toEqual(["q-upper"]);
+  });
+
+  it("PIN: SQL-LIKE wildcard semantics preserved — an underscore in a slice name matches any single body character (current behavior, byte-for-byte)", () => {
+    // Fallback terms come from folder names / frontmatter, which CAN carry
+    // `_` (and in principle `%`). Today those bytes are LIKE wildcards:
+    // body LIKE '%under_score-slice%' matches "underXscore-slice". The
+    // batch rewrite must translate, not literalize, these bytes.
+    const flatRoot = path.join(cleanup, "flat-wildcard");
+    writeSlice(flatRoot, "under_score-slice", { "README.md": "---\nstatus: active\n---\n" });
+    insertQitem(db, { qitemId: "q-wild-x", body: "see underXscore-slice notes", tags: [] });
+    insertQitem(db, { qitemId: "q-wild-lit", body: "see under_score-slice notes", tags: [] });
+    const indexer = new SliceIndexer({ slicesRoot: flatRoot, dogfoodEvidenceRoot: null, db });
+    expect(indexer.get("under_score-slice")!.qitemIds.sort()).toEqual(["q-wild-lit", "q-wild-x"]);
+  });
+
+  it("PIN: tags-column-missing degradation — fallback still matches by body (tier-1 failure is caught)", () => {
+    const bareDb = createDb();
+    migrate(bareDb, [coreSchema]);
+    bareDb.exec(`CREATE TABLE queue_items (
+      qitem_id TEXT PRIMARY KEY, ts_created TEXT NOT NULL, ts_updated TEXT NOT NULL,
+      source_session TEXT NOT NULL, destination_session TEXT NOT NULL, state TEXT NOT NULL,
+      priority TEXT NOT NULL DEFAULT 'routine', body TEXT NOT NULL)`);
+    bareDb.prepare(
+      `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body)
+       VALUES ('q-no-tags-col', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', 'a@r', 'b@r', 'done', 'notagcol-slice work')`,
+    ).run();
+    const flatRoot = path.join(cleanup, "flat-notags");
+    writeSlice(flatRoot, "notagcol-slice", { "README.md": "---\nstatus: active\n---\n" });
+    const indexer = new SliceIndexer({ slicesRoot: flatRoot, dogfoodEvidenceRoot: null, db: bareDb });
+    expect(indexer.get("notagcol-slice")!.qitemIds).toEqual(["q-no-tags-col"]);
+    bareDb.close();
+  });
+});
+
+// qitem-ccf87c0d guard RED-verdict delta — two byte-equivalence blockers
+// pinned against the CURRENT engine before any batch matcher lands.
+describe("qitem-ccf87c0d — LIKE byte-equivalence + fallback-order pins (guard delta)", () => {
+  let db: Database.Database;
+  let cleanup: string;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [coreSchema, eventsSchema, streamItemsSchema, queueItemsSchema]);
+    db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
+    cleanup = fs.mkdtempSync(path.join(os.tmpdir(), "slice-indexer-eqv-"));
+  });
+
+  afterEach(() => {
+    db.close();
+    fs.rmSync(cleanup, { recursive: true, force: true });
+  });
+
+  it("PIN: SQLite LIKE folds ASCII ONLY — non-ASCII case variants (æ vs Æ) do NOT match; ASCII letters still fold", () => {
+    const flatRoot = path.join(cleanup, "flat-ascii-fold");
+    writeSlice(flatRoot, "graey-æ-slice", { "README.md": "---\nstatus: active\n---\n" });
+    // Æ (U+00C6) is the Unicode uppercase of æ (U+00E6): a JS /i regex would
+    // match it; SQLite LIKE must NOT (ASCII-only fold).
+    insertQitem(db, { qitemId: "q-unicode-upper", body: "ref GRAEY-Æ-SLICE here", tags: [] });
+    // Same æ byte, ASCII letters case-varied: LIKE matches.
+    insertQitem(db, { qitemId: "q-ascii-fold", body: "ref GRAEY-æ-SLICE here", tags: [] });
+    const indexer = new SliceIndexer({ slicesRoot: flatRoot, dogfoodEvidenceRoot: null, db });
+    expect(indexer.get("graey-æ-slice")!.qitemIds).toEqual(["q-ascii-fold"]);
+  });
+
+  it("PIN: LIKE wildcards match across NEWLINE — an underscore in a slice name matches '\\n' in the body (dotAll-equivalent behavior required)", () => {
+    const flatRoot = path.join(cleanup, "flat-nl-wild");
+    writeSlice(flatRoot, "nl_probe", { "README.md": "---\nstatus: active\n---\n" });
+    insertQitem(db, { qitemId: "q-newline-wild", body: "prefix nl\nprobe suffix", tags: [] });
+    const indexer = new SliceIndexer({ slicesRoot: flatRoot, dogfoodEvidenceRoot: null, db });
+    expect(indexer.get("nl_probe")!.qitemIds).toEqual(["q-newline-wild"]);
+  });
+
+  it("PIN: equal-ts fallback rows keep TERM-FIRST order ([sliceName, railItem]), not DB row order", () => {
+    // Row matching ONLY the railItem term is inserted FIRST in the DB; the
+    // row matching ONLY the sliceName term second; identical ts_created.
+    // Current engine: terms iterate [sliceName, railItem], ids enter the Set
+    // in term order, and the final ts-DESC sort is stable on equals — so the
+    // sliceName-matched row renders first. A row-first batch scan would
+    // emit DB order and flip them.
+    const flatRoot = path.join(cleanup, "flat-term-order");
+    writeSlice(flatRoot, "term-order-slice", {
+      "README.md": "---\nstatus: active\nrail-item: TORD-RAIL\n---\n",
+    });
+    const ts = "2026-07-05T12:00:00.000Z";
+    insertQitem(db, { qitemId: "q-a-railitem", body: "TORD-RAIL work", tags: [], tsCreated: ts });
+    insertQitem(db, { qitemId: "q-b-slicename", body: "term-order-slice work", tags: [], tsCreated: ts });
+    const indexer = new SliceIndexer({ slicesRoot: flatRoot, dogfoodEvidenceRoot: null, db });
+    expect(indexer.get("term-order-slice")!.qitemIds).toEqual(["q-b-slicename", "q-a-railitem"]);
+  });
+});
+
+// qitem-ccf87c0d guard POST-EDIT blocker — code-point parity for LIKE '_'.
+describe("qitem-ccf87c0d — LIKE '_' Unicode code-point parity (guard blocker pin)", () => {
+  let db: Database.Database;
+  let cleanup: string;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [coreSchema, eventsSchema, streamItemsSchema, queueItemsSchema]);
+    db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
+    cleanup = fs.mkdtempSync(path.join(os.tmpdir(), "slice-indexer-cp-"));
+  });
+
+  afterEach(() => {
+    db.close();
+    fs.rmSync(cleanup, { recursive: true, force: true });
+  });
+
+  it("PIN: '_' matches ONE CHARACTER (code point) — an astral emoji (surrogate pair in UTF-16) satisfies a single '_', exactly like SQLite", () => {
+    // SQLite LIKE '%emoji_probe%' matches body 'emoji😀probe' — 😀 (U+1F600)
+    // is one character. A UTF-16 code-unit matcher ([\s\S]) consumes only
+    // half the surrogate pair and misses; the translation must be
+    // code-point-correct (dotAll + u).
+    const flatRoot = path.join(cleanup, "flat-cp");
+    writeSlice(flatRoot, "emoji_probe", { "README.md": "---\nstatus: active\n---\n" });
+    insertQitem(db, { qitemId: "q-astral", body: "see emoji\u{1F600}probe notes", tags: [] });
+    // Two-code-unit ASCII sequence must still NOT match a single '_':
+    insertQitem(db, { qitemId: "q-two-chars", body: "see emojiXYprobe notes", tags: [] });
+    const indexer = new SliceIndexer({ slicesRoot: flatRoot, dogfoodEvidenceRoot: null, db });
+    expect(indexer.get("emoji_probe")!.qitemIds).toEqual(["q-astral"]);
+  });
+});

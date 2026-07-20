@@ -137,6 +137,59 @@ interface SliceLocation {
   slicePath: string;
 }
 
+/** qitem-ccf87c0d — the per-generation batch membership index. Replaces the
+ *  per-slice queue_items scans (353 tier-1 wildcard+ORDER-BY scans + up to 3
+ *  body-LIKE scans per zero-typed slice = ~10s cold at host scale,
+ *  synchronously blocking the event loop) with TWO streamed scans per
+ *  generation. Semantics are byte-equivalent to the per-slice path and are
+ *  pinned by test: typed-authoritative gating (VM-004), per-slice 500
+ *  confirmed cap in ts_created DESC/qitem_id DESC order, term-first fallback
+ *  assembly, SQL-LIKE ASCII-only case folding, %/_ wildcards spanning
+ *  newline, per-term 500 cap, and the tags-column/table-absent degradations. */
+interface MembershipIndex {
+  /** slice name -> CONFIRMED typed qitem ids (scan order = ts DESC, id DESC; capped 500/slice). */
+  typedBySlice: Map<string, string[]>;
+  /** fallback term -> qitem ids in row (rowid) order, capped 500/term. */
+  fallbackByTerm: Map<string, string[]>;
+  /** location names the index was built from — a get() on a folder created
+   *  mid-generation (not in this set) forces a rebuild so fresh folders
+   *  resolve membership without waiting for invalidate/TTL, exactly like
+   *  the per-slice path did. */
+  knownSlices: Set<string>;
+  expiresAt: number;
+}
+
+// --- SQL-LIKE-equivalent matching (qitem-ccf87c0d) -------------------------
+// SQLite LIKE semantics, replicated byte-for-byte (test-pinned):
+//   - ASCII-ONLY case folding (A-Z <-> a-z; æ vs Æ do NOT fold),
+//   - `%` matches any run and `_` exactly ONE CHARACTER (code point) — both
+//     spanning newlines and astral chars (a surrogate pair is one `_`), so
+//     the translated regexes MUST compile with the `su` flags
+//     (LIKE_REGEXP_FLAGS below): dotAll for newline, `u` for code-point
+//     stepping. A [\s\S] translation would count UTF-16 code units and
+//     miss e.g. `a😀b` against `%a_b%` (guard blocker pin).
+//   - every other byte is literal (regex specials escaped).
+
+/** The one flag set every translated LIKE regex compiles with. */
+const LIKE_REGEXP_FLAGS = "su";
+
+/** Lowercase ASCII A-Z only — never Unicode (SQLite LIKE's fold). */
+function asciiFold(s: string): string {
+  return s.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
+}
+
+/** Translate one LIKE term (already ascii-folded) to a RegExp source.
+ *  Compile the result with LIKE_REGEXP_FLAGS. */
+function likeTermToRegExpSource(term: string): string {
+  let out = "";
+  for (const ch of term) {
+    if (ch === "%") out += ".*";
+    else if (ch === "_") out += ".";
+    else out += ch.replace(/[.*+?^${}()|[\]\\]/, "\\$&");
+  }
+  return out;
+}
+
 const FRONTMATTER_DELIM = "---";
 const DEFAULT_CACHE_TTL_MS = 60_000;
 
@@ -173,6 +226,8 @@ export class SliceIndexer {
   private readonly cacheTtlMs: number;
   private listingCache: CachedListing | null = null;
   private detailCache: Map<string, CachedSlice> = new Map();
+  // qitem-ccf87c0d — batch membership index (see MembershipIndex doc).
+  private membershipIndex: MembershipIndex | null = null;
   // VM-005: authored mission-status sidecar cache (same TTL as the listing).
   private missionStatusCache: {
     statuses: Record<string, { authoredStatus: string | null }>;
@@ -197,6 +252,7 @@ export class SliceIndexer {
     this.listingCache = null;
     this.detailCache.clear();
     this.missionStatusCache = null;
+    this.membershipIndex = null;
   }
 
   /** VM-005 B1 (the narrow C-vii exception; arch ruling b8d91aee…) — the
@@ -524,72 +580,39 @@ export class SliceIndexer {
     // Substring fallback (including the missionId term) is preserved for
     // slices whose qitem corpus pre-dates the typed-tag convention so
     // legacy mission-aware workspaces don't regress.
+    // qitem-ccf87c0d — both tiers now answer from the per-generation batch
+    // membership index (TWO scans per generation instead of O(slices) scans;
+    // see ensureMembershipIndex). TWO-TIER DOCTRINE unchanged: the SIGNAL
+    // tier answers from canonical typed membership ONLY; this DISPLAY tier
+    // carries the gated legacy substring fallback. Never promote a
+    // display-tier match into a signal. (P3)
     const ids = new Set<string>();
     try {
-      // 1. Typed-tag matches: tags JSON contains `slice:<sliceName>` literal.
-      // Both the `"slice:..."` JSON-array form and the comma-separated
-      // form (legacy CLI tags) are caught by a wildcard on the slice id.
-      let typedTagMatchCount = 0;
-      try {
-        // TWO-TIER DOCTRINE: the SIGNAL tier (phase / band / attention)
-        // answers from canonical membership ONLY; this DISPLAY tier (the
-        // queue-tab's qitemIds) may carry the gated legacy substring fallback
-        // below. Never promote a display-tier match into a signal. (P3)
-        //
-        // B2 fix: cap on CONFIRMED matches, never the prefilter window. The
-        // unquoted LIKE stays a PREFILTER (catches comma-legacy AND the
-        // suffix/sibling over-matches); parseScopeTags is the authoritative
-        // row-level confirm. We iterate() ORDER BY ts_created DESC, qitem_id
-        // DESC (P2: the id tiebreak makes the confirmed set fully deterministic
-        // under equal timestamps — byte-consistent with the id-lex tail
-        // fallback below, since the id encodes the ts prefix), confirm per
-        // row, and break at 500 CONFIRMED. There is NO pre-confirmation SQL
-        // LIMIT: with one, >500 suffix/sibling over-match rows could hide a
-        // true typed member and un-gate the fallback (VM-004 returns).
-        // Streaming keeps memory bounded, and the leading-wildcard LIKE never
-        // used an index anyway (the old LIMIT saved materialization only,
-        // which iterate+break also saves). typedTagMatchCount counts CONFIRMED
-        // rows only, so the substring gate reflects real typed membership.
-        const stmt = this.db.prepare(
-          `SELECT qitem_id, tags FROM queue_items WHERE tags LIKE ? ORDER BY ts_created DESC, qitem_id DESC`,
-        );
-        for (const r of stmt.iterate(`%slice:${sliceName}%`) as Iterable<{ qitem_id: string; tags: string | null }>) {
-          if (parseScopeTags(r.tags).slices.has(sliceName)) {
-            ids.add(r.qitem_id);
-            typedTagMatchCount++;
-            if (typedTagMatchCount >= 500) break;
-          }
-        }
-      } catch {
-        // queue_items present but `tags` column missing (older test
-        // harness): fall through to substring path with full term set.
+      let index = this.ensureMembershipIndex();
+      if (!index.knownSlices.has(sliceName)) {
+        // Folder created mid-generation: rebuild so the fresh slice resolves
+        // membership immediately (parity with the old per-slice queries).
+        this.membershipIndex = null;
+        index = this.ensureMembershipIndex();
       }
-
-      // 2. Substring fallback. Now that typed membership is canonical and
-      // authoritative, the substring tier executes ONLY when zero CONFIRMED
-      // typed-tag rows exist — the deliberate VM-004 behavior change for
-      // typed corpora (it used to ALWAYS run, leaking sibling-name and
-      // body-mention matches into typed slices). Legacy zero-typed corpora
-      // keep today's full term set, including the missionId term (mission-
-      // folder railItem defaults to missionId when no rail item is authored,
-      // so it must be included for legacy mission-aware workspaces). LIMIT
-      // 500 preserved.
-      if (typedTagMatchCount === 0) {
+      // 1. Typed-tag matches (VM-004 authoritative): confirmed rows for this
+      // slice, in ts_created DESC/qitem_id DESC scan order, capped at 500
+      // confirmed per slice by the builder.
+      const typed = index.typedBySlice.get(sliceName);
+      if (typed && typed.length > 0) {
+        for (const id of typed) ids.add(id);
+      } else {
+        // 2. Substring fallback — executes ONLY when zero CONFIRMED typed
+        // rows exist (the deliberate VM-004 gating). Term-first assembly in
+        // the original deduped term order [sliceName, railItem, missionId]
+        // keeps equal-timestamp output byte-identical to the per-slice path
+        // (the final sort below is stable on equals).
         const substringTerms = [sliceName, railItem, missionId].filter(
           (v): v is string => !!v,
         );
         for (const term of Array.from(new Set(substringTerms))) {
-          try {
-            const rows = this.db.prepare(
-              `SELECT qitem_id FROM queue_items WHERE body LIKE ? OR tags LIKE ? LIMIT 500`,
-            ).all(`%${term}%`, `%${term}%`) as Array<{ qitem_id: string }>;
-            for (const r of rows) ids.add(r.qitem_id);
-          } catch {
-            const rows = this.db.prepare(
-              `SELECT qitem_id FROM queue_items WHERE body LIKE ? LIMIT 500`,
-            ).all(`%${term}%`) as Array<{ qitem_id: string }>;
-            for (const r of rows) ids.add(r.qitem_id);
-          }
+          const bucket = index.fallbackByTerm.get(term);
+          if (bucket) for (const id of bucket) ids.add(id);
         }
       }
     } catch {
@@ -625,6 +648,107 @@ export class SliceIndexer {
       idsArr.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
     }
     return idsArr;
+  }
+
+  /** qitem-ccf87c0d — build (or reuse) the per-generation membership index.
+   *  TWO queue_items scans per generation, replacing O(slices) per-slice
+   *  scans:
+   *   Scan 1 (typed): `tags LIKE '%slice:%'` prefilter, ORDER BY ts_created
+   *     DESC, qitem_id DESC (P2 determinism preserved), parseScopeTags as the
+   *     authoritative row-level confirm; a row credits EVERY slice it tags;
+   *     cap after 500 CONFIRMED per slice (never a pre-confirmation LIMIT —
+   *     the B2/VM-004 rule).
+   *   Scan 2 (fallback): one streamed pass over (body, tags) evaluated
+   *     against the term universe of all ZERO-TYPED locations. A combined
+   *     regex is a PREFILTER only; every term is then confirmed per row so
+   *     overlapping terms all credit (no consuming-alternation loss). Terms
+   *     use SQL-LIKE-equivalent matching (asciiFold + %/_ translation);
+   *     bucket order is row (rowid) order — the same order the un-ORDERed
+   *     per-term `LIMIT 500` queries returned; cap 500 per term.
+   *  Degradations preserved: tags column missing -> typed tier empty + body-
+   *  only fallback scan; queue_items absent -> throws to matchQitems' catch. */
+  private ensureMembershipIndex(): MembershipIndex {
+    const now = Date.now();
+    if (this.membershipIndex && this.membershipIndex.expiresAt > now) {
+      return this.membershipIndex;
+    }
+
+    const typedBySlice = new Map<string, string[]>();
+    const fallbackByTerm = new Map<string, string[]>();
+    const knownSlices = new Set<string>();
+
+    // Term universe: every location's deduped [sliceName, railItem,
+    // missionId], derived with the SAME helpers toListEntry/buildRecord use.
+    const locations = this.readSliceLocations();
+    const termsBySlice = new Map<string, string[]>();
+    for (const location of locations) {
+      knownSlices.add(location.name);
+      const frontmatter = this.readPrimaryFrontmatter(location.slicePath);
+      const railItem = this.extractRailItem(frontmatter, location.missionId);
+      const terms = Array.from(new Set(
+        [location.name, railItem, location.missionId].filter((v): v is string => !!v),
+      ));
+      termsBySlice.set(location.name, terms);
+    }
+
+    // Scan 1 — typed membership. A thrown error here (tags column missing)
+    // leaves the typed map empty; a missing queue_items table throws from
+    // scan 2's body-only retry too, surfacing to matchQitems' catch.
+    let tagsColumnAvailable = true;
+    try {
+      const stmt = this.db.prepare(
+        `SELECT qitem_id, tags FROM queue_items WHERE tags LIKE '%slice:%' ORDER BY ts_created DESC, qitem_id DESC`,
+      );
+      for (const r of stmt.iterate() as Iterable<{ qitem_id: string; tags: string | null }>) {
+        for (const tagged of parseScopeTags(r.tags).slices) {
+          const bucket = typedBySlice.get(tagged);
+          if (!bucket) typedBySlice.set(tagged, [r.qitem_id]);
+          else if (bucket.length < 500) bucket.push(r.qitem_id);
+        }
+      }
+    } catch {
+      tagsColumnAvailable = false;
+    }
+
+    // Scan 2 — fallback buckets for the zero-typed slices' term universe.
+    const fallbackTerms = new Set<string>();
+    for (const [slice, terms] of termsBySlice) {
+      const typed = typedBySlice.get(slice);
+      if (typed && typed.length > 0) continue;
+      for (const term of terms) fallbackTerms.add(term);
+    }
+    if (fallbackTerms.size > 0) {
+      try {
+        const termList = Array.from(fallbackTerms);
+        const matchers = termList.map((term) => ({
+          term,
+          re: new RegExp(likeTermToRegExpSource(asciiFold(term)), LIKE_REGEXP_FLAGS),
+        }));
+        const prefilter = new RegExp(matchers.map((m) => m.re.source).join("|"), LIKE_REGEXP_FLAGS);
+        for (const term of termList) fallbackByTerm.set(term, []);
+        const scan = tagsColumnAvailable
+          ? this.db.prepare(`SELECT qitem_id, body, tags FROM queue_items`)
+          : this.db.prepare(`SELECT qitem_id, body FROM queue_items`);
+        for (const r of scan.iterate() as Iterable<{ qitem_id: string; body: string; tags?: string | null }>) {
+          const hayBody = asciiFold(r.body);
+          const hayTags = r.tags != null ? asciiFold(r.tags) : null;
+          if (!prefilter.test(hayBody) && !(hayTags !== null && prefilter.test(hayTags))) continue;
+          for (const m of matchers) {
+            if (m.re.test(hayBody) || (hayTags !== null && m.re.test(hayTags))) {
+              const bucket = fallbackByTerm.get(m.term)!;
+              if (bucket.length < 500) bucket.push(r.qitem_id);
+            }
+          }
+        }
+      } catch {
+        // queue_items table absent entirely: empty buckets — matchQitems
+        // yields [] for every slice, byte-matching the old catch path,
+        // while the built index still caches (no per-call rebuild churn).
+      }
+    }
+
+    this.membershipIndex = { typedBySlice, fallbackByTerm, knownSlices, expiresAt: now + this.cacheTtlMs };
+    return this.membershipIndex;
   }
 
   private findProofPacket(sliceName: string): SliceProofPacket | null {
