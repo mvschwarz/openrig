@@ -941,3 +941,121 @@ describe("qitem-18f3300d — NUL parity + cross-operation membership freshness (
     expect(indexer.get("fresh-c-fallback")!.qitemIds).toEqual(["q-c-fallback"]);
   });
 });
+
+// qitem-ccf87c0d amended gate — the explicit composite-operation scope API
+// (withMembershipBatch). RED pre-fix via missing export; pins define the
+// contract: outermost-fresh open, in-scope sharing, nested reuse,
+// exception-safe close, and unchanged standalone semantics.
+describe("qitem-ccf87c0d — withMembershipBatch scope API (RED: API missing)", () => {
+  let db: Database.Database;
+  let cleanup: string;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [coreSchema, eventsSchema, streamItemsSchema, queueItemsSchema]);
+    db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
+    cleanup = fs.mkdtempSync(path.join(os.tmpdir(), "slice-indexer-scope-"));
+  });
+
+  afterEach(() => {
+    db.close();
+    fs.rmSync(cleanup, { recursive: true, force: true });
+  });
+
+  type Scoped = SliceIndexer & { withMembershipBatch<T>(fn: () => T): T };
+  function scoped(indexer: SliceIndexer): Scoped {
+    const s = indexer as Scoped;
+    expect(typeof s.withMembershipBatch, "withMembershipBatch must be a public SliceIndexer method").toBe("function");
+    return s;
+  }
+
+  /** Same membership-scan counter as the route/Review contracts (all
+   *  queue_items scans; PK IN lookups + INSERTs excluded — no gather reads
+   *  exist at the indexer seam so total == membership here). */
+  function instrumentScans(target: Database.Database): () => number {
+    let n = 0;
+    const origPrepare = target.prepare.bind(target);
+    (target as unknown as { prepare: (sql: string) => unknown }).prepare = (sql: string) => {
+      const stmt = origPrepare(sql) as unknown as Record<string, (...a: unknown[]) => unknown>;
+      const isScan = /from\s+queue_items/i.test(sql)
+        && !/^\s*insert/i.test(sql)
+        && !/where\s+qitem_id\s+in/i.test(sql);
+      if (!isScan) return stmt;
+      return {
+        all: (...a: unknown[]) => { n++; return stmt.all!(...a); },
+        iterate: (...a: unknown[]) => { n++; return stmt.iterate!(...a); },
+        get: (...a: unknown[]) => { n++; return stmt.get!(...a); },
+        run: (...a: unknown[]) => stmt.run!(...a),
+      };
+    };
+    return () => n;
+  }
+
+  function seedSlices(n: number): string {
+    const root = path.join(cleanup, "missions");
+    for (let i = 0; i < n; i++) {
+      writeSlice(path.join(root, "scope-mission", "slices"), `sc-${String(i).padStart(2, "0")}-topic`, {
+        "README.md": "---\nstatus: active\n---\n",
+      });
+    }
+    return root;
+  }
+
+  it("in-scope list() + N gets share ONE batch: <= 4 total queue scans across the whole scope", () => {
+    const root = seedSlices(12);
+    const indexer = new SliceIndexer({ slicesRoot: root, dogfoodEvidenceRoot: null, db });
+    const s = scoped(indexer);
+    const scans = instrumentScans(db);
+    s.withMembershipBatch(() => {
+      const entries = indexer.list();
+      for (const e of entries) indexer.get(e.name);
+    });
+    expect(scans()).toBeLessThanOrEqual(4);
+  });
+
+  it("REQUEST-BOUNDARY FRESHNESS: scope1 builds a batch via get(A); insert membership for already-known uncached B; scope2 get(B) sees it (scope-open is always fresh)", () => {
+    const root = seedSlices(2); // sc-00 (A) + sc-01 (B), both known from the start
+    const indexer = new SliceIndexer({ slicesRoot: root, dogfoodEvidenceRoot: null, db });
+    const s = scoped(indexer);
+    s.withMembershipBatch(() => {
+      expect(indexer.get("sc-00-topic")!.qitemIds).toEqual([]); // scope1 builds the generation
+    });
+    insertQitem(db, { qitemId: "q-scope-b", body: "no mention", tags: ["slice:sc-01-topic"] });
+    s.withMembershipBatch(() => {
+      // B was already known to scope1's batch — a stale-generation reuse
+      // would serve []; the fresh scope2 open must see the new row.
+      expect(indexer.get("sc-01-topic")!.qitemIds).toEqual(["q-scope-b"]);
+    });
+  });
+
+  it("NESTED scopes share the outermost batch and clear only at outermost exit", () => {
+    const root = seedSlices(4);
+    const indexer = new SliceIndexer({ slicesRoot: root, dogfoodEvidenceRoot: null, db });
+    const s = scoped(indexer);
+    const scans = instrumentScans(db);
+    s.withMembershipBatch(() => {
+      indexer.get("sc-00-topic");
+      s.withMembershipBatch(() => {
+        indexer.get("sc-01-topic");
+      });
+      // Inner exit must NOT have cleared the shared batch.
+      indexer.get("sc-02-topic");
+    });
+    expect(scans()).toBeLessThanOrEqual(4);
+    // After outermost exit the batch is gone: a later write is visible.
+    insertQitem(db, { qitemId: "q-after-scope", body: "no mention", tags: ["slice:sc-03-topic"] });
+    expect(indexer.get("sc-03-topic")!.qitemIds).toEqual(["q-after-scope"]);
+  });
+
+  it("EXCEPTION inside a scope still clears at exit (finally): the next operation is fresh", () => {
+    const root = seedSlices(2);
+    const indexer = new SliceIndexer({ slicesRoot: root, dogfoodEvidenceRoot: null, db });
+    const s = scoped(indexer);
+    expect(() => s.withMembershipBatch(() => {
+      indexer.get("sc-00-topic");
+      throw new Error("boom");
+    })).toThrow("boom");
+    insertQitem(db, { qitemId: "q-post-throw", body: "no mention", tags: ["slice:sc-01-topic"] });
+    expect(indexer.get("sc-01-topic")!.qitemIds).toEqual(["q-post-throw"]);
+  });
+});

@@ -261,6 +261,8 @@ export class SliceIndexer {
   private detailCache: Map<string, CachedSlice> = new Map();
   // qitem-ccf87c0d — batch membership index (see MembershipIndex doc).
   private membershipIndex: MembershipIndex | null = null;
+  // qitem-ccf87c0d corrective — depth of open withMembershipBatch scopes.
+  private batchDepth = 0;
   // VM-005: authored mission-status sidecar cache (same TTL as the listing).
   private missionStatusCache: {
     statuses: Record<string, { authoredStatus: string | null }>;
@@ -278,6 +280,34 @@ export class SliceIndexer {
   /** Returns true when any configured slice root exists on disk. */
   isReady(): boolean {
     return this.sliceRoots().some((root) => this.isDirectory(root));
+  }
+
+  /** qitem-ccf87c0d corrective — the explicit COMPOSITE-OPERATION scope: a
+   *  caller performing list()-plus-per-slice-get() as ONE user-visible
+   *  operation (the slices route's boundToWorkflow lens, ReviewGatherer.
+   *  composeMission) wraps it here so every inner list/get shares ONE
+   *  membership batch instead of building one per uncached get (the 2+2N
+   *  regression). Contract, pinned by test:
+   *   - the OUTERMOST open never reuses a prior operation's batch (drops
+   *     any existing one); the index is LAZY, so the first membership
+   *     access inside the scope builds from then-current queue state —
+   *     request-boundary freshness, no snapshot claim;
+   *   - nested/reentrant scopes share the outermost batch;
+   *   - the outermost exit ALWAYS clears (finally — exception-safe), so
+   *     separate operations never share a generation;
+   *   - standalone list()/get() outside any scope keep their own
+   *     one-operation batch semantics unchanged (their clears are
+   *     conditional on depth === 0).
+   *  Synchronous by design — matches the synchronous list/get call graph. */
+  withMembershipBatch<T>(fn: () => T): T {
+    if (this.batchDepth === 0) this.membershipIndex = null;
+    this.batchDepth++;
+    try {
+      return fn();
+    } finally {
+      this.batchDepth--;
+      if (this.batchDepth === 0) this.membershipIndex = null;
+    }
   }
 
   /** Drops both caches. Used by tests + by a future explicit-refresh route. */
@@ -365,12 +395,13 @@ export class SliceIndexer {
     const locations = this.readSliceLocations();
     // ONE batch membership index serves this whole rebuild (the <=4 LIKE-
     // execution load contract), then drops so later uncached operations
-    // read current queue state (qitem-18f3300d operation scoping).
+    // read current queue state (qitem-18f3300d operation scoping) — unless
+    // an enclosing withMembershipBatch scope owns the batch lifetime.
     let entries: SliceListEntry[];
     try {
       entries = locations.map((location) => this.toListEntry(location));
     } finally {
-      this.membershipIndex = null;
+      if (this.batchDepth === 0) this.membershipIndex = null;
     }
     this.listingCache = { entries, expiresAt: now + this.cacheTtlMs };
     return entries;
@@ -387,12 +418,13 @@ export class SliceIndexer {
     if (!location) return null;
 
     // Uncached get(): its own operation-scoped batch, dropped afterward so
-    // the next uncached operation sees current queue state (qitem-18f3300d).
+    // the next uncached operation sees current queue state (qitem-18f3300d)
+    // — unless an enclosing withMembershipBatch scope owns the batch lifetime.
     let record: SliceRecord;
     try {
       record = this.buildRecord(location);
     } finally {
-      this.membershipIndex = null;
+      if (this.batchDepth === 0) this.membershipIndex = null;
     }
     this.detailCache.set(name, { record, expiresAt: now + this.cacheTtlMs });
     return record;

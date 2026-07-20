@@ -53,49 +53,55 @@ export function slicesRoutes(): Hono {
     if (refresh === "1" || refresh === "true") {
       deps.indexer.invalidate();
     }
-    const all = deps.indexer.list();
-    let filtered = filter === "all" ? all : all.filter((s) => s.status === filter);
-    // Workflows in Spec Library v0: optional lens filter — narrow to
-    // slices bound to a workflow_instance of <name>:<version>.
-    const boundToWorkflow = c.req.query("boundToWorkflow");
-    let boundDiagnostic: { specName: string; specVersion: string; matched: number; total: number } | null = null;
-    if (boundToWorkflow) {
-      const colonIdx = boundToWorkflow.lastIndexOf(":");
-      if (colonIdx === -1) {
-        return c.json({
-          error: "boundToWorkflow_invalid",
-          hint: "Format is boundToWorkflow=<specName>:<specVersion>",
-        }, 400);
+    // qitem-ccf87c0d corrective — ONE HTTP request is ONE composite
+    // operation: the list rebuild, the boundToWorkflow per-slice get loop,
+    // and the mission sidecar share ONE membership batch (pre-scope, each
+    // uncached get built its own 2-scan batch: 2+2N total queue scans).
+    return deps.indexer.withMembershipBatch(() => {
+      const all = deps.indexer.list();
+      let filtered = filter === "all" ? all : all.filter((s) => s.status === filter);
+      // Workflows in Spec Library v0: optional lens filter — narrow to
+      // slices bound to a workflow_instance of <name>:<version>.
+      const boundToWorkflow = c.req.query("boundToWorkflow");
+      let boundDiagnostic: { specName: string; specVersion: string; matched: number; total: number } | null = null;
+      if (boundToWorkflow) {
+        const colonIdx = boundToWorkflow.lastIndexOf(":");
+        if (colonIdx === -1) {
+          return c.json({
+            error: "boundToWorkflow_invalid",
+            hint: "Format is boundToWorkflow=<specName>:<specVersion>",
+          }, 400);
+        }
+        const specName = boundToWorkflow.slice(0, colonIdx);
+        const specVersion = boundToWorkflow.slice(colonIdx + 1);
+        const db = deps.indexer.db;
+        const before = filtered.length;
+        filtered = filtered.filter((slice) => {
+          // Re-resolve binding per slice. The indexer's list payload
+          // doesn't carry workflowName so we do the join here. v0 cost
+          // is bounded by the slice count + a small SQL per slice (the
+          // membership batch is shared across the whole request).
+          const sliceRecord = deps.indexer.get(slice.name);
+          if (!sliceRecord || sliceRecord.qitemIds.length === 0) return false;
+          const binding = findSliceWorkflowBinding(db, sliceRecord.qitemIds);
+          return binding.primary?.workflowName === specName
+            && binding.primary?.workflowVersion === specVersion;
+        });
+        boundDiagnostic = { specName, specVersion, matched: filtered.length, total: before };
       }
-      const specName = boundToWorkflow.slice(0, colonIdx);
-      const specVersion = boundToWorkflow.slice(colonIdx + 1);
-      const db = deps.indexer.db;
-      const before = filtered.length;
-      filtered = filtered.filter((slice) => {
-        // Re-resolve binding per slice. The indexer's list payload
-        // doesn't carry workflowName so we do the join here. v0 cost
-        // is bounded by the slice count + a small SQL per slice; with
-        // ~109 slices this stays sub-100ms in practice.
-        const sliceRecord = deps.indexer.get(slice.name);
-        if (!sliceRecord || sliceRecord.qitemIds.length === 0) return false;
-        const binding = findSliceWorkflowBinding(db, sliceRecord.qitemIds);
-        return binding.primary?.workflowName === specName
-          && binding.primary?.workflowVersion === specVersion;
+      // Sort by lastActivityAt DESC (most recently touched first); slices
+      // without activity sort to the end.
+      filtered.sort(compareByActivityDesc);
+      return c.json({
+        slices: filtered,
+        totalCount: filtered.length,
+        filter,
+        boundToWorkflow: boundDiagnostic,
+        // VM-005 (release-0.4.7): additive authored mission-status sidecar so
+        // chip surfaces can honor authored-wins precedence without a second
+        // round-trip. The `slices` array itself is byte-untouched.
+        missions: deps.indexer.missionAuthoredStatuses(),
       });
-      boundDiagnostic = { specName, specVersion, matched: filtered.length, total: before };
-    }
-    // Sort by lastActivityAt DESC (most recently touched first); slices
-    // without activity sort to the end.
-    filtered.sort(compareByActivityDesc);
-    return c.json({
-      slices: filtered,
-      totalCount: filtered.length,
-      filter,
-      boundToWorkflow: boundDiagnostic,
-      // VM-005 (release-0.4.7): additive authored mission-status sidecar so
-      // chip surfaces can honor authored-wins precedence without a second
-      // round-trip. The `slices` array itself is byte-untouched.
-      missions: deps.indexer.missionAuthoredStatuses(),
     });
   });
 

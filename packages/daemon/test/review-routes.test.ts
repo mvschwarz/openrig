@@ -498,3 +498,84 @@ describe("GET /api/review/rig (OPR.0.4.4.22)", () => {
     expect(res.status).toBe(503);
   });
 });
+
+// ---------------------------------------------------------------------------
+// qitem-ccf87c0d amended gate — composeMission composite-operation load
+// contract. On 75245ed6, composeMission runs a cold list() (one 2-scan
+// batch) then gatherSlice()->indexer.get() once per uncached mission slice
+// (one MORE 2-scan batch each): 2 + 2N MEMBERSHIP scans — 82 at 40 slices
+// (guard-reproduced; the exact inventory is 204 total queue reads, of which
+// 82 are membership — see the matcher doc below). The contract: one mission
+// compose = a CONSTANT number of membership-scan executions.
+// ---------------------------------------------------------------------------
+
+describe("qitem-ccf87c0d — composeMission MEMBERSHIP-scan load contract", () => {
+  /** Count EXECUTIONS (.all/.iterate/.get) of the MEMBERSHIP-SCAN shapes —
+   *  the statement class the batch/scope fix owns, counted by NAMED shape
+   *  (guard audit trail; inventory at 40 slices/1 row: these two shapes are
+   *  41+41=82 pre-fix, exactly the 2+2N regression; the OTHER 122 queue
+   *  reads are pre-existing Review projections — 82x attention/agent
+   *  projection reads, 40x hasActiveQitem `state IN … AND tags LIKE ?` —
+   *  present on parent 7b19b73e and untouched by the locked fix, so
+   *  counting them would make the constant-scan contract unsatisfiable
+   *  in scope):
+   *    (a) typed membership scan  — tags LIKE '%slice:%'
+   *    (b) batch fallback scan    — FROM queue_items with NO WHERE clause
+   *    (c) legacy per-slice tiers — WHERE tags LIKE ? ORDER BY / body LIKE ?
+   *  INSERT seeding and PK point lookups (WHERE qitem_id IN) pass through. */
+  function instrumentMembershipScans(target: Database.Database): () => number {
+    let n = 0;
+    const origPrepare = target.prepare.bind(target);
+    (target as unknown as { prepare: (sql: string) => unknown }).prepare = (sql: string) => {
+      const stmt = origPrepare(sql) as unknown as Record<string, (...a: unknown[]) => unknown>;
+      const flat = sql.replace(/\s+/g, " ");
+      const isMembershipScan = /from queue_items/i.test(flat)
+        && !/^\s*insert/i.test(flat)
+        && (
+          /tags LIKE '%slice:%'/i.test(flat)
+          || !/ where /i.test(flat)
+          || /where tags like \? order by/i.test(flat)
+          || /where body like \?/i.test(flat)
+        );
+      if (!isMembershipScan) return stmt;
+      return {
+        all: (...a: unknown[]) => { n++; return stmt.all!(...a); },
+        iterate: (...a: unknown[]) => { n++; return stmt.iterate!(...a); },
+        get: (...a: unknown[]) => { n++; return stmt.get!(...a); },
+        run: (...a: unknown[]) => stmt.run!(...a),
+      };
+    };
+    return () => n;
+  }
+
+  it("one composeMission over 40 indexed slices executes <= 4 membership queue scans AND composes all 40 ledger entries", () => {
+    const db = createDb();
+    migrate(db, [
+      coreSchema, bindingsSessionsSchema, eventsSchema, streamItemsSchema,
+      queueItemsSchema, queueTransitionsSchema, missionControlActionsSchema,
+      queueItemSummarySchema,
+    ]);
+    db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-load', 'rig')`).run();
+    // Guard repro shape: exactly one queue row (matches no slice, so no
+    // per-slice IN lookups fire — the count isolates the scan class).
+    db.prepare(
+      `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, body)
+       VALUES ('q-lone', '2026-07-04T00:00:00.000Z', '2026-07-04T00:00:00.000Z', 'a@r', 'b@r', 'done', 'routine', 'fixture')`,
+    ).run();
+    const ws = makeFixtureWorkspace();
+    for (let i = 0; i < 40; i++) {
+      writeFixtureSlice(ws, "load-mission", `ld-${String(i).padStart(2, "0")}-topic`, {});
+    }
+    const indexer = new SliceIndexer({ slicesRoot: ws.root, dogfoodEvidenceRoot: null, db });
+    const scans = instrumentMembershipScans(db);
+    const gatherer = new ReviewGatherer({ db, indexer, gitRepoPath: null, now: () => NOW });
+    const composed = gatherer.composeMission("load-mission");
+    expect(composed).toBeTruthy();
+    expect(composed!.ledger).toHaveLength(40); // semantic: every slice composed
+    // Pre-fix on 75245ed6: 2 (cold list batch) + 40x2 (one batch per
+    // uncached gatherSlice get) = 82 membership scans. Contract: constant.
+    expect(scans()).toBeLessThanOrEqual(4);
+    db.close();
+    fs.rmSync(ws.root, { recursive: true, force: true });
+  });
+});

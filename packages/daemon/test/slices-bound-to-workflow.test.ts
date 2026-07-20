@@ -177,3 +177,66 @@ describe("GET /api/slices?boundToWorkflow=<name>:<version>", () => {
     expect(body.boundToWorkflow).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// qitem-ccf87c0d amended gate — boundToWorkflow composite-operation load
+// contract. The route runs list() then indexer.get() per filtered slice; on
+// 75245ed6 each uncached get builds its own 2-scan batch: 82 total queue
+// scans at 40 slices (guard-reproduced). Contract: one lens request = a
+// CONSTANT number of queue_items scan executions. This path has NO gather
+// reads, so the count-EVERYTHING rule applies cleanly (LIKE and non-LIKE;
+// INSERTs and PK point lookups WHERE qitem_id IN excluded).
+// ---------------------------------------------------------------------------
+
+describe("qitem-ccf87c0d — boundToWorkflow total queue-scan load contract", () => {
+  function instrumentQueueScans(target: Database.Database): () => number {
+    let n = 0;
+    const origPrepare = target.prepare.bind(target);
+    (target as unknown as { prepare: (sql: string) => unknown }).prepare = (sql: string) => {
+      const stmt = origPrepare(sql) as unknown as Record<string, (...a: unknown[]) => unknown>;
+      const isScan = /from\s+queue_items/i.test(sql)
+        && !/^\s*insert/i.test(sql)
+        && !/where\s+qitem_id\s+in/i.test(sql);
+      if (!isScan) return stmt;
+      return {
+        all: (...a: unknown[]) => { n++; return stmt.all!(...a); },
+        iterate: (...a: unknown[]) => { n++; return stmt.iterate!(...a); },
+        get: (...a: unknown[]) => { n++; return stmt.get!(...a); },
+        run: (...a: unknown[]) => stmt.run!(...a),
+      };
+    };
+    return () => n;
+  }
+
+  it("one GET /api/slices?boundToWorkflow over 40 slices executes <= 4 total queue_items scans, response diagnostic intact", async () => {
+    const db = createDb();
+    migrate(db, [
+      coreSchema, eventsSchema, streamItemsSchema, queueItemsSchema,
+      queueTransitionsSchema, workflowSpecsSchema, workflowInstancesSchema,
+      workflowStepTrailsSchema, missionControlActionsSchema,
+    ]);
+    db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-load', 'rig')`).run();
+    ensureQitem(db, "q-lone", "matches nothing");
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "btw-load-"));
+    const slicesRoot = path.join(base, "missions");
+    for (let i = 0; i < 40; i++) {
+      const dir = path.join(slicesRoot, "load-mission", "slices", `ld-${String(i).padStart(2, "0")}-topic`);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "README.md"), `---\nstatus: active\n---\n# t${i}\n`);
+    }
+    const indexer = new SliceIndexer({ slicesRoot, dogfoodEvidenceRoot: null, db });
+    const projector = new SliceDetailProjector({ db, indexer });
+    const app = buildApp({ indexer, projector });
+    const scans = instrumentQueueScans(db);
+    const res = await app.request("/api/slices?boundToWorkflow=openrig-velocity:1.0");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { boundToWorkflow: { matched: number; total: number }; slices: unknown[] };
+    expect(body.boundToWorkflow).toEqual({ specName: "openrig-velocity", specVersion: "1.0", matched: 0, total: 40 });
+    expect(body.slices).toHaveLength(0);
+    // Pre-fix on 75245ed6: 2 (cold list batch) + 40x2 (uncached get per
+    // filtered slice) = 82. Contract: constant.
+    expect(scans()).toBeLessThanOrEqual(4);
+    db.close();
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+});
