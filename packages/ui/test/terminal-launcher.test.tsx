@@ -16,9 +16,9 @@ vi.mock("../src/hooks/useHosts.js", () => ({ useSelectedHostId: () => "local" })
 vi.mock("../src/hooks/useNodeInventory.js", () => ({
   useNodeInventory: () => ({
     data: [
-      { logicalId: "orch.lead", canonicalSessionName: "orch-lead@acme-build", nodeKind: "agent", podNamespace: "orch", agentActivity: { state: "running" } },
-      { logicalId: "dev.d1", canonicalSessionName: "dev-d1@acme-build", nodeKind: "agent", podNamespace: "dev", agentActivity: { state: "idle" } },
-      { logicalId: "infra.daemon", canonicalSessionName: "infra@acme-build", nodeKind: "infrastructure", podNamespace: null },
+      { rigId: "00000000-0000-4000-8000-000000000042", rigName: "v-openrig-build", logicalId: "orch.lead", canonicalSessionName: "orch-lead@acme-build", nodeKind: "agent", podNamespace: "orch", agentActivity: { state: "running" } },
+      { rigId: "00000000-0000-4000-8000-000000000042", rigName: "v-openrig-build", logicalId: "dev.d1", canonicalSessionName: "dev-d1@acme-build", nodeKind: "agent", podNamespace: "dev", agentActivity: { state: "idle" } },
+      { rigId: "00000000-0000-4000-8000-000000000042", rigName: "v-openrig-build", logicalId: "infra.daemon", canonicalSessionName: "infra@acme-build", nodeKind: "infrastructure", podNamespace: null },
     ],
   }),
 }));
@@ -40,9 +40,20 @@ import {
 } from "../src/components/topology/TerminalLauncher.js";
 
 const node = (partial: Partial<NodeInventoryEntry>): NodeInventoryEntry =>
-  ({ nodeKind: "agent", canonicalSessionName: null, logicalId: "x", podNamespace: null, ...partial } as unknown as NodeInventoryEntry);
+  ({
+    rigId: "rig-1",
+    rigName: "acme",
+    nodeKind: "agent",
+    canonicalSessionName: null,
+    logicalId: "x",
+    podNamespace: null,
+    ...partial,
+  } as unknown as NodeInventoryEntry);
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  window.history.replaceState({}, "", "/");
+});
 
 describe("buildLauncherViews — the view library", () => {
   const slices = [{ name: "02-ride", missionId: "release-0.4.6", displayName: "02 ride" }];
@@ -59,6 +70,52 @@ describe("buildLauncherViews — the view library", () => {
     expect(views[0]).toMatchObject({ id: "rig:rig-1", kind: "rig", label: "acme" });
     expect(views[0]!.crossRig).toBeUndefined(); // a rig view is interactive
     expect(views[0]!.seats).toHaveLength(1); // infra excluded
+  });
+
+  it.each([null, ""])(
+    "resolves a missing caller name from the matching node and never labels the rig with its UUID (%j)",
+    (rigName) => {
+      const rigId = "00000000-0000-4000-8000-000000000042";
+      const views = buildLauncherViews({
+        nodes: [node({ rigId, rigName: "v-openrig-build" })],
+        rigId,
+        rigName,
+        slices: [],
+        savedViews: [],
+      });
+
+      expect(views[0]!.label).toBe("v-openrig-build");
+      expect(views[0]!.label).not.toContain(rigId);
+    },
+  );
+
+  it("keeps an explicit nonblank caller name ahead of the node fallback", () => {
+    const rigId = "00000000-0000-4000-8000-000000000042";
+    const views = buildLauncherViews({
+      nodes: [node({ rigId, rigName: "node-name" })],
+      rigId,
+      rigName: "summary-name",
+      slices: [],
+      savedViews: [],
+    });
+
+    expect(views[0]!.label).toBe("summary-name");
+  });
+
+  it("uses the exact honest unavailable label for mismatched or blank node names", () => {
+    const rigId = "00000000-0000-4000-8000-000000000042";
+    const views = buildLauncherViews({
+      nodes: [
+        node({ rigId: "00000000-0000-4000-8000-000000000099", rigName: "another-rig" }),
+        node({ rigId, rigName: "   " }),
+      ],
+      rigId,
+      rigName: " ",
+      slices: [],
+      savedViews: [],
+    });
+
+    expect(views[0]!.label).toBe("Rig name unavailable");
   });
 
   it("groups agents into pod views by podNamespace and names absent seats", () => {
@@ -159,5 +216,44 @@ describe("TerminalLauncher — mounts with its live hooks (collapsed)", () => {
     );
     const btn = screen.getByTestId("terminal-launcher-button");
     expect(btn.textContent).toContain("Open in terminal");
+  });
+
+  it("uses one resolved canonical label in the deep-linked header and rig row without exposing the UUID", () => {
+    const rigId = "00000000-0000-4000-8000-000000000042";
+    window.history.replaceState(
+      {},
+      "",
+      `/topology/rig/${rigId}?launcher=open&provider=cmux&view=${encodeURIComponent(`rig:${rigId}`)}`,
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+
+    render(
+      <QueryClientProvider client={qc}>
+        <TerminalLauncher rigId={rigId} rigName={null} />
+      </QueryClientProvider>,
+    );
+
+    const dialog = screen.getByTestId("terminal-launcher-dialog");
+    const rigRow = screen.getByTestId(`launcher-view-rig:${rigId}`);
+    expect(dialog.textContent).toContain("v-openrig-build · topology");
+    expect(rigRow.textContent).toContain("v-openrig-build");
+    expect(dialog.textContent).not.toContain(rigId);
+  });
+
+  it("keeps the deep-linked dialog inside a one-rem viewport inset with vertically reachable content", () => {
+    window.history.replaceState({}, "", "/topology/rig/rig-1?launcher=open");
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+
+    render(
+      <QueryClientProvider client={qc}>
+        <TerminalLauncher rigId="rig-1" rigName="acme-build" />
+      </QueryClientProvider>,
+    );
+
+    const classes = screen.getByTestId("terminal-launcher-dialog").className;
+    expect(classes).toContain("w-[calc(100vw-2rem)]");
+    expect(classes).toContain("max-h-[calc(100vh-2rem)]");
+    expect(classes).toContain("overflow-y-auto");
+    expect(classes).not.toContain("overflow-hidden");
   });
 });

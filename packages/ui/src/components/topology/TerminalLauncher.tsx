@@ -113,6 +113,21 @@ const KIND_GROUP: { heading: string; kinds: ViewKind[] }[] = [
   { heading: "Saved views", kinds: ["saved"] },
 ];
 
+const RIG_NAME_UNAVAILABLE = "Rig name unavailable";
+
+export function resolveLauncherRigName(input: {
+  nodes: NodeInventoryEntry[] | undefined;
+  rigId: string;
+  rigName?: string | null;
+}): string {
+  const explicitName = input.rigName?.trim();
+  if (explicitName) return explicitName;
+  const nodeName = input.nodes
+    ?.find((node) => node.rigId === input.rigId && typeof node.rigName === "string" && node.rigName.trim())
+    ?.rigName.trim();
+  return nodeName || RIG_NAME_UNAVAILABLE;
+}
+
 // Boot open/provider/view from the URL — the ratified deep-link capture method
 // (a capture is an honest deep link ?launcher=open&provider=cmux&view=…,
 // deterministic, no click scripts; also exactly what addressable UI state wants).
@@ -151,12 +166,13 @@ export function buildLauncherViews(input: {
   const { nodes, rigId, rigName, slices, savedViews } = input;
   const out: LauncherView[] = [];
   const agents = (nodes ?? []).filter((n) => n.nodeKind === "agent");
+  const resolvedRigName = resolveLauncherRigName({ nodes, rigId, rigName });
 
   // This rig — every live agent, interactive.
   out.push({
     id: `rig:${rigId}`,
     kind: "rig",
-    label: rigName ?? rigId,
+    label: resolvedRigName,
     sub: "All live agents in this rig",
     seats: agents.map(nodeToSeat),
   });
@@ -236,6 +252,7 @@ export function TerminalLauncher({ rigId, rigName }: TerminalLauncherProps) {
   );
 
   const selected = views.find((v) => v.id === selectedId) ?? views[0];
+  const resolvedRigName = views.find((view) => view.kind === "rig")?.label ?? RIG_NAME_UNAVAILABLE;
 
   // A derived view (mission/slice) previews its roster via the review band.
   const derivedScope = selected && (selected.kind === "mission" || selected.kind === "slice") ? selected.id : null;
@@ -284,7 +301,11 @@ export function TerminalLauncher({ rigId, rigName }: TerminalLauncherProps) {
           </button>
         </DialogTrigger>
 
-        <DialogContent hideCloseButton data-testid="terminal-launcher-dialog" className="max-w-xl gap-0 p-0 overflow-hidden">
+        <DialogContent
+          hideCloseButton
+          data-testid="terminal-launcher-dialog"
+          className="w-[calc(100vw-2rem)] max-w-xl max-h-[calc(100vh-2rem)] gap-0 p-0 overflow-y-auto"
+        >
           {/* Radix a11y: a Dialog needs an accessible title + description; the
               twin's visible header is a styled div, so these are sr-only —
               screen-reader-visible, pixel-identical to the locked frames. */}
@@ -299,7 +320,7 @@ export function TerminalLauncher({ rigId, rigName }: TerminalLauncherProps) {
               <span className="font-mono text-[11px] uppercase tracking-[0.18em]">Open terminal view</span>
             </div>
             <span className="font-mono text-[9px] uppercase tracking-[0.18em] text-stone-400">
-              {(rigName ?? rigId).replace(/^rig_/, "")} · topology
+              {resolvedRigName.replace(/^rig_/, "")} · topology
             </span>
           </div>
 
