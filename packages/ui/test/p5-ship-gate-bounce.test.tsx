@@ -112,7 +112,7 @@ describe("TopologyTableView P0-1 regression: no rules-of-hooks crash on first-re
     const { container } = withQueryClient(<TopologyTableView />, { selectedHost: "vps-a" });
     expect(container.querySelector("[data-testid='topology-table-view']")).toBeTruthy();
     await waitFor(() => {
-      expect(mockFetch).toHaveBeenCalledWith("/api/rigs/summary?host=vps-a");
+      expect(mockFetch).toHaveBeenCalledWith("/api/rigs/summary?host=vps-a", expect.objectContaining({ signal: expect.any(AbortSignal) }));
       expect(mockFetch).toHaveBeenCalledWith("/api/rigs/rig-1/nodes?host=vps-a");
     });
     expect(

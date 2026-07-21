@@ -9,10 +9,12 @@ import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
 import { projectRigToGraph, type InventoryOverlay, type CurrentQitemSummary } from "../domain/graph-projection.js";
 import {
   getNodeInventory,
+  getNodeInventoryForRigs,
   getNodeInventoryWithContext,
   attachAgentActivity,
   attachTerminalActivityAndWork,
 } from "../domain/node-inventory.js";
+import { projectionLane } from "../domain/projection-lane.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import type { SeatActivityService } from "../domain/seat-activity-service.js";
@@ -169,15 +171,24 @@ rigsRoutes.get("/summary", (c) => {
   // OPR.0.3.3.19 - default excludes archived; ?includeArchived=true / ?archived=only opt in.
   const includeArchived = c.req.query("includeArchived") === "true";
   const archivedOnly = c.req.query("archived") === "only";
-  const summaries = repo.getRigSummaries({ includeArchived, archivedOnly });
-  // Enrich with rig-level lifecycleState so CLI surfaces (rig up wording, recover vs
-  // turn-on) can choose the right operator action without a second round trip.
-  const enriched = summaries.map((s) => {
-    const inventory = getNodeInventory(repo.db, s.id);
-    const lifecycleState = deriveRigLifecycleState(inventory.map((e) => e.lifecycleState));
-    return { ...s, lifecycleState };
+  // slice-04: the WHOLE response (summaries + scoped inventory fold + enrichment +
+  // c.json) runs as ONE cooperative lane job shared with /api/ps, so a concurrent
+  // burst yields the event loop between jobs and /healthz stays responsive. Only the
+  // query flags are parsed before the lane.
+  //   - The inventory fold is SCOPED to the rigs THIS request returns (default
+  //     active-only; archived variants pass their archived rig-ids), so the per-node
+  //     fold never widens to excluded rigs — one fleet startup + one restore scan.
+  //   - Live per request; NO cache/staleness (getRigSummaries + fold read live db).
+  return projectionLane.run(() => {
+    const summaries = repo.getRigSummaries({ includeArchived, archivedOnly });
+    const invByRig = getNodeInventoryForRigs(repo.db, new Set(summaries.map((s) => s.id)));
+    const enriched = summaries.map((s) => {
+      const inventory = invByRig.get(s.id) ?? [];
+      const lifecycleState = deriveRigLifecycleState(inventory.map((e) => e.lifecycleState));
+      return { ...s, lifecycleState };
+    });
+    return c.json(enriched);
   });
-  return c.json(enriched);
 });
 
 // OPR.0.4.3.22 — GET /api/rigs/:id/status — the composed rig-status object.

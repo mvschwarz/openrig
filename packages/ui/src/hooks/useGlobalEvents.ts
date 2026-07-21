@@ -28,10 +28,26 @@ export function useGlobalEvents(): void {
         pendingInvalidations.add("rigs:summary");
         pendingInvalidations.add("ps");
       }
-      if (type === "restore.completed" && rigId) {
+      if (type === "restore.completed") {
+        // slice-04: ps + default-summary are AGGREGATE signals — queue them
+        // REGARDLESS of rigId (matching the prior ActivityFeed aggregate
+        // behavior). Only the rig-specific nodes key stays conditional on rigId.
         pendingInvalidations.add("rigs:summary");
         pendingInvalidations.add("ps");
-        pendingInvalidations.add(`rig:${rigId}:nodes`);
+        if (rigId) pendingInvalidations.add(`rig:${rigId}:nodes`);
+      }
+      // slice-04: useGlobalEvents (this one AppShell-mounted 150ms Set/timer) is
+      // now the SOLE coalesced owner of the ps + default-summary invalidations
+      // that ActivityFeed used to fire per-event. Rig-scoped graph/nodes/sessions
+      // + discovery invalidations stay in ActivityFeed (distinct-key semantics).
+      if (type === "node.claimed" && rigId) {
+        pendingInvalidations.add("rigs:summary");
+        pendingInvalidations.add("ps");
+      }
+      if (type === "session.detached" || type === "node.removed" ||
+          type === "pod.deleted" || type === "rig.expanded") {
+        pendingInvalidations.add("rigs:summary");
+        pendingInvalidations.add("ps");
       }
       // OPR.0.3.3.19 (AC-7): archive/unarchive move a rig between the default
       // view and the per-host Archive section. Refetch BOTH the default summary

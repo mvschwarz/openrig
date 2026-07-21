@@ -435,7 +435,7 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
  * The latest-session subquery (`s2.node_id = n.id ORDER BY id DESC LIMIT 1`)
  * rides the W1.1 index (051, idx_sessions_node_created_id).
  */
-function queryInventoryRows(db: Database.Database, rigId?: string): InventoryRow[] {
+function runInventoryRowQuery(db: Database.Database, whereClause: string, orderClause: string, params: readonly string[]): InventoryRow[] {
   // Join nodes with newest session (max ULID = max session.id string comparison)
   // and the rig name
   const hasCodexConfigProfile = db.prepare("PRAGMA table_info(nodes)").all()
@@ -481,10 +481,29 @@ function queryInventoryRows(db: Database.Database, rigId?: string): InventoryRow
     LEFT JOIN sessions s ON s.node_id = n.id
       AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
     LEFT JOIN bindings b ON b.node_id = n.id
-    ${rigId ? "WHERE n.rig_id = ?" : ""}
-    ORDER BY ${rigId ? "n.created_at" : "n.rig_id, n.created_at"}
+    ${whereClause}
+    ORDER BY ${orderClause}
   `);
-  return (rigId ? stmt.all(rigId) : stmt.all()) as InventoryRow[];
+  return stmt.all(...params) as InventoryRow[];
+}
+
+// Single-rig (WHERE n.rig_id=?) or ALL-rigs (no WHERE). Byte-identical SQL/order to
+// the prior inline read; existing single-rig callers are unchanged.
+function queryInventoryRows(db: Database.Database, rigId?: string): InventoryRow[] {
+  return runInventoryRowQuery(
+    db,
+    rigId ? "WHERE n.rig_id = ?" : "",
+    rigId ? "n.created_at" : "n.rig_id, n.created_at",
+    rigId ? [rigId] : [],
+  );
+}
+
+// Scoped to a rig-id SET — every IN value bound as a parameter; per-rig created_at
+// order preserved (same ORDER BY as the all-rigs path). Callers guarantee a
+// non-empty list (empty set → getNodeInventoryForRigs returns early, no query run).
+function queryInventoryRowsForRigs(db: Database.Database, rigIds: readonly string[]): InventoryRow[] {
+  const placeholders = rigIds.map(() => "?").join(", ");
+  return runInventoryRowQuery(db, `WHERE n.rig_id IN (${placeholders})`, "n.rig_id, n.created_at", rigIds);
 }
 
 /** Per-rig setup context an inventory row is built against. FS-1 W1.2: the
@@ -618,16 +637,22 @@ function readAllRigWorkspaceJson(db: Database.Database): Map<string, WorkspaceSp
  * derived. Per-node reads inside `buildInventoryEntry` (`deriveRestoreOutcome`
  * etc.) remain per-node and ride the 047 index — NOT the rig-level N+1 removed here.
  */
-export function getNodeInventoryForAllRigs(db: Database.Database): Map<string, NodeInventoryEntry[]> {
+// Shared batched builder — the common body of the all-rigs and scoped-rigs paths.
+// Builds the fleet setup maps + EXACTLY one fleet startup-orientation
+// (buildOrientedMap) and one fleet restore-outcome (buildRestoreOutcomeMap) scan
+// ONCE, then builds a NodeInventoryEntry for each PROVIDED row via the SAME
+// buildInventoryEntry, grouped by rig_id with per-rig created_at order preserved.
+// `rows` decides the scope (all rigs vs a selected rig set); entry derivation is
+// identical, so a rig's entries are byte-identical regardless of which caller ran.
+function buildInventoryMapFromRows(db: Database.Database, rows: InventoryRow[]): Map<string, NodeInventoryEntry[]> {
   const snapshotByRig = findLatestUsableSnapshotsForAllRigs(db);
   const workspaceByRig = readAllRigWorkspaceJson(db);
   const verdictsByRig = new SeatIdentityStore(db).getForAllRigs();
-  // FS-1 W1.3 S1/S2 — the per-node reads built ONCE for ALL rigs (O(1) queries,
-  // not O(nodes)). Restore map unscoped: a nodeId is referenced only by its own
-  // rig's restore events, so each node's value equals the single-rig path.
-  const restoreOutcomes = buildRestoreOutcomeMap(db);
-  const orienteds = buildOrientedMap(db);
-  const rows = queryInventoryRows(db);
+  // FS-1 W1.3 S1/S2 — the per-node reads built ONCE (O(1) queries, not O(nodes)).
+  // Restore map unscoped: a nodeId is referenced only by its own rig's restore
+  // events, so each node's value equals the single-rig path.
+  const restoreOutcomes = buildRestoreOutcomeMap(db); // one fleet restore-outcome scan
+  const orienteds = buildOrientedMap(db);             // one fleet startup-orientation scan
   const out = new Map<string, NodeInventoryEntry[]>();
   for (const row of rows) {
     const entry = buildInventoryEntry(db, row, {
@@ -642,6 +667,21 @@ export function getNodeInventoryForAllRigs(db: Database.Database): Map<string, N
     list.push(entry);
   }
   return out;
+}
+
+export function getNodeInventoryForAllRigs(db: Database.Database): Map<string, NodeInventoryEntry[]> {
+  return buildInventoryMapFromRows(db, queryInventoryRows(db));
+}
+
+// slice-04 — inventory for a SELECTED set of rigs only (e.g. the rigs a summary
+// actually returns), so the per-node fold never widens to rigs the caller excluded
+// (e.g. archived). Retains exactly one fleet startup-orientation + one fleet
+// restore-outcome scan via the shared builder. Empty set → empty Map, NO scans and
+// no invalid `IN ()`. getNodeInventoryForRigs(db, {r}).get(r) is byte-identical to
+// the all-rigs path's entry list for r (same rows, same builder).
+export function getNodeInventoryForRigs(db: Database.Database, rigIds: ReadonlySet<string>): Map<string, NodeInventoryEntry[]> {
+  if (rigIds.size === 0) return new Map();
+  return buildInventoryMapFromRows(db, queryInventoryRowsForRigs(db, [...rigIds]));
 }
 
 /** PL-007 — read the rig's typed workspace block from `rigs.workspace_json`

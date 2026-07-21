@@ -43,9 +43,8 @@ export function useActivityFeed(): UseActivityFeedResult {
     if (event.type === "package.installed" || event.type === "package.rolledback") {
       queryClient.invalidateQueries({ queryKey: ["packages"] });
     }
-    if (event.type === "bootstrap.completed" || event.type === "bootstrap.partial") {
-      queryClient.invalidateQueries({ queryKey: ["rigs", "summary"] });
-    }
+    // slice-04: ps + default-summary invalidations for bootstrap.completed/partial
+    // are now owned (150ms-coalesced) by useGlobalEvents; ActivityFeed no longer fires them.
     if (event.type === "session.discovered" || event.type === "session.vanished") {
       queryClient.invalidateQueries({ queryKey: ["discovery"] });
     }
@@ -64,8 +63,7 @@ export function useActivityFeed(): UseActivityFeedResult {
         queryClient.invalidateQueries({ queryKey: ["rig", rigId, "graph"] });
         queryClient.invalidateQueries({ queryKey: ["rig", rigId, "nodes"] });
         queryClient.invalidateQueries({ queryKey: ["rig", rigId, "sessions"] });
-        queryClient.invalidateQueries({ queryKey: ["rigs", "summary"] });
-        queryClient.invalidateQueries({ queryKey: ["ps"] });
+        // slice-04: ps + default-summary now owned by useGlobalEvents (coalesced).
       }
     }
 
@@ -87,8 +85,7 @@ export function useActivityFeed(): UseActivityFeedResult {
         queryClient.invalidateQueries({ queryKey: ["rig", rigId, "nodes"] });
         queryClient.invalidateQueries({ queryKey: ["rig", rigId, "sessions"] });
       }
-      queryClient.invalidateQueries({ queryKey: ["rigs", "summary"] });
-      queryClient.invalidateQueries({ queryKey: ["ps"] });
+      // slice-04: ps + default-summary now owned (coalesced) by useGlobalEvents.
     }
 
     // OPR.0.3.2.20 — keep the For You attention surface live without

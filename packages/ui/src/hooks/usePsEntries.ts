@@ -30,10 +30,12 @@ export interface PsEntry {
   latestSnapshot: string | null;
 }
 
-async function fetchPsEntries(hostId: string): Promise<PsEntry[]> {
+async function fetchPsEntries(hostId: string, signal?: AbortSignal): Promise<PsEntry[]> {
   // OPR.0.4.6.MH2 FR-2 — selected-host envelope; origin shape verbatim;
   // local path unchanged (withHostParam is identity for local).
-  const res = await fetch(withHostParam("/api/ps", hostId));
+  // slice-04: forward the TanStack query AbortSignal so superseded/cancelled
+  // fetches actually abort instead of piling up.
+  const res = await fetch(withHostParam("/api/ps", hostId), { signal });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -42,7 +44,7 @@ export function usePsEntries() {
   const hostId = useSelectedHostId();
   return useQuery({
     queryKey: ["ps", hostId],
-    queryFn: () => fetchPsEntries(hostId),
+    queryFn: ({ signal }) => fetchPsEntries(hostId, signal),
     refetchInterval: 3_000,
     placeholderData: keepPreviousData,
   });

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, cleanup, act } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { usePsEntries } from "../src/hooks/usePsEntries.js";
 import { useRigSummary } from "../src/hooks/useRigSummary.js";
 import { useArchivedRigs } from "../src/hooks/useArchivedRigs.js";
 import { useRigGraph } from "../src/hooks/useRigGraph.js";
@@ -222,5 +223,38 @@ describe("TanStack Query hooks", () => {
 
     await waitFor(() => expect(screen.getByTestId("status").textContent).toBe("success"));
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["rigs", "summary"] });
+  });
+
+  // slice-04 qitem-20260721000001-ps-stall-driver — U2 (regression pin; genuine RED
+  // at the test-only gate, green now): both the ps and default-summary queryFns
+  // forward the TanStack AbortSignal to fetch, and cancelQueries aborts it. Pre-fix,
+  // both queryFns called fetch(url) with no signal.
+  function PsSummaryHarness() {
+    usePsEntries();
+    useRigSummary();
+    return <div data-testid="ps-summary">mounted</div>;
+  }
+
+  it("U2 regression: usePsEntries + useRigSummary forward the AbortSignal to fetch and honor cancel", async () => {
+    mockFetch.mockImplementation(() => new Promise(() => {})); // never resolves -> queries stay pending
+    render(<Wrapper><PsSummaryHarness /></Wrapper>);
+
+    await waitFor(() => {
+      expect(mockFetch.mock.calls.some((c) => String(c[0]).includes("/api/ps"))).toBe(true);
+      expect(mockFetch.mock.calls.some((c) => String(c[0]).includes("/api/rigs/summary"))).toBe(true);
+    });
+
+    const psCall = mockFetch.mock.calls.find((c) => String(c[0]).includes("/api/ps"));
+    const sumCall = mockFetch.mock.calls.find((c) => String(c[0]).includes("/api/rigs/summary"));
+    const psSignal = (psCall?.[1] as { signal?: AbortSignal } | undefined)?.signal;
+    const sumSignal = (sumCall?.[1] as { signal?: AbortSignal } | undefined)?.signal;
+
+    // Genuine RED at the test-only gate; regression now. Pre-fix, fetch was called with no options/signal.
+    expect(psSignal).toBeInstanceOf(AbortSignal);
+    expect(sumSignal).toBeInstanceOf(AbortSignal);
+
+    await act(async () => { await qc.cancelQueries(); });
+    expect(psSignal?.aborted).toBe(true);
+    expect(sumSignal?.aborted).toBe(true);
   });
 });

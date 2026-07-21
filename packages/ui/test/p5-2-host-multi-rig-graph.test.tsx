@@ -286,7 +286,7 @@ describe("HostMultiRigGraph (P5.2-1 reachability — ritual #6)", () => {
     const { findByTestId } = withQueryClient(<HostMultiRigGraph />, { selectedHost: "vps-a" });
     expect(await findByTestId("host-multi-rig-graph")).toBeTruthy();
     await waitFor(() => {
-      expect(mockFetch).toHaveBeenCalledWith("/api/ps?host=vps-a");
+      expect(mockFetch).toHaveBeenCalledWith("/api/ps?host=vps-a", expect.objectContaining({ signal: expect.any(AbortSignal) }));
       expect(mockFetch).toHaveBeenCalledWith("/api/rigs/rig-1/graph?host=vps-a");
       expect(mockFetch).toHaveBeenCalledWith("/api/rigs/rig-2/graph?host=vps-a");
       expect(mockFetch).toHaveBeenCalledWith("/api/rigs/rig-3/graph?host=vps-a");
