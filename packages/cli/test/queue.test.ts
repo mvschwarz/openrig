@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { PassThrough } from "node:stream";
 import type { QueueDeps } from "../src/commands/queue.js";
 import { resolveQueueBody, previewBody } from "../src/commands/queue.js";
 import { createProgram } from "../src/index.js";
@@ -982,6 +983,281 @@ describe("rig queue CLI", () => {
       expect(printed).not.toHaveProperty("bodyBytes");
       expect(printed).not.toHaveProperty("bodyTruncated");
       expect(logs.join("\n")).not.toContain("truncated");
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // slice-08 OPR.0.4.7.8 — queue verb-surface body-input parity (TEST-ONLY RED).
+  // Production queue.ts is NOT edited yet; these pin the atomic-A contract so it
+  // fails today and passes after the four verbs route through the shipped
+  // resolveQueueBody. Anchors grounded at 4b05f970; locked spec sha b2db0f2b.
+  //
+  // Guard-ruled classification (honest, per-input):
+  //   GENUINE RED (fails today): --body-file exact POST ×4; --body - stdin exact
+  //     POST ×4; --help documents --body-file + stdin '-' ×4; command-neutral
+  //     resolver error wording.
+  //   PRESERVATION GREEN (must NOT regress): handoff/handoff-and-complete neither
+  //     → POST body undefined (source-body default); inbox-drop/outbox-record
+  //     neither → error + no POST (mechanism-neutral: Commander requiredOption
+  //     today, resolver reject tomorrow).
+  //   NEW-CAPABILITY GREEN: both sources → error + no POST (unknown-option today).
+  // Exact equality only for all 8 body transports; never length/contains.
+  // ───────────────────────────────────────────────────────────────────────────
+  describe("slice-08 OPR.0.4.7.8 — queue body-input parity", () => {
+    // Byte-discriminating body: multiline + Unicode + backticks — the exact
+    // corruption class file/stdin input kills.
+    const DISCRIMINATOR =
+      "line-1 `raw backticks`\nlíne-2 ünïcode ☑\n```bash\nrig queue handoff q --to x\n```\n";
+
+    // Command-level stdin harness (Guard-specified): swap process.stdin for an
+    // ended PassThrough carrying exact bytes; restore the ORIGINAL descriptor in
+    // finally. Node22 process.stdin is getter-only but configurable, so
+    // defineProperty is viable; a PassThrough is not a TTY so defaultStdinReader
+    // reads it to EOF instead of short-circuiting empty.
+    async function withStdin(bytes: string, fn: () => Promise<void>): Promise<void> {
+      const originalStdin = Object.getOwnPropertyDescriptor(process, "stdin");
+      const prevExit = process.exitCode;
+      const fake = new PassThrough();
+      fake.end(bytes);
+      Object.defineProperty(process, "stdin", { value: fake, configurable: true });
+      try {
+        await fn();
+      } finally {
+        // Restore BOTH globals this helper owns: the stdin descriptor and
+        // process.exitCode. If process had no own stdin descriptor originally,
+        // delete the temporary own property rather than leaving it installed.
+        if (originalStdin) Object.defineProperty(process, "stdin", originalStdin);
+        else delete (process as unknown as Record<string, unknown>).stdin;
+        process.exitCode = prevExit;
+        fake.destroy();
+      }
+    }
+
+    function verbSubcommand(program: ReturnType<typeof createProgram>, name: string) {
+      const queue = program.commands.find((c) => c.name() === "queue")!;
+      return queue.commands.find((c) => c.name() === name)!;
+    }
+
+    // Endpoints + required flags grounded at 4b05f970. `argv` is everything after
+    // `rig` except the body flags; `neither` is the verb's no-body contract.
+    const VERBS = [
+      {
+        name: "handoff",
+        argv: ["queue", "handoff", "q1", "--from", "a@rig", "--to", "b@rig"],
+        pathMatch: (p: string) => p === "/api/queue/q1/handoff",
+        neither: "undefined-body" as const,
+      },
+      {
+        name: "handoff-and-complete",
+        argv: ["queue", "handoff-and-complete", "q1", "--from", "a@rig", "--to", "b@rig"],
+        pathMatch: (p: string) => p === "/api/queue/q1/handoff-and-complete",
+        neither: "undefined-body" as const,
+      },
+      {
+        name: "inbox-drop",
+        argv: ["queue", "inbox-drop", "b@rig", "--sender", "a@rig"],
+        pathMatch: (p: string) => p === "/api/queue/inbox/drop",
+        neither: "reject" as const,
+      },
+      {
+        name: "outbox-record",
+        argv: ["queue", "outbox-record", "--sender", "a@rig", "--destination", "b@rig"],
+        pathMatch: (p: string) => p === "/api/queue/outbox/record",
+        neither: "reject" as const,
+      },
+    ];
+
+    // ── STEP 1: harness calibration on EXISTING create --body - (GREEN today).
+    // Proves the process.stdin swap technique works before it carries any RED.
+    it("CALIBRATION (green): create --body - consumes the stdin PassThrough as the exact POST body", async () => {
+      const { deps, calls } = makeDeps({
+        routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "q-cal", state: "pending" } } },
+      });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await withStdin(DISCRIMINATOR, async () => {
+        await program.parseAsync(["node", "rig", "queue", "create", "--source", "a@rig", "--destination", "b@rig", "--body", "-", "--json"]);
+      });
+      const post = calls.find((c) => c.path === "/api/queue/create");
+      expect(post, "create should POST after consuming stdin").toBeDefined();
+      expect((post!.body as Record<string, unknown>).body).toBe(DISCRIMINATOR);
+    });
+
+    // ── GENUINE RED ×4: --body-file exact POST body.
+    for (const v of VERBS) {
+      it(`RED: ${v.name} --body-file <path> POSTs the exact file bytes`, async () => {
+        const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `s08-${v.name}-file-`));
+        const bodyPath = path.join(tmp, "body.txt");
+        fs.writeFileSync(bodyPath, DISCRIMINATOR, "utf8");
+        const { deps, calls } = makeDeps();
+        const program = createProgram({ queueDeps: deps });
+        program.exitOverride();
+        try {
+          // Today --body-file is an unknown option on these verbs; catch the
+          // Commander rejection so the discriminator is the missing/incorrect
+          // POST body, not an uncaught parser throw.
+          try {
+            await program.parseAsync(["node", "rig", ...v.argv, "--body-file", bodyPath, "--json"]);
+          } catch {
+            /* expected Commander unknown-option today */
+          }
+          const post = calls.find((c) => v.pathMatch(c.path));
+          expect(post, `${v.name} should POST the file body`).toBeDefined();
+          expect((post!.body as Record<string, unknown>).body).toBe(DISCRIMINATOR);
+        } finally {
+          fs.rmSync(tmp, { recursive: true, force: true });
+        }
+      });
+    }
+
+    // ── GENUINE RED ×4: --body - stdin exact POST body.
+    for (const v of VERBS) {
+      it(`RED: ${v.name} --body - consumes stdin as the exact POST body`, async () => {
+        const { deps, calls } = makeDeps();
+        const program = createProgram({ queueDeps: deps });
+        program.exitOverride();
+        await withStdin(DISCRIMINATOR, async () => {
+          try {
+            await program.parseAsync(["node", "rig", ...v.argv, "--body", "-", "--json"]);
+          } catch {
+            /* no throw expected today (--body exists); guarded for symmetry */
+          }
+        });
+        const post = calls.find((c) => v.pathMatch(c.path));
+        expect(post, `${v.name} should POST after consuming stdin`).toBeDefined();
+        // Today this is the literal "-" (bodyBytes:1) — the exact silent-dash bug.
+        expect((post!.body as Record<string, unknown>).body).toBe(DISCRIMINATOR);
+      });
+    }
+
+    // ── GENUINE RED ×4: help documents --body-file + stdin '-'.
+    for (const v of VERBS) {
+      it(`RED: ${v.name} --help documents --body-file and stdin '-'`, () => {
+        const { deps } = makeDeps();
+        const program = createProgram({ queueDeps: deps });
+        const help = verbSubcommand(program, v.name).helpInformation();
+        expect(help, `${v.name} help should teach --body-file`).toContain("--body-file");
+        expect(help, `${v.name} help should teach stdin '-'`).toMatch(/stdin|read from stdin|use -/i);
+      });
+    }
+
+    // ── PRESERVATION GREEN ×2: handoff pair, neither → POST body undefined.
+    for (const v of VERBS.filter((x) => x.neither === "undefined-body")) {
+      it(`PRESERVE (green): ${v.name} with no body POSTs body undefined (source-body default)`, async () => {
+        const { deps, calls } = makeDeps();
+        const program = createProgram({ queueDeps: deps });
+        program.exitOverride();
+        try {
+          await program.parseAsync(["node", "rig", ...v.argv, "--json"]);
+        } catch {
+          /* not expected */
+        }
+        const post = calls.find((c) => v.pathMatch(c.path));
+        expect(post, `${v.name} should still POST with the source-body default`).toBeDefined();
+        expect((post!.body as Record<string, unknown>).body).toBeUndefined();
+      });
+    }
+
+    // ── PRESERVATION GREEN ×2: inbox/outbox, neither → error + no POST
+    // (mechanism-neutral across Commander requiredOption today and resolver reject later).
+    for (const v of VERBS.filter((x) => x.neither === "reject")) {
+      it(`PRESERVE (green): ${v.name} with no body errors and does NOT contact the daemon`, async () => {
+        const { deps, calls } = makeDeps();
+        const program = createProgram({ queueDeps: deps });
+        program.exitOverride();
+        const prevExit = process.exitCode;
+        process.exitCode = undefined;
+        let errored = false;
+        try {
+          await program.parseAsync(["node", "rig", ...v.argv, "--json"]);
+        } catch {
+          errored = true; // Commander requiredOption throws today
+        }
+        try {
+          expect(errored || process.exitCode === 1, `${v.name} should signal an error`).toBe(true);
+          expect(calls.find((c) => v.pathMatch(c.path)), `${v.name} must not POST`).toBeUndefined();
+        } finally {
+          process.exitCode = prevExit;
+        }
+      });
+    }
+
+    // ── NEW-CAPABILITY GREEN ×4: both sources → error + no POST
+    // (unknown-option today; resolver mutual-exclusion after A — either way no daemon contact).
+    for (const v of VERBS) {
+      it(`NEW-CAP (green): ${v.name} with both --body and --body-file errors and does NOT POST`, async () => {
+        const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `s08-${v.name}-both-`));
+        const bodyPath = path.join(tmp, "body.txt");
+        fs.writeFileSync(bodyPath, "x", "utf8");
+        const { deps, calls } = makeDeps();
+        const program = createProgram({ queueDeps: deps });
+        program.exitOverride();
+        const prevExit = process.exitCode;
+        process.exitCode = undefined;
+        let errored = false;
+        try {
+          await program.parseAsync(["node", "rig", ...v.argv, "--body", "inline", "--body-file", bodyPath, "--json"]);
+        } catch {
+          errored = true;
+        }
+        try {
+          expect(errored || process.exitCode === 1, `${v.name} should reject dual sources`).toBe(true);
+          expect(calls.find((c) => v.pathMatch(c.path)), `${v.name} must not POST`).toBeUndefined();
+        } finally {
+          process.exitCode = prevExit;
+          fs.rmSync(tmp, { recursive: true, force: true });
+        }
+      });
+    }
+
+    // ── GENUINE RED: shared resolver errors must be command-NEUTRAL.
+    // Today all four say "rig queue create did not run" — false once handoff/
+    // inbox/outbox share the helper. Pin generic wording; no stale "queue create".
+    it("RED: resolveQueueBody 'neither' error wording is command-neutral (no 'queue create')", async () => {
+      await expect(resolveQueueBody({})).rejects.toMatchObject({
+        consequence: expect.not.stringMatching(/queue create/i),
+      });
+    });
+
+    it("RED: resolveQueueBody 'both' error wording is command-neutral (no 'queue create')", async () => {
+      await expect(resolveQueueBody({ body: "x", bodyFile: "/tmp/y" })).rejects.toMatchObject({
+        consequence: expect.not.stringMatching(/queue create/i),
+      });
+    });
+
+    it("RED: resolveQueueBody missing-file error wording is command-neutral (no 'queue create')", async () => {
+      await expect(
+        resolveQueueBody({ bodyFile: "/tmp/s08-does-not-exist-neutral-wording.md" }),
+      ).rejects.toMatchObject({
+        consequence: expect.not.stringMatching(/queue create/i),
+      });
+    });
+
+    // BLOCKER-1 fix: the FOURTH stale consequence — the not-a-regular-file /
+    // directory branch — was unguarded. A negative search found FOUR 'rig queue
+    // create did not run' occurrences; the packet must pin all four, not three.
+    it("RED: resolveQueueBody not-a-regular-file error wording is command-neutral (no 'queue create')", async () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "s08-notregular-wording-"));
+      try {
+        await expect(resolveQueueBody({ bodyFile: tmp })).rejects.toMatchObject({
+          consequence: expect.not.stringMatching(/queue create/i),
+        });
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    // BLOCKER-2 fix: the gate required generic BODY guidance, not only the
+    // consequence. The neither ACTION today is "Pass the qitem body via …",
+    // which is false for inbox/outbox records. It must teach --body/--body-file
+    // and stay generic — no 'qitem'. Phrasing-tolerant (no exact-prose lock).
+    it("RED: resolveQueueBody 'neither' action gives generic body guidance (no 'qitem')", async () => {
+      await expect(resolveQueueBody({})).rejects.toMatchObject({
+        action: expect.stringMatching(/--body\b|--body-file/),
+      });
+      await expect(resolveQueueBody({})).rejects.toMatchObject({
+        action: expect.not.stringMatching(/qitem/i),
+      });
     });
   });
 });

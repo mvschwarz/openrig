@@ -131,15 +131,15 @@ export async function resolveQueueBody(
   if (hasInline && hasFile) {
     const err = new Error("--body and --body-file are mutually exclusive.") as Error & { fact?: string; consequence?: string; action?: string };
     err.fact = "Both --body and --body-file were passed; the body source is ambiguous.";
-    err.consequence = "rig queue create did not run; daemon was not contacted.";
+    err.consequence = "The queue command did not run; the daemon was not contacted.";
     err.action = "Pass exactly one of --body or --body-file.";
     throw err;
   }
   if (!hasInline && !hasFile) {
     const err = new Error("Missing required body input.") as Error & { fact?: string; consequence?: string; action?: string };
     err.fact = "Neither --body nor --body-file was provided.";
-    err.consequence = "rig queue create did not run; daemon was not contacted.";
-    err.action = "Pass the qitem body via --body \"<text>\" or --body-file <path> (use - for stdin).";
+    err.consequence = "The queue command did not run; the daemon was not contacted.";
+    err.action = "Pass the body via --body \"<text>\" or --body-file <path> (use - for stdin).";
     throw err;
   }
   if (hasInline) {
@@ -152,7 +152,7 @@ export async function resolveQueueBody(
   if (!fs.existsSync(absPath)) {
     const err = new Error(`--body-file path does not exist: ${absPath}`) as Error & { fact?: string; consequence?: string; action?: string };
     err.fact = `--body-file path does not exist: ${absPath}`;
-    err.consequence = "rig queue create did not run; daemon was not contacted.";
+    err.consequence = "The queue command did not run; the daemon was not contacted.";
     err.action = "Check the path; pass an absolute path; or use --body-file - to read from stdin.";
     throw err;
   }
@@ -160,7 +160,7 @@ export async function resolveQueueBody(
   if (!stat.isFile()) {
     const err = new Error(`--body-file path is not a regular file: ${absPath}`) as Error & { fact?: string; consequence?: string; action?: string };
     err.fact = `--body-file path is not a regular file: ${absPath}`;
-    err.consequence = "rig queue create did not run; daemon was not contacted.";
+    err.consequence = "The queue command did not run; the daemon was not contacted.";
     err.action = "Pass a path to a readable file (not a directory, symlink-to-directory, or block device). Use --body-file - to read from stdin.";
     throw err;
   }
@@ -541,7 +541,8 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .description("Transactional handoff: closes source as handed-off + creates new qitem owned by --to")
     .option("--from <session>", "Source seat handing off (defaults to OPENRIG_SESSION_NAME)")
     .requiredOption("--to <session>", "Destination seat receiving the new qitem")
-    .option("--body <text>", "New qitem body (defaults to source body)")
+    .option("--body <text>", "New qitem body inline (use - to read from stdin; mutually exclusive with --body-file). Omit both to keep the source body.")
+    .option("--body-file <path>", "Read the new qitem body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class.")
     .option("--note <text>", "Transition note")
     .option("--priority <priority>", "Override priority for the new qitem")
     .option("--tier <tier>", "Override tier for the new qitem")
@@ -557,6 +558,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       from?: string;
       to: string;
       body?: string;
+      bodyFile?: string;
       note?: string;
       priority?: string;
       tier?: string;
@@ -571,6 +573,19 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     }) => {
       const from = resolveCurrentSession(opts.from, "from");
       if (!from) return;
+      // slice-08 OPR.0.4.7.8 — body-input parity. Resolve through the shipped
+      // resolveQueueBody ONLY when a body source is supplied; neither preserves
+      // today's source-body default (POST body undefined). Both/invalid reject
+      // BEFORE any daemon contact, mirroring create.
+      let resolvedBody: string | undefined;
+      if (opts.body !== undefined || opts.bodyFile !== undefined) {
+        try {
+          resolvedBody = await resolveQueueBody({ body: opts.body, bodyFile: opts.bodyFile });
+        } catch (err) {
+          emitBodyResolveError(err as Error & { fact?: string; consequence?: string; action?: string }, opts.json ?? false);
+          return;
+        }
+      }
       // OPR.0.4.6.MH3 D-3 (C3): the host qualifier resolves at the CLI edge
       // (applies to the DESTINATION --to only; --from stays as given).
       const hostResolved = resolveQueueHostDestination(opts.to, opts.host);
@@ -599,7 +614,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/handoff`, {
           fromSession: from,
           toSession: hostResolved.destination,
-          body: opts.body,
+          body: resolvedBody,
           summary: opts.summary,
           evidenceRef: opts.evidenceRef,
           transitionNote: opts.note,
@@ -621,7 +636,8 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     )
     .option("--from <session>", "Source seat handing off (defaults to OPENRIG_SESSION_NAME)")
     .requiredOption("--to <session>", "Destination seat receiving the new qitem")
-    .option("--body <text>", "New qitem body (defaults to source body)")
+    .option("--body <text>", "New qitem body inline (use - to read from stdin; mutually exclusive with --body-file). Omit both to keep the source body.")
+    .option("--body-file <path>", "Read the new qitem body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class.")
     .option("--note <text>", "Transition note")
     .option("--priority <priority>", "Override priority for the new qitem")
     .option("--tier <tier>", "Override tier for the new qitem")
@@ -637,6 +653,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       from?: string;
       to: string;
       body?: string;
+      bodyFile?: string;
       note?: string;
       priority?: string;
       tier?: string;
@@ -651,6 +668,18 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     }) => {
       const from = resolveCurrentSession(opts.from, "from");
       if (!from) return;
+      // slice-08 OPR.0.4.7.8 — body-input parity (same contract as handoff):
+      // resolve only when a body source is supplied; neither keeps the
+      // source-body default; both/invalid reject before daemon contact.
+      let resolvedBody: string | undefined;
+      if (opts.body !== undefined || opts.bodyFile !== undefined) {
+        try {
+          resolvedBody = await resolveQueueBody({ body: opts.body, bodyFile: opts.bodyFile });
+        } catch (err) {
+          emitBodyResolveError(err as Error & { fact?: string; consequence?: string; action?: string }, opts.json ?? false);
+          return;
+        }
+      }
       // OPR.0.4.6.MH3 D-3 (C3): same edge resolution as handoff.
       const hostResolved = resolveQueueHostDestination(opts.to, opts.host);
       if (!hostResolved.ok) {
@@ -678,7 +707,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/handoff-and-complete`, {
           fromSession: from,
           toSession: hostResolved.destination,
-          body: opts.body,
+          body: resolvedBody,
           summary: opts.summary,
           evidenceRef: opts.evidenceRef,
           transitionNote: opts.note,
@@ -877,7 +906,8 @@ Examples:
     .command("inbox-drop <destinationSession>")
     .description("Drop a mailbox-style entry into a destination's inbox")
     .requiredOption("--sender <session>", "Sender session")
-    .requiredOption("--body <text>", "Inbox body")
+    .option("--body <text>", "Inbox body inline (use - to read from stdin; mutually exclusive with --body-file).")
+    .option("--body-file <path>", "Read the inbox body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class.")
     .option("--tags <tags>", "Comma-separated tags")
     .option("--urgency <urgency>", "routine | urgent | critical", "routine")
     .option("--audit <pointer>", "Audit pointer reference")
@@ -885,13 +915,24 @@ Examples:
     .option("--json", "JSON output for agents")
     .action(async (destinationSession: string, opts: {
       sender: string;
-      body: string;
+      body?: string;
+      bodyFile?: string;
       tags?: string;
       urgency: string;
       audit?: string;
       id?: string;
       json?: boolean;
     }) => {
+      // slice-08 OPR.0.4.7.8 — inbox-drop ALWAYS resolves body through the
+      // shipped resolveQueueBody (no source-body default here): neither and
+      // both reject BEFORE daemon contact; --body -/--body-file - read stdin.
+      let resolvedBody: string;
+      try {
+        resolvedBody = await resolveQueueBody({ body: opts.body, bodyFile: opts.bodyFile });
+      } catch (err) {
+        emitBodyResolveError(err as Error & { fact?: string; consequence?: string; action?: string }, opts.json ?? false);
+        return;
+      }
       const deps = getDeps();
       const tags = opts.tags ? opts.tags.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
       await withClient(deps, async (client) => {
@@ -899,7 +940,7 @@ Examples:
           inboxId: opts.id,
           destinationSession,
           senderSession: opts.sender,
-          body: opts.body,
+          body: resolvedBody,
           tags,
           urgency: opts.urgency,
           auditPointer: opts.audit,
@@ -960,7 +1001,8 @@ Examples:
     .description("Record an outbound dispatch in the sender's outbox")
     .requiredOption("--sender <session>", "Sender session")
     .requiredOption("--destination <session>", "Destination session")
-    .requiredOption("--body <text>", "Body")
+    .option("--body <text>", "Outbox body inline (use - to read from stdin; mutually exclusive with --body-file).")
+    .option("--body-file <path>", "Read the outbox body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class.")
     .option("--tags <tags>", "Comma-separated tags")
     .option("--urgency <urgency>", "routine | urgent | critical", "routine")
     .option("--audit <pointer>", "Audit pointer reference")
@@ -969,13 +1011,24 @@ Examples:
     .action(async (opts: {
       sender: string;
       destination: string;
-      body: string;
+      body?: string;
+      bodyFile?: string;
       tags?: string;
       urgency: string;
       audit?: string;
       id?: string;
       json?: boolean;
     }) => {
+      // slice-08 OPR.0.4.7.8 — outbox-record ALWAYS resolves body through the
+      // shipped resolveQueueBody (no source-body default): neither and both
+      // reject BEFORE daemon contact; --body -/--body-file - read stdin.
+      let resolvedBody: string;
+      try {
+        resolvedBody = await resolveQueueBody({ body: opts.body, bodyFile: opts.bodyFile });
+      } catch (err) {
+        emitBodyResolveError(err as Error & { fact?: string; consequence?: string; action?: string }, opts.json ?? false);
+        return;
+      }
       const deps = getDeps();
       const tags = opts.tags ? opts.tags.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
       await withClient(deps, async (client) => {
@@ -983,7 +1036,7 @@ Examples:
           outboxId: opts.id,
           senderSession: opts.sender,
           destinationSession: opts.destination,
-          body: opts.body,
+          body: resolvedBody,
           tags,
           urgency: opts.urgency,
           auditPointer: opts.audit,
