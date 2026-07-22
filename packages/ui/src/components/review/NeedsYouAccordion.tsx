@@ -15,7 +15,7 @@ import { cn } from "../../lib/utils.js";
 import { VELLUM_CARD } from "./vellum.js";
 import type { NeedsYouBand, NeedsYouItem } from "../../hooks/useReview.js";
 import { EvidenceOpener, type EvidenceContext } from "./EvidenceOpener.js";
-import { approveSlice, type ActionOutcome } from "./review-actions.js";
+import { approveSlice, sliceScopePath, type ActionOutcome } from "./review-actions.js";
 import { buildChatPreamble } from "./chat.js";
 import { ProgressiveTerminal } from "../terminal/ProgressiveTerminal.js";
 import { useInvalidateReview } from "../../hooks/useReview.js";
@@ -31,12 +31,14 @@ function ageLabel(iso: string | null): string {
 function ExpandedCard({
   item,
   slice,
+  missionId,
   actorSession,
   ctx,
   showApprove = true,
 }: {
   item: NeedsYouItem;
   slice: string;
+  missionId: string | null;
   actorSession: string;
   ctx: EvidenceContext;
   showApprove?: boolean;
@@ -51,7 +53,9 @@ function ExpandedCard({
   const onApprove = async () => {
     // APPROVE maps to FAITHFUL (the slice-terminal approve verb / adjudication
     // semantics — the FR-2 write paths, unchanged; never a synthetic qitem).
-    const result = await approveSlice(slice, actorSession);
+    // slice-04 REV6: shared derivation — send the missions-root-relative
+    // <mission>/slices/<slice> (bare only for a legacy root slice, missionId null).
+    const result = await approveSlice(sliceScopePath(missionId, slice), actorSession);
     setOutcome(result);
     if (result.ok) invalidate(); // rows must actually LEAVE the band (FR-4)
   };
@@ -133,6 +137,7 @@ function ExpandedCard({
 export function NeedsYouAccordion({
   band,
   slice,
+  missionId,
   actorSession,
   ctx,
   anchorIdentity,
@@ -140,6 +145,9 @@ export function NeedsYouAccordion({
 }: {
   band: NeedsYouBand;
   slice: string;
+  /** slice-04 REV6 — the slice's mission (null for a legacy root slice), used to
+   *  compose the missions-root-relative approve scopePath via sliceScopePath. */
+  missionId: string | null;
   actorSession: string;
   ctx: EvidenceContext;
   /** FR-9 deep link: auto-expand this identity on load. */
@@ -178,7 +186,7 @@ export function NeedsYouAccordion({
                 {item.priority ? <span className="font-mono text-[10px] uppercase">{item.priority}</span> : null}
               </button>
               {expanded === item.identity ? (
-                <ExpandedCard item={item} slice={slice} actorSession={actorSession} ctx={ctx} showApprove={showApprove} />
+                <ExpandedCard item={item} slice={slice} missionId={missionId} actorSession={actorSession} ctx={ctx} showApprove={showApprove} />
               ) : null}
             </li>
           ))}

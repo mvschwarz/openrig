@@ -131,6 +131,7 @@ export function RigAgentsPage() {
       <NeedsYouAccordion
         band={data.needsYou}
         slice="rig"
+        missionId={null}
         actorSession={SURFACE_ACTOR}
         ctx={RIG_EVIDENCE_CTX}
         showApprove={false}

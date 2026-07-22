@@ -24,7 +24,7 @@ import {
 } from "../../hooks/useReview.js";
 import { AgentsBandView } from "./AgentsBandView.js";
 import { VerifyLineageCard } from "./VerifyLineageCard.js";
-import { approveSlice, type ActionOutcome } from "./review-actions.js";
+import { approveSlice, sliceScopePath, type ActionOutcome } from "./review-actions.js";
 import { buildChatPreamble } from "./chat.js";
 import { ProgressiveTerminal } from "../terminal/ProgressiveTerminal.js";
 import { useInvalidateReview } from "../../hooks/useReview.js";
@@ -58,7 +58,10 @@ function BoardRowExpansion({ slot }: { slot: BoardSlot }) {
   const chatSession = d.agents.rows[0]?.sessionName ?? null;
 
   const onApprove = async () => {
-    const result = await approveSlice(d.slice, SURFACE_ACTOR);
+    // slice-04 REV6: the scope-approve contract is missions-root-relative
+    // <mission>/slices/<slice>; the mission board must send the composed path
+    // (bare slice name 404s — it is not a root slice). Shared derivation.
+    const result = await approveSlice(sliceScopePath(d.missionId, d.slice), SURFACE_ACTOR);
     setOutcome(result);
     if (result.ok) invalidate();
   };

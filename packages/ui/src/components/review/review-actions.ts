@@ -49,13 +49,28 @@ async function post(url: string, body: unknown): Promise<ActionOutcome> {
  * approvalScope — rev1-r2 fixback at d6135921; the earlier guessed field
  * names failed the real route's scope_tier_invalid validation).
  */
-export function approveSlice(slice: string, actor: string, scope: "spec" | "delivery" = "delivery"): Promise<ActionOutcome> {
+export function approveSlice(scopePath: string, actor: string, scope: "spec" | "delivery" = "delivery"): Promise<ActionOutcome> {
   return post("/api/scope/approve", {
     scopeTier: "slice",
-    scopePath: slice,
+    scopePath,
     actorSession: actor,
     approvalScope: scope,
   });
+}
+
+/**
+ * slice-04 REV6 — the ONE derivation of the scope-approve caller value, shared by
+ * EVERY nested approve control (mission board + slice NEEDS YOU) so they cannot
+ * drift. The daemon contract (routes/scope-approve.ts) is a missions-root-RELATIVE
+ * path `<mission>/slices/<slice>`; a bare slice name is the legacy root-slice
+ * fallback (missionId null/absent). This is a pure API value — NEVER an absolute
+ * filesystem path (e.g. SliceDetail.slicePath): the route (path.resolve +
+ * containment) would accept and canonicalize a contained absolute path, so this is
+ * not about a 404 — it is that an absolute path couples the API value to host-local
+ * filesystem identity and violates the missions-root-relative scopePath contract.
+ */
+export function sliceScopePath(missionId: string | null | undefined, slice: string): string {
+  return missionId ? `${missionId}/slices/${slice}` : slice;
 }
 
 /**
