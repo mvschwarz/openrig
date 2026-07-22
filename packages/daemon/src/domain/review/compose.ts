@@ -1198,7 +1198,7 @@ export function composeSliceReview(inputs: SliceComposeInputs): ComposedSliceRev
       ageIso: null,
       priority: "high",
       tier: null,
-      evidenceRef: `${sliceRef}/PROOF.md`,
+      evidenceRef: "PROOF.md",
       unblocks: `${slice.name} green (regime 2)`,
       qitemId: null,
       destinationSession: null,

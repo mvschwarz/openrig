@@ -189,6 +189,12 @@ describe("FR-2 — pass-mapping + recorded verdicts", () => {
     expect(cf).toBeDefined();
     expect(cf!.summary).toBe("confirm this proof is faithful");
     expect(r.delivered.items.every((it) => it.verified === "missing")).toBe(true);
+    // slice-04 REV6 (qitem-20260722114922): the confirm-faithful evidenceRef is a
+    // SLICE-RELATIVE ref (EvidenceOpener joins the current slice-dir relPath, like
+    // every other proof ref). It must be exactly "PROOF.md" — emitting the full
+    // mission-relative "<mission>/slices/<slice>/PROOF.md" duplicates the slice path
+    // in the opener and 404s. GENUINE RED until compose.ts emits slice-relative.
+    expect(cf!.evidenceRef).toBe("PROOF.md");
   });
 
   it("incidental PASS words in a pending PROOF.md do not count as a self-claim", () => {

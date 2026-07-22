@@ -13,8 +13,12 @@ import React from "react";
 import { approveSlice } from "../src/components/review/review-actions.js";
 import { EvidenceOpener, evidenceRefContained } from "../src/components/review/EvidenceOpener.js";
 
+// slice-04 REV6 — a capturing double so the opener pins can read the composed
+// data.readPath. The opener is NOT changed; this only surfaces its output.
 vi.mock("../src/components/drawer-triggers/FileReferenceTrigger.js", () => ({
-  FileReferenceTrigger: () => null,
+  FileReferenceTrigger: ({ data, testId, children }: { data: { readPath?: string; kind?: string }; testId?: string; children?: React.ReactNode }) => (
+    <span data-testid={testId} data-readpath={data?.readPath ?? ""} data-kind={data?.kind ?? ""}>{children}</span>
+  ),
 }));
 
 vi.mock("../src/components/project/ArtifactsNavigator.js", () => ({
@@ -83,5 +87,22 @@ describe("EvidenceOpener — slice-boundary containment", () => {
     render(<EvidenceOpener evidenceRef="../sibling-evidence/" ctx={ctx} testId="ev2" />);
     expect(screen.getByTestId("ev2-outside-scope")).toBeTruthy();
     expect(document.querySelector("button")).toBeNull(); // no folder-open affordance
+  });
+
+  // slice-04 REV6 (qitem-20260722114922) — pre-fix GREEN characterization pins:
+  // the opener joins the current slice-dir relPath with a SLICE-RELATIVE ref
+  // exactly once. These prove the opener is correct/unchanged; the defect is that
+  // the composer emitted a mission-relative confirm-faithful ref (pinned RED in
+  // review-composer.test.ts), NOT any opener behavior.
+  it("R2 pin (GREEN): a slice-relative PROOF.md resolves the canonical slice path exactly once (never duplicated)", () => {
+    render(<EvidenceOpener evidenceRef="PROOF.md" ctx={ctx} testId="cf" />);
+    const readPath = screen.getByTestId("cf-md").getAttribute("data-readpath");
+    expect(readPath).toBe("missions/m/slices/s/PROOF.md");
+    expect(readPath).not.toBe("missions/m/slices/s/missions/m/slices/s/PROOF.md");
+  });
+
+  it("R3 pin (GREEN): an ordinary slice-relative proof/qa.md is preserved/openable, unchanged", () => {
+    render(<EvidenceOpener evidenceRef="proof/qa.md" ctx={ctx} testId="pq" />);
+    expect(screen.getByTestId("pq-md").getAttribute("data-readpath")).toBe("missions/m/slices/s/proof/qa.md");
   });
 });
