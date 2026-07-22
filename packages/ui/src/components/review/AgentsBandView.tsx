@@ -106,6 +106,7 @@ export function AgentsBandView({
   band,
   itemRef,
   grouping = "agent",
+  previewLimit,
 }: {
   band: AgentsBand;
   itemRef: string;
@@ -115,16 +116,21 @@ export function AgentsBandView({
    *  grouped under each slice they hold work on — membership stays
    *  work-on-scope, never rig co-residency (the data already guarantees it). */
   grouping?: "agent" | "slice";
+  /** Mission altitude keeps ownership visible without letting a large queue
+   *  ledger dominate the page. Only the remainder is disclosed. */
+  previewLimit?: number;
 }) {
+  const visibleRows = previewLimit === undefined ? band.rows : band.rows.slice(0, previewLimit);
+  const overflowRows = previewLimit === undefined ? [] : band.rows.slice(previewLimit);
   const groups: Array<{ label: string | null; rows: typeof band.rows }> =
-    grouping === "slice" && band.rows.length > 0
-      ? [...new Set(band.rows.flatMap((r) => (r.slices.length > 0 ? r.slices : ["(no slice)"])))]
+    grouping === "slice" && visibleRows.length > 0
+      ? [...new Set(visibleRows.flatMap((r) => (r.slices.length > 0 ? r.slices : ["(no slice)"])))]
           .sort()
           .map((slice) => ({
             label: slice,
-            rows: band.rows.filter((r) => (r.slices.length > 0 ? r.slices.includes(slice) : slice === "(no slice)")),
+            rows: visibleRows.filter((r) => (r.slices.length > 0 ? r.slices.includes(slice) : slice === "(no slice)")),
           }))
-      : [{ label: null, rows: band.rows }];
+      : [{ label: null, rows: visibleRows }];
 
   return (
     <section id="agents" data-testid="agents-band" className={cn(VELLUM_CARD, "space-y-1 p-2")}>
@@ -140,22 +146,42 @@ export function AgentsBandView({
           {band.provenance}
         </p>
       ) : (
-        groups.map((group) => (
-        <div key={group.label ?? "__flat"}>
-        {group.label ? (
-          <p data-testid={`agents-group-${group.label}`} className="mt-1 font-mono text-[10px] uppercase text-on-surface-variant">
-            {group.label}
-          </p>
-        ) : null}
-        <ul className="divide-y divide-outline-variant/50 border border-outline-variant">
-          {group.rows.map((row) => {
-            const rowInstanceKey = `${group.label ?? "__flat"}:${row.sessionName}`;
-            return <AgentRowItem key={rowInstanceKey} row={row} rowInstanceKey={rowInstanceKey} bandScope={band.scope} itemRef={itemRef} />;
-          })}
-        </ul>
+        <div data-testid={previewLimit === undefined ? undefined : "agents-visible"}>
+          {groups.map((group) => (
+            <div key={group.label ?? "__flat"}>
+              {group.label ? (
+                <p data-testid={`agents-group-${group.label}`} className="mt-1 font-mono text-[10px] uppercase text-on-surface-variant">
+                  {group.label}
+                </p>
+              ) : null}
+              <ul className="divide-y divide-outline-variant/50 border border-outline-variant">
+                {group.rows.map((row) => {
+                  const rowInstanceKey = `${group.label ?? "__flat"}:${row.sessionName}`;
+                  return <AgentRowItem key={rowInstanceKey} row={row} rowInstanceKey={rowInstanceKey} bandScope={band.scope} itemRef={itemRef} />;
+                })}
+              </ul>
+            </div>
+          ))}
         </div>
-        ))
       )}
+      {overflowRows.length > 0 ? (
+        <details data-testid="agents-overflow" className="border border-outline-variant">
+          <summary className="cursor-pointer px-2 py-1.5 font-mono text-[10px] text-on-surface-variant">
+            +{overflowRows.length} more queue-scoped agents
+          </summary>
+          <ul className="divide-y divide-outline-variant/50 border-t border-outline-variant">
+            {overflowRows.map((row) => (
+              <AgentRowItem
+                key={`__overflow:${row.sessionName}`}
+                row={row}
+                rowInstanceKey={`__overflow:${row.sessionName}`}
+                bandScope={band.scope}
+                itemRef={itemRef}
+              />
+            ))}
+          </ul>
+        </details>
+      ) : null}
       {band.rows.length > 0 ? (
         <p className="font-mono text-[10px] text-on-surface-variant">{band.provenance}</p>
       ) : null}

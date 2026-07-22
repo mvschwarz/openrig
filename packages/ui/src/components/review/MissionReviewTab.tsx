@@ -354,23 +354,18 @@ export function MissionReviewTab({ missionId }: { missionId: string }) {
 
       {/* Delta-A: the mission AGENTS band, directly below NEEDS YOU, at
           mission:<id> scope — rows + zoom only, never embedded slice pages. */}
-      <AgentsBandView band={data.agents} itemRef={data.mission} />
+      <div className="space-y-1" data-testid="mission-agents-preview">
+        <AgentsBandView band={data.agents} itemRef={data.mission} previewLimit={6} />
+        <a
+          href="/agents"
+          className="font-mono text-[10px] uppercase text-on-surface-variant underline-offset-2 hover:underline"
+        >
+          all agents ↗
+        </a>
+      </div>
 
       <Board review={data} />
       <Ledger review={data} />
-
-      {/* FR-8: the generated status spine — always-fresh in-tab projection of
-          the SAME composer queries; the file version lands only at freeze
-          moments (zero writes from rendering this). */}
-      <section data-testid="brief-spine" className="space-y-2">
-        <h3 className="font-mono text-[10px] uppercase tracking-wide text-on-surface-variant">BRIEF SPINE (generated)</h3>
-        {(["building", "progress", "proven", "needsYou"] as const).map((k) => (
-          <div key={k} className="border border-outline-variant p-2">
-            <h4 className="font-mono text-[9px] uppercase text-on-surface-variant">{k === "needsYou" ? "Needs you" : k}</h4>
-            <pre className="whitespace-pre-wrap break-words text-[11px]">{data.briefSpine[k]}</pre>
-          </div>
-        ))}
-      </section>
     </div>
   );
 }

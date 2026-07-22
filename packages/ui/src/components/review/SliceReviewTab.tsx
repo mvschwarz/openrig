@@ -178,6 +178,8 @@ function DeliveredSection({ d, ctx }: { d: ComposedSliceReview["delivered"]; ctx
                         <InlineMedia key={j} media={m} ctx={ctx} full />
                       ))}
                     </div>
+                  ) : item.verified === "verified" && item.note ? (
+                    <p className="font-mono text-[11px] text-on-surface-variant">✓ verified by artifact; no media attached</p>
                   ) : (
                     <p className="font-mono text-[11px] text-on-surface-variant">— nothing delivered for this item</p>
                   )}
@@ -251,10 +253,6 @@ export function SliceReviewTab({
 
   return (
     <div data-testid="slice-review-tab" className="space-y-5">
-      <p className="font-mono text-[10px] uppercase tracking-wide text-on-surface-variant">
-        lane {data.laneLabel} · composed {data.composedAt}
-      </p>
-
       {data.defects.length > 0 ? (
         <section data-testid="review-defects" className="border border-red-300 bg-red-50 p-2 dark:bg-red-950/40">
           <ul className="space-y-0.5 font-mono text-[10px] text-red-800 dark:text-red-300">
