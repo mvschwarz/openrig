@@ -140,6 +140,55 @@ describe("flagship attempt-0003 Review polish", () => {
     expect(open.textContent).not.toMatch(/nothing delivered/i);
   });
 
+  // slice-04 REV6 (qitem-20260722121455-3f43040c) — render honesty. Per
+  // composeDelivered, `unverified` = covering.length>0 with NO PASSING recorded
+  // comparison, so an artifact was DELIVERED even when proof=[] and note is absent.
+  // The expanded fallback must read "artifact recorded / no media", NEVER "nothing
+  // delivered" (only `missing` keeps that phrase); and the unverified BADGE must say
+  // "no PASSING QA comparison", not "no recorded QA comparison" (a non-passing
+  // comparison may exist and produce the note).
+  const deliveredUnverified = (note?: string) => ({
+    delivered: {
+      items: [{ promised: { text: "Blocked outcome" }, proof: [], verified: "unverified" as const, ...(note ? { note } : {}) }],
+      extraProof: [], lock: null, proofDirPath: null,
+    },
+  });
+
+  it("REV6 RED: unverified + real non-passing note renders artifact-recorded/no-media (never 'nothing delivered'), keeps the note, badge says no PASSING comparison", () => {
+    sliceState.data = sliceReview(deliveredUnverified("The comparison was kicked back; remediation is required."));
+    render(withQuery(<SliceReviewTab sliceName="04-review-tab-observability" slicePath={null} />));
+    fireEvent.click(screen.getByTestId("delivered-item-0"));
+    const open = screen.getByTestId("delivered-item-open-0");
+    expect(open.textContent).toMatch(/artifact recorded/i);
+    expect(open.textContent).toMatch(/no media/i);
+    expect(open.textContent).not.toMatch(/nothing delivered/i);
+    expect(open.textContent).toContain("The comparison was kicked back; remediation is required.");
+    const badge = screen.getByTestId("delivered-item-0").textContent ?? "";
+    expect(badge).toMatch(/no passing QA comparison/i);
+    expect(badge).not.toMatch(/no recorded QA comparison/i);
+  });
+
+  it("REV6 RED: unverified with NO note still renders artifact-recorded/no-media, never 'nothing delivered'", () => {
+    sliceState.data = sliceReview(deliveredUnverified());
+    render(withQuery(<SliceReviewTab sliceName="04-review-tab-observability" slicePath={null} />));
+    fireEvent.click(screen.getByTestId("delivered-item-0"));
+    const open = screen.getByTestId("delivered-item-open-0");
+    expect(open.textContent).toMatch(/artifact recorded/i);
+    expect(open.textContent).toMatch(/no media/i);
+    expect(open.textContent).not.toMatch(/nothing delivered/i);
+  });
+
+  it("REV6 pin (GREEN): `missing` proof=[] is the ONLY 'nothing delivered' branch (not artifact-recorded)", () => {
+    sliceState.data = sliceReview({
+      delivered: { items: [{ promised: { text: "Promised but absent" }, proof: [], verified: "missing" as const }], extraProof: [], lock: null, proofDirPath: null },
+    });
+    render(withQuery(<SliceReviewTab sliceName="04-review-tab-observability" slicePath={null} />));
+    fireEvent.click(screen.getByTestId("delivered-item-0"));
+    const open = screen.getByTestId("delivered-item-open-0");
+    expect(open.textContent).toMatch(/nothing delivered/i);
+    expect(open.textContent).not.toMatch(/artifact recorded/i);
+  });
+
   it("R4 keeps six owners visible and owns the all-agents action inside the shared footer", () => {
     missionState.data = missionReview({
       agents: {

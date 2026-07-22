@@ -130,7 +130,7 @@ function LockStamp({ lock, label }: { lock: LockState | null; label: string }) {
 // §3.1 verified → the founder's plain words. QA laziness is VISIBLE, never blocking.
 const VERIFIED_RENDER: Record<DeliveredItem["verified"], { label: string; cls: string }> = {
   verified: { label: "✓ QA-verified against the plan", cls: "text-emerald-700 dark:text-emerald-400" },
-  unverified: { label: "◇ unverified — no recorded QA comparison", cls: "text-amber-700 dark:text-amber-400" },
+  unverified: { label: "◇ unverified — no PASSING QA comparison", cls: "text-amber-700 dark:text-amber-400" },
   missing: { label: "✗ missing — promised, nothing delivered", cls: "font-bold text-red-700 dark:text-red-400" },
 };
 
@@ -178,8 +178,14 @@ function DeliveredSection({ d, ctx }: { d: ComposedSliceReview["delivered"]; ctx
                         <InlineMedia key={j} media={m} ctx={ctx} full />
                       ))}
                     </div>
-                  ) : item.verified === "verified" && item.note ? (
+                  ) : item.verified === "verified" ? (
                     <p className="font-mono text-[11px] text-on-surface-variant">✓ verified by artifact; no media attached</p>
+                  ) : item.verified === "unverified" ? (
+                    // slice-04 REV6: unverified means an artifact was delivered
+                    // (covering.length>0) with no PASSING comparison — honest, not
+                    // "nothing delivered" (reserved for `missing` below). Any QA note
+                    // renders beneath.
+                    <p className="font-mono text-[11px] text-on-surface-variant">◇ artifact recorded; no media attached</p>
                   ) : (
                     <p className="font-mono text-[11px] text-on-surface-variant">— nothing delivered for this item</p>
                   )}
