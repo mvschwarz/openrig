@@ -266,15 +266,14 @@ describe("NeedsYouAccordion showApprove (slice-terminal act stays at slice altit
 
 // OPR.0.4.4.22 FR-5 — the entry points (front doors) zoom to /agents.
 describe("entry points zoom to the AGENTS altitude", () => {
-  it("SliceReviewTab's AGENTS region carries the anchored zoom link", async () => {
-    // Static source assertion (behavior lives in the slice tab's data flow;
-    // the link contract is what FR-5 pins): the zoom href is anchored.
+  it("the shared AgentsBand footer owns the scope-anchored zoom link", async () => {
     const src = (await import("node:fs")).readFileSync(
-      "src/components/review/SliceReviewTab.tsx",
+      "src/components/review/AgentsBandView.tsx",
       "utf8",
     );
-    expect(src).toContain('href={`/agents?slice=${encodeURIComponent(data.slice)}`}');
-    expect(src).toContain('data-testid="slice-agents-zoom"');
+    expect(src).toContain('data-testid="agents-footer"');
+    expect(src).toContain('band.scope.startsWith("slice:")');
+    expect(src).toContain('`/agents?slice=${encodeURIComponent(band.scope.slice("slice:".length))}`');
   });
 
   it("MissionReviewTab's board agent-count chip zooms to rig scope", async () => {

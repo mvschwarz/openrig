@@ -140,7 +140,7 @@ describe("flagship attempt-0003 Review polish", () => {
     expect(open.textContent).not.toMatch(/nothing delivered/i);
   });
 
-  it("R4 keeps six owners visible and discloses only the remaining twelve with the all-agents route", () => {
+  it("R4 keeps six owners visible and owns the all-agents action inside the shared footer", () => {
     missionState.data = missionReview({
       agents: {
         scope: "mission:release-0.4.7",
@@ -158,6 +158,71 @@ describe("flagship attempt-0003 Review polish", () => {
     expect(within(overflow).getAllByTestId(/^agent-drill-/)).toHaveLength(12);
     expect(within(overflow).getByText("+12 more queue-scoped agents")).toBeTruthy();
     expect(overflow.hasAttribute("open")).toBe(false);
-    expect(screen.getByRole("link", { name: /all agents/i }).getAttribute("href")).toBe("/agents");
+    const footer = within(band).getByTestId("agents-footer");
+    expect(footer.textContent).toContain("18 queue-scoped agents");
+    expect(within(footer).getByRole("link", { name: /all agents/i }).getAttribute("href")).toBe("/agents");
+    expect(screen.getByTestId("mission-agents-preview").lastElementChild).toBe(band);
+  });
+
+  it("R5 composes nonempty phase lanes as vellum cards and compresses all empty lanes into one line", () => {
+    missionState.data = missionReview({
+      board: [
+        {
+          slice: "01-foundation",
+          title: "Foundation",
+          phase: "planned",
+          laneLabel: "PLAN",
+          agentsCount: 2,
+          stageCell: "planned",
+          changedSinceStamp: false,
+          attentionWorthy: false,
+        },
+        {
+          slice: "04-review-tab-observability",
+          title: "Review tab observability",
+          phase: "locked",
+          laneLabel: "LOCKED",
+          agentsCount: 3,
+          stageCell: "locked",
+          changedSinceStamp: false,
+          attentionWorthy: false,
+        },
+      ],
+    });
+    render(withQuery(<MissionReviewTab missionId="release-0.4.7" />));
+
+    const plan = screen.getByTestId("board-lane-card-PLAN");
+    expect(plan.className).toContain("backdrop-blur");
+    const planHeader = within(plan).getByTestId("board-lane-header-PLAN");
+    expect(within(planHeader).getByText("PLAN")).toBeTruthy();
+    expect(within(planHeader).getByText("1")).toBeTruthy();
+    const locked = screen.getByTestId("board-lane-card-LOCKED");
+    const lockedHeader = within(locked).getByTestId("board-lane-header-LOCKED");
+    expect(within(lockedHeader).getByText("LOCKED")).toBeTruthy();
+    expect(within(lockedHeader).getByText("1")).toBeTruthy();
+    expect(screen.getByTestId("board-empty-lanes").textContent).toBe("INTENT 0 · BUILD 0 · REVIEW 0");
+  });
+
+  it("R6 gives SETTLED a vellum card header with cut status inside its hierarchy", () => {
+    missionState.data = missionReview({
+      ledger: [{
+        slice: "04-review-tab-observability",
+        candidateSha: "85e67f0",
+        gateCells: [],
+        mergeSha: null,
+        needsHumanCount: 0,
+        green: true,
+      }],
+      cutComplete: true,
+      cutCompleteBasis: "all slices settled",
+    });
+    render(withQuery(<MissionReviewTab missionId="release-0.4.7" />));
+
+    const ledger = screen.getByTestId("mission-ledger");
+    expect(ledger.className).toContain("backdrop-blur");
+    const header = within(ledger).getByTestId("ledger-header");
+    expect(header.textContent).toContain("SETTLED");
+    expect(header.textContent).toContain("completion ledger");
+    expect(within(header).getByTestId("cut-complete").textContent).toContain("cut-gating COMPLETE");
   });
 });

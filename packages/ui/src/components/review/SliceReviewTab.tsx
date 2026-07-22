@@ -267,17 +267,7 @@ export function SliceReviewTab({
       <NeedsYouAccordion band={data.needsYou} slice={data.slice} actorSession={SURFACE_ACTOR} ctx={ctx} anchorIdentity={anchorIdentity} />
 
       {/* Band 2: AGENTS — standing band, zoom to the rig altitude (kept). */}
-      <div className="space-y-1">
-        <AgentsBandView band={data.agents} itemRef={data.slice} />
-        <a
-          href={`/agents?slice=${encodeURIComponent(data.slice)}`}
-          data-testid="slice-agents-zoom"
-          className="font-mono text-[10px] uppercase text-on-surface-variant underline-offset-2 hover:underline"
-          title="Zoom to the AGENTS altitude, anchored to this slice"
-        >
-          zoom: all agents ↗
-        </a>
-      </div>
+      <AgentsBandView band={data.agents} itemRef={data.slice} />
 
       {/* Band 3: THE ONE STACK — INTENT → PLAN → DELIVERED (§3.3). Scanned
           top-to-bottom: did intent become a correct plan become a correct

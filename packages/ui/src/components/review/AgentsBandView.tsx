@@ -122,6 +122,11 @@ export function AgentsBandView({
 }) {
   const visibleRows = previewLimit === undefined ? band.rows : band.rows.slice(0, previewLimit);
   const overflowRows = previewLimit === undefined ? [] : band.rows.slice(previewLimit);
+  const zoomHref = band.scope.startsWith("slice:")
+    ? `/agents?slice=${encodeURIComponent(band.scope.slice("slice:".length))}`
+    : band.scope === "rig"
+      ? null
+      : "/agents";
   const groups: Array<{ label: string | null; rows: typeof band.rows }> =
     grouping === "slice" && visibleRows.length > 0
       ? [...new Set(visibleRows.flatMap((r) => (r.slices.length > 0 ? r.slices : ["(no slice)"])))]
@@ -141,11 +146,7 @@ export function AgentsBandView({
           {band.coordinationHealth}
         </p>
       ) : null}
-      {band.rows.length === 0 ? (
-        <p data-testid="agents-empty" className="font-mono text-[11px] text-on-surface-variant">
-          {band.provenance}
-        </p>
-      ) : (
+      {band.rows.length === 0 ? null : (
         <div data-testid={previewLimit === undefined ? undefined : "agents-visible"}>
           {groups.map((group) => (
             <div key={group.label ?? "__flat"}>
@@ -182,9 +183,22 @@ export function AgentsBandView({
           </ul>
         </details>
       ) : null}
-      {band.rows.length > 0 ? (
-        <p className="font-mono text-[10px] text-on-surface-variant">{band.provenance}</p>
-      ) : null}
+      <div data-testid="agents-footer" className="flex items-center justify-between gap-3 border-t border-outline-variant/60 pt-1.5">
+        <p
+          data-testid={band.rows.length === 0 ? "agents-empty" : undefined}
+          className="font-mono text-[10px] text-on-surface-variant"
+        >
+          {band.provenance}
+        </p>
+        {zoomHref ? (
+          <a
+            href={zoomHref}
+            className="shrink-0 font-mono text-[10px] uppercase text-on-surface-variant underline-offset-2 hover:underline"
+          >
+            all agents ↗
+          </a>
+        ) : null}
+      </div>
     </section>
   );
 }

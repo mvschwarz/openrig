@@ -30,6 +30,8 @@ import { ProgressiveTerminal } from "../terminal/ProgressiveTerminal.js";
 import { useInvalidateReview } from "../../hooks/useReview.js";
 import { EmptyState } from "../ui/empty-state.js";
 import { MarkdownViewer } from "../markdown/MarkdownViewer.js";
+import { cn } from "../../lib/utils.js";
+import { VELLUM_CARD } from "./vellum.js";
 
 const LANES = ["INTENT", "PLAN", "BUILD", "REVIEW", "LOCKED"] as const;
 const COLLAPSE_THRESHOLD = 12;
@@ -152,6 +154,8 @@ function Board({ review }: { review: ComposedMissionReview }) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
   const collapse = review.board.length > COLLAPSE_THRESHOLD && !showAll;
+  const laneSlots = LANES.map((lane) => ({ lane, slots: review.board.filter((b) => b.laneLabel === lane) }));
+  const emptyLanes = laneSlots.filter(({ slots }) => slots.length === 0).map(({ lane }) => lane);
 
   return (
     <section data-testid="mission-board" className="space-y-3">
@@ -161,28 +165,25 @@ function Board({ review }: { review: ComposedMissionReview }) {
           no slices yet
         </p>
       ) : (
-        LANES.map((lane) => {
-          const slots = review.board.filter((b) => b.laneLabel === lane);
-          if (slots.length === 0) {
-            return (
-              <div key={lane} className="flex items-center gap-2">
-                <span className="w-16 font-mono text-[10px] uppercase text-on-surface-variant">{lane}</span>
-                <span className="font-mono text-[10px] text-on-surface-variant">0</span>
-              </div>
-            );
-          }
+        <>
+          {emptyLanes.length > 0 ? (
+            <p data-testid="board-empty-lanes" className="font-mono text-[9px] uppercase tracking-wide text-on-surface-variant">
+              {emptyLanes.map((lane) => `${lane} 0`).join(" · ")}
+            </p>
+          ) : null}
+          {laneSlots.filter(({ slots }) => slots.length > 0).map(({ lane, slots }) => {
           const visible = collapse ? slots.filter((s) => s.attentionWorthy) : slots;
           const hidden = slots.length - visible.length;
           return (
-            <div key={lane} data-testid={`board-lane-${lane}`}>
-              <div className="flex items-center gap-2">
-                <span className="w-16 font-mono text-[10px] uppercase text-on-surface-variant">{lane}</span>
-                <span className="font-mono text-[10px] text-on-surface-variant">{slots.length}</span>
+            <section key={lane} data-testid={`board-lane-card-${lane}`} className={cn(VELLUM_CARD, "overflow-hidden")}>
+              <div data-testid={`board-lane-header-${lane}`} className="flex items-center gap-2 px-2 py-1.5">
+                <span className="font-mono text-[10px] font-semibold uppercase tracking-wide text-on-surface">{lane}</span>
+                <span className="rounded-full border border-outline-variant px-1.5 font-mono text-[9px] text-on-surface-variant">{slots.length}</span>
                 {collapse && hidden > 0 ? (
                   <span className="font-mono text-[9px] text-on-surface-variant">({hidden} collapsed)</span>
                 ) : null}
               </div>
-              <ul className="mt-1 divide-y divide-outline-variant/40 border border-outline-variant">
+              <ul className="divide-y divide-outline-variant/40 border-t border-outline-variant">
                 {visible.map((slot) => (
                   <li key={slot.slice}>
                     <div className="flex w-full flex-wrap items-center gap-2 px-2 py-1.5 hover:bg-surface-variant/50">
@@ -216,9 +217,10 @@ function Board({ review }: { review: ComposedMissionReview }) {
                   </li>
                 ))}
               </ul>
-            </div>
+            </section>
           );
-        })
+          })}
+        </>
       )}
       {review.board.length > COLLAPSE_THRESHOLD ? (
         <button
@@ -236,15 +238,20 @@ function Board({ review }: { review: ComposedMissionReview }) {
 
 function Ledger({ review }: { review: ComposedMissionReview }) {
   return (
-    <section data-testid="mission-ledger" className="space-y-2">
-      <h3 className="font-mono text-[10px] uppercase tracking-wide text-on-surface-variant">SETTLED — completion ledger</h3>
-      <p
-        data-testid="cut-complete"
-        className={`border px-2 py-1 font-mono text-[11px] ${review.cutComplete ? "border-emerald-300 bg-emerald-50 text-emerald-900" : "border-outline-variant text-on-surface-variant"}`}
-      >
-        cut-gating {review.cutComplete ? "COMPLETE" : "incomplete"} — {review.cutCompleteBasis}
-      </p>
-      <div className="overflow-x-auto">
+    <section data-testid="mission-ledger" className={cn(VELLUM_CARD, "overflow-hidden")}>
+      <div data-testid="ledger-header" className="flex flex-wrap items-center justify-between gap-2 border-b border-outline-variant px-3 py-2">
+        <div>
+          <h3 className="font-mono text-[10px] font-semibold uppercase tracking-wide text-on-surface">SETTLED</h3>
+          <p className="font-mono text-[9px] uppercase tracking-wide text-on-surface-variant">completion ledger</p>
+        </div>
+        <p
+          data-testid="cut-complete"
+          className={`border px-2 py-1 font-mono text-[10px] ${review.cutComplete ? "border-emerald-300 bg-emerald-50 text-emerald-900" : "border-outline-variant text-on-surface-variant"}`}
+        >
+          cut-gating {review.cutComplete ? "COMPLETE" : "incomplete"} — {review.cutCompleteBasis}
+        </p>
+      </div>
+      <div className="overflow-x-auto px-3 pb-3">
         <table className="w-full border-collapse text-[11px]">
           <thead>
             <tr className="border-b border-outline-variant font-mono text-[10px] uppercase text-on-surface-variant">
@@ -354,14 +361,8 @@ export function MissionReviewTab({ missionId }: { missionId: string }) {
 
       {/* Delta-A: the mission AGENTS band, directly below NEEDS YOU, at
           mission:<id> scope — rows + zoom only, never embedded slice pages. */}
-      <div className="space-y-1" data-testid="mission-agents-preview">
+      <div data-testid="mission-agents-preview">
         <AgentsBandView band={data.agents} itemRef={data.mission} previewLimit={6} />
-        <a
-          href="/agents"
-          className="font-mono text-[10px] uppercase text-on-surface-variant underline-offset-2 hover:underline"
-        >
-          all agents ↗
-        </a>
       </div>
 
       <Board review={data} />
