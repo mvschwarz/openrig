@@ -24,6 +24,7 @@ import { useScopeMarkdown } from "../../hooks/useScopeMarkdown.js";
 import { MarkdownViewer } from "../markdown/MarkdownViewer.js";
 import { SectionHeader } from "../ui/section-header.js";
 import { EmptyState } from "../ui/empty-state.js";
+import { FileLink } from "../ui/FileLink.js";
 // OPR.0.4.4.20: Lightbox extracted (verbatim) for reuse by the Review surface.
 import { Lightbox } from "./Lightbox.js";
 
@@ -36,6 +37,11 @@ const VERDICT_TONE: Record<Verdict, string> = {
 };
 
 const IMAGE_RE = /\.(png|jpe?g|gif|webp|avif|svg)$/i;
+// Markdown proof-of-work artifacts (guard/qa/rev1 verdicts) open IN-APP in the
+// SharedDetailDrawer via FileLink — rendering the C1 header + body — instead of a
+// full-page raw-asset navigation out of the SPA. Non-Markdown other files
+// (logs/video/binary) keep their existing browser-viewable raw-asset link.
+const MD_RE = /\.mdx?$/i;
 
 /** Asset base for INLINE PROOF.md images — e.g. `![](proof/real-live.png)` in the
  *  Intent→Proof table, relative to the slice root where PROOF.md lives. MarkdownViewer
@@ -212,14 +218,27 @@ function ProofSliceCard({
         <ul data-testid={`proof-files-${sliceId}`} className="mt-3 space-y-1 font-mono text-[10px]">
           {otherFiles.map((f) => (
             <li key={f.name}>
-              <a
-                href={fileAssetUrl(resolved!.rootName, `${proofRel}/${f.name}`)}
-                target="_blank"
-                rel="noreferrer"
-                className="text-on-surface-variant underline decoration-outline-variant underline-offset-2 hover:text-on-surface"
-              >
-                proof/{f.name}
-              </a>
+              {MD_RE.test(f.name) ? (
+                // Markdown proof artifact — open in the in-app drawer (C1 header +
+                // body), not a full-page raw-asset navigation out of the SPA.
+                <FileLink
+                  root={resolved!.rootName}
+                  path={`proof/${f.name}`}
+                  readPath={`${proofRel}/${f.name}`}
+                  className="text-on-surface-variant underline decoration-outline-variant underline-offset-2 hover:text-on-surface"
+                >
+                  proof/{f.name}
+                </FileLink>
+              ) : (
+                <a
+                  href={fileAssetUrl(resolved!.rootName, `${proofRel}/${f.name}`)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-on-surface-variant underline decoration-outline-variant underline-offset-2 hover:text-on-surface"
+                >
+                  proof/{f.name}
+                </a>
+              )}
             </li>
           ))}
         </ul>

@@ -3,9 +3,13 @@
 // one is AC-3 (the lazy-load boundary — no eager file-body fetch, no tree pre-walk).
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, waitFor, fireEvent } from "@testing-library/react";
+import { useState, type ReactNode } from "react";
+import { render, screen, cleanup, waitFor, fireEvent, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ArtifactsNavigator } from "../src/components/project/ArtifactsNavigator.js";
+import { EvidenceOpener, type EvidenceContext } from "../src/components/review/EvidenceOpener.js";
+import { DrawerSelectionContext } from "../src/components/AppShell.js";
+import { SharedDetailDrawer, type DrawerSelection } from "../src/components/SharedDetailDrawer.js";
 
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch as unknown as typeof fetch;
@@ -33,6 +37,12 @@ const TREE: Record<string, Array<{ name: string; type: "dir" | "file" | "other";
     { name: "README.md", type: "file", size: 4096, mtime: "2026-06-23T22:01:00.000Z" },
     { name: "batch-1.change.diff", type: "file", size: 12288, mtime: "2026-06-23T22:52:00.000Z" },
     { name: "03-story-dag.intent.png", type: "file", size: 129024, mtime: "2026-06-23T22:53:00.000Z" },
+    { name: "proof", type: "dir", size: null, mtime: "2026-06-23T22:52:00.000Z" },
+  ],
+  // FOUNDER-FIX DELIVERED drill-in target — the slice proof/ folder EvidenceOpener
+  // ('proof/') scopes ArtifactsNavigator to; its C1 file must open in the drawer.
+  "missions/release-0.4.1/slices/15-workspace-ux/proof": [
+    { name: "guard.md", type: "file", size: 480, mtime: "2026-06-23T22:52:00.000Z" },
   ],
 };
 
@@ -55,9 +65,39 @@ function routeFiles({ rootsStatus = 200, rootsEmpty = false }: { rootsStatus?: n
       const path = u.searchParams.get("path") ?? "";
       return Promise.resolve(jsonResponse({ root: "work", path, entries: TREE[path] ?? [] }));
     }
+    // File bodies — served ONLY when a file is opened (never on landing; AC-3 pins this).
+    if (url.includes("/api/files/read")) {
+      const u = new URL(url, "http://twin.local");
+      const path = u.searchParams.get("path") ?? "";
+      const content = FILE_BODIES[path];
+      if (content == null) return Promise.resolve(jsonResponse({ error: "not found" }, 404));
+      return Promise.resolve(jsonResponse({ root: "work", path, absolutePath: `/ws/${path}`, content, mtime: "2026-06-23T22:01:00.000Z", contentHash: "h", size: content.length }));
+    }
     return Promise.resolve(jsonResponse({}, 404));
   };
 }
+
+// C1 proof contract (docs/reference/sdlc-conventions.md §5) — five valid fields
+// (artifact_type in the closed set) + a distinctive body, so the DELIVERED drawer
+// render is asserted against real proof content, never a false green.
+const GUARD_C1 = [
+  "---",
+  "slice: slice-15-workspace-ux",
+  "candidate_sha: 7d0997dddaab59f43bcc658fe2c0457128a64f53",
+  "artifact_type: guard",
+  "verdict: PASS",
+  "money_evidence: delivered see-all proof/ drill-in opens guard.md in the drawer",
+  "---",
+  "",
+  "# Guard Verdict",
+  "",
+  "DELIVERED-DRILL-IN-BODY: the proof file opened in the in-app drawer.",
+].join("\n");
+
+// Opened-file bodies keyed by slice-relative read path (drawer content).
+const FILE_BODIES: Record<string, string> = {
+  "missions/release-0.4.1/slices/15-workspace-ux/proof/guard.md": GUARD_C1,
+};
 
 function listedPaths(): string[] {
   return calls
@@ -168,4 +208,93 @@ describe("OPR.0.4.1.21 — Artifacts navigator", () => {
     // NOT the misleading out-of-scope state.
     expect(screen.queryByTestId("artifacts-navigator-no-scope")).toBeNull();
   });
+
+  // -------------------------------------------------------------------------
+  // FOUNDER FIX (qitem-20260722234754-e8db7111) — DELIVERED proof/ drill-in leg.
+  // The SECOND founder-named site: DELIVERED "see all proof" -> the REAL
+  // EvidenceOpener('proof/') folder control -> ArtifactsNavigator scoped to the
+  // slice proof/ dir, whose C1 file rows route through FileLink -> the drawer.
+  // GREEN preservation: this caller already opens IN-APP, so no production change
+  // is needed here — this pins it against regression through the real path.
+  // -------------------------------------------------------------------------
+  it("DELIVERED preservation: delivered-see-all -> EvidenceOpener('proof/') opens a proof C1 file IN the drawer, not a full-page asset", async () => {
+    mockFetch.mockImplementation(routeFiles());
+    const ctx: EvidenceContext = {
+      root: "work",
+      relPath: "missions/release-0.4.1/slices/15-workspace-ux",
+      slicePath: "/ws/missions/release-0.4.1/slices/15-workspace-ux",
+    };
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <DrawerHost>
+          <EvidenceOpener evidenceRef="proof/" ctx={ctx} testId="delivered-see-all" />
+        </DrawerHost>
+      </QueryClientProvider>,
+    );
+    // pin the exact SPA location + history depth — a raw-asset navigation mutates these.
+    const hrefBefore = window.location.href;
+    const historyBefore = window.history.length;
+
+    // the DELIVERED "see all proof" folder control is the real founder-named caller.
+    const folderBtn = screen.getByTestId("delivered-see-all-folder");
+    expect(calls.some((c) => c.includes("/api/files/read"))).toBe(false); // lazy: nothing read yet
+    fireEvent.click(folderBtn);
+
+    // the proof/ folder drills into the navigator; its C1 file row is an in-app control.
+    const openCtrl = await screen.findByTestId("artifacts-file-open-guard.md");
+    expect(openCtrl.closest("a")).toBeNull();
+    expect(screen.queryByTestId("file-viewer")).toBeNull();
+
+    fireEvent.click(openCtrl);
+
+    const viewer = await screen.findByTestId("file-viewer");
+    // reads the exact slice proof path under the work root — never the /asset escape.
+    await waitFor(() =>
+      expect(
+        calls.some(
+          (c) =>
+            c.includes("/api/files/read") &&
+            c.includes("root=work") &&
+            c.includes("15-workspace-ux%2Fproof%2Fguard.md"),
+        ),
+      ).toBe(true),
+    );
+    expect(calls.some((c) => c.includes("/api/files/asset"))).toBe(false);
+    // valid C1 header (five fields) + distinctive body render in the drawer.
+    const fm = within(viewer).getByTestId("markdown-frontmatter");
+    for (const field of ["slice", "candidate_sha", "artifact_type", "verdict", "money_evidence"]) {
+      expect(within(fm).getByText(field)).toBeTruthy();
+    }
+    expect(within(fm).getByText("guard")).toBeTruthy();
+    expect(screen.getByText(/DELIVERED-DRILL-IN-BODY/)).toBeTruthy();
+
+    // close in place — the opener + drilled folder remain; location/history unmoved.
+    fireEvent.pointerDown(screen.getByTestId("shared-detail-drawer-outside"));
+    await waitFor(() => expect(screen.queryByTestId("file-viewer")).toBeNull());
+    expect(screen.getByTestId("delivered-see-all-folder")).toBeTruthy();
+    expect(screen.getByTestId("artifacts-file-open-guard.md")).toBeTruthy();
+    expect(window.location.href).toBe(hrefBefore);
+    expect(window.history.length).toBe(historyBefore);
+  });
 });
+
+// Minimal real drawer host — mirrors AppShell's DrawerSelection provider +
+// SharedDetailDrawer so a FileLink click actually opens the drawer end-to-end.
+function DrawerHost({ children }: { children: ReactNode }) {
+  const [selection, setSelection] = useState<DrawerSelection>(null);
+  return (
+    <DrawerSelectionContext.Provider value={{ selection, setSelection }}>
+      {children}
+      <SharedDetailDrawer
+        selection={selection}
+        onClose={() => setSelection(null)}
+        events={[]}
+        selectedDiscoveredId={null}
+        onSelectDiscoveredId={() => {}}
+        placementTarget={null}
+        onClearPlacement={() => {}}
+      />
+    </DrawerSelectionContext.Provider>
+  );
+}
