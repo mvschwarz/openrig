@@ -298,3 +298,119 @@ function DrawerHost({ children }: { children: ReactNode }) {
     </DrawerSelectionContext.Provider>
   );
 }
+
+// ---------------------------------------------------------------------------
+// PM HALF-PASS (qitem-20260723005752-5ee2eea4): in the proof-directory browser,
+// the file HIT TARGET is ONLY the nested FileLink filename button; the row/tree
+// WRAPPER surface (the right-pane <li> with badge/size/mtime; the tree-item indent
+// <li>) is INERT (no onClick). A user clicking the row/item (PM) gets no
+// selection/read/drawer; clicking the exact filename button (QA-local) works. The
+// two REDs click the inert wrappers under a REAL drawer host; the GREEN controls
+// prove the nested filename buttons still work for BOTH the right and tree paths.
+// ---------------------------------------------------------------------------
+const PROOF_SCOPE = "/ws/missions/release-0.4.1/slices/15-workspace-ux/proof";
+const PROOF_READ_PATH = "missions/release-0.4.1/slices/15-workspace-ux/proof/guard.md";
+const TREE_FILE_TID = `artifacts-tree-file-${PROOF_READ_PATH}`;
+
+function renderProofNavInDrawer() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={qc}>
+      <DrawerHost>
+        <ArtifactsNavigator scopePath={PROOF_SCOPE} scopeLabel="proof" />
+      </DrawerHost>
+    </QueryClientProvider>,
+  );
+}
+
+// Assert the guard.md C1 file drawer opened: exact read, one file viewer, five C1
+// labels+values, and the distinctive body.
+async function assertGuardC1Drawer() {
+  await screen.findByTestId("file-viewer");
+  // exactly ONE /api/files/read for guard.md — parsed (not substring): pathname
+  // /api/files/read, root=work, path EXACTLY the slice-relative proof path.
+  await waitFor(() => {
+    const guardReads = calls
+      .map((c) => new URL(c, "http://nav.local"))
+      .filter(
+        (u) =>
+          u.pathname === "/api/files/read" &&
+          u.searchParams.get("root") === "work" &&
+          u.searchParams.get("path") === PROOF_READ_PATH,
+      );
+    expect(guardReads.length).toBe(1);
+  });
+  // exactly one file viewer opened.
+  expect(screen.getAllByTestId("file-viewer").length).toBe(1);
+  const fm = within(screen.getByTestId("file-viewer")).getByTestId("markdown-frontmatter");
+  const C1: Array<[string, string | RegExp]> = [
+    ["slice", "slice-15-workspace-ux"],
+    ["candidate_sha", "7d0997dddaab59f43bcc658fe2c0457128a64f53"],
+    ["artifact_type", "guard"],
+    ["verdict", "PASS"],
+    ["money_evidence", /delivered see-all proof/],
+  ];
+  for (const [k, v] of C1) {
+    expect(within(fm).getByText(k)).toBeTruthy();
+    expect(within(fm).getByText(v)).toBeTruthy();
+  }
+  expect(screen.getByText(/DELIVERED-DRILL-IN-BODY/)).toBeTruthy();
+}
+
+describe("Artifacts navigator — proof-file hit target (PM half-pass 5ee2eea4)", () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+    mockFetch.mockImplementation(routeFiles());
+    calls = [];
+  });
+  afterEach(() => cleanup());
+
+  it("R-right (RED): clicking a REAL inert visible right-row child (the size cell, not artifacts-file-open) opens the file drawer with C1", async () => {
+    renderProofNavInDrawer();
+    await screen.findByTestId("artifacts-file-row-guard.md");
+    // a real visible row child a user targets — currently a sibling of the filename
+    // button, so inert. Wrapping ALL row content in the FileLink makes this green
+    // (the click bubbles to the button); it is NOT a synthetic wrapper click.
+    const sizeCell = screen.getByTestId("artifacts-file-size-guard.md");
+    expect(calls.some((c) => c.includes("/api/files/read"))).toBe(false);
+    expect(screen.queryByTestId("file-viewer")).toBeNull();
+    const hrefBefore = window.location.href;
+    const historyBefore = window.history.length;
+    fireEvent.click(sizeCell);
+    await assertGuardC1Drawer();
+    // in-app: no navigation.
+    expect(window.location.href).toBe(hrefBefore);
+    expect(window.history.length).toBe(historyBefore);
+  });
+
+  it("R-tree (RED, structural hitbox): the noninteractive <li> owns no indentation; the artifacts-tree-file button owns the depth indentation + full-width hit area", async () => {
+    renderProofNavInDrawer();
+    // artifacts-tree-file-* IS the working FileLink button (see the GREEN control
+    // below); this RED pins the HITBOX STRUCTURE, not a synthetic li click.
+    const treeBtn = await screen.findByTestId(TREE_FILE_TID);
+    const treeLi = treeBtn.closest("li");
+    expect(treeLi).toBeTruthy();
+    // DESIRED: the noninteractive wrapper <li> carries NO indentation padding...
+    expect(treeLi!.style.paddingLeft).toBe("");
+    // ...and the interactive FileLink button owns the depth indentation + full width,
+    // so the whole indented row (not just the filename glyphs) is a real hit target.
+    expect(treeBtn.style.paddingLeft).not.toBe("");
+    expect(treeBtn.className).toContain("w-full");
+  });
+
+  it("GREEN control (right): clicking the nested right-pane filename button opens the file drawer with C1", async () => {
+    renderProofNavInDrawer();
+    const btn = await screen.findByTestId("artifacts-file-open-guard.md");
+    expect(screen.queryByTestId("file-viewer")).toBeNull();
+    fireEvent.click(btn);
+    await assertGuardC1Drawer();
+  });
+
+  it("GREEN control (tree): clicking the nested tree filename button opens the file drawer with C1", async () => {
+    renderProofNavInDrawer();
+    const btn = await screen.findByTestId(TREE_FILE_TID);
+    expect(screen.queryByTestId("file-viewer")).toBeNull();
+    fireEvent.click(btn);
+    await assertGuardC1Drawer();
+  });
+});

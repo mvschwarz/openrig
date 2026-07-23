@@ -144,12 +144,18 @@ function FolderNode({
             {entries
               .filter((e) => e.type === "file")
               .map((e) => (
-                <li key={e.name} style={indent(depth + 1)}>
+                <li key={e.name}>
+                  {/* Depth indentation lives on the full-width FileLink button, NOT
+                      the inert li, so the whole indented row is the hit target.
+                      paddingLeft = the moved li indent (indent(depth+1) = *12+4) plus
+                      the button's former pl-5 (20px) glyph inset, folded into one
+                      inline value so the prior visual indentation is preserved. */}
                   <FileLink
                     root={root}
                     path={joinPath(path, e.name)}
                     testId={`artifacts-tree-file-${joinPath(path, e.name)}`}
-                    className="block w-full truncate py-0.5 pl-5 text-left font-mono text-[11px] text-on-surface-variant hover:text-on-surface hover:underline"
+                    style={{ paddingLeft: `${(depth + 1) * 12 + 24}px` }}
+                    className="block w-full truncate py-0.5 text-left font-mono text-[11px] text-on-surface-variant hover:text-on-surface hover:underline"
                   >
                     {e.name}
                   </FileLink>
@@ -192,29 +198,36 @@ function FolderFileList({ root, path }: { root: string; path: string }) {
             <li
               key={f.name}
               data-testid={`artifacts-file-row-${f.name}`}
-              className="flex items-center gap-3 px-3 py-1.5 font-mono text-[11px]"
+              className="font-mono text-[11px]"
             >
-              <span
-                data-testid={`artifacts-file-badge-${f.name}`}
-                className="w-10 shrink-0 border border-outline-variant px-1 py-0.5 text-center text-[8px] uppercase tracking-[0.08em] text-on-surface-variant"
-              >
-                {fileBadge(f.name)}
-              </span>
+              {/* The ENTIRE row is one FileLink hitbox — badge, filename, size,
+                  separator, and mtime all sit inside the existing button so a click
+                  anywhere on the row opens the file, not only the filename glyphs.
+                  The row layout (flex/gap/padding) moves onto the button; all
+                  testids/text/order and the per-cell styles are preserved. */}
               <FileLink
                 root={root}
                 path={joinPath(path, f.name)}
                 testId={`artifacts-file-open-${f.name}`}
-                className="min-w-0 flex-1 truncate text-left text-on-surface hover:underline"
+                className="group flex w-full items-center gap-3 px-3 py-1.5 text-left"
               >
-                {f.name}
+                <span
+                  data-testid={`artifacts-file-badge-${f.name}`}
+                  className="w-10 shrink-0 border border-outline-variant px-1 py-0.5 text-center text-[8px] uppercase tracking-[0.08em] text-on-surface-variant"
+                >
+                  {fileBadge(f.name)}
+                </span>
+                {/* Full row is the hitbox (group), but only the filename underlines
+                    on hover — preserving the pre-fix per-cell decoration. */}
+                <span className="min-w-0 flex-1 truncate text-on-surface group-hover:underline">{f.name}</span>
+                <span data-testid={`artifacts-file-size-${f.name}`} className="shrink-0 text-on-surface-variant">
+                  {formatSize(f.size)}
+                </span>
+                <span className="shrink-0 text-on-surface-variant">·</span>
+                <span data-testid={`artifacts-file-mtime-${f.name}`} className="shrink-0 text-on-surface-variant">
+                  {formatMtime(f.mtime)}
+                </span>
               </FileLink>
-              <span data-testid={`artifacts-file-size-${f.name}`} className="shrink-0 text-on-surface-variant">
-                {formatSize(f.size)}
-              </span>
-              <span className="shrink-0 text-on-surface-variant">·</span>
-              <span data-testid={`artifacts-file-mtime-${f.name}`} className="shrink-0 text-on-surface-variant">
-                {formatMtime(f.mtime)}
-              </span>
             </li>
           ))}
         </ul>
