@@ -274,4 +274,65 @@ describe("flagship attempt-0003 Review polish", () => {
     expect(header.textContent).toContain("completion ledger");
     expect(within(header).getByTestId("cut-complete").textContent).toContain("cut-gating COMPLETE");
   });
+
+  // ===================================================================
+  // STAGE-3 LEVER C (Stage-1) — "not compliant: mini-reqs" render marker.
+  // REV3 d9fa8a2e §5. TEST-ONLY: RED-1/RED-2/RED-3 fail because the marker
+  // element (testid plan-mini-reqs-noncompliant) does not exist yet; the
+  // compliant companion is GREEN today. The marker renders whenever
+  // data.plan.concise.text === null, in EVERY phase (D1: NO phase gate),
+  // presentation-only; copy is FROZEN (D2). They become regression pins when
+  // the marker lands (a SEPARATE Guard-gated GREEN dispatch on SliceReviewTab).
+  // ===================================================================
+  const MARKER_TID = "plan-mini-reqs-noncompliant";
+  const MARKER_COPY = "Not compliant · mini-requirements not authored";
+  const planNull = { concise: { text: null, media: [] }, lockedArtifacts: [], lock: null, ssotPath: null };
+  const renderSlice = () => render(withQuery(<SliceReviewTab sliceName="04-review-tab-observability" slicePath={null} />));
+
+  it("LeverC RED-1 (post-intent non-compliance): phase=spec + plan.concise.text===null renders the frozen marker with exact copy", () => {
+    sliceState.data = sliceReview({ phase: "spec", plan: planNull } as Partial<ComposedSliceReview>);
+    renderSlice();
+    const marker = screen.getByTestId(MARKER_TID); // <-- RED: marker element absent (writer unbuilt)
+    expect(marker.textContent).toBe(MARKER_COPY);
+  });
+
+  it("LeverC RED-2 (intent no-gate PIN, D1): phase=intent + text===null renders the SAME marker — no phase gate suppresses it", () => {
+    sliceState.data = sliceReview({ phase: "intent", plan: planNull } as Partial<ComposedSliceReview>);
+    renderSlice();
+    const marker = screen.getByTestId(MARKER_TID); // <-- RED: marker element absent
+    expect(marker.textContent).toBe(MARKER_COPY);
+  });
+
+  it("LeverC GREEN companion (compliant): authored plan text renders Markdown and NO marker", () => {
+    sliceState.data = sliceReview({
+      phase: "spec",
+      plan: { concise: { text: "1. Author the mini-requirements", media: [] }, lockedArtifacts: [], lock: null, ssotPath: null },
+    } as Partial<ComposedSliceReview>);
+    renderSlice();
+    const planSection = screen.getByTestId("plan-section");
+    expect(within(planSection).queryByTestId(MARKER_TID)).toBeNull(); // compliant -> no marker
+    expect(within(planSection).getByTestId("markdown-viewer")).toBeTruthy(); // the authored plan renders
+  });
+
+  it("LeverC RED-3 (preservation + MARKER-SCOPED non-interactive): text===null WITH media + locked siblings renders the marker AND both siblings; the marker element itself is non-interactive", () => {
+    sliceState.data = sliceReview({
+      plan: {
+        concise: { text: null, media: [{ kind: "video", src: "data:video/mp4;base64,AAAA", caption: "plan clip" }] },
+        lockedArtifacts: [{ name: "Implementation PRD", path: "IMPLEMENTATION-PRD.md", kind: "spec" }],
+        lock: null,
+        ssotPath: null,
+      },
+    } as Partial<ComposedSliceReview>);
+    renderSlice();
+    const marker = screen.getByTestId(MARKER_TID); // <-- RED: marker element absent
+    expect(marker.textContent).toBe(MARKER_COPY);
+    // both plan-section siblings still render (the marker suppresses nothing).
+    expect(screen.getByTestId("review-inline-video")).toBeTruthy(); // media sibling
+    expect(screen.getByTestId("plan-locked-set")).toBeTruthy(); // locked-set sibling
+    // non-interactive oracle SCOPED TO THE MARKER ELEMENT ONLY (locked-set EvidenceOpeners are valid controls).
+    expect(["A", "BUTTON"]).not.toContain(marker.tagName);
+    expect(marker.getAttribute("role")).not.toBe("button");
+    expect(marker.getAttribute("role")).not.toBe("link");
+    expect(marker.querySelectorAll("a, button, input, select, textarea, [role='button'], [role='link']").length).toBe(0);
+  });
 });

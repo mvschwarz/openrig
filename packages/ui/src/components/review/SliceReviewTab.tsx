@@ -297,7 +297,13 @@ export function SliceReviewTab({
         {data.plan.concise.text ? (
           <MarkdownViewer content={data.plan.concise.text} hideFrontmatter hideRawToggle />
         ) : (
-          <p className="font-mono text-[11px] text-on-surface-variant">— not planned yet</p>
+          // Stage-3 Lever C (Stage-1): the composer already returned text===null iff the
+          // mini-requirements are not authored — name that non-compliance honestly (a
+          // static, non-interactive attention marker) instead of the terse dash. Renders
+          // in every phase; presentation-only, suppresses no sibling.
+          <p data-testid="plan-mini-reqs-noncompliant" className="font-mono text-[11px] text-amber-700 dark:text-amber-400">
+            Not compliant · mini-requirements not authored
+          </p>
         )}
         {data.plan.concise.media.length > 0 ? (
           <div className="flex flex-wrap gap-3">
