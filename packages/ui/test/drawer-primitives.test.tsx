@@ -18,7 +18,7 @@
 // guard lives in test/node-selection-migration.test.tsx.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, fireEvent, cleanup, screen } from "@testing-library/react";
+import { render, fireEvent, cleanup, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactElement } from "react";
 
@@ -165,6 +165,133 @@ describe("Drawer viewers (P4-1) render with canonical props", () => {
     expect(await screen.findByTestId("file-viewer")).toBeTruthy();
     expect(screen.getByText(/Agent Role/)).toBeTruthy();
     expect(screen.getByTestId("file-viewer-root-path").textContent).toBe("workspace/agents/role.md");
+  });
+
+  // -------------------------------------------------------------------------
+  // FOUNDER-FIX blocker (qitem-20260723002125-9e4526a0): the drawer's FileViewer
+  // Markdown branch must pass an assetBasePath so relative C1-body images resolve
+  // through /api/files/asset (dirname of the RESOLVED target.path), not as broken
+  // SPA-route-relative URLs (QA firsthand caught proof/qa.md body ![](proof-image.png)
+  // resolving to http://host/project/slice/proof-image.png). RED against FileViewer.tsx
+  // (currently renders <MarkdownViewer content={content}/> with no assetBasePath).
+  // Semantic URL parsing (decode params) — never brittle encoded-string matching.
+  // -------------------------------------------------------------------------
+  const C1_QA = [
+    "---",
+    "slice: fg1-09-locked-media",
+    "candidate_sha: 44ef16c1b57fdf06f486a287bf9434b8971accf0",
+    "artifact_type: qa",
+    "verdict: PASS",
+    "money_evidence: inline proof image resolves via /api/files/asset",
+    "---",
+    "",
+    "# QA Verdict",
+    "",
+    "DISTINCTIVE-QA-BODY line.",
+    "",
+    "![proof](proof-image.png)",
+  ].join("\n");
+
+  function readContentMock(content: string, readPath: string, expectedRoot: string) {
+    return vi.fn(async (url: string) => {
+      // semantic pin: FileViewer reads the RESOLVED root/readPath (never the display path).
+      const u = new URL(String(url), "http://drawer.local");
+      expect(u.pathname).toBe("/api/files/read");
+      expect(u.searchParams.get("root")).toBe(expectedRoot);
+      expect(u.searchParams.get("path")).toBe(readPath);
+      return {
+        ok: true,
+        json: async () => ({
+          root: expectedRoot,
+          path: readPath,
+          absolutePath: `/ws/${readPath}`,
+          content,
+          mtime: "2026-07-23T00:00:00.000Z",
+          contentHash: "h",
+          size: content.length,
+          truncated: false,
+          truncatedAtBytes: null,
+          totalBytes: content.length,
+        }),
+      };
+    });
+  }
+
+  // decode an md-inline-image src into {pathname, root, path} for semantic assertions.
+  function assetParams(src: string) {
+    const u = new URL(src, "http://drawer.local");
+    return { pathname: u.pathname, root: u.searchParams.get("root"), path: u.searchParams.get("path") };
+  }
+
+  it("FileViewer RED-1: inline C1-body image resolves via /api/files/asset using dirname of the RESOLVED target.path (not the display path)", async () => {
+    globalThis.fetch = readContentMock(C1_QA, "missions/m/slices/s/proof/qa.md", "workspace") as unknown as typeof fetch;
+    // display path DELIBERATELY different from readPath — derivation must use target.path.
+    renderWithQuery(
+      <FileViewer path="proof/qa.md" kind="markdown" root="workspace" readPath="missions/m/slices/s/proof/qa.md" />,
+    );
+    // C1 five-field header — labels AND values (the founder contract is header+body,
+    // not generic keys) — plus the distinctive body, still render.
+    const fm = await screen.findByTestId("markdown-frontmatter");
+    const C1_FIELDS: Array<[string, string | RegExp]> = [
+      ["slice", "fg1-09-locked-media"],
+      ["candidate_sha", "44ef16c1b57fdf06f486a287bf9434b8971accf0"],
+      ["artifact_type", "qa"],
+      ["verdict", "PASS"],
+      ["money_evidence", /inline proof image resolves/],
+    ];
+    for (const [key, value] of C1_FIELDS) {
+      expect(within(fm).getByText(key)).toBeTruthy();
+      expect(within(fm).getByText(value)).toBeTruthy();
+    }
+    expect(screen.getByText(/DISTINCTIVE-QA-BODY/)).toBeTruthy();
+    // the inline image resolves through the canonical asset URL: dirname of readPath, exactly once.
+    const img = await screen.findByTestId("md-inline-image");
+    const p = assetParams(img.getAttribute("src") ?? "");
+    expect(p.pathname).toBe("/api/files/asset");
+    expect(p.root).toBe("workspace");
+    expect(p.path).toBe("missions/m/slices/s/proof/proof-image.png");
+  });
+
+  it("FileViewer RED-2: a root-file readPath (no directory) anchors the asset parent at '.', never a leading slash", async () => {
+    globalThis.fetch = readContentMock(C1_QA, "qa.md", "slice-root") as unknown as typeof fetch;
+    renderWithQuery(
+      <FileViewer path="qa.md" kind="markdown" root="slice-root" readPath="qa.md" />,
+    );
+    const img = await screen.findByTestId("md-inline-image");
+    const p = assetParams(img.getAttribute("src") ?? "");
+    expect(p.pathname).toBe("/api/files/asset");
+    expect(p.root).toBe("slice-root");
+    expect(p.path).toBe("./proof-image.png");
+    expect(p.path?.startsWith("/")).toBe(false);
+  });
+
+  it("FileViewer passthrough (GREEN preservation): absolute http(s)/data:/leading-slash image srcs pass through unchanged even with a derived asset base", async () => {
+    const body = [
+      "---",
+      "slice: s",
+      "candidate_sha: x",
+      "artifact_type: qa",
+      "verdict: PASS",
+      "money_evidence: e",
+      "---",
+      "",
+      "![remote](https://example.com/img.png)",
+      "",
+      "![data](data:image/png;base64,AAAA)",
+      "",
+      "![rooted](/already/absolute.png)",
+    ].join("\n");
+    globalThis.fetch = readContentMock(body, "missions/m/slices/s/proof/qa.md", "workspace") as unknown as typeof fetch;
+    renderWithQuery(
+      <FileViewer path="proof/qa.md" kind="markdown" root="workspace" readPath="missions/m/slices/s/proof/qa.md" />,
+    );
+    await screen.findByTestId("markdown-frontmatter");
+    const imgs = screen.getAllByTestId("md-inline-image").map((i) => i.getAttribute("src"));
+    // each absolute form is preserved verbatim — the derived base never rewrites them
+    // (this passthrough is also unit-pinned in markdown-viewer.test.tsx:85-89/92-96).
+    expect(imgs).toContain("https://example.com/img.png");
+    expect(imgs).toContain("data:image/png;base64,AAAA");
+    expect(imgs).toContain("/already/absolute.png");
   });
 
   it("SubSpecPreview renders header + manifest excerpt; no Link when entryId omitted", () => {

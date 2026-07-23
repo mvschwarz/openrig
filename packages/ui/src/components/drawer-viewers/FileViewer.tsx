@@ -93,6 +93,13 @@ function useResolvedReadTarget(data: FileViewerData): {
   };
 }
 
+/** Parent directory of a slash-separated relative path; "" when the path has no
+ *  directory segment (a root-level file). Pure string semantics — no Node path. */
+function parentDir(p: string): string {
+  const i = p.lastIndexOf("/");
+  return i >= 0 ? p.slice(0, i) : "";
+}
+
 function FileViewerBody({
   path,
   resolvedKind,
@@ -117,6 +124,16 @@ function FileViewerBody({
     );
   }
 
+  // Inline C1-body images in the drawer's Markdown are slice-RELATIVE — siblings of
+  // the file (e.g. proof/qa.md body `![](proof-image.png)`). Resolve them through the
+  // canonical /api/files/asset base derived from the file's PARENT directory (slash
+  // semantics on the resolved target.path; a root-level file anchors at ".") so they
+  // load in-app instead of falling through to broken SPA-route-relative URLs. No
+  // resolved target (inline-only callers) => no base (leave MarkdownViewer passthrough).
+  const markdownAssetBase = target
+    ? fileAssetUrl(target.root, parentDir(target.path) || ".")
+    : undefined;
+
   return (
     <div data-testid="file-viewer" data-file-kind={resolvedKind} className="flex flex-col h-full">
       <header className="px-4 py-3 border-b border-outline-variant">
@@ -134,7 +151,7 @@ function FileViewerBody({
       <div className="flex-1 min-h-0 overflow-y-auto">
         {resolvedKind === "markdown" && content ? (
           <div className="px-4 py-3">
-            <MarkdownViewer content={content} />
+            <MarkdownViewer content={content} assetBasePath={markdownAssetBase} />
           </div>
         ) : null}
         {resolvedKind === "yaml" || resolvedKind === "json" ? (
