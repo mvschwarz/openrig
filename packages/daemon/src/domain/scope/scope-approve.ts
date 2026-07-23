@@ -20,6 +20,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import YAML from "yaml";
 import type { MissionControlActionLog } from "../mission-control/mission-control-action-log.js";
+import { derivePlanLockArtifacts } from "./plan-lock-artifacts.js";
 
 export type ScopeTier = "slice" | "mission";
 export type ApprovalScope = "spec" | "delivery";
@@ -157,10 +158,21 @@ export class ScopeApproveService {
 
     const approvedAt = (this.deps.now?.() ?? new Date()).toISOString();
 
-    // 1. Frontmatter FIRST (the arch-pinned ordering).
+    // Stage-3 Lever A — plan-lock snapshot: ONLY a slice SPEC approval derives +
+    // co-serializes the `locked-artifacts` set (mission/delivery NEVER create it;
+    // a delivery merge preserves an existing list). PRD read fails open to null.
+    const isPlanLock = input.scopeTier === "slice" && input.approvalScope === "spec";
+    const lockedArtifacts = isPlanLock
+      ? derivePlanLockArtifacts(originalBytes, tryReadPRD(resolved))
+      : undefined;
+
+    // 1. Frontmatter FIRST (the arch-pinned ordering). The stamp AND the
+    // co-serialized `locked-artifacts` land in ONE writeFrontmatterFields +
+    // writeFileSync — so a later audit failure restores a clean verbatim README.
     const updated = writeFrontmatterFields(originalBytes, {
       [fields.by]: input.actorSession,
       [fields.at]: approvedAt,
+      ...(isPlanLock ? { "locked-artifacts": lockedArtifacts } : {}),
     });
     fs.writeFileSync(readmePath, updated, "utf8");
 
@@ -230,6 +242,16 @@ function parseFrontmatter(content: string): Record<string, unknown> {
     return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
   } catch {
     return {};
+  }
+}
+
+/** Reads the slice IMPLEMENTATION-PRD.md; returns null on ANY missing/unreadable
+ *  error (never throws) — the plan-lock derivation fails open to a PRD-only set. */
+function tryReadPRD(sliceDir: string): string | null {
+  try {
+    return fs.readFileSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md"), "utf8");
+  } catch {
+    return null;
   }
 }
 
