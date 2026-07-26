@@ -1,0 +1,259 @@
+{
+  "version": 0,
+  "owner": "skills-architect@skill-library",
+  "edges": {
+    "canonical": {
+      "path": "skills/_canonical",
+      "layout": "mirror-of-spec"
+    },
+    "plugin": {
+      "path": "packages/daemon/assets/plugins/openrig-core/skills",
+      "layout": "flat"
+    },
+    "spec": {
+      "path": "packages/daemon/specs/agents/shared/skills",
+      "layout": "categorized"
+    }
+  },
+  "skills": {
+    "agent-browser": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "process"
+    },
+    "agent-startup-and-context-ingestion": {
+      "edges": [
+        "plugin"
+      ],
+      "category": null
+    },
+    "backlog-capture": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "pm"
+    },
+    "brainstorming": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "process"
+    },
+    "claude-compaction-restore": {
+      "edges": [
+        "plugin"
+      ],
+      "category": null
+    },
+    "context-builder": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "pm"
+    },
+    "development-team": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "pods"
+    },
+    "dogfood": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "process"
+    },
+    "exec-summary": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "pm"
+    },
+    "executing-plans": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "process"
+    },
+    "forming-an-openrig-mental-model": {
+      "edges": [
+        "plugin"
+      ],
+      "category": null
+    },
+    "frontend-design": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "process"
+    },
+    "mission-slice-sop": {
+      "edges": [
+        "canonical",
+        "plugin",
+        "spec"
+      ],
+      "category": "core"
+    },
+    "office-hours": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "pm"
+    },
+    "openrig-architect": {
+      "edges": [
+        "canonical",
+        "plugin",
+        "spec"
+      ],
+      "category": "core"
+    },
+    "openrig-cmux": {
+      "edges": [
+        "canonical",
+        "plugin",
+        "spec"
+      ],
+      "category": "core"
+    },
+    "openrig-herdr": {
+      "edges": [
+        "canonical",
+        "plugin",
+        "spec"
+      ],
+      "category": "core"
+    },
+    "openrig-installer": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "core"
+    },
+    "openrig-operator": {
+      "edges": [
+        "canonical",
+        "plugin",
+        "spec"
+      ],
+      "category": "core"
+    },
+    "openrig-user": {
+      "edges": [
+        "canonical",
+        "plugin",
+        "spec"
+      ],
+      "category": "core"
+    },
+    "openrig-user-settings": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "core"
+    },
+    "orchestration-team": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "pods"
+    },
+    "plan-review": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "pm"
+    },
+    "queue-handoff": {
+      "edges": [
+        "plugin"
+      ],
+      "category": null
+    },
+    "requirements-writer": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "pm"
+    },
+    "review-team": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "pods"
+    },
+    "rig-lifecycle": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "core"
+    },
+    "seat-continuity-and-handover": {
+      "edges": [
+        "plugin"
+      ],
+      "category": null
+    },
+    "systematic-debugging": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "process"
+    },
+    "test-driven-development": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "process"
+    },
+    "ui-mockup": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "pm"
+    },
+    "using-superpowers": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "process"
+    },
+    "verification-before-completion": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "process"
+    },
+    "writing-plans": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "process"
+    }
+  }
+}

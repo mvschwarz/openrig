@@ -1,0 +1,60 @@
+{
+  "version": 0,
+  "provisional": true,
+  "owner": "pm-lead@openrig-pm",
+  "product_public": {
+    "clean": [
+      "mission-slice-sop",
+      "openrig-cmux",
+      "openrig-herdr"
+    ],
+    "ship_after_fix": [
+      "openrig-user",
+      "forming-an-openrig-mental-model",
+      "queue-handoff",
+      "seat-continuity-and-handover",
+      "claude-compaction-restore",
+      "openrig-architect"
+    ],
+    "ship_misses_add": [
+      "topology-mutation-and-seat-management",
+      "rig-lifecycle",
+      "session-compaction-and-restore"
+    ],
+    "sanitize_borderlines_ship": [
+      "rig-bundles-and-shareable-artifacts",
+      "cross-host-rig-commands",
+      "openrig-upgrade",
+      "agent-starters",
+      "specification-system",
+      "attention-queue",
+      "human-in-the-loop",
+      "watchdog",
+      "session-source-fork"
+    ]
+  },
+  "vendored_ship_with_provenance": [
+    "agent-browser",
+    "brainstorming",
+    "executing-plans",
+    "systematic-debugging",
+    "test-driven-development",
+    "using-superpowers",
+    "verification-before-completion",
+    "writing-plans",
+    "frontend-design",
+    "dogfood"
+  ],
+  "not_public": {
+    "reclass_host_only": [
+      "openrig-operator"
+    ],
+    "private_with_public_sibling_pending": [
+      "security-and-consequence-boundary-policy"
+    ]
+  },
+  "pending_author_public": [
+    "openrig-operator",
+    "foot-guns"
+  ]
+}

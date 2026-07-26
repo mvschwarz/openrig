@@ -1,8 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { createHash } from "node:crypto";
+import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   SOURCE_DIR,
   TARGET_DIR,
@@ -10,6 +22,7 @@ import {
   parseChanges,
   buildStaleMessage,
   checkMode,
+  checkModeAbsolute,
 } from "./mirror-skills.mjs";
 
 test("parseChanges extracts file-change and deletion lines from itemize-changes output", () => {
@@ -120,7 +133,862 @@ test("excluded patterns are absent in the mirror target", () => {
   );
 });
 
+test("stagePublicSkills applies membership, path, frontmatter, and fence transforms", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  assert.equal(
+    typeof mirror.stagePublicSkills,
+    "function",
+    "stagePublicSkills must be exported",
+  );
+
+  const root = mkdtempSync(join(tmpdir(), "openrig-mirror-red-"));
+  try {
+    const canon = join(root, "canon");
+    const staging = join(root, "staging");
+    write(
+      join(canon, "public-skill", "SKILL.md"),
+      [
+        "---",
+        "name: public-skill",
+        "description: public",
+        "distribution_scope: product-bound",
+        "source_evidence: openrig-work/private.md",
+        "curation_note: remove-me",
+        "content_curator: reviewer",
+        "transfer_test: pending",
+        "naming_note: historical",
+        "last_verified: 2026-07-01",
+        "private_path: openrig-work/host-only.md",
+        "internal_owner: operator-agent@kernel",
+        "metadata:",
+        "  openrig:",
+        "    stage: factory-approved",
+        "    sibling_skills:",
+        "      - public-sibling",
+        "---",
+        "",
+        "Visible.",
+        "<!-- internal:begin -->",
+        "operator-agent@kernel",
+        "<!-- internal:end -->",
+        "Still visible.",
+        "",
+      ].join("\n"),
+    );
+    write(join(canon, "public-skill", "notes.internal.md"), "secret\n");
+    write(join(canon, "public-skill", "internal", "host.md"), "secret\n");
+    write(join(canon, "private-skill", "SKILL.md"), "# private\n");
+    write(join(canon, "operator-internal", "SKILL.md"), "# whole internal\n");
+
+    await mirror.stagePublicSkills({
+      canonRoot: canon,
+      stagingRoot: staging,
+      membership: membershipFixture({
+        clean: ["public-skill", "operator-internal"],
+      }),
+      rules: fixtureRules(),
+    });
+
+    const shipped = readFileSync(
+      join(staging, "public-skill", "SKILL.md"),
+      "utf8",
+    );
+    assert.match(shipped, /name: public-skill/);
+    assert.match(shipped, /metadata:/);
+    assert.match(shipped, /stage: factory-approved/);
+    assert.match(shipped, /public-sibling/);
+    assert.match(shipped, /Visible\./);
+    assert.match(shipped, /Still visible\./);
+    assert.doesNotMatch(shipped, /distribution_scope/);
+    assert.doesNotMatch(shipped, /source_evidence/);
+    assert.doesNotMatch(shipped, /curation_note/);
+    assert.doesNotMatch(shipped, /content_curator/);
+    assert.doesNotMatch(shipped, /transfer_test/);
+    assert.doesNotMatch(shipped, /naming_note/);
+    assert.doesNotMatch(shipped, /last_verified/);
+    assert.doesNotMatch(shipped, /private_path/);
+    assert.doesNotMatch(shipped, /internal_owner/);
+    assert.doesNotMatch(shipped, /operator-agent@kernel/);
+    assert.equal(existsSync(join(staging, "public-skill", "notes.internal.md")), false);
+    assert.equal(existsSync(join(staging, "public-skill", "internal")), false);
+    assert.equal(existsSync(join(staging, "private-skill")), false);
+    assert.equal(existsSync(join(staging, "operator-internal")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("stagePublicSkills applies existing EXCLUDES before scanning or copying", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  const root = mkdtempSync(join(tmpdir(), "openrig-mirror-excludes-red-"));
+  try {
+    const canon = join(root, "canon");
+    const staging = join(root, "staging");
+    write(join(canon, "alpha", "SKILL.md"), "# Public alpha\n");
+    for (const path of [
+      "feedback.md",
+      "evals/case.md",
+      ".DS_Store",
+      "notes.local.md",
+    ]) {
+      write(join(canon, "alpha", path), "founder-only excluded fixture\n");
+    }
+
+    await mirror.stagePublicSkills({
+      canonRoot: canon,
+      stagingRoot: staging,
+      membership: membershipFixture({ clean: ["alpha"] }),
+      rules: fixtureRules(),
+    });
+
+    assert.equal(
+      readFileSync(join(staging, "alpha", "SKILL.md"), "utf8"),
+      "# Public alpha\n",
+    );
+    for (const path of [
+      "feedback.md",
+      "evals",
+      ".DS_Store",
+      "notes.local.md",
+    ]) {
+      assert.equal(existsSync(join(staging, "alpha", path)), false);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("stagePublicSkills recursively strips configured keys and internal values while preserving clean metadata", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  assert.equal(typeof mirror.stagePublicSkills, "function");
+
+  const root = mkdtempSync(join(tmpdir(), "openrig-mirror-nested-red-"));
+  try {
+    const canon = join(root, "canon");
+    const staging = join(root, "staging");
+    write(
+      join(canon, "public-skill", "SKILL.md"),
+      [
+        "---",
+        "name: public-skill",
+        "structure: public-sections",
+        "metadata:",
+        "  openrig:",
+        "    stage: factory-approved",
+        "    distribution_scope: product-bound",
+        "    source_evidence: |",
+        "      private provenance",
+        "    curation_note: remove-me",
+        "    content_curator: reviewer",
+        "    transfer_test: pending",
+        "    transfer_test_notes: remove-me-too",
+        "    naming_note: historical",
+        "    last_verified: 2026-07-01",
+        "    structure: openrig-work/private-layout.md",
+        "    source_location: openrig-work/private-source.md",
+        "    sibling_skills:",
+        "      - public-sibling",
+        "---",
+        "",
+        "# Public",
+        "",
+      ].join("\n"),
+    );
+
+    await mirror.stagePublicSkills({
+      canonRoot: canon,
+      stagingRoot: staging,
+      membership: membershipFixture({ clean: ["public-skill"] }),
+      rules: fixtureRules(),
+    });
+
+    const shipped = readFileSync(
+      join(staging, "public-skill", "SKILL.md"),
+      "utf8",
+    );
+    assert.match(shipped, /metadata:/);
+    assert.match(shipped, /stage: factory-approved/);
+    assert.match(shipped, /sibling_skills:/);
+    assert.match(shipped, /public-sibling/);
+    for (const key of [
+      "distribution_scope",
+      "source_evidence",
+      "curation_note",
+      "content_curator",
+      "transfer_test",
+      "transfer_test_notes",
+      "naming_note",
+      "last_verified",
+      "structure",
+    ]) {
+      assert.doesNotMatch(shipped, new RegExp(`^\\s*${key}:`, "m"));
+    }
+    assert.doesNotMatch(shipped, /^\s*source_location:/m);
+    assert.doesNotMatch(shipped, /openrig-work\/private-(?:layout|source)/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("stagePublicSkills aborts an unmatched internal fence with file and line", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  assert.equal(typeof mirror.stagePublicSkills, "function");
+
+  const root = mkdtempSync(join(tmpdir(), "openrig-mirror-red-"));
+  try {
+    const canon = join(root, "canon");
+    write(
+      join(canon, "public-skill", "SKILL.md"),
+      "# Public\n\n<!-- internal:begin -->\nsecret\n",
+    );
+
+    await assert.rejects(
+      mirror.stagePublicSkills({
+        canonRoot: canon,
+        stagingRoot: join(root, "staging"),
+        membership: membershipFixture({ clean: ["public-skill"] }),
+        rules: fixtureRules(),
+      }),
+      (error) => {
+        assert.match(error.message, /public-skill\/SKILL\.md/);
+        assert.match(error.message, /line 3/i);
+        assert.match(error.message, /unbalanced|unmatched/i);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("stagePublicSkills strips internal fences from non-SKILL Markdown without sanitizing ordinary content", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  const root = mkdtempSync(join(tmpdir(), "openrig-mirror-markdown-red-"));
+  try {
+    const canon = join(root, "canon");
+    const staging = join(root, "staging");
+    write(join(canon, "alpha", "SKILL.md"), "# Public skill\n");
+
+    for (const path of ["references/guide.md", "references/walkthrough.mdx"]) {
+      write(
+        join(canon, "alpha", path),
+        [
+          "---",
+          "distribution_scope: ordinary-reference-metadata",
+          "---",
+          "# Public before",
+          "ordinary reference content remains",
+          "<!-- internal:begin -->",
+          "private prose deliberately outside the denylist",
+          "<!-- internal:end -->",
+          "# Public after",
+          "",
+        ].join("\n"),
+      );
+    }
+
+    await mirror.stagePublicSkills({
+      canonRoot: canon,
+      stagingRoot: staging,
+      membership: membershipFixture({ clean: ["alpha"] }),
+      rules: fixtureRules(),
+    });
+
+    for (const path of ["references/guide.md", "references/walkthrough.mdx"]) {
+      const shipped = readFileSync(join(staging, "alpha", path), "utf8");
+      assert.match(shipped, /distribution_scope: ordinary-reference-metadata/);
+      assert.match(shipped, /# Public before/);
+      assert.match(shipped, /ordinary reference content remains/);
+      assert.match(shipped, /# Public after/);
+      assert.doesNotMatch(shipped, /internal:(?:begin|end)/);
+      assert.doesNotMatch(shipped, /private prose deliberately/);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("stagePublicSkills rejects an unmatched fence in non-SKILL Markdown with file and line", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  const root = mkdtempSync(join(tmpdir(), "openrig-mirror-markdown-red-"));
+  try {
+    const canon = join(root, "canon");
+    write(join(canon, "alpha", "SKILL.md"), "# Public skill\n");
+    write(
+      join(canon, "alpha", "references", "guide.mdx"),
+      "# Public\n\n<!-- internal:begin -->\nprivate prose\n",
+    );
+
+    await assert.rejects(
+      mirror.stagePublicSkills({
+        canonRoot: canon,
+        stagingRoot: join(root, "staging"),
+        membership: membershipFixture({ clean: ["alpha"] }),
+        rules: fixtureRules(),
+      }),
+      (error) => {
+        assert.match(error.message, /alpha\/references\/guide\.mdx/);
+        assert.match(error.message, /line 3/i);
+        assert.match(error.message, /unbalanced|unmatched/i);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("stagePublicSkills rejects canon file symlinks before reading or staging outside bytes", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  const root = mkdtempSync(join(tmpdir(), "openrig-mirror-symlink-red-"));
+  try {
+    const canon = join(root, "canon");
+    const staging = join(root, "staging");
+    const outside = join(root, "outside-file.txt");
+    write(join(canon, "alpha", "SKILL.md"), "# Public skill\n");
+    write(outside, "outside bytes deliberately outside the denylist\n");
+    const link = join(canon, "alpha", "references", "linked.txt");
+    mkdirSync(dirname(link), { recursive: true });
+    symlinkSync(outside, link, "file");
+
+    await assert.rejects(
+      mirror.stagePublicSkills({
+        canonRoot: canon,
+        stagingRoot: staging,
+        membership: membershipFixture({ clean: ["alpha"] }),
+        rules: fixtureRules(),
+      }),
+      (error) => {
+        assert.match(error.message, /symlink/i);
+        assert.match(error.message, /alpha\/references\/linked\.txt/);
+        return true;
+      },
+    );
+    assert.equal(
+      existsSync(join(staging, "alpha", "references", "linked.txt")),
+      false,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("stagePublicSkills rejects canon directory symlinks before recursion or staging outside bytes", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  const root = mkdtempSync(join(tmpdir(), "openrig-mirror-symlink-red-"));
+  try {
+    const canon = join(root, "canon");
+    const staging = join(root, "staging");
+    const outside = join(root, "outside-directory");
+    write(join(canon, "alpha", "SKILL.md"), "# Public skill\n");
+    write(join(outside, "secret.txt"), "outside directory bytes\n");
+    const link = join(canon, "alpha", "references", "linked-directory");
+    mkdirSync(dirname(link), { recursive: true });
+    symlinkSync(outside, link, "dir");
+
+    await assert.rejects(
+      mirror.stagePublicSkills({
+        canonRoot: canon,
+        stagingRoot: staging,
+        membership: membershipFixture({ clean: ["alpha"] }),
+        rules: fixtureRules(),
+      }),
+      (error) => {
+        assert.match(error.message, /symlink/i);
+        assert.match(error.message, /alpha\/references\/linked-directory/);
+        return true;
+      },
+    );
+    assert.equal(
+      existsSync(join(staging, "alpha", "references", "linked-directory")),
+      false,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("stagePublicSkills is deterministic for the same clean input", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  assert.equal(typeof mirror.stagePublicSkills, "function");
+
+  const root = mkdtempSync(join(tmpdir(), "openrig-mirror-red-"));
+  try {
+    const canon = join(root, "canon");
+    write(join(canon, "public-skill", "SKILL.md"), "---\nname: public-skill\n---\n\n# Public\n");
+    write(join(canon, "public-skill", "references", "guide.md"), "# Guide\n");
+
+    const first = join(root, "first");
+    const second = join(root, "second");
+    const input = {
+      canonRoot: canon,
+      membership: membershipFixture({ clean: ["public-skill"] }),
+      rules: fixtureRules(),
+    };
+    await mirror.stagePublicSkills({ ...input, stagingRoot: first });
+    await mirror.stagePublicSkills({ ...input, stagingRoot: second });
+
+    assert.deepEqual(snapshotTree(first), snapshotTree(second));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("shipSetFromMembership consumes exactly the five shipping categories", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  assert.equal(
+    typeof mirror.shipSetFromMembership,
+    "function",
+    "shipSetFromMembership must be exported",
+  );
+
+  const shipSet = mirror.shipSetFromMembership({
+    version: 0,
+    product_public: {
+      clean: ["clean", "duplicate"],
+      ship_after_fix: ["after", "duplicate"],
+      ship_misses_add: ["miss"],
+      sanitize_borderlines_ship: ["sanitize"],
+    },
+    vendored_ship_with_provenance: ["vendored"],
+    not_public: {
+      reclass_host_only: ["host-only"],
+      private_with_public_sibling_pending: ["private"],
+    },
+    pending_author_public: ["pending"],
+  });
+
+  assert.deepEqual(shipSet, [
+    "after",
+    "clean",
+    "duplicate",
+    "miss",
+    "sanitize",
+    "vendored",
+  ]);
+});
+
+test("shipSetFromMembership subtracts not_public and pending overlaps", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  assert.equal(typeof mirror.shipSetFromMembership, "function");
+
+  const shipSet = mirror.shipSetFromMembership({
+    version: 0,
+    product_public: {
+      clean: ["blocked", "ok", "pending"],
+      ship_after_fix: [],
+      ship_misses_add: [],
+      sanitize_borderlines_ship: [],
+    },
+    vendored_ship_with_provenance: [],
+    not_public: {
+      reclass_host_only: ["blocked"],
+    },
+    pending_author_public: ["pending"],
+  });
+
+  assert.deepEqual(shipSet, ["ok"]);
+});
+
+test("checkGeneratedEdges detects layout and digest drift without invoking the leak scanner", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  assert.equal(
+    typeof mirror.checkGeneratedEdges,
+    "function",
+    "checkGeneratedEdges must be exported",
+  );
+
+  const root = mkdtempSync(join(tmpdir(), "openrig-digest-red-"));
+  try {
+    const specPath = "packages/daemon/specs/agents/shared/skills";
+    const canonicalPath = "skills/_canonical";
+    const pluginPath = "packages/daemon/assets/plugins/openrig-core/skills";
+    write(join(root, specPath, "core", "alpha", "SKILL.md"), "# Alpha\n");
+    write(join(root, specPath, "core", "alpha", "references", "guide.md"), "# Guide\n");
+    write(join(root, canonicalPath, "core", "alpha", "SKILL.md"), "# Alpha\n");
+    write(join(root, canonicalPath, "core", "alpha", "references", "guide.md"), "# Guide\n");
+    write(join(root, pluginPath, "alpha", "SKILL.md"), "# Alpha\n");
+    write(join(root, pluginPath, "alpha", "references", "guide.md"), "# Guide\n");
+
+    const layout = {
+      version: 0,
+      edges: {
+        spec: { path: specPath, layout: "categorized" },
+        canonical: { path: canonicalPath, layout: "mirror-of-spec" },
+        plugin: { path: pluginPath, layout: "flat" },
+      },
+      skills: {
+        alpha: { edges: ["spec", "canonical", "plugin"], category: "core" },
+      },
+    };
+    const digests = {
+      version: 1,
+      edges: {
+        spec: {
+          "core/alpha/SKILL.md": sha256("# Alpha\n"),
+          "core/alpha/references/guide.md": sha256("# Guide\n"),
+        },
+        canonical: {
+          "core/alpha/SKILL.md": sha256("# Alpha\n"),
+          "core/alpha/references/guide.md": sha256("# Guide\n"),
+        },
+        plugin: {
+          "alpha/SKILL.md": sha256("# Alpha\n"),
+          "alpha/references/guide.md": sha256("# Guide\n"),
+        },
+      },
+    };
+    let scannerCalls = 0;
+    const clean = await mirror.checkGeneratedEdges({
+      repoRoot: root,
+      layout,
+      digests,
+      scan: () => {
+        scannerCalls += 1;
+        throw new Error("provisional scanner must not run from mirror --check");
+      },
+    });
+    assert.deepEqual(clean, { stale: false, changes: [] });
+    assert.equal(scannerCalls, 0);
+
+    write(join(root, pluginPath, "alpha", "SKILL.md"), "# Changed\n");
+    const drift = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests });
+    assert.equal(drift.stale, true);
+    assert.ok(
+      drift.changes.some(
+        (change) =>
+          change.edge === "plugin" &&
+          change.path === "alpha/SKILL.md" &&
+          change.reason === "digest",
+        ),
+    );
+
+    write(join(root, pluginPath, "alpha", "SKILL.md"), "# Alpha\n");
+    write(join(root, pluginPath, "alpha", "unexpected.txt"), "extra\n");
+    const added = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests });
+    assert.ok(
+      added.changes.some(
+        (change) =>
+          change.edge === "plugin" &&
+          change.path === "alpha/unexpected.txt" &&
+          change.reason === "unexpected",
+      ),
+    );
+
+    rmSync(join(root, pluginPath, "alpha", "unexpected.txt"));
+    rmSync(join(root, pluginPath, "alpha", "references", "guide.md"));
+    const missing = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests });
+    assert.ok(
+      missing.changes.some(
+        (change) =>
+          change.edge === "plugin" &&
+          change.path === "alpha/references/guide.md" &&
+          change.reason === "missing",
+      ),
+    );
+
+    write(join(root, pluginPath, "alpha", "guide.md"), "# Guide\n");
+    const relocated = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests });
+    assert.ok(
+      relocated.changes.some(
+        (change) =>
+          change.edge === "plugin" &&
+          change.path === "alpha/guide.md" &&
+          change.reason === "unexpected",
+      ),
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("checkGeneratedEdges fails closed on empty or malformed control manifests", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+
+  await assert.rejects(
+    mirror.checkGeneratedEdges({
+      repoRoot: "/unused",
+      layout: {},
+      digests: {},
+    }),
+    /layout|edges|control/i,
+  );
+  await assert.rejects(
+    mirror.checkGeneratedEdges({
+      repoRoot: "/unused",
+      layout: {
+        version: 0,
+        edges: {
+          spec: { path: "spec", layout: "categorized" },
+        },
+        skills: {},
+      },
+      digests: { version: 1, edges: {} },
+    }),
+    /digest|spec|control/i,
+  );
+
+  const root = mkdtempSync(join(tmpdir(), "openrig-partial-controls-red-"));
+  try {
+    write(join(root, "spec", "core", "alpha", "SKILL.md"), "# Alpha\n");
+    await assert.rejects(
+      mirror.checkGeneratedEdges({
+        repoRoot: root,
+        layout: {
+          version: 0,
+          edges: {
+            spec: { path: "spec", layout: "categorized" },
+          },
+          skills: {
+            alpha: { edges: ["spec"], category: "core" },
+          },
+        },
+        digests: {
+          version: 1,
+          edges: {
+            spec: {
+              "core/alpha/SKILL.md": sha256("# Alpha\n"),
+            },
+          },
+        },
+      }),
+      /canonical|plugin|spec|exactly three|control/i,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("authoring regeneration stages canon and projects exact manifest layouts to all three edges", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  assert.equal(
+    typeof mirror.regeneratePublicSkills,
+    "function",
+    "regeneratePublicSkills must be exported",
+  );
+
+  const root = mkdtempSync(join(tmpdir(), "openrig-authoring-red-"));
+  try {
+    const canonRoot = join(root, "canon");
+    const repoRoot = join(root, "repo");
+    write(join(canonRoot, "alpha", "SKILL.md"), "# Alpha\n");
+    write(join(canonRoot, "alpha", "references", "guide.md"), "# Guide\n");
+    write(join(canonRoot, "alpha", "feedback.md"), "private cycle\n");
+    write(join(canonRoot, "alpha", "evals", "case.md"), "private eval\n");
+
+    const result = await mirror.regeneratePublicSkills({
+      canonRoot,
+      repoRoot,
+      membership: membershipFixture({ clean: ["alpha"] }),
+      rules: fixtureRules(),
+      layout: {
+        version: 0,
+        edges: {
+          spec: { path: "spec", layout: "categorized" },
+          canonical: { path: "canonical", layout: "mirror-of-spec" },
+          plugin: { path: "plugin", layout: "flat" },
+        },
+        skills: {
+          alpha: {
+            edges: ["canonical", "plugin", "spec"],
+            category: "core",
+          },
+        },
+      },
+    });
+
+    for (const path of [
+      "spec/core/alpha/SKILL.md",
+      "canonical/core/alpha/SKILL.md",
+      "plugin/alpha/SKILL.md",
+      "spec/core/alpha/references/guide.md",
+      "canonical/core/alpha/references/guide.md",
+      "plugin/alpha/references/guide.md",
+    ]) {
+      assert.equal(readFileSync(join(repoRoot, path), "utf8").startsWith("#"), true);
+    }
+    assert.equal(existsSync(join(repoRoot, "spec/core/alpha/feedback.md")), false);
+    assert.equal(existsSync(join(repoRoot, "plugin/alpha/evals")), false);
+    assert.deepEqual(
+      [...new Set(result.changes.map(({ edge }) => edge))].sort(),
+      ["canonical", "plugin", "spec"],
+    );
+    assert.ok(result.changes.every(({ path }) => !path.includes("feedback.md")));
+
+    await assert.rejects(
+      mirror.regeneratePublicSkills({
+        canonRoot,
+        repoRoot,
+        membership: membershipFixture({ clean: ["alpha", "missing"] }),
+        rules: fixtureRules(),
+        layout: {
+          version: 0,
+          edges: {
+            spec: { path: "spec", layout: "categorized" },
+            canonical: { path: "canonical", layout: "mirror-of-spec" },
+            plugin: { path: "plugin", layout: "flat" },
+          },
+          skills: {
+            alpha: { edges: ["spec"], category: "core" },
+          },
+        },
+      }),
+      /missing.*ship|ship.*missing|missing.*membership/i,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("default apply refreshes controls after regeneration and enumerates every diff", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  assert.equal(
+    typeof mirror.authoringApplyMode,
+    "function",
+    "authoringApplyMode must be exported",
+  );
+
+  const order = [];
+  const result = await mirror.authoringApplyMode({
+    generateControlPlaneJson: async () => {
+      order.push("generate");
+    },
+    readAuthoringInputs: () => {
+      order.push("read");
+      return { fixture: true };
+    },
+    regeneratePublicSkills: async (inputs) => {
+      order.push(`regenerate:${inputs.fixture}`);
+      return {
+        changes: [
+          { edge: "canonical", path: "core/alpha/SKILL.md", reason: "write" },
+          { edge: "plugin", path: "alpha/SKILL.md", reason: "write" },
+          { edge: "spec", path: "core/alpha/SKILL.md", reason: "write" },
+        ],
+      };
+    },
+  });
+  assert.deepEqual(order, [
+    "generate",
+    "read",
+    "regenerate:true",
+    "generate",
+  ]);
+  assert.equal(result.changes.length, 3);
+
+  let defaultApplyCalls = 0;
+  const messages = [];
+  await mirror.main([], {
+    authoringApplyMode: async () => {
+      defaultApplyCalls += 1;
+      return result;
+    },
+    log: (message) => messages.push(message),
+  });
+  assert.equal(defaultApplyCalls, 1);
+  for (const change of result.changes) {
+    assert.ok(
+      messages.some(
+        (message) =>
+          message.includes(change.edge) && message.includes(change.path),
+      ),
+    );
+  }
+});
+
+test("mirror main --check uses layout/digests and never activates the provisional scanner", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  let checkCalls = 0;
+  let scannerCalls = 0;
+
+  await mirror.main(["--check"], {
+    checkGeneratedEdges: async () => {
+      checkCalls += 1;
+      return { stale: false, changes: [] };
+    },
+    scanInternalLeaks: () => {
+      scannerCalls += 1;
+      throw new Error("Plain B forbids scanner activation from mirror main");
+    },
+  });
+
+  assert.equal(checkCalls, 1, "main --check must call the layout/digest verifier");
+  assert.equal(scannerCalls, 0, "main --check must not call the provisional scanner");
+});
+
+test("checkModeAbsolute retains its one-source/one-target checksum contract", () => {
+  const calls = [];
+  const result = checkModeAbsolute("/source", "/target", (command, args) => {
+    calls.push({ command, args });
+    return "";
+  });
+
+  assert.equal(result.stale, false);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, "rsync");
+  assert.ok(calls[0].args.includes("--checksum"));
+  assert.equal(calls[0].args.at(-2), "/source/");
+  assert.equal(calls[0].args.at(-1), "/target/");
+});
+
 // --- helpers (test-only) ---
+
+function fixtureRules() {
+  return {
+    path_prefixes: ["openrig-work/"],
+    seat_and_rig_patterns: ["operator-agent@"],
+    host_patterns: ["mm2-"],
+    charged_terms: ["founder"],
+    frontmatter_drop_keys: [
+      "source_evidence",
+      "curation_note",
+      "content_curator",
+      "transfer_test",
+      "transfer_test_notes",
+      "naming_note",
+      "last_verified",
+      "structure",
+    ],
+    internal_path_globs: ["*.internal.*", "**/internal/**", "*-internal/**"],
+    section_fence: {
+      begin: "<!-- internal:begin -->",
+      end: "<!-- internal:end -->",
+    },
+    allowed_context_substrings: ["do not ship"],
+  };
+}
+
+function membershipFixture({ clean = [] } = {}) {
+  return {
+    version: 0,
+    product_public: {
+      clean,
+      ship_after_fix: [],
+      ship_misses_add: [],
+      sanitize_borderlines_ship: [],
+    },
+    vendored_ship_with_provenance: [],
+    not_public: {},
+    pending_author_public: [],
+  };
+}
+
+function write(path, content) {
+  mkdirSync(join(path, ".."), { recursive: true });
+  writeFileSync(path, content);
+}
+
+function snapshotTree(root) {
+  const result = {};
+  walk(root, (path) => {
+    result[path.slice(root.length + 1)] = readFileSync(path);
+  });
+  return result;
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
 
 function walkSkillFiles(root) {
   const out = [];

@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "path_prefixes": [
+    "openrig-work/",
+    "openrig-internal/",
+    "/Users/wrandom/",
+    "~/code/substrate/",
+    "code/substrate/shared-docs/",
+    ".openrig/"
+  ],
+  "seat_and_rig_patterns": [
+    "@skill-library",
+    "@kernel",
+    "@openrig-pm",
+    "@openrig-studio",
+    "@openrig-comms",
+    "@v-openrig-build",
+    "operator-agent@",
+    "pm-lead@",
+    "skills-architect@",
+    "skills-analyst@",
+    "openrig-velocity",
+    "redo-driver",
+    "dev1-guard",
+    "dev-driver3"
+  ],
+  "host_patterns": [
+    "mm2-",
+    "ovh1-",
+    "linkpix",
+    "vm-claude-test"
+  ],
+  "charged_terms": [
+    "dogfood",
+    "founder",
+    "founder-owned host",
+    "one open trust domain",
+    "default-open",
+    "bomb on this host",
+    "the unforgivable sin"
+  ],
+  "frontmatter_drop_keys": [
+    "source_evidence",
+    "curation_note",
+    "content_curator",
+    "transfer_test",
+    "transfer_test_notes",
+    "naming_note",
+    "last_verified",
+    "structure"
+  ],
+  "internal_path_globs": [
+    "*.internal.*",
+    "**/internal/**",
+    "*-internal/**"
+  ],
+  "section_fence": {
+    "begin": "<!-- internal:begin -->",
+    "end": "<!-- internal:end -->"
+  },
+  "allowed_context_substrings": [
+    "deprecated",
+    "defunct",
+    "do not ship",
+    "internal-only (example)"
+  ]
+}

@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc && node scripts/copy-workflow-specs.mjs",
+    "gen:control-plane-json": "node scripts/gen-control-plane-json.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "dev": "tsx watch src/index.ts"
