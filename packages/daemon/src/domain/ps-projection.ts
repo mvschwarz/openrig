@@ -113,6 +113,30 @@ export function deriveRigLifecycleState(nodeStates: NodeLifecycleState[]): RigLi
 }
 
 /**
+ * Slice-05 item-5 (D5) — the SINGLE effective-running predicate for the ps
+ * running rollup. `sessions.status='running'` alone is verdict-blind: a seat
+ * whose tmux session was torn down out-of-band keeps `status='running'` in the
+ * DB, so the raw SQL count fabricates a dead seat as running. The
+ * SeatIdentityReconciler (and, since Slice-05, the live SessionTransport on a
+ * `session_missing` send/capture) records an APPLICABLE `session_missing`
+ * verdict for exactly that case; node-inventory already surfaces it here,
+ * applicability-gated (a stale verdict is null → fail-open).
+ *
+ * ONLY `reason === "session_missing"` — a genuinely-gone tmux session — is
+ * excluded. `pane_pid_gone` / `mismatch` / `tmux_unavailable` and an absent or
+ * inapplicable (null) verdict all stay running: an ambiguous or non-fatal
+ * identity signal must never fabricate `stopped` (it down-ranks lifecycle to
+ * attention, a separate axis). runningCount, status, and activeCount all flow
+ * through this one predicate so the three never contradict each other. This
+ * reads the verdict; it NEVER mutates `sessions.status`.
+ */
+export function isEffectivelyRunning(node: NodeInventoryEntry): boolean {
+  if (node.sessionStatus !== "running") return false;
+  if (node.identityVerdict?.reason === "session_missing") return false;
+  return true;
+}
+
+/**
  * Projects rig/run summary for `rig ps`.
  * Aggregates across all rigs: node counts, running counts, status, uptime, snapshot age.
  */
@@ -184,16 +208,35 @@ export class PsProjectionService {
     const inventoryByRig = getNodeInventoryForAllRigs(this.db);
 
     return rows.map((r) => {
-      const status: PsEntry["status"] =
-        r.node_count === 0 ? "stopped"
-        : r.running_count === r.node_count ? "running"
-        : r.running_count > 0 ? "partial"
-        : "stopped";
-
       // Derive rig-level lifecycleState by folding per-node states. FS-1 W1.2:
       // inventory for ALL rigs was built in ONE batched pass above (previously one
       // getNodeInventory query-set per rig — the rig-level N+1); index it here.
       const inventory = inventoryByRig.get(r.rig_id) ?? [];
+
+      // Slice-05 item-5 (D5) — running honesty. The raw SQL `running_count` is
+      // the running BASE: it selects each node's latest session by
+      // `created_at DESC, id DESC` (the "newest session counts" contract). We
+      // must NOT re-derive that base from `inventory` — node-inventory picks the
+      // latest session by `id DESC` alone, a DIFFERENT ordering that diverges
+      // whenever session ids are not monotonic with created_at (pre-existing
+      // latent inconsistency, orthogonal to D5). Instead, subtract ONLY the
+      // status-running seats that are not EFFECTIVELY running — i.e. those
+      // carrying an applicable `session_missing` verdict — so a torn-down tmux
+      // session is never fabricated as running. The subtraction routes through
+      // the SAME isEffectivelyRunning predicate the activeCount gate uses below,
+      // so the two counts never disagree on liveness. NEVER mutates
+      // `sessions.status`.
+      const sessionMissingRunning = inventory.filter(
+        (n) => n.sessionStatus === "running" && !isEffectivelyRunning(n),
+      ).length;
+      const effectiveRunningCount = Math.max(0, r.running_count - sessionMissingRunning);
+
+      const status: PsEntry["status"] =
+        r.node_count === 0 ? "stopped"
+        : effectiveRunningCount === r.node_count ? "running"
+        : effectiveRunningCount > 0 ? "partial"
+        : "stopped";
+
       const lifecycleState = deriveRigLifecycleState(inventory.map((e) => e.lifecycleState));
 
       // Slice 15 — `terminal-active` count. Subset of running tmux-bound
@@ -203,7 +246,7 @@ export class PsProjectionService {
       let activeCount = 0;
       if (this.seatActivity) {
         for (const node of inventory) {
-          if (node.sessionStatus !== "running") continue;
+          if (!isEffectivelyRunning(node)) continue;
           if (!node.canonicalSessionName) continue;
           const obs = this.seatActivity.getSeatActivity(node.canonicalSessionName);
           if (obs?.isActiveWithinWindow === true) activeCount++;
@@ -256,7 +299,7 @@ export class PsProjectionService {
         name: r.name,
         rigName: r.name,
         nodeCount: r.node_count,
-        runningCount: r.running_count,
+        runningCount: effectiveRunningCount,
         activeCount,
         hasWorkCount,
         status,

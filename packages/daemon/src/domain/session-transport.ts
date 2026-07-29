@@ -6,6 +6,7 @@ import type { AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
+import { SeatIdentityStore } from "./seat-identity-store.js";
 
 // OPR.0.4.1.10 — send-readiness freshness. The runtime-hook store keeps a 5min freshness for activity
 // DISPLAY, but "safe to send NOW" needs a tight window: a stale "idle" read must not authorize a send
@@ -465,6 +466,47 @@ export class SessionTransport {
     this.sendReadinessFreshnessMs = deps.sendReadinessFreshnessMs ?? SEND_READINESS_FRESHNESS_MS;
   }
 
+  /**
+   * Slice-05 D5/D6 — when a live transport op (send/capture) observes that the
+   * seat's tmux session is genuinely gone (`hasSession(sessionName) === false`),
+   * durably record the SAME `session_missing` identity verdict the reconciler
+   * would write, so `rig ps` stops reporting the dead seat as running WITHOUT
+   * waiting for the next reconciler poll. This is the transport-side writer of
+   * the shared verdict bridge; the reconciler is the poll-side writer.
+   *
+   * Only writes an APPLICABLE verdict: the join is narrowed to the node whose
+   * LATEST running session_name equals the probed session (so
+   * `verdict.sessionName === latest session_name`, the node-inventory
+   * applicability gate), and it only writes when a binding pane is registered
+   * (a null pane is the reconciler's `tmux_unavailable` case, which is
+   * non-down-ranking — never fabricate `session_missing` without a pane).
+   * Never mutates `sessions.status`.
+   */
+  private recordSessionMissingVerdict(sessionName: string): void {
+    const seat = this.db
+      .prepare(`
+        SELECT n.id AS node_id, s.session_name AS session_name, b.tmux_pane AS tmux_pane
+        FROM nodes n
+        JOIN sessions s ON s.node_id = n.id
+          AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
+        LEFT JOIN bindings b ON b.node_id = n.id
+        WHERE s.status = 'running'
+          AND s.session_name = ?
+        LIMIT 1
+      `)
+      .get(sessionName) as { node_id: string; session_name: string; tmux_pane: string | null } | undefined;
+    if (!seat || seat.tmux_pane === null) return;
+    new SeatIdentityStore(this.db).upsert({
+      nodeId: seat.node_id,
+      verdict: "pane_missing",
+      evidenceSource: "tmux_session",
+      reason: "session_missing",
+      evidence: { registeredPane: seat.tmux_pane, observedPid: null, observedCommand: null, matchedLayer: null },
+      sessionName: seat.session_name,
+      observedAt: this.now().toISOString(),
+    });
+  }
+
   private getSessionMeta(sessionName: string): { runtime: string | null; attachmentType: string | null } {
     const row = this.db.prepare(`
       SELECT
@@ -740,6 +782,7 @@ export class SessionTransport {
     try {
       const exists = await this.tmuxAdapter.hasSession(sessionName);
       if (!exists) {
+        this.recordSessionMissingVerdict(sessionName);
         return {
           ok: false,
           sessionName,
@@ -1127,6 +1170,7 @@ export class SessionTransport {
     try {
       const exists = await this.tmuxAdapter.hasSession(sessionName);
       if (!exists) {
+        this.recordSessionMissingVerdict(sessionName);
         return {
           ok: false,
           sessionName,

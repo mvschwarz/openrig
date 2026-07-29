@@ -148,7 +148,12 @@ const DEFAULT_DB = "openrig.sqlite";
 // bounded, but do not kill a healthy daemon during first-boot slack.
 const HEALTHZ_RETRIES = 80;
 const HEALTHZ_DELAY_MS = 250;
-const HEALTHZ_PROBE_TIMEOUT_MS = 250;
+// OPR.0.4.7 slice-05 item-4: the WHOLE status health probe stays within ONE normal
+// CLI request window (~5s, matching DaemonClient's timeoutMs) — immediate connection
+// errors may retry INSIDE this deadline, but it is NEVER re-allocated per retry. So a
+// slow-but-answering /healthz (e.g. 400ms) is OBSERVED rather than falsely reported
+// stopped; a genuine connection refusal still fails within the window -> stopped.
+const STATUS_PROBE_DEADLINE_MS = 5000;
 // OPR.0.4.2.1 — status-probe bounded settle: a single /healthz fetch loses to the post-restart
 // listener bind window (process up, not yet accepting). getDaemonStatus retries a HARD-BOUNDED
 // number of attempts with a short backoff so the status reflects the ACTUAL /healthz answer. This
@@ -156,6 +161,12 @@ const HEALTHZ_PROBE_TIMEOUT_MS = 250;
 // a genuine-down status check is bounded ((ATTEMPTS-1)*DELAY + per-attempt timeout) — never a hang.
 const STATUS_PROBE_MAX_ATTEMPTS = 5;
 const STATUS_PROBE_RETRY_DELAY_MS = 200;
+// Per-probe /healthz timeout for the SINGLE-SHOT callers that are NOT the status
+// settle path — checkPid classification and the start/stop recovery guards, plus
+// each iteration of startDaemon's own HEALTHZ_RETRIES poll loop. These keep their
+// prior fixed-bound timing (the settle deadline above is status-probe-LOCAL); this
+// restores the timeout the removed HEALTHZ_PROBE_TIMEOUT_MS supplied to them.
+const HEALTHZ_PROBE_TIMEOUT_MS = 250;
 
 export interface WorkspaceScaffoldResult {
   root: string;
@@ -310,7 +321,7 @@ async function checkPid(state: DaemonState, deps: LifecycleDeps): Promise<"openr
   if (!deps.isProcessAlive(state.pid)) return "dead";
   const host = state.host ?? DEFAULT_HOST;
   try {
-    await fetchDaemonProbe(deps, `http://${host}:${state.port}/healthz`);
+    await fetchDaemonProbe(deps, `http://${host}:${state.port}/healthz`, HEALTHZ_PROBE_TIMEOUT_MS);
     // Any response (ok or not) means something is listening on our port → OpenRig
     return "openrig";
   } catch (err) {
@@ -441,7 +452,7 @@ export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Prom
   } else {
     let recoveredRunning = false;
     try {
-      await fetchDaemonProbe(deps, `http://${probeHost}:${port}/healthz`);
+      await fetchDaemonProbe(deps, `http://${probeHost}:${port}/healthz`, HEALTHZ_PROBE_TIMEOUT_MS);
       recoveredRunning = true;
     } catch (err) {
       if (err instanceof HealthProbeTimeoutError) {
@@ -486,7 +497,7 @@ export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Prom
   let healthy = false;
   for (let i = 0; i < HEALTHZ_RETRIES; i++) {
     try {
-      const res = await fetchDaemonProbe(deps, healthzUrl);
+      const res = await fetchDaemonProbe(deps, healthzUrl, HEALTHZ_PROBE_TIMEOUT_MS);
       if (res.ok) {
         healthy = true;
         break;
@@ -524,7 +535,7 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<void> {
     const configured = resolveConfiguredDaemonTarget();
     let recoveredRunning = false;
     try {
-      await fetchDaemonProbe(deps, `http://${configured.host}:${configured.port}/healthz`);
+      await fetchDaemonProbe(deps, `http://${configured.host}:${configured.port}/healthz`, HEALTHZ_PROBE_TIMEOUT_MS);
       recoveredRunning = true;
     } catch (err) {
       if (err instanceof HealthProbeTimeoutError) {
@@ -683,13 +694,18 @@ async function readHealthEvidence(
   return { healthy: true };
 }
 
-async function fetchDaemonProbe(deps: LifecycleDeps, url: string): Promise<{ ok: boolean; json?: () => Promise<unknown> }> {
-  return await Promise.race([
-    deps.fetch(url),
-    new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new HealthProbeTimeoutError(url)), HEALTHZ_PROBE_TIMEOUT_MS);
-    }),
-  ]);
+async function fetchDaemonProbe(deps: LifecycleDeps, url: string, timeoutMs: number): Promise<{ ok: boolean; json?: () => Promise<unknown> }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      deps.fetch(url),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new HealthProbeTimeoutError(url)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -705,13 +721,25 @@ const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => set
  */
 async function probeHealthzWithSettle(deps: LifecycleDeps, url: string): Promise<{ ok: boolean; json?: () => Promise<unknown> }> {
   const sleep = deps.sleep ?? defaultSleep;
+  // ONE ~5s deadline for the whole status probe. Each attempt gets the REMAINING
+  // budget (never a fresh 5s), so a slow-but-answering /healthz is observed within
+  // the window. A probe TIMEOUT means the deadline is spent -> stop (no re-allocation);
+  // only IMMEDIATE connection errors (the post-restart bind window) retry, bounded by
+  // BOTH the attempt cap and the deadline. Genuine connection-refusal exhausts the
+  // bounded retries and is rethrown (reported stopped/unhealthy) — never masked.
+  const deadline = Date.now() + STATUS_PROBE_DEADLINE_MS;
   let lastErr: unknown;
   for (let attempt = 1; attempt <= STATUS_PROBE_MAX_ATTEMPTS; attempt++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
     try {
-      return await fetchDaemonProbe(deps, url);
+      return await fetchDaemonProbe(deps, url, remaining);
     } catch (err) {
       lastErr = err;
-      if (attempt < STATUS_PROBE_MAX_ATTEMPTS) await sleep(STATUS_PROBE_RETRY_DELAY_MS);
+      if (err instanceof HealthProbeTimeoutError) break; // deadline spent — do not re-allocate a new window
+      if (attempt < STATUS_PROBE_MAX_ATTEMPTS && Date.now() + STATUS_PROBE_RETRY_DELAY_MS < deadline) {
+        await sleep(STATUS_PROBE_RETRY_DELAY_MS);
+      }
     }
   }
   throw lastErr;

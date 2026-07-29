@@ -22,6 +22,7 @@ import { checkpointsSchema } from "../src/db/migrations/005_checkpoints.js";
 import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
+import { SessionTransport } from "../src/domain/session-transport.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import { CheckpointStore } from "../src/domain/checkpoint-store.js";
@@ -33,6 +34,7 @@ import { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import { TmuxAdapter, type ExecFn } from "../src/adapters/tmux.js";
 import type { ResumeResult } from "../src/adapters/claude-resume.js";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { PsProjectionService } from "../src/domain/ps-projection.js";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -969,5 +971,87 @@ describe("Lifecycle reboot/recovery scenario matrix (Tier 1)", () => {
 
       db.close();
     });
+  });
+});
+
+// ===================================================================
+// SLICE-05 items 5+6 — cross-contract invariant RED (the item-6 regression).
+// INVARIANT: a seat whose live tmux session is gone — PROVEN by driving the REAL
+// SessionTransport.send AND .capture (both return { ok:false, reason:"session_missing" }
+// through the tmuxAdapter.hasSession gate) — must NEVER be concurrently reported running
+// by ps. ps.runningCount reads raw persisted sessions.status='running' and never consults
+// live tmux, so the invariant is violated today. ONE shared db + ONE shared tmux adapter
+// with per-session hasSession truth. Row (b) is LOAD-BEARING: the last/only session, where
+// the reconciler emits tmux_unavailable (not session_missing) on the empty census — so a
+// verdict-only demotion cannot satisfy it; the fix must honor the definitive send/capture
+// liveness. Outcome-level (fix-agnostic); no invented production seam.
+// ===================================================================
+describe("Slice-05 items 5+6 — real send/capture vs ps running (cross-contract regression)", () => {
+  function seedSeat(db: Database.Database, rigId: string, node: string, sessionName: string, pane: string): void {
+    db.prepare("INSERT OR IGNORE INTO rigs (id, name) VALUES (?, ?)").run(rigId, rigId);
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES (?, ?, ?, 'claude-code', '/tmp')").run(node, rigId, `pod.${node}`);
+    db.prepare(
+      "INSERT INTO sessions (id, node_id, session_name, status, startup_status, created_at) VALUES (?, ?, ?, 'running', 'ready', '2026-07-02 12:00:00')",
+    ).run(`sess-${node}`, node, sessionName);
+    db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES (?, ?, 'tmux', ?, ?)").run(`bind-${node}`, node, sessionName, pane);
+  }
+  function tmuxWithLive(live: Set<string>): TmuxAdapter {
+    return {
+      hasSession: async (name: string) => live.has(name),
+      sendText: async () => ({ ok: true as const }),
+      sendKeys: async () => ({ ok: true as const }),
+      capturePaneContent: async () => "idle\n> ",
+      createSession: async () => ({ ok: true as const }),
+      killSession: async () => ({ ok: true as const }),
+      listSessions: async () => [],
+      listWindows: async () => [],
+      listPanes: async () => [],
+      startPipePane: async () => ({ ok: true as const }),
+      stopPipePane: async () => ({ ok: true as const }),
+      getPanePid: async () => null,
+      getPaneCommand: async () => null,
+    } as unknown as TmuxAdapter;
+  }
+  function transportFor(db: Database.Database, tmux: TmuxAdapter): SessionTransport {
+    return new SessionTransport({ db, rigRepo: new RigRepository(db), sessionRegistry: new SessionRegistry(db), tmuxAdapter: tmux });
+  }
+
+  it("RED (another session remains): send+capture session_missing must not coexist with ps running", async () => {
+    const db = createFullTestDb();
+    try {
+      seedSeat(db, "rig-1", "n1", "s1@rig", "%1"); // dead seat
+      seedSeat(db, "rig-1", "n2", "s2@rig", "%2"); // another live seat remains
+      const transport = transportFor(db, tmuxWithLive(new Set(["s2@rig"]))); // s1 gone, s2 live
+      const send = await transport.send("s1@rig", "hi");
+      const cap = await transport.capture("s1@rig");
+      expect(send.ok).toBe(false);
+      expect(send.reason).toBe("session_missing");
+      expect(cap.ok).toBe(false);
+      expect(cap.reason).toBe("session_missing");
+      // INVARIANT: ps must not report running the seat send+capture just declared missing.
+      const rig = new PsProjectionService({ db }).getEntries()[0]!;
+      expect(rig.runningCount).toBe(1); // <-- RED: currently 2 (s1 fabricated running)
+    } finally {
+      db.close();
+    }
+  });
+
+  it("RED (LOAD-BEARING last/only session): send+capture session_missing must not coexist with ps running", async () => {
+    const db = createFullTestDb();
+    try {
+      seedSeat(db, "rig-1", "n1", "s1@rig", "%1"); // the ONLY seat
+      const transport = transportFor(db, tmuxWithLive(new Set())); // no live sessions (empty census)
+      const send = await transport.send("s1@rig", "hi");
+      const cap = await transport.capture("s1@rig");
+      expect(send.ok).toBe(false);
+      expect(send.reason).toBe("session_missing");
+      expect(cap.ok).toBe(false);
+      expect(cap.reason).toBe("session_missing");
+      const entry = new PsProjectionService({ db }).getEntries()[0]!;
+      expect(entry.runningCount).toBe(0); // <-- RED: currently 1 despite the definitive session_missing
+      expect(entry.status).not.toBe("running"); // <-- RED
+    } finally {
+      db.close();
+    }
   });
 });

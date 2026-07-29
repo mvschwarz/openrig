@@ -27,7 +27,7 @@ export interface DoctorDeps {
   baseDir: string;
   readFile: (path: string) => string | null;
   exec: (cmd: string) => string;
-  checkPort: (port: number) => Promise<boolean>;
+  checkPort: (port: number, host: string) => Promise<boolean>;
   configStore: Pick<ConfigStore, "resolve">;
   platform?: NodeJS.Platform;
   mkdirp?: (path: string) => void;
@@ -38,14 +38,14 @@ export interface DoctorDeps {
 const MIN_NODE_MAJOR = 20;
 const DEFAULT_PORT = 7433;
 
-function defaultCheckPort(port: number): Promise<boolean> {
+function defaultCheckPort(port: number, host: string): Promise<boolean> {
   return new Promise((resolve) => {
     const socket = new net.Socket();
     socket.setTimeout(1000);
     socket.on("connect", () => { socket.destroy(); resolve(false); });
     socket.on("error", () => { socket.destroy(); resolve(true); });
     socket.on("timeout", () => { socket.destroy(); resolve(true); });
-    socket.connect(port, "127.0.0.1");
+    socket.connect(port, host);
   });
 }
 
@@ -191,25 +191,31 @@ export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; port
     fix: writableCheck.fix,
   });
 
-  // 7. Port availability (async) — daemon already running on that port counts as OK
+  // 7. Port availability (async) — daemon already running on that port counts as OK.
+  // OPR.0.4.7 slice-05 item-4b: resolve the daemon host+port ONCE from config and use
+  // BOTH for checkPort, healthz, the cmux URL, and messages (a daemon on a non-default
+  // configured host/port must not be reported missing). Defaults stay 127.0.0.1:7433.
+  const daemonHost = config.daemon.host ?? "127.0.0.1";
+  const daemonPort = config.daemon.port ?? DEFAULT_PORT;
+  const daemonBase = `http://${daemonHost}:${daemonPort}`;
   const fetchFn = deps.fetch ?? globalThis.fetch;
-  const portCheck = deps.checkPort(DEFAULT_PORT).then(async (available): Promise<DoctorCheck> => {
+  const portCheck = deps.checkPort(daemonPort, daemonHost).then(async (available): Promise<DoctorCheck> => {
     if (available) {
-      return { name: "port", status: "pass", message: `Port ${DEFAULT_PORT} available.` };
+      return { name: "port", status: "pass", message: `Port ${daemonHost}:${daemonPort} available.` };
     }
     // Port in use — check if it's our daemon via healthz
     try {
-      const res = await fetchFn(`http://127.0.0.1:${DEFAULT_PORT}/healthz`);
+      const res = await fetchFn(`${daemonBase}/healthz`);
       if (res.ok) {
-        return { name: "port", status: "pass", message: `Port ${DEFAULT_PORT} in use by OpenRig daemon.` };
+        return { name: "port", status: "pass", message: `Port ${daemonHost}:${daemonPort} in use by OpenRig daemon.` };
       }
     } catch { /* not our daemon */ }
     return {
       name: "port",
       status: "fail",
-      message: `Port ${DEFAULT_PORT} is in use by another process.`,
+      message: `Port ${daemonHost}:${daemonPort} is in use by another process.`,
       reason: "The daemon needs this port to serve the API and UI.",
-      fix: `Stop the process using port ${DEFAULT_PORT}, or start the daemon on a different port with: rig daemon start --port <port>`,
+      fix: `Stop the process using port ${daemonPort}, or start the daemon on a different port with: rig daemon start --port <port>`,
     };
   });
 
@@ -218,7 +224,7 @@ export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; port
   if (shellCmuxPassed) {
     const daemonCmuxCheck = (async (): Promise<DoctorCheck> => {
       try {
-        const healthRes = await fetchFn(`http://127.0.0.1:${DEFAULT_PORT}/healthz`);
+        const healthRes = await fetchFn(`${daemonBase}/healthz`);
         if (!healthRes.ok) {
           return { name: "cmux_daemon", status: "skipped", message: "Daemon not running. Skipping daemon cmux check." };
         }
@@ -227,7 +233,7 @@ export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; port
       }
 
       try {
-        const cmuxRes = await fetchFn(`http://127.0.0.1:${DEFAULT_PORT}/api/adapters/cmux/status`);
+        const cmuxRes = await fetchFn(`${daemonBase}/api/adapters/cmux/status`);
         if (cmuxRes.ok && cmuxRes.json) {
           const data = (await cmuxRes.json()) as { available?: boolean };
           if (data.available) {

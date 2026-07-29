@@ -1308,4 +1308,85 @@ describe("daemonNotRunningError / printDaemonNotRunning (AC-4 shared honest erro
     expect(parsed.error.consequence).toContain("needs a running daemon");
     expect(parsed.error.action).toContain("rig up");
   });
+
+  // ===================================================================
+  // SLICE-05 item-4 (D4) — daemon-status false-negative RED.
+  // getDaemonStatus' stateless (no daemon.json) branch returns "stopped" on ANY
+  // /healthz throw, conflating a probe TIMEOUT (daemon reachable but slow /healthz,
+  // e.g. answers in 400ms > the 250ms status probe) with genuine-down. Runtime repro
+  // (REPRO-D4a): a delayed-/healthz shim makes candidate `rig status` say "Daemon not
+  // running" while /api serves. RED pins the honest outcome (a slow-but-ANSWERING probe
+  // must not be "stopped"); fix-agnostic (widened budget OR timeout-vs-conn-error).
+  // Genuine-down (connection error) stays "stopped" (control preserved).
+  // ===================================================================
+  it("Slice-05 D4 RED: a slow-but-answering /healthz on the no-daemon.json branch must NOT report stopped", async () => {
+    const savedUrl = process.env["OPENRIG_URL"];
+    delete process.env["OPENRIG_URL"]; // force the no-state (config) branch, not the OPENRIG_URL branch
+    vi.useFakeTimers();
+    try {
+      const deps = mockDeps({
+        exists: vi.fn(() => false), // no daemon.json -> stateless branch
+        // /healthz ANSWERS 200, but after 400ms — past the 250ms probe, within a sane budget.
+        fetch: vi.fn(() => new Promise((resolve) => setTimeout(() => resolve({ ok: true }), 400))),
+      });
+      const statusPromise = getDaemonStatus(deps);
+      await vi.runAllTimersAsync();
+      const status = await statusPromise;
+      expect(status.state).not.toBe("stopped"); // <-- RED: currently "stopped" (timeout conflated with down)
+    } finally {
+      vi.useRealTimers();
+      if (savedUrl !== undefined) process.env["OPENRIG_URL"] = savedUrl;
+    }
+  });
+
+  it("Slice-05 D4 preserve (GREEN): genuine-down (connection error, no daemon.json) still reports stopped", async () => {
+    const savedUrl = process.env["OPENRIG_URL"];
+    delete process.env["OPENRIG_URL"];
+    try {
+      const deps = mockDeps({
+        exists: vi.fn(() => false),
+        sleep: async () => {},
+        fetch: vi.fn(async () => { throw new Error("ECONNREFUSED"); }), // connection refused = confirmed down
+      });
+      const status = await getDaemonStatus(deps);
+      expect(status.state).toBe("stopped");
+    } finally {
+      if (savedUrl !== undefined) process.env["OPENRIG_URL"] = savedUrl;
+    }
+  });
+
+  // The OTHER independent stateless catch->stopped branch: OPENRIG_URL set (the
+  // firsthand D4a repro path). Same false-negative: a slow-but-answering /healthz
+  // there is also reported stopped.
+  it("Slice-05 D4 RED (OPENRIG_URL branch): a slow-but-answering /healthz must NOT report stopped", async () => {
+    const savedUrl = process.env["OPENRIG_URL"];
+    process.env["OPENRIG_URL"] = "http://127.0.0.1:9999"; // force the OPENRIG_URL branch
+    vi.useFakeTimers();
+    try {
+      const deps = mockDeps({
+        fetch: vi.fn(() => new Promise((resolve) => setTimeout(() => resolve({ ok: true }), 400))), // answers > 250ms probe
+      });
+      const statusPromise = getDaemonStatus(deps);
+      await vi.runAllTimersAsync();
+      const status = await statusPromise;
+      expect(status.state).not.toBe("stopped"); // <-- RED: currently "stopped" (OPENRIG_URL branch catch)
+    } finally {
+      vi.useRealTimers();
+      if (savedUrl !== undefined) process.env["OPENRIG_URL"] = savedUrl;
+      else delete process.env["OPENRIG_URL"];
+    }
+  });
+
+  it("Slice-05 D4 preserve (GREEN, OPENRIG_URL branch): genuine-down (connection error) still reports stopped", async () => {
+    const savedUrl = process.env["OPENRIG_URL"];
+    process.env["OPENRIG_URL"] = "http://127.0.0.1:9999";
+    try {
+      const deps = mockDeps({ sleep: async () => {}, fetch: vi.fn(async () => { throw new Error("ECONNREFUSED"); }) });
+      const status = await getDaemonStatus(deps);
+      expect(status.state).toBe("stopped");
+    } finally {
+      if (savedUrl !== undefined) process.env["OPENRIG_URL"] = savedUrl;
+      else delete process.env["OPENRIG_URL"];
+    }
+  });
 });

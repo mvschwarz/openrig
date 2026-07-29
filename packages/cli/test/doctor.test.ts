@@ -567,4 +567,49 @@ describe("rig doctor", () => {
     const doctorCmd = program.commands.find((c) => c.name() === "doctor");
     expect(doctorCmd).toBeDefined();
   });
+
+  // ===================================================================
+  // SLICE-05 item-4 (D4b) — doctor hardcoded-target RED.
+  // runDoctorChecks probes 127.0.0.1:DEFAULT_PORT(7433) for port/health/cmux and
+  // consults configStore.resolve() ONLY for writable paths — so a healthy daemon
+  // on a NON-default configured port is invisible to these checks (deterministic
+  // false-negative). RED pins that the checks TARGET the configured daemon port;
+  // default-port config is preserved.
+  // ===================================================================
+  it("Slice-05 D4b RED: doctor port/health/cmux must target the CONFIGURED host+port, not hardcoded 127.0.0.1:7433", async () => {
+    const checkPortArgs: unknown[] = [];
+    const fetchUrls: string[] = [];
+    const deps = makeDeps({
+      configStore: { resolve: () => ({ ...defaultConfig, daemon: { port: 8999, host: "10.0.0.5" } }) },
+      // Widened test double (test-only): capture ALL args so we can prove the configured
+      // HOST is passed, not only the port. Cast to the current (port)-only dep type.
+      checkPort: ((...args: unknown[]) => {
+        checkPortArgs.push(...args);
+        return Promise.resolve(false); // in use = a daemon is there
+      }) as unknown as (port: number) => Promise<boolean>,
+      fetch: async (url: string) => {
+        fetchUrls.push(url);
+        return { ok: true, json: async () => ({ available: true }) } as unknown as { ok: boolean };
+      },
+    });
+    const { portCheck, asyncChecks } = runDoctorChecks(deps);
+    await portCheck;
+    await Promise.all(asyncChecks ?? []);
+    // checkPort must receive BOTH the configured port AND the configured host.
+    expect(checkPortArgs).toContain(8999); // <-- RED: currently 7433
+    expect(checkPortArgs).toContain("10.0.0.5"); // <-- RED: host is never passed to checkPort today
+    // fetch must hit the configured host:port for BOTH healthz and cmux status.
+    expect(fetchUrls.some((u) => u.includes("http://10.0.0.5:8999/healthz"))).toBe(true); // <-- RED
+    expect(fetchUrls.some((u) => u.includes("http://10.0.0.5:8999/api/adapters/cmux/status"))).toBe(true); // <-- RED
+    // and NO hardcoded default target anywhere.
+    expect(fetchUrls.some((u) => u.includes("127.0.0.1:7433"))).toBe(false); // <-- RED
+  });
+
+  it("Slice-05 D4b preserve (GREEN): default-port config still targets 7433", async () => {
+    const portArgs: number[] = [];
+    const deps = makeDeps({ checkPort: async (port: number) => { portArgs.push(port); return true; } });
+    const { portCheck } = runDoctorChecks(deps);
+    await portCheck;
+    expect(portArgs).toContain(7433);
+  });
 });

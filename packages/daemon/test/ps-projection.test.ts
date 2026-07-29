@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { PsProjectionService, deriveRigLifecycleState, seatNeedsAttention } from "../src/domain/ps-projection.js";
+import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import type { AgentActivity, NodeInventoryEntry } from "../src/domain/types.js";
@@ -554,5 +555,51 @@ describe("PsProjectionService", () => {
       expect(typeof entry.attentionCount).toBe("number");
       expect(JSON.stringify(entry)).not.toContain("resumeToken");
     });
+  });
+});
+
+// ===================================================================
+// SLICE-05 item-5 (D5) — ps must not fabricate a dead seat as running.
+// runningCount/status are raw `sessions.status='running'` SQL (verdict-blind);
+// the SeatIdentityReconciler writes a session_missing verdict to a separate table
+// that runningCount never reads. After an out-of-band tmux teardown the persisted
+// status stays 'running', so ps fabricates running. RED pins that effective
+// runningCount/status must exclude a seat with a session_missing identity verdict.
+// Production seam UNDECIDED (ps consumes verdict, or adapter/verdict demotion) —
+// this asserts the OUTCOME, not the mechanism. self-contained (own db).
+// ===================================================================
+describe("Slice-05 item-5 (D5) — ps running honesty vs identity verdict", () => {
+  it("RED: a running session with an APPLICABLE session_missing verdict is NOT counted running", () => {
+    const db = createFullTestDb();
+    try {
+      db.prepare("INSERT INTO rigs (id, name) VALUES ('r-d5','d5')").run();
+      db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES ('n-d5','r-d5','dev','claude-code','/tmp')").run();
+      db.prepare(
+        "INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES ('s-d5','n-d5','tmux-n-d5','running','2026-07-02 12:00:00')",
+      ).run();
+      // A CURRENT binding so the verdict is APPLICABLE (applicableVerdict requires
+      // verdict.sessionName === latest session_name AND registeredPane === binding tmux_pane).
+      db.prepare(
+        "INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES ('b-d5','n-d5','tmux','tmux-n-d5','%1')",
+      ).run();
+      // The live tmux session is gone; the reconciler recorded session_missing against THIS binding.
+      new SeatIdentityStore(db).upsert({
+        nodeId: "n-d5",
+        verdict: "pane_missing",
+        evidenceSource: "tmux_session",
+        reason: "session_missing",
+        evidence: { registeredPane: "%1", observedPid: null, observedCommand: null, matchedLayer: null },
+        sessionName: "tmux-n-d5",
+        observedAt: "2026-07-02T12:00:00.000Z",
+      });
+      const entry = new PsProjectionService({ db }).getEntries()[0]!;
+      // The verdict IS applicable: the lifecycle axis already honors it (down-ranked).
+      expect(entry.lifecycleState).toBe("attention_required");
+      // ...but the running axis is verdict-blind — the exact inconsistency this RED pins.
+      expect(entry.runningCount).toBe(0); // <-- RED: currently 1 (raw sessions.status, verdict-blind)
+      expect(entry.status).not.toBe("running"); // <-- RED: currently "running"
+    } finally {
+      db.close();
+    }
   });
 });
