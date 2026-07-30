@@ -24,7 +24,7 @@ const PLUGIN_ROOT = nodePath.resolve(import.meta.dirname, "../assets/plugins/ope
 //   - session-compaction-and-restore (replaced by claude-compaction-restore)
 //   - permission-posture (internal-only doctrine, not operator-facing)
 //   - openrig-compaction-instructions (empty leftover from slice 27)
-// Remaining: 8 operator-facing skills (was 11); slice 32 added mission-slice-sop.
+// Remaining: 11 operator-facing skills; slice 32 added mission-slice-sop.
 const EXPECTED_SKILLS = [
   "agent-startup-and-context-ingestion",
   "claude-compaction-restore",
@@ -96,6 +96,11 @@ describe("openrig-core plugin — manifest shape (HG-2.2)", () => {
 });
 
 describe("openrig-core plugin — skills (HG-2.1 skill content per agentskills.io spec)", () => {
+  it("README reports the actual shipped skill count", () => {
+    const readme = fs.readFileSync(nodePath.join(PLUGIN_ROOT, "README.md"), "utf-8");
+    expect(readme).toContain(`Skills (${EXPECTED_SKILLS.length})`);
+  });
+
   it.each(EXPECTED_SKILLS)("skill '%s' has SKILL.md with required frontmatter (name + description)", (skillId) => {
     const skillPath = nodePath.join(PLUGIN_ROOT, "skills", skillId, "SKILL.md");
     expect(fs.existsSync(skillPath)).toBe(true);
