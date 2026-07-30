@@ -133,6 +133,8 @@ Notes:
 
 Usage: `rig ui open`
 
+The OpenRig UI is experimental and in maintenance mode. It is not under active development; support is best-effort. The CLI is the primary supported interface. Contributions welcome.
+
 Subcommands:
 - `open`
 

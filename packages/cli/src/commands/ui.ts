@@ -8,6 +8,9 @@ export interface UiDeps {
   exec: (cmd: string, args: string[]) => Promise<void>;
 }
 
+export const UI_MAINTENANCE_NOTICE =
+  "The OpenRig UI is experimental and in maintenance mode. It is not under active development; support is best-effort. The CLI is the primary supported interface. Contributions welcome.";
+
 export function uiCommand(depsOverride?: UiDeps): Command {
   const cmd = new Command("ui").description("UI commands");
   const getDeps = (): UiDeps => depsOverride ?? {
@@ -23,6 +26,7 @@ export function uiCommand(depsOverride?: UiDeps): Command {
     .command("open")
     .description("Open the OpenRig UI in the default browser")
     .action(async () => {
+      console.error(UI_MAINTENANCE_NOTICE);
       const deps = getDeps();
 
       // Explicit override skips daemon status entirely (dev workflow with Vite)

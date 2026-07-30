@@ -1,6 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
 import { Command } from "commander";
-import { uiCommand, type UiDeps } from "../src/commands/ui.js";
+import {
+  UI_MAINTENANCE_NOTICE,
+  uiCommand,
+  type UiDeps,
+} from "../src/commands/ui.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 
 function mockLifecycleDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
@@ -53,6 +57,24 @@ function runningDeps(port: number, execFn?: UiDeps["exec"]): UiDeps {
 }
 
 describe("rig ui open", () => {
+  it("prints the maintenance notice to stderr on every invocation", async () => {
+    expect(UI_MAINTENANCE_NOTICE).toBe(
+      "The OpenRig UI is experimental and in maintenance mode. It is not under active development; support is best-effort. The CLI is the primary supported interface. Contributions welcome.",
+    );
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const execFn = vi.fn(async () => {});
+    const deps = runningDeps(8888, execFn);
+
+    for (let invocation = 0; invocation < 2; invocation += 1) {
+      const program = new Command();
+      program.addCommand(uiCommand(deps));
+      await program.parseAsync(["node", "rig", "ui", "open"]);
+    }
+
+    expect(error.mock.calls.filter(([line]) => line === UI_MAINTENANCE_NOTICE)).toHaveLength(2);
+    error.mockRestore();
+  });
+
   // Test 1: Daemon up -> exec open with UI URL AND prints URL
   it("daemon up -> exec open with UI URL and prints URL", async () => {
     const execFn = vi.fn(async () => {});
