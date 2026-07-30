@@ -155,14 +155,24 @@ export async function doctorLegs(host: HostEntry, deps: DoctorDeps): Promise<Che
 
     const daemon = await deps.run(host, ["rig", "daemon", "status"]);
     const daemonUp = daemon.ok && /running/i.test(daemon.stdout);
-    rows.push(daemonUp
-      ? { step: "remote-daemon-health", status: "pass", detail: "remote daemon reports running" }
-      : {
+    if (daemonUp) {
+      rows.push({ step: "remote-daemon-health", status: "pass", detail: "remote daemon reports running" });
+    } else if (!daemon.ok) {
+      rows.push({
+        step: "remote-daemon-health",
+        status: "unknown",
+        detail: "remote daemon status could not confirm health; SSH reachability alone cannot determine daemon health",
+        fix: "on the host: verify with `rig daemon status` and an actual daemon-backed operation such as `rig ps --json`",
+      });
+      return rows;
+    } else {
+      rows.push({
           step: "remote-daemon-health",
           status: "fail",
           detail: "SSH works and rig is installed, but the remote daemon is not running",
           fix: "on the host: rig daemon start (then re-run doctor)",
-        });
+      });
+    }
     if (!daemonUp) return rows;
 
     const whoami = await deps.run(host, ["rig", "ps", "--json", "--limit", "5"]);

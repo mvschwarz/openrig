@@ -22,15 +22,21 @@ export interface QueueDeps extends StatusDeps {}
 
 async function withClient<T>(
   deps: QueueDeps,
-  fn: (client: DaemonClient) => Promise<T>
+  fn: (client: DaemonClient) => Promise<T>,
+  attemptWhenProbeUnconfirmed = false,
 ): Promise<T | undefined> {
   const status = await getDaemonStatus(deps.lifecycleDeps);
   if (status.state !== "running" || status.healthy === false) {
-    console.error("Daemon not running. Start it with: rig daemon start");
-    process.exitCode = 1;
-    return undefined;
+    if (!attemptWhenProbeUnconfirmed) {
+      console.error("Daemon not running. Start it with: rig daemon start");
+      process.exitCode = 1;
+      return undefined;
+    }
   }
-  const client = deps.clientFactory(getDaemonUrl(status));
+  const baseUrl = status.state === "running" && status.port !== undefined
+    ? getDaemonUrl(status)
+    : new DaemonClient().baseUrl;
+  const client = deps.clientFactory(baseUrl);
   return fn(client);
 }
 
@@ -375,7 +381,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
         });
         printResult(opts.json ?? false, res.data, res.status);
-      });
+      }, hostResolved.hostId !== undefined);
     });
 
   cmd

@@ -74,6 +74,7 @@ describe("rig queue CLI", () => {
   let errors: string[];
 
   beforeEach(() => {
+    vi.unstubAllEnvs();
     logs = [];
     errors = [];
     vi.spyOn(console, "log").mockImplementation((...args) => logs.push(args.join(" ")));
@@ -692,6 +693,69 @@ describe("rig queue CLI", () => {
     expect(process.exitCode).toBe(1);
     const out = logs.join("\n");
     expect(out).toContain("unknown_destination_rig");
+  });
+
+  it("queue create --host attempts the real write when the local health probe is inconclusive and surfaces the daemon response", async () => {
+    vi.stubEnv("OPENRIG_URL", "http://127.0.0.1:7766");
+    const { getDaemonStatus } = await import("../src/daemon-lifecycle.js");
+    vi.mocked(getDaemonStatus).mockResolvedValueOnce({ state: "stopped" });
+    const { deps, calls } = makeDeps({
+      routes: {
+        "POST /api/queue/create": {
+          status: 400,
+          data: {
+            error: "unknown_destination_rig",
+            message: "destination_session bob@phantom-rig references an unknown rig",
+          },
+        },
+      },
+    });
+    const clientUrls: string[] = [];
+    const clientFactory = deps.clientFactory;
+    deps.clientFactory = (baseUrl) => {
+      clientUrls.push(baseUrl);
+      return clientFactory(baseUrl);
+    };
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "queue", "create",
+      "--source", "alice@known-rig",
+      "--destination", "bob@phantom-rig",
+      "--host", "remote-a",
+      "--body", "x",
+      "--json",
+    ]);
+
+    expect(calls).toContainEqual({
+      method: "POST",
+      path: "/api/queue/create",
+      body: expect.objectContaining({ hostId: "remote-a" }),
+    });
+    expect(clientUrls).toEqual(["http://127.0.0.1:7766"]);
+    expect(logs.join("\n")).toContain("unknown_destination_rig");
+    expect(errors.join("\n")).not.toContain("Daemon not running");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("plain local queue create remains blocked when the daemon probe confirms no reachable operation target", async () => {
+    const { getDaemonStatus } = await import("../src/daemon-lifecycle.js");
+    vi.mocked(getDaemonStatus).mockResolvedValueOnce({ state: "stopped" });
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+
+    await program.parseAsync([
+      "node", "rig", "queue", "create",
+      "--source", "alice@known-rig",
+      "--destination", "bob@known-rig",
+      "--body", "x",
+      "--json",
+    ]);
+
+    expect(calls).toEqual([]);
+    expect(errors.join("\n")).toContain("Daemon not running");
+    expect(process.exitCode).toBe(1);
   });
 
   it("handoff with --no-nudge passes nudge: false through to daemon", async () => {

@@ -138,6 +138,31 @@ describe("rig host doctor — stepwise distinct errors + three-valued posture", 
     expect(rows).toHaveLength(3); // identity leg not attempted without a daemon
   });
 
+  it("reachable SSH host + unconfirmable daemon status reports health UNKNOWN, never unreachable or confirmed-down", async () => {
+    const deps = depsFromScript((argv) => {
+      if (argv[0] === "true") return okRun("");
+      if (argv[1] === "--version") return okRun("0.4.7");
+      if (argv[1] === "daemon") {
+        return {
+          ok: false,
+          failedStep: "remote-daemon-unreachable",
+          stdout: "",
+          stderr: "Daemon not running",
+          remoteExitCode: 1,
+        };
+      }
+      return failRun();
+    });
+
+    const rows = await doctorLegs(sshHost, deps);
+    expect(rows[0]).toMatchObject({ step: "transport-reachability", status: "pass" });
+    expect(rows[1]).toMatchObject({ step: "remote-rig-binary", status: "pass" });
+    expect(rows[2]).toMatchObject({ step: "remote-daemon-health", status: "unknown" });
+    expect(rows[2]!.detail).toContain("could not confirm");
+    expect(rows[2]!.detail).not.toContain("unreachable");
+    expect(rows[2]!.fix).not.toContain("rig daemon start");
+  });
+
   it("all legs green when the remote answers", async () => {
     const calls: string[][] = [];
     const deps = depsFromScript((argv) => {
