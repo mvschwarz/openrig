@@ -62,6 +62,9 @@ export interface QueueItem {
    *  (convention C3). NULL for all non-human-routed items (BR-1); required
    *  at the domain write path only when the §5 predicate is true. */
   evidenceRef: string | null;
+  /** Present only on compact list rows so omitted content cannot be mistaken
+   *  for an author-supplied empty value. Full reads never carry this marker. */
+  fieldsElided?: Array<"body" | "summary" | "evidenceRef">;
   closureReason: ClosureReason | null;
   closureTarget: string | null;
   closureRequiredAt: string | null;
@@ -1404,7 +1407,13 @@ export class QueueRepository {
         `SELECT ${columns} FROM queue_items ${where} ORDER BY ${orderBy} LIMIT ?`
       )
       .all(...params) as QueueItemRow[];
-    return rows.map((r) => this.rowToItem(r));
+    const items = rows.map((r) => this.rowToItem(r));
+    return opts?.compact
+      ? items.map((item) => ({
+          ...item,
+          fieldsElided: ["body", "summary", "evidenceRef"],
+        }))
+      : items;
   }
 
   /**

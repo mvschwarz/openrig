@@ -21,6 +21,8 @@ function createTestDb(): Database.Database {
     expires_at TEXT,
     chain_of_record TEXT,
     body TEXT NOT NULL DEFAULT '',
+    summary TEXT,
+    evidence_ref TEXT,
     closure_reason TEXT,
     closure_target TEXT,
     closure_required_at TEXT,
@@ -39,15 +41,19 @@ function seedItem(db: Database.Database, id: string, opts: {
   destination: string;
   state?: string;
   body?: string;
+  summary?: string | null;
+  evidenceRef?: string | null;
   tags?: string[];
   tsCreated?: string;
 }) {
   const ts = opts.tsCreated ?? new Date().toISOString();
-  db.prepare(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body, tags, chain_of_record)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+  db.prepare(`INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body, summary, evidence_ref, tags, chain_of_record)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
     id, ts, ts, opts.source, opts.destination,
     opts.state ?? "pending",
     opts.body ?? `Body of ${id} - this is a long body that adds token weight and should be excluded in compact mode. `.repeat(10),
+    opts.summary ?? null,
+    opts.evidenceRef ?? null,
     opts.tags ? JSON.stringify(opts.tags) : null,
     JSON.stringify([`chain-${id}`]),
   );
@@ -160,11 +166,13 @@ describe("OPR.0.4.0.28 — queue list compact + scope-default", () => {
     expect(ids).not.toContain("q-unrelated");
   });
 
-  it("AC-4: compact excludes body and chainOfRecord", () => {
+  it("AC-4: compact marks content fields as elided instead of posing as empty content", () => {
     seedItem(db, "q-1", {
       source: "a@rig",
       destination: "b@rig",
       body: "This body should be excluded in compact mode",
+      summary: "This summary should be excluded in compact mode",
+      evidenceRef: "proof/PROOF.md",
       tags: ["slice:OPR.0.4.0.28"],
     });
 
@@ -180,7 +188,29 @@ describe("OPR.0.4.0.28 — queue list compact + scope-default", () => {
     expect(item.tags).toBeDefined();
     // Compact excludes heavy fields
     expect(item.body).toBe("");
+    expect(item.summary).toBeNull();
+    expect(item.evidenceRef).toBeNull();
     expect(item.chainOfRecord).toBeNull();
+    expect(item.fieldsElided).toEqual(["body", "summary", "evidenceRef"]);
+  });
+
+  it("distinguishes a genuinely empty full item from an elided compact item", () => {
+    seedItem(db, "q-empty", {
+      source: "a@rig",
+      destination: "b@rig",
+      body: "",
+      summary: null,
+      evidenceRef: null,
+    });
+
+    const compact = repo.list({ compact: true })[0]!;
+    const full = repo.list({})[0]!;
+
+    expect(compact.fieldsElided).toEqual(["body", "summary", "evidenceRef"]);
+    expect(full.body).toBe("");
+    expect(full.summary).toBeNull();
+    expect(full.evidenceRef).toBeNull();
+    expect(full.fieldsElided).toBeUndefined();
   });
 
   it("AC-5: existing filters compose with asSession", () => {
@@ -234,6 +264,9 @@ describe("OPR.0.4.0.28 — queue list compact + scope-default", () => {
     const items = repo.list({});
     expect(items.length).toBe(1);
     expect(items[0]!.body).toBe("Full body preserved");
+    expect(items[0]!.summary).toBeNull();
+    expect(items[0]!.evidenceRef).toBeNull();
+    expect(items[0]!.fieldsElided).toBeUndefined();
     expect(items[0]!.chainOfRecord).toBeDefined();
   });
 });
