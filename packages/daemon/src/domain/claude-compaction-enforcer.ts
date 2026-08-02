@@ -50,6 +50,14 @@ export const POST_COMPACT_RESTORE_COOLDOWN_MS_DEFAULT = 10 * 60_000;
 // writing the restore map can take a minute+; the wait returns as soon as the
 // seat is idle, so this only bounds a pathological never-idle case.
 export const MANUAL_PREP_WAIT_MS_DEFAULT = 120_000;
+// Slices 13–14 fix — each post-compact back-half send (turn_boundary → restore →
+// audit) is idle-gated so it cannot be injected into the busy pane right after
+// /compact and silently dropped while the surfaced stage advances anyway. This
+// wait is kept SMALL and BELOW the ~30s ContextMonitor poll interval (the loop is
+// sequential — a longer block would stall other seats' telemetry); on a busy
+// timeout the send returns not-ok, the stage does NOT advance, and the SAME stage
+// is retried on the next poll tick. No new scheduler.
+export const POST_COMPACT_SEND_WAIT_MS_DEFAULT = 10_000;
 
 export interface EnforcerInput {
   sessionName: string;
@@ -285,6 +293,7 @@ export class ClaudeCompactionEnforcer {
   // OPR.0.4.3.14 — max time to wait for the manual prep turn to complete (seat
   // idle) before sending /compact. Bounds the two-phase wait-for-idle.
   private readonly manualPrepWaitMs: number;
+  private readonly postCompactSendWaitMs: number;
   private readonly lastAutoCompactAt = new Map<string, number>();
   private readonly postCompactRestoreCooldownUntil = new Map<string, number>();
   private readonly triggeredAboveThreshold = new Set<string>();
@@ -297,7 +306,7 @@ export class ClaudeCompactionEnforcer {
   constructor(
     settingsStore: SettingsStore,
     sessionTransport: SessionTransport,
-    opts?: { dedupWindowMs?: number; openrigHome?: string; postCompactRestoreCooldownMs?: number; manualPrepWaitMs?: number },
+    opts?: { dedupWindowMs?: number; openrigHome?: string; postCompactRestoreCooldownMs?: number; manualPrepWaitMs?: number; postCompactSendWaitMs?: number },
   ) {
     this.settingsStore = settingsStore;
     this.sessionTransport = sessionTransport;
@@ -305,6 +314,7 @@ export class ClaudeCompactionEnforcer {
     this.postCompactRestoreCooldownMs = opts?.postCompactRestoreCooldownMs ?? POST_COMPACT_RESTORE_COOLDOWN_MS_DEFAULT;
     this.openrigHome = opts?.openrigHome ?? defaultOpenRigHome();
     this.manualPrepWaitMs = opts?.manualPrepWaitMs ?? MANUAL_PREP_WAIT_MS_DEFAULT;
+    this.postCompactSendWaitMs = opts?.postCompactSendWaitMs ?? POST_COMPACT_SEND_WAIT_MS_DEFAULT;
   }
 
   /**
@@ -343,8 +353,10 @@ export class ClaudeCompactionEnforcer {
         const boundary = await this.sessionTransport.send(
           input.sessionName,
           buildPostCompactTurnBoundaryPrompt(),
+          { waitForIdleMs: this.postCompactSendWaitMs },
         );
         if (!boundary.ok) {
+          // Busy/never-idle → no delivery, no advance; the SAME stage retries next tick.
           return { triggered: false, reason: "send_failed" };
         }
         this.pendingPostCompactRestore.set(input.sessionName, "restore_prompt");
@@ -365,8 +377,12 @@ export class ClaudeCompactionEnforcer {
             postCompactInstructionFilePath: extra.filePath,
             ignoredWrongSeatExtra: extra.ignoredWrongSeat,
           }),
+          { waitForIdleMs: this.postCompactSendWaitMs },
         );
         if (!restore.ok) {
+          // Restore is exact-once + operator-authorized: if the seat is still busy
+          // (mid-compaction/boundary), do NOT advance to restore-sent on an
+          // undelivered send — retry the SAME stage next tick.
           return { triggered: false, reason: "send_failed" };
         }
         this.pendingPostCompactRestore.set(input.sessionName, "compliance_prompt");
@@ -378,8 +394,11 @@ export class ClaudeCompactionEnforcer {
         const compliance = await this.sessionTransport.send(
           input.sessionName,
           buildPostCompactCompliancePrompt(policy.postRestoreAuditInstruction),
+          { waitForIdleMs: this.postCompactSendWaitMs },
         );
         if (!compliance.ok) {
+          // Audit cannot overtake restore: only advances once the restore turn is
+          // idle and this send delivers; a busy tick retries the SAME stage.
           return { triggered: false, reason: "send_failed" };
         }
         this.pendingPostCompactRestore.delete(input.sessionName);
