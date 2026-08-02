@@ -1,0 +1,21 @@
+{
+  "name": "@openrig/tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Mission-control TUI — explorer/master-detail over the daemon's existing projections; one tile in herdr's wall",
+  "main": "dist/index.js",
+  "bin": {
+    "openrig-tui": "dist/main.js"
+  },
+  "scripts": {
+    "build": "tsc && chmod +x dist/main.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
