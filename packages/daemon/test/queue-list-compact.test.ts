@@ -270,3 +270,50 @@ describe("OPR.0.4.0.28 — queue list compact + scope-default", () => {
     expect(items[0]!.chainOfRecord).toBeDefined();
   });
 });
+
+describe("Slice 15 — findOverdue rig-scoped + bounded + compact (finding 2)", () => {
+  let db: Database.Database;
+  let repo: QueueRepository;
+  const PAST = "2020-01-01T00:00:00.000Z";
+  const FUTURE = "2999-01-01T00:00:00.000Z";
+  const NOW = "2025-01-01T00:00:00.000Z";
+
+  function seedOverdue(id: string, rig: string, opts: { state?: string; body?: string; due?: string } = {}) {
+    db.prepare(
+      `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, body, summary, evidence_ref, closure_required_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    ).run(id, PAST, PAST, `src@${rig}`, `dst@${rig}`, opts.state ?? "in-progress", opts.body ?? `long body for ${id} `.repeat(20), "sum", "ev", opts.due ?? PAST);
+  }
+
+  beforeEach(() => { db = createTestDb(); repo = new QueueRepository(db); });
+  afterEach(() => { db.close(); });
+
+  it("unscoped returns all overdue in-progress items (watchdog behavior preserved)", () => {
+    seedOverdue("q1", "rig-a");
+    seedOverdue("q2", "rig-b");
+    seedOverdue("q3", "rig-a", { due: FUTURE }); // not past deadline
+    seedOverdue("q4", "rig-a", { state: "pending" }); // not in-progress
+    expect(repo.findOverdue({ now: NOW }).map((i) => i.qitemId).sort()).toEqual(["q1", "q2"]);
+  });
+
+  it("rig scope filters to a single rig", () => {
+    seedOverdue("q1", "rig-a");
+    seedOverdue("q2", "rig-b");
+    expect(repo.findOverdue({ now: NOW, rig: "rig-a" }).map((i) => i.qitemId)).toEqual(["q1"]);
+  });
+
+  it("limit bounds the result set", () => {
+    for (let i = 0; i < 5; i++) seedOverdue(`q${i}`, "rig-a");
+    expect(repo.findOverdue({ now: NOW, limit: 2 })).toHaveLength(2);
+  });
+
+  it("compact omits body/summary/evidenceRef; full retains the body", () => {
+    seedOverdue("q1", "rig-a", { body: "SECRET-LONG-BODY-CONTENT" });
+    const compact = repo.findOverdue({ now: NOW, compact: true })[0]!;
+    expect(compact.body).toBe("");
+    expect(compact.summary).toBeNull();
+    expect(compact.evidenceRef).toBeNull();
+    const full = repo.findOverdue({ now: NOW })[0]!;
+    expect(full.body).toContain("SECRET-LONG-BODY-CONTENT");
+  });
+});

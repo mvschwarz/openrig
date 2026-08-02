@@ -800,7 +800,14 @@ export function queueRoutes(): Hono {
   // GET /overdue — surfaces in-progress qitems past closure_required_at.
   // MUST precede /:qitemId.
   app.get("/overdue", (c) => {
-    const items = getRepo(c).findOverdue();
+    // Slice 15 (finding 2): rig-scoped + bounded + compact-by-default, mirroring
+    // /list — so `rig queue overdue` no longer dumps every rig's full bodies.
+    const q = c.req.query();
+    const rig = q.rig || undefined;
+    const limitRaw = q.limit !== undefined ? Number.parseInt(q.limit, 10) : undefined;
+    const limit = limitRaw !== undefined && Number.isInteger(limitRaw) && limitRaw > 0 ? limitRaw : undefined;
+    const compact = q.compact === "1" || q.compact === "true";
+    const items = getRepo(c).findOverdue({ rig, limit, compact });
     return c.json(items);
   });
 

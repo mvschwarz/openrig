@@ -354,6 +354,20 @@ interface ParsedPsControls {
 function parsePsControls(opts: PsCliOptions): ParsedPsControls | { error: string } {
   let effectiveFilter = opts.filter;
   if (opts.active) {
+    // Slice 15 (finding 5): agent activity is a per-NODE signal; the LOCAL
+    // rig-summary tier carries only an activeCount aggregate and cannot honestly
+    // filter on it. A bare local `rig ps --active` used to be a silent no-op that
+    // looked like it worked — fail loudly and state the node-only scope. Remote
+    // paths (--host/--all-hosts/--hosts) FORWARD --active to the remote, which
+    // applies (and re-validates) it there, so they are exempt from the local gate.
+    const isRemote = !!(opts.host || opts.allHosts || opts.hosts);
+    if (!opts.nodes && !isRemote) {
+      return {
+        error:
+          `--active/--running filters agentActivity.state, a per-node signal available only at the node tier. ` +
+          `Add --nodes (rig-summary rows carry no per-node activity) — nothing was filtered.`,
+      };
+    }
     if (effectiveFilter) {
       return {
         error:
@@ -716,7 +730,8 @@ Multi-host fan-out (--all-hosts/--hosts) is rollup-only by default; the full
 explicit ladder (--all-hosts --nodes -A, --full for complete records) fans out
 per-node with hostId-stamped projected rows.
 
---active/--running narrow to agentActivity.state=running. Cannot combine with --filter.
+--active/--running narrow to agentActivity.state=running. NODE-TIER ONLY: requires --nodes
+(rig-summary rows carry no per-node activity). Cannot combine with --filter.
 
 --filter accepts: status, lifecycleState, name-prefix, name, agentActivity.state,
 contextUsage.percent, contextUsage.state. Other keys are rejected.

@@ -334,6 +334,12 @@ function detectQueueColumn(db: Database.Database, columnName: string): boolean {
  * Phase A wires no-op; Phase B can plug in the rig registry to reject
  * phantom-rig destinations. POC compatibility: `qitem_id` shape preserved.
  */
+// Reduced column set for compact list rows (body/summary/evidence_ref omitted →
+// rowToItem backfills them empty). Shared by `list` and `findOverdue` (Slice 15)
+// so the compact projection cannot drift between the two.
+const COMPACT_QUEUE_COLUMNS =
+  "qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, blocked_on, handed_off_to, handed_off_from, expires_at, closure_reason, closure_target, closure_required_at, claimed_at, last_nudge_attempt, last_nudge_result, last_heartbeat, resolution, target_repo";
+
 export class QueueRepository {
   readonly db: Database.Database;
   readonly transitionLog: QueueTransitionLog;
@@ -1393,9 +1399,7 @@ export class QueueRepository {
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    const columns = opts?.compact
-      ? "qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, blocked_on, handed_off_to, handed_off_from, expires_at, closure_reason, closure_target, closure_required_at, claimed_at, last_nudge_attempt, last_nudge_result, last_heartbeat, resolution, target_repo"
-      : "*";
+    const columns = opts?.compact ? COMPACT_QUEUE_COLUMNS : "*";
     const useActiveFirst = !!(opts?.rig || opts?.asSession || opts?.activeOnly);
     const orderBy = useActiveFirst
       ? "CASE WHEN state IN ('pending', 'in-progress', 'blocked') THEN 0 ELSE 1 END, ts_created DESC"
@@ -1510,17 +1514,28 @@ export class QueueRepository {
   /**
    * Find qitems whose `closure_required_at` is past now. Used by watchdog;
    * does NOT itself emit events — callers decide whether to nudge or escalate.
+   *
+   * Slice 15 (finding 2): optionally rig-scoped, limited, and compact — mirroring
+   * `list` — so `rig queue overdue` is bounded and body-free by default instead of
+   * dumping every rig's full qitem bodies to a single caller. No args = the prior
+   * behavior (all overdue, full rows) for the watchdog.
    */
-  findOverdue(now?: string): QueueItem[] {
-    const cutoff = now ?? new Date().toISOString();
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM queue_items
-          WHERE state = 'in-progress'
-            AND closure_required_at IS NOT NULL
-            AND closure_required_at <= ?`
-      )
-      .all(cutoff) as QueueItemRow[];
+  findOverdue(opts?: { now?: string; rig?: string; limit?: number; compact?: boolean }): QueueItem[] {
+    const cutoff = opts?.now ?? new Date().toISOString();
+    const conditions = ["state = 'in-progress'", "closure_required_at IS NOT NULL", "closure_required_at <= ?"];
+    const params: unknown[] = [cutoff];
+    if (opts?.rig) {
+      const escaped = opts.rig.replace(/%/g, "\\%").replace(/_/g, "\\_");
+      conditions.push("(destination_session LIKE ? ESCAPE '\\' OR source_session LIKE ? ESCAPE '\\')");
+      params.push(`%@${escaped}`, `%@${escaped}`);
+    }
+    const columns = opts?.compact ? COMPACT_QUEUE_COLUMNS : "*";
+    let sql = `SELECT ${columns} FROM queue_items WHERE ${conditions.join(" AND ")} ORDER BY closure_required_at ASC`;
+    if (opts?.limit !== undefined) {
+      sql += " LIMIT ?";
+      params.push(opts.limit);
+    }
+    const rows = this.db.prepare(sql).all(...params) as QueueItemRow[];
     return rows.map((r) => this.rowToItem(r));
   }
 

@@ -74,8 +74,13 @@ export async function run(argv = process.argv): Promise<void> {
   }
 
   const entryUrl = pathToFileURL(resolveBinEntry(normalizedArgv[1], import.meta.url)).href;
-  const mod = await import(entryUrl) as { createProgram: () => { parseAsync: (argv: string[]) => Promise<void> } };
-  await mod.createProgram().parseAsync(normalizedArgv);
+  const mod = await import(entryUrl) as {
+    createProgram: () => import("commander").Command;
+    runProgram: (program: import("commander").Command, argv: string[]) => Promise<number>;
+  };
+  // Slice 15: run through the shared error path so `--json` failures emit a JSON
+  // error object with a nonzero exit instead of plain Commander text.
+  await mod.runProgram(mod.createProgram(), normalizedArgv);
 }
 
 if (isDirectRun()) {

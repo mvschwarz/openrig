@@ -5,6 +5,7 @@ import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { sessionRigOf, isHumanSeatSessionRef } from "../session-name.js";
 import { realDeps } from "./daemon.js";
+import { enumArg, positiveIntArg } from "../cli-error.js";
 import type { StatusDeps } from "./status.js";
 
 /**
@@ -814,12 +815,12 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("-A, --all-rigs", "Cross-rig breadth (like 'kubectl get --all-namespaces')")
     .option("--full", "Show complete per-item fields (body, chain-of-record)")
     .option("--mine", "Scope to items where you are destination or source")
-    .option("-o <format>", "Output format: json")
+    .option("-o <format>", "Output format: json", enumArg(["json"]))
     .option("--destination <session>", "Filter by destination session")
     .option("--source <session>", "Filter by source session")
     .option("--state <state>", "Filter by state (comma-separated for multiple)")
     .option("--target-repo <name>", "PL-007: filter qitems by target_repo (exact match)")
-    .option("--limit <n>", "Result limit", "100")
+    .option("--limit <n>", "Result limit", positiveIntArg, 100)
     .option("--json", "JSON output (compact; use --full --json for complete fields)")
     .addHelpText("after", `
 Default: active items in your current rig, compact summary (like 'docker ps').
@@ -886,7 +887,7 @@ Examples:
       if (opts.source) params.set("sourceSession", opts.source);
       if (opts.state) params.set("state", opts.state);
       if (opts.targetRepo) params.set("targetRepo", opts.targetRepo);
-      if (opts.limit) params.set("limit", opts.limit);
+      if (opts.limit) params.set("limit", String(opts.limit));
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>(`/api/queue/list?${params.toString()}`);
         const useJson = opts.json || opts.o === "json";
@@ -896,12 +897,28 @@ Examples:
 
   cmd
     .command("overdue")
-    .description("List in-progress qitems past their closure_required_at deadline")
+    .description("List in-progress qitems past their closure_required_at deadline (current rig, bounded, body-free by default)")
+    .option("--rig <name>", "Scope to a specific rig (default: current rig from OPENRIG_SESSION_NAME)")
+    .option("-A, --all-rigs", "Cross-rig breadth (default is current rig only)")
+    .option("--full", "Include complete per-item fields (body, chain-of-record)")
+    .option("--limit <n>", "Result limit", positiveIntArg, 50)
     .option("--json", "JSON output for agents")
-    .action(async (opts: { json?: boolean }) => {
+    .addHelpText("after", "\nDefault: overdue items in your current rig, compact (no bodies), newest-deadline first.\nUse --full for bodies, -A for all rigs, --rig <name> to target another rig.")
+    .action(async (opts: { rig?: string; allRigs?: boolean; full?: boolean; limit?: number; json?: boolean }) => {
       const deps = getDeps();
+      const params = new URLSearchParams();
+      // Rig scope: explicit --rig wins; else current-rig default unless -A (mirrors `list`).
+      if (opts.rig) {
+        params.set("rig", opts.rig);
+      } else if (!opts.allRigs) {
+        const sessionName = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+        const rigName = sessionName ? extractRigName(sessionName) : undefined;
+        if (rigName) params.set("rig", rigName);
+      }
+      if (!opts.full) params.set("compact", "1"); // body-free by default
+      if (opts.limit) params.set("limit", String(opts.limit));
       await withClient(deps, async (client) => {
-        const res = await client.get<unknown>("/api/queue/overdue");
+        const res = await client.get<unknown>(`/api/queue/overdue?${params.toString()}`);
         printResult(opts.json ?? false, res.data, res.status);
       });
     });
