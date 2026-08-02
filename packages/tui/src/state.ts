@@ -35,7 +35,7 @@ export function defaultSections(): SectionDef[] {
 }
 
 export function emptySnapshot(): FleetSnapshot {
-  return { hosts: [], specs: [], needs: [], humanQueueProbed: false, humanQueue: [], hostsDown: [], readErrors: [] };
+  return { hosts: [], specs: [], needs: [], humanQueueProbed: false, humanQueue: [], hostsDown: [], stream: [], readErrors: [] };
 }
 
 export interface CreateViewStateOptions {
@@ -56,6 +56,8 @@ export function createViewState(options: CreateViewStateOptions): ViewStateStore
     filter: "",
     selection: 0,
     runningOf: null,
+    viewTab: "table",
+    footerOn: true,
     lastError: null,
   };
   const listeners = new Set<(s: ViewState) => void>();
@@ -87,8 +89,12 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
     case "jump": {
       if (!state.sections.some((s) => s.name === action.section))
         return { ...next, lastError: `unknown section "${action.section}"` };
-      return { ...next, section: action.section, drill: [], filter: "", selection: 0, runningOf: null };
+      return { ...next, section: action.section, drill: [], filter: "", selection: 0, runningOf: null, viewTab: "table" };
     }
+    case "tab":
+      return { ...next, viewTab: action.tab };
+    case "footer":
+      return { ...next, footerOn: action.on ?? !state.footerOn };
     case "filter":
       return { ...next, filter: action.text, selection: 0 };
     case "select": {
@@ -103,8 +109,10 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
       if (!row) return { ...next, lastError: "nothing selected" };
       return reduce(next, row.action, snap);
     }
-    case "drill":
-      return drillTo(next, action.resource, action.name, snap);
+    case "drill": {
+      const drilled = drillTo(next, action.resource, action.name, snap);
+      return drilled.lastError ? drilled : { ...drilled, viewTab: "table" };
+    }
     case "cross":
       return crossNav(next, action.kind, action.name, snap);
     default:
@@ -124,6 +132,15 @@ export function findAgent(snap: FleetSnapshot, name: string) {
 
 export function findSpec(snap: FleetSnapshot, name: string) {
   return snap.specs.find((s) => s.name === name) ?? null;
+}
+
+/** Joins a Needs-You target (a session name) back to the topology agent. */
+export function findAgentBySession(snap: FleetSnapshot, session: string) {
+  for (const host of snap.hosts)
+    for (const rig of host.rigs)
+      for (const pod of rig.pods)
+        for (const agent of pod.agents) if (agent.session === session) return agent;
+  return null;
 }
 
 export function findRig(snap: FleetSnapshot, name: string) {

@@ -29,6 +29,14 @@ export function parseCommand(raw: string): Action {
   const [verb = "", ...rest] = input.split(/\s+/);
   const name = rest.join(" ");
 
+  if (verb === "tab") {
+    // FR-3 content-pane view tabs; command path keeps R1.2 (every view
+    // reachable by a command). Same <verb> <name> shape as drill — not
+    // the retired richer grammar.
+    if (name === "table" || name === "overview") return { type: "tab", tab: name };
+    return { type: "error", message: `unknown tab "${name}" — known: tab table, tab overview` };
+  }
+
   if (verb === "spec-of" || verb === "running") {
     if (!name) {
       const example = verb === "spec-of" ? "spec-of dev.driver" : "running driver-agent";

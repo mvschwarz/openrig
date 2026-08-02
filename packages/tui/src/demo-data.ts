@@ -16,9 +16,9 @@ export function demoSnapshot(): FleetSnapshot {
               {
                 name: "dev50",
                 agents: [
-                  { name: "dev50.driver", runtime: "claude-code", spec: "driver-agent", context: 62, tokens: "118k", status: "running" },
-                  { name: "dev50.guard", runtime: "codex", spec: "guard-agent", context: 31, tokens: "54k", status: "idle" },
-                  { name: "dev50.qa", runtime: "codex", spec: "qa-agent", context: null, tokens: null, status: "unknown" },
+                  { name: "dev50.driver", runtime: "claude-code", spec: "driver-agent", context: 62, tokens: "118k", status: "running", session: "dev50-driver@openrig-build" },
+                  { name: "dev50.guard", runtime: "codex", spec: "guard-agent", context: 31, tokens: "54k", status: "idle", session: "dev50-guard@openrig-build" },
+                  { name: "dev50.qa", runtime: "codex", spec: "qa-agent", context: null, tokens: null, status: "unknown", session: "dev50-qa@openrig-build" },
                 ],
               },
               {
@@ -42,12 +42,16 @@ export function demoSnapshot(): FleetSnapshot {
     ],
     needs: [
       // shaped like served composeNeedsYou derived items: kind + summary/evidence verbatim
-      { kind: "stuck", target: "dev50.guard", detail: "dev50.guard looks stuck — idle 42m >= 30m default · holds 1" },
+      { kind: "stuck", target: "dev50-guard@openrig-build", detail: "dev50.guard looks stuck — idle 42m >= 30m default · holds 1" },
     ],
     humanQueueProbed: true,
     humanQueue: [],
     // host-down is composed BESIDE the items (never projected into the item shape)
     hostsDown: [{ hostId: "mm2-host", status: "unreachable", error: "read timed out" }],
+    stream: [
+      { tsEmitted: "2026-08-02T10:00:00.000Z", sourceSession: "dev50-guard@v-openrig-build", body: "gate cleared: slice-11 spike verdict PASS" },
+      { tsEmitted: "2026-08-02T10:05:00.000Z", sourceSession: "orch-lead@v-openrig-build", body: "provider re-auth completed on mm2" },
+    ],
     readErrors: [],
   };
 }

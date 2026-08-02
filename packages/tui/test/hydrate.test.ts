@@ -58,6 +58,9 @@ const FIXTURES: Record<string, unknown> = {
     agents: { scope: "rig", rows: [], provenance: "computed", coordinationHealth: null },
     settled: [], settledProvenance: "computed", composedAt: "2026-08-02T09:30:00.000Z",
   },
+  "/api/stream/list?limit=5": [
+    { streamItemId: "si-1", tsEmitted: "2026-08-02T10:00:00.000Z", streamSortKey: "k1", sourceSession: "dev-guard@myrig", body: "gate cleared: slice-11", format: "text", hintType: null, hintUrgency: null, hintDestination: null, hintTags: null, interrupt: false, archivedAt: null },
+  ],
   "/api/queue/attention-aggregate": {
     items: [],
     hosts: [

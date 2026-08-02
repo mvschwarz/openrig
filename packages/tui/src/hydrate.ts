@@ -26,6 +26,7 @@ interface NodeInventoryRead {
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
   lifecycleState: string;
+  canonicalSessionName: string | null;
   resolvedSpecName: string | null;
   contextUsage?: {
     availability: "known" | "unknown";
@@ -57,6 +58,11 @@ interface ReviewRigRead {
 interface AttentionAggregateRead {
   hosts?: Array<{ hostId: string; status: string; error?: string }>;
 }
+interface StreamItemRead {
+  tsEmitted: string;
+  sourceSession: string;
+  body: string;
+}
 
 function fmtTokens(input: number | null, output: number | null): string | null {
   if (input == null && output == null) return null;
@@ -76,6 +82,7 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
     tokens: known ? fmtTokens(ctx.totalInputTokens, ctx.totalOutputTokens) : null,
     // PIN 2: the maintained projection's lifecycleState VERBATIM
     status: node.lifecycleState,
+    session: node.canonicalSessionName,
   };
 }
 
@@ -110,11 +117,12 @@ export async function hydrateSnapshot(client: DaemonClient): Promise<FleetSnapsh
     }
   }
 
-  const [agg, summaries, library, review] = await Promise.all([
+  const [agg, summaries, library, review, streamItems] = await Promise.all([
     safe<AttentionAggregateRead>("attention-aggregate", () => client.attentionAggregate()),
     safe<RigSummaryRead[]>("rigs-summary", () => client.rigsSummary()),
     safe<SpecLibraryRead[]>("specs-library", () => client.specsLibrary()),
     safe<ReviewRigRead>("review-rig", () => client.reviewRig()),
+    safe<StreamItemRead[]>("stream-list", () => client.streamList()),
   ]);
 
   // Topology: the local host expands to the daemon's rigs; remote hosts come
@@ -168,6 +176,7 @@ export async function hydrateSnapshot(client: DaemonClient): Promise<FleetSnapsh
     humanQueueProbed: review != null,
     humanQueue,
     hostsDown,
+    stream: (streamItems ?? []).map((s) => ({ tsEmitted: s.tsEmitted, sourceSession: s.sourceSession, body: s.body })),
     readErrors,
   };
 }

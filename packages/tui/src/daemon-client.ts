@@ -67,4 +67,9 @@ export class DaemonClient {
   rigStatus(rigId: string) {
     return this.get(`/api/rigs/${encodeURIComponent(rigId)}/status`);
   }
+
+  // --- rig-stream footer (§4.A row 7: the rig stream read surface) ---
+  streamList(limit = 5) {
+    return this.get(`/api/stream/list?limit=${limit}`);
+  }
 }

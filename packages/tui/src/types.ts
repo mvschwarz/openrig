@@ -11,6 +11,8 @@ export interface AgentRow {
   context: number | null;
   tokens: string | null;
   status: string;
+  /** canonicalSessionName where served — joins Needs-You targets to topology */
+  session?: string | null;
 }
 
 export interface PodNode {
@@ -63,6 +65,8 @@ export interface FleetSnapshot {
   humanQueueProbed: boolean;
   humanQueue: NeedsItem[];
   hostsDown: HostDown[];
+  /** latest ambient stream items for the footer ticker (FR-10), newest last */
+  stream: Array<{ tsEmitted: string; sourceSession: string; body: string }>;
   /** named per-read failures (honest partial hydration, never silent) */
   readErrors: string[];
 }
@@ -76,6 +80,8 @@ export interface DrillSegment {
   name: string;
 }
 
+export type ViewTab = "table" | "overview";
+
 export type Action =
   | { type: "noop" }
   | { type: "error"; message: string }
@@ -84,7 +90,9 @@ export type Action =
   | { type: "select"; delta?: number; index?: number; rowCount?: number }
   | { type: "activate" }
   | { type: "drill"; resource: ResourceKind; name: string }
-  | { type: "cross"; kind: "spec-of" | "running"; name: string };
+  | { type: "cross"; kind: "spec-of" | "running"; name: string }
+  | { type: "tab"; tab: ViewTab }
+  | { type: "footer"; on?: boolean };
 
 /** FR-12: the section set is ONE in-code registry — adding a section is a
  * localized edit to this data structure, never a scattered switch. */
@@ -103,6 +111,9 @@ export interface ViewState {
   filter: string;
   selection: number;
   runningOf: string | null;
+  viewTab: ViewTab;
+  /** the rig-stream footer is ambient: toggleable, never a navigable view (FR-10) */
+  footerOn: boolean;
   lastError: string | null;
 }
 

@@ -74,6 +74,10 @@ async function run(): Promise<void> {
           void shutdown();
           return;
         }
+        if (ev.ch === "f" && inputLine === "") {
+          view.dispatch({ type: "footer" });
+          continue;
+        }
         inputLine += ev.ch;
       } else if (ev.type === "key" && ev.key === "backspace") {
         inputLine = inputLine.slice(0, -1);
