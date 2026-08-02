@@ -99,6 +99,23 @@ describe("live visual regressions", () => {
     expect(screen.hitMap.some((hit) => hit.y === lineIndex + 1 && hit.x1 > 30)).toBe(false);
   });
 
+  it("never opens a local seat for a remote Needs row with the same canonical session", () => {
+    const snap = demoSnapshot();
+    snap.needs = [{
+      kind: "stuck",
+      target: "dev50-guard@openrig-build",
+      hostId: "remote-a",
+      detail: "remote guard needs attention",
+    }];
+    const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    view.dispatch({ type: "jump", section: "needs" });
+    const screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
+    const row = screen.lines.find((line) => line.includes("remote guard needs attention"));
+    expect(row).toContain("[remote-a]");
+    expect(row).not.toContain("open ▸");
+    expect(screen.contentTargets).toHaveLength(0);
+  });
+
   it("renders the locked rig-spec structure with clickable agent refs", () => {
     const base = demoSnapshot();
     const snap: FleetSnapshot = {

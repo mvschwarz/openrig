@@ -167,12 +167,14 @@ export function findSpec(snap: FleetSnapshot, name: string) {
 }
 
 /** Joins a Needs-You target (a session name) back to the topology agent. */
-export function findAgentBySession(snap: FleetSnapshot, session: string) {
+export function findAgentBySession(snap: FleetSnapshot, session: string, hostId?: string) {
+  const matches = [];
   for (const host of snap.hosts)
     for (const rig of host.rigs)
       for (const pod of rig.pods)
-        for (const agent of pod.agents) if (agent.session === session) return { host, rig, pod, agent };
-  return null;
+        for (const agent of pod.agents)
+          if (agent.session === session && (!hostId || host.name === hostId)) matches.push({ host, rig, pod, agent });
+  return matches.length === 1 ? matches[0]! : null;
 }
 
 function rigMatches(snap: FleetSnapshot, name: string, hostName?: string) {

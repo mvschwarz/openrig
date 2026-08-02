@@ -68,9 +68,10 @@ function specTabsLine(state: ViewState, name: string): ContentLine {
 }
 
 function needsLine(prefix: string, item: NeedsItem, snap: FleetSnapshot): ContentLine {
-  const found = findAgentBySession(snap, item.target);
+  const found = findAgentBySession(snap, item.target, item.hostId);
+  const provenance = item.hostId ? ` [${item.hostId}]` : "";
   return {
-    text: `${prefix}${item.kind}  ${item.target}  — ${item.detail}${found ? "  (open ▸)" : ""}`,
+    text: `${prefix}${item.kind}${provenance}  ${item.target}  — ${item.detail}${found ? "  (open ▸)" : ""}`,
     ...(found ? { action: { type: "drill", resource: "agent", name: found.agent.name, target: { host: found.host.name, rig: found.rig.name, pod: found.pod.name } } as const } : {}),
   };
 }

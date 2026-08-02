@@ -91,10 +91,10 @@ const FIXTURES: Record<string, unknown> = {
     scope: "rig",
     needsYou: {
       items: [
-        { source: "agent", identity: "qitem-2026080201", summary: "approve slice 11 proof", leg: "human-routed", where: "human@kernel", ageIso: "2026-08-02T08:40:00.000Z", priority: "high", tier: "human-gate", evidenceRef: "proof/qa.md", unblocks: null, qitemId: "qitem-2026080201", destinationSession: "human@kernel", derived: null },
+        { source: "agent", identity: "qitem-2026080201", summary: "approve slice 11 proof", leg: "human-routed", where: "human@kernel", ageIso: "2026-08-02T08:40:00.000Z", priority: "high", tier: "human-gate", evidenceRef: "proof/qa.md", unblocks: null, qitemId: "qitem-2026080201", destinationSession: "human@kernel", derived: null, hostId: "local" },
         { source: "agent", identity: "qitem-remote", summary: "remote founder gate", leg: "human-routed", where: "human@kernel", ageIso: "2026-08-02T08:41:00.000Z", priority: "high", tier: "human-gate", evidenceRef: null, unblocks: null, qitemId: "qitem-remote", destinationSession: "human@kernel", derived: null, hostId: "mm2-host" },
-        { source: "derived", identity: "dev-impl@myrig|stuck|2026-08-02T08:43:00.000Z", summary: "impl looks stuck", leg: "stuck", where: "rig", ageIso: null, priority: null, tier: null, evidenceRef: null, unblocks: null, qitemId: null, destinationSession: null, derived: { kind: "stuck", evidence: "idle 47m >= 30m default · holds 2", threshold: "idle-with-work >= 30m" } },
-        { source: "derived", identity: "dev-qa@myrig|too-long-in-state|2026-08-02T05:00:00.000Z", summary: "qa has not transitioned in 180m", leg: "stuck", where: "rig", ageIso: null, priority: null, tier: null, evidenceRef: null, unblocks: null, qitemId: null, destinationSession: null, derived: { kind: "stuck", evidence: "no transition for 180m >= 120m default · holds 2", threshold: "too-long-in-state >= 120m" } },
+        { source: "derived", identity: "dev-impl@myrig|stuck|2026-08-02T08:43:00.000Z", summary: "impl looks stuck", leg: "stuck", where: "rig", ageIso: null, priority: null, tier: null, evidenceRef: null, unblocks: null, qitemId: null, destinationSession: null, derived: { kind: "stuck", evidence: "idle 47m >= 30m default · holds 2", threshold: "idle-with-work >= 30m" }, hostId: "local" },
+        { source: "derived", identity: "dev-qa@myrig|too-long-in-state|2026-08-02T05:00:00.000Z", summary: "qa has not transitioned in 180m", leg: "stuck", where: "rig", ageIso: null, priority: null, tier: null, evidenceRef: null, unblocks: null, qitemId: null, destinationSession: null, derived: { kind: "stuck", evidence: "no transition for 180m >= 120m default · holds 2", threshold: "too-long-in-state >= 120m" }, hostId: "local" },
       ],
       provenance: "computed from queue+ps (rig scope) · window: today at 2026-08-02T09:30:00.000Z",
     },
@@ -146,7 +146,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     const snap = await hydrateSnapshot(fixtureClient());
     const stuck = snap.needs.filter((n) => n.kind === "stuck");
     expect(stuck).toHaveLength(2);
-    expect(stuck[0]?.target).toBe("dev-impl@myrig");
+    expect(stuck[0]).toMatchObject({ target: "dev-impl@myrig", hostId: "local" });
     expect(stuck[0]?.detail).toContain("idle 47m >= 30m default");
     expect(stuck[1]?.target).toBe("dev-qa@myrig");
     expect(stuck[1]?.detail).toContain("no transition for 180m >= 120m default");
@@ -213,8 +213,8 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     const snap = await hydrateSnapshot(fixtureClient());
     expect(snap.humanQueueProbed).toBe(true);
     expect(snap.humanQueue).toEqual([
-      { kind: "human-routed", target: "human@kernel", detail: "approve slice 11 proof" },
-      { kind: "human-routed", target: "human@kernel", detail: "remote founder gate" },
+      { kind: "human-routed", target: "human@kernel", detail: "approve slice 11 proof", hostId: "local" },
+      { kind: "human-routed", target: "human@kernel", detail: "remote founder gate", hostId: "mm2-host" },
     ]);
   });
 
@@ -230,6 +230,36 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     }));
     expect(snap.humanQueueProbed).toBe(false);
     expect(snap.humanQueue).toEqual([]);
+  });
+
+  it("treats a fleet registry error as named incomplete state, never proven-empty", async () => {
+    const snap = await hydrateSnapshot(fixtureClient({}, {
+      "/api/review/fleet": {
+        needsYou: { items: [] },
+        hosts: [{ hostId: "local", status: { hostId: "local", status: "ok" } }],
+        registryError: "failed to parse hosts.yaml",
+      },
+    }));
+    expect(snap.humanQueueProbed).toBe(false);
+    expect(snap.readErrors).toContain("review-fleet registry: failed to parse hosts.yaml");
+  });
+
+  it("gives failed, attention, and needs-input truth precedence over terminal active/idle", async () => {
+    const base = (FIXTURES["/api/rigs/01JRIG/nodes"] as Array<Record<string, unknown>>)[0]!;
+    const nodes = [
+      { ...base, logicalId: "dev.failed", startupStatus: "failed", lifecycleState: "attention_required", terminalActive: true },
+      { ...base, logicalId: "dev.attention", startupStatus: "attention_required", lifecycleState: "attention_required", terminalActive: false },
+      { ...base, logicalId: "dev.input", startupStatus: "ready", agentActivity: { state: "needs_input" }, terminalActive: true },
+      { ...base, logicalId: "dev.active", startupStatus: "ready", agentActivity: { state: "running" }, terminalActive: true },
+    ];
+    const snap = await hydrateSnapshot(fixtureClient({}, { "/api/rigs/01JRIG/nodes": nodes }));
+    const statuses = Object.fromEntries(snap.hosts[0]!.rigs[0]!.pods[0]!.agents.map((agent) => [agent.name, agent.status]));
+    expect(statuses).toEqual({
+      "dev.failed": "failed",
+      "dev.attention": "attention_required",
+      "dev.input": "needs_input",
+      "dev.active": "active",
+    });
   });
 
   it("joins Specs↔Topology over existing reads: rig agentRefs + agent usedByRigs", async () => {

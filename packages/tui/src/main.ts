@@ -7,7 +7,7 @@
 //   openrig-tui [--instance <id>] [--socket <path>] [--url <daemon>] [--demo]
 import { createViewState, computeExplorerRows, emptySnapshot } from "./state.js";
 import { parseCommand } from "./grammar.js";
-import { decodeInput, resolveKeyAction, MOUSE_ENABLE, MOUSE_DISABLE, ALT_SCREEN_ON, ALT_SCREEN_OFF } from "./input.js";
+import { createInputDecoder, resolveKeyAction, MOUSE_ENABLE, MOUSE_DISABLE, ALT_SCREEN_ON, ALT_SCREEN_OFF } from "./input.js";
 import { renderScreen } from "./render.js";
 import { createControlSocket, defaultSocketPath } from "./socket-server.js";
 import { demoSnapshot } from "./demo-data.js";
@@ -37,6 +37,8 @@ async function run(): Promise<void> {
 
   let inputLine = "";
   let lastScreen: Screen | null = null;
+  const inputDecoder = createInputDecoder();
+  let inputFlushTimer: NodeJS.Timeout | null = null;
 
   function draw(): void {
     const cols = process.stdout.columns ?? 120;
@@ -107,8 +109,8 @@ async function run(): Promise<void> {
   process.on("SIGTERM", () => void shutdown());
 
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
-  process.stdin.on("data", (bytes: Buffer) => {
-    for (const ev of decodeInput(bytes)) {
+  function handleInput(events: ReturnType<typeof inputDecoder.write>): void {
+    for (const ev of events) {
       if (ev.type === "char") {
         if (ev.ch === "q" && inputLine === "") {
           void shutdown();
@@ -144,6 +146,17 @@ async function run(): Promise<void> {
       }
     }
     draw();
+  }
+
+  process.stdin.on("data", (bytes: Buffer) => {
+    if (inputFlushTimer) clearTimeout(inputFlushTimer);
+    handleInput(inputDecoder.write(bytes));
+    if (inputDecoder.hasPending()) {
+      inputFlushTimer = setTimeout(() => {
+        inputFlushTimer = null;
+        handleInput(inputDecoder.flush());
+      }, 25);
+    }
   });
 
   process.stdout.write(ALT_SCREEN_ON + MOUSE_ENABLE);

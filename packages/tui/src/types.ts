@@ -109,6 +109,8 @@ export interface NeedsItem {
   kind: string;
   target: string;
   detail: string;
+  /** fleet provenance; required to prevent a remote row opening a local twin */
+  hostId?: string;
 }
 
 /** Host/rig-down rows — composed BESIDE the Needs-You items at render, never

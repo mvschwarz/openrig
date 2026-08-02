@@ -91,6 +91,7 @@ interface RigSpecJsonRead {
   pods?: Array<{ members?: Array<{ agentRef?: string }> }>;
 }
 interface NeedsYouItemRead {
+  hostId?: string;
   source: "agent" | "derived";
   identity: string;
   summary: string;
@@ -102,6 +103,7 @@ interface NeedsYouItemRead {
 interface ReviewFleetRead {
   needsYou?: { items?: NeedsYouItemRead[] };
   hosts?: Array<{ hostId: string; status: { status: string } }>;
+  registryError?: string | null;
 }
 interface AttentionAggregateRead {
   hosts?: Array<{ hostId: string; status: string; error?: string }>;
@@ -130,9 +132,15 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
     tokens: known ? fmtTokens(ctx.totalInputTokens, ctx.totalOutputTokens) : null,
     // Mirror the maintained web projection: lifecycle truth drives actions,
     // while session/terminal activity drives the visible status label.
-    status: node.sessionStatus === "running" || node.sessionStatus === "ready"
-      ? (node.terminalActive === true || (node.terminalActive == null && node.agentActivity?.state === "running") ? "active" : "idle")
-      : (node.sessionStatus ?? "unknown"),
+    status: node.startupStatus === "failed"
+      ? "failed"
+      : node.startupStatus === "attention_required"
+        ? "attention_required"
+        : node.agentActivity?.state === "needs_input"
+          ? "needs_input"
+          : node.sessionStatus === "running" || node.sessionStatus === "ready"
+            ? (node.terminalActive === true || (node.terminalActive == null && node.agentActivity?.state === "running") ? "active" : "idle")
+            : (node.sessionStatus ?? "unknown"),
     live: node.lifecycleState === "running",
     canRun: node.lifecycleState !== "running",
     session: node.canonicalSessionName,
@@ -157,7 +165,7 @@ function toNeedsItem(item: NeedsYouItemRead): NeedsItem {
   // session/where the daemon already names (identity prefix for derived rows)
   const target = item.source === "derived" ? (item.identity.split("|")[0] ?? item.where) : (item.destinationSession ?? item.where);
   const detail = item.derived ? `${item.summary} — ${item.derived.evidence}` : item.summary;
-  return { kind: item.derived?.kind ?? item.leg, target, detail };
+  return { kind: item.derived?.kind ?? item.leg, target, detail, ...(item.hostId ? { hostId: item.hostId } : {}) };
 }
 
 function resolveAgentRef(ref: string, agentSpecNames: Set<string>): string {
@@ -222,6 +230,7 @@ export async function hydrateSnapshot(client: DaemonClient, reviewCache?: SpecRe
   ]);
 
   const agentSpecNames = new Set((library ?? []).filter((entry) => entry.kind === "agent").map((entry) => entry.name));
+  if (review?.registryError) readErrors.push(`review-fleet registry: ${review.registryError}`);
 
   // Topology: the local host expands to the daemon's rigs; remote hosts come
   // from the aggregate with reachability only (per-rig start; the all-rigs
@@ -382,7 +391,7 @@ export async function hydrateSnapshot(client: DaemonClient, reviewCache?: SpecRe
     hosts: [localHost, ...remoteHosts],
     specs,
     needs,
-    humanQueueProbed: review != null && Array.isArray(review.hosts) && review.hosts.length > 0
+    humanQueueProbed: review != null && !review.registryError && Array.isArray(review.hosts) && review.hosts.length > 0
       && review.hosts.every((host) => host.status.status === "ok"),
     humanQueue,
     hostsDown,
