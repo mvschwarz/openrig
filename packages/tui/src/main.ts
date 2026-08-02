@@ -69,11 +69,14 @@ async function run(): Promise<void> {
     }
     try {
       if (action.act === "open-terminal") {
-        await client.openTerminal(action.view);
-        view.dispatch({ type: "notice", message: `terminal opened: ${action.view}` });
+        const result = await client.openTerminal(action.view);
+        view.dispatch({
+          type: "notice",
+          message: `terminal opened: ${action.view} (${result.opened.length} opened, ${result.absent.length} absent, ${result.degraded.length} degraded)`,
+        });
       } else {
-        await client.upRig(action.rig);
-        view.dispatch({ type: "notice", message: `rig up requested: ${action.rig}` });
+        await client.launchNode(action.rigId, action.agent);
+        view.dispatch({ type: "notice", message: `agent run requested: ${action.agent}` });
       }
     } catch (err) {
       view.dispatch({ type: "notice", message: err instanceof Error ? err.message : String(err) });

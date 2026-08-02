@@ -23,6 +23,8 @@ export interface PodNode {
 }
 
 export interface RigNode {
+  /** daemon rig id; absent only in static demo fixtures */
+  id?: string;
   name: string;
   pods: PodNode[];
   /** served rig lifecycleState verbatim (summary read); non-"running" states surface */
@@ -107,7 +109,7 @@ export type Action =
   /** drive-structure daemon writes (BR-8/BR-9): executed by the driver loop
    * against EXISTING write contracts; never a view-state mutation */
   | { type: "act"; act: "open-terminal"; view: string }
-  | { type: "act"; act: "run"; rig: string }
+  | { type: "act"; act: "run"; rigId: string; agent: string }
   | { type: "notice"; message: string };
 
 /** FR-12: the section set is ONE in-code registry — adding a section is a

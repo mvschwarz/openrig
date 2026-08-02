@@ -64,21 +64,44 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
     }
   });
 
-  it("write surface = EXACTLY the two BR-8 drive-structure contracts (terminal-open, rig-up)", async () => {
+  it("write surface = EXACTLY the two BR-8 drive-structure contracts (terminal-open, seat-launch)", async () => {
     const seen: string[] = [];
     const fetchImpl = (async (url: unknown, init?: RequestInit) => {
       if (init?.method === "POST") seen.push(String(url).replace("http://x", ""));
-      return { ok: true, json: async () => ({}) } as Response;
+      return {
+        ok: true,
+        json: async () => String(url).endsWith("/api/terminal/open")
+          ? { provider: "herdr", ok: true, opened: ["dev.qa"], absent: [], degraded: [], pages: 1 }
+          : {},
+      } as Response;
     }) as typeof fetch;
     const c = new DaemonClient({ baseUrl: "http://x", fetchImpl });
     await c.openTerminal("pod:dev");
-    await c.upRig("myrig");
-    expect(seen).toEqual(["/api/terminal/open", "/api/up"]);
+    await c.launchNode("myrig", "dev.qa");
+    expect(seen).toEqual(["/api/terminal/open", "/api/rigs/myrig/nodes/dev.qa/launch"]);
     // and no other method on the client POSTs
     const postCalls = Object.getOwnPropertyNames(Object.getPrototypeOf(c)).filter((m) =>
-      ["openTerminal", "upRig"].includes(m),
+      ["openTerminal", "launchNode"].includes(m),
     );
     expect(postCalls).toHaveLength(2);
+  });
+
+  it("does not report a zero-pane HTTP 200 terminal result as opened", async () => {
+    const fetchImpl = (async () => ({
+      ok: true,
+      json: async () => ({
+        provider: "herdr",
+        ok: false,
+        opened: [],
+        absent: [],
+        degraded: [],
+        pages: 0,
+        code: "herdr_unavailable",
+        error: "herdr control socket is not answering ping",
+      }),
+    }) as Response) as typeof fetch;
+    const c = new DaemonClient({ baseUrl: "http://x", fetchImpl });
+    await expect(c.openTerminal("pod:dev")).rejects.toThrow(/herdr control socket is not answering ping/);
   });
 
   it("surfaces a failed read as a NAMED error (route + status), never silent", async () => {

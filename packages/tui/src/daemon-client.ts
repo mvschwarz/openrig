@@ -8,6 +8,17 @@ export interface DaemonClientOptions {
   fetchImpl?: typeof fetch;
 }
 
+export interface TerminalOpenResult {
+  provider: string;
+  ok: boolean;
+  opened: string[];
+  absent: unknown[];
+  degraded: unknown[];
+  pages: number;
+  error?: string;
+  code?: string;
+}
+
 export class DaemonClient {
   readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
@@ -91,11 +102,15 @@ export class DaemonClient {
 
   // --- drive-structure writes (BR-8: EXISTING contracts only; the ONLY two) ---
   /** the web's TerminalLauncher contract: POST /api/terminal/open {view} */
-  openTerminal(view: string) {
-    return this.post(`/api/terminal/open`, { view });
+  async openTerminal(view: string): Promise<TerminalOpenResult> {
+    const result = (await this.post(`/api/terminal/open`, { view })) as TerminalOpenResult;
+    if (!Array.isArray(result.opened) || result.opened.length === 0) {
+      throw new Error(`terminal open failed: ${result.error ?? result.code ?? "no tiles opened"}`);
+    }
+    return result;
   }
-  /** the `rig up` restore contract: POST /api/up {sourceRef} */
-  upRig(sourceRef: string) {
-    return this.post(`/api/up`, { sourceRef });
+  /** the `rig launch` per-seat contract */
+  launchNode(rigId: string, logicalId: string) {
+    return this.post(`/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(logicalId)}/launch`, {});
   }
 }

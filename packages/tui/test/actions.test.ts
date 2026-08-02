@@ -6,7 +6,7 @@ import { demoSnapshot } from "../src/demo-data.js";
 
 // QA blocker 1: ACTIONS must be a real lifecycle path, not a false affordance.
 // The two acts map to the ONLY existing write contracts (web parity):
-// open-terminal → POST /api/terminal/open {view}; run → POST /api/up {sourceRef}.
+// open-terminal → POST /api/terminal/open {view}; run → the per-seat launch route.
 
 const snap = demoSnapshot();
 
@@ -29,13 +29,13 @@ describe("ACTIONS column = real drive-structure acts (BR-9)", () => {
     expect(row).not.toMatch(/run ▸/);
   });
 
-  it("non-running row offers run ▸ wired to the rig-restore contract", () => {
+  it("non-running row offers run ▸ wired to the existing per-seat launch contract", () => {
     const { screen } = drilledScreen();
     const rowIdx = screen.lines.findIndex((l) => l.includes("dev50.qa"));
     const row = screen.lines[rowIdx]!;
     const x = row.indexOf("run ▸") + 1;
     const hit = hitAt(screen, x, rowIdx + 1);
-    expect(hit?.action).toEqual({ type: "act", act: "run", rig: "openrig-build" });
+    expect(hit?.action).toEqual({ type: "act", act: "run", rigId: "openrig-build", agent: "dev50.qa" });
   });
 
   it("term ▸ zone dispatches open-terminal for the row's pod; clicking elsewhere still drills", () => {

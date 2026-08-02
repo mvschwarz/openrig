@@ -164,6 +164,7 @@ export async function hydrateSnapshot(client: DaemonClient, reviewCache?: SpecRe
   for (const rig of summaries ?? []) {
     const nodes = await safe<NodeInventoryRead[]>(`nodes(${rig.name})`, () => client.rigNodes(rig.id));
     rigs.push({
+      id: rig.id,
       name: rig.name,
       pods: nodes ? groupPods(nodes) : [],
       ...(rig.lifecycleState ? { lifecycleState: rig.lifecycleState } : {}),

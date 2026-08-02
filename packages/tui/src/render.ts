@@ -117,7 +117,11 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
       const termOffset = actionsColStart + actionsCell.indexOf("term ▸");
       zones.push({ start: termOffset, end: termOffset + "term ▸".length, action: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${a.pod}` } });
       if (canRun)
-        zones.push({ start: actionsColStart, end: actionsColStart + "run ▸".length, action: { type: "act", act: "run", rig: rig.name } });
+        zones.push({
+          start: actionsColStart,
+          end: actionsColStart + "run ▸".length,
+          action: { type: "act", act: "run", rigId: rig.id ?? rig.name, agent: a.name },
+        });
       lines.push({
         // the WHOLE row is the hit surface (not a testid'd control): clicking
         // any visible cell opens the agent; the ACTIONS zones override.
