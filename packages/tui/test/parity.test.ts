@@ -65,7 +65,7 @@ describe("parity by construction (FR-7 / PIN 1)", () => {
     const header = screen.lines.find((l) => l.includes("AGENT") && l.includes("STATUS"));
     expect(header).toBeDefined();
     const ctxCol = header!.indexOf("CTX%");
-    const rows = screen.lines.filter((l) => /\b(running|idle|needs-attention|unknown)\b/.test(l));
+    const rows = screen.lines.filter((l) => l.includes("openrig-build") && /\b(running|idle|needs-attention|unknown)\b/.test(l));
     expect(rows.length).toBeGreaterThanOrEqual(2);
     for (const row of rows) {
       expect(row.slice(ctxCol, ctxCol + 4)).toMatch(/^\s*(\d+%|—)$/);

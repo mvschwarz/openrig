@@ -52,6 +52,21 @@ function tabsLine(state: ViewState, suffix: string): ContentLine[] {
   ];
 }
 
+function specTabsLine(state: ViewState, name: string): ContentLine {
+  const active = state.viewTab === "topology" || state.viewTab === "yaml" ? state.viewTab : "configuration";
+  const labels = ["topology", "configuration", "yaml"] as const;
+  const parts = labels.map((tab) => (tab === active ? `[ ${tab.toUpperCase()} ]` : `  ${tab.toUpperCase()}  `));
+  const text = `rig spec ${name}   ${parts.join(" ")}`;
+  return {
+    text,
+    zones: labels.map((tab, index) => {
+      const label = parts[index]!;
+      const start = text.indexOf(label);
+      return { start, end: start + label.length, action: { type: "tab", tab } };
+    }),
+  };
+}
+
 function needsLine(prefix: string, item: NeedsItem, snap: FleetSnapshot): ContentLine {
   const agent = findAgentBySession(snap, item.target);
   return {
@@ -76,6 +91,24 @@ function displayPath(path: string, max = 68): string {
     kept.unshift(parts.pop()!);
   }
   return `…/${kept.join("/")}`;
+}
+
+function wrappedList(prefix: string, values: string[], max = 84): ContentLine[] {
+  if (values.length === 0) return [{ text: `${prefix}(none)` }];
+  const lines: ContentLine[] = [];
+  const indent = " ".repeat(prefix.length);
+  let current = prefix;
+  for (const value of values) {
+    const addition = `${current === prefix ? "" : ", "}${value}`;
+    if (current !== prefix && current.length + addition.length > max) {
+      lines.push({ text: current });
+      current = `${indent}${value}`;
+    } else {
+      current += addition;
+    }
+  }
+  lines.push({ text: current });
+  return lines;
 }
 
 function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
@@ -112,6 +145,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
       .filter((a) => !state.filter || a.name.includes(state.filter) || a.pod.includes(state.filter));
     const suffix = `rig ${rig.name}${podFilter ? ` · pod ${podFilter}` : ""}${state.filter ? ` · filter "${state.filter}"` : ""}`;
     lines.push(...tabsLine(state, suffix));
+    lines.push({ text: state.filter ? `/ filter agents: ${state.filter}` : "/ filter agents…" });
     if (state.viewTab === "overview") {
       lines.push({ text: `rig ${rig.name} — ${rig.pods.length} pods · ${all.length} agents` });
       for (const pod of rig.pods)
@@ -158,7 +192,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
       });
     }
     lines.push({ text: "" });
-    lines.push({ text: `${rows.length} of ${all.length} agents shown` });
+    lines.push({ text: `${rows.length} of ${all.length} / ${rows.filter((agent) => agent.status === "idle").length} idle` });
     return lines;
   }
   if (state.section === "specs") {
@@ -167,8 +201,21 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
       const spec = findSpec(snap, leaf.name);
       if (!spec) return [{ text: `spec "${leaf.name}" not in the current snapshot` }];
       if (spec.kind === "rig") {
-        lines.push({ text: `rig spec ${spec.name}   tabs: topology [ CONFIGURATION ] yaml` });
+        lines.push(specTabsLine(state, spec.name));
         if (spec.sourcePath) lines.push({ text: `  source: ${displayPath(spec.sourcePath)} · ${sourceProvenance(spec)}` });
+        if (state.viewTab === "topology") {
+          lines.push({ text: `  topology · nodes ${spec.graph?.nodes.length ?? 0} · edges ${spec.graph?.edges.length ?? 0}` });
+          for (const node of spec.graph?.nodes ?? [])
+            lines.push({ text: `    ${node.id} · ${node.label}${node.pod ? ` · pod ${node.pod}` : ""} · ${node.runtime}` });
+          for (const edge of spec.graph?.edges ?? [])
+            lines.push({ text: `    ${edge.source} → ${edge.target} (${edge.kind})` });
+          if ((spec.graph?.nodes.length ?? 0) === 0) lines.push({ text: "    (topology projection is empty)" });
+          return lines;
+        }
+        if (state.viewTab === "yaml") {
+          for (const rawLine of (spec.raw ?? "# raw YAML unavailable").split("\n")) lines.push({ text: `  ${rawLine}` });
+          return lines;
+        }
         const members = spec.pods?.reduce((count, pod) => count + pod.members.length, 0) ?? spec.legacyNodes?.length ?? 0;
         const edges = (spec.edges?.length ?? 0) + (spec.pods?.reduce((count, pod) => count + pod.edges.length, 0) ?? 0);
         if (spec.format)
@@ -193,7 +240,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
         lines.push({ text: `agent spec ${spec.name}${spec.version ? ` · v${spec.version}` : ""}` });
         if (spec.description) lines.push({ text: `  ${spec.description}` });
         lines.push({ text: `  runtime ${spec.runtime ?? "—"}` });
-        if (spec.skills) lines.push({ text: `  skills: ${spec.skills.join(", ") || "(none)"}` });
+        if (spec.skills) lines.push(...wrappedList("  skills: ", spec.skills));
         if (spec.hasGuidance != null) lines.push({ text: `  guidance: ${spec.hasGuidance ? "yes" : "no"}` });
         if (spec.startupFiles)
           for (const f of spec.startupFiles)
@@ -285,6 +332,22 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
     Math.max(state.selection - bodyRows + 1, 0),
     Math.max(explorer.length - bodyRows, 0),
   );
+  const contentRows = content.length > bodyRows ? Math.max(bodyRows - 1, 0) : bodyRows;
+  const maxContentOffset = Math.max(content.length - contentRows, 0);
+  const contentStart = Math.min(state.contentOffset, maxContentOffset);
+  const visibleContent = content.slice(contentStart, contentStart + contentRows);
+  if (content.length > bodyRows) {
+    const scrollText = `content ↑/↓ · ${contentStart + 1}-${contentStart + visibleContent.length} of ${content.length}`;
+    const up = scrollText.indexOf("↑");
+    const down = scrollText.indexOf("↓");
+    visibleContent.push({
+      text: scrollText,
+      zones: [
+        { start: up, end: up + 1, action: { type: "content-scroll", delta: -10 } },
+        { start: down, end: down + 1, action: { type: "content-scroll", delta: 10 } },
+      ],
+    });
+  }
   const explorerRows: Screen["explorerRows"] = [];
   for (let i = 0; i < bodyRows; i++) {
     const y = lines.length + 1; // 1-based terminal row this line will occupy
@@ -292,7 +355,7 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
     const row = explorer[explorerIndex];
     const marker = explorerIndex === state.selection && row ? "›" : " ";
     const left = pad(row ? `${marker}${row.label}` : "", EXPL_W);
-    const item = content[i];
+    const item = visibleContent[i];
     lines.push(pad(`${left}│ ${item?.text ?? ""}`, cols));
     if (row) {
       hitMap.push({ y, x1: 1, x2: EXPL_W, action: row.action });

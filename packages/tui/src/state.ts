@@ -57,6 +57,7 @@ export function createViewState(options: CreateViewStateOptions): ViewStateStore
     selection: 0,
     runningOf: null,
     viewTab: "table",
+    contentOffset: 0,
     footerOn: true,
     notice: null,
     lastError: null,
@@ -90,10 +91,12 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
     case "jump": {
       if (!state.sections.some((s) => s.name === action.section))
         return { ...next, lastError: `unknown section "${action.section}"` };
-      return { ...next, section: action.section, drill: [], filter: "", selection: 0, runningOf: null, viewTab: "table" };
+      return { ...next, section: action.section, drill: [], filter: "", selection: 0, runningOf: null, viewTab: "table", contentOffset: 0 };
     }
     case "tab":
-      return { ...next, viewTab: action.tab };
+      return { ...next, viewTab: action.tab, contentOffset: 0 };
+    case "content-scroll":
+      return { ...next, contentOffset: Math.max(0, state.contentOffset + action.delta) };
     case "footer":
       return { ...next, footerOn: action.on ?? !state.footerOn };
     case "act":
@@ -103,7 +106,7 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
     case "notice":
       return { ...next, notice: action.message };
     case "filter":
-      return { ...next, filter: action.text, selection: 0 };
+      return { ...next, filter: action.text, selection: 0, contentOffset: 0 };
     case "select": {
       const count = Math.max(action.rowCount ?? Number.MAX_SAFE_INTEGER, 1);
       const target = action.index ?? state.selection + (action.delta ?? 0);
@@ -118,7 +121,9 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
     }
     case "drill": {
       const drilled = drillTo(next, action.resource, action.name, snap);
-      return drilled.lastError ? drilled : { ...drilled, viewTab: "table" };
+      if (drilled.lastError) return drilled;
+      const spec = action.resource === "spec" ? findSpec(snap, action.name) : null;
+      return { ...drilled, viewTab: spec?.kind === "rig" ? "configuration" : "table", contentOffset: 0 };
     }
     case "cross":
       return crossNav(next, action.kind, action.name, snap);
@@ -231,10 +236,12 @@ function crossNav(state: ViewState, kind: "spec-of" | "running", name: string, s
       drill: [{ kind: "spec", name: found.agent.spec }],
       selection: 0,
       runningOf: null,
+      viewTab: "table",
+      contentOffset: 0,
     };
   }
   if (!findSpec(snap, name)) return { ...state, lastError: `no such spec "${name}"` };
-  return { ...state, section: "topology", drill: [], runningOf: name, filter: "", selection: 0 };
+  return { ...state, section: "topology", drill: [], runningOf: name, filter: "", selection: 0, viewTab: "table", contentOffset: 0 };
 }
 
 // The explorer row model — pure function of (state, snapshot), shared by the

@@ -78,6 +78,11 @@ describe("live visual regressions", () => {
           edges: [],
         }],
         edges: [{ from: "orch.lead", to: "review.r1", kind: "delegates_to" }],
+        graph: {
+          nodes: [{ id: "orch.lead", label: "lead", pod: "orch", runtime: "claude-code", kind: "agent" }],
+          edges: [{ source: "orch.lead", target: "review.r1", kind: "delegates_to" }],
+        },
+        raw: "name: adversarial-review\nversion: '0.2'",
       }, {
         name: "independent-reviewer",
         kind: "agent",
@@ -100,6 +105,61 @@ describe("live visual regressions", () => {
       y: memberY,
       action: { type: "drill", resource: "spec", name: "independent-reviewer" },
     }));
+
+    const tabsY = screen.lines.findIndex((line) => line.includes("TOPOLOGY") && line.includes("YAML")) + 1;
+    expect(screen.hitMap).toContainEqual(expect.objectContaining({
+      y: tabsY,
+      action: { type: "tab", tab: "topology" },
+    }));
+
+    view.dispatch({ type: "tab", tab: "topology" });
+    const topology = renderScreen(view.get(), snap, { cols: 140, rows: 34 }).lines.join("\n");
+    expect(topology).toContain("orch.lead · lead · pod orch · claude-code");
+    expect(topology).toContain("orch.lead → review.r1 (delegates_to)");
+
+    view.dispatch({ type: "tab", tab: "yaml" });
+    const yaml = renderScreen(view.get(), snap, { cols: 140, rows: 34 }).lines.join("\n");
+    expect(yaml).toContain("name: adversarial-review");
+    expect(yaml).not.toContain("format pod-aware");
+  });
+
+  it("scrolls long content independently of the Explorer selection", () => {
+    const base = demoSnapshot();
+    const snap: FleetSnapshot = {
+      ...base,
+      specs: [{
+        name: "long-rig",
+        kind: "rig",
+        format: "pod_aware",
+        pods: Array.from({ length: 18 }, (_, i) => ({ id: `pod-${i}`, members: [], edges: [] })),
+      }],
+    };
+    const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    view.dispatch({ type: "drill", resource: "spec", name: "long-rig" });
+    const selected = view.get().selection;
+
+    const initial = renderScreen(view.get(), snap, { cols: 100, rows: 12 });
+    expect(initial.lines.join("\n")).not.toContain("pod-17 (pod)");
+    const scrollY = initial.lines.findIndex((line) => line.includes("content ↑/↓")) + 1;
+    expect(initial.hitMap).toContainEqual(expect.objectContaining({
+      y: scrollY,
+      action: { type: "content-scroll", delta: 10 },
+    }));
+    view.dispatch({ type: "content-scroll", delta: 20 });
+    const scrolled = renderScreen(view.get(), snap, { cols: 100, rows: 12 }).lines.join("\n");
+    expect(scrolled).toContain("pod-17 (pod)");
+    expect(view.get().selection).toBe(selected);
+    expect(scrolled).toContain("content ↑/↓");
+  });
+
+  it("shows the Topology filter affordance and N-of-M / idle frame", () => {
+    const snap = demoSnapshot();
+    const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    view.dispatch({ type: "drill", resource: "rig", name: "openrig-build" });
+
+    const output = renderScreen(view.get(), snap, { cols: 140, rows: 34 }).lines.join("\n");
+    expect(output).toContain("/ filter agents…");
+    expect(output).toMatch(/\d+ of \d+ \/ \d+ idle/);
   });
 
   it("renders agent runtime/resources and makes each used-by rig a real reverse link", () => {
@@ -110,6 +170,7 @@ describe("live visual regressions", () => {
         name: "independent-reviewer",
         kind: "agent",
         runtime: "claude-code",
+        skills: ["using-superpowers", "openrig-user", "mission-slice-sop", "review-team", "systematic-debugging", "verification-before-completion", "writing-plans", "brainstorming"],
         profiles: ["default"],
         resources: {
           skills: ["review-team"], guidance: ["guidance/role.md"], plugins: ["openrig-core"], subagents: ["reviewer"],
@@ -123,6 +184,7 @@ describe("live visual regressions", () => {
     const screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
     const output = screen.lines.join("\n");
     expect(output).toContain("runtime claude-code");
+    expect(output).toContain("brainstorming");
     expect(output).toContain("resources: guidance guidance/role.md · plugins openrig-core · subagents reviewer");
     const usedY = screen.lines.findIndex((line) => line.includes("used by rig adversarial-review")) + 1;
     expect(screen.hitMap).toContainEqual(expect.objectContaining({

@@ -23,7 +23,7 @@ const FIXTURES: Record<string, unknown> = {
     pods: [{
       id: "dev", label: "Development",
       members: [
-        { id: "impl", agentRef: "local:../../../agents/development/implementer", runtime: "claude-code", profile: "default" },
+        { id: "impl", agentRef: "local:../../../agents/development/implementer", runtime: "codex", profile: "default" },
         { id: "qa", agentRef: "qa-agent", runtime: "codex", profile: "default" },
       ],
       edges: [{ from: "impl", to: "qa", kind: "delegates_to" }],
@@ -36,9 +36,17 @@ const FIXTURES: Record<string, unknown> = {
     sourceState: "library_item", kind: "agent", name: "implementer", version: "0.1.0",
     description: "Implements locked slices",
     profiles: [{ name: "default" }],
-    resources: { skills: ["tdd", "verification"], guidance: ["guidance.md"], plugins: ["openrig-core"], subagents: ["reviewer"] },
+    resources: { skills: [], guidance: ["guidance.md"], plugins: ["openrig-core"], subagents: ["reviewer"] },
     startup: { files: [{ path: "STARTUP.md", required: true }], actions: [] },
-    raw: "name: implementer",
+    raw: [
+      "name: implementer",
+      "defaults:",
+      "  runtime: claude-code",
+      "profiles:",
+      "  default:",
+      "    uses:",
+      "      skills: [using-superpowers, tdd]",
+    ].join("\n"),
   },
   "/api/rigs/01JRIG/nodes": [
     {
@@ -161,12 +169,12 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
       sourcePath: "/s/implementer.yaml",
       description: "Implements locked slices",
       runtime: "claude-code",
-      skills: ["tdd", "verification"],
+      skills: ["using-superpowers", "tdd"],
       hasGuidance: true,
       startupFiles: [{ path: "STARTUP.md", required: true }],
       profiles: ["default"],
       resources: {
-        skills: ["tdd", "verification"],
+        skills: [],
         guidance: ["guidance.md"],
         plugins: ["openrig-core"],
         subagents: ["reviewer"],
@@ -187,7 +195,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
         id: "dev",
         label: "Development",
         members: [
-          { id: "impl", agentRef: "implementer", runtime: "claude-code", profile: "default" },
+          { id: "impl", agentRef: "implementer", runtime: "codex", profile: "default" },
           { id: "qa", agentRef: "qa-agent", runtime: "codex", profile: "default" },
         ],
         edges: [{ from: "impl", to: "qa", kind: "delegates_to" }],

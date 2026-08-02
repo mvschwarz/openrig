@@ -24,6 +24,16 @@ export function decodeInput(bytes: string | Buffer): InputEvent[] {
     const ch = rest[i] ?? "";
     if (ch === "\x1b" && rest[i + 1] === "[") {
       const code = rest[i + 2];
+      if ((code === "5" || code === "6") && rest[i + 3] === "~") {
+        const down = code === "6";
+        events.push({
+          type: "key",
+          key: down ? "pagedown" : "pageup",
+          action: { type: "content-scroll", delta: down ? 10 : -10 },
+        });
+        i += 4;
+        continue;
+      }
       const key = code === "A" ? "up" : code === "B" ? "down" : code === "C" ? "right" : code === "D" ? "left" : null;
       if (key) {
         events.push({

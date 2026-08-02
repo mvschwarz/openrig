@@ -104,6 +104,16 @@ describe("content-pane parity (Phase 3): click the surface, not a control", () =
     s.dispatch(parseCommand("agent dev50.driver"));
     expect(s.get().viewTab).toBe("table");
   });
+
+  it("PageDown scrolls content without moving the Explorer selection", () => {
+    const s = fresh("t");
+    const selected = s.get().selection;
+    const pageDown = decodeInput("\x1b[6~")[0];
+    if (!pageDown || pageDown.type !== "key" || !("action" in pageDown)) throw new Error("PageDown was not decoded");
+    s.dispatch(pageDown.action);
+    expect(s.get().contentOffset).toBe(10);
+    expect(s.get().selection).toBe(selected);
+  });
 });
 
 describe("rig-stream footer (FR-10): ambient, toggleable, never a view", () => {

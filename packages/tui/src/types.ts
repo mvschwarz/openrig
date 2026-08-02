@@ -67,6 +67,11 @@ export interface AgentSpecResources {
   subagents: string[];
 }
 
+export interface SpecGraphData {
+  nodes: Array<{ id: string; label: string; pod?: string; runtime: string; kind: "agent" | "infrastructure" }>;
+  edges: Array<{ source: string; target: string; kind: string }>;
+}
+
 export interface SpecEntry {
   name: string;
   kind: SpecKind;
@@ -91,6 +96,8 @@ export interface SpecEntry {
   format?: "pod_aware" | "legacy";
   pods?: RigSpecPod[];
   edges?: RigSpecEdge[];
+  graph?: SpecGraphData;
+  raw?: string;
   legacyNodes?: Array<{ id: string; runtime: string; role?: string; model?: string }>;
 }
 
@@ -132,7 +139,7 @@ export interface DrillSegment {
   name: string;
 }
 
-export type ViewTab = "table" | "overview";
+export type ViewTab = "table" | "overview" | "topology" | "configuration" | "yaml";
 
 export type Action =
   | { type: "noop" }
@@ -144,6 +151,7 @@ export type Action =
   | { type: "drill"; resource: ResourceKind; name: string }
   | { type: "cross"; kind: "spec-of" | "running"; name: string }
   | { type: "tab"; tab: ViewTab }
+  | { type: "content-scroll"; delta: number }
   | { type: "footer"; on?: boolean }
   /** drive-structure daemon writes (BR-8/BR-9): executed by the driver loop
    * against EXISTING write contracts; never a view-state mutation */
@@ -169,6 +177,7 @@ export interface ViewState {
   selection: number;
   runningOf: string | null;
   viewTab: ViewTab;
+  contentOffset: number;
   /** the rig-stream footer is ambient: toggleable, never a navigable view (FR-10) */
   footerOn: boolean;
   /** transient result line from an executed act (daemon reply, verbatim) */
@@ -203,7 +212,7 @@ export interface Screen {
 
 export type InputEvent =
   | { type: "char"; ch: string }
-  | { type: "key"; key: "up" | "down" | "left" | "right"; action: Action }
+  | { type: "key"; key: "up" | "down" | "left" | "right" | "pageup" | "pagedown"; action: Action }
   | { type: "key"; key: "enter"; action: Action }
   | { type: "key"; key: "backspace" | "escape" }
   | { type: "mouse"; button: number; x: number; y: number };

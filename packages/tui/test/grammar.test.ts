@@ -19,6 +19,14 @@ describe("safe-core grammar (FR-1, §4.B)", () => {
     expect(parseCommand("/")).toEqual({ type: "filter", text: "" });
   });
 
+  it("drives rig-spec views and content scrolling through the command path", () => {
+    expect(parseCommand("tab topology")).toEqual({ type: "tab", tab: "topology" });
+    expect(parseCommand("tab configuration")).toEqual({ type: "tab", tab: "configuration" });
+    expect(parseCommand("tab yaml")).toEqual({ type: "tab", tab: "yaml" });
+    expect(parseCommand("scroll down")).toEqual({ type: "content-scroll", delta: 10 });
+    expect(parseCommand("scroll up")).toEqual({ type: "content-scroll", delta: -10 });
+  });
+
   it("parses <resource> <name> drill for known resource kinds", () => {
     expect(parseCommand("rig openrig-build")).toEqual({ type: "drill", resource: "rig", name: "openrig-build" });
     expect(parseCommand("agent dev50.driver")).toEqual({ type: "drill", resource: "agent", name: "dev50.driver" });

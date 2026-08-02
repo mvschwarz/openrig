@@ -12,6 +12,7 @@
 //   - host/rig-down composes BESIDE the items (hostsDown), never into them.
 //   - A failed read leaves its portion honest-empty and records a NAMED error.
 import { DaemonClient } from "./daemon-client.js";
+import { parse as parseYaml } from "yaml";
 import type { AgentRow, FleetSnapshot, HostNode, NeedsItem, PodNode, SpecEntry } from "./types.js";
 
 // Narrow read-shapes: just the served fields this module consumes (names match
@@ -59,6 +60,7 @@ interface AgentSpecReviewRead {
   profiles?: Array<{ name: string }>;
   resources?: { skills?: string[]; guidance?: string[]; plugins?: string[]; subagents?: string[] };
   startup?: { files?: Array<{ path: string; required: boolean }> };
+  raw?: string;
 }
 interface RigSpecReviewRead {
   sourceState?: "draft" | "file_preview" | "library_item";
@@ -73,6 +75,11 @@ interface RigSpecReviewRead {
   }>;
   nodes?: Array<{ id: string; runtime: string; role?: string; model?: string }>;
   edges?: Array<{ from: string; to: string; kind: string }>;
+  graph?: {
+    nodes: Array<{ id: string; label: string; pod?: string; runtime: string; kind: "agent" | "infrastructure" }>;
+    edges: Array<{ source: string; target: string; kind: string }>;
+  };
+  raw?: string;
 }
 type SpecLibraryReviewRead = AgentSpecReviewRead | RigSpecReviewRead;
 interface RigSpecJsonRead {
@@ -157,6 +164,27 @@ function agentNamespace(relativePath?: string): string | undefined {
   const candidates = agentsAt >= 0 ? dirs.slice(agentsAt + 1) : dirs;
   if (parts.at(-1) === "agent.yaml" || parts.at(-1) === "agent.yml") candidates.pop();
   return candidates.length > 0 ? candidates.join("/") : undefined;
+}
+
+function agentSpecTruth(raw?: string): { runtime?: string; skills: string[] } {
+  if (!raw) return { skills: [] };
+  try {
+    const spec = parseYaml(raw) as Record<string, unknown> | null;
+    if (!spec || typeof spec !== "object") return { skills: [] };
+    const defaults = spec["defaults"] as Record<string, unknown> | undefined;
+    const profiles = spec["profiles"] as Record<string, unknown> | undefined;
+    const profile = (profiles?.["default"] ?? Object.values(profiles ?? {})[0]) as Record<string, unknown> | undefined;
+    const uses = profile?.["uses"] as Record<string, unknown> | undefined;
+    const skills = Array.isArray(uses?.["skills"])
+      ? uses["skills"].filter((skill): skill is string => typeof skill === "string")
+      : [];
+    return {
+      ...(typeof defaults?.["runtime"] === "string" ? { runtime: defaults["runtime"] } : {}),
+      skills,
+    };
+  } catch {
+    return { skills: [] };
+  }
 }
 
 /** Cross-cycle memo for spec-detail reviews, keyed by `${id}@${updatedAt}` —
@@ -251,7 +279,6 @@ export async function hydrateSnapshot(client: DaemonClient, reviewCache?: SpecRe
   );
 
   const reviewedRigRefs = new Map<string, string[]>();
-  const runtimesByAgent = new Map<string, Set<string>>();
   for (const entry of library ?? []) {
     const detail = reviewed.get(entry.id);
     if (entry.kind !== "rig" || detail?.kind !== "rig" || detail.format !== "pod_aware") continue;
@@ -260,9 +287,6 @@ export async function hydrateSnapshot(client: DaemonClient, reviewCache?: SpecRe
       for (const member of pod.members) {
         const ref = resolveAgentRef(member.agentRef, agentSpecNames);
         refs.push(ref);
-        const runtimes = runtimesByAgent.get(ref) ?? new Set<string>();
-        runtimes.add(member.runtime);
-        runtimesByAgent.set(ref, runtimes);
       }
     }
     reviewedRigRefs.set(entry.name, refs);
@@ -298,12 +322,15 @@ export async function hydrateSnapshot(client: DaemonClient, reviewCache?: SpecRe
           agentRefs: allRigRefs.get(entry.name) ?? [],
           ...(pods ? { pods } : {}),
           ...(detail.edges ? { edges: detail.edges } : {}),
+          ...(detail.graph ? { graph: detail.graph } : {}),
+          ...(detail.raw ? { raw: detail.raw } : {}),
           ...(detail.kind === "rig" && detail.format === "legacy" && detail.nodes ? { legacyNodes: detail.nodes } : {}),
         };
       }
       if (entry.kind === "agent") {
         const usedByRigs = [...allRigRefs.entries()].filter(([, refs]) => refs.includes(entry.name)).map(([rig]) => rig);
         const review = detail?.kind === "agent" ? detail : null;
+        const truth = agentSpecTruth(review?.raw);
         const resources = {
           skills: review?.resources?.skills ?? [],
           guidance: review?.resources?.guidance ?? [],
@@ -316,13 +343,14 @@ export async function hydrateSnapshot(client: DaemonClient, reviewCache?: SpecRe
           usedByRigs,
           namespace: agentNamespace(entry.relativePath),
           sourceState: review?.sourceState,
-          runtime: [...(runtimesByAgent.get(entry.name) ?? [])].sort().join(", ") || undefined,
+          runtime: truth.runtime,
           ...(review?.description ? { description: review.description } : {}),
-          skills: resources.skills,
+          skills: truth.skills.length > 0 ? truth.skills : resources.skills,
           hasGuidance: resources.guidance.length > 0,
           profiles: review?.profiles?.map((profile) => profile.name) ?? [],
           resources,
           ...(review?.startup?.files ? { startupFiles: review.startup.files } : {}),
+          ...(review?.raw ? { raw: review.raw } : {}),
         };
       }
       return { ...base, kind: "workflow" };

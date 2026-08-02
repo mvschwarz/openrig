@@ -33,8 +33,14 @@ export function parseCommand(raw: string): Action {
     // FR-3 content-pane view tabs; command path keeps R1.2 (every view
     // reachable by a command). Same <verb> <name> shape as drill — not
     // the retired richer grammar.
-    if (name === "table" || name === "overview") return { type: "tab", tab: name };
-    return { type: "error", message: `unknown tab "${name}" — known: tab table, tab overview` };
+    if (["table", "overview", "topology", "configuration", "yaml"].includes(name))
+      return { type: "tab", tab: name as Extract<Action, { type: "tab" }>["tab"] };
+    return { type: "error", message: `unknown tab "${name}" — known: table, overview, topology, configuration, yaml` };
+  }
+
+  if (verb === "scroll") {
+    if (name === "up" || name === "down") return { type: "content-scroll", delta: name === "down" ? 10 : -10 };
+    return { type: "error", message: `unknown scroll direction "${name}" — known: scroll up, scroll down` };
   }
 
   if (verb === "spec-of" || verb === "running") {
