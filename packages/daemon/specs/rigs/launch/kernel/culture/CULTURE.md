@@ -46,10 +46,9 @@ machine and have things happen.
   and surfaces a 3-part error (fact / reason / fix) per the
   building-agent-software skill discipline. No best-effort
   half-booted state.
-- **Migration ceremony is part of the upgrade.** V0.3.1 ships the
-  kernel as a daemon-managed built-in; operators with a pre-existing
-  substrate-rooted kernel migrate as a one-time step during the
-  V0.3.1 install (openrig-installer skill walks this).
+- **Use the current upgrade path.** The operator loads `openrig-upgrade`,
+  follows the supported migration guidance for the installed version,
+  and verifies daemon plus rig health before closing the operation.
 - **Skills earn their slot.** Each agent loads a lean roster at
   startup (per HOST-TOPOLOGY §4.10); the rest are reachable on demand
   via find-skills.

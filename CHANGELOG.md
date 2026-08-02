@@ -169,7 +169,7 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 - **New verbs (capped at exactly three)**: `rig host add` (registry writes validated by the loader's own rules — no more hand-edited YAML for the standard path), `rig host list` (config pointers, never secret values), `rig host doctor <id>` (stepwise distinct errors: transport → remote rig binary → daemon health → identity) with `--posture product-factory-vps` — the ONE built-in security baseline, three-valued per item (UNKNOWN is never pass).
 - **Transport posture DECIDED + documented** (no behavior change): ssh carries pane ops (`send`/`capture`), http-bearer carries daemon REST (`up`/`down`/`launch`), `ps`/`whoami` follow the host's declared transport, fan-out is http-only; NO cross-transport fallback; NO http parity for send/capture in 0.4.4. Per-command table in cli-reference §Cross-host execution.
-- **Product-factory bootstrap**: `scripts/bootstrap-product-factory-vps.sh` + `docs/reference/product-factory-vps-runbook.md` (fresh Ubuntu VPS → factory-ready; smoke-tested VPS posture as encoded defaults; safe UI tunnel + restricted fail-closed reverse-path recipes).
+- **Product-factory bootstrap**: `scripts/bootstrap-product-factory-vps.sh` (fresh Ubuntu VPS → factory-ready; smoke-tested VPS posture as encoded defaults).
 
 ### BREAKING: `rig ps` consolidated all-rigs default + explicit disclosure ladder (OPR.0.4.4.21)
 

@@ -44,5 +44,5 @@ Watch upstream for:
 When upstream changes:
 
 1. Pull non-conflicting changes into the OpenRig copy.
-2. Do NOT re-introduce the multi-platform sections, SUBAGENT-STOP block, or Instruction Priority section unless founder direction reverses.
+2. Do NOT re-introduce the multi-platform sections, SUBAGENT-STOP block, or Instruction Priority section unless operator direction reverses.
 3. Bump `last_upstream_check` in `SKILL.md` frontmatter.

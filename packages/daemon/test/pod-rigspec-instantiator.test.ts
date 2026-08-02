@@ -317,6 +317,9 @@ profiles:
     expect(existsSync(assetPath)).toBe(true);
     const content = readFileSync(assetPath, "utf8");
     expect(content).toContain("thin bootstrap overlay");
+    expect(content).toContain("openrig-skills");
+    expect(content).toContain("~/.claude/skills/openrig-skills/SKILL.md");
+    expect(content).toContain("~/.agents/skills/openrig-skills/SKILL.md");
     expect(content).toContain("openrig-user");
     expect(content).toContain("current project or workspace");
     expect(content).toContain("usually sees it under `.claude/skills/openrig-user/SKILL.md`");

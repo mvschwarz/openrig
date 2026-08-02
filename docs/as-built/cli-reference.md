@@ -946,8 +946,8 @@ Semantics + safety wall (source: `packages/cli/src/lib/file-transfer.ts`):
 
 Usage: `rig host <add|list|doctor>` — the multi-host registry verbs (OPR.0.4.4.13; capped at
 exactly these three — no edit/remove/tunnel/bootstrap verbs; hand-editing `hosts.yaml` remains
-the path for exotica, and the factory bootstrap ships as script + runbook at
-`docs/reference/product-factory-vps-runbook.md`).
+the path for exotica, and the factory bootstrap ships as
+`scripts/bootstrap-product-factory-vps.sh`).
 
 - `add --id <id> --transport <ssh|http> [--target <t> --user <u> | --url <u> [--bearer-env <n>|--bearer-file <p>]] [--notes <text>] [--json]` — writes the entry validated by the registry loader's OWN rules (add-time errors are load-time errors, verbatim; duplicate ids refused; the http bearer pointer is optional — omit both for a tokenless daemon, never both). Rewrites `hosts.yaml` canonically (hand-authored comments are not preserved).
 - `list [--json]` — id/transport/target plus AUTH as a config POINTER (`env:NAME` / `file:PATH` / `ssh-key`); never a resolved secret value.

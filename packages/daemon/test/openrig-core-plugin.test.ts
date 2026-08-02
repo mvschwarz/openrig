@@ -18,25 +18,20 @@ import * as nodePath from "node:path";
 
 const PLUGIN_ROOT = nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core");
 
-// Skills shipping in openrig-core v0. Slice 29 deleted 4 skills that were
-// mis-imports or duplicates:
-//   - claude-compact-in-place (was a SPEC, not a skill)
-//   - session-compaction-and-restore (replaced by claude-compaction-restore)
-//   - permission-posture (internal-only doctrine, not operator-facing)
-//   - openrig-compaction-instructions (empty leftover from slice 27)
-// Remaining: 11 operator-facing skills; slice 32 added mission-slice-sop.
+// Tier A is the universal skill spine projected into every shipped/default
+// agent CWD. Role-specific skills stay on the spec-selected edge; host-only
+// skills do not enter the product edges.
 const EXPECTED_SKILLS = [
-  "agent-startup-and-context-ingestion",
   "claude-compaction-restore",
   "forming-an-openrig-mental-model",
+  "messaging-the-human",
   "mission-slice-sop",
-  "openrig-architect",
-  "openrig-cmux",
-  "openrig-herdr",
-  "openrig-operator",
+  "openrig-skills",
   "openrig-user",
   "queue-handoff",
   "seat-continuity-and-handover",
+  "session-compaction-and-restore",
+  "software-for-agents",
 ];
 
 describe("openrig-core plugin — vendored tree shape (HG-2.1)", () => {
@@ -117,7 +112,7 @@ describe("openrig-core plugin — skills (HG-2.1 skill content per agentskills.i
     expect(desc.length).toBeLessThanOrEqual(1024);
   });
 
-  it("ships exactly the 11 expected skills (no drift; no missing skills; slice 29 deleted 4, slice 32 added mission-slice-sop, OPR.0.4.6.02 added openrig-herdr/openrig-cmux)", () => {
+  it("ships exactly the Tier-A universal spine", () => {
     const skillsDir = nodePath.join(PLUGIN_ROOT, "skills");
     const actual = fs.readdirSync(skillsDir).filter((f) =>
       fs.statSync(nodePath.join(skillsDir, f)).isDirectory()
@@ -126,9 +121,42 @@ describe("openrig-core plugin — skills (HG-2.1 skill content per agentskills.i
     expect(actual.sort()).toEqual([...EXPECTED_SKILLS].sort());
   });
 
+  it("routes openrig-user readers through the global skill index", () => {
+    const userSkill = fs.readFileSync(
+      nodePath.join(PLUGIN_ROOT, "skills", "openrig-user", "SKILL.md"),
+      "utf-8",
+    );
+    expect(userSkill).toContain("openrig-skills");
+  });
+
+  it("gives a bare installed agent a resolvable one-hop path for every shipped skill", () => {
+    const index = fs.readFileSync(
+      nodePath.join(PLUGIN_ROOT, "skills", "openrig-skills", "SKILL.md"),
+      "utf-8",
+    );
+    const layout = JSON.parse(fs.readFileSync(
+      nodePath.resolve(import.meta.dirname, "../../../scripts/skill-edge-layout.generated.json"),
+      "utf-8",
+    )) as {
+      skills: Record<string, { edges: string[]; category: string | null }>;
+    };
+
+    expect(index).toContain("OPENRIG_CLI_ROOT");
+    for (const [skillId, placement] of Object.entries(layout.skills)) {
+      if (placement.edges.includes("plugin")) {
+        expect(index).toContain(`~/.openrig/plugins/openrig-core/skills/${skillId}/SKILL.md`);
+      } else {
+        expect(placement.category).not.toBeNull();
+        expect(index).toContain(
+          `\${OPENRIG_CLI_ROOT}/daemon/specs/agents/shared/skills/${placement.category}/${skillId}/SKILL.md`,
+        );
+      }
+    }
+  });
+
   it("routes rig authors through the advisory spec audit in the skill and startup guide", () => {
     const architectSkill = fs.readFileSync(
-      nodePath.join(PLUGIN_ROOT, "skills", "openrig-architect", "SKILL.md"),
+      nodePath.resolve(import.meta.dirname, "../specs/agents/shared/skills/core/openrig-architect/SKILL.md"),
       "utf-8",
     );
     const startupGuide = fs.readFileSync(

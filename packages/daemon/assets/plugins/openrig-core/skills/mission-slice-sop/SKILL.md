@@ -4,17 +4,6 @@ description: "Use when working a mission or slice: the SDLC flow (intent -> mini
 metadata:
   openrig:
     stage: shipped
-    last_verified: "2026-07-06"
-    distribution_scope: product-bound
-    source_evidence: |
-      The canonical product SDLC skill: it teaches the full SDLC flow the
-      Living Notes UI projects — the convention sections, the proof-contract
-      pairing, the two staged-approval locks, C1 proof drops, and the three
-      role contracts. Conventions SSOT: docs/reference/sdlc-conventions.md
-      in the repo; on an installed package the daemon materializes the same
-      document at $OPENRIG_HOME/reference/sdlc-conventions.md (default
-      ~/.openrig/reference/sdlc-conventions.md). The deterministic backstop
-      is the `rig scope audit` classifier.
     sibling_skills:
       - queue-handoff
       - seat-continuity-and-handover
@@ -23,7 +12,10 @@ metadata:
 
 # Mission/Slice SOP — how you work a mission & slice
 
-Use this skill to actually **do** mission/slice work the way OpenRig expects: author the convention sections, track on the canonical files, prove on them, hand off through them, and survive compaction on them. **Do the work described here; do not merely explain the protocol.** The deterministic backstop is `rig scope audit` — the audit classifier is the source of truth for adherence. The conventions themselves live in ONE document: **`docs/reference/sdlc-conventions.md`** in the repo, materialized by the daemon at **`$OPENRIG_HOME/reference/sdlc-conventions.md`** (default `~/.openrig/reference/sdlc-conventions.md`) on an installed package — this skill teaches the flow; the SSOT defines the formats.
+Use this skill to actually **do** mission/slice work the way OpenRig expects: author the convention sections, track on the canonical files, prove on them, hand off through them, and survive compaction on them. **Do the work described here; do not merely explain the protocol.** The deterministic backstop is `rig scope audit` — an **advisory, fail-open** check (it records and advises, never blocks a write; see Proportionality below), not an authority you serve. The conventions themselves live in ONE document: **`docs/reference/sdlc-conventions.md`** in the repo, materialized by the daemon at **`$OPENRIG_HOME/reference/sdlc-conventions.md`** (default `~/.openrig/reference/sdlc-conventions.md`) on an installed package — this skill teaches the flow; the SSOT defines the formats.
+
+## Proportionality — this SOP serves shipping; it is not the work itself
+The working product is the deliverable. This bookkeeping exists so the work survives handoff, compaction, and review — nothing more. **Match it to stakes:** OpenRig core = full ceremony; Studio Box / SDK / app slices = pragmatic — the mini-requirements may BE the whole PRD, and a couple of honest, LOOKed proof lines beat an elaborate contract. The `rig scope audit` backstop is **advisory and fail-open** (its own SSOT says so): it never blocks a build and is not a gate you clear before proceeding. If you're spending more time on the convention files or the audit than on the running product, stop and go build. Running the full apparatus on a small change is the letter-worship failure, not diligence.
 
 ## The SDLC flow (intent → proof)
 
@@ -38,7 +30,10 @@ intent → mini-requirements + proof contract → (UI slices: mockups)
 
 1. **Record intent** verbatim in the slice's `## Intent` section (`rig scope slice create` scaffolds it — every template kind).
 2. **Author the mini-requirements + proof contract**: `## Mini-requirements` is the concise one-glance tier (approval starts there); `## Proof contract` is a checkbox list of promised deliverables, each written as an observable outcome. UI deliverables name their planned mockup. The IMPLEMENTATION-PRD opens with the mini-requirements; everything between intent and proof is **elastic** — for a small slice the mini-requirements may BE the whole PRD.
+   - **PARSER CONTRACT (README AND IMPLEMENTATION-PRD, from first draft — a parser contract, not stylistic):** each doc carries a verbatim, **undecorated** `## Mini-requirements` heading with a **numbered list**, and a verbatim, **undecorated** `## Proof contract` heading whose checkbox (`- [ ]`) lines are **character-identical** across the two files. `rig scope audit` parses the PRD's `## Proof contract`; a prose rollup (e.g. `## Required proof …`) or any renamed/decorated heading trips **`proof_contract_missing_or_malformed`** and forces a post-lock format patch. Never rename or decorate these two headings, and keep the PRD's checkbox lines byte-for-byte equal to the README's.
+   - **REFERENCE-NOT-RESTATE (public / runnable examples — an honesty rail, from first draft):** any example that shows output or a value the referenced file/command **derives** — repo/runtime counts, current-state totals, hashes, timestamps — must **reference the source/derivation, omit the volatile value, or pin an explicitly stable fixture**; never hardcode the live count/state in a public or shipped doc. "Illustrative" derived output is a lie on a timer: `OK registry (2 manifests)` goes false the instant an entry lands. Write the invariant form (`OK registry (<N> manifests)`, N = entries in `registry.json`) or name the fixture instead of the momentary number. Restated derivable state in a public doc is a defect `rig scope audit` will not catch — the author owns it.
 3. **Plan-lock**: `rig scope slice approve <slice> --scope spec` — "the PRD matches the intent; THIS artifact set is what gets built." One daemon-side write: frontmatter stamp + append-only audit row.
+   - **PRE-PLAN-LOCK SELF-CHECK (advisory, not a gate):** before requesting `--scope spec`, it's worth running `rig scope audit --mission <mission> --json` and clearing any real **format** defect (e.g. `proof_contract_missing_or_malformed`) so the parser can read your proof contract — that's a genuine machine-parsing need, cheap to fix. But the audit is fail-open: findings do NOT block the lock or the build, and you do NOT need a zero-findings score to proceed. Fix what's real, skip what isn't, keep moving.
 4. **Build the locked set** — look at the mockups, not just the spec text.
 5. **QA visual compare**: for each deliverable, load the planned mockup, produce the real artifact in a test/demo environment, visually compare, and record the verdict.
 6. **Drop proof**: `rig proof add <slice> --artifact-type qa --verdict PASS --candidate-sha <tip> --money-evidence "…" --evidences "1,3" --media "walk.webm,panel.png" --self-check "…"` — the C1 header's closed sets validate at drop time; `--evidences` joins the drop to its proof-contract items and `--media` names the curated proof/-relative media the drop stands behind (that pairing + media set is what the UI's DELIVERED section renders).
@@ -52,7 +47,7 @@ intent → mini-requirements + proof contract → (UI slices: mockups)
 
 ## The canonical files (the operating surface)
 
-> The canonical files below are the **operating surface of the work** — you track on them, prove on them, hand off through them, and survive compaction on them. They are NOT side-artifacts to "maintain"; keeping them current *is* the work.
+> The canonical files below are the **operating surface of the work** — you track on them, prove on them, hand off through them, and survive compaction on them. Keep them current because that is what lets the work survive handoff, compaction, and review — but they **serve** the product, they are not the product. If you're polishing these files while the actual thing isn't shipping, you've inverted it: go build, then update them.
 
 - **README.md** (mission + slice) — the overview, OPENING with the convention sections (`## Intent` / `## Mini-requirements` / `## Proof contract`). The **mission README carries this SOP at its bottom.**
 - **IMPLEMENTATION-PRD.md** — the full PRD; opens with the mini-requirements; the `## Proof contract` here is what the UI's DELIVERED pairing joins proof against.
@@ -108,7 +103,7 @@ When you `rig capture` a pane, **greyed / ghost autocomplete suggestions are NOT
 
 ## Moment-of-truth checklist
 
-- **Starting a slice?** → intent recorded verbatim? mini-requirements + proof contract authored? mockups attached (UI slices)? plan locked (`--scope spec`)?
+- **Starting a slice?** → intent recorded verbatim? **PRD carries a verbatim numbered `## Mini-requirements` + a verbatim `## Proof contract` whose `- [ ]` lines are character-identical to the README's** (parser contract)? **no example restates derivable state** — counts/hashes/timestamps referenced, omitted, or pinned to a stable fixture, never hardcoded (reference-not-restate)? mockups attached (UI slices)? ran `rig scope audit` and fixed any real **format** defect so the parser reads the proof contract (advisory — a clean score is NOT required to lock)?
 - **Finishing a slice?** → every proof-contract item has curated evidence via `rig proof add … --evidences --media` (C1 drops — never only hand-placed files)? PROGRESS updated? MISSION_NOTES `§1` refreshed? proof locked (`--scope delivery`)? Handed off via queue?
 - **Committing?** → PROGRESS updated?
 - **Compacting?** → filed your state in MISSION_NOTES?

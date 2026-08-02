@@ -11,10 +11,10 @@ imports:
 profiles:
   default:
     uses:
-      skills: [openrig-user, openrig-operator, rig-lifecycle, systematic-debugging, verification-before-completion, openrig-installer]
+      skills: [rig-lifecycle, openrig-upgrade, systematic-debugging, verification-before-completion]
       guidance: [role]
       subagents: []
-      plugins: []
+      plugins: [shared:openrig-core]
       runtime_resources: [shared:claude-default-settings, shared:claude-default-mcp, shared:codex-default-config]
 
 resources:

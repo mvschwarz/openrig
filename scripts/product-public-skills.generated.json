@@ -6,7 +6,20 @@
     "clean": [
       "mission-slice-sop",
       "openrig-cmux",
-      "openrig-herdr"
+      "openrig-herdr",
+      "messaging-the-human",
+      "software-for-agents",
+      "openrig-skills",
+      "orchestration-team",
+      "development-team",
+      "review-team",
+      "office-hours",
+      "context-builder",
+      "requirements-writer",
+      "ui-mockup",
+      "plan-review",
+      "exec-summary",
+      "backlog-capture"
     ],
     "ship_after_fix": [
       "openrig-user",
@@ -14,7 +27,8 @@
       "queue-handoff",
       "seat-continuity-and-handover",
       "claude-compaction-restore",
-      "openrig-architect"
+      "openrig-architect",
+      "agent-startup-and-context-ingestion"
     ],
     "ship_misses_add": [
       "topology-mutation-and-seat-management",

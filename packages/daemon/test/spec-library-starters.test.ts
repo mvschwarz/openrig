@@ -48,6 +48,14 @@ const KERNEL_AGENT_SPECS = [
   "rigs/launch/kernel/agents/queue/worker/agent.yaml",
 ];
 
+const RUNNABLE_SHIPPED_AGENT_SPECS = [
+  ...AGENT_SPECS,
+  "agents/factory-rsi/dogfood/agent.yaml",
+  "agents/factory-rsi/release-manager/agent.yaml",
+  "agents/product-management/pm/agent.yaml",
+  ...KERNEL_AGENT_SPECS,
+];
+
 // bug-fix slice deprecation-check-keys-widening — IMPL-PRD §1.2 + §3.
 // Allowlist of removed/deprecated KEY paths the spec library MUST NOT
 // carry. Each entry uses dot-path notation with `*` as a profile-name
@@ -356,7 +364,7 @@ describe("Starter specs", () => {
   });
 
   it("openrig-user documents agent-managed apps and current cwd/env operation", () => {
-    const content = readFileSync(join(SPECS_ROOT, "agents/shared/skills/core/openrig-user/SKILL.md"), "utf-8");
+    const content = readFileSync(join(import.meta.dirname, "../assets/plugins/openrig-core/skills/openrig-user/SKILL.md"), "utf-8");
 
     expect(content).toContain("agent-managed app");
     expect(content).toContain("rig up secrets-manager");
@@ -382,7 +390,6 @@ describe("Starter specs", () => {
       "dogfood",
       "executing-plans",
       "frontend-design",
-      "openrig-user",
       "orchestration-team",
       "development-team",
       "review-team",
@@ -400,6 +407,15 @@ describe("Starter specs", () => {
     }
     const deprecatedHaSkill = ["mental", "model", "ha"].join("-");
     expect(sharedSkills.map((entry) => entry.id)).not.toContain(deprecatedHaSkill);
+    expect(sharedSkills.map((entry) => entry.id)).not.toContain("openrig-operator");
+    expect(sharedSkills.map((entry) => entry.id)).not.toContain("openrig-user");
+    expect(sharedSkills.map((entry) => entry.id)).not.toContain("mission-slice-sop");
+    for (const skill of sharedSkills) {
+      expect(
+        existsSync(join(SPECS_ROOT, "agents/shared", skill.path, "SKILL.md")),
+        `missing shared skill resource ${skill.id} at ${skill.path}`,
+      ).toBe(true);
+    }
 
     const sharedRuntimeResources = (sharedResources["runtime_resources"] as Array<{ id: string; path: string; type: string }>) ?? [];
     for (const resourceId of ["claude-default-settings", "claude-default-mcp", "codex-default-config"]) {
@@ -438,39 +454,39 @@ describe("Starter specs", () => {
     const expectedAgentSkills = new Map<string, string[]>([
       [
         "agents/conveyor/lead/agent.yaml",
-        ["openrig-user", "orchestration-team", "backlog-capture", "writing-plans", "executing-plans", "verification-before-completion", "brainstorming"],
+        ["orchestration-team", "backlog-capture", "writing-plans", "executing-plans", "verification-before-completion", "brainstorming"],
       ],
       [
         "agents/conveyor/planner/agent.yaml",
-        ["openrig-user", "requirements-writer", "context-builder", "writing-plans", "verification-before-completion"],
+        ["requirements-writer", "context-builder", "writing-plans", "verification-before-completion"],
       ],
       [
         "agents/conveyor/builder/agent.yaml",
-        ["openrig-user", "development-team", "test-driven-development", "systematic-debugging", "executing-plans", "verification-before-completion"],
+        ["development-team", "test-driven-development", "systematic-debugging", "executing-plans", "verification-before-completion"],
       ],
       [
         "agents/conveyor/reviewer/agent.yaml",
-        ["openrig-user", "review-team", "plan-review", "systematic-debugging", "verification-before-completion"],
+        ["review-team", "plan-review", "systematic-debugging", "verification-before-completion"],
       ],
       [
         "agents/design/product-designer/agent.yaml",
-        ["using-superpowers", "openrig-user", "development-team", "frontend-design", "brainstorming", "writing-plans", "verification-before-completion"],
+        ["using-superpowers", "development-team", "frontend-design", "brainstorming", "writing-plans", "verification-before-completion"],
       ],
       [
         "agents/development/implementer/agent.yaml",
-        ["using-superpowers", "openrig-user", "development-team", "test-driven-development", "systematic-debugging", "writing-plans", "executing-plans", "verification-before-completion"],
+        ["using-superpowers", "development-team", "test-driven-development", "systematic-debugging", "writing-plans", "executing-plans", "verification-before-completion"],
       ],
       [
         "agents/development/qa/agent.yaml",
-        ["using-superpowers", "openrig-user", "development-team", "systematic-debugging", "agent-browser", "dogfood", "writing-plans", "executing-plans", "verification-before-completion"],
+        ["using-superpowers", "development-team", "systematic-debugging", "agent-browser", "dogfood", "writing-plans", "executing-plans", "verification-before-completion"],
       ],
       [
         "agents/review/independent-reviewer/agent.yaml",
-        ["using-superpowers", "openrig-user", "review-team", "systematic-debugging", "brainstorming", "writing-plans", "verification-before-completion"],
+        ["using-superpowers", "review-team", "systematic-debugging", "brainstorming", "writing-plans", "verification-before-completion"],
       ],
       [
         "agents/orchestration/orchestrator/agent.yaml",
-        ["using-superpowers", "openrig-user", "orchestration-team", "systematic-debugging", "brainstorming", "writing-plans", "executing-plans", "verification-before-completion"],
+        ["using-superpowers", "orchestration-team", "systematic-debugging", "brainstorming", "writing-plans", "executing-plans", "verification-before-completion"],
       ],
     ]);
 
@@ -484,10 +500,46 @@ describe("Starter specs", () => {
       const defaultProfile = profiles["default"] ?? {};
       const uses = (defaultProfile["uses"] as Record<string, unknown> | undefined) ?? {};
       const skills = (uses["skills"] as string[] | undefined) ?? [];
-      for (const skillId of expectedAgentSkills.get(file) ?? ["openrig-user"]) {
+      for (const skillId of expectedAgentSkills.get(file) ?? []) {
         expect(skills).toContain(skillId);
       }
     }
+  });
+
+  it("declares the vendored openrig-core plugin once in the shared resource pool", () => {
+    const shared = parseYaml(
+      readFileSync(join(SPECS_ROOT, SHARED_AGENT_SPEC), "utf-8"),
+    ) as {
+      resources?: {
+        plugins?: Array<{
+          id: string;
+          source: { kind: string; path: string };
+        }>;
+      };
+    };
+
+    expect(shared.resources?.plugins ?? []).toContainEqual({
+      id: "openrig-core",
+      source: {
+        kind: "local",
+        path: "~/.openrig/plugins/openrig-core",
+      },
+    });
+  });
+
+  it("all 18 runnable shipped default profiles explicitly select openrig-core", () => {
+    expect(RUNNABLE_SHIPPED_AGENT_SPECS).toHaveLength(18);
+
+    const missing = RUNNABLE_SHIPPED_AGENT_SPECS.filter((file) => {
+      const raw = parseYaml(readFileSync(join(SPECS_ROOT, file), "utf-8")) as {
+        profiles?: Record<string, { uses?: { plugins?: string[] } }>;
+      };
+      return !raw.profiles?.default?.uses?.plugins?.includes(
+        "shared:openrig-core",
+      );
+    });
+
+    expect(missing).toEqual([]);
   });
 
   it("starter role guidance explicitly names every packaged default skill it expects agents to load", () => {

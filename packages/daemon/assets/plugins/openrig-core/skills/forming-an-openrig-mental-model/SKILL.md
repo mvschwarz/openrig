@@ -1,22 +1,27 @@
 ---
 name: forming-an-openrig-mental-model
 description: |
-  Use when an agent is newly oriented to OpenRig and needs to form an accurate mental model of the system fast — what rigs are, how skills load, what the topology shapes mean, what the product loop is. For agents booting into a new seat or returning to OpenRig work after time away. NOT for HA-pair compaction recovery (that's the pair-of-seats coordination pattern; orientation is a solo task) or for specific operational procedures.
+  Use when an agent is newly oriented to OpenRig and needs to form an accurate mental model of the system fast — what rigs are, how skills load, what the topology shapes mean, what the product loop is. For agents booting into a new seat or returning to OpenRig work after time away. NOT for compaction recovery (use claude-compaction-restore for that) or for specific operational procedures.
 metadata:
+  cli_surfaces_referenced:
+    - ask
+    - capture
+    - down
+    - ps
+    - send
+    - transcript
+    - up
+    - whoami
   openrig:
     stage: factory-approved
-    last_verified: "2026-05-04"
-    distribution_scope: product-bound
-    source_evidence: |
-      Authored 2026-05-02 in response to founder-observed pattern: agents
-      Distinct from HA-pair mental-model preservation (which is a
-      pair-of-seats coordination pattern). This skill serves the legitimate
-      need to form an initial mental model of OpenRig as a system.
     sibling_skills:
       - openrig-user
       - openrig-operator
+      - openrig-builder
       - openrig-architect
-    transfer_test: pending
+      - openrig-upgrade
+      - ai-dev-workflows
+      - software-for-agents
 ---
 
 # Forming an OpenRig Mental Model
@@ -165,13 +170,14 @@ cost when you reach for one.
 | Home | Purpose |
 |---|---|
 | `<rig-cwd>/.claude/skills/`, `<rig-cwd>/.agents/skills/` | Where the harness actually loads from. Populated by `rig up`. |
-| `~/.claude/skills/`, `~/.agents/skills/` | Your personal/global skills + the OpenRig bootstrap set (openrig-user, openrig-operator, openrig-architect, forming-an-openrig-mental-model, plus the rest of the openrig-core plugin skills). |
-| openrig-core plugin skills | Product built-in skills that ship with OpenRig (installed via the openrig-core plugin). |
-| `~/.openrig/skills/` | Runtime install home for OpenRig-shipped skills. |
+| `~/.claude/skills/`, `~/.agents/skills/` | Your personal / user-installed global skills, loaded by the harness itself (independent of OpenRig). NOT where OpenRig's own bootstrap skills live — those ship in the product (below) and project into the cwd `.claude/skills/` at `rig up`. |
+| `openrig/packages/daemon/{specs/agents/shared/skills,assets/plugins/*/skills}/` | Product skills that ship with OpenRig — the spec pool + the bundled plugin assets (openrig-user, openrig-operator, openrig-architect, forming-an-openrig-mental-model, queue-handoff, claude-compaction-restore, …). |
+| `~/.openrig/skills/` | Future runtime install home for OpenRig-shipped skills. |
+| the skills authoring workspace | Skill authoring source (not runtime-loaded). |
 
-The harness only sees the first two. Other locations are shipping and
-source-of-truth — they reach the harness via projection or NPM install,
-not directly.
+The harness only sees the first two. Other locations are authoring,
+shipping, and source-of-truth — they reach the harness via projection or
+NPM install, not directly.
 
 ---
 
@@ -230,10 +236,8 @@ If you're booting into a new seat in an OpenRig rig:
    that tells you when to reach for it.
 5. **Check your peers** — `rig capture <peer-session>` to see what they're
    doing.
-6. **Recover from durable artifacts** if you're returning to an in-flight
-   workstream: read the restore map, current `MISSION_NOTES.md`, and owned queue
-   items. Use `rig transcript <session> --tail 100` only as a secondary check;
-   little or no output does not prove the workstream was quiet.
+6. **Check the transcripts** if you're returning to an in-flight workstream
+   — `rig transcript <session> --tail 100` for recent context.
 7. **Ask `rig ask <rig> "<question>"`** if you need cross-cutting evidence
    from the rig's transcripts and chat.
 
@@ -252,19 +256,25 @@ For real depth, these are the load-bearing canonical docs:
 | `openrig/docs/reference/rig-spec.md` | The RigSpec YAML format — pods, members, edges, all fields |
 | `openrig/docs/reference/agent-spec.md` | The AgentSpec YAML format — resources, profiles, imports |
 | `openrig/docs/reference/agent-startup-guide.md` | The 7-layer startup layering model; delivery hints |
+| the product taxonomy | Canonical vocabulary (read literally) |
+| `substrate/shared-docs/HOST-TOPOLOGY.md` | Host-level doctrine — rig classes, context patterns, lifecycle, authoring SOP |
+| `substrate/shared-docs/SUBSTRATE-CONVENTIONS.md` | Filesystem layout doctrine for substrate |
 | `https://agentskills.io/specification` | The cross-runtime skill standard |
 
-If your team maintains a host-level topology doc (rig classes, context
-patterns, authoring SOPs), read its rig-authoring section before
-touching YAML for high-stakes rigs.
+If you're going to be authoring rigs, read `HOST-TOPOLOGY.md` §7 (the
+authoring SOP) before touching YAML.
+
+If you're going to be doing skill work, read
+the factory-design reference and the
+`operating-the-skill-library` skill that lives in
+`substrate/shared-docs/rigs/skill-library/agents/shared/skills/`.
 
 ---
 
 ## What this skill is NOT for
 
-- **HA pair compaction recovery.** Forming an initial mental model is a
-  solo orientation task — different from the pair-of-seats coordination
-  pattern that preserves a shared mental model across compactions.
+- **Compaction recovery.** That's `claude-compaction-restore`. Different
+  skill, different scenario.
 - **Operating a specific rig.** Specific rigs have their own DESIGN.md and
   CULTURE.md. Read those.
 - **Authoring a new rig.** Use the `openrig-architect` skill for that.
@@ -287,7 +297,7 @@ that fit your actual work.
 | "I should manage Codex's compaction the way I manage Claude's" | No. Codex auto-compacts cleanly; Claude doesn't. Different runtimes, different lifecycles. |
 | "MEMORY.md auto-loads, so I don't need to read it" | Maybe. Sometimes MEMORY.md auto-loads via system reminders; sometimes not. Don't assume. If your work touches the topics it covers, read it explicitly. |
 | "Skills inherit from a parent or compose like classes" | No. Skills are flat artifacts; composition happens via AgentSpec `profile.uses.skills` (structural) or soft cross-references in skill bodies (advisory). Not via OO-style inheritance. |
-| "Any folder I keep skill files in is the canonical runtime path" | No. The harness only loads from `<rig-cwd>/.claude/skills/`, `<rig-cwd>/.agents/skills/`, and the runtime-installed plugin skills. Other folders are authoring or source-of-truth. |
+| "The substrate `shared-docs/skills/` folder is the canonical runtime path" | No. The harness doesn't read there. It's an authoring workspace. Runtime loads from `.claude/skills/`, `.agents/skills/`, and product built-in. |
 
 ---
 

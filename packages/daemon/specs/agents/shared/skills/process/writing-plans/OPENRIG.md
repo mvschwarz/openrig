@@ -47,6 +47,6 @@ Watch upstream for:
 When upstream changes:
 
 1. Pull non-conflicting changes into the OpenRig copy.
-2. Preserve the `docs/plans/` save path and the absence of the Scope Check + File Structure sections unless founder direction reverses.
+2. Preserve the `docs/plans/` save path and the absence of the Scope Check + File Structure sections unless operator direction reverses.
 3. Re-check that the subagent-driven-development pointer hasn't crept back in.
 4. Bump `last_upstream_check` in `SKILL.md` frontmatter.

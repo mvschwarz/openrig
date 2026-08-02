@@ -163,9 +163,54 @@ describe("control-plane JSON generator", () => {
     });
     expect(layout.skills["stale-only"]).toBeUndefined();
     expect(layout.skills.future).toEqual({
-      edges: ["plugin", "spec"],
+      edges: ["canonical", "plugin", "spec"],
       category: "process",
     });
+  });
+
+  it("projects spec overrides onto the canonical mirror edge", async () => {
+    const generator = await loadGenerator();
+    const root = tempRoot();
+    seedEdges(root);
+
+    const layout = await generator.extractSkillEdgeLayout({
+      repoRoot: root,
+      config: {
+        version: 0,
+        owner: "skills-architect@example",
+        edges: edgeConfig(),
+        extract_from_committed_trees: true,
+        forward_overrides: {
+          future: { edges: ["spec"], category: "process" },
+        },
+      },
+    });
+
+    expect(layout.skills.future).toEqual({
+      edges: ["canonical", "spec"],
+      category: "process",
+    });
+  });
+
+  it("removes an empty-edge override from the generated product layout", async () => {
+    const generator = await loadGenerator();
+    const root = tempRoot();
+    seedEdges(root);
+
+    const layout = await generator.extractSkillEdgeLayout({
+      repoRoot: root,
+      config: {
+        version: 0,
+        owner: "skills-architect@example",
+        edges: edgeConfig(),
+        extract_from_committed_trees: true,
+        forward_overrides: {
+          alpha: { edges: [], category: null },
+        },
+      },
+    });
+
+    expect(layout.skills.alpha).toBeUndefined();
   });
 
   it("rejects malformed forward overrides with the source path and reason", async () => {

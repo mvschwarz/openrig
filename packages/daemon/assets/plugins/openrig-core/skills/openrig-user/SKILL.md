@@ -8,9 +8,27 @@ description: Use when operating OpenRig with the `rig` CLI and you need the ship
 This is an as-built guide to the shipped `rig` CLI.
 Use current code and `rig ... --help` as ground truth if anything here ever conflicts with older planning docs.
 
+If you need a different shipped skill, open `openrig-skills` — the global index that routes to every shipped skill in one hop.
+
 This is not the config-layer or builder guide. Use the substrate control-plane guidance for `rigx`
 and experimental overlays. Use the OpenRig builder guidance when changing OpenRig behavior,
 doctrine, or release posture.
+
+
+## Coordination trust boundary
+
+Coordinate as openly as the trust boundary you actually control allows. Within a set of machines you
+own that already trust each other — they can reach each other's daemon URLs and the daemon itself
+requires no authentication — direct `rig send`, `rig capture`, and `rig queue` should just work.
+Don't invent bearer placeholders, allowlists, trust handshakes, or guest-reach restrictions the
+environment doesn't require.
+
+Do not add or defend a restriction without naming the protected asset, the actual adversary, the
+blocked attack path, and the concrete consequence. Missing capability is not protection — repair the
+route, registration, runtime posture, or product defect directly. Arbitrary boundaries create
+constraint-induced circumvention: under goal pressure, agents build shadow transports, alternate
+credentials, and weaker proof instead of the direct authorized path. Keep only explicitly stated
+external or irreversible boundaries — public push / PR / publish, and destruction of canonical data.
 
 ## Coordination primitives — when to use which
 
@@ -28,7 +46,7 @@ the receipt and move on.
 Example:
 
 ```bash
-rig send reviewer@acme-web "Heads up — filing the per-commit handoff on the search-filters slice at the current tip." --verify
+rig send guard@your-rig "Heads up — filing per-commit handoff on the rig-up paper-cut fix at tip 6b8673b6." --verify
 ```
 
 ### `rig queue create --source <X> --destination <Y> --tags <...> --body "<...>"` — durable work item
@@ -39,18 +57,19 @@ restarts. Tracked in the daemon SQLite schema. Surfaces in Project / queue views
 + in the destination seat's inbox. Tag with mission / slice / gate / checkpoint
 so future-you (and any peer) can find it.
 
-Body discipline: substantive bodies go through a temp-file pattern, not inline
-`--body` with raw backticks — `rig queue create` body parsing breaks on
-unescaped backticks and rejects flag-like tokens.
+Body discipline: substantive bodies go through **`--body-file <path>`** (or `-` for stdin) — the
+purpose-built, corruption-safe surface (it kills the backtick-shell-corruption class for multi-line
+bodies). Do NOT inline a backtick-heavy or multi-line body via `--body`: `rig queue create` body
+parsing breaks on unescaped backticks and rejects flag-like tokens.
 
 Example:
 
 ```bash
 rig queue create \
-  --source builder@acme-web \
-  --destination reviewer@acme-web \
-  --tags "mission:site-relaunch,slice:02-search-filters,gate:guard,handoff:per-commit,checkpoint:bug-1" \
-  --body "$(cat /tmp/per-commit-body.txt)"
+  --source driver-2@your-rig \
+  --destination redo-guard-2@your-rig \
+  --tags "mission:release,slice:rig-up-paper-cut-fix,gate:guard,handoff:per-commit,checkpoint:bug-1-bonus" \
+  --body-file /tmp/per-commit-body.txt
 ```
 
 ### `rig queue handoff <qitem-id> --to <next> ...` — hot-potato handoff
@@ -64,8 +83,8 @@ Example:
 
 ```bash
 rig queue handoff qitem-20260601012431-d78aa805 \
-  --to qa@acme-web \
-  --tags "mission:site-relaunch,slice:02-search-filters,gate:qa,handoff:adversarial-dogfood"
+  --to velocity-qa@your-rig \
+  --tags "mission:release,slice:rig-up-paper-cut-fix,gate:qa,handoff:adversarial-dogfood"
 ```
 
 ### §1b doctrine — turn ends by passing the ball
@@ -99,9 +118,9 @@ process does not require.
   recovery-only fallback; qitems written via `rigx queue` are invisible to
   daemon-backed reads and break fleet-wide routing discipline.
 - Inlining a multi-line / backtick-heavy body into `rig queue create --body`
-  → write the body to `/tmp/<descriptive-name>.txt` first, then
-  `--body "$(cat /tmp/<file>.txt)"`. The body parser does not tolerate raw
-  backticks or flag-like tokens inline.
+  → use `--body-file /tmp/<descriptive-name>.txt` (or `-` for stdin), the
+  corruption-safe surface. The body parser does not tolerate raw backticks or
+  flag-like tokens inline.
 
 ## Runtime-Gated Coordination Primitives
 
@@ -267,10 +286,14 @@ workflow spec.
 workflow instance + entry-step qitem. Inspect existing surface state with:
 
 ```bash
-rig workflow specs --json   # list registered specs (built-in + operator-authored)
-rig workflow list --json    # list active workflow instances
-rig workflow show <instanceId> --json
+rig workflow specs --json              # list registered specs (built-in + operator-authored)
+rig workflow list --json               # list active workflow instances
+rig workflow show <instanceId> --json  # inspect one instance
+rig workflow project <instanceId>      # ADVANCE an instance — projects the next-step packet
+rig workflow continue <instanceId>     # read-only inspector of an instance (does NOT advance it)
 ```
+
+*(Surface note — the current `rig workflow` command group registers **13** subcommands: `validate`, `instantiate`, `project`, `list`, `specs`, `show`, `trace`, `continue`, `run`, `watch`, `route`, `resume`, `status`. There is still no `create` verb — the spec YAML is authored on disk. `project` is the advancing verb (it projects the next-step packet); `continue` is a read-only inspector, NOT an advance — do not conflate them. The 13-verb set and the project-vs-continue semantics are verified against current product main `d37a08ad` (`packages/cli/src/commands/workflow.ts`, 13 registered `.command(...)` entries; the earlier "6-verb surface / continue-advances" claim here was stale). Verify individual subcommand flags with `rig workflow --help`.)*
 
 ## v0.3.x Starter, Workspace, And Plugin Surfaces
 
@@ -388,7 +411,7 @@ reconcile:
 
 ```bash
 rig seat clear-attention <session>
-rig seat clear-attention <session> --reason "operator attested: founder re-authed, confirmed live"
+rig seat clear-attention <session> --reason "operator attested: the operator re-authed, confirmed live"
 rig seat clear-attention <session> --json
 ```
 
@@ -435,47 +458,27 @@ honestly and the UI exposes a one-click open-missing affordance.
 
 v0.4.0 flips the five most frequently invoked read-commands from firehose-by-default to compact-by-default, and `rig queue list` adopts the docker / kubectl read-command grammar. **All defaults preserve breadth and capability — the firehose is one explicit flag away.**
 
-### `rig ps` — consolidated all-rigs default + the disclosure ladder (v0.4.4)
+### `rig ps` — current-rig default + compact-by-default + `-A`/`--all-rigs` + `--full`
 
 ```bash
-rig ps                      # ALL ACTIVE RIGS, one compact row each + rollup line + count line + ladder footer (default)
-rig ps --json               # bare array of ALL non-archived rigs (incl. stopped; existing keys + additive attentionCount)
-rig ps --rig <name>         # one rig's detail
-rig ps --nodes              # compact node inventory (current rig — session default, LOCAL only)
-rig ps --nodes --rig <name> # compact node inventory, named rig
-rig ps --nodes -A           # fleet node inventory, projected rows
-rig ps --nodes -A --full    # complete per-node records (the ONLY full fan-out; resumeToken VALUE retained here for downstream consumers)
+rig ps                      # CURRENT-RIG, all-states, compact rig summaries (default)
+rig ps --json               # compact JSON array (TL;DR per node: session, rig, activity, assigned/pending, resumeTokenPresent boolean)
+rig ps -A                   # all-rigs (fleet breadth; was the v0.3.4 default)
+rig ps --rig <name>         # explicit-rig (overrides current-rig default)
+rig ps --nodes              # compact node inventory (current rig)
+rig ps --nodes -A           # cross-rig node inventory (was v0.3.4 default)
+rig ps --nodes --full       # complete record (the v0.3.4 per-node default shape; resumeToken VALUE retained here for downstream consumers)
 rig ps --nodes --session <sess>  # narrow to one canonical session
-rig ps --include-archived   # archived history as rows (otherwise ONE count line)
 rig ps --active             # opt-in active-state filter (does NOT change the all-states default — ps surfaces topology/readiness, where stopped/recoverable/attention IS the actionable signal)
 ```
 
-**v0.4.4 consolidated default + disclosure ladder (OPR.0.4.4.21)**:
-- **The default is the fleet MAP**: every active rig as one O(rigs) compact row, with the host rollup ("N rigs · M seats · K need attention"), the archived/stopped count line, and the drill-ladder footer. The v0.4.0 current-rig default is RETIRED — it hid running rigs from the operator's field of view.
-- **`-A` has exactly ONE meaning**: the `--nodes` fleet widener. Bare `rig ps -A` errors (all-rigs IS the default; archived history stays behind `--include-archived`).
-- **The session-rig default applies ONLY to `--nodes`, and only locally.** Implicit scope defaults don't cross host boundaries: `rig ps --host <id> --nodes` requires an explicit `--rig` or `-A`; multi-host fan-out is rollup-only by default; the full explicit ladder (`--all-hosts --nodes -A`, `--full` for complete records) fans out per-node with hostId-stamped projected rows.
-- **STATED JSON contract**: default `--json` = bare array of ALL non-archived rigs INCLUDING stopped ones (scope-not-shape: existing keys preserved, additive `attentionCount`); only the human table folds stopped rigs into the count line.
-- **Resume-token security unchanged**: compact output never carries token material; `--full` retains it for consumers that legitimately need it.
+**v0.4.0 breadth + projection changes**:
+- **Default breadth is CURRENT-RIG** (derived from `OPENRIG_SESSION_NAME`'s `@<rig>` suffix), not all-rigs. `-A` / `--all-rigs` widens to fleet. Matches the `rig queue list -A` pattern.
+- **Per-node TL;DR projection (compact) is the default**; `--full` returns the raw byte-equivalent passthrough. Daemon-side `recoveryGuidance` relocated to a guidance-by-reference map (no longer duplicated per-node) — even `--full` benefits.
+- **All-states stays default** (different from `rig queue list` which defaults to active-only) — for `ps`, non-running states ARE often the actionable signal.
+- **Resume-token security**: `--full` JSON emits `resumeTokenPresent` (boolean) — the actual `resumeToken` value also remains in `--full` for downstream consumers that legitimately need it, but the compact default never carries it (an orch glance never accidentally leaks token material).
 
-**The casual status glance is just `rig ps`.** The old fleet firehose is the explicit last rung: `rig ps --nodes -A --full`. The ~77,000-token incident class stays closed (compact + O(rigs) default + explicit ladder).
-
-### `rig host` — the multi-host registry verbs (v0.4.4)
-
-```bash
-rig host add --id <id> --transport ssh --target <tailnet-alias> --user openrig
-rig host add --id <id> --transport http --url http://100.x.y.z:7433 --bearer-env MY_TOKEN
-rig host list                       # pointers only — never secret values
-rig host doctor <id>                # stepwise: transport -> rig binary -> daemon -> identity
-rig host doctor <id> --posture product-factory-vps [--public-addr <ip>]
-```
-
-Exactly three verbs (capped); the VPS factory bootstrap is script + runbook
-(`docs/reference/product-factory-vps-runbook.md`). **Transport posture is
-DECIDED and documented** (cli-reference §Cross-host execution): ssh = pane ops
-(`send`/`capture`), http = daemon REST (`up`/`down`/`launch`), `ps`/`whoami`
-follow the DECLARED transport; fan-out is http-only; no cross-transport
-fallback; no http parity for send/capture in 0.4.4. Posture/doctor UNKNOWN is
-never pass — each unknown carries the command that verifies it.
+**STOP using `rig ps --nodes --json` as a fleet-wide casual status check assuming the v0.3.4 shape.** The v0.4.0 default is CURRENT-RIG + compact; explicit `-A --full` is the fleet firehose. The ~77,000-token status-glance incident is closed twice over (compact + scope).
 
 ### `rig whoami` — compact-by-default + `--full` (`--verbose` alias)
 
@@ -503,7 +506,7 @@ rig queue list --source <s>          # sourced by <s>
 rig queue show <qitemId>             # full single item (kubectl describe)
 ```
 
-Four orthogonal axes (scope × history × field-breadth × encoding), all composable. **STOP using bare `rig queue list` as the cross-rig firehose.** Default is now active + compact + current-rig. The cross-rig + history + full-body firehose (the ~64,000-token bomb on this host) is opt-in via `-A -a --full`.
+Four orthogonal axes (scope × history × field-breadth × encoding), all composable. **STOP using bare `rig queue list` as the cross-rig firehose.** Default is now active + compact + current-rig. The cross-rig + history + full-body firehose (the ~64,000-token payload spike) is opt-in via `-A -a --full`.
 
 ### `rig restore-check` — summary + not-ready-only default + `--full`
 
@@ -535,16 +538,16 @@ This release closes the host-version-aged token-burn class: on this host the rea
 
 The interim `token-efficiency-boot-guardrail` pack (the CLI-command prohibitions on `rig queue list` unfiltered, `rig ps --nodes --json` unfiltered, `rig restore-check`, `rig context`, `rig whoami --json`) is a host-version workaround for the bloated defaults this release closes. **The CLI-command-prohibitions half retires when 0.4.0 lands on the host.** The pack's bounded-local-search rule + scope / over-flag discipline GRADUATE to a standing convention (`conventions/bounded-local-search-and-flag-scope`) and continue to apply host-independently.
 
-### `rig scope mission|slice progress` — deterministic progress updates (slice 33)
+### `rig scope mission|slice progress` — deterministic progress updates
 
 ```bash
-rig scope mission progress <mission> --status <state> --milestone <text>
-rig scope slice progress <slice-path> --status <state> --note <text>
+rig scope mission progress <mission> --add "<line>"   # append a progress line; --set replaces; --section <heading> (default Rail); --status active|done|blocked
+rig scope slice progress <slice-path> --add "<line>"  # same flags: --add / --set, --section <heading>, --status active|done|blocked
 ```
 
 Replaces hand-editing `PROGRESS.md` with markdown. Writes the canonical structure the OpenRig PROGRESS UI page reads. `rig scope mission create` + `rig scope slice create` now scaffold `PROGRESS.md` automatically per `conventions/scope-and-versioning/README.md`.
 
-### `rig scope mission|slice stage / verified / reconcile` — deterministic maturity vocabulary (slice 35)
+### `rig scope mission|slice stage / verified / repair` — deterministic maturity vocabulary
 
 ```bash
 rig scope slice stage <slice> <new-stage>             # wip / provisional / established / canonical / superseded / retired
@@ -554,40 +557,16 @@ rig scope mission stage <mission> <new-stage>         # same enum + rules at mis
 rig scope slice verified <slice> --against "<source>" # stamp `verified: <today> against <source>`; --against MANDATORY
 rig scope mission verified <mission> --against "<source>"
 
-rig scope slice reconcile <slice>                     # idempotent repair: backfill PROGRESS.md, conform id/stage/verified, repair ghosts
-rig scope mission reconcile <mission>                 # mission-tier idempotent repair
+rig scope slice repair <slice>                        # idempotent repair: backfill PROGRESS.md, conform id/stage/verified, repair ghosts
+rig scope mission repair <mission>                    # mission-tier idempotent repair
 
 rig scope slice show <slice>                          # derives read-time effective-reliability from (stage × verified)
                                                       # — stale-`verified` `canonical` reported as effectively `provisional`
 ```
 
-Composes with slice 33's `progress` + scaffolding to make `rig scope` the **deterministic enforcer** of `conventions/scope-and-versioning` §1 (dot-IDs) + §2 (maturity vocabulary). Agents update `stage` / `verified` / `id` through commands rather than hand-editing markdown and drifting. The `--against` MANDATORY rule on `verified` is the anti-stale keystone: bare timestamps are rejected because a bare timestamp is exactly what lets stale trackers lie while looking fresh. **STOP hand-editing the `stage` / `verified` / `id` fields in scope frontmatter; use the new verbs.** Existing missions / slices with `id:null` ghosts or missing `PROGRESS.md` are repaired idempotently via `reconcile`.
+Composes with the `progress` command + scaffolding to make `rig scope` the **deterministic enforcer** of `conventions/scope-and-versioning` §1 (dot-IDs) + §2 (maturity vocabulary). Agents update `stage` / `verified` / `id` through commands rather than hand-editing markdown and drifting. The `--against` MANDATORY rule on `verified` is the anti-stale keystone: bare timestamps are rejected because a bare timestamp is exactly what lets stale trackers lie while looking fresh. **STOP hand-editing the `stage` / `verified` / `id` fields in scope frontmatter; use the new verbs.** Existing missions / slices with `id:null` ghosts or missing `PROGRESS.md` are repaired idempotently via `repair`.
 
-### The SDLC control plane — convention sections, the two locks, `rig proof` (v0.4.4)
-
-The Living Notes UI is a plain projection of well-formed on-disk markdown. The conventions live in ONE shipped document — **`docs/reference/sdlc-conventions.md`** in the repo, materialized by the daemon at **`$OPENRIG_HOME/reference/sdlc-conventions.md`** (default `~/.openrig/reference/sdlc-conventions.md`) on an installed package — and the operating procedure is the **`mission-slice-sop`** skill. The command surface:
-
-```bash
-rig scope slice create <mission> <slug> [--template <kind>]   # scaffolds ## Intent / ## Mini-requirements / ## Proof contract
-                                                              # + proof/ + PROOF.md + IMPLEMENTATION-PRD.md — EVERY template kind
-
-rig scope slice approve <slice> --scope spec                  # PLAN-LOCK: "the PRD matches my intent; this set gets built"
-rig scope slice approve <slice> --scope delivery              # PROOF-LOCK: the terminal sign-off (default scope; fires the freeze)
-
-rig proof add <slice> --artifact-type qa --verdict PASS \
-  --candidate-sha <tip> --money-evidence "<one line>" \
-  --evidences "1,3" --media "walk.webm" \
-  --self-check "<looked at it>"                               # C1 proof drop into proof/; --evidences joins the drop to its
-                                                              # proof-contract items and --media names the curated proof/-relative
-                                                              # media it stands behind (what the DELIVERED section pairs + renders)
-
-rig scope audit <mission>                                     # deterministic backstop — flags missing sections / malformed
-                                                              # proof contract / invalid C1 headers; ADVISORY, never blocks
-```
-
-The flow: intent → mini-requirements + proof contract (→ mockups for UI slices) → plan-lock → build the locked set → QA visual compare → `rig proof` drops → proof-lock. Approval is freeze/sign-off, **never** proven-green — proven-green requires recorded C1 verdicts.
-
-### `rig skill audit` — skill cascade provenance (slice 10)
+### `rig skill audit` — skill cascade provenance
 
 ```bash
 rig skill audit                  # human report of findings
@@ -596,11 +575,45 @@ rig skill audit --severity warn  # stale + mirror-drift only
 rig skill audit --rig <name>     # narrow to embedded skill copies for one rig
 ```
 
-Read-only audit of the skill cascade. Detects `missing` / `stale` / `self-referential` / `invalid-date` / `mirror-drift` across the canonical `openrig-work/skills/` → product mirror → hub cwd → installed plugin chain. Findings route back to the lifecycle for shaped propagation runs. **False-green prevention**: when audit evidence is unavailable, the CLI emits `unable-to-audit` with exit code `2` rather than reporting `clean`.
+Read-only audit of the skill cascade. Detects `missing` / `stale` / `self-referential` / `invalid-date` / `mirror-drift` across the canonical skills workspace → product mirror → hub cwd → installed plugin chain. Findings route back to the lifecycle for shaped propagation runs. **False-green prevention**: when audit evidence is unavailable, the CLI emits `unable-to-audit` with exit code `2` rather than reporting `clean`.
 
-### `rig seat clear-attention` — extended to derived projection staleness (slice 16)
+### `rig seat clear-attention` — extended to derived projection staleness
 
 v0.3.4 shipped `clear-attention` gating on `session.startupStatus` only. v0.4.0 extends the verb to also reach **restoreOutcome-derived** attention (seat is `startupStatus=ready` + `sessionStatus=running` but carries `restoreOutcome=failed` / `continuityOutcome=failed`). Same evidence-gated audit row applies; the `--reason <text>` operator-attestation override carries the runtime / cwd-uncertainty disclosure honestly.
+
+### Native Codex session id capture
+
+Codex seats can now record the real native session id from the Codex
+`SessionStart` hook instead of relying on scrape-shaped identity. The proof
+lane for v0.4.0 matched the same id across the hook payload, rollout log, and
+SQLite. Treat hook-sourced ids as stronger resume/identity evidence than
+terminal scraping when present.
+
+Managed-seat hook trust is a 0.4.1 carry: the v0.4.0 surface proves native
+capture and hook-trust constraints, but do not assume every managed Codex seat
+has already migrated from scrape-backed to hook-sourced ids.
+
+### Codex resume preserves approval posture
+
+Resuming a Codex seat preserves the launching seat's approval/sandbox posture
+and profile flags. Product-emitted resume commands carry the posture flags
+instead of silently falling back to implicit-deny or an unrelated profile.
+
+Do not "fix" a resumed Codex seat by relaunching it with broader approvals
+unless the operator explicitly grants a bounded window. Verify the seat's
+active posture first, and preserve it when composing recovery commands.
+
+### `rig seat set-resume-token --token-stdin`
+
+```bash
+printf '%s' "$RESUME_TOKEN" | rig seat set-resume-token <session> --token-stdin
+```
+
+Use this command to set or restore a seat resume token. It replaces direct
+SQLite edits, rejects unauthorized writes and bad/null token false-ready paths,
+records redacted audit/provenance, and keeps token material out of command
+arguments, stdout, logs, and normal status rows. Use stdin, not an inline flag,
+when passing token material.
 
 ## Core Loop
 
@@ -628,7 +641,7 @@ Typical operator loop:
 
 ```bash
 rig up secrets-manager --cwd /path/to/project
-rig ps --nodes --rig secrets-manager --json
+rig ps --nodes --json
 rig send vault-specialist@secrets-manager "Check Vault health and report back." --verify
 rig env status secrets-manager
 rig env logs secrets-manager
@@ -675,19 +688,18 @@ JSON form exposes `peersNote` directly for programmatic consumers.
 ## Inventory and Monitoring
 
 ```bash
-rig ps
-rig ps --json
-rig ps --nodes
-rig ps --nodes --rig <name> --json
-rig ps --nodes -A --json
-rig ps --nodes -A --full --json
+rig ps                      # CURRENT-RIG, compact rig summaries (v0.4.0 default)
+rig ps --nodes              # compact node inventory (current rig)
+rig ps -A                   # all-rigs breadth (was the pre-0.4.0 default)
+rig ps --nodes --full       # complete per-node record (the firehose — opt-in)
+rig ps --nodes --json       # compact JSON node inventory (add --full for the full record)
 ```
 
-Use `rig ps --nodes --rig <name> --json` for one rig's node inventory, or `rig ps --nodes -A --json` for fleet-wide projected node inventory. Use `--full` only when a downstream consumer truly needs complete per-node records. The node inventory surface carries:
+**v0.4.0 flipped these to compact-by-default — see the `rig ps` compact-defaults section above; STOP using bare `rig ps --nodes --json` as a fleet-wide firehose (the ~77k-token status-glance incident).** The compact `rig ps --nodes` node inventory (add `--full` only when you need the complete record, `-A` for cross-rig breadth) carries, per node:
 - session name
 - runtime
 - session/startup status
-- restore outcome
+- restore outcome (compact: `resumeTokenPresent` boolean; the token VALUE is in `--full`)
 - attach/resume commands
 - latest error
 
@@ -719,13 +731,25 @@ rig transcript <session> --json
 ```bash
 rig send <session> "message"
 rig send <session> "message" --verify
-rig send <session> "message" --force
+rig send <session> "message" --wait-for-idle <seconds>
+rig send <session> "message" --raw
+rig send <session> "message" --dangerously-interact --reason "<why>"
+rig send <session> "message" --host <id>
 rig send <session> "message" --json
 ```
 
-Use `--verify` when you want delivery evidence. Use `--force` only when you intentionally want to bypass activity-risk checks.
+**The send-guard (v0.4.0) — the default is SAFE.** A default `rig send` is guarded: it will NOT submit into an interactive prompt / permission block on the target pane (the footgun that prematurely shipped 0.4.0). Flags:
+- `--verify` — delivery evidence.
+- `--force` — **a back-compat no-op on the send DECISION**: it never bypasses the interactive-prompt/permission guard and never changes whether a message is delivered (a mid-task/busy pane already sends-with-advisory by default). *(It does NOT "bypass activity-risk checks" — that earlier teaching is retired.)* It is **not fully inert**, though — it is still parsed solely to be **rejected in combination with `--wait-for-idle`**: `rig send … --force --wait-for-idle <n>` prints `--wait-for-idle cannot be combined with --force`, exits 1, and sends nothing. So do not read "no-op" as "`--force --wait-for-idle` is harmless"; that pairing errors. *(Verified against current product main `d37a08ad`: the guard-bypass no-op is declared at `send.ts` and confirmed by runtime capture — a plain `--force` send delivers through the ordinary path; the `--wait-for-idle` rejection is enforced at `send.ts`, `routes/transport.ts`, and `session-transport.ts`, and confirmed by runtime capture — exit 1, nothing sent.)*
+- `--wait-for-idle <seconds>` — wait until the target is explicitly idle before sending. **Cannot be combined with `--force`** (that pairing is rejected: exit 1, nothing sent).
+- `--raw` — send exact text/keystrokes without the From/To messaging envelope (still guarded against interactive prompts).
+- `--dangerously-interact --reason "<why>"` — the ONLY override of the prompt/permission guard: deliberately drive an interactive prompt/permission block (implies `--raw`, requires `--reason`, audit-logged).
+- `--host <id>` — send on a remote host declared in `~/.openrig/hosts.yaml` (ssh hosts shell out; http hosts go CLI-direct to the remote daemon).
+- `--from <session>` — originating session for the envelope sender/actor (provenance; defaults to `$OPENRIG_SESSION_NAME`, and is plumbed through cross-host sends so the remote envelope names the origin, not the relay).
 
-As of v0.3.3 (slice 17), content beginning with `--` or `-` is safe:
+> **Durable work goes to the QUEUE, not `send`.** `rig send` is an *ephemeral* message to a pane — it can be missed, and its delivery status is pane-render, not receipt. If you are **assigning work, or the message is important enough that losing it would be a real bummer**, use `rig queue` (below): it's durable, owned, tracked, and survives compaction and restart. Reach for `send` for a quick conversational nudge; reach for the **queue** for anything that must not get lost. Do not default to `send` for work — that's the most common mistake.
+
+As of v0.3.3, content beginning with `--` or `-` is safe:
 `rig send <session> "content starting with -- or - is now safe"` delivers
 literally. The daemon's `send_text` path carries an explicit `--`
 end-of-options sentinel so tmux no longer parses dash-prefixed content
@@ -774,7 +798,17 @@ rig broadcast "message"
 rig broadcast --rig <name> "message" --json
 ```
 
-Without `--rig` or `--pod`, broadcast targets all running sessions.
+**Use `rig broadcast` sparingly — prefer `rig send` fan-out.** Without `--rig` or `--pod`, broadcast targets
+**every running session across ALL rigs** (plus attached external_cli nodes) — the fastest way to cause a
+broadcast storm. Reserve `rig broadcast` for small rigs or a genuine all-hands emergency. For the normal
+"message several seats at once" case, use `rig send`, which scopes the fan-out and keeps the messaging
+envelope, the delivery/interactive-prompt guards, and per-recipient results:
+
+```bash
+rig send --to dev-impl@my-rig,dev-qa@my-rig "message to specific seats"   # named seats (comma-list or repeat --to)
+rig send --pod dev "message to one pod"                                    # scoped fan-out
+rig send --rig my-rig "message to one rig"                                 # scoped fan-out
+```
 
 ### Chatroom
 
@@ -792,6 +826,27 @@ rig chatroom watch <rig> [--tmux]
 - `history` — retrieve with composable filters (sender, since, after, topic)
 - `wait` — block until new matching messages arrive (polls history, times out honestly)
 - `clear` — delete all messages for the rig (destructive, rig-scoped)
+
+## See something, say something
+
+OpenRig has an **observation stream** — the fleet's zero-friction institutional memory, mined for
+real product improvements. When you notice **anything worth externalizing**, say something and keep
+working:
+
+- a **bug**, a rough edge, or something that needs fixing
+- a **feature idea** or an improvement
+- something that **worked really well** — a technique, tool, or pattern worth spreading
+- an **observation**, positive or negative feedback, or something genuinely cool, productive, or funny
+
+```bash
+rig stream emit --source <your-session> --body "what you noticed"
+```
+
+That's the whole reflex. **Don't** decide where it goes or who it's for — the intake router triages
+(destination/type/urgency/tags are optional hints — `--hint-type review|handoff|idea`,
+`--hint-urgency routine|urgent|critical`, `--hint-tags` — never required). One command, then carry
+on; the value is the habit, not the polish. **Don't overdo it, either:** stream real signal, not
+narration — a good observation beats ten noisy ones. It's a passing thought you externalize, not a chore.
 - `topic` — set a topic marker
 - `watch` — SSE or tmux-based live stream
 
@@ -821,6 +876,21 @@ Current shipped behavior:
 - returns insufficiency state and optional guidance
 
 This is an evidence/context command. It is not a hidden second-LLM call.
+
+### `rig auth` — agent auth-profile management (v0.4.1, product-native)
+
+Product-native switching of agent auth profiles from the CLI. The runtime is a **flag** (`--runtime <codex>`), not a command noun — never `rig codex-auth`.
+
+```bash
+rig auth status --runtime codex          # presence / mode / parseability / login-state (never prints token contents)
+rig auth list --runtime codex            # saved profiles
+rig auth save <profile> --runtime codex  # snapshot the auth FILE (mode-guarded), never echoes contents
+rig auth switch <profile> --runtime codex
+rig auth validate <profile> --runtime codex
+rig auth seats … --runtime codex         # seat -> profile registry (metadata only; NOT proof of a live account)
+```
+
+**Hard secret boundary:** no token value is ever printed, logged, queued, streamed, or committed; status/validate report presence/mode/login-state only; seat labels are metadata, not live-account proof. MVP is `--runtime codex`; other runtimes use the same surface with a different `--runtime`, never a parallel command.
 
 ## Lifecycle
 
@@ -1010,7 +1080,7 @@ rig whoami --json
 
 Notes:
 - for tmux-backed self-attach, `rig whoami --json` is the right verification
-- for raw/external self-attach, `rig ps --nodes --rig <rigId-or-name> --json` is currently the more reliable verification surface
+- for raw/external self-attach, `rig ps --nodes --json` is currently the more reliable verification surface
 - if the current shell is outside tmux, pass `--display-name <name>` when you want a stable human session label recorded
 
 ### Adopt a topology and bind live sessions
@@ -1077,13 +1147,13 @@ Verification loop:
 ```bash
 rig discover --json
 rig adopt <fragment.yaml> --bindings-file <bindings.yaml> --target-rig <rigId>
-rig ps --nodes --rig <target-rig-name> --json
+rig ps --nodes --json
 rig export <rigId> -o rig.yaml
 ```
 
 Success looks like:
 - the new sessions stop appearing in `rig discover`
-- the new logical IDs appear in `rig ps --nodes --rig <target-rig-name> --json`
+- the new logical IDs appear in `rig ps --nodes --json`
 - `rig export` includes the new pod
 
 ### Mixed-origin rigs are allowed
@@ -1101,7 +1171,7 @@ Current safety rule:
 The proven operator pattern is:
 - keep one OpenRig manager session outside the rig it manages
 - address the target by rig name, not cached rig ID
-- resolve the current owner from fresh `rig ps --nodes -A --json`
+- resolve the current owner from fresh `rig ps --nodes --json`
 - send the manager the spec path, bindings path, and verification steps with `rig send`
 
 This lets ordinary agents ask the manager for OpenRig help instead of every agent needing to be an OpenRig expert.
@@ -1198,7 +1268,7 @@ When the CLI behaves strangely, use the smallest truthful check first:
 ```bash
 rig whoami --json
 rig daemon status
-rig ps --nodes
+rig ps --nodes --json
 ```
 
 Specific operator rules:
@@ -1234,7 +1304,7 @@ Design assumptions that hold in the shipped CLI:
 
 1. `rig whoami --json`
 2. `rig transcript <your-session> --tail 100`
-3. `rig ps --nodes`
+3. `rig ps --nodes --json`
 4. `rig chatroom history <rig> --limit 50`
 
 ## Commands That Do Not Exist

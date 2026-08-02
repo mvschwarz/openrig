@@ -9,11 +9,6 @@ description: >
 metadata:
   openrig:
     stage: candidate
-    distribution_scope: product-bound
-    source_evidence: |
-      cmux is OpenRig's shipped terminal provider generalized onto `rig terminal <provider>` —
-      best-effort, not proof-gated. Authored clean-room.
-    transfer_test: pending
     sibling_skills:
       - openrig-herdr
       - openrig-user

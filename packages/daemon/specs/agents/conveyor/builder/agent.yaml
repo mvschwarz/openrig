@@ -11,9 +11,10 @@ imports:
 profiles:
   default:
     uses:
-      skills: [openrig-user, mission-slice-sop, development-team, test-driven-development, systematic-debugging, executing-plans, verification-before-completion]
+      skills: [development-team, test-driven-development, systematic-debugging, executing-plans, verification-before-completion]
       guidance: []
       subagents: []
+      plugins: [shared:openrig-core]
       runtime_resources: [shared:claude-default-settings, shared:claude-default-mcp, shared:codex-default-config]
 
 resources:

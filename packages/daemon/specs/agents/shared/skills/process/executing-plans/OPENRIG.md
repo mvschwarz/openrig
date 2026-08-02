@@ -50,7 +50,7 @@ Watch for upstream changes to:
 When upstream changes:
 
 1. Pull non-conflicting changes into the OpenRig copy.
-2. Preserve the batch-with-checkpoint structure unless founder direction reverses.
+2. Preserve the batch-with-checkpoint structure unless operator direction reverses.
 3. Re-check that the subagent-alternative pointer hasn't crept back in.
 4. Bump `last_upstream_check` in `SKILL.md` frontmatter.
 5. Note any structural shape changes in `divergence_notes`.

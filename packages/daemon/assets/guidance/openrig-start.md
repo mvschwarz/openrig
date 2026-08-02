@@ -5,6 +5,11 @@ You are running inside an OpenRig-managed topology.
 This file is the thin bootstrap overlay, not the full OpenRig manual.
 Use it to recover identity, communicate, and regain context after launch or compaction.
 
+When you are unsure which packaged skill applies, start with the global `openrig-skills` index. It routes to every shipped skill in one hop:
+
+- Claude Code: `~/.claude/skills/openrig-skills/SKILL.md`
+- Codex: `~/.agents/skills/openrig-skills/SKILL.md`
+
 For the full OpenRig command surface, load the packaged `openrig-user` skill now.
 If your runtime supports skills, use that mechanism.
 If it does not auto-load skills reliably, read the packaged copy directly from your current project or workspace:

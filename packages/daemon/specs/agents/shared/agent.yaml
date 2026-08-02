@@ -16,18 +16,10 @@ resources:
       path: skills/process/frontend-design
     - id: using-superpowers
       path: skills/process/using-superpowers
-    - id: openrig-user
-      path: skills/core/openrig-user
-    - id: openrig-operator
-      path: skills/core/openrig-operator
-    - id: openrig-installer
-      path: skills/core/openrig-installer
     - id: openrig-architect
       path: skills/core/openrig-architect
     - id: rig-lifecycle
       path: skills/core/rig-lifecycle
-    - id: mission-slice-sop
-      path: skills/core/mission-slice-sop
     - id: systematic-debugging
       path: skills/process/systematic-debugging
     - id: test-driven-development
@@ -57,6 +49,11 @@ resources:
       path: skills/pm/exec-summary
     - id: backlog-capture
       path: skills/pm/backlog-capture
+  plugins:
+    - id: openrig-core
+      source:
+        kind: local
+        path: ~/.openrig/plugins/openrig-core
   runtime_resources:
     - id: claude-default-settings
       path: runtime/claude-settings.fragment.json

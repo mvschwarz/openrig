@@ -23,11 +23,26 @@
       ],
       "category": "process"
     },
+    "agent-starters": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "core"
+    },
     "agent-startup-and-context-ingestion": {
       "edges": [
-        "plugin"
+        "canonical",
+        "spec"
       ],
-      "category": null
+      "category": "core"
+    },
+    "attention-queue": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "core"
     },
     "backlog-capture": {
       "edges": [
@@ -55,6 +70,13 @@
         "spec"
       ],
       "category": "pm"
+    },
+    "cross-host-rig-commands": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "core"
     },
     "development-team": {
       "edges": [
@@ -97,13 +119,24 @@
       ],
       "category": "process"
     },
-    "mission-slice-sop": {
+    "human-in-the-loop": {
       "edges": [
         "canonical",
-        "plugin",
         "spec"
       ],
       "category": "core"
+    },
+    "messaging-the-human": {
+      "edges": [
+        "plugin"
+      ],
+      "category": null
+    },
+    "mission-slice-sop": {
+      "edges": [
+        "plugin"
+      ],
+      "category": null
     },
     "office-hours": {
       "edges": [
@@ -115,7 +148,6 @@
     "openrig-architect": {
       "edges": [
         "canonical",
-        "plugin",
         "spec"
       ],
       "category": "core"
@@ -123,7 +155,6 @@
     "openrig-cmux": {
       "edges": [
         "canonical",
-        "plugin",
         "spec"
       ],
       "category": "core"
@@ -131,40 +162,28 @@
     "openrig-herdr": {
       "edges": [
         "canonical",
-        "plugin",
         "spec"
       ],
       "category": "core"
     },
-    "openrig-installer": {
+    "openrig-skills": {
       "edges": [
-        "canonical",
-        "spec"
+        "plugin"
       ],
-      "category": "core"
+      "category": null
     },
-    "openrig-operator": {
+    "openrig-upgrade": {
       "edges": [
         "canonical",
-        "plugin",
         "spec"
       ],
       "category": "core"
     },
     "openrig-user": {
       "edges": [
-        "canonical",
-        "plugin",
-        "spec"
+        "plugin"
       ],
-      "category": "core"
-    },
-    "openrig-user-settings": {
-      "edges": [
-        "canonical",
-        "spec"
-      ],
-      "category": "core"
+      "category": null
     },
     "orchestration-team": {
       "edges": [
@@ -200,6 +219,13 @@
       ],
       "category": "pods"
     },
+    "rig-bundles-and-shareable-artifacts": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "core"
+    },
     "rig-lifecycle": {
       "edges": [
         "canonical",
@@ -212,6 +238,32 @@
         "plugin"
       ],
       "category": null
+    },
+    "session-compaction-and-restore": {
+      "edges": [
+        "plugin"
+      ],
+      "category": null
+    },
+    "session-source-fork": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "core"
+    },
+    "software-for-agents": {
+      "edges": [
+        "plugin"
+      ],
+      "category": null
+    },
+    "specification-system": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "core"
     },
     "systematic-debugging": {
       "edges": [
@@ -226,6 +278,13 @@
         "spec"
       ],
       "category": "process"
+    },
+    "topology-mutation-and-seat-management": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "core"
     },
     "ui-mockup": {
       "edges": [
@@ -247,6 +306,13 @@
         "spec"
       ],
       "category": "process"
+    },
+    "watchdog": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "core"
     },
     "writing-plans": {
       "edges": [

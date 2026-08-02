@@ -102,6 +102,44 @@ export class PluginVendorService {
     }
   }
 
+  /** Project one plugin skill into the harness-global skill roots. */
+  ensureSkillGlobally(
+    pluginName: string,
+    skillName: string,
+    globalSkillRoots: string[],
+  ): void {
+    const sourceDir = nodePath.join(
+      this.userPluginsDir,
+      pluginName,
+      "skills",
+      skillName,
+    );
+    if (!this.fs.exists(sourceDir)) {
+      throw new Error(
+        `Required global seed '${skillName}' is missing from plugin '${pluginName}'`,
+      );
+    }
+
+    const files = this.fs.listFiles(sourceDir);
+    for (const root of globalSkillRoots) {
+      const targetDir = nodePath.join(root, skillName);
+      this.fs.mkdirp(targetDir);
+      for (const relPath of files) {
+        const srcPath = nodePath.join(sourceDir, relPath);
+        const destPath = nodePath.join(targetDir, relPath);
+        const content = this.fs.readFile(srcPath);
+        if (
+          this.fs.exists(destPath) &&
+          hashContent(this.fs.readFile(destPath)) === hashContent(content)
+        ) {
+          continue;
+        }
+        this.fs.mkdirp(nodePath.dirname(destPath));
+        this.fs.writeFile(destPath, content);
+      }
+    }
+  }
+
   /**
    * Attempt to fetch the latest plugin tree from
    * github.com/mvschwarz/openrig-plugins. Tolerates 404, network errors,

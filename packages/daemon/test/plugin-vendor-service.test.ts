@@ -40,6 +40,7 @@ function mockFs(initialFiles?: Record<string, string>) {
 const VENDORED_OPENRIG_CORE = {
   "/asset-root/openrig-core/.claude-plugin/plugin.json": '{"name":"openrig-core","version":"0.1.0"}',
   "/asset-root/openrig-core/.codex-plugin/plugin.json": '{"name":"openrig-core","version":"0.1.0","description":"v"}',
+  "/asset-root/openrig-core/skills/openrig-skills/SKILL.md": "# openrig-skills index",
   "/asset-root/openrig-core/skills/openrig-user/SKILL.md": "# openrig-user vendored",
   "/asset-root/openrig-core/hooks/claude.json": '{"hooks":{}}',
 };
@@ -69,6 +70,7 @@ describe("PluginVendorService — vendoring (HG-2.3)", () => {
       ...VENDORED_OPENRIG_CORE,
       "/home/test/.openrig/plugins/openrig-core/.claude-plugin/plugin.json": '{"name":"openrig-core","version":"0.1.0"}',
       "/home/test/.openrig/plugins/openrig-core/.codex-plugin/plugin.json": '{"name":"openrig-core","version":"0.1.0","description":"v"}',
+      "/home/test/.openrig/plugins/openrig-core/skills/openrig-skills/SKILL.md": "# openrig-skills index",
       "/home/test/.openrig/plugins/openrig-core/skills/openrig-user/SKILL.md": "# openrig-user vendored",
       "/home/test/.openrig/plugins/openrig-core/hooks/claude.json": '{"hooks":{}}',
     });
@@ -102,6 +104,45 @@ describe("PluginVendorService — vendoring (HG-2.3)", () => {
 
     await expect(svc.ensureVendored("nonexistent-plugin")).resolves.not.toThrow();
     expect(fs._store["/home/test/.openrig/plugins/nonexistent-plugin/anything"]).toBeUndefined();
+  });
+
+  it("projects a plugin seed skill into both harness-global skill roots", async () => {
+    const fs = mockFs(VENDORED_OPENRIG_CORE);
+    const svc = new PluginVendorService({
+      vendoredAssetsDir: "/asset-root",
+      userPluginsDir: "/home/test/.openrig/plugins",
+      fs,
+      httpClient: vi.fn().mockResolvedValue({ ok: false, status: 404 }),
+      logger: vi.fn(),
+    });
+
+    await svc.ensureVendored("openrig-core");
+    svc.ensureSkillGlobally("openrig-core", "openrig-skills", [
+      "/home/test/.claude/skills",
+      "/home/test/.agents/skills",
+    ]);
+
+    expect(fs._store["/home/test/.claude/skills/openrig-skills/SKILL.md"]).toBe("# openrig-skills index");
+    expect(fs._store["/home/test/.agents/skills/openrig-skills/SKILL.md"]).toBe("# openrig-skills index");
+  });
+
+  it("fails loudly when the required global seed is missing from the vendored plugin", async () => {
+    const fs = mockFs(VENDORED_OPENRIG_CORE);
+    const svc = new PluginVendorService({
+      vendoredAssetsDir: "/asset-root",
+      userPluginsDir: "/home/test/.openrig/plugins",
+      fs,
+      httpClient: vi.fn().mockResolvedValue({ ok: false, status: 404 }),
+      logger: vi.fn(),
+    });
+
+    await svc.ensureVendored("openrig-core");
+    expect(() =>
+      svc.ensureSkillGlobally("openrig-core", "missing-seed", [
+        "/home/test/.claude/skills",
+        "/home/test/.agents/skills",
+      ]),
+    ).toThrow(/missing-seed/);
   });
 });
 

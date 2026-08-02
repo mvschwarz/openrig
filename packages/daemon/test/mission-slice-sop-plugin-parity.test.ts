@@ -1,10 +1,7 @@
-// OPR.0.4.4.23 (arch S2) — the bundled openrig-core plugin's copy of
-// mission-slice-sop must be MECHANICALLY pinned to the canonical product
-// skill source: hand-sync without a guard is banned. This is the
-// scope-audit-copies pattern (byte-parity CI test) applied to the skill —
-// the mirror-skills script covers specs → skills/_canonical, and this test
-// covers specs → the bundled plugin. Any edit to one copy fails here until
-// the other copy is refreshed (cp, byte-for-byte).
+// OPR.0.4.4.23 originally pinned duplicate spec/plugin copies. The vendoring
+// placement ruling now makes mission-slice-sop and openrig-user plugin-only:
+// universal delivery comes from openrig-core, so recreating a spec copy would
+// reintroduce the drift this guard was meant to prevent.
 
 import { describe, expect, it } from "vitest";
 import fs from "node:fs";
@@ -14,61 +11,28 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..", "..", "..");
 
-const CANONICAL_SOURCE = path.join(
-  repoRoot,
-  "packages/daemon/specs/agents/shared/skills/core/mission-slice-sop/SKILL.md",
-);
 const PLUGIN_COPY = path.join(
   repoRoot,
   "packages/daemon/assets/plugins/openrig-core/skills/mission-slice-sop/SKILL.md",
 );
-
-// aa922842 — openrig-user is the SECOND skill whose canonical and bundled-plugin copies both
-// carry the conventions pointer, so the dual-context rewrite edits both. Unlike
-// mission-slice-sop it had NO byte-parity guard: mirror-skills covers specs → _canonical, and
-// the S2 test above covered specs → plugin for exactly one skill. Verified by negative search
-// over packages/*/test (openrig-core-plugin.test.ts asserts tree existence, not byte parity;
-// skill-audit.test.ts has no equality assertion). Editing an unguarded pair is how the repo
-// ends up correct while the shipped plugin ships stale — pin it before touching it.
-const PARITY_PINNED_SKILLS = ["mission-slice-sop", "openrig-user"] as const;
-
-function canonicalPath(skill: string): string {
-  return path.join(repoRoot, `packages/daemon/specs/agents/shared/skills/core/${skill}/SKILL.md`);
-}
-function pluginPath(skill: string): string {
-  return path.join(repoRoot, `packages/daemon/assets/plugins/openrig-core/skills/${skill}/SKILL.md`);
-}
-
-describe("OPR.0.4.4.23 mission-slice-sop plugin byte-parity (S2 drift guard)", () => {
-  it("both copies exist", () => {
-    expect(fs.existsSync(CANONICAL_SOURCE), `missing ${CANONICAL_SOURCE}`).toBe(true);
-    expect(fs.existsSync(PLUGIN_COPY), `missing ${PLUGIN_COPY}`).toBe(true);
-  });
-
-  it("the bundled plugin copy is byte-identical to the canonical skill source", () => {
-    const source = fs.readFileSync(CANONICAL_SOURCE);
-    const plugin = fs.readFileSync(PLUGIN_COPY);
-    expect(
-      source.equals(plugin),
-      "mission-slice-sop drifted between the canonical skill source and the bundled plugin — refresh the plugin copy byte-for-byte (cp source → plugin); hand-edited divergence is banned (OPR.0.4.4.23 S2)",
-    ).toBe(true);
-  });
-});
-
-describe("aa922842 canonical→plugin byte-parity, extended to every conventions-carrying skill", () => {
-  for (const skill of PARITY_PINNED_SKILLS) {
-    it(`${skill}: canonical and bundled plugin copies both exist`, () => {
-      expect(fs.existsSync(canonicalPath(skill)), `missing ${canonicalPath(skill)}`).toBe(true);
-      expect(fs.existsSync(pluginPath(skill)), `missing ${pluginPath(skill)}`).toBe(true);
-    });
-
-    it(`${skill}: bundled plugin copy is byte-identical to canonical`, () => {
-      const source = fs.readFileSync(canonicalPath(skill));
-      const plugin = fs.readFileSync(pluginPath(skill));
-      expect(
-        source.equals(plugin),
-        `${skill} drifted between the canonical skill source and the bundled plugin — refresh the plugin copy byte-for-byte (cp source → plugin). mirror-skills does NOT cover this pair; hand-edited divergence is banned.`,
-      ).toBe(true);
+describe("OPR.0.4.7 vendoring — universal skills have one plugin home", () => {
+  for (const skill of ["mission-slice-sop", "openrig-user"] as const) {
+    it(`${skill}: ships from the plugin and has no spec/canonical duplicate`, () => {
+      const plugin = path.join(
+        repoRoot,
+        `packages/daemon/assets/plugins/openrig-core/skills/${skill}/SKILL.md`,
+      );
+      const spec = path.join(
+        repoRoot,
+        `packages/daemon/specs/agents/shared/skills/core/${skill}/SKILL.md`,
+      );
+      const canonical = path.join(
+        repoRoot,
+        `skills/_canonical/core/${skill}/SKILL.md`,
+      );
+      expect(fs.existsSync(plugin), `missing ${plugin}`).toBe(true);
+      expect(fs.existsSync(spec), `redundant spec copy ${spec}`).toBe(false);
+      expect(fs.existsSync(canonical), `redundant canonical copy ${canonical}`).toBe(false);
     });
   }
 });
@@ -106,8 +70,8 @@ function readDescription(file: string): string {
 }
 
 describe("aa922842 mission-slice-sop description budget + trigger preservation", () => {
-  it(`the canonical description fits the ${DESCRIPTION_BUDGET_BYTES}-byte retrieval budget`, () => {
-    const description = readDescription(CANONICAL_SOURCE);
+  it(`the shipped description fits the ${DESCRIPTION_BUDGET_BYTES}-byte retrieval budget`, () => {
+    const description = readDescription(PLUGIN_COPY);
     const bytes = Buffer.byteLength(description, "utf-8");
     expect(
       bytes,
@@ -116,7 +80,7 @@ describe("aa922842 mission-slice-sop description budget + trigger preservation",
   });
 
   it("every named trigger term survives the trim", () => {
-    const description = readDescription(CANONICAL_SOURCE).toLowerCase();
+    const description = readDescription(PLUGIN_COPY).toLowerCase();
     const missing = REQUIRED_TRIGGERS.filter((t) => !description.includes(t.toLowerCase()));
     expect(
       missing,
@@ -124,9 +88,4 @@ describe("aa922842 mission-slice-sop description budget + trigger preservation",
     ).toEqual([]);
   });
 
-  it("the bundled plugin copy carries the same description (budget survives the byte-copy)", () => {
-    // Byte-parity above already implies this, but asserting it directly means a future
-    // refactor that relaxes parity cannot silently ship an over-budget installed skill.
-    expect(readDescription(PLUGIN_COPY)).toBe(readDescription(CANONICAL_SOURCE));
-  });
 });

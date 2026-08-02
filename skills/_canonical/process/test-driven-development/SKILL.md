@@ -16,7 +16,7 @@ Write the test first. Watch it fail. Write minimal code to pass.
 
 **Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.
 
-**Violating the letter of the rules is violating the spirit of the rules.**
+**A strong default in service of shipping — not a law that outranks it.** TDD earns its keep where a failing test pins down behavior you'd otherwise get wrong: core logic, contracts, tricky edge cases. Match it to stakes — reach for it where test-first genuinely de-risks the change; throwaway prototypes, one-line copy tweaks, and obvious glue don't need the ceremony. Don't dodge it with synonyms; equally, don't let it block you from shipping the working thing.
 
 ## When to Use
 

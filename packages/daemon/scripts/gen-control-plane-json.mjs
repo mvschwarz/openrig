@@ -97,8 +97,18 @@ export async function extractSkillEdgeLayout({
     config.forward_overrides ?? {},
   ).sort()) {
     validateOverride(skill, override, config.edges, sourcePath);
+    if (override.edges.length === 0) {
+      skills.delete(skill);
+      continue;
+    }
+    const edges = new Set(override.edges);
+    if (edges.has("spec")) {
+      for (const [edge, edgeConfig] of Object.entries(config.edges)) {
+        if (edgeConfig.layout === "mirror-of-spec") edges.add(edge);
+      }
+    }
     skills.set(skill, {
-      edges: [...new Set(override.edges)].sort(),
+      edges: [...edges].sort(),
       category: override.category ?? null,
     });
   }

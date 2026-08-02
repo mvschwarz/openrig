@@ -2,14 +2,31 @@
 name: queue-handoff
 description: Use when ending a turn, finishing a slice, blocked on another agent's work, or escalating to a human — durable work handoff via queue items so the system keeps moving across compactions, missed messages, and interruptions. Covers the hot-potato terminal-turn-rule (active work ends by passing the ball, not by going idle), default-nudge semantics, and when `--no-nudge` is appropriate for intentional cold park or human gate.
 metadata:
+  cli_surfaces_referenced:
+    - queue
+    - queue create
+    - queue handoff
+    - queue handoff-and-complete
   openrig:
     stage: factory-approved
-    last_verified: "2026-06-24"
-    distribution_scope: product-bound
-    source_evidence: |
-      Daemon-backed `rig queue` shipped in v0.2.0 (PL-004 Phase A) with handed-off-to / handed-off-from / state field shape. `rig queue` is canonical for new work; `rigx queue` is recovery-only fallback. The daemon enforces hot-potato strict-rejection at the API. Body resynced from canonical 2026-06-24 (demo-blocker fix: corrected the default-nudge guidance — the default already nudges; the previously-described extra notify flag does not exist on the shipped CLI).
-    sibling_skills: []
-    transfer_test: pending
+    sibling_skills:
+      - workflow-runtime
+      - watchdog
+      - alignment-trace
+      - looping-workflows
+      - intake-routing
+      - human-in-the-loop
+      - attention-queue
+      - dispatching-parallel-agents
+      - subagent-driven-development
+      - structured-ack-dispatch
+      - control-plane-capabilities
+      - status-not-chat-orchestrator
+      - control-plane-queue
+      - control-plane-watchdog
+      - control-plane-workflows
+      - control-plane-delivery-loop
+      - control-plane-rollout-manager
 ---
 
 # Queue Handoff
@@ -67,7 +84,7 @@ every surface (CLI, MCP, future UI) inherits the same guarantee.
 | `rig queue create` | yes | New qitem created from scratch |
 | `rig queue handoff` | yes | Transactional close-as-handed-off + create-new |
 | `rig queue handoff-and-complete` | yes | Atomic close + create-new; default nudge wakes the new owner |
-| `rigx queue handoff` (filesystem v0 prototype; **recovery-only fallback since 2026-05-11**) | yes | Legacy artifact; qitems invisible to daemon-backed reads; deprecated with removal queued. Use `rig queue handoff` (daemon-backed) for all new substantive work. |
+| `rigx queue handoff` (filesystem v0 prototype; **recovery-only fallback since 2026-05-11**) | yes | Legacy artifact; qitems invisible to daemon-backed reads; deprecation warning + removal queued at `missions/bug-fix/slices/rigx-queue-deprecation-message/`. Use `rig queue handoff` (daemon-backed) for all new substantive work. |
 
 **Footgun**: `--no-nudge` accidentally added to a live-loop handoff.
 The shipped 0.3.1 CLI nudges by default on every queue write surface
@@ -96,8 +113,8 @@ recipient.
   at the file for the detail. A pasted dump makes `rig queue show <id>
   --json` huge — a second-order token bloat: bloated DATA living in the
   queue, distinct from the command-default output bombs the token-burn
-  emergency pack covers. (Sensor: dev1-guard token-burn-flag 8ea201e4,
-  2026-06; founder-directed cure.)
+  emergency pack covers. (Sensor: guard token-burn-flag 8ea201e4,
+  2026-06; operator-directed cure.)
 - **Substantive bodies go through `--body-file`, not inline `--body`.**
   For anything beyond a short line, write the body to a file and pass
   `--body-file <path>` (or `-` for stdin). Inline `--body` with shell

@@ -16,7 +16,7 @@ Claiming work is complete without verification is dishonesty, not efficiency.
 
 **Core principle:** Evidence before claims, always.
 
-**Violating the letter of this rule is violating the spirit of this rule.**
+**This rule serves shipping — it is not a ritual that outranks it.** It governs one thing: *claims that a verifiable result holds* ("tests pass", "build succeeds", "bug fixed") — run the check before you assert it, and scale the check to the stakes (a one-line copy tweak is not a test-suite ceremony). Don't dodge it with synonyms; equally, don't inflate it into a tax on the word "done" or a reason to keep re-proving instead of shipping the working thing.
 
 ## The Iron Law
 
@@ -57,7 +57,7 @@ Skip any step = lying, not verifying
 ## Red Flags - STOP
 
 - Using "should", "probably", "seems to"
-- Expressing satisfaction before verification ("Great!", "Perfect!", "Done!", etc.)
+- Claiming a specific result is *proven* ("tests pass", "it's fixed", "build's green") before running the check in this message — enthusiasm itself is fine; an unverified **result claim** is the flag
 - About to commit/push/PR without verification
 - Trusting agent success reports
 - Relying on partial verification
@@ -109,6 +109,16 @@ Skip any step = lying, not verifying
 ✅ Agent reports success → Check VCS diff → Verify changes → Report actual state
 ❌ Trust agent report
 ```
+
+## When the check itself lies — content over shape
+
+Running a verification is necessary but not sufficient: a check can exit clean and still prove nothing. These are the named ways a green check lies — the failure siblings behind "evidence before claims." (Deeper treatment of *what* you verify against: `reference-first-verification`.)
+
+- **Assert on CONTENT, never shape or count.** Output that *looks* like success — a non-zero count, a clean exit, no error text — can carry failure as its content. Before trusting a check, ask what its output looks like *when it fails*: if failure and success are indistinguishable at a glance, the check proves nothing. (`[1 lines]` and `No matches found` both read as "a match" to a line-count.)
+- **Compare the returned value to the value you PASSED — never to a description of it.** A confident label (`evidenceRef NOW SET:` printed above the untouched original) is indistinguishable from a verification in a transcript. Diff the actual result against your actual input, not against a claim about it.
+- **Find the untested axis.** Thorough coverage of ONE axis reads as thorough coverage overall. Ask what every one of your tests shares — a healthy manifest, a default option value, the happy path — and treat that shared assumption as the dimension you never tested. (A 15-case "exhaustive" harness whose only defect lived on the one axis every case held constant.)
+- **A syntax check proves parseability and nothing else.** A clean `node --check` / lint / parse pass is the *covered* axis; boot and runtime are the untested one. Parseable ≠ sound.
+- **A failure whose shape is a HANG reports nothing.** A bare `await` against a stated deadline that never re-checks cannot fail loudly. Race it against a timer so failure has a shape you can see.
 
 ## Why This Matters
 

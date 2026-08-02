@@ -462,6 +462,12 @@ describe("rig scope mission create (HG-14 + HG-15)", () => {
     expect(content).toMatch(/## §1\. Top-of-mind context/);
     expect(content).toMatch(/## §10\. What NOT to reconstruct/);
     expect(content).toMatch(/## §A\. <first-seat>@<rig> notes/);
+    // Recovery must use durable full-body artifacts first. Compact queue rows
+    // and transcript output are insufficient evidence after compaction.
+    expect(content).toContain("rig queue list --mine --full --json");
+    expect(content).toContain("rig queue show <id> --full --json");
+    expect(content).toMatch(/little or\s+no output does not prove the session was quiet/);
+    expect(content).not.toContain("rig queue list --destination <your-session>");
   });
 
   it("FR-3: --no-mission-notes opts out — README created, MISSION_NOTES.md is NOT", async () => {

@@ -18,11 +18,9 @@ with them and escalate to them when ops decisions need human approval.
   4. Confirm healthy via `rig ps --nodes --rig <name>`.
 - Inspect topology, transcript, attention queue state, mission
   control views.
-- Shepherd install / upgrade / migration ceremonies. The
-  `openrig-installer` skill is your reference for the V0.3.1
-  upgrade flow (which includes the substrate-kernel → daemon-managed
-  kernel migration as a one-time ceremony — see openrig-installer
-  for the canonical steps).
+- Shepherd current install and upgrade work. Use the `openrig-upgrade`
+  skill for the supported upgrade path and verify the resulting daemon
+  and rig health before declaring the operation complete.
 
 ## What you do NOT do
 

@@ -4,15 +4,17 @@ description: Use when a Claude Code session has just compacted, is about to comp
 metadata:
   openrig:
     stage: factory-approved
-    last_verified: "2026-05-04"
-    distribution_scope: product-bound
-    source_evidence: |
-      Load-bearing for any OpenRig seat that may compact. PreCompact hook
-      is wired into Claude Code's settings (e.g. ~/.claude/settings.json)
-      so the restore packet is generated automatically before compaction.
     sibling_skills:
+      - mental-model-ha
+      - scope-recovery
+      - session-compaction-and-restore
       - agent-startup-and-context-ingestion
+      - agent-starters
+      - composable-priming-packs
+      - session-source-fork
       - seat-continuity-and-handover
+      - claude-compact-in-place
+      - pre-maintenance-agent-preservation
 ---
 
 # Claude Compaction Restore
@@ -105,6 +107,7 @@ After the first restore pass, audit yourself before continuing.
 
 ## Guardrails
 
+- Compaction is survival, not housekeeping — never compact to free space, "lean" a seat, or capture/prepare an agent starter (the `rig agent-image` library). It is lossy (a compacted Claude is confident-but-hollow); compact only when a seat is genuinely near its context limit, with a before/after plan. A starter's value is being *functional*, not small — see the `agent-starters` skill.
 - Do not silently launch fresh after compaction.
 - Do not continue from memory when restore evidence exists.
 - Do not defer required restore reading until a later user task. The restore is

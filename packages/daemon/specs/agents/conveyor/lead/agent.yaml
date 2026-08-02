@@ -11,9 +11,10 @@ imports:
 profiles:
   default:
     uses:
-      skills: [openrig-user, mission-slice-sop, orchestration-team, backlog-capture, writing-plans, executing-plans, verification-before-completion, brainstorming]
+      skills: [orchestration-team, backlog-capture, writing-plans, executing-plans, verification-before-completion, brainstorming]
       guidance: []
       subagents: []
+      plugins: [shared:openrig-core]
       runtime_resources: [shared:claude-default-settings, shared:claude-default-mcp, shared:codex-default-config]
 
 resources:

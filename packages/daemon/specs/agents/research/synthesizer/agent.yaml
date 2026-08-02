@@ -11,9 +11,10 @@ imports:
 profiles:
   default:
     uses:
-      skills: [openrig-user]
+      skills: []
       guidance: []
       subagents: []
+      plugins: [shared:openrig-core]
       runtime_resources: [shared:claude-default-settings, shared:claude-default-mcp, shared:codex-default-config]
 
 resources:

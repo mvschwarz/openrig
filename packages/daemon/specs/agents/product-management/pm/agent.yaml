@@ -15,8 +15,6 @@ profiles:
   default:
     uses:
       skills:
-        - openrig-user
-        - mission-slice-sop
         - office-hours
         - context-builder
         - requirements-writer
@@ -24,6 +22,7 @@ profiles:
         - plan-review
         - exec-summary
         - backlog-capture
+      plugins: [shared:openrig-core]
       runtime_resources:
         - shared:claude-default-settings
         - shared:claude-default-mcp

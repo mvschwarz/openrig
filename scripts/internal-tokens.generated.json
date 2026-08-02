@@ -6,7 +6,11 @@
     "/Users/wrandom/",
     "~/code/substrate/",
     "code/substrate/shared-docs/",
-    ".openrig/"
+    ".openrig/artifacts/",
+    ".openrig/compaction/",
+    ".openrig/backups/",
+    ".openrig/agent-images/",
+    ".openrig/secrets/"
   ],
   "seat_and_rig_patterns": [
     "@skill-library",
@@ -31,7 +35,6 @@
     "vm-claude-test"
   ],
   "charged_terms": [
-    "dogfood",
     "founder",
     "founder-owned host",
     "one open trust domain",

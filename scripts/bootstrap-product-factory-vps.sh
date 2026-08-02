@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # OPR.0.4.4.13 FR-3 — product-factory VPS bootstrap (runs ON the VPS).
 #
-# Fresh Ubuntu -> factory-ready: the 2026-06-23 OVH smoke test's manual
-# sequence, productized. Pairs with docs/reference/product-factory-vps-runbook.md
-# (read it first: Tailscale tag/ACL setup and the home-base steps live there).
+# Fresh Ubuntu -> factory-ready: the smoke-tested manual sequence, productized.
 #
 # Usage (as root on a fresh Ubuntu 22.04/24.04 VPS):
 #   ./bootstrap-product-factory-vps.sh --artifact <@openrig/cli@X.Y.Z | /path/to/openrig-cli.tgz> \
@@ -110,5 +108,4 @@ VPS side complete. From the HOME BASE now:
   3. rig host doctor <id> --posture product-factory-vps [--public-addr <public-ip>]
   4. Remove the public-SSH escape hatch once the tailnet path is verified:
        sudo ufw delete allow OpenSSH            # on the VPS
-Runbook: docs/reference/product-factory-vps-runbook.md
 EOF

@@ -4,16 +4,17 @@ description: Use when replacing a seat's occupant (rebuild/handover/swap), reaso
 metadata:
   openrig:
     stage: factory-approved
-    last_verified: "2026-05-04"
-    distribution_scope: product-bound
-    source_evidence: |
-      Option A rebuild MVP shipped 2026-04-30. Option B (full code-direct
-      seat handover via SeatHandoverService daemon module) is a future
-      follow-on.
     sibling_skills:
       - claude-compaction-restore
+      - mental-model-ha
+      - scope-recovery
+      - session-compaction-and-restore
       - agent-startup-and-context-ingestion
-    transfer_test: pending
+      - agent-starters
+      - composable-priming-packs
+      - session-source-fork
+      - claude-compact-in-place
+      - pre-maintenance-agent-preservation
 ---
 
 # Seat Continuity and Handover
@@ -133,5 +134,6 @@ enough to receive new work or needs re-handover.
 
 ## See also
 
-- `claude-compaction-restore` skill — packet-driven restore after Claude compaction
-- `agent-startup-and-context-ingestion` skill — ingestion path for restore packets at agent boot
+- `session-source-fork` skill — `fork` occupant-creation primitive (sibling)
+- `agent-starters` skill — composes occupant-creation + binding into named reusable starting points
+- `cross-host-rig-commands` skill — multi-host handover (deferred)

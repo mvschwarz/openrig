@@ -11,9 +11,10 @@ imports:
 profiles:
   default:
     uses:
-      skills: [using-superpowers, openrig-user, mission-slice-sop, development-team, frontend-design, verification-before-completion, writing-plans, brainstorming]
+      skills: [using-superpowers, development-team, frontend-design, verification-before-completion, writing-plans, brainstorming]
       guidance: []
       subagents: []
+      plugins: [shared:openrig-core]
       runtime_resources: [shared:claude-default-settings, shared:claude-default-mcp, shared:codex-default-config]
 
 resources:

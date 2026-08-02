@@ -17,6 +17,29 @@ test("npm pack of @openrig/cli includes scripts/check-abi.mjs in tarball", () =>
   );
 });
 
+test("the private product-factory VPS runbook and its pointers do not ship", () => {
+  const privateRunbook = "docs/reference/product-factory-vps-runbook.md";
+  assert.equal(
+    existsSync(privateRunbook),
+    false,
+    `${privateRunbook} is private operator canon and must not ship in the public repo or package`,
+  );
+
+  const publicPointerSources = [
+    "CHANGELOG.md",
+    "scripts/bootstrap-product-factory-vps.sh",
+    "docs/as-built/cli-reference.md",
+    "packages/daemon/assets/plugins/openrig-core/skills/openrig-user/SKILL.md",
+  ];
+  for (const source of publicPointerSources) {
+    assert.doesNotMatch(
+      readFileSync(source, "utf8"),
+      /product-factory-vps-runbook/,
+      `${source} still points public readers at the private VPS runbook`,
+    );
+  }
+});
+
 // aa922842 — the conventions doc reaches agents through a THREE-path model:
 //   repo source      docs/reference/sdlc-conventions.md            (what repo readers cite)
 //   packed INTERNAL  daemon/docs/reference/sdlc-conventions.md     (assembly input only —

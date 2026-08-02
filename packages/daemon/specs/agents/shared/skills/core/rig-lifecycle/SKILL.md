@@ -2,18 +2,27 @@
 name: rig-lifecycle
 description: Use when reasoning about the rig lifecycle operations family (create / start / stop / resume / restore / snapshot / release / unclaim / destroy), reading or trusting `rig ps` / lifecycle projections after recovery, or designing proof for a lifecycle scenario. Covers the 4 failure modes (auto-restore creates partial rig; projections report healthier than reality; provider auth treated as impl work; resume succeeds for one runtime fails another) plus the restore-honesty rule (failed resume is FAILED loudly — no auto fresh fallback).
 metadata:
+  cli_surfaces_referenced:
+    - destroy
+    - down
+    - ps
+    - release
+    - restore
+    - restore-check
+    - resume
+    - snapshot
+    - unclaim
+    - up
   openrig:
     stage: factory-approved
-    last_verified: "2026-05-04"
-    distribution_scope: product-bound
-    source_evidence: |
-      Lifecycle Reboot/Recovery Scenario Matrix (Tier 1 complete; Tier 2
-      human-gated). Codex auth-refusal surfaces as attention_required.
     sibling_skills:
-      - openrig-user
-      - openrig-operator
-      - seat-continuity-and-handover
-    transfer_test: pending
+      - topology-mutation-and-seat-management
+      - seat-scaling-and-specialization
+      - cross-host-rig-commands
+      - sidecar-operator
+      - rig-bundles-and-shareable-artifacts
+      - specification-system
+      - extension-and-user-workspace
 ---
 
 # Rig Lifecycle
@@ -53,7 +62,7 @@ states.
 
 **Failed resume is FAILED loudly.** No automatic fresh fallback. Fresh
 launch is **explicit follow-up only.** This is enforced architecturally
-at the daemon level (per `docs/as-built/architecture/architecture-rules-and-event-system.md` rule 15).
+at the daemon level (per `architecture.md` §7 rule 15).
 
 The locked restore-outcome vocabulary:
 
@@ -112,5 +121,7 @@ different claims; don't conflate.
 
 - `openrig-user` skill — CLI surface for `rig up / down / restore / etc.`
 - `openrig-operator` skill — operator-level discipline for OpenRig itself
-- `seat-continuity-and-handover` skill — occupant-creation modes for restore (`resume` / `rebuild` / `fresh` / `failed`)
+- `seat-continuity-and-handover` skill — sub-primitive: occupant-creation modes for restore (`resume` / `rebuild` / `fresh` / `failed`)
+- `session-source-fork` skill — `forked` continuity outcome for fork-based restore
+- `permission-and-capability-preflight` skill — provider-auth blocker → escalation path
 - `openrig/docs/as-built/architecture/lifecycle-snapshot-restore.md` (product reference doc) — daemon enforcement of restore-honesty rule

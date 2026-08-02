@@ -10,11 +10,6 @@ description: >
 metadata:
   openrig:
     stage: candidate
-    distribution_scope: product-bound
-    source_evidence: |
-      Empirical herdr 0.7.1 hands-on findings + the ratified implementation PRD. Authored
-      clean-room (patterns only, no herdr source text; AGPL arm's-length).
-    transfer_test: pending
     sibling_skills:
       - openrig-cmux
       - openrig-user
@@ -51,7 +46,7 @@ An agent asked "open all my rigs plus a mission as views" runs one `open` per ta
 ```bash
 rig terminal open acme-web                     # a whole rig, live agents as tiles
 rig terminal open mission:site-relaunch        # exactly the agents working the mission
-rig terminal open slice:02-search-filters      # the agents working one slice
+rig terminal open slice:search-filters      # the agents working one slice
 ```
 
 No hand-listing of seats: the mission/slice membership is derived from live topology at open time.

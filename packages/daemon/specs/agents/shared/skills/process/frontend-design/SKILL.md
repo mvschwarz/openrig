@@ -4,9 +4,12 @@ description: Create distinctive, production-grade frontend interfaces with high 
 license: Complete terms in LICENSE.txt
 metadata:
   openrig:
-    vendored_from: "Anthropic skills (Apache 2.0; see LICENSE.txt sibling)"
-    vendoring_pattern: vendored-as-is
-    last_upstream_check: "2026-05-13 (diff against ~/.claude/skills/frontend-design = identical)"
+    stage: factory-approved
+    license_status: "see LICENSE.txt — vendor-derived; license terms apply"
+    vendored_from: "unknown vendor — LICENSE.txt present at copy time; quarterly license review"
+    sibling_skills:
+      - shadcn
+      - remotion-best-practices
 ---
 
 This skill guides creation of distinctive, production-grade frontend interfaces that avoid generic "AI slop" aesthetics. Implement real working code with exceptional attention to aesthetic details and creative choices.
