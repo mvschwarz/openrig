@@ -37,7 +37,7 @@ const FIXTURES: Record<string, unknown> = {
   ],
   "/api/rigs/01JRIG/spec.json": {
     version: "0.2", name: "myrig",
-    pods: [{ id: "dev", label: "Development", members: [{ id: "impl", agentRef: "implementer", profile: "default", runtime: "claude-code", cwd: "/repo" }, { id: "qa", agentRef: "qa-agent", profile: "default", runtime: "codex", cwd: "/repo" }], edges: [] }],
+    pods: [{ id: "dev", label: "Development", members: [{ id: "impl", agentRef: "local:../../../agents/development/implementer", profile: "default", runtime: "claude-code", cwd: "/repo" }, { id: "qa", agentRef: "qa-agent", profile: "default", runtime: "codex", cwd: "/repo" }], edges: [] }],
     edges: [],
   },
   "/api/specs/library": [

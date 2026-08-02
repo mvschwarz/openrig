@@ -5,7 +5,7 @@
 // SAME semantic actions commands produce (PIN 1). Isolated seam: a substrate
 // swap touches only this module (spike verdict revisit trigger).
 import { computeExplorerRows, findAgent, findSpec, findAgentBySession, agentsRunningSpec } from "./state.js";
-import type { Action, FleetSnapshot, Screen, ViewState } from "./types.js";
+import type { Action, FleetSnapshot, NeedsItem, Screen, ViewState } from "./types.js";
 
 const EXPL_W = 30;
 
@@ -27,6 +27,7 @@ function padLeft(text: string | number | null | undefined, width: number): strin
 
 type Align = "left" | "right";
 const AGENT_COLS: Array<[string, number, Align]> = [
+  ["RIG", 18, "left"],
   ["POD", 8, "left"],
   ["AGENT", 16, "left"],
   ["RUNTIME", 13, "left"],
@@ -46,6 +47,14 @@ function tabsLine(state: ViewState, suffix: string): ContentLine[] {
   return [
     { text: `${table}${overview}   ${suffix}`, action: { type: "tab", tab: state.viewTab === "table" ? "overview" : "table" } },
   ];
+}
+
+function needsLine(prefix: string, item: NeedsItem, snap: FleetSnapshot): ContentLine {
+  const agent = findAgentBySession(snap, item.target);
+  return {
+    text: `${prefix}${item.kind}  ${item.target}  — ${item.detail}${agent ? "  (open ▸)" : ""}`,
+    ...(agent ? { action: { type: "drill", resource: "agent", name: agent.name } as const } : {}),
+  };
 }
 
 function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
@@ -96,6 +105,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
         // the WHOLE row is the hit surface (not a testid'd control): clicking
         // any visible cell opens the agent (drive-structure navigation)
         text: tableRow([
+          rig.name,
           a.pod,
           a.name,
           a.runtime,
@@ -147,14 +157,9 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
     lines.push({ text: "NEEDS-YOU" });
     for (const item of snap.needs) {
       // open/navigate is the ONLY in-TUI action (B3): the click target joins
-      // the item's session back to topology; unresolvable targets name it.
-      const agent = findAgentBySession(snap, item.target);
-      lines.push({
-        text: `  ⚑ ${item.kind}  ${item.target}  — ${item.detail}  (open ▸)`,
-        action: agent
-          ? { type: "drill", resource: "agent", name: agent.name }
-          : { type: "error", message: `"${item.target}" is not in the current topology snapshot (remote or gone)` },
-      });
+      // the item's session back to topology; unresolvable targets never
+      // advertise a control that can only fail.
+      lines.push(needsLine("  ⚑ ", item, snap));
     }
     if (snap.needs.length === 0) lines.push({ text: "  (no grounded exception items right now)" });
     if (snap.hostsDown.length > 0) {
@@ -169,7 +174,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
       lines.push({ text: "  human-queue: no items (proven empty — surfacing adoption pending)" });
     else
       for (const item of snap.humanQueue)
-        lines.push({ text: `  ☐ ${item.kind}  ${item.target}  — ${item.detail}  (open ▸)` });
+        lines.push(needsLine("  ☐ ", item, snap));
     return lines;
   }
   return [{ text: `(${state.section})` }];
@@ -192,14 +197,19 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   const footer = state.footerOn ? snap.stream.at(-1) : undefined;
   const chromeRows = footer ? 3 : 2; // bottom rule + status line (+ footer)
   const bodyRows = Math.min(Math.max(explorer.length, content.length), Math.max(rows - 2 - chromeRows, 1));
+  const explorerStart = Math.min(
+    Math.max(state.selection - bodyRows + 1, 0),
+    Math.max(explorer.length - bodyRows, 0),
+  );
   const explorerRows: Screen["explorerRows"] = [];
   for (let i = 0; i < bodyRows; i++) {
     const y = lines.length + 1; // 1-based terminal row this line will occupy
-    const row = explorer[i];
-    const marker = i === state.selection && row ? "›" : " ";
+    const explorerIndex = explorerStart + i;
+    const row = explorer[explorerIndex];
+    const marker = explorerIndex === state.selection && row ? "›" : " ";
     const left = pad(row ? `${marker}${row.label}` : "", EXPL_W);
     const item = content[i];
-    lines.push(`${left}│ ${item?.text ?? ""}`);
+    lines.push(pad(`${left}│ ${item?.text ?? ""}`, cols));
     if (row) {
       hitMap.push({ y, x1: 1, x2: EXPL_W, action: row.action });
       explorerRows.push({ ...row, y });

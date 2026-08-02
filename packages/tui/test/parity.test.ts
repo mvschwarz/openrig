@@ -61,7 +61,7 @@ describe("parity by construction (FR-7 / PIN 1)", () => {
   it("renders the agents table with fixed-width columns and right-aligned numerics (honest-unknown as —)", () => {
     const s = fresh("t");
     s.dispatch(parseCommand("rig openrig-build"));
-    const screen = renderScreen(s.get(), snap, { cols: 100, rows: 30 });
+    const screen = renderScreen(s.get(), snap, { cols: 140, rows: 30 });
     const header = screen.lines.find((l) => l.includes("AGENT") && l.includes("STATUS"));
     expect(header).toBeDefined();
     const ctxCol = header!.indexOf("CTX%");
@@ -75,7 +75,7 @@ describe("parity by construction (FR-7 / PIN 1)", () => {
   it("keeps STATUS verbatim from the snapshot — never fabricated (PIN 2 render leg)", () => {
     const s = fresh("t");
     s.dispatch(parseCommand("rig openrig-build"));
-    const screen = renderScreen(s.get(), snap, { cols: 100, rows: 30 });
+    const screen = renderScreen(s.get(), snap, { cols: 140, rows: 30 });
     const qaRow = screen.lines.find((l) => l.includes("dev50.qa"));
     expect(qaRow).toBeDefined();
     expect(qaRow).toMatch(/unknown/);

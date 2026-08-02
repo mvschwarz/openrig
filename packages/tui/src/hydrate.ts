@@ -106,6 +106,12 @@ function toNeedsItem(item: NeedsYouItemRead): NeedsItem {
   return { kind: item.derived?.kind ?? item.leg, target, detail };
 }
 
+function resolveAgentRef(ref: string, agentSpecNames: Set<string>): string {
+  if (agentSpecNames.has(ref)) return ref;
+  const basename = ref.replace(/\/+$/, "").split("/").at(-1)?.replace(/\.(?:ya?ml|json)$/, "");
+  return basename && agentSpecNames.has(basename) ? basename : ref;
+}
+
 export async function hydrateSnapshot(client: DaemonClient): Promise<FleetSnapshot> {
   const readErrors: string[] = [];
   async function safe<T>(label: string, fn: () => Promise<unknown>): Promise<T | null> {
@@ -125,6 +131,8 @@ export async function hydrateSnapshot(client: DaemonClient): Promise<FleetSnapsh
     safe<StreamItemRead[]>("stream-list", () => client.streamList()),
   ]);
 
+  const agentSpecNames = new Set((library ?? []).filter((entry) => entry.kind === "agent").map((entry) => entry.name));
+
   // Topology: the local host expands to the daemon's rigs; remote hosts come
   // from the aggregate with reachability only (per-rig start; the all-rigs
   // level is deliberately under-designed — founder capture).
@@ -135,7 +143,12 @@ export async function hydrateSnapshot(client: DaemonClient): Promise<FleetSnapsh
     rigs.push({ name: rig.name, pods: nodes ? groupPods(nodes) : [] });
     const spec = await safe<RigSpecJsonRead>(`rig-spec(${rig.name})`, () => client.rigSpec(rig.id));
     if (spec?.pods) {
-      const refs = spec.pods.flatMap((p) => (p.members ?? []).map((m) => m.agentRef).filter((r): r is string => !!r));
+      const refs = spec.pods.flatMap((p) =>
+        (p.members ?? [])
+          .map((m) => m.agentRef)
+          .filter((r): r is string => !!r)
+          .map((ref) => resolveAgentRef(ref, agentSpecNames)),
+      );
       if (spec.name) rigSpecRefs.set(spec.name, refs);
     }
   }
