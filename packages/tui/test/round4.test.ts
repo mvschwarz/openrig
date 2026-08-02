@@ -61,6 +61,34 @@ describe("selection sync + cursor stability (item 2)", () => {
   });
 });
 
+describe("filters are view-scoped (founder direct-drive catch)", () => {
+  it("a specs filter never leaks into the topology table across a cross-section drill", () => {
+    const s = fresh();
+    s.dispatch(parseCommand(":specs"));
+    s.dispatch(parseCommand("/independent-reviewer"));
+    s.dispatch(parseCommand("rig openrig-build"));
+    expect(s.get().section).toBe("topology");
+    expect(s.get().filter).toBe("");
+  });
+
+  it("a same-section drill keeps the filter (topology rig → pod)", () => {
+    const s = fresh();
+    s.dispatch(parseCommand("rig openrig-build"));
+    s.dispatch(parseCommand("/dev50"));
+    s.dispatch(parseCommand("pod dev50"));
+    expect(s.get().filter).toBe("dev50");
+  });
+
+  it("cross-nav across sections clears the filter too (spec-of)", () => {
+    const s = fresh();
+    s.dispatch(parseCommand("rig openrig-build"));
+    s.dispatch(parseCommand("/dev50"));
+    s.dispatch(parseCommand("spec-of dev50.driver"));
+    expect(s.get().section).toBe("specs");
+    expect(s.get().filter).toBe("");
+  });
+});
+
 describe("specs default expansion (item 3): rig specs full, agent folders collapsed", () => {
   const nsSnap: FleetSnapshot = {
     ...snap,

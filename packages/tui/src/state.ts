@@ -141,11 +141,17 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
       const drilled = drillTo(next, action.resource, action.name, snap, action.target);
       if (drilled.lastError) return drilled;
       const spec = action.resource === "spec" ? findSpec(snap, action.name) : null;
-      return syncSelection(resetContent({ ...drilled, viewTab: spec?.kind === "rig" ? "configuration" : "table" }), snap);
+      // filters are VIEW-scoped: a drill that crosses sections clears the old
+      // section's filter (founder direct-drive catch — a specs filter leaked
+      // into the topology table and blanked it)
+      const filter = drilled.section === state.section ? drilled.filter : "";
+      return syncSelection(resetContent({ ...drilled, filter, viewTab: spec?.kind === "rig" ? "configuration" : "table" }), snap);
     }
     case "cross": {
       const crossed = crossNav(next, action.kind, action.name, snap, action.target);
-      return crossed.lastError ? crossed : syncSelection(crossed, snap);
+      if (crossed.lastError) return crossed;
+      const filter = crossed.section === state.section ? crossed.filter : "";
+      return syncSelection({ ...crossed, filter }, snap);
     }
     default:
       return { ...next, lastError: "unknown action" };
