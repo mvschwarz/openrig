@@ -57,6 +57,10 @@ interface SpecLibraryRead {
   sourceType?: "builtin" | "user_file";
   relativePath?: string;
   updatedAt?: string;
+  /** workflow entries only (served on the list read) */
+  rolesCount?: number;
+  stepsCount?: number;
+  status?: string;
 }
 interface AgentSpecReviewRead {
   sourceState?: "draft" | "file_preview" | "library_item";
@@ -375,7 +379,13 @@ export async function hydrateSnapshot(client: DaemonClient, reviewCache?: SpecRe
           ...(review?.raw ? { raw: review.raw } : {}),
         };
       }
-      return { ...base, kind: "workflow" };
+      return {
+        ...base,
+        kind: "workflow",
+        ...(entry.rolesCount != null ? { rolesCount: entry.rolesCount } : {}),
+        ...(entry.stepsCount != null ? { stepsCount: entry.stepsCount } : {}),
+        ...(entry.status ? { workflowStatus: entry.status } : {}),
+      };
     }),
   );
 

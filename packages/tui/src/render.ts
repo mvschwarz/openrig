@@ -5,6 +5,7 @@
 // SAME semantic actions commands produce (PIN 1). Isolated seam: a substrate
 // swap touches only this module (spike verdict revisit trigger).
 import { computeExplorerRows, findAgent, findSpec, findAgentBySession, agentsRunningSpec, agentsRunningSpecTargets } from "./state.js";
+import { detailPage, fieldLine, sectionRule, listItem, alignedRow } from "./detail.js";
 import type { Action, FleetSnapshot, NeedsItem, Screen, ViewState } from "./types.js";
 
 const EXPL_W = 30;
@@ -68,10 +69,16 @@ function specTabsLine(state: ViewState, name: string): ContentLine {
 }
 
 function needsLine(prefix: string, item: NeedsItem, snap: FleetSnapshot): ContentLine {
+  // aligned columns (glance speed): kind · host · target · detail — same fact,
+  // same visual place, every row
   const found = findAgentBySession(snap, item.target, item.hostId);
-  const provenance = item.hostId ? ` [${item.hostId}]` : "";
+  const cols = alignedRow([
+    [item.kind, 16],
+    [item.hostId ? `[${item.hostId}]` : "", 11],
+    [item.target, 34],
+  ]);
   return {
-    text: `${prefix}${item.kind}${provenance}  ${item.target}  — ${item.detail}${found ? "  (open ▸)" : ""}`,
+    text: `${prefix}${cols} ${item.detail}${found ? "  (open ▸)" : ""}`,
     ...(found ? { action: { type: "drill", resource: "agent", name: found.agent.name, target: { host: found.host.name, rig: found.rig.name, pod: found.pod.name } } as const } : {}),
   };
 }
@@ -112,18 +119,35 @@ function wrappedList(prefix: string, values: string[], max = 84): ContentLine[] 
   return lines;
 }
 
+/** field row whose value list wraps at the value column (label rhythm kept) */
+function fieldWrapped(label: string, values: string[]): ContentLine[] {
+  if (values.length === 0) return [fieldLine({ label, value: "(none)" })];
+  const valueCol = 2 + 12 + 1; // indent + LABEL_W + gap — where field values start
+  const wrapped = wrappedList(" ".repeat(valueCol), values, 92);
+  const first = wrapped[0]!.text.slice(valueCol);
+  return [fieldLine({ label, value: first }), ...wrapped.slice(1)];
+}
+
 function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
   const lines: ContentLine[] = [];
   if (state.section === "topology") {
     if (state.runningOf) {
-      lines.push({ text: `seats running spec "${state.runningOf}":` });
-      for (const seat of agentsRunningSpecTargets(snap, state.runningOf))
-        lines.push({
-          text: `  ● ${seat.agent.name}  (open: agent ${seat.agent.name})`,
-          action: { type: "drill", resource: "agent", name: seat.agent.name, target: { host: seat.host.name, rig: seat.rig.name, pod: seat.pod.name } },
-        });
-      if (lines.length === 1) lines.push({ text: "  (no seats currently run it)" });
-      return lines;
+      const seats = agentsRunningSpecTargets(snap, state.runningOf);
+      return detailPage({ text: `seats running spec ${state.runningOf}` }, [
+        {
+          lines:
+            seats.length === 0
+              ? [{ text: "  (no seats currently run it)" }]
+              : seats.map((seat) =>
+                  listItem(`${seat.agent.name}  ·  ${seat.rig.name} / ${seat.pod.name}  ·  ${seat.agent.status}`, {
+                    type: "drill",
+                    resource: "agent",
+                    name: seat.agent.name,
+                    target: { host: seat.host.name, rig: seat.rig.name, pod: seat.pod.name },
+                  }),
+                ),
+        },
+      ]);
     }
     const leaf = state.drill.at(-1);
     if (leaf?.kind === "agent") {
@@ -133,15 +157,46 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
       const found = hostName ? findAgent(snap, leaf.name, { host: hostName, rig: rigName, pod: podName }) : findAgent(snap, leaf.name);
       if (!found) return [{ text: `agent "${leaf.name}" not in the current snapshot` }];
       const { agent, rig, pod } = found;
-      lines.push({ text: `agent ${agent.name}` });
-      lines.push({ text: `  rig ${rig.name} · pod ${pod.name} · runtime ${agent.runtime}` });
-      if (agent.spec && findSpec(snap, agent.spec))
-        lines.push({ text: `  spec ${agent.spec}  (open: spec-of ${agent.name})`, action: { type: "cross", kind: "spec-of", name: agent.name, target: { host: found.host.name, rig: rig.name, pod: pod.name } } });
-      else if (agent.spec) lines.push({ text: `  spec ${agent.spec}  (not in library)` });
-      lines.push({ text: `  state ${agent.status}` });
-      if (agent.attach) lines.push({ text: `  attach: ${agent.attach}` });
-      lines.push({ text: `  term ▸ (open pod terminal)`, action: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${pod.name}` } });
-      return lines;
+      const specInLibrary = !!agent.spec && !!findSpec(snap, agent.spec);
+      return detailPage({ text: `agent ${agent.name}` }, [
+        {
+          title: "seat",
+          fields: [
+            { label: "state", value: agent.status },
+            { label: "host", value: found.host.name },
+            { label: "rig", value: rig.name },
+            { label: "pod", value: pod.name },
+            { label: "runtime", value: agent.runtime },
+            {
+              label: "context",
+              value: agent.context == null ? "— (not yet known)" : `${agent.context}% used · ${agent.tokens ?? "—"} tokens`,
+            },
+          ],
+        },
+        {
+          title: "spec",
+          fields: [
+            specInLibrary
+              ? {
+                  label: "spec",
+                  value: agent.spec,
+                  link: { type: "cross", kind: "spec-of", name: agent.name, target: { host: found.host.name, rig: rig.name, pod: pod.name } },
+                }
+              : { label: "spec", value: agent.spec ? `${agent.spec}  (not in library)` : "—" },
+          ],
+        },
+        {
+          title: "actions",
+          fields: [
+            ...(agent.attach ? [{ label: "attach", value: agent.attach }] : []),
+            {
+              label: "terminal",
+              value: `term ▸ pod ${pod.name}`,
+              link: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${pod.name}` },
+            },
+          ],
+        },
+      ]);
     }
     const rigName = state.drill.find((d) => d.kind === "rig")?.name ?? snap.hosts[0]?.rigs[0]?.name;
     const hostName = state.drill.find((d) => d.kind === "host")?.name;
@@ -157,12 +212,27 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
     lines.push(...tabsLine(state, suffix));
     lines.push({ text: state.filter ? `/ filter agents: ${state.filter}` : "/ filter agents…" });
     if (state.viewTab === "overview") {
-      lines.push({ text: `rig ${rig.name} — ${rig.pods.length} pods · ${all.length} agents` });
-      for (const pod of rig.pods)
-        lines.push({
-          text: `  ▾ ${pod.name} — ${pod.agents.length} agents`,
-          action: { type: "drill", resource: "pod", name: pod.name, target: { host: host.name, rig: rig.name } },
-        });
+      lines.push(
+        ...detailPage({ text: `rig ${rig.name}` }, [
+          {
+            title: "rig",
+            fields: [
+              { label: "host", value: host.name },
+              { label: "shape", value: `${rig.pods.length} pods · ${all.length} agents` },
+              ...(rig.lifecycleState ? [{ label: "state", value: rig.lifecycleState }] : []),
+            ],
+          },
+          {
+            title: "pods",
+            lines: rig.pods.map((pod) =>
+              listItem(
+                alignedRow([[pod.name, 14], [`${pod.agents.length} agents`, 10], [pod.agents.map((a) => a.status).filter((s, i, arr) => arr.indexOf(s) === i).join(" · "), 40]]),
+                { type: "drill", resource: "pod", name: pod.name, target: { host: host.name, rig: rig.name } },
+              ),
+            ),
+          },
+        ]),
+      );
       return lines;
     }
     lines.push({ text: tableRow(AGENT_COLS.map(([name]) => name)) });
@@ -212,7 +282,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
       if (!spec) return [{ text: `spec "${leaf.name}" not in the current snapshot` }];
       if (spec.kind === "rig") {
         lines.push(specTabsLine(state, spec.name));
-        if (spec.sourcePath) lines.push({ text: `  source: ${displayPath(spec.sourcePath)} · ${sourceProvenance(spec)}` });
+        if (spec.sourcePath) lines.push(fieldLine({ label: "source", value: `${displayPath(spec.sourcePath, 56)} · ${sourceProvenance(spec)}` }));
         if (state.viewTab === "topology") {
           lines.push({ text: `  topology · nodes ${spec.graph?.nodes.length ?? 0} · edges ${spec.graph?.edges.length ?? 0}` });
           for (const node of spec.graph?.nodes ?? [])
@@ -228,55 +298,103 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
         }
         const members = spec.pods?.reduce((count, pod) => count + pod.members.length, 0) ?? spec.legacyNodes?.length ?? 0;
         const edges = (spec.edges?.length ?? 0) + (spec.pods?.reduce((count, pod) => count + pod.edges.length, 0) ?? 0);
-        if (spec.format)
-          lines.push({ text: `  format ${spec.format.replace("_", "-")} · pods ${spec.pods?.length ?? 0} · members ${members} · edges ${edges}` });
-        for (const pod of spec.pods ?? []) {
-          lines.push({ text: `  ${pod.namespace ?? pod.id} (pod)${pod.label ? ` · ${pod.label}` : ""}` });
-          for (const member of pod.members)
-            lines.push({
-              text: `    ${member.id} → ${member.agentRef} · ${member.runtime}${member.profile ? ` · profile ${member.profile}` : ""}`,
-              action: { type: "drill", resource: "spec", name: member.agentRef },
-            });
-          for (const edge of pod.edges)
-            lines.push({ text: `    edge ${edge.from} → ${edge.to} (${edge.kind})` });
-        }
-        for (const node of spec.legacyNodes ?? [])
-          lines.push({ text: `  ${node.id} · ${node.runtime}${node.role ? ` · ${node.role}` : ""}` });
-        if ((spec.edges?.length ?? 0) > 0) {
-          lines.push({ text: "  cross-pod edges:" });
-          for (const edge of spec.edges ?? []) lines.push({ text: `    ${edge.from} → ${edge.to} (${edge.kind})` });
-        }
+        lines.push(
+          ...detailPage({ text: "" }, [
+            {
+              fields: [
+                ...(spec.format ? [{ label: "format", value: spec.format.replace("_", "-") }] : []),
+                { label: "shape", value: `${spec.pods?.length ?? 0} pods · ${members} members · ${edges} edges` },
+              ],
+            },
+            ...(spec.pods ?? []).map((pod) => ({
+              title: `pod ${pod.namespace ?? pod.id}${pod.label ? ` — ${pod.label}` : ""}`,
+              lines: [
+                ...pod.members.map((member) =>
+                  listItem(
+                    `${alignedRow([[member.id, 12], [member.agentRef, 34], [member.runtime, 12]])}${member.profile ? ` profile ${member.profile}` : ""}`,
+                    { type: "drill", resource: "spec", name: member.agentRef },
+                  ),
+                ),
+                ...pod.edges.map((edge) => ({ text: `    ${edge.from} → ${edge.to}  (${edge.kind})` })),
+                // an empty pod still exists — render it honestly, never skip it
+                ...(pod.members.length === 0 && pod.edges.length === 0 ? [{ text: "  (no members)" }] : []),
+              ],
+            })),
+            ...(spec.legacyNodes?.length
+              ? [{ title: "nodes", lines: spec.legacyNodes.map((node) => listItem(`${alignedRow([[node.id, 16], [node.runtime, 12]])}${node.role ? ` ${node.role}` : ""}`)) }]
+              : []),
+            ...((spec.edges?.length ?? 0) > 0
+              ? [{ title: "cross-pod edges", lines: (spec.edges ?? []).map((edge) => ({ text: `  ${edge.from} → ${edge.to}  (${edge.kind})` })) }]
+              : []),
+          ]).slice(1),
+        );
+      } else if (spec.kind === "workflow") {
+        lines.push(
+          ...detailPage({ text: `workflow spec ${spec.name}${spec.version ? `  ·  v${spec.version}` : ""}` }, [
+            {
+              title: "workflow",
+              fields: [
+                { label: "roles", value: spec.rolesCount != null ? String(spec.rolesCount) : "—" },
+                { label: "steps", value: spec.stepsCount != null ? String(spec.stepsCount) : "—" },
+                { label: "status", value: spec.workflowStatus ?? "—" },
+              ],
+            },
+            {
+              title: "source",
+              fields: [{ label: "source", value: spec.sourcePath ? `${displayPath(spec.sourcePath)} · ${sourceProvenance(spec)}` : "—" }],
+            },
+          ]),
+        );
       } else {
-        lines.push({ text: `agent spec ${spec.name}${spec.version ? ` · v${spec.version}` : ""}` });
-        if (spec.description) lines.push({ text: `  ${spec.description}` });
-        lines.push({ text: `  runtime ${spec.runtime ?? "—"}` });
-        if (spec.skills) lines.push(...wrappedList("  skills: ", spec.skills));
-        if (spec.hasGuidance != null) lines.push({ text: `  guidance: ${spec.hasGuidance ? "yes" : "no"}` });
-        if (spec.startupFiles)
-          for (const f of spec.startupFiles)
-            lines.push({ text: `  startup: ${f.path}${f.required ? " (required)" : ""}` });
-        if (spec.profiles?.length) lines.push({ text: `  profiles: ${spec.profiles.join(", ")}` });
-        if (spec.resources) {
-          const resources = [
-            spec.resources.guidance.length ? `guidance ${spec.resources.guidance.join(", ")}` : "",
-            spec.resources.plugins.length ? `plugins ${spec.resources.plugins.join(", ")}` : "",
-            spec.resources.subagents.length ? `subagents ${spec.resources.subagents.join(", ")}` : "",
-          ].filter(Boolean);
-          lines.push({ text: `  resources: ${resources.join(" · ") || "(none beyond skills)"}` });
-        }
-        if (spec.sourcePath) lines.push({ text: `  source: ${displayPath(spec.sourcePath)} · ${sourceProvenance(spec)}` });
-        if ((spec.usedByRigs?.length ?? 0) === 0) lines.push({ text: "  used by rigs: —" });
-        else
-          for (const rig of spec.usedByRigs ?? [])
-            lines.push({
-              text: `  used by rig ${rig}  (open ▸)`,
-              action: { type: "drill", resource: "spec", name: rig },
-            });
+        // the mockup's agent-spec frame IS the field-grid reference — recreate it
         const seats = agentsRunningSpec(snap, spec.name);
-        lines.push({
-          text: `  seats now: ${seats.join(", ") || "(none)"}  (open: running ${spec.name})`,
-          action: { type: "cross", kind: "running", name: spec.name },
-        });
+        const resources = [
+          spec.resources?.guidance.length ? `guidance ${spec.resources.guidance.join(", ")}` : "",
+          spec.resources?.plugins.length ? `plugins ${spec.resources.plugins.join(", ")}` : "",
+          spec.resources?.subagents.length ? `subagents ${spec.resources.subagents.join(", ")}` : "",
+        ].filter(Boolean);
+        lines.push(
+          ...detailPage({ text: `agent spec ${spec.name}${spec.version ? `  ·  v${spec.version}` : ""}` }, [
+            {
+              title: "spec",
+              fields: [
+                ...(spec.description ? [{ label: "about", value: spec.description }] : []),
+                { label: "runtime", value: spec.runtime ?? "—" },
+              ],
+              lines: spec.skills ? fieldWrapped("skills", spec.skills) : [],
+            },
+            {
+              title: "startup",
+              fields: [
+                ...(spec.hasGuidance != null ? [{ label: "guidance", value: spec.hasGuidance ? "yes" : "no" }] : []),
+                ...(spec.startupFiles ?? []).map((f) => ({ label: "startup", value: `${f.path}${f.required ? "  (required)" : ""}` })),
+                ...(spec.profiles?.length ? [{ label: "profiles", value: spec.profiles.join(", ") }] : []),
+                ...(spec.resources ? [{ label: "resources", value: resources.join(" · ") || "(none beyond skills)" }] : []),
+              ],
+            },
+            {
+              title: "source",
+              fields: [{ label: "source", value: spec.sourcePath ? `${displayPath(spec.sourcePath, 56)} · ${sourceProvenance(spec)}` : "—" }],
+            },
+            {
+              title: "where it runs",
+              fields: [
+                ...((spec.usedByRigs?.length ?? 0) === 0
+                  ? [{ label: "used by", value: "—" }]
+                  : (spec.usedByRigs ?? []).map((rig) => ({
+                      label: "used by",
+                      value: `rig ${rig}`,
+                      link: { type: "drill", resource: "spec", name: rig } as Action,
+                    }))),
+                {
+                  label: "seats now",
+                  value: seats.join(", ") || "(none)",
+                  link: { type: "cross", kind: "running", name: spec.name },
+                },
+              ],
+            },
+          ]),
+        );
       }
       return lines;
     }
@@ -307,7 +425,8 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
       lines.push({ text: "  hosts/rigs down:" });
       // NB: glyphs here must be single-cell — U+26D4 ⛔ is emoji-width (2 cells)
       // and wraps a full-width padded line, shearing every row below it.
-      for (const h of snap.hostsDown) lines.push({ text: `  ✖ ${h.hostId} — ${h.status}${h.error ? ` (${h.error})` : ""}` });
+      for (const h of snap.hostsDown)
+        lines.push({ text: `  ✖ ${alignedRow([[h.hostId, 28], [h.status, 26]])} ${h.error ?? ""}`.trimEnd() });
     }
     lines.push({ text: "" });
     if (!snap.humanQueueProbed) lines.push({ text: "  human-queue: not yet known (read pending)" });

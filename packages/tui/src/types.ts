@@ -103,6 +103,10 @@ export interface SpecEntry {
   graph?: SpecGraphData;
   raw?: string;
   legacyNodes?: Array<{ id: string; runtime: string; role?: string; model?: string }>;
+  /** workflow library entries (served on the library list read) */
+  rolesCount?: number;
+  stepsCount?: number;
+  workflowStatus?: string;
 }
 
 export interface NeedsItem {

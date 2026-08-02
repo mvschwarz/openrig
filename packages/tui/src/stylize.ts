@@ -39,17 +39,33 @@ function paintExplorer(text: string, s: Style): string {
   return text;
 }
 
-/** amber alert line with the trailing link kept accent */
+/** alert line with in-row hierarchy: glyph+kind toned, host dim, target
+ * bright, detail dim, link accent — same fact, same place, same color. */
 function paintAlertLine(text: string, token: "warn" | "error", s: Style): string {
   const openAt = text.indexOf("(open ▸)");
-  if (openAt >= 0)
-    return s.paint(token, text.slice(0, openAt)) + s.paint("accent", "(open ▸)", { bold: true }) + text.slice(openAt + "(open ▸)".length);
-  return s.paint(token, text);
+  const body = openAt >= 0 ? text.slice(0, openAt) : text;
+  const suffix = openAt >= 0 ? s.paint("accent", "(open ▸)", { bold: true }) + text.slice(openAt + "(open ▸)".length) : "";
+  const cols = body.match(/^(\s*[⚑☐✖] )(\S+\s+)(\[[^\]]*\]\s+)?(\S+\s+)(.*)$/);
+  if (!cols)
+    return s.paint(token, body) + suffix;
+  return (
+    s.paint(token, cols[1]! + cols[2]!) +
+    (cols[3] ? s.paint("dim", cols[3]) : "") +
+    s.paint("bright", cols[4]!) +
+    s.paint("dim", cols[5] ?? "") +
+    suffix
+  );
 }
 
 function paintContent(text: string, s: Style): string {
   if (text.trim() === "") return text;
   if (/\bRIG\b.*\bAGENT\b.*\bSTATUS\b/.test(text)) return s.paint("accentBright", text, { bold: true });
+  // detail vocabulary: section rule "  ── title ────"
+  const rule = text.match(/^( {2})── (.+?) (─+)$/);
+  if (rule) return `${rule[1]}${s.paint("chrome", "──")} ${s.paint("bright", rule[2]!, { bold: true })} ${s.paint("chrome", rule[3]!)}`;
+  // detail vocabulary: field row "  label:      value" → dim label, inline-painted value
+  const field = text.match(/^( {2})([a-z][a-z0-9 -]{0,14}:)( +)(\S.*)$/);
+  if (field) return `${field[1]}${s.paint("dim", field[2]!)}${field[3]}${paintInline(field[4]!, s)}`;
   if (/^(SPEC LIBRARY|NEEDS-YOU|agent spec |rig spec |agent |seats running spec )/.test(text.trimStart()) && !text.includes("│"))
     return paintTitleLine(text, s);
   if (/^\s*\/ filter/.test(text)) return s.paint("dim", text);

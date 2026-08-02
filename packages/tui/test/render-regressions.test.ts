@@ -154,12 +154,13 @@ describe("live visual regressions", () => {
 
     const screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
     const output = screen.lines.join("\n");
-    expect(output).toContain("source: …/");
+    expect(output).toMatch(/source:\s+…\//);
     expect(output).toContain("adversarial-review/rig.yaml · user library");
-    expect(output).toContain("format pod-aware · pods 1 · members 1 · edges 1");
-    expect(output).toContain("review (pod)");
-    expect(output).toContain("r1 → independent-reviewer · claude-code · profile default");
-    expect(output).toContain("orch.lead → review.r1 (delegates_to)");
+    expect(output).toMatch(/format:\s+pod-aware/);
+    expect(output).toMatch(/shape:\s+1 pods · 1 members · 1 edges/);
+    expect(output).toMatch(/── pod review/);
+    expect(output).toMatch(/▪ r1\s+independent-reviewer\s+claude-code\s+profile default/);
+    expect(output).toMatch(/orch\.lead → review\.r1\s+\(delegates_to\)/);
     const memberY = screen.lines.findIndex((line) => line.includes("independent-reviewer")) + 1;
     expect(screen.hitMap).toContainEqual(expect.objectContaining({
       y: memberY,
@@ -200,15 +201,15 @@ describe("live visual regressions", () => {
 
     const initial = renderScreen(view.get(), snap, { cols: 100, rows: 12 });
     view.dispatch({ type: "layout", contentMaxOffset: initial.contentMaxOffset, contentTargetCount: initial.contentTargets.length });
-    expect(initial.lines.join("\n")).not.toContain("pod-17 (pod)");
+    expect(initial.lines.join("\n")).not.toContain("pod pod-17");
     const scrollY = initial.lines.findIndex((line) => line.includes("content ↑/↓")) + 1;
     expect(initial.hitMap).toContainEqual(expect.objectContaining({
       y: scrollY,
       action: { type: "content-scroll", delta: 10 },
     }));
-    view.dispatch({ type: "content-scroll", delta: 20 });
+    view.dispatch({ type: "content-scroll", delta: 60 }); // clamps to max; content grew to ~3 lines/pod under the section vocabulary
     const scrolled = renderScreen(view.get(), snap, { cols: 100, rows: 12 }).lines.join("\n");
-    expect(scrolled).toContain("pod-17 (pod)");
+    expect(scrolled).toContain("pod pod-17");
     expect(view.get().selection).toBe(selected);
     expect(scrolled).toContain("content ↑/↓");
   });
@@ -244,10 +245,10 @@ describe("live visual regressions", () => {
 
     const screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
     const output = screen.lines.join("\n");
-    expect(output).toContain("runtime claude-code");
+    expect(output).toMatch(/runtime:\s+claude-code/);
     expect(output).toContain("brainstorming");
-    expect(output).toContain("resources: guidance guidance/role.md · plugins openrig-core · subagents reviewer");
-    const usedY = screen.lines.findIndex((line) => line.includes("used by rig adversarial-review")) + 1;
+    expect(output).toMatch(/resources:\s+guidance guidance\/role\.md · plugins openrig-core · subagents reviewer/);
+    const usedY = screen.lines.findIndex((line) => line.includes("rig adversarial-review")) + 1;
     expect(screen.hitMap).toContainEqual(expect.objectContaining({
       y: usedY,
       action: { type: "drill", resource: "spec", name: "adversarial-review" },
