@@ -409,7 +409,26 @@ describe("Starter specs", () => {
     }
     const claudeSettingsResource = sharedRuntimeResources.find((entry) => entry.id === "claude-default-settings");
     const claudeSettings = JSON.parse(readFileSync(join(SPECS_ROOT, "agents/shared", claudeSettingsResource!.path), "utf-8"));
-    expect(claudeSettings.permissions.allow).toEqual(["Bash(rig:*)"]);
+    // Slice 16 (item 1): the shipped fragment carries the dev toolchain a TDD
+    // factory needs (git / npm / node / tsc + edit tools) so fresh product-team
+    // seats don't stall on permission prompts. This assertion is the deliberate
+    // security GATE — any FURTHER widening beyond this authorized set must update
+    // it consciously. `rig up`/`rig down` stay behind the ask gate.
+    expect(claudeSettings.permissions.allow).toEqual([
+      "Bash(rig:*)",
+      "Bash(git:*)",
+      "Bash(npm:*)",
+      "Bash(npx:*)",
+      "Bash(pnpm:*)",
+      "Bash(yarn:*)",
+      "Bash(node:*)",
+      "Bash(tsc:*)",
+      "Bash(vitest:*)",
+      "Bash(jest:*)",
+      "Read",
+      "Edit",
+      "Write",
+    ]);
     expect(claudeSettings.permissions.ask).toEqual(["Bash(rig up:*)", "Bash(rig down:*)"]);
     expect(claudeSettings.permissions.deny).toBeUndefined();
 

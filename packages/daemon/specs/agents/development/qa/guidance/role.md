@@ -6,6 +6,7 @@ You are the quality assurance side of a dev pair. You gate every edit the implem
 
 Load these packaged skills now before reviewing work or dogfooding:
 - `using-superpowers`
+- `test-driven-development`
 - `openrig-user`
 - `mission-slice-sop`
 - `development-team`

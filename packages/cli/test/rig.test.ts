@@ -152,6 +152,44 @@ describe("rig spec", () => {
     expect(exitCode).toBe(1);
   });
 
+  // Slice 16 (item 2): rig spec audit flags stale seat ids in the culture.
+  function rigDepsMap(files: Record<string, string>): RigDeps {
+    return {
+      lifecycleDeps: runningLifecycleDeps(port),
+      clientFactory: (baseUrl) => new DaemonClient(baseUrl),
+      readFile: vi.fn((p: string) => {
+        const key = Object.keys(files).find((k) => p.endsWith(k));
+        if (key === undefined) throw new Error(`no such file: ${p}`);
+        return files[key]!;
+      }),
+    };
+  }
+
+  it("rig spec audit: flags a stale culture seat id after a rename", async () => {
+    const rigYaml = "schema_version: 1\nname: t\nculture_file: CULTURE.md\npods:\n  - id: dev1\n    members:\n      - id: builder\n      - id: qa\n";
+    // culture still names the OLD id `dev1.impl` (renamed to dev1.builder)
+    const culture = "The dev pod: `dev1.builder` builds, dispatch to `dev1.impl` for legacy, `dev1.qa` gates.";
+    const deps = rigDepsMap({ "rig.yaml": rigYaml, "CULTURE.md": culture });
+    const program = new Command();
+    program.addCommand(rigCommand(deps));
+    const { logs } = await captureLogs(() => program.parseAsync(["node", "rig", "spec", "audit", "/x/rig.yaml", "--json"]));
+    const result = JSON.parse(logs.join("\n"));
+    const stale = result.findings.find((f: { kind: string }) => f.kind === "stale_culture_seat_id");
+    expect(stale).toBeDefined();
+    expect(stale.message).toContain("dev1.impl");
+  });
+
+  it("rig spec audit: consistent culture ids → no stale finding; a file path is not a false positive", async () => {
+    const rigYaml = "schema_version: 1\nname: t\nculture_file: CULTURE.md\nstartup:\n  files: [x.md]\npods:\n  - id: dev1\n    members:\n      - id: impl\n";
+    const culture = "The `dev1.impl` implements. See `docs/reference.md` and `README.md`.";
+    const deps = rigDepsMap({ "rig.yaml": rigYaml, "CULTURE.md": culture });
+    const program = new Command();
+    program.addCommand(rigCommand(deps));
+    const { logs } = await captureLogs(() => program.parseAsync(["node", "rig", "spec", "audit", "/x/rig.yaml", "--json"]));
+    const result = JSON.parse(logs.join("\n"));
+    expect(result.findings.map((f: { kind: string }) => f.kind)).not.toContain("stale_culture_seat_id");
+  });
+
   // T4: rig spec preflight -> exit 0, output contains "ready" + warnings
   it("rig spec preflight ready: prints ready + warnings", async () => {
     const deps = rigDeps("schema_version: 1\nname: test-rig\nnodes: []\n");

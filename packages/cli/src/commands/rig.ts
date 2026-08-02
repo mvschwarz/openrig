@@ -51,12 +51,59 @@ export function rigCommand(depsOverride?: RigDeps): Command {
 
       const spec = parsed as Record<string, unknown>;
       const findings: Array<{ kind: string; message: string; typicalFix: string }> = [];
-      if (typeof spec["culture_file"] !== "string" || spec["culture_file"].trim() === "") {
+      const cultureFile = typeof spec["culture_file"] === "string" ? spec["culture_file"].trim() : "";
+      if (cultureFile === "") {
         findings.push({
           kind: "missing_culture",
           message: "No culture_file is declared.",
           typicalFix: "Author CULTURE.md and add culture_file: CULTURE.md. See the openrig-architect skill's authoring workflow.",
         });
+      } else {
+        // Slice 16 (item 2): a seat rename in rig.yaml must not leave STALE seat ids
+        // in the culture that materializes into each seat's AGENTS.md/CLAUDE.md
+        // (misdirects seat-to-seat addressing). Flag any `pod.member` reference in
+        // the culture whose pod exists but whose full seat id is not a current seat.
+        const knownPods = new Set<string>();
+        const knownSeats = new Set<string>();
+        const pods = Array.isArray(spec["pods"]) ? (spec["pods"] as Array<Record<string, unknown>>) : [];
+        for (const pod of pods) {
+          const podId = typeof pod?.["id"] === "string" ? (pod["id"] as string) : null;
+          if (!podId) continue;
+          knownPods.add(podId);
+          const members = Array.isArray(pod["members"]) ? (pod["members"] as Array<Record<string, unknown>>) : [];
+          for (const m of members) {
+            const mid = typeof m?.["id"] === "string" ? (m["id"] as string) : null;
+            if (mid) knownSeats.add(`${podId}.${mid}`);
+          }
+        }
+        const culturePath = nodePath.isAbsolute(cultureFile) ? cultureFile : nodePath.join(nodePath.dirname(filePath), cultureFile);
+        let cultureText: string | null = null;
+        try { cultureText = deps.readFile(culturePath); } catch { cultureText = null; }
+        if (cultureText === null) {
+          findings.push({
+            kind: "culture_unreadable",
+            message: `culture_file '${cultureFile}' is declared but could not be read at ${culturePath}.`,
+            typicalFix: "Ensure the culture file exists beside the rig spec.",
+          });
+        } else if (knownPods.size > 0) {
+          // Only backtick-wrapped `pod.member` tokens whose pod is a known pod —
+          // avoids false positives on file paths (docs/x.md), versions, etc.
+          const stale = new Set<string>();
+          const re = /`([a-z0-9_-]+)\.([a-z0-9_-]+)`/gi;
+          let match: RegExpExecArray | null;
+          while ((match = re.exec(cultureText)) !== null) {
+            const pod = match[1]!.toLowerCase();
+            const seat = `${pod}.${match[2]!.toLowerCase()}`;
+            if (knownPods.has(pod) && !knownSeats.has(seat)) stale.add(seat);
+          }
+          for (const seat of [...stale].sort()) {
+            findings.push({
+              kind: "stale_culture_seat_id",
+              message: `culture references seat id '${seat}', which is not a current seat in rig.yaml (renamed or removed).`,
+              typicalFix: "Update the culture block to the current seat id (a rename in rig.yaml must be mirrored in CULTURE.md).",
+            });
+          }
+        }
       }
 
       const startup = spec["startup"];
