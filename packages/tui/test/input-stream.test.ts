@@ -26,4 +26,13 @@ describe("stateful stdin decoding", () => {
       expect(decoder.write(bytes.subarray(split))).toEqual([{ type: "char", ch: "界" }]);
     }
   });
+
+  it("defines EOF flush for an incomplete CSI prefix", () => {
+    const decoder = createInputDecoder();
+    expect(decoder.write("\x1b[")).toEqual([]);
+    expect(decoder.flush()).toEqual([
+      { type: "key", key: "escape" },
+      { type: "char", ch: "[" },
+    ]);
+  });
 });

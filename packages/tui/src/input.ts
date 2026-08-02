@@ -72,7 +72,6 @@ function parseText(text: string, final: boolean): { events: InputEvent[]; remain
 export interface InputDecoder {
   write(bytes: string | Buffer): InputEvent[];
   flush(): InputEvent[];
-  hasPending(): boolean;
 }
 
 /** Stateful terminal-stream decoder: retains split escape sequences and uses
@@ -92,7 +91,6 @@ export function createInputDecoder(): InputDecoder {
       pending = parsed.remainder;
       return parsed.events;
     },
-    hasPending: () => pending.length > 0,
   };
 }
 

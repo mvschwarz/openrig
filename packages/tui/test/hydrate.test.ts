@@ -251,6 +251,8 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
       { ...base, logicalId: "dev.attention", startupStatus: "attention_required", lifecycleState: "attention_required", terminalActive: false },
       { ...base, logicalId: "dev.input", startupStatus: "ready", agentActivity: { state: "needs_input" }, terminalActive: true },
       { ...base, logicalId: "dev.active", startupStatus: "ready", agentActivity: { state: "running" }, terminalActive: true },
+      { ...base, logicalId: "dev.mismatch", startupStatus: "ready", lifecycleState: "attention_required", agentActivity: { state: "running" }, terminalActive: true, identityVerdict: { verdict: "mismatch" } },
+      { ...base, logicalId: "dev.missing", startupStatus: "ready", lifecycleState: "attention_required", agentActivity: { state: "running" }, terminalActive: true, identityVerdict: { verdict: "pane_missing" } },
     ];
     const snap = await hydrateSnapshot(fixtureClient({}, { "/api/rigs/01JRIG/nodes": nodes }));
     const statuses = Object.fromEntries(snap.hosts[0]!.rigs[0]!.pods[0]!.agents.map((agent) => [agent.name, agent.status]));
@@ -259,6 +261,8 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
       "dev.attention": "attention_required",
       "dev.input": "needs_input",
       "dev.active": "active",
+      "dev.mismatch": "attention_required",
+      "dev.missing": "attention_required",
     });
   });
 

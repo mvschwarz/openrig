@@ -37,6 +37,7 @@ interface NodeInventoryRead {
   startupStatus?: string | null;
   terminalActive?: boolean | null;
   agentActivity?: { state?: string } | null;
+  identityVerdict?: { verdict?: string } | null;
   canonicalSessionName: string | null;
   tmuxAttachCommand?: string | null;
   resolvedSpecName: string | null;
@@ -123,6 +124,8 @@ function fmtTokens(input: number | null, output: number | null): string | null {
 function toAgentRow(node: NodeInventoryRead): AgentRow {
   const ctx = node.contextUsage;
   const known = ctx?.availability === "known";
+  const identityDownranked = node.identityVerdict?.verdict === "mismatch"
+    || node.identityVerdict?.verdict === "pane_missing";
   return {
     name: node.logicalId,
     runtime: node.runtime ?? "unknown",
@@ -134,7 +137,7 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
     // while session/terminal activity drives the visible status label.
     status: node.startupStatus === "failed"
       ? "failed"
-      : node.startupStatus === "attention_required"
+      : node.lifecycleState === "attention_required" || identityDownranked || node.startupStatus === "attention_required"
         ? "attention_required"
         : node.agentActivity?.state === "needs_input"
           ? "needs_input"

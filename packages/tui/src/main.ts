@@ -38,7 +38,6 @@ async function run(): Promise<void> {
   let inputLine = "";
   let lastScreen: Screen | null = null;
   const inputDecoder = createInputDecoder();
-  let inputFlushTimer: NodeJS.Timeout | null = null;
 
   function draw(): void {
     const cols = process.stdout.columns ?? 120;
@@ -149,14 +148,10 @@ async function run(): Promise<void> {
   }
 
   process.stdin.on("data", (bytes: Buffer) => {
-    if (inputFlushTimer) clearTimeout(inputFlushTimer);
     handleInput(inputDecoder.write(bytes));
-    if (inputDecoder.hasPending()) {
-      inputFlushTimer = setTimeout(() => {
-        inputFlushTimer = null;
-        handleInput(inputDecoder.flush());
-      }, 25);
-    }
+  });
+  process.stdin.on("end", () => {
+    handleInput(inputDecoder.flush());
   });
 
   process.stdout.write(ALT_SCREEN_ON + MOUSE_ENABLE);
