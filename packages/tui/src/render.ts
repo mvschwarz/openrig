@@ -21,12 +21,15 @@ interface ContentLine {
 
 function pad(text: string | number | null | undefined, width: number): string {
   const t = String(text ?? "");
-  return t.length >= width ? t.slice(0, width) : t + " ".repeat(width - t.length);
+  if (t.length <= width) return t + " ".repeat(width - t.length);
+  // never hard-clip mid-word: any truncation reads as an ellipsis (glance honesty)
+  return t.slice(0, Math.max(width - 1, 0)) + "…";
 }
 
 function padLeft(text: string | number | null | undefined, width: number): string {
   const t = String(text ?? "");
-  return t.length >= width ? t.slice(0, width) : " ".repeat(width - t.length) + t;
+  if (t.length <= width) return " ".repeat(width - t.length) + t;
+  return t.slice(0, Math.max(width - 1, 0)) + "…";
 }
 
 type Align = "left" | "right";

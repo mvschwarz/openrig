@@ -80,3 +80,13 @@ describe("unfocused-pane cursor dims (pm-approved nit)", () => {
     for (let i = 0; i < styled.length; i++) expect(stripAnsi(styled[i]!)).toBe(screen.lines[i]!);
   });
 });
+
+describe("truncation reads as ellipsis, never a hard mid-word clip", () => {
+  it("clips long explorer labels and long cells with …", () => {
+    const s = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    const screen = renderScreen(s.get(), snap, { cols: 60, rows: 20 });
+    const clipped = screen.lines.filter((l) => l.includes("…"));
+    expect(clipped.length).toBeGreaterThan(0);
+    for (const line of screen.lines) expect(line.length).toBeLessThanOrEqual(60);
+  });
+});
