@@ -39,6 +39,34 @@ export interface HostNode {
 
 export type SpecKind = "rig" | "agent" | "workflow";
 
+export interface RigSpecMember {
+  id: string;
+  agentRef: string;
+  runtime: string;
+  profile?: string;
+}
+
+export interface RigSpecEdge {
+  from: string;
+  to: string;
+  kind: string;
+}
+
+export interface RigSpecPod {
+  id: string;
+  namespace?: string;
+  label?: string;
+  members: RigSpecMember[];
+  edges: RigSpecEdge[];
+}
+
+export interface AgentSpecResources {
+  skills: string[];
+  guidance: string[];
+  plugins: string[];
+  subagents: string[];
+}
+
 export interface SpecEntry {
   name: string;
   kind: SpecKind;
@@ -48,11 +76,22 @@ export interface SpecEntry {
   usedByRigs?: string[];
   /** structured detail from existing reads (library list + /:id/review), verbatim */
   version?: string;
+  sourceState?: "draft" | "file_preview" | "library_item";
+  sourceType?: "builtin" | "user_file";
   sourcePath?: string;
+  relativePath?: string;
+  /** Agent library folder grouping, e.g. review/ or orchestration/. */
+  namespace?: string;
   description?: string;
   skills?: string[];
   hasGuidance?: boolean;
   startupFiles?: Array<{ path: string; required: boolean }>;
+  profiles?: string[];
+  resources?: AgentSpecResources;
+  format?: "pod_aware" | "legacy";
+  pods?: RigSpecPod[];
+  edges?: RigSpecEdge[];
+  legacyNodes?: Array<{ id: string; runtime: string; role?: string; model?: string }>;
 }
 
 export interface NeedsItem {

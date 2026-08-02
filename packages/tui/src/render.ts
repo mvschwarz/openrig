@@ -60,6 +60,24 @@ function needsLine(prefix: string, item: NeedsItem, snap: FleetSnapshot): Conten
   };
 }
 
+function sourceProvenance(spec: FleetSnapshot["specs"][number]): string {
+  if (spec.sourceType === "builtin") return "built-in library";
+  if (spec.sourceType === "user_file") return "user library";
+  return spec.sourceState === "library_item" ? "library" : "source unknown";
+}
+
+function displayPath(path: string, max = 68): string {
+  if (path.length <= max) return path;
+  const parts = path.split("/").filter(Boolean);
+  const kept: string[] = [];
+  while (parts.length > 0) {
+    const candidate = [parts.at(-1)!, ...kept];
+    if (`…/${candidate.join("/")}`.length > max) break;
+    kept.unshift(parts.pop()!);
+  }
+  return `…/${kept.join("/")}`;
+}
+
 function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
   const lines: ContentLine[] = [];
   if (state.section === "topology") {
@@ -148,11 +166,29 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
     if (leaf?.kind === "spec") {
       const spec = findSpec(snap, leaf.name);
       if (!spec) return [{ text: `spec "${leaf.name}" not in the current snapshot` }];
-      if (spec.agentRefs) {
+      if (spec.kind === "rig") {
         lines.push({ text: `rig spec ${spec.name}   tabs: topology [ CONFIGURATION ] yaml` });
-        lines.push({ text: "  members:" });
-        for (const ref of spec.agentRefs)
-          lines.push({ text: `    ▪ ${ref}  (open: spec ${ref})`, action: { type: "drill", resource: "spec", name: ref } });
+        if (spec.sourcePath) lines.push({ text: `  source: ${displayPath(spec.sourcePath)} · ${sourceProvenance(spec)}` });
+        const members = spec.pods?.reduce((count, pod) => count + pod.members.length, 0) ?? spec.legacyNodes?.length ?? 0;
+        const edges = (spec.edges?.length ?? 0) + (spec.pods?.reduce((count, pod) => count + pod.edges.length, 0) ?? 0);
+        if (spec.format)
+          lines.push({ text: `  format ${spec.format.replace("_", "-")} · pods ${spec.pods?.length ?? 0} · members ${members} · edges ${edges}` });
+        for (const pod of spec.pods ?? []) {
+          lines.push({ text: `  ${pod.namespace ?? pod.id} (pod)${pod.label ? ` · ${pod.label}` : ""}` });
+          for (const member of pod.members)
+            lines.push({
+              text: `    ${member.id} → ${member.agentRef} · ${member.runtime}${member.profile ? ` · profile ${member.profile}` : ""}`,
+              action: { type: "drill", resource: "spec", name: member.agentRef },
+            });
+          for (const edge of pod.edges)
+            lines.push({ text: `    edge ${edge.from} → ${edge.to} (${edge.kind})` });
+        }
+        for (const node of spec.legacyNodes ?? [])
+          lines.push({ text: `  ${node.id} · ${node.runtime}${node.role ? ` · ${node.role}` : ""}` });
+        if ((spec.edges?.length ?? 0) > 0) {
+          lines.push({ text: "  cross-pod edges:" });
+          for (const edge of spec.edges ?? []) lines.push({ text: `    ${edge.from} → ${edge.to} (${edge.kind})` });
+        }
       } else {
         lines.push({ text: `agent spec ${spec.name}${spec.version ? ` · v${spec.version}` : ""}` });
         if (spec.description) lines.push({ text: `  ${spec.description}` });
@@ -162,8 +198,23 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
         if (spec.startupFiles)
           for (const f of spec.startupFiles)
             lines.push({ text: `  startup: ${f.path}${f.required ? " (required)" : ""}` });
-        if (spec.sourcePath) lines.push({ text: `  source: ${spec.sourcePath}` });
-        lines.push({ text: `  used by rigs: ${spec.usedByRigs?.join(", ") ?? "—"}` });
+        if (spec.profiles?.length) lines.push({ text: `  profiles: ${spec.profiles.join(", ")}` });
+        if (spec.resources) {
+          const resources = [
+            spec.resources.guidance.length ? `guidance ${spec.resources.guidance.join(", ")}` : "",
+            spec.resources.plugins.length ? `plugins ${spec.resources.plugins.join(", ")}` : "",
+            spec.resources.subagents.length ? `subagents ${spec.resources.subagents.join(", ")}` : "",
+          ].filter(Boolean);
+          lines.push({ text: `  resources: ${resources.join(" · ") || "(none beyond skills)"}` });
+        }
+        if (spec.sourcePath) lines.push({ text: `  source: ${displayPath(spec.sourcePath)} · ${sourceProvenance(spec)}` });
+        if ((spec.usedByRigs?.length ?? 0) === 0) lines.push({ text: "  used by rigs: —" });
+        else
+          for (const rig of spec.usedByRigs ?? [])
+            lines.push({
+              text: `  used by rig ${rig}  (open ▸)`,
+              action: { type: "drill", resource: "spec", name: rig },
+            });
         const seats = agentsRunningSpec(snap, spec.name);
         lines.push({
           text: `  seats now: ${seats.join(", ") || "(none)"}  (open: running ${spec.name})`,
@@ -173,6 +224,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
       return lines;
     }
     lines.push({ text: "SPEC LIBRARY" });
+    lines.push({ text: state.filter ? `/ filter specs: ${state.filter}` : "/ filter specs…" });
     for (const kind of ["rig", "agent", "workflow"] as const) {
       const shown = snap.specs.filter((s) => s.kind === kind).filter((s) => !state.filter || s.name.includes(state.filter));
       if (shown.length === 0 && !snap.specs.some((s) => s.kind === kind)) continue;

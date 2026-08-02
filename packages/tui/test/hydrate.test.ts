@@ -17,11 +17,26 @@ const FIXTURES: Record<string, unknown> = {
     rigId: "01JDOWN", rigName: "downrig", isKernel: false, status: "down", seatsTotal: 2, seatsRunning: 0,
     recoverable: true, perSeat: [], src: ["ps: 0/2 running · lifecycle=recoverable"],
   },
+  "/api/specs/library/a1/review": {
+    sourceState: "library_item", kind: "rig", name: "myrig", version: "0.2",
+    format: "pod_aware",
+    pods: [{
+      id: "dev", label: "Development",
+      members: [
+        { id: "impl", agentRef: "local:../../../agents/development/implementer", runtime: "claude-code", profile: "default" },
+        { id: "qa", agentRef: "qa-agent", runtime: "codex", profile: "default" },
+      ],
+      edges: [{ from: "impl", to: "qa", kind: "delegates_to" }],
+    }],
+    edges: [{ from: "dev.impl", to: "review.r1", kind: "collaborates_with" }],
+    graph: { nodes: [], edges: [] }, raw: "name: myrig",
+    libraryEntryId: "a1", sourcePath: "/s/rig.yaml",
+  },
   "/api/specs/library/a2/review": {
     sourceState: "library_item", kind: "agent", name: "implementer", version: "0.1.0",
     description: "Implements locked slices",
     profiles: [{ name: "default" }],
-    resources: { skills: ["tdd", "verification"], guidance: ["guidance.md"], plugins: [], subagents: [] },
+    resources: { skills: ["tdd", "verification"], guidance: ["guidance.md"], plugins: ["openrig-core"], subagents: ["reviewer"] },
     startup: { files: [{ path: "STARTUP.md", required: true }], actions: [] },
     raw: "name: implementer",
   },
@@ -145,11 +160,40 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
       version: "0.1.0",
       sourcePath: "/s/implementer.yaml",
       description: "Implements locked slices",
+      runtime: "claude-code",
       skills: ["tdd", "verification"],
       hasGuidance: true,
       startupFiles: [{ path: "STARTUP.md", required: true }],
+      profiles: ["default"],
+      resources: {
+        skills: ["tdd", "verification"],
+        guidance: ["guidance.md"],
+        plugins: ["openrig-core"],
+        subagents: ["reviewer"],
+      },
     });
-    expect(cache.size).toBe(1); // memoized by id@updatedAt for the refresh loop
+    expect(cache.size).toBe(2); // rig + agent reviews memoized by id@updatedAt
+  });
+
+  it("hydrates the locked rig-spec structure and library provenance from the LIVE /:id/review route", async () => {
+    const snap = await hydrateSnapshot(fixtureClient());
+    expect(snap.specs.find((s) => s.name === "myrig")).toMatchObject({
+      sourceState: "library_item",
+      sourceType: "user_file",
+      sourcePath: "/s/rig.yaml",
+      relativePath: "rig.yaml",
+      format: "pod_aware",
+      pods: [{
+        id: "dev",
+        label: "Development",
+        members: [
+          { id: "impl", agentRef: "implementer", runtime: "claude-code", profile: "default" },
+          { id: "qa", agentRef: "qa-agent", runtime: "codex", profile: "default" },
+        ],
+        edges: [{ from: "impl", to: "qa", kind: "delegates_to" }],
+      }],
+      edges: [{ from: "dev.impl", to: "review.r1", kind: "collaborates_with" }],
+    });
   });
 
   it("maps the human-queue leg and marks it PROBED (proven-empty vs not-yet-known)", async () => {

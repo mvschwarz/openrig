@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { demoSnapshot } from "../src/demo-data.js";
 import { renderScreen } from "../src/render.js";
-import { createViewState } from "../src/state.js";
+import { computeExplorerRows, createViewState } from "../src/state.js";
 import type { FleetSnapshot } from "../src/types.js";
 
 describe("live visual regressions", () => {
@@ -35,7 +35,9 @@ describe("live visual regressions", () => {
     };
     const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
     view.dispatch({ type: "jump", section: "specs" });
-    view.dispatch({ type: "select", index: 18, rowCount: 23 });
+    const rows = computeExplorerRows(view.get(), snap);
+    const target = rows.findIndex((row) => row.label.includes("spec-15"));
+    view.dispatch({ type: "select", index: target, rowCount: rows.length });
 
     const screen = renderScreen(view.get(), snap, { cols: 100, rows: 12 });
     expect(screen.lines.some((line) => line.includes("›") && line.includes("spec-15"))).toBe(true);
@@ -55,5 +57,95 @@ describe("live visual regressions", () => {
     expect(lineIndex).toBeGreaterThanOrEqual(0);
     expect(screen.lines[lineIndex]).not.toContain("open ▸");
     expect(screen.hitMap.some((hit) => hit.y === lineIndex + 1 && hit.x1 > 30)).toBe(false);
+  });
+
+  it("renders the locked rig-spec structure with clickable agent refs", () => {
+    const base = demoSnapshot();
+    const snap: FleetSnapshot = {
+      ...base,
+      specs: [{
+        name: "adversarial-review",
+        kind: "rig",
+        sourceState: "library_item",
+        sourceType: "user_file",
+        sourcePath: "/Users/admin/code/openrig-build-source/packages/daemon/specs/rigs/focused/adversarial-review/rig.yaml",
+        relativePath: "rigs/focused/adversarial-review/rig.yaml",
+        format: "pod_aware",
+        pods: [{
+          id: "review",
+          label: "Review",
+          members: [{ id: "r1", agentRef: "independent-reviewer", runtime: "claude-code", profile: "default" }],
+          edges: [],
+        }],
+        edges: [{ from: "orch.lead", to: "review.r1", kind: "delegates_to" }],
+      }, {
+        name: "independent-reviewer",
+        kind: "agent",
+        relativePath: "agents/review/independent-reviewer/agent.yaml",
+      }],
+    };
+    const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    view.dispatch({ type: "drill", resource: "spec", name: "adversarial-review" });
+
+    const screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
+    const output = screen.lines.join("\n");
+    expect(output).toContain("source: …/");
+    expect(output).toContain("adversarial-review/rig.yaml · user library");
+    expect(output).toContain("format pod-aware · pods 1 · members 1 · edges 1");
+    expect(output).toContain("review (pod)");
+    expect(output).toContain("r1 → independent-reviewer · claude-code · profile default");
+    expect(output).toContain("orch.lead → review.r1 (delegates_to)");
+    const memberY = screen.lines.findIndex((line) => line.includes("independent-reviewer")) + 1;
+    expect(screen.hitMap).toContainEqual(expect.objectContaining({
+      y: memberY,
+      action: { type: "drill", resource: "spec", name: "independent-reviewer" },
+    }));
+  });
+
+  it("renders agent runtime/resources and makes each used-by rig a real reverse link", () => {
+    const base = demoSnapshot();
+    const snap: FleetSnapshot = {
+      ...base,
+      specs: [{ name: "adversarial-review", kind: "rig", agentRefs: ["independent-reviewer"] }, {
+        name: "independent-reviewer",
+        kind: "agent",
+        runtime: "claude-code",
+        profiles: ["default"],
+        resources: {
+          skills: ["review-team"], guidance: ["guidance/role.md"], plugins: ["openrig-core"], subagents: ["reviewer"],
+        },
+        usedByRigs: ["adversarial-review"],
+      }],
+    };
+    const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    view.dispatch({ type: "drill", resource: "spec", name: "independent-reviewer" });
+
+    const screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
+    const output = screen.lines.join("\n");
+    expect(output).toContain("runtime claude-code");
+    expect(output).toContain("resources: guidance guidance/role.md · plugins openrig-core · subagents reviewer");
+    const usedY = screen.lines.findIndex((line) => line.includes("used by rig adversarial-review")) + 1;
+    expect(screen.hitMap).toContainEqual(expect.objectContaining({
+      y: usedY,
+      action: { type: "drill", resource: "spec", name: "adversarial-review" },
+    }));
+  });
+
+  it("shows the Specs filter affordance and groups agent specs by folder namespace", () => {
+    const base = demoSnapshot();
+    const snap: FleetSnapshot = {
+      ...base,
+      specs: [
+        { name: "independent-reviewer", kind: "agent", namespace: "review" },
+        { name: "orchestrator", kind: "agent", namespace: "orchestration" },
+      ],
+    };
+    const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    view.dispatch({ type: "jump", section: "specs" });
+
+    const output = renderScreen(view.get(), snap, { cols: 140, rows: 34 }).lines.join("\n");
+    expect(output).toContain("/ filter specs…");
+    expect(output).toContain("review/");
+    expect(output).toContain("orchestration/");
   });
 });

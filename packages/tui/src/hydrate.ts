@@ -48,13 +48,33 @@ interface SpecLibraryRead {
   name: string;
   version?: string;
   sourcePath?: string;
+  sourceType?: "builtin" | "user_file";
+  relativePath?: string;
   updatedAt?: string;
 }
 interface AgentSpecReviewRead {
+  sourceState?: "draft" | "file_preview" | "library_item";
+  kind: "agent";
   description?: string;
-  resources?: { skills?: string[]; guidance?: string[] };
+  profiles?: Array<{ name: string }>;
+  resources?: { skills?: string[]; guidance?: string[]; plugins?: string[]; subagents?: string[] };
   startup?: { files?: Array<{ path: string; required: boolean }> };
 }
+interface RigSpecReviewRead {
+  sourceState?: "draft" | "file_preview" | "library_item";
+  kind: "rig";
+  format?: "pod_aware" | "legacy";
+  pods?: Array<{
+    id: string;
+    namespace?: string;
+    label?: string;
+    members: Array<{ id: string; agentRef: string; runtime: string; profile?: string }>;
+    edges: Array<{ from: string; to: string; kind: string }>;
+  }>;
+  nodes?: Array<{ id: string; runtime: string; role?: string; model?: string }>;
+  edges?: Array<{ from: string; to: string; kind: string }>;
+}
+type SpecLibraryReviewRead = AgentSpecReviewRead | RigSpecReviewRead;
 interface RigSpecJsonRead {
   name?: string;
   pods?: Array<{ members?: Array<{ agentRef?: string }> }>;
@@ -129,10 +149,20 @@ function resolveAgentRef(ref: string, agentSpecNames: Set<string>): string {
   return basename && agentSpecNames.has(basename) ? basename : ref;
 }
 
+function agentNamespace(relativePath?: string): string | undefined {
+  if (!relativePath) return undefined;
+  const parts = relativePath.replaceAll("\\", "/").split("/").filter(Boolean);
+  const dirs = parts.slice(0, -1);
+  const agentsAt = dirs.lastIndexOf("agents");
+  const candidates = agentsAt >= 0 ? dirs.slice(agentsAt + 1) : dirs;
+  if (parts.at(-1) === "agent.yaml" || parts.at(-1) === "agent.yml") candidates.pop();
+  return candidates.length > 0 ? candidates.join("/") : undefined;
+}
+
 /** Cross-cycle memo for spec-detail reviews, keyed by `${id}@${updatedAt}` —
  * avoids re-reading every spec every refresh; the key rolls when the library
  * entry's updatedAt changes. Owned by the caller (instance-scoped, no module state). */
-export type SpecReviewCache = Map<string, AgentSpecReviewRead>;
+export type SpecReviewCache = Map<string, SpecLibraryReviewRead>;
 
 export async function hydrateSnapshot(client: DaemonClient, reviewCache?: SpecReviewCache): Promise<FleetSnapshot> {
   const readErrors: string[] = [];
@@ -201,32 +231,97 @@ export async function hydrateSnapshot(client: DaemonClient, reviewCache?: SpecRe
     .filter((h) => h.hostId !== "local")
     .map((h) => ({ name: h.hostId, reachable: h.status === "ok", rigs: [] }));
 
-  // Specs: library entries (RIG + AGENT land well, WORKFLOW basics; other
-  // kinds are ABSENT from the library read itself). Rig-spec agentRefs from
-  // spec.json; agent-spec usedByRigs joined from those same refs; agent-spec
-  // structured detail from the LIVE /:id/review route (memoized by updatedAt).
-  async function agentReview(entry: SpecLibraryRead): Promise<AgentSpecReviewRead | null> {
+  // Specs: RIG + AGENT land well by consuming the existing structured review
+  // for BOTH kinds. WORKFLOW remains basics. Reviews are memoized by updatedAt.
+  async function specReview(entry: SpecLibraryRead): Promise<SpecLibraryReviewRead | null> {
     const key = `${entry.id}@${entry.updatedAt ?? ""}`;
     const cached = reviewCache?.get(key);
     if (cached) return cached;
-    const review = await safe<AgentSpecReviewRead>(`spec-review(${entry.name})`, () => client.specLibraryReview(entry.id));
+    const review = await safe<SpecLibraryReviewRead>(`spec-review(${entry.name})`, () => client.specLibraryReview(entry.id));
     if (review && reviewCache) reviewCache.set(key, review);
     return review;
   }
+
+  const reviewed = new Map<string, SpecLibraryReviewRead>();
+  await Promise.all(
+    (library ?? []).filter((entry) => entry.kind !== "workflow").map(async (entry) => {
+      const detail = await specReview(entry);
+      if (detail) reviewed.set(entry.id, detail);
+    }),
+  );
+
+  const reviewedRigRefs = new Map<string, string[]>();
+  const runtimesByAgent = new Map<string, Set<string>>();
+  for (const entry of library ?? []) {
+    const detail = reviewed.get(entry.id);
+    if (entry.kind !== "rig" || detail?.kind !== "rig" || detail.format !== "pod_aware") continue;
+    const refs: string[] = [];
+    for (const pod of detail.pods ?? []) {
+      for (const member of pod.members) {
+        const ref = resolveAgentRef(member.agentRef, agentSpecNames);
+        refs.push(ref);
+        const runtimes = runtimesByAgent.get(ref) ?? new Set<string>();
+        runtimes.add(member.runtime);
+        runtimesByAgent.set(ref, runtimes);
+      }
+    }
+    reviewedRigRefs.set(entry.name, refs);
+  }
+  const allRigRefs = new Map([...rigSpecRefs, ...reviewedRigRefs]);
+
   const specs: SpecEntry[] = await Promise.all(
     (library ?? []).map(async (entry): Promise<SpecEntry> => {
-      const base = { name: entry.name, version: entry.version, sourcePath: entry.sourcePath };
-      if (entry.kind === "rig") return { ...base, kind: "rig", agentRefs: rigSpecRefs.get(entry.name) ?? [] };
+      const base = {
+        name: entry.name,
+        version: entry.version,
+        sourcePath: entry.sourcePath,
+        sourceType: entry.sourceType,
+        relativePath: entry.relativePath,
+      };
+      const detail = reviewed.get(entry.id);
+      if (entry.kind === "rig") {
+        if (detail?.kind !== "rig") return { ...base, kind: "rig", agentRefs: allRigRefs.get(entry.name) ?? [] };
+        const pods = detail.format === "pod_aware"
+          ? (detail.pods ?? []).map((pod) => ({
+              ...pod,
+              members: pod.members.map((member) => ({
+                ...member,
+                agentRef: resolveAgentRef(member.agentRef, agentSpecNames),
+              })),
+            }))
+          : undefined;
+        return {
+          ...base,
+          kind: "rig",
+          sourceState: detail.sourceState,
+          format: detail.format,
+          agentRefs: allRigRefs.get(entry.name) ?? [],
+          ...(pods ? { pods } : {}),
+          ...(detail.edges ? { edges: detail.edges } : {}),
+          ...(detail.kind === "rig" && detail.format === "legacy" && detail.nodes ? { legacyNodes: detail.nodes } : {}),
+        };
+      }
       if (entry.kind === "agent") {
-        const usedByRigs = [...rigSpecRefs.entries()].filter(([, refs]) => refs.includes(entry.name)).map(([rig]) => rig);
-        const review = await agentReview(entry);
+        const usedByRigs = [...allRigRefs.entries()].filter(([, refs]) => refs.includes(entry.name)).map(([rig]) => rig);
+        const review = detail?.kind === "agent" ? detail : null;
+        const resources = {
+          skills: review?.resources?.skills ?? [],
+          guidance: review?.resources?.guidance ?? [],
+          plugins: review?.resources?.plugins ?? [],
+          subagents: review?.resources?.subagents ?? [],
+        };
         return {
           ...base,
           kind: "agent",
           usedByRigs,
+          namespace: agentNamespace(entry.relativePath),
+          sourceState: review?.sourceState,
+          runtime: [...(runtimesByAgent.get(entry.name) ?? [])].sort().join(", ") || undefined,
           ...(review?.description ? { description: review.description } : {}),
-          ...(review?.resources?.skills ? { skills: review.resources.skills } : {}),
-          ...(review?.resources ? { hasGuidance: (review.resources.guidance ?? []).length > 0 } : {}),
+          skills: resources.skills,
+          hasGuidance: resources.guidance.length > 0,
+          profiles: review?.profiles?.map((profile) => profile.name) ?? [],
+          resources,
           ...(review?.startup?.files ? { startupFiles: review.startup.files } : {}),
         };
       }

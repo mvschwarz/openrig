@@ -277,12 +277,31 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
       }
     } else if (section.name === "specs") {
       const kinds = ["rig", "agent", "workflow"] as const;
+      rows.push({
+        label: state.filter ? `/ filter: ${state.filter}` : "/ filter specs…",
+        action: { type: "filter", text: state.filter },
+      });
       for (const kind of kinds) {
-        const list = snap.specs.filter((s) => s.kind === kind);
+        const list = snap.specs.filter((s) => s.kind === kind).filter((s) => !state.filter || s.name.includes(state.filter));
         if (list.length === 0) continue;
         rows.push({ label: `  ${kind.toUpperCase()} SPECS (${list.length})`, action: { type: "jump", section: "specs" } });
-        for (const spec of list)
-          rows.push({ label: `    ▪ ${spec.name}`, action: { type: "drill", resource: "spec", name: spec.name } });
+        if (kind !== "agent") {
+          for (const spec of list)
+            rows.push({ label: `    ▪ ${spec.name}`, action: { type: "drill", resource: "spec", name: spec.name } });
+          continue;
+        }
+        const groups = new Map<string, typeof list>();
+        for (const spec of list) {
+          const namespace = spec.namespace ?? "(root)";
+          const group = groups.get(namespace) ?? [];
+          group.push(spec);
+          groups.set(namespace, group);
+        }
+        for (const [namespace, specs] of [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+          if (namespace !== "(root)") rows.push({ label: `    ▾ ${namespace}/`, action: { type: "jump", section: "specs" } });
+          for (const spec of specs)
+            rows.push({ label: `${namespace === "(root)" ? "    " : "      "}▪ ${spec.name}`, action: { type: "drill", resource: "spec", name: spec.name } });
+        }
       }
     } else if (section.name === "needs") {
       for (const item of snap.needs)
