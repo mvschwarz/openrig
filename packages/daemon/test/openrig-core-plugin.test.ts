@@ -125,6 +125,19 @@ describe("openrig-core plugin — skills (HG-2.1 skill content per agentskills.i
     );
     expect(actual.sort()).toEqual([...EXPECTED_SKILLS].sort());
   });
+
+  it("routes rig authors through the advisory spec audit in the skill and startup guide", () => {
+    const architectSkill = fs.readFileSync(
+      nodePath.join(PLUGIN_ROOT, "skills", "openrig-architect", "SKILL.md"),
+      "utf-8",
+    );
+    const startupGuide = fs.readFileSync(
+      nodePath.resolve(import.meta.dirname, "../../../docs/reference/agent-startup-guide.md"),
+      "utf-8",
+    );
+    expect(architectSkill).toContain("rig spec audit rig.yaml");
+    expect(startupGuide).toContain("rig spec audit rig.yaml");
+  });
 });
 
 describe("openrig-core plugin — hooks (HG-2.6 + HG-2.7)", () => {

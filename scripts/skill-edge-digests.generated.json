@@ -3,7 +3,7 @@
   "edges": {
     "canonical": {
       "core/mission-slice-sop/SKILL.md": "d195ef466ddd09944ad4ddb073fa1c5e5f809c8167ac72d1a3b3277314321930",
-      "core/openrig-architect/SKILL.md": "fe038f4ec31e47ac1d5f40fd6d940f6ec291e0f57eab04ce9b2f4ae127289545",
+      "core/openrig-architect/SKILL.md": "12c3ddb129cd82b304b24eb7330970c6008ce00e42badfe2961967424f2ca45e",
       "core/openrig-cmux/SKILL.md": "f54d9b0a0cf42fc9617ab26bb1a45d8b28b982091dbb4332d68b2ebda7d09208",
       "core/openrig-herdr/SKILL.md": "9301cdff9734dfaffe400c11733168a82154814023e6e021550fe28b392ef9a8",
       "core/openrig-installer/SKILL.md": "362bf919ff91dc083550e4fa2583ec349187d3ed9e0ec5443d49b704cb900e80",
@@ -61,7 +61,7 @@
       "claude-compaction-restore/templates/post-compact-restore-instruction.md": "10a5a7e5e052f3aa000a4209f386dc4eb90a3c2bba449ca685f124714f59e47a",
       "forming-an-openrig-mental-model/SKILL.md": "ebadef30569ea07fd27e4cac87104a1ce02fe7a17838e4591c35a9a186e2e7f9",
       "mission-slice-sop/SKILL.md": "d195ef466ddd09944ad4ddb073fa1c5e5f809c8167ac72d1a3b3277314321930",
-      "openrig-architect/SKILL.md": "fe038f4ec31e47ac1d5f40fd6d940f6ec291e0f57eab04ce9b2f4ae127289545",
+      "openrig-architect/SKILL.md": "12c3ddb129cd82b304b24eb7330970c6008ce00e42badfe2961967424f2ca45e",
       "openrig-cmux/SKILL.md": "f54d9b0a0cf42fc9617ab26bb1a45d8b28b982091dbb4332d68b2ebda7d09208",
       "openrig-herdr/SKILL.md": "9301cdff9734dfaffe400c11733168a82154814023e6e021550fe28b392ef9a8",
       "openrig-operator/SKILL.md": "5fa5223914b7242455dec8c47f4c88b2c408257b5be60cd8bfb5f340a819d948",
@@ -71,7 +71,7 @@
     },
     "spec": {
       "core/mission-slice-sop/SKILL.md": "d195ef466ddd09944ad4ddb073fa1c5e5f809c8167ac72d1a3b3277314321930",
-      "core/openrig-architect/SKILL.md": "fe038f4ec31e47ac1d5f40fd6d940f6ec291e0f57eab04ce9b2f4ae127289545",
+      "core/openrig-architect/SKILL.md": "12c3ddb129cd82b304b24eb7330970c6008ce00e42badfe2961967424f2ca45e",
       "core/openrig-cmux/SKILL.md": "f54d9b0a0cf42fc9617ab26bb1a45d8b28b982091dbb4332d68b2ebda7d09208",
       "core/openrig-herdr/SKILL.md": "9301cdff9734dfaffe400c11733168a82154814023e6e021550fe28b392ef9a8",
       "core/openrig-installer/SKILL.md": "362bf919ff91dc083550e4fa2583ec349187d3ed9e0ec5443d49b704cb900e80",

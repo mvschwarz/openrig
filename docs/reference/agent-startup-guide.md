@@ -355,4 +355,5 @@ When creating a new agent's startup experience:
 - [ ] Include a system check in the startup context
 - [ ] Verify the agent spec validates: `rig agent validate agent.yaml`
 - [ ] Verify the rig spec validates: `rig spec validate rig.yaml`
+- [ ] Run the advisory authoring check: `rig spec audit rig.yaml`
 - [ ] Test by launching the rig and checking that the agent received the expected content

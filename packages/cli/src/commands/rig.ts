@@ -5,6 +5,7 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import { parse as parseYaml } from "yaml";
 
 export interface RigDeps extends StatusDeps {
   readFile: (path: string) => string;
@@ -17,6 +18,74 @@ export function rigCommand(depsOverride?: RigDeps): Command {
     clientFactory: (url: string) => new DaemonClient(url),
     readFile: (p) => fs.readFileSync(p, "utf-8"),
   };
+
+  cmd
+    .command("audit <path>")
+    .description("Advisory audit of rig-spec culture and startup context")
+    .option("--json", "JSON output")
+    .action((filePath: string, opts: { json?: boolean }) => {
+      const deps = getDeps();
+      let source: string;
+      try {
+        source = deps.readFile(filePath);
+      } catch {
+        console.error(`Cannot read file: ${filePath}`);
+        process.exitCode = 1;
+        return;
+      }
+
+      let parsed: unknown;
+      try {
+        parsed = parseYaml(source);
+      } catch (error) {
+        console.error(`Cannot audit ${filePath}: invalid YAML (${(error as Error).message})`);
+        process.exitCode = 1;
+        return;
+      }
+
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        console.error(`Cannot audit ${filePath}: rig spec must be a YAML object`);
+        process.exitCode = 1;
+        return;
+      }
+
+      const spec = parsed as Record<string, unknown>;
+      const findings: Array<{ kind: string; message: string; typicalFix: string }> = [];
+      if (typeof spec["culture_file"] !== "string" || spec["culture_file"].trim() === "") {
+        findings.push({
+          kind: "missing_culture",
+          message: "No culture_file is declared.",
+          typicalFix: "Author CULTURE.md and add culture_file: CULTURE.md. See the openrig-architect skill's authoring workflow.",
+        });
+      }
+
+      const startup = spec["startup"];
+      const startupFiles = startup && typeof startup === "object" && !Array.isArray(startup)
+        ? (startup as Record<string, unknown>)["files"]
+        : undefined;
+      if (!Array.isArray(startupFiles) || startupFiles.length === 0) {
+        findings.push({
+          kind: "missing_startup_context",
+          message: "No startup.files context is declared.",
+          typicalFix: "Add startup.files for the environment context agents need at boot. See the openrig-architect skill's authoring workflow.",
+        });
+      }
+
+      const result = { clean: findings.length === 0, findingCount: findings.length, findings };
+      if (opts.json) {
+        console.log(JSON.stringify(result));
+        return;
+      }
+      if (result.clean) {
+        console.log(`Spec audit clean: ${filePath}`);
+        return;
+      }
+      console.log(`Spec audit: ${findings.length} advisory findings for ${filePath}`);
+      for (const finding of findings) {
+        console.log(`  - ${finding.message}\n    Typical fix: ${finding.typicalFix}`);
+      }
+      console.log("Advisory only: these findings do not block validation or launch.");
+    });
 
   // rig spec validate <path>
   cmd

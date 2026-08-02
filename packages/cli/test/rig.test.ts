@@ -187,4 +187,59 @@ describe("rig spec", () => {
     expect(output).toContain("not ready");
     expect(exitCode).toBe(1);
   });
+
+  it("rig spec audit reports missing culture and startup context without blocking", async () => {
+    const clientFactory = vi.fn(() => new DaemonClient(`http://127.0.0.1:${port}`));
+    const deps: RigDeps = {
+      lifecycleDeps: mockLifecycleDeps(),
+      clientFactory,
+      readFile: vi.fn(() => "version: '0.2'\nname: sparse-rig\npods: []\nedges: []\n"),
+    };
+    const program = new Command();
+    program.exitOverride();
+    const specCommand = rigCommand(deps);
+    specCommand.exitOverride();
+    program.addCommand(specCommand);
+
+    const { logs, exitCode } = await captureLogs(() =>
+      program.parseAsync(["node", "rig", "spec", "audit", "rig.yaml"]),
+    );
+    const output = logs.join("\n");
+    expect(output).toContain("2 advisory findings");
+    expect(output).toContain("culture_file");
+    expect(output).toContain("startup.files");
+    expect(output).toContain("openrig-architect");
+    expect(exitCode).toBeUndefined();
+    expect(clientFactory).not.toHaveBeenCalled();
+  });
+
+  it("rig spec audit reports a complete spec clean as JSON", async () => {
+    const deps = rigDeps([
+      "version: '0.2'",
+      "name: complete-rig",
+      "culture_file: CULTURE.md",
+      "startup:",
+      "  files:",
+      "    - path: startup/context.md",
+      "      delivery_hint: guidance_merge",
+      "pods: []",
+      "edges: []",
+      "",
+    ].join("\n"));
+    const program = new Command();
+    program.exitOverride();
+    const specCommand = rigCommand(deps);
+    specCommand.exitOverride();
+    program.addCommand(specCommand);
+
+    const { logs, exitCode } = await captureLogs(() =>
+      program.parseAsync(["node", "rig", "spec", "audit", "rig.yaml", "--json"]),
+    );
+    expect(JSON.parse(logs.join("\n"))).toEqual({
+      clean: true,
+      findingCount: 0,
+      findings: [],
+    });
+    expect(exitCode).toBeUndefined();
+  });
 });

@@ -260,6 +260,56 @@ profiles:
     db.close();
   });
 
+  it("always includes the default culture when the rig has no culture_file", async () => {
+    const { db, inst } = setup();
+    const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+    expect(result.ok).toBe(true);
+
+    const ctxRows = db.prepare("SELECT resolved_files_json FROM node_startup_context").all() as Array<{ resolved_files_json: string }>;
+    const allFiles = ctxRows.flatMap((row) => JSON.parse(row.resolved_files_json) as Array<{
+      path: string;
+      deliveryHint: string;
+      required: boolean;
+    }>);
+    expect(allFiles).toContainEqual(expect.objectContaining({
+      path: "CULTURE-default.md",
+      deliveryHint: "guidance_merge",
+      required: true,
+    }));
+
+    db.close();
+  });
+
+  it("orders the default culture before the rig culture overlay", async () => {
+    const { db, inst } = setup();
+    const spec = makeRigSpec({ cultureFile: "CULTURE.md" });
+    const result = await inst.instantiate(RigSpecCodec.serialize(spec), RIG_ROOT);
+    expect(result.ok).toBe(true);
+
+    const ctxRows = db.prepare("SELECT resolved_files_json FROM node_startup_context").all() as Array<{ resolved_files_json: string }>;
+    const paths = ctxRows.flatMap((row) =>
+      (JSON.parse(row.resolved_files_json) as Array<{ path: string }>).map((file) => file.path),
+    );
+    expect(paths).toContain("CULTURE-default.md");
+    expect(paths).toContain("CULTURE.md");
+    expect(paths.indexOf("CULTURE-default.md")).toBeLessThan(paths.indexOf("CULTURE.md"));
+
+    db.close();
+  });
+
+  it("CULTURE-default.md ships the lightweight operating-model floor", () => {
+    const { existsSync, readFileSync } = require("node:fs");
+    const { resolve } = require("node:path");
+    const assetPath = resolve(import.meta.dirname, "../src/domain/../../assets/guidance/CULTURE-default.md");
+    expect(existsSync(assetPath)).toBe(true);
+    const content = readFileSync(assetPath, "utf8");
+    expect(content).toContain("Pragmatic truth-seeking");
+    expect(content).toContain("Principles over rules");
+    expect(content).toContain("Ship good, working product");
+    expect(content).toContain("Match rigor to stakes");
+    expect(content).not.toContain("full stop on new production");
+  });
+
   it("openrig-start.md asset exists on disk", () => {
     const { existsSync, readFileSync } = require("node:fs");
     const { resolve } = require("node:path");

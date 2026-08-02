@@ -60,6 +60,8 @@ function mockClaudeFs(seed: Record<string, string>): ClaudeAdapterFsOps & { _sto
 }
 
 const RIG_ROOT = "/project/rigs/test-rig";
+const DEFAULT_CULTURE_PATH = path.resolve(import.meta.dirname, "../assets/guidance/CULTURE-default.md");
+const DEFAULT_CULTURE = fs.readFileSync(DEFAULT_CULTURE_PATH, "utf8");
 
 const CLAUDE_STARTER = `draft: false
 starter_id: claude-fixture-starter
@@ -101,7 +103,10 @@ describe("Agent Starter v1 vertical — real Claude adapter delivery (M2 R2)", (
       // registry-entry content (matching the path the resolver will hand
       // back) so the adapter's `readFile(file.absolutePath)` succeeds and
       // the merge_guidance branch can run.
-      const claudeFs = mockClaudeFs({ [registryEntryPath]: CLAUDE_STARTER });
+      const claudeFs = mockClaudeFs({
+        [registryEntryPath]: CLAUDE_STARTER,
+        [DEFAULT_CULTURE_PATH]: DEFAULT_CULTURE,
+      });
       const claudeAdapter = new ClaudeCodeAdapter({ tmux, fsOps: claudeFs });
 
       // Pass-through Codex/terminal adapters keep the instantiator's
@@ -172,6 +177,8 @@ describe("Agent Starter v1 vertical — real Claude adapter delivery (M2 R2)", (
       // We pick `starter_id: claude-fixture-starter` because it's a stable,
       // unambiguous marker the resolver passed through.
       expect(claudeMd).toContain("starter_id: claude-fixture-starter");
+      expect(claudeMd).toContain("BEGIN OpenRig MANAGED BLOCK: CULTURE-default.md");
+      expect(claudeMd).toContain("Ship good, working product");
 
       db.close();
     } finally {
