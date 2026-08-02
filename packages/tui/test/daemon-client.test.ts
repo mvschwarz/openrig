@@ -52,7 +52,7 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
 
   it("is the ONLY module that talks HTTP (one-file source-check stays one file)", () => {
     const srcDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src");
-    const files = ["state.ts", "render.ts", "grammar.ts", "input.ts", "socket-server.ts", "main.ts", "types.ts", "demo-data.ts", "index.ts"];
+    const files = ["state.ts", "render.ts", "grammar.ts", "input.ts", "socket-server.ts", "main.ts", "types.ts", "demo-data.ts", "index.ts", "hydrate.ts"];
     for (const file of files) {
       const text = readFileSync(path.join(srcDir, file), "utf8");
       expect(text, `${file} must not fetch`).not.toMatch(/fetch\(/);

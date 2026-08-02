@@ -114,6 +114,12 @@ function contentLines(state: ViewState, snap: FleetSnapshot): string[] {
     lines.push("NEEDS-YOU");
     for (const item of snap.needs) lines.push(`  ⚑ ${item.kind}  ${item.target}  — ${item.detail}  (open ▸)`);
     if (snap.needs.length === 0) lines.push("  (no grounded exception items right now)");
+    if (snap.hostsDown.length > 0) {
+      // composed BESIDE the items (a separate shipped read), never into the item shape
+      lines.push("");
+      lines.push("  hosts down:");
+      for (const h of snap.hostsDown) lines.push(`  ⛔ ${h.hostId} — ${h.status}${h.error ? ` (${h.error})` : ""}`);
+    }
     lines.push("");
     if (!snap.humanQueueProbed) lines.push("  human-queue: not yet known (read pending)");
     else if (snap.humanQueue.length === 0)
@@ -154,10 +160,11 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   }
 
   const drillPath = state.drill.map((d) => d.name).join(" → ");
+  const readWarn = snap.readErrors.length > 0 ? `  ⚠ ${snap.readErrors.length} read(s) failed: ${snap.readErrors[0]}` : "";
   lines.push("─".repeat(cols));
   lines.push(
     pad(
-      `[${state.instanceId}] ${state.section}${drillPath ? " · " + drillPath : ""}${state.lastError ? "  ✗ " + state.lastError : ""}`,
+      `[${state.instanceId}] ${state.section}${drillPath ? " · " + drillPath : ""}${state.lastError ? "  ✗ " + state.lastError : ""}${readWarn}`,
       cols,
     ),
   );

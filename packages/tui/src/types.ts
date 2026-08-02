@@ -46,14 +46,25 @@ export interface NeedsItem {
   detail: string;
 }
 
+/** Host/rig-down rows — composed BESIDE the Needs-You items at render, never
+ * projected into the item shape (§4.A: composeNeedsYou supplies no host rows). */
+export interface HostDown {
+  hostId: string;
+  status: string;
+  error?: string;
+}
+
 export interface FleetSnapshot {
   hosts: HostNode[];
   specs: SpecEntry[];
-  /** grounded composeNeedsYou legs + host/rig-down, composed beside (PIN 3) */
+  /** grounded composeNeedsYou derived exceptions, VERBATIM (PIN 3) */
   needs: NeedsItem[];
   /** false until the human-queue read has answered — honest-unknown vs proven-empty */
   humanQueueProbed: boolean;
   humanQueue: NeedsItem[];
+  hostsDown: HostDown[];
+  /** named per-read failures (honest partial hydration, never silent) */
+  readErrors: string[];
 }
 
 export type GetSnapshot = () => FleetSnapshot;

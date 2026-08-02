@@ -35,7 +35,7 @@ export function defaultSections(): SectionDef[] {
 }
 
 export function emptySnapshot(): FleetSnapshot {
-  return { hosts: [], specs: [], needs: [], humanQueueProbed: false, humanQueue: [] };
+  return { hosts: [], specs: [], needs: [], humanQueueProbed: false, humanQueue: [], hostsDown: [], readErrors: [] };
 }
 
 export interface CreateViewStateOptions {

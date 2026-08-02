@@ -11,7 +11,11 @@ import { decodeInput, MOUSE_ENABLE, MOUSE_DISABLE, ALT_SCREEN_ON, ALT_SCREEN_OFF
 import { renderScreen } from "./render.js";
 import { createControlSocket, defaultSocketPath } from "./socket-server.js";
 import { demoSnapshot } from "./demo-data.js";
+import { DaemonClient } from "./daemon-client.js";
+import { hydrateSnapshot } from "./hydrate.js";
 import type { FleetSnapshot, Screen } from "./types.js";
+
+const REFRESH_MS = 5000;
 
 function argOf(args: string[], flag: string): string | undefined {
   const i = args.indexOf(flag);
@@ -23,10 +27,12 @@ async function run(): Promise<void> {
   const instanceId = argOf(args, "--instance") ?? "tui-1";
   const demo = args.includes("--demo");
 
-  // Phase 1: the snapshot is honest-empty unless --demo; Phase 2 binds the
-  // §4.A daemon reads (DaemonClient) to hydrate it.
-  const snapshot: FleetSnapshot = demo ? demoSnapshot() : emptySnapshot();
+  // --demo renders the labeled fixture; otherwise the §4.A reads hydrate the
+  // snapshot (honest-empty until the first read answers; failed reads surface
+  // as named readErrors in the status line, never fabricated content).
+  let snapshot: FleetSnapshot = demo ? demoSnapshot() : emptySnapshot();
   const view = createViewState({ instanceId, getSnapshot: () => snapshot });
+  const client = demo ? null : new DaemonClient({ baseUrl: argOf(args, "--url") });
 
   let inputLine = "";
   let lastScreen: Screen | null = null;
@@ -41,7 +47,18 @@ async function run(): Promise<void> {
   const socketPath = argOf(args, "--socket") ?? defaultSocketPath(instanceId);
   const socket = await createControlSocket({ socketPath, view, onMutation: draw });
 
+  let refreshTimer: NodeJS.Timeout | null = null;
+  if (client) {
+    const refresh = async () => {
+      snapshot = await hydrateSnapshot(client);
+      draw();
+    };
+    await refresh();
+    refreshTimer = setInterval(() => void refresh(), REFRESH_MS);
+  }
+
   async function shutdown(): Promise<void> {
+    if (refreshTimer) clearInterval(refreshTimer);
     process.stdout.write(MOUSE_DISABLE + ALT_SCREEN_OFF);
     await socket.close();
     process.exit(0);

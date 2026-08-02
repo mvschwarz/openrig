@@ -41,10 +41,13 @@ export function demoSnapshot(): FleetSnapshot {
       { name: "lead-agent", kind: "agent", runtime: "codex", usedByRigs: ["openrig-build-rig"] },
     ],
     needs: [
-      { kind: "idle-with-work", target: "dev50.guard", detail: "assigned work, idle 42m" },
-      { kind: "host-down", target: "mm2-host", detail: "unreachable 12m" },
+      // shaped like served composeNeedsYou derived items: kind + summary/evidence verbatim
+      { kind: "stuck", target: "dev50.guard", detail: "dev50.guard looks stuck — idle 42m >= 30m default · holds 1" },
     ],
     humanQueueProbed: true,
     humanQueue: [],
+    // host-down is composed BESIDE the items (never projected into the item shape)
+    hostsDown: [{ hostId: "mm2-host", status: "unreachable", error: "read timed out" }],
+    readErrors: [],
   };
 }
