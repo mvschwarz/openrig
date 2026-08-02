@@ -60,6 +60,7 @@ function paintAlertLine(text: string, token: "warn" | "error", s: Style): string
 function paintContent(text: string, s: Style): string {
   if (text.trim() === "") return text;
   if (/\bRIG\b.*\bAGENT\b.*\bSTATUS\b/.test(text)) return s.paint("accentBright", text, { bold: true });
+  if (/\bNODE\b.*\bLABEL\b.*\bRUNTIME\b/.test(text)) return s.paint("accentBright", text, { bold: true });
   // detail vocabulary: section rule "  ── title ────"
   const rule = text.match(/^( {2})── (.+?) (─+)$/);
   if (rule) return `${rule[1]}${s.paint("chrome", "──")} ${s.paint("bright", rule[2]!, { bold: true })} ${s.paint("chrome", rule[3]!)}`;

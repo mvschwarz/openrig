@@ -172,6 +172,7 @@ export type Action =
   | { type: "content-select"; delta?: number; index?: number }
   | { type: "layout"; contentMaxOffset: number; contentTargetCount: number }
   | { type: "footer"; on?: boolean }
+  | { type: "toggle-expand"; key: string }
   /** drive-structure daemon writes (BR-8/BR-9): executed by the driver loop
    * against EXISTING write contracts; never a view-state mutation */
   | { type: "act"; act: "open-terminal"; view: string }
@@ -203,6 +204,8 @@ export interface ViewState {
   focusedPane: "explorer" | "content";
   /** the rig-stream footer is ambient: toggleable, never a navigable view (FR-10) */
   footerOn: boolean;
+  /** explorer expansion keys (pod:…, folder:…) — default-collapsed levels open on demand */
+  expanded: string[];
   /** transient result line from an executed act (daemon reply, verbatim) */
   notice: string | null;
   lastError: string | null;
@@ -218,6 +221,8 @@ export interface ViewStateStore {
 export interface ExplorerRow {
   label: string;
   action: Action;
+  /** stable identity — selection sync finds the row for the current location */
+  key?: string;
 }
 
 export interface HitTarget {

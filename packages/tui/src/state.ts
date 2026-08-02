@@ -48,6 +48,7 @@ export function createViewState(options: CreateViewStateOptions): ViewStateStore
     contentSelection: 0,
     focusedPane: "explorer",
     footerOn: true,
+    expanded: [],
     notice: null,
     lastError: null,
   };
@@ -80,7 +81,16 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
     case "jump": {
       if (!state.sections.some((s) => s.name === action.section))
         return { ...next, lastError: `unknown section "${action.section}"` };
-      return resetContent({ ...next, section: action.section, drill: [], filter: "", selection: 0, runningOf: null, viewTab: "table" });
+      return syncSelection(
+        resetContent({ ...next, section: action.section, drill: [], filter: "", runningOf: null, viewTab: "table" }),
+        snap,
+      );
+    }
+    case "toggle-expand": {
+      const expanded = state.expanded.includes(action.key)
+        ? state.expanded.filter((key) => key !== action.key)
+        : [...state.expanded, action.key];
+      return { ...next, expanded };
     }
     case "tab": {
       const rigSpec = state.section === "specs" && state.drill.at(-1)?.kind === "spec" && findSpec(snap, state.drill.at(-1)!.name)?.kind === "rig";
@@ -131,10 +141,12 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
       const drilled = drillTo(next, action.resource, action.name, snap, action.target);
       if (drilled.lastError) return drilled;
       const spec = action.resource === "spec" ? findSpec(snap, action.name) : null;
-      return resetContent({ ...drilled, viewTab: spec?.kind === "rig" ? "configuration" : "table" });
+      return syncSelection(resetContent({ ...drilled, viewTab: spec?.kind === "rig" ? "configuration" : "table" }), snap);
     }
-    case "cross":
-      return crossNav(next, action.kind, action.name, snap, action.target);
+    case "cross": {
+      const crossed = crossNav(next, action.kind, action.name, snap, action.target);
+      return crossed.lastError ? crossed : syncSelection(crossed, snap);
+    }
     default:
       return { ...next, lastError: "unknown action" };
   }
@@ -142,6 +154,44 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
 
 function resetContent(state: ViewState): ViewState {
   return { ...state, contentOffset: 0, contentMaxOffset: 0, contentTargetCount: 0, contentSelection: 0, focusedPane: "explorer" };
+}
+
+/** The explorer key for the state's current location (drill leaf or section). */
+export function locationKey(state: ViewState): string {
+  const names = new Map(state.drill.map((seg) => [seg.kind, seg.name]));
+  const leaf = state.drill.at(-1);
+  if (!leaf || state.runningOf) return `section:${state.section}`;
+  switch (leaf.kind) {
+    case "host":
+      return `host:${leaf.name}`;
+    case "rig":
+      return `rig:${names.get("host")}/${leaf.name}`;
+    case "pod":
+      return `pod:${names.get("host")}/${names.get("rig")}/${leaf.name}`;
+    case "agent":
+      return `agent:${names.get("host")}/${names.get("rig")}/${names.get("pod")}/${leaf.name}`;
+    case "spec":
+      return `spec:${leaf.name}`;
+    default:
+      return `section:${state.section}`;
+  }
+}
+
+/** ROUND-4 items 2-4: after navigation the explorer highlight lands ON the
+ * opened item and STAYS there — auto-expanding whatever level hides it. */
+function syncSelection(state: ViewState, snap: FleetSnapshot): ViewState {
+  const expanded = new Set(state.expanded);
+  const names = new Map(state.drill.map((seg) => [seg.kind, seg.name]));
+  if (names.has("pod")) expanded.add(`pod:${names.get("host")}/${names.get("rig")}/${names.get("pod")}`);
+  const leaf = state.drill.at(-1);
+  if (leaf?.kind === "spec") {
+    const spec = findSpec(snap, leaf.name);
+    if (spec?.kind === "agent" && spec.namespace) expanded.add(`folder:${spec.namespace}`);
+  }
+  const withExpansion = { ...state, expanded: [...expanded] };
+  const key = locationKey(withExpansion);
+  const index = computeExplorerRows(withExpansion, snap).findIndex((row) => row.key === key);
+  return index >= 0 ? { ...withExpansion, selection: index } : withExpansion;
 }
 
 // --- snapshot lookups (pure; no daemon calls here) ---
@@ -323,26 +373,39 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
           : section.name === "needs"
             ? "NEEDS-YOU"
             : section.name.toUpperCase();
-    rows.push({ label: `${active ? "▾" : "▸"} ${label}`, action: { type: "jump", section: section.name } });
+    rows.push({ label: `${active ? "▾" : "▸"} ${label}`, action: { type: "jump", section: section.name }, key: `section:${section.name}` });
     if (!active) continue;
     if (section.name === "topology") {
+      // ROUND-4 item 4: rigs + pods by default; agents appear when a pod is
+      // expanded (drilling a pod expands it) — "tighter visually".
+      const expanded = new Set(state.expanded);
       for (const host of snap.hosts) {
         rows.push({
           label: `  ▾ ${host.name}${host.reachable ? "" : " (unreachable)"}`,
           action: { type: "drill", resource: "host", name: host.name },
+          key: `host:${host.name}`,
         });
         for (const rig of host.rigs) {
           const stateSuffix = rig.lifecycleState && rig.lifecycleState !== "running" ? ` (${rig.lifecycleState})` : "";
-          rows.push({ label: `    ▾ ${rig.name}${stateSuffix}`, action: { type: "drill", resource: "rig", name: rig.name, target: { host: host.name } } });
+          rows.push({
+            label: `    ▾ ${rig.name}${stateSuffix}`,
+            action: { type: "drill", resource: "rig", name: rig.name, target: { host: host.name } },
+            key: `rig:${host.name}/${rig.name}`,
+          });
           for (const pod of rig.pods) {
+            const podKey = `pod:${host.name}/${rig.name}/${pod.name}`;
+            const open = expanded.has(podKey);
             rows.push({
-              label: `      ▾ ${pod.name} (${pod.agents.length})`,
+              label: `      ${open ? "▾" : "▸"} ${pod.name} (${pod.agents.length})`,
               action: { type: "drill", resource: "pod", name: pod.name, target: { host: host.name, rig: rig.name } },
+              key: podKey,
             });
+            if (!open) continue;
             for (const agent of pod.agents)
               rows.push({
                 label: `        ● ${agent.name}`,
                 action: { type: "drill", resource: "agent", name: agent.name, target: { host: host.name, rig: rig.name, pod: pod.name } },
+                key: `agent:${host.name}/${rig.name}/${pod.name}/${agent.name}`,
               });
           }
         }
@@ -353,13 +416,16 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
         label: state.filter ? `/ filter: ${state.filter}` : "/ filter specs…",
         action: { type: "filter", text: state.filter },
       });
+      // ROUND-4 item 3: RIG SPECS fully expanded; AGENT SPECS collapsed to the
+      // folder level by default ("there's too many, it fills it up").
+      const expanded = new Set(state.expanded);
       for (const kind of kinds) {
         const list = snap.specs.filter((s) => s.kind === kind).filter((s) => !state.filter || s.name.includes(state.filter));
         if (list.length === 0) continue;
-        rows.push({ label: `  ${kind.toUpperCase()} SPECS (${list.length})`, action: { type: "jump", section: "specs" } });
+        rows.push({ label: `  ${kind.toUpperCase()} SPECS (${list.length})`, action: { type: "jump", section: "specs" }, key: `specs-kind:${kind}` });
         if (kind !== "agent") {
           for (const spec of list)
-            rows.push({ label: `    ▪ ${spec.name}`, action: { type: "drill", resource: "spec", name: spec.name } });
+            rows.push({ label: `    ▪ ${spec.name}`, action: { type: "drill", resource: "spec", name: spec.name }, key: `spec:${spec.name}` });
           continue;
         }
         const groups = new Map<string, typeof list>();
@@ -370,9 +436,21 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
           groups.set(namespace, group);
         }
         for (const [namespace, specs] of [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))) {
-          if (namespace !== "(root)") rows.push({ label: `    ▾ ${namespace}/`, action: { type: "jump", section: "specs" } });
+          // a filter search overrides collapse — matches must be visible
+          const open = namespace === "(root)" || expanded.has(`folder:${namespace}`) || !!state.filter;
+          if (namespace !== "(root)")
+            rows.push({
+              label: `    ${open ? "▾" : "▸"} ${namespace}/ (${specs.length})`,
+              action: { type: "toggle-expand", key: `folder:${namespace}` },
+              key: `folder:${namespace}`,
+            });
+          if (!open) continue;
           for (const spec of specs)
-            rows.push({ label: `${namespace === "(root)" ? "    " : "      "}▪ ${spec.name}`, action: { type: "drill", resource: "spec", name: spec.name } });
+            rows.push({
+              label: `${namespace === "(root)" ? "    " : "      "}▪ ${spec.name}`,
+              action: { type: "drill", resource: "spec", name: spec.name },
+              key: `spec:${spec.name}`,
+            });
         }
       }
     } else if (section.name === "needs") {

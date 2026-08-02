@@ -284,12 +284,25 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
         lines.push(specTabsLine(state, spec.name));
         if (spec.sourcePath) lines.push(fieldLine({ label: "source", value: `${displayPath(spec.sourcePath, 56)} · ${sourceProvenance(spec)}` }));
         if (state.viewTab === "topology") {
-          lines.push({ text: `  topology · nodes ${spec.graph?.nodes.length ?? 0} · edges ${spec.graph?.edges.length ?? 0}` });
-          for (const node of spec.graph?.nodes ?? [])
-            lines.push({ text: `    ${node.id} · ${node.label}${node.pod ? ` · pod ${node.pod}` : ""} · ${node.runtime}` });
-          for (const edge of spec.graph?.edges ?? [])
-            lines.push({ text: `    ${edge.source} → ${edge.target} (${edge.kind})` });
-          if ((spec.graph?.nodes.length ?? 0) === 0) lines.push({ text: "    (topology projection is empty)" });
+          // ROUND-4 item 1: the established table treatment, not unformatted rows
+          const nodes = spec.graph?.nodes ?? [];
+          const graphEdges = spec.graph?.edges ?? [];
+          const NODE_COLS: Array<[string, number]> = [["NODE", 16], ["LABEL", 24], ["POD", 12], ["RUNTIME", 14]];
+          lines.push(fieldLine({ label: "shape", value: `${nodes.length} nodes · ${graphEdges.length} edges` }));
+          lines.push({ text: "" });
+          if (nodes.length === 0) {
+            lines.push({ text: "  (topology projection is empty)" });
+            return lines;
+          }
+          lines.push({ text: `  ${alignedRow(NODE_COLS)}` });
+          lines.push({ text: `  ${"─".repeat(NODE_COLS.reduce((n, [, w]) => n + w + 1, -1))}` });
+          for (const node of nodes)
+            lines.push({ text: `  ${alignedRow([[node.id, 16], [node.label, 24], [node.pod ?? "—", 12], [node.runtime, 14]])}` });
+          if (graphEdges.length > 0) {
+            lines.push({ text: "" });
+            lines.push(sectionRule("edges"));
+            for (const edge of graphEdges) lines.push({ text: `  ${alignedRow([[edge.source, 16], ["→", 2], [edge.target, 20]])} (${edge.kind})` });
+          }
           return lines;
         }
         if (state.viewTab === "yaml") {

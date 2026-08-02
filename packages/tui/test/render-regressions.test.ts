@@ -175,8 +175,9 @@ describe("live visual regressions", () => {
 
     view.dispatch({ type: "tab", tab: "topology" });
     const topology = renderScreen(view.get(), snap, { cols: 140, rows: 34 }).lines.join("\n");
-    expect(topology).toContain("orch.lead · lead · pod orch · claude-code");
-    expect(topology).toContain("orch.lead → review.r1 (delegates_to)");
+    expect(topology).toMatch(/NODE\s+LABEL\s+POD\s+RUNTIME/);
+    expect(topology).toMatch(/orch\.lead\s+lead\s+orch\s+claude-code/);
+    expect(topology).toMatch(/orch\.lead\s+→\s+review\.r1\s+\(delegates_to\)/);
 
     view.dispatch({ type: "tab", tab: "yaml" });
     const yaml = renderScreen(view.get(), snap, { cols: 140, rows: 34 }).lines.join("\n");
