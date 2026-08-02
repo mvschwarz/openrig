@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type Database from "better-sqlite3";
@@ -92,6 +92,45 @@ describe("transcript routes", () => {
     expect(body.content).not.toContain("\x1b[");
   });
 
+  it("GET /tail reports live transcript ingest metadata for a fresh capture", async () => {
+    const { store } = seedRigWithTranscript("recent work\n");
+    const app = createApp({ db, rigRepo, sessionRegistry, transcriptStore: store });
+
+    const res = await app.request("/api/transcripts/dev-impl@my-rig/tail?lines=10");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ingestHealth).toEqual(expect.objectContaining({
+      state: "live",
+      runtime: "claude-code",
+    }));
+  });
+
+  it("GET /tail fails loudly when an existing transcript is stale and capture cannot restart", async () => {
+    const { store } = seedRigWithTranscript("old misleading work\n");
+    const transcriptPath = store.getTranscriptPath("my-rig", "dev-impl@my-rig");
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(transcriptPath, old, old);
+    const capturePaneContent = vi.fn(async () => null);
+    const app = createApp({
+      db,
+      rigRepo,
+      sessionRegistry,
+      transcriptStore: store,
+      tmuxAdapter: { capturePaneContent } as unknown as TmuxAdapter,
+    });
+
+    const res = await app.request("/api/transcripts/dev-impl@my-rig/tail?lines=10");
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.error).toContain("Transcript ingest degraded");
+    expect(body.error).toContain("claude-code");
+    expect(body.ingestHealth).toEqual(expect.objectContaining({
+      state: "degraded",
+      runtime: "claude-code",
+      reason: "capture_stale",
+    }));
+  });
+
   it("GET /tail with unknown session returns 404 with guidance", async () => {
     const store = new TranscriptStore({ transcriptsRoot: tmpDir, enabled: true });
     const app = createApp({ db, rigRepo, sessionRegistry, transcriptStore: store });
@@ -166,9 +205,6 @@ describe("transcript routes", () => {
     sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@my-rig" });
 
     const store = new TranscriptStore({ transcriptsRoot: tmpDir, enabled: true });
-    const readTailSpy = vi.spyOn(store, "readTail")
-      .mockReturnValueOnce(null)
-      .mockReturnValueOnce("READY\n");
     vi.spyOn(store, "ensureTranscriptDir").mockReturnValue(true);
     const capturePaneSpy = vi.fn(async () => "READY\n");
     const app = createApp({
@@ -184,7 +220,6 @@ describe("transcript routes", () => {
     const body = await res.json();
     expect(body.content).toBe("READY\n");
     expect(getActiveRotationCount()).toBeGreaterThan(0);
-    expect(readTailSpy).toHaveBeenCalledTimes(2);
     clearAllTranscriptRotationsForTest();
   });
 

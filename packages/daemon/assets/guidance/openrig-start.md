@@ -50,7 +50,12 @@ Broadcast to all peers in your rig:
 rig broadcast --rig <name> "message"
 ```
 
-## Transcript Recovery
+## Secondary Transcript Check
+
+After compaction, recover work from durable artifacts first: the restore map,
+current `MISSION_NOTES.md`, and your owned queue items. Transcript output is a
+secondary check and may be unavailable or incomplete for some runtimes. Little
+or no output does not mean the session was quiet.
 
 Read recent transcript output:
 ```bash
@@ -64,4 +69,8 @@ rig transcript <session> --grep "pattern"
 
 ## After Compaction
 
-If you lose context, run `rig whoami --json` immediately. It tells you who you are, who your peers are, and how to reach them. Then use `rig transcript` to recover recent history.
+If you lose context, run `rig whoami --json` immediately. It tells you who you
+are, who your peers are, and how to reach them. Rebuild the work from the
+restore map, current `MISSION_NOTES.md`, and your owned queue items. Use
+`rig transcript` only as a secondary check; if it returns little or nothing,
+do not conclude that the session was quiet.

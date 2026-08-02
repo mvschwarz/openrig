@@ -555,6 +555,10 @@ export interface NodeInventoryEntry {
   startupCompletedAt: string | null;
   agentActivity?: AgentActivity;
   contextUsage?: ContextUsage;
+  /** Health of the daemon-owned transcript capture for this seat. */
+  transcriptIngest?: import("./transcript-store.js").TranscriptIngestHealth & {
+    runtime: string | null;
+  };
   /**
    * Slice 15 — `terminal-active` primitive (tmux byte-stream).
    *

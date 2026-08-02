@@ -59,6 +59,7 @@ import { UpCommandRouter } from "./domain/up-command-router.js";
 import { RigTeardownOrchestrator } from "./domain/rig-teardown.js";
 import { ResumeMetadataRefresher } from "./domain/resume-metadata-refresher.js";
 import { TranscriptStore } from "./domain/transcript-store.js";
+import { resumeRunningTranscriptCaptures } from "./domain/transcript-capture.js";
 import { SessionTransport } from "./domain/session-transport.js";
 import { AgentActivityStore } from "./domain/agent-activity-store.js";
 import { HistoryQuery } from "./domain/history-query.js";
@@ -460,6 +461,18 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // eslint-disable-next-line no-console
     console.log(`startup reconcile: rigs=${rigs.length} checked=${reconcileChecked} detached=${reconcileDetached} errors=${reconcileErrors}`);
   } catch { /* logging must never throw */ }
+
+  // Transcript rotators are process-local. Reattach them after lifecycle
+  // reconciliation so surviving tmux sessions keep ingesting across daemon
+  // restarts while genuinely detached sessions stay excluded.
+  try {
+    await resumeRunningTranscriptCaptures(db, tmuxAdapter, transcriptStore);
+  } catch (err) {
+    try {
+      // eslint-disable-next-line no-console
+      console.warn(`startup transcript capture warning: ${err instanceof Error ? err.message : String(err)}`);
+    } catch { /* logging must never throw */ }
+  }
 
   const podRepo = new PodRepository(db);
   const rigSpecExporter = new RigSpecExporter({ rigRepo, sessionRegistry, podRepo });

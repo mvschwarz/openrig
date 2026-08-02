@@ -408,4 +408,30 @@ describe("ContextMonitor", () => {
     expect(refreshed.startup_status).toBe("pending");
     expect(checkReadySpy).not.toHaveBeenCalled();
   });
+
+  it("coalesces overlapping pollOnce calls so one compaction stage is emitted once", async () => {
+    const { sessionName } = seedClaudeNode("dev.compact", "dev-compact@test");
+    writeSidecar(sessionName, { ...VALID_SIDECAR, session_name: sessionName });
+
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const maybeAutoCompact = vi.fn(async () => {
+      await blocked;
+      return { triggered: true as const };
+    });
+    monitor = new ContextMonitor(
+      db,
+      store,
+      { ensureContextCollector: ensureContextCollectorSpy, checkReady: checkReadySpy },
+      { maybeAutoCompact } as never,
+    );
+
+    const timerTick = monitor.pollOnce();
+    await vi.waitFor(() => expect(maybeAutoCompact).toHaveBeenCalledTimes(1));
+    const refreshRequest = monitor.pollOnce();
+    release();
+    await Promise.all([timerTick, refreshRequest]);
+
+    expect(maybeAutoCompact).toHaveBeenCalledTimes(1);
+  });
 });

@@ -67,7 +67,10 @@ When a seat's startup is artifact-backed mental-model rebuild (active-work
 reentry case, distinct from reusable Agent Starters / priming packs):
 
 - See the **cross-runtime restore/reentry packet standard v0**
-- Source-trust ranking applies: **`rig whoami` > target rigspec > bounded latest transcript > full transcript > touched-files > `restore-summary.json`**
+- Source-trust ranking applies: **`rig whoami` > target rigspec > restore map /
+  current `MISSION_NOTES.md` / owned queue items > touched files > transcript
+  output**. Transcript output is secondary and may be unavailable or incomplete;
+  little or no output does not prove the session was quiet.
 
 ## Memory surfaces consumed at startup
 

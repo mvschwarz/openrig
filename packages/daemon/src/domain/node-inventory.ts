@@ -5,6 +5,7 @@ import { SeatIdentityStore } from "./seat-identity-store.js";
 import { buildOrientedMap } from "./startup-proof.js";
 import type { RuntimeAdapter } from "./runtime-adapter.js";
 import type { ContextUsageStore } from "./context-usage-store.js";
+import type { TranscriptStore } from "./transcript-store.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
 import type { SeatActivityService } from "./seat-activity-service.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
@@ -877,6 +878,7 @@ export function getNodeInventoryWithContext(
   db: Database.Database,
   rigId: string,
   contextUsageStore: ContextUsageStore,
+  transcriptStore?: Pick<TranscriptStore, "getIngestHealth">,
 ): NodeInventoryEntry[] {
   const entries = getNodeInventory(db, rigId);
 
@@ -901,7 +903,17 @@ export function getNodeInventoryWithContext(
     // large fleet; no node-list consumer reads it). All scalars are kept so
     // the ring/table/filter consumers are unaffected. The full currentUsage
     // remains on the detail/whoami path (getNodeDetailWithContext, whoami).
-    return { ...e, contextUsage: { ...usage, currentUsage: null } };
+    const transcriptIngest = transcriptStore && e.canonicalSessionName
+      ? {
+          ...transcriptStore.getIngestHealth(e.rigName, e.canonicalSessionName),
+          runtime: e.runtime,
+        }
+      : undefined;
+    return {
+      ...e,
+      contextUsage: { ...usage, currentUsage: null },
+      ...(transcriptIngest ? { transcriptIngest } : {}),
+    };
   });
 }
 

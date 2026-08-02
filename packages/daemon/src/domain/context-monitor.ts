@@ -47,6 +47,7 @@ export class ContextMonitor {
   private compactionEnforcer: ClaudeCompactionEnforcer | null;
   private readinessCheckers: Record<string, RuntimeReadinessChecker | undefined>;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private activePoll: Promise<void> | null = null;
 
   constructor(
     db: Database.Database,
@@ -67,6 +68,17 @@ export class ContextMonitor {
 
   /** Discover active managed Claude sessions and poll their sidecar files. */
   async pollOnce(): Promise<void> {
+    if (this.activePoll) return this.activePoll;
+    const poll = this.runPoll();
+    this.activePoll = poll;
+    try {
+      await poll;
+    } finally {
+      if (this.activePoll === poll) this.activePoll = null;
+    }
+  }
+
+  private async runPoll(): Promise<void> {
     const sessions = this.getEligibleSessions();
     for (const session of sessions) {
       let observed: ContextUsage | null = null;

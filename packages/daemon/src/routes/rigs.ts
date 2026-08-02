@@ -26,6 +26,7 @@ import { createRestoreCheckService } from "./restore-check.js";
 import type { KernelBootTracker, KernelState } from "../domain/kernel-boot-tracker.js";
 import type { RecoveryPlan } from "../domain/restore-check-service.js";
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
+import type { TranscriptStore } from "../domain/transcript-store.js";
 import type { Pod, ExpansionPodFragment } from "../domain/types.js";
 import type { RigExpansionService } from "../domain/rig-expansion-service.js";
 import type { PodRigInstantiator } from "../domain/rigspec-instantiator.js";
@@ -298,8 +299,9 @@ rigsRoutes.get("/:id/graph", async (c) => {
   const sessions = getSessionRegistry(c).getSessionsForRig(rigId);
   // Overlay inventory data for enriched graph fields.
   const ctxStore = c.get("contextUsageStore" as never) as ContextUsageStore | undefined;
+  const transcriptStore = c.get("transcriptStore" as never) as TranscriptStore | undefined;
   const inventory = ctxStore
-    ? getNodeInventoryWithContext(getRepo(c).db, rigId, ctxStore)
+    ? getNodeInventoryWithContext(getRepo(c).db, rigId, ctxStore, transcriptStore)
     : getNodeInventory(getRepo(c).db, rigId);
 
   // PL-019 item 4: enrich inventory with agentActivity at graph-payload time

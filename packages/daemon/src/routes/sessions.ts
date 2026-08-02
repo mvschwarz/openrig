@@ -102,8 +102,9 @@ nodesRoutes.get("/", async (c) => {
   }
 
   const contextUsageStore = c.get("contextUsageStore" as never) as ContextUsageStore | undefined;
+  const transcriptStore = c.get("transcriptStore" as never) as TranscriptStore | undefined;
   const inventory = contextUsageStore
-    ? getNodeInventoryWithContext(deps.rigRepo.db, rigId, contextUsageStore)
+    ? getNodeInventoryWithContext(deps.rigRepo.db, rigId, contextUsageStore, transcriptStore)
     : getNodeInventory(deps.rigRepo.db, rigId);
   // Slice 15 — enrich with the two new orthogonal primitives. Order is
   // independent (each enrichment reads its own source), so the chain

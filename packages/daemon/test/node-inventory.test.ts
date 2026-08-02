@@ -840,6 +840,33 @@ describe("OPR.0.4.0.26 — node-list payload source dedupe", () => {
     expect(ctx?.availability).toBe("known");
   });
 
+  it("LIST exposes per-seat transcript ingest health from the capture store", () => {
+    seedPodAwareRig(db);
+    seedSession(db, "node-1", "dev-impl@test-rig");
+    const getIngestHealth = vi.fn(() => ({
+      state: "degraded",
+      reason: "capture_stale",
+      lastCapturedAt: "2026-08-02T08:00:00.000Z",
+    }));
+    const getWithTranscriptHealth = getNodeInventoryWithContext as unknown as (
+      db: Database.Database,
+      rigId: string,
+      contextStore: ContextUsageStore,
+      transcriptStore: { getIngestHealth: typeof getIngestHealth },
+    ) => ReturnType<typeof getNodeInventoryWithContext>;
+
+    const entry = getWithTranscriptHealth(db, "rig-1", stubStore(), { getIngestHealth })
+      .find((candidate) => candidate.logicalId === "dev.impl");
+
+    expect(getIngestHealth).toHaveBeenCalledWith("test-rig", "dev-impl@test-rig");
+    expect(entry?.transcriptIngest).toEqual({
+      state: "degraded",
+      runtime: "claude-code",
+      reason: "capture_stale",
+      lastCapturedAt: "2026-08-02T08:00:00.000Z",
+    });
+  });
+
   it("DETAIL contextUsage retains the full currentUsage (relocation, not loss)", () => {
     seedPodAwareRig(db);
     seedSession(db, "node-1", "dev-impl@test-rig");

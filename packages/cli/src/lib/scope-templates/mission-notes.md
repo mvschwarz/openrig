@@ -71,8 +71,13 @@ restore-needs evolve.)
 2. Read this file's §1 + your §A-§X section + this §9
 3. Read `missions/{{mission_id}}/README.md` for mission scope
 4. Read `missions/{{mission_id}}/PROGRESS.md` for delivery state
-5. `rig queue list --destination <your-session>` — your durable inbox
-6. State "restored from {{mission_id}}; resumed at <action>" before acting
+5. `rig queue list --mine --full --json` — triage your durable inbox from full
+   bodies; use `rig queue show <id> --full --json` for individual items. Never
+   use the bare compact queue list for triage.
+6. Optionally check `rig transcript <your-session> --tail 100` as secondary
+   evidence. It may be unavailable or incomplete for some runtimes; little or
+   no output does not prove the session was quiet.
+7. State "restored from {{mission_id}}; resumed at <action>" before acting
 
 ## §10. What NOT to reconstruct
 

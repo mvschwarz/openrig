@@ -230,8 +230,10 @@ If you're booting into a new seat in an OpenRig rig:
    that tells you when to reach for it.
 5. **Check your peers** — `rig capture <peer-session>` to see what they're
    doing.
-6. **Check the transcripts** if you're returning to an in-flight workstream
-   — `rig transcript <session> --tail 100` for recent context.
+6. **Recover from durable artifacts** if you're returning to an in-flight
+   workstream: read the restore map, current `MISSION_NOTES.md`, and owned queue
+   items. Use `rig transcript <session> --tail 100` only as a secondary check;
+   little or no output does not prove the workstream was quiet.
 7. **Ask `rig ask <rig> "<question>"`** if you need cross-cutting evidence
    from the rig's transcripts and chat.
 

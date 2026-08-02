@@ -6,9 +6,19 @@ import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 export interface TranscriptStoreOpts {
   transcriptsRoot?: string;
   enabled?: boolean;
+  staleAfterMs?: number;
+}
+
+export type TranscriptIngestState = "live" | "degraded" | "unavailable";
+
+export interface TranscriptIngestHealth {
+  state: TranscriptIngestState;
+  reason: "capture_fresh" | "capture_stale" | "capture_empty" | "capture_missing" | "capture_disabled" | "capture_unreadable";
+  lastCapturedAt: string | null;
 }
 
 const DEFAULT_ROOT = getCompatibleOpenRigPath("transcripts");
+export const DEFAULT_TRANSCRIPT_STALE_AFTER_MS = 10_000;
 
 function applyBackspaces(text: string): string {
   const chars: string[] = [];
@@ -170,10 +180,12 @@ function countNewlines(s: string): number {
 export class TranscriptStore {
   private readonly root: string;
   private readonly _enabled: boolean;
+  private readonly staleAfterMs: number;
 
   constructor(opts?: TranscriptStoreOpts) {
     this.root = opts?.transcriptsRoot ?? DEFAULT_ROOT;
     this._enabled = opts?.enabled ?? true;
+    this.staleAfterMs = opts?.staleAfterMs ?? DEFAULT_TRANSCRIPT_STALE_AFTER_MS;
   }
 
   get enabled(): boolean {
@@ -187,6 +199,29 @@ export class TranscriptStore {
       return join(this.root, "_unsafe", `${sessionName}.log`);
     }
     return resolved;
+  }
+
+  getIngestHealth(rigName: string, sessionName: string): TranscriptIngestHealth {
+    if (!this._enabled) {
+      return { state: "unavailable", reason: "capture_disabled", lastCapturedAt: null };
+    }
+    try {
+      const filePath = this.getTranscriptPath(rigName, sessionName);
+      if (!existsSync(filePath)) {
+        return { state: "unavailable", reason: "capture_missing", lastCapturedAt: null };
+      }
+      const stat = statSync(filePath);
+      const lastCapturedAt = stat.mtime.toISOString();
+      if (stat.size === 0) {
+        return { state: "degraded", reason: "capture_empty", lastCapturedAt };
+      }
+      if (Date.now() - stat.mtimeMs > this.staleAfterMs) {
+        return { state: "degraded", reason: "capture_stale", lastCapturedAt };
+      }
+      return { state: "live", reason: "capture_fresh", lastCapturedAt };
+    } catch {
+      return { state: "degraded", reason: "capture_unreadable", lastCapturedAt: null };
+    }
   }
 
   ensureTranscriptDir(rigName: string): boolean {
