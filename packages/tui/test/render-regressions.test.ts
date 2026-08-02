@@ -62,8 +62,11 @@ describe("live visual regressions", () => {
 
     const screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
     expect(screen.lines).toHaveLength(34);
-    expect(screen.lines[31]).toContain("≋");
-    expect(screen.lines[32]).toMatch(/^─+$/);
+    // chrome contract (visual-polish directive): ticker · pane rule · keybind
+    // hint bar · status line, bottom-anchored
+    expect(screen.lines[30]).toContain("≋");
+    expect(screen.lines[31]).toMatch(/^─+┴─+$/);
+    expect(screen.lines[32]).toContain("q quit");
     expect(screen.lines[33]).toContain("[t] needs");
   });
 

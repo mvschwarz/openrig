@@ -326,17 +326,31 @@ export interface RenderOptions {
   rows?: number;
 }
 
+function paneRule(cols: number, joint: "┬" | "┴", leftTitle?: string, rightTitle?: string): string {
+  const left = leftTitle ? `─ ${leftTitle} ` : "";
+  const right = rightTitle ? `─ ${rightTitle} ` : "";
+  const leftPart = (left + "─".repeat(EXPL_W)).slice(0, EXPL_W);
+  const rightPart = (right + "─".repeat(cols)).slice(0, Math.max(cols - EXPL_W - 1, 0));
+  return `${leftPart}${joint}${rightPart}`;
+}
+
+function keybindHints(state: ViewState): string {
+  const scroll = state.viewTab === "yaml" || state.focusedPane === "content" ? "⇞⇟ scroll · " : "";
+  return `↑↓ move · ←→ pane · ⏎ open · ${scroll}: command · / filter · f footer · q quit`;
+}
+
 export function renderScreen(state: ViewState, snap: FleetSnapshot, options: RenderOptions = {}, inputLine = ""): Screen {
   const { cols = 120, rows = 32 } = options;
   const lines: string[] = [];
   const hitMap: Screen["hitMap"] = [];
   lines.push(pad(`cmd ▸ ${inputLine}`, cols));
-  lines.push("─".repeat(cols));
+  const sectionTitle = { topology: "TOPOLOGY", specs: "SPECS", needs: "NEEDS-YOU" }[state.section] ?? state.section.toUpperCase();
+  lines.push(paneRule(cols, "┬", "EXPLORER", sectionTitle));
 
   const explorer = computeExplorerRows(state, snap);
   const content = contentLines(state, snap);
   const footer = state.footerOn ? snap.stream.at(-1) : undefined;
-  const chromeRows = footer ? 3 : 2; // bottom rule + status line (+ footer)
+  const chromeRows = footer ? 4 : 3; // bottom rule + hint bar + status line (+ footer)
   const bodyRows = Math.max(rows - 2 - chromeRows, 1);
   const explorerStart = Math.min(
     Math.max(state.selection - bodyRows + 1, 0),
@@ -400,7 +414,8 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   if (footer) lines.push(pad(`≋ ${footer.tsEmitted.slice(11, 16)} ${footer.sourceSession}: ${footer.body}`, cols));
   const drillPath = state.drill.map((d) => d.name).join(" → ");
   const readWarn = snap.readErrors.length > 0 ? `  ⚠ ${snap.readErrors.length} read(s) failed: ${snap.readErrors[0]}` : "";
-  lines.push("─".repeat(cols));
+  lines.push(paneRule(cols, "┴"));
+  lines.push(pad(keybindHints(state), cols));
   lines.push(
     pad(
       `[${state.instanceId}] ${state.section}${drillPath ? " · " + drillPath : ""}${state.lastError ? "  ✗ " + state.lastError : ""}${state.notice ? "  ▸ " + state.notice : ""}${readWarn}`,

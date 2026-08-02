@@ -9,6 +9,8 @@ import { createViewState, computeExplorerRows, emptySnapshot } from "./state.js"
 import { parseCommand } from "./grammar.js";
 import { createInputDecoder, resolveKeyAction, MOUSE_ENABLE, MOUSE_DISABLE, ALT_SCREEN_ON, ALT_SCREEN_OFF } from "./input.js";
 import { renderScreen } from "./render.js";
+import { createStyle, detectColorMode } from "./theme.js";
+import { stylizeLines } from "./stylize.js";
 import { createControlSocket, defaultSocketPath } from "./socket-server.js";
 import { demoSnapshot } from "./demo-data.js";
 import { DaemonClient } from "./daemon-client.js";
@@ -38,6 +40,7 @@ async function run(): Promise<void> {
   let inputLine = "";
   let lastScreen: Screen | null = null;
   const inputDecoder = createInputDecoder();
+  const style = createStyle(args.includes("--no-color") ? "none" : detectColorMode());
 
   function draw(): void {
     const cols = process.stdout.columns ?? 120;
@@ -47,7 +50,9 @@ async function run(): Promise<void> {
       view.dispatch({ type: "layout", contentMaxOffset: lastScreen.contentMaxOffset, contentTargetCount: lastScreen.contentTargets.length });
       lastScreen = renderScreen(view.get(), snapshot, { cols, rows }, inputLine);
     }
-    process.stdout.write("\x1b[H" + lastScreen.lines.map((l) => "\x1b[2K" + l).join("\r\n"));
+    // styling is a zero-width post-pass over the tested plain layer — the
+    // hitMap coordinates always match what is on screen
+    process.stdout.write("\x1b[H" + stylizeLines(lastScreen, style).map((l) => "\x1b[2K" + l).join("\r\n"));
   }
 
   const socketPath = argOf(args, "--socket") ?? defaultSocketPath(instanceId);
