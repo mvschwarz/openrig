@@ -19,8 +19,9 @@ If it does not auto-load skills reliably, read the packaged copy directly from y
 
 That skill covers the broader surface, including chatroom, discovery, adopt/bind/attach, lifecycle, specs, bundles, and richer operator workflows.
 
-Your per-session startup guidance may also name additional packaged skills for your role and pod.
-Load those too. This shared overlay is only the common bootstrap floor, not the full operating manual for your seat.
+Your per-session startup guidance also names the process skills for your role and pod.
+Load AND invoke those now, before proceeding with any work, using your runtime's supported skill mechanism.
+This shared overlay is only the common bootstrap floor, not the full operating manual for your seat.
 
 ## Working missions and slices (the SDLC)
 

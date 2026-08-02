@@ -27,4 +27,13 @@ startup:
     - path: guidance/role.md
       delivery_hint: send_text
       required: true
-  actions: []
+  actions:
+    - type: send_text
+      value: >-
+        A task is coming. BEFORE you do anything else, load and invoke your process skills NOW
+        using your runtime's supported skill mechanism: using-superpowers, frontend-design,
+        verification-before-completion, writing-plans, brainstorming. Load them first, then begin
+        the work.
+      phase: after_ready
+      applies_on: [fresh_start, restore]
+      idempotent: true
