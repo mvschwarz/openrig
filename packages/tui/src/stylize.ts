@@ -141,8 +141,11 @@ export function stylizeLines(screen: Screen, s: Style): string[] {
       const left = line.slice(0, border);
       const marker = line.slice(border + 1, border + 2);
       const right = line.slice(border + 2);
-      const styledMarker = marker === "›" ? s.paint("accent", "›", { bold: true }) : marker;
-      return `${paintExplorer(left, s)}${s.paint("chrome", "│")}${styledMarker}${paintContent(right, s)}`;
+      if (marker === "›") {
+        // content-pane selection = a real highlight bar, not just a glyph
+        return `${paintExplorer(left, s)}${s.paint("chrome", "│")}${s.paint("accent", `›${right}`, { inverse: true, bold: true })}`;
+      }
+      return `${paintExplorer(left, s)}${s.paint("chrome", "│")}${marker}${paintContent(right, s)}`;
     }
     return paintContent(line, s);
   });

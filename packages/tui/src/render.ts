@@ -413,12 +413,37 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
     }
     lines.push({ text: "SPEC LIBRARY" });
     lines.push({ text: state.filter ? `/ filter specs: ${state.filter}` : "/ filter specs…" });
+    // mirrors the explorer exactly (same grouping, same expansion state, same
+    // filter-overrides-collapse rule) — glance consistency across panes
+    const expandedSet = new Set(state.expanded);
     for (const kind of ["rig", "agent", "workflow"] as const) {
       const shown = snap.specs.filter((s) => s.kind === kind).filter((s) => !state.filter || s.name.includes(state.filter));
       if (shown.length === 0 && !snap.specs.some((s) => s.kind === kind)) continue;
       lines.push({ text: `  ${kind.toUpperCase()} (${shown.length})` });
-      for (const s of shown)
-        lines.push({ text: `    ▪ ${s.name}`, action: { type: "drill", resource: "spec", name: s.name } });
+      if (kind !== "agent") {
+        for (const s of shown)
+          lines.push({ text: `    ▪ ${s.name}`, action: { type: "drill", resource: "spec", name: s.name } });
+        continue;
+      }
+      const groups = new Map<string, typeof shown>();
+      for (const s of shown) {
+        const namespace = s.namespace ?? "(root)";
+        groups.set(namespace, [...(groups.get(namespace) ?? []), s]);
+      }
+      for (const [namespace, specs] of [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+        const open = namespace === "(root)" || expandedSet.has(`folder:${namespace}`) || !!state.filter;
+        if (namespace !== "(root)")
+          lines.push({
+            text: `    ${open ? "▾" : "▸"} ${namespace}/ (${specs.length})`,
+            action: { type: "toggle-expand", key: `folder:${namespace}` },
+          });
+        if (!open) continue;
+        for (const s of specs)
+          lines.push({
+            text: `${namespace === "(root)" ? "    " : "      "}▪ ${s.name}`,
+            action: { type: "drill", resource: "spec", name: s.name },
+          });
+      }
     }
     if (snap.specs.length === 0) lines.push({ text: "  (library read pending — honest-empty)" });
     return lines;
@@ -477,7 +502,10 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   const hitMap: Screen["hitMap"] = [];
   lines.push(pad(`cmd ▸ ${inputLine}`, cols));
   const sectionTitle = { topology: "TOPOLOGY", specs: "SPECS", needs: "NEEDS-YOU" }[state.section] ?? state.section.toUpperCase();
-  lines.push(paneRule(cols, "┬", "EXPLORER", sectionTitle));
+  // active-pane emphasis (k9s-class chrome): the focused pane's title is bracketed
+  const explorerTitle = state.focusedPane === "explorer" ? "[ EXPLORER ]" : "EXPLORER";
+  const contentTitle = state.focusedPane === "content" ? `[ ${sectionTitle} ]` : sectionTitle;
+  lines.push(paneRule(cols, "┬", explorerTitle, contentTitle));
 
   const explorer = computeExplorerRows(state, snap);
   const content = contentLines(state, snap);
