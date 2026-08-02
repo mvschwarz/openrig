@@ -25,8 +25,9 @@ function paintInline(text: string, s: Style): string {
   return out;
 }
 
-function paintExplorer(text: string, s: Style): string {
-  if (text.startsWith("›")) return s.paint("accent", text, { inverse: true, bold: true });
+function paintExplorer(text: string, s: Style, focused: boolean): string {
+  // pm-approved: the unfocused pane's selection bar dims (k9s/editor standard)
+  if (text.startsWith("›")) return s.paint(focused ? "accent" : "dim", text, { inverse: true, bold: focused });
   if (/[▾▸] (TOPOLOGY|SPECS|NEEDS-YOU)/.test(text)) return s.paint("bright", text, { bold: true });
   if (text.includes("⚑")) return s.paint("warn", text);
   if (/\(unreachable\)/.test(text)) {
@@ -98,6 +99,9 @@ function paintRule(line: string, s: Style): string {
 
 export function stylizeLines(screen: Screen, s: Style): string[] {
   if (s.mode === "none") return screen.lines;
+  // focus is read from the chrome itself (the bracketed pane title) — no
+  // second source of truth to drift
+  const explorerFocused = (screen.lines[1] ?? "").includes("[ EXPLORER ]");
 
   return screen.lines.map((line, index) => {
     if (index === 0) {
@@ -143,9 +147,9 @@ export function stylizeLines(screen: Screen, s: Style): string[] {
       const right = line.slice(border + 2);
       if (marker === "›") {
         // content-pane selection = a real highlight bar, not just a glyph
-        return `${paintExplorer(left, s)}${s.paint("chrome", "│")}${s.paint("accent", `›${right}`, { inverse: true, bold: true })}`;
+        return `${paintExplorer(left, s, explorerFocused)}${s.paint("chrome", "│")}${s.paint("accent", `›${right}`, { inverse: true, bold: true })}`;
       }
-      return `${paintExplorer(left, s)}${s.paint("chrome", "│")}${marker}${paintContent(right, s)}`;
+      return `${paintExplorer(left, s, explorerFocused)}${s.paint("chrome", "│")}${marker}${paintContent(right, s)}`;
     }
     return paintContent(line, s);
   });

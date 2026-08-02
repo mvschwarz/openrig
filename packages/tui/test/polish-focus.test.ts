@@ -63,3 +63,20 @@ describe("content library mirrors the explorer grouping", () => {
     expect(lines).toContain("rev-1");
   });
 });
+
+describe("unfocused-pane cursor dims (pm-approved nit)", () => {
+  it("explorer bar is accent when explorer focused, dim-inverse when content focused", () => {
+    const s = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    s.dispatch(parseCommand("rig openrig-build"));
+    let styled = stylizeLines(renderScreen(s.get(), snap, { cols: 140, rows: 34 }), createStyle("truecolor"));
+    expect(styled.join("\n")).toContain("\x1b[1;7;38;2;77;189;178m›");
+    const pre = renderScreen(s.get(), snap, { cols: 140, rows: 34 });
+    s.dispatch({ type: "layout", contentMaxOffset: pre.contentMaxOffset, contentTargetCount: pre.contentTargets.length });
+    s.dispatch({ type: "focus", pane: "content" });
+    const screen = renderScreen(s.get(), snap, { cols: 140, rows: 34 });
+    styled = stylizeLines(screen, createStyle("truecolor"));
+    const barIndex = screen.lines.findIndex((l) => /^›/.test(l));
+    expect(styled[barIndex]).toContain("\x1b[7;38;2;109;116;128m");
+    for (let i = 0; i < styled.length; i++) expect(stripAnsi(styled[i]!)).toBe(screen.lines[i]!);
+  });
+});
