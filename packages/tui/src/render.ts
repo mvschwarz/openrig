@@ -366,16 +366,25 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
     const marker = explorerIndex === state.selection && row ? "›" : " ";
     const left = pad(row ? `${marker}${row.label}` : "", EXPL_W);
     const item = visibleContent[i];
-    const hasContentTarget = !!item?.action || (item?.zones?.length ?? 0) > 0;
     const targetIndex = contentTargets.length;
-    const contentMarker = state.focusedPane === "content" && hasContentTarget && targetIndex === state.contentSelection ? "›" : " ";
-    lines.push(pad(`${left}│${contentMarker}${item?.text ?? ""}`, cols));
+    const zones = item?.zones ?? [];
+    const selectedOnLine = state.focusedPane === "content" ? state.contentSelection - targetIndex : -1;
+    const selectedZone = selectedOnLine >= 0 && selectedOnLine < zones.length ? zones[selectedOnLine] : undefined;
+    const selectedAction = !!item?.action && selectedOnLine === zones.length;
+    let contentText = item?.text ?? "";
+    let contentMarker = selectedAction ? "›" : " ";
+    if (selectedZone) {
+      if (selectedZone.start > 0)
+        contentText = `${contentText.slice(0, selectedZone.start - 1)}›${contentText.slice(selectedZone.start)}`;
+      else contentMarker = "›";
+    }
+    lines.push(pad(`${left}│${contentMarker}${contentText}`, cols));
     if (row) {
       hitMap.push({ y, x1: 1, x2: EXPL_W, action: row.action });
       explorerRows.push({ ...row, y });
     }
     // zones first: hit lookup takes the first match, so a zone wins over the row-wide action
-    for (const z of item?.zones ?? []) {
+    for (const z of zones) {
       const target = { y, x1: EXPL_W + 3 + z.start, x2: EXPL_W + 2 + z.end, action: z.action };
       hitMap.push(target);
       contentTargets.push(target);

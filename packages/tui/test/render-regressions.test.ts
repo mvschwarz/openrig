@@ -18,6 +18,33 @@ describe("live visual regressions", () => {
     expect(row).toContain("openrig-build");
   });
 
+  it("keeps every raw-key content target visibly focused, including multiple actions on one row", () => {
+    const snap = demoSnapshot();
+    const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    view.dispatch({ type: "drill", resource: "rig", name: "openrig-build" });
+    view.dispatch({ type: "focus", pane: "content" });
+    let screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
+    view.dispatch({ type: "layout", contentMaxOffset: screen.contentMaxOffset, contentTargetCount: screen.contentTargets.length });
+    screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
+
+    const tabIndex = screen.contentTargets.findIndex((target) => target.action.type === "tab");
+    const termIndex = screen.contentTargets.findIndex((target) => target.action.type === "act" && target.action.act === "open-terminal");
+    const rowIndex = screen.contentTargets.findIndex((target) => target.action.type === "drill" && target.action.resource === "agent");
+    expect([tabIndex, termIndex, rowIndex].every((index) => index >= 0)).toBe(true);
+
+    view.dispatch({ type: "content-select", index: tabIndex });
+    screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
+    expect(screen.lines[screen.contentTargets[tabIndex]!.y - 1]!.split("│")[1]).toMatch(/^›/);
+
+    view.dispatch({ type: "content-select", index: termIndex });
+    screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
+    expect(screen.lines[screen.contentTargets[termIndex]!.y - 1]).toContain("›term ▸");
+
+    view.dispatch({ type: "content-select", index: rowIndex });
+    screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
+    expect(screen.lines[screen.contentTargets[rowIndex]!.y - 1]!.split("│")[1]).toMatch(/^›/);
+  });
+
   it("never emits a composed row wider than the terminal", () => {
     const snap = demoSnapshot();
     const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
