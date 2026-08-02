@@ -45,7 +45,12 @@ describe("ACTIONS column = real drive-structure acts (BR-9)", () => {
     const termHit = hitAt(screen, row.indexOf("term ▸") + 1, rowIdx + 1);
     expect(termHit?.action).toEqual({ type: "act", act: "open-terminal", view: "pod:openrig-build/dev50" });
     const cellHit = hitAt(screen, row.indexOf("codex") + 1, rowIdx + 1);
-    expect(cellHit?.action).toEqual({ type: "drill", resource: "agent", name: "dev50.guard" });
+    expect(cellHit?.action).toEqual({
+      type: "drill",
+      resource: "agent",
+      name: "dev50.guard",
+      target: { host: "vm-host", rig: "openrig-build", pod: "dev50" },
+    });
   });
 
   it("acts NEVER mutate the view-state; the outcome arrives as a notice (PIN 1 intact)", () => {

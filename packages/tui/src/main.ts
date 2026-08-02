@@ -7,7 +7,7 @@
 //   openrig-tui [--instance <id>] [--socket <path>] [--url <daemon>] [--demo]
 import { createViewState, computeExplorerRows, emptySnapshot } from "./state.js";
 import { parseCommand } from "./grammar.js";
-import { decodeInput, MOUSE_ENABLE, MOUSE_DISABLE, ALT_SCREEN_ON, ALT_SCREEN_OFF } from "./input.js";
+import { decodeInput, resolveKeyAction, MOUSE_ENABLE, MOUSE_DISABLE, ALT_SCREEN_ON, ALT_SCREEN_OFF } from "./input.js";
 import { renderScreen } from "./render.js";
 import { createControlSocket, defaultSocketPath } from "./socket-server.js";
 import { demoSnapshot } from "./demo-data.js";
@@ -42,6 +42,10 @@ async function run(): Promise<void> {
     const cols = process.stdout.columns ?? 120;
     const rows = process.stdout.rows ?? 32;
     lastScreen = renderScreen(view.get(), snapshot, { cols, rows }, inputLine);
+    if (view.get().contentMaxOffset !== lastScreen.contentMaxOffset || view.get().contentTargetCount !== lastScreen.contentTargets.length) {
+      view.dispatch({ type: "layout", contentMaxOffset: lastScreen.contentMaxOffset, contentTargetCount: lastScreen.contentTargets.length });
+      lastScreen = renderScreen(view.get(), snapshot, { cols, rows }, inputLine);
+    }
     process.stdout.write("\x1b[H" + lastScreen.lines.map((l) => "\x1b[2K" + l).join("\r\n"));
   }
 
@@ -121,16 +125,19 @@ async function run(): Promise<void> {
         inputLine = "";
       } else if (ev.type === "key" && ev.key === "enter") {
         if (inputLine !== "") {
-          view.dispatch(parseCommand(inputLine));
+          perform(parseCommand(inputLine, view.get().sections));
           inputLine = "";
         } else {
-          view.dispatch({ type: "activate" });
+          if (lastScreen) {
+            const action = resolveKeyAction(ev, view.get(), lastScreen, computeExplorerRows(view.get(), snapshot).length);
+            if (action) perform(action);
+          }
         }
       } else if (ev.type === "key" && "action" in ev) {
-        const action = ev.action;
-        if (action.type === "select")
-          view.dispatch({ ...action, rowCount: computeExplorerRows(view.get(), snapshot).length });
-        else view.dispatch(action);
+        if (lastScreen) {
+          const action = resolveKeyAction(ev, view.get(), lastScreen, computeExplorerRows(view.get(), snapshot).length);
+          if (action) perform(action);
+        }
       } else if (ev.type === "mouse" && lastScreen) {
         const hit = lastScreen.hitMap.find((h) => h.y === ev.y && ev.x >= h.x1 && ev.x <= h.x2);
         if (hit) perform(hit.action);

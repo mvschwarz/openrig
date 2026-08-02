@@ -26,12 +26,14 @@
     "url": "https://esoteric.run"
   },
   "bin": {
-    "rig": "dist/bin-wrapper.js"
+    "rig": "dist/bin-wrapper.js",
+    "openrig-tui": "tui/dist/main.js"
   },
   "files": [
     "dist",
     "daemon",
     "ui",
+    "tui",
     "scripts"
   ],
   "scripts": {

@@ -33,6 +33,10 @@ interface NodeInventoryRead {
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
   lifecycleState: string;
+  sessionStatus?: string | null;
+  startupStatus?: string | null;
+  terminalActive?: boolean | null;
+  agentActivity?: { state?: string } | null;
   canonicalSessionName: string | null;
   tmuxAttachCommand?: string | null;
   resolvedSpecName: string | null;
@@ -95,8 +99,9 @@ interface NeedsYouItemRead {
   destinationSession: string | null;
   derived: { kind: string; evidence: string; threshold: string } | null;
 }
-interface ReviewRigRead {
+interface ReviewFleetRead {
   needsYou?: { items?: NeedsYouItemRead[] };
+  hosts?: Array<{ hostId: string; status: { status: string } }>;
 }
 interface AttentionAggregateRead {
   hosts?: Array<{ hostId: string; status: string; error?: string }>;
@@ -123,8 +128,13 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
     // honest-unknown: no value in the projection → null → renders "—"
     context: known && ctx.usedPercentage != null ? Math.round(ctx.usedPercentage) : null,
     tokens: known ? fmtTokens(ctx.totalInputTokens, ctx.totalOutputTokens) : null,
-    // PIN 2: the maintained projection's lifecycleState VERBATIM
-    status: node.lifecycleState,
+    // Mirror the maintained web projection: lifecycle truth drives actions,
+    // while session/terminal activity drives the visible status label.
+    status: node.sessionStatus === "running" || node.sessionStatus === "ready"
+      ? (node.terminalActive === true || (node.terminalActive == null && node.agentActivity?.state === "running") ? "active" : "idle")
+      : (node.sessionStatus ?? "unknown"),
+    live: node.lifecycleState === "running",
+    canRun: node.lifecycleState !== "running",
     session: node.canonicalSessionName,
     attach: node.tmuxAttachCommand ?? null,
   };
@@ -207,7 +217,7 @@ export async function hydrateSnapshot(client: DaemonClient, reviewCache?: SpecRe
     safe<AttentionAggregateRead>("attention-aggregate", () => client.attentionAggregate()),
     safe<RigSummaryRead[]>("rigs-summary", () => client.rigsSummary()),
     safe<SpecLibraryRead[]>("specs-library", () => client.specsLibrary()),
-    safe<ReviewRigRead>("review-rig", () => client.reviewRig()),
+    safe<ReviewFleetRead>("review-fleet", () => client.reviewFleet()),
     safe<StreamItemRead[]>("stream-list", () => client.streamList()),
   ]);
 
@@ -372,7 +382,8 @@ export async function hydrateSnapshot(client: DaemonClient, reviewCache?: SpecRe
     hosts: [localHost, ...remoteHosts],
     specs,
     needs,
-    humanQueueProbed: review != null,
+    humanQueueProbed: review != null && Array.isArray(review.hosts) && review.hosts.length > 0
+      && review.hosts.every((host) => host.status.status === "ok"),
     humanQueue,
     hostsDown,
     stream: (streamItems ?? []).map((s) => ({ tsEmitted: s.tsEmitted, sourceSession: s.sourceSession, body: s.body })),

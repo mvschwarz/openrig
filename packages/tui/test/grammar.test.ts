@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseCommand } from "../src/grammar.js";
+import { defaultSections } from "../src/state.js";
 
 describe("safe-core grammar (FR-1, §4.B)", () => {
   it("parses :section jump for the three launch sections", () => {
@@ -12,6 +13,11 @@ describe("safe-core grammar (FR-1, §4.B)", () => {
     const r = parseCommand(":bogus");
     expect(r.type).toBe("error");
     if (r.type === "error") expect(r.message).toMatch(/unknown section ":bogus"/);
+  });
+
+  it("derives section commands from the same supplied registry", () => {
+    const sections = [...defaultSections(), { name: "extra", sourceRead: "GET /extra", drillShape: "flat" }];
+    expect(parseCommand(":extra", sections)).toEqual({ type: "jump", section: "extra" });
   });
 
   it("parses /text filter; bare / clears", () => {

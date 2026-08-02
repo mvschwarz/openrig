@@ -26,6 +26,7 @@ export function describeState(state: ViewState) {
     screen: state.section,
     drill: state.drill.map((d) => `${d.kind}:${d.name}`),
     filter: state.filter || undefined,
+    viewTab: state.viewTab,
     error: state.lastError ?? undefined,
   };
 }
@@ -75,7 +76,7 @@ export async function createControlSocket(options: {
           continue;
         }
         // The one mutation path: grammar → dispatch. Nothing else.
-        const next = view.dispatch(parseCommand(line));
+        const next = view.dispatch(parseCommand(line, view.get().sections));
         conn.write(JSON.stringify(describeState(next)) + "\n");
         onMutation?.();
       }

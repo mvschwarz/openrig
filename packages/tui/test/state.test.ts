@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { createViewState, defaultSections } from "../src/state.js";
+import { agentsRunningSpec, createViewState, defaultSections } from "../src/state.js";
+import { parseCommand } from "../src/grammar.js";
 import { demoSnapshot } from "../src/demo-data.js";
 import type { NeedsItem, SectionDef } from "../src/types.js";
 
@@ -42,6 +43,24 @@ describe("one instance-scoped view-state (PIN 1, FR-12/13)", () => {
     expect(s.get().lastError).toMatch(/no such agent "nobody\.here"/);
   });
 
+  it("rejects ambiguous fleet shorthand and accepts an exact scoped agent target", () => {
+    const duplicate = demoSnapshot();
+    duplicate.hosts[0]!.rigs.push({
+      name: "other-rig",
+      pods: [{ name: "dev50", agents: [{ name: "dev50.qa", runtime: "codex", spec: "qa-agent", context: null, tokens: null, status: "idle", live: true }] }],
+    });
+    const s = createViewState({ instanceId: "t", getSnapshot: () => duplicate });
+    expect(s.dispatch({ type: "drill", resource: "agent", name: "dev50.qa" }).lastError).toMatch(/ambiguous agent/);
+    expect(s.dispatch({
+      type: "drill",
+      resource: "agent",
+      name: "dev50.qa",
+      target: { host: "vm-host", rig: "other-rig", pod: "dev50" },
+    }).drill.map((part) => part.name)).toEqual(["vm-host", "other-rig", "dev50", "dev50.qa"]);
+    expect(s.dispatch(parseCommand("agent vm-host/openrig-build/dev50/dev50.qa")).drill.map((part) => part.name))
+      .toEqual(["vm-host", "openrig-build", "dev50", "dev50.qa"]);
+  });
+
   it("cross-navs spec-of: running agent → its agent spec", () => {
     const s = createViewState({ instanceId: "t", ...withSnap });
     s.dispatch({ type: "cross", kind: "spec-of", name: "dev50.driver" });
@@ -56,12 +75,44 @@ describe("one instance-scoped view-state (PIN 1, FR-12/13)", () => {
     expect(s.get().runningOf).toBe("driver-agent");
   });
 
+  it("filters spec reverse navigation to genuinely live seats", () => {
+    const copy = demoSnapshot();
+    copy.hosts[0]!.rigs[0]!.pods[0]!.agents[0]!.live = false;
+    expect(agentsRunningSpec(copy, "driver-agent")).toEqual([]);
+  });
+
+  it("keeps a missing spec-of target in place with a named error", () => {
+    const copy = demoSnapshot();
+    copy.hosts[0]!.rigs[0]!.pods[0]!.agents[0]!.spec = "materialized-only";
+    const s = createViewState({ instanceId: "t", getSnapshot: () => copy });
+    const before = s.get().section;
+    const next = s.dispatch({ type: "cross", kind: "spec-of", name: "dev50.driver" });
+    expect(next.section).toBe(before);
+    expect(next.lastError).toMatch(/spec .*not in the library/);
+  });
+
+  it("rejects tabs that do not exist in the current content context", () => {
+    const s = createViewState({ instanceId: "t", ...withSnap });
+    expect(s.dispatch({ type: "tab", tab: "yaml" }).lastError).toMatch(/not available/);
+    s.dispatch({ type: "drill", resource: "spec", name: "openrig-build-rig" });
+    expect(s.dispatch({ type: "tab", tab: "yaml" }).lastError).toBeNull();
+  });
+
   it("filters the current view and clears with empty text", () => {
     const s = createViewState({ instanceId: "t", ...withSnap });
     s.dispatch({ type: "filter", text: "dev50" });
     expect(s.get().filter).toBe("dev50");
     s.dispatch({ type: "filter", text: "" });
     expect(s.get().filter).toBe("");
+  });
+
+  it("bounds content scrolling in state so PageUp moves immediately from the bottom", () => {
+    const s = createViewState({ instanceId: "t", ...withSnap });
+    s.dispatch({ type: "layout", contentMaxOffset: 15, contentTargetCount: 0 });
+    for (let i = 0; i < 20; i++) s.dispatch({ type: "content-scroll", delta: 10 });
+    expect(s.get().contentOffset).toBe(15);
+    s.dispatch({ type: "content-scroll", delta: -10 });
+    expect(s.get().contentOffset).toBe(5);
   });
 
   it("renders honest-empty against an empty snapshot: errors name the miss, nothing is fabricated", () => {

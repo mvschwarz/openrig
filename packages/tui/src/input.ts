@@ -2,7 +2,7 @@
 // ESC [ < b ; x ; y M/m — the standard tmux/iTerm/Terminal.app mouse encoding.
 // Mouse events are resolved against the renderer's hit-map by the caller and
 // then dispatched through the SAME dispatch as commands and keys (PIN 1).
-import type { InputEvent } from "./types.js";
+import type { Action, InputEvent, Screen, ViewState } from "./types.js";
 
 const SGR_MOUSE = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g;
 
@@ -71,6 +71,29 @@ export function decodeInput(bytes: string | Buffer): InputEvent[] {
 /** Test/automation helper: the SGR bytes a terminal emits for a left click at (x, y). */
 export function sgrClick(x: number, y: number): string {
   return `\x1b[<0;${x};${y}M\x1b[<0;${x};${y}m`;
+}
+
+/** Resolve directional/Enter keys against the currently rendered pane. */
+export function resolveKeyAction(
+  event: Extract<InputEvent, { type: "key" }>,
+  state: ViewState,
+  screen: Screen,
+  explorerCount: number,
+): Action | null {
+  if (event.key === "left") return { type: "focus", pane: "explorer" };
+  if (event.key === "right") return screen.contentTargets.length > 0 ? { type: "focus", pane: "content" } : null;
+  if (event.key === "up" || event.key === "down") {
+    const delta = event.key === "down" ? 1 : -1;
+    return state.focusedPane === "content"
+      ? { type: "content-select", delta }
+      : { type: "select", delta, rowCount: explorerCount };
+  }
+  if (event.key === "enter") {
+    return state.focusedPane === "content"
+      ? (screen.contentTargets[state.contentSelection]?.action ?? { type: "error", message: "nothing selected in content" })
+      : { type: "activate" };
+  }
+  return "action" in event ? event.action : null;
 }
 
 export const MOUSE_ENABLE = "\x1b[?1000h\x1b[?1006h";

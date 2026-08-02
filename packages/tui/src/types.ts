@@ -11,6 +11,10 @@ export interface AgentRow {
   context: number | null;
   tokens: string | null;
   status: string;
+  /** lifecycle truth, separate from the displayed activity status */
+  live: boolean;
+  /** whether the lifecycle restore action is valid */
+  canRun?: boolean;
   /** canonicalSessionName where served — joins Needs-You targets to topology */
   session?: string | null;
   /** served tmuxAttachCommand, displayed verbatim in the detail view (web parity) */
@@ -134,6 +138,12 @@ export type GetSnapshot = () => FleetSnapshot;
 
 export type ResourceKind = "host" | "rig" | "pod" | "agent" | "spec";
 
+export interface ResourceTarget {
+  host: string;
+  rig?: string;
+  pod?: string;
+}
+
 export interface DrillSegment {
   kind: ResourceKind;
   name: string;
@@ -148,10 +158,13 @@ export type Action =
   | { type: "filter"; text: string }
   | { type: "select"; delta?: number; index?: number; rowCount?: number }
   | { type: "activate" }
-  | { type: "drill"; resource: ResourceKind; name: string }
-  | { type: "cross"; kind: "spec-of" | "running"; name: string }
+  | { type: "drill"; resource: ResourceKind; name: string; target?: ResourceTarget }
+  | { type: "cross"; kind: "spec-of" | "running"; name: string; target?: ResourceTarget }
   | { type: "tab"; tab: ViewTab }
   | { type: "content-scroll"; delta: number }
+  | { type: "focus"; pane: "explorer" | "content" }
+  | { type: "content-select"; delta?: number; index?: number }
+  | { type: "layout"; contentMaxOffset: number; contentTargetCount: number }
   | { type: "footer"; on?: boolean }
   /** drive-structure daemon writes (BR-8/BR-9): executed by the driver loop
    * against EXISTING write contracts; never a view-state mutation */
@@ -178,6 +191,10 @@ export interface ViewState {
   runningOf: string | null;
   viewTab: ViewTab;
   contentOffset: number;
+  contentMaxOffset: number;
+  contentTargetCount: number;
+  contentSelection: number;
+  focusedPane: "explorer" | "content";
   /** the rig-stream footer is ambient: toggleable, never a navigable view (FR-10) */
   footerOn: boolean;
   /** transient result line from an executed act (daemon reply, verbatim) */
@@ -207,6 +224,8 @@ export interface HitTarget {
 export interface Screen {
   lines: string[];
   hitMap: HitTarget[];
+  contentTargets: HitTarget[];
+  contentMaxOffset: number;
   explorerRows: Array<ExplorerRow & { y: number }>;
 }
 

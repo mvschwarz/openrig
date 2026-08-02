@@ -68,6 +68,15 @@ describe("control-socket adapter (spike-adopted; arch boundary constraint)", () 
     expect(view.get().drill).toEqual([]);
   });
 
+  it("rejects a tab outside its content context and exposes the active view tab", async () => {
+    const view = createViewState({ instanceId: "tui-sock", getSnapshot: () => snap });
+    open = await createControlSocket({ socketPath: shortSockPath(), view });
+    const [bad, good, state] = await ask(open.path, ["tab yaml", "spec openrig-build-rig", "state"]);
+    expect(JSON.parse(bad!).error).toMatch(/not available/);
+    expect(JSON.parse(good!).viewTab).toBe("configuration");
+    expect(JSON.parse(state!).state.viewTab).toBe("configuration");
+  });
+
   it("refuses socket paths beyond the sun_path limit with a named error", async () => {
     const view = createViewState({ instanceId: "tui-sock", getSnapshot: () => snap });
     const tooLong = path.join(os.tmpdir(), "x".repeat(MAX_SOCKET_PATH_BYTES + 1) + ".sock");

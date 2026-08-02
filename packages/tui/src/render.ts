@@ -4,7 +4,7 @@
 // agent-refs, Needs-You items) — so a mouse click anywhere resolves to the
 // SAME semantic actions commands produce (PIN 1). Isolated seam: a substrate
 // swap touches only this module (spike verdict revisit trigger).
-import { computeExplorerRows, findAgent, findSpec, findAgentBySession, agentsRunningSpec } from "./state.js";
+import { computeExplorerRows, findAgent, findSpec, findAgentBySession, agentsRunningSpec, agentsRunningSpecTargets } from "./state.js";
 import type { Action, FleetSnapshot, NeedsItem, Screen, ViewState } from "./types.js";
 
 const EXPL_W = 30;
@@ -68,10 +68,10 @@ function specTabsLine(state: ViewState, name: string): ContentLine {
 }
 
 function needsLine(prefix: string, item: NeedsItem, snap: FleetSnapshot): ContentLine {
-  const agent = findAgentBySession(snap, item.target);
+  const found = findAgentBySession(snap, item.target);
   return {
-    text: `${prefix}${item.kind}  ${item.target}  — ${item.detail}${agent ? "  (open ▸)" : ""}`,
-    ...(agent ? { action: { type: "drill", resource: "agent", name: agent.name } as const } : {}),
+    text: `${prefix}${item.kind}  ${item.target}  — ${item.detail}${found ? "  (open ▸)" : ""}`,
+    ...(found ? { action: { type: "drill", resource: "agent", name: found.agent.name, target: { host: found.host.name, rig: found.rig.name, pod: found.pod.name } } as const } : {}),
   };
 }
 
@@ -116,28 +116,37 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
   if (state.section === "topology") {
     if (state.runningOf) {
       lines.push({ text: `seats running spec "${state.runningOf}":` });
-      for (const seat of agentsRunningSpec(snap, state.runningOf))
-        lines.push({ text: `  ● ${seat}  (open: agent ${seat})`, action: { type: "drill", resource: "agent", name: seat } });
+      for (const seat of agentsRunningSpecTargets(snap, state.runningOf))
+        lines.push({
+          text: `  ● ${seat.agent.name}  (open: agent ${seat.agent.name})`,
+          action: { type: "drill", resource: "agent", name: seat.agent.name, target: { host: seat.host.name, rig: seat.rig.name, pod: seat.pod.name } },
+        });
       if (lines.length === 1) lines.push({ text: "  (no seats currently run it)" });
       return lines;
     }
     const leaf = state.drill.at(-1);
     if (leaf?.kind === "agent") {
-      const found = findAgent(snap, leaf.name);
+      const hostName = state.drill.find((part) => part.kind === "host")?.name;
+      const rigName = state.drill.find((part) => part.kind === "rig")?.name;
+      const podName = state.drill.find((part) => part.kind === "pod")?.name;
+      const found = hostName ? findAgent(snap, leaf.name, { host: hostName, rig: rigName, pod: podName }) : findAgent(snap, leaf.name);
       if (!found) return [{ text: `agent "${leaf.name}" not in the current snapshot` }];
       const { agent, rig, pod } = found;
       lines.push({ text: `agent ${agent.name}` });
       lines.push({ text: `  rig ${rig.name} · pod ${pod.name} · runtime ${agent.runtime}` });
-      if (agent.spec)
-        lines.push({ text: `  spec ${agent.spec}  (open: spec-of ${agent.name})`, action: { type: "cross", kind: "spec-of", name: agent.name } });
+      if (agent.spec && findSpec(snap, agent.spec))
+        lines.push({ text: `  spec ${agent.spec}  (open: spec-of ${agent.name})`, action: { type: "cross", kind: "spec-of", name: agent.name, target: { host: found.host.name, rig: rig.name, pod: pod.name } } });
+      else if (agent.spec) lines.push({ text: `  spec ${agent.spec}  (not in library)` });
       lines.push({ text: `  state ${agent.status}` });
       if (agent.attach) lines.push({ text: `  attach: ${agent.attach}` });
       lines.push({ text: `  term ▸ (open pod terminal)`, action: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${pod.name}` } });
       return lines;
     }
     const rigName = state.drill.find((d) => d.kind === "rig")?.name ?? snap.hosts[0]?.rigs[0]?.name;
-    const rig = snap.hosts.flatMap((h) => h.rigs).find((r) => r.name === rigName);
-    if (!rig) return [{ text: "no rig in view — waiting on the daemon read (honest-empty, not fabricated)" }];
+    const hostName = state.drill.find((d) => d.kind === "host")?.name;
+    const host = (hostName ? snap.hosts.find((candidate) => candidate.name === hostName) : snap.hosts[0]);
+    const rig = host?.rigs.find((candidate) => candidate.name === rigName);
+    if (!rig || !host) return [{ text: "no rig in view — waiting on the daemon read (honest-empty, not fabricated)" }];
     const podFilter = leaf?.kind === "pod" ? leaf.name : null;
     const all = rig.pods.flatMap((p) => p.agents.map((a) => ({ pod: p.name, ...a })));
     const rows = all
@@ -151,7 +160,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
       for (const pod of rig.pods)
         lines.push({
           text: `  ▾ ${pod.name} — ${pod.agents.length} agents`,
-          action: { type: "drill", resource: "pod", name: pod.name },
+          action: { type: "drill", resource: "pod", name: pod.name, target: { host: host.name, rig: rig.name } },
         });
       return lines;
     }
@@ -163,7 +172,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
       // write contract: `run ▸` = the rig-restore write (rendered only where
       // it applies — the seat is not running); `term ▸` = the terminal-open
       // view contract (pod-scoped, the web's granularity). No false affordance.
-      const canRun = a.status !== "running";
+      const canRun = a.canRun ?? !a.live;
       const actionsCell = canRun ? "run ▸ · term ▸" : "term ▸";
       const zones: ContentLine["zones"] = [];
       const termOffset = actionsColStart + actionsCell.indexOf("term ▸");
@@ -187,7 +196,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
           a.status,
           actionsCell,
         ]),
-        action: { type: "drill", resource: "agent", name: a.name },
+        action: { type: "drill", resource: "agent", name: a.name, target: { host: host.name, rig: rig.name, pod: a.pod } },
         zones,
       });
     }
@@ -327,7 +336,7 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   const content = contentLines(state, snap);
   const footer = state.footerOn ? snap.stream.at(-1) : undefined;
   const chromeRows = footer ? 3 : 2; // bottom rule + status line (+ footer)
-  const bodyRows = Math.min(Math.max(explorer.length, content.length), Math.max(rows - 2 - chromeRows, 1));
+  const bodyRows = Math.max(rows - 2 - chromeRows, 1);
   const explorerStart = Math.min(
     Math.max(state.selection - bodyRows + 1, 0),
     Math.max(explorer.length - bodyRows, 0),
@@ -349,6 +358,7 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
     });
   }
   const explorerRows: Screen["explorerRows"] = [];
+  const contentTargets: Screen["contentTargets"] = [];
   for (let i = 0; i < bodyRows; i++) {
     const y = lines.length + 1; // 1-based terminal row this line will occupy
     const explorerIndex = explorerStart + i;
@@ -356,15 +366,25 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
     const marker = explorerIndex === state.selection && row ? "›" : " ";
     const left = pad(row ? `${marker}${row.label}` : "", EXPL_W);
     const item = visibleContent[i];
-    lines.push(pad(`${left}│ ${item?.text ?? ""}`, cols));
+    const hasContentTarget = !!item?.action || (item?.zones?.length ?? 0) > 0;
+    const targetIndex = contentTargets.length;
+    const contentMarker = state.focusedPane === "content" && hasContentTarget && targetIndex === state.contentSelection ? "›" : " ";
+    lines.push(pad(`${left}│${contentMarker}${item?.text ?? ""}`, cols));
     if (row) {
       hitMap.push({ y, x1: 1, x2: EXPL_W, action: row.action });
       explorerRows.push({ ...row, y });
     }
     // zones first: hit lookup takes the first match, so a zone wins over the row-wide action
-    for (const z of item?.zones ?? [])
-      hitMap.push({ y, x1: EXPL_W + 3 + z.start, x2: EXPL_W + 2 + z.end, action: z.action });
-    if (item?.action) hitMap.push({ y, x1: EXPL_W + 3, x2: cols, action: item.action });
+    for (const z of item?.zones ?? []) {
+      const target = { y, x1: EXPL_W + 3 + z.start, x2: EXPL_W + 2 + z.end, action: z.action };
+      hitMap.push(target);
+      contentTargets.push(target);
+    }
+    if (item?.action) {
+      const target = { y, x1: EXPL_W + 3, x2: cols, action: item.action };
+      hitMap.push(target);
+      contentTargets.push(target);
+    }
   }
 
   if (footer) lines.push(pad(`≋ ${footer.tsEmitted.slice(11, 16)} ${footer.sourceSession}: ${footer.body}`, cols));
@@ -378,5 +398,5 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
     ),
   );
   while (lines.length < rows) lines.push("");
-  return { lines: lines.slice(0, rows), hitMap, explorerRows };
+  return { lines: lines.slice(0, rows), hitMap, contentTargets, contentMaxOffset: maxContentOffset, explorerRows };
 }

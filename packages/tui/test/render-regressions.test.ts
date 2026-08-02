@@ -27,6 +27,19 @@ describe("live visual regressions", () => {
     expect(screen.lines.every((line) => line.length <= 80)).toBe(true);
   });
 
+  it("anchors ticker, rule, and status to the bottom of an exact short 140x34 view", () => {
+    const base = demoSnapshot();
+    const snap: FleetSnapshot = { ...base, needs: [], hostsDown: [], humanQueue: [] };
+    const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    view.dispatch({ type: "jump", section: "needs" });
+
+    const screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
+    expect(screen.lines).toHaveLength(34);
+    expect(screen.lines[31]).toContain("≋");
+    expect(screen.lines[32]).toMatch(/^─+$/);
+    expect(screen.lines[33]).toContain("[t] needs");
+  });
+
   it("scrolls the Explorer viewport to keep the keyboard selection visible", () => {
     const base = demoSnapshot();
     const snap: FleetSnapshot = {
@@ -139,6 +152,7 @@ describe("live visual regressions", () => {
     const selected = view.get().selection;
 
     const initial = renderScreen(view.get(), snap, { cols: 100, rows: 12 });
+    view.dispatch({ type: "layout", contentMaxOffset: initial.contentMaxOffset, contentTargetCount: initial.contentTargets.length });
     expect(initial.lines.join("\n")).not.toContain("pod-17 (pod)");
     const scrollY = initial.lines.findIndex((line) => line.includes("content ↑/↓")) + 1;
     expect(initial.hitMap).toContainEqual(expect.objectContaining({

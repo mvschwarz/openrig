@@ -53,6 +53,7 @@ const FIXTURES: Record<string, unknown> = {
       rigId: "01JRIG", rigName: "myrig", logicalId: "dev.impl", podId: "01JPOD", podNamespace: "dev",
       role: "implementer", canonicalSessionName: "dev-impl@myrig", nodeKind: "agent", runtime: "claude-code",
       sessionStatus: "running", startupStatus: "ready", restoreOutcome: "resumed", oriented: "verified",
+      terminalActive: false,
       lifecycleState: "running", occupantLifecycle: "active", continuityOutcome: null, handoverResult: null,
       previousOccupant: null, handoverAt: null, tmuxAttachCommand: null, resumeCommand: null,
       recoveryGuidance: null, latestError: null, model: null, agentRef: "implementer", profile: "default",
@@ -65,6 +66,7 @@ const FIXTURES: Record<string, unknown> = {
       rigId: "01JRIG", rigName: "myrig", logicalId: "dev.qa", podId: "01JPOD", podNamespace: "dev",
       role: "qa", canonicalSessionName: "dev-qa@myrig", nodeKind: "agent", runtime: "codex",
       sessionStatus: null, startupStatus: null, restoreOutcome: "n-a", oriented: "n-a",
+      terminalActive: null,
       lifecycleState: "detached", occupantLifecycle: "unknown", continuityOutcome: null, handoverResult: null,
       previousOccupant: null, handoverAt: null, tmuxAttachCommand: null, resumeCommand: null,
       recoveryGuidance: null, latestError: null, model: null, agentRef: "qa", profile: "default",
@@ -85,11 +87,12 @@ const FIXTURES: Record<string, unknown> = {
     { id: "a2", kind: "agent", name: "implementer", version: "0.1.0", sourceType: "builtin", sourcePath: "/s/implementer.yaml", relativePath: "agents/implementer.yaml", updatedAt: "2026-08-01T00:00:00.000Z" },
     { id: "a3", kind: "workflow", name: "conveyor", version: "0.3.0", sourceType: "user_file", sourcePath: "/s/conveyor.yaml", relativePath: "workflows/conveyor.yaml", updatedAt: "2026-08-01T00:00:00.000Z", isBuiltIn: false, rolesCount: 4, stepsCount: 9, status: "valid", errorMessage: null },
   ],
-  "/api/review/rig": {
+  "/api/review/fleet": {
     scope: "rig",
     needsYou: {
       items: [
         { source: "agent", identity: "qitem-2026080201", summary: "approve slice 11 proof", leg: "human-routed", where: "human@kernel", ageIso: "2026-08-02T08:40:00.000Z", priority: "high", tier: "human-gate", evidenceRef: "proof/qa.md", unblocks: null, qitemId: "qitem-2026080201", destinationSession: "human@kernel", derived: null },
+        { source: "agent", identity: "qitem-remote", summary: "remote founder gate", leg: "human-routed", where: "human@kernel", ageIso: "2026-08-02T08:41:00.000Z", priority: "high", tier: "human-gate", evidenceRef: null, unblocks: null, qitemId: "qitem-remote", destinationSession: "human@kernel", derived: null, hostId: "mm2-host" },
         { source: "derived", identity: "dev-impl@myrig|stuck|2026-08-02T08:43:00.000Z", summary: "impl looks stuck", leg: "stuck", where: "rig", ageIso: null, priority: null, tier: null, evidenceRef: null, unblocks: null, qitemId: null, destinationSession: null, derived: { kind: "stuck", evidence: "idle 47m >= 30m default · holds 2", threshold: "idle-with-work >= 30m" } },
         { source: "derived", identity: "dev-qa@myrig|too-long-in-state|2026-08-02T05:00:00.000Z", summary: "qa has not transitioned in 180m", leg: "stuck", where: "rig", ageIso: null, priority: null, tier: null, evidenceRef: null, unblocks: null, qitemId: null, destinationSession: null, derived: { kind: "stuck", evidence: "no transition for 180m >= 120m default · holds 2", threshold: "too-long-in-state >= 120m" } },
       ],
@@ -97,6 +100,7 @@ const FIXTURES: Record<string, unknown> = {
     },
     agents: { scope: "rig", rows: [], provenance: "computed", coordinationHealth: null },
     settled: [], settledProvenance: "computed", composedAt: "2026-08-02T09:30:00.000Z",
+    hosts: [{ hostId: "local", status: { hostId: "local", status: "ok" } }, { hostId: "mm2-host", status: { hostId: "mm2-host", status: "ok" } }],
   },
   "/api/stream/list?limit=5": [
     { streamItemId: "si-1", tsEmitted: "2026-08-02T10:00:00.000Z", streamSortKey: "k1", sourceSession: "dev-guard@myrig", body: "gate cleared: slice-11", format: "text", hintType: null, hintUrgency: null, hintDestination: null, hintTags: null, interrupt: false, archivedAt: null },
@@ -110,11 +114,12 @@ const FIXTURES: Record<string, unknown> = {
   },
 };
 
-function fixtureClient(overrides: Record<string, { status: number } | undefined> = {}): DaemonClient {
+function fixtureClient(overrides: Record<string, { status: number } | undefined> = {}, responses: Record<string, unknown> = {}): DaemonClient {
   const fetchImpl = (async (url: unknown) => {
     const route = String(url).replace("http://x", "");
     const failure = overrides[route];
     if (failure) return { ok: false, status: failure.status, json: async () => ({}) } as Response;
+    if (route in responses) return { ok: true, json: async () => responses[route] } as Response;
     if (!(route in FIXTURES)) throw new Error(`unexpected route in test: ${route}`);
     return { ok: true, json: async () => FIXTURES[route] } as Response;
   }) as typeof fetch;
@@ -129,10 +134,10 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     const dev = local?.rigs[0]?.pods.find((p) => p.name === "dev");
     expect(dev?.agents.map((a) => a.name)).toEqual(["dev.impl", "dev.qa"]);
     const impl = dev?.agents[0];
-    expect(impl).toMatchObject({ runtime: "claude-code", spec: "implementer", context: 43, tokens: "129k", status: "running" });
+    expect(impl).toMatchObject({ runtime: "claude-code", spec: "implementer", context: 43, tokens: "129k", status: "idle", canRun: false });
     // honest-unknown: availability "unknown" → null cells; lifecycleState verbatim
     const qa = dev?.agents[1];
-    expect(qa).toMatchObject({ context: null, tokens: null, status: "detached" });
+    expect(qa).toMatchObject({ context: null, tokens: null, status: "unknown", canRun: true });
     // infrastructure nodes are not agent rows
     expect(local?.rigs[0]?.pods.flatMap((p) => p.agents.map((a) => a.name))).not.toContain("svc.db");
   });
@@ -207,7 +212,24 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
   it("maps the human-queue leg and marks it PROBED (proven-empty vs not-yet-known)", async () => {
     const snap = await hydrateSnapshot(fixtureClient());
     expect(snap.humanQueueProbed).toBe(true);
-    expect(snap.humanQueue).toEqual([{ kind: "human-routed", target: "human@kernel", detail: "approve slice 11 proof" }]);
+    expect(snap.humanQueue).toEqual([
+      { kind: "human-routed", target: "human@kernel", detail: "approve slice 11 proof" },
+      { kind: "human-routed", target: "human@kernel", detail: "remote founder gate" },
+    ]);
+  });
+
+  it("marks fleet attention incomplete when any remote host is absent, never proven-empty", async () => {
+    const snap = await hydrateSnapshot(fixtureClient({}, {
+      "/api/review/fleet": {
+        needsYou: { items: [] },
+        hosts: [
+          { hostId: "local", status: { hostId: "local", status: "ok" } },
+          { hostId: "mm2-host", status: { hostId: "mm2-host", status: "unreachable" } },
+        ],
+      },
+    }));
+    expect(snap.humanQueueProbed).toBe(false);
+    expect(snap.humanQueue).toEqual([]);
   });
 
   it("joins Specs↔Topology over existing reads: rig agentRefs + agent usedByRigs", async () => {
@@ -218,10 +240,10 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
   });
 
   it("leaves a failed read honest-empty with a NAMED error; other sections still hydrate", async () => {
-    const snap = await hydrateSnapshot(fixtureClient({ "/api/review/rig": { status: 503 } }));
+    const snap = await hydrateSnapshot(fixtureClient({ "/api/review/fleet": { status: 503 } }));
     expect(snap.humanQueueProbed).toBe(false);
     expect(snap.needs).toEqual([]);
-    expect(snap.readErrors).toEqual([expect.stringMatching(/review-rig: .*503/)]);
+    expect(snap.readErrors).toEqual([expect.stringMatching(/review-fleet: .*503/)]);
     expect(snap.hosts.find((h) => h.name === "local")?.rigs[0]?.name).toBe("myrig");
   });
 });

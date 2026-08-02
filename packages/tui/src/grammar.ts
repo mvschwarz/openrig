@@ -4,21 +4,22 @@
 // dispatch, so every input adapter shares one failure surface.
 // Richer grammar (compound commands, prefixes, history/completion) was
 // RETIRED by the Phase-0 kill-criterion — see the spike verdict.
-import type { Action, ResourceKind } from "./types.js";
+import { SECTION_REGISTRY } from "./sections.js";
+import type { Action, ResourceKind, SectionDef } from "./types.js";
 
-const SECTIONS = ["topology", "specs", "needs"] as const;
 const RESOURCES: ResourceKind[] = ["host", "rig", "pod", "agent", "spec"];
 
-export function parseCommand(raw: string): Action {
+export function parseCommand(raw: string, sections: readonly SectionDef[] = SECTION_REGISTRY): Action {
   const input = raw.trim();
   if (input === "") return { type: "noop" };
 
   if (input.startsWith(":")) {
     const section = input.slice(1).trim();
-    if ((SECTIONS as readonly string[]).includes(section)) return { type: "jump", section };
+    const names = sections.map((entry) => entry.name);
+    if (names.includes(section)) return { type: "jump", section };
     return {
       type: "error",
-      message: `unknown section ":${section}" — known: ${SECTIONS.map((s) => ":" + s).join(" ")}`,
+      message: `unknown section ":${section}" — known: ${names.map((s) => ":" + s).join(" ")}`,
     };
   }
 

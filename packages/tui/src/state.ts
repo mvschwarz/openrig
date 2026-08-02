@@ -13,25 +13,10 @@ import type {
   ViewState,
   ViewStateStore,
 } from "./types.js";
+import { SECTION_REGISTRY } from "./sections.js";
 
 export function defaultSections(): SectionDef[] {
-  return [
-    {
-      name: "topology",
-      sourceRead: "GET /api/rigs/:id/graph + /api/ps + /api/rigs/summary (existing)",
-      drillShape: "host>rig>pod>agent",
-    },
-    {
-      name: "specs",
-      sourceRead: "GET /api/specs/library + /api/rigs/:rigId/spec (existing)",
-      drillShape: "kind>spec",
-    },
-    {
-      name: "needs",
-      sourceRead: "GET /api/review/rig|fleet + /api/queue/list?attention=1 (existing)",
-      drillShape: "flat",
-    },
-  ];
+  return SECTION_REGISTRY.map((section) => ({ ...section }));
 }
 
 export function emptySnapshot(): FleetSnapshot {
@@ -58,6 +43,10 @@ export function createViewState(options: CreateViewStateOptions): ViewStateStore
     runningOf: null,
     viewTab: "table",
     contentOffset: 0,
+    contentMaxOffset: 0,
+    contentTargetCount: 0,
+    contentSelection: 0,
+    focusedPane: "explorer",
     footerOn: true,
     notice: null,
     lastError: null,
@@ -91,12 +80,31 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
     case "jump": {
       if (!state.sections.some((s) => s.name === action.section))
         return { ...next, lastError: `unknown section "${action.section}"` };
-      return { ...next, section: action.section, drill: [], filter: "", selection: 0, runningOf: null, viewTab: "table", contentOffset: 0 };
+      return resetContent({ ...next, section: action.section, drill: [], filter: "", selection: 0, runningOf: null, viewTab: "table" });
     }
-    case "tab":
-      return { ...next, viewTab: action.tab, contentOffset: 0 };
+    case "tab": {
+      const rigSpec = state.section === "specs" && state.drill.at(-1)?.kind === "spec" && findSpec(snap, state.drill.at(-1)!.name)?.kind === "rig";
+      const allowed = rigSpec ? ["topology", "configuration", "yaml"] : state.section === "topology" ? ["table", "overview"] : [];
+      if (!allowed.includes(action.tab)) return { ...next, lastError: `tab ${action.tab} is not available in this content context` };
+      return resetContent({ ...next, viewTab: action.tab });
+    }
     case "content-scroll":
-      return { ...next, contentOffset: Math.max(0, state.contentOffset + action.delta) };
+      return { ...next, contentOffset: Math.min(Math.max(0, state.contentOffset + action.delta), state.contentMaxOffset) };
+    case "focus":
+      return { ...next, focusedPane: action.pane };
+    case "content-select": {
+      const count = Math.max(state.contentTargetCount, 1);
+      const target = action.index ?? state.contentSelection + (action.delta ?? 0);
+      return { ...next, contentSelection: Math.min(Math.max(target, 0), count - 1) };
+    }
+    case "layout":
+      return {
+        ...next,
+        contentMaxOffset: Math.max(action.contentMaxOffset, 0),
+        contentTargetCount: Math.max(action.contentTargetCount, 0),
+        contentOffset: Math.min(state.contentOffset, Math.max(action.contentMaxOffset, 0)),
+        contentSelection: Math.min(state.contentSelection, Math.max(action.contentTargetCount - 1, 0)),
+      };
     case "footer":
       return { ...next, footerOn: action.on ?? !state.footerOn };
     case "act":
@@ -106,7 +114,7 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
     case "notice":
       return { ...next, notice: action.message };
     case "filter":
-      return { ...next, filter: action.text, selection: 0, contentOffset: 0 };
+      return resetContent({ ...next, filter: action.text, selection: 0 });
     case "select": {
       const count = Math.max(action.rowCount ?? Number.MAX_SAFE_INTEGER, 1);
       const target = action.index ?? state.selection + (action.delta ?? 0);
@@ -120,26 +128,38 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
       return reduce(next, row.action, snap);
     }
     case "drill": {
-      const drilled = drillTo(next, action.resource, action.name, snap);
+      const drilled = drillTo(next, action.resource, action.name, snap, action.target);
       if (drilled.lastError) return drilled;
       const spec = action.resource === "spec" ? findSpec(snap, action.name) : null;
-      return { ...drilled, viewTab: spec?.kind === "rig" ? "configuration" : "table", contentOffset: 0 };
+      return resetContent({ ...drilled, viewTab: spec?.kind === "rig" ? "configuration" : "table" });
     }
     case "cross":
-      return crossNav(next, action.kind, action.name, snap);
+      return crossNav(next, action.kind, action.name, snap, action.target);
     default:
       return { ...next, lastError: "unknown action" };
   }
 }
 
+function resetContent(state: ViewState): ViewState {
+  return { ...state, contentOffset: 0, contentMaxOffset: 0, contentTargetCount: 0, contentSelection: 0, focusedPane: "explorer" };
+}
+
 // --- snapshot lookups (pure; no daemon calls here) ---
 
-export function findAgent(snap: FleetSnapshot, name: string) {
+function agentMatches(snap: FleetSnapshot, name: string, target?: { host: string; rig?: string; pod?: string }) {
+  const matches = [];
   for (const host of snap.hosts)
     for (const rig of host.rigs)
       for (const pod of rig.pods)
-        for (const agent of pod.agents) if (agent.name === name) return { host, rig, pod, agent };
-  return null;
+        for (const agent of pod.agents)
+          if (agent.name === name && (!target || (host.name === target.host && (!target.rig || rig.name === target.rig) && (!target.pod || pod.name === target.pod))))
+            matches.push({ host, rig, pod, agent });
+  return matches;
+}
+
+export function findAgent(snap: FleetSnapshot, name: string, target?: { host: string; rig?: string; pod?: string }) {
+  const matches = agentMatches(snap, name, target);
+  return matches.length === 1 ? matches[0]! : null;
 }
 
 export function findSpec(snap: FleetSnapshot, name: string) {
@@ -151,69 +171,97 @@ export function findAgentBySession(snap: FleetSnapshot, session: string) {
   for (const host of snap.hosts)
     for (const rig of host.rigs)
       for (const pod of rig.pods)
-        for (const agent of pod.agents) if (agent.session === session) return agent;
+        for (const agent of pod.agents) if (agent.session === session) return { host, rig, pod, agent };
   return null;
 }
 
-export function findRig(snap: FleetSnapshot, name: string) {
-  for (const host of snap.hosts) for (const rig of host.rigs) if (rig.name === name) return { host, rig };
-  return null;
+function rigMatches(snap: FleetSnapshot, name: string, hostName?: string) {
+  return snap.hosts.flatMap((host) => host.rigs
+    .filter((rig) => rig.name === name && (!hostName || host.name === hostName))
+    .map((rig) => ({ host, rig })));
+}
+
+export function findRig(snap: FleetSnapshot, name: string, hostName?: string) {
+  const matches = rigMatches(snap, name, hostName);
+  return matches.length === 1 ? matches[0]! : null;
 }
 
 export function agentsRunningSpec(snap: FleetSnapshot, specName: string): string[] {
-  const out: string[] = [];
+  return agentsRunningSpecTargets(snap, specName).map(({ agent }) => agent.name);
+}
+
+export function agentsRunningSpecTargets(snap: FleetSnapshot, specName: string) {
+  const out = [];
   for (const host of snap.hosts)
     for (const rig of host.rigs)
       for (const pod of rig.pods)
-        for (const agent of pod.agents) if (agent.spec === specName) out.push(agent.name);
+        for (const agent of pod.agents) if (agent.live && agent.spec === specName) out.push({ host, rig, pod, agent });
   return out;
 }
 
-function drillTo(state: ViewState, resource: string, name: string, snap: FleetSnapshot): ViewState {
+function drillTo(state: ViewState, resource: string, name: string, snap: FleetSnapshot, target?: { host: string; rig?: string; pod?: string }): ViewState {
   switch (resource) {
     case "host": {
       if (!snap.hosts.some((h) => h.name === name)) return { ...state, lastError: `no such host "${name}"` };
       return { ...state, section: "topology", drill: [{ kind: "host", name }], selection: 0, runningOf: null };
     }
     case "rig": {
-      const found = findRig(snap, name);
+      const qualified = !target ? parseQualified(name, 2) : null;
+      const rigName = qualified?.at(-1) ?? name;
+      const hostName = qualified?.[0] ?? target?.host;
+      const matches = rigMatches(snap, rigName, hostName);
+      if (matches.length > 1) return { ...state, lastError: `ambiguous rig "${name}" — use rig <host>/<rig>` };
+      const found = matches[0];
       if (!found) return { ...state, lastError: `no such rig "${name}"` };
       return {
         ...state,
         section: "topology",
         drill: [
           { kind: "host", name: found.host.name },
-          { kind: "rig", name },
+          { kind: "rig", name: rigName },
         ],
         selection: 0,
         runningOf: null,
       };
     }
     case "pod": {
+      const qualified = !target ? parseQualified(name, 3) : null;
+      const podName = qualified?.at(-1) ?? name;
+      const hostName = qualified?.[0] ?? target?.host;
+      const rigName = qualified?.[1] ?? target?.rig;
+      const matches = [];
       for (const host of snap.hosts)
         for (const rig of host.rigs)
-          if (rig.pods.some((p) => p.name === name))
-            return {
-              ...state,
-              section: "topology",
-              drill: [
-                { kind: "host", name: host.name },
-                { kind: "rig", name: rig.name },
-                { kind: "pod", name },
-              ],
-              selection: 0,
-              runningOf: null,
-            };
+          for (const pod of rig.pods)
+            if (pod.name === podName && (!hostName || host.name === hostName) && (!rigName || rig.name === rigName)) matches.push({ host, rig, pod });
+      if (matches.length > 1) return { ...state, lastError: `ambiguous pod "${name}" — use pod <host>/<rig>/<pod>` };
+      const found = matches[0];
+      if (found) return {
+        ...state,
+        section: "topology",
+        drill: [
+          { kind: "host", name: found.host.name },
+          { kind: "rig", name: found.rig.name },
+          { kind: "pod", name: podName },
+        ],
+        selection: 0,
+        runningOf: null,
+      };
       return { ...state, lastError: `no such pod "${name}"` };
     }
     case "agent": {
-      const found = findAgent(snap, name);
+      const qualified = !target ? parseQualifiedAgent(name) : null;
+      const agentName = qualified?.name ?? name;
+      const exactTarget = qualified?.target ?? target;
+      const matches = agentMatches(snap, agentName, exactTarget);
+      if (matches.length > 1) return { ...state, lastError: `ambiguous agent "${name}" — use agent <host>/<rig>/<pod>/<agent>` };
+      const found = matches[0];
       if (!found) return { ...state, lastError: `no such agent "${name}"` };
       const drill: DrillSegment[] = [
         { kind: "host", name: found.host.name },
         { kind: "rig", name: found.rig.name },
         { kind: "pod", name: found.pod.name },
-        { kind: "agent", name },
+        { kind: "agent", name: agentName },
       ];
       return { ...state, section: "topology", drill, selection: 0, runningOf: null };
     }
@@ -226,22 +274,37 @@ function drillTo(state: ViewState, resource: string, name: string, snap: FleetSn
   }
 }
 
-function crossNav(state: ViewState, kind: "spec-of" | "running", name: string, snap: FleetSnapshot): ViewState {
+function parseQualifiedAgent(value: string): { name: string; target: { host: string; rig: string; pod: string } } | null {
+  const [host, rig, pod, ...agentParts] = value.split("/");
+  if (!host || !rig || !pod || agentParts.length === 0) return null;
+  return { name: agentParts.join("/"), target: { host, rig, pod } };
+}
+
+function parseQualified(value: string, count: number): string[] | null {
+  const parts = value.split("/");
+  return parts.length === count && parts.every(Boolean) ? parts : null;
+}
+
+function crossNav(state: ViewState, kind: "spec-of" | "running", name: string, snap: FleetSnapshot, target?: { host: string; rig?: string; pod?: string }): ViewState {
   if (kind === "spec-of") {
-    const found = findAgent(snap, name);
+    const qualified = !target ? parseQualifiedAgent(name) : null;
+    const agentName = qualified?.name ?? name;
+    const matches = agentMatches(snap, agentName, qualified?.target ?? target);
+    if (matches.length > 1) return { ...state, lastError: `ambiguous agent "${name}" — use spec-of <host>/<rig>/<pod>/<agent>` };
+    const found = matches[0];
     if (!found) return { ...state, lastError: `no such agent "${name}"` };
-    return {
+    if (!findSpec(snap, found.agent.spec)) return { ...state, lastError: `spec "${found.agent.spec}" not in the library` };
+    return resetContent({
       ...state,
       section: "specs",
       drill: [{ kind: "spec", name: found.agent.spec }],
       selection: 0,
       runningOf: null,
       viewTab: "table",
-      contentOffset: 0,
-    };
+    });
   }
   if (!findSpec(snap, name)) return { ...state, lastError: `no such spec "${name}"` };
-  return { ...state, section: "topology", drill: [], runningOf: name, filter: "", selection: 0, viewTab: "table", contentOffset: 0 };
+  return resetContent({ ...state, section: "topology", drill: [], runningOf: name, filter: "", selection: 0, viewTab: "table" });
 }
 
 // The explorer row model — pure function of (state, snapshot), shared by the
@@ -268,16 +331,16 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
         });
         for (const rig of host.rigs) {
           const stateSuffix = rig.lifecycleState && rig.lifecycleState !== "running" ? ` (${rig.lifecycleState})` : "";
-          rows.push({ label: `    ▾ ${rig.name}${stateSuffix}`, action: { type: "drill", resource: "rig", name: rig.name } });
+          rows.push({ label: `    ▾ ${rig.name}${stateSuffix}`, action: { type: "drill", resource: "rig", name: rig.name, target: { host: host.name } } });
           for (const pod of rig.pods) {
             rows.push({
               label: `      ▾ ${pod.name} (${pod.agents.length})`,
-              action: { type: "drill", resource: "pod", name: pod.name },
+              action: { type: "drill", resource: "pod", name: pod.name, target: { host: host.name, rig: rig.name } },
             });
             for (const agent of pod.agents)
               rows.push({
                 label: `        ● ${agent.name}`,
-                action: { type: "drill", resource: "agent", name: agent.name },
+                action: { type: "drill", resource: "agent", name: agent.name, target: { host: host.name, rig: rig.name, pod: pod.name } },
               });
           }
         }

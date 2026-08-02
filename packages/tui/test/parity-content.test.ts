@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createViewState } from "../src/state.js";
+import { computeExplorerRows, createViewState } from "../src/state.js";
 import { parseCommand } from "../src/grammar.js";
-import { decodeInput, sgrClick } from "../src/input.js";
+import { decodeInput, resolveKeyAction, sgrClick } from "../src/input.js";
 import { renderScreen } from "../src/render.js";
 import { demoSnapshot } from "../src/demo-data.js";
-import type { ViewState, ViewStateStore } from "../src/types.js";
+import type { FleetSnapshot, Screen, ViewState, ViewStateStore } from "../src/types.js";
 
 // Phase-3 parity hardening: CONTENT-pane surfaces are hit targets too.
 // Hit-target realism: these tests click coordinates on the rendered SURFACE
@@ -36,6 +36,25 @@ function findContentLine(store: ViewStateStore, match: RegExp): { y: number; tex
   const idx = screen.lines.findIndex((l) => match.test(l));
   if (idx < 0) throw new Error(`no rendered line matches ${match}`);
   return { y: idx + 1, text: screen.lines[idx]! };
+}
+
+function syncedScreen(store: ViewStateStore, snapshot: FleetSnapshot = snap): Screen {
+  let screen = renderScreen(store.get(), snapshot, { cols: 120, rows: 32 });
+  store.dispatch({
+    type: "layout",
+    contentMaxOffset: screen.contentMaxOffset,
+    contentTargetCount: screen.contentTargets.length,
+  });
+  screen = renderScreen(store.get(), snapshot, { cols: 120, rows: 32 });
+  return screen;
+}
+
+function press(store: ViewStateStore, bytes: string, snapshot: FleetSnapshot = snap): void {
+  const screen = syncedScreen(store, snapshot);
+  const event = decodeInput(bytes)[0];
+  if (!event || event.type !== "key") throw new Error("expected key event");
+  const action = resolveKeyAction(event, store.get(), screen, computeExplorerRows(store.get(), snapshot).length);
+  if (action) store.dispatch(action);
 }
 
 describe("content-pane parity (Phase 3): click the surface, not a control", () => {
@@ -108,11 +127,57 @@ describe("content-pane parity (Phase 3): click the surface, not a control", () =
   it("PageDown scrolls content without moving the Explorer selection", () => {
     const s = fresh("t");
     const selected = s.get().selection;
+    const screen = renderScreen(s.get(), snap, { cols: 120, rows: 8 });
+    s.dispatch({ type: "layout", contentMaxOffset: screen.contentMaxOffset, contentTargetCount: screen.contentTargets.length });
     const pageDown = decodeInput("\x1b[6~")[0];
     if (!pageDown || pageDown.type !== "key" || !("action" in pageDown)) throw new Error("PageDown was not decoded");
     s.dispatch(pageDown.action);
-    expect(s.get().contentOffset).toBe(10);
+    expect(s.get().contentOffset).toBe(Math.min(10, screen.contentMaxOffset));
     expect(s.get().selection).toBe(selected);
+  });
+
+  it("raw right/down/Enter reaches content tabs, table rows, spec refs, and Needs links", () => {
+    const structured: FleetSnapshot = {
+      ...snap,
+      specs: [{
+        name: "openrig-build-rig",
+        kind: "rig",
+        format: "pod_aware",
+        pods: [{ id: "dev50", members: [{ id: "guard", agentRef: "guard-agent", runtime: "codex" }], edges: [] }],
+        graph: { nodes: [], edges: [] },
+        raw: "name: openrig-build-rig",
+      }, ...snap.specs.filter((spec) => spec.name !== "openrig-build-rig")],
+    };
+
+    const tab = createViewState({ instanceId: "tab", getSnapshot: () => structured });
+    tab.dispatch(parseCommand("spec openrig-build-rig"));
+    press(tab, "\x1b[C", structured);
+    press(tab, "\r", structured);
+    expect(tab.get().viewTab).toBe("topology");
+
+    const row = fresh("row");
+    row.dispatch(parseCommand("rig openrig-build"));
+    press(row, "\x1b[C");
+    let screen = syncedScreen(row);
+    const rowTarget = screen.contentTargets.findIndex((target) => target.action.type === "drill" && target.action.resource === "agent" && target.action.name === "dev50.guard");
+    for (let i = 0; i < rowTarget; i++) press(row, "\x1b[B");
+    press(row, "\r");
+    expect(row.get().drill.at(-1)).toEqual({ kind: "agent", name: "dev50.guard" });
+
+    const ref = createViewState({ instanceId: "ref", getSnapshot: () => structured });
+    ref.dispatch(parseCommand("spec openrig-build-rig"));
+    press(ref, "\x1b[C", structured);
+    screen = syncedScreen(ref, structured);
+    const refTarget = screen.contentTargets.findIndex((target) => target.action.type === "drill" && target.action.resource === "spec" && target.action.name === "guard-agent");
+    for (let i = 0; i < refTarget; i++) press(ref, "\x1b[B", structured);
+    press(ref, "\r", structured);
+    expect(ref.get().drill.at(-1)).toEqual({ kind: "spec", name: "guard-agent" });
+
+    const needs = fresh("needs");
+    needs.dispatch(parseCommand(":needs"));
+    press(needs, "\x1b[C");
+    press(needs, "\r");
+    expect(needs.get().drill.at(-1)).toEqual({ kind: "agent", name: "dev50.guard" });
   });
 });
 
