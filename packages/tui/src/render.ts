@@ -13,6 +13,9 @@ interface ContentLine {
   text: string;
   /** dispatched when this line is clicked (open/navigate class only) */
   action?: Action;
+  /** sub-line click zones (content-relative indices); matched before `action`.
+   * BR-9: zone actions are drive-structure only (lifecycle + navigation). */
+  zones?: Array<{ start: number; end: number; action: Action }>;
 }
 
 function pad(text: string | number | null | undefined, width: number): string {
@@ -77,6 +80,8 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
       if (agent.spec)
         lines.push({ text: `  spec ${agent.spec}  (open: spec-of ${agent.name})`, action: { type: "cross", kind: "spec-of", name: agent.name } });
       lines.push({ text: `  state ${agent.status}` });
+      if (agent.attach) lines.push({ text: `  attach: ${agent.attach}` });
+      lines.push({ text: `  term ▸ (open pod terminal)`, action: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${pod.name}` } });
       return lines;
     }
     const rigName = state.drill.find((d) => d.kind === "rig")?.name ?? snap.hosts[0]?.rigs[0]?.name;
@@ -100,10 +105,22 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
     }
     lines.push({ text: tableRow(AGENT_COLS.map(([name]) => name)) });
     lines.push({ text: "─".repeat(AGENT_COLS.reduce((n, [, w]) => n + w + 1, -1)) });
-    for (const a of rows)
+    const actionsColStart = AGENT_COLS.slice(0, -1).reduce((n, [, w]) => n + w + 1, 0);
+    for (const a of rows) {
+      // ACTIONS = drive-structure ONLY (BR-9), each mapped to an EXISTING
+      // write contract: `run ▸` = the rig-restore write (rendered only where
+      // it applies — the seat is not running); `term ▸` = the terminal-open
+      // view contract (pod-scoped, the web's granularity). No false affordance.
+      const canRun = a.status !== "running";
+      const actionsCell = canRun ? "run ▸ · term ▸" : "term ▸";
+      const zones: ContentLine["zones"] = [];
+      const termOffset = actionsColStart + actionsCell.indexOf("term ▸");
+      zones.push({ start: termOffset, end: termOffset + "term ▸".length, action: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${a.pod}` } });
+      if (canRun)
+        zones.push({ start: actionsColStart, end: actionsColStart + "run ▸".length, action: { type: "act", act: "run", rig: rig.name } });
       lines.push({
         // the WHOLE row is the hit surface (not a testid'd control): clicking
-        // any visible cell opens the agent (drive-structure navigation)
+        // any visible cell opens the agent; the ACTIONS zones override.
         text: tableRow([
           rig.name,
           a.pod,
@@ -112,10 +129,12 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
           a.context == null ? "—" : `${a.context}%`,
           a.tokens ?? "—",
           a.status,
-          "run ▸ · term",
+          actionsCell,
         ]),
         action: { type: "drill", resource: "agent", name: a.name },
+        zones,
       });
+    }
     lines.push({ text: "" });
     lines.push({ text: `${rows.length} of ${all.length} agents shown` });
     return lines;
@@ -131,8 +150,15 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
         for (const ref of spec.agentRefs)
           lines.push({ text: `    ▪ ${ref}  (open: spec ${ref})`, action: { type: "drill", resource: "spec", name: ref } });
       } else {
-        lines.push({ text: `agent spec ${spec.name}` });
+        lines.push({ text: `agent spec ${spec.name}${spec.version ? ` · v${spec.version}` : ""}` });
+        if (spec.description) lines.push({ text: `  ${spec.description}` });
         lines.push({ text: `  runtime ${spec.runtime ?? "—"}` });
+        if (spec.skills) lines.push({ text: `  skills: ${spec.skills.join(", ") || "(none)"}` });
+        if (spec.hasGuidance != null) lines.push({ text: `  guidance: ${spec.hasGuidance ? "yes" : "no"}` });
+        if (spec.startupFiles)
+          for (const f of spec.startupFiles)
+            lines.push({ text: `  startup: ${f.path}${f.required ? " (required)" : ""}` });
+        if (spec.sourcePath) lines.push({ text: `  source: ${spec.sourcePath}` });
         lines.push({ text: `  used by rigs: ${spec.usedByRigs?.join(", ") ?? "—"}` });
         const seats = agentsRunningSpec(snap, spec.name);
         lines.push({
@@ -165,8 +191,10 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
     if (snap.hostsDown.length > 0) {
       // composed BESIDE the items (a separate shipped read), never into the item shape
       lines.push({ text: "" });
-      lines.push({ text: "  hosts down:" });
-      for (const h of snap.hostsDown) lines.push({ text: `  ⛔ ${h.hostId} — ${h.status}${h.error ? ` (${h.error})` : ""}` });
+      lines.push({ text: "  hosts/rigs down:" });
+      // NB: glyphs here must be single-cell — U+26D4 ⛔ is emoji-width (2 cells)
+      // and wraps a full-width padded line, shearing every row below it.
+      for (const h of snap.hostsDown) lines.push({ text: `  ✖ ${h.hostId} — ${h.status}${h.error ? ` (${h.error})` : ""}` });
     }
     lines.push({ text: "" });
     if (!snap.humanQueueProbed) lines.push({ text: "  human-queue: not yet known (read pending)" });
@@ -214,6 +242,9 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
       hitMap.push({ y, x1: 1, x2: EXPL_W, action: row.action });
       explorerRows.push({ ...row, y });
     }
+    // zones first: hit lookup takes the first match, so a zone wins over the row-wide action
+    for (const z of item?.zones ?? [])
+      hitMap.push({ y, x1: EXPL_W + 3 + z.start, x2: EXPL_W + 2 + z.end, action: z.action });
     if (item?.action) hitMap.push({ y, x1: EXPL_W + 3, x2: cols, action: item.action });
   }
 
@@ -223,7 +254,7 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   lines.push("─".repeat(cols));
   lines.push(
     pad(
-      `[${state.instanceId}] ${state.section}${drillPath ? " · " + drillPath : ""}${state.lastError ? "  ✗ " + state.lastError : ""}${readWarn}`,
+      `[${state.instanceId}] ${state.section}${drillPath ? " · " + drillPath : ""}${state.lastError ? "  ✗ " + state.lastError : ""}${state.notice ? "  ▸ " + state.notice : ""}${readWarn}`,
       cols,
     ),
   );

@@ -13,6 +13,8 @@ export interface AgentRow {
   status: string;
   /** canonicalSessionName where served — joins Needs-You targets to topology */
   session?: string | null;
+  /** served tmuxAttachCommand, displayed verbatim in the detail view (web parity) */
+  attach?: string | null;
 }
 
 export interface PodNode {
@@ -23,6 +25,8 @@ export interface PodNode {
 export interface RigNode {
   name: string;
   pods: PodNode[];
+  /** served rig lifecycleState verbatim (summary read); non-"running" states surface */
+  lifecycleState?: string;
 }
 
 export interface HostNode {
@@ -40,6 +44,13 @@ export interface SpecEntry {
   agentRefs?: string[];
   runtime?: string;
   usedByRigs?: string[];
+  /** structured detail from existing reads (library list + /:id/review), verbatim */
+  version?: string;
+  sourcePath?: string;
+  description?: string;
+  skills?: string[];
+  hasGuidance?: boolean;
+  startupFiles?: Array<{ path: string; required: boolean }>;
 }
 
 export interface NeedsItem {
@@ -92,7 +103,12 @@ export type Action =
   | { type: "drill"; resource: ResourceKind; name: string }
   | { type: "cross"; kind: "spec-of" | "running"; name: string }
   | { type: "tab"; tab: ViewTab }
-  | { type: "footer"; on?: boolean };
+  | { type: "footer"; on?: boolean }
+  /** drive-structure daemon writes (BR-8/BR-9): executed by the driver loop
+   * against EXISTING write contracts; never a view-state mutation */
+  | { type: "act"; act: "open-terminal"; view: string }
+  | { type: "act"; act: "run"; rig: string }
+  | { type: "notice"; message: string };
 
 /** FR-12: the section set is ONE in-code registry — adding a section is a
  * localized edit to this data structure, never a scattered switch. */
@@ -114,6 +130,8 @@ export interface ViewState {
   viewTab: ViewTab;
   /** the rig-stream footer is ambient: toggleable, never a navigable view (FR-10) */
   footerOn: boolean;
+  /** transient result line from an executed act (daemon reply, verbatim) */
+  notice: string | null;
   lastError: string | null;
 }
 

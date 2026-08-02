@@ -7,7 +7,24 @@ import { hydrateSnapshot } from "../src/hydrate.js";
 // strings — fixture realism is the point (a text-only stub would false-green).
 
 const FIXTURES: Record<string, unknown> = {
-  "/api/rigs/summary": [{ id: "01JRIG", name: "myrig", nodeCount: 4, hasServices: false, latestSnapshotAt: null, latestSnapshotId: null, archivedAt: null, lifecycleState: "running" }],
+  "/api/rigs/summary": [
+    { id: "01JRIG", name: "myrig", nodeCount: 4, hasServices: false, latestSnapshotAt: null, latestSnapshotId: null, archivedAt: null, lifecycleState: "running" },
+    { id: "01JDOWN", name: "downrig", nodeCount: 2, hasServices: false, latestSnapshotAt: null, latestSnapshotId: null, archivedAt: null, lifecycleState: "recoverable" },
+  ],
+  "/api/rigs/01JDOWN/nodes": [],
+  "/api/rigs/01JDOWN/spec.json": { schemaVersion: 1, name: "downrig", version: "0.1.0", nodes: [], edges: [] },
+  "/api/rigs/01JDOWN/status": {
+    rigId: "01JDOWN", rigName: "downrig", isKernel: false, status: "down", seatsTotal: 2, seatsRunning: 0,
+    recoverable: true, perSeat: [], src: ["ps: 0/2 running · lifecycle=recoverable"],
+  },
+  "/api/specs/library/a2/review": {
+    sourceState: "library_item", kind: "agent", name: "implementer", version: "0.1.0",
+    description: "Implements locked slices",
+    profiles: [{ name: "default" }],
+    resources: { skills: ["tdd", "verification"], guidance: ["guidance.md"], plugins: [], subagents: [] },
+    startup: { files: [{ path: "STARTUP.md", required: true }], actions: [] },
+    raw: "name: implementer",
+  },
   "/api/rigs/01JRIG/nodes": [
     {
       rigId: "01JRIG", rigName: "myrig", logicalId: "dev.impl", podId: "01JPOD", podNamespace: "dev",
@@ -107,12 +124,32 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     expect(stuck[1]?.detail).toContain("no transition for 180m >= 120m default");
   });
 
-  it("composes host-down BESIDE the items, never into the item shape (PIN 3)", async () => {
+  it("composes host-down AND rig-down BESIDE the items, never into the item shape (PIN 3)", async () => {
     const snap = await hydrateSnapshot(fixtureClient());
-    expect(snap.hostsDown).toEqual([{ hostId: "mm2-host", status: "unreachable", error: "read timed out after 5000ms" }]);
-    expect(snap.needs.some((n) => n.target === "mm2-host")).toBe(false);
+    expect(snap.hostsDown).toEqual([
+      { hostId: "mm2-host", status: "unreachable", error: "read timed out after 5000ms" },
+      { hostId: "rig:downrig", status: "recoverable (down)", error: "0/2 seats running" },
+    ]);
+    expect(snap.needs.some((n) => n.target === "mm2-host" || n.target.includes("downrig"))).toBe(false);
     // and the unreachable host appears in topology with honest reachability
     expect(snap.hosts.find((h) => h.name === "mm2-host")?.reachable).toBe(false);
+    // the non-running rig carries its served lifecycleState verbatim (QA blocker 3)
+    expect(snap.hosts.find((h) => h.name === "local")?.rigs.find((r) => r.name === "downrig")?.lifecycleState).toBe("recoverable");
+  });
+
+  it("hydrates agent-spec structured detail from the LIVE /:id/review route (QA blocker 2)", async () => {
+    const cache = new Map();
+    const snap = await hydrateSnapshot(fixtureClient(), cache);
+    const impl = snap.specs.find((s) => s.name === "implementer");
+    expect(impl).toMatchObject({
+      version: "0.1.0",
+      sourcePath: "/s/implementer.yaml",
+      description: "Implements locked slices",
+      skills: ["tdd", "verification"],
+      hasGuidance: true,
+      startupFiles: [{ path: "STARTUP.md", required: true }],
+    });
+    expect(cache.size).toBe(1); // memoized by id@updatedAt for the refresh loop
   });
 
   it("maps the human-queue leg and marks it PROBED (proven-empty vs not-yet-known)", async () => {

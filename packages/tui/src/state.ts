@@ -58,6 +58,7 @@ export function createViewState(options: CreateViewStateOptions): ViewStateStore
     runningOf: null,
     viewTab: "table",
     footerOn: true,
+    notice: null,
     lastError: null,
   };
   const listeners = new Set<(s: ViewState) => void>();
@@ -80,7 +81,7 @@ export function createViewState(options: CreateViewStateOptions): ViewStateStore
 }
 
 function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewState {
-  const next: ViewState = { ...state, lastError: null };
+  const next: ViewState = { ...state, lastError: null, notice: action.type === "notice" || action.type === "act" ? state.notice : null };
   switch (action.type) {
     case "noop":
       return next;
@@ -95,6 +96,12 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
       return { ...next, viewTab: action.tab };
     case "footer":
       return { ...next, footerOn: action.on ?? !state.footerOn };
+    case "act":
+      // Acts are daemon writes executed by the driver loop, never view-state
+      // mutations — the view is untouched; the loop reports via 'notice'.
+      return next;
+    case "notice":
+      return { ...next, notice: action.message };
     case "filter":
       return { ...next, filter: action.text, selection: 0 };
     case "select": {
@@ -253,7 +260,8 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
           action: { type: "drill", resource: "host", name: host.name },
         });
         for (const rig of host.rigs) {
-          rows.push({ label: `    ▾ ${rig.name}`, action: { type: "drill", resource: "rig", name: rig.name } });
+          const stateSuffix = rig.lifecycleState && rig.lifecycleState !== "running" ? ` (${rig.lifecycleState})` : "";
+          rows.push({ label: `    ▾ ${rig.name}${stateSuffix}`, action: { type: "drill", resource: "rig", name: rig.name } });
           for (const pod of rig.pods) {
             rows.push({
               label: `      ▾ ${pod.name} (${pod.agents.length})`,

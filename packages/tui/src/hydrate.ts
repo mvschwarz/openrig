@@ -19,6 +19,12 @@ import type { AgentRow, FleetSnapshot, HostNode, NeedsItem, PodNode, SpecEntry }
 interface RigSummaryRead {
   id: string;
   name: string;
+  lifecycleState?: string;
+}
+interface RigStatusRead {
+  status?: string;
+  seatsTotal?: number;
+  seatsRunning?: number;
 }
 interface NodeInventoryRead {
   logicalId: string;
@@ -27,6 +33,7 @@ interface NodeInventoryRead {
   runtime: string | null;
   lifecycleState: string;
   canonicalSessionName: string | null;
+  tmuxAttachCommand?: string | null;
   resolvedSpecName: string | null;
   contextUsage?: {
     availability: "known" | "unknown";
@@ -36,8 +43,17 @@ interface NodeInventoryRead {
   };
 }
 interface SpecLibraryRead {
+  id: string;
   kind: "rig" | "agent" | "workflow";
   name: string;
+  version?: string;
+  sourcePath?: string;
+  updatedAt?: string;
+}
+interface AgentSpecReviewRead {
+  description?: string;
+  resources?: { skills?: string[]; guidance?: string[] };
+  startup?: { files?: Array<{ path: string; required: boolean }> };
 }
 interface RigSpecJsonRead {
   name?: string;
@@ -83,6 +99,7 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
     // PIN 2: the maintained projection's lifecycleState VERBATIM
     status: node.lifecycleState,
     session: node.canonicalSessionName,
+    attach: node.tmuxAttachCommand ?? null,
   };
 }
 
@@ -112,7 +129,12 @@ function resolveAgentRef(ref: string, agentSpecNames: Set<string>): string {
   return basename && agentSpecNames.has(basename) ? basename : ref;
 }
 
-export async function hydrateSnapshot(client: DaemonClient): Promise<FleetSnapshot> {
+/** Cross-cycle memo for spec-detail reviews, keyed by `${id}@${updatedAt}` —
+ * avoids re-reading every spec every refresh; the key rolls when the library
+ * entry's updatedAt changes. Owned by the caller (instance-scoped, no module state). */
+export type SpecReviewCache = Map<string, AgentSpecReviewRead>;
+
+export async function hydrateSnapshot(client: DaemonClient, reviewCache?: SpecReviewCache): Promise<FleetSnapshot> {
   const readErrors: string[] = [];
   async function safe<T>(label: string, fn: () => Promise<unknown>): Promise<T | null> {
     try {
@@ -137,10 +159,26 @@ export async function hydrateSnapshot(client: DaemonClient): Promise<FleetSnapsh
   // from the aggregate with reachability only (per-rig start; the all-rigs
   // level is deliberately under-designed — founder capture).
   const rigs = [];
+  const rigsDown: FleetSnapshot["hostsDown"] = [];
   const rigSpecRefs = new Map<string, string[]>(); // rig-spec name → agentRefs
   for (const rig of summaries ?? []) {
     const nodes = await safe<NodeInventoryRead[]>(`nodes(${rig.name})`, () => client.rigNodes(rig.id));
-    rigs.push({ name: rig.name, pods: nodes ? groupPods(nodes) : [] });
+    rigs.push({
+      name: rig.name,
+      pods: nodes ? groupPods(nodes) : [],
+      ...(rig.lifecycleState ? { lifecycleState: rig.lifecycleState } : {}),
+    });
+    if (rig.lifecycleState && rig.lifecycleState !== "running") {
+      // rig-down leg (§4.A): summary lifecycleState verbatim, enriched by the
+      // rig-status projection where it answers — composed BESIDE the items.
+      const st = await safe<RigStatusRead>(`rig-status(${rig.name})`, () => client.rigStatus(rig.id));
+      const seatDetail = st && st.seatsTotal != null ? `${st.seatsRunning ?? 0}/${st.seatsTotal} seats running` : undefined;
+      rigsDown.push({
+        hostId: `rig:${rig.name}`,
+        status: st?.status ? `${rig.lifecycleState} (${st.status})` : rig.lifecycleState,
+        ...(seatDetail ? { error: seatDetail } : {}),
+      });
+    }
     const spec = await safe<RigSpecJsonRead>(`rig-spec(${rig.name})`, () => client.rigSpec(rig.id));
     if (spec?.pods) {
       const refs = spec.pods.flatMap((p) =>
@@ -164,23 +202,47 @@ export async function hydrateSnapshot(client: DaemonClient): Promise<FleetSnapsh
 
   // Specs: library entries (RIG + AGENT land well, WORKFLOW basics; other
   // kinds are ABSENT from the library read itself). Rig-spec agentRefs from
-  // spec.json; agent-spec usedByRigs joined from those same refs.
-  const specs: SpecEntry[] = (library ?? []).map((entry) => {
-    if (entry.kind === "rig") return { name: entry.name, kind: "rig", agentRefs: rigSpecRefs.get(entry.name) ?? [] };
-    if (entry.kind === "agent") {
-      const usedByRigs = [...rigSpecRefs.entries()].filter(([, refs]) => refs.includes(entry.name)).map(([rig]) => rig);
-      return { name: entry.name, kind: "agent", usedByRigs };
-    }
-    return { name: entry.name, kind: "workflow" };
-  });
+  // spec.json; agent-spec usedByRigs joined from those same refs; agent-spec
+  // structured detail from the LIVE /:id/review route (memoized by updatedAt).
+  async function agentReview(entry: SpecLibraryRead): Promise<AgentSpecReviewRead | null> {
+    const key = `${entry.id}@${entry.updatedAt ?? ""}`;
+    const cached = reviewCache?.get(key);
+    if (cached) return cached;
+    const review = await safe<AgentSpecReviewRead>(`spec-review(${entry.name})`, () => client.specLibraryReview(entry.id));
+    if (review && reviewCache) reviewCache.set(key, review);
+    return review;
+  }
+  const specs: SpecEntry[] = await Promise.all(
+    (library ?? []).map(async (entry): Promise<SpecEntry> => {
+      const base = { name: entry.name, version: entry.version, sourcePath: entry.sourcePath };
+      if (entry.kind === "rig") return { ...base, kind: "rig", agentRefs: rigSpecRefs.get(entry.name) ?? [] };
+      if (entry.kind === "agent") {
+        const usedByRigs = [...rigSpecRefs.entries()].filter(([, refs]) => refs.includes(entry.name)).map(([rig]) => rig);
+        const review = await agentReview(entry);
+        return {
+          ...base,
+          kind: "agent",
+          usedByRigs,
+          ...(review?.description ? { description: review.description } : {}),
+          ...(review?.resources?.skills ? { skills: review.resources.skills } : {}),
+          ...(review?.resources ? { hasGuidance: (review.resources.guidance ?? []).length > 0 } : {}),
+          ...(review?.startup?.files ? { startupFiles: review.startup.files } : {}),
+        };
+      }
+      return { ...base, kind: "workflow" };
+    }),
+  );
 
   // Needs-You: composeNeedsYou verbatim; host-down BESIDE.
   const items = review?.needsYou?.items ?? [];
   const needs = items.filter((i) => i.source === "derived").map(toNeedsItem);
   const humanQueue = items.filter((i) => i.source === "agent").map(toNeedsItem);
-  const hostsDown = aggHosts
-    .filter((h) => h.status !== "ok")
-    .map((h) => ({ hostId: h.hostId, status: h.status, ...(h.error ? { error: h.error } : {}) }));
+  const hostsDown = [
+    ...aggHosts
+      .filter((h) => h.status !== "ok")
+      .map((h) => ({ hostId: h.hostId, status: h.status, ...(h.error ? { error: h.error } : {}) })),
+    ...rigsDown,
+  ];
 
   return {
     hosts: [localHost, ...remoteHosts],

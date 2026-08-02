@@ -13,7 +13,8 @@ import { createControlSocket, defaultSocketPath } from "./socket-server.js";
 import { demoSnapshot } from "./demo-data.js";
 import { DaemonClient } from "./daemon-client.js";
 import { hydrateSnapshot } from "./hydrate.js";
-import type { FleetSnapshot, Screen } from "./types.js";
+import type { Action, FleetSnapshot, Screen } from "./types.js";
+import type { SpecReviewCache } from "./hydrate.js";
 
 const REFRESH_MS = 5000;
 
@@ -49,12 +50,44 @@ async function run(): Promise<void> {
 
   let refreshTimer: NodeJS.Timeout | null = null;
   if (client) {
+    const reviewCache: SpecReviewCache = new Map();
     const refresh = async () => {
-      snapshot = await hydrateSnapshot(client);
+      snapshot = await hydrateSnapshot(client, reviewCache);
       draw();
     };
     await refresh();
     refreshTimer = setInterval(() => void refresh(), REFRESH_MS);
+  }
+
+  // Acts are drive-structure daemon WRITES (BR-8/BR-9) — executed here against
+  // the two existing contracts; the view-state is only told the outcome.
+  async function executeAct(action: Extract<Action, { type: "act" }>): Promise<void> {
+    if (!client) {
+      view.dispatch({ type: "notice", message: "demo mode: actions disabled" });
+      draw();
+      return;
+    }
+    try {
+      if (action.act === "open-terminal") {
+        await client.openTerminal(action.view);
+        view.dispatch({ type: "notice", message: `terminal opened: ${action.view}` });
+      } else {
+        await client.upRig(action.rig);
+        view.dispatch({ type: "notice", message: `rig up requested: ${action.rig}` });
+      }
+    } catch (err) {
+      view.dispatch({ type: "notice", message: err instanceof Error ? err.message : String(err) });
+    }
+    draw();
+  }
+
+  function perform(action: Action): void {
+    if (action.type === "act") {
+      view.dispatch({ type: "notice", message: `${action.act}…` });
+      void executeAct(action);
+      return;
+    }
+    view.dispatch(action);
   }
 
   async function shutdown(): Promise<void> {
@@ -97,7 +130,7 @@ async function run(): Promise<void> {
         else view.dispatch(action);
       } else if (ev.type === "mouse" && lastScreen) {
         const hit = lastScreen.hitMap.find((h) => h.y === ev.y && ev.x >= h.x1 && ev.x <= h.x2);
-        if (hit) view.dispatch(hit.action);
+        if (hit) perform(hit.action);
       }
     }
     draw();

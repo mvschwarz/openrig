@@ -23,6 +23,20 @@ export class DaemonClient {
     return res.json();
   }
 
+  private async post(route: string, body: unknown): Promise<unknown> {
+    const res = await this.fetchImpl(`${this.baseUrl}${route}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const parsed = await res.json().catch(() => null);
+    if (!res.ok) {
+      const detail = parsed && typeof parsed === "object" && "error" in parsed ? ` — ${(parsed as { error: unknown }).error}` : "";
+      throw new Error(`daemon write failed: POST ${route} → ${res.status}${detail}`);
+    }
+    return parsed;
+  }
+
   // --- Topology (§4.A rows 1–3) ---
   rigGraph(rigId: string) {
     return this.get(`/api/rigs/${encodeURIComponent(rigId)}/graph`);
@@ -47,8 +61,10 @@ export class DaemonClient {
   rigSpec(rigId: string) {
     return this.get(`/api/rigs/${encodeURIComponent(rigId)}/spec.json`);
   }
-  specsReview() {
-    return this.get(`/api/specs/review`);
+  /** structured spec detail (spec-library.ts /:id/review — the live route;
+   * the spec's §4.A cite `GET /api/specs/review` 404s at tip, QA-found) */
+  specLibraryReview(id: string) {
+    return this.get(`/api/specs/library/${encodeURIComponent(id)}/review`);
   }
 
   // --- Needs-You (§4.A rows 5–6): composeNeedsYou legs + host/rig-down beside ---
@@ -71,5 +87,15 @@ export class DaemonClient {
   // --- rig-stream footer (§4.A row 7: the rig stream read surface) ---
   streamList(limit = 5) {
     return this.get(`/api/stream/list?limit=${limit}`);
+  }
+
+  // --- drive-structure writes (BR-8: EXISTING contracts only; the ONLY two) ---
+  /** the web's TerminalLauncher contract: POST /api/terminal/open {view} */
+  openTerminal(view: string) {
+    return this.post(`/api/terminal/open`, { view });
+  }
+  /** the `rig up` restore contract: POST /api/up {sourceRef} */
+  upRig(sourceRef: string) {
+    return this.post(`/api/up`, { sourceRef });
   }
 }

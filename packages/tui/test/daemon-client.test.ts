@@ -16,7 +16,7 @@ const SPEC_4A_ROUTES = [
   "/api/review/agents?scope=rig",
   "/api/specs/library?kind=rig",
   "/api/rigs/openrig-build/spec.json",
-  "/api/specs/review",
+  "/api/specs/library/a2/review",
   "/api/queue/list?attention=1",
   "/api/review/rig",
   "/api/review/fleet",
@@ -41,7 +41,7 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
     await c.reviewAgents("rig");
     await c.specsLibrary("rig");
     await c.rigSpec("openrig-build");
-    await c.specsReview();
+    await c.specLibraryReview("a2");
     await c.queueAttention();
     await c.reviewRig();
     await c.reviewFleet();
@@ -62,6 +62,23 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
       // (sourceRead metadata) — those are documentation, not request paths.
       if (file !== "state.ts") expect(text, `${file} must not carry routes`).not.toMatch(/\/api\//);
     }
+  });
+
+  it("write surface = EXACTLY the two BR-8 drive-structure contracts (terminal-open, rig-up)", async () => {
+    const seen: string[] = [];
+    const fetchImpl = (async (url: unknown, init?: RequestInit) => {
+      if (init?.method === "POST") seen.push(String(url).replace("http://x", ""));
+      return { ok: true, json: async () => ({}) } as Response;
+    }) as typeof fetch;
+    const c = new DaemonClient({ baseUrl: "http://x", fetchImpl });
+    await c.openTerminal("pod:dev");
+    await c.upRig("myrig");
+    expect(seen).toEqual(["/api/terminal/open", "/api/up"]);
+    // and no other method on the client POSTs
+    const postCalls = Object.getOwnPropertyNames(Object.getPrototypeOf(c)).filter((m) =>
+      ["openTerminal", "upRig"].includes(m),
+    );
+    expect(postCalls).toHaveLength(2);
   });
 
   it("surfaces a failed read as a NAMED error (route + status), never silent", async () => {

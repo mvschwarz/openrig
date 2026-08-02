@@ -16,7 +16,7 @@ export function demoSnapshot(): FleetSnapshot {
               {
                 name: "dev50",
                 agents: [
-                  { name: "dev50.driver", runtime: "claude-code", spec: "driver-agent", context: 62, tokens: "118k", status: "running", session: "dev50-driver@openrig-build" },
+                  { name: "dev50.driver", runtime: "claude-code", spec: "driver-agent", context: 62, tokens: "118k", status: "running", session: "dev50-driver@openrig-build", attach: "tmux attach -t dev50-driver@openrig-build" },
                   { name: "dev50.guard", runtime: "codex", spec: "guard-agent", context: 31, tokens: "54k", status: "idle", session: "dev50-guard@openrig-build" },
                   { name: "dev50.qa", runtime: "codex", spec: "qa-agent", context: null, tokens: null, status: "unknown", session: "dev50-qa@openrig-build" },
                 ],
