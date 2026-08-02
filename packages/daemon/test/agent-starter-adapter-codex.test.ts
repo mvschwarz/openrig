@@ -51,6 +51,8 @@ function mockCodexFs(seed: Record<string, string>): CodexAdapterFsOps & { _store
 }
 
 const RIG_ROOT = "/project/rigs/test-rig";
+const DEFAULT_CULTURE_PATH = path.resolve(import.meta.dirname, "../assets/guidance/CULTURE-default.md");
+const DEFAULT_CULTURE = fs.readFileSync(DEFAULT_CULTURE_PATH, "utf8");
 
 const CODEX_STARTER = `draft: false
 starter_id: codex-fixture-starter
@@ -88,7 +90,10 @@ describe("Agent Starter v1 vertical — real Codex adapter delivery (M2 R2)", ()
       const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
       const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
 
-      const codexFs = mockCodexFs({ [registryEntryPath]: CODEX_STARTER });
+      const codexFs = mockCodexFs({
+        [registryEntryPath]: CODEX_STARTER,
+        [DEFAULT_CULTURE_PATH]: DEFAULT_CULTURE,
+      });
       const codexAdapter = new CodexRuntimeAdapter({
         tmux,
         fsOps: codexFs,
@@ -156,6 +161,8 @@ describe("Agent Starter v1 vertical — real Codex adapter delivery (M2 R2)", ()
       expect(agentsMd).toContain("BEGIN OpenRig MANAGED BLOCK: codex-fixture-starter.yaml");
       expect(agentsMd).toContain("END OpenRig MANAGED BLOCK: codex-fixture-starter.yaml");
       expect(agentsMd).toContain("starter_id: codex-fixture-starter");
+      expect(agentsMd).toContain("BEGIN OpenRig MANAGED BLOCK: CULTURE-default.md");
+      expect(agentsMd).toContain("Ship good, working product");
 
       db.close();
     } finally {

@@ -218,9 +218,10 @@ For rigs that reuse builtin agents, the agents directory is often unnecessary �
 4. **Write role guidance** for each custom agent — who they are, what they do
 5. **Write startup context** for agents that need environment grounding
 6. **Validate:** `rig spec validate rig.yaml` and `rig agent validate agents/*/agent.yaml`
-7. **Confirm the runtime cwd** — do not assume agents should work from the directory where the rig spec is stored. The spec root controls file resolution; the runtime cwd controls trust, project guidance, permissions, and repo context.
-8. **Launch:** `rig up rig.yaml --cwd /path/to/project`
-9. **Verify:** `rig ps --nodes` — all agents ready? Check `rig capture` on each agent.
+7. **Audit authoring completeness:** `rig spec audit rig.yaml` — advisory findings identify missing culture or startup context without blocking launch.
+8. **Confirm the runtime cwd** — do not assume agents should work from the directory where the rig spec is stored. The spec root controls file resolution; the runtime cwd controls trust, project guidance, permissions, and repo context.
+9. **Launch:** `rig up rig.yaml --cwd /path/to/project`
+10. **Verify:** `rig ps --nodes` — all agents ready? Check `rig capture` on each agent.
 
 ### Validation Is Non-Negotiable
 
@@ -228,6 +229,7 @@ Always validate before launching:
 
 ```bash
 rig spec validate rig.yaml
+rig spec audit rig.yaml
 rig agent validate agents/my-agent/agent.yaml
 ```
 

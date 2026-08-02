@@ -294,6 +294,18 @@ import type { RuntimeAdapter, NodeBinding, ResolvedStartupFile } from "./runtime
 import { resolveConcreteHint } from "./runtime-adapter.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 
+function defaultCultureStartupFile(): ResolvedStartupFile {
+  const assetsRoot = nodePath.resolve(import.meta.dirname, "../../assets");
+  return {
+    path: "CULTURE-default.md",
+    absolutePath: nodePath.join(assetsRoot, "guidance/CULTURE-default.md"),
+    ownerRoot: assetsRoot,
+    deliveryHint: "guidance_merge",
+    required: true,
+    appliesOn: ["fresh_start", "restore"],
+  };
+}
+
 interface PodInstantiatorDeps {
   db: Database.Database;
   rigRepo: RigRepository;
@@ -1804,7 +1816,8 @@ export class PodRigInstantiator {
     const files: ResolvedStartupFile[] = [];
 
     // Skip layers 1-2 (agent base, profile) — terminal nodes have no agent spec
-    // Layer 3: Rig culture file
+    // Layer 3: OpenRig culture floor, then the rig-specific overlay.
+    files.push(defaultCultureStartupFile());
     if (rigSpec.cultureFile) {
       files.push({
         path: rigSpec.cultureFile,
@@ -1860,7 +1873,8 @@ export class PodRigInstantiator {
         files.push({ ...f, absolutePath: nodePath.resolve(agentSourcePath, f.path), ownerRoot: agentSourcePath });
       }
     }
-    // 3. Rig culture file
+    // 3. OpenRig culture floor, then the rig-specific overlay.
+    files.push(defaultCultureStartupFile());
     if (rigSpec.cultureFile) {
       files.push({
         path: rigSpec.cultureFile,
