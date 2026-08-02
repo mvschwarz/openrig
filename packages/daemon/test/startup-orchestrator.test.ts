@@ -403,6 +403,74 @@ describe("StartupOrchestrator", () => {
     expect(sendText).toHaveBeenCalledWith("r01-impl", "/rename impl");
   });
 
+  // OPR.0.4.7.17 restore-order-correction (qitem-e99624f7). On a real automatic
+  // Codex restore the daemon delivered the work-triggering guidance/role.md FIRST
+  // (its turn ran skill-metadata checks + `rig whoami`), and the after_ready
+  // "BEFORE you do anything else" preload action landed only afterwards — so
+  // non-skill work preceded the action, breaking the locked action-before-work
+  // contract. The fix must be CAUSAL (sequence the preload ahead of the
+  // role-triggered turn), not a larger send delay. This pin asserts the contract
+  // shape-agnostically: across the ordered provider inputs (send_text sends AND
+  // post-launch send_text file deliveries), the preload text is delivered no
+  // later than the role.md work-trigger content, and when bundled into one input
+  // the preload text precedes the role content.
+  it("restore: the after_ready preload action is sequenced before the role.md work-trigger", async () => {
+    const seed = seedSession();
+    const ROLE = "# Role: QA\nload your named skills: using-superpowers, test-driven-development";
+    const PRELOAD = "A task is coming. BEFORE you do anything else, load and invoke your process skills NOW: using-superpowers, test-driven-development. Load them first, then begin the work.";
+
+    // Unified ordered list of provider inputs (what actually reaches the pane).
+    const inputs: string[] = [];
+    const deliverStartup = vi.fn(async (files: ResolvedStartupFile[]) => {
+      for (const f of files) {
+        if (f.deliveryHint === "send_text") inputs.push(f.absolutePath === "/tmp/role.md" ? ROLE : "");
+      }
+      return { delivered: 0, failed: [] };
+    });
+    const adapter = mockAdapter({ deliverStartup });
+    const sendText = vi.fn(async (_session: string, text: string) => { inputs.push(text); return { ok: true as const }; });
+    const tmuxOverride = mockTmux({ sendText });
+    const orch = createOrchestrator({
+      tmux: tmuxOverride,
+      readFile: (path) => path === "/tmp/role.md" ? ROLE : "",
+    });
+
+    const result = await orch.startNode(makeInput(seed, {
+      adapter,
+      resolvedStartupFiles: [{
+        path: "guidance/role.md",
+        absolutePath: "/tmp/role.md",
+        ownerRoot: "/tmp",
+        deliveryHint: "send_text",
+        required: true,
+        appliesOn: ["fresh_start", "restore"],
+      }],
+      startupActions: [
+        makeAction({ type: "send_text", value: PRELOAD, phase: "after_ready", appliesOn: ["fresh_start", "restore"], idempotent: true }),
+      ],
+      isRestore: true,
+      resumeToken: "codex-session-abc",
+    }));
+
+    expect(result.ok).toBe(true);
+
+    const preloadIdx = inputs.findIndex((t) => t.includes("BEFORE you do anything else"));
+    const roleIdx = inputs.findIndex((t) => t.includes("# Role: QA"));
+    expect(preloadIdx).toBeGreaterThanOrEqual(0); // the preload action reached the provider
+    expect(roleIdx).toBeGreaterThanOrEqual(0);    // the role.md work-trigger reached the provider
+
+    // CONTRACT: the preload must not land after the role.md work-trigger.
+    expect(preloadIdx).toBeLessThanOrEqual(roleIdx);
+    // If bundled into a single input, the preload text must precede the role content.
+    if (preloadIdx === roleIdx) {
+      const payload = inputs[preloadIdx]!;
+      expect(payload.indexOf("BEFORE you do anything else")).toBeLessThan(payload.indexOf("# Role: QA"));
+    }
+    // And the preload must not be re-sent as a duplicate separate turn.
+    const preloadDeliveries = inputs.filter((t) => t.includes("BEFORE you do anything else")).length;
+    expect(preloadDeliveries).toBe(1);
+  });
+
   it("sends the identity prompt first when restore falls back to a fresh launch", async () => {
     const seed = seedSession();
     const sendText = vi.fn(async () => ({ ok: true as const }));

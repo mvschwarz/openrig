@@ -269,6 +269,7 @@ export class StartupOrchestrator {
     // A challenge-only prompt is synthesized (guard caveat — never silently
     // `n-a`) when a fresh managed launch has no session_identity action to ride
     // along with; delivered after the post-launch contract files below.
+    const consumedActions = new Set<StartupAction>();
     let challengeOnlyPrompt: string | null = null;
     if (continuityOutcome === "fresh" && identityAction) {
       const initialPrompt = await this.deliverInitialSessionPrompt(input.binding, identityAction, postLaunchFiles, challenge?.promptBlock ?? null);
@@ -279,6 +280,38 @@ export class StartupOrchestrator {
       postLaunchFiles = initialPrompt.remainingFiles;
     } else if (challenge) {
       challengeOnlyPrompt = challenge.promptBlock;
+    }
+
+    // OPR.0.4.7.17 restore-order-correction (qitem-e99624f7). On a resumed
+    // restore the work-triggering guidance/role.md is delivered as a post-launch
+    // send_text file (step 7 below) and starts the seat's first turn at once. An
+    // after_ready send_text "BEFORE you do anything else, load skills" preload
+    // delivered later (step 9) therefore lands AFTER work has begun — the locked
+    // action-before-work contract fails. Fix CAUSALLY, not by widening the send
+    // delay: on restore, bundle the applicable after_ready send_text preload
+    // action(s) IN FRONT of the first send_text post-launch file and deliver them
+    // as the single leading turn — the restore analogue of the fresh
+    // deliverInitialSessionPrompt identity+role.md bundle. Sequencing (not
+    // timing) guarantees the preload precedes the role-triggered work turn; the
+    // bundled actions are marked consumed so step 9 does not re-send them.
+    if (continuityOutcome !== "fresh") {
+      const preloadActions = input.startupActions.filter(
+        (a) =>
+          !isSessionIdentityAction(a) &&
+          a.type === "send_text" &&
+          a.phase === "after_ready" &&
+          a.appliesOn.includes(context) &&
+          !(input.isRestore && !a.idempotent),
+      );
+      if (preloadActions.length > 0) {
+        const preload = await this.deliverRestorePreloadPrompt(input.binding, preloadActions, postLaunchFiles);
+        if (!preload.ok) {
+          errors.push(preload.error);
+          return this.fail(input, "failed", errors);
+        }
+        postLaunchFiles = preload.remainingFiles;
+        for (const a of preloadActions) consumedActions.add(a);
+      }
     }
 
     // 7. Deliver post-launch files (send_text → TUI, now that harness is ready)
@@ -310,8 +343,9 @@ export class StartupOrchestrator {
       return this.fail(input, "failed", afterFilesResult.errors);
     }
 
-    // 9. Execute after_ready actions
-    const afterReadyResult = await this.executeActions(input, "after_ready");
+    // 9. Execute after_ready actions (skipping any preload actions already
+    // delivered ahead of role.md by the restore-order bundling above).
+    const afterReadyResult = await this.executeActions(input, "after_ready", consumedActions);
     if (!afterReadyResult.ok) {
       return this.fail(input, "failed", afterReadyResult.errors);
     }
@@ -392,12 +426,14 @@ export class StartupOrchestrator {
   private async executeActions(
     input: StartupInput,
     phase: "after_files" | "after_ready",
+    skip?: Set<StartupAction>,
   ): Promise<{ ok: true } | { ok: false; errors: string[] }> {
     const errors: string[] = [];
     const context = input.isRestore ? "restore" : "fresh_start";
 
     for (const action of input.startupActions) {
       if (isSessionIdentityAction(action)) continue;
+      if (skip?.has(action)) continue;
 
       // Phase filter
       if (action.phase !== phase) continue;
@@ -471,6 +507,49 @@ export class StartupOrchestrator {
     const sendError = await this.sendInteractiveText(binding.tmuxSession, prompt);
     if (sendError) {
       return { ok: false, error: `Initial session identity prompt failed: ${sendError}` };
+    }
+
+    return { ok: true, remainingFiles };
+  }
+
+  /**
+   * OPR.0.4.7.17 restore-order-correction. Deliver the after_ready send_text
+   * preload action(s) as the single leading turn on a resumed restore, bundling
+   * the first work-triggering send_text post-launch file (guidance/role.md)
+   * behind them so "load skills BEFORE anything else" causally precedes the role
+   * content in one submission. Returns the post-launch files still to deliver
+   * normally (role.md removed once bundled).
+   */
+  private async deliverRestorePreloadPrompt(
+    binding: NodeBinding,
+    preloadActions: StartupAction[],
+    postLaunchFiles: ResolvedStartupFile[],
+  ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[] } | { ok: false; error: string }> {
+    if (!binding.tmuxSession) {
+      return { ok: false, error: "No tmux session for the restore preload prompt" };
+    }
+
+    const parts = preloadActions.map((a) => a.value);
+    let remainingFiles = postLaunchFiles;
+
+    const firstSendTextIndex = postLaunchFiles.findIndex((file) => file.deliveryHint === "send_text");
+    if (firstSendTextIndex !== -1) {
+      const firstSendText = postLaunchFiles[firstSendTextIndex]!;
+      try {
+        const content = this.readFile(firstSendText.absolutePath);
+        if (content.length > 0) {
+          parts.push(content);
+          remainingFiles = postLaunchFiles.filter((_, index) => index !== firstSendTextIndex);
+        }
+      } catch {
+        // Leave role.md in postLaunchFiles for normal delivery; the preload
+        // still leads as its own turn.
+      }
+    }
+
+    const sendError = await this.sendInteractiveText(binding.tmuxSession, parts.join("\n\n"));
+    if (sendError) {
+      return { ok: false, error: `Restore preload prompt failed: ${sendError}` };
     }
 
     return { ok: true, remainingFiles };
