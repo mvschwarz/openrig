@@ -23,9 +23,20 @@ export type BindingAnomalyKind = "same_account_on_n_seats" | "seat_with_no_accou
  * First-class binding anomalies — server-computed, not derived client-side. A discriminated
  * union carrying EXACTLY the locked §1 fields for each variant (nothing added).
  */
-export type BindingAnomaly =
-  | { kind: "same_account_on_n_seats"; count: number; seats: string[]; evidence: string; asOf: string }
-  | { kind: "seat_with_no_account"; seat: string; evidence: string; asOf: string };
+export type SameAccountOnNSeatsAnomaly = {
+  kind: "same_account_on_n_seats";
+  count: number;
+  seats: string[];
+  evidence: string;
+  asOf: string;
+};
+export type SeatWithNoAccountAnomaly = {
+  kind: "seat_with_no_account";
+  seat: string;
+  evidence: string;
+  asOf: string;
+};
+export type BindingAnomaly = SameAccountOnNSeatsAnomaly | SeatWithNoAccountAnomaly;
 
 /**
  * A `bindings[]` row — a discriminated bound/unbound union over the SAME locked §1 field names
@@ -49,7 +60,10 @@ export type ProviderBinding =
       rigName: string;
       boundAt: null;
       bindingSource: null;
-      anomalies: BindingAnomaly[];
+      // An unbound seat MUST carry a seat_with_no_account anomaly — enforced at the type
+      // level as a non-empty tuple whose first element is that anomaly, so the dishonest
+      // "unbound row with an empty/same-account-only anomaly list" cannot even compile.
+      anomalies: [SeatWithNoAccountAnomaly, ...BindingAnomaly[]];
     };
 
 export type SignalSourceClass =
