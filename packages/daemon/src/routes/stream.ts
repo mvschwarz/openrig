@@ -5,6 +5,11 @@ import type { StreamStore } from "../domain/stream-store.js";
 
 const ISO_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
+function hasSubMillisecondPrecision(value: string): boolean {
+  const fraction = /\.(\d+)(?:Z|[+-]\d{2}:\d{2})$/.exec(value)?.[1];
+  return /[1-9]/.test(fraction?.slice(3) ?? "");
+}
+
 function normalizeIsoTimestamp(value: string): string | null {
   const match = ISO_TIMESTAMP.exec(value);
   if (!match) return null;
@@ -98,10 +103,16 @@ export function streamRoutes(): Hono {
     let since: string | undefined;
     let until: string | undefined;
     if (sinceInput) {
+      if (hasSubMillisecondPrecision(sinceInput)) {
+        return c.json({ error: "since must use at most millisecond precision" }, 400);
+      }
       since = normalizeIsoTimestamp(sinceInput) ?? undefined;
       if (!since) return c.json({ error: "since must be a valid ISO timestamp" }, 400);
     }
     if (untilInput) {
+      if (hasSubMillisecondPrecision(untilInput)) {
+        return c.json({ error: "until must use at most millisecond precision" }, 400);
+      }
       until = normalizeIsoTimestamp(untilInput) ?? undefined;
       if (!until) return c.json({ error: "until must be a valid ISO timestamp" }, 400);
     }

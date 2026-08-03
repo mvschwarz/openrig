@@ -148,6 +148,15 @@ describe("stream routes", () => {
     expect(await res.json()).toEqual({ error: `${field} must be a valid ISO timestamp` });
   });
 
+  it.each([
+    "since",
+    "until",
+  ])("GET /api/stream/list rejects unsupported %s sub-millisecond precision", async (field) => {
+    const res = await app.request(`/api/stream/list?${field}=2026-08-03T09%3A00%3A00.0009Z`);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: `${field} must use at most millisecond precision` });
+  });
+
   it("GET /api/stream/:id returns 404 on unknown id", async () => {
     const res = await app.request("/api/stream/nonexistent");
     expect(res.status).toBe(404);
