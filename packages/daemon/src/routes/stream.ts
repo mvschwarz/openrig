@@ -3,10 +3,28 @@ import { streamSSE } from "hono/streaming";
 import type { EventBus } from "../domain/event-bus.js";
 import type { StreamStore } from "../domain/stream-store.js";
 
-const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+const ISO_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 function normalizeIsoTimestamp(value: string): string | null {
-  if (!ISO_TIMESTAMP.test(value)) return null;
+  const match = ISO_TIMESTAMP.exec(value);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const local = new Date(0);
+  local.setUTCFullYear(year, month - 1, day);
+  local.setUTCHours(hour, minute, second, 0);
+  if (
+    local.getUTCFullYear() !== year ||
+    local.getUTCMonth() + 1 !== month ||
+    local.getUTCDate() !== day ||
+    local.getUTCHours() !== hour ||
+    local.getUTCMinutes() !== minute ||
+    local.getUTCSeconds() !== second
+  ) return null;
   const epochMs = Date.parse(value);
   return Number.isFinite(epochMs) ? new Date(epochMs).toISOString() : null;
 }

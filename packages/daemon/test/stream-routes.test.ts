@@ -139,6 +139,15 @@ describe("stream routes", () => {
     expect(await reversed.json()).toEqual({ error: "since must not be after until" });
   });
 
+  it.each([
+    ["since", "2026-02-30T00:00:00Z"],
+    ["until", "2026-01-01T24:00:00Z"],
+  ])("GET /api/stream/list rejects impossible %s timestamp components", async (field, value) => {
+    const res = await app.request(`/api/stream/list?${field}=${encodeURIComponent(value)}`);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: `${field} must be a valid ISO timestamp` });
+  });
+
   it("GET /api/stream/:id returns 404 on unknown id", async () => {
     const res = await app.request("/api/stream/nonexistent");
     expect(res.status).toBe(404);
