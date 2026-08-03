@@ -65,12 +65,12 @@ function expectedFreshLaunchCommand(options: { cwd?: string; model?: string; que
   const gitDirArg = ` --add-dir ${quote(nodePath.join(cwd, ".git"))}`;
   const queueDirArg = options.queueRoot === null ? "" : ` --add-dir ${quote(options.queueRoot ?? testQueueRoot())}`;
   const modelArg = options.model ? ` -m ${quote(options.model)}` : "";
-  return `codex -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg} -a on-request -s danger-full-access`;
+  return `codex -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}`;
 }
 
 function expectedResumeCommand(token = "sess-456", queueRoot: string | null = testQueueRoot()): string {
   const queueDirArg = queueRoot === null ? "" : `--add-dir ${quote(queueRoot)} `;
-  return `codex -a on-request -s danger-full-access resume ${queueDirArg}${quote(token)}`;
+  return `codex resume ${queueDirArg}${quote(token)}`;
 }
 
 function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: string; model?: string; queueRoot?: string | null } = {}): string {
@@ -679,8 +679,8 @@ describe("Codex runtime adapter", () => {
       fsOps: mockFs(),
       listProcesses: () => [
         { pid: 900, ppid: 1, command: "-zsh" },
-        { pid: 901, ppid: 900, command: "node /opt/homebrew/bin/codex -C /project -a on-request -s danger-full-access" },
-        { pid: 902, ppid: 901, command: "/opt/homebrew/lib/node_modules/@openai/codex/vendor/codex/codex -C /project -a on-request -s danger-full-access" },
+        { pid: 901, ppid: 900, command: "node /opt/homebrew/bin/codex -C /project" },
+        { pid: 902, ppid: 901, command: "/opt/homebrew/lib/node_modules/@openai/codex/vendor/codex/codex -C /project" },
       ],
       readThreadIdByPid: (pid) => pid === 902 ? "019d45bc-117d-78a3-a4ad-6fb186e5a86d" : undefined,
       sleep: async () => {},

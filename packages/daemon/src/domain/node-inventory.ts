@@ -147,8 +147,8 @@ function computeRecoveryGuidance(input: {
 
     return {
       summary: resumeToken
-        ? "Try native Codex resume first; posture flags preserve the approval/sandbox configuration."
-        : "No stored Codex resume token. Try codex resume --last with posture flags.",
+        ? "Try native Codex resume first; Codex uses its harness default (restricted fs + on-request) unless a named config profile is present."
+        : "No stored Codex resume token. Try codex resume --last; Codex uses its harness default unless a named config profile is present.",
       commands,
       notes,
     };

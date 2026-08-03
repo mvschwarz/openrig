@@ -58,7 +58,7 @@ describe("CodexResumeAdapter", () => {
 
       expect(sendText).toHaveBeenCalledOnce();
       expect(sendText.mock.calls[0]![0]).toBe("r99-demo1-impl");
-      expect(sendText.mock.calls[0]![1]).toBe("codex -a on-request -s danger-full-access resume 'uuid-123'");
+      expect(sendText.mock.calls[0]![1]).toBe("codex resume 'uuid-123'");
       expect(sendKeys).toHaveBeenCalledOnce();
       expect(sendKeys.mock.calls[0]![1]).toEqual(["Enter"]);
       expect(sendText.mock.invocationCallOrder[0]).toBeLessThan(sendKeys.mock.invocationCallOrder[0]!);
@@ -73,7 +73,7 @@ describe("CodexResumeAdapter", () => {
       await adapter.resume("r99-demo1-impl", "codex_last", null, "/repo");
 
       expect(sendText).toHaveBeenCalledOnce();
-      expect(sendText.mock.calls[0]![1]).toBe("codex -a on-request -s danger-full-access resume --last");
+      expect(sendText.mock.calls[0]![1]).toBe("codex resume --last");
       expect(sendKeys).toHaveBeenCalledOnce();
     });
 
@@ -112,7 +112,7 @@ describe("CodexResumeAdapter", () => {
 
       await adapter.resume("r99-demo1-impl", "codex_id", "uuid; rm -rf /", "/repo");
 
-      expect(sendText.mock.calls[0]![1]).toBe("codex -a on-request -s danger-full-access resume 'uuid; rm -rf /'");
+      expect(sendText.mock.calls[0]![1]).toBe("codex resume 'uuid; rm -rf /'");
     });
 
     it("profile-bearing resume uses -p flag after preflight passes", async () => {
