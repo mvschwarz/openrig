@@ -65,12 +65,12 @@ function expectedFreshLaunchCommand(options: { cwd?: string; model?: string; que
   const gitDirArg = ` --add-dir ${quote(nodePath.join(cwd, ".git"))}`;
   const queueDirArg = options.queueRoot === null ? "" : ` --add-dir ${quote(options.queueRoot ?? testQueueRoot())}`;
   const modelArg = options.model ? ` -m ${quote(options.model)}` : "";
-  return `codex -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}`;
+  return `codex -s workspace-write -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}`;
 }
 
 function expectedResumeCommand(token = "sess-456", queueRoot: string | null = testQueueRoot()): string {
   const queueDirArg = queueRoot === null ? "" : `--add-dir ${quote(queueRoot)} `;
-  return `codex resume ${queueDirArg}${quote(token)}`;
+  return `codex -s workspace-write resume ${queueDirArg}${quote(token)}`;
 }
 
 function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: string; model?: string; queueRoot?: string | null } = {}): string {
@@ -679,8 +679,8 @@ describe("Codex runtime adapter", () => {
       fsOps: mockFs(),
       listProcesses: () => [
         { pid: 900, ppid: 1, command: "-zsh" },
-        { pid: 901, ppid: 900, command: "node /opt/homebrew/bin/codex -C /project" },
-        { pid: 902, ppid: 901, command: "/opt/homebrew/lib/node_modules/@openai/codex/vendor/codex/codex -C /project" },
+        { pid: 901, ppid: 900, command: "node /opt/homebrew/bin/codex -s workspace-write -C /project" },
+        { pid: 902, ppid: 901, command: "/opt/homebrew/lib/node_modules/@openai/codex/vendor/codex/codex -s workspace-write -C /project" },
       ],
       readThreadIdByPid: (pid) => pid === 902 ? "019d45bc-117d-78a3-a4ad-6fb186e5a86d" : undefined,
       sleep: async () => {},
@@ -906,7 +906,7 @@ describe("Codex runtime adapter", () => {
   // commit 63ee206 alongside the legacy CodexResumeAdapter path.
   it("launchHarness returns attention_required when Codex post-logout token-refresh fails during resume", async () => {
     const refusalPane = [
-      "$ codex resume sess-456",
+      "$ codex -s workspace-write resume sess-456",
       "Error: Your access token could not be refreshed because you have since",
       "logged out or signed in to another account. Please sign in again.",
     ].join("\n");
@@ -933,7 +933,7 @@ describe("Codex runtime adapter", () => {
     const tmux = mockTmux({
       getPaneCommand: vi.fn(async () => "zsh"),
       capturePaneContent: vi.fn(async () => [
-        "$ codex resume sess-456",
+        "$ codex -s workspace-write resume sess-456",
         "Your access token could not be refreshed.",
         "Please log out and sign in again.",
       ].join("\n")),
@@ -1046,7 +1046,7 @@ describe("Codex runtime adapter", () => {
         return callCount <= 10 ? "node" : "codex";
       }),
       capturePaneContent: vi.fn(async () => {
-        if (callCount <= 10) return "codex resume 019ecd3b-test-thread\nCodex v0.128.0\nloading...";
+        if (callCount <= 10) return "codex -s workspace-write resume 019ecd3b-test-thread\nCodex v0.128.0\nloading...";
         return "OpenAI Codex (v0.128.0)\n  gpt-5.5 · session 019ecd3b-test-thread\n› ";
       }),
     });

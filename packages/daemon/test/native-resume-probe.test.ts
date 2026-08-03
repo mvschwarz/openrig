@@ -13,9 +13,9 @@ describe("native resume probe", () => {
     ).toBe("claude --resume 'abc-123' --name 'dev-impl@demo-rig'");
   });
 
-  it("builds a Codex no-profile resume with NO forced flags (harness default)", () => {
+  it("builds a Codex no-profile resume with the explicit -s workspace-write floor flag", () => {
     expect(buildNativeResumeCommand("codex", "019d-token")).toBe(
-      "codex resume '019d-token'"
+      "codex -s workspace-write resume '019d-token'"
     );
   });
 
@@ -31,9 +31,9 @@ describe("native resume probe", () => {
   });
 
   describe("buildCodexResumeCore (shared builder)", () => {
-    it("no-profile emits NO forced flags (harness default) matching fresh launch", () => {
+    it("no-profile emits the explicit -s workspace-write floor flag matching fresh launch", () => {
       expect(buildCodexResumeCore("tok-123")).toBe(
-        "codex resume 'tok-123'"
+        "codex -s workspace-write resume 'tok-123'"
       );
     });
 
@@ -45,7 +45,7 @@ describe("native resume probe", () => {
 
     it("useLast emits --last instead of token", () => {
       expect(buildCodexResumeCore("", null, true)).toBe(
-        "codex resume --last"
+        "codex -s workspace-write resume --last"
       );
     });
 
@@ -524,7 +524,7 @@ describe("native resume probe", () => {
   describe("Codex auth-refusal recognition", () => {
     it("classifies Codex post-logout token-refresh failure as attention_required", () => {
       const paneContent = [
-        "$ codex resume 019d-token",
+        "$ codex -s workspace-write resume 019d-token",
         "Error: Your access token could not be refreshed because you have since",
         "logged out or signed in to another account. Please sign in again.",
       ].join("\n");
@@ -542,7 +542,7 @@ describe("native resume probe", () => {
 
     it("classifies Codex token-refresh failure with `log out and sign in` guidance as attention_required", () => {
       const paneContent = [
-        "$ codex resume 019d-token",
+        "$ codex -s workspace-write resume 019d-token",
         "Your access token could not be refreshed.",
         "Please log out and sign in again.",
       ].join("\n");

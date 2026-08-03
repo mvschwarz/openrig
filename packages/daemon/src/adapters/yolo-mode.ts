@@ -3,9 +3,10 @@
 // A simple deterministic setting that rides the STABLE launch-flag surface only (per the founder's
 // two-surface rule: launch flags may be deterministic code; config-file policy may NOT). When ON,
 // every managed seat boots at its harness's maximally-permissive LAUNCH FLAG:
-//   - Claude: --dangerously-skip-permissions            (permission bypass)
-//   - Codex:  --dangerously-bypass-approvals-and-sandbox (permission + sandbox bypass)
-//   - Pi:     --approve                                  (full RESOURCE TRUST — Pi's
+//   - Claude: --dangerously-skip-permissions  (permission bypass)
+//   - Codex:  -s danger-full-access           (maximally-permissive sandbox; OFF floor = the
+//             explicit -s workspace-write flag, NOT a harness default)
+//   - Pi:     --approve                       (full RESOURCE TRUST — Pi's
 //             --approve/--no-approve govern RESOURCE TRUST, not a permission policy)
 // When OFF (the default), seats boot with the usability floor, unchanged. The YOLO path writes ZERO
 // config files — it only selects a launch flag. Opt-in via the OPENRIG_YOLO env setting. (The
@@ -27,12 +28,19 @@ export function claudePostureFlag(env: NodeJS.ProcessEnv = process.env): string 
 }
 
 /**
- * Codex launch posture segment (leading space included). YOLO forces the full-bypass flag on EVERY
- * seat, overriding even a named `-p` profile; otherwise pass the caller's profile arg (or "" for the
- * harness-default floor). `profileArg` is the already-formatted ` -p <profile>` string or "".
+ * Codex launch posture segment (leading space included), applied on EVERY managed Codex path
+ * (fresh / resume / native-fork). `profileArg` is the already-formatted ` -p <profile>` string or "".
+ * - YOLO ON → ` -s danger-full-access` (maximally-permissive sandbox), overriding even a named profile.
+ * - OFF + named profile → the profile (it governs its own sandbox).
+ * - OFF + no profile → the EXPLICIT workspace-only floor ` -s workspace-write`. NOTE: emitting NO
+ *   sandbox flag is NOT equivalent — on the installed managed runtime the no-flags default does not
+ *   grant the `--add-dir` writable roots managed seats pass, so the seat fails before readiness (QA
+ *   firsthand). The floor must therefore be the explicit workspace-write flag (the arch-ruled value).
+ * No forced approval flag on any path — the approval flow is left to Codex, unforced.
  */
 export function codexPostureArg(profileArg: string, env: NodeJS.ProcessEnv = process.env): string {
-  return yoloEnabled(env) ? " --dangerously-bypass-approvals-and-sandbox" : profileArg;
+  if (yoloEnabled(env)) return " -s danger-full-access";
+  return profileArg ? profileArg : " -s workspace-write";
 }
 
 /** Pi RESOURCE TRUST (Pi's --approve/--no-approve govern resource trust, NOT a permission policy):
