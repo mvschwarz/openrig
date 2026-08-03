@@ -77,6 +77,7 @@ import type { SpecReviewService } from "./domain/spec-review-service.js";
 import type { SpecLibraryService } from "./domain/spec-library-service.js";
 import type { ChatRepository } from "./domain/chat-repository.js";
 import { whoamiRoutes } from "./routes/whoami.js";
+import { providerRoutes } from "./routes/provider.js";
 import type { WhoamiService } from "./domain/whoami-service.js";
 import { chatRoutes } from "./routes/chat.js";
 import { streamRoutes } from "./routes/stream.js";
@@ -609,6 +610,9 @@ export function createApp(deps: AppDeps): Hono {
     specRoots: deps.agentImageSpecRoots ?? (() => []),
   }));
   app.route("/api/whoami", whoamiRoutes());
+  // Slice-04 OPR.0.5.0.4: registered so the endpoints exist and 503 honestly; the providerService
+  // is not set in context until the collection/service seam (C) wires it (until then -> 503).
+  app.route("/api/provider", providerRoutes());
   app.route("/api/seat", seatRoutes);
   app.route("/api/rigs/:rigId/chat", chatRoutes());
   app.route("/api/stream", streamRoutes());
