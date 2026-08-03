@@ -211,6 +211,23 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     expect(selectedLine.slice(0, 30).trimEnd()).toMatch(/codex · 31%$/); // demo: guard ctx 31
   });
 
+  it("FOUNDER CORRECTION: the selected-row highlight covers the item TEXT ONLY — branch guides stay unhighlighted", () => {
+    const s = makeStore();
+    s.dispatch({ type: "drill", resource: "agent", name: "dev50.guard", target: { host: "vm-host", rig: "openrig-build", pod: "dev50" } });
+    const screen = renderScreen(s.get(), snap, { cols: 120, rows: 32 });
+    const styled = stylizeLines(screen, createStyle("truecolor"));
+    const i = screen.lines.findIndex((l) => l.startsWith("›"));
+    expect(i).toBeGreaterThan(0);
+    const line = styled[i]!;
+    // the guide run paints CHROME with no inverse (7) in its opening SGR…
+    expect(line).toMatch(/\x1b\[38;2;58;63;75m[^\x1b]*├─/);
+    // …while the item text carries the accent inverse bar…
+    expect(line).toMatch(/\x1b\[1;7;38;2;77;189;178m[^\x1b]*● guard/);
+    // …and the selection marker keeps its shipped form (floor compatibility)
+    expect(line).toContain("\x1b[1;7;38;2;77;189;178m›");
+    styled.forEach((l, j) => expect(stripAnsi(l), `line ${j}`).toBe(screen.lines[j]));
+  });
+
   it("stylize keeps the strip-invariant over the re-skinned labels", () => {
     const s = makeStore();
     s.dispatch({ type: "drill", resource: "pod", name: "dev50", target: { host: "vm-host", rig: "openrig-build" } });

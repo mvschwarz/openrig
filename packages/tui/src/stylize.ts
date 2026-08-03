@@ -27,7 +27,15 @@ function paintInline(text: string, s: Style): string {
 
 function paintExplorer(text: string, s: Style, focused: boolean): string {
   // pm-approved: the unfocused pane's selection bar dims (k9s/editor standard)
-  if (text.startsWith("›")) return s.paint(focused ? "accent" : "dim", text, { inverse: true, bold: focused });
+  if (text.startsWith("›")) {
+    const token = focused ? "accent" : "dim";
+    const opts = { inverse: true, bold: focused };
+    // FOUNDER CORRECTION (style verdict, folded spec): the highlight covers
+    // the row's item TEXT only — branch-guide glyphs stay UNHIGHLIGHTED.
+    const tree = text.match(/^›( *(?:[│ ] )*(?:├─|└─) )(.*?)( *)$/);
+    if (tree) return s.paint(token, "›", opts) + s.paint("chrome", tree[1]!) + s.paint(token, tree[2]!, opts) + tree[3]!;
+    return s.paint(token, text, opts);
+  }
   if (/[▾▸] (TOPOLOGY|SPECS|NEEDS-YOU)/.test(text)) return s.paint("bright", text, { bold: true });
   // Slice-17 re-skin: branch guides paint faint (chrome), the row body keeps
   // its own rules — the tree rails read as structure, never as content.
