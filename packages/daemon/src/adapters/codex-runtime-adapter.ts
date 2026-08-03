@@ -31,6 +31,10 @@ export interface CodexAdapterFsOps {
   exists(path: string): boolean;
   mkdirp(path: string): void;
   listFiles?(dirPath: string): string[];
+  /** Source file permission bits (for mode-preserving projection). Optional: mode preservation is a no-op if absent. */
+  statMode?(path: string): number;
+  /** Apply permission bits to a file (for mode-preserving projection). Optional: no-op if absent. */
+  chmod?(path: string, mode: number): void;
   homedir?: string;
 }
 
@@ -525,17 +529,40 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         const src = nodePath.join(entry.absolutePath, file);
         const dest = nodePath.join(targetDir, file);
         const content = this.fs.readFile(src);
-        if (this.fs.exists(dest) && hashContent(content) === hashContent(this.fs.readFile(dest))) continue;
+        // Reconcile mode even when the content write is skipped: a byte-identical dest
+        // projected earlier may still carry the wrong (default) mode.
+        if (this.fs.exists(dest) && hashContent(content) === hashContent(this.fs.readFile(dest))) {
+          this.preserveMode(src, dest);
+          continue;
+        }
         this.fs.mkdirp(nodePath.dirname(dest));
         this.fs.writeFile(dest, content);
+        this.preserveMode(src, dest);
       }
     } else {
       const content = this.fs.readFile(entry.absolutePath);
       const destFile = nodePath.join(targetDir, nodePath.basename(entry.absolutePath));
-      if (this.fs.exists(destFile) && hashContent(content) === hashContent(this.fs.readFile(destFile))) return true;
+      if (this.fs.exists(destFile) && hashContent(content) === hashContent(this.fs.readFile(destFile))) {
+        this.preserveMode(entry.absolutePath, destFile);
+        return true;
+      }
       this.fs.writeFile(destFile, content);
+      this.preserveMode(entry.absolutePath, destFile);
     }
     return true;
+  }
+
+  /**
+   * Reapply the source file's permission bits to the projected dest. Plain
+   * readFile+writeFile (writeFileSync) creates the dest with the process default
+   * mode, dropping executable bits on nested plugin helpers (e.g. the
+   * claude-compaction-restore/scripts/*.mjs 0755 hooks). No-op when the fs adapter
+   * does not expose mode primitives (keeps existing mock-fs callers unaffected).
+   */
+  private preserveMode(src: string, dest: string): void {
+    if (!this.fs.statMode || !this.fs.chmod) return;
+    const srcMode = this.fs.statMode(src) & 0o777;
+    if ((this.fs.statMode(dest) & 0o777) !== srcMode) this.fs.chmod(dest, srcMode);
   }
 
   private pluginAppliesToCodex(entry: ProjectionEntry): boolean {
