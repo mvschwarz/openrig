@@ -75,12 +75,8 @@ const CORE_STEP_IDS = [
 ];
 const FULL_EXTRA_STEP_IDS = ["jq_install", "gh_install"];
 const BASE_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
-  {
-    scope: "global",
-    runtime: "claude-code",
-    path: "~/.claude/settings.json",
-    purpose: "Allow OpenRig commands without Claude permission prompts.",
-  },
+  // OPR.0.4.8.2 agnostic rip-out: OpenRig no longer writes ~/.claude/settings.json — the global
+  // permission allow-list (C2) is removed, so that global file is no longer touched at all.
   {
     scope: "global",
     runtime: "claude-code",
@@ -91,7 +87,8 @@ const BASE_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
     scope: "project",
     runtime: "claude-code",
     path: ".claude/settings.local.json",
-    purpose: "Apply context-collector statusLine config and selected Claude settings runtime-resource fragments.",
+    purpose:
+      "Apply context-collector statusLine config and the acceptEdits floor fragment. OpenRig bakes NO allow/ask/deny permission policy — the harness-native permissions are the control surface.",
   },
   {
     scope: "project",
