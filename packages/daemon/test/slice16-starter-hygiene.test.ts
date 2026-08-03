@@ -11,19 +11,14 @@ import { fileURLToPath } from "node:url";
 const specs = fileURLToPath(new URL("../specs/", import.meta.url));
 
 describe("Slice 16 — starter bootstrap hygiene", () => {
-  it("item 1: shipped claude-settings fragment allows the dev toolchain; rig up/down stays gated", () => {
+  it("item 1 (OPR.0.4.8.2 agnostic rip-out): fragment keeps ONLY the acceptEdits floor — no allow/ask/deny", () => {
     const frag = JSON.parse(readFileSync(specs + "agents/shared/runtime/claude-settings.fragment.json", "utf8"));
-    const allow: string[] = frag.permissions.allow;
-    // acceptEdits + the toolchain a TDD factory needs (git / npm test / tsc / node) + edit tools
+    // The 13-entry allow-list (assessment C1b) and the rig up/down ask gates (C1c) are RIPPED —
+    // OpenRig no longer bakes any config-file permission policy. The floor (acceptEdits) stays.
     expect(frag.permissions.defaultMode).toBe("acceptEdits");
-    for (const perm of ["Bash(rig:*)", "Bash(git:*)", "Bash(npm:*)", "Bash(node:*)", "Bash(tsc:*)", "Read", "Edit", "Write"]) {
-      expect(allow).toContain(perm);
-    }
-    // rig up/down remain behind the ask gate — NOT auto-allowed
-    expect(frag.permissions.ask).toContain("Bash(rig up:*)");
-    expect(frag.permissions.ask).toContain("Bash(rig down:*)");
-    expect(allow).not.toContain("Bash(rig up:*)");
-    expect(allow).not.toContain("Bash(rig down:*)");
+    expect(frag.permissions.allow).toBeUndefined();
+    expect(frag.permissions.ask).toBeUndefined();
+    expect(frag.permissions.deny).toBeUndefined();
   });
 
   it("item 3: the QA agent carries the test-driven-development skill it enforces", () => {
