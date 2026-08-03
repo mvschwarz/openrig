@@ -251,6 +251,12 @@ export { runProgram, wantsJsonOutput } from "./cli-error.js";
 
 // Only parse when executed directly (not imported for testing)
 if (isDirectRun()) {
-  const { runProgram: runProgramDirect } = await import("./cli-error.js");
-  await runProgramDirect(createProgram(), process.argv);
+  // Slice-17 mini-req 7 — bare `rig` in a real terminal opens the TUI; any
+  // arg or a non-TTY stream falls through to the normal program unchanged.
+  const { runFrontDoor } = await import("./front-door.js");
+  const owned = await runFrontDoor(process.argv);
+  if (!owned) {
+    const { runProgram: runProgramDirect } = await import("./cli-error.js");
+    await runProgramDirect(createProgram(), process.argv);
+  }
 }

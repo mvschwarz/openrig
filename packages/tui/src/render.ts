@@ -5,6 +5,7 @@
 // SAME semantic actions commands produce (PIN 1). Isolated seam: a substrate
 // swap touches only this module (spike verdict revisit trigger).
 import { computeExplorerRows, findAgent, findSpec, findAgentBySession, agentsRunningSpec, agentsRunningSpecTargets } from "./state.js";
+import { navigatorLabels } from "./navigator.js";
 import { detailPage, fieldLine, sectionRule, listItem, alignedRow } from "./detail.js";
 import type { Action, FleetSnapshot, NeedsItem, Screen, ViewState } from "./types.js";
 
@@ -537,6 +538,9 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   lines.push(paneRule(cols, "┬", explorerTitle, contentTitle));
 
   const explorer = computeExplorerRows(state, snap);
+  // Slice-17: the file-tree re-skin is a DISPLAY transform only — rows, keys,
+  // actions, and the hit-map all keep resolving against the row model above.
+  const explorerDisplay = navigatorLabels(explorer, snap, EXPL_W - 1);
   const content = contentLines(state, snap, Math.max(cols - EXPL_W - 2, 0));
   const footer = state.footerOn ? snap.stream.at(-1) : undefined;
   const chromeRows = footer ? 4 : 3; // bottom rule + hint bar + status line (+ footer)
@@ -568,7 +572,7 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
     const explorerIndex = explorerStart + i;
     const row = explorer[explorerIndex];
     const marker = explorerIndex === state.selection && row ? "›" : " ";
-    const left = pad(row ? `${marker}${row.label}` : "", EXPL_W);
+    const left = pad(row ? `${marker}${explorerDisplay[explorerIndex] ?? row.label}` : "", EXPL_W);
     const item = visibleContent[i];
     const targetIndex = contentTargets.length;
     const zones = item?.zones ?? [];

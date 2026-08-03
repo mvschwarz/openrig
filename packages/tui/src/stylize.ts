@@ -29,6 +29,18 @@ function paintExplorer(text: string, s: Style, focused: boolean): string {
   // pm-approved: the unfocused pane's selection bar dims (k9s/editor standard)
   if (text.startsWith("›")) return s.paint(focused ? "accent" : "dim", text, { inverse: true, bold: focused });
   if (/[▾▸] (TOPOLOGY|SPECS|NEEDS-YOU)/.test(text)) return s.paint("bright", text, { bold: true });
+  // Slice-17 re-skin: branch guides paint faint (chrome), the row body keeps
+  // its own rules — the tree rails read as structure, never as content.
+  const tree = text.match(/^( *(?:[┊ ] )*(?:├─|└─) )(.*)$/);
+  if (tree) return s.paint("chrome", tree[1]!) + paintExplorerBody(tree[2]!, s);
+  return paintExplorerBody(text, s);
+}
+
+/** row-body treatment (VISUAL-TARGETS: rig teal · pod dim · meta faint ·
+ * names default ink); the right-aligned meta column always dims */
+function paintExplorerBody(text: string, s: Style): string {
+  const meta = text.match(/^(.*?\S)( {2,})([0-9]+%|—|[0-9]+)$/);
+  if (meta) return paintExplorerBody(meta[1]!, s) + meta[2]! + s.paint("dim", meta[3]!);
   if (text.includes("⚑")) return s.paint("warn", text);
   if (/\(unreachable\)/.test(text)) {
     const at = text.indexOf("(unreachable)");
@@ -37,6 +49,9 @@ function paintExplorer(text: string, s: Style, focused: boolean): string {
   if (/\((recoverable|degraded|stopped|attention_required)\)/.test(text)) {
     return text.replace(/\((recoverable|degraded|stopped|attention_required)\)/, (m) => s.paint("warn", m));
   }
+  if (text.startsWith("▚ ")) return s.paint("accent", text);
+  if (text.startsWith("⊕ ")) return s.paint("dim", "⊕ ") + text.slice(2);
+  if (/^[▾▸] /.test(text)) return s.paint("chrome", text.slice(0, 2)) + s.paint("dim", text.slice(2));
   return text;
 }
 
