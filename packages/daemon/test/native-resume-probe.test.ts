@@ -13,9 +13,9 @@ describe("native resume probe", () => {
     ).toBe("claude --resume 'abc-123' --name 'dev-impl@demo-rig'");
   });
 
-  it("builds a Codex no-profile resume with posture flags", () => {
+  it("builds a Codex no-profile resume with NO forced flags (harness default)", () => {
     expect(buildNativeResumeCommand("codex", "019d-token")).toBe(
-      "codex -a on-request -s danger-full-access resume '019d-token'"
+      "codex resume '019d-token'"
     );
   });
 
@@ -31,9 +31,9 @@ describe("native resume probe", () => {
   });
 
   describe("buildCodexResumeCore (shared builder)", () => {
-    it("no-profile emits posture flags matching fresh launch", () => {
+    it("no-profile emits NO forced flags (harness default) matching fresh launch", () => {
       expect(buildCodexResumeCore("tok-123")).toBe(
-        "codex -a on-request -s danger-full-access resume 'tok-123'"
+        "codex resume 'tok-123'"
       );
     });
 
@@ -45,7 +45,7 @@ describe("native resume probe", () => {
 
     it("useLast emits --last instead of token", () => {
       expect(buildCodexResumeCore("", null, true)).toBe(
-        "codex -a on-request -s danger-full-access resume --last"
+        "codex resume --last"
       );
     });
 

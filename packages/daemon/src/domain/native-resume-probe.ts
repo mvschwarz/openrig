@@ -47,9 +47,11 @@ export function buildCodexResumeCore(
   useLast?: boolean,
   extraArgs?: string,
 ): string {
-  const profileOrPosture = codexConfigProfile
-    ? ` -p ${shellQuote(codexConfigProfile)}`
-    : " -a on-request -s danger-full-access";
+  // OPR.0.4.8.2 agnostic rip-out (Codex floor): the no-profile branch NO LONGER forces
+  // `-s danger-full-access` / `-a on-request`. Codex's own no-flags default is restricted-fs +
+  // OnRequest approval (the workspace-only floor the founder selected — confirmed via
+  // `codex doctor`), so "setting nothing" IS the floor. A named config profile still governs itself.
+  const profileOrPosture = codexConfigProfile ? ` -p ${shellQuote(codexConfigProfile)}` : "";
   const middle = extraArgs ? `${extraArgs} ` : "";
   const tokenArg = useLast ? "--last" : shellQuote(resumeToken);
   return `codex${profileOrPosture} resume ${middle}${tokenArg}`;

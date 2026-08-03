@@ -100,8 +100,8 @@ describe("ResumeMetadataRefresher", () => {
       tmuxAdapter: tmux,
       listProcesses: () => [
         { pid: 900, ppid: 1, command: "-zsh" },
-        { pid: 901, ppid: 900, command: "node /opt/homebrew/bin/codex -C /project -a on-request -s danger-full-access" },
-        { pid: 902, ppid: 901, command: "/opt/homebrew/lib/node_modules/@openai/codex/vendor/codex/codex -C /project -a on-request -s danger-full-access" },
+        { pid: 901, ppid: 900, command: "node /opt/homebrew/bin/codex -C /project" },
+        { pid: 902, ppid: 901, command: "/opt/homebrew/lib/node_modules/@openai/codex/vendor/codex/codex -C /project" },
       ],
       readCodexThreadIdByPid: (pid) => pid === 902 ? "019d45c3-e909-7152-b52e-34edab4070ed" : undefined,
       sleep: async () => {},

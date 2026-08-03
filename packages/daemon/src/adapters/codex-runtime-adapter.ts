@@ -360,7 +360,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       ? buildCodexResumeCore(opts.resumeToken, profile, false, queueStateDirArg.trim() || undefined)
       : profile
         ? `codex${profileArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`
-        : `codex -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg} -a on-request -s danger-full-access`;
+        : // OPR.0.4.8.2 agnostic rip-out (Codex floor): no forced -a/-s. Codex's no-flags default is
+          // restricted-fs + OnRequest (the workspace-only floor, confirmed via `codex doctor`).
+          `codex -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`;
 
     const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
     if (!textResult.ok) {
