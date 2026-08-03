@@ -68,7 +68,7 @@ describe("live visual regressions", () => {
 
   it("anchors ticker, rule, and status to the bottom of an exact short 140x34 view", () => {
     const base = demoSnapshot();
-    const snap: FleetSnapshot = { ...base, needs: [], hostsDown: [], humanQueue: [] };
+    const snap: FleetSnapshot = { ...base, needs: [], hostsDown: [] };
     const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
     view.dispatch({ type: "jump", section: "needs" });
 
@@ -102,7 +102,7 @@ describe("live visual regressions", () => {
     const base = demoSnapshot();
     const snap: FleetSnapshot = {
       ...base,
-      needs: [{ kind: "overdue", target: "qitem-123", detail: "past closure_required_at" }],
+      needs: [{ source: "derived", kind: "overdue", target: "qitem-123", detail: "past closure_required_at" }],
     };
     const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
     view.dispatch({ type: "jump", section: "needs" });
@@ -117,6 +117,7 @@ describe("live visual regressions", () => {
   it("never opens a local seat for a remote Needs row with the same canonical session", () => {
     const snap = demoSnapshot();
     snap.needs = [{
+      source: "derived",
       kind: "stuck",
       target: "dev50-guard@openrig-build",
       hostId: "remote-a",

@@ -176,7 +176,7 @@ function toNeedsItem(item: NeedsYouItemRead): NeedsItem {
   // session/where the daemon already names (identity prefix for derived rows)
   const target = item.source === "derived" ? (item.identity.split("|")[0] ?? item.where) : (item.destinationSession ?? item.where);
   const detail = item.derived ? `${item.summary} — ${item.derived.evidence}` : item.summary;
-  return { kind: item.derived?.kind ?? item.leg, target, detail, ...(item.hostId ? { hostId: item.hostId } : {}) };
+  return { source: item.source, kind: item.derived?.kind ?? item.leg, target, detail, ...(item.hostId ? { hostId: item.hostId } : {}) };
 }
 
 function resolveAgentRef(ref: string, agentSpecNames: Set<string>): string {
@@ -398,8 +398,7 @@ export async function hydrateSnapshot(
 
   // Needs-You: composeNeedsYou verbatim; host-down BESIDE.
   const items = review?.needsYou?.items ?? [];
-  const needs = items.filter((i) => i.source === "derived").map(toNeedsItem);
-  const humanQueue = items.filter((i) => i.source === "agent").map(toNeedsItem);
+  const needs = items.map(toNeedsItem);
   const hostsDown = [
     ...aggHosts
       .filter((h) => h.status !== "ok")
@@ -413,7 +412,6 @@ export async function hydrateSnapshot(
     needs,
     humanQueueProbed: review != null && !review.registryError && Array.isArray(review.hosts) && review.hosts.length > 0
       && review.hosts.every((host) => host.status.status === "ok"),
-    humanQueue,
     hostsDown,
     stream: (streamItems ?? []).map((s) => ({ tsEmitted: s.tsEmitted, sourceSession: s.sourceSession, body: s.body })),
     readErrors,

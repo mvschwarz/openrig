@@ -486,9 +486,9 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       // open/navigate is the ONLY in-TUI action (B3): the click target joins
       // the item's session back to topology; unresolvable targets never
       // advertise a control that can only fail.
-      lines.push(needsLine("  ⚑ ", item, snap));
+      lines.push(needsLine(item.source === "agent" ? "  ☐ " : "  ⚑ ", item, snap));
     }
-    if (snap.needs.length === 0) lines.push({ text: "  (no grounded exception items right now)" });
+    if (snap.needs.length === 0) lines.push({ text: "  (no fleet attention items right now)" });
     if (snap.hostsDown.length > 0) {
       // composed BESIDE the items (a separate shipped read), never into the item shape
       lines.push({ text: "" });
@@ -500,11 +500,8 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
     }
     lines.push({ text: "" });
     if (!snap.humanQueueProbed) lines.push({ text: "  human-queue: not yet known (read pending)" });
-    else if (snap.humanQueue.length === 0)
+    else if (!snap.needs.some((item) => item.source === "agent"))
       lines.push({ text: "  human-queue: no items (proven empty — surfacing adoption pending)" });
-    else
-      for (const item of snap.humanQueue)
-        lines.push(needsLine("  ☐ ", item, snap));
     return lines;
   }
   return [{ text: `(${state.section})` }];

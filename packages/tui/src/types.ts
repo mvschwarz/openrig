@@ -110,6 +110,8 @@ export interface SpecEntry {
 }
 
 export interface NeedsItem {
+  /** Preserve the daemon's ordered union while retaining presentation semantics. */
+  source: "agent" | "derived";
   kind: string;
   target: string;
   detail: string;
@@ -128,11 +130,10 @@ export interface HostDown {
 export interface FleetSnapshot {
   hosts: HostNode[];
   specs: SpecEntry[];
-  /** grounded composeNeedsYou derived exceptions, VERBATIM (PIN 3) */
+  /** grounded composeNeedsYou union in daemon priority order, VERBATIM (PIN 3) */
   needs: NeedsItem[];
   /** false until the human-queue read has answered — honest-unknown vs proven-empty */
   humanQueueProbed: boolean;
-  humanQueue: NeedsItem[];
   hostsDown: HostDown[];
   /** latest ambient stream items for the footer ticker (FR-10), newest last */
   stream: Array<{ tsEmitted: string; sourceSession: string; body: string }>;

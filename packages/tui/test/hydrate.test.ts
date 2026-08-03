@@ -214,10 +214,56 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
   it("maps the human-queue leg and marks it PROBED (proven-empty vs not-yet-known)", async () => {
     const snap = await hydrateSnapshot(fixtureClient());
     expect(snap.humanQueueProbed).toBe(true);
-    expect(snap.humanQueue).toEqual([
-      { kind: "human-routed", target: "human@kernel", detail: "approve slice 11 proof", hostId: "local" },
-      { kind: "human-routed", target: "human@kernel", detail: "remote founder gate", hostId: "mm2-host" },
+    expect(snap.needs.filter((item) => item.source === "agent")).toEqual([
+      { source: "agent", kind: "human-routed", target: "human@kernel", detail: "approve slice 11 proof", hostId: "local" },
+      { source: "agent", kind: "human-routed", target: "human@kernel", detail: "remote founder gate", hostId: "mm2-host" },
     ]);
+  });
+
+  it("preserves the daemon's fleet-wide Needs priority order across agent and derived sources", async () => {
+    const ordered = [
+      { source: "derived", identity: "urgent@rig|stuck|1", summary: "urgent derived", leg: "stuck", where: "rig", priority: "urgent", derived: { kind: "stuck", evidence: "urgent evidence" }, hostId: "local" },
+      { source: "agent", identity: "q-high", summary: "high human", leg: "human-routed", where: "human@kernel", priority: "high", destinationSession: "human@kernel", derived: null, hostId: "local" },
+      { source: "derived", identity: "normal@rig|stuck|2", summary: "normal derived", leg: "stuck", where: "rig", priority: "normal", derived: { kind: "stuck", evidence: "normal evidence" }, hostId: "local" },
+      { source: "agent", identity: "q-low", summary: "low human", leg: "human-routed", where: "human@kernel", priority: "low", destinationSession: "human@kernel", derived: null, hostId: "local" },
+    ];
+    const snap = await hydrateSnapshot(fixtureClient({}, {
+      "/api/review/fleet": {
+        needsYou: { items: ordered },
+        hosts: [{ hostId: "local", status: { hostId: "local", status: "ok" } }],
+      },
+    }));
+
+    expect(snap.needs.map((item) => [item.source, item.detail.split(" — ")[0]])).toEqual([
+      ["derived", "urgent derived"],
+      ["agent", "high human"],
+      ["derived", "normal derived"],
+      ["agent", "low human"],
+    ]);
+  });
+
+  it("keeps a served-first high human gate visible at 140x34 above a long normal-derived tail", async () => {
+    const items = [
+      { source: "agent", identity: "q-high", summary: "HIGH HUMAN APPROVAL", leg: "human-routed", where: "human@kernel", priority: "high", destinationSession: "human@kernel", derived: null, hostId: "local" },
+      ...Array.from({ length: 30 }, (_, index) => ({
+        source: "derived", identity: `normal-${index}@rig|stuck|${index}`, summary: `normal exception ${index}`, leg: "stuck", where: "rig", priority: "normal",
+        derived: { kind: "stuck", evidence: `normal evidence ${index}` }, hostId: "local",
+      })),
+    ];
+    const snap = await hydrateSnapshot(fixtureClient({}, {
+      "/api/review/fleet": {
+        needsYou: { items },
+        hosts: [{ hostId: "local", status: { hostId: "local", status: "ok" } }],
+      },
+    }));
+    const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    view.dispatch({ type: "jump", section: "needs" });
+    const screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
+
+    const humanRow = screen.lines.findIndex((line) => line.includes("HIGH HUMAN APPROVAL"));
+    const firstNormalRow = screen.lines.findIndex((line) => line.includes("normal exception 0"));
+    expect(humanRow).toBeGreaterThanOrEqual(0);
+    expect(humanRow).toBeLessThan(firstNormalRow);
   });
 
   it("marks fleet attention incomplete when any remote host is absent, never proven-empty", async () => {
@@ -231,7 +277,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
       },
     }));
     expect(snap.humanQueueProbed).toBe(false);
-    expect(snap.humanQueue).toEqual([]);
+    expect(snap.needs).toEqual([]);
   });
 
   it("treats a fleet registry error as named incomplete state, never proven-empty", async () => {

@@ -123,7 +123,7 @@ describe("one instance-scoped view-state (PIN 1, FR-12/13)", () => {
   });
 
   it("mutates needs snapshots only through the registry data (no hidden globals)", () => {
-    const localNeeds: NeedsItem[] = [{ kind: "idle-with-work", target: "x", detail: "d" }];
+    const localNeeds: NeedsItem[] = [{ source: "derived", kind: "idle-with-work", target: "x", detail: "d" }];
     const s = createViewState({
       instanceId: "t",
       getSnapshot: () => ({ ...demoSnapshot(), needs: localNeeds }),

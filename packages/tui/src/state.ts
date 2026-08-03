@@ -20,7 +20,7 @@ export function defaultSections(): SectionDef[] {
 }
 
 export function emptySnapshot(): FleetSnapshot {
-  return { hosts: [], specs: [], needs: [], humanQueueProbed: false, humanQueue: [], hostsDown: [], stream: [], readErrors: [] };
+  return { hosts: [], specs: [], needs: [], humanQueueProbed: false, hostsDown: [], stream: [], readErrors: [] };
 }
 
 export interface CreateViewStateOptions {
@@ -461,7 +461,7 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
       }
     } else if (section.name === "needs") {
       for (const item of snap.needs)
-        rows.push({ label: `  ⚑ ${item.kind}: ${item.target}`, action: { type: "jump", section: "needs" } });
+        rows.push({ label: `  ${item.source === "agent" ? "☐" : "⚑"} ${item.kind}: ${item.target}`, action: { type: "jump", section: "needs" } });
     }
   }
   return rows;

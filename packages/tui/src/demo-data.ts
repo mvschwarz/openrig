@@ -42,10 +42,9 @@ export function demoSnapshot(): FleetSnapshot {
     ],
     needs: [
       // shaped like served composeNeedsYou derived items: kind + summary/evidence verbatim
-      { kind: "stuck", target: "dev50-guard@openrig-build", detail: "dev50.guard looks stuck — idle 42m >= 30m default · holds 1" },
+      { source: "derived", kind: "stuck", target: "dev50-guard@openrig-build", detail: "dev50.guard looks stuck — idle 42m >= 30m default · holds 1" },
     ],
     humanQueueProbed: true,
-    humanQueue: [],
     // host-down is composed BESIDE the items (never projected into the item shape)
     hostsDown: [{ hostId: "mm2-host", status: "unreachable", error: "read timed out" }],
     stream: [
