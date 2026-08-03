@@ -1,5 +1,5 @@
 import { shellQuote } from "../adapters/shell-quote.js";
-import { yoloEnabled } from "../adapters/yolo-mode.js";
+import { codexPostureArg } from "../adapters/yolo-mode.js";
 
 // L3 adds `attention_required` for the Claude resume-selection prompt proxy.
 // Distinct from `inconclusive` (we don't know yet) and `failed` (terminal
@@ -48,18 +48,12 @@ export function buildCodexResumeCore(
   useLast?: boolean,
   extraArgs?: string,
 ): string {
-  // OPR.0.4.8.2 agnostic rip-out (Codex floor): the no-profile branch NO LONGER forces
-  // `-s danger-full-access` / `-a on-request`. Codex's own no-flags default is restricted-fs +
-  // OnRequest approval (the workspace-only floor the founder selected — confirmed via
-  // `codex doctor`), so "setting nothing" IS the floor. A named config profile still governs itself.
-  // OPR.0.4.8.2: YOLO (opt-in) forces the full-bypass launch flag on EVERY seat (overriding even a
-  // named profile); otherwise a named profile governs itself and the no-profile case is the harness
-  // default (no forced flags). Launch-flag surface only.
-  const profileOrPosture = yoloEnabled()
-    ? " --dangerously-bypass-approvals-and-sandbox"
-    : codexConfigProfile
-      ? ` -p ${shellQuote(codexConfigProfile)}`
-      : "";
+  // OPR.0.4.8.2: the RESUME path uses the SAME posture decision (codexPostureArg) as fresh/fork.
+  // YOLO forces full-bypass (overriding even a named profile); otherwise a named profile governs
+  // itself and the no-profile case is the harness-default floor (no forced -a/-s; Codex's no-flags
+  // default is restricted-fs + OnRequest, the workspace-only floor confirmed via `codex doctor`).
+  const profileArg = codexConfigProfile ? ` -p ${shellQuote(codexConfigProfile)}` : "";
+  const profileOrPosture = codexPostureArg(profileArg);
   const middle = extraArgs ? `${extraArgs} ` : "";
   const tokenArg = useLast ? "--last" : shellQuote(resumeToken);
   return `codex${profileOrPosture} resume ${middle}${tokenArg}`;
