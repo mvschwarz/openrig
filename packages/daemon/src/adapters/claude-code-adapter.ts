@@ -2,6 +2,7 @@ import nodePath from "node:path";
 import fs from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import type { TmuxAdapter } from "./tmux.js";
+import { yoloEnabled } from "./yolo-mode.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
   InstalledResource, ProjectionResult, StartupDeliveryResult, ReadinessResult,
@@ -209,7 +210,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       return { ok: false, error: "resumeToken and forkSource are mutually exclusive — pick one" };
     }
 
-    const permissionMode = "--permission-mode acceptEdits";
+    // OPR.0.4.8.2: the acceptEdits floor by default; YOLO mode (opt-in) swaps in the full-bypass
+    // launch flag. Launch-flag surface only — no config-file writes on either path.
+    const permissionMode = yoloEnabled() ? "--dangerously-skip-permissions" : "--permission-mode acceptEdits";
 
     // Fork branch: build `claude --resume <parent> --fork-session --name <seat>`
     // and capture the NEW post-fork session id. The parent token is NEVER

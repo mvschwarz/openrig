@@ -5,6 +5,7 @@ import os from "node:os";
 import { execFileSync } from "node:child_process";
 import Database from "better-sqlite3";
 import type { TmuxAdapter } from "./tmux.js";
+import { yoloEnabled } from "./yolo-mode.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
   InstalledResource, ProjectionResult, StartupDeliveryResult, ReadinessResult,
@@ -362,11 +363,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
     const cmd = opts.resumeToken
       ? buildCodexResumeCore(opts.resumeToken, profile, false, queueStateDirArg.trim() || undefined)
-      : profile
-        ? `codex${profileArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`
-        : // OPR.0.4.8.2 agnostic rip-out (Codex floor): no forced -a/-s. Codex's no-flags default is
-          // restricted-fs + OnRequest (the workspace-only floor, confirmed via `codex doctor`).
-          `codex -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`;
+      : yoloEnabled()
+        ? // OPR.0.4.8.2 YOLO (opt-in): full-bypass on every seat (overrides even a named profile).
+          `codex -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg} --dangerously-bypass-approvals-and-sandbox`
+        : profile
+          ? `codex${profileArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`
+          : // OPR.0.4.8.2 agnostic rip-out (Codex floor): no forced -a/-s. Codex's no-flags default
+            // is restricted-fs + OnRequest (the workspace-only floor, confirmed via `codex doctor`).
+            `codex -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`;
 
     const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
     if (!textResult.ok) {
