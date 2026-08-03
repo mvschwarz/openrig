@@ -49,9 +49,9 @@ export function buildCodexResumeCore(
   extraArgs?: string,
 ): string {
   // OPR.0.4.8.2: the RESUME path uses the SAME posture decision (codexPostureArg) as fresh/fork.
-  // YOLO forces full-bypass (overriding even a named profile); otherwise a named profile governs
-  // itself and the no-profile case is the harness-default floor (no forced -a/-s; Codex's no-flags
-  // default is restricted-fs + OnRequest, the workspace-only floor confirmed via `codex doctor`).
+  // YOLO forces -s danger-full-access (overriding even a named profile); otherwise a named profile
+  // governs itself and the no-profile case is the explicit -s workspace-write floor flag (the
+  // no-flags default does NOT grant the --add-dir writable roots managed seats pass).
   const profileArg = codexConfigProfile ? ` -p ${shellQuote(codexConfigProfile)}` : "";
   const profileOrPosture = codexPostureArg(profileArg);
   const middle = extraArgs ? `${extraArgs} ` : "";

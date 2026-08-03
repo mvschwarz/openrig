@@ -191,9 +191,9 @@ describe("Node Inventory Projection", () => {
     expect(entry?.resumeCommand).toBeNull();
     expect(entry?.recoveryGuidance).toBeNull(); // relocated to detail
     const detail = getNodeDetail(db, "rig-2", "dev.qa");
-    expect(detail?.recoveryGuidance?.summary).toContain("codex resume --last");
-    expect(detail?.recoveryGuidance?.summary).toContain("harness default");
-    expect(detail?.recoveryGuidance?.commands).toEqual(["cd /workspace/app", "codex resume --last"]);
+    expect(detail?.recoveryGuidance?.summary).toContain("codex -s workspace-write resume --last");
+    expect(detail?.recoveryGuidance?.summary).toContain("explicit -s workspace-write floor flag");
+    expect(detail?.recoveryGuidance?.commands).toEqual(["cd /workspace/app", "codex -s workspace-write resume --last"]);
     expect(detail?.recoveryGuidance?.notes).toContain("Use workspace and recent prompt text to identify the right conversation.");
     expect(detail?.recoveryGuidance?.notes).toContain("If the identity anchor was captured, the picker may include: dev-qa@test-rig");
   });

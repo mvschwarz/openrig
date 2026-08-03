@@ -58,13 +58,13 @@ describe("CodexResumeAdapter", () => {
 
       expect(sendText).toHaveBeenCalledOnce();
       expect(sendText.mock.calls[0]![0]).toBe("r99-demo1-impl");
-      expect(sendText.mock.calls[0]![1]).toBe("codex resume 'uuid-123'");
+      expect(sendText.mock.calls[0]![1]).toBe("codex -s workspace-write resume 'uuid-123'");
       expect(sendKeys).toHaveBeenCalledOnce();
       expect(sendKeys.mock.calls[0]![1]).toEqual(["Enter"]);
       expect(sendText.mock.invocationCallOrder[0]).toBeLessThan(sendKeys.mock.invocationCallOrder[0]!);
     });
 
-    it("codex_last: sendText posture-preserving codex resume --last", async () => {
+    it("codex_last: sendText posture-preserving codex -s workspace-write resume --last", async () => {
       const sendText = vi.fn(async () => ({ ok: true as const }));
       const sendKeys = vi.fn(async () => ({ ok: true as const }));
       const tmux = mockTmux({ sendText, sendKeys });
@@ -73,7 +73,7 @@ describe("CodexResumeAdapter", () => {
       await adapter.resume("r99-demo1-impl", "codex_last", null, "/repo");
 
       expect(sendText).toHaveBeenCalledOnce();
-      expect(sendText.mock.calls[0]![1]).toBe("codex resume --last");
+      expect(sendText.mock.calls[0]![1]).toBe("codex -s workspace-write resume --last");
       expect(sendKeys).toHaveBeenCalledOnce();
     });
 
@@ -112,7 +112,7 @@ describe("CodexResumeAdapter", () => {
 
       await adapter.resume("r99-demo1-impl", "codex_id", "uuid; rm -rf /", "/repo");
 
-      expect(sendText.mock.calls[0]![1]).toBe("codex resume 'uuid; rm -rf /'");
+      expect(sendText.mock.calls[0]![1]).toBe("codex -s workspace-write resume 'uuid; rm -rf /'");
     });
 
     it("profile-bearing resume uses -p flag after preflight passes", async () => {
@@ -281,7 +281,7 @@ describe("CodexResumeAdapter", () => {
     // Closes the lifecycle scenario matrix slice's documented Codex deferral.
     it("probe says attention_required (codex auth-refusal) -> { ok: false, code: 'attention_required', evidence }", async () => {
       const refusalPane = [
-        "$ codex resume 019d-token",
+        "$ codex -s workspace-write resume 019d-token",
         "Error: Your access token could not be refreshed because you have since",
         "logged out or signed in to another account. Please sign in again.",
       ].join("\n");

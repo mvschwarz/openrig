@@ -147,8 +147,8 @@ function computeRecoveryGuidance(input: {
 
     return {
       summary: resumeToken
-        ? "Try native Codex resume first; Codex uses its harness default (restricted fs + on-request) unless a named config profile is present."
-        : "No stored Codex resume token. Try codex resume --last; Codex uses its harness default unless a named config profile is present.",
+        ? "Try native Codex resume first; the managed launch sets the explicit -s workspace-write floor flag unless a named config profile is present."
+        : "No stored Codex resume token. Try codex -s workspace-write resume --last; the managed launch sets the explicit -s workspace-write floor flag unless a named config profile is present.",
       commands,
       notes,
     };

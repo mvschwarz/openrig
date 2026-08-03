@@ -75,20 +75,20 @@ describe("OPR.0.4.8.2 YOLO mode — opt-in, default OFF, launch-flag surface onl
     expect(on).not.toContain("--permission-mode acceptEdits");
   });
 
-  it("Codex resume: OFF -> harness-default floor (no bypass); ON -> --dangerously-bypass-approvals-and-sandbox", () => {
+  it("Codex resume: OFF -> explicit -s workspace-write floor flag; ON -> -s danger-full-access", () => {
     delete process.env.OPENRIG_YOLO;
     const off = buildCodexResumeCore("tok-1", null, false);
-    expect(off).toBe("codex resume 'tok-1'");
+    expect(off).toBe("codex -s workspace-write resume 'tok-1'");
 
     process.env.OPENRIG_YOLO = "1";
     const on = buildCodexResumeCore("tok-1", null, false);
-    expect(on).toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(on).toContain("-s danger-full-access");
   });
 
-  it("Codex resume ON overrides even a named config profile (every seat full-bypass)", () => {
+  it("Codex resume ON overrides even a named config profile (every seat -s danger-full-access)", () => {
     process.env.OPENRIG_YOLO = "1";
     const on = buildCodexResumeCore("tok-1", "my-profile", false);
-    expect(on).toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(on).toContain("-s danger-full-access");
     expect(on).not.toContain("-p 'my-profile'");
   });
 
@@ -110,7 +110,7 @@ describe("OPR.0.4.8.2 YOLO mode — opt-in, default OFF, launch-flag surface onl
     expect(on).not.toContain("--permission-mode acceptEdits");
   });
 
-  it("Codex native FORK carries the posture: OFF no bypass / ON --dangerously-bypass-approvals-and-sandbox", async () => {
+  it("Codex native FORK carries the posture: OFF -s workspace-write / ON -s danger-full-access", async () => {
     const codexFs = {
       readFile: () => { throw new Error("nf"); },
       writeFile: () => {},
@@ -126,20 +126,21 @@ describe("OPR.0.4.8.2 YOLO mode — opt-in, default OFF, launch-flag surface onl
     await new CodexRuntimeAdapter({ tmux: tmuxOff, fsOps: codexFs }).launchHarness(makeBinding(), forkOpts);
     const off = (tmuxOff.sendText as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
     expect(off).toContain("fork");
-    expect(off).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(off).toContain("-s workspace-write");
+    expect(off).not.toContain("-s danger-full-access");
 
     process.env.OPENRIG_YOLO = "1";
     const tmuxOn = mockTmux();
     await new CodexRuntimeAdapter({ tmux: tmuxOn, fsOps: codexFs }).launchHarness(makeBinding(), forkOpts);
     const on = (tmuxOn.sendText as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
-    expect(on).toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(on).toContain("-s danger-full-access");
     expect(on).toContain("fork");
   });
 
-  it("codexPostureArg: OFF passes the profile arg through; ON forces the bypass flag", () => {
+  it("codexPostureArg: OFF no-profile -> explicit -s workspace-write floor; OFF profile passes through; ON -> -s danger-full-access", () => {
     expect(codexPostureArg(" -p 'x'", {} as NodeJS.ProcessEnv)).toBe(" -p 'x'");
-    expect(codexPostureArg("", {} as NodeJS.ProcessEnv)).toBe("");
-    expect(codexPostureArg(" -p 'x'", { OPENRIG_YOLO: "1" } as NodeJS.ProcessEnv)).toBe(" --dangerously-bypass-approvals-and-sandbox");
+    expect(codexPostureArg("", {} as NodeJS.ProcessEnv)).toBe(" -s workspace-write");
+    expect(codexPostureArg(" -p 'x'", { OPENRIG_YOLO: "1" } as NodeJS.ProcessEnv)).toBe(" -s danger-full-access");
   });
 
   it("piTrust (RESOURCE TRUST, not permission policy): OFF keeps configured/no-approve; ON forces approve", () => {
