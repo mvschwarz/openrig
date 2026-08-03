@@ -63,32 +63,28 @@ function contentOf(row: ExplorerRow, kind: string): string {
   return stripped;
 }
 
-/** meta candidates, RICHEST first — the renderer picks the first that fits
- * WITHOUT sacrificing row identity (names never become ambiguous to make
- * room for telemetry) */
-function metaOf(row: ExplorerRow, snap: FleetSnapshot): string[] {
+function metaOf(row: ExplorerRow, snap: FleetSnapshot): string {
   const parsed = parseKey(row.key);
-  if (!parsed) return [];
+  if (!parsed) return "";
   if (parsed.kind === "agent") {
     const [host, rig, pod, ...name] = parsed.parts;
     const agent = snap.hosts
       .find((h) => h.name === host)?.rigs.find((r) => r.name === rig)
       ?.pods.find((p) => p.name === pod)?.agents.find((a) => a.name === name.join("/"));
-    if (!agent) return [];
-    // Locked meta = runtime · ctx% (mini-req 1). The runtime's DISPLAY form is
-    // its first hyphen token — the literal mockups render exactly "claude 18%"
-    // for claude-code seats (tui-ascii-aesthetic.html) — served data unchanged.
-    // Honest-unknown: no served ctx → an explicit —, never a fabricated value.
+    if (!agent) return "";
+    // LOCKED meta form (mini-req 1, guard-ruled): ALWAYS `runtime · ctx%` —
+    // never context-only. The runtime's DISPLAY form is its first hyphen
+    // token (the literal mockups render "claude" for claude-code seats);
+    // honest-unknown ctx renders `runtime · —`, never a fabricated value.
     const runtimeToken = agent.runtime.split("-")[0] || agent.runtime;
-    const ctx = agent.context == null ? "—" : `${agent.context}%`;
-    return [`${runtimeToken} ${ctx}`, ctx];
+    return `${runtimeToken} · ${agent.context == null ? "—" : `${agent.context}%`}`;
   }
   if (parsed.kind === "pod") {
     const [host, rig, pod] = parsed.parts;
     const found = snap.hosts.find((h) => h.name === host)?.rigs.find((r) => r.name === rig)?.pods.find((p) => p.name === pod);
-    return found ? [String(found.agents.length)] : [];
+    return found ? String(found.agents.length) : "";
   }
-  return [];
+  return "";
 }
 
 /**
@@ -124,19 +120,14 @@ export function navigatorLabels(rows: ExplorerRow[], snap: FleetSnapshot, width:
     const branch = isLast[i] ? "└─ " : "├─ ";
     const parsed = parseKey(row.key)!;
     let content = contentOf(row, parsed.kind);
-    const candidates = metaOf(row, snap);
+    const meta = metaOf(row, snap);
     const prefix = ` ${guides}${branch}`;
-    if (candidates.length === 0) return `${prefix}${content}`;
-    // IDENTITY-FIRST width policy: pick the richest meta that fits beside the
-    // FULL name (runtime · ctx% where geometry allows, ctx% otherwise); only
-    // when even the leanest meta cannot fit does the name truncate with … —
-    // rows must never become ambiguous to make room for telemetry.
-    const fits = candidates.find((m) => prefix.length + content.length + 1 + m.length <= width);
-    const meta = fits ?? candidates.at(-1)!;
-    if (!fits) {
-      const contentMax = width - prefix.length - meta.length - 1;
-      content = `${content.slice(0, Math.max(contentMax - 1, 0))}…`;
-    }
+    if (!meta) return `${prefix}${content}`;
+    // LOCKED width policy (guard-ruled): the complete right-aligned meta is
+    // ALWAYS preserved; an over-long display name truncates with … instead
+    // of the meta ever dropping its runtime.
+    const contentMax = width - prefix.length - meta.length - 1;
+    if (content.length > contentMax) content = `${content.slice(0, Math.max(contentMax - 1, 0))}…`;
     const gap = Math.max(width - prefix.length - content.length - meta.length, 1);
     return `${prefix}${content}${" ".repeat(gap)}${meta}`;
   });

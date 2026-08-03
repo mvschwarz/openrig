@@ -50,35 +50,45 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     s.dispatch({ type: "drill", resource: "pod", name: "dev50", target: { host: "vm-host", rig: "openrig-build" } });
     screen = renderScreen(s.get(), snap, { cols: 120, rows: 32 });
     const pane = explorerPane(screen.lines);
-    expect(pane.find((l) => l.includes("dev50") && !l.includes("driver") && !l.includes("guard") && !l.includes("qa"))).toContain("▾");
-    expect(pane.some((l) => l.includes("dev50.driver"))).toBe(true);
+    expect(pane.find((l) => l.includes("dev50") && !l.includes("●"))).toContain("▾");
+    // the agent rows appear (identity by ROW MODEL key — display names may
+    // truncate under the locked meta-always policy)
+    expect(screen.explorerRows.some((r) => r.key === "agent:vm-host/openrig-build/dev50/dev50.driver")).toBe(true);
   });
 
-  it("agent meta is right-aligned runtime · ctx% where it fits, ctx% otherwise — IDENTITY-FIRST (locked mini-req + guard finding 3)", () => {
-    // demo names are long: full identity is kept, the meta degrades to ctx-only
+  it("agent meta is ALWAYS the locked `runtime · ctx%` form — typical name truncates rather than the meta degrading (guard residual)", () => {
     const s = makeStore();
     s.dispatch({ type: "drill", resource: "pod", name: "dev50", target: { host: "vm-host", rig: "openrig-build" } });
     const pane = explorerPane(renderScreen(s.get(), snap, { cols: 120, rows: 32 }).lines);
-    const driver = pane.find((l) => l.includes("dev50.driver"))!;
-    expect(driver.trimEnd()).toMatch(/62%$/); // full name preserved, ctx at the edge
-    const qa = pane.find((l) => l.includes("dev50.qa"))!;
-    expect(qa.trimEnd()).toMatch(/—$/); // ctx null → honest-unknown
+    // typical long name: the NAME yields with …; the meta stays complete
+    const driver = pane.find((l) => l.trimEnd().endsWith("claude · 62%"))!;
+    expect(driver).toBeDefined();
+    expect(driver).toMatch(/● dev/); // still recognizably the agent row
+    expect(driver).toMatch(/…/);
+  });
 
-    // a short name leaves room: the FULL runtime · ctx meta renders (the
-    // mockup's "claude 18%" display form for a claude-code seat)
+  it("null context renders the honest `runtime · —` — runtime never drops, unknown never fabricates", () => {
+    const s = makeStore();
+    s.dispatch({ type: "drill", resource: "pod", name: "dev50", target: { host: "vm-host", rig: "openrig-build" } });
+    const pane = explorerPane(renderScreen(s.get(), snap, { cols: 120, rows: 32 }).lines);
+    expect(pane.some((l) => l.trimEnd().endsWith("codex · —"))).toBe(true); // demo: dev50.qa ctx null
+  });
+
+  it("a short name renders untruncated beside the full meta (mockup display form, middle dot included)", () => {
     const shortSnap = {
       ...snap,
       hosts: [{ name: "h", reachable: true, rigs: [{ name: "r", pods: [{ name: "p", agents: [
         { name: "ok", runtime: "claude-code", spec: "", context: 5, tokens: null, status: "active", live: true },
       ] }] }] }],
     };
-    const s2 = createViewState({ instanceId: "nav-short", getSnapshot: () => shortSnap });
-    s2.dispatch({ type: "drill", resource: "pod", name: "p", target: { host: "h", rig: "r" } });
-    const shortPane = explorerPane(renderScreen(s2.get(), shortSnap, { cols: 120, rows: 32 }).lines);
-    expect(shortPane.find((l) => l.includes("● ok"))!.trimEnd()).toMatch(/claude 5%$/);
+    const s = createViewState({ instanceId: "nav-short", getSnapshot: () => shortSnap });
+    s.dispatch({ type: "drill", resource: "pod", name: "p", target: { host: "h", rig: "r" } });
+    const row = explorerPane(renderScreen(s.get(), shortSnap, { cols: 120, rows: 32 }).lines).find((l) => l.includes("● ok"))!;
+    expect(row).not.toMatch(/…/);
+    expect(row.trimEnd()).toMatch(/● ok\s+claude · 5%$/);
   });
 
-  it("only an identity too long for even the leanest meta truncates with … — meta stays complete at the edge", () => {
+  it("an extreme name still truncates with … while the whole meta survives at the edge", () => {
     const longSnap = {
       ...snap,
       hosts: [{ name: "h", reachable: true, rigs: [{ name: "r", pods: [{ name: "p", agents: [
@@ -87,9 +97,21 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     };
     const s = createViewState({ instanceId: "nav-long", getSnapshot: () => longSnap });
     s.dispatch({ type: "drill", resource: "pod", name: "p", target: { host: "h", rig: "r" } });
-    const row = explorerPane(renderScreen(s.get(), longSnap, { cols: 120, rows: 32 }).lines).find((l) => l.includes("an-extre"))!;
+    const row = explorerPane(renderScreen(s.get(), longSnap, { cols: 120, rows: 32 }).lines).find((l) => l.includes("● an-"))!;
     expect(row).toMatch(/…/);
-    expect(row.trimEnd()).toMatch(/9%$/);
+    expect(row.trimEnd()).toMatch(/codex · 9%$/);
+  });
+
+  it("the WHOLE right-aligned meta paints dim as one run — runtime, middle dot, and value together", () => {
+    const s = makeStore();
+    s.dispatch({ type: "drill", resource: "pod", name: "dev50", target: { host: "vm-host", rig: "openrig-build" } });
+    const screen = renderScreen(s.get(), snap, { cols: 120, rows: 32 });
+    const styled = stylizeLines(screen, createStyle("truecolor"));
+    const i = screen.lines.findIndex((l) => l.slice(0, 30).trimEnd().endsWith("claude · 62%"));
+    expect(i).toBeGreaterThanOrEqual(0);
+    // the dim SGR opens immediately before the runtime token, covering the full meta
+    expect(styled[i]).toMatch(/\x1b\[38;2;109;116;128mclaude · 62%\x1b\[0m/);
+    styled.forEach((line, j) => expect(stripAnsi(line), `line ${j}`).toBe(screen.lines[j]));
   });
 
   it("an expanded namespaced spec folder renders its child ONE level deeper, never a sibling (guard finding 2)", () => {
@@ -145,8 +167,12 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     const rows = computeExplorerRows(s.get(), snap);
     expect(rows[s.get().selection]?.key).toBe("agent:vm-host/openrig-build/dev50/dev50.guard");
     const screen = renderScreen(s.get(), snap, { cols: 120, rows: 32 });
+    // the selected ROW is the drilled agent (row-model identity); its display
+    // line carries the marker and the agent's own locked meta at the edge
+    const selectedRow = screen.explorerRows.find((r) => r.y === screen.lines.findIndex((l) => l.startsWith("›")) + 1);
+    expect(selectedRow?.key).toBe("agent:vm-host/openrig-build/dev50/dev50.guard");
     const selectedLine = screen.lines.find((l) => l.startsWith("›"))!;
-    expect(selectedLine).toContain("dev50.guard");
+    expect(selectedLine.slice(0, 30).trimEnd()).toMatch(/codex · 31%$/); // demo: guard ctx 31
   });
 
   it("stylize keeps the strip-invariant over the re-skinned labels", () => {

@@ -39,7 +39,9 @@ function paintExplorer(text: string, s: Style, focused: boolean): string {
 /** row-body treatment (VISUAL-TARGETS: rig teal · pod dim · meta faint ·
  * names default ink); the right-aligned meta column always dims */
 function paintExplorerBody(text: string, s: Style): string {
-  const meta = text.match(/^(.*?\S)( {2,})([0-9]+%|—|[0-9]+)$/);
+  // the right-aligned meta dims as a WHOLE — `runtime · ctx%` (or honest
+  // `runtime · —`) and bare pod counts alike, never just the trailing token
+  const meta = text.match(/^(.*?\S)( +)((?:\S+ · )?(?:[0-9]+%|—)|[0-9]+)$/);
   if (meta) return paintExplorerBody(meta[1]!, s) + meta[2]! + s.paint("dim", meta[3]!);
   if (text.includes("⚑")) return s.paint("warn", text);
   if (/\(unreachable\)/.test(text)) {
