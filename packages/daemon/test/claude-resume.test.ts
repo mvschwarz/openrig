@@ -61,7 +61,8 @@ describe("ClaudeResumeAdapter", () => {
 
       expect(sendText).toHaveBeenCalledOnce();
       expect(sendText.mock.calls[0]![0]).toBe("r99-demo1-lead");
-      expect(sendText.mock.calls[0]![1]).toBe("claude --resume 'my-session'");
+      // OPR.0.4.8.2: restore now carries the launch-posture floor (acceptEdits), same as fresh.
+      expect(sendText.mock.calls[0]![1]).toBe("claude --permission-mode acceptEdits --resume 'my-session'");
       expect(sendKeys).toHaveBeenCalledOnce();
       expect(sendKeys.mock.calls[0]![0]).toBe("r99-demo1-lead");
       expect(sendKeys.mock.calls[0]![1]).toEqual(["Enter"]);
@@ -104,7 +105,7 @@ describe("ClaudeResumeAdapter", () => {
 
       await adapter.resume("r99-demo1-lead", "claude_name", "tok; rm -rf /", "/repo");
 
-      expect(sendText.mock.calls[0]![1]).toBe("claude --resume 'tok; rm -rf /'");
+      expect(sendText.mock.calls[0]![1]).toBe("claude --permission-mode acceptEdits --resume 'tok; rm -rf /'");
     });
 
     it("sendKeys(Enter) fails after sendText -> C-c sent to clear buffer", async () => {
@@ -237,7 +238,7 @@ describe("ClaudeResumeAdapter", () => {
       }
       // Explicitly: only the launch command + Enter were sent.
       expect(sendText).toHaveBeenCalledTimes(1);
-      expect(sendText.mock.calls[0]![1]).toContain("claude --resume");
+      expect(sendText.mock.calls[0]![1]).toContain("claude --permission-mode acceptEdits --resume");
       expect(sendKeys).toHaveBeenCalledTimes(1);
       expect(sendKeys.mock.calls[0]![1]).toEqual(["Enter"]);
     });

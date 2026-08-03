@@ -12,6 +12,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { randomUUID } from "node:crypto";
 import type { TmuxAdapter } from "./tmux.js";
 import type { ResumeResult } from "./claude-resume.js";
+import { piTrust } from "./yolo-mode.js";
 import {
   piSeatPaths, parsePiRunnerState, buildPiRunnerCommand, buildPendingRunnerState,
 } from "./pi-runner-protocol.js";
@@ -87,7 +88,9 @@ export class PiResumeAdapter {
       // The model declaration must survive resume: the runner's provider-key
       // allowlist keys off the declared provider (VM leg finding).
       model: model ?? undefined,
-      trust: this.options.trustPosture ?? "no-approve",
+      // OPR.0.4.8.2: Pi RESOURCE TRUST (not a permission policy). Same decision as the launch path:
+      // YOLO forces `approve` on every restored seat; otherwise the configured posture.
+      trust: piTrust(this.options.trustPosture),
       sessionFile,
       launchId,
     });

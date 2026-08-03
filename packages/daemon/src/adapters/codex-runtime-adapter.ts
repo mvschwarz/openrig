@@ -5,7 +5,7 @@ import os from "node:os";
 import { execFileSync } from "node:child_process";
 import Database from "better-sqlite3";
 import type { TmuxAdapter } from "./tmux.js";
-import { yoloEnabled } from "./yolo-mode.js";
+import { codexPostureArg } from "./yolo-mode.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
   InstalledResource, ProjectionResult, StartupDeliveryResult, ReadinessResult,
@@ -341,7 +341,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       if (!parentId) {
         return { ok: false, error: "codex fork: forkSource.value is required (parent native_id)" };
       }
-      const cmd = `codex${profileArg} fork${queueStateDirArg} ${shellQuote(parentId)}`;
+      // OPR.0.4.8.2: the FORK path uses the SAME posture decision (codexPostureArg) — YOLO forces
+      // full-bypass on every seat; otherwise the named profile (or the harness-default floor).
+      const cmd = `codex${codexPostureArg(profileArg)} fork${queueStateDirArg} ${shellQuote(parentId)}`;
       const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
@@ -361,16 +363,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return { ok: true, resumeToken: threadId, resumeType: "codex_id" };
     }
 
+    // OPR.0.4.8.2: one posture decision (codexPostureArg) for the fresh launch too — YOLO forces
+    // full-bypass (overrides even a named profile); otherwise the named profile, or the harness-
+    // default floor (no forced -a/-s; Codex's no-flags default is restricted-fs + OnRequest, the
+    // workspace-only floor confirmed via `codex doctor`).
     const cmd = opts.resumeToken
       ? buildCodexResumeCore(opts.resumeToken, profile, false, queueStateDirArg.trim() || undefined)
-      : yoloEnabled()
-        ? // OPR.0.4.8.2 YOLO (opt-in): full-bypass on every seat (overrides even a named profile).
-          `codex -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg} --dangerously-bypass-approvals-and-sandbox`
-        : profile
-          ? `codex${profileArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`
-          : // OPR.0.4.8.2 agnostic rip-out (Codex floor): no forced -a/-s. Codex's no-flags default
-            // is restricted-fs + OnRequest (the workspace-only floor, confirmed via `codex doctor`).
-            `codex -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`;
+      : `codex${codexPostureArg(profileArg)} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`;
 
     const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
     if (!textResult.ok) {

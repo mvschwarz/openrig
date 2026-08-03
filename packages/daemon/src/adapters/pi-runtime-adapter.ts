@@ -12,7 +12,7 @@
 import nodePath from "node:path";
 import { randomUUID } from "node:crypto";
 import type { TmuxAdapter } from "./tmux.js";
-import { yoloEnabled } from "./yolo-mode.js";
+import { piTrust } from "./yolo-mode.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
   InstalledResource, ProjectionResult, StartupDeliveryResult, ReadinessResult,
@@ -239,8 +239,9 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       stateRoot: this.stateRoot,
       cwd: binding.cwd,
       model: binding.model,
-      // OPR.0.4.8.2 YOLO (opt-in): forces --approve on every seat; otherwise the conservative floor.
-      trust: yoloEnabled() ? "approve" : this.trustPosture,
+      // OPR.0.4.8.2: Pi RESOURCE TRUST (not a permission policy). YOLO forces `approve` on every
+      // seat; otherwise the configured posture. Same decision used on the restore path (pi-resume).
+      trust: piTrust(this.trustPosture),
       sessionFile: opts.resumeToken,
       forkRef,
       launchId,

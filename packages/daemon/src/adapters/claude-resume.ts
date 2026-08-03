@@ -1,6 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import type { TmuxAdapter } from "./tmux.js";
 import { shellQuote } from "./shell-quote.js";
+import { claudePostureFlag } from "./yolo-mode.js";
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
 
 export type ResumeResult =
@@ -42,7 +43,9 @@ export class ClaudeResumeAdapter {
       return { ok: false, code: "no_resume", message: "Claude resume not available" };
     }
 
-    const cmd = `claude --resume ${shellQuote(resumeToken!)}`;
+    // OPR.0.4.8.2: the RESTORE path uses the SAME launch-posture decision as fresh launch (the
+    // unconditional acceptEdits floor when OFF; the full bypass when YOLO is ON) — every seat.
+    const cmd = `claude ${claudePostureFlag()} --resume ${shellQuote(resumeToken!)}`;
 
     const textResult = await this.tmux.sendText(tmuxSessionName, cmd);
     if (!textResult.ok) {

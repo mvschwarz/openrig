@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { yoloEnabled } from "../src/adapters/yolo-mode.js";
+import { yoloEnabled, codexPostureArg, piTrust } from "../src/adapters/yolo-mode.js";
 import { buildCodexResumeCore } from "../src/domain/native-resume-probe.js";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
+import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
+import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
@@ -88,5 +90,62 @@ describe("OPR.0.4.8.2 YOLO mode — opt-in, default OFF, launch-flag surface onl
     const on = buildCodexResumeCore("tok-1", "my-profile", false);
     expect(on).toContain("--dangerously-bypass-approvals-and-sandbox");
     expect(on).not.toContain("-p 'my-profile'");
+  });
+
+  // ── The three managed launch paths the fresh-only wiring missed (guard finding) ──
+
+  it("Claude RESTORE (ClaudeResumeAdapter) carries the posture flag: OFF floor / ON bypass", async () => {
+    delete process.env.OPENRIG_YOLO;
+    const tmuxOff = mockTmux();
+    await new ClaudeResumeAdapter(tmuxOff).resume("r01-impl", "claude_name", "my-session", "/repo");
+    const off = (tmuxOff.sendText as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
+    expect(off).toContain("--permission-mode acceptEdits");
+    expect(off).toContain("--resume 'my-session'");
+
+    process.env.OPENRIG_YOLO = "1";
+    const tmuxOn = mockTmux();
+    await new ClaudeResumeAdapter(tmuxOn).resume("r01-impl", "claude_name", "my-session", "/repo");
+    const on = (tmuxOn.sendText as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
+    expect(on).toContain("--dangerously-skip-permissions");
+    expect(on).not.toContain("--permission-mode acceptEdits");
+  });
+
+  it("Codex native FORK carries the posture: OFF no bypass / ON --dangerously-bypass-approvals-and-sandbox", async () => {
+    const codexFs = {
+      readFile: () => { throw new Error("nf"); },
+      writeFile: () => {},
+      exists: () => false,
+      mkdirp: () => {},
+      copyFile: () => {},
+      listFiles: () => [],
+    } as unknown as ConstructorParameters<typeof CodexRuntimeAdapter>[0]["fsOps"];
+    const forkOpts = { name: "dev-impl@test-rig", forkSource: { kind: "native_id" as const, value: "parent-123" } };
+
+    delete process.env.OPENRIG_YOLO;
+    const tmuxOff = mockTmux();
+    await new CodexRuntimeAdapter({ tmux: tmuxOff, fsOps: codexFs }).launchHarness(makeBinding(), forkOpts);
+    const off = (tmuxOff.sendText as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
+    expect(off).toContain("fork");
+    expect(off).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+
+    process.env.OPENRIG_YOLO = "1";
+    const tmuxOn = mockTmux();
+    await new CodexRuntimeAdapter({ tmux: tmuxOn, fsOps: codexFs }).launchHarness(makeBinding(), forkOpts);
+    const on = (tmuxOn.sendText as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
+    expect(on).toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(on).toContain("fork");
+  });
+
+  it("codexPostureArg: OFF passes the profile arg through; ON forces the bypass flag", () => {
+    expect(codexPostureArg(" -p 'x'", {} as NodeJS.ProcessEnv)).toBe(" -p 'x'");
+    expect(codexPostureArg("", {} as NodeJS.ProcessEnv)).toBe("");
+    expect(codexPostureArg(" -p 'x'", { OPENRIG_YOLO: "1" } as NodeJS.ProcessEnv)).toBe(" --dangerously-bypass-approvals-and-sandbox");
+  });
+
+  it("piTrust (RESOURCE TRUST, not permission policy): OFF keeps configured/no-approve; ON forces approve", () => {
+    expect(piTrust("no-approve", {} as NodeJS.ProcessEnv)).toBe("no-approve");
+    expect(piTrust(undefined, {} as NodeJS.ProcessEnv)).toBe("no-approve");
+    expect(piTrust("approve", {} as NodeJS.ProcessEnv)).toBe("approve");
+    expect(piTrust("no-approve", { OPENRIG_YOLO: "1" } as NodeJS.ProcessEnv)).toBe("approve");
   });
 });
