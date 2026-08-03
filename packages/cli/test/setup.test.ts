@@ -46,14 +46,11 @@ function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCod
 }
 
 function expectRuntimeConfigDisclosure(result: SetupResult): void {
-  expect(result.runtimeConfig).toHaveLength(6);
+  // OPR.0.4.8.2 agnostic rip-out: the ~/.claude/settings.json disclosure (the global allow-list,
+  // C2) is REMOVED — OpenRig no longer writes that file. Disclosure drops from 6 to 5 entries.
+  expect(result.runtimeConfig).toHaveLength(5);
+  expect(result.runtimeConfig.find((d) => d.path === "~/.claude/settings.json")).toBeUndefined();
   expect(result.runtimeConfig).toEqual(expect.arrayContaining([
-    {
-      scope: "global",
-      runtime: "claude-code",
-      path: "~/.claude/settings.json",
-      purpose: "Allow OpenRig commands without Claude permission prompts.",
-    },
     {
       scope: "global",
       runtime: "claude-code",
