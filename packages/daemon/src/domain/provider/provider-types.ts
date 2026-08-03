@@ -119,7 +119,8 @@ export interface ProviderSignal {
 // precheck / switch (§1 + §3)
 export type PrecheckReason =
   | "would_strand_live_conversation"
-  | "target_needs_reauth"
+  | "target_needs_reauth" // target authState === "needs_reauth"
+  | "target_auth_unknown" // target authState === "unknown" — fails closed, NOT relabeled as re-auth
   | "signal_unknown_or_stale"
   | "rebind_unsupported_for_runtime";
 
