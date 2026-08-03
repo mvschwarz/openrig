@@ -79,6 +79,10 @@ const FIXTURES: Record<string, unknown> = {
     },
     { rigId: "01JRIG", rigName: "myrig", logicalId: "svc.db", podId: null, podNamespace: null, role: null, canonicalSessionName: null, nodeKind: "infrastructure", runtime: null, sessionStatus: null, startupStatus: null, restoreOutcome: "n-a", oriented: "n-a", lifecycleState: "running", occupantLifecycle: "unknown", continuityOutcome: null, handoverResult: null, previousOccupant: null, handoverAt: null, tmuxAttachCommand: null, resumeCommand: null, recoveryGuidance: null, latestError: null, model: null, agentRef: null, profile: null, resolvedSpecName: null, resolvedSpecVersion: null, resolvedSpecHash: null, cwd: null, restorePolicy: null, resumeType: null, resumeToken: null, startupCompletedAt: null },
   ],
+  // slice-17: the topology view consumes the DECLARED graph read — the
+  // closed route enumeration gains the row; assertions below are unchanged
+  "/api/rigs/01JRIG/graph": { nodes: [], edges: [] },
+  "/api/rigs/01JDOWN/graph": { nodes: [], edges: [] },
   "/api/rigs/01JRIG/spec.json": {
     version: "0.2", name: "myrig",
     pods: [{ id: "dev", label: "Development", members: [{ id: "impl", agentRef: "local:../../../agents/development/implementer", profile: "default", runtime: "claude-code", cwd: "/repo" }, { id: "qa", agentRef: "qa-agent", profile: "default", runtime: "codex", cwd: "/repo" }], edges: [] }],

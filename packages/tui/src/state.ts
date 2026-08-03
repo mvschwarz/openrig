@@ -14,6 +14,7 @@ import type {
   ViewStateStore,
 } from "./types.js";
 import { SECTION_REGISTRY } from "./sections.js";
+import { GRAPH_STYLE_NAMES } from "./topology/render-graph.js";
 
 export function defaultSections(): SectionDef[] {
   return SECTION_REGISTRY.map((section) => ({ ...section }));
@@ -42,6 +43,7 @@ export function createViewState(options: CreateViewStateOptions): ViewStateStore
     selection: 0,
     runningOf: null,
     viewTab: "table",
+    graphStyle: "hatchet",
     contentOffset: 0,
     contentMaxOffset: 0,
     contentTargetCount: 0,
@@ -86,6 +88,13 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
         snap,
       );
     }
+    case "style": {
+      // slice-17: validated against the graph-style registry — the ONE
+      // failure surface for every input adapter (same rule as sections)
+      if (!(GRAPH_STYLE_NAMES as readonly string[]).includes(action.name))
+        return { ...next, lastError: `unknown style "${action.name}" — known: ${GRAPH_STYLE_NAMES.join(", ")}` };
+      return { ...next, graphStyle: action.name };
+    }
     case "toggle-expand": {
       const expanded = state.expanded.includes(action.key)
         ? state.expanded.filter((key) => key !== action.key)
@@ -94,7 +103,7 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
     }
     case "tab": {
       const rigSpec = state.section === "specs" && state.drill.at(-1)?.kind === "spec" && findSpec(snap, state.drill.at(-1)!.name)?.kind === "rig";
-      const allowed = rigSpec ? ["topology", "configuration", "yaml"] : state.section === "topology" ? ["table", "overview"] : [];
+      const allowed = rigSpec ? ["topology", "configuration", "yaml"] : state.section === "topology" ? ["table", "overview", "graph"] : [];
       if (!allowed.includes(action.tab)) return { ...next, lastError: `tab ${action.tab} is not available in this content context` };
       return resetContent({ ...next, viewTab: action.tab });
     }

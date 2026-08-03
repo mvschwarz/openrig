@@ -31,6 +31,9 @@ export interface RigNode {
   id?: string;
   name: string;
   pods: PodNode[];
+  /** the rig's served graph projection (§4.A topology row 1 — a DECLARED
+   * existing read via daemon-client.rigGraph; slice-17 view consumes it, R7-clean) */
+  graph?: import("./topology/graph-types.js").RigGraph;
   /** served rig lifecycleState verbatim (summary read); non-"running" states surface */
   lifecycleState?: string;
 }
@@ -156,7 +159,7 @@ export interface DrillSegment {
   name: string;
 }
 
-export type ViewTab = "table" | "overview" | "topology" | "configuration" | "yaml";
+export type ViewTab = "table" | "overview" | "graph" | "topology" | "configuration" | "yaml";
 
 export type Action =
   | { type: "noop" }
@@ -174,6 +177,8 @@ export type Action =
   | { type: "layout"; contentMaxOffset: number; contentTargetCount: number }
   | { type: "footer"; on?: boolean }
   | { type: "toggle-expand"; key: string }
+  /** slice-17: the graph-render style dimension rides the command bar */
+  | { type: "style"; name: string }
   /** drive-structure daemon writes (BR-8/BR-9): executed by the driver loop
    * against EXISTING write contracts; never a view-state mutation */
   | { type: "act"; act: "open-terminal"; view: string }
@@ -203,6 +208,8 @@ export interface ViewState {
   contentTargetCount: number;
   contentSelection: number;
   focusedPane: "explorer" | "content";
+  /** slice-17 graph view render style (hatchet mainline per the founder verdict) */
+  graphStyle: string;
   /** the rig-stream footer is ambient: toggleable, never a navigable view (FR-10) */
   footerOn: boolean;
   /** explorer expansion keys (pod:…, folder:…) — default-collapsed levels open on demand */
@@ -239,6 +246,10 @@ export interface Screen {
   contentTargets: HitTarget[];
   contentMaxOffset: number;
   explorerRows: Array<ExplorerRow & { y: number }>;
+  /** slice-17: token segments for canvas-rendered content rows (keyed by
+   * 1-based terminal row) — the paint layer renders them with its own Style;
+   * plain(segs) === the row's content text BY CONSTRUCTION (strip-invariant) */
+  segRows?: Record<number, Array<{ text: string; token?: import("./theme.js").Token; bold?: boolean }>>;
 }
 
 export type InputEvent =

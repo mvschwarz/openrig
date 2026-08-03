@@ -254,10 +254,15 @@ export async function hydrateSnapshot(
   const rigSpecRefs = new Map<string, string[]>(); // rig-spec name → agentRefs
   for (const rig of summaries ?? []) {
     const nodes = await safe<NodeInventoryRead[]>(`nodes(${rig.name})`, () => client.rigNodes(rig.id));
+    // slice-17: the topology graph view consumes the DECLARED §4.A graph read
+    // (nodes + edges + overlay in one fetch); a failed read leaves the view
+    // honest-empty with a NAMED error, never fabricated boxes.
+    const graph = await safe<import("./topology/graph-types.js").RigGraph>(`graph(${rig.name})`, () => client.rigGraph(rig.id));
     rigs.push({
       id: rig.id,
       name: rig.name,
       pods: nodes ? groupPods(nodes) : [],
+      ...(graph ? { graph } : {}),
       ...(rig.lifecycleState ? { lifecycleState: rig.lifecycleState } : {}),
     });
     if (rig.lifecycleState && rig.lifecycleState !== "running") {

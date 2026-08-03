@@ -34,9 +34,17 @@ export function parseCommand(raw: string, sections: readonly SectionDef[] = SECT
     // FR-3 content-pane view tabs; command path keeps R1.2 (every view
     // reachable by a command). Same <verb> <name> shape as drill — not
     // the retired richer grammar.
-    if (["table", "overview", "topology", "configuration", "yaml"].includes(name))
+    if (["table", "overview", "graph", "topology", "configuration", "yaml"].includes(name))
       return { type: "tab", tab: name as Extract<Action, { type: "tab" }>["tab"] };
-    return { type: "error", message: `unknown tab "${name}" — known: table, overview, topology, configuration, yaml` };
+    return { type: "error", message: `unknown tab "${name}" — known: table, overview, graph, topology, configuration, yaml` };
+  }
+
+  if (verb === "style") {
+    // slice-17: the graph-render style is a render DIMENSION riding the same
+    // command bar (spike binding 5 — no new input surface); validity is
+    // resolved by dispatch against the style registry (one failure surface).
+    if (!name) return { type: "error", message: 'style needs a name (e.g. "style hatchet")' };
+    return { type: "style", name };
   }
 
   if (verb === "scroll") {

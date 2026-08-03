@@ -177,6 +177,17 @@ export function stylizeLines(screen: Screen, s: Style): string[] {
         // content-pane selection = a real highlight bar, not just a glyph
         return `${paintExplorer(left, s, explorerFocused)}${s.paint("chrome", "│")}${s.paint("accent", `›${right}`, { inverse: true, bold: true })}`;
       }
+      // slice-17: canvas-rendered rows (graph view) carry token segments —
+      // painted with THIS Style; plain(segs) === the content text by
+      // construction, so the strip-invariant holds structurally
+      const segs = screen.segRows?.[index + 1];
+      if (segs) {
+        const segText = segs.map((seg) => seg.text).join("");
+        const painted = segs
+          .map((seg) => (seg.token ? s.paint(seg.token, seg.text, seg.bold ? { bold: true } : undefined) : seg.text))
+          .join("");
+        return `${paintExplorer(left, s, explorerFocused)}${s.paint("chrome", "│")}${marker}${painted}${right.slice(segText.length)}`;
+      }
       return `${paintExplorer(left, s, explorerFocused)}${s.paint("chrome", "│")}${marker}${paintContent(right, s)}`;
     }
     return paintContent(line, s);

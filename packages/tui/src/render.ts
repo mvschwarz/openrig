@@ -6,6 +6,7 @@
 // swap touches only this module (spike verdict revisit trigger).
 import { computeExplorerRows, findAgent, findSpec, findAgentBySession, agentsRunningSpec, agentsRunningSpecTargets } from "./state.js";
 import { navigatorLabels } from "./navigator.js";
+import { renderGraphStyle } from "./topology/render-graph.js";
 import { detailPage, fieldLine, sectionRule, listItem, alignedRow } from "./detail.js";
 import type { Action, FleetSnapshot, NeedsItem, Screen, ViewState } from "./types.js";
 
@@ -18,6 +19,8 @@ interface ContentLine {
   /** sub-line click zones (content-relative indices); matched before `action`.
    * BR-9: zone actions are drive-structure only (lifecycle + navigation). */
   zones?: Array<{ start: number; end: number; action: Action }>;
+  /** slice-17: token segments for canvas-rendered rows (graph view) */
+  segs?: Array<{ text: string; token?: import("./theme.js").Token; bold?: boolean }>;
 }
 
 function pad(text: string | number | null | undefined, width: number): string {
@@ -72,11 +75,22 @@ function tableRow(columns: AgentColumn[], cells: Record<AgentColumnKey, string |
 }
 
 function tabsLine(state: ViewState, suffix: string): ContentLine[] {
-  const table = state.viewTab === "table" ? "[ TABLE ]" : "  TABLE  ";
-  const overview = state.viewTab === "overview" ? "[ OVERVIEW ]" : "  OVERVIEW  ";
-  return [
-    { text: `${table}${overview}   ${suffix}`, action: { type: "tab", tab: state.viewTab === "table" ? "overview" : "table" } },
+  // slice-17: three tabs, each its own click zone (the first zone starts at
+  // content col 0, preserving the focus-marker floor); `tab graph` = the
+  // topology graph view (frame-01 hatchet mainline)
+  const labels: Array<[Extract<ViewState["viewTab"], "table" | "overview" | "graph">, string]> = [
+    ["table", state.viewTab === "table" ? "[ TABLE ]" : "  TABLE  "],
+    ["overview", state.viewTab === "overview" ? "[ OVERVIEW ]" : "  OVERVIEW  "],
+    ["graph", state.viewTab === "graph" ? "[ GRAPH ]" : "  GRAPH  "],
   ];
+  const text = `${labels.map(([, label]) => label).join("")}   ${suffix}`;
+  const zones: ContentLine["zones"] = [];
+  let at = 0;
+  for (const [tab, label] of labels) {
+    zones.push({ start: at, end: at + label.length, action: { type: "tab", tab } });
+    at += label.length;
+  }
+  return [{ text, zones }];
 }
 
 function specTabsLine(state: ViewState, name: string): ContentLine {
@@ -155,6 +169,8 @@ function fieldWrapped(label: string, values: string[]): ContentLine[] {
 }
 
 function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: number): ContentLine[] {
+  const contentWidthForGraph = contentWidth;
+  void contentWidthForGraph;
   const lines: ContentLine[] = [];
   if (state.section === "topology") {
     if (state.runningOf) {
@@ -236,6 +252,28 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       .filter((a) => !state.filter || a.name.includes(state.filter) || a.pod.includes(state.filter));
     const suffix = `rig ${rig.name}${podFilter ? ` · pod ${podFilter}` : ""}${state.filter ? ` · filter "${state.filter}"` : ""}`;
     lines.push(...tabsLine(state, suffix));
+    if (state.viewTab === "graph") {
+      // slice-17 topology view (frame-01): the rig's SERVED /graph projection
+      // rendered by the style registry; honest-empty until the read answers.
+      if (!rig.graph) {
+        lines.push({ text: "" });
+        lines.push({ text: "  topology graph read pending (honest-empty, never fabricated)" });
+        return lines;
+      }
+      const canvas = renderGraphStyle(state.graphStyle, rig.graph, { host: host.name, rig: rig.name, selected: null }, contentWidth);
+      const plain = canvas.plainLines();
+      const segs = canvas.segLines();
+      for (let row = 0; row < plain.length; row++) {
+        lines.push({
+          text: plain[row]!,
+          segs: segs[row]!,
+          zones: canvas.zones.filter((z) => z.y === row).map((z) => ({ start: z.start, end: z.end, action: z.action })),
+        });
+      }
+      lines.push({ text: "" });
+      lines.push({ text: `  style: ${state.graphStyle} · style hatchet|braille|braille-fallback rides the command bar` });
+      return lines;
+    }
     lines.push({ text: state.filter ? `/ filter agents: ${state.filter}` : "/ filter agents…" });
     if (state.viewTab === "overview") {
       lines.push(
@@ -567,6 +605,7 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   }
   const explorerRows: Screen["explorerRows"] = [];
   const contentTargets: Screen["contentTargets"] = [];
+  const segRows: NonNullable<Screen["segRows"]> = {};
   for (let i = 0; i < bodyRows; i++) {
     const y = lines.length + 1; // 1-based terminal row this line will occupy
     const explorerIndex = explorerStart + i;
@@ -602,6 +641,7 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
       hitMap.push(target);
       contentTargets.push(target);
     }
+    if (item?.segs) segRows[y] = item.segs;
   }
 
   if (footer) lines.push(pad(`≋ ${footer.tsEmitted.slice(11, 16)} ${footer.sourceSession}: ${footer.body}`, cols));
@@ -616,5 +656,5 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
     ),
   );
   while (lines.length < rows) lines.push("");
-  return { lines: lines.slice(0, rows), hitMap, contentTargets, contentMaxOffset: maxContentOffset, explorerRows };
+  return { lines: lines.slice(0, rows), hitMap, contentTargets, contentMaxOffset: maxContentOffset, explorerRows, segRows };
 }
