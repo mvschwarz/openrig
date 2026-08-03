@@ -55,11 +55,22 @@ function keyDepth(row: ExplorerRow): number {
 
 /** the label with its legacy indent + list glyph stripped; pod/folder rows
  * keep their GENUINE ▾/▸ (they really collapse), hosts/rigs lose theirs */
-function contentOf(row: ExplorerRow, kind: string): string {
+function contentOf(row: ExplorerRow, parsed: KeyParts): string {
   const stripped = row.label.replace(/^\s+/, "");
-  if (kind === "host") return `⊕ ${stripped.replace(/^▾ /, "")}`;
-  if (kind === "rig") return `▚ ${stripped.replace(/^▾ /, "")}`;
-  if (kind === "pod") return stripped.replace(/ \(\d+\)$/, ""); // count moves to meta
+  if (parsed.kind === "host") return `⊕ ${stripped.replace(/^▾ /, "")}`;
+  if (parsed.kind === "rig") return `▚ ${stripped.replace(/^▾ /, "")}`;
+  if (parsed.kind === "pod") return stripped.replace(/ \(\d+\)$/, ""); // count moves to meta
+  if (parsed.kind === "agent") {
+    // POD-RELATIVE display (guard-ruled; the nav-flow mockup's convention —
+    // "driver" under pod dev50): strip ONLY a confirmed `${pod}.` prefix so
+    // same-pod siblings stay visibly distinct at the fixed pane width; any
+    // non-prefixed served name displays unchanged (honest fallback). The FULL
+    // served identity always lives in the row key/action/selection/detail.
+    const pod = parsed.parts[2];
+    const name = parsed.parts.slice(3).join("/");
+    const display = pod && name.startsWith(`${pod}.`) ? name.slice(pod.length + 1) : name;
+    return stripped.replace(name, display);
+  }
   return stripped;
 }
 
@@ -119,7 +130,7 @@ export function navigatorLabels(rows: ExplorerRow[], snap: FleetSnapshot, width:
     const guides = Array.from({ length: depth - 1 }, (_, level) => (railOpen[level + 1] ? "│ " : "  ")).join("");
     const branch = isLast[i] ? "└─ " : "├─ ";
     const parsed = parseKey(row.key)!;
-    let content = contentOf(row, parsed.kind);
+    let content = contentOf(row, parsed);
     const meta = metaOf(row, snap);
     const prefix = ` ${guides}${branch}`;
     if (!meta) return `${prefix}${content}`;

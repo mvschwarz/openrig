@@ -56,15 +56,49 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     expect(screen.explorerRows.some((r) => r.key === "agent:vm-host/openrig-build/dev50/dev50.driver")).toBe(true);
   });
 
-  it("agent meta is ALWAYS the locked `runtime · ctx%` form — typical name truncates rather than the meta degrading (guard residual)", () => {
+  it("agent meta is ALWAYS the locked `runtime · ctx%` form and names render POD-RELATIVE (guard rulings)", () => {
     const s = makeStore();
     s.dispatch({ type: "drill", resource: "pod", name: "dev50", target: { host: "vm-host", rig: "openrig-build" } });
     const pane = explorerPane(renderScreen(s.get(), snap, { cols: 120, rows: 32 }).lines);
-    // typical long name: the NAME yields with …; the meta stays complete
+    // dev50.driver under pod dev50 displays pod-relative "driver" (the
+    // nav-flow mockup's convention); the meta stays complete
     const driver = pane.find((l) => l.trimEnd().endsWith("claude · 62%"))!;
     expect(driver).toBeDefined();
-    expect(driver).toMatch(/● dev/); // still recognizably the agent row
-    expect(driver).toMatch(/…/);
+    // pod-relative "driver" may still truncate at depth-4 geometry, but its
+    // visible stem is the AGENT's own name, never the shared pod prefix
+    expect(driver).toMatch(/● dri/);
+    expect(driver).not.toMatch(/dev50\.driver/); // full identity lives in the row model, not the display
+  });
+
+  it("same-pod agents with IDENTICAL runtime+context stay visibly distinct (guard collision repro)", () => {
+    const twinSnap = {
+      ...snap,
+      hosts: [{ name: "h", reachable: true, rigs: [{ name: "r", pods: [{ name: "dev50", agents: [
+        { name: "dev50.driver", runtime: "codex", spec: "", context: 31, tokens: null, status: "active", live: true },
+        { name: "dev50.guard", runtime: "codex", spec: "", context: 31, tokens: null, status: "active", live: true },
+      ] }] }] }],
+    };
+    const s = createViewState({ instanceId: "nav-twin", getSnapshot: () => twinSnap });
+    s.dispatch({ type: "drill", resource: "pod", name: "dev50", target: { host: "h", rig: "r" } });
+    const pane = explorerPane(renderScreen(s.get(), twinSnap, { cols: 120, rows: 32 }).lines);
+    const agentRows = pane.filter((l) => l.includes("codex · 31%")).map((l) => l.replace(/^./, " "));
+    expect(agentRows).toHaveLength(2);
+    expect(new Set(agentRows.map((l) => l.trim())).size).toBe(2); // visibly distinct rows
+    expect(agentRows.some((l) => l.includes("driv"))).toBe(true);
+    expect(agentRows.some((l) => l.includes("guar"))).toBe(true);
+  });
+
+  it("a name NOT prefixed by its pod displays unchanged (honest fallback — only a confirmed prefix strips)", () => {
+    const soloSnap = {
+      ...snap,
+      hosts: [{ name: "h", reachable: true, rigs: [{ name: "r", pods: [{ name: "dev50", agents: [
+        { name: "solo", runtime: "codex", spec: "", context: 7, tokens: null, status: "active", live: true },
+      ] }] }] }],
+    };
+    const s = createViewState({ instanceId: "nav-solo", getSnapshot: () => soloSnap });
+    s.dispatch({ type: "drill", resource: "pod", name: "dev50", target: { host: "h", rig: "r" } });
+    const row = explorerPane(renderScreen(s.get(), soloSnap, { cols: 120, rows: 32 }).lines).find((l) => l.includes("● solo"))!;
+    expect(row.trimEnd()).toMatch(/● solo\s+codex · 7%$/);
   });
 
   it("null context renders the honest `runtime · —` — runtime never drops, unknown never fabricates", () => {
@@ -167,11 +201,13 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     const rows = computeExplorerRows(s.get(), snap);
     expect(rows[s.get().selection]?.key).toBe("agent:vm-host/openrig-build/dev50/dev50.guard");
     const screen = renderScreen(s.get(), snap, { cols: 120, rows: 32 });
-    // the selected ROW is the drilled agent (row-model identity); its display
-    // line carries the marker and the agent's own locked meta at the edge
+    // the selected ROW is the drilled agent (row-model identity)…
     const selectedRow = screen.explorerRows.find((r) => r.y === screen.lines.findIndex((l) => l.startsWith("›")) + 1);
     expect(selectedRow?.key).toBe("agent:vm-host/openrig-build/dev50/dev50.guard");
+    // …AND the line shows the agent's VISIBLE identity (pod-relative "guard")
+    // plus its own locked meta at the edge (guard: visible-identity restore)
     const selectedLine = screen.lines.find((l) => l.startsWith("›"))!;
+    expect(selectedLine.slice(0, 30)).toMatch(/● guard/);
     expect(selectedLine.slice(0, 30).trimEnd()).toMatch(/codex · 31%$/); // demo: guard ctx 31
   });
 
