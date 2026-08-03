@@ -355,3 +355,59 @@ describe("footer stream tail via the cursor contract (QA blocker 02d3acde)", () 
     expect(snap2.readErrors.some((e) => e.startsWith("stream-tail"))).toBe(true);
   });
 });
+
+describe("no page budget: served-page termination + loud non-progress guard (QA c5b32f17)", () => {
+  const bigItem = (n: number) => ({
+    streamItemId: `si-${n}`, tsEmitted: "2026-08-03T07:30:00.000Z",
+    streamSortKey: `k${String(n).padStart(6, "0")}`, sourceSession: "qa@rig", body: `item-${n}`,
+    format: "text", hintType: null, hintUrgency: null, hintDestination: null, hintTags: null, interrupt: false, archivedAt: null,
+  });
+
+  function pagedClient(total: number): DaemonClient {
+    const fetchImpl = (async (url: unknown) => {
+      const route = String(url).replace("http://x", "");
+      if (route.startsWith("/api/stream/list")) {
+        const after = new URL(String(url)).searchParams.get("afterSortKey");
+        const start = after ? Number(after.slice(1)) : 0;
+        const items = Array.from({ length: Math.min(100, total - start) }, (_, i) => bigItem(start + i + 1));
+        return { ok: true, json: async () => items } as Response;
+      }
+      if (route in FIXTURES) return { ok: true, json: async () => FIXTURES[route] } as Response;
+      return { ok: true, json: async () => [] } as Response;
+    }) as typeof fetch;
+    return new DaemonClient({ baseUrl: "http://x", fetchImpl });
+  }
+
+  it("reaches item 10,001 (one past the former 100-page boundary) in a single hydrate, readErrors empty", async () => {
+    const { createStreamCursor } = await import("../src/hydrate.js");
+    const snap = await hydrateSnapshot(pagedClient(10_001), new Map(), createStreamCursor());
+    expect(snap.stream.at(-1)?.body).toBe("item-10001");
+    expect(snap.readErrors.filter((e) => e.startsWith("stream-tail"))).toEqual([]);
+  });
+
+  it("reaches the tail of 25,050 items — termination is the served short page, never a budget", async () => {
+    const { createStreamCursor } = await import("../src/hydrate.js");
+    const snap = await hydrateSnapshot(pagedClient(25_050), new Map(), createStreamCursor());
+    expect(snap.stream.at(-1)?.body).toBe("item-25050");
+  });
+
+  it("a non-advancing cursor aborts LOUDLY: named readError, committed progress kept, no hang", async () => {
+    const { createStreamCursor } = await import("../src/hydrate.js");
+    const stuckPage = Array.from({ length: 100 }, (_, i) => bigItem(i + 1));
+    let calls = 0;
+    const fetchImpl = (async (url: unknown) => {
+      const route = String(url).replace("http://x", "");
+      if (route.startsWith("/api/stream/list")) {
+        calls++;
+        return { ok: true, json: async () => stuckPage } as Response; // full page, cursor never advances
+      }
+      if (route in FIXTURES) return { ok: true, json: async () => FIXTURES[route] } as Response;
+      return { ok: true, json: async () => [] } as Response;
+    }) as typeof fetch;
+    const cursor = createStreamCursor();
+    const snap = await hydrateSnapshot(new DaemonClient({ baseUrl: "http://x", fetchImpl }), new Map(), cursor);
+    expect(calls).toBe(2); // first page commits, repeat detected on the second — terminates
+    expect(snap.readErrors.some((e) => e.includes("did not advance"))).toBe(true);
+    expect(snap.stream.at(-1)?.body).toBe("item-100"); // committed progress kept, not blanked
+  });
+});

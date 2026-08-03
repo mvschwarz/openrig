@@ -135,7 +135,6 @@ export function createStreamCursor(): StreamCursor {
 
 const STREAM_PAGE_LIMIT = 100;
 const STREAM_TAIL_KEEP = 5;
-const STREAM_MAX_PAGES_PER_REFRESH = 100;
 
 function fmtTokens(input: number | null, output: number | null): string | null {
   if (input == null && output == null) return null;
@@ -243,18 +242,24 @@ async function walkStreamTail(
   read: (limit: number, afterSortKey?: string) => Promise<unknown>,
   cursor: StreamCursor,
 ): Promise<StreamItemRead[]> {
-  let after = cursor.after ?? undefined;
-  let tail = [...cursor.tail];
-  for (let page = 0; page < STREAM_MAX_PAGES_PER_REFRESH; page++) {
-    const items = (await read(STREAM_PAGE_LIMIT, after)) as StreamItemRead[];
+  // Termination is the SERVED short/empty page — never a page budget (QA
+  // c5b32f17: any fixed budget silently under-reaches a long-enough stream).
+  // The only other exit is the non-progress guard, which aborts LOUDLY.
+  for (;;) {
+    const items = (await read(STREAM_PAGE_LIMIT, cursor.after ?? undefined)) as StreamItemRead[];
     if (!Array.isArray(items) || items.length === 0) break;
-    tail = [...tail, ...items].slice(-STREAM_TAIL_KEEP);
-    after = items.at(-1)!.streamSortKey;
+    const nextAfter = items.at(-1)!.streamSortKey;
+    if (cursor.after != null && !(nextAfter > cursor.after)) {
+      // a server that repeats or rewinds the cursor would loop forever —
+      // abort with a NAMED error; pages committed so far are kept
+      throw new Error(`stream cursor did not advance (after=${cursor.after}, next=${nextAfter}) — walk aborted, prior tail kept`);
+    }
+    // commit per page so an abort or failed page never loses reached progress
+    cursor.tail = [...cursor.tail, ...items].slice(-STREAM_TAIL_KEEP);
+    cursor.after = nextAfter;
     if (items.length < STREAM_PAGE_LIMIT) break;
   }
-  cursor.after = after ?? cursor.after;
-  cursor.tail = tail;
-  return tail;
+  return cursor.tail;
 }
 
 export async function hydrateSnapshot(
@@ -452,7 +457,8 @@ export async function hydrateSnapshot(
       && review.hosts.every((host) => host.status.status === "ok"),
     humanQueue,
     hostsDown,
-    stream: (streamItems ?? []).map((s) => ({ tsEmitted: s.tsEmitted, sourceSession: s.sourceSession, body: s.body })),
+    // on a failed/aborted walk the cursor still holds the last committed tail
+    stream: (streamItems ?? streamCursor.tail).map((s) => ({ tsEmitted: s.tsEmitted, sourceSession: s.sourceSession, body: s.body })),
     readErrors,
   };
 }
