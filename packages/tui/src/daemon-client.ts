@@ -19,6 +19,19 @@ export interface TerminalOpenResult {
   code?: string;
 }
 
+export interface LaunchNodeResult {
+  ok: boolean;
+  code?: string;
+  launched?: Array<{ logicalId?: string }>;
+  alreadyRunning?: Array<{ logicalId?: string }>;
+}
+
+export function launchNodeNotice(agent: string, result: LaunchNodeResult): string {
+  return result.code === "already_running"
+    ? `agent already running: ${agent}`
+    : `agent run requested: ${agent}`;
+}
+
 export class DaemonClient {
   readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
@@ -96,10 +109,13 @@ export class DaemonClient {
   }
 
   // --- rig-stream footer (§4.A row 7: the rig stream read surface) ---
-  /** ascending page of the stream; afterSortKey is the served cursor contract
-   * (stream.ts /list) — the tail is reached by walking pages, never by a cap */
+  /** legacy chronological page contract, retained for additive API compatibility */
   streamList(limit = 100, afterSortKey?: string) {
     return this.get(`/api/stream/list?limit=${limit}${afterSortKey ? `&afterSortKey=${encodeURIComponent(afterSortKey)}` : ""}`);
+  }
+  /** newest bounded page of the maintained active stream, returned oldest→newest */
+  streamLatest(limit = 5) {
+    return this.get(`/api/stream/list?limit=${limit}&direction=latest`);
   }
 
   // --- drive-structure writes (BR-8: EXISTING contracts only; the ONLY two) ---
@@ -112,7 +128,7 @@ export class DaemonClient {
     return result;
   }
   /** the `rig launch` per-seat contract */
-  launchNode(rigId: string, logicalId: string) {
-    return this.post(`/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(logicalId)}/launch`, {});
+  async launchNode(rigId: string, logicalId: string): Promise<LaunchNodeResult> {
+    return (await this.post(`/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(logicalId)}/launch`, {})) as LaunchNodeResult;
   }
 }

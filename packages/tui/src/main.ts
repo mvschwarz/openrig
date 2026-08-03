@@ -13,8 +13,8 @@ import { createStyle, detectColorMode } from "./theme.js";
 import { stylizeLines } from "./stylize.js";
 import { createControlSocket, defaultSocketPath } from "./socket-server.js";
 import { demoSnapshot } from "./demo-data.js";
-import { DaemonClient } from "./daemon-client.js";
-import { hydrateSnapshot, createStreamCursor } from "./hydrate.js";
+import { DaemonClient, launchNodeNotice } from "./daemon-client.js";
+import { hydrateSnapshot } from "./hydrate.js";
 import type { Action, FleetSnapshot, Screen } from "./types.js";
 import type { SpecReviewCache } from "./hydrate.js";
 
@@ -61,9 +61,8 @@ async function run(): Promise<void> {
   let refreshTimer: NodeJS.Timeout | null = null;
   if (client) {
     const reviewCache: SpecReviewCache = new Map();
-    const streamCursor = createStreamCursor();
     const refresh = async () => {
-      snapshot = await hydrateSnapshot(client, reviewCache, streamCursor);
+      snapshot = await hydrateSnapshot(client, reviewCache);
       draw();
     };
     await refresh();
@@ -86,8 +85,8 @@ async function run(): Promise<void> {
           message: `terminal opened: ${action.view} (${result.opened.length} opened, ${result.absent.length} absent, ${result.degraded.length} degraded)`,
         });
       } else {
-        await client.launchNode(action.rigId, action.agent);
-        view.dispatch({ type: "notice", message: `agent run requested: ${action.agent}` });
+        const result = await client.launchNode(action.rigId, action.agent);
+        view.dispatch({ type: "notice", message: launchNodeNotice(action.agent, result) });
       }
     } catch (err) {
       view.dispatch({ type: "notice", message: err instanceof Error ? err.message : String(err) });

@@ -56,12 +56,27 @@ export function streamRoutes(): Hono {
   app.get("/list", (c) => {
     const limit = c.req.query("limit") ? Number.parseInt(c.req.query("limit")!, 10) : undefined;
     const afterSortKey = c.req.query("afterSortKey") || undefined;
+    const direction = c.req.query("direction");
+    if (direction && direction !== "chronological" && direction !== "latest") {
+      return c.json({ error: "direction must be chronological or latest" }, 400);
+    }
+    if (direction === "latest" && afterSortKey) {
+      return c.json({ error: "direction=latest cannot be combined with afterSortKey" }, 400);
+    }
+    const parsedDirection = direction === "latest" || direction === "chronological" ? direction : undefined;
     const sourceSession = c.req.query("sourceSession") || undefined;
     const hintDestination = c.req.query("hintDestination") || undefined;
     const includeArchived = c.req.query("includeArchived") === "true";
 
     const store = getStore(c);
-    const items = store.list({ limit, afterSortKey, sourceSession, hintDestination, includeArchived });
+    const items = store.list({
+      limit,
+      afterSortKey,
+      sourceSession,
+      hintDestination,
+      includeArchived,
+      ...(parsedDirection ? { direction: parsedDirection } : {}),
+    });
     return c.json(items);
   });
 

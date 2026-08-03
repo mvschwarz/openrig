@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { DaemonClient } from "../src/daemon-client.js";
+import { DaemonClient, launchNodeNotice } from "../src/daemon-client.js";
 
 // FR-8 / R7 no-new-data: the TUI's entire daemon surface is this ONE module,
 // and every route it can emit is on the §4.A table of EXISTING web-consumed
@@ -24,6 +24,7 @@ const SPEC_4A_ROUTES = [
   "/api/rigs/openrig-build/status",
   "/api/stream/list?limit=100",
   "/api/stream/list?limit=100&afterSortKey=k1",
+  "/api/stream/list?limit=5&direction=latest",
 ];
 
 describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)", () => {
@@ -50,6 +51,7 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
     await c.rigStatus("openrig-build");
     await c.streamList();
     await c.streamList(100, "k1");
+    await c.streamLatest();
 
     expect(seen.sort()).toEqual([...SPEC_4A_ROUTES].sort());
   });
@@ -86,6 +88,13 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
       ["openTerminal", "launchNode"].includes(m),
     );
     expect(postCalls).toHaveLength(2);
+  });
+
+  it("reports an already-running launch response honestly", () => {
+    expect(launchNodeNotice("dev.qa", { ok: true, code: "already_running", alreadyRunning: [{ logicalId: "dev.qa" }] }))
+      .toBe("agent already running: dev.qa");
+    expect(launchNodeNotice("dev.qa", { ok: true, launched: [{ logicalId: "dev.qa" }] }))
+      .toBe("agent run requested: dev.qa");
   });
 
   it("does not report a zero-pane HTTP 200 terminal result as opened", async () => {

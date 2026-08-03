@@ -76,6 +76,33 @@ describe("StreamStore", () => {
     expect(withArchived).toHaveLength(3);
   });
 
+  it("list latest returns the newest bounded active rows in chronological order", () => {
+    expect(store.list({ limit: 5, direction: "latest" })).toEqual([]);
+    const items = Array.from({ length: 7 }, (_, index) =>
+      store.emit({ sourceSession: "alice@rig", body: `item-${index + 1}` }),
+    );
+
+    expect(store.list({ limit: 5, direction: "latest" }).map((item) => item.body)).toEqual([
+      "item-3", "item-4", "item-5", "item-6", "item-7",
+    ]);
+
+    store.archive(items[6]!.streamItemId);
+    expect(store.list({ limit: 5, direction: "latest" }).map((item) => item.body)).toEqual([
+      "item-2", "item-3", "item-4", "item-5", "item-6",
+    ]);
+  });
+
+  it("list latest uses the canonical timestamp + sort-key tuple and keeps filters", () => {
+    const first = store.emit({ sourceSession: "alice@rig", body: "first", hintDestination: "bob@rig" });
+    const second = store.emit({ sourceSession: "alice@rig", body: "second", hintDestination: "bob@rig" });
+    store.emit({ sourceSession: "carol@rig", body: "filtered-out", hintDestination: "bob@rig" });
+    db.prepare("UPDATE stream_items SET ts_emitted = ? WHERE stream_item_id IN (?, ?)")
+      .run("2026-08-03T07:00:00.000Z", first.streamItemId, second.streamItemId);
+
+    expect(store.list({ limit: 1, direction: "latest", sourceSession: "alice@rig" }).map((item) => item.body)).toEqual(["second"]);
+    expect(store.list({ limit: 5, direction: "latest", sourceSession: "alice@rig", hintDestination: "bob@rig" }).map((item) => item.body)).toEqual(["first", "second"]);
+  });
+
   it("list filters by sourceSession + hintDestination", () => {
     store.emit({ sourceSession: "alice@rig", body: "a-msg", hintDestination: "bob@rig" });
     store.emit({ sourceSession: "carol@rig", body: "c-msg", hintDestination: "bob@rig" });

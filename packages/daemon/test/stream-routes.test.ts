@@ -82,6 +82,29 @@ describe("stream routes", () => {
     expect(filteredData).toHaveLength(2);
   });
 
+  it("GET /api/stream/list?direction=latest returns the newest active page chronologically", async () => {
+    const items = Array.from({ length: 7 }, (_, index) =>
+      store.emit({ sourceSession: "alice@rig", body: `item-${index + 1}` }),
+    );
+
+    const first = await app.request("/api/stream/list?limit=5&direction=latest");
+    expect(first.status).toBe(200);
+    expect(((await first.json()) as Array<{ body: string }>).map((item) => item.body)).toEqual([
+      "item-3", "item-4", "item-5", "item-6", "item-7",
+    ]);
+
+    store.archive(items[6]!.streamItemId);
+    const afterArchive = await app.request("/api/stream/list?limit=5&direction=latest");
+    expect(((await afterArchive.json()) as Array<{ body: string }>).map((item) => item.body)).toEqual([
+      "item-2", "item-3", "item-4", "item-5", "item-6",
+    ]);
+  });
+
+  it("GET /api/stream/list rejects invalid or ambiguous direction input", async () => {
+    expect((await app.request("/api/stream/list?direction=sideways")).status).toBe(400);
+    expect((await app.request("/api/stream/list?direction=latest&afterSortKey=k1")).status).toBe(400);
+  });
+
   it("GET /api/stream/:id returns 404 on unknown id", async () => {
     const res = await app.request("/api/stream/nonexistent");
     expect(res.status).toBe(404);

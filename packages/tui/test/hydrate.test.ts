@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { DaemonClient } from "../src/daemon-client.js";
 import { hydrateSnapshot } from "../src/hydrate.js";
+import { renderScreen } from "../src/render.js";
+import { createViewState } from "../src/state.js";
 
 // Fixtures mirror the SERVED shapes traced firsthand at 5f3b5bd4 (Phase-2
 // endpoint-shape survey): real field names, real enum values, real evidence
@@ -102,7 +104,7 @@ const FIXTURES: Record<string, unknown> = {
     settled: [], settledProvenance: "computed", composedAt: "2026-08-02T09:30:00.000Z",
     hosts: [{ hostId: "local", status: { hostId: "local", status: "ok" } }, { hostId: "mm2-host", status: { hostId: "mm2-host", status: "ok" } }],
   },
-  "/api/stream/list?limit=100": [
+  "/api/stream/list?limit=5&direction=latest": [
     { streamItemId: "si-1", tsEmitted: "2026-08-02T10:00:00.000Z", streamSortKey: "k1", sourceSession: "dev-guard@myrig", body: "gate cleared: slice-11", format: "text", hintType: null, hintUrgency: null, hintDestination: null, hintTags: null, interrupt: false, archivedAt: null },
   ],
   "/api/queue/attention-aggregate": {
@@ -264,6 +266,14 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
       "dev.mismatch": "attention_required",
       "dev.missing": "attention_required",
     });
+    const byName = Object.fromEntries(snap.hosts[0]!.rigs[0]!.pods[0]!.agents.map((agent) => [agent.name, agent]));
+    expect(byName["dev.mismatch"]?.canRun).toBe(false);
+    expect(byName["dev.missing"]?.canRun).toBe(false);
+    const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    view.dispatch({ type: "drill", resource: "rig", name: "myrig" });
+    const output = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
+    expect(output.lines.find((line) => line.includes("dev.mismatch"))).not.toContain("run ▸");
+    expect(output.lines.find((line) => line.includes("dev.missing"))).not.toContain("run ▸");
   });
 
   it("joins Specs↔Topology over existing reads: rig agentRefs + agent usedByRigs", async () => {
@@ -282,15 +292,14 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
   });
 });
 
-describe("footer stream tail via the cursor contract (QA blocker 02d3acde)", () => {
-  function streamClient(pages: Record<string, unknown[]>): DaemonClient {
+describe("footer stream tail via the bounded latest-active projection", () => {
+  function streamClient(responses: unknown[][]): DaemonClient {
     const calls: string[] = [];
     const fetchImpl = (async (url: unknown) => {
       const route = String(url).replace("http://x", "");
       calls.push(route);
       if (route.startsWith("/api/stream/list")) {
-        const after = new URL(String(url)).searchParams.get("afterSortKey") ?? "";
-        return { ok: true, json: async () => pages[after] ?? [] } as Response;
+        return { ok: true, json: async () => responses.shift() ?? [] } as Response;
       }
       if (route in FIXTURES) return { ok: true, json: async () => FIXTURES[route] } as Response;
       return { ok: true, json: async () => [] } as Response;
@@ -306,40 +315,26 @@ describe("footer stream tail via the cursor contract (QA blocker 02d3acde)", () 
   });
 
   it("beyond-cap: with 6 unarchived items the ticker shows the SIXTH (QA's exact repro shape)", async () => {
-    const { createStreamCursor } = await import("../src/hydrate.js");
     const six = Array.from({ length: 6 }, (_, i) => item(i + 1));
-    const client = streamClient({ "": six });
-    const snap = await hydrateSnapshot(client, new Map(), createStreamCursor());
+    const client = streamClient([six.slice(-5)]);
+    const snap = await hydrateSnapshot(client, new Map());
     expect(snap.stream.at(-1)?.body).toBe("item-6");
+    expect((client as unknown as { __calls: string[] }).__calls.filter((route) => route.startsWith("/api/stream/list"))).toEqual([
+      "/api/stream/list?limit=5&direction=latest",
+    ]);
   });
 
-  it("beyond-page-size: 147 items across ascending pages — the walk reaches the true tail", async () => {
-    const { createStreamCursor } = await import("../src/hydrate.js");
-    const all = Array.from({ length: 147 }, (_, i) => item(i + 1));
-    const client = streamClient({ "": all.slice(0, 100), k0100: all.slice(100) });
-    const snap = await hydrateSnapshot(client, new Map(), createStreamCursor());
-    expect(snap.stream.at(-1)?.body).toBe("item-147");
-    expect(snap.stream).toHaveLength(5);
+  it("archive truth replaces a cached newest row on the very next refresh", async () => {
+    const client = streamClient([[item(1), item(2)], [item(1)]]);
+    const first = await hydrateSnapshot(client, new Map());
+    const afterArchive = await hydrateSnapshot(client, new Map());
+    expect(first.stream.at(-1)?.body).toBe("item-2");
+    expect(afterArchive.stream.at(-1)?.body).toBe("item-1");
   });
 
-  it("cursor persists across refreshes: the next hydrate resumes AFTER the last seen key", async () => {
-    const { createStreamCursor } = await import("../src/hydrate.js");
-    const cursor = createStreamCursor();
-    const first = streamClient({ "": [item(1), item(2)] });
-    await hydrateSnapshot(first, new Map(), cursor);
-    expect(cursor.after).toBe("k0002");
-
-    const second = streamClient({ k0002: [item(3)] });
-    const snap = await hydrateSnapshot(second, new Map(), cursor);
-    expect(snap.stream.at(-1)?.body).toBe("item-3");
-    expect((second as unknown as { __calls: string[] }).__calls.some((c) => c.includes("afterSortKey=k0002"))).toBe(true);
-  });
-
-  it("an empty stream stays honest-empty and a failed page keeps the prior tail with a named error", async () => {
-    const { createStreamCursor } = await import("../src/hydrate.js");
-    const cursor = createStreamCursor();
-    const empty = streamClient({ "": [] });
-    const snap = await hydrateSnapshot(empty, new Map(), cursor);
+  it("an empty stream and a failed latest read stay honest instead of reusing stale rows", async () => {
+    const empty = streamClient([[]]);
+    const snap = await hydrateSnapshot(empty, new Map());
     expect(snap.stream).toEqual([]);
 
     const failing = new DaemonClient({
@@ -351,63 +346,28 @@ describe("footer stream tail via the cursor contract (QA blocker 02d3acde)", () 
         return { ok: true, json: async () => [] } as Response;
       }) as typeof fetch,
     });
-    const snap2 = await hydrateSnapshot(failing, new Map(), cursor);
+    const snap2 = await hydrateSnapshot(failing, new Map());
+    expect(snap2.stream).toEqual([]);
     expect(snap2.readErrors.some((e) => e.startsWith("stream-tail"))).toBe(true);
   });
-});
 
-describe("no page budget: served-page termination + loud non-progress guard (QA c5b32f17)", () => {
-  const bigItem = (n: number) => ({
-    streamItemId: `si-${n}`, tsEmitted: "2026-08-03T07:30:00.000Z",
-    streamSortKey: `k${String(n).padStart(6, "0")}`, sourceSession: "qa@rig", body: `item-${n}`,
-    format: "text", hintType: null, hintUrgency: null, hintDestination: null, hintTags: null, interrupt: false, archivedAt: null,
-  });
-
-  function pagedClient(total: number): DaemonClient {
-    const fetchImpl = (async (url: unknown) => {
-      const route = String(url).replace("http://x", "");
-      if (route.startsWith("/api/stream/list")) {
-        const after = new URL(String(url)).searchParams.get("afterSortKey");
-        const start = after ? Number(after.slice(1)) : 0;
-        const items = Array.from({ length: Math.min(100, total - start) }, (_, i) => bigItem(start + i + 1));
-        return { ok: true, json: async () => items } as Response;
-      }
-      if (route in FIXTURES) return { ok: true, json: async () => FIXTURES[route] } as Response;
-      return { ok: true, json: async () => [] } as Response;
-    }) as typeof fetch;
-    return new DaemonClient({ baseUrl: "http://x", fetchImpl });
-  }
-
-  it("reaches item 10,001 (one past the former 100-page boundary) in a single hydrate, readErrors empty", async () => {
-    const { createStreamCursor } = await import("../src/hydrate.js");
-    const snap = await hydrateSnapshot(pagedClient(10_001), new Map(), createStreamCursor());
-    expect(snap.stream.at(-1)?.body).toBe("item-10001");
-    expect(snap.readErrors.filter((e) => e.startsWith("stream-tail"))).toEqual([]);
-  });
-
-  it("reaches the tail of 25,050 items — termination is the served short page, never a budget", async () => {
-    const { createStreamCursor } = await import("../src/hydrate.js");
-    const snap = await hydrateSnapshot(pagedClient(25_050), new Map(), createStreamCursor());
-    expect(snap.stream.at(-1)?.body).toBe("item-25050");
-  });
-
-  it("a non-advancing cursor aborts LOUDLY: named readError, committed progress kept, no hang", async () => {
-    const { createStreamCursor } = await import("../src/hydrate.js");
-    const stuckPage = Array.from({ length: 100 }, (_, i) => bigItem(i + 1));
+  it("one bounded read completes even when the source could always append another full page", async () => {
     let calls = 0;
-    const fetchImpl = (async (url: unknown) => {
-      const route = String(url).replace("http://x", "");
-      if (route.startsWith("/api/stream/list")) {
-        calls++;
-        return { ok: true, json: async () => stuckPage } as Response; // full page, cursor never advances
-      }
-      if (route in FIXTURES) return { ok: true, json: async () => FIXTURES[route] } as Response;
-      return { ok: true, json: async () => [] } as Response;
-    }) as typeof fetch;
-    const cursor = createStreamCursor();
-    const snap = await hydrateSnapshot(new DaemonClient({ baseUrl: "http://x", fetchImpl }), new Map(), cursor);
-    expect(calls).toBe(2); // first page commits, repeat detected on the second — terminates
-    expect(snap.readErrors.some((e) => e.includes("did not advance"))).toBe(true);
-    expect(snap.stream.at(-1)?.body).toBe("item-100"); // committed progress kept, not blanked
+    const client = streamClient([Array.from({ length: 5 }, (_, index) => item(index + 10))]);
+    const original = (client as unknown as { __calls: string[] }).__calls;
+    const snap = await hydrateSnapshot(client, new Map());
+    calls = original.filter((route) => route.startsWith("/api/stream/list")).length;
+    expect(calls).toBe(1);
+    expect(snap.stream.at(-1)?.body).toBe("item-14");
+  });
+
+  it("concurrent hydrations have no shared cursor and report no false non-progress error", async () => {
+    const client = streamClient([[item(1)], [item(2)]]);
+    const [first, second] = await Promise.all([
+      hydrateSnapshot(client, new Map()),
+      hydrateSnapshot(client, new Map()),
+    ]);
+    expect([first.stream.at(-1)?.body, second.stream.at(-1)?.body].sort()).toEqual(["item-1", "item-2"]);
+    expect([...first.readErrors, ...second.readErrors].filter((error) => error.startsWith("stream-tail"))).toEqual([]);
   });
 });

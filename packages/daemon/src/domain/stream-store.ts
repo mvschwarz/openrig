@@ -37,6 +37,7 @@ export interface StreamListOptions {
   sourceSession?: string;
   hintDestination?: string;
   includeArchived?: boolean;
+  direction?: "chronological" | "latest";
 }
 
 interface StreamItemRow {
@@ -149,13 +150,14 @@ export class StreamStore {
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     params.push(limit);
 
+    const latest = opts?.direction === "latest";
     const rows = this.db
       .prepare(
-        `SELECT * FROM stream_items ${where} ORDER BY ts_emitted ASC, stream_sort_key ASC LIMIT ?`
+        `SELECT * FROM stream_items ${where} ORDER BY ts_emitted ${latest ? "DESC" : "ASC"}, stream_sort_key ${latest ? "DESC" : "ASC"} LIMIT ?`
       )
       .all(...params) as StreamItemRow[];
 
-    return rows.map((r) => this.rowToItem(r));
+    return (latest ? rows.reverse() : rows).map((r) => this.rowToItem(r));
   }
 
   /**

@@ -83,4 +83,22 @@ describe("ACTIONS column = real drive-structure acts (BR-9)", () => {
       expect(parsed.type, cmd).toBe("error");
     }
   });
+
+  it("keeps run and term visible and clickable across the 120-column fallback boundary", () => {
+    for (const cols of [119, 120, 121]) {
+      const s = createViewState({ instanceId: "t", getSnapshot: () => snap });
+      s.dispatch(parseCommand("rig openrig-build"));
+      const screen = renderScreen(s.get(), snap, { cols, rows: 34 });
+      const runningRow = screen.lines.find((line) => line.includes("dev50.driver"));
+      const runnableRow = screen.lines.find((line) => line.includes("dev50.qa"));
+      expect(runningRow, `running row at ${cols}`).toContain("term ▸");
+      expect(runnableRow, `runnable row at ${cols}`).toContain("run ▸ · term ▸");
+      const acts = screen.contentTargets.filter((target) => target.action.type === "act");
+      expect(acts.length, `act count at ${cols}`).toBeGreaterThan(0);
+      expect(acts.every((target) => target.x1 >= 1 && target.x2 <= cols), `act bounds at ${cols}`).toBe(true);
+      const runY = screen.lines.findIndex((line) => line.includes("dev50.qa")) + 1;
+      const runX = runnableRow!.indexOf("run ▸") + 1;
+      expect(hitAt(screen, runX, runY)?.action).toEqual({ type: "act", act: "run", rigId: "openrig-build", agent: "dev50.qa" });
+    }
+  });
 });

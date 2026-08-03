@@ -18,6 +18,18 @@ describe("live visual regressions", () => {
     expect(row).toContain("openrig-build");
   });
 
+  it("preserves the full CTX/TOKENS table at the locked 140-column size", () => {
+    const snap = demoSnapshot();
+    const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    view.dispatch({ type: "drill", resource: "rig", name: "openrig-build" });
+
+    const screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
+    const header = screen.lines.find((line) => line.includes("AGENT") && line.includes("STATUS"));
+    expect(header).toContain("CTX%");
+    expect(header).toContain("TOKENS");
+    expect(header).toContain("ACTIONS");
+  });
+
   it("keeps every raw-key content target visibly focused, including multiple actions on one row", () => {
     const snap = demoSnapshot();
     const view = createViewState({ instanceId: "t", getSnapshot: () => snap });

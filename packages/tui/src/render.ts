@@ -33,19 +33,41 @@ function padLeft(text: string | number | null | undefined, width: number): strin
 }
 
 type Align = "left" | "right";
-const AGENT_COLS: Array<[string, number, Align]> = [
-  ["RIG", 18, "left"],
-  ["POD", 8, "left"],
-  ["AGENT", 16, "left"],
-  ["RUNTIME", 13, "left"],
-  ["CTX%", 4, "right"],
-  ["TOKENS", 7, "right"],
-  ["STATUS", 17, "left"],
-  ["ACTIONS", 14, "left"],
+type AgentColumnKey = "rig" | "pod" | "agent" | "runtime" | "context" | "tokens" | "status" | "actions";
+type AgentColumn = [key: AgentColumnKey, name: string, width: number, align: Align];
+
+const FULL_AGENT_COLS: AgentColumn[] = [
+  ["rig", "RIG", 18, "left"],
+  ["pod", "POD", 8, "left"],
+  ["agent", "AGENT", 16, "left"],
+  ["runtime", "RUNTIME", 13, "left"],
+  ["context", "CTX%", 4, "right"],
+  ["tokens", "TOKENS", 7, "right"],
+  ["status", "STATUS", 17, "left"],
+  ["actions", "ACTIONS", 14, "left"],
 ];
 
-function tableRow(cells: Array<string | null>): string {
-  return AGENT_COLS.map(([, w, align], i) => (align === "right" ? padLeft(cells[i], w) : pad(cells[i], w))).join(" ");
+function columnsWidth(columns: AgentColumn[]): number {
+  return columns.reduce((total, [, , width]) => total + width + 1, -1);
+}
+
+function agentColumns(contentWidth: number): AgentColumn[] {
+  if (columnsWidth(FULL_AGENT_COLS) <= contentWidth) return FULL_AGENT_COLS;
+  // At the 120-column fallback the content pane is 88 cells. Preserve the
+  // operable identity/status/action path; telemetry cells yield first.
+  const compactRest: AgentColumn[] = [
+    ["pod", "POD", 8, "left"],
+    ["agent", "AGENT", 16, "left"],
+    ["runtime", "RUNTIME", 13, "left"],
+    ["status", "STATUS", 17, "left"],
+    ["actions", "ACTIONS", 14, "left"],
+  ];
+  const rigWidth = Math.max(6, Math.min(18, contentWidth - columnsWidth(compactRest) - 1));
+  return [["rig", "RIG", rigWidth, "left"], ...compactRest];
+}
+
+function tableRow(columns: AgentColumn[], cells: Record<AgentColumnKey, string | number | null>): string {
+  return columns.map(([key, , width, align]) => align === "right" ? padLeft(cells[key], width) : pad(cells[key], width)).join(" ");
 }
 
 function tabsLine(state: ViewState, suffix: string): ContentLine[] {
@@ -131,7 +153,7 @@ function fieldWrapped(label: string, values: string[]): ContentLine[] {
   return [fieldLine({ label, value: first }), ...wrapped.slice(1)];
 }
 
-function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
+function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: number): ContentLine[] {
   const lines: ContentLine[] = [];
   if (state.section === "topology") {
     if (state.runningOf) {
@@ -238,9 +260,16 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
       );
       return lines;
     }
-    lines.push({ text: tableRow(AGENT_COLS.map(([name]) => name)) });
-    lines.push({ text: "─".repeat(AGENT_COLS.reduce((n, [, w]) => n + w + 1, -1)) });
-    const actionsColStart = AGENT_COLS.slice(0, -1).reduce((n, [, w]) => n + w + 1, 0);
+    const agentCols = agentColumns(contentWidth);
+    lines.push({
+      text: tableRow(agentCols, {
+        rig: "RIG", pod: "POD", agent: "AGENT", runtime: "RUNTIME",
+        context: "CTX%", tokens: "TOKENS", status: "STATUS", actions: "ACTIONS",
+      }),
+    });
+    lines.push({ text: "─".repeat(columnsWidth(agentCols)) });
+    const actionsIndex = agentCols.findIndex(([key]) => key === "actions");
+    const actionsColStart = agentCols.slice(0, actionsIndex).reduce((n, [, , width]) => n + width + 1, 0);
     for (const a of rows) {
       // ACTIONS = drive-structure ONLY (BR-9), each mapped to an EXISTING
       // write contract: `run ▸` = the rig-restore write (rendered only where
@@ -260,16 +289,16 @@ function contentLines(state: ViewState, snap: FleetSnapshot): ContentLine[] {
       lines.push({
         // the WHOLE row is the hit surface (not a testid'd control): clicking
         // any visible cell opens the agent; the ACTIONS zones override.
-        text: tableRow([
-          rig.name,
-          a.pod,
-          a.name,
-          a.runtime,
-          a.context == null ? "—" : `${a.context}%`,
-          a.tokens ?? "—",
-          a.status,
-          actionsCell,
-        ]),
+        text: tableRow(agentCols, {
+          rig: rig.name,
+          pod: a.pod,
+          agent: a.name,
+          runtime: a.runtime,
+          context: a.context == null ? "—" : `${a.context}%`,
+          tokens: a.tokens ?? "—",
+          status: a.status,
+          actions: actionsCell,
+        }),
         action: { type: "drill", resource: "agent", name: a.name, target: { host: host.name, rig: rig.name, pod: a.pod } },
         zones,
       });
@@ -511,7 +540,7 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   lines.push(paneRule(cols, "┬", explorerTitle, contentTitle));
 
   const explorer = computeExplorerRows(state, snap);
-  const content = contentLines(state, snap);
+  const content = contentLines(state, snap, Math.max(cols - EXPL_W - 2, 0));
   const footer = state.footerOn ? snap.stream.at(-1) : undefined;
   const chromeRows = footer ? 4 : 3; // bottom rule + hint bar + status line (+ footer)
   const bodyRows = Math.max(rows - 2 - chromeRows, 1);

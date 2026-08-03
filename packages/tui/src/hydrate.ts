@@ -117,24 +117,8 @@ interface StreamItemRead {
   tsEmitted: string;
   sourceSession: string;
   body: string;
-  /** the served ascending cursor (stream_sort_key) */
   streamSortKey: string;
 }
-
-/** Cross-refresh stream cursor (instance-scoped, caller-owned): the walk
- * resumes from the last seen sortKey each refresh instead of re-reading the
- * whole stream, and `tail` always holds the ACTUAL newest items. */
-export interface StreamCursor {
-  after: string | null;
-  tail: StreamItemRead[];
-}
-
-export function createStreamCursor(): StreamCursor {
-  return { after: null, tail: [] };
-}
-
-const STREAM_PAGE_LIMIT = 100;
-const STREAM_TAIL_KEEP = 5;
 
 function fmtTokens(input: number | null, output: number | null): string | null {
   if (input == null && output == null) return null;
@@ -166,7 +150,10 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
             ? (node.terminalActive === true || (node.terminalActive == null && node.agentActivity?.state === "running") ? "active" : "idle")
             : (node.sessionStatus ?? "unknown"),
     live: node.lifecycleState === "running",
-    canRun: node.lifecycleState !== "running",
+    canRun: node.lifecycleState !== "running"
+      && node.sessionStatus !== "running"
+      && node.sessionStatus !== "ready"
+      && node.terminalActive !== true,
     session: node.canonicalSessionName,
     attach: node.tmuxAttachCommand ?? null,
   };
@@ -234,38 +221,9 @@ function agentSpecTruth(raw?: string): { runtime?: string; skills: string[] } {
  * entry's updatedAt changes. Owned by the caller (instance-scoped, no module state). */
 export type SpecReviewCache = Map<string, SpecLibraryReviewRead>;
 
-/** Walk the ascending stream pages from the cursor to the ACTUAL tail (QA
- * blocker 02d3acde: a fixed limit returns the OLDEST rows once the stream
- * outgrows it — the newest item must be reached via the served afterSortKey
- * cursor, never a cap). Returns the updated tail; throws only via `read`. */
-async function walkStreamTail(
-  read: (limit: number, afterSortKey?: string) => Promise<unknown>,
-  cursor: StreamCursor,
-): Promise<StreamItemRead[]> {
-  // Termination is the SERVED short/empty page — never a page budget (QA
-  // c5b32f17: any fixed budget silently under-reaches a long-enough stream).
-  // The only other exit is the non-progress guard, which aborts LOUDLY.
-  for (;;) {
-    const items = (await read(STREAM_PAGE_LIMIT, cursor.after ?? undefined)) as StreamItemRead[];
-    if (!Array.isArray(items) || items.length === 0) break;
-    const nextAfter = items.at(-1)!.streamSortKey;
-    if (cursor.after != null && !(nextAfter > cursor.after)) {
-      // a server that repeats or rewinds the cursor would loop forever —
-      // abort with a NAMED error; pages committed so far are kept
-      throw new Error(`stream cursor did not advance (after=${cursor.after}, next=${nextAfter}) — walk aborted, prior tail kept`);
-    }
-    // commit per page so an abort or failed page never loses reached progress
-    cursor.tail = [...cursor.tail, ...items].slice(-STREAM_TAIL_KEEP);
-    cursor.after = nextAfter;
-    if (items.length < STREAM_PAGE_LIMIT) break;
-  }
-  return cursor.tail;
-}
-
 export async function hydrateSnapshot(
   client: DaemonClient,
   reviewCache?: SpecReviewCache,
-  streamCursor: StreamCursor = createStreamCursor(),
 ): Promise<FleetSnapshot> {
   const readErrors: string[] = [];
   async function safe<T>(label: string, fn: () => Promise<unknown>): Promise<T | null> {
@@ -282,7 +240,7 @@ export async function hydrateSnapshot(
     safe<RigSummaryRead[]>("rigs-summary", () => client.rigsSummary()),
     safe<SpecLibraryRead[]>("specs-library", () => client.specsLibrary()),
     safe<ReviewFleetRead>("review-fleet", () => client.reviewFleet()),
-    safe<StreamItemRead[]>("stream-tail", () => walkStreamTail((limit, after) => client.streamList(limit, after), streamCursor)),
+    safe<StreamItemRead[]>("stream-tail", () => client.streamLatest()),
   ]);
 
   const agentSpecNames = new Set((library ?? []).filter((entry) => entry.kind === "agent").map((entry) => entry.name));
@@ -457,8 +415,7 @@ export async function hydrateSnapshot(
       && review.hosts.every((host) => host.status.status === "ok"),
     humanQueue,
     hostsDown,
-    // on a failed/aborted walk the cursor still holds the last committed tail
-    stream: (streamItems ?? streamCursor.tail).map((s) => ({ tsEmitted: s.tsEmitted, sourceSession: s.sourceSession, body: s.body })),
+    stream: (streamItems ?? []).map((s) => ({ tsEmitted: s.tsEmitted, sourceSession: s.sourceSession, body: s.body })),
     readErrors,
   };
 }
