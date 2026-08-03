@@ -128,6 +128,14 @@ function fixtureClient(overrides: Record<string, { status: number } | undefined>
   return new DaemonClient({ baseUrl: "http://x", fetchImpl });
 }
 
+function expectIncompleteNeedsTruth(snap: Awaited<ReturnType<typeof hydrateSnapshot>>): void {
+  const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+  view.dispatch({ type: "jump", section: "needs" });
+  const text = renderScreen(view.get(), snap, { cols: 140, rows: 34 }).lines.join("\n");
+  expect(text).toContain("human-queue: not yet known (read pending)");
+  expect(text).not.toContain("no fleet attention items right now");
+}
+
 describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
   it("maps topology: pods grouped, agent rows VERBATIM from the maintained projection (PIN 2)", async () => {
     const snap = await hydrateSnapshot(fixtureClient());
@@ -278,6 +286,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     }));
     expect(snap.humanQueueProbed).toBe(false);
     expect(snap.needs).toEqual([]);
+    expectIncompleteNeedsTruth(snap);
   });
 
   it("treats a fleet registry error as named incomplete state, never proven-empty", async () => {
@@ -290,6 +299,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     }));
     expect(snap.humanQueueProbed).toBe(false);
     expect(snap.readErrors).toContain("review-fleet registry: failed to parse hosts.yaml");
+    expectIncompleteNeedsTruth(snap);
   });
 
   it("gives failed, attention, and needs-input truth precedence over terminal active/idle", async () => {
@@ -335,6 +345,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     expect(snap.needs).toEqual([]);
     expect(snap.readErrors).toEqual([expect.stringMatching(/review-fleet: .*503/)]);
     expect(snap.hosts.find((h) => h.name === "local")?.rigs[0]?.name).toBe("myrig");
+    expectIncompleteNeedsTruth(snap);
   });
 });
 

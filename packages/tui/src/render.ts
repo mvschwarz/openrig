@@ -488,7 +488,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       // advertise a control that can only fail.
       lines.push(needsLine(item.source === "agent" ? "  ☐ " : "  ⚑ ", item, snap));
     }
-    if (snap.needs.length === 0) lines.push({ text: "  (no fleet attention items right now)" });
+    if (snap.needs.length === 0 && snap.humanQueueProbed) lines.push({ text: "  (no fleet attention items right now)" });
     if (snap.hostsDown.length > 0) {
       // composed BESIDE the items (a separate shipped read), never into the item shape
       lines.push({ text: "" });
