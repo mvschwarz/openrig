@@ -515,58 +515,17 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   private provisionManagedBootstrap(binding: { cwd?: string | null; tmuxSession?: string | null }): void {
-    this.provisionRigPermissions();
+    // OPR.0.4.8.2 agnostic rip-out: provisionRigPermissions (C2) removed — OpenRig no longer
+    // authors any config-file permission policy. Trust/onboarding (C3/C4) are neutral plumbing, kept.
     this.provisionWorkspaceTrust(binding.cwd ?? null);
     this.provisionOnboardingState();
   }
 
-  /** Managed rig command baseline.
-   *  Additive only; never removes existing entries. Uses `Bash(cmd:*)`
-   *  colon-form per Claude Code convention.
-   *
-   *  NOTE: this is not OpenRig's permission system. Harness-native
-   *  permissions should remain the primary control surface. */
-  static readonly CONVENIENCE_BASELINE: readonly string[] = [
-    "Bash(rig:*)",
-  ];
-
-  private provisionRigPermissions(): void {
-    const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
-    if (!home) return;
-
-    const settingsPath = nodePath.join(home, ".claude", "settings.json");
-    this.fs.mkdirp(nodePath.dirname(settingsPath));
-
-    const settings = this.readJsonObject(settingsPath);
-    const permissions = this.readJsonObjectField(settings, "permissions");
-    const allow = new Set(this.readStringArray(permissions["allow"]));
-
-    // Bash convenience baseline — additive only; never removes existing entries.
-    // Track whether any new patterns were actually added to avoid redundant writes
-    // (preserves provenance timestamp + file content idempotency on re-runs).
-    let added = 0;
-    for (const pattern of ClaudeCodeAdapter.CONVENIENCE_BASELINE) {
-      if (!allow.has(pattern)) {
-        allow.add(pattern);
-        added++;
-      }
-    }
-
-    if (added === 0) return; // All patterns already present; skip write
-
-    permissions["allow"] = Array.from(allow);
-    settings["permissions"] = permissions;
-
-    // Provenance marker so operators can distinguish rig-injected from human-authored
-    settings["_openrig_provenance"] = {
-      author: "openrig-at-spawn",
-      baseline: "convenience",
-      patterns_added: added,
-      ts: new Date().toISOString(),
-    };
-
-    this.fs.writeFile(settingsPath, JSON.stringify(settings, null, 2));
-  }
+  // OPR.0.4.8.2 agnostic rip-out: the CONVENIENCE_BASELINE (global `Bash(rig:*)` allow) and its
+  // provisionRigPermissions writer (assessment row C2 — wrote into ~/.claude/settings.json with an
+  // `_openrig_provenance` marker) are DELETED. OpenRig no longer authors any config-file permission
+  // policy; the harness-native permission surface is the control surface. Existing provenance-marked
+  // user files are NOT retro-scrubbed — the new code simply never touches settings.json.
 
   private provisionWorkspaceTrust(cwd: string | null): void {
     if (!cwd) return;
@@ -634,9 +593,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       : {};
   }
 
-  private readStringArray(value: unknown): string[] {
-    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-  }
+  // OPR.0.4.8.2 rip-out: readStringArray removed — its only caller was provisionRigPermissions (C2).
 
   /**
    * Best-effort: provision the OpenRig context collector for managed Claude sessions.

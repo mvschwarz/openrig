@@ -1,25 +1,6 @@
 {
   "permissions": {
-    "defaultMode": "acceptEdits",
-    "allow": [
-      "Bash(rig:*)",
-      "Bash(git:*)",
-      "Bash(npm:*)",
-      "Bash(npx:*)",
-      "Bash(pnpm:*)",
-      "Bash(yarn:*)",
-      "Bash(node:*)",
-      "Bash(tsc:*)",
-      "Bash(vitest:*)",
-      "Bash(jest:*)",
-      "Read",
-      "Edit",
-      "Write"
-    ],
-    "ask": [
-      "Bash(rig up:*)",
-      "Bash(rig down:*)"
-    ]
+    "defaultMode": "acceptEdits"
   },
   "enabledMcpjsonServers": [
     "exa",

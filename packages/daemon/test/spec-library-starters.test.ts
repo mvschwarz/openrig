@@ -425,28 +425,13 @@ describe("Starter specs", () => {
     }
     const claudeSettingsResource = sharedRuntimeResources.find((entry) => entry.id === "claude-default-settings");
     const claudeSettings = JSON.parse(readFileSync(join(SPECS_ROOT, "agents/shared", claudeSettingsResource!.path), "utf-8"));
-    // Slice 16 (item 1): the shipped fragment carries the dev toolchain a TDD
-    // factory needs (git / npm / node / tsc + edit tools) so fresh product-team
-    // seats don't stall on permission prompts. This assertion is the deliberate
-    // security GATE — any FURTHER widening beyond this authorized set must update
-    // it consciously. `rig up`/`rig down` stay behind the ask gate.
-    expect(claudeSettings.permissions.allow).toEqual([
-      "Bash(rig:*)",
-      "Bash(git:*)",
-      "Bash(npm:*)",
-      "Bash(npx:*)",
-      "Bash(pnpm:*)",
-      "Bash(yarn:*)",
-      "Bash(node:*)",
-      "Bash(tsc:*)",
-      "Bash(vitest:*)",
-      "Bash(jest:*)",
-      "Read",
-      "Edit",
-      "Write",
-    ]);
-    expect(claudeSettings.permissions.ask).toEqual(["Bash(rig up:*)", "Bash(rig down:*)"]);
+    // OPR.0.4.8.2 agnostic rip-out: the fragment's 13-entry allow-list (assessment C1b) and the
+    // rig up/down ask gates (C1c) are RIPPED. OpenRig bakes NO config-file permission policy
+    // beyond the acceptEdits floor — post-rip the fragment carries only defaultMode.
+    expect(claudeSettings.permissions.allow).toBeUndefined();
+    expect(claudeSettings.permissions.ask).toBeUndefined();
     expect(claudeSettings.permissions.deny).toBeUndefined();
+    expect(claudeSettings.permissions.defaultMode).toBe("acceptEdits");
 
     // Slice 29: claude-compact-in-place skill DELETED (was mis-imported as a
     // skill; its content remains in skill-spec docs not under skills/).
