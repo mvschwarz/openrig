@@ -248,6 +248,9 @@ export function isDirectRun(argv1 = process.argv[1], moduleUrl = import.meta.url
 
 // Slice 15 — the shared CLI error/exit path (re-exported for bin-wrapper + tests).
 export { runProgram, wantsJsonOutput } from "./cli-error.js";
+// Slice 17 — the bare-rig front door (re-exported so the PUBLIC bin-wrapper
+// path owns bare TTY invocations too, not just direct entry runs).
+export { runFrontDoor } from "./front-door.js";
 
 // Only parse when executed directly (not imported for testing)
 if (isDirectRun()) {

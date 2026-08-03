@@ -46,7 +46,10 @@ describe("live visual regressions", () => {
 
     view.dispatch({ type: "content-select", index: tabIndex });
     screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
-    expect(screen.lines[screen.contentTargets[tabIndex]!.y - 1]!.split("│")[1]).toMatch(/^›/);
+    // pane delimiter located by its FIXED boundary (EXPL_W=30 → content at 31):
+    // the slice-17 navigator's │ rails would shadow a first-│ split (guard-
+    // sanctioned truthful floor update; the assertion is unchanged)
+    expect(screen.lines[screen.contentTargets[tabIndex]!.y - 1]!.slice(31)).toMatch(/^›/);
 
     view.dispatch({ type: "content-select", index: termIndex });
     screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
@@ -54,7 +57,8 @@ describe("live visual regressions", () => {
 
     view.dispatch({ type: "content-select", index: rowIndex });
     screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
-    expect(screen.lines[screen.contentTargets[rowIndex]!.y - 1]!.split("│")[1]).toMatch(/^›/);
+    // fixed-boundary pane delimiter (see the tab-focus pin above)
+    expect(screen.lines[screen.contentTargets[rowIndex]!.y - 1]!.slice(31)).toMatch(/^›/);
   });
 
   it("never emits a composed row wider than the terminal", () => {

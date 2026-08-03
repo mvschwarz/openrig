@@ -118,6 +118,63 @@ describe("resolveTuiPath — monorepo-first, bundled fallback (the daemon resolv
   });
 });
 
+describe("PUBLIC bin ownership (guard finding 1 — the wrapper is the real front door)", () => {
+  const binWrapper = join(__dirname, "..", "dist", "bin-wrapper.js");
+  const hasTmux = spawnSync("tmux", ["-V"], { encoding: "utf-8" }).status === 0;
+  it.skipIf(!existsSync(binWrapper) || !hasTmux)("bare PUBLIC bin under a REAL PTY reaches the front-door path (daemon-down degrade proves ownership)", () => {
+    // tmux gives the process a real TTY on BOTH streams (BSD script(1) cannot
+    // allocate one under a piped test runner). A dead daemon URL forces the
+    // front door's degrade branch — its distinctive message proves
+    // runFrontDoor ran on the PUBLIC path (commander's usage text would mean
+    // the bypass guard reported).
+    const session = `frontdoor-pin-${process.pid}`;
+    spawnSync("tmux", ["kill-session", "-t", session], { encoding: "utf-8" });
+    const run = spawnSync(
+      "tmux",
+      ["new-session", "-d", "-s", session, "-x", "120", "-y", "30",
+        `OPENRIG_URL=http://127.0.0.1:9 ${process.execPath} ${binWrapper}; sleep 15`],
+      { encoding: "utf-8", timeout: 10000 },
+    );
+    expect(run.status).toBe(0);
+    let text = "";
+    for (let i = 0; i < 20 && !/daemon not running|Usage: rig/.test(text); i++) {
+      spawnSync("sleep", ["0.5"]);
+      text = spawnSync("tmux", ["capture-pane", "-t", session, "-p"], { encoding: "utf-8", timeout: 5000 }).stdout ?? "";
+    }
+    spawnSync("tmux", ["kill-session", "-t", session], { encoding: "utf-8" });
+    expect(text).toMatch(/daemon not running — try: rig up/);
+    expect(text).not.toMatch(/Usage: rig \[options\] \[command\]/); // NOT the commander bypass
+    expect(text).not.toMatch(/\n\s+at /);
+  });
+
+  it.skipIf(!existsSync(binWrapper))("compiled wrapper wiring: forced-TTY in-process run reaches the degrade branch (belt for PTY-less environments)", () => {
+    const probe = spawnSync(
+      process.execPath,
+      ["-e", `process.stdin.isTTY = true; process.stdout.isTTY = true; process.argv[1] = ${JSON.stringify(binWrapper)}; import(${JSON.stringify(binWrapper)});`],
+      { encoding: "utf-8", timeout: 10000, env: { ...process.env, OPENRIG_URL: "http://127.0.0.1:9" } },
+    );
+    const text = `${probe.stdout}${probe.stderr}`;
+    expect(text).toMatch(/daemon not running — try: rig up/);
+    expect(text).not.toMatch(/\n\s+at /);
+  });
+
+  it.skipIf(!existsSync(binWrapper))("piped PUBLIC bin keeps the commander usage baseline (no TUI, fast exit)", () => {
+    const result = spawnSync(process.execPath, [binWrapper], {
+      input: "x\n",
+      timeout: 5000,
+      encoding: "utf-8",
+    });
+    expect(result.status).toBe(0);
+    expect(`${result.stderr}${result.stdout}`).toMatch(/Usage: rig/);
+  });
+
+  it.skipIf(!existsSync(binWrapper))("PUBLIC bin subcommands are untouched (rig --version via wrapper)", () => {
+    const result = spawnSync(process.execPath, [binWrapper, "--version"], { timeout: 5000, encoding: "utf-8" });
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
+  });
+});
+
 describe("script-safety integration (the compiled front door)", () => {
   const cliEntry = join(__dirname, "..", "dist", "index.js");
   it.skipIf(!existsSync(cliEntry))("`echo x | rig` returns usage fast — no hang (exit code preserves today's clean-help baseline)", () => {

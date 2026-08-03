@@ -54,15 +54,67 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     expect(pane.some((l) => l.includes("dev50.driver"))).toBe(true);
   });
 
-  it("agent rows carry right-aligned ctx% meta; a null ctx renders — (honest-unknown)", () => {
+  it("agent meta is right-aligned runtime · ctx% where it fits, ctx% otherwise — IDENTITY-FIRST (locked mini-req + guard finding 3)", () => {
+    // demo names are long: full identity is kept, the meta degrades to ctx-only
     const s = makeStore();
     s.dispatch({ type: "drill", resource: "pod", name: "dev50", target: { host: "vm-host", rig: "openrig-build" } });
-    const screen = renderScreen(s.get(), snap, { cols: 120, rows: 32 });
-    const pane = explorerPane(screen.lines);
+    const pane = explorerPane(renderScreen(s.get(), snap, { cols: 120, rows: 32 }).lines);
     const driver = pane.find((l) => l.includes("dev50.driver"))!;
-    expect(driver.trimEnd()).toMatch(/62%$/); // demo fixture: driver ctx 62
+    expect(driver.trimEnd()).toMatch(/62%$/); // full name preserved, ctx at the edge
     const qa = pane.find((l) => l.includes("dev50.qa"))!;
-    expect(qa.trimEnd()).toMatch(/—$/); // demo fixture: qa ctx null → honest
+    expect(qa.trimEnd()).toMatch(/—$/); // ctx null → honest-unknown
+
+    // a short name leaves room: the FULL runtime · ctx meta renders (the
+    // mockup's "claude 18%" display form for a claude-code seat)
+    const shortSnap = {
+      ...snap,
+      hosts: [{ name: "h", reachable: true, rigs: [{ name: "r", pods: [{ name: "p", agents: [
+        { name: "ok", runtime: "claude-code", spec: "", context: 5, tokens: null, status: "active", live: true },
+      ] }] }] }],
+    };
+    const s2 = createViewState({ instanceId: "nav-short", getSnapshot: () => shortSnap });
+    s2.dispatch({ type: "drill", resource: "pod", name: "p", target: { host: "h", rig: "r" } });
+    const shortPane = explorerPane(renderScreen(s2.get(), shortSnap, { cols: 120, rows: 32 }).lines);
+    expect(shortPane.find((l) => l.includes("● ok"))!.trimEnd()).toMatch(/claude 5%$/);
+  });
+
+  it("only an identity too long for even the leanest meta truncates with … — meta stays complete at the edge", () => {
+    const longSnap = {
+      ...snap,
+      hosts: [{ name: "h", reachable: true, rigs: [{ name: "r", pods: [{ name: "p", agents: [
+        { name: "an-extremely-long-agent-name-x", runtime: "codex", spec: "", context: 9, tokens: null, status: "active", live: true },
+      ] }] }] }],
+    };
+    const s = createViewState({ instanceId: "nav-long", getSnapshot: () => longSnap });
+    s.dispatch({ type: "drill", resource: "pod", name: "p", target: { host: "h", rig: "r" } });
+    const row = explorerPane(renderScreen(s.get(), longSnap, { cols: 120, rows: 32 }).lines).find((l) => l.includes("an-extre"))!;
+    expect(row).toMatch(/…/);
+    expect(row.trimEnd()).toMatch(/9%$/);
+  });
+
+  it("an expanded namespaced spec folder renders its child ONE level deeper, never a sibling (guard finding 2)", () => {
+    const nsSnap = {
+      ...snap,
+      specs: [
+        ...snap.specs,
+        { name: "vault-specialist", kind: "agent" as const, runtime: "codex", namespace: "vault", usedByRigs: [] },
+      ],
+    };
+    const s = createViewState({ instanceId: "nav-ns", getSnapshot: () => nsSnap });
+    s.dispatch({ type: "jump", section: "specs" });
+    s.dispatch({ type: "toggle-expand", key: "folder:vault" });
+    const screen = renderScreen(s.get(), nsSnap, { cols: 120, rows: 40 });
+    const pane = explorerPane(screen.lines);
+    const folder = pane.find((l) => l.includes("vault/"))!;
+    const child = pane.find((l) => l.includes("vault-specialist"))!;
+    const indentOf = (l: string) => (/^\s*(?:│ )*/.exec(l)?.[0] ?? "").length + (l.match(/├─|└─/)?.index ?? 0);
+    const branchCol = (l: string) => l.search(/├─|└─/);
+    expect(branchCol(child)).toBeGreaterThan(branchCol(folder)); // child branch sits deeper
+    void indentOf;
+    // PIN-1 untouched: the child's action is still the spec drill from the row model
+    const rows = computeExplorerRows(s.get(), nsSnap);
+    const childRow = rows.find((r) => r.key === "spec:vault-specialist")!;
+    expect(childRow.action).toEqual({ type: "drill", resource: "spec", name: "vault-specialist" });
   });
 
   it("pod rows carry their agent count right-aligned (moved out of the inline label)", () => {

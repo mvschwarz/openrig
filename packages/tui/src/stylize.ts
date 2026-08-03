@@ -31,7 +31,7 @@ function paintExplorer(text: string, s: Style, focused: boolean): string {
   if (/[▾▸] (TOPOLOGY|SPECS|NEEDS-YOU)/.test(text)) return s.paint("bright", text, { bold: true });
   // Slice-17 re-skin: branch guides paint faint (chrome), the row body keeps
   // its own rules — the tree rails read as structure, never as content.
-  const tree = text.match(/^( *(?:[┊ ] )*(?:├─|└─) )(.*)$/);
+  const tree = text.match(/^( *(?:[│ ] )*(?:├─|└─) )(.*)$/);
   if (tree) return s.paint("chrome", tree[1]!) + paintExplorerBody(tree[2]!, s);
   return paintExplorerBody(text, s);
 }
@@ -155,7 +155,10 @@ export function stylizeLines(screen: Screen, s: Style): string[] {
       else if (tail.startsWith("⚠")) tail = s.paint("warn", tail);
       return `${s.paint("accent", line.slice(0, closeAt + 1), { bold: true })}${s.paint("bright", path)}${tail}`;
     }
-    const border = line.indexOf("│");
+    // The pane border lives at the FIXED boundary column (EXPL_W) — located
+    // positionally, never by scanning: the navigator's │ rails would shadow
+    // a first-index search (slice-17 locked-rail resolution).
+    const border = line.charAt(EXPL_W) === "│" ? EXPL_W : -1;
     if (border >= EXPL_W - 1 && border <= EXPL_W) {
       const left = line.slice(0, border);
       const marker = line.slice(border + 1, border + 2);

@@ -77,7 +77,14 @@ export async function run(argv = process.argv): Promise<void> {
   const mod = await import(entryUrl) as {
     createProgram: () => import("commander").Command;
     runProgram: (program: import("commander").Command, argv: string[]) => Promise<number>;
+    runFrontDoor?: (argv: readonly string[]) => Promise<boolean>;
   };
+  // Slice 17: the PUBLIC bin is the real front door — bare `rig` in a TTY
+  // opens the TUI here, not only under a direct `node dist/index.js` run
+  // (guard finding 1: importing the entry makes its isDirectRun false).
+  // Feature-detected so the wrapper still runs an older sibling entry.
+  const owned = mod.runFrontDoor ? await mod.runFrontDoor(normalizedArgv) : false;
+  if (owned) return;
   // Slice 15: run through the shared error path so `--json` failures emit a JSON
   // error object with a nonzero exit instead of plain Commander text.
   await mod.runProgram(mod.createProgram(), normalizedArgv);

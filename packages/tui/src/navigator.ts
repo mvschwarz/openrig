@@ -26,8 +26,8 @@ function parseKey(key: string | undefined): KeyParts | null {
   return { kind: key.slice(0, at), parts: key.slice(at + 1).split("/") };
 }
 
-function keyDepth(key: string | undefined): number {
-  const parsed = parseKey(key);
+function keyDepth(row: ExplorerRow): number {
+  const parsed = parseKey(row.key);
   if (!parsed) return -1; // keyless rows (filter, needs items) keep their label
   switch (parsed.kind) {
     case "section":
@@ -41,7 +41,11 @@ function keyDepth(key: string | undefined): number {
     case "pod":
       return 3;
     case "spec":
-      return parsed.parts[0]?.includes("/") ? 3 : 2;
+      // The row model's spec keys carry no parent relation (guard finding 2);
+      // the folder membership IS encoded in the shipped label indent — a
+      // foldered spec indents 6 spaces, a root spec 4 (state.ts) — so the
+      // child renders one level BELOW its folder, never as a sibling.
+      return /^ {6}/.test(row.label) ? 3 : 2;
     case "agent":
       return 4;
     default:
@@ -59,24 +63,32 @@ function contentOf(row: ExplorerRow, kind: string): string {
   return stripped;
 }
 
-function metaOf(row: ExplorerRow, snap: FleetSnapshot): string {
+/** meta candidates, RICHEST first — the renderer picks the first that fits
+ * WITHOUT sacrificing row identity (names never become ambiguous to make
+ * room for telemetry) */
+function metaOf(row: ExplorerRow, snap: FleetSnapshot): string[] {
   const parsed = parseKey(row.key);
-  if (!parsed) return "";
+  if (!parsed) return [];
   if (parsed.kind === "agent") {
     const [host, rig, pod, ...name] = parsed.parts;
     const agent = snap.hosts
       .find((h) => h.name === host)?.rigs.find((r) => r.name === rig)
       ?.pods.find((p) => p.name === pod)?.agents.find((a) => a.name === name.join("/"));
-    if (!agent) return "";
-    // honest-unknown: no served ctx → an explicit —, never a fabricated value
-    return agent.context == null ? "—" : `${agent.context}%`;
+    if (!agent) return [];
+    // Locked meta = runtime · ctx% (mini-req 1). The runtime's DISPLAY form is
+    // its first hyphen token — the literal mockups render exactly "claude 18%"
+    // for claude-code seats (tui-ascii-aesthetic.html) — served data unchanged.
+    // Honest-unknown: no served ctx → an explicit —, never a fabricated value.
+    const runtimeToken = agent.runtime.split("-")[0] || agent.runtime;
+    const ctx = agent.context == null ? "—" : `${agent.context}%`;
+    return [`${runtimeToken} ${ctx}`, ctx];
   }
   if (parsed.kind === "pod") {
     const [host, rig, pod] = parsed.parts;
     const found = snap.hosts.find((h) => h.name === host)?.rigs.find((r) => r.name === rig)?.pods.find((p) => p.name === pod);
-    return found ? String(found.agents.length) : "";
+    return found ? [String(found.agents.length)] : [];
   }
-  return "";
+  return [];
 }
 
 /**
@@ -85,7 +97,7 @@ function metaOf(row: ExplorerRow, snap: FleetSnapshot): string {
  * rails read continuously (the `tree` command look).
  */
 export function navigatorLabels(rows: ExplorerRow[], snap: FleetSnapshot, width: number): string[] {
-  const depths = rows.map((row) => keyDepth(row.key));
+  const depths = rows.map((row) => keyDepth(row));
   const isLast = rows.map((_, i) => {
     const depth = depths[i]!;
     if (depth <= 0) return true;
@@ -98,26 +110,33 @@ export function navigatorLabels(rows: ExplorerRow[], snap: FleetSnapshot, width:
     return true;
   });
 
-  // NB: the continuation rail is ┊ (not │) — the pane BORDER is │ and the
-  // shipped floor treats the first │ on a line as pane structure; the rail
-  // must never masquerade as the border (same glyph-collision class as the
-  // emoji-width lesson). Branch glyphs ├─ └─ are the mockup's exact chars.
+  // The continuation rail is the mockup's literal │ (guard finding 4, locked
+  // glyph). The pane border is ALSO │ but lives at a FIXED column (EXPL_W) —
+  // the paint layer and floors locate it by that boundary, never by scanning
+  // for the first │ (which a rail would shadow).
   const railOpen: boolean[] = []; // per depth level: does a later sibling exist?
   return rows.map((row, i) => {
     const depth = depths[i]!;
     if (depth < 0) return row.label; // keyless rows untouched
     if (depth === 0) return row.label; // section headers keep their ▾/▸ identity
     railOpen[depth] = !isLast[i]!;
-    const guides = Array.from({ length: depth - 1 }, (_, level) => (railOpen[level + 1] ? "┊ " : "  ")).join("");
+    const guides = Array.from({ length: depth - 1 }, (_, level) => (railOpen[level + 1] ? "│ " : "  ")).join("");
     const branch = isLast[i] ? "└─ " : "├─ ";
     const parsed = parseKey(row.key)!;
     let content = contentOf(row, parsed.kind);
-    const meta = metaOf(row, snap);
+    const candidates = metaOf(row, snap);
     const prefix = ` ${guides}${branch}`;
-    if (!meta) return `${prefix}${content}`;
-    // meta is glance data — guaranteed; over-long content truncates honestly
-    const contentMax = width - prefix.length - meta.length - 1;
-    if (content.length > contentMax) content = `${content.slice(0, Math.max(contentMax - 1, 0))}…`;
+    if (candidates.length === 0) return `${prefix}${content}`;
+    // IDENTITY-FIRST width policy: pick the richest meta that fits beside the
+    // FULL name (runtime · ctx% where geometry allows, ctx% otherwise); only
+    // when even the leanest meta cannot fit does the name truncate with … —
+    // rows must never become ambiguous to make room for telemetry.
+    const fits = candidates.find((m) => prefix.length + content.length + 1 + m.length <= width);
+    const meta = fits ?? candidates.at(-1)!;
+    if (!fits) {
+      const contentMax = width - prefix.length - meta.length - 1;
+      content = `${content.slice(0, Math.max(contentMax - 1, 0))}…`;
+    }
     const gap = Math.max(width - prefix.length - content.length - meta.length, 1);
     return `${prefix}${content}${" ".repeat(gap)}${meta}`;
   });
