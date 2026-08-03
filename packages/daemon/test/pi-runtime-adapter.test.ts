@@ -607,4 +607,37 @@ describe("durable catch-up cursor survives launch-attempt resets", () => {
     expect(result).toEqual({ ok: true });
     expect(sendText).toHaveBeenCalledOnce();
   });
+
+  // OPR.0.4.8.2: Pi RESTORE resource-trust posture (RESOURCE TRUST, NOT a permission policy). Direct
+  // PiResumeAdapter call-site pin so pi-resume.ts cannot regress while the pure piTrust helper stays
+  // green. OFF keeps the configured/no-approve trust; YOLO ON forces --approve.
+  it("PiResumeAdapter restore trust: OFF -> --no-approve; ON (YOLO) -> --approve", async () => {
+    async function resumeCmd(): Promise<string> {
+      const fs = memFs({ [SESSION_FILE]: "jsonl" });
+      let cmd = "";
+      const sendText = vi.fn(async (_t: string, text: string) => {
+        cmd = text;
+        fs.files[statePath] = readyState(SESSION_FILE, launchIdFrom(text));
+        return { ok: true as const };
+      });
+      const a = new PiResumeAdapter(mockTmux({ sendText }), fs, { stateRoot: STATE_ROOT, runnerEntryPath: RUNNER }, {
+        pollMs: 1, maxWaitMs: 5, sleep: async () => {},
+      });
+      await a.resume(SESSION, "pi_session_file", SESSION_FILE, "/work");
+      return cmd;
+    }
+    try {
+      delete process.env.OPENRIG_YOLO;
+      const off = await resumeCmd();
+      expect(off).toContain("--no-approve");
+      expect(off).not.toContain("--approve"); // "--no-approve" does not contain the "--approve" token
+
+      process.env.OPENRIG_YOLO = "1";
+      const on = await resumeCmd();
+      expect(on).toContain("--approve");
+      expect(on).not.toContain("--no-approve");
+    } finally {
+      delete process.env.OPENRIG_YOLO;
+    }
+  });
 });

@@ -17,7 +17,9 @@ export function yoloEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 }
 
 // ── The single launch-posture decision per harness — used on EVERY managed launch path (fresh,
-// resume, fork) so the floor (OFF) and the full-bypass (ON) are uniform, never path-dependent. ──
+// resume, fork) so the floor (OFF) and the maximally-permissive posture (ON) are uniform, never
+// path-dependent. NOTE the ON posture differs by harness: Claude/Codex = permission bypass; Pi =
+// full RESOURCE TRUST (--approve), which is not a permission policy. ──
 
 /** Claude launch posture flag: floor `--permission-mode acceptEdits`, or the YOLO full bypass. */
 export function claudePostureFlag(env: NodeJS.ProcessEnv = process.env): string {
