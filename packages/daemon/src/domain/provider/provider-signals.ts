@@ -4,7 +4,7 @@
 // `unknown` rows (never silent zeros, never missing rows); only a real structured read is
 // `allow_switch_decision` (BR-2).
 
-import type { ProviderSignal } from "./provider-types.js";
+import type { ProviderKind, ProviderSignal } from "./provider-types.js";
 
 /** One provider-native usage window from the Codex app-server `account/rateLimits/read`. */
 export interface CodexWindowReading {
@@ -209,4 +209,39 @@ export function claudeStatuslineSignals(input: ClaudeSignalInput): ProviderSigna
     return [claudeUnknownSignal(accountRef, asOf, CLAUDE_UNKNOWN_REASON.empty_reading, staleAfter)];
   }
   return rows;
+}
+
+// ── Reactive lane (both providers) ──────────────────────────────────────────────────────
+// At-limit errors / stream failures / stop-error events are consumed IMMEDIATELY as
+// sourceClass=provider_event, authority=reactive_error — EXHAUSTION evidence, not a remaining
+// meter (so never a usedPercent). An at-limit event is a real exhaustion trigger
+// (allow_switch_decision); stream/stop errors are advisory context only.
+
+export type ReactiveEventKind = "at_limit" | "stream_failure" | "stop_error";
+
+export interface ReactiveEventInput {
+  provider: ProviderKind;
+  accountRef: string;
+  kind: ReactiveEventKind;
+  asOf: string;
+  // Required: a reactive event without a freshness bound could never pass BR-2, and a momentary
+  // event must always carry when it expires. Staleness itself stays the shared predicate's job.
+  staleAfter: string;
+}
+
+export function reactiveEventSignal(input: ReactiveEventInput): ProviderSignal {
+  return {
+    provider: input.provider,
+    accountRef: input.accountRef,
+    sourceClass: "provider_event",
+    authority: "reactive_error",
+    asOf: input.asOf,
+    staleAfter: input.staleAfter,
+    // supportsNotification is OMITTED: it describes a per-account transport capability (true for
+    // Codex account/rateLimits/updated, false/unknown for Claude statusline). A generic reactive
+    // event does not establish that capability — hard-coding false would fabricate it.
+    // At-limit exhaustion is an actionable switch trigger; stream/stop errors are advisory.
+    automationUse: input.kind === "at_limit" ? "allow_switch_decision" : "advisory_only",
+    // No usedPercent — a reactive event is exhaustion evidence, not a remaining meter.
+  };
 }
