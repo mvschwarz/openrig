@@ -54,6 +54,12 @@ describe("graph view reachability (the existing navigation, extended additively)
     expect(state.lastError).toBeNull();
   });
 
+  it("the DEFAULT graph style is braille (Phase-2 decision rule executed: clean-box solved) with hatchet one command away", () => {
+    const s = makeStore(graphSnap());
+    expect(s.get().graphStyle).toBe("braille");
+    expect(s.dispatch(parseCommand("style hatchet")).graphStyle).toBe("hatchet");
+  });
+
   it("`style braille` rides the command bar; unknown styles are named errors", () => {
     expect(parseCommand("style braille")).toEqual({ type: "style", name: "braille" });
     const s = makeStore(graphSnap());

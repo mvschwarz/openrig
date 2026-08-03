@@ -43,7 +43,11 @@ export function createViewState(options: CreateViewStateOptions): ViewStateStore
     selection: 0,
     runningOf: null,
     viewTab: "table",
-    graphStyle: "hatchet",
+    // Phase-2 DECISION RULE EXECUTED (founder pre-ratified): the clean-box
+    // braille attempt SOLVED → braille = primary, hatchet one command away
+    // (`style hatchet`). Residual: braille is TIER-2 (font-dependent) — the
+    // decision record carries that caveat to the founder via pm.
+    graphStyle: "braille",
     contentOffset: 0,
     contentMaxOffset: 0,
     contentTargetCount: 0,

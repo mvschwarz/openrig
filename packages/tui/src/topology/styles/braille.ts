@@ -55,13 +55,21 @@ export function renderBraille(layout: GraphLayout, ctx: StyleContext, width: num
     if (!from || !to) continue;
     const token = edgeToken(edge.label);
     const rightward = to.x > from.x;
-    const sx = (rightward ? from.x + from.w : from.x - 1) * 2;
-    const sy = (from.y + 1) * 4 + 2;
     const txCell = rightward ? to.x - 1 : to.x + to.w;
-    const tx = txCell * 2 + (rightward ? 0 : 1);
-    const ty = (to.y + 1) * 4 + 2;
-    field.line(sx, sy, tx, ty, token);
-    canvas.set(txCell + (rightward ? 0 : 0), to.y + 1, rightward ? "▸" : "◂", token);
+    if (from.y === to.y) {
+      // CLEAN-BOX refinement: a straight horizontal is already straight —
+      // box-drawing ─ aligns mid-cell with the arrowhead (braille ⠤ sits low
+      // and kinks the junction); braille earns its keep on DIAGONALS only.
+      const [x1, x2] = rightward ? [from.x + from.w, txCell - 1] : [txCell + 1, from.x - 1];
+      canvas.hline(x1, x2, from.y + 1, "─", token);
+    } else {
+      const sx = (rightward ? from.x + from.w : from.x - 1) * 2;
+      const sy = (from.y + 1) * 4 + 2;
+      const tx = txCell * 2 + (rightward ? 0 : 1);
+      const ty = (to.y + 1) * 4 + 2;
+      field.line(sx, sy, tx, ty, token);
+    }
+    canvas.set(txCell, to.y + 1, rightward ? "▸" : "◂", token);
   }
   field.blit(canvas);
   canvas.text(2, canvas.height + 1, "braille sub-cell edges · TIER-2 (modern terminals) · fallback = hatchet box-drawing", "dim");
