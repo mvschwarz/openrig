@@ -117,7 +117,25 @@ interface StreamItemRead {
   tsEmitted: string;
   sourceSession: string;
   body: string;
+  /** the served ascending cursor (stream_sort_key) */
+  streamSortKey: string;
 }
+
+/** Cross-refresh stream cursor (instance-scoped, caller-owned): the walk
+ * resumes from the last seen sortKey each refresh instead of re-reading the
+ * whole stream, and `tail` always holds the ACTUAL newest items. */
+export interface StreamCursor {
+  after: string | null;
+  tail: StreamItemRead[];
+}
+
+export function createStreamCursor(): StreamCursor {
+  return { after: null, tail: [] };
+}
+
+const STREAM_PAGE_LIMIT = 100;
+const STREAM_TAIL_KEEP = 5;
+const STREAM_MAX_PAGES_PER_REFRESH = 100;
 
 function fmtTokens(input: number | null, output: number | null): string | null {
   if (input == null && output == null) return null;
@@ -217,7 +235,33 @@ function agentSpecTruth(raw?: string): { runtime?: string; skills: string[] } {
  * entry's updatedAt changes. Owned by the caller (instance-scoped, no module state). */
 export type SpecReviewCache = Map<string, SpecLibraryReviewRead>;
 
-export async function hydrateSnapshot(client: DaemonClient, reviewCache?: SpecReviewCache): Promise<FleetSnapshot> {
+/** Walk the ascending stream pages from the cursor to the ACTUAL tail (QA
+ * blocker 02d3acde: a fixed limit returns the OLDEST rows once the stream
+ * outgrows it — the newest item must be reached via the served afterSortKey
+ * cursor, never a cap). Returns the updated tail; throws only via `read`. */
+async function walkStreamTail(
+  read: (limit: number, afterSortKey?: string) => Promise<unknown>,
+  cursor: StreamCursor,
+): Promise<StreamItemRead[]> {
+  let after = cursor.after ?? undefined;
+  let tail = [...cursor.tail];
+  for (let page = 0; page < STREAM_MAX_PAGES_PER_REFRESH; page++) {
+    const items = (await read(STREAM_PAGE_LIMIT, after)) as StreamItemRead[];
+    if (!Array.isArray(items) || items.length === 0) break;
+    tail = [...tail, ...items].slice(-STREAM_TAIL_KEEP);
+    after = items.at(-1)!.streamSortKey;
+    if (items.length < STREAM_PAGE_LIMIT) break;
+  }
+  cursor.after = after ?? cursor.after;
+  cursor.tail = tail;
+  return tail;
+}
+
+export async function hydrateSnapshot(
+  client: DaemonClient,
+  reviewCache?: SpecReviewCache,
+  streamCursor: StreamCursor = createStreamCursor(),
+): Promise<FleetSnapshot> {
   const readErrors: string[] = [];
   async function safe<T>(label: string, fn: () => Promise<unknown>): Promise<T | null> {
     try {
@@ -233,7 +277,7 @@ export async function hydrateSnapshot(client: DaemonClient, reviewCache?: SpecRe
     safe<RigSummaryRead[]>("rigs-summary", () => client.rigsSummary()),
     safe<SpecLibraryRead[]>("specs-library", () => client.specsLibrary()),
     safe<ReviewFleetRead>("review-fleet", () => client.reviewFleet()),
-    safe<StreamItemRead[]>("stream-list", () => client.streamList()),
+    safe<StreamItemRead[]>("stream-tail", () => walkStreamTail((limit, after) => client.streamList(limit, after), streamCursor)),
   ]);
 
   const agentSpecNames = new Set((library ?? []).filter((entry) => entry.kind === "agent").map((entry) => entry.name));

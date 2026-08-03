@@ -22,7 +22,8 @@ const SPEC_4A_ROUTES = [
   "/api/review/fleet",
   "/api/queue/attention-aggregate",
   "/api/rigs/openrig-build/status",
-  "/api/stream/list?limit=5",
+  "/api/stream/list?limit=100",
+  "/api/stream/list?limit=100&afterSortKey=k1",
 ];
 
 describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)", () => {
@@ -48,6 +49,7 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
     await c.attentionAggregate();
     await c.rigStatus("openrig-build");
     await c.streamList();
+    await c.streamList(100, "k1");
 
     expect(seen.sort()).toEqual([...SPEC_4A_ROUTES].sort());
   });

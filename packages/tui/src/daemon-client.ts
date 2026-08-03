@@ -96,8 +96,10 @@ export class DaemonClient {
   }
 
   // --- rig-stream footer (§4.A row 7: the rig stream read surface) ---
-  streamList(limit = 5) {
-    return this.get(`/api/stream/list?limit=${limit}`);
+  /** ascending page of the stream; afterSortKey is the served cursor contract
+   * (stream.ts /list) — the tail is reached by walking pages, never by a cap */
+  streamList(limit = 100, afterSortKey?: string) {
+    return this.get(`/api/stream/list?limit=${limit}${afterSortKey ? `&afterSortKey=${encodeURIComponent(afterSortKey)}` : ""}`);
   }
 
   // --- drive-structure writes (BR-8: EXISTING contracts only; the ONLY two) ---

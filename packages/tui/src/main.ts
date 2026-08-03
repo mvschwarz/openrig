@@ -14,7 +14,7 @@ import { stylizeLines } from "./stylize.js";
 import { createControlSocket, defaultSocketPath } from "./socket-server.js";
 import { demoSnapshot } from "./demo-data.js";
 import { DaemonClient } from "./daemon-client.js";
-import { hydrateSnapshot } from "./hydrate.js";
+import { hydrateSnapshot, createStreamCursor } from "./hydrate.js";
 import type { Action, FleetSnapshot, Screen } from "./types.js";
 import type { SpecReviewCache } from "./hydrate.js";
 
@@ -61,8 +61,9 @@ async function run(): Promise<void> {
   let refreshTimer: NodeJS.Timeout | null = null;
   if (client) {
     const reviewCache: SpecReviewCache = new Map();
+    const streamCursor = createStreamCursor();
     const refresh = async () => {
-      snapshot = await hydrateSnapshot(client, reviewCache);
+      snapshot = await hydrateSnapshot(client, reviewCache, streamCursor);
       draw();
     };
     await refresh();

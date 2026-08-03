@@ -102,7 +102,7 @@ const FIXTURES: Record<string, unknown> = {
     settled: [], settledProvenance: "computed", composedAt: "2026-08-02T09:30:00.000Z",
     hosts: [{ hostId: "local", status: { hostId: "local", status: "ok" } }, { hostId: "mm2-host", status: { hostId: "mm2-host", status: "ok" } }],
   },
-  "/api/stream/list?limit=5": [
+  "/api/stream/list?limit=100": [
     { streamItemId: "si-1", tsEmitted: "2026-08-02T10:00:00.000Z", streamSortKey: "k1", sourceSession: "dev-guard@myrig", body: "gate cleared: slice-11", format: "text", hintType: null, hintUrgency: null, hintDestination: null, hintTags: null, interrupt: false, archivedAt: null },
   ],
   "/api/queue/attention-aggregate": {
@@ -279,5 +279,79 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     expect(snap.needs).toEqual([]);
     expect(snap.readErrors).toEqual([expect.stringMatching(/review-fleet: .*503/)]);
     expect(snap.hosts.find((h) => h.name === "local")?.rigs[0]?.name).toBe("myrig");
+  });
+});
+
+describe("footer stream tail via the cursor contract (QA blocker 02d3acde)", () => {
+  function streamClient(pages: Record<string, unknown[]>): DaemonClient {
+    const calls: string[] = [];
+    const fetchImpl = (async (url: unknown) => {
+      const route = String(url).replace("http://x", "");
+      calls.push(route);
+      if (route.startsWith("/api/stream/list")) {
+        const after = new URL(String(url)).searchParams.get("afterSortKey") ?? "";
+        return { ok: true, json: async () => pages[after] ?? [] } as Response;
+      }
+      if (route in FIXTURES) return { ok: true, json: async () => FIXTURES[route] } as Response;
+      return { ok: true, json: async () => [] } as Response;
+    }) as typeof fetch;
+    const client = new DaemonClient({ baseUrl: "http://x", fetchImpl });
+    return Object.assign(client, { __calls: calls });
+  }
+
+  const item = (n: number) => ({
+    streamItemId: `si-${n}`, tsEmitted: `2026-08-03T07:${String(n % 60).padStart(2, "0")}:00.000Z`,
+    streamSortKey: `k${String(n).padStart(4, "0")}`, sourceSession: "qa@rig", body: `item-${n}`,
+    format: "text", hintType: null, hintUrgency: null, hintDestination: null, hintTags: null, interrupt: false, archivedAt: null,
+  });
+
+  it("beyond-cap: with 6 unarchived items the ticker shows the SIXTH (QA's exact repro shape)", async () => {
+    const { createStreamCursor } = await import("../src/hydrate.js");
+    const six = Array.from({ length: 6 }, (_, i) => item(i + 1));
+    const client = streamClient({ "": six });
+    const snap = await hydrateSnapshot(client, new Map(), createStreamCursor());
+    expect(snap.stream.at(-1)?.body).toBe("item-6");
+  });
+
+  it("beyond-page-size: 147 items across ascending pages — the walk reaches the true tail", async () => {
+    const { createStreamCursor } = await import("../src/hydrate.js");
+    const all = Array.from({ length: 147 }, (_, i) => item(i + 1));
+    const client = streamClient({ "": all.slice(0, 100), k0100: all.slice(100) });
+    const snap = await hydrateSnapshot(client, new Map(), createStreamCursor());
+    expect(snap.stream.at(-1)?.body).toBe("item-147");
+    expect(snap.stream).toHaveLength(5);
+  });
+
+  it("cursor persists across refreshes: the next hydrate resumes AFTER the last seen key", async () => {
+    const { createStreamCursor } = await import("../src/hydrate.js");
+    const cursor = createStreamCursor();
+    const first = streamClient({ "": [item(1), item(2)] });
+    await hydrateSnapshot(first, new Map(), cursor);
+    expect(cursor.after).toBe("k0002");
+
+    const second = streamClient({ k0002: [item(3)] });
+    const snap = await hydrateSnapshot(second, new Map(), cursor);
+    expect(snap.stream.at(-1)?.body).toBe("item-3");
+    expect((second as unknown as { __calls: string[] }).__calls.some((c) => c.includes("afterSortKey=k0002"))).toBe(true);
+  });
+
+  it("an empty stream stays honest-empty and a failed page keeps the prior tail with a named error", async () => {
+    const { createStreamCursor } = await import("../src/hydrate.js");
+    const cursor = createStreamCursor();
+    const empty = streamClient({ "": [] });
+    const snap = await hydrateSnapshot(empty, new Map(), cursor);
+    expect(snap.stream).toEqual([]);
+
+    const failing = new DaemonClient({
+      baseUrl: "http://x",
+      fetchImpl: (async (url: unknown) => {
+        const route = String(url).replace("http://x", "");
+        if (route.startsWith("/api/stream/list")) return { ok: false, status: 503, json: async () => ({}) } as Response;
+        if (route in FIXTURES) return { ok: true, json: async () => FIXTURES[route] } as Response;
+        return { ok: true, json: async () => [] } as Response;
+      }) as typeof fetch,
+    });
+    const snap2 = await hydrateSnapshot(failing, new Map(), cursor);
+    expect(snap2.readErrors.some((e) => e.startsWith("stream-tail"))).toBe(true);
   });
 });

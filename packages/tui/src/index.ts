@@ -5,7 +5,7 @@ export { createInputDecoder, decodeInput, resolveKeyAction, sgrClick, MOUSE_ENAB
 export { renderScreen } from "./render.js";
 export { createControlSocket, defaultSocketPath, describeState, MAX_SOCKET_PATH_BYTES } from "./socket-server.js";
 export { DaemonClient } from "./daemon-client.js";
-export { hydrateSnapshot } from "./hydrate.js";
+export { hydrateSnapshot, createStreamCursor } from "./hydrate.js";
 export { createStyle, detectColorMode, stripAnsi } from "./theme.js";
 export { stylizeLines } from "./stylize.js";
 export { demoSnapshot } from "./demo-data.js";
