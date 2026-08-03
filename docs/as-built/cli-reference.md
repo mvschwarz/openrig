@@ -1014,13 +1014,16 @@ Two top-level commands back the SQLite-canonical coordination layer. They speak 
 Usage: `rig stream <subcommand>` — L1 append-only intake stream.
 
 Subcommands:
-- `emit --source <session> --body <text> [--hint-destination <session>] [--hint-type <type>] [--hint-urgency <urgency>] [--hint-tags <csv>] [--interrupt] [--id <streamItemId>] [--json]`
-- `list [--source <session>] [--hint-destination <session>] [--limit <n>] [--after <sortKey>] [--include-archived] [--json]`
+- `emit --source <session> --body <text> [--format <fmt>] [--hint-destination <session>] [--hint-type <type>] [--hint-urgency <urgency>] [--hint-tags <csv>] [--interrupt] [--id <streamItemId>] [--json]`
+- `list [--source <session>] [--hint-destination <session>] [--tag <tag>] [--since <iso>] [--until <iso>] [--limit <n>] [--after <sortKey>] [--include-archived] [--json]`
+- `watch [--json]`
 - `show <streamItemId> [--json]`
 - `archive <streamItemId> [--json]`
 
 Notes:
 - `--id` is for idempotency; same id returns the same row, body of subsequent calls is ignored.
+- `--tag` is exact membership in `hint_tags`, not substring matching. `--since` and `--until` are inclusive ISO timestamp bounds normalized to UTC by the daemon; list order and cursor semantics remain chronological.
+- `watch` consumes the existing `/api/stream/sse` contract: the daemon's initial replay followed by live items. Human output shows timestamp, source, and body; `--json` emits one `StreamItem` object per line. It makes one connection and does not reconnect automatically.
 - `archive` is soft — the row remains for audit and is excluded from `list` unless `--include-archived` is passed.
 
 ### `rig queue`

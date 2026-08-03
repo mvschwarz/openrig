@@ -36,6 +36,9 @@ export interface StreamListOptions {
   afterSortKey?: string;
   sourceSession?: string;
   hintDestination?: string;
+  hintTag?: string;
+  since?: string;
+  until?: string;
   includeArchived?: boolean;
   direction?: "chronological" | "latest";
 }
@@ -145,6 +148,18 @@ export class StreamStore {
     if (opts?.hintDestination) {
       conditions.push("hint_destination = ?");
       params.push(opts.hintDestination);
+    }
+    if (opts?.hintTag) {
+      conditions.push("EXISTS (SELECT 1 FROM json_each(stream_items.hint_tags) WHERE json_each.value = ?)");
+      params.push(opts.hintTag);
+    }
+    if (opts?.since) {
+      conditions.push("ts_emitted >= ?");
+      params.push(opts.since);
+    }
+    if (opts?.until) {
+      conditions.push("ts_emitted <= ?");
+      params.push(opts.until);
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";

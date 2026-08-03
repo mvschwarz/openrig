@@ -64,7 +64,10 @@ L649–658; files re-confirmed in `packages/daemon/src/domain/` at HEAD).
 Routes import these; services are Hono-free:
 
 - **`stream-store.ts`** — L1 stream: idempotent emit (on `stream_item_id`),
-  chronological list with cursor pagination, soft archive.
+  chronological list with cursor pagination plus source, destination, exact-tag,
+  and inclusive time-window filters, soft archive. `direction=latest` applies
+  every filter before taking the newest bounded page, then returns that page
+  chronologically.
 - **`queue-repository.ts`** — L3 queue: create, claim/unclaim, update
   (general state mutator with hot-potato strict-rejection on `done`),
   transactional handoff (close source as `handed-off` plus create new owned
@@ -208,12 +211,15 @@ event family at HEAD is 10 (`stream` 1 + `queue` 5 + `inbox` 2 + `qitem` 2)
 Two SSE surfaces stream coordination events: `/api/stream/watch`
 (aliased `/api/stream/sse`, `routes/stream.ts:117–118`) for new stream
 items, and `/api/queue/watch` for queue/inbox events. The event log remains
-append-only and SQLite-backed.
+append-only and SQLite-backed. `rig stream watch` is a thin, single-connection
+consumer of `/api/stream/sse`; it does not add a daemon route or reconnect
+policy.
 
 ## 5. Route surface
 
 - `/api/stream` (`server.ts:489`) — `POST /emit` (`routes/stream.ts:24`),
-  `GET /list` (`:56`), `GET /watch` + `/sse` SSE (`:117`),
+  `GET /list` (`:56`, including `sourceSession`, `hintDestination`, `hintTag`,
+  `since`, and `until` filters), `GET /watch` + `/sse` SSE (`:117`),
   `GET /:streamItemId` (`:121`), `POST /:streamItemId/archive` (`:130`).
 - `/api/queue` (`server.ts:490`) — `POST /create` (`routes/queue.ts:99`),
   `POST /:qitemId/claim` (`:144`), `POST /:qitemId/unclaim` (`:157`),

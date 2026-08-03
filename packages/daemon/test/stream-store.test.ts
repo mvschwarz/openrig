@@ -127,4 +127,89 @@ describe("StreamStore", () => {
     const fetched = store.getById(item.streamItemId);
     expect(fetched?.hintTags).toEqual(["urgent", "review", "phase-a"]);
   });
+
+  it("list filters by exact tag and inclusive time window without changing cursor order", () => {
+    const before = store.emit({
+      sourceSession: "alice@rig",
+      body: "before",
+      hintTags: ["review"],
+    });
+    const lower = store.emit({
+      sourceSession: "alice@rig",
+      body: "lower-bound",
+      hintTags: ["review", "context"],
+    });
+    const upper = store.emit({
+      sourceSession: "alice@rig",
+      body: "upper-bound",
+      hintTags: ["review"],
+    });
+    const wrongSource = store.emit({
+      sourceSession: "bob@rig",
+      body: "wrong-source",
+      hintTags: ["review"],
+    });
+    const substringOnly = store.emit({
+      sourceSession: "alice@rig",
+      body: "substring-only",
+      hintTags: ["review-request"],
+    });
+
+    const setTime = db.prepare("UPDATE stream_items SET ts_emitted = ? WHERE stream_item_id = ?");
+    setTime.run("2026-08-03T08:59:59.999Z", before.streamItemId);
+    setTime.run("2026-08-03T09:00:00.000Z", lower.streamItemId);
+    setTime.run("2026-08-03T10:00:00.000Z", upper.streamItemId);
+    setTime.run("2026-08-03T09:30:00.000Z", wrongSource.streamItemId);
+    setTime.run("2026-08-03T09:45:00.000Z", substringOnly.streamItemId);
+
+    const options = {
+      sourceSession: "alice@rig",
+      hintTag: "review",
+      since: "2026-08-03T09:00:00.000Z",
+      until: "2026-08-03T10:00:00.000Z",
+    };
+    expect(store.list(options).map((item) => item.body)).toEqual(["lower-bound", "upper-bound"]);
+    expect(store.list({ ...options, afterSortKey: lower.streamSortKey }).map((item) => item.body)).toEqual([
+      "upper-bound",
+    ]);
+    expect(store.list({ hintTag: "review-request" }).map((item) => item.body)).toEqual(["substring-only"]);
+  });
+
+  it("list composes tag, time, source, archive, and latest-page filters", () => {
+    const matching = Array.from({ length: 4 }, (_, index) => store.emit({
+      sourceSession: "alice@rig",
+      body: `matching-${index + 1}`,
+      hintTags: ["context"],
+    }));
+    const wrongSource = store.emit({ sourceSession: "bob@rig", body: "wrong-source", hintTags: ["context"] });
+    const wrongTag = store.emit({ sourceSession: "alice@rig", body: "wrong-tag", hintTags: ["context-extra"] });
+    const outsideWindow = store.emit({ sourceSession: "alice@rig", body: "outside-window", hintTags: ["context"] });
+    const archived = store.emit({ sourceSession: "alice@rig", body: "archived-newest", hintTags: ["context"] });
+
+    const setTime = db.prepare("UPDATE stream_items SET ts_emitted = ? WHERE stream_item_id = ?");
+    matching.forEach((item, index) => setTime.run(`2026-08-03T09:0${index}:00.000Z`, item.streamItemId));
+    setTime.run("2026-08-03T09:01:30.000Z", wrongSource.streamItemId);
+    setTime.run("2026-08-03T09:02:30.000Z", wrongTag.streamItemId);
+    setTime.run("2026-08-03T09:04:00.000Z", archived.streamItemId);
+    setTime.run("2026-08-03T09:05:00.000Z", outsideWindow.streamItemId);
+    store.archive(archived.streamItemId);
+
+    expect(store.list({
+      sourceSession: "alice@rig",
+      hintTag: "context",
+      since: "2026-08-03T09:00:00.000Z",
+      until: "2026-08-03T09:04:00.000Z",
+      direction: "latest",
+      limit: 2,
+    }).map((item) => item.body)).toEqual(["matching-3", "matching-4"]);
+    expect(store.list({
+      sourceSession: "alice@rig",
+      hintTag: "context",
+      since: "2026-08-03T09:00:00.000Z",
+      until: "2026-08-03T09:04:00.000Z",
+      direction: "latest",
+      includeArchived: true,
+      limit: 2,
+    }).map((item) => item.body)).toEqual(["matching-4", "archived-newest"]);
+  });
 });

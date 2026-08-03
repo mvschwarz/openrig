@@ -105,6 +105,40 @@ describe("stream routes", () => {
     expect((await app.request("/api/stream/list?direction=latest&afterSortKey=k1")).status).toBe(400);
   });
 
+  it("GET /api/stream/list wires exact tag and canonicalized inclusive ISO time filters", async () => {
+    const lower = store.emit({ sourceSession: "alice@rig", body: "lower", hintTags: ["context"] });
+    const upper = store.emit({ sourceSession: "alice@rig", body: "upper", hintTags: ["context"] });
+    const wrongTag = store.emit({ sourceSession: "alice@rig", body: "wrong-tag", hintTags: ["context-extra"] });
+    const wrongSource = store.emit({ sourceSession: "bob@rig", body: "wrong-source", hintTags: ["context"] });
+    const outsideWindow = store.emit({ sourceSession: "alice@rig", body: "outside-window", hintTags: ["context"] });
+    const setTime = db.prepare("UPDATE stream_items SET ts_emitted = ? WHERE stream_item_id = ?");
+    setTime.run("2026-08-03T09:00:00.000Z", lower.streamItemId);
+    setTime.run("2026-08-03T10:00:00.000Z", upper.streamItemId);
+    setTime.run("2026-08-03T09:30:00.000Z", wrongTag.streamItemId);
+    setTime.run("2026-08-03T09:45:00.000Z", wrongSource.streamItemId);
+    setTime.run("2026-08-03T10:00:00.001Z", outsideWindow.streamItemId);
+
+    const res = await app.request(
+      "/api/stream/list?sourceSession=alice%40rig&hintTag=context&since=2026-08-03T11%3A00%3A00%2B02%3A00&until=2026-08-03T06%3A00%3A00-04%3A00",
+    );
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as Array<{ body: string }>).map((item) => item.body)).toEqual(["lower", "upper"]);
+  });
+
+  it("GET /api/stream/list rejects invalid time windows", async () => {
+    const invalidSince = await app.request("/api/stream/list?since=not-a-time");
+    expect(invalidSince.status).toBe(400);
+    expect(await invalidSince.json()).toEqual({ error: "since must be a valid ISO timestamp" });
+    const invalidUntil = await app.request("/api/stream/list?until=not-a-time");
+    expect(invalidUntil.status).toBe(400);
+    expect(await invalidUntil.json()).toEqual({ error: "until must be a valid ISO timestamp" });
+    const reversed = await app.request(
+      "/api/stream/list?since=2026-08-03T10%3A00%3A00.000Z&until=2026-08-03T09%3A00%3A00.000Z",
+    );
+    expect(reversed.status).toBe(400);
+    expect(await reversed.json()).toEqual({ error: "since must not be after until" });
+  });
+
   it("GET /api/stream/:id returns 404 on unknown id", async () => {
     const res = await app.request("/api/stream/nonexistent");
     expect(res.status).toBe(404);

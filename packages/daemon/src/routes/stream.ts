@@ -3,6 +3,14 @@ import { streamSSE } from "hono/streaming";
 import type { EventBus } from "../domain/event-bus.js";
 import type { StreamStore } from "../domain/stream-store.js";
 
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function normalizeIsoTimestamp(value: string): string | null {
+  if (!ISO_TIMESTAMP.test(value)) return null;
+  const epochMs = Date.parse(value);
+  return Number.isFinite(epochMs) ? new Date(epochMs).toISOString() : null;
+}
+
 /**
  * Coordination L1 — Stream HTTP routes (PL-004 Phase A).
  *
@@ -66,6 +74,22 @@ export function streamRoutes(): Hono {
     const parsedDirection = direction === "latest" || direction === "chronological" ? direction : undefined;
     const sourceSession = c.req.query("sourceSession") || undefined;
     const hintDestination = c.req.query("hintDestination") || undefined;
+    const hintTag = c.req.query("hintTag") || undefined;
+    const sinceInput = c.req.query("since") || undefined;
+    const untilInput = c.req.query("until") || undefined;
+    let since: string | undefined;
+    let until: string | undefined;
+    if (sinceInput) {
+      since = normalizeIsoTimestamp(sinceInput) ?? undefined;
+      if (!since) return c.json({ error: "since must be a valid ISO timestamp" }, 400);
+    }
+    if (untilInput) {
+      until = normalizeIsoTimestamp(untilInput) ?? undefined;
+      if (!until) return c.json({ error: "until must be a valid ISO timestamp" }, 400);
+    }
+    if (since && until && since > until) {
+      return c.json({ error: "since must not be after until" }, 400);
+    }
     const includeArchived = c.req.query("includeArchived") === "true";
 
     const store = getStore(c);
@@ -74,6 +98,9 @@ export function streamRoutes(): Hono {
       afterSortKey,
       sourceSession,
       hintDestination,
+      hintTag,
+      since,
+      until,
       includeArchived,
       ...(parsedDirection ? { direction: parsedDirection } : {}),
     });
