@@ -173,6 +173,32 @@ describe("ATOM 2 — recursive path-addressed discovery (spec §2 refs)", () => 
     expect(service.getByRef("packs/dup")!.version).toBe("2");
   });
 
+  it("GUARD DISCRIMINATOR (round 2): legacy shared-id resolution follows ACTUAL last-discovery order even after a same-ref override", () => {
+    // three-write sequence: root1 packs/a (same:1) → root1 packs/b (same:1)
+    // → root2 packs/a (same:1, the override). The FINAL write is root-2
+    // packs/a, so the shared legacy id must resolve THERE — a naive
+    // values()-derived index would keep packs/a at its first-seen position
+    // and wrongly resolve packs/b.
+    const rootB = join(tmp, "storeB3");
+    mkdirSync(rootB, { recursive: true });
+    writePackAt(root, "packs/a", "same", "1");
+    writePackAt(root, "packs/b", "same", "1");
+    writePackAt(rootB, "packs/a", "same", "1");
+    const service = new ContextPackLibraryService({
+      roots: [
+        { path: root, sourceType: "builtin" },
+        { path: rootB, sourceType: "user_file" },
+      ],
+    });
+    const result = service.scan();
+    expect(result.count).toBe(2); // primary ref semantics unchanged
+    expect(service.getByRef("packs/a")!.sourceType).toBe("user_file"); // root-2 override wins the ref
+    expect(service.getByRef("packs/b")!.sourceType).toBe("builtin");
+    const legacy = service.get(contextPackId("same", "1"));
+    expect(legacy!.relativePath).toBe("packs/a"); // last DISCOVERY write
+    expect(legacy!.sourceType).toBe("user_file");
+  });
+
   it("colon-id addressing COEXISTS untouched (the id strip is explicitly a LATER atom)", () => {
     writePackAt(root, "packs/compaction-restore", "compaction-restore", "3");
     const service = lib();

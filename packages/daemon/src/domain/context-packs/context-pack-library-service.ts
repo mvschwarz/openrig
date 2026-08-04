@@ -122,6 +122,11 @@ export class ContextPackLibraryService {
           // wins (workspace > user_file > builtin in the startup-configured
           // discovery order) — for the WHOLE index, so list/count/resolve
           // agree. Distinct refs never collide, whatever their manifests say.
+          // Guard round-2 (9e3865a4): delete-before-set moves an OVERRIDDEN
+          // ref to the map's end, so insertion order IS actual last-discovery
+          // order — the derived legacy-id index below depends on that
+          // (Map.set alone would keep the first-seen position).
+          nextByRef.delete(ref);
           nextByRef.set(ref, entry);
         } catch (err) {
           errors.push({
@@ -134,9 +139,11 @@ export class ContextPackLibraryService {
       }
     }
     this.entriesByRef = nextByRef;
-    // Legacy colon-id compat index, DERIVED from the final ref entries
-    // (insertion order = discovery order; a shared legacy id resolves
-    // last-wins for compat callers, never touching ref identity).
+    // Legacy colon-id compat index, DERIVED from the final ref entries.
+    // Insertion order = ACTUAL last-discovery order (guaranteed by the
+    // delete-before-set above), so a shared legacy id resolves to the final
+    // discovery write — the pre-Atom-2 compat behavior — never touching
+    // ref identity.
     const nextById = new Map<string, ContextPackEntry>();
     for (const entry of nextByRef.values()) nextById.set(entry.id, entry);
     this.idIndex = nextById;
