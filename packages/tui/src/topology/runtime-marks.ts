@@ -117,10 +117,43 @@ export function clawdDownsample(cols: number, rows: number): MarkSeg[][] {
  * no limbs/legs; color + face ARE the mark at 2-cell size. Exact source
  * values: body #ad6755, eyes #181818 (RuntimeMark.tsx). */
 export function clawdFounderMark(): MarkSeg[] {
+  // superseded by clawdSquareMark (round-3: wide-rect center-bunch REJECTED);
+  // kept for the decision-record lineage only
   return [
     { text: "╹", token: "clawdEye", bg: "clawd" },
     { text: "╹", token: "clawdEye", bg: "clawd" },
   ];
+}
+
+/** ROUND-3 LOCKED clawd row mark: a SQUARE (2 cells ≈ square at cell aspect)
+ * with two quarter-block EYES clearly APART — upper-right then upper-left
+ * quarters leave the center gap between the eyes, eyes sit high like the
+ * source grid. Dark #181818 eyes ON the #ad6755 terracotta field. */
+export function clawdSquareMark(): MarkSeg[] {
+  return [
+    { text: "▝", token: "clawdEye", bg: "clawd" },
+    { text: "▘", token: "clawdEye", bg: "clawd" },
+  ];
+}
+
+/** ROUND-3 codex blue-hint CANDIDATES (LOOK choice a — UNPICKED; the shipped
+ * mark stays the approved plain form until the authenticated pick): each
+ * variant uses the OFFICIAL sampled #6867aa (token codexBlue), never a
+ * remembered value. */
+export function codexHintVariants(): Record<"chevron" | "outline" | "none", MarkSeg[]> {
+  return {
+    none: codexMark(),
+    chevron: [
+      { text: ">", token: "codexBlue", bold: true },
+      { text: "_", token: "markInk", bold: true },
+    ],
+    outline: [
+      { text: "▕", token: "codexBlue" },
+      { text: ">", token: "markInk", bold: true },
+      { text: "_", token: "markInk", bold: true },
+      { text: "▏", token: "codexBlue" },
+    ],
+  };
 }
 
 /** row-mark CANDIDATES for the mr7 pick — both are downsample outputs */
@@ -155,7 +188,7 @@ export function terminalMark(): MarkSeg[] {
  * miniA for claude until the founder pick lands — swap point, one site) */
 export function runtimeMarkSegs(runtime: string | null | undefined): MarkSeg[] {
   const r = (runtime ?? "").toLowerCase();
-  if (r.startsWith("claude")) return clawdMiniA();
+  if (r.startsWith("claude")) return clawdSquareMark(); // round-3 locked square
   if (r.startsWith("codex")) return codexMark();
   if (r === "terminal" || r === "tty" || r.startsWith("external")) return terminalMark();
   // unknown runtime: honest text token, dimmed — never a fabricated mark

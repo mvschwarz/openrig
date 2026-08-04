@@ -95,7 +95,7 @@ describe("hatchet mainline in the SHIPPED content pane (frame-01 visual contract
     const body = screen.lines.join("\n");
     expect(body).toMatch(/┌─+┐/);
     expect(body).toContain("● lead"); // member-only title (S19 MR1)
-    expect(body).toContain("▐▌ 18%"); // S19 MR2: web-family mark + adjacent ctx (MR1: pod suffix gone)
+    expect(body).toContain("▝▘ 18%"); // round-3 square clawd mark + adjacent ctx
     // straight connector runs + arrowhead; under the LOCKED containment an
     // edge may legitimately cross a pod-container wall (─ becomes ┼ at the
     // crossing) before its arrowhead
@@ -341,8 +341,8 @@ describe("R2 HIGH-1 — the locked agent-in-pod-in-rig containment is VISIBLE", 
   it("pod containers wrap their member agent boxes and the rig container wraps all (nesting fingerprint on every agent row)", () => {
     const { screen } = containScreen();
     const body = screen.lines.join("\n");
-    expect(body).toMatch(/▚ RIG openrig-build/); // rig container tab
-    for (const pod of ["orch", "dev", "review"]) expect(body, `pod ${pod} header`).toMatch(new RegExp(`▾ ${pod}`));
+    expect(body).toMatch(/▦ RIG openrig-build/); // rig container tab (round-3 glyph)
+    for (const pod of ["orch", "dev", "review"]) expect(body, `pod ${pod} header`).toMatch(new RegExp(`≡ ${pod}`)); // round-3 pod glyph
     // the fingerprint: rig double-border ║, then a pod border │, then the
     // agent's OWN box border │ — three nested walls left of every agent glyph
     // S19 MR1: titles are member-only — the fingerprint (three nested walls
@@ -454,7 +454,7 @@ describe("S19 MR1 — kill the triple name (§A1)", () => {
     s.dispatch({ type: "tab", tab: "graph" });
     const body = renderScreen(s.get(), snap, { cols: 160, rows: 44 }).lines.join("\n");
     // pod named once — the container tab
-    expect(body).toMatch(/▾ dev/);
+    expect(body).toMatch(/≡ dev/);
     // titles are member-only: the qa card reads "◐ qa", never "◐ dev.qa"
     expect(body).toMatch(/[◐] qa/);
     expect(body).not.toMatch(/[◐] dev\.qa/);
@@ -530,5 +530,66 @@ describe("S19 MR5 — chrome: blinking cursor + guide contrast", () => {
     const guideLine = styled.find((l) => stripAnsi(l).includes("├─"))!;
     expect(guideLine).toMatch(/38;2;76;84;99m[^m]*├─/); // the bumped chrome value
     expect(guideLine).not.toMatch(/38;2;58;63;75m[^m]*├─/); // not the old faint value
+  });
+});
+
+describe("ROUND-3 LOCKED SET (orch locked-scope GO; pins 02259adb/29a10b62)", () => {
+  it("runtime marks are OFF explorer rows: agent meta is ctx% only; marks live on detail + topology cards", () => {
+    const snap = graphSnap();
+    const s = makeStore(snap);
+    s.dispatch({ type: "drill", resource: "pod", name: "dev", target: { host: "vm-host", rig: FIXTURE_RIG_NAME } });
+    const pane = renderScreen(s.get(), snap, { cols: 150, rows: 40 }).lines.map((l) => l.slice(0, 30)).join("\n");
+    expect(pane).not.toMatch(/▐▌|>_|▝▘/); // no marks in the explorer
+    expect(pane).toMatch(/driver\s+24%/); // name-first untruncated + bare ctx%
+    // cards still carry the mark
+    s.dispatch({ type: "tab", tab: "graph" });
+    const body = renderScreen(s.get(), snap, { cols: 150, rows: 40 }).lines.join("\n");
+    expect(body).toMatch(/▝▘ 24%|▝▘ 63%/); // square clawd mark in card meta
+    // detail page shows the mark beside the runtime
+    s.dispatch({ type: "drill", resource: "agent", name: "dev.driver", target: { host: "vm-host", rig: FIXTURE_RIG_NAME, pod: "dev" } });
+    const detail = renderScreen(s.get(), snap, { cols: 150, rows: 40 }).lines.join("\n");
+    expect(detail).toMatch(/▝▘ claude-code/); // mark + runtime on the detail page
+  });
+
+  it("the clawd row mark is the SQUARE with eyes clearly APART (round-3 redraw; wide-rect center-bunch rejected)", async () => {
+    const { clawdSquareMark, runtimeMarkSegs, markText } = await import("../src/topology/runtime-marks.js");
+    const sq = clawdSquareMark();
+    expect(sq).toHaveLength(2); // 2 cells x 1 row ≈ square at cell aspect
+    expect(markText(sq)).toBe("▝▘"); // quarter-block eyes: upper-right then upper-left = APART around the center gap
+    expect(sq.every((g) => g.token === "clawdEye" && g.bg === "clawd")).toBe(true); // dark eyes ON the terracotta field
+    expect(markText(runtimeMarkSegs("claude-code"))).toBe("▝▘"); // shipped claude mark = the square
+  });
+
+  it("rig glyph is ▦ and pod glyph is ≡ (founder picks of record)", () => {
+    const snap = graphSnap();
+    const s = makeStore(snap);
+    const pane = renderScreen(s.get(), snap, { cols: 150, rows: 40 }).lines.map((l) => l.slice(0, 30)).join("\n");
+    expect(pane).toContain("▦ openrig-build"); // rig icon
+    expect(pane).not.toMatch(/▚ /);
+    s.dispatch({ type: "tab", tab: "graph" });
+    const body = renderScreen(s.get(), snap, { cols: 150, rows: 40 }).lines.join("\n");
+    expect(body).toMatch(/▦ RIG openrig-build/);
+    expect(body).toMatch(/≡ dev/); // pod container tab carries the pod glyph
+  });
+
+  it("explorer icons are MONOCHROME (color is for status only)", () => {
+    const snap = graphSnap();
+    const s = makeStore(snap);
+    const screen = renderScreen(s.get(), snap, { cols: 150, rows: 40 });
+    const styled = stylizeLines(screen, createStyle("truecolor"));
+    const rigLine = styled.find((l) => stripAnsi(l).includes("▦ openrig-build"))!;
+    expect(rigLine).not.toMatch(/38;2;77;189;178m[^m]*▦/); // NOT the old accent teal
+    expect(rigLine).toMatch(/38;2;109;116;128m[^m]*▦|38;2;76;84;99m[^m]*▦/); // dim/chrome monochrome
+  });
+
+  it("the official codex blue token is #6867aa and the three hint CANDIDATES exist unpicked", async () => {
+    const { codexHintVariants } = await import("../src/topology/runtime-marks.js");
+    const { createStyle: cs } = await import("../src/theme.js");
+    const t = cs("truecolor");
+    expect(t.paint("codexBlue", "x")).toContain("38;2;104;103;170"); // #6867aa exact
+    const variants = codexHintVariants();
+    expect(Object.keys(variants).sort()).toEqual(["chevron", "none", "outline"]); // candidates only — nothing picked
+    const { runtimeMarkSegs, markText } = await import("../src/topology/runtime-marks.js");
+    expect(markText(runtimeMarkSegs("codex"))).toBe(">_"); // the SHIPPED mark stays the approved plain form
   });
 });

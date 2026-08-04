@@ -13,7 +13,7 @@
 // "Hover" is the existing selection-focus highlight — RENDER-ONLY, no motion
 // protocol, no second write-path to selection (arch ruling 1).
 import type { ExplorerRow, FleetSnapshot } from "./types.js";
-import { markText, runtimeMarkSegs, type MarkSeg } from "./topology/runtime-marks.js";
+import type { MarkSeg } from "./topology/runtime-marks.js";
 
 interface KeyParts {
   kind: string;
@@ -59,7 +59,7 @@ function keyDepth(row: ExplorerRow): number {
 function contentOf(row: ExplorerRow, parsed: KeyParts): string {
   const stripped = row.label.replace(/^\s+/, "");
   if (parsed.kind === "host") return `⊕ ${stripped.replace(/^▾ /, "")}`;
-  if (parsed.kind === "rig") return `▚ ${stripped.replace(/^▾ /, "")}`;
+  if (parsed.kind === "rig") return `▦ ${stripped.replace(/^▾ /, "")}`; // round-3 rig glyph
   if (parsed.kind === "pod") return stripped.replace(/ \(\d+\)$/, ""); // count moves to meta
   if (parsed.kind === "agent") {
     // POD-RELATIVE display (guard-ruled; the nav-flow mockup's convention —
@@ -92,11 +92,11 @@ function metaOf(row: ExplorerRow, snap: FleetSnapshot): { text: string; segs: Ma
       .find((h) => h.name === host)?.rigs.find((r) => r.name === rig)
       ?.pods.find((p) => p.name === pod)?.agents.find((a) => a.name === name.join("/"));
     if (!agent) return null;
-    // S19 MR2 (guard RE-SEAL 1e661dba): web-family runtime MARK + adjacent
-    // ctx% — no spelled runtime, no middle-dot; honest-unknown ctx renders —.
-    const mark = runtimeMarkSegs(agent.runtime);
-    const value = ` ${agent.context == null ? "—" : `${agent.context}%`}`;
-    return { text: `${markText(mark)}${value}`, segs: [...mark, { text: value, token: "dim" }] };
+    // ROUND-3 LOCKED: runtime marks are OFF explorer rows (detail + topology
+    // only; stacked rows too busy) — the meta is bare ctx%, honest — when
+    // unknown; spelled runtime stays dead; name-first-untruncated holds.
+    const value = agent.context == null ? "—" : `${agent.context}%`;
+    return { text: value, segs: [{ text: value, token: "dim" }] };
   }
   if (parsed.kind === "pod") {
     const [host, rig, pod] = parsed.parts;

@@ -122,12 +122,12 @@ export function drawContainers(canvas: GraphCanvas, layout: GraphLayout, ctx: St
   for (const c of layout.containers) {
     if (c.kind === "rig") {
       canvas.box(c.x, c.y, c.w, c.h, "accent", true, false);
-      const tab = ` ▚ RIG ${c.name || ctx.rig} `;
+      const tab = ` ▦ RIG ${c.name || ctx.rig} `; // round-3 rig glyph
       canvas.text(c.x + 2, c.y, tab, "accent", true);
       canvas.zone(c.y, c.x + 2, c.x + 2 + tab.length, { type: "drill", resource: "rig", name: c.name || ctx.rig, target: { host: ctx.host } });
     } else {
       canvas.box(c.x, c.y, c.w, c.h, "chrome", false, false);
-      const tab = ` ▾ ${c.name} `;
+      const tab = ` ≡ ${c.name} `; // round-3 pod glyph
       canvas.text(c.x + 1, c.y, tab, "accent", true);
       canvas.zone(c.y, c.x + 1, c.x + 1 + tab.length, { type: "drill", resource: "pod", name: c.name, target: { host: ctx.host, rig: ctx.rig } });
     }

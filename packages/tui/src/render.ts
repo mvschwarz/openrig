@@ -7,6 +7,8 @@
 import { computeExplorerRows, findAgent, findSpec, findAgentBySession, agentsRunningSpec, agentsRunningSpecTargets } from "./state.js";
 import { navigatorDisplay } from "./navigator.js";
 import { renderGraphStyle } from "./topology/render-graph.js";
+import { markText, runtimeMarkSegs } from "./topology/runtime-marks.js";
+import { barCells } from "./motion.js";
 import { detailPage, fieldLine, sectionRule, listItem, alignedRow } from "./detail.js";
 import type { Action, FleetSnapshot, NeedsItem, Screen, ViewState } from "./types.js";
 
@@ -208,10 +210,14 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
             { label: "host", value: found.host.name },
             { label: "rig", value: rig.name },
             { label: "pod", value: pod.name },
-            { label: "runtime", value: agent.runtime },
+            // ROUND-3: the runtime MARK lives on the detail page (sparingly)
+            { label: "runtime", value: `${markText(runtimeMarkSegs(agent.runtime))} ${agent.runtime}` },
             {
               label: "context",
-              value: agent.context == null ? "— (not yet known)" : `${agent.context}% used · ${agent.tokens ?? "—"} tokens`,
+              // ROUND-3 mr7: a quiet determinate bar rides REAL fractions only
+              value: agent.context == null
+                ? "— (not yet known)"
+                : `${agent.context}% used · ${agent.tokens ?? "—"} tokens  ${barCells(agent.context / 100, 10)}`,
             },
             // S19 MR4 (§D9, founder: "very important"): the FULL absolute
             // working directory, verbatim; honest — when not served

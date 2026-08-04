@@ -6,6 +6,7 @@
 // never bleed.
 import type { Screen } from "./types.js";
 import type { Style } from "./theme.js";
+import { reducedMotion } from "./motion.js";
 
 const EXPL_W = 30;
 
@@ -57,7 +58,8 @@ function paintExplorerBody(text: string, s: Style): string {
   if (/\((recoverable|degraded|stopped|attention_required)\)/.test(text)) {
     return text.replace(/\((recoverable|degraded|stopped|attention_required)\)/, (m) => s.paint("warn", m));
   }
-  if (text.startsWith("▚ ")) return s.paint("accent", text);
+  // ROUND-3: explorer icons MONOCHROME — color is for status only
+  if (text.startsWith("▦ ")) return s.paint("dim", "▦ ") + text.slice(2);
   if (text.startsWith("⊕ ")) return s.paint("dim", "⊕ ") + text.slice(2);
   if (/^[▾▸] /.test(text)) return s.paint("chrome", text.slice(0, 2)) + s.paint("dim", text.slice(2));
   return text;
@@ -70,10 +72,18 @@ function paintAlertLine(text: string, token: "warn" | "error", s: Style): string
   const body = openAt >= 0 ? text.slice(0, openAt) : text;
   const suffix = openAt >= 0 ? s.paint("accent", "(open ▸)", { bold: true }) + text.slice(openAt + "(open ▸)".length) : "";
   const cols = body.match(/^(\s*[⚑☐✖] )(\S+\s+)(\[[^\]]*\]\s+)?(\S+\s+)(.*)$/);
+  // ROUND-3 mr7: the needs-you ⚑ carries the SLOW attention-pulse — the ONLY
+  // persistent motion in its region; reduced-motion renders it steady
+  const pulse = !reducedMotion();
+  const paintFlag = (seg: string): string => {
+    const at = seg.indexOf("⚑");
+    if (at < 0 || !pulse) return s.paint(token, seg);
+    return s.paint(token, seg.slice(0, at)) + s.paint(token, "⚑", { blink: true }) + s.paint(token, seg.slice(at + 1));
+  };
   if (!cols)
-    return s.paint(token, body) + suffix;
+    return paintFlag(body) + suffix;
   return (
-    s.paint(token, cols[1]! + cols[2]!) +
+    paintFlag(cols[1]! + cols[2]!) +
     (cols[3] ? s.paint("dim", cols[3]) : "") +
     s.paint("bright", cols[4]!) +
     s.paint("dim", cols[5] ?? "") +
@@ -130,7 +140,7 @@ export function stylizeLines(screen: Screen, s: Style): string[] {
     if (index === 0) {
       const m = line.match(/^cmd ▸ (.*?)(▊?)( *)$/);
       if (m)
-        return `${s.paint("accent", "cmd ▸", { bold: true })} ${s.paint("bright", m[1] ?? "")}${m[2] ? s.paint("accent", "▊", { blink: true }) : ""}${m[3] ?? ""}`;
+        return `${s.paint("accent", "cmd ▸", { bold: true })} ${s.paint("bright", m[1] ?? "")}${m[2] ? s.paint("accent", "▊", reducedMotion() ? {} : { blink: true }) : ""}${m[3] ?? ""}`;
       return line;
     }
     if (/^[─┌┐└┘├┤┬┴┼]/.test(line) && /─{4}/.test(line)) return paintRule(line, s);
