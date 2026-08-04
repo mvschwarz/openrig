@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync, accessSync, constants, mkdirSync } from "node:fs";
 import path from "node:path";
+import { parseDocument } from "yaml";
 import { runDoctorChecks, type DoctorDeps } from "./doctor.js";
 import { resolveDaemonPath } from "../daemon-lifecycle.js";
 import { ConfigStore } from "../config-store.js";
@@ -217,7 +218,100 @@ async function probeDaemonCmuxStatus(doctorDeps?: DoctorDeps): Promise<"availabl
   }
 }
 
-export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?: boolean; doctorDeps?: DoctorDeps }): Promise<SetupResult> {
+// Slice-03 Lane B (OPR.0.4.8) onboarding RECORD path. RULING-C (b4913ed4): the v1 onboarding menu
+// EDITS/RECORDS a deliberate policy choice into an EXISTING RigSpec only — a NEW INSTALL has no spec,
+// so nothing is written and the floor holds by ABSENCE. Persistence is the RigSpec `permission_policy`
+// field ONLY (P6 fence: no config.json / daemon-state widening). The record is a least-destructive
+// YAML edit (parse -> set the one key -> serialize), never a codec re-emit that could drop keys.
+//   chosen built-in  -> permission_policy: builtin:<name>   (Seam-B ref semantics)
+//   deliberate-none  -> permission_policy: none             (origin deliberate_none; floor==absent)
+// P3: the record runs ONLY on an explicit --policy selection, NEVER on skip/quit/timeout (no flag =>
+// no step => bare setup byte-unchanged). P1: no path here upgrades an absent spec to deliberate_none.
+export const POLICY_CHOICES = ["locked", "standard", "open", "yolo", "none"] as const;
+export type PolicyChoice = (typeof POLICY_CHOICES)[number];
+
+// Root-spec filenames, matching the CLI's established file-or-directory spec convention
+// (see specs.ts resolveAddSpecSource + `rig up <source>`).
+const ROOT_SPEC_NAMES = ["rig.yaml", "rig.yml", "agent.yaml", "agent.yml"];
+
+function policyRefFor(choice: PolicyChoice): string {
+  // Deliberate-none is the explicit reserved value; every built-in name carries the MANDATORY
+  // `builtin:` prefix (bare canonical names never resolve — anti-shadowing, policy-ref.ts A1).
+  return choice === "none" ? "none" : `builtin:${choice}`;
+}
+
+/**
+ * Resolve `specPath` to a readable EXISTING root spec file, or null. Accepts a direct file path or a
+ * directory containing a root spec. Uses deps.readFile as the read+existence probe (null = absent), so
+ * the resolver stays fs-injectable and never mints a spec — RULING-C: no scaffold-authoring here.
+ */
+function resolveExistingSpecPath(deps: SetupDeps, specPath: string): string | null {
+  if (deps.readFile(specPath) !== null) return specPath;
+  for (const name of ROOT_SPEC_NAMES) {
+    const candidate = path.join(specPath, name);
+    if (deps.readFile(candidate) !== null) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Record a deliberate policy choice into an existing spec, returning the `policy_record` SetupStep.
+ * Only called when the operator explicitly passed --policy (P3). Unknown choice or no resolvable
+ * existing spec => a `fail` step and NOTHING is written (P1 + RULING-C new-install-writes-nothing).
+ */
+function recordPermissionPolicyStep(deps: SetupDeps, choice: string, specPath: string | undefined): SetupStep {
+  if (!(POLICY_CHOICES as readonly string[]).includes(choice)) {
+    return {
+      id: "policy_record",
+      status: "fail",
+      message: `Unknown policy choice '${choice}'.`,
+      reason: `--policy must be one of: ${POLICY_CHOICES.join(", ")}.`,
+      fixHint: `Re-run with --policy <${POLICY_CHOICES.join("|")}>.`,
+    };
+  }
+
+  const resolved = specPath ? resolveExistingSpecPath(deps, specPath) : null;
+  if (!resolved) {
+    return {
+      id: "policy_record",
+      status: "fail",
+      message: "No existing rig spec to record the policy into.",
+      reason:
+        "The onboarding menu records a policy choice into an EXISTING spec only. A new install has no spec, so nothing is written — the usability floor holds by absence.",
+      fixHint: "Point --spec at an existing rig.yaml (or a directory containing one), then re-run `rig setup --policy`.",
+    };
+  }
+
+  const ref = policyRefFor(choice as PolicyChoice);
+  try {
+    const raw = deps.readFile(resolved) ?? "";
+    // Comment-preserving least-destructive edit: parseDocument retains comments (top + inline), key
+    // order, and formatting; we set ONLY the permission_policy key and re-serialize. A plain
+    // parse->stringify would DROP every comment — pinned by the byte-survival test.
+    const doc = parseDocument(raw);
+    doc.set("permission_policy", ref);
+    deps.writeFile(resolved, String(doc));
+  } catch (err) {
+    return {
+      id: "policy_record",
+      status: "fail",
+      message: `Could not record the policy into ${resolved}: ${(err as Error).message}`,
+      reason: "The spec could not be parsed or written; no partial change was applied.",
+      fixHint: "Repair the spec YAML, then re-run `rig setup --policy`.",
+    };
+  }
+
+  return {
+    id: "policy_record",
+    status: "applied",
+    message:
+      choice === "none"
+        ? `Recorded a deliberate no-policy choice (permission_policy: none) into ${resolved}.`
+        : `Recorded permission_policy: ${ref} into ${resolved}.`,
+  };
+}
+
+export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?: boolean; policy?: string; specPath?: string; doctorDeps?: DoctorDeps }): Promise<SetupResult> {
   const profile = opts.full ? "full" : "core";
   const platform = deps.platform ?? process.platform;
   const runtimeConfig = buildRuntimeConfigDisclosure(platform);
@@ -227,6 +321,9 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   if (opts.dryRun) {
     for (const id of stepIds) {
       steps.push({ id, status: "skipped", message: `Dry run: ${id} would be attempted.` });
+    }
+    if (opts.policy !== undefined) {
+      steps.push({ id: "policy_record", status: "skipped", message: `Dry run: would record permission_policy for '${opts.policy}'.` });
     }
     return { profile, platform, ready: false, steps, runtimeConfig };
   }
@@ -564,6 +661,12 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     };
   }
 
+  // P3: record a deliberate policy choice ONLY when --policy was explicitly passed (never on a bare
+  // run). No flag => no policy_record step => bare setup byte-unchanged (anchor 1).
+  if (opts.policy !== undefined) {
+    steps.push(recordPermissionPolicyStep(deps, opts.policy, opts.specPath));
+  }
+
   // ready = no fail statuses in steps or verification checks
   const stepsFailed = steps.some((s) => s.status === "fail");
   const verificationFailed = verification?.checks.some((c) => c.status === "fail") ?? false;
@@ -613,6 +716,32 @@ export function goldenPathNextSteps(): string[] {
   ];
 }
 
+/**
+ * Slice-03 Lane B (OPR.0.4.8) onboarding menu copy. The 0.4.8 lineage has no TUI, so the "menu" is
+ * calm-register narrative text presenting the permission-policy choice. Copy is FROZEN + founder-picked
+ * (missions/.../MENU-COPY-FROZEN-2026-08-04): verbatim `Policy Mode`/`YOLO Mode` labels, the NAME
+ * "Operator" never appears (YOLO Mode is the user-facing label for it), the exact deliberate-none and
+ * skip-line phrasing, NO pre-selected default, and `Standard` carries the ⭐ recommendation marker.
+ * REGISTER RULE (pm-lead): factual + version-neutral — never "treacherous"/editorializing/
+ * founder-internal wording. Recording is a thought, never a gate — `rig up` always works bare.
+ */
+export function permissionPolicyMenuLines(): string[] {
+  return [
+    "Permission policy (optional — recording is a thought, not a gate; `rig up` always works without one):",
+    "  Policy Mode:",
+    "    Locked            The most restrictive built-in policy.",
+    "    Standard  ⭐      The recommended balanced built-in policy.",
+    "    Open              The least restrictive built-in policy.",
+    "  YOLO Mode           The full-bypass built-in policy.",
+    "  No policy — deliberate choice (recorded)",
+    "",
+    "  If you skip: OpenRig sets nothing — the usability floor only",
+    "",
+    "  To record a choice into an existing spec:",
+    "    rig setup --policy <locked|standard|open|yolo|none> --spec <path>",
+  ];
+}
+
 export function setupCommand(depsOverride?: SetupDeps): Command {
   const cmd = new Command("setup").description("Prepare the machine for OpenRig");
 
@@ -620,10 +749,12 @@ export function setupCommand(depsOverride?: SetupDeps): Command {
     .option("--dry-run", "Show the plan without making changes")
     .option("--json", "Machine-readable JSON output")
     .option("--full", "Install broader operator workstation tools")
-    .action(async (opts: { dryRun?: boolean; json?: boolean; full?: boolean }) => {
+    .option("--policy <name>", `Record a deliberate permission-policy choice into an existing spec (${POLICY_CHOICES.join("|")})`)
+    .option("--spec <path>", "Existing rig spec (file or directory) to record the --policy choice into")
+    .action(async (opts: { dryRun?: boolean; json?: boolean; full?: boolean; policy?: string; spec?: string }) => {
       const deps = depsOverride ?? defaultDeps();
       const doctorDeps = opts.dryRun ? undefined : buildDefaultDoctorDeps(deps);
-      const result = await runSetup(deps, { dryRun: opts.dryRun, full: opts.full, doctorDeps });
+      const result = await runSetup(deps, { dryRun: opts.dryRun, full: opts.full, policy: opts.policy, specPath: opts.spec, doctorDeps });
 
       if (opts.json) {
         console.log(JSON.stringify(result, null, 2));
@@ -645,6 +776,11 @@ export function setupCommand(depsOverride?: SetupDeps): Command {
         if (step.reason) console.log(`       Why: ${step.reason}`);
         if (step.fixHint) console.log(`       Fix: ${step.fixHint}`);
       }
+
+      // Surface the permission-policy choice (the 0.4.8 onboarding "menu" is calm-register narrative,
+      // not a TUI). Recording is optional and never a gate.
+      console.log("");
+      for (const line of permissionPolicyMenuLines()) console.log(line);
 
       // OPR.0.3.3.04.2 (AC-1): the canonical ordered golden path. `rig setup` is
       // the primary surface for the new-operator sequence (status/doctor only
