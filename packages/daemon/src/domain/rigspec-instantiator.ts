@@ -12,7 +12,7 @@ import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { NodeLauncher } from "./node-launcher.js";
-import type { RigSpecPreflight } from "./rigspec-preflight.js";
+import type { PreflightSpecContext, RigSpecPreflight } from "./rigspec-preflight.js";
 import { deriveCanonicalSessionName, validateSessionComponents } from "./session-name.js";
 import { LegacyRigSpecSchema as RigSpecSchema } from "./rigspec-schema.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { LegacyRigSpecCodec as RigSpecCodec } from "./rigspec-codec.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
@@ -423,6 +423,19 @@ export class PodRigInstantiator {
     this.deps = deps;
   }
 
+  private inheritedPermissionPolicy(targetRigId: string | undefined): PreflightSpecContext["inheritedPermissionPolicy"] {
+    if (!targetRigId) return undefined;
+    const provenance = this.deps.rigRepo.getRigPolicyProvenance(targetRigId);
+    if (!provenance?.rigRef) return undefined;
+    return {
+      ref: provenance.rigRef,
+      origin: provenance.origin,
+      launchPosture: provenance.launchPosture,
+      ...(provenance.resolvedTarget ? { resolvedTarget: provenance.resolvedTarget } : {}),
+      ...(provenance.declaringDir ? { declaringDir: provenance.declaringDir } : {}),
+    };
+  }
+
   async materialize(
     rigSpecYaml: string,
     rigRoot: string,
@@ -455,6 +468,7 @@ export class PodRigInstantiator {
       fsOps: this.deps.fsOps,
       rigNameOverride: targetRig?.rig.name,
       externalQualifiedIds: targetRig?.nodes.map((node) => node.logicalId),
+      inheritedPermissionPolicy: this.inheritedPermissionPolicy(opts?.targetRigId),
       exec: this.deps.exec,
     });
     if (!preflight.ready) {
@@ -497,23 +511,12 @@ export class PodRigInstantiator {
     }
 
     const rigSpec = PodRigSpecSchema.normalize(raw as Record<string, unknown>);
-    const targetRigPolicy = opts?.targetRigId
-      ? this.deps.rigRepo.getRigPolicyProvenance(opts.targetRigId)
-      : null;
     const preflight = await preflightValidatedSpec(rigSpec, {
       rigRoot,
       cwdOverride: opts?.cwdOverride,
       fsOps: this.deps.fsOps,
       rigNameOverride: targetRig?.rig.name,
-      inheritedPermissionPolicy: targetRigPolicy?.rigRef
-        ? {
-          ref: targetRigPolicy.rigRef,
-          origin: targetRigPolicy.origin,
-          launchPosture: targetRigPolicy.launchPosture,
-          ...(targetRigPolicy.resolvedTarget ? { resolvedTarget: targetRigPolicy.resolvedTarget } : {}),
-          ...(targetRigPolicy.declaringDir ? { declaringDir: targetRigPolicy.declaringDir } : {}),
-        }
-        : undefined,
+      inheritedPermissionPolicy: this.inheritedPermissionPolicy(opts?.targetRigId),
       exec: this.deps.exec,
     });
     if (!preflight.ready) {
@@ -892,6 +895,7 @@ export class PodRigInstantiator {
       cwdOverride: opts?.cwdOverride,
       fsOps: this.deps.fsOps,
       rigNameOverride: rig.rig.name,
+      inheritedPermissionPolicy: this.inheritedPermissionPolicy(rigId),
       exec: this.deps.exec,
     });
     if (!preflight.ready) {
@@ -1014,7 +1018,7 @@ export class PodRigInstantiator {
           sessionName: launched.sessionName,
         },
         edges: resolvedEdges,
-        warnings: launched.warnings,
+        warnings: [...preflight.warnings, ...(launched.warnings ?? [])],
       },
     };
   }
