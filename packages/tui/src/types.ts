@@ -21,6 +21,10 @@ export interface AgentRow {
   attach?: string | null;
   /** served working directory (S19 MR4 §D9 — full absolute path, verbatim) */
   cwd?: string | null;
+  /** served terminalActive VERBATIM (S19 round-5): tmux #{window_activity}
+   * within the daemon's silence window — the substrate whose false→true
+   * transition means real new pane output; null = no signal */
+  paneActive?: boolean | null;
 }
 
 export interface PodNode {
@@ -242,6 +246,22 @@ export interface HitTarget {
   action: Action;
 }
 
+/** S19 round-5 (guard): the refresh owner's honest load lifecycle — the ONLY
+ * state the loading spinner may ride (data absence is not a lifecycle fact) */
+export interface LoadState {
+  /** a hydrate refresh is running right now */
+  inFlight: boolean;
+  /** at least one refresh has completed (success or failure) */
+  settled: boolean;
+}
+
+/** S19 round-5 (guard): one seat's fresh pane-output event — key matches the
+ * agent's stable explorer-row key; at = owner clock ms when observed */
+export interface RowFlash {
+  key: string;
+  at: number;
+}
+
 export interface Screen {
   lines: string[];
   hitMap: HitTarget[];
@@ -257,9 +277,10 @@ export interface Screen {
    * 1-based row; start = column within the LEFT cell after the selection-
    * marker slot; runs are in ascending start order) */
   explorerMeta?: Record<number, Array<{ start: number; segs: Array<{ text: string; token?: import("./theme.js").Token; bold?: boolean; bg?: import("./theme.js").Token }> }>>;
-  /** S19 round-4 motion wiring: true while the footer's ONE-SHOT fresh-output
-   * row flash is inside its window (stylize inverts the row) */
-  footerFlash?: boolean;
+  /** S19 round-5 (guard): 1-based terminal rows whose agent produced fresh
+   * PANE OUTPUT inside the one-shot flash window — stylize inverts exactly
+   * these rows (the tmux-style activity row flash) */
+  flashRows?: number[];
   /** true when this frame contains time-driven motion (spinner frame or an
    * un-expired flash) — the entry loop keeps redrawing while set */
   motionActive?: boolean;

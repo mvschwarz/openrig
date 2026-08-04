@@ -71,78 +71,151 @@ describe("motion wiring + region discipline", () => {
   });
 });
 
-describe("LIVE motion wiring — guard round-4 finding 3 (caller-boundary, not helper-only)", () => {
+describe("motion rides the LOAD LIFECYCLE — guard round-5 finding 1 (spinner = real in-flight state, never data absence)", () => {
   const snap = demoSnapshot();
-  // a graph-pending topology view is the honest LOADING lifecycle state the
-  // spinner rides — renderScreen is the caller boundary every adapter shares
-  function pendingStore() {
-    const noGraph = structuredClone(snap);
+  const LOADING = { inFlight: true, settled: false } as const;
+  function graphTabStore(base = snap) {
+    const noGraph = structuredClone(base);
     const s = createViewState({ instanceId: "sp", getSnapshot: () => noGraph });
     s.dispatch({ type: "tab", tab: "graph" });
     return { s, noGraph };
   }
 
-  it("the loading spinner renders on the pending line and ANIMATES across frames (braille in truecolor)", () => {
-    const { s, noGraph } = pendingStore();
+  it("IN-FLIGHT + unanswered graph: the spinner renders and ANIMATES, marking the screen motion-active", () => {
+    const { s, noGraph } = graphTabStore();
     const at = (nowMs: number) =>
-      renderScreen(s.get(), noGraph, { cols: 140, rows: 34, nowMs, colorMode: "truecolor" }).lines.find((l) => l.includes("read pending"))!;
+      renderScreen(s.get(), noGraph, { cols: 140, rows: 34, nowMs, colorMode: "truecolor", load: LOADING }).lines.find((l) => l.includes("read pending"))!;
     const f0 = at(0);
     const f1 = at(120);
     expect(f0).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] topology graph read pending/);
-    expect(f1).not.toBe(f0); // frame/time transition through the caller boundary
-    // the spinner marks the screen motion-active so the entry loop keeps redrawing
-    const screen = renderScreen(s.get(), noGraph, { cols: 140, rows: 34, nowMs: 0, colorMode: "truecolor" });
-    expect(screen.motionActive).toBe(true);
+    expect(f1).not.toBe(f0); // frame/time transition
+    const screen = renderScreen(s.get(), noGraph, { cols: 140, rows: 34, nowMs: 0, colorMode: "truecolor", load: LOADING });
+    expect(screen.motionActive).toBe(true); // the entry loop keeps redrawing while loading
   });
 
-  it("16-color mode renders the LINE spinner; reduced motion renders the honest static dot and no motion-active", () => {
-    const { s, noGraph } = pendingStore();
-    const line16 = renderScreen(s.get(), noGraph, { cols: 140, rows: 34, nowMs: 0, colorMode: "16" }).lines.find((l) => l.includes("read pending"))!;
+  it("SETTLED absence does NOT spin: proven-empty renders a static honest-empty line (default options = settled)", () => {
+    const { s, noGraph } = graphTabStore();
+    const screen = renderScreen(s.get(), noGraph, { cols: 140, rows: 34, nowMs: 0, colorMode: "truecolor" });
+    const line = screen.lines.find((l) => l.includes("topology graph"))!;
+    expect(line).toMatch(/no topology graph served/);
+    expect(line).not.toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏·] /);
+    expect(screen.motionActive).toBeFalsy(); // nothing animates over settled truth
+  });
+
+  it("SETTLED NAMED read failure does not spin: the graph line reports the failure statically", () => {
+    const { s, noGraph } = graphTabStore();
+    noGraph.readErrors.push("graph(openrig-build): fetch failed");
+    const screen = renderScreen(s.get(), noGraph, { cols: 140, rows: 34, nowMs: 0, colorMode: "truecolor" });
+    const line = screen.lines.find((l) => l.includes("topology graph"))!;
+    expect(line).toMatch(/✕ topology graph read failed/);
+    expect(line).not.toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/);
+    expect(screen.motionActive).toBeFalsy();
+  });
+
+  it("SPECS: in-flight spins, settled proven-empty and settled named failure render static", () => {
+    const empty = structuredClone(snap);
+    empty.specs = [];
+    const s = createViewState({ instanceId: "sl", getSnapshot: () => empty });
+    s.dispatch({ type: "jump", section: "specs" });
+    const loading = renderScreen(s.get(), empty, { cols: 140, rows: 34, nowMs: 0, colorMode: "truecolor", load: LOADING }).lines.join("\n");
+    expect(loading).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] library read pending/);
+    const settled = renderScreen(s.get(), empty, { cols: 140, rows: 34, nowMs: 0, colorMode: "truecolor" });
+    expect(settled.lines.join("\n")).toMatch(/library empty — proven/);
+    expect(settled.motionActive).toBeFalsy();
+    empty.readErrors.push("specs-library: boom");
+    const failed = renderScreen(s.get(), empty, { cols: 140, rows: 34, nowMs: 0, colorMode: "truecolor" });
+    expect(failed.lines.join("\n")).toMatch(/✕ library read failed/);
+    expect(failed.motionActive).toBeFalsy();
+  });
+
+  it("HUMAN-QUEUE: in-flight spins with '(read pending)'; a settled unprobed state renders static without it", () => {
+    const unprobed = { ...structuredClone(snap), humanQueueProbed: false, needs: [] };
+    const s = createViewState({ instanceId: "hq", getSnapshot: () => unprobed });
+    s.dispatch({ type: "jump", section: "needs" });
+    const loading = renderScreen(s.get(), unprobed, { cols: 140, rows: 34, nowMs: 0, colorMode: "truecolor", load: LOADING }).lines.join("\n");
+    expect(loading).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] human-queue: not yet known \(read pending\)/);
+    const settled = renderScreen(s.get(), unprobed, { cols: 140, rows: 34, nowMs: 0, colorMode: "truecolor" });
+    const line = settled.lines.find((l) => l.includes("human-queue"))!;
+    expect(line).toMatch(/human-queue: not yet known/);
+    expect(line).not.toMatch(/read pending|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/);
+    expect(settled.motionActive).toBeFalsy();
+  });
+
+  it("16-color in-flight renders the LINE spinner; reduced motion renders the honest static dot and no motion-active", () => {
+    const { s, noGraph } = graphTabStore();
+    const line16 = renderScreen(s.get(), noGraph, { cols: 140, rows: 34, nowMs: 0, colorMode: "16", load: LOADING }).lines.find((l) => l.includes("read pending"))!;
     expect(line16).toMatch(/[|/\-\\] topology graph read pending/);
     process.env["OPENRIG_REDUCED_MOTION"] = "1";
     try {
-      const reduced = renderScreen(s.get(), noGraph, { cols: 140, rows: 34, nowMs: 0, colorMode: "truecolor" });
+      const reduced = renderScreen(s.get(), noGraph, { cols: 140, rows: 34, nowMs: 0, colorMode: "truecolor", load: LOADING });
       expect(reduced.lines.find((l) => l.includes("read pending"))!).toMatch(/· topology graph read pending/);
-      expect(reduced.motionActive).toBe(false);
+      expect(reduced.motionActive).toBeFalsy();
     } finally {
       delete process.env["OPENRIG_REDUCED_MOTION"];
     }
   });
 
-  it("fresh footer stream output raises the ONE-SHOT row flash: inverse within the window, gone after expiry, never under reduced motion", () => {
-    const s = createViewState({ instanceId: "fl", getSnapshot: () => snap });
-    const render = (nowMs: number) => renderScreen(s.get(), snap, { cols: 140, rows: 34, nowMs, streamFreshAt: 1000 });
-    const inWindow = render(1300);
-    expect(inWindow.footerFlash).toBe(true);
-    expect(inWindow.motionActive).toBe(true); // the expiry redraw is scheduled off this
-    const styled = stylizeLines(inWindow, createStyle("truecolor"));
-    const footerIdx = inWindow.lines.findIndex((l) => l.startsWith("≋"));
-    expect(footerIdx).toBeGreaterThan(0);
-    // inverse = a STANDALONE SGR param 7 (never the 7 inside e.g. 77;189;178)
-    const INVERSE = /\x1b\[(?:[0-9;]+;)?7(?:;[0-9;]+)?m/;
-    expect(styled[footerIdx]!, "flash = inverse video on the row").toMatch(INVERSE);
-    styled.forEach((l, i) => expect(stripAnsi(l)).toBe(inWindow.lines[i]));
-    // ONE-SHOT expiry: past the window the flash is gone
-    const after = render(1700);
-    expect(after.footerFlash).toBe(false);
-    const styledAfter = stylizeLines(after, createStyle("truecolor"));
-    expect(styledAfter[footerIdx]!).not.toMatch(INVERSE);
-    // reduced motion: no flash even inside the window
-    process.env["OPENRIG_REDUCED_MOTION"] = "1";
-    try {
-      expect(render(1300).footerFlash).toBe(false);
-    } finally {
-      delete process.env["OPENRIG_REDUCED_MOTION"];
-    }
-  });
-
-  it("region discipline: while a ⚑ pulse is visible on the needs page, the pending-line spinner degrades to the static dot", () => {
+  it("region discipline: while a ⚑ pulse is visible on the needs page, the IN-FLIGHT spinner degrades to the static dot", () => {
     const probing = { ...structuredClone(snap), humanQueueProbed: false };
     const s = createViewState({ instanceId: "rd", getSnapshot: () => probing });
     s.dispatch({ type: "jump", section: "needs" });
-    const screen = renderScreen(s.get(), probing, { cols: 140, rows: 34, nowMs: 0, colorMode: "truecolor" });
+    const screen = renderScreen(s.get(), probing, { cols: 140, rows: 34, nowMs: 0, colorMode: "truecolor", load: LOADING });
     const pending = screen.lines.find((l) => l.includes("not yet known"))!;
     expect(pending).toMatch(/· human-queue: not yet known/); // static — the ⚑ pulse owns the region's one persistent animation
     expect(pending).not.toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/);
+  });
+});
+
+describe("fresh pane-output ROW FLASH — guard round-5 finding 2 (exact agent row, never the ambient stream footer)", () => {
+  const snap = demoSnapshot();
+  const DRIVER_KEY = "agent:vm-host/openrig-build/dev50/dev50.driver";
+  // inverse = a STANDALONE SGR param 7 (never the 7 inside e.g. 77;189;178)
+  const INVERSE = /\x1b\[(?:[0-9;]+;)?7(?:;[0-9;]+)?m/;
+  function agentRowsStore() {
+    const s = createViewState({ instanceId: "fl", getSnapshot: () => snap });
+    // drilling the pod auto-expands it — agent rows become visible explorer rows
+    s.dispatch({ type: "drill", resource: "pod", name: "dev50", target: { host: "vm-host", rig: "openrig-build" } });
+    return s;
+  }
+
+  it("an in-window flash inverse-paints EXACTLY the flashed agent's explorer row and marks motion-active", () => {
+    const s = agentRowsStore();
+    const screen = renderScreen(s.get(), snap, { cols: 140, rows: 34, nowMs: 1300, rowFlashes: [{ key: DRIVER_KEY, at: 1000 }] });
+    expect(screen.flashRows).toHaveLength(1);
+    const y = screen.flashRows![0]!;
+    expect(screen.lines[y - 1]).toContain("dev50.driver"); // exact-row targeting
+    expect(screen.motionActive).toBe(true); // the expiry redraw is scheduled off this
+    const styled = stylizeLines(screen, createStyle("truecolor"));
+    expect(styled[y - 1]!, "flash = inverse video on the agent row").toMatch(INVERSE);
+    const guardRow = screen.lines.findIndex((l) => l.includes("dev50.guard"));
+    expect(styled[guardRow]!).not.toMatch(INVERSE); // sibling rows untouched
+    styled.forEach((l, i) => expect(stripAnsi(l)).toBe(screen.lines[i]));
+  });
+
+  it("the flash is ONE-SHOT: past the window it is gone; reduced motion never flashes", () => {
+    const s = agentRowsStore();
+    const after = renderScreen(s.get(), snap, { cols: 140, rows: 34, nowMs: 1700, rowFlashes: [{ key: DRIVER_KEY, at: 1000 }] });
+    expect(after.flashRows ?? []).toHaveLength(0);
+    // the driver's OWN row is back to normal paint (the content-pane selection
+    // bar legitimately uses inverse elsewhere — scope the pin to the row)
+    const driverIdx = after.lines.findIndex((l) => l.includes("dev50.driver"));
+    expect(stylizeLines(after, createStyle("truecolor"))[driverIdx]!).not.toMatch(INVERSE);
+    process.env["OPENRIG_REDUCED_MOTION"] = "1";
+    try {
+      const reduced = renderScreen(s.get(), snap, { cols: 140, rows: 34, nowMs: 1300, rowFlashes: [{ key: DRIVER_KEY, at: 1000 }] });
+      expect(reduced.flashRows ?? []).toHaveLength(0);
+    } finally {
+      delete process.env["OPENRIG_REDUCED_MOTION"];
+    }
+  });
+
+  it("the ambient rig-stream footer ticker NEVER inverse-flashes (round-4 wiring rejected: wrong event source)", () => {
+    const s = createViewState({ instanceId: "ft", getSnapshot: () => snap }); // footer ticker is on by default
+    const screen = renderScreen(s.get(), snap, { cols: 140, rows: 34, nowMs: 1300 });
+    const styled = stylizeLines(screen, createStyle("truecolor"));
+    const footerIdx = screen.lines.findIndex((l) => l.startsWith("≋"));
+    expect(footerIdx).toBeGreaterThan(0); // the ticker still renders
+    expect(styled[footerIdx]!).not.toMatch(INVERSE);
+    styled.forEach((l, i) => expect(stripAnsi(l)).toBe(screen.lines[i]));
   });
 });

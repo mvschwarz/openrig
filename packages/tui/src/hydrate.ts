@@ -158,6 +158,9 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
     session: node.canonicalSessionName,
     attach: node.tmuxAttachCommand ?? null,
     cwd: node.cwd ?? null,
+    // S19 round-5: served terminalActive VERBATIM — the pane-output substrate
+    // (tmux window_activity within the silence window); null = no signal
+    paneActive: node.terminalActive ?? null,
   };
 }
 

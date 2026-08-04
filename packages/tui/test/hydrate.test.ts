@@ -136,7 +136,11 @@ function expectIncompleteNeedsTruth(snap: Awaited<ReturnType<typeof hydrateSnaps
   const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
   view.dispatch({ type: "jump", section: "needs" });
   const text = renderScreen(view.get(), snap, { cols: 140, rows: 34 }).lines.join("\n");
-  expect(text).toContain("human-queue: not yet known (read pending)");
+  // guard round-5 (NOT-CLEAR at b92c2a58): a SETTLED unprobed queue renders the
+  // honest static "not yet known" — "(read pending)" is reserved for a real
+  // in-flight refresh (load lifecycle), so the settled default drops it
+  expect(text).toContain("human-queue: not yet known");
+  expect(text).not.toContain("(read pending)");
   expect(text).not.toContain("no fleet attention items right now");
 }
 

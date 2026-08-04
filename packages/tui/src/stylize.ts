@@ -156,10 +156,9 @@ export function stylizeLines(screen: Screen, s: Style): string[] {
         .join("");
     }
     if (line.startsWith("≋")) {
-      // round-4 mr7 wiring: the ONE-SHOT fresh-output row flash — tmux-style
-      // whole-row inverse while the window is open (renderScreen owns the
-      // window/reduced-motion truth; this is zero-width SGR only)
-      if (screen.footerFlash) return s.paint("bright", line, { inverse: true });
+      // round-5 (guard): the ambient rig-stream ticker is NOT a pane-output
+      // event source — it never flashes; the activity flash lives on the
+      // flashed agent's explorer row (flashRows) instead
       const m = line.match(/^≋ (\S+) (\S+) (.*)$/);
       if (m) return `${s.paint("accent", "≋")} ${s.paint("dim", m[1]!)} ${s.paint("accentBright", m[2]!)} ${s.paint("dim", m[3]!)}`;
       return s.paint("dim", line);
@@ -178,6 +177,11 @@ export function stylizeLines(screen: Screen, s: Style): string[] {
       else if (tail.startsWith("⚠")) tail = s.paint("warn", tail);
       return `${s.paint("accent", line.slice(0, closeAt + 1), { bold: true })}${s.paint("bright", path)}${tail}`;
     }
+    // S19 round-5 (guard): the tmux-style fresh-pane-output ONE-SHOT flash —
+    // whole-row inverse on EXACTLY the flashed agent's explorer row while the
+    // window is open (renderScreen owns event/window/reduced-motion truth;
+    // this is zero-width SGR only, strip-invariant preserved)
+    if (screen.flashRows?.includes(index + 1)) return s.paint("bright", line, { inverse: true });
     // The pane border lives at the FIXED boundary column (EXPL_W) — located
     // positionally, never by scanning: the navigator's │ rails would shadow
     // a first-index search (slice-17 locked-rail resolution).

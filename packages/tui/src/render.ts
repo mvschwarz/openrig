@@ -11,7 +11,7 @@ import { runtimeMarkSegs } from "./topology/runtime-marks.js";
 import { barCells, flashActive, reducedMotion, spinnerFrame } from "./motion.js";
 import type { ColorMode } from "./theme.js";
 import { detailPage, fieldLine, sectionRule, listItem, alignedRow, LABEL_W } from "./detail.js";
-import type { Action, FleetSnapshot, NeedsItem, Screen, ViewState } from "./types.js";
+import type { Action, FleetSnapshot, LoadState, NeedsItem, RowFlash, Screen, ViewState } from "./types.js";
 
 const EXPL_W = 30;
 
@@ -171,14 +171,16 @@ function fieldWrapped(label: string, values: string[]): ContentLine[] {
   return [fieldLine({ label, value: first }), ...wrapped.slice(1)];
 }
 
-/** S19 round-4 motion wiring (guard finding 3): the loading spinner's frame
- * for this render pass + a used-flag so the entry loop knows the frame is
- * time-driven and must keep redrawing. The spinner rides ONLY the honest
- * read-pending lifecycle states — it never fabricates progress. */
+/** S19 round-5 (guard): the loading spinner's frame for this render pass +
+ * a used-flag so the entry loop knows the frame is time-driven and must keep
+ * redrawing. `loading` is the refresh OWNER's explicit lifecycle — the ONLY
+ * state the spinner may ride; settled absence (proven-empty or a NAMED read
+ * failure) renders static honest text, never a fabricated pending claim. */
 interface MotionCtx {
   frame: string;
   reduced: boolean;
   used: boolean;
+  loading: boolean;
 }
 
 function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: number, motion: MotionCtx): ContentLine[] {
@@ -288,11 +290,18 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       // slice-17 topology view (frame-01): the rig's SERVED /graph projection
       // rendered by the style registry; honest-empty until the read answers.
       if (!rig.graph) {
-        // round-4 motion wiring: the braille loading spinner rides this honest
-        // read-pending state (line frames at 16-color, static dot reduced)
-        if (!motion.reduced) motion.used = true;
         lines.push({ text: "" });
-        lines.push({ text: `  ${motion.frame} topology graph read pending (honest-empty, never fabricated)` });
+        // round-5 (guard): the spinner rides the OWNER's in-flight state only;
+        // settled absence renders the honest static truth — a NAMED failure or
+        // a proven-empty read — and never spins
+        if (motion.loading) {
+          if (!motion.reduced) motion.used = true;
+          lines.push({ text: `  ${motion.frame} topology graph read pending (honest-empty, never fabricated)` });
+        } else if (snap.readErrors.some((e) => e.startsWith(`graph(${rig.name})`))) {
+          lines.push({ text: "  ✕ topology graph read failed — named in the status line (honest-empty, never fabricated)" });
+        } else {
+          lines.push({ text: "  (no topology graph served — honest-empty, never fabricated)" });
+        }
         return lines;
       }
       // PER-VIEW zoom (PM b7f95c4b): a pod drill scopes the SAME projection to
@@ -565,8 +574,16 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       }
     }
     if (snap.specs.length === 0) {
-      if (!motion.reduced) motion.used = true;
-      lines.push({ text: `  ${motion.frame} library read pending — honest-empty` });
+      // round-5 (guard): spin only while the owner is loading; settled empty
+      // is PROVEN empty and a settled failure is named — neither spins
+      if (motion.loading) {
+        if (!motion.reduced) motion.used = true;
+        lines.push({ text: `  ${motion.frame} library read pending — honest-empty` });
+      } else if (snap.readErrors.some((e) => e.startsWith("specs-library"))) {
+        lines.push({ text: "  ✕ library read failed — named in the status line" });
+      } else {
+        lines.push({ text: "  (library empty — proven, no specs served)" });
+      }
     }
     return lines;
   }
@@ -590,13 +607,19 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
     }
     lines.push({ text: "" });
     if (!snap.humanQueueProbed) {
-      // region discipline (max ONE persistent animation): while a derived ⚑
-      // item pulses on this page, the pending spinner degrades to the honest
-      // static dot instead of animating beside it
-      const pulseVisible = snap.needs.some((item) => item.source === "derived") && !motion.reduced;
-      const spin = pulseVisible ? "·" : motion.frame;
-      if (!pulseVisible && !motion.reduced) motion.used = true;
-      lines.push({ text: `  ${spin} human-queue: not yet known (read pending)` });
+      if (motion.loading) {
+        // region discipline (max ONE persistent animation): while a derived ⚑
+        // item pulses on this page, the pending spinner degrades to the honest
+        // static dot instead of animating beside it
+        const pulseVisible = snap.needs.some((item) => item.source === "derived") && !motion.reduced;
+        const spin = pulseVisible ? "·" : motion.frame;
+        if (!pulseVisible && !motion.reduced) motion.used = true;
+        lines.push({ text: `  ${spin} human-queue: not yet known (read pending)` });
+      } else {
+        // round-5 (guard): settled-unprobed is a static truth (hosts down or
+        // registry unavailable) — "(read pending)" would be a false claim
+        lines.push({ text: "  human-queue: not yet known (hosts unreachable or registry unavailable)" });
+      }
     } else if (!snap.needs.some((item) => item.source === "agent"))
       lines.push({ text: "  human-queue: no items (proven empty — surfacing adoption pending)" });
     return lines;
@@ -612,9 +635,14 @@ export interface RenderOptions {
   nowMs?: number;
   /** the active Style's color mode — picks braille vs line spinner frames */
   colorMode?: ColorMode;
-  /** when the entry loop last saw a NEW footer stream item land (one-shot
-   * row-flash source); omitted = no flash */
-  streamFreshAt?: number;
+  /** S19 round-5 (guard): the refresh owner's honest load lifecycle — the
+   * spinner renders ONLY while un-settled/in-flight; omitted = settled
+   * (demo/fixtures: the data given IS the answer, nothing is loading) */
+  load?: LoadState;
+  /** S19 round-5 (guard): per-seat fresh pane-output events from the refresh
+   * owner — renderScreen targets each agent's explorer row while its one-shot
+   * window is open; omitted = no flashes */
+  rowFlashes?: RowFlash[];
 }
 
 /** replace ONE character at a plain-text position inside a token-segment row
@@ -656,13 +684,16 @@ function keybindHints(state: ViewState): string {
 
 export function renderScreen(state: ViewState, snap: FleetSnapshot, options: RenderOptions = {}, inputLine = ""): Screen {
   const { cols = 120, rows = 32, nowMs = 0 } = options;
-  // S19 round-4 motion wiring (guard finding 3): one spinner frame per render
-  // pass, derived from caller-supplied time; reduced-motion kills all of it
+  // S19 round-5 (guard): one spinner frame per render pass from caller time;
+  // `loading` comes from the refresh OWNER (omitted = settled — demo/fixture
+  // data IS the answer); reduced-motion kills all of it
   const reduced = reducedMotion();
+  const load = options.load ?? { inFlight: false, settled: true };
   const motion: MotionCtx = {
     frame: spinnerFrame(Math.floor(nowMs / 120), options.colorMode ?? "truecolor", reduced),
     reduced,
     used: false,
+    loading: load.inFlight || !load.settled,
   };
   const lines: string[] = [];
   const hitMap: Screen["hitMap"] = [];
@@ -684,10 +715,11 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   const { labels: explorerDisplay, metas: explorerMetas } = navigatorDisplay(explorer, snap, EXPL_W - 1);
   const content = contentLines(state, snap, Math.max(cols - EXPL_W - 2, 0), motion);
   const footer = state.footerOn ? snap.stream.at(-1) : undefined;
-  // round-4: tmux-style ONE-SHOT row flash on fresh footer output — active
-  // only inside its window, never under reduced motion (flashActive)
-  const footerFlash = footer != null && options.streamFreshAt != null
-    && flashActive(options.streamFreshAt, nowMs, 600, reduced);
+  // round-5 (guard): the tmux-style ONE-SHOT activity flash targets the
+  // flashed agent's EXPLORER row — per-seat pane-output events from the
+  // refresh owner, windowed here, never under reduced motion. The ambient
+  // rig-stream footer is NOT an event source and never flashes.
+  const liveFlashes = (options.rowFlashes ?? []).filter((f) => flashActive(f.at, nowMs, 600, reduced));
   const chromeRows = footer ? 4 : 3; // bottom rule + hint bar + status line (+ footer)
   const bodyRows = Math.max(rows - 2 - chromeRows, 1);
   const explorerStart = Math.min(
@@ -714,6 +746,7 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   const contentTargets: Screen["contentTargets"] = [];
   const segRows: NonNullable<Screen["segRows"]> = {};
   const explorerMeta: NonNullable<Screen["explorerMeta"]> = {};
+  const flashRows: number[] = [];
   for (let i = 0; i < bodyRows; i++) {
     const y = lines.length + 1; // 1-based terminal row this line will occupy
     const explorerIndex = explorerStart + i;
@@ -743,6 +776,7 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
       explorerRows.push({ ...row, y });
       const em = explorerMetas[explorerIndex];
       if (em && em.length) explorerMeta[y] = em.map((run) => ({ start: 1 + run.start, segs: run.segs })); // +1 = marker slot
+      if (row.key && liveFlashes.some((f) => f.key === row.key)) flashRows.push(y);
     }
     // zones first: hit lookup takes the first match, so a zone wins over the row-wide action
     for (const z of zones) {
@@ -778,7 +812,7 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
     explorerRows,
     segRows,
     explorerMeta,
-    footerFlash,
-    motionActive: motion.used || footerFlash,
+    flashRows,
+    motionActive: motion.used || flashRows.length > 0,
   };
 }
