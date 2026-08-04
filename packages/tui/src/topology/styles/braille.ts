@@ -46,9 +46,13 @@ class BrailleField {
 
 export function renderBraille(layout: GraphLayout, ctx: StyleContext, width: number, tier1Fallback: boolean): GraphCanvas {
   if (tier1Fallback) return renderHatchet(layout, ctx, width); // the PROVEN fallback path
+  // DRAW ORDER = the hatchet semantics (pm kickback: opacity must be a CLASS
+  // invariant, never a draw-order artifact): (1) box-drawing edge runs first,
+  // (2) OPAQUE boxes clear any pass-through segment, (3) the braille field
+  // blits last but is protected-cell-aware, (4) arrowheads last of all.
   const canvas = new GraphCanvas(width);
-  for (const p of layout.placed) drawNodeBox(canvas, p, ctx);
   const field = new BrailleField();
+  const arrows: Array<{ x: number; y: number; ch: string; token: ReturnType<typeof edgeToken> }> = [];
   for (const edge of layout.edges) {
     const from = layout.byId.get(edge.source);
     const to = layout.byId.get(edge.target);
@@ -69,9 +73,11 @@ export function renderBraille(layout: GraphLayout, ctx: StyleContext, width: num
       const ty = (to.y + 1) * 4 + 2;
       field.line(sx, sy, tx, ty, token);
     }
-    canvas.set(txCell, to.y + 1, rightward ? "▸" : "◂", token);
+    arrows.push({ x: txCell, y: to.y + 1, ch: rightward ? "▸" : "◂", token });
   }
-  field.blit(canvas);
+  for (const p of layout.placed) drawNodeBox(canvas, p, ctx);
+  field.blit(canvas); // protected-aware: never dots a box cell
+  for (const a of arrows) if (!canvas.isProtected(a.x, a.y)) canvas.set(a.x, a.y, a.ch, a.token, true);
   canvas.text(2, canvas.height + 1, "braille sub-cell edges · TIER-2 (modern terminals) · fallback = hatchet box-drawing", "dim");
   return canvas;
 }

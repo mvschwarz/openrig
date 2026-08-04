@@ -209,3 +209,53 @@ describe("fixture gating (the --demo rule)", () => {
     expect(offenders).toEqual([]);
   });
 });
+
+describe("box opacity is a CLASS invariant, not a draw-order artifact (pm kickback, planner-refined)", () => {
+  // three ranks on ONE row: a → b → c by delegation; a-collaborates-c gives a
+  // straight same-row corridor that must CROSS b's box — the box renders
+  // byte-clean in BOTH styles (the braille regression pm falsified was
+  // order-dependent: hatchet edges-first masked it, braille boxes-first bled)
+  function crossingGraph() {
+    const node = (id: string, name: string) => ({
+      id,
+      type: "rigNode",
+      parentId: "pod-X",
+      data: {
+        logicalId: name, podNamespace: "p", runtime: "codex", model: null,
+        status: "running", nodeKind: "agent" as const, startupStatus: "ready" as const,
+        contextUsedPercentage: 10, agentActivity: { state: "running" }, terminalActive: true,
+        canonicalSessionName: `${name}@r`,
+      },
+    });
+    return {
+      nodes: [
+        { id: "pod-X", type: "podGroup", data: { logicalId: "p", podNamespace: "p", runtime: null, model: null, status: null, nodeKind: "agent" as const, startupStatus: null, contextUsedPercentage: null } },
+        node("nA", "aa.left"), node("nB", "bb.mid"), node("nC", "cc.right"),
+      ],
+      edges: [
+        { id: "e1", source: "nA", target: "nB", label: "delegates_to" },
+        { id: "e2", source: "nB", target: "nC", label: "delegates_to" },
+        { id: "e3", source: "nA", target: "nC", label: "collaborates_with" },
+      ],
+    };
+  }
+
+  it("an edge corridor crossing an intermediate box never paints inside it — hatchet AND braille", async () => {
+    const { renderGraphStyle } = await import("../src/topology/render-graph.js");
+    for (const style of ["hatchet", "braille", "braille-fallback"] as const) {
+      const plain = renderGraphStyle(style, crossingGraph(), { host: "h", rig: "r", selected: null }, 140).plainLines();
+      const nameIdx = plain.findIndex((l) => l.includes("bb.mid"));
+      expect(nameIdx, `${style}: bb.mid renders`).toBeGreaterThanOrEqual(0);
+      const nameRow = plain[nameIdx]!;
+      const metaRow = plain[nameIdx + 1]!; // box rows: border/name/meta/border
+      // the box's OWN borders must be intact │ (a pierced border shows ┼)
+      // and the interior between them must carry ONLY the box's content
+      const nameInner = nameRow.match(/│([^│]*● bb\.mid[^│]*)│/);
+      expect(nameInner, `${style}: name-row borders intact — got: ${nameRow}`).not.toBeNull();
+      expect(nameInner![1]!, `${style}: name interior clean`).not.toMatch(/[─┼⠁-⣿]/);
+      const metaInner = metaRow.match(/│([^│]*codex · 10% · p[^│]*)│/);
+      expect(metaInner, `${style}: meta-row borders intact — got: ${metaRow}`).not.toBeNull();
+      expect(metaInner![1]!, `${style}: meta interior clean`).not.toMatch(/[─┼⠁-⣿]/);
+    }
+  });
+});
