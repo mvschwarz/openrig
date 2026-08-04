@@ -770,12 +770,15 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
     const y = lines.length + 1; // 1-based terminal row this line will occupy
     const explorerIndex = explorerStart + i;
     const row = explorer[explorerIndex];
-    // round-6: the fresh-output ack rides the marker slot (zero geometry
-    // drift); the selection cue keeps precedence on the one selected row —
-    // its event still shows via the inverse flash under full motion
+    // round-6/7 (guard): the fresh-output ack rides the marker slot (zero
+    // geometry drift). Collision matrix: a SELECTED flashed row shows "»" —
+    // still unmistakably the selection chevron, while visibly distinct from
+    // both the plain "›" baseline and the unselected "≈" ack — so neither
+    // signal is lost under reduced motion / NO_COLOR; expiry returns the
+    // exact "›" baseline
     const flashed = row?.key != null && ackFlashes.some((f) => f.key === row.key);
     if (flashed) flashAck = true;
-    const marker = explorerIndex === state.selection && row ? "›" : flashed ? "≈" : " ";
+    const marker = explorerIndex === state.selection && row ? (flashed ? "»" : "›") : flashed ? "≈" : " ";
     const left = pad(row ? `${marker}${explorerDisplay[explorerIndex] ?? row.label}` : "", EXPL_W);
     const item = visibleContent[i];
     const targetIndex = contentTargets.length;

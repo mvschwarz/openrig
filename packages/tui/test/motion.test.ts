@@ -3,7 +3,7 @@
 // max ONE persistent animation per region, honest fallbacks).
 import { describe, it, expect } from "vitest";
 import { reducedMotion, spinnerFrame, flashActive, barCells } from "../src/motion.js";
-import { createViewState } from "../src/state.js";
+import { computeExplorerRows, createViewState } from "../src/state.js";
 import { renderScreen } from "../src/render.js";
 import { stylizeLines } from "../src/stylize.js";
 import { createStyle, stripAnsi } from "../src/theme.js";
@@ -225,6 +225,30 @@ describe("fresh pane-output ROW FLASH — guard round-5 finding 2 (exact agent r
       const after = renderScreen(s.get(), snap, { cols: 140, rows: 34, nowMs: 1700, rowFlashes: [{ key: DRIVER_KEY, at: 1000 }] });
       expect(after.lines[y]!.startsWith("≈")).toBe(false);
       expect(after.motionActive).toBeFalsy();
+    } finally {
+      delete process.env["OPENRIG_REDUCED_MOTION"];
+    }
+  });
+
+  it("SELECTED agent × fresh event × reduced motion: selection stays visible AND the ack is a distinct stable signal; expiry returns to the exact baseline (guard round-7 collision matrix)", () => {
+    const s = agentRowsStore();
+    const idx = computeExplorerRows(s.get(), snap).findIndex((r) => r.key === DRIVER_KEY);
+    expect(idx).toBeGreaterThan(0);
+    s.dispatch({ type: "select", index: idx, rowCount: computeExplorerRows(s.get(), snap).length });
+    process.env["OPENRIG_REDUCED_MOTION"] = "1";
+    try {
+      const base = renderScreen(s.get(), snap, { cols: 140, rows: 34, nowMs: 1300 });
+      const ev = renderScreen(s.get(), snap, { cols: 140, rows: 34, nowMs: 1300, rowFlashes: [{ key: DRIVER_KEY, at: 1000 }] });
+      const y = ev.lines.findIndex((l) => l.includes("dev50.driver"));
+      expect(base.lines[y]!.startsWith("›")).toBe(true); // baseline: plain selection cue
+      expect(ev.lines[y]).not.toBe(base.lines[y]); // the event frame has a VISIBLE delta
+      expect(ev.lines[y]!.startsWith("»")).toBe(true); // selection-preserving chevron + ack in one cell
+      expect(ev.lines[y]!.slice(1)).toBe(base.lines[y]!.slice(1)); // ONLY the marker cell differs
+      expect(ev.lines[y]!.length).toBe(base.lines[y]!.length); // no geometry drift
+      expect(ev.hitMap).toEqual(base.hitMap); // no hit-map drift
+      expect(stylizeLines(ev, createStyle("none"))[y]!).toContain("»"); // NO_COLOR observable
+      const after = renderScreen(s.get(), snap, { cols: 140, rows: 34, nowMs: 1700, rowFlashes: [{ key: DRIVER_KEY, at: 1000 }] });
+      expect(after.lines[y]).toBe(base.lines[y]); // expiry returns EXACTLY to baseline
     } finally {
       delete process.env["OPENRIG_REDUCED_MOTION"];
     }
