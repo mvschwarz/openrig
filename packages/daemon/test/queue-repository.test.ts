@@ -255,9 +255,16 @@ describe("QueueRepository", () => {
       tier: "fast",
     });
     repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+    // Slice-15 contract: findOverdue takes an OPTIONS OBJECT (the shape the
+    // runtime caller routes/queue.ts uses) — the old positional timestamp is
+    // not a supported API (broad-suite-residue atom 1).
     const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-    const overdue = repo.findOverdue(future);
+    const overdue = repo.findOverdue({ now: future });
     expect(overdue.map((q) => q.qitemId)).toContain(item.qitemId);
+    // scoped/bounded discriminator: a rig scope that matches nothing returns
+    // empty, and limit bounds the result — the options are honored, not ignored
+    expect(repo.findOverdue({ now: future, rig: "no-such-rig" })).toEqual([]);
+    expect(repo.findOverdue({ now: future, limit: 1 }).length).toBeLessThanOrEqual(1);
   });
 
   it("routeToFallback emits qitem.fallback_routed and rewrites destination", async () => {
