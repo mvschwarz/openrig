@@ -168,7 +168,7 @@ describe("Seam B R6 — resolved posture drives the REAL launch helpers on all t
     expect(piTrust("no-approve", yoloOn, "floor")).toBe("no-approve");
   });
 
-  it("ABSENT posture preserves the 0.4.8.2 env behavior byte-for-byte (no policy attached)", () => {
+  it("the STANDALONE Slice-02 primitive keeps its env behavior when invoked BARE (non-lifecycle callers; Seam-B lifecycle surfaces always pass an explicit posture — absence binds the floor, pinned in the lifecycle suite)", () => {
     expect(claudePostureFlag(yoloOn)).toBe("--dangerously-skip-permissions");
     expect(claudePostureFlag(yoloOff)).toBe("--permission-mode acceptEdits");
     expect(codexPostureArg("", yoloOff)).toBe(" -s workspace-write");

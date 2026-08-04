@@ -1251,7 +1251,7 @@ export class RestoreOrchestrator {
    *      degrades to the resolver's advisory floor (honest absence of a declaring dir).
    *   3. Nothing attached → undefined (the env-driven 0.4.8.2 decision, unchanged).
    */
-  private resolveRestorePosture(nodeId: string, rigId: string): "floor" | "full_bypass" | undefined {
+  private resolveRestorePosture(nodeId: string, rigId: string): "floor" | "full_bypass" {
     try {
       const prov = this.rigRepo.getNodePolicyProvenance(nodeId);
       if (prov) {
@@ -1298,7 +1298,9 @@ export class RestoreOrchestrator {
         return rigProv.launchPosture;
       }
     } catch { /* posture resolution must never block a restore */ }
-    return undefined;
+    // R2 terminal (954d97a0): NO provenance anywhere (and the error path) = the locked
+    // minimum floor, explicitly — never undefined (which would delegate to ambient YOLO).
+    return "floor";
   }
 
   private async attemptResume(
