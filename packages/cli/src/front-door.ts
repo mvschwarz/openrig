@@ -28,10 +28,11 @@ export function resolveTuiPath(baseDir: string, exists: (p: string) => boolean =
   return null;
 }
 
-const USAGE_LINES = [
+export const USAGE_LINES = [
   "rig — the OpenRig control plane",
   "",
   "  rig              open mission control (interactive terminal only)",
+  "  rig tui          open mission control (explicit alias of bare `rig`)",
   "  rig --help       full command list",
   "  rig up <rig>     bring a rig up",
   "  rig ps           list live seats",
@@ -76,16 +77,12 @@ async function defaultLaunchTui(): Promise<number> {
 }
 
 /**
- * Returns true when the front door OWNED the invocation (TUI launched or a
- * degrade message printed + exit requested); false to fall through to the
- * normal commander program (args present, or a non-TTY stream).
+ * The OWNED mission-control path, factored out so `rig tui` is a true ALIAS (not a
+ * mirror) of what bare `rig` does: probe the daemon, then either launch the TUI and
+ * exit with its code, or print the friendly first-impression degrade. Shared by
+ * runFrontDoor (bare `rig`) and the `tui` subcommand — one launch path, no duplication.
  */
-export async function runFrontDoor(argv: readonly string[], io: FrontDoorIo = {}): Promise<boolean> {
-  if (argv.length > 2) return false; // any arg → the normal CLI, unchanged
-  const stdinIsTTY = io.stdinIsTTY ?? process.stdin.isTTY === true;
-  const stdoutIsTTY = io.stdoutIsTTY ?? process.stdout.isTTY === true;
-  if (!stdinIsTTY || !stdoutIsTTY) return false; // script involved → usage path, fast exit
-
+export async function openMissionControl(io: FrontDoorIo = {}): Promise<void> {
   const err = io.err ?? ((l: string) => process.stderr.write(l + "\n"));
   const exit = io.exit ?? ((c: number) => process.exit(c));
   const probe = io.probeDaemon ?? defaultProbeDaemon;
@@ -96,7 +93,7 @@ export async function runFrontDoor(argv: readonly string[], io: FrontDoorIo = {}
     err("");
     err("daemon not running — try: rig up   (then bare `rig` opens mission control)");
     exit(1);
-    return true;
+    return;
   }
   try {
     const code = await launch();
@@ -108,5 +105,19 @@ export async function runFrontDoor(argv: readonly string[], io: FrontDoorIo = {}
     err(`mission control could not start: ${e instanceof Error ? e.message : String(e)}`);
     exit(1);
   }
+}
+
+/**
+ * Returns true when the front door OWNED the invocation (TUI launched or a
+ * degrade message printed + exit requested); false to fall through to the
+ * normal commander program (args present, or a non-TTY stream).
+ */
+export async function runFrontDoor(argv: readonly string[], io: FrontDoorIo = {}): Promise<boolean> {
+  if (argv.length > 2) return false; // any arg → the normal CLI, unchanged
+  const stdinIsTTY = io.stdinIsTTY ?? process.stdin.isTTY === true;
+  const stdoutIsTTY = io.stdoutIsTTY ?? process.stdout.isTTY === true;
+  if (!stdinIsTTY || !stdoutIsTTY) return false; // script involved → usage path, fast exit
+
+  await openMissionControl(io);
   return true;
 }
