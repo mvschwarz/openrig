@@ -1170,8 +1170,7 @@ export class PodRigInstantiator {
         }
 
         // Create node
-        let nodeId: string;
-        try {
+        const createUnit = this.db.transaction(() => {
           const node = this.deps.rigRepo.addNode(rigId, qualifiedId, {
             // OPR.0.4.6.FAC1 (VM-caught): the pod-aware bootstrap
             // instantiate-from-YAML path (`rig up <spec>`) creates agent
@@ -1200,15 +1199,21 @@ export class PodRigInstantiator {
             resolvedSpecVersion: configResult.config.resolvedSpecVersion,
             resolvedSpecHash: configResult.config.resolvedSpecHash,
           });
-          nodeId = node.id;
-          nodeIdMap[qualifiedId] = nodeId;
-          // R2 terminal (4c49c758): the bootstrap path's provenance write is the FIRST
-          // write for this node (not a launch-time refresh) — it is LOAD-BEARING restart
-          // state and must be STRICT: a real setter fault fails THIS seat visibly (failed
-          // node result, no silent success), so restore can never fall through a missing
-          // member record to the rig attachment (member precedence + restart truth).
+          // Guard multi-seat correction (16e853a7): node creation + required provenance
+          // are ONE ATOMIC UNIT (SQLite savepoint). A setter fault rolls the INSERT back
+          // too — under partial-success semantics the sibling may proceed, but a failed
+          // member can never survive as a half-created node whose restore posture would
+          // widen to the rig attachment. (Previously the row survived with provenance
+          // null, and resolveRestorePosture fell through to rig full_bypass.)
           const bootstrapAttachment = this.resolveMemberPolicyAttachment(member.permissionPolicy, rigSpec.permissionPolicy, rigRoot);
-          if (bootstrapAttachment) this.persistNodePolicyProvenanceStrict(nodeId, bootstrapAttachment);
+          if (bootstrapAttachment) this.persistNodePolicyProvenanceStrict(node.id, bootstrapAttachment);
+          return node.id;
+        });
+        let nodeId: string;
+        try {
+          nodeId = createUnit();
+          // nodeIdMap only AFTER the atomic unit succeeds (Guard contract item 2).
+          nodeIdMap[qualifiedId] = nodeId;
         } catch (err) {
           nodeResults.push({ logicalId: qualifiedId, status: "failed", error: (err as Error).message });
           continue;

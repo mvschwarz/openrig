@@ -35,7 +35,79 @@ pods:
 edges: []
 `;
 
+const TWO_MEMBER_RIG_YAML = `version: "0.2"
+name: bootstrap-policy-probe-2
+permission_policy: builtin:yolo
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: impl
+        runtime: claude-code
+        agent_ref: local:agents/impl
+        profile: default
+        permission_policy: builtin:locked
+        cwd: .
+      - id: qa
+        runtime: claude-code
+        agent_ref: local:agents/impl
+        profile: default
+        permission_policy: builtin:locked
+        cwd: .
+    edges: []
+edges: []
+`;
+
 describe("R2 bootstrap provenance fault probe", () => {
+  it("SELECTIVE first-setter fault in a TWO-member bootstrap: the sibling may launch (partial-success semantics), but the failed member must NOT survive as a resumable node whose restore posture widens to the rig full_bypass (Guard multi-seat probe at 16e853a7)", async () => {
+    const bindings: NodeBinding[] = [];
+    const adapter: RuntimeAdapter = {
+      runtime: "claude-code",
+      listInstalled: async () => [],
+      project: async () => ({ projected: [], skipped: [], failed: [] }),
+      deliverStartup: async () => ({ delivered: 0, failed: [] }),
+      launchHarness: async (binding) => { bindings.push(binding); return { ok: true }; },
+      checkReady: async () => ({ ready: true }),
+    } as unknown as RuntimeAdapter;
+    const db = createFullTestDb();
+    try {
+      const setup = createTestApp(db, {
+        adapters: { "claude-code": adapter },
+        podInstantiatorFsOps: {
+          exists: (path: string) => path.includes("agents/impl"),
+          readFile: (path: string) => {
+            if (path.includes("agents/impl")) return AGENT_YAML;
+            throw new Error(`not found: ${path}`);
+          },
+        },
+      });
+      // selective fault: FIRST provenance write throws, later ones delegate normally
+      const original = setup.rigRepo.setNodePolicyProvenance.bind(setup.rigRepo);
+      let calls = 0;
+      setup.rigRepo.setNodePolicyProvenance = (nodeId, prov) => {
+        calls += 1;
+        if (calls === 1) throw new Error("injected selective provenance fault");
+        return original(nodeId, prov);
+      };
+
+      const outcome = await setup.podInstantiator.instantiate(TWO_MEMBER_RIG_YAML, "/rig");
+
+      // partial-success semantics: the UNAFFECTED sibling may launch and the rig may report ok
+      expect(bindings.length, "exactly the unaffected sibling launches").toBe(1);
+      void outcome; // ok may be true under partial-success — that is the preserved contract
+
+      // the load-bearing invariant: NO resumable node lacking required provenance survives.
+      const rows = db.prepare("SELECT logical_id FROM nodes WHERE logical_id LIKE 'dev.%'").all() as { logical_id: string }[];
+      const survivors = rows.map((r) => r.logical_id).sort();
+      expect(survivors, "the failed member must not survive as a half-created node").toHaveLength(1);
+      // the surviving sibling carries its member provenance (locked/floor), never the rig widening
+      const survivor = db.prepare("SELECT id, rig_id FROM nodes WHERE logical_id = ?").get(survivors[0]!) as { id: string; rig_id: string };
+      expect(setup.rigRepo.getNodePolicyProvenance(survivor.id)).toMatchObject({ origin: "builtin", launchPosture: "floor" });
+    } finally {
+      db.close();
+    }
+  });
+
   it("happy path: bootstrap persists the MEMBER attachment (locked/floor) with the rig attachment (yolo) alongside — precedence + restart truth agree", async () => {
     const bindings: NodeBinding[] = [];
     const adapter: RuntimeAdapter = {
