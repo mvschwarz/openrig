@@ -8,6 +8,8 @@
 // SCOPE: this atom is the cache producer/reader + collectSignals wiring ONLY. It does not touch the
 // C4 reactive tap, C2 Codex app-server, activity-accurate precheck, D switch execution, or BR-1.
 
+import fs from "node:fs";
+import nodePath from "node:path";
 import { claudeStatuslineSignals, type ClaudeStatuslineReading } from "./provider-signals.js";
 import type { ProviderSignal } from "./provider-types.js";
 
@@ -97,6 +99,34 @@ export function collectClaudeStatuslineSignals(deps: ClaudeUsageReaderDeps): Pro
     );
   }
   return out;
+}
+
+/** Read the seat-keyed cache directory using the same path consumed by daemon startup. */
+export function collectClaudeSignalsFromProviderUsageDirectory(
+  directory: string,
+  now: () => string = () => new Date().toISOString(),
+): ProviderSignal[] {
+  const seats = new Map<string, ClaudeSeatRef>();
+  try {
+    for (const file of fs.readdirSync(directory)) {
+      if (!file.endsWith(".json")) continue;
+      try {
+        const parsed = JSON.parse(fs.readFileSync(nodePath.join(directory, file), "utf-8")) as { seatSession?: unknown };
+        if (typeof parsed.seatSession === "string") {
+          seats.set(parsed.seatSession, { seatSession: parsed.seatSession });
+        }
+      } catch { /* malformed cache cannot create a usable cache signal */ }
+    }
+  } catch { /* absent cache directory */ }
+
+  return collectClaudeStatuslineSignals({
+    listClaudeSeats: () => [...seats.values()],
+    readCacheRaw: (seatSession) => {
+      const safe = seatSession.replace(/[^a-zA-Z0-9@._-]/g, "_");
+      try { return fs.readFileSync(nodePath.join(directory, `${safe}.json`), "utf-8"); } catch { return null; }
+    },
+    now,
+  });
 }
 
 function validRateLimits(value: unknown): ClaudeStatuslineReading | undefined {

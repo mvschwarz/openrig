@@ -75,15 +75,20 @@ export function collectFourBlockReadModel(deps: ProviderCollectDeps): FourBlockR
     };
   });
 
-  const signals = deps.collectSignals ? [...deps.collectSignals()] : [];
+  const liveClaudeSeats = new Set(
+    seatUniverse.filter((seat) => seat.runtime === "claude-code").map((seat) => seat.seatSession),
+  );
+  const signals = (deps.collectSignals ? [...deps.collectSignals()] : []).filter((signal) =>
+    signal.provider !== "claude" || !signal.seatSession || liveClaudeSeats.has(signal.seatSession),
+  );
   const signaledClaudeSeats = new Set(
     signals.filter((signal) => signal.provider === "claude" && signal.seatSession).map((signal) => signal.seatSession!),
   );
   // Cache discovery is never the seat-discovery authority. Every live Claude seat must have a
   // row even before its first statusline payload (or when its cache is malformed/absent).
-  for (const seat of seatUniverse) {
-    if (seat.runtime !== "claude-code" || signaledClaudeSeats.has(seat.seatSession)) continue;
-    signals.push(...claudeStatuslineSignals({ seatSession: seat.seatSession, cachePresent: false, asOf }));
+  for (const seatSession of liveClaudeSeats) {
+    if (signaledClaudeSeats.has(seatSession)) continue;
+    signals.push(...claudeStatuslineSignals({ seatSession, cachePresent: false, asOf }));
   }
   return assembleFourBlock({ accounts, rawBindings, signals, asOf });
 }

@@ -88,4 +88,34 @@ describe("collectFourBlockReadModel — getReadModel collection seam", () => {
     expect(b.accountId).toBeNull(); // must NOT bind to the Codex account despite the stale same-session row
     expect(b.anomalies[0]).toMatchObject({ kind: "seat_with_no_account", seat: "shared@rig" });
   });
+
+  it("drops stale seat-keyed Claude cache signals and emits the live Claude seat's honest unknown", () => {
+    const model = collectFourBlockReadModel(deps({
+      listSeats: () => [{ seatSession: "live@rig", rigName: "rig", runtime: "claude-code" }],
+      collectSignals: () => [{
+        provider: "claude", seatSession: "dead@rig", sourceClass: "provider_statusline",
+        authority: "account_cross_device", window: "five_hour", usedPercent: 12, asOf: ASOF,
+        automationUse: "allow_switch_decision",
+      }],
+    }));
+
+    expect(model.signals.some((signal) => signal.seatSession === "dead@rig")).toBe(false);
+    expect(model.signals).toEqual([expect.objectContaining({
+      provider: "claude", seatSession: "live@rig", sourceClass: "unknown",
+      authority: "unknown", automationUse: "do_not_automate",
+    })]);
+  });
+
+  it("drops a Claude cache signal when the session name is live only as a non-Claude runtime", () => {
+    const model = collectFourBlockReadModel(deps({
+      listSeats: () => [{ seatSession: "reused@rig", rigName: "rig", runtime: "codex" }],
+      collectSignals: () => [{
+        provider: "claude", seatSession: "reused@rig", sourceClass: "provider_statusline",
+        authority: "account_cross_device", window: "five_hour", usedPercent: 12, asOf: ASOF,
+        automationUse: "allow_switch_decision",
+      }],
+    }));
+
+    expect(model.signals.filter((signal) => signal.provider === "claude")).toEqual([]);
+  });
 });

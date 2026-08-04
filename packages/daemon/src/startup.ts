@@ -95,7 +95,7 @@ import { WhoamiService } from "./domain/whoami-service.js";
 import { NodeCmuxService } from "./domain/node-cmux-service.js";
 import { createAppWithWebSocket, type AppDeps } from "./server.js";
 import { ProviderServiceImpl } from "./domain/provider/provider-service-impl.js";
-import { collectClaudeStatuslineSignals, type ClaudeSeatRef } from "./domain/provider/claude-usage-reader.js";
+import { collectClaudeSignalsFromProviderUsageDirectory } from "./domain/provider/claude-usage-reader.js";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -848,30 +848,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     providerService: new ProviderServiceImpl({
       db,
       listRigs: () => rigRepo.listRigs(),
-      collectClaudeSignals: () => {
-        const dir = nodePath.join(OPENRIG_HOME, "provider-usage");
-        const readCacheRaw = (seatSession: string): string | null => {
-          const safe = seatSession.replace(/[^a-zA-Z0-9@._-]/g, "_");
-          try { return fs.readFileSync(nodePath.join(dir, `${safe}.json`), "utf-8"); } catch { return null; }
-        };
-        const seats = new Map<string, ClaudeSeatRef>();
-        try {
-          for (const f of fs.readdirSync(dir)) {
-            if (!f.endsWith(".json")) continue;
-            try {
-              const p = JSON.parse(fs.readFileSync(nodePath.join(dir, f), "utf-8")) as { seatSession?: unknown };
-              if (typeof p.seatSession === "string") {
-                seats.set(p.seatSession, { seatSession: p.seatSession });
-              }
-            } catch { /* skip malformed cache file */ }
-          }
-        } catch { /* absent cache dir → live-seat fallback supplies explicit unknown rows */ }
-        return collectClaudeStatuslineSignals({
-          listClaudeSeats: () => [...seats.values()],
-          readCacheRaw,
-          now: () => new Date().toISOString(),
-        });
-      },
+      collectClaudeSignals: () => collectClaudeSignalsFromProviderUsageDirectory(
+        nodePath.join(OPENRIG_HOME, "provider-usage"),
+      ),
     }),
     restoreOrchestrator,
     resumeMetadataRefresher, // OPR.0.4.3.20 FR-4 — manual snapshot refresh-before-serialize

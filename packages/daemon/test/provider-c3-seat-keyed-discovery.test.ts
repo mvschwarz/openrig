@@ -12,9 +12,11 @@ import { describe, it, expect } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
+import { spawnSync } from "node:child_process";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { ProviderServiceImpl } from "../src/domain/provider/provider-service-impl.js";
+import { collectClaudeSignalsFromProviderUsageDirectory } from "../src/domain/provider/claude-usage-reader.js";
 
 const ASOF = "2026-08-04T00:00:00.000Z";
 
@@ -61,5 +63,48 @@ describe("Slice-04 C3 — seat-keyed Claude provider_usage discovery (production
     const svc = new ProviderServiceImpl({ db, listRigs: () => [], env: emptyCodexHomeEnv(), now: () => ASOF });
     const model = await svc.getReadModel();
     expect(model.signals.filter((s) => s.provider === "claude")).toEqual([]);
+  });
+
+  it("composes the shipped collector and production cache reader through real getReadModel", async () => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "provider-c3-altitude-"));
+    try {
+      const contextDir = nodePath.join(root, "context");
+      const usageDir = nodePath.join(root, "provider-usage");
+      const seatSession = "dev-impl@test-rig";
+      const collectorPath = nodePath.join(import.meta.dirname, "../assets/claude-statusline-context.cjs");
+      const result = spawnSync(process.execPath, [collectorPath, contextDir, usageDir], {
+        encoding: "utf-8",
+        input: JSON.stringify({
+          session_id: "sess-123",
+          session_name: seatSession,
+          context_window: { context_window_size: 200_000, used_percentage: 10 },
+          rate_limits: {
+            five_hour: { used_percentage: 0, resets_at: "2026-08-04T05:00:00.000Z" },
+            seven_day: { used_percentage: 7, resets_at: "2026-08-10T00:00:00.000Z" },
+          },
+        }),
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(fs.existsSync(nodePath.join(usageDir, `${seatSession}.json`))).toBe(true);
+
+      const db = createFullTestDb();
+      seedClaudeSeat(db, seatSession);
+      const svc = new ProviderServiceImpl({
+        db,
+        listRigs: () => [{ id: "rig-1" }],
+        env: emptyCodexHomeEnv(),
+        now: () => ASOF,
+        collectClaudeSignals: () => collectClaudeSignalsFromProviderUsageDirectory(usageDir, () => ASOF),
+      });
+      const model = await svc.getReadModel();
+      const claude = model.signals.filter((signal) => signal.provider === "claude");
+
+      expect(claude).toHaveLength(2);
+      expect(claude.map((signal) => signal.window).sort()).toEqual(["five_hour", "weekly"]);
+      expect(claude.find((signal) => signal.window === "five_hour")?.usedPercent).toBe(0);
+      expect(claude.every((signal) => signal.seatSession === seatSession && signal.accountRef === undefined)).toBe(true);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
