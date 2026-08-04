@@ -108,6 +108,11 @@ export interface ResolvedPolicyAttachment {
   surface?: PolicySurface;
   /** Flag-surface launch posture for per-seat binding (floor | full_bypass). */
   launchPosture: LaunchPosture;
+  /** Guard round-2 (8232199a): TRUE only when custom CONTENT resolution genuinely
+   *  succeeded with USABLE semantics — parse OK + known surface + (flag ⇒ a valid
+   *  launch_posture). Restore trusts a re-derivation ONLY when this is true; otherwise
+   *  the PERSISTED posture carries. Builtins: always true (name-derived semantics). */
+  contentResolved: boolean;
 }
 
 /** Injected reader so resolution is testable + does not hard-couple the module to fs. Throws when
@@ -154,12 +159,14 @@ export function resolvePermissionPolicyAttachment(
       resolvedTarget: builtinPackageTarget(builtinName),
       surface: builtinName === "yolo" ? "flag" : undefined,
       launchPosture: builtinName === "yolo" ? "full_bypass" : "floor",
+      contentResolved: true,
     };
   }
   // Custom ref: resolve relative to the declaring RigSpec directory (never cwd/workspace root).
   const resolvedTarget = path.resolve(declaringDir, ref);
   let surface: PolicySurface | undefined;
   let launchPosture: LaunchPosture = "floor";
+  let contentResolved = false;
   try {
     const parsed = parsePolicySpec(deps.readFile(resolvedTarget));
     if (!("error" in parsed)) {
@@ -167,14 +174,20 @@ export function resolvePermissionPolicyAttachment(
       if (s === "flag" || s === "config") surface = s;
       if (surface === "flag") {
         const lp = parsed.frontmatter["launch_posture"];
-        if (lp === "floor" || lp === "full_bypass") launchPosture = lp;
+        if (lp === "floor" || lp === "full_bypass") {
+          launchPosture = lp;
+          contentResolved = true; // usable flag semantics
+        }
+        // flag WITHOUT a valid launch_posture = Seam-A-invalid contract → NOT resolved
+      } else if (surface === "config") {
+        contentResolved = true; // valid config semantics; posture floor is genuine
       }
-      // config-surface → floor (its content application is the deferred skill leg; no config write).
+      // unknown surface → NOT resolved (advisory floor, provenance preserved)
     }
   } catch {
     // Unreadable/unresolvable at resolve time → advisory floor; ref + provenance still preserved.
   }
-  return { ref, origin: "custom", resolvedTarget, declaringDir, surface, launchPosture };
+  return { ref, origin: "custom", resolvedTarget, declaringDir, surface, launchPosture, contentResolved };
 }
 
 /**

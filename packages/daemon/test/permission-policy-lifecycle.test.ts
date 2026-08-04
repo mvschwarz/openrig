@@ -355,3 +355,207 @@ describe("F4 — REAL adapter command pins (floor + full_bypass on every launch 
     } finally { vi.unstubAllEnvs(); }
   });
 });
+
+// ── Guard round-2 (NOT-CLEAR at 8232199a) ──────────────────────────────────────
+
+const MALFORMED_POLICY = "---\nname: broken\nsurface: flag\nlaunch_posture: full_bypass\n# unclosed frontmatter — no closing fence\n# body follows\n";
+const UNUSABLE_FLAG_POLICY = `---\nname: no-posture\nversion: "1"\ndescription: flag policy MISSING launch_posture (Seam-A: invalid flag contract)\nsurface: flag\nallowed_actions: []\nask_actions: []\ndenied_actions: []\nwatch_actions: []\n---\nbody\n`;
+
+describe("GF1 — READABLE but malformed/unusable custom content uses the PERSISTED posture", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "seamb-gf1-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  async function reopenedRestorePosture(kind: "node" | "rig", policyBody: string): Promise<unknown> {
+    const { writeFileSync: wf, mkdirSync: mk } = await import("node:fs");
+    const declRoot = join(dir, "declaring-root");
+    mk(join(declRoot, "policies"), { recursive: true });
+    wf(join(declRoot, "policies", "operator-full.md"), policyBody); // READABLE on the real fs
+    const dbFile = join(dir, `${kind}.sqlite`);
+    const db1 = createDb(dbFile);
+    migrate(db1, migrationsForFullTestDb);
+    const setup1 = createTestApp(db1, { podInstantiatorFsOps: fsOps() });
+    const rig = setup1.rigRepo.createRig(`gf1-${kind}`);
+    const node = setup1.rigRepo.addNode(rig.id, "dev.seat", { runtime: "claude-code", cwd: "/w" });
+    if (kind === "node") {
+      setup1.rigRepo.setNodePolicyProvenance(node.id, {
+        origin: "custom", resolvedTarget: join(declRoot, "policies", "operator-full.md"),
+        declaringDir: declRoot, launchPosture: "full_bypass",
+      });
+      db1.prepare("UPDATE nodes SET permission_policy = 'policies/operator-full.md' WHERE id = ?").run(node.id);
+    } else {
+      setup1.rigRepo.setRigPermissionPolicy(rig.id, "policies/operator-full.md");
+      setup1.rigRepo.setRigPolicyProvenance(rig.id, {
+        origin: "custom", resolvedTarget: join(declRoot, "policies", "operator-full.md"),
+        declaringDir: declRoot, launchPosture: "full_bypass",
+      });
+    }
+    const session = setup1.sessionRegistry.registerSession(node.id, `dev-seat@gf1-${kind}`);
+    db1.prepare("UPDATE sessions SET resume_type = 'claude_id', resume_token = 'tok-gf1' WHERE id = ?").run(session.id);
+    const snap = setup1.snapshotCapture.captureSnapshot(rig.id, "manual");
+    db1.close();
+
+    const db2 = createDb(dbFile);
+    const rigRepo2 = new RigRepository(db2);
+    const sessionRegistry2 = new SessionRegistry(db2);
+    const eventBus2 = new EventBus(db2);
+    const snapshotRepo2 = new SnapshotRepository(db2);
+    const checkpointStore2 = new CheckpointStore(db2);
+    const snapshotCapture2 = new SnapshotCapture({ db: db2, rigRepo: rigRepo2, sessionRegistry: sessionRegistry2, eventBus: eventBus2, snapshotRepo: snapshotRepo2, checkpointStore: checkpointStore2 });
+    const tmux = mockTmux();
+    const claudeResume = {
+      canResume: vi.fn((t: string | null) => t === "claude_id"),
+      resume: vi.fn(async (): Promise<ResumeResult> => ({ ok: true })),
+    } as unknown as ClaudeResumeAdapter;
+    const orch = new RestoreOrchestrator({
+      db: db2, rigRepo: rigRepo2, sessionRegistry: sessionRegistry2, eventBus: eventBus2,
+      snapshotRepo: snapshotRepo2, snapshotCapture: snapshotCapture2, checkpointStore: checkpointStore2,
+      nodeLauncher: new NodeLauncher({ db: db2, rigRepo: rigRepo2, sessionRegistry: sessionRegistry2, eventBus: eventBus2, tmuxAdapter: tmux }),
+      tmuxAdapter: tmux,
+      claudeResume,
+      codexResume: { canResume: vi.fn(() => false), resume: vi.fn() } as unknown as CodexResumeAdapter,
+    });
+    await orch.restore(snap.id);
+    db2.close();
+    const call = (claudeResume.resume as ReturnType<typeof vi.fn>).mock.calls.find((c) => c[2] === "tok-gf1");
+    expect(call, "seat resume should have been attempted").toBeDefined();
+    return call![4];
+  }
+
+  it("RED: NODE provenance + readable MALFORMED frontmatter → persisted full_bypass (never silent floor)", async () => {
+    expect(await reopenedRestorePosture("node", MALFORMED_POLICY)).toBe("full_bypass");
+  });
+
+  it("RED: NODE provenance + readable UNUSABLE flag contract (missing launch_posture) → persisted full_bypass", async () => {
+    expect(await reopenedRestorePosture("node", UNUSABLE_FLAG_POLICY)).toBe("full_bypass");
+  });
+
+  it("RED: inherited RIG provenance + readable MALFORMED frontmatter → persisted full_bypass", async () => {
+    expect(await reopenedRestorePosture("rig", MALFORMED_POLICY)).toBe("full_bypass");
+  });
+
+  it("valid readable content still RE-DERIVES (the ruling's re-validation stays live)", async () => {
+    expect(await reopenedRestorePosture("node", CUSTOM_POLICY)).toBe("full_bypass");
+  });
+});
+
+describe("GF2 — the COMPLETE production-altitude launch/restore matrix", () => {
+  function binding2(posture?: "floor" | "full_bypass"): NodeBinding {
+    return { id: "b1", nodeId: "n1", tmuxSession: "s1", tmuxWindow: null, tmuxPane: null, cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd: "/project", ...(posture ? { launchPosture: posture } : {}) } as NodeBinding;
+  }
+
+  it("POD-AWARE restore: the reconstructed binding's posture reaches the REAL adapter's harness command", { timeout: 30000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "seamb-podaware-"));
+    try {
+      const dbFile = join(dir, "d.sqlite");
+      const db1 = createDb(dbFile);
+      migrate(db1, migrationsForFullTestDb);
+      const setup1 = createTestApp(db1, { podInstantiatorFsOps: fsOps() });
+      const outcome = await setup1.podInstantiator.materializeStructured(rigLevelSpec(), DECLARING_ROOT);
+      expect(outcome.ok).toBe(true);
+      const rigId = (outcome as { ok: true; result: { rigId: string } }).result.rigId;
+      const implNode = db1.prepare("SELECT id FROM nodes WHERE logical_id = 'dev.impl'").get() as { id: string };
+      // pod-aware = snapshot carries podId nodes; the materialized member has one
+      const session = setup1.sessionRegistry.registerSession(implNode.id, "dev-impl@lifecycle-rig");
+      db1.prepare("UPDATE sessions SET resume_type = 'claude_id', resume_token = 'tok-pod' WHERE id = ?").run(session.id);
+      const snap = setup1.snapshotCapture.captureSnapshot(rigId, "manual");
+      // pod-aware startup replay requires nodeStartupContext (captured at original launch;
+      // seeded here the same way the shipped restore tests do)
+      {
+        const row = db1.prepare("SELECT data FROM snapshots WHERE id = ?").get(snap.id) as { data: string };
+        const data = JSON.parse(row.data);
+        data.nodeStartupContext = data.nodeStartupContext ?? {};
+        data.nodeStartupContext[implNode.id] = { projectionEntries: [], resolvedStartupFiles: [], startupActions: [], runtime: "claude-code" };
+        db1.prepare("UPDATE snapshots SET data = ? WHERE id = ?").run(JSON.stringify(data), snap.id);
+      }
+      db1.close();
+
+      const db2 = createDb(dbFile);
+      const rigRepo2 = new RigRepository(db2);
+      const sessionRegistry2 = new SessionRegistry(db2);
+      const eventBus2 = new EventBus(db2);
+      const snapshotRepo2 = new SnapshotRepository(db2);
+      const checkpointStore2 = new CheckpointStore(db2);
+      const snapshotCapture2 = new SnapshotCapture({ db: db2, rigRepo: rigRepo2, sessionRegistry: sessionRegistry2, eventBus: eventBus2, snapshotRepo: snapshotRepo2, checkpointStore: checkpointStore2 });
+      const tmux = mockTmux();
+      const realClaude = new ClaudeCodeAdapter({ sleep: async () => {}, tmux, fsOps: (function () {
+        const store: Record<string, string> = {};
+        return { readFile: (p: string) => { if (p in store) return store[p]!; throw new Error("nf"); }, writeFile: (p: string, c: string) => { store[p] = c; }, exists: (p: string) => p in store, mkdirp: () => {}, copyFile: () => {}, listFiles: () => [] } as ClaudeAdapterFsOps;
+      })(), sessionIdFactory: () => "11111111-1111-4111-8111-111111111111" });
+      const orch = new RestoreOrchestrator({
+        db: db2, rigRepo: rigRepo2, sessionRegistry: sessionRegistry2, eventBus: eventBus2,
+        snapshotRepo: snapshotRepo2, snapshotCapture: snapshotCapture2, checkpointStore: checkpointStore2,
+        nodeLauncher: new NodeLauncher({ db: db2, rigRepo: rigRepo2, sessionRegistry: sessionRegistry2, eventBus: eventBus2, tmuxAdapter: tmux }),
+        tmuxAdapter: tmux,
+        claudeResume: { canResume: vi.fn(() => false), resume: vi.fn() } as unknown as ClaudeResumeAdapter,
+        codexResume: { canResume: vi.fn(() => false), resume: vi.fn() } as unknown as CodexResumeAdapter,
+      });
+      await orch.restore(snap.id, { adapters: { "claude-code": realClaude } } as never);
+      const cmds = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[1]));
+      const launchCmd = cmds.find((c) => c.includes("claude"));
+      expect(launchCmd, `expected a claude harness launch among: ${cmds.join(" | ")}`).toBeDefined();
+      // rig-level custom flag/full_bypass provenance → the harness command carries the bypass
+      expect(launchCmd!).toContain("--dangerously-skip-permissions");
+      db2.close();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("Codex RESUME command: full_bypass forces danger-full-access; floor HOLDS workspace-write under env YOLO", { timeout: 30000 }, async () => {
+    vi.stubEnv("OPENRIG_YOLO", "1");
+    try {
+      const { CodexResumeAdapter: RealCodexResume } = await import("../src/adapters/codex-resume.js");
+      for (const [posture, expected, absent] of [["full_bypass", " -s danger-full-access", ""], ["floor", " -s workspace-write", "danger-full-access"]] as const) {
+        const tmux = mockTmux();
+        const adapter = new RealCodexResume(tmux, { sleep: async () => {} });
+        await adapter.resume("s1", "codex_id", "thread-1", "/w", null, posture);
+        const cmd = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
+        expect(cmd).toContain("codex");
+        expect(cmd).toContain("resume");
+        expect(cmd).toContain(expected);
+        if (absent) expect(cmd).not.toContain(absent);
+      }
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("Pi FRESH + RESUME: posture drives RESOURCE TRUST (approve vs no-approve), floor holding under env YOLO", { timeout: 30000 }, async () => {
+    vi.stubEnv("OPENRIG_YOLO", "1");
+    try {
+      const { PiRuntimeAdapter } = await import("../src/adapters/pi-runtime-adapter.js");
+      const { PiResumeAdapter } = await import("../src/adapters/pi-resume.js");
+      const piFs = { readFile: () => "{}", writeFile: () => {}, exists: () => true, mkdirp: () => {}, listFiles: () => [] };
+      for (const [posture, expectedTrust] of [["full_bypass", "approve"], ["floor", "no-approve"]] as const) {
+        const tmux = mockTmux();
+        const adapter = new PiRuntimeAdapter({ tmux, fsOps: piFs as never, stateRoot: "/tmp/pi-state", runnerEntryPath: "/tmp/pi-runner.js", sleep: async () => {} });
+        await adapter.launchHarness(binding2(posture), { name: "dev-pi@test-rig" });
+        const cmd = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
+        // RESOURCE TRUST wording: Pi's --approve/--no-approve govern resource trust, not permissions
+        if (expectedTrust === "approve") { expect(cmd).toMatch(/--approve/); expect(cmd).not.toMatch(/--no-approve/); }
+        else expect(cmd).toContain("--no-approve");
+      }
+      for (const [posture, expectedTrust] of [["full_bypass", "approve"], ["floor", "no-approve"]] as const) {
+        const tmux = mockTmux();
+        const adapter = new PiResumeAdapter(tmux, piFs as never, { stateRoot: "/tmp/pi-state", runnerEntryPath: "/tmp/pi-runner.js" }, { sleep: async () => {} });
+        await adapter.resume("s1", "pi_session_file", "/tmp/pi-state/session.json", "/w", null, posture);
+        const cmd = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
+        if (expectedTrust === "approve") { expect(cmd).toMatch(/--approve/); expect(cmd).not.toMatch(/--no-approve/); }
+        else expect(cmd).toContain("--no-approve");
+      }
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("Claude NATIVE-FORK command: posture drives the flag on the fork path too (floor holds under env YOLO)", { timeout: 30000 }, async () => {
+    vi.stubEnv("OPENRIG_YOLO", "1");
+    try {
+      for (const [posture, expected] of [["full_bypass", "--dangerously-skip-permissions"], ["floor", "--permission-mode acceptEdits"]] as const) {
+        const tmux = mockTmux();
+        const store: Record<string, string> = {};
+        const adapter = new ClaudeCodeAdapter({ sleep: async () => {}, tmux, fsOps: { readFile: (p: string) => { if (p in store) return store[p]!; throw new Error("nf"); }, writeFile: (p: string, c: string) => { store[p] = c; }, exists: (p: string) => p in store, mkdirp: () => {}, copyFile: () => {}, listFiles: () => [] } as ClaudeAdapterFsOps, sessionIdFactory: () => "11111111-1111-4111-8111-111111111111" });
+        await adapter.launchHarness(binding2(posture), { name: "dev-impl@test-rig", forkSource: { kind: "native_id", value: "parent-session-1" } as never });
+        const cmd = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
+        expect(cmd).toContain("claude");
+        expect(cmd).toContain(expected);
+        if (posture === "floor") expect(cmd).not.toContain("--dangerously-skip-permissions");
+      }
+    } finally { vi.unstubAllEnvs(); }
+  });
+});
