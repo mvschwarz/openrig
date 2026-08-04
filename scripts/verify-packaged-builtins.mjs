@@ -60,13 +60,36 @@ ok("assembled daemon/policies/builtin: exactly the known four, all authority has
 const home = mkdtempSync(join(tmpdir(), "builtins-probe-home-"));
 const state = mkdtempSync(join(tmpdir(), "builtins-probe-state-"));
 process.env.OPENRIG_HOME = home;
+// QA finding (qitem 03a6194b): createDaemon() fires the background kernel
+// bootstrap by default, which can create/replace tmux sessions on the SHARED
+// server — the probe must deterministically opt out BEFORE importing the
+// compiled startup, and PIN the skip so a regression fails loudly.
+process.env.OPENRIG_NO_KERNEL = "1";
 delete process.env.OPENRIG_URL;
 delete process.env.OPENRIG_PORT;
 try {
   const startup = await import(pathToFileURL(join(cli, "daemon", "dist", "startup.js")).href);
   if (typeof startup.createDaemon !== "function") fail("assembled dist/startup.js does not export createDaemon");
-  // construct WITHOUT listening — isolated DB under the temp state dir
-  const daemon = await startup.createDaemon({ dbPath: join(state, "probe.db") });
+  // construct WITHOUT listening — isolated DB under the temp state dir; tee
+  // stdout/stderr during construction to pin the kernel-boot SKIP
+  const chunks = [];
+  const origOut = process.stdout.write.bind(process.stdout);
+  const origErr = process.stderr.write.bind(process.stderr);
+  process.stdout.write = (c, ...rest) => { chunks.push(String(c)); return origOut(c, ...rest); };
+  process.stderr.write = (c, ...rest) => { chunks.push(String(c)); return origErr(c, ...rest); };
+  let daemon;
+  try {
+    daemon = await startup.createDaemon({ dbPath: join(state, "probe.db") });
+  } finally {
+    process.stdout.write = origOut;
+    process.stderr.write = origErr;
+  }
+  const bootLog = chunks.join("");
+  if (!bootLog.includes("skipping kernel auto-boot"))
+    fail("kernel auto-boot skip NOT observed — the probe must never start the background kernel bootstrap");
+  if (bootLog.includes("kernel-boot: booting"))
+    fail("kernel-boot attempted to BOOT during the probe — shared tmux was at risk");
+  ok("kernel auto-boot deterministically SKIPPED (OPENRIG_NO_KERNEL=1 pinned in probe output)");
   const refDir = join(home, "reference", "policies", "builtin");
   const files = readdirSync(refDir).sort();
   if (JSON.stringify(files) !== JSON.stringify(expectedFiles))
