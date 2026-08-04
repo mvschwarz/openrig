@@ -274,7 +274,7 @@ describe("Phase-3 live-glyph honesty (the states the fleet GENUINELY serves)", (
       agentActivity: null, terminalActive: null,
     });
     expect(detached.glyph).toBe("○");
-    expect(detached.token).toBe("dim");
+    expect(detached.token).toBe("actDetached"); // S19 MR3 role (glyph honesty unchanged)
     // and the ● bucket is EXCLUSIVE to ready+running — nothing else qualifies
     for (const status of [null, "detached", "stopped", "pending"]) {
       const g = statusGlyph({
@@ -465,5 +465,65 @@ describe("S19 MR1 — kill the triple name (§A1)", () => {
     expect(body).not.toMatch(/· orch │/);
     // non-pod-prefixed names display unchanged (honest fallback mirrors the
     // navigator's confirmed-prefix rule)
+  });
+});
+
+describe("S19 MR3 — activity design language (role-level, palette-value-agnostic)", () => {
+  it("active / idle / detached / attention map to FOUR DISTINCT color roles; glyph honesty unchanged", async () => {
+    const { statusGlyph } = await import("../src/topology/glyphs.js");
+    const base = { logicalId: "x", podNamespace: "p", runtime: "codex", model: null, nodeKind: "agent" as const, contextUsedPercentage: null };
+    const active = statusGlyph({ ...base, status: "running", startupStatus: "ready", agentActivity: { state: "running" } });
+    const idle = statusGlyph({ ...base, status: "running", startupStatus: "ready", agentActivity: { state: "idle" } });
+    const detached = statusGlyph({ ...base, status: "detached", startupStatus: null, agentActivity: null });
+    const attention = statusGlyph({ ...base, status: "running", startupStatus: "attention_required", agentActivity: null });
+    // glyphs stay the honest 4-vocab
+    expect(active.glyph).toBe("●");
+    expect(idle.glyph).toBe("●");
+    expect(detached.glyph).toBe("○");
+    expect(attention.glyph).toBe("◐");
+    // roles are DISTINCT (values = founder pick later; roles are the contract)
+    const roles = [active.token, idle.token, detached.token, attention.token];
+    expect(new Set(roles).size).toBe(4);
+    // honest-unknown unchanged: no session/no activity → ○, never ●
+    const unknown = statusGlyph({ ...base, status: null, startupStatus: null });
+    expect(unknown.glyph).toBe("○");
+  });
+});
+
+describe("S19 MR4 — detail pane shows the full absolute working directory", () => {
+  it("an agent with a served cwd renders it verbatim; absent cwd renders honest —", () => {
+    const snap = graphSnap();
+    (snap.hosts[0]!.rigs[0]!.pods[1]!.agents[0]! as { cwd?: string | null }).cwd = "/Users/admin/code/openrig-build-source";
+    const s = makeStore(snap);
+    s.dispatch({ type: "drill", resource: "agent", name: "dev.driver", target: { host: "vm-host", rig: FIXTURE_RIG_NAME, pod: "dev" } });
+    const body = renderScreen(s.get(), snap, { cols: 150, rows: 40 }).lines.join("\n");
+    expect(body).toContain("/Users/admin/code/openrig-build-source"); // full absolute path, verbatim
+    const s2 = makeStore(graphSnap());
+    s2.dispatch({ type: "drill", resource: "agent", name: "dev.qa", target: { host: "vm-host", rig: FIXTURE_RIG_NAME, pod: "dev" } });
+    const body2 = renderScreen(s2.get(), graphSnap(), { cols: 150, rows: 40 }).lines.join("\n");
+    expect(body2).toMatch(/cwd/); // the field exists and reads honestly when unknown
+  });
+});
+
+describe("S19 MR5 — chrome: blinking cursor + guide contrast", () => {
+  it("the command bar renders a BLINKING cursor while composing and none when empty", () => {
+    const snap = graphSnap();
+    const s = makeStore(snap);
+    const composing = renderScreen(s.get(), snap, { cols: 120, rows: 30 }, "rig ope");
+    expect(composing.lines[0]).toContain("rig ope▊");
+    const styledC = stylizeLines(composing, createStyle("truecolor"));
+    expect(styledC[0]!, "SGR blink (5) on the cursor cell").toMatch(/\x1b\[[0-9;]*5;?[0-9;]*m▊/);
+    styledC.forEach((l, i) => expect(stripAnsi(l)).toBe(composing.lines[i]));
+    const empty = renderScreen(s.get(), snap, { cols: 120, rows: 30 }, "");
+    expect(empty.lines[0]).not.toContain("▊");
+  });
+
+  it("tree guides paint the BUMPED chrome contrast (one step up; text-only-highlight pin is the regression guard)", () => {
+    const s = makeStore(graphSnap());
+    const screen = renderScreen(s.get(), graphSnap(), { cols: 120, rows: 30 });
+    const styled = stylizeLines(screen, createStyle("truecolor"));
+    const guideLine = styled.find((l) => stripAnsi(l).includes("├─"))!;
+    expect(guideLine).toMatch(/38;2;76;84;99m[^m]*├─/); // the bumped chrome value
+    expect(guideLine).not.toMatch(/38;2;58;63;75m[^m]*├─/); // not the old faint value
   });
 });

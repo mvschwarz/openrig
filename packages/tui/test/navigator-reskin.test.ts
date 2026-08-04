@@ -246,7 +246,7 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     expect(i).toBeGreaterThan(0);
     const line = styled[i]!;
     // the guide run paints CHROME with no inverse (7) in its opening SGR…
-    expect(line).toMatch(/\x1b\[38;2;58;63;75m[^\x1b]*├─/);
+    expect(line).toMatch(/\x1b\[38;2;76;84;99m[^\x1b]*├─/); // S19 MR5b bumped chrome
     // …while the item text carries the accent inverse bar…
     expect(line).toMatch(/\x1b\[1;7;38;2;77;189;178m[^\x1b]*● guard/);
     // …and the selection marker keeps its shipped form (floor compatibility)

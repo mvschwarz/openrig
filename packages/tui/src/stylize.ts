@@ -128,8 +128,9 @@ export function stylizeLines(screen: Screen, s: Style): string[] {
 
   return screen.lines.map((line, index) => {
     if (index === 0) {
-      const m = line.match(/^cmd ▸ (.*)$/);
-      if (m) return `${s.paint("accent", "cmd ▸", { bold: true })} ${s.paint("bright", m[1] ?? "")}`;
+      const m = line.match(/^cmd ▸ (.*?)(▊?)( *)$/);
+      if (m)
+        return `${s.paint("accent", "cmd ▸", { bold: true })} ${s.paint("bright", m[1] ?? "")}${m[2] ? s.paint("accent", "▊", { blink: true }) : ""}${m[3] ?? ""}`;
       return line;
     }
     if (/^[─┌┐└┘├┤┬┴┼]/.test(line) && /─{4}/.test(line)) return paintRule(line, s);

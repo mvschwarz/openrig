@@ -19,6 +19,8 @@ export interface AgentRow {
   session?: string | null;
   /** served tmuxAttachCommand, displayed verbatim in the detail view (web parity) */
   attach?: string | null;
+  /** served working directory (S19 MR4 §D9 — full absolute path, verbatim) */
+  cwd?: string | null;
 }
 
 export interface PodNode {

@@ -40,6 +40,7 @@ interface NodeInventoryRead {
   identityVerdict?: { verdict?: string } | null;
   canonicalSessionName: string | null;
   tmuxAttachCommand?: string | null;
+  cwd?: string | null;
   resolvedSpecName: string | null;
   contextUsage?: {
     availability: "known" | "unknown";
@@ -156,6 +157,7 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
       && node.terminalActive !== true,
     session: node.canonicalSessionName,
     attach: node.tmuxAttachCommand ?? null,
+    cwd: node.cwd ?? null,
   };
 }
 

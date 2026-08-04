@@ -35,14 +35,18 @@ export function statusGlyph(data: GraphNodeData): StatusGlyph {
   if (data.startupStatus === "attention_required" || data.heldReason != null || activity === "needs_input")
     return {
       glyph: "◐",
-      token: "warn",
+      token: "actAttention",
       overlay: data.contextUsedPercentage != null ? `${Math.round(data.contextUsedPercentage)}%` : null,
     };
-  if (data.startupStatus === "ready" && data.status === "running")
-    return { glyph: "●", token: "ok", overlay: null };
-  // everything else — pending, queued, no session, activity unknown — is the
-  // honest-unknown bucket, rendered wherever the projection has no value
-  return { glyph: "○", token: "dim", overlay: null };
+  if (data.startupStatus === "ready" && data.status === "running") {
+    // S19 MR3: ACTIVITY splits the ● bucket by color ROLE (glyph honesty
+    // unchanged) — actively-working vs idle are visibly distinct
+    const working = activity === "running" || data.terminalActive === true;
+    return { glyph: "●", token: working ? "actActive" : "actIdle", overlay: null };
+  }
+  // everything else — pending, queued, detached, no session — is the honest
+  // ○ bucket, rendered wherever the projection has no value (role: detached)
+  return { glyph: "○", token: "actDetached", overlay: null };
 }
 
 export function edgeToken(kind: string): Token {

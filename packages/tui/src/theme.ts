@@ -29,6 +29,12 @@ export type Token =
   | "chrome" // borders/rules
   // S19 MR2 — web-identical runtime-mark colors (RuntimeMark.tsx values);
   // 16-color values are PLACEHOLDERS pending the founder degrade pick (mr7)
+  // S19 MR3 — activity ROLES (values = PLACEHOLDERS pending the founder
+  // palette pick; the roles are the contract, pins are value-agnostic)
+  | "actActive"
+  | "actIdle"
+  | "actDetached"
+  | "actAttention"
   | "clawd" // clawd body #ad6755
   | "clawdEye" // clawd eyes #181818
   | "markInk" // codex `>_` ink (light)
@@ -43,7 +49,12 @@ const PALETTE: Record<Token, [[number, number, number], number, number]> = {
   ok: [[152, 195, 121], 108, 32],
   dim: [[109, 116, 128], 243, 90],
   bright: [[232, 234, 240], 254, 97],
-  chrome: [[58, 63, 75], 238, 90],
+  // S19 MR5b: one-step contrast bump (founder: 'a little more noticeable')
+  chrome: [[76, 84, 99], 244, 90],
+  actActive: [[152, 195, 121], 108, 32],
+  actIdle: [[110, 142, 170], 109, 34],
+  actDetached: [[109, 116, 128], 243, 90],
+  actAttention: [[230, 181, 110], 179, 33],
   clawd: [[173, 103, 85], 131, 31],
   clawdEye: [[24, 24, 24], 234, 30],
   markInk: [[250, 250, 249], 255, 97],
@@ -52,15 +63,16 @@ const PALETTE: Record<Token, [[number, number, number], number, number]> = {
 
 export interface Style {
   /** wrap text in the token's SGR (plus bold/inverse); identity in "none" mode */
-  paint(token: Token, text: string, opts?: { bold?: boolean; inverse?: boolean; bg?: Token }): string;
+  paint(token: Token, text: string, opts?: { bold?: boolean; inverse?: boolean; bg?: Token; blink?: boolean }): string;
   readonly mode: ColorMode;
 }
 
 export function createStyle(mode: ColorMode = detectColorMode()): Style {
-  function open(token: Token, opts?: { bold?: boolean; inverse?: boolean; bg?: Token }): string {
+  function open(token: Token, opts?: { bold?: boolean; inverse?: boolean; bg?: Token; blink?: boolean }): string {
     if (mode === "none") return "";
     const parts: string[] = [];
     if (opts?.bold) parts.push("1");
+    if (opts?.blink) parts.push("5");
     if (opts?.inverse) parts.push("7");
     const [rgb, x256, basic] = PALETTE[token];
     if (mode === "truecolor") parts.push(`38;2;${rgb[0]};${rgb[1]};${rgb[2]}`);

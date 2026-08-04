@@ -213,6 +213,9 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
               label: "context",
               value: agent.context == null ? "— (not yet known)" : `${agent.context}% used · ${agent.tokens ?? "—"} tokens`,
             },
+            // S19 MR4 (§D9, founder: "very important"): the FULL absolute
+            // working directory, verbatim; honest — when not served
+            { label: "cwd", value: agent.cwd ?? "— (not served)" },
           ],
         },
         {
@@ -605,7 +608,9 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   const { cols = 120, rows = 32 } = options;
   const lines: string[] = [];
   const hitMap: Screen["hitMap"] = [];
-  lines.push(pad(`cmd ▸ ${inputLine}`, cols));
+  // S19 MR5a: a cursor cell renders while composing (the existing input
+  // state — no new focus mechanism); stylize gives it SGR blink
+  lines.push(pad(`cmd ▸ ${inputLine}${inputLine ? "▊" : ""}`, cols));
   const sectionTitle = { topology: "TOPOLOGY", specs: "SPECS", needs: "NEEDS-YOU" }[state.section] ?? state.section.toUpperCase();
   // active-pane emphasis (k9s-class chrome): the focused pane's title is bracketed
   const explorerTitle = state.focusedPane === "explorer" ? "[ EXPLORER ]" : "EXPLORER";

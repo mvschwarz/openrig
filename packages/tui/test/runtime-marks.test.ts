@@ -30,7 +30,7 @@ describe("clawd grid = the RuntimeMark.tsx rect list", () => {
 });
 
 describe("row-scale mark family", () => {
-  it("runtime → mark mapping: claude family = clawd cells, codex = ❯_, terminal = dark ❯_, unknown = honest ?", () => {
+  it("runtime → mark mapping: claude family = clawd cells, codex = >_, terminal = dark >_, unknown = honest ?", () => {
     expect(markText(runtimeMarkSegs("claude-code"))).toBe(markText(clawdMiniA()));
     expect(markText(runtimeMarkSegs("codex"))).toBe(">_"); // the LOCKED web token
     expect(markText(runtimeMarkSegs("terminal"))).toBe(">_");
