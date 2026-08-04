@@ -17,15 +17,12 @@ import { claudePostureFlag, codexPostureArg, piTrust } from "../src/adapters/yol
 
 const RIG_ROOT = "/project/rigs/policy-rig";
 const CUSTOM_POLICY = `---
+policy_schema_version: 1
 name: operator-full
-version: "1"
-description: full-bypass flag policy for the plumb pins
+source: custom
+description: full-bypass flag policy (Seam-A-complete fixture)
 surface: flag
 launch_posture: full_bypass
-allowed_actions: []
-ask_actions: []
-denied_actions: []
-watch_actions: []
 ---
 # Operator full
 `;

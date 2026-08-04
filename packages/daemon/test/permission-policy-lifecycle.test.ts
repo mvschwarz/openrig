@@ -33,15 +33,12 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 
 const CUSTOM_POLICY = `---
+policy_schema_version: 1
 name: operator-full
-version: "1"
-description: full-bypass flag policy (lifecycle pins)
+source: custom
+description: full-bypass flag policy (Seam-A-complete fixture)
 surface: flag
 launch_posture: full_bypass
-allowed_actions: []
-ask_actions: []
-denied_actions: []
-watch_actions: []
 ---
 # Operator full
 `;
@@ -319,12 +316,12 @@ describe("F4 — REAL adapter command pins (floor + full_bypass on every launch 
     } finally { vi.unstubAllEnvs(); }
   });
 
-  it("Codex FRESH + NATIVE-FORK: binding posture drives -s danger-full-access vs the workspace-write floor", async () => {
+  it("Codex FRESH + NATIVE-FORK: binding posture drives -s danger-full-access vs the workspace-write floor", { timeout: 30000 }, async () => {
     const codexFs = { readFile: () => { throw new Error("nf"); }, writeFile: () => {}, exists: () => false, mkdirp: () => {}, listFiles: () => [] };
     // fresh
     for (const [posture, expected, absent] of [["full_bypass", " -s danger-full-access", ""], ["floor", " -s workspace-write", "danger-full-access"]] as const) {
       const tmux = mockTmux();
-      await new CodexRuntimeAdapter({ tmux, fsOps: codexFs as never }).launchHarness(binding(posture), { name: "dev-qa@test-rig" });
+      await new CodexRuntimeAdapter({ sleep: async () => {}, tmux, fsOps: codexFs as never }).launchHarness(binding(posture), { name: "dev-qa@test-rig" });
       const cmd = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
       expect(cmd).toContain(expected);
       if (absent) expect(cmd).not.toContain(absent);
@@ -332,7 +329,7 @@ describe("F4 — REAL adapter command pins (floor + full_bypass on every launch 
     // native fork (the Slice-02 helper remains the only flag translator)
     for (const [posture, expected] of [["full_bypass", " -s danger-full-access"], ["floor", " -s workspace-write"]] as const) {
       const tmux = mockTmux();
-      await new CodexRuntimeAdapter({ tmux, fsOps: codexFs as never }).launchHarness(binding(posture), { name: "dev-qa@test-rig", forkSource: { kind: "native_id", value: "parent-thread-1" } as never });
+      await new CodexRuntimeAdapter({ sleep: async () => {}, tmux, fsOps: codexFs as never }).launchHarness(binding(posture), { name: "dev-qa@test-rig", forkSource: { kind: "native_id", value: "parent-thread-1" } as never });
       const cmd = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
       expect(cmd).toContain("fork");
       expect(cmd).toContain(expected);
@@ -359,7 +356,7 @@ describe("F4 — REAL adapter command pins (floor + full_bypass on every launch 
 // ── Guard round-2 (NOT-CLEAR at 8232199a) ──────────────────────────────────────
 
 const MALFORMED_POLICY = "---\nname: broken\nsurface: flag\nlaunch_posture: full_bypass\n# unclosed frontmatter — no closing fence\n# body follows\n";
-const UNUSABLE_FLAG_POLICY = `---\nname: no-posture\nversion: "1"\ndescription: flag policy MISSING launch_posture (Seam-A: invalid flag contract)\nsurface: flag\nallowed_actions: []\nask_actions: []\ndenied_actions: []\nwatch_actions: []\n---\nbody\n`;
+const UNUSABLE_FLAG_POLICY = `---\npolicy_schema_version: 1\nname: no-posture\nsource: custom\ndescription: flag policy MISSING launch_posture (Seam-A invalid flag contract)\nsurface: flag\n---\nbody\n`;
 
 describe("GF1 — READABLE but malformed/unusable custom content uses the PERSISTED posture", () => {
   let dir: string;

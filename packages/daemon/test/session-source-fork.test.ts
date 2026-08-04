@@ -451,7 +451,10 @@ describe("CodexRuntimeAdapter.launchHarness fork branch", () => {
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     const sentCmd = sendText.mock.calls[0]?.[1] as string;
-    expect(sentCmd).toMatch(/^codex( -p [^ ]+)? fork/);
+    // R2 LOW-4 reconciliation (truthful floor update, assertion intent unchanged): the
+    // no-profile floor now emits the explicit ` -s workspace-write` sandbox argument
+    // (OPR.0.4.8.2 posture helper) between the executable and the fork subcommand.
+    expect(sentCmd).toMatch(/^codex( -p [^ ]+| -s [a-z-]+)* fork/);
     expect(sentCmd).toContain("PARENT-THREAD-ABC");
     if (result.ok) {
       expect(result.resumeToken).toBe("NEW-CODEX-THREAD-XYZ");

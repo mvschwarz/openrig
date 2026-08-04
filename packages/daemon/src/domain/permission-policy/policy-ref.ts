@@ -14,7 +14,7 @@
 
 import * as path from "node:path";
 import { validateSafePath } from "../path-safety.js";
-import { parsePolicySpec } from "./policy-spec.js";
+import { parsePolicySpec, validatePolicySpec } from "./policy-spec.js";
 import type { LaunchPosture, PolicySurface } from "./policy-spec.js";
 
 /** The packaged read-only built-in policy set (README v4: 3 Policy-Mode specs + Operator/YOLO). */
@@ -67,8 +67,16 @@ export function validatePermissionPolicyRef(value: unknown, label: string): stri
   const pathErr = validateSafePath(value, label);
   if (pathErr) return pathErr;
   // …plus the explicit empty-segment rejection (README v4 A2) that validateSafePath does not cover.
-  if (value.replace(/\\/g, "/").split("/").some((seg) => seg.length === 0)) {
+  const segments = value.replace(/\\/g, "/").split("/");
+  if (segments.some((seg) => seg.length === 0)) {
     return `${label}: empty path segments are not allowed (got "${value}")`;
+  }
+  // README v4 A2 per-segment charset (the established ref discipline — same class as the
+  // rig-context day-one contract): every segment is a single safe path component.
+  for (const seg of segments) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(seg)) {
+      return `${label}: path segment "${seg}" violates the ref charset (each segment must match [A-Za-z0-9][A-Za-z0-9._-]*)`;
+    }
   }
   return null;
 }
@@ -172,17 +180,21 @@ export function resolvePermissionPolicyAttachment(
     if (!("error" in parsed)) {
       const s = parsed.frontmatter["surface"];
       if (s === "flag" || s === "config") surface = s;
-      if (surface === "flag") {
+      // R2 HIGH-2: content is RESOLVED only when the COMPLETE sealed Seam-A frontmatter
+      // contract validates (validatePolicySpec: surface-appropriate required fields,
+      // action-list shapes, schema version, description, …) — parseable-but-invalid
+      // content must NOT be trusted over persisted posture. Advisory read only.
+      const contract = validatePolicySpec(parsed.frontmatter);
+      if (contract.ok && surface === "flag") {
         const lp = parsed.frontmatter["launch_posture"];
         if (lp === "floor" || lp === "full_bypass") {
           launchPosture = lp;
-          contentResolved = true; // usable flag semantics
+          contentResolved = true;
         }
-        // flag WITHOUT a valid launch_posture = Seam-A-invalid contract → NOT resolved
-      } else if (surface === "config") {
+      } else if (contract.ok && surface === "config") {
         contentResolved = true; // valid config semantics; posture floor is genuine
       }
-      // unknown surface → NOT resolved (advisory floor, provenance preserved)
+      // invalid contract or unknown surface → NOT resolved (advisory floor, provenance kept)
     }
   } catch {
     // Unreadable/unresolvable at resolve time → advisory floor; ref + provenance still preserved.
