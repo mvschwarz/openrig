@@ -193,7 +193,7 @@ export class RigRepository {
   setRigPolicyProvenance(
     rigId: string,
     provenance: {
-      origin: "builtin" | "custom";
+      origin: "builtin" | "custom" | "deliberate_none";
       resolvedTarget: string | null;
       declaringDir: string | null;
       launchPosture: "floor" | "full_bypass";
@@ -207,7 +207,7 @@ export class RigRepository {
 
   /** Seam B Guard-F1 — read the rig-level resolved attachment provenance (null when none). */
   getRigPolicyProvenance(rigId: string): {
-    origin: "builtin" | "custom";
+    origin: "builtin" | "custom" | "deliberate_none";
     resolvedTarget: string | null;
     declaringDir: string | null;
     launchPosture: "floor" | "full_bypass";
@@ -226,7 +226,7 @@ export class RigRepository {
     } | undefined;
     if (!row || row.rig_policy_origin == null || row.rig_policy_launch_posture == null) return null;
     return {
-      origin: row.rig_policy_origin as "builtin" | "custom",
+      origin: row.rig_policy_origin as "builtin" | "custom" | "deliberate_none",
       resolvedTarget: row.rig_policy_resolved_target,
       declaringDir: row.rig_policy_declaring_dir,
       launchPosture: row.rig_policy_launch_posture as "floor" | "full_bypass",
@@ -241,7 +241,7 @@ export class RigRepository {
   setNodePolicyProvenance(
     nodeId: string,
     provenance: {
-      origin: "builtin" | "custom";
+      origin: "builtin" | "custom" | "deliberate_none";
       resolvedTarget: string | null;
       declaringDir: string | null;
       launchPosture: "floor" | "full_bypass";
@@ -256,7 +256,7 @@ export class RigRepository {
   /** Seam B (R2) — read a node's persisted policy provenance; null when none attached
    *  (or pre-057 DB). Restore consumers re-derive posture from this without the spec. */
   getNodePolicyProvenance(nodeId: string): {
-    origin: "builtin" | "custom";
+    origin: "builtin" | "custom" | "deliberate_none";
     resolvedTarget: string | null;
     declaringDir: string | null;
     launchPosture: "floor" | "full_bypass";
@@ -275,7 +275,7 @@ export class RigRepository {
     } | undefined;
     if (!row || row.policy_origin == null || row.policy_launch_posture == null) return null;
     return {
-      origin: row.policy_origin as "builtin" | "custom",
+      origin: row.policy_origin as "builtin" | "custom" | "deliberate_none",
       resolvedTarget: row.policy_resolved_target,
       declaringDir: row.policy_declaring_dir,
       launchPosture: row.policy_launch_posture as "floor" | "full_bypass",
