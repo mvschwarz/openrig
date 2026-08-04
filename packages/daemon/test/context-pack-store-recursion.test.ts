@@ -125,6 +125,39 @@ describe("ATOM 2 — recursive path-addressed discovery (spec §2 refs)", () => 
     expect((thrown as ContextPackError).message).toMatch(/unsafe pack ref/);
   });
 
+  it("GUARD PROBE 1 (canonical): distinct refs with IDENTICAL manifest name/version stay independent — each ref resolves to its OWN physical pack", () => {
+    writePackAt(root, "packs/a", "same", "1");
+    writePackAt(root, "packs/b", "same", "1");
+    const service = lib();
+    const result = service.scan();
+    expect(result.errors).toEqual([]);
+    expect(result.count).toBe(2); // ref is the PRIMARY identity — no collapse
+    expect(service.list().map((e) => e.relativePath).sort()).toEqual(["packs/a", "packs/b"]);
+    const a = service.getByRef("packs/a");
+    const b = service.getByRef("packs/b");
+    expect(a!.sourcePath.endsWith("packs/a")).toBe(true);
+    expect(b!.sourcePath.endsWith("packs/b")).toBe(true);
+  });
+
+  it("GUARD PROBE 2 (canonical): same ref across roots is last-root-wins EVERYWHERE — one list row, count one, resolve to the last entry", () => {
+    const rootB = join(tmp, "storeB2");
+    mkdirSync(rootB, { recursive: true });
+    writePackAt(root, "packs/dup", "first", "1");
+    writePackAt(rootB, "packs/dup", "second", "2");
+    const service = new ContextPackLibraryService({
+      roots: [
+        { path: root, sourceType: "builtin" },
+        { path: rootB, sourceType: "user_file" },
+      ],
+    });
+    const result = service.scan();
+    expect(result.count).toBe(1); // not two — precedence applies to the WHOLE index
+    const rows = service.list();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.name).toBe("second");
+    expect(service.getByRef("packs/dup")!.version).toBe("2");
+  });
+
   it("last root wins when two roots serve the SAME ref (mirrors the id-index precedence)", () => {
     const rootB = join(tmp, "storeB");
     mkdirSync(rootB, { recursive: true });

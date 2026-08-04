@@ -52,11 +52,18 @@ export function estimateTokensFromBytes(bytes: number): number {
 }
 
 export class ContextPackLibraryService {
-  private entries = new Map<string, ContextPackEntry>();
-  /** Slice-03 Atom 2: path-like ref → colon id, maintained by scan() with the
-   *  same last-wins root precedence as the id index. Refs are ADDED alongside
-   *  colon ids; the id strip is explicitly a later atom. */
-  private refIndex = new Map<string, string>();
+  /** Slice-03 Atom 2 (guard correction b74e4576): the PRIMARY index — the
+   *  normalized safe path-like ref IS the pack identity (spec §2 "refs are
+   *  the contract"). getByRef/list/scan().count all observe THIS map; same
+   *  ref across roots is last-root-wins here, so precedence holds everywhere
+   *  (one row, one count, one resolution). Distinct refs with identical
+   *  manifest name/version are independent entries by construction. */
+  private entriesByRef = new Map<string, ContextPackEntry>();
+  /** TEMPORARY legacy colon-id compatibility index (strip = later atom),
+   *  DERIVED from the final ref entries after each scan — it can never
+   *  collapse ref identity; two refs sharing a legacy id resolve that id
+   *  last-wins for compat callers only. */
+  private idIndex = new Map<string, ContextPackEntry>();
   private readonly roots: ContextPackLibraryRoot[];
 
   constructor(opts: ContextPackLibraryOpts) {
@@ -95,8 +102,7 @@ export class ContextPackLibraryService {
 
   /** Re-walk all roots, replace the in-memory index, return a count. */
   scan(): { count: number; errors: Array<{ source: string; error: string }> } {
-    const next = new Map<string, ContextPackEntry>();
-    const nextRefs = new Map<string, string>();
+    const nextByRef = new Map<string, ContextPackEntry>();
     const errors: Array<{ source: string; error: string }> = [];
 
     for (const root of this.roots) {
@@ -112,10 +118,11 @@ export class ContextPackLibraryService {
         }
         try {
           const entry = this.readPackEntry(packDir, join(packDir, "manifest.yaml"), root);
-          // Last-wins: workspace > user_file > builtin in the discovery
-          // order configured by startup — for BOTH indexes.
-          next.set(entry.id, entry);
-          nextRefs.set(entry.relativePath, entry.id);
+          // PRIMARY identity = the ref. Same ref across roots: last root
+          // wins (workspace > user_file > builtin in the startup-configured
+          // discovery order) — for the WHOLE index, so list/count/resolve
+          // agree. Distinct refs never collide, whatever their manifests say.
+          nextByRef.set(ref, entry);
         } catch (err) {
           errors.push({
             source: packDir,
@@ -126,9 +133,14 @@ export class ContextPackLibraryService {
         }
       }
     }
-    this.entries = next;
-    this.refIndex = nextRefs;
-    return { count: next.size, errors };
+    this.entriesByRef = nextByRef;
+    // Legacy colon-id compat index, DERIVED from the final ref entries
+    // (insertion order = discovery order; a shared legacy id resolves
+    // last-wins for compat callers, never touching ref identity).
+    const nextById = new Map<string, ContextPackEntry>();
+    for (const entry of nextByRef.values()) nextById.set(entry.id, entry);
+    this.idIndex = nextById;
+    return { count: nextByRef.size, errors };
   }
 
   /** Slice-03 Atom 2 — RESOLVE trust boundary: get a pack by its path-like
@@ -140,20 +152,24 @@ export class ContextPackLibraryService {
     } catch (err) {
       throw new ContextPackError("unsafe_ref", (err as Error).message, { ref });
     }
-    const id = this.refIndex.get(ref);
-    return id ? this.entries.get(id) ?? null : null;
+    return this.entriesByRef.get(ref) ?? null;
   }
 
   list(): ContextPackEntry[] {
-    return Array.from(this.entries.values()).sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version));
+    // primary-ref-index view: one row per ref; ref is the deterministic
+    // tiebreaker for identical manifest name/version
+    return Array.from(this.entriesByRef.values()).sort(
+      (a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version) || a.relativePath.localeCompare(b.relativePath),
+    );
   }
 
+  /** LEGACY colon-id lookup (compatibility only; strip = later atom). */
   get(id: string): ContextPackEntry | null {
-    return this.entries.get(id) ?? null;
+    return this.idIndex.get(id) ?? null;
   }
 
   getByNameVersion(name: string, version: string): ContextPackEntry | null {
-    return this.entries.get(contextPackId(name, version)) ?? null;
+    return this.idIndex.get(contextPackId(name, version)) ?? null;
   }
 
   /** Resolve the absolute file path for a pack entry's file, with a
