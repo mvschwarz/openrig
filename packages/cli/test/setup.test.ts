@@ -779,11 +779,15 @@ describe("rig setup --policy (onboarding record)", () => {
     expect(parsed["pods"]).toEqual([]);
   });
 
-  it("byte-survival least-destructive: records ONLY the permission_policy line, preserving comments (top+inline), key order, and formatting", async () => {
+  it("least-destructive record: preserves comment text/order/quoting/structure, appending ONLY the permission_policy line", async () => {
     const sink: Record<string, string> = {};
     // DISCRIMINATING fixture — a commented, hand-authored-style spec. A parse+serialize round-trip
     // (the pre-revision impl) DROPS every comment here, so this pin is RED against that impl BY
     // CONSTRUCTION; a comment-preserving edit reproduces the file byte-for-byte plus the one new line.
+    // SCOPE (honest API limit, probed at the lib): parseDocument preserves comment TEXT, key ORDER,
+    // QUOTING, and STRUCTURE — but pre-`#` padding may NORMALIZE (e.g. multiple spaces -> one). This
+    // fixture uses single-space padding (parseDocument's fixed point) so the byte-equality is exact;
+    // the claim is scoped accordingly, not "every byte of arbitrary formatting survives".
     const commented =
       "# hand-authored: do not clobber\n" +
       'version: "1"\n' +
@@ -880,11 +884,26 @@ describe("rig setup --policy (onboarding record)", () => {
     expect(longs).toContain("--spec");
   });
 
-  // CROSS-LANE PIN (do NOT green on this base 2a05118a): on my base, permission_policy: none is STILL
-  // the Seam-A reservation error (policy-ref.ts:50-52). The deliberate-none PARSE round-trip
-  // (none -> origin deliberate_none, floor==absent) becomes valid only at the ASSEMBLED 4.8 tip
-  // 909c33e2 where Lane A's amendment converges. This is asserted at the tip, never here.
-  it.todo("CROSS-LANE @tip 909c33e2: recorded permission_policy: none parses as deliberate_none (floor==absent) via Lane A's amendment");
+  // CONVERGED @tip 909c33e2 — Lane A's amendment (05931d33, ruled form 5f37e40f) activated
+  // `permission_policy: none` as the recorded deliberate_none choice. The cross-lane round-trip is
+  // realized at the SANCTIONED ALTITUDE SPLIT (pre-approved by acting-orch), keeping the P6 fence the
+  // QA verified — the CLI never imports the daemon:
+  //   - CLI WRITE half (asserted here): `--policy none` emits the ruled deliberate_none token
+  //     `permission_policy: none` (not a builtin: ref, not an absent field).
+  //   - daemon PARSE half: that exact form resolves to origin=deliberate_none, floor==absent, and
+  //     NEVER reads a file — proven in packages/daemon/test/deliberate-none-amendment.test.ts.
+  // Forcing the parse assertion into this CLI file would require a daemon import — exactly the P6
+  // breach the split avoids.
+  it("cross-lane round-trip WRITE half: --policy none emits the ruled deliberate_none token (parse half proven daemon-side)", async () => {
+    const sink: Record<string, string> = {};
+    const deps = specDeps(BASE_SPEC, sink);
+
+    await runSetup(deps, { policy: "none", specPath: SPEC });
+
+    expect(sink[SPEC]).toContain("permission_policy: none\n");
+    const parsed = parseYaml(sink[SPEC]!) as Record<string, unknown>;
+    expect(parsed["permission_policy"]).toBe("none");
+  });
 });
 
 // Slice-03 Lane B onboarding MENU COPY. The 0.4.8 lineage has NO TUI, so the "menu" is calm-register
