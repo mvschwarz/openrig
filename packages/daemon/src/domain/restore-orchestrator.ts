@@ -1266,9 +1266,14 @@ export class RestoreOrchestrator {
             try { content = readFileSync(prov.resolvedTarget, "utf-8"); } catch { content = null; }
             if (content !== null) {
               const body = content;
-              return resolvePermissionPolicyAttachment(ref, prov.declaringDir, {
+              const rederived = resolvePermissionPolicyAttachment(ref, prov.declaringDir, {
                 readFile: () => body,
-              }).launchPosture;
+              });
+              // Guard round-2: trust the re-derivation ONLY when content resolution
+              // genuinely succeeded with usable semantics (parse OK + valid flag
+              // contract) — readable-but-malformed/unusable carries the PERSISTED
+              // posture, exactly like unreadable. Advisory only; no enforcement.
+              if (rederived.contentResolved) return rederived.launchPosture;
             }
           }
         }
@@ -1284,9 +1289,10 @@ export class RestoreOrchestrator {
           try { content = readFileSync(rigProv.resolvedTarget, "utf-8"); } catch { content = null; }
           if (content !== null) {
             const body = content;
-            return resolvePermissionPolicyAttachment(rigProv.rigRef, rigProv.declaringDir, {
+            const rederived = resolvePermissionPolicyAttachment(rigProv.rigRef, rigProv.declaringDir, {
               readFile: () => body,
-            }).launchPosture;
+            });
+            if (rederived.contentResolved) return rederived.launchPosture; // same rule as node-level
           }
         }
         return rigProv.launchPosture;
