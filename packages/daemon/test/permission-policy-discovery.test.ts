@@ -18,6 +18,27 @@ profiles:
     uses:
       skills: []
 `;
+const COLLIDING_AGENT_YAML = `name: impl
+version: "1.0.0"
+imports:
+  - ref: local:../lib
+resources:
+  skills:
+    - id: shared
+      path: skills/shared
+profiles:
+  default:
+    uses:
+      skills: [shared]
+`;
+const COLLIDING_IMPORT_YAML = `name: lib
+version: "1.0.0"
+resources:
+  skills:
+    - id: shared
+      path: skills/shared
+profiles: {}
+`;
 const CUSTOM_POLICY = `---
 policy_schema_version: 1
 name: operator-full
@@ -35,6 +56,17 @@ function fsOps(): AgentResolverFsOps {
     readFile: (path) => {
       if (path.includes("agents/impl")) return AGENT_YAML;
       if (path.endsWith("policies/operator-full.md")) return CUSTOM_POLICY;
+      throw new Error(`Not found: ${path}`);
+    },
+  };
+}
+
+function collisionFsOps(): AgentResolverFsOps {
+  return {
+    exists: (path) => path.includes("agents/impl") || path.includes("agents/lib"),
+    readFile: (path) => {
+      if (path.includes("agents/impl")) return COLLIDING_AGENT_YAML;
+      if (path.includes("agents/lib")) return COLLIDING_IMPORT_YAML;
       throw new Error(`Not found: ${path}`);
     },
   };
@@ -105,6 +137,57 @@ describe("Seam C permission-policy discovery", () => {
     expect(policyLines(result.warnings)).toEqual([
       "dev.impl: permission_policy absent; launch_posture=floor",
     ]);
+  });
+
+  it("carries policy discovery and existing preflight advisories through materialize in order", async () => {
+    const db = createFullTestDb();
+    try {
+      const setup = createTestApp(db, { podInstantiatorFsOps: collisionFsOps() });
+      const outcome = await setup.podInstantiator.materialize(
+        rigYaml({ name: "policy-materialize-warnings", rigPolicy: "builtin:yolo" }),
+        RIG_ROOT,
+      );
+
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.result.warnings).toEqual([
+        'dev.impl: permission_policy ref="builtin:yolo" origin=builtin launch_posture=full_bypass',
+        'dev.impl: base/import collision in skills on "shared"',
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("carries policy discovery and existing preflight advisories through instantiate in order", async () => {
+    const adapter: RuntimeAdapter = {
+      runtime: "claude-code",
+      listInstalled: async () => [],
+      project: async () => ({ projected: [], skipped: [], failed: [] }),
+      deliverStartup: async () => ({ delivered: 0, failed: [] }),
+      launchHarness: async () => ({ ok: true }),
+      checkReady: async () => ({ ready: true }),
+    } as RuntimeAdapter;
+    const db = createFullTestDb();
+    try {
+      const setup = createTestApp(db, {
+        adapters: { "claude-code": adapter },
+        podInstantiatorFsOps: collisionFsOps(),
+      });
+      const outcome = await setup.podInstantiator.instantiate(
+        rigYaml({ name: "policy-instantiate-warnings", rigPolicy: "builtin:yolo" }),
+        RIG_ROOT,
+      );
+
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.result.warnings).toEqual([
+        'dev.impl: permission_policy ref="builtin:yolo" origin=builtin launch_posture=full_bypass',
+        'dev.impl: base/import collision in skills on "shared"',
+      ]);
+    } finally {
+      db.close();
+    }
   });
 
   it("keeps launch outcomes identical while carrying discovery on the rig-up result", async () => {
