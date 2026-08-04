@@ -851,6 +851,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       collectClaudeSignals: () => collectClaudeSignalsFromProviderUsageDirectory(
         nodePath.join(OPENRIG_HOME, "provider-usage"),
       ),
+      agentActivityStore,
     }),
     restoreOrchestrator,
     resumeMetadataRefresher, // OPR.0.4.3.20 FR-4 — manual snapshot refresh-before-serialize

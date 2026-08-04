@@ -5,10 +5,15 @@
 // is the D seam; until it lands, switch returns an honest failed_safely with an operational reason.
 
 import type Database from "better-sqlite3";
+import {
+  AGENT_ACTIVITY_FRESHNESS_MS,
+  type AgentActivityStore,
+} from "../agent-activity-store.js";
 import { getNodeInventory } from "../node-inventory.js";
-import { readCodexAuthMetadata } from "./codex-auth-reader.js";
+import { readCodexAuthMetadata, type CodexAuthMetadata } from "./codex-auth-reader.js";
 import { collectFourBlockReadModel, type ProviderSeat } from "./provider-collect.js";
 import { precheckSwitch } from "./provider-policy.js";
+import { collectReactiveEventSignals } from "./reactive-tap.js";
 import type {
   ProviderService,
   ProviderPrecheckInput,
@@ -23,6 +28,8 @@ export interface ProviderServiceImplDeps {
   listRigs: () => Array<{ id: string }>;
   /** Slice-04 C3: the Claude statusline provider_usage signal source (undefined → signals []). */
   collectClaudeSignals?: () => ProviderSignal[];
+  /** Slice-04 C4: the shipped structured activity detector. Undefined keeps the reactive lane empty. */
+  agentActivityStore?: Pick<AgentActivityStore, "getLatestForNode">;
   env?: NodeJS.ProcessEnv;
   now?: () => string;
 }
@@ -32,27 +39,44 @@ export class ProviderServiceImpl implements ProviderService {
 
   async getReadModel(): Promise<FourBlockReadModel> {
     const env = this.deps.env ?? process.env;
+    const asOf = (this.deps.now ?? (() => new Date().toISOString()))();
+    let auth: CodexAuthMetadata | undefined;
+    let seats: ProviderSeat[] | undefined;
+    const readAuth = () => auth ??= readCodexAuthMetadata(env);
+    const listSeats = () => seats ??= this.listSeats();
     return collectFourBlockReadModel({
-      readCodexAuth: () => readCodexAuthMetadata(env),
-      listSeats: () => {
-        const seats: ProviderSeat[] = [];
-        for (const rig of this.deps.listRigs()) {
-          for (const e of getNodeInventory(this.deps.db, rig.id)) {
-            if (e.canonicalSessionName) {
-              seats.push({
-                seatSession: e.canonicalSessionName,
-                rigName: e.rigName ?? "",
-                runtime: e.runtime ?? "unknown",
-                lifecycleState: e.lifecycleState,
-              });
-            }
-          }
-        }
-        return seats;
-      },
-      collectSignals: this.deps.collectClaudeSignals,
-      now: this.deps.now ?? (() => new Date().toISOString()),
+      readCodexAuth: readAuth,
+      listSeats,
+      collectSignals: () => [
+        ...(this.deps.collectClaudeSignals?.() ?? []),
+        ...(this.deps.agentActivityStore
+          ? collectReactiveEventSignals({
+            seats: listSeats(),
+            auth: readAuth(),
+            activity: this.deps.agentActivityStore,
+            now: asOf,
+            freshnessMs: AGENT_ACTIVITY_FRESHNESS_MS,
+          })
+          : []),
+      ],
+      now: () => asOf,
     });
+  }
+
+  private listSeats(): ProviderSeat[] {
+    const seats: ProviderSeat[] = [];
+    for (const rig of this.deps.listRigs()) {
+      for (const entry of getNodeInventory(this.deps.db, rig.id)) {
+        if (!entry.canonicalSessionName) continue;
+        seats.push({
+          seatSession: entry.canonicalSessionName,
+          rigName: entry.rigName ?? "",
+          runtime: entry.runtime ?? "unknown",
+          lifecycleState: entry.lifecycleState,
+        });
+      }
+    }
+    return seats;
   }
 
   async precheck(input: ProviderPrecheckInput): Promise<PrecheckResult> {

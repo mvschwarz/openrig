@@ -2,7 +2,7 @@ import type Database from "better-sqlite3";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity, PersistedEvent } from "./types.js";
 
-const DEFAULT_FRESHNESS_MS = 5 * 60 * 1000;
+export const AGENT_ACTIVITY_FRESHNESS_MS = 5 * 60 * 1000;
 
 export interface HookActivityInput {
   runtime: string | null;
@@ -45,7 +45,7 @@ export class AgentActivityStore {
     this.db = deps.db;
     this.eventBus = deps.eventBus;
     this.now = deps.now ?? (() => new Date());
-    this.freshnessMs = deps.freshnessMs ?? DEFAULT_FRESHNESS_MS;
+    this.freshnessMs = deps.freshnessMs ?? AGENT_ACTIVITY_FRESHNESS_MS;
   }
 
   recordHookEvent(input: HookActivityInput): RecordHookActivityResult {
