@@ -150,8 +150,18 @@ describe("ATOM 3 — durable compose into the Atom-2 ref store", () => {
       outRef: "packs/missing",
       sources: [{ path: join(sourceRoot, "absent.md"), label: "absent.md" }],
     }));
-    expect(err.code).toBe("source_files_missing");
+    expect(err.code).toBe("missing_files");
     expect(err.details?.["missingFiles"]).toEqual([join(sourceRoot, "absent.md")]);
+    expect(existsSync(userRoot)).toBe(false);
+  });
+
+  it("uses missing_files for an empty source list before store inspection or mutation", () => {
+    const err = captureError(() => service().composeFromFiles({
+      outRef: "packs/empty",
+      sources: [],
+    }));
+    expect(err.code).toBe("missing_files");
+    expect(err.details?.["missingFiles"]).toEqual([]);
     expect(existsSync(userRoot)).toBe(false);
   });
 
@@ -183,6 +193,29 @@ describe("ATOM 3 — durable compose into the Atom-2 ref store", () => {
     expect(err.code).toBe("pack_exists");
     expect(existsSync(join(userRoot, "packs", "taken"))).toBe(false);
     expect(lib.getByRef("packs/taken")?.name).toBe("workspace-pack");
+  });
+
+  it("reports complete source preflight before an existing-ref conflict and mutates nothing", () => {
+    const workspaceRoot = join(tmp, "workspace-store");
+    writePack(workspaceRoot, "packs/taken", "workspace-pack");
+    const existingManifest = readFileSync(join(workspaceRoot, "packs", "taken", "manifest.yaml"));
+    const missing = join(sourceRoot, "absent.md");
+    const lib = new ContextPackLibraryService({
+      roots: [
+        { path: userRoot, sourceType: "user_file" },
+        { path: workspaceRoot, sourceType: "workspace" },
+      ],
+    });
+
+    const err = captureError(() => lib.composeFromFiles({
+      outRef: "packs/taken",
+      sources: [{ path: missing, label: "absent.md" }],
+    }));
+
+    expect(err.code).toBe("missing_files");
+    expect(err.details?.["missingFiles"]).toEqual([missing]);
+    expect(existsSync(join(userRoot, "packs", "taken"))).toBe(false);
+    expect(readFileSync(join(workspaceRoot, "packs", "taken", "manifest.yaml"))).toEqual(existingManifest);
   });
 
   it("rejects a manifestless physical user target without overwriting it", () => {

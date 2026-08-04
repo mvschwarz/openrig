@@ -146,6 +146,63 @@ files:
     expect(transport.calls).toEqual([]);
   });
 
+  it("POST /library/compose returns the exact missing_files envelope", async () => {
+    const missing = join(tmp, "absent.md");
+    const app = buildApp({ withTransport: false });
+    const res = await app.request("/api/context-packs/library/compose", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        outRef: "packs/missing",
+        sources: [{ path: missing, label: "absent.md" }],
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: "missing_files",
+      message: `context composition source file(s) not found: ${missing}`,
+      missingFiles: [missing],
+    });
+    expect(existsSync(join(libRoot, "packs", "missing"))).toBe(false);
+    expect(transport.calls).toEqual([]);
+  });
+
+  it("POST /library/compose returns missing_files for an empty source list", async () => {
+    const app = buildApp({ withTransport: false });
+    const res = await app.request("/api/context-packs/library/compose", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ outRef: "packs/empty", sources: [] }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: "missing_files",
+      message: "context composition requires at least one --from file",
+      missingFiles: [],
+    });
+    expect(existsSync(join(libRoot, "packs", "empty"))).toBe(false);
+    expect(transport.calls).toEqual([]);
+  });
+
+  it.each([null, 7, []])(
+    "POST /library/compose rejects malformed source member %j with the structured 400 envelope",
+    async (sourceMember) => {
+      const app = buildApp({ withTransport: false });
+      const res = await app.request("/api/context-packs/library/compose", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ outRef: "packs/malformed", sources: [sourceMember] }),
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        error: "invalid_compose_request",
+        message: "body must include { outRef, sources: [{ path, label }, ...] }",
+      });
+      expect(existsSync(join(libRoot, "packs", "malformed"))).toBe(false);
+      expect(transport.calls).toEqual([]);
+    },
+  );
+
   it("GET /library/:id returns the pack manifest", async () => {
     writePack(libRoot, "p1", `
 name: p1

@@ -221,6 +221,48 @@ export class ContextPackLibraryService {
       throw new ContextPackError("unsafe_ref", (err as Error).message, { ref: opts.outRef });
     }
 
+    if (opts.sources.length === 0) {
+      throw new ContextPackError(
+        "missing_files",
+        "context composition requires at least one --from file",
+        { missingFiles: [] },
+      );
+    }
+
+    // Complete source preflight precedes every output/store conflict check.
+    const missingFiles = opts.sources
+      .filter((source) => !existsSync(source.path))
+      .map((source) => source.path);
+    if (missingFiles.length > 0) {
+      throw new ContextPackError(
+        "missing_files",
+        `context composition source file(s) not found: ${missingFiles.join(", ")}`,
+        { missingFiles },
+      );
+    }
+
+    const allowedSuffixes = new Set([".md", ".markdown", ".yaml", ".yml", ".txt"]);
+    const members = opts.sources.map((source, index) => {
+      let content: Buffer;
+      try {
+        if (!statSync(source.path).isFile()) throw new Error("source is not a regular file");
+        content = readFileSync(source.path);
+      } catch (err) {
+        throw new ContextPackError(
+          "file_read_failed",
+          `failed to read composition source ${source.path}: ${(err as Error).message}`,
+          { path: source.path },
+        );
+      }
+      const candidateSuffix = extname(source.label).toLowerCase();
+      const suffix = allowedSuffixes.has(candidateSuffix) ? candidateSuffix : ".txt";
+      return {
+        path: `source-${String(index + 1).padStart(4, "0")}${suffix}`,
+        label: source.label,
+        content,
+      };
+    });
+
     const writeRoot = this.roots.find((root) => root.sourceType === "user_file");
     if (!writeRoot) {
       throw new ContextPackError(
@@ -287,48 +329,6 @@ export class ContextPackLibraryService {
         );
       }
     }
-
-    if (opts.sources.length === 0) {
-      throw new ContextPackError(
-        "source_files_missing",
-        "context composition requires at least one --from file",
-        { missingFiles: [] },
-      );
-    }
-
-    // First collect every missing path so failure is honest and complete.
-    const missingFiles = opts.sources
-      .filter((source) => !existsSync(source.path))
-      .map((source) => source.path);
-    if (missingFiles.length > 0) {
-      throw new ContextPackError(
-        "source_files_missing",
-        `context composition source file(s) not found: ${missingFiles.join(", ")}`,
-        { missingFiles },
-      );
-    }
-
-    const allowedSuffixes = new Set([".md", ".markdown", ".yaml", ".yml", ".txt"]);
-    const members = opts.sources.map((source, index) => {
-      let content: Buffer;
-      try {
-        if (!statSync(source.path).isFile()) throw new Error("source is not a regular file");
-        content = readFileSync(source.path);
-      } catch (err) {
-        throw new ContextPackError(
-          "file_read_failed",
-          `failed to read composition source ${source.path}: ${(err as Error).message}`,
-          { path: source.path },
-        );
-      }
-      const candidateSuffix = extname(source.label).toLowerCase();
-      const suffix = allowedSuffixes.has(candidateSuffix) ? candidateSuffix : ".txt";
-      return {
-        path: `source-${String(index + 1).padStart(4, "0")}${suffix}`,
-        label: source.label,
-        content,
-      };
-    });
 
     const name = segments.at(-1)!;
     const manifest = stringifyYaml({

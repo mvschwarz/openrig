@@ -86,7 +86,7 @@ export class ContextPackError extends Error {
       // contract (ref-safety.ts) at a discovery/resolve boundary
       | "unsafe_ref"
       // Slice-03 Atom 3: durable file composition boundaries.
-      | "source_files_missing"
+      | "missing_files"
       | "pack_exists"
       | "pack_ref_below_pack"
       | "unsafe_ref_namespace"

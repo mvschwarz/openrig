@@ -25,7 +25,7 @@ interface SendBody {
 
 interface ComposeBody {
   outRef?: string;
-  sources?: Array<{ path?: string; label?: string }>;
+  sources?: unknown[];
 }
 
 export function contextPacksRoutes(): Hono {
@@ -54,8 +54,13 @@ export function contextPacksRoutes(): Hono {
     if (
       typeof body.outRef !== "string" ||
       !Array.isArray(body.sources) ||
-      body.sources.length === 0 ||
-      body.sources.some((source) => typeof source.path !== "string" || typeof source.label !== "string")
+      body.sources.some((source) =>
+        typeof source !== "object" ||
+        source === null ||
+        Array.isArray(source) ||
+        typeof (source as Record<string, unknown>).path !== "string" ||
+        typeof (source as Record<string, unknown>).label !== "string"
+      )
     ) {
       return c.json({
         error: "invalid_compose_request",
