@@ -19,7 +19,7 @@ import { describe, it, expect } from "vitest";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, statSync } from "node:fs";
 import { resolve as pathResolve } from "node:path";
 import { planProjection, type ProjectionPlan, type ProjectionEntry } from "../src/domain/projection-planner.js";
 import { resolveNodeConfig, type ResolutionContext } from "../src/domain/profile-resolver.js";
@@ -129,6 +129,18 @@ function seededOwned(): string {
   for (const ev of EVENTS) hooks[ev] = [{ hooks: [{ type: "command", command: OWNED_CMD, timeout: 5 }] }];
   return JSON.stringify({ hooks });
 }
+
+// Packaged contract (QA blocker 1f53796c): the projected relay must be 0755, and production
+// PRESERVES the source mode (no adapter chmod policy). So the SHIPPED asset itself must be
+// executable — this regression STATS the real committed asset, not a synthetic 0o755 fixture.
+describe("Claude activity-hook delivery — shipped relay asset executable mode (0755 contract)", () => {
+  it("the committed activity-relay.cjs asset is executable 0755 (so the preserved projection meets the contract)", () => {
+    const assetPath = pathResolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs");
+    const mode = statSync(assetPath).mode & 0o777;
+    expect(mode & 0o111, `shipped relay mode is 0${mode.toString(8)}, expected executable`).not.toBe(0);
+    expect(mode, `shipped relay mode is 0${mode.toString(8)}, expected 0755`).toBe(0o755);
+  });
+});
 
 describe("Claude activity-hook delivery — ENABLE (entry present, source + manifest readable)", () => {
   it("copies the relay to <cwd>/.openrig/hooks/scripts/ at mode 0755", async () => {
