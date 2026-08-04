@@ -315,6 +315,9 @@ interface PodInstantiatorDeps {
   nodeLauncher: NodeLauncher;
   startupOrchestrator: StartupOrchestrator;
   fsOps: AgentResolverFsOps;
+  /** Managed Claude activity-hook delivery asset paths, forwarded to preflight (defaults to the
+   *  daemon-shipped assets; tests inject fixtures). Same shared validation as the adapter. */
+  claudeActivityAssets?: { relayPath?: string; manifestPath?: string };
   adapters: Record<string, RuntimeAdapter>;
   tmuxAdapter?: TmuxAdapter;
   /** PL-014 Item 6: optional context-pack library so AgentSpec
@@ -335,6 +338,8 @@ export interface MaterializeResult {
   specName: string;
   specVersion: string;
   nodes: Array<{ logicalId: string; status: "materialized" }>;
+  /** NONFATAL READY-path preflight warnings (e.g. managed activity-hook delivery gaps). */
+  warnings?: string[];
 }
 
 export type MaterializeOutcome =
@@ -450,6 +455,7 @@ export class PodRigInstantiator {
       rigNameOverride: targetRig?.rig.name,
       externalQualifiedIds: targetRig?.nodes.map((node) => node.logicalId),
       exec: this.deps.exec,
+      claudeActivityAssets: this.deps.claudeActivityAssets,
     });
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
@@ -459,7 +465,8 @@ export class PodRigInstantiator {
     // persistence CORE (createPod + create-node + edges + events, in one tx)
     // takes the already-parsed+validated spec so `expand` and the `add_member`
     // converge op compose it WITHOUT fabricating a synthetic rig spec.
-    return this.materializeValidatedSpec(rigSpec, rigRoot, opts);
+    // READY-path preflight warnings (nonfatal) ride along into the success result.
+    return this.materializeValidatedSpec(rigSpec, rigRoot, opts, preflight.warnings);
   }
 
   /**
@@ -497,12 +504,14 @@ export class PodRigInstantiator {
       fsOps: this.deps.fsOps,
       rigNameOverride: targetRig?.rig.name,
       exec: this.deps.exec,
+      claudeActivityAssets: this.deps.claudeActivityAssets,
     });
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
     }
 
-    return this.materializeValidatedSpec(rigSpec, rigRoot, opts);
+    // READY-path preflight warnings (nonfatal) ride along into the success result.
+    return this.materializeValidatedSpec(rigSpec, rigRoot, opts, preflight.warnings);
   }
 
   /**
@@ -519,6 +528,9 @@ export class PodRigInstantiator {
     rigSpec: PodRigSpec,
     rigRoot: string,
     opts?: { targetRigId?: string; suppressSummaryEvent?: boolean; cwdOverride?: string },
+    /** NONFATAL preflight warnings from the READY path, surfaced alongside the successful
+     *  materialize result (e.g. managed activity-hook delivery gaps) so rig up stays rc0. */
+    carryWarnings?: string[],
   ): Promise<MaterializeOutcome> {
     const persistedEvents: Array<ReturnType<EventBus["persistWithinTransaction"]>> = [];
     const nodeResults: Array<{ logicalId: string; status: "materialized" }> = [];
@@ -630,6 +642,7 @@ export class PodRigInstantiator {
           specName: rigSpec.name,
           specVersion: rigSpec.version,
           nodes: nodeResults,
+          warnings: carryWarnings && carryWarnings.length > 0 ? carryWarnings : undefined,
         },
       };
     } catch (err) {
@@ -955,7 +968,7 @@ export class PodRigInstantiator {
     }
 
     // 2. Preflight
-    const preflight = await rigPreflight({ rigSpecYaml, rigRoot, cwdOverride: opts?.cwdOverride, fsOps: this.deps.fsOps, exec: this.deps.exec });
+    const preflight = await rigPreflight({ rigSpecYaml, rigRoot, cwdOverride: opts?.cwdOverride, fsOps: this.deps.fsOps, exec: this.deps.exec, claudeActivityAssets: this.deps.claudeActivityAssets });
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
     }
@@ -992,7 +1005,10 @@ export class PodRigInstantiator {
     const nodeResults: { logicalId: string; status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string }[] = [];
     const nodeIdMap: Record<string, string> = {}; // "pod.member" -> node DB id
     const launchedSessionNames: string[] = []; // Track for orphan cleanup on total failure
-    const podInstantiateWarnings: string[] = [];
+    // Seed with the READY-path preflight warnings (nonfatal — e.g. managed activity-hook
+    // delivery gaps) so they ride along in the successful instantiate result alongside
+    // launch/materialization warnings; rig up stays rc0.
+    const podInstantiateWarnings: string[] = [...preflight.warnings];
     // Store per-member context for deferred launch
     const memberContext = new Map<string, { pod: typeof rigSpec.pods[0]; member: typeof rigSpec.pods[0]["members"][0]; podId: string; nodeId: string; resolveResult: any; configResult: any }>();
 

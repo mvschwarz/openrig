@@ -19,7 +19,10 @@ import { describe, it, expect } from "vitest";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
-import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-planner.js";
+import { planProjection, type ProjectionPlan, type ProjectionEntry } from "../src/domain/projection-planner.js";
+import { resolveNodeConfig, type ResolutionContext } from "../src/domain/profile-resolver.js";
+import type { AgentSpec, RigSpec, RigSpecPod, RigSpecPodMember } from "../src/domain/types.js";
+import type { ResolvedAgentSpec } from "../src/domain/agent-resolver.js";
 
 const CWD = "/project";
 const RELAY_SRC = "/assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs";
@@ -116,6 +119,13 @@ function allCommands(settings: Record<string, any>): string[] {
     for (const g of groups ?? []) for (const h of g.hooks ?? []) if (typeof h.command === "string") out.push(h.command);
   }
   return out;
+}
+
+/** settings.local.json pre-seeded with the 4 managed owned entries. */
+function seededOwned(): string {
+  const hooks: Record<string, any> = {};
+  for (const ev of EVENTS) hooks[ev] = [{ hooks: [{ type: "command", command: OWNED_CMD, timeout: 5 }] }];
+  return JSON.stringify({ hooks });
 }
 
 describe("Claude activity-hook delivery — ENABLE (entry present, source + manifest readable)", () => {
@@ -236,5 +246,78 @@ describe("Claude activity-hook delivery — hardening (guard r3 findings)", () =
     expect(allCommands(readSettings(fs)).filter((c) => c.includes(OWNED_MARKER))).toEqual([]);
     expect(res.projected).not.toContain("claude-activity-hooks");
     expect(res.skipped).toContain("claude-activity-hooks");
+  });
+
+  // PREVALIDATE BEFORE MUTATION: a relay source present but a canonical manifest that is
+  // missing / malformed / yields zero relay events must NOT strip existing managed hooks,
+  // NOT copy the relay, NOT mutate settings, and NOT claim projected/delivered.
+  for (const [label, manifest] of [
+    ["ABSENT manifest", undefined],
+    ["MALFORMED manifest", "{ broken json"],
+    ["ZERO-relay-event manifest", JSON.stringify({ hooks: { PreCompact: [{ hooks: [{ type: "command", command: "node bridge.cjs" }] }] } })],
+  ] as const) {
+    it(`${label} on enable: preserves existing managed hooks + settings bytes, no projected claim, no relay copy`, async () => {
+      const seeded = seededOwned();
+      const files: Store = { [RELAY_SRC]: "// relay", [SETTINGS]: seeded };
+      if (manifest !== undefined) files[MANIFEST_SRC] = manifest;
+      const fs = mockFs(files, { [RELAY_SRC]: 0o755 });
+      const manifestPath = manifest === undefined ? "/assets/missing-manifest.json" : MANIFEST_SRC;
+      const res = await makeAdapter(fs, RELAY_SRC, manifestPath).project(plan([activityEntry()]), binding());
+      expect(fs._store[SETTINGS]).toBe(seeded); // settings bytes untouched (no strip, no write)
+      expect(allCommands(readSettings(fs)).filter((c) => c.includes(OWNED_MARKER)).length).toBe(EVENTS.length); // managed hooks preserved
+      expect(fs._store[RELAY_DEST]).toBeUndefined(); // relay NOT copied
+      expect(res.projected).not.toContain("claude-activity-hooks");
+      expect(res.skipped).toContain("claude-activity-hooks");
+    });
+  }
+});
+
+// Production-altitude reachability: a profile that SELECTS shared:claude-activity-hooks
+// must produce, through the REAL resolver -> planner, a plan entry the adapter enables.
+// A hand-built plan (the suites above) is not sufficient evidence of reachability.
+describe("Claude activity-hook — real resolver -> planner -> adapter reachability", () => {
+  // Mirrors the shipped shared/agent.yaml runtime_resources declaration + a profile selecting it.
+  function specSelectingActivityHooks(): AgentSpec {
+    return {
+      version: "1.0.0", name: "test-agent", imports: [],
+      startup: { files: [], actions: [] },
+      resources: {
+        skills: [], guidance: [], subagents: [], plugins: [],
+        runtimeResources: [{ id: "claude-activity-hooks", path: "runtime/claude-activity-hooks.json", runtime: "claude-code", type: "claude_activity_hooks" }],
+      },
+      profiles: {
+        default: { uses: { skills: [], guidance: [], subagents: [], plugins: [], runtimeResources: ["claude-activity-hooks"] } },
+      },
+    } as AgentSpec;
+  }
+  const resolved = (spec: AgentSpec): ResolvedAgentSpec => ({ spec, sourcePath: "/agents/test", hash: "abc123" } as ResolvedAgentSpec);
+  const member = (): RigSpecPodMember => ({ id: "impl", agentRef: "local:agents/test", profile: "default", runtime: "claude-code", cwd: "." } as RigSpecPodMember);
+  const pod = (): RigSpecPod => ({ id: "dev", label: "Dev", members: [member()], edges: [] } as RigSpecPod);
+  const rig = (): RigSpec => ({ version: "0.2", name: "test-rig", pods: [pod()], edges: [] } as RigSpec);
+
+  it("a profile selecting shared:claude-activity-hooks yields a claude_activity_hooks entry that the adapter ENABLES", async () => {
+    const ctx: ResolutionContext = {
+      baseSpec: resolved(specSelectingActivityHooks()), importedSpecs: [], collisions: [],
+      profileName: "default", member: member(), pod: pod(), rig: rig(),
+    };
+    // 1. REAL resolver
+    const rc = resolveNodeConfig(ctx);
+    expect(rc.ok).toBe(true);
+    if (!rc.ok) return;
+    // 2. REAL planner
+    const pr = planProjection({ config: rc.config, collisions: [], fsOps: { readFile: () => "{}", exists: () => true } });
+    expect(pr.ok).toBe(true);
+    if (!pr.ok) return;
+    const entry = pr.plan.entries.find((e) => e.resourceType === "claude_activity_hooks");
+    expect(entry, "planner must emit a claude_activity_hooks runtime_resource entry").toBeDefined();
+    expect(entry!.category).toBe("runtime_resource");
+    // 3. REAL adapter enables from the REAL plan
+    const fs = enableFs();
+    await makeAdapter(fs).project(pr.plan, binding());
+    expect(fs._store[RELAY_DEST]).toBe("// relay");
+    for (const ev of EVENTS) {
+      const cmds = (readSettings(fs).hooks?.[ev] ?? []).flatMap((g: any) => (g.hooks ?? []).map((h: any) => h.command));
+      expect(cmds).toContain(OWNED_CMD);
+    }
   });
 });

@@ -69,5 +69,9 @@ resources:
       path: runtime/codex-config.fragment.toml
       runtime: codex
       type: codex_config_fragment
+    - id: claude-activity-hooks
+      path: runtime/claude-activity-hooks.json
+      runtime: claude-code
+      type: claude_activity_hooks
 
 profiles: {}

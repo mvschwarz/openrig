@@ -12,6 +12,7 @@ import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-plann
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
 import { mergeManagedBlock } from "../domain/managed-blocks.js";
 import { shellQuote } from "./shell-quote.js";
+import { validateClaudeActivityHookDelivery } from "../domain/claude-activity-hooks.js";
 
 export interface ClaudeAdapterFsOps {
   readFile(path: string): string;
@@ -121,12 +122,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const activityEntries = plan.entries.filter(
       (e) => e.category === "runtime_resource" && e.resourceType === "claude_activity_hooks",
     );
-    let activityOutcome: ActivityHookOutcome = { changed: false, delivered: false, sourceMissing: false, settingsUnparseable: false };
+    let activityOutcome: ActivityHookOutcome = { changed: false, delivered: false, sourceMissing: false, manifestUnavailable: false, settingsUnparseable: false };
     try {
       activityOutcome = this.reconcileClaudeActivityHooks(binding.cwd, activityEntries.length > 0);
     } catch (err) {
       console.error(`[openrig] claude activity-hook reconcile warning: ${(err as Error).message}`);
-      activityOutcome = { changed: false, delivered: false, sourceMissing: false, settingsUnparseable: false };
+      activityOutcome = { changed: false, delivered: false, sourceMissing: false, manifestUnavailable: false, settingsUnparseable: false };
     }
     // Never claim a resource as PROJECTED when delivery could not happen (missing
     // relay source or a fail-closed malformed settings file): demote to skipped so
@@ -755,20 +756,34 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const relayDest = nodePath.join(cwd, ".openrig", "hooks", "scripts", "activity-relay.cjs");
     const ownedCmd = `node ${shellQuote(relayDest)}`;
     const settingsPath = nodePath.join(cwd, ".claude", "settings.local.json");
-    const settingsExisted = this.fs.exists(settingsPath);
 
+    // PREVALIDATE BEFORE ANY MUTATION using the SHARED delivery validation (same gate
+    // preflight uses — one parser, no drift). Enable is deliverable ONLY when BOTH the relay
+    // source AND a nonempty canonical event set resolve. If enable is requested but not
+    // deliverable (missing relay, or a missing/malformed/zero-relay-event manifest), do
+    // NOTHING — no strip, no copy, no write — so existing managed hooks + settings bytes
+    // are preserved and the resource is NOT claimed delivered/projected (⇒ warn + skip).
+    const delivery = validateClaudeActivityHookDelivery(this.fs, this.activityRelayPath, this.claudeHooksManifestPath);
+    const derivedEvents = delivery.events;
+    const deliverable = enabled && delivery.deliverable;
+    if (enabled && !deliverable) {
+      return {
+        changed: false, delivered: false,
+        sourceMissing: !delivery.relaySourceOk,
+        manifestUnavailable: delivery.relaySourceOk && delivery.events.length === 0,
+        settingsUnparseable: false,
+      };
+    }
+
+    const settingsExisted = this.fs.exists(settingsPath);
     // Fail closed: never clobber a settings file we cannot parse — preserve its bytes.
     let settings: Record<string, unknown>;
     if (settingsExisted) {
       try { settings = this.readJsonObjectStrict(settingsPath); }
-      catch { return { changed: false, delivered: false, sourceMissing: false, settingsUnparseable: true }; }
+      catch { return { changed: false, delivered: false, sourceMissing: false, manifestUnavailable: false, settingsUnparseable: true }; }
     } else {
       settings = {};
     }
-
-    // ENABLE demands a readable relay source — otherwise deliver nothing (no dangling).
-    const sourceMissing = enabled && (!this.activityRelayPath || !this.fs.exists(this.activityRelayPath));
-    const effectiveEnable = enabled && !sourceMissing;
 
     const hooks = this.readJsonObjectField(settings, "hooks");
 
@@ -791,13 +806,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       else hooks[event] = keptGroups;
     }
 
-    // 2. Enable: deliver the relay asset + upsert the owned entry for each relay event
-    //    derived from the canonical manifest.
-    if (effectiveEnable) {
+    // 2. Deliverable enable: copy the relay asset + upsert the owned entry for each
+    //    PREVALIDATED relay event (derived from the canonical manifest above).
+    if (deliverable) {
       this.fs.mkdirp(nodePath.dirname(relayDest));
       this.fs.copyFile(this.activityRelayPath!, relayDest);
       this.preserveMode(this.activityRelayPath!, relayDest);
-      for (const { event, timeout } of this.deriveRelayEvents()) {
+      for (const { event, timeout } of derivedEvents) {
         const groups = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
         const hook: Record<string, unknown> = { type: "command", command: ownedCmd };
         if (typeof timeout === "number") hook["timeout"] = timeout;
@@ -808,40 +823,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     // 3. Persist only when something changed (never touch an unchanged / never-managed file).
-    if (!changed) return { changed: false, delivered: effectiveEnable, sourceMissing, settingsUnparseable: false };
+    if (!changed) return { changed: false, delivered: deliverable, sourceMissing: false, manifestUnavailable: false, settingsUnparseable: false };
     if (Object.keys(hooks).length > 0) settings["hooks"] = hooks;
     else delete settings["hooks"];
     this.fs.mkdirp(nodePath.dirname(settingsPath));
     this.fs.writeFile(settingsPath, JSON.stringify(settings, null, 2));
-    return { changed: true, delivered: effectiveEnable, sourceMissing, settingsUnparseable: false };
-  }
-
-  /**
-   * Relay event vocabulary DERIVED from the canonical claude.json manifest: the events whose
-   * group invokes activity-relay.cjs (compaction/bridge groups excluded), with each event's
-   * declared timeout. Empty when the manifest is absent/unreadable (⇒ nothing injected).
-   */
-  private deriveRelayEvents(): Array<{ event: string; timeout?: number }> {
-    if (!this.claudeHooksManifestPath || !this.fs.exists(this.claudeHooksManifestPath)) return [];
-    let manifest: unknown;
-    try { manifest = JSON.parse(this.fs.readFile(this.claudeHooksManifestPath)); } catch { return []; }
-    const hooks = isPlainObject(manifest) && isPlainObject(manifest["hooks"]) ? (manifest["hooks"] as Record<string, unknown>) : {};
-    const out: Array<{ event: string; timeout?: number }> = [];
-    const seen = new Set<string>();
-    for (const [event, groups] of Object.entries(hooks)) {
-      if (seen.has(event) || !Array.isArray(groups)) continue;
-      for (const group of groups as unknown[]) {
-        if (!isPlainObject(group) || !Array.isArray(group["hooks"])) continue;
-        const relay = (group["hooks"] as unknown[]).find((h) => (hookCommand(h) ?? "").includes("activity-relay.cjs"));
-        if (relay) {
-          const t = isPlainObject(relay) ? relay["timeout"] : undefined;
-          out.push({ event, timeout: typeof t === "number" ? t : undefined });
-          seen.add(event);
-          break;
-        }
-      }
-    }
-    return out;
+    return { changed: true, delivered: deliverable, sourceMissing: false, manifestUnavailable: false, settingsUnparseable: false };
   }
 
 }
@@ -853,6 +840,9 @@ interface ActivityHookOutcome {
   delivered: boolean;
   /** Enable requested but the relay source was absent — nothing delivered (⇒ warn + skip). */
   sourceMissing: boolean;
+  /** Enable requested, relay present, but the canonical manifest was missing/malformed/
+   *  yielded zero relay events — nothing delivered, existing managed hooks preserved (⇒ warn + skip). */
+  manifestUnavailable: boolean;
   /** Fail-closed: an unparseable settings file was preserved untouched. */
   settingsUnparseable: boolean;
 }

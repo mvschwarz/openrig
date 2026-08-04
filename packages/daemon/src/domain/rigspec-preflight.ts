@@ -122,8 +122,16 @@ import { RigSpecSchema } from "./rigspec-schema.js";
 import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { resolveNodeConfig, type ResolutionContext } from "./profile-resolver.js";
 import { getOpenRigInstallCwdError, resolveLaunchCwd } from "./cwd-resolution.js";
+import nodePath from "node:path";
+import { validateClaudeActivityHookDelivery, CLAUDE_ACTIVITY_HOOKS_RESOURCE_TYPE } from "./claude-activity-hooks.js";
 
 const SUPPORTED_RUNTIMES = new Set(["claude-code", "codex", "pi", "terminal"]);
+
+// Default daemon-shipped asset paths for the managed Claude activity hooks — the SAME files the
+// ClaudeCodeAdapter is wired with in startup.ts (validation is the shared module either way).
+// Overridable via PreflightSpecContext.claudeActivityAssets for fixture-injecting tests.
+const DEFAULT_ACTIVITY_RELAY_PATH = nodePath.resolve(import.meta.dirname, "../../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs");
+const DEFAULT_CLAUDE_HOOKS_MANIFEST_PATH = nodePath.resolve(import.meta.dirname, "../../assets/plugins/openrig-core/hooks/claude.json");
 
 export interface RigPreflightInput {
   rigSpecYaml: string;
@@ -132,6 +140,7 @@ export interface RigPreflightInput {
   fsOps: AgentResolverFsOps;
   rigNameOverride?: string;
   externalQualifiedIds?: Iterable<string>;
+  claudeActivityAssets?: { relayPath?: string; manifestPath?: string };
 }
 
 /**
@@ -147,6 +156,10 @@ export interface PreflightSpecContext {
    *  the Codex profile probe is skipped (backwards-compatible for callers that
    *  cannot provide exec, e.g. legacy sync-only test paths). */
   exec?: (cmd: string) => Promise<string>;
+  /** Managed Claude activity-hook delivery asset paths (relay + canonical manifest). Defaults to
+   *  the daemon-shipped assets (same as the ClaudeCodeAdapter); tests inject fixtures. Validated
+   *  via the SHARED delivery check so preflight + adapter cannot drift. */
+  claudeActivityAssets?: { relayPath?: string; manifestPath?: string };
 }
 
 /**
@@ -179,6 +192,7 @@ export async function rigPreflight(input: RigPreflightInput & { exec?: (cmd: str
     fsOps: input.fsOps,
     rigNameOverride: input.rigNameOverride,
     exec: input.exec,
+    claudeActivityAssets: input.claudeActivityAssets,
   });
 }
 
@@ -263,6 +277,28 @@ export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: 
           errors.push(`${pod.id}.${member.id}: ${err}`);
         }
         continue;
+      }
+
+      // Managed Claude activity-hook delivery preflight (NONFATAL): when a claude-code member
+      // selects the claude_activity_hooks resource, verify the daemon can actually deliver
+      // (relay asset present + canonical manifest yields >= 1 relay event) using the SHARED
+      // validation the adapter uses. A delivery gap is a warning, never a gate — rig up
+      // proceeds without activity tracking for that seat rather than failing.
+      if (member.runtime === "claude-code") {
+        const selectsActivityHooks = configResult.config.selectedResources.runtimeResources.some(
+          (qr) => (qr.resource as { type?: string }).type === CLAUDE_ACTIVITY_HOOKS_RESOURCE_TYPE,
+        );
+        if (selectsActivityHooks) {
+          const relayPath = preflightCtx.claudeActivityAssets?.relayPath ?? DEFAULT_ACTIVITY_RELAY_PATH;
+          const manifestPath = preflightCtx.claudeActivityAssets?.manifestPath ?? DEFAULT_CLAUDE_HOOKS_MANIFEST_PATH;
+          const delivery = validateClaudeActivityHookDelivery(preflightCtx.fsOps, relayPath, manifestPath);
+          if (!delivery.deliverable) {
+            const reason = !delivery.relaySourceOk
+              ? "activity-relay asset missing"
+              : "canonical claude.json hook manifest missing, unreadable, or has no relay events";
+            warnings.push(`${pod.id}.${member.id}: managed Claude activity hooks cannot be delivered (${reason}); rig up continues without activity tracking for this seat`);
+          }
+        }
       }
 
       // Check runtime

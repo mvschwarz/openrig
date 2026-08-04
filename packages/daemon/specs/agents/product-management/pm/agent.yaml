@@ -27,6 +27,7 @@ profiles:
         - shared:claude-default-settings
         - shared:claude-default-mcp
         - shared:codex-default-config
+        - shared:claude-activity-hooks
 
 resources:
   guidance:

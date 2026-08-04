@@ -1,0 +1,4 @@
+{
+  "openrig_activity_hooks": true,
+  "note": "Selection marker for the managed Claude activity-relay hooks. Delivery is performed by the daemon (ClaudeCodeAdapter reconcile) using the shipped activity-relay.cjs + the canonical claude.json hooks manifest; this asset carries no projected content."
+}
