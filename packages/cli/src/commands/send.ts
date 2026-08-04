@@ -10,6 +10,7 @@ import { emitCrossHostError, emitCrossHostFailure, emitRemoteHttpFailure } from 
 import { resolveCrossHostTarget } from "../cross-host-target.js";
 import { runRemoteHttpOp } from "../remote-host-ops.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
+import { resolveContextRef, walkSizedWarning } from "../context-resolve.js";
 
 const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
 
@@ -163,6 +164,7 @@ export function sendCommand(depsOverride?: SendDeps): Command {
     .option("--reason <text>", "Why the prompt is being driven (required with --dangerously-interact; recorded in the audit log)")
     .option("--host <id>", "Send on a remote host declared in ~/.openrig/hosts.yaml (ssh hosts shell out; http hosts go CLI-direct to the remote daemon)")
     .option("--from <session>", "Originating session for the envelope sender/actor (provenance; defaults to $OPENRIG_SESSION_NAME). Plumbed through cross-host ssh sends so the remote envelope names the origin, not the relay.")
+    .option("--context <ref>", "Deliver a context pack by its path-like ref (e.g. packs/compaction-restore). The resolved content is sent; an oversized ref is flagged as 'walk-sized'.")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
@@ -208,7 +210,7 @@ result and verify verdict are the REMOTE's, verbatim. A target of the form
 agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
 (explicit --host > target sugar > persisted selection; a conflict between
 --host and the sugar is an error).`)
-    .action(async (session: string | undefined, text: string | undefined, opts: { to?: string[]; pod?: string; rig?: string; verify?: boolean; force?: boolean; waitForIdle?: string; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; host?: string; from?: string; json?: boolean }) => {
+    .action(async (session: string | undefined, text: string | undefined, opts: { to?: string[]; pod?: string; rig?: string; verify?: boolean; force?: boolean; waitForIdle?: string; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; host?: string; from?: string; context?: string; json?: boolean }) => {
       // OPR.0.4.6.MH1 FR-2: selected-host routing — explicit --host wins;
       // else the persisted selection feeds the SHIPPED --host path; no
       // selection = today exactly. OPR.0.4.6.MH4 §4: the raw flag is kept
@@ -250,6 +252,15 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       }
       const isFanOut = fanModes.length === 1;
 
+      // Slice-03 Atom 6b: --context is single-seat LOCAL in v1 (fan-out and
+      // cross-host --context are follow-ons). Reject loudly rather than silently
+      // dropping the requested context.
+      if (opts.context && (isFanOut || opts.host)) {
+        console.error("--context is supported on a single-seat LOCAL send in v1 (not with --to/--pod/--rig or --host).");
+        process.exitCode = 1;
+        return;
+      }
+
       const deps = getDeps();
 
       if (isFanOut) {
@@ -281,8 +292,9 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       }
 
       // --- Single-seat path (byte-identical to pre-0.4.3.30) ---
-      if (session === undefined || text === undefined) {
-        console.error("Usage: rig send <session> <text>  (or --to/--pod/--rig <message> for fan-out)");
+      // Atom 6b: --context supplies the payload, so <text> is optional with it.
+      if (session === undefined || (text === undefined && !opts.context)) {
+        console.error("Usage: rig send <session> <text>  (or rig send <session> --context <ref>, or --to/--pod/--rig <message> for fan-out)");
         process.exitCode = 1;
         return;
       }
@@ -304,7 +316,9 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
 
       // --- Cross-host short-circuit (CLI-side; ssh shell-out or the MH-4 http branch; daemon untouched) ---
       if (opts.host) {
-        await runCrossHostSend(opts.host, session, text, opts, deps, waitForIdleMs, crossHostHint);
+        // text is validated-defined here: --context is rejected with --host, and
+        // the single-seat (no text && no context) guard requires it on this path.
+        await runCrossHostSend(opts.host, session, text!, opts, deps, waitForIdleMs, crossHostHint);
         return;
       }
 
@@ -317,7 +331,26 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       const senderSession = opts.from ?? resolveSenderSession();
       // --raw (and --dangerously-interact, which implies it) send EXACT text with no messaging envelope.
       const raw = Boolean(opts.raw || opts.dangerouslyInteract);
-      const outboundText = raw ? text : wrapSendBody(senderSession, session, text);
+
+      // Atom 6b: --context resolves a pack ref to its whole content (all-or-nothing
+      // — a missing member aborts before any send) and delivers it. A message +
+      // --context sends the message then the context, blank-line separated. An
+      // oversized context surfaces the §4 walk-sized advisory.
+      let payload = text ?? "";
+      if (opts.context) {
+        let resolved;
+        try {
+          resolved = await resolveContextRef(client, opts.context);
+        } catch (err) {
+          console.error((err as Error).message);
+          process.exitCode = 1;
+          return;
+        }
+        payload = text && text.length > 0 ? `${text}\n\n${resolved.text}` : resolved.text;
+        const warn = walkSizedWarning(resolved, session);
+        if (warn && !opts.json) console.log(`Advisory: ${warn}`);
+      }
+      const outboundText = raw ? payload : wrapSendBody(senderSession, session, payload);
       let res: { status: number; data: Record<string, unknown> };
       try {
         res = await client.post<Record<string, unknown>>("/api/transport/send", {

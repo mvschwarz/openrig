@@ -15,7 +15,7 @@
 import { Hono } from "hono";
 import { readFileSync } from "node:fs";
 import type { ContextPackLibraryService } from "../domain/context-packs/context-pack-library-service.js";
-import { assembleBundle } from "../domain/context-packs/bundle-assembler.js";
+import { assembleBundle, assemblePlainFiles } from "../domain/context-packs/bundle-assembler.js";
 import { ContextPackError, type ContextPackEntry } from "../domain/context-packs/context-pack-types.js";
 
 interface ComposeBody {
@@ -210,7 +210,12 @@ export function contextPacksRoutes(): Hono {
         missingFiles.push({ path: file.path, role: file.role });
       }
     }
-    return c.json({ ref: entry.relativePath, id: entry.id, pieces, missingFiles });
+    // Slice-03 Atom 6b: `text` = the WHOLE plain content (present members joined
+    // by the sealed compose separator via assemblePlainFiles, read-only) — the
+    // one-payload form the --context/--body-context delivery flags inject/snapshot,
+    // vs `pieces` which walk paces separately. `bytes` lets a caller size-warn.
+    const assembled = assemblePlainFiles({ files: pieces.map((p) => ({ path: p.path, content: p.content })) });
+    return c.json({ ref: entry.relativePath, id: entry.id, pieces, missingFiles, text: assembled.text, bytes: assembled.bytes });
   });
 
   return router;

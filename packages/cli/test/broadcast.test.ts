@@ -94,6 +94,42 @@ describe("Broadcast CLI", () => {
     expect(output).toContain("2/2 delivered");
   });
 
+  // Slice-03 Atom 6b — --context delivery flag on broadcast.
+  it("broadcast --context resolves a ref and fans out the whole content", async () => {
+    const posts: Array<{ body: Record<string, unknown> }> = []; const gets: string[] = [];
+    const client = {
+      get: async (p: string) => { gets.push(p); return { status: 200, data: { ref: "packs/fleet", text: "FLEET-UPDATE", bytes: 12, missingFiles: [] } }; },
+      post: async (_p: string, b: unknown) => { posts.push({ body: b as Record<string, unknown> }); return { status: 200, data: { results: [{ sessionName: "a@rig", ok: true }], sent: 1, total: 1, failed: 0 } }; },
+    } as unknown as DaemonClient;
+    const prog = new Command(); prog.exitOverride();
+    prog.addCommand(broadcastCommand({ ...runningDeps(port), clientFactory: () => client }));
+    const { exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "broadcast", "--rig", "my-rig", "--context", "packs/fleet"]);
+    });
+    expect(exitCode).toBeUndefined();
+    expect(gets.some((g) => g.includes("/api/context-packs/library/by-ref/pieces?ref=") && g.includes(encodeURIComponent("packs/fleet")))).toBe(true);
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.body["text"]).toBe("FLEET-UPDATE");
+  });
+
+  it("broadcast --context ABORTS (no fan-out) when the pack has a missing member", async () => {
+    // The missing-member message (naming the member) is pinned in
+    // context-resolve.test.ts; here we assert the broadcast-level contract:
+    // exit non-zero and ZERO fan-out (no partial context ever leaves).
+    const posts: unknown[] = [];
+    const client = {
+      get: async () => ({ status: 200, data: { ref: "packs/broken", text: "X", bytes: 1, missingFiles: [{ path: "gone.md" }] } }),
+      post: async (_p: string, b: unknown) => { posts.push(b); return { status: 200, data: {} }; },
+    } as unknown as DaemonClient;
+    const prog = new Command(); prog.exitOverride();
+    prog.addCommand(broadcastCommand({ ...runningDeps(port), clientFactory: () => client }));
+    const { exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "broadcast", "--rig", "my-rig", "--context", "packs/broken"]);
+    });
+    expect(exitCode).toBe(1);
+    expect(posts).toEqual([]);
+  });
+
   it("broadcast --json prints raw JSON", async () => {
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "broadcast", "--rig", "my-rig", "hello", "--json"]);

@@ -398,11 +398,14 @@ files:
     const app = buildApp();
     const res = await app.request(`/api/context-packs/library/by-ref/pieces?ref=${encodeURIComponent("packs/walkme")}`);
     expect(res.status).toBe(200);
-    const body = await res.json() as { ref: string; pieces: Array<{ path: string; content: string }>; missingFiles: Array<{ path: string }> };
+    const body = await res.json() as { ref: string; pieces: Array<{ path: string; content: string }>; missingFiles: Array<{ path: string }>; text: string; bytes: number };
     expect(body.ref).toBe("packs/walkme");
     expect(body.pieces.map((p) => p.path)).toEqual(["intro.md", "steps.md"]);
     expect(body.pieces.map((p) => p.content)).toEqual(["INTRO-BODY", "STEPS-BODY"]);
     expect(body.missingFiles.map((m) => m.path)).toEqual(["gone.md"]);
+    // Atom 6b: `text` = whole plain content (present members joined by the compose separator "\n\n").
+    expect(body.text).toBe("INTRO-BODY\n\nSTEPS-BODY");
+    expect(body.bytes).toBe(Buffer.byteLength("INTRO-BODY\n\nSTEPS-BODY"));
   });
 
   it("GET /library/by-ref/pieces 404s an absent ref, 400s an unsafe ref, 400s a missing ref", async () => {

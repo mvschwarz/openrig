@@ -286,6 +286,38 @@ describe("Send CLI", () => {
     expect(postFn.mock.calls[0]?.[2]).toBeUndefined();
   });
 
+  // Slice-03 Atom 6b — --context delivery flag.
+  it("send --context resolves a ref to its whole content and sends it (single-seat local)", async () => {
+    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const gets: string[] = [];
+    const client = {
+      get: async (path: string) => { gets.push(path); return { status: 200, data: { ref: "packs/brief", text: "BRIEF-CONTENT", bytes: 13, missingFiles: [] } }; },
+      post: async (path: string, body: unknown) => { posts.push({ path, body: body as Record<string, unknown> }); return { status: 200, data: { ok: true, sessionName: "dev@rig" } }; },
+    } as unknown as DaemonClient;
+    const { exitCode } = await captureChannels(async () => {
+      await makeCmd(runningDeps(port, () => client)).parseAsync(["node", "rig", "send", "dev@rig", "--context", "packs/brief", "--raw"]);
+    });
+    expect(exitCode).toBeUndefined();
+    expect(gets.some((g) => g.includes("/api/context-packs/library/by-ref/pieces?ref=") && g.includes(encodeURIComponent("packs/brief")))).toBe(true);
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.body["session"]).toBe("dev@rig");
+    expect(posts[0]!.body["text"]).toBe("BRIEF-CONTENT"); // --raw → no From/To envelope
+  });
+
+  it("send --context ABORTS (no send) when the pack has a missing/unreadable member", async () => {
+    const posts: unknown[] = [];
+    const client = {
+      get: async () => ({ status: 200, data: { ref: "packs/broken", text: "X", bytes: 1, missingFiles: [{ path: "gone.md" }] } }),
+      post: async (_p: string, b: unknown) => { posts.push(b); return { status: 200, data: {} }; },
+    } as unknown as DaemonClient;
+    const { stderr, exitCode } = await captureChannels(async () => {
+      await makeCmd(runningDeps(port, () => client)).parseAsync(["node", "rig", "send", "dev@rig", "--context", "packs/broken", "--raw"]);
+    });
+    expect(exitCode).toBe(1);
+    expect(posts).toEqual([]); // no partial context ever sent
+    expect(stderr.join("\n")).toMatch(/gone\.md/);
+  });
+
   it("send rejects invalid wait-for-idle values before contacting daemon", async () => {
     const { logs, exitCode } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--wait-for-idle", "0"]);

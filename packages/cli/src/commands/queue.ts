@@ -7,6 +7,7 @@ import { sessionRigOf, isHumanSeatSessionRef } from "../session-name.js";
 import { realDeps } from "./daemon.js";
 import { enumArg, positiveIntArg } from "../cli-error.js";
 import type { StatusDeps } from "./status.js";
+import { resolveContextRef } from "../context-resolve.js";
 
 /**
  * `rig queue` — coordination primitive L3/inbox/outbox commands (PL-004 Phase A).
@@ -285,6 +286,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .requiredOption("--destination <session>", "Destination session (the seat that owns the work)")
     .option("--body <text>", "Qitem body inline (use - to read from stdin; mutually exclusive with --body-file)")
     .option("--body-file <path>", "Read qitem body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class for multiline bodies.")
+    .option("--body-context <ref>", "Snapshot a context pack by its path-like ref into the qitem body (the resolved content rides the handoff + a body-context:<ref> provenance tag). Mutually exclusive with --body / --body-file.")
     .option("--mission <id>", "First-class mission scope; translated to a mission:<id> tag (composes with --tags)")
     .option("--slice <id>", "First-class slice scope; translated to a slice:<id> tag (composes with --tags)")
     .option("--gate <role>", "OPR.0.4.3.16: mark this as a gate qitem; translated to a gate:<role> tag (role e.g. guard | spec-review | pm-lead | qa | human). The idle-gate watchdog reads this predicate. Composes with --tags.")
@@ -304,6 +306,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       destination: string;
       body?: string;
       bodyFile?: string;
+      bodyContext?: string;
       mission?: string;
       slice?: string;
       gate?: string;
@@ -327,14 +330,24 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         emitHostResolutionError(hostResolved, opts.json ?? false);
         return;
       }
-      // OPR.0.3.2.21.FR-4(a) — resolve body BEFORE contacting the daemon
-      // so a missing/ambiguous body fails fast and locally.
-      let resolvedBody: string;
-      try {
-        resolvedBody = await resolveQueueBody({ body: opts.body, bodyFile: opts.bodyFile });
-      } catch (err) {
-        emitBodyResolveError(err as Error & { fact?: string; consequence?: string; action?: string }, opts.json ?? false);
+      // Atom 6b: --body-context snapshots a pack ref's whole content as the body
+      // (the snapshot rule), resolved against the daemon library inside withClient
+      // below. Mutually exclusive with the local --body / --body-file sources.
+      if (opts.bodyContext !== undefined && (opts.body !== undefined || opts.bodyFile !== undefined)) {
+        console.error("--body-context is mutually exclusive with --body / --body-file (choose one body source).");
+        process.exitCode = 1;
         return;
+      }
+      // OPR.0.3.2.21.FR-4(a) — resolve a LOCAL body BEFORE contacting the daemon
+      // so a missing/ambiguous body fails fast and locally.
+      let resolvedBody = "";
+      if (opts.bodyContext === undefined) {
+        try {
+          resolvedBody = await resolveQueueBody({ body: opts.body, bodyFile: opts.bodyFile });
+        } catch (err) {
+          emitBodyResolveError(err as Error & { fact?: string; consequence?: string; action?: string }, opts.json ?? false);
+          return;
+        }
       }
       // OPR.0.4.1.18 (FR-7, warn-then-require grace): a summary SHOULD accompany
       // every new qitem (it feeds the Story node + helps humans skim). Warn — to
@@ -359,11 +372,27 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       // (the queue-gate-predicate the idle-gate watchdog reads). Same
       // formalization + de-dup as --mission/--slice.
       if (opts.gate) fromFlags.push(`gate:${opts.gate}`);
+      // Atom 6b snapshot provenance: record WHERE the body came from so the
+      // handoff stays auditable even if the pack is edited later.
+      if (opts.bodyContext) fromFlags.push(`body-context:${opts.bodyContext}`);
       const merged = [...fromFlags, ...fromTagsArg];
       const seen = new Set<string>();
       const dedupedTags = merged.filter((t) => { if (seen.has(t)) return false; seen.add(t); return true; });
       const tags = dedupedTags.length > 0 ? dedupedTags : undefined;
       await withClient(deps, async (client) => {
+        // Atom 6b: resolve --body-context against the library (all-or-nothing —
+        // a missing member aborts before the qitem is created). The RESOLVED
+        // content is the body (a snapshot); the ref rides as a provenance tag,
+        // so a later library edit never rewrites this handoff's history.
+        if (opts.bodyContext !== undefined) {
+          try {
+            resolvedBody = (await resolveContextRef(client, opts.bodyContext)).text;
+          } catch (err) {
+            console.error((err as Error).message);
+            process.exitCode = 1;
+            return;
+          }
+        }
         const res = await client.post<Record<string, unknown>>("/api/queue/create", {
           qitemId: opts.id,
           sourceSession: opts.source,

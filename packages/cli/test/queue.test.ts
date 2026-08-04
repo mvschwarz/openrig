@@ -125,6 +125,64 @@ describe("rig queue CLI", () => {
     expect(body.nudge).toBe(true);
   });
 
+  // Slice-03 Atom 6b — --body-context snapshot + provenance rule.
+  it("create --body-context snapshots the RESOLVED content as the body + a provenance tag", async () => {
+    const { deps, calls } = makeDeps({
+      routes: {
+        "GET /api/context-packs/library/by-ref/pieces?ref=packs%2Fbrief": { status: 200, data: { ref: "packs/brief", text: "BRIEF-BODY", bytes: 10, missingFiles: [] } },
+        "POST /api/queue/create": { status: 201, data: { qitemId: "qitem-y", state: "pending" } },
+      },
+    });
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "queue", "create",
+      "--source", "alice@rig", "--destination", "bob@rig",
+      "--body-context", "packs/brief", "--summary", "onboarding",
+    ]);
+    const create = calls.find((c) => c.path === "/api/queue/create");
+    expect(create, "expected the qitem to be created").toBeDefined();
+    const body = create!.body as { body: string; tags?: string[] };
+    // Snapshot: the RESOLVED content is the body (not the ref); a later library
+    // edit can never rewrite this handoff's history.
+    expect(body.body).toBe("BRIEF-BODY");
+    // Provenance: the ref rides as a tag so "what context was this agent given?"
+    // stays auditable.
+    expect(body.tags).toContain("body-context:packs/brief");
+  });
+
+  it("create --body-context ABORTS (no qitem created) when the pack has a missing member", async () => {
+    const { deps, calls } = makeDeps({
+      routes: {
+        "GET /api/context-packs/library/by-ref/pieces?ref=packs%2Fbroken": { status: 200, data: { ref: "packs/broken", text: "X", missingFiles: [{ path: "gone.md" }] } },
+      },
+    });
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "queue", "create",
+      "--source", "alice@rig", "--destination", "bob@rig",
+      "--body-context", "packs/broken", "--summary", "x",
+    ]);
+    expect(calls.find((c) => c.path === "/api/queue/create"), "no qitem created on a broken pack").toBeUndefined();
+    expect(process.exitCode).toBe(1);
+    expect(errors.join("\n")).toMatch(/gone\.md/);
+  });
+
+  it("create --body-context is mutually exclusive with --body", async () => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "queue", "create",
+      "--source", "alice@rig", "--destination", "bob@rig",
+      "--body", "x", "--body-context", "packs/brief", "--summary", "x",
+    ]);
+    expect(calls.find((c) => c.path === "/api/queue/create")).toBeUndefined();
+    expect(process.exitCode).toBe(1);
+    expect(errors.join("\n")).toMatch(/mutually exclusive/i);
+  });
+
   it("create --no-nudge passes nudge: false to the daemon (cold-queue opt-out)", async () => {
     const { deps, calls } = makeDeps();
     const program = createProgram({ queueDeps: deps });
