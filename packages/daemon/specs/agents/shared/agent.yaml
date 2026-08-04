@@ -20,6 +20,8 @@ resources:
       path: skills/core/openrig-architect
     - id: rig-lifecycle
       path: skills/core/rig-lifecycle
+    - id: openrig-upgrade
+      path: skills/core/openrig-upgrade
     - id: systematic-debugging
       path: skills/process/systematic-debugging
     - id: test-driven-development
