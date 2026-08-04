@@ -95,7 +95,7 @@ describe("hatchet mainline in the SHIPPED content pane (frame-01 visual contract
     const body = screen.lines.join("\n");
     expect(body).toMatch(/┌─+┐/);
     expect(body).toContain("● lead"); // member-only title (S19 MR1)
-    expect(body).toContain("▘▝ 18%"); // round-4 corrected square clawd mark + adjacent ctx
+    expect(body).toContain(">< 18%"); // picks v4 (14afeb74): inward squinty eyes + adjacent ctx
     // straight connector runs + arrowhead; under the LOCKED containment an
     // edge may legitimately cross a pod-container wall (─ becomes ┼ at the
     // crossing) before its arrowhead
@@ -539,34 +539,28 @@ describe("ROUND-3 LOCKED SET (orch locked-scope GO; pins 02259adb/29a10b62)", ()
     const s = makeStore(snap);
     s.dispatch({ type: "drill", resource: "pod", name: "dev", target: { host: "vm-host", rig: FIXTURE_RIG_NAME } });
     const pane = renderScreen(s.get(), snap, { cols: 150, rows: 40 }).lines.map((l) => l.slice(0, 30)).join("\n");
-    expect(pane).not.toMatch(/▐▌|>_|▝▘|▘▝/); // no marks in the explorer (either quadrant order)
+    expect(pane).not.toMatch(/▐▌|>_|▝▘|▘▝|></); // no marks in the explorer (quadrant orders AND the picks-v4 eyes)
     expect(pane).toMatch(/driver\s+24%/); // name-first untruncated + bare ctx%
     // cards still carry the mark
     s.dispatch({ type: "tab", tab: "graph" });
     const body = renderScreen(s.get(), snap, { cols: 150, rows: 40 }).lines.join("\n");
-    expect(body).toMatch(/▘▝ 24%|▘▝ 63%/); // square clawd mark in card meta
+    expect(body).toMatch(/>< 24%|>< 63%/); // picks-v4 clawd mark in card meta
     // detail page shows the mark as the runtime field — spelled runtime is dead
     s.dispatch({ type: "drill", resource: "agent", name: "dev.driver", target: { host: "vm-host", rig: FIXTURE_RIG_NAME, pod: "dev" } });
     const detail = renderScreen(s.get(), snap, { cols: 150, rows: 40 }).lines.join("\n");
-    expect(detail).toMatch(/runtime:\s+▘▝/); // the mark IS the runtime value
-    expect(detail).not.toMatch(/▘▝ claude-code/); // no spelled runtime beside the mark
+    expect(detail).toMatch(/runtime:\s+></); // the mark IS the runtime value
+    expect(detail).not.toMatch(/>< claude-code/); // no spelled runtime beside the mark
   });
 
-  it("the clawd row mark is the SQUARE with eyes clearly APART (round-4 quadrant-geometry correction)", async () => {
+  it("the clawd eyes are the picks-v4 INWARD SQUINTY pair `><` (founder amendment 14afeb74, supersedes the round-4 quadrant geometry)", async () => {
     const { clawdSquareMark, runtimeMarkSegs, markText } = await import("../src/topology/runtime-marks.js");
     const sq = clawdSquareMark();
-    expect(sq).toHaveLength(2); // 2 cells x 1 row ≈ square at cell aspect
-    // GEOMETRY, not just the string (guard round-4 finding 1): the first cell's
-    // eye occupies the OUTER-LEFT quadrant (U+2598 QUADRANT UPPER LEFT) and the
-    // second cell's the OUTER-RIGHT (U+259D QUADRANT UPPER RIGHT) — the inner
-    // half of BOTH cells is pure terracotta field, so the eyes sit clearly
-    // APART around a real center gap (the ▝▘ order put both eyes at the center
-    // seam — the rejected bunched form).
-    expect(sq[0]!.text).toBe("▘"); // ▘ upper-LEFT quadrant — eye hugs the square's left edge
-    expect(sq[1]!.text).toBe("▝"); // ▝ upper-RIGHT quadrant — eye hugs the right edge
-    expect(markText(sq)).toBe("▘▝");
-    expect(sq.every((g) => g.token === "clawdEye" && g.bg === "clawd")).toBe(true); // dark eyes ON the terracotta field
-    expect(markText(runtimeMarkSegs("claude-code"))).toBe("▘▝"); // shipped claude mark = the square
+    expect(sq).toHaveLength(2); // 2-cell form: literally the characters >< per the amendment
+    expect(sq[0]!.text).toBe(">"); // left eye points INWARD
+    expect(sq[1]!.text).toBe("<"); // right eye points INWARD — reads as a FACE
+    expect(markText(sq)).toBe("><");
+    expect(sq.every((g) => g.token === "clawdEye" && g.bg === "clawd")).toBe(true); // dark eyes ON the terracotta field (unchanged)
+    expect(markText(runtimeMarkSegs("claude-code"))).toBe("><"); // shipped claude mark = the refined face
   });
 
   it("agent-detail runtime marks keep their OWN styling in compiled output (guard round-4 finding 2)", () => {
@@ -603,15 +597,19 @@ describe("ROUND-3 LOCKED SET (orch locked-scope GO; pins 02259adb/29a10b62)", ()
     };
     // clawd: dark #181818 eyes ON the #ad6755 terracotta field, in compiled SGR
     const cl = drillDetail("d.cl");
-    expect(cl.styled).toMatch(/38;2;24;24;24;48;2;173;103;85m[^\x1b]*▘/);
+    expect(cl.styled).toMatch(/38;2;24;24;24;48;2;173;103;85m[^\x1b]*>/);
+    expect(cl.styled).toMatch(/38;2;24;24;24;48;2;173;103;85m[^\x1b]*</); // both inward eyes carry the eye-on-terracotta SGR
     expect(cl.plain).not.toMatch(/claude/); // spelled runtime is dead
     // terminal: the dark-cell background survives to the compiled detail line
     const tty = drillDetail("d.tty");
     expect(tty.styled).toMatch(/48;2;12;10;9m?[^\x1b]*>/);
     expect(tty.plain.slice(31)).not.toMatch(/terminal/);
-    // codex: exactly ASCII >_ (no ❯, no enclosure pick), no spelled runtime
+    // codex: ASCII >_ text with the picks-v4 CHEVRON-ONLY blue hint — the `>`
+    // carries the OFFICIAL sampled #6867aa (38;2;104;103;170) on detail; the
+    // `_` stays light ink; no ❯, no outline, no spelled runtime
     const cx = drillDetail("d.cx");
     expect(cx.plain.slice(31).trimEnd()).toMatch(/runtime:\s+>_$/);
+    expect(cx.styled).toMatch(/38;2;104;103;170m[^\x1b]*>/); // chevron pick (picks v4 item a)
     expect(cx.plain).not.toMatch(/❯|codex/);
   });
 

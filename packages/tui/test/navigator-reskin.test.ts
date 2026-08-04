@@ -195,7 +195,7 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     const screen = renderScreen(s.get(), snap2, { cols: 150, rows: 40 });
     const styled = stylizeLines(screen, createStyle("truecolor"));
     const joined = styled.join("\n");
-    expect(joined).toMatch(/38;2;24;24;24;48;2;173;103;85m▘▝/); // eyes-apart cells on the terracotta field (round-4 order)
+    expect(joined).toMatch(/38;2;24;24;24;48;2;173;103;85m></); // picks-v4 inward squinty eyes on the terracotta field
     styled.forEach((line, j) => expect(stripAnsi(line), `line ${j}`).toBe(screen.lines[j]));
   });
 

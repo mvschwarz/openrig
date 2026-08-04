@@ -42,7 +42,7 @@ const MARK_SGR = {
   markInkFg: "38;2;250;250;249", // codex `>_` light ink
   codexBlueFg: "38;2;104;103;170", // OFFICIAL sampled       #6867aa
 } as const;
-const MARK_GLYPHS = /[▘▝▖▗▚▞▐▌█▀▄╹]|>_/;
+const MARK_GLYPHS = /[▘▝▖▗▚▞▐▌█▀▄╹]|>_|></; // incl. the picks-v4 eyes pair
 const RUNTIME_WORDS = /claude|codex|terminal|tty/i;
 
 function explorerRowsFor(view: ReturnType<typeof createViewState>, s: FleetSnapshot) {
@@ -86,12 +86,14 @@ describe("POSITIVE explorer-absence regression — claude/codex/terminal rows ca
       return stylizeLines(screen, createStyle("truecolor")).join("\n");
     };
     const claude = detail("alpha");
-    expect(claude).toMatch(/▘/); // clawd outer-left eye quadrant
+    expect(claude).toMatch(/38;2;24;24;24;48;2;173;103;85m[^\x1b]*>/); // left inward eye (picks v4)
+    expect(claude).toMatch(/38;2;24;24;24;48;2;173;103;85m[^\x1b]*</); // right inward eye
     expect(claude).toContain(MARK_SGR.clawdEyeFg);
     expect(claude).toContain(MARK_SGR.clawdBodyBg);
     const codex = detail("beta");
     expect(stripAnsi(codex)).toContain(">_"); // codex ASCII prompt mark
     expect(codex).toContain(MARK_SGR.markInkFg);
+    expect(codex).toContain(MARK_SGR.codexBlueFg); // picks-v4 chevron hint on detail
     const term = detail("gamma");
     expect(stripAnsi(term)).toContain(">_");
     expect(term).toContain(MARK_SGR.terminalCellBg);

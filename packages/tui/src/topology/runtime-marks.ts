@@ -125,24 +125,25 @@ export function clawdFounderMark(): MarkSeg[] {
   ];
 }
 
-/** ROUND-3 LOCKED clawd row mark, round-4 quadrant-geometry correction (guard
- * finding 1): a SQUARE (2 cells ≈ square at cell aspect) with two quarter-
- * block EYES clearly APART — cell 1 carries the OUTER-LEFT quadrant (▘
- * U+2598 QUADRANT UPPER LEFT) and cell 2 the OUTER-RIGHT (▝ U+259D QUADRANT
- * UPPER RIGHT), so the inner half of BOTH cells is pure terracotta field and
- * the eyes flank a real center gap. (The prior ▝▘ order put the inner-right
- * and inner-left quadrants together AT the center seam — the rejected
- * center-bunched form.) Eyes sit high like the source grid; dark #181818 eyes
- * ON the #ad6755 terracotta field. */
+/** PICKS-V4 clawd row mark (founder amendment, PICKS-OF-RECORD sha256-16
+ * 14afeb74, 2026-08-04 — a bounded refinement INSIDE the locked square-with-
+ * eyes direction): the eyes are literally the characters `><` — left eye `>`,
+ * right eye `<`, pointing INWARD, squinty (reference image-cache 102).
+ * Founder rationale verbatim: eyes at the far edges do not read as eyes;
+ * inward angle brackets make it read as a FACE. Dark #181818 eyes ON the
+ * #ad6755 terracotta field, unchanged. (Lineage: round-4 shipped the ▘▝
+ * outer-quadrant pair; superseded by this amendment.) */
 export function clawdSquareMark(): MarkSeg[] {
   return [
-    { text: "▘", token: "clawdEye", bg: "clawd" },
-    { text: "▝", token: "clawdEye", bg: "clawd" },
+    { text: ">", token: "clawdEye", bg: "clawd" },
+    { text: "<", token: "clawdEye", bg: "clawd" },
   ];
 }
 
-/** ROUND-3 codex blue-hint CANDIDATES (LOOK choice a — UNPICKED; the shipped
- * mark stays the approved plain form until the authenticated pick): each
+/** ROUND-3 codex blue-hint CANDIDATES — PICKED at picks v4 (14afeb74):
+ * CHEVRON-ONLY, on detail/topology surfaces only (founder delegated; pm-lead
+ * ruled the most restrained option). codexMark() below now ships the chevron
+ * form; this record keeps the presented variants for decision lineage. Each
  * variant uses the OFFICIAL sampled #6867aa (token codexBlue), never a
  * remembered value. */
 export function codexHintVariants(): Record<"chevron" | "outline" | "none", MarkSeg[]> {
@@ -170,13 +171,14 @@ export function clawdMiniB(): MarkSeg[] {
   return clawdDownsample(3, 1)[0]!;
 }
 
-/** Codex: the `>_` prompt mark, light-on-dark (the web mark is `>_` in a
- * light circle; the terminal-cell form keeps the glyph pair). */
+/** Codex: the `>_` prompt mark with the PICKS-V4 CHEVRON-ONLY blue hint
+ * (item a, 14afeb74): the `>` carries the OFFICIAL sampled #6867aa; the `_`
+ * stays light ink. Text stays exactly ASCII `>_` (web-identity: the SAME
+ * mark, not a cousin; ❯ remains vetoed). This mark renders on detail +
+ * topology surfaces only — the explorer carries no marks (locked). */
 export function codexMark(): MarkSeg[] {
-  // the LOCKED token is `>_` (web mark verbatim); any restyling (e.g. ❯) is
-  // a founder-LOOK question, not a driver choice (guard finding 4)
   return [
-    { text: ">", token: "markInk", bold: true },
+    { text: ">", token: "codexBlue", bold: true },
     { text: "_", token: "markInk", bold: true },
   ];
 }
