@@ -1202,6 +1202,13 @@ export class PodRigInstantiator {
           });
           nodeId = node.id;
           nodeIdMap[qualifiedId] = nodeId;
+          // R2 terminal (4c49c758): the bootstrap path's provenance write is the FIRST
+          // write for this node (not a launch-time refresh) — it is LOAD-BEARING restart
+          // state and must be STRICT: a real setter fault fails THIS seat visibly (failed
+          // node result, no silent success), so restore can never fall through a missing
+          // member record to the rig attachment (member precedence + restart truth).
+          const bootstrapAttachment = this.resolveMemberPolicyAttachment(member.permissionPolicy, rigSpec.permissionPolicy, rigRoot);
+          if (bootstrapAttachment) this.persistNodePolicyProvenanceStrict(nodeId, bootstrapAttachment);
         } catch (err) {
           nodeResults.push({ logicalId: qualifiedId, status: "failed", error: (err as Error).message });
           continue;
