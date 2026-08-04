@@ -14,6 +14,7 @@ import type {
 } from "./types.js";
 import { WORKSPACE_KINDS } from "./types.js";
 import { validateSafePath } from "./path-safety.js";
+import { validatePermissionPolicyRef } from "./permission-policy/policy-ref.js";
 import { validateStartupBlock, normalizeStartupBlock } from "./startup-validation.js";
 import { COMPOSE_PROJECT_NAME_PATTERN, deriveComposeProjectName } from "./compose-project-name.js";
 import * as path from "node:path";
@@ -103,6 +104,14 @@ export class RigSpecSchema {
       errors.push(...validateWorkspaceBlock(obj["workspace"], "workspace"));
     }
 
+    // OPR.0.4.8.3 Seam B: optional rig-level permission_policy REF (builtin:<name> or a
+    // spec-relative custom path). Absent = the floor (honest absence). Validated per README v4
+    // A1/A2/A3 — an invalid ref is a STRUCTURED spec error, never a silent floor fallback.
+    if (obj["permission_policy"] !== undefined && obj["permission_policy"] !== null) {
+      const refErr = validatePermissionPolicyRef(obj["permission_policy"], "permission_policy");
+      if (refErr) errors.push(refErr);
+    }
+
     // pods: required array
     if (!obj["pods"] || !Array.isArray(obj["pods"])) {
       errors.push("pods: required non-empty array");
@@ -167,6 +176,7 @@ export class RigSpecSchema {
       name: raw["name"] as string,
       summary: raw["summary"] as string | undefined,
       cultureFile: raw["culture_file"] as string | undefined,
+      permissionPolicy: raw["permission_policy"] as string | undefined,
       docs,
       startup: raw["startup"] ? normalizeStartupBlock(raw["startup"]) : undefined,
       services: raw["services"] ? normalizeServicesBlock(raw["services"], raw["name"] as string) : undefined,
@@ -381,6 +391,19 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
       errors.push(`${prefix}.role: must contain only letters, numbers, underscores, dots, or hyphens`);
     } else if (member["runtime"] === "terminal") {
       errors.push(`${prefix}.role: not valid on terminal members (a terminal node is not an agent seat and cannot be role-resolved)`);
+    }
+  }
+
+  // OPR.0.4.8.3 Seam B: optional per-seat permission_policy REF (builtin:<name> or a spec-relative
+  // custom path; validated per README v4 A1/A2/A3 — NOT the role charset, since a ref carries ':'
+  // and '/'). Opt-in per seat; absent = the floor. Rejected on terminal runtime (a terminal node is
+  // not an agent seat — mirrors the role rejection). A per-member ref overrides the rig-level ref.
+  if (member["permission_policy"] !== undefined) {
+    const refErr = validatePermissionPolicyRef(member["permission_policy"], `${prefix}.permission_policy`);
+    if (refErr) {
+      errors.push(refErr);
+    } else if (member["runtime"] === "terminal") {
+      errors.push(`${prefix}.permission_policy: not valid on terminal members (a terminal node is not an agent seat)`);
     }
   }
 
@@ -998,6 +1021,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     codexConfigProfile: m["codex_config_profile"] as string | undefined,
     model: m["model"] as string | undefined,
     role: m["role"] as string | undefined,
+    permissionPolicy: m["permission_policy"] as string | undefined,
     cwd: m["cwd"] as string,
     restorePolicy: m["restore_policy"] as string | undefined,
     startup: m["startup"] ? normalizeStartupBlock(m["startup"]) : undefined,

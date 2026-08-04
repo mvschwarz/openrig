@@ -161,6 +161,9 @@ export class RigSpecExporter {
         // OPR.0.4.6.FAC1: a declared seat role exports with the pod
         // member (round-trip fidelity — export→import keeps the role).
         if (node.role) member.role = node.role;
+        // OPR.0.4.8.3 Seam B: the seat's RAW permission_policy ref round-trips
+        // (export truth = the ref, never the resolved provenance).
+        if (node.permissionPolicy) member.permissionPolicy = node.permissionPolicy;
         const rp = getRestorePolicy(node.id);
         if (rp) member.restorePolicy = rp;
         return member;
@@ -206,9 +209,14 @@ export class RigSpecExporter {
         to: idToLogical.get(e.targetId)!,
       }));
 
+    // OPR.0.4.8.3 Seam B: rig-level permission_policy is a RIG-ROW field (not derivable
+    // from the spec re-emit) — explicit repository read, emitted only when set.
+    const rigPermissionPolicy = this.rigRepo.getRigPermissionPolicy(rigId);
+
     return {
       version: "0.2",
       name: rig.rig.name,
+      ...(rigPermissionPolicy ? { permissionPolicy: rigPermissionPolicy } : {}),
       pods: podSpecs,
       edges: crossPodEdges,
     };

@@ -9,6 +9,11 @@ export interface NodeBinding extends Binding {
   cwd: string;
   model?: string;
   codexConfigProfile?: string;
+  /** OPR.0.4.8.3 Seam B: the seat's RESOLVED launch posture from its permission_policy
+   * attachment (member > rig precedence, resolved by the core resolver at materialize /
+   * restore). Absent = no policy attached → the env-driven floor/YOLO decision stands.
+   * Present = authoritative for this seat (overrides the env read in BOTH directions). */
+  launchPosture?: "floor" | "full_bypass";
 }
 
 // -- Resolved startup file with source-root provenance --

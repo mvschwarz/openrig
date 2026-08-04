@@ -340,7 +340,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // OPR.0.4.8.2: the FORK path uses the SAME posture decision (codexPostureArg) — YOLO forces
       // -s danger-full-access on every seat; otherwise the named profile, or OpenRig's explicit
       // -s workspace-write floor flag.
-      const cmd = `codex${codexPostureArg(profileArg)} fork${queueStateDirArg} ${shellQuote(parentId)}`;
+      const cmd = `codex${codexPostureArg(profileArg, process.env, binding.launchPosture)} fork${queueStateDirArg} ${shellQuote(parentId)}`;
       const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
@@ -364,8 +364,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // -s danger-full-access (overrides even a named profile); otherwise the named profile, or
     // OpenRig's explicit -s workspace-write floor flag.
     const cmd = opts.resumeToken
-      ? buildCodexResumeCore(opts.resumeToken, profile, false, queueStateDirArg.trim() || undefined)
-      : `codex${codexPostureArg(profileArg)} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`;
+      ? buildCodexResumeCore(opts.resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture)
+      : `codex${codexPostureArg(profileArg, process.env, binding.launchPosture)} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`;
 
     const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
     if (!textResult.ok) {

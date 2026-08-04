@@ -47,12 +47,16 @@ export function buildCodexResumeCore(
   codexConfigProfile?: string | null,
   useLast?: boolean,
   extraArgs?: string,
+  // OPR.0.4.8.3 Seam B: optional resolved posture — LAUNCH callers thread the seat's
+  // persisted/bound posture; the shared non-launch consumers (node inventory,
+  // resume-metadata) omit it and keep byte-identical behavior.
+  resolvedPosture?: "floor" | "full_bypass",
 ): string {
   // OPR.0.4.8.2: the RESUME path uses the SAME posture decision (codexPostureArg) as fresh/fork.
   // YOLO forces -s danger-full-access (overriding even a named profile); otherwise a named profile
   // governs itself and the no-profile case is OpenRig's explicit -s workspace-write floor flag.
   const profileArg = codexConfigProfile ? ` -p ${shellQuote(codexConfigProfile)}` : "";
-  const profileOrPosture = codexPostureArg(profileArg);
+  const profileOrPosture = codexPostureArg(profileArg, process.env, resolvedPosture);
   const middle = extraArgs ? `${extraArgs} ` : "";
   const tokenArg = useLast ? "--last" : shellQuote(resumeToken);
   return `codex${profileOrPosture} resume ${middle}${tokenArg}`;

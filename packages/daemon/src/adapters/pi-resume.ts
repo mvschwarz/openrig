@@ -53,6 +53,8 @@ export class PiResumeAdapter {
     resumeToken: string | null,
     cwd: string,
     model?: string | null,
+    // OPR.0.4.8.3 Seam B: persisted resolved posture (resource-trust wording for Pi).
+    resolvedPosture?: "floor" | "full_bypass",
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Pi resume not available" };
@@ -90,7 +92,7 @@ export class PiResumeAdapter {
       model: model ?? undefined,
       // OPR.0.4.8.2: Pi RESOURCE TRUST (not a permission policy). Same decision as the launch path:
       // YOLO forces `approve` on every restored seat; otherwise the configured posture.
-      trust: piTrust(this.options.trustPosture),
+      trust: piTrust(this.options.trustPosture, process.env, resolvedPosture),
       sessionFile,
       launchId,
     });

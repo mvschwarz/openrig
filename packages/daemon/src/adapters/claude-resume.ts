@@ -37,7 +37,10 @@ export class ClaudeResumeAdapter {
     tmuxSessionName: string,
     resumeType: string | null,
     resumeToken: string | null,
-    _cwd: string
+    _cwd: string,
+    // OPR.0.4.8.3 Seam B: the seat's PERSISTED resolved posture (restore re-derivation);
+    // absent = the env decision (0.4.8.2), unchanged.
+    resolvedPosture?: "floor" | "full_bypass",
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Claude resume not available" };
@@ -45,7 +48,7 @@ export class ClaudeResumeAdapter {
 
     // OPR.0.4.8.2: the RESTORE path uses the SAME launch-posture decision as fresh launch (the
     // unconditional acceptEdits floor when OFF; the full bypass when YOLO is ON) — every seat.
-    const cmd = `claude ${claudePostureFlag()} --resume ${shellQuote(resumeToken!)}`;
+    const cmd = `claude ${claudePostureFlag(process.env, resolvedPosture)} --resume ${shellQuote(resumeToken!)}`;
 
     const textResult = await this.tmux.sendText(tmuxSessionName, cmd);
     if (!textResult.ok) {

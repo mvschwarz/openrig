@@ -32,6 +32,9 @@ export interface Node {
   runtime: string | null;
   model: string | null;
   codexConfigProfile?: string | null;
+  /** OPR.0.4.8.3 Seam B: attached permission_policy REF (builtin:<name> or spec-relative custom
+   *  path), or null when none is attached (= the floor). */
+  permissionPolicy?: string | null;
   cwd: string | null;
   surfaceHint: string | null;
   workspace: string | null;
@@ -545,6 +548,8 @@ export interface NodeInventoryEntry {
   agentRef: string | null;
   profile: string | null;
   codexConfigProfile?: string | null;
+  /** OPR.0.4.8.3 Seam B: attached permission_policy REF, or null when none is attached. */
+  permissionPolicy?: string | null;
   resolvedSpecName: string | null;
   resolvedSpecVersion: string | null;
   resolvedSpecHash: string | null;
@@ -911,6 +916,9 @@ export interface RigSpecPodMember {
    * stays reachable only via explicit preferred_targets.
    */
   role?: string;
+  /** OPR.0.4.8.3 Seam B: optional per-seat permission_policy REF (builtin:<name> or a spec-relative
+   *  custom path). Absent = the floor. Overrides the rig-level ref. */
+  permissionPolicy?: string;
   cwd: string;
   restorePolicy?: string;
   startup?: StartupBlock;
@@ -991,6 +999,9 @@ export interface RigSpec {
   name: string;
   summary?: string;
   cultureFile?: string;
+  /** OPR.0.4.8.3 Seam B: optional rig-level permission_policy REF (builtin:<name> or a
+   *  spec-relative custom path). Absent = the floor. A per-member ref overrides this. */
+  permissionPolicy?: string;
   docs?: RigSpecDoc[];
   startup?: StartupBlock;
   services?: RigServicesSpec;
