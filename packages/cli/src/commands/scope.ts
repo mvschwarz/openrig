@@ -858,7 +858,11 @@ function buildAuditCommand(): Command {
         // Revision basis = the most recent commit (HEAD). null when git context
         // is unavailable → the check is left inert per-slice below.
         const headTouched = gitHeadTouchedAbsPaths(missionDir);
-        const sliceResults: Array<{ name: string; result: ReturnType<typeof classifyScopeItem> }> = [];
+        const sliceResults: Array<{
+          name: string;
+          result: ReturnType<typeof classifyScopeItem>;
+          attestations?: AttestationLineage;
+        }> = [];
 
         if (fs.existsSync(slicesDir)) {
           for (const entry of fs.readdirSync(slicesDir)) {
@@ -957,7 +961,7 @@ function buildAuditCommand(): Command {
               });
             }
 
-            sliceResults.push({ name: entry, result: sliceResult });
+            sliceResults.push({ name: entry, result: sliceResult, attestations: attestationLineage(sliceFm) });
           }
         }
 
@@ -971,7 +975,14 @@ function buildAuditCommand(): Command {
           out.write(JSON.stringify({
             ok: hardFindings.length === 0,
             mission: { name: missionName, railStatus: missionResult.railStatus, frontmatterError: missionResult.frontmatterError, findings: missionResult.findings },
-            slices: sliceResults.map((s) => ({ name: s.name, railStatus: s.result.railStatus, frontmatterError: s.result.frontmatterError, findings: s.result.findings })),
+            slices: sliceResults.map((s) => ({
+              name: s.name,
+              railStatus: s.result.railStatus,
+              frontmatterError: s.result.frontmatterError,
+              findings: s.result.findings,
+              // OPR.0.5.0.18 — amendment lineage (present only when re-stamped).
+              ...(s.attestations ? { attestations: s.attestations } : {}),
+            })),
             totalFindings: allFindings.length,
           }, null, 2));
           out.write("\n");
@@ -982,6 +993,20 @@ function buildAuditCommand(): Command {
         out.write(`Scope audit: ${missionName}\n`);
         out.write(`Mission rail: ${missionResult.railStatus}\n`);
         out.write(`Slices: ${sliceResults.length} total\n\n`);
+
+        // OPR.0.5.0.18 — amendment lineage: a re-stamped slice shows the
+        // CURRENT attestation + prior-count (the append-only audit rows
+        // reconstruct the full history; this is the at-a-glance surface).
+        const amended = sliceResults.filter((s) => s.attestations);
+        if (amended.length > 0) {
+          out.write("AMENDMENT LINEAGE:\n");
+          for (const s of amended) {
+            for (const [scope, att] of Object.entries(s.attestations!)) {
+              out.write(`  ${s.name} [${scope}]: current ${att.by} at ${att.at} — ${att.priors} prior attestation(s) in the audit log\n`);
+            }
+          }
+          out.write("\n");
+        }
 
         if (allFindings.length > 0) {
           out.write("FINDINGS:\n");
@@ -1010,6 +1035,35 @@ function extractFrontmatterRaw(content: string): string | null {
   if (!content.startsWith("---")) return null;
   const match = /^---\s*\n([\s\S]*?)\n---/.exec(content);
   return match ? match[1]! : null;
+}
+
+// OPR.0.5.0.18 — amendment lineage from frontmatter: the re-stamp verb writes
+// `approved-spec-priors` / `approved-priors` atomically beside the current
+// stamp, so the (filesystem-local) audit can show lineage without DB access.
+// Returns undefined for never-amended slices (first-approve output unchanged).
+interface AttestationLineage {
+  spec?: { by: string; at: string; priors: number };
+  delivery?: { by: string; at: string; priors: number };
+}
+
+function attestationLineage(frontmatterRaw: string | null): AttestationLineage | undefined {
+  if (!frontmatterRaw) return undefined;
+  const read = (key: string): string | null => {
+    const m = new RegExp(`^${key}\\s*:\\s*(.+)$`, "m").exec(frontmatterRaw);
+    return m ? m[1]!.trim().replace(/^["']|["']$/g, "") : null;
+  };
+  const lineage: AttestationLineage = {};
+  for (const [scope, fields] of [
+    ["spec", { by: "approved-spec-by", at: "approved-spec-at", priors: "approved-spec-priors" }],
+    ["delivery", { by: "approved-by", at: "approved-at", priors: "approved-priors" }],
+  ] as const) {
+    const priorsRaw = read(fields.priors);
+    const priors = priorsRaw !== null ? Number(priorsRaw) : NaN;
+    if (Number.isFinite(priors) && priors > 0) {
+      lineage[scope] = { by: read(fields.by) ?? "?", at: read(fields.at) ?? "?", priors };
+    }
+  }
+  return Object.keys(lineage).length > 0 ? lineage : undefined;
 }
 
 function directoryHasEntries(dir: string): boolean {
@@ -1604,12 +1658,16 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
     .option("--scope <scope>", "Approval scope: spec | delivery (default delivery)")
     .option("--actor <session>", "Approving session (defaults to OPENRIG_SESSION_NAME)")
     .option("--on-behalf-of <human>", "Record the delegation: whose decision this stamp records (actor stays the real invoking session)")
+    .option("--re-approve", "OPR.0.5.0.18 amend/re-stamp: supersede an existing stamp with a new reasoned attestation (prior preserved in the append-only audit log). Requires --reason.")
+    .option("--reason <why>", "Why the stamp is being amended (required with --re-approve; recorded on the audit row)")
     .option("--json", "Machine-readable output")
     .action(async (target: string, opts: {
       mission?: string;
       scope?: string;
       actor?: string;
       onBehalfOf?: string;
+      reApprove?: boolean;
+      reason?: string;
       json?: boolean;
     }, command: Command) => {
       const out = makeStdout();
@@ -1620,6 +1678,22 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
             fact: `Unknown --scope value "${opts.scope}".`,
             consequence: "Command did not run.",
             action: "Pick one of: spec, delivery (omit for delivery).",
+          });
+        }
+        // OPR.0.5.0.18 — fail the flag misuse fast and locally (the daemon
+        // enforces the same contract; this just saves the round-trip).
+        if (opts.reApprove && (!opts.reason || opts.reason.trim().length === 0)) {
+          throw new ScopeCliError({
+            fact: "--re-approve without --reason.",
+            consequence: "A re-stamp is a reasoned deliberate act; nothing was written.",
+            action: 'Re-run with --reason "<why>" describing what changed since the prior attestation.',
+          });
+        }
+        if (opts.reason && !opts.reApprove) {
+          throw new ScopeCliError({
+            fact: "--reason was passed without --re-approve.",
+            consequence: "A first-time approval carries no amendment reason; nothing was written.",
+            action: "Drop --reason for a first approval, or add --re-approve to amend an existing stamp.",
           });
         }
         const actor = opts.actor ?? process.env.OPENRIG_SESSION_NAME;
@@ -1659,6 +1733,8 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
           approvalScope: opts.scope,
           actorSession: actor,
           onBehalfOf: opts.onBehalfOf ?? null,
+          reApprove: opts.reApprove === true,
+          reason: opts.reason ?? null,
         });
         if (res.status >= 400) {
           const err = res.data as { error?: string; message?: string };
@@ -1666,13 +1742,16 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
             fact: `Approve failed (${err.error ?? res.status}): ${err.message ?? "unknown error"}.`,
             consequence: "No stamp and no audit row were left behind (no half-stamp).",
             action: err.error === "already_approved"
-              ? "The scope already carries this stamp; un-approve/re-approve is out of scope v1."
+              ? 'The scope already carries this stamp; amend it with --re-approve --reason "<why>" (new attestation; prior preserved in the audit log).'
               : "Fix the named issue and re-run.",
           });
         }
         const data = res.data;
         emit(out, { ok: true, ...data }, json, [
-          `Approved (${String(data.approvalScope)}) ${tier} ${String(data.scopeId)} — ${String(data.approvedBy)} at ${String(data.approvedAt)}${data.onBehalfOf ? ` on behalf of ${String(data.onBehalfOf)}` : ""}`,
+          `${data.reApproved ? "Re-approved" : "Approved"} (${String(data.approvalScope)}) ${tier} ${String(data.scopeId)} — ${String(data.approvedBy)} at ${String(data.approvedAt)}${data.onBehalfOf ? ` on behalf of ${String(data.onBehalfOf)}` : ""}`,
+          ...(data.reApproved
+            ? [`Superseded prior attestation: ${String(data.priorApprovedBy)} at ${String(data.priorApprovedAt ?? "?")} (preserved in the audit log)`]
+            : []),
           `Audit action: ${String(data.actionId)} (scope_path=${String(data.scopePath)})`,
         ]);
       } catch (err) {

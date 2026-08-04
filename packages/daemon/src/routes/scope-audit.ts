@@ -35,6 +35,35 @@ function listProofArtifactsForAudit(proofDir: string): Array<{ path: string; fro
   }
 }
 
+
+// OPR.0.5.0.18 — amendment lineage from frontmatter (parity with the CLI
+// audit builder): the atomic re-stamp writes `approved-spec-priors` /
+// `approved-priors` beside the current stamp; surfaced only when > 0.
+interface AttestationLineage {
+  spec?: { by: string; at: string; priors: number };
+  delivery?: { by: string; at: string; priors: number };
+}
+
+function attestationLineage(frontmatterRaw: string | null): AttestationLineage | undefined {
+  if (!frontmatterRaw) return undefined;
+  const read = (key: string): string | null => {
+    const m = new RegExp(`^${key}\\s*:\\s*(.+)$`, "m").exec(frontmatterRaw);
+    return m ? m[1]!.trim().replace(/^["']|["']$/g, "") : null;
+  };
+  const lineage: AttestationLineage = {};
+  for (const [scope, fields] of [
+    ["spec", { by: "approved-spec-by", at: "approved-spec-at", priors: "approved-spec-priors" }],
+    ["delivery", { by: "approved-by", at: "approved-at", priors: "approved-priors" }],
+  ] as const) {
+    const priorsRaw = read(fields.priors);
+    const priors = priorsRaw !== null ? Number(priorsRaw) : NaN;
+    if (Number.isFinite(priors) && priors > 0) {
+      lineage[scope] = { by: read(fields.by) ?? "?", at: read(fields.at) ?? "?", priors };
+    }
+  }
+  return Object.keys(lineage).length > 0 ? lineage : undefined;
+}
+
 export function scopeAuditRoutes(): Hono {
   const app = new Hono();
 
@@ -105,7 +134,7 @@ export function scopeAuditRoutes(): Hono {
       }
 
       const slicesDir = path.join(missionDir, "slices");
-      const sliceResults: Array<{ name: string; result: ScopeAuditResult }> = [];
+      const sliceResults: Array<{ name: string; result: ScopeAuditResult; attestations?: AttestationLineage }> = [];
 
       if (fs.existsSync(slicesDir)) {
         for (const entry of fs.readdirSync(slicesDir)) {
@@ -187,7 +216,7 @@ export function scopeAuditRoutes(): Hono {
             });
           }
 
-          sliceResults.push({ name: entry, result: sliceResult });
+          sliceResults.push({ name: entry, result: sliceResult, attestations: attestationLineage(sliceFm) });
         }
       }
 
@@ -210,6 +239,8 @@ export function scopeAuditRoutes(): Hono {
           railStatus: s.result.railStatus,
           frontmatterError: s.result.frontmatterError,
           findings: s.result.findings,
+          // OPR.0.5.0.18 — amendment lineage (present only when re-stamped).
+          ...(s.attestations ? { attestations: s.attestations } : {}),
         })),
         totalFindings: allFindings.length,
       });

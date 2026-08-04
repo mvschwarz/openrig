@@ -40,6 +40,14 @@ export interface ScopeApproveInput {
   /** DELEGATED APPROVAL: whose decision this stamp records when an agent
    *  invokes on the founder's behalf. Recorded in the audit notes only. */
   onBehalfOf?: string | null;
+  /** OPR.0.5.0.18 — AMEND/RE-STAMP: re-approve an already-approved scope as a
+   *  new reasoned attestation superseding the prior (both preserved in the
+   *  append-only audit log; ARCH-SHAPING 9d64ceb6 v2). Atomic: same
+   *  frontmatter-first → audit-second → byte-restore ordering; no unapprove
+   *  window ever exists. */
+  reApprove?: boolean;
+  /** REQUIRED with reApprove (a reasoned deliberate act, never an accident). */
+  reason?: string | null;
 }
 
 export interface ScopeApproveResult {
@@ -55,6 +63,11 @@ export interface ScopeApproveResult {
    *  compose-and-freeze endpoint ships in Packet 2, so P1 always reports
    *  false. The stamp + audit row stand regardless of any render outcome. */
   freezeFired: false;
+  /** OPR.0.5.0.18 — true when this result is an amendment (a re-stamp). */
+  reApproved: boolean;
+  /** The superseded attestation (present only on a re-stamp). */
+  priorApprovedBy?: string;
+  priorApprovedAt?: string | null;
 }
 
 export class ScopeApproveError extends Error {
@@ -81,9 +94,9 @@ export interface ScopeApprovalAuditNotes extends Record<string, unknown> {
   on_behalf_of: string | null;
 }
 
-const STAMP_FIELDS: Record<ApprovalScope, { by: string; at: string }> = {
-  delivery: { by: "approved-by", at: "approved-at" },
-  spec: { by: "approved-spec-by", at: "approved-spec-at" },
+const STAMP_FIELDS: Record<ApprovalScope, { by: string; at: string; priors: string }> = {
+  delivery: { by: "approved-by", at: "approved-at", priors: "approved-priors" },
+  spec: { by: "approved-spec-by", at: "approved-spec-at", priors: "approved-spec-priors" },
 };
 
 interface ScopeApproveDeps {
@@ -143,18 +156,44 @@ export class ScopeApproveService {
       );
     }
 
-    // Re-stamp at the SAME scope fails loudly naming the existing stamp
-    // (no silent re-stamp; un-approve/re-approve is out of scope v1). A
-    // spec stamp followed by a delivery stamp is the normal staged sequence.
+    // OPR.0.5.0.18 — the amend/re-stamp verb (ARCH-SHAPING 9d64ceb6 v2): a
+    // lock is a point-in-time ATTESTATION, not an irreversible seal. Without
+    // --re-approve, an existing stamp still refuses loudly — but the refusal
+    // TEACHES the sanctioned verb instead of dead-ending. With it, the stamp
+    // is superseded by a new reasoned attestation; both live in the
+    // append-only audit log. A spec stamp followed by a delivery stamp is
+    // still the normal staged sequence (different scopes never collide).
     const fields = STAMP_FIELDS[input.approvalScope];
     const existingBy = frontmatter[fields.by];
-    if (typeof existingBy === "string" && existingBy.trim().length > 0) {
+    const hasExistingStamp = typeof existingBy === "string" && existingBy.trim().length > 0;
+    const isReApprove = input.reApprove === true;
+    if (hasExistingStamp && !isReApprove) {
       throw new ScopeApproveError(
         "already_approved",
-        `${input.scopePath} already carries a ${input.approvalScope} approval stamp: ${fields.by}: ${existingBy}, ${fields.at}: ${String(frontmatter[fields.at] ?? "?")}. Re-approval after un-approval is out of scope v1.`,
+        `${input.scopePath} already carries a ${input.approvalScope} approval stamp: ${fields.by}: ${existingBy}, ${fields.at}: ${String(frontmatter[fields.at] ?? "?")}. To amend/re-stamp it as a new reasoned attestation (prior preserved in the audit log), re-run with --re-approve --reason "<why>".`,
         { scopePath: input.scopePath, approvalScope: input.approvalScope, existingBy, existingAt: frontmatter[fields.at] ?? null },
       );
     }
+    const reason = typeof input.reason === "string" ? input.reason.trim() : "";
+    if (isReApprove && reason.length === 0) {
+      throw new ScopeApproveError(
+        "reason_required",
+        `--re-approve is a reasoned deliberate act: pass --reason "<why>" describing what changed since the prior ${input.approvalScope} attestation.`,
+        { scopePath: input.scopePath, approvalScope: input.approvalScope },
+      );
+    }
+    if (isReApprove && !hasExistingStamp) {
+      throw new ScopeApproveError(
+        "nothing_to_reapprove",
+        `${input.scopePath} carries no ${input.approvalScope} approval stamp to supersede — run a plain approve (without --re-approve) for the first attestation.`,
+        { scopePath: input.scopePath, approvalScope: input.approvalScope },
+      );
+    }
+    const priorApprovedBy = hasExistingStamp ? (existingBy as string) : null;
+    const priorApprovedAt = hasExistingStamp
+      ? (typeof frontmatter[fields.at] === "string" ? (frontmatter[fields.at] as string) : null)
+      : null;
+    const priorCount = typeof frontmatter[fields.priors] === "number" ? (frontmatter[fields.priors] as number) : 0;
 
     const approvedAt = (this.deps.now?.() ?? new Date()).toISOString();
 
@@ -172,6 +211,10 @@ export class ScopeApproveService {
     const updated = writeFrontmatterFields(originalBytes, {
       [fields.by]: input.actorSession,
       [fields.at]: approvedAt,
+      // OPR.0.5.0.18 — amendment lineage in the ONE atomic frontmatter write:
+      // prior-count rides beside the current attestation so the (filesystem-
+      // local) scope audit can show lineage; the rows hold the full history.
+      ...(isReApprove ? { [fields.priors]: priorCount + 1 } : {}),
       ...(isPlanLock ? { "locked-artifacts": lockedArtifacts } : {}),
     });
     fs.writeFileSync(readmePath, updated, "utf8");
@@ -187,17 +230,31 @@ export class ScopeApproveService {
       scope_path: scopePathCanonical,
       approval_scope: input.approvalScope,
       on_behalf_of: input.onBehalfOf ?? null,
+      // OPR.0.5.0.18 — the amendment row makes the supersession explicit
+      // (additive keys; the audit-browse scope filters are untouched). The
+      // provenance triple: authorizer = on_behalf_of, acting agent =
+      // actor_session, reason = the verbatim operator reason.
+      ...(isReApprove
+        ? {
+            re_approval: true,
+            reason,
+            prior_approved_by: priorApprovedBy,
+            prior_approved_at: priorApprovedAt,
+            prior_count: priorCount + 1,
+          }
+        : {}),
     };
     let actionId: string;
     try {
+      const baseReason = input.onBehalfOf
+        ? `scope-approval (${input.approvalScope}) on behalf of ${input.onBehalfOf}`
+        : `scope-approval (${input.approvalScope})`;
       const entry = this.deps.actionLog.record({
         actionVerb: "approve",
         qitemId: null, // scope approvals are NOT qitem actions
         actorSession: input.actorSession,
         actedAt: approvedAt,
-        reason: input.onBehalfOf
-          ? `scope-approval (${input.approvalScope}) on behalf of ${input.onBehalfOf}`
-          : `scope-approval (${input.approvalScope})`,
+        reason: isReApprove ? `${baseReason} re-approve: ${reason}` : baseReason,
         auditNotes,
       });
       actionId = entry.actionId;
@@ -226,6 +283,10 @@ export class ScopeApproveService {
       onBehalfOf: input.onBehalfOf ?? null,
       actionId,
       freezeFired: false,
+      reApproved: isReApprove,
+      ...(isReApprove && priorApprovedBy !== null
+        ? { priorApprovedBy, priorApprovedAt }
+        : {}),
     };
   }
 }

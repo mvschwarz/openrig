@@ -18,6 +18,8 @@ export function scopeApproveRoutes(): Hono {
       approvalScope?: string;
       actorSession?: string;
       onBehalfOf?: string | null;
+      reApprove?: boolean;
+      reason?: string | null;
     }>().catch(() => ({} as never));
 
     if (body.scopeTier !== "slice" && body.scopeTier !== "mission") {
@@ -47,12 +49,15 @@ export function scopeApproveRoutes(): Hono {
         approvalScope,
         actorSession: body.actorSession,
         onBehalfOf: body.onBehalfOf ?? null,
+        reApprove: body.reApprove === true,
+        reason: typeof body.reason === "string" ? body.reason : null,
       });
       return c.json(result, 201);
     } catch (err) {
       if (err instanceof ScopeApproveError) {
         const status = err.code === "scope_not_found" ? 404
           : err.code === "already_approved" ? 409
+          : err.code === "nothing_to_reapprove" ? 409
           : err.code === "workspace_not_configured" ? 503
           : err.code === "audit_write_failed" ? 500
           : 400;
