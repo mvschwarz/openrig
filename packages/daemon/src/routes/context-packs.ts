@@ -13,6 +13,7 @@
 // the entry's opaque `id` is `context-pack:<ref>` (UI routing key only).
 
 import { Hono } from "hono";
+import { readFileSync } from "node:fs";
 import type { ContextPackLibraryService } from "../domain/context-packs/context-pack-library-service.js";
 import { assembleBundle } from "../domain/context-packs/bundle-assembler.js";
 import { ContextPackError, type ContextPackEntry } from "../domain/context-packs/context-pack-types.js";
@@ -185,6 +186,31 @@ export function contextPacksRoutes(): Hono {
     } catch (err) {
       return c.json({ error: (err as Error).message }, 500);
     }
+  });
+
+  // GET /library/by-ref/pieces?ref=<path-like-ref> — ordered per-member
+  // contents for `rig walk`; missing members are reported before delivery.
+  router.get("/library/by-ref/pieces", (c) => {
+    const lib = c.get("contextPackLibrary" as never) as ContextPackLibraryService | undefined;
+    if (!lib) return c.json({ error: "context_pack_library_unavailable" }, 503);
+    const resolved = resolveByRef(lib, c.req.query("ref"));
+    if ("error" in resolved) return c.json(resolved.error.body, resolved.error.status);
+    const entry = resolved.entry;
+    const pieces: Array<{ path: string; role: string; content: string }> = [];
+    const missingFiles: Array<{ path: string; role: string }> = [];
+    for (const file of entry.files) {
+      if (file.absolutePath === null) {
+        missingFiles.push({ path: file.path, role: file.role });
+        continue;
+      }
+      try {
+        const absolutePath = lib.resolveFileWithinPack(entry, file.path);
+        pieces.push({ path: file.path, role: file.role, content: readFileSync(absolutePath, "utf-8") });
+      } catch {
+        missingFiles.push({ path: file.path, role: file.role });
+      }
+    }
+    return c.json({ ref: entry.relativePath, id: entry.id, pieces, missingFiles });
   });
 
   return router;

@@ -380,4 +380,35 @@ files:
     expect(body.error).toBe("pack_not_removable");
     expect(existsSync(join(builtinRoot, "packs", "shipped"))).toBe(true);
   });
+
+  // Slice-03 Atom 6 (rig walk) — ordered per-member contents for paced delivery.
+  it("GET /library/by-ref/pieces returns ordered member contents + reports missing members", async () => {
+    writePack(libRoot, join("packs", "walkme"), `
+name: walkme
+version: 1
+files:
+  - path: intro.md
+    role: intro
+  - path: gone.md
+    role: proof
+  - path: steps.md
+    role: steps
+`, { "intro.md": "INTRO-BODY", "steps.md": "STEPS-BODY" }); // gone.md intentionally absent
+    lib.scan();
+    const app = buildApp();
+    const res = await app.request(`/api/context-packs/library/by-ref/pieces?ref=${encodeURIComponent("packs/walkme")}`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { ref: string; pieces: Array<{ path: string; content: string }>; missingFiles: Array<{ path: string }> };
+    expect(body.ref).toBe("packs/walkme");
+    expect(body.pieces.map((p) => p.path)).toEqual(["intro.md", "steps.md"]);
+    expect(body.pieces.map((p) => p.content)).toEqual(["INTRO-BODY", "STEPS-BODY"]);
+    expect(body.missingFiles.map((m) => m.path)).toEqual(["gone.md"]);
+  });
+
+  it("GET /library/by-ref/pieces 404s an absent ref, 400s an unsafe ref, 400s a missing ref", async () => {
+    const app = buildApp();
+    expect((await app.request(`/api/context-packs/library/by-ref/pieces?ref=${encodeURIComponent("packs/absent")}`)).status).toBe(404);
+    expect((await app.request(`/api/context-packs/library/by-ref/pieces?ref=${encodeURIComponent("../escape")}`)).status).toBe(400);
+    expect((await app.request(`/api/context-packs/library/by-ref/pieces`)).status).toBe(400);
+  });
 });
