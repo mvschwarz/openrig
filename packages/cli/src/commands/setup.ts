@@ -285,9 +285,10 @@ function recordPermissionPolicyStep(deps: SetupDeps, choice: string, specPath: s
   const ref = policyRefFor(choice as PolicyChoice);
   try {
     const raw = deps.readFile(resolved) ?? "";
-    // Comment-preserving least-destructive edit: parseDocument retains comments (top + inline), key
-    // order, and formatting; we set ONLY the permission_policy key and re-serialize. A plain
-    // parse->stringify would DROP every comment — pinned by the byte-survival test.
+    // Comment-preserving least-destructive edit: parseDocument retains comment TEXT (top + inline),
+    // key ORDER, QUOTING, and STRUCTURE; we set ONLY the permission_policy key and re-serialize. (Honest
+    // API limit: pre-`#` padding may normalize — this is a text/structure preserve, not a byte-image of
+    // arbitrary whitespace.) A plain parse->stringify would DROP every comment — pinned by the test above.
     const doc = parseDocument(raw);
     doc.set("permission_policy", ref);
     deps.writeFile(resolved, String(doc));
