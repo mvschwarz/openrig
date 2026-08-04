@@ -32,18 +32,21 @@ describe("clawd grid = the RuntimeMark.tsx rect list", () => {
 describe("row-scale mark family", () => {
   it("runtime → mark mapping: claude family = clawd cells, codex = ❯_, terminal = dark ❯_, unknown = honest ?", () => {
     expect(markText(runtimeMarkSegs("claude-code"))).toBe(markText(clawdMiniA()));
-    expect(markText(runtimeMarkSegs("codex"))).toBe("❯_");
-    expect(markText(runtimeMarkSegs("terminal"))).toBe("❯_");
+    expect(markText(runtimeMarkSegs("codex"))).toBe(">_"); // the LOCKED web token
+    expect(markText(runtimeMarkSegs("terminal"))).toBe(">_");
     expect(runtimeMarkSegs("terminal").every((s) => s.bg === "markBg")).toBe(true); // the dark-cell variant
     expect(markText(runtimeMarkSegs("something-else"))).toBe("?");
     expect(runtimeMarkSegs(null)[0]!.token).toBe("dim"); // honest, never fabricated
   });
 
-  it("both downscale candidates are 2-3 single-cell clawd-token glyphs (the mr7 pick set)", () => {
+  it("both downscale candidates are OUTPUTS of the grid downsample (provably derived — guard finding 4)", async () => {
+    const { clawdDownsample } = await import("../src/topology/runtime-marks.js");
+    expect(clawdMiniA()).toEqual(clawdDownsample(2, 1)[0]);
+    expect(clawdMiniB()).toEqual(clawdDownsample(3, 1)[0]);
     for (const mini of [clawdMiniA(), clawdMiniB()]) {
       expect(mini.length).toBeGreaterThanOrEqual(2);
       expect(mini.length).toBeLessThanOrEqual(3);
-      expect(mini.every((s) => s.token === "clawd" && s.text.length === 1)).toBe(true);
+      expect(mini.every((s) => s.text === " " || (s.token === "clawd" && s.text.length === 1))).toBe(true);
     }
   });
 });

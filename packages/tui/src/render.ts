@@ -5,7 +5,7 @@
 // SAME semantic actions commands produce (PIN 1). Isolated seam: a substrate
 // swap touches only this module (spike verdict revisit trigger).
 import { computeExplorerRows, findAgent, findSpec, findAgentBySession, agentsRunningSpec, agentsRunningSpecTargets } from "./state.js";
-import { navigatorLabels } from "./navigator.js";
+import { navigatorDisplay } from "./navigator.js";
 import { renderGraphStyle } from "./topology/render-graph.js";
 import { detailPage, fieldLine, sectionRule, listItem, alignedRow } from "./detail.js";
 import type { Action, FleetSnapshot, NeedsItem, Screen, ViewState } from "./types.js";
@@ -615,7 +615,7 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   const explorer = computeExplorerRows(state, snap);
   // Slice-17: the file-tree re-skin is a DISPLAY transform only — rows, keys,
   // actions, and the hit-map all keep resolving against the row model above.
-  const explorerDisplay = navigatorLabels(explorer, snap, EXPL_W - 1);
+  const { labels: explorerDisplay, metas: explorerMetas } = navigatorDisplay(explorer, snap, EXPL_W - 1);
   const content = contentLines(state, snap, Math.max(cols - EXPL_W - 2, 0));
   const footer = state.footerOn ? snap.stream.at(-1) : undefined;
   const chromeRows = footer ? 4 : 3; // bottom rule + hint bar + status line (+ footer)
@@ -643,6 +643,7 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   const explorerRows: Screen["explorerRows"] = [];
   const contentTargets: Screen["contentTargets"] = [];
   const segRows: NonNullable<Screen["segRows"]> = {};
+  const explorerMeta: NonNullable<Screen["explorerMeta"]> = {};
   for (let i = 0; i < bodyRows; i++) {
     const y = lines.length + 1; // 1-based terminal row this line will occupy
     const explorerIndex = explorerStart + i;
@@ -670,6 +671,8 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
     if (row) {
       hitMap.push({ y, x1: 1, x2: EXPL_W, action: row.action });
       explorerRows.push({ ...row, y });
+      const em = explorerMetas[explorerIndex];
+      if (em) explorerMeta[y] = { start: 1 + em.start, segs: em.segs }; // +1 = marker slot
     }
     // zones first: hit lookup takes the first match, so a zone wins over the row-wide action
     for (const z of zones) {
@@ -697,5 +700,5 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
     ),
   );
   while (lines.length < rows) lines.push("");
-  return { lines: lines.slice(0, rows), hitMap, contentTargets, contentMaxOffset: maxContentOffset, explorerRows, segRows };
+  return { lines: lines.slice(0, rows), hitMap, contentTargets, contentMaxOffset: maxContentOffset, explorerRows, segRows, explorerMeta };
 }

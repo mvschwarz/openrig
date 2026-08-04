@@ -47,17 +47,6 @@ function paintExplorer(text: string, s: Style, focused: boolean): string {
 /** row-body treatment (VISUAL-TARGETS: rig teal · pod dim · meta faint ·
  * names default ink); the right-aligned meta column always dims */
 function paintExplorerBody(text: string, s: Style): string {
-  // S19 MR2 meta: web-family MARK + ctx% — the mark glyphs paint with their
-  // own tokens (clawd body / prompt ink), the value dims; pod counts dim whole
-  const markMeta = text.match(/^(.*?\S)( +)(▟▙|▐█▌|❯_)( )([0-9]+%|—)$/);
-  if (markMeta) {
-    const markTok = markMeta[3] === "❯_" ? "markInk" : "clawd";
-    return (
-      paintExplorerBody(markMeta[1]!, s) + markMeta[2]! +
-      s.paint(markTok as Parameters<typeof s.paint>[0], markMeta[3]!, { bold: markMeta[3] === "❯_" }) +
-      markMeta[4]! + s.paint("dim", markMeta[5]!)
-    );
-  }
   const meta = text.match(/^(.*?\S)( +)((?:\S+ · )?(?:[0-9]+%|—)|[0-9]+)$/);
   if (meta) return paintExplorerBody(meta[1]!, s) + meta[2]! + s.paint("dim", meta[3]!);
   if (text.includes("⚑")) return s.paint("warn", text);
@@ -185,6 +174,28 @@ export function stylizeLines(screen: Screen, s: Style): string[] {
       if (marker === "›") {
         // content-pane selection = a real highlight bar, not just a glyph
         return `${paintExplorer(left, s, explorerFocused)}${s.paint("chrome", "│")}${s.paint("accent", `›${right}`, { inverse: true, bold: true })}`;
+      }
+      // S19 MR2 (guard finding 2): explorer meta segs — the runtime mark's
+      // OWN tokens (incl. the terminal dark-cell bg) survive stylization;
+      // the label body keeps its normal rules. Selected rows keep the bar.
+      const em = screen.explorerMeta?.[index + 1];
+      if (em && !left.startsWith("›")) {
+        const metaPlain = em.segs.map((g) => g.text).join("");
+        const body = left.slice(0, em.start);
+        const tail = left.slice(em.start + metaPlain.length);
+        const paintedMeta = em.segs
+          .map((g) => (g.token || g.bg ? s.paint(g.token ?? "bright", g.text, { ...(g.bold ? { bold: true } : {}), ...(g.bg ? { bg: g.bg } : {}) }) : g.text))
+          .join("");
+        const paintedLeft = paintExplorer(body, s, explorerFocused) + paintedMeta + tail;
+        const cSegs = screen.segRows?.[index + 1];
+        if (cSegs) {
+          const segText = cSegs.map((g) => g.text).join("");
+          const paintedC = cSegs
+            .map((g) => (g.token || g.bg ? s.paint(g.token ?? "bright", g.text, { ...(g.bold ? { bold: true } : {}), ...(g.bg ? { bg: g.bg } : {}) }) : g.text))
+            .join("");
+          return `${paintedLeft}${s.paint("chrome", "│")}${marker}${paintedC}${right.slice(segText.length)}`;
+        }
+        return `${paintedLeft}${s.paint("chrome", "│")}${marker}${paintContent(right, s)}`;
       }
       // slice-17: canvas-rendered rows (graph view) carry token segments —
       // painted with THIS Style; plain(segs) === the content text by

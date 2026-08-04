@@ -250,6 +250,10 @@ export interface Screen {
    * 1-based terminal row) — the paint layer renders them with its own Style;
    * plain(segs) === the row's content text BY CONSTRUCTION (strip-invariant) */
   segRows?: Record<number, Array<{ text: string; token?: import("./theme.js").Token; bold?: boolean; bg?: import("./theme.js").Token }>>;
+  /** S19: explorer meta seg channel — the runtime mark's own colors (incl.
+   * the terminal dark-cell bg) survive stylization (keyed by 1-based row;
+   * start = column within the LEFT cell after the selection-marker slot) */
+  explorerMeta?: Record<number, { start: number; segs: Array<{ text: string; token?: import("./theme.js").Token; bold?: boolean; bg?: import("./theme.js").Token }> }>;
 }
 
 export type InputEvent =

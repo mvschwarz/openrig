@@ -67,32 +67,67 @@ export function clawdFaithfulRows(): MarkSeg[][] {
   return rows;
 }
 
-/** DOWNSCALED essence forms (~2-cell row marks) — CANDIDATES for the founder
- * pick (mr7); the shapes are majority-vote downsamples of the same grid, so
- * the family identity is derived, not invented. */
+/** quadrant-block downsample: the 16x16 grid → cols x rows cells, each cell
+ * a 2x2 quadrant whose quadrants are majority-vote body coverage of their
+ * source region. PROVABLY grid-derived (guard finding 4) — the mini forms
+ * are OUTPUTS of this function, never hand-picked glyphs. Honest limit: the
+ * 1px eyes are below majority threshold at these scales and vanish — that
+ * fidelity fact is part of the mr7 packet, not hidden. */
+const QUADRANT_CHARS: Record<number, string> = {
+  0b0000: " ", 0b0001: "▗", 0b0010: "▖", 0b0011: "▄", 0b0100: "▝", 0b0101: "▐",
+  0b0110: "▞", 0b0111: "▟", 0b1000: "▘", 0b1001: "▚", 0b1010: "▌", 0b1011: "▙",
+  0b1100: "▀", 0b1101: "▜", 0b1110: "▛", 0b1111: "█",
+};
+
+export function clawdDownsample(cols: number, rows: number): MarkSeg[][] {
+  const g = clawdGrid();
+  const cellW = 16 / cols;
+  const cellH = 16 / rows;
+  const covered = (x0: number, y0: number, x1: number, y1: number): boolean => {
+    let body = 0;
+    let total = 0;
+    for (let y = Math.floor(y0); y < Math.ceil(y1); y++)
+      for (let x = Math.floor(x0); x < Math.ceil(x1); x++) {
+        total++;
+        if (g[y]![x]! !== 0) body++;
+      }
+    return total > 0 && body * 2 >= total; // majority vote
+  };
+  const out: MarkSeg[][] = [];
+  for (let r = 0; r < rows; r++) {
+    const segs: MarkSeg[] = [];
+    for (let c = 0; c < cols; c++) {
+      const x0 = c * cellW;
+      const y0 = r * cellH;
+      const bits =
+        (covered(x0, y0, x0 + cellW / 2, y0 + cellH / 2) ? 0b1000 : 0) |
+        (covered(x0 + cellW / 2, y0, x0 + cellW, y0 + cellH / 2) ? 0b0100 : 0) |
+        (covered(x0, y0 + cellH / 2, x0 + cellW / 2, y0 + cellH) ? 0b0010 : 0) |
+        (covered(x0 + cellW / 2, y0 + cellH / 2, x0 + cellW, y0 + cellH) ? 0b0001 : 0);
+      const ch = QUADRANT_CHARS[bits]!;
+      segs.push(ch === " " ? { text: " " } : { text: ch, token: "clawd" });
+    }
+    out.push(segs);
+  }
+  return out;
+}
+
+/** row-mark CANDIDATES for the mr7 pick — both are downsample outputs */
 export function clawdMiniA(): MarkSeg[] {
-  // 2 cells: quadrant-composed from a 4x4 downsample (each cell = 2x2 blocks)
-  // reads as: solid head/body block + leg stubs
-  return [
-    { text: "▟", token: "clawd" },
-    { text: "▙", token: "clawd" },
-  ];
+  return clawdDownsample(2, 1)[0]!;
 }
 
 export function clawdMiniB(): MarkSeg[] {
-  // 3 cells: body with arms — one more cell of essence
-  return [
-    { text: "▐", token: "clawd" },
-    { text: "█", token: "clawd" },
-    { text: "▌", token: "clawd" },
-  ];
+  return clawdDownsample(3, 1)[0]!;
 }
 
 /** Codex: the `>_` prompt mark, light-on-dark (the web mark is `>_` in a
  * light circle; the terminal-cell form keeps the glyph pair). */
 export function codexMark(): MarkSeg[] {
+  // the LOCKED token is `>_` (web mark verbatim); any restyling (e.g. ❯) is
+  // a founder-LOOK question, not a driver choice (guard finding 4)
   return [
-    { text: "❯", token: "markInk", bold: true },
+    { text: ">", token: "markInk", bold: true },
     { text: "_", token: "markInk", bold: true },
   ];
 }
@@ -100,7 +135,7 @@ export function codexMark(): MarkSeg[] {
 /** terminal/tty runtime: dark cell + white `>_` — same family, inverted. */
 export function terminalMark(): MarkSeg[] {
   return [
-    { text: "❯", token: "bright", bg: "markBg", bold: true },
+    { text: ">", token: "bright", bg: "markBg", bold: true },
     { text: "_", token: "bright", bg: "markBg", bold: true },
   ];
 }

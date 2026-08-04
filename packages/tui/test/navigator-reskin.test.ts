@@ -62,7 +62,7 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     const pane = explorerPane(renderScreen(s.get(), snap, { cols: 120, rows: 32 }).lines);
     // dev50.driver under pod dev50 displays pod-relative "driver" (the
     // nav-flow mockup's convention); the meta stays complete
-    const driver = pane.find((l) => l.trimEnd().endsWith("▟▙ 62%"))!;
+    const driver = pane.find((l) => l.trimEnd().endsWith("▐▌ 62%"))!;
     expect(driver).toBeDefined();
     // pod-relative "driver" may still truncate at depth-4 geometry, but its
     // visible stem is the AGENT's own name, never the shared pod prefix
@@ -81,7 +81,7 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     const s = createViewState({ instanceId: "nav-twin", getSnapshot: () => twinSnap });
     s.dispatch({ type: "drill", resource: "pod", name: "dev50", target: { host: "h", rig: "r" } });
     const pane = explorerPane(renderScreen(s.get(), twinSnap, { cols: 120, rows: 32 }).lines);
-    const agentRows = pane.filter((l) => l.includes("❯_ 31%")).map((l) => l.replace(/^./, " "));
+    const agentRows = pane.filter((l) => l.includes(">_ 31%")).map((l) => l.replace(/^./, " "));
     expect(agentRows).toHaveLength(2);
     expect(new Set(agentRows.map((l) => l.trim())).size).toBe(2); // visibly distinct rows
     expect(agentRows.some((l) => l.includes("driv"))).toBe(true);
@@ -98,14 +98,14 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     const s = createViewState({ instanceId: "nav-solo", getSnapshot: () => soloSnap });
     s.dispatch({ type: "drill", resource: "pod", name: "dev50", target: { host: "h", rig: "r" } });
     const row = explorerPane(renderScreen(s.get(), soloSnap, { cols: 120, rows: 32 }).lines).find((l) => l.includes("● solo"))!;
-    expect(row.trimEnd()).toMatch(/● solo\s+❯_ 7%$/);
+    expect(row.trimEnd()).toMatch(/● solo\s+>_ 7%$/);
   });
 
   it("null context renders the honest `mark —` — the mark never drops, unknown never fabricates", () => {
     const s = makeStore();
     s.dispatch({ type: "drill", resource: "pod", name: "dev50", target: { host: "vm-host", rig: "openrig-build" } });
     const pane = explorerPane(renderScreen(s.get(), snap, { cols: 120, rows: 32 }).lines);
-    expect(pane.some((l) => l.trimEnd().endsWith("❯_ —"))).toBe(true); // demo: dev50.qa (codex) ctx null → honest —
+    expect(pane.some((l) => l.trimEnd().endsWith(">_ —"))).toBe(true); // demo: dev50.qa (codex) ctx null → honest —
   });
 
   it("a short name renders untruncated beside the full mark meta (S19 form)", () => {
@@ -119,10 +119,10 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     s.dispatch({ type: "drill", resource: "pod", name: "p", target: { host: "h", rig: "r" } });
     const row = explorerPane(renderScreen(s.get(), shortSnap, { cols: 120, rows: 32 }).lines).find((l) => l.includes("● ok"))!;
     expect(row).not.toMatch(/…/);
-    expect(row.trimEnd()).toMatch(/● ok\s+▟▙ 5%$/);
+    expect(row.trimEnd()).toMatch(/● ok\s+▐▌ 5%$/);
   });
 
-  it("an extreme name still truncates with … while the whole meta survives at the edge", () => {
+  it("an extreme name renders FULL — the meta yields entirely, the identity NEVER ellipsises (guard NOT-CLEAR finding 1)", () => {
     const longSnap = {
       ...snap,
       hosts: [{ name: "h", reachable: true, rigs: [{ name: "r", pods: [{ name: "p", agents: [
@@ -132,8 +132,33 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     const s = createViewState({ instanceId: "nav-long", getSnapshot: () => longSnap });
     s.dispatch({ type: "drill", resource: "pod", name: "p", target: { host: "h", rig: "r" } });
     const row = explorerPane(renderScreen(s.get(), longSnap, { cols: 120, rows: 32 }).lines).find((l) => l.includes("● an-"))!;
-    expect(row).toMatch(/…/);
-    expect(row.trimEnd()).toMatch(/❯_ 9%$/);
+    // the LAYOUT never truncates: the name gets every available cell and the
+    // meta yields entirely; only the PHYSICAL pane edge may clip (pad()'s
+    // honest boundary ellipsis at the last column — same class as the
+    // width-clip indicator, not a layout choice)
+    expect(row).toContain("an-extremely-lon"); // every cell the pane physically offers
+    expect(row).not.toMatch(/9%/); // the meta yielded — name-first
+    expect(row.indexOf("…") === -1 || row.indexOf("…") === 29, "ellipsis only at the physical pane edge").toBe(true);
+  });
+
+  it("the TERMINAL mark keeps its dark-cell background through explorer styling (guard NOT-CLEAR finding 2)", () => {
+    const ttySnap = {
+      ...snap,
+      hosts: [{ name: "h", reachable: true, rigs: [{ name: "r", pods: [{ name: "p", agents: [
+        { name: "tty-seat", runtime: "terminal", spec: "", context: null, tokens: null, status: "active", live: true },
+        { name: "cx-seat", runtime: "codex", spec: "", context: 5, tokens: null, status: "active", live: true },
+      ] }] }] }],
+    };
+    const s = createViewState({ instanceId: "nav-tty", getSnapshot: () => ttySnap });
+    s.dispatch({ type: "drill", resource: "pod", name: "p", target: { host: "h", rig: "r" } });
+    const screen = renderScreen(s.get(), ttySnap, { cols: 120, rows: 32 });
+    const styled = stylizeLines(screen, createStyle("truecolor"));
+    const ttyIdx = screen.lines.findIndex((l) => l.includes("tty-seat"));
+    const cxIdx = screen.lines.findIndex((l) => l.includes("cx-seat"));
+    // DISCRIMINATING: terminal's >_ carries the dark bg (48;2;12;10;9); codex's does NOT
+    expect(styled[ttyIdx]!, "terminal mark keeps markBg").toMatch(/48;2;12;10;9[^m]*m>/);
+    expect(styled[cxIdx]!, "codex mark has no dark bg").not.toMatch(/48;2;12;10;9/);
+    styled.forEach((line, j) => expect(stripAnsi(line), `line ${j}`).toBe(screen.lines[j]));
   });
 
   it("the mark paints with its OWN token (clawd body) and the value dims (S19 meta styling)", () => {
@@ -141,10 +166,11 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     s.dispatch({ type: "drill", resource: "pod", name: "dev50", target: { host: "vm-host", rig: "openrig-build" } });
     const screen = renderScreen(s.get(), snap, { cols: 120, rows: 32 });
     const styled = stylizeLines(screen, createStyle("truecolor"));
-    const i = screen.lines.findIndex((l) => l.slice(0, 30).trimEnd().endsWith("▟▙ 62%"));
+    const i = screen.lines.findIndex((l) => l.slice(0, 30).trimEnd().endsWith("▐▌ 62%"));
     expect(i).toBeGreaterThanOrEqual(0);
-    expect(styled[i]).toMatch(/\x1b\[38;2;173;103;85m▟▙\x1b\[0m/); // clawd body #ad6755
-    expect(styled[i]).toMatch(/\x1b\[38;2;109;116;128m62%\x1b\[0m/); // value dims
+    expect(styled[i]).toMatch(/38;2;173;103;85m▐/); // clawd body #ad6755 (per-cell segs)
+    expect(styled[i]).toMatch(/38;2;173;103;85m▌/);
+    expect(styled[i]).toMatch(/38;2;109;116;128m 62%/); // value dims
     styled.forEach((line, j) => expect(stripAnsi(line), `line ${j}`).toBe(screen.lines[j]));
   });
 
@@ -208,7 +234,7 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     // plus its own locked meta at the edge (guard: visible-identity restore)
     const selectedLine = screen.lines.find((l) => l.startsWith("›"))!;
     expect(selectedLine.slice(0, 30)).toMatch(/● guard/);
-    expect(selectedLine.slice(0, 30).trimEnd()).toMatch(/❯_ 31%$/); // demo: guard ctx 31 (S19 mark meta)
+    expect(selectedLine.slice(0, 30).trimEnd()).toMatch(/>_ 31%$/); // demo: guard ctx 31 (S19 mark meta)
   });
 
   it("FOUNDER CORRECTION: the selected-row highlight covers the item TEXT ONLY — branch guides stay unhighlighted", () => {

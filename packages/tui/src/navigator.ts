@@ -13,7 +13,7 @@
 // "Hover" is the existing selection-focus highlight — RENDER-ONLY, no motion
 // protocol, no second write-path to selection (arch ruling 1).
 import type { ExplorerRow, FleetSnapshot } from "./types.js";
-import { markText, runtimeMarkSegs } from "./topology/runtime-marks.js";
+import { markText, runtimeMarkSegs, type MarkSeg } from "./topology/runtime-marks.js";
 
 interface KeyParts {
   kind: string;
@@ -75,34 +75,57 @@ function contentOf(row: ExplorerRow, parsed: KeyParts): string {
   return stripped;
 }
 
-function metaOf(row: ExplorerRow, snap: FleetSnapshot): string {
+export interface NavigatorMeta {
+  /** column (within the DISPLAY label) where the meta begins */
+  start: number;
+  /** token segments — the mark's own colors (incl. the terminal dark bg)
+   * survive the paint layer through this channel (guard finding 2) */
+  segs: MarkSeg[];
+}
+
+function metaOf(row: ExplorerRow, snap: FleetSnapshot): { text: string; segs: MarkSeg[] } | null {
   const parsed = parseKey(row.key);
-  if (!parsed) return "";
+  if (!parsed) return null;
   if (parsed.kind === "agent") {
     const [host, rig, pod, ...name] = parsed.parts;
     const agent = snap.hosts
       .find((h) => h.name === host)?.rigs.find((r) => r.name === rig)
       ?.pods.find((p) => p.name === pod)?.agents.find((a) => a.name === name.join("/"));
-    if (!agent) return "";
-    // S19 MR2 (guard RE-SEAL 1e661dba supersedes the slice-17 form): the
-    // web-family runtime MARK + adjacent ctx% — no spelled runtime, no
-    // middle-dot tail; honest-unknown ctx renders —, never fabricated.
-    return `${markText(runtimeMarkSegs(agent.runtime))} ${agent.context == null ? "—" : `${agent.context}%`}`;
+    if (!agent) return null;
+    // S19 MR2 (guard RE-SEAL 1e661dba): web-family runtime MARK + adjacent
+    // ctx% — no spelled runtime, no middle-dot; honest-unknown ctx renders —.
+    const mark = runtimeMarkSegs(agent.runtime);
+    const value = ` ${agent.context == null ? "—" : `${agent.context}%`}`;
+    return { text: `${markText(mark)}${value}`, segs: [...mark, { text: value, token: "dim" }] };
   }
   if (parsed.kind === "pod") {
     const [host, rig, pod] = parsed.parts;
     const found = snap.hosts.find((h) => h.name === host)?.rigs.find((r) => r.name === rig)?.pods.find((p) => p.name === pod);
-    return found ? String(found.agents.length) : "";
+    return found ? { text: String(found.agents.length), segs: [{ text: String(found.agents.length), token: "dim" }] } : null;
   }
-  return "";
+  return null;
 }
 
 /**
- * Display labels for the explorer pane — same order, same length as `rows`.
- * Guides derive from key depth with last-sibling awareness so the vertical
- * rails read continuously (the `tree` command look).
+ * Display rows for the explorer pane — labels plus the meta seg channel
+ * (same order/length as `rows`).
  */
+export function navigatorDisplay(
+  rows: ExplorerRow[],
+  snap: FleetSnapshot,
+  width: number,
+): { labels: string[]; metas: Array<NavigatorMeta | null> } {
+  const metas: Array<NavigatorMeta | null> = [];
+  const labels = navigatorLabelsInner(rows, snap, width, metas);
+  return { labels, metas };
+}
+
+/** compat view (tests/callers that only need labels) */
 export function navigatorLabels(rows: ExplorerRow[], snap: FleetSnapshot, width: number): string[] {
+  return navigatorDisplay(rows, snap, width).labels;
+}
+
+function navigatorLabelsInner(rows: ExplorerRow[], snap: FleetSnapshot, width: number, metasOut: Array<NavigatorMeta | null>): string[] {
   const depths = rows.map((row) => keyDepth(row));
   const isLast = rows.map((_, i) => {
     const depth = depths[i]!;
@@ -123,22 +146,23 @@ export function navigatorLabels(rows: ExplorerRow[], snap: FleetSnapshot, width:
   const railOpen: boolean[] = []; // per depth level: does a later sibling exist?
   return rows.map((row, i) => {
     const depth = depths[i]!;
-    if (depth < 0) return row.label; // keyless rows untouched
-    if (depth === 0) return row.label; // section headers keep their ▾/▸ identity
+    if (depth < 0) { metasOut.push(null); return row.label; } // keyless rows untouched
+    if (depth === 0) { metasOut.push(null); return row.label; } // section headers keep their ▾/▸ identity
     railOpen[depth] = !isLast[i]!;
     const guides = Array.from({ length: depth - 1 }, (_, level) => (railOpen[level + 1] ? "│ " : "  ")).join("");
     const branch = isLast[i] ? "└─ " : "├─ ";
     const parsed = parseKey(row.key)!;
-    let content = contentOf(row, parsed);
+    const content = contentOf(row, parsed);
     const meta = metaOf(row, snap);
     const prefix = ` ${guides}${branch}`;
-    if (!meta) return `${prefix}${content}`;
-    // LOCKED width policy (guard-ruled): the complete right-aligned meta is
-    // ALWAYS preserved; an over-long display name truncates with … instead
-    // of the meta ever dropping its runtime.
-    const contentMax = width - prefix.length - meta.length - 1;
-    if (content.length > contentMax) content = `${content.slice(0, Math.max(contentMax - 1, 0))}…`;
-    const gap = Math.max(width - prefix.length - content.length - meta.length, 1);
-    return `${prefix}${content}${" ".repeat(gap)}${meta}`;
+    if (!meta) { metasOut.push(null); return `${prefix}${content}`; }
+    // S19 re-sealed width policy (guard NOT-CLEAR finding 1): the NAME renders
+    // FIRST and UNTRUNCATED — when the full name leaves no room, the META
+    // yields entirely (never an ellipsised identity).
+    const room = width - prefix.length - content.length - 1;
+    if (room < meta.text.length) { metasOut.push(null); return `${prefix}${content}`; }
+    const gap = Math.max(width - prefix.length - content.length - meta.text.length, 1);
+    metasOut.push({ start: prefix.length + content.length + gap, segs: meta.segs });
+    return `${prefix}${content}${" ".repeat(gap)}${meta.text}`;
   });
 }

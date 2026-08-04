@@ -95,7 +95,7 @@ describe("hatchet mainline in the SHIPPED content pane (frame-01 visual contract
     const body = screen.lines.join("\n");
     expect(body).toMatch(/┌─+┐/);
     expect(body).toContain("● lead"); // member-only title (S19 MR1)
-    expect(body).toContain("▟▙ 18%"); // S19 MR2: web-family mark + adjacent ctx (MR1: pod suffix gone)
+    expect(body).toContain("▐▌ 18%"); // S19 MR2: web-family mark + adjacent ctx (MR1: pod suffix gone)
     // straight connector runs + arrowhead; under the LOCKED containment an
     // edge may legitimately cross a pod-container wall (─ becomes ┼ at the
     // crossing) before its arrowhead
@@ -258,7 +258,7 @@ describe("box opacity is a CLASS invariant, not a draw-order artifact (pm kickba
       const nameInner = nameRow.match(/│([^│]*● bb\.mid[^│]*)│/);
       expect(nameInner, `${style}: name-row borders intact — got: ${nameRow}`).not.toBeNull();
       expect(nameInner![1]!, `${style}: name interior clean`).not.toMatch(/[─┼⠁-⣿]/);
-      const metaInner = metaRow.match(/│([^│]*❯_ 10%[^│]*)│/); // S19 MR2 mark meta form
+      const metaInner = metaRow.match(/│([^│]*>_ 10%[^│]*)│/); // S19 MR2 mark meta form
       expect(metaInner, `${style}: meta-row borders intact — got: ${metaRow}`).not.toBeNull();
       expect(metaInner![1]!, `${style}: meta interior clean`).not.toMatch(/[─┼⠁-⣿]/);
     }
