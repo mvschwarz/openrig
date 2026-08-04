@@ -1035,8 +1035,8 @@ Subcommands:
 - `claim <qitemId> --destination <session> [--json]` — pending → in-progress; computes closure_required_at from tier
 - `unclaim <qitemId> --destination <session> [--reason <text>] [--json]` — in-progress → pending
 - `update <qitemId> --actor <session> --state <state> [--closure-reason <r>] [--closure-target <t>] [--note <text>] [--json]`
-- `handoff <qitemId> --from <session> --to <session> [--body <text>] [--note <text>] [--priority <p>] [--tier <t>] [--tags <csv>] [--host <id>] [--json]` — transactional close-as-handed-off + create-new; v0.4.6 (OPR.0.4.6.MH3) adds `--host <id>` / the `agent@rig@host` `--to` form (§ Cross-host queue routing)
-- `handoff-and-complete <qitemId> --from <session> --to <session> [--body <text>] [--note <text>] [--priority <p>] [--tier <t>] [--tags <csv>] [--host <id>] [--json]` — variant of `handoff` that closes the source as `done` (terminal) instead of `handed-off`; same atomic close+create, chain_of_record, default-nudge, and cross-host contracts
+- `handoff <qitemId> --from <session> --to <session> [--body <text> | --body-file <path>] [--note <text>] [--priority <p>] [--tier <t>] [--tags <csv>] [--host <id>] [--json]` — transactional close-as-handed-off + create-new; v0.4.6 (OPR.0.4.6.MH3) adds `--host <id>` / the `agent@rig@host` `--to` form (§ Cross-host queue routing)
+- `handoff-and-complete <qitemId> --from <session> --to <session> [--body <text> | --body-file <path>] [--note <text>] [--priority <p>] [--tier <t>] [--tags <csv>] [--host <id>] [--json]` — variant of `handoff` that closes the source as `done` (terminal) instead of `handed-off`; same atomic close+create, chain_of_record, default-nudge, and cross-host contracts
 - `fallback <qitemId> --destination <session> [--reason <text>] [--json]` — reroute to fallback seat
 - `show <qitemId> [--json]`
 - `transitions <qitemId> [--json]` — append-only transition log
@@ -1051,11 +1051,11 @@ Subcommands:
   - The four axes (scope × history × field-breadth × encoding) are orthogonal and composable. The bare unscoped firehose that aggregated cross-rig + full-history (~64,000 tokens on the live host) is retired as a default — opt-in via `-A -a --full`.
   - Use `rig queue show <qitemId>` for the full single-item view (kubectl `describe` / docker `inspect` pattern).
 - `overdue [--json]` — in-progress qitems past closure_required_at
-- `inbox-drop <destinationSession> --sender <session> --body <text> [--tags <csv>] [--urgency <u>] [--audit <pointer>] [--id <inboxId>] [--json]`
+- `inbox-drop <destinationSession> --sender <session> (--body <text> | --body-file <path>) [--tags <csv>] [--urgency <u>] [--audit <pointer>] [--id <inboxId>] [--json]`
 - `inbox-absorb <inboxId> --receiver <session> [--json]` — promote a pending inbox entry to a queue_item
 - `inbox-deny <inboxId> --receiver <session> --reason <text> [--json]`
 - `inbox-pending <destinationSession> [--json]`
-- `outbox-record --sender <session> --destination <session> --body <text> [--tags <csv>] [--urgency <u>] [--audit <pointer>] [--id <outboxId>] [--json]`
+- `outbox-record --sender <session> --destination <session> (--body <text> | --body-file <path>) [--tags <csv>] [--urgency <u>] [--audit <pointer>] [--id <outboxId>] [--json]`
 - `outbox-list <senderSession> [--limit <n>] [--json]`
 
 Hot-potato strict-rejection (load-bearing API contract):
