@@ -163,6 +163,10 @@ export function createTestApp(
       exists: (p: string) => boolean;
       readFile: (p: string) => string;
     };
+    /** Managed Claude activity-hook delivery asset paths, forwarded to the PodRigInstantiator
+     *  (defaults to daemon-shipped assets). Tests inject fixtures to exercise the nonfatal
+     *  delivery-gap warning through the real /api/up route. */
+    claudeActivityAssets?: { relayPath?: string; manifestPath?: string };
     /**
      * Agent Starter v1 vertical M2 R2: optionally expose the in-test
      * StartupOrchestrator + PodRigInstantiator so callers can spy on
@@ -228,6 +232,7 @@ export function createTestApp(
     db, rigRepo, podRepo, sessionRegistry, eventBus, nodeLauncher,
     startupOrchestrator,
     fsOps: opts?.podInstantiatorFsOps ?? { readFile: () => "", exists: () => false },
+    claudeActivityAssets: opts?.claudeActivityAssets,
     adapters,
   });
 

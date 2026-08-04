@@ -19,10 +19,12 @@ import { describe, it, expect } from "vitest";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
+import { readFileSync, existsSync } from "node:fs";
+import { resolve as pathResolve } from "node:path";
 import { planProjection, type ProjectionPlan, type ProjectionEntry } from "../src/domain/projection-planner.js";
 import { resolveNodeConfig, type ResolutionContext } from "../src/domain/profile-resolver.js";
-import type { AgentSpec, RigSpec, RigSpecPod, RigSpecPodMember } from "../src/domain/types.js";
-import type { ResolvedAgentSpec } from "../src/domain/agent-resolver.js";
+import type { RigSpec, RigSpecPod, RigSpecPodMember } from "../src/domain/types.js";
+import { resolveAgentRef, type ResolvedAgentSpec } from "../src/domain/agent-resolver.js";
 
 const CWD = "/project";
 const RELAY_SRC = "/assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs";
@@ -272,46 +274,40 @@ describe("Claude activity-hook delivery — hardening (guard r3 findings)", () =
   }
 });
 
-// Production-altitude reachability: a profile that SELECTS shared:claude-activity-hooks
-// must produce, through the REAL resolver -> planner, a plan entry the adapter enables.
-// A hand-built plan (the suites above) is not sufficient evidence of reachability.
-describe("Claude activity-hook — real resolver -> planner -> adapter reachability", () => {
-  // Mirrors the shipped shared/agent.yaml runtime_resources declaration + a profile selecting it.
-  function specSelectingActivityHooks(): AgentSpec {
-    return {
-      version: "1.0.0", name: "test-agent", imports: [],
-      startup: { files: [], actions: [] },
-      resources: {
-        skills: [], guidance: [], subagents: [], plugins: [],
-        runtimeResources: [{ id: "claude-activity-hooks", path: "runtime/claude-activity-hooks.json", runtime: "claude-code", type: "claude_activity_hooks" }],
-      },
-      profiles: {
-        default: { uses: { skills: [], guidance: [], subagents: [], plugins: [], runtimeResources: ["claude-activity-hooks"] } },
-      },
-    } as AgentSpec;
-  }
-  const resolved = (spec: AgentSpec): ResolvedAgentSpec => ({ spec, sourcePath: "/agents/test", hash: "abc123" } as ResolvedAgentSpec);
-  const member = (): RigSpecPodMember => ({ id: "impl", agentRef: "local:agents/test", profile: "default", runtime: "claude-code", cwd: "." } as RigSpecPodMember);
+// Production-altitude reachability: the ACTUAL SHIPPED profile bytes (development/implementer,
+// which selects shared:claude-activity-hooks) must resolve — through the REAL resolveAgentRef ->
+// resolveNodeConfig -> planProjection -> adapter — to a plan entry the adapter enables. Loaded
+// from disk (not an in-memory AgentSpec) so this pins the shipped selection, not a mirror.
+describe("Claude activity-hook — REAL SHIPPED-spec resolver -> planner -> adapter reachability", () => {
+  const SHIPPED_SPECS_ROOT = pathResolve(import.meta.dirname, "../specs");
+  const realSpecFs = { readFile: (p: string) => readFileSync(p, "utf-8"), exists: (p: string) => existsSync(p) };
+  const member = (): RigSpecPodMember => ({ id: "impl", agentRef: "local:agents/development/implementer", profile: "default", runtime: "claude-code", cwd: "." } as RigSpecPodMember);
   const pod = (): RigSpecPod => ({ id: "dev", label: "Dev", members: [member()], edges: [] } as RigSpecPod);
   const rig = (): RigSpec => ({ version: "0.2", name: "test-rig", pods: [pod()], edges: [] } as RigSpec);
 
-  it("a profile selecting shared:claude-activity-hooks yields a claude_activity_hooks entry that the adapter ENABLES", async () => {
+  it("the SHIPPED development/implementer profile selects claude_activity_hooks -> plan entry -> adapter ENABLES", async () => {
+    // 1. Resolve the ACTUAL shipped agent.yaml + its shared import from disk.
+    const rr = resolveAgentRef("local:agents/development/implementer", SHIPPED_SPECS_ROOT, realSpecFs);
+    expect(rr.ok, rr.ok ? "" : `resolve failed: ${JSON.stringify(rr)}`).toBe(true);
+    if (!rr.ok) return;
     const ctx: ResolutionContext = {
-      baseSpec: resolved(specSelectingActivityHooks()), importedSpecs: [], collisions: [],
+      baseSpec: rr.resolved as ResolvedAgentSpec, importedSpecs: rr.imports, collisions: rr.collisions,
       profileName: "default", member: member(), pod: pod(), rig: rig(),
     };
-    // 1. REAL resolver
+    // 2. REAL resolver — the shipped selection resolves to a claude_activity_hooks runtime resource.
     const rc = resolveNodeConfig(ctx);
     expect(rc.ok).toBe(true);
     if (!rc.ok) return;
-    // 2. REAL planner
+    expect(rc.config.selectedResources.runtimeResources.some((qr) => (qr.resource as { type?: string }).type === "claude_activity_hooks")).toBe(true);
+    // 3. REAL planner emits the entry.
     const pr = planProjection({ config: rc.config, collisions: [], fsOps: { readFile: () => "{}", exists: () => true } });
     expect(pr.ok).toBe(true);
     if (!pr.ok) return;
     const entry = pr.plan.entries.find((e) => e.resourceType === "claude_activity_hooks");
-    expect(entry, "planner must emit a claude_activity_hooks runtime_resource entry").toBeDefined();
+    expect(entry, "planner must emit a claude_activity_hooks entry from the shipped spec").toBeDefined();
     expect(entry!.category).toBe("runtime_resource");
-    // 3. REAL adapter enables from the REAL plan
+    // 4. REAL adapter enables from the REAL plan (skill-entry projection noise is irrelevant —
+    //    the always-run reconcile delivers off the manifest DI).
     const fs = enableFs();
     await makeAdapter(fs).project(pr.plan, binding());
     expect(fs._store[RELAY_DEST]).toBe("// relay");
