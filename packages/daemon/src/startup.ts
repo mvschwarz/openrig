@@ -170,6 +170,7 @@ import { NtfyNotificationAdapter } from "./domain/mission-control/notification-a
 import { WebhookNotificationAdapter } from "./domain/mission-control/notification-adapter-webhook.js";
 import type { NotificationAdapter } from "./domain/mission-control/notification-adapter-types.js";
 import { OPENRIG_HOME } from "./openrig-compat.js";
+import { materializeBuiltinPolicyReference } from "./domain/builtin-policy-reference.js";
 import { ensureActivityHookToken, writeActivityEndpointFile, deriveActivityUrl } from "./domain/activity-endpoint.js";
 import {
   getCompatibleOpenRigPath,
@@ -1047,6 +1048,17 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       }
     }
   } catch { /* best-effort — reference docs are not critical to daemon operation */ }
+
+  // OPR.0.4.8.3 — materialize the packaged built-in policies as read-only
+  // inspection copies at $OPENRIG_HOME/reference/policies/builtin/ (same
+  // best-effort posture as the reference docs above; ../policies/builtin
+  // resolves from the compiled dist in BOTH the repo-run and assembled layouts)
+  try {
+    materializeBuiltinPolicyReference({
+      bundledDir: nodePath.resolve(import.meta.dirname, "../policies/builtin"),
+      targetDir: getDefaultOpenRigPath(nodePath.join("reference", "policies", "builtin")),
+    });
+  } catch { /* best-effort — inspection copies are not critical to daemon operation */ }
 
   // PL-004 Phase C — watchdog policy engine + scheduler. Wired here
   // (after deps construction) so the engine can dispatch deliveries

@@ -70,6 +70,13 @@ if [ -d "$DAEMON_DIR/specs" ]; then
   cp -r "$DAEMON_DIR/specs" "$CLI_DIR/daemon/specs"
 fi
 
+# Built-in policies (OPR.0.4.8.3): canonical source packages/daemon/policies/builtin/
+# ships with the daemon; startup materializes read-only inspection copies at
+# $OPENRIG_HOME/reference/policies/builtin/ (same chain as reference docs below).
+if [ -d "$DAEMON_DIR/policies" ]; then
+  cp -r "$DAEMON_DIR/policies" "$CLI_DIR/daemon/policies"
+fi
+
 # Reference docs: copy from repo root docs/reference/ into the assembled package
 if [ -d "$REPO_ROOT/docs/reference" ]; then
   mkdir -p "$CLI_DIR/daemon/docs/reference"
@@ -87,6 +94,7 @@ echo "CLI dist:        $(find "$CLI_DIR/dist" -name '*.js' | wc -l | tr -d ' ') 
 echo "Daemon dist:     $(find "$CLI_DIR/daemon/dist" -name '*.js' | wc -l | tr -d ' ') JS files"
 echo "Daemon assets:   $(find "$CLI_DIR/daemon/assets" -type f 2>/dev/null | wc -l | tr -d ' ') files"
 echo "Daemon specs:    $(find "$CLI_DIR/daemon/specs" -type f 2>/dev/null | wc -l | tr -d ' ') files"
+echo "Daemon policies: $(find "$CLI_DIR/daemon/policies" -type f 2>/dev/null | wc -l | tr -d ' ') files"
 echo "Daemon docs:     $(find "$CLI_DIR/daemon/docs" -type f 2>/dev/null | wc -l | tr -d ' ') files"
 echo "UI dist:         $(find "$CLI_DIR/ui/dist" -type f | wc -l | tr -d ' ') files"
 echo ""
