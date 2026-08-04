@@ -41,6 +41,10 @@ function readInstructionFile(filePath) {
   return fs.readFileSync(expanded, "utf8");
 }
 
+function sanitizeKey(value) {
+  return value.replace(/[^a-zA-Z0-9_.@-]/g, "_");
+}
+
 function sessionKey(input) {
   const raw = [
     process.env.OPENRIG_SESSION_NAME,
@@ -51,11 +55,63 @@ function sessionKey(input) {
     input.sessionName,
     input.transcript_path ? path.basename(input.transcript_path, ".jsonl") : "",
   ].find((value) => typeof value === "string" && value.trim().length > 0) || "unknown-session";
-  return raw.replace(/[^a-zA-Z0-9_.@-]/g, "_");
+  return sanitizeKey(raw);
+}
+
+// OPR.0.4.1.09 (rev1-r2 hook-path leak fix): MUST match claude-compaction-enforcer.ts
+// declaredSeatOf EXACTLY — a seat is authoritative ONLY inside a WELL-FORMED leading
+// frontmatter fence (opened AND closed `---`); the body is NEVER scanned; malformed/absent
+// frontmatter -> null (generic). Duplicated (not imported) because this hook is a standalone
+// portable plugin asset that cannot import the compiled daemon TS; semantics are kept
+// identical so the enforcer and hook paths refuse wrong-seat extras the same way.
+function declaredSeatOf(content) {
+  const fm = /^\s*---\s*\n([\s\S]*?)\n---/.exec(content);
+  if (!fm) return null;
+  const m = /^[ \t]*(?:target[_-]?seat|seat|session(?:[_-]?name)?)[ \t]*:[ \t]*["']?([^"'\n#]+?)["']?[ \t]*$/im.exec(fm[1]);
+  return m ? m[1].trim() : null;
+}
+
+// OPR.0.4.1.09 (rev1-r2): resolve the seat-safe EXTRA-FILE CONTENT for
+// postCompactInstruction, mirroring the enforcer resolvePostCompactExtra: (1) prefer the
+// PER-SEAT extra post-compact-extra/<seat>.md; (2) else the GLOBAL messageFilePath. In
+// EITHER case a file whose WELL-FORMED frontmatter declares a DIFFERENT seat is REFUSED
+// (returns "") so a foreign-seat extra never leaks into the marker via the hook path
+// (the enforcer path already refused it). Generic/this-seat/malformed -> inject.
+function readSeatSafeExtraFile(input, globalFilePath) {
+  const seatKey = sessionKey(input);
+  const refusedIfForeign = (content) => {
+    const declared = declaredSeatOf(content);
+    return declared && sanitizeKey(declared) !== seatKey ? "" : content;
+  };
+  // 1. Per-seat extra preferred (seat-keyed path; still defensively seat-checked to match
+  //    the enforcer, which refuses a per-seat file declaring a different seat).
+  const perSeatPath = path.join(getOpenRigHome(), "compaction", "post-compact-extra", `${seatKey}.md`);
+  if (fs.existsSync(perSeatPath)) {
+    return refusedIfForeign(fs.readFileSync(perSeatPath, "utf8"));
+  }
+  // 2. Global messageFilePath fallback, seat-checked.
+  if (!globalFilePath) return "";
+  const content = readInstructionFile(globalFilePath);
+  if (!content) return "";
+  return refusedIfForeign(content);
 }
 
 function pendingMarkerPath(input) {
   return path.join(getOpenRigHome(), "compaction", "restore-pending", `${sessionKey(input)}.json`);
+}
+
+// OPR.0.4.1.09: pointer to this seat's per-seat post-compaction extra
+// (compaction/post-compact-extra/<seat>.md), surfaced by the bridge reader.
+// Returned ONLY when it EXISTS, so the marker never points at an unresolvable
+// restoreMapPath; null otherwise.
+function perSeatRestoreMapPath(input) {
+  const p = path.join(getOpenRigHome(), "compaction", "post-compact-extra", `${sessionKey(input)}.md`);
+  try {
+    fs.accessSync(p);
+    return p;
+  } catch {
+    return null;
+  }
 }
 
 function writePendingRestoreMarker(input, parsed, restoreInstruction, customMessage) {
@@ -74,6 +130,8 @@ function writePendingRestoreMarker(input, parsed, restoreInstruction, customMess
     expectedAck: "restored from packet at <path>; resumed at step <X>",
     deliveredAt: null,
     deliveryCount: 0,
+    // OPR.0.4.1.09: per-seat restore-map pointer (post-compact-extra/<seat>.md) or null.
+    restoreMapPath: perSeatRestoreMapPath(input),
   };
   fs.writeFileSync(markerPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
   return markerPath;
@@ -86,7 +144,7 @@ function writePendingRestoreMarker(input, parsed, restoreInstruction, customMess
 // enabled but restore text has not been written yet, use OpenRig's default
 // instruction to load the canonical restore skill. Inline instructions and
 // file-path content are both included when both are configured.
-function readClaudeCompactionMessage() {
+function readClaudeCompactionMessage(input) {
   const configPath = path.join(getOpenRigHome(), "config.json");
   let inline = "";
   let filePath = "";
@@ -115,17 +173,20 @@ function readClaudeCompactionMessage() {
 
   const parts = [];
   if (inline && inline.length > 0) {
+    // Inline has no file/seat to declare; keep as-is.
     parts.push(`Inline restore instruction:\n${inline}`);
   }
-  if (filePath && filePath.length > 0) {
-    try {
-      const fileText = readInstructionFile(filePath);
-      if (fileText) {
-        parts.push(`Additional restore instruction file (${filePath}):\n${fileText}`);
-      }
-    } catch {
-      // Keep any inline instruction; unreadable extra files degrade quietly.
+  // OPR.0.4.1.09 (rev1-r2): the FILE portion is SEAT-SAFE — per-seat extra preferred, a
+  // foreign-seat global refused (mirrors the enforcer). Checked even when messageFilePath
+  // is unset, because the per-seat extra is an independent mechanism (the enforcer also
+  // checks the per-seat path regardless of the global config).
+  try {
+    const fileText = readSeatSafeExtraFile(input, filePath);
+    if (fileText) {
+      parts.push(`Additional restore instruction file:\n${fileText}`);
     }
+  } catch {
+    // Keep any inline instruction; unreadable extra files degrade quietly.
   }
   if (parts.length > 0) return parts.join("\n\n");
   if (policyEnabled && !inlineConfigured && !filePathConfigured) {
@@ -147,7 +208,7 @@ try {
     args.push(input.transcript_path);
   }
 
-  const customMessage = readClaudeCompactionMessage();
+  const customMessage = readClaudeCompactionMessage(input);
 
   const result = spawnSync("node", args, { encoding: "utf8" });
   if (result.status !== 0) {
