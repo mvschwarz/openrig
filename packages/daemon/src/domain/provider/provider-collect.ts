@@ -49,7 +49,11 @@ export function collectFourBlockReadModel(deps: ProviderCollectDeps): FourBlockR
 
   const rawBindings: RawSeatBinding[] = deps.listSeats().map((seat) => {
     const reg = registryBySeat.get(seat.seatSession);
-    if (reg) {
+    // Runtime-identity gate: bind ONLY when the LIVE inventory seat is actually a Codex seat. The
+    // codex auth-seat-registry is keyed by session name, so a STALE row whose session name was
+    // reused by a Claude seat must NOT bind that Claude seat to a Codex account — a Claude seat
+    // stays unbound (seat_with_no_account) regardless of any same-session registry row.
+    if (reg && seat.runtime === "codex") {
       return {
         accountId: reg.authProfile,
         seatSession: seat.seatSession,
@@ -58,7 +62,7 @@ export function collectFourBlockReadModel(deps: ProviderCollectDeps): FourBlockR
         bindingSource: "codex_auth_seat_registry",
       };
     }
-    // Unregistered (claude seats, and codex seats with no registry row) → unbound. The assembler
+    // Unregistered/non-codex (claude seats, codex seats with no registry row) → unbound. The assembler
     // attaches the required seat_with_no_account anomaly; we never fabricate a sentinel account.
     return {
       accountId: null,

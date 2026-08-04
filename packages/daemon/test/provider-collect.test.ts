@@ -76,4 +76,16 @@ describe("collectFourBlockReadModel — getReadModel collection seam", () => {
     const model = collectFourBlockReadModel(deps({ auth: { profiles: ["work"], seats: [] }, collectSignals: () => [sig] }));
     expect(model.signals).toEqual([sig]);
   });
+
+  it("a claude seat is NOT bound by a stale same-session Codex registry row (runtime-identity gate)", () => {
+    const model = collectFourBlockReadModel(deps({
+      auth: { profiles: ["work"], seats: [{ seat: "shared@rig", rig: "rig", runtime: "codex", cwd: "/p", authProfile: "work", updatedTs: "t1" }] },
+      // The LIVE inventory seat with this same session name is a CLAUDE seat — the codex row is stale.
+      listSeats: () => [{ seatSession: "shared@rig", rigName: "rig", runtime: "claude-code" }],
+    }));
+    expect(model.bindings).toHaveLength(1);
+    const b = model.bindings[0]!;
+    expect(b.accountId).toBeNull(); // must NOT bind to the Codex account despite the stale same-session row
+    expect(b.anomalies[0]).toMatchObject({ kind: "seat_with_no_account", seat: "shared@rig" });
+  });
 });
