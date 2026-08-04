@@ -32,10 +32,7 @@ export function claudePostureFlag(env: NodeJS.ProcessEnv = process.env): string 
  * (fresh / resume / native-fork). `profileArg` is the already-formatted ` -p <profile>` string or "".
  * - YOLO ON → ` -s danger-full-access` (maximally-permissive sandbox), overriding even a named profile.
  * - OFF + named profile → the profile (it governs its own sandbox).
- * - OFF + no profile → the EXPLICIT workspace-only floor ` -s workspace-write`. NOTE: emitting NO
- *   sandbox flag is NOT equivalent — on the installed managed runtime the no-flags default does not
- *   grant the `--add-dir` writable roots managed seats pass, so the seat fails before readiness (QA
- *   firsthand). The floor must therefore be the explicit workspace-write flag (the arch-ruled value).
+ * - OFF + no profile → OpenRig's explicit workspace-only floor ` -s workspace-write`.
  * No forced approval flag on any path — the approval flow is left to Codex, unforced.
  */
 export function codexPostureArg(profileArg: string, env: NodeJS.ProcessEnv = process.env): string {

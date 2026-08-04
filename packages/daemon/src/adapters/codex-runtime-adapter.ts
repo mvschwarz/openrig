@@ -338,9 +338,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         return { ok: false, error: "codex fork: forkSource.value is required (parent native_id)" };
       }
       // OPR.0.4.8.2: the FORK path uses the SAME posture decision (codexPostureArg) — YOLO forces
-      // -s danger-full-access on every seat; otherwise the named profile, or the explicit
-      // -s workspace-write floor flag (see codexPostureArg: the no-flags default does NOT grant the
-      // --add-dir writable roots managed seats pass, so the floor must be the explicit flag).
+      // -s danger-full-access on every seat; otherwise the named profile, or OpenRig's explicit
+      // -s workspace-write floor flag.
       const cmd = `codex${codexPostureArg(profileArg)} fork${queueStateDirArg} ${shellQuote(parentId)}`;
       const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
       if (!textResult.ok) {
@@ -362,9 +361,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
 
     // OPR.0.4.8.2: one posture decision (codexPostureArg) for the fresh launch too — YOLO forces
-    // -s danger-full-access (overrides even a named profile); otherwise the named profile, or the
-    // explicit -s workspace-write floor flag (the no-flags default does NOT grant the --add-dir
-    // writable roots this launch passes, so the floor must be the explicit workspace-write flag).
+    // -s danger-full-access (overrides even a named profile); otherwise the named profile, or
+    // OpenRig's explicit -s workspace-write floor flag.
     const cmd = opts.resumeToken
       ? buildCodexResumeCore(opts.resumeToken, profile, false, queueStateDirArg.trim() || undefined)
       : `codex${codexPostureArg(profileArg)} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`;
