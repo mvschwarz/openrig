@@ -87,6 +87,22 @@ describe("validatePolicySpec — advisory, fail-open, surface-appropriate", () =
     expect(validatePolicySpec({ source: "builtin", name: "x", surface: "sideways", policy_schema_version: 1 }).ok).toBe(false);
     expect(validatePolicySpec({ source: "builtin", name: "x", surface: "config", default_posture: "maybe", policy_schema_version: 1 }).ok).toBe(false);
   });
+
+  it("missing description → error (required field)", () => {
+    const r = validatePolicySpec({ source: "builtin", name: "x", surface: "flag", launch_posture: "floor", policy_schema_version: 1 });
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => e.includes("description"))).toBe(true);
+  });
+  it("non-string description → error", () => {
+    const r = validatePolicySpec({ source: "builtin", name: "x", surface: "flag", launch_posture: "floor", policy_schema_version: 1, description: 42 });
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => e.includes("description"))).toBe(true);
+  });
+  it("config policy MISSING an action list (destructive_class) → error (all four required)", () => {
+    const r = validatePolicySpec({ source: "builtin", name: "x", surface: "config", description: "d", default_posture: "allow", policy_schema_version: 1, allow: [], ask: [], deny: [] });
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => e.includes("destructive_class"))).toBe(true);
+  });
 });
 
 describe("round-trip — canonical serialize stability + semantic equality + body preservation", () => {
