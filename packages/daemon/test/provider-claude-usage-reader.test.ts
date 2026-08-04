@@ -13,7 +13,7 @@ const ASOF = "2026-08-04T00:00:00.000Z";
 const CACHE_ASOF = "2026-08-03T12:00:00.000Z";
 
 function readerDeps(over: Partial<ClaudeUsageReaderDeps>): ClaudeUsageReaderDeps {
-  return { listClaudeAccounts: () => [], readCacheRaw: () => null, now: () => ASOF, ...over };
+  return { listClaudeSeats: () => [], readCacheRaw: () => null, now: () => ASOF, ...over };
 }
 
 describe("writeProviderUsageCacheAtomic — tmp+rename (no torn read)", () => {
@@ -24,7 +24,7 @@ describe("writeProviderUsageCacheAtomic — tmp+rename (no torn read)", () => {
       writeFile: (p) => ops.push(`write:${p}`),
       rename: (from, to) => ops.push(`rename:${from}->${to}`),
     };
-    const cache: ProviderUsageCache = { accountRef: "acct", accountKind: "subscription", asOf: CACHE_ASOF };
+    const cache: ProviderUsageCache = { seatSession: "dev-impl@rig", asOf: CACHE_ASOF };
     writeProviderUsageCacheAtomic(fs, "/cache/acct.json", cache);
     expect(ops).toHaveLength(2);
     expect(ops[0]!.startsWith("write:/cache/acct.json.tmp-")).toBe(true); // tmp, NOT the target
@@ -37,50 +37,44 @@ describe("writeProviderUsageCacheAtomic — tmp+rename (no torn read)", () => {
 describe("collectClaudeStatuslineSignals — reader → provider_statusline / explicit unknown", () => {
   it("absent cache (pre-first-response) → explicit unknown(no_statusline_cache_yet)", () => {
     const sigs = collectClaudeStatuslineSignals(readerDeps({
-      listClaudeAccounts: () => [{ accountRef: "sub", accountKind: "subscription" }],
+      listClaudeSeats: () => [{ seatSession: "dev-impl@rig" }],
       readCacheRaw: () => null,
     }));
     expect(sigs).toHaveLength(1);
     expect(sigs[0]!.sourceClass).toBe("unknown");
     expect(sigs[0]!.unknownReason).toBe(CLAUDE_UNKNOWN_REASON.no_statusline_cache_yet);
     expect(sigs[0]!.usedPercent).toBeUndefined(); // never a fabricated zero
-  });
-
-  it("api_key account → explicit unknown(api_key_no_subscription_windows) even if a cache exists", () => {
-    const sigs = collectClaudeStatuslineSignals(readerDeps({
-      listClaudeAccounts: () => [{ accountRef: "key", accountKind: "api_key" }],
-      readCacheRaw: () => JSON.stringify({ accountRef: "key", accountKind: "api_key", asOf: CACHE_ASOF }),
-    }));
-    expect(sigs).toHaveLength(1);
-    expect(sigs[0]!.unknownReason).toBe(CLAUDE_UNKNOWN_REASON.api_key_no_subscription_windows);
+    expect(sigs[0]!.seatSession).toBe("dev-impl@rig");
+    expect(sigs[0]!.accountRef).toBeUndefined();
   });
 
   it("subscription + windows → provider_statusline rows (five_hour + weekly), asOf = the cache's asOf", () => {
     const cache: ProviderUsageCache = {
-      accountRef: "sub", accountKind: "subscription", asOf: CACHE_ASOF,
+      seatSession: "dev-impl@rig", accountKind: "subscription", asOf: CACHE_ASOF,
       rateLimits: { five_hour: { usedPercent: 42, resetsAt: "2026-08-03T17:00:00Z" }, seven_day: { usedPercent: 10, resetsAt: "2026-08-10T00:00:00Z" } },
     };
     const sigs = collectClaudeStatuslineSignals(readerDeps({
-      listClaudeAccounts: () => [{ accountRef: "sub", accountKind: "subscription" }],
+      listClaudeSeats: () => [{ seatSession: "dev-impl@rig" }],
       readCacheRaw: () => JSON.stringify(cache),
     }));
     expect(sigs.every((s) => s.sourceClass === "provider_statusline")).toBe(true);
     expect(sigs.every((s) => s.asOf === CACHE_ASOF)).toBe(true); // captured-at, not now
     expect(sigs.map((s) => s.window).sort()).toEqual(["five_hour", "weekly"]);
     expect(sigs.find((s) => s.window === "five_hour")!.usedPercent).toBe(42);
+    expect(sigs.every((s) => s.seatSession === "dev-impl@rig" && s.accountRef === undefined)).toBe(true);
   });
 
   it("cache present but no rate_limits → explicit unknown(empty_reading)", () => {
     const sigs = collectClaudeStatuslineSignals(readerDeps({
-      listClaudeAccounts: () => [{ accountRef: "sub", accountKind: "subscription" }],
-      readCacheRaw: () => JSON.stringify({ accountRef: "sub", accountKind: "subscription", asOf: CACHE_ASOF }),
+      listClaudeSeats: () => [{ seatSession: "dev-impl@rig" }],
+      readCacheRaw: () => JSON.stringify({ seatSession: "dev-impl@rig", asOf: CACHE_ASOF }),
     }));
     expect(sigs[0]!.unknownReason).toBe(CLAUDE_UNKNOWN_REASON.empty_reading);
   });
 
   it("malformed cache JSON → unknown(empty_reading), never throws", () => {
     const sigs = collectClaudeStatuslineSignals(readerDeps({
-      listClaudeAccounts: () => [{ accountRef: "sub", accountKind: "subscription" }],
+      listClaudeSeats: () => [{ seatSession: "dev-impl@rig" }],
       readCacheRaw: () => "{ not json",
     }));
     expect(sigs[0]!.sourceClass).toBe("unknown");

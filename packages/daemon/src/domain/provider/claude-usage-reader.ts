@@ -1,8 +1,8 @@
 // Slice-04 (OPR.0.5.0.4) seam C3 — the Claude statusline provider_usage cache LANE.
-// A statusline sidecar writes a per-account provider_usage cache with an atomic tmp+rename (so a
+// A statusline sidecar writes a per-seat provider_usage cache with an atomic tmp+rename (so a
 // concurrent daemon read never sees a torn file); the daemon reads it here and normalizes it into
 // provider_statusline signal rows via the existing claudeStatuslineSignals. Absent cache
-// (pre-first-response), api_key accounts, and empty/malformed readings each become an EXPLICIT
+// (pre-first-response) and empty/malformed readings each become an EXPLICIT
 // unknown row with an unknownReason — never a missing row and never a fabricated zero. Never throws.
 //
 // SCOPE: this atom is the cache producer/reader + collectSignals wiring ONLY. It does not touch the
@@ -20,8 +20,9 @@ export interface ProviderUsageCacheFs {
 
 /** The on-disk provider_usage cache shape (authored by the Claude statusline sidecar). */
 export interface ProviderUsageCache {
-  accountRef: string;
-  accountKind: "subscription" | "api_key";
+  seatSession: string;
+  /** Present only when the statusline carried valid Pro/Max rate_limits. */
+  accountKind?: "subscription";
   asOf: string;
   /** Present only when the statusline carried a rate_limits object. */
   rateLimits?: ClaudeStatuslineReading;
@@ -43,39 +44,40 @@ export function writeProviderUsageCacheAtomic(
   fs.rename(tmp, path);
 }
 
-export interface ClaudeAccountRef {
-  accountRef: string;
-  accountKind: "subscription" | "api_key";
+export interface ClaudeSeatRef {
+  seatSession: string;
 }
 
 export interface ClaudeUsageReaderDeps {
-  /** The Claude accounts to read provider_usage for. */
-  listClaudeAccounts: () => ClaudeAccountRef[];
-  /** Raw cache JSON for an account, or null if the cache file is absent (pre-first-response). Never throws. */
-  readCacheRaw: (accountRef: string) => string | null;
+  /** The live Claude seats to read provider_usage for. */
+  listClaudeSeats: () => ClaudeSeatRef[];
+  /** Raw cache JSON for a seat, or null if the cache file is absent (pre-first-response). Never throws. */
+  readCacheRaw: (seatSession: string) => string | null;
   now: () => string;
 }
 
 /**
- * Read each Claude account's provider_usage cache → provider_statusline rows via
- * claudeStatuslineSignals. Explicit unknown rows for: api_key (no subscription windows), absent
- * cache (no_statusline_cache_yet), and cache-present-but-no/-malformed windows (empty_reading).
+ * Read each Claude seat's provider_usage cache → provider_statusline rows via
+ * claudeStatuslineSignals. Explicit unknown rows for absent cache (no_statusline_cache_yet) and
+ * cache-present-but-no/-malformed windows (empty_reading).
  * Never throws — a malformed cache is treated as present-with-no-windows, not a crash.
  */
 export function collectClaudeStatuslineSignals(deps: ClaudeUsageReaderDeps): ProviderSignal[] {
   const now = deps.now();
   const out: ProviderSignal[] = [];
-  for (const acct of deps.listClaudeAccounts()) {
+  for (const seat of deps.listClaudeSeats()) {
     let cachePresent = false;
     let reading: ClaudeStatuslineReading | undefined;
     let staleAfter: string | undefined;
     let capturedAsOf: string | undefined;
-    const raw = deps.readCacheRaw(acct.accountRef);
+    const raw = deps.readCacheRaw(seat.seatSession);
     if (raw !== null) {
       cachePresent = true;
       try {
         const parsed = JSON.parse(raw) as Partial<ProviderUsageCache>;
-        reading = parsed.rateLimits;
+        if (parsed.seatSession === seat.seatSession && parsed.accountKind === "subscription") {
+          reading = validRateLimits(parsed.rateLimits);
+        }
         staleAfter = parsed.staleAfter;
         capturedAsOf = typeof parsed.asOf === "string" ? parsed.asOf : undefined;
       } catch {
@@ -85,8 +87,7 @@ export function collectClaudeStatuslineSignals(deps: ClaudeUsageReaderDeps): Pro
     }
     out.push(
       ...claudeStatuslineSignals({
-        accountRef: acct.accountRef,
-        accountKind: acct.accountKind,
+        seatSession: seat.seatSession,
         cachePresent,
         reading,
         // Signal asOf = when the reading was captured (the cache's asOf) when present+valid; else now.
@@ -96,4 +97,20 @@ export function collectClaudeStatuslineSignals(deps: ClaudeUsageReaderDeps): Pro
     );
   }
   return out;
+}
+
+function validRateLimits(value: unknown): ClaudeStatuslineReading | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  const reading: ClaudeStatuslineReading = {};
+  for (const key of ["five_hour", "seven_day"] as const) {
+    const raw = source[key];
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const window = raw as Record<string, unknown>;
+    if (typeof window.usedPercent === "number" && Number.isFinite(window.usedPercent)
+      && typeof window.resetsAt === "string") {
+      reading[key] = { usedPercent: window.usedPercent, resetsAt: window.resetsAt };
+    }
+  }
+  return reading.five_hour || reading.seven_day ? reading : undefined;
 }

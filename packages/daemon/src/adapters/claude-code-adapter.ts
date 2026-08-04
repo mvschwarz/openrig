@@ -714,6 +714,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private provisionContextCollector(binding: { cwd?: string | null; tmuxSession?: string | null }): void {
     if (!this.stateDir || !this.collectorAssetPath || !binding.cwd) return;
     const contextDir = nodePath.join(this.stateDir, "context");
+    const providerUsageDir = nodePath.join(this.stateDir, "provider-usage");
+    this.fs.mkdirp(providerUsageDir);
 
     // 1. Copy collector script to project
     const collectorDest = nodePath.join(binding.cwd, ".openrig", "context-collector.cjs");
@@ -726,7 +728,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     const existing = this.readJsonObject(settingsPath);
 
-    const collectorCmd = `node ${collectorDest} ${contextDir}`;
+    const collectorCmd = `node ${collectorDest} ${contextDir} ${providerUsageDir}`;
     existing["statusLine"] = {
       ...(typeof existing["statusLine"] === "object" && existing["statusLine"] !== null ? existing["statusLine"] as Record<string, unknown> : {}),
       type: "command",

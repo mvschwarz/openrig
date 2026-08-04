@@ -3,12 +3,13 @@
 // Reads Claude status line JSON from stdin, extracts context window data,
 // and writes atomically to a sidecar file.
 //
-// Usage: node claude-statusline-context.js <sidecar-output-path-or-dir>
+// Usage: node claude-statusline-context.js <context-output-path-or-dir> [provider-usage-dir]
 
 const fs = require("fs");
 const path = require("path");
 
 const outputTarget = process.argv[2];
+const providerUsageTarget = process.argv[3];
 if (!outputTarget) {
   process.exit(0); // No output path — silently exit
 }
@@ -51,14 +52,22 @@ process.stdin.on("end", () => {
       process.exit(0);
     }
 
-    // Atomic write: write to .tmp then rename
-    const tmpPath = outputPath + ".tmp";
-    const dir = path.dirname(outputPath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+    writeJsonAtomic(outputPath, sample);
+
+    if (providerUsageTarget) {
+      const providerUsagePath = resolveOutputPath(providerUsageTarget, raw);
+      if (!providerUsagePath) {
+        logFailure("could not resolve provider_usage output path from Claude status line payload");
+        process.exit(0);
+      }
+      const rateLimits = normalizeRateLimits(raw.rate_limits);
+      const providerUsage = {
+        seatSession: raw.session_name || raw.session_id,
+        asOf: new Date().toISOString(),
+        ...(rateLimits ? { accountKind: "subscription", rateLimits } : {}),
+      };
+      writeJsonAtomic(providerUsagePath, providerUsage);
     }
-    fs.writeFileSync(tmpPath, JSON.stringify(sample), "utf-8");
-    fs.renameSync(tmpPath, outputPath);
   } catch (error) {
     logFailure("failed to collect Claude context status line", error);
     process.exit(0);
@@ -77,4 +86,27 @@ function resolveOutputPath(target, raw) {
 
   const safe = String(sessionKey).replace(/[^a-zA-Z0-9@._-]/g, "_");
   return path.join(target, safe + ".json");
+}
+
+function normalizeRateLimits(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const result = {};
+  for (const key of ["five_hour", "seven_day"]) {
+    const window = value[key];
+    if (!window || typeof window !== "object" || Array.isArray(window)) continue;
+    if (typeof window.used_percentage !== "number" || !Number.isFinite(window.used_percentage)
+      || typeof window.resets_at !== "string") continue;
+    result[key] = { usedPercent: window.used_percentage, resetsAt: window.resets_at };
+  }
+  return result.five_hour || result.seven_day ? result : null;
+}
+
+function writeJsonAtomic(outputPath, value) {
+  const tmpPath = outputPath + ".tmp";
+  const dir = path.dirname(outputPath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  fs.writeFileSync(tmpPath, JSON.stringify(value), "utf-8");
+  fs.renameSync(tmpPath, outputPath);
 }

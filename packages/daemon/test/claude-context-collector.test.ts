@@ -18,6 +18,10 @@ const VALID_STATUS_LINE = JSON.stringify({
   session_id: "sess-123",
   session_name: "dev-impl@test",
   transcript_path: "/tmp/transcripts/test.log",
+  rate_limits: {
+    five_hour: { used_percentage: 42, resets_at: "2026-08-04T15:00:00.000Z" },
+    seven_day: { used_percentage: 7, resets_at: "2026-08-10T00:00:00.000Z" },
+  },
 });
 
 describe("Claude Status Line Collector Script", () => {
@@ -80,6 +84,30 @@ describe("Claude Status Line Collector Script", () => {
     const content = JSON.parse(readFileSync(sessionSidecar, "utf-8"));
     expect(content.session_name).toBe("dev-impl@test");
     expect(content.context_window.used_percentage).toBe(67);
+  });
+
+  it("writes a seat-keyed subscription provider_usage cache atomically from rate_limits", () => {
+    const contextDir = join(tmpDir, "context");
+    const usageDir = join(tmpDir, "provider-usage");
+    const result = spawnSync("node", [collectorPath, contextDir, usageDir], {
+      encoding: "utf-8",
+      input: VALID_STATUS_LINE,
+    });
+
+    expect(result.status).toBe(0);
+    const cachePath = join(usageDir, "dev-impl@test.json");
+    expect(existsSync(cachePath)).toBe(true);
+    expect(existsSync(cachePath + ".tmp")).toBe(false);
+    const cache = JSON.parse(readFileSync(cachePath, "utf-8"));
+    expect(cache).toMatchObject({
+      seatSession: "dev-impl@test",
+      accountKind: "subscription",
+      rateLimits: {
+        five_hour: { usedPercent: 42, resetsAt: "2026-08-04T15:00:00.000Z" },
+        seven_day: { usedPercent: 7, resetsAt: "2026-08-10T00:00:00.000Z" },
+      },
+    });
+    expect(cache.accountRef).toBeUndefined();
   });
 
   // T3b: No output path arg — silent exit
@@ -159,6 +187,8 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     expect(settings.statusLine.type).toBe("command");
     expect(settings.statusLine.command).toContain("context-collector.cjs");
     expect(settings.statusLine.command).toContain(join(tmpDir, "context"));
+    expect(settings.statusLine.command).toContain(join(tmpDir, "provider-usage"));
+    expect(dirsMade).toContain(join(tmpDir, "provider-usage"));
   });
 
   // T5: deliverStartup copies collector script to project

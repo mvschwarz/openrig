@@ -125,9 +125,8 @@ export interface ClaudeStatuslineReading {
 }
 
 export interface ClaudeSignalInput {
-  accountRef: string;
-  /** API-key accounts never emit subscription windows (Pro/Max only). */
-  accountKind: "subscription" | "api_key";
+  /** Claude statusline carries session identity but no honest account identity (Option A). */
+  seatSession: string;
   /** false = the statusline cache has not been written yet (before the first API response). */
   cachePresent: boolean;
   /** Present only when the cache exists and carried a rate_limits object. */
@@ -137,20 +136,19 @@ export interface ClaudeSignalInput {
 }
 
 export const CLAUDE_UNKNOWN_REASON = {
-  api_key_no_subscription_windows: "claude_api_key_no_subscription_windows",
   no_statusline_cache_yet: "claude_no_statusline_cache_yet",
   empty_reading: "claude_statusline_cache_had_no_windows",
 } as const;
 
 function claudeUnknownSignal(
-  accountRef: string,
+  seatSession: string,
   asOf: string,
   unknownReason: string,
   staleAfter?: string,
 ): ProviderSignal {
   return {
     provider: "claude",
-    accountRef,
+    seatSession,
     sourceClass: "unknown",
     authority: "unknown",
     asOf,
@@ -164,22 +162,16 @@ function claudeUnknownSignal(
 
 /**
  * Normalize a Claude statusline `rate_limits` reading into `signals[]` rows.
- * - API-key account → explicit unknown row (no subscription windows exist).
- * - subscription before first response (no cache) → explicit unknown row.
- * - subscription with windows → one `provider_statusline` row per window (five_hour, and
+ * - seat before first response (no cache) → explicit unknown row.
+ * - seat with subscription windows → one `provider_statusline` row per window (five_hour, and
  *   seven_day normalized to "weekly"); a genuine 0 survives as 0.
  * - subscription with cache but no windows → explicit unknown row (never fabricated zeros).
  */
 export function claudeStatuslineSignals(input: ClaudeSignalInput): ProviderSignal[] {
-  const { accountRef, accountKind, cachePresent, reading, asOf, staleAfter } = input;
+  const { seatSession, cachePresent, reading, asOf, staleAfter } = input;
 
-  if (accountKind === "api_key") {
-    return [
-      claudeUnknownSignal(accountRef, asOf, CLAUDE_UNKNOWN_REASON.api_key_no_subscription_windows, staleAfter),
-    ];
-  }
   if (!cachePresent) {
-    return [claudeUnknownSignal(accountRef, asOf, CLAUDE_UNKNOWN_REASON.no_statusline_cache_yet, staleAfter)];
+    return [claudeUnknownSignal(seatSession, asOf, CLAUDE_UNKNOWN_REASON.no_statusline_cache_yet, staleAfter)];
   }
 
   const windows: Array<["five_hour" | "weekly", ClaudeStatuslineWindow | undefined]> = [
@@ -192,7 +184,7 @@ export function claudeStatuslineSignals(input: ClaudeSignalInput): ProviderSigna
     if (!w) continue;
     rows.push({
       provider: "claude",
-      accountRef,
+      seatSession,
       sourceClass: "provider_statusline",
       authority: "account_cross_device", // Claude.ai Pro/Max subscription windows are account-level
       window,
@@ -206,7 +198,7 @@ export function claudeStatuslineSignals(input: ClaudeSignalInput): ProviderSigna
   }
 
   if (rows.length === 0) {
-    return [claudeUnknownSignal(accountRef, asOf, CLAUDE_UNKNOWN_REASON.empty_reading, staleAfter)];
+    return [claudeUnknownSignal(seatSession, asOf, CLAUDE_UNKNOWN_REASON.empty_reading, staleAfter)];
   }
   return rows;
 }

@@ -9,6 +9,7 @@
 
 import type { CodexAuthMetadata } from "./codex-auth-reader.js";
 import { assembleFourBlock, type RawSeatBinding } from "./provider-read-model.js";
+import { claudeStatuslineSignals } from "./provider-signals.js";
 import type { FourBlockReadModel, ProviderAccount, ProviderSignal } from "./provider-types.js";
 
 /** One seat in the fleet (the universe to bind), sourced from node-inventory across rigs. */
@@ -32,6 +33,7 @@ export interface ProviderCollectDeps {
 export function collectFourBlockReadModel(deps: ProviderCollectDeps): FourBlockReadModel {
   const asOf = deps.now();
   const { profiles, seats } = deps.readCodexAuth();
+  const seatUniverse = deps.listSeats();
 
   // accounts[] — one row per known codex profile. BR-3: authState is "unknown" (validate-at-use);
   // static disk presence proves the profile exists, NOT that its auth is currently valid.
@@ -47,7 +49,7 @@ export function collectFourBlockReadModel(deps: ProviderCollectDeps): FourBlockR
   // seat session → codex-auth registry row (the only binding source in this seam).
   const registryBySeat = new Map(seats.map((s) => [s.seat, s]));
 
-  const rawBindings: RawSeatBinding[] = deps.listSeats().map((seat) => {
+  const rawBindings: RawSeatBinding[] = seatUniverse.map((seat) => {
     const reg = registryBySeat.get(seat.seatSession);
     // Runtime-identity gate: bind ONLY when the LIVE inventory seat is actually a Codex seat. The
     // codex auth-seat-registry is keyed by session name, so a STALE row whose session name was
@@ -73,6 +75,15 @@ export function collectFourBlockReadModel(deps: ProviderCollectDeps): FourBlockR
     };
   });
 
-  const signals = deps.collectSignals ? deps.collectSignals() : [];
+  const signals = deps.collectSignals ? [...deps.collectSignals()] : [];
+  const signaledClaudeSeats = new Set(
+    signals.filter((signal) => signal.provider === "claude" && signal.seatSession).map((signal) => signal.seatSession!),
+  );
+  // Cache discovery is never the seat-discovery authority. Every live Claude seat must have a
+  // row even before its first statusline payload (or when its cache is malformed/absent).
+  for (const seat of seatUniverse) {
+    if (seat.runtime !== "claude-code" || signaledClaudeSeats.has(seat.seatSession)) continue;
+    signals.push(...claudeStatuslineSignals({ seatSession: seat.seatSession, cachePresent: false, asOf }));
+  }
   return assembleFourBlock({ accounts, rawBindings, signals, asOf });
 }

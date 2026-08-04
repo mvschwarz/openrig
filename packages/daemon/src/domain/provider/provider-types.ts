@@ -101,7 +101,10 @@ export type AutomationUse = "allow_switch_decision" | "advisory_only" | "do_not_
  */
 export interface ProviderSignal {
   provider: ProviderKind;
-  accountRef: string; // opaque account ref (BR-6)
+  /** Opaque account ref (BR-6). Claude statusline rows omit it: that surface exposes no account identity. */
+  accountRef?: string;
+  /** Runtime seat identity for seat-keyed lanes such as Claude statusline provider_usage. */
+  seatSession?: string;
   sourceClass: SignalSourceClass;
   authority: SignalAuthority;
   window?: SignalWindow;

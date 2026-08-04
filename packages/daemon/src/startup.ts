@@ -95,7 +95,7 @@ import { WhoamiService } from "./domain/whoami-service.js";
 import { NodeCmuxService } from "./domain/node-cmux-service.js";
 import { createAppWithWebSocket, type AppDeps } from "./server.js";
 import { ProviderServiceImpl } from "./domain/provider/provider-service-impl.js";
-import { collectClaudeStatuslineSignals, type ClaudeAccountRef } from "./domain/provider/claude-usage-reader.js";
+import { collectClaudeStatuslineSignals, type ClaudeSeatRef } from "./domain/provider/claude-usage-reader.js";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -843,30 +843,31 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     snapshotRepo,
     // Slice-04 OPR.0.5.0.4: production provider service — getReadModel over the codex-auth reader
     // + node-inventory across rigs; precheck via the pure gate; switch honest-interim (D seam).
-    // C3: the Claude statusline provider_usage cache lane — accounts + readings discovered from the
-    // atomically-written cache dir; the reader normalizes to provider_statusline / explicit-unknown.
+    // C3: the Claude statusline provider_usage cache lane. Cache files are seat-keyed and the
+    // reader normalizes valid subscription windows. Live-seat fallback is owned by provider-collect.
     providerService: new ProviderServiceImpl({
       db,
       listRigs: () => rigRepo.listRigs(),
       collectClaudeSignals: () => {
         const dir = nodePath.join(OPENRIG_HOME, "provider-usage");
-        const readCacheRaw = (ref: string): string | null => {
-          try { return fs.readFileSync(nodePath.join(dir, `${ref}.json`), "utf-8"); } catch { return null; }
+        const readCacheRaw = (seatSession: string): string | null => {
+          const safe = seatSession.replace(/[^a-zA-Z0-9@._-]/g, "_");
+          try { return fs.readFileSync(nodePath.join(dir, `${safe}.json`), "utf-8"); } catch { return null; }
         };
-        const accounts: ClaudeAccountRef[] = [];
+        const seats = new Map<string, ClaudeSeatRef>();
         try {
           for (const f of fs.readdirSync(dir)) {
             if (!f.endsWith(".json")) continue;
             try {
-              const p = JSON.parse(fs.readFileSync(nodePath.join(dir, f), "utf-8")) as { accountRef?: unknown; accountKind?: unknown };
-              if (typeof p.accountRef === "string" && (p.accountKind === "subscription" || p.accountKind === "api_key")) {
-                accounts.push({ accountRef: p.accountRef, accountKind: p.accountKind });
+              const p = JSON.parse(fs.readFileSync(nodePath.join(dir, f), "utf-8")) as { seatSession?: unknown };
+              if (typeof p.seatSession === "string") {
+                seats.set(p.seatSession, { seatSession: p.seatSession });
               }
             } catch { /* skip malformed cache file */ }
           }
-        } catch { /* absent cache dir → no claude accounts yet */ }
+        } catch { /* absent cache dir → live-seat fallback supplies explicit unknown rows */ }
         return collectClaudeStatuslineSignals({
-          listClaudeAccounts: () => accounts,
+          listClaudeSeats: () => [...seats.values()],
           readCacheRaw,
           now: () => new Date().toISOString(),
         });
