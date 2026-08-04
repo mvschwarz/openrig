@@ -274,8 +274,10 @@ export class SeatHandoverService {
     //    READY agent (§2.1b seam, B1): createSession -> resolve pane -> real
     //    runtime startup (launchHarness + readiness) -> upsertDiscoveredSession.
     //    The successor is a live agent, not a bare shell, before it can commit.
+    const successorPosture = this.rigRepo.getNodePolicyProvenance(node.id)?.launchPosture;
     const launch = await this.successorLauncher.createSuccessor({
-      node: { id: node.id, runtime: node.runtime, cwd: node.cwd },
+      // Seam B: the successor is the SAME seat continuing — persisted policy posture carries.
+      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, ...(successorPosture ? { launchPosture: successorPosture } : {}) },
       departingSessionName: latestSession.session_name,
     });
     if (!launch.ok) {

@@ -38,6 +38,10 @@ export interface SuccessorNode {
   id: string;
   runtime: string | null;
   cwd: string | null;
+  /** OPR.0.4.8.3 Seam B: the departing seat's PERSISTED resolved launch posture —
+   *  the successor is a CONTINUITY edge of the same seat, so its policy posture
+   *  carries (populated by the caller from node provenance; absent = env decision). */
+  launchPosture?: "floor" | "full_bypass";
 }
 
 export type SuccessorLaunchResult =
@@ -250,6 +254,8 @@ export class SuccessorSessionLauncher {
       cmuxSurface: null,
       updatedAt: "",
       cwd: cwd ?? "",
+      // Seam B: continuity — the successor launches at the departing seat's posture.
+      ...(node.launchPosture ? { launchPosture: node.launchPosture } : {}),
     };
 
     let launch: Awaited<ReturnType<RuntimeAdapter["launchHarness"]>>;

@@ -68,6 +68,9 @@ interface ForkSourceShape {
   profile: string | null;
   cwd: string | null;
   codexConfigProfile: string | null;
+  /** OPR.0.4.8.3 Seam B: the source seat's raw permission_policy ref — a forked/imaged
+   *  successor preserves the source's policy attachment (preflight surface 2). */
+  permissionPolicy: string | null;
 }
 
 function resolveForkSourceNode(db: Database.Database, sourceSession: string): ForkSourceShape | null {
@@ -86,6 +89,7 @@ function resolveForkSourceNode(db: Database.Database, sourceSession: string): Fo
     profile: (row["profile"] as string | null) ?? null,
     cwd: (row["cwd"] as string | null) ?? null,
     codexConfigProfile: (row["codex_config_profile"] as string | null) ?? null,
+    permissionPolicy: (row["permission_policy"] as string | null) ?? null,
   };
 }
 
@@ -254,6 +258,7 @@ export function agentImagesRoutes(deps: AgentImageRoutesDeps): Hono {
       ...(source.profile ? { profile: source.profile } : {}),
       ...(source.cwd ? { cwd: source.cwd } : {}),
       ...(source.codexConfigProfile ? { codex_config_profile: source.codexConfigProfile } : {}),
+      ...(source.permissionPolicy ? { permission_policy: source.permissionPolicy } : {}),
       session_source: sessionSource,
     };
 

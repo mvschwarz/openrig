@@ -213,11 +213,14 @@ export class RigRepository {
     resolvedTarget: string | null;
     declaringDir: string | null;
     launchPosture: "floor" | "full_bypass";
+    /** The node's own raw ref (member-level; null when the attachment came from the rig). */
+    nodeRef: string | null;
   } | null {
     if (!this.hasNodeColumn("policy_launch_posture")) return null;
     const row = this.db.prepare(
-      "SELECT policy_origin, policy_resolved_target, policy_declaring_dir, policy_launch_posture FROM nodes WHERE id = ?",
+      "SELECT permission_policy, policy_origin, policy_resolved_target, policy_declaring_dir, policy_launch_posture FROM nodes WHERE id = ?",
     ).get(nodeId) as {
+      permission_policy: string | null;
       policy_origin: string | null;
       policy_resolved_target: string | null;
       policy_declaring_dir: string | null;
@@ -229,6 +232,7 @@ export class RigRepository {
       resolvedTarget: row.policy_resolved_target,
       declaringDir: row.policy_declaring_dir,
       launchPosture: row.policy_launch_posture as "floor" | "full_bypass",
+      nodeRef: row.permission_policy,
     };
   }
 

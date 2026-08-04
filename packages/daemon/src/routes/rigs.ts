@@ -127,6 +127,12 @@ function normalizeExpansionPodFragment(raw: Record<string, unknown>): ExpansionP
               : undefined,
         cwd: typeof m["cwd"] === "string" ? m["cwd"] : undefined,
         model: typeof m["model"] === "string" ? m["model"] : undefined,
+        permissionPolicy:
+          typeof m["permissionPolicy"] === "string"
+            ? m["permissionPolicy"]
+            : typeof m["permission_policy"] === "string"
+              ? m["permission_policy"]
+              : undefined,
         restorePolicy:
           typeof m["restorePolicy"] === "string"
             ? m["restorePolicy"]
