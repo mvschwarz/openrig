@@ -1249,7 +1249,8 @@ export class RestoreOrchestrator {
    *   2. No provenance (e.g. organic claim/self-attach seats): the persisted RIG-level ref
    *      resolves — builtin refs resolve dirlessly; a custom rig ref without provenance
    *      degrades to the resolver's advisory floor (honest absence of a declaring dir).
-   *   3. Nothing attached → undefined (the env-driven 0.4.8.2 decision, unchanged).
+   *   3. Nothing attached (or a resolution error) → EXPLICIT "floor" — the locked
+   *      minimum-floor absence contract; never undefined/env-delegation for managed seats.
    */
   private resolveRestorePosture(nodeId: string, rigId: string): "floor" | "full_bypass" {
     try {
