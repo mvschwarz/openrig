@@ -304,6 +304,22 @@ describe("Claude activity-hook delivery — ownership round-trips shellQuote (ap
     const disabled = fs._store[settingsPath] ? JSON.parse(fs._store[settingsPath]!) : {};
     expect(allCommands(disabled).filter((c) => c.includes(OWNED_MARKER)), "no dangling owned hook").toEqual([]);
   });
+
+  it("PRESERVES a user multi-arg command whose LAST arg ends in the relay suffix (not one owned token)", async () => {
+    // Both of these are USER commands: node <user-arg> <relay-path>. Neither is a single
+    // canonical shellQuote token, so ownership must NOT claim (and delete) them.
+    const userSingle = `node 'user-arg' ${shellQuote("/tmp/.openrig/hooks/scripts/activity-relay.cjs")}`;
+    const userDouble = `node "user-arg" "/tmp/.openrig/hooks/scripts/activity-relay.cjs"`;
+    const seeded = JSON.stringify({ hooks: { Stop: [{ hooks: [
+      { type: "command", command: userSingle, timeout: 3 },
+      { type: "command", command: userDouble, timeout: 3 },
+    ] }] } });
+    const fs = enableFs({ [SETTINGS]: seeded });
+    await makeAdapter(fs).project(plan([]), binding()); // disable exercises the strip
+    const cmds = allCommands(readSettings(fs));
+    expect(cmds, "single-quoted multi-arg user command preserved").toContain(userSingle);
+    expect(cmds, "double-quoted multi-arg user command preserved").toContain(userDouble);
+  });
 });
 
 // Production-altitude reachability: the ACTUAL SHIPPED profile bytes (development/implementer,

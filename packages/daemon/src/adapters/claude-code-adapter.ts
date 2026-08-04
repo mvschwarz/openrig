@@ -860,26 +860,25 @@ function isOwnedRelayCommand(cmd: string | undefined): boolean {
   if (!cmd) return false;
   const m = /^node\s+(.+)$/.exec(cmd.trim());
   if (!m) return false;
-  // Ownership must ROUND-TRIP the writer: the command is `node ${shellQuote(relayDest)}`, and
-  // shellQuote escapes an embedded ' as '"'"', so a cwd containing an apostrophe (O'Brien) must be
-  // DECODED back to the literal path before the suffix check — else the owned hook is unrecognised
-  // (unbounded re-add on enable, dangling on disable). Tolerates a legacy double-quoted form too.
-  const arg = unquoteShellArg(m[1]!);
-  return arg !== null && arg.endsWith(OWNED_RELAY_SUFFIX);
+  const arg = m[1]!;
+  const decoded = unquoteSingleShellToken(arg);
+  if (decoded === null) return false;
+  // Canonical ONE-TOKEN round-trip: the argument must be EXACTLY one shellQuote token — re-encoding
+  // the decoded path must reproduce the argument VERBATIM. This is the ownership test's core: the
+  // command is `node ${shellQuote(relayDest)}`, so any owned entry re-encodes to itself (including
+  // an apostrophe cwd O'Brien via the '"'"' escape). It REJECTS a user command whose multiple quoted
+  // args merely concatenate to text ending in the relay suffix (e.g. `node 'x' '<relay>'`), which
+  // must never be recognised as owned and deleted.
+  if (shellQuote(decoded) !== arg) return false;
+  return decoded.endsWith(OWNED_RELAY_SUFFIX);
 }
 
-/** Recover the literal path from a `node <arg>` argument: reverse shellQuote's single-quote
- *  wrapping (with `'`→`'"'"'`), tolerating a legacy double-quoted form. Returns null when the
- *  argument is not a single self-quoted token (e.g. trailing extra args), which is not owned. */
-function unquoteShellArg(token: string): string | null {
-  const t = token.trim();
-  if (t.length >= 2 && t.startsWith("'") && t.endsWith("'")) {
-    return t.slice(1, -1).split(`'"'"'`).join("'");
-  }
-  if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) {
-    return t.slice(1, -1);
-  }
-  return null;
+/** Decode ONE POSIX single-quoted shell token as produced by shellQuote (outer `'…'` with an
+ *  embedded `'` escaped as `'"'"'`). Returns null when the token is not single-quote wrapped. The
+ *  caller re-encodes to confirm the token is canonical/single — this decode alone does not. */
+function unquoteSingleShellToken(token: string): string | null {
+  if (token.length < 2 || !token.startsWith("'") || !token.endsWith("'")) return null;
+  return token.slice(1, -1).split(`'"'"'`).join("'");
 }
 
 function hashContent(content: string): string {
