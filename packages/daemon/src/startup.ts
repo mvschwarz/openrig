@@ -94,6 +94,7 @@ import { SettingsStore as ContextPackSettingsStore } from "./domain/user-setting
 import { WhoamiService } from "./domain/whoami-service.js";
 import { NodeCmuxService } from "./domain/node-cmux-service.js";
 import { createAppWithWebSocket, type AppDeps } from "./server.js";
+import { ProviderServiceImpl } from "./domain/provider/provider-service-impl.js";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -839,6 +840,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     cmuxAdapter,
     snapshotCapture,
     snapshotRepo,
+    // Slice-04 OPR.0.5.0.4: production provider service — getReadModel over the codex-auth reader
+    // + node-inventory across rigs; precheck via the pure gate; switch honest-interim (D seam).
+    providerService: new ProviderServiceImpl({ db, listRigs: () => rigRepo.listRigs() }),
     restoreOrchestrator,
     resumeMetadataRefresher, // OPR.0.4.3.20 FR-4 — manual snapshot refresh-before-serialize
     rigSpecExporter,

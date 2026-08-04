@@ -78,6 +78,7 @@ import type { SpecLibraryService } from "./domain/spec-library-service.js";
 import type { ChatRepository } from "./domain/chat-repository.js";
 import { whoamiRoutes } from "./routes/whoami.js";
 import { providerRoutes } from "./routes/provider.js";
+import type { ProviderService } from "./domain/provider/provider-service.js";
 import type { WhoamiService } from "./domain/whoami-service.js";
 import { chatRoutes } from "./routes/chat.js";
 import { streamRoutes } from "./routes/stream.js";
@@ -133,6 +134,8 @@ export interface AppDeps {
   cmuxAdapter: CmuxAdapter;
   snapshotCapture: SnapshotCapture;
   snapshotRepo: SnapshotRepository;
+  /** Slice-04 OPR.0.5.0.4: the provider read-model/precheck/switch service. Routes 503 honestly if absent. */
+  providerService?: ProviderService;
   restoreOrchestrator: RestoreOrchestrator;
   // OPR.0.4.3.20 FR-4 — for refresh-before-serialize on the manual snapshot route.
   resumeMetadataRefresher?: import("./domain/resume-metadata-refresher.js").ResumeMetadataRefresher;
@@ -437,6 +440,7 @@ export function createApp(deps: AppDeps): Hono {
     );
     c.set("snapshotCapture" as never, deps.snapshotCapture);
     c.set("snapshotRepo" as never, deps.snapshotRepo);
+    c.set("providerService" as never, deps.providerService);
     c.set("restoreOrchestrator" as never, deps.restoreOrchestrator);
     c.set("resumeMetadataRefresher" as never, deps.resumeMetadataRefresher);
     c.set("rigSpecExporter" as never, deps.rigSpecExporter);
