@@ -642,17 +642,9 @@ describe("ABSENCE = locked floor at every lifecycle surface (R2 HIGH at 954d97a0
     } finally { rmSync(dir, { recursive: true, force: true }); vi.unstubAllEnvs(); }
   });
 
-  it("RED: successor continuity for a NO-attachment seat carries EXPLICIT floor", async () => {
-    const db = createFullTestDb();
-    const setup = createTestApp(db, { podInstantiatorFsOps: fsOps() });
-    const rig = setup.rigRepo.createRig("absent-rig-2");
-    const organic = setup.rigRepo.addNode(rig.id, "dev.bare2", { runtime: "claude-code", cwd: "/w" });
-    const successorPosture = setup.rigRepo.getNodePolicyProvenance(organic.id)?.launchPosture
-      ?? setup.rigRepo.getRigPolicyProvenance(rig.id)?.launchPosture
-      ?? "floor";
-    expect(successorPosture).toBe("floor");
-    db.close();
-  });
+  // (successor-absence pin lives at PRODUCTION altitude in seat-handover-service.test.ts —
+  //  the helper-only variant was removed per Guard at c203812f: it re-computed the fallback
+  //  chain instead of driving SeatHandoverService.)
 
   it("adapter parity under env YOLO: an ABSENT-attachment lifecycle binding (explicit floor) emits FLOOR commands on all three families", async () => {
     vi.stubEnv("OPENRIG_YOLO", "1");

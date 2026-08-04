@@ -233,6 +233,28 @@ describe("SeatHandoverService", () => {
 
   const SUCCESSOR_NAME = "dev-impl@seat-rig-h1SUCCID0";
 
+  it("Seam B (R2/Guard): a fresh handover for a NO-policy seat launches the REAL successor at EXPLICIT floor, even under ambient OPENRIG_YOLO", async () => {
+    // Production altitude: the pin drives SeatHandoverService.handover() end-to-end and
+    // asserts the binding the REAL launchHarness call received — never a re-computed
+    // fallback chain (the helper-only false-green Guard rejected at c203812f).
+    vi.stubEnv("OPENRIG_YOLO", "1");
+    try {
+      seedSeat({ runtime: "codex" }); // no node/rig policy provenance anywhere
+      const result = await service.handover({
+        seatRef: "dev-impl@seat-rig",
+        reason: "context-wall",
+        source: "fresh",
+        operator: "orch-lead@seat-rig",
+      });
+      expect(result.ok).toBe(true);
+      expect(launchHarness).toHaveBeenCalledTimes(1);
+      const successorBinding = launchHarness.mock.calls[0]![0] as { launchPosture?: string };
+      // locked absence contract: the continuity edge binds the minimum floor explicitly —
+      // ambient YOLO must not widen an attachment-less successor.
+      expect(successorBinding.launchPosture).toBe("floor");
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it("composes the full cycle for a fresh source: create -> deliver -> verify -> rebind", async () => {
     const { node } = seedSeat({ runtime: "codex" });
 
