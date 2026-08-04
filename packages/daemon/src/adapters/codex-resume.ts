@@ -36,6 +36,8 @@ export class CodexResumeAdapter {
     resumeToken: string | null,
     _cwd: string,
     codexConfigProfile?: string | null,
+    // OPR.0.4.8.3 Seam B: persisted resolved posture threaded from restore.
+    resolvedPosture?: "floor" | "full_bypass",
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Codex resume not available" };
@@ -61,6 +63,8 @@ export class CodexResumeAdapter {
       resumeToken ?? "",
       codexConfigProfile,
       resumeType === "codex_last",
+      undefined,
+      resolvedPosture,
     );
 
     const textResult = await this.tmux.sendText(tmuxSessionName, cmd);

@@ -607,6 +607,10 @@ export class PodRigInstantiator {
               cwdOverride: opts?.cwdOverride,
             });
             logicalIdToNodeId.set(qualifiedId, node.id);
+            // Seam B R2: restart-stable provenance persists AT MATERIALIZE (a
+            // materialized-but-never-launched seat must still restore its posture).
+            const materializeAttachment = this.resolveMemberPolicyAttachment(member.permissionPolicy, rigSpec.permissionPolicy, rigRoot);
+            if (materializeAttachment) this.persistNodePolicyProvenance(node.id, materializeAttachment);
             nodeResults.push({ logicalId: qualifiedId, status: "materialized" });
             persistedEvents.push(event);
           }
@@ -921,6 +925,10 @@ export class PodRigInstantiator {
       });
       createdNodeId = node.id;
       createdEvent = event;
+      // Seam B R2: add_member persists provenance at creation too (rig ref from the DB —
+      // no in-memory rigSpec exists on this path).
+      const addMemberAttachment = this.resolveMemberPolicyAttachment(member.permissionPolicy, this.deps.rigRepo.getRigPermissionPolicy(rigId), rigRoot);
+      if (addMemberAttachment) this.persistNodePolicyProvenance(node.id, addMemberAttachment);
       if (resolvedEdges.length > 0) {
         const logicalIdToNodeId = new Map(rig.nodes.map((n) => [n.logicalId, n.id]));
         logicalIdToNodeId.set(qualifiedId, node.id);
@@ -1480,11 +1488,11 @@ export class PodRigInstantiator {
    * materialized rig). Returns undefined when no ref is attached at either level.
    */
   private resolveMemberPolicyAttachment(
-    member: RigSpecPodMember,
-    rigSpec: PodRigSpec,
+    memberRef: string | undefined,
+    rigRef: string | undefined | null,
     rigRoot: string,
   ): ResolvedPolicyAttachment | undefined {
-    const ref = resolvePermissionPolicyRefValue(member.permissionPolicy, rigSpec.permissionPolicy);
+    const ref = resolvePermissionPolicyRefValue(memberRef, rigRef);
     if (!ref) return undefined;
     return resolvePermissionPolicyAttachment(ref, rigRoot, {
       readFile: (p) => this.deps.fsOps.readFile(p),
@@ -1546,7 +1554,7 @@ export class PodRigInstantiator {
     // OPR.0.4.8.3 Seam B: resolve the seat's permission-policy attachment once for this
     // launch (member > rig precedence; declaring dir = the rig root, where the declaring
     // RigSpec + its relative policy files live). Also persists restart-stable provenance.
-    const policyAttachment = this.resolveMemberPolicyAttachment(input.member, input.rigSpec, input.rigRoot);
+    const policyAttachment = this.resolveMemberPolicyAttachment(input.member.permissionPolicy, input.rigSpec.permissionPolicy, input.rigRoot);
     if (policyAttachment) this.persistNodePolicyProvenance(input.nodeId, policyAttachment);
 
     const sessionNameErrors = validateSessionComponents(input.pod.id, input.member.id, input.rigSpec.name);
@@ -1784,7 +1792,7 @@ export class PodRigInstantiator {
     cwdOverride?: string;
   }): Promise<{ status: "launched" | "failed"; error?: string; sessionName?: string; warnings?: string[] }> {
     const effectiveCwd = resolveLaunchCwd(input.member.cwd, input.rigRoot, input.cwdOverride);
-    const terminalPolicyAttachment = this.resolveMemberPolicyAttachment(input.member, input.rigSpec, input.rigRoot);
+    const terminalPolicyAttachment = this.resolveMemberPolicyAttachment(input.member.permissionPolicy, input.rigSpec.permissionPolicy, input.rigRoot);
     if (terminalPolicyAttachment) this.persistNodePolicyProvenance(input.nodeId, terminalPolicyAttachment);
     const sessionNameErrors = validateSessionComponents(input.pod.id, input.member.id, input.rigSpec.name);
     if (sessionNameErrors.length > 0) {

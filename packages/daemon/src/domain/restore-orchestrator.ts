@@ -1,7 +1,8 @@
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
+import { resolvePermissionPolicyAttachment } from "./permission-policy/policy-ref.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { SnapshotRepository } from "./snapshot-repository.js";
@@ -983,7 +984,7 @@ export class RestoreOrchestrator {
         await this.rollbackToZeroSession(node.id, sessionName, launchResult?.session.id, priorState);
         return { nodeId: node.id, logicalId: node.logicalId, status: "awaiting-decision", error: `Original session unresumable: resume requested but no token available. No session is running. Re-run with --fresh ${node.logicalId} for a deliberate fresh-primed seat, or restore the original session manually.` };
       } else {
-        const resumeOutcome = await this.attemptResume(sessionName, resumeType, resumeToken, node.cwd ?? "/", node.codexConfigProfile, node.model);
+        const resumeOutcome = await this.attemptResume(sessionName, resumeType, resumeToken, node.cwd ?? "/", node.codexConfigProfile, node.model, this.resolveRestorePosture(node.id, rigId));
         if (resumeOutcome.kind === "resumed") {
           baseStatus = "resumed";
         } else if (resumeOutcome.kind === "attention_required") {
@@ -1104,6 +1105,9 @@ export class RestoreOrchestrator {
             ...launchResult.binding,
             cwd: node.cwd ?? ".",
             codexConfigProfile: node.codexConfigProfile ?? undefined,
+            // OPR.0.4.8.3 Seam B: the pod-aware restore path binds the restored posture too
+            // (both restore paths consume persisted provenance — preflight surface 3).
+            launchPosture: this.resolveRestorePosture(node.id, rigId),
             // OPR.0.4.6.PI1 VM leg finding: the restore binding dropped the
             // node's model declaration, so a resumed Pi seat relaunched with
             // no --model — and the runner's provider-key allowlist (keyed off
@@ -1235,6 +1239,44 @@ export class RestoreOrchestrator {
     return row.resume_type === resumeType && row.resume_token === resumeToken;
   }
 
+  /**
+   * OPR.0.4.8.3 Seam B — a restored seat's launch posture WITHOUT the in-memory RigSpec
+   * (dev-guard restart-provenance ruling):
+   *   1. Persisted node provenance (migration 057) is the primary source. For a CUSTOM
+   *      attachment with readable provenance (declaringDir + the node's raw ref) the policy
+   *      is REOPENED + re-derived (a custom surface:flag policy restores to full_bypass);
+   *      an unreadable file degrades to the PERSISTED posture (still restart-stable).
+   *   2. No provenance (e.g. organic claim/self-attach seats): the persisted RIG-level ref
+   *      resolves — builtin refs resolve dirlessly; a custom rig ref without provenance
+   *      degrades to the resolver's advisory floor (honest absence of a declaring dir).
+   *   3. Nothing attached → undefined (the env-driven 0.4.8.2 decision, unchanged).
+   */
+  private resolveRestorePosture(nodeId: string, rigId: string): "floor" | "full_bypass" | undefined {
+    try {
+      const prov = this.rigRepo.getNodePolicyProvenance(nodeId);
+      if (prov) {
+        if (prov.origin === "custom" && prov.declaringDir) {
+          const ref = prov.nodeRef ?? this.rigRepo.getRigPermissionPolicy(rigId);
+          if (ref) {
+            try {
+              return resolvePermissionPolicyAttachment(ref, prov.declaringDir, {
+                readFile: (p) => readFileSync(p, "utf-8"),
+              }).launchPosture;
+            } catch { /* unreadable at restore → persisted posture below */ }
+          }
+        }
+        return prov.launchPosture;
+      }
+      const rigRef = this.rigRepo.getRigPermissionPolicy(rigId);
+      if (rigRef) {
+        return resolvePermissionPolicyAttachment(rigRef, "", {
+          readFile: (p) => readFileSync(p, "utf-8"),
+        }).launchPosture;
+      }
+    } catch { /* posture resolution must never block a restore */ }
+    return undefined;
+  }
+
   private async attemptResume(
     sessionName: string,
     resumeType: string,
@@ -1242,6 +1284,9 @@ export class RestoreOrchestrator {
     cwd: string,
     codexConfigProfile?: string | null,
     model?: string | null,
+    // OPR.0.4.8.3 Seam B: the seat's restored launch posture (persisted provenance,
+    // custom policies re-validated when readable). Absent = env decision.
+    resolvedPosture?: "floor" | "full_bypass",
   ): Promise<
     | { kind: "resumed" }
     | { kind: "retry_fresh" }
@@ -1249,7 +1294,7 @@ export class RestoreOrchestrator {
     | { kind: "attention_required"; message: string; evidence?: string }
   > {
     if (this.claudeResume.canResume(resumeType, resumeToken)) {
-      const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd);
+      const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture);
       if (result.ok) return { kind: "resumed" };
       if (result.code === "retry_fresh") return { kind: "retry_fresh" };
       // L3: surface attention_required from the Claude probe (resume-selection prompt).
@@ -1264,7 +1309,7 @@ export class RestoreOrchestrator {
     }
 
     if (this.codexResume.canResume(resumeType, resumeToken)) {
-      const result = await this.codexResume.resume(sessionName, resumeType, resumeToken, cwd, codexConfigProfile);
+      const result = await this.codexResume.resume(sessionName, resumeType, resumeToken, cwd, codexConfigProfile, resolvedPosture);
       if (result.ok) return { kind: "resumed" };
       if (result.code === "retry_fresh") return { kind: "retry_fresh" };
       // Codex auth-refusal: stored OAuth token can no longer be refreshed.
@@ -1285,7 +1330,7 @@ export class RestoreOrchestrator {
     // session file returns retry_fresh, which the caller maps to the
     // awaiting-decision stop-and-ask — never a silent fresh start (BR-6).
     if (this.piResume?.canResume(resumeType, resumeToken)) {
-      const result = await this.piResume.resume(sessionName, resumeType, resumeToken, cwd, model);
+      const result = await this.piResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture);
       if (result.ok) return { kind: "resumed" };
       if (result.code === "retry_fresh") return { kind: "retry_fresh" };
       if (result.code === "attention_required") {

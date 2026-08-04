@@ -1165,6 +1165,9 @@ export interface ExpansionPodFragment {
     cwd?: string;
     model?: string;
     codexConfigProfile?: string;
+    /** OPR.0.4.8.3 Seam B: per-seat permission_policy REF — threaded through the
+     *  expansion ingress exactly like role (never silently dropped). */
+    permissionPolicy?: string;
     restorePolicy?: string;
     label?: string;
     /**
