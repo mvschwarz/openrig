@@ -7,10 +7,22 @@
 // reconciliation: the operator's filesystem edit always wins on next
 // scan() (matches PL-004 Phase D's contract for workflow_specs).
 
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { join, relative, sep } from "node:path";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, extname, join, relative, sep } from "node:path";
+import { stringify as stringifyYaml } from "yaml";
+import { assemblePlainFiles, type PlainFileAssembly } from "./bundle-assembler.js";
 import { assertSafePackRef } from "./ref-safety.js";
 import { parseManifest } from "./manifest-parser.js";
+import { estimateTokensFromBytes } from "./token-estimate.js";
 import {
   ContextPackError,
   type ContextPackEntry,
@@ -29,6 +41,20 @@ export interface ContextPackLibraryRoot {
 
 export interface ContextPackLibraryOpts {
   roots: ContextPackLibraryRoot[];
+  /** Narrow test seam for Atom 3's cleanup-on-write-failure contract. */
+  writeFile?: (path: string, data: string | Buffer) => void;
+}
+
+export interface ComposeContextPackSource {
+  /** Absolute source path, resolved by the local CLI caller. */
+  path: string;
+  /** Original caller spelling retained as YAML-serialized provenance. */
+  label: string;
+}
+
+export interface ComposeContextPackResult extends PlainFileAssembly {
+  ref: string;
+  entry: ContextPackEntry;
 }
 
 /** Stable id format: context-pack:<name>:<version>. */
@@ -44,12 +70,7 @@ export function parseContextPackId(id: string): { name: string; version: string 
   return { name: rest.slice(0, last), version: rest.slice(last + 1) };
 }
 
-/** Daemon-derived per-file token estimate. Same heuristic the existing
- *  context-usage-store uses (≈4 chars/token); cheap, stable, no
- *  dependency on a tokenizer library. */
-export function estimateTokensFromBytes(bytes: number): number {
-  return Math.ceil(bytes / 4);
-}
+export { estimateTokensFromBytes } from "./token-estimate.js";
 
 export class ContextPackLibraryService {
   /** Slice-03 Atom 2 (guard correction b74e4576): the PRIMARY index — the
@@ -65,9 +86,11 @@ export class ContextPackLibraryService {
    *  last-wins for compat callers only. */
   private idIndex = new Map<string, ContextPackEntry>();
   private readonly roots: ContextPackLibraryRoot[];
+  private readonly writeFile: (path: string, data: string | Buffer) => void;
 
   constructor(opts: ContextPackLibraryOpts) {
     this.roots = opts.roots;
+    this.writeFile = opts.writeFile ?? ((path, data) => writeFileSync(path, data));
   }
 
   /** Slice-03 Atom 2 — recursive path-addressed discovery: walk a root and
@@ -177,6 +200,198 @@ export class ContextPackLibraryService {
 
   getByNameVersion(name: string, version: string): ContextPackEntry | null {
     return this.idIndex.get(contextPackId(name, version)) ?? null;
+  }
+
+  /**
+   * Atom 3: compose named files into one durable path-ref pack.
+   *
+   * Safety ordering is load-bearing: validate the ref first; reject every
+   * existing/hidden/unsafe namespace and preflight every source before the
+   * first mutation. Members are written before manifest.yaml, so discovery
+   * can never observe a partial pack. A failed write removes the new target.
+   */
+  composeFromFiles(opts: {
+    outRef: string;
+    sources: ComposeContextPackSource[];
+  }): ComposeContextPackResult {
+    // FIRST trust-boundary operation: the sealed Atom-1 validator.
+    try {
+      assertSafePackRef(opts.outRef);
+    } catch (err) {
+      throw new ContextPackError("unsafe_ref", (err as Error).message, { ref: opts.outRef });
+    }
+
+    const writeRoot = this.roots.find((root) => root.sourceType === "user_file");
+    if (!writeRoot) {
+      throw new ContextPackError(
+        "store_unavailable",
+        "context pack composition requires a writable user_file store root",
+      );
+    }
+
+    // Refresh before checking so the exact ref is rejected in ANY root, not
+    // merely at the user target path. This preserves Atom-2 precedence truth.
+    this.scan();
+    if (this.entriesByRef.has(opts.outRef)) {
+      throw new ContextPackError(
+        "pack_exists",
+        `context pack ref '${opts.outRef}' already exists in the library`,
+        { ref: opts.outRef },
+      );
+    }
+
+    const segments = opts.outRef.split("/");
+    const targetDir = join(writeRoot.path, ...segments);
+    // lstat sees dangling symlinks too; any physical exact target is a
+    // conflict and is never overwritten or merged.
+    try {
+      lstatSync(targetDir);
+      throw new ContextPackError(
+        "pack_exists",
+        `context pack target '${targetDir}' already exists`,
+        { ref: opts.outRef, targetDir },
+      );
+    } catch (err) {
+      if (err instanceof ContextPackError) throw err;
+      const code = (err as NodeJS.ErrnoException).code;
+      // ENOTDIR means an ancestor is a file; the namespace walk below turns
+      // that into the structured unsafe_ref_namespace contract.
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw err;
+    }
+
+    // Atom-2 treats manifest-bearing dirs as leaves. Reject an undiscoverable
+    // child, and reject symlink/non-directory namespace segments before any
+    // mkdir can follow them.
+    let cursor = writeRoot.path;
+    for (const segment of segments.slice(0, -1)) {
+      cursor = join(cursor, segment);
+      let stat: ReturnType<typeof lstatSync>;
+      try {
+        stat = lstatSync(cursor);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") break;
+        throw err;
+      }
+      if (stat.isSymbolicLink() || !stat.isDirectory()) {
+        throw new ContextPackError(
+          "unsafe_ref_namespace",
+          `context pack ref '${opts.outRef}' crosses a symlink or non-directory namespace segment '${cursor}'`,
+          { ref: opts.outRef, segmentPath: cursor },
+        );
+      }
+      if (existsSync(join(cursor, "manifest.yaml"))) {
+        throw new ContextPackError(
+          "pack_ref_below_pack",
+          `context pack ref '${opts.outRef}' is below existing pack leaf '${cursor}'`,
+          { ref: opts.outRef, ancestor: cursor },
+        );
+      }
+    }
+
+    if (opts.sources.length === 0) {
+      throw new ContextPackError(
+        "source_files_missing",
+        "context composition requires at least one --from file",
+        { missingFiles: [] },
+      );
+    }
+
+    // First collect every missing path so failure is honest and complete.
+    const missingFiles = opts.sources
+      .filter((source) => !existsSync(source.path))
+      .map((source) => source.path);
+    if (missingFiles.length > 0) {
+      throw new ContextPackError(
+        "source_files_missing",
+        `context composition source file(s) not found: ${missingFiles.join(", ")}`,
+        { missingFiles },
+      );
+    }
+
+    const allowedSuffixes = new Set([".md", ".markdown", ".yaml", ".yml", ".txt"]);
+    const members = opts.sources.map((source, index) => {
+      let content: Buffer;
+      try {
+        if (!statSync(source.path).isFile()) throw new Error("source is not a regular file");
+        content = readFileSync(source.path);
+      } catch (err) {
+        throw new ContextPackError(
+          "file_read_failed",
+          `failed to read composition source ${source.path}: ${(err as Error).message}`,
+          { path: source.path },
+        );
+      }
+      const candidateSuffix = extname(source.label).toLowerCase();
+      const suffix = allowedSuffixes.has(candidateSuffix) ? candidateSuffix : ".txt";
+      return {
+        path: `source-${String(index + 1).padStart(4, "0")}${suffix}`,
+        label: source.label,
+        content,
+      };
+    });
+
+    const name = segments.at(-1)!;
+    const manifest = stringifyYaml({
+      name,
+      version: "1",
+      purpose: `Composed from ${members.length} ordered files`,
+      files: members.map((member) => ({
+        path: member.path,
+        role: "source",
+        summary: member.label,
+      })),
+    });
+
+    let createdTarget = false;
+    try {
+      mkdirSync(dirname(targetDir), { recursive: true });
+      try {
+        mkdirSync(targetDir);
+        createdTarget = true;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+          throw new ContextPackError(
+            "pack_exists",
+            `context pack target '${targetDir}' already exists`,
+            { ref: opts.outRef, targetDir },
+          );
+        }
+        throw err;
+      }
+      for (const member of members) {
+        this.writeFile(join(targetDir, member.path), member.content);
+      }
+      // Manifest last: only complete packs become discoverable.
+      this.writeFile(join(targetDir, "manifest.yaml"), manifest);
+    } catch (err) {
+      if (createdTarget) rmSync(targetDir, { recursive: true, force: true });
+      if (err instanceof ContextPackError) throw err;
+      throw new ContextPackError(
+        "pack_write_failed",
+        `failed to write context pack '${opts.outRef}': ${(err as Error).message}`,
+        { ref: opts.outRef, targetDir },
+      );
+    }
+
+    this.scan();
+    const entry = this.entriesByRef.get(opts.outRef);
+    if (!entry || entry.sourcePath !== targetDir) {
+      rmSync(targetDir, { recursive: true, force: true });
+      this.scan();
+      throw new ContextPackError(
+        "pack_write_failed",
+        `composed context pack '${opts.outRef}' was not discoverable at its durable ref`,
+        { ref: opts.outRef, targetDir },
+      );
+    }
+
+    const assembled = assemblePlainFiles({
+      files: members.map((member) => ({
+        path: member.path,
+        content: member.content.toString("utf-8"),
+      })),
+    });
+    return { ref: opts.outRef, entry, ...assembled };
   }
 
   /** Resolve the absolute file path for a pack entry's file, with a

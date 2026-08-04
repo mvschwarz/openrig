@@ -3,7 +3,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ContextPackLibraryService } from "../src/domain/context-packs/context-pack-library-service.js";
@@ -102,6 +102,48 @@ files:
     const body = await res.json() as { count: number; entries: Array<{ name: string }> };
     expect(body.count).toBe(1);
     expect(body.entries[0]!.name).toBe("p1");
+  });
+
+  it("POST /library/compose writes an ordered durable ref without requiring or calling transport", async () => {
+    const a = join(tmp, "a.md");
+    const b = join(tmp, "b.md");
+    writeFileSync(a, "A\n");
+    writeFileSync(b, "B");
+    const app = buildApp({ withTransport: false });
+    const res = await app.request("/api/context-packs/library/compose", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        outRef: "packs/qitem-brief",
+        sources: [{ path: a, label: "a.md" }, { path: b, label: "b.md" }],
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = await res.json() as { ref: string; text: string; entry: { relativePath: string } };
+    expect(body.ref).toBe("packs/qitem-brief");
+    expect(body.entry.relativePath).toBe("packs/qitem-brief");
+    expect(body.text).toBe("A\n\n\nB");
+    expect(body.text).not.toContain("# OpenRig Context Pack:");
+    expect(body.text).not.toContain("## File:");
+    expect(lib.getByRef("packs/qitem-brief")).not.toBeNull();
+    expect(transport.calls).toEqual([]);
+  });
+
+  it("POST /library/compose returns a structured unsafe_ref and performs no write", async () => {
+    const a = join(tmp, "a.md");
+    writeFileSync(a, "A");
+    const app = buildApp({ withTransport: false });
+    const res = await app.request("/api/context-packs/library/compose", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ outRef: "../escape", sources: [{ path: a, label: "a.md" }] }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string; message: string };
+    expect(body.error).toBe("unsafe_ref");
+    expect(body.message).toMatch(/unsafe pack ref/);
+    expect(existsSync(join(tmp, "escape"))).toBe(false);
+    expect(transport.calls).toEqual([]);
   });
 
   it("GET /library/:id returns the pack manifest", async () => {

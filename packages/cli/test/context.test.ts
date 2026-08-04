@@ -96,10 +96,12 @@ describe("rig context CLI (PL-014)", () => {
   let server: http.Server;
   let port: number;
   let sendLog: Array<{ id: string; body: unknown }>;
+  let composeLog: Array<{ outRef?: string; sources?: Array<{ path: string; label: string }> }>;
   let sendBehavior: "ok" | "fail" = "ok";
 
   beforeAll(async () => {
     sendLog = [];
+    composeLog = [];
     server = http.createServer((req, res) => {
       let body = "";
       req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
@@ -113,6 +115,13 @@ describe("rig context CLI (PL-014)", () => {
         if (url === "/api/context-packs/library/sync" && req.method === "POST") {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ count: 1, errors: [], entries: [FIXTURE_PACK] }));
+          return;
+        }
+        if (url === "/api/context-packs/library/compose" && req.method === "POST") {
+          const parsed = JSON.parse(body || "{}") as { outRef?: string; sources?: Array<{ path: string; label: string }> };
+          composeLog.push(parsed);
+          res.writeHead(201, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ref: parsed.outRef, bytes: 4, estimatedTokens: 1, files: parsed.sources ?? [] }));
           return;
         }
         const idMatch = url.match(/^\/api\/context-packs\/library\/([^/]+)(\/(preview|send))?$/);
@@ -161,6 +170,28 @@ describe("rig context CLI (PL-014)", () => {
   });
 
   afterAll(() => server.close());
+
+  it("compose posts caller-resolved files to the delivery-free compose route", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "context-compose-cli-"));
+    const a = join(dir, "a.md");
+    const b = join(dir, "b.md");
+    writeFileSync(a, "A");
+    writeFileSync(b, "B");
+    try {
+      composeLog.length = 0;
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "context", "compose", "--out", "packs/qitem-brief", "--from", a, b]);
+      });
+      expect(composeLog).toEqual([{
+          outRef: "packs/qitem-brief",
+          sources: [{ path: a, label: a }, { path: b, label: b }],
+      }]);
+      expect(logs.join("\n")).toContain("packs/qitem-brief");
+      expect(exitCode).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   function makeCmd(): Command {
     const prog = new Command();

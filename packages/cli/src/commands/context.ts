@@ -19,7 +19,7 @@ import {
   readdirSync,
   readFileSync,
 } from "node:fs";
-import { basename, extname, isAbsolute, join } from "node:path";
+import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { getDefaultOpenRigPath } from "../openrig-compat.js";
 import { DaemonClient } from "../client.js";
@@ -203,6 +203,44 @@ Examples:
     }
     return deps.clientFactory(getDaemonUrl(status));
   }
+
+  cmd.command("compose")
+    .description("Compose ordered files into a durable context-pack ref (never delivers)")
+    .requiredOption("--out <ref>", "Path-like durable output ref")
+    .requiredOption("--from <files...>", "Ordered source files")
+    .action(async (opts: { out: string; from: string[] }) => {
+      const deps = getDeps();
+      const status = await getDaemonStatus(deps.lifecycleDeps);
+      if (status.state !== "running" || status.healthy === false) {
+        console.error("Daemon is not running. Start it with: rig daemon start");
+        process.exitCode = 1;
+        return;
+      }
+      const client = deps.clientFactory(getDaemonUrl(status));
+      try {
+        const res = await client.post<{
+          ref?: string;
+          bytes?: number;
+          estimatedTokens?: number;
+          files?: unknown[];
+          error?: string;
+          message?: string;
+        }>("/api/context-packs/library/compose", {
+          outRef: opts.out,
+          sources: opts.from.map((path) => ({ path: resolve(path), label: path })),
+        });
+        if (res.status !== 201) {
+          throw new Error(res.data.message ?? res.data.error ?? `Daemon returned HTTP ${res.status}`);
+        }
+        console.log(
+          `Composed ${res.data.files?.length ?? opts.from.length} file(s) -> ${res.data.ref} ` +
+          `(${res.data.bytes ?? 0} bytes, ~${res.data.estimatedTokens ?? 0} tokens).`,
+        );
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    });
 
   cmd.command("list")
     .description("List all context packs in the library")

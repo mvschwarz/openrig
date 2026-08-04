@@ -84,7 +84,14 @@ export class ContextPackError extends Error {
       | "file_read_failed"
       // Slice-03 Atom 2: a path-like ref failed the sealed per-segment
       // contract (ref-safety.ts) at a discovery/resolve boundary
-      | "unsafe_ref",
+      | "unsafe_ref"
+      // Slice-03 Atom 3: durable file composition boundaries.
+      | "source_files_missing"
+      | "pack_exists"
+      | "pack_ref_below_pack"
+      | "unsafe_ref_namespace"
+      | "pack_write_failed"
+      | "store_unavailable",
     message: string,
     public readonly details?: Record<string, unknown>,
   ) {

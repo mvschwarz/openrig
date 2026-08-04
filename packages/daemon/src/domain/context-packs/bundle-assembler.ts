@@ -12,7 +12,7 @@
 
 import { readFileSync } from "node:fs";
 import { ContextPackError, type ContextPackEntry } from "./context-pack-types.js";
-import { estimateTokensFromBytes } from "./context-pack-library-service.js";
+import { estimateTokensFromBytes } from "./token-estimate.js";
 
 export interface AssembledBundle {
   /** Concatenated bundle string ready for SessionTransport.send. */
@@ -33,6 +33,54 @@ export interface AssembleOpts {
   packEntry: ContextPackEntry;
   /** Defaults to readFileSync; injected for tests. */
   readFile?: (absPath: string) => string;
+}
+
+/** Atom 3's deliberately dumb composition separator. Source bytes are
+ * otherwise untouched: no trim, framing headers, or forced final newline. */
+export const PLAIN_COMPOSE_SEPARATOR = "\n\n";
+
+export interface PlainFileInput {
+  path: string;
+  /** null records an honestly missing member. */
+  content: string | null;
+}
+
+export interface PlainFileAssembly {
+  text: string;
+  bytes: number;
+  estimatedTokens: number;
+  files: Array<{ path: string; bytes: number; estimatedTokens: number }>;
+  missingFiles: Array<{ path: string }>;
+}
+
+/**
+ * Atom 3 compose core: concatenate present file contents in declared order.
+ * The durable store retains each source as its own member; this projection is
+ * the exact content future delivery verbs can resolve without coupling the
+ * context noun to SessionTransport.
+ */
+export function assemblePlainFiles(opts: { files: PlainFileInput[] }): PlainFileAssembly {
+  const present = opts.files.filter(
+    (file): file is PlainFileInput & { content: string } => file.content !== null,
+  );
+  const text = present.map((file) => file.content).join(PLAIN_COMPOSE_SEPARATOR);
+  const bytes = Buffer.byteLength(text, "utf-8");
+  return {
+    text,
+    bytes,
+    estimatedTokens: estimateTokensFromBytes(bytes),
+    files: present.map((file) => {
+      const fileBytes = Buffer.byteLength(file.content, "utf-8");
+      return {
+        path: file.path,
+        bytes: fileBytes,
+        estimatedTokens: estimateTokensFromBytes(fileBytes),
+      };
+    }),
+    missingFiles: opts.files
+      .filter((file) => file.content === null)
+      .map((file) => ({ path: file.path })),
+  };
 }
 
 const PACK_HEADER_PREFIX = "# OpenRig Context Pack:";

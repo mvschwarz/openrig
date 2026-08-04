@@ -15,11 +15,17 @@ import { Hono } from "hono";
 import type { ContextPackLibraryService } from "../domain/context-packs/context-pack-library-service.js";
 import type { SessionTransport } from "../domain/session-transport.js";
 import { assembleBundle } from "../domain/context-packs/bundle-assembler.js";
+import { ContextPackError } from "../domain/context-packs/context-pack-types.js";
 
 interface SendBody {
   destinationSession?: string;
   /** When true, returns the assembled bundle without invoking SessionTransport. */
   dryRun?: boolean;
+}
+
+interface ComposeBody {
+  outRef?: string;
+  sources?: Array<{ path?: string; label?: string }>;
 }
 
 export function contextPacksRoutes(): Hono {
@@ -38,6 +44,43 @@ export function contextPacksRoutes(): Hono {
     if (!lib) return c.json({ error: "context_pack_library_unavailable" }, 503);
     const result = lib.scan();
     return c.json({ ...result, entries: lib.list() });
+  });
+
+  // POST /library/compose — Atom 3's delivery-free file -> durable-ref path.
+  router.post("/library/compose", async (c) => {
+    const lib = c.get("contextPackLibrary" as never) as ContextPackLibraryService | undefined;
+    if (!lib) return c.json({ error: "context_pack_library_unavailable" }, 503);
+    const body = await c.req.json<ComposeBody>().catch(() => ({} as ComposeBody));
+    if (
+      typeof body.outRef !== "string" ||
+      !Array.isArray(body.sources) ||
+      body.sources.length === 0 ||
+      body.sources.some((source) => typeof source.path !== "string" || typeof source.label !== "string")
+    ) {
+      return c.json({
+        error: "invalid_compose_request",
+        message: "body must include { outRef, sources: [{ path, label }, ...] }",
+      }, 400);
+    }
+    try {
+      const result = lib.composeFromFiles({
+        outRef: body.outRef,
+        sources: body.sources as Array<{ path: string; label: string }>,
+      });
+      return c.json(result, 201);
+    } catch (err) {
+      if (err instanceof ContextPackError) {
+        const status = err.code === "pack_exists"
+          ? 409
+          : err.code === "store_unavailable"
+            ? 503
+            : err.code === "pack_write_failed"
+              ? 500
+              : 400;
+        return c.json({ error: err.code, message: err.message, ...(err.details ?? {}) }, status as 400);
+      }
+      return c.json({ error: "compose_failed", message: (err as Error).message }, 500);
+    }
   });
 
   // GET /library/:id
