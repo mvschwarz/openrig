@@ -2,14 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   resolvePermissionPolicyAttachment,
   validatePermissionPolicyRef,
-} from "/private/tmp/openrig-slice03-80336ff0/packages/daemon/src/domain/permission-policy/policy-ref.ts";
-import { validatePolicySpec } from "/private/tmp/openrig-slice03-80336ff0/packages/daemon/src/domain/permission-policy/policy-spec.ts";
-import { RigSpecSchema } from "/private/tmp/openrig-slice03-80336ff0/packages/daemon/src/domain/rigspec-schema.ts";
+} from "../src/domain/permission-policy/policy-ref.js";
+import { validatePolicySpec } from "../src/domain/permission-policy/policy-spec.js";
+import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
 import {
   createFullTestDb,
   createTestApp,
-} from "/private/tmp/openrig-slice03-80336ff0/packages/daemon/test/helpers/test-app.ts";
-import type { NodeBinding, RuntimeAdapter } from "/private/tmp/openrig-slice03-80336ff0/packages/daemon/src/domain/runtime-adapter.ts";
+} from "./helpers/test-app.js";
+import type { NodeBinding, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 
 const INVALID_BUT_READABLE_CONFIG = `---
 source: custom
