@@ -117,15 +117,16 @@ export interface PolicyResolveDeps {
 }
 
 /**
- * The SINGLE swap-in point for the built-in policies' canonical shipped package-copy path.
- * BLOCKED DEPENDENCY (do not invent — dev-guard correction 2 + orch 2026-08-04): the canonical
- * location is owned by the deferred built-ins packaging leg (skill-library-mirror convention) and
- * is being ruled in PM source-fit lane c76c7153. Until that ruling lands, built-ins carry NO
- * resolvedTarget (absence is honest; a `builtin:<name>` echo is not provenance). When the ruling
- * arrives, return the ruled path here and the resolver + persistence pick it up unchanged.
+ * The SINGLE mapping point for the built-in policies' canonical shipped package-copy path —
+ * PM-RULED (inline ruling via dev-guard NOT-CLEAR at 9e94c274, lane c76c7153):
+ *   repo source (future):   packages/daemon/policies/builtin/<name>.policy.md
+ *   provenance target:      policies/builtin/<name>.policy.md  (package-relative;
+ *                           module-relative at runtime)
+ * The raw `builtin:<name>` ref stays separate (export truth); this target is the restart-
+ * stable provenance. Built-in CONTENT stays a later leg — no asset read or copy here.
  */
-export function builtinPackageTarget(_name: BuiltinPolicyName): string | null {
-  return null; // pending PM/packaging ruling (lane c76c7153)
+export function builtinPackageTarget(name: BuiltinPolicyName): string {
+  return `policies/builtin/${name}.policy.md`;
 }
 
 /**
@@ -146,12 +147,11 @@ export function resolvePermissionPolicyAttachment(
 ): ResolvedPolicyAttachment {
   if (ref.startsWith(BUILTIN_PREFIX)) {
     const builtinName = ref.slice(BUILTIN_PREFIX.length) as BuiltinPolicyName;
-    const packageTarget = builtinPackageTarget(builtinName);
     return {
       ref,
       origin: "builtin",
       builtinName,
-      ...(packageTarget ? { resolvedTarget: packageTarget } : {}),
+      resolvedTarget: builtinPackageTarget(builtinName),
       surface: builtinName === "yolo" ? "flag" : undefined,
       launchPosture: builtinName === "yolo" ? "full_bypass" : "floor",
     };

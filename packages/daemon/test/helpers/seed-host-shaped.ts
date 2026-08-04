@@ -34,6 +34,7 @@ import { seatHandoverObservabilitySchema } from "../../src/db/migrations/021_sea
 import { nodePermissionPolicySchema } from "../../src/db/migrations/055_node_permission_policy.js";
 import { rigPermissionPolicySchema } from "../../src/db/migrations/056_rig_permission_policy.js";
 import { nodePolicyProvenanceSchema } from "../../src/db/migrations/057_node_policy_provenance.js";
+import { rigPolicyProvenanceSchema } from "../../src/db/migrations/058_rig_policy_provenance.js";
 import { nodeCodexConfigProfileSchema } from "../../src/db/migrations/022_node_codex_config_profile.js";
 import { streamItemsSchema } from "../../src/db/migrations/023_stream_items.js";
 import { queueItemsSchema } from "../../src/db/migrations/024_queue_items.js";
@@ -58,7 +59,7 @@ import { sessionsNodeIdIndexSchema } from "../../src/db/migrations/053_sessions_
 // index-independent).
 export function createMigratedDb(): Database.Database {
   const db = createDb();
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, resumeVerificationSchema, seatIdentityVerdictsSchema, eventsNodeTypeIndexSchema, sessionsNodeIdIndexSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, rigPolicyProvenanceSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, resumeVerificationSchema, seatIdentityVerdictsSchema, eventsNodeTypeIndexSchema, sessionsNodeIdIndexSchema]);
   return db;
 }
 

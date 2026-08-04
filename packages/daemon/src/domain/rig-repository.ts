@@ -187,6 +187,53 @@ export class RigRepository {
     return row?.permission_policy ?? null;
   }
 
+  /** Seam B Guard-F1 — persist the RIG-level resolved attachment provenance (migration 058).
+   *  declaringDir = the ORIGINAL declaring RigSpec dir; consumers must never re-resolve the
+   *  raw relative ref against an unrelated operation root. No-op on pre-058 fixture DBs. */
+  setRigPolicyProvenance(
+    rigId: string,
+    provenance: {
+      origin: "builtin" | "custom";
+      resolvedTarget: string | null;
+      declaringDir: string | null;
+      launchPosture: "floor" | "full_bypass";
+    },
+  ): void {
+    if (!this.hasRigColumn("rig_policy_launch_posture")) return;
+    this.db.prepare(
+      "UPDATE rigs SET rig_policy_origin = ?, rig_policy_resolved_target = ?, rig_policy_declaring_dir = ?, rig_policy_launch_posture = ?, updated_at = ? WHERE id = ?",
+    ).run(provenance.origin, provenance.resolvedTarget, provenance.declaringDir, provenance.launchPosture, new Date().toISOString(), rigId);
+  }
+
+  /** Seam B Guard-F1 — read the rig-level resolved attachment provenance (null when none). */
+  getRigPolicyProvenance(rigId: string): {
+    origin: "builtin" | "custom";
+    resolvedTarget: string | null;
+    declaringDir: string | null;
+    launchPosture: "floor" | "full_bypass";
+    /** the raw rig ref (056) alongside, for re-validation */
+    rigRef: string | null;
+  } | null {
+    if (!this.hasRigColumn("rig_policy_launch_posture")) return null;
+    const row = this.db.prepare(
+      "SELECT permission_policy, rig_policy_origin, rig_policy_resolved_target, rig_policy_declaring_dir, rig_policy_launch_posture FROM rigs WHERE id = ?",
+    ).get(rigId) as {
+      permission_policy: string | null;
+      rig_policy_origin: string | null;
+      rig_policy_resolved_target: string | null;
+      rig_policy_declaring_dir: string | null;
+      rig_policy_launch_posture: string | null;
+    } | undefined;
+    if (!row || row.rig_policy_origin == null || row.rig_policy_launch_posture == null) return null;
+    return {
+      origin: row.rig_policy_origin as "builtin" | "custom",
+      resolvedTarget: row.rig_policy_resolved_target,
+      declaringDir: row.rig_policy_declaring_dir,
+      launchPosture: row.rig_policy_launch_posture as "floor" | "full_bypass",
+      rigRef: row.permission_policy,
+    };
+  }
+
   /** OPR.0.4.8.3 Seam B (R2, dev-guard ruling) — persist a node's RESOLVED policy attachment
    *  provenance (restart-stable: origin + resolved target + declaring dir + launch posture).
    *  Builtins carry resolvedTarget=null until the packaging leg's canonical path is ruled
