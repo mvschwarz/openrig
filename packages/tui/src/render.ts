@@ -260,7 +260,20 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
         lines.push({ text: "  topology graph read pending (honest-empty, never fabricated)" });
         return lines;
       }
-      const canvas = renderGraphStyle(state.graphStyle, rig.graph, { host: host.name, rig: rig.name, selected: null }, contentWidth);
+      // PER-VIEW zoom (PM b7f95c4b): a pod drill scopes the SAME projection to
+      // that pod's containment subgraph — nodes clipped at rig scale become
+      // visible AND eligible here; eligibility is always the current view's
+      // clipped hit-zone truth, never a global filter.
+      let graphView = rig.graph;
+      if (podFilter) {
+        const podGroup = rig.graph.nodes.find((n) => n.type === "podGroup" && (n.data.podNamespace ?? n.data.logicalId) === podFilter);
+        const memberIds = new Set(rig.graph.nodes.filter((n) => n.parentId && n.parentId === podGroup?.id).map((n) => n.id));
+        graphView = {
+          nodes: rig.graph.nodes.filter((n) => n === podGroup || memberIds.has(n.id)),
+          edges: rig.graph.edges.filter((e) => memberIds.has(e.source) && memberIds.has(e.target)),
+        };
+      }
+      const canvas = renderGraphStyle(state.graphStyle, graphView, { host: host.name, rig: rig.name, selected: null }, contentWidth);
       const plain = canvas.plainLines();
       const segs = canvas.segLines();
       for (let row = 0; row < plain.length; row++) {

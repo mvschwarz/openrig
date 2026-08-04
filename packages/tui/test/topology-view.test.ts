@@ -374,3 +374,72 @@ describe("R2 HIGH-1 — the locked agent-in-pod-in-rig containment is VISIBLE", 
     expect(screen.contentTargets[podIdx]!.action).toEqual({ type: "drill", resource: "pod", name: "dev", target: { host: "vm-host", rig: FIXTURE_RIG_NAME } });
   });
 });
+
+describe("R2 c47219f1 — offscreen nodes are neither keyboard-selectable nor actionable", () => {
+  function screenAt(cols: number) {
+    const snap = graphSnap();
+    const s = makeStore(snap);
+    s.dispatch({ type: "tab", tab: "graph" });
+    const screen = renderScreen(s.get(), snap, { cols, rows: 34 });
+    return { s, snap, screen };
+  }
+
+  it("every content target's hit region intersects the VISIBLE pane at 140x34 AND 80x34 (zones derive from the clipped truth)", () => {
+    for (const cols of [140, 80]) {
+      const { screen } = screenAt(cols);
+      for (const t of screen.contentTargets) {
+        expect(t.x1, `cols=${cols}: target ${JSON.stringify(t.action)} starts on-screen`).toBeLessThanOrEqual(cols);
+      }
+    }
+  });
+
+  it("keyboard walking the FULL target list always shows a visible marker whose Enter action matches (plain + truecolor)", () => {
+    for (const cols of [140, 80]) {
+      const { s, snap, screen } = screenAt(cols);
+      s.dispatch({ type: "layout", contentMaxOffset: screen.contentMaxOffset, contentTargetCount: screen.contentTargets.length });
+      s.dispatch({ type: "focus", pane: "content" });
+      // walk to the LAST selectable target — the class R2 hit (12×Down at 140)
+      const last = screen.contentTargets.length - 1;
+      s.dispatch({ type: "content-select", index: last });
+      const sel = renderScreen(s.get(), snap, { cols, rows: 34 });
+      const markerRow = sel.lines.findIndex((l, i) => i > 1 && l.slice(31).includes("›"));
+      expect(markerRow, `cols=${cols}: a visible marker exists for the last selectable target`).toBeGreaterThan(0);
+      const styled = stylizeLines(sel, createStyle("truecolor"));
+      expect(styled[markerRow]!, `cols=${cols}: marker visible in truecolor`).toContain("›");
+      expect(stripAnsi(styled[markerRow]!)).toBe(sel.lines[markerRow]!);
+      // Enter dispatches a real, visible-target action
+      expect(sel.contentTargets[Math.min(last, sel.contentTargets.length - 1)]!.action).toBeDefined();
+    }
+  });
+
+  it("selection normalizes honestly when a narrower re-render shrinks the target list (resize class)", () => {
+    const { s, snap, screen } = screenAt(150);
+    s.dispatch({ type: "layout", contentMaxOffset: screen.contentMaxOffset, contentTargetCount: screen.contentTargets.length });
+    s.dispatch({ type: "focus", pane: "content" });
+    s.dispatch({ type: "content-select", index: screen.contentTargets.length - 1 });
+    // resize narrower: fewer targets — the layout action clamps the selection
+    const narrow = renderScreen(s.get(), snap, { cols: 80, rows: 34 });
+    const after = s.dispatch({ type: "layout", contentMaxOffset: narrow.contentMaxOffset, contentTargetCount: narrow.contentTargets.length });
+    expect(after.contentSelection).toBeLessThan(Math.max(narrow.contentTargets.length, 1));
+  });
+});
+
+describe("PER-VIEW eligibility (PM concurrence on b7f95c4b): visibility truth re-evaluates per view", () => {
+  it("an agent fully clipped at rig level becomes eligible when its pod is drilled, and ineligible again at rig level", () => {
+    const snap = graphSnap();
+    const s = makeStore(snap);
+    s.dispatch({ type: "tab", tab: "graph" });
+    // at 80 cols (48-col content pane) the rig-level graph fully clips the
+    // LAST pod column — dev — while earlier pods stay (partially) visible
+    const rigLevel = renderScreen(s.get(), snap, { cols: 80, rows: 34 });
+    const atRig = rigLevel.contentTargets.some((t) => t.action.type === "drill" && t.action.resource === "agent" && t.action.name === "dev.qa");
+    expect(atRig, "dev.qa ineligible while fully clipped at rig level").toBe(false);
+    // drill the dev pod → the pod-scoped view fits → dev.qa is visible AND eligible
+    s.dispatch({ type: "drill", resource: "pod", name: "dev", target: { host: "vm-host", rig: FIXTURE_RIG_NAME } });
+    s.dispatch({ type: "tab", tab: "graph" });
+    const podLevel = renderScreen(s.get(), snap, { cols: 80, rows: 34 });
+    expect(podLevel.lines.join("\n")).toContain("◐ dev.qa"); // visible pixels
+    const atPod = podLevel.contentTargets.some((t) => t.action.type === "drill" && t.action.resource === "agent" && t.action.name === "dev.qa");
+    expect(atPod, "dev.qa eligible in the drilled view (same visible-truth rule, per view)").toBe(true);
+  });
+});

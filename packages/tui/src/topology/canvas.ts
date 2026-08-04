@@ -88,7 +88,12 @@ export class GraphCanvas {
   }
 
   zone(y: number, start: number, end: number, action: Action): void {
-    this.zones.push({ y, start, end, action });
+    // R2 c47219f1: hit zones derive from the SAME viewport-clipped truth as
+    // pixels — a fully offscreen region records NO zone (never keyboard-
+    // selectable/actionable), a partially visible one keeps only its visible,
+    // mouse-reachable extent.
+    if (start >= this.width) return;
+    this.zones.push({ y, start, end: Math.min(end, this.width), action });
   }
 
   get height(): number {
