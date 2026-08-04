@@ -1620,9 +1620,14 @@ export class PodRigInstantiator {
     // the creation tx) and then the PERSISTED rig attachment are the binding's truth.
     const policyAttachment = this.resolveMemberPolicyAttachment(input.member.permissionPolicy, input.rigSpec.permissionPolicy, input.rigRoot);
     if (policyAttachment) this.persistNodePolicyProvenance(input.nodeId, policyAttachment);
+    // R2 terminal (954d97a0): TRUE ABSENCE binds the locked MINIMUM FLOOR explicitly
+    // (README v4 "DEFAULT IF NONE ATTACHED = the minimum floor"; FINAL2) — ambient
+    // OPENRIG_YOLO must never widen a seat with no attachment. Absence stays honest
+    // (no fabricated attachment/provenance); only the lifecycle BINDING is explicit.
     const launchPosture = policyAttachment?.launchPosture
       ?? this.deps.rigRepo.getNodePolicyProvenance(input.nodeId)?.launchPosture
-      ?? this.deps.rigRepo.getRigPolicyProvenance(input.rigId)?.launchPosture;
+      ?? this.deps.rigRepo.getRigPolicyProvenance(input.rigId)?.launchPosture
+      ?? "floor";
 
     const sessionNameErrors = validateSessionComponents(input.pod.id, input.member.id, input.rigSpec.name);
     if (sessionNameErrors.length > 0) {
@@ -1683,9 +1688,9 @@ export class PodRigInstantiator {
       cwd: configResult.config.cwd,
       model: configResult.config.model,
       codexConfigProfile: input.member.codexConfigProfile,
-      // OPR.0.4.8.3 Seam B: resolved launch posture (member > rig > persisted > absent)
-      // binds per-seat; adapters thread it into the yolo-mode helpers on every launch path.
-      ...(launchPosture ? { launchPosture } : {}),
+      // OPR.0.4.8.3 Seam B: resolved launch posture (member > rig > persisted > FLOOR)
+      // binds per-seat explicitly; adapters thread it into the yolo-mode helpers.
+      launchPosture,
     };
 
     // session_source dispatch: fork (native runtime fork) vs rebuild (artifact-
@@ -1863,7 +1868,8 @@ export class PodRigInstantiator {
     if (terminalPolicyAttachment) this.persistNodePolicyProvenance(input.nodeId, terminalPolicyAttachment);
     const terminalLaunchPosture = terminalPolicyAttachment?.launchPosture
       ?? this.deps.rigRepo.getNodePolicyProvenance(input.nodeId)?.launchPosture
-      ?? this.deps.rigRepo.getRigPolicyProvenance(input.rigId)?.launchPosture;
+      ?? this.deps.rigRepo.getRigPolicyProvenance(input.rigId)?.launchPosture
+      ?? "floor"; // R2 terminal: absence = the locked floor, explicitly
     const sessionNameErrors = validateSessionComponents(input.pod.id, input.member.id, input.rigSpec.name);
     if (sessionNameErrors.length > 0) {
       return { status: "failed", error: sessionNameErrors.join("; ") };
@@ -1906,8 +1912,8 @@ export class PodRigInstantiator {
       updatedAt: "",
       cwd: effectiveCwd,
       // Seam B: a terminal seat has no harness posture flag, but the resolved/persisted
-      // attachment still binds for provenance-consuming consumers; terminal ignores it.
-      ...(terminalLaunchPosture ? { launchPosture: terminalLaunchPosture } : {}),
+      // posture (floor when absent) still binds for provenance-consuming consumers.
+      launchPosture: terminalLaunchPosture,
     };
     const adapter = this.deps.adapters["terminal"];
     if (!adapter) {

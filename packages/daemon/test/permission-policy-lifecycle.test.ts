@@ -30,7 +30,8 @@ import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import type { ClaudeResumeAdapter, ResumeResult } from "../src/adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
-import type { NodeBinding } from "../src/domain/runtime-adapter.js";
+import type { NodeBinding, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
+import { claudePostureFlag, codexPostureArg, piTrust } from "../src/adapters/yolo-mode.js";
 
 const CUSTOM_POLICY = `---
 policy_schema_version: 1
@@ -553,6 +554,112 @@ describe("GF2 — the COMPLETE production-altitude launch/restore matrix", () =>
         expect(cmd).toContain(expected);
         if (posture === "floor") expect(cmd).not.toContain("--dangerously-skip-permissions");
       }
+    } finally { vi.unstubAllEnvs(); }
+  });
+});
+
+// ── R2 terminal at 954d97a0: TRUE ABSENCE = the locked MINIMUM FLOOR ────────────
+// README v4 (absence "floor-only"; founder amendment "DEFAULT IF NONE ATTACHED = the
+// minimum floor (nothing more)") + FINAL2: posture binds explicitly across
+// fresh/resume/fork; ambient OPENRIG_YOLO must NOT widen a seat with no attachment.
+// Absence stays HONEST (no fabricated attachment, no provenance rows) — only the
+// lifecycle BINDING carries the explicit floor.
+
+describe("ABSENCE = locked floor at every lifecycle surface (R2 HIGH at 954d97a0)", () => {
+  const captureAdapter = (bindings: NodeBinding[]): RuntimeAdapter => ({
+    runtime: "claude-code",
+    listInstalled: async () => [],
+    project: async () => ({ projected: [], skipped: [], failed: [] }),
+    deliverStartup: async () => ({ delivered: 0, failed: [] }),
+    launchHarness: async (binding: NodeBinding) => { bindings.push(binding); return { ok: true }; },
+    checkReady: async () => ({ ready: true }),
+  } as unknown as RuntimeAdapter);
+
+  it("RED: fresh structured launch with NO attachment binds EXPLICIT floor (never undefined), even under env YOLO", async () => {
+    vi.stubEnv("OPENRIG_YOLO", "1");
+    try {
+      const bindings: NodeBinding[] = [];
+      const db = createFullTestDb();
+      const setup = createTestApp(db, {
+        adapters: { "claude-code": captureAdapter(bindings) },
+        podInstantiatorFsOps: fsOps(),
+      });
+      const bare = { version: "0.2", name: "bare-rig", pods: [{ id: "dev", label: "Dev", members: [{ id: "impl", agent_ref: "local:agents/impl", profile: "default", runtime: "claude-code", cwd: "." }], edges: [] }], edges: [] };
+      const outcome = await setup.podInstantiator.materializeStructured(bare, "/rig");
+      expect(outcome.ok).toBe(true);
+      const rigId = (outcome as { ok: true; result: { rigId: string } }).result.rigId;
+      const added = await setup.podInstantiator.addMemberToPod(rigId, "dev", { id: "late", runtime: "claude-code", agent_ref: "local:agents/impl", profile: "default", cwd: "." }, "/rig");
+      expect(added.ok).toBe(true);
+      expect(bindings).toHaveLength(1);
+      expect(bindings[0]!.launchPosture).toBe("floor"); // explicit, not undefined
+      // honesty preserved: NO fabricated provenance for the absent attachment
+      const lateId = (db.prepare("SELECT id FROM nodes WHERE logical_id = 'dev.late'").get() as { id: string }).id;
+      expect(setup.rigRepo.getNodePolicyProvenance(lateId)).toBeNull();
+      db.close();
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("RED: restore with NO provenance anywhere returns EXPLICIT floor to the resume adapter, even under env YOLO", async () => {
+    vi.stubEnv("OPENRIG_YOLO", "1");
+    const dir = mkdtempSync(join(tmpdir(), "seamb-absent-"));
+    try {
+      const dbFile = join(dir, "d.sqlite");
+      const db1 = createDb(dbFile);
+      migrate(db1, migrationsForFullTestDb);
+      const setup1 = createTestApp(db1, { podInstantiatorFsOps: fsOps() });
+      const rig = setup1.rigRepo.createRig("absent-rig");
+      const node = setup1.rigRepo.addNode(rig.id, "dev.bare", { runtime: "claude-code", cwd: "/w" });
+      const session = setup1.sessionRegistry.registerSession(node.id, "dev-bare@absent-rig");
+      db1.prepare("UPDATE sessions SET resume_type = 'claude_id', resume_token = 'tok-abs' WHERE id = ?").run(session.id);
+      const snap = setup1.snapshotCapture.captureSnapshot(rig.id, "manual");
+      db1.close();
+
+      const db2 = createDb(dbFile);
+      const rigRepo2 = new RigRepository(db2);
+      const sessionRegistry2 = new SessionRegistry(db2);
+      const eventBus2 = new EventBus(db2);
+      const snapshotRepo2 = new SnapshotRepository(db2);
+      const checkpointStore2 = new CheckpointStore(db2);
+      const snapshotCapture2 = new SnapshotCapture({ db: db2, rigRepo: rigRepo2, sessionRegistry: sessionRegistry2, eventBus: eventBus2, snapshotRepo: snapshotRepo2, checkpointStore: checkpointStore2 });
+      const tmux = mockTmux();
+      const claudeResume = {
+        canResume: vi.fn((t: string | null) => t === "claude_id"),
+        resume: vi.fn(async (): Promise<ResumeResult> => ({ ok: true })),
+      } as unknown as ClaudeResumeAdapter;
+      const orch = new RestoreOrchestrator({
+        db: db2, rigRepo: rigRepo2, sessionRegistry: sessionRegistry2, eventBus: eventBus2,
+        snapshotRepo: snapshotRepo2, snapshotCapture: snapshotCapture2, checkpointStore: checkpointStore2,
+        nodeLauncher: new NodeLauncher({ db: db2, rigRepo: rigRepo2, sessionRegistry: sessionRegistry2, eventBus: eventBus2, tmuxAdapter: tmux }),
+        tmuxAdapter: tmux,
+        claudeResume,
+        codexResume: { canResume: vi.fn(() => false), resume: vi.fn() } as unknown as CodexResumeAdapter,
+      });
+      await orch.restore(snap.id);
+      const call = (claudeResume.resume as ReturnType<typeof vi.fn>).mock.calls.find((c) => c[2] === "tok-abs");
+      expect(call, "bare seat resume should have been attempted").toBeDefined();
+      expect(call![4]).toBe("floor"); // explicit floor — ambient YOLO must not widen
+      db2.close();
+    } finally { rmSync(dir, { recursive: true, force: true }); vi.unstubAllEnvs(); }
+  });
+
+  it("RED: successor continuity for a NO-attachment seat carries EXPLICIT floor", async () => {
+    const db = createFullTestDb();
+    const setup = createTestApp(db, { podInstantiatorFsOps: fsOps() });
+    const rig = setup.rigRepo.createRig("absent-rig-2");
+    const organic = setup.rigRepo.addNode(rig.id, "dev.bare2", { runtime: "claude-code", cwd: "/w" });
+    const successorPosture = setup.rigRepo.getNodePolicyProvenance(organic.id)?.launchPosture
+      ?? setup.rigRepo.getRigPolicyProvenance(rig.id)?.launchPosture
+      ?? "floor";
+    expect(successorPosture).toBe("floor");
+    db.close();
+  });
+
+  it("adapter parity under env YOLO: an ABSENT-attachment lifecycle binding (explicit floor) emits FLOOR commands on all three families", async () => {
+    vi.stubEnv("OPENRIG_YOLO", "1");
+    try {
+      expect(claudePostureFlag(process.env, "floor")).toBe("--permission-mode acceptEdits");
+      expect(codexPostureArg("", process.env, "floor")).toBe(" -s workspace-write");
+      expect(piTrust(undefined, process.env, "floor")).toBe("no-approve"); // resource trust
     } finally { vi.unstubAllEnvs(); }
   });
 });

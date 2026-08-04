@@ -277,10 +277,11 @@ export class SeatHandoverService {
     // Seam B Guard-F1: an ORGANIC seat has no node provenance — the inherited rig
     // attachment still carries to the successor (continuity of the same seat).
     const successorPosture = this.rigRepo.getNodePolicyProvenance(node.id)?.launchPosture
-      ?? this.rigRepo.getRigPolicyProvenance(statusResult.status.rig_id)?.launchPosture;
+      ?? this.rigRepo.getRigPolicyProvenance(statusResult.status.rig_id)?.launchPosture
+      ?? "floor"; // R2 terminal: absence = the locked floor on the continuity edge too
     const launch = await this.successorLauncher.createSuccessor({
       // Seam B: the successor is the SAME seat continuing — persisted policy posture carries.
-      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, ...(successorPosture ? { launchPosture: successorPosture } : {}) },
+      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, launchPosture: successorPosture },
       departingSessionName: latestSession.session_name,
     });
     if (!launch.ok) {
