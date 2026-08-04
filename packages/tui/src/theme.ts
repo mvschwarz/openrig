@@ -28,7 +28,9 @@ export type Token =
   | "bright" // primary emphasis
   | "chrome" // borders/rules
   // S19 MR2 — web-identical runtime-mark colors (RuntimeMark.tsx values);
-  // 16-color values are PLACEHOLDERS pending the founder degrade pick (mr7)
+  // 16-color values are the SHIPPED degrade set verified through QA at the
+  // round-7 seal (superseded-comment cleanup per QA LOCKED-SCOPE-CLEAR at
+  // 5348bb66 INFO — behavior and pins were already on these locked values)
   // S19 MR3 — activity ROLES (values = PLACEHOLDERS pending the founder
   // palette pick; the roles are the contract, pins are value-agnostic)
   | "actActive"

@@ -5,7 +5,8 @@
 // 'activate' and the renderer's hit-map keep resolving against it); this
 // module only derives each row's DISPLAY label:
 //   · continuous branch guides │ ├─ └─ from the row's key depth,
-//   · icons: host ⊕ · rig ▚ · pod (dim name + genuine ▾/▸) · agent status ●,
+//   · icons: host ⊕ · rig ▦ (round-3 founder pick of record) · pod ≡ (dim
+//     name + genuine ▾/▸) · agent status glyph via rowStatusGlyph,
 //   · meta right-aligned (agent ctx% — honest `—` when null; pod agent count),
 //   · collapse glyphs ONLY where collapse genuinely exists today (pods, spec
 //     folders, section headers) — hosts/rigs carried a decorative ▾ that
