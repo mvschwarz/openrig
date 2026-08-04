@@ -78,6 +78,11 @@ describe("getting-started narrative parity — slice 21", () => {
         expect(cliProof, `CLI scaffold missing ${relProof}`).toBeDefined();
         expect(daemonProof, `daemon scaffold missing ${relProof}`).toBeDefined();
         expect(daemonProof).toBe(cliProof);
+        // broad-suite-residue atom 3: the WHO/WHEN sentence carries BOTH context
+        // paths as separate code spans and never the internal staging path
+        expect(daemonProof).toContain("`docs/reference/sdlc-conventions.md` in the repo");
+        expect(daemonProof).toContain("`$OPENRIG_HOME/reference/sdlc-conventions.md` on an installed package");
+        expect(daemonProof).not.toContain("daemon/docs/reference/");
         expect(cliDirs).toContain(relProofDir);
         expect(daemonDirs).toContain(relProofDir);
       });
