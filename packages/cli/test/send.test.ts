@@ -413,6 +413,39 @@ describe("Send CLI", () => {
     expect(argv[ri + 1]).toBe("why now");
   });
 
+  // Slice-03 Atom 6b QA fix — the agent@rig@host SUGAR host folds in AFTER the
+  // early --context guard, so --context must be re-rejected after the fold: it
+  // must NEVER reach the cross-host argv (which would ship literal null with no
+  // message, or silently drop the context with one). Both forms pinned.
+  it("send --context rejects the agent@rig@host sugar cross-host form (NO message) — never reaches remote argv", async () => {
+    let captured: readonly string[] | null = null;
+    const deps: SendDeps = {
+      ...runningDeps(port),
+      hostRegistryLoader: () => ({ ok: true, registry: { hosts: [{ id: "vm-test", transport: "ssh", target: "vm.local" }] } }),
+      crossHostRun: async (_host, argv) => { captured = argv; return { ok: true, stdout: "", stderr: "" }; },
+    };
+    const { stderr, exitCode } = await captureChannels(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "send", "dev-impl@my-rig@vm-test", "--context", "packs/x"]);
+    });
+    expect(exitCode).toBe(1);
+    expect(captured).toBeNull(); // never reached cross-host → no null shipped
+    expect(stderr.join("\n")).toMatch(/--host|agent@rig@host/);
+  });
+
+  it("send --context rejects the sugar cross-host form (WITH message) — context not silently dropped", async () => {
+    let captured: readonly string[] | null = null;
+    const deps: SendDeps = {
+      ...runningDeps(port),
+      hostRegistryLoader: () => ({ ok: true, registry: { hosts: [{ id: "vm-test", transport: "ssh", target: "vm.local" }] } }),
+      crossHostRun: async (_host, argv) => { captured = argv; return { ok: true, stdout: "", stderr: "" }; },
+    };
+    const { exitCode } = await captureChannels(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "send", "dev-impl@my-rig@vm-test", "msg", "--context", "packs/x"]);
+    });
+    expect(exitCode).toBe(1);
+    expect(captured).toBeNull(); // rejected before cross-host → context never dropped
+  });
+
   // OPR.0.4.3.30 — `rig send` fan-out targeting (--to / --pod / --rig).
   it("send --to a,b fans out to /broadcast with a sessions list and prints per-recipient summary", async () => {
     const { logs, exitCode } = await captureLogs(async () => {

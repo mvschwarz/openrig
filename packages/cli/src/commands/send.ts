@@ -314,10 +314,23 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       const crossHostHint = targetResolution.hint;
       opts.host = explicitHost ?? targetResolution.sugarHost ?? opts.host;
 
+      // Atom 6b QA fix (root cause): re-reject --context on the cross-host path
+      // AFTER the agent@rig@host sugar host folds into opts.host. The early guard
+      // runs before resolveCrossHostTarget, so it cannot see the sugar host — the
+      // hole that let a sugar-form --context reach the remote argv (shipping a
+      // literal null with no message, or silently dropping the context with one).
+      // --context is single-seat LOCAL in v1; it is never handed to a remote send.
+      if (opts.context && opts.host) {
+        console.error("--context is supported on a LOCAL send in v1 (not with --host or an agent@rig@host cross-host target).");
+        process.exitCode = 1;
+        return;
+      }
+
       // --- Cross-host short-circuit (CLI-side; ssh shell-out or the MH-4 http branch; daemon untouched) ---
       if (opts.host) {
-        // text is validated-defined here: --context is rejected with --host, and
-        // the single-seat (no text && no context) guard requires it on this path.
+        // text is validated-defined here: --context is rejected with --host (above,
+        // for both explicit and sugar forms), and the single-seat (no text && no
+        // context) guard requires it on this path.
         await runCrossHostSend(opts.host, session, text!, opts, deps, waitForIdleMs, crossHostHint);
         return;
       }
