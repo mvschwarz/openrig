@@ -287,7 +287,7 @@ export class RigInstantiator {
 
 import { RigSpecCodec as PodRigSpecCodec } from "./rigspec-codec.js";
 import { RigSpecSchema as PodRigSpecSchema, VALID_EDGE_KINDS } from "./rigspec-schema.js";
-import { rigPreflight, preflightValidatedSpec } from "./rigspec-preflight.js";
+import { permissionPolicyDiscoveryWarnings, rigPreflight, preflightValidatedSpec } from "./rigspec-preflight.js";
 import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { resolveNodeConfig } from "./profile-resolver.js";
 import { resolveStartup } from "./startup-resolver.js";
@@ -343,7 +343,8 @@ export interface MaterializeResult {
   specName: string;
   specVersion: string;
   nodes: Array<{ logicalId: string; status: "materialized" }>;
-  /** NONFATAL READY-path preflight warnings (e.g. managed activity-hook delivery gaps). */
+  /** NONFATAL READY-path warnings: managed activity-hook delivery gaps (main's floor) FOLLOWED BY
+   *  permission-policy lifecycle-discovery warnings (§6 reconciliation — activity-hook-first). */
   warnings?: string[];
 }
 
@@ -685,7 +686,12 @@ export class PodRigInstantiator {
           specName: rigSpec.name,
           specVersion: rigSpec.version,
           nodes: nodeResults,
-          warnings: carryWarnings && carryWarnings.length > 0 ? carryWarnings : undefined,
+          // §6 reconciliation (activity-hook-first, policy-appended): both proven warning sources ride;
+          // undefined-when-empty preserved from main's floor.
+          warnings: ((): string[] | undefined => {
+            const merged = [...(carryWarnings ?? []), ...permissionPolicyDiscoveryWarnings(rigSpec, { rigRoot, fsOps: this.deps.fsOps })];
+            return merged.length > 0 ? merged : undefined;
+          })(),
         },
       };
     } catch (err) {
@@ -1084,10 +1090,10 @@ export class PodRigInstantiator {
     const nodeResults: { logicalId: string; status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string }[] = [];
     const nodeIdMap: Record<string, string> = {}; // "pod.member" -> node DB id
     const launchedSessionNames: string[] = []; // Track for orphan cleanup on total failure
-    // Seed with the READY-path preflight warnings (nonfatal — e.g. managed activity-hook
-    // delivery gaps) so they ride along in the successful instantiate result alongside
-    // launch/materialization warnings; rig up stays rc0.
-    const podInstantiateWarnings: string[] = [...preflight.warnings];
+    // §6 reconciliation (activity-hook-first, policy-appended): seed with the READY-path preflight
+    // warnings (nonfatal — managed activity-hook delivery gaps, main's floor) FIRST, then append the
+    // permission-policy lifecycle-discovery warnings; both proven sources ride, rig up stays rc0.
+    const podInstantiateWarnings: string[] = [...preflight.warnings, ...permissionPolicyDiscoveryWarnings(rigSpec, { rigRoot, fsOps: this.deps.fsOps })];
     // Store per-member context for deferred launch
     const memberContext = new Map<string, { pod: typeof rigSpec.pods[0]; member: typeof rigSpec.pods[0]["members"][0]; podId: string; nodeId: string; resolveResult: any; configResult: any }>();
 

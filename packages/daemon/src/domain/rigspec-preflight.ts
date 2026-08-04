@@ -124,6 +124,10 @@ import { resolveNodeConfig, type ResolutionContext } from "./profile-resolver.js
 import { getOpenRigInstallCwdError, resolveLaunchCwd } from "./cwd-resolution.js";
 import nodePath from "node:path";
 import { validateClaudeActivityHookDelivery, CLAUDE_ACTIVITY_HOOKS_RESOURCE_TYPE } from "./claude-activity-hooks.js";
+import {
+  resolvePermissionPolicyAttachment,
+  resolvePermissionPolicyRefValue,
+} from "./permission-policy/policy-ref.js";
 
 const SUPPORTED_RUNTIMES = new Set(["claude-code", "codex", "pi", "terminal"]);
 
@@ -160,6 +164,33 @@ export interface PreflightSpecContext {
    *  the daemon-shipped assets (same as the ClaudeCodeAdapter); tests inject fixtures. Validated
    *  via the SHARED delivery check so preflight + adapter cannot drift. */
   claudeActivityAssets?: { relayPath?: string; manifestPath?: string };
+}
+
+/**
+ * Seam C: describe each seat's effective permission-policy attachment without
+ * changing readiness or state. The existing Seam-B resolver remains the one
+ * source of truth for member-over-rig precedence, origin, and launch posture.
+ */
+export function permissionPolicyDiscoveryWarnings(
+  rigSpec: PodRigSpec,
+  preflightCtx: Pick<PreflightSpecContext, "rigRoot" | "fsOps">,
+): string[] {
+  const warnings: string[] = [];
+  for (const pod of rigSpec.pods) {
+    for (const member of pod.members) {
+      const logicalId = `${pod.id}.${member.id}`;
+      const ref = resolvePermissionPolicyRefValue(member.permissionPolicy, rigSpec.permissionPolicy);
+      if (!ref) {
+        warnings.push(`${logicalId}: permission_policy absent; launch_posture=floor`);
+        continue;
+      }
+      const attachment = resolvePermissionPolicyAttachment(ref, preflightCtx.rigRoot, {
+        readFile: (path) => preflightCtx.fsOps.readFile(path),
+      });
+      warnings.push(`${logicalId}: permission_policy ref="${attachment.ref}" origin=${attachment.origin} launch_posture=${attachment.launchPosture}`);
+    }
+  }
+  return warnings;
 }
 
 /**
@@ -205,7 +236,7 @@ export async function rigPreflight(input: RigPreflightInput & { exec?: (cmd: str
  */
 export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: PreflightSpecContext): Promise<PreflightResult> {
   const errors: string[] = [];
-  const warnings: string[] = [];
+  const warnings = permissionPolicyDiscoveryWarnings(rigSpec, preflightCtx);
 
   // 2. Validate session name components for all pod members
   const effectiveRigName = preflightCtx.rigNameOverride ?? rigSpec.name;
