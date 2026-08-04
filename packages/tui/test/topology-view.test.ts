@@ -54,9 +54,11 @@ describe("graph view reachability (the existing navigation, extended additively)
     expect(state.lastError).toBeNull();
   });
 
-  it("the DEFAULT graph style is braille (Phase-2 decision rule executed: clean-box solved) with hatchet one command away", () => {
+  it("the DEFAULT graph style is HATCHET (founder flip 2026-08-04: font-dependence = brittleness) with braille one command away", () => {
     const s = makeStore(graphSnap());
-    expect(s.get().graphStyle).toBe("braille");
+    expect(s.get().graphStyle).toBe("hatchet");
+    // both directions stay live: braille reachable, and back
+    expect(s.dispatch(parseCommand("style braille")).graphStyle).toBe("braille");
     expect(s.dispatch(parseCommand("style hatchet")).graphStyle).toBe("hatchet");
   });
 
