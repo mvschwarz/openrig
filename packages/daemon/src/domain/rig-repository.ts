@@ -110,6 +110,8 @@ interface NodeOptions {
   runtime?: string;
   model?: string;
   codexConfigProfile?: string;
+  /** OPR.0.4.8.3 Seam B: per-seat permission_policy REF (builtin:<name> or spec-relative path). */
+  permissionPolicy?: string;
   cwd?: string;
   surfaceHint?: string;
   workspace?: string;
@@ -169,6 +171,67 @@ export class RigRepository {
     }
   }
 
+  /** OPR.0.4.8.3 Seam B — persist a rig's attached permission_policy REF (builtin:<name> or a
+   *  spec-relative custom path), or null to clear. Mirrors setRigWorkspace (migration 056). */
+  setRigPermissionPolicy(rigId: string, permissionPolicy: string | null): void {
+    if (!this.hasRigColumn("permission_policy")) return;
+    this.db.prepare("UPDATE rigs SET permission_policy = ?, updated_at = ? WHERE id = ?")
+      .run(permissionPolicy ?? null, new Date().toISOString(), rigId);
+  }
+
+  /** OPR.0.4.8.3 Seam B — read the persisted rig-level permission_policy REF (null when none). */
+  getRigPermissionPolicy(rigId: string): string | null {
+    if (!this.hasRigColumn("permission_policy")) return null;
+    const row = this.db.prepare("SELECT permission_policy FROM rigs WHERE id = ?")
+      .get(rigId) as { permission_policy: string | null } | undefined;
+    return row?.permission_policy ?? null;
+  }
+
+  /** OPR.0.4.8.3 Seam B (R2, dev-guard ruling) — persist a node's RESOLVED policy attachment
+   *  provenance (restart-stable: origin + resolved target + declaring dir + launch posture).
+   *  Builtins carry resolvedTarget=null until the packaging leg's canonical path is ruled
+   *  (PM lane c76c7153) — never a `builtin:<name>` echo. No-op on pre-057 fixture DBs. */
+  setNodePolicyProvenance(
+    nodeId: string,
+    provenance: {
+      origin: "builtin" | "custom";
+      resolvedTarget: string | null;
+      declaringDir: string | null;
+      launchPosture: "floor" | "full_bypass";
+    },
+  ): void {
+    if (!this.hasNodeColumn("policy_launch_posture")) return;
+    this.db.prepare(
+      "UPDATE nodes SET policy_origin = ?, policy_resolved_target = ?, policy_declaring_dir = ?, policy_launch_posture = ? WHERE id = ?",
+    ).run(provenance.origin, provenance.resolvedTarget, provenance.declaringDir, provenance.launchPosture, nodeId);
+  }
+
+  /** Seam B (R2) — read a node's persisted policy provenance; null when none attached
+   *  (or pre-057 DB). Restore consumers re-derive posture from this without the spec. */
+  getNodePolicyProvenance(nodeId: string): {
+    origin: "builtin" | "custom";
+    resolvedTarget: string | null;
+    declaringDir: string | null;
+    launchPosture: "floor" | "full_bypass";
+  } | null {
+    if (!this.hasNodeColumn("policy_launch_posture")) return null;
+    const row = this.db.prepare(
+      "SELECT policy_origin, policy_resolved_target, policy_declaring_dir, policy_launch_posture FROM nodes WHERE id = ?",
+    ).get(nodeId) as {
+      policy_origin: string | null;
+      policy_resolved_target: string | null;
+      policy_declaring_dir: string | null;
+      policy_launch_posture: string | null;
+    } | undefined;
+    if (!row || row.policy_origin == null || row.policy_launch_posture == null) return null;
+    return {
+      origin: row.policy_origin as "builtin" | "custom",
+      resolvedTarget: row.policy_resolved_target,
+      declaringDir: row.policy_declaring_dir,
+      launchPosture: row.policy_launch_posture as "floor" | "full_bypass",
+    };
+  }
+
   /** PL-007 — defensive column probe on rigs (migration 038's
    *  workspace_json is absent in legacy test fixtures). */
   private hasRigColumn(columnName: string): boolean {
@@ -189,7 +252,38 @@ export class RigRepository {
     }
 
     const id = ulid();
-    if (this.hasNodeColumn("codex_config_profile")) {
+    if (this.hasNodeColumn("codex_config_profile") && this.hasNodeColumn("permission_policy")) {
+      // OPR.0.4.8.3 Seam B: both ALTER-added optional columns present (migrations 022 + 055; 055
+      // runs after 022, so a permission_policy column implies a codex_config_profile column).
+      this.db
+        .prepare(
+          `INSERT INTO nodes (id, rig_id, logical_id, role, runtime, model, codex_config_profile, permission_policy, cwd, surface_hint, workspace, restore_policy, package_refs,
+           pod_id, agent_ref, profile, label, resolved_spec_name, resolved_spec_version, resolved_spec_hash)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          id,
+          rigId,
+          logicalId,
+          opts?.role ?? null,
+          opts?.runtime ?? null,
+          opts?.model ?? null,
+          opts?.codexConfigProfile ?? null,
+          opts?.permissionPolicy ?? null,
+          opts?.cwd ?? null,
+          opts?.surfaceHint ?? null,
+          opts?.workspace ?? null,
+          opts?.restorePolicy ?? null,
+          opts?.packageRefs ? JSON.stringify(opts.packageRefs) : null,
+          opts?.podId ?? null,
+          opts?.agentRef ?? null,
+          opts?.profile ?? null,
+          opts?.label ?? null,
+          opts?.resolvedSpecName ?? null,
+          opts?.resolvedSpecVersion ?? null,
+          opts?.resolvedSpecHash ?? null,
+        );
+    } else if (this.hasNodeColumn("codex_config_profile")) {
       this.db
         .prepare(
           `INSERT INTO nodes (id, rig_id, logical_id, role, runtime, model, codex_config_profile, cwd, surface_hint, workspace, restore_policy, package_refs,
@@ -464,6 +558,7 @@ export class RigRepository {
       runtime: row.runtime,
       model: row.model,
       codexConfigProfile: row.codex_config_profile ?? null,
+      permissionPolicy: row.permission_policy ?? null,
       cwd: row.cwd,
       surfaceHint: row.surface_hint ?? null,
       workspace: row.workspace ?? null,
@@ -548,6 +643,7 @@ interface NodeRow {
   runtime: string | null;
   model: string | null;
   codex_config_profile?: string | null;
+  permission_policy?: string | null;
   cwd: string | null;
   surface_hint: string | null;
   workspace: string | null;

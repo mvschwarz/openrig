@@ -2,6 +2,11 @@ import nodePath from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
 import type Database from "better-sqlite3";
 import { assembleBundle } from "./context-packs/bundle-assembler.js";
+import {
+  resolvePermissionPolicyAttachment,
+  resolvePermissionPolicyRefValue,
+  type ResolvedPolicyAttachment,
+} from "./permission-policy/policy-ref.js";
 import type { ContextPackEntry } from "./context-packs/context-pack-types.js";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
@@ -549,6 +554,13 @@ export class PodRigInstantiator {
           this.deps.rigRepo.setRigWorkspace(materializedRigId, rigSpec.workspace);
         }
 
+        // OPR.0.4.8.3 Seam B: persist the rig-level permission_policy REF (raw, like role) —
+        // this is ONE of TWO rig-persist sites (materializeValidatedSpec + instantiate); missing
+        // either drops the rig ref on that path (map correction, independently verified).
+        if (rigSpec.permissionPolicy) {
+          this.deps.rigRepo.setRigPermissionPolicy(materializedRigId, rigSpec.permissionPolicy);
+        }
+
         const currentRig = this.deps.rigRepo.getRig(materializedRigId)!;
         const logicalIdToNodeId = new Map(currentRig.nodes.map((node) => [node.logicalId, node.id]));
         const existingPodIds = new Set(
@@ -997,6 +1009,11 @@ export class PodRigInstantiator {
       if (rigSpec.workspace) {
         this.deps.rigRepo.setRigWorkspace(rigId, rigSpec.workspace);
       }
+      // OPR.0.4.8.3 Seam B: the SECOND rig-persist site (bootstrap instantiate path) —
+      // both sites must write or the rig ref silently drops on one instantiate path.
+      if (rigSpec.permissionPolicy) {
+        this.deps.rigRepo.setRigPermissionPolicy(rigId, rigSpec.permissionPolicy);
+      }
     } catch (err) {
       return { ok: false, code: "instantiate_error", message: (err as Error).message };
     }
@@ -1107,6 +1124,10 @@ export class PodRigInstantiator {
             runtime: member.runtime,
             model: member.model,
             codexConfigProfile: member.codexConfigProfile,
+            // OPR.0.4.8.3 Seam B: bootstrap inline addNode is the FOURTH node-creation
+            // site (see the role wire note above) — same member-ref persistence as
+            // createMemberNode or `rig up <spec>` seats lose their policy ref.
+            permissionPolicy: member.permissionPolicy,
             cwd: configResult.config.cwd,
             restorePolicy: configResult.config.restorePolicy,
             podId,
@@ -1409,6 +1430,9 @@ export class PodRigInstantiator {
       runtime: input.member.runtime,
       model: input.member.model,
       codexConfigProfile: input.member.codexConfigProfile,
+      // OPR.0.4.8.3 Seam B: the member's OWN raw ref persists on the node (like role);
+      // rig-level lives on the rig row; precedence applies at RESOLUTION, not storage.
+      permissionPolicy: input.member.permissionPolicy,
       cwd: effectiveCwd,
       restorePolicy: input.member.restorePolicy,
       podId: input.podId,
@@ -1449,6 +1473,39 @@ export class PodRigInstantiator {
       : this.launchExistingAgentMember(input);
   }
 
+  /**
+   * OPR.0.4.8.3 Seam B — the ONE precedence + resolution point for a seat's permission
+   * policy at launch: member ref > rig ref > absent (undefined = the env-driven floor).
+   * Custom refs resolve relative to the rig root (the declaring RigSpec's directory in a
+   * materialized rig). Returns undefined when no ref is attached at either level.
+   */
+  private resolveMemberPolicyAttachment(
+    member: RigSpecPodMember,
+    rigSpec: PodRigSpec,
+    rigRoot: string,
+  ): ResolvedPolicyAttachment | undefined {
+    const ref = resolvePermissionPolicyRefValue(member.permissionPolicy, rigSpec.permissionPolicy);
+    if (!ref) return undefined;
+    return resolvePermissionPolicyAttachment(ref, rigRoot, {
+      readFile: (p) => this.deps.fsOps.readFile(p),
+    });
+  }
+
+  /** Seam B R2: persist the restart-stable resolved provenance on the node (best-effort —
+   *  a missing column on an old fixture DB must not fail the launch; graceful degradation
+   *  mirrors the addNode column discipline). Builtins carry NO resolvedTarget until the
+   *  packaging ruling (lane c76c7153) — absence is honest, never a builtin:<name> echo. */
+  private persistNodePolicyProvenance(nodeId: string, attachment: ResolvedPolicyAttachment): void {
+    try {
+      this.deps.rigRepo.setNodePolicyProvenance(nodeId, {
+        origin: attachment.origin,
+        resolvedTarget: attachment.resolvedTarget ?? null,
+        declaringDir: attachment.declaringDir ?? null,
+        launchPosture: attachment.launchPosture,
+      });
+    } catch { /* best-effort: provenance persistence never blocks a launch */ }
+  }
+
   private async launchExistingAgentMember(input: {
     rigId: string;
     rigSpec: PodRigSpec;
@@ -1485,6 +1542,12 @@ export class PodRigInstantiator {
     }
 
     this.updateNodeResolvedConfig(input.nodeId, configResult.config);
+
+    // OPR.0.4.8.3 Seam B: resolve the seat's permission-policy attachment once for this
+    // launch (member > rig precedence; declaring dir = the rig root, where the declaring
+    // RigSpec + its relative policy files live). Also persists restart-stable provenance.
+    const policyAttachment = this.resolveMemberPolicyAttachment(input.member, input.rigSpec, input.rigRoot);
+    if (policyAttachment) this.persistNodePolicyProvenance(input.nodeId, policyAttachment);
 
     const sessionNameErrors = validateSessionComponents(input.pod.id, input.member.id, input.rigSpec.name);
     if (sessionNameErrors.length > 0) {
@@ -1545,6 +1608,9 @@ export class PodRigInstantiator {
       cwd: configResult.config.cwd,
       model: configResult.config.model,
       codexConfigProfile: input.member.codexConfigProfile,
+      // OPR.0.4.8.3 Seam B: resolved launch posture (member > rig > absent) binds per-seat;
+      // adapters thread it into the yolo-mode helpers on every launch path.
+      ...(policyAttachment ? { launchPosture: policyAttachment.launchPosture } : {}),
     };
 
     // session_source dispatch: fork (native runtime fork) vs rebuild (artifact-
@@ -1718,6 +1784,8 @@ export class PodRigInstantiator {
     cwdOverride?: string;
   }): Promise<{ status: "launched" | "failed"; error?: string; sessionName?: string; warnings?: string[] }> {
     const effectiveCwd = resolveLaunchCwd(input.member.cwd, input.rigRoot, input.cwdOverride);
+    const terminalPolicyAttachment = this.resolveMemberPolicyAttachment(input.member, input.rigSpec, input.rigRoot);
+    if (terminalPolicyAttachment) this.persistNodePolicyProvenance(input.nodeId, terminalPolicyAttachment);
     const sessionNameErrors = validateSessionComponents(input.pod.id, input.member.id, input.rigSpec.name);
     if (sessionNameErrors.length > 0) {
       return { status: "failed", error: sessionNameErrors.join("; ") };
@@ -1759,6 +1827,10 @@ export class PodRigInstantiator {
       cmuxSurface: null,
       updatedAt: "",
       cwd: effectiveCwd,
+      // Seam B: a terminal seat has no harness posture flag, but the resolved attachment
+      // (rig-level only — schema rejects member-level policy on terminal runtime) still
+      // binds for provenance-consuming consumers; the terminal adapter ignores it.
+      ...(terminalPolicyAttachment ? { launchPosture: terminalPolicyAttachment.launchPosture } : {}),
     };
     const adapter = this.deps.adapters["terminal"];
     if (!adapter) {

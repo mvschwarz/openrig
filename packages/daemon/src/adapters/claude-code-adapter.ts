@@ -212,7 +212,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     // OPR.0.4.8.2: the acceptEdits floor by default; YOLO (opt-in) swaps in the full-bypass flag.
     // The SAME decision (claudePostureFlag) is used on the restore path (claude-resume.ts).
-    const permissionMode = claudePostureFlag();
+    // OPR.0.4.8.3 Seam B: a per-seat resolved policy posture (binding.launchPosture) overrides env.
+    const permissionMode = claudePostureFlag(process.env, binding.launchPosture);
 
     // Fork branch: build `claude --resume <parent> --fork-session --name <seat>`
     // and capture the NEW post-fork session id. The parent token is NEVER

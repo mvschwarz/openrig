@@ -12,7 +12,18 @@
 // config files — it only selects a launch flag. Opt-in via the OPENRIG_YOLO env setting. (The
 // zero-permission-config-write property concerns Claude/Codex permission policy; Pi is resource trust.)
 
-export function yoloEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+/** OPR.0.4.8.3 Seam B: a seat's RESOLVED permission-policy posture. When present it is
+ *  authoritative for that seat and overrides the OPENRIG_YOLO env read in BOTH directions
+ *  (an attached builtin:locked keeps the floor even under global YOLO; an attached custom
+ *  full_bypass flag policy lifts the seat without the env switch). Absent = no policy
+ *  attached → the env decision stands (0.4.8.2 behavior, unchanged). */
+export type ResolvedLaunchPosture = "floor" | "full_bypass";
+
+export function yoloEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+  resolvedPosture?: ResolvedLaunchPosture,
+): boolean {
+  if (resolvedPosture) return resolvedPosture === "full_bypass";
   const v = env.OPENRIG_YOLO;
   return v === "1" || v === "true";
 }
@@ -22,9 +33,13 @@ export function yoloEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 // path-dependent. NOTE the ON posture differs by harness: Claude/Codex = permission bypass; Pi =
 // full RESOURCE TRUST (--approve), which is not a permission policy. ──
 
-/** Claude launch posture flag: floor `--permission-mode acceptEdits`, or the YOLO full bypass. */
-export function claudePostureFlag(env: NodeJS.ProcessEnv = process.env): string {
-  return yoloEnabled(env) ? "--dangerously-skip-permissions" : "--permission-mode acceptEdits";
+/** Claude launch posture flag: floor `--permission-mode acceptEdits`, or the full bypass
+ *  (global YOLO, or a per-seat resolved full_bypass policy attachment). */
+export function claudePostureFlag(
+  env: NodeJS.ProcessEnv = process.env,
+  resolvedPosture?: ResolvedLaunchPosture,
+): string {
+  return yoloEnabled(env, resolvedPosture) ? "--dangerously-skip-permissions" : "--permission-mode acceptEdits";
 }
 
 /**
@@ -35,8 +50,12 @@ export function claudePostureFlag(env: NodeJS.ProcessEnv = process.env): string 
  * - OFF + no profile → OpenRig's explicit workspace-only floor ` -s workspace-write`.
  * No forced approval flag on any path — the approval flow is left to Codex, unforced.
  */
-export function codexPostureArg(profileArg: string, env: NodeJS.ProcessEnv = process.env): string {
-  if (yoloEnabled(env)) return " -s danger-full-access";
+export function codexPostureArg(
+  profileArg: string,
+  env: NodeJS.ProcessEnv = process.env,
+  resolvedPosture?: ResolvedLaunchPosture,
+): string {
+  if (yoloEnabled(env, resolvedPosture)) return " -s danger-full-access";
   return profileArg ? profileArg : " -s workspace-write";
 }
 
@@ -45,6 +64,9 @@ export function codexPostureArg(profileArg: string, env: NodeJS.ProcessEnv = pro
 export function piTrust(
   configured: "approve" | "no-approve" | undefined,
   env: NodeJS.ProcessEnv = process.env,
+  resolvedPosture?: ResolvedLaunchPosture,
 ): "approve" | "no-approve" {
-  return yoloEnabled(env) ? "approve" : configured ?? "no-approve";
+  // Pi wording discipline: this is RESOURCE TRUST, not a permission policy — a resolved
+  // full_bypass policy forces full resource trust exactly as global YOLO does.
+  return yoloEnabled(env, resolvedPosture) ? "approve" : configured ?? "no-approve";
 }
