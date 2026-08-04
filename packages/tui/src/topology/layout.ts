@@ -8,7 +8,10 @@ import { statusGlyph, type StatusGlyph } from "./glyphs.js";
 export interface PlacedNode {
   node: GraphNode;
   glyph: StatusGlyph;
-  /** `● name  63%` and `runtime · ctx% · pod` — the info INSIDE the node */
+  /** MEMBER-only display title (S19 MR1 — identity stays logicalId in every
+   * zone/action; this is display only) */
+  title: string;
+  /** `● member  63%` and `runtime · ctx%` — the info INSIDE the node */
   nameLine: string;
   metaLine: string;
   x: number;
@@ -45,13 +48,21 @@ export function agentNodes(graph: RigGraph): GraphNode[] {
   return graph.nodes.filter((n) => n.type === "rigNode" && n.data.nodeKind === "agent");
 }
 
-export function nodeLines(node: GraphNode): { glyph: StatusGlyph; nameLine: string; metaLine: string } {
+export function nodeLines(node: GraphNode): { glyph: StatusGlyph; title: string; nameLine: string; metaLine: string } {
   const glyph = statusGlyph(node.data);
   const ctx = node.data.contextUsedPercentage;
-  const nameLine = `${glyph.glyph} ${node.data.logicalId}${glyph.overlay ? `  ${glyph.overlay}` : ""}`;
+  // S19 MR1 (§A1): the pod is named ONCE — by its container tab. The card
+  // title is the MEMBER-only segment (a confirmed `${pod}.` prefix strips,
+  // the navigator's rule; non-prefixed names display unchanged) and the meta
+  // drops the pod suffix.
+  const pod = node.data.podNamespace;
+  const member = pod && node.data.logicalId.startsWith(`${pod}.`)
+    ? node.data.logicalId.slice(pod.length + 1)
+    : node.data.logicalId;
+  const nameLine = `${glyph.glyph} ${member}${glyph.overlay ? `  ${glyph.overlay}` : ""}`;
   // honest-unknown: a null ctx renders "—", never a fabricated number
-  const metaLine = `${node.data.runtime ?? "—"} · ${ctx == null ? "—" : `${Math.round(ctx)}%`} · ${node.data.podNamespace ?? "—"}`;
-  return { glyph, nameLine, metaLine };
+  const metaLine = `${node.data.runtime ?? "—"} · ${ctx == null ? "—" : `${Math.round(ctx)}%`}`;
+  return { glyph, title: member, nameLine, metaLine };
 }
 
 function rankNodes(agents: GraphNode[], edges: GraphEdge[]): Map<string, number> {
@@ -127,9 +138,9 @@ export function layoutGraph(graph: RigGraph, maxWidth: number, rigName = ""): Gr
     let y = podTop + 1;
     let podInnerW = Math.max(`▾ ${podName}`.length + 2, 8);
     for (const node of sorted) {
-      const { glyph, nameLine, metaLine } = nodeLines(node);
+      const { glyph, title, nameLine, metaLine } = nodeLines(node);
       const w = Math.max(nameLine.length, metaLine.length) + 4;
-      const p: PlacedNode = { node, glyph, nameLine, metaLine, x: podX + 2, y, w, h: 4 };
+      const p: PlacedNode = { node, glyph, title, nameLine, metaLine, x: podX + 2, y, w, h: 4 };
       placed.push(p);
       byId.set(node.id, p);
       y += p.h + 1;

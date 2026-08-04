@@ -94,8 +94,8 @@ describe("hatchet mainline in the SHIPPED content pane (frame-01 visual contract
     const { screen } = graphScreen();
     const body = screen.lines.join("\n");
     expect(body).toMatch(/┌─+┐/);
-    expect(body).toContain("● orch.lead");
-    expect(body).toContain("claude-code · 18% · orch");
+    expect(body).toContain("● lead"); // member-only title (S19 MR1)
+    expect(body).toContain("claude-code · 18%"); // S19 MR1: pod suffix gone (pod named once by its container)
     // straight connector runs + arrowhead; under the LOCKED containment an
     // edge may legitimately cross a pod-container wall (─ becomes ┼ at the
     // crossing) before its arrowhead
@@ -105,9 +105,9 @@ describe("hatchet mainline in the SHIPPED content pane (frame-01 visual contract
 
   it("honest-unknown ○ renders in the shipped graph view (never a fabricated ●)", () => {
     const { screen } = graphScreen();
-    expect(screen.lines.join("\n")).toContain("○ review.r1");
-    expect(screen.lines.join("\n")).toContain("✕ review.validator");
-    expect(screen.lines.join("\n")).toMatch(/◐ dev\.qa/);
+    expect(screen.lines.join("\n")).toContain("○ r1"); // member-only (S19 MR1)
+    expect(screen.lines.join("\n")).toContain("✕ validator");
+    expect(screen.lines.join("\n")).toMatch(/◐ qa/);
   });
 
   it("braille style renders sub-cell edges; braille-fallback degrades to box-drawing", () => {
@@ -258,7 +258,7 @@ describe("box opacity is a CLASS invariant, not a draw-order artifact (pm kickba
       const nameInner = nameRow.match(/│([^│]*● bb\.mid[^│]*)│/);
       expect(nameInner, `${style}: name-row borders intact — got: ${nameRow}`).not.toBeNull();
       expect(nameInner![1]!, `${style}: name interior clean`).not.toMatch(/[─┼⠁-⣿]/);
-      const metaInner = metaRow.match(/│([^│]*codex · 10% · p[^│]*)│/);
+      const metaInner = metaRow.match(/│([^│]*codex · 10%[^│]*)│/); // S19 MR1 meta form
       expect(metaInner, `${style}: meta-row borders intact — got: ${metaRow}`).not.toBeNull();
       expect(metaInner![1]!, `${style}: meta interior clean`).not.toMatch(/[─┼⠁-⣿]/);
     }
@@ -345,7 +345,9 @@ describe("R2 HIGH-1 — the locked agent-in-pod-in-rig containment is VISIBLE", 
     for (const pod of ["orch", "dev", "review"]) expect(body, `pod ${pod} header`).toMatch(new RegExp(`▾ ${pod}`));
     // the fingerprint: rig double-border ║, then a pod border │, then the
     // agent's OWN box border │ — three nested walls left of every agent glyph
-    for (const agent of ["orch\\.lead", "dev\\.driver", "dev\\.qa", "review\\.r1"]) {
+    // S19 MR1: titles are member-only — the fingerprint (three nested walls
+    // before glyph+member) is unchanged in intent
+    for (const agent of ["lead", "driver", "qa", "r1"]) {
       expect(body, `agent ${agent} nested`).toMatch(new RegExp(`║[^║╗\\n]*│[^│\\n]*│ [●◐○✕] ${agent}`));
     }
   });
@@ -438,8 +440,29 @@ describe("PER-VIEW eligibility (PM concurrence on b7f95c4b): visibility truth re
     s.dispatch({ type: "drill", resource: "pod", name: "dev", target: { host: "vm-host", rig: FIXTURE_RIG_NAME } });
     s.dispatch({ type: "tab", tab: "graph" });
     const podLevel = renderScreen(s.get(), snap, { cols: 80, rows: 34 });
-    expect(podLevel.lines.join("\n")).toContain("◐ dev.qa"); // visible pixels
+    expect(podLevel.lines.join("\n")).toContain("◐ qa"); // visible pixels (member-only, S19 MR1)
     const atPod = podLevel.contentTargets.some((t) => t.action.type === "drill" && t.action.resource === "agent" && t.action.name === "dev.qa");
     expect(atPod, "dev.qa eligible in the drilled view (same visible-truth rule, per view)").toBe(true);
+  });
+});
+
+describe("S19 MR1 — kill the triple name (§A1)", () => {
+  it("each graph card names its pod ONCE: node titles are MEMBER-only, no pod token in card meta", () => {
+    const snap = graphSnap();
+    const s = makeStore(snap);
+    s.dispatch({ type: "tab", tab: "graph" });
+    const body = renderScreen(s.get(), snap, { cols: 160, rows: 44 }).lines.join("\n");
+    // pod named once — the container tab
+    expect(body).toMatch(/▾ dev/);
+    // titles are member-only: the qa card reads "◐ qa", never "◐ dev.qa"
+    expect(body).toMatch(/[◐] qa/);
+    expect(body).not.toMatch(/[◐] dev\.qa/);
+    expect(body).toMatch(/● driver/);
+    expect(body).not.toMatch(/● dev\.driver/);
+    // meta drops the pod suffix: no "· dev" tail inside a card meta row
+    expect(body).not.toMatch(/· dev │/);
+    expect(body).not.toMatch(/· orch │/);
+    // non-pod-prefixed names display unchanged (honest fallback mirrors the
+    // navigator's confirmed-prefix rule)
   });
 });

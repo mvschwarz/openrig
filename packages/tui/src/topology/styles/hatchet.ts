@@ -32,8 +32,8 @@ export function drawNodeBox(canvas: GraphCanvas, p: PlacedNode, ctx: StyleContex
   const borderToken = selected ? "accent" : p.glyph.token;
   canvas.box(p.x, p.y, p.w, p.h, borderToken);
   canvas.text(p.x + 2, p.y + 1, p.glyph.glyph, p.glyph.token, true);
-  canvas.text(p.x + 4, p.y + 1, p.node.data.logicalId, "bright", selected);
-  if (p.glyph.overlay) canvas.text(p.x + 4 + p.node.data.logicalId.length + 2, p.y + 1, p.glyph.overlay, "warn", true);
+  canvas.text(p.x + 4, p.y + 1, p.title, "bright", selected);
+  if (p.glyph.overlay) canvas.text(p.x + 4 + p.title.length + 2, p.y + 1, p.glyph.overlay, "warn", true);
   canvas.text(p.x + 2, p.y + 2, p.metaLine, "dim");
   // the WHOLE box is the hit surface — every row emits the same drill action
   const action = drillAction(p, ctx);
