@@ -95,7 +95,7 @@ describe("hatchet mainline in the SHIPPED content pane (frame-01 visual contract
     const body = screen.lines.join("\n");
     expect(body).toMatch(/┌─+┐/);
     expect(body).toContain("● lead"); // member-only title (S19 MR1)
-    expect(body).toContain("claude-code · 18%"); // S19 MR1: pod suffix gone (pod named once by its container)
+    expect(body).toContain("▟▙ 18%"); // S19 MR2: web-family mark + adjacent ctx (MR1: pod suffix gone)
     // straight connector runs + arrowhead; under the LOCKED containment an
     // edge may legitimately cross a pod-container wall (─ becomes ┼ at the
     // crossing) before its arrowhead
@@ -258,7 +258,7 @@ describe("box opacity is a CLASS invariant, not a draw-order artifact (pm kickba
       const nameInner = nameRow.match(/│([^│]*● bb\.mid[^│]*)│/);
       expect(nameInner, `${style}: name-row borders intact — got: ${nameRow}`).not.toBeNull();
       expect(nameInner![1]!, `${style}: name interior clean`).not.toMatch(/[─┼⠁-⣿]/);
-      const metaInner = metaRow.match(/│([^│]*codex · 10%[^│]*)│/); // S19 MR1 meta form
+      const metaInner = metaRow.match(/│([^│]*❯_ 10%[^│]*)│/); // S19 MR2 mark meta form
       expect(metaInner, `${style}: meta-row borders intact — got: ${metaRow}`).not.toBeNull();
       expect(metaInner![1]!, `${style}: meta interior clean`).not.toMatch(/[─┼⠁-⣿]/);
     }
@@ -431,9 +431,10 @@ describe("PER-VIEW eligibility (PM concurrence on b7f95c4b): visibility truth re
     const snap = graphSnap();
     const s = makeStore(snap);
     s.dispatch({ type: "tab", tab: "graph" });
-    // at 80 cols (48-col content pane) the rig-level graph fully clips the
-    // LAST pod column — dev — while earlier pods stay (partially) visible
-    const rigLevel = renderScreen(s.get(), snap, { cols: 80, rows: 34 });
+    // S19 density shrank the cards, so the old 80-col premise no longer
+    // clips anything — 56 cols (24-col content pane) restores a genuinely
+    // fully-clipped last pod for this eligibility pin
+    const rigLevel = renderScreen(s.get(), snap, { cols: 56, rows: 34 });
     const atRig = rigLevel.contentTargets.some((t) => t.action.type === "drill" && t.action.resource === "agent" && t.action.name === "dev.qa");
     expect(atRig, "dev.qa ineligible while fully clipped at rig level").toBe(false);
     // drill the dev pod → the pod-scoped view fits → dev.qa is visible AND eligible

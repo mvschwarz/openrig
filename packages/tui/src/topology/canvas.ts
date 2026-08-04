@@ -10,6 +10,7 @@ interface Cell {
   ch: string;
   token?: Token;
   bold?: boolean;
+  bg?: Token;
 }
 
 export interface CanvasZone {
@@ -30,11 +31,11 @@ export class GraphCanvas {
     return this.grid[y]!;
   }
 
-  set(x: number, y: number, ch: string, token?: Token, bold?: boolean): void {
+  set(x: number, y: number, ch: string, token?: Token, bold?: boolean, bg?: Token): void {
     if (x < 0 || x >= this.width || y < 0) return;
     const row = this.row(y);
     while (row.length <= x) row.push({ ch: " " });
-    row[x] = { ch, ...(token ? { token } : {}), ...(bold ? { bold } : {}) };
+    row[x] = { ch, ...(token ? { token } : {}), ...(bold ? { bold } : {}), ...(bg ? { bg } : {}) };
   }
 
   /** read the plain character at (x, y) — " " when unset */
@@ -103,15 +104,15 @@ export class GraphCanvas {
   /** per-line token segments — the paint layer (stylize) renders these with
    * ITS Style instance; plain(segs) === plainLines()[y] BY CONSTRUCTION, so
    * the shipped strip-invariant holds structurally */
-  segLines(): Array<Array<{ text: string; token?: Token; bold?: boolean }>> {
+  segLines(): Array<Array<{ text: string; token?: Token; bold?: boolean; bg?: Token }>> {
     return this.grid.map((row) => {
-      const segs: Array<{ text: string; token?: Token; bold?: boolean }> = [];
+      const segs: Array<{ text: string; token?: Token; bold?: boolean; bg?: Token }> = [];
       const cells = [...row];
       while (cells.length < this.width) cells.push({ ch: " " });
       for (const cell of cells.slice(0, this.width)) {
         const last = segs.at(-1);
-        if (last && last.token === cell.token && last.bold === cell.bold) last.text += cell.ch;
-        else segs.push({ text: cell.ch, ...(cell.token ? { token: cell.token } : {}), ...(cell.bold ? { bold: cell.bold } : {}) });
+        if (last && last.token === cell.token && last.bold === cell.bold && last.bg === cell.bg) last.text += cell.ch;
+        else segs.push({ text: cell.ch, ...(cell.token ? { token: cell.token } : {}), ...(cell.bold ? { bold: cell.bold } : {}), ...(cell.bg ? { bg: cell.bg } : {}) });
       }
       return segs;
     });
@@ -127,18 +128,20 @@ export class GraphCanvas {
       let run = "";
       let runToken: Token | undefined;
       let runBold: boolean | undefined;
+      let runBg: Token | undefined;
       const flush = () => {
         if (run === "") return;
-        out += runToken ? style.paint(runToken, run, runBold ? { bold: true } : undefined) : run;
+        out += runToken || runBg ? style.paint(runToken ?? "bright", run, { ...(runBold ? { bold: true } : {}), ...(runBg ? { bg: runBg } : {}) }) : run;
         run = "";
       };
       const cells = [...row];
       while (cells.length < this.width) cells.push({ ch: " " });
       for (const cell of cells.slice(0, this.width)) {
-        if (cell.token !== runToken || cell.bold !== runBold) {
+        if (cell.token !== runToken || cell.bold !== runBold || cell.bg !== runBg) {
           flush();
           runToken = cell.token;
           runBold = cell.bold;
+          runBg = cell.bg;
         }
         run += cell.ch;
       }

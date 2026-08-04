@@ -4,6 +4,7 @@
 // never ranks. Everything is derived from the served projection only.
 import type { GraphEdge, GraphNode, RigGraph } from "./graph-types.js";
 import { statusGlyph, type StatusGlyph } from "./glyphs.js";
+import { markText, runtimeMarkSegs } from "./runtime-marks.js";
 
 export interface PlacedNode {
   node: GraphNode;
@@ -60,8 +61,8 @@ export function nodeLines(node: GraphNode): { glyph: StatusGlyph; title: string;
     ? node.data.logicalId.slice(pod.length + 1)
     : node.data.logicalId;
   const nameLine = `${glyph.glyph} ${member}${glyph.overlay ? `  ${glyph.overlay}` : ""}`;
-  // honest-unknown: a null ctx renders "—", never a fabricated number
-  const metaLine = `${node.data.runtime ?? "—"} · ${ctx == null ? "—" : `${Math.round(ctx)}%`}`;
+  // S19 MR2: meta = web-family runtime MARK + adjacent ctx% (honest-unknown —)
+  const metaLine = `${markText(runtimeMarkSegs(node.data.runtime))} ${ctx == null ? "—" : `${Math.round(ctx)}%`}`;
   return { glyph, title: member, nameLine, metaLine };
 }
 

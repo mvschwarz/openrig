@@ -13,6 +13,7 @@
 // "Hover" is the existing selection-focus highlight — RENDER-ONLY, no motion
 // protocol, no second write-path to selection (arch ruling 1).
 import type { ExplorerRow, FleetSnapshot } from "./types.js";
+import { markText, runtimeMarkSegs } from "./topology/runtime-marks.js";
 
 interface KeyParts {
   kind: string;
@@ -83,12 +84,10 @@ function metaOf(row: ExplorerRow, snap: FleetSnapshot): string {
       .find((h) => h.name === host)?.rigs.find((r) => r.name === rig)
       ?.pods.find((p) => p.name === pod)?.agents.find((a) => a.name === name.join("/"));
     if (!agent) return "";
-    // LOCKED meta form (mini-req 1, guard-ruled): ALWAYS `runtime · ctx%` —
-    // never context-only. The runtime's DISPLAY form is its first hyphen
-    // token (the literal mockups render "claude" for claude-code seats);
-    // honest-unknown ctx renders `runtime · —`, never a fabricated value.
-    const runtimeToken = agent.runtime.split("-")[0] || agent.runtime;
-    return `${runtimeToken} · ${agent.context == null ? "—" : `${agent.context}%`}`;
+    // S19 MR2 (guard RE-SEAL 1e661dba supersedes the slice-17 form): the
+    // web-family runtime MARK + adjacent ctx% — no spelled runtime, no
+    // middle-dot tail; honest-unknown ctx renders —, never fabricated.
+    return `${markText(runtimeMarkSegs(agent.runtime))} ${agent.context == null ? "—" : `${agent.context}%`}`;
   }
   if (parsed.kind === "pod") {
     const [host, rig, pod] = parsed.parts;

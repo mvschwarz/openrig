@@ -47,8 +47,17 @@ function paintExplorer(text: string, s: Style, focused: boolean): string {
 /** row-body treatment (VISUAL-TARGETS: rig teal · pod dim · meta faint ·
  * names default ink); the right-aligned meta column always dims */
 function paintExplorerBody(text: string, s: Style): string {
-  // the right-aligned meta dims as a WHOLE — `runtime · ctx%` (or honest
-  // `runtime · —`) and bare pod counts alike, never just the trailing token
+  // S19 MR2 meta: web-family MARK + ctx% — the mark glyphs paint with their
+  // own tokens (clawd body / prompt ink), the value dims; pod counts dim whole
+  const markMeta = text.match(/^(.*?\S)( +)(▟▙|▐█▌|❯_)( )([0-9]+%|—)$/);
+  if (markMeta) {
+    const markTok = markMeta[3] === "❯_" ? "markInk" : "clawd";
+    return (
+      paintExplorerBody(markMeta[1]!, s) + markMeta[2]! +
+      s.paint(markTok as Parameters<typeof s.paint>[0], markMeta[3]!, { bold: markMeta[3] === "❯_" }) +
+      markMeta[4]! + s.paint("dim", markMeta[5]!)
+    );
+  }
   const meta = text.match(/^(.*?\S)( +)((?:\S+ · )?(?:[0-9]+%|—)|[0-9]+)$/);
   if (meta) return paintExplorerBody(meta[1]!, s) + meta[2]! + s.paint("dim", meta[3]!);
   if (text.includes("⚑")) return s.paint("warn", text);
@@ -184,7 +193,10 @@ export function stylizeLines(screen: Screen, s: Style): string[] {
       if (segs) {
         const segText = segs.map((seg) => seg.text).join("");
         const painted = segs
-          .map((seg) => (seg.token ? s.paint(seg.token, seg.text, seg.bold ? { bold: true } : undefined) : seg.text))
+          .map((seg) =>
+            seg.token || seg.bg
+              ? s.paint(seg.token ?? "bright", seg.text, { ...(seg.bold ? { bold: true } : {}), ...(seg.bg ? { bg: seg.bg } : {}) })
+              : seg.text)
           .join("");
         return `${paintExplorer(left, s, explorerFocused)}${s.paint("chrome", "│")}${marker}${painted}${right.slice(segText.length)}`;
       }

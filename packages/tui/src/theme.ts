@@ -26,7 +26,13 @@ export type Token =
   | "ok" // healthy/running states
   | "dim" // secondary text (mockup #6d7480)
   | "bright" // primary emphasis
-  | "chrome"; // borders/rules
+  | "chrome" // borders/rules
+  // S19 MR2 — web-identical runtime-mark colors (RuntimeMark.tsx values);
+  // 16-color values are PLACEHOLDERS pending the founder degrade pick (mr7)
+  | "clawd" // clawd body #ad6755
+  | "clawdEye" // clawd eyes #181818
+  | "markInk" // codex `>_` ink (light)
+  | "markBg"; // terminal mark dark cell
 
 // [truecolor rgb, 256 index, 16-color SGR]
 const PALETTE: Record<Token, [[number, number, number], number, number]> = {
@@ -38,16 +44,20 @@ const PALETTE: Record<Token, [[number, number, number], number, number]> = {
   dim: [[109, 116, 128], 243, 90],
   bright: [[232, 234, 240], 254, 97],
   chrome: [[58, 63, 75], 238, 90],
+  clawd: [[173, 103, 85], 131, 31],
+  clawdEye: [[24, 24, 24], 234, 30],
+  markInk: [[250, 250, 249], 255, 97],
+  markBg: [[12, 10, 9], 233, 30],
 };
 
 export interface Style {
   /** wrap text in the token's SGR (plus bold/inverse); identity in "none" mode */
-  paint(token: Token, text: string, opts?: { bold?: boolean; inverse?: boolean }): string;
+  paint(token: Token, text: string, opts?: { bold?: boolean; inverse?: boolean; bg?: Token }): string;
   readonly mode: ColorMode;
 }
 
 export function createStyle(mode: ColorMode = detectColorMode()): Style {
-  function open(token: Token, opts?: { bold?: boolean; inverse?: boolean }): string {
+  function open(token: Token, opts?: { bold?: boolean; inverse?: boolean; bg?: Token }): string {
     if (mode === "none") return "";
     const parts: string[] = [];
     if (opts?.bold) parts.push("1");
@@ -56,6 +66,12 @@ export function createStyle(mode: ColorMode = detectColorMode()): Style {
     if (mode === "truecolor") parts.push(`38;2;${rgb[0]};${rgb[1]};${rgb[2]}`);
     else if (mode === "256") parts.push(`38;5;${x256}`);
     else parts.push(String(basic));
+    if (opts?.bg) {
+      const [brgb, b256] = PALETTE[opts.bg];
+      if (mode === "truecolor") parts.push(`48;2;${brgb[0]};${brgb[1]};${brgb[2]}`);
+      else if (mode === "256") parts.push(`48;5;${b256}`);
+      // 16-color: no bg (placeholder-safe degrade; mr7 carries the question)
+    }
     return `\x1b[${parts.join(";")}m`;
   }
   return {

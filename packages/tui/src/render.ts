@@ -20,7 +20,7 @@ interface ContentLine {
    * BR-9: zone actions are drive-structure only (lifecycle + navigation). */
   zones?: Array<{ start: number; end: number; action: Action }>;
   /** slice-17: token segments for canvas-rendered rows (graph view) */
-  segs?: Array<{ text: string; token?: import("./theme.js").Token; bold?: boolean }>;
+  segs?: Array<{ text: string; token?: import("./theme.js").Token; bold?: boolean; bg?: import("./theme.js").Token }>;
 }
 
 function pad(text: string | number | null | undefined, width: number): string {

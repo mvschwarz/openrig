@@ -249,7 +249,7 @@ export interface Screen {
   /** slice-17: token segments for canvas-rendered content rows (keyed by
    * 1-based terminal row) — the paint layer renders them with its own Style;
    * plain(segs) === the row's content text BY CONSTRUCTION (strip-invariant) */
-  segRows?: Record<number, Array<{ text: string; token?: import("./theme.js").Token; bold?: boolean }>>;
+  segRows?: Record<number, Array<{ text: string; token?: import("./theme.js").Token; bold?: boolean; bg?: import("./theme.js").Token }>>;
 }
 
 export type InputEvent =

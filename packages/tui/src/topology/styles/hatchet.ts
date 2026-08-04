@@ -6,6 +6,7 @@
 // NO text labels on the graph (founder refinement). TIER-1 glyphs only.
 import { GraphCanvas } from "../canvas.js";
 import { edgeToken } from "../glyphs.js";
+import { markText, runtimeMarkSegs } from "../runtime-marks.js";
 import type { GraphContainer, GraphLayout, PlacedNode } from "../layout.js";
 import type { Action, ResourceTarget } from "../../types.js";
 
@@ -34,7 +35,15 @@ export function drawNodeBox(canvas: GraphCanvas, p: PlacedNode, ctx: StyleContex
   canvas.text(p.x + 2, p.y + 1, p.glyph.glyph, p.glyph.token, true);
   canvas.text(p.x + 4, p.y + 1, p.title, "bright", selected);
   if (p.glyph.overlay) canvas.text(p.x + 4 + p.title.length + 2, p.y + 1, p.glyph.overlay, "warn", true);
-  canvas.text(p.x + 2, p.y + 2, p.metaLine, "dim");
+  // S19 MR2: runtime renders as the web-family MARK + adjacent ctx%
+  let mx = p.x + 2;
+  for (const seg of runtimeMarkSegs(p.node.data.runtime)) {
+    canvas.text(mx, p.y + 2, seg.text, seg.token, seg.bold, );
+    if (seg.bg) for (let i = 0; i < seg.text.length; i++) canvas.set(mx + i, p.y + 2, seg.text[i]!, seg.token, seg.bold, seg.bg);
+    mx += seg.text.length;
+  }
+  const ctxText = ` ${p.node.data.contextUsedPercentage == null ? "—" : `${Math.round(p.node.data.contextUsedPercentage)}%`}`;
+  canvas.text(mx, p.y + 2, ctxText, "dim");
   // the WHOLE box is the hit surface — every row emits the same drill action
   const action = drillAction(p, ctx);
   for (let row = 0; row < p.h; row++) canvas.zone(p.y + row, p.x, p.x + p.w, action);
