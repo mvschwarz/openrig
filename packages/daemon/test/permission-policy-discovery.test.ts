@@ -10,6 +10,9 @@ import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { SystemPreflight } from "../../cli/src/system-preflight.js";
 
 const RIG_ROOT = "/project/rigs/policy-discovery";
+const ORIGINAL_RIG_ROOT = "/original/rig";
+const OTHER_OPERATION_ROOT = "/different/operation-root";
+const CUSTOM_POLICY_REF = "policies/operator-full.md";
 const AGENT_YAML = `name: impl
 version: "1.0.0"
 resources:
@@ -303,6 +306,166 @@ describe("Seam C permission-policy discovery", () => {
       );
       expect(launched.ok).toBe(true);
       expect(bindings.map((binding) => binding.launchPosture)).toEqual(["full_bypass", "floor"]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("carries persisted target policy discovery through the public YAML materialize route", async () => {
+    const policyReads: string[] = [];
+    const agentOnlyFsOps: AgentResolverFsOps = {
+      exists: (path) => path.includes("agents/impl"),
+      readFile: (path) => {
+        if (path.includes("agents/impl")) return AGENT_YAML;
+        policyReads.push(path);
+        throw new Error(`Not found: ${path}`);
+      },
+    };
+    const db = createFullTestDb();
+    try {
+      const setup = createTestApp(db, { podInstantiatorFsOps: agentOnlyFsOps });
+      const rig = setup.rigRepo.createRig("persisted-yaml-target");
+      setup.rigRepo.setRigPermissionPolicy(rig.id, CUSTOM_POLICY_REF);
+      setup.rigRepo.setRigPolicyProvenance(rig.id, {
+        origin: "custom",
+        resolvedTarget: `${ORIGINAL_RIG_ROOT}/${CUSTOM_POLICY_REF}`,
+        declaringDir: ORIGINAL_RIG_ROOT,
+        launchPosture: "full_bypass",
+      });
+
+      const response = await setup.app.request("/api/rigs/import/materialize", {
+        method: "POST",
+        headers: {
+          "Content-Type": "text/yaml",
+          "X-Rig-Root": OTHER_OPERATION_ROOT,
+          "X-Target-Rig-Id": rig.id,
+        },
+        body: rigYaml({ name: rig.name }),
+      });
+
+      expect(response.status).toBe(201);
+      const body = await response.json() as { warnings?: string[] };
+      const node = setup.rigRepo.getRig(rig.id)!.nodes.find((candidate) => candidate.logicalId === "dev.impl")!;
+      expect(setup.rigRepo.getNodePolicyProvenance(node.id)).toEqual({
+        origin: "custom",
+        resolvedTarget: `${ORIGINAL_RIG_ROOT}/${CUSTOM_POLICY_REF}`,
+        declaringDir: ORIGINAL_RIG_ROOT,
+        launchPosture: "full_bypass",
+        nodeRef: null,
+      });
+      expect(body.warnings).toEqual([
+        'dev.impl: permission_policy ref="policies/operator-full.md" origin=custom launch_posture=full_bypass',
+      ]);
+      expect(body.warnings?.join("\n")).not.toContain("permission_policy absent");
+      expect(policyReads).not.toContain(`${OTHER_OPERATION_ROOT}/${CUSTOM_POLICY_REF}`);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("carries inherited discovery before launch warnings through the public add-member route", async () => {
+    const bindings: NodeBinding[] = [];
+    const adapter: RuntimeAdapter = {
+      runtime: "claude-code",
+      listInstalled: async () => [],
+      project: async () => ({ projected: [], skipped: [], failed: [] }),
+      deliverStartup: async () => ({ delivered: 0, failed: [] }),
+      launchHarness: async (binding) => { bindings.push(binding); return { ok: true }; },
+      checkReady: async () => ({ ready: true }),
+    } as RuntimeAdapter;
+    const agentOnlyFsOps: AgentResolverFsOps = {
+      exists: (path) => path.includes("agents/impl"),
+      readFile: (path) => {
+        if (path.includes("agents/impl")) return AGENT_YAML;
+        throw new Error(`Not found: ${path}`);
+      },
+    };
+    const db = createFullTestDb();
+    try {
+      const setup = createTestApp(db, {
+        adapters: { "claude-code": adapter },
+        podInstantiatorFsOps: agentOnlyFsOps,
+      });
+      const seeded = await setup.podInstantiator.materializeStructured({
+        version: "0.2",
+        name: "persisted-add-member-target",
+        pods: [{
+          id: "dev",
+          label: "Dev",
+          members: [{
+            id: "existing",
+            runtime: "claude-code",
+            agent_ref: "local:agents/impl",
+            profile: "default",
+            cwd: ".",
+          }],
+          edges: [],
+        }],
+        edges: [],
+      }, ORIGINAL_RIG_ROOT);
+      expect(seeded.ok).toBe(true);
+      if (!seeded.ok) return;
+      setup.rigRepo.setRigPermissionPolicy(seeded.result.rigId, CUSTOM_POLICY_REF);
+      setup.rigRepo.setRigPolicyProvenance(seeded.result.rigId, {
+        origin: "custom",
+        resolvedTarget: `${ORIGINAL_RIG_ROOT}/${CUSTOM_POLICY_REF}`,
+        declaringDir: ORIGINAL_RIG_ROOT,
+        launchPosture: "full_bypass",
+      });
+      const originalLaunch = setup.nodeLauncher.launchNode.bind(setup.nodeLauncher);
+      vi.spyOn(setup.nodeLauncher, "launchNode").mockImplementation(async (...args) => {
+        const outcome = await originalLaunch(...args);
+        return outcome.ok
+          ? { ...outcome, warnings: [...(outcome.warnings ?? []), "later launch warning"] }
+          : outcome;
+      });
+
+      const inheritedResponse = await setup.app.request(`/api/rigs/${seeded.result.rigId}/pods/dev/members`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          rigRoot: OTHER_OPERATION_ROOT,
+          member: {
+            id: "late",
+            runtime: "claude-code",
+            agent_ref: "local:agents/impl",
+            profile: "default",
+            cwd: ".",
+          },
+        }),
+      });
+      const inheritedBody = await inheritedResponse.json() as { ok: boolean; result: { warnings?: string[] } };
+
+      expect(inheritedResponse.status).toBe(201);
+      expect(inheritedBody.result.warnings).toEqual([
+        'dev.late: permission_policy ref="policies/operator-full.md" origin=custom launch_posture=full_bypass',
+        "later launch warning",
+      ]);
+      expect(bindings[0]?.launchPosture).toBe("full_bypass");
+
+      const overrideResponse = await setup.app.request(`/api/rigs/${seeded.result.rigId}/pods/dev/members`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          rigRoot: OTHER_OPERATION_ROOT,
+          member: {
+            id: "override",
+            runtime: "claude-code",
+            agent_ref: "local:agents/impl",
+            profile: "default",
+            permission_policy: "builtin:standard",
+            cwd: ".",
+          },
+        }),
+      });
+      const overrideBody = await overrideResponse.json() as { ok: boolean; result: { warnings?: string[] } };
+
+      expect(overrideResponse.status).toBe(201);
+      expect(overrideBody.result.warnings).toEqual([
+        'dev.override: permission_policy ref="builtin:standard" origin=builtin launch_posture=floor',
+        "later launch warning",
+      ]);
+      expect(bindings[1]?.launchPosture).toBe("floor");
     } finally {
       db.close();
     }

@@ -146,6 +146,7 @@ export interface RigPreflightInput {
   rigNameOverride?: string;
   externalQualifiedIds?: Iterable<string>;
   claudeActivityAssets?: { relayPath?: string; manifestPath?: string };
+  inheritedPermissionPolicy?: PreflightSpecContext["inheritedPermissionPolicy"];
 }
 
 /**
@@ -231,6 +232,7 @@ export async function rigPreflight(input: RigPreflightInput & { exec?: (cmd: str
     cwdOverride: input.cwdOverride,
     fsOps: input.fsOps,
     rigNameOverride: input.rigNameOverride,
+    inheritedPermissionPolicy: input.inheritedPermissionPolicy,
     exec: input.exec,
     claudeActivityAssets: input.claudeActivityAssets,
   });
