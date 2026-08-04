@@ -497,11 +497,23 @@ export class PodRigInstantiator {
     }
 
     const rigSpec = PodRigSpecSchema.normalize(raw as Record<string, unknown>);
+    const targetRigPolicy = opts?.targetRigId
+      ? this.deps.rigRepo.getRigPolicyProvenance(opts.targetRigId)
+      : null;
     const preflight = await preflightValidatedSpec(rigSpec, {
       rigRoot,
       cwdOverride: opts?.cwdOverride,
       fsOps: this.deps.fsOps,
       rigNameOverride: targetRig?.rig.name,
+      inheritedPermissionPolicy: targetRigPolicy?.rigRef
+        ? {
+          ref: targetRigPolicy.rigRef,
+          origin: targetRigPolicy.origin,
+          launchPosture: targetRigPolicy.launchPosture,
+          ...(targetRigPolicy.resolvedTarget ? { resolvedTarget: targetRigPolicy.resolvedTarget } : {}),
+          ...(targetRigPolicy.declaringDir ? { declaringDir: targetRigPolicy.declaringDir } : {}),
+        }
+        : undefined,
       exec: this.deps.exec,
     });
     if (!preflight.ready) {

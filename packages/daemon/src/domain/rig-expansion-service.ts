@@ -92,7 +92,10 @@ export class RigExpansionService {
       error: node.error,
       sessionName: node.sessionName,
     }));
-    const warnings = launchOutcome.result.warnings ?? [];
+    const warnings = [
+      ...(materializeResult.result.warnings ?? []),
+      ...(launchOutcome.result.warnings ?? []),
+    ];
     const retryTargets = nodeOutcomes
       .filter((node) => node.status === "failed")
       .map((node) => node.logicalId);
