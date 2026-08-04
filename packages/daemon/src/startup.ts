@@ -606,6 +606,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         w(dir, "");
         return r;
       },
+      statMode: (p: string) => fs.statSync(p).mode,
+      chmod: (p: string, m: number) => fs.chmodSync(p, m),
     };
     const httpClient = async (url: string, opts?: { timeoutMs?: number }) => {
       const ctrl = new AbortController();

@@ -33,6 +33,10 @@ export interface PluginVendorFs {
   mkdirp(path: string): void;
   listFiles(dir: string): string[];
   rmrf?(path: string): void;
+  /** Source file permission bits (for mode-preserving vendor staging). Optional: no-op if absent. */
+  statMode?(path: string): number;
+  /** Apply permission bits to a file (for mode-preserving vendor staging). Optional: no-op if absent. */
+  chmod?(path: string, mode: number): void;
 }
 
 export interface HttpClientResponse {
@@ -93,13 +97,31 @@ export class PluginVendorService {
       const srcPath = nodePath.join(sourceDir, relPath);
       const destPath = nodePath.join(targetDir, relPath);
       const content = this.fs.readFile(srcPath);
-      // Hash-skip: only write if content differs (idempotent re-runs)
+      // Hash-skip: only write if content differs (idempotent re-runs). Reconcile mode even on
+      // skip — a byte-identical copy staged earlier may still carry the wrong (default) mode.
       if (this.fs.exists(destPath) && hashContent(this.fs.readFile(destPath)) === hashContent(content)) {
+        this.preserveMode(srcPath, destPath);
         continue;
       }
       this.fs.mkdirp(nodePath.dirname(destPath));
       this.fs.writeFile(destPath, content);
+      this.preserveMode(srcPath, destPath);
     }
+  }
+
+  /**
+   * Reapply the source file's permission bits to the staged/projected dest. Plain
+   * readFile+writeFile (writeFileSync) creates the dest with the process default mode,
+   * dropping executable bits on nested plugin helpers (e.g. claude-compaction-restore/
+   * scripts/*.mjs, 0755). This vendor-staging hop (assets -> ~/.openrig/plugins) runs
+   * UPSTREAM of the adapter CWD projection, so an unfixed mode here strands 0644 in the
+   * staged copy that the adapters then faithfully preserve. No-op when the fs adapter does
+   * not expose mode primitives (keeps existing mock-fs callers unaffected).
+   */
+  private preserveMode(src: string, dest: string): void {
+    if (!this.fs.statMode || !this.fs.chmod) return;
+    const srcMode = this.fs.statMode(src) & 0o777;
+    if ((this.fs.statMode(dest) & 0o777) !== srcMode) this.fs.chmod(dest, srcMode);
   }
 
   /** Project one plugin skill into the harness-global skill roots. */
@@ -132,10 +154,12 @@ export class PluginVendorService {
           this.fs.exists(destPath) &&
           hashContent(this.fs.readFile(destPath)) === hashContent(content)
         ) {
+          this.preserveMode(srcPath, destPath);
           continue;
         }
         this.fs.mkdirp(nodePath.dirname(destPath));
         this.fs.writeFile(destPath, content);
+        this.preserveMode(srcPath, destPath);
       }
     }
   }
@@ -160,7 +184,10 @@ export class PluginVendorService {
       }
       // v0: tarball extraction NOT implemented — when slice 3.6 lands marketplace-
       // consumption, this is where fetch-then-extract logic lives. For now,
-      // success path just logs.
+      // success path just logs. EXPLICIT MODE DECISION: v0 writes no files here, so there is
+      // no mode to preserve; the future extract path MUST route its writes through
+      // preserveMode() (or a tar extractor that preserves mode) so fetched executable helpers
+      // keep 0755 — same invariant as ensureVendored/ensureSkillGlobally.
       this.logger(`[plugin-vendor] fetch ${pluginName} succeeded (${response.status}); v0 vendored copy still authoritative`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
