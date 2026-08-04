@@ -287,7 +287,7 @@ export class RigInstantiator {
 
 import { RigSpecCodec as PodRigSpecCodec } from "./rigspec-codec.js";
 import { RigSpecSchema as PodRigSpecSchema, VALID_EDGE_KINDS } from "./rigspec-schema.js";
-import { rigPreflight, preflightValidatedSpec } from "./rigspec-preflight.js";
+import { permissionPolicyDiscoveryWarnings, rigPreflight, preflightValidatedSpec } from "./rigspec-preflight.js";
 import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { resolveNodeConfig } from "./profile-resolver.js";
 import { resolveStartup } from "./startup-resolver.js";
@@ -340,6 +340,7 @@ export interface MaterializeResult {
   specName: string;
   specVersion: string;
   nodes: Array<{ logicalId: string; status: "materialized" }>;
+  warnings?: string[];
 }
 
 export type MaterializeOutcome =
@@ -673,6 +674,7 @@ export class PodRigInstantiator {
           specName: rigSpec.name,
           specVersion: rigSpec.version,
           nodes: nodeResults,
+          warnings: permissionPolicyDiscoveryWarnings(rigSpec, { rigRoot, fsOps: this.deps.fsOps }),
         },
       };
     } catch (err) {
@@ -1071,7 +1073,7 @@ export class PodRigInstantiator {
     const nodeResults: { logicalId: string; status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string }[] = [];
     const nodeIdMap: Record<string, string> = {}; // "pod.member" -> node DB id
     const launchedSessionNames: string[] = []; // Track for orphan cleanup on total failure
-    const podInstantiateWarnings: string[] = [];
+    const podInstantiateWarnings = permissionPolicyDiscoveryWarnings(rigSpec, { rigRoot, fsOps: this.deps.fsOps });
     // Store per-member context for deferred launch
     const memberContext = new Map<string, { pod: typeof rigSpec.pods[0]; member: typeof rigSpec.pods[0]["members"][0]; podId: string; nodeId: string; resolveResult: any; configResult: any }>();
 
