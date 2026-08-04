@@ -184,6 +184,9 @@ describe("fresh pane-output ROW FLASH — guard round-5 finding 2 (exact agent r
     expect(screen.flashRows).toHaveLength(1);
     const y = screen.flashRows![0]!;
     expect(screen.lines[y - 1]).toContain("dev50.driver"); // exact-row targeting
+    // round-6 (guard finding 2): the PLAIN layer carries the stable ack glyph
+    // too — the event stays observable in NO_COLOR, never SGR-only
+    expect(screen.lines[y - 1]!.startsWith("≈")).toBe(true);
     expect(screen.motionActive).toBe(true); // the expiry redraw is scheduled off this
     const styled = stylizeLines(screen, createStyle("truecolor"));
     expect(styled[y - 1]!, "flash = inverse video on the agent row").toMatch(INVERSE);
@@ -192,7 +195,7 @@ describe("fresh pane-output ROW FLASH — guard round-5 finding 2 (exact agent r
     styled.forEach((l, i) => expect(stripAnsi(l)).toBe(screen.lines[i]));
   });
 
-  it("the flash is ONE-SHOT: past the window it is gone; reduced motion never flashes", () => {
+  it("the flash is ONE-SHOT: past the window both the inverse and the ack glyph are gone", () => {
     const s = agentRowsStore();
     const after = renderScreen(s.get(), snap, { cols: 140, rows: 34, nowMs: 1700, rowFlashes: [{ key: DRIVER_KEY, at: 1000 }] });
     expect(after.flashRows ?? []).toHaveLength(0);
@@ -200,10 +203,28 @@ describe("fresh pane-output ROW FLASH — guard round-5 finding 2 (exact agent r
     // bar legitimately uses inverse elsewhere — scope the pin to the row)
     const driverIdx = after.lines.findIndex((l) => l.includes("dev50.driver"));
     expect(stylizeLines(after, createStyle("truecolor"))[driverIdx]!).not.toMatch(INVERSE);
+    expect(after.lines[driverIdx]!.startsWith("≈")).toBe(false); // the ack expires cleanly too
+  });
+
+  it("reduced motion keeps a STABLE static fresh-output acknowledgement — plain-layer glyph, no SGR flash, no geometry drift (guard round-6 finding 2)", () => {
+    const s = agentRowsStore();
+    const base = renderScreen(s.get(), snap, { cols: 140, rows: 34, nowMs: 1300 }); // same frame, no event
     process.env["OPENRIG_REDUCED_MOTION"] = "1";
     try {
       const reduced = renderScreen(s.get(), snap, { cols: 140, rows: 34, nowMs: 1300, rowFlashes: [{ key: DRIVER_KEY, at: 1000 }] });
-      expect(reduced.flashRows ?? []).toHaveLength(0);
+      expect(reduced.flashRows ?? []).toHaveLength(0); // no SGR animation under reduced motion…
+      const y = reduced.lines.findIndex((l) => l.includes("dev50.driver"));
+      expect(reduced.lines[y]!.startsWith("≈")).toBe(true); // …but the state SIGNAL survives as the stable marker-slot glyph
+      expect(reduced.lines[y]!.length).toBe(base.lines[y]!.length); // no geometry drift
+      expect(reduced.lines[y]!.slice(1)).toBe(base.lines[y]!.slice(1)); // ONLY the marker cell differs
+      expect(reduced.hitMap).toEqual(base.hitMap); // no hit-map drift
+      expect(reduced.motionActive).toBe(true); // one bounded expiry redraw is scheduled — the ack settles cleanly
+      // NO_COLOR: the acknowledgement is glyph/text, never SGR-only
+      expect(stylizeLines(reduced, createStyle("none"))[y]!).toContain("≈");
+      // expiry under reduced motion too
+      const after = renderScreen(s.get(), snap, { cols: 140, rows: 34, nowMs: 1700, rowFlashes: [{ key: DRIVER_KEY, at: 1000 }] });
+      expect(after.lines[y]!.startsWith("≈")).toBe(false);
+      expect(after.motionActive).toBeFalsy();
     } finally {
       delete process.env["OPENRIG_REDUCED_MOTION"];
     }

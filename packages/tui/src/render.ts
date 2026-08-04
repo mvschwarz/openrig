@@ -278,7 +278,20 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
     const hostName = state.drill.find((d) => d.kind === "host")?.name;
     const host = (hostName ? snap.hosts.find((candidate) => candidate.name === hostName) : snap.hosts[0]);
     const rig = host?.rigs.find((candidate) => candidate.name === rigName);
-    if (!rig || !host) return [{ text: "no rig in view — waiting on the daemon read (honest-empty, not fabricated)" }];
+    if (!rig || !host) {
+      // round-6 (guard): the ROOT topology branch consumes the OWNER's load
+      // truth like every other read surface — a real in-flight cold start
+      // renders the spinner; after settlement only a NAMED rigs-summary
+      // failure or the proven no-rigs truth may render, never "waiting"
+      if (motion.loading) {
+        if (!motion.reduced) motion.used = true;
+        return [{ text: `${motion.frame} topology read pending — waiting on the daemon rigs read (honest-empty, not fabricated)` }];
+      }
+      if (snap.readErrors.some((e) => e.startsWith("rigs-summary"))) {
+        return [{ text: "✕ rigs read failed — named in the status line (honest-empty, not fabricated)" }];
+      }
+      return [{ text: "(no rigs served — proven empty, not fabricated)" }];
+    }
     const podFilter = leaf?.kind === "pod" ? leaf.name : null;
     const all = rig.pods.flatMap((p) => p.agents.map((a) => ({ pod: p.name, ...a })));
     const rows = all
@@ -717,9 +730,14 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   const footer = state.footerOn ? snap.stream.at(-1) : undefined;
   // round-5 (guard): the tmux-style ONE-SHOT activity flash targets the
   // flashed agent's EXPLORER row — per-seat pane-output events from the
-  // refresh owner, windowed here, never under reduced motion. The ambient
-  // rig-stream footer is NOT an event source and never flashes.
+  // refresh owner, windowed here. The ambient rig-stream footer is NOT an
+  // event source and never flashes. round-6 (guard finding 2): the SGR
+  // inverse is the animation (killed under reduced motion), while the
+  // acknowledgement WINDOW itself ignores reduced — the plain-layer "≈"
+  // marker-slot glyph is the stable static signal reduced motion (and
+  // NO_COLOR) keeps, expiring with the same bounded window.
   const liveFlashes = (options.rowFlashes ?? []).filter((f) => flashActive(f.at, nowMs, 600, reduced));
+  const ackFlashes = (options.rowFlashes ?? []).filter((f) => flashActive(f.at, nowMs, 600, false));
   const chromeRows = footer ? 4 : 3; // bottom rule + hint bar + status line (+ footer)
   const bodyRows = Math.max(rows - 2 - chromeRows, 1);
   const explorerStart = Math.min(
@@ -747,11 +765,17 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   const segRows: NonNullable<Screen["segRows"]> = {};
   const explorerMeta: NonNullable<Screen["explorerMeta"]> = {};
   const flashRows: number[] = [];
+  let flashAck = false;
   for (let i = 0; i < bodyRows; i++) {
     const y = lines.length + 1; // 1-based terminal row this line will occupy
     const explorerIndex = explorerStart + i;
     const row = explorer[explorerIndex];
-    const marker = explorerIndex === state.selection && row ? "›" : " ";
+    // round-6: the fresh-output ack rides the marker slot (zero geometry
+    // drift); the selection cue keeps precedence on the one selected row —
+    // its event still shows via the inverse flash under full motion
+    const flashed = row?.key != null && ackFlashes.some((f) => f.key === row.key);
+    if (flashed) flashAck = true;
+    const marker = explorerIndex === state.selection && row ? "›" : flashed ? "≈" : " ";
     const left = pad(row ? `${marker}${explorerDisplay[explorerIndex] ?? row.label}` : "", EXPL_W);
     const item = visibleContent[i];
     const targetIndex = contentTargets.length;
@@ -813,6 +837,8 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
     segRows,
     explorerMeta,
     flashRows,
-    motionActive: motion.used || flashRows.length > 0,
+    // an un-expired ack (even the static reduced-motion glyph) schedules the
+    // bounded expiry redraw — the acknowledgement must settle cleanly
+    motionActive: motion.used || flashRows.length > 0 || flashAck,
   };
 }

@@ -7,6 +7,8 @@
 import { describe, it, expect } from "vitest";
 import { createLiveRefresh, FLASH_WINDOW_MS } from "../src/live.js";
 import { demoSnapshot } from "../src/demo-data.js";
+import { createViewState, emptySnapshot } from "../src/state.js";
+import { renderScreen } from "../src/render.js";
 import type { FleetSnapshot } from "../src/types.js";
 
 const DRIVER_KEY = "agent:vm-host/openrig-build/dev50/dev50.driver";
@@ -58,6 +60,73 @@ describe("refresh owner — load lifecycle (guard round-5 finding 1)", () => {
     fail = false;
     await live.refresh(); // retry path works
     expect(live.snapshot().hosts.length).toBeGreaterThan(0);
+  });
+});
+
+describe("COLD START root topology through the OWNER — guard round-6 finding 1 (the no-rig branch consumes load truth)", () => {
+  const BRAILLE = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] topology read pending/;
+  function composed(live: ReturnType<typeof createLiveRefresh>, opts?: { colorMode?: "truecolor" | "16" }) {
+    // the application's REAL default entry: empty snapshot, default Topology
+    // view — exactly what main.ts draws before the first hydrate settles
+    const s = createViewState({ instanceId: "cold", getSnapshot: () => live.snapshot() });
+    return (nowMs: number) =>
+      renderScreen(s.get(), live.snapshot(), { cols: 140, rows: 34, nowMs, colorMode: opts?.colorMode ?? "truecolor", load: live.load() });
+  }
+
+  it("a real in-flight cold start renders the braille spinner at the root, ANIMATES across frames, and marks motion-active", async () => {
+    let release!: (s: FleetSnapshot) => void;
+    const gate = new Promise<FleetSnapshot>((r) => { release = r; });
+    const live = createLiveRefresh({ hydrate: () => gate, onFrame: () => {}, now: () => 0 });
+    const done = live.refresh();
+    const frame = composed(live);
+    const f0 = frame(0);
+    const l0 = f0.lines.find((l) => l.includes("read pending"))!;
+    expect(l0).toMatch(BRAILLE);
+    expect(frame(120).lines.find((l) => l.includes("read pending"))!).not.toBe(l0); // two frame phases
+    expect(f0.motionActive).toBe(true);
+    // 16-color fallback renders the LINE spinner on the same real path
+    expect(composed(live, { colorMode: "16" })(0).lines.find((l) => l.includes("read pending"))!).toMatch(/[|/\-\\] topology read pending/);
+    release(demoSnapshot());
+    await done;
+    expect(frame(0).lines.join("\n")).not.toMatch(/read pending/); // settled rigs render, no pending claim
+  });
+
+  it("settle-success-EMPTY renders the static proven-no-rigs truth — never 'waiting', never a spinner", async () => {
+    const live = createLiveRefresh({ hydrate: () => Promise.resolve(emptySnapshot()), onFrame: () => {}, now: () => 0 });
+    await live.refresh();
+    const screen = composed(live)(0);
+    const line = screen.lines.find((l) => l.includes("no rigs"))!;
+    expect(line).toMatch(/no rigs served — proven empty/);
+    expect(screen.lines.join("\n")).not.toMatch(/waiting|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/);
+    expect(screen.motionActive).toBeFalsy();
+  });
+
+  it("settle-NAMED-FAILURE renders the static rigs-summary failure — never 'waiting', never a spinner", async () => {
+    const failed = emptySnapshot();
+    failed.readErrors.push("rigs-summary: connect ECONNREFUSED");
+    const live = createLiveRefresh({ hydrate: () => Promise.resolve(failed), onFrame: () => {}, now: () => 0 });
+    await live.refresh();
+    const screen = composed(live)(0);
+    expect(screen.lines.find((l) => l.includes("rigs read"))!).toMatch(/✕ rigs read failed/);
+    expect(screen.lines.join("\n")).not.toMatch(/waiting|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/);
+    expect(screen.motionActive).toBeFalsy();
+  });
+
+  it("reduced motion renders the honest STATIC loading mark on the in-flight cold start, with no motion-active", async () => {
+    let release!: (s: FleetSnapshot) => void;
+    const gate = new Promise<FleetSnapshot>((r) => { release = r; });
+    const live = createLiveRefresh({ hydrate: () => gate, onFrame: () => {}, now: () => 0 });
+    const done = live.refresh();
+    process.env["OPENRIG_REDUCED_MOTION"] = "1";
+    try {
+      const screen = composed(live)(0);
+      expect(screen.lines.find((l) => l.includes("read pending"))!).toMatch(/· topology read pending/);
+      expect(screen.motionActive).toBeFalsy();
+    } finally {
+      delete process.env["OPENRIG_REDUCED_MOTION"];
+    }
+    release(demoSnapshot());
+    await done;
   });
 });
 
