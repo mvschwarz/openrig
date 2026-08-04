@@ -501,21 +501,26 @@ describe("S19 MR4 — detail pane shows the full absolute working directory", ()
     const s2 = makeStore(graphSnap());
     s2.dispatch({ type: "drill", resource: "agent", name: "dev.qa", target: { host: "vm-host", rig: FIXTURE_RIG_NAME, pod: "dev" } });
     const body2 = renderScreen(s2.get(), graphSnap(), { cols: 150, rows: 40 }).lines.join("\n");
-    expect(body2).toMatch(/cwd/); // the field exists and reads honestly when unknown
+    expect(body2).toContain("— (not served)"); // the literal honest absent value (guard strengthening)
   });
 });
 
 describe("S19 MR5 — chrome: blinking cursor + guide contrast", () => {
-  it("the command bar renders a BLINKING cursor while composing and none when empty", () => {
+  it("the command bar's blinking insertion cell is visible for EMPTY and non-empty input (guard MR5a: pre-typing discoverability)", () => {
     const snap = graphSnap();
     const s = makeStore(snap);
+    // EMPTY buffer: the cursor shows the bar is ready BEFORE the first key
+    const empty = renderScreen(s.get(), snap, { cols: 120, rows: 30 }, "");
+    expect(empty.lines[0]).toContain("cmd ▸ ▊");
+    const styledE = stylizeLines(empty, createStyle("truecolor"));
+    expect(styledE[0]!, "blink on the empty-buffer insertion cell").toMatch(/\x1b\[[0-9;]*5;?[0-9;]*m▊/);
+    styledE.forEach((l, i) => expect(stripAnsi(l)).toBe(empty.lines[i]));
+    // NON-EMPTY: the cursor rides the end of the text
     const composing = renderScreen(s.get(), snap, { cols: 120, rows: 30 }, "rig ope");
     expect(composing.lines[0]).toContain("rig ope▊");
     const styledC = stylizeLines(composing, createStyle("truecolor"));
     expect(styledC[0]!, "SGR blink (5) on the cursor cell").toMatch(/\x1b\[[0-9;]*5;?[0-9;]*m▊/);
     styledC.forEach((l, i) => expect(stripAnsi(l)).toBe(composing.lines[i]));
-    const empty = renderScreen(s.get(), snap, { cols: 120, rows: 30 }, "");
-    expect(empty.lines[0]).not.toContain("▊");
   });
 
   it("tree guides paint the BUMPED chrome contrast (one step up; text-only-highlight pin is the regression guard)", () => {

@@ -608,9 +608,12 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   const { cols = 120, rows = 32 } = options;
   const lines: string[] = [];
   const hitMap: Screen["hitMap"] = [];
-  // S19 MR5a: a cursor cell renders while composing (the existing input
-  // state — no new focus mechanism); stylize gives it SGR blink
-  lines.push(pad(`cmd ▸ ${inputLine}${inputLine ? "▊" : ""}`, cols));
+  // S19 MR5a (guard-corrected): ONE ▊ insertion cell renders at the bar's
+  // current insertion point for EMPTY and non-empty buffers alike — the
+  // shell accepts typing from the empty state, so the honest readiness
+  // affordance must show BEFORE the first key (no new focus state; stylize
+  // gives the cell SGR blink; zero effect on hit geometry).
+  lines.push(pad(`cmd ▸ ${inputLine}▊`, cols));
   const sectionTitle = { topology: "TOPOLOGY", specs: "SPECS", needs: "NEEDS-YOU" }[state.section] ?? state.section.toUpperCase();
   // active-pane emphasis (k9s-class chrome): the focused pane's title is bracketed
   const explorerTitle = state.focusedPane === "explorer" ? "[ EXPLORER ]" : "EXPLORER";

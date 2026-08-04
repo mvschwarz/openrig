@@ -4,8 +4,9 @@
 // invents state, and a projection with no value renders honest-unknown ○
 // (PIN-2 as a glyph — NEVER a fabricated ●).
 //
-//   ● active/done   = startupStatus ready + session running (activity may be
-//                     running or idle — both are the green bucket)
+//   ● active/done   = startupStatus ready + session running; S19 MR3 splits
+//                     the COLOR by activity (actActive vs actIdle roles) —
+//                     the glyph stays one honest ●
 //   ◐ partial/%     = the existing amber-attention family: startupStatus/
 //                     lifecycle attention_required, needs_input, heldReason
 //                     (ps-projection.ts seatNeedsAttention minus `failed`,
