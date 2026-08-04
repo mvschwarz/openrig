@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { Command } from "commander";
-import { setupCommand, runSetup, goldenPathNextSteps, type SetupDeps, type SetupResult } from "../src/commands/setup.js";
+import { parse as parseYaml } from "yaml";
+import { setupCommand, runSetup, goldenPathNextSteps, permissionPolicyMenuLines, type SetupDeps, type SetupResult } from "../src/commands/setup.js";
 import type { DoctorDeps } from "../src/commands/doctor.js";
 import { resolveCmuxSettingsPath } from "../src/cmux-config.js";
 
@@ -741,5 +742,185 @@ describe("rig setup", () => {
     expect(result.ready).toBe(true);
     expect(seenTimeouts.get("npm install -g @anthropic-ai/claude-code")).toBe(300000);
     expect(seenTimeouts.get("npm install -g @openai/codex")).toBe(300000);
+  });
+});
+
+// Slice-03 Lane B (0.4.8) onboarding RECORD path. RULING-C b4913ed4: the v1 menu EDITS/RECORDS into
+// an EXISTING spec only (chosen -> permission_policy: builtin:<name>; deliberate-none ->
+// permission_policy: none); NEW INSTALL = no spec = NOTHING WRITTEN = floor by absence. Persistence =
+// the RigSpec permission_policy ONLY (P6 fence). Invariants: P3 write-on-explicit-selection-ONLY,
+// P1 no absent->deliberate_none upgrade, P2 honest render.
+describe("rig setup --policy (onboarding record)", () => {
+  const SPEC = "/tmp/onboard-demo/rig.yaml";
+  const BASE_SPEC = 'version: "1"\nname: demo-rig\npods: []\nedges: []\n';
+
+  function specDeps(initial: string | null, sink: Record<string, string>): SetupDeps {
+    return makeDeps({
+      readFile: (p: string) => (p === SPEC ? (p in sink ? sink[p] : initial) : null),
+      exists: (p: string) => p === SPEC && (initial !== null || p in sink),
+      writeFile: (p: string, c: string) => { sink[p] = c; },
+    });
+  }
+
+  it("--policy standard records permission_policy: builtin:standard into the existing spec (chosen builtin), least-destructively", async () => {
+    const sink: Record<string, string> = {};
+    const deps = specDeps(BASE_SPEC, sink);
+
+    const result = await runSetup(deps, { policy: "standard", specPath: SPEC });
+
+    const step = result.steps.find((s) => s.id === "policy_record");
+    expect(step?.status).toBe("applied");
+    expect(sink[SPEC]).toBeDefined();
+    const parsed = parseYaml(sink[SPEC]!) as Record<string, unknown>;
+    expect(parsed["permission_policy"]).toBe("builtin:standard");
+    // least-destructive: all other keys survive the record.
+    expect(parsed["name"]).toBe("demo-rig");
+    expect(parsed["version"]).toBe("1");
+    expect(parsed["pods"]).toEqual([]);
+  });
+
+  it("byte-survival least-destructive: records ONLY the permission_policy line, preserving comments (top+inline), key order, and formatting", async () => {
+    const sink: Record<string, string> = {};
+    // DISCRIMINATING fixture — a commented, hand-authored-style spec. A parse+serialize round-trip
+    // (the pre-revision impl) DROPS every comment here, so this pin is RED against that impl BY
+    // CONSTRUCTION; a comment-preserving edit reproduces the file byte-for-byte plus the one new line.
+    const commented =
+      "# hand-authored: do not clobber\n" +
+      'version: "1"\n' +
+      "name: demo-rig # the rig name\n" +
+      "pods: [] # no pods yet\n" +
+      "edges: []\n";
+    const deps = specDeps(commented, sink);
+
+    await runSetup(deps, { policy: "standard", specPath: SPEC });
+
+    const written = sink[SPEC]!;
+    // Everything survives byte-for-byte; the ONLY delta is the appended permission_policy line.
+    expect(written).toBe(commented + "permission_policy: builtin:standard\n");
+  });
+
+  it("maps each chosen built-in name to its builtin:<name> ref", async () => {
+    for (const name of ["locked", "standard", "open", "yolo"] as const) {
+      const sink: Record<string, string> = {};
+      const deps = specDeps(BASE_SPEC, sink);
+      await runSetup(deps, { policy: name, specPath: SPEC });
+      const parsed = parseYaml(sink[SPEC]!) as Record<string, unknown>;
+      expect(parsed["permission_policy"]).toBe(`builtin:${name}`);
+    }
+  });
+
+  it("--policy none records the deliberate-none value permission_policy: none (the WRITE is base-testable; the PARSE round-trip is cross-lane)", async () => {
+    const sink: Record<string, string> = {};
+    const deps = specDeps(BASE_SPEC, sink);
+
+    const result = await runSetup(deps, { policy: "none", specPath: SPEC });
+
+    const step = result.steps.find((s) => s.id === "policy_record");
+    expect(step?.status).toBe("applied");
+    const parsed = parseYaml(sink[SPEC]!) as Record<string, unknown>;
+    // Deliberate-none is the EXPLICIT recorded value (origin deliberate_none), NOT absence.
+    expect(parsed["permission_policy"]).toBe("none");
+  });
+
+  it("P3 + anchor 1: NO --policy => NO policy_record step, NO spec write (bare setup byte-unchanged)", async () => {
+    const sink: Record<string, string> = {};
+    const deps = specDeps(BASE_SPEC, sink);
+
+    const result = await runSetup(deps, {});
+
+    expect(result.steps.find((s) => s.id === "policy_record")).toBeUndefined();
+    // Nothing recorded into the spec on the skip/no-selection path.
+    expect(sink[SPEC]).toBeUndefined();
+  });
+
+  it("P1 + RULING-C: --policy with NO resolvable existing spec records NOTHING (fail step, no phantom write)", async () => {
+    const sink: Record<string, string> = {};
+    // No spec present anywhere: readFile null, exists false.
+    const deps = specDeps(null, sink);
+
+    const result = await runSetup(deps, { policy: "standard", specPath: SPEC });
+
+    const step = result.steps.find((s) => s.id === "policy_record");
+    expect(step?.status).toBe("fail");
+    expect(sink[SPEC]).toBeUndefined();
+    // A record failure must not silently pass as ready.
+    expect(result.ready).toBe(false);
+  });
+
+  it("rejects an unknown --policy name, records NOTHING", async () => {
+    const sink: Record<string, string> = {};
+    const deps = specDeps(BASE_SPEC, sink);
+
+    const result = await runSetup(deps, { policy: "bananas" as never, specPath: SPEC });
+
+    const step = result.steps.find((s) => s.id === "policy_record");
+    expect(step?.status).toBe("fail");
+    // The rejection surfaces the valid set to the operator (message + reason are what they see).
+    expect(`${step?.message ?? ""} ${step?.reason ?? ""}`).toMatch(/locked, standard, open, yolo, none/);
+    expect(sink[SPEC]).toBeUndefined();
+  });
+
+  it("re-recording overwrites a prior permission_policy in place (no duplication)", async () => {
+    const sink: Record<string, string> = {};
+    const deps = specDeps('version: "1"\nname: demo-rig\npermission_policy: builtin:locked\npods: []\nedges: []\n', sink);
+
+    await runSetup(deps, { policy: "open", specPath: SPEC });
+
+    const written = sink[SPEC]!;
+    const parsed = parseYaml(written) as Record<string, unknown>;
+    expect(parsed["permission_policy"]).toBe("builtin:open");
+    // exactly one permission_policy key in the serialized form.
+    expect(written.match(/permission_policy:/g)?.length).toBe(1);
+  });
+
+  it("wires --policy and --spec options on the setup command", () => {
+    const cmd = setupCommand(makeDeps());
+    const longs = cmd.options.map((o) => o.long);
+    expect(longs).toContain("--policy");
+    expect(longs).toContain("--spec");
+  });
+
+  // CROSS-LANE PIN (do NOT green on this base 2a05118a): on my base, permission_policy: none is STILL
+  // the Seam-A reservation error (policy-ref.ts:50-52). The deliberate-none PARSE round-trip
+  // (none -> origin deliberate_none, floor==absent) becomes valid only at the ASSEMBLED 4.8 tip
+  // 909c33e2 where Lane A's amendment converges. This is asserted at the tip, never here.
+  it.todo("CROSS-LANE @tip 909c33e2: recorded permission_policy: none parses as deliberate_none (floor==absent) via Lane A's amendment");
+});
+
+// Slice-03 Lane B onboarding MENU COPY. The 0.4.8 lineage has NO TUI, so the "menu" is calm-register
+// narrative text presenting the choice. Copy is FROZEN (MENU-COPY-FROZEN-2026-08-04, founder-picked):
+// verbatim labels, no "Operator" in copy, exact deliberate-none + skip-line phrasing, NO pre-selected
+// default, Standard carries the ⭐ recommendation marker. P2: the render is honest (three-way).
+describe("rig setup permission-policy menu copy (frozen)", () => {
+  it("renders the frozen top-level labels verbatim", () => {
+    const out = permissionPolicyMenuLines().join("\n");
+    expect(out).toContain("Policy Mode");
+    expect(out).toContain("YOLO Mode");
+  });
+
+  it("renders the exact frozen deliberate-none and skip-line copy", () => {
+    const out = permissionPolicyMenuLines().join("\n");
+    expect(out).toContain("No policy — deliberate choice (recorded)");
+    expect(out).toContain("If you skip: OpenRig sets nothing — the usability floor only");
+  });
+
+  it("marks Standard with the ⭐ recommendation marker and pre-selects nothing", () => {
+    const lines = permissionPolicyMenuLines();
+    const standardLine = lines.find((l) => l.includes("Standard"));
+    expect(standardLine).toBeDefined();
+    expect(standardLine!).toContain("⭐");
+    // NO pre-selected default (the ⭐ is a recommendation, not a selection).
+    expect(permissionPolicyMenuLines().join("\n")).not.toMatch(/\(default\)|\[selected\]|pre-selected/i);
+  });
+
+  it("never names 'Operator' in the copy (YOLO Mode is the user-facing label)", () => {
+    expect(permissionPolicyMenuLines().join("\n")).not.toContain("Operator");
+  });
+
+  it("holds the calm register — no editorializing / founder-internal wording", () => {
+    const out = permissionPolicyMenuLines().join("\n").toLowerCase();
+    for (const banned of ["treacherous", "dangerous", "yolo mode is reckless", "footgun"]) {
+      expect(out).not.toContain(banned);
+    }
   });
 });
