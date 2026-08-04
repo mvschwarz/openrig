@@ -10,6 +10,27 @@ import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
 
+// config-store's DEFAULTS (module scope) resolve db/transcripts paths via
+// getDefaultOpenRigPath → getOpenRigHome → readOpenRigEnv("OPENRIG_HOME",
+// "RIGGED_HOME"), read at IMPORT time — so an ambient home (primary OPENRIG_HOME
+// OR legacy RIGGED_HOME) freezes the default paths before any beforeEach can
+// scrub it, making "resolve() returns defaults" non-hermetic. vi.hoisted runs
+// BEFORE the module graph loads, so neutralizing BOTH aliases here binds the
+// default-resolution assertions to ~/.openrig deterministically.
+const { savedOpenrigHome, savedRiggedHome } = vi.hoisted(() => {
+  const savedOpenrig = process.env["OPENRIG_HOME"];
+  const savedRigged = process.env["RIGGED_HOME"];
+  delete process.env["OPENRIG_HOME"];
+  delete process.env["RIGGED_HOME"];
+  return { savedOpenrigHome: savedOpenrig, savedRiggedHome: savedRigged };
+});
+afterAll(() => {
+  if (savedOpenrigHome === undefined) delete process.env["OPENRIG_HOME"];
+  else process.env["OPENRIG_HOME"] = savedOpenrigHome;
+  if (savedRiggedHome === undefined) delete process.env["RIGGED_HOME"];
+  else process.env["RIGGED_HOME"] = savedRiggedHome;
+});
+
 describe("ConfigStore", () => {
   let tmpDir: string;
   let savedEnv: Record<string, string | undefined>;
