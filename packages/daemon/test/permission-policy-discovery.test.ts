@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { rigPreflight } from "../src/domain/rigspec-preflight.js";
+import { RigSpecSchema as PodRigSpecSchema } from "../src/domain/rigspec-schema.js";
 import type { AgentResolverFsOps } from "../src/domain/agent-resolver.js";
 import type { NodeBinding, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
@@ -185,6 +186,123 @@ describe("Seam C permission-policy discovery", () => {
         'dev.impl: permission_policy ref="builtin:yolo" origin=builtin launch_posture=full_bypass',
         'dev.impl: base/import collision in skills on "shared"',
       ]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("carries structured materialize warnings through the public expansion response in order", async () => {
+    const db = createFullTestDb();
+    try {
+      const setup = createTestApp(db, { podInstantiatorFsOps: collisionFsOps() });
+      const rig = setup.rigRepo.createRig("policy-expand-warnings");
+      const response = await setup.app.request(`/api/rigs/${rig.id}/expand`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          rigRoot: RIG_ROOT,
+          pod: {
+            id: "dev",
+            label: "Dev",
+            members: [{
+              id: "impl",
+              runtime: "claude-code",
+              agent_ref: "local:agents/impl",
+              profile: "default",
+              permission_policy: "builtin:yolo",
+              cwd: ".",
+            }],
+            edges: [],
+          },
+        }),
+      });
+
+      expect(response.status).toBe(201);
+      const body = await response.json() as { warnings: string[] };
+      expect(body.warnings).toEqual([
+        'dev.impl: permission_policy ref="builtin:yolo" origin=builtin launch_posture=full_bypass',
+        'dev.impl: base/import collision in skills on "shared"',
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("discovers persisted target-rig policy provenance and matches the launch binding", async () => {
+    const bindings: NodeBinding[] = [];
+    const adapter: RuntimeAdapter = {
+      runtime: "claude-code",
+      listInstalled: async () => [],
+      project: async () => ({ projected: [], skipped: [], failed: [] }),
+      deliverStartup: async () => ({ delivered: 0, failed: [] }),
+      launchHarness: async (binding) => { bindings.push(binding); return { ok: true }; },
+      checkReady: async () => ({ ready: true }),
+    } as RuntimeAdapter;
+    const agentOnlyFsOps: AgentResolverFsOps = {
+      exists: (path) => path.includes("agents/impl"),
+      readFile: (path) => {
+        if (path.includes("agents/impl")) return AGENT_YAML;
+        throw new Error(`Not found: ${path}`);
+      },
+    };
+    const db = createFullTestDb();
+    try {
+      const setup = createTestApp(db, {
+        adapters: { "claude-code": adapter },
+        podInstantiatorFsOps: agentOnlyFsOps,
+      });
+      const rig = setup.rigRepo.createRig("persisted-policy-target");
+      setup.rigRepo.setRigPermissionPolicy(rig.id, "policies/operator-full.md");
+      setup.rigRepo.setRigPolicyProvenance(rig.id, {
+        origin: "custom",
+        resolvedTarget: "/original/rig/policies/operator-full.md",
+        declaringDir: "/original/rig",
+        launchPosture: "full_bypass",
+      });
+      const specObject = {
+        version: "0.2",
+        name: rig.name,
+        pods: [{
+          id: "dev",
+          label: "Dev",
+          members: [{
+            id: "impl",
+            runtime: "claude-code",
+            agent_ref: "local:agents/impl",
+            profile: "default",
+            cwd: ".",
+          }, {
+            id: "override",
+            runtime: "claude-code",
+            agent_ref: "local:agents/impl",
+            profile: "default",
+            permission_policy: "builtin:standard",
+            cwd: ".",
+          }],
+          edges: [],
+        }],
+        edges: [],
+      };
+
+      const materialized = await setup.podInstantiator.materializeStructured(
+        specObject,
+        "/different/operation-root",
+        { targetRigId: rig.id },
+      );
+      expect(materialized.ok).toBe(true);
+      if (!materialized.ok) return;
+      expect(materialized.result.warnings).toEqual([
+        'dev.impl: permission_policy ref="policies/operator-full.md" origin=custom launch_posture=full_bypass',
+        'dev.override: permission_policy ref="builtin:standard" origin=builtin launch_posture=floor',
+      ]);
+
+      const launched = await setup.podInstantiator.launchValidatedSpec(
+        PodRigSpecSchema.normalize(specObject),
+        "/different/operation-root",
+        rig.id,
+      );
+      expect(launched.ok).toBe(true);
+      expect(bindings.map((binding) => binding.launchPosture)).toEqual(["full_bypass", "floor"]);
     } finally {
       db.close();
     }

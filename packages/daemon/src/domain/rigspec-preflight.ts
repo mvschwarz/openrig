@@ -125,6 +125,7 @@ import { getOpenRigInstallCwdError, resolveLaunchCwd } from "./cwd-resolution.js
 import {
   resolvePermissionPolicyAttachment,
   resolvePermissionPolicyRefValue,
+  type ResolvedPolicyAttachment,
 } from "./permission-policy/policy-ref.js";
 
 const SUPPORTED_RUNTIMES = new Set(["claude-code", "codex", "pi", "terminal"]);
@@ -147,6 +148,12 @@ export interface PreflightSpecContext {
   cwdOverride?: string;
   fsOps: AgentResolverFsOps;
   rigNameOverride?: string;
+  /** Effective persisted target-rig attachment for structured expansion.
+   * Explicit member/fragment refs still win; this is the inherited fallback. */
+  inheritedPermissionPolicy?: Pick<
+    ResolvedPolicyAttachment,
+    "ref" | "origin" | "resolvedTarget" | "declaringDir" | "launchPosture"
+  >;
   /** OPR.0.3.4.7 — exec for async probes (Codex profile-LOAD). When omitted,
    *  the Codex profile probe is skipped (backwards-compatible for callers that
    *  cannot provide exec, e.g. legacy sync-only test paths). */
@@ -160,20 +167,22 @@ export interface PreflightSpecContext {
  */
 export function permissionPolicyDiscoveryWarnings(
   rigSpec: PodRigSpec,
-  preflightCtx: Pick<PreflightSpecContext, "rigRoot" | "fsOps">,
+  preflightCtx: Pick<PreflightSpecContext, "rigRoot" | "fsOps" | "inheritedPermissionPolicy">,
 ): string[] {
   const warnings: string[] = [];
   for (const pod of rigSpec.pods) {
     for (const member of pod.members) {
       const logicalId = `${pod.id}.${member.id}`;
       const ref = resolvePermissionPolicyRefValue(member.permissionPolicy, rigSpec.permissionPolicy);
-      if (!ref) {
+      const attachment = ref
+        ? resolvePermissionPolicyAttachment(ref, preflightCtx.rigRoot, {
+          readFile: (path) => preflightCtx.fsOps.readFile(path),
+        })
+        : preflightCtx.inheritedPermissionPolicy;
+      if (!attachment) {
         warnings.push(`${logicalId}: permission_policy absent; launch_posture=floor`);
         continue;
       }
-      const attachment = resolvePermissionPolicyAttachment(ref, preflightCtx.rigRoot, {
-        readFile: (path) => preflightCtx.fsOps.readFile(path),
-      });
       warnings.push(`${logicalId}: permission_policy ref="${attachment.ref}" origin=${attachment.origin} launch_posture=${attachment.launchPosture}`);
     }
   }
