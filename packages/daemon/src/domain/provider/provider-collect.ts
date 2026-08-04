@@ -11,12 +11,14 @@ import type { CodexAuthMetadata } from "./codex-auth-reader.js";
 import { assembleFourBlock, type RawSeatBinding } from "./provider-read-model.js";
 import { claudeStatuslineSignals } from "./provider-signals.js";
 import type { FourBlockReadModel, ProviderAccount, ProviderSignal } from "./provider-types.js";
+import type { NodeLifecycleState } from "../types.js";
 
 /** One seat in the fleet (the universe to bind), sourced from node-inventory across rigs. */
 export interface ProviderSeat {
   seatSession: string;
   rigName: string;
   runtime: string;
+  lifecycleState: NodeLifecycleState;
 }
 
 export interface ProviderCollectDeps {
@@ -76,7 +78,9 @@ export function collectFourBlockReadModel(deps: ProviderCollectDeps): FourBlockR
   });
 
   const liveClaudeSeats = new Set(
-    seatUniverse.filter((seat) => seat.runtime === "claude-code").map((seat) => seat.seatSession),
+    seatUniverse
+      .filter((seat) => seat.runtime === "claude-code" && seat.lifecycleState === "running")
+      .map((seat) => seat.seatSession),
   );
   const signals = (deps.collectSignals ? [...deps.collectSignals()] : []).filter((signal) =>
     signal.provider !== "claude" || !signal.seatSession || liveClaudeSeats.has(signal.seatSession),

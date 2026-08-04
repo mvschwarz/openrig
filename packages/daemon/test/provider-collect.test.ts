@@ -26,7 +26,7 @@ describe("collectFourBlockReadModel — getReadModel collection seam", () => {
   it("binds a registered codex seat to its profile with boundAt/source from the registry", () => {
     const model = collectFourBlockReadModel(deps({
       auth: { profiles: ["work"], seats: [{ seat: "dev-driver@rig-a", rig: "rig-a", runtime: "codex", cwd: "/p", authProfile: "work", updatedTs: "2026-08-03T10:00:00Z" }] },
-      listSeats: () => [{ seatSession: "dev-driver@rig-a", rigName: "rig-a", runtime: "codex" }],
+      listSeats: () => [{ seatSession: "dev-driver@rig-a", rigName: "rig-a", runtime: "codex", lifecycleState: "running" }],
     }));
     expect(model.bindings).toEqual([
       { accountId: "work", seatSession: "dev-driver@rig-a", rigName: "rig-a", boundAt: "2026-08-03T10:00:00Z", bindingSource: "codex_auth_seat_registry", anomalies: [] },
@@ -36,7 +36,7 @@ describe("collectFourBlockReadModel — getReadModel collection seam", () => {
   it("a claude (or unregistered) seat is unbound and carries seat_with_no_account", () => {
     const model = collectFourBlockReadModel(deps({
       auth: { profiles: ["work"], seats: [] },
-      listSeats: () => [{ seatSession: "pm@rig-a", rigName: "rig-a", runtime: "claude-code" }],
+      listSeats: () => [{ seatSession: "pm@rig-a", rigName: "rig-a", runtime: "claude-code", lifecycleState: "running" }],
     }));
     expect(model.bindings).toHaveLength(1);
     const b = model.bindings[0]!;
@@ -51,8 +51,8 @@ describe("collectFourBlockReadModel — getReadModel collection seam", () => {
         { seat: "b@rig", rig: "rig", runtime: "codex", cwd: "/p", authProfile: "work", updatedTs: "t2" },
       ] },
       listSeats: () => [
-        { seatSession: "a@rig", rigName: "rig", runtime: "codex" },
-        { seatSession: "b@rig", rigName: "rig", runtime: "codex" },
+        { seatSession: "a@rig", rigName: "rig", runtime: "codex", lifecycleState: "running" },
+        { seatSession: "b@rig", rigName: "rig", runtime: "codex", lifecycleState: "running" },
       ],
     }));
     for (const b of model.bindings) {
@@ -63,7 +63,7 @@ describe("collectFourBlockReadModel — getReadModel collection seam", () => {
   it("empty codex home → empty accounts, every seat unbound; signals default to []", () => {
     const model = collectFourBlockReadModel(deps({
       auth: { profiles: [], seats: [] },
-      listSeats: () => [{ seatSession: "s@rig", rigName: "rig", runtime: "codex" }],
+      listSeats: () => [{ seatSession: "s@rig", rigName: "rig", runtime: "codex", lifecycleState: "running" }],
     }));
     expect(model.accounts).toEqual([]);
     expect(model.bindings[0]!.accountId).toBeNull();
@@ -81,7 +81,7 @@ describe("collectFourBlockReadModel — getReadModel collection seam", () => {
     const model = collectFourBlockReadModel(deps({
       auth: { profiles: ["work"], seats: [{ seat: "shared@rig", rig: "rig", runtime: "codex", cwd: "/p", authProfile: "work", updatedTs: "t1" }] },
       // The LIVE inventory seat with this same session name is a CLAUDE seat — the codex row is stale.
-      listSeats: () => [{ seatSession: "shared@rig", rigName: "rig", runtime: "claude-code" }],
+      listSeats: () => [{ seatSession: "shared@rig", rigName: "rig", runtime: "claude-code", lifecycleState: "running" }],
     }));
     expect(model.bindings).toHaveLength(1);
     const b = model.bindings[0]!;
@@ -91,7 +91,7 @@ describe("collectFourBlockReadModel — getReadModel collection seam", () => {
 
   it("drops stale seat-keyed Claude cache signals and emits the live Claude seat's honest unknown", () => {
     const model = collectFourBlockReadModel(deps({
-      listSeats: () => [{ seatSession: "live@rig", rigName: "rig", runtime: "claude-code" }],
+      listSeats: () => [{ seatSession: "live@rig", rigName: "rig", runtime: "claude-code", lifecycleState: "running" }],
       collectSignals: () => [{
         provider: "claude", seatSession: "dead@rig", sourceClass: "provider_statusline",
         authority: "account_cross_device", window: "five_hour", usedPercent: 12, asOf: ASOF,
@@ -108,7 +108,7 @@ describe("collectFourBlockReadModel — getReadModel collection seam", () => {
 
   it("drops a Claude cache signal when the session name is live only as a non-Claude runtime", () => {
     const model = collectFourBlockReadModel(deps({
-      listSeats: () => [{ seatSession: "reused@rig", rigName: "rig", runtime: "codex" }],
+      listSeats: () => [{ seatSession: "reused@rig", rigName: "rig", runtime: "codex", lifecycleState: "running" }],
       collectSignals: () => [{
         provider: "claude", seatSession: "reused@rig", sourceClass: "provider_statusline",
         authority: "account_cross_device", window: "five_hour", usedPercent: 12, asOf: ASOF,

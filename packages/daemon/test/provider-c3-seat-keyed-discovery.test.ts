@@ -26,7 +26,11 @@ function emptyCodexHomeEnv(): NodeJS.ProcessEnv {
 }
 
 /** Seed a live claude-code seat into node-inventory (rig + pod + node + running session/binding). */
-function seedClaudeSeat(db: Database.Database, sessionName = "dev-impl@test-rig") {
+function seedClaudeSeat(
+  db: Database.Database,
+  sessionName = "dev-impl@test-rig",
+  sessionStatus: "running" | "exited" = "running",
+) {
   db.prepare("INSERT INTO rigs (id, name) VALUES (?, ?)").run("rig-1", "test-rig");
   db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)").run("pod-1", "rig-1", "dev", "Dev");
   db.prepare(
@@ -34,7 +38,7 @@ function seedClaudeSeat(db: Database.Database, sessionName = "dev-impl@test-rig"
   ).run("node-1", "rig-1", "dev.impl", "claude-code", "/project", "pod-1", "local:agents/impl", "default", "impl", "1.0.0", "abc123");
   db.prepare(
     "INSERT INTO sessions (id, node_id, session_name, status, startup_status) VALUES (?, ?, ?, ?, ?)"
-  ).run("sess-node-1", "node-1", sessionName, "running", "ready");
+  ).run("sess-node-1", "node-1", sessionName, sessionStatus, "ready");
   db.prepare("INSERT OR REPLACE INTO bindings (id, node_id, tmux_session) VALUES (?, ?, ?)").run("bind-node-1", "node-1", sessionName);
 }
 
@@ -103,6 +107,45 @@ describe("Slice-04 C3 — seat-keyed Claude provider_usage discovery (production
       expect(claude.map((signal) => signal.window).sort()).toEqual(["five_hour", "weekly"]);
       expect(claude.find((signal) => signal.window === "five_hour")?.usedPercent).toBe(0);
       expect(claude.every((signal) => signal.seatSession === seatSession && signal.accountRef === undefined)).toBe(true);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("an exited latest Claude session plus matching stale cache emits zero Claude signals", async () => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "provider-c3-exited-"));
+    try {
+      const contextDir = nodePath.join(root, "context");
+      const usageDir = nodePath.join(root, "provider-usage");
+      const seatSession = "exited-impl@test-rig";
+      const collectorPath = nodePath.join(import.meta.dirname, "../assets/claude-statusline-context.cjs");
+      const result = spawnSync(process.execPath, [collectorPath, contextDir, usageDir], {
+        encoding: "utf-8",
+        input: JSON.stringify({
+          session_id: "sess-exited",
+          session_name: seatSession,
+          context_window: { context_window_size: 200_000, used_percentage: 10 },
+          rate_limits: {
+            five_hour: { used_percentage: 0, resets_at: "2026-08-04T05:00:00.000Z" },
+            seven_day: { used_percentage: 7, resets_at: "2026-08-10T00:00:00.000Z" },
+          },
+        }),
+      });
+      expect(result.status, result.stderr).toBe(0);
+
+      const db = createFullTestDb();
+      seedClaudeSeat(db, seatSession, "exited");
+      const svc = new ProviderServiceImpl({
+        db,
+        listRigs: () => [{ id: "rig-1" }],
+        env: emptyCodexHomeEnv(),
+        now: () => ASOF,
+        collectClaudeSignals: () => collectClaudeSignalsFromProviderUsageDirectory(usageDir, () => ASOF),
+      });
+      const model = await svc.getReadModel();
+
+      expect(model.signals.filter((signal) => signal.provider === "claude")).toEqual([]);
+      expect(model.bindings).toEqual([expect.objectContaining({ seatSession, accountId: null })]);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

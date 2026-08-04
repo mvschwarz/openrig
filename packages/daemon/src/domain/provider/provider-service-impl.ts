@@ -7,7 +7,7 @@
 import type Database from "better-sqlite3";
 import { getNodeInventory } from "../node-inventory.js";
 import { readCodexAuthMetadata } from "./codex-auth-reader.js";
-import { collectFourBlockReadModel } from "./provider-collect.js";
+import { collectFourBlockReadModel, type ProviderSeat } from "./provider-collect.js";
 import { precheckSwitch } from "./provider-policy.js";
 import type {
   ProviderService,
@@ -35,11 +35,16 @@ export class ProviderServiceImpl implements ProviderService {
     return collectFourBlockReadModel({
       readCodexAuth: () => readCodexAuthMetadata(env),
       listSeats: () => {
-        const seats: Array<{ seatSession: string; rigName: string; runtime: string }> = [];
+        const seats: ProviderSeat[] = [];
         for (const rig of this.deps.listRigs()) {
           for (const e of getNodeInventory(this.deps.db, rig.id)) {
             if (e.canonicalSessionName) {
-              seats.push({ seatSession: e.canonicalSessionName, rigName: e.rigName ?? "", runtime: e.runtime ?? "unknown" });
+              seats.push({
+                seatSession: e.canonicalSessionName,
+                rigName: e.rigName ?? "",
+                runtime: e.runtime ?? "unknown",
+                lifecycleState: e.lifecycleState,
+              });
             }
           }
         }
