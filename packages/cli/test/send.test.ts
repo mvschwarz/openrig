@@ -40,6 +40,28 @@ function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCod
   });
 }
 
+// Channel-separated capture: proves WHICH stream a line went to. captureLogs
+// merges stdout+stderr, so it cannot show that the --json envelope lands on
+// stdout while the human prose lands on stderr (and neither leaks to the other).
+function captureChannels(
+  fn: () => Promise<void>,
+): Promise<{ stdout: string[]; stderr: string[]; exitCode: number | undefined }> {
+  return new Promise(async (resolve) => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const origLog = console.log;
+    const origErr = console.error;
+    const origExitCode = process.exitCode;
+    process.exitCode = undefined;
+    console.log = (...args: unknown[]) => stdout.push(args.join(" "));
+    console.error = (...args: unknown[]) => stderr.push(args.join(" "));
+    try { await fn(); } finally { console.log = origLog; console.error = origErr; }
+    const exitCode = process.exitCode;
+    process.exitCode = origExitCode;
+    resolve({ stdout, stderr, exitCode });
+  });
+}
+
 function runningDeps(port: number, clientFactory?: StatusDeps["clientFactory"]): StatusDeps {
   return {
     lifecycleDeps: {
@@ -782,6 +804,83 @@ describe("Send CLI", () => {
       expect(out).toContain("If the daemon is confirmed stopped, run 'rig daemon start'.");
       expect(out).not.toContain("Daemon not running");
       expect(out).not.toContain("unhealthy");
+    });
+
+    // send-json-error-envelope-gap follow-up: on the --json path a real
+    // transport failure must hand the agent a PARSEABLE record, not empty
+    // stdout + human prose on stderr. Mirrors printDaemonNotRunning's
+    // {error:{fact,consequence,action}} envelope. Channel-separated so the
+    // discriminator is unambiguous: stdout carries exactly one JSON record and
+    // stderr is empty (and the human path is the mirror image).
+    it("R7c RED: single-seat --json transport failure emits exactly one parseable stdout JSON envelope, empty stderr, exit 1", async () => {
+      vi.stubEnv("OPENRIG_URL", "http://127.0.0.1:1");
+      vi.stubEnv("RIGGED_URL", "");
+      const rc = recordingRealClient();
+      const { stdout, stderr, exitCode } = await captureChannels(async () => {
+        await makeCmd(probeFailNoStateDeps(rc.factory)).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--json"]);
+      });
+      expect(exitCode).toBe(1);
+      // exactly one stdout record, parseable, exact structured envelope shape
+      // (no top-level ok, no discrete target field — just error:{f,c,a}).
+      expect(stdout).toHaveLength(1);
+      expect(JSON.parse(stdout[0])).toEqual({
+        error: {
+          fact: expect.stringContaining("Cannot connect to the OpenRig daemon at http://127.0.0.1:1:"),
+          consequence: "The message was not sent.",
+          action: expect.stringContaining("Inspect the configured target with 'rig status'; a failed health probe does not prove the daemon is stopped."),
+        },
+      });
+      // the --json path must NOT leak human prose onto stderr
+      expect(stderr).toEqual([]);
+    });
+
+    it("R7d RED: fan-out --json transport failure emits exactly one parseable stdout JSON envelope, empty stderr, exit 1", async () => {
+      vi.stubEnv("OPENRIG_URL", "http://127.0.0.1:1");
+      vi.stubEnv("RIGGED_URL", "");
+      const rc = recordingRealClient();
+      const { stdout, stderr, exitCode } = await captureChannels(async () => {
+        // with --to the FIRST positional IS the message (bare seat + --to is rejected)
+        await makeCmd(probeFailNoStateDeps(rc.factory)).parseAsync(["node", "rig", "send", "--to", "dev-impl@my-rig", "hello", "--json"]);
+      });
+      expect(exitCode).toBe(1);
+      expect(stdout).toHaveLength(1);
+      expect(JSON.parse(stdout[0])).toEqual({
+        error: {
+          fact: expect.stringContaining("Cannot connect to the OpenRig daemon at http://127.0.0.1:1:"),
+          consequence: "The message was not sent.",
+          action: expect.stringContaining("Inspect the configured target with 'rig status'; a failed health probe does not prove the daemon is stopped."),
+        },
+      });
+      expect(stderr).toEqual([]);
+    });
+
+    it("R7e: single-seat HUMAN transport failure keeps stdout empty (mirror of R7c) — the 3 remediation lines are stderr-only, exit 1", async () => {
+      vi.stubEnv("OPENRIG_URL", "http://127.0.0.1:1");
+      vi.stubEnv("RIGGED_URL", "");
+      const rc = recordingRealClient();
+      const { stdout, stderr, exitCode } = await captureChannels(async () => {
+        await makeCmd(probeFailNoStateDeps(rc.factory)).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello"]);
+      });
+      expect(exitCode).toBe(1);
+      expect(stdout).toEqual([]); // human path must never write to stdout
+      const err = stderr.join("\n");
+      expect(err).toContain("Cannot connect to the OpenRig daemon at http://127.0.0.1:1:");
+      expect(err).toContain("The message was not sent.");
+      expect(err).toContain("Inspect the configured target with 'rig status'; a failed health probe does not prove the daemon is stopped.");
+    });
+
+    it("R7f: fan-out HUMAN transport failure keeps stdout empty (mirror of R7d) — stderr-only remediation, exit 1", async () => {
+      vi.stubEnv("OPENRIG_URL", "http://127.0.0.1:1");
+      vi.stubEnv("RIGGED_URL", "");
+      const rc = recordingRealClient();
+      const { stdout, stderr, exitCode } = await captureChannels(async () => {
+        await makeCmd(probeFailNoStateDeps(rc.factory)).parseAsync(["node", "rig", "send", "--to", "dev-impl@my-rig", "hello"]);
+      });
+      expect(exitCode).toBe(1);
+      expect(stdout).toEqual([]);
+      const err = stderr.join("\n");
+      expect(err).toContain("Cannot connect to the OpenRig daemon at http://127.0.0.1:1:");
+      expect(err).toContain("The message was not sent.");
     });
 
     // ff13bcdf finding 1 — the load-bearing latency discriminator. An

@@ -65,14 +65,26 @@ function resolveSenderSession(): string | undefined {
  * Shared by both local paths so single-seat and fan-out remediation are
  * IDENTICAL BY CONSTRUCTION rather than by hand-maintained duplication.
  */
-function printTransportFailure(err: DaemonConnectionError): void {
-  console.error(err.message);
-  console.error("  The message was not sent.");
-  console.error(
-    "  Inspect the configured target with 'rig status'; a failed health probe does not prove the daemon is stopped. " +
+function printTransportFailure(err: DaemonConnectionError, opts?: { json?: boolean }): void {
+  // Remediation values are defined ONCE; the human path adds its two-space
+  // indentation at render so the existing three-line output stays byte-identical,
+  // while the --json envelope carries the clean strings. Same
+  // {error:{fact,consequence,action}} shape as printDaemonNotRunning
+  // (daemon-lifecycle.ts) so an agent on the --json path gets a parseable record
+  // instead of empty stdout plus human prose on stderr.
+  const fact = err.message;
+  const consequence = "The message was not sent.";
+  const action =
+    "Inspect the configured target with 'rig status'; a failed health probe does not prove the daemon is stopped. " +
     "If the target is wrong, check OPENRIG_URL / RIGGED_URL or daemon.host + daemon.port. " +
-    "If the daemon is confirmed stopped, run 'rig daemon start'.",
-  );
+    "If the daemon is confirmed stopped, run 'rig daemon start'.";
+  if (opts?.json) {
+    console.log(JSON.stringify({ error: { fact, consequence, action } }));
+    return;
+  }
+  console.error(fact);
+  console.error(`  ${consequence}`);
+  console.error(`  ${action}`);
 }
 
 /** qitem-c113bd41 — the LOCAL send target. The status probe is advisory,
@@ -318,7 +330,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
           // configured target + the underlying error) — never the bare
           // probe-derived restart line. 1b45cf21 adds the actionable next
           // step after that real failure.
-          printTransportFailure(err);
+          printTransportFailure(err, { json: opts.json });
           process.exitCode = 1;
           return;
         }
@@ -565,8 +577,9 @@ async function runFanOutSend(params: {
   } catch (err) {
     if (err instanceof DaemonConnectionError) {
       // 1b45cf21 — same helper as single-seat, so the remediation is
-      // byte-identical across both local paths by construction.
-      printTransportFailure(err);
+      // byte-identical across both local paths by construction (including the
+      // --json envelope, threaded identically).
+      printTransportFailure(err, { json: opts.json });
       process.exitCode = 1;
       return;
     }
