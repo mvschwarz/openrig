@@ -112,6 +112,17 @@ export function clawdDownsample(cols: number, rows: number): MarkSeg[][] {
   return out;
 }
 
+/** FOUNDER ROUND-2 DESIGN (2026-08-04 via pm-lead): the row mark is a flat
+ * claude-terracotta BLOCK with two short dark vertical eye bars centered —
+ * no limbs/legs; color + face ARE the mark at 2-cell size. Exact source
+ * values: body #ad6755, eyes #181818 (RuntimeMark.tsx). */
+export function clawdFounderMark(): MarkSeg[] {
+  return [
+    { text: "╹", token: "clawdEye", bg: "clawd" },
+    { text: "╹", token: "clawdEye", bg: "clawd" },
+  ];
+}
+
 /** row-mark CANDIDATES for the mr7 pick — both are downsample outputs */
 export function clawdMiniA(): MarkSeg[] {
   return clawdDownsample(2, 1)[0]!;

@@ -79,10 +79,11 @@ export function createStyle(mode: ColorMode = detectColorMode()): Style {
     else if (mode === "256") parts.push(`38;5;${x256}`);
     else parts.push(String(basic));
     if (opts?.bg) {
-      const [brgb, b256] = PALETTE[opts.bg];
+      const [brgb, b256, bBasic] = PALETTE[opts.bg];
       if (mode === "truecolor") parts.push(`48;2;${brgb[0]};${brgb[1]};${brgb[2]}`);
       else if (mode === "256") parts.push(`48;5;${b256}`);
-      // 16-color: no bg (placeholder-safe degrade; mr7 carries the question)
+      // 16-color: fg code + 10 = the matching bg code (30-37→40-47, 90-97→100-107)
+      else parts.push(String(bBasic + 10));
     }
     return `\x1b[${parts.join(";")}m`;
   }
