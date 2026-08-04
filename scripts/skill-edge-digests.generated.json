@@ -60,7 +60,7 @@
     },
     "plugin": {
       "claude-compaction-restore/SKILL.md": "16e0a2e0ef711872ede33aeacd92e22f8e1b7c851112aecd4133a9004e376722",
-      "claude-compaction-restore/scripts/precompact-hook.mjs": "3b739a39210985e6aa2da493bfcda58a1587b258440444188e65133b9450ebac",
+      "claude-compaction-restore/scripts/precompact-hook.mjs": "be1161c8528f81dcecc7b3f88c17622496e6d8b7c4f376347bf4eb3b37e4d311",
       "claude-compaction-restore/scripts/restore-from-jsonl.mjs": "9de164582eed8270d8e257860d156fade3b1295ca952c23b10d3db8569dd964c",
       "claude-compaction-restore/templates/compact-instruction.md": "682c778464517b831902ddc2678c055545899b4751a1d32391ce965d5eb7061d",
       "claude-compaction-restore/templates/post-compact-restore-instruction.md": "10a5a7e5e052f3aa000a4209f386dc4eb90a3c2bba449ca685f124714f59e47a",
