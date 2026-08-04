@@ -8,7 +8,8 @@
 // scan() (matches PL-004 Phase D's contract for workflow_specs).
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
+import { assertSafePackRef } from "./ref-safety.js";
 import { parseManifest } from "./manifest-parser.js";
 import {
   ContextPackError,
@@ -18,7 +19,10 @@ import {
 } from "./context-pack-types.js";
 
 export interface ContextPackLibraryRoot {
-  /** Absolute path to a directory whose immediate children are pack dirs. */
+  /** Absolute path to a discovery root. Slice-03 Atom 2: a pack is any
+   *  NESTED directory containing manifest.yaml; its ref is the relative
+   *  path from this root (spec §2 path-like refs, e.g.
+   *  `packs/compaction-restore`). */
   path: string;
   sourceType: ContextPackSourceType;
 }
@@ -49,36 +53,69 @@ export function estimateTokensFromBytes(bytes: number): number {
 
 export class ContextPackLibraryService {
   private entries = new Map<string, ContextPackEntry>();
+  /** Slice-03 Atom 2: path-like ref → colon id, maintained by scan() with the
+   *  same last-wins root precedence as the id index. Refs are ADDED alongside
+   *  colon ids; the id strip is explicitly a later atom. */
+  private refIndex = new Map<string, string>();
   private readonly roots: ContextPackLibraryRoot[];
 
   constructor(opts: ContextPackLibraryOpts) {
     this.roots = opts.roots;
   }
 
-  /** Re-walk all roots, replace the in-memory index, return a count. */
-  scan(): { count: number; errors: Array<{ source: string; error: string }> } {
-    const next = new Map<string, ContextPackEntry>();
-    const errors: Array<{ source: string; error: string }> = [];
-
-    for (const root of this.roots) {
+  /** Slice-03 Atom 2 — recursive path-addressed discovery: walk a root and
+   *  return every NESTED dir containing manifest.yaml, with its path-like
+   *  ref. Packs are LEAVES: a manifest-bearing dir's subtree belongs to that
+   *  pack, so discovery does not descend below it (a nested manifest would
+   *  make the outer pack's files ambiguous). Symlinked dirs are never
+   *  traversed (dirent.isDirectory() is lstat-shaped — the pre-Atom-2
+   *  semantics, carried into the recursion). */
+  private discoverPackDirs(rootPath: string): Array<{ packDir: string; ref: string }> {
+    const found: Array<{ packDir: string; ref: string }> = [];
+    const walk = (dir: string): void => {
       let dirents: import("node:fs").Dirent[];
       try {
-        dirents = existsSync(root.path)
-          ? readdirSync(root.path, { withFileTypes: true })
-          : [];
+        dirents = readdirSync(dir, { withFileTypes: true });
       } catch {
-        continue;
+        return;
       }
       for (const dirent of dirents) {
         if (!dirent.isDirectory()) continue;
-        const packDir = join(root.path, dirent.name);
-        const manifestPath = join(packDir, "manifest.yaml");
-        if (!existsSync(manifestPath)) continue;
+        const child = join(dir, dirent.name);
+        if (existsSync(join(child, "manifest.yaml"))) {
+          found.push({ packDir: child, ref: relative(rootPath, child).split(sep).join("/") });
+        } else {
+          walk(child);
+        }
+      }
+    };
+    if (existsSync(rootPath)) walk(rootPath);
+    return found;
+  }
+
+  /** Re-walk all roots, replace the in-memory index, return a count. */
+  scan(): { count: number; errors: Array<{ source: string; error: string }> } {
+    const next = new Map<string, ContextPackEntry>();
+    const nextRefs = new Map<string, string>();
+    const errors: Array<{ source: string; error: string }> = [];
+
+    for (const root of this.roots) {
+      for (const { packDir, ref } of this.discoverPackDirs(root.path)) {
+        // DISCOVERY trust boundary (Atom 2): every discovered ref passes the
+        // sealed per-segment contract; an unsafe on-disk ref is a STRUCTURED,
+        // FAIL-VISIBLE error and the pack is skipped — never indexed.
         try {
-          const entry = this.readPackEntry(packDir, manifestPath, root);
+          assertSafePackRef(ref);
+        } catch (err) {
+          errors.push({ source: packDir, error: (err as Error).message });
+          continue;
+        }
+        try {
+          const entry = this.readPackEntry(packDir, join(packDir, "manifest.yaml"), root);
           // Last-wins: workspace > user_file > builtin in the discovery
-          // order configured by startup.
+          // order configured by startup — for BOTH indexes.
           next.set(entry.id, entry);
+          nextRefs.set(entry.relativePath, entry.id);
         } catch (err) {
           errors.push({
             source: packDir,
@@ -90,7 +127,21 @@ export class ContextPackLibraryService {
       }
     }
     this.entries = next;
+    this.refIndex = nextRefs;
     return { count: next.size, errors };
+  }
+
+  /** Slice-03 Atom 2 — RESOLVE trust boundary: get a pack by its path-like
+   *  ref. An unsafe ref is a structured, fail-visible error BEFORE any
+   *  lookup; a safe-but-absent ref is an honest null. */
+  getByRef(ref: string): ContextPackEntry | null {
+    try {
+      assertSafePackRef(ref);
+    } catch (err) {
+      throw new ContextPackError("unsafe_ref", (err as Error).message, { ref });
+    }
+    const id = this.refIndex.get(ref);
+    return id ? this.entries.get(id) ?? null : null;
   }
 
   list(): ContextPackEntry[] {

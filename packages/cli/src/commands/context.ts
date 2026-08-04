@@ -76,6 +76,25 @@ interface SendWire {
   error?: string;
 }
 
+// Slice-03 Atom 2 — mirror the daemon's per-segment ref contract at the
+// local install boundary. This must run before creating the context store.
+const SAFE_REF_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+function assertSafeInstallRef(ref: string): void {
+  const safe =
+    ref.length > 0 &&
+    ref.split("/").every(
+      (segment) => segment.length > 0 && segment !== "." && segment !== ".." && SAFE_REF_SEGMENT.test(segment),
+    );
+  if (!safe) {
+    throw new Error(
+      `unsafe install ref '${ref}' — a ref must be one or more '/'-separated segments, each matching ` +
+        `[A-Za-z0-9][A-Za-z0-9._-]{0,63} (no '.'/'..', no absolute path, no empty segment, no ` +
+        `whitespace or injection), so packs stay inside the context store root.`,
+    );
+  }
+}
+
 function assertTreeHasNoSymlinks(root: string): void {
   const stack = [root];
   while (stack.length > 0) {
@@ -329,6 +348,7 @@ Examples:
             return basename(sourceDir);
           }
         })();
+        assertSafeInstallRef(installName);
         assertTreeHasNoSymlinks(sourceDir);
         const targetRoot = getDefaultOpenRigPath("context-packs");
         mkdirSync(targetRoot, { recursive: true });

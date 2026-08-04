@@ -81,7 +81,10 @@ export class ContextPackError extends Error {
       | "manifest_invalid"
       | "pack_not_found"
       | "file_outside_pack"
-      | "file_read_failed",
+      | "file_read_failed"
+      // Slice-03 Atom 2: a path-like ref failed the sealed per-segment
+      // contract (ref-safety.ts) at a discovery/resolve boundary
+      | "unsafe_ref",
     message: string,
     public readonly details?: Record<string, unknown>,
   ) {
