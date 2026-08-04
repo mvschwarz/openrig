@@ -779,8 +779,8 @@ Usage: `rig send <session> <text> [--verify] [--force] [--raw] [--dangerously-in
 Notes:
 - Uses the two-step send pattern automatically: paste text, wait, submit Enter.
 - `--verify` requests delivery verification.
-- The default path refuses to send when the target is at an interactive prompt / permission block (fail-closed: an unknown or stale activity state also blocks). This closes the footgun where a peer message blindly submits another agent's open prompt.
-- `--force` overrides the mid-task safety heuristic but does **NOT** bypass the interactive-prompt/permission guard.
+- The default path refuses to send ONLY on positive evidence that the target is at an interactive prompt / permission block. This closes the footgun where a peer message blindly submits another agent's open prompt. When the target's activity cannot be determined (unknown, missing, or stale telemetry), the send PROCEEDS with an advisory note — telemetry is advisory, not authority over whether agents can communicate. Use `--wait-for-idle` to send only after explicit idle evidence.
+- A mid-task/busy target sends-with-advisory by default (busy is not a block). `--force` is a back-compat no-op and never bypasses the interactive-prompt/permission guard.
 - `--raw` sends exact text/keystrokes without the From/To messaging envelope; still guarded against interactive prompts.
 - `--dangerously-interact` is the ONLY override of the prompt/permission guard — it deliberately drives an interactive prompt/permission block (e.g. selects an option). It implies `--raw`, requires `--reason <text>`, and is recorded in the audit log. Cannot be combined with `--wait-for-idle`.
 - `--reason <text>` records why the prompt is being driven (required with `--dangerously-interact`).
