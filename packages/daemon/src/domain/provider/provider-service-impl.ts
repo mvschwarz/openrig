@@ -15,12 +15,14 @@ import type {
   ProviderSwitchInput,
   ProviderSwitchResult,
 } from "./provider-service.js";
-import type { FourBlockReadModel, PrecheckResult } from "./provider-types.js";
+import type { FourBlockReadModel, PrecheckResult, ProviderSignal } from "./provider-types.js";
 
 export interface ProviderServiceImplDeps {
   db: Database.Database;
   /** The rig universe (rigRepo.listRigs()) — each rig's node-inventory contributes seats. */
   listRigs: () => Array<{ id: string }>;
+  /** Slice-04 C3: the Claude statusline provider_usage signal source (undefined → signals []). */
+  collectClaudeSignals?: () => ProviderSignal[];
   env?: NodeJS.ProcessEnv;
   now?: () => string;
 }
@@ -43,6 +45,7 @@ export class ProviderServiceImpl implements ProviderService {
         }
         return seats;
       },
+      collectSignals: this.deps.collectClaudeSignals,
       now: this.deps.now ?? (() => new Date().toISOString()),
     });
   }

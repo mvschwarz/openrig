@@ -46,4 +46,11 @@ describe("ProviderServiceImpl — production getReadModel/precheck/switch wiring
     expect(r.outcome).toBe("failed_safely");
     if (r.outcome === "failed_safely") expect(r.reasons).toContain("switch_execution_not_yet_wired");
   });
+
+  it("getReadModel surfaces Claude statusline signals from the collectClaudeSignals dep (C3 wiring)", async () => {
+    const sig = { provider: "claude" as const, accountRef: "sub", sourceClass: "unknown" as const, authority: "unknown" as const, asOf: ASOF, unknownReason: "claude_no_statusline_cache_yet", automationUse: "do_not_automate" as const };
+    const svc = new ProviderServiceImpl({ db: createFullTestDb(), listRigs: () => [], env: emptyCodexHomeEnv(), now: () => ASOF, collectClaudeSignals: () => [sig] });
+    const model = await svc.getReadModel();
+    expect(model.signals).toEqual([sig]);
+  });
 });
