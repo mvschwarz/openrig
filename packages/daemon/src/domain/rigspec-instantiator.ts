@@ -557,8 +557,20 @@ export class PodRigInstantiator {
         // OPR.0.4.8.3 Seam B: persist the rig-level permission_policy REF (raw, like role) —
         // this is ONE of TWO rig-persist sites (materializeValidatedSpec + instantiate); missing
         // either drops the rig ref on that path (map correction, independently verified).
+        // Guard-F1: the RESOLVED rig attachment persists too (declaringDir = THIS rigRoot,
+        // the original declaring RigSpec dir) — restart-complete for organic seats,
+        // add-member under a different root, and successor continuity. STRICT (load-bearing).
         if (rigSpec.permissionPolicy) {
           this.deps.rigRepo.setRigPermissionPolicy(materializedRigId, rigSpec.permissionPolicy);
+          const rigAttachment = resolvePermissionPolicyAttachment(rigSpec.permissionPolicy, rigRoot, {
+            readFile: (p) => this.deps.fsOps.readFile(p),
+          });
+          this.deps.rigRepo.setRigPolicyProvenance(materializedRigId, {
+            origin: rigAttachment.origin,
+            resolvedTarget: rigAttachment.resolvedTarget ?? null,
+            declaringDir: rigAttachment.origin === "custom" ? rigRoot : null,
+            launchPosture: rigAttachment.launchPosture,
+          });
         }
 
         const currentRig = this.deps.rigRepo.getRig(materializedRigId)!;
@@ -610,7 +622,7 @@ export class PodRigInstantiator {
             // Seam B R2: restart-stable provenance persists AT MATERIALIZE (a
             // materialized-but-never-launched seat must still restore its posture).
             const materializeAttachment = this.resolveMemberPolicyAttachment(member.permissionPolicy, rigSpec.permissionPolicy, rigRoot);
-            if (materializeAttachment) this.persistNodePolicyProvenance(node.id, materializeAttachment);
+            if (materializeAttachment) this.persistNodePolicyProvenanceStrict(node.id, materializeAttachment);
             nodeResults.push({ logicalId: qualifiedId, status: "materialized" });
             persistedEvents.push(event);
           }
@@ -925,10 +937,27 @@ export class PodRigInstantiator {
       });
       createdNodeId = node.id;
       createdEvent = event;
-      // Seam B R2: add_member persists provenance at creation too (rig ref from the DB —
-      // no in-memory rigSpec exists on this path).
-      const addMemberAttachment = this.resolveMemberPolicyAttachment(member.permissionPolicy, this.deps.rigRepo.getRigPermissionPolicy(rigId), rigRoot);
-      if (addMemberAttachment) this.persistNodePolicyProvenance(node.id, addMemberAttachment);
+      // Seam B Guard-F1: add_member runs under the CURRENT operation's root, which may
+      // differ from the ORIGINAL declaring RigSpec dir. A member OVERRIDE resolves against
+      // this operation's root (it is declared HERE); an INHERITED rig policy must reuse the
+      // PERSISTED rig attachment (original declaring root) — never re-resolve the raw rig
+      // ref against an unrelated root. STRICT persistence (load-bearing).
+      if (member.permissionPolicy) {
+        const memberAttachment = resolvePermissionPolicyAttachment(member.permissionPolicy, rigRoot, {
+          readFile: (p) => this.deps.fsOps.readFile(p),
+        });
+        this.persistNodePolicyProvenanceStrict(node.id, memberAttachment);
+      } else {
+        const rigProv = this.deps.rigRepo.getRigPolicyProvenance(rigId);
+        if (rigProv) {
+          this.deps.rigRepo.setNodePolicyProvenance(node.id, {
+            origin: rigProv.origin,
+            resolvedTarget: rigProv.resolvedTarget,
+            declaringDir: rigProv.declaringDir,
+            launchPosture: rigProv.launchPosture,
+          });
+        }
+      }
       if (resolvedEdges.length > 0) {
         const logicalIdToNodeId = new Map(rig.nodes.map((n) => [n.logicalId, n.id]));
         logicalIdToNodeId.set(qualifiedId, node.id);
@@ -1019,8 +1048,18 @@ export class PodRigInstantiator {
       }
       // OPR.0.4.8.3 Seam B: the SECOND rig-persist site (bootstrap instantiate path) —
       // both sites must write or the rig ref silently drops on one instantiate path.
+      // Guard-F1: resolved rig attachment persists here too (declaringDir = rigRoot).
       if (rigSpec.permissionPolicy) {
         this.deps.rigRepo.setRigPermissionPolicy(rigId, rigSpec.permissionPolicy);
+        const rigAttachment = resolvePermissionPolicyAttachment(rigSpec.permissionPolicy, rigRoot, {
+          readFile: (p) => this.deps.fsOps.readFile(p),
+        });
+        this.deps.rigRepo.setRigPolicyProvenance(rigId, {
+          origin: rigAttachment.origin,
+          resolvedTarget: rigAttachment.resolvedTarget ?? null,
+          declaringDir: rigAttachment.origin === "custom" ? rigRoot : null,
+          launchPosture: rigAttachment.launchPosture,
+        });
       }
     } catch (err) {
       return { ok: false, code: "instantiate_error", message: (err as Error).message };
@@ -1499,19 +1538,25 @@ export class PodRigInstantiator {
     });
   }
 
-  /** Seam B R2: persist the restart-stable resolved provenance on the node (best-effort —
-   *  a missing column on an old fixture DB must not fail the launch; graceful degradation
-   *  mirrors the addNode column discipline). Builtins carry NO resolvedTarget until the
-   *  packaging ruling (lane c76c7153) — absence is honest, never a builtin:<name> echo. */
+  /** Seam B Guard-F2: the STRICT materialize/add-member persist — provenance here is
+   *  LOAD-BEARING restart state; a real write failure must fail the surrounding
+   *  transaction, never commit a node without it. (The repository setter itself still
+   *  no-ops on pre-057 legacy fixture DBs — that narrow compatibility is preserved.) */
+  private persistNodePolicyProvenanceStrict(nodeId: string, attachment: ResolvedPolicyAttachment): void {
+    this.deps.rigRepo.setNodePolicyProvenance(nodeId, {
+      origin: attachment.origin,
+      resolvedTarget: attachment.resolvedTarget ?? null,
+      declaringDir: attachment.declaringDir ?? null,
+      launchPosture: attachment.launchPosture,
+    });
+  }
+
+  /** Seam B: the LAUNCH-time refresh stays best-effort (idempotent re-write on an already-
+   *  materialized node; a transient failure must not block a launch). */
   private persistNodePolicyProvenance(nodeId: string, attachment: ResolvedPolicyAttachment): void {
     try {
-      this.deps.rigRepo.setNodePolicyProvenance(nodeId, {
-        origin: attachment.origin,
-        resolvedTarget: attachment.resolvedTarget ?? null,
-        declaringDir: attachment.declaringDir ?? null,
-        launchPosture: attachment.launchPosture,
-      });
-    } catch { /* best-effort: provenance persistence never blocks a launch */ }
+      this.persistNodePolicyProvenanceStrict(nodeId, attachment);
+    } catch { /* best-effort on launch refresh only */ }
   }
 
   private async launchExistingAgentMember(input: {

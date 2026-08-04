@@ -1255,23 +1255,41 @@ export class RestoreOrchestrator {
     try {
       const prov = this.rigRepo.getNodePolicyProvenance(nodeId);
       if (prov) {
-        if (prov.origin === "custom" && prov.declaringDir) {
+        // Guard-F3: the resolver swallows read errors internally (advisory floor), so the
+        // fallback must be decided BEFORE re-resolution: probe readability of the persisted
+        // resolvedTarget first — readable → REOPEN + re-derive (the ruling); unreadable /
+        // invalid → the PERSISTED posture carries (restart-stable), never a silent floor.
+        if (prov.origin === "custom" && prov.declaringDir && prov.resolvedTarget) {
           const ref = prov.nodeRef ?? this.rigRepo.getRigPermissionPolicy(rigId);
           if (ref) {
-            try {
+            let content: string | null = null;
+            try { content = readFileSync(prov.resolvedTarget, "utf-8"); } catch { content = null; }
+            if (content !== null) {
+              const body = content;
               return resolvePermissionPolicyAttachment(ref, prov.declaringDir, {
-                readFile: (p) => readFileSync(p, "utf-8"),
+                readFile: () => body,
               }).launchPosture;
-            } catch { /* unreadable at restore → persisted posture below */ }
+            }
           }
         }
         return prov.launchPosture;
       }
-      const rigRef = this.rigRepo.getRigPermissionPolicy(rigId);
-      if (rigRef) {
-        return resolvePermissionPolicyAttachment(rigRef, "", {
-          readFile: (p) => readFileSync(p, "utf-8"),
-        }).launchPosture;
+      // Guard-F1: no node provenance (organic claim/self-attach seats) → the PERSISTED
+      // rig-level attachment is authoritative — same readable-probe discipline; NEVER
+      // resolve the raw relative rig ref against this process's cwd.
+      const rigProv = this.rigRepo.getRigPolicyProvenance(rigId);
+      if (rigProv) {
+        if (rigProv.origin === "custom" && rigProv.declaringDir && rigProv.resolvedTarget && rigProv.rigRef) {
+          let content: string | null = null;
+          try { content = readFileSync(rigProv.resolvedTarget, "utf-8"); } catch { content = null; }
+          if (content !== null) {
+            const body = content;
+            return resolvePermissionPolicyAttachment(rigProv.rigRef, rigProv.declaringDir, {
+              readFile: () => body,
+            }).launchPosture;
+          }
+        }
+        return rigProv.launchPosture;
       }
     } catch { /* posture resolution must never block a restore */ }
     return undefined;

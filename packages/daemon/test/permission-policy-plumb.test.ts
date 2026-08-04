@@ -87,8 +87,8 @@ describe("Seam B R6 — full-thread plumb (materialize → columns → export)",
 
     // provenance: member ref WINS over rig ref → impl floor (locked), helper full_bypass (rig yolo)
     const nodeId = (lid: string) => (db.prepare("SELECT id FROM nodes WHERE logical_id = ?").get(lid) as { id: string }).id;
-    expect(setup.rigRepo.getNodePolicyProvenance(nodeId("dev.impl"))).toMatchObject({ origin: "builtin", launchPosture: "floor", resolvedTarget: null });
-    expect(setup.rigRepo.getNodePolicyProvenance(nodeId("dev.helper"))).toMatchObject({ origin: "builtin", launchPosture: "full_bypass", resolvedTarget: null });
+    expect(setup.rigRepo.getNodePolicyProvenance(nodeId("dev.impl"))).toMatchObject({ origin: "builtin", launchPosture: "floor", resolvedTarget: "policies/builtin/locked.policy.md" });
+    expect(setup.rigRepo.getNodePolicyProvenance(nodeId("dev.helper"))).toMatchObject({ origin: "builtin", launchPosture: "full_bypass", resolvedTarget: "policies/builtin/yolo.policy.md" });
   });
 
   it("export round-trips BOTH levels: member ref on the pod member, rig ref at the top level", async () => {

@@ -67,27 +67,26 @@ describe("permission_policy ref — classify origin (origin honesty)", () => {
 describe("permission_policy — restart-stable attachment resolution (Guard ruling 2026-08-04)", () => {
   const noFile = { readFile: () => { throw new Error("no file"); } };
 
-  it("builtin:yolo → full_bypass, origin=builtin; resolvedTarget ABSENT until the packaging ruling (never a builtin:<name> echo)", () => {
+  it("builtin:yolo → full_bypass, origin=builtin, PM-ruled package-copy target (never a builtin:<name> echo)", () => {
     const a = resolvePermissionPolicyAttachment("builtin:yolo", "/rig", noFile);
     expect(a).toMatchObject({ ref: "builtin:yolo", origin: "builtin", builtinName: "yolo", launchPosture: "full_bypass" });
-    // Guard correction 2 + orch no-placeholder rule: the raw ref must NOT be duplicated into
-    // resolvedTarget; the canonical shipped package-copy path is PM/packaging-owned (lane c76c7153)
-    // and lands via builtinPackageTarget() — until then the field stays absent for built-ins.
-    expect(a.resolvedTarget).toBeUndefined();
+    // PM inline ruling (via dev-guard NOT-CLEAR at 9e94c274): the resolved target is the
+    // package-relative canonical copy — NOT the raw ref echoed.
+    expect(a.resolvedTarget).toBe("policies/builtin/yolo.policy.md");
   });
 
-  it("Policy-Mode built-ins resolve to the floor with origin preserved and NO placeholder target", () => {
+  it("Policy-Mode built-ins resolve to the floor with the PM-ruled package-copy target", () => {
     for (const name of ["locked", "standard", "open"]) {
       const a = resolvePermissionPolicyAttachment(`builtin:${name}`, "/rig", noFile);
       expect(a.origin).toBe("builtin");
       expect(a.launchPosture).toBe("floor");
-      expect(a.resolvedTarget).toBeUndefined();
+      expect(a.resolvedTarget).toBe(`policies/builtin/${name}.policy.md`);
     }
   });
 
-  it("builtinPackageTarget is the SINGLE swap-in point: null until the packaging-leg canonical path is ruled", () => {
+  it("builtinPackageTarget pins EXACTLY the four ruled names to package-relative copies", () => {
     for (const name of ["locked", "standard", "open", "yolo"] as const) {
-      expect(builtinPackageTarget(name)).toBeNull();
+      expect(builtinPackageTarget(name)).toBe(`policies/builtin/${name}.policy.md`);
     }
   });
 
