@@ -259,3 +259,24 @@ describe("box opacity is a CLASS invariant, not a draw-order artifact (pm kickba
     }
   });
 });
+
+describe("Phase-3 live-glyph honesty (the states the fleet GENUINELY serves)", () => {
+  it("a detached seat (status 'detached', no startupStatus) renders ○ — the live-observed shape, never a fabricated ●", async () => {
+    const { statusGlyph } = await import("../src/topology/glyphs.js");
+    const detached = statusGlyph({
+      logicalId: "dev.impl", podNamespace: "dev", runtime: "claude-code", model: null,
+      status: "detached", nodeKind: "agent", startupStatus: null, contextUsedPercentage: null,
+      agentActivity: null, terminalActive: null,
+    });
+    expect(detached.glyph).toBe("○");
+    expect(detached.token).toBe("dim");
+    // and the ● bucket is EXCLUSIVE to ready+running — nothing else qualifies
+    for (const status of [null, "detached", "stopped", "pending"]) {
+      const g = statusGlyph({
+        logicalId: "x", podNamespace: "p", runtime: "codex", model: null,
+        status, nodeKind: "agent", startupStatus: status === "stopped" ? null : null, contextUsedPercentage: null,
+      });
+      expect(g.glyph, `status=${status}`).not.toBe("●");
+    }
+  });
+});
