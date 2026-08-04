@@ -2,8 +2,8 @@
 // family (Atom-7 renamed the retired `context-pack` grammar to `rig context`;
 // the pack STORE contract — kind/id/API/on-disk dir — is unchanged).
 //
-// Six subcommands parallel to `rig specs`:
-//   list / show / preview / add / sync / send
+// Delivery-free subcommands parallel to `rig specs`:
+//   list / show / preview / compose / add / rm / sync
 //
 // Each delegates to /api/context-packs/library/* against the daemon.
 // The `add` verb installs a pack from a directory at
@@ -58,22 +58,6 @@ interface PreviewWire {
   estimatedTokens: number;
   files: Array<{ path: string; role: string; bytes: number; estimatedTokens: number }>;
   missingFiles: Array<{ path: string; role: string }>;
-}
-
-interface SendWire {
-  id: string;
-  name: string;
-  version: string;
-  destinationSession: string;
-  bundleBytes: number;
-  estimatedTokens: number;
-  files: Array<{ path: string; role: string; bytes: number; estimatedTokens: number }>;
-  missingFiles: Array<{ path: string; role: string }>;
-  dryRun: boolean;
-  bundleText?: string;
-  sent?: boolean;
-  reason?: string;
-  error?: string;
 }
 
 // Slice-03 Atom 2 — mirror the daemon's per-segment ref contract at the
@@ -154,40 +138,41 @@ function validateContextPackManifestForInstall(manifestPath: string): void {
   }
 }
 
-async function resolvePack(client: DaemonClient, nameOrId: string): Promise<ContextPackEntryWire> {
-  // First try as id (context-pack:<name>:<version>); else search by name.
-  if (nameOrId.startsWith("context-pack:")) {
-    const res = await client.get<ContextPackEntryWire>(`/api/context-packs/library/${encodeURIComponent(nameOrId)}`);
-    if (res.status === 200) return res.data;
-    if (res.status === 404) throw new Error(`Context pack '${nameOrId}' not found in library. Run 'rig context list' to see what's available.`);
-    throw new Error(`Daemon returned HTTP ${res.status} for /api/context-packs/library/${nameOrId}`);
+async function resolvePack(client: DaemonClient, nameOrRef: string): Promise<ContextPackEntryWire> {
+  if (nameOrRef.startsWith("context-pack:")) {
+    throw new Error(
+      "Context pack colon-id addressing ('context-pack:<name>:<version>') was removed. " +
+        "Address a pack by its path-like ref instead (for example 'packs/compaction-restore').",
+    );
   }
-  if (nameOrId.includes("/")) {
+  if (nameOrRef.includes("/")) {
     const res = await client.get<ContextPackEntryWire & { error?: string; message?: string }>(
-      `/api/context-packs/library/by-ref?ref=${encodeURIComponent(nameOrId)}`,
+      `/api/context-packs/library/by-ref?ref=${encodeURIComponent(nameOrRef)}`,
     );
     if (res.status === 200) return res.data;
-    if (res.status === 404) throw new Error(`Context pack '${nameOrId}' not found in library. Run 'rig context list' to see what's available.`);
-    if (res.status === 400) throw new Error(res.data?.message ?? `Unsafe context pack ref '${nameOrId}'.`);
+    if (res.status === 404) throw new Error(`Context pack '${nameOrRef}' not found in library. Run 'rig context list' to see what's available.`);
+    if (res.status === 400) throw new Error(res.data?.message ?? `Unsafe context pack ref '${nameOrRef}'.`);
     throw new Error(`Daemon returned HTTP ${res.status} for /api/context-packs/library/by-ref`);
   }
   const res = await client.get<ContextPackEntryWire[]>("/api/context-packs/library");
   if (res.status !== 200) throw new Error(`Daemon returned HTTP ${res.status} for /api/context-packs/library`);
   const entries = res.data ?? [];
-  const matches = entries.filter((e) => e.name === nameOrId);
+  const exactRef = entries.find((entry) => entry.relativePath === nameOrRef);
+  if (exactRef) return exactRef;
+  const matches = entries.filter((e) => e.name === nameOrRef);
   if (matches.length === 0) {
-    throw new Error(`Context pack '${nameOrId}' not found in library. Run 'rig context list' to see what's available.`);
+    throw new Error(`Context pack '${nameOrRef}' not found in library. Run 'rig context list' to see what's available.`);
   }
   if (matches.length > 1) {
-    const versions = matches.map((m) => m.version).join(", ");
-    throw new Error(`Context pack '${nameOrId}' is ambiguous (versions: ${versions}). Use the full id 'context-pack:${nameOrId}:<version>'.`);
+    const refs = matches.map((entry) => entry.relativePath).join(", ");
+    throw new Error(`Context pack name '${nameOrRef}' is ambiguous across refs: ${refs}. Address it by path-like ref.`);
   }
   return matches[0]!;
 }
 
 export function contextCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("context")
-    .description("Browse, preview, send, and install operator-authored context packs")
+    .description("Browse, preview, compose, and manage operator-authored context packs")
     .addHelpText("after", `
 Examples:
   rig context list
@@ -196,8 +181,6 @@ Examples:
   rig context add ./my-pack
   rig context rm packs/compaction-restore
   rig context sync
-  rig context send pl-005-phase-a-priming velocity-driver@openrig-velocity --dry-run
-  rig context send pl-005-phase-a-priming velocity-driver@openrig-velocity
 `);
 
   const getDeps = (): StatusDeps => depsOverride ?? {
@@ -269,7 +252,7 @@ Examples:
           return;
         }
         for (const e of entries) {
-          console.log(`${e.name.padEnd(28)} v${String(e.version).padEnd(6)} ${String(e.files.length).padStart(2)} files  ~${String(e.derivedEstimatedTokens).padStart(6)} tokens  ${e.sourceType}  ${e.sourcePath}`);
+          console.log(`${e.relativePath.padEnd(36)} ${e.name.padEnd(24)} v${String(e.version).padEnd(6)} ${String(e.files.length).padStart(2)} files  ~${String(e.derivedEstimatedTokens).padStart(6)} tokens  ${e.sourceType}  ${e.sourcePath}`);
         }
       } catch (err) {
         console.error((err as Error).message);
@@ -278,7 +261,7 @@ Examples:
     });
 
   cmd.command("show")
-    .argument("<name-or-id>", "Context pack name or library ID")
+    .argument("<name-or-ref>", "Context pack name or path-like ref")
     .description("Show pack manifest + per-file metadata")
     .option("--json", "JSON output")
     .action(async (nameOrId: string, opts: { json?: boolean }) => {
@@ -289,6 +272,7 @@ Examples:
           console.log(JSON.stringify(entry, null, 2));
           return;
         }
+        console.log(`Ref:         ${entry.relativePath}`);
         console.log(`Name:        ${entry.name}`);
         console.log(`Version:     ${entry.version}`);
         console.log(`Source:      ${entry.sourceType} (${entry.sourcePath})`);
@@ -313,14 +297,14 @@ Examples:
     });
 
   cmd.command("preview")
-    .argument("<name-or-id>", "Context pack name or library ID")
-    .description("Show the assembled bundle (the exact text that would be sent)")
+    .argument("<name-or-ref>", "Context pack name or path-like ref")
+    .description("Show the assembled bundle without delivering it")
     .option("--json", "JSON output")
-    .action(async (nameOrId: string, opts: { json?: boolean }) => {
+    .action(async (nameOrRef: string, opts: { json?: boolean }) => {
       try {
         const client = await getClient();
-        const entry = await resolvePack(client, nameOrId);
-        const res = await client.get<PreviewWire>(`/api/context-packs/library/${encodeURIComponent(entry.id)}/preview`);
+        const entry = await resolvePack(client, nameOrRef);
+        const res = await client.get<PreviewWire>(`/api/context-packs/library/by-ref/preview?ref=${encodeURIComponent(entry.relativePath)}`);
         if (res.status !== 200) throw new Error(`Daemon returned HTTP ${res.status}`);
         const preview = res.data;
         if (opts.json) {
@@ -452,49 +436,6 @@ Examples:
           return;
         }
         console.log(`Removed context pack '${res.data.ref}'.${typeof res.data.count === "number" ? ` Library now has ${res.data.count} context pack(s).` : ""}`);
-      } catch (err) {
-        console.error((err as Error).message);
-        process.exitCode = 1;
-      }
-    });
-
-  cmd.command("send")
-    .argument("<name-or-id>", "Context pack name or library ID")
-    .argument("<destination-session>", "Destination session name (e.g., velocity-driver@openrig-velocity)")
-    .description("Assemble the pack into one paste-ready bundle and send to a seat")
-    .option("--dry-run", "Show what would be sent without invoking SessionTransport")
-    .option("--json", "JSON output")
-    .action(async (nameOrId: string, destinationSession: string, opts: { dryRun?: boolean; json?: boolean }) => {
-      try {
-        const client = await getClient();
-        const entry = await resolvePack(client, nameOrId);
-        const res = await client.post<SendWire>(`/api/context-packs/library/${encodeURIComponent(entry.id)}/send`, {
-          destinationSession,
-          dryRun: opts.dryRun ?? false,
-        });
-        if (res.status !== 200) {
-          // 502/503/etc. — surface daemon error verbatim.
-          const data = res.data as Partial<SendWire> & { error?: string; reason?: string };
-          throw new Error(data.error ?? data.reason ?? `Daemon returned HTTP ${res.status}`);
-        }
-        const data = res.data;
-        if (opts.json) {
-          console.log(JSON.stringify(data, null, 2));
-          return;
-        }
-        if (data.dryRun) {
-          if (data.missingFiles.length > 0) {
-            console.error(`Warning: ${data.missingFiles.length} manifest file(s) missing on disk.`);
-          }
-          console.log(`(dry-run) ${data.name} v${data.version} → ${data.destinationSession}`);
-          console.log(`Bundle: ${data.bundleBytes} bytes (~${data.estimatedTokens} tokens), ${data.files.length} files`);
-          if (data.bundleText) {
-            console.log("# ---");
-            console.log(data.bundleText);
-          }
-          return;
-        }
-        console.log(`Sent ${data.name} v${data.version} (${data.bundleBytes} bytes) to ${data.destinationSession}.`);
       } catch (err) {
         console.error((err as Error).message);
         process.exitCode = 1;

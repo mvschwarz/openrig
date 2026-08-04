@@ -9,10 +9,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import {
-  ContextPackLibraryService,
-  contextPackId,
-} from "../src/domain/context-packs/context-pack-library-service.js";
+import { ContextPackLibraryService } from "../src/domain/context-packs/context-pack-library-service.js";
 import { ContextPackError } from "../src/domain/context-packs/context-pack-types.js";
 
 function writePackAt(root: string, refPath: string, name: string, version = "1") {
@@ -173,12 +170,12 @@ describe("ATOM 2 — recursive path-addressed discovery (spec §2 refs)", () => 
     expect(service.getByRef("packs/dup")!.version).toBe("2");
   });
 
-  it("GUARD DISCRIMINATOR (round 2): legacy shared-id resolution follows ACTUAL last-discovery order even after a same-ref override", () => {
-    // three-write sequence: root1 packs/a (same:1) → root1 packs/b (same:1)
-    // → root2 packs/a (same:1, the override). The FINAL write is root-2
-    // packs/a, so the shared legacy id must resolve THERE — a naive
-    // values()-derived index would keep packs/a at its first-seen position
-    // and wrongly resolve packs/b.
+  it("same-ref override across roots resolves last-root-wins; distinct refs keep DISTINCT ids (Atom 5 — no legacy shared-id collapse)", () => {
+    // packs/a exists in BOTH roots (root-2 override); packs/b only in root-1.
+    // The ref is the identity: packs/a → last root (user_file) wins; packs/b →
+    // builtin. Though all three share manifest same:1, the two surviving refs
+    // keep DISTINCT ids — the legacy name:version id would have collapsed them
+    // into one shared-id resolution (the shadowing this strip removes).
     const rootB = join(tmp, "storeB3");
     mkdirSync(rootB, { recursive: true });
     writePackAt(root, "packs/a", "same", "1");
@@ -194,19 +191,20 @@ describe("ATOM 2 — recursive path-addressed discovery (spec §2 refs)", () => 
     expect(result.count).toBe(2); // primary ref semantics unchanged
     expect(service.getByRef("packs/a")!.sourceType).toBe("user_file"); // root-2 override wins the ref
     expect(service.getByRef("packs/b")!.sourceType).toBe("builtin");
-    const legacy = service.get(contextPackId("same", "1"));
-    expect(legacy!.relativePath).toBe("packs/a"); // last DISCOVERY write
-    expect(legacy!.sourceType).toBe("user_file");
+    expect(service.getByRef("packs/a")!.id).toBe("context-pack:packs/a");
+    expect(service.getByRef("packs/b")!.id).toBe("context-pack:packs/b");
+    expect(service.getByRef("packs/a")!.id).not.toBe(service.getByRef("packs/b")!.id);
   });
 
-  it("colon-id addressing COEXISTS untouched (the id strip is explicitly a LATER atom)", () => {
+  it("colon-id addressing is REMOVED (Atom 5): id is context-pack:<ref>, resolution is by-ref only", () => {
     writePackAt(root, "packs/compaction-restore", "compaction-restore", "3");
     const service = lib();
     service.scan();
-    const viaId = service.get(contextPackId("compaction-restore", "3"));
-    expect(viaId).not.toBeNull();
-    expect(viaId!.relativePath).toBe("packs/compaction-restore");
-    expect(service.getByRef("packs/compaction-restore")!.id).toBe(viaId!.id);
+    const entry = service.getByRef("packs/compaction-restore");
+    expect(entry).not.toBeNull();
+    expect(entry!.id).toBe("context-pack:packs/compaction-restore");
+    // the legacy colon-id accessor no longer exists on the service
+    expect((service as unknown as { get?: unknown }).get).toBeUndefined();
   });
 
   it("symlinked directories are not traversed during discovery (existing lstat-dirent semantics carried into recursion)", () => {

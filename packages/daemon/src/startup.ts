@@ -709,7 +709,6 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p) },
     adapters: { "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() },
     tmuxAdapter,
-    contextPackLibrary,
     agentImageLibrary,
     exec,
   });
@@ -1021,10 +1020,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // Slice 28 Checkpoint C-3 — skillLibraryDiscoveryService is constructed
     // AFTER filesAllowlist resolution below (deps.skillLibraryDiscoveryService
     // assignment near filesAllowlist binding).
-    // PL-014 Item 6: same instance hoisted earlier so the
-    // PodRigInstantiator can resolve `kind: context_pack` startup_files
-    // entries — sharing the cache means /api/context-packs/* + the
-    // instantiator see consistent state.
+    // Shared context library backing the delivery-free context routes.
     contextPackLibrary,
     // PL-016 — agent_image typed primitive. Shared library + capturer
     // + spec-roots supplier across /api/agent-images/* and the

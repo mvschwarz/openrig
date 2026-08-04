@@ -68,8 +68,14 @@ sendable. No SQLite tables; in-memory cache at daemon scope.
 **last-wins** in discovery order (workspace > user_file > builtin).
 Startup wires three roots: builtin (`../context-packs`, first), user-file
 (`~/.openrig/context-packs`), and workspace-local
-`<workspaceRoot>/.openrig/context-packs` when present + distinct. Stable
-id `context-pack:<name>:<version>`.
+`<workspaceRoot>/.openrig/context-packs` when present + distinct. A pack is
+addressed by its path-like **ref** (e.g. `packs/compaction-restore`), which is
+its unique identity; the opaque entry id is `context-pack:<ref>` (a UI routing
+key). Colon-id `context-pack:<name>:<version>` addressing and the `/library/:id`
+routes were removed in Slice-03 Atom 5 — resolution is by ref only (`getByRef`,
+`GET/DELETE /library/by-ref`, `GET /library/by-ref/preview`,
+`POST /library/by-ref/send`). `startup_files` `kind: context_pack` entries
+likewise address by `ref:`.
 
 > Source: `domain/context-packs/context-pack-library-service.ts:59-94`
 > (scan; last-wins L79-81), `:31-33` (id); `startup.ts:481-502` (3-root

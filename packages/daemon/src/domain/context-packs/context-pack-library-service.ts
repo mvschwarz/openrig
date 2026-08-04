@@ -57,17 +57,13 @@ export interface ComposeContextPackResult extends PlainFileAssembly {
   entry: ContextPackEntry;
 }
 
-/** Stable id format: context-pack:<name>:<version>. */
-export function contextPackId(name: string, version: string): string {
-  return `context-pack:${name}:${version}`;
-}
-
-export function parseContextPackId(id: string): { name: string; version: string } | null {
-  if (!id.startsWith("context-pack:")) return null;
-  const rest = id.slice("context-pack:".length);
-  const last = rest.lastIndexOf(":");
-  if (last === -1) return null;
-  return { name: rest.slice(0, last), version: rest.slice(last + 1) };
+/** Stable opaque id = `context-pack:<ref>` (Slice-03 Atom 5). The path-like ref
+ *  IS the identity, so the id is unique per pack — two refs that share a manifest
+ *  name+version no longer collide — and it keeps the `context-pack:` prefix the
+ *  UI's library-review dispatch keys on. Colon-id name:version addressing/parsing
+ *  was removed with the legacy index; resolution is by-ref only. */
+export function contextPackId(ref: string): string {
+  return `context-pack:${ref}`;
 }
 
 export { estimateTokensFromBytes } from "./token-estimate.js";
@@ -80,11 +76,6 @@ export class ContextPackLibraryService {
    *  (one row, one count, one resolution). Distinct refs with identical
    *  manifest name/version are independent entries by construction. */
   private entriesByRef = new Map<string, ContextPackEntry>();
-  /** TEMPORARY legacy colon-id compatibility index (strip = later atom),
-   *  DERIVED from the final ref entries after each scan — it can never
-   *  collapse ref identity; two refs sharing a legacy id resolve that id
-   *  last-wins for compat callers only. */
-  private idIndex = new Map<string, ContextPackEntry>();
   private readonly roots: ContextPackLibraryRoot[];
   private readonly writeFile: (path: string, data: string | Buffer) => void;
 
@@ -140,16 +131,11 @@ export class ContextPackLibraryService {
           continue;
         }
         try {
-          const entry = this.readPackEntry(packDir, join(packDir, "manifest.yaml"), root);
-          // PRIMARY identity = the ref. Same ref across roots: last root
-          // wins (workspace > user_file > builtin in the startup-configured
-          // discovery order) — for the WHOLE index, so list/count/resolve
-          // agree. Distinct refs never collide, whatever their manifests say.
-          // Guard round-2 (9e3865a4): delete-before-set moves an OVERRIDDEN
-          // ref to the map's end, so insertion order IS actual last-discovery
-          // order — the derived legacy-id index below depends on that
-          // (Map.set alone would keep the first-seen position).
-          nextByRef.delete(ref);
+          const entry = this.readPackEntry(packDir, join(packDir, "manifest.yaml"), root, ref);
+          // PRIMARY identity = the ref. Same ref across roots: last root wins
+          // (workspace > user_file > builtin in the startup-configured discovery
+          // order), so list/count/resolve agree. Distinct refs never collide,
+          // whatever their manifests say.
           nextByRef.set(ref, entry);
         } catch (err) {
           errors.push({
@@ -162,14 +148,6 @@ export class ContextPackLibraryService {
       }
     }
     this.entriesByRef = nextByRef;
-    // Legacy colon-id compat index, DERIVED from the final ref entries.
-    // Insertion order = ACTUAL last-discovery order (guaranteed by the
-    // delete-before-set above), so a shared legacy id resolves to the final
-    // discovery write — the pre-Atom-2 compat behavior — never touching
-    // ref identity.
-    const nextById = new Map<string, ContextPackEntry>();
-    for (const entry of nextByRef.values()) nextById.set(entry.id, entry);
-    this.idIndex = nextById;
     return { count: nextByRef.size, errors };
   }
 
@@ -224,14 +202,6 @@ export class ContextPackLibraryService {
     );
   }
 
-  /** LEGACY colon-id lookup (compatibility only; strip = later atom). */
-  get(id: string): ContextPackEntry | null {
-    return this.idIndex.get(id) ?? null;
-  }
-
-  getByNameVersion(name: string, version: string): ContextPackEntry | null {
-    return this.idIndex.get(contextPackId(name, version)) ?? null;
-  }
 
   /**
    * Atom 3: compose named files into one durable path-ref pack.
@@ -451,6 +421,7 @@ export class ContextPackLibraryService {
     packDir: string,
     manifestPath: string,
     root: ContextPackLibraryRoot,
+    ref: string,
   ): ContextPackEntry {
     const raw = readFileSync(manifestPath, "utf-8");
     const manifest = parseManifest(raw, manifestPath);
@@ -485,14 +456,16 @@ export class ContextPackLibraryService {
     const derivedEstimatedTokens = files.reduce((acc, f) => acc + (f.estimatedTokens ?? 0), 0);
 
     return {
-      id: contextPackId(manifest.name, manifest.version),
+      // id and relativePath share ONE source of truth: the discovered path-like
+      // ref (posix-joined). The id is `context-pack:<ref>` — opaque, unique.
+      id: contextPackId(ref),
       kind: "context-pack",
       name: manifest.name,
       version: manifest.version,
       purpose: manifest.purpose ?? null,
       sourceType: root.sourceType,
       sourcePath: packDir,
-      relativePath: relative(root.path, packDir) || ".",
+      relativePath: ref,
       updatedAt: new Date(mostRecentMtime || Date.now()).toISOString(),
       manifestEstimatedTokens: typeof manifest.estimatedTokens === "number" ? manifest.estimatedTokens : null,
       derivedEstimatedTokens,

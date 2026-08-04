@@ -77,7 +77,7 @@ describe("Library page taxonomy", () => {
         return {
           ok: true,
           json: async () => [
-            { id: "context-pack:demo:1", kind: "context-pack", name: "demo-pack", version: "1", sourceType: "workspace", sourcePath: "/workspace/.openrig/context-packs/demo", relativePath: "demo", updatedAt: "2026-05-07T00:00:00.000Z", manifestEstimatedTokens: null, derivedEstimatedTokens: 120, files: [] },
+            { id: "context-pack:demo", kind: "context-pack", name: "demo-pack", version: "1", sourceType: "workspace", sourcePath: "/workspace/.openrig/context-packs/demo", relativePath: "demo", updatedAt: "2026-05-07T00:00:00.000Z", manifestEstimatedTokens: null, derivedEstimatedTokens: 120, files: [] },
           ],
         };
       }
@@ -143,7 +143,7 @@ describe("Library page taxonomy", () => {
     expect(rigRow.textContent).toContain("openrig-build");
     expect(rigRow.textContent).not.toContain("builtin");
     expect(rigRow.textContent).not.toContain("1");
-    const contextPackRow = screen.getByTestId("library-row-context-packs-context-pack:demo:1");
+    const contextPackRow = screen.getByTestId("library-row-context-packs-context-pack:demo");
     expect(contextPackRow.textContent).toBe("demo-pack");
     const imageRow = screen.getByTestId("library-row-agent-images-agent-image:driver:1");
     expect(imageRow.textContent).toContain("driver-image");

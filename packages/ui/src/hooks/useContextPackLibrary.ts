@@ -38,20 +38,6 @@ export interface ContextPackPreview {
   missingFiles: Array<{ path: string; role: string }>;
 }
 
-export interface ContextPackSendResponse {
-  id: string;
-  name: string;
-  version: string;
-  destinationSession: string;
-  bundleBytes: number;
-  estimatedTokens: number;
-  files: Array<{ path: string; role: string; bytes: number; estimatedTokens: number }>;
-  missingFiles: Array<{ path: string; role: string }>;
-  dryRun: boolean;
-  bundleText?: string;
-  sent?: boolean;
-}
-
 async function fetchContextPacks(): Promise<ContextPackEntry[]> {
   const res = await fetch("/api/context-packs/library");
   if (!res.ok) {
@@ -74,42 +60,19 @@ export function useContextPackLibrary() {
   });
 }
 
-async function fetchContextPackPreview(id: string): Promise<ContextPackPreview> {
-  const res = await fetch(`/api/context-packs/library/${encodeURIComponent(id)}/preview`);
+// Slice-03 Atom 5: preview addresses by the pack's path-like ref.
+async function fetchContextPackPreview(ref: string): Promise<ContextPackPreview> {
+  const res = await fetch(`/api/context-packs/library/by-ref/preview?ref=${encodeURIComponent(ref)}`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
-export function useContextPackPreview(id: string | null) {
+export function useContextPackPreview(ref: string | null) {
   return useQuery({
-    queryKey: ["context-packs", "preview", id],
-    queryFn: () => fetchContextPackPreview(id!),
-    enabled: !!id,
+    queryKey: ["context-packs", "preview", ref],
+    queryFn: () => fetchContextPackPreview(ref!),
+    enabled: !!ref,
     staleTime: 30_000,
-  });
-}
-
-export function useContextPackSend() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async (input: { id: string; destinationSession: string; dryRun?: boolean }): Promise<ContextPackSendResponse> => {
-      const res = await fetch(`/api/context-packs/library/${encodeURIComponent(input.id)}/send`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          destinationSession: input.destinationSession,
-          dryRun: input.dryRun ?? false,
-        }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({})) as { error?: string };
-        throw new Error(body.error ?? `HTTP ${res.status}`);
-      }
-      return res.json();
-    },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["context-packs"] });
-    },
   });
 }
 

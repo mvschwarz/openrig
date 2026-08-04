@@ -27,7 +27,6 @@ import {
 import {
   useContextPackLibrary,
   useContextPackPreview,
-  useContextPackSend,
   type ContextPackEntry,
 } from "../hooks/useContextPackLibrary.js";
 import {
@@ -37,7 +36,6 @@ import {
   type AgentImageEntry,
   type AgentImagePreview,
 } from "../hooks/useAgentImageLibrary.js";
-import { useMissionControlDestinations } from "./mission-control/hooks/useMissionControlDestinations.js";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   WorkflowHeader,
@@ -401,7 +399,8 @@ function LibraryContextPackReviewPage({ entryId }: { entryId: string }) {
   const navigate = useNavigate();
   const { data: packs = [], isLoading: packsLoading, error: packsError } = useContextPackLibrary();
   const entry = packs.find((p) => p.id === entryId) ?? null;
-  const { data: preview, isLoading: previewLoading } = useContextPackPreview(entry ? entryId : null);
+  // Atom 5: preview addresses by the pack's path-like ref, not its opaque id.
+  const { data: preview, isLoading: previewLoading } = useContextPackPreview(entry ? entry.relativePath : null);
 
   if (packsLoading) {
     return (
@@ -438,45 +437,6 @@ function ContextPackReviewBody({
   previewLoading: boolean;
 }) {
   const navigate = useNavigate();
-  const [showSendPicker, setShowSendPicker] = useState(false);
-  const [destinationSession, setDestinationSession] = useState<string>("");
-  const [sendError, setSendError] = useState<string | null>(null);
-  const [sendStatus, setSendStatus] = useState<"idle" | "dry-run-shown" | "sent">("idle");
-  const sendMutation = useContextPackSend();
-  const { data: destinations } = useMissionControlDestinations(showSendPicker);
-
-  const runningSessions = (destinations?.destinations ?? [])
-    .filter((d) => d.source === "topology" && d.status === "running")
-    .map((d) => d.sessionName)
-    .sort();
-
-  const onDryRun = async () => {
-    setSendError(null);
-    if (!destinationSession) {
-      setSendError("Pick a destination session first.");
-      return;
-    }
-    try {
-      await sendMutation.mutateAsync({ id: entry.id, destinationSession, dryRun: true });
-      setSendStatus("dry-run-shown");
-    } catch (err) {
-      setSendError((err as Error).message);
-    }
-  };
-
-  const onSend = async () => {
-    setSendError(null);
-    if (!destinationSession) {
-      setSendError("Pick a destination session first.");
-      return;
-    }
-    try {
-      await sendMutation.mutateAsync({ id: entry.id, destinationSession, dryRun: false });
-      setSendStatus("sent");
-    } catch (err) {
-      setSendError((err as Error).message);
-    }
-  };
 
   return (
     <WorkspacePage>
@@ -486,17 +446,7 @@ function ContextPackReviewBody({
           title={entry.name}
           description={entry.purpose ?? "Operator-authored composable context bundle."}
           actions={
-            <div className="flex gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                data-testid="context-pack-send-button"
-                onClick={() => setShowSendPicker((v) => !v)}
-              >
-                {showSendPicker ? "Hide Send" : "Send to seat"}
-              </Button>
-              <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Library</Button>
-            </div>
+            <Button variant="outline" size="sm" onClick={() => navigate({ to: "/specs" })}>Back to Library</Button>
           }
         />
 
@@ -552,58 +502,6 @@ function ContextPackReviewBody({
             })}
           </ul>
         </section>
-
-        {showSendPicker && (
-          <section data-testid="context-pack-send-modal" className="border border-outline bg-surface-lowest px-3 py-3 space-y-2">
-            <div className="font-mono text-[10px] uppercase tracking-[0.10em] text-on-surface">Send to seat</div>
-            <select
-              data-testid="context-pack-send-session"
-              className="w-full font-mono text-[10px] border border-outline-variant px-2 py-1"
-              value={destinationSession}
-              onChange={(e) => setDestinationSession(e.target.value)}
-            >
-              <option value="">Pick a running session…</option>
-              {runningSessions.map((s) => (
-                <option key={s} value={s}>{s}</option>
-              ))}
-            </select>
-            <div className="flex gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                data-testid="context-pack-send-dry-run"
-                onClick={() => void onDryRun()}
-                disabled={sendMutation.isPending}
-              >
-                {sendMutation.isPending ? "…" : "Dry run"}
-              </Button>
-              <Button
-                size="sm"
-                data-testid="context-pack-send-confirm"
-                onClick={() => void onSend()}
-                disabled={sendMutation.isPending || !destinationSession}
-              >
-                {sendMutation.isPending ? "Sending…" : "Send"}
-              </Button>
-            </div>
-            {sendError && (
-              <div data-testid="context-pack-send-error" className="font-mono text-[9px] text-red-600">{sendError}</div>
-            )}
-            {sendStatus === "sent" && (
-              <div data-testid="context-pack-send-success" className="font-mono text-[9px] text-emerald-700">
-                Sent to {destinationSession}.
-              </div>
-            )}
-            {sendStatus === "dry-run-shown" && sendMutation.data?.bundleText && (
-              <pre
-                data-testid="context-pack-send-bundle-preview"
-                className="font-mono text-[9px] bg-background border border-outline-variant px-2 py-1 max-h-64 overflow-y-auto whitespace-pre-wrap"
-              >
-                {sendMutation.data.bundleText}
-              </pre>
-            )}
-          </section>
-        )}
 
         <section className="border border-outline-variant/40 bg-surface-lowest/[0.08]">
           <header className="border-b border-outline-variant bg-background px-3 py-2 font-mono text-[10px] uppercase tracking-[0.10em] text-on-surface-variant">

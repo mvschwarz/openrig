@@ -3,7 +3,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ContextPackLibraryService } from "../src/domain/context-packs/context-pack-library-service.js";
@@ -203,7 +203,9 @@ files:
     },
   );
 
-  it("GET /library/:id returns the pack manifest", async () => {
+  // Slice-03 Atom 5 — DEAD PATH: the colon-id `/library/:id[/preview|/send]`
+  // routes are removed. A pack still resolves by ref; the legacy addressing 404s.
+  it("colon-id /library/:id[/preview|/send] routes are removed → 404; by-ref still resolves", async () => {
     writePack(libRoot, "p1", `
 name: p1
 version: 1
@@ -213,20 +215,20 @@ files:
 `, { "a.md": "content" });
     lib.scan();
     const app = buildApp();
-    const res = await app.request(`/api/context-packs/library/${encodeURIComponent("context-pack:p1:1")}`);
-    expect(res.status).toBe(200);
-    const body = await res.json() as { name: string; files: unknown[] };
-    expect(body.name).toBe("p1");
-    expect(body.files).toHaveLength(1);
+    const cid = encodeURIComponent("context-pack:p1:1");
+    expect((await app.request(`/api/context-packs/library/${cid}`)).status).toBe(404);
+    expect((await app.request(`/api/context-packs/library/${cid}/preview`)).status).toBe(404);
+    const send = await app.request(`/api/context-packs/library/${cid}/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ destinationSession: "x@rig" }),
+    });
+    expect(send.status).toBe(404);
+    // ref-primary resolution is intact
+    expect((await app.request(`/api/context-packs/library/by-ref?ref=${encodeURIComponent("p1")}`)).status).toBe(200);
   });
 
-  it("GET /library/:id returns 404 for unknown id", async () => {
-    const app = buildApp();
-    const res = await app.request(`/api/context-packs/library/${encodeURIComponent("context-pack:missing:1")}`);
-    expect(res.status).toBe(404);
-  });
-
-  it("GET /library/:id/preview returns the assembled bundle", async () => {
+  it("GET /library/by-ref/preview returns the assembled bundle", async () => {
     writePack(libRoot, "preview-pack", `
 name: preview-pack
 version: 1
@@ -237,117 +239,35 @@ files:
 `, { "a.md": "BODY-A" });
     lib.scan();
     const app = buildApp();
-    const res = await app.request(`/api/context-packs/library/${encodeURIComponent("context-pack:preview-pack:1")}/preview`);
+    const res = await app.request(`/api/context-packs/library/by-ref/preview?ref=${encodeURIComponent("preview-pack")}`);
     expect(res.status).toBe(200);
-    const body = await res.json() as { bundleText: string; bundleBytes: number; missingFiles: unknown[] };
+    const body = await res.json() as { id: string; bundleText: string; bundleBytes: number; missingFiles: unknown[] };
+    expect(body.id).toBe("context-pack:preview-pack");
     expect(body.bundleText).toContain("# OpenRig Context Pack: preview-pack v1");
     expect(body.bundleText).toContain("BODY-A");
     expect(body.bundleBytes).toBeGreaterThan(0);
     expect(body.missingFiles).toEqual([]);
   });
 
-  it("POST /library/:id/send dry-run returns the bundle without invoking transport", async () => {
-    writePack(libRoot, "dry", `
-name: dry
-version: 1
-files:
-  - path: a.md
-    role: r
-`, { "a.md": "dry content" });
-    lib.scan();
+  it("GET /library/by-ref/preview 404s an absent ref, 400s an unsafe ref, 400s a missing ref", async () => {
     const app = buildApp();
-    const res = await app.request(`/api/context-packs/library/${encodeURIComponent("context-pack:dry:1")}/send`, {
+    expect((await app.request(`/api/context-packs/library/by-ref/preview?ref=${encodeURIComponent("packs/absent")}`)).status).toBe(404);
+    expect((await app.request(`/api/context-packs/library/by-ref/preview?ref=${encodeURIComponent("../escape")}`)).status).toBe(400);
+    expect((await app.request(`/api/context-packs/library/by-ref/preview`)).status).toBe(400);
+  });
+
+  it("is delivery-free: no send route, SessionTransport import, or transport call", async () => {
+    const app = buildApp();
+    const response = await app.request(`/api/context-packs/library/by-ref/send?ref=${encodeURIComponent("dry")}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ destinationSession: "test@rig", dryRun: true }),
+      body: JSON.stringify({ destinationSession: "test@rig" }),
     });
-    expect(res.status).toBe(200);
-    const body = await res.json() as { dryRun: boolean; bundleText?: string; sent?: boolean };
-    expect(body.dryRun).toBe(true);
-    expect(body.bundleText).toContain("dry content");
-    expect(body.sent).toBeUndefined();
+    expect(response.status).toBe(404);
     expect(transport.calls).toEqual([]);
-  });
-
-  it("POST /library/:id/send invokes SessionTransport.send with the assembled bundle", async () => {
-    writePack(libRoot, "real", `
-name: real
-version: 1
-files:
-  - path: a.md
-    role: r
-`, { "a.md": "real content" });
-    lib.scan();
-    const app = buildApp();
-    const res = await app.request(`/api/context-packs/library/${encodeURIComponent("context-pack:real:1")}/send`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ destinationSession: "driver@rig" }),
-    });
-    expect(res.status).toBe(200);
-    const body = await res.json() as { sent: boolean };
-    expect(body.sent).toBe(true);
-    expect(transport.calls).toHaveLength(1);
-    expect(transport.calls[0]!.sessionName).toBe("driver@rig");
-    expect(transport.calls[0]!.text).toContain("real content");
-  });
-
-  it("POST /library/:id/send 502s when SessionTransport reports failure", async () => {
-    writePack(libRoot, "fail", `
-name: fail
-version: 1
-files:
-  - path: a.md
-    role: r
-`, { "a.md": "x" });
-    lib.scan();
-    transport.response = { ok: false, sessionName: "x", reason: "session_missing", error: "Session not found" };
-    const app = buildApp();
-    const res = await app.request(`/api/context-packs/library/${encodeURIComponent("context-pack:fail:1")}/send`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ destinationSession: "missing@rig" }),
-    });
-    expect(res.status).toBe(502);
-    const body = await res.json() as { error: string; sent: boolean };
-    expect(body.error).toContain("Session not found");
-    expect(body.sent).toBe(false);
-  });
-
-  it("POST /library/:id/send 400s without destinationSession", async () => {
-    writePack(libRoot, "no-dest", `
-name: no-dest
-version: 1
-files:
-  - path: a.md
-    role: r
-`, { "a.md": "x" });
-    lib.scan();
-    const app = buildApp();
-    const res = await app.request(`/api/context-packs/library/${encodeURIComponent("context-pack:no-dest:1")}/send`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    });
-    expect(res.status).toBe(400);
-  });
-
-  it("POST /library/:id/send 503s when SessionTransport is missing from context", async () => {
-    writePack(libRoot, "no-transport", `
-name: no-transport
-version: 1
-files:
-  - path: a.md
-    role: r
-`, { "a.md": "x" });
-    lib.scan();
-    const app = buildApp({ withTransport: false });
-    const res = await app.request(`/api/context-packs/library/${encodeURIComponent("context-pack:no-transport:1")}/send`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ destinationSession: "x" }),
-    });
-    expect(res.status).toBe(503);
+    const source = readFileSync(new URL("../src/routes/context-packs.ts", import.meta.url), "utf8");
+    expect(source).not.toContain("SessionTransport");
+    expect(source).not.toMatch(/router\.post\([^\n]*\/send/);
   });
 
   // Slice-03 ATOM 4 — the path-like-ref resolution/deletion surface. Refs carry

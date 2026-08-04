@@ -393,7 +393,7 @@ describe("LibraryReview", () => {
       if (url === "/api/context-packs/library") {
         return new Response(JSON.stringify([
           {
-            id: "context-pack:pl-005-priming:1",
+            id: "context-pack:pl-005-priming",
             kind: "context-pack",
             name: "pl-005-priming",
             version: "1",
@@ -411,9 +411,9 @@ describe("LibraryReview", () => {
           },
         ]), { status: 200 });
       }
-      if (url === "/api/context-packs/library/context-pack%3Apl-005-priming%3A1/preview") {
+      if (url === "/api/context-packs/library/by-ref/preview?ref=pl-005-priming") {
         return new Response(JSON.stringify({
-          id: "context-pack:pl-005-priming:1",
+          id: "context-pack:pl-005-priming",
           name: "pl-005-priming",
           version: "1",
           bundleText: "# OpenRig Context Pack: pl-005-priming v1\n\nPRD body\n",
@@ -428,9 +428,9 @@ describe("LibraryReview", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(createAppTestRouter({
-      initialPath: "/specs/library/context-pack:pl-005-priming:1",
+      initialPath: "/specs/library/context-pack:pl-005-priming",
       routes: [
-        { path: "/specs/library/context-pack:pl-005-priming:1", component: () => <LibraryReview entryId="context-pack:pl-005-priming:1" /> },
+        { path: "/specs/library/context-pack:pl-005-priming", component: () => <LibraryReview entryId="context-pack:pl-005-priming" /> },
       ],
     }));
 
@@ -453,13 +453,13 @@ describe("LibraryReview", () => {
     expect(screen.getByTestId("lib-pack-missing-warning")).toBeDefined();
   });
 
-  it("Send-to-seat modal opens on click and shows running sessions", async () => {
+  it("keeps the context-pack review delivery-free", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/context-packs/library") {
         return new Response(JSON.stringify([
           {
-            id: "context-pack:test:1",
+            id: "context-pack:test",
             kind: "context-pack",
             name: "test",
             version: "1",
@@ -474,20 +474,11 @@ describe("LibraryReview", () => {
           },
         ]), { status: 200 });
       }
-      if (url.endsWith("/preview")) {
+      if (url === "/api/context-packs/library/by-ref/preview?ref=test") {
         return new Response(JSON.stringify({
-          id: "context-pack:test:1", name: "test", version: "1",
+          id: "context-pack:test", name: "test", version: "1",
           bundleText: "ok", bundleBytes: 2, estimatedTokens: 1,
           files: [], missingFiles: [],
-        }), { status: 200 });
-      }
-      if (url === "/api/mission-control/destinations") {
-        return new Response(JSON.stringify({
-          destinations: [
-            { sessionName: "driver@demo", label: "driver", source: "topology", status: "running" },
-            { sessionName: "qa@demo", label: "qa", source: "topology", status: "running" },
-            { sessionName: "stopped@demo", label: "stopped", source: "topology", status: "exited" },
-          ],
         }), { status: 200 });
       }
       throw new Error(`Unexpected fetch: ${url}`);
@@ -495,20 +486,15 @@ describe("LibraryReview", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(createAppTestRouter({
-      initialPath: "/specs/library/context-pack:test:1",
+      initialPath: "/specs/library/context-pack:test",
       routes: [
-        { path: "/specs/library/context-pack:test:1", component: () => <LibraryReview entryId="context-pack:test:1" /> },
+        { path: "/specs/library/context-pack:test", component: () => <LibraryReview entryId="context-pack:test" /> },
       ],
     }));
 
-    await waitFor(() => expect(screen.getByTestId("context-pack-send-button")).toBeDefined());
-    fireEvent.click(screen.getByTestId("context-pack-send-button"));
-    await waitFor(() => expect(screen.getByTestId("context-pack-send-modal")).toBeDefined());
-    const select = screen.getByTestId("context-pack-send-session") as HTMLSelectElement;
-    const options = Array.from(select.querySelectorAll("option")).map((o) => o.value);
-    expect(options).toContain("driver@demo");
-    expect(options).toContain("qa@demo");
-    // Stopped session not surfaced (only sessionStatus === "running")
-    expect(options).not.toContain("stopped@demo");
+    await waitFor(() => expect(screen.getByTestId("library-review-context-pack")).toBeDefined());
+    expect(screen.queryByTestId("context-pack-send-button")).toBeNull();
+    expect(screen.queryByTestId("context-pack-send-modal")).toBeNull();
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).not.toContain("/api/mission-control/destinations");
   });
 });

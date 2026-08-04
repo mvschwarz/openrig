@@ -8,7 +8,6 @@ import { tmpdir } from "node:os";
 import {
   ContextPackLibraryService,
   contextPackId,
-  parseContextPackId,
   estimateTokensFromBytes,
 } from "../src/domain/context-packs/context-pack-library-service.js";
 
@@ -57,7 +56,7 @@ files:
     const entries = lib.list();
     expect(entries).toHaveLength(1);
     const entry = entries[0]!;
-    expect(entry.id).toBe(contextPackId("smoke", "1"));
+    expect(entry.id).toBe(contextPackId("smoke")); // id = context-pack:<ref>
     expect(entry.name).toBe("smoke");
     expect(entry.kind).toBe("context-pack");
     expect(entry.purpose).toBe("Smoke pack");
@@ -81,7 +80,7 @@ files:
       roots: [{ path: userRoot, sourceType: "user_file" }],
     });
     lib.scan();
-    const entry = lib.getByNameVersion("missing", "1")!;
+    const entry = lib.getByRef("missing")!;
     expect(entry).toBeDefined();
     const present = entry.files.find((f) => f.path === "present.md")!;
     const absent = entry.files.find((f) => f.path === "absent.md")!;
@@ -107,9 +106,37 @@ files:
       ],
     });
     lib.scan();
-    const entry = lib.getByNameVersion("collision", "1")!;
+    const entry = lib.getByRef("collision")!;
     expect(entry.sourceType).toBe("workspace");
     expect(entry.sourcePath).toContain("/workspace/");
+  });
+
+  // Slice-03 Atom 5 (colon-id strip, ruled contract §4) — the id is now
+  // `context-pack:<ref>`, so two distinct refs that happen to share a manifest
+  // name+version get DISTINCT ids and BOTH resolve. The legacy
+  // `context-pack:<name>:<version>` id silently SHADOWED this case (the two refs
+  // collapsed to one id in idIndex); the strip fixes that latent bug.
+  it("distinct refs sharing a manifest name+version get DISTINCT ids and both resolve", () => {
+    const sameManifest = `
+name: dup
+version: 1
+files:
+  - path: notes.md
+    role: r
+`;
+    writePack(userRoot, "packs/a", sameManifest, { "notes.md": "A" });
+    writePack(userRoot, "packs/b", sameManifest, { "notes.md": "B" });
+    const lib = new ContextPackLibraryService({
+      roots: [{ path: userRoot, sourceType: "user_file" }],
+    });
+    lib.scan();
+    const a = lib.getByRef("packs/a");
+    const b = lib.getByRef("packs/b");
+    expect(a, "packs/a resolves").not.toBeNull();
+    expect(b, "packs/b resolves").not.toBeNull();
+    expect(a!.id).toBe("context-pack:packs/a");
+    expect(b!.id).toBe("context-pack:packs/b");
+    expect(a!.id).not.toBe(b!.id); // legacy name:version collapsed both to context-pack:dup:1
   });
 
   it("captures parse errors instead of throwing them out of scan", () => {
@@ -171,26 +198,16 @@ files:
       roots: [{ path: userRoot, sourceType: "user_file" }],
     });
     lib.scan();
-    const entry = lib.getByNameVersion("guard", "1")!;
+    const entry = lib.getByRef("guard")!;
     expect(() => lib.resolveFileWithinPack(entry, "../etc/passwd")).toThrow(/inside the pack/);
     expect(() => lib.resolveFileWithinPack(entry, "/abs")).toThrow(/inside the pack/);
   });
 });
 
-describe("contextPackId / parseContextPackId", () => {
-  it("encodes and decodes name:version", () => {
-    expect(contextPackId("foo", "1")).toBe("context-pack:foo:1");
-    expect(parseContextPackId("context-pack:foo:1")).toEqual({ name: "foo", version: "1" });
-  });
-
-  it("splits on the LAST colon so names with colons round-trip", () => {
-    const id = contextPackId("project:alpha", "3");
-    expect(parseContextPackId(id)).toEqual({ name: "project:alpha", version: "3" });
-  });
-
-  it("returns null for non-context-pack ids", () => {
-    expect(parseContextPackId("workflow:foo:1")).toBeNull();
-    expect(parseContextPackId("context-pack:no-version")).toBeNull();
+describe("contextPackId", () => {
+  it("builds the opaque context-pack:<ref> id (Atom 5 — ref is the identity)", () => {
+    expect(contextPackId("packs/compaction-restore")).toBe("context-pack:packs/compaction-restore");
+    expect(contextPackId("smoke")).toBe("context-pack:smoke");
   });
 });
 

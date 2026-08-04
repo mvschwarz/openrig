@@ -65,7 +65,7 @@ function runningDeps(port: number): StatusDeps {
 }
 
 const FIXTURE_PACK = {
-  id: "context-pack:smoke:1",
+  id: "context-pack:packs/smoke",
   kind: "context-pack" as const,
   name: "smoke",
   version: "1",
@@ -127,7 +127,8 @@ describe("rig context CLI (PL-014)", () => {
           return;
         }
         if (url.startsWith("/api/context-packs/library/by-ref")) {
-          const ref = new URL(url, "http://x").searchParams.get("ref");
+          const parsedUrl = new URL(url, "http://x");
+          const ref = parsedUrl.searchParams.get("ref");
           const json = (status: number, payload: unknown) => {
             res.writeHead(status, { "Content-Type": "application/json" });
             res.end(JSON.stringify(payload));
@@ -136,7 +137,10 @@ describe("rig context CLI (PL-014)", () => {
           const unsafe = ref.split("/").some((segment) => segment.length === 0 || segment === "." || segment === "..");
           if (unsafe) return json(400, { error: "unsafe_ref", message: `unsafe pack ref '${ref}'` });
           if (ref !== FIXTURE_PACK.relativePath) return json(404, { error: "pack_not_found", message: `Context pack '${ref}' not found in library` });
-          if (req.method === "GET") return json(200, FIXTURE_PACK);
+          if (parsedUrl.pathname === "/api/context-packs/library/by-ref/preview" && req.method === "GET") {
+            return json(200, FIXTURE_PREVIEW);
+          }
+          if (parsedUrl.pathname === "/api/context-packs/library/by-ref" && req.method === "GET") return json(200, FIXTURE_PACK);
           if (req.method === "DELETE") {
             deleteLog.push(ref);
             return json(200, { removed: true, ref, removedPath: FIXTURE_PACK.sourcePath, count: 0 });
@@ -347,6 +351,28 @@ files:
     expect(logs.join("\n")).toContain("Smoke test pack");
   });
 
+  it("show and preview resolve the exact path-like ref", async () => {
+    const shown = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "context", "show", "packs/smoke"]);
+    });
+    expect(shown.exitCode).toBeUndefined();
+    expect(shown.logs.join("\n")).toContain("Name:        smoke");
+    const previewed = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "context", "preview", "packs/smoke"]);
+    });
+    expect(previewed.exitCode).toBeUndefined();
+    expect(previewed.logs.join("\n")).toContain("Smoke body");
+  });
+
+  it("rejects legacy colon-id addressing with an actionable ref migration", async () => {
+    const { errLogs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "context", "show", "context-pack:smoke:1"]);
+    });
+    expect(exitCode).toBe(1);
+    expect(errLogs.join("\n")).toMatch(/colon-id addressing.*removed/);
+    expect(errLogs.join("\n")).toMatch(/path-like ref/);
+  });
+
   it("show fails with helpful error on unknown name", async () => {
     const { errLogs, exitCode } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "context", "show", "missing-pack"]);
@@ -363,38 +389,10 @@ files:
     expect(logs.join("\n")).toContain("Smoke body");
   });
 
-  it("send --dry-run does not invoke the daemon send path twice", async () => {
-    sendLog.length = 0;
-    sendBehavior = "ok";
-    const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "context", "send", "smoke", "driver@rig", "--dry-run"]);
-    });
-    expect(exitCode).toBeUndefined();
-    expect(sendLog).toHaveLength(1);
-    expect(sendLog[0]!.body).toEqual({ destinationSession: "driver@rig", dryRun: true });
-    expect(logs.join("\n")).toContain("(dry-run)");
-  });
-
-  it("send (real) reports successful delivery", async () => {
-    sendLog.length = 0;
-    sendBehavior = "ok";
-    const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "context", "send", "smoke", "driver@rig"]);
-    });
-    expect(exitCode).toBeUndefined();
-    expect(sendLog[0]!.body).toEqual({ destinationSession: "driver@rig", dryRun: false });
-    expect(logs.join("\n")).toContain("Sent smoke v1");
-  });
-
-  it("send fails fast when daemon returns 502", async () => {
-    sendLog.length = 0;
-    sendBehavior = "fail";
-    const { errLogs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "context", "send", "smoke", "missing@rig"]);
-    });
-    expect(exitCode).toBe(1);
-    expect(errLogs.join("\n")).toContain("Session not found");
-    sendBehavior = "ok";
+  it("is a delivery-free noun: no send subcommand or send help", () => {
+    const command = contextCommand(runningDeps(port));
+    expect(command.commands.map((sub) => sub.name())).not.toContain("send");
+    expect(command.helpInformation()).not.toMatch(/rig context send|\bsend\b/i);
   });
 
   it("sync reports indexed count", async () => {
