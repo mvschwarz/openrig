@@ -396,7 +396,9 @@ export function buildDaemonEnv(
 
   for (const [key, value] of Object.entries(baseEnv)) {
     if (ENV_SCRUB_EXACT.has(key)) continue;
-    if (ENV_SCRUB_PREFIXES.some((prefix) => key.startsWith(prefix))) continue;
+    // CODEX_HOME is daemon topology/config-root state. Every other CODEX_*
+    // value remains transient runtime/auth/session state and stays scrubbed.
+    if (key !== "CODEX_HOME" && ENV_SCRUB_PREFIXES.some((prefix) => key.startsWith(prefix))) continue;
     env[key] = value;
   }
 

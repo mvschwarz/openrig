@@ -888,7 +888,7 @@ describe("resolveDaemonPath", () => {
 });
 
 describe("startDaemon env sanitization", () => {
-  it("startDaemon spawns with sanitized env that excludes terminal/GUI vars", async () => {
+  it("startDaemon preserves the Codex config root while excluding transient CODEX runtime/session vars", async () => {
     // Pollute process.env temporarily
     const saved: Record<string, string | undefined> = {};
     const pollutants: Record<string, string> = {
@@ -897,7 +897,9 @@ describe("startDaemon env sanitization", () => {
       CMUX_WORKSPACE: "workspace:1",
       CMUX_PANEL_ID: "panel:7",
       CMUX_BUNDLED_CLI_PATH: "/Applications/cmux.app/Contents/Resources/bin/cmux",
+      CODEX_HOME: "/Users/tester/.codex-custom",
       CODEX_CI: "1",
+      CODEX_THREAD_ID: "thread-123",
       COMMAND_MODE: "unix2003",
       __CFBundleIdentifier: "com.test",
     };
@@ -918,6 +920,7 @@ describe("startDaemon env sanitization", () => {
       expect(spawnEnv["TERM_PROGRAM"]).toBeUndefined();
       expect(spawnEnv["CMUX_WORKSPACE"]).toBeUndefined();
       expect(spawnEnv["CODEX_CI"]).toBeUndefined();
+      expect(spawnEnv["CODEX_THREAD_ID"]).toBeUndefined();
       expect(spawnEnv["COMMAND_MODE"]).toBeUndefined();
       expect(spawnEnv["__CFBundleIdentifier"]).toBeUndefined();
 
@@ -927,6 +930,9 @@ describe("startDaemon env sanitization", () => {
 
       // Core vars must be present
       expect(spawnEnv["HOME"]).toBeDefined();
+      // CODEX_HOME is topology/config-root state consumed by the daemon; unlike
+      // every other CODEX_* runtime/auth/session value, it must cross this boundary.
+      expect(spawnEnv["CODEX_HOME"]).toBe("/Users/tester/.codex-custom");
       expect(spawnEnv["OPENRIG_PORT"]).toBe("7433");
     } finally {
       // Restore process.env
@@ -939,6 +945,22 @@ describe("startDaemon env sanitization", () => {
 });
 
 describe("buildDaemonEnv", () => {
+  it("preserves only CODEX_HOME because it is topology/config-root state", () => {
+    const result = buildDaemonEnv({
+      CODEX_HOME: "/Users/tester/.codex-custom",
+      CODEX_CI: "1",
+      CODEX_THREAD_ID: "thread-123",
+      CODEX_SESSION_ID: "session-456",
+      CODEX_AUTH_TOKEN: "transient-auth",
+    }, { port: 7433, db: "/tmp/test.db" });
+
+    expect(result["CODEX_HOME"]).toBe("/Users/tester/.codex-custom");
+    expect(result["CODEX_CI"]).toBeUndefined();
+    expect(result["CODEX_THREAD_ID"]).toBeUndefined();
+    expect(result["CODEX_SESSION_ID"]).toBeUndefined();
+    expect(result["CODEX_AUTH_TOKEN"]).toBeUndefined();
+  });
+
   it("strips terminal/GUI vars and preserves core vars", () => {
     const baseEnv: Record<string, string> = {
       HOME: "/Users/tester",
