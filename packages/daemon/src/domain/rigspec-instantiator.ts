@@ -609,8 +609,23 @@ export class PodRigInstantiator {
             logicalIdToNodeId.set(qualifiedId, node.id);
             // Seam B R2: restart-stable provenance persists AT MATERIALIZE (a
             // materialized-but-never-launched seat must still restore its posture).
+            // R2 HIGH-1: expansion into an EXISTING rig materializes through a SYNTHETIC
+            // fragment with no rig-level ref — a ref-less member must inherit the
+            // PERSISTED target-rig attachment (original declaring dir), never lose it.
             const materializeAttachment = this.resolveMemberPolicyAttachment(member.permissionPolicy, rigSpec.permissionPolicy, rigRoot);
-            if (materializeAttachment) this.persistNodePolicyProvenanceStrict(node.id, materializeAttachment);
+            if (materializeAttachment) {
+              this.persistNodePolicyProvenanceStrict(node.id, materializeAttachment);
+            } else if (opts?.targetRigId) {
+              const rigProv = this.deps.rigRepo.getRigPolicyProvenance(materializedRigId);
+              if (rigProv) {
+                this.deps.rigRepo.setNodePolicyProvenance(node.id, {
+                  origin: rigProv.origin,
+                  resolvedTarget: rigProv.resolvedTarget,
+                  declaringDir: rigProv.declaringDir,
+                  launchPosture: rigProv.launchPosture,
+                });
+              }
+            }
             nodeResults.push({ logicalId: qualifiedId, status: "materialized" });
             persistedEvents.push(event);
           }
@@ -1583,8 +1598,15 @@ export class PodRigInstantiator {
     // OPR.0.4.8.3 Seam B: resolve the seat's permission-policy attachment once for this
     // launch (member > rig precedence; declaring dir = the rig root, where the declaring
     // RigSpec + its relative policy files live). Also persists restart-stable provenance.
+    // R2 HIGH-1: the LIVE binding must AGREE with persisted provenance — structured
+    // add-member/expansion launch with a SYNTHETIC minimal spec (no rig-level ref), so
+    // when the in-memory spec resolves nothing, the PERSISTED node provenance (written in
+    // the creation tx) and then the PERSISTED rig attachment are the binding's truth.
     const policyAttachment = this.resolveMemberPolicyAttachment(input.member.permissionPolicy, input.rigSpec.permissionPolicy, input.rigRoot);
     if (policyAttachment) this.persistNodePolicyProvenance(input.nodeId, policyAttachment);
+    const launchPosture = policyAttachment?.launchPosture
+      ?? this.deps.rigRepo.getNodePolicyProvenance(input.nodeId)?.launchPosture
+      ?? this.deps.rigRepo.getRigPolicyProvenance(input.rigId)?.launchPosture;
 
     const sessionNameErrors = validateSessionComponents(input.pod.id, input.member.id, input.rigSpec.name);
     if (sessionNameErrors.length > 0) {
@@ -1645,9 +1667,9 @@ export class PodRigInstantiator {
       cwd: configResult.config.cwd,
       model: configResult.config.model,
       codexConfigProfile: input.member.codexConfigProfile,
-      // OPR.0.4.8.3 Seam B: resolved launch posture (member > rig > absent) binds per-seat;
-      // adapters thread it into the yolo-mode helpers on every launch path.
-      ...(policyAttachment ? { launchPosture: policyAttachment.launchPosture } : {}),
+      // OPR.0.4.8.3 Seam B: resolved launch posture (member > rig > persisted > absent)
+      // binds per-seat; adapters thread it into the yolo-mode helpers on every launch path.
+      ...(launchPosture ? { launchPosture } : {}),
     };
 
     // session_source dispatch: fork (native runtime fork) vs rebuild (artifact-
@@ -1823,6 +1845,9 @@ export class PodRigInstantiator {
     const effectiveCwd = resolveLaunchCwd(input.member.cwd, input.rigRoot, input.cwdOverride);
     const terminalPolicyAttachment = this.resolveMemberPolicyAttachment(input.member.permissionPolicy, input.rigSpec.permissionPolicy, input.rigRoot);
     if (terminalPolicyAttachment) this.persistNodePolicyProvenance(input.nodeId, terminalPolicyAttachment);
+    const terminalLaunchPosture = terminalPolicyAttachment?.launchPosture
+      ?? this.deps.rigRepo.getNodePolicyProvenance(input.nodeId)?.launchPosture
+      ?? this.deps.rigRepo.getRigPolicyProvenance(input.rigId)?.launchPosture;
     const sessionNameErrors = validateSessionComponents(input.pod.id, input.member.id, input.rigSpec.name);
     if (sessionNameErrors.length > 0) {
       return { status: "failed", error: sessionNameErrors.join("; ") };
@@ -1864,10 +1889,9 @@ export class PodRigInstantiator {
       cmuxSurface: null,
       updatedAt: "",
       cwd: effectiveCwd,
-      // Seam B: a terminal seat has no harness posture flag, but the resolved attachment
-      // (rig-level only — schema rejects member-level policy on terminal runtime) still
-      // binds for provenance-consuming consumers; the terminal adapter ignores it.
-      ...(terminalPolicyAttachment ? { launchPosture: terminalPolicyAttachment.launchPosture } : {}),
+      // Seam B: a terminal seat has no harness posture flag, but the resolved/persisted
+      // attachment still binds for provenance-consuming consumers; terminal ignores it.
+      ...(terminalLaunchPosture ? { launchPosture: terminalLaunchPosture } : {}),
     };
     const adapter = this.deps.adapters["terminal"];
     if (!adapter) {

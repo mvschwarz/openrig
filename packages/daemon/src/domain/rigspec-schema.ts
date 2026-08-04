@@ -105,9 +105,10 @@ export class RigSpecSchema {
     }
 
     // OPR.0.4.8.3 Seam B: optional rig-level permission_policy REF (builtin:<name> or a
-    // spec-relative custom path). Absent = the floor (honest absence). Validated per README v4
-    // A1/A2/A3 — an invalid ref is a STRUCTURED spec error, never a silent floor fallback.
-    if (obj["permission_policy"] !== undefined && obj["permission_policy"] !== null) {
+    // spec-relative custom path). ABSENT = the floor (honest absence). An explicitly PRESENT
+    // value — including null (R2 HIGH-3) — must validate: present-invalid is a STRUCTURED
+    // spec error, never silently collapsed to absence/floor. Mirrors the member level.
+    if (obj["permission_policy"] !== undefined) {
       const refErr = validatePermissionPolicyRef(obj["permission_policy"], "permission_policy");
       if (refErr) errors.push(refErr);
     }
