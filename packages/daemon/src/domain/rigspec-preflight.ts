@@ -197,6 +197,13 @@ export function permissionPolicyDiscoveryWarnings(
         warnings.push(`${logicalId}: permission_policy absent; launch_posture=floor`);
         continue;
       }
+      if (attachment.origin === "deliberate_none") {
+        // RULED amendment (5f37e40f): the three-way distinction renders — a
+        // RECORDED choice is not absence; the posture claim stays byte-equal
+        // to the absent floor (P2), only the record wording differs.
+        warnings.push(`${logicalId}: permission_policy: none (deliberate choice — recorded); launch_posture=floor`);
+        continue;
+      }
       warnings.push(`${logicalId}: permission_policy ref="${attachment.ref}" origin=${attachment.origin} launch_posture=${attachment.launchPosture}`);
     }
   }

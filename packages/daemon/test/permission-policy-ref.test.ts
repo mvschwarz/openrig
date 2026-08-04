@@ -45,8 +45,8 @@ describe("permission_policy ref — validate (A1/A2/A3)", () => {
     expect(validatePermissionPolicyRef("a//b.md", "permission_policy")).toMatch(/empty|segment/i);
   });
 
-  it("reserves the literal 'none' (structured error, not floor)", () => {
-    expect(validatePermissionPolicyRef("none", "permission_policy")).toMatch(/reserved/i);
+  it("'none' is the recorded DELIBERATE choice — VALID per the ruled amendment (RULED-FORM-deliberate-none-2026-08-04, sha256 5f37e40f; supersedes the A3 reservation error, the amendment's ONE sanctioned sealed-surface change)", () => {
+    expect(validatePermissionPolicyRef("none", "permission_policy")).toBeNull();
   });
 
   it("rejects empty / whitespace-only", () => {

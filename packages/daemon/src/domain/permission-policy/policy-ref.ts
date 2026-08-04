@@ -7,7 +7,9 @@
 //   - a RELATIVE custom path (A2), resolved relative to the DECLARING RigSpec dir (origin=custom);
 //     absolute / `..` traversal / empty segments = STRUCTURED error (a spec defect, NOT a floor
 //     fallback). Reuses the established safe-path discipline (path-safety.validateSafePath).
-//   - `none` (A3) is RESERVED → structured error.
+//   - `none` = the RECORDED DELIBERATE choice (RULED-FORM-deliberate-none-2026-08-04,
+//     sha256 5f37e40f — the A3 reservation ACTIVATED by its own amendment): third origin
+//     deliberate_none, never resolves to any file, posture identical to absent (floor).
 //   - ABSENT (no value) = the floor (honest absence) — the CALLER passes undefined; not an error.
 // Built-in ASSET packaging is a LATER leg: builtin resolution here is REF-SEMANTICS (prefix→origin),
 // it does NOT read or require the asset file to exist.
@@ -20,7 +22,8 @@ import type { LaunchPosture, PolicySurface } from "./policy-spec.js";
 /** The packaged read-only built-in policy set (README v4: 3 Policy-Mode specs + Operator/YOLO). */
 export const BUILTIN_POLICY_NAMES = ["locked", "standard", "open", "yolo"] as const;
 export type BuiltinPolicyName = (typeof BUILTIN_POLICY_NAMES)[number];
-export type PolicyRefOrigin = "builtin" | "custom";
+/** deliberate_none: the ruled amendment 5f37e40f — the recorded choice; never file-backed. */
+export type PolicyRefOrigin = "builtin" | "custom" | "deliberate_none";
 
 const BUILTIN_PREFIX = "builtin:";
 
@@ -48,7 +51,9 @@ export function validatePermissionPolicyRef(value: unknown, label: string): stri
     return `${label}: permission_policy must be a non-empty string ref`;
   }
   if (value === "none") {
-    return `${label}: 'none' is reserved for the deliberate-none representation landing with the onboarding leg`;
+    // RULED amendment (5f37e40f): the A3-reserved literal IS the recorded
+    // deliberate choice — valid; classification/resolution handle it below.
+    return null;
   }
   if (value.startsWith(BUILTIN_PREFIX)) {
     const name = value.slice(BUILTIN_PREFIX.length);
@@ -158,6 +163,18 @@ export function resolvePermissionPolicyAttachment(
   declaringDir: string,
   deps: PolicyResolveDeps,
 ): ResolvedPolicyAttachment {
+  if (ref === "none") {
+    // RULED amendment (5f37e40f): recorded deliberate choice. NEVER resolves to
+    // any file (no resolvedTarget/declaringDir — the A3 no-squatting fence
+    // holds because 'none' stays unreferenceable); posture IDENTICAL to absent
+    // (zero privilege delta — the entire change is record/provenance).
+    return {
+      ref,
+      origin: "deliberate_none",
+      launchPosture: "floor",
+      contentResolved: true, // semantics fully known by construction (like builtins)
+    };
+  }
   if (ref.startsWith(BUILTIN_PREFIX)) {
     const builtinName = ref.slice(BUILTIN_PREFIX.length) as BuiltinPolicyName;
     return {
