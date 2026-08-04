@@ -349,4 +349,115 @@ files:
     });
     expect(res.status).toBe(503);
   });
+
+  // Slice-03 ATOM 4 — the path-like-ref resolution/deletion surface. Refs carry
+  // '/', so they travel as a `?ref=` query (never a `:id` path segment). Both
+  // verbs flow through the sealed getByRef/removeByRef boundary.
+  it("GET /library/by-ref resolves a pack by its path-like ref (getByRef-backed)", async () => {
+    writePack(libRoot, join("packs", "smoke"), `
+name: smoke
+version: 1
+purpose: Ref pack
+files:
+  - path: notes.md
+    role: notes
+`, { "notes.md": "Hello" });
+    lib.scan();
+    const app = buildApp();
+    const res = await app.request(`/api/context-packs/library/by-ref?ref=${encodeURIComponent("packs/smoke")}`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { name: string; relativePath: string };
+    expect(body.name).toBe("smoke");
+    expect(body.relativePath).toBe("packs/smoke");
+  });
+
+  it("GET /library/by-ref returns a structured 400 unsafe_ref for a traversal ref", async () => {
+    const app = buildApp();
+    const res = await app.request(`/api/context-packs/library/by-ref?ref=${encodeURIComponent("../escape")}`);
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string; message: string };
+    expect(body.error).toBe("unsafe_ref");
+    expect(body.message).toMatch(/unsafe pack ref/);
+  });
+
+  it("GET /library/by-ref returns 404 for a safe-but-absent ref", async () => {
+    const app = buildApp();
+    const res = await app.request(`/api/context-packs/library/by-ref?ref=${encodeURIComponent("packs/absent")}`);
+    expect(res.status).toBe(404);
+  });
+
+  it("GET /library/by-ref returns 400 when the ref query is missing", async () => {
+    const app = buildApp();
+    const res = await app.request("/api/context-packs/library/by-ref");
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string };
+    expect(body.error).toBe("ref_required");
+  });
+
+  it("DELETE /library/by-ref removes a pack; the ref stops resolving", async () => {
+    writePack(libRoot, join("packs", "smoke"), `
+name: smoke
+version: 1
+files:
+  - path: notes.md
+    role: notes
+`, { "notes.md": "Hello" });
+    lib.scan();
+    expect(lib.getByRef("packs/smoke")).not.toBeNull();
+    const app = buildApp();
+    const res = await app.request(`/api/context-packs/library/by-ref?ref=${encodeURIComponent("packs/smoke")}`, { method: "DELETE" });
+    expect(res.status).toBe(200);
+    const body = await res.json() as { removed: boolean; ref: string };
+    expect(body.removed).toBe(true);
+    expect(body.ref).toBe("packs/smoke");
+    expect(lib.getByRef("packs/smoke")).toBeNull();
+    expect(existsSync(join(libRoot, "packs", "smoke"))).toBe(false);
+  });
+
+  it("DELETE /library/by-ref returns a structured 400 unsafe_ref with no mutation", async () => {
+    writePack(libRoot, join("packs", "keep"), `
+name: keep
+version: 1
+files:
+  - path: notes.md
+    role: notes
+`, { "notes.md": "x" });
+    lib.scan();
+    const app = buildApp();
+    const res = await app.request(`/api/context-packs/library/by-ref?ref=${encodeURIComponent("../escape")}`, { method: "DELETE" });
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string };
+    expect(body.error).toBe("unsafe_ref");
+    expect(lib.getByRef("packs/keep")).not.toBeNull();
+    expect(existsSync(join(libRoot, "packs", "keep"))).toBe(true);
+  });
+
+  it("DELETE /library/by-ref returns 404 pack_not_found for a safe-but-absent ref", async () => {
+    const app = buildApp();
+    const res = await app.request(`/api/context-packs/library/by-ref?ref=${encodeURIComponent("packs/absent")}`, { method: "DELETE" });
+    expect(res.status).toBe(404);
+    const body = await res.json() as { error: string };
+    expect(body.error).toBe("pack_not_found");
+  });
+
+  it("DELETE /library/by-ref returns 403 pack_not_removable for a shipped builtin pack", async () => {
+    const builtinRoot = join(tmp, "builtin");
+    writePack(builtinRoot, join("packs", "shipped"), `
+name: shipped
+version: 1
+files:
+  - path: notes.md
+    role: notes
+`, { "notes.md": "x" });
+    const builtinLib = new ContextPackLibraryService({ roots: [{ path: builtinRoot, sourceType: "builtin" }] });
+    builtinLib.scan();
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("contextPackLibrary" as never, builtinLib); await next(); });
+    app.route("/api/context-packs", contextPacksRoutes());
+    const res = await app.request(`/api/context-packs/library/by-ref?ref=${encodeURIComponent("packs/shipped")}`, { method: "DELETE" });
+    expect(res.status).toBe(403);
+    const body = await res.json() as { error: string };
+    expect(body.error).toBe("pack_not_removable");
+    expect(existsSync(join(builtinRoot, "packs", "shipped"))).toBe(true);
+  });
 });

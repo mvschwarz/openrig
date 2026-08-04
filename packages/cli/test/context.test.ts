@@ -72,7 +72,7 @@ const FIXTURE_PACK = {
   purpose: "Smoke test pack",
   sourceType: "user_file" as const,
   sourcePath: "/home/op/.openrig/context-packs/smoke",
-  relativePath: "smoke",
+  relativePath: "packs/smoke",
   updatedAt: "2026-05-04T00:00:00Z",
   manifestEstimatedTokens: null,
   derivedEstimatedTokens: 100,
@@ -97,11 +97,13 @@ describe("rig context CLI (PL-014)", () => {
   let port: number;
   let sendLog: Array<{ id: string; body: unknown }>;
   let composeLog: Array<{ outRef?: string; sources?: Array<{ path: string; label: string }> }>;
+  let deleteLog: string[];
   let sendBehavior: "ok" | "fail" = "ok";
 
   beforeAll(async () => {
     sendLog = [];
     composeLog = [];
+    deleteLog = [];
     server = http.createServer((req, res) => {
       let body = "";
       req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
@@ -123,6 +125,23 @@ describe("rig context CLI (PL-014)", () => {
           res.writeHead(201, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ref: parsed.outRef, bytes: 4, estimatedTokens: 1, files: parsed.sources ?? [] }));
           return;
+        }
+        if (url.startsWith("/api/context-packs/library/by-ref")) {
+          const ref = new URL(url, "http://x").searchParams.get("ref");
+          const json = (status: number, payload: unknown) => {
+            res.writeHead(status, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(payload));
+          };
+          if (!ref) return json(400, { error: "ref_required" });
+          const unsafe = ref.split("/").some((segment) => segment.length === 0 || segment === "." || segment === "..");
+          if (unsafe) return json(400, { error: "unsafe_ref", message: `unsafe pack ref '${ref}'` });
+          if (ref !== FIXTURE_PACK.relativePath) return json(404, { error: "pack_not_found", message: `Context pack '${ref}' not found in library` });
+          if (req.method === "GET") return json(200, FIXTURE_PACK);
+          if (req.method === "DELETE") {
+            deleteLog.push(ref);
+            return json(200, { removed: true, ref, removedPath: FIXTURE_PACK.sourcePath, count: 0 });
+          }
+          return json(405, { error: "method_not_allowed" });
         }
         const idMatch = url.match(/^\/api\/context-packs\/library\/([^/]+)(\/(preview|send))?$/);
         if (idMatch) {
@@ -384,5 +403,39 @@ files:
     });
     expect(exitCode).toBeUndefined();
     expect(logs.join("\n")).toContain("Indexed 1 context pack");
+  });
+
+  it("rm removes a pack by its path-like ref and reports success", async () => {
+    deleteLog.length = 0;
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "context", "rm", "packs/smoke"]);
+    });
+    expect(exitCode).toBeUndefined();
+    expect(deleteLog).toEqual(["packs/smoke"]);
+    expect(logs.join("\n")).toMatch(/Removed .*packs\/smoke/);
+  });
+
+  it("rm --json emits the structured removal result", async () => {
+    deleteLog.length = 0;
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "context", "rm", "packs/smoke", "--json"]);
+    });
+    expect(exitCode).toBeUndefined();
+    expect(JSON.parse(logs.join(""))).toMatchObject({ removed: true, ref: "packs/smoke" });
+  });
+
+  it("rm surfaces unsafe and absent ref errors without a delete", async () => {
+    deleteLog.length = 0;
+    const unsafe = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "context", "rm", "../escape"]);
+    });
+    expect(unsafe.exitCode).toBe(1);
+    expect(unsafe.errLogs.join("\n")).toMatch(/unsafe/);
+    const absent = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "context", "rm", "packs/absent"]);
+    });
+    expect(absent.exitCode).toBe(1);
+    expect(absent.errLogs.join("\n")).toContain("not found");
+    expect(deleteLog).toEqual([]);
   });
 });

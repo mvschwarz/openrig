@@ -88,6 +88,55 @@ export function contextPacksRoutes(): Hono {
     }
   });
 
+  // Slice-03 Atom 4 — the ref-primary read/delete surface. A path-like ref
+  // carries '/', so it travels as a `?ref=` query, never a `:id` path segment.
+  // Registered BEFORE `/library/:id` so the static `by-ref` segment is never
+  // captured as a colon-id. Both verbs flow through the store's sealed
+  // getByRef/removeByRef boundary (assertSafePackRef before any effect).
+
+  // GET /library/by-ref?ref=<path-like-ref>
+  router.get("/library/by-ref", (c) => {
+    const lib = c.get("contextPackLibrary" as never) as ContextPackLibraryService | undefined;
+    if (!lib) return c.json({ error: "context_pack_library_unavailable" }, 503);
+    const ref = c.req.query("ref");
+    if (!ref) return c.json({ error: "ref_required", message: "query must include ?ref=<path-like-ref>" }, 400);
+    try {
+      const entry = lib.getByRef(ref);
+      if (!entry) return c.json({ error: "pack_not_found", message: `Context pack '${ref}' not found in library` }, 404);
+      return c.json(entry);
+    } catch (err) {
+      if (err instanceof ContextPackError) {
+        const status = err.code === "unsafe_ref" ? 400 : 500;
+        return c.json({ error: err.code, message: err.message, ...(err.details ?? {}) }, status as 400);
+      }
+      return c.json({ error: "by_ref_failed", message: (err as Error).message }, 500);
+    }
+  });
+
+  // DELETE /library/by-ref?ref=<path-like-ref>
+  router.delete("/library/by-ref", (c) => {
+    const lib = c.get("contextPackLibrary" as never) as ContextPackLibraryService | undefined;
+    if (!lib) return c.json({ error: "context_pack_library_unavailable" }, 503);
+    const ref = c.req.query("ref");
+    if (!ref) return c.json({ error: "ref_required", message: "query must include ?ref=<path-like-ref>" }, 400);
+    try {
+      const result = lib.removeByRef(ref);
+      return c.json({ ...result, count: lib.list().length });
+    } catch (err) {
+      if (err instanceof ContextPackError) {
+        const status = err.code === "unsafe_ref"
+          ? 400
+          : err.code === "pack_not_found"
+            ? 404
+            : err.code === "pack_not_removable"
+              ? 403
+              : 500;
+        return c.json({ error: err.code, message: err.message, ...(err.details ?? {}) }, status as 400);
+      }
+      return c.json({ error: "rm_failed", message: (err as Error).message }, 500);
+    }
+  });
+
   // GET /library/:id
   router.get("/library/:id", (c) => {
     const lib = c.get("contextPackLibrary" as never) as ContextPackLibraryService | undefined;

@@ -162,6 +162,15 @@ async function resolvePack(client: DaemonClient, nameOrId: string): Promise<Cont
     if (res.status === 404) throw new Error(`Context pack '${nameOrId}' not found in library. Run 'rig context list' to see what's available.`);
     throw new Error(`Daemon returned HTTP ${res.status} for /api/context-packs/library/${nameOrId}`);
   }
+  if (nameOrId.includes("/")) {
+    const res = await client.get<ContextPackEntryWire & { error?: string; message?: string }>(
+      `/api/context-packs/library/by-ref?ref=${encodeURIComponent(nameOrId)}`,
+    );
+    if (res.status === 200) return res.data;
+    if (res.status === 404) throw new Error(`Context pack '${nameOrId}' not found in library. Run 'rig context list' to see what's available.`);
+    if (res.status === 400) throw new Error(res.data?.message ?? `Unsafe context pack ref '${nameOrId}'.`);
+    throw new Error(`Daemon returned HTTP ${res.status} for /api/context-packs/library/by-ref`);
+  }
   const res = await client.get<ContextPackEntryWire[]>("/api/context-packs/library");
   if (res.status !== 200) throw new Error(`Daemon returned HTTP ${res.status} for /api/context-packs/library`);
   const entries = res.data ?? [];
@@ -185,6 +194,7 @@ Examples:
   rig context show pl-005-phase-a-priming
   rig context preview pl-005-phase-a-priming
   rig context add ./my-pack
+  rig context rm packs/compaction-restore
   rig context sync
   rig context send pl-005-phase-a-priming velocity-driver@openrig-velocity --dry-run
   rig context send pl-005-phase-a-priming velocity-driver@openrig-velocity
@@ -413,6 +423,35 @@ Examples:
         } else {
           console.log(`Installed at ${targetDir}. Library now has ${syncRes.data.count} context pack(s).`);
         }
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    });
+
+  cmd.command("rm")
+    .argument("<ref>", "Path-like ref of the context pack to remove (e.g. packs/compaction-restore)")
+    .description("Remove a context pack from the library by its path-like ref")
+    .option("--json", "JSON output")
+    .action(async (ref: string, opts: { json?: boolean }) => {
+      try {
+        const client = await getClient();
+        const res = await client.delete<{
+          removed?: boolean;
+          ref?: string;
+          removedPath?: string;
+          count?: number;
+          error?: string;
+          message?: string;
+        }>(`/api/context-packs/library/by-ref?ref=${encodeURIComponent(ref)}`);
+        if (res.status !== 200) {
+          throw new Error(res.data?.message ?? res.data?.error ?? `Daemon returned HTTP ${res.status}`);
+        }
+        if (opts.json) {
+          console.log(JSON.stringify(res.data, null, 2));
+          return;
+        }
+        console.log(`Removed context pack '${res.data.ref}'.${typeof res.data.count === "number" ? ` Library now has ${res.data.count} context pack(s).` : ""}`);
       } catch (err) {
         console.error((err as Error).message);
         process.exitCode = 1;

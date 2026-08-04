@@ -91,7 +91,11 @@ export class ContextPackError extends Error {
       | "pack_ref_below_pack"
       | "unsafe_ref_namespace"
       | "pack_write_failed"
-      | "store_unavailable",
+      | "store_unavailable"
+      // Slice-03 Atom 4: rm refuses to delete a shipped `builtin` pack —
+      // it mirrors add's operator-writable contract (never rmSyncs shipped
+      // assets under the package directory).
+      | "pack_not_removable",
     message: string,
     public readonly details?: Record<string, unknown>,
   ) {

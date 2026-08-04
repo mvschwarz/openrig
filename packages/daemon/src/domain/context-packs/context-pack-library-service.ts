@@ -185,6 +185,37 @@ export class ContextPackLibraryService {
     return this.entriesByRef.get(ref) ?? null;
   }
 
+  /** Slice-03 Atom 4 — DELETE trust boundary: remove a pack by its path-like
+   *  ref. Safety ordering mirrors getByRef/compose: an unsafe ref is a
+   *  structured, fail-visible error BEFORE any filesystem op; a safe-but-absent
+   *  ref is an honest pack_not_found; a shipped `builtin` pack is REFUSED — rm
+   *  mirrors add's operator-writable contract (add only ever writes into the
+   *  user_file root, and rm never rmSyncs shipped assets under the package
+   *  directory). On success the pack directory is deleted and a re-scan makes
+   *  the ref stop resolving (durable removal). */
+  removeByRef(ref: string): { removed: boolean; ref: string; removedPath: string } {
+    try {
+      assertSafePackRef(ref);
+    } catch (err) {
+      throw new ContextPackError("unsafe_ref", (err as Error).message, { ref });
+    }
+    const entry = this.entriesByRef.get(ref);
+    if (!entry) {
+      throw new ContextPackError("pack_not_found", `context pack ref '${ref}' not found in the library`, { ref });
+    }
+    if (entry.sourceType === "builtin") {
+      throw new ContextPackError(
+        "pack_not_removable",
+        `context pack ref '${ref}' is a shipped builtin pack and cannot be removed`,
+        { ref, sourceType: entry.sourceType },
+      );
+    }
+    const removedPath = entry.sourcePath;
+    rmSync(removedPath, { recursive: true, force: true });
+    this.scan();
+    return { removed: true, ref, removedPath };
+  }
+
   list(): ContextPackEntry[] {
     // primary-ref-index view: one row per ref; ref is the deterministic
     // tiebreaker for identical manifest name/version
