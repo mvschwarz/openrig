@@ -287,7 +287,7 @@ export class RigInstantiator {
 
 import { RigSpecCodec as PodRigSpecCodec } from "./rigspec-codec.js";
 import { RigSpecSchema as PodRigSpecSchema, VALID_EDGE_KINDS } from "./rigspec-schema.js";
-import { permissionPolicyDiscoveryWarnings, rigPreflight, preflightValidatedSpec } from "./rigspec-preflight.js";
+import { rigPreflight, preflightValidatedSpec } from "./rigspec-preflight.js";
 import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { resolveNodeConfig } from "./profile-resolver.js";
 import { resolveStartup } from "./startup-resolver.js";
@@ -465,7 +465,7 @@ export class PodRigInstantiator {
     // persistence CORE (createPod + create-node + edges + events, in one tx)
     // takes the already-parsed+validated spec so `expand` and the `add_member`
     // converge op compose it WITHOUT fabricating a synthetic rig spec.
-    return this.materializeValidatedSpec(rigSpec, rigRoot, opts);
+    return this.materializeValidatedSpec(rigSpec, rigRoot, preflight.warnings, opts);
   }
 
   /**
@@ -508,7 +508,7 @@ export class PodRigInstantiator {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
     }
 
-    return this.materializeValidatedSpec(rigSpec, rigRoot, opts);
+    return this.materializeValidatedSpec(rigSpec, rigRoot, preflight.warnings, opts);
   }
 
   /**
@@ -524,6 +524,7 @@ export class PodRigInstantiator {
   async materializeValidatedSpec(
     rigSpec: PodRigSpec,
     rigRoot: string,
+    preflightWarnings: string[],
     opts?: { targetRigId?: string; suppressSummaryEvent?: boolean; cwdOverride?: string },
   ): Promise<MaterializeOutcome> {
     const persistedEvents: Array<ReturnType<EventBus["persistWithinTransaction"]>> = [];
@@ -674,7 +675,7 @@ export class PodRigInstantiator {
           specName: rigSpec.name,
           specVersion: rigSpec.version,
           nodes: nodeResults,
-          warnings: permissionPolicyDiscoveryWarnings(rigSpec, { rigRoot, fsOps: this.deps.fsOps }),
+          warnings: preflightWarnings,
         },
       };
     } catch (err) {
@@ -1073,7 +1074,7 @@ export class PodRigInstantiator {
     const nodeResults: { logicalId: string; status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string }[] = [];
     const nodeIdMap: Record<string, string> = {}; // "pod.member" -> node DB id
     const launchedSessionNames: string[] = []; // Track for orphan cleanup on total failure
-    const podInstantiateWarnings = permissionPolicyDiscoveryWarnings(rigSpec, { rigRoot, fsOps: this.deps.fsOps });
+    const podInstantiateWarnings = preflight.warnings;
     // Store per-member context for deferred launch
     const memberContext = new Map<string, { pod: typeof rigSpec.pods[0]; member: typeof rigSpec.pods[0]["members"][0]; podId: string; nodeId: string; resolveResult: any; configResult: any }>();
 
