@@ -11,6 +11,7 @@ import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
 import { mergeManagedBlock } from "../domain/managed-blocks.js";
+import { shellQuote } from "./shell-quote.js";
 
 export interface ClaudeAdapterFsOps {
   readFile(path: string): string;
@@ -52,6 +53,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private collectorAssetPath: string | null;
   private autoDriveProviderPrompts: boolean;
   private activityRelayPath: string | null;
+  private claudeHooksManifestPath: string | null;
 
   constructor(deps: {
     tmux: TmuxAdapter;
@@ -63,6 +65,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     autoDriveProviderPrompts?: boolean;
     /** DI source of the activity-relay.cjs asset (parity with the Codex adapter). */
     activityRelayPath?: string;
+    /** DI source of the canonical claude.json hooks manifest — the event vocabulary
+     *  is derived (filtered to relay events) from it, not a parallel constant. */
+    claudeHooksManifestPath?: string;
   }) {
     this.tmux = deps.tmux;
     this.fs = deps.fsOps;
@@ -72,6 +77,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.collectorAssetPath = deps.collectorAssetPath ?? null;
     this.autoDriveProviderPrompts = deps.autoDriveProviderPrompts ?? false;
     this.activityRelayPath = deps.activityRelayPath ?? null;
+    this.claudeHooksManifestPath = deps.claudeHooksManifestPath ?? null;
   }
 
   async listInstalled(binding: NodeBinding): Promise<InstalledResource[]> {
@@ -112,13 +118,25 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // per-entry projection): a profile that REMOVES the resource emits no entry,
     // so the strip/disable branch must fire off the plan's ABSENCE — not off an
     // entry — for durable disable to be production-reachable. Exactly one call.
-    const activityEnabled = plan.entries.some(
+    const activityEntries = plan.entries.filter(
       (e) => e.category === "runtime_resource" && e.resourceType === "claude_activity_hooks",
     );
+    let activityOutcome: ActivityHookOutcome = { changed: false, delivered: false, sourceMissing: false, settingsUnparseable: false };
     try {
-      this.reconcileClaudeActivityHooks(binding.cwd, activityEnabled);
+      activityOutcome = this.reconcileClaudeActivityHooks(binding.cwd, activityEntries.length > 0);
     } catch (err) {
       console.error(`[openrig] claude activity-hook reconcile warning: ${(err as Error).message}`);
+      activityOutcome = { changed: false, delivered: false, sourceMissing: false, settingsUnparseable: false };
+    }
+    // Never claim a resource as PROJECTED when delivery could not happen (missing
+    // relay source or a fail-closed malformed settings file): demote to skipped so
+    // no false projected claim + no dangling hooks are reported as success.
+    if (activityEntries.length > 0 && !activityOutcome.delivered) {
+      for (const e of activityEntries) {
+        const idx = projected.indexOf(e.effectiveId);
+        if (idx >= 0) projected.splice(idx, 1);
+        if (!skipped.includes(e.effectiveId)) skipped.push(e.effectiveId);
+      }
     }
 
     return { projected, skipped, failed };
@@ -721,28 +739,42 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    * Reconcile the OpenRig-managed activity-relay hooks in `.claude/settings.local.json`
    * to the desired `enabled` state, driven ONCE from the always-run `project()` seam.
    *
-   * ENABLE: deliver `activity-relay.cjs` → `<cwd>/.openrig/hooks/scripts/` (mode preserved,
-   * 0755 from the source asset) and upsert the owned command entry for exactly the 4 relay
-   * events (SessionStart / UserPromptSubmit / Stop / Notification — never compaction hooks).
-   * DISABLE: strip the owned entries and prune emptied containers.
+   * ENABLE (only when the relay SOURCE is readable): deliver `activity-relay.cjs` →
+   * `<cwd>/.openrig/hooks/scripts/` (mode preserved, 0755 from the source asset) and upsert
+   * the owned command for each relay event DERIVED from the canonical claude.json manifest
+   * (compaction hooks excluded). If the source is missing, deliver NOTHING (no dangling
+   * commands) and report `sourceMissing` so the caller can surface a warning + not claim
+   * projection. DISABLE: strip owned entries and prune emptied containers.
    *
-   * Owned entries are recognised by the OpenRig relay SCRIPT PATH (not the exact full
-   * command), so a stale/changed absolute prefix is replaced rather than duplicated. Every
-   * non-owned (user-authored) hook is preserved. This does NOT use `mergeJsonFragment`:
-   * that merge is additive union-by-key with no remove/replace, which cannot strip on disable.
+   * Ownership is the EXACT `node <quoted relay path>` command shape, so a stale/changed
+   * absolute prefix is replaced (never duplicated) while a user command that merely CONTAINS
+   * the path is preserved. Fail-closed: a settings file we cannot parse is left byte-for-byte
+   * untouched. Not `mergeJsonFragment` (additive union-by-key can't strip on disable).
    */
-  private reconcileClaudeActivityHooks(cwd: string, enabled: boolean): void {
+  private reconcileClaudeActivityHooks(cwd: string, enabled: boolean): ActivityHookOutcome {
     const relayDest = nodePath.join(cwd, ".openrig", "hooks", "scripts", "activity-relay.cjs");
-    const ownedCmd = `node "${relayDest}"`;
+    const ownedCmd = `node ${shellQuote(relayDest)}`;
     const settingsPath = nodePath.join(cwd, ".claude", "settings.local.json");
     const settingsExisted = this.fs.exists(settingsPath);
 
-    const settings = this.readJsonObject(settingsPath);
+    // Fail closed: never clobber a settings file we cannot parse — preserve its bytes.
+    let settings: Record<string, unknown>;
+    if (settingsExisted) {
+      try { settings = this.readJsonObjectStrict(settingsPath); }
+      catch { return { changed: false, delivered: false, sourceMissing: false, settingsUnparseable: true }; }
+    } else {
+      settings = {};
+    }
+
+    // ENABLE demands a readable relay source — otherwise deliver nothing (no dangling).
+    const sourceMissing = enabled && (!this.activityRelayPath || !this.fs.exists(this.activityRelayPath));
+    const effectiveEnable = enabled && !sourceMissing;
+
     const hooks = this.readJsonObjectField(settings, "hooks");
 
-    // 1. Strip every OpenRig-owned relay entry from all events; prune emptied groups
-    //    and event arrays. User-authored hooks are untouched.
-    let removedAny = false;
+    // 1. Strip OpenRig-owned relay entries (EXACT node-command shape) from all events;
+    //    prune emptied groups + events. User-authored hooks are untouched.
+    let changed = false;
     for (const event of Object.keys(hooks)) {
       const groups = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : null;
       if (!groups) continue;
@@ -750,8 +782,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       for (const group of groups) {
         if (!isPlainObject(group) || !Array.isArray(group["hooks"])) { keptGroups.push(group); continue; }
         const groupHooks = group["hooks"] as unknown[];
-        const keptHooks = groupHooks.filter((h) => !isOwnedRelayHook(h));
-        if (keptHooks.length !== groupHooks.length) removedAny = true;
+        const keptHooks = groupHooks.filter((h) => !isOwnedRelayCommand(hookCommand(h)));
+        if (keptHooks.length !== groupHooks.length) changed = true;
         if (keptHooks.length === 0) continue; // prune emptied group
         keptGroups.push({ ...group, hooks: keptHooks });
       }
@@ -759,42 +791,87 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       else hooks[event] = keptGroups;
     }
 
-    // 2. Enable: deliver the relay asset + upsert the owned entry for the 4 events.
-    if (enabled) {
-      if (this.activityRelayPath) {
-        this.fs.mkdirp(nodePath.dirname(relayDest));
-        this.fs.copyFile(this.activityRelayPath, relayDest);
-        this.preserveMode(this.activityRelayPath, relayDest);
-      }
-      for (const event of ACTIVITY_RELAY_EVENTS) {
+    // 2. Enable: deliver the relay asset + upsert the owned entry for each relay event
+    //    derived from the canonical manifest.
+    if (effectiveEnable) {
+      this.fs.mkdirp(nodePath.dirname(relayDest));
+      this.fs.copyFile(this.activityRelayPath!, relayDest);
+      this.preserveMode(this.activityRelayPath!, relayDest);
+      for (const { event, timeout } of this.deriveRelayEvents()) {
         const groups = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
-        groups.push({ hooks: [{ type: "command", command: ownedCmd, timeout: ACTIVITY_RELAY_TIMEOUT_S }] });
+        const hook: Record<string, unknown> = { type: "command", command: ownedCmd };
+        if (typeof timeout === "number") hook["timeout"] = timeout;
+        groups.push({ hooks: [hook] });
         hooks[event] = groups;
+        changed = true;
       }
     }
 
-    // 3. Persist. Don't create a fresh empty settings file when disabling a project
-    //    that never carried managed hooks (preserve the "don't touch config" posture).
-    if (!enabled && !removedAny && !settingsExisted) return;
+    // 3. Persist only when something changed (never touch an unchanged / never-managed file).
+    if (!changed) return { changed: false, delivered: effectiveEnable, sourceMissing, settingsUnparseable: false };
     if (Object.keys(hooks).length > 0) settings["hooks"] = hooks;
     else delete settings["hooks"];
     this.fs.mkdirp(nodePath.dirname(settingsPath));
     this.fs.writeFile(settingsPath, JSON.stringify(settings, null, 2));
+    return { changed: true, delivered: effectiveEnable, sourceMissing, settingsUnparseable: false };
+  }
+
+  /**
+   * Relay event vocabulary DERIVED from the canonical claude.json manifest: the events whose
+   * group invokes activity-relay.cjs (compaction/bridge groups excluded), with each event's
+   * declared timeout. Empty when the manifest is absent/unreadable (⇒ nothing injected).
+   */
+  private deriveRelayEvents(): Array<{ event: string; timeout?: number }> {
+    if (!this.claudeHooksManifestPath || !this.fs.exists(this.claudeHooksManifestPath)) return [];
+    let manifest: unknown;
+    try { manifest = JSON.parse(this.fs.readFile(this.claudeHooksManifestPath)); } catch { return []; }
+    const hooks = isPlainObject(manifest) && isPlainObject(manifest["hooks"]) ? (manifest["hooks"] as Record<string, unknown>) : {};
+    const out: Array<{ event: string; timeout?: number }> = [];
+    const seen = new Set<string>();
+    for (const [event, groups] of Object.entries(hooks)) {
+      if (seen.has(event) || !Array.isArray(groups)) continue;
+      for (const group of groups as unknown[]) {
+        if (!isPlainObject(group) || !Array.isArray(group["hooks"])) continue;
+        const relay = (group["hooks"] as unknown[]).find((h) => (hookCommand(h) ?? "").includes("activity-relay.cjs"));
+        if (relay) {
+          const t = isPlainObject(relay) ? relay["timeout"] : undefined;
+          out.push({ event, timeout: typeof t === "number" ? t : undefined });
+          seen.add(event);
+          break;
+        }
+      }
+    }
+    return out;
   }
 
 }
 
-// The exactly-4 relay events (source of truth: assets/plugins/openrig-core/hooks/claude.json,
-// filtered to the entries invoking activity-relay.cjs). Compaction hooks are deliberately excluded.
-const ACTIVITY_RELAY_EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "Notification"] as const;
-const ACTIVITY_RELAY_TIMEOUT_S = 5;
-// OpenRig ownership marker: the relay script's owned path. Matching on the path (not the full
-// command) makes a changed absolute prefix a replace, never a duplicate — and never matches a
-// user hook pointing elsewhere.
-const OWNED_RELAY_MARKER = ".openrig/hooks/scripts/activity-relay.cjs";
+interface ActivityHookOutcome {
+  /** A write happened (owned entries added or stripped). */
+  changed: boolean;
+  /** Enable succeeded — relay + hooks were actually delivered (stays PROJECTED). */
+  delivered: boolean;
+  /** Enable requested but the relay source was absent — nothing delivered (⇒ warn + skip). */
+  sourceMissing: boolean;
+  /** Fail-closed: an unparseable settings file was preserved untouched. */
+  settingsUnparseable: boolean;
+}
 
-function isOwnedRelayHook(hook: unknown): boolean {
-  return isPlainObject(hook) && typeof hook["command"] === "string" && (hook["command"] as string).includes(OWNED_RELAY_MARKER);
+// OpenRig-owned relay path suffix. Ownership is the EXACT `node <arg>` command whose single
+// argument ends with this path — a changed prefix still matches (replace, not duplicate); a
+// user command that merely contains the path (echo, or node with extra args) does NOT.
+const OWNED_RELAY_SUFFIX = "/.openrig/hooks/scripts/activity-relay.cjs";
+
+function hookCommand(hook: unknown): string | undefined {
+  return isPlainObject(hook) && typeof hook["command"] === "string" ? (hook["command"] as string) : undefined;
+}
+
+function isOwnedRelayCommand(cmd: string | undefined): boolean {
+  if (!cmd) return false;
+  const m = /^node\s+(?:'([^']*)'|"([^"]*)"|(\S+))\s*$/.exec(cmd);
+  if (!m) return false;
+  const arg = m[1] ?? m[2] ?? m[3] ?? "";
+  return arg.endsWith(OWNED_RELAY_SUFFIX);
 }
 
 function hashContent(content: string): string {

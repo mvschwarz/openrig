@@ -1,33 +1,54 @@
 // OPR activity-hook r3 — Claude managed activity-hook DELIVERY pins.
 //
-// SUPERSEDES the `activity-hook-rip-proof.test.ts` no-injection pins: post-rip
-// the OLD ad-hoc `deliverStartup` injection was ripped; r3 RE-introduces activity
-// hooks as a MANAGED, reconciled projection driven from the always-run
-// `ClaudeCodeAdapter.project()` seam (NOT `deliverStartup`, NOT the old
-// provisionActivityHooks/upsertCommandHook path — those banned names stay gone).
+// COEXISTS with `activity-hook-rip-proof.test.ts` (it does NOT supersede it): the
+// rip-proof suite guards the DISTINCT `deliverStartup` seam (old path/name
+// `activity-hook-relay`), which stays ripped. This suite pins the r3 MANAGED
+// delivery driven from the always-run `ClaudeCodeAdapter.project()` seam.
 //
-// The always-run seam is load-bearing (r3 correction): `project()` iterates
-// `plan.entries` unconditionally, so DISABLE (strip owned entries) is
-// production-reachable even when a profile REMOVES the resource and no entry is
-// emitted. ENABLE fires when a `claude_activity_hooks` runtime_resource entry is
-// present. Exactly 4 relay events; owned entries recognised by the OpenRig relay
-// script path; user hooks always preserved.
+// The always-run seam is load-bearing: `project()` iterates `plan.entries`
+// unconditionally, so DISABLE (strip owned entries) is production-reachable even
+// when a profile REMOVES the resource and no entry is emitted. ENABLE fires when a
+// `claude_activity_hooks` runtime_resource entry is present AND the relay source +
+// canonical event manifest are readable. Event vocabulary is DERIVED from the
+// canonical `claude.json` (no parallel hand-maintained constant). Ownership is the
+// EXACT `node <quoted relay path>` shape (a user command that merely contains the
+// path is preserved). Malformed settings are preserved (fail-closed). Missing
+// source produces NO dangling commands and NO false projected claim.
 
 import { describe, it, expect } from "vitest";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-planner.js";
 
 const CWD = "/project";
 const RELAY_SRC = "/assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs";
+const MANIFEST_SRC = "/assets/plugins/openrig-core/hooks/claude.json";
 const RELAY_DEST = "/project/.openrig/hooks/scripts/activity-relay.cjs";
 const SETTINGS = "/project/.claude/settings.local.json";
 // The concrete, absolute, shell-quoted leg-B firing shape — never ${CLAUDE_PLUGIN_ROOT}.
-const OWNED_CMD = `node "${RELAY_DEST}"`;
-// Ownership marker: any command referencing the OpenRig-owned relay script path,
-// so a changed absolute prefix is still recognised + replaced (not duplicated).
+const OWNED_CMD = `node ${shellQuote(RELAY_DEST)}`;
 const OWNED_MARKER = ".openrig/hooks/scripts/activity-relay.cjs";
 const EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "Notification"] as const;
+
+// A faithful subset of the canonical claude.json: the 4 relay events (unscoped
+// relay group) interleaved with compaction/bridge groups that must be excluded.
+const CANONICAL_MANIFEST = JSON.stringify({
+  hooks: {
+    SessionStart: [
+      { hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs"', timeout: 5 }] },
+      { matcher: "compact", hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/compaction-restore-bridge.cjs"', timeout: 5 }] },
+    ],
+    UserPromptSubmit: [
+      { hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs"', timeout: 5 }] },
+      { hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/compaction-restore-bridge.cjs"', timeout: 5 }] },
+    ],
+    PreCompact: [{ hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/skills/claude-compaction-restore/scripts/precompact-hook.mjs"', timeout: 30 }] }],
+    PostCompact: [{ hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/compaction-restore-bridge.cjs"', timeout: 5 }] }],
+    Stop: [{ hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs"', timeout: 5 }] }],
+    Notification: [{ hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs"', timeout: 5 }] }],
+  },
+});
 
 type Store = Record<string, string>;
 type Modes = Record<string, number>;
@@ -58,10 +79,13 @@ function mockTmux() {
   } as unknown as ConstructorParameters<typeof ClaudeCodeAdapter>[0]["tmux"];
 }
 
-function makeAdapter(fs: ClaudeAdapterFsOps) {
-  // activityRelayPath is the DI source of the relay asset (parity with the Codex
-  // adapter's `activityRelayPath` wired at startup.ts).
-  return new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: fs, activityRelayPath: RELAY_SRC } as ConstructorParameters<typeof ClaudeCodeAdapter>[0]);
+function makeAdapter(fs: ClaudeAdapterFsOps, relayPath = RELAY_SRC, manifestPath = MANIFEST_SRC) {
+  return new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: fs, activityRelayPath: relayPath, claudeHooksManifestPath: manifestPath } as ConstructorParameters<typeof ClaudeCodeAdapter>[0]);
+}
+
+/** Enable-ready fs: relay asset (0755) + canonical manifest seeded. */
+function enableFs(extra?: Store): ReturnType<typeof mockFs> {
+  return mockFs({ [RELAY_SRC]: "// relay", [MANIFEST_SRC]: CANONICAL_MANIFEST, ...extra }, { [RELAY_SRC]: 0o755 });
 }
 
 function binding(cwd = CWD): NodeBinding {
@@ -85,7 +109,6 @@ function readSettings(fs: ReturnType<typeof mockFs>): Record<string, any> {
   return raw ? JSON.parse(raw) : {};
 }
 
-/** All command strings in a settings.local hooks block, flattened. */
 function allCommands(settings: Record<string, any>): string[] {
   const out: string[] = [];
   const hooks = settings.hooks ?? {};
@@ -95,28 +118,27 @@ function allCommands(settings: Record<string, any>): string[] {
   return out;
 }
 
-describe("Claude activity-hook delivery — ENABLE (claude_activity_hooks entry present)", () => {
+describe("Claude activity-hook delivery — ENABLE (entry present, source + manifest readable)", () => {
   it("copies the relay to <cwd>/.openrig/hooks/scripts/ at mode 0755", async () => {
-    const fs = mockFs({ [RELAY_SRC]: "// relay" }, { [RELAY_SRC]: 0o755 });
+    const fs = enableFs();
     await makeAdapter(fs).project(plan([activityEntry()]), binding());
     expect(fs._store[RELAY_DEST]).toBe("// relay");
     expect(fs._modes[RELAY_DEST]! & 0o777).toBe(0o755);
   });
 
   it("upserts the owned relay command for exactly the 4 relay events with the concrete absolute command", async () => {
-    const fs = mockFs({ [RELAY_SRC]: "// relay" }, { [RELAY_SRC]: 0o755 });
+    const fs = enableFs();
     await makeAdapter(fs).project(plan([activityEntry()]), binding());
     const settings = readSettings(fs);
     for (const ev of EVENTS) {
       const cmds = (settings.hooks?.[ev] ?? []).flatMap((g: any) => (g.hooks ?? []).map((h: any) => h.command));
       expect(cmds).toContain(OWNED_CMD);
     }
-    // The owned command is the concrete absolute path — never the plugin-root token.
     expect(JSON.stringify(settings.hooks)).not.toContain("CLAUDE_PLUGIN_ROOT");
   });
 
   it("injects NO compaction hooks (PreCompact/PostCompact/compaction-restore-bridge)", async () => {
-    const fs = mockFs({ [RELAY_SRC]: "// relay" }, { [RELAY_SRC]: 0o755 });
+    const fs = enableFs();
     await makeAdapter(fs).project(plan([activityEntry()]), binding());
     const settings = readSettings(fs);
     expect(settings.hooks?.PreCompact).toBeUndefined();
@@ -124,33 +146,41 @@ describe("Claude activity-hook delivery — ENABLE (claude_activity_hooks entry 
     expect(JSON.stringify(settings.hooks ?? {})).not.toContain("compaction-restore-bridge");
   });
 
+  it("derives the injected events from the canonical claude.json manifest (no hardcoded event set)", async () => {
+    // A manifest where ONLY Stop references the relay → only Stop is injected.
+    const onlyStop = JSON.stringify({ hooks: {
+      Stop: [{ hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs"', timeout: 9 }] }],
+      PreCompact: [{ hooks: [{ type: "command", command: "node bridge.cjs" }] }],
+    } });
+    const fs = mockFs({ [RELAY_SRC]: "// relay", [MANIFEST_SRC]: onlyStop }, { [RELAY_SRC]: 0o755 });
+    await makeAdapter(fs).project(plan([activityEntry()]), binding());
+    expect(Object.keys(readSettings(fs).hooks)).toEqual(["Stop"]);
+  });
+
   it("is idempotent: a second project() adds no duplicate owned entries", async () => {
-    const fs = mockFs({ [RELAY_SRC]: "// relay" }, { [RELAY_SRC]: 0o755 });
+    const fs = enableFs();
     const adapter = makeAdapter(fs);
     await adapter.project(plan([activityEntry()]), binding());
     const once = fs._store[SETTINGS];
     await adapter.project(plan([activityEntry()]), binding());
     expect(fs._store[SETTINGS]).toBe(once);
-    // exactly one owned command per event (4 total), no duplicates.
     expect(allCommands(readSettings(fs)).filter((c) => c.includes(OWNED_MARKER)).length).toBe(EVENTS.length);
   });
 
   it("preserves pre-existing user hooks while adding the owned entry", async () => {
-    const user = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "node ./my-stop-hook.cjs", timeout: 10 }] }] } });
-    const fs = mockFs({ [RELAY_SRC]: "// relay", [SETTINGS]: user }, { [RELAY_SRC]: 0o755 });
+    const fs = enableFs({ [SETTINGS]: JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "node ./my-stop-hook.cjs", timeout: 10 }] }] } }) });
     await makeAdapter(fs).project(plan([activityEntry()]), binding());
     const cmds = allCommands(readSettings(fs));
-    expect(cmds).toContain("node ./my-stop-hook.cjs"); // user hook untouched
-    expect(cmds).toContain(OWNED_CMD); // owned added alongside
+    expect(cmds).toContain("node ./my-stop-hook.cjs");
+    expect(cmds).toContain(OWNED_CMD);
   });
 
   it("replaces a stale owned entry at a CHANGED relay path (no duplicate)", async () => {
-    const stale = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: `node "/old/prefix/${OWNED_MARKER}"`, timeout: 5 }] }] } });
-    const fs = mockFs({ [RELAY_SRC]: "// relay", [SETTINGS]: stale }, { [RELAY_SRC]: 0o755 });
+    const stale = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: `node ${shellQuote(`/old/prefix/${OWNED_MARKER}`)}`, timeout: 5 }] }] } });
+    const fs = enableFs({ [SETTINGS]: stale });
     await makeAdapter(fs).project(plan([activityEntry()]), binding());
     const stopCmds = (readSettings(fs).hooks?.Stop ?? []).flatMap((g: any) => (g.hooks ?? []).map((h: any) => h.command));
-    const owned = stopCmds.filter((c: string) => c.includes(OWNED_MARKER));
-    expect(owned).toEqual([OWNED_CMD]); // exactly one, at the new path
+    expect(stopCmds.filter((c: string) => c.includes(OWNED_MARKER))).toEqual([OWNED_CMD]);
   });
 });
 
@@ -163,24 +193,48 @@ describe("Claude activity-hook delivery — DISABLE via the always-run project()
   }
 
   it("strips owned entries when NO claude_activity_hooks entry is present (production-reachable disable)", async () => {
-    const fs = mockFs({ [SETTINGS]: seededManaged() });
-    // A plan with zero activity-hook entries — the profile removed the resource.
+    const fs = enableFs({ [SETTINGS]: seededManaged() });
     await makeAdapter(fs).project(plan([]), binding());
     expect(allCommands(readSettings(fs)).filter((c) => c.includes(OWNED_MARKER))).toEqual([]);
   });
 
   it("prunes emptied event containers after stripping", async () => {
-    const fs = mockFs({ [SETTINGS]: seededManaged() });
+    const fs = enableFs({ [SETTINGS]: seededManaged() });
     await makeAdapter(fs).project(plan([]), binding());
     const settings = readSettings(fs);
     for (const ev of EVENTS) expect(settings.hooks?.[ev]).toBeUndefined();
   });
 
   it("strips ONLY owned entries and preserves user hooks on disable", async () => {
-    const fs = mockFs({ [SETTINGS]: seededManaged({ Stop: [{ hooks: [{ type: "command", command: "node ./my-stop-hook.cjs", timeout: 10 }] }] }) });
+    const fs = enableFs({ [SETTINGS]: seededManaged({ Stop: [{ hooks: [{ type: "command", command: "node ./my-stop-hook.cjs", timeout: 10 }] }] }) });
     await makeAdapter(fs).project(plan([]), binding());
     const cmds = allCommands(readSettings(fs));
-    expect(cmds).toContain("node ./my-stop-hook.cjs"); // user hook survives
-    expect(cmds.filter((c) => c.includes(OWNED_MARKER))).toEqual([]); // owned gone
+    expect(cmds).toContain("node ./my-stop-hook.cjs");
+    expect(cmds.filter((c) => c.includes(OWNED_MARKER))).toEqual([]);
+  });
+});
+
+describe("Claude activity-hook delivery — hardening (guard r3 findings)", () => {
+  it("EXACT ownership: does NOT strip a user command that merely CONTAINS the relay path", async () => {
+    // An echo whose argument contains the marker — NOT the owned `node <path>` shape.
+    const userCmd = `echo ${shellQuote(`/somewhere/${OWNED_MARKER}`)}`;
+    const fs = enableFs({ [SETTINGS]: JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: userCmd, timeout: 3 }] }] } }) });
+    await makeAdapter(fs).project(plan([]), binding()); // disable path exercises the strip
+    expect(allCommands(readSettings(fs))).toContain(userCmd);
+  });
+
+  it("FAIL-CLOSED: preserves malformed settings bytes (no clobber to {})", async () => {
+    const malformed = "{ broken json";
+    const fs = enableFs({ [SETTINGS]: malformed });
+    await makeAdapter(fs).project(plan([activityEntry()]), binding());
+    expect(fs._store[SETTINGS]).toBe(malformed);
+  });
+
+  it("MISSING SOURCE: writes NO dangling commands and reports the entry skipped, not projected", async () => {
+    const fs = mockFs({ [MANIFEST_SRC]: CANONICAL_MANIFEST }, {}); // relay source absent
+    const res = await makeAdapter(fs, "/assets/missing-relay.cjs").project(plan([activityEntry()]), binding());
+    expect(allCommands(readSettings(fs)).filter((c) => c.includes(OWNED_MARKER))).toEqual([]);
+    expect(res.projected).not.toContain("claude-activity-hooks");
+    expect(res.skipped).toContain("claude-activity-hooks");
   });
 });
