@@ -127,12 +127,14 @@ function normalizeExpansionPodFragment(raw: Record<string, unknown>): ExpansionP
               : undefined,
         cwd: typeof m["cwd"] === "string" ? m["cwd"] : undefined,
         model: typeof m["model"] === "string" ? m["model"] : undefined,
-        permissionPolicy:
-          typeof m["permissionPolicy"] === "string"
-            ? m["permissionPolicy"]
-            : typeof m["permission_policy"] === "string"
-              ? m["permission_policy"]
-              : undefined,
+        // R2 (4ac243c3): PRESERVE raw presence — a present-invalid value (null, number,
+        // object, …) must reach the canonical RigSpec validator as-is and reject there;
+        // only a truly ABSENT key stays absent. No route-local validation, no coercion.
+        ...("permissionPolicy" in m
+          ? { permissionPolicy: m["permissionPolicy"] }
+          : "permission_policy" in m
+            ? { permissionPolicy: m["permission_policy"] }
+            : {}),
         restorePolicy:
           typeof m["restorePolicy"] === "string"
             ? m["restorePolicy"]

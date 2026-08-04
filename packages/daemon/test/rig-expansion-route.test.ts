@@ -28,6 +28,51 @@ describe("POST /api/rigs/:rigId/expand", () => {
     };
   }
 
+  // Seam B (R2 terminal at 4ac243c3): present-INVALID permission_policy must reach the
+  // ONE canonical validator — the normalizer may not erase presence into absence/floor.
+  it("SEAM-B RED: expansion member permission_policy: null -> structured 400, ZERO persistence, NO launch (rig carries builtin:yolo)", async () => {
+    const rig = seedRig("null-policy-rig");
+    setup.rigRepo.setRigPermissionPolicy(rig.id, "builtin:yolo");
+    setup.rigRepo.setRigPolicyProvenance(rig.id, { origin: "builtin", resolvedTarget: "policies/builtin/yolo.policy.md", declaringDir: null, launchPosture: "full_bypass" });
+    const res = await setup.app.request(`/api/rigs/${rig.id}/expand`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pod: { id: "dev2", label: "Dev2", members: [
+        { id: "late", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp", permission_policy: null },
+      ], edges: [] } }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(JSON.stringify(body)).toMatch(/permission_policy/);
+    // zero persistence: no member node, no session, no edges for the rejected pod
+    expect(db.prepare("SELECT COUNT(*) AS c FROM nodes WHERE logical_id LIKE 'dev2.%'").get()).toMatchObject({ c: 0 });
+  });
+
+  it("SEAM-B RED: another present-invalid shape (number) is also a structured 400, never coerced/erased", async () => {
+    const rig = seedRig("num-policy-rig");
+    const res = await setup.app.request(`/api/rigs/${rig.id}/expand`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pod: { id: "dev3", label: "Dev3", members: [
+        { id: "late", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp", permission_policy: 42 },
+      ], edges: [] } }),
+    });
+    expect(res.status).toBe(400);
+    expect(db.prepare("SELECT COUNT(*) AS c FROM nodes WHERE logical_id LIKE 'dev3.%'").get()).toMatchObject({ c: 0 });
+  });
+
+  it("SEAM-B control: a VALID string permission_policy and TRUE absence both keep working through expansion", async () => {
+    const rig = seedRig("valid-policy-rig");
+    const ok = await setup.app.request(`/api/rigs/${rig.id}/expand`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pod: { id: "dev4", label: "Dev4", members: [
+        { id: "server", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" },
+      ], edges: [] } }),
+    });
+    expect(ok.status).toBe(201);
+  });
+
   // T1: Valid expansion -> 201
   it("returns 201 with ok result for valid expansion", async () => {
     const rig = seedRig();

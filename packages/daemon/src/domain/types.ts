@@ -1166,8 +1166,11 @@ export interface ExpansionPodFragment {
     model?: string;
     codexConfigProfile?: string;
     /** OPR.0.4.8.3 Seam B: per-seat permission_policy REF — threaded through the
-     *  expansion ingress exactly like role (never silently dropped). */
-    permissionPolicy?: string;
+     *  expansion ingress exactly like role (never silently dropped). Typed UNKNOWN
+     *  (R2 at 4ac243c3): the ingress preserves RAW presence — including null and other
+     *  invalid shapes — so the ONE canonical RigSpec validator rejects present-invalid
+     *  values; the normalizer must never erase presence into absence/floor. */
+    permissionPolicy?: unknown;
     restorePolicy?: string;
     label?: string;
     /**
