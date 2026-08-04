@@ -252,10 +252,17 @@ export interface Screen {
    * 1-based terminal row) — the paint layer renders them with its own Style;
    * plain(segs) === the row's content text BY CONSTRUCTION (strip-invariant) */
   segRows?: Record<number, Array<{ text: string; token?: import("./theme.js").Token; bold?: boolean; bg?: import("./theme.js").Token }>>;
-  /** S19: explorer meta seg channel — the runtime mark's own colors (incl.
-   * the terminal dark-cell bg) survive stylization (keyed by 1-based row;
-   * start = column within the LEFT cell after the selection-marker slot) */
-  explorerMeta?: Record<number, { start: number; segs: Array<{ text: string; token?: import("./theme.js").Token; bold?: boolean; bg?: import("./theme.js").Token }> }>;
+  /** S19: explorer seg-run channel — a row's paint runs (round-4: status
+   * badge + right meta) carry their own tokens through stylization (keyed by
+   * 1-based row; start = column within the LEFT cell after the selection-
+   * marker slot; runs are in ascending start order) */
+  explorerMeta?: Record<number, Array<{ start: number; segs: Array<{ text: string; token?: import("./theme.js").Token; bold?: boolean; bg?: import("./theme.js").Token }> }>>;
+  /** S19 round-4 motion wiring: true while the footer's ONE-SHOT fresh-output
+   * row flash is inside its window (stylize inverts the row) */
+  footerFlash?: boolean;
+  /** true when this frame contains time-driven motion (spinner frame or an
+   * un-expired flash) — the entry loop keeps redrawing while set */
+  motionActive?: boolean;
 }
 
 export type InputEvent =

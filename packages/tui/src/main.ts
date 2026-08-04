@@ -43,17 +43,39 @@ async function run(): Promise<void> {
   const inputDecoder = createInputDecoder();
   const style = createStyle(args.includes("--no-color") ? "none" : detectColorMode());
 
+  // S19 round-4 motion wiring (guard finding 3): time-driven motion lives in
+  // the entry loop — renderScreen stays pure and takes the clock as input.
+  // streamFreshAt = when THIS loop last saw a NEW footer stream item (the
+  // one-shot row-flash event source); motionTimer keeps redrawing ONLY while
+  // the frame reports live motion (spinner visible or flash un-expired).
+  let streamFreshAt: number | undefined;
+  let lastStreamKey: string | null = null;
+  let motionTimer: NodeJS.Timeout | null = null;
+
   function draw(): void {
     const cols = process.stdout.columns ?? 120;
     const rows = process.stdout.rows ?? 32;
-    lastScreen = renderScreen(view.get(), snapshot, { cols, rows }, inputLine);
+    const nowMs = Date.now();
+    const opts = { cols, rows, nowMs, colorMode: style.mode, ...(streamFreshAt != null ? { streamFreshAt } : {}) };
+    lastScreen = renderScreen(view.get(), snapshot, opts, inputLine);
     if (view.get().contentMaxOffset !== lastScreen.contentMaxOffset || view.get().contentTargetCount !== lastScreen.contentTargets.length) {
       view.dispatch({ type: "layout", contentMaxOffset: lastScreen.contentMaxOffset, contentTargetCount: lastScreen.contentTargets.length });
-      lastScreen = renderScreen(view.get(), snapshot, { cols, rows }, inputLine);
+      lastScreen = renderScreen(view.get(), snapshot, opts, inputLine);
     }
     // styling is a zero-width post-pass over the tested plain layer — the
     // hitMap coordinates always match what is on screen
     process.stdout.write("\x1b[H" + stylizeLines(lastScreen, style).map((l) => "\x1b[2K" + l).join("\r\n"));
+    if (motionTimer) clearTimeout(motionTimer);
+    motionTimer = lastScreen.motionActive ? setTimeout(draw, 120) : null;
+  }
+
+  /** flags fresh footer output for the one-shot flash (first hydration is a
+   * load, not fresh output — only a CHANGE from a known tail flashes) */
+  function noteStream(): void {
+    const tail = snapshot.stream.at(-1);
+    const key = tail ? `${tail.tsEmitted}|${tail.sourceSession}|${tail.body}` : null;
+    if (key !== lastStreamKey && lastStreamKey !== null && key !== null) streamFreshAt = Date.now();
+    lastStreamKey = key;
   }
 
   const socketPath = argOf(args, "--socket") ?? defaultSocketPath(instanceId);
@@ -64,6 +86,7 @@ async function run(): Promise<void> {
     const reviewCache: SpecReviewCache = new Map();
     const refresh = singleFlight(async () => {
       snapshot = await hydrateSnapshot(client, reviewCache);
+      noteStream();
       draw();
     });
     await refresh();
@@ -106,6 +129,7 @@ async function run(): Promise<void> {
 
   async function shutdown(): Promise<void> {
     if (refreshTimer) clearInterval(refreshTimer);
+    if (motionTimer) clearTimeout(motionTimer);
     process.stdout.write(MOUSE_DISABLE + ALT_SCREEN_OFF);
     await socket.close();
     process.exit(0);

@@ -95,7 +95,7 @@ describe("hatchet mainline in the SHIPPED content pane (frame-01 visual contract
     const body = screen.lines.join("\n");
     expect(body).toMatch(/┌─+┐/);
     expect(body).toContain("● lead"); // member-only title (S19 MR1)
-    expect(body).toContain("▝▘ 18%"); // round-3 square clawd mark + adjacent ctx
+    expect(body).toContain("▘▝ 18%"); // round-4 corrected square clawd mark + adjacent ctx
     // straight connector runs + arrowhead; under the LOCKED containment an
     // edge may legitimately cross a pod-container wall (─ becomes ┼ at the
     // crossing) before its arrowhead
@@ -539,25 +539,80 @@ describe("ROUND-3 LOCKED SET (orch locked-scope GO; pins 02259adb/29a10b62)", ()
     const s = makeStore(snap);
     s.dispatch({ type: "drill", resource: "pod", name: "dev", target: { host: "vm-host", rig: FIXTURE_RIG_NAME } });
     const pane = renderScreen(s.get(), snap, { cols: 150, rows: 40 }).lines.map((l) => l.slice(0, 30)).join("\n");
-    expect(pane).not.toMatch(/▐▌|>_|▝▘/); // no marks in the explorer
+    expect(pane).not.toMatch(/▐▌|>_|▝▘|▘▝/); // no marks in the explorer (either quadrant order)
     expect(pane).toMatch(/driver\s+24%/); // name-first untruncated + bare ctx%
     // cards still carry the mark
     s.dispatch({ type: "tab", tab: "graph" });
     const body = renderScreen(s.get(), snap, { cols: 150, rows: 40 }).lines.join("\n");
-    expect(body).toMatch(/▝▘ 24%|▝▘ 63%/); // square clawd mark in card meta
-    // detail page shows the mark beside the runtime
+    expect(body).toMatch(/▘▝ 24%|▘▝ 63%/); // square clawd mark in card meta
+    // detail page shows the mark as the runtime field — spelled runtime is dead
     s.dispatch({ type: "drill", resource: "agent", name: "dev.driver", target: { host: "vm-host", rig: FIXTURE_RIG_NAME, pod: "dev" } });
     const detail = renderScreen(s.get(), snap, { cols: 150, rows: 40 }).lines.join("\n");
-    expect(detail).toMatch(/▝▘ claude-code/); // mark + runtime on the detail page
+    expect(detail).toMatch(/runtime:\s+▘▝/); // the mark IS the runtime value
+    expect(detail).not.toMatch(/▘▝ claude-code/); // no spelled runtime beside the mark
   });
 
-  it("the clawd row mark is the SQUARE with eyes clearly APART (round-3 redraw; wide-rect center-bunch rejected)", async () => {
+  it("the clawd row mark is the SQUARE with eyes clearly APART (round-4 quadrant-geometry correction)", async () => {
     const { clawdSquareMark, runtimeMarkSegs, markText } = await import("../src/topology/runtime-marks.js");
     const sq = clawdSquareMark();
     expect(sq).toHaveLength(2); // 2 cells x 1 row ≈ square at cell aspect
-    expect(markText(sq)).toBe("▝▘"); // quarter-block eyes: upper-right then upper-left = APART around the center gap
+    // GEOMETRY, not just the string (guard round-4 finding 1): the first cell's
+    // eye occupies the OUTER-LEFT quadrant (U+2598 QUADRANT UPPER LEFT) and the
+    // second cell's the OUTER-RIGHT (U+259D QUADRANT UPPER RIGHT) — the inner
+    // half of BOTH cells is pure terracotta field, so the eyes sit clearly
+    // APART around a real center gap (the ▝▘ order put both eyes at the center
+    // seam — the rejected bunched form).
+    expect(sq[0]!.text).toBe("▘"); // ▘ upper-LEFT quadrant — eye hugs the square's left edge
+    expect(sq[1]!.text).toBe("▝"); // ▝ upper-RIGHT quadrant — eye hugs the right edge
+    expect(markText(sq)).toBe("▘▝");
     expect(sq.every((g) => g.token === "clawdEye" && g.bg === "clawd")).toBe(true); // dark eyes ON the terracotta field
-    expect(markText(runtimeMarkSegs("claude-code"))).toBe("▝▘"); // shipped claude mark = the square
+    expect(markText(runtimeMarkSegs("claude-code"))).toBe("▘▝"); // shipped claude mark = the square
+  });
+
+  it("agent-detail runtime marks keep their OWN styling in compiled output (guard round-4 finding 2)", () => {
+    const node = (id: string, name: string, runtime: string) => ({
+      id, type: "rigNode", parentId: "pod-D",
+      data: { logicalId: name, podNamespace: "d", runtime, model: null, status: "running",
+        nodeKind: "agent" as const, startupStatus: "ready" as const, contextUsedPercentage: 10,
+        agentActivity: { state: "running" }, terminalActive: true, canonicalSessionName: `${name}@r` },
+    });
+    const graph = {
+      nodes: [
+        { id: "pod-D", type: "podGroup", data: { logicalId: "d", podNamespace: "d", runtime: null, model: null, status: null, nodeKind: "agent" as const, startupStatus: null, contextUsedPercentage: null } },
+        node("n1", "d.cl", "claude-code"), node("n2", "d.tty", "terminal"), node("n3", "d.cx", "codex"),
+      ],
+      edges: [],
+    };
+    const trioSnap = {
+      ...graphSnap(),
+      hosts: [{ name: "h", reachable: true, rigs: [{ name: "r", pods: [{ name: "d", agents: [
+        { name: "d.cl", runtime: "claude-code", spec: "", context: 10, tokens: null, status: "active", live: true },
+        { name: "d.tty", runtime: "terminal", spec: "", context: 10, tokens: null, status: "active", live: true },
+        { name: "d.cx", runtime: "codex", spec: "", context: 10, tokens: null, status: "active", live: true },
+      ] }], graph }] }],
+    };
+    const drillDetail = (agent: string) => {
+      const s = makeStore(trioSnap);
+      s.dispatch({ type: "drill", resource: "agent", name: agent, target: { host: "h", rig: "r", pod: "d" } });
+      const screen = renderScreen(s.get(), trioSnap, { cols: 150, rows: 40 });
+      const styled = stylizeLines(screen, createStyle("truecolor"));
+      const idx = screen.lines.findIndex((l) => l.slice(31).includes("runtime:"));
+      expect(idx, `runtime field row for ${agent}`).toBeGreaterThan(0);
+      styled.forEach((l, j) => expect(stripAnsi(l), `${agent} line ${j}`).toBe(screen.lines[j]));
+      return { plain: screen.lines[idx]!, styled: styled[idx]! };
+    };
+    // clawd: dark #181818 eyes ON the #ad6755 terracotta field, in compiled SGR
+    const cl = drillDetail("d.cl");
+    expect(cl.styled).toMatch(/38;2;24;24;24;48;2;173;103;85m[^\x1b]*▘/);
+    expect(cl.plain).not.toMatch(/claude/); // spelled runtime is dead
+    // terminal: the dark-cell background survives to the compiled detail line
+    const tty = drillDetail("d.tty");
+    expect(tty.styled).toMatch(/48;2;12;10;9m?[^\x1b]*>/);
+    expect(tty.plain.slice(31)).not.toMatch(/terminal/);
+    // codex: exactly ASCII >_ (no ❯, no enclosure pick), no spelled runtime
+    const cx = drillDetail("d.cx");
+    expect(cx.plain.slice(31).trimEnd()).toMatch(/runtime:\s+>_$/);
+    expect(cx.plain).not.toMatch(/❯|codex/);
   });
 
   it("rig glyph is ▦ and pod glyph is ≡ (founder picks of record)", () => {

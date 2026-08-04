@@ -12,8 +12,9 @@
 //     afforded nothing; it is dropped, not re-skinned (no false affordances).
 // "Hover" is the existing selection-focus highlight — RENDER-ONLY, no motion
 // protocol, no second write-path to selection (arch ruling 1).
-import type { ExplorerRow, FleetSnapshot } from "./types.js";
+import type { AgentRow, ExplorerRow, FleetSnapshot } from "./types.js";
 import type { MarkSeg } from "./topology/runtime-marks.js";
+import { rowStatusGlyph } from "./topology/glyphs.js";
 
 interface KeyParts {
   kind: string;
@@ -76,21 +77,26 @@ function contentOf(row: ExplorerRow, parsed: KeyParts): string {
 }
 
 export interface NavigatorMeta {
-  /** column (within the DISPLAY label) where the meta begins */
+  /** column (within the DISPLAY label) where this run begins */
   start: number;
-  /** token segments — the mark's own colors (incl. the terminal dark bg)
-   * survive the paint layer through this channel (guard finding 2) */
+  /** token segments — a run's own colors (status role; formerly the mark's
+   * bg channel) survive the paint layer through this channel (guard finding 2;
+   * round-4: rows may carry SEVERAL runs — status badge + right meta) */
   segs: MarkSeg[];
+}
+
+function agentOf(parsed: KeyParts, snap: FleetSnapshot): AgentRow | null {
+  const [host, rig, pod, ...name] = parsed.parts;
+  return snap.hosts
+    .find((h) => h.name === host)?.rigs.find((r) => r.name === rig)
+    ?.pods.find((p) => p.name === pod)?.agents.find((a) => a.name === name.join("/")) ?? null;
 }
 
 function metaOf(row: ExplorerRow, snap: FleetSnapshot): { text: string; segs: MarkSeg[] } | null {
   const parsed = parseKey(row.key);
   if (!parsed) return null;
   if (parsed.kind === "agent") {
-    const [host, rig, pod, ...name] = parsed.parts;
-    const agent = snap.hosts
-      .find((h) => h.name === host)?.rigs.find((r) => r.name === rig)
-      ?.pods.find((p) => p.name === pod)?.agents.find((a) => a.name === name.join("/"));
+    const agent = agentOf(parsed, snap);
     if (!agent) return null;
     // ROUND-3 LOCKED: runtime marks are OFF explorer rows (detail + topology
     // only; stacked rows too busy) — the meta is bare ctx%, honest — when
@@ -107,15 +113,15 @@ function metaOf(row: ExplorerRow, snap: FleetSnapshot): { text: string; segs: Ma
 }
 
 /**
- * Display rows for the explorer pane — labels plus the meta seg channel
- * (same order/length as `rows`).
+ * Display rows for the explorer pane — labels plus the seg-run channel
+ * (same order/length as `rows`; each row carries 0..n paint runs).
  */
 export function navigatorDisplay(
   rows: ExplorerRow[],
   snap: FleetSnapshot,
   width: number,
-): { labels: string[]; metas: Array<NavigatorMeta | null> } {
-  const metas: Array<NavigatorMeta | null> = [];
+): { labels: string[]; metas: Array<NavigatorMeta[] | null> } {
+  const metas: Array<NavigatorMeta[] | null> = [];
   const labels = navigatorLabelsInner(rows, snap, width, metas);
   return { labels, metas };
 }
@@ -125,7 +131,7 @@ export function navigatorLabels(rows: ExplorerRow[], snap: FleetSnapshot, width:
   return navigatorDisplay(rows, snap, width).labels;
 }
 
-function navigatorLabelsInner(rows: ExplorerRow[], snap: FleetSnapshot, width: number, metasOut: Array<NavigatorMeta | null>): string[] {
+function navigatorLabelsInner(rows: ExplorerRow[], snap: FleetSnapshot, width: number, metasOut: Array<NavigatorMeta[] | null>): string[] {
   const depths = rows.map((row) => keyDepth(row));
   const isLast = rows.map((_, i) => {
     const depth = depths[i]!;
@@ -155,14 +161,26 @@ function navigatorLabelsInner(rows: ExplorerRow[], snap: FleetSnapshot, width: n
     const content = contentOf(row, parsed);
     const meta = metaOf(row, snap);
     const prefix = ` ${guides}${branch}`;
-    if (!meta) { metasOut.push(null); return `${prefix}${content}`; }
+    // S19 round-4 (guard finding 4): agent rows carry a STATUS BADGE run so
+    // the served-truth glyph paints its activity ROLE (color is for status —
+    // the one colored thing on the row; non-status icons stay monochrome)
+    const runs: NavigatorMeta[] = [];
+    if (parsed.kind === "agent") {
+      const agent = agentOf(parsed, snap);
+      if (agent) {
+        const st = rowStatusGlyph(agent);
+        runs.push({ start: prefix.length, segs: [{ text: st.glyph, token: st.token }] });
+      }
+    }
+    if (!meta) { metasOut.push(runs.length ? runs : null); return `${prefix}${content}`; }
     // S19 re-sealed width policy (guard NOT-CLEAR finding 1): the NAME renders
     // FIRST and UNTRUNCATED — when the full name leaves no room, the META
     // yields entirely (never an ellipsised identity).
     const room = width - prefix.length - content.length - 1;
-    if (room < meta.text.length) { metasOut.push(null); return `${prefix}${content}`; }
+    if (room < meta.text.length) { metasOut.push(runs.length ? runs : null); return `${prefix}${content}`; }
     const gap = Math.max(width - prefix.length - content.length - meta.text.length, 1);
-    metasOut.push({ start: prefix.length + content.length + gap, segs: meta.segs });
+    runs.push({ start: prefix.length + content.length + gap, segs: meta.segs });
+    metasOut.push(runs);
     return `${prefix}${content}${" ".repeat(gap)}${meta.text}`;
   });
 }

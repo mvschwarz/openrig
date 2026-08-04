@@ -195,7 +195,7 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     const screen = renderScreen(s.get(), snap2, { cols: 150, rows: 40 });
     const styled = stylizeLines(screen, createStyle("truecolor"));
     const joined = styled.join("\n");
-    expect(joined).toMatch(/38;2;24;24;24;48;2;173;103;85m▝/); // eye cell on terracotta field
+    expect(joined).toMatch(/38;2;24;24;24;48;2;173;103;85m▘▝/); // eyes-apart cells on the terracotta field (round-4 order)
     styled.forEach((line, j) => expect(stripAnsi(line), `line ${j}`).toBe(screen.lines[j]));
   });
 
@@ -277,6 +277,30 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     // …and the selection marker keeps its shipped form (floor compatibility)
     expect(line).toContain("\x1b[1;7;38;2;77;189;178m›");
     styled.forEach((l, j) => expect(stripAnsi(l), `line ${j}`).toBe(screen.lines[j]));
+  });
+
+  it("explorer agent status derives from SERVED truth — all four states visibly distinct in compiled output (guard round-4 finding 4)", () => {
+    // demo fixture serves all four: driver active · guard idle · qa unknown
+    // (live:false) · orch.lead needs-attention — none may fabricate liveness
+    const s = makeStore();
+    s.dispatch({ type: "drill", resource: "pod", name: "dev50", target: { host: "vm-host", rig: "openrig-build" } });
+    s.dispatch({ type: "drill", resource: "pod", name: "orch", target: { host: "vm-host", rig: "openrig-build" } });
+    const screen = renderScreen(s.get(), snap, { cols: 140, rows: 36 });
+    const styled = stylizeLines(screen, createStyle("truecolor"));
+    const styledRow = (needle: string) => styled.find((l) => stripAnsi(l).slice(0, 30).includes(needle))!;
+    const plainRow = (needle: string) => screen.lines.find((l) => l.slice(0, 30).includes(needle))!;
+    // honest glyphs first: unknown/offline qa is ○ (never a fabricated ●),
+    // needs-attention lead is ◐ — served truth, not a hardcoded ●
+    expect(plainRow("driver").slice(0, 30)).toMatch(/● driver/);
+    expect(plainRow("guard").slice(0, 30)).toMatch(/● guard/);
+    expect(plainRow("qa").slice(0, 30)).toMatch(/○ qa/);
+    expect(plainRow("lead").slice(0, 30)).toMatch(/◐ lead/);
+    // the four activity ROLES paint distinctly (Substrate values, truecolor)
+    expect(styledRow("driver"), "active → actActive").toMatch(/38;2;152;195;121m●/);
+    expect(styledRow("guard"), "idle → actIdle").toMatch(/38;2;110;142;170m●/);
+    expect(styledRow("qa"), "unknown → actDetached (honest)").toMatch(/38;2;109;116;128m○/);
+    expect(styledRow("lead"), "needs-attention → actAttention").toMatch(/38;2;230;181;110m◐/);
+    styled.forEach((l, i) => expect(stripAnsi(l), `line ${i}`).toBe(screen.lines[i]));
   });
 
   it("stylize keeps the strip-invariant over the re-skinned labels", () => {

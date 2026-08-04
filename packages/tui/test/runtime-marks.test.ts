@@ -31,7 +31,7 @@ describe("clawd grid = the RuntimeMark.tsx rect list", () => {
 
 describe("row-scale mark family", () => {
   it("runtime → mark mapping: claude family = clawd cells, codex = >_, terminal = dark >_, unknown = honest ?", () => {
-    expect(markText(runtimeMarkSegs("claude-code"))).toBe("▝▘"); // round-3 locked square (minis stay downsample candidates)
+    expect(markText(runtimeMarkSegs("claude-code"))).toBe("▘▝"); // round-4 corrected square (minis stay downsample candidates)
     expect(markText(runtimeMarkSegs("codex"))).toBe(">_"); // the LOCKED web token
     expect(markText(runtimeMarkSegs("terminal"))).toBe(">_");
     expect(runtimeMarkSegs("terminal").every((s) => s.bg === "markBg")).toBe(true); // the dark-cell variant

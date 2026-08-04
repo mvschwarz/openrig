@@ -15,6 +15,7 @@ import type {
 } from "./types.js";
 import { SECTION_REGISTRY } from "./sections.js";
 import { GRAPH_STYLE_NAMES } from "./topology/render-graph.js";
+import { rowStatusGlyph } from "./topology/glyphs.js";
 
 export function defaultSections(): SectionDef[] {
   return SECTION_REGISTRY.map((section) => ({ ...section }));
@@ -420,9 +421,12 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
               key: podKey,
             });
             if (!open) continue;
+            // S19 round-4 (guard finding 4): the glyph derives from the SERVED
+            // status — active/idle/attention/unknown are visibly distinct and
+            // an offline seat is never dressed as a live ●
             for (const agent of pod.agents)
               rows.push({
-                label: `        ● ${agent.name}`,
+                label: `        ${rowStatusGlyph(agent).glyph} ${agent.name}`,
                 action: { type: "drill", resource: "agent", name: agent.name, target: { host: host.name, rig: rig.name, pod: pod.name } },
                 key: `agent:${host.name}/${rig.name}/${pod.name}/${agent.name}`,
               });

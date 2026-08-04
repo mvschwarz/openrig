@@ -156,6 +156,10 @@ export function stylizeLines(screen: Screen, s: Style): string[] {
         .join("");
     }
     if (line.startsWith("≋")) {
+      // round-4 mr7 wiring: the ONE-SHOT fresh-output row flash — tmux-style
+      // whole-row inverse while the window is open (renderScreen owns the
+      // window/reduced-motion truth; this is zero-width SGR only)
+      if (screen.footerFlash) return s.paint("bright", line, { inverse: true });
       const m = line.match(/^≋ (\S+) (\S+) (.*)$/);
       if (m) return `${s.paint("accent", "≋")} ${s.paint("dim", m[1]!)} ${s.paint("accentBright", m[2]!)} ${s.paint("dim", m[3]!)}`;
       return s.paint("dim", line);
@@ -186,18 +190,23 @@ export function stylizeLines(screen: Screen, s: Style): string[] {
         // content-pane selection = a real highlight bar, not just a glyph
         return `${paintExplorer(left, s, explorerFocused)}${s.paint("chrome", "│")}${s.paint("accent", `›${right}`, { inverse: true, bold: true })}`;
       }
-      // S19 MR2 (guard finding 2): explorer meta segs — the runtime mark's
-      // OWN tokens (incl. the terminal dark-cell bg) survive stylization;
-      // the label body keeps its normal rules. Selected rows keep the bar.
+      // S19 MR2 (guard finding 2) + round-4 finding 4: explorer seg RUNS —
+      // each run (status badge, right meta) paints its OWN tokens; the guide
+      // prefix keeps the explorer chrome rules and the text between runs is
+      // default ink (names). Selected rows keep the highlight bar.
       const em = screen.explorerMeta?.[index + 1];
-      if (em && !left.startsWith("›")) {
-        const metaPlain = em.segs.map((g) => g.text).join("");
-        const body = left.slice(0, em.start);
-        const tail = left.slice(em.start + metaPlain.length);
-        const paintedMeta = em.segs
-          .map((g) => (g.token || g.bg ? s.paint(g.token ?? "bright", g.text, { ...(g.bold ? { bold: true } : {}), ...(g.bg ? { bg: g.bg } : {}) }) : g.text))
-          .join("");
-        const paintedLeft = paintExplorer(body, s, explorerFocused) + paintedMeta + tail;
+      if (em && em.length && !left.startsWith("›")) {
+        let paintedLeft = "";
+        let pos = 0;
+        em.forEach((run, k) => {
+          const chunk = left.slice(pos, run.start);
+          paintedLeft += k === 0 ? paintExplorer(chunk, s, explorerFocused) : chunk;
+          paintedLeft += run.segs
+            .map((g) => (g.token || g.bg ? s.paint(g.token ?? "bright", g.text, { ...(g.bold ? { bold: true } : {}), ...(g.bg ? { bg: g.bg } : {}) }) : g.text))
+            .join("");
+          pos = run.start + run.segs.reduce((n, g) => n + g.text.length, 0);
+        });
+        paintedLeft += left.slice(pos);
         const cSegs = screen.segRows?.[index + 1];
         if (cSegs) {
           const segText = cSegs.map((g) => g.text).join("");

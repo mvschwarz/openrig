@@ -125,14 +125,19 @@ export function clawdFounderMark(): MarkSeg[] {
   ];
 }
 
-/** ROUND-3 LOCKED clawd row mark: a SQUARE (2 cells ≈ square at cell aspect)
- * with two quarter-block EYES clearly APART — upper-right then upper-left
- * quarters leave the center gap between the eyes, eyes sit high like the
- * source grid. Dark #181818 eyes ON the #ad6755 terracotta field. */
+/** ROUND-3 LOCKED clawd row mark, round-4 quadrant-geometry correction (guard
+ * finding 1): a SQUARE (2 cells ≈ square at cell aspect) with two quarter-
+ * block EYES clearly APART — cell 1 carries the OUTER-LEFT quadrant (▘
+ * U+2598 QUADRANT UPPER LEFT) and cell 2 the OUTER-RIGHT (▝ U+259D QUADRANT
+ * UPPER RIGHT), so the inner half of BOTH cells is pure terracotta field and
+ * the eyes flank a real center gap. (The prior ▝▘ order put the inner-right
+ * and inner-left quadrants together AT the center seam — the rejected
+ * center-bunched form.) Eyes sit high like the source grid; dark #181818 eyes
+ * ON the #ad6755 terracotta field. */
 export function clawdSquareMark(): MarkSeg[] {
   return [
-    { text: "▝", token: "clawdEye", bg: "clawd" },
     { text: "▘", token: "clawdEye", bg: "clawd" },
+    { text: "▝", token: "clawdEye", bg: "clawd" },
   ];
 }
 

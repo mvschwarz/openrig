@@ -70,3 +70,79 @@ describe("motion wiring + region discipline", () => {
     expect((styled[0]!.match(/\[[0-9;]*5;[0-9;]*m|\[5m/g) ?? []).length).toBe(1);
   });
 });
+
+describe("LIVE motion wiring — guard round-4 finding 3 (caller-boundary, not helper-only)", () => {
+  const snap = demoSnapshot();
+  // a graph-pending topology view is the honest LOADING lifecycle state the
+  // spinner rides — renderScreen is the caller boundary every adapter shares
+  function pendingStore() {
+    const noGraph = structuredClone(snap);
+    const s = createViewState({ instanceId: "sp", getSnapshot: () => noGraph });
+    s.dispatch({ type: "tab", tab: "graph" });
+    return { s, noGraph };
+  }
+
+  it("the loading spinner renders on the pending line and ANIMATES across frames (braille in truecolor)", () => {
+    const { s, noGraph } = pendingStore();
+    const at = (nowMs: number) =>
+      renderScreen(s.get(), noGraph, { cols: 140, rows: 34, nowMs, colorMode: "truecolor" }).lines.find((l) => l.includes("read pending"))!;
+    const f0 = at(0);
+    const f1 = at(120);
+    expect(f0).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] topology graph read pending/);
+    expect(f1).not.toBe(f0); // frame/time transition through the caller boundary
+    // the spinner marks the screen motion-active so the entry loop keeps redrawing
+    const screen = renderScreen(s.get(), noGraph, { cols: 140, rows: 34, nowMs: 0, colorMode: "truecolor" });
+    expect(screen.motionActive).toBe(true);
+  });
+
+  it("16-color mode renders the LINE spinner; reduced motion renders the honest static dot and no motion-active", () => {
+    const { s, noGraph } = pendingStore();
+    const line16 = renderScreen(s.get(), noGraph, { cols: 140, rows: 34, nowMs: 0, colorMode: "16" }).lines.find((l) => l.includes("read pending"))!;
+    expect(line16).toMatch(/[|/\-\\] topology graph read pending/);
+    process.env["OPENRIG_REDUCED_MOTION"] = "1";
+    try {
+      const reduced = renderScreen(s.get(), noGraph, { cols: 140, rows: 34, nowMs: 0, colorMode: "truecolor" });
+      expect(reduced.lines.find((l) => l.includes("read pending"))!).toMatch(/· topology graph read pending/);
+      expect(reduced.motionActive).toBe(false);
+    } finally {
+      delete process.env["OPENRIG_REDUCED_MOTION"];
+    }
+  });
+
+  it("fresh footer stream output raises the ONE-SHOT row flash: inverse within the window, gone after expiry, never under reduced motion", () => {
+    const s = createViewState({ instanceId: "fl", getSnapshot: () => snap });
+    const render = (nowMs: number) => renderScreen(s.get(), snap, { cols: 140, rows: 34, nowMs, streamFreshAt: 1000 });
+    const inWindow = render(1300);
+    expect(inWindow.footerFlash).toBe(true);
+    expect(inWindow.motionActive).toBe(true); // the expiry redraw is scheduled off this
+    const styled = stylizeLines(inWindow, createStyle("truecolor"));
+    const footerIdx = inWindow.lines.findIndex((l) => l.startsWith("≋"));
+    expect(footerIdx).toBeGreaterThan(0);
+    // inverse = a STANDALONE SGR param 7 (never the 7 inside e.g. 77;189;178)
+    const INVERSE = /\x1b\[(?:[0-9;]+;)?7(?:;[0-9;]+)?m/;
+    expect(styled[footerIdx]!, "flash = inverse video on the row").toMatch(INVERSE);
+    styled.forEach((l, i) => expect(stripAnsi(l)).toBe(inWindow.lines[i]));
+    // ONE-SHOT expiry: past the window the flash is gone
+    const after = render(1700);
+    expect(after.footerFlash).toBe(false);
+    const styledAfter = stylizeLines(after, createStyle("truecolor"));
+    expect(styledAfter[footerIdx]!).not.toMatch(INVERSE);
+    // reduced motion: no flash even inside the window
+    process.env["OPENRIG_REDUCED_MOTION"] = "1";
+    try {
+      expect(render(1300).footerFlash).toBe(false);
+    } finally {
+      delete process.env["OPENRIG_REDUCED_MOTION"];
+    }
+  });
+
+  it("region discipline: while a ⚑ pulse is visible on the needs page, the pending-line spinner degrades to the static dot", () => {
+    const probing = { ...structuredClone(snap), humanQueueProbed: false };
+    const s = createViewState({ instanceId: "rd", getSnapshot: () => probing });
+    s.dispatch({ type: "jump", section: "needs" });
+    const screen = renderScreen(s.get(), probing, { cols: 140, rows: 34, nowMs: 0, colorMode: "truecolor" });
+    const pending = screen.lines.find((l) => l.includes("not yet known"))!;
+    expect(pending).toMatch(/· human-queue: not yet known/); // static — the ⚑ pulse owns the region's one persistent animation
+    expect(pending).not.toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/);
+  });
+});

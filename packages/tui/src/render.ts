@@ -7,9 +7,10 @@
 import { computeExplorerRows, findAgent, findSpec, findAgentBySession, agentsRunningSpec, agentsRunningSpecTargets } from "./state.js";
 import { navigatorDisplay } from "./navigator.js";
 import { renderGraphStyle } from "./topology/render-graph.js";
-import { markText, runtimeMarkSegs } from "./topology/runtime-marks.js";
-import { barCells } from "./motion.js";
-import { detailPage, fieldLine, sectionRule, listItem, alignedRow } from "./detail.js";
+import { runtimeMarkSegs } from "./topology/runtime-marks.js";
+import { barCells, flashActive, reducedMotion, spinnerFrame } from "./motion.js";
+import type { ColorMode } from "./theme.js";
+import { detailPage, fieldLine, sectionRule, listItem, alignedRow, LABEL_W } from "./detail.js";
 import type { Action, FleetSnapshot, NeedsItem, Screen, ViewState } from "./types.js";
 
 const EXPL_W = 30;
@@ -170,7 +171,17 @@ function fieldWrapped(label: string, values: string[]): ContentLine[] {
   return [fieldLine({ label, value: first }), ...wrapped.slice(1)];
 }
 
-function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: number): ContentLine[] {
+/** S19 round-4 motion wiring (guard finding 3): the loading spinner's frame
+ * for this render pass + a used-flag so the entry loop knows the frame is
+ * time-driven and must keep redrawing. The spinner rides ONLY the honest
+ * read-pending lifecycle states — it never fabricates progress. */
+interface MotionCtx {
+  frame: string;
+  reduced: boolean;
+  used: boolean;
+}
+
+function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: number, motion: MotionCtx): ContentLine[] {
   const contentWidthForGraph = contentWidth;
   void contentWidthForGraph;
   const lines: ContentLine[] = [];
@@ -202,6 +213,17 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       if (!found) return [{ text: `agent "${leaf.name}" not in the current snapshot` }];
       const { agent, rig, pod } = found;
       const specInLibrary = !!agent.spec && !!findSpec(snap, agent.spec);
+      // ROUND-3: the runtime MARK lives on the detail page (sparingly).
+      // ROUND-4 (guard finding 2): the mark's OWN token segments ride the seg
+      // channel so its colors/background survive stylization, and NO spelled
+      // runtime word renders beside it (spelled runtime is dead everywhere).
+      const rtSegs = [
+        { text: "  " },
+        { text: "runtime:", token: "dim" as const },
+        { text: " ".repeat(LABEL_W - "runtime:".length + 1) },
+        ...runtimeMarkSegs(agent.runtime),
+      ];
+      const runtimeLine: ContentLine = { text: rtSegs.map((g) => g.text).join(""), segs: rtSegs };
       return detailPage({ text: `agent ${agent.name}` }, [
         {
           title: "seat",
@@ -210,18 +232,19 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
             { label: "host", value: found.host.name },
             { label: "rig", value: rig.name },
             { label: "pod", value: pod.name },
-            // ROUND-3: the runtime MARK lives on the detail page (sparingly)
-            { label: "runtime", value: `${markText(runtimeMarkSegs(agent.runtime))} ${agent.runtime}` },
-            {
+          ],
+          lines: [
+            runtimeLine,
+            fieldLine({
               label: "context",
               // ROUND-3 mr7: a quiet determinate bar rides REAL fractions only
               value: agent.context == null
                 ? "— (not yet known)"
                 : `${agent.context}% used · ${agent.tokens ?? "—"} tokens  ${barCells(agent.context / 100, 10)}`,
-            },
+            }),
             // S19 MR4 (§D9, founder: "very important"): the FULL absolute
             // working directory, verbatim; honest — when not served
-            { label: "cwd", value: agent.cwd ?? "— (not served)" },
+            fieldLine({ label: "cwd", value: agent.cwd ?? "— (not served)" }),
           ],
         },
         {
@@ -265,8 +288,11 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       // slice-17 topology view (frame-01): the rig's SERVED /graph projection
       // rendered by the style registry; honest-empty until the read answers.
       if (!rig.graph) {
+        // round-4 motion wiring: the braille loading spinner rides this honest
+        // read-pending state (line frames at 16-color, static dot reduced)
+        if (!motion.reduced) motion.used = true;
         lines.push({ text: "" });
-        lines.push({ text: "  topology graph read pending (honest-empty, never fabricated)" });
+        lines.push({ text: `  ${motion.frame} topology graph read pending (honest-empty, never fabricated)` });
         return lines;
       }
       // PER-VIEW zoom (PM b7f95c4b): a pod drill scopes the SAME projection to
@@ -538,7 +564,10 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
           });
       }
     }
-    if (snap.specs.length === 0) lines.push({ text: "  (library read pending — honest-empty)" });
+    if (snap.specs.length === 0) {
+      if (!motion.reduced) motion.used = true;
+      lines.push({ text: `  ${motion.frame} library read pending — honest-empty` });
+    }
     return lines;
   }
   if (state.section === "needs") {
@@ -560,8 +589,15 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
         lines.push({ text: `  ✖ ${alignedRow([[h.hostId, 28], [h.status, 26]])} ${h.error ?? ""}`.trimEnd() });
     }
     lines.push({ text: "" });
-    if (!snap.humanQueueProbed) lines.push({ text: "  human-queue: not yet known (read pending)" });
-    else if (!snap.needs.some((item) => item.source === "agent"))
+    if (!snap.humanQueueProbed) {
+      // region discipline (max ONE persistent animation): while a derived ⚑
+      // item pulses on this page, the pending spinner degrades to the honest
+      // static dot instead of animating beside it
+      const pulseVisible = snap.needs.some((item) => item.source === "derived") && !motion.reduced;
+      const spin = pulseVisible ? "·" : motion.frame;
+      if (!pulseVisible && !motion.reduced) motion.used = true;
+      lines.push({ text: `  ${spin} human-queue: not yet known (read pending)` });
+    } else if (!snap.needs.some((item) => item.source === "agent"))
       lines.push({ text: "  human-queue: no items (proven empty — surfacing adoption pending)" });
     return lines;
   }
@@ -571,6 +607,14 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
 export interface RenderOptions {
   cols?: number;
   rows?: number;
+  /** wall-clock ms for time-driven motion (spinner frames, flash windows);
+   * renderScreen stays pure — the caller supplies time (round-4 wiring) */
+  nowMs?: number;
+  /** the active Style's color mode — picks braille vs line spinner frames */
+  colorMode?: ColorMode;
+  /** when the entry loop last saw a NEW footer stream item land (one-shot
+   * row-flash source); omitted = no flash */
+  streamFreshAt?: number;
 }
 
 /** replace ONE character at a plain-text position inside a token-segment row
@@ -611,7 +655,15 @@ function keybindHints(state: ViewState): string {
 }
 
 export function renderScreen(state: ViewState, snap: FleetSnapshot, options: RenderOptions = {}, inputLine = ""): Screen {
-  const { cols = 120, rows = 32 } = options;
+  const { cols = 120, rows = 32, nowMs = 0 } = options;
+  // S19 round-4 motion wiring (guard finding 3): one spinner frame per render
+  // pass, derived from caller-supplied time; reduced-motion kills all of it
+  const reduced = reducedMotion();
+  const motion: MotionCtx = {
+    frame: spinnerFrame(Math.floor(nowMs / 120), options.colorMode ?? "truecolor", reduced),
+    reduced,
+    used: false,
+  };
   const lines: string[] = [];
   const hitMap: Screen["hitMap"] = [];
   // S19 MR5a (guard-corrected): ONE ▊ insertion cell renders at the bar's
@@ -630,8 +682,12 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   // Slice-17: the file-tree re-skin is a DISPLAY transform only — rows, keys,
   // actions, and the hit-map all keep resolving against the row model above.
   const { labels: explorerDisplay, metas: explorerMetas } = navigatorDisplay(explorer, snap, EXPL_W - 1);
-  const content = contentLines(state, snap, Math.max(cols - EXPL_W - 2, 0));
+  const content = contentLines(state, snap, Math.max(cols - EXPL_W - 2, 0), motion);
   const footer = state.footerOn ? snap.stream.at(-1) : undefined;
+  // round-4: tmux-style ONE-SHOT row flash on fresh footer output — active
+  // only inside its window, never under reduced motion (flashActive)
+  const footerFlash = footer != null && options.streamFreshAt != null
+    && flashActive(options.streamFreshAt, nowMs, 600, reduced);
   const chromeRows = footer ? 4 : 3; // bottom rule + hint bar + status line (+ footer)
   const bodyRows = Math.max(rows - 2 - chromeRows, 1);
   const explorerStart = Math.min(
@@ -686,7 +742,7 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
       hitMap.push({ y, x1: 1, x2: EXPL_W, action: row.action });
       explorerRows.push({ ...row, y });
       const em = explorerMetas[explorerIndex];
-      if (em) explorerMeta[y] = { start: 1 + em.start, segs: em.segs }; // +1 = marker slot
+      if (em && em.length) explorerMeta[y] = em.map((run) => ({ start: 1 + run.start, segs: run.segs })); // +1 = marker slot
     }
     // zones first: hit lookup takes the first match, so a zone wins over the row-wide action
     for (const z of zones) {
@@ -714,5 +770,15 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
     ),
   );
   while (lines.length < rows) lines.push("");
-  return { lines: lines.slice(0, rows), hitMap, contentTargets, contentMaxOffset: maxContentOffset, explorerRows, segRows, explorerMeta };
+  return {
+    lines: lines.slice(0, rows),
+    hitMap,
+    contentTargets,
+    contentMaxOffset: maxContentOffset,
+    explorerRows,
+    segRows,
+    explorerMeta,
+    footerFlash,
+    motionActive: motion.used || footerFlash,
+  };
 }
