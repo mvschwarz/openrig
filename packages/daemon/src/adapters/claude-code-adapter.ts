@@ -858,10 +858,28 @@ function hookCommand(hook: unknown): string | undefined {
 
 function isOwnedRelayCommand(cmd: string | undefined): boolean {
   if (!cmd) return false;
-  const m = /^node\s+(?:'([^']*)'|"([^"]*)"|(\S+))\s*$/.exec(cmd);
+  const m = /^node\s+(.+)$/.exec(cmd.trim());
   if (!m) return false;
-  const arg = m[1] ?? m[2] ?? m[3] ?? "";
-  return arg.endsWith(OWNED_RELAY_SUFFIX);
+  // Ownership must ROUND-TRIP the writer: the command is `node ${shellQuote(relayDest)}`, and
+  // shellQuote escapes an embedded ' as '"'"', so a cwd containing an apostrophe (O'Brien) must be
+  // DECODED back to the literal path before the suffix check — else the owned hook is unrecognised
+  // (unbounded re-add on enable, dangling on disable). Tolerates a legacy double-quoted form too.
+  const arg = unquoteShellArg(m[1]!);
+  return arg !== null && arg.endsWith(OWNED_RELAY_SUFFIX);
+}
+
+/** Recover the literal path from a `node <arg>` argument: reverse shellQuote's single-quote
+ *  wrapping (with `'`→`'"'"'`), tolerating a legacy double-quoted form. Returns null when the
+ *  argument is not a single self-quoted token (e.g. trailing extra args), which is not owned. */
+function unquoteShellArg(token: string): string | null {
+  const t = token.trim();
+  if (t.length >= 2 && t.startsWith("'") && t.endsWith("'")) {
+    return t.slice(1, -1).split(`'"'"'`).join("'");
+  }
+  if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) {
+    return t.slice(1, -1);
+  }
+  return null;
 }
 
 function hashContent(content: string): string {

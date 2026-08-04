@@ -286,6 +286,26 @@ describe("Claude activity-hook delivery — hardening (guard r3 findings)", () =
   }
 });
 
+// M1 (R1 verdict): ownership must ROUND-TRIP shellQuote. A cwd containing a legal apostrophe
+// (O'Brien) makes shellQuote escape ' as '"'"', which the naive quoted-arg matcher missed —
+// so owned hooks accumulated without bound on re-enable and dangled on disable.
+describe("Claude activity-hook delivery — ownership round-trips shellQuote (apostrophe cwd)", () => {
+  it("cwd with an apostrophe (O'Brien): enable x2 keeps exactly one owned entry/event, disable strips all", async () => {
+    const cwd = "/project/O'Brien";
+    const settingsPath = `${cwd}/.claude/settings.local.json`;
+    const ownedCmd = `node ${shellQuote(`${cwd}/.openrig/hooks/scripts/activity-relay.cjs`)}`;
+    const fs = enableFs();
+    const adapter = makeAdapter(fs);
+    await adapter.project(plan([activityEntry()]), binding(cwd));
+    await adapter.project(plan([activityEntry()]), binding(cwd)); // idempotent re-enable
+    const enabled = JSON.parse(fs._store[settingsPath]!);
+    expect(allCommands(enabled).filter((c) => c === ownedCmd).length, "no unbounded accumulation").toBe(EVENTS.length);
+    await adapter.project(plan([]), binding(cwd)); // disable
+    const disabled = fs._store[settingsPath] ? JSON.parse(fs._store[settingsPath]!) : {};
+    expect(allCommands(disabled).filter((c) => c.includes(OWNED_MARKER)), "no dangling owned hook").toEqual([]);
+  });
+});
+
 // Production-altitude reachability: the ACTUAL SHIPPED profile bytes (development/implementer,
 // which selects shared:claude-activity-hooks) must resolve — through the REAL resolveAgentRef ->
 // resolveNodeConfig -> planProjection -> adapter — to a plan entry the adapter enables. Loaded
