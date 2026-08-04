@@ -96,7 +96,10 @@ describe("hatchet mainline in the SHIPPED content pane (frame-01 visual contract
     expect(body).toMatch(/┌─+┐/);
     expect(body).toContain("● orch.lead");
     expect(body).toContain("claude-code · 18% · orch");
-    expect(body).toMatch(/─+▸/); // straight connector + arrowhead
+    // straight connector runs + arrowhead; under the LOCKED containment an
+    // edge may legitimately cross a pod-container wall (─ becomes ┼ at the
+    // crossing) before its arrowhead
+    expect(body).toMatch(/[─┼]+▸/);
     expect(body).not.toMatch(/delegates_to|collaborates_with|escalates_to/); // NO edge labels
   });
 
@@ -112,7 +115,7 @@ describe("hatchet mainline in the SHIPPED content pane (frame-01 visual contract
     expect(braille).toMatch(/[⠁-⣿]/);
     const fallback = graphScreen("braille-fallback").screen.lines.join("\n");
     expect(fallback).not.toMatch(/[⠁-⣿]/);
-    expect(fallback).toMatch(/─+▸/);
+    expect(fallback).toMatch(/[─┼]+▸/);
   });
 
   it("a rig without a hydrated graph renders honest-empty, never fabricated boxes", () => {
@@ -280,5 +283,94 @@ describe("Phase-3 live-glyph honesty (the states the fleet GENUINELY serves)", (
       });
       expect(g.glyph, `status=${status}`).not.toBe("●");
     }
+  });
+});
+
+describe("R2 HIGH-3 — keyboard content focus stays VISIBLE under truecolor (segs path)", () => {
+  it("the › marker survives seg stylization: visible in the styled row, strip-invariant intact, action unchanged", () => {
+    const snap = graphSnap();
+    const s = makeStore(snap);
+    s.dispatch({ type: "style", name: "hatchet" });
+    s.dispatch({ type: "tab", tab: "graph" });
+    let screen = renderScreen(s.get(), snap, { cols: 150, rows: 40 });
+    s.dispatch({ type: "layout", contentMaxOffset: screen.contentMaxOffset, contentTargetCount: screen.contentTargets.length });
+    s.dispatch({ type: "focus", pane: "content" });
+    // pick a node-box zone that does NOT start at content col 0 (the splice path)
+    const zoneIdx = screen.contentTargets.findIndex(
+      (t) => t.action.type === "drill" && t.action.resource === "agent" && t.x1 > 33,
+    );
+    expect(zoneIdx).toBeGreaterThanOrEqual(0);
+    const zoneAction = screen.contentTargets[zoneIdx]!.action;
+    s.dispatch({ type: "content-select", index: zoneIdx });
+    screen = renderScreen(s.get(), snap, { cols: 150, rows: 40 });
+    const rowIdx = screen.lines.findIndex((l, i) => i > 1 && l.slice(31).includes("›"));
+    expect(rowIdx, "plain screen carries the marker").toBeGreaterThan(0);
+    const styled = stylizeLines(screen, createStyle("truecolor"));
+    // VISIBLE: the styled row still contains the marker glyph
+    expect(styled[rowIdx]!, "marker visible after truecolor stylization").toContain("›");
+    // TRUTHFUL: the strip-invariant holds on the marker row too
+    expect(stripAnsi(styled[rowIdx]!)).toBe(screen.lines[rowIdx]!);
+    // PIN-1: Enter would dispatch the SAME action the click zone carries
+    expect(screen.contentTargets[zoneIdx]!.action).toEqual(zoneAction);
+  });
+});
+
+describe("MR8 — width-clip honesty indicator (founder GO; indicator ONLY)", () => {
+  it("a graph wider than the viewport renders the visible clipped-content indicator at the right edge", async () => {
+    const { renderGraphStyle } = await import("../src/topology/render-graph.js");
+    // 40 cols cannot hold the fixture's three ranked columns
+    const plain = renderGraphStyle("hatchet", spikeFixtureGraph(), { host: "h", rig: "r", selected: null }, 40).plainLines().join("\n");
+    expect(plain).toMatch(/content clipped ▸/);
+  });
+
+  it("a graph that fits renders WITHOUT the indicator (no false alarm)", async () => {
+    const { renderGraphStyle } = await import("../src/topology/render-graph.js");
+    const plain = renderGraphStyle("hatchet", spikeFixtureGraph(), { host: "h", rig: "r", selected: null }, 200).plainLines().join("\n");
+    expect(plain).not.toMatch(/content clipped/);
+  });
+});
+
+describe("R2 HIGH-1 — the locked agent-in-pod-in-rig containment is VISIBLE", () => {
+  function containScreen() {
+    const snap = graphSnap();
+    const s = makeStore(snap);
+    s.dispatch({ type: "tab", tab: "graph" });
+    return { s, snap, screen: renderScreen(s.get(), snap, { cols: 160, rows: 44 }) };
+  }
+
+  it("pod containers wrap their member agent boxes and the rig container wraps all (nesting fingerprint on every agent row)", () => {
+    const { screen } = containScreen();
+    const body = screen.lines.join("\n");
+    expect(body).toMatch(/▚ RIG openrig-build/); // rig container tab
+    for (const pod of ["orch", "dev", "review"]) expect(body, `pod ${pod} header`).toMatch(new RegExp(`▾ ${pod}`));
+    // the fingerprint: rig double-border ║, then a pod border │, then the
+    // agent's OWN box border │ — three nested walls left of every agent glyph
+    for (const agent of ["orch\\.lead", "dev\\.driver", "dev\\.qa", "review\\.r1"]) {
+      expect(body, `agent ${agent} nested`).toMatch(new RegExp(`║[^║╗\\n]*│[^│\\n]*│ [●◐○✕] ${agent}`));
+    }
+  });
+
+  it("nested hit zones DISCRIMINATE: rig tab → rig drill, pod header → pod drill, agent cell → agent drill", () => {
+    const { s, screen } = containScreen();
+    const podZone = screen.contentTargets.find((t) => t.action.type === "drill" && t.action.resource === "pod" && t.action.name === "dev");
+    expect(podZone, "pod-header hit zone").toBeDefined();
+    const agentZone = screen.contentTargets.find((t) => t.action.type === "drill" && t.action.resource === "agent" && t.action.name === "dev.qa");
+    expect(agentZone, "agent-cell hit zone").toBeDefined();
+    const podState = s.dispatch(podZone!.action);
+    expect(podState.drill.at(-1)).toEqual({ kind: "pod", name: "dev" });
+    s.dispatch({ type: "tab", tab: "graph" });
+    const agentState = s.dispatch(agentZone!.action);
+    expect(agentState.drill.at(-1)).toEqual({ kind: "agent", name: "dev.qa" });
+  });
+
+  it("keyboard navigation reaches the SAME nested targets (content-select indices exist for pod AND agent zones)", () => {
+    const { screen } = containScreen();
+    const podIdx = screen.contentTargets.findIndex((t) => t.action.type === "drill" && t.action.resource === "pod" && t.action.name === "dev");
+    const agentIdx = screen.contentTargets.findIndex((t) => t.action.type === "drill" && t.action.resource === "agent" && t.action.name === "dev.qa");
+    expect(podIdx).toBeGreaterThanOrEqual(0);
+    expect(agentIdx).toBeGreaterThanOrEqual(0);
+    // Enter on the selected index dispatches EXACTLY the zone's action — the
+    // same object the mouse path uses (PIN-1, keyboard leg)
+    expect(screen.contentTargets[podIdx]!.action).toEqual({ type: "drill", resource: "pod", name: "dev", target: { host: "vm-host", rig: FIXTURE_RIG_NAME } });
   });
 });

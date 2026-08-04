@@ -6,7 +6,7 @@
 // NO text labels on the graph (founder refinement). TIER-1 glyphs only.
 import { GraphCanvas } from "../canvas.js";
 import { edgeToken } from "../glyphs.js";
-import type { GraphLayout, PlacedNode } from "../layout.js";
+import type { GraphContainer, GraphLayout, PlacedNode } from "../layout.js";
 import type { Action, ResourceTarget } from "../../types.js";
 
 export interface StyleContext {
@@ -49,7 +49,9 @@ interface Arrow {
 
 /** straight orthogonal connector; the arrowhead is returned so the caller can
  * draw it LAST (it must survive the node boxes painting over line ends) */
-export function drawEdge(canvas: GraphCanvas, from: PlacedNode, to: PlacedNode, kind: string, lane = 0, obstacles: PlacedNode[] = []): Arrow {
+type Rect = { x: number; y: number; w: number; h: number };
+
+export function drawEdge(canvas: GraphCanvas, from: PlacedNode, to: PlacedNode, kind: string, lane = 0, obstacles: Rect[] = []): Arrow {
   const token = edgeToken(kind);
   const sy = from.y + 1;
   const ty = to.y + 1;
@@ -72,7 +74,7 @@ export function drawEdge(canvas: GraphCanvas, from: PlacedNode, to: PlacedNode, 
     // the target's bottom edge (the mockup's curve, box-drawn). The vertical
     // legs pick columns that no OTHER box occupies (obstacle-aware).
     const belowY = Math.max(...[from, to, ...obstacles].map((p) => p.y + p.h)) + 1 + lane;
-    const freeColumn = (box: PlacedNode, fromRight: boolean): number => {
+    const freeColumn = (box: Rect, fromRight: boolean): number => {
       const candidates: number[] = [];
       for (let i = 2; i < box.w - 1; i++) candidates.push(fromRight ? box.x + box.w - 1 - i : box.x + i);
       for (const x of candidates) {
@@ -102,9 +104,31 @@ export function drawEdge(canvas: GraphCanvas, from: PlacedNode, to: PlacedNode, 
   return { x, y: to.y + to.h, ch: "▴", token };
 }
 
+/** R2 HIGH-1: the LOCKED containment hierarchy drawn as real container boxes
+ * — the rig (double border, name tab) wraps pod containers (light border,
+ * ▾-name tab, header hit zone → drill pod) which wrap their agent boxes.
+ * Containers are BACKGROUNDS (unprotected fills): edges may route across
+ * their interiors; agent boxes stay opaque+protected on top. */
+export function drawContainers(canvas: GraphCanvas, layout: GraphLayout, ctx: StyleContext): void {
+  for (const c of layout.containers) {
+    if (c.kind === "rig") {
+      canvas.box(c.x, c.y, c.w, c.h, "accent", true, false);
+      const tab = ` ▚ RIG ${c.name || ctx.rig} `;
+      canvas.text(c.x + 2, c.y, tab, "accent", true);
+      canvas.zone(c.y, c.x + 2, c.x + 2 + tab.length, { type: "drill", resource: "rig", name: c.name || ctx.rig, target: { host: ctx.host } });
+    } else {
+      canvas.box(c.x, c.y, c.w, c.h, "chrome", false, false);
+      const tab = ` ▾ ${c.name} `;
+      canvas.text(c.x + 1, c.y, tab, "accent", true);
+      canvas.zone(c.y, c.x + 1, c.x + 1 + tab.length, { type: "drill", resource: "pod", name: c.name, target: { host: ctx.host, rig: ctx.rig } });
+    }
+  }
+}
+
 export function renderHatchet(layout: GraphLayout, ctx: StyleContext, width: number): GraphCanvas {
   const canvas = new GraphCanvas(width);
-  // edges first, boxes second (borders clean up line ends), arrowheads LAST
+  drawContainers(canvas, layout, ctx);
+  // then edges, agent boxes (borders clean up line ends), arrowheads LAST
   const lanes = new Map<string, number>();
   const arrows: Arrow[] = [];
   for (const edge of layout.edges) {
@@ -114,9 +138,18 @@ export function renderHatchet(layout: GraphLayout, ctx: StyleContext, width: num
     const laneKey = `${to.x}:${to.x + to.w < from.x ? "back" : "fwd"}`;
     const lane = lanes.get(laneKey) ?? 0;
     lanes.set(laneKey, lane + 1);
-    arrows.push(drawEdge(canvas, from, to, edge.label, lane, layout.placed));
+    arrows.push(drawEdge(canvas, from, to, edge.label, lane, [...layout.placed, ...layout.containers.filter((c) => c.kind === "pod")]));
   }
   for (const p of layout.placed) drawNodeBox(canvas, p, ctx);
   for (const a of arrows) canvas.set(a.x, a.y, a.ch, a.token, true);
+  drawClipIndicator(canvas, layout, width);
   return canvas;
+}
+
+/** MR8 width-clip honesty: the view never quietly loses right-side nodes —
+ * an INDICATOR only (founder-scoped: no scroll, no rework, no cap) */
+export function drawClipIndicator(canvas: GraphCanvas, layout: GraphLayout, width: number): void {
+  if (!layout.clipped) return;
+  const label = " content clipped ▸ ";
+  canvas.text(Math.max(width - label.length, 0), 0, label, "warn", true);
 }

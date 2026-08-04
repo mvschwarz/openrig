@@ -17,12 +17,28 @@ export interface PlacedNode {
   h: number;
 }
 
+export interface GraphContainer {
+  kind: "rig" | "pod";
+  name: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface GraphLayout {
   placed: PlacedNode[];
   byId: Map<string, PlacedNode>;
   edges: GraphEdge[];
+  /** R2 HIGH-1: the LOCKED containment hierarchy — the rig container wraps
+   * pod containers, pod containers wrap their member agent boxes; renderers
+   * MUST draw them (agent-in-pod-in-rig is a visible contract, not metadata) */
+  containers: GraphContainer[];
   width: number;
   height: number;
+  /** MR8: true when the laid-out extent exceeds the viewport width — the
+   * renderer MUST show the honest clipped-content indicator */
+  clipped: boolean;
 }
 
 export function agentNodes(graph: RigGraph): GraphNode[] {
@@ -71,45 +87,68 @@ function rankNodes(agents: GraphNode[], edges: GraphEdge[]): Map<string, number>
   return rank;
 }
 
-const COL_GAP = 8;
-const ROW_GAP = 1;
-const MARGIN_X = 2;
-const MARGIN_Y = 1;
+const POD_GAP = 4;
+const MARGIN_X = 1;
 
-export function layoutGraph(graph: RigGraph, maxWidth: number): GraphLayout {
+/** R2 HIGH-1 layout: pods are the clustering unit — each pod is a container
+ * column holding its member agent boxes stacked vertically; pods order by the
+ * min delegation rank of their members (delegation still reads left→right);
+ * the rig container wraps everything. Ungrouped agents get a "(no pod)"
+ * cluster so nothing served is ever dropped. */
+export function layoutGraph(graph: RigGraph, maxWidth: number, rigName = ""): GraphLayout {
   const agents = agentNodes(graph);
   const rank = rankNodes(agents, graph.edges);
-  const columns = new Map<number, GraphNode[]>();
+  const podLabel = new Map<string, string>(
+    graph.nodes.filter((n) => n.type === "podGroup").map((n) => [n.id, n.data.podNamespace ?? n.data.logicalId]),
+  );
+  const pods = new Map<string, GraphNode[]>();
   for (const n of agents) {
-    const r = rank.get(n.id) ?? 0;
-    columns.set(r, [...(columns.get(r) ?? []), n]);
+    const key = (n.parentId && podLabel.get(n.parentId)) ?? n.data.podNamespace ?? "(no pod)";
+    pods.set(key, [...(pods.get(key) ?? []), n]);
   }
+  const podOrder = [...pods.entries()].sort(([an, a], [bn, b]) => {
+    const ar = Math.min(...a.map((n) => rank.get(n.id) ?? 0));
+    const br = Math.min(...b.map((n) => rank.get(n.id) ?? 0));
+    return ar - br || an.localeCompare(bn);
+  });
+
   const placed: PlacedNode[] = [];
   const byId = new Map<string, PlacedNode>();
-  let x = MARGIN_X;
-  for (const r of [...columns.keys()].sort((a, b) => a - b)) {
-    const col = columns.get(r)!.sort((a, b) => {
-      // delegation sources read top-left (the mockup's lead position)
-      const aDelegates = graph.edges.some((e) => e.label === "delegates_to" && e.source === a.id) ? 0 : 1;
-      const bDelegates = graph.edges.some((e) => e.label === "delegates_to" && e.source === b.id) ? 0 : 1;
-      return aDelegates - bDelegates
-        || (a.data.podNamespace ?? "").localeCompare(b.data.podNamespace ?? "")
-        || a.data.logicalId.localeCompare(b.data.logicalId);
-    });
-    let y = MARGIN_Y;
-    let colWidth = 0;
-    for (const node of col) {
+  const containers: GraphContainer[] = [];
+  const rigX = MARGIN_X;
+  const rigY = 1;
+  let podX = rigX + 2;
+  let maxPodBottom = 0;
+  for (const [podName, members] of podOrder) {
+    const sorted = [...members].sort(
+      (a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0) || a.data.logicalId.localeCompare(b.data.logicalId),
+    );
+    const podTop = rigY + 1;
+    let y = podTop + 1;
+    let podInnerW = Math.max(`▾ ${podName}`.length + 2, 8);
+    for (const node of sorted) {
       const { glyph, nameLine, metaLine } = nodeLines(node);
-      const w = Math.max(nameLine.length, metaLine.length) + 4; // borders + 1-cell padding
-      const p: PlacedNode = { node, glyph, nameLine, metaLine, x, y, w, h: 4 };
+      const w = Math.max(nameLine.length, metaLine.length) + 4;
+      const p: PlacedNode = { node, glyph, nameLine, metaLine, x: podX + 2, y, w, h: 4 };
       placed.push(p);
       byId.set(node.id, p);
-      y += p.h + ROW_GAP * 2;
-      colWidth = Math.max(colWidth, w);
+      y += p.h + 1;
+      podInnerW = Math.max(podInnerW, w);
     }
-    x += colWidth + COL_GAP;
+    const podW = podInnerW + 4;
+    const podH = y - podTop + 1;
+    containers.push({ kind: "pod", name: podName, x: podX, y: podTop, w: podW, h: podH });
+    maxPodBottom = Math.max(maxPodBottom, podTop + podH);
+    podX += podW + POD_GAP;
   }
-  const width = Math.min(Math.max(...placed.map((p) => p.x + p.w), 0) + MARGIN_X, maxWidth);
-  const height = Math.max(...placed.map((p) => p.y + p.h), 0) + MARGIN_Y;
-  return { placed, byId, edges: graph.edges, width, height };
+  const rigW = podX - POD_GAP + 2 - rigX;
+  // two spare interior rows: the escalation under-route corridor (lanes 0-1)
+  // must never land on the rig's own bottom border
+  const rigH = maxPodBottom - rigY + 4;
+  containers.unshift({ kind: "rig", name: rigName, x: rigX, y: rigY, w: rigW, h: rigH });
+
+  const trueWidth = rigX + rigW + MARGIN_X;
+  const width = Math.min(trueWidth, maxWidth);
+  const height = rigY + rigH + 1;
+  return { placed, byId, edges: graph.edges, containers, width, height, clipped: trueWidth > maxWidth };
 }

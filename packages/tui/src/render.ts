@@ -551,6 +551,30 @@ export interface RenderOptions {
   rows?: number;
 }
 
+/** replace ONE character at a plain-text position inside a token-segment row
+ * with the keyboard focus marker (accent, bold) — keeps plain(segs) equal to
+ * the spliced content text (R2 HIGH-3) */
+function spliceMarkerIntoSegs(
+  segs: NonNullable<ContentLine["segs"]>,
+  pos: number,
+): NonNullable<ContentLine["segs"]> {
+  const out: NonNullable<ContentLine["segs"]> = [];
+  let at = 0;
+  for (const seg of segs) {
+    const end = at + seg.text.length;
+    if (pos >= at && pos < end) {
+      const off = pos - at;
+      if (off > 0) out.push({ ...seg, text: seg.text.slice(0, off) });
+      out.push({ text: "›", token: "accent", bold: true });
+      if (off + 1 < seg.text.length) out.push({ ...seg, text: seg.text.slice(off + 1) });
+    } else {
+      out.push(seg);
+    }
+    at = end;
+  }
+  return out;
+}
+
 function paneRule(cols: number, joint: "┬" | "┴", leftTitle?: string, rightTitle?: string): string {
   const left = leftTitle ? `─ ${leftTitle} ` : "";
   const right = rightTitle ? `─ ${rightTitle} ` : "";
@@ -620,10 +644,14 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
     const selectedAction = !!item?.action && selectedOnLine === zones.length;
     let contentText = item?.text ?? "";
     let contentMarker = selectedAction ? "›" : " ";
+    let rowSegs = item?.segs;
     if (selectedZone) {
-      if (selectedZone.start > 0)
+      if (selectedZone.start > 0) {
         contentText = `${contentText.slice(0, selectedZone.start - 1)}›${contentText.slice(selectedZone.start)}`;
-      else contentMarker = "›";
+        // R2 HIGH-3: a segs row's paint source must carry the SAME splice the
+        // plain text carries, or stylization erases the keyboard focus marker
+        if (rowSegs) rowSegs = spliceMarkerIntoSegs(rowSegs, selectedZone.start - 1);
+      } else contentMarker = "›";
     }
     lines.push(pad(`${left}│${contentMarker}${contentText}`, cols));
     if (row) {
@@ -641,7 +669,7 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
       hitMap.push(target);
       contentTargets.push(target);
     }
-    if (item?.segs) segRows[y] = item.segs;
+    if (rowSegs) segRows[y] = rowSegs;
   }
 
   if (footer) lines.push(pad(`≋ ${footer.tsEmitted.slice(11, 16)} ${footer.sourceSession}: ${footer.body}`, cols));

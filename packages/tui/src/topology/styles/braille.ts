@@ -7,7 +7,7 @@ import { GraphCanvas } from "../canvas.js";
 import { edgeToken } from "../glyphs.js";
 import type { GraphLayout } from "../layout.js";
 import type { StyleContext } from "./hatchet.js";
-import { drawNodeBox, renderHatchet } from "./hatchet.js";
+import { drawClipIndicator, drawContainers, drawNodeBox, renderHatchet } from "./hatchet.js";
 import type { Token } from "../../theme.js";
 
 // braille dot bits by (subCol 0-1, subRow 0-3)
@@ -51,6 +51,7 @@ export function renderBraille(layout: GraphLayout, ctx: StyleContext, width: num
   // (2) OPAQUE boxes clear any pass-through segment, (3) the braille field
   // blits last but is protected-cell-aware, (4) arrowheads last of all.
   const canvas = new GraphCanvas(width);
+  drawContainers(canvas, layout, ctx);
   const field = new BrailleField();
   const arrows: Array<{ x: number; y: number; ch: string; token: ReturnType<typeof edgeToken> }> = [];
   for (const edge of layout.edges) {
@@ -78,6 +79,7 @@ export function renderBraille(layout: GraphLayout, ctx: StyleContext, width: num
   for (const p of layout.placed) drawNodeBox(canvas, p, ctx);
   field.blit(canvas); // protected-aware: never dots a box cell
   for (const a of arrows) if (!canvas.isProtected(a.x, a.y)) canvas.set(a.x, a.y, a.ch, a.token, true);
+  drawClipIndicator(canvas, layout, width);
   canvas.text(2, canvas.height + 1, "braille sub-cell edges · TIER-2 (modern terminals) · fallback = hatchet box-drawing", "dim");
   return canvas;
 }

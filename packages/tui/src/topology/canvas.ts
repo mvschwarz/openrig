@@ -72,10 +72,10 @@ export class GraphCanvas {
    * The FULL rect is cleared first and marked protected: boxes are OPAQUE —
    * edge lines drawn earlier never show through an interior, and sub-cell
    * (braille) passes must not dot inside them. */
-  box(x: number, y: number, w: number, h: number, token?: Token, double = false): void {
+  box(x: number, y: number, w: number, h: number, token?: Token, double = false, protect = true): void {
     for (let row = y; row < y + h; row++)
       for (let col = x; col < x + w; col++) this.set(col, row, " ");
-    this.protectedRects.push({ x, y, w, h });
+    if (protect) this.protectedRects.push({ x, y, w, h });
     const [hz, vt, tl, tr, bl, br] = double ? ["═", "║", "╔", "╗", "╚", "╝"] : ["─", "│", "┌", "┐", "└", "┘"];
     this.hline(x + 1, x + w - 2, y, hz!, token);
     this.hline(x + 1, x + w - 2, y + h - 1, hz!, token);

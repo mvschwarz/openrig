@@ -20,12 +20,12 @@ export function isGraphStyle(value: string): value is GraphStyle {
 export function renderGraphStyle(style: string, graph: RigGraph, ctx: StyleContext, width: number): GraphCanvas {
   switch (style) {
     case "braille":
-      return renderBraille(layoutGraph(graph, width), ctx, width, false);
+      return renderBraille(layoutGraph(graph, width, ctx.rig), ctx, width, false);
     case "braille-fallback":
-      return renderBraille(layoutGraph(graph, width), ctx, width, true);
+      return renderBraille(layoutGraph(graph, width, ctx.rig), ctx, width, true);
     default:
       // hatchet is the mainline AND the unknown-style safety floor — the
       // reducer already rejects unknown names before render (one surface)
-      return renderHatchet(layoutGraph(graph, width), ctx, width);
+      return renderHatchet(layoutGraph(graph, width, ctx.rig), ctx, width);
   }
 }
