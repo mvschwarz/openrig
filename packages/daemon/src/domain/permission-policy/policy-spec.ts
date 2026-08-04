@@ -71,6 +71,7 @@ export function validatePolicySpec(fm: Record<string, unknown>): ValidationResul
   if (fm["policy_schema_version"] !== 1) errors.push("policy_schema_version must be the number 1");
   if (typeof fm["name"] !== "string" || (fm["name"] as string).length === 0) errors.push("name must be a non-empty string");
   if (typeof fm["source"] !== "string" || !SOURCES.has(fm["source"] as string)) errors.push("source must be 'builtin' or 'custom'");
+  if (typeof fm["description"] !== "string" || (fm["description"] as string).length === 0) errors.push("description must be a non-empty string");
 
   const surface = fm["surface"];
   if (typeof surface !== "string" || !SURFACES.has(surface)) {
@@ -86,8 +87,10 @@ export function validatePolicySpec(fm: Record<string, unknown>): ValidationResul
     // config
     if (fm["launch_posture"] !== undefined) errors.push("config-surface policy must NOT carry launch_posture (flag-surface field)");
     if (!DEFAULT_POSTURES.has(fm["default_posture"] as string)) errors.push("config-surface policy requires default_posture ('allow', 'ask' or 'deny')");
+    // The schema requires all four action-list fields present (use [] for none) — not optional.
     for (const f of ACTION_LIST_FIELDS) {
-      if (fm[f] !== undefined && !isStringList(fm[f])) errors.push(`${f} must be a list of strings`);
+      if (fm[f] === undefined) errors.push(`config-surface policy requires '${f}' (a list of strings; use [] for none)`);
+      else if (!isStringList(fm[f])) errors.push(`${f} must be a list of strings`);
     }
   }
 
