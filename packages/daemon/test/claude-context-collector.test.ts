@@ -284,7 +284,15 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     expect(written["/project/.openrig/context-collector.cjs"]).toBe("copied:/fake/collector.js");
   });
 
-  it("deliverStartup provisions user-scope Claude permissions for rig commands", async () => {
+  // OPR.0.4.8.2 AGNOSTIC PERMISSION RIP-OUT, ADOPTED for the 0.5.0 fold by PM ruling 2026-08-05
+  // (fold-wave qitem 79159e6f): the user-scope `Bash(rig:*)` permission write (provisionRigPermissions
+  // / CONVENIENCE_BASELINE, assessment row C2) is RIPPED OUT — deliverStartup NEVER touches
+  // ~/.claude/settings.json permissions; policy lives only in the sanctioned permission_policy surface.
+  // This INVERTS the prior 0.5.0 "provisions user-scope permissions" pin (contradictory content the
+  // ruling resolved in favor of the rip-out). Cites: PM ruling 2026-08-05; rip-out commit 1c4e2db1
+  // ("the new code simply never touches settings.json"); missions/release-0.4.8/slices/
+  // 02-agnostic-permission-rip-out (PERMISSION-POLICY-RESTEER).
+  it("deliverStartup does NOT write user-scope Claude settings.json permissions (OPR.0.4.8.2 rip-out C2)", async () => {
     const adapter = new ClaudeCodeAdapter({
       tmux: mockTmux(),
       fsOps: mockFsOps(),
@@ -294,10 +302,9 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
 
     await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "dev-impl@test", nodeId: "n1" } as any);
 
+    // The rip-out guarantee: no user-scope settings.json is written (permission injection is gone).
     const settingsPath = "/home/tester/.claude/settings.json";
-    expect(written[settingsPath]).toBeDefined();
-    const settings = JSON.parse(written[settingsPath]!);
-    expect(settings.permissions.allow).toContain("Bash(rig:*)");
+    expect(written[settingsPath]).toBeUndefined();
   });
 
   it("deliverStartup does not inject project-scope Claude permissions or MCP config without runtime resources", async () => {
