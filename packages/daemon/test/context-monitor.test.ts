@@ -112,6 +112,15 @@ describe("ContextMonitor", () => {
     return { rig, node };
   }
 
+  function seedStubNode(logicalId = "dev.stub", sessionName = "dev-stub@test") {
+    const rig = rigRepo.createRig("test-rig-stub");
+    const node = rigRepo.addNode(rig.id, logicalId, { runtime: "stub" });
+    const session = sessionRegistry.registerSession(node.id, sessionName);
+    // Mark as running so the monitor considers it eligible
+    db.prepare("UPDATE sessions SET status = 'running' WHERE id = ?").run(session.id);
+    return { rig, node, sessionName };
+  }
+
   function writeSidecar(sessionName: string, data: Record<string, unknown>) {
     const safeName = sessionName.replace(/[^a-zA-Z0-9@._-]/g, "_");
     writeFileSync(join(tmpDir, "context", `${safeName}.json`), JSON.stringify(data));
@@ -205,6 +214,34 @@ describe("ContextMonitor", () => {
     expect(usage.availability).toBe("known");
     expect(usage.source).toBe("codex_token_count_jsonl");
     expect(usage.usedPercentage).toBe(88);
+  });
+
+  // STUB-A (51-01 GAP-1): running stub sessions with a context sidecar are polled and observed
+  it("pollOnce discovers running stub sessions and persists context usage", async () => {
+    const { node, sessionName } = seedStubNode();
+    writeSidecar(sessionName, { ...VALID_SIDECAR, session_name: sessionName });
+
+    await monitor.pollOnce();
+
+    const usage = store.getForNode(node.id, sessionName);
+    expect(usage.availability).toBe("known");
+    expect(usage.usedPercentage).toBe(67);
+  });
+
+  // STUB-B (51-01 GAP-2): stub sessions consume their own sidecar but must NOT
+  // provision the Claude context collector (no settings.local.json / collector
+  // write into a stub seat's cwd) — mirrors the codex non-provisioning contract.
+  it("pollOnce does not provision the Claude context collector for stub sessions", async () => {
+    const { node, sessionName } = seedStubNode("dev.stubb", "dev-stubb@test");
+    writeSidecar(sessionName, { ...VALID_SIDECAR, session_name: sessionName });
+
+    await monitor.pollOnce();
+
+    // The sidecar is still consumed (readAndNormalize is unconditional)...
+    const usage = store.getForNode(node.id, sessionName);
+    expect(usage.availability).toBe("known");
+    // ...but no Claude-specific collector provisioning happens for a stub seat.
+    expect(ensureContextCollectorSpy).not.toHaveBeenCalled();
   });
 
   // T3: pollOnce persists unknown for missing sidecar

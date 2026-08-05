@@ -164,6 +164,7 @@ export class ContextMonitor {
       LEFT JOIN bindings b ON b.node_id = n.id
       WHERE (
           (n.runtime = 'claude-code' AND s.status = 'running')
+          OR (n.runtime = 'stub' AND s.status = 'running')
           OR (
             n.runtime = 'codex'
             AND (
@@ -185,10 +186,16 @@ export class ContextMonitor {
       });
     }
 
-    this.claudeContextProvisioner?.ensureContextCollector({
-      cwd: session.cwd ?? undefined,
-      tmuxSession: session.session_name,
-    });
+    // Only claude-code seats get the Claude context collector provisioned into
+    // their cwd. A runtime:stub seat self-provides its context sidecar, so the
+    // monitor consumes it via readAndNormalize below WITHOUT writing any
+    // Claude-specific collector config into the stub's cwd.
+    if (session.runtime === "claude-code") {
+      this.claudeContextProvisioner?.ensureContextCollector({
+        cwd: session.cwd ?? undefined,
+        tmuxSession: session.session_name,
+      });
+    }
     return this.store.readAndNormalize(session.session_name);
   }
 
