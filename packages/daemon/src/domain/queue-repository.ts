@@ -343,6 +343,29 @@ function detectQueueColumn(db: Database.Database, columnName: string): boolean {
 const COMPACT_QUEUE_COLUMNS =
   "qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, blocked_on, handed_off_to, handed_off_from, expires_at, closure_reason, closure_target, closure_required_at, claimed_at, last_nudge_attempt, last_nudge_result, last_heartbeat, resolution, target_repo";
 
+/**
+ * 51-09 increment 4 — stamp-at-write: the STORED `source_session` IS the origin
+ * triple `<member>@<rig>@<selfHostId>`, matching the envelope's always-suffix
+ * rule (the daemon receiving a create is the sender's host, so getSelfHostId()
+ * is the sender's host — captured at write, correct even for a row later read
+ * cross-host). FAIL-OPEN: when the self-id is not yet reconciled (getSelfHostId()
+ * null) OR the value is not a bare `member@rig` (legacy / malformed / already
+ * carries a host suffix), the value is left UNCHANGED (today's 2-part) — no new
+ * failure mode, existing 2-part behavior preserved wherever no self-id exists.
+ * One convention (stamp-at-write), so every read surface sees the triple with no
+ * render-time logic.
+ */
+export function stampSelfHostSuffix(session: string): string;
+export function stampSelfHostSuffix(session: undefined): undefined;
+export function stampSelfHostSuffix(session: string | undefined): string | undefined;
+export function stampSelfHostSuffix(session: string | undefined): string | undefined {
+  if (session === undefined) return undefined;
+  const selfId = getSelfHostId();
+  if (!selfId) return session;
+  if (session.split("@").length !== 2) return session; // not a bare member@rig — untouched
+  return `${session}@${selfId}`;
+}
+
 export class QueueRepository {
   readonly db: Database.Database;
   readonly transitionLog: QueueTransitionLog;
@@ -475,6 +498,10 @@ export class QueueRepository {
   }
 
   async create(input: QueueCreateInput): Promise<QueueItem> {
+    // 51-09 incr 4 — stamp the origin host onto the STORED sender identity once,
+    // before validation/insert/idempotency, so the row's source_session IS the
+    // triple (fail-open to 2-part when no self-id / not a bare member@rig).
+    input = { ...input, sourceSession: stampSelfHostSuffix(input.sourceSession) };
     if (!this.validateRig(input.destinationSession)) {
       throw new QueueRepositoryError(
         "unknown_destination_rig",

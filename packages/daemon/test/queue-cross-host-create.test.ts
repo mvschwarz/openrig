@@ -28,6 +28,7 @@ import {
 } from "../src/domain/queue-repository.js";
 import { queueRoutes, crossHostProvenanceTags, CROSS_HOST_TAG } from "../src/routes/queue.js";
 import type { HostRegistry } from "../src/domain/hosts/hosts-registry-reader.js";
+import { setSelfHostId } from "../src/domain/hosts/fanout-contract.js";
 
 const REGISTRY: HostRegistry = {
   hosts: [
@@ -136,6 +137,50 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
     expect(capture.body?.["tags"]).toContain("existing");
     // NO local row (origin-owns-the-record).
     expect(rowCount(db)).toBe(0);
+  });
+
+  // 51-09 incr 4a correction — STAMP-AT-FORWARD: the forwarding daemon IS the
+  // origin/sender host, so it stamps its OWN self-id onto sourceSession when
+  // building the forward body. Otherwise the DESTINATION daemon's create() would
+  // stamp the RECEIVER's host onto a bare member@rig — sender-identity FORGERY on
+  // exactly the cross-host path this slice exists to make honest (replies would
+  // route to the wrong host). The not-bare guard then protects it at the remote.
+  it("cross-host create STAMPS the ORIGIN self-id onto sourceSession at FORWARD (never the receiver)", async () => {
+    setSelfHostId("host-origin");
+    try {
+      const capture: { body?: Record<string, unknown> } = {};
+      const app = makeApp({
+        db, bus,
+        fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => {
+          capture.body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return jsonResponse({ qitemId: "qitem-fwd", destinationSession: "dev@rig-b" }, 201);
+        }) as unknown as typeof fetch,
+      });
+      const res = await post(app, { ...BASE, hostId: "vps-b" }); // BASE.sourceSession = "orch@rig-a" (bare)
+      expect(res.status).toBe(201);
+      // origin-stamped (host-origin), NOT the receiver vps-b.
+      expect(capture.body?.["sourceSession"]).toBe("orch@rig-a@host-origin");
+    } finally {
+      setSelfHostId(null);
+    }
+  });
+
+  it("cross-host create preserves an ALREADY-triple sourceSession verbatim at forward (origin not re-forged)", async () => {
+    setSelfHostId("host-origin");
+    try {
+      const capture: { body?: Record<string, unknown> } = {};
+      const app = makeApp({
+        db, bus,
+        fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => {
+          capture.body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return jsonResponse({ qitemId: "qitem-fwd", destinationSession: "dev@rig-b" }, 201);
+        }) as unknown as typeof fetch,
+      });
+      await post(app, { ...BASE, sourceSession: "orch@rig-a@host-elsewhere", hostId: "vps-b" });
+      expect(capture.body?.["sourceSession"]).toBe("orch@rig-a@host-elsewhere");
+    } finally {
+      setSelfHostId(null);
+    }
   });
 
   it("cross-host create to a URL-only (anonymous) host: forward omits Authorization; bearer host still sends it", async () => {
