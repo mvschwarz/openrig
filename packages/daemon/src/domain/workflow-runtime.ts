@@ -1000,10 +1000,14 @@ export class WorkflowRuntime {
 
       // A parked (waiting) frontier packet keeps its park on the
       // successor — route changes the owner, never the recorded state.
-      // summary/evidenceRef passed explicitly too (belt + suspenders
-      // with the create-side carry): validateHumanPark evaluates the
-      // EFFECTIVE values, so a human park re-parks with its fields
-      // intact instead of throwing human_route_fields_required.
+      // OPR.0.5.1 slice-51-06 D2: summary/evidenceRef are NOT re-supplied
+      // here. The create above (create-side carry) already put them on the
+      // successor, and validateHumanPark evaluates the EFFECTIVE values
+      // (input ?? item), so a human re-park still validates from the
+      // carried fields. Re-supplying them made this a non-park metadata
+      // update, which the D2 guard rejects for a NON-human blocker —
+      // rolling back a valid route with HTTP 500. Dropping the redundant
+      // re-submission keeps the metadata (from create) without tripping D2.
       if (oldPacket.state === "blocked" && oldPacket.blockedOn) {
         const reparked = this.queueRepo.updateWithinTransaction({
           qitemId: created.qitemId,
@@ -1012,8 +1016,6 @@ export class WorkflowRuntime {
           closureReason: "blocked_on",
           closureTarget: oldPacket.blockedOn,
           blockedOn: oldPacket.blockedOn,
-          summary: oldPacket.summary ?? undefined,
-          evidenceRef: oldPacket.evidenceRef ?? undefined,
           transitionNote: `workflow route: park preserved (${oldPacket.blockedOn})`,
         });
         persistedEvents.push(reparked.persistedEvent);

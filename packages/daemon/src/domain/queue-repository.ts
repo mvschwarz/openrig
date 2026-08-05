@@ -186,8 +186,10 @@ export interface QueueUpdateInput {
    * updatable AT THE PARK MOMENT (state=blocked with a human-seat blocker),
    * not create-only: `rig queue block --summary --evidence-ref` persists
    * them onto the EXISTING item so the attention query + Packet 2 read
-   * them. Ignored (not persisted) on non-park transitions to keep the
-   * update surface tight.
+   * them. OPR.0.5.1 slice-51-06 D2: supplying them on a NON-park transition
+   * is REJECTED (QueueRepositoryError "summary_evidence_not_persistable")
+   * before any mutation — not silently ignored — so a caller never believes
+   * unpersistable metadata was saved.
    */
   summary?: string | null;
   evidenceRef?: string | null;

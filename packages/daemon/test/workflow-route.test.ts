@@ -65,6 +65,48 @@ const SPEC = `workflow:
       - failed
 `;
 
+// OPR.0.5.1 slice-51-06 D2 bounded correction — a handler-role-gated step (metadata rides the
+// packet) whose exit=waiting parks it on a NON-HUMAN blocker ("external-gate"). Routing that packet
+// must NOT trip D2's non-park metadata reject (route re-supplies redundant summary/evidence).
+const SPEC_GATED = `workflow:
+  id: route-repark-fixture
+  version: 1
+  entry:
+    role: producer
+  roles:
+    producer:
+      preferred_targets:
+        - producer@rig
+    handler:
+      preferred_targets:
+        - handler@rig
+  steps:
+    - id: produce
+      actor_role: producer
+      allowed_exits:
+        - handoff
+        - failed
+      next_hop:
+        suggested_roles:
+          - handler
+    - id: review
+      actor_role: handler
+      gate:
+        target: handler
+        summary: needs handler sign-off
+        evidence_ref: proof/review.md
+      allowed_exits:
+        - waiting
+        - done
+        - failed
+  invariants:
+    allowed_exits:
+      - handoff
+      - waiting
+      - done
+      - failed
+`;
+
 function buildApp(opts: { eventBus: EventBus; runtime: WorkflowRuntime }): Hono {
   const app = new Hono();
   app.use("*", async (c, next) => {
@@ -80,6 +122,7 @@ describe("workflow route (WF3 FR-4 — close+recreate+rebind)", () => {
   let db: Database.Database;
   let bus: EventBus;
   let runtime: WorkflowRuntime;
+  let queueRepo: QueueRepository;
   let app: Hono;
   let tmp: string;
   let specPath: string;
@@ -95,7 +138,7 @@ describe("workflow route (WF3 FR-4 — close+recreate+rebind)", () => {
     ]);
     bus = new EventBus(db);
     db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
-    const queueRepo = new QueueRepository(db, bus, { validateRig: () => true });
+    queueRepo = new QueueRepository(db, bus, { validateRig: () => true });
     runtime = new WorkflowRuntime({ db, eventBus: bus, queueRepo });
     app = buildApp({ eventBus: bus, runtime });
     tmp = mkdtempSync(join(tmpdir(), "wf-route-"));
@@ -417,5 +460,63 @@ describe("workflow route (WF3 FR-4 — close+recreate+rebind)", () => {
     });
     expect(res.status).toBe(404);
     void WorkflowProjectorError;
+  });
+
+  // OPR.0.5.1 slice-51-06 D2 bounded correction (terminal NOT-CLEAR regression). RED before the
+  // fix: routing a handler-gated metadata packet that is projected WAITING on a non-human blocker
+  // tripped D2 (the repark redundantly re-supplied summary/evidence) -> the route txn rolled back
+  // and POST /:id/route surfaced HTTP 500 summary_evidence_not_persistable. GREEN after: route
+  // commits, the successor retains the metadata (from create-side carry) on the exact non-human
+  // blocker, and the frontier rebinds with no orphan.
+  it("D2×route: a handler-gated metadata packet WAITING on a non-human blocker routes cleanly (no 500, metadata retained, frontier rebound)", async () => {
+    const gatedPath = join(tmp, "gated.yaml");
+    writeFileSync(gatedPath, SPEC_GATED);
+    const inst = await runtime.instantiate({ specPath: gatedPath, rootObjective: "repark", createdBySession: "orch@rig" });
+    const instanceId = inst.instance.instanceId;
+    const frontier = (): string[] => runtime.instanceStore.getByIdOrThrow(instanceId).currentFrontier;
+
+    // produce -> review (handler-gated: summary/evidence ride the review packet, dest handler@rig)
+    await runtime.project({ instanceId, currentPacketId: inst.entryQitemId, exit: "handoff", actorSession: "producer@rig" });
+    const reviewPacket = frontier()[0]!;
+    // review projected WAITING -> blocked on the NON-HUMAN "external-gate", metadata retained
+    await runtime.project({ instanceId, currentPacketId: reviewPacket, exit: "waiting", actorSession: "handler@rig" });
+    const waited = queueRepo.getByIdOrThrow(reviewPacket);
+    expect(waited.state).toBe("blocked");
+    expect(waited.blockedOn).toBe("external-gate");
+    expect(waited.summary).toBe("needs handler sign-off");
+    expect(waited.evidenceRef).toBe("proof/review.md");
+    const before = runtime.instanceStore.getByIdOrThrow(instanceId);
+    expect(before.currentStepId).toBe("review");
+    expect(before.status).toBe("waiting");
+
+    // REAL POST /api/workflow/:instance_id/route (pre-fix: 500 summary_evidence_not_persistable)
+    const res = await app.request(`/api/workflow/${instanceId}/route`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ toSession: "handler2@rig", actorSession: "orch@rig", reason: "rebalance" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { newPacketId: string };
+
+    // successor is the SOLE frontier; the workflow stays waiting on the SAME step (route ≠ advance)
+    const after = runtime.instanceStore.getByIdOrThrow(instanceId);
+    expect(after.currentFrontier).toEqual([body.newPacketId]);
+    expect(after.currentStepId).toBe("review");
+    expect(after.currentStepId).toBe(before.currentStepId);
+    expect(after.status).toBe("waiting");
+    // successor: owner=handler2@rig, still blocked on the EXACT non-human blocker, metadata RETAINED
+    const successor = queueRepo.getByIdOrThrow(body.newPacketId);
+    expect(successor.destinationSession).toBe("handler2@rig");
+    expect(successor.state).toBe("blocked");
+    expect(successor.blockedOn).toBe("external-gate");
+    expect(successor.summary).toBe("needs handler sign-off");
+    expect(successor.evidenceRef).toBe("proof/review.md");
+    // the OLD blocked packet is closed HONESTLY: handed-off with the EXACT closure target (no orphan)
+    const old = queueRepo.getByIdOrThrow(reviewPacket);
+    expect(old.state).toBe("handed-off");
+    expect(old.closureReason).toBe("handed_off_to");
+    expect(old.closureTarget).toBe("handler2@rig");
+    expect(old.handedOffTo).toBe("handler2@rig");
+    expect(after.currentFrontier).not.toContain(reviewPacket);
   });
 });
