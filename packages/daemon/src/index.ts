@@ -32,18 +32,23 @@ export async function drainSlowOpRecorderOnShutdown(
   const timeoutMs = opts?.timeoutMs ?? SLOW_OP_SHUTDOWN_DRAIN_TIMEOUT_MS;
 
   let drainError: unknown;
+  // Track rejection independently of its value: a Promise may reject with a
+  // falsey value (undefined / null / false / 0 / ""), which is still a failure.
+  let rejected = false;
   let settled = false;
   const drainPromise = Promise.resolve()
     .then(() => drain.call(recorder))
     .then(
       () => { settled = true; },
-      (error) => { drainError = error; settled = true; },
+      (error) => { drainError = error; rejected = true; settled = true; },
     );
 
+  // This finite timer is the ONLY thing keeping shutdown alive long enough to
+  // enforce the bound once the servers + recorder Worker are unreferenced, so
+  // it must stay referenced (do NOT unref it); it is cleared after settlement.
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<void>((resolve) => {
     timer = setTimeout(resolve, timeoutMs);
-    timer.unref?.();
   });
 
   await Promise.race([drainPromise, timeoutPromise]);
@@ -53,7 +58,7 @@ export async function drainSlowOpRecorderOnShutdown(
     log("[slow-operation] shutdown drain timed out; instrumentation records may be lost");
     return 1;
   }
-  if (drainError) {
+  if (rejected) {
     log("[slow-operation] shutdown drain failed; instrumentation records may be lost", drainError);
     return 1;
   }
