@@ -104,6 +104,14 @@ function extractRigName(sessionName: string): string | undefined {
   return sessionRigOf(sessionName);
 }
 
+/** The ONE active-rig predicate (LEG-7 extraction, fold-wave qitem 79159e6f): a rig is active unless
+ *  its lifecycle status is exactly "stopped". Shared by the bare-default table projection and the
+ *  rigsOnHost scope count so the "1 of N" label and the shown rows can never diverge (the
+ *  derived-label-must-carry-liveness class the LEG-2 QA flagged). */
+export function isActiveRig(entry: { status?: string | null }): boolean {
+  return entry.status !== "stopped";
+}
+
 const HUMAN_RIG_BUDGET = 50;
 const HUMAN_NODE_BUDGET = 100;
 
@@ -939,7 +947,7 @@ Exit codes:
       // --rig, no --include-archived) stopped rigs fold into the count
       // line — history is what the default drops, not field of view.
       const bareDefault = !parsedFilter && !opts.rig && !opts.includeArchived;
-      const tableRows = bareDefault ? limited.filter((e) => e.status !== "stopped") : limited;
+      const tableRows = bareDefault ? limited.filter(isActiveRig) : limited;
       const stoppedCount = bareDefault ? limited.length - tableRows.length : 0;
 
       // FR-1 display element 1: the host rollup line.
@@ -1078,7 +1086,7 @@ async function handleNodes(
   // contract at ~L942). So rigsOnHost counts that SAME active set; counting every non-archived
   // entry (stopped included) would make "1 of N" disagree with what the operator sees when they
   // follow the hint (the derived-label-must-carry-liveness / width-clip-honesty class).
-  const rigsOnHost = rigRes.data.filter((r) => r.status !== "stopped").length;
+  const rigsOnHost = rigRes.data.filter(isActiveRig).length;
   const scope = scopedToSessionRig && rigsOnHost > 1
     ? { rig: opts.rig as string, rigsOnHost, hint: `1 of ${rigsOnHost} rigs shown; rig ps lists all; --rig NAME or -A for others` }
     : null;
