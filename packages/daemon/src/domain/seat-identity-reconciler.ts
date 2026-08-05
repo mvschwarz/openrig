@@ -3,7 +3,7 @@ import type Database from "better-sqlite3";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { SeatIdentityVerdict } from "./types.js";
 import { SeatIdentityStore, SelfHostIdentityStore } from "./seat-identity-store.js";
-import { RESERVED_HOST_IDS } from "./hosts/hosts-registry-reader.js";
+import { RESERVED_HOST_IDS, validateHostRegistry } from "./hosts/hosts-registry-reader.js";
 
 /** Default identity-reconcile cadence: 5s. Process identity changes rarely
  *  (a seat's pane/process is stable for its whole life), and the check is
@@ -279,6 +279,42 @@ function generateSelfHostId(): string {
   return `host-${randomUUID().slice(0, 8)}`;
 }
 
+// ── 51-09 increment 2b: self-id ↔ registry-id ALIGNMENT (arch ruling dfa65bfc) ─
+// Interpretation (ii): there is NO registry self-row (type-incoherent against the
+// closed HostEntry union); the alignment property is that the minted self-host id
+// must be a VALID, NON-RESERVED registry id so a REMOTE host can adopt it as a
+// registry key (transport-carries-host). We REUSE the canonical registry-id
+// validator (validateHostRegistry — the CLI/daemon lockstep twin, parity-pinned
+// in hosts-registry-parity.test.ts) via a single-entry probe rather than a
+// divergent copy of its rules (regex + reserved set). The probe fixes a valid
+// transport/target so ONLY the id can fail — ok===false iff the id is invalid.
+
+function isRegistryValidSelfId(id: string): boolean {
+  return validateHostRegistry(
+    { hosts: [{ id, transport: "ssh", target: "self-host-alignment-probe" }] },
+    "<self-host-identity>",
+  ).ok;
+}
+
+/**
+ * 51-09 increment 2b — the FAIL-CLOSED registry-alignment assert. A durable
+ * self-host id that is not a valid registry id could not be resolved by a remote
+ * host as a key (transport-carries-host breaks), so it is a fatal boot
+ * misconfiguration. Escalates increment 1's loud-conflict posture to a
+ * fail-closed assert-on-boot for the registry-alignment case, per the ruling.
+ */
+export function assertSelfHostIdRegistryAligned(hostId: string): void {
+  const probe = validateHostRegistry(
+    { hosts: [{ id: hostId, transport: "ssh", target: "self-host-alignment-probe" }] },
+    "<self-host-identity>",
+  );
+  if (!probe.ok) {
+    throw new Error(
+      `[self-host-identity] registry-alignment: self-host id '${hostId}' is not a valid registry id — remote hosts could not resolve it as a key. ${probe.error} Fix the operator host.name or drop the self-host record to re-key.`,
+    );
+  }
+}
+
 function normalizeCandidate(raw: string | null | undefined): string | null {
   if (typeof raw !== "string") return null;
   const trimmed = raw.trim();
@@ -319,6 +355,9 @@ export function reconcileSelfHostIdentity(
   if (existing) {
     store.touchReconciledAt(opts.nowIso);
     assertNeverReservedHostId(existing.hostId);
+    // 51-09 incr 2b: fail-closed if the stored self-id is not a valid registry id
+    // (a pre-2b-minted or DB-tampered id that a remote could not adopt as a key).
+    assertSelfHostIdRegistryAligned(existing.hostId);
     let conflict: SelfHostReconcileResult["conflict"] = null;
     if (candidate && !isReservedSeed(candidate) && candidate !== existing.hostId) {
       conflict = { storedId: existing.hostId, candidate };
@@ -329,8 +368,17 @@ export function reconcileSelfHostIdentity(
     return { hostId: existing.hostId, minted: false, conflict };
   }
 
-  const seed = candidate && !isReservedSeed(candidate) ? candidate : generateSelfHostId();
+  // 51-09 incr 2b: a host.name seed is adopted ONLY when it is a valid registry id
+  // (non-reserved via incr-1's case-insensitive guard AND registry-id-format valid),
+  // so a format-invalid operator host.name falls back to a generated valid id
+  // rather than minting an unusable, boot-bricking self-id.
+  const seed =
+    candidate && !isReservedSeed(candidate) && isRegistryValidSelfId(candidate)
+      ? candidate
+      : generateSelfHostId();
   assertNeverReservedHostId(seed);
   const record = store.mint(seed, opts.nowIso);
+  // Belt: the minted id (adopted-valid or generated) is registry-aligned.
+  assertSelfHostIdRegistryAligned(record.hostId);
   return { hostId: record.hostId, minted: true, conflict: null };
 }
