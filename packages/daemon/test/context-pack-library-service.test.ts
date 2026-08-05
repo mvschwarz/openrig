@@ -219,3 +219,33 @@ describe("estimateTokensFromBytes", () => {
     expect(estimateTokensFromBytes(100)).toBe(25);
   });
 });
+
+// Slice-03 lineage repair (R2 terminal HIGH-2): the version predicate must fire
+// on the LIVE ingestion path (scan → readPackEntry → parseManifest), not only in
+// a unit test. A forged version must be captured as a scan ERROR and NEVER
+// indexed as a resolvable entry.
+describe("ContextPackLibraryService — forged versions rejected live during scan (R2 HIGH-2)", () => {
+  let tmp: string;
+  let userRoot: string;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "context-pack-lib-ver-"));
+    userRoot = join(tmp, "user");
+    mkdirSync(userRoot, { recursive: true });
+  });
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("indexes neither a colon-bearing nor an overlong version — both surface as scan errors", () => {
+    writePack(userRoot, "colonver", "name: colonver\nversion: '1:0:0'\nfiles: []", {});
+    writePack(userRoot, "longver", `name: longver\nversion: '${"a".repeat(300)}'\nfiles: []`, {});
+    const lib = new ContextPackLibraryService({ roots: [{ path: userRoot, sourceType: "user_file" }] });
+    const result = lib.scan();
+    expect(result.count).toBe(0);
+    expect(result.errors).toHaveLength(2);
+    expect(result.errors.every((e) => /version/.test(e.error))).toBe(true);
+    expect(lib.getByRef("colonver")).toBeNull();
+    expect(lib.getByRef("longver")).toBeNull();
+  });
+});

@@ -4,7 +4,7 @@
 // the CLI trust boundary like the existing manifest hardening). PM watch: the
 // matrix pins the ACTUAL reject + no-write behavior verbatim, per clause.
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Command } from "commander";
@@ -117,5 +117,60 @@ describe("ATOM 2 — `context add` write boundary rejects unsafe install refs BE
     console.error = origErr;
     console.log = origLog;
     expect(existsSync(join(home, "context-packs", "packs", "compaction-restore", "manifest.yaml"))).toBe(true);
+  });
+
+  // Slice-03 lineage repair (R2 terminal HIGH-1): a lexically-safe path-like ref
+  // whose parent namespace segment is a SYMLINK must not let the copy escape the
+  // store. The destination namespace must be walked (lstat, reject symlink /
+  // non-dir) BEFORE any mutation — mirroring the daemon compose containment.
+  it("HIGH-1: rejects a symlinked destination namespace segment — `linked/escape` cannot write outside the store", async () => {
+    const home = isolatedHome();
+    const src = validSourcePack();
+    tmpSrcs.push(src);
+    const outside = mkdtempSync(join(tmpdir(), "ctx-add-outside-"));
+    tmpSrcs.push(outside);
+    const storeRoot = join(home, "context-packs");
+    mkdirSync(storeRoot, { recursive: true });
+    symlinkSync(outside, join(storeRoot, "linked")); // attacker-planted namespace segment
+    let failed = false;
+    const origErr = console.error;
+    const errLogs: string[] = [];
+    console.error = (...a: unknown[]) => { errLogs.push(a.map(String).join(" ")); };
+    const origExit = process.exitCode;
+    try {
+      await makeCmd().parseAsync(["node", "rig", "context", "add", src, "--name", "linked/escape"]);
+    } catch { /* commander exitOverride */ }
+    failed = process.exitCode === 1;
+    console.error = origErr;
+    process.exitCode = origExit;
+    expect(failed, "add must fail on a symlinked destination namespace").toBe(true);
+    expect(errLogs.join("\n")).toMatch(/symlink|namespace|unsafe/i);
+    // the REAL pin: nothing was copied THROUGH the symlink to the outside dir
+    expect(existsSync(join(outside, "escape")), "no escape write outside the store").toBe(false);
+    expect(readdirSync(outside), "outside dir untouched").toEqual([]);
+  });
+
+  // Slice-03 lineage repair (R2 terminal HIGH-2): the install boundary must
+  // enforce the bounded, delimiter-free version predicate BEFORE any write.
+  it("HIGH-2: rejects an unsafe manifest version at the install boundary BEFORE any fs mutation", async () => {
+    const home = isolatedHome();
+    const src = mkdtempSync(join(tmpdir(), "ctx-add-badver-"));
+    tmpSrcs.push(src);
+    writeFileSync(join(src, "manifest.yaml"), "name: badver\nversion: '1:0:0'\nfiles:\n  - path: notes.md\n    role: notes\n");
+    writeFileSync(join(src, "notes.md"), "# n\n");
+    let failed = false;
+    const origErr = console.error;
+    const errLogs: string[] = [];
+    console.error = (...a: unknown[]) => { errLogs.push(a.map(String).join(" ")); };
+    const origExit = process.exitCode;
+    try {
+      await makeCmd().parseAsync(["node", "rig", "context", "add", src, "--name", "badver"]);
+    } catch { /* commander exitOverride */ }
+    failed = process.exitCode === 1;
+    console.error = origErr;
+    process.exitCode = origExit;
+    expect(failed, "add must fail on an unsafe version").toBe(true);
+    expect(errLogs.join("\n")).toMatch(/version/i);
+    expect(existsSync(join(home, "context-packs")), "no store root created — rejected before write").toBe(false);
   });
 });

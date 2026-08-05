@@ -64,6 +64,12 @@ interface PreviewWire {
 // local install boundary. This must run before creating the context store.
 const SAFE_REF_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
+// Slice-03 lineage repair (R2 HIGH-2): the install boundary mirrors the daemon
+// bounded, delimiter-free version token (ref-safety.SAFE_VERSION) so an unsafe
+// version is rejected BEFORE any local write — matching the per-segment ref
+// mirror above.
+const SAFE_INSTALL_VERSION = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$/;
+
 function assertSafeInstallRef(ref: string): void {
   const safe =
     ref.length > 0 &&
@@ -93,6 +99,34 @@ function assertTreeHasNoSymlinks(root: string): void {
   }
 }
 
+// Slice-03 lineage repair (R2 HIGH-1): a lexically-safe path-like install ref
+// can still escape the store if one of its parent namespace segments is a
+// symlink (or a non-directory). Walk every ANCESTOR segment under the store root
+// and reject before the copy — the FS-canonical containment the lexical ref
+// check alone cannot give, mirroring the daemon compose namespace walk
+// (context-pack-library-service.ts). A not-yet-created segment (ENOENT) is safe:
+// cpSync will materialize it as a real directory.
+function assertDestinationNamespaceContained(targetRoot: string, installName: string): void {
+  const segments = installName.split("/");
+  let cursor = targetRoot;
+  for (const segment of segments.slice(0, -1)) {
+    cursor = join(cursor, segment);
+    let stat: ReturnType<typeof lstatSync>;
+    try {
+      stat = lstatSync(cursor);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") break;
+      throw err;
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(
+        `unsafe install ref '${installName}' — its namespace segment '${cursor}' is a symlink or non-directory, ` +
+          `so the copy would escape the context store root. Remove it or install under a different --name.`,
+      );
+    }
+  }
+}
+
 const ALLOWED_CONTEXT_PACK_SUFFIXES = new Set([".md", ".markdown", ".yaml", ".yml", ".txt"]);
 
 function validateContextPackManifestForInstall(manifestPath: string): void {
@@ -111,6 +145,13 @@ function validateContextPackManifestForInstall(manifestPath: string): void {
   }
   if (obj["version"] === undefined || obj["version"] === null) {
     throw new Error(`manifest at ${manifestPath} is missing required field 'version'`);
+  }
+  const versionStr = String(obj["version"]);
+  if (!SAFE_INSTALL_VERSION.test(versionStr)) {
+    throw new Error(
+      `manifest at ${manifestPath} has an invalid version '${versionStr}' — a version must be a single bounded ` +
+        `token [A-Za-z0-9][A-Za-z0-9._+-]{0,31} (no ':' or separator, no whitespace, ≤32 chars).`,
+    );
   }
   const files = obj["files"];
   if (!Array.isArray(files)) {
@@ -384,6 +425,7 @@ Examples:
         assertTreeHasNoSymlinks(sourceDir);
         const targetRoot = getDefaultOpenRigPath("context-packs");
         mkdirSync(targetRoot, { recursive: true });
+        assertDestinationNamespaceContained(targetRoot, installName);
         const targetDir = join(targetRoot, installName);
         if (existsSync(targetDir)) {
           throw new Error(`A context pack named '${installName}' already exists at ${targetDir}. Remove it first or use --name to install under a different name.`);

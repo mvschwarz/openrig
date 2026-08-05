@@ -7,6 +7,7 @@
 
 import { parse as parseYaml } from "yaml";
 import { ContextPackError, type ContextPackManifest, type ContextPackManifestFile } from "./context-pack-types.js";
+import { isSafePackVersion } from "./ref-safety.js";
 
 const ALLOWED_FILE_SUFFIXES = [".md", ".markdown", ".yaml", ".yml", ".txt"];
 
@@ -50,6 +51,20 @@ export function parseManifest(rawYaml: string, sourcePath: string): ContextPackM
     );
   }
   const version = String(versionRaw);
+  // Slice-03 lineage repair (R2 HIGH-2): enforce the bounded, delimiter-free
+  // version predicate at the ingestion chokepoint — a colon-bearing version
+  // forges a `<name>:<version>` store id and an overlong one breaches the OS
+  // filename bound. Rejecting here covers every scan/install path that flows
+  // through the parser.
+  if (!isSafePackVersion(version)) {
+    throw new ContextPackError(
+      "manifest_invalid",
+      `manifest at ${sourcePath} has an invalid version '${version}' — a version must be a single bounded token ` +
+        `[A-Za-z0-9][A-Za-z0-9._+-]{0,31} (no ':' or other separator, no whitespace, ≤32 chars) so it cannot ` +
+        `forge a '<name>:<version>' store id or breach the OS filename bound.`,
+      { sourcePath },
+    );
+  }
 
   const purpose = typeof obj["purpose"] === "string" ? (obj["purpose"] as string) : undefined;
 

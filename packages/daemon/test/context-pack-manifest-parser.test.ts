@@ -95,3 +95,31 @@ files:
     expect(m.estimatedTokens).toBeUndefined();
   });
 });
+
+// Slice-03 lineage repair (R2 terminal HIGH-2): the bounded, delimiter-free
+// version predicate (ref-safety.isSafePackVersion) must be ENFORCED at parse —
+// the ingestion chokepoint — not merely defined. A colon-bearing version forges
+// a `<name>:<version>` store id; an overlong version breaches the OS filename
+// bound (ENAMETOOLONG). Both are FIXED-IN-BUILD per the locked PRD and must be
+// rejected live, not just by a unit predicate.
+describe("parseManifest — bounded version predicate enforcement (R2 HIGH-2)", () => {
+  it("rejects a colon-bearing version with manifest_invalid (delimiter forgery vector)", () => {
+    expect(() => parseManifest("name: x\nversion: '1:0:0'\nfiles: []", "/x.yaml")).toThrow(ContextPackError);
+    try {
+      parseManifest("name: x\nversion: '1:0:0'\nfiles: []", "/x.yaml");
+    } catch (err) {
+      expect((err as ContextPackError).code).toBe("manifest_invalid");
+      expect((err as Error).message).toMatch(/version/);
+    }
+  });
+
+  it("rejects an overlong version (>32 chars → ENAMETOOLONG class)", () => {
+    const long = "1" + "a".repeat(300);
+    expect(() => parseManifest(`name: x\nversion: '${long}'\nfiles: []`, "/x.yaml")).toThrow(/version/);
+  });
+
+  it("still accepts a bounded delimiter-free version (dots/underscore/plus/hyphen allowed)", () => {
+    const m = parseManifest("name: x\nversion: '1.2.0-rc.1+build_7'\nfiles: []", "/x.yaml");
+    expect(m.version).toBe("1.2.0-rc.1+build_7");
+  });
+});
