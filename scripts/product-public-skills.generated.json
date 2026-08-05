@@ -10,16 +10,7 @@
       "messaging-the-human",
       "software-for-agents",
       "openrig-skills",
-      "orchestration-team",
-      "development-team",
-      "review-team",
-      "office-hours",
-      "context-builder",
-      "requirements-writer",
-      "ui-mockup",
-      "plan-review",
-      "exec-summary",
-      "backlog-capture"
+      "delegating-work"
     ],
     "ship_after_fix": [
       "openrig-user",
@@ -28,7 +19,8 @@
       "seat-continuity-and-handover",
       "claude-compaction-restore",
       "openrig-architect",
-      "agent-startup-and-context-ingestion"
+      "agent-startup-and-context-ingestion",
+      "applying-a-permission-policy"
     ],
     "ship_misses_add": [
       "topology-mutation-and-seat-management",
@@ -45,6 +37,18 @@
       "human-in-the-loop",
       "watchdog",
       "session-source-fork"
+    ],
+    "restored_role_pm_selected": [
+      "orchestration-team",
+      "development-team",
+      "review-team",
+      "office-hours",
+      "context-builder",
+      "requirements-writer",
+      "ui-mockup",
+      "plan-review",
+      "exec-summary",
+      "backlog-capture"
     ]
   },
   "vendored_ship_with_provenance": [

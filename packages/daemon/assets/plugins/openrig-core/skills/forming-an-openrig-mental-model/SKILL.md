@@ -243,6 +243,8 @@ If you're booting into a new seat in an OpenRig rig:
 
 You're now oriented enough to start doing useful work.
 
+**Permission policy (at setup):** OpenRig sets only a minimal usability floor on your harness permissions, then offers recommended policies you opt into (Locked / Standard / Open — or YOLO to bypass). If you're creating or bringing up a rig, that's a choice you make, not something OpenRig decides for you — see openrig-user's "Permission policy — pick one at setup" and the `applying-a-permission-policy` skill.
+
 ---
 
 ## Going deeper (canonical references)

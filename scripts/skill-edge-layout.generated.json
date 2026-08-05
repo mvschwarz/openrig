@@ -37,6 +37,12 @@
       ],
       "category": "core"
     },
+    "applying-a-permission-policy": {
+      "edges": [
+        "plugin"
+      ],
+      "category": null
+    },
     "attention-queue": {
       "edges": [
         "canonical",
@@ -77,6 +83,12 @@
         "spec"
       ],
       "category": "core"
+    },
+    "delegating-work": {
+      "edges": [
+        "plugin"
+      ],
+      "category": null
     },
     "development-team": {
       "edges": [
