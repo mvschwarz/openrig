@@ -1,7 +1,9 @@
+import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { SeatIdentityVerdict } from "./types.js";
-import { SeatIdentityStore } from "./seat-identity-store.js";
+import { SeatIdentityStore, SelfHostIdentityStore } from "./seat-identity-store.js";
+import { RESERVED_HOST_IDS } from "./hosts/hosts-registry-reader.js";
 
 /** Default identity-reconcile cadence: 5s. Process identity changes rarely
  *  (a seat's pane/process is stable for its whole life), and the check is
@@ -238,4 +240,97 @@ export class SeatIdentityReconciler {
       this.timer = null;
     }
   }
+}
+
+// ── 51-09 increment 1: durable daemon self-host identity ─────────────────────
+// Co-located with the seat-identity substrate per arch ruling cb19867f (extend,
+// do not invent a parallel identity lifecycle). Reconciled once AT BOOT.
+
+/**
+ * Reserved / non-identity host tokens that must NEVER become a self-host id: the
+ * registry reserved set ({kernel, host, local}, hosts-registry-reader) plus the
+ * bare display default "localhost" (host.name's default — display-only per DP4,
+ * never an identity). Compared case-insensitively.
+ */
+export const RESERVED_SELF_HOST_SEEDS = new Set<string>([...RESERVED_HOST_IDS, "localhost"]);
+
+function isReservedSeed(candidate: string): boolean {
+  return RESERVED_SELF_HOST_SEEDS.has(candidate.trim().toLowerCase());
+}
+
+/**
+ * Assert a self-host id is never empty and never a reserved/display token.
+ * Throws (loud, fail-closed) if violated — the never-'local' invariant guard.
+ */
+export function assertNeverReservedHostId(hostId: string): void {
+  const norm = hostId.trim().toLowerCase();
+  if (!norm) {
+    throw new Error("[self-host-identity] invariant: self-host id must be non-empty");
+  }
+  if (RESERVED_SELF_HOST_SEEDS.has(norm)) {
+    throw new Error(
+      `[self-host-identity] invariant: self-host id must never be a reserved/display token (got '${hostId}'; reserved: ${[...RESERVED_SELF_HOST_SEEDS].sort().join(", ")})`,
+    );
+  }
+}
+
+/** A collision-safe generated self-host id, used when no unambiguous operator seed exists. */
+function generateSelfHostId(): string {
+  return `host-${randomUUID().slice(0, 8)}`;
+}
+
+function normalizeCandidate(raw: string | null | undefined): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+export interface SelfHostReconcileResult {
+  hostId: string;
+  minted: boolean;
+  /**
+   * Populated (non-null) when a stored id already exists AND an operator
+   * candidate (host.name) differs from it — the identity is NEVER silently
+   * re-keyed; the stored id is kept and the conflict is surfaced loudly. This is
+   * the general loud-conflict mechanism increment 2 reuses for self-id ↔
+   * registry-id alignment.
+   */
+  conflict: { storedId: string; candidate: string } | null;
+}
+
+/**
+ * 51-09 increment 1 — mint-or-reconcile the daemon's durable self-host id at
+ * boot. First boot MINTS (seeding from an unambiguous operator host.name where
+ * present, else a generated collision-safe id); every subsequent boot RECONCILES
+ * (advances reconciled_at, keeps the id — restart ⇒ same id). host.name is a
+ * DISPLAY-ONLY candidate seed (arch ruling cb19867f / DP4); a reserved/default
+ * candidate is rejected in favour of a generated id. When a stored id exists and
+ * the operator candidate now differs, the id is KEPT (never silent re-key) and a
+ * LOUD conflict naming BOTH is surfaced.
+ */
+export function reconcileSelfHostIdentity(
+  store: SelfHostIdentityStore,
+  opts: { nowIso: string; hostNameCandidate?: string | null; log?: (message: string) => void },
+): SelfHostReconcileResult {
+  const log = opts.log ?? ((message: string) => console.error(message));
+  const candidate = normalizeCandidate(opts.hostNameCandidate);
+  const existing = store.get();
+
+  if (existing) {
+    store.touchReconciledAt(opts.nowIso);
+    assertNeverReservedHostId(existing.hostId);
+    let conflict: SelfHostReconcileResult["conflict"] = null;
+    if (candidate && !isReservedSeed(candidate) && candidate !== existing.hostId) {
+      conflict = { storedId: existing.hostId, candidate };
+      log(
+        `[self-host-identity] CONFLICT: operator host.name '${candidate}' differs from the minted self-host id '${existing.hostId}'. Keeping '${existing.hostId}' — a durable host identity is NEVER silently re-keyed. Re-key deliberately (drop the self-host record) or reconcile the display name.`,
+      );
+    }
+    return { hostId: existing.hostId, minted: false, conflict };
+  }
+
+  const seed = candidate && !isReservedSeed(candidate) ? candidate : generateSelfHostId();
+  assertNeverReservedHostId(seed);
+  const record = store.mint(seed, opts.nowIso);
+  return { hostId: record.hostId, minted: true, conflict: null };
 }

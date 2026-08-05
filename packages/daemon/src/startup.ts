@@ -54,7 +54,8 @@ import { LegacyBundleSourceResolver as BundleSourceResolver } from "./domain/bun
 import { PodBundleSourceResolver } from "./domain/bundle-source-resolver.js";
 import { PsProjectionService } from "./domain/ps-projection.js";
 import { SeatActivityService } from "./domain/seat-activity-service.js";
-import { SeatIdentityReconciler } from "./domain/seat-identity-reconciler.js";
+import { SeatIdentityReconciler, reconcileSelfHostIdentity } from "./domain/seat-identity-reconciler.js";
+import { SelfHostIdentityStore } from "./domain/seat-identity-store.js";
 import { UpCommandRouter } from "./domain/up-command-router.js";
 import { RigTeardownOrchestrator } from "./domain/rig-teardown.js";
 import { ResumeMetadataRefresher } from "./domain/resume-metadata-refresher.js";
@@ -160,6 +161,7 @@ import { nodePermissionPolicySchema } from "./db/migrations/055_node_permission_
 import { rigPermissionPolicySchema } from "./db/migrations/056_rig_permission_policy.js";
 import { nodePolicyProvenanceSchema } from "./db/migrations/057_node_policy_provenance.js";
 import { rigPolicyProvenanceSchema } from "./db/migrations/058_rig_policy_provenance.js";
+import { selfHostIdentitySchema } from "./db/migrations/059_self_host_identity.js";
 import { RigPolicyStore } from "./domain/rig-policy/rig-policy-store.js";
 import { MissionControlActionLog } from "./domain/mission-control/mission-control-action-log.js";
 import { MissionControlWriteContract } from "./domain/mission-control/mission-control-write-contract.js";
@@ -264,7 +266,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const codexHome = configuredCodexHome || nodePath.join(daemonHome, ".codex");
   const dbPath = opts?.dbPath ?? ":memory:";
   const db = createDb(dbPath);
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, inboxEntriesSchema, outboxEntriesSchema, projectClassificationsSchema, classifierLeasesSchema, viewsCustomSchema, watchdogJobsSchema, watchdogHistorySchema, workflowSpecsSchema, workflowInstancesSchema, workflowStepTrailsSchema, watchdogPolicyEnumExtensionSchema, missionControlActionsSchema, workspacePrimitiveSchema, queueTargetRepoSchema, workflowSpecsDiagnosticSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, queueItemSummarySchema, resumeVerificationSchema, seatIdentityVerdictsSchema, eventsNodeTypeIndexSchema, queueItemEvidenceRefSchema, workflowInstanceVersionSchema, workflowSpecJsonSchema, workflowResumeSchema, workflowInstanceBoundRigSchema, sessionsNodeIdIndexSchema, queueTransitionsArchiveSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, rigPolicyProvenanceSchema]);
+  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, inboxEntriesSchema, outboxEntriesSchema, projectClassificationsSchema, classifierLeasesSchema, viewsCustomSchema, watchdogJobsSchema, watchdogHistorySchema, workflowSpecsSchema, workflowInstancesSchema, workflowStepTrailsSchema, watchdogPolicyEnumExtensionSchema, missionControlActionsSchema, workspacePrimitiveSchema, queueTargetRepoSchema, workflowSpecsDiagnosticSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, queueItemSummarySchema, resumeVerificationSchema, seatIdentityVerdictsSchema, eventsNodeTypeIndexSchema, queueItemEvidenceRefSchema, workflowInstanceVersionSchema, workflowSpecJsonSchema, workflowResumeSchema, workflowInstanceBoundRigSchema, sessionsNodeIdIndexSchema, queueTransitionsArchiveSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, rigPolicyProvenanceSchema, selfHostIdentitySchema]);
+
+  // 51-09 increment 1 — establish the daemon's durable self-host identity at
+  // boot (mint on first boot, reconcile thereafter). host.name is a display-only
+  // CANDIDATE SEED (arch ruling cb19867f / DP4). Boot proceeds on a host.name
+  // conflict (the stored id is kept and the conflict is surfaced loudly).
+  reconcileSelfHostIdentity(new SelfHostIdentityStore(db), {
+    nowIso: new Date().toISOString(),
+    hostNameCandidate: new ContextPackSettingsStore().resolveOne("host.name").value as string,
+  });
 
   const rigRepo = new RigRepository(db);
   const sessionRegistry = new SessionRegistry(db);

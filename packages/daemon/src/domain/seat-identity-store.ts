@@ -144,3 +144,50 @@ export class SeatIdentityStore {
     }
   }
 }
+
+/** 51-09 increment 1 — the durable daemon self-host identity record. */
+export interface SelfHostIdentityRecord {
+  hostId: string;
+  mintedAt: string;
+  reconciledAt: string;
+}
+
+/**
+ * 51-09 increment 1 — thin durable store for the daemon's own self-host id
+ * (migration 059 `self_host_identity`, singleton row). Co-located with the
+ * seat-identity substrate per arch ruling cb19867f (extend, do not invent a
+ * parallel identity store). The reconciler mints once + reconciles at boot; this
+ * store is the DB access seam only (no policy — mint/reconcile decisions live in
+ * seat-identity-reconciler.ts). Reads are DEFENSIVE (table absent → null),
+ * matching SeatIdentityStore's fixture-tolerant contract.
+ */
+export class SelfHostIdentityStore {
+  constructor(private readonly db: Database.Database) {}
+
+  /** The current self-host record, or null when none has been minted. */
+  get(): SelfHostIdentityRecord | null {
+    try {
+      const row = this.db.prepare(
+        "SELECT host_id, minted_at, reconciled_at FROM self_host_identity WHERE singleton = 1",
+      ).get() as { host_id: string; minted_at: string; reconciled_at: string } | undefined;
+      return row ? { hostId: row.host_id, mintedAt: row.minted_at, reconciledAt: row.reconciled_at } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Insert the singleton self-host record (first boot only). minted_at == reconciled_at at mint. */
+  mint(hostId: string, nowIso: string): SelfHostIdentityRecord {
+    this.db.prepare(
+      "INSERT INTO self_host_identity (singleton, host_id, minted_at, reconciled_at) VALUES (1, ?, ?, ?)",
+    ).run(hostId, nowIso, nowIso);
+    return { hostId, mintedAt: nowIso, reconciledAt: nowIso };
+  }
+
+  /** Advance reconciled_at on the existing singleton row; host_id + minted_at are never touched. */
+  touchReconciledAt(nowIso: string): void {
+    this.db.prepare(
+      "UPDATE self_host_identity SET reconciled_at = ? WHERE singleton = 1",
+    ).run(nowIso);
+  }
+}
