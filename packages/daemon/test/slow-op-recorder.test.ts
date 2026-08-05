@@ -181,7 +181,10 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
         site: "test.sync.observer_failure",
       });
     } finally {
-      await recorder.close();
+      // This recorder's log path is intentionally unwritable (to force the
+      // begin-barrier failure above), so close() now correctly rejects on the
+      // latched lost-write durability — tolerate it in teardown.
+      await recorder.close().catch(() => {});
     }
   });
 
@@ -415,6 +418,37 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
     await recorder.close();
     expect(recorder.snapshot()).toMatchObject({ healthy: true });
     expect(emissions).toBe(0);
+  });
+
+  it("latches an acknowledged Worker write failure so flush/close cannot report a clean durable drain", async () => {
+    const mod = await loadRecorderModule();
+    expect(mod, "slow-op-recorder production module is missing").not.toBeNull();
+    if (!mod) return;
+
+    // Deterministic real Worker append rejection: the log's parent is a regular
+    // file, so the Worker's mkdirSync(dirname) fails ENOTDIR-class -> ok:false.
+    const dir = tempDir();
+    const notADir = path.join(dir, "regular-file");
+    fs.writeFileSync(notADir, "x");
+    const recorder = new mod.SlowOpRecorder({ logPath: path.join(notADir, "slow-operations.jsonl") });
+    let emissions = 0;
+    recorder.setDegradedHandler(() => { emissions += 1; });
+    recorder.recordMeasurement("test.write.fail", 300);
+
+    // A known-lost write must make the drain non-clean: flush rejects with the
+    // write-failure error (distinct from the worker-terminal error).
+    await expect(recorder.flush()).rejects.toBeInstanceOf(mod.SlowOpRecorderWriteError);
+    expect(recorder.snapshot()).toMatchObject({
+      healthy: false,
+      reason: "recorder_write_failed",
+      site: "recorder.worker",
+    });
+    expect(emissions).toBe(1);
+    // Wrapped operation identity is still authoritative after a write failure.
+    expect(recorder.runSync("test.after.write", () => 7)).toBe(7);
+    // close() preserves the drain failure (rejects) but still tears down finitely.
+    await expect(recorder.close()).rejects.toBeInstanceOf(mod.SlowOpRecorderWriteError);
+    expect(emissions).toBe(1);
   });
 
   it("isolates a throwing request observer so the route keeps its exact successful status and body", async () => {

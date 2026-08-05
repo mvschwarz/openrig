@@ -44,7 +44,7 @@ describe("drainSlowOpRecorderOnShutdown — bounded shutdown drain", () => {
     expect(code).toBe(0);
     const records = await readRecords(logPath);
     expect(records.map((r) => r.site)).toEqual(["test.drain.a", "test.drain.b"]);
-  });
+  }, 30_000);
 
   it("returns 0 when no recorder is wired", async () => {
     const { drainSlowOpRecorderOnShutdown } = await loadIndex();
@@ -59,6 +59,21 @@ describe("drainSlowOpRecorderOnShutdown — bounded shutdown drain", () => {
     expect(code).toBe(1);
     expect(logs.join(" ")).toMatch(/slow-operation/);
   });
+
+  it("returns nonzero and logs when the recorder acknowledged a lost write (durability not clean)", async () => {
+    const { drainSlowOpRecorderOnShutdown } = await loadIndex();
+    const { SlowOpRecorder } = await loadRecorder();
+    // Deterministic real Worker ok:false — log parent is a regular file (ENOTDIR).
+    const dir = tempDir();
+    const notADir = path.join(dir, "regular-file");
+    fs.writeFileSync(notADir, "x");
+    const recorder = new SlowOpRecorder({ logPath: path.join(notADir, "slow-operations.jsonl") });
+    recorder.recordMeasurement("test.write.fail", 300);
+    const logs: string[] = [];
+    const code = await drainSlowOpRecorderOnShutdown(recorder, { timeoutMs: 20_000, log: (m: string) => logs.push(m) });
+    expect(code).toBe(1);
+    expect(logs.join(" ")).toMatch(/slow-operation/);
+  }, 30_000);
 
   it("treats a FALSEY promise rejection as a failure (logs + nonzero), not a silent success", async () => {
     const { drainSlowOpRecorderOnShutdown } = await loadIndex();

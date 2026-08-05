@@ -27,6 +27,19 @@ export class SlowOpRecorderTerminatedError extends Error {
   }
 }
 
+/**
+ * OPR.0.4.3.21 (51elv2) — the named acknowledged-write-failure signal. The
+ * Worker is still alive (distinct from {@link SlowOpRecorderTerminatedError}),
+ * but it acknowledged that a record could not be durably written; flush()/close()
+ * reject with this so a known-lost record can never read as a clean durable drain.
+ */
+export class SlowOpRecorderWriteError extends Error {
+  constructor(reason: string) {
+    super(`slow-operation recorder write failed: ${reason}`);
+    this.name = "SlowOpRecorderWriteError";
+  }
+}
+
 export interface SlowOperationInstrumentation {
   runSync?<T>(site: string, fn: () => T): T;
   runStage?<T>(
@@ -127,6 +140,10 @@ export class SlowOpRecorder implements SlowOperationInstrumentation {
   // rejects every future post/flush so nothing waits forever or reports a
   // false durable drain.
   private terminalReason: string | null = null;
+  // OPR.0.4.3.21 (51elv2) — sticky latch set once the Worker acknowledges a
+  // record it could not durably write (ok:false). The Worker stays alive, but
+  // durability is lost, so flush()/close() must refuse to report a clean drain.
+  private acknowledgedWriteFailure = false;
 
   constructor(options: SlowOpRecorderOptions) {
     this.logPath = options.logPath;
@@ -138,7 +155,13 @@ export class SlowOpRecorder implements SlowOperationInstrumentation {
     this.worker.unref();
     this.worker.on("message", (message: { id?: string; ok?: boolean }) => {
       if (!message.id) return;
-      if (message.ok === false) this.markDegraded("recorder_write_failed", "recorder.worker");
+      if (message.ok === false) {
+        // Latch the lost durability BEFORE resolving this waiter (the write
+        // attempt is done, just failed): keep the one-shot degraded signal and
+        // waiter resolution, but flush()/close() will now refuse a clean drain.
+        this.acknowledgedWriteFailure = true;
+        this.markDegraded("recorder_write_failed", "recorder.worker");
+      }
       this.pending.get(message.id)?.resolve();
       this.pending.delete(message.id);
     });
@@ -236,6 +259,12 @@ export class SlowOpRecorder implements SlowOperationInstrumentation {
     // Rejects with SlowOpRecorderTerminatedError when the Worker is lost —
     // finite, and never a false durable-drain success.
     await this.postAndWait({ type: "flush" });
+    // The marker round-tripped, but if the Worker earlier acknowledged a write
+    // it could not persist, durability is unproven — reject so flush()/close()
+    // (and the production drain) never report a clean drain over a lost record.
+    if (this.acknowledgedWriteFailure) {
+      throw new SlowOpRecorderWriteError("recorder_write_failed");
+    }
   }
 
   async close(): Promise<void> {
