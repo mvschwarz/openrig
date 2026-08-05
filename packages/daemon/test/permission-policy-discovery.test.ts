@@ -155,8 +155,11 @@ describe("Seam C permission-policy discovery", () => {
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.result.warnings).toEqual([
-        'dev.impl: permission_policy ref="builtin:yolo" origin=builtin launch_posture=full_bypass',
+        // §6 reconciliation (PM ruling 2026-08-05, fold-wave qitem 79159e6f): main's already-folded
+        // preflight advisories (collision) are the FLOOR (first); the restacked permission-policy
+        // discovery warning is APPENDED after. Supersedes the 4.8 lineage's original policy-first order.
         'dev.impl: base/import collision in skills on "shared"',
+        'dev.impl: permission_policy ref="builtin:yolo" origin=builtin launch_posture=full_bypass',
       ]);
     } finally {
       db.close();
@@ -186,8 +189,11 @@ describe("Seam C permission-policy discovery", () => {
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.result.warnings).toEqual([
-        'dev.impl: permission_policy ref="builtin:yolo" origin=builtin launch_posture=full_bypass',
+        // §6 reconciliation (PM ruling 2026-08-05, fold-wave qitem 79159e6f): main's already-folded
+        // preflight advisories (collision) are the FLOOR (first); the restacked permission-policy
+        // discovery warning is APPENDED after. Supersedes the 4.8 lineage's original policy-first order.
         'dev.impl: base/import collision in skills on "shared"',
+        'dev.impl: permission_policy ref="builtin:yolo" origin=builtin launch_posture=full_bypass',
       ]);
     } finally {
       db.close();
@@ -223,8 +229,11 @@ describe("Seam C permission-policy discovery", () => {
       expect(response.status).toBe(201);
       const body = await response.json() as { warnings: string[] };
       expect(body.warnings).toEqual([
-        'dev.impl: permission_policy ref="builtin:yolo" origin=builtin launch_posture=full_bypass',
+        // §6 reconciliation (PM ruling 2026-08-05, fold-wave qitem 79159e6f): main's already-folded
+        // preflight advisories (collision) are the FLOOR (first); the restacked permission-policy
+        // discovery warning is APPENDED after. Supersedes the 4.8 lineage's original policy-first order.
         'dev.impl: base/import collision in skills on "shared"',
+        'dev.impl: permission_policy ref="builtin:yolo" origin=builtin launch_posture=full_bypass',
       ]);
     } finally {
       db.close();

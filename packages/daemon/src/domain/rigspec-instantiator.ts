@@ -320,6 +320,10 @@ interface PodInstantiatorDeps {
   nodeLauncher: NodeLauncher;
   startupOrchestrator: StartupOrchestrator;
   fsOps: AgentResolverFsOps;
+  /** §6 reconciliation: main's managed Claude activity-hook delivery asset paths, forwarded to
+   *  preflight (defaults to daemon-shipped assets; tests inject fixtures). Restores main's proven
+   *  threading, dropped when the restacked 4.8 instantiator won the warnings-site conflicts. */
+  claudeActivityAssets?: { relayPath?: string; manifestPath?: string };
   adapters: Record<string, RuntimeAdapter>;
   tmuxAdapter?: TmuxAdapter;
   /** PL-014 Item 6: optional context-pack library so AgentSpec
@@ -470,6 +474,7 @@ export class PodRigInstantiator {
       externalQualifiedIds: targetRig?.nodes.map((node) => node.logicalId),
       inheritedPermissionPolicy: this.inheritedPermissionPolicy(opts?.targetRigId),
       exec: this.deps.exec,
+      claudeActivityAssets: this.deps.claudeActivityAssets, // §6: restore main's activity-hook asset threading
     });
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
@@ -518,6 +523,7 @@ export class PodRigInstantiator {
       rigNameOverride: targetRig?.rig.name,
       inheritedPermissionPolicy: this.inheritedPermissionPolicy(opts?.targetRigId),
       exec: this.deps.exec,
+      claudeActivityAssets: this.deps.claudeActivityAssets, // §6: restore main's activity-hook asset threading
     });
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
@@ -1038,7 +1044,7 @@ export class PodRigInstantiator {
     }
 
     // 2. Preflight
-    const preflight = await rigPreflight({ rigSpecYaml, rigRoot, cwdOverride: opts?.cwdOverride, fsOps: this.deps.fsOps, exec: this.deps.exec });
+    const preflight = await rigPreflight({ rigSpecYaml, rigRoot, cwdOverride: opts?.cwdOverride, fsOps: this.deps.fsOps, exec: this.deps.exec, claudeActivityAssets: this.deps.claudeActivityAssets });
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
     }

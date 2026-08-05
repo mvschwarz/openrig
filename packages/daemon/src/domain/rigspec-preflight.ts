@@ -254,7 +254,10 @@ export async function rigPreflight(input: RigPreflightInput & { exec?: (cmd: str
  */
 export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: PreflightSpecContext): Promise<PreflightResult> {
   const errors: string[] = [];
-  const warnings = permissionPolicyDiscoveryWarnings(rigSpec, preflightCtx);
+  // §6 reconciliation (PM ruling 2026-08-05): seed EMPTY so main's already-folded activity-hook /
+  // collision warnings (pushed below during the checks) come FIRST; the incoming permission-policy
+  // discovery warnings are APPENDED at the return. Rationale + semantic fence at the return site.
+  const warnings: string[] = [];
 
   // 2. Validate session name components for all pod members
   const effectiveRigName = preflightCtx.rigNameOverride ?? rigSpec.name;
@@ -378,6 +381,18 @@ export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: 
     errors.push(...piErrors);
   }
 
+  // §6 RECONCILIATION — WARNING EMISSION ORDER (PM ruling 2026-08-05): ACTIVITY-HOOK-FIRST,
+  // POLICY-APPENDED. Fold-order = emission-order — main is the restack's fixed base and its
+  // already-folded managed-activity-hook warnings are the floor (emitted above during the checks);
+  // the incoming restacked permission-policy discovery warnings APPEND after here, matching the
+  // mechanical grain of the rebase + the gates-first discipline, and keeping the 0.5.0 train's
+  // existing warning content byte-stable under the restack (the actual stability invariant — npm
+  // compatibility is NOT implicated either way: what is live on npm is the POLICY chain cut from
+  // 0.4.7, the activity-hook content is unshipped local 0.5.0 work, so neither ordering existed
+  // anywhere before this merge; this pin freezes the merged order).
+  // SEMANTIC FENCE: this order is PRESENTATION ONLY. Any consumer that treats the first warning as
+  // higher-priority is a FINDING, not an ordering input — the pin freezes presentation, never semantics.
+  warnings.push(...permissionPolicyDiscoveryWarnings(rigSpec, preflightCtx));
   return { ready: errors.length === 0, errors, warnings };
 }
 
