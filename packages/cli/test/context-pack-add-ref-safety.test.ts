@@ -4,7 +4,7 @@
 // the CLI trust boundary like the existing manifest hardening). PM watch: the
 // matrix pins the ACTUAL reject + no-write behavior verbatim, per clause.
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Command } from "commander";
@@ -148,6 +148,31 @@ describe("ATOM 2 — `context add` write boundary rejects unsafe install refs BE
     // the REAL pin: nothing was copied THROUGH the symlink to the outside dir
     expect(existsSync(join(outside, "escape")), "no escape write outside the store").toBe(false);
     expect(readdirSync(outside), "outside dir untouched").toEqual([]);
+  });
+
+  it("HIGH-1: rejects a dangling destination leaf symlink through the normal CLI error path", async () => {
+    const home = isolatedHome();
+    const src = validSourcePack();
+    tmpSrcs.push(src);
+    const storeRoot = join(home, "context-packs");
+    const outside = join(home, "outside-missing");
+    const leaf = join(storeRoot, "dangle");
+    mkdirSync(storeRoot, { recursive: true });
+    symlinkSync(outside, leaf);
+    const origErr = console.error;
+    const errLogs: string[] = [];
+    console.error = (...a: unknown[]) => { errLogs.push(a.map(String).join(" ")); };
+    const origExit = process.exitCode;
+    try {
+      await makeCmd().parseAsync(["node", "rig", "context", "add", src, "--name", "dangle"]);
+      expect(process.exitCode, "normal CLI rejection, never a signal/abort").toBe(1);
+    } finally {
+      console.error = origErr;
+      process.exitCode = origExit;
+    }
+    expect(errLogs.join("\n")).toMatch(/symlink|already exists|unsafe/i);
+    expect(lstatSync(leaf).isSymbolicLink(), "dangling leaf remains unchanged").toBe(true);
+    expect(existsSync(outside), "outside target remains absent").toBe(false);
   });
 
   // Slice-03 lineage repair (R2 terminal HIGH-2): the install boundary must

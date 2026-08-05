@@ -427,7 +427,14 @@ Examples:
         mkdirSync(targetRoot, { recursive: true });
         assertDestinationNamespaceContained(targetRoot, installName);
         const targetDir = join(targetRoot, installName);
-        if (existsSync(targetDir)) {
+        let targetExists = false;
+        try {
+          lstatSync(targetDir);
+          targetExists = true;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+        }
+        if (targetExists) {
           throw new Error(`A context pack named '${installName}' already exists at ${targetDir}. Remove it first or use --name to install under a different name.`);
         }
         cpSync(sourceDir, targetDir, { recursive: true });
