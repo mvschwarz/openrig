@@ -340,6 +340,26 @@ describe("Rebooted rig preflight", () => {
     expect(result.errors.some((e) => e.includes("unsupported runtime"))).toBe(true);
   });
 
+  // Slice 51-01 stub-runtime — TEST-ONLY RED (undisputed mechanical FACT 1): a modern pod member
+  // with runtime: stub + a resolvable agent_ref must be ACCEPTED by preflight. RED now because
+  // SUPPORTED_RUNTIMES (rigspec-preflight.ts:133) omits "stub"; green once production adds it there.
+  // Encodes NO disputed hook/usage/compaction/packaging surface.
+  it("FACT1: accepts a modern pod member with runtime: stub + resolvable agent_ref [RED until SUPPORTED_RUNTIMES adds stub]", async () => {
+    const files: Record<string, string> = {
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
+    };
+    const rigYaml = makeRigYaml({
+      pods: [{
+        id: "dev", label: "Dev",
+        members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "stub", cwd: "." }],
+        edges: [],
+      }],
+    });
+    const result = await rigPreflight({ rigSpecYaml: rigYaml, rigRoot: RIG_ROOT, fsOps: mockFs(files) });
+    expect(result.ready, `preflight must accept runtime: stub; errors: ${JSON.stringify(result.errors)}`).toBe(true);
+    expect(result.errors).toEqual([]);
+  });
+
   // T7: missing cwd
   it("reports missing cwd", async () => {
     const files: Record<string, string> = {

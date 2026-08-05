@@ -229,6 +229,41 @@ describe("StartupOrchestrator", () => {
     expect(afterReadyIdx).toBeGreaterThan(afterFilesIdx);
   });
 
+  // Slice 51-01 stub-runtime — TEST-ONLY RED (undisputed mechanical FACT 3): the REAL StubRuntimeAdapter,
+  // driven through the REAL StartupOrchestrator, must ride the ordered sequence project → pre-launch
+  // deliver → launchHarness → checkReady → post-launch deliver and reach `ready`. Dynamic import keeps
+  // this file's other tests green; RED now because the adapter module is absent. Fully executable after
+  // the import: a BARE `StubRuntimeAdapter` export fails (methods absent/wrong ⇒ startNode never reaches
+  // ready and deliver is not invoked twice). A send_text-hinted file forces the post-launch phase.
+  // Requires the stub's hermetic testability (a determinism/hermetic design property of the shape).
+  // Encodes NO disputed hook/usage_limit/compaction/packaging surface. Construction deps are
+  // provisional-to-design, finalized when the adapter ships (post fresh Guard CLEAR).
+  it("FACT3: real stub adapter rides ordered project→pre-deliver→launch→ready→post-deliver to ready", async () => {
+    const { StubRuntimeAdapter } = await import("../src/adapters/stub-runtime-adapter.js") as { StubRuntimeAdapter: new (deps: unknown) => RuntimeAdapter }; // RED now: module absent
+    const seed = seedSession();
+    const t = mockTmux();
+    const adapter = new StubRuntimeAdapter({ tmux: t, runtime: "stub" });
+    const projectSpy = vi.spyOn(adapter, "project");
+    const deliverSpy = vi.spyOn(adapter, "deliverStartup");
+    const launchSpy = vi.spyOn(adapter, "launchHarness");
+    const readySpy = vi.spyOn(adapter, "checkReady");
+    const files = [
+      { path: "priming.txt", absolutePath: "/tmp/priming.txt", ownerRoot: "/tmp", deliveryHint: "send_text" as const, required: false, appliesOn: ["fresh_start" as const] },
+    ];
+    const result = await createOrchestrator({ tmux: t }).startNode(makeInput(seed, { adapter, resolvedStartupFiles: files }));
+    expect(result.startupStatus, "the real stub must reach ready through the real orchestrator").toBe("ready");
+    expect(deliverSpy, "deliverStartup must run on BOTH sides of launch").toHaveBeenCalledTimes(2);
+    const pIdx = projectSpy.mock.invocationCallOrder[0]!;
+    const preDeliver = deliverSpy.mock.invocationCallOrder[0]!;
+    const lIdx = launchSpy.mock.invocationCallOrder[0]!;
+    const rIdx = readySpy.mock.invocationCallOrder[0]!;
+    const postDeliver = deliverSpy.mock.invocationCallOrder[1]!;
+    expect(pIdx).toBeLessThan(preDeliver);
+    expect(preDeliver).toBeLessThan(lIdx);
+    expect(lIdx).toBeLessThan(rIdx);
+    expect(rIdx).toBeLessThan(postDeliver);
+  });
+
   // T6: non-idempotent restore action is skipped
   it("non-idempotent action skipped on restore", async () => {
     const seed = seedSession();

@@ -22,6 +22,7 @@ import { CheckpointStore } from "../src/domain/checkpoint-store.js";
 import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { RestoreOrchestrator, rollupRestoreRigResult } from "../src/domain/restore-orchestrator.js";
+import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { TmuxAdapter, type TmuxResult } from "../src/adapters/tmux.js";
 import type { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
@@ -1102,6 +1103,34 @@ describe("RestoreOrchestrator", () => {
       // Node should be "resumed"
       expect(result.result.nodes[0]!.status).toBe("resumed");
     }
+  });
+
+  // Slice 51-01 stub-runtime — TEST-ONLY RED (undisputed mechanical FACT 4): pod-aware restore dispatches
+  // resume to the REAL StubRuntimeAdapter keyed on runtime: stub, reaching "resumed" via the real
+  // launchHarness (the shipped resume path, not old helpers, not a renamed mock). Dynamic import keeps
+  // this file's other tests green; RED now because the adapter module is absent. Fully executable after
+  // the import: a BARE `StubRuntimeAdapter` export fails (launchHarness absent/wrong ⇒ not resumed).
+  // Construction deps are provisional-to-design; reaching "resumed" relies on the stub's hermetic
+  // testability (a determinism/hermetic design property). Encodes NO disputed surface.
+  it("FACT4: pod-aware restore dispatches resume to the real stub adapter (runtime: stub)", async () => {
+    const { StubRuntimeAdapter } = await import("../src/adapters/stub-runtime-adapter.js") as { StubRuntimeAdapter: new (deps: unknown) => RuntimeAdapter }; // RED now: module absent
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-1", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "stub", podId: "pod-1" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateResumeToken(session.id, "stub_id", "resume-token-123");
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "stub");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+    const adapter = new StubRuntimeAdapter({ tmux: {} as unknown, runtime: "stub" });
+    const launchSpy = vi.spyOn(adapter, "launchHarness");
+    const result = await createOrchestrator().restore(snap.id, { adapters: { "stub": adapter } });
+    expect(result.ok, "restore of a runtime: stub node must succeed via the real adapter").toBe(true);
+    expect(launchSpy, "resume must dispatch through the stub adapter's launchHarness").toHaveBeenCalled();
+    if (result.ok) expect(result.result.nodes[0]!.status).toBe("resumed");
   });
 
   it("pod-aware resume failure -> status 'failed' with startup error", async () => {

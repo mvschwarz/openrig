@@ -60,7 +60,7 @@ function makeRigSpec(overrides?: Partial<RigSpec>): RigSpec {
 }
 
 describe("PodRigInstantiator", () => {
-  function setup(fsFiles?: Record<string, string>) {
+  function setup(fsFiles?: Record<string, string>, extraAdapters?: Record<string, RuntimeAdapter>) {
     const db = createFullTestDb();
     const rigRepo = new RigRepository(db);
     const podRepo = new PodRepository(db);
@@ -76,7 +76,7 @@ describe("PodRigInstantiator", () => {
 
     const inst = new PodRigInstantiator({
       db, rigRepo, podRepo, sessionRegistry, eventBus, nodeLauncher, startupOrchestrator: startupOrch,
-      fsOps, adapters: { "claude-code": adapter, "codex": codexAdapter, "terminal": mockAdapter("terminal") },
+      fsOps, adapters: { "claude-code": adapter, "codex": codexAdapter, "terminal": mockAdapter("terminal"), ...(extraAdapters ?? {}) },
       tmuxAdapter: tmux,
     });
 
@@ -120,6 +120,29 @@ describe("PodRigInstantiator", () => {
     expect(result.ok).toBe(true);
     expect(adapter.project).toHaveBeenCalled();
     expect(adapter.checkReady).toHaveBeenCalled();
+    db.close();
+  });
+
+  // Slice 51-01 stub-runtime — TEST-ONLY RED (undisputed mechanical FACT 2): the NORMAL-SEAT
+  // preflight→materialize→instantiate path DISPATCHES to the runtime: stub adapter that is injected into
+  // the instantiator — proven by the injected adapter's REAL lifecycle methods being invoked. RED now
+  // because instantiate() runs rigPreflight first (rigspec-instantiator.ts:1039) and SUPPORTED_RUNTIMES
+  // rejects "stub" (same source gate as FACT1), so dispatch never happens. This is NOT a production-
+  // registry proof — the startup.ts :710/:898 registration is a SEPARATE first-production RED in the
+  // revised packet (composition via createDaemon/assembled instantiator + real restore/successor path);
+  // this test must not be read as satisfying that requirement by direct injection. NO disputed surface.
+  it("FACT2: normal-seat instantiate DISPATCHES to the injected stub adapter (real lifecycle calls) [RED until preflight accepts stub]", async () => {
+    const stubAdapter = mockAdapter("stub");
+    const { db, inst } = setup(undefined, { stub: stubAdapter });
+    const spec = makeRigSpec({
+      pods: [{ id: "dev", label: "Dev", members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "stub", cwd: "." }], edges: [] }],
+    });
+    const result = await inst.instantiate(RigSpecCodec.serialize(spec), RIG_ROOT);
+    expect(result.ok, `instantiate must succeed for runtime: stub; got: ${JSON.stringify(result)}`).toBe(true);
+    // dispatch proof: the injected stub adapter's REAL lifecycle methods were actually invoked.
+    expect(stubAdapter.project, "instantiate must dispatch project() to the injected stub adapter").toHaveBeenCalled();
+    expect(stubAdapter.checkReady, "instantiate must dispatch checkReady() to the injected stub adapter").toHaveBeenCalled();
+    if (result.ok) expect(result.result.nodes).toHaveLength(1);
     db.close();
   });
 

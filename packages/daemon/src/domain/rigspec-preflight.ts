@@ -130,7 +130,9 @@ import {
   type ResolvedPolicyAttachment,
 } from "./permission-policy/policy-ref.js";
 
-const SUPPORTED_RUNTIMES = new Set(["claude-code", "codex", "pi", "terminal"]);
+// Slice 51-01 (OPR.0.5.1.1): `stub` is a first-class runtime (the deterministic node-script fake harness
+// through the real orchestrator) — admitted at the modern-pod preflight gate alongside the real runtimes.
+const SUPPORTED_RUNTIMES = new Set(["claude-code", "codex", "pi", "terminal", "stub"]);
 
 // Default daemon-shipped asset paths for the managed Claude activity hooks — the SAME files the
 // ClaudeCodeAdapter is wired with in startup.ts (validation is the shared module either way).
