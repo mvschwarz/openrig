@@ -30,6 +30,18 @@ export function providerRoutes(): Hono {
     return c.json(await svc.getReadModel(), 200);
   });
 
+  // S-B (OPR.0.5.0.4-B) — the external status site's ENTIRE contract: GET /api/provider/usage
+  // SERVES the S-A host-level rollup rows (model.hostUsage) verbatim from the one read model. No
+  // derivation here — state/windows/resets_at/anomalies/provenance are built in S-A's rollupHostUsage
+  // (and the rows carry NO account identity by construction, only (host, provider) + topology seats).
+  // Absent block -> honest empty array (never a fabricated row); unwired service -> loud 503.
+  router.get("/usage", async (c) => {
+    const svc = svcOf(c);
+    if (!svc) return c.json({ error: "provider_service_unavailable" }, unavailable);
+    const model = await svc.getReadModel();
+    return c.json({ hostUsage: model.hostUsage ?? [] }, 200);
+  });
+
   router.get("/accounts", async (c) => {
     const svc = svcOf(c);
     if (!svc) return c.json({ error: "provider_service_unavailable" }, unavailable);
