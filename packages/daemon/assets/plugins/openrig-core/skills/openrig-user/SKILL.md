@@ -8,8 +8,6 @@ description: Use when operating OpenRig with the `rig` CLI and you need the ship
 This is an as-built guide to the shipped `rig` CLI.
 Use current code and `rig ... --help` as ground truth if anything here ever conflicts with older planning docs.
 
-If you need a different shipped skill, open `openrig-skills` — the global index that routes to every shipped skill in one hop.
-
 This is not the config-layer or builder guide. Use the substrate control-plane guidance for `rigx`
 and experimental overlays. Use the OpenRig builder guidance when changing OpenRig behavior,
 doctrine, or release posture.
@@ -294,6 +292,21 @@ rig workflow continue <instanceId>     # read-only inspector of an instance (doe
 ```
 
 *(Surface note — the current `rig workflow` command group registers **13** subcommands: `validate`, `instantiate`, `project`, `list`, `specs`, `show`, `trace`, `continue`, `run`, `watch`, `route`, `resume`, `status`. There is still no `create` verb — the spec YAML is authored on disk. `project` is the advancing verb (it projects the next-step packet); `continue` is a read-only inspector, NOT an advance — do not conflate them. The 13-verb set and the project-vs-continue semantics are verified against current product main `d37a08ad` (`packages/cli/src/commands/workflow.ts`, 13 registered `.command(...)` entries; the earlier "6-verb surface / continue-advances" claim here was stale). Verify individual subcommand flags with `rig workflow --help`.)*
+
+## Permission policy — pick one at setup (onboarding)
+
+OpenRig sets only a **minimal usability floor** on your harness permissions and otherwise stays out of the way — then it ships **recommended policies you opt into**. It never bakes a permission policy for you. On install / onboarding this is a required choice, presented as a top-level pick:
+
+- **POLICY MODE** — pick a built-in policy and have it applied:
+  - **Locked** — deny-by-default whitelist; untrusted rigs/work.
+  - **Standard** ⭐ (recommended) — the normal software-factory posture; dev incl. push + PR, destructive actions ask.
+  - **Open** — allow-by-default; everything except explicitly-destructive, which ask.
+
+  The built-in definitions ship as read-only policy spec files (Locked / Standard / Open); applying your pick is the job of the **`applying-a-permission-policy`** skill — it translates the chosen spec into your live harness config (Claude `settings.json` / Codex `config.toml`), interactively, showing the diff before it writes.
+- **YOLO MODE** — done with permissions, just want it to work: OpenRig boots every seat with the harness full-bypass launch flag. No config policy is applied (the bypass overrides it). This is a deterministic OpenRig setting, not a skill.
+- **No choice = the floor** — the minimal usability baseline (Claude `acceptEdits` / Codex workspace-only / Pi `--no-approve`), one consistent minimum, nothing more.
+
+The floor and YOLO are **launch flags** OpenRig sets deterministically; the Locked / Standard / Open policies are **config-file** policies the skill applies (agent-driven, because harness config formats drift). A rig **carries** its chosen policy on its spec and boots with it — see Lifecycle → Bring a rig up. To (re)apply or change a policy, open **`applying-a-permission-policy`**.
 
 ## v0.3.x Starter, Workspace, And Plugin Surfaces
 
@@ -932,6 +945,7 @@ Current behavior notes:
 - `local:` `agent_ref` values resolve relative to the rig spec directory, not your shell cwd.
 - if you copy a built-in spec elsewhere, keep its `agents/` tree beside the YAML or rewrite those refs to `path:/absolute/path`
 - `rig specs add <directory>` installs a full spec tree when the directory contains `rig.yaml` or `agent.yaml`.
+- **Permission policy:** a rig carries a permission policy and boots with it (never changed on the fly). Default if none set = the minimum floor (Claude `acceptEdits` / Codex workspace-only / Pi `--no-approve`); otherwise a chosen built-in (Locked / Standard / Open) or deliberately none. When you spec or bring up a rig, decide its policy — apply it via `applying-a-permission-policy` (see also the onboarding menu, "Permission policy — pick one at setup").
 
 Legacy/spec-specific surfaces still ship too:
 
