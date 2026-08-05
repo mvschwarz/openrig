@@ -15,7 +15,7 @@ import type { Command } from "commander";
 import { createProgram } from "../src/index.js";
 
 const VIEWER_DESCRIPTION_FRAGMENT = "context-usage across running agents";
-const LIBRARY_SUBCOMMANDS = ["list", "show", "preview", "add", "sync", "send"];
+const LIBRARY_SUBCOMMANDS = ["compose", "list", "show", "preview", "sync", "add", "rm"];
 
 function topLevelNames(program: Command): string[] {
   return program.commands.map((c) => c.name());
@@ -49,12 +49,16 @@ describe("ATOM-7 rig context grammar (STRIP viewer + RENAME context-pack)", () =
     expect(help).not.toContain(VIEWER_DESCRIPTION_FRAGMENT);
   });
 
-  it("(c) BARE `rig context` = LIBRARY: help enumerates the library subcommands, not the usage table", () => {
+  it("(c) BARE `rig context` = DELIVERY-FREE LIBRARY: exact ordered subcommands exclude every delivery seam", () => {
     const program = createProgram();
-    const help = contextCmd(program).helpInformation();
+    const context = contextCmd(program);
+    const help = context.helpInformation();
+    expect(context.commands.map((sub) => sub.name())).toEqual(LIBRARY_SUBCOMMANDS);
     for (const sub of LIBRARY_SUBCOMMANDS) {
       expect(help).toContain(sub);
     }
+    expect(context.commands.map((sub) => sub.name())).not.toContain("send");
+    expect(help).not.toMatch(/rig context send|^\s*send\b/im);
     expect(help).not.toContain("CONTEXT USAGE");
   });
 

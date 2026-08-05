@@ -95,13 +95,10 @@ const FIXTURE_PREVIEW = {
 describe("rig context CLI (PL-014)", () => {
   let server: http.Server;
   let port: number;
-  let sendLog: Array<{ id: string; body: unknown }>;
   let composeLog: Array<{ outRef?: string; sources?: Array<{ path: string; label: string }> }>;
   let deleteLog: string[];
-  let sendBehavior: "ok" | "fail" = "ok";
 
   beforeAll(async () => {
-    sendLog = [];
     composeLog = [];
     deleteLog = [];
     server = http.createServer((req, res) => {
@@ -146,43 +143,6 @@ describe("rig context CLI (PL-014)", () => {
             return json(200, { removed: true, ref, removedPath: FIXTURE_PACK.sourcePath, count: 0 });
           }
           return json(405, { error: "method_not_allowed" });
-        }
-        const idMatch = url.match(/^\/api\/context-packs\/library\/([^/]+)(\/(preview|send))?$/);
-        if (idMatch) {
-          const id = decodeURIComponent(idMatch[1]!);
-          const sub = idMatch[3];
-          if (id !== FIXTURE_PACK.id) {
-            res.writeHead(404, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: `Context pack '${id}' not found in library` }));
-            return;
-          }
-          if (sub === "preview" && req.method === "GET") {
-            res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify(FIXTURE_PREVIEW));
-            return;
-          }
-          if (sub === "send" && req.method === "POST") {
-            const parsed = JSON.parse(body || "{}") as { destinationSession?: string; dryRun?: boolean };
-            sendLog.push({ id, body: parsed });
-            if (sendBehavior === "fail") {
-              res.writeHead(502, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ error: "Session not found", reason: "session_missing" }));
-              return;
-            }
-            res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({
-              ...FIXTURE_PREVIEW,
-              destinationSession: parsed.destinationSession,
-              dryRun: !!parsed.dryRun,
-              ...(parsed.dryRun ? {} : { sent: true }),
-            }));
-            return;
-          }
-          if (!sub && req.method === "GET") {
-            res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify(FIXTURE_PACK));
-            return;
-          }
         }
         res.writeHead(404);
         res.end();

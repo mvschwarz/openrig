@@ -92,12 +92,12 @@ This document reflects the current `rig` surface as shipped. Where live help tex
 | `workflow` | Daemon-native Workflow Runtime — declarative spec + transactional-scribe step projection |
 | `restore-packet` | Generate, read, and validate cross-runtime restore packets |
 | `restore-check` | Check restore readiness across running rigs |
-| `context` | Browse, preview, send, and install operator-authored context packs |
+| `context` | Browse, preview, compose, and manage operator-authored context packs (never delivers) |
+| `walk` | Walk a seat through a paced sequence of context pieces |
 | `compact-plan` | Plan Claude compact-in-place candidates without compacting anything |
 | `heartbeat` | Show workflow execution proof state from queue files |
 | `seat` | Inspect OpenRig seat observability state |
 | `agent-image` | Browse, snapshot, and manage agent images |
-| `context-pack` | Browse, preview, send, and install operator-authored context packs |
 | `workspace` | Workspace primitive — typed-kind tooling (frontmatter validation) |
 | `plugin` | Inspect plugins (read-only) — list, show, used-by, validate |
 | `scope` | Scope tree primitive — missions, slices, sub-slices |
@@ -774,7 +774,7 @@ Notes:
 
 ### `rig send`
 
-Usage: `rig send <session> <text> [--verify] [--force] [--raw] [--dangerously-interact --reason <text>] [--wait-for-idle <s>] [--from <session>] [--host <id>] [--json]`
+Usage: `rig send <session> [<text>] [--context <ref>] [--verify] [--force] [--raw] [--dangerously-interact --reason <text>] [--wait-for-idle <s>] [--from <session>] [--host <id>] [--json]`
 
 Notes:
 - Uses the two-step send pattern automatically: paste text, wait, submit Enter.
@@ -782,6 +782,7 @@ Notes:
 - The default path refuses to send ONLY on positive evidence that the target is at an interactive prompt / permission block. This closes the footgun where a peer message blindly submits another agent's open prompt. When the target's activity cannot be determined (unknown, missing, or stale telemetry), the send PROCEEDS with an advisory note — telemetry is advisory, not authority over whether agents can communicate. Use `--wait-for-idle` to send only after explicit idle evidence.
 - A mid-task/busy target sends-with-advisory by default (busy is not a block). `--force` is a back-compat no-op and never bypasses the interactive-prompt/permission guard.
 - `--raw` sends exact text/keystrokes without the From/To messaging envelope; still guarded against interactive prompts.
+- `--context <ref>` resolves one path-like context ref and delivers its whole content on a local single-seat send. Missing members abort before delivery; oversized content emits a `rig walk` advisory. It is not supported with `--host`, cross-host target sugar, or fan-out targeting.
 - `--dangerously-interact` is the ONLY override of the prompt/permission guard — it deliberately drives an interactive prompt/permission block (e.g. selects an option). It implies `--raw`, requires `--reason <text>`, and is recorded in the audit log. Cannot be combined with `--wait-for-idle`.
 - `--reason <text>` records why the prompt is being driven (required with `--dangerously-interact`).
 - `--host <id>` sends on a remote host declared in `~/.openrig/hosts.yaml`; see "Cross-host execution" below. **v0.4.6 (OPR.0.4.6.MH4)** — the host entry's transport decides the path: ssh hosts keep the single-hop ssh shell-out byte-verbatim (SSH success is NOT verify success — the remote rig's `Verified: yes/no` is what counts and is surfaced verbatim); http hosts (e.g. pair-registered) go CLI-direct to the remote daemon's `POST /api/transport/send` with the same body a local send posts (wrap parity by construction) — `--verify` prints the REMOTE route's `verified`/`outcome` verbatim, never a locally synthesized verdict. The `agent@rig@host` target form is sugar for `--host` when the suffix is a REGISTERED host id (explicit `--host` > sugar > persisted selection; a conflict between `--host` and the sugar is a structured error).
@@ -798,6 +799,15 @@ Default:
 
 Notes:
 - `--host <id>` captures on a remote host declared in `~/.openrig/hosts.yaml`; see "Cross-host execution" below. **v0.4.6 (OPR.0.4.6.MH4)** — ssh hosts keep the shell-out verbatim; http hosts go CLI-direct to the remote daemon's `POST /api/transport/capture` with the local body shape (lines/rig/pod/session), rendering single/multi results exactly as a local capture under the `[via host=…]` banner. The `agent@rig@host` session form is sugar for `--host` when the suffix is a REGISTERED host id (`--rig`/`--pod` values are names, never sugar-parsed).
+
+### `rig walk`
+
+Usage: `rig walk <seat> --through <ref | files...> [--pace <duration>] [--json]`
+
+Notes:
+- `--through` accepts either one path-like context ref or an ordered list of existing local files; mixing the two forms is rejected.
+- Sends one piece at a time through the normal transport and waits `--pace` between pieces (default `10s`; `500ms`, `10s`, and bare seconds are accepted). There is no trailing delay.
+- A missing local file or missing/unreadable ref member aborts before the first send, so a walk delivers every piece or none.
 
 ### Cross-host execution (`--host <id>`)
 
@@ -955,10 +965,11 @@ the path for exotica, and the factory bootstrap ships as
 
 ### `rig broadcast`
 
-Usage: `rig broadcast <text> [--rig <name>] [--pod <name>] [--force] [--host <id>] [--json]`
+Usage: `rig broadcast [<text>] [--context <ref>] [--rig <name>] [--pod <name>] [--force] [--host <id>] [--json]`
 
 Notes:
 - Without `--rig` or `--pod`, broadcasts across all running sessions in all rigs.
+- `--context <ref>` resolves one path-like context ref and fans out its whole content. Missing members abort before fan-out; oversized content emits a `rig walk` advisory. It is not supported with `--host`.
 - **v0.4.6 (OPR.0.4.6.MH4)** — `--host <id>` broadcasts on a remote host, CLI-direct to that
   daemon's shipped `POST /api/transport/broadcast` (http-registered hosts only; an ssh-declared
   host is a structured transport-requirement error). The REMOTE daemon resolves `--rig`/`--pod`
@@ -1031,7 +1042,7 @@ Notes:
 Usage: `rig queue <subcommand>` — L3 owned-work queue plus inbox/outbox.
 
 Subcommands:
-- `create --source <session> --destination <session> (--body <text> | --body-file <path>) [--mission <id>] [--slice <id>] [--priority <p>] [--tier <t>] [--tags <csv>] [--target-repo <name>] [--host <id>] [--no-nudge] [--expires-at <iso>] [--id <qitemId>] [--json]` — v0.3.2 slice-21 FR-4 adds `--body-file <path>` (use `-` for stdin) which kills the backtick-shell-corruption class for multiline bodies, and first-class `--mission <id>` / `--slice <id>` flags that translate to `mission:<id>` / `slice:<id>` tags (compose with `--tags`). Exactly one of `--body` / `--body-file` must be provided. v0.4.6 (OPR.0.4.6.MH3) adds `--host <id>` / the `agent@rig@host` destination form — see § Cross-host queue routing below.
+- `create --source <session> --destination <session> (--body <text> | --body-file <path> | --body-context <ref>) [--mission <id>] [--slice <id>] [--priority <p>] [--tier <t>] [--tags <csv>] [--target-repo <name>] [--host <id>] [--no-nudge] [--expires-at <iso>] [--id <qitemId>] [--json]` — `--body-context <ref>` resolves a complete context pack, snapshots that content into the qitem body, and adds a `body-context:<ref>` provenance tag; it is mutually exclusive with `--body` / `--body-file`, and missing members abort before qitem creation. v0.3.2 slice-21 FR-4 adds `--body-file <path>` (use `-` for stdin) which kills the backtick-shell-corruption class for multiline bodies, and first-class `--mission <id>` / `--slice <id>` flags that translate to `mission:<id>` / `slice:<id>` tags (compose with `--tags`). v0.4.6 (OPR.0.4.6.MH3) adds `--host <id>` / the `agent@rig@host` destination form — see § Cross-host queue routing below.
 - `claim <qitemId> --destination <session> [--json]` — pending → in-progress; computes closure_required_at from tier
 - `unclaim <qitemId> --destination <session> [--reason <text>] [--json]` — in-progress → pending
 - `update <qitemId> --actor <session> --state <state> [--closure-reason <r>] [--closure-target <t>] [--note <text>] [--json]`
@@ -1192,17 +1203,7 @@ The owner-as-author + workflow-as-transactional-scribe contract is enforced by t
 
 ## Operational Inspection
 
-Read-only inspection commands for context-window state, compaction planning, workflow heartbeat, and seat handover observability. Default mode is read-only across this section.
-
-### `rig context`
-
-Usage: `rig context [--rig <name>] [--threshold <pct>] [--refresh] [--full] [--json]`
-
-Notes:
-- Shows context-window usage across running agents.
-- **v0.4.0 — compact-by-default (slice 30)**: default emits a compact summary (the few fields the common use needs); `--full` (or `--full --json`) returns today's complete current payload. Daemon skips the expensive aggregation when compact. Lower leverage than 28 / 29 but keeps the read-command surface compact-by-default after the upgrade.
-- `--rig <name>` narrows to a single rig; `--threshold <pct>` filters to seats at or above the percent (plus unknown + stale).
-- `--refresh` re-samples context usage before displaying instead of reading the latest cached snapshot.
+Read-only inspection commands for compaction planning, workflow heartbeat, and seat handover observability. Default mode is read-only across this section.
 
 ### `rig compact-plan`
 
@@ -1269,20 +1270,21 @@ Notes:
 
 ### `rig context`
 
-Usage: `rig context <subcommand>` — browse, preview, send, and install operator-authored context packs. (Atom-7 retired the `rig context-pack` grammar and removed the old context-window usage viewer; `rig context` is now the library.)
+Usage: `rig context <subcommand>` — browse, preview, compose, and manage operator-authored context packs. This noun never delivers; delivery belongs to `send`, `broadcast`, `walk`, and `queue create`.
 
 Subcommands:
 - `list [options]` — list all context packs in the library.
-- `show <name-or-id> [options]` — show pack manifest + per-file metadata.
-- `preview <name-or-id> [options]` — show the assembled bundle (the exact text that would be sent).
+- `show <name-or-ref> [options]` — show pack manifest + per-file metadata.
+- `preview <name-or-ref> [options]` — show the assembled bundle without delivering it.
+- `compose --out <ref> --from <files...>` — compose ordered files into a durable context ref without delivering it.
 - `sync [options]` — re-walk discovery roots and refresh the library index.
-- `add <source-dir> [options]` — install a context pack from a local directory into `~/.openrig/context-packs/`.
-- `send <name-or-id> <destination-session> [options]` — assemble the pack into one paste-ready bundle and send to a seat.
+- `add <source-dir> [options]` — install a context pack from a local directory into the configured context store.
+- `rm <ref> [options]` — remove a context pack by its path-like ref.
 
 Notes:
 - Context packs are operator-authored bundles of context (manifest + files) intended to prime a managed seat with a coherent starting context.
-- `preview` is the canonical way to see exactly what `send` will deliver; useful before priming a live seat.
-- `send --dry-run` is supported for preview-then-deliver flows.
+- `preview` is the canonical read-only way to inspect the assembled content.
+- This command family is delivery-free; context-window inspection is not part of this noun.
 
 ### `rig workspace`
 
