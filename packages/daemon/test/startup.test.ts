@@ -13,6 +13,7 @@ import { checkpointsSchema } from "../src/db/migrations/005_checkpoints.js";
 import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
+import { StreamStore } from "../src/domain/stream-store.js";
 import type { CmuxTransportFactory } from "../src/adapters/cmux.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
 
@@ -567,6 +568,64 @@ describe("createDaemon startup composition", () => {
     } finally {
       logSpy.mockRestore();
       fs.rmSync(tmpDir, { recursive: true });
+    }
+  });
+
+  it("does not let a throwing setDegradedHandler registration abort createDaemon", async () => {
+    const cmuxFactory: CmuxTransportFactory = async () => {
+      throw Object.assign(new Error(""), { code: "ENOENT" });
+    };
+    const tmuxExec: ExecFn = async () => "";
+    const recorder = {
+      setDegradedHandler() {
+        throw new Error("registration boom");
+      },
+      snapshot: () => ({ healthy: true }),
+    };
+    const { db, eventLoopMonitor } = await createDaemon({
+      cmuxFactory,
+      tmuxExec,
+      slowOpRecorder: recorder,
+    } as never);
+    eventLoopMonitor.stop();
+    db.close();
+  });
+
+  it("isolates a throwing degradation callback body (streamStore.emit) from later work", async () => {
+    const cmuxFactory: CmuxTransportFactory = async () => {
+      throw Object.assign(new Error(""), { code: "ENOENT" });
+    };
+    const tmuxExec: ExecFn = async () => "";
+    const originalEmit = StreamStore.prototype.emit;
+    const spy = vi
+      .spyOn(StreamStore.prototype, "emit")
+      .mockImplementation(function (this: StreamStore, item: Parameters<StreamStore["emit"]>[0]) {
+        if (typeof item?.body === "string" && item.body.includes("slow-operation instrumentation degraded")) {
+          throw new Error("emit boom");
+        }
+        return originalEmit.call(this, item);
+      });
+    let captured: ((snapshot: { reason: string; site: string }) => void) | undefined;
+    const recorder = {
+      setDegradedHandler(handler: (snapshot: { reason: string; site: string }) => void) {
+        captured = handler;
+      },
+      snapshot: () => ({ healthy: true }),
+    };
+    try {
+      const { db, eventLoopMonitor } = await createDaemon({
+        cmuxFactory,
+        tmuxExec,
+        slowOpRecorder: recorder,
+      } as never);
+      expect(captured).toBeTypeOf("function");
+      // A later degradation fires the supplied callback; a throwing emit inside
+      // its body must be swallowed, never escaping into wrapped work.
+      expect(() => captured!({ reason: "recorder_worker_failed", site: "recorder.worker" })).not.toThrow();
+      eventLoopMonitor.stop();
+      db.close();
+    } finally {
+      spy.mockRestore();
     }
   });
 });

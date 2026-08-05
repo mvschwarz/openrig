@@ -544,7 +544,14 @@ export function createApp(deps: AppDeps): Hono {
       try {
         await next();
       } finally {
-        deps.slowOpRecorder?.recordRequest?.(`${c.req.method} ${c.req.path}`, Date.now() - startedAt);
+        // The observer is measurement-only: a throw here must never replace the
+        // route's real status/body with a 500. Isolate it at the boundary and
+        // log without re-entering Hono control flow.
+        try {
+          deps.slowOpRecorder?.recordRequest?.(`${c.req.method} ${c.req.path}`, Date.now() - startedAt);
+        } catch (error) {
+          console.error("[slow-operation] request observer failed", error);
+        }
       }
     });
   }

@@ -9,6 +9,56 @@ import {
   isTailscaleBind,
   resolveToIpOrNull,
 } from "./middleware/auth-bearer-token.js";
+import type { SlowOperationInstrumentation } from "./domain/slow-op-recorder.js";
+
+/** OPR.0.4.3.21 (51elv2) — bound the graceful-shutdown recorder drain. */
+export const SLOW_OP_SHUTDOWN_DRAIN_TIMEOUT_MS = 5_000;
+
+/**
+ * OPR.0.4.3.21 (51elv2) — drain + close the slow-operation recorder on graceful
+ * shutdown and report the process exit code. Returns 0 when the recorder closes
+ * cleanly (or is absent), 1 when the drain rejects, times out, or the recorder
+ * is in a terminal-failure state — an unproven/lost drain must never look like a
+ * clean exit. Bounded by ONE finite timer (cleared + unref'd) so shutdown never
+ * hangs; adds no retry, queue repair, migration, or supervisor machinery.
+ */
+export async function drainSlowOpRecorderOnShutdown(
+  recorder: Pick<SlowOperationInstrumentation, "flush" | "close"> | undefined,
+  opts?: { timeoutMs?: number; log?: (message: string, error?: unknown) => void },
+): Promise<number> {
+  const drain = recorder?.close ?? recorder?.flush;
+  if (!recorder || !drain) return 0;
+  const log = opts?.log ?? ((message: string, error?: unknown) => console.error(message, error));
+  const timeoutMs = opts?.timeoutMs ?? SLOW_OP_SHUTDOWN_DRAIN_TIMEOUT_MS;
+
+  let drainError: unknown;
+  let settled = false;
+  const drainPromise = Promise.resolve()
+    .then(() => drain.call(recorder))
+    .then(
+      () => { settled = true; },
+      (error) => { drainError = error; settled = true; },
+    );
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, timeoutMs);
+    timer.unref?.();
+  });
+
+  await Promise.race([drainPromise, timeoutPromise]);
+  if (timer) clearTimeout(timer);
+
+  if (!settled) {
+    log("[slow-operation] shutdown drain timed out; instrumentation records may be lost");
+    return 1;
+  }
+  if (drainError) {
+    log("[slow-operation] shutdown drain failed; instrumentation records may be lost", drainError);
+    return 1;
+  }
+  return 0;
+}
 
 /** OPR.0.3.4.9 — extracted for testability. Starts the periodic snapshot
  *  scheduler and updates the ps-projection status when enabled. */
@@ -194,7 +244,12 @@ export async function startServer(port?: number) {
           }),
       ),
     );
-    process.exit(0);
+    // OPR.0.4.3.21 (51elv2) — drain the slow-operation recorder AFTER services
+    // and HTTP servers have stopped, but before exit. A clean drain keeps exit
+    // 0; a timeout / rejection / terminal recorder failure is logged and exits
+    // nonzero so a lost drain never masquerades as a clean shutdown.
+    const slowOpExitCode = await drainSlowOpRecorderOnShutdown(deps.slowOpRecorder);
+    process.exit(slowOpExitCode);
   };
   process.once("SIGINT", () => void shutdown("SIGINT"));
   process.once("SIGTERM", () => void shutdown("SIGTERM"));

@@ -276,15 +276,26 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         logPath: nodePath.join(OPENRIG_HOME, "logs", "slow-operations.jsonl"),
       }));
   configureSyncSiteRecorder(slowOpRecorder);
-  slowOpRecorder?.setDegradedHandler?.(({ reason, site }) => {
-    streamStore.emit({
-      sourceSession: "daemon@kernel",
-      body: `slow-operation instrumentation degraded: ${reason} at ${site}`,
-      hintType: "observation",
-      hintUrgency: "high",
-      hintTags: ["daemon", "slow-operation", "observability-degraded"],
+  // Instrumentation wiring is observe-only: neither a throwing registration
+  // call nor a throwing callback body (streamStore.emit) may abort createDaemon
+  // or later wrapped work. Guard both boundaries.
+  try {
+    slowOpRecorder?.setDegradedHandler?.(({ reason, site }) => {
+      try {
+        streamStore.emit({
+          sourceSession: "daemon@kernel",
+          body: `slow-operation instrumentation degraded: ${reason} at ${site}`,
+          hintType: "observation",
+          hintUrgency: "high",
+          hintTags: ["daemon", "slow-operation", "observability-degraded"],
+        });
+      } catch (error) {
+        console.error("[slow-operation] degradation notification failed", error);
+      }
     });
-  });
+  } catch (error) {
+    console.error("[slow-operation] setDegradedHandler registration failed", error);
+  }
   // PL-004 Phase A revision (R1): topology-backed validateRig.
   // Reject `<member>@<unknown-rig>` shapes by checking the rig portion
   // against the rig registry. Bare ids without `@` are also rejected

@@ -326,6 +326,124 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
     }
   });
 
+  it("degrades once and releases every pending waiter on an unexpected worker exit (code 0 counts)", async () => {
+    const mod = await loadRecorderModule();
+    expect(mod, "slow-op-recorder production module is missing").not.toBeNull();
+    if (!mod) return;
+
+    const dir = tempDir();
+    const recorder = new mod.SlowOpRecorder({ logPath: path.join(dir, "exit.jsonl") });
+    let highUrgencyEmissions = 0;
+    recorder.setDegradedHandler(() => { highUrgencyEmissions += 1; });
+    const worker = (recorder as any).worker;
+    // Wedge the worker so posted records stay pending (no response arrives).
+    worker.postMessage = () => {};
+    const inflightFlush = recorder.flush();
+    recorder.recordMeasurement("test.pending.a", 300);
+    recorder.recordMeasurement("test.pending.b", 300);
+    expect((recorder as any).pending.size).toBeGreaterThan(0);
+
+    // Unexpected worker exit — even an exit code of 0 is a loss while open.
+    worker.emit("exit", 0);
+
+    await expect(inflightFlush).rejects.toBeInstanceOf(mod.SlowOpRecorderTerminatedError);
+    expect((recorder as any).pending.size).toBe(0);
+    expect(recorder.snapshot()).toMatchObject({ healthy: false });
+    // Second terminal trigger must not re-emit the one-shot high-urgency signal.
+    worker.emit("error", new Error("second"));
+    expect(highUrgencyEmissions).toBe(1);
+    await recorder.close().catch(() => {});
+  });
+
+  it("routes error, messageerror, and synchronous post failure through the same terminal transition", async () => {
+    const mod = await loadRecorderModule();
+    if (!mod) return;
+    const dir = tempDir();
+
+    for (const trigger of ["error", "messageerror"] as const) {
+      const recorder = new mod.SlowOpRecorder({ logPath: path.join(dir, `${trigger}.jsonl`) });
+      (recorder as any).worker.postMessage = () => {};
+      const pending = recorder.flush();
+      (recorder as any).worker.emit(trigger, new Error(trigger));
+      await expect(pending).rejects.toBeInstanceOf(mod.SlowOpRecorderTerminatedError);
+      expect(recorder.snapshot()).toMatchObject({ healthy: false });
+      await recorder.close().catch(() => {});
+    }
+
+    // Synchronous worker.postMessage failure is the same terminal transition;
+    // fire-and-forget measurement must internalize it (no unhandled rejection).
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const recorder = new mod.SlowOpRecorder({ logPath: path.join(dir, "syncpost.jsonl") });
+      (recorder as any).worker.postMessage = () => { throw new Error("posting to terminated worker"); };
+      expect(() => recorder.recordMeasurement("test.syncpost", 300)).not.toThrow();
+      await expect(recorder.flush()).rejects.toBeInstanceOf(mod.SlowOpRecorderTerminatedError);
+      expect(recorder.snapshot()).toMatchObject({ healthy: false });
+      await recorder.close().catch(() => {});
+      await new Promise((r) => setImmediate(r));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("makes future flush finite + explicitly unsuccessful after a real worker termination", async () => {
+    const mod = await loadRecorderModule();
+    if (!mod) return;
+    const recorder = new mod.SlowOpRecorder({ logPath: path.join(tempDir(), "realterm.jsonl") });
+    await (recorder as any).worker.terminate(); // real, unexpected (not via close())
+    await new Promise((r) => setImmediate(r));   // let the 'exit' handler run
+    expect(recorder.snapshot()).toMatchObject({ healthy: false });
+    await expect(recorder.flush()).rejects.toBeInstanceOf(mod.SlowOpRecorderTerminatedError);
+    // wrapped value identity is authoritative even after terminal failure
+    expect(recorder.runSync("test.after.terminal", () => 7)).toBe(7);
+    await expect(recorder.runStage("test.after.stage", async () => "ok")).resolves.toBe("ok");
+    const boom = new Error("wrapped");
+    await expect(recorder.runStage("test.after.throw", async () => { throw boom; })).rejects.toBe(boom);
+    await recorder.close().catch(() => {});
+  });
+
+  it("treats a normal close() as expected termination — no degradation, no high-urgency event", async () => {
+    const mod = await loadRecorderModule();
+    if (!mod) return;
+    const recorder = new mod.SlowOpRecorder({ logPath: path.join(tempDir(), "normalclose.jsonl") });
+    let emissions = 0;
+    recorder.setDegradedHandler(() => { emissions += 1; });
+    recorder.recordMeasurement("test.normal", 300);
+    await recorder.close();
+    expect(recorder.snapshot()).toMatchObject({ healthy: true });
+    expect(emissions).toBe(0);
+  });
+
+  it("isolates a throwing request observer so the route keeps its exact successful status and body", async () => {
+    const recorder = {
+      recordRequest(): void { throw new Error("request observer sink failed"); },
+      snapshot: () => ({ healthy: true }),
+    };
+    const oldNoKernel = process.env.OPENRIG_NO_KERNEL;
+    process.env.OPENRIG_NO_KERNEL = "1";
+    const daemon = await createTestDaemon({
+      dbPath: ":memory:",
+      tmuxExec: async () => "",
+      cmuxExec: async () => "",
+      slowOpRecorder: recorder,
+    } as never);
+    try {
+      const res = await daemon.app.request("/healthz");
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ status: "ok" });
+      const missing = await daemon.app.request("/definitely-missing");
+      expect(missing.status).toBe(404);
+    } finally {
+      daemon.eventLoopMonitor.stop();
+      daemon.db.close();
+      if (oldNoKernel === undefined) delete process.env.OPENRIG_NO_KERNEL;
+      else process.env.OPENRIG_NO_KERNEL = oldNoKernel;
+    }
+  }, 10_000);
+
   it("drives the real tmux command-v spawnSync site through a hermetic daemon", async () => {
     const mod = await loadRecorderModule();
     expect(mod, "slow-op-recorder production module is missing").not.toBeNull();
