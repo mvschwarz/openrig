@@ -118,7 +118,9 @@ describe("S-A host-level usage rollup (pure)", () => {
   });
 
   it("(ii) tolerance: resets_at sampling skew INSIDE the epsilon does not conflict", () => {
-    const skewed = new Date(Date.parse(RESETS) + CONFLICTING_RESETS_EPSILON_MS - 1000).toISOString();
+    // ABSOLUTE anchor (ruled epsilon = 120s): 119s spread. Deliberately NOT computed from the
+    // imported constant — an eps-relative fixture tracks constant drift and can never catch it.
+    const skewed = new Date(Date.parse(RESETS) + 119_000).toISOString();
     const rows = rollupHostUsage({
       signals: [claudeRow("a@r", 30), claudeRow("b@r", 31, { resetsAt: skewed })],
       codexProfilesPresent: false,
@@ -127,6 +129,26 @@ describe("S-A host-level usage rollup (pure)", () => {
     const r = rowFor(rows, "claude");
     expect(r.state).toBe("ok");
     expect(r.anomalies).toEqual([]);
+  });
+
+  it("(ii) the ruled epsilon VALUE is pinned (drift in either direction is a deliberate re-rule, not an accident)", () => {
+    expect(CONFLICTING_RESETS_EPSILON_MS).toBe(120_000);
+  });
+
+  it("(ii) boundary, just-OUTSIDE: eps+1s divergence IS a conflict — first-class anomaly + explicit_unknown (guard 6b2e84d3: the epsilon is falsifiable from above)", () => {
+    // ABSOLUTE anchor: 121s spread — one second OUTSIDE the ruled 120s epsilon. Under any
+    // upward constant drift (the guard's 30x probe) this stops conflicting and FAILS here.
+    const skewed = new Date(Date.parse(RESETS) + 121_000).toISOString();
+    const rows = rollupHostUsage({
+      signals: [claudeRow("a@r", 30), claudeRow("b@r", 31, { resetsAt: skewed })],
+      codexProfilesPresent: false,
+      now: NOW,
+    });
+    const r = rowFor(rows, "claude");
+    expect(r.state).toBe("explicit_unknown");
+    expect(r.anomalies).toHaveLength(1);
+    expect(r.anomalies[0]!.kind).toBe("conflicting_seat_windows");
+    expect(r.anomalies[0]!.seats.sort()).toEqual(["a@r", "b@r"]);
   });
 
   it("claude all-unknown seat rows → explicit_unknown carrying the unknownReason (never ok-by-absence)", () => {
@@ -178,7 +200,7 @@ describe("S-A host-level usage rollup (pure)", () => {
 
   it("(i) NO account identity ever appears in any rollup row — even when input signals carry accountRef", () => {
     const rows = rollupHostUsage({
-      signals: [codexEventRow(), claudeRow("a@r", 42)],
+      signals: [codexEventRow(), claudeRow("a@r", 42, { accountRef: "acct-claude-forged" })],
       codexProfilesPresent: true,
       now: NOW,
     });
@@ -186,6 +208,7 @@ describe("S-A host-level usage rollup (pure)", () => {
     expect(json).not.toContain("accountRef");
     expect(json).not.toContain("accountId");
     expect(json).not.toContain("acct-profile-a");
+    expect(json).not.toContain("acct-claude-forged");
   });
 
   it("providers with no deployment presence emit NO row (no claude seats, no codex profiles)", () => {
@@ -202,7 +225,7 @@ describe("S-A composition — hostUsage rides the read model (additive block)", 
       now: () => NOW,
     });
     expect(model.hostUsage).toBeDefined();
-    const codex = model.hostUsage.find((r) => r.provider === "codex");
+    const codex = model.hostUsage!.find((r) => r.provider === "codex");
     expect(codex?.state).toBe("limited");
     expect(JSON.stringify(model.hostUsage)).not.toContain("accountRef");
   });
