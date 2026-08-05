@@ -148,6 +148,9 @@ export function queueRoutes(): Hono {
         : err.code === "cross_host_close_conflict" ? 409
         : err.code === "unknown_destination_rig" ? 400
         : err.code === "human_route_fields_required" ? 400
+        // OPR.0.5.1 slice-51-06 D2: summary/evidence_ref on a non-park transition — a client
+        // input error surfaced as a structured 400 (the daemon rejects before any mutation).
+        : err.code === "summary_evidence_not_persistable" ? 400
         // OPR.0.4.6.WF3 FR-6: the frontier close-path guard — operator
         // misuse of a queue verb on a live workflow packet; structured
         // 400 with the what/why/fix message, never a 500.

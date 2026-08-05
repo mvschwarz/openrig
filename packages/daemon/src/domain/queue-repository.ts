@@ -1283,6 +1283,26 @@ export class QueueRepository {
     // enforcement). Blocking on another qitem requires nothing new (BR-1).
     const effectiveBlockedOn = input.blockedOn ?? qitem.blockedOn;
     const isHumanPark = input.state === "blocked" && isHumanSeatSession(effectiveBlockedOn);
+
+    // OPR.0.5.1 slice-51-06 D2 — summary/evidence_ref are persist-able ONLY at a human-seat park
+    // (see the FR-6 note below). Silently ignoring them on any other transition is a data-loss trap
+    // (the operator believes the metadata was saved). HARD-REJECT before ANY UPDATE/log/event so the
+    // caller learns immediately and nothing is half-applied. null/undefined = absent (allowed);
+    // empty string = present (a deliberate value → rejected on a non-park transition).
+    if (!isHumanPark) {
+      const invalidFields: Array<"summary" | "evidenceRef"> = [];
+      if (input.summary != null) invalidFields.push("summary");
+      if (input.evidenceRef != null) invalidFields.push("evidenceRef");
+      if (invalidFields.length > 0) {
+        const flags = invalidFields.map((f) => (f === "summary" ? "--summary" : "--evidence-ref")).join(" / ");
+        throw new QueueRepositoryError(
+          "summary_evidence_not_persistable",
+          `${invalidFields.join(" + ")} persist only on a human-seat park (state=blocked on a human seat); the '${input.state}' transition cannot store them. Remove ${flags}, or park the item (rig queue block --on <human-seat> --summary … --evidence-ref …).`,
+          { invalidFields },
+        );
+      }
+    }
+
     let effectiveSummary = qitem.summary;
     let effectiveEvidenceRef = qitem.evidenceRef;
     if (isHumanPark) {

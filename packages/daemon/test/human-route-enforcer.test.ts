@@ -307,17 +307,26 @@ describe("FR-6 park-on-human (leg-1) — enforcement + persistence + attention",
     expect(ev!.toState).toBe("blocked");
   });
 
-  it("NEGATIVE: non-park updates never persist summary/evidence_ref inputs (surface stays tight)", async () => {
+  // OPR.0.5.1 slice-51-06 D2: non-park summary/evidence used to be SILENTLY dropped (a data-loss
+  // trap); it is now a HARD REJECT before any mutation. The surface still stays tight (nothing
+  // persists on a non-park item) — now enforced loudly instead of silently.
+  it("NEGATIVE: non-park updates REJECT summary/evidence_ref inputs (surface stays tight, loudly)", async () => {
     const item = await inProgressItem();
-    repo.update({
-      qitemId: item.qitemId,
-      actorSession: "driver@rig",
-      state: "in-progress",
-      summary: "should NOT persist",
-      evidenceRef: "should-not-persist.md",
-    });
+    let err: unknown;
+    try {
+      repo.update({
+        qitemId: item.qitemId,
+        actorSession: "driver@rig",
+        state: "in-progress",
+        summary: "should NOT persist",
+        evidenceRef: "should-not-persist.md",
+      });
+    } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(QueueRepositoryError);
+    expect((err as QueueRepositoryError).code).toBe("summary_evidence_not_persistable");
+    expect((err as QueueRepositoryError).meta?.invalidFields).toEqual(["summary", "evidenceRef"]);
     const read = repo.getById(item.qitemId)!;
-    expect(read.summary).toBeNull();
+    expect(read.summary).toBeNull(); // nothing persisted (reject was before any write)
     expect(read.evidenceRef).toBeNull();
   });
 });
