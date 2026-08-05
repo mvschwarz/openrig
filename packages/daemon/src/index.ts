@@ -19,8 +19,10 @@ export const SLOW_OP_SHUTDOWN_DRAIN_TIMEOUT_MS = 5_000;
  * shutdown and report the process exit code. Returns 0 when the recorder closes
  * cleanly (or is absent), 1 when the drain rejects, times out, or the recorder
  * is in a terminal-failure state — an unproven/lost drain must never look like a
- * clean exit. Bounded by ONE finite timer (cleared + unref'd) so shutdown never
- * hangs; adds no retry, queue repair, migration, or supervisor machinery.
+ * clean exit. Bounded by ONE finite timer that stays REFERENCED until the drain
+ * settles or times out — it is the only handle that can enforce the bound once
+ * the servers and recorder Worker are unreferenced — and is cleared after
+ * settlement; adds no retry, queue repair, migration, or supervisor machinery.
  */
 export async function drainSlowOpRecorderOnShutdown(
   recorder: Pick<SlowOperationInstrumentation, "flush" | "close"> | undefined,
