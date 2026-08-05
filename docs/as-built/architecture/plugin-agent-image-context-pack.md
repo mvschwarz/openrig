@@ -100,7 +100,7 @@ unreadable file throws `file_read_failed`.
 (`{ destinationSession, dryRun }`; dry-run returns text without
 `SessionTransport`; real send → 502 on transport failure). `id==="sync"`
 → 404 so it cannot shadow the sync route; 503 when unprovisioned. CLI:
-`rig context-pack list|show|preview|sync|add|send` (`send --dry-run`).
+`rig context list|show|preview|sync|add|send` (`send --dry-run`; Atom-7 retired the `rig context-pack` grammar).
 
 > Source: `routes/context-packs.ts:25-138` (table; sync-guard L51; 503
 > L31; dry-run L121-123; 502 L126-133); `server.ts:482`;

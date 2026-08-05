@@ -1,5 +1,6 @@
 // Fork Primitive + Starter Agent Images v0 (PL-016) — `rig agent-image`
-// CLI verb family. Parallel to `rig context-pack` shipped in PL-014.
+// CLI verb family. Parallel to `rig context` (the context-pack library,
+// shipped in PL-014; grammar renamed from `rig context-pack` in Atom-7).
 //
 // Subcommands:
 //   create   <source-session> --name <name>     — capture image from a live seat

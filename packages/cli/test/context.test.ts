@@ -1,327 +1,357 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { contextCommand, type ContextDeps } from "../src/commands/context.js";
+// Rig Context / Composable Context Injection — `rig context` CLI verb family
+// tests (Atom-7 renamed the retired `context-pack` grammar to `rig context`).
+//
+// Stands up a small in-memory daemon mock for the /api/context-packs/*
+// surface and exercises each subcommand against it.
 
-function makeDeps(overrides?: {
-  daemonState?: string;
-  rigNames?: string[];
-  nodesByRig?: Record<string, unknown[]>;
-}): ContextDeps {
-  const rigs = (overrides?.rigNames ?? ["test-rig"]).map((name, i) => ({
-    rigId: `rig-${i}`, name, nodeCount: 1, runningCount: 1, status: "running", uptime: "1h", latestSnapshot: null,
-  }));
+import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import http from "node:http";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Command } from "commander";
+import { contextCommand } from "../src/commands/context.js";
+import { DaemonClient } from "../src/client.js";
+import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
+import type { StatusDeps } from "../src/commands/status.js";
 
-  const nodesByRig = overrides?.nodesByRig ?? {
-    "rig-0": [
-      {
-        rigId: "rig-0", rigName: "test-rig", logicalId: "dev.impl", canonicalSessionName: "dev-impl@test-rig",
-        nodeKind: "agent", runtime: "claude-code", sessionStatus: "running", startupStatus: "ready",
-        restoreOutcome: "n-a", tmuxAttachCommand: null, resumeCommand: null, latestError: null,
-        contextUsage: {
-          usedPercentage: 85, remainingPercentage: 15, contextWindowSize: 1000000,
-          source: "claude_statusline_json", availability: "known",
-          sampledAt: new Date(Date.now() - 60_000).toISOString(), fresh: true,
-        },
-      },
-      {
-        rigId: "rig-0", rigName: "test-rig", logicalId: "dev.qa", canonicalSessionName: "dev-qa@test-rig",
-        nodeKind: "agent", runtime: "codex", sessionStatus: "running", startupStatus: "ready",
-        restoreOutcome: "n-a", tmuxAttachCommand: null, resumeCommand: null, latestError: null,
-        contextUsage: { usedPercentage: null, remainingPercentage: null, contextWindowSize: null, source: null, availability: "unknown", sampledAt: null, fresh: false },
-      },
-      {
-        rigId: "rig-0", rigName: "test-rig", logicalId: "dev.synth", canonicalSessionName: "dev-synth@test-rig",
-        nodeKind: "agent", runtime: "claude-code", sessionStatus: "running", startupStatus: "ready",
-        restoreOutcome: "n-a", tmuxAttachCommand: null, resumeCommand: null, latestError: null,
-        contextUsage: {
-          usedPercentage: 50, remainingPercentage: 50, contextWindowSize: 1000000,
-          source: "claude_statusline_json", availability: "known",
-          sampledAt: new Date(Date.now() - 3600_000).toISOString(), fresh: false,
-        },
-      },
-    ],
-  };
-
+function mockLifecycleDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
   return {
-    lifecycleDeps: {} as ContextDeps["lifecycleDeps"],
-    clientFactory: () => ({
-      get: vi.fn(async (path: string) => {
-        if (path === "/api/ps") return { status: 200, data: rigs };
-        for (const [key, nodes] of Object.entries(nodesByRig)) {
-          if (path.includes(key)) return { status: 200, data: nodes };
-        }
-        return { status: 200, data: [] };
-      }),
-    }) as unknown as ReturnType<ContextDeps["clientFactory"]>,
+    spawn: vi.fn(() => ({ pid: 1, unref: vi.fn() }) as never),
+    fetch: vi.fn(async () => ({ ok: true })),
+    kill: vi.fn(() => true),
+    readFile: vi.fn(() => null),
+    writeFile: vi.fn(),
+    removeFile: vi.fn(),
+    exists: vi.fn(() => false),
+    mkdirp: vi.fn(),
+    openForAppend: vi.fn(() => 3),
+    isProcessAlive: vi.fn(() => true),
+    ...overrides,
   };
 }
 
-// Patch getDaemonStatus + getDaemonUrl for tests
-vi.mock("../src/daemon-lifecycle.js", async () => {
-  const actual = await vi.importActual<Record<string, unknown>>("../src/daemon-lifecycle.js");
-  return {
-    ...actual,
-    getDaemonStatus: vi.fn(async () => ({ state: "running", healthy: true, pid: 1234, port: 7433 })),
-    getDaemonUrl: vi.fn(() => "http://localhost:7433"),
-  };
-});
-
-describe("rig context", () => {
-  let logs: string[];
-  let errors: string[];
-
-  beforeEach(() => {
-    logs = [];
-    errors = [];
-    vi.spyOn(console, "log").mockImplementation((...args) => logs.push(args.join(" ")));
-    vi.spyOn(console, "error").mockImplementation((...args) => errors.push(args.join(" ")));
+function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; errLogs: string[]; exitCode: number | undefined }> {
+  return new Promise(async (resolve) => {
+    const logs: string[] = [];
+    const errLogs: string[] = [];
+    const origLog = console.log;
+    const origErr = console.error;
+    const origExitCode = process.exitCode;
+    console.log = (...args: unknown[]) => { logs.push(args.map(String).join(" ")); };
+    console.error = (...args: unknown[]) => { errLogs.push(args.map(String).join(" ")); };
     process.exitCode = undefined;
+    try { await fn(); } catch { /* commander.exitOverride */ }
+    const exitCode = process.exitCode;
+    console.log = origLog;
+    console.error = origErr;
+    process.exitCode = origExitCode;
+    resolve({ logs, errLogs, exitCode });
+  });
+}
+
+function runningDeps(port: number): StatusDeps {
+  return {
+    lifecycleDeps: mockLifecycleDeps({
+      exists: vi.fn((p: string) => p === STATE_FILE),
+      readFile: vi.fn((p: string) => {
+        if (p === STATE_FILE) return JSON.stringify({ pid: 123, port, db: "test.sqlite", startedAt: "2026-05-04T00:00:00Z" } as DaemonState);
+        return null;
+      }),
+      fetch: vi.fn(async () => ({ ok: true })),
+    }),
+    clientFactory: (baseUrl) => new DaemonClient(baseUrl),
+  };
+}
+
+const FIXTURE_PACK = {
+  id: "context-pack:smoke:1",
+  kind: "context-pack" as const,
+  name: "smoke",
+  version: "1",
+  purpose: "Smoke test pack",
+  sourceType: "user_file" as const,
+  sourcePath: "/home/op/.openrig/context-packs/smoke",
+  relativePath: "smoke",
+  updatedAt: "2026-05-04T00:00:00Z",
+  manifestEstimatedTokens: null,
+  derivedEstimatedTokens: 100,
+  files: [
+    { path: "notes.md", role: "notes", summary: "Smoke notes", absolutePath: "/abs/notes.md", bytes: 50, estimatedTokens: 13 },
+  ],
+};
+
+const FIXTURE_PREVIEW = {
+  id: FIXTURE_PACK.id,
+  name: FIXTURE_PACK.name,
+  version: FIXTURE_PACK.version,
+  bundleText: "# OpenRig Context Pack: smoke v1\n\nSmoke test pack\n\n## File: notes.md (role: notes) — Smoke notes\n\nSmoke body\n",
+  bundleBytes: 110,
+  estimatedTokens: 28,
+  files: [{ path: "notes.md", role: "notes", bytes: 50, estimatedTokens: 13 }],
+  missingFiles: [] as Array<{ path: string; role: string }>,
+};
+
+describe("rig context CLI (PL-014)", () => {
+  let server: http.Server;
+  let port: number;
+  let sendLog: Array<{ id: string; body: unknown }>;
+  let sendBehavior: "ok" | "fail" = "ok";
+
+  beforeAll(async () => {
+    sendLog = [];
+    server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+      req.on("end", () => {
+        const url = req.url ?? "";
+        if (url === "/api/context-packs/library" && req.method === "GET") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify([FIXTURE_PACK]));
+          return;
+        }
+        if (url === "/api/context-packs/library/sync" && req.method === "POST") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ count: 1, errors: [], entries: [FIXTURE_PACK] }));
+          return;
+        }
+        const idMatch = url.match(/^\/api\/context-packs\/library\/([^/]+)(\/(preview|send))?$/);
+        if (idMatch) {
+          const id = decodeURIComponent(idMatch[1]!);
+          const sub = idMatch[3];
+          if (id !== FIXTURE_PACK.id) {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: `Context pack '${id}' not found in library` }));
+            return;
+          }
+          if (sub === "preview" && req.method === "GET") {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(FIXTURE_PREVIEW));
+            return;
+          }
+          if (sub === "send" && req.method === "POST") {
+            const parsed = JSON.parse(body || "{}") as { destinationSession?: string; dryRun?: boolean };
+            sendLog.push({ id, body: parsed });
+            if (sendBehavior === "fail") {
+              res.writeHead(502, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: "Session not found", reason: "session_missing" }));
+              return;
+            }
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+              ...FIXTURE_PREVIEW,
+              destinationSession: parsed.destinationSession,
+              dryRun: !!parsed.dryRun,
+              ...(parsed.dryRun ? {} : { sent: true }),
+            }));
+            return;
+          }
+          if (!sub && req.method === "GET") {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(FIXTURE_PACK));
+            return;
+          }
+        }
+        res.writeHead(404);
+        res.end();
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    port = (server.address() as { port: number }).port;
   });
 
-  it("human output includes seat table with status + fleet summary", async () => {
-    const cmd = contextCommand(makeDeps());
-    await cmd.parseAsync(["node", "rig"]);
+  afterAll(() => server.close());
 
-    const output = logs.join("\n");
-    expect(output).toContain("CONTEXT USAGE");
-    expect(output).toContain("dev-impl@test-rig");
-    expect(output).toContain("CRITICAL");
-    expect(output).toContain("dev-qa@test-rig");
-    expect(output).toContain("unknown");
-    expect(output).toContain("dev-synth@test-rig");
-    expect(output).toContain("stale");
-    expect(output).toContain("FLEET SUMMARY:");
-  });
+  function makeCmd(): Command {
+    const prog = new Command();
+    prog.exitOverride();
+    prog.addCommand(contextCommand(runningDeps(port)));
+    return prog;
+  }
 
-  it("JSON output includes seats array + summary with correct fields", async () => {
-    // The full per-seat fields (urgency/freshness/status) live on --full --json
-    // after OPR.0.4.0.30 (bare --json is the slim projection).
-    const cmd = contextCommand(makeDeps());
-    await cmd.parseAsync(["node", "rig", "--full", "--json"]);
+  function writePack(manifest: string): string {
+    const dir = mkdtempSync(join(tmpdir(), "openrig-context-pack-test-"));
+    writeFileSync(join(dir, "manifest.yaml"), manifest);
+    return dir;
+  }
 
-    const json = JSON.parse(logs.join(""));
-    expect(json.seats).toBeInstanceOf(Array);
-    expect(json.seats.length).toBe(3);
-    expect(json.summary).toBeDefined();
-    expect(json.summary.total).toBe(3);
-
-    const critical = json.seats.find((s: { session: string }) => s.session === "dev-impl@test-rig");
-    expect(critical.urgency).toBe("critical");
-    expect(critical.freshness).toBe("fresh");
-    expect(critical.status).toBe("critical");
-    expect(critical.usedPercentage).toBe(85);
-
-    const unknown = json.seats.find((s: { session: string }) => s.session === "dev-qa@test-rig");
-    expect(unknown.urgency).toBe("unknown");
-    expect(unknown.status).toBe("unknown");
-
-    const stale = json.seats.find((s: { session: string }) => s.session === "dev-synth@test-rig");
-    expect(stale.urgency).toBe("low");
-    expect(stale.freshness).toBe("stale");
-    expect(stale.status).toBe("stale");
-  });
-
-  it("sort order: critical > warning > stale > ok > unknown", async () => {
-    const cmd = contextCommand(makeDeps());
-    await cmd.parseAsync(["node", "rig", "--json"]);
-
-    const json = JSON.parse(logs.join(""));
-    const sessions = json.seats.map((s: { session: string }) => s.session);
-    // critical first, then stale (low+stale), then unknown
-    expect(sessions).toEqual(["dev-impl@test-rig", "dev-synth@test-rig", "dev-qa@test-rig"]);
-  });
-
-  it("--rig filters to one rig", async () => {
-    const cmd = contextCommand(makeDeps({ rigNames: ["rig-a", "rig-b"] }));
-    await cmd.parseAsync(["node", "rig", "--rig", "rig-a", "--json"]);
-
-    const output = logs.join("\n");
-    // Should not error — even if node data is empty for the filtered rig
-    expect(process.exitCode).toBeUndefined();
-  });
-
-  it("--rig with unknown rig name exits 1", async () => {
-    const cmd = contextCommand(makeDeps());
-    await cmd.parseAsync(["node", "rig", "--rig", "nonexistent"]);
-
-    expect(process.exitCode).toBe(1);
-    expect(errors.join(" ")).toContain("not found");
-  });
-
-  it("--threshold filters seats but keeps unknown and stale visible", async () => {
-    const cmd = contextCommand(makeDeps());
-    await cmd.parseAsync(["node", "rig", "--threshold", "80", "--json"]);
-
-    const json = JSON.parse(logs.join(""));
-    const sessions = json.seats.map((s: { session: string }) => s.session);
-    // 85% critical (above threshold) + 50% stale (always visible) + unknown (always visible)
-    expect(sessions).toContain("dev-impl@test-rig");
-    expect(sessions).toContain("dev-synth@test-rig"); // stale — always visible
-    expect(sessions).toContain("dev-qa@test-rig");    // unknown — always visible
-  });
-
-  it("--threshold abc rejects with nonzero exit", async () => {
-    const cmd = contextCommand(makeDeps());
-    await cmd.parseAsync(["node", "rig", "--threshold", "abc"]);
-
-    expect(process.exitCode).toBe(2);
-    expect(errors.join(" ")).toContain("integer percentage");
-  });
-
-  it("--threshold -1 rejects with nonzero exit", async () => {
-    const cmd = contextCommand(makeDeps());
-    await cmd.parseAsync(["node", "rig", "--threshold", "-1"]);
-
-    expect(process.exitCode).toBe(2);
-  });
-
-  it("low + fresh = ok; low + stale = stale (never ok)", async () => {
-    const cmd = contextCommand(makeDeps());
-    await cmd.parseAsync(["node", "rig", "--full", "--json"]);
-
-    const json = JSON.parse(logs.join(""));
-    const stale = json.seats.find((s: { session: string }) => s.session === "dev-synth@test-rig");
-    // 50% (low urgency) + stale freshness => status must be "stale", NOT "ok"
-    expect(stale.status).toBe("stale");
-    expect(stale.displayStatus).toBe("stale");
-  });
-
-  it("unknown seats have honest unknown status", async () => {
-    const cmd = contextCommand(makeDeps());
-    await cmd.parseAsync(["node", "rig", "--full", "--json"]);
-
-    const json = JSON.parse(logs.join(""));
-    const unknown = json.seats.find((s: { session: string }) => s.session === "dev-qa@test-rig");
-    expect(unknown.usedPercentage).toBeNull();
-    expect(unknown.urgency).toBe("unknown");
-    expect(unknown.status).toBe("unknown");
-    expect(unknown.fresh).toBe(false);
-  });
-
-  // --- --refresh CLI tests ---
-
-  it("--refresh calls /nodes?refresh=true once then fetches inventory normally", async () => {
-    const requestedPaths: string[] = [];
-    const deps: ContextDeps = {
-      lifecycleDeps: {} as ContextDeps["lifecycleDeps"],
-      clientFactory: () => ({
-        get: vi.fn(async (path: string) => {
-          requestedPaths.push(path);
-          if (path === "/api/ps") return { status: 200, data: [{ rigId: "rig-0", name: "test-rig" }] };
-          return { status: 200, data: [] };
-        }),
-      }) as unknown as ReturnType<ContextDeps["clientFactory"]>,
-    };
-    const cmd = contextCommand(deps);
-    await cmd.parseAsync(["node", "rig", "--refresh", "--json"]);
-
-    // First non-ps call should be refresh, then normal inventory
-    const nodeCalls = requestedPaths.filter((p) => p.includes("/nodes"));
-    expect(nodeCalls.length).toBe(2);
-    expect(nodeCalls[0]).toContain("refresh=true");
-    expect(nodeCalls[1]).not.toContain("refresh=true");
-    expect(process.exitCode).toBeUndefined();
-  });
-
-  it("--refresh failure exits 2 with honest error copy", async () => {
-    const deps: ContextDeps = {
-      lifecycleDeps: {} as ContextDeps["lifecycleDeps"],
-      clientFactory: () => ({
-        get: vi.fn(async (path: string) => {
-          if (path === "/api/ps") return { status: 200, data: [{ rigId: "rig-0", name: "test-rig" }] };
-          if (path.includes("refresh=true")) return { status: 502, data: { code: "context_refresh_failed", error: "statusline read failed" } };
-          return { status: 200, data: [] };
-        }),
-      }) as unknown as ReturnType<ContextDeps["clientFactory"]>,
-    };
-    const cmd = contextCommand(deps);
-    await cmd.parseAsync(["node", "rig", "--refresh"]);
-
-    expect(process.exitCode).toBe(2);
-    const errorOutput = errors.join("\n");
-    expect(errorOutput).toContain("Context refresh failed");
-    expect(errorOutput).toContain("Fix:");
-  });
-
-  it("--refresh success returns same JSON semantics as non-refresh", async () => {
-    const deps = makeDeps();
-    const cmd = contextCommand(deps);
-    await cmd.parseAsync(["node", "rig", "--refresh", "--json"]);
-
-    const json = JSON.parse(logs.join(""));
-    expect(json.seats).toBeInstanceOf(Array);
-    expect(json.summary).toBeDefined();
-    // Should have the same structure as non-refresh output
-    expect(json.summary.total).toBeDefined();
-    expect(process.exitCode).toBeUndefined();
-  });
-
-  // --- OPR.0.4.0.30: compact --json default + --full ---
-
-  const COMPACT_KEYS = ["session", "rig", "runtime", "usedPercentage", "contextWindowSize", "staleness", "displayStatus"];
-  const FULL_ONLY_KEYS = ["logicalId", "remainingPercentage", "urgency", "freshness", "status", "source", "availability", "sampledAt", "fresh"];
-
-  it("AC-3: bare --json emits EXACTLY the 7 compact keys per seat (full-only keys absent)", async () => {
-    const cmd = contextCommand(makeDeps());
-    await cmd.parseAsync(["node", "rig", "--json"]);
-    const json = JSON.parse(logs.join(""));
-    expect(json.seats.length).toBe(3);
-    for (const seat of json.seats) {
-      expect(Object.keys(seat).sort()).toEqual([...COMPACT_KEYS].sort());
-      for (const k of FULL_ONLY_KEYS) expect(seat[k]).toBeUndefined();
+  it.each([
+    [
+      "path traversal",
+      `name: invalid-pack
+version: 1.0.0
+files:
+  - path: ../secret.md
+    role: notes
+`,
+      "must be a relative path inside the pack",
+    ],
+    [
+      "absolute path",
+      `name: invalid-pack
+version: 1.0.0
+files:
+  - path: /etc/passwd
+    role: notes
+`,
+      "must be a relative path inside the pack",
+    ],
+    [
+      "leading backslash",
+      `name: invalid-pack
+version: 1.0.0
+files:
+  - path: '\\evil.md'
+    role: notes
+`,
+      "must be a relative path inside the pack",
+    ],
+    [
+      "unknown suffix",
+      `name: invalid-pack
+version: 1.0.0
+files:
+  - path: secret.bin
+    role: notes
+`,
+      "has an unsupported suffix",
+    ],
+    [
+      "missing name",
+      `version: 1.0.0
+files:
+  - path: notes.md
+    role: notes
+`,
+      "missing required field 'name'",
+    ],
+    [
+      "missing version",
+      `name: invalid-pack
+files:
+  - path: notes.md
+    role: notes
+`,
+      "missing required field 'version'",
+    ],
+    [
+      "missing files",
+      `name: invalid-pack
+version: 1.0.0
+`,
+      "must declare 'files: [...]'",
+    ],
+    [
+      "missing path",
+      `name: invalid-pack
+version: 1.0.0
+files:
+  - role: notes
+`,
+      "missing 'path'",
+    ],
+    [
+      "missing role",
+      `name: invalid-pack
+version: 1.0.0
+files:
+  - path: notes.md
+`,
+      "missing 'role'",
+    ],
+  ])("rejects invalid context add manifest: %s", async (_name, manifest, expectedError) => {
+    const dir = writePack(manifest);
+    try {
+      const { errLogs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "context", "add", dir]);
+      });
+      expect(exitCode).toBe(1);
+      expect(errLogs.join("\n")).toContain(expectedError);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
-    expect(json.summary).toBeDefined();
   });
 
-  it("AC-2/AC-3: --full --json emits the complete 16-field Seat[]", async () => {
-    const cmd = contextCommand(makeDeps());
-    await cmd.parseAsync(["node", "rig", "--full", "--json"]);
-    const json = JSON.parse(logs.join(""));
-    for (const seat of json.seats) {
-      for (const k of [...COMPACT_KEYS, ...FULL_ONLY_KEYS]) expect(k in seat).toBe(true);
-    }
+  it("list shows discovered packs", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "context", "list"]);
+    });
+    expect(exitCode).toBeUndefined();
+    expect(logs.join("\n")).toContain("smoke");
+    expect(logs.join("\n")).toContain("1 files");
   });
 
-  it("AC-1: bare --json is non-pretty and smaller than --full --json", async () => {
-    const compactCmd = contextCommand(makeDeps());
-    await compactCmd.parseAsync(["node", "rig", "--json"]);
-    const compactOut = logs.join("");
-    logs.length = 0;
-    const fullCmd = contextCommand(makeDeps());
-    await fullCmd.parseAsync(["node", "rig", "--full", "--json"]);
-    const fullOut = logs.join("");
-    // Non-pretty compact vs pretty-printed full.
-    expect(compactOut).not.toContain("\n");
-    expect(fullOut).toContain("\n");
-    expect(compactOut.length).toBeLessThan(fullOut.length);
+  it("list --json emits JSON", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "context", "list", "--json"]);
+    });
+    const parsed = JSON.parse(logs.join("")) as Array<{ name: string }>;
+    expect(parsed[0]!.name).toBe("smoke");
   });
 
-  it("AC-4: compact default preserves every visible seat + summary", async () => {
-    const cmd = contextCommand(makeDeps());
-    await cmd.parseAsync(["node", "rig", "--json"]);
-    const json = JSON.parse(logs.join(""));
-    const sessions = json.seats.map((s: { session: string }) => s.session).sort();
-    expect(sessions).toEqual(["dev-impl@test-rig", "dev-qa@test-rig", "dev-synth@test-rig"]);
-    expect(json.summary.total).toBe(3);
+  it("show resolves by name", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "context", "show", "smoke"]);
+    });
+    expect(logs.join("\n")).toContain("Name:        smoke");
+    expect(logs.join("\n")).toContain("Smoke test pack");
   });
 
-  it("AC-2: --full human widens the table (remaining/source/freshness); default omits them", async () => {
-    const fullCmd = contextCommand(makeDeps());
-    await fullCmd.parseAsync(["node", "rig", "--full"]);
-    const fullOut = logs.join("\n");
-    expect(fullOut).toContain("remaining");
-    expect(fullOut).toContain("freshness");
-    expect(fullOut).toContain("claude_statusline_json"); // a source value renders
-
-    logs.length = 0;
-    const defCmd = contextCommand(makeDeps());
-    await defCmd.parseAsync(["node", "rig"]);
-    const defOut = logs.join("\n");
-    expect(defOut).not.toContain("freshness"); // default header unchanged
-    expect(defOut).not.toContain("claude_statusline_json");
+  it("show fails with helpful error on unknown name", async () => {
+    const { errLogs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "context", "show", "missing-pack"]);
+    });
+    expect(exitCode).toBe(1);
+    expect(errLogs.join("\n")).toContain("not found in library");
   });
 
-  it("AC-5: --help teaches --full", async () => {
-    const cmd = contextCommand(makeDeps());
-    expect(cmd.helpInformation()).toContain("--full");
+  it("preview prints the assembled bundle text", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "context", "preview", "smoke"]);
+    });
+    expect(logs.join("\n")).toContain("# OpenRig Context Pack: smoke v1");
+    expect(logs.join("\n")).toContain("Smoke body");
+  });
+
+  it("send --dry-run does not invoke the daemon send path twice", async () => {
+    sendLog.length = 0;
+    sendBehavior = "ok";
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "context", "send", "smoke", "driver@rig", "--dry-run"]);
+    });
+    expect(exitCode).toBeUndefined();
+    expect(sendLog).toHaveLength(1);
+    expect(sendLog[0]!.body).toEqual({ destinationSession: "driver@rig", dryRun: true });
+    expect(logs.join("\n")).toContain("(dry-run)");
+  });
+
+  it("send (real) reports successful delivery", async () => {
+    sendLog.length = 0;
+    sendBehavior = "ok";
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "context", "send", "smoke", "driver@rig"]);
+    });
+    expect(exitCode).toBeUndefined();
+    expect(sendLog[0]!.body).toEqual({ destinationSession: "driver@rig", dryRun: false });
+    expect(logs.join("\n")).toContain("Sent smoke v1");
+  });
+
+  it("send fails fast when daemon returns 502", async () => {
+    sendLog.length = 0;
+    sendBehavior = "fail";
+    const { errLogs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "context", "send", "smoke", "missing@rig"]);
+    });
+    expect(exitCode).toBe(1);
+    expect(errLogs.join("\n")).toContain("Session not found");
+    sendBehavior = "ok";
+  });
+
+  it("sync reports indexed count", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "context", "sync"]);
+    });
+    expect(exitCode).toBeUndefined();
+    expect(logs.join("\n")).toContain("Indexed 1 context pack");
   });
 });

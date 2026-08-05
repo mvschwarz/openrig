@@ -1,306 +1,406 @@
+// Rig Context / Composable Context Injection — the `rig context` CLI verb
+// family (Atom-7 renamed the retired `context-pack` grammar to `rig context`;
+// the pack STORE contract — kind/id/API/on-disk dir — is unchanged).
+//
+// Six subcommands parallel to `rig specs`:
+//   list / show / preview / add / sync / send
+//
+// Each delegates to /api/context-packs/library/* against the daemon.
+// The `add` verb installs a pack from a directory at
+// ~/.openrig/context-packs/<name>/ — host-symlink-free contract,
+// matches `rig specs add` shape (regular files only; no symlinks).
+
 import { Command } from "commander";
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+} from "node:fs";
+import { basename, extname, isAbsolute, join } from "node:path";
+import { parse as parseYaml } from "yaml";
+import { getDefaultOpenRigPath } from "../openrig-compat.js";
 import { DaemonClient } from "../client.js";
-import { getDaemonStatus, getDaemonUrl, type LifecycleDeps } from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
+import type { StatusDeps } from "./status.js";
 
-export interface ContextDeps {
-  lifecycleDeps: LifecycleDeps;
-  clientFactory: (url: string) => DaemonClient;
+interface ContextPackEntryWire {
+  id: string;
+  kind: "context-pack";
+  name: string;
+  version: string;
+  purpose: string | null;
+  sourceType: "builtin" | "user_file" | "workspace";
+  sourcePath: string;
+  relativePath: string;
+  updatedAt: string;
+  manifestEstimatedTokens: number | null;
+  derivedEstimatedTokens: number;
+  files: Array<{
+    path: string;
+    role: string;
+    summary: string | null;
+    absolutePath: string | null;
+    bytes: number | null;
+    estimatedTokens: number | null;
+  }>;
 }
 
-interface NodeEntry {
-  rigId: string;
-  rigName: string;
-  logicalId: string;
-  canonicalSessionName: string | null;
-  runtime: string | null;
-  contextUsage?: {
-    usedPercentage: number | null;
-    remainingPercentage: number | null;
-    contextWindowSize: number | null;
-    source: string | null;
-    availability: string | null;
-    sampledAt: string | null;
-    fresh: boolean;
-  };
-  [key: string]: unknown;
+interface PreviewWire {
+  id: string;
+  name: string;
+  version: string;
+  bundleText: string;
+  bundleBytes: number;
+  estimatedTokens: number;
+  files: Array<{ path: string; role: string; bytes: number; estimatedTokens: number }>;
+  missingFiles: Array<{ path: string; role: string }>;
 }
 
-interface Seat {
-  session: string;
-  rig: string;
-  logicalId: string;
-  runtime: string;
-  usedPercentage: number | null;
-  remainingPercentage: number | null;
-  contextWindowSize: number | null;
-  urgency: "critical" | "warning" | "low" | "unknown";
-  freshness: "fresh" | "stale" | "none";
-  status: string;
-  displayStatus: string;
-  source: string | null;
-  availability: string;
-  sampledAt: string | null;
-  staleness: string;
-  fresh: boolean;
+interface SendWire {
+  id: string;
+  name: string;
+  version: string;
+  destinationSession: string;
+  bundleBytes: number;
+  estimatedTokens: number;
+  files: Array<{ path: string; role: string; bytes: number; estimatedTokens: number }>;
+  missingFiles: Array<{ path: string; role: string }>;
+  dryRun: boolean;
+  bundleText?: string;
+  sent?: boolean;
+  reason?: string;
+  error?: string;
 }
 
-const FRESHNESS_THRESHOLD_S = 600; // 10 minutes
-
-function ageLabel(sampledAt: string | null): string {
-  if (!sampledAt) return "\u2014";
-  const age = Math.max(0, Math.floor((Date.now() - new Date(sampledAt).getTime()) / 1000));
-  if (age < 60) return "<1m ago";
-  const minutes = Math.floor(age / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 48) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}
-
-function computeFreshness(sampledAt: string | null): "fresh" | "stale" | "none" {
-  if (!sampledAt) return "none";
-  const age = (Date.now() - new Date(sampledAt).getTime()) / 1000;
-  return age <= FRESHNESS_THRESHOLD_S ? "fresh" : "stale";
-}
-
-function analyze(node: NodeEntry): Seat {
-  const ctx = node.contextUsage ?? {} as Partial<NonNullable<NodeEntry["contextUsage"]>>;
-  const used = ctx.usedPercentage != null ? Math.round(ctx.usedPercentage) : null;
-  const remaining = ctx.remainingPercentage != null ? Math.round(ctx.remainingPercentage) : null;
-  const window = ctx.contextWindowSize ?? null;
-  const sampledAt = ctx.sampledAt ?? null;
-  const source = ctx.source ?? null;
-  const availability = ctx.availability ?? (used != null ? "known" : "unknown");
-
-  if (used == null) {
-    return {
-      session: node.canonicalSessionName ?? "",
-      rig: node.rigName ?? "",
-      logicalId: node.logicalId ?? "",
-      runtime: node.runtime ?? "unknown",
-      usedPercentage: null, remainingPercentage: null, contextWindowSize: null,
-      urgency: "unknown", freshness: "none", status: "unknown", displayStatus: "unknown",
-      source, availability, sampledAt, staleness: "\u2014", fresh: false,
-    };
+function assertTreeHasNoSymlinks(root: string): void {
+  const stack = [root];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const absPath = join(current, entry.name);
+      if (entry.isSymbolicLink()) {
+        throw new Error(`Context pack directories must not contain symlinks: ${absPath}`);
+      }
+      if (entry.isDirectory()) stack.push(absPath);
+    }
   }
+}
 
-  const urgency: "critical" | "warning" | "low" = used >= 80 ? "critical" : used >= 60 ? "warning" : "low";
-  const freshness = computeFreshness(sampledAt);
-  let status: string;
-  let displayStatus: string;
+const ALLOWED_CONTEXT_PACK_SUFFIXES = new Set([".md", ".markdown", ".yaml", ".yml", ".txt"]);
 
-  if (urgency === "critical") {
-    status = freshness === "fresh" ? "critical" : "critical_stale";
-    displayStatus = freshness === "fresh" ? "CRITICAL" : "CRITICAL (stale)";
-  } else if (urgency === "warning") {
-    status = freshness === "fresh" ? "warning" : "warning_stale";
-    displayStatus = freshness === "fresh" ? "WARNING" : "WARNING (stale)";
-  } else if (freshness === "fresh") {
-    status = "ok";
-    displayStatus = "ok";
-  } else {
-    status = "stale";
-    displayStatus = "stale";
+function validateContextPackManifestForInstall(manifestPath: string): void {
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(readFileSync(manifestPath, "utf-8"));
+  } catch (err) {
+    throw new Error(`manifest at ${manifestPath} is not valid YAML: ${(err as Error).message}`);
   }
-
-  return {
-    session: node.canonicalSessionName ?? "",
-    rig: node.rigName ?? "",
-    logicalId: node.logicalId ?? "",
-    runtime: node.runtime ?? "unknown",
-    usedPercentage: used, remainingPercentage: remaining, contextWindowSize: window,
-    urgency, freshness, status, displayStatus,
-    source, availability, sampledAt, staleness: ageLabel(sampledAt), fresh: freshness === "fresh",
-  };
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`manifest at ${manifestPath} must be a YAML object at the root`);
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (typeof obj["name"] !== "string" || obj["name"].length === 0) {
+    throw new Error(`manifest at ${manifestPath} is missing required field 'name' (string)`);
+  }
+  if (obj["version"] === undefined || obj["version"] === null) {
+    throw new Error(`manifest at ${manifestPath} is missing required field 'version'`);
+  }
+  const files = obj["files"];
+  if (!Array.isArray(files)) {
+    throw new Error(`manifest at ${manifestPath} must declare 'files: [...]'`);
+  }
+  for (let i = 0; i < files.length; i++) {
+    const entry = files[i];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`manifest at ${manifestPath} has malformed entry at files[${i}]`);
+    }
+    const file = entry as Record<string, unknown>;
+    const relPath = file["path"];
+    if (typeof relPath !== "string" || relPath.length === 0) {
+      throw new Error(`manifest at ${manifestPath} files[${i}] missing 'path' (string)`);
+    }
+    if (relPath.includes("..") || isAbsolute(relPath) || relPath.startsWith("\\")) {
+      throw new Error(`manifest at ${manifestPath} files[${i}].path '${relPath}' must be a relative path inside the pack (no '..' segments, no leading '/')`);
+    }
+    if (!ALLOWED_CONTEXT_PACK_SUFFIXES.has(extname(relPath))) {
+      throw new Error(`manifest at ${manifestPath} files[${i}].path '${relPath}' has an unsupported suffix; allowed: ${Array.from(ALLOWED_CONTEXT_PACK_SUFFIXES).join(", ")}`);
+    }
+    if (typeof file["role"] !== "string" || file["role"].length === 0) {
+      throw new Error(`manifest at ${manifestPath} files[${i}] missing 'role' (string)`);
+    }
+  }
 }
 
-const STATUS_RANK: Record<string, number> = {
-  critical: 0, critical_stale: 0,
-  warning: 1, warning_stale: 1,
-  stale: 2, ok: 3, unknown: 4,
-};
-
-function sortSeats(seats: Seat[]): Seat[] {
-  return seats.sort((a, b) => {
-    const ra = STATUS_RANK[a.status] ?? 9;
-    const rb = STATUS_RANK[b.status] ?? 9;
-    if (ra !== rb) return ra - rb;
-    const pa = a.usedPercentage ?? -1;
-    const pb = b.usedPercentage ?? -1;
-    if (pa !== pb) return pb - pa; // higher percentage first
-    if (a.rig !== b.rig) return a.rig.localeCompare(b.rig);
-    return a.session.localeCompare(b.session);
-  });
+async function resolvePack(client: DaemonClient, nameOrId: string): Promise<ContextPackEntryWire> {
+  // First try as id (context-pack:<name>:<version>); else search by name.
+  if (nameOrId.startsWith("context-pack:")) {
+    const res = await client.get<ContextPackEntryWire>(`/api/context-packs/library/${encodeURIComponent(nameOrId)}`);
+    if (res.status === 200) return res.data;
+    if (res.status === 404) throw new Error(`Context pack '${nameOrId}' not found in library. Run 'rig context list' to see what's available.`);
+    throw new Error(`Daemon returned HTTP ${res.status} for /api/context-packs/library/${nameOrId}`);
+  }
+  const res = await client.get<ContextPackEntryWire[]>("/api/context-packs/library");
+  if (res.status !== 200) throw new Error(`Daemon returned HTTP ${res.status} for /api/context-packs/library`);
+  const entries = res.data ?? [];
+  const matches = entries.filter((e) => e.name === nameOrId);
+  if (matches.length === 0) {
+    throw new Error(`Context pack '${nameOrId}' not found in library. Run 'rig context list' to see what's available.`);
+  }
+  if (matches.length > 1) {
+    const versions = matches.map((m) => m.version).join(", ");
+    throw new Error(`Context pack '${nameOrId}' is ambiguous (versions: ${versions}). Use the full id 'context-pack:${nameOrId}:<version>'.`);
+  }
+  return matches[0]!;
 }
 
-function isVisible(seat: Seat, threshold: number | null): boolean {
-  if (threshold == null) return true;
-  if (seat.status === "unknown") return true;
-  if (seat.freshness === "stale") return true;
-  return seat.usedPercentage != null && seat.usedPercentage >= threshold;
-}
-
-export function contextCommand(depsOverride?: ContextDeps): Command {
+export function contextCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("context")
-    .description("Show context-usage across running agents")
+    .description("Browse, preview, send, and install operator-authored context packs")
     .addHelpText("after", `
 Examples:
-  rig context                    Show all seats with context usage
-  rig context --rig openrig-pm   Show one rig
-  rig context --threshold 80     Show seats at or above 80% (plus unknown + stale)
-  rig context --refresh          Re-sample context before displaying
-  rig context --json             Compact JSON (slim per-seat projection, non-pretty)
-  rig context --full --json      Complete per-seat payload (all fields; lossless)
-  rig context --full             Widened human table (adds remaining/source/freshness)`);
+  rig context list
+  rig context show pl-005-phase-a-priming
+  rig context preview pl-005-phase-a-priming
+  rig context add ./my-pack
+  rig context sync
+  rig context send pl-005-phase-a-priming velocity-driver@openrig-velocity --dry-run
+  rig context send pl-005-phase-a-priming velocity-driver@openrig-velocity
+`);
 
-  const getDepsF = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
+  const getDeps = (): StatusDeps => depsOverride ?? {
+    lifecycleDeps: realDeps(),
+    clientFactory: (url: string) => new DaemonClient(url),
+  };
 
-  cmd
-    .option("--json", "Compact JSON for agents (use --full --json for the complete payload)")
-    .option("--full", "Include every field: --full --json is the complete Seat[]; --full widens the human table")
-    .option("--rig <name>", "Show one rig only")
-    .option("--threshold <pct>", "Show seats at or above this percentage")
-    .option("--refresh", "Re-sample context usage before displaying")
-    .action(async (opts: { json?: boolean; full?: boolean; rig?: string; threshold?: string; refresh?: boolean }) => {
-      const deps = getDepsF();
+  async function getClient(): Promise<DaemonClient> {
+    const deps = getDeps();
+    const status = await getDaemonStatus(deps.lifecycleDeps);
+    if (status.state !== "running" || status.healthy === false) {
+      throw new Error("Daemon not running. Start it with: rig daemon start");
+    }
+    return deps.clientFactory(getDaemonUrl(status));
+  }
 
-      // Strict threshold validation — reject non-integer input
-      let threshold: number | null = null;
-      if (opts.threshold != null) {
-        const parsed = Number(opts.threshold);
-        if (!Number.isInteger(parsed) || parsed < 0 || parsed > 100) {
-          console.error("rig context: --threshold must be an integer percentage (0-100)");
-          process.exitCode = 2;
-          return;
-        }
-        threshold = parsed;
-      }
-
-      const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (status.state !== "running" || status.healthy === false) {
-        console.error("Daemon is not running. Start it with: rig daemon start");
-        process.exitCode = 1;
-        return;
-      }
-      const client = deps.clientFactory(getDaemonUrl(status));
-
+  cmd.command("list")
+    .description("List all context packs in the library")
+    .option("--json", "JSON output")
+    .action(async (opts: { json?: boolean }) => {
       try {
-        // Get rig list to iterate
-        const psResult = await client.get<Array<{ rigId: string; name: string }>>("/api/ps");
-        const rigs = psResult.data ?? [];
-        const targetRigs = opts.rig
-          ? rigs.filter((r) => r.name === opts.rig)
-          : rigs;
-
-        if (opts.rig && targetRigs.length === 0) {
-          console.error(`Rig "${opts.rig}" not found. List rigs with: rig ps`);
-          process.exitCode = 1;
-          return;
-        }
-
-        // Refresh once globally if requested (pollOnce samples all active Claude sessions).
-        // Refresh failure is a hard error — do not silently display stale data as if refreshed.
-        if (opts.refresh && targetRigs.length > 0) {
-          const firstRig = targetRigs[0]!;
-          try {
-            const refreshResult = await client.get(`/api/rigs/${firstRig.rigId}/nodes?refresh=true`);
-            if (refreshResult.status >= 400) {
-              console.error("Context refresh failed. Data may be stale.");
-              console.error(`Detail: ${JSON.stringify(refreshResult.data)}`);
-              console.error("Fix: retry without --refresh to see stale data, or check daemon logs.");
-              process.exitCode = 2;
-              return;
-            }
-          } catch (refreshErr) {
-            console.error("Context refresh failed. Data may be stale.");
-            console.error(`Detail: ${refreshErr instanceof Error ? refreshErr.message : String(refreshErr)}`);
-            console.error("Fix: retry without --refresh to see stale data, or check daemon logs.");
-            process.exitCode = 2;
-            return;
-          }
-        }
-
-        // Fetch node inventory per rig (without refresh — already done globally)
-        const allNodes: NodeEntry[] = [];
-        for (const rig of targetRigs) {
-          const nodesResult = await client.get<NodeEntry[]>(`/api/rigs/${rig.rigId}/nodes`);
-          if (Array.isArray(nodesResult.data)) {
-            allNodes.push(...nodesResult.data);
-          }
-        }
-
-        const seats = sortSeats(
-          allNodes
-            .map(analyze)
-            .filter((s) => isVisible(s, threshold))
-        );
-
-        const summary = {
-          total: seats.length,
-          known: seats.filter((s) => s.usedPercentage != null).length,
-          critical: seats.filter((s) => s.urgency === "critical").length,
-          warning: seats.filter((s) => s.urgency === "warning").length,
-          ok: seats.filter((s) => s.status === "ok").length,
-          stale: seats.filter((s) => s.freshness === "stale").length,
-          unknown: seats.filter((s) => s.status === "unknown").length,
-        };
-
+        const client = await getClient();
+        const res = await client.get<ContextPackEntryWire[]>("/api/context-packs/library");
+        const entries = res.data ?? [];
         if (opts.json) {
-          if (opts.full) {
-            // --full --json: the complete Seat[] + summary. Lossless parity
-            // with the pre-0.4.0.30 --json output (pretty-printed). This is
-            // the ONLY full-payload surface.
-            console.log(JSON.stringify({ seats, summary }, null, 2));
-          } else {
-            // Compact default (OPR.0.4.0.30): a slim, non-pretty actionable
-            // projection — exactly the columns the human table shows. The
-            // other Seat fields move to --full --json.
-            const compactSeats = seats.map((s) => ({
-              session: s.session,
-              rig: s.rig,
-              runtime: s.runtime,
-              usedPercentage: s.usedPercentage,
-              contextWindowSize: s.contextWindowSize,
-              staleness: s.staleness,
-              displayStatus: s.displayStatus,
-            }));
-            console.log(JSON.stringify({ seats: compactSeats, summary }));
+          console.log(JSON.stringify(entries, null, 2));
+          return;
+        }
+        if (entries.length === 0) {
+          console.log("No context packs in library. Author one at ~/.openrig/context-packs/<name>/ then run: rig context sync");
+          return;
+        }
+        for (const e of entries) {
+          console.log(`${e.name.padEnd(28)} v${String(e.version).padEnd(6)} ${String(e.files.length).padStart(2)} files  ~${String(e.derivedEstimatedTokens).padStart(6)} tokens  ${e.sourceType}  ${e.sourcePath}`);
+        }
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    });
+
+  cmd.command("show")
+    .argument("<name-or-id>", "Context pack name or library ID")
+    .description("Show pack manifest + per-file metadata")
+    .option("--json", "JSON output")
+    .action(async (nameOrId: string, opts: { json?: boolean }) => {
+      try {
+        const client = await getClient();
+        const entry = await resolvePack(client, nameOrId);
+        if (opts.json) {
+          console.log(JSON.stringify(entry, null, 2));
+          return;
+        }
+        console.log(`Name:        ${entry.name}`);
+        console.log(`Version:     ${entry.version}`);
+        console.log(`Source:      ${entry.sourceType} (${entry.sourcePath})`);
+        console.log(`Files:       ${entry.files.length}`);
+        console.log(`Tokens (~):  ${entry.derivedEstimatedTokens}${entry.manifestEstimatedTokens !== null ? ` (manifest: ${entry.manifestEstimatedTokens})` : ""}`);
+        if (entry.purpose) {
+          console.log("");
+          console.log("Purpose:");
+          console.log(`  ${entry.purpose.replaceAll("\n", "\n  ")}`);
+        }
+        console.log("");
+        for (const f of entry.files) {
+          const sizeStr = f.bytes === null ? "(missing)" : `${f.bytes}B`;
+          const tokenStr = f.estimatedTokens === null ? "—" : `~${f.estimatedTokens} tokens`;
+          console.log(`  ${f.path.padEnd(40)} role=${f.role.padEnd(20)} ${sizeStr.padEnd(12)} ${tokenStr}`);
+          if (f.summary) console.log(`    ${f.summary}`);
+        }
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    });
+
+  cmd.command("preview")
+    .argument("<name-or-id>", "Context pack name or library ID")
+    .description("Show the assembled bundle (the exact text that would be sent)")
+    .option("--json", "JSON output")
+    .action(async (nameOrId: string, opts: { json?: boolean }) => {
+      try {
+        const client = await getClient();
+        const entry = await resolvePack(client, nameOrId);
+        const res = await client.get<PreviewWire>(`/api/context-packs/library/${encodeURIComponent(entry.id)}/preview`);
+        if (res.status !== 200) throw new Error(`Daemon returned HTTP ${res.status}`);
+        const preview = res.data;
+        if (opts.json) {
+          console.log(JSON.stringify(preview, null, 2));
+          return;
+        }
+        if (preview.missingFiles.length > 0) {
+          console.error(`Warning: ${preview.missingFiles.length} file(s) referenced by manifest are missing on disk:`);
+          for (const m of preview.missingFiles) console.error(`  - ${m.path} (role: ${m.role})`);
+          console.error("");
+        }
+        console.log(`# Preview: ${preview.name} v${preview.version}`);
+        console.log(`# Bundle: ${preview.bundleBytes} bytes (~${preview.estimatedTokens} tokens), ${preview.files.length} files`);
+        console.log("# ---");
+        console.log(preview.bundleText);
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    });
+
+  cmd.command("sync")
+    .description("Re-walk discovery roots and refresh the library index")
+    .option("--json", "JSON output")
+    .action(async (opts: { json?: boolean }) => {
+      try {
+        const client = await getClient();
+        const res = await client.post<{ count: number; errors: Array<{ source: string; error: string }>; entries: ContextPackEntryWire[] }>(
+          "/api/context-packs/library/sync",
+        );
+        if (res.status !== 200) throw new Error(`Daemon returned HTTP ${res.status}`);
+        const data = res.data;
+        if (opts.json) {
+          console.log(JSON.stringify(data, null, 2));
+          return;
+        }
+        console.log(`Indexed ${data.count} context pack(s).`);
+        if (data.errors.length > 0) {
+          console.log(`Encountered ${data.errors.length} parse error(s):`);
+          for (const e of data.errors) console.log(`  - ${e.source}: ${e.error}`);
+        }
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    });
+
+  cmd.command("add")
+    .argument("<source-dir>", "Directory containing manifest.yaml + included files")
+    .description("Install a context pack from a local directory into ~/.openrig/context-packs/")
+    .option("--name <name>", "Override the install name (defaults to source directory basename)")
+    .option("--json", "JSON output")
+    .action(async (sourceDir: string, opts: { name?: string; json?: boolean }) => {
+      try {
+        if (!existsSync(sourceDir)) throw new Error(`Source directory not found: ${sourceDir}`);
+        const stat = lstatSync(sourceDir);
+        if (stat.isSymbolicLink()) throw new Error(`Source must not be a symlink: ${sourceDir}`);
+        if (!stat.isDirectory()) throw new Error(`Source must be a directory containing manifest.yaml: ${sourceDir}`);
+        const manifestPath = join(sourceDir, "manifest.yaml");
+        if (!existsSync(manifestPath)) {
+          throw new Error(`Source directory must contain manifest.yaml: ${sourceDir}`);
+        }
+        validateContextPackManifestForInstall(manifestPath);
+        // Read the manifest's name as the canonical install name when
+        // --name not given. Cheap parse: trust the daemon to validate
+        // on next sync; here we just need the name.
+        const installName = opts.name ?? (() => {
+          try {
+            const raw = readFileSync(manifestPath, "utf-8");
+            const m = raw.match(/^name:\s*['"]?([^'"\n]+)['"]?\s*$/m);
+            return m?.[1]?.trim() || basename(sourceDir);
+          } catch {
+            return basename(sourceDir);
+          }
+        })();
+        assertTreeHasNoSymlinks(sourceDir);
+        const targetRoot = getDefaultOpenRigPath("context-packs");
+        mkdirSync(targetRoot, { recursive: true });
+        const targetDir = join(targetRoot, installName);
+        if (existsSync(targetDir)) {
+          throw new Error(`A context pack named '${installName}' already exists at ${targetDir}. Remove it first or use --name to install under a different name.`);
+        }
+        cpSync(sourceDir, targetDir, { recursive: true });
+        // Sync the daemon library so the new pack appears immediately.
+        const client = await getClient();
+        const syncRes = await client.post<{ count: number; errors?: Array<{ source: string; error: string }>; entries: ContextPackEntryWire[] }>("/api/context-packs/library/sync");
+        if (syncRes.status !== 200) {
+          // Install succeeded; sync failed → still surface install path.
+          if (opts.json) console.log(JSON.stringify({ installedAt: targetDir, syncError: `HTTP ${syncRes.status}` }, null, 2));
+          else console.log(`Installed at ${targetDir}; daemon sync failed (HTTP ${syncRes.status}). Run 'rig context sync' manually.`);
+          return;
+        }
+        const syncError = syncRes.data.errors?.find((e) => e.source === targetDir);
+        if (syncError) {
+          throw new Error(`Installed at ${targetDir}, but daemon rejected the pack during sync: ${syncError.error}`);
+        }
+        if (opts.json) {
+          console.log(JSON.stringify({ installedAt: targetDir, count: syncRes.data.count }, null, 2));
+        } else {
+          console.log(`Installed at ${targetDir}. Library now has ${syncRes.data.count} context pack(s).`);
+        }
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    });
+
+  cmd.command("send")
+    .argument("<name-or-id>", "Context pack name or library ID")
+    .argument("<destination-session>", "Destination session name (e.g., velocity-driver@openrig-velocity)")
+    .description("Assemble the pack into one paste-ready bundle and send to a seat")
+    .option("--dry-run", "Show what would be sent without invoking SessionTransport")
+    .option("--json", "JSON output")
+    .action(async (nameOrId: string, destinationSession: string, opts: { dryRun?: boolean; json?: boolean }) => {
+      try {
+        const client = await getClient();
+        const entry = await resolvePack(client, nameOrId);
+        const res = await client.post<SendWire>(`/api/context-packs/library/${encodeURIComponent(entry.id)}/send`, {
+          destinationSession,
+          dryRun: opts.dryRun ?? false,
+        });
+        if (res.status !== 200) {
+          // 502/503/etc. — surface daemon error verbatim.
+          const data = res.data as Partial<SendWire> & { error?: string; reason?: string };
+          throw new Error(data.error ?? data.reason ?? `Daemon returned HTTP ${res.status}`);
+        }
+        const data = res.data;
+        if (opts.json) {
+          console.log(JSON.stringify(data, null, 2));
+          return;
+        }
+        if (data.dryRun) {
+          if (data.missingFiles.length > 0) {
+            console.error(`Warning: ${data.missingFiles.length} manifest file(s) missing on disk.`);
+          }
+          console.log(`(dry-run) ${data.name} v${data.version} → ${data.destinationSession}`);
+          console.log(`Bundle: ${data.bundleBytes} bytes (~${data.estimatedTokens} tokens), ${data.files.length} files`);
+          if (data.bundleText) {
+            console.log("# ---");
+            console.log(data.bundleText);
           }
           return;
         }
-
-        // Human-readable output
-        const title = opts.rig ? `CONTEXT USAGE - ${opts.rig}` : "CONTEXT USAGE - all rigs";
-        console.log(title);
-        // Default table is unchanged; --full appends remaining/source/freshness
-        // columns (a defined additive widening, not multi-line).
-        const baseHeader = `${"seat".padEnd(42)} ${"runtime".padEnd(12)} ${"context".padStart(7)} ${"window".padStart(8)} ${"sampled".padStart(10)}  ${opts.full ? "status".padEnd(16) : "status"}`;
-        console.log(opts.full
-          ? `${baseHeader}  ${"remaining".padStart(9)}  ${"source".padEnd(22)}  freshness`
-          : baseHeader);
-        for (const seat of seats) {
-          const context = seat.usedPercentage == null ? "?" : `${seat.usedPercentage}%`;
-          const window = seat.contextWindowSize == null ? "?" : String(seat.contextWindowSize);
-          const baseRow = `${seat.session.slice(0, 42).padEnd(42)} ${seat.runtime.slice(0, 12).padEnd(12)} ${context.padStart(7)} ${window.padStart(8)} ${seat.staleness.padStart(10)}  ${opts.full ? seat.displayStatus.padEnd(16) : seat.displayStatus}`;
-          if (opts.full) {
-            const remaining = seat.remainingPercentage == null ? "?" : `${seat.remainingPercentage}%`;
-            const source = seat.source ?? "\u2014";
-            console.log(`${baseRow}  ${remaining.padStart(9)}  ${source.padEnd(22)}  ${seat.freshness}`);
-          } else {
-            console.log(baseRow);
-          }
-        }
-        console.log();
-        console.log(
-          `FLEET SUMMARY: ${summary.known}/${summary.total} known | ` +
-          `${summary.critical} CRITICAL | ${summary.warning} WARNING | ` +
-          `${summary.ok} ok | ${summary.stale} stale | ${summary.unknown} unknown`
-        );
+        console.log(`Sent ${data.name} v${data.version} (${data.bundleBytes} bytes) to ${data.destinationSession}.`);
       } catch (err) {
-        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
-        process.exitCode = 2;
+        console.error((err as Error).message);
+        process.exitCode = 1;
       }
     });
 

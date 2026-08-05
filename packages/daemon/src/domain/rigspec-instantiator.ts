@@ -1976,7 +1976,7 @@ export class PodRigInstantiator {
       const pack = library.getByNameVersion(name, version);
       if (!pack) {
         throw new Error(
-          `Context pack '${name}' v${version} not found in library. Run 'rig context-pack list' to see what's installed.`,
+          `Context pack '${name}' v${version} not found in library. Run 'rig context list' to see what's installed.`,
         );
       }
       const bundle = assembleBundle({ packEntry: pack as ContextPackEntry });

@@ -92,7 +92,7 @@ This document reflects the current `rig` surface as shipped. Where live help tex
 | `workflow` | Daemon-native Workflow Runtime — declarative spec + transactional-scribe step projection |
 | `restore-packet` | Generate, read, and validate cross-runtime restore packets |
 | `restore-check` | Check restore readiness across running rigs |
-| `context` | Show context-usage across running agents |
+| `context` | Browse, preview, send, and install operator-authored context packs |
 | `compact-plan` | Plan Claude compact-in-place candidates without compacting anything |
 | `heartbeat` | Show workflow execution proof state from queue files |
 | `seat` | Inspect OpenRig seat observability state |
@@ -1267,9 +1267,9 @@ Notes:
 - Images are an operator-authored library form; deletion is gated by an evidence-preservation guard so productive seat snapshots are not lost accidentally.
 - `pin` / `unpin` are the operator levers for explicit retention; `prune` honours them.
 
-### `rig context-pack`
+### `rig context`
 
-Usage: `rig context-pack <subcommand>` — browse, preview, send, and install operator-authored context packs.
+Usage: `rig context <subcommand>` — browse, preview, send, and install operator-authored context packs. (Atom-7 retired the `rig context-pack` grammar and removed the old context-window usage viewer; `rig context` is now the library.)
 
 Subcommands:
 - `list [options]` — list all context packs in the library.
