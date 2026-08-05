@@ -11,6 +11,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
+import { attestationLineage, type AttestationLineage } from "../lib/scope/attestation-lineage.js";
 import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 
@@ -1035,35 +1036,6 @@ function extractFrontmatterRaw(content: string): string | null {
   if (!content.startsWith("---")) return null;
   const match = /^---\s*\n([\s\S]*?)\n---/.exec(content);
   return match ? match[1]! : null;
-}
-
-// OPR.0.5.0.18 — amendment lineage from frontmatter: the re-stamp verb writes
-// `approved-spec-priors` / `approved-priors` atomically beside the current
-// stamp, so the (filesystem-local) audit can show lineage without DB access.
-// Returns undefined for never-amended slices (first-approve output unchanged).
-interface AttestationLineage {
-  spec?: { by: string; at: string; priors: number };
-  delivery?: { by: string; at: string; priors: number };
-}
-
-function attestationLineage(frontmatterRaw: string | null): AttestationLineage | undefined {
-  if (!frontmatterRaw) return undefined;
-  const read = (key: string): string | null => {
-    const m = new RegExp(`^${key}\\s*:\\s*(.+)$`, "m").exec(frontmatterRaw);
-    return m ? m[1]!.trim().replace(/^["']|["']$/g, "") : null;
-  };
-  const lineage: AttestationLineage = {};
-  for (const [scope, fields] of [
-    ["spec", { by: "approved-spec-by", at: "approved-spec-at", priors: "approved-spec-priors" }],
-    ["delivery", { by: "approved-by", at: "approved-at", priors: "approved-priors" }],
-  ] as const) {
-    const priorsRaw = read(fields.priors);
-    const priors = priorsRaw !== null ? Number(priorsRaw) : NaN;
-    if (Number.isFinite(priors) && priors > 0) {
-      lineage[scope] = { by: read(fields.by) ?? "?", at: read(fields.at) ?? "?", priors };
-    }
-  }
-  return Object.keys(lineage).length > 0 ? lineage : undefined;
 }
 
 function directoryHasEntries(dir: string): boolean {
