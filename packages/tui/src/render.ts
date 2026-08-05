@@ -222,7 +222,11 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       // the seg channel (ROUND-4: colors/background survive stylization) but only
       // ACCOMPANY the name decoratively, never substitute. Topology cards remain
       // mark-only by space (layout.ts/hatchet.ts) — the ruling is bounded, not reversed.
-      const rtName = agent.runtime ?? "— (not served)";
+      // LEG-7 LOW 2 (dead-arm cleanup, wave qitem 79159e6f): the daemon coerces a null runtime to the
+      // string "unknown" BEFORE the wire (the icon-fix QA at 5a70e200 proved the old "— (not served)"
+      // arm unreachable), so the defensive fallback matches that coercion — honest, never a misleading
+      // placeholder. (The cwd field below keeps its own "— (not served)" — a legitimately-servable value.)
+      const rtName = agent.runtime ?? "unknown";
       const rtSegs = [
         { text: "  " },
         { text: "runtime:", token: "dim" as const },
