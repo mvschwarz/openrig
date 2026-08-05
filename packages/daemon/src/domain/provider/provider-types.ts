@@ -17,6 +17,8 @@ export interface ProviderAccount {
   asOf: string; // ISO-8601
 }
 
+import type { HostUsageRow } from "./host-usage-rollup.js";
+
 export type BindingAnomalyKind = "same_account_on_n_seats" | "seat_with_no_account";
 
 /**
@@ -137,4 +139,8 @@ export interface FourBlockReadModel {
   bindings: ProviderBinding[];
   signals: ProviderSignal[];
   asOf: string;
+  /** Slice-04 S-A (A2 amendment) — the host-level usage rollup, ADDITIVE: one honest state
+   *  row per (host, provider) aggregated from the seat-sourced signal rows. Optional so the
+   *  sealed assembler stays untouched; the collect layer always populates it. */
+  hostUsage?: HostUsageRow[];
 }

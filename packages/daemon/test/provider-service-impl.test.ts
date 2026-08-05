@@ -26,7 +26,9 @@ function makeSvc() {
 describe("ProviderServiceImpl — production getReadModel/precheck/switch wiring", () => {
   it("getReadModel over an empty codex home + no rigs is a well-formed empty four-block", async () => {
     const model = await makeSvc().getReadModel();
-    expect(model).toEqual({ accounts: [], bindings: [], signals: [], asOf: ASOF });
+    // S-A amendment (OPR.0.5.0.4 A2, README 21a5cb73): the read model additively carries the
+    // host-level usage rollup — empty here (no providers present ⇒ no rows, honestly).
+    expect(model).toEqual({ accounts: [], bindings: [], signals: [], hostUsage: [], asOf: ASOF });
   });
 
   it("precheck for an unknown/absent target fails CLOSED (target_auth_unknown), never safe", async () => {

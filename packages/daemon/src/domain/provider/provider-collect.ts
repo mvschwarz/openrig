@@ -8,6 +8,7 @@
 // computation to assembleFourBlock.
 
 import type { CodexAuthMetadata } from "./codex-auth-reader.js";
+import { rollupHostUsage } from "./host-usage-rollup.js";
 import { assembleFourBlock, type RawSeatBinding } from "./provider-read-model.js";
 import { claudeStatuslineSignals } from "./provider-signals.js";
 import type { FourBlockReadModel, ProviderAccount, ProviderSignal } from "./provider-types.js";
@@ -94,5 +95,12 @@ export function collectFourBlockReadModel(deps: ProviderCollectDeps): FourBlockR
     if (signaledClaudeSeats.has(seatSession)) continue;
     signals.push(...claudeStatuslineSignals({ seatSession, cachePresent: false, asOf }));
   }
-  return assembleFourBlock({ accounts, rawBindings, signals, asOf });
+  const model = assembleFourBlock({ accounts, rawBindings, signals, asOf });
+  // Slice-04 S-A: the host-level rollup aggregates the SAME signals this collection produced.
+  // Codex deployment presence = auth profiles on disk (a host with codex accounts but no meter
+  // must surface an explicit unknown, never an omitted row).
+  return {
+    ...model,
+    hostUsage: rollupHostUsage({ signals, codexProfilesPresent: profiles.length > 0, now: asOf }),
+  };
 }
