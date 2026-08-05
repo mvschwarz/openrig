@@ -16,6 +16,8 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { StreamStore } from "../src/domain/stream-store.js";
 import type { CmuxTransportFactory } from "../src/adapters/cmux.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
+import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
+import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
 
 function saveEnv(...names: string[]): Record<string, string | undefined> {
   return Object.fromEntries(names.map((name) => [name, process.env[name]]));
@@ -76,6 +78,85 @@ describe("createDaemon startup composition", () => {
 
     db.close();
   });
+
+  // Slice 51-01 stub-runtime — STEP 2 (Registry-B composition, RED-first): the PRODUCTION runtime-adapter
+  // registry assembled by createDaemon must register the "stub" adapter, so a runtime:stub seat resolves at
+  // the exposed AppDeps.runtimeAdapters map (NOT only via a test-injected instantiator map). RED now:
+  // startup.ts:898 runtimeAdapters = {claude-code, codex, pi, terminal} — no stub; goes green when the stub
+  // adapter is constructed + registered (step 4). Drives the REAL createDaemon composition, not a mock.
+  it("STEP2: createDaemon registers the stub adapter in the production runtimeAdapters registry [RED until startup.ts:898 adds stub]", async () => {
+    const cmuxFactory: CmuxTransportFactory = async () => {
+      throw Object.assign(new Error("no socket"), { code: "ENOENT" });
+    };
+    const tmuxExec: ExecFn = async () => "";
+    const { db, deps } = await createDaemon({ cmuxFactory, tmuxExec });
+    try {
+      expect(deps.runtimeAdapters, "AppDeps.runtimeAdapters exposed").toBeDefined();
+      expect(deps.runtimeAdapters!["stub"], "production runtimeAdapters registry must register the stub adapter").toBeDefined();
+    } finally {
+      db.close();
+    }
+  }, 30000); // createDaemon full composition can exceed the 5s default on a cold start
+
+  // Slice 51-01 stub-runtime — STEP 3 (first PRODUCTION dispatch proof, RED-first): the assembled
+  // PodRigInstantiator's PRIVATE adapters map (startup.ts:710 — a SEPARATE literal from the :898
+  // runtimeAdapters map STEP2 checks) must DISPATCH a runtime:stub seat to the stub adapter so its
+  // project() lifecycle method is REACHED. Drives the REAL createDaemon composition + the production
+  // instantiate() entry (NOT a test-injected adapters map; NOT error-string absence). RED now:
+  // adapters[:710] = {claude-code,codex,pi,terminal}, no stub → instantiate hits "No adapter for
+  // runtime stub" (rigspec-instantiator.ts:1669) and startNode/project (:130) are never reached.
+  // GREEN when step 4 registers the stub adapter at :710. The 30s timeout is HARNESS BUDGET (cold
+  // createDaemon compose), not product readiness.
+  it("STEP3: the assembled instantiator dispatches runtime:stub → the stub adapter's project() is REACHED [RED until startup.ts:710 adds stub]", async () => {
+    const cmuxFactory: CmuxTransportFactory = async () => {
+      throw Object.assign(new Error("no socket"), { code: "ENOENT" });
+    };
+    const tmuxExec: ExecFn = async () => "";
+
+    // REAL fs: the assembled instantiator uses fs.readFileSync (startup.ts:709), so agent_ref must
+    // resolve to a real file at <rigRoot>/agents/impl/agent.yaml.
+    const rigRoot = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-stub-dispatch-"));
+    fs.mkdirSync(path.join(rigRoot, "agents", "impl"), { recursive: true });
+    fs.writeFileSync(
+      path.join(rigRoot, "agents", "impl", "agent.yaml"),
+      `name: impl\nversion: "1.0.0"\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []`,
+    );
+
+    const { db, deps } = await createDaemon({ cmuxFactory, tmuxExec });
+    try {
+      // Reach the PRODUCTION instantiator's private adapters map (startup.ts:710).
+      const adapters = (deps.podInstantiator as unknown as {
+        deps: { adapters: Record<string, RuntimeAdapter> };
+      }).deps.adapters;
+
+      const stub = adapters["stub"];
+      // RED-now guard: pre-step-4 the production instantiator adapters map has no stub adapter.
+      expect(stub, "production instantiator adapters map (startup.ts:710) must register the stub adapter").toBeDefined();
+
+      // Observe the NAMED lifecycle method on the REAL production adapter (spy calls through).
+      const projectSpy = vi.spyOn(stub!, "project");
+
+      const specYaml = RigSpecCodec.serialize({
+        version: "0.2",
+        name: "stub-dispatch-rig",
+        pods: [{
+          id: "dev",
+          label: "Dev",
+          members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "stub", cwd: "." }],
+          edges: [],
+        }],
+        edges: [],
+      });
+
+      await deps.podInstantiator.instantiate(specYaml, rigRoot);
+
+      // Load-bearing assertion: dispatch reached the stub adapter's project() (startup-orchestrator.ts:130).
+      expect(projectSpy, "instantiate must dispatch project() to the production stub adapter").toHaveBeenCalled();
+    } finally {
+      db.close();
+      fs.rmSync(rigRoot, { recursive: true, force: true });
+    }
+  }, 30000); // harness budget (cold createDaemon compose), not product readiness
 
   it("defaults terminal auth to local-trusted mode without minting a token file", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-terminal-auth-"));
