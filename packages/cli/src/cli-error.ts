@@ -12,6 +12,7 @@
 // One class-fix at the entry, not per-command patches.
 import type { Command } from "commander";
 import { InvalidArgumentError } from "commander";
+import { DaemonConnectionError, DaemonResponseError, DaemonTimeoutError } from "./client.js";
 
 /**
  * Commander option parser — a positive integer (>= 1). Rejects negative, zero,
@@ -86,6 +87,52 @@ export interface RunProgramIo {
 }
 
 /**
+ * Response-integrity render: a daemon transport failure (bad-response /
+ * slow-response / no-connect) becomes the repo's 3-part fact/consequence/action
+ * error in BOTH json and human modes (Commander's writeErr does NOT fire for an
+ * error thrown inside an action, so a human run would otherwise be SILENT).
+ * Returns true when it handled `e`. A bad/slow response is NEVER rendered with
+ * daemon-not-running language — the request was delivered; the outcome is unknown.
+ */
+export function renderDaemonTransportError(
+  e: unknown,
+  io: { out: (l: string) => void; err: (l: string) => void; json: boolean },
+): boolean {
+  let parts: { fact: string; consequence: string; action: string } | undefined;
+  // DaemonTimeoutError is a subclass of DaemonConnectionError — check it FIRST.
+  if (e instanceof DaemonResponseError) {
+    parts = {
+      fact: e.message,
+      consequence: "The command's outcome is UNKNOWN — it may or may not have been applied.",
+      action:
+        "Re-check current state (e.g. 'rig queue show <id>'); if it repeats, inspect daemon health with 'rig daemon status' and the daemon logs. This is a bad response, not a stopped daemon.",
+    };
+  } else if (e instanceof DaemonTimeoutError) {
+    parts = {
+      fact: e.message,
+      consequence: "The command's outcome is UNKNOWN — the daemon did not answer in time.",
+      action:
+        "The daemon is slow or unresponsive (check load); retry once conditions ease. This is a slow response, not a stopped daemon.",
+    };
+  } else if (e instanceof DaemonConnectionError) {
+    parts = {
+      fact: e.message,
+      consequence: "The command was not delivered.",
+      action: "Confirm the daemon is reachable with 'rig daemon status'; if it is down, start it with 'rig up' or 'rig daemon start'.",
+    };
+  }
+  if (!parts) return false;
+  if (io.json) {
+    io.out(JSON.stringify({ error: parts }));
+  } else {
+    io.err(parts.fact);
+    io.err(`  ${parts.consequence}`);
+    io.err(`  ${parts.action}`);
+  }
+  return true;
+}
+
+/**
  * Parse+run the program through the shared error path. Injectable IO for tests.
  * Returns the process exit code (0 on success / clean help/version).
  */
@@ -110,6 +157,13 @@ export async function runProgram(program: Command, argv: string[], io: RunProgra
     return 0;
   } catch (e) {
     if (isCleanCommanderExit(e)) return 0;
+    // Response-integrity: render daemon transport failures honestly (3-part, both
+    // modes, honest nonzero exit) before the generic path — otherwise a thrown
+    // bad-response/timeout is cryptic under --json and SILENT for a human run.
+    if (renderDaemonTransportError(e, { out, err, json })) {
+      exit(1);
+      return 1;
+    }
     const code = (e as CommanderLikeError)?.exitCode ?? 1;
     if (json) {
       out(JSON.stringify(formatCliError(e)));

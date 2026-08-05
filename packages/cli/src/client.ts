@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { ConfigStore } from "./config-store.js";
 import { readOpenRigEnv } from "./openrig-compat.js";
-import { fetchWithTimeout } from "./fetch-with-timeout.js";
+import { fetchWithTimeout, FetchTimeoutError } from "./fetch-with-timeout.js";
 
 export function terminalAuthHeaders(): Record<string, string> {
   const token = resolveTerminalToken();
@@ -26,6 +26,35 @@ export class DaemonConnectionError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "DaemonConnectionError";
+  }
+}
+
+/**
+ * Slow-response: the request reached its bound without a reply. A SUBCLASS of
+ * DaemonConnectionError so existing callers still catch it, but distinguishable
+ * so the CLI can render "slow, not stopped" instead of daemon-down language.
+ */
+export class DaemonTimeoutError extends DaemonConnectionError {
+  constructor(message: string) {
+    super(message);
+    this.name = "DaemonTimeoutError";
+  }
+}
+
+/**
+ * Bad-response: the daemon replied, but the body could not be read as JSON
+ * (truncated / unparseable / non-JSON — a real symptom under daemon saturation).
+ * DISTINCT from a stopped or unreachable daemon: the request WAS delivered and
+ * the outcome is unknown, so this must never render as daemon-not-running.
+ */
+export class DaemonResponseError extends Error {
+  readonly status: number;
+  readonly bodySnippet: string;
+  constructor(status: number, body: string) {
+    super(`The daemon returned an unreadable response (HTTP ${status}).`);
+    this.name = "DaemonResponseError";
+    this.status = status;
+    this.bodySnippet = body.slice(0, 200);
   }
 }
 
@@ -134,14 +163,30 @@ export class DaemonClient {
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      // Slow-response (a timed-out request) is a DISTINCT class from no-connect:
+      // the daemon may be up but saturated. Surface it as a subclass so callers
+      // still catch DaemonConnectionError, but the CLI can say "slow, not stopped".
+      if (err instanceof FetchTimeoutError) {
+        throw new DaemonTimeoutError(`The OpenRig daemon at ${this.baseUrl} did not respond in time: ${msg}`);
+      }
       throw new DaemonConnectionError(`Cannot connect to the OpenRig daemon at ${this.baseUrl}: ${msg}`);
     }
   }
 
   private async requestJson<T>(path: string, init: RequestInit, options?: DaemonRequestOptions): Promise<DaemonResponse<T>> {
     const res = await this.fetch(path, init, options);
-    const data = (await res.json()) as T;
-    return { status: res.status, data };
+    // Read the raw body once, THEN parse — so a truncated / unparseable response
+    // (a real symptom under daemon saturation) surfaces as a typed
+    // DaemonResponseError carrying the status + a bounded snippet, instead of a
+    // raw SyntaxError bubbling to a cryptic (json) or silent (human) CLI exit.
+    // A well-formed non-2xx body still parses and returns {status,data}; 204 has none.
+    const text = await res.text();
+    if (res.status === 204) return { status: res.status, data: undefined as T };
+    try {
+      return { status: res.status, data: JSON.parse(text) as T };
+    } catch {
+      throw new DaemonResponseError(res.status, text);
+    }
   }
 
   private async requestText(path: string, init: RequestInit, options?: DaemonRequestOptions): Promise<DaemonResponse<string>> {
