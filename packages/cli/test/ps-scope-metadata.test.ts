@@ -13,6 +13,15 @@ const RIGS_MULTI = [
   { rigId: "rC", rigName: "gamma", name: "gamma" },
 ];
 const RIGS_SINGLE = [{ rigId: "rA", rigName: "alpha", name: "alpha" }];
+// LIVE-CLASS coherence fixture (review50-r1 finding @ fb8c8dcc): 4 rigs on host, but `rig ps`'s
+// bare-default header renders the ACTIVE projection (stopped fold into a count line) — so an honest
+// "1 of N" must count the 2 ACTIVE rigs the operator sees when they follow the hint, never all 4.
+const RIGS_MIXED = [
+  { rigId: "rA", rigName: "alpha", name: "alpha", status: "running" }, // session rig (active)
+  { rigId: "rB", rigName: "beta", name: "beta", status: "running" },
+  { rigId: "rC", rigName: "gamma", name: "gamma", status: "stopped" },
+  { rigId: "rD", rigName: "delta", name: "delta", status: "stopped" },
+];
 const NODE = { rigId: "rA", rigName: "alpha", logicalId: "dev.impl", canonicalSessionName: "dev-impl@alpha", lifecycleState: "running", sessionStatus: "running", agentActivity: null, hasAssignedWork: false, pendingWorkCount: 0 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -77,5 +86,16 @@ describe("rig ps --nodes honest scope metadata", () => {
     const { out } = await run(["--nodes", "--json"], RIGS_MULTI);
     const entries = JSON.parse(out).entries;
     expect(entries.every((n: { rigName: string }) => n.rigName === "alpha")).toBe(true);
+  });
+
+  it("LABEL-REFERENT COHERENCE: rigsOnHost counts the ACTIVE projection `rig ps` shows, not stopped rigs", async () => {
+    // 4 rigs on host (2 active, 2 stopped). `rig ps`'s bare header renders the 2 active — so the
+    // hint that DIRECTS the operator there must say "1 of 2", never "1 of 4" (the live-only finding).
+    const { out, err } = await run(["--nodes", "--json"], RIGS_MIXED);
+    const parsed = JSON.parse(out);
+    expect(parsed.scope.rigsOnHost).toBe(2); // active projection, NOT rigRes.data.length (4)
+    expect(parsed.scope.rigsOnHost).not.toBe(4); // the exact RED before the fix
+    expect(parsed.scope.hint).toContain("1 of 2 rigs shown");
+    expect(err).toBe(""); // json path: no stderr
   });
 });

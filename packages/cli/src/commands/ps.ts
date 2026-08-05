@@ -1073,7 +1073,12 @@ async function handleNodes(
   // OPR.0.5.0 scope-honesty: when --nodes defaulted to the session rig AND other rigs exist on the
   // host, DECLARE the scope so a scoped list is never read as the whole host. Single-rig hosts and
   // explicit --rig/-A paths stay byte-stable (nothing hidden -> no scope envelope, no stderr hint).
-  const rigsOnHost = rigRes.data.length;
+  // The count MUST match the surface the hint cites: `rig ps`'s bare-default header renders the
+  // ACTIVE-rig projection — stopped rigs fold into a count line, not the field of view (the FR-1
+  // contract at ~L942). So rigsOnHost counts that SAME active set; counting every non-archived
+  // entry (stopped included) would make "1 of N" disagree with what the operator sees when they
+  // follow the hint (the derived-label-must-carry-liveness / width-clip-honesty class).
+  const rigsOnHost = rigRes.data.filter((r) => r.status !== "stopped").length;
   const scope = scopedToSessionRig && rigsOnHost > 1
     ? { rig: opts.rig as string, rigsOnHost, hint: `1 of ${rigsOnHost} rigs shown; rig ps lists all; --rig NAME or -A for others` }
     : null;
