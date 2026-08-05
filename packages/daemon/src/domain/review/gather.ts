@@ -33,6 +33,7 @@ import {
 } from "./compose.js";
 import type { AgentsBand, AgentsScope, ComposedMissionReview, ComposedRigAgents, ComposedSliceReview, LockedArtifact, SettledRow, WorkflowRowRef } from "./types.js";
 import { composeAgentsBand, composeRigAgents } from "./compose.js";
+import { runSyncSite } from "../sync-site-wrap.js";
 import { readProofArtifacts } from "./proof-io.js";
 import { evaluateStepDeadline } from "../workflow-deadline.js";
 import type { AgentActivityStore } from "../agent-activity-store.js";
@@ -891,9 +892,12 @@ export class ReviewGatherer {
   }
 
   private git(args: string[]): string | null {
-    if (!this.gitRepoPath) return null;
+    const gitRepoPath = this.gitRepoPath;
+    if (!gitRepoPath) return null;
     try {
-      return execFileSync("git", args, { cwd: this.gitRepoPath, timeout: 4000, encoding: "utf8" }).trim();
+      return runSyncSite("review.gather.git", () =>
+        execFileSync("git", args, { cwd: gitRepoPath, timeout: 4000, encoding: "utf8" })
+      ).trim();
     } catch {
       return null;
     }

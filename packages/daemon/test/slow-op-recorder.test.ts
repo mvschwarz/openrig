@@ -18,6 +18,28 @@ const expectedSites = new Map<string, string[]>([
   ["domain/tmux-option-defaults.ts", ["tmux_options.command_v"]],
 ]);
 
+const pluginVendorUrl = "https://github.com/mvschwarz/openrig-plugins/releases/latest/download/openrig-core.tar.gz";
+
+async function createTestDaemon(
+  options: Parameters<typeof createDaemon>[0],
+): Promise<Awaited<ReturnType<typeof createDaemon>>> {
+  const originalFetch = globalThis.fetch;
+  const fetchedUrls: string[] = [];
+  globalThis.fetch = async (input) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    fetchedUrls.push(url);
+    if (url !== pluginVendorUrl) throw new Error(`unexpected startup fetch: ${url}`);
+    return new Response(null, { status: 404 });
+  };
+  try {
+    const daemon = await createDaemon(options);
+    expect(fetchedUrls).toEqual([pluginVendorUrl]);
+    return daemon;
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
 const tempDirs: string[] = [];
 
 function tempDir(): string {
@@ -102,7 +124,7 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
     });
     const oldNoKernel = process.env.OPENRIG_NO_KERNEL;
     process.env.OPENRIG_NO_KERNEL = "1";
-    const daemon = await createDaemon({
+    const daemon = await createTestDaemon({
       dbPath: ":memory:",
       tmuxExec: async () => "",
       cmuxExec: async () => "",
@@ -133,6 +155,33 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
       await degraded.close();
       if (oldNoKernel === undefined) delete process.env.OPENRIG_NO_KERNEL;
       else process.env.OPENRIG_NO_KERNEL = oldNoKernel;
+    }
+  });
+
+  it("isolates a throwing degradation observer so wrapped work still proceeds", async () => {
+    const mod = await loadRecorderModule();
+    expect(mod, "slow-op-recorder production module is missing").not.toBeNull();
+    if (!mod) return;
+
+    const recorder = new mod.SlowOpRecorder({ logPath: tempDir() });
+    recorder.setDegradedHandler(() => {
+      throw new Error("stream sink failed");
+    });
+    let ran = false;
+    try {
+      const value = recorder.runSync("test.sync.observer_failure", () => {
+        ran = true;
+        return "continued";
+      });
+      expect(value).toBe("continued");
+      expect(ran).toBe(true);
+      expect(recorder.snapshot()).toEqual({
+        healthy: false,
+        reason: "begin_barrier_failed",
+        site: "test.sync.observer_failure",
+      });
+    } finally {
+      await recorder.close();
     }
   });
 
@@ -246,7 +295,7 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
     };
     const oldNoKernel = process.env.OPENRIG_NO_KERNEL;
     process.env.OPENRIG_NO_KERNEL = "1";
-    const daemon = await createDaemon({
+    const daemon = await createTestDaemon({
       dbPath: ":memory:",
       tmuxExec: async () => "",
       cmuxExec: async () => "",
@@ -287,7 +336,7 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
     const recorder = new mod.SlowOpRecorder({ logPath });
     const oldNoKernel = process.env.OPENRIG_NO_KERNEL;
     process.env.OPENRIG_NO_KERNEL = "1";
-    const daemon = await createDaemon({
+    const daemon = await createTestDaemon({
       dbPath: ":memory:",
       tmuxExec: async () => "",
       cmuxExec: async () => "",

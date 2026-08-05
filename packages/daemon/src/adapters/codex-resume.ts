@@ -2,6 +2,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { TmuxAdapter } from "./tmux.js";
 import type { ResumeResult } from "./claude-resume.js";
 import { assessNativeResumeProbe, buildCodexResumeCore } from "../domain/native-resume-probe.js";
+import { runSyncSite } from "../domain/sync-site-wrap.js";
 
 const CODEX_TYPES = new Set(["codex_id", "codex_last"]);
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
@@ -47,7 +48,9 @@ export class CodexResumeAdapter {
       const { verifyCodexProfileLoads } = await import("../domain/codex-profile-preflight.js");
       const execFn = this.options.exec ?? (async (cmd: string) => {
         const { execSync } = await import("node:child_process");
-        return execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000 });
+        return runSyncSite("codex.resume.profile_preflight", () =>
+          execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000 })
+        );
       });
       const probeResult = await verifyCodexProfileLoads(codexConfigProfile, execFn);
       if (!probeResult.ok) {

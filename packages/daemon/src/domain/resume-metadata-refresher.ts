@@ -13,6 +13,7 @@ import {
   buildNativeResumeCommand,
   isProbeShellReady,
 } from "./native-resume-probe.js";
+import { runSyncSite } from "./sync-site-wrap.js";
 
 export interface ResumeRefreshSession {
   sessionId: string;
@@ -271,7 +272,9 @@ export class ResumeMetadataRefresher {
 
 function defaultListProcesses(): Array<{ pid: number; ppid: number; command: string }> {
   try {
-    const output = execFileSync("ps", ["-Ao", "pid,ppid,command"], { encoding: "utf-8" });
+    const output = runSyncSite("resume_metadata.list_processes", () =>
+      execFileSync("ps", ["-Ao", "pid,ppid,command"], { encoding: "utf-8" })
+    );
     return output
       .split("\n")
       .slice(1)

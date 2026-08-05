@@ -3,6 +3,7 @@ import nodePath from "node:path";
 import fs from "node:fs";
 import { execFileSync } from "node:child_process";
 import Database from "better-sqlite3";
+import { runSyncSite } from "./sync-site-wrap.js";
 
 export type ResolveHomeDirByPid = (pid: number) => string | undefined;
 
@@ -10,7 +11,9 @@ export function defaultResolveHomeDirByPid(pid: number): string | undefined {
   try {
     // BSD/macOS `ps` supports `eww` to expose the full process environment.
     // If OpenRig grows a Linux daemon target, this likely needs a /proc-based path.
-    const output = execFileSync("ps", ["eww", "-p", String(pid), "-o", "command="], { encoding: "utf-8" }).trim();
+    const output = runSyncSite("codex_thread_id.resolve_home", () =>
+      execFileSync("ps", ["eww", "-p", String(pid), "-o", "command="], { encoding: "utf-8" })
+    ).trim();
     if (!output) return undefined;
     const match = output.match(/(?:^|\s)HOME=([^\s]+)/);
     return match?.[1];

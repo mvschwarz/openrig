@@ -7,6 +7,28 @@ import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import { createDaemon } from "../src/startup.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 
+const pluginVendorUrl = "https://github.com/mvschwarz/openrig-plugins/releases/latest/download/openrig-core.tar.gz";
+
+async function createTestDaemon(
+  options: Parameters<typeof createDaemon>[0],
+): Promise<Awaited<ReturnType<typeof createDaemon>>> {
+  const originalFetch = globalThis.fetch;
+  const fetchedUrls: string[] = [];
+  globalThis.fetch = async (input) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    fetchedUrls.push(url);
+    if (url !== pluginVendorUrl) throw new Error(`unexpected startup fetch: ${url}`);
+    return new Response(null, { status: 404 });
+  };
+  try {
+    const daemon = await createDaemon(options);
+    expect(fetchedUrls).toEqual([pluginVendorUrl]);
+    return daemon;
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
 interface StageRecord {
   site: string;
   durationMs: number;
@@ -124,7 +146,7 @@ describe("SessionTransport stage timing", () => {
     const timer = new RecordingStageTimer();
     const oldNoKernel = process.env.OPENRIG_NO_KERNEL;
     process.env.OPENRIG_NO_KERNEL = "1";
-    const daemon = await createDaemon({
+    const daemon = await createTestDaemon({
       dbPath: ":memory:",
       tmuxExec: async (command: string) => command.includes("capture-pane") ? "idle\n❯ " : "",
       cmuxExec: async () => "",

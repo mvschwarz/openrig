@@ -66,6 +66,8 @@ import { HistoryQuery } from "./domain/history-query.js";
 import { AskService } from "./domain/ask-service.js";
 import { ChatRepository } from "./domain/chat-repository.js";
 import { StreamStore } from "./domain/stream-store.js";
+import { SlowOpRecorder, type SlowOperationInstrumentation } from "./domain/slow-op-recorder.js";
+import { configureSyncSiteRecorder } from "./domain/sync-site-wrap.js";
 import { QueueRepository } from "./domain/queue-repository.js";
 import { createWorkflowFrontierPredicate } from "./domain/workflow-frontier-guard.js";
 import { InboxHandler } from "./domain/inbox-handler.js";
@@ -186,6 +188,8 @@ interface DaemonOptions {
   cmuxExec?: ExecFn;
   cmuxFactory?: CmuxTransportFactory;
   cmuxTimeoutMs?: number;
+  tmuxOptionPlatform?: NodeJS.Platform;
+  slowOpRecorder?: SlowOperationInstrumentation;
   /**
    * PL-005 Phase B: bearer token for Mission Control write verbs.
    * When null, the auth-bearer-token middleware passes through (the
@@ -265,6 +269,22 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const rigRepo = new RigRepository(db);
   const sessionRegistry = new SessionRegistry(db);
   const eventBus = new EventBus(db);
+  const streamStore = new StreamStore(db, eventBus);
+  const slowOpRecorder = opts?.slowOpRecorder ?? (dbPath === ":memory:"
+    ? undefined
+    : new SlowOpRecorder({
+        logPath: nodePath.join(OPENRIG_HOME, "logs", "slow-operations.jsonl"),
+      }));
+  configureSyncSiteRecorder(slowOpRecorder);
+  slowOpRecorder?.setDegradedHandler?.(({ reason, site }) => {
+    streamStore.emit({
+      sourceSession: "daemon@kernel",
+      body: `slow-operation instrumentation degraded: ${reason} at ${site}`,
+      hintType: "observation",
+      hintUrgency: "high",
+      hintTags: ["daemon", "slow-operation", "observability-degraded"],
+    });
+  });
   // PL-004 Phase A revision (R1): topology-backed validateRig.
   // Reject `<member>@<unknown-rig>` shapes by checking the rig portion
   // against the rig registry. Bare ids without `@` are also rejected
@@ -395,6 +415,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const tmuxOptionSettings = new ContextPackSettingsStore();
   const tmuxOptionDefaults = new TmuxOptionDefaultsApplier({
     tmuxAdapter,
+    platform: opts?.tmuxOptionPlatform,
     readTmuxOptionDefaults: () => {
       try {
         return { statusBar: tmuxOptionSettings.resolveOne("terminal.status_bar").value === true };
@@ -906,7 +927,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     runtimeAdapters: { "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() },
     transcriptStore,
     sessionTransport: (() => {
-      const t = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter, agentActivityStore, eventBus });
+      const t = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter, agentActivityStore, eventBus, slowOpRecorder });
       // PL-004 Phase A revision (R1): wire QueueRepository's wake-path so
       // create / handoff / handoff-and-complete nudge by default.
       queueRepoInstance.attachTransport(t);
@@ -931,7 +952,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       return t;
     })(),
     chatRepo: new ChatRepository(db),
-    streamStore: new StreamStore(db, eventBus),
+    streamStore,
+    slowOpRecorder,
     queueRepo: queueRepoInstance,
     inboxHandler: new InboxHandler(db, eventBus, queueRepoInstance),
     outboxHandler: new OutboxHandler(db),

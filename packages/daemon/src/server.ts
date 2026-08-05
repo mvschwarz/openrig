@@ -106,6 +106,7 @@ import { createNodeWebSocket } from "@hono/node-ws";
 import { steeringRoutes } from "./routes/steering.js";
 import { healthSummaryRoutes } from "./routes/health-summary.js";
 import type { StreamStore } from "./domain/stream-store.js";
+import type { SlowOperationInstrumentation } from "./domain/slow-op-recorder.js";
 import type { QueueRepository } from "./domain/queue-repository.js";
 import type { InboxHandler } from "./domain/inbox-handler.js";
 import type { OutboxHandler } from "./domain/outbox-handler.js";
@@ -174,6 +175,7 @@ export interface AppDeps {
   askService?: AskService;
   chatRepo?: ChatRepository;
   streamStore?: StreamStore;
+  slowOpRecorder?: SlowOperationInstrumentation;
   queueRepo?: QueueRepository;
   inboxHandler?: InboxHandler;
   outboxHandler?: OutboxHandler;
@@ -536,6 +538,17 @@ export function createApp(deps: AppDeps): Hono {
     app.use("*", createRouteTimingMiddleware(deps.routeTimingRecorder));
   }
 
+  if (deps.slowOpRecorder?.recordRequest) {
+    app.use("*", async (c, next) => {
+      const startedAt = Date.now();
+      try {
+        await next();
+      } finally {
+        deps.slowOpRecorder?.recordRequest?.(`${c.req.method} ${c.req.path}`, Date.now() - startedAt);
+      }
+    });
+  }
+
   // OPR.0.4.6.MH2 FR-2/FR-7 — the single-host READ-THROUGH edge (the read
   // twin of the mission-control remote-forward). Consumes a `?host=<id>`
   // envelope on allowlisted GET reads; refuses non-GET / non-allowlisted
@@ -553,8 +566,11 @@ export function createApp(deps: AppDeps): Hono {
     // {} without a stamp — no invented identity, legacy bodies preserved).
     const stamp = stampFields();
     const monitor = deps.eventLoopMonitor;
+    const slowOperations = deps.slowOpRecorder?.snapshot
+      ? { slowOperations: deps.slowOpRecorder.snapshot() }
+      : {};
     if (!monitor) {
-      return c.json({ status: "ok", ...stamp });
+      return c.json({ status: "ok", ...stamp, ...slowOperations });
     }
     const eventLoop = monitor.snapshot();
     return c.json({
@@ -562,6 +578,7 @@ export function createApp(deps: AppDeps): Hono {
       ...stamp,
       eventLoop,
       routeTimings: deps.routeTimingRecorder?.snapshot() ?? {},
+      ...slowOperations,
     });
   });
 

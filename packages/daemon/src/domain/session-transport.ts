@@ -7,6 +7,7 @@ import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
+import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
 
 // OPR.0.4.1.10 — send-readiness freshness. The runtime-hook store keeps a 5min freshness for activity
 // DISPLAY, but "safe to send NOW" needs a tight window: a stale "idle" read must not authorize a send
@@ -434,6 +435,7 @@ interface SessionTransportDeps {
   waitForIdlePollMs?: number;
   // OPR.0.4.1.10 — send-readiness freshness override (default SEND_READINESS_FRESHNESS_MS). Test seam.
   sendReadinessFreshnessMs?: number;
+  slowOpRecorder?: SlowOperationInstrumentation;
 }
 
 interface SessionRow { node_id: string; session_name: string; }
@@ -452,6 +454,7 @@ export class SessionTransport {
   private sleep: (ms: number) => Promise<void>;
   private waitForIdlePollMs: number;
   private sendReadinessFreshnessMs: number;
+  private slowOpRecorder?: SlowOperationInstrumentation;
 
   constructor(deps: SessionTransportDeps) {
     this.db = deps.db;
@@ -464,6 +467,7 @@ export class SessionTransport {
     this.sleep = deps.sleep ?? delay;
     this.waitForIdlePollMs = deps.waitForIdlePollMs ?? 500;
     this.sendReadinessFreshnessMs = deps.sendReadinessFreshnessMs ?? SEND_READINESS_FRESHNESS_MS;
+    this.slowOpRecorder = deps.slowOpRecorder;
   }
 
   /**
@@ -908,14 +912,21 @@ export class SessionTransport {
 
     if (opts?.verify) {
       try {
-        preVerifyContent = await this.tmuxAdapter.capturePaneContent(sessionName, 30);
+        preVerifyContent = await this.runStage(
+          "session_transport.pre_capture",
+          () => this.tmuxAdapter.capturePaneContent(sessionName, 30),
+        );
       } catch {
         preVerifyContent = null;
       }
     }
 
     // 3. Send text (paste)
-    const textResult = await this.tmuxAdapter.sendText(sessionName, text);
+    const textResult = await this.runStage(
+      "session_transport.send_text",
+      () => this.tmuxAdapter.sendText(sessionName, text),
+      (result) => result.ok ? "ok" : "failed",
+    );
     if (!textResult.ok) {
       return {
         ok: false,
@@ -931,7 +942,11 @@ export class SessionTransport {
     await this.sleep(200);
 
     // 5. Submit (C-m)
-    const submitResult = await this.tmuxAdapter.sendKeys(sessionName, ["C-m"]);
+    const submitResult = await this.runStage(
+      "session_transport.submit",
+      () => this.tmuxAdapter.sendKeys(sessionName, ["C-m"]),
+      (result) => result.ok ? "ok" : "failed",
+    );
     if (!submitResult.ok) {
       return {
         ok: false,
@@ -950,7 +965,10 @@ export class SessionTransport {
     if (opts?.verify) {
       await this.sleep(500);
       try {
-        const content = await this.tmuxAdapter.capturePaneContent(sessionName, 30);
+        const content = await this.runStage(
+          "session_transport.post_capture",
+          () => this.tmuxAdapter.capturePaneContent(sessionName, 30),
+        );
         const snippet = text.substring(0, Math.min(text.length, 40));
         const preCount = countOccurrences(preVerifyContent ?? "", snippet);
         const postCount = countOccurrences(content ?? "", snippet);
@@ -962,6 +980,16 @@ export class SessionTransport {
     }
 
     return { ok: true, sessionName, ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) };
+  }
+
+  private runStage<T>(
+    site: string,
+    fn: () => Promise<T>,
+    classify?: (value: T) => "ok" | "failed",
+  ): Promise<T> {
+    return this.slowOpRecorder?.runStage
+      ? this.slowOpRecorder.runStage(site, fn, classify)
+      : fn();
   }
 
   private async waitForIdle(input: {

@@ -25,6 +25,7 @@ import { assessNativeResumeProbe, buildCodexResumeCore, type NativeResumeProbeRe
 import { mergeManagedBlock } from "../domain/managed-blocks.js";
 import { parseSessionName } from "../domain/session-name.js";
 import { shellQuote } from "./shell-quote.js";
+import { runSyncSite } from "../domain/sync-site-wrap.js";
 
 export interface CodexAdapterFsOps {
   readFile(path: string): string;
@@ -1194,13 +1195,17 @@ async function defaultProfilePreflight(profile: string): Promise<CodexProfilePro
   const { verifyCodexProfileLoads } = await import("../domain/codex-profile-preflight.js");
   const { execSync } = await import("node:child_process");
   const execFn = async (cmd: string) =>
-    execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000 });
+    runSyncSite("codex.runtime.profile_preflight", () =>
+      execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000 })
+    );
   return verifyCodexProfileLoads(profile, execFn);
 }
 
 function defaultListProcesses(): Array<{ pid: number; ppid: number; command: string }> {
   try {
-    const output = execFileSync("ps", ["-Ao", "pid,ppid,command"], { encoding: "utf-8" });
+    const output = runSyncSite("codex.runtime.list_processes", () =>
+      execFileSync("ps", ["-Ao", "pid,ppid,command"], { encoding: "utf-8" })
+    );
     return output
       .split("\n")
       .slice(1)

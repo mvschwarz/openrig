@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import type { TmuxAdapter } from "../adapters/tmux.js";
+import { runSyncSite } from "./sync-site-wrap.js";
 
 export interface TmuxOptionDefaultsDeps {
   tmuxAdapter: TmuxAdapter;
@@ -154,7 +155,9 @@ export function resolveCopyCommand(
  */
 function defaultHasCommand(bin: string): boolean {
   try {
-    const r = spawnSync(`command -v ${bin}`, { shell: true, stdio: "ignore" });
+    const r = runSyncSite("tmux_options.command_v", () =>
+      spawnSync(`command -v ${bin}`, { shell: true, stdio: "ignore" })
+    );
     return r.status === 0;
   } catch {
     return false;
