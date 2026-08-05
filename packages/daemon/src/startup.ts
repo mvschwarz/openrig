@@ -56,6 +56,7 @@ import { PsProjectionService } from "./domain/ps-projection.js";
 import { SeatActivityService } from "./domain/seat-activity-service.js";
 import { SeatIdentityReconciler, reconcileSelfHostIdentity } from "./domain/seat-identity-reconciler.js";
 import { SelfHostIdentityStore } from "./domain/seat-identity-store.js";
+import { setSelfHostId } from "./domain/hosts/fanout-contract.js";
 import { UpCommandRouter } from "./domain/up-command-router.js";
 import { RigTeardownOrchestrator } from "./domain/rig-teardown.js";
 import { ResumeMetadataRefresher } from "./domain/resume-metadata-refresher.js";
@@ -272,10 +273,15 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // boot (mint on first boot, reconcile thereafter). host.name is a display-only
   // CANDIDATE SEED (arch ruling cb19867f / DP4). Boot proceeds on a host.name
   // conflict (the stored id is kept and the conflict is surfaced loudly).
-  reconcileSelfHostIdentity(new SelfHostIdentityStore(db), {
+  const selfHost = reconcileSelfHostIdentity(new SelfHostIdentityStore(db), {
     nowIso: new Date().toISOString(),
     hostNameCandidate: new ContextPackSettingsStore().resolveOne("host.name").value as string,
   });
+  // 51-09 increment 2 — publish the resolved self-host id so the read-through
+  // (and, in increment 4, the queue-destination validator) resolve a request
+  // addressed to THIS host's own id HOME, instead of dialing/validating it as a
+  // remote/unknown host. Distinct spelling from the 'local' sentinel.
+  setSelfHostId(selfHost.hostId);
 
   const rigRepo = new RigRepository(db);
   const sessionRegistry = new SessionRegistry(db);

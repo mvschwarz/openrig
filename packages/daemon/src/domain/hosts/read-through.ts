@@ -21,7 +21,7 @@
 // (FR-2 zero-regression negative).
 
 import type { Context, Next } from "hono";
-import { LOCAL_HOST_ID } from "./fanout-contract.js";
+import { getSelfHostId, resolvesToLocalHost } from "./fanout-contract.js";
 import { loadHostRegistry, resolveHost } from "./hosts-registry-reader.js";
 import { remoteRawRequest } from "./remote-daemon-http.js";
 
@@ -86,7 +86,11 @@ const MH3_BOUNDARY_MESSAGE =
 export function hostReadThrough() {
   return async (c: Context, next: Next) => {
     const hostParam = c.req.query("host");
-    if (hostParam === undefined || hostParam === "" || hostParam === LOCAL_HOST_ID) {
+    // local / absent host param short-circuits to the existing handler. 51-09
+    // incr 2: the daemon's OWN self-host id resolves home too (a distinct
+    // spelling from the 'local' sentinel, not an overload) — so a read
+    // addressed to this host's own id is served locally, never dialed out.
+    if (hostParam === undefined || resolvesToLocalHost(hostParam, getSelfHostId())) {
       return next();
     }
     const hostId = hostParam;

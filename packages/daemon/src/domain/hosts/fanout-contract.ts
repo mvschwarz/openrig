@@ -13,6 +13,47 @@
  *  topology aggregate literal. */
 export const LOCAL_HOST_ID = "local";
 
+// 51-09 increment 2 — the daemon's durable self-host id (increment 1's
+// self_host_identity), published beside the LOCAL_HOST_ID sentinel and
+// populated ONCE at boot (startup calls setSelfHostId after
+// reconcileSelfHostIdentity). This is ADDITIVE — it does NOT touch the
+// AggregatedPayload / PerHostStatus cross-PRD contract below; it only exposes
+// the origin's OWN stable, operator-meaningful identity, DISTINCT from the
+// "local" positional sentinel ("whoever is local"): both route home, but they
+// are different tokens and the self-id never BECOMES 'local'. Null until boot
+// resolves it. A module accessor (this single shared host-contract module) so
+// the read-through AND the queue-destination validator (increment 4) resolve
+// the self-id from ONE source without a server.ts/context plumb.
+let selfHostId: string | null = null;
+
+/** Publish the boot-resolved self-host id (startup, once). null resets (tests). */
+export function setSelfHostId(id: string | null): void {
+  selfHostId = id;
+}
+
+/** The boot-resolved self-host id, or null before boot has reconciled it. */
+export function getSelfHostId(): string | null {
+  return selfHostId;
+}
+
+/**
+ * The shared self-resolution convention: does a host token route to THIS host?
+ * True for an absent/empty token, the `LOCAL_HOST_ID` positional sentinel, and
+ * the daemon's own resolved self-id. The self-id comparison is CASE-SENSITIVE —
+ * the same convention as increment 1's candidate-vs-stored check, so the two
+ * identity layers agree on case (a case-only divergence is a distinct token).
+ * `selfId` is passed explicitly (defaults to the boot-resolved id) so the
+ * predicate is pure + unit-testable.
+ */
+export function resolvesToLocalHost(
+  hostToken: string | undefined | null,
+  selfId: string | null = selfHostId,
+): boolean {
+  if (hostToken === undefined || hostToken === null || hostToken === "") return true;
+  if (hostToken === LOCAL_HOST_ID) return true;
+  return selfId !== null && hostToken === selfId;
+}
+
 /** CLOSED enum (arch pin A). `unsupported-transport` is R15-2's explicit
  *  class (an SSH-declared host is never a silently thinner payload);
  *  `auth-failed` is distinct from `unreachable` because the operator fix
