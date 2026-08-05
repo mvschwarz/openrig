@@ -176,6 +176,18 @@ function resetContent(state: ViewState): ViewState {
   return { ...state, contentOffset: 0, contentMaxOffset: 0, contentTargetCount: 0, contentSelection: 0, focusedPane: "explorer" };
 }
 
+/** The founder scroll fix (class-(b) focus-model defect): on a SCROLLABLE spec
+ *  detail the body IS the meaningful surface, so reflexive ↑↓ scroll it —
+ *  regardless of which pane holds focus (focus resets to explorer on every
+ *  drill, which is why the reflexive keys used to drive the hidden tree). Gated
+ *  on real scrollability (contentMaxOffset), so a non-overflowing spec detail
+ *  keeps its link-hop / explorer behavior. The key ROUTING (input.ts) and the
+ *  footer/indicator affordances (render.ts) both read this ONE predicate, so
+ *  the hint can never again promise a gesture the keys don't perform. */
+export function specDetailArrowsScroll(state: ViewState): boolean {
+  return state.section === "specs" && state.drill.length > 0 && state.contentMaxOffset > 0;
+}
+
 /** The explorer key for the state's current location (drill leaf or section). */
 export function locationKey(state: ViewState): string {
   const names = new Map(state.drill.map((seg) => [seg.kind, seg.name]));

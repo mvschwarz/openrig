@@ -220,7 +220,7 @@ describe("live visual regressions", () => {
     const initial = renderScreen(view.get(), snap, { cols: 100, rows: 12 });
     view.dispatch({ type: "layout", contentMaxOffset: initial.contentMaxOffset, contentTargetCount: initial.contentTargets.length });
     expect(initial.lines.join("\n")).not.toContain("pod pod-17");
-    const scrollY = initial.lines.findIndex((line) => line.includes("content ↑/↓")) + 1;
+    const scrollY = initial.lines.findIndex((line) => line.includes("scroll ↑/↓")) + 1;
     expect(initial.hitMap).toContainEqual(expect.objectContaining({
       y: scrollY,
       action: { type: "content-scroll", delta: 10 },
@@ -229,7 +229,7 @@ describe("live visual regressions", () => {
     const scrolled = renderScreen(view.get(), snap, { cols: 100, rows: 12 }).lines.join("\n");
     expect(scrolled).toContain("pod pod-17");
     expect(view.get().selection).toBe(selected);
-    expect(scrolled).toContain("content ↑/↓");
+    expect(scrolled).toContain("scroll ↑/↓");
   });
 
   it("shows the Topology filter affordance and N-of-M / idle frame", () => {

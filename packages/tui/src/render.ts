@@ -4,7 +4,7 @@
 // agent-refs, Needs-You items) — so a mouse click anywhere resolves to the
 // SAME semantic actions commands produce (PIN 1). Isolated seam: a substrate
 // swap touches only this module (spike verdict revisit trigger).
-import { computeExplorerRows, findAgent, findSpec, findAgentBySession, agentsRunningSpec, agentsRunningSpecTargets } from "./state.js";
+import { computeExplorerRows, findAgent, findSpec, findAgentBySession, agentsRunningSpec, agentsRunningSpecTargets, specDetailArrowsScroll } from "./state.js";
 import { navigatorDisplay } from "./navigator.js";
 import { renderGraphStyle } from "./topology/render-graph.js";
 import { runtimeMarkSegs } from "./topology/runtime-marks.js";
@@ -697,8 +697,15 @@ function paneRule(cols: number, joint: "┬" | "┴", leftTitle?: string, rightT
 }
 
 function keybindHints(state: ViewState): string {
-  const scroll = state.viewTab === "yaml" || state.focusedPane === "content" ? "⇞⇟ scroll · " : "";
-  return `↑↓ move · ←→ pane · ⏎ open · ${scroll}: command · / filter · f footer · q quit`;
+  // Affordance surfaces on REAL scrollability (contentMaxOffset), never gated
+  // behind already-being-content-focused — that gate was the catch-22 (the
+  // hint hid exactly where it was needed). When ↑↓ themselves scroll (a
+  // scrollable spec detail), the nav label says so; otherwise ↑↓ move and the
+  // page keys carry the scroll.
+  const arrowsScroll = specDetailArrowsScroll(state);
+  const nav = arrowsScroll ? "↑↓ scroll" : "↑↓ move";
+  const pageScroll = state.contentMaxOffset > 0 && !arrowsScroll ? "⇞⇟ scroll · " : "";
+  return `${nav} · ←→ pane · ⏎ open · ${pageScroll}: command · / filter · f footer · q quit`;
 }
 
 export function renderScreen(state: ViewState, snap: FleetSnapshot, options: RenderOptions = {}, inputLine = ""): Screen {
@@ -755,7 +762,7 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   const contentStart = Math.min(state.contentOffset, maxContentOffset);
   const visibleContent = content.slice(contentStart, contentStart + contentRows);
   if (content.length > bodyRows) {
-    const scrollText = `content ↑/↓ · ${contentStart + 1}-${contentStart + visibleContent.length} of ${content.length}`;
+    const scrollText = `scroll ↑/↓ · ${contentStart + 1}-${contentStart + visibleContent.length} of ${content.length}`;
     const up = scrollText.indexOf("↑");
     const down = scrollText.indexOf("↓");
     visibleContent.push({

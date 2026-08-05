@@ -3,6 +3,7 @@
 // Mouse events are resolved against the renderer's hit-map by the caller and
 // then dispatched through the SAME dispatch as commands and keys (PIN 1).
 import type { Action, InputEvent, Screen, ViewState } from "./types.js";
+import { specDetailArrowsScroll } from "./state.js";
 import { StringDecoder } from "node:string_decoder";
 
 function parseText(text: string, final: boolean): { events: InputEvent[]; remainder: string } {
@@ -116,6 +117,11 @@ export function resolveKeyAction(
   if (event.key === "right") return screen.contentTargets.length > 0 ? { type: "focus", pane: "content" } : null;
   if (event.key === "up" || event.key === "down") {
     const delta = event.key === "down" ? 1 : -1;
+    // Founder fix: on a scrollable spec detail the body is the meaningful
+    // surface — reflexive ↑↓ scroll it (one line per press), whichever pane
+    // holds focus. Non-scrolling spec details and every other view fall through
+    // to the unchanged explorer-move / content-select behavior.
+    if (specDetailArrowsScroll(state)) return { type: "content-scroll", delta };
     return state.focusedPane === "content"
       ? { type: "content-select", delta }
       : { type: "select", delta, rowCount: explorerCount };
