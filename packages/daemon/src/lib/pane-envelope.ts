@@ -30,14 +30,27 @@ export function wrapPaneEnvelope(
   sender: string | undefined,
   recipient: string,
   body: string,
+  selfHostId?: string | null,
 ): string {
   const senderLabel = sender && sender.trim().length > 0 ? sender : SENDER_FALLBACK;
+  // 51-09 increment 3 (ruling cb19867f Q2 always-suffix + 2e1b737f C1 fail-open):
+  // when the origin's boot-reconciled self-host id is known, the sender renders
+  // as the <member>@<rig>@<selfHostId> triple ALWAYS (local included) so the
+  // signature is self-describing and the reply hint is verbatim-usable. When it
+  // is absent (daemon pre-reconcile / unknown sender), fall open to today's exact
+  // two-part form — no new failure mode. A sender that ALREADY carries a host (a
+  // --from relay passing the ORIGIN's full triple) is preserved verbatim, never
+  // re-stamped with THIS host's id (which would forge the origin).
+  const senderTriple =
+    selfHostId && selfHostId.length > 0 && senderLabel !== SENDER_FALLBACK && senderLabel.split("@").length < 3
+      ? `${senderLabel}@${selfHostId}`
+      : senderLabel;
   return [
-    `From: ${senderLabel}`,
+    `From: ${senderTriple}`,
     `To: ${recipient}`,
     "---",
     body,
     "---",
-    `↩ Reply: rig send ${senderLabel} "..."`,
+    `↩ Reply: rig send ${senderTriple} "..."`,
   ].join("\n");
 }

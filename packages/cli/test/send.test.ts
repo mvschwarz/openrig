@@ -628,7 +628,7 @@ describe("Send CLI", () => {
     /** ff13bcdf finding 1 — deps whose lifecycle probe is COUNTABLE. The
      *  probe throws so any accidental call is also visibly useless work.  */
     function probeCountingDeps(clientFactory: StatusDeps["clientFactory"]): {
-      deps: StatusDeps; probeCalls: () => number;
+      deps: StatusDeps; probeCalls: () => number; probeUrls: () => string[];
     } {
       const fetchSpy = vi.fn(async (): Promise<{ ok: boolean }> => { throw new Error("probe should not be needed"); });
       return {
@@ -643,6 +643,9 @@ describe("Send CLI", () => {
           clientFactory,
         },
         probeCalls: () => fetchSpy.mock.calls.length,
+        // 51-09 incr-3 (R8 supersession): the URLs let R8 discriminate the ONE allowed
+        // fetch as the self-id /healthz GET by path, not merely by count.
+        probeUrls: () => fetchSpy.mock.calls.map((c) => String(c[0])),
       };
     }
 
@@ -956,19 +959,28 @@ describe("Send CLI", () => {
     // RED on this parent: getDaemonStatus takes the openrigUrl branch and
     // burns STATUS_PROBE_MAX_ATTEMPTS (5) fetches before the resolver reads
     // the same alias. The POST assertions pass today; ONLY the count fails.
-    it("R8 RED: explicit OPENRIG_URL (single-seat) -> exact target POSTed and ZERO lifecycle probe calls", async () => {
+    it("R8: explicit OPENRIG_URL (single-seat) -> exact target POSTed + EXACTLY ONE self-id /healthz GET, no status-probe burn", async () => {
       vi.stubEnv("OPENRIG_URL", `http://127.0.0.1:${port}`);
       vi.stubEnv("RIGGED_URL", "");
       lastSendBody = null;
       const rc = recordingRealClient();
-      const { deps, probeCalls } = probeCountingDeps(rc.factory);
+      const { deps, probeCalls, probeUrls } = probeCountingDeps(rc.factory);
       const { logs } = await captureLogs(async () => {
         await makeCmd(deps).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello"]);
       });
       expect(logs.join("\n")).toContain("Sent to dev-impl@my-rig");
       expect(rc.seen()).toBe(`http://127.0.0.1:${port}`);
       expect(lastSendBody).not.toBeNull();
-      expect(probeCalls()).toBe(0);
+      // SUPERSEDED 2026-08-06 (merge-desk sanction + the arch/planner 1-GET trade-off ruling,
+      // 51-09 incr-3): ff13bcdf's zero-probe guarantee targeted the EXPENSIVE 5-attempt
+      // STATUS-PROBE BURN, not a single bounded self-id read. A single-seat send now renders
+      // the From: origin triple CLI-side, which needs the daemon self-id via ONE best-effort
+      // loopback /healthz GET (rider-b one-source; C1 fail-open; CEILING = 1, NO retry —
+      // fetchSelfHostId is a single fetchDaemonProbe that fails open to undefined). This pin
+      // discriminates MECHANICALLY, so it STILL catches the burn it was born for AND catches a
+      // SECOND self-id GET or a retry sneaking in:
+      expect(probeCalls()).toBe(1); // ceiling: exactly ONE attempt — never the 5-attempt burn, never a retry
+      expect(String(probeUrls()[0] ?? "")).toContain("/healthz"); // the one allowed call IS the self-id GET (path, not just count)
     });
 
     it("R8b RED: explicit OPENRIG_URL (fan-out) -> exact target broadcast and ZERO lifecycle probe calls", async () => {

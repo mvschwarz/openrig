@@ -6,6 +6,7 @@ import type { AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
+import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
 
@@ -1252,7 +1253,7 @@ export class SessionTransport {
       // it doesn't know each resolved seat). When envelopeSender is absent (`rig broadcast`,
       // --raw, --dangerously-interact) the text is delivered raw, exactly as before.
       const perRecipientText = opts?.envelopeSender
-        ? wrapPaneEnvelope(opts.envelopeSender, session.sessionName, text)
+        ? wrapPaneEnvelope(opts.envelopeSender, session.sessionName, text, getSelfHostId())
         : text;
       const result = await this.send(session.sessionName, perRecipientText, opts);
       results.push(result);

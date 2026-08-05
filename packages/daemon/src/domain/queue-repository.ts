@@ -4,6 +4,7 @@ import type { EventBus } from "./event-bus.js";
 import type { PersistedEvent } from "./types.js";
 import { QueueTransitionLog } from "./queue-transition-log.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
+import { getSelfHostId } from "./hosts/fanout-contract.js";
 import {
   computeClosureRequiredAt,
   validateClosure,
@@ -453,7 +454,7 @@ export class QueueRepository {
     // OPR.0.4.4.19 FR-7: bodyOverride lets the resolve verb carry the
     // decision text to the parked owner; default stays the handoff nudge.
     const bareBody = bodyOverride ?? `Queue handoff: ${qitemId} - check your queue.`;
-    const text = wrapPaneEnvelope(sourceSession, destinationSession, bareBody);
+    const text = wrapPaneEnvelope(sourceSession, destinationSession, bareBody, getSelfHostId());
     try {
       const res = await this.transport.send(destinationSession, text, { verify: true });
       // OPR.0.3.2.21.FR-4(c) — wording rename: the prior literal

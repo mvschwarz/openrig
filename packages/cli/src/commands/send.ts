@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { resolveEffectiveHost } from "../host-selection.js";
 import { DaemonClient, DaemonConnectionError, terminalAuthHeaders } from "../client.js";
-import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl, fetchSelfHostId } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { loadHostRegistry, resolveHost, hostDisplayTarget, type HttpHostEntry } from "../host-registry.js";
@@ -30,15 +30,32 @@ const SENDER_FALLBACK = "<unknown sender>";
  * render the same envelope as peer-to-peer `rig send`. If you update
  * this function, update wrapPaneEnvelope in lockstep.
  */
-export function wrapSendBody(sender: string | undefined, recipient: string, body: string): string {
+export function wrapSendBody(
+  sender: string | undefined,
+  recipient: string,
+  body: string,
+  selfHostId?: string | null,
+): string {
   const senderLabel = sender && sender.trim().length > 0 ? sender : SENDER_FALLBACK;
+  // 51-09 increment 3 (ruling cb19867f Q2 always-suffix + 2e1b737f C1 fail-open):
+  // when the origin's boot-reconciled self-host id is known, the sender renders
+  // as the <member>@<rig>@<selfHostId> triple ALWAYS (local included) so the
+  // signature is self-describing and the reply hint is verbatim-usable. When it
+  // is absent (daemon pre-reconcile / unknown sender), fall open to today's exact
+  // two-part form — no new failure mode. A sender that ALREADY carries a host (a
+  // --from relay passing the ORIGIN's full triple) is preserved verbatim, never
+  // re-stamped with THIS host's id (which would forge the origin).
+  const senderTriple =
+    selfHostId && selfHostId.length > 0 && senderLabel !== SENDER_FALLBACK && senderLabel.split("@").length < 3
+      ? `${senderLabel}@${selfHostId}`
+      : senderLabel;
   return [
-    `From: ${senderLabel}`,
+    `From: ${senderTriple}`,
     `To: ${recipient}`,
     "---",
     body,
     "---",
-    `↩ Reply: rig send ${senderLabel} "..."`,
+    `↩ Reply: rig send ${senderTriple} "..."`,
   ].join("\n");
 }
 
@@ -299,12 +316,22 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         return;
       }
 
+      // 51-09 increment 3: resolve the local daemon URL ONCE (reused for the
+      // client below) and best-effort read THIS host's boot-reconciled self-id
+      // from it — ONE identity source + one addressing resolution (rider b), the
+      // same /healthz field the daemon exposes. Fail-open to undefined (C1): the
+      // sugar self-strip and the From: triple both degrade to today's exact
+      // behavior when it is absent (daemon down / pre-reconcile).
+      const localDaemonUrl = await resolveLocalDaemonUrl(deps);
+      const selfHostId = await fetchSelfHostId(deps.lifecycleDeps, localDaemonUrl);
+
       // OPR.0.4.6.MH4 §4 — the `agent@rig@host` target sugar (single-seat
       // only; the fan-out positional is message text). Suffix must match a
       // REGISTERED host id, else the target passes through unchanged and
       // the hint rides any later failure. Precedence: explicit --host >
       // sugar > persisted selection (already folded into opts.host above).
-      const targetResolution = resolveCrossHostTarget(session, explicitHost, deps.hostRegistryLoader);
+      // 51-09 incr 3: a suffix == this host's self-id strips-and-routes-home.
+      const targetResolution = resolveCrossHostTarget(session, explicitHost, deps.hostRegistryLoader, selfHostId);
       if (!targetResolution.ok) {
         console.error(targetResolution.error);
         process.exitCode = 1;
@@ -331,7 +358,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         // text is validated-defined here: --context is rejected with --host (above,
         // for both explicit and sugar forms), and the single-seat (no text && no
         // context) guard requires it on this path.
-        await runCrossHostSend(opts.host, session, text!, opts, deps, waitForIdleMs, crossHostHint);
+        await runCrossHostSend(opts.host, session, text!, opts, deps, waitForIdleMs, crossHostHint, selfHostId);
         return;
       }
 
@@ -340,7 +367,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       // running/unhealthy verdict no longer refuses the send. ff13bcdf —
       // the resolver takes that probe lazily, and skips it entirely when an
       // explicit env alias already names the target.
-      const client = deps.clientFactory(await resolveLocalDaemonUrl(deps));
+      const client = deps.clientFactory(localDaemonUrl);
       const senderSession = opts.from ?? resolveSenderSession();
       // --raw (and --dangerously-interact, which implies it) send EXACT text with no messaging envelope.
       const raw = Boolean(opts.raw || opts.dangerouslyInteract);
@@ -363,7 +390,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         const warn = walkSizedWarning(resolved, session);
         if (warn && !opts.json) console.log(`Advisory: ${warn}`);
       }
-      const outboundText = raw ? payload : wrapSendBody(senderSession, session, payload);
+      const outboundText = raw ? payload : wrapSendBody(senderSession, session, payload, selfHostId);
       let res: { status: number; data: Record<string, unknown> };
       try {
         res = await client.post<Record<string, unknown>>("/api/transport/send", {
@@ -433,6 +460,7 @@ async function runCrossHostSend(
   deps: SendDeps,
   waitForIdleMs?: number,
   hint?: string,
+  selfHostId?: string,
 ): Promise<void> {
   const loader = deps.hostRegistryLoader ?? loadHostRegistry;
   const runner = deps.crossHostRun ?? runCrossHostCommand;
@@ -455,7 +483,7 @@ async function runCrossHostSend(
   // byte-verbatim for ssh hosts (transport is dictated by the host entry —
   // ssh XOR http, never a fallback).
   if (host.transport === "http") {
-    await runHttpHostSend(host, session, text, opts, deps, waitForIdleMs, hint);
+    await runHttpHostSend(host, session, text, opts, deps, waitForIdleMs, hint, selfHostId);
     return;
   }
 
@@ -473,7 +501,15 @@ async function runCrossHostSend(
   // to "unknown". Carry the origin (explicit --from, else $OPENRIG_SESSION_NAME)
   // so the remote envelope names the originating session. Plumbing, not a gate.
   const originSender = opts.from ?? resolveSenderSession();
-  if (originSender) argv.push("--from", originSender);
+  // 51-09 increment 3: carry the ORIGIN's full <member>@<rig>@<selfHostId> triple
+  // so the remote envelope names the ORIGIN host, not the relay's. Append this
+  // host's self-id only when the origin isn't already a triple (a --from already
+  // carrying an origin triple is preserved verbatim — never re-stamped).
+  const originTriple =
+    originSender && selfHostId && originSender.split("@").length < 3
+      ? `${originSender}@${selfHostId}`
+      : originSender;
+  if (originTriple) argv.push("--from", originTriple);
   if (opts.json) argv.push("--json");
 
   const result = await runner(host, argv);
@@ -524,10 +560,11 @@ async function runHttpHostSend(
   deps: SendDeps,
   waitForIdleMs?: number,
   hint?: string,
+  selfHostId?: string,
 ): Promise<void> {
   const senderSession = opts.from ?? resolveSenderSession();
   const raw = Boolean(opts.raw || opts.dangerouslyInteract);
-  const outboundText = raw ? text : wrapSendBody(senderSession, session, text);
+  const outboundText = raw ? text : wrapSendBody(senderSession, session, text, selfHostId);
 
   const result = await runRemoteHttpOp(host.id, "POST", "/api/transport/send", {
     session, text: outboundText, verify: opts.verify, force: opts.force, waitForIdleMs,

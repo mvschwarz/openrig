@@ -52,6 +52,7 @@ export function resolveCrossHostTarget(
   rawTarget: string,
   explicitHost: string | undefined,
   registryLoader?: () => ReturnType<typeof loadHostRegistry>,
+  selfHostId?: string | undefined | null,
 ): CrossHostTargetResolution | CrossHostTargetConflict {
   const atCount = rawTarget.split("@").length - 1;
   if (atCount < 2) {
@@ -68,6 +69,29 @@ export function resolveCrossHostTarget(
 
   if (suffix.length === 0 || base.length === 0) {
     return { ok: true, target: rawTarget, sugarHost: undefined, hint: unregisteredHint };
+  }
+
+  // 51-09 increment 3 (arch ruling 2e1b737f): a suffix EQUAL to the daemon's
+  // LITERAL boot-reconciled self-host id routes HOME — the CLI-edge twin of the
+  // daemon's resolvesToLocalHost. Increment 3 always-suffixes the reply hint with
+  // the origin's self-id; a LOCAL reply copies `member@rig@selfId`, and without
+  // this strip the 3-part string dead-letters as unknown_destination_rig (the
+  // reverse dead-letter). C2: LITERAL, case-SENSITIVE self-id match ONLY — no
+  // alias/prefix/registry fallback, never 'local' aliasing (matches
+  // resolvesToLocalHost's self-id branch). Rider (a): a NON-self suffix is NOT
+  // matched here and falls through to the registry lookup + loud unregistered
+  // hint below — the sugar never becomes any-unknown-falls-through-to-local. C1
+  // fail-open: when selfHostId is absent (daemon down / pre-reconcile / unknown),
+  // this branch is skipped and the string passes through EXACTLY as today.
+  if (typeof selfHostId === "string" && selfHostId.length > 0 && suffix === selfHostId) {
+    if (explicitHost !== undefined && explicitHost !== suffix) {
+      return {
+        ok: false,
+        error: `ambiguous host: --host ${explicitHost} conflicts with the target's host qualifier @${suffix} — name one host`,
+      };
+    }
+    // Routes home: strip the self-suffix, no cross-host sugarHost (local send).
+    return { ok: true, target: base, sugarHost: undefined, hint: undefined };
   }
 
   const loader = registryLoader ?? loadHostRegistry;

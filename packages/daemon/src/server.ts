@@ -71,6 +71,7 @@ import type { SkillLibraryDiscoveryService } from "./domain/skill-library-discov
 import { configRoutes } from "./routes/config.js";
 import { hostsRoutes } from "./routes/hosts.js";
 import { hostReadThrough } from "./domain/hosts/read-through.js";
+import { getSelfHostId } from "./domain/hosts/fanout-contract.js";
 import { contextPacksRoutes } from "./routes/context-packs.js";
 import { agentImagesRoutes } from "./routes/agent-images.js";
 import type { SpecReviewService } from "./domain/spec-review-service.js";
@@ -572,17 +573,26 @@ export function createApp(deps: AppDeps): Hono {
     // {semver, commit, dirty, builtAt}; dev runs add NOTHING (stampFields is
     // {} without a stamp — no invented identity, legacy bodies preserved).
     const stamp = stampFields();
+    // 51-09 increment 3 (arch ruling 2e1b737f) — expose the daemon's
+    // boot-reconciled self-host id so the CLI edge can render the always-suffix
+    // sender triple + self-resolve the reply hint (ONE identity source). ADDITIVE
+    // on the FR-7 stamp precedent: ABSENT before the boot reconcile (getSelfHostId
+    // is null → {} → no invented identity, legacy bodies byte-preserved). NEVER
+    // ownName/host.name (display-only, DP4 — the conflation this slice kills).
+    const self = getSelfHostId();
+    const selfHost = self ? { selfHostId: self } : {};
     const monitor = deps.eventLoopMonitor;
     const slowOperations = deps.slowOpRecorder?.snapshot
       ? { slowOperations: deps.slowOpRecorder.snapshot() }
       : {};
     if (!monitor) {
-      return c.json({ status: "ok", ...stamp, ...slowOperations });
+      return c.json({ status: "ok", ...stamp, ...selfHost, ...slowOperations });
     }
     const eventLoop = monitor.snapshot();
     return c.json({
       status: "ok",
       ...stamp,
+      ...selfHost,
       eventLoop,
       routeTimings: deps.routeTimingRecorder?.snapshot() ?? {},
       ...slowOperations,
