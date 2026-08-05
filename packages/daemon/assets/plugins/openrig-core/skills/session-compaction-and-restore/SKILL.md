@@ -15,6 +15,7 @@ metadata:
       - composable-priming-packs
       - session-source-fork
       - seat-continuity-and-handover
+      - retiring-and-inheriting-a-seat
       - claude-compact-in-place
       - pre-maintenance-agent-preservation
 ---

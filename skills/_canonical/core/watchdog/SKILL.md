@@ -15,6 +15,7 @@ metadata:
       - intake-routing
       - human-in-the-loop
       - status-not-chat-orchestrator
+      - oversight-team
 ---
 
 # Watchdog

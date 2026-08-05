@@ -311,7 +311,7 @@ The floor and YOLO are **launch flags** OpenRig sets deterministically; the Lock
 ## v0.3.x Starter, Workspace, And Plugin Surfaces
 
 OpenRig v0.3.0 adds `rig agent-image`, `rig context-pack`, `rig workspace`, and
-`rig config init-workspace`. It also shifts fresh-user starter guidance toward
+`rig config init-workspace`. *(0.5.0: the `rig context-pack` alias is retired — the store + compose library is the single `rig context` noun; see "Context packs and paced delivery (0.5.0)".)* It also shifts fresh-user starter guidance toward
 `product-team` for human-directed work and `conveyor` for workflow-oriented
 work. Treat `demo` as legacy/test content unless a task specifically asks for
 the old demo spec.
@@ -471,14 +471,14 @@ honestly and the UI exposes a one-click open-missing affordance.
 
 v0.4.0 flips the five most frequently invoked read-commands from firehose-by-default to compact-by-default, and `rig queue list` adopts the docker / kubectl read-command grammar. **All defaults preserve breadth and capability — the firehose is one explicit flag away.**
 
-### `rig ps` — current-rig default + compact-by-default + `-A`/`--all-rigs` + `--full`
+### `rig ps` — scope-aware: bare `rig ps` = ALL rigs; `--nodes` = your rig only
 
 ```bash
-rig ps                      # CURRENT-RIG, all-states, compact rig summaries (default)
-rig ps --json               # compact JSON array (TL;DR per node: session, rig, activity, assigned/pending, resumeTokenPresent boolean)
-rig ps -A                   # all-rigs (fleet breadth; was the v0.3.4 default)
-rig ps --rig <name>         # explicit-rig (overrides current-rig default)
-rig ps --nodes              # compact node inventory (current rig)
+rig ps                      # ALL active rigs on the host, one compact row each — RUN FIRST to know the world
+rig ps --rig <name>         # one named rig's summary
+rig ps --nodes --rig <name> # per-node (seat) detail for a NAMED rig — the normal drill-in
+rig ps --nodes              # per-node detail — CURRENT rig ONLY (deliberately narrow; NOT the whole host)
+rig ps --json               # compact JSON (default = a bare array of ALL non-archived rigs)
 rig ps --nodes -A           # cross-rig node inventory (was v0.3.4 default)
 rig ps --nodes --full       # complete record (the v0.3.4 per-node default shape; resumeToken VALUE retained here for downstream consumers)
 rig ps --nodes --session <sess>  # narrow to one canonical session
@@ -486,12 +486,12 @@ rig ps --active             # opt-in active-state filter (does NOT change the al
 ```
 
 **v0.4.0 breadth + projection changes**:
-- **Default breadth is CURRENT-RIG** (derived from `OPENRIG_SESSION_NAME`'s `@<rig>` suffix), not all-rigs. `-A` / `--all-rigs` widens to fleet. Matches the `rig queue list -A` pattern.
+- **Rig-level `rig ps` lists ALL active rigs** (one row each — the cheap "know the world" view). The **`--nodes` (per-seat) view defaults to your CURRENT rig only** (from `OPENRIG_SESSION_NAME`'s `@<rig>` suffix); `--rig <name>` picks another rig, `-A` widens `--nodes` to the whole host (expensive — prefer `--fields`/`--limit`).
 - **Per-node TL;DR projection (compact) is the default**; `--full` returns the raw byte-equivalent passthrough. Daemon-side `recoveryGuidance` relocated to a guidance-by-reference map (no longer duplicated per-node) — even `--full` benefits.
 - **All-states stays default** (different from `rig queue list` which defaults to active-only) — for `ps`, non-running states ARE often the actionable signal.
 - **Resume-token security**: `--full` JSON emits `resumeTokenPresent` (boolean) — the actual `resumeToken` value also remains in `--full` for downstream consumers that legitimately need it, but the compact default never carries it (an orch glance never accidentally leaks token material).
 
-**STOP using `rig ps --nodes --json` as a fleet-wide casual status check assuming the v0.3.4 shape.** The v0.4.0 default is CURRENT-RIG + compact; explicit `-A --full` is the fleet firehose. The ~77,000-token status-glance incident is closed twice over (compact + scope).
+**⚠ SCOPE-AWARENESS — the one that bites:** `rig ps --nodes` (and `--nodes --json`) show ONLY your current rig's seats, by design — the narrow default protects your context window. **Narrow output is not the whole world.** Never conclude "my rig is the only rig on the host" from a `--nodes` read — run bare `rig ps` FIRST (cheap; it lists every rig), then `rig ps --nodes --rig <name>` for the one you need. (`-A` = the expensive whole-host node read; use sparingly. The ~77k-token status-glance incident is closed by compact + scope.)
 
 ### `rig whoami` — compact-by-default + `--full` (`--verbose` alias)
 
@@ -532,16 +532,16 @@ rig restore-check --as <session>  # narrow to one seat
 
 Closes the largest measured bomb (~79,000 → low thousands). Summary correctly identifies EVERY not-ready seat (no false-ready omission); detail is dropped only for ready seats.
 
-### `rig context` — compact summary + `--full`
+### `rig context` — context-window usage viewer (0.4.x; REMOVED in 0.5.0)
 
 ```bash
-rig context                # compact summary
+rig context                # compact summary        (0.4.x only)
 rig context --full         # complete current payload
 rig context --rig <name>   # narrow to one rig
 rig context --threshold 80 # filter to seats at/above 80%
 ```
 
-Lower leverage than the others but keeps the read-command surface compact-by-default after the upgrade.
+Lower leverage than the others; keeps the read-command surface compact-by-default after the 0.4.0 upgrade. **⚠ 0.5.0: this usage viewer is removed entirely and the `rig context` name is reassigned to the context library (store + compose) — see "Context packs and paced delivery (0.5.0)" below. On a 0.5.0 host, bare `rig context` is the library, not this viewer.**
 
 ### Why this matters
 
@@ -701,7 +701,7 @@ JSON form exposes `peersNote` directly for programmatic consumers.
 ## Inventory and Monitoring
 
 ```bash
-rig ps                      # CURRENT-RIG, compact rig summaries (v0.4.0 default)
+rig ps                      # ALL active rigs on the host, one compact row each (run FIRST to know the world)
 rig ps --nodes              # compact node inventory (current rig)
 rig ps -A                   # all-rigs breadth (was the pre-0.4.0 default)
 rig ps --nodes --full       # complete per-node record (the firehose — opt-in)
@@ -759,6 +759,7 @@ rig send <session> "message" --json
 - `--dangerously-interact --reason "<why>"` — the ONLY override of the prompt/permission guard: deliberately drive an interactive prompt/permission block (implies `--raw`, requires `--reason`, audit-logged).
 - `--host <id>` — send on a remote host declared in `~/.openrig/hosts.yaml` (ssh hosts shell out; http hosts go CLI-direct to the remote daemon).
 - `--from <session>` — originating session for the envelope sender/actor (provenance; defaults to `$OPENRIG_SESSION_NAME`, and is plumbed through cross-host sends so the remote envelope names the origin, not the relay).
+- `--context <ref>` **(0.5.0)** — attach a composed context pack/piece by ref (see "Context packs and paced delivery"). Small piece → `send --context`; a real pack → `rig walk`. The noun `rig context` composes the ref; the verb delivers it.
 
 > **Durable work goes to the QUEUE, not `send`.** `rig send` is an *ephemeral* message to a pane — it can be missed, and its delivery status is pane-render, not receipt. If you are **assigning work, or the message is important enough that losing it would be a real bummer**, use `rig queue` (below): it's durable, owned, tracked, and survives compaction and restart. Reach for `send` for a quick conversational nudge; reach for the **queue** for anything that must not get lost. Do not default to `send` for work — that's the most common mistake.
 
@@ -904,6 +905,56 @@ rig auth seats … --runtime codex         # seat -> profile registry (metadata 
 ```
 
 **Hard secret boundary:** no token value is ever printed, logged, queued, streamed, or committed; status/validate report presence/mode/login-state only; seat labels are metadata, not live-account proof. MVP is `--runtime codex`; other runtimes use the same surface with a different `--runtime`, never a parallel command.
+
+## Context packs and paced delivery (0.5.0)
+
+**Compose context once, hand it to a seat cleanly.** A library primitive plus a set of delivery flags. The rule that keeps the grammar coherent — internalize this one: **the noun stores and composes; the verbs deliver.** `rig context` never sends anything; delivery is only ever `rig send` / `rig broadcast` / `rig walk` / `rig queue`.
+
+> Version note: this is the 0.5.0 surface, pinned to the team-locked spec — not yet on lagging hosts. In 0.4.x, bare `rig context` was a context-window usage viewer (above); in 0.5.0 that viewer is removed and the `rig context` name belongs to the library here.
+
+### `rig context` — the store + compose library (never delivers)
+
+Manage and compose context (any text/markdown) into reusable **packs**. Every piece and pack has a stable, **path-like ref** — you address context the way you address files (`packs/compaction-restore`, `as-built/queue-internals`).
+
+```bash
+rig context list                     # what's in the library
+rig context show <ref>               # read a piece or pack
+rig context add <ref> --from <file>  # put a piece in the store
+rig context rm <ref>
+rig context compose --out packs/<ref> --from <fileA> <fileB> ...   # ordered pieces -> a durable pack
+```
+
+- Sensible default store location; works unconfigured, can be pointed elsewhere later (another folder now; a machine or URL later).
+- `compose` (v1) is honest ordered concatenation of named files into a durable pack with a ref — "here's a file, read a file."
+- **No delivery verb lives on the noun.** To get a pack to a seat, hand its ref to a delivery verb below.
+
+### `rig walk` — paced delivery of a sequence
+
+```bash
+rig walk <seat> --through <ref | file ...> --pace 10s
+```
+
+Walk a seat *through* a pack: each piece is sent into the pane, spaced by `--pace`, so the agent processes between sends (the human paste → wait → paste rhythm). Its own top-level verb, push-direction — the walker leads and does not wait for replies; the spacing does the work. Reach for `walk` on onboarding, repriming, or a fleet update — anything absorbed in order rather than all at once.
+
+### The delivery grammar — send a ref, walk a pack, or attach it to a qitem
+
+| When | Verb |
+|---|---|
+| One thing, now | `rig send <seat> --context <ref>` |
+| One thing, everyone | `rig broadcast --rig <rig> --context <ref>` |
+| A sequence, absorbed | `rig walk <seat> --through <ref> --pace 10s` |
+| Context riding a durable handoff | `rig queue create … --body-context <ref>` |
+
+- **Rule of thumb:** small piece → `send --context`; real pack → `walk`. An oversized `send --context` warns "this is walk-sized" instead of blasting the pane.
+- **`--body-context` snapshot rule:** a qitem built from a ref stores the **resolved content** in its body **plus the ref for provenance** — the handoff carries what was actually sent, and a later library edit never silently rewrites a past handoff's history.
+- **The orchestrator habit — assign work *with* its context attached:**
+  ```bash
+  rig context compose --out packs/qitem-brief --from as-built/queue.md conventions/c1-proof.md
+  rig queue create --destination dev-driver@build --body-context packs/qitem-brief --summary "…"
+  ```
+  The assignee never greps for the as-built; the curated context rides the durable handoff, survives compaction, and is auditable.
+
+**Skills tier vs context tier:** skills are the HOT tier (ambient, finite, always-visible front-matter); context packs are the COLD tier (unbounded, fetched on instruction — "walk yourself through `packs/tui-onboarding`"). Don't overrun the skill layer by using skills as context packs — that's what this primitive is for.
 
 ## Lifecycle
 
@@ -1161,13 +1212,13 @@ Verification loop:
 ```bash
 rig discover --json
 rig adopt <fragment.yaml> --bindings-file <bindings.yaml> --target-rig <rigId>
-rig ps --nodes --json
+rig ps --nodes --rig <rigId>   # the target rig's nodes (--nodes alone = your current rig)
 rig export <rigId> -o rig.yaml
 ```
 
 Success looks like:
 - the new sessions stop appearing in `rig discover`
-- the new logical IDs appear in `rig ps --nodes --json`
+- the new logical IDs appear in `rig ps --nodes --rig <rigId>`
 - `rig export` includes the new pod
 
 ### Mixed-origin rigs are allowed
@@ -1185,7 +1236,7 @@ Current safety rule:
 The proven operator pattern is:
 - keep one OpenRig manager session outside the rig it manages
 - address the target by rig name, not cached rig ID
-- resolve the current owner from fresh `rig ps --nodes --json`
+- find the target rig with bare `rig ps` (lists all rigs), then resolve its owner from `rig ps --nodes --rig <target>` (a bare `--nodes` read is your current rig only, not the target's)
 - send the manager the spec path, bindings path, and verification steps with `rig send`
 
 This lets ordinary agents ask the manager for OpenRig help instead of every agent needing to be an OpenRig expert.
@@ -1318,7 +1369,7 @@ Design assumptions that hold in the shipped CLI:
 
 1. `rig whoami --json`
 2. `rig transcript <your-session> --tail 100`
-3. `rig ps --nodes --json`
+3. `rig ps` — lists ALL rigs on the host (know the world FIRST); then `rig ps --nodes --rig <your-rig>` for your seats. ⚠ `rig ps --nodes --json` alone is your CURRENT rig only — do NOT mistake it for the whole host (a freshly-compacted agent has no other context to catch the lie).
 4. `rig chatroom history <rig> --limit 50`
 
 ## Commands That Do Not Exist

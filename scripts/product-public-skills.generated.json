@@ -20,7 +20,9 @@
       "claude-compaction-restore",
       "openrig-architect",
       "agent-startup-and-context-ingestion",
-      "applying-a-permission-policy"
+      "applying-a-permission-policy",
+      "retiring-and-inheriting-a-seat",
+      "oversight-team"
     ],
     "ship_misses_add": [
       "topology-mutation-and-seat-management",

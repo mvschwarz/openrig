@@ -151,6 +151,8 @@ Every qitem carries:
 - `state` — one of: `pending | in-progress | done | blocked | failed | denied | canceled | handed-off`
 - `closure_reason` + `closure_target` — set on terminal closure per hot-potato rule
 
+**(0.5.0) `--body-context <ref>` — context riding the handoff.** `rig queue create … --body-context <ref>` attaches a composed context pack to the qitem. The snapshot rule: the qitem stores the **resolved content** in its body **plus the ref for provenance** — the handoff carries what was actually sent, and a later edit to the library never silently rewrites a past handoff's history. (The `rig context` noun composes the ref; the queue delivers it — the noun has no send.) See `openrig-user` → "Context packs and paced delivery."
+
 The fields are auditable across both `rigx queue` (config-layer) and
 `rig queue` (daemon-shipped) surfaces. Watchdog policies and workflow
 runtime project new owners off these fields.

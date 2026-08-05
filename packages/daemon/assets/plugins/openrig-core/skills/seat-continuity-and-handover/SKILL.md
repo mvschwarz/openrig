@@ -9,6 +9,7 @@ metadata:
       - mental-model-ha
       - scope-recovery
       - session-compaction-and-restore
+      - retiring-and-inheriting-a-seat
       - agent-startup-and-context-ingestion
       - agent-starters
       - composable-priming-packs
@@ -107,7 +108,7 @@ A seat stays `Stable` even if multiple candidate-occupants were produced and dis
 ## Hard boundaries (do-not list; verbatim)
 
 - **Do NOT collapse `rebuild` and `seat handover` into one primitive.** The design specifically separates them so the system can describe what actually happened.
-- **Do NOT introduce successor-suffix seat names** (`lead2`/`lead3`). Stable seat identity is the architectural goal.
+- **Do NOT introduce successor-suffix seat names** (`lead2`/`lead3`). Stable seat identity is the architectural goal. *(Reconciliation: this governs the **live** seat address, which stays clean — the seat name is whoever sits now. A **retired** tenure IS versioned (`<seat>-vN`) as the separately-recorded provenance trail / cold wake-target — that is the lineage, not a live successor-suffix. See `retiring-and-inheriting-a-seat` and its lineage ledger.)*
 - **Do NOT report `seatBindingOutcome: handed_over`** if the provenance record didn't write durably.
 - **Do NOT auto-rollback a half-completed handover** by re-attaching the old occupant unless detach completed cleanly first.
 

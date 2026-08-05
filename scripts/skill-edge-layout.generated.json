@@ -204,6 +204,13 @@
       ],
       "category": "pods"
     },
+    "oversight-team": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "pods"
+    },
     "plan-review": {
       "edges": [
         "canonical",
@@ -223,6 +230,12 @@
         "spec"
       ],
       "category": "pm"
+    },
+    "retiring-and-inheriting-a-seat": {
+      "edges": [
+        "plugin"
+      ],
+      "category": null
     },
     "review-team": {
       "edges": [
