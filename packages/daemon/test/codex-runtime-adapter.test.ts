@@ -1105,6 +1105,37 @@ describe("Codex runtime adapter", () => {
     expect(content).toContain('trust_level = "trusted"');
   });
 
+  it("GAP-7 routes workspace trust and runtime config fragments through the injected Codex home", async () => {
+    const fs = mockFs({
+      "/agents/base/runtime/codex-config.toml": "[mcp_servers.test]\nurl = \"https://example.test\"\n",
+    });
+    const fsWithHome = { ...fs, homedir: "/daemon-home" };
+    const adapter = new CodexRuntimeAdapter({
+      tmux: mockTmux(),
+      fsOps: fsWithHome,
+      codexHome: "/daemon-codex",
+    });
+    const plan: ProjectionPlan = {
+      runtime: "codex", cwd: "/tmp/workspace",
+      entries: [makeEntry({
+        category: "runtime_resource",
+        effectiveId: "codex-test-config",
+        resourceType: "codex_config_fragment",
+        absolutePath: "/agents/base/runtime/codex-config.toml",
+        resourcePath: "runtime/codex-config.toml",
+      })],
+      startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
+    };
+
+    await adapter.deliverStartup([], makeBinding("/tmp/workspace"));
+    await adapter.project(plan, makeBinding("/tmp/workspace"));
+
+    const store = (fsWithHome as unknown as { _store: Record<string, string> })._store;
+    expect(store["/daemon-codex/config.toml"]).toContain('[projects."/tmp/workspace"]');
+    expect(store["/daemon-codex/config.toml"]).toContain("[mcp_servers.test]");
+    expect(store["/daemon-home/.codex/config.toml"]).toBeUndefined();
+  });
+
   it("deliverStartup does not inject Codex MCP servers without runtime resources", async () => {
     const fs = mockFs({
       "/home/tester/.codex/config.toml": '[projects."/tmp/workspace"]\ntrust_level = "trusted"\n',

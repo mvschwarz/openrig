@@ -51,6 +51,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private readThreadIdByPid: (pid: number) => string | undefined;
   private sleep: (ms: number) => Promise<void>;
   private resolveHomeDirByPid: ResolveHomeDirByPid;
+  private codexHome?: string;
   // Housekeeping B1 fixback (guard-blocking, arch HK-AR-1 = whole-probe DI):
   // the Codex profile-LOAD probe is an injectable dep in the adapter's
   // established optional-deps shape. Default = the REAL probe
@@ -72,10 +73,12 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     resolveHomeDirByPid?: ResolveHomeDirByPid;
     sleep?: (ms: number) => Promise<void>;
     activityRelayPath?: string;
+    codexHome?: string;
     verifyProfilePreflight?: (profile: string) => Promise<CodexProfileProbeResult>;
   }) {
     this.tmux = deps.tmux;
     this.fs = deps.fsOps;
+    this.codexHome = deps.codexHome;
     this.activityRelayPath = deps.activityRelayPath;
     this.listProcesses = deps.listProcesses ?? defaultListProcesses;
     this.readThreadIdByPid = deps.readThreadIdByPid ?? ((pid) => this.readThreadIdFromLogs(pid));
@@ -100,9 +103,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     if (!enabled) return;
     if (!opts?.codexVersion) return;
     if (isCodex013xOrLater(opts.codexVersion)) return;
-    const homedir = this.fs.homedir;
-    if (!homedir) return;
-    const configPath = nodePath.join(homedir, ".codex", "config.toml");
+    const configPath = this.resolveCodexConfigPath();
     const existing = this.fs.exists(configPath) ? this.fs.readFile(configPath) : "";
     const updated = upsertCodexHooksFeature(existing);
     if (updated !== existing) {
@@ -140,9 +141,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       }
       return;
     }
-    const homedir = this.fs.homedir;
-    if (!homedir) return;
-    const configPath = nodePath.join(homedir, ".codex", "config.toml");
+    const configPath = this.resolveCodexConfigPath();
     const existing = this.fs.exists(configPath) ? this.fs.readFile(configPath) : "";
     const withHooks = upsertCodexActivityHooks(existing, relay);
     if (withHooks !== existing) {
@@ -198,9 +197,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    * (the Codex 0.139 default) intact. Idempotent; no-op when the config or the block is absent.
    */
   removeCodexActivityHooks(): void {
-    const homedir = this.fs.homedir;
-    if (!homedir) return;
-    const configPath = nodePath.join(homedir, ".codex", "config.toml");
+    const configPath = this.resolveCodexConfigPath();
     if (!this.fs.exists(configPath)) return;
     const existing = this.fs.readFile(configPath);
     const updated = stripCodexActivityHooks(existing);
@@ -594,8 +591,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return false;
     }
 
-    const home = this.fs.homedir ?? os.homedir();
-    const configPath = nodePath.join(home, ".codex", "config.toml");
+    const configPath = this.resolveCodexConfigPath();
     this.fs.mkdirp(nodePath.dirname(configPath));
 
     const existing = this.fs.exists(configPath) ? this.fs.readFile(configPath) : "";
@@ -634,10 +630,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   private provisionWorkspaceTrust(cwd: string | null): void {
     if (!cwd) return;
-    const home = this.fs.homedir ?? os.homedir();
-    if (!home) return;
-
-    const configPath = nodePath.join(home, ".codex", "config.toml");
+    const configPath = this.resolveCodexConfigPath();
     this.fs.mkdirp(nodePath.dirname(configPath));
 
     let content = "";
@@ -652,6 +645,12 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
 
     this.fs.writeFile(configPath, content);
+  }
+
+  private resolveCodexConfigPath(): string {
+    const root = this.codexHome
+      ?? nodePath.join(this.fs.homedir ?? os.homedir(), ".codex");
+    return nodePath.join(root, "config.toml");
   }
 
   private readJsonObject(path: string): Record<string, unknown> {

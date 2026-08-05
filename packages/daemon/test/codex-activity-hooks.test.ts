@@ -47,6 +47,23 @@ describe("OPR.0.4.1.10 FR-A — Codex config-layer activity hooks", () => {
     expect(cfg).toContain("timeout = 5");
   });
 
+  it("GAP-7 adds hook trust and removes hooks through the injected Codex home", () => {
+    const customConfig = "/custom-codex/config.toml";
+    const fs = mockCodexFs({ [RELAY]: "// relay" });
+    const adapter = new CodexRuntimeAdapter({
+      tmux: mockTmux(), fsOps: fs, activityRelayPath: RELAY, codexHome: "/custom-codex",
+    });
+
+    adapter.ensureCodexActivityHooks();
+    expect(fs._store[customConfig]).toContain("# BEGIN OPENRIG MANAGED ACTIVITY HOOKS");
+    expect(fs._store[customConfig]).toContain("[hooks.state.");
+    expect(fs._store[CONFIG]).toBeUndefined();
+
+    adapter.removeCodexActivityHooks();
+    expect(fs._store[customConfig]).not.toContain("# BEGIN OPENRIG MANAGED ACTIVITY HOOKS");
+    expect(fs._store[CONFIG]).toBeUndefined();
+  });
+
   it("pins [features].hooks = true using the canonical key (not the deprecated codex_hooks alias)", () => {
     const fs = mockCodexFs({ [RELAY]: "// relay" });
     makeAdapter(fs).ensureCodexActivityHooks();

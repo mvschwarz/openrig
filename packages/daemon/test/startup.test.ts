@@ -16,6 +16,17 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import type { CmuxTransportFactory } from "../src/adapters/cmux.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
 
+function saveEnv(...names: string[]): Record<string, string | undefined> {
+  return Object.fromEntries(names.map((name) => [name, process.env[name]]));
+}
+
+function restoreEnv(saved: Record<string, string | undefined>): void {
+  for (const [name, value] of Object.entries(saved)) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+}
+
 function seedDbWithStaleSessions(dbPath: string, rigs: { rigName: string; logicalId: string; sessionName: string }[]) {
   const db = createDb(dbPath);
   migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, nodeSpecFieldsSchema, checkpointsSchema, agentspecRebootSchema]);
@@ -196,6 +207,108 @@ describe("createDaemon startup composition", () => {
       db.close();
     } finally {
       vi.unstubAllEnvs();
+    }
+  });
+
+  it("GAP-7 projects the daemon HOME and default absolute CODEX_HOME into the production launch env", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-gap7-default-"));
+    const daemonHome = path.join(root, "daemon-home");
+    fs.mkdirSync(daemonHome, { recursive: true });
+    const saved = saveEnv("HOME", "CODEX_HOME", "PATH", "OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST", "OPENAI_API_KEY");
+    process.env.HOME = daemonHome;
+    delete process.env.CODEX_HOME;
+    process.env.PATH = "/proof/openrig/bin:/usr/bin:/bin";
+    process.env.OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST = "OPENAI_API_KEY";
+    process.env.OPENAI_API_KEY = "gap7-openai-key";
+    const tmuxExec = vi.fn<ExecFn>(async () => "");
+    let result: Awaited<ReturnType<typeof createDaemon>> | undefined;
+
+    try {
+      result = await createDaemon({
+        cmuxFactory: async () => { throw Object.assign(new Error(""), { code: "ENOENT" }); },
+        tmuxExec,
+      });
+      expect(result.deps.sessionEnv).toMatchObject({
+        HOME: daemonHome,
+        CODEX_HOME: path.join(daemonHome, ".codex"),
+        PATH: "/proof/openrig/bin:/usr/bin:/bin",
+        OPENAI_API_KEY: "gap7-openai-key",
+      });
+
+      const rig = result.deps.rigRepo.createRig("gap7-default");
+      result.deps.rigRepo.addNode(rig.id, "worker", { runtime: "codex" });
+      expect((await result.deps.nodeLauncher.launchNode(rig.id, "worker")).ok).toBe(true);
+      const command = tmuxExec.mock.calls.map((call) => call[0]).find((line) => line.includes("tmux new-session"));
+      expect(command).toContain(`-e 'HOME=${daemonHome}'`);
+      expect(command).toContain(`-e 'CODEX_HOME=${path.join(daemonHome, ".codex")}'`);
+      expect(command).toContain("-e 'PATH=/proof/openrig/bin:/usr/bin:/bin'");
+      expect(command).toContain("-e 'OPENAI_API_KEY=gap7-openai-key'");
+    } finally {
+      result?.db.close();
+      restoreEnv(saved);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("GAP-7 shares one custom absolute CODEX_HOME between production session env and adapter config writes", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-gap7-custom-"));
+    const daemonHome = path.join(root, "daemon-home");
+    const codexHome = path.join(root, "daemon-codex");
+    const workspace = path.join(root, "workspace");
+    fs.mkdirSync(workspace, { recursive: true });
+    const saved = saveEnv("HOME", "CODEX_HOME");
+    process.env.HOME = daemonHome;
+    process.env.CODEX_HOME = codexHome;
+    let result: Awaited<ReturnType<typeof createDaemon>> | undefined;
+
+    try {
+      result = await createDaemon({
+        cmuxFactory: async () => { throw Object.assign(new Error(""), { code: "ENOENT" }); },
+        tmuxExec: async () => "",
+      });
+      expect(result.deps.sessionEnv).toMatchObject({ HOME: daemonHome, CODEX_HOME: codexHome });
+      const adapter = result.deps.runtimeAdapters?.codex;
+      expect(adapter).toBeDefined();
+      await adapter!.deliverStartup([], {
+        id: "gap7-binding", nodeId: "gap7-node", tmuxSession: "gap7-session",
+        tmuxWindow: null, tmuxPane: null, cmuxWorkspace: null, cmuxSurface: null,
+        updatedAt: "", cwd: workspace,
+      });
+      const configPath = path.join(codexHome, "config.toml");
+      expect(fs.readFileSync(configPath, "utf8")).toContain(`[projects."${workspace}"]`);
+      expect(fs.existsSync(path.join(daemonHome, ".codex", "config.toml"))).toBe(false);
+    } finally {
+      result?.db.close();
+      restoreEnv(saved);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("GAP-7 rejects relative CODEX_HOME during composition before any tmux session launch", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-gap7-relative-"));
+    const saved = saveEnv("HOME", "CODEX_HOME");
+    process.env.HOME = path.join(root, "daemon-home");
+    process.env.CODEX_HOME = "relative-codex-home";
+    const tmuxExec = vi.fn<ExecFn>(async () => "");
+    let result: Awaited<ReturnType<typeof createDaemon>> | undefined;
+    let thrown: unknown;
+
+    try {
+      try {
+        result = await createDaemon({
+          cmuxFactory: async () => { throw Object.assign(new Error(""), { code: "ENOENT" }); },
+          tmuxExec,
+        });
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toMatch(/CODEX_HOME.*absolute/i);
+      expect(tmuxExec.mock.calls.some((call) => call[0].includes("tmux new-session"))).toBe(false);
+    } finally {
+      result?.db.close();
+      restoreEnv(saved);
+      fs.rmSync(root, { recursive: true, force: true });
     }
   });
 

@@ -65,6 +65,16 @@ describe("Slice 3.5 — Codex feature flag (runtime.codex.hooks_enabled)", () =>
     expect(written).toContain("codex_hooks = true");
   });
 
+  it("GAP-7 writes the feature flag to the injected Codex home", () => {
+    const fs = mockCodexFs();
+    const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fs, codexHome: "/custom-codex" });
+
+    adapter.ensureCodexFeatureFlag(true, { codexVersion: "0.120.0" });
+
+    expect(fs._store["/custom-codex/config.toml"]).toContain("codex_hooks = true");
+    expect(fs._store["/home/test/.codex/config.toml"]).toBeUndefined();
+  });
+
   it("HG-5.2 — ensureCodexFeatureFlag(true) sets codex_hooks = true while preserving existing config content", () => {
     const existing = `[model_provider]\nname = "openai"\n\n[other_section]\nfoo = "bar"\n`;
     const fs = mockCodexFs({ "/home/test/.codex/config.toml": existing });

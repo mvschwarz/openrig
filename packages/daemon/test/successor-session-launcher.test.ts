@@ -38,7 +38,7 @@ describe("SuccessorSessionLauncher", () => {
   function launcher(tmuxOptionDefaults?: TmuxOptionDefaultsApplier): SuccessorSessionLauncher {
     const tmux = { createSession, listPanes, killSession } as unknown as TmuxAdapter;
     return new SuccessorSessionLauncher(tmux, discoveryRepo, {
-      sessionEnv: { OPENRIG_HOME: "/home" },
+      sessionEnv: { OPENRIG_HOME: "/home", HOME: "/daemon-home", CODEX_HOME: "/daemon-codex" },
       newId: () => "01ABCDEFG",
       runtimeAdapters: { codex: fakeAdapter("codex") },
       readinessTimeoutMs: 50,
@@ -59,7 +59,14 @@ describe("SuccessorSessionLauncher", () => {
     const [name, cwd, env] = createSession.mock.calls[0]!;
     expect(name).toBe("dev-impl@rig-h1ABCDEFG");
     expect(cwd).toBe("/w");
-    expect(env).toMatchObject({ OPENRIG_NODE_ID: "node-1", OPENRIG_SESSION_NAME: "dev-impl@rig-h1ABCDEFG", OPENRIG_RUNTIME: "codex", OPENRIG_HOME: "/home" });
+    expect(env).toMatchObject({
+      OPENRIG_NODE_ID: "node-1",
+      OPENRIG_SESSION_NAME: "dev-impl@rig-h1ABCDEFG",
+      OPENRIG_RUNTIME: "codex",
+      OPENRIG_HOME: "/home",
+      HOME: "/daemon-home",
+      CODEX_HOME: "/daemon-codex",
+    });
 
     // Driver note 2: pane resolved after create, carried into the discovery candidate.
     expect(listPanes.mock.invocationCallOrder[0]!).toBeGreaterThan(createSession.mock.invocationCallOrder[0]!);
