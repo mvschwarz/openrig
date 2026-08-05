@@ -4,6 +4,7 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
+import { createDaemon } from "../src/startup.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 
 interface StageRecord {
@@ -118,4 +119,44 @@ describe("SessionTransport stage timing", () => {
       expect.objectContaining({ site: "session_transport.send_text", outcome: "failed" }),
     ]);
   });
+
+  it("wires the recorder through createDaemon into the production SessionTransport", async () => {
+    const timer = new RecordingStageTimer();
+    const oldNoKernel = process.env.OPENRIG_NO_KERNEL;
+    process.env.OPENRIG_NO_KERNEL = "1";
+    const daemon = await createDaemon({
+      dbPath: ":memory:",
+      tmuxExec: async (command: string) => command.includes("capture-pane") ? "idle\n❯ " : "",
+      cmuxExec: async () => "",
+      slowOpRecorder: timer,
+    } as never);
+    try {
+      const composedRig = daemon.deps.rigRepo.createRig("composed-timing-rig");
+      const node = daemon.deps.rigRepo.addNode(composedRig.id, "dev.impl", {
+        role: "worker",
+        runtime: "claude-code",
+      });
+      const session = daemon.deps.sessionRegistry.registerSession(node.id, "dev-impl@composed-timing-rig");
+      daemon.deps.sessionRegistry.updateStatus(session.id, "running");
+      daemon.deps.sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@composed-timing-rig" });
+
+      const result = await daemon.deps.sessionTransport!.send(
+        "dev-impl@composed-timing-rig",
+        "hello",
+        { verify: true },
+      );
+      expect(result.ok).toBe(true);
+      expect(timer.records.map((record) => record.site)).toEqual([
+        "session_transport.pre_capture",
+        "session_transport.send_text",
+        "session_transport.submit",
+        "session_transport.post_capture",
+      ]);
+    } finally {
+      daemon.eventLoopMonitor.stop();
+      daemon.db.close();
+      if (oldNoKernel === undefined) delete process.env.OPENRIG_NO_KERNEL;
+      else process.env.OPENRIG_NO_KERNEL = oldNoKernel;
+    }
+  }, 10_000);
 });

@@ -1,6 +1,9 @@
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { createDaemon } from "../src/startup.js";
 
@@ -65,6 +68,8 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
       const records = await readRecords(logPath);
       expect(records.map((r) => r.phase)).toEqual(["begin", "end"]);
       expect(records.every((r) => r.v === 1 && typeof r.ts === "string" && typeof r.spanId === "string")).toBe(true);
+      expect(records[0]).not.toHaveProperty("durationMs");
+      expect(records[0]).not.toHaveProperty("outcome");
       expect(records[1]).toMatchObject({ site: "test.sync.boundary", outcome: "ok" });
       expect(typeof records[1]!.durationMs).toBe("number");
       expect(fs.readFileSync(logPath, "utf8")).not.toContain(secret);
@@ -95,13 +100,97 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
       logPath: path.join(dir, "degraded.jsonl"),
       barrierTimeoutMs: 0,
     });
-    degraded.runSync("test.sync.degraded", () => "continued");
-    expect(degraded.snapshot()).toMatchObject({
-      healthy: false,
-      reason: "begin_barrier_timeout",
-    });
-    await degraded.close();
+    const oldNoKernel = process.env.OPENRIG_NO_KERNEL;
+    process.env.OPENRIG_NO_KERNEL = "1";
+    const daemon = await createDaemon({
+      dbPath: ":memory:",
+      tmuxExec: async () => "",
+      cmuxExec: async () => "",
+      slowOpRecorder: degraded,
+    } as never);
+    try {
+      expect(degraded.runSync("test.sync.degraded", () => "continued")).toBe("continued");
+      expect(degraded.snapshot()).toMatchObject({
+        healthy: false,
+        reason: "begin_barrier_timeout",
+      });
+
+      const healthResponse = await daemon.app.request("/healthz");
+      expect(await healthResponse.json()).toMatchObject({
+        status: "ok",
+        slowOperations: {
+          healthy: false,
+          reason: "begin_barrier_timeout",
+        },
+      });
+      const observations = daemon.deps.streamStore!.list();
+      expect(observations).toHaveLength(1);
+      expect(observations[0]!.body).toContain("begin_barrier_timeout");
+      expect(observations[0]!.body).toContain("test.sync.degraded");
+    } finally {
+      daemon.eventLoopMonitor.stop();
+      daemon.db.close();
+      await degraded.close();
+      if (oldNoKernel === undefined) delete process.env.OPENRIG_NO_KERNEL;
+      else process.env.OPENRIG_NO_KERNEL = oldNoKernel;
+    }
   });
+
+  it("durably records an open span before a main-thread sync wedge is killed", async () => {
+    const dir = tempDir();
+    const logPath = path.join(dir, "crash.jsonl");
+    const moduleUrl = pathToFileURL(path.resolve(import.meta.dirname, "../src/domain/slow-op-recorder.ts")).href;
+    const childSource = `
+      import { isMainThread, threadId } from "node:worker_threads";
+      const mod = await import(process.env.RECORDER_MODULE_URL);
+      const recorder = new mod.SlowOpRecorder({ logPath: process.env.RECORDER_LOG_PATH });
+      recorder.runSync("test.sync.crash", () => {
+        process.stdout.write(JSON.stringify({ isMainThread, threadId }) + "\\n");
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+      });
+    `;
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", childSource], {
+      env: {
+        ...process.env,
+        RECORDER_LOG_PATH: logPath,
+        RECORDER_MODULE_URL: moduleUrl,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr!.setEncoding("utf8");
+    child.stderr!.on("data", (chunk: string) => { stderr += chunk; });
+
+    try {
+      const callbackEvidence = await new Promise<{ isMainThread: boolean; threadId: number }>((resolve, reject) => {
+        let stdout = "";
+        const timeout = setTimeout(() => reject(new Error(`child callback did not begin: ${stderr}`)), 5_000);
+        child.stdout!.setEncoding("utf8");
+        child.stdout!.on("data", (chunk: string) => {
+          stdout += chunk;
+          const newline = stdout.indexOf("\n");
+          if (newline < 0) return;
+          clearTimeout(timeout);
+          resolve(JSON.parse(stdout.slice(0, newline)) as { isMainThread: boolean; threadId: number });
+        });
+        child.once("exit", (code) => {
+          clearTimeout(timeout);
+          reject(new Error(`child exited before callback (code=${code}): ${stderr}`));
+        });
+      });
+      expect(callbackEvidence).toEqual({ isMainThread: true, threadId: 0 });
+      child.kill("SIGKILL");
+      await once(child, "exit");
+
+      const records = await readRecords(logPath);
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({ phase: "begin", site: "test.sync.crash" });
+      expect(records[0]).not.toHaveProperty("durationMs");
+      expect(records[0]).not.toHaveProperty("outcome");
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }
+  }, 10_000);
 
   it("rotates at the exact cap and records the inclusive slow-request boundary", async () => {
     const mod = await loadRecorderModule();
@@ -113,15 +202,20 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
     const recorder = new mod.SlowOpRecorder({
       logPath,
       maxBytes: 512,
-      rotationCount: 2,
+      rotationCount: 3,
       slowThresholdMs: 250,
     });
+    for (let i = 0; i < 30; i += 1) recorder.recordMeasurement(`test.measure.${i}`, 300);
     recorder.recordRequest("GET /api/queue/:qitemId", 249);
     recorder.recordRequest("GET /api/queue/:qitemId", 250);
-    for (let i = 0; i < 30; i += 1) recorder.recordMeasurement(`test.measure.${i}`, 300);
     await recorder.flush();
-    expect(fs.existsSync(`${logPath}.1`)).toBe(true);
-    const all = [logPath, `${logPath}.1`, `${logPath}.2`]
+    const retained = [logPath, `${logPath}.1`, `${logPath}.2`, `${logPath}.3`];
+    for (const retainedPath of retained) {
+      expect(fs.existsSync(retainedPath), `${retainedPath} should exist`).toBe(true);
+      expect(fs.statSync(retainedPath).mode & 0o777).toBe(0o600);
+    }
+    expect(fs.existsSync(`${logPath}.4`)).toBe(false);
+    const all = retained
       .filter((p) => fs.existsSync(p))
       .map((p) => fs.readFileSync(p, "utf8"))
       .join("\n");
