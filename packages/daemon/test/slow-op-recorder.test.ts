@@ -139,10 +139,21 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
   it("durably records an open span before a main-thread sync wedge is killed", async () => {
     const dir = tempDir();
     const logPath = path.join(dir, "crash.jsonl");
+    fs.writeFileSync(logPath, "", { mode: 0o600 });
     const moduleUrl = pathToFileURL(path.resolve(import.meta.dirname, "../src/domain/slow-op-recorder.ts")).href;
     const childSource = `
+      import fs from "node:fs";
+      import { syncBuiltinESMExports } from "node:module";
       import { isMainThread, threadId } from "node:worker_threads";
       const mod = await import(process.env.RECORDER_MODULE_URL);
+      for (const name of [
+        "appendFileSync", "chmodSync", "fchmodSync", "fdatasyncSync", "fsyncSync",
+        "ftruncateSync", "mkdirSync", "openSync", "renameSync", "rmSync", "rmdirSync",
+        "truncateSync", "unlinkSync", "writeFileSync", "writeSync",
+      ]) {
+        fs[name] = () => { throw new Error("main-thread synchronous recorder I/O: " + name); };
+      }
+      syncBuiltinESMExports();
       const recorder = new mod.SlowOpRecorder({ logPath: process.env.RECORDER_LOG_PATH });
       recorder.runSync("test.sync.crash", () => {
         process.stdout.write(JSON.stringify({ isMainThread, threadId }) + "\\n");
@@ -224,6 +235,39 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
     expect(all).toContain('"durationMs":250');
     await recorder.close();
   });
+
+  it("composes request timing across health and unmatched routes in the real server", async () => {
+    const requests: Array<{ site: string; durationMs: number }> = [];
+    const recorder = {
+      recordRequest(site: string, durationMs: number): void {
+        requests.push({ site, durationMs });
+      },
+      snapshot: () => ({ healthy: true }),
+    };
+    const oldNoKernel = process.env.OPENRIG_NO_KERNEL;
+    process.env.OPENRIG_NO_KERNEL = "1";
+    const daemon = await createDaemon({
+      dbPath: ":memory:",
+      tmuxExec: async () => "",
+      cmuxExec: async () => "",
+      slowOpRecorder: recorder,
+    } as never);
+    try {
+      expect((await daemon.app.request("/healthz?probe=1")).status).toBe(200);
+      expect((await daemon.app.request("/definitely-missing?token=must-not-appear")).status).toBe(404);
+      expect(requests.map((request) => request.site)).toEqual([
+        "GET /healthz",
+        "GET /definitely-missing",
+      ]);
+      expect(requests.every((request) => Number.isFinite(request.durationMs) && request.durationMs >= 0)).toBe(true);
+      expect(JSON.stringify(requests)).not.toContain("must-not-appear");
+    } finally {
+      daemon.eventLoopMonitor.stop();
+      daemon.db.close();
+      if (oldNoKernel === undefined) delete process.env.OPENRIG_NO_KERNEL;
+      else process.env.OPENRIG_NO_KERNEL = oldNoKernel;
+    }
+  }, 10_000);
 
   it("wraps all nine accepted sync calls without moving them off the main thread", () => {
     const srcRoot = path.resolve(import.meta.dirname, "../src");
