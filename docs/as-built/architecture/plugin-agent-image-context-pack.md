@@ -58,8 +58,9 @@ reference already encodes this ("## Plugin Inspection (v0.3.1)").
 ## 1. Context packs (PL-014) — 0.3.0
 
 A **context pack** is a directory of `manifest.yaml` + included markdown /
-yaml / txt files: operator-authored, library-discoverable, reviewable,
-sendable. No SQLite tables; in-memory cache at daemon scope.
+yaml / txt files: operator-authored, library-discoverable, reviewable, and
+composable. The `rig context` noun is delivery-free. No SQLite tables;
+in-memory cache at daemon scope.
 
 > Source: `domain/context-packs/context-pack-types.ts:1-11` @HEAD.
 
@@ -72,10 +73,10 @@ Startup wires three roots: builtin (`../context-packs`, first), user-file
 addressed by its path-like **ref** (e.g. `packs/compaction-restore`), which is
 its unique identity; the opaque entry id is `context-pack:<ref>` (a UI routing
 key). Colon-id `context-pack:<name>:<version>` addressing and the `/library/:id`
-routes were removed in Slice-03 Atom 5 — resolution is by ref only (`getByRef`,
-`GET/DELETE /library/by-ref`, `GET /library/by-ref/preview`,
-`POST /library/by-ref/send`). `startup_files` `kind: context_pack` entries
-likewise address by `ref:`.
+routes were removed in Slice-03 Atom 5. Resolution is by ref only through
+`getByRef` and the read/delete/preview/pieces route family. Startup accepts
+ordinary files only and rejects context-pack expansion; compose a durable ref
+first, then use a dedicated delivery verb when delivery is intended.
 
 > Source: `domain/context-packs/context-pack-library-service.ts:59-94`
 > (scan; last-wins L79-81), `:31-33` (id); `startup.ts:481-502` (3-root
@@ -100,17 +101,20 @@ unreadable file throws `file_read_failed`.
 > Source: `domain/context-packs/bundle-assembler.ts:38-39` (prefixes),
 > `:73-100` (missing skip L74-76; read-fail throw L81-87) @HEAD.
 
-`contextPacksRoutes()` (mounted `server.ts:482`): `GET /library`,
-`POST /library/sync`, `GET /library/:id`, `GET /library/:id/preview`
-(assembled, no send), `POST /library/:id/send`
-(`{ destinationSession, dryRun }`; dry-run returns text without
-`SessionTransport`; real send → 502 on transport failure). `id==="sync"`
-→ 404 so it cannot shadow the sync route; 503 when unprovisioned. CLI:
-`rig context list|show|preview|sync|add|send` (`send --dry-run`; Atom-7 retired the `rig context-pack` grammar).
+`contextPacksRoutes()` exposes a ref-primary, delivery-free library surface:
+`GET /library`, `POST /library/sync`, `POST /library/compose`,
+`GET/DELETE /library/by-ref`, `GET /library/by-ref/preview`, and
+`GET /library/by-ref/pieces`. Preview returns the assembled review shape;
+pieces returns ordered member contents plus the whole plain text and byte size.
+There is no pack-owned delivery route. CLI library verbs are
+`rig context compose|list|show|preview|sync|add|rm`; delivery belongs to
+`rig send --context`, `rig broadcast --context`, `rig walk --through`, and
+`rig queue create --body-context`.
 
-> Source: `routes/context-packs.ts:25-138` (table; sync-guard L51; 503
-> L31; dry-run L121-123; 502 L126-133); `server.ts:482`;
-> `docs/as-built/cli-reference.md:914-929` @HEAD.
+> Source: `routes/context-packs.ts` (complete route table);
+> `domain/startup-validation.ts` (file-only startup contract);
+> `packages/cli/src/commands/context.ts`, `send.ts`, `broadcast.ts`,
+> `walk.ts`, and `queue.ts` @HEAD.
 
 ## 2. Agent images (PL-016) — 0.3.0
 

@@ -32,7 +32,7 @@ export async function resolveContextRef(client: DaemonClient, ref: string): Prom
     `/api/context-packs/library/by-ref/pieces?ref=${encodeURIComponent(ref)}`,
   );
   if (res.status === 404) {
-    throw new Error(`Context pack '${ref}' not found in library. Run 'rig context-pack list' to see the available refs.`);
+    throw new Error(`Context pack '${ref}' not found in library. Run 'rig context list' to see the available refs.`);
   }
   if (res.status === 400) {
     throw new Error(res.data?.message ?? `Unsafe context ref '${ref}'.`);

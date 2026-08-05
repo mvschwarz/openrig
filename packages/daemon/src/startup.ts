@@ -642,10 +642,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     console.error(`[openrig] plugin vendor setup warning: ${(err as Error).message}`);
   }
 
-  // PL-014 Item 6: hoist ContextPackLibraryService construction so the
-  // PodRigInstantiator can resolve `kind: context_pack` startup_files
-  // entries at materialize time. Same instance is returned to deps
-  // below so /api/context-packs/* shares it.
+  // PL-014: one daemon-scoped ContextPackLibraryService backs the
+  // delivery-free /api/context-packs list/sync/compose/read/delete/preview/pieces
+  // routes. Startup context-pack expansion is intentionally unsupported;
+  // dedicated send/broadcast/walk/queue verbs own delivery.
   const contextPackLibrary = (() => {
     const userPacksRoot = getDefaultOpenRigPath("context-packs");
     try { fs.mkdirSync(userPacksRoot, { recursive: true }); } catch { /* best-effort */ }

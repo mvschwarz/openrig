@@ -24,8 +24,17 @@ describe("resolveContextRef (Atom 6b)", () => {
     await expect(resolveContextRef(client, "packs/x")).rejects.toThrow(/whole context or none/i);
   });
 
-  it("throws a not-found error for an absent ref (404)", async () => {
-    await expect(resolveContextRef(fakeClient(404, {}), "packs/absent")).rejects.toThrow(/not found in library/);
+  it("points an absent ref at the live delivery-free context list command", async () => {
+    let error: Error | undefined;
+    try {
+      await resolveContextRef(fakeClient(404, {}), "packs/absent");
+    } catch (caught) {
+      error = caught as Error;
+    }
+    expect(error?.message).toBe(
+      "Context pack 'packs/absent' not found in library. Run 'rig context list' to see the available refs.",
+    );
+    expect(error?.message).not.toContain("rig context-pack");
   });
 
   it("throws the daemon's structured unsafe message for a 400", async () => {
