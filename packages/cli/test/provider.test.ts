@@ -72,6 +72,13 @@ describe("rig provider CLI grammar (daemon-backed)", () => {
       },
     ],
     signals: [{ provider: "codex", accountRef: "cdx-a", sourceClass: "unknown", authority: "unknown", asOf: "2026-08-03T12:00:00.000Z", unknownReason: "codex_app_server_unavailable", automationUse: "do_not_automate" }],
+    // S-C: the S-A host-usage rollup rows the status verb now renders (arrive via /status verbatim).
+    hostUsage: [
+      { host: "local", provider: "claude", state: "ok", windows: [{ window: "five_hour", usedPercent: 10, asOf: "2026-08-03T12:00:00.000Z", seatSession: "seat-c" }], provenance: { basis: "one_account_per_host_deployment_invariant", note: "host==account is a deployment invariant of this rig (one account per host); no account identity is read or emitted." }, anomalies: [], evidenceSeats: ["seat-c"], asOf: "2026-08-03T12:00:00.000Z" },
+      { host: "local", provider: "codex", state: "limited", resetsAt: "2026-08-03T13:00:00.000Z", windows: [{ window: "primary", usedPercent: 100, resetsAt: "2026-08-03T13:00:00.000Z", asOf: "2026-08-03T12:00:00.000Z", seatSession: "seat-x" }], provenance: { basis: "one_account_per_host_deployment_invariant", note: "host==account is a deployment invariant of this rig (one account per host); no account identity is read or emitted." }, anomalies: [], evidenceSeats: ["seat-x"], asOf: "2026-08-03T12:00:00.000Z" },
+      { host: "local", provider: "codex", state: "explicit_unknown", unknownReason: "codex profile present but no usage meter", windows: [], provenance: { basis: "one_account_per_host_deployment_invariant", note: "host==account is a deployment invariant of this rig (one account per host); no account identity is read or emitted." }, anomalies: [], evidenceSeats: [], asOf: "2026-08-03T12:00:00.000Z" },
+      { host: "local", provider: "claude", state: "explicit_unknown", unknownReason: "conflicting seat windows falsify the one-account-per-host invariant", windows: [], provenance: { basis: "one_account_per_host_deployment_invariant", note: "host==account is a deployment invariant of this rig (one account per host); no account identity is read or emitted." }, anomalies: [{ kind: "conflicting_seat_windows", window: "five_hour", seats: ["a@rig", "b@rig"], evidence: "a=20% vs b=90% at same asOf", asOf: "2026-08-03T12:00:00.000Z" }], evidenceSeats: ["a@rig", "b@rig"], asOf: "2026-08-03T12:00:00.000Z" },
+    ],
     asOf: "2026-08-03T12:00:00.000Z",
   };
 
@@ -158,6 +165,46 @@ describe("rig provider CLI grammar (daemon-backed)", () => {
     expect(out).toContain("ANOMALIES");
     expect(out).toMatch(/seat with no bound account: seat-9/);
     expect(out).toMatch(/SIGNALS \(1;/); // freshest-signal summary
+  });
+
+  // ── S-C: host-usage rollup rendered on the EXISTING `provider status` verb (no new verb) ──
+  it("S-C human: a HOST USAGE section renders the rollup rows (state / window granularity / resets_at)", async () => {
+    const out = (await run(["status"], runningDeps(port))).logs.join("\n");
+    expect(out).toContain("HOST USAGE");
+    expect(out).toMatch(/claude\s+ok/);
+    expect(out).toMatch(/codex\s+limited/);
+    expect(out).toContain("2026-08-03T13:00:00.000Z"); // resets_at surfaced for the limited row
+    expect(out).toMatch(/five_hour|primary/); // C3 window granularity present, never normalized away
+  });
+
+  it("S-C human: explicit_unknown renders as 'unknown' + reason — never blank, never ok", async () => {
+    const out = (await run(["status"], runningDeps(port))).logs.join("\n");
+    expect(out).toMatch(/codex\s+unknown/);
+    expect(out).toContain("codex profile present but no usage meter");
+  });
+
+  it("S-C human: the conflict anomaly renders both-facts-visible (never a silent merge)", async () => {
+    const out = (await run(["status"], runningDeps(port))).logs.join("\n");
+    expect(out.toLowerCase()).toContain("conflict");
+    expect(out).toContain("a@rig");
+    expect(out).toContain("b@rig");
+  });
+
+  it("S-C human: the deployment-invariant provenance label is visible", async () => {
+    const out = (await run(["status"], runningDeps(port))).logs.join("\n");
+    expect(out.toLowerCase()).toMatch(/deployment invariant|one account per host/);
+  });
+
+  it("S-C PARITY: --json carries the SAME hostUsage rows the human render shows (values must ARRIVE)", async () => {
+    const out = JSON.parse((await run(["status", "--json"], runningDeps(port))).logs.join("\n"));
+    expect(out.hostUsage).toEqual(FOUR_BLOCK.hostUsage);
+  });
+
+  it("S-C BELT: the human status render emits NO account identifier at the CLI altitude", async () => {
+    const out = (await run(["status"], runningDeps(port))).logs.join("\n");
+    expect(out).not.toContain("cdx-a"); // the accounts-block id never leaks into the host-usage render
+    expect(out).not.toContain("accountId");
+    expect(out).not.toContain("accountRef");
   });
 
   it("reports honestly when the daemon is not running", async () => {

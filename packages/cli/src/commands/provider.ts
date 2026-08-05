@@ -80,6 +80,36 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     } else {
       console.log("SIGNALS: none");
     }
+
+    // S-C (OPR.0.5.0.4-C) — host-level usage rollup on the EXISTING `provider status` verb (PM: no
+    // new verb). The rows arrive verbatim via /api/provider/status; --json emits them unchanged, so
+    // the human projection here is the parity surface. Honesty AT THE RENDER: state as-is (an
+    // explicit_unknown reads "unknown", never blank/ok), C3 window granularity kept, the conflict
+    // anomaly shown both-facts-visible (never a silent merge), the deployment-invariant provenance
+    // label surfaced, and NO account identity emitted (the rows carry none — keys are host+provider).
+    const hostUsage = (m["hostUsage"] as Array<Record<string, unknown>>) ?? [];
+    if (hostUsage.length) {
+      console.log("HOST USAGE");
+      for (const r of hostUsage) {
+        const state = r["state"] as string;
+        const label = state === "explicit_unknown" ? "unknown" : state;
+        const wins = ((r["windows"] as Array<Record<string, unknown>>) ?? [])
+          .map((w) => `${w["window"]} ${w["usedPercent"] ?? "?"}%`).join(", ");
+        let line = `  ${r["provider"]}  ${label}`;
+        if (state === "limited" && r["resetsAt"]) line += `  until ${r["resetsAt"]}`;
+        if (state === "explicit_unknown" && r["unknownReason"]) line += `  (${r["unknownReason"]})`;
+        if (wins) line += `  [${wins}]`;
+        console.log(line);
+        for (const an of (r["anomalies"] as Array<Record<string, unknown>>) ?? []) {
+          if (an["kind"] === "conflicting_seat_windows") {
+            const seats = (an["seats"] as string[]) ?? [];
+            console.log(`    ! conflict (${an["window"]}): ${seats.join(" vs ")} — ${an["evidence"]}  [invariant falsified for this host]`);
+          }
+        }
+      }
+      const prov = hostUsage[0]?.["provenance"] as Record<string, unknown> | undefined;
+      if (prov?.["note"]) console.log(`  provenance: ${prov["note"]}`);
+    }
   }
 
   // Shared daemon-backed read for the FILTERED blocks: --json verbatim, human = pretty JSON (§3

@@ -98,6 +98,13 @@ describe("GET /api/provider/usage — S-B external status contract", () => {
     expect(body.hostUsage).toEqual([]);
   });
 
+  // Guard advisory (S-B verdict, folded free): a PRE-S-A model with NO hostUsage KEY at all exercises
+  // the `?? []` absent-key branch — must serve an honest empty array, never undefined/null.
+  it("absent hostUsage key (pre-S-A model) → honest empty array via the ?? [] branch", async () => {
+    const body = await (await appWith(svc(undefined)).request("/api/provider/usage")).json();
+    expect(body.hostUsage).toEqual([]);
+  });
+
   it("unwired service → loud 503 (never an empty/fabricated payload)", async () => {
     const res = await appWith(null).request("/api/provider/usage");
     expect(res.status).toBe(503);
