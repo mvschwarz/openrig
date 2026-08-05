@@ -795,8 +795,13 @@ Exit codes:
         process.exitCode = 1;
         return;
       }
+      // OPR.0.5.0 scope-honesty: capture WHEN --nodes defaulted to the session rig, so the
+      // (correct) current-rig-only scope is DECLARED in the output — silent completeness is
+      // silent loss (a restoring agent must not read a scoped list as the whole host).
+      let scopedToSessionRig = false;
       if (opts.nodes && !opts.allRigs && !opts.rig && !isRemote && callerRig) {
         opts.rig = callerRig;
+        scopedToSessionRig = true;
       }
       const deps = getDepsF();
 
@@ -846,7 +851,7 @@ Exit codes:
       const client = deps.clientFactory(getDaemonUrl(status));
 
       if (opts.nodes) {
-        await handleNodes(client, opts, parsedFilter, limit, fields, useEnvelope);
+        await handleNodes(client, opts, parsedFilter, limit, fields, useEnvelope, undefined, scopedToSessionRig);
         return;
       }
 
@@ -1005,6 +1010,7 @@ async function handleNodes(
   fields: string[] | null,
   useEnvelope: boolean,
   requestHeaders?: Record<string, string>,
+  scopedToSessionRig?: boolean,
 ): Promise<void> {
   const rigRes = await client.get<PsEntry[]>(psApiPath(opts), requestHeaders ? { headers: requestHeaders } : undefined);
   if (rigRes.status >= 400) {
@@ -1064,19 +1070,33 @@ async function handleNodes(
       ? compactNodeProjection(limited)
       : limited;
 
+  // OPR.0.5.0 scope-honesty: when --nodes defaulted to the session rig AND other rigs exist on the
+  // host, DECLARE the scope so a scoped list is never read as the whole host. Single-rig hosts and
+  // explicit --rig/-A paths stay byte-stable (nothing hidden -> no scope envelope, no stderr hint).
+  const rigsOnHost = rigRes.data.length;
+  const scope = scopedToSessionRig && rigsOnHost > 1
+    ? { rig: opts.rig as string, rigsOnHost, hint: `1 of ${rigsOnHost} rigs shown; rig ps lists all; --rig NAME or -A for others` }
+    : null;
+
   if (opts.json) {
-    if (useEnvelope) {
+    if (useEnvelope || scope) {
       const envelope: Record<string, unknown> = {
         entries: projected,
         totalNodes: filtered.length,
         truncated: limitTruncated,
       };
       if (limitTruncated) envelope.hint = "rig ps --nodes --full --json";
+      if (scope) envelope.scope = scope;
       console.log(JSON.stringify(envelope));
     } else {
       console.log(JSON.stringify(projected));
     }
     return;
+  }
+
+  // The matching human-path line (stderr, so it never pollutes piped stdout).
+  if (scope) {
+    console.error(`1 of ${rigsOnHost} rigs shown (scoped to ${opts.rig}); rig ps lists all — use --rig NAME or -A for others`);
   }
 
   if (limited.length === 0) {
