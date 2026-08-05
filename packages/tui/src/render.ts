@@ -215,14 +215,20 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       if (!found) return [{ text: `agent "${leaf.name}" not in the current snapshot` }];
       const { agent, rig, pod } = found;
       const specInLibrary = !!agent.spec && !!findSpec(snap, agent.spec);
-      // ROUND-3: the runtime MARK lives on the detail page (sparingly).
-      // ROUND-4 (guard finding 2): the mark's OWN token segments ride the seg
-      // channel so its colors/background survive stylization, and NO spelled
-      // runtime word renders beside it (spelled runtime is dead everywhere).
+      // a4c9548a — S19 FOLLOW-ON FOUNDER RULING (binding, bounds the S19 marks
+      // ruling): where there is ROOM, WRITE THE NAME — an icon NEVER replaces text
+      // as the value. The detail page has room, so the runtime NAME is the VALUE
+      // (honest placeholder when unserved); the mark's OWN token segments still ride
+      // the seg channel (ROUND-4: colors/background survive stylization) but only
+      // ACCOMPANY the name decoratively, never substitute. Topology cards remain
+      // mark-only by space (layout.ts/hatchet.ts) — the ruling is bounded, not reversed.
+      const rtName = agent.runtime ?? "— (not served)";
       const rtSegs = [
         { text: "  " },
         { text: "runtime:", token: "dim" as const },
         { text: " ".repeat(LABEL_W - "runtime:".length + 1) },
+        { text: rtName },
+        { text: "  " },
         ...runtimeMarkSegs(agent.runtime),
       ];
       const runtimeLine: ContentLine = { text: rtSegs.map((g) => g.text).join(""), segs: rtSegs };

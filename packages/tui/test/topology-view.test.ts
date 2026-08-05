@@ -548,8 +548,12 @@ describe("ROUND-3 LOCKED SET (orch locked-scope GO; pins 02259adb/29a10b62)", ()
     // detail page shows the mark as the runtime field — spelled runtime is dead
     s.dispatch({ type: "drill", resource: "agent", name: "dev.driver", target: { host: "vm-host", rig: FIXTURE_RIG_NAME, pod: "dev" } });
     const detail = renderScreen(s.get(), snap, { cols: 150, rows: 40 }).lines.join("\n");
-    expect(detail).toMatch(/runtime:\s+></); // the mark IS the runtime value
-    expect(detail).not.toMatch(/>< claude-code/); // no spelled runtime beside the mark
+    // a4c9548a (S19 follow-on founder ruling, bounds the marks ruling): on the detail
+    // page there is room, so the runtime NAME is the VALUE; the mark only accompanies
+    // decoratively, never substitutes. (Supersedes the earlier "the mark IS the value /
+    // spelled runtime is dead" pin — topology cards above stay mark-only, bounded not reversed.)
+    expect(detail).toMatch(/runtime:\s+claude-code/); // the NAME is the runtime value
+    expect(detail).toMatch(/claude-code\s+></); // the clawd mark still accompanies decoratively
   });
 
   it("the clawd eyes are the picks-v4 INWARD SQUINTY pair `><` (founder amendment 14afeb74, supersedes the round-4 quadrant geometry)", async () => {
@@ -563,7 +567,7 @@ describe("ROUND-3 LOCKED SET (orch locked-scope GO; pins 02259adb/29a10b62)", ()
     expect(markText(runtimeMarkSegs("claude-code"))).toBe("><"); // shipped claude mark = the refined face
   });
 
-  it("agent-detail runtime marks keep their OWN styling in compiled output (guard round-4 finding 2)", () => {
+  it("agent-detail runtime NAME is the value AND the mark keeps its OWN styling in compiled output (a4c9548a + guard round-4 finding 2)", () => {
     const node = (id: string, name: string, runtime: string) => ({
       id, type: "rigNode", parentId: "pod-D",
       data: { logicalId: name, podNamespace: "d", runtime, model: null, status: "running",
@@ -599,18 +603,18 @@ describe("ROUND-3 LOCKED SET (orch locked-scope GO; pins 02259adb/29a10b62)", ()
     const cl = drillDetail("d.cl");
     expect(cl.styled).toMatch(/38;2;24;24;24;48;2;173;103;85m[^\x1b]*>/);
     expect(cl.styled).toMatch(/38;2;24;24;24;48;2;173;103;85m[^\x1b]*</); // both inward eyes carry the eye-on-terracotta SGR
-    expect(cl.plain).not.toMatch(/claude/); // spelled runtime is dead
+    expect(cl.plain).toMatch(/runtime:\s+claude-code/); // a4c9548a: the NAME is the value (the mark's SGR above proves it still accompanies decoratively)
     // terminal: the dark-cell background survives to the compiled detail line
     const tty = drillDetail("d.tty");
     expect(tty.styled).toMatch(/48;2;12;10;9m?[^\x1b]*>/);
-    expect(tty.plain.slice(31)).not.toMatch(/terminal/);
-    // codex: ASCII >_ text with the picks-v4 CHEVRON-ONLY blue hint — the `>`
-    // carries the OFFICIAL sampled #6867aa (38;2;104;103;170) on detail; the
-    // `_` stays light ink; no ❯, no outline, no spelled runtime
+    expect(tty.plain.slice(31)).toMatch(/runtime:\s+terminal/); // a4c9548a: the NAME is the value; the >_ mark still trails (SGR above)
+    // codex: the NAME `codex` is the value (a4c9548a), with the picks-v4 CHEVRON-ONLY
+    // blue hint accompanying — the `>` carries the OFFICIAL sampled #6867aa
+    // (38;2;104;103;170) on detail; the `_` stays light ink; no ❯, no outline.
     const cx = drillDetail("d.cx");
-    expect(cx.plain.slice(31).trimEnd()).toMatch(/runtime:\s+>_$/);
-    expect(cx.styled).toMatch(/38;2;104;103;170m[^\x1b]*>/); // chevron pick (picks v4 item a)
-    expect(cx.plain).not.toMatch(/❯|codex/);
+    expect(cx.plain.slice(31)).toMatch(/runtime:\s+codex/); // a4c9548a: the NAME is the value
+    expect(cx.styled).toMatch(/38;2;104;103;170m[^\x1b]*>/); // chevron pick (picks v4 item a) still accompanies
+    expect(cx.plain).not.toMatch(/❯/); // no ❯ outline (the codex name renders as the value, not an icon substitute)
   });
 
   it("rig glyph is ▦ and pod glyph is ≡ (founder picks of record)", () => {
