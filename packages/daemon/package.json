@@ -8,6 +8,10 @@
     "./crash-cart": {
       "types": "./dist/crash-cart-surface.d.ts",
       "import": "./dist/crash-cart-surface.js"
+    },
+    "./gateway-human-registry": {
+      "types": "./dist/gateway-human-registry-surface.d.ts",
+      "import": "./dist/gateway-human-registry-surface.js"
     }
   },
   "scripts": {

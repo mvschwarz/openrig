@@ -1,5 +1,8 @@
 import { Command } from "commander";
-import { addHumanFragment } from "../gateway/human-registry.js";
+// The human registry is home-state owned by the daemon; the verb LAZY-imports the narrow
+// @openrig/daemon/gateway-human-registry surface at invocation (the C3/crash-cart dep rail —
+// one source, no twin). Type-only import keeps the surface off the eager cli graph.
+import type { addHumanFragment as AddHumanFragment } from "@openrig/daemon/gateway-human-registry";
 
 // `rig gateway human add` — the verb-add-only surface for the human registry (M1 A3).
 // Operators NEVER hand-create the fragment YAML; the verb owns it (validate -> atomic
@@ -47,7 +50,7 @@ export function gatewayCommand(): Command {
     .requiredOption("--delivery-class <A|B|C|D>", "Notification loudness class (the notifications register selection)")
     .option("--away", "Set the AWAY preset")
     .option("--replace", "Explicitly replace an existing human (no silent overwrite)")
-    .action((entityId: string, opts: { displayName: string; binding: string[]; deliveryClass: string; away?: boolean; replace?: boolean }) => {
+    .action(async (entityId: string, opts: { displayName: string; binding: string[]; deliveryClass: string; away?: boolean; replace?: boolean }) => {
       const bindings: BindingSpec[] = [];
       for (const spec of opts.binding) {
         const b = parseBinding(spec);
@@ -62,6 +65,8 @@ export function gatewayCommand(): Command {
         connectorBindings: bindings,
         prefs: { deliveryClass: opts.deliveryClass, ...(opts.away ? { away: true } : {}) },
       };
+      // LAZY import the narrow daemon surface at invocation (dep rail 2).
+      const { addHumanFragment } = (await import("@openrig/daemon/gateway-human-registry")) as { addHumanFragment: typeof AddHumanFragment };
       const res = addHumanFragment(fragment, undefined, { replace: !!opts.replace });
       if (!res.ok) { console.error(`refused: ${res.error}`); process.exitCode = 1; return; }
       console.log(JSON.stringify({ ok: true, entityId: res.fragment.entityId, path: res.path }));
