@@ -7,6 +7,8 @@
 import { computeExplorerRows, findAgent, findSpec, findAgentBySession, agentsRunningSpec, agentsRunningSpecTargets, specDetailArrowsScroll } from "./state.js";
 import { navigatorDisplay } from "./navigator.js";
 import { renderGraphStyle } from "./topology/render-graph.js";
+import { demoPulseModel } from "./pulse/pulse-model.js";
+import { renderPulseView } from "./pulse/render-pulse.js";
 import { runtimeMarkSegs } from "./topology/runtime-marks.js";
 import { barCells, flashActive, reducedMotion, spinnerFrame } from "./motion.js";
 import type { ColorMode } from "./theme.js";
@@ -187,6 +189,15 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
   const contentWidthForGraph = contentWidth;
   void contentWidthForGraph;
   const lines: ContentLine[] = [];
+  if (state.viewTab === "pulse") {
+    // 5.2 Wave B — the fleet-wide PULSE view (increment 1: static from the demo
+    // fixture reproducing the approved mock). Fleet-scoped, so it dispatches
+    // before the section branches.
+    return renderPulseView(demoPulseModel()).map((l) => ({
+      text: l.text,
+      ...(l.segs ? { segs: l.selected ? l.segs.map((s) => ({ ...s, bg: "accent" as const })) : l.segs } : {}),
+    }));
+  }
   if (state.section === "topology") {
     if (state.runningOf) {
       const seats = agentsRunningSpecTargets(snap, state.runningOf);

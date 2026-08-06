@@ -24,6 +24,7 @@ export type Token =
   | "warn" // blocked/needs-you/alerts (mockup amber #e6b56e)
   | "error" // failed/error states
   | "ok" // healthy/running states
+  | "info" // informational/blocked-class accent (51-09 pulse mock #8fb8d8 — info-class, reusable)
   | "dim" // secondary text (mockup #6d7480)
   | "bright" // primary emphasis
   | "chrome" // borders/rules
@@ -50,6 +51,7 @@ const PALETTE: Record<Token, [[number, number, number], number, number]> = {
   warn: [[230, 181, 110], 179, 33],
   error: [[224, 108, 117], 167, 31],
   ok: [[152, 195, 121], 108, 32],
+  info: [[143, 184, 216], 110, 94], // #8fb8d8 exact; xterm256 110, 16-color bright-blue
   dim: [[109, 116, 128], 243, 90],
   bright: [[232, 234, 240], 254, 97],
   // S19 MR5b: one-step contrast bump (founder: 'a little more noticeable')

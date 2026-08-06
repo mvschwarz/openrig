@@ -165,7 +165,7 @@ export interface DrillSegment {
   name: string;
 }
 
-export type ViewTab = "table" | "overview" | "graph" | "topology" | "configuration" | "yaml";
+export type ViewTab = "table" | "overview" | "graph" | "topology" | "configuration" | "yaml" | "pulse";
 
 export type Action =
   | { type: "noop" }

@@ -107,6 +107,9 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
       return { ...next, expanded };
     }
     case "tab": {
+      // 5.2 Wave B — PULSE is a FLEET-WIDE top-level view (the mock's tab set),
+      // reachable from ANY content context, unlike the section-scoped tabs.
+      if (action.tab === "pulse") return resetContent({ ...next, viewTab: "pulse" });
       const rigSpec = state.section === "specs" && state.drill.at(-1)?.kind === "spec" && findSpec(snap, state.drill.at(-1)!.name)?.kind === "rig";
       const allowed = rigSpec ? ["topology", "configuration", "yaml"] : state.section === "topology" ? ["table", "overview", "graph"] : [];
       if (!allowed.includes(action.tab)) return { ...next, lastError: `tab ${action.tab} is not available in this content context` };
