@@ -163,6 +163,18 @@ export interface QueueRead {
   blockerSession?: string | null;
 }
 
+/** One seat's ps/activity summary — the PULSE ◌ PARKED WITH BATON join's right
+ * side, carried VERBATIM from the shipped nodes read (attachTerminalActivityAndWork).
+ * `terminalActive`: the shipped idle boolean (false = silent past the window = the
+ * "idle owner" gate; null = NO signal → honest-unknown, NEVER treated as idle).
+ * `lastActivityAt`: the RAW window_activity fact (arch 3a947fb1) — owner idle-age
+ * is a VIEW derived at the renderer from this + the reader clock, never here. */
+export interface SeatActivitySummary {
+  session: string;
+  terminalActive: boolean | null;
+  lastActivityAt: string | null;
+}
+
 export interface FleetSnapshot {
   hosts: HostNode[];
   specs: SpecEntry[];
@@ -176,6 +188,13 @@ export interface FleetSnapshot {
   /** PULSE ⧗ BLOCKED ON AGENTS source — the shipped state=blocked read (ALL
    * blocked qitems); the render filters to NON-human blockedOn. */
   blocked: QueueRead[];
+  /** PULSE ◌ PARKED WITH BATON source — the shipped state=in-progress read (ALL
+   * in-progress qitems); the render joins each to its owner's seatActivity and
+   * keeps only IDLE (terminalActive===false), NOT-handed-off owners. */
+  inProgress: QueueRead[];
+  /** Per-seat ps/activity (the PARKED join's right side), one entry per running
+   * agent seat with a canonical session, from the shipped nodes read. */
+  seatActivity: SeatActivitySummary[];
   hostsDown: HostDown[];
   /** latest ambient stream items for the footer ticker (FR-10), newest last */
   stream: Array<{ tsEmitted: string; sourceSession: string; body: string }>;

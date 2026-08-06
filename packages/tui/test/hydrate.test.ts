@@ -55,7 +55,7 @@ const FIXTURES: Record<string, unknown> = {
       rigId: "01JRIG", rigName: "myrig", logicalId: "dev.impl", podId: "01JPOD", podNamespace: "dev",
       role: "implementer", canonicalSessionName: "dev-impl@myrig", nodeKind: "agent", runtime: "claude-code",
       sessionStatus: "running", startupStatus: "ready", restoreOutcome: "resumed", oriented: "verified",
-      terminalActive: false,
+      terminalActive: false, lastActivityAt: "2026-08-02T09:15:00.000Z",
       lifecycleState: "running", occupantLifecycle: "active", continuityOutcome: null, handoverResult: null,
       previousOccupant: null, handoverAt: null, tmuxAttachCommand: null, resumeCommand: null,
       recoveryGuidance: null, latestError: null, model: null, agentRef: "implementer", profile: "default",
@@ -68,7 +68,7 @@ const FIXTURES: Record<string, unknown> = {
       rigId: "01JRIG", rigName: "myrig", logicalId: "dev.qa", podId: "01JPOD", podNamespace: "dev",
       role: "qa", canonicalSessionName: "dev-qa@myrig", nodeKind: "agent", runtime: "codex",
       sessionStatus: null, startupStatus: null, restoreOutcome: "n-a", oriented: "n-a",
-      terminalActive: null,
+      terminalActive: null, lastActivityAt: null,
       lifecycleState: "detached", occupantLifecycle: "unknown", continuityOutcome: null, handoverResult: null,
       previousOccupant: null, handoverAt: null, tmuxAttachCommand: null, resumeCommand: null,
       recoveryGuidance: null, latestError: null, model: null, agentRef: "qa", profile: "default",
@@ -121,6 +121,8 @@ const FIXTURES: Record<string, unknown> = {
   // PULSE exception joins (increment 2) — default empty; per-test responses override
   "/api/queue/list?attention=1": [],
   "/api/queue/list?state=blocked": [],
+  // PULSE ◌ PARKED WITH BATON source (increment 2b) — in-progress qitems
+  "/api/queue/list?state=in-progress": [],
 };
 
 function fixtureClient(overrides: Record<string, { status: number } | undefined> = {}, responses: Record<string, unknown> = {}): DaemonClient {
@@ -369,6 +371,24 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     expect(by["b3"]?.blockerSession ?? null).toBeNull();     // 404 miss → null (fallback to raw at render)
     // the per-row enrichment is NOT load-bearing: a miss must not pollute readErrors
     expect(snap.readErrors.filter((e) => e.includes("queue-blocker") || e.includes("qitem-gone"))).toEqual([]);
+  });
+
+  it("PULSE PARKED (2b): builds per-seat ps/activity (session→terminalActive+lastActivityAt) from the nodes reads, and carries the in-progress read", async () => {
+    const inProgress = [
+      { qitemId: "qitem-p1", state: "in-progress", destinationSession: "dev-impl@myrig", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "parked?", body: "", claimedAt: "2026-08-02T09:00:00.000Z", tsUpdated: "2026-08-02T09:00:00.000Z" },
+    ];
+    const snap = await hydrateSnapshot(fixtureClient({}, { "/api/queue/list?state=in-progress": inProgress }));
+
+    // seatActivity: one entry per agent seat WITH a canonical session (svc.db has
+    // none → excluded). lastActivityAt carried VERBATIM; terminalActive verbatim.
+    const bySession = Object.fromEntries(snap.seatActivity.map((s) => [s.session, s]));
+    expect(bySession["dev-impl@myrig"]).toEqual({ session: "dev-impl@myrig", terminalActive: false, lastActivityAt: "2026-08-02T09:15:00.000Z" });
+    expect(bySession["dev-qa@myrig"]).toEqual({ session: "dev-qa@myrig", terminalActive: null, lastActivityAt: null });
+    expect(snap.seatActivity.some((s) => s.session == null)).toBe(false); // infra seat (no session) excluded
+
+    // in-progress read carried into the snapshot for the PARKED join
+    expect(snap.inProgress.map((q) => q.qitemId)).toEqual(["qitem-p1"]);
+    expect(snap.inProgress[0]?.destinationSession).toBe("dev-impl@myrig");
   });
 
   it("leaves a failed read honest-empty with a NAMED error; other sections still hydrate", async () => {

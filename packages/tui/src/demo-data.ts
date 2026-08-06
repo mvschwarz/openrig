@@ -60,6 +60,22 @@ export function demoSnapshot(): FleetSnapshot {
       { qitemId: "b1", state: "blocked", destinationSession: "dev50-driver@openrig-build", blockedOn: "qitem-20260805-review", blockerSession: "review-r1@openrig-build", handedOffTo: null, tier: null, tags: null, summary: "terminal verdict for 51209941", body: "", claimedAt: "2026-08-05T09:00:00.000Z", tsUpdated: "2026-08-05T09:00:00.000Z" },
       { qitemId: "b2", state: "blocked", destinationSession: "dev50-qa@openrig-build", blockedOn: "human-yeah@kernel", blockerSession: null, handedOffTo: null, tier: null, tags: null, summary: "human sign-off pending", body: "", claimedAt: "2026-08-05T08:00:00.000Z", tsUpdated: "2026-08-05T08:00:00.000Z" },
     ],
+    // PULSE ◌ PARKED WITH BATON source — shaped like the shipped state=in-progress
+    // read. p1 is a REALISTIC parked baton (owner dev50-guard is IDLE — see
+    // seatActivity — and no handoff). p2 is a realistic EXCLUSION control: owner
+    // dev50-driver is ACTIVE, so it is NOT parked (working, not stranded).
+    inProgress: [
+      { qitemId: "qitem-20260806-8f3a1b2c", state: "in-progress", destinationSession: "dev50-guard@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "slice 51-06 D2 atom", body: "", claimedAt: "2026-08-06T10:50:00.000Z", tsUpdated: "2026-08-06T11:13:00.000Z" },
+      { qitemId: "qitem-20260806-drv0aa11", state: "in-progress", destinationSession: "dev50-driver@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "pulse-view incr build", body: "", claimedAt: "2026-08-06T11:40:00.000Z", tsUpdated: "2026-08-06T11:58:00.000Z" },
+    ],
+    // Per-seat ps/activity — the PARKED join's right side (terminalActive idle
+    // boolean + raw lastActivityAt). driver ACTIVE, guard IDLE (47m before the
+    // 12:00 demo clock), qa NO SIGNAL (detached → null, honest-unknown ≠ idle).
+    seatActivity: [
+      { session: "dev50-driver@openrig-build", terminalActive: true, lastActivityAt: "2026-08-06T11:58:30.000Z" },
+      { session: "dev50-guard@openrig-build", terminalActive: false, lastActivityAt: "2026-08-06T11:13:00.000Z" },
+      { session: "dev50-qa@openrig-build", terminalActive: null, lastActivityAt: null },
+    ],
     // host-down is composed BESIDE the items (never projected into the item shape)
     hostsDown: [{ hostId: "mm2-host", status: "unreachable", error: "read timed out" }],
     stream: [

@@ -8,6 +8,9 @@ import { renderPulseView } from "../src/pulse/render-pulse.js";
 
 const snap = demoSnapshot();
 const withSnap = { getSnapshot: () => snap };
+// Fixed reader clock so the PARKED idle-duration (derived from the demo seat's
+// lastActivityAt) renders deterministically — the demo guard last output 47m before.
+const DEMO_NOW = Date.parse("2026-08-06T12:00:00.000Z");
 
 describe("PULSE view (5.2 Wave B — increment 1: static skeleton from the approved mock)", () => {
   it("registers `pulse` as a reachable viewTab (tab pulse + dispatch)", () => {
@@ -22,16 +25,20 @@ describe("PULSE view (5.2 Wave B — increment 1: static skeleton from the appro
   it("renders LIVE exception sections from the snapshot + contract ordering (increment 2)", () => {
     const v = createViewState({ instanceId: "t", ...withSnap });
     v.dispatch({ type: "tab", tab: "pulse" });
-    const body = renderScreen(v.get(), snap, { cols: 140, rows: 44 }).lines.join("\n");
+    const body = renderScreen(v.get(), snap, { cols: 140, rows: 44, nowMs: DEMO_NOW }).lines.join("\n");
 
     // ▲ NEEDS YOU ← the demo attention read (subject from summary)
     expect(body).toContain("▲ NEEDS YOU (2)");
     expect(body).toContain("0.5.0 cut packet ready · waiting on you");
     expect(body).toContain("slice-20 routing pixels · waiting on you");
-    // ◌ PARKED WITH BATON ← DEFERRED read: header WITHOUT a count + the honesty line
-    expect(body).toContain("◌ PARKED WITH BATON");
-    expect(body).toContain("— idle-age read pending");
-    expect(body).not.toContain("PARKED WITH BATON (");
+    // ◌ PARKED WITH BATON ← LIVE join: the demo in-progress qitem whose owner
+    // (dev50-guard) is idle (terminalActive false) and NOT handed off; idle-duration
+    // derived at the renderer from the seat's lastActivityAt (47m before DEMO_NOW).
+    expect(body).toContain("◌ PARKED WITH BATON (1)");
+    expect(body).toContain("dev50-guard@openrig-build");
+    expect(body).toContain("47m idle");
+    expect(body).toContain("no handoff");
+    expect(body).not.toContain("idle-age read pending"); // placeholder gone — read is live
     // ⧗ BLOCKED ON AGENTS ← the demo state=blocked read, human-blocked item EXCLUDED
     expect(body).toContain("⧗ BLOCKED ON AGENTS (1)");
     expect(body).toContain("dev50-driver@openrig-build");

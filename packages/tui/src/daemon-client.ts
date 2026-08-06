@@ -102,6 +102,13 @@ export class DaemonClient {
   queueBlocked() {
     return this.get(`/api/queue/list?state=blocked`);
   }
+  /** ALL in-progress qitems via the SAME shipped /list route with ?state=in-progress
+   * (queue.ts reads c.req.query("state") and filters). Mirror of queueBlocked — a
+   * client-method addition on an existing route, NOT a new endpoint. The PULSE
+   * PARKED join keeps only idle, un-handed-off owners. */
+  queueInProgress() {
+    return this.get(`/api/queue/list?state=in-progress`);
+  }
   /** A single qitem by id via the shipped GET /api/queue/:qitemId (queue.ts:864,
    * returns the QueueItem or 404). Used for the BLOCKED ON AGENTS bounded per-row
    * lookup: blockedOn is a qitem POINTER, so the blocking agent is that qitem's

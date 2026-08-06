@@ -14,8 +14,17 @@ const HR = 60 * MIN;
 
 function liveSnap(over: Partial<FleetSnapshot> = {}): FleetSnapshot {
   const base = demoSnapshot();
-  return { ...base, attention: [], blocked: [], ...over };
+  // Zero ALL exception sources by default; each test opts into the ones it drives.
+  return { ...base, attention: [], blocked: [], inProgress: [], seatActivity: [], ...over };
 }
+
+// A ps/activity row for one seat (the PARKED join's right side).
+const seat = (session: string, terminalActive: boolean | null, lastActivityAt: string | null) =>
+  ({ session, terminalActive, lastActivityAt });
+
+// An in-progress qitem (reuses attn's shape but with a real owner + in-progress state).
+const inprog = (over: Partial<QueueRead>): QueueRead =>
+  attn({ state: "in-progress", destinationSession: "dev50-guard@openrig-build", claimedAt: ago(50 * MIN), ...over });
 
 const attn = (over: Partial<QueueRead>): QueueRead => ({
   qitemId: "q",
@@ -127,23 +136,54 @@ describe("PULSE view increment 2 — Exceptions strip LIVE", () => {
     expect(text).toContain("blocked on gate:review"); // honest raw reference, not a fabricated agent
   });
 
-  it("◌ PARKED WITH BATON: renders the non-silent honesty-floor placeholder line (deferred read)", () => {
-    const model = buildPulseModel(liveSnap(), NOW);
+  it("◌ PARKED WITH BATON: rows from in-progress qitems whose owner is IDLE (terminalActive===false) and NOT handed off; idle-duration derived from lastActivityAt at the renderer", () => {
+    const snap = liveSnap({
+      inProgress: [
+        inprog({ qitemId: "qitem-20260806-8f3a1b2c", destinationSession: "dev50-guard@openrig-build", summary: "slice 51-06 D2 atom" }),
+      ],
+      // owner idle: terminalActive false, last output 47m ago
+      seatActivity: [seat("dev50-guard@openrig-build", false, ago(47 * MIN))],
+    });
+    const model = buildPulseModel(snap, NOW);
     const parked = model.exceptions.find((s) => s.label === "PARKED WITH BATON");
     expect(parked).toBeDefined();
+    expect(parked!.rows.length).toBe(1);
     const text = renderExceptionSection(parked!).map((l) => l.text).join("\n");
-    expect(text).toContain("◌ PARKED WITH BATON");
-    expect(text).toContain("— idle-age read pending");
-    // it is NOT a ran-join: it must not advertise a fabricated (0)/(n) count
-    expect(text).not.toContain("PARKED WITH BATON (");
+    expect(text).toContain("◌ PARKED WITH BATON (1)");
+    expect(text).toContain("dev50-guard@openrig-build");      // owner (baton holder) named
+    expect(text).toContain("qitem 8f3a…");                     // qitem-short
+    expect(text).not.toContain("qitem-20260806-8f3a1b2c");     // full id pointer NOT rendered
+    expect(text).toContain("47m idle");                         // idle-duration from lastActivityAt (renderer nowMs)
+    expect(text).toContain("no handoff");
+    expect(text).toContain("→ enter: transcript check");       // the drill hint
+    // deferred-read placeholder is GONE now the join is live
+    expect(text).not.toContain("idle-age read pending");
   });
 
-  it("empty LIVE join is SILENCE: a zero-item attention/blocked read omits the section entirely", () => {
-    const model = buildPulseModel(liveSnap({ attention: [], blocked: [] }), NOW);
+  it("◌ PARKED WITH BATON exclusions: ACTIVE owner (terminalActive===true), HANDED-OFF baton, and UNKNOWN-activity owner (null) are all excluded (null ≠ idle — honest)", () => {
+    const snap = liveSnap({
+      inProgress: [
+        inprog({ qitemId: "qitem-a-active01", destinationSession: "dev50-driver@openrig-build", summary: "actively working" }),
+        inprog({ qitemId: "qitem-b-handed02", destinationSession: "dev50-guard@openrig-build", handedOffTo: "review50-r1@openrig-build", summary: "already handed off" }),
+        inprog({ qitemId: "qitem-c-unknwn3", destinationSession: "dev50-qa@openrig-build", summary: "no activity signal" }),
+      ],
+      seatActivity: [
+        seat("dev50-driver@openrig-build", true, ago(1 * MIN)),   // ACTIVE → working, not parked
+        seat("dev50-guard@openrig-build", false, ago(47 * MIN)),  // idle, but THIS qitem is handed off
+        seat("dev50-qa@openrig-build", null, null),               // no signal → honest-unknown, NOT idle
+      ],
+    });
+    const model = buildPulseModel(snap, NOW);
+    // all three excluded → the ran join yields zero → SILENCE (section omitted)
+    expect(model.exceptions.find((s) => s.label === "PARKED WITH BATON")).toBeUndefined();
+  });
+
+  it("empty LIVE join is SILENCE: zero attention/blocked/parked reads omit their sections entirely", () => {
+    const model = buildPulseModel(liveSnap(), NOW);
     expect(model.exceptions.find((s) => s.label === "NEEDS YOU")).toBeUndefined();
     expect(model.exceptions.find((s) => s.label === "BLOCKED ON AGENTS")).toBeUndefined();
-    // PARKED is the deferred read, NOT a ran-join → always present
-    expect(model.exceptions.find((s) => s.label === "PARKED WITH BATON")).toBeDefined();
+    // PARKED is now a LIVE ran-join too → zero parked = silence = omitted
+    expect(model.exceptions.find((s) => s.label === "PARKED WITH BATON")).toBeUndefined();
   });
 
   it("FULL-WIDTH: the pulse view spans full cols with NO explorer sidebar", () => {

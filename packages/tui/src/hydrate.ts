@@ -13,7 +13,7 @@
 //   - A failed read leaves its portion honest-empty and records a NAMED error.
 import { DaemonClient } from "./daemon-client.js";
 import { parse as parseYaml } from "yaml";
-import type { AgentRow, FleetSnapshot, HostNode, NeedsItem, PodNode, QueueRead, SpecEntry } from "./types.js";
+import type { AgentRow, FleetSnapshot, HostNode, NeedsItem, PodNode, QueueRead, SeatActivitySummary, SpecEntry } from "./types.js";
 import { isHumanSeatSession } from "./pulse/pulse-model.js";
 
 // Narrow read-shapes: just the served fields this module consumes (names match
@@ -37,6 +37,9 @@ interface NodeInventoryRead {
   sessionStatus?: string | null;
   startupStatus?: string | null;
   terminalActive?: boolean | null;
+  /** arch 3a947fb1: raw window_activity ISO (owner idle-age is derived at the
+   * renderer). Absent/null when the seat has no observation. */
+  lastActivityAt?: string | null;
   agentActivity?: { state?: string } | null;
   identityVerdict?: { verdict?: string } | null;
   canonicalSessionName: string | null;
@@ -272,15 +275,16 @@ export async function hydrateSnapshot(
     }
   }
 
-  const [agg, summaries, library, review, streamItems, attention, blocked] = await Promise.all([
+  const [agg, summaries, library, review, streamItems, attention, blocked, inProgress] = await Promise.all([
     safe<AttentionAggregateRead>("attention-aggregate", () => client.attentionAggregate()),
     safe<RigSummaryRead[]>("rigs-summary", () => client.rigsSummary()),
     safe<SpecLibraryRead[]>("specs-library", () => client.specsLibrary()),
     safe<ReviewFleetRead>("review-fleet", () => client.reviewFleet()),
     safe<StreamItemRead[]>("stream-tail", () => client.streamLatest()),
-    // PULSE ▲ NEEDS YOU + ⧗ BLOCKED — the two shipped queue reads (§ increment 2)
+    // PULSE ▲ NEEDS YOU + ⧗ BLOCKED + ◌ PARKED — the shipped queue reads (increments 2/2b)
     safe<QueueItemRead[]>("queue-attention", () => client.queueAttention()),
     safe<QueueItemRead[]>("queue-blocked", () => client.queueBlocked()),
+    safe<QueueItemRead[]>("queue-in-progress", () => client.queueInProgress()),
   ]);
 
   const agentSpecNames = new Set((library ?? []).filter((entry) => entry.kind === "agent").map((entry) => entry.name));
@@ -312,8 +316,20 @@ export async function hydrateSnapshot(
   const rigs = [];
   const rigsDown: FleetSnapshot["hostsDown"] = [];
   const rigSpecRefs = new Map<string, string[]>(); // rig-spec name → agentRefs
+  // PULSE ◌ PARKED WITH BATON — the ps/activity side of the join, accumulated
+  // across rigs from the SAME nodes read that feeds topology (no extra fetch):
+  // one entry per agent seat WITH a canonical session (infra seats have none).
+  const seatActivity: SeatActivitySummary[] = [];
   for (const rig of summaries ?? []) {
     const nodes = await safe<NodeInventoryRead[]>(`nodes(${rig.name})`, () => client.rigNodes(rig.id));
+    for (const node of nodes ?? []) {
+      if (node.nodeKind !== "agent" || !node.canonicalSessionName) continue;
+      seatActivity.push({
+        session: node.canonicalSessionName,
+        terminalActive: node.terminalActive ?? null,
+        lastActivityAt: node.lastActivityAt ?? null,
+      });
+    }
     // slice-17: the topology graph view consumes the DECLARED §4.A graph read
     // (nodes + edges + overlay in one fetch); a failed read leaves the view
     // honest-empty with a NAMED error, never fabricated boxes.
@@ -479,6 +495,8 @@ export async function hydrateSnapshot(
       && review.hosts.every((host) => host.status.status === "ok"),
     attention: (attention ?? []).map(toQueueRead),
     blocked: blockedResolved,
+    inProgress: (inProgress ?? []).map(toQueueRead),
+    seatActivity,
     hostsDown,
     stream: (streamItems ?? []).map((s) => ({ tsEmitted: s.tsEmitted, sourceSession: s.sourceSession, body: s.body })),
     readErrors,

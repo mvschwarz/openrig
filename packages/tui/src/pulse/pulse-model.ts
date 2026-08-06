@@ -4,7 +4,7 @@
 // a STATIC demo fixture reproducing the approved mock's EXACT rows; increments
 // 2-3 build it from SHIPPED daemon reads (no new surface).
 import type { Token } from "../theme.js";
-import type { FleetSnapshot, QueueRead } from "../types.js";
+import type { FleetSnapshot, QueueRead, SeatActivitySummary } from "../types.js";
 
 /** One exception row: an accent glyph + bold subject + plain claim + dim metadata. */
 export interface PulseException {
@@ -188,6 +188,44 @@ function blockedRows(blocked: QueueRead[], nowMs: number): PulseException[] {
     });
 }
 
+/** Short qitem reference for a PARKED row — the trailing id segment, 4 chars +
+ * ellipsis (mock "8f3a…"). NEVER the full pointer (label==referent honesty). */
+function qitemShort(qitemId: string): string {
+  const tail = qitemId.split("-").pop() ?? qitemId;
+  return `${tail.slice(0, 4)}…`;
+}
+
+/** ◌ PARKED WITH BATON rows — the premature-park join (IMPL-PLAN §exceptions:
+ * in-progress qitem ∧ idle owner ∧ no handoff — queue ⋈ ps/activity). "idle
+ * owner" is the SHIPPED ps/activity idle boolean (terminalActive===false); a
+ * null signal is honest-unknown and EXCLUDED (never assumed idle). The idle
+ * DURATION is a VIEW derived HERE from the owner's raw lastActivityAt (arch
+ * 3a947fb1) + the reader clock (nowMs) — the renderer-side test-clock seam,
+ * DISTINCT from the .cjs OPENRIG_TEST_CLOCK_NOW env clock. Render: owner ·
+ * qitem-short · idle-duration · no-handoff · the drill hint. */
+function parkedRows(
+  inProgress: QueueRead[],
+  seatBySession: Map<string, SeatActivitySummary>,
+  nowMs: number,
+): PulseException[] {
+  const out: PulseException[] = [];
+  for (const q of inProgress) {
+    if (q.state !== "in-progress") continue;       // defensive: the read is already state=in-progress
+    if (q.handedOffTo != null) continue;           // handed off → not a stranded baton
+    const seat = seatBySession.get(q.destinationSession);
+    if (!seat || seat.terminalActive !== false) continue; // IDLE owner ONLY (null ≠ idle — honest-unknown)
+    const idle = ageLabel(seat.lastActivityAt, nowMs);
+    out.push({
+      glyph: "◌",
+      token: "warn",
+      subject: q.destinationSession,
+      claim: ` · qitem ${qitemShort(q.qitemId)} in-progress ${idle} idle, no handoff`,
+      meta: " → enter: transcript check",
+    });
+  }
+  return out;
+}
+
 /** Increment-2 LIVE builder — the exception sections from the hydrated snapshot;
  * lanes + footer stay static (demoPulseModel) until their reads land. The two
  * LIVE joins obey empty-strip-is-silence (a ran join yielding zero is OMITTED);
@@ -200,12 +238,13 @@ export function buildPulseModel(snap: FleetSnapshot, nowMs: number = Date.now())
   // empty-strip-is-silence: a ran join with zero items is OMITTED (silence == zero)
   if (needs.length > 0) exceptions.push({ glyph: "▲", token: "error", label: "NEEDS YOU", rows: needs });
 
-  // ◌ PARKED WITH BATON — DEFERRED: the per-seat idle-age (ageSeconds computed
-  // then discarded at packages/daemon/src/domain/seat-activity-service.ts:77) is
-  // not projected; PARKED lands in a later increment when it is. Until then this
-  // is the NON-SILENT honesty-floor placeholder — an omitted section would
-  // falsely claim "join ran, zero exceptions = all good".
-  exceptions.push({ glyph: "◌", token: "warn", label: "PARKED WITH BATON", rows: [], pending: "— idle-age read pending" });
+  // ◌ PARKED WITH BATON — now a LIVE ran-join (arch 3a947fb1 landed the owner
+  // idle-age fact): in-progress qitems whose owner is idle and un-handed-off,
+  // idle-duration derived at the renderer. Zero parked = silence (OMITTED), like
+  // the other live joins — the incr-2 "read pending" placeholder is retired.
+  const seatBySession = new Map(snap.seatActivity.map((s) => [s.session, s]));
+  const parked = parkedRows(snap.inProgress, seatBySession, nowMs);
+  if (parked.length > 0) exceptions.push({ glyph: "◌", token: "warn", label: "PARKED WITH BATON", rows: parked });
 
   const blocked = blockedRows(snap.blocked, nowMs);
   if (blocked.length > 0) exceptions.push({ glyph: "⧗", token: PULSE_INFO_TOKEN, label: "BLOCKED ON AGENTS", rows: blocked });
