@@ -154,6 +154,16 @@ describe("OPR.0.4.0.34 — rig ps current-rig default", () => {
     process.env.OPENRIG_SESSION_NAME = name;
   }
 
+  // P6/D12-residue: OPR.0.5.0 scope-honesty — a session-scoped `--nodes --json`
+  // (default, when >1 rig is on the host) now returns a scope-DECLARED envelope
+  // { entries, totalNodes, scope } instead of a bare node array, so the correct
+  // scope is visible (silent completeness is silent loss). Fleet-wide (-A) stays a
+  // bare array. This helper reads the node list from either shape.
+  function nodesOf(logs: string[]): Array<Record<string, unknown>> {
+    const parsed = JSON.parse(logs.join("")) as unknown;
+    return (Array.isArray(parsed) ? parsed : (parsed as { entries: Array<Record<string, unknown>> }).entries);
+  }
+
   // OPR.0.4.4.21 FR-1: the rig tier is consolidated ALL-rigs by default —
   // the current-rig-only default is RETIRED (it hid running rigs from the
   // operator's field of view). Session context no longer narrows the rig tier.
@@ -194,7 +204,7 @@ describe("OPR.0.4.0.34 — rig ps current-rig default", () => {
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json"]);
     });
-    const nodes = JSON.parse(logs.join(""));
+    const nodes = nodesOf(logs);
     expect(Array.isArray(nodes)).toBe(true);
     expect(nodes.length).toBe(3);
     for (const n of nodes) {
@@ -283,7 +293,7 @@ describe("OPR.0.4.0.34 — rig ps current-rig default", () => {
       await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json"]);
     });
     expect(exitCode).toBeUndefined();
-    const nodes = JSON.parse(logs.join(""));
+    const nodes = nodesOf(logs);
     expect(nodes.length).toBe(5); // 3 delivery + 2 comms — the whole fixture fleet
   });
 
@@ -294,7 +304,7 @@ describe("OPR.0.4.0.34 — rig ps current-rig default", () => {
       await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--rig", "openrig-comms", "--json"]);
     });
     expect(exitCode).toBeUndefined();
-    const nodes = JSON.parse(logs.join(""));
+    const nodes = nodesOf(logs);
     expect(nodes.length).toBe(2);
   });
 
@@ -315,7 +325,7 @@ describe("OPR.0.4.0.34 — rig ps current-rig default", () => {
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json"]);
     });
-    const nodes = JSON.parse(logs.join(""));
+    const nodes = nodesOf(logs);
     const detached = nodes.find((n: Record<string, unknown>) => n.canonicalSessionName === "dev1-guard@openrig-delivery");
     expect(detached).toBeDefined();
   });
@@ -326,7 +336,7 @@ describe("OPR.0.4.0.34 — rig ps current-rig default", () => {
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json"]);
     });
-    const nodes = JSON.parse(logs.join(""));
+    const nodes = nodesOf(logs);
     const driver = nodes.find((n: Record<string, unknown>) => n.canonicalSessionName === "dev1-driver@openrig-delivery");
     expect(driver).toBeDefined();
     expect(driver.resumeType).toBe("codex_id");
@@ -344,7 +354,7 @@ describe("OPR.0.4.0.34 — rig ps current-rig default", () => {
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json"]);
     });
-    const nodes = JSON.parse(logs.join(""));
+    const nodes = nodesOf(logs);
     const driver = nodes.find((n: Record<string, unknown>) => n.canonicalSessionName === "dev1-driver@openrig-delivery");
     expect(driver).toBeDefined();
     // Required FR-4 orch identity + state fields, all present in the compact row.
@@ -375,7 +385,7 @@ describe("OPR.0.4.0.34 — rig ps current-rig default", () => {
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--full"]);
     });
-    const nodes = JSON.parse(logs.join(""));
+    const nodes = nodesOf(logs);
     const driver = nodes.find((n: Record<string, unknown>) => n.canonicalSessionName === "dev1-driver@openrig-delivery");
     expect(driver.resumeToken).toBe("019e376e-secret-token-do-not-leak");
     expect(driver.resumeCommand).toBe("codex resume 019e376e-secret-token-do-not-leak");
