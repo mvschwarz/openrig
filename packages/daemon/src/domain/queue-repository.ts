@@ -5,6 +5,7 @@ import type { PersistedEvent } from "./types.js";
 import { QueueTransitionLog } from "./queue-transition-log.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
+import { parseSessionName } from "./session-name.js";
 import {
   computeClosureRequiredAt,
   validateClosure,
@@ -366,6 +367,36 @@ export function stampSelfHostSuffix(session: string | undefined): string | undef
   return `${session}@${selfId}`;
 }
 
+/**
+ * 51-09 increment 4b — additive TEACHING for the unknown_destination_rig refusal
+ * (arch ruling c9964404, mechanism ii). 3-part destinations ALREADY refuse (BR-1:
+ * member@rig@host greedy-folds to rig "rig@host", misses, rejects) — the code is
+ * UNCHANGED (C1). When the rejected destination's greedy-parsed rig token CONTAINS
+ * '@', return ADDITIVE structured fields (FR-7 precedent) teaching the out-of-band
+ * path: the split echo + a hint naming `--host`. C4: a SELF-suffixed destination
+ * names the self case and is NEVER auto-stripped/routed home (self-strip is option
+ * (i), routed to arch). Returns undefined for 2-part / non-canonical tokens (the
+ * refusal is byte-unchanged there). One helper, all four refusal sites (C2). Reads
+ * the FR-8 parse contract; the parse family stays byte-identical (C3).
+ */
+export function destinationRigTeaching(session: string): Record<string, unknown> | undefined {
+  const parsed = parseSessionName(session);
+  if (parsed.kind !== "canonical" || !parsed.rig.includes("@")) return undefined;
+  const at = parsed.rig.lastIndexOf("@");
+  const rig = parsed.rig.slice(0, at);
+  const host = parsed.rig.slice(at + 1);
+  const bare = `${parsed.member}@${rig}`;
+  const selfId = getSelfHostId();
+  const selfHost = !!selfId && host === selfId;
+  return {
+    destinationSplit: { member: parsed.member, rig, host },
+    selfHost,
+    hint: selfHost
+      ? `the host suffix '@${host}' is THIS host — the host never rides in the session string; resend the destination as ${bare}`
+      : `host does not ride in the session string; use --host ${host} with destination ${bare}`,
+  };
+}
+
 export class QueueRepository {
   readonly db: Database.Database;
   readonly transitionLog: QueueTransitionLog;
@@ -505,7 +536,8 @@ export class QueueRepository {
     if (!this.validateRig(input.destinationSession)) {
       throw new QueueRepositoryError(
         "unknown_destination_rig",
-        `destination_session ${input.destinationSession} references an unknown rig`
+        `destination_session ${input.destinationSession} references an unknown rig`,
+        destinationRigTeaching(input.destinationSession),
       );
     }
 
@@ -582,7 +614,8 @@ export class QueueRepository {
     if (!this.validateRig(input.destinationSession)) {
       throw new QueueRepositoryError(
         "unknown_destination_rig",
-        `destination_session ${input.destinationSession} references an unknown rig`
+        `destination_session ${input.destinationSession} references an unknown rig`,
+        destinationRigTeaching(input.destinationSession),
       );
     }
     const result = this.createInTransactionalContext(input);
@@ -688,7 +721,8 @@ export class QueueRepository {
     if (!this.validateRig(input.toSession)) {
       throw new QueueRepositoryError(
         "unknown_destination_rig",
-        `to_session ${input.toSession} references an unknown rig`
+        `to_session ${input.toSession} references an unknown rig`,
+        destinationRigTeaching(input.toSession),
       );
     }
 
@@ -829,7 +863,8 @@ export class QueueRepository {
     if (!this.validateRig(input.toSession)) {
       throw new QueueRepositoryError(
         "unknown_destination_rig",
-        `to_session ${input.toSession} references an unknown rig`
+        `to_session ${input.toSession} references an unknown rig`,
+        destinationRigTeaching(input.toSession),
       );
     }
 
