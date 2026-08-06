@@ -84,7 +84,8 @@ export const COMMAND_REGISTRY: readonly CommandEntry[] = [
     // grammar special-case, now a registered first-class command. Same action as `tab graph`;
     // the view renders honest-empty when no graph is served (honest-degraded rail).
     name: "graph",
-    aliases: [],
+    // "g" — the first REAL alias (I1-review nit 2): exercises the alias parity leg for real.
+    aliases: ["g"],
     args: "",
     description: "open the topology graph view",
     context: "standard",
@@ -150,8 +151,13 @@ export const VERB_TABLE: ReadonlyMap<string, CommandEntry> = new Map(
 
 /** The unknown-verb error listing — SERIALIZED from the registry (never hand-maintained). */
 export function unknownCommandMessage(verb: string): string {
+  // I1-review nit 1: the prefix fragment is serialized from the prefix entries too —
+  // ZERO hand-written command listings anywhere (mirror-law, whole message).
+  const prefixes = COMMAND_REGISTRY.filter((e) => e.prefix)
+    .map((e) => `${e.name}${e.args}`)
+    .join(" ");
   const verbs = COMMAND_REGISTRY.filter((e) => !e.prefix)
     .map((e) => (e.args ? `${e.name} ${e.args}` : e.name))
     .join(", ");
-  return `unknown command "${verb}" — known: :<section> /<filter> ${verbs}`;
+  return `unknown command "${verb}" — known: ${prefixes} ${verbs}`;
 }
