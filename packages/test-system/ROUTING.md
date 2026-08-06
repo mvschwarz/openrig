@@ -74,5 +74,7 @@ against the locked/ruled shape so it drops in when the dependency lands.
 
 ## Path finalization
 These files live under `packages/test-system/` as a self-contained drop. The EXACT tree
-location inside the 51-02 runner's home is finalized by the 51-02 build; the relative
-`scenarios/ ↔ fixtures/ ↔ scripts/` structure is what the runner consumes.
+location inside the 51-02 runner's home is finalized by the 51-02 build; the shipped
+layout is CO-LOCATED — `scenarios/` carries the scenario YAMLs with their fixture assets
+(topologies, agents/, culture) beside them, `scripts/` beside it; the formerly separate
+`fixtures/` dir was absorbed into `scenarios/`.
