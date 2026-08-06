@@ -136,9 +136,17 @@ export function resolveKeyAction(
     // holds focus. Non-scrolling spec details and every other view fall through
     // to the unchanged explorer-move / content-select behavior.
     if (specDetailArrowsScroll(state)) return { type: "content-scroll", delta };
-    return state.focusedPane === "content"
-      ? { type: "content-select", delta }
-      : { type: "select", delta, rowCount: explorerCount };
+    if (state.focusedPane === "content") {
+      // k9s selection-driven auto-scroll: at the viewport EDGE with more content beyond, the arrow
+      // SCROLLS the viewport (reveal) instead of clamping — so ↑↓ reach every row without PgUp/PgDn
+      // (most keyboards lack them — the founder fix). Away from the edge it moves the selection.
+      const atBottom = state.contentSelection >= screen.contentTargets.length - 1;
+      const atTop = state.contentSelection <= 0;
+      if (delta === 1 && atBottom && state.contentOffset < state.contentMaxOffset) return { type: "content-scroll", delta: 1 };
+      if (delta === -1 && atTop && state.contentOffset > 0) return { type: "content-scroll", delta: -1 };
+      return { type: "content-select", delta };
+    }
+    return { type: "select", delta, rowCount: explorerCount };
   }
   if (event.key === "enter") {
     return state.focusedPane === "content"
