@@ -18,10 +18,10 @@ Where the helper runs depends on whether the 51-02 hermetic-env module is **pack
 tarball the image installs (it currently lives at `packages/daemon/test/helpers/hermetic-env.ts` — a
 test helper, which may not be in the pack set):
 - **If packaged / resolvable in-container:** invoke the assertion directly in the container (L4.1).
-- **If not packaged:** this leg is exercised via the **runner's container-execution mode (step-3)**,
-  which drives a scenario into the container with the foreign target injected and the helper (host-side
-  in the runner) refusing — record that as the L4 form and cross-link the step-3 runbook. Either way,
-  the leg is real; pick the form the shipped surface supports and say which.
+- **If not packaged:** this leg is exercised via the **runner's container-execution mode (step-3)** —
+  see **L6.3** (`L6-container-runner-e2e.md`), which drives a run with a foreign target injected into the
+  base env and the host-side hermetic prep refusing before any container is created — record that as the
+  L4 form. Either way, the leg is real; pick the form the shipped surface supports and say which.
 
 ## L4.1 — in-container assertion (when the helper is resolvable)
 
