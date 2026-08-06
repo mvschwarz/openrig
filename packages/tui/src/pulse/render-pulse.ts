@@ -38,7 +38,12 @@ export function renderExceptionSection(section: PulseExceptionSection): Line[] {
 }
 
 // ── the three-lane split: a dim rule-row then fixed-width columns ──
-const COL = [30, 26] as const; // NOW width, JUST FINISHED width; UP NEXT takes the rest
+const COL = [30, 26] as const; // NOW, JUST FINISHED CONTENT widths; UP NEXT takes the rest
+// The 3-space inter-column gutter is RESERVED separately from the content pad, so
+// it never collapses on a row whose content exactly fills its column (the mock's
+// "✓ 14:02 slice-03 close-out" is exactly COL[1]). renderLanes lays the gutter as
+// spaces; the rule row lays it as continuous dashes — same stride (COL[i] + 3).
+const LANE_GUTTER = "   ";
 
 function padEnd(s: string, w: number): string {
   return s.length >= w ? s.slice(0, w) : s + " ".repeat(w - s.length);
@@ -47,8 +52,10 @@ function padEnd(s: string, w: number): string {
 /** The `── NOW (n) ──… JUST FINISHED (n) ──… UP NEXT (n) ──` rule row (dim). */
 export function renderLaneRule(lanes: [PulseLane, PulseLane, PulseLane]): Line {
   const seg = (label: string, count: number, w: number): string => {
+    // Keep the space after "(n)"; dashes begin AFTER it (mock: "── NOW (4) ───…").
+    // Span the content width + the gutter so the dashes align with the columns.
     const head = `── ${label} (${count}) `;
-    return padEnd(head, w).replace(/ +$/, (m) => "─".repeat(m.length));
+    return head + "─".repeat(Math.max(0, w + LANE_GUTTER.length - head.length));
   };
   const text = seg(lanes[0].label, lanes[0].count, COL[0]) + seg(lanes[1].label, lanes[1].count, COL[1]) + `── ${lanes[2].label} (${lanes[2].count}) ` + "──────────";
   return line([{ text, token: "dim" }]);
@@ -62,7 +69,8 @@ function laneCell(row: PulseLaneRow | undefined, w: number): Seg[] {
   const segs: Seg[] = [{ text: glyph, token: row.token }];
   if (row.time) segs.push({ text: time, token: "dim" });
   segs.push({ text: row.label, token: row.time ? undefined : row.token === "ok" ? "dim" : row.token });
-  // pad the cell to width (plain trailing spaces)
+  // pad the cell to its CONTENT width (plain trailing spaces); the inter-column
+  // gutter is added by renderLanes so it is guaranteed even when body === w.
   const pad = w - body.length;
   if (pad > 0) segs.push({ text: " ".repeat(pad) });
   return segs;
@@ -72,10 +80,13 @@ function laneCell(row: PulseLaneRow | undefined, w: number): Seg[] {
 export function renderLanes(lanes: [PulseLane, PulseLane, PulseLane]): Line[] {
   const rows = Math.max(...lanes.map((l) => l.rows.length));
   const out: Line[] = [];
+  const gutter: Seg = { text: LANE_GUTTER };
   for (let i = 0; i < rows; i += 1) {
     const cells = [laneCell(lanes[0].rows[i], COL[0]), laneCell(lanes[1].rows[i], COL[1]), laneCell(lanes[2].rows[i], 40)];
     const selected = lanes.some((l) => l.rows[i]?.selected);
-    out.push(line([...cells[0]!, ...cells[1]!, ...cells[2]!], { selected }));
+    // gutter reserved BETWEEN columns (never collapses on a full-width row); the
+    // last column (UP NEXT) takes no trailing gutter.
+    out.push(line([...cells[0]!, gutter, ...cells[1]!, gutter, ...cells[2]!], { selected }));
   }
   return out;
 }

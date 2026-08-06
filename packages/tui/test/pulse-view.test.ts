@@ -77,6 +77,25 @@ describe("PULSE view (5.2 Wave B — increment 1: static skeleton from the appro
     expect(body).toContain("PULSE");
   });
 
+  it("preserves the mock's 3-space inter-column gutter on full-width rows + the rule's post-count space (r1 padding finding)", () => {
+    const lines = renderPulseView(demoPulseModel()).map((l) => l.text);
+
+    // (a) JUST FINISHED → UP NEXT gutter must NOT collapse when JF content fills
+    //     the column ("✓ 14:02 slice-03 close-out" is exactly the col width): the
+    //     mock keeps a 3-space gutter — "close-out   ○ 51-02".
+    const laneRow = lines.find((l) => l.includes("slice-03 close-out"));
+    expect(laneRow).toBeDefined();
+    expect(laneRow).toContain("slice-03 close-out   ○ 51-02 scenario runner");
+
+    // (b) the rule row keeps the space after each "(n)" before the dashes:
+    //     mock "── NOW (4) ───… JUST FINISHED (3) ───…" (space, THEN dashes).
+    const rule = lines.find((l) => l.includes("NOW (4)"));
+    expect(rule).toBeDefined();
+    expect(rule).toContain("NOW (4) ─");
+    expect(rule).toContain("JUST FINISHED (3) ─");
+    expect(rule).not.toContain("NOW (4)─"); // no dash flush against the paren
+  });
+
   it("renders without throwing, and the reusable renderer's counts match the model", () => {
     const v = createViewState({ instanceId: "t", ...withSnap });
     expect(() => renderScreen(v.get(), snap, { cols: 120, rows: 32 })).not.toThrow(); // default (table) still fine
