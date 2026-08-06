@@ -58,7 +58,13 @@ function writeSidecar(cwd: string, state: StubRunnerState): void {
 }
 
 export async function runStubRunner(args: StubRunnerArgs): Promise<void> {
-  const nowIso = () => new Date().toISOString();
+  // PRD §5 (no wall-clock in the stub's OWN behavior): the runner's own stamps honor
+  // the same A3-R3 injectable clock the compaction assets use — OPENRIG_TEST_CLOCK_NOW
+  // (an ISO instant) when set, real wall-clock otherwise (absent = production).
+  const nowIso = () => {
+    const injected = process.env.OPENRIG_TEST_CLOCK_NOW;
+    return typeof injected === "string" && injected.trim().length > 0 ? injected : new Date().toISOString();
+  };
   try {
     writeSidecar(args.cwd, { ready: true, launchId: args.launchId, updatedAt: nowIso() });
     // eslint-disable-next-line no-console
