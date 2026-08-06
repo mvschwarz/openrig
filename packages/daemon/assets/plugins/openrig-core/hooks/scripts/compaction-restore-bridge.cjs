@@ -44,6 +44,15 @@ function firstString(...values) {
   return null;
 }
 
+// A3-R3 injectable clock (slice 51-01): the marker stamps below default to real
+// wall-clock, but become deterministic when the shared hermetic env-var
+// OPENRIG_TEST_CLOCK_NOW is set (an ISO instant). An empty/absent var = production
+// real-time (absence is the production state — the only unguarded path, on purpose).
+function nowIso(env = process.env) {
+  const injected = env.OPENRIG_TEST_CLOCK_NOW;
+  return typeof injected === "string" && injected.trim().length > 0 ? injected : new Date().toISOString();
+}
+
 function openrigHome(env = process.env) {
   return firstString(env.OPENRIG_HOME, env.RIGGED_HOME) || path.join(os.homedir(), ".openrig");
 }
@@ -142,7 +151,7 @@ async function main() {
 
   marker.data.lastBridgeEvent = eventName;
   if (eventName === "PostCompact") {
-    marker.data.postCompactAt = new Date().toISOString();
+    marker.data.postCompactAt = nowIso();
     writeMarker(marker);
     return;
   }
@@ -151,7 +160,7 @@ async function main() {
     return;
   }
 
-  marker.data.deliveredAt = new Date().toISOString();
+  marker.data.deliveredAt = nowIso();
   marker.data.deliveryCount = Number(marker.data.deliveryCount || 0) + 1;
   writeMarker(marker);
 

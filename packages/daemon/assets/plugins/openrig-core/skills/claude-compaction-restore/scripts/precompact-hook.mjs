@@ -24,6 +24,14 @@ function getOpenRigHome() {
   return process.env.OPENRIG_HOME || process.env.RIGGED_HOME || path.join(os.homedir(), ".openrig");
 }
 
+// A3-R3 injectable clock (slice 51-01): marker.createdAt defaults to real wall-clock,
+// but becomes deterministic when the shared hermetic env-var OPENRIG_TEST_CLOCK_NOW is
+// set (an ISO instant). Empty/absent = production real-time.
+function nowIso() {
+  const injected = process.env.OPENRIG_TEST_CLOCK_NOW;
+  return typeof injected === "string" && injected.trim().length > 0 ? injected : new Date().toISOString();
+}
+
 function expandInstructionPath(filePath) {
   if (filePath.startsWith("~/")) return path.join(os.homedir(), filePath.slice(2));
   if (filePath.startsWith("${OPENRIG_HOME}/")) {
@@ -63,7 +71,7 @@ function writePendingRestoreMarker(input, parsed, restoreInstruction, customMess
   fs.mkdirSync(path.dirname(markerPath), { recursive: true });
   const payload = {
     version: 1,
-    createdAt: new Date().toISOString(),
+    createdAt: nowIso(),
     sessionName: process.env.OPENRIG_SESSION_NAME || process.env.RIGGED_SESSION_NAME || null,
     sessionId: input.session_id || input.sessionId || null,
     transcriptPath: input.transcript_path || null,

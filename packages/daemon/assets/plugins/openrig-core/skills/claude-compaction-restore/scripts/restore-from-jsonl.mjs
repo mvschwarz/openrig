@@ -375,8 +375,16 @@ function restoreInstructions(summary, outputPaths) {
   return lines.join("\n");
 }
 
+// A3-R3 injectable clock (slice 51-01): the packet output-dir timestamped path
+// defaults to real wall-clock, but becomes deterministic when the shared hermetic
+// env-var OPENRIG_TEST_CLOCK_NOW is set (an ISO instant). Empty/absent = production.
+function nowIso() {
+  const injected = process.env.OPENRIG_TEST_CLOCK_NOW;
+  return typeof injected === "string" && injected.trim().length > 0 ? injected : new Date().toISOString();
+}
+
 function writeOutputs(summary, outRoot) {
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const stamp = nowIso().replace(/[:.]/g, "-");
   const base = path.join(outRoot, `${summary.sessionId ?? "unknown-session"}-${stamp}`);
   fs.mkdirSync(base, { recursive: true });
 
