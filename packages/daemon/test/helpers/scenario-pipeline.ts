@@ -22,8 +22,13 @@ import {
   type ValidatedScenario,
   type ValidationError,
 } from "./scenario-schema.js";
-import { prepareHermeticEnv } from "./hermetic-env.js";
-import { spawnScenarioDaemon, runRig as realRunRig, type RigResult } from "./scenario-daemon.js";
+import { prepareHermeticEnv, type HermeticScaffold } from "./hermetic-env.js";
+import {
+  spawnScenarioDaemon,
+  runRig as realRunRig,
+  type RigResult,
+  type ScenarioDaemon,
+} from "./scenario-daemon.js";
 import { buildRealDeps, type RealDepsOptions } from "./scenario-real-deps.js";
 import { runValidatedScenario, type RunScenarioResult } from "./scenario-runner.js";
 
@@ -170,6 +175,37 @@ export interface RunScenarioFileOptions {
   baseEnv?: Record<string, string | undefined>;
   /** Overrides forwarded to buildRealDeps (clock/sleep/appendRecord/defaults/normalizer). */
   deps?: Partial<Pick<RealDepsOptions, "now" | "sleep" | "appendRecord" | "defaults" | "normalizer">>;
+  /**
+   * 51-04 opt-in: how the scenario-local daemon is stood up. ABSENT => host-mode,
+   * byte-identical to pre-51-04 (`defaultHostDaemon` = spawnScenarioDaemon with rigBin).
+   * Container-mode (scenario-container.ts) supplies its own spawner here; nothing else
+   * on the host-mode path changes, so the 51-02 contract stays byte-intact.
+   */
+  daemon?: ScenarioDaemonSpawner;
+}
+
+/**
+ * Stand a scenario-local daemon up and return the ScenarioDaemon contract. The default
+ * is host-mode (`defaultHostDaemon`); 51-04 container-mode injects its own spawner via
+ * RunScenarioFileOptions.daemon. runScenarioFile binds to whatever this returns purely
+ * through the ScenarioDaemon interface, so the two modes are interchangeable.
+ */
+export type ScenarioDaemonSpawner = (
+  scaffold: HermeticScaffold,
+  opts: RunScenarioFileOptions,
+) => Promise<ScenarioDaemon>;
+
+/** Host-mode default — the verbatim pre-51-04 standup (spawnScenarioDaemon + rigBin). */
+export const defaultHostDaemon: ScenarioDaemonSpawner = (scaffold, opts) =>
+  spawnScenarioDaemon(scaffold, { rigBin: opts.rigBin });
+
+/**
+ * Pick the daemon spawner: the caller's opt-in override, else host-mode. An ABSENT
+ * override yields the exact host-mode standup unchanged (the additive-opt-in fence that
+ * keeps the 51-02 host-mode contract byte-intact — no PM 51-02 gate crossed).
+ */
+export function resolveScenarioDaemonSpawner(opts: RunScenarioFileOptions): ScenarioDaemonSpawner {
+  return opts.daemon ?? defaultHostDaemon;
 }
 
 /**
@@ -192,7 +228,7 @@ export async function runScenarioFile(
   // the stub sidecar) stay in scratch and never pollute the launch cwd.
   const seatCwd = join(scaffold.root, "seat-cwd");
   mkdirSync(seatCwd, { recursive: true });
-  const daemon = await spawnScenarioDaemon(scaffold, { rigBin: opts.rigBin });
+  const daemon = await resolveScenarioDaemonSpawner(opts)(scaffold, opts);
   try {
     const baseDeps = buildRealDeps({
       daemon,
