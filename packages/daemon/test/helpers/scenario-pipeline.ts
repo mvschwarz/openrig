@@ -31,6 +31,7 @@ import {
 } from "./scenario-daemon.js";
 import { buildRealDeps, type RealDepsOptions } from "./scenario-real-deps.js";
 import { runValidatedScenario, type RunScenarioResult } from "./scenario-runner.js";
+import type { RunRecord } from "./scenario-run-record.js";
 
 /** Thrown when a scenario file cannot be read or parsed (loud I/O/syntax floor). */
 export class ScenarioLoadError extends Error {
@@ -182,6 +183,26 @@ export interface RunScenarioFileOptions {
    * on the host-mode path changes, so the 51-02 contract stays byte-intact.
    */
   daemon?: ScenarioDaemonSpawner;
+  /**
+   * 51-04 container-mode: the testbed image manifest identity (digest) this run
+   * executed against. When set, it is stamped onto every results-ledger record so
+   * runs are comparable across image versions (plan §4). ABSENT in host-mode.
+   */
+  imageId?: string;
+}
+
+/**
+ * Stamp the image manifest id onto every record an appendRecord sink receives. Returns
+ * the ORIGINAL sink unchanged when no image id is supplied (host-mode: the ledger rows
+ * stay byte-for-byte pre-51-04) or when there is no sink to record into. The stamp is a
+ * COPY — the caller's record object is never mutated.
+ */
+export function withImageId(
+  appendRecord: ((rec: RunRecord) => void) | undefined,
+  imageId: string | undefined,
+): ((rec: RunRecord) => void) | undefined {
+  if (!imageId || !appendRecord) return appendRecord;
+  return (rec) => appendRecord({ ...rec, imageId });
 }
 
 /**
@@ -236,6 +257,9 @@ export async function runScenarioFile(
       topologyPath: loaded.loaded.topologyPath,
       seatCwd,
       ...opts.deps,
+      // Container-mode stamps the image id onto every ledger row; host-mode (no
+      // imageId) leaves opts.deps.appendRecord exactly as supplied (byte-intact).
+      appendRecord: withImageId(opts.deps?.appendRecord, opts.imageId),
     });
 
     // Fixture-level preconditions (the baton) are applied RIGHT AFTER the topology

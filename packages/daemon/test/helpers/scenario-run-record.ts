@@ -21,6 +21,12 @@ export interface RunRecord {
   at?: string;
   /** Wall-clock-independent run duration in ms, if the caller measured one. */
   durationMs?: number;
+  /**
+   * 51-04 container-mode: the testbed image manifest identity the run executed
+   * against (the manifest digest), so runs are comparable across image versions.
+   * ABSENT in host-mode — the row is byte-identical to the pre-51-04 ledger.
+   */
+  imageId?: string;
 }
 
 /** Append one run record as a JSON line. Append-only; creates the file if absent. */

@@ -18,11 +18,13 @@ vi.mock("./helpers/scenario-daemon.js", async (importOriginal) => {
 import {
   defaultHostDaemon,
   resolveScenarioDaemonSpawner,
+  withImageId,
   type ScenarioDaemonSpawner,
   type RunScenarioFileOptions,
 } from "./helpers/scenario-pipeline.js";
 import type { HermeticScaffold } from "./helpers/hermetic-env.js";
 import type { ScenarioDaemon } from "./helpers/scenario-daemon.js";
+import type { RunRecord } from "./helpers/scenario-run-record.js";
 
 const FAKE_DAEMON = { port: 1 } as unknown as ScenarioDaemon;
 const scaffold = { root: "/scratch", env: {} } as unknown as HermeticScaffold;
@@ -56,5 +58,36 @@ describe("resolveScenarioDaemonSpawner — the additive opt-in selection", () =>
     const override: ScenarioDaemonSpawner = async () => FAKE_DAEMON;
     resolveScenarioDaemonSpawner({ rigBin: "x", daemon: override });
     expect(spawnScenarioDaemon).not.toHaveBeenCalled();
+  });
+});
+
+describe("withImageId — container-mode results-ledger stamping (plan §4)", () => {
+  const baseRec: RunRecord = { scenario: "collision", verdict: "PASS" };
+
+  it("stamps the image manifest id onto every appended record when container-mode supplies one", () => {
+    const sink = vi.fn();
+    const wrapped = withImageId(sink, "sha256:abc");
+    wrapped!({ ...baseRec });
+    expect(sink).toHaveBeenCalledWith({ scenario: "collision", verdict: "PASS", imageId: "sha256:abc" });
+  });
+
+  it("returns the ORIGINAL appendRecord unchanged when no image id is supplied (host-mode byte-intact)", () => {
+    const sink = vi.fn();
+    // Identity: host-mode gets back the exact same sink reference — the ledger rows
+    // are byte-for-byte what they were pre-51-04 (no imageId key added).
+    expect(withImageId(sink, undefined)).toBe(sink);
+    expect(withImageId(undefined, undefined)).toBeUndefined();
+  });
+
+  it("returns undefined when an id is supplied but there is no sink (nothing to record into)", () => {
+    expect(withImageId(undefined, "sha256:abc")).toBeUndefined();
+  });
+
+  it("does not mutate the caller's record object (stamps a copy)", () => {
+    const sink = vi.fn();
+    const rec: RunRecord = { scenario: "collision", verdict: "PASS" };
+    withImageId(sink, "sha256:abc")!(rec);
+    expect(rec).toEqual({ scenario: "collision", verdict: "PASS" });
+    expect("imageId" in rec).toBe(false);
   });
 });
