@@ -1,0 +1,236 @@
+// OPR gateway M1 A3 — human specs: file-per-human FRAGMENTS + a GENERATED registry
+// projection. Schema sealed in GATEWAY-M1-A3-ENTITY-SCHEMA (b2a2594b, supersedes
+// e499dab6): prefs are PER-ENTITY (loudness once per human) and `role` is PER-BINDING
+// (routing / default delivery channel) — two DISTINCT axes.
+//
+// TRUTH MODEL (design-record §7 / plan §1): each human is one YAML fragment at
+// <home>/gateway/humans/<entityId>.yaml. The registry is a GENERATED PROJECTION of
+// the fragments (humans.generated.yaml) — NEVER hand-edited; the fragment is truth.
+// The projection carries a DO-NOT-EDIT header and a drift pin (mirrors the
+// attestation-lineage.generated codegen convention). Admission/resolution is the
+// A1/A4 gateway's job — this module only owns the fragment + projection contract.
+//
+// Validation is add-time == load-time (the hosts-registry entry pattern): the SAME
+// validateHumanFragment runs on `add` and on load, so a present-but-invalid fragment
+// is a loud error, never silently projected.
+
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { getOpenRigHome } from "../openrig-compat.js";
+
+// ── Schema (closed enums; extend only additively behind the contract) ──
+export const HUMAN_ENTITY_CLASSES = new Set(["human"]);          // M1's only class
+export const HUMAN_CONNECTOR_KINDS = new Set(["slack"]);          // M1's only kind
+export const HUMAN_BINDING_ROLES = new Set(["primary", "secondary"]);
+export const HUMAN_DELIVERY_CLASSES = new Set(["A", "B", "C", "D"]);
+// entityId is the fragment key + filename: a stable slug that survives platform
+// renames. Lowercase alnum + separators, no path chars (it is spliced into a path).
+export const ENTITY_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/;
+
+export interface HumanConnectorBinding {
+  kind: "slack";
+  connectorRef: string;
+  /** POINTER at the connector's vault (secrets-on-connector) — NEVER the secret. */
+  secretsRef: string;
+  /** Per-BINDING routing: EXACTLY ONE primary per entity = the default channel. */
+  role: "primary" | "secondary";
+}
+
+export interface HumanPrefs {
+  /** Per-ENTITY loudness — a SELECTION from the notifications register (spec §6);
+   *  A3 carries it, never redefines it. Forward-compatible if the register grows. */
+  deliveryClass: "A" | "B" | "C" | "D";
+  /** The AWAY preset (optional). */
+  away?: boolean;
+}
+
+export interface HumanFragment {
+  entityId: string;
+  class: "human";
+  displayName: string;
+  /** The registered @external ref, = <entityId>@external by convention. */
+  address: string;
+  connectorBindings: HumanConnectorBinding[];
+  prefs: HumanPrefs;
+}
+
+export type ValidateResult =
+  | { ok: true; fragment: HumanFragment }
+  | { ok: false; error: string };
+
+function isObj(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** add-time == load-time validation. Returns the typed fragment or a loud error.
+ *  Structural + closed-enum + the two cross-field invariants (>=1 binding,
+ *  exactly-one-primary-per-entity). Does NOT touch the filesystem. */
+export function validateHumanFragment(raw: unknown): ValidateResult {
+  if (!isObj(raw)) return { ok: false, error: "human fragment must be a mapping" };
+  const { entityId, class: cls, displayName, address, connectorBindings, prefs } = raw;
+
+  if (typeof entityId !== "string" || !ENTITY_ID_PATTERN.test(entityId)) {
+    return { ok: false, error: `entityId "${String(entityId)}" must be a lowercase slug (a-z0-9._- , no leading/trailing separator)` };
+  }
+  if (cls !== "human") {
+    return { ok: false, error: `class "${String(cls)}" is not a known entity class (M1: ${[...HUMAN_ENTITY_CLASSES].join(", ")})` };
+  }
+  if (typeof displayName !== "string" || displayName.length === 0) {
+    return { ok: false, error: "displayName must be a non-empty string" };
+  }
+  if (typeof address !== "string" || address.length === 0) {
+    return { ok: false, error: "address must be a non-empty string (the registered @external ref)" };
+  }
+  if (!Array.isArray(connectorBindings) || connectorBindings.length < 1) {
+    return { ok: false, error: "connectorBindings must be a non-empty list (>=1)" };
+  }
+
+  const bindings: HumanConnectorBinding[] = [];
+  let primaryCount = 0;
+  for (let i = 0; i < connectorBindings.length; i++) {
+    const b = connectorBindings[i];
+    if (!isObj(b)) return { ok: false, error: `connectorBindings[${i}] must be a mapping` };
+    if (!HUMAN_CONNECTOR_KINDS.has(String(b.kind))) {
+      return { ok: false, error: `connectorBindings[${i}].kind "${String(b.kind)}" is not a known connector kind (M1: ${[...HUMAN_CONNECTOR_KINDS].join(", ")})` };
+    }
+    if (typeof b.connectorRef !== "string" || b.connectorRef.length === 0) {
+      return { ok: false, error: `connectorBindings[${i}].connectorRef must be a non-empty string` };
+    }
+    if (typeof b.secretsRef !== "string" || b.secretsRef.length === 0) {
+      return { ok: false, error: `connectorBindings[${i}].secretsRef must be a non-empty vault POINTER (never the secret)` };
+    }
+    if (!HUMAN_BINDING_ROLES.has(String(b.role))) {
+      return { ok: false, error: `connectorBindings[${i}].role "${String(b.role)}" must be primary|secondary` };
+    }
+    if (b.role === "primary") primaryCount++;
+    bindings.push({ kind: "slack", connectorRef: b.connectorRef, secretsRef: b.secretsRef, role: b.role as "primary" | "secondary" });
+  }
+  // EXACTLY ONE primary binding per entity = the default delivery channel.
+  if (primaryCount !== 1) {
+    return { ok: false, error: `exactly one connectorBinding must have role "primary" (found ${primaryCount}) — it is the default delivery channel` };
+  }
+
+  if (!isObj(prefs)) return { ok: false, error: "prefs must be a mapping { deliveryClass, away? }" };
+  if (!HUMAN_DELIVERY_CLASSES.has(String(prefs.deliveryClass))) {
+    return { ok: false, error: `prefs.deliveryClass "${String(prefs.deliveryClass)}" must be one of A|B|C|D (the notifications register)` };
+  }
+  if (prefs.away !== undefined && typeof prefs.away !== "boolean") {
+    return { ok: false, error: "prefs.away must be a boolean when present" };
+  }
+  const validatedPrefs: HumanPrefs = { deliveryClass: prefs.deliveryClass as HumanPrefs["deliveryClass"] };
+  if (prefs.away !== undefined) validatedPrefs.away = prefs.away;
+
+  return {
+    ok: true,
+    fragment: { entityId, class: "human", displayName, address, connectorBindings: bindings, prefs: validatedPrefs },
+  };
+}
+
+// ── Paths (under getOpenRigHome(); `home` injectable for hermetic tests) ──
+export function humansDir(home: string = getOpenRigHome()): string {
+  return join(home, "gateway", "humans");
+}
+export function projectionPath(home: string = getOpenRigHome()): string {
+  return join(home, "gateway", "humans.generated.yaml");
+}
+
+/** The default inbound slot when no addressable entity resolves (slice-11 default,
+ *  unchanged). NOT a fragment — the fallback target, never an entities[] entry. */
+export const OPERATOR_HUMAN_DEFAULT_SLOT = "operator-human@kernel";
+
+const PROJECTION_HEADER =
+  "# GENERATED FILE — DO NOT EDIT.\n" +
+  "# Projection of the human fragments under gateway/humans/<entityId>.yaml.\n" +
+  "# The fragment is truth: add/edit a human via its fragment (or `rig gateway human\n" +
+  "# add`), then re-project. A hand-edit here is REFUSED at load.\n";
+
+export type ProjectResult =
+  | { ok: true; body: string; entities: HumanFragment[] }
+  | { ok: false; error: string };
+
+/** Generate the canonical registry projection from the fragments (the ONE generator
+ *  used by both the write path and the drift/load check). Load-time validation is the
+ *  SAME validateHumanFragment as add-time; the filename must equal <entityId>.yaml
+ *  (collision-free key). Entities are sorted by entityId for a stable, diffable body. */
+export function projectHumans(home: string = getOpenRigHome()): ProjectResult {
+  const dir = humansDir(home);
+  const entities: HumanFragment[] = [];
+  if (existsSync(dir)) {
+    const files = readdirSync(dir).filter((f) => f.endsWith(".yaml") && !f.startsWith(".")).sort();
+    for (const f of files) {
+      let raw: unknown;
+      try {
+        raw = parseYaml(readFileSync(join(dir, f), "utf8"));
+      } catch (err) {
+        return { ok: false, error: `failed to parse human fragment ${f}: ${(err as Error).message}` };
+      }
+      const v = validateHumanFragment(raw);
+      if (!v.ok) return { ok: false, error: `invalid human fragment ${f}: ${v.error}` };
+      if (`${v.fragment.entityId}.yaml` !== f) {
+        return { ok: false, error: `human fragment ${f} declares entityId "${v.fragment.entityId}" — the filename must be <entityId>.yaml` };
+      }
+      entities.push(v.fragment);
+    }
+  }
+  entities.sort((a, b) => (a.entityId < b.entityId ? -1 : a.entityId > b.entityId ? 1 : 0));
+  return { ok: true, body: PROJECTION_HEADER + stringifyYaml({ entities }), entities };
+}
+
+function atomicWrite(path: string, body: string): { ok: true } | { ok: false; error: string } {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    const tmp = `${path}.tmp-${process.pid}`;
+    writeFileSync(tmp, body, { mode: 0o600 });
+    renameSync(tmp, path);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: `failed to write ${path}: ${(err as Error).message}` };
+  }
+}
+
+/** (Re)write the generated projection from the current fragments. Atomic. */
+export function writeProjection(home: string = getOpenRigHome()): { ok: true; path: string } | { ok: false; error: string } {
+  const proj = projectHumans(home);
+  if (!proj.ok) return { ok: false, error: proj.error };
+  const path = projectionPath(home);
+  const w = atomicWrite(path, proj.body);
+  return w.ok ? { ok: true, path } : w;
+}
+
+export type AddHumanResult =
+  | { ok: true; path: string; fragment: HumanFragment }
+  | { ok: false; error: string };
+
+/** The verb-add writer: validate (add-time) -> atomic write the ONE fragment file ->
+ *  re-project. Operators never hand-create the fragment YAML; the verb owns it. */
+export function addHumanFragment(raw: unknown, home: string = getOpenRigHome()): AddHumanResult {
+  const v = validateHumanFragment(raw);
+  if (!v.ok) return { ok: false, error: v.error };
+  const file = join(humansDir(home), `${v.fragment.entityId}.yaml`);
+  const w = atomicWrite(file, stringifyYaml(v.fragment));
+  if (!w.ok) return { ok: false, error: w.error };
+  const proj = writeProjection(home);
+  if (!proj.ok) return { ok: false, error: `fragment written but re-projection failed: ${proj.error}` };
+  return { ok: true, path: file, fragment: v.fragment };
+}
+
+export type LoadResult =
+  | { ok: true; entities: HumanFragment[] }
+  | { ok: false; error: string };
+
+/** Load the registry via the projection, but REFUSE a hand-edited/drifted projection:
+ *  the fragments are truth, so the on-disk projection must byte-match a fresh one.
+ *  This is the drift pin's runtime half (the vitest parity pin is the CI half). */
+export function loadHumanRegistry(home: string = getOpenRigHome()): LoadResult {
+  const proj = projectHumans(home);
+  if (!proj.ok) return { ok: false, error: proj.error };
+  const path = projectionPath(home);
+  if (!existsSync(path)) {
+    return { ok: false, error: `registry projection missing at ${path} — re-project from the fragments` };
+  }
+  if (readFileSync(path, "utf8") !== proj.body) {
+    return { ok: false, error: `registry projection at ${path} is HAND-EDITED or DRIFTED from the fragments — the fragment is truth; re-project, never hand-edit` };
+  }
+  return { ok: true, entities: proj.entities };
+}
