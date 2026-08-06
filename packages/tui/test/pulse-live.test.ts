@@ -1,0 +1,146 @@
+import { describe, expect, it } from "vitest";
+import { createViewState } from "../src/state.js";
+import { renderScreen } from "../src/render.js";
+import { demoSnapshot } from "../src/demo-data.js";
+import { buildPulseModel } from "../src/pulse/pulse-model.js";
+import { renderExceptionSection } from "../src/pulse/render-pulse.js";
+import type { FleetSnapshot, QueueRead } from "../src/types.js";
+
+// A fixed reference clock so age math is deterministic.
+const NOW = Date.parse("2026-08-06T12:00:00.000Z");
+const ago = (ms: number) => new Date(NOW - ms).toISOString();
+const MIN = 60_000;
+const HR = 60 * MIN;
+
+function liveSnap(over: Partial<FleetSnapshot> = {}): FleetSnapshot {
+  const base = demoSnapshot();
+  return { ...base, attention: [], blocked: [], ...over };
+}
+
+const attn = (over: Partial<QueueRead>): QueueRead => ({
+  qitemId: "q",
+  state: "pending",
+  destinationSession: "human-yeah@kernel",
+  blockedOn: null,
+  handedOffTo: null,
+  tier: "human-gate",
+  tags: null,
+  summary: null,
+  body: "",
+  claimedAt: null,
+  tsUpdated: ago(0),
+  ...over,
+});
+
+describe("PULSE view increment 2 — Exceptions strip LIVE", () => {
+  it("▲ NEEDS YOU: rows built from the attention read (subject from summary, age from claimedAt)", () => {
+    const snap = liveSnap({
+      attention: [
+        attn({ qitemId: "q1", summary: "0.5.0 cut packet ready · waiting on you", claimedAt: ago(22 * MIN) }),
+        attn({ qitemId: "q2", summary: "slice-20 routing pixels · waiting on you", claimedAt: ago(3 * HR) }),
+      ],
+    });
+    const model = buildPulseModel(snap, NOW);
+    const needs = model.exceptions.find((s) => s.label === "NEEDS YOU");
+    expect(needs).toBeDefined();
+    expect(needs!.rows.length).toBe(2);
+    const text = renderExceptionSection(needs!).map((l) => l.text).join("\n");
+    expect(text).toContain("▲ NEEDS YOU (2)");
+    expect(text).toContain("0.5.0 cut packet ready · waiting on you");
+    expect(text).toContain("22m");
+    expect(text).toContain("slice-20 routing pixels · waiting on you");
+    expect(text).toContain("3h");
+  });
+
+  it("▲ NEEDS YOU: subject falls back to the body head when summary is null", () => {
+    const snap = liveSnap({
+      attention: [attn({ qitemId: "q1", summary: null, body: "please cut the 0.5.1 release now\nsecond line ignored" })],
+    });
+    const model = buildPulseModel(snap, NOW);
+    const needs = model.exceptions.find((s) => s.label === "NEEDS YOU")!;
+    const text = renderExceptionSection(needs).map((l) => l.text).join("\n");
+    expect(text).toContain("please cut the 0.5.1 release now");
+    expect(text).not.toContain("second line ignored");
+  });
+
+  it("⧗ BLOCKED ON AGENTS: non-human blockers only — the human-blocked item is EXCLUDED", () => {
+    const snap = liveSnap({
+      blocked: [
+        attn({
+          qitemId: "b1",
+          state: "blocked",
+          destinationSession: "dev50-driver@openrig-build",
+          blockedOn: "review-r1@openrig-build",
+          tier: null,
+          summary: "terminal verdict for 51209941",
+          claimedAt: ago(1 * HR),
+        }),
+        attn({
+          qitemId: "b2",
+          state: "blocked",
+          destinationSession: "dev50-qa@openrig-build",
+          blockedOn: "human-yeah@kernel", // human blocker → already under NEEDS YOU
+          tier: null,
+          summary: "human sign-off pending",
+          claimedAt: ago(2 * HR),
+        }),
+      ],
+    });
+    const model = buildPulseModel(snap, NOW);
+    const blocked = model.exceptions.find((s) => s.label === "BLOCKED ON AGENTS");
+    expect(blocked).toBeDefined();
+    expect(blocked!.rows.length).toBe(1);
+    const text = renderExceptionSection(blocked!).map((l) => l.text).join("\n");
+    expect(text).toContain("⧗ BLOCKED ON AGENTS (1)");
+    expect(text).toContain("dev50-driver@openrig-build");
+    expect(text).toContain("review-r1@openrig-build");
+    expect(text).toContain("terminal verdict for 51209941");
+    // the human-blocked item must NOT leak into BLOCKED ON AGENTS
+    expect(text).not.toContain("dev50-qa@openrig-build");
+    expect(text).not.toContain("human sign-off pending");
+  });
+
+  it("◌ PARKED WITH BATON: renders the non-silent honesty-floor placeholder line (deferred read)", () => {
+    const model = buildPulseModel(liveSnap(), NOW);
+    const parked = model.exceptions.find((s) => s.label === "PARKED WITH BATON");
+    expect(parked).toBeDefined();
+    const text = renderExceptionSection(parked!).map((l) => l.text).join("\n");
+    expect(text).toContain("◌ PARKED WITH BATON");
+    expect(text).toContain("— idle-age read pending");
+    // it is NOT a ran-join: it must not advertise a fabricated (0)/(n) count
+    expect(text).not.toContain("PARKED WITH BATON (");
+  });
+
+  it("empty LIVE join is SILENCE: a zero-item attention/blocked read omits the section entirely", () => {
+    const model = buildPulseModel(liveSnap({ attention: [], blocked: [] }), NOW);
+    expect(model.exceptions.find((s) => s.label === "NEEDS YOU")).toBeUndefined();
+    expect(model.exceptions.find((s) => s.label === "BLOCKED ON AGENTS")).toBeUndefined();
+    // PARKED is the deferred read, NOT a ran-join → always present
+    expect(model.exceptions.find((s) => s.label === "PARKED WITH BATON")).toBeDefined();
+  });
+
+  it("FULL-WIDTH: the pulse view spans full cols with NO explorer sidebar", () => {
+    const snap = liveSnap({
+      attention: [attn({ qitemId: "q1", summary: "cut packet ready", claimedAt: ago(5 * MIN) })],
+    });
+    const v = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    v.dispatch({ type: "tab", tab: "pulse" });
+    const body = renderScreen(v.get(), snap, { cols: 140, rows: 44, nowMs: NOW }).lines.join("\n");
+    // no explorer pane title, no explorer split joint
+    expect(body).not.toContain("EXPLORER");
+    expect(body).not.toContain("┬");
+    // pulse content begins at the left edge (full-width), not after a 30-col sidebar
+    const needsLine = body.split("\n").find((l) => l.includes("NEEDS YOU"));
+    expect(needsLine).toBeDefined();
+    expect(needsLine!.startsWith("▲ NEEDS YOU")).toBe(true);
+  });
+
+  it("REGRESSION: a non-pulse view (table) STILL renders the explorer sidebar", () => {
+    const snap = liveSnap();
+    const v = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    // default view is the table (topology section) — explorer must remain
+    const body = renderScreen(v.get(), snap, { cols: 140, rows: 44 }).lines.join("\n");
+    expect(body).toContain("EXPLORER");
+    expect(body).toContain("┬");
+  });
+});

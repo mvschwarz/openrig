@@ -22,7 +22,7 @@ export function defaultSections(): SectionDef[] {
 }
 
 export function emptySnapshot(): FleetSnapshot {
-  return { hosts: [], specs: [], needs: [], humanQueueProbed: false, hostsDown: [], stream: [], readErrors: [] };
+  return { hosts: [], specs: [], needs: [], humanQueueProbed: false, attention: [], blocked: [], hostsDown: [], stream: [], readErrors: [] };
 }
 
 export interface CreateViewStateOptions {

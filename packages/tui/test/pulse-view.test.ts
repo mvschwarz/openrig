@@ -19,27 +19,27 @@ describe("PULSE view (5.2 Wave B — increment 1: static skeleton from the appro
     expect(v.get().section).toBe("topology");
   });
 
-  it("reproduces the mock's EXACT exception rows + ordering (glyphs/labels are contract)", () => {
+  it("renders LIVE exception sections from the snapshot + contract ordering (increment 2)", () => {
     const v = createViewState({ instanceId: "t", ...withSnap });
     v.dispatch({ type: "tab", tab: "pulse" });
     const body = renderScreen(v.get(), snap, { cols: 140, rows: 44 }).lines.join("\n");
 
-    // exception sections — ordering ▲ NEEDS YOU → ◌ PARKED → ⧗ BLOCKED is contract
+    // ▲ NEEDS YOU ← the demo attention read (subject from summary)
     expect(body).toContain("▲ NEEDS YOU (2)");
-    expect(body).toContain("push-go");
     expect(body).toContain("0.5.0 cut packet ready · waiting on you");
-    expect(body).toContain("· 22m");
-    expect(body).toContain("style verdict");
     expect(body).toContain("slice-20 routing pixels · waiting on you");
-    expect(body).toContain("◌ PARKED WITH BATON (1)");
-    expect(body).toContain("dev.qa");
-    expect(body).toContain("qitem 8f3a… in-progress 47m idle, no handoff");
-    expect(body).toContain("→ enter: transcript check");
+    // ◌ PARKED WITH BATON ← DEFERRED read: header WITHOUT a count + the honesty line
+    expect(body).toContain("◌ PARKED WITH BATON");
+    expect(body).toContain("— idle-age read pending");
+    expect(body).not.toContain("PARKED WITH BATON (");
+    // ⧗ BLOCKED ON AGENTS ← the demo state=blocked read, human-blocked item EXCLUDED
     expect(body).toContain("⧗ BLOCKED ON AGENTS (1)");
-    expect(body).toContain("dev50.driver");
-    expect(body).toContain('blocked on review-r1 · "terminal verdict for 51209941"');
-    expect(body).toContain("· 1h");
+    expect(body).toContain("dev50-driver@openrig-build");
+    expect(body).toContain("review-r1@openrig-build");
+    expect(body).toContain("terminal verdict for 51209941");
+    expect(body).not.toContain("human sign-off pending"); // human-blocked → not here
 
+    // ordering ▲ NEEDS YOU → ◌ PARKED → ⧗ BLOCKED → lanes is contract
     const iNeeds = body.indexOf("NEEDS YOU");
     const iParked = body.indexOf("PARKED WITH BATON");
     const iBlocked = body.indexOf("BLOCKED ON AGENTS");

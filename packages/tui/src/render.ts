@@ -7,7 +7,7 @@
 import { computeExplorerRows, findAgent, findSpec, findAgentBySession, agentsRunningSpec, agentsRunningSpecTargets, specDetailArrowsScroll } from "./state.js";
 import { navigatorDisplay } from "./navigator.js";
 import { renderGraphStyle } from "./topology/render-graph.js";
-import { demoPulseModel } from "./pulse/pulse-model.js";
+import { buildPulseModel } from "./pulse/pulse-model.js";
 import { renderPulseView } from "./pulse/render-pulse.js";
 import { runtimeMarkSegs } from "./topology/runtime-marks.js";
 import { barCells, flashActive, reducedMotion, spinnerFrame } from "./motion.js";
@@ -189,15 +189,8 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
   const contentWidthForGraph = contentWidth;
   void contentWidthForGraph;
   const lines: ContentLine[] = [];
-  if (state.viewTab === "pulse") {
-    // 5.2 Wave B — the fleet-wide PULSE view (increment 1: static from the demo
-    // fixture reproducing the approved mock). Fleet-scoped, so it dispatches
-    // before the section branches.
-    return renderPulseView(demoPulseModel()).map((l) => ({
-      text: l.text,
-      ...(l.segs ? { segs: l.selected ? l.segs.map((s) => ({ ...s, bg: "accent" as const })) : l.segs } : {}),
-    }));
-  }
+  // PULSE is a FULL-WIDTH view handled by an early return in renderScreen
+  // (renderPulseScreen) — it never reaches the sidebar+content layout below.
   if (state.section === "topology") {
     if (state.runningOf) {
       const seats = agentsRunningSpecTargets(snap, state.runningOf);
@@ -723,8 +716,60 @@ function keybindHints(state: ViewState): string {
   return `${nav} · ←→ pane · ⏎ open · ${pageScroll}: command · / filter · f footer · q quit`;
 }
 
+/** The PULSE view renders FULL-WIDTH with NO explorer sidebar (increment 2). A
+ * minimal self-contained screen: cmd bar + a full-width titled rule + the pulse
+ * lines laid across all `cols` + the bottom chrome. Skips computeExplorerRows
+ * and the left│content paint entirely. */
+function renderPulseScreen(state: ViewState, snap: FleetSnapshot, cols: number, rows: number, nowMs: number, inputLine: string): Screen {
+  const lines: string[] = [];
+  const segRows: NonNullable<Screen["segRows"]> = {};
+  lines.push(pad(`cmd ▸ ${inputLine}▊`, cols));
+  const title = state.focusedPane === "content" ? "[ PULSE ]" : "PULSE";
+  // full-width rule (no ┬ explorer split, no EXPLORER title)
+  lines.push((`─ ${title} ` + "─".repeat(cols)).slice(0, cols));
+
+  const pulseLines = renderPulseView(buildPulseModel(snap, nowMs));
+  const chromeRows = 3; // bottom rule + hint bar + status line
+  const bodyRows = Math.max(rows - 2 - chromeRows, 1);
+  const maxContentOffset = Math.max(pulseLines.length - bodyRows, 0);
+  const contentStart = Math.min(state.contentOffset, maxContentOffset);
+  const visible = pulseLines.slice(contentStart, contentStart + bodyRows);
+  for (let i = 0; i < bodyRows; i++) {
+    const y = lines.length + 1;
+    const item = visible[i];
+    lines.push(pad(item?.text ?? "", cols));
+    if (item?.segs) segRows[y] = item.selected ? item.segs.map((s) => ({ ...s, bg: "accent" as const })) : item.segs;
+  }
+
+  lines.push("─".repeat(cols));
+  lines.push(pad(keybindHints(state), cols));
+  const drillPath = state.drill.map((d) => d.name).join(" → ");
+  const readWarn = snap.readErrors.length > 0 ? `  ⚠ ${snap.readErrors.length} read(s) failed: ${snap.readErrors[0]}` : "";
+  lines.push(
+    pad(
+      `[${state.instanceId}] ${state.section}${drillPath ? " · " + drillPath : ""}${state.lastError ? "  ✗ " + state.lastError : ""}${state.notice ? "  ▸ " + state.notice : ""}${readWarn}`,
+      cols,
+    ),
+  );
+  while (lines.length < rows) lines.push("");
+  return {
+    lines: lines.slice(0, rows),
+    hitMap: [],
+    contentTargets: [],
+    contentMaxOffset: maxContentOffset,
+    explorerRows: [],
+    segRows,
+    explorerMeta: {},
+    flashRows: [],
+    motionActive: false,
+  };
+}
+
 export function renderScreen(state: ViewState, snap: FleetSnapshot, options: RenderOptions = {}, inputLine = ""): Screen {
   const { cols = 120, rows = 32, nowMs = 0 } = options;
+  // PULSE is fleet-wide + FULL-WIDTH: render it before the sidebar layout,
+  // skipping the explorer entirely (BEFORE computeExplorerRows).
+  if (state.viewTab === "pulse") return renderPulseScreen(state, snap, cols, rows, nowMs, inputLine);
   // S19 round-5 (guard): one spinner frame per render pass from caller time;
   // `loading` comes from the refresh OWNER (omitted = settled — demo/fixture
   // data IS the answer); reduced-motion kills all of it

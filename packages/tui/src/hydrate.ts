@@ -13,7 +13,7 @@
 //   - A failed read leaves its portion honest-empty and records a NAMED error.
 import { DaemonClient } from "./daemon-client.js";
 import { parse as parseYaml } from "yaml";
-import type { AgentRow, FleetSnapshot, HostNode, NeedsItem, PodNode, SpecEntry } from "./types.js";
+import type { AgentRow, FleetSnapshot, HostNode, NeedsItem, PodNode, QueueRead, SpecEntry } from "./types.js";
 
 // Narrow read-shapes: just the served fields this module consumes (names match
 // the daemon's serialized output — see the Phase-2 endpoint-shape survey).
@@ -119,6 +119,37 @@ interface StreamItemRead {
   sourceSession: string;
   body: string;
   streamSortKey: string;
+}
+// The served queue-item fields the PULSE joins consume (camelCase QueueItem,
+// queue-repository.ts). Both reads return this shape; the TUI maps + presents.
+interface QueueItemRead {
+  qitemId: string;
+  state: string;
+  destinationSession: string;
+  blockedOn: string | null;
+  handedOffTo: string | null;
+  tier: string | null;
+  tags: string[] | null;
+  summary: string | null;
+  body?: string;
+  claimedAt: string | null;
+  tsUpdated: string;
+}
+
+function toQueueRead(item: QueueItemRead): QueueRead {
+  return {
+    qitemId: item.qitemId,
+    state: item.state,
+    destinationSession: item.destinationSession,
+    blockedOn: item.blockedOn,
+    handedOffTo: item.handedOffTo,
+    tier: item.tier,
+    tags: item.tags,
+    summary: item.summary,
+    body: item.body ?? "",
+    claimedAt: item.claimedAt,
+    tsUpdated: item.tsUpdated,
+  };
 }
 
 function fmtTokens(input: number | null, output: number | null): string | null {
@@ -240,12 +271,15 @@ export async function hydrateSnapshot(
     }
   }
 
-  const [agg, summaries, library, review, streamItems] = await Promise.all([
+  const [agg, summaries, library, review, streamItems, attention, blocked] = await Promise.all([
     safe<AttentionAggregateRead>("attention-aggregate", () => client.attentionAggregate()),
     safe<RigSummaryRead[]>("rigs-summary", () => client.rigsSummary()),
     safe<SpecLibraryRead[]>("specs-library", () => client.specsLibrary()),
     safe<ReviewFleetRead>("review-fleet", () => client.reviewFleet()),
     safe<StreamItemRead[]>("stream-tail", () => client.streamLatest()),
+    // PULSE ▲ NEEDS YOU + ⧗ BLOCKED — the two shipped queue reads (§ increment 2)
+    safe<QueueItemRead[]>("queue-attention", () => client.queueAttention()),
+    safe<QueueItemRead[]>("queue-blocked", () => client.queueBlocked()),
   ]);
 
   const agentSpecNames = new Set((library ?? []).filter((entry) => entry.kind === "agent").map((entry) => entry.name));
@@ -422,6 +456,8 @@ export async function hydrateSnapshot(
     needs,
     humanQueueProbed: review != null && !review.registryError && Array.isArray(review.hosts) && review.hosts.length > 0
       && review.hosts.every((host) => host.status.status === "ok"),
+    attention: (attention ?? []).map(toQueueRead),
+    blocked: (blocked ?? []).map(toQueueRead),
     hostsDown,
     stream: (streamItems ?? []).map((s) => ({ tsEmitted: s.tsEmitted, sourceSession: s.sourceSession, body: s.body })),
     readErrors,

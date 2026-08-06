@@ -45,6 +45,19 @@ export function demoSnapshot(): FleetSnapshot {
       { source: "derived", kind: "stuck", target: "dev50-guard@openrig-build", detail: "dev50.guard looks stuck — idle 42m >= 30m default · holds 1" },
     ],
     humanQueueProbed: true,
+    // PULSE ▲ NEEDS YOU source — shaped like the shipped attention read (the
+    // daemon already returns exactly the human-facing set).
+    attention: [
+      { qitemId: "q1", state: "in-progress", destinationSession: "human-yeah@kernel", blockedOn: null, handedOffTo: null, tier: "human-gate", tags: null, summary: "0.5.0 cut packet ready · waiting on you", body: "", claimedAt: "2026-08-05T09:38:00.000Z", tsUpdated: "2026-08-05T09:38:00.000Z" },
+      { qitemId: "q2", state: "pending", destinationSession: "human-yeah@kernel", blockedOn: null, handedOffTo: null, tier: "human-gate", tags: null, summary: "slice-20 routing pixels · waiting on you", body: "", claimedAt: "2026-08-05T07:00:00.000Z", tsUpdated: "2026-08-05T07:00:00.000Z" },
+    ],
+    // PULSE ⧗ BLOCKED source — shaped like the shipped state=blocked read (ALL
+    // blocked qitems). The render excludes the human-blocked one (b2) — it is
+    // already surfaced under NEEDS YOU.
+    blocked: [
+      { qitemId: "b1", state: "blocked", destinationSession: "dev50-driver@openrig-build", blockedOn: "review-r1@openrig-build", handedOffTo: null, tier: null, tags: null, summary: "terminal verdict for 51209941", body: "", claimedAt: "2026-08-05T09:00:00.000Z", tsUpdated: "2026-08-05T09:00:00.000Z" },
+      { qitemId: "b2", state: "blocked", destinationSession: "dev50-qa@openrig-build", blockedOn: "human-yeah@kernel", handedOffTo: null, tier: null, tags: null, summary: "human sign-off pending", body: "", claimedAt: "2026-08-05T08:00:00.000Z", tsUpdated: "2026-08-05T08:00:00.000Z" },
+    ],
     // host-down is composed BESIDE the items (never projected into the item shape)
     hostsDown: [{ hostId: "mm2-host", status: "unreachable", error: "read timed out" }],
     stream: [

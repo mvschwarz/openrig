@@ -136,6 +136,27 @@ export interface HostDown {
   error?: string;
 }
 
+/** TUI-local read shape for the PULSE exception joins — the subset of the
+ * daemon QueueItem (queue-repository.ts) the two LIVE joins consume. Carried
+ * VERBATIM from the shipped queue-list reads (attention → NEEDS YOU;
+ * state=blocked → BLOCKED ON AGENTS; the client wrappers own the routes). The
+ * daemon applies both filters, so the TUI only maps + presents (no threshold,
+ * no synthesis). `body` is present for the NEEDS-YOU subject fallback
+ * (summary → body head). */
+export interface QueueRead {
+  qitemId: string;
+  state: string;
+  destinationSession: string;
+  blockedOn: string | null;
+  handedOffTo: string | null;
+  tier: string | null;
+  tags: string[] | null;
+  summary: string | null;
+  body: string;
+  claimedAt: string | null;
+  tsUpdated: string;
+}
+
 export interface FleetSnapshot {
   hosts: HostNode[];
   specs: SpecEntry[];
@@ -143,6 +164,12 @@ export interface FleetSnapshot {
   needs: NeedsItem[];
   /** false until the human-queue read has answered — honest-unknown vs proven-empty */
   humanQueueProbed: boolean;
+  /** PULSE ▲ NEEDS YOU source — the shipped attention read (already the exact
+   * human-facing set); empty array = the join ran and yielded zero (silence). */
+  attention: QueueRead[];
+  /** PULSE ⧗ BLOCKED ON AGENTS source — the shipped state=blocked read (ALL
+   * blocked qitems); the render filters to NON-human blockedOn. */
+  blocked: QueueRead[];
   hostsDown: HostDown[];
   /** latest ambient stream items for the footer ticker (FR-10), newest last */
   stream: Array<{ tsEmitted: string; sourceSession: string; body: string }>;

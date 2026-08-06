@@ -95,6 +95,13 @@ export class DaemonClient {
   queueAttention() {
     return this.get(`/api/queue/list?attention=1`);
   }
+  /** ALL blocked qitems via the SAME shipped /list route with ?state=blocked
+   * (queue.ts reads c.req.query("state") and filters). Mirror of queueAttention
+   * — a client-method addition on an existing route, NOT a new endpoint.
+   * The PULSE render filters these to NON-human blockedOn. */
+  queueBlocked() {
+    return this.get(`/api/queue/list?state=blocked`);
+  }
   reviewRig() {
     return this.get(`/api/review/rig`);
   }

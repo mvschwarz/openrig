@@ -25,6 +25,14 @@ export function renderPulseTabStrip(): Line {
 
 // ── an exception section: header (glyph LABEL (n)) + its rows ──
 export function renderExceptionSection(section: PulseExceptionSection): Line[] {
+  // DEFERRED read (PARKED): header WITHOUT a (n) count — a fabricated count
+  // would falsely claim a ran join — plus one dim "read pending" line.
+  if (section.pending) {
+    return [
+      line([{ text: `${section.glyph} ${section.label}`, token: section.token, bold: true }]),
+      line([{ text: ` ${section.pending}`, token: "dim" }]),
+    ];
+  }
   const header = line([{ text: `${section.glyph} ${section.label} (${section.rows.length})`, token: section.token, bold: true }]);
   const rows = section.rows.map((r) =>
     line([

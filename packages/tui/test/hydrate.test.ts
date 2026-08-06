@@ -118,6 +118,9 @@ const FIXTURES: Record<string, unknown> = {
       { hostId: "mm2-host", status: "unreachable", error: "read timed out after 5000ms", failedStep: "remote-daemon-unreachable" },
     ],
   },
+  // PULSE exception joins (increment 2) — default empty; per-test responses override
+  "/api/queue/list?attention=1": [],
+  "/api/queue/list?state=blocked": [],
 };
 
 function fixtureClient(overrides: Record<string, { status: number } | undefined> = {}, responses: Record<string, unknown> = {}): DaemonClient {
