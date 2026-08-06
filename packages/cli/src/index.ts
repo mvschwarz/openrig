@@ -4,6 +4,7 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { daemonCommand } from "./commands/daemon.js";
 import { statusCommand, type StatusDeps } from "./commands/status.js";
+import { crashCartCommand } from "./commands/crash-cart.js";
 import { snapshotCommand } from "./commands/snapshot.js";
 import { restoreCommand } from "./commands/restore.js";
 import { exportCommand, type ExportDeps } from "./commands/export.js";
@@ -162,6 +163,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(statusCommand(depsOverride?.statusDeps));
   program.addCommand(snapshotCommand(depsOverride?.snapshotDeps));
   program.addCommand(restoreCommand(depsOverride?.restoreDeps));
+  program.addCommand(crashCartCommand());
   program.addCommand(exportCommand(depsOverride?.exportDeps));
   program.addCommand(importCommand(depsOverride?.importDeps));
   program.addCommand(uiCommand(depsOverride?.uiDeps));

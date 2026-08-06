@@ -4,7 +4,11 @@
     "outDir": "dist",
     "rootDir": "src",
     "lib": ["ES2022"],
-    "types": ["node"]
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@openrig/daemon/crash-cart": ["../daemon/dist/crash-cart-surface.d.ts"]
+    }
   },
   "include": ["src"],
   "exclude": ["dist", "test"]

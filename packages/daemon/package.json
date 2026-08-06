@@ -4,6 +4,12 @@
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
+  "exports": {
+    "./crash-cart": {
+      "types": "./dist/crash-cart-surface.d.ts",
+      "import": "./dist/crash-cart-surface.js"
+    }
+  },
   "scripts": {
     "build": "tsc && node scripts/copy-workflow-specs.mjs",
     "gen:control-plane-json": "node scripts/gen-control-plane-json.mjs",
