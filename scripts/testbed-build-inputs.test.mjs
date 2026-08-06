@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { deriveStubAssetsHash, TestbedBuildInputsError } from "./testbed-build-inputs.mjs";
+import {
+  deriveStubAssetsHash,
+  parseDigestPinnedBase,
+  readBaseImage,
+  TestbedBuildInputsError,
+} from "./testbed-build-inputs.mjs";
 
 // 51-04 testbed image — the build verb derives the manifest's `stubAssetsHash` (plan §1) by
 // hashing the EXACT stub-asset file set the Dockerfile COPYs into the image. This is the
@@ -145,5 +150,76 @@ test("loud-fail: a path escaping the asset root (containment guard)", () => {
     assert.throws(() => deriveStubAssetsHash(root, ["/etc/passwd"]), TestbedBuildInputsError);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// --- base image: the digest-pin fence (plan §1: "digest-pinned, not tag-floating") ---
+// The base LTS-slim Linux MUST be pinned by @sha256 digest so the image is byte-reproducible; a
+// tag-floating base (`debian:bookworm-slim`) drifts silently between builds. The resolved digest
+// becomes the manifest's baseDigest. The build verb refuses anything but a digest-pinned ref; the
+// digest is resolved HOST-side (the locus ruling) and recorded in docker/testbed/base-image.
+
+const GOOD_DIGEST = "sha256:" + "a".repeat(64);
+
+test("parseDigestPinnedBase accepts a digest-pinned ref and returns its name + sha256 digest", () => {
+  const { ref, name, digest } = parseDigestPinnedBase(`debian:bookworm-slim@${GOOD_DIGEST}`);
+  assert.equal(ref, `debian:bookworm-slim@${GOOD_DIGEST}`);
+  assert.equal(name, "debian:bookworm-slim");
+  assert.equal(digest, GOOD_DIGEST);
+  // A fully-qualified registry path is fine too.
+  assert.equal(parseDigestPinnedBase(`docker.io/library/debian@${GOOD_DIGEST}`).digest, GOOD_DIGEST);
+});
+
+test("parseDigestPinnedBase REFUSES a tag-floating (non-@sha256) base — the fence", () => {
+  assert.throws(() => parseDigestPinnedBase("debian:bookworm-slim"), TestbedBuildInputsError);
+  assert.throws(() => parseDigestPinnedBase("node:22.22.1-bookworm-slim"), TestbedBuildInputsError);
+});
+
+test("parseDigestPinnedBase REFUSES a malformed digest (short hex / non-hex / wrong algo)", () => {
+  assert.throws(() => parseDigestPinnedBase("debian@sha256:" + "a".repeat(63)), TestbedBuildInputsError);
+  assert.throws(() => parseDigestPinnedBase("debian@sha256:" + "g".repeat(64)), TestbedBuildInputsError);
+  assert.throws(() => parseDigestPinnedBase("debian@sha256:" + "A".repeat(64)), TestbedBuildInputsError);
+  assert.throws(() => parseDigestPinnedBase("debian@sha512:" + "a".repeat(128)), TestbedBuildInputsError);
+});
+
+test("parseDigestPinnedBase REFUSES empty / non-string input", () => {
+  assert.throws(() => parseDigestPinnedBase(""), TestbedBuildInputsError);
+  assert.throws(() => parseDigestPinnedBase("   "), TestbedBuildInputsError);
+  assert.throws(() => parseDigestPinnedBase(null), TestbedBuildInputsError);
+});
+
+test("readBaseImage reads a comment-tolerant single digest-pinned ref from a file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "testbed-base-"));
+  try {
+    const p = join(dir, "base-image");
+    writeFileSync(p, `# resolved host-side per the L0 runbook\n\ndebian:bookworm-slim@${GOOD_DIGEST}\n`);
+    const { digest, name } = readBaseImage(p);
+    assert.equal(digest, GOOD_DIGEST);
+    assert.equal(name, "debian:bookworm-slim");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readBaseImage loud-fails on an UNRESOLVED slot (comment-only — no ref yet)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "testbed-base-"));
+  try {
+    const p = join(dir, "base-image");
+    writeFileSync(p, "# not yet resolved — run the host-side base-image resolve step\n");
+    assert.throws(() => readBaseImage(p), TestbedBuildInputsError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readBaseImage loud-fails on multiple refs (ambiguous) and on a missing file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "testbed-base-"));
+  try {
+    const p = join(dir, "base-image");
+    writeFileSync(p, `debian@${GOOD_DIGEST}\nubuntu@${GOOD_DIGEST}\n`);
+    assert.throws(() => readBaseImage(p), TestbedBuildInputsError);
+    assert.throws(() => readBaseImage(join(dir, "nope")), TestbedBuildInputsError);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

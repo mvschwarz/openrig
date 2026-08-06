@@ -15,7 +15,7 @@
 // fail LOUDLY — never a silent partial receipt that would look build-clean.
 
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve, sep } from "node:path";
 
 /** Loud, typed failure — a missing/invalid asset input must fail, never a silent partial
@@ -105,4 +105,67 @@ export function deriveStubAssetsHash(rootDir, relativePaths) {
   const receipt = { schema: STUB_ASSETS_SCHEMA, files };
   const hash = sha256(JSON.stringify(receipt));
   return { hash, receipt };
+}
+
+/**
+ * Parse + ENFORCE a digest-pinned base image reference (plan §1 fence: "digest-pinned, not
+ * tag-floating"). A tag-floating base drifts silently between builds and breaks byte-repro; only a
+ * `name[:tag]@sha256:<64-hex>` reference is accepted. The returned digest becomes the manifest's
+ * baseDigest. Anything else — a tag-only ref, a malformed/non-sha256 digest, empty — fails LOUDLY.
+ * @returns {{ ref: string, name: string, digest: string }}
+ */
+export function parseDigestPinnedBase(ref) {
+  if (typeof ref !== "string" || ref.trim().length === 0) {
+    throw new TestbedBuildInputsError("base image reference must be a non-empty string");
+  }
+  const trimmed = ref.trim();
+  const at = trimmed.indexOf("@");
+  if (at === -1) {
+    throw new TestbedBuildInputsError(
+      `base image '${trimmed}' is tag-floating — it must be digest-pinned (name@sha256:<64-hex>)`,
+    );
+  }
+  const name = trimmed.slice(0, at);
+  const digest = trimmed.slice(at + 1);
+  if (name.trim().length === 0) {
+    throw new TestbedBuildInputsError(`base image '${trimmed}' is missing a name before the digest`);
+  }
+  // Only sha256, exactly 64 lowercase hex — matches how docker records a pinned digest.
+  if (!/^sha256:[0-9a-f]{64}$/.test(digest)) {
+    throw new TestbedBuildInputsError(
+      `base image digest '${digest}' is not a valid sha256:<64 lowercase hex> pin`,
+    );
+  }
+  return { ref: trimmed, name, digest };
+}
+
+/**
+ * Read the committed base-image slot (docker/testbed/base-image) — the digest resolved HOST-side by
+ * the L0 runbook and recorded for byte-reproducibility. Comment (`#`) and blank lines are ignored;
+ * exactly ONE reference must remain. An unresolved slot (comment-only), an ambiguous slot (multiple
+ * refs), or a missing file all fail LOUDLY — the tree can never build against an unpinned base.
+ * @returns {{ ref: string, name: string, digest: string }}
+ */
+export function readBaseImage(filePath) {
+  if (typeof filePath !== "string" || filePath.trim().length === 0) {
+    throw new TestbedBuildInputsError("base-image file path must be a non-empty string");
+  }
+  if (!existsSync(filePath)) {
+    throw new TestbedBuildInputsError(`base-image file '${filePath}' does not exist`);
+  }
+  const refs = readFileSync(filePath, "utf8")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && !l.startsWith("#"));
+  if (refs.length === 0) {
+    throw new TestbedBuildInputsError(
+      `base-image slot '${filePath}' is unresolved — resolve the digest host-side (L0 runbook)`,
+    );
+  }
+  if (refs.length > 1) {
+    throw new TestbedBuildInputsError(
+      `base-image slot '${filePath}' names ${refs.length} refs — exactly one digest-pinned base is required`,
+    );
+  }
+  return parseDigestPinnedBase(refs[0]);
 }
