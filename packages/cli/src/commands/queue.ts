@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { Command } from "commander";
-import { DaemonClient } from "../client.js";
+import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, DaemonResponseError } from "../client.js";
 import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { sessionRigOf, isHumanSeatSessionRef } from "../session-name.js";
@@ -26,6 +26,8 @@ async function withClient<T>(
   deps: QueueDeps,
   fn: (client: DaemonClient) => Promise<T>,
   attemptWhenProbeUnconfirmed = false,
+  // D14 — names the cross-host target in transport-failure output.
+  hostContext?: string,
 ): Promise<T | undefined> {
   const status = await getDaemonStatus(deps.lifecycleDeps);
   // RULING 1ae863d2 — status is 3-state: hard-block ONLY on positive evidence
@@ -50,7 +52,20 @@ async function withClient<T>(
     ? getDaemonUrl(status)
     : new DaemonClient().baseUrl;
   const client = deps.clientFactory(baseUrl);
-  return fn(client);
+  // D14 (accept-and-drop family #6): a THROWING transport must fail LOUD — the
+  // classified error + host context on stderr, nonzero exit — never a silent exit.
+  try {
+    return await fn(client);
+  } catch (err) {
+    if (err instanceof DaemonConnectionError || err instanceof DaemonTimeoutError || err instanceof DaemonResponseError) {
+      const where = hostContext ? ` (routing to host '${hostContext}')` : "";
+      console.error(`queue transport failure${where}: ${err.message}`);
+      console.error("The write outcome is INDETERMINATE if the request may have reached a daemon — reconcile by ID before any retry.");
+      process.exitCode = 1;
+      return undefined;
+    }
+    throw err;
+  }
 }
 
 function printResult(json: boolean, body: unknown, status: number): void {
@@ -422,7 +437,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
         });
         printResult(opts.json ?? false, res.data, res.status);
-      }, hostResolved.hostId !== undefined);
+      }, hostResolved.hostId !== undefined, hostResolved.hostId);
     });
 
   cmd
