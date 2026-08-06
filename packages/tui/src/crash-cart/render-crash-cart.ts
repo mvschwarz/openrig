@@ -3,6 +3,7 @@
 // section wording are CONTRACT; theme tokens only (no invented colors). Bold text carries a color
 // token (`bright`) because a bold-only seg renders as plain ink in this pipeline.
 import type { Token } from "../theme.js";
+import type { Screen } from "../types.js";
 import type { CrashCartModel } from "./crash-cart-model.js";
 
 interface Seg {
@@ -111,4 +112,33 @@ export function renderCrashCartView(model: CrashCartModel): Line[] {
     { text: "" },
     ...renderActions(),
   ];
+}
+
+/** Pad a line to width with trailing spaces; NEVER truncate (a truncated line would break the
+ *  strip-invariant against its full-length segs). Over-width lines are left as-is. */
+function padTo(s: string, w: number): string {
+  return s.length >= w ? s : s + " ".repeat(w - s.length);
+}
+
+export interface CrashCartScreenOptions {
+  cols?: number;
+  rows?: number;
+}
+
+/**
+ * Wrap the cockpit view into a full-width Screen (no explorer split). Line 0 is left BENIGN (blank)
+ * because stylize special-cases index 0; the content + its segRows start at index ≥ 1, painted by the
+ * full-width segRows branch. plain(segs) === the (padded) line, so the strip-invariant holds.
+ */
+export function renderCrashCartScreen(model: CrashCartModel, options: CrashCartScreenOptions = {}): Screen {
+  const cols = options.cols ?? 120;
+  const view = renderCrashCartView(model);
+  const lines: string[] = [""]; // benign line 0
+  const segRows: NonNullable<Screen["segRows"]> = {};
+  for (const item of view) {
+    const y = lines.length + 1; // 1-based terminal row of the line about to be pushed
+    lines.push(padTo(item.text, cols));
+    if (item.segs) segRows[y] = item.segs;
+  }
+  return { lines, segRows, hitMap: [], contentTargets: [], contentMaxOffset: 0, explorerRows: [] };
 }
