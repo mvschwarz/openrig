@@ -23,6 +23,16 @@ function parseText(text: string, final: boolean): { events: InputEvent[]; remain
             const button = Number(match[1]);
             if (match[4] === "M" && (button & 3) !== 3 && button < 32)
               events.push({ type: "mouse", button: button & 3, x: Number(match[2]), y: Number(match[3]) });
+            // Wheel notches (SGR button & 64 → 64=up, 65=down) drive the SAME content-scroll as
+            // PgUp/PgDn (most keyboards lack those keys — the founder fix). Was decoded then dropped.
+            else if (match[4] === "M" && (button & 64) !== 0) {
+              const down = (button & 1) !== 0;
+              events.push({
+                type: "key",
+                key: down ? "pagedown" : "pageup",
+                action: { type: "content-scroll", delta: down ? 3 : -3 },
+              });
+            }
             i += match[0].length;
             continue;
           }
