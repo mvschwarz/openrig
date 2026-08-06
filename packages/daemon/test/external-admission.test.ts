@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { resolveExternal, OPERATOR_HUMAN_DEFAULT_SLOT, type RegisteredEntity } from "../src/domain/gateway/external-admission.js";
+import { isHumanSeatSessionRef } from "../src/domain/session-name.js";
 
 // M1 A4b — @external entity-admission resolver. Contract 2a57d099. The four ruled
 // outcomes; proof-2's ENTITY-level teaching refusal text lives here (the DOMAIN-level
@@ -38,7 +39,16 @@ describe("A4b resolveExternal", () => {
     expect(r.kind).toBe("scheme");
   });
 
-  it("the default inbound slot is operator-human@kernel", () => {
-    expect(OPERATOR_HUMAN_DEFAULT_SLOT).toBe("operator-human@kernel");
+  it("the default HUMAN operator slot is human-operator@kernel (prefix convention)", () => {
+    expect(OPERATOR_HUMAN_DEFAULT_SLOT).toBe("human-operator@kernel");
+  });
+
+  // Durable class-guard (dev-planner ruling): a HUMAN-named slot MUST classify as human.
+  // The '-human'-SUFFIX footgun (operator-human@kernel) matched NEITHER human-seat predicate;
+  // pinning the prefix convention here kills a future convention-breaking rename of this slot.
+  it("the default HUMAN slot satisfies isHumanSeatSessionRef (human-class, not the '-human'-suffix footgun)", () => {
+    expect(isHumanSeatSessionRef(OPERATOR_HUMAN_DEFAULT_SLOT)).toBe(true);
+    // the buggy legacy form does NOT — proving the guard is discriminating
+    expect(isHumanSeatSessionRef("operator-human@kernel")).toBe(false);
   });
 });

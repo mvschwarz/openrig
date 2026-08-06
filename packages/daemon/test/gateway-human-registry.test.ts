@@ -91,8 +91,8 @@ describe("A3 human-fragment validation (add-time == load-time)", () => {
     expect(validateHumanFragment(fragment({ entityId: "../evil" })).ok).toBe(false);
   });
 
-  it("operator-human@kernel is the fallback slot, NOT a fragment", () => {
-    expect(OPERATOR_HUMAN_DEFAULT_SLOT).toBe("operator-human@kernel");
+  it("human-operator@kernel is the fallback HUMAN slot, NOT a fragment", () => {
+    expect(OPERATOR_HUMAN_DEFAULT_SLOT).toBe("human-operator@kernel");
   });
 });
 

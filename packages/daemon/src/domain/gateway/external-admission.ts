@@ -9,11 +9,15 @@
 //   scheme        slack:U012AB3CD@external -> a one-off ADDRESS (never a registry entry;
 //                                            connector #1 delivers it directly)
 //   unregistered  stranger@external        -> LOUD structured teaching refusal
-//   (unresolved inbound with no target)    -> the default slot operator-human@kernel
+//   (unresolved inbound with no target)    -> the default HUMAN slot human-operator@kernel
 //
 // proof-2 captures BOTH refusal texts: the DOMAIN-level bounce (a token NOT in the
 // closed set falls through to unknown_destination_rig, from A1/A2) AND the ENTITY-level
 // teaching refusal here (valid @external domain, entity absent).
+
+// The default HUMAN operator identity — re-exported from its canonical home in the
+// human-registry (ONE source, no dup). See there for the concept-1/concept-2 note.
+export { OPERATOR_HUMAN_DEFAULT_SLOT } from "./human-registry.js";
 
 /** The identity a registered human contributes to admission (a projection of the A3
  *  fragment; the resolver only needs the key + address for admission). */
@@ -27,8 +31,6 @@ export type ExternalResolution =
   | { kind: "scheme"; scheme: string; handle: string }
   | { kind: "unregistered"; local: string; error: string };
 
-/** The fallback inbound target when no addressable entity resolves (slice-11 default). */
-export const OPERATOR_HUMAN_DEFAULT_SLOT = "operator-human@kernel";
 
 /** Resolve the `local` part of a `<local>@external` ref against the registered entities.
  *  A scheme form (`local` contains ':') is the literal-scheme mode — a one-off address,

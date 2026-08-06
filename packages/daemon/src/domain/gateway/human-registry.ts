@@ -159,9 +159,14 @@ export function projectionPath(home: string = getOpenRigHome()): string {
   return join(home, "gateway", "humans.generated.yaml");
 }
 
-/** The default inbound slot when no addressable entity resolves (slice-11 default,
- *  unchanged). NOT a fragment — the fallback target, never an entities[] entry. */
-export const OPERATOR_HUMAN_DEFAULT_SLOT = "operator-human@kernel";
+/** The default HUMAN operator identity — the fallback HUMAN when admission resolves no
+ *  addressable entity. NOT a fragment (never an entities[] entry) and NOT the inbound
+ *  routing destination (that is the operator-AGENT operator-agent@kernel, which has its
+ *  own home in the slack connector config — a different seat). Named with the human-seat
+ *  PREFIX convention so it classifies as human-CLASS (isHumanSeatSessionRef); the parity
+ *  test pins that, killing the '-human'-suffix footgun class. Canonical home for this
+ *  constant — external-admission.ts imports it (ONE source, no dup). */
+export const OPERATOR_HUMAN_DEFAULT_SLOT = "human-operator@kernel";
 
 const PROJECTION_HEADER =
   "# GENERATED FILE — DO NOT EDIT.\n" +
