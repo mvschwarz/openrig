@@ -35,7 +35,7 @@ const IDENTITY_FIELDS = ["baseDigest", "nodeVersion", "openrigSha", "stubAssetsH
 /** Deterministic JSON with recursively sorted keys — the byte-stable form the digest is
  *  taken over (two objects with the same entries serialize identically regardless of key
  *  insertion order). */
-function canonicalJson(value) {
+export function canonicalJson(value) {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   const keys = Object.keys(value).sort();

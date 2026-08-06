@@ -17,6 +17,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve, sep } from "node:path";
+import { canonicalJson } from "./testbed-manifest.mjs";
 
 /** Loud, typed failure — a missing/invalid asset input must fail, never a silent partial
  *  receipt that omits (or over-counts) a baked-in file. */
@@ -98,12 +99,13 @@ export function deriveStubAssetsHash(rootDir, relativePaths) {
     files.push({ path, sha256: sha256(bytes) });
   }
 
-  // Sort by POSIX path so the receipt + digest are order-independent. The digested payload is the
-  // schema + the sorted {path,sha256} entries — both fields JSON-escaped (path) or fixed-width hex
-  // (sha256), so no naive delimiter join can forge a distinct set.
+  // Sort by POSIX path so the receipt + digest are order-independent. The digest is taken over the
+  // SAME canonical sorted-key JSON the manifest uses (never a naive join): both fields are JSON-escaped
+  // (path) or fixed-width hex (sha256), so no delimiter in a path can forge a distinct set, and the
+  // canonical serializer keeps the digest key-order-independent even if the receipt shape grows.
   files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   const receipt = { schema: STUB_ASSETS_SCHEMA, files };
-  const hash = sha256(JSON.stringify(receipt));
+  const hash = sha256(canonicalJson(receipt));
   return { hash, receipt };
 }
 
