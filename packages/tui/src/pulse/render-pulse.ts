@@ -2,7 +2,7 @@
 // renderers (plan §crash-cart-pre-work: crash-cart rides these). Reproduces the
 // approved mock's structure/ordering/emphasis in the TUI idiom — glyph set
 // ●/◌/⧗/▲/✓/○ and section wording are CONTRACT; theme tokens only (no invented
-// colors — the ⧗ info accent is a routed D4 gap, see PULSE_INFO_TOKEN).
+// colors — the ⧗ info accent uses the RESOLVED D4 info token, see PULSE_INFO_TOKEN).
 import type { Token } from "../theme.js";
 import type { PulseModel, PulseExceptionSection, PulseLane, PulseLaneRow } from "./pulse-model.js";
 
@@ -73,13 +73,19 @@ function laneCell(row: PulseLaneRow | undefined, w: number): Seg[] {
   if (!row) return [{ text: padEnd("", w) }];
   const glyph = `${row.glyph} `;
   const time = row.time ? `${row.time} ` : "";
-  const body = `${glyph}${time}${row.label}`;
+  // TRUNCATE the (variable) label to the cell budget so a long REAL label never
+  // overflows and shoves the next column out of alignment — the mock's fixed
+  // three-lane columns are a render contract. A cut is signalled with a trailing
+  // "…" (honest truncation, not a silent drop); the full value stays on drill-in.
+  const avail = Math.max(0, w - glyph.length - time.length);
+  let label = row.label;
+  if (label.length > avail) label = avail > 0 ? label.slice(0, avail - 1) + "…" : "";
   const segs: Seg[] = [{ text: glyph, token: row.token }];
   if (row.time) segs.push({ text: time, token: "dim" });
-  segs.push({ text: row.label, token: row.time ? undefined : row.token === "ok" ? "dim" : row.token });
+  segs.push({ text: label, token: row.time ? undefined : row.token === "ok" ? "dim" : row.token });
   // pad the cell to its CONTENT width (plain trailing spaces); the inter-column
   // gutter is added by renderLanes so it is guaranteed even when body === w.
-  const pad = w - body.length;
+  const pad = w - glyph.length - time.length - label.length;
   if (pad > 0) segs.push({ text: " ".repeat(pad) });
   return segs;
 }

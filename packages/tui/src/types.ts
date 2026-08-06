@@ -195,6 +195,19 @@ export interface FleetSnapshot {
   /** Per-seat ps/activity (the PARKED join's right side), one entry per running
    * agent seat with a canonical session, from the shipped nodes read. */
   seatActivity: SeatActivitySummary[];
+  /** PULSE UP NEXT source (increment 3) — the shipped state=pending read
+   * (unclaimed backlog). Carried in the daemon's served order (ts_created DESC);
+   * the render keeps only unclaimed (claimedAt null) and caps for display. */
+  pending: QueueRead[];
+  /** PULSE JUST FINISHED source (increment 3) — the shipped
+   * state=done,handed-off read (a bounded recent WINDOW; no fleet-wide
+   * finish-time-ordered transitions endpoint exists — the served order is
+   * ts_created, so the render re-sorts by tsUpdated DESC for newest-finished-first). */
+  recentlyFinished: QueueRead[];
+  /** When THIS snapshot finished hydrating (TUI render-time fact, not a daemon
+   * read) — the PULSE footer "updated Ns ago" freshness. Absent before the first
+   * hydration (emptySnapshot) → the footer renders an honest "—", never a fake age. */
+  hydratedAt?: string;
   hostsDown: HostDown[];
   /** latest ambient stream items for the footer ticker (FR-10), newest last */
   stream: Array<{ tsEmitted: string; sourceSession: string; body: string }>;

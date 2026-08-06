@@ -275,7 +275,7 @@ export async function hydrateSnapshot(
     }
   }
 
-  const [agg, summaries, library, review, streamItems, attention, blocked, inProgress] = await Promise.all([
+  const [agg, summaries, library, review, streamItems, attention, blocked, inProgress, pending, recentlyFinished] = await Promise.all([
     safe<AttentionAggregateRead>("attention-aggregate", () => client.attentionAggregate()),
     safe<RigSummaryRead[]>("rigs-summary", () => client.rigsSummary()),
     safe<SpecLibraryRead[]>("specs-library", () => client.specsLibrary()),
@@ -285,6 +285,9 @@ export async function hydrateSnapshot(
     safe<QueueItemRead[]>("queue-attention", () => client.queueAttention()),
     safe<QueueItemRead[]>("queue-blocked", () => client.queueBlocked()),
     safe<QueueItemRead[]>("queue-in-progress", () => client.queueInProgress()),
+    // PULSE UP NEXT + JUST FINISHED lane reads (increment 3) — same shipped /list route
+    safe<QueueItemRead[]>("queue-pending", () => client.queuePending()),
+    safe<QueueItemRead[]>("queue-recently-finished", () => client.queueRecentlyFinished()),
   ]);
 
   const agentSpecNames = new Set((library ?? []).filter((entry) => entry.kind === "agent").map((entry) => entry.name));
@@ -497,6 +500,9 @@ export async function hydrateSnapshot(
     blocked: blockedResolved,
     inProgress: (inProgress ?? []).map(toQueueRead),
     seatActivity,
+    pending: (pending ?? []).map(toQueueRead),
+    recentlyFinished: (recentlyFinished ?? []).map(toQueueRead),
+    hydratedAt: new Date().toISOString(),
     hostsDown,
     stream: (streamItems ?? []).map((s) => ({ tsEmitted: s.tsEmitted, sourceSession: s.sourceSession, body: s.body })),
     readErrors,

@@ -123,6 +123,9 @@ const FIXTURES: Record<string, unknown> = {
   "/api/queue/list?state=blocked": [],
   // PULSE ◌ PARKED WITH BATON source (increment 2b) — in-progress qitems
   "/api/queue/list?state=in-progress": [],
+  // PULSE ○ UP NEXT + ✓ JUST FINISHED lane sources (increment 3) — same /list route
+  "/api/queue/list?state=pending&limit=50": [],
+  "/api/queue/list?state=done,handed-off&limit=20": [],
 };
 
 function fixtureClient(overrides: Record<string, { status: number } | undefined> = {}, responses: Record<string, unknown> = {}): DaemonClient {
@@ -389,6 +392,25 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     // in-progress read carried into the snapshot for the PARKED join
     expect(snap.inProgress.map((q) => q.qitemId)).toEqual(["qitem-p1"]);
     expect(snap.inProgress[0]?.destinationSession).toBe("dev-impl@myrig");
+  });
+
+  it("PULSE lanes (incr 3): carries the pending (UP NEXT) + done/handed-off (JUST FINISHED) reads and stamps hydratedAt", async () => {
+    const pending = [
+      { qitemId: "qp1", state: "pending", destinationSession: "dev-a@rig", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "next up", body: "", claimedAt: null, tsUpdated: "2026-08-06T11:00:00.000Z" },
+    ];
+    const finished = [
+      { qitemId: "qf1", state: "done", destinationSession: "dev-a@rig", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "closed", body: "", claimedAt: "2026-08-06T10:00:00.000Z", tsUpdated: "2026-08-06T10:30:00.000Z" },
+      { qitemId: "qf2", state: "handed-off", destinationSession: "dev-b@rig", blockedOn: null, handedOffTo: "rev@rig", tier: null, tags: null, summary: "passed on", body: "", claimedAt: "2026-08-06T09:00:00.000Z", tsUpdated: "2026-08-06T09:30:00.000Z" },
+    ];
+    const snap = await hydrateSnapshot(fixtureClient({}, {
+      "/api/queue/list?state=pending&limit=50": pending,
+      "/api/queue/list?state=done,handed-off&limit=20": finished,
+    }));
+    expect(snap.pending.map((q) => q.qitemId)).toEqual(["qp1"]);
+    expect(snap.recentlyFinished.map((q) => q.qitemId)).toEqual(["qf1", "qf2"]);
+    // hydratedAt is the TUI's own render-time completion stamp (not a daemon read) — a valid ISO
+    expect(snap.hydratedAt).toBeDefined();
+    expect(Number.isNaN(Date.parse(snap.hydratedAt!))).toBe(false);
   });
 
   it("leaves a failed read honest-empty with a NAMED error; other sections still hydrate", async () => {

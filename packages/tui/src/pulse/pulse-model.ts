@@ -215,23 +215,92 @@ function parkedRows(
     const seat = seatBySession.get(q.destinationSession);
     if (!seat || seat.terminalActive !== false) continue; // IDLE owner ONLY (null ≠ idle — honest-unknown)
     const idle = ageLabel(seat.lastActivityAt, nowMs);
+    // r1 belt (incr-3): a false-active seat carries a record, so it carries a
+    // lastActivityAt (same-observation ladder) → this fallback is unreachable
+    // post-fold, purely defensive against a bare "in-progress  idle" if the age
+    // is ever absent/unparseable — never a fabricated duration.
+    const idleText = idle ? `${idle} idle` : "idle (age unknown)";
     out.push({
       glyph: "◌",
       token: "warn",
       subject: q.destinationSession,
-      claim: ` · qitem ${qitemShort(q.qitemId)} in-progress ${idle} idle, no handoff`,
+      claim: ` · qitem ${qitemShort(q.qitemId)} in-progress ${idleText}, no handoff`,
       meta: " → enter: transcript check",
     });
   }
   return out;
 }
 
-/** Increment-2 LIVE builder — the exception sections from the hydrated snapshot;
- * lanes + footer stay static (demoPulseModel) until their reads land. The two
- * LIVE joins obey empty-strip-is-silence (a ran join yielding zero is OMITTED);
- * PARKED is the DEFERRED read and renders the non-silent honesty-floor line. */
+/** Per-lane DISPLAY cap. A lane never dumps an unbounded set; overflow past the
+ * cap is signalled explicitly (UP NEXT renders a "…" marker with the TRUE total
+ * in the header) — never a silent truncation (see [[pagination-terminates-on-data-not-budgets]]). */
+const LANE_ROW_CAP = 5;
+
+/** Absolute UTC clock label for a JUST FINISHED transition time (e.g. "11:44").
+ * UTC keeps it deterministic + TZ-independent; an unparseable stamp renders "". */
+function hhmm(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  const d = new Date(t);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+}
+
+/** ● NOW rows — running seats with active work: each ACTIVE seat
+ * (terminalActive===true) joined to its in-progress qitem (IMPL-PLAN §lanes).
+ * null/false-activity owners are excluded here (idle → PARKED; null → honest-
+ * unknown). An active seat with no in-progress qitem is still running, so it is
+ * shown bare (the seat is the load-bearing referent; its work is context). Both
+ * inputs already ride the snapshot from incr-2b — NO new read. */
+function nowRows(seatActivity: SeatActivitySummary[], inProgress: QueueRead[]): PulseLaneRow[] {
+  const workBySession = new Map<string, QueueRead>();
+  for (const q of inProgress) if (!workBySession.has(q.destinationSession)) workBySession.set(q.destinationSession, q);
+  const out: PulseLaneRow[] = [];
+  for (const seat of seatActivity) {
+    if (seat.terminalActive !== true) continue; // ACTIVE only (null ≠ active — honest-unknown)
+    const q = workBySession.get(seat.session);
+    const work = q ? (q.summary ?? bodyHead(q.body)) : "";
+    out.push({ glyph: "●", token: "ok", label: work ? `${seat.session}  ${work}` : seat.session });
+  }
+  return out;
+}
+
+/** ✓ JUST FINISHED rows — recent terminal transitions newest-FINISHED-first.
+ * The shipped /list read serves ts_created order, so we re-sort by tsUpdated
+ * DESC (the finish time) and cap to a recent window (count == rendered — this is
+ * inherently a WINDOW, not a total). Time = the transition's tsUpdated (HH:MM). */
+function finishedRows(recent: QueueRead[], cap: number): PulseLaneRow[] {
+  return [...recent]
+    .sort((a, b) => Date.parse(b.tsUpdated) - Date.parse(a.tsUpdated))
+    .slice(0, cap)
+    .map((q) => ({ glyph: "✓", token: "ok" as Token, time: hhmm(q.tsUpdated), label: q.summary ?? bodyHead(q.body) }));
+}
+
+/** ○ UP NEXT lane — the unclaimed pending backlog. Carried in the daemon's
+ * SERVED order (ts_created DESC — verbatim; re-sorting by an invented priority
+ * scale the daemon does not serve would be exactly the forbidden client-side
+ * synthesis). Beyond the display cap the last row is a "…" overflow marker and
+ * the header count is the TRUE total (honesty floor — the count is the referent
+ * total, the rows are the rendered subset). */
+function upNextLane(pending: QueueRead[], cap: number): PulseLane {
+  const unclaimed = pending.filter((q) => q.claimedAt == null); // unclaimed only (claimedAt null)
+  const toRow = (q: QueueRead): PulseLaneRow => ({ glyph: "○", token: "dim", label: q.summary ?? bodyHead(q.body) });
+  const rows = unclaimed.length > cap
+    ? [...unclaimed.slice(0, cap - 1).map(toRow), { glyph: "○", token: "dim" as Token, label: "…" }]
+    : unclaimed.map(toRow);
+  return { label: "UP NEXT", count: unclaimed.length, rows };
+}
+
+/** Increment-3 LIVE builder — exception sections (incr 2/2b) PLUS the three
+ * lanes + footer, all from the hydrated snapshot's SHIPPED reads. The LIVE joins
+ * obey empty-strip-is-silence for the EXCEPTION sections (a ran join yielding
+ * zero is OMITTED); the LANES always render (a lane with zero rows is an honest
+ * "(0)", not silence — an empty backlog IS information). The footer counts are
+ * derived FROM the built model so header numbers can never diverge from their
+ * referent sets (label==referent). demoPulseModel is retained only as a static
+ * renderer fixture (spatial-contract tests), no longer this builder's source. */
 export function buildPulseModel(snap: FleetSnapshot, nowMs: number = Date.now()): PulseModel {
-  const demo = demoPulseModel();
   const exceptions: PulseExceptionSection[] = [];
 
   const needs = needsRows(snap.attention, nowMs);
@@ -249,5 +318,21 @@ export function buildPulseModel(snap: FleetSnapshot, nowMs: number = Date.now())
   const blocked = blockedRows(snap.blocked, nowMs);
   if (blocked.length > 0) exceptions.push({ glyph: "⧗", token: PULSE_INFO_TOKEN, label: "BLOCKED ON AGENTS", rows: blocked });
 
-  return { exceptions, lanes: demo.lanes, footer: demo.footer };
+  const now = nowRows(snap.seatActivity, snap.inProgress);
+  const finished = finishedRows(snap.recentlyFinished, LANE_ROW_CAP);
+  const lanes: [PulseLane, PulseLane, PulseLane] = [
+    { label: "NOW", count: now.length, rows: now },
+    { label: "JUST FINISHED", count: finished.length, rows: finished },
+    upNextLane(snap.pending, LANE_ROW_CAP),
+  ];
+
+  // Footer counts ARE the built referent sets (label==referent — never a second
+  // source of truth). "updated" freshness from the TUI's own hydration stamp;
+  // absent (pre-first-hydration) → honest "—", never a fabricated age.
+  const parkedCount = exceptions.find((s) => s.label === "PARKED WITH BATON")?.rows.length ?? 0;
+  const waitingYou = exceptions.find((s) => s.label === "NEEDS YOU")?.rows.length ?? 0;
+  const ago = ageLabel(snap.hydratedAt, nowMs);
+  const footer = { active: now.length, parked: parkedCount, waitingYou, updatedAgo: ago ? `${ago} ago` : "—" };
+
+  return { exceptions, lanes, footer };
 }

@@ -109,6 +109,22 @@ export class DaemonClient {
   queueInProgress() {
     return this.get(`/api/queue/list?state=in-progress`);
   }
+  /** ALL unclaimed pending qitems via the SAME shipped /list route with
+   * ?state=pending (the UP NEXT backlog). Mirror of queueInProgress — a
+   * client-method addition on an existing route, NOT a new endpoint. The daemon
+   * serves ts_created DESC; the PULSE render keeps only unclaimed + caps display.
+   * Bounded so a huge backlog can't unbound the frame. */
+  queuePending(limit = 50) {
+    return this.get(`/api/queue/list?state=pending&limit=${limit}`);
+  }
+  /** Recent terminal transitions (JUST FINISHED) via the SAME shipped /list
+   * route with a COMMA multi-state ?state=done,handed-off (queue.ts splits
+   * stateRaw on ","). No fleet-wide finish-time transitions endpoint exists, so
+   * this is a bounded RECENT WINDOW fetched in ts_created order; the PULSE render
+   * re-sorts by tsUpdated DESC (finish time) for newest-first. NOT a new endpoint. */
+  queueRecentlyFinished(limit = 20) {
+    return this.get(`/api/queue/list?state=done,handed-off&limit=${limit}`);
+  }
   /** A single qitem by id via the shipped GET /api/queue/:qitemId (queue.ts:864,
    * returns the QueueItem or 404). Used for the BLOCKED ON AGENTS bounded per-row
    * lookup: blockedOn is a qitem POINTER, so the blocking agent is that qitem's

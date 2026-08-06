@@ -14,8 +14,8 @@ const HR = 60 * MIN;
 
 function liveSnap(over: Partial<FleetSnapshot> = {}): FleetSnapshot {
   const base = demoSnapshot();
-  // Zero ALL exception sources by default; each test opts into the ones it drives.
-  return { ...base, attention: [], blocked: [], inProgress: [], seatActivity: [], ...over };
+  // Zero ALL exception + lane sources by default; each test opts into the ones it drives.
+  return { ...base, attention: [], blocked: [], inProgress: [], seatActivity: [], pending: [], recentlyFinished: [], ...over };
 }
 
 // A ps/activity row for one seat (the PARKED join's right side).
@@ -209,5 +209,133 @@ describe("PULSE view increment 2 — Exceptions strip LIVE", () => {
     const body = renderScreen(v.get(), snap, { cols: 140, rows: 44 }).lines.join("\n");
     expect(body).toContain("EXPLORER");
     expect(body).toContain("┬");
+  });
+});
+
+describe("PULSE view increment 3 — Lanes LIVE (NOW / JUST FINISHED / UP NEXT + live footer)", () => {
+  it("NOW: active seats (terminalActive===true) joined to their in-progress work; idle/unknown owners excluded", () => {
+    const snap = liveSnap({
+      inProgress: [
+        inprog({ qitemId: "n1", destinationSession: "dev50-driver@openrig-build", summary: "pulse incr-3 build" }),
+        inprog({ qitemId: "n2", destinationSession: "dev50-guard@openrig-build", summary: "guard busywork" }),
+        inprog({ qitemId: "n3", destinationSession: "dev50-qa@openrig-build", summary: "qa matrix leg" }),
+      ],
+      seatActivity: [
+        seat("dev50-driver@openrig-build", true, ago(1 * MIN)),   // ACTIVE → NOW (with work)
+        seat("dev50-guard@openrig-build", false, ago(47 * MIN)),  // IDLE → PARKED, never NOW
+        seat("dev50-qa@openrig-build", null, null),               // UNKNOWN signal → excluded (null ≠ active)
+        seat("dev50-planner@openrig-build", true, ago(30_000)),   // ACTIVE, no in-progress qitem → bare NOW row
+      ],
+    });
+    const now = buildPulseModel(snap, NOW).lanes[0];
+    expect(now.label).toBe("NOW");
+    const labels = now.rows.map((r) => r.label);
+    // active owner + its work
+    expect(labels.some((l) => l.includes("dev50-driver@openrig-build") && l.includes("pulse incr-3 build"))).toBe(true);
+    // active seat with NO in-progress qitem is still running → shown bare (honest)
+    expect(labels.some((l) => l.includes("dev50-planner@openrig-build"))).toBe(true);
+    // idle owner belongs under PARKED, NOT here; unknown-signal owner excluded
+    expect(labels.some((l) => l.includes("dev50-guard@openrig-build"))).toBe(false);
+    expect(labels.some((l) => l.includes("dev50-qa@openrig-build"))).toBe(false);
+    // NOW has no overflow: header count == rendered referent
+    expect(now.count).toBe(now.rows.length);
+    expect(now.count).toBe(2);
+    expect(now.rows.every((r) => r.glyph === "●")).toBe(true);
+  });
+
+  it("JUST FINISHED: recent done/handed-off newest-FINISHED-first (tsUpdated desc) with HH:MM times", () => {
+    const snap = liveSnap({
+      recentlyFinished: [
+        // served in ts_created order (NOT finish order) — the view re-sorts by tsUpdated
+        attn({ qitemId: "f1", state: "done", summary: "older close-out", tsUpdated: "2026-08-06T10:58:00.000Z" }),
+        attn({ qitemId: "f2", state: "handed-off", summary: "newest fold receipt", tsUpdated: "2026-08-06T11:44:00.000Z" }),
+        attn({ qitemId: "f3", state: "done", summary: "mid terminal CLEAR", tsUpdated: "2026-08-06T11:20:00.000Z" }),
+      ],
+    });
+    const jf = buildPulseModel(snap, NOW).lanes[1];
+    expect(jf.label).toBe("JUST FINISHED");
+    expect(jf.rows.map((r) => r.label)).toEqual(["newest fold receipt", "mid terminal CLEAR", "older close-out"]);
+    expect(jf.rows.map((r) => r.time)).toEqual(["11:44", "11:20", "10:58"]);
+    expect(jf.rows.every((r) => r.glyph === "✓")).toBe(true);
+    expect(jf.count).toBe(3);
+  });
+
+  it("UP NEXT: pending in the SERVED order (verbatim — no client priority synthesis); beyond the cap shows a '…' overflow row with the TRUE total count", () => {
+    const pend = Array.from({ length: 6 }, (_, i) => attn({ qitemId: `p${i}`, state: "pending", summary: `pending item ${i}`, claimedAt: null }));
+    const un = buildPulseModel(liveSnap({ pending: pend }), NOW).lanes[2];
+    expect(un.label).toBe("UP NEXT");
+    expect(un.count).toBe(6); // TRUE total (honesty floor — header is the referent total)
+    expect(un.rows.length).toBe(5); // display cap
+    // served order preserved; the last rendered row is the overflow marker
+    expect(un.rows.slice(0, 4).map((r) => r.label)).toEqual(["pending item 0", "pending item 1", "pending item 2", "pending item 3"]);
+    expect(un.rows[4]?.label).toBe("…");
+    expect(un.rows.some((r) => r.label === "pending item 5")).toBe(false); // beyond-cap real item not fabricated as shown
+    expect(un.rows.slice(0, 4).every((r) => r.glyph === "○")).toBe(true);
+  });
+
+  it("UP NEXT: only UNCLAIMED pending (claimedAt null) — a claimed straggler is excluded", () => {
+    const un = buildPulseModel(liveSnap({
+      pending: [
+        attn({ qitemId: "u1", state: "pending", summary: "unclaimed work", claimedAt: null }),
+        attn({ qitemId: "c1", state: "pending", summary: "claimed already", claimedAt: ago(5 * MIN) }),
+      ],
+    }), NOW).lanes[2];
+    expect(un.rows.map((r) => r.label)).toEqual(["unclaimed work"]);
+    expect(un.count).toBe(1);
+  });
+
+  it("FOOTER counts are LIVE and EQUAL their referent sets (active=NOW · parked=PARKED · waiting-you=NEEDS YOU); updated-ago derived from hydratedAt", () => {
+    const snap = liveSnap({
+      attention: [
+        attn({ qitemId: "a1", summary: "gate one", claimedAt: ago(2 * MIN) }),
+        attn({ qitemId: "a2", summary: "gate two", claimedAt: ago(3 * MIN) }),
+      ],
+      inProgress: [
+        inprog({ qitemId: "n1", destinationSession: "dev50-driver@openrig-build", summary: "working" }),
+        inprog({ qitemId: "pk", destinationSession: "dev50-guard@openrig-build", summary: "parked baton" }),
+      ],
+      seatActivity: [
+        seat("dev50-driver@openrig-build", true, ago(1 * MIN)),
+        seat("dev50-guard@openrig-build", false, ago(47 * MIN)),
+      ],
+      hydratedAt: ago(2000),
+    });
+    const model = buildPulseModel(snap, NOW);
+    expect(model.footer.active).toBe(1); // NOW: driver only
+    expect(model.footer.parked).toBe(1); // PARKED: guard
+    expect(model.footer.waitingYou).toBe(2); // NEEDS YOU: two gates
+    expect(model.footer.updatedAgo).toBe("2s ago");
+    // label==referent: the footer numbers ARE the built referent sets (never divergent)
+    expect(model.footer.active).toBe(model.lanes[0].rows.length);
+    expect(model.footer.parked).toBe(model.exceptions.find((s) => s.label === "PARKED WITH BATON")?.rows.length ?? 0);
+    expect(model.footer.waitingYou).toBe(model.exceptions.find((s) => s.label === "NEEDS YOU")?.rows.length ?? 0);
+  });
+
+  it("FOOTER updated-ago is an honest '—' when no hydration timestamp exists yet (never a fabricated age)", () => {
+    expect(buildPulseModel(liveSnap({ hydratedAt: undefined }), NOW).footer.updatedAgo).toBe("—");
+  });
+
+  it("◌ PARKED age-unknown belt: an idle owner (terminalActive false) with NO lastActivityAt renders 'idle (age unknown)', never a bare/fabricated duration", () => {
+    const snap = liveSnap({
+      inProgress: [inprog({ qitemId: "qitem-x-noagey1", destinationSession: "dev50-guard@openrig-build", summary: "stranded" })],
+      seatActivity: [seat("dev50-guard@openrig-build", false, null)], // idle owner, but NO activity stamp
+    });
+    const parked = buildPulseModel(snap, NOW).exceptions.find((s) => s.label === "PARKED WITH BATON")!;
+    expect(parked).toBeDefined();
+    const text = renderExceptionSection(parked).map((l) => l.text).join("\n");
+    expect(text).toContain("idle (age unknown)");
+    expect(text).not.toContain("in-progress  idle"); // never the bare double-space form
+  });
+
+  it("empty lanes are HONEST: zero live lane sources render empty lanes with (0), not stale demo rows", () => {
+    const model = buildPulseModel(liveSnap(), NOW);
+    expect(model.lanes.map((l) => [l.label, l.count])).toEqual([
+      ["NOW", 0],
+      ["JUST FINISHED", 0],
+      ["UP NEXT", 0],
+    ]);
+    expect(model.lanes.every((l) => l.rows.length === 0)).toBe(true);
+    // and the old static demo lane content must be GONE from the live builder
+    expect(model.lanes.flatMap((l) => l.rows.map((r) => r.label)).join(" ")).not.toContain("slice 51-01 stub");
   });
 });

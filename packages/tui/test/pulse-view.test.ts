@@ -4,7 +4,7 @@ import { parseCommand } from "../src/grammar.js";
 import { renderScreen } from "../src/render.js";
 import { demoSnapshot } from "../src/demo-data.js";
 import { demoPulseModel } from "../src/pulse/pulse-model.js";
-import { renderPulseView } from "../src/pulse/render-pulse.js";
+import { renderPulseView, renderLanes } from "../src/pulse/render-pulse.js";
 
 const snap = demoSnapshot();
 const withSnap = { getSnapshot: () => snap };
@@ -59,24 +59,34 @@ describe("PULSE view (5.2 Wave B — increment 1: static skeleton from the appro
     expect(iBlocked).toBeLessThan(iLanes);
   });
 
-  it("reproduces the mock's three lanes + counts + footer (label==referent honesty)", () => {
+  it("builds the three lanes + footer LIVE from the demo snapshot (label==referent honesty)", () => {
     const v = createViewState({ instanceId: "t", ...withSnap });
     v.dispatch({ type: "tab", tab: "pulse" });
-    const body = renderScreen(v.get(), snap, { cols: 140, rows: 44 }).lines.join("\n");
+    const body = renderScreen(v.get(), snap, { cols: 140, rows: 44, nowMs: DEMO_NOW }).lines.join("\n");
 
+    // NOW ← active seats (terminalActive true) ⋈ their in-progress work: driver,
+    // planner, r1, lead (guard is idle → PARKED; qa null → excluded). The 30-col
+    // NOW lane fits the full session (the load-bearing referent); trailing work
+    // is width-truncated in the strip, so assert the seats + count here.
     expect(body).toContain("NOW (4)");
+    expect(body).toContain("dev50-driver@openrig-build");
+    expect(body).toContain("orch-lead@openrig-build");
+    // JUST FINISHED ← done/handed-off, newest-FINISHED first (tsUpdated desc) + HH:MM
     expect(body).toContain("JUST FINISHED (3)");
-    expect(body).toContain("UP NEXT (5)");
-    expect(body).toContain("dev.impl");
-    expect(body).toContain("slice 51-01 stub");
-    expect(body).toContain("oversight.watch");
-    expect(body).toContain("token sweep");
-    expect(body).toContain("14:02");
+    expect(body).toContain("11:44");
     expect(body).toContain("slice-03 close-out");
     expect(body).toContain("terminal CLEAR");
-    expect(body).toContain("51-02 scenario runner");
+    expect(body).not.toContain("14:02"); // the old static mock time is gone
+    // UP NEXT ← unclaimed pending in served order; SIX pending → cap-4 + "…", count 6
+    expect(body).toContain("UP NEXT (6)");
     expect(body).toContain("RM ceremony");
+    expect(body).toContain("51-02 scenario runner");
+    expect(body).toContain("…"); // overflow marker (2 hidden pending)
+    // FOOTER live: active=NOW(4) · parked=PARKED(1) · waiting-you=NEEDS YOU(2) · 2s ago
     expect(body).toContain("4 active · 1 parked · 2 waiting-you · updated 2s ago");
+    // the old static lane content is GONE
+    expect(body).not.toContain("slice 51-01 stub");
+    expect(body).not.toContain("oversight.watch");
   });
 
   it("the tab strip carries the PULSE tab (top-level view set)", () => {
@@ -103,6 +113,22 @@ describe("PULSE view (5.2 Wave B — increment 1: static skeleton from the appro
     expect(rule).toContain("NOW (4) ─");
     expect(rule).toContain("JUST FINISHED (3) ─");
     expect(rule).not.toContain("NOW (4)─"); // no dash flush against the paren
+  });
+
+  it("column ALIGNMENT holds when a live NOW label overflows: truncated with '…', never shoving the JUST FINISHED column (incr-3, real-data widths)", () => {
+    const lanes: Parameters<typeof renderLanes>[0] = [
+      { label: "NOW", count: 1, rows: [{ glyph: "●", token: "ok", label: "dev50-driver@openrig-build  a very long piece of active work that would overflow the lane" }] },
+      { label: "JUST FINISHED", count: 1, rows: [{ glyph: "✓", token: "ok", time: "11:44", label: "JFMARK" }] },
+      { label: "UP NEXT", count: 1, rows: [{ glyph: "○", token: "dim", label: "UPMARK" }] },
+    ];
+    const [row0] = renderLanes(lanes);
+    // the NOW cell is truncated to exactly COL[0] (30) → the JF column begins at a
+    // FIXED offset (30 + 3-space gutter = 33) instead of being shoved rightward
+    expect(row0!.text.indexOf("✓ 11:44 JFMARK")).toBe(33);
+    expect(row0!.text.slice(0, 30)).toContain("…"); // overflow signalled in-cell
+    expect(row0!.text).toContain("UPMARK");
+    // and the full active-work text is NOT smeared across the neighbouring column
+    expect(row0!.text).not.toContain("overflow the lane");
   });
 
   it("renders without throwing, and the reusable renderer's counts match the model", () => {
