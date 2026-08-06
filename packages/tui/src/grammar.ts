@@ -39,6 +39,13 @@ export function parseCommand(raw: string, sections: readonly SectionDef[] = SECT
     return { type: "error", message: `unknown tab "${name}" — known: table, overview, graph, topology, configuration, yaml, pulse` };
   }
 
+  if (verb === "graph") {
+    // P10 (founder-caught): a first-class `graph` command — opens the topology graph view (same action
+    // as `tab graph`). The view is per-rig and renders honest-empty when no graph is served in the
+    // current context (honest-degraded rail — never a fabricated graph, never a silent no-op).
+    return { type: "tab", tab: "graph" };
+  }
+
   if (verb === "style") {
     // slice-17: the graph-render style is a render DIMENSION riding the same
     // command bar (spike binding 5 — no new input surface); validity is
@@ -67,6 +74,6 @@ export function parseCommand(raw: string, sections: readonly SectionDef[] = SECT
 
   return {
     type: "error",
-    message: `unknown command "${verb}" — known: :<section> /<filter> ${RESOURCES.join("|")} <name>, spec-of <agent>, running <spec>`,
+    message: `unknown command "${verb}" — known: :<section> /<filter> graph, tab <view>, ${RESOURCES.join("|")} <name>, spec-of <agent>, running <spec>`,
   };
 }
