@@ -356,3 +356,42 @@ describe("PULSE view (5.2 Wave B — increment 5: live refresh-seam + motion bud
     expect(t1).toContain("updated");
   });
 });
+
+// P2 — tab-strip active "PULSE" bold no-op. The mock renders the active tab (trailing
+// PULSE) in BOLD, but its seg was bold-ONLY (no token), so the segRows painter (paints
+// only when token||bg||inverse) dropped it to plain — the same class as the exception
+// subject. Per-site emphasis token (no stylize.ts change). Pin at the STYLIZED layer.
+describe("PULSE view (5.2 Wave B) — tab-strip active PULSE renders bold [P2]", () => {
+  // extract the text rendered under an active BOLD SGR (1=on, 0/22=off)
+  function boldText(styled: string): string {
+    let bold = false;
+    let out = "";
+    let i = 0;
+    while (i < styled.length) {
+      if (styled[i] === "\x1b" && styled[i + 1] === "[") {
+        const m = styled.slice(i).match(/^\x1b\[([0-9;]*)m/);
+        if (m) {
+          for (const p of m[1]!.split(";").filter(Boolean).map(Number)) {
+            if (p === 1) bold = true;
+            else if (p === 0 || p === 22) bold = false;
+          }
+          i += m[0].length;
+          continue;
+        }
+      }
+      if (bold) out += styled[i];
+      i += 1;
+    }
+    return out;
+  }
+
+  it("the active (trailing) PULSE tab label renders BOLD in the stylized output", () => {
+    const v = createViewState({ instanceId: "t", ...withSnap });
+    v.dispatch({ type: "tab", tab: "pulse" });
+    const styled = stylizeLines(renderScreen(v.get(), snap, { cols: 140, rows: 44, nowMs: DEMO_NOW, colorMode: "truecolor" }), createStyle("truecolor"));
+    const tabLine = styled.find((l) => l.includes("TABLE") && l.includes("OVERVIEW"))!;
+    expect(tabLine).toBeDefined();
+    // the trailing active "PULSE" is the bold token; "[ PULSE ]" is dim, not bold
+    expect(boldText(tabLine)).toContain("PULSE");
+  });
+});

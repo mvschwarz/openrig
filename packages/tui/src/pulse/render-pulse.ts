@@ -20,7 +20,10 @@ export function renderPulseTabStrip(): Line {
   return line([
     { text: "[ PULSE ]", token: "dim" },
     { text: "  TABLE   OVERVIEW   GRAPH   " },
-    { text: "PULSE", bold: true },
+    // P2: the mock renders the ACTIVE tab in BOLD. Bold needs a color token to emit in
+    // this pipeline (a bold-only seg is drawn plain by the segRows painter — the same
+    // no-op class as the exception subject); the emphasis ink `bright` carries it.
+    { text: "PULSE", token: "bright", bold: true },
   ]);
 }
 
