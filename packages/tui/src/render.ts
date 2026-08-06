@@ -661,6 +661,8 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
 }
 
 export interface RenderOptions {
+  /** I5 — the live command context (from the C3 detector); default "standard". */
+  commandContext?: string;
   cols?: number;
   rows?: number;
   /** wall-clock ms for time-driven motion (spinner frames, flash windows);
@@ -793,7 +795,7 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
   // REGISTRY I3 — the palette overlay: fuzzy rows over the ONE registry; unavailable
   // entries render DIMMED-WITH-REASON, never hidden (PM pin); bounded height.
   if (state.palette) {
-    const rows = filterPalette(state.palette.query, COMMAND_REGISTRY, "standard");
+    const rows = filterPalette(state.palette.query, COMMAND_REGISTRY, options.commandContext ?? "standard");
     const sel = Math.min(state.palette.selection, Math.max(0, rows.length - 1));
     lines.push(pad(`? ${state.palette.query}▊  (${rows.length} commands · ↑↓ · ⏎ run · esc close)`, cols));
     for (let i = 0; i < Math.min(rows.length, 8); i += 1) {
@@ -1008,7 +1010,7 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   // REGISTRY I3 — the palette overlay: fuzzy rows over the ONE registry; unavailable
   // entries render DIMMED-WITH-REASON, never hidden (PM pin); bounded height.
   if (state.palette) {
-    const rows = filterPalette(state.palette.query, COMMAND_REGISTRY, "standard");
+    const rows = filterPalette(state.palette.query, COMMAND_REGISTRY, options.commandContext ?? "standard");
     const sel = Math.min(state.palette.selection, Math.max(0, rows.length - 1));
     lines.push(pad(`? ${state.palette.query}▊  (${rows.length} commands · ↑↓ · ⏎ run · esc close)`, cols));
     for (let i = 0; i < Math.min(rows.length, 8); i += 1) {

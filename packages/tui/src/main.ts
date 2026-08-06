@@ -8,7 +8,7 @@
 import { createViewState, computeExplorerRows, emptySnapshot } from "./state.js";
 import { parseCommand } from "./grammar.js";
 import { filterPalette, paletteExecuteLine } from "./commands/palette.js";
-import { COMMAND_REGISTRY } from "./commands/registry.js";
+import { COMMAND_REGISTRY, currentCommandContext } from "./commands/registry.js";
 import { createInputDecoder, resolveKeyAction, MOUSE_ENABLE, MOUSE_DISABLE, ALT_SCREEN_ON, ALT_SCREEN_OFF } from "./input.js";
 import { renderScreen } from "./render.js";
 import { createStyle, detectColorMode } from "./theme.js";
@@ -66,7 +66,7 @@ async function run(): Promise<void> {
     const rows = process.stdout.rows ?? 32;
     const nowMs = Date.now();
     if (live) snapshot = live.snapshot();
-    const opts = { cols, rows, nowMs, colorMode: style.mode, ...crashCartOpts, ...(live ? { load: live.load(), rowFlashes: live.flashes() } : {}) };
+    const opts = { cols, rows, nowMs, colorMode: style.mode, commandContext: currentCommandContext(crashCartOpts.daemonState ?? null), ...crashCartOpts, ...(live ? { load: live.load(), rowFlashes: live.flashes() } : {}) };
     lastScreen = renderScreen(view.get(), snapshot, opts, inputLine);
     if (view.get().contentMaxOffset !== lastScreen.contentMaxOffset || view.get().contentTargetCount !== lastScreen.contentTargets.length) {
       view.dispatch({ type: "layout", contentMaxOffset: lastScreen.contentMaxOffset, contentTargetCount: lastScreen.contentTargets.length });
@@ -105,7 +105,7 @@ async function run(): Promise<void> {
   }
 
   const socketPath = argOf(args, "--socket") ?? defaultSocketPath(instanceId);
-  const socket = await createControlSocket({ socketPath, view, onMutation: draw });
+  const socket = await createControlSocket({ socketPath, view, onMutation: draw, currentContext: () => currentCommandContext(crashCartOpts.daemonState ?? null) });
 
   let refreshTimer: NodeJS.Timeout | null = null;
 
@@ -178,7 +178,7 @@ async function run(): Promise<void> {
           continue;
         }
         if (ev.type === "key" && ev.key === "enter") {
-          const rows = filterPalette(pal.query, COMMAND_REGISTRY, "standard");
+          const rows = filterPalette(pal.query, COMMAND_REGISTRY, currentCommandContext(crashCartOpts.daemonState ?? null));
           const row = rows[Math.min(pal.selection, Math.max(0, rows.length - 1))];
           view.dispatch({ type: "palette-close" });
           if (row && row.available) {

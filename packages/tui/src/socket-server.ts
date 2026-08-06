@@ -50,8 +50,11 @@ export async function createControlSocket(options: {
   socketPath: string;
   view: ViewStateStore;
   onMutation?: () => void;
+  /** I5 — live command context supplier (from the C3 detector); default standard. */
+  currentContext?: () => string;
 }): Promise<ControlSocket> {
   const { socketPath, view, onMutation } = options;
+  const currentContext = options.currentContext ?? (() => "standard");
   const bytes = Buffer.byteLength(socketPath);
   if (bytes > MAX_SOCKET_PATH_BYTES) {
     throw new Error(
@@ -75,7 +78,7 @@ export async function createControlSocket(options: {
         // stays inside the arch constraint's OBSERVE class beside "state".
         if (line === "commands") {
           conn.write(
-            JSON.stringify({ ok: true, instanceId: view.instanceId, commands: serializeCommands("standard") }) + "\n",
+            JSON.stringify({ ok: true, instanceId: view.instanceId, commands: serializeCommands(currentContext()) }) + "\n",
           );
           continue;
         }

@@ -191,3 +191,12 @@ export function serializeCommands(currentContext: string): Array<{
     context: e.context, sample: e.sample, ...evaluateAvailability(e, currentContext),
   }));
 }
+
+/** I5 — the C3 detector state → command context mapping (composes PM pin 3 with the
+ *  crash-cart detector): up/absent = the standard shell; down = the crash-cart cockpit;
+ *  unverified = its own honest context (nothing pretends the daemon is up OR down). */
+export function currentCommandContext(daemonState: "up" | "down" | "unverified" | null | undefined): string {
+  if (daemonState === "down") return "crash-cart";
+  if (daemonState === "unverified") return "unverified";
+  return "standard";
+}
