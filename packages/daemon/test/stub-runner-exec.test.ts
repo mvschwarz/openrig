@@ -85,8 +85,23 @@ describe("executeStubScript (R1 dispatch over the StubRunnerIO seam)", () => {
     }
   });
 
+  it("simulates slow_output as DETERMINISTIC chunked pane output (paced observable, no real delay, no fabrication)", () => {
+    const io = fakeIo();
+    executeStubScript({ steps: [{ kind: "emit", behavior: "slow_output" }] }, io, IDENTITY);
+    expect(io.fireCount).toBe(0); // not a compaction; no seam fired
+    // "paced output at the scripted rate" (PRD §4.2) realized deterministically as a
+    // fixed MULTI-part chunk sequence — the assertable observable (the scenario verb set
+    // has no temporal assertion, so chunking IS the paced signal); §5-clean, fits R3.
+    const chunks = io.lines.filter((l) => /slow_output chunk \d+\/\d+/.test(l));
+    expect(chunks.length).toBeGreaterThanOrEqual(2); // multi-part = paced
+    // Emitted in ascending order, deterministically.
+    expect(io.lines.indexOf(chunks[0]!)).toBeLessThan(io.lines.indexOf(chunks[chunks.length - 1]!));
+    expect(chunks[0]).toContain("1/");
+    expect(chunks[chunks.length - 1]).toContain(`${chunks.length}/${chunks.length}`);
+  });
+
   it("does NOT fabricate a not-yet-wired behavior — it mirrors an honest deferral, never a silent no-op", () => {
-    for (const behavior of ["slow_output", "mid_turn_death", "restore"] as const) {
+    for (const behavior of ["mid_turn_death", "restore"] as const) {
       const io = fakeIo();
       executeStubScript({ steps: [{ kind: "emit", behavior }] }, io, IDENTITY);
       // No compaction seam fired for a non-compaction behavior…

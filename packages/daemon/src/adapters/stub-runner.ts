@@ -102,6 +102,10 @@ export function stubActivityPayload(
   };
 }
 
+/** slow_output's fixed chunk count — the "scripted rate" as a deterministic multi-part
+ *  pane sequence (no wall-clock, no new leak-vector pacer var). */
+export const SLOW_OUTPUT_CHUNKS = 3;
+
 /** Execute a stub behavior script step-by-step against the injected IO seam. Pure
  *  dispatch — no filesystem/clock of its own — so a fake IO drives it hermetically.
  *  A script is ONE turn: it opens with a UserPromptSubmit activity (running) and
@@ -121,8 +125,19 @@ export function executeStubScript(script: StubScript, io: StubRunnerIO, identity
       io.mirrorLine(`[stub] compaction fired — restore-pending marker ${markerPath}`);
       continue;
     }
-    // slow_output / mid_turn_death / restore are seeded but not yet simulated —
-    // surface that loudly rather than silently drop the step (honest labeling).
+    if (step.behavior === "slow_output") {
+      // "paced output at the scripted rate" (PRD §4.2) realized DETERMINISTICALLY as a
+      // fixed multi-part chunk sequence — no wall-clock/real delay (§5), no new leak-vector
+      // pacer var. The scenario verb set (match/contains/equals) has no temporal assertion,
+      // so chunked multi-part pane output IS the assertable "paced" observable (orch ruling
+      // 2026-08-06). Real temporal pacing would return only as a future grammar extension.
+      for (let i = 1; i <= SLOW_OUTPUT_CHUNKS; i++) {
+        io.mirrorLine(`[stub] slow_output chunk ${i}/${SLOW_OUTPUT_CHUNKS}`);
+      }
+      continue;
+    }
+    // mid_turn_death / restore are seeded but not yet simulated — surface that loudly
+    // rather than silently drop the step (honest labeling).
     io.mirrorLine(`[stub] behavior '${step.behavior}' not yet simulated (deferred increment)`);
   }
   io.postActivity(stubActivityPayload(identity, "Stop", null, io.now()));
