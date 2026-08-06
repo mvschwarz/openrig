@@ -106,6 +106,70 @@ export function assertNoForeignDaemon(env: EnvLike = process.env): void {
 }
 
 /**
+ * The A3-R3 injected-clock env var (OPR.0.5.1.1 items 6-8). The compaction-restore
+ * bridge — a GENERAL production hook (real seats, real compactions) — reads it for a
+ * deterministic timestamp, falling back to `new Date()` when ABSENT (absence = the
+ * production state). A PRESENT clock var in a REAL seat silently FREEZES production
+ * compaction-asset stamps: the temporal edition of the silent-retarget class this
+ * slice's env-discipline exists to kill. So the hermetic guard hard-refuses an
+ * ambient clock var it did NOT set itself (belt); the scaffold sets it ONLY via
+ * `injectClockNow`. Named with TEST semantics on purpose — a `TEST` var visible in
+ * production reads as obviously wrong.
+ */
+export const TEST_CLOCK_ENV_VARS = ["OPENRIG_TEST_CLOCK_NOW"] as const;
+
+export type TestClockEnvVar = (typeof TEST_CLOCK_ENV_VARS)[number];
+
+/** A detected ambient injected-clock var: the offending var name and its value. */
+export interface AmbientClockHazard {
+  name: TestClockEnvVar;
+  value: string;
+}
+
+/** Hard-refusal error thrown when the ambient env carries an injected-clock var. */
+export class AmbientClockHazardError extends Error {
+  readonly hazard: AmbientClockHazard;
+  constructor(hazard: AmbientClockHazard) {
+    super(
+      `hermetic env refused: ambient injected-clock ${hazard.name}=${hazard.value} is present — ` +
+        `this var freezes compaction-asset timestamps and must NEVER leak into a real seat ` +
+        `(temporal silent-retarget). The scaffold sets it only via injectClockNow; a pre-existing ` +
+        `value is a leak. Fail-closed; zero traffic sent. Unset ${hazard.name}.`,
+    );
+    this.name = "AmbientClockHazardError";
+    this.hazard = hazard;
+  }
+}
+
+/**
+ * Inspect an environment for an inherited injected-clock var. Returns the first
+ * non-empty match, or null when clean. Empty (`OPENRIG_TEST_CLOCK_NOW=`) is absent.
+ * Pure and synchronous — no network, no side effects.
+ */
+export function detectAmbientClockHazard(env: EnvLike = process.env): AmbientClockHazard | null {
+  for (const name of TEST_CLOCK_ENV_VARS) {
+    const value = env[name];
+    if (typeof value === "string" && value.length > 0) {
+      return { name, value };
+    }
+  }
+  return null;
+}
+
+/**
+ * FAIL-CLOSED assertion: throw AmbientClockHazardError if the environment already
+ * carries an injected-clock var. The scaffold sets the clock ONLY via injectClockNow,
+ * so a pre-existing value is a leak that would freeze production stamps. Sends ZERO
+ * traffic.
+ */
+export function assertNoAmbientClock(env: EnvLike = process.env): void {
+  const hazard = detectAmbientClockHazard(env);
+  if (hazard) {
+    throw new AmbientClockHazardError(hazard);
+  }
+}
+
+/**
  * Credential vars scrubbed from the child env alongside the daemon-target vars.
  * Not fail-closed triggers on their own (they carry no target address), but they
  * must never bleed into a scenario-local daemon's environment.
@@ -136,6 +200,14 @@ export interface HermeticScaffold {
 export interface PrepareHermeticEnvOptions {
   /** Base environment to derive the clean child env from. Defaults to process.env. */
   baseEnv?: EnvLike;
+  /**
+   * The A3-R3 injected clock. When set, the scaffold's child env carries
+   * OPENRIG_TEST_CLOCK_NOW = this value (an ISO timestamp) so the compaction bridge
+   * stamps deterministically; when omitted, the var stays UNSET and the bridge falls
+   * back to real-time `new Date()` (production behavior). This is the ONLY sanctioned
+   * way the var is set — a pre-existing one in baseEnv is refused as a leak.
+   */
+  injectClockNow?: string;
 }
 
 /**
@@ -156,8 +228,10 @@ export interface PrepareHermeticEnvOptions {
 export function prepareHermeticEnv(opts: PrepareHermeticEnvOptions = {}): HermeticScaffold {
   const baseEnv = opts.baseEnv ?? process.env;
 
-  // Fail-closed BEFORE any filesystem side effect.
+  // Fail-closed BEFORE any filesystem side effect: a foreign daemon target OR a
+  // leaked injected-clock var (temporal silent-retarget) both hard-refuse here.
   assertNoForeignDaemon(baseEnv);
+  assertNoAmbientClock(baseEnv);
 
   const root = mkdtempSync(join(tmpdir(), "openrig-scenario-"));
   const home = join(root, "home");
@@ -171,6 +245,9 @@ export function prepareHermeticEnv(opts: PrepareHermeticEnvOptions = {}): Hermet
   const env: Record<string, string | undefined> = { ...baseEnv };
   for (const name of DAEMON_TARGET_ENV_VARS) delete env[name];
   for (const name of CREDENTIAL_ENV_VARS) delete env[name];
+  // Scrub any injected-clock var (defense in depth behind the fail-closed guard) so
+  // only an explicit injectClockNow can set it below — never an inherited value.
+  for (const name of TEST_CLOCK_ENV_VARS) delete env[name];
   env.HOME = home;
   env.XDG_CONFIG_HOME = join(home, ".config");
   env.XDG_STATE_HOME = join(home, ".local", "state");
@@ -179,6 +256,12 @@ export function prepareHermeticEnv(opts: PrepareHermeticEnvOptions = {}): Hermet
   env.OPENRIG_HOME = openrigHome;
   // Forced-local: never resolve/attach the shared fleet kernel.
   env.OPENRIG_NO_KERNEL = "1";
+  // A3-R3 injected clock: the ONLY sanctioned way OPENRIG_TEST_CLOCK_NOW is set —
+  // the scaffold's own value, never an inherited one. Omitted => unset => the bridge
+  // stamps real-time (production behavior).
+  if (opts.injectClockNow !== undefined) {
+    env.OPENRIG_TEST_CLOCK_NOW = opts.injectClockNow;
+  }
 
   return {
     root,
