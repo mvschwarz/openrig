@@ -720,78 +720,189 @@ function keybindHints(state: ViewState): string {
  * minimal self-contained screen: cmd bar + a full-width titled rule + the pulse
  * lines laid across all `cols` + the bottom chrome. Skips computeExplorerRows
  * and the left│content paint entirely. */
-function renderPulseScreen(state: ViewState, snap: FleetSnapshot, cols: number, rows: number, nowMs: number, inputLine: string): Screen {
-  const lines: string[] = [];
-  const segRows: NonNullable<Screen["segRows"]> = {};
-  lines.push(pad(`cmd ▸ ${inputLine}▊`, cols));
-  const title = state.focusedPane === "content" ? "[ PULSE ]" : "PULSE";
-  // full-width rule (no ┬ explorer split, no EXPLORER title)
-  lines.push((`─ ${title} ` + "─".repeat(cols)).slice(0, cols));
+/** Truncate a seg list to a column budget, cutting the final seg mid-text if
+ * needed — keeps plain(segs) === the truncated content prefix (strip-invariant). */
+function truncateSegs(
+  segs: NonNullable<Screen["segRows"]>[number],
+  width: number,
+): NonNullable<Screen["segRows"]>[number] {
+  const out: NonNullable<Screen["segRows"]>[number] = [];
+  let used = 0;
+  for (const s of segs) {
+    if (used >= width) break;
+    const room = width - used;
+    if (s.text.length <= room) {
+      out.push(s);
+      used += s.text.length;
+    } else {
+      out.push({ ...s, text: s.text.slice(0, room) });
+      break;
+    }
+  }
+  return out;
+}
 
+function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: RenderOptions, inputLine: string): Screen {
+  const { cols = 120, rows = 32, nowMs = 0 } = options;
+  // FOUNDER OPTION-B (supersedes the earlier full-width ruling): PULSE renders as
+  // a content-pane view INSIDE the normal chrome — the EXPLORER sidebar STAYS (it
+  // is the founder's action path: from a needs-you row, mouse to the sidebar and
+  // navigate). So this builds the same explorer│content split every other view
+  // uses; the lanes truncate to the content width (trade accepted by the founder).
+  // The per-cell selection highlight + fresh-output flash paint through the NORMAL
+  // split-pane segRows path — no full-width stylize bypass (that special-case is
+  // gone). incr-5's refresh-seam/motion/reader-clock ride along unchanged.
+  //
+  // WHY a dedicated renderer + custom cell targets instead of the generic content
+  // zone machinery (reviewer: the documented reason parity-with-native yields):
+  // the approved mock's `.sel` row is a HIGHLIGHTED CELL — an affordance the
+  // native "›"-marker zone selection cannot express. The mock BINDS that
+  // affordance, so selection stays incr-4's per-cell accent-bg, walked
+  // COLUMN-MAJOR by pulseLaneTargets. The sidebar half is the normal split (same
+  // helpers), so the founder's navigator behaves identically to every other view.
+  const reduced = reducedMotion();
+  const load = options.load ?? { inFlight: false, settled: true };
+  const loading = load.inFlight || !load.settled;
+  const frame = spinnerFrame(Math.floor(nowMs / 120), options.colorMode ?? "truecolor", reduced);
+  const liveFlashes = (options.rowFlashes ?? []).filter((f) => flashActive(f.at, nowMs, 600, reduced));
+  const ackFlashes = (options.rowFlashes ?? []).filter((f) => flashActive(f.at, nowMs, 600, false));
+
+  const lines: string[] = [];
+  const hitMap: Screen["hitMap"] = [];
+  const segRows: NonNullable<Screen["segRows"]> = {};
+  const explorerRows: Screen["explorerRows"] = [];
+  const explorerMeta: NonNullable<Screen["explorerMeta"]> = {};
+  const contentTargets: Screen["contentTargets"] = [];
+  const flashRows: number[] = [];
+  let flashAck = false;
+
+  lines.push(pad(`cmd ▸ ${inputLine}▊`, cols));
+  const explorerTitle = state.focusedPane === "explorer" ? "[ EXPLORER ]" : "EXPLORER";
+  const contentTitle = state.focusedPane === "content" ? "[ PULSE ]" : "PULSE";
+  lines.push(paneRule(cols, "┬", explorerTitle, contentTitle));
+
+  const contentWidth = Math.max(cols - EXPL_W - 2, 0);
   const model = buildPulseModel(snap, nowMs);
-  const targets = pulseLaneTargets(model);
   const chromeRows = 3; // bottom rule + hint bar + status line
   const bodyRows = Math.max(rows - 2 - chromeRows, 1);
+
   const maxContentOffset = Math.max(renderPulseView(model).length - bodyRows, 0);
   const contentStart = Math.min(state.contentOffset, maxContentOffset);
 
-  // Lane selection: contentSelection indexes the VISIBLE lane targets in
-  // column-major order (parity with the content pane, which indexes its visible
-  // targets). PULSE is full-width with no explorer, so the lane grid is always
-  // the active selection surface — the cursor shows regardless of focusedPane.
-  const visibleTargets = targets.filter((t) => t.lineIndex >= contentStart && t.lineIndex < contentStart + bodyRows);
-  const sel = visibleTargets.length > 0 ? Math.min(Math.max(state.contentSelection, 0), visibleTargets.length - 1) : -1;
+  // Lane cells (column-major), CLIPPED to the content width: a cell whose column
+  // span starts past the content edge is not rendered → not a target (no
+  // invisible-but-actionable cell). x is content-relative (1-based within lanes).
+  const allTargets = pulseLaneTargets(model).filter((t) => t.x1 <= contentWidth);
+  const visibleTargets = allTargets.filter((t) => t.lineIndex >= contentStart && t.lineIndex < contentStart + bodyRows);
+
+  // The lane cursor lives on the CONTENT pane; it shows only when content is
+  // focused (explorer-focused → the sidebar cursor leads, the founder's path).
+  const sel =
+    state.focusedPane === "content" && visibleTargets.length > 0
+      ? Math.min(Math.max(state.contentSelection, 0), visibleTargets.length - 1)
+      : -1;
   if (sel >= 0) {
     const t = visibleTargets[sel]!;
-    model.lanes[t.lane]!.rows[t.row]!.selected = true; // painted PER-CELL by laneCell
+    model.lanes[t.lane]!.rows[t.row]!.selected = true; // per-cell accent-bg (mock affordance)
+  }
+
+  // motion budget: NOW (lane 0) cells whose seat produced fresh pane output flash
+  // per-cell (inverse) — the SAME served terminalActive false→true onset the table
+  // row flash rides. JUST FINISHED / UP NEXT never flash (no shipped finish event).
+  if (liveFlashes.length) {
+    for (const t of allTargets) {
+      if (t.lane !== 0) continue;
+      const a = t.action;
+      if (a.type !== "drill" || a.resource !== "agent" || !a.target?.rig || !a.target?.pod) continue;
+      const key = `agent:${a.target.host}/${a.target.rig}/${a.target.pod}/${a.name}`;
+      if (liveFlashes.some((f) => f.key === key)) model.lanes[t.lane]!.rows[t.row]!.flashed = true;
+    }
   }
 
   const pulseLines = renderPulseView(model);
-  const visible = pulseLines.slice(contentStart, contentStart + bodyRows);
-  const contentTargets: Screen["contentTargets"] = [];
+  const visiblePulse = pulseLines.slice(contentStart, contentStart + bodyRows);
+
+  // EXPLORER sidebar = the normal navigator (same helpers as every other view).
+  const explorer = computeExplorerRows(state, snap);
+  const { labels: explorerDisplay, metas: explorerMetas } = navigatorDisplay(explorer, snap, EXPL_W - 1);
+  const explorerStart = Math.min(Math.max(state.selection - bodyRows + 1, 0), Math.max(explorer.length - bodyRows, 0));
+
   for (let i = 0; i < bodyRows; i++) {
     const y = lines.length + 1;
-    const item = visible[i];
-    lines.push(pad(item?.text ?? "", cols));
-    if (item?.segs) segRows[y] = item.selected ? item.segs.map((s) => ({ ...s, bg: "accent" as const })) : item.segs;
-  }
-  // Register the visible lane cells as content targets in the SAME column-major
-  // order contentSelection indexes (Enter → contentTargets[contentSelection]);
-  // the y maps the target's line index into this screen's body rows (the first
-  // body row is at y=3, after the cmd bar + rule). Doubles as the mouse hitMap.
-  for (const t of visibleTargets) {
-    contentTargets.push({ y: t.lineIndex - contentStart + 3, x1: t.x1, x2: t.x2, action: t.action });
+    // EXPLORER half (identical to the normal split — real chrome, the action path)
+    const explorerIndex = explorerStart + i;
+    const row = explorer[explorerIndex];
+    const flashed = row?.key != null && ackFlashes.some((f) => f.key === row.key);
+    if (flashed) flashAck = true;
+    const marker = explorerIndex === state.selection && row ? (flashed ? "»" : "›") : flashed ? "≈" : " ";
+    const left = pad(row ? `${marker}${explorerDisplay[explorerIndex] ?? row.label}` : "", EXPL_W);
+    // CONTENT half = the pulse view, truncated to the content width. Selection is
+    // the per-cell bg on the segs (mock affordance), so the content marker slot
+    // stays blank — no "›" chevron (the native affordance the mock overrides).
+    const citem = visiblePulse[i];
+    const contentText = (citem?.text ?? "").slice(0, contentWidth);
+    lines.push(pad(`${left}│ ${contentText}`, cols));
+    if (row) {
+      hitMap.push({ y, x1: 1, x2: EXPL_W, action: row.action });
+      explorerRows.push({ ...row, y });
+      const em = explorerMetas[explorerIndex];
+      if (em && em.length) explorerMeta[y] = em.map((run) => ({ start: 1 + run.start, segs: run.segs }));
+      if (row.key && liveFlashes.some((f) => f.key === row.key)) flashRows.push(y);
+    }
+    if (citem?.segs) segRows[y] = truncateSegs(citem.segs, contentWidth);
   }
 
-  lines.push("─".repeat(cols));
+  // Lane cells → content targets, x mapped into the content column (origin =
+  // EXPL_W + 3, matching the normal content zone geometry), clamped to `cols`.
+  for (const t of visibleTargets) {
+    const x1 = EXPL_W + 2 + t.x1;
+    if (x1 > cols) continue;
+    const target = { y: t.lineIndex - contentStart + 3, x1, x2: Math.min(EXPL_W + 2 + t.x2, cols), action: t.action };
+    contentTargets.push(target);
+    hitMap.push(target);
+  }
+
+  lines.push(paneRule(cols, "┴"));
   lines.push(pad(keybindHints(state), cols));
   const drillPath = state.drill.map((d) => d.name).join(" → ");
   const readWarn = snap.readErrors.length > 0 ? `  ⚠ ${snap.readErrors.length} read(s) failed: ${snap.readErrors[0]}` : "";
+  // Honest first-load lifecycle: while the refresh owner's FIRST hydrate is in
+  // flight (!settled) show a spinner-tagged "loading" — distinguishing "still
+  // reading" from a genuinely empty fleet. Once settled, refreshes are silent;
+  // the footer's live "updated Ns ago" IS the ongoing refresh signal (reader
+  // clock), so a settled empty view stays calm. Reduced motion → static "·".
+  const loadTag = loading ? `  ${frame} loading` : "";
   lines.push(
     pad(
-      `[${state.instanceId}] ${state.section}${drillPath ? " · " + drillPath : ""}${state.lastError ? "  ✗ " + state.lastError : ""}${state.notice ? "  ▸ " + state.notice : ""}${readWarn}`,
+      `[${state.instanceId}] ${state.section}${drillPath ? " · " + drillPath : ""}${state.lastError ? "  ✗ " + state.lastError : ""}${state.notice ? "  ▸ " + state.notice : ""}${readWarn}${loadTag}`,
       cols,
     ),
   );
   while (lines.length < rows) lines.push("");
+  const anyFlash = model.lanes.some((l) => l.rows.some((r) => r.flashed));
   return {
     lines: lines.slice(0, rows),
-    hitMap: contentTargets, // lane cells are clickable too (same targets)
+    hitMap,
     contentTargets,
     contentMaxOffset: maxContentOffset,
-    explorerRows: [],
+    explorerRows,
     segRows,
-    explorerMeta: {},
-    flashRows: [],
-    motionActive: false,
+    explorerMeta,
+    // whole-line explorer activity flash (tmux-style) on the sidebar half, exactly
+    // as the table view; PULSE cell flashes are PER-CELL (inverse in segRows).
+    flashRows,
+    // schedule the bounded-expiry redraw while the first-load spinner or an
+    // un-expired flash is live; reduced motion (no animation) settles via refresh.
+    motionActive: (!reduced && loading) || anyFlash || flashRows.length > 0 || flashAck,
   };
 }
 
 export function renderScreen(state: ViewState, snap: FleetSnapshot, options: RenderOptions = {}, inputLine = ""): Screen {
   const { cols = 120, rows = 32, nowMs = 0 } = options;
-  // PULSE is fleet-wide + FULL-WIDTH: render it before the sidebar layout,
-  // skipping the explorer entirely (BEFORE computeExplorerRows).
-  if (state.viewTab === "pulse") return renderPulseScreen(state, snap, cols, rows, nowMs, inputLine);
+  // PULSE (founder Option-B): a content-pane view inside the NORMAL explorer│
+  // content chrome — renderPulseScreen builds its own split (sidebar + lanes)
+  // and rides the same segRows paint path, so it returns before the table layout.
+  if (state.viewTab === "pulse") return renderPulseScreen(state, snap, options, inputLine);
   // S19 round-5 (guard): one spinner frame per render pass from caller time;
   // `loading` comes from the refresh OWNER (omitted = settled — demo/fixture
   // data IS the answer); reduced-motion kills all of it

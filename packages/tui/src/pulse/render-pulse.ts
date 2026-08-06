@@ -7,7 +7,7 @@ import type { Token } from "../theme.js";
 import type { Action } from "../types.js";
 import type { PulseModel, PulseExceptionSection, PulseLane, PulseLaneRow } from "./pulse-model.js";
 
-interface Seg { text: string; token?: Token; bold?: boolean; bg?: Token }
+interface Seg { text: string; token?: Token; bold?: boolean; bg?: Token; inverse?: boolean }
 interface Line { text: string; segs?: Seg[]; selected?: boolean }
 
 /** Build a Line whose plain `text` is the concat of its segs (capture/width truth). */
@@ -90,8 +90,16 @@ function laneCell(row: PulseLaneRow | undefined, w: number): Seg[] {
   if (pad > 0) segs.push({ text: " ".repeat(pad) });
   // SELECTION is PER-CELL (incr-4): a selected lane row accent-bgs only ITS cell,
   // never the whole zipped terminal row (which spans all three lanes) — so the
-  // highlight names one entity, not one row-across-three-columns.
-  return row.selected ? segs.map((s) => ({ ...s, bg: "accent" as const })) : segs;
+  // highlight names one entity, not one row-across-three-columns. incr-5 adds the
+  // fresh-output FLASH the same way: an inverse on THIS cell only (the live-update
+  // region moves; siblings stay calm). Selection (bg) and flash (inverse) compose
+  // and stay visually distinct when both land on one cell.
+  if (!row.selected && !row.flashed) return segs;
+  return segs.map((s) => ({
+    ...s,
+    ...(row.selected ? { bg: "accent" as const } : {}),
+    ...(row.flashed ? { inverse: true as const } : {}),
+  }));
 }
 
 // Content-cell widths reused by pulseLaneTargets to place selection/hit spans;

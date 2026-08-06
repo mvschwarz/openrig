@@ -206,7 +206,7 @@ export function stylizeLines(screen: Screen, s: Style): string[] {
           const chunk = left.slice(pos, run.start);
           paintedLeft += k === 0 ? paintExplorer(chunk, s, explorerFocused) : chunk;
           paintedLeft += run.segs
-            .map((g) => (g.token || g.bg ? s.paint(g.token ?? "bright", g.text, { ...(g.bold ? { bold: true } : {}), ...(g.bg ? { bg: g.bg } : {}) }) : g.text))
+            .map((g) => (g.token || g.bg || g.inverse ? s.paint(g.token ?? "bright", g.text, { ...(g.bold ? { bold: true } : {}), ...(g.bg ? { bg: g.bg } : {}), ...(g.inverse ? { inverse: true } : {}) }) : g.text))
             .join("");
           pos = run.start + run.segs.reduce((n, g) => n + g.text.length, 0);
         });
@@ -215,7 +215,7 @@ export function stylizeLines(screen: Screen, s: Style): string[] {
         if (cSegs) {
           const segText = cSegs.map((g) => g.text).join("");
           const paintedC = cSegs
-            .map((g) => (g.token || g.bg ? s.paint(g.token ?? "bright", g.text, { ...(g.bold ? { bold: true } : {}), ...(g.bg ? { bg: g.bg } : {}) }) : g.text))
+            .map((g) => (g.token || g.bg || g.inverse ? s.paint(g.token ?? "bright", g.text, { ...(g.bold ? { bold: true } : {}), ...(g.bg ? { bg: g.bg } : {}), ...(g.inverse ? { inverse: true } : {}) }) : g.text))
             .join("");
           return `${paintedLeft}${s.paint("chrome", "│")}${marker}${paintedC}${right.slice(segText.length)}`;
         }
@@ -229,8 +229,8 @@ export function stylizeLines(screen: Screen, s: Style): string[] {
         const segText = segs.map((seg) => seg.text).join("");
         const painted = segs
           .map((seg) =>
-            seg.token || seg.bg
-              ? s.paint(seg.token ?? "bright", seg.text, { ...(seg.bold ? { bold: true } : {}), ...(seg.bg ? { bg: seg.bg } : {}) })
+            seg.token || seg.bg || seg.inverse
+              ? s.paint(seg.token ?? "bright", seg.text, { ...(seg.bold ? { bold: true } : {}), ...(seg.bg ? { bg: seg.bg } : {}), ...(seg.inverse ? { inverse: true } : {}) })
               : seg.text)
           .join("");
         return `${paintExplorer(left, s, explorerFocused)}${s.paint("chrome", "│")}${marker}${painted}${right.slice(segText.length)}`;

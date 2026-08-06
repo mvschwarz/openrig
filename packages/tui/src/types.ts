@@ -343,12 +343,12 @@ export interface Screen {
   /** slice-17: token segments for canvas-rendered content rows (keyed by
    * 1-based terminal row) — the paint layer renders them with its own Style;
    * plain(segs) === the row's content text BY CONSTRUCTION (strip-invariant) */
-  segRows?: Record<number, Array<{ text: string; token?: import("./theme.js").Token; bold?: boolean; bg?: import("./theme.js").Token }>>;
+  segRows?: Record<number, Array<{ text: string; token?: import("./theme.js").Token; bold?: boolean; bg?: import("./theme.js").Token; inverse?: boolean }>>;
   /** S19: explorer seg-run channel — a row's paint runs (round-4: status
    * badge + right meta) carry their own tokens through stylization (keyed by
    * 1-based row; start = column within the LEFT cell after the selection-
    * marker slot; runs are in ascending start order) */
-  explorerMeta?: Record<number, Array<{ start: number; segs: Array<{ text: string; token?: import("./theme.js").Token; bold?: boolean; bg?: import("./theme.js").Token }> }>>;
+  explorerMeta?: Record<number, Array<{ start: number; segs: Array<{ text: string; token?: import("./theme.js").Token; bold?: boolean; bg?: import("./theme.js").Token; inverse?: boolean }> }>>;
   /** S19 round-5 (guard): 1-based terminal rows whose agent produced fresh
    * PANE OUTPUT inside the one-shot flash window — stylize inverts exactly
    * these rows (the tmux-style activity row flash) */

@@ -113,14 +113,10 @@ export function resolveKeyAction(
   screen: Screen,
   explorerCount: number,
 ): Action | null {
-  // PULSE is full-width with NO explorer: ↑↓ walk the lane-cell selection, Enter
-  // drills the selected cell, and ←→ have no pane to switch (no-op). pageup/
-  // pagedown fall through to the content-scroll handling below.
-  if (state.viewTab === "pulse") {
-    if (event.key === "up" || event.key === "down") return { type: "content-select", delta: event.key === "down" ? 1 : -1 };
-    if (event.key === "enter") return screen.contentTargets[state.contentSelection]?.action ?? { type: "noop" };
-    if (event.key === "left" || event.key === "right") return { type: "noop" };
-  }
+  // PULSE (founder Option-B) is a content-pane view inside the normal chrome, so
+  // it uses the SAME input as every other view: ←→ switch panes (the sidebar is
+  // the founder's action path), ↑↓ move the focused pane, Enter drills. No pulse
+  // special-case — the lane cells are the content pane's selection targets.
   if (event.key === "left") return { type: "focus", pane: "explorer" };
   if (event.key === "right") return screen.contentTargets.length > 0 ? { type: "focus", pane: "content" } : null;
   if (event.key === "up" || event.key === "down") {

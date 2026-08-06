@@ -190,20 +190,25 @@ describe("PULSE view increment 2 — Exceptions strip LIVE", () => {
     expect(model.exceptions.find((s) => s.label === "PARKED WITH BATON")).toBeUndefined();
   });
 
-  it("FULL-WIDTH: the pulse view spans full cols with NO explorer sidebar", () => {
+  it("IN-PANE (founder Option-B): the pulse view renders inside the normal explorer│content chrome — the sidebar STAYS (the founder's action path)", () => {
     const snap = liveSnap({
       attention: [attn({ qitemId: "q1", summary: "cut packet ready", claimedAt: ago(5 * MIN) })],
     });
     const v = createViewState({ instanceId: "t", getSnapshot: () => snap });
     v.dispatch({ type: "tab", tab: "pulse" });
-    const body = renderScreen(v.get(), snap, { cols: 140, rows: 44, nowMs: NOW }).lines.join("\n");
-    // no explorer pane title, no explorer split joint
-    expect(body).not.toContain("EXPLORER");
-    expect(body).not.toContain("┬");
-    // pulse content begins at the left edge (full-width), not after a 30-col sidebar
+    const s = renderScreen(v.get(), snap, { cols: 140, rows: 44, nowMs: NOW });
+    const body = s.lines.join("\n");
+    // normal chrome: the EXPLORER pane title + the ┬ split joint (sidebar present)
+    expect(body).toContain("EXPLORER");
+    expect(body).toContain("┬");
+    // the sidebar is the real topology navigator — the founder navigates from it
+    expect(s.explorerRows.length).toBeGreaterThan(0);
+    // pulse content lives in the CONTENT column: the NEEDS YOU strip begins AFTER
+    // the 30-col sidebar + │ boundary, never at the left edge
     const needsLine = body.split("\n").find((l) => l.includes("NEEDS YOU"));
     expect(needsLine).toBeDefined();
-    expect(needsLine!.startsWith("▲ NEEDS YOU")).toBe(true);
+    expect(needsLine!.startsWith("▲ NEEDS YOU")).toBe(false);
+    expect(needsLine![30]).toBe("│"); // the split border at the fixed boundary column
   });
 
   it("REGRESSION: a non-pulse view (table) STILL renders the explorer sidebar", () => {
