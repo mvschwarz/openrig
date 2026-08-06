@@ -138,6 +138,17 @@ export const COMMAND_REGISTRY: readonly CommandEntry[] = [
         ? { type: "cross", kind: "running", name }
         : { type: "error", message: `running needs a target name (e.g. "running driver-agent")` },
   },
+  {
+    // I3 — the palette trigger is itself a REGISTERED command ('?' the founder-ergonomic
+    // alias); context "always": help must work in every state.
+    name: "help",
+    aliases: ["?"],
+    args: "",
+    description: "open the command palette (fuzzy-find every command)",
+    context: "always",
+    sample: "help",
+    build: () => ({ type: "palette-open" }),
+  },
   ...RESOURCES.map(drillEntry),
 ];
 

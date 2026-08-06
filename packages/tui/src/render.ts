@@ -5,6 +5,8 @@
 // SAME semantic actions commands produce (PIN 1). Isolated seam: a substrate
 // swap touches only this module (spike verdict revisit trigger).
 import { computeExplorerRows, findAgent, findSpec, findAgentBySession, agentsRunningSpec, agentsRunningSpecTargets, specDetailArrowsScroll } from "./state.js";
+import { filterPalette } from "./commands/palette.js";
+import { COMMAND_REGISTRY } from "./commands/registry.js";
 import { navigatorDisplay } from "./navigator.js";
 import { renderGraphStyle } from "./topology/render-graph.js";
 import { buildPulseModel } from "./pulse/pulse-model.js";
@@ -788,6 +790,21 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
   let flashAck = false;
 
   lines.push(pad(`cmd ▸ ${inputLine}▊`, cols));
+  // REGISTRY I3 — the palette overlay: fuzzy rows over the ONE registry; unavailable
+  // entries render DIMMED-WITH-REASON, never hidden (PM pin); bounded height.
+  if (state.palette) {
+    const rows = filterPalette(state.palette.query, COMMAND_REGISTRY, "standard");
+    const sel = Math.min(state.palette.selection, Math.max(0, rows.length - 1));
+    lines.push(pad(`? ${state.palette.query}▊  (${rows.length} commands · ↑↓ · ⏎ run · esc close)`, cols));
+    for (let i = 0; i < Math.min(rows.length, 8); i += 1) {
+      const r = rows[i]!;
+      const mark = i === sel ? "▸" : " ";
+      const label = `${r.entry.name}${r.entry.args ? " " + r.entry.args : ""}`;
+      const alias = r.entry.aliases.length ? ` (${r.entry.aliases.join(",")})` : "";
+      const tail = r.available ? r.entry.description : `${r.entry.description} — unavailable: ${r.reason}`;
+      lines.push(pad(`${mark} ${label}${alias}  ${tail}`, cols));
+    }
+  }
   const explorerTitle = state.focusedPane === "explorer" ? "[ EXPLORER ]" : "EXPLORER";
   const contentTitle = state.focusedPane === "content" ? "[ PULSE ]" : "PULSE";
   lines.push(paneRule(cols, "┬", explorerTitle, contentTitle));
@@ -988,6 +1005,21 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   // affordance must show BEFORE the first key (no new focus state; stylize
   // gives the cell SGR blink; zero effect on hit geometry).
   lines.push(pad(`cmd ▸ ${inputLine}▊`, cols));
+  // REGISTRY I3 — the palette overlay: fuzzy rows over the ONE registry; unavailable
+  // entries render DIMMED-WITH-REASON, never hidden (PM pin); bounded height.
+  if (state.palette) {
+    const rows = filterPalette(state.palette.query, COMMAND_REGISTRY, "standard");
+    const sel = Math.min(state.palette.selection, Math.max(0, rows.length - 1));
+    lines.push(pad(`? ${state.palette.query}▊  (${rows.length} commands · ↑↓ · ⏎ run · esc close)`, cols));
+    for (let i = 0; i < Math.min(rows.length, 8); i += 1) {
+      const r = rows[i]!;
+      const mark = i === sel ? "▸" : " ";
+      const label = `${r.entry.name}${r.entry.args ? " " + r.entry.args : ""}`;
+      const alias = r.entry.aliases.length ? ` (${r.entry.aliases.join(",")})` : "";
+      const tail = r.available ? r.entry.description : `${r.entry.description} — unavailable: ${r.reason}`;
+      lines.push(pad(`${mark} ${label}${alias}  ${tail}`, cols));
+    }
+  }
   const sectionTitle = { topology: "TOPOLOGY", specs: "SPECS", needs: "NEEDS-YOU" }[state.section] ?? state.section.toUpperCase();
   // active-pane emphasis (k9s-class chrome): the focused pane's title is bracketed
   const explorerTitle = state.focusedPane === "explorer" ? "[ EXPLORER ]" : "EXPLORER";

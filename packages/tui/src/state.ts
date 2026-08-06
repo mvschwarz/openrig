@@ -58,6 +58,7 @@ export function createViewState(options: CreateViewStateOptions): ViewStateStore
     expanded: [],
     notice: null,
     lastError: null,
+    palette: null,
   };
   const listeners = new Set<(s: ViewState) => void>();
 
@@ -92,6 +93,17 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
         resetContent({ ...next, section: action.section, drill: [], filter: "", runningOf: null, viewTab: "table" }),
         snap,
       );
+    }
+    case "palette-open":
+      return { ...next, palette: { query: "", selection: 0 } };
+    case "palette-close":
+      return { ...next, palette: null };
+    case "palette-query":
+      return next.palette ? { ...next, palette: { query: action.query, selection: 0 } } : next;
+    case "palette-move": {
+      if (!next.palette) return next;
+      const sel = Math.max(0, next.palette.selection + action.delta);
+      return { ...next, palette: { ...next.palette, selection: sel } };
     }
     case "style": {
       // slice-17: validated against the graph-style registry — the ONE

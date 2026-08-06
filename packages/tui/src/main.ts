@@ -7,6 +7,8 @@
 //   openrig-tui [--instance <id>] [--socket <path>] [--url <daemon>] [--demo]
 import { createViewState, computeExplorerRows, emptySnapshot } from "./state.js";
 import { parseCommand } from "./grammar.js";
+import { filterPalette, paletteExecuteLine } from "./commands/palette.js";
+import { COMMAND_REGISTRY } from "./commands/registry.js";
 import { createInputDecoder, resolveKeyAction, MOUSE_ENABLE, MOUSE_DISABLE, ALT_SCREEN_ON, ALT_SCREEN_OFF } from "./input.js";
 import { renderScreen } from "./render.js";
 import { createStyle, detectColorMode } from "./theme.js";
@@ -154,7 +156,46 @@ async function run(): Promise<void> {
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
   function handleInput(events: ReturnType<typeof inputDecoder.write>): void {
     for (const ev of events) {
+      // REGISTRY I3 — palette mode captures input while open. Execution is BYTE-EQUAL to
+      // direct typing: an argless selection runs perform(parseCommand(line)) — the exact
+      // BR-9 one-resolver path the command bar uses; argful selections PRE-FILL the bar.
+      const pal = view.get().palette;
+      if (pal) {
+        if (ev.type === "char") {
+          view.dispatch({ type: "palette-query", query: pal.query + ev.ch });
+          continue;
+        }
+        if (ev.type === "key" && ev.key === "backspace") {
+          view.dispatch({ type: "palette-query", query: pal.query.slice(0, -1) });
+          continue;
+        }
+        if (ev.type === "key" && (ev.key === "up" || ev.key === "down")) {
+          view.dispatch({ type: "palette-move", delta: ev.key === "down" ? 1 : -1 });
+          continue;
+        }
+        if (ev.type === "key" && ev.key === "escape") {
+          view.dispatch({ type: "palette-close" });
+          continue;
+        }
+        if (ev.type === "key" && ev.key === "enter") {
+          const rows = filterPalette(pal.query, COMMAND_REGISTRY, "standard");
+          const row = rows[Math.min(pal.selection, Math.max(0, rows.length - 1))];
+          view.dispatch({ type: "palette-close" });
+          if (row && row.available) {
+            const exec = paletteExecuteLine(row.entry);
+            if (exec.mode === "execute") perform(parseCommand(exec.line, view.get().sections));
+            else inputLine = exec.line;
+          }
+          continue;
+        }
+        continue;
+      }
       if (ev.type === "char") {
+        if (ev.ch === "?" && inputLine === "") {
+          // The registered palette trigger — through the grammar, never beside it.
+          perform(parseCommand("?", view.get().sections));
+          continue;
+        }
         if (ev.ch === "q" && inputLine === "") {
           void shutdown();
           return;

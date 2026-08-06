@@ -257,6 +257,11 @@ export type Action =
   | { type: "toggle-expand"; key: string }
   /** slice-17: the graph-render style dimension rides the command bar */
   | { type: "style"; name: string }
+  /** REGISTRY I3 — the command palette (open/query/move/close ride dispatch like all state). */
+  | { type: "palette-open" }
+  | { type: "palette-close" }
+  | { type: "palette-query"; query: string }
+  | { type: "palette-move"; delta: number }
   /** drive-structure daemon writes (BR-8/BR-9): executed by the driver loop
    * against EXISTING write contracts; never a view-state mutation */
   | { type: "act"; act: "open-terminal"; view: string }
@@ -273,6 +278,8 @@ export interface SectionDef {
 }
 
 export interface ViewState {
+  /** REGISTRY I3 — open command palette (null = closed). */
+  palette: { query: string; selection: number } | null;
   instanceId: string;
   sections: SectionDef[];
   section: string;
