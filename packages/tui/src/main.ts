@@ -16,6 +16,8 @@ import { demoSnapshot } from "./demo-data.js";
 import { DaemonClient, launchNodeNotice } from "./daemon-client.js";
 import { hydrateSnapshot } from "./hydrate.js";
 import { createLiveRefresh } from "./live.js";
+import { execFile } from "node:child_process";
+import { probeCrashCart, type CrashCartRenderOpts } from "./crash-cart/from-emit.js";
 import type { Action, FleetSnapshot, Screen } from "./types.js";
 import type { SpecReviewCache } from "./hydrate.js";
 
@@ -40,6 +42,9 @@ async function run(): Promise<void> {
 
   let inputLine = "";
   let lastScreen: Screen | null = null;
+  // 5.2 crash-cart: the daemon-down verdict (probed from the `rig crash-cart --json` verb). Empty ⇒
+  // normal fleet views; DOWN ⇒ the recovery cockpit; UNVERIFIED ⇒ the cannot-verify screen.
+  let crashCartOpts: CrashCartRenderOpts = {};
   const inputDecoder = createInputDecoder();
   const style = createStyle(args.includes("--no-color") ? "none" : detectColorMode());
 
@@ -58,7 +63,7 @@ async function run(): Promise<void> {
     const rows = process.stdout.rows ?? 32;
     const nowMs = Date.now();
     if (live) snapshot = live.snapshot();
-    const opts = { cols, rows, nowMs, colorMode: style.mode, ...(live ? { load: live.load(), rowFlashes: live.flashes() } : {}) };
+    const opts = { cols, rows, nowMs, colorMode: style.mode, ...crashCartOpts, ...(live ? { load: live.load(), rowFlashes: live.flashes() } : {}) };
     lastScreen = renderScreen(view.get(), snapshot, opts, inputLine);
     if (view.get().contentMaxOffset !== lastScreen.contentMaxOffset || view.get().contentTargetCount !== lastScreen.contentTargets.length) {
       view.dispatch({ type: "layout", contentMaxOffset: lastScreen.contentMaxOffset, contentTargetCount: lastScreen.contentTargets.length });
@@ -69,6 +74,20 @@ async function run(): Promise<void> {
     process.stdout.write("\x1b[H" + stylizeLines(lastScreen, style).map((l) => "\x1b[2K" + l).join("\r\n"));
     if (motionTimer) clearTimeout(motionTimer);
     motionTimer = lastScreen.motionActive ? setTimeout(draw, 120) : null;
+  }
+
+  // 5.2 crash-cart: probe the daemon-down verdict via the shipped `rig crash-cart --json` verb (its
+  // JSON is the truth even on a hint non-zero exit). Any failure → normal TUI (never a fabricated cockpit).
+  const runCrashCartVerb = (): Promise<string> =>
+    new Promise((resolve, reject) => {
+      execFile("rig", ["crash-cart", "--json"], { timeout: 5000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+        if (stdout && stdout.trim()) resolve(stdout);
+        else reject(err ?? new Error("crash-cart: no output"));
+      });
+    });
+  async function refreshCrashCart(): Promise<void> {
+    crashCartOpts = await probeCrashCart(runCrashCartVerb);
+    draw();
   }
 
   const socketPath = argOf(args, "--socket") ?? defaultSocketPath(instanceId);
@@ -172,6 +191,9 @@ async function run(): Promise<void> {
   // state — the refresh starts after entering the alt screen, never before,
   // so loading is VISIBLE instead of awaited behind a blank terminal
   draw();
+  // Probe the daemon-down verdict once on launch: bare `rig` with the daemon down renders the cockpit.
+  // (Key-triggered re-probe after `s start daemon` / `r retry` is the follow-on increment.)
+  void refreshCrashCart();
   if (live) {
     void live.refresh();
     refreshTimer = setInterval(() => void live.refresh(), REFRESH_MS);
