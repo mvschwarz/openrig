@@ -13,7 +13,10 @@ export type CrossHostResult =
   | { ok: false; failedStep: "ssh-unreachable"; sshStderr: string }
   | { ok: false; failedStep: "permission-gate"; sshStderr: string; hint?: string }
   | { ok: false; failedStep: "remote-daemon-unreachable"; stdout: string; stderr: string; remoteExitCode: number }
-  | { ok: false; failedStep: "remote-command-failed"; stdout: string; stderr: string; remoteExitCode: number };
+  | { ok: false; failedStep: "remote-command-failed"; stdout: string; stderr: string; remoteExitCode: number }
+  // D13 — the remote shell could not RESOLVE the command (exit 127 / command not found):
+  // its own step with a teaching hint, never a generic remote-command-failed.
+  | { ok: false; failedStep: "remote-command-not-found"; stdout: string; stderr: string; remoteExitCode: number; hint: string };
 
 export type { FailedStep } from "./cross-host-types.js";
 
@@ -77,7 +80,10 @@ export async function runCrossHostCommand(
   // No BatchMode — operators may legitimately use password / interactive auth.
   // Stay deferential to ~/.ssh/config defaults.
 
-  const remoteCommandLine = argv.map(shellQuote).join(" ");
+  // D13 — ssh runs the remote command in a NON-login shell (no operator PATH → `rig`
+  // exits 127 on nvm/npm-global installs). Run it under `sh -lc` so the operator's own
+  // login PATH resolves it — one exec, zero config; `sh` exists everywhere POSIX.
+  const remoteCommandLine = `sh -lc ${shellQuote(argv.map(shellQuote).join(" "))}`;
   const fullArgs = [...sshOpts, sshHost.target, remoteCommandLine];
 
   const spawn = opts.spawn ?? (nodeSpawn as unknown as SpawnFn);
@@ -140,6 +146,17 @@ export function classifyResult(exitCode: number, stdout: string, stderr: string)
       };
     }
     return { ok: false, failedStep: "ssh-unreachable", sshStderr: stderr };
+  }
+  // D13 — resolution failure is its own loud class (127 or the not-found signature).
+  if (exitCode === 127 || /command not found/i.test(stderr)) {
+    return {
+      ok: false,
+      failedStep: "remote-command-not-found",
+      stdout,
+      stderr,
+      remoteExitCode: exitCode,
+      hint: "The remote login PATH does not resolve `rig`. Check the remote install (nvm/npm-global in the login profile); a hosts.yaml rigPath override is the escape hatch if the profile cannot carry it.",
+    };
   }
   if (looksLikeDaemonUnreachable(stderr) || looksLikeDaemonUnreachable(stdout)) {
     return {

@@ -143,10 +143,12 @@ describe("runCrossHostCommand", () => {
     const spawn = mockSpawnFor({ exitCode: 0, stdout: "ok\n", capture });
     await runCrossHostCommand(HOST, ["rig", "send", "dev-impl@rig", "hello world", "--verify"], { spawn });
     expect(capture.command).toBe("ssh");
+    // D13 supersession: the remote command now runs under `sh -lc` (login-shell PATH
+    // resolution) — the quoted argv rides inside one further quoting layer.
     expect(capture.args).toEqual([
       "-o", "ConnectTimeout=10",
       "vm-test.local",
-      "'rig' 'send' 'dev-impl@rig' 'hello world' '--verify'",
+      "sh -lc ''\\''rig'\\'' '\\''send'\\'' '\\''dev-impl@rig'\\'' '\\''hello world'\\'' '\\''--verify'\\'''",
     ]);
   });
 
@@ -254,5 +256,47 @@ describe("runCrossHostCommand", () => {
       connectTimeoutSeconds: 30,
     });
     expect(capture.args).toContain("ConnectTimeout=30");
+  });
+});
+
+// ─── D13 (INTAKE 5674431c): remote rig resolution over ssh ─────────────────────
+// Bare quoted argv over ssh runs in a NON-LOGIN shell (no operator PATH) → exit 127.
+// Fix: the remote command runs under `sh -lc` (the operator's own login PATH), and a
+// 127/command-not-found classifies LOUD as its own step with a teaching hint.
+import { runCrossHostCommand as d13Run, classifyResult as d13Classify } from "../src/cross-host-executor.js";
+import { EventEmitter } from "node:events";
+
+function d13Child(exitCode: number, stderr = "") {
+  const child = new EventEmitter() as import("node:child_process").ChildProcess;
+  (child as unknown as { stdin: { write(): void; end(): void } }).stdin = { write() {}, end() {} };
+  const out = new EventEmitter(); const err = new EventEmitter();
+  (child as unknown as { stdout: EventEmitter }).stdout = out;
+  (child as unknown as { stderr: EventEmitter }).stderr = err;
+  setImmediate(() => { if (stderr) err.emit("data", stderr); child.emit("close", exitCode); });
+  return child;
+}
+
+describe("D13 — remote rig resolution + loud 127", () => {
+  it("the remote command runs under a login shell (sh -lc) so the operator PATH resolves rig", async () => {
+    const capture: { command?: string; args?: readonly string[] } = {};
+    const spawn = mockSpawnFor({ exitCode: 0, capture });
+    await d13Run(HOST, ["rig", "ps", "--json"], { spawn });
+    const full = [capture.command!, ...capture.args!];
+    const remote = full[full.length - 1]!;
+    expect(full.slice(-2)[0]).toBe("vm-test.local");
+    expect(remote).toMatch(/^sh -lc /); // login-shell bootstrap present
+    expect(remote).toContain("rig"); // the command rides inside it
+  });
+
+  it("exit 127 / command-not-found classifies as remote-command-not-found with a teaching hint", () => {
+    const r = d13Classify(127, "", "sh: rig: command not found");
+    expect(r.ok).toBe(false);
+    expect(r.failedStep).toBe("remote-command-not-found");
+    expect((r as { hint?: string }).hint).toMatch(/PATH|login|rigPath/i);
+  });
+
+  it("control: non-127 remote failures keep their existing classification", () => {
+    expect(d13Classify(1, "", "boom").failedStep).toBe("remote-command-failed");
+    expect(d13Classify(255, "", "Permission denied (publickey)").failedStep).toBe("permission-gate");
   });
 });
