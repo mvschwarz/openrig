@@ -49,6 +49,50 @@ function readInstructionFile(filePath) {
   return fs.readFileSync(expanded, "utf8");
 }
 
+// OPR.0.4.1.09 / R5 marker-lifecycle (foreign-content-in-marker face): the hook
+// path must apply the SAME seat-check the daemon enforcer's resolvePostCompactExtra
+// applies (rev1-r2 dcd95bd9), or a FOREIGN seat's global messageFilePath leaks into
+// THIS seat's marker. Parse a WELL-FORMED leading `---` frontmatter for a declared
+// seat (target_seat / seat / session); body text is never scanned; a broken/absent
+// fence is GENERIC (valid for any seat). Byte-mirrors the enforcer regexes.
+function declaredSeatOf(content) {
+  const fm = /^\s*---\s*\n([\s\S]*?)\n---/.exec(content);
+  if (!fm) return null;
+  const m = /^[ \t]*(?:target[_-]?seat|seat|session(?:[_-]?name)?)[ \t]*:[ \t]*["']?([^"'\n#]+?)["']?[ \t]*$/im.exec(fm[1]);
+  return m ? m[1].trim() : null;
+}
+
+function sanitizeSeat(value) {
+  return value.replace(/[^a-zA-Z0-9_.@-]/g, "_");
+}
+
+// Resolve the post-compaction extra FOR THIS SEAT (mirror of the enforcer): (1) prefer
+// a per-seat compaction/post-compact-extra/<seat>.md — no cross-seat contamination
+// possible; (2) fall back to the global ONLY when it does not declare a DIFFERENT seat
+// (a wrong-seat global is REFUSED). Generic/undeclared/configured-but-absent stay
+// allowed. Returns the path to read, or null when nothing valid for this seat.
+function resolveSeatSafeExtraPath(globalFilePathRaw) {
+  const rawSeat = process.env.OPENRIG_SESSION_NAME || process.env.RIGGED_SESSION_NAME || "";
+  const seatKey = rawSeat ? sanitizeSeat(rawSeat) : "";
+  if (seatKey) {
+    const perSeatPath = path.join(getOpenRigHome(), "compaction", "post-compact-extra", `${seatKey}.md`);
+    if (fs.existsSync(perSeatPath)) {
+      const declared = declaredSeatOf(fs.readFileSync(perSeatPath, "utf8"));
+      if (declared && sanitizeSeat(declared) !== seatKey) return null; // wrong-seat per-seat file
+      return perSeatPath;
+    }
+  }
+  const trimmed = (globalFilePathRaw || "").trim();
+  if (!trimmed) return null;
+  const expanded = expandInstructionPath(trimmed);
+  // configured-but-absent: keep the path (an absent file cannot be a wrong-seat leak;
+  // readInstructionFile returns "" so nothing is appended).
+  if (!fs.existsSync(expanded)) return trimmed;
+  const declared = declaredSeatOf(fs.readFileSync(expanded, "utf8"));
+  if (declared && sanitizeSeat(declared) !== seatKey) return null; // foreign-seat global REFUSED
+  return trimmed;
+}
+
 function sessionKey(input) {
   const raw = [
     process.env.OPENRIG_SESSION_NAME,
@@ -126,13 +170,18 @@ function readClaudeCompactionMessage() {
     parts.push(`Inline restore instruction:\n${inline}`);
   }
   if (filePath && filePath.length > 0) {
-    try {
-      const fileText = readInstructionFile(filePath);
-      if (fileText) {
-        parts.push(`Additional restore instruction file (${filePath}):\n${fileText}`);
+    // R5 seat-check: resolve to the per-seat extra or a seat-safe global; a
+    // foreign-seat global resolves to null and is never injected into this marker.
+    const resolved = resolveSeatSafeExtraPath(filePath);
+    if (resolved) {
+      try {
+        const fileText = readInstructionFile(resolved);
+        if (fileText) {
+          parts.push(`Additional restore instruction file (${resolved}):\n${fileText}`);
+        }
+      } catch {
+        // Keep any inline instruction; unreadable extra files degrade quietly.
       }
-    } catch {
-      // Keep any inline instruction; unreadable extra files degrade quietly.
     }
   }
   if (parts.length > 0) return parts.join("\n\n");
