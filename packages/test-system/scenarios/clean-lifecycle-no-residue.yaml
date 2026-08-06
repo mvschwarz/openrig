@@ -1,0 +1,29 @@
+# Defect class: install/up/down residue.
+# Marathon origin: rigs that came up but left tmux sessions / seat rows behind on
+#   down, so a later `up` collided with residue or `ps` showed ghosts.
+# SEED (class: install-up-down-residue): the seeded regression leaves the worker's
+#   tmux session (or its ps/seat row) alive after `down`. The post-down `expect ps
+#   empty` MUST catch it — the runner diff shows expected {rigs: []} vs an observed
+#   lingering seat, naming the residue class.
+# Deps: none beyond the 51-02 runner + hermetic helper (R-10). Lifecycle only; no emit.
+scenario: clean-lifecycle-no-residue
+topology: ./solo-stub.yaml
+steps:
+  - up: {}
+  # Real `rig ps --json` = BARE ARRAY of per-RIG PsEntry {name,rigName,nodeCount,
+  # runningCount,status,...} — NOT the sketch {rigs:[{seats}]} (seats are the separate
+  # `--nodes`/NodeEntry endpoint). Subset match on the bare array.
+  - expect:
+      surface: ps
+      within: 30s
+      match:
+        - name: solo-stub
+          status: running
+  - down: {}
+  # DEFERRED (F-#1, ROUTED to 51-02): "settled → NO residue" needs an EMPTINESS assertion.
+  # A subset `match: []` trivially passes (empty subset ⊆ anything) so it does NOT assert
+  # emptiness; the locked format has no negative/count/absent form. Routed for a
+  # `match:[]`-means-exact-empty rule (or an `absent`/`count` verb). NOT faked with a
+  # trivially-green match. Lights up when the emptiness form lands.
+  #   - expect: { surface: ps, within: 30s, match: [] }   # <- would be false-green; held
+  - seed_regression: {class: install-up-down-residue}

@@ -1,0 +1,21 @@
+# Defect class: pane-render vs receipt (send --verify honesty).
+# Marathon origin: `rig send --verify` reported success on delivery/receipt (message
+#   queued) while the text never RENDERED in the seat's pane — a false-positive that
+#   masked wedged seats.
+# SEED (class: verify-is-receipt-not-render): the seeded regression makes --verify
+#   ack on receipt without confirming pane render. The `expect pane contains marker`
+#   MUST catch it — the diff shows expected marker-in-pane vs an observed empty pane,
+#   even though the send "succeeded", naming the receipt-not-render class.
+# Deps: send{verify} + pane surface (R-10). No emit.
+scenario: send-verify-means-rendered
+topology: ./solo-stub.yaml
+steps:
+  - up: {}
+  - send: {to: work-worker@solo-stub, text: "render-marker-7f3a", verify: true}
+  # --verify must mean RENDERED: the exact text is observable in the pane.
+  - expect:
+      surface: pane
+      seat: work-worker@solo-stub
+      within: 30s
+      contains: "render-marker-7f3a"
+  - seed_regression: {class: verify-is-receipt-not-render}

@@ -1,0 +1,11 @@
+version: "0.2"
+name: dev-pair-stub
+culture_file: culture.md
+pods:
+  - id: dev
+    label: Development Pair
+    members:
+      - {id: impl, agent_ref: "local:agents/impl", profile: default, runtime: stub, cwd: .}
+      - {id: qa, agent_ref: "local:agents/qa", profile: default, runtime: stub, cwd: .}
+    edges:
+      - {kind: delegates_to, from: impl, to: qa}

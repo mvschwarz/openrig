@@ -1,0 +1,30 @@
+# Defect class: Seam-B posture preservation across a structural topology edit.
+# Marathon origin: adding/removing a member or pod recomputed permission posture and
+#   silently dropped an attached policy on an unrelated seat.
+# SEED (class: seam-b-posture-loss): the seeded regression makes the structural
+#   mutate path recompute posture from scratch, dropping `lead`'s attached policy.
+#   The post-mutate `expect policy_provenance` (unchanged for lead) MUST catch it —
+#   the diff shows expected policy=guarded/source=attach vs an observed default/none.
+# Deps: policy attach + mutate + policy_provenance surface (R-10). No emit.
+scenario: policy-posture-survives-structural-edit
+topology: ./policy-seat-stub.yaml
+steps:
+  - up: {}
+  - policy: {op: attach, name: guarded, seat: lead}
+  - expect:
+      surface: policy_provenance
+      seat: lead
+      within: 20s
+      match:
+        policy: guarded
+        source: attach
+  # Structural edit elsewhere in the topology must NOT disturb lead's posture.
+  - mutate: {op: add_member, pod: guarded, member: helper, runtime: stub}
+  - expect:
+      surface: policy_provenance
+      seat: lead
+      within: 20s
+      match:
+        policy: guarded
+        source: attach
+  - seed_regression: {class: seam-b-posture-loss}

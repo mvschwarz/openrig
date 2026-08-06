@@ -1,0 +1,9 @@
+version: "0.2"
+name: rig-beta
+culture_file: culture.md
+pods:
+  - id: work
+    label: Work
+    members:
+      - {id: worker, agent_ref: "local:agents/worker", profile: default, runtime: stub, cwd: .}
+    edges: []

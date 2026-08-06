@@ -1,0 +1,9 @@
+version: "0.2"
+name: policy-seat-stub
+culture_file: culture.md
+pods:
+  - id: guarded
+    label: Guarded
+    members:
+      - {id: lead, agent_ref: "local:agents/lead", profile: default, runtime: stub, cwd: .}
+    edges: []

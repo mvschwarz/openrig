@@ -1,0 +1,28 @@
+# Defect class: the acting-orch / wrong-seat restore class.
+# Marathon origin: after a compaction round-trip a seat came back without its role
+#   (or the WRONG seat was re-primed), so an acting-orch lost its seat identity.
+# SEED (class: wrong-seat-restore): the seeded regression makes restore read/deliver
+#   the WRONG seat's restore marker. Because the real restore is SEAT-KEYED (fireRestore
+#   reads THIS seat's keyed marker), the seeded cross-seat delivery makes the `expect
+#   pane` below (impl's own restore directive) fail — the diff names the class.
+#
+# REAL EMIT FORM (51-01 items 6-8 in main 9cf78106): `restore` is an EMIT BEHAVIOR, not a
+# seat verb. `emit compaction` fires the real precompact-hook.mjs → a seat-keyed
+# restore-pending marker; `emit restore` fires the real compaction-restore-bridge.cjs →
+# injects ONE additionalContext directive (one-shot, deliveredAt/deliveryCount) which the
+# runner mirrors to the pane verbatim ("[stub] restore delivered — injected restore
+# directive:"). Real seams, never fabricated.
+# Deps: R-10 runner + the folded emit behaviors (in main).
+scenario: compaction-restore-resumes-role
+topology: ./dev-pair-stub.yaml
+steps:
+  - up: {}
+  - emit: {seat: impl, behavior: compaction}   # real precompact seam → seat-keyed marker
+  - emit: {seat: impl, behavior: restore}       # real bridge → injects impl's own directive, mirrored
+  - expect:
+      surface: pane
+      seat: impl
+      within: 60s
+      contains: "restore delivered"
+  - seed_regression: {class: wrong-seat-restore}
+  - down: {}

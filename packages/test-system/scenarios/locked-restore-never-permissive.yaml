@@ -1,0 +1,29 @@
+# Defect class: the fail-OPEN Locked→full-bypass inversion.
+# Marathon origin: a restart/restore path re-applied a pre-lock (permissive) posture,
+#   so a seat pinned Locked came back full-bypass — a security inversion that
+#   fails OPEN exactly when it must fail closed.
+# SEED (class: fail-open-restore): the seeded regression makes the restore path
+#   re-apply the seat's pre-lock posture instead of the persisted Locked one. The
+#   post-restore `expect policy_provenance` (still Locked) MUST catch it — the diff
+#   shows expected policy=Locked vs an observed full_bypass, naming the inversion.
+# Deps: policy attach + restore + policy_provenance surface (R-10). No emit.
+scenario: locked-restore-never-permissive
+topology: ./policy-seat-stub.yaml
+steps:
+  - up: {}
+  - policy: {op: attach, name: Locked, seat: lead}
+  - expect:
+      surface: policy_provenance
+      seat: lead
+      within: 20s
+      match:
+        policy: Locked
+  - restore: lead
+  # Fail-CLOSED: restore must never widen posture. Locked stays Locked.
+  - expect:
+      surface: policy_provenance
+      seat: lead
+      within: 30s
+      match:
+        policy: Locked
+  - seed_regression: {class: fail-open-restore}

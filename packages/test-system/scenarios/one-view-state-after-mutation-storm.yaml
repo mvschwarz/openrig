@@ -1,0 +1,35 @@
+# Defect class: the one-view-state invariant (PIN-1) as a standing machine-checked
+#   assertion — tui_socket == ps == queue must express the SAME truth.
+# Marathon origin: the TUI socket state, `rig ps`, and `rig queue` drifted out of sync
+#   after a burst of activity, so three surfaces told three stories of one system.
+# SEED (class: view-state-divergence): the seeded regression makes one surface
+#   (tui_socket) lag/omit after the storm. The `equals` cross-surface leg MUST catch it
+#   — the diff shows the normalized surfaces disagreeing.
+#
+# REAL 51-02 FORM (adapted, see FORMAT-CONFORMANCE-NOTES.md): the locked schema requires
+# a nominal `surface` on every expect, so `surface: ps` is the anchor and `equals` is a
+# LIST of the compared surfaces (NOT an object). The declarative normalizer's final
+# shape (which fields of each surface map onto the shared comparison form) rides 51-03
+# shaping; the runner takes an injected normalizer (R-13).
+# Deps: R-13 (equals normalizer). Storm = an explicit bounded sequence (no loop verb).
+scenario: one-view-state-after-mutation-storm
+topology: ./mutation-pod-stub.yaml
+steps:
+  - up: {}
+  # Bounded mutation storm: interleave sends and structural edits.
+  - send: {to: swarm-a@mutation-pod-stub, text: "task 1"}
+  - send: {to: swarm-b@mutation-pod-stub, text: "task 2"}
+  - mutate: {op: add_member, pod: swarm, member: d, runtime: stub}
+  - send: {to: swarm-c@mutation-pod-stub, text: "task 3"}
+  - mutate: {op: rename_member, pod: swarm, from: d, to: e}
+  - send: {to: swarm-e@mutation-pod-stub, text: "task 4"}
+  # After the storm the three surfaces MUST agree (normalized cross-surface equality).
+  - expect:
+      surface: ps
+      within: 30s
+      equals:
+        - tui_socket
+        - ps
+        - queue
+  - seed_regression: {class: view-state-divergence}
+  - down: {}

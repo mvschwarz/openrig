@@ -1,0 +1,38 @@
+# Defect class: the across-rigs trap (`rig ps` scope honesty).
+# Marathon origin: `rig ps` silently mixed seats from other rigs into the current-rig
+#   view (or hid them), so operators mis-read who was running where.
+# SEED (class: across-rigs-leak): the seeded regression leaks rig-beta's seats into
+#   rig-alpha's DEFAULT (current-rig) ps view. The default-scope `expect ps` MUST catch
+#   it — beta is UP but must be ABSENT from alpha's default; the diff shows expected
+#   {only rig-alpha} vs an observed alpha+beta, naming the leak.
+#
+# V1 SHAPE (endorsed, dev-driver + orch 2026-08-06): assert the current-rig-DEFAULT leg
+# LIVE (honest, shipped: default `rig ps` is current-rig). The all-rigs / per-rig
+# confirmatory legs (`ps --nodes -A` / `ps --nodes --rig <name>`) are R-16 VISIBLY-
+# DEFERRED: the daemon may SILENTLY IGNORE the scope selector in its projection, so
+# asserting them now risks a FALSE GREEN (selector dropped). They light up when R-16
+# honors the selector end-to-end (pooled accept-and-drop instance #3, family trending to
+# a systematic accept-vs-honor sweep at conversion).
+# Deps: R-12 (multi-rig `up` — the second rig must actually come up for the leak-catch to
+#   be real, not a trivial-absent false green); R-16 (the deferred scoped legs).
+scenario: ps-scope-honesty
+topology: ./rig-alpha-stub.yaml
+steps:
+  - up: {}
+  - up: {topology: ./rig-beta-stub.yaml}   # R-12: bring up the second rig (dep)
+  # DEFAULT ps = current rig only: rig-beta is UP but ABSENT from rig-alpha's default
+  # view. (Exact `rig ps --json` field shape verifies-at-source in the runtime pass.)
+  - expect:
+      surface: ps
+      within: 20s
+      # ps default = BARE ARRAY of per-rig PsEntry {name,status,runningCount,...};
+      # rig-alpha present, rig-beta absent (the leak-catch). Per-seat detail = --nodes.
+      match:
+        - name: rig-alpha
+          status: running
+  # DEFERRED (R-16, VISIBLY annotated, NOT dropped) — the confirmatory scoped legs:
+  #   `ps --nodes -A` shows alpha+beta (the honest cross-rig widening); `ps --nodes
+  #   --rig rig-beta` shows beta only. Held until the daemon honors the scope selector
+  #   in its projection (else the selector is silently dropped = false green).
+  - seed_regression: {class: across-rigs-leak}
+  - down: {}

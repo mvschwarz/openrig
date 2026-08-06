@@ -1,0 +1,50 @@
+# Defect class: baton drop / stale-activity / mid-turn death.
+# Marathon origin: a restart (crash/resume) dropped the in-progress queue claim, so
+#   owned work looked unowned and a second seat re-picked it.
+# SEED (class: baton-drop): the seeded regression makes the restart path fail to
+#   rehydrate the claim record. The post-restart `expect queue` (baton-1 still
+#   in-progress AND destinationSession dev-qa@dev-pair-stub) MUST catch it — the diff
+#   shows expected in-progress/owned vs an observed pending/unowned item.
+#
+# REAL 51-02 FORM (adapted to the CLEARED runner, verdict 57d5aa7d — see
+# FORMAT-CONFORMANCE-NOTES.md): the baton is a fixture-level `env.queue` PRECONDITION
+# (there is NO queue action verb); the pipeline runs the shipped `rig queue
+# create`/`claim` before the steps. "restart" = `daemon:{op:restart}` (ratified; the
+# baton lives in daemon SQLite, so it must survive the daemon lifecycle) — NOT a seat
+# relaunch (no snapshot-free per-seat relaunch verb exists, F2). `expect queue` is a
+# LIST keyed on qitemId/state/destinationSession.
+# Deps: R-10 runner. No emit.
+scenario: queue-baton-survives-restart
+topology: ./dev-pair-stub.yaml
+env:
+  queue:
+    - id: baton-1
+      source: harness@dev-pair-stub
+      destination: dev-qa@dev-pair-stub
+      summary: "51-03 baton — survives a restart"
+      claim: true
+steps:
+  - up: {}
+  # the baton is in-progress + owned before we touch the daemon
+  - expect:
+      surface: queue
+      within: 20s
+      match:
+        - qitemId: baton-1
+          state: in-progress
+          destinationSession: dev-qa@dev-pair-stub
+  - daemon: { op: restart }
+  # the baton MUST survive the restart: same item, still in-progress, still owned
+  - expect:
+      surface: queue
+      within: 20s
+      match:
+        - qitemId: baton-1
+          state: in-progress
+          destinationSession: dev-qa@dev-pair-stub
+  # DEFERRED (items-6-8, VISIBLY annotated, NOT dropped): the locked class also asserts
+  #   expect { surface: pane, seat: qa, contains: "restored" }. The stub-runner at the
+  #   current tip emits only READY/EXITED; the `restore` behavior that prints the
+  #   "restored" pane marker is A5 items 6-8. Lights up when they land.
+  - seed_regression: {class: baton-drop}
+  - down: {}

@@ -1,0 +1,69 @@
+# Defect class: lost-execution-closure / executed-unclosed (A1 scenario #11).
+# Wild incident (2026-08-05, pm-lead ruling 6eb9166a): a gated, guard-cleared branch
+#   cleanup EXECUTED correctly and was receipted on disk, but the daemon died before the
+#   queue closure landed — so a later reader misread completed work as an out-of-band
+#   incident for ~5 hours. The divergence between completed EXECUTION and queue STATE
+#   must become VISIBLE on a shipped surface, never silently misread as unexecuted.
+#
+# *** RED-FIRST ***  Unlike the ten, this scenario is RED-first: its GREEN gates on the
+#   51-06 transactional execution-closure + executed-unclosed reconcile (R-20). Until
+#   that lands, its runs are recorded as EXPECTED-RED (the class demonstrably caught),
+#   NEVER massaged to green. It flips GREEN when 51-06 lands.
+#
+# SEED (class: lost-execution-closure): the kill window itself IS the seed — the daemon
+#   is SIGTERMed after the handoff executes but before the closure write commits. The
+#   `expect` legs below (queue honest post-restart + divergence visible on stream) MUST
+#   catch the executed-unclosed state; pre-51-06 they fail (the work is misread as
+#   unexecuted/pending) — that failure IS the class, recorded as expected-RED.
+#
+# Deps (BLOCKING, routed — never shimmed here):
+#   R-11: `daemon: {op: sigterm|restart}` step verb (arch-ruled ARCH-RULING-51-09, on
+#         the shared env-helper lifecycle surface). Not yet in the locked 51-02 verb
+#         list — rides the 51-02 build gate. #11 BLOCKS on it.
+#   R-20: the 51-06 transactional-closure fix (the GREEN gate). The scenario-local
+#         daemon restart rides the 51elv2 acknowledged-write-failure latch already in
+#         main (4cd2c313).
+#   R-17: (minor) whether faithfully reproducing the handoff-and-complete closure needs
+#         a distinct queue-completion action beyond `send` — routed to 51-02.
+#   #11 may NOT assert on the on-disk receipt (not a shipped surface): its assertions
+#   ride queue/stream, where the 51-06 fix must surface the divergence.
+scenario: kill-daemon-mid-handoff
+topology: ./dev-pair-stub.yaml
+steps:
+  - up: {}
+  # Drive an executed handoff: impl hands work to qa; qa claims and executes it.
+  - send: {to: dev-qa@dev-pair-stub, text: "execute cleanup task (receipt on disk)"}
+  # Real queue = BARE ARRAY QueueItem[] {qitemId,state,destinationSession,…}. NOTE (R-17,
+  # routed): a `send` creates a STREAM item, not a queue item — faithfully establishing an
+  # in-progress handoff needs an `env.queue` precondition + claim (as #2 does) or a queue
+  # action verb. Until R-17 resolves, this leg observes [] (expected-RED, consistent with
+  # the scenario's 51-06 RED-first posture). Shape shown shipped-correct for the flip.
+  - expect:
+      surface: queue
+      within: 20s
+      match:
+        - state: in-progress
+          destinationSession: dev-qa@dev-pair-stub
+  # Kill the scenario-local daemon in the window AFTER execution, BEFORE the closure
+  # write commits — the exact incident shape.
+  - daemon: {op: sigterm}
+  - daemon: {op: restart}
+  # Post-restart the queue must be HONEST about the executed-but-unclosed item, and the
+  # divergence must be VISIBLE on stream. Pre-51-06 these FAIL (executed work misread as
+  # unexecuted) → recorded EXPECTED-RED. Post-51-06 they hold → GREEN.
+  - expect:
+      surface: queue
+      within: 30s
+      match:
+        items:
+          - destination: qa
+            executed: true
+            closure: reconciled
+  - expect:
+      surface: stream
+      within: 30s
+      match:
+        events:
+          - kind: executed_unclosed_divergence
+            visible: true
+  - seed_regression: {class: lost-execution-closure}

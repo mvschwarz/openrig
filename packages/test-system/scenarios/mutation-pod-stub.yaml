@@ -1,0 +1,11 @@
+version: "0.2"
+name: mutation-pod-stub
+culture_file: culture.md
+pods:
+  - id: swarm
+    label: Swarm
+    members:
+      - {id: a, agent_ref: "local:agents/worker", profile: default, runtime: stub, cwd: .}
+      - {id: b, agent_ref: "local:agents/worker", profile: default, runtime: stub, cwd: .}
+      - {id: c, agent_ref: "local:agents/worker", profile: default, runtime: stub, cwd: .}
+    edges: []

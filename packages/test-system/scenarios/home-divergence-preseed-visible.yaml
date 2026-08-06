@@ -1,0 +1,36 @@
+# Defect class: GAP-7 HOME divergence (the daemon HOME != the seat HOME).
+# Marathon origin: when a seat launched under a pre-existing tmux server with a
+#   different HOME, the orchestrator's preseed (startup files/trust) silently did not
+#   reach the seat — and nothing surfaced. Silent divergence is the defect.
+#
+# ERA-SPLIT RULING (PM via orch, 2026-08-06): the former "preseed reaches OR failure
+# visible" disjunction was TWO ERAS sharing one assert — the OR existed only because
+# home-divergence VARIED before GAP-7. GAP-7 folded tonight (`d0668d5f`, in main:
+# "fix(cli): preserve Codex home for daemon"), so at the FIXED tip the outcome is
+# DETERMINISTIC. The GREEN/RED pair structure separates the two eras without any_of
+# (the validator's refusal of any_of was correct and stands):
+#   - GREEN leg (fixed tip): preseed REACHES the seat — one deterministic outcome.
+#   - seed_regression leg: the seeded GAP-7-class fault makes preseed fail, and the
+#     failure MUST be VISIBLE on stream (never silent) — that is what the seeded run pins.
+#
+# SEED (class: gap7-home-divergence): the seed plants the GAP-7-class HOME split. The
+#   GREEN `expect pane trust-reached` then goes RED (preseed did not reach), and the
+#   failure surfaces on `stream` — the runner diff names the class. If the seeded run
+#   produced a SILENT failure (neither reach nor visible), THAT is the defect the pair
+#   catches. (If the SUT is ever found non-determinate at the fixed tip, the any_of
+#   amendment question returns WITH that evidence — not before.)
+# Deps: R-14 (env.pre_existing_tmux hermetic fixture). R-10 runner.
+scenario: home-divergence-preseed-visible
+topology: ./solo-stub.yaml
+env:
+  pre_existing_tmux: true
+steps:
+  - up: {}
+  # GREEN leg — deterministic at the GAP-7-fixed tip: preseed reaches the seat.
+  - expect:
+      surface: pane
+      seat: work-worker@solo-stub
+      within: 45s
+      contains: "trust reached"
+  - seed_regression: {class: gap7-home-divergence}
+  - down: {}
