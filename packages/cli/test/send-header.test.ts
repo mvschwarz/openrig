@@ -38,4 +38,39 @@ describe("wrapSendBody — pre-release CLI/daemon Item 2 (email-style envelope)"
     const out = wrapSendBody("from@a", "to@b", "x");
     expect(out).toMatch(/^From: from@a\nTo: to@b\n---\n/);
   });
+
+  // Send/broadcast header (ruling 03c35295) — MUST mirror packages/daemon/test/pane-envelope.test.ts
+  // byte-for-byte (the twin parity contract). Envelope=truth, render=projection; scale=anti-storm teeth.
+  it("backward-compat: with no meta, the output is exactly today's 6-line DM envelope (no Sent line)", () => {
+    expect(wrapSendBody("a@r", "b@r", "hi")).toBe("From: a@r\nTo: b@r\n---\nhi\n---\n↩ Reply: rig send a@r \"...\"");
+  });
+
+  it("multi-send renders the FULL recipient list on the To line", () => {
+    const out = wrapSendBody("a@r", "b@r", "hi", null, { scope: { kind: "multi", recipients: ["b@r", "c@r", "d@r"] } });
+    expect(out).toContain("To: b@r, c@r, d@r");
+  });
+
+  it("rig-broadcast renders 'broadcast to <rig> (N seats)' — the anti-storm scale", () => {
+    const out = wrapSendBody("a@r", "openrig-pm", "hi", null, { scope: { kind: "rig-broadcast", rig: "openrig-pm", seats: 11 } });
+    expect(out).toContain("To: broadcast to openrig-pm (11 seats)");
+  });
+
+  it("topology-broadcast renders 'broadcast to topology'", () => {
+    const out = wrapSendBody("a@r", "*", "hi", null, { scope: { kind: "topology" } });
+    expect(out).toContain("To: broadcast to topology");
+  });
+
+  it("stamps the short MM-DD HH:MMZ timestamp from the transport ISO", () => {
+    const out = wrapSendBody("a@r", "b@r", "hi", null, { stampISO: "2026-08-06T17:42:09Z" });
+    expect(out).toContain("Sent: 08-06 17:42Z");
+  });
+
+  it("storm test: DM / multi / rig-bcast / topology each render distinct To lines (header-alone)", () => {
+    const to = (out: string) => out.split("\n").find((l) => l.startsWith("To:"));
+    const dm = to(wrapSendBody("a@r", "b@r", "x"));
+    const multi = to(wrapSendBody("a@r", "b@r", "x", null, { scope: { kind: "multi", recipients: ["b@r", "c@r"] } }));
+    const rig = to(wrapSendBody("a@r", "r", "x", null, { scope: { kind: "rig-broadcast", rig: "r", seats: 4 } }));
+    const topo = to(wrapSendBody("a@r", "*", "x", null, { scope: { kind: "topology" } }));
+    expect(new Set([dm, multi, rig, topo]).size).toBe(4);
+  });
 });

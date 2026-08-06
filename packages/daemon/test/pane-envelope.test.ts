@@ -65,4 +65,43 @@ describe("wrapPaneEnvelope — slice 23 envelope renderer (daemon-side)", () => 
     const matches = out.split(bare).length - 1;
     expect(matches).toBe(1);
   });
+
+  // ── Send/broadcast header (ruling 03c35295) — recipient-visibility projection + timestamp ──
+  // Envelope = truth; render = projection. The To-line + scale is the anti-storm teeth (a recipient
+  // tells DM vs multi vs rig-broadcast vs topology from the header alone). Stamp is stamped ONCE at
+  // transport send-time (an INPUT — render reads it, never re-derives).
+
+  it("backward-compat: with no meta, the output is exactly today's 6-line DM envelope (no Sent line)", () => {
+    const out = wrapPaneEnvelope("a@r", "b@r", "hi");
+    expect(out).toBe("From: a@r\nTo: b@r\n---\nhi\n---\n↩ Reply: rig send a@r \"...\"");
+  });
+
+  it("multi-send renders the FULL recipient list on the To line (WHO got it)", () => {
+    const out = wrapPaneEnvelope("a@r", "b@r", "hi", null, { scope: { kind: "multi", recipients: ["b@r", "c@r", "d@r"] } });
+    expect(out).toContain("To: b@r, c@r, d@r");
+  });
+
+  it("rig-broadcast renders 'broadcast to <rig> (N seats)' — the anti-storm scale", () => {
+    const out = wrapPaneEnvelope("a@r", "openrig-pm", "hi", null, { scope: { kind: "rig-broadcast", rig: "openrig-pm", seats: 11 } });
+    expect(out).toContain("To: broadcast to openrig-pm (11 seats)");
+  });
+
+  it("topology-broadcast renders 'broadcast to topology'", () => {
+    const out = wrapPaneEnvelope("a@r", "*", "hi", null, { scope: { kind: "topology" } });
+    expect(out).toContain("To: broadcast to topology");
+  });
+
+  it("stamps the short MM-DD HH:MMZ timestamp from the transport ISO (read, never re-derived)", () => {
+    const out = wrapPaneEnvelope("a@r", "b@r", "hi", null, { stampISO: "2026-08-06T17:42:09Z" });
+    expect(out).toContain("Sent: 08-06 17:42Z");
+  });
+
+  it("header-alone distinguishability (storm test): DM / multi / rig-bcast / topology each render distinct To lines", () => {
+    const to = (out: string) => out.split("\n").find((l) => l.startsWith("To:"));
+    const dm = to(wrapPaneEnvelope("a@r", "b@r", "x"));
+    const multi = to(wrapPaneEnvelope("a@r", "b@r", "x", null, { scope: { kind: "multi", recipients: ["b@r", "c@r"] } }));
+    const rig = to(wrapPaneEnvelope("a@r", "r", "x", null, { scope: { kind: "rig-broadcast", rig: "r", seats: 4 } }));
+    const topo = to(wrapPaneEnvelope("a@r", "*", "x", null, { scope: { kind: "topology" } }));
+    expect(new Set([dm, multi, rig, topo]).size).toBe(4); // all four visually distinct, zero context
+  });
 });

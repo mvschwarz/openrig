@@ -30,11 +30,39 @@ const SENDER_FALLBACK = "<unknown sender>";
  * render the same envelope as peer-to-peer `rig send`. If you update
  * this function, update wrapPaneEnvelope in lockstep.
  */
+/** Send/broadcast header envelope metadata (ruling 03c35295) — the BYTE-IDENTICAL twin of the daemon's
+ *  pane-envelope EnvelopeMeta. Envelope = machine truth; rendered header = projection. */
+export interface EnvelopeScope {
+  kind: "dm" | "multi" | "rig-broadcast" | "topology";
+  recipients?: string[];
+  rig?: string;
+  seats?: number;
+}
+export interface EnvelopeMeta {
+  /** ISO-8601, stamped ONCE at transport send-time; render READS it, never re-derives. */
+  stampISO?: string;
+  scope?: EnvelopeScope;
+}
+
+/** The To-line projection + anti-storm scale (header-alone distinguishability). */
+export function renderToLine(recipient: string, scope?: EnvelopeScope): string {
+  if (!scope || scope.kind === "dm") return `To: ${recipient}`;
+  if (scope.kind === "multi") return `To: ${(scope.recipients ?? [recipient]).join(", ")}`;
+  if (scope.kind === "rig-broadcast") return `To: broadcast to ${scope.rig} (${scope.seats} seats)`;
+  return "To: broadcast to topology";
+}
+
+/** Short glanceable stamp MM-DD HH:MMZ from the transport ISO. */
+export function renderShortStamp(stampISO: string): string {
+  return `${stampISO.slice(5, 7)}-${stampISO.slice(8, 10)} ${stampISO.slice(11, 16)}Z`;
+}
+
 export function wrapSendBody(
   sender: string | undefined,
   recipient: string,
   body: string,
   selfHostId?: string | null,
+  meta?: EnvelopeMeta,
 ): string {
   const senderLabel = sender && sender.trim().length > 0 ? sender : SENDER_FALLBACK;
   // 51-09 increment 3 (ruling cb19867f Q2 always-suffix + 2e1b737f C1 fail-open):
@@ -49,14 +77,9 @@ export function wrapSendBody(
     selfHostId && selfHostId.length > 0 && senderLabel !== SENDER_FALLBACK && senderLabel.split("@").length < 3
       ? `${senderLabel}@${selfHostId}`
       : senderLabel;
-  return [
-    `From: ${senderTriple}`,
-    `To: ${recipient}`,
-    "---",
-    body,
-    "---",
-    `↩ Reply: rig send ${senderTriple} "..."`,
-  ].join("\n");
+  const header = [`From: ${senderTriple}`, renderToLine(recipient, meta?.scope)];
+  if (meta?.stampISO) header.push(`Sent: ${renderShortStamp(meta.stampISO)}`);
+  return [...header, "---", body, "---", `↩ Reply: rig send ${senderTriple} "..."`].join("\n");
 }
 
 function resolveSenderSession(): string | undefined {
