@@ -582,6 +582,16 @@ export interface NodeInventoryEntry {
    */
   terminalActive?: boolean | null;
   /**
+   * ARCH RULING 3a947fb1 (FR-7 additive) — the seat's RAW `lastActivityAt`
+   * fact (SeatActivity.lastActivityAt), projected per-seat alongside
+   * `terminalActive`. ISO string when an observation exists; `null` when
+   * the seat has no observation (never polled / non-tmux); `undefined`
+   * when no SeatActivityService is wired — exactly the honest-absence
+   * ladder `terminalActive` uses. NO `ageSeconds` sibling: age is a VIEW
+   * derived at the renderer from this fact + a reader clock (C3).
+   */
+  lastActivityAt?: string | null;
+  /**
    * Slice 15 — `has-work-to-do` primitive. Derived from queue/assignment
    * projection (pending qitems whose `destination_session` matches this
    * seat's `canonicalSessionName`).
@@ -634,6 +644,20 @@ export interface SeatActivity {
   silenceWindowSeconds: number;
   /** ISO timestamp of the most recent observation. */
   lastObservedAt: string;
+  /**
+   * ARCH RULING 3a947fb1 (FR-7 additive) — the RAW `window_activity`
+   * timestamp (last output on the pane), as ISO. This is the input the
+   * service already reads to derive active/idle; surfaced verbatim so
+   * consumers can compute a fresh idle-age = f(fact, reader-clock).
+   *
+   * RAW FACT, never clamped: clock skew can put this slightly AHEAD of
+   * `lastObservedAt` (the service reads negative age as active); the
+   * value is stored as observed and renderers clamp for display only.
+   * Distinct from `lastObservedAt` (when WE looked) — this is when the
+   * pane last produced output. A record only exists when tmux returned a
+   * signal, so this is always present on a record (absence = no record).
+   */
+  lastActivityAt: string;
 }
 
 export interface NodeWorkspaceInfo {

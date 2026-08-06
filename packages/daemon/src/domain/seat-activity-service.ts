@@ -86,6 +86,11 @@ export class SeatActivityService {
       isActiveWithinWindow,
       silenceWindowSeconds,
       lastObservedAt: observedAt.toISOString(),
+      // ARCH RULING 3a947fb1 (FR-7 additive): surface the RAW window_activity
+      // timestamp as ISO — the same epoch we just consumed for `ageSeconds`,
+      // no longer discarded. RAW, never clamped (skew may put it ahead of
+      // lastObservedAt); consumers derive display-age from it + a reader clock.
+      lastActivityAt: new Date(lastActivityEpochSeconds * 1000).toISOString(),
     };
     this.latestByPaneId.set(paneId, record);
     return record;

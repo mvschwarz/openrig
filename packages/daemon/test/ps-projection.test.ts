@@ -324,6 +324,7 @@ describe("PsProjectionService", () => {
               isActiveWithinWindow: activeByPaneId[paneId]!,
               silenceWindowSeconds: 3,
               lastObservedAt: "2026-05-16T00:00:00.000Z",
+              lastActivityAt: "2026-05-15T23:59:40.000Z",
             };
           }
           return null;

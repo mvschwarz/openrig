@@ -141,6 +141,47 @@ describe("SeatActivityService", () => {
     expect(svc).toBeDefined();
   });
 
+  // ── ARCH RULING 3a947fb1 (pulse PARKED-WITH-BATON owner idle-age): pollSeat
+  // ── already reads the RAW window_activity epoch to derive active/idle, then
+  // ── discards it. FR-7 additive — surface it as `lastActivityAt` (ISO) on the
+  // ── record. RAW fact, never clamped (C2); ONE field, no ageSeconds sibling
+  // ── (C3 — age is a renderer-side VIEW = f(fact, reader-clock)).
+  describe("lastActivityAt — raw window_activity fact (arch 3a947fb1)", () => {
+    it("stamps the RAW activity epoch as ISO — distinct from lastObservedAt (observation time)", async () => {
+      // Activity 10s before the observation clock.
+      const tmux = makeTmuxAdapter({ "claude@rig": FIXED_NOW_EPOCH - 10 });
+      const svc = new SeatActivityService({ tmux, defaultWindowSeconds: 3, now: () => FIXED_NOW });
+
+      const observed = await svc.pollSeat("claude@rig");
+
+      // The fact is the tmux activity TIME, not when we observed it.
+      expect(observed!.lastActivityAt).toBe(new Date((FIXED_NOW_EPOCH - 10) * 1000).toISOString());
+      expect(observed!.lastObservedAt).toBe(FIXED_NOW.toISOString());
+      expect(observed!.lastActivityAt).not.toBe(observed!.lastObservedAt);
+    });
+
+    it("C2 raw fact, NO clamping — skew putting activity AHEAD of the observation clock is preserved, not floored", async () => {
+      // Clock skew: tmux reports activity 5s in the (near) future vs our clock.
+      const tmux = makeTmuxAdapter({ "claude@rig": FIXED_NOW_EPOCH + 5 });
+      const svc = new SeatActivityService({ tmux, defaultWindowSeconds: 3, now: () => FIXED_NOW });
+
+      const observed = await svc.pollSeat("claude@rig");
+
+      // Surfaced verbatim — AHEAD of lastObservedAt. The projection never
+      // clamps/floors; renderers clamp for display only.
+      expect(observed!.lastActivityAt).toBe(new Date((FIXED_NOW_EPOCH + 5) * 1000).toISOString());
+      expect(Date.parse(observed!.lastActivityAt)).toBeGreaterThan(Date.parse(observed!.lastObservedAt));
+    });
+
+    it("C1 absent-when-no-signal — a null tmux read yields NO record (the fact is absent, never fabricated)", async () => {
+      const tmux = makeTmuxAdapter({ "claude@rig": null });
+      const svc = new SeatActivityService({ tmux, defaultWindowSeconds: 3, now: () => FIXED_NOW });
+
+      expect(await svc.pollSeat("claude@rig")).toBeNull();
+      expect(svc.getSeatActivity("claude@rig")).toBeNull(); // no record ⟹ no lastActivityAt
+    });
+  });
+
   describe("pollAllRunningTmuxSeats", () => {
     // Uses the same DB schema the daemon uses — pick up the test-app
     // helper that provisions an in-memory daemon DB with all migrations.

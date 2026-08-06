@@ -149,6 +149,9 @@ nodesRoutes.get("/:logicalId", async (c) => {
   Object.assign(detail, {
     agentActivity: detailWithTerminalAndWork?.agentActivity,
     terminalActive: detailWithTerminalAndWork?.terminalActive,
+    // ARCH RULING 3a947fb1: serve the raw lastActivityAt fact on node-detail too
+    // (the list route serves the whole entry wholesale) — same per-seat surface.
+    lastActivityAt: detailWithTerminalAndWork?.lastActivityAt,
     hasAssignedWork: detailWithTerminalAndWork?.hasAssignedWork,
     pendingWorkCount: detailWithTerminalAndWork?.pendingWorkCount,
   });

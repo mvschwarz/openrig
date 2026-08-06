@@ -54,6 +54,7 @@ function makeSeatActivityFor(activeBySession: Record<string, boolean | null>) {
         isActiveWithinWindow: isActive,
         silenceWindowSeconds: 3,
         lastObservedAt: "2026-05-16T00:00:00.000Z",
+        lastActivityAt: "2026-05-15T23:59:40.000Z",
       };
     },
   };
@@ -145,6 +146,55 @@ describe("attachTerminalActivityAndWork — slice 15 per-node enrichment", () =>
 
     expect(entry!.terminalActive).toBeUndefined();
     expect(entry!.hasAssignedWork).toBe(false); // queue check still runs
+  });
+
+  // ── ARCH RULING 3a947fb1: the per-seat projection surfaces the RAW
+  // ── lastActivityAt fact alongside terminalActive — projected verbatim, null
+  // ── when no observation (honest absence, parallel to terminalActive), and
+  // ── with NO ageSeconds sibling (C3 — age is derived renderer-side).
+  it("projects lastActivityAt VERBATIM from the observation (raw fact, distinct from lastObservedAt) — and no ageSeconds sibling (C3)", () => {
+    const rig = seedRig(db, "act-ts");
+    const n = seedNode(db, rig, "dev");
+    seedSession(db, n, "dev@rig", "running");
+
+    const seatActivity = {
+      getSeatActivity: (paneId: string) =>
+        paneId === "dev@rig"
+          ? {
+              paneId,
+              isActiveWithinWindow: true,
+              silenceWindowSeconds: 3,
+              lastObservedAt: "2026-05-16T10:00:00.000Z",
+              lastActivityAt: "2026-05-16T09:59:12.000Z", // distinct raw fact
+            }
+          : null,
+    };
+    const [entry] = attachTerminalActivityAndWork(getNodeInventory(db, rig), { db, seatActivity: seatActivity as never });
+
+    expect(entry!.lastActivityAt).toBe("2026-05-16T09:59:12.000Z");
+    // C3 — one field only; no ageSeconds sibling on the projected surface.
+    expect((entry as Record<string, unknown>).ageSeconds).toBeUndefined();
+  });
+
+  it("no observation → lastActivityAt=null (honest absence, parallel to terminalActive=null)", () => {
+    const rig = seedRig(db, "act-noobs");
+    const n = seedNode(db, rig, "dev");
+    seedSession(db, n, "dev@rig", "running");
+
+    const seatActivity = { getSeatActivity: () => null };
+    const [entry] = attachTerminalActivityAndWork(getNodeInventory(db, rig), { db, seatActivity: seatActivity as never });
+
+    expect(entry!.terminalActive).toBeNull();
+    expect(entry!.lastActivityAt).toBeNull();
+  });
+
+  it("no seatActivity service wired → lastActivityAt=undefined (field absent, not a value claim)", () => {
+    const rig = seedRig(db, "act-nosvc");
+    const n = seedNode(db, rig, "dev");
+    seedSession(db, n, "dev@rig", "running");
+
+    const [entry] = attachTerminalActivityAndWork(getNodeInventory(db, rig), { db });
+    expect(entry!.lastActivityAt).toBeUndefined();
   });
 
   it("multiple pending qitems for one seat ⟹ hasAssignedWork=true, pendingWorkCount = N", () => {

@@ -964,14 +964,21 @@ export function attachTerminalActivityAndWork(
   const pendingByDest = readPendingWorkBySession(deps.db);
   return entries.map((entry) => {
     let terminalActive: boolean | null | undefined = undefined;
+    // ARCH RULING 3a947fb1 (FR-7 additive): project the RAW lastActivityAt fact
+    // alongside terminalActive from the SAME observation — honest-absence ladder
+    // (obs → value, no obs → null, no service → undefined). No ageSeconds
+    // sibling; age is derived renderer-side from this fact + a reader clock (C3).
+    let lastActivityAt: string | null | undefined = undefined;
     if (seatActivity && entry.canonicalSessionName) {
       const obs = seatActivity.getSeatActivity(entry.canonicalSessionName);
       terminalActive = obs ? obs.isActiveWithinWindow : null;
+      lastActivityAt = obs ? obs.lastActivityAt : null;
     }
     const pendingCount = countPendingForEntry(entry, pendingByDest);
     return {
       ...entry,
       terminalActive,
+      lastActivityAt,
       hasAssignedWork: pendingCount > 0,
       pendingWorkCount: pendingCount,
     };
