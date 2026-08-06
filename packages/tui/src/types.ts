@@ -171,6 +171,13 @@ export interface QueueRead {
  * is a VIEW derived at the renderer from this + the reader clock, never here. */
 export interface SeatActivitySummary {
   session: string;
+  /** the seat's COMPACT canonical id (podNamespace.memberId, e.g. "dev50.driver")
+   * — served VERBATIM as node.logicalId on the SAME nodes read (it is the agent
+   * NAME the TABLE view already renders, hydrate.ts toAgentRow). The PULSE lane
+   * form (r1 mock-authority ruling) shows this short id; the full `session` is
+   * recovered on drill-in. Carried, never reconstructed from the session string
+   * (namespaces/members may contain hyphens → a split would be lossy). */
+  logicalId: string;
   terminalActive: boolean | null;
   lastActivityAt: string | null;
 }

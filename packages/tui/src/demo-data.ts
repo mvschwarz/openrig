@@ -24,7 +24,7 @@ export function demoSnapshot(): FleetSnapshot {
               {
                 name: "orch",
                 agents: [
-                  { name: "orch.lead", runtime: "codex", spec: "lead-agent", context: 88, tokens: "203k", status: "needs-attention", live: true, canRun: false },
+                  { name: "orch.lead", runtime: "codex", spec: "lead-agent", context: 88, tokens: "203k", status: "needs-attention", live: true, canRun: false, session: "orch-lead@openrig-build" },
                 ],
               },
             ],
@@ -77,12 +77,12 @@ export function demoSnapshot(): FleetSnapshot {
     // guard IDLE (47m before the 12:00 demo clock) → PARKED; qa NO SIGNAL
     // (detached → null, honest-unknown ≠ idle → shown in neither lane).
     seatActivity: [
-      { session: "dev50-driver@openrig-build", terminalActive: true, lastActivityAt: "2026-08-06T11:58:30.000Z" },
-      { session: "dev50-planner@openrig-build", terminalActive: true, lastActivityAt: "2026-08-06T11:59:10.000Z" },
-      { session: "review50-r1@openrig-build", terminalActive: true, lastActivityAt: "2026-08-06T11:59:20.000Z" },
-      { session: "orch-lead@openrig-build", terminalActive: true, lastActivityAt: "2026-08-06T11:59:40.000Z" },
-      { session: "dev50-guard@openrig-build", terminalActive: false, lastActivityAt: "2026-08-06T11:13:00.000Z" },
-      { session: "dev50-qa@openrig-build", terminalActive: null, lastActivityAt: null },
+      { session: "dev50-driver@openrig-build", logicalId: "dev50.driver", terminalActive: true, lastActivityAt: "2026-08-06T11:58:30.000Z" },
+      { session: "dev50-planner@openrig-build", logicalId: "dev50.planner", terminalActive: true, lastActivityAt: "2026-08-06T11:59:10.000Z" },
+      { session: "review50-r1@openrig-build", logicalId: "review50.r1", terminalActive: true, lastActivityAt: "2026-08-06T11:59:20.000Z" },
+      { session: "orch-lead@openrig-build", logicalId: "orch.lead", terminalActive: true, lastActivityAt: "2026-08-06T11:59:40.000Z" },
+      { session: "dev50-guard@openrig-build", logicalId: "dev50.guard", terminalActive: false, lastActivityAt: "2026-08-06T11:13:00.000Z" },
+      { session: "dev50-qa@openrig-build", logicalId: "dev50.qa", terminalActive: null, lastActivityAt: null },
     ],
     // PULSE ○ UP NEXT source — shaped like the shipped state=pending read
     // (unclaimed backlog, served ts_created DESC → carried verbatim). SIX items

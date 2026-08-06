@@ -8,7 +8,7 @@ import { computeExplorerRows, findAgent, findSpec, findAgentBySession, agentsRun
 import { navigatorDisplay } from "./navigator.js";
 import { renderGraphStyle } from "./topology/render-graph.js";
 import { buildPulseModel } from "./pulse/pulse-model.js";
-import { renderPulseView } from "./pulse/render-pulse.js";
+import { renderPulseView, pulseLaneTargets } from "./pulse/render-pulse.js";
 import { runtimeMarkSegs } from "./topology/runtime-marks.js";
 import { barCells, flashActive, reducedMotion, spinnerFrame } from "./motion.js";
 import type { ColorMode } from "./theme.js";
@@ -728,17 +728,39 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, cols: number, 
   // full-width rule (no ┬ explorer split, no EXPLORER title)
   lines.push((`─ ${title} ` + "─".repeat(cols)).slice(0, cols));
 
-  const pulseLines = renderPulseView(buildPulseModel(snap, nowMs));
+  const model = buildPulseModel(snap, nowMs);
+  const targets = pulseLaneTargets(model);
   const chromeRows = 3; // bottom rule + hint bar + status line
   const bodyRows = Math.max(rows - 2 - chromeRows, 1);
-  const maxContentOffset = Math.max(pulseLines.length - bodyRows, 0);
+  const maxContentOffset = Math.max(renderPulseView(model).length - bodyRows, 0);
   const contentStart = Math.min(state.contentOffset, maxContentOffset);
+
+  // Lane selection: contentSelection indexes the VISIBLE lane targets in
+  // column-major order (parity with the content pane, which indexes its visible
+  // targets). PULSE is full-width with no explorer, so the lane grid is always
+  // the active selection surface — the cursor shows regardless of focusedPane.
+  const visibleTargets = targets.filter((t) => t.lineIndex >= contentStart && t.lineIndex < contentStart + bodyRows);
+  const sel = visibleTargets.length > 0 ? Math.min(Math.max(state.contentSelection, 0), visibleTargets.length - 1) : -1;
+  if (sel >= 0) {
+    const t = visibleTargets[sel]!;
+    model.lanes[t.lane]!.rows[t.row]!.selected = true; // painted PER-CELL by laneCell
+  }
+
+  const pulseLines = renderPulseView(model);
   const visible = pulseLines.slice(contentStart, contentStart + bodyRows);
+  const contentTargets: Screen["contentTargets"] = [];
   for (let i = 0; i < bodyRows; i++) {
     const y = lines.length + 1;
     const item = visible[i];
     lines.push(pad(item?.text ?? "", cols));
     if (item?.segs) segRows[y] = item.selected ? item.segs.map((s) => ({ ...s, bg: "accent" as const })) : item.segs;
+  }
+  // Register the visible lane cells as content targets in the SAME column-major
+  // order contentSelection indexes (Enter → contentTargets[contentSelection]);
+  // the y maps the target's line index into this screen's body rows (the first
+  // body row is at y=3, after the cmd bar + rule). Doubles as the mouse hitMap.
+  for (const t of visibleTargets) {
+    contentTargets.push({ y: t.lineIndex - contentStart + 3, x1: t.x1, x2: t.x2, action: t.action });
   }
 
   lines.push("─".repeat(cols));
@@ -754,8 +776,8 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, cols: number, 
   while (lines.length < rows) lines.push("");
   return {
     lines: lines.slice(0, rows),
-    hitMap: [],
-    contentTargets: [],
+    hitMap: contentTargets, // lane cells are clickable too (same targets)
+    contentTargets,
     contentMaxOffset: maxContentOffset,
     explorerRows: [],
     segRows,

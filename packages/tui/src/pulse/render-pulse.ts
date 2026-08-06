@@ -4,6 +4,7 @@
 // ●/◌/⧗/▲/✓/○ and section wording are CONTRACT; theme tokens only (no invented
 // colors — the ⧗ info accent uses the RESOLVED D4 info token, see PULSE_INFO_TOKEN).
 import type { Token } from "../theme.js";
+import type { Action } from "../types.js";
 import type { PulseModel, PulseExceptionSection, PulseLane, PulseLaneRow } from "./pulse-model.js";
 
 interface Seg { text: string; token?: Token; bold?: boolean; bg?: Token }
@@ -87,21 +88,63 @@ function laneCell(row: PulseLaneRow | undefined, w: number): Seg[] {
   // gutter is added by renderLanes so it is guaranteed even when body === w.
   const pad = w - glyph.length - time.length - label.length;
   if (pad > 0) segs.push({ text: " ".repeat(pad) });
-  return segs;
+  // SELECTION is PER-CELL (incr-4): a selected lane row accent-bgs only ITS cell,
+  // never the whole zipped terminal row (which spans all three lanes) — so the
+  // highlight names one entity, not one row-across-three-columns.
+  return row.selected ? segs.map((s) => ({ ...s, bg: "accent" as const })) : segs;
 }
 
-/** Zip the three lanes into aligned column rows (max lane length). */
+// Content-cell widths reused by pulseLaneTargets to place selection/hit spans;
+// the last lane (UP NEXT) takes the fixed 40-col tail (see renderLanes).
+const UP_NEXT_WIDTH = 40;
+
+/** Zip the three lanes into aligned column rows (max lane length). Selection is
+ * carried on the individual PulseLaneRow (painted per-cell by laneCell), NOT at
+ * the line level, so a selected cell highlights one lane only. */
 export function renderLanes(lanes: [PulseLane, PulseLane, PulseLane]): Line[] {
   const rows = Math.max(...lanes.map((l) => l.rows.length));
   const out: Line[] = [];
   const gutter: Seg = { text: LANE_GUTTER };
   for (let i = 0; i < rows; i += 1) {
-    const cells = [laneCell(lanes[0].rows[i], COL[0]), laneCell(lanes[1].rows[i], COL[1]), laneCell(lanes[2].rows[i], 40)];
-    const selected = lanes.some((l) => l.rows[i]?.selected);
+    const cells = [laneCell(lanes[0].rows[i], COL[0]), laneCell(lanes[1].rows[i], COL[1]), laneCell(lanes[2].rows[i], UP_NEXT_WIDTH)];
     // gutter reserved BETWEEN columns (never collapses on a full-width row); the
     // last column (UP NEXT) takes no trailing gutter.
-    out.push(line([...cells[0]!, gutter, ...cells[1]!, gutter, ...cells[2]!], { selected }));
+    out.push(line([...cells[0]!, gutter, ...cells[1]!, gutter, ...cells[2]!]));
   }
+  return out;
+}
+
+/** One selectable lane cell: its position in renderPulseView's line list, its
+ * lane column's fixed x-span (1-based terminal columns), and the drill Action. */
+export interface PulseLaneTarget {
+  lane: number; // 0=NOW, 1=JUST FINISHED, 2=UP NEXT
+  row: number; // index within that lane's rows
+  lineIndex: number; // 0-based line within renderPulseView(model) output
+  x1: number;
+  x2: number;
+  action: Action;
+}
+
+/** The selectable lane cells in COLUMN-MAJOR order (all NOW rows, then JUST
+ * FINISHED, then UP NEXT) — the flat domain PULSE selection walks with ↑↓, each
+ * mapped to its line index in renderPulseView's output and its lane's fixed
+ * column x-span. Rows with no action (the "…" overflow marker) are omitted; they
+ * are not entities. This is the ONE place that knows the view's vertical layout,
+ * so render.ts never re-derives the offset math. */
+export function pulseLaneTargets(model: PulseModel): PulseLaneTarget[] {
+  const exceptionLines = model.exceptions.reduce((n, s) => n + renderExceptionSection(s).length, 0);
+  // renderPulseView layout: [tabStrip, blank] + exceptions + [blank, laneRule] + laneRows + footer
+  const laneStart = 2 + exceptionLines + 2;
+  const g = LANE_GUTTER.length;
+  const starts = [0, COL[0] + g, COL[0] + g + COL[1] + g]; // text col where each lane's cell begins
+  const widths = [COL[0], COL[1], UP_NEXT_WIDTH];
+  const out: PulseLaneTarget[] = [];
+  model.lanes.forEach((lane, li) =>
+    lane.rows.forEach((row, ri) => {
+      if (!row.action) return; // overflow marker / actionless rows are not targets
+      out.push({ lane: li, row: ri, lineIndex: laneStart + ri, x1: starts[li]! + 1, x2: starts[li]! + widths[li]!, action: row.action });
+    }),
+  );
   return out;
 }
 

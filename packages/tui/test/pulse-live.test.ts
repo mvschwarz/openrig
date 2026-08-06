@@ -18,9 +18,13 @@ function liveSnap(over: Partial<FleetSnapshot> = {}): FleetSnapshot {
   return { ...base, attention: [], blocked: [], inProgress: [], seatActivity: [], pending: [], recentlyFinished: [], ...over };
 }
 
-// A ps/activity row for one seat (the PARKED join's right side).
-const seat = (session: string, terminalActive: boolean | null, lastActivityAt: string | null) =>
-  ({ session, terminalActive, lastActivityAt });
+// The compact canonical id the daemon serves as node.logicalId (podNamespace.member).
+// For the simple fixture sessions here `dev50-guard@rig` → `dev50.guard`; a test that
+// cares about the exact compact form passes it explicitly.
+const compact = (session: string) => session.split("@")[0]!.replace(/-/g, ".");
+// A ps/activity row for one seat (the PARKED/NOW join's right side).
+const seat = (session: string, terminalActive: boolean | null, lastActivityAt: string | null, logicalId: string = compact(session)) =>
+  ({ session, logicalId, terminalActive, lastActivityAt });
 
 // An in-progress qitem (reuses attn's shape but with a real owner + in-progress state).
 const inprog = (over: Partial<QueueRead>): QueueRead =>
@@ -230,13 +234,14 @@ describe("PULSE view increment 3 — Lanes LIVE (NOW / JUST FINISHED / UP NEXT +
     const now = buildPulseModel(snap, NOW).lanes[0];
     expect(now.label).toBe("NOW");
     const labels = now.rows.map((r) => r.label);
-    // active owner + its work
-    expect(labels.some((l) => l.includes("dev50-driver@openrig-build") && l.includes("pulse incr-3 build"))).toBe(true);
+    // active owner + its work — the COMPACT logicalId (incr-4), never the full session
+    expect(labels.some((l) => l.includes("dev50.driver") && l.includes("pulse incr-3 build"))).toBe(true);
+    expect(labels.some((l) => l.includes("dev50-driver@openrig-build"))).toBe(false); // full session dropped → drill recovers it
     // active seat with NO in-progress qitem is still running → shown bare (honest)
-    expect(labels.some((l) => l.includes("dev50-planner@openrig-build"))).toBe(true);
+    expect(labels.some((l) => l.includes("dev50.planner"))).toBe(true);
     // idle owner belongs under PARKED, NOT here; unknown-signal owner excluded
-    expect(labels.some((l) => l.includes("dev50-guard@openrig-build"))).toBe(false);
-    expect(labels.some((l) => l.includes("dev50-qa@openrig-build"))).toBe(false);
+    expect(labels.some((l) => l.includes("dev50.guard"))).toBe(false);
+    expect(labels.some((l) => l.includes("dev50.qa"))).toBe(false);
     // NOW has no overflow: header count == rendered referent
     expect(now.count).toBe(now.rows.length);
     expect(now.count).toBe(2);
@@ -337,5 +342,62 @@ describe("PULSE view increment 3 — Lanes LIVE (NOW / JUST FINISHED / UP NEXT +
     expect(model.lanes.every((l) => l.rows.length === 0)).toBe(true);
     // and the old static demo lane content must be GONE from the live builder
     expect(model.lanes.flatMap((l) => l.rows.map((r) => r.label)).join(" ")).not.toContain("slice 51-01 stub");
+  });
+});
+
+describe("PULSE view increment 4 — compact-seat lane form + drill-in actions", () => {
+  it("NOW label is the COMPACT logicalId (r1 mock-authority ruling); the full session is dropped from the strip", () => {
+    const snap = liveSnap({
+      inProgress: [inprog({ qitemId: "n1", destinationSession: "dev50-driver@openrig-build", summary: "pulse incr-4 build" })],
+      seatActivity: [seat("dev50-driver@openrig-build", true, ago(1 * MIN), "dev50.driver")],
+    });
+    const now = buildPulseModel(snap, NOW).lanes[0];
+    expect(now.rows[0]!.label).toBe("dev50.driver  pulse incr-4 build"); // compact id + work
+    expect(now.rows[0]!.label).not.toContain("@openrig-build"); // full session NOT on the strip
+  });
+
+  it("compact form is LANES-ONLY: exception rows keep the FULL session", () => {
+    const snap = liveSnap({
+      inProgress: [inprog({ qitemId: "pk", destinationSession: "dev50-guard@openrig-build", summary: "stranded" })],
+      seatActivity: [seat("dev50-guard@openrig-build", false, ago(47 * MIN), "dev50.guard")],
+    });
+    const parked = buildPulseModel(snap, NOW).exceptions.find((s) => s.label === "PARKED WITH BATON")!;
+    const text = renderExceptionSection(parked).map((l) => l.text).join("\n");
+    expect(text).toContain("dev50-guard@openrig-build"); // exceptions keep the FULL session
+    expect(text).not.toContain("dev50.guard"); // and NOT the compact lane form
+  });
+
+  it("NOW row drills to the seat's AGENT (session→topology) — recovering the full identity the compact label drops", () => {
+    const snap = liveSnap({
+      inProgress: [inprog({ qitemId: "n1", destinationSession: "dev50-driver@openrig-build", summary: "work" })],
+      seatActivity: [seat("dev50-driver@openrig-build", true, ago(1 * MIN), "dev50.driver")],
+    });
+    const now = buildPulseModel(snap, NOW).lanes[0];
+    expect(now.rows[0]!.action).toEqual({ type: "drill", resource: "agent", name: "dev50.driver", target: { host: "vm-host", rig: "openrig-build", pod: "dev50" } });
+  });
+
+  it("a NOW seat ABSENT from the topology degrades to a `notice` revealing the full identity — never a dead key", () => {
+    const snap = liveSnap({
+      seatActivity: [seat("ghost-seat@remote", true, ago(1 * MIN), "ghost.seat")],
+    });
+    const now = buildPulseModel(snap, NOW).lanes[0];
+    expect(now.rows[0]!.label).toBe("ghost.seat"); // bare compact (no in-progress work)
+    expect(now.rows[0]!.action).toEqual({ type: "notice", message: "ghost-seat@remote" });
+  });
+
+  it("JUST FINISHED row drills to the seat that FINISHED it (destinationSession→agent)", () => {
+    const snap = liveSnap({
+      recentlyFinished: [attn({ qitemId: "f1", state: "done", destinationSession: "dev50-guard@openrig-build", summary: "close-out", tsUpdated: "2026-08-06T11:44:00.000Z" })],
+    });
+    const jf = buildPulseModel(snap, NOW).lanes[1];
+    expect(jf.rows[0]!.action).toEqual({ type: "drill", resource: "agent", name: "dev50.guard", target: { host: "vm-host", rig: "openrig-build", pod: "dev50" } });
+  });
+
+  it("UP NEXT rows drill to the DESTINED seat; the '…' overflow marker carries NO action (not an entity → not selectable)", () => {
+    const pend = Array.from({ length: 6 }, (_, i) => attn({ qitemId: `p${i}`, state: "pending", destinationSession: "dev50-qa@openrig-build", summary: `item ${i}`, claimedAt: null }));
+    const un = buildPulseModel(liveSnap({ pending: pend }), NOW).lanes[2];
+    expect(un.rows[0]!.action).toEqual({ type: "drill", resource: "agent", name: "dev50.qa", target: { host: "vm-host", rig: "openrig-build", pod: "dev50" } });
+    expect(un.rows[4]!.label).toBe("…");
+    expect(un.rows[4]!.action).toBeUndefined();
   });
 });

@@ -329,6 +329,10 @@ export async function hydrateSnapshot(
       if (node.nodeKind !== "agent" || !node.canonicalSessionName) continue;
       seatActivity.push({
         session: node.canonicalSessionName,
+        // COMPACT lane form (r1 ruling): node.logicalId served verbatim — the
+        // same value TABLE renders as the agent name — NOT reconstructed from
+        // the session string (a hyphen split would be lossy).
+        logicalId: node.logicalId,
         terminalActive: node.terminalActive ?? null,
         lastActivityAt: node.lastActivityAt ?? null,
       });

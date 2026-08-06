@@ -385,8 +385,8 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     // seatActivity: one entry per agent seat WITH a canonical session (svc.db has
     // none → excluded). lastActivityAt carried VERBATIM; terminalActive verbatim.
     const bySession = Object.fromEntries(snap.seatActivity.map((s) => [s.session, s]));
-    expect(bySession["dev-impl@myrig"]).toEqual({ session: "dev-impl@myrig", terminalActive: false, lastActivityAt: "2026-08-02T09:15:00.000Z" });
-    expect(bySession["dev-qa@myrig"]).toEqual({ session: "dev-qa@myrig", terminalActive: null, lastActivityAt: null });
+    expect(bySession["dev-impl@myrig"]).toEqual({ session: "dev-impl@myrig", logicalId: "dev.impl", terminalActive: false, lastActivityAt: "2026-08-02T09:15:00.000Z" });
+    expect(bySession["dev-qa@myrig"]).toEqual({ session: "dev-qa@myrig", logicalId: "dev.qa", terminalActive: null, lastActivityAt: null });
     expect(snap.seatActivity.some((s) => s.session == null)).toBe(false); // infra seat (no session) excluded
 
     // in-progress read carried into the snapshot for the PARKED join

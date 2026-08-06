@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import { createViewState } from "../src/state.js";
 import { parseCommand } from "../src/grammar.js";
 import { renderScreen } from "../src/render.js";
+import { resolveKeyAction } from "../src/input.js";
 import { demoSnapshot } from "../src/demo-data.js";
 import { demoPulseModel } from "../src/pulse/pulse-model.js";
 import { renderPulseView, renderLanes } from "../src/pulse/render-pulse.js";
+import type { InputEvent } from "../src/types.js";
 
 const snap = demoSnapshot();
 const withSnap = { getSnapshot: () => snap };
@@ -65,12 +67,12 @@ describe("PULSE view (5.2 Wave B — increment 1: static skeleton from the appro
     const body = renderScreen(v.get(), snap, { cols: 140, rows: 44, nowMs: DEMO_NOW }).lines.join("\n");
 
     // NOW ← active seats (terminalActive true) ⋈ their in-progress work: driver,
-    // planner, r1, lead (guard is idle → PARKED; qa null → excluded). The 30-col
-    // NOW lane fits the full session (the load-bearing referent); trailing work
-    // is width-truncated in the strip, so assert the seats + count here.
+    // planner, r1, lead (guard is idle → PARKED; qa null → excluded). The lane
+    // shows the COMPACT logicalId (incr-4 r1 ruling — full session recovered on
+    // drill-in); assert the compact seats + count here.
     expect(body).toContain("NOW (4)");
-    expect(body).toContain("dev50-driver@openrig-build");
-    expect(body).toContain("orch-lead@openrig-build");
+    expect(body).toContain("dev50.driver");
+    expect(body).toContain("orch.lead");
     // JUST FINISHED ← done/handed-off, newest-FINISHED first (tsUpdated desc) + HH:MM
     expect(body).toContain("JUST FINISHED (3)");
     expect(body).toContain("11:44");
@@ -129,6 +131,71 @@ describe("PULSE view (5.2 Wave B — increment 1: static skeleton from the appro
     expect(row0!.text).toContain("UPMARK");
     // and the full active-work text is NOT smeared across the neighbouring column
     expect(row0!.text).not.toContain("overflow the lane");
+  });
+
+  it("registers the lane cells as content targets in column-major order (NOW first), each with its drill action", () => {
+    const v = createViewState({ instanceId: "t", ...withSnap });
+    v.dispatch({ type: "tab", tab: "pulse" });
+    const s = renderScreen(v.get(), snap, { cols: 140, rows: 44, nowMs: DEMO_NOW });
+    // demo NOW = driver/planner/r1/lead (4 active) → the first four targets are the
+    // NOW column (column-major). driver resolves in the topology → an agent drill.
+    expect(s.contentTargets.length).toBeGreaterThanOrEqual(4);
+    expect(s.contentTargets[0]!.action).toEqual({ type: "drill", resource: "agent", name: "dev50.driver", target: { host: "vm-host", rig: "openrig-build", pod: "dev50" } });
+    // a JUST FINISHED cell (guard's close-out) drills the seat that finished it
+    const jf = s.contentTargets.find((t) => t.action.type === "drill" && t.action.name === "dev50.guard");
+    expect(jf).toBeDefined();
+  });
+
+  it("↑↓ move the lane selection, painting the selected cell PER-CELL (not the whole zipped row)", () => {
+    const v = createViewState({ instanceId: "t", ...withSnap });
+    v.dispatch({ type: "tab", tab: "pulse" });
+    const opts = { cols: 140, rows: 44, nowMs: DEMO_NOW };
+    let s = renderScreen(v.get(), snap, opts);
+    v.dispatch({ type: "layout", contentMaxOffset: s.contentMaxOffset, contentTargetCount: s.contentTargets.length });
+    s = renderScreen(v.get(), snap, opts);
+
+    // default selection (0) = the first NOW cell; its line is accent-painted, but
+    // only the NOW cell — the JF/UP-NEXT cells on the SAME zipped line are NOT, so
+    // the line carries BOTH accent and non-accent segs (per-cell, not whole-row).
+    const y0 = s.contentTargets[0]!.y;
+    const segs0 = s.segRows![y0]!;
+    expect(segs0.some((sg) => sg.bg === "accent")).toBe(true);
+    expect(segs0.some((sg) => sg.bg !== "accent")).toBe(true);
+
+    // move down one: selection follows to target[1], and target[0]'s cell clears.
+    v.dispatch({ type: "content-select", delta: 1 });
+    s = renderScreen(v.get(), snap, opts);
+    const y1 = s.contentTargets[1]!.y;
+    // the newly-selected cell paints…
+    expect(s.segRows![y1]!.some((sg) => sg.bg === "accent")).toBe(true);
+    // …and if target[1] is on a DIFFERENT line than target[0], target[0] clears.
+    if (y1 !== y0) expect((s.segRows![y0] ?? []).some((sg) => sg.bg === "accent")).toBe(false);
+  });
+
+  it("Enter on the selected NOW seat drills to that AGENT — leaving PULSE, recovering the full identity the compact label dropped", () => {
+    const v = createViewState({ instanceId: "t", ...withSnap });
+    v.dispatch({ type: "tab", tab: "pulse" });
+    let s = renderScreen(v.get(), snap, { cols: 140, rows: 44, nowMs: DEMO_NOW });
+    v.dispatch({ type: "layout", contentMaxOffset: s.contentMaxOffset, contentTargetCount: s.contentTargets.length });
+    s = renderScreen(v.get(), snap, { cols: 140, rows: 44, nowMs: DEMO_NOW });
+
+    const enter: Extract<InputEvent, { type: "key" }> = { type: "key", key: "enter", action: { type: "activate" } };
+    const action = resolveKeyAction(enter, v.get(), s, 0);
+    expect(action).toEqual({ type: "drill", resource: "agent", name: "dev50.driver", target: { host: "vm-host", rig: "openrig-build", pod: "dev50" } });
+    // dispatching it navigates to the agent (full detail), leaving the pulse view
+    v.dispatch(action!);
+    expect(v.get().viewTab).toBe("table");
+    expect(v.get().drill.at(-1)).toEqual({ kind: "agent", name: "dev50.driver" });
+  });
+
+  it("in PULSE, ↑↓ resolve to content-select (no explorer to move) and ←→ are no-ops", () => {
+    const v = createViewState({ instanceId: "t", ...withSnap });
+    v.dispatch({ type: "tab", tab: "pulse" });
+    const s = renderScreen(v.get(), snap, { cols: 140, rows: 44, nowMs: DEMO_NOW });
+    const down: Extract<InputEvent, { type: "key" }> = { type: "key", key: "down", action: { type: "select", delta: 1 } };
+    const left: Extract<InputEvent, { type: "key" }> = { type: "key", key: "left", action: { type: "select", delta: 0 } };
+    expect(resolveKeyAction(down, v.get(), s, 0)).toEqual({ type: "content-select", delta: 1 });
+    expect(resolveKeyAction(left, v.get(), s, 0)).toEqual({ type: "noop" });
   });
 
   it("renders without throwing, and the reusable renderer's counts match the model", () => {

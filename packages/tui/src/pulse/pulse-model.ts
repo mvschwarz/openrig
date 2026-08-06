@@ -4,7 +4,8 @@
 // a STATIC demo fixture reproducing the approved mock's EXACT rows; increments
 // 2-3 build it from SHIPPED daemon reads (no new surface).
 import type { Token } from "../theme.js";
-import type { FleetSnapshot, QueueRead, SeatActivitySummary } from "../types.js";
+import type { Action, FleetSnapshot, QueueRead, SeatActivitySummary } from "../types.js";
+import { findAgentBySession } from "../state.js";
 
 /** One exception row: an accent glyph + bold subject + plain claim + dim metadata. */
 export interface PulseException {
@@ -33,6 +34,13 @@ export interface PulseLaneRow {
   time?: string; // dim time (JUST FINISHED)
   label: string; // seat+work / label
   selected?: boolean; // the mock .sel row
+  /** incr-4 drill-in: the Action Enter/click dispatches on this row. Present on
+   * every REAL lane row (absent on the "…" overflow marker, which is not an
+   * entity). A row about a seat resolvable in the topology drills to that AGENT
+   * (recovering the full identity the compact lane label drops); an unresolvable
+   * seat degrades to a `notice` that reveals the full identity — honest, never a
+   * dead key. Rows with no action are not registered as selection targets. */
+  action?: Action;
 }
 
 export interface PulseLane {
@@ -247,13 +255,29 @@ function hhmm(iso: string | null | undefined): string {
   return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
 }
 
+/** The drill-in Action for a lane row keyed on a SEAT session. A seat resolvable
+ * in the topology drills to that AGENT (the shipped agent drill — recovers the
+ * full identity the compact lane label drops, parity with clicking the agent
+ * anywhere); an unresolvable seat (remote/absent from the local topology) degrades
+ * to a `notice` that still reveals the full identity — honest, never a dead key.
+ * Shipped-reads-only: no invented qitem-detail endpoint (a missing detail read is
+ * a routed finding, not an improvised surface). */
+function seatRowAction(snap: FleetSnapshot, session: string, fullDetail: string): Action {
+  const found = findAgentBySession(snap, session);
+  if (found) return { type: "drill", resource: "agent", name: found.agent.name, target: { host: found.host.name, rig: found.rig.name, pod: found.pod.name } };
+  return { type: "notice", message: fullDetail };
+}
+
 /** ● NOW rows — running seats with active work: each ACTIVE seat
  * (terminalActive===true) joined to its in-progress qitem (IMPL-PLAN §lanes).
  * null/false-activity owners are excluded here (idle → PARKED; null → honest-
  * unknown). An active seat with no in-progress qitem is still running, so it is
- * shown bare (the seat is the load-bearing referent; its work is context). Both
- * inputs already ride the snapshot from incr-2b — NO new read. */
-function nowRows(seatActivity: SeatActivitySummary[], inProgress: QueueRead[]): PulseLaneRow[] {
+ * shown bare (the seat is the load-bearing referent; its work is context). The
+ * lane LABEL is the seat's COMPACT logicalId (r1 mock-authority ruling — short
+ * canonical forms in lanes, full sessions in exceptions); the full session is
+ * recovered on drill-in via the row's action. Both inputs already ride the
+ * snapshot from incr-2b — NO new read. */
+function nowRows(seatActivity: SeatActivitySummary[], inProgress: QueueRead[], snap: FleetSnapshot): PulseLaneRow[] {
   const workBySession = new Map<string, QueueRead>();
   for (const q of inProgress) if (!workBySession.has(q.destinationSession)) workBySession.set(q.destinationSession, q);
   const out: PulseLaneRow[] = [];
@@ -261,7 +285,10 @@ function nowRows(seatActivity: SeatActivitySummary[], inProgress: QueueRead[]): 
     if (seat.terminalActive !== true) continue; // ACTIVE only (null ≠ active — honest-unknown)
     const q = workBySession.get(seat.session);
     const work = q ? (q.summary ?? bodyHead(q.body)) : "";
-    out.push({ glyph: "●", token: "ok", label: work ? `${seat.session}  ${work}` : seat.session });
+    // COMPACT label = logicalId; the FULL session lives in the drill action.
+    const label = work ? `${seat.logicalId}  ${work}` : seat.logicalId;
+    const fullDetail = work ? `${seat.session} · ${work}` : seat.session;
+    out.push({ glyph: "●", token: "ok", label, action: seatRowAction(snap, seat.session, fullDetail) });
   }
   return out;
 }
@@ -270,11 +297,15 @@ function nowRows(seatActivity: SeatActivitySummary[], inProgress: QueueRead[]): 
  * The shipped /list read serves ts_created order, so we re-sort by tsUpdated
  * DESC (the finish time) and cap to a recent window (count == rendered — this is
  * inherently a WINDOW, not a total). Time = the transition's tsUpdated (HH:MM). */
-function finishedRows(recent: QueueRead[], cap: number): PulseLaneRow[] {
+function finishedRows(recent: QueueRead[], cap: number, snap: FleetSnapshot): PulseLaneRow[] {
   return [...recent]
     .sort((a, b) => Date.parse(b.tsUpdated) - Date.parse(a.tsUpdated))
     .slice(0, cap)
-    .map((q) => ({ glyph: "✓", token: "ok" as Token, time: hhmm(q.tsUpdated), label: q.summary ?? bodyHead(q.body) }));
+    .map((q) => {
+      const label = q.summary ?? bodyHead(q.body);
+      // drill to the seat that FINISHED it (destinationSession → agent).
+      return { glyph: "✓", token: "ok" as Token, time: hhmm(q.tsUpdated), label, action: seatRowAction(snap, q.destinationSession, `${q.destinationSession} · ${label}`) };
+    });
 }
 
 /** ○ UP NEXT lane — the unclaimed pending backlog. Carried in the daemon's
@@ -283,9 +314,14 @@ function finishedRows(recent: QueueRead[], cap: number): PulseLaneRow[] {
  * synthesis). Beyond the display cap the last row is a "…" overflow marker and
  * the header count is the TRUE total (honesty floor — the count is the referent
  * total, the rows are the rendered subset). */
-function upNextLane(pending: QueueRead[], cap: number): PulseLane {
+function upNextLane(pending: QueueRead[], cap: number, snap: FleetSnapshot): PulseLane {
   const unclaimed = pending.filter((q) => q.claimedAt == null); // unclaimed only (claimedAt null)
-  const toRow = (q: QueueRead): PulseLaneRow => ({ glyph: "○", token: "dim", label: q.summary ?? bodyHead(q.body) });
+  const toRow = (q: QueueRead): PulseLaneRow => {
+    const label = q.summary ?? bodyHead(q.body);
+    // drill to the seat the work is DESTINED for (destinationSession → agent).
+    return { glyph: "○", token: "dim", label, action: seatRowAction(snap, q.destinationSession, `${q.destinationSession} · ${label}`) };
+  };
+  // The overflow marker is NOT an entity → it carries no action (never a selection target).
   const rows = unclaimed.length > cap
     ? [...unclaimed.slice(0, cap - 1).map(toRow), { glyph: "○", token: "dim" as Token, label: "…" }]
     : unclaimed.map(toRow);
@@ -318,12 +354,12 @@ export function buildPulseModel(snap: FleetSnapshot, nowMs: number = Date.now())
   const blocked = blockedRows(snap.blocked, nowMs);
   if (blocked.length > 0) exceptions.push({ glyph: "⧗", token: PULSE_INFO_TOKEN, label: "BLOCKED ON AGENTS", rows: blocked });
 
-  const now = nowRows(snap.seatActivity, snap.inProgress);
-  const finished = finishedRows(snap.recentlyFinished, LANE_ROW_CAP);
+  const now = nowRows(snap.seatActivity, snap.inProgress, snap);
+  const finished = finishedRows(snap.recentlyFinished, LANE_ROW_CAP, snap);
   const lanes: [PulseLane, PulseLane, PulseLane] = [
     { label: "NOW", count: now.length, rows: now },
     { label: "JUST FINISHED", count: finished.length, rows: finished },
-    upNextLane(snap.pending, LANE_ROW_CAP),
+    upNextLane(snap.pending, LANE_ROW_CAP, snap),
   ];
 
   // Footer counts ARE the built referent sets (label==referent — never a second
