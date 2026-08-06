@@ -15,6 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { parseCommand } from "./grammar.js";
+import { serializeCommands } from "./commands/registry.js";
 import type { ViewState, ViewStateStore } from "./types.js";
 
 /** macOS sun_path caps unix-socket paths at ~104 bytes; guard with margin. */
@@ -69,6 +70,15 @@ export async function createControlSocket(options: {
         const line = buf.slice(0, nl).trim();
         buf = buf.slice(nl + 1);
         if (!line) continue;
+        // REGISTRY I4 — the second OBSERVE verb: the registry projection with LIVE
+        // per-session availability (one serializer, PM pin 2; context pin 3). Read-only —
+        // stays inside the arch constraint's OBSERVE class beside "state".
+        if (line === "commands") {
+          conn.write(
+            JSON.stringify({ ok: true, instanceId: view.instanceId, commands: serializeCommands("standard") }) + "\n",
+          );
+          continue;
+        }
         if (line === "state") {
           conn.write(
             JSON.stringify({ ok: true, instanceId: view.instanceId, state: describeState(view.get()) }) + "\n",

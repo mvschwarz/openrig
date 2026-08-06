@@ -5,6 +5,7 @@
 //   - execution is BYTE-EQUAL to direct typing: the palette emits a COMMAND LINE that
 //     rides parseCommand -> dispatch (the BR-9 one-resolver path) — argless entries
 //     execute the line verbatim, argful entries PRE-FILL the command bar.
+import { evaluateAvailability } from "./registry.js";
 import type { CommandEntry } from "./registry.js";
 
 export interface PaletteRow {
@@ -45,13 +46,8 @@ export function filterPalette(
   for (const entry of registry) {
     const score = scoreEntry(query, entry);
     if (score === 0) continue;
-    const available = entry.context === "always" || entry.context === currentContext;
-    rows.push({
-      entry,
-      available,
-      ...(available ? {} : { reason: `needs ${entry.context} context` }),
-      score,
-    });
+    const availability = evaluateAvailability(entry, currentContext);
+    rows.push({ entry, ...availability, score });
   }
   // Stable: score desc, then registry order (rows carry insertion order for ties).
   return rows.sort((a, b) => b.score - a.score);

@@ -172,3 +172,22 @@ export function unknownCommandMessage(verb: string): string {
     .join(", ");
   return `unknown command "${verb}" — known: ${prefixes} ${verbs}`;
 }
+
+/** ONE availability rule (I3 palette + I4 socket share it): "always" satisfies any
+ *  context; otherwise the entry's context must equal the current one. */
+export function evaluateAvailability(entry: CommandEntry, currentContext: string): { available: boolean; reason?: string } {
+  const available = entry.context === "always" || entry.context === currentContext;
+  return available ? { available } : { available: false, reason: `needs ${entry.context} context` };
+}
+
+/** I4 — the socket "commands" OBSERVE projection: the data contract + LIVE availability.
+ *  Serialized from the ONE registry (PM pin 2), evaluated per-session (PM pin 3). */
+export function serializeCommands(currentContext: string): Array<{
+  name: string; aliases: string[]; args: string; description: string; context: string;
+  sample: string; available: boolean; reason?: string;
+}> {
+  return COMMAND_REGISTRY.map((e) => ({
+    name: e.name, aliases: e.aliases, args: e.args, description: e.description,
+    context: e.context, sample: e.sample, ...evaluateAvailability(e, currentContext),
+  }));
+}
