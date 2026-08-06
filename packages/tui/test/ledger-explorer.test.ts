@@ -9,8 +9,8 @@ import { buildLedgerExplorer } from "../src/crash-cart/ledger-explorer.js";
 describe("buildLedgerExplorer — ledger-fed rig sidebar (honestly marked)", () => {
   it("one row per rig from the discovery, with seat count, and an honest ledger marker", () => {
     const led = buildLedgerExplorer([
-      { rigName: "openrig-pm", seatCount: 13, resumableCount: 7 },
-      { rigName: "kernel", seatCount: 4, resumableCount: 4 },
+      { name: "openrig-pm", seatCount: 13 },
+      { name: "kernel", seatCount: 4 },
     ]);
     expect(led.ledgerSourced).toBe(true);
     expect(led.note.toLowerCase()).toContain("ledger"); // honestly marked ledger-sourced

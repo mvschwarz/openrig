@@ -9,12 +9,13 @@ import { navigatorDisplay } from "./navigator.js";
 import { renderGraphStyle } from "./topology/render-graph.js";
 import { buildPulseModel } from "./pulse/pulse-model.js";
 import { renderPulseView, pulseLaneTargets } from "./pulse/render-pulse.js";
-import { renderCrashCartScreen, renderUnverifiedScreen } from "./crash-cart/render-crash-cart.js";
+import { renderCrashCartView, renderUnverifiedView } from "./crash-cart/render-crash-cart.js";
+import { buildLedgerExplorer } from "./crash-cart/ledger-explorer.js";
 import type { CrashCartModel } from "./crash-cart/crash-cart-model.js";
 import type { DaemonState, DaemonUnverifiedEvidence } from "./crash-cart/contract.js";
 import { runtimeMarkSegs } from "./topology/runtime-marks.js";
 import { barCells, flashActive, reducedMotion, spinnerFrame } from "./motion.js";
-import type { ColorMode } from "./theme.js";
+import type { ColorMode, Token } from "./theme.js";
 import { detailPage, fieldLine, sectionRule, listItem, alignedRow, LABEL_W } from "./detail.js";
 import type { Action, FleetSnapshot, LoadState, NeedsItem, RowFlash, Screen, ViewState } from "./types.js";
 
@@ -907,13 +908,63 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
   };
 }
 
+// Crash-cart shell (ruling 3c6c2be0): the daemon-down cockpit as a content-pane view inside the
+// standard explorer│content shell — the LEDGER-FED explorer on the left (honestly marked), the
+// approved content on the right. Mirrors renderPulseScreen's split; content segs paint via the normal
+// split-pane path (stylize │ branch), so no full-width bypass. All rails live in the content builders.
+function crashCartShell(
+  content: Array<{ text: string; segs?: Array<{ text: string; token?: Token; bold?: boolean; bg?: Token; inverse?: boolean }> }>,
+  led: ReturnType<typeof buildLedgerExplorer>,
+  contentTitle: string,
+  cols: number,
+  rows: number,
+  inputLine: string,
+): Screen {
+  const lines: string[] = [];
+  const segRows: NonNullable<Screen["segRows"]> = {};
+  lines.push(pad(`cmd ▸ ${inputLine}▊`, cols));
+  lines.push(paneRule(cols, "┬", "EXPLORER", contentTitle));
+
+  // The ledger-fed explorer column: the honest marker, then one row per rig (name + seat count).
+  const leftRows: string[] = [led.note, "", ...led.rows.map((r) => `${r.label} (${r.seatCount})`)];
+  const contentWidth = Math.max(cols - EXPL_W - 2, 0);
+  const bodyRows = Math.max(rows - 2 - 3, 1); // minus cmd bar + top rule + (bottom rule, hints, status)
+  for (let i = 0; i < bodyRows; i++) {
+    const y = lines.length + 1;
+    const left = pad(leftRows[i] ?? "", EXPL_W);
+    const citem = content[i];
+    const contentText = (citem?.text ?? "").slice(0, contentWidth);
+    lines.push(pad(`${left}│ ${contentText}`, cols));
+    if (citem?.segs) segRows[y] = truncateSegs(citem.segs, contentWidth);
+  }
+  lines.push(paneRule(cols, "┴"));
+  lines.push(pad("", cols));
+  lines.push(pad(`[crash-cart] daemon down · explorer ${led.note}`, cols));
+  while (lines.length < rows) lines.push("");
+  return {
+    lines: lines.slice(0, rows),
+    hitMap: [],
+    contentTargets: [],
+    contentMaxOffset: 0,
+    explorerRows: [],
+    segRows,
+  };
+}
+
 export function renderScreen(state: ViewState, snap: FleetSnapshot, options: RenderOptions = {}, inputLine = ""): Screen {
   const { cols = 120, rows = 32, nowMs = 0 } = options;
-  // 5.2 crash-cart: daemon-DOWN takes over the whole screen (the fleet views have no data with no
-  // daemon). DOWN → the recovery cockpit; UNVERIFIED → the distinct cannot-verify screen (no restore).
-  if (options.daemonState === "down" && options.crashCart) return renderCrashCartScreen(options.crashCart, { cols, rows });
-  if (options.daemonState === "unverified" && options.daemonEvidence)
-    return renderUnverifiedScreen(options.daemonEvidence, { cols, rows });
+  // 5.2 crash-cart (shell-placement rework, ruling 3c6c2be0): daemon-DOWN renders as a CONTENT-PANE
+  // view inside the standard shell — the explorer sidebar is ALWAYS present, ledger-fed + honestly
+  // marked (from the SAME one-JSON discovery, never a second read). Content moves into the right pane
+  // verbatim; all rails stand. DOWN → cockpit; UNVERIFIED → cannot-verify (no restore).
+  if (options.daemonState === "down" && options.crashCart) {
+    const led = buildLedgerExplorer(options.crashCart.foundOnHost);
+    return crashCartShell(renderCrashCartView(options.crashCart), led, "CRASH-CART", cols, rows, inputLine);
+  }
+  if (options.daemonState === "unverified" && options.daemonEvidence) {
+    const led = buildLedgerExplorer([]); // no rigs listed when we cannot verify — honest empty ledger
+    return crashCartShell(renderUnverifiedView(options.daemonEvidence), led, "DAEMON?", cols, rows, inputLine);
+  }
   // PULSE (founder Option-B): a content-pane view inside the NORMAL explorer│
   // content chrome — renderPulseScreen builds its own split (sidebar + lanes)
   // and rides the same segRows paint path, so it returns before the table layout.
