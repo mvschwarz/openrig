@@ -1,0 +1,19 @@
+# Slice 51-02 fixture topology — a minimal runtime:stub rig for the scenario runner.
+#
+# One pod (dev) with one stub seat (worker). The stub runtime is the deterministic
+# node-script harness (51-01), so this topology stands up headlessly in real tmux
+# without a live LLM. Canonical session of the seat = <pod>-<member>@<rigName> =
+# dev-worker@scn-baton (deriveCanonicalSessionName), the queue baton's destination.
+version: "0.2"
+name: scn-baton
+culture_file: culture.md
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: worker
+        agent_ref: "local:agents/worker"
+        profile: default
+        runtime: stub
+        cwd: .
+    edges: []

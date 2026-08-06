@@ -1,0 +1,22 @@
+# Scenario #10 — one-view-state consistency (51-02 proof item 7, parse + interface).
+#
+# INTENT: a single point in time must read consistently across surfaces — the TUI
+# control socket, `rig ps`, and `rig queue` should agree on the one view state
+# (the cross-surface `equals` assertion). This scenario exercises the equals PARSE
+# + the declarative-normalizer INTERFACE; the normalizer's final shape (which fields
+# of each surface map onto the shared comparison form) rides 51-03 shaping, so the
+# runner takes an injected normalizer here. The locked schema requires a nominal
+# `surface` on every expect, so `surface: ps` names the anchor; `equals` lists the
+# surfaces compared.
+scenario: one-view-state-consistency
+topology: ./topo-stub-baton.yaml
+steps:
+  - up: {}
+  - expect:
+      surface: ps
+      within: 20s
+      equals:
+        - tui_socket
+        - ps
+        - queue
+  - down: {}

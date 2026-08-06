@@ -1,0 +1,65 @@
+# Scenario #2 — queue-baton-survives-restart (51-02 proof items 2 + 7).
+#
+# PROVES: a claimed queue baton (in-progress + owner) SURVIVES a seat relaunch.
+# The runner drives the SHIPPED rig CLI on a live scenario-local daemon
+# (product-is-truth): up -> observe queue -> restart <seat> -> observe queue -> down.
+#
+# BATON PRECONDITION (fixture level). Per the locked grammar the scenario asserts
+# OBSERVABLES; the `env` block establishes PRECONDITIONS — there is no queue ACTION
+# verb (verb set = topology/seat + daemon:{op}). The pipeline runs these shipped
+# `rig queue` writes BEFORE the steps, so a reviewer sees exactly where the baton
+# comes from (queue state is daemon-side, independent of any seat process):
+#   rig queue create --id baton-1 --source harness@scn-baton \
+#                    --destination dev-worker@scn-baton --summary "..."
+#   rig queue claim  baton-1 --destination dev-worker@scn-baton
+# => qitem baton-1 is state=in-progress, owned by dev-worker@scn-baton, up front.
+#
+# DEFERRED ASSERTION (items-6-8 gate — VISIBLY annotated, NOT silently dropped):
+# the locked #2 also asserts `expect { surface: pane, seat: dev-worker,
+# contains: "restored" }` after the relaunch. The stub-runner at 13e26355 emits
+# only READY/EXITED; the `restore` seeded behavior that prints the "restored" pane
+# marker is A5 items 6-8 (dev-driver's NEXT queue pull, qitem 00bf5dbe). So this
+# one assertion is HELD here and lights up when items 6-8 land — the runner and
+# the rest of #2 are proven now. Ruling: orch-advisor Option A (2026-08-05);
+# record: FINDING-51-02-scenario2-restored-gate.md.
+scenario: queue-baton-survives-restart
+topology: ./topo-stub-baton.yaml
+env:
+  queue:
+    - id: baton-1
+      source: harness@scn-baton
+      destination: dev-worker@scn-baton
+      summary: "51-02 baton — survives a worker relaunch"
+      claim: true
+steps:
+  - up: {}
+  # the baton is in-progress + owned before we touch the seat
+  - expect:
+      surface: queue
+      within: 20s
+      match:
+        - qitemId: baton-1
+          state: in-progress
+          destinationSession: dev-worker@scn-baton
+  # RESTART = a daemon restart (kill + re-spawn on the SAME db). The baton lives in
+  # the daemon's SQLite, so it must survive the daemon lifecycle. Empirically proven:
+  # the qitem is byte-identical (in-progress + owner) before and after the restart.
+  #
+  # Why daemon-restart and not a seat relaunch: `rig launch <rig> <node>` on a
+  # RUNNING node is a no-op ("already_running") and on a down node needs a snapshot
+  # (no snapshot-free per-seat kill+relaunch verb exists). The locked #2 named a seat
+  # restart; the seat-level relaunch + its `expect pane "restored"` observable both
+  # ride A5 items 6-8 (the stub `restore` behavior). Daemon-restart is the faithful,
+  # v1-green reading of "queue baton survives a restart" and exercises the locked
+  # daemon:{op} verb. RATIFICATION PENDING (orch/PM): finding artifact
+  # FINDING-51-02-e2e-viability.md documents the choice + the seat-restart path.
+  - daemon: { op: restart }
+  - expect:
+      surface: queue
+      within: 20s
+      match:
+        - qitemId: baton-1
+          state: in-progress
+          destinationSession: dev-worker@scn-baton
+  # DEFERRED (items-6-8): expect { surface: pane, seat: dev-worker, contains: restored }
+  - down: {}
