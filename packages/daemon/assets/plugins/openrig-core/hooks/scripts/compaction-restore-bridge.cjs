@@ -106,6 +106,24 @@ function findMarker(payload, env = process.env) {
   return marker;
 }
 
+// R5 absent-when-needed: the expected-sentinel the PreCompact hook drops FIRST (same seat
+// key + identity binding as the marker). Its presence-without-a-marker is what makes an
+// absent marker LOUD; its lifecycle mirrors the marker (removed once the marker delivers).
+function sentinelPath(payload, env = process.env) {
+  const key = sessionKey(payload, env);
+  return key ? path.join(markerDir(env), `${key}.expected.json`) : null;
+}
+
+function findSentinel(payload, env = process.env) {
+  const p = sentinelPath(payload, env);
+  return p ? readMarker(p) : null;
+}
+
+function removeSentinel(payload, env = process.env) {
+  const p = sentinelPath(payload, env);
+  if (p) { try { fs.unlinkSync(p); } catch { /* best-effort cleanup */ } }
+}
+
 function writeMarker(marker) {
   fs.writeFileSync(marker.filePath, `${JSON.stringify(marker.data, null, 2)}\n`, "utf8");
 }
@@ -163,7 +181,20 @@ async function main() {
   const payload = parseJson(await readStdin());
   const eventName = hookEventName(payload);
   const marker = findMarker(payload);
-  if (!marker) return;
+  if (!marker) {
+    // R5 absent-when-needed: LOUD iff a matching expected-sentinel is present (a compaction
+    // WAS expected for this seat/session — the PreCompact hook drops the sentinel FIRST) but
+    // the marker is absent/unresolvable (write failed / hook died partway / packet lost).
+    // No sentinel = no hook = policy off = silent by construction. Stderr, so it never
+    // pollutes the additionalContext stdout.
+    const sentinel = findSentinel(payload);
+    if (sentinel && premiseMatches(sentinel.data, payload)) {
+      process.stderr.write(
+        "OpenRig compaction restore: a restore packet was EXPECTED for this session but its marker is missing or unresolvable — the PreCompact write may have failed. Fall back to the JSONL restore (claude-compaction-restore skill).\n",
+      );
+    }
+    return;
+  }
 
   marker.data.lastBridgeEvent = eventName;
   if (eventName === "PostCompact") {
@@ -184,6 +215,7 @@ async function main() {
   marker.data.deliveredAt = nowIso();
   marker.data.deliveryCount = Number(marker.data.deliveryCount || 0) + 1;
   writeMarker(marker);
+  removeSentinel(payload); // R5: expectation fulfilled — clear the sentinel so it can't false-loud later
 
   process.stdout.write(`${JSON.stringify({
     continue: true,

@@ -110,6 +110,22 @@ function pendingMarkerPath(input) {
   return path.join(getOpenRigHome(), "compaction", "restore-pending", `${sessionKey(input)}.json`);
 }
 
+// R5 absent-when-needed: drop a lightweight EXPECTED sentinel FIRST (before the packet is
+// generated + the marker is written), carrying the SAME identity binding the marker gets.
+// Its presence-without-a-marker is what lets the bridge be LOUD about a missing packet
+// (hook died partway / write failed); policy off = no hook = no sentinel = silent.
+function writeExpectedSentinel(input) {
+  const p = path.join(getOpenRigHome(), "compaction", "restore-pending", `${sessionKey(input)}.expected.json`);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, `${JSON.stringify({
+    version: 1,
+    sessionName: process.env.OPENRIG_SESSION_NAME || process.env.RIGGED_SESSION_NAME || null,
+    sessionId: input.session_id || input.sessionId || null,
+    transcriptPath: input.transcript_path || null,
+    createdAt: nowIso(),
+  }, null, 2)}\n`, "utf8");
+}
+
 function writePendingRestoreMarker(input, parsed, restoreInstruction, customMessage) {
   const markerPath = pendingMarkerPath(input);
   fs.mkdirSync(path.dirname(markerPath), { recursive: true });
@@ -206,6 +222,7 @@ try {
     process.stderr.write("OPENRIG_TEST_CLOCK_NOW active — timestamps are injected\n");
   }
   const input = readHookInput();
+  writeExpectedSentinel(input); // R5: sentinel FIRST, before the packet + marker (catches hook-died-partway)
   const args = [restoreScript, "--out", outRoot, "--json"];
   if (input.cwd) args.push("--cwd", input.cwd);
   if (input.transcript_path && input.transcript_path.endsWith(".jsonl") && fs.existsSync(input.transcript_path)) {

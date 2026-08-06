@@ -393,6 +393,16 @@ describe("OPR.0.4.1.09 (rev1-r2) — hook-path post-compact extra is seat-safe (
     expect(markerPostInstruction()).not.toContain("NOT MINE.");
   });
 
+  it("R5 absent-when-needed: the PreCompact hook drops the EXPECTED sentinel (seat identity) so an absent marker is loud", () => {
+    const { status } = runHook(openrigHome);
+    expect(status).toBe(0);
+    const sentinelPath = join(openrigHome, "compaction", "restore-pending", "test-seat@kernel.expected.json");
+    expect(existsSync(sentinelPath)).toBe(true);
+    const sentinel = JSON.parse(readFileSync(sentinelPath, "utf8"));
+    expect(sentinel.sessionName).toBe("test-seat@kernel");
+    expect("transcriptPath" in sentinel).toBe(true); // identity-binding field present (matches the marker's)
+  });
+
   it("injects a GENERIC global extra (no frontmatter -> valid for any seat)", () => {
     const globalExtra = join(tmpDir, "global-extra.md");
     writeFileSync(globalExtra, "Generic restore note for all seats.");
