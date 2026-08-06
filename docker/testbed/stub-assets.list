@@ -5,7 +5,10 @@
 #
 # One repo-relative path per line; comments (#) and blank lines are ignored.
 #
-# UNRESOLVED SLOT — the concrete zero-token stub payload (the container-local stub rig.yaml + its
-# agent fixture + culture.md that boot a stub topology for the L3 daemon-in-container leg) is
-# finalized in the L3 stub-boot runbook increment, where the exact set is grounded rather than
-# guessed. Until populated, the build verb REFUSES (deriveStubAssetsHash loud-fails on an empty set).
+# RESOLVED (2026-08-06 VM-side) — the concrete zero-token stub payload: a runtime:stub rig.yaml +
+# its agent fixture + culture.md that boot a settled topology for the L3 daemon-in-container leg.
+# Shape grounded on the proven 51-02 runner fixture (test/fixtures/scenarios/topo-stub-baton.yaml),
+# not guessed. The base-image digest slot (docker/testbed/base-image) remains host-resolved (L0.1).
+docker/testbed/stub-assets/rig.yaml
+docker/testbed/stub-assets/culture.md
+docker/testbed/stub-assets/agents/worker/agent.yaml

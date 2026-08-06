@@ -1,0 +1,23 @@
+# 51-04 testbed image — the container-local zero-token stub topology (plan §1 layer 4).
+#
+# One pod (dev) with one stub seat (worker). The stub runtime is the deterministic 51-01
+# node-script harness, so this topology stands up headlessly in real tmux INSIDE the
+# testbed container without a live LLM (the L3 daemon-in-container leg: `rig up` settles
+# it, zero tokens by construction). Shape mirrors the proven 51-02 runner fixture
+# (test/fixtures/scenarios/topo-stub-baton.yaml), which the scenario runner settles
+# headlessly end-to-end — not a product rig.
+#
+# Canonical session of the seat = <pod>-<member>@<name> = dev-worker@testbed-stub.
+version: "0.2"
+name: testbed-stub
+culture_file: culture.md
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: worker
+        agent_ref: "local:agents/worker"
+        profile: default
+        runtime: stub
+        cwd: .
+    edges: []
