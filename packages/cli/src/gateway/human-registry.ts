@@ -27,6 +27,19 @@ export const HUMAN_DELIVERY_CLASSES = new Set(["A", "B", "C", "D"]);
 // entityId is the fragment key + filename: a stable slug that survives platform
 // renames. Lowercase alnum + separators, no path chars (it is spliced into a path).
 export const ENTITY_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/;
+// The registered @external ref shape (the section2 registered mode). A registry
+// fragment's address is <entityId>@external by convention; literal-scheme addresses
+// (slack:U...@external) are one-off ADDRESSES, never registry entries.
+export const ADDRESS_DOMAIN = "external";
+
+// Closed key sets — a typo'd field must fail LOUD, never silently degrade behavior.
+const ALLOWED_FRAGMENT_KEYS = new Set(["entityId", "class", "displayName", "address", "connectorBindings", "prefs"]);
+const ALLOWED_BINDING_KEYS = new Set(["kind", "connectorRef", "secretsRef", "role"]);
+const ALLOWED_PREFS_KEYS = new Set(["deliveryClass", "away"]);
+function unknownKey(obj: Record<string, unknown>, allowed: Set<string>): string | undefined {
+  for (const k of Object.keys(obj)) if (!allowed.has(k)) return k;
+  return undefined;
+}
 
 export interface HumanConnectorBinding {
   kind: "slack";
@@ -68,6 +81,8 @@ function isObj(v: unknown): v is Record<string, unknown> {
  *  exactly-one-primary-per-entity). Does NOT touch the filesystem. */
 export function validateHumanFragment(raw: unknown): ValidateResult {
   if (!isObj(raw)) return { ok: false, error: "human fragment must be a mapping" };
+  const uk = unknownKey(raw, ALLOWED_FRAGMENT_KEYS);
+  if (uk) return { ok: false, error: `unknown fragment key "${uk}" — allowed: ${[...ALLOWED_FRAGMENT_KEYS].join(", ")} (a typo must not silently degrade)` };
   const { entityId, class: cls, displayName, address, connectorBindings, prefs } = raw;
 
   if (typeof entityId !== "string" || !ENTITY_ID_PATTERN.test(entityId)) {
@@ -82,6 +97,11 @@ export function validateHumanFragment(raw: unknown): ValidateResult {
   if (typeof address !== "string" || address.length === 0) {
     return { ok: false, error: "address must be a non-empty string (the registered @external ref)" };
   }
+  // Registered-mode pin: the address is <entityId>@external (collision-free, ties the
+  // ref to the fragment key). Not a loose @external match — mike@externalx is NOT a ref.
+  if (address !== `${entityId}@${ADDRESS_DOMAIN}`) {
+    return { ok: false, error: `address "${address}" must be the registered ref "${entityId}@${ADDRESS_DOMAIN}" (the <entityId>@external convention)` };
+  }
   if (!Array.isArray(connectorBindings) || connectorBindings.length < 1) {
     return { ok: false, error: "connectorBindings must be a non-empty list (>=1)" };
   }
@@ -91,6 +111,8 @@ export function validateHumanFragment(raw: unknown): ValidateResult {
   for (let i = 0; i < connectorBindings.length; i++) {
     const b = connectorBindings[i];
     if (!isObj(b)) return { ok: false, error: `connectorBindings[${i}] must be a mapping` };
+    const ubk = unknownKey(b, ALLOWED_BINDING_KEYS);
+    if (ubk) return { ok: false, error: `connectorBindings[${i}] has unknown key "${ubk}" — allowed: ${[...ALLOWED_BINDING_KEYS].join(", ")}` };
     if (!HUMAN_CONNECTOR_KINDS.has(String(b.kind))) {
       return { ok: false, error: `connectorBindings[${i}].kind "${String(b.kind)}" is not a known connector kind (M1: ${[...HUMAN_CONNECTOR_KINDS].join(", ")})` };
     }
@@ -112,6 +134,8 @@ export function validateHumanFragment(raw: unknown): ValidateResult {
   }
 
   if (!isObj(prefs)) return { ok: false, error: "prefs must be a mapping { deliveryClass, away? }" };
+  const upk = unknownKey(prefs, ALLOWED_PREFS_KEYS);
+  if (upk) return { ok: false, error: `prefs has unknown key "${upk}" — allowed: ${[...ALLOWED_PREFS_KEYS].join(", ")} (the notifications register selection)` };
   if (!HUMAN_DELIVERY_CLASSES.has(String(prefs.deliveryClass))) {
     return { ok: false, error: `prefs.deliveryClass "${String(prefs.deliveryClass)}" must be one of A|B|C|D (the notifications register)` };
   }
@@ -203,11 +227,21 @@ export type AddHumanResult =
   | { ok: false; error: string };
 
 /** The verb-add writer: validate (add-time) -> atomic write the ONE fragment file ->
- *  re-project. Operators never hand-create the fragment YAML; the verb owns it. */
-export function addHumanFragment(raw: unknown, home: string = getOpenRigHome()): AddHumanResult {
+ *  re-project. Operators never hand-create the fragment YAML; the verb owns it.
+ *  NO SILENT CLOBBER (mirrors hosts-registry addHostEntry): an existing entityId is
+ *  REFUSED unless `replace` is passed explicitly — a re-run must not silently replace
+ *  a human's data (managed-config data-safety class). */
+export function addHumanFragment(
+  raw: unknown,
+  home: string = getOpenRigHome(),
+  opts: { replace?: boolean } = {},
+): AddHumanResult {
   const v = validateHumanFragment(raw);
   if (!v.ok) return { ok: false, error: v.error };
   const file = join(humansDir(home), `${v.fragment.entityId}.yaml`);
+  if (!opts.replace && existsSync(file)) {
+    return { ok: false, error: `human "${v.fragment.entityId}" already exists at ${file} — pass an explicit replace to update it (no silent overwrite)` };
+  }
   const w = atomicWrite(file, stringifyYaml(v.fragment));
   if (!w.ok) return { ok: false, error: w.error };
   const proj = writeProjection(home);

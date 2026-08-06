@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "no
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { stringify as stringifyYaml } from "yaml";
+import { createProgram } from "../src/index.js";
 import {
   validateHumanFragment,
   addHumanFragment,
@@ -20,11 +21,12 @@ import {
 // a fragment edit re-projects; the projection hand-edit refuses.
 
 function fragment(over: Partial<HumanFragment> = {}): Record<string, unknown> {
+  const entityId = (over.entityId as string) ?? "mike";
   return {
-    entityId: "mike",
+    entityId,
     class: "human",
     displayName: "Mike",
-    address: "mike@external",
+    address: `${entityId}@external`, // the registered convention; override to test the pin
     connectorBindings: [
       { kind: "slack", connectorRef: "slack-main", secretsRef: "vault://slack/mike", role: "primary" },
     ],
@@ -121,8 +123,8 @@ describe("A3 proof-5 — fragments -> generated projection; re-project; hand-edi
   it("a fragment EDIT re-projects (projection tracks the fragment = truth)", () => {
     addHumanFragment(fragment({ entityId: "mike", prefs: { deliveryClass: "B" } }), home);
     const before = readFileSync(projectionPath(home), "utf8");
-    // edit the fragment via the verb (deliveryClass B -> D) + re-project
-    addHumanFragment(fragment({ entityId: "mike", prefs: { deliveryClass: "D" } }), home);
+    // edit the fragment via the EXPLICIT replace path (deliveryClass B -> D) + re-project
+    expect(addHumanFragment(fragment({ entityId: "mike", prefs: { deliveryClass: "D" } }), home, { replace: true }).ok).toBe(true);
     const after = readFileSync(projectionPath(home), "utf8");
     expect(after).not.toBe(before);
     expect(after).toContain("deliveryClass: D");
@@ -154,5 +156,95 @@ describe("A3 proof-5 — fragments -> generated projection; re-project; hand-edi
     writeFileSync(join(humansDir(home), "wrongname.yaml"), stringifyYaml(fragment({ entityId: "mike" })));
     const proj = projectHumans(home);
     expect(proj.ok).toBe(false);
+  });
+
+  // pt2 r1 MUST — no silent clobber (managed-config data-safety; mirror addHostEntry).
+  it("addHumanFragment REFUSES an existing entityId (no silent overwrite)", () => {
+    expect(addHumanFragment(fragment({ entityId: "founder", displayName: "Founder" }), home).ok).toBe(true);
+    const dup = addHumanFragment(fragment({ entityId: "founder", displayName: "Impostor" }), home);
+    expect(dup.ok).toBe(false);
+    if (!dup.ok) expect(dup.error).toMatch(/exists|already/i);
+    // the on-disk fragment is UNCHANGED (no clobber)
+    const loaded = loadHumanRegistry(home);
+    expect(loaded.ok && loaded.entities[0]!.displayName).toBe("Founder");
+  });
+
+  it("addHumanFragment { replace: true } is the EXPLICIT update path", () => {
+    addHumanFragment(fragment({ entityId: "founder", displayName: "Founder" }), home);
+    const r = addHumanFragment(fragment({ entityId: "founder", displayName: "Founder Renamed" }), home, { replace: true });
+    expect(r.ok).toBe(true);
+    const loaded = loadHumanRegistry(home);
+    expect(loaded.ok && loaded.entities[0]!.displayName).toBe("Founder Renamed");
+  });
+});
+
+describe("A3 pt2 — hardening (r1 pooled notes)", () => {
+  it("rejects UNKNOWN top-level keys (a typo must not silently degrade)", () => {
+    expect(validateHumanFragment({ ...fragment(), bogus: 1 }).ok).toBe(false);
+  });
+  it("rejects an unknown key inside prefs (awya: typo)", () => {
+    expect(validateHumanFragment(fragment({ prefs: { deliveryClass: "B", awya: true } as unknown as HumanFragment["prefs"] })).ok).toBe(false);
+  });
+  it("rejects an unknown key inside a connectorBinding", () => {
+    expect(validateHumanFragment({ ...fragment(), connectorBindings: [{ kind: "slack", connectorRef: "x", secretsRef: "v", role: "primary", bogus: 1 }] }).ok).toBe(false);
+  });
+  it("pins address to <entityId>@external (mike@externalx is NOT a registered ref)", () => {
+    expect(validateHumanFragment(fragment({ entityId: "mike", address: "mike@externalx" })).ok).toBe(false);
+    expect(validateHumanFragment(fragment({ entityId: "mike", address: "mike@external" })).ok).toBe(true);
+    expect(validateHumanFragment(fragment({ entityId: "mike", address: "other@external" })).ok).toBe(false); // must match entityId
+  });
+});
+
+describe("A3 pt2 — rig gateway human add verb", () => {
+  let home: string;
+  let prevHome: string | undefined;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "a3-verb-"));
+    prevHome = process.env.OPENRIG_HOME;
+    process.env.OPENRIG_HOME = home;
+    process.exitCode = undefined;
+  });
+  afterEach(() => {
+    if (prevHome === undefined) delete process.env.OPENRIG_HOME; else process.env.OPENRIG_HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("is wired via createProgram (gateway human add)", () => {
+    const gw = createProgram().commands.find((c) => c.name() === "gateway");
+    expect(gw).toBeDefined();
+    const human = gw!.commands.find((c) => c.name() === "human");
+    expect(human!.commands.find((c) => c.name() === "add")).toBeDefined();
+  });
+
+  it("add writes a fragment + projection; address DERIVED; vault-pointer secretsRef (with ':') survives", async () => {
+    const program = createProgram();
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "gateway", "human", "add", "mike",
+      "--display-name", "Mike",
+      "--binding", "slack:main:vault://slack/mike:primary",
+      "--delivery-class", "B",
+    ]);
+    expect(existsSync(join(humansDir(home), "mike.yaml"))).toBe(true);
+    const loaded = loadHumanRegistry(home);
+    expect(loaded.ok).toBe(true);
+    if (loaded.ok) {
+      expect(loaded.entities[0]!.address).toBe("mike@external");
+      expect(loaded.entities[0]!.connectorBindings[0]!.secretsRef).toBe("vault://slack/mike");
+    }
+  });
+
+  it("add REFUSES an existing entityId (no silent clobber; exit 1)", async () => {
+    const args = [
+      "node", "rig", "gateway", "human", "add", "mike",
+      "--display-name", "Mike", "--binding", "slack:main:vault://x:primary", "--delivery-class", "B",
+    ];
+    const p1 = createProgram(); p1.exitOverride();
+    await p1.parseAsync(args);
+    expect(process.exitCode).toBeUndefined();
+    process.exitCode = undefined;
+    const p2 = createProgram(); p2.exitOverride();
+    try { await p2.parseAsync(args); } catch { /* action sets exitCode, not throw */ }
+    expect(process.exitCode).toBe(1);
   });
 });
