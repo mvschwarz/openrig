@@ -115,6 +115,39 @@ export const COMMAND_REGISTRY: readonly CommandEntry[] = [
         : { type: "error", message: `unknown scroll direction "${name}" — known: scroll up, scroll down` },
   },
   {
+    // TUI scroll (ruling cfec754f): jump the content pane to the extremes. Registered as a VERB
+    // (`top`), NOT `:top` — `:` is the section-jump prefix (would parse as an unknown section). Reuses
+    // content-scroll: the reducer clamps `contentOffset + delta` to [0, max], so an extreme negative
+    // delta lands at the top (no new action/reducer).
+    name: "top",
+    aliases: [],
+    args: "",
+    description: "scroll the content pane to the top",
+    context: "standard",
+    sample: "top",
+    build: () => ({ type: "content-scroll", delta: -Number.MAX_SAFE_INTEGER }),
+  },
+  {
+    name: "bottom",
+    aliases: [],
+    args: "",
+    description: "scroll the content pane to the bottom",
+    context: "standard",
+    sample: "bottom",
+    build: () => ({ type: "content-scroll", delta: Number.MAX_SAFE_INTEGER }),
+  },
+  {
+    // `find <text>` — the discoverable verb form of the `/` filter prefix (same filter action).
+    name: "find",
+    aliases: [],
+    args: "<text>",
+    description: "filter rows by text (verb form of the / prefix)",
+    context: "standard",
+    sample: "find dev",
+    build: (name) =>
+      name ? { type: "filter", text: name } : { type: "error", message: 'find needs text (e.g. "find dev")' },
+  },
+  {
     name: "spec-of",
     aliases: [],
     args: "<agent>",
