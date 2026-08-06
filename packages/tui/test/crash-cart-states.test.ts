@@ -1,17 +1,20 @@
 import { describe, it, expect } from "vitest";
 import { buildCrashCartModel, type CrashCartDiscoveryInput } from "../src/crash-cart/crash-cart-model.js";
-import { renderCrashCartView, renderUnverifiedScreen } from "../src/crash-cart/render-crash-cart.js";
+import { renderCrashCartView, renderUnverifiedView } from "../src/crash-cart/render-crash-cart.js";
 
-// Crash-cart C3 (SUB-3b) — the two non-DOWN framings (planner+PM rulings):
-//  UNVERIFIED = a minimal DISTINCT screen: evidence verbatim + retry + quit, ZERO recovery actions.
+// Crash-cart (rulings) — the two non-DOWN framings; content-level (the in-shell wrapping is covered by
+// crash-cart-in-shell.test.ts):
+//  UNVERIFIED = evidence verbatim + retry + quit, ZERO recovery actions.
 //  FIRST-RUN = DOWN + no DB found (no rigs, no prior activity) → onboarding framing, NEVER a crash story.
 
-describe("renderUnverifiedScreen — cannot-verify (no recovery offered)", () => {
-  const screen = renderUnverifiedScreen(
-    { pidState: "alive (pid 4242)", probeResult: "timeout", failedSignal: "healthz timed out after 3 probes" },
-    { cols: 120 },
-  );
-  const body = screen.lines.join("\n");
+describe("renderUnverifiedView — cannot-verify content (no recovery offered)", () => {
+  const body = renderUnverifiedView({
+    pidState: "alive (pid 4242)",
+    probeResult: "timeout",
+    failedSignal: "healthz timed out after 3 probes",
+  })
+    .map((l) => l.text)
+    .join("\n");
 
   it("names it NOT-confirmed-down and shows the evidence verbatim", () => {
     expect(body).toContain("cannot verify the daemon");

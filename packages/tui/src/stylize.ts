@@ -237,20 +237,8 @@ export function stylizeLines(screen: Screen, s: Style): string[] {
       }
       return `${paintExplorer(left, s, explorerFocused)}${s.paint("chrome", "│")}${marker}${paintContent(right, s)}`;
     }
-    // Full-width canvas rows (no explorer split — e.g. the crash-cart cockpit): paint the row's
-    // segs directly. Same seg-paint rule as the split-pane path; plain(segs) === the row text by
-    // construction, so stripAnsi(styled) === plain holds (the strip-invariant).
-    const fullSegs = screen.segRows?.[index + 1];
-    if (fullSegs) {
-      const segText = fullSegs.map((g) => g.text).join("");
-      const painted = fullSegs
-        .map((g) =>
-          g.token || g.bg || g.inverse
-            ? s.paint(g.token ?? "bright", g.text, { ...(g.bold ? { bold: true } : {}), ...(g.bg ? { bg: g.bg } : {}), ...(g.inverse ? { inverse: true } : {}) })
-            : g.text)
-        .join("");
-      return painted + line.slice(segText.length);
-    }
+    // (The full-width segRows branch was removed with the crash-cart shell-placement rework — its only
+    // caller, the full-width cockpit Screen, now renders in-pane via the split-pane │ path above.)
     return paintContent(line, s);
   });
 }

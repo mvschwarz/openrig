@@ -3,7 +3,6 @@
 // section wording are CONTRACT; theme tokens only (no invented colors). Bold text carries a color
 // token (`bright`) because a bold-only seg renders as plain ink in this pipeline.
 import type { Token } from "../theme.js";
-import type { Screen } from "../types.js";
 import type { CrashCartModel } from "./crash-cart-model.js";
 import type { DaemonUnverifiedEvidence } from "./contract.js";
 
@@ -149,41 +148,7 @@ export function renderUnverifiedView(evidence: DaemonUnverifiedEvidence): Line[]
   ];
 }
 
-/** Pad a line to width with trailing spaces; NEVER truncate (a truncated line would break the
- *  strip-invariant against its full-length segs). Over-width lines are left as-is. */
-function padTo(s: string, w: number): string {
-  return s.length >= w ? s : s + " ".repeat(w - s.length);
-}
-
-export interface CrashCartScreenOptions {
-  cols?: number;
-  rows?: number;
-}
-
-/**
- * Wrap the cockpit view into a full-width Screen (no explorer split). Line 0 is left BENIGN (blank)
- * because stylize special-cases index 0; the content + its segRows start at index ≥ 1, painted by the
- * full-width segRows branch. plain(segs) === the (padded) line, so the strip-invariant holds.
- */
-/** Wrap a view's Line[] into a full-width Screen: benign line 0 (stylize special-cases index 0),
- *  content + segRows from index 1, pad-only (never truncate → the strip-invariant holds). */
-function linesToScreen(view: Line[], cols: number): Screen {
-  const lines: string[] = [""]; // benign line 0
-  const segRows: NonNullable<Screen["segRows"]> = {};
-  for (const item of view) {
-    const y = lines.length + 1; // 1-based terminal row of the line about to be pushed
-    lines.push(padTo(item.text, cols));
-    if (item.segs) segRows[y] = item.segs;
-  }
-  return { lines, segRows, hitMap: [], contentTargets: [], contentMaxOffset: 0, explorerRows: [] };
-}
-
-/** The full-width cockpit Screen (recovery or first-run, per the model's mode). */
-export function renderCrashCartScreen(model: CrashCartModel, options: CrashCartScreenOptions = {}): Screen {
-  return linesToScreen(renderCrashCartView(model), options.cols ?? 120);
-}
-
-/** The full-width UNVERIFIED Screen (cannot-confirm-down; no recovery offered). */
-export function renderUnverifiedScreen(evidence: DaemonUnverifiedEvidence, options: CrashCartScreenOptions = {}): Screen {
-  return linesToScreen(renderUnverifiedView(evidence), options.cols ?? 120);
-}
+// The full-width Screen wrappers (renderCrashCartScreen/renderUnverifiedScreen/linesToScreen) were
+// REMOVED in the shell-placement rework (ruling 3c6c2be0): the cockpit now renders as a content-pane
+// view inside the standard shell (render.ts crashCartShell), so the content builders above produce
+// Line[] and the shell owns the Screen. The full-width stylize branch that only they used is gone too.
