@@ -102,7 +102,7 @@ const sshRunnerNeverCalled = vi.fn(async (): Promise<CrossHostResult> => {
 
 function httpDeps(harness: MockClientHarness, overrides: Partial<SendDeps & CaptureDeps & TranscriptDeps & BroadcastDeps> = {}): SendDeps & CaptureDeps & TranscriptDeps & BroadcastDeps {
   return {
-    lifecycleDeps: {} as never,
+    lifecycleDeps: { exists: () => false } as never,
     clientFactory: harness.clientFactory,
     hostRegistryLoader: () => REGISTRY,
     crossHostRun: sshRunnerNeverCalled as never,

@@ -58,7 +58,7 @@ const KNOWN_REGISTRY: HostRegistryLoadResult = {
 };
 
 function deps(overrides: { run?: (h: never, argv: readonly string[]) => Promise<CrossHostResult>; registry?: HostRegistryLoadResult } = {}): SendDeps & CaptureDeps {
-  const lifecycleDeps = {} as never;
+  const lifecycleDeps = { exists: () => false } as never;
   const clientFactory = (() => ({}) as never) as never;
   return {
     lifecycleDeps,
@@ -348,7 +348,7 @@ function makeFailingLifecycleDeps(): never {
 
 function psDeps(overrides: { run?: (h: never, argv: readonly string[]) => Promise<CrossHostResult>; registry?: HostRegistryLoadResult } = {}): PsDeps {
   return {
-    lifecycleDeps: {} as never,
+    lifecycleDeps: { exists: () => false } as never,
     clientFactory: (() => ({}) as never) as never,
     hostRegistryLoader: () => overrides.registry ?? KNOWN_REGISTRY,
     crossHostRun: overrides.run ?? (async () => ({ ok: true, failedStep: "none", stdout: "", stderr: "", remoteExitCode: 0 })),
@@ -481,7 +481,7 @@ describe("ps --host (cross-host short-circuit)", () => {
 
 function whoamiDeps(overrides: { run?: (h: never, argv: readonly string[]) => Promise<CrossHostResult>; registry?: HostRegistryLoadResult } = {}): WhoamiDeps {
   return {
-    lifecycleDeps: {} as never,
+    lifecycleDeps: { exists: () => false } as never,
     clientFactory: (() => ({}) as never) as never,
     hostRegistryLoader: () => overrides.registry ?? KNOWN_REGISTRY,
     crossHostRun: overrides.run ?? (async () => ({ ok: true, failedStep: "none", stdout: "", stderr: "", remoteExitCode: 0 })),
