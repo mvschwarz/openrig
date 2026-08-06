@@ -132,6 +132,22 @@ function buildRestoreContext(marker) {
   return pieces.join("\n");
 }
 
+// R5 marker-lifecycle (stale-firing-premise-false): a marker records the identity of
+// the compaction it was written for (its own transcriptPath / sessionId, stamped by the
+// PreCompact writer from the same Claude input). The bridge fires ONLY when the current
+// start MATCHES that premise — binding to EVENT+IDENTITY, not recency (a clock window
+// misfires both directions; recency would only ever be a belt). A legacy marker that
+// recorded no identity falls back to the seat-key + deliver-once behavior (transitional).
+function premiseMatches(markerData, payload) {
+  const markerTranscript = firstString(markerData.transcriptPath);
+  const markerSession = firstString(markerData.sessionId);
+  if (!markerTranscript && !markerSession) return true; // legacy marker: no identity to gate on
+  const payloadTranscript = firstString(payload.transcript_path, payload.transcriptPath);
+  const payloadSession = firstString(payload.session_id, payload.sessionId);
+  if (markerTranscript) return payloadTranscript === markerTranscript;
+  return payloadSession === markerSession;
+}
+
 function hookEventName(payload) {
   return firstString(
     payload.hook_event_name,
@@ -153,6 +169,11 @@ async function main() {
   if (eventName === "PostCompact") {
     marker.data.postCompactAt = nowIso();
     writeMarker(marker);
+    return;
+  }
+
+  // R5: stale-firing gate — never deliver a marker written for a different compaction.
+  if (!premiseMatches(marker.data, payload)) {
     return;
   }
 

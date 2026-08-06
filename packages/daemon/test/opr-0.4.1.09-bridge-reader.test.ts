@@ -56,6 +56,20 @@ describe("OPR.0.4.1.09 part 2b — bridge reader resolves ONLY this seat's marke
     expect(stdout.trim()).toBe("");
   });
 
+  // R5 marker-lifecycle (P6-3), STALE-FIRING-premise-false face: deliver-once is not
+  // enough — a not-yet-delivered marker written for a DIFFERENT compaction (its own
+  // transcriptPath/session identity) must NOT fire for the current session. Bind the
+  // fire to EVENT+IDENTITY, not recency.
+  it("STALE-FIRING (R5): a not-yet-delivered marker for a DIFFERENT compaction/session is NOT fired for the current start", () => {
+    writeMarker(home, SEAT, {
+      version: 1, sessionName: SEAT, sessionId: "sess-A", transcriptPath: "/t/sess-A.jsonl",
+      outputDir: "/tmp/x", deliveryCount: 0, deliveredAt: null,
+    });
+    // Same seat, but the current start is a DIFFERENT session/compaction — the marker's premise is false.
+    const { stdout } = runBridge(home, { hook_event_name: "UserPromptSubmit", session_id: "sess-B", transcript_path: "/t/sess-B.jsonl" });
+    expect(stdout.trim()).toBe(""); // must NOT fire stale content
+  });
+
   it("delivers THIS seat's marker once and surfaces the restoreMapPath the writer recorded (idempotent)", () => {
     const restoreMapPath = join(home, "compaction", "post-compact-extra", `${SEAT}.md`);
     writeMarker(home, SEAT, {
