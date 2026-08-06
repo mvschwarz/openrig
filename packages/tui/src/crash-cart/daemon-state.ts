@@ -16,6 +16,14 @@ export type DaemonState = "up" | "down" | "unverified";
  *  (unverified) from a foreign occupant (unverified). */
 export type HealthzProbeResult = "answered" | "refused" | "timeout" | "not-openrig";
 
+/** Verbatim evidence rendered on the UNVERIFIED screen (never a crash story — the honest "we cannot
+ *  confirm the daemon is down" record). Assembled by the caller from the pid check + last probe. */
+export interface DaemonUnverifiedEvidence {
+  pidState: string;
+  probeResult: string;
+  failedSignal: string;
+}
+
 /** Minimal daemon.json shape the classifier needs. */
 export interface DaemonStateFile {
   pid: number;

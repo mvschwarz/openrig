@@ -34,6 +34,9 @@ export interface CrashCartStoppedVM {
 }
 
 export interface CrashCartModel {
+  /** recovery = evidence of prior life (rigs and/or last activity) → the crash cockpit.
+   *  first-run = DOWN + no DB (no rigs, no prior activity) → onboarding framing, never a crash story. */
+  mode: "recovery" | "first-run";
   header: CrashCartHeaderVM;
   foundOnHost: CrashCartRigVM[];
   /** In-progress work at crash time; empty ⇒ the renderer shows only the idle-clean line. */
@@ -67,7 +70,12 @@ export function hhmm(ts: string | null): string {
 
 /** Adapt the C2 daemon-down discovery into the crash-cart view model. */
 export function buildCrashCartModel(discovery: CrashCartDiscoveryInput): CrashCartModel {
+  // Crash language requires evidence of PRIOR LIFE: no rigs AND no last-activity ⇒ a fresh host, not
+  // a crash — render onboarding framing (PM ruling), never a crash story.
+  const mode: CrashCartModel["mode"] =
+    discovery.foundOnHost.length === 0 && !discovery.header.lastActivityAt ? "first-run" : "recovery";
   return {
+    mode,
     header: {
       lastSeen: hhmm(discovery.header.lastActivityAt),
       uptimeText: NO_SHUTDOWN_RECORD,
@@ -91,6 +99,7 @@ export function buildCrashCartModel(discovery: CrashCartDiscoveryInput): CrashCa
  *  the demo screen + the strip-invariant test. */
 export function demoCrashCartModel(): CrashCartModel {
   return {
+    mode: "recovery",
     header: { lastSeen: "08:12", uptimeText: NO_SHUTDOWN_RECORD, reasonText: NO_SHUTDOWN_RECORD },
     foundOnHost: [
       { name: "openrig-pm", seatCount: 13, lastActive: "08:11", resumableCount: 7 },

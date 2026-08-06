@@ -5,6 +5,7 @@
 import type { Token } from "../theme.js";
 import type { Screen } from "../types.js";
 import type { CrashCartModel } from "./crash-cart-model.js";
+import type { DaemonUnverifiedEvidence } from "./daemon-state.js";
 
 interface Seg {
   text: string;
@@ -100,9 +101,26 @@ export function renderActions(): Line[] {
   ];
 }
 
-/** The whole crash-cart cockpit view: header → FOUND ON THIS HOST → WHERE WORK STOPPED → actions,
- *  blank-line separated (mock-verbatim ordering). */
+/** First-run framing (DOWN + no DB): a fresh host, NOT a crash — onboarding, never a crash header or
+ *  a RESTORE-of-nothing (PM ruling: crash language requires evidence of prior life). */
+export function renderFirstRunView(): Line[] {
+  return [
+    line([
+      { text: "◌ no daemon running", token: "warn" },
+      { text: " — no rigs found on this host yet (a fresh host)", token: "dim" },
+    ]),
+    { text: "" },
+    line([{ text: "Nothing to restore — this looks like a first run.", token: "dim" }]),
+    { text: "" },
+    line([{ text: " ⏎ n new here? onboarding (policy menu lives here now) ", bg: "accent" }], { selected: true }),
+    line([{ text: "  s start daemon only" }]),
+  ];
+}
+
+/** The whole crash-cart cockpit view: recovery = header → FOUND ON THIS HOST → WHERE WORK STOPPED →
+ *  actions (mock-verbatim ordering); first-run = onboarding framing. */
 export function renderCrashCartView(model: CrashCartModel): Line[] {
+  if (model.mode === "first-run") return renderFirstRunView();
   return [
     renderCrashCartHeader(model),
     { text: "" },
@@ -111,6 +129,23 @@ export function renderCrashCartView(model: CrashCartModel): Line[] {
     ...renderWhereWorkStopped(model),
     { text: "" },
     ...renderActions(),
+  ];
+}
+
+/** The UNVERIFIED screen (planner+PM ruling): a minimal DISTINCT view — evidence VERBATIM + retry +
+ *  quit + the rig-status hint, and ZERO recovery actions (never the cockpit, never RESTORE). */
+export function renderUnverifiedView(evidence: DaemonUnverifiedEvidence): Line[] {
+  return [
+    line([
+      { text: "◌ cannot verify the daemon", token: "warn" },
+      { text: " — may be busy/wedged, not confirmed down", token: "dim" },
+    ]),
+    { text: "" },
+    line([{ text: " pid:    ", token: "dim" }, { text: evidence.pidState }]),
+    line([{ text: " probe:  ", token: "dim" }, { text: evidence.probeResult }]),
+    line([{ text: " signal: ", token: "dim" }, { text: evidence.failedSignal }]),
+    { text: "" },
+    line([{ text: "  r retry  ·  q quit  ·  try: rig status", token: "dim" }]),
   ];
 }
 
@@ -130,9 +165,9 @@ export interface CrashCartScreenOptions {
  * because stylize special-cases index 0; the content + its segRows start at index ≥ 1, painted by the
  * full-width segRows branch. plain(segs) === the (padded) line, so the strip-invariant holds.
  */
-export function renderCrashCartScreen(model: CrashCartModel, options: CrashCartScreenOptions = {}): Screen {
-  const cols = options.cols ?? 120;
-  const view = renderCrashCartView(model);
+/** Wrap a view's Line[] into a full-width Screen: benign line 0 (stylize special-cases index 0),
+ *  content + segRows from index 1, pad-only (never truncate → the strip-invariant holds). */
+function linesToScreen(view: Line[], cols: number): Screen {
   const lines: string[] = [""]; // benign line 0
   const segRows: NonNullable<Screen["segRows"]> = {};
   for (const item of view) {
@@ -141,4 +176,14 @@ export function renderCrashCartScreen(model: CrashCartModel, options: CrashCartS
     if (item.segs) segRows[y] = item.segs;
   }
   return { lines, segRows, hitMap: [], contentTargets: [], contentMaxOffset: 0, explorerRows: [] };
+}
+
+/** The full-width cockpit Screen (recovery or first-run, per the model's mode). */
+export function renderCrashCartScreen(model: CrashCartModel, options: CrashCartScreenOptions = {}): Screen {
+  return linesToScreen(renderCrashCartView(model), options.cols ?? 120);
+}
+
+/** The full-width UNVERIFIED Screen (cannot-confirm-down; no recovery offered). */
+export function renderUnverifiedScreen(evidence: DaemonUnverifiedEvidence, options: CrashCartScreenOptions = {}): Screen {
+  return linesToScreen(renderUnverifiedView(evidence), options.cols ?? 120);
 }

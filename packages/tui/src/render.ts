@@ -9,6 +9,9 @@ import { navigatorDisplay } from "./navigator.js";
 import { renderGraphStyle } from "./topology/render-graph.js";
 import { buildPulseModel } from "./pulse/pulse-model.js";
 import { renderPulseView, pulseLaneTargets } from "./pulse/render-pulse.js";
+import { renderCrashCartScreen, renderUnverifiedScreen } from "./crash-cart/render-crash-cart.js";
+import type { CrashCartModel } from "./crash-cart/crash-cart-model.js";
+import type { DaemonState, DaemonUnverifiedEvidence } from "./crash-cart/daemon-state.js";
 import { runtimeMarkSegs } from "./topology/runtime-marks.js";
 import { barCells, flashActive, reducedMotion, spinnerFrame } from "./motion.js";
 import type { ColorMode } from "./theme.js";
@@ -670,6 +673,13 @@ export interface RenderOptions {
    * owner — renderScreen targets each agent's explorer row while its one-shot
    * window is open; omitted = no flashes */
   rowFlashes?: RowFlash[];
+  /** 5.2 crash-cart: the resolved daemon-down signal. Present ⇒ the whole screen is the daemon-down
+   *  path — the normal fleet views have no data when the daemon isn't serving. */
+  daemonState?: DaemonState;
+  /** the cockpit model — rendered when daemonState === "down". */
+  crashCart?: CrashCartModel;
+  /** evidence for the UNVERIFIED screen — rendered when daemonState === "unverified". */
+  daemonEvidence?: DaemonUnverifiedEvidence;
 }
 
 /** replace ONE character at a plain-text position inside a token-segment row
@@ -899,6 +909,11 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
 
 export function renderScreen(state: ViewState, snap: FleetSnapshot, options: RenderOptions = {}, inputLine = ""): Screen {
   const { cols = 120, rows = 32, nowMs = 0 } = options;
+  // 5.2 crash-cart: daemon-DOWN takes over the whole screen (the fleet views have no data with no
+  // daemon). DOWN → the recovery cockpit; UNVERIFIED → the distinct cannot-verify screen (no restore).
+  if (options.daemonState === "down" && options.crashCart) return renderCrashCartScreen(options.crashCart, { cols, rows });
+  if (options.daemonState === "unverified" && options.daemonEvidence)
+    return renderUnverifiedScreen(options.daemonEvidence, { cols, rows });
   // PULSE (founder Option-B): a content-pane view inside the NORMAL explorer│
   // content chrome — renderPulseScreen builds its own split (sidebar + lanes)
   // and rides the same segRows paint path, so it returns before the table layout.
