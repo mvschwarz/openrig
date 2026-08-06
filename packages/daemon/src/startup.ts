@@ -4,9 +4,9 @@ import type { ExecFn } from "./adapters/tmux.js";
 import type { CmuxTransportFactory } from "./adapters/cmux.js";
 import { createDb } from "./db/connection.js";
 import { migrate } from "./db/migrate.js";
-import { coreSchema } from "./db/migrations/001_core_schema.js";
-import { bindingsSessionsSchema } from "./db/migrations/002_bindings_sessions.js";
-import { eventsSchema } from "./db/migrations/003_events.js";
+// P8: apply the CANONICAL migration list — the single source of truth (db/all-migrations.ts),
+// never an inline copy that can drift out of sync with the daemon's schema.
+import { ALL_MIGRATIONS } from "./db/all-migrations.js";
 import { RigRepository } from "./domain/rig-repository.js";
 import { SessionRegistry } from "./domain/session-registry.js";
 import { isHumanSeatSessionRef, parseSessionName } from "./domain/session-name.js";
@@ -104,65 +104,9 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import nodePath from "node:path";
-import { snapshotsSchema } from "./db/migrations/004_snapshots.js";
-import { checkpointsSchema } from "./db/migrations/005_checkpoints.js";
-import { resumeMetadataSchema } from "./db/migrations/006_resume_metadata.js";
-import { nodeSpecFieldsSchema } from "./db/migrations/007_node_spec_fields.js";
-import { packagesSchema } from "./db/migrations/008_packages.js";
-import { installJournalSchema } from "./db/migrations/009_install_journal.js";
-import { journalSeqSchema } from "./db/migrations/010_journal_seq.js";
-import { bootstrapSchema } from "./db/migrations/011_bootstrap.js";
-import { discoverySchema } from "./db/migrations/012_discovery.js";
-import { discoveryFkFix } from "./db/migrations/013_discovery_fk_fix.js";
-import { agentspecRebootSchema } from "./db/migrations/014_agentspec_reboot.js";
-import { startupContextSchema } from "./db/migrations/015_startup_context.js";
-import { chatMessagesSchema } from "./db/migrations/016_chat_messages.js";
-import { podNamespaceSchema } from "./db/migrations/017_pod_namespace.js";
-import { contextUsageSchema } from "./db/migrations/018_context_usage.js";
-import { externalCliAttachmentSchema } from "./db/migrations/019_external_cli_attachment.js";
-import { rigServicesSchema } from "./db/migrations/020_rig_services.js";
-import { seatHandoverObservabilitySchema } from "./db/migrations/021_seat_handover_observability.js";
-import { nodeCodexConfigProfileSchema } from "./db/migrations/022_node_codex_config_profile.js";
-import { streamItemsSchema } from "./db/migrations/023_stream_items.js";
-import { queueItemsSchema } from "./db/migrations/024_queue_items.js";
-import { queueTransitionsSchema } from "./db/migrations/025_queue_transitions.js";
-import { inboxEntriesSchema } from "./db/migrations/026_inbox_entries.js";
-import { outboxEntriesSchema } from "./db/migrations/027_outbox_entries.js";
-import { projectClassificationsSchema } from "./db/migrations/028_project_classifications.js";
-import { classifierLeasesSchema } from "./db/migrations/029_classifier_leases.js";
-import { viewsCustomSchema } from "./db/migrations/030_views_custom.js";
-import { watchdogJobsSchema } from "./db/migrations/031_watchdog_jobs.js";
-import { watchdogHistorySchema } from "./db/migrations/032_watchdog_history.js";
-import { workflowSpecsSchema } from "./db/migrations/033_workflow_specs.js";
-import { workflowInstancesSchema } from "./db/migrations/034_workflow_instances.js";
-import { workflowStepTrailsSchema } from "./db/migrations/035_workflow_step_trails.js";
-import { watchdogPolicyEnumExtensionSchema } from "./db/migrations/036_watchdog_policy_enum_extension.js";
-import { missionControlActionsSchema } from "./db/migrations/037_mission_control_actions.js";
-import { workspacePrimitiveSchema } from "./db/migrations/038_workspace_primitive.js";
-import { queueTargetRepoSchema } from "./db/migrations/039_queue_target_repo.js";
 // Slice 11 (release-0.3.1 workflow-spec-folder-discovery) — adds
 // status + error_message columns to workflow_specs so the scanner
 // can record diagnostic rows. SC-29 #10 declared verbatim in commit body.
-import { workflowSpecsDiagnosticSchema } from "./db/migrations/040_workflow_specs_diagnostic.js";
-import { rigPolicySchema } from "./db/migrations/041_rig_policy.js";
-import { rigArchiveSchema } from "./db/migrations/042_rig_archive.js";
-import { resumeProvenanceSchema } from "./db/migrations/043_resume_provenance.js";
-import { queueItemSummarySchema } from "./db/migrations/044_queue_item_summary.js";
-import { resumeVerificationSchema } from "./db/migrations/045_resume_verification.js";
-import { seatIdentityVerdictsSchema } from "./db/migrations/046_seat_identity_verdicts.js";
-import { eventsNodeTypeIndexSchema } from "./db/migrations/047_events_node_type_index.js";
-import { queueItemEvidenceRefSchema } from "./db/migrations/048_queue_item_evidence_ref.js";
-import { workflowInstanceVersionSchema } from "./db/migrations/049_workflow_instance_version.js";
-import { workflowSpecJsonSchema } from "./db/migrations/050_workflow_spec_json.js";
-import { workflowResumeSchema } from "./db/migrations/051_workflow_resume.js";
-import { workflowInstanceBoundRigSchema } from "./db/migrations/052_workflow_instance_bound_rig.js";
-import { sessionsNodeIdIndexSchema } from "./db/migrations/053_sessions_node_id_index.js";
-import { queueTransitionsArchiveSchema } from "./db/migrations/054_queue_transitions_archive.js";
-import { nodePermissionPolicySchema } from "./db/migrations/055_node_permission_policy.js";
-import { rigPermissionPolicySchema } from "./db/migrations/056_rig_permission_policy.js";
-import { nodePolicyProvenanceSchema } from "./db/migrations/057_node_policy_provenance.js";
-import { rigPolicyProvenanceSchema } from "./db/migrations/058_rig_policy_provenance.js";
-import { selfHostIdentitySchema } from "./db/migrations/059_self_host_identity.js";
 import { RigPolicyStore } from "./domain/rig-policy/rig-policy-store.js";
 import { MissionControlActionLog } from "./domain/mission-control/mission-control-action-log.js";
 import { MissionControlWriteContract } from "./domain/mission-control/mission-control-write-contract.js";
@@ -267,7 +211,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const codexHome = configuredCodexHome || nodePath.join(daemonHome, ".codex");
   const dbPath = opts?.dbPath ?? ":memory:";
   const db = createDb(dbPath);
-  migrate(db, [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, inboxEntriesSchema, outboxEntriesSchema, projectClassificationsSchema, classifierLeasesSchema, viewsCustomSchema, watchdogJobsSchema, watchdogHistorySchema, workflowSpecsSchema, workflowInstancesSchema, workflowStepTrailsSchema, watchdogPolicyEnumExtensionSchema, missionControlActionsSchema, workspacePrimitiveSchema, queueTargetRepoSchema, workflowSpecsDiagnosticSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, queueItemSummarySchema, resumeVerificationSchema, seatIdentityVerdictsSchema, eventsNodeTypeIndexSchema, queueItemEvidenceRefSchema, workflowInstanceVersionSchema, workflowSpecJsonSchema, workflowResumeSchema, workflowInstanceBoundRigSchema, sessionsNodeIdIndexSchema, queueTransitionsArchiveSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, rigPolicyProvenanceSchema, selfHostIdentitySchema]);
+  migrate(db, ALL_MIGRATIONS);
 
   // 51-09 increment 1 — establish the daemon's durable self-host identity at
   // boot (mint on first boot, reconcile thereafter). host.name is a display-only
