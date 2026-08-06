@@ -23,8 +23,26 @@ import {
 import { configCommand } from "../src/commands/config.js";
 import { initWorkspaceCommand, runInitWorkspace } from "../src/commands/config-init-workspace.js";
 
+// P6/D12-residue: config-store captures DEFAULT_WORKSPACE_ROOT at MODULE-LOAD from
+// OPENRIG_HOME, so a beforeEach set is too late (module-load-env-capture). Point
+// OPENRIG_HOME at a fresh temp BEFORE the import graph loads (vi.hoisted), never the
+// seat's real home and never a fall-through to ~/.openrig (foreign on-box state).
+const HOISTED_HOME: string = vi.hoisted(() => {
+  const os = require("node:os");
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "config-store-home-")) as string;
+  process.env["OPENRIG_HOME"] = home;
+  return home;
+});
+
 function clearEnv(): () => void {
   const keysToClear = [
+    // P6/D12-residue: snapshot+clear the HOME vars too so a per-test tmp home can be
+    // set (beforeEach) and restored. Leaving OPENRIG_HOME as the seat's value leaked
+    // its custom home into default-path resolution; UNSETTING it would fall through
+    // to the REAL ~/.openrig (foreign on-box state) — so tests set a fresh tmp home.
+    "OPENRIG_HOME", "RIGGED_HOME",
     "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB",
     "OPENRIG_TRANSCRIPTS_ENABLED", "OPENRIG_TRANSCRIPTS_PATH",
     "OPENRIG_TRANSCRIPTS_LINES", "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS",
@@ -73,6 +91,9 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     tmpDir = mkdtempSync(join(tmpdir(), "config-store-ext-"));
     configPath = join(tmpDir, "config.json");
     restoreEnv = clearEnv();
+    // Keep OPENRIG_HOME on the module-load temp (clearEnv cleared it); runtime home
+    // reads stay hermetic and consistent with the import-captured default.
+    process.env["OPENRIG_HOME"] = HOISTED_HOME;
   });
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true });
@@ -225,10 +246,10 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     expect(store.get("daemon.port")).toBe(7433);
   });
 
-  it("workspace.root default is ~/.openrig/workspace; per-subdir defaults derive from it", () => {
+  it("workspace.root default is <OPENRIG_HOME>/workspace; per-subdir defaults derive from it", () => {
     const store = new ConfigStore(configPath);
     const cfg = store.resolve();
-    expect(cfg.workspace.root).toMatch(/\.openrig[\/\\]workspace$/);
+    expect(cfg.workspace.root).toBe(join(HOISTED_HOME, "workspace"));
     expect(cfg.workspace.slicesRoot).toBe(join(cfg.workspace.root, "missions"));
     expect(cfg.workspace.steeringPath).toBe(join(cfg.workspace.root, "STEERING.md"));
     expect(cfg.workspace.fieldNotesRoot).toBe(join(cfg.workspace.root, "field-notes"));
