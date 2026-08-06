@@ -1,6 +1,8 @@
 import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import type { EventBus } from "./event-bus.js";
+import { loadHumanRegistry } from "./gateway/human-registry.js";
+import { resolveExternal } from "./gateway/external-admission.js";
 import type { PersistedEvent } from "./types.js";
 import { QueueTransitionLog } from "./queue-transition-log.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
@@ -397,6 +399,30 @@ export function destinationRigTeaching(session: string): Record<string, unknown>
   };
 }
 
+/**
+ * M1 A4b — entity-level teaching for an UNREGISTERED <local>@external destination (the
+ * ENTITY half of proof-2; the DOMAIN half is the closed-set fall-through to
+ * unknown_destination_rig, A1/A2). A row addressed to a valid @external domain whose
+ * entity is not in the registry refuses LOUDLY with the structured teaching from the
+ * gateway resolver (how to register + "not an agent seat"). Loads the registry only for
+ * the (rare) @external refusal path. Undefined for non-@external / registered / scheme.
+ */
+export function externalAdmissionTeaching(session: string): Record<string, unknown> | undefined {
+  const parsed = parseSessionName(session);
+  if (parsed.kind !== "external") return undefined;
+  const reg = loadHumanRegistry();
+  const entities = reg.ok ? reg.entities.map((e) => ({ entityId: e.entityId, address: e.address })) : [];
+  const res = resolveExternal(parsed.local, entities);
+  if (res.kind !== "unregistered") return undefined; // registered/scheme were admitted upstream
+  return { externalDomain: parsed.domain, unregisteredEntity: parsed.local, hint: res.error };
+}
+
+/** The refusal teaching for ANY rejected destination: the @external entity teaching
+ *  (A4b) OR the host-suffix teaching (4b). One helper, all four refusal sites. */
+export function destinationRefusalTeaching(session: string): Record<string, unknown> | undefined {
+  return externalAdmissionTeaching(session) ?? destinationRigTeaching(session);
+}
+
 export class QueueRepository {
   readonly db: Database.Database;
   readonly transitionLog: QueueTransitionLog;
@@ -537,7 +563,7 @@ export class QueueRepository {
       throw new QueueRepositoryError(
         "unknown_destination_rig",
         `destination_session ${input.destinationSession} references an unknown rig`,
-        destinationRigTeaching(input.destinationSession),
+        destinationRefusalTeaching(input.destinationSession),
       );
     }
 
@@ -615,7 +641,7 @@ export class QueueRepository {
       throw new QueueRepositoryError(
         "unknown_destination_rig",
         `destination_session ${input.destinationSession} references an unknown rig`,
-        destinationRigTeaching(input.destinationSession),
+        destinationRefusalTeaching(input.destinationSession),
       );
     }
     const result = this.createInTransactionalContext(input);
@@ -722,7 +748,7 @@ export class QueueRepository {
       throw new QueueRepositoryError(
         "unknown_destination_rig",
         `to_session ${input.toSession} references an unknown rig`,
-        destinationRigTeaching(input.toSession),
+        destinationRefusalTeaching(input.toSession),
       );
     }
 
@@ -864,7 +890,7 @@ export class QueueRepository {
       throw new QueueRepositoryError(
         "unknown_destination_rig",
         `to_session ${input.toSession} references an unknown rig`,
-        destinationRigTeaching(input.toSession),
+        destinationRefusalTeaching(input.toSession),
       );
     }
 

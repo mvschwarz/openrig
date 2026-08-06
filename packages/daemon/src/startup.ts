@@ -10,6 +10,8 @@ import { ALL_MIGRATIONS } from "./db/all-migrations.js";
 import { RigRepository } from "./domain/rig-repository.js";
 import { SessionRegistry } from "./domain/session-registry.js";
 import { isHumanSeatSessionRef, parseSessionName } from "./domain/session-name.js";
+import { resolveExternal } from "./domain/gateway/external-admission.js";
+import { loadHumanRegistry } from "./domain/gateway/human-registry.js";
 import { EventBus } from "./domain/event-bus.js";
 import { NodeLauncher } from "./domain/node-launcher.js";
 import { TmuxOptionDefaultsApplier } from "./domain/tmux-option-defaults.js";
@@ -266,8 +268,19 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // greedy first-@ rig (so "member@rig@x" looks up rig "rig@x", misses,
   // and rejects with the same unknown_destination_rig as ever — BR-1).
   const topologyValidateRig = (sessionRef: string): boolean => {
-    if (isHumanSeatSessionRef(sessionRef)) return true;
     const parsed = parseSessionName(sessionRef);
+    // M1 A4b — @external entity-admission (checked BEFORE the human-CLASS bare-admit,
+    // which A2 also makes true for <local>@external): a queue row destinationed to
+    // <local>@external is admitted ONLY if the human is REGISTERED (or it is a literal
+    // scheme address); an unregistered entity is REFUSED (the 4b site carries the
+    // entity-level teaching via externalAdmissionTeaching). Admission is the gateway's
+    // job, never the classifier's (arch 8cd30094).
+    if (parsed.kind === "external") {
+      const reg = loadHumanRegistry();
+      const entities = reg.ok ? reg.entities.map((e) => ({ entityId: e.entityId, address: e.address })) : [];
+      return resolveExternal(parsed.local, entities).kind !== "unregistered";
+    }
+    if (isHumanSeatSessionRef(sessionRef)) return true;
     if (parsed.kind !== "canonical") return false;
     return rigRepo.findRigsByName(parsed.rig).length > 0;
   };
