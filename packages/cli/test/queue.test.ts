@@ -1383,3 +1383,76 @@ describe("rig queue CLI", () => {
     });
   });
 });
+
+// P3 — authored-summary TEACHING LAYER. The shipped warn-then-require rail (OPR.0.4.1.18
+// FR-7) told callers a missing --summary COSTS a Story-node truncation; the teaching layer
+// additionally TEACHES the convention (what a good summary is + where a human reads it), so
+// the needs-you rows a human skims are actually authored, not just hoped for. Rails held:
+// warn → stderr (json stdout clean), warn-not-hard-break, the two handoff advisories stay
+// byte-identical, facts-not-fabricated (teaches, never invents).
+describe("P3 — authored-summary teaching layer (advisory + --summary hint)", () => {
+  let stderrOut: string[];
+  const TEACHES_WHERE = /needs-you view/;      // teaches WHERE the summary is read
+  const TEACHES_WHY = /why it needs this seat/; // teaches the WHAT+WHY convention
+
+  beforeEach(() => {
+    stderrOut = [];
+    vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+      stderrOut.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+      return true;
+    });
+    process.exitCode = undefined;
+  });
+
+  it("create without --summary TEACHES the convention on the stderr advisory (not just the truncation cost) and does NOT hard-break", async () => {
+    const { deps, calls } = makeDeps({
+      routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "q1", state: "pending" } } },
+    });
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "queue", "create",
+      "--source", "a@rig", "--destination", "b@rig", "--body", "x", "--json",
+    ]);
+    const warn = stderrOut.join("");
+    expect(warn).toMatch(TEACHES_WHERE);
+    expect(warn).toMatch(TEACHES_WHY);
+    // warn-not-require rail: the qitem is still created (no hard-break on omission).
+    expect(calls.find((c) => c.path === "/api/queue/create")).toBeDefined();
+  });
+
+  it("handoff + handoff-and-complete without --summary carry the SAME teaching advisory (byte-identical parity)", async () => {
+    async function warnFor(sub: "handoff" | "handoff-and-complete"): Promise<string> {
+      stderrOut = [];
+      const { deps } = makeDeps({
+        routes: {
+          "POST /api/queue/handoff": { status: 201, data: { qitemId: "q2" } },
+          "POST /api/queue/handoff-and-complete": { status: 201, data: { qitemId: "q3" } },
+        },
+      });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      try {
+        await program.parseAsync([
+          "node", "rig", "queue", sub, "qitem-src-1",
+          "--from", "a@rig", "--to", "b@rig", "--body", "y", "--json",
+        ]);
+      } catch { /* exitOverride / downstream mock — the warn fires before the daemon call */ }
+      return stderrOut.join("");
+    }
+    const h = await warnFor("handoff");
+    const hc = await warnFor("handoff-and-complete");
+    expect(h).toMatch(TEACHES_WHERE);
+    expect(h).toMatch(TEACHES_WHY);
+    expect(hc).toBe(h); // parity rail: the two handoff advisories are byte-identical
+  });
+
+  it("the create --summary option hint teaches WHERE the summary is read (not only the cost)", () => {
+    const { deps } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    const queueCmd = program.commands.find((c) => c.name() === "queue")!;
+    const createCmd = queueCmd.commands.find((c) => c.name() === "create")!;
+    const summaryOpt = createCmd.options.find((o) => o.long === "--summary")!;
+    expect(summaryOpt.description).toMatch(TEACHES_WHERE);
+  });
+});

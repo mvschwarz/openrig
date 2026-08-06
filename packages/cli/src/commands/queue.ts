@@ -296,7 +296,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--expires-at <iso>", "ISO timestamp at which the qitem expires")
     .option("--id <qitemId>", "Idempotent qitem_id (skip if not provided)")
     .option("--target-repo <name>", "PL-007: typed repo scope (must match a repo in the source rig's RigSpec.workspace.repos[])")
-    .option("--summary <text>", "OPR.0.4.1.18: short human-readable 1-2 sentence summary of the work (feeds the Story node label; the agent-speak --body stays the source of truth). Warned-if-missing; pre-18 qitems exempt.")
+    .option("--summary <text>", "OPR.0.4.1.18: short human-readable 1-2 sentence summary of the work — what it is and why this seat, skimmable by a human in the needs-you view (the agent-speak --body stays the source of truth). Warned-if-missing; pre-18 qitems exempt.")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: pointer to the durable artifact a human judges (e.g. a PROOF.md path). Required by the daemon when the item is human-routed; optional otherwise.")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default destination nudge (cold-queue)")
@@ -355,7 +355,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       // callers that omit it; hard-require is a future hardening.
       if (!opts.summary) {
         process.stderr.write(
-          "warning: rig queue create called without --summary. New qitems should carry a short human-readable summary; the Story node degrades to a body truncation without it. Proceeding (pre-18 callers exempt).\n"
+          "warning: rig queue create called without --summary. New qitems should carry a short human-readable summary; the Story node degrades to a body truncation without it. A good summary is 1-2 plain sentences a human skims in the needs-you view — what the work is and why it needs this seat, not the agent-speak --body. Proceeding (pre-18 callers exempt).\n"
         );
       }
       const deps = getDeps();
@@ -585,7 +585,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--tags <tags>", "Comma-separated tags for the new qitem")
     .option("--gate <role>", "OPR.0.4.3.16: mark the new qitem as gate work; translated to a gate:<role> tag (e.g. guard | spec-review). The idle-gate watchdog reads this predicate. Composes with --tags.")
     .option("--target-repo <name>", "PL-007: typed repo scope for the new qitem")
-    .option("--summary <text>", "OPR.0.4.1.18: short human-readable 1-2 sentence summary for the new qitem (feeds the Story node; --body stays source of truth). Warned-if-missing.")
+    .option("--summary <text>", "OPR.0.4.1.18: short human-readable 1-2 sentence summary for the new qitem — what it is and why this seat, skimmable in the needs-you view (--body stays source of truth). Warned-if-missing.")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: durable-artifact pointer for the new qitem. Required by the daemon when the new qitem is human-routed; optional otherwise.")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default nudge to the new destination")
@@ -633,7 +633,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       // it should carry its own summary. Warn to stderr; do not hard-break.
       if (!opts.summary) {
         process.stderr.write(
-          "warning: rig queue handoff called without --summary. The new qitem should carry a short human-readable summary; the Story node degrades to a body truncation without it. Proceeding.\n"
+          "warning: rig queue handoff called without --summary. The new qitem should carry a short human-readable summary; the Story node degrades to a body truncation without it. A good summary is 1-2 plain sentences a human skims in the needs-you view — what the work is and why it needs this seat, not the agent-speak --body. Proceeding.\n"
         );
       }
       const deps = getDeps();
@@ -680,7 +680,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--tags <tags>", "Comma-separated tags for the new qitem")
     .option("--gate <role>", "OPR.0.4.3.16: mark the new qitem as gate work; translated to a gate:<role> tag (e.g. guard | spec-review). The idle-gate watchdog reads this predicate. Composes with --tags.")
     .option("--target-repo <name>", "PL-007: typed repo scope for the new qitem")
-    .option("--summary <text>", "OPR.0.4.1.18: short human-readable 1-2 sentence summary for the new qitem (feeds the Story node; --body stays source of truth). Warned-if-missing.")
+    .option("--summary <text>", "OPR.0.4.1.18: short human-readable 1-2 sentence summary for the new qitem — what it is and why this seat, skimmable in the needs-you view (--body stays source of truth). Warned-if-missing.")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: durable-artifact pointer for the new qitem. Required by the daemon when the new qitem is human-routed; optional otherwise.")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default nudge to the new destination")
@@ -726,7 +726,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       // it should carry its own summary. Warn to stderr; do not hard-break.
       if (!opts.summary) {
         process.stderr.write(
-          "warning: rig queue handoff called without --summary. The new qitem should carry a short human-readable summary; the Story node degrades to a body truncation without it. Proceeding.\n"
+          "warning: rig queue handoff called without --summary. The new qitem should carry a short human-readable summary; the Story node degrades to a body truncation without it. A good summary is 1-2 plain sentences a human skims in the needs-you view — what the work is and why it needs this seat, not the agent-speak --body. Proceeding.\n"
         );
       }
       const deps = getDeps();
