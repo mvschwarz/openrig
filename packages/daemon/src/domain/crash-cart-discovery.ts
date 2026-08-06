@@ -158,3 +158,202 @@ export function snapshotDaemonDb(dbPath: string, scratchDir: string, deps: Snaps
 export function openDaemonDbReadonly(copyDbPath: string): Database.Database {
   return new Database(copyDbPath, { readonly: true, fileMustExist: true });
 }
+
+// ── The discovery read-model (reproduces the daemon-side facts from the DB, daemon-down) ──────────
+
+/** Header facts. `stopReason`/`priorUptimeMs` are ALWAYS null: no shutdown/uptime record is persisted
+ *  anywhere (verified at source), so they are honest-null daemon-down — never fabricated. */
+export interface CrashCartHeader {
+  /** Newest write-timestamp across the durable tables (best-effort "last activity"); null if empty. */
+  lastActivityAt: string | null;
+  /** Last daemon boot (self_host_identity.reconciled_at advances every boot); null if never booted. */
+  lastBootAt: string | null;
+  /** First-ever boot (self_host_identity.minted_at). */
+  firstBootAt: string | null;
+  hostId: string | null;
+  /** UNRECOVERABLE daemon-down — no shutdown record exists. Honest-null. */
+  stopReason: null;
+  /** UNRECOVERABLE daemon-down — no persisted uptime. Honest-null. */
+  priorUptimeMs: null;
+}
+
+/** One rig found on this host, with the recovery-relevant counts. */
+export interface RigFound {
+  rigId: string;
+  rigName: string;
+  seatCount: number;
+  runningCount: number;
+  /** Seats whose LATEST session was probed resumable (derived; the recoverable bucket). */
+  resumableCount: number;
+  /** Newest persisted `sessions.last_seen_at` for the rig; null if none. (Live "last active" is a
+   *  tmux observation, unavailable daemon-down — this is the honest DB approximation.) */
+  lastActiveAt: string | null;
+}
+
+/** One in-progress queue item at crash time (display-only; the cart never mutates queue state). */
+export interface StoppedWork {
+  qitemId: string;
+  destinationSession: string;
+  sourceSession: string;
+  state: string;
+  claimedAt: string | null;
+  summary: string | null;
+  tsUpdated: string;
+}
+
+export interface CrashCartDiscovery {
+  header: CrashCartHeader;
+  foundOnHost: RigFound[];
+  whereWorkStopped: StoppedWork[];
+}
+
+/** Read the full daemon-down discovery view from an already-opened (copied) daemon DB. Read-only. */
+export function readCrashCartDiscovery(db: Database.Database): CrashCartDiscovery {
+  return {
+    header: readHeader(db),
+    foundOnHost: readFoundOnHost(db),
+    whereWorkStopped: readWhereWorkStopped(db),
+  };
+}
+
+function readHeader(db: Database.Database): CrashCartHeader {
+  const id = db
+    .prepare("SELECT host_id, minted_at, reconciled_at FROM self_host_identity WHERE singleton = 1")
+    .get() as { host_id: string; minted_at: string; reconciled_at: string } | undefined;
+  // Newest write across the durable tables. datetime() in ORDER BY normalizes the mixed timestamp
+  // formats (ISO-Z app writes vs SQLite `datetime('now')` defaults) so the comparison is chronological;
+  // we return the ORIGINAL string of that newest row.
+  const act = db
+    .prepare(
+      `SELECT ts FROM (
+         SELECT last_seen_at AS ts FROM sessions
+         UNION ALL SELECT created_at FROM sessions
+         UNION ALL SELECT created_at FROM events
+         UNION ALL SELECT ts_updated FROM queue_items
+         UNION ALL SELECT last_seen_at FROM discovered_sessions
+         UNION ALL SELECT reconciled_at FROM self_host_identity WHERE singleton = 1
+       ) WHERE ts IS NOT NULL ORDER BY datetime(ts) DESC LIMIT 1`,
+    )
+    .get() as { ts: string } | undefined;
+  return {
+    lastActivityAt: act?.ts ?? null,
+    lastBootAt: id?.reconciled_at ?? null,
+    firstBootAt: id?.minted_at ?? null,
+    hostId: id?.host_id ?? null,
+    stopReason: null,
+    priorUptimeMs: null,
+  };
+}
+
+function readFoundOnHost(db: Database.Database): RigFound[] {
+  // Per rig: seat count + counts folded over the LATEST session per node (max ULID id, per the
+  // daemon's own latest-per-node convention) + newest persisted last_seen_at.
+  const rows = db
+    .prepare(
+      `SELECT r.id AS rigId, r.name AS rigName,
+         (SELECT COUNT(*) FROM nodes n WHERE n.rig_id = r.id) AS seatCount,
+         (SELECT COUNT(*) FROM nodes n WHERE n.rig_id = r.id
+            AND (SELECT s.status FROM sessions s WHERE s.node_id = n.id ORDER BY s.id DESC LIMIT 1) = 'running'
+         ) AS runningCount,
+         (SELECT COUNT(*) FROM nodes n WHERE n.rig_id = r.id
+            AND (SELECT s.resume_last_probe_status FROM sessions s WHERE s.node_id = n.id ORDER BY s.id DESC LIMIT 1) = 'resumable'
+         ) AS resumableCount,
+         (SELECT MAX(s.last_seen_at) FROM sessions s JOIN nodes n ON s.node_id = n.id WHERE n.rig_id = r.id) AS lastActiveAt
+       FROM rigs r
+       WHERE r.archived_at IS NULL
+       ORDER BY r.name ASC`,
+    )
+    .all() as Array<{
+    rigId: string;
+    rigName: string;
+    seatCount: number;
+    runningCount: number;
+    resumableCount: number;
+    lastActiveAt: string | null;
+  }>;
+  return rows.map((r) => ({
+    rigId: r.rigId,
+    rigName: r.rigName,
+    seatCount: r.seatCount,
+    runningCount: r.runningCount,
+    resumableCount: r.resumableCount,
+    lastActiveAt: r.lastActiveAt ?? null,
+  }));
+}
+
+export interface LoadCrashCartDiscoveryDeps extends AssertDaemonDownDeps {
+  /** Copy one file (e.g. `copyFileSync`). */
+  copyFile: (src: string, dest: string) => void;
+  /** True if the path exists (e.g. `existsSync`). */
+  exists: (p: string) => boolean;
+  /** Create a fresh disposable scratch dir for the DB copy; returns its path. */
+  makeScratchDir: () => string;
+  /** Remove the scratch dir (best-effort cleanup). */
+  removeScratchDir: (dir: string) => void;
+  /** Open the copied DB read-only. Defaults to openDaemonDbReadonly; injected in tests. */
+  openDb?: (copyDbPath: string) => Database.Database;
+}
+
+/**
+ * The public C2 entry: safely read the daemon-down discovery view. FAIL-CLOSED FIRST (throws
+ * DaemonLiveError before touching disk if a daemon is live), then copy-then-read the DB into a
+ * disposable scratch dir, read the view, and ALWAYS clean up the scratch copy. Read-only end to end.
+ */
+export async function loadCrashCartDiscovery(
+  deps: LoadCrashCartDiscoveryDeps,
+): Promise<{ discovery: CrashCartDiscovery; dbPath: ResolvedDbPath }> {
+  // Refuse before any disk work if a daemon holds the DB.
+  await assertDaemonDown(deps);
+
+  const resolved = resolveDaemonDbPath(deps.openrigHome, deps.readDaemonJson);
+  if (resolved.relative) {
+    throw new CrashCartReadError(
+      `daemon DB path '${resolved.path}' is relative — the daemon CWD is unknown, cannot locate it daemon-down`,
+    );
+  }
+
+  const scratchDir = deps.makeScratchDir();
+  try {
+    const copyDb = snapshotDaemonDb(resolved.path, scratchDir, {
+      copyFile: deps.copyFile,
+      exists: deps.exists,
+    });
+    const db = (deps.openDb ?? openDaemonDbReadonly)(copyDb);
+    try {
+      return { discovery: readCrashCartDiscovery(db), dbPath: resolved };
+    } finally {
+      db.close();
+    }
+  } finally {
+    deps.removeScratchDir(scratchDir);
+  }
+}
+
+function readWhereWorkStopped(db: Database.Database): StoppedWork[] {
+  const rows = db
+    .prepare(
+      `SELECT qitem_id AS qitemId, destination_session AS destinationSession, source_session AS sourceSession,
+              state, claimed_at AS claimedAt, summary, ts_updated AS tsUpdated
+       FROM queue_items
+       WHERE state = 'in-progress'
+       ORDER BY datetime(ts_updated) DESC, qitem_id DESC`,
+    )
+    .all() as Array<{
+    qitemId: string;
+    destinationSession: string;
+    sourceSession: string;
+    state: string;
+    claimedAt: string | null;
+    summary: string | null;
+    tsUpdated: string;
+  }>;
+  return rows.map((r) => ({
+    qitemId: r.qitemId,
+    destinationSession: r.destinationSession,
+    sourceSession: r.sourceSession,
+    state: r.state,
+    claimedAt: r.claimedAt ?? null,
+    summary: r.summary ?? null,
+    tsUpdated: r.tsUpdated,
+  }));
+}
