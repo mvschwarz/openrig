@@ -4,7 +4,35 @@ import { renderScreen } from "../src/render.js";
 import { demoSnapshot } from "../src/demo-data.js";
 import { buildPulseModel } from "../src/pulse/pulse-model.js";
 import { renderExceptionSection } from "../src/pulse/render-pulse.js";
+import { stylizeLines } from "../src/stylize.js";
+import { createStyle } from "../src/theme.js";
 import type { FleetSnapshot, QueueRead } from "../src/types.js";
+
+/** Extract the text rendered under an active BOLD SGR from a stylized line —
+ * walks the SGR state (1=bold on, 0/22=bold off) so a "renders bold" claim is
+ * asserted at the STYLIZED layer, not just the pre-stylize seg. */
+function boldText(styled: string): string {
+  let bold = false;
+  let out = "";
+  let i = 0;
+  while (i < styled.length) {
+    if (styled[i] === "\x1b" && styled[i + 1] === "[") {
+      const m = styled.slice(i).match(/^\x1b\[([0-9;]*)m/);
+      if (m) {
+        const params = m[1]!.split(";").filter(Boolean).map(Number);
+        for (const p of params.length ? params : [0]) {
+          if (p === 1) bold = true;
+          else if (p === 0 || p === 22) bold = false;
+        }
+        i += m[0].length;
+        continue;
+      }
+    }
+    if (bold) out += styled[i];
+    i += 1;
+  }
+  return out;
+}
 
 // A fixed reference clock so age math is deterministic.
 const NOW = Date.parse("2026-08-06T12:00:00.000Z");
@@ -74,6 +102,36 @@ describe("PULSE view increment 2 — Exceptions strip LIVE", () => {
     const text = renderExceptionSection(needs).map((l) => l.text).join("\n");
     expect(text).toContain("please cut the 0.5.1 release now");
     expect(text).not.toContain("second line ignored");
+  });
+
+  it("▲ NEEDS YOU (founder Option-1 taste ruling): the who/what SUBJECT leads in BOLD, the detail plain after — split on the ' — ' boundary the summary affords", () => {
+    const snap = liveSnap({
+      attention: [attn({ qitemId: "q1", summary: "push-go — 0.5.0 cut packet ready · waiting on you", claimedAt: ago(22 * MIN) })],
+    });
+    const model = buildPulseModel(snap, NOW);
+    const row = model.exceptions.find((s) => s.label === "NEEDS YOU")!.rows[0]!;
+    // model: the summary splits at the ' — ' boundary → subject (who/what) + claim
+    // (detail, keeping the separator so the plain run reads naturally)
+    expect(row.subject).toBe("push-go");
+    expect(row.claim).toBe(" — 0.5.0 cut packet ready · waiting on you");
+    // STYLIZED (paint-proof discipline): the subject RENDERS bold, the detail does not
+    const v = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    v.dispatch({ type: "tab", tab: "pulse" });
+    const screen = renderScreen(v.get(), snap, { cols: 140, rows: 44, nowMs: NOW, colorMode: "truecolor" });
+    const styled = stylizeLines(screen, createStyle("truecolor"));
+    const needsLine = styled.find((l) => l.includes("push-go"))!;
+    expect(needsLine).toBeDefined();
+    expect(boldText(needsLine)).toContain("push-go"); // who/what subject is BOLD
+    expect(boldText(needsLine)).not.toContain("0.5.0"); // detail is plain (NOT bold)
+  });
+
+  it("▲ NEEDS YOU: a summary with NO ' — ' boundary renders whole-as-subject (honest degrade — no synthesis the flat summary can't support)", () => {
+    const snap = liveSnap({
+      attention: [attn({ qitemId: "q1", summary: "0.5.0 cut packet ready · waiting on you", claimedAt: ago(22 * MIN) })],
+    });
+    const row = buildPulseModel(snap, NOW).exceptions.find((s) => s.label === "NEEDS YOU")!.rows[0]!;
+    expect(row.subject).toBe("0.5.0 cut packet ready · waiting on you"); // whole summary is the subject
+    expect(row.claim).toBe(""); // no fabricated detail split
   });
 
   it("⧗ BLOCKED ON AGENTS: names the blocking AGENT (blockedOn qitem-id resolved to its owner), not the qitem pointer; human-blocked EXCLUDED", () => {

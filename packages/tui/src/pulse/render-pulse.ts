@@ -38,7 +38,11 @@ export function renderExceptionSection(section: PulseExceptionSection): Line[] {
   const rows = section.rows.map((r) =>
     line([
       { text: ` ${r.glyph} `, token: r.token },
-      { text: r.subject, bold: true },
+      // Founder Option-1: the who/what SUBJECT leads in BOLD (the mock's <b>). Bold
+      // needs a color token to render in this pipeline (a bold-only seg is drawn as
+      // plain ink), so the emphasis ink `bright` carries it — the detail (claim)
+      // stays plain, the age (meta) dim.
+      { text: r.subject, token: "bright", bold: true },
       { text: r.claim },
       { text: r.meta, token: "dim" },
     ]),

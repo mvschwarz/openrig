@@ -160,16 +160,32 @@ function bodyHead(body: string): string {
   return (body.split("\n").find((l) => l.trim().length > 0) ?? "").trim();
 }
 
+/** The subject/detail boundary the mock's NEEDS-YOU rows use: "<who/what> — <detail>"
+ * (space, EM DASH U+2014, space). The founder's Option-1 taste ruling: the who/what
+ * SUBJECT leads in bold, the detail plain after. */
+const NEEDS_SUBJECT_SEP = " — ";
+
 /** ▲ NEEDS YOU rows — the attention read IS the human-facing set (daemon-filtered);
- * subject from summary, fallback body head; age from claimedAt (fallback tsUpdated). */
+ * subject from summary, fallback body head; age from claimedAt (fallback tsUpdated).
+ *
+ * Founder Option-1 taste ruling (resolves the incr-2 bold/plain disclosure): the
+ * who/what SUBJECT leads in BOLD, the detail plain after. We split on the " — "
+ * boundary the served summary AFFORDS (the mock's own subject/detail convention) —
+ * subject = before it (bold via renderExceptionSection), claim = from it onward
+ * (plain, keeping the separator so the run reads naturally). A summary WITHOUT the
+ * boundary renders whole-as-subject: honest, no synthesis the flat summary can't
+ * support. (A guaranteed subject for every row would need a served subject field or
+ * an authored-summary convention — a served-data question, not this increment.) */
 function needsRows(attention: QueueRead[], nowMs: number): PulseException[] {
   return attention.map((q) => {
     const age = ageLabel(q.claimedAt ?? q.tsUpdated, nowMs);
+    const full = q.summary ?? (bodyHead(q.body) || q.destinationSession);
+    const sep = full.indexOf(NEEDS_SUBJECT_SEP);
     return {
       glyph: "●",
       token: "error" as Token,
-      subject: q.summary ?? (bodyHead(q.body) || q.destinationSession),
-      claim: "",
+      subject: sep > 0 ? full.slice(0, sep) : full,
+      claim: sep > 0 ? full.slice(sep) : "",
       meta: age ? ` · ${age}` : "",
     };
   });
