@@ -73,9 +73,16 @@ export interface StubRunnerIO {
   fireCompaction(): CompactionResult;
   /** Fire-and-forget POST of a canonical activity event to /api/activity/hooks. */
   postActivity(payload: Record<string, unknown>): void;
+  /** Kill the seat MID-TURN (mid_turn_death): record the exited sidecar + EXIT marker,
+   *  then terminate the process. The real runner never returns from this. */
+  die(code: number): void;
   /** Injectable clock (OPENRIG_TEST_CLOCK_NOW when set, real wall-clock otherwise). */
   now(): string;
 }
+
+/** mid_turn_death's exit code — 128+SIGKILL(9), the conventional "process killed" code,
+ *  evoking a seat struck down mid-turn. Deterministic + distinct from the error paths. */
+export const STUB_MID_TURN_DEATH_EXIT_CODE = 137;
 
 /** The seat's activity identity (mirror pi-runner). runtime is always "stub". */
 export interface StubActivityIdentity {
@@ -136,8 +143,17 @@ export function executeStubScript(script: StubScript, io: StubRunnerIO, identity
       }
       continue;
     }
-    // mid_turn_death / restore are seeded but not yet simulated — surface that loudly
-    // rather than silently drop the step (honest labeling).
+    if (step.behavior === "mid_turn_death") {
+      // The seat dies MID-TURN: emit a partial-turn line, then die. `return` halts the
+      // loop BEFORE the trailing Stop — so hooks CEASE (UserPromptSubmit fired, no Stop),
+      // the production-identical signature of a turn that never completed. The real
+      // runner's die() exits the process here, so nothing after this runs either way.
+      io.mirrorLine("[stub] mid_turn_death — dying mid-turn; hooks cease");
+      io.die(STUB_MID_TURN_DEATH_EXIT_CODE);
+      return;
+    }
+    // restore is seeded but not yet simulated — surface that loudly rather than
+    // silently drop the step (honest labeling).
     io.mirrorLine(`[stub] behavior '${step.behavior}' not yet simulated (deferred increment)`);
   }
   io.postActivity(stubActivityPayload(identity, "Stop", null, io.now()));
@@ -277,6 +293,16 @@ export async function runStubRunner(args: StubRunnerArgs): Promise<void> {
         body: JSON.stringify(payload),
         signal: controller.signal,
       }).catch(() => { /* best-effort — never blocks the loop */ }).finally(() => clearTimeout(timeout));
+    },
+    die: (code) => {
+      // Record the honest exited sidecar so the daemon sees the seat die (never a stale
+      // ready), print the EXIT marker, then terminate — no graceful idle, no Stop.
+      try {
+        writeSidecar(args.cwd, { ready: false, launchId: args.launchId, exited: { code, at: nowIso() }, updatedAt: nowIso() });
+      } catch { /* best-effort on the way out */ }
+      // eslint-disable-next-line no-console
+      console.log(STUB_RUNNER_EXIT_MARKER);
+      process.exit(code);
     },
     now: nowIso,
   };

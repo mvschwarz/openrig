@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   executeStubScript,
   resolveStubScript,
+  STUB_MID_TURN_DEATH_EXIT_CODE,
   type StubRunnerIO,
 } from "../src/adapters/stub-runner.js";
 import { DEFAULT_STUB_SCRIPT, StubScriptError, type StubScript } from "../src/adapters/stub-script.js";
@@ -23,17 +24,21 @@ import type { CompactionResult } from "../src/adapters/stub-compaction.js";
 const IDENTITY = { sessionName: "dev-worker@exec", nodeId: "exec-node" };
 
 /** A recording fake of the StubRunnerIO seam. */
-function fakeIo(): StubRunnerIO & { lines: string[]; fireCount: number; activities: Record<string, unknown>[] } {
+function fakeIo(): StubRunnerIO & { lines: string[]; fireCount: number; activities: Record<string, unknown>[]; died: boolean; diedCode: number | undefined } {
   const state = {
     lines: [] as string[],
     fireCount: 0,
     activities: [] as Record<string, unknown>[],
+    died: false,
+    diedCode: undefined as number | undefined,
     mirrorLine(line: string) { this.lines.push(line); },
     fireCompaction(): CompactionResult {
       this.fireCount++;
       return { markerPath: "/fake/restore-pending/seat.json" };
     },
     postActivity(payload: Record<string, unknown>) { this.activities.push(payload); },
+    // The real runner's die() exits the process; the fake records it so dispatch is testable.
+    die(code: number) { this.died = true; this.diedCode = code; },
     now() { return "2021-06-06T06:06:06.000Z"; },
   };
   return state;
@@ -100,8 +105,26 @@ describe("executeStubScript (R1 dispatch over the StubRunnerIO seam)", () => {
     expect(chunks[chunks.length - 1]).toContain(`${chunks.length}/${chunks.length}`);
   });
 
+  it("simulates mid_turn_death: the turn dies mid-flight — hooks CEASE (no Stop) and later steps do NOT run", () => {
+    const io = fakeIo();
+    executeStubScript({
+      steps: [
+        { kind: "emit", behavior: "mid_turn_death" },
+        { kind: "say", text: "SHOULD NOT RUN — the seat is dead" },
+      ],
+    }, io, IDENTITY);
+    // The turn opened (UserPromptSubmit) but died before completing — NO Stop was posted.
+    const events = io.activities.map((a) => a.hookEvent);
+    expect(events).toContain("UserPromptSubmit");
+    expect(events).not.toContain("Stop"); // hooks ceased
+    // The process was told to die (real runner exits here); later steps never ran.
+    expect(io.died).toBe(true);
+    expect(io.diedCode).toBe(STUB_MID_TURN_DEATH_EXIT_CODE);
+    expect(io.lines).not.toContain("SHOULD NOT RUN — the seat is dead");
+  });
+
   it("does NOT fabricate a not-yet-wired behavior — it mirrors an honest deferral, never a silent no-op", () => {
-    for (const behavior of ["mid_turn_death", "restore"] as const) {
+    for (const behavior of ["restore"] as const) {
       const io = fakeIo();
       executeStubScript({ steps: [{ kind: "emit", behavior }] }, io, IDENTITY);
       // No compaction seam fired for a non-compaction behavior…
