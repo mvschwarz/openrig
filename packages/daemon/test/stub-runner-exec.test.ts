@@ -20,16 +20,20 @@ import type { CompactionResult } from "../src/adapters/stub-compaction.js";
 // executor is dispatch-only over the injected seam, so it unit-tests hermetically with
 // a fake IO — the real-spawn wiring is proven separately (stub-runner-compaction e2e).
 
+const IDENTITY = { sessionName: "dev-worker@exec", nodeId: "exec-node" };
+
 /** A recording fake of the StubRunnerIO seam. */
-function fakeIo(): StubRunnerIO & { lines: string[]; fireCount: number } {
+function fakeIo(): StubRunnerIO & { lines: string[]; fireCount: number; activities: Record<string, unknown>[] } {
   const state = {
     lines: [] as string[],
     fireCount: 0,
+    activities: [] as Record<string, unknown>[],
     mirrorLine(line: string) { this.lines.push(line); },
     fireCompaction(): CompactionResult {
       this.fireCount++;
       return { markerPath: "/fake/restore-pending/seat.json" };
     },
+    postActivity(payload: Record<string, unknown>) { this.activities.push(payload); },
     now() { return "2021-06-06T06:06:06.000Z"; },
   };
   return state;
@@ -38,14 +42,14 @@ function fakeIo(): StubRunnerIO & { lines: string[]; fireCount: number } {
 describe("executeStubScript (R1 dispatch over the StubRunnerIO seam)", () => {
   it("mirrors a `say` step's text verbatim to the pane", () => {
     const io = fakeIo();
-    executeStubScript({ steps: [{ kind: "say", text: "hello from the stub" }] }, io);
+    executeStubScript({ steps: [{ kind: "say", text: "hello from the stub" }] }, io, IDENTITY);
     expect(io.lines).toContain("hello from the stub");
     expect(io.fireCount).toBe(0);
   });
 
   it("fires the REAL compaction seam on an `emit compaction` step (never fabricates)", () => {
     const io = fakeIo();
-    executeStubScript({ steps: [{ kind: "emit", behavior: "compaction" }] }, io);
+    executeStubScript({ steps: [{ kind: "emit", behavior: "compaction" }] }, io, IDENTITY);
     expect(io.fireCount).toBe(1);
     // The runner mirrors the marker the seam actually wrote (observable, honest).
     expect(io.lines.some((l) => l.includes("/fake/restore-pending/seat.json"))).toBe(true);
@@ -59,16 +63,32 @@ describe("executeStubScript (R1 dispatch over the StubRunnerIO seam)", () => {
         { kind: "emit", behavior: "compaction" },
         { kind: "say", text: "third" },
       ],
-    }, io);
+    }, io, IDENTITY);
     expect(io.fireCount).toBe(1);
     expect(io.lines[0]).toBe("first");
     expect(io.lines.at(-1)).toBe("third");
   });
 
+  it("frames the scripted turn with canonical activity events (UserPromptSubmit … Stop), runtime=stub", () => {
+    const io = fakeIo();
+    executeStubScript({ steps: [{ kind: "say", text: "reply" }] }, io, IDENTITY);
+    // A script is ONE turn: it opens with UserPromptSubmit (running) and closes with
+    // Stop (idle) — the observable state transition the 51-02 scenario harness reads.
+    expect(io.activities.at(0)).toMatchObject({
+      hookEvent: "UserPromptSubmit", runtime: "stub", sessionName: IDENTITY.sessionName, nodeId: IDENTITY.nodeId,
+    });
+    expect(io.activities.at(-1)).toMatchObject({ hookEvent: "Stop", runtime: "stub" });
+    // Every payload carries the canonical field shape (occurredAt from the injected clock).
+    for (const a of io.activities) {
+      expect(a.occurredAt).toBe("2021-06-06T06:06:06.000Z");
+      expect(a.sessionName).toBe(IDENTITY.sessionName);
+    }
+  });
+
   it("does NOT fabricate a not-yet-wired behavior — it mirrors an honest deferral, never a silent no-op", () => {
     for (const behavior of ["slow_output", "mid_turn_death", "restore"] as const) {
       const io = fakeIo();
-      executeStubScript({ steps: [{ kind: "emit", behavior }] }, io);
+      executeStubScript({ steps: [{ kind: "emit", behavior }] }, io, IDENTITY);
       // No compaction seam fired for a non-compaction behavior…
       expect(io.fireCount).toBe(0);
       // …and the runner says so out loud (visible, not silently dropped).

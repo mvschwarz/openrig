@@ -71,15 +71,45 @@ export interface StubRunnerIO {
   /** Fire the REAL precompact seam (arch R3: TRIGGER, never fabricate) and return
    *  the seat-keyed restore-pending marker it wrote. */
   fireCompaction(): CompactionResult;
+  /** Fire-and-forget POST of a canonical activity event to /api/activity/hooks. */
+  postActivity(payload: Record<string, unknown>): void;
   /** Injectable clock (OPENRIG_TEST_CLOCK_NOW when set, real wall-clock otherwise). */
   now(): string;
 }
 
+/** The seat's activity identity (mirror pi-runner). runtime is always "stub". */
+export interface StubActivityIdentity {
+  sessionName: string;
+  nodeId?: string;
+}
+
+/** Build a canonical /api/activity/hooks payload — the SAME field shape the real
+ *  runtimes POST ({runtime, sessionName, nodeId, hookEvent, subtype?, occurredAt}),
+ *  so the stub's events drive agent-activity-store state identically. */
+export function stubActivityPayload(
+  identity: StubActivityIdentity,
+  hookEvent: string,
+  subtype: string | null,
+  occurredAt: string,
+): Record<string, unknown> {
+  return {
+    sessionName: identity.sessionName,
+    nodeId: identity.nodeId ?? null,
+    runtime: "stub",
+    hookEvent,
+    subtype,
+    occurredAt,
+  };
+}
+
 /** Execute a stub behavior script step-by-step against the injected IO seam. Pure
  *  dispatch — no filesystem/clock of its own — so a fake IO drives it hermetically.
- *  `say` mirrors its text; `emit compaction` fires the real seam; a not-yet-wired
- *  behavior mirrors an HONEST deferral (never a silent no-op, never a fabrication). */
-export function executeStubScript(script: StubScript, io: StubRunnerIO): void {
+ *  A script is ONE turn: it opens with a UserPromptSubmit activity (running) and
+ *  closes with Stop (idle) — the observable state transition the 51-02 scenario
+ *  harness reads. `say` mirrors its text; `emit compaction` fires the real seam; a
+ *  not-yet-wired behavior mirrors an HONEST deferral (never a silent no-op). */
+export function executeStubScript(script: StubScript, io: StubRunnerIO, identity: StubActivityIdentity): void {
+  io.postActivity(stubActivityPayload(identity, "UserPromptSubmit", null, io.now()));
   for (const step of script.steps) {
     if (step.kind === "say") {
       io.mirrorLine(step.text);
@@ -95,6 +125,7 @@ export function executeStubScript(script: StubScript, io: StubRunnerIO): void {
     // surface that loudly rather than silently drop the step (honest labeling).
     io.mirrorLine(`[stub] behavior '${step.behavior}' not yet simulated (deferred increment)`);
   }
+  io.postActivity(stubActivityPayload(identity, "Stop", null, io.now()));
 }
 
 /** Resolve the seat's behavior script: the scenario-resolved script at
@@ -147,6 +178,29 @@ export function resolveStubHookScriptPath(env: NodeJS.ProcessEnv = process.env):
   );
 }
 
+/** Resolve the daemon's activity endpoint (mirror pi-runner): env first
+ *  (OPENRIG_URL + OPENRIG_ACTIVITY_HOOK_TOKEN, or OPENRIG_HOST:OPENRIG_PORT), then
+ *  the <OPENRIG_HOME>/activity-endpoint.json fallback. Returns null when neither is
+ *  available — activity POSTs then no-op (the sidecar + pane still work). */
+export function resolveStubActivityEndpoint(env: NodeJS.ProcessEnv): { baseUrl: string; token: string } | null {
+  let baseUrl = env.OPENRIG_URL?.trim() || null;
+  let token = env.OPENRIG_ACTIVITY_HOOK_TOKEN?.trim() || null;
+  if (!baseUrl && env.OPENRIG_PORT) {
+    baseUrl = `http://${env.OPENRIG_HOST?.trim() || "127.0.0.1"}:${env.OPENRIG_PORT.trim()}`;
+  }
+  if (!baseUrl || !token) {
+    try {
+      const home = env.OPENRIG_HOME?.trim() || nodePath.join(env.HOME ?? "", ".openrig");
+      const parsed = JSON.parse(nodeFs.readFileSync(nodePath.join(home, "activity-endpoint.json"), "utf8"));
+      if (!baseUrl && typeof parsed.baseUrl === "string") baseUrl = parsed.baseUrl;
+      if (!token && typeof parsed.token === "string") token = parsed.token;
+    } catch {
+      // absent/malformed — activity POSTs no-op; the sidecar + mirror still work.
+    }
+  }
+  return baseUrl && token ? { baseUrl, token } : null;
+}
+
 export async function runStubRunner(args: StubRunnerArgs): Promise<void> {
   // PRD §5 (no wall-clock in the stub's OWN behavior): the runner's own stamps honor
   // the same A3-R3 injectable clock the compaction assets use — OPENRIG_TEST_CLOCK_NOW
@@ -174,6 +228,8 @@ export async function runStubRunner(args: StubRunnerArgs): Promise<void> {
   // The stub compacts its OWN authored transcript (never a foreign one discovered
   // under ~/.claude/projects) — authored below from the resolved script.
   const transcriptPath = nodePath.join(args.cwd, ".openrig", "stub", "transcript.jsonl");
+  const identity: StubActivityIdentity = { sessionName: args.sessionName, nodeId: process.env.OPENRIG_NODE_ID };
+  const endpoint = resolveStubActivityEndpoint(process.env);
   const io: StubRunnerIO = {
     // eslint-disable-next-line no-console
     mirrorLine: (line) => console.log(line),
@@ -185,8 +241,21 @@ export async function runStubRunner(args: StubRunnerArgs): Promise<void> {
       transcriptPath,
       injectClockNow: process.env.OPENRIG_TEST_CLOCK_NOW,
     }),
+    postActivity: (payload) => {
+      if (!endpoint || typeof fetch !== "function") return;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 1500);
+      fetch(new URL("/api/activity/hooks", endpoint.baseUrl).toString(), {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${endpoint.token}` },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      }).catch(() => { /* best-effort — never blocks the loop */ }).finally(() => clearTimeout(timeout));
+    },
     now: nowIso,
   };
+  // SessionStart signals the seat came up (running); it precedes the turn's events.
+  io.postActivity(stubActivityPayload(identity, "SessionStart", null, nowIso()));
   try {
     const script = resolveStubScript(args.cwd, {
       readFile: (p) => nodeFs.readFileSync(p, "utf-8"),
@@ -200,7 +269,7 @@ export async function runStubRunner(args: StubRunnerArgs): Promise<void> {
       buildStubTranscript(script, { sessionName: args.sessionName, cwd: args.cwd, sessionId: args.launchId }),
       "utf-8",
     );
-    executeStubScript(script, io);
+    executeStubScript(script, io, identity);
   } catch (err) {
     // eslint-disable-next-line no-console
     console.error(`${STUB_RUNNER_ERROR_MARKER} script execution failed: ${(err as Error).message}`);
