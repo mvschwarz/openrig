@@ -28,7 +28,13 @@ export interface DaemonEventLoopEvidence {
 }
 
 export interface DaemonStatus {
-  state: "running" | "stopped" | "stale";
+  /** RULING 1ae863d2 — C3 3-state semantics (canonical: daemon crash-cart-detect.ts, kept in
+   *  lockstep): "stopped" requires POSITIVE evidence (connection refused); a probe TIMEOUT or
+   *  other non-refusal failure is "unverified" — never a down assertion. */
+  state: "running" | "stopped" | "stale" | "unverified";
+  /** Home-resolution honesty: set when the resolved home lacks daemon state but a live sibling
+   *  home (or a HOME-MOVED marker) exists — callers name BOTH paths, never assert down. */
+  siblingHint?: { resolvedHome: string; siblingHome: string };
   port?: number;
   host?: string;
   pid?: number;
@@ -131,6 +137,11 @@ export interface LifecycleDeps {
   // Defaults to a real setTimeout in production; tests pass a no-op to stay fast. Optional so
   // existing deps / mocks / callers are untouched.
   sleep?: (ms: number) => Promise<void>;
+  // RULING 1ae863d2 — optional home-resolution honesty deps (optional so existing
+  // mocks/callers are untouched): homeDir overrides the module-load OPENRIG_DIR for
+  // the sibling-home scan; listDir lists a directory (production: fs.readdirSync).
+  homeDir?: string;
+  listDir?: (path: string) => string[];
 }
 
 export const OPENRIG_DIR = OPENRIG_HOME;
@@ -583,6 +594,52 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<void> {
   }
 }
 
+/** RULING 1ae863d2 — positive-down evidence classifier (lockstep with the daemon's
+ *  crash-cart-detect semantics): ONLY a connection refusal is strong down evidence;
+ *  a timeout / abort / anything else never proves the daemon dead. */
+function isRefusedError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const cause = (err as Error & { cause?: { code?: string } }).cause;
+  const code = (err as Error & { code?: string }).code;
+  return cause?.code === "ECONNREFUSED" || code === "ECONNREFUSED" || /refused/i.test(err.message);
+}
+
+/** RULING 1ae863d2 — best-effort wrong-home detection: a HOME-MOVED marker in the resolved
+ *  home, else a live sibling `.openrig*` home (daemon.json with an alive pid) beside it.
+ *  Never throws — a failed scan just yields no hint. */
+function findSiblingHome(deps: LifecycleDeps): DaemonStatus["siblingHint"] {
+  try {
+    const home = deps.homeDir ?? OPENRIG_DIR;
+    const marker = path.join(home, "HOME-MOVED");
+    if (deps.exists(marker)) {
+      const target = deps.readFile(marker)?.trim();
+      if (target) return { resolvedHome: home, siblingHome: target };
+    }
+    if (!deps.listDir) return undefined;
+    const parent = path.dirname(home);
+    const self = path.basename(home);
+    for (const entry of deps.listDir(parent)) {
+      if (!entry.startsWith(".openrig") || entry === self) continue;
+      const sibling = path.join(parent, entry);
+      const stateFile = path.join(sibling, "daemon.json");
+      if (!deps.exists(stateFile)) continue;
+      const raw = deps.readFile(stateFile);
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw) as { pid?: number };
+        if (typeof parsed.pid === "number" && deps.isProcessAlive(parsed.pid)) {
+          return { resolvedHome: home, siblingHome: sibling };
+        }
+      } catch {
+        continue;
+      }
+    }
+  } catch {
+    // best-effort only
+  }
+  return undefined;
+}
+
 export async function getDaemonStatus(deps: LifecycleDeps): Promise<DaemonStatus> {
   // If OPENRIG_URL is set, bypass daemon.json and probe that URL directly
   const openrigUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
@@ -592,8 +649,9 @@ export async function getDaemonStatus(deps: LifecycleDeps): Promise<DaemonStatus
       const ev = await readHealthEvidence(res);
       const url = new URL(openrigUrl);
       return { state: "running", port: Number(url.port) || DEFAULT_PORT, host: url.hostname || DEFAULT_HOST, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop };
-    } catch {
-      return { state: "stopped" };
+    } catch (err) {
+      // 1ae863d2: refusal = positive down; anything else (timeout/wedged) = unverified.
+      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified" };
     }
   }
 
@@ -611,8 +669,12 @@ export async function getDaemonStatus(deps: LifecycleDeps): Promise<DaemonStatus
         reason: ev.reason,
         eventLoop: ev.eventLoop,
       };
-    } catch {
-      return { state: "stopped" };
+    } catch (err) {
+      // 1ae863d2: the resolved home has NO daemon state — before asserting anything,
+      // look for a live sibling home / HOME-MOVED marker (the wrong-home class).
+      const siblingHint = findSiblingHome(deps);
+      if (siblingHint) return { state: "unverified", siblingHint };
+      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified" };
     }
   }
 

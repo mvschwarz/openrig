@@ -28,12 +28,23 @@ async function withClient<T>(
   attemptWhenProbeUnconfirmed = false,
 ): Promise<T | undefined> {
   const status = await getDaemonStatus(deps.lifecycleDeps);
-  if (status.state !== "running" || status.healthy === false) {
+  // RULING 1ae863d2 — status is 3-state: hard-block ONLY on positive evidence
+  // (stopped/stale). UNVERIFIED (timeout/wedged/wrong-home) proceeds to the
+  // configured-target request as the authority — never a down assertion.
+  const positiveDown = status.state === "stopped" || status.state === "stale";
+  if (positiveDown || (status.state === "running" && status.healthy === false)) {
     if (!attemptWhenProbeUnconfirmed) {
-      console.error("Daemon not running. Start it with: rig daemon start");
+      if (positiveDown) {
+        console.error("Daemon not running. Start it with: rig daemon start");
+      } else {
+        console.error("Daemon present but unhealthy — queue write not attempted. Check: rig daemon status");
+      }
       process.exitCode = 1;
       return undefined;
     }
+  }
+  if (status.state === "unverified" && status.siblingHint) {
+    console.error(`note: OPENRIG_HOME may be wrong — resolved ${status.siblingHint.resolvedHome}, live sibling ${status.siblingHint.siblingHome}`);
   }
   const baseUrl = status.state === "running" && status.port !== undefined
     ? getDaemonUrl(status)

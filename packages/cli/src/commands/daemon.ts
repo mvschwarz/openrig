@@ -66,6 +66,8 @@ export function realDeps(): LifecycleDeps {
     mkdirp: (p) => fs.mkdirSync(p, { recursive: true }),
     openForAppend: (p) => fs.openSync(p, "a"),
     isProcessAlive,
+    // RULING 1ae863d2 — sibling-home scan (home-resolution honesty).
+    listDir: (p) => { try { return fs.readdirSync(p); } catch { return []; } },
   };
 }
 
@@ -234,6 +236,18 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
           break;
         case "stale":
           console.log("Daemon stale (cleaned up)");
+          break;
+        case "unverified":
+          // 1ae863d2 — C3 semantics: we could NOT confirm up or down; never claim stopped.
+          if (status.siblingHint) {
+            console.log("Daemon state UNVERIFIED — the resolved OPENRIG_HOME has no daemon state, but a live daemon appears under a sibling home:");
+            console.log(`  resolved: ${status.siblingHint.resolvedHome}`);
+            console.log(`  sibling:  ${status.siblingHint.siblingHome}`);
+            console.log("  Fix: point OPENRIG_HOME at the right home (or check your shell env) — this CLI is likely resolving the wrong home.");
+          } else {
+            console.log("Daemon state UNVERIFIED — the probe timed out or was inconclusive (this is NOT evidence the daemon is down).");
+            console.log("  Re-check with: rig daemon status  ·  direct: curl the daemon /healthz");
+          }
           break;
       }
     });
