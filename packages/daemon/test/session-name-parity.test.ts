@@ -127,6 +127,52 @@ const SHARED_VECTORS = [
     parsed: malformed("r3-worker"),
     human: false, memberLabel: "r3-worker", rigOf: undefined,
   },
+  // ── A2 4th leg: virtual-domain (@external). Contract 2cf541c6 / verdict 8cd30094.
+  // kind 'external' {local, domain}; the human-CLASS predicate returns TRUE (no silent
+  // agent-class downgrade); rigOf undefined (a virtual domain is NOT a routing rig).
+  // Admission (registered vs scheme, refuse-if-unregistered) is the A1/A4 GATEWAY's job.
+  {
+    label: "4TH LEG: registered virtual-domain ref mike@external",
+    input: "mike@external",
+    parsed: { kind: "external", local: "mike", domain: "external" },
+    human: true, memberLabel: "mike", rigOf: undefined,
+  },
+  {
+    label: "4TH LEG: scheme-form local rides the leg LEXICALLY (slack:U012AB3CD@external)",
+    input: "slack:U012AB3CD@external",
+    parsed: { kind: "external", local: "slack:U012AB3CD", domain: "external" },
+    human: true, memberLabel: "slack:U012AB3CD", rigOf: undefined,
+  },
+  {
+    label: "4TH LEG: dotted local (my.name@external)",
+    input: "my.name@external",
+    parsed: { kind: "external", local: "my.name", domain: "external" },
+    human: true, memberLabel: "my.name", rigOf: undefined,
+  },
+  {
+    label: "4TH LEG: hyphenated local (my-name@external)",
+    input: "my-name@external",
+    parsed: { kind: "external", local: "my-name", domain: "external" },
+    human: true, memberLabel: "my-name", rigOf: undefined,
+  },
+  {
+    label: "4TH LEG decided human@external: local 'human' is valid -> external (human-class), refused-at-gateway if unregistered",
+    input: "human@external",
+    parsed: { kind: "external", local: "human", domain: "external" },
+    human: true, memberLabel: "human", rigOf: undefined,
+  },
+  {
+    label: "4TH LEG neg: empty local (@external) -> malformed (not agent-downgraded)",
+    input: "@external",
+    parsed: malformed("@external"),
+    human: false, memberLabel: "", rigOf: undefined,
+  },
+  {
+    label: "4TH LEG neg: domain not in the closed set (mike@externalx) -> canonical, NOT external",
+    input: "mike@externalx",
+    parsed: { kind: "canonical", member: "mike", rig: "externalx" },
+    human: false, memberLabel: "mike", rigOf: "externalx",
+  },
 ] as const;
 
 describe("session-name contract — three-copy parity (shared vectors)", () => {
@@ -149,12 +195,18 @@ describe("session-name contract — three-copy parity (shared vectors)", () => {
     expect(cliSrc).toBe(uiSrc);
   });
 
-  it("the contract's human-seat predicate agrees with the read-only human-route-enforcer pattern on every vector", () => {
-    // human-route-enforcer.ts is READ-ONLY this slice (PRD constraint) and
-    // keeps its own pattern; this read-only import pins the contract copy
-    // against it so neither can drift silently.
+  it("the contract's human-CLASS predicate = the read-only enforcer human-seat pattern OR the A2 virtual-domain leg (intentional widening, pinned not silent)", () => {
+    // human-route-enforcer.ts is READ-ONLY this slice (PRD constraint) and keeps
+    // its narrow human-seat pattern. A2 widened the contract predicate to also
+    // admit virtual-domain refs (<local>@external) as human-CLASS. That divergence
+    // is INTENTIONAL, so we pin the exact union — enforcer-human-seat OR the
+    // contract's own external kind — so neither side can drift SILENTLY. (The
+    // enforcer's remaining consumers keep the narrow pattern this slice: a
+    // DOCUMENTED divergence routed as a follow-on, per dev-planner's ruling.)
     for (const v of SHARED_VECTORS) {
-      expect(daemonCopy.isHumanSeatSessionRef(v.input)).toBe(HUMAN_SEAT_SESSION_PATTERN.test(v.input));
+      const enforcerHumanSeat = HUMAN_SEAT_SESSION_PATTERN.test(v.input);
+      const virtualDomainLeg = daemonCopy.parseSessionName(v.input).kind === "external";
+      expect(daemonCopy.isHumanSeatSessionRef(v.input)).toBe(enforcerHumanSeat || virtualDomainLeg);
     }
   });
 });

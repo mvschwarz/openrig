@@ -8,8 +8,7 @@ import type {
 } from "../domain/queue-repository.js";
 import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelfHostSuffix } from "../domain/queue-repository.js";
 import type { QueueItem } from "../domain/queue-repository.js";
-import { isHumanSeatSession } from "../domain/human-route-enforcer.js";
-import { parseSessionName } from "../domain/session-name.js";
+import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
 import { hostname as osHostname } from "node:os";
 import type { InboxHandler } from "../domain/inbox-handler.js";
 import { InboxHandlerError } from "../domain/inbox-handler.js";
@@ -72,8 +71,13 @@ export function crossHostProvenanceTags(existing: string[] | undefined): string[
  */
 export function isAttentionItem(q: { tier: string | null; destinationSession: string; state?: string; blockedOn?: string | null }): boolean {
   if (q.tier === "human-gate") return true;
-  if (isHumanSeatSession(q.destinationSession)) return true;
-  return q.state === "blocked" && isHumanSeatSession(q.blockedOn ?? null);
+  // A2: consolidated onto the ONE contract predicate (isHumanSeatSessionRef) so
+  // virtual-domain refs (<local>@external) are human-CLASS and JOIN the attention
+  // union — behavior-identical for every non-@external ref (same pattern today).
+  // The enforcer's other consumers keep the narrow pattern this slice (a DOCUMENTED
+  // divergence, routed as a follow-on per dev-planner's ruling).
+  if (isHumanSeatSessionRef(q.destinationSession)) return true;
+  return q.state === "blocked" && isHumanSeatSessionRef(q.blockedOn ?? "");
 }
 
 
@@ -717,8 +721,9 @@ export function queueRoutes(): Hono {
   // source of truth for the UI Action-required + Approval lenses) so
   // those surfaces don't depend on the lossy ephemeral client event
   // FIFO. Class membership matches the mission-control read layer
-  // semantics: tier='human-gate' OR destination matches
-  // /^human(?:-[A-Za-z0-9._-]+)?@(kernel|host)$/. Open state defaults
+  // semantics: tier='human-gate' OR the ONE contract predicate
+  // isHumanSeatSessionRef (human-seat /^human…@(kernel|host)$/ OR the A2
+  // virtual-domain leg <local>@external). Open state defaults
   // to pending|in-progress|blocked (callers can still override via
   // `state=...`). Composable with destinationSession/sourceSession/
   // targetRepo/limit.

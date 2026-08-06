@@ -81,8 +81,10 @@ async function fetchAggregatedAttention(limit?: number): Promise<AttentionData> 
 }
 
 /**
- * Open attention-class qitems (tier="human-gate" OR destination
- * matches /^human(?:-[A-Za-z0-9._-]+)?@(kernel|host)$/). State default
+ * Open attention-class qitems (tier="human-gate" OR destination is
+ * human-CLASS via isHumanSeatSessionRef — human-seat
+ * /^human(?:-[A-Za-z0-9._-]+)?@(kernel|host)$/ OR the A2 virtual-domain
+ * leg <local>@external). State default
  * is pending|in-progress|blocked — closed/done items are NOT surfaced.
  *
  * `limit` (optional, default 50) caps the rendered set so a

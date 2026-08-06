@@ -33,18 +33,42 @@
 export type ParsedSessionName =
   | { kind: "canonical"; member: string; rig: string }
   | { kind: "legacy"; name: string }
+  // A2 4th leg — virtual-domain ref (<local>@external). `local` is verbatim up to
+  // the domain "@" (the scheme leg, slack:U..., rides `local` LEXICALLY; the
+  // registered-vs-scheme split is a GATEWAY parse, never the classifier's).
+  | { kind: "external"; local: string; domain: string }
   | { kind: "malformed"; error: "malformed_session_name"; input: string };
 
 const HUMAN_SEAT_SESSION_REF_PATTERN = /^human(?:-[A-Za-z0-9._-]+)?@(kernel|host)$/;
 const LEGACY_FLAT_SESSION_PATTERN = /^r\d{2}-.+$/;
+// A2 4th leg — CLOSED virtual-domain token set as a NAMED CONSTANT beside the
+// pattern (arch: not inline alternation; lexical-only pure fn, no state/IO).
+// Future domain words extend this array (e.g. @a2a) as explicit alternation.
+// Admission (is this @external ref registered?) is NOT here — it is the A1/A4
+// gateway's job; the classifier only recognizes the lexical shape.
+const VIRTUAL_DOMAIN_TOKENS = ["external"] as const;
+const VIRTUAL_DOMAIN_SESSION_REF_PATTERN = new RegExp(
+  `^[A-Za-z0-9._:-]+@(${VIRTUAL_DOMAIN_TOKENS.join("|")})$`
+);
 
-/** Arch tooth 1: human-seat classification runs BEFORE any parse at sites
- *  where the human/agent distinction matters (the queue-destination gate). */
+/** Arch tooth 1: human-CLASS classification runs BEFORE any parse at sites where
+ *  the human/agent distinction matters (the queue-destination gate + attention
+ *  union). A2 widened it: virtual-domain refs (<local>@external) are human-CLASS
+ *  too (they join human-route enforcement; NEVER a silent agent-class downgrade).
+ *  Admission stays at the A1/A4 gateway. */
 export function isHumanSeatSessionRef(sessionRef: string): boolean {
-  return HUMAN_SEAT_SESSION_REF_PATTERN.test(sessionRef);
+  return HUMAN_SEAT_SESSION_REF_PATTERN.test(sessionRef) ||
+    VIRTUAL_DOMAIN_SESSION_REF_PATTERN.test(sessionRef);
 }
 
 export function parseSessionName(raw: string): ParsedSessionName {
+  // Precedence (arch): human -> EXTERNAL -> canonical -> legacy -> malformed. The
+  // virtual-domain leg MUST precede canonical, else "mike@external" parses as
+  // member=mike rig=external; A1's rig-name reservation keeps that unambiguous.
+  if (VIRTUAL_DOMAIN_SESSION_REF_PATTERN.test(raw)) {
+    const domainAt = raw.lastIndexOf("@");
+    return { kind: "external", local: raw.slice(0, domainAt), domain: raw.slice(domainAt + 1) };
+  }
   const at = raw.indexOf("@");
   if (at > 0 && at < raw.length - 1) {
     return { kind: "canonical", member: raw.slice(0, at), rig: raw.slice(at + 1) };
