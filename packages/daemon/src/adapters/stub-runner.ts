@@ -24,6 +24,7 @@ import {
 } from "./stub-runner-protocol.js";
 import { parseStubScript, DEFAULT_STUB_SCRIPT, type StubScript } from "./stub-script.js";
 import { fireCompaction, type CompactionResult } from "./stub-compaction.js";
+import { fireRestore, type RestoreResult } from "./stub-restore.js";
 
 export interface StubRunnerArgs {
   sessionName: string;
@@ -71,6 +72,10 @@ export interface StubRunnerIO {
   /** Fire the REAL precompact seam (arch R3: TRIGGER, never fabricate) and return
    *  the seat-keyed restore-pending marker it wrote. */
   fireCompaction(): CompactionResult;
+  /** Fire the REAL restore reader (compaction-restore-bridge.cjs) — arch R3: TRIGGER,
+   *  never fabricate — and return the injected restore directive it delivered (or a
+   *  delivered=false no-op when there is no pending marker to deliver). */
+  fireRestore(): RestoreResult;
   /** Fire-and-forget POST of a canonical activity event to /api/activity/hooks. */
   postActivity(payload: Record<string, unknown>): void;
   /** Kill the seat MID-TURN (mid_turn_death): record the exited sidecar + EXIT marker,
@@ -152,9 +157,28 @@ export function executeStubScript(script: StubScript, io: StubRunnerIO, identity
       io.die(STUB_MID_TURN_DEATH_EXIT_CODE);
       return;
     }
-    // restore is seeded but not yet simulated — surface that loudly rather than
-    // silently drop the step (honest labeling).
-    io.mirrorLine(`[stub] behavior '${step.behavior}' not yet simulated (deferred increment)`);
+    if (step.behavior === "restore") {
+      // Fire the REAL restore reader (compaction-restore-bridge.cjs): it reads THIS seat's
+      // keyed restore-pending marker (written by a prior `emit compaction`), injects ONE
+      // additionalContext restore directive, and stamps the marker deliveredAt/deliveryCount
+      // (one-shot). The runner mirrors the delivered directive verbatim (observable + honest
+      // — the real injected context, never a fabricated one). A restore with no pending
+      // marker legitimately no-ops; the runner says so out loud rather than silently drop it.
+      const { additionalContext, delivered } = io.fireRestore();
+      if (delivered && additionalContext) {
+        io.mirrorLine("[stub] restore delivered — injected restore directive:");
+        io.mirrorLine(additionalContext);
+      } else {
+        io.mirrorLine("[stub] restore fired — no pending restore marker to deliver");
+      }
+      continue;
+    }
+    // All four seeded behaviors are wired above; step.behavior is `never` here. A value
+    // outside the closed STUB_BEHAVIORS union can only reach the executor by bypassing
+    // parseStubScript — a programming error. Fail LOUDLY, never a silent no-op.
+    throw new Error(
+      `[stub] unknown behavior '${(step as { behavior: string }).behavior}' — not in the stub repertoire`,
+    );
   }
   io.postActivity(stubActivityPayload(identity, "Stop", null, io.now()));
 }
@@ -206,6 +230,19 @@ export function resolveStubHookScriptPath(env: NodeJS.ProcessEnv = process.env):
   return nodePath.resolve(
     import.meta.dirname,
     "../../assets/plugins/openrig-core/skills/claude-compaction-restore/scripts/precompact-hook.mjs",
+  );
+}
+
+/** Resolve the shipped compaction-restore-bridge.cjs the restore behavior fires. An env
+ *  override (OPENRIG_STUB_RESTORE_BRIDGE) wins for hermetic tests; otherwise the packaged
+ *  asset relative to this entry — the SAME relative path from src/adapters (tsx) and
+ *  dist/adapters (compiled), matching the daemon's asset-resolution idiom. */
+export function resolveStubRestoreBridgePath(env: NodeJS.ProcessEnv = process.env): string {
+  const override = env.OPENRIG_STUB_RESTORE_BRIDGE;
+  if (typeof override === "string" && override.trim().length > 0) return override;
+  return nodePath.resolve(
+    import.meta.dirname,
+    "../../assets/plugins/openrig-core/hooks/scripts/compaction-restore-bridge.cjs",
   );
 }
 
@@ -281,6 +318,13 @@ export async function runStubRunner(args: StubRunnerArgs): Promise<void> {
       openrigHome,
       cwd: args.cwd,
       transcriptPath,
+      injectClockNow: process.env.OPENRIG_TEST_CLOCK_NOW,
+    }),
+    fireRestore: () => fireRestore({
+      bridgeScriptPath: resolveStubRestoreBridgePath(),
+      sessionName: args.sessionName,
+      openrigHome,
+      cwd: args.cwd,
       injectClockNow: process.env.OPENRIG_TEST_CLOCK_NOW,
     }),
     postActivity: (payload) => {

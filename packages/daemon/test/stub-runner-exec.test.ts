@@ -8,9 +8,10 @@ import {
   STUB_MID_TURN_DEATH_EXIT_CODE,
   type StubRunnerIO,
 } from "../src/adapters/stub-runner.js";
-import { DEFAULT_STUB_SCRIPT, StubScriptError, type StubScript } from "../src/adapters/stub-script.js";
+import { DEFAULT_STUB_SCRIPT, StubScriptError, type StubScript, type StubBehavior } from "../src/adapters/stub-script.js";
 import { stubSeatScriptPath } from "../src/adapters/stub-runner-protocol.js";
 import type { CompactionResult } from "../src/adapters/stub-compaction.js";
+import type { RestoreResult } from "../src/adapters/stub-restore.js";
 
 // Slice 51-01 items 6-8 — R1: the runner's SCRIPT-EXECUTION loop + the StubRunnerIO seam.
 //
@@ -24,10 +25,11 @@ import type { CompactionResult } from "../src/adapters/stub-compaction.js";
 const IDENTITY = { sessionName: "dev-worker@exec", nodeId: "exec-node" };
 
 /** A recording fake of the StubRunnerIO seam. */
-function fakeIo(): StubRunnerIO & { lines: string[]; fireCount: number; activities: Record<string, unknown>[]; died: boolean; diedCode: number | undefined } {
+function fakeIo(): StubRunnerIO & { lines: string[]; fireCount: number; restoreCount: number; activities: Record<string, unknown>[]; died: boolean; diedCode: number | undefined } {
   const state = {
     lines: [] as string[],
     fireCount: 0,
+    restoreCount: 0,
     activities: [] as Record<string, unknown>[],
     died: false,
     diedCode: undefined as number | undefined,
@@ -35,6 +37,14 @@ function fakeIo(): StubRunnerIO & { lines: string[]; fireCount: number; activiti
     fireCompaction(): CompactionResult {
       this.fireCount++;
       return { markerPath: "/fake/restore-pending/seat.json" };
+    },
+    fireRestore(): RestoreResult {
+      this.restoreCount++;
+      return {
+        additionalContext: "OpenRig compaction restore packet is available for this Claude session.\n[fake restore directive]",
+        markerPath: "/fake/restore-pending/seat.json",
+        delivered: true,
+      };
     },
     postActivity(payload: Record<string, unknown>) { this.activities.push(payload); },
     // The real runner's die() exits the process; the fake records it so dispatch is testable.
@@ -123,15 +133,26 @@ describe("executeStubScript (R1 dispatch over the StubRunnerIO seam)", () => {
     expect(io.lines).not.toContain("SHOULD NOT RUN — the seat is dead");
   });
 
-  it("does NOT fabricate a not-yet-wired behavior — it mirrors an honest deferral, never a silent no-op", () => {
-    for (const behavior of ["restore"] as const) {
-      const io = fakeIo();
-      executeStubScript({ steps: [{ kind: "emit", behavior }] }, io, IDENTITY);
-      // No compaction seam fired for a non-compaction behavior…
-      expect(io.fireCount).toBe(0);
-      // …and the runner says so out loud (visible, not silently dropped).
-      expect(io.lines.some((l) => l.includes(behavior) && /not yet simulated/i.test(l))).toBe(true);
-    }
+  it("fires the REAL restore seam on an `emit restore` step and mirrors the injected restore directive (never fabricates)", () => {
+    const io = fakeIo();
+    executeStubScript({ steps: [{ kind: "emit", behavior: "restore" }] }, io, IDENTITY);
+    // The restore reader (compaction-restore-bridge.cjs) was TRIGGERED, exactly once…
+    expect(io.restoreCount).toBe(1);
+    // …restore is NOT a compaction — the precompact seam must NOT fire on this path…
+    expect(io.fireCount).toBe(0);
+    // …and the runner mirrors the additionalContext restore directive the bridge injected
+    // (observable + honest — the real delivered context, never a fabricated one).
+    expect(io.lines.some((l) => l.includes("OpenRig compaction restore packet is available"))).toBe(true);
+  });
+
+  it("throws LOUDLY on a behavior outside the closed repertoire (defensive exhaustiveness) — never a silent no-op", () => {
+    // All four seeded behaviors are wired; a value outside STUB_BEHAVIORS can only reach
+    // the executor by bypassing parseStubScript — that is a programming error, and the
+    // executor must fail loudly rather than silently drop the step.
+    const io = fakeIo();
+    expect(() => executeStubScript(
+      { steps: [{ kind: "emit", behavior: "totally-unknown" as unknown as StubBehavior }] }, io, IDENTITY,
+    )).toThrow();
   });
 });
 
