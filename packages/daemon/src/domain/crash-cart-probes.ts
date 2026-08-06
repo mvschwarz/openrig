@@ -3,7 +3,7 @@
 // proven by the real-daemon-down run.
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { DaemonStateFile, HealthzProbeResult } from "./daemon-state.js";
+import type { DaemonStateFile, HealthzProbeResult } from "./crash-cart-detect.js";
 
 /** Classify a fetch REJECTION into a probe result. ECONNREFUSED = the only strong down signal; an
  *  abort/timeout = unverified; anything else = timeout (conservative — never a fabricated down). */

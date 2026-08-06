@@ -11,7 +11,7 @@ import { buildPulseModel } from "./pulse/pulse-model.js";
 import { renderPulseView, pulseLaneTargets } from "./pulse/render-pulse.js";
 import { renderCrashCartScreen, renderUnverifiedScreen } from "./crash-cart/render-crash-cart.js";
 import type { CrashCartModel } from "./crash-cart/crash-cart-model.js";
-import type { DaemonState, DaemonUnverifiedEvidence } from "./crash-cart/daemon-state.js";
+import type { DaemonState, DaemonUnverifiedEvidence } from "./crash-cart/contract.js";
 import { runtimeMarkSegs } from "./topology/runtime-marks.js";
 import { barCells, flashActive, reducedMotion, spinnerFrame } from "./motion.js";
 import type { ColorMode } from "./theme.js";

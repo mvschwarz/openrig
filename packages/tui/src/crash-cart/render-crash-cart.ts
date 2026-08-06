@@ -5,7 +5,7 @@
 import type { Token } from "../theme.js";
 import type { Screen } from "../types.js";
 import type { CrashCartModel } from "./crash-cart-model.js";
-import type { DaemonUnverifiedEvidence } from "./daemon-state.js";
+import type { DaemonUnverifiedEvidence } from "./contract.js";
 
 interface Seg {
   text: string;

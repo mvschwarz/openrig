@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyProbeError, probeHealthz } from "../src/crash-cart/daemon-probes.js";
+import { classifyProbeError, probeHealthz } from "../src/domain/crash-cart-probes.js";
 
 // Crash-cart C3 — the REAL /healthz probe classification (feeds resolveDaemonState). A connection
 // REFUSED is the only strong down signal; a timeout/abort is UNVERIFIED; a 2xx is answered; a non-2xx

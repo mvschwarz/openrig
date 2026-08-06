@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { classifyDaemonState, resolveDaemonState, type HealthzProbeResult } from "../src/crash-cart/daemon-state.js";
+import { classifyDaemonState, resolveDaemonState, type HealthzProbeResult } from "../src/domain/crash-cart-detect.js";
 
 // Crash-cart C3 — the daemon-state classifier (planner+PM ruling, honest-degraded false-negative rail).
 // THREE states: UP (healthz answered) · DOWN (POSITIVE evidence only: pid dead/absent AND healthz
