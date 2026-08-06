@@ -18,6 +18,7 @@ import { hydrateSnapshot } from "./hydrate.js";
 import { createLiveRefresh } from "./live.js";
 import { execFile } from "node:child_process";
 import { probeCrashCart, type CrashCartRenderOpts } from "./crash-cart/from-emit.js";
+import { resolveCrashCartKey, type CrashCartKeyAction } from "./crash-cart/keys.js";
 import type { Action, FleetSnapshot, Screen } from "./types.js";
 import type { SpecReviewCache } from "./hydrate.js";
 
@@ -89,6 +90,17 @@ async function run(): Promise<void> {
     crashCartOpts = await probeCrashCart(runCrashCartVerb);
     draw();
   }
+  // Perform a cockpit action key. start-daemon/restore exec `rig daemon start` (the ⏎ flow's `s` step;
+  // the C1 batch conductor that RESTORE ultimately drives is EXCLUDED this wave) then re-probe; retry
+  // re-probes (UNVERIFIED). inspect/onboarding are entry-point seams this wave.
+  function performCrashCart(action: CrashCartKeyAction): void {
+    if (action === "start-daemon" || action === "restore") {
+      execFile("rig", ["daemon", "start"], { timeout: 30_000 }, () => void refreshCrashCart());
+      return;
+    }
+    if (action === "retry") void refreshCrashCart();
+    // inspect / onboarding: entry-point seams (no cockpit notice channel this wave).
+  }
 
   const socketPath = argOf(args, "--socket") ?? defaultSocketPath(instanceId);
   const socket = await createControlSocket({ socketPath, view, onMutation: draw });
@@ -151,6 +163,15 @@ async function run(): Promise<void> {
           view.dispatch({ type: "footer" });
           continue;
         }
+        // 5.2 crash-cart: while a daemon-down screen is active, single keys are cockpit actions
+        // (s/i/n/r), not command-bar input.
+        if (crashCartOpts.daemonState && inputLine === "") {
+          const cca = resolveCrashCartKey(ev.ch, crashCartOpts);
+          if (cca) {
+            performCrashCart(cca);
+            continue;
+          }
+        }
         inputLine += ev.ch;
       } else if (ev.type === "key" && ev.key === "backspace") {
         inputLine = inputLine.slice(0, -1);
@@ -160,6 +181,10 @@ async function run(): Promise<void> {
         if (inputLine !== "") {
           perform(parseCommand(inputLine, view.get().sections));
           inputLine = "";
+        } else if (crashCartOpts.daemonState) {
+          // 5.2 crash-cart: ⏎ is the cockpit primary action (RESTORE EVERYTHING) when daemon-down.
+          const cca = resolveCrashCartKey("enter", crashCartOpts);
+          if (cca) performCrashCart(cca);
         } else {
           if (lastScreen) {
             const action = resolveKeyAction(ev, view.get(), lastScreen, computeExplorerRows(view.get(), snapshot).length);
