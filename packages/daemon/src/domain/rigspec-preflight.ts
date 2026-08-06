@@ -4,7 +4,7 @@ import type { RigRepository } from "./rig-repository.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { ExecFn } from "../adapters/tmux.js";
 import type { LegacyRigSpec as RigSpec, PreflightResult, RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember } from "./types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
-import { deriveSessionName, validateSessionName, validateSessionComponents } from "./session-name.js";
+import { deriveSessionName, validateSessionName, validateSessionComponents, VIRTUAL_DOMAIN_TOKENS } from "./session-name.js";
 
 const RUNTIME_COMMANDS: Record<string, string> = {
   "claude-code": "claude --version",
@@ -45,6 +45,15 @@ export class RigSpecPreflight {
       if (!validateSessionName(sessionName)) {
         errors.push(`Derived session name '${sessionName}' is invalid for node '${node.id}'`);
       }
+    }
+
+    // M1 A1 — reserved rig names (the RIG-slot half of the reserved-token rail; the
+    // host-slot half is RESERVED_HOST_IDS). Source = the A2 virtual-domain closed set
+    // (VIRTUAL_DOMAIN_TOKENS, ONE source of truth): a rig named `external` would make
+    // `<local>@external` ambiguous with the virtual-domain classifier (member=<local>
+    // rig=external vs a virtual-domain ref). Refused at the daemon mint gate.
+    if ((VIRTUAL_DOMAIN_TOKENS as readonly string[]).includes(spec.name)) {
+      errors.push(`Rig name '${spec.name}' is reserved (virtual-domain token): it would collide with the '<local>@${spec.name}' classifier — pick a different name`);
     }
 
     // Rig name collision

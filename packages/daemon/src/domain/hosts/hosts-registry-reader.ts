@@ -16,6 +16,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { getDefaultOpenRigPath } from "../../openrig-compat.js";
+import { VIRTUAL_DOMAIN_TOKENS } from "../session-name.js";
 
 export interface SshHostEntry {
   id: string;
@@ -51,7 +52,9 @@ export type HostResolution =
 // OPR.0.4.6.MH1 FR-7 — reserved host ids, MIRRORED verbatim from the
 // CLI twin (packages/cli/src/host-registry.ts RESERVED_HOST_IDS; the
 // parity test pins both). See the CLI twin for the collision rationale.
-export const RESERVED_HOST_IDS = new Set(["kernel", "host", "local"]);
+// M1 A1: the virtual-domain tokens (VIRTUAL_DOMAIN_TOKENS, the A2 closed set) are
+// reserved too — a host named `external` would collide with the @external classifier.
+export const RESERVED_HOST_IDS = new Set(["kernel", "host", "local", ...VIRTUAL_DOMAIN_TOKENS]);
 
 const KNOWN_TRANSPORTS = new Set(["ssh", "http"]);
 

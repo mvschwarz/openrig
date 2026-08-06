@@ -84,6 +84,13 @@ describe("RigSpecPreflight", () => {
     expect(result.errors.some((e) => e.includes("r99"))).toBe(true);
   });
 
+  it("M1 A1 — a rig named a virtual-domain token ('external') is REFUSED (rig-slot reserved rail)", async () => {
+    const pf = createPreflight();
+    const result = await pf.check(validSpec({ name: "external" }));
+    expect(result.ready).toBe(false);
+    expect(result.errors.some((e) => e.includes("external") && /reserved|virtual-domain/i.test(e))).toBe(true);
+  });
+
   it("tmux session name collision -> error", async () => {
     const tmux = mockTmux({ "r99-worker": true });
     const pf = createPreflight({ tmux });

@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from "
 import { dirname, join } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { getDefaultOpenRigPath } from "./openrig-compat.js";
+import { VIRTUAL_DOMAIN_TOKENS } from "./session-name.js";
 import type { FailedStep } from "./cross-host-types.js";
 
 export type { FailedStep };
@@ -98,7 +99,12 @@ export type HostResolution =
 // every selection/fan-out surface). Rejected at add/pair AND surfaced
 // as a load-time finding on pre-existing files (fail loud, never
 // silent). Mirrored verbatim in the daemon reader twin (parity test).
-export const RESERVED_HOST_IDS = new Set(["kernel", "host", "local"]);
+//
+// M1 A1 — the virtual-domain tokens (VIRTUAL_DOMAIN_TOKENS, the A2 closed set = ONE
+// source of truth) join the reserved host ids: a host registered `external` would make
+// the `<local>@external` virtual-domain classification ambiguous (X@Y@external). The
+// rig-name mint gate reserves the SAME tokens for the rig namespace (rigspec-preflight).
+export const RESERVED_HOST_IDS = new Set(["kernel", "host", "local", ...VIRTUAL_DOMAIN_TOKENS]);
 
 const KNOWN_TRANSPORTS = new Set(["ssh", "http"]);
 

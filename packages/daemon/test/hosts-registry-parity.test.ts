@@ -45,6 +45,9 @@ const SHARED_FIXTURES: Array<{ label: string; parsed: unknown; ok: boolean }> = 
   { label: "invalid: reserved id 'kernel' (human-seat collision)", parsed: { hosts: [{ id: "kernel", transport: "ssh", target: "a" }] }, ok: false },
   { label: "invalid: reserved id 'host' (human-seat collision)", parsed: { hosts: [{ id: "host", transport: "ssh", target: "a" }] }, ok: false },
   { label: "invalid: reserved id 'local' (LOCAL_HOST_ID shadow)", parsed: { hosts: [{ id: "local", transport: "http", url: "http://x", bearer_env: "T" }] }, ok: false },
+  // M1 A1 — the A2 virtual-domain tokens are reserved in BOTH twins (a host 'external'
+  // would collide with the <local>@external classifier). Sourced from VIRTUAL_DOMAIN_TOKENS.
+  { label: "invalid: reserved id 'external' (M1 A1 virtual-domain token collision)", parsed: { hosts: [{ id: "external", transport: "ssh", target: "a" }] }, ok: false },
   // OPR.0.4.6.MH1 rev1-r2 B1 — path-bearing ids rejected in BOTH twins
   // (ids name credential files; the pair token path embeds the id).
   { label: "invalid: path-traversal id '../escape'", parsed: { hosts: [{ id: "../escape", transport: "ssh", target: "a" }] }, ok: false },

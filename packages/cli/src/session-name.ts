@@ -46,7 +46,7 @@ const LEGACY_FLAT_SESSION_PATTERN = /^r\d{2}-.+$/;
 // Future domain words extend this array (e.g. @a2a) as explicit alternation.
 // Admission (is this @external ref registered?) is NOT here — it is the A1/A4
 // gateway's job; the classifier only recognizes the lexical shape.
-const VIRTUAL_DOMAIN_TOKENS = ["external"] as const;
+export const VIRTUAL_DOMAIN_TOKENS = ["external"] as const;
 const VIRTUAL_DOMAIN_SESSION_REF_PATTERN = new RegExp(
   `^[A-Za-z0-9._:-]+@(${VIRTUAL_DOMAIN_TOKENS.join("|")})$`
 );
