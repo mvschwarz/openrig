@@ -201,10 +201,21 @@ export function resolveStubActivityEndpoint(env: NodeJS.ProcessEnv): { baseUrl: 
   return baseUrl && token ? { baseUrl, token } : null;
 }
 
+/** The loud stderr line both the stub runner AND the shipped precompact hook emit when
+ *  OPENRIG_TEST_CLOCK_NOW is active. A leaked test-clock var silently FREEZES production
+ *  timestamps; this makes any leak visible in seat logs (safety, per review-r1's
+ *  escalation). MUST stay byte-identical to the literal in precompact-hook.mjs. */
+export const STUB_CLOCK_ANNOUNCEMENT = "OPENRIG_TEST_CLOCK_NOW active — timestamps are injected";
+
 export async function runStubRunner(args: StubRunnerArgs): Promise<void> {
   // PRD §5 (no wall-clock in the stub's OWN behavior): the runner's own stamps honor
   // the same A3-R3 injectable clock the compaction assets use — OPENRIG_TEST_CLOCK_NOW
   // (an ISO instant) when set, real wall-clock otherwise (absent = production).
+  const injectedClock = process.env.OPENRIG_TEST_CLOCK_NOW;
+  if (typeof injectedClock === "string" && injectedClock.trim().length > 0) {
+    // eslint-disable-next-line no-console
+    console.error(STUB_CLOCK_ANNOUNCEMENT); // loud-on-active; absence stays silent (production)
+  }
   const nowIso = () => {
     const injected = process.env.OPENRIG_TEST_CLOCK_NOW;
     return typeof injected === "string" && injected.trim().length > 0 ? injected : new Date().toISOString();

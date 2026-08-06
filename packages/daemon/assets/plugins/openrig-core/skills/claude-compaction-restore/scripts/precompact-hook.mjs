@@ -148,6 +148,14 @@ function buildSystemMessage(restoreInstruction, customMessage) {
 }
 
 try {
+  // Slice 51-01 RIDER (leak-visibility, review-r1 escalation): OPENRIG_TEST_CLOCK_NOW is
+  // read by nowIso() to make createdAt deterministic in tests — but a LEAKED var in a
+  // real seat would silently FREEZE production createdAt. Announce loudly on stderr when
+  // active so any leak is visible in seat logs; absence stays silent (production path).
+  // MUST stay byte-identical to STUB_CLOCK_ANNOUNCEMENT in stub-runner.ts.
+  if (typeof process.env.OPENRIG_TEST_CLOCK_NOW === "string" && process.env.OPENRIG_TEST_CLOCK_NOW.trim().length > 0) {
+    process.stderr.write("OPENRIG_TEST_CLOCK_NOW active — timestamps are injected\n");
+  }
   const input = readHookInput();
   const args = [restoreScript, "--out", outRoot, "--json"];
   if (input.cwd) args.push("--cwd", input.cwd);
