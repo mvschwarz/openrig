@@ -14,6 +14,7 @@
 import { DaemonClient } from "./daemon-client.js";
 import { parse as parseYaml } from "yaml";
 import type { AgentRow, FleetSnapshot, HostNode, NeedsItem, PodNode, QueueRead, SpecEntry } from "./types.js";
+import { isHumanSeatSession } from "./pulse/pulse-model.js";
 
 // Narrow read-shapes: just the served fields this module consumes (names match
 // the daemon's serialized output — see the Phase-2 endpoint-shape survey).
@@ -285,6 +286,26 @@ export async function hydrateSnapshot(
   const agentSpecNames = new Set((library ?? []).filter((entry) => entry.kind === "agent").map((entry) => entry.name));
   if (review?.registryError) readErrors.push(`review-fleet registry: ${review.registryError}`);
 
+  // BLOCKED ON AGENTS label==referent (r1 finding): blockedOn is a qitem POINTER
+  // for agent-blocks, so the blocking AGENT is that qitem's OWNER. Resolve each
+  // via the shipped single-qitem daemon read (client.queueItem) — a BOUNDED
+  // per-row lookup. human-park (a session in blockedOn) is skipped: it belongs
+  // under NEEDS YOU and would 404.
+  // A miss (gate name / closed blocker) degrades QUIETLY to the raw blockedOn at
+  // render (honest) — this is enrichment, NOT a load-bearing read, so it must not
+  // pollute readErrors / the "reads failed" status line (the blocked LIST read,
+  // which IS load-bearing, already goes through safe()).
+  const blockedResolved: QueueRead[] = await Promise.all(
+    (blocked ?? []).map(async (item) => {
+      const read = toQueueRead(item);
+      if (read.blockedOn && !isHumanSeatSession(read.blockedOn)) {
+        const blocker = (await client.queueItem(read.blockedOn).catch(() => null)) as QueueItemRead | null;
+        read.blockerSession = blocker?.destinationSession ?? null;
+      }
+      return read;
+    }),
+  );
+
   // Topology: the local host expands to the daemon's rigs; remote hosts come
   // from the aggregate with reachability only (per-rig start; the all-rigs
   // level is deliberately under-designed — founder capture).
@@ -457,7 +478,7 @@ export async function hydrateSnapshot(
     humanQueueProbed: review != null && !review.registryError && Array.isArray(review.hosts) && review.hosts.length > 0
       && review.hosts.every((host) => host.status.status === "ok"),
     attention: (attention ?? []).map(toQueueRead),
-    blocked: (blocked ?? []).map(toQueueRead),
+    blocked: blockedResolved,
     hostsDown,
     stream: (streamItems ?? []).map((s) => ({ tsEmitted: s.tsEmitted, sourceSession: s.sourceSession, body: s.body })),
     readErrors,

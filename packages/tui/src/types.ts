@@ -155,6 +155,12 @@ export interface QueueRead {
   body: string;
   claimedAt: string | null;
   tsUpdated: string;
+  /** BLOCKED ON AGENTS label==referent: blockedOn is a qitem id for agent-blocks
+   * (a session only for human-park), so the blocking AGENT is that qitem's owner.
+   * hydrate resolves it via the shipped single-qitem daemon read (a bounded
+   * per-row lookup) and stamps the owner session here; null when unresolved (gate
+   * name / lookup miss) — the render falls back to the raw blockedOn, never fabricates. */
+  blockerSession?: string | null;
 }
 
 export interface FleetSnapshot {

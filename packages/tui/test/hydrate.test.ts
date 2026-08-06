@@ -350,6 +350,27 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     expect(snap.specs.find((s) => s.name === "conveyor")?.kind).toBe("workflow");
   });
 
+  it("PULSE BLOCKED: resolves blockedOn (qitem id) to the blocker's OWNER via GET /:qitemId; human-park skipped; a miss degrades QUIETLY", async () => {
+    const blockedList = [
+      // agent-block: blockedOn is a qitem POINTER → resolves to the owner
+      { qitemId: "b1", state: "blocked", destinationSession: "dev-a@rig", blockedOn: "qitem-blkA", handedOffTo: null, tier: null, tags: null, summary: "waiting", body: "", claimedAt: "2026-08-05T09:00:00.000Z", tsUpdated: "2026-08-05T09:00:00.000Z" },
+      // human-park: blockedOn is a SESSION → NOT resolved (no lookup, belongs under NEEDS YOU)
+      { qitemId: "b2", state: "blocked", destinationSession: "dev-b@rig", blockedOn: "human-yeah@kernel", handedOffTo: null, tier: null, tags: null, summary: "human", body: "", claimedAt: "2026-08-05T09:00:00.000Z", tsUpdated: "2026-08-05T09:00:00.000Z" },
+      // agent-block whose blocker read 404s → blockerSession null, NO readError (enrichment)
+      { qitemId: "b3", state: "blocked", destinationSession: "dev-c@rig", blockedOn: "qitem-gone", handedOffTo: null, tier: null, tags: null, summary: "stale", body: "", claimedAt: "2026-08-05T09:00:00.000Z", tsUpdated: "2026-08-05T09:00:00.000Z" },
+    ];
+    const snap = await hydrateSnapshot(fixtureClient({ "/api/queue/qitem-gone": { status: 404 } }, {
+      "/api/queue/list?state=blocked": blockedList,
+      "/api/queue/qitem-blkA": { qitemId: "qitem-blkA", destinationSession: "review-r1@rig", state: "in-progress", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "the blocker", body: "", claimedAt: null, tsUpdated: "2026-08-05T09:00:00.000Z" },
+    }));
+    const by = Object.fromEntries(snap.blocked.map((q) => [q.qitemId, q]));
+    expect(by["b1"]?.blockerSession).toBe("review-r1@rig"); // resolved owner = the blocking agent
+    expect(by["b2"]?.blockerSession ?? null).toBeNull();     // human-park not resolved
+    expect(by["b3"]?.blockerSession ?? null).toBeNull();     // 404 miss → null (fallback to raw at render)
+    // the per-row enrichment is NOT load-bearing: a miss must not pollute readErrors
+    expect(snap.readErrors.filter((e) => e.includes("queue-blocker") || e.includes("qitem-gone"))).toEqual([]);
+  });
+
   it("leaves a failed read honest-empty with a NAMED error; other sections still hydrate", async () => {
     const snap = await hydrateSnapshot(fixtureClient({ "/api/review/fleet": { status: 503 } }));
     expect(snap.humanQueueProbed).toBe(false);

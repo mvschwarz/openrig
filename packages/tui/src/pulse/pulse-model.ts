@@ -118,9 +118,10 @@ export function demoPulseModel(): PulseModel {
   };
 }
 
-// mirror of daemon human-route-enforcer.ts isHumanSeatSession — keep byte-identical to that canonical regex
+// mirror of daemon human-route-enforcer.ts isHumanSeatSession — keep byte-identical to that canonical regex.
+// EXPORTED so hydrate reuses this ONE copy (no second mirror) to skip resolving human-park blockers.
 const HUMAN_SEAT_SESSION_PATTERN = /^human(?:-[A-Za-z0-9._-]+)?@(kernel|host)$/;
-function isHumanSeatSession(value: string | null | undefined): boolean {
+export function isHumanSeatSession(value: string | null | undefined): boolean {
   return typeof value === "string" && HUMAN_SEAT_SESSION_PATTERN.test(value);
 }
 
@@ -161,20 +162,27 @@ function needsRows(attention: QueueRead[], nowMs: number): PulseException[] {
 }
 
 /** ⧗ BLOCKED ON AGENTS rows — filter the state=blocked read to NON-human
- * blockers (the human-blocked ones already appear under NEEDS YOU); render
- * blocked-seat · blocker · dim(reason from summary) · age. */
+ * blockers (human-blocked already appear under NEEDS YOU), then NAME the blocking
+ * AGENT. blockedOn is a qitem POINTER for agent-blocks (a session only for
+ * human-park), so the agent is the blocker qitem's OWNER — hydrate resolves it
+ * into blockerSession (label==referent, the founder-caught class). Fallback to
+ * the raw blockedOn when unresolved (gate name / lookup miss) — honest, never
+ * fabricated. Render: blocked-seat · "blocked on" AGENT · dim(reason) · age. */
 function blockedRows(blocked: QueueRead[], nowMs: number): PulseException[] {
   return blocked
-    .filter((q) => !isHumanSeatSession(q.blockedOn))
+    // exclude human-park whether it names the human in blockedOn (session form)
+    // or resolves to a human owner — those belong under NEEDS YOU.
+    .filter((q) => !isHumanSeatSession(q.blockedOn) && !isHumanSeatSession(q.blockerSession))
     .map((q) => {
       const age = ageLabel(q.claimedAt ?? q.tsUpdated, nowMs);
       const reason = q.summary ?? bodyHead(q.body);
       const meta = [reason, age].filter(Boolean).join(" · ");
+      const blocker = q.blockerSession ?? q.blockedOn ?? "—";
       return {
         glyph: "⧗",
         token: PULSE_INFO_TOKEN,
         subject: q.destinationSession,
-        claim: ` blocked on ${q.blockedOn ?? "—"}`,
+        claim: ` blocked on ${blocker}`,
         meta: meta ? ` · ${meta}` : "",
       };
     });

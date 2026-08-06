@@ -102,6 +102,13 @@ export class DaemonClient {
   queueBlocked() {
     return this.get(`/api/queue/list?state=blocked`);
   }
+  /** A single qitem by id via the shipped GET /api/queue/:qitemId (queue.ts:864,
+   * returns the QueueItem or 404). Used for the BLOCKED ON AGENTS bounded per-row
+   * lookup: blockedOn is a qitem POINTER, so the blocking agent is that qitem's
+   * owner (destinationSession). NOT a new endpoint. */
+  queueItem(qitemId: string) {
+    return this.get(`/api/queue/${encodeURIComponent(qitemId)}`);
+  }
   reviewRig() {
     return this.get(`/api/review/rig`);
   }

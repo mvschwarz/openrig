@@ -63,23 +63,27 @@ describe("PULSE view increment 2 — Exceptions strip LIVE", () => {
     expect(text).not.toContain("second line ignored");
   });
 
-  it("⧗ BLOCKED ON AGENTS: non-human blockers only — the human-blocked item is EXCLUDED", () => {
+  it("⧗ BLOCKED ON AGENTS: names the blocking AGENT (blockedOn qitem-id resolved to its owner), not the qitem pointer; human-blocked EXCLUDED", () => {
     const snap = liveSnap({
       blocked: [
+        // REALISTIC: an agent-block stores a QITEM ID in blockedOn; the blocking
+        // AGENT is that qitem's owner, resolved by hydrate into blockerSession.
         attn({
           qitemId: "b1",
           state: "blocked",
           destinationSession: "dev50-driver@openrig-build",
-          blockedOn: "review-r1@openrig-build",
+          blockedOn: "qitem-20260805-blkA", // a qitem POINTER — must NOT be shown as the blocker
+          blockerSession: "review-r1@openrig-build", // resolved owner = the blocking agent
           tier: null,
           summary: "terminal verdict for 51209941",
           claimedAt: ago(1 * HR),
         }),
+        // human-park stores a SESSION in blockedOn → excluded (already under NEEDS YOU)
         attn({
           qitemId: "b2",
           state: "blocked",
           destinationSession: "dev50-qa@openrig-build",
-          blockedOn: "human-yeah@kernel", // human blocker → already under NEEDS YOU
+          blockedOn: "human-yeah@kernel",
           tier: null,
           summary: "human sign-off pending",
           claimedAt: ago(2 * HR),
@@ -93,11 +97,34 @@ describe("PULSE view increment 2 — Exceptions strip LIVE", () => {
     const text = renderExceptionSection(blocked!).map((l) => l.text).join("\n");
     expect(text).toContain("⧗ BLOCKED ON AGENTS (1)");
     expect(text).toContain("dev50-driver@openrig-build");
-    expect(text).toContain("review-r1@openrig-build");
+    // label==referent: the AGENT is named, the qitem POINTER is NOT rendered
+    expect(text).toContain("blocked on review-r1@openrig-build");
+    expect(text).not.toContain("qitem-20260805-blkA");
     expect(text).toContain("terminal verdict for 51209941");
     // the human-blocked item must NOT leak into BLOCKED ON AGENTS
     expect(text).not.toContain("dev50-qa@openrig-build");
     expect(text).not.toContain("human sign-off pending");
+  });
+
+  it("⧗ BLOCKED ON AGENTS: an UNRESOLVED blocker (blockerSession null) falls back to the raw blockedOn — honest, never fabricated", () => {
+    const snap = liveSnap({
+      blocked: [
+        attn({
+          qitemId: "b3",
+          state: "blocked",
+          destinationSession: "dev50-guard@openrig-build",
+          blockedOn: "gate:review", // e.g. a gate name — not a qitem id, does not resolve
+          blockerSession: null,
+          tier: null,
+          summary: "awaiting gate",
+          claimedAt: ago(30 * MIN),
+        }),
+      ],
+    });
+    const model = buildPulseModel(snap, NOW);
+    const blocked = model.exceptions.find((s) => s.label === "BLOCKED ON AGENTS")!;
+    const text = renderExceptionSection(blocked).map((l) => l.text).join("\n");
+    expect(text).toContain("blocked on gate:review"); // honest raw reference, not a fabricated agent
   });
 
   it("◌ PARKED WITH BATON: renders the non-silent honesty-floor placeholder line (deferred read)", () => {

@@ -52,11 +52,13 @@ export function demoSnapshot(): FleetSnapshot {
       { qitemId: "q2", state: "pending", destinationSession: "human-yeah@kernel", blockedOn: null, handedOffTo: null, tier: "human-gate", tags: null, summary: "slice-20 routing pixels · waiting on you", body: "", claimedAt: "2026-08-05T07:00:00.000Z", tsUpdated: "2026-08-05T07:00:00.000Z" },
     ],
     // PULSE ⧗ BLOCKED source — shaped like the shipped state=blocked read (ALL
-    // blocked qitems). The render excludes the human-blocked one (b2) — it is
-    // already surfaced under NEEDS YOU.
+    // blocked qitems). b1 is a REALISTIC agent-block: blockedOn is a qitem POINTER
+    // and blockerSession carries the resolved owner (the blocking AGENT — hydrate
+    // resolves this live via GET /:qitemId). The render excludes the human-blocked
+    // one (b2, a SESSION in blockedOn) — it is already surfaced under NEEDS YOU.
     blocked: [
-      { qitemId: "b1", state: "blocked", destinationSession: "dev50-driver@openrig-build", blockedOn: "review-r1@openrig-build", handedOffTo: null, tier: null, tags: null, summary: "terminal verdict for 51209941", body: "", claimedAt: "2026-08-05T09:00:00.000Z", tsUpdated: "2026-08-05T09:00:00.000Z" },
-      { qitemId: "b2", state: "blocked", destinationSession: "dev50-qa@openrig-build", blockedOn: "human-yeah@kernel", handedOffTo: null, tier: null, tags: null, summary: "human sign-off pending", body: "", claimedAt: "2026-08-05T08:00:00.000Z", tsUpdated: "2026-08-05T08:00:00.000Z" },
+      { qitemId: "b1", state: "blocked", destinationSession: "dev50-driver@openrig-build", blockedOn: "qitem-20260805-review", blockerSession: "review-r1@openrig-build", handedOffTo: null, tier: null, tags: null, summary: "terminal verdict for 51209941", body: "", claimedAt: "2026-08-05T09:00:00.000Z", tsUpdated: "2026-08-05T09:00:00.000Z" },
+      { qitemId: "b2", state: "blocked", destinationSession: "dev50-qa@openrig-build", blockedOn: "human-yeah@kernel", blockerSession: null, handedOffTo: null, tier: null, tags: null, summary: "human sign-off pending", body: "", claimedAt: "2026-08-05T08:00:00.000Z", tsUpdated: "2026-08-05T08:00:00.000Z" },
     ],
     // host-down is composed BESIDE the items (never projected into the item shape)
     hostsDown: [{ hostId: "mm2-host", status: "unreachable", error: "read timed out" }],
