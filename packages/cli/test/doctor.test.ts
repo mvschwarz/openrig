@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { createProgram } from "../src/index.js";
 import { Command } from "commander";
 import { doctorCommand, runDoctorChecks, type DoctorDeps } from "../src/commands/doctor.js";
 import { resolveCmuxSettingsPath } from "../src/cmux-config.js";
@@ -562,7 +563,6 @@ describe("rig doctor", () => {
   });
 
   it("wired via createProgram", async () => {
-    const { createProgram } = await import("../src/index.js");
     const program = createProgram();
     const doctorCmd = program.commands.find((c) => c.name() === "doctor");
     expect(doctorCmd).toBeDefined();

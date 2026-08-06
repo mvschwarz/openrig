@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import { createProgram } from "../src/index.js";
 import http from "node:http";
 import { Command } from "commander";
 import { exportCommand, type ExportDeps } from "../src/commands/export.js";
@@ -350,7 +351,6 @@ describe("rig export + import", () => {
 
   // Test 11: createProgram: both export AND import mounted
   it("createProgram mounts both export and import commands", async () => {
-    const { createProgram } = await import("../src/index.js");
     const stoppedLC = stoppedLifecycleDeps();
 
     const exportD: ExportDeps = { lifecycleDeps: stoppedLC, clientFactory: vi.fn() as never, writeFile: vi.fn() };

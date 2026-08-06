@@ -1,5 +1,6 @@
 // OPR.0.3.4.3 — rig reconcile-session CLI.
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import { createProgram } from "../src/index.js";
 import http from "node:http";
 import { Command } from "commander";
 import { reconcileSessionCommand } from "../src/commands/reconcile-session.js";
@@ -155,7 +156,6 @@ describe("rig reconcile-session", () => {
   });
 
   it("wired via createProgram", async () => {
-    const { createProgram } = await import("../src/index.js");
     const program = createProgram();
     expect(program.commands.find((c) => c.name() === "reconcile-session")).toBeDefined();
   });

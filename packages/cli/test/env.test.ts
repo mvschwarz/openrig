@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import { createProgram } from "../src/index.js";
 import http from "node:http";
 import { Command } from "commander";
 import { envCommand } from "../src/commands/env.js";
@@ -167,7 +168,6 @@ describe("rig env", () => {
   });
 
   it("env is wired via createProgram", async () => {
-    const { createProgram } = await import("../src/index.js");
     const program = createProgram();
     const envCmd = program.commands.find((c) => c.name() === "env");
     expect(envCmd).toBeDefined();

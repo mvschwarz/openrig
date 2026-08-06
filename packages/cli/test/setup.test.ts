@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { createProgram } from "../src/index.js";
 import { Command } from "commander";
 import { parse as parseYaml } from "yaml";
 import { setupCommand, runSetup, goldenPathNextSteps, permissionPolicyMenuLines, type SetupDeps, type SetupResult } from "../src/commands/setup.js";
@@ -87,7 +88,6 @@ function expectRuntimeConfigDisclosure(result: SetupResult): void {
 
 describe("rig setup", () => {
   it("wired via createProgram", async () => {
-    const { createProgram } = await import("../src/index.js");
     const program = createProgram();
     const setupCmd = program.commands.find((c) => c.name() === "setup");
     expect(setupCmd).toBeDefined();

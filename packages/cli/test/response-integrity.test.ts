@@ -121,7 +121,11 @@ describe("render response integrity — 3-part error + honest exit, never daemon
   it("bad-response renders fact/consequence/action JSON with nonzero exit (json)", async () => {
     const err = new DaemonResponseError(502, "<html>502 Bad Gateway</html>");
     const { out, exitCode } = await runCli(
-      ["queue", "update", "qitem-x", "--state", "done", "--closure-reason", "denied", "--json"],
+      // --actor: queue update requires it when OPENRIG_SESSION_NAME is unset (the hermetic setup
+      // scrubs it); without it the command short-circuits before the daemon-response path under
+      // test. Product requirement is correct — the fixture was stale (base-health, distinct from
+      // the P11 createProgram flap).
+      ["queue", "update", "qitem-x", "--actor", "harness@rig", "--state", "done", "--closure-reason", "denied", "--json"],
       depsThrowing(err),
     );
     expect(exitCode).toBe(1);
@@ -137,7 +141,7 @@ describe("render response integrity — 3-part error + honest exit, never daemon
   it("bad-response renders 3-part guidance to stderr with nonzero exit, never daemon-down (human)", async () => {
     const err = new DaemonResponseError(502, "<html>truncated");
     const { err: stderr, exitCode } = await runCli(
-      ["queue", "update", "qitem-x", "--state", "done", "--closure-reason", "denied"],
+      ["queue", "update", "qitem-x", "--actor", "harness@rig", "--state", "done", "--closure-reason", "denied"],
       depsThrowing(err),
     );
     expect(exitCode).toBe(1);
@@ -148,7 +152,7 @@ describe("render response integrity — 3-part error + honest exit, never daemon
   it("slow-response (timeout) renders slow guidance, not daemon-down, nonzero exit", async () => {
     const err = new DaemonTimeoutError("Request to http://localhost:7433/api/queue/x/update timed out after 5000ms");
     const { err: stderr, exitCode } = await runCli(
-      ["queue", "update", "qitem-x", "--state", "done", "--closure-reason", "denied"],
+      ["queue", "update", "qitem-x", "--actor", "harness@rig", "--state", "done", "--closure-reason", "denied"],
       depsThrowing(err),
     );
     expect(exitCode).toBe(1);

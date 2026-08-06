@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import { createProgram } from "../src/index.js";
 import http from "node:http";
 import { Command } from "commander";
 import { statusCommand, type StatusDeps } from "../src/commands/status.js";
@@ -371,7 +372,6 @@ describe("rig status", () => {
 
   // Test 8: root-level rig status is mounted (uses real createProgram from index.ts)
   it("rig status is wired via createProgram (real index.ts wiring)", async () => {
-    const { createProgram } = await import("../src/index.js");
 
     const statusDeps: StatusDeps = {
       lifecycleDeps: mockLifecycleDeps({

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import { createProgram } from "../src/index.js";
 import http from "node:http";
 import { Command } from "commander";
 import { snapshotCommand } from "../src/commands/snapshot.js";
@@ -443,7 +444,6 @@ describe("rig snapshot + restore", () => {
 
   // Test 11: createProgram: both snapshot AND restore mounted
   it("createProgram mounts both snapshot and restore commands", async () => {
-    const { createProgram } = await import("../src/index.js");
     const deps = stoppedDeps();
     const program = createProgram({ snapshotDeps: deps, restoreDeps: deps });
 

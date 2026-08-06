@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterAll, afterEach } from "vitest";
+import { createProgram } from "../src/index.js";
 import { Command } from "commander";
 import { expandCommand } from "../src/commands/expand.js";
 import { DaemonClient } from "../src/client.js";
@@ -237,7 +238,6 @@ describe("rig expand", () => {
 
   // T5: Wired via createProgram
   it("wired via createProgram", async () => {
-    const { createProgram } = await import("../src/index.js");
     const program = createProgram();
     const cmd = program.commands.find((c) => c.name() === "expand");
     expect(cmd).toBeDefined();

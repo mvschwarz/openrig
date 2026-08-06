@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { createProgram } from "../src/index.js";
 import { Command } from "commander";
 import {
   UI_MAINTENANCE_NOTICE,
@@ -174,7 +175,6 @@ describe("rig ui open", () => {
 
   // Test 5: createProgram: rig ui open mounted
   it("rig ui open is wired via createProgram", async () => {
-    const { createProgram } = await import("../src/index.js");
     const execFn = vi.fn(async () => {});
     const deps: UiDeps = {
       lifecycleDeps: mockLifecycleDeps({
