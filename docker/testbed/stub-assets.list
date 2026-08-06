@@ -1,0 +1,11 @@
+# openrig-testbed stub runtime assets (plan §1 layer 4: "the 51-01 stub script + its registry
+# wiring — zero tokens by construction"). This file is the EXACT census scope the manifest hashes
+# and the build verb stages into the image (census-scope-match-code-path — this list IS the code
+# path; never a recursive walk that would over-count).
+#
+# One repo-relative path per line; comments (#) and blank lines are ignored.
+#
+# UNRESOLVED SLOT — the concrete zero-token stub payload (the container-local stub rig.yaml + its
+# agent fixture + culture.md that boot a stub topology for the L3 daemon-in-container leg) is
+# finalized in the L3 stub-boot runbook increment, where the exact set is grounded rather than
+# guessed. Until populated, the build verb REFUSES (deriveStubAssetsHash loud-fails on an empty set).

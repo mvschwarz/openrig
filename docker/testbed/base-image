@@ -1,0 +1,14 @@
+# openrig-testbed base image — the digest-pinned LTS-slim Linux (plan §1: "digest-pinned, not
+# tag-floating — byte-reproducible builds; the pin recorded in the image manifest").
+#
+# UNRESOLVED SLOT — resolve HOST-SIDE (locus ruling, the L0 build runbook). The VM seat has no
+# container runtime and cannot pull/inspect a real digest, so this is a host-resolved input:
+#
+#   docker pull debian:bookworm-slim
+#   docker inspect --format '{{index .RepoDigests 0}}' debian:bookworm-slim
+#
+# then replace this comment block with the single resulting reference, e.g.
+#   debian:bookworm-slim@sha256:<64-hex>
+#
+# Exactly one digest-pinned ref. Until resolved, the build verb REFUSES to build (no tag-floating
+# base) — readBaseImage() loud-fails on this comment-only slot.
