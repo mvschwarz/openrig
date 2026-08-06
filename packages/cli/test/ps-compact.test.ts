@@ -208,10 +208,10 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
   // -- AC-1: token-safe default (the regression) --
   it("AC-1: default --nodes --json is an order of magnitude smaller than --full", async () => {
     const { logs: defaultLogs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json"]);
     });
     const { logs: fullLogs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--full"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--full"]);
     });
 
     const defaultOutput = defaultLogs.join("");
@@ -226,10 +226,10 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
   // -- AC-2: same breadth (no node dropped) --
   it("AC-2: compact default lists ALL nodes (same count as --full)", async () => {
     const { logs: defaultLogs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json"]);
     });
     const { logs: fullLogs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--full"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--full"]);
     });
 
     const defaultNodes = JSON.parse(defaultLogs.join(""));
@@ -248,7 +248,7 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     // Today's default IS the full raw array (no compact yet).
     // After slice-25, --full must produce the same output as today's default.
     const { logs: fullLogs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--full"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--full"]);
     });
 
     const fullOutput = fullLogs.join("");
@@ -277,7 +277,7 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
   // -- AC-4: compact field set --
   it("AC-4: compact projection includes the specified field set", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json"]);
     });
     const nodes = JSON.parse(logs.join(""));
 
@@ -308,7 +308,7 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
 
   it("AC-4: attention node includes reason + latestError; healthy node omits reason", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json"]);
     });
     const nodes = JSON.parse(logs.join(""));
 
@@ -345,7 +345,7 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
 
   it("AC-5: --session narrows to matching session", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--session", "dev1-driver@openrig-velocity"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--session", "dev1-driver@openrig-velocity"]);
     });
     const nodes = JSON.parse(logs.join(""));
     expect(nodes.length).toBe(1);
@@ -366,7 +366,7 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
 
   it("AC-5: --session composes with compact (compact payload, session-filtered)", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--session", "orch1-lead@openrig-build"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--session", "orch1-lead@openrig-build"]);
     });
     const nodes = JSON.parse(logs.join(""));
     expect(nodes.length).toBe(1);
@@ -391,10 +391,10 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
   // -- AC-7: both paths in one suite --
   it("AC-7: default compact and --full exercised on same fixture (regression guard)", async () => {
     const { logs: compactLogs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json"]);
     });
     const { logs: fullLogs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--full"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--full"]);
     });
 
     const compact = JSON.parse(compactLogs.join(""));
@@ -416,7 +416,7 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
   // -- Composition: --fields overrides compact (existing behavior preserved) --
   it("--fields overrides compact (explicit projection takes precedence)", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--fields", "rigName,canonicalSessionName"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--fields", "rigName,canonicalSessionName"]);
     });
     const parsed = JSON.parse(logs.join(""));
     // --fields triggers envelope
@@ -428,10 +428,10 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
   // -- --verbose alias --
   it("--verbose is an alias for --full", async () => {
     const { logs: fullLogs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--full"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--full"]);
     });
     const { logs: verboseLogs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--verbose"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--verbose"]);
     });
     expect(fullLogs.join("")).toBe(verboseLogs.join(""));
   });
@@ -439,7 +439,7 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
   // -- Default shape is bare array (back-compat) --
   it("compact default --json stays a bare array (not envelope)", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json"]);
     });
     const parsed = JSON.parse(logs.join(""));
     expect(Array.isArray(parsed)).toBe(true);
@@ -450,7 +450,7 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
   // -- Human table compact --
   it("compact default human table uses compact columns and omits full-only columns", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A"]);
     });
     const output = logs.join("\n");
     // Compact headers present
@@ -474,7 +474,7 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
 
   it("--full human table uses full-detail columns", async () => {
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--full"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--full"]);
     });
     const output = logs.join("\n");
     // Full headers present

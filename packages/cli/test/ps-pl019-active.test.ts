@@ -194,7 +194,7 @@ describe("PL-019 ps --filter agentActivity.state + --active", () => {
   it("--filter agentActivity.state=running narrows to the running node", async () => {
     nodesByRig["rig-1"] = [NODE_RUNNING, NODE_IDLE, NODE_NEEDS_INPUT, NODE_UNKNOWN];
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--filter", "agentActivity.state=running"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--filter", "agentActivity.state=running"]);
     });
     expect(exitCode).toBeUndefined();
     const env = JSON.parse(logs.join(""));
@@ -207,10 +207,10 @@ describe("PL-019 ps --filter agentActivity.state + --active", () => {
   it("--active is identical to --filter agentActivity.state=running on same fixture", async () => {
     nodesByRig["rig-1"] = [NODE_RUNNING, NODE_IDLE, NODE_NEEDS_INPUT, NODE_UNKNOWN];
     const a = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--filter", "agentActivity.state=running"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--filter", "agentActivity.state=running"]);
     });
     const b = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--active"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--active"]);
     });
     expect(a.exitCode).toBeUndefined();
     expect(b.exitCode).toBeUndefined();
@@ -220,7 +220,7 @@ describe("PL-019 ps --filter agentActivity.state + --active", () => {
   it("--filter agentActivity.state=needs_input picks the amber-state node", async () => {
     nodesByRig["rig-1"] = [NODE_RUNNING, NODE_IDLE, NODE_NEEDS_INPUT, NODE_UNKNOWN];
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--filter", "agentActivity.state=needs_input"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--filter", "agentActivity.state=needs_input"]);
     });
     expect(exitCode).toBeUndefined();
     const env = JSON.parse(logs.join(""));
@@ -232,7 +232,7 @@ describe("PL-019 ps --filter agentActivity.state + --active", () => {
   it("--filter agentActivity.state=invalid fails fast with three-part error and exit 1", async () => {
     nodesByRig["rig-1"] = [NODE_RUNNING];
     const { errLogs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--filter", "agentActivity.state=lol-no"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--filter", "agentActivity.state=lol-no"]);
     });
     expect(exitCode).toBe(1);
     const errOutput = errLogs.join("\n");
@@ -247,7 +247,7 @@ describe("PL-019 ps --filter agentActivity.state + --active", () => {
   it("--active combined with --filter is rejected explicitly with exit 1", async () => {
     nodesByRig["rig-1"] = [NODE_RUNNING];
     const { errLogs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--active", "--filter", "status=running"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--active", "--filter", "status=running"]);
     });
     expect(exitCode).toBe(1);
     expect(errLogs.join("\n")).toContain("--active and --filter cannot be combined");
@@ -262,7 +262,7 @@ describe("PL-019 ps --filter agentActivity.state + --active", () => {
     };
     nodesByRig["rig-1"] = [NODE_RUNNING, NODE_NO_ACTIVITY];
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--active"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--active"]);
     });
     expect(exitCode).toBeUndefined();
     const env = JSON.parse(logs.join(""));

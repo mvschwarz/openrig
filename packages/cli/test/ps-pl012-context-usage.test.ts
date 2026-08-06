@@ -130,7 +130,7 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
       nodeAt("delta", null),
     ];
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--filter", "contextUsage.percent>=80"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--filter", "contextUsage.percent>=80"]);
     });
     expect(exitCode).toBeUndefined();
     const env = JSON.parse(logs.join(""));
@@ -141,7 +141,7 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
   it("--filter contextUsage.percent<60 picks low/ok seats only", async () => {
     nodesByRig["rig-1"] = [nodeAt("alpha", 90), nodeAt("beta", 65), nodeAt("gamma", 30)];
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--filter", "contextUsage.percent<60"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--filter", "contextUsage.percent<60"]);
     });
     expect(exitCode).toBeUndefined();
     const env = JSON.parse(logs.join(""));
@@ -152,7 +152,7 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
   it("--filter contextUsage.percent>=N excludes nodes with no sample (unknown availability)", async () => {
     nodesByRig["rig-1"] = [nodeAt("alpha", 90), nodeAt("delta", null)];
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--filter", "contextUsage.percent>=0"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--filter", "contextUsage.percent>=0"]);
     });
     const env = JSON.parse(logs.join(""));
     const entries = Array.isArray(env) ? env : env.entries;
@@ -167,7 +167,7 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
       nodeAt("delta", null),// unknown
     ];
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--filter", "contextUsage.state=critical"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--filter", "contextUsage.state=critical"]);
     });
     const env = JSON.parse(logs.join(""));
     const entries = Array.isArray(env) ? env : env.entries;
@@ -177,7 +177,7 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
   it("--filter contextUsage.state=unknown picks no-sample seats", async () => {
     nodesByRig["rig-1"] = [nodeAt("alpha", 90), nodeAt("delta", null)];
     const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--filter", "contextUsage.state=unknown"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--filter", "contextUsage.state=unknown"]);
     });
     const env = JSON.parse(logs.join(""));
     const entries = Array.isArray(env) ? env : env.entries;
@@ -187,7 +187,7 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
   it("--filter contextUsage.percent>=invalid fails fast with three-part error and exit 1", async () => {
     nodesByRig["rig-1"] = [nodeAt("alpha", 90)];
     const { errLogs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--filter", "contextUsage.percent>=banana"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--filter", "contextUsage.percent>=banana"]);
     });
     expect(exitCode).toBe(1);
     const out = errLogs.join("\n");
@@ -199,7 +199,7 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
   it("--filter contextUsage.state=bogus fails fast with three-part error and exit 1", async () => {
     nodesByRig["rig-1"] = [nodeAt("alpha", 90)];
     const { errLogs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--filter", "contextUsage.state=lol-no"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--filter", "contextUsage.state=lol-no"]);
     });
     expect(exitCode).toBe(1);
     const out = errLogs.join("\n");
@@ -211,7 +211,7 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
   it("--filter contextUsage.percent>=N rejects equality-only on non-numeric keys cleanly", async () => {
     nodesByRig["rig-1"] = [nodeAt("alpha", 90)];
     const { errLogs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--filter", "name>=demo"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--filter", "name>=demo"]);
     });
     expect(exitCode).toBe(1);
     expect(errLogs.join("\n")).toContain("numeric comparator on a non-numeric key");
@@ -220,7 +220,7 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
   it("--fields contextUsage projects only the contextUsage column", async () => {
     nodesByRig["rig-1"] = [nodeAt("alpha", 73)];
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--json", "--fields", "logicalId,contextUsage"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--json", "--fields", "logicalId,contextUsage"]);
     });
     expect(exitCode).toBeUndefined();
     const env = JSON.parse(logs.join(""));
@@ -231,7 +231,7 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
   it("CTX column appears in --full human output", async () => {
     nodesByRig["rig-1"] = [nodeAt("alpha", 73), nodeAt("delta", null)];
     const { logs, exitCode } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "--full"]);
+      await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", "--full"]);
     });
     expect(exitCode).toBeUndefined();
     const out = logs.join("\n");
