@@ -106,32 +106,68 @@ docker exec H_A bash -lc "rig host add --id '${ID_B}' --transport http --url htt
 docker exec H_B bash -lc "rig host add --id '${ID_A}' --transport http --url http://H_A:7433 --bearer-env OPENRIG_AUTH_BEARER_TOKEN && rig host ls --json"
 ```
 
-## LEG A — CROSS-HOST STAMPED-TRIPLE ROUND-TRIP (deferred from 4a/2a)
+## LEG A — CROSS-HOST STAMPED TRIPLE: TWO SURFACES, TWO VERBS
 
-**Claim:** a cross-host send stores a sender identity that names the ORIGIN host, and
-the `↩ Reply:` hint round-trips verbatim back to the origin.
+**WHY THIS LEG IS SPLIT (grounded in the delivery-lock's own words).** The locked
+proof contract, item 3, reads: *"ALWAYS: send, broadcast, and queue sender surfaces
+all render the sender triple member@rig@host unconditionally — local sends included —
+with the host token in one fixed deterministic position."* It names **three** surfaces,
+so the property is NOT "one identity somewhere" — it is the same triple appearing on
+each surface independently. The earlier single-leg form drove `rig send` (transport)
+and then asserted a stored `source_session` on a forwarded qitem (queue) — two different
+stores reached by two different verbs. `rig send` creates NO queue row, so that
+assertion could only ever read zero rows. **Action must match assertion: never infer a
+queue record from a rendered terminal envelope.** Each surface below is proven by the
+verb that actually writes it.
 
-**Fixture:** origin host `H_A` (self-id `A`), destination host `H_B` (self-id `B`),
-seat `orch-main@rig-a` on `H_A`, seat `dev-main@rig-b` on `H_B`; `H_B` registered in `H_A`'s
-`hosts.yaml` under id `B`.
+**Fixture:** origin `H_A` (`${ID_A}`), destination `H_B` (`${ID_B}`), seats
+`orch-main@rig-a` on `H_A` and `dev-main@rig-b` on `H_B`; both hosts registered in both
+directions (see REGISTRATION above — the reply half needs the reverse row).
 
-**Steps (on H_A):**
-1. Self-ids come from the ADOPT-BY-READ capture above (`${ID_A}`/`${ID_B}` off each
-   daemon's own `/healthz`) — NOT `rig whoami`, which answers for a seat, not a host.
-   EXPECT: both non-'local', registry-valid (incr 1/2b), stable across a daemon
-   restart in the same container (incr 1).
+### LEG A1 — TRANSPORT SURFACE (`rig send`): the rendered envelope + verbatim reply
+
+1. Self-ids come from the ADOPT-BY-READ capture above (`${ID_A}`/`${ID_B}`), NOT
+   `rig whoami` (it answers for a seat; a host has none).
 2. From `orch-main@rig-a` on `H_A`: `rig send dev-main@rig-b "ping" --host B`.
-3. On `H_B`, capture `dev-main@rig-b`'s pane. EXPECT the received signature:
-   `From: orch-main@rig-a@${ID_A}` (the ORIGIN host `A`, never `@B`). The forwarded qitem's
-   stored `source_session` == `orch-main@rig-a@${ID_A}` (stamp-at-forward, incr 4a).
-4. Copy the `↩ Reply: rig send orch-main@rig-a@${ID_A} "..."` hint VERBATIM and run it on `H_B`.
-   EXPECT it routes to `H_A` (the origin), delivering to `orch-main@rig-a` — NOT a local
-   `H_B` lookalike. (`@A` is a cross-host target; if a same-named `rig-a` exists on
-   `H_B`, the triple still routes to `A`.)
+3. On `H_B`, capture `dev-main@rig-b`'s pane. EXPECT `From: orch-main@rig-a@${ID_A}` —
+   the ORIGIN host, never `@${ID_B}`.
+4. Copy the `↩ Reply: rig send orch-main@rig-a@${ID_A} "..."` hint VERBATIM and run it on
+   `H_B`. EXPECT it routes to `H_A` and delivers to `orch-main@rig-a`, not a local
+   lookalike.
 
-**Pass:** signature names `A`; stored source_session == `orch-main@rig-a@${ID_A}`; the verbatim
-reply lands on `H_A`. **Fail-open control:** stop `H_A`'s daemon, repeat step 2 → the
-From: degrades to today's 2-part, no crash (C1, incr 3).
+**A1 PASS:** the rendered signature names `${ID_A}`; the verbatim reply lands on `H_A`.
+**A1 asserts NOTHING about the queue** — no qitem is created by `rig send`, and claiming
+one would be inferring a store from a render.
+**Fail-open control:** stop `H_A`'s daemon, repeat step 2 → `From:` degrades to the 2-part
+form, no crash (C1, incr 3).
+
+### LEG A2 — QUEUE SURFACE (`rig queue create --host`): the DURABLE stored provenance
+
+The lock names the queue sender surface separately, and only a queue verb writes a queue
+row. Drive the real cross-host queue write and assert on the row itself:
+
+```bash
+# from H_A, create a qitem ON H_B with a unique body (the discriminator)
+export BODY="lega2-$(date +%s)"   # exported: the python assertion below reads it from the environment
+docker exec H_A bash -lc "rig queue create --source orch-main@rig-a --destination dev-main@rig-b --host '${ID_B}' --summary 'leg-a2 provenance' --body '${BODY}'"
+# assert on H_B's DURABLE row — the stored identity, not a rendered line
+docker exec H_B bash -lc "rig queue list -A --json" | python3 -c "
+import json,sys,os
+rows=[q for q in json.load(sys.stdin) if os.environ['BODY'] in (q.get('body') or '')]
+assert len(rows)==1, f'expected exactly 1 row for the discriminator, got {len(rows)}'
+r=rows[0]; print('sourceSession:', r.get('sourceSession'), '| tags:', r.get('tags'))
+"
+```
+
+**A2 PASS:** exactly one row matches the unique body; its stored `sourceSession` is the
+host-qualified triple naming the ORIGIN (`orch-main@rig-a@${ID_A}`, stamp-at-forward,
+incr 4a); the shipped `from-host:` tag is present and unchanged (lock item 6).
+**A2 asserts NOTHING about the pane** — the envelope is A1's surface.
+
+*Coverage note for the gate: the lock's item 3 names a THIRD surface, `broadcast`. This
+leg proves send + queue LIVE; whether broadcast's live capture is required here or is
+covered by item 3's "tests" half is a gate call, not a runbook choice — flagged rather
+than silently omitted.*
 
 ---
 
