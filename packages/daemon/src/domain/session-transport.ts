@@ -1265,6 +1265,13 @@ export class SessionTransport {
     const recipientNames = resolved.sessions.map((s) => s.sessionName);
     const scope = scopeForTarget(target, recipientNames);
     const stampISO = opts?.stampISO ?? new Date().toISOString();
+    // GHOST-STAGE (g): resolve the SENDER's occupant generation ONCE per fan-out (same sender for
+    // every recipient), at the same seam as stampISO. Local sender ⇒ its atom-B generation-uuid;
+    // a cross-host --from relay (sender not a local session) resolves to null ⇒ UNKNOWN ⇒ the
+    // render omits the gen suffix (never forges this host's generation onto a foreign sender).
+    const genUuid = opts?.envelopeSender
+      ? (this.sessionRegistry.currentOccupantGenerationForSession(opts.envelopeSender) ?? undefined)
+      : undefined;
 
     const results: SendResult[] = [];
     for (const session of resolved.sessions) {
@@ -1274,7 +1281,7 @@ export class SessionTransport {
       // Sent stamp, so a recipient tells DM from broadcast header-alone (anti-storm). Raw paths
       // (--raw / --dangerously-interact, absent envelopeSender) still deliver unwrapped.
       const perRecipientText = opts?.envelopeSender
-        ? wrapPaneEnvelope(opts.envelopeSender, session.sessionName, text, getSelfHostId(), { scope, stampISO })
+        ? wrapPaneEnvelope(opts.envelopeSender, session.sessionName, text, getSelfHostId(), { scope, stampISO, genUuid })
         : text;
       const result = await this.send(session.sessionName, perRecipientText, opts);
       results.push(result);

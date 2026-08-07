@@ -104,4 +104,55 @@ describe("wrapPaneEnvelope — slice 23 envelope renderer (daemon-side)", () => 
     const topo = to(wrapPaneEnvelope("a@r", "*", "x", null, { scope: { kind: "topology" } }));
     expect(new Set([dm, multi, rig, topo]).size).toBe(4); // all four visually distinct, zero context
   });
+
+  // ── GHOST-STAGE (g): sender-generation suffix on the Sent: line ──
+  // These assertions are MIRRORED byte-for-byte in packages/cli/test/send-header.test.ts against
+  // wrapSendBody — the cross-package byte-identity contract. Update both twins in lockstep.
+  const GEN = "a1b2c3d4-e5f6-7890-abcd-ef0123456789";
+
+  it("(g) stamps the sender's short generation (first8) as a Sent:-line suffix", () => {
+    const out = wrapPaneEnvelope("a@r", "b@r", "hi", null, { stampISO: "2026-08-06T17:42:09Z", genUuid: GEN });
+    expect(out).toContain("Sent: 08-06 17:42Z · gen a1b2c3d4");
+  });
+
+  it("(g) byte-exact full envelope with gen (cross-package parity anchor)", () => {
+    const out = wrapPaneEnvelope("a@r", "b@r", "hi", null, { stampISO: "2026-08-06T17:42:09Z", genUuid: GEN });
+    expect(out).toBe('From: a@r\nTo: b@r\nSent: 08-06 17:42Z · gen a1b2c3d4\n---\nhi\n---\n↩ Reply: rig send a@r "..."');
+  });
+
+  it("(g) pin-a: OMITS the suffix entirely when the generation is UNKNOWN (never 'gen unknown', never forged)", () => {
+    const absent = wrapPaneEnvelope("a@r", "b@r", "hi", null, { stampISO: "2026-08-06T17:42:09Z" });
+    const empty = wrapPaneEnvelope("a@r", "b@r", "hi", null, { stampISO: "2026-08-06T17:42:09Z", genUuid: "" });
+    for (const out of [absent, empty]) {
+      expect(out.split("\n").find((l) => l.startsWith("Sent:"))).toBe("Sent: 08-06 17:42Z");
+      expect(out).not.toContain(" · gen ");
+    }
+  });
+
+  it("(g) pin-a: no Sent line ⇒ no gen suffix (the gen rides the Sent stamp, absent without it)", () => {
+    const out = wrapPaneEnvelope("a@r", "b@r", "hi", null, { genUuid: GEN });
+    expect(out).not.toContain("Sent:");
+    expect(out).not.toContain(" · gen ");
+  });
+
+  it("(g) pin-b: a body containing ' · gen …' cannot forge the Sent: line's generation (containment)", () => {
+    const body = "totally · gen ffffffff not the real gen";
+    const out = wrapPaneEnvelope("a@r", "b@r", body, null, { stampISO: "2026-08-06T17:42:09Z", genUuid: GEN });
+    // The Sent: line lives in the header block (before the first "\n---\n"); the body is after it.
+    const [headerBlock, ...bodyRegion] = out.split("\n---\n");
+    expect(headerBlock.split("\n").find((l) => l.startsWith("Sent:"))).toBe("Sent: 08-06 17:42Z · gen a1b2c3d4");
+    expect(headerBlock).not.toContain("ffffffff"); // the forged token never reaches the header
+    expect(bodyRegion.join("\n---\n")).toContain("· gen ffffffff"); // it stays verbatim in the body
+  });
+
+  // (g) INTERIM PIN (orch scope ruling): g renders the gen ONLY where a Sent: line already exists
+  // (the rig-send seam). The queue-handoff nudge (queue-repository:537) passes NO meta today, so it
+  // carries no Sent:/gen line — absent=omit, honestly. FOLLOW-ON (h): the delivered-at stamp adds a
+  // Sent: line to the nudge, at which point the gen rides this same render for free (one HG-5
+  // baseline change, in h, not two). This pin documents the interim gap and its closer.
+  it("(g) interim: the meta-less handoff nudge carries no Sent:/gen line (h will stamp it)", () => {
+    const nudge = wrapPaneEnvelope("orch-lead@v", "driver-3@v", "Queue handoff: qitem-9 - check your queue.", null);
+    expect(nudge).not.toContain("Sent:");
+    expect(nudge).not.toContain(" · gen ");
+  });
 });

@@ -42,6 +42,9 @@ export interface EnvelopeMeta {
   /** ISO-8601, stamped ONCE at transport send-time; render READS it, never re-derives. */
   stampISO?: string;
   scope?: EnvelopeScope;
+  /** GHOST-STAGE (g): the SENDER's atom-B occupant generation-uuid, stamped ONCE at transport.
+   *  ABSENT ⇒ UNKNOWN → the render OMITS the suffix (never forges). Twin of pane-envelope's field. */
+  genUuid?: string;
 }
 
 /** The To-line projection + anti-storm scale (header-alone distinguishability). */
@@ -78,7 +81,15 @@ export function wrapSendBody(
       ? `${senderLabel}@${selfHostId}`
       : senderLabel;
   const header = [`From: ${senderTriple}`, renderToLine(recipient, meta?.scope)];
-  if (meta?.stampISO) header.push(`Sent: ${renderShortStamp(meta.stampISO)}`);
+  if (meta?.stampISO) {
+    // GHOST-STAGE (g): the sender's occupant generation rides the Sent: line as a short suffix
+    // (first8 of the uuid — discriminates at per-node scale; the ledger keeps the full uuid for
+    // exact joins). ABSENT gen ⇒ OMIT the suffix entirely — never "gen unknown", never a forged
+    // value. The suffix is positionally bound to the Sent: header line (a body line, always after
+    // the first "---", can contain " · gen …" but cannot inject a Sent: line — containment).
+    const genSuffix = meta.genUuid && meta.genUuid.length > 0 ? ` · gen ${meta.genUuid.slice(0, 8)}` : "";
+    header.push(`Sent: ${renderShortStamp(meta.stampISO)}${genSuffix}`);
+  }
   return [...header, "---", body, "---", `↩ Reply: rig send ${senderTriple} "..."`].join("\n");
 }
 

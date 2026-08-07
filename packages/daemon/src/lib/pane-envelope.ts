@@ -37,6 +37,12 @@ export interface EnvelopeMeta {
    *  (the 51-02 wall-clock-in-projection forbids computing it at read). */
   stampISO?: string;
   scope?: EnvelopeScope;
+  /** GHOST-STAGE (g): the SENDER's atom-B occupant generation-uuid, resolved ONCE at the transport
+   *  layer at send-time (same seam as stampISO). Lets a recipient attribute a delayed lifecycle
+   *  message to the composing generation rather than inheriting it as the current occupant's.
+   *  ABSENT ⇒ UNKNOWN (cross-host --from relay whose sender isn't local, or pre-tenure daemon) —
+   *  the render omits it, never forges a generation. Render is a PROJECTION of this machine truth. */
+  genUuid?: string;
 }
 
 /** The To-line projection + anti-storm scale (header-alone distinguishability, ruling pin 2). */
@@ -80,6 +86,14 @@ export function wrapPaneEnvelope(
       ? `${senderLabel}@${selfHostId}`
       : senderLabel;
   const header = [`From: ${senderTriple}`, renderToLine(recipient, meta?.scope)];
-  if (meta?.stampISO) header.push(`Sent: ${renderShortStamp(meta.stampISO)}`);
+  if (meta?.stampISO) {
+    // GHOST-STAGE (g): the sender's occupant generation rides the Sent: line as a short suffix
+    // (first8 of the uuid — discriminates at per-node scale; the ledger keeps the full uuid for
+    // exact joins). ABSENT gen ⇒ OMIT the suffix entirely — never "gen unknown", never a forged
+    // value. The suffix is positionally bound to the Sent: header line (a body line, always after
+    // the first "---", can contain " · gen …" but cannot inject a Sent: line — containment).
+    const genSuffix = meta.genUuid && meta.genUuid.length > 0 ? ` · gen ${meta.genUuid.slice(0, 8)}` : "";
+    header.push(`Sent: ${renderShortStamp(meta.stampISO)}${genSuffix}`);
+  }
   return [...header, "---", body, "---", `↩ Reply: rig send ${senderTriple} "..."`].join("\n");
 }
