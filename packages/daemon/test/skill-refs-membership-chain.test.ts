@@ -24,7 +24,6 @@ const REPO_ROOT = join(__dirname, "..", "..", "..");
 const AGENT_YAML = join(__dirname, "..", "specs", "agents", "shared", "agent.yaml");
 const MEMBERSHIP = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "product-public-skills.generated.json"), "utf8"));
 const LAYOUT = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "skill-edge-layout.generated.json"), "utf8"));
-const DIGESTS = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "skill-edge-digests.generated.json"), "utf8"));
 
 // Skills the oracle ships that live ONLY in the external, founder-gated skill canon: authored there,
 // already tracked in the generated edge digests, but not yet mirrored into this repo (their source
@@ -123,20 +122,24 @@ describe("P6(A) skill refs→membership→ship-categories→disk chain (0.4.8 st
   });
 
   // The external-canon-pending allowlist must stay MINIMAL: each entry MUST be (a) in the ship set,
-  // (b) digest-tracked (the founder mirror knows it), and (c) genuinely absent from repo disk. An
-  // entry that is on disk, off the ship set, or untracked is stale — and fails here — so a real
-  // stranding can never be silently parked in the allowlist.
+  // (b) LAYOUT-tracked — the founder layout still demands it, so the control-plane staleness check stays
+  // LOUD about its absence (layout-missing) and only the named allowlist tolerates it — and (c) genuinely
+  // absent from repo disk. An entry off the ship set, off the layout, or actually on disk is stale and
+  // fails here, so a real stranding can never be silently parked in the allowlist.
+  // NOTE: the property is LAYOUT-tracked, not digest-tracked — the disk-truth digest regen correctly
+  // omits a digest for a file that isn't on disk (a hash of a ghost is meaningless); "loud" comes from
+  // the layout demanding it (layout = authority, disk = reality).
   it("external-canon-pending allowlist is minimal + self-policing (no real stranding hides here)", () => {
     const shipSet = new Set(shipSetFromMembership(MEMBERSHIP));
-    const digestTracked = new Set(
-      Object.values(DIGESTS.edges as Record<string, Record<string, string>>).flatMap((files) =>
-        Object.keys(files).map((p) => p.split("/").filter((s) => s !== "SKILL.md").pop()),
-      ),
+    const layoutTracked = new Set(
+      Object.entries((LAYOUT.skills ?? {}) as Record<string, { edges?: string[] }>)
+        .filter(([, entry]) => (entry.edges?.length ?? 0) > 0)
+        .map(([skill]) => skill),
     );
     const stillMissing = new Set(shipSetNotOnDisk(MEMBERSHIP, LAYOUT, REPO_ROOT).map((v) => v.split("@")[0]));
     for (const skill of EXTERNAL_CANON_PENDING) {
       expect(shipSet.has(skill), `${skill} must be in the oracle ship set`).toBe(true);
-      expect(digestTracked.has(skill), `${skill} must be digest-tracked (loud, not silent)`).toBe(true);
+      expect(layoutTracked.has(skill), `${skill} must be layout-tracked (loud via layout-missing, not silent)`).toBe(true);
       expect(stillMissing.has(skill), `${skill} must be genuinely absent from repo disk`).toBe(true);
     }
   });
