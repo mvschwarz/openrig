@@ -67,14 +67,12 @@ test("P2 exclusivity (no SO_REUSEPORT): a second CONCURRENT bind on the same por
   }
 });
 
-test("P3: GATE_LANE_PORT is the ONE named lock (numeric, valid range, env-overridable default)", async () => {
+test("P3: GATE_LANE_PORT is the ONE named lock (numeric, valid range, env-overridable)", () => {
   assert.equal(typeof GATE_LANE_PORT, "number");
   assert.ok(GATE_LANE_PORT > 0 && GATE_LANE_PORT < 65536);
-  // acquire uses the constant when no port is passed (one home).
-  const p = info();
-  const a = await acquireGateLane({ holderInfoPath: p });
-  assert.equal(a.ok, true);
-  await a.release();
+  // NOTE: this test must NOT acquire the DEFAULT port — GATE_LANE_PORT is the real machine lock, so a
+  // running gate (which runs this very suite via test:repo) HOLDS it; acquiring it here would EADDRINUSE
+  // against the parent gate. acquire-uses-the-passed-port is covered by the explicit-port tests above.
 });
 
 test("P4 best-effort: a failed holder-info write does NOT lose the already-held lane (bind is the lock)", async () => {
