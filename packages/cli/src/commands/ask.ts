@@ -13,6 +13,14 @@ interface AskRigInfo {
   uptime: string | null;
 }
 
+interface AskSeatEvidence {
+  name: string;
+  generations: number;
+  hits: Array<{ generation: number; text: string }>;
+  degraded?: { reason: string; message: string };
+  advisory?: string;
+}
+
 interface AskResult {
   question: string;
   rig: AskRigInfo | null;
@@ -21,6 +29,7 @@ interface AskResult {
     excerpts: string[];
     chatExcerpts?: string[];
   };
+  seat?: AskSeatEvidence;
   insufficient: boolean;
   guidance?: string;
 }
@@ -35,10 +44,17 @@ export function askCommand(depsOverride?: StatusDeps): Command {
     .argument("<rig>", "Rig name to search")
     .argument("<question>", "Question to search for in transcripts")
     .option("--json", "JSON output for agents")
+    .option("--seat <session>", "Scope the search to ONE seat's transcript across every generation that sat in it (cross-generation archaeology)")
     .addHelpText("after", `
+rig ask is one verb for information about the PAST, three ways to reach it:
+  1. rig ask <rig> "<q>"                 search the whole rig's transcripts
+  2. rig ask <rig> "<q>" --seat <seat>   scope to ONE seat, across every
+                                         generation that sat in it (L1)
+
 Examples:
   rig ask my-rig "what decisions were made about deployment?"
   rig ask my-rig "error handling strategy" --json
+  rig ask my-rig "what did we decide" --seat dev-planner@my-rig
 
 Exit codes:
   0  Success
@@ -50,7 +66,7 @@ Exit codes:
     clientFactory: (url: string) => new DaemonClient(url),
   };
 
-  cmd.action(async (rig: string, question: string, opts: { json?: boolean }) => {
+  cmd.action(async (rig: string, question: string, opts: { json?: boolean; seat?: string }) => {
     const deps = getDeps();
 
     const status = await getDaemonStatus(deps.lifecycleDeps);
@@ -63,6 +79,7 @@ Exit codes:
       question,
       nodeId: identity?.nodeId,
       sessionName: identity?.sessionName,
+      seat: opts.seat,
     });
 
     if (res.status >= 400) {
@@ -86,6 +103,13 @@ Exit codes:
       console.log(`Rig: ${result.rig.name}  [${result.rig.status}]  ${result.rig.runningCount}/${result.rig.nodeCount} nodes  uptime: ${result.rig.uptime ?? "—"}`);
     } else {
       console.log(`Rig: ${rig}  [not found]`);
+    }
+
+    if (result.seat) {
+      console.log(`Seat: ${result.seat.name}  (${result.seat.generations} generation(s) searched)`);
+      if (result.seat.advisory) {
+        console.log(`  ⚠ ${result.seat.advisory}`);
+      }
     }
 
     console.log(`Search: ${result.evidence.backend}`);

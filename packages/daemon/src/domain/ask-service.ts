@@ -1,6 +1,6 @@
 import type { PsEntry } from "./ps-projection.js";
 import type { Rig } from "./types.js";
-import type { SearchResult, ChatSearchResult } from "./history-query.js";
+import type { SearchResult, ChatSearchResult, SeatSearchResult, SeatHit } from "./history-query.js";
 import type { RigWithRelations } from "./types.js";
 import type { WhoamiResult } from "./whoami-service.js";
 
@@ -12,6 +12,7 @@ export interface AskDeps {
   historyQuery: {
     search(rigName: string, question: string): Promise<SearchResult>;
     searchChat(rigId: string, question: string): ChatSearchResult[];
+    searchSeat(rigName: string, seatSessionName: string, question: string): Promise<SeatSearchResult>;
   };
   transcriptsEnabled: boolean;
   whoamiService?: { resolve(query: { nodeId?: string; sessionName?: string }): WhoamiResult | null };
@@ -25,6 +26,14 @@ export interface AskRigInfo {
   uptime: string | null;
 }
 
+export interface AskSeatEvidence {
+  name: string;
+  generations: number;
+  hits: SeatHit[];
+  degraded?: { reason: string; message: string };
+  advisory?: string;
+}
+
 export interface AskResult {
   question: string;
   rig: AskRigInfo | null;
@@ -33,6 +42,8 @@ export interface AskResult {
     excerpts: string[];
     chatExcerpts?: string[];
   };
+  /** L1 seat-scoped evidence — present only when a seat was addressed. */
+  seat?: AskSeatEvidence;
   insufficient: boolean;
   guidance?: string;
 }
@@ -50,7 +61,7 @@ export class AskService {
     this.deps = deps;
   }
 
-  async ask(rigName: string, question: string, context?: { nodeId?: string; sessionName?: string }): Promise<AskResult> {
+  async ask(rigName: string, question: string, context?: { nodeId?: string; sessionName?: string; seat?: string }): Promise<AskResult> {
     // Resolve rig
     const rigs = this.deps.rigRepo.findRigsByName(rigName);
 
@@ -80,6 +91,46 @@ export class AskService {
     const rigInfo: AskRigInfo = psEntry
       ? { name: psEntry.name, status: psEntry.status, nodeCount: psEntry.nodeCount, runningCount: psEntry.runningCount, uptime: psEntry.uptime }
       : { name: rigName, status: "unknown", nodeCount: 0, runningCount: 0, uptime: null };
+
+    // L1 — seat-scoped archaeology: an explicit seat address searches ONE seat's
+    // transcript across every generation (never the whole-rig grep, never the
+    // structured peer path). Honest-degraded surfaces as guidance.
+    if (context?.seat) {
+      if (!this.deps.transcriptsEnabled) {
+        return {
+          question,
+          rig: rigInfo,
+          evidence: { backend: "read", excerpts: [] },
+          insufficient: true,
+          guidance: "Transcripts are disabled. Enable with: rig config set transcripts.enabled true",
+        };
+      }
+      const seatResult = await this.deps.historyQuery.searchSeat(rigName, context.seat, question);
+      const excerpts = seatResult.hits.map((h) => `[gen ${h.generation}] ${h.text}`);
+      let guidance: string | undefined;
+      if (seatResult.degraded) {
+        guidance = seatResult.degraded.message;
+      } else if (seatResult.insufficient) {
+        guidance = `No matching evidence in seat '${context.seat}' across ${seatResult.generations} generation(s). Try different search terms.`;
+      }
+      if (seatResult.advisory) {
+        guidance = guidance ? `${seatResult.advisory}\n${guidance}` : seatResult.advisory;
+      }
+      return {
+        question,
+        rig: rigInfo,
+        evidence: { backend: seatResult.backend, excerpts },
+        seat: {
+          name: seatResult.seat,
+          generations: seatResult.generations,
+          hits: seatResult.hits,
+          degraded: seatResult.degraded,
+          advisory: seatResult.advisory,
+        },
+        insufficient: seatResult.insufficient,
+        guidance,
+      };
+    }
 
     const structured = this.answerStructuredQuestion(rigs[0]!.id, rigName, question, context);
     if (structured) {
