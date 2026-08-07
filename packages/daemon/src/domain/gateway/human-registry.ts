@@ -34,7 +34,11 @@ export const ADDRESS_DOMAIN = "external";
 
 // Closed key sets — a typo'd field must fail LOUD, never silently degrade behavior.
 const ALLOWED_FRAGMENT_KEYS = new Set(["entityId", "class", "displayName", "address", "connectorBindings", "prefs"]);
-const ALLOWED_BINDING_KEYS = new Set(["kind", "connectorRef", "secretsRef", "role"]);
+const ALLOWED_BINDING_KEYS = new Set(["kind", "connectorRef", "secretsRef", "role", "handle"]);
+// A connector handle (M1 A6 v3 schema 9e468b2f): the platform-native id of the human ON that
+// connector (e.g. a Slack user id). Constrained so it can never forge a session ref (no ':' / '@'
+// / whitespace) — it is compared to an inbound sender id and spliced into teaching text.
+export const HANDLE_PATTERN = /^[A-Za-z0-9._-]+$/;
 const ALLOWED_PREFS_KEYS = new Set(["deliveryClass", "away"]);
 function unknownKey(obj: Record<string, unknown>, allowed: Set<string>): string | undefined {
   for (const k of Object.keys(obj)) if (!allowed.has(k)) return k;
@@ -48,6 +52,12 @@ export interface HumanConnectorBinding {
   secretsRef: string;
   /** Per-BINDING routing: EXACTLY ONE primary per entity = the default channel. */
   role: "primary" | "secondary";
+  /** A6 v3: the platform-native id of this human on the connector (e.g. Slack user id).
+   *  OPTIONAL — a handle-less binding is OUTBOUND-ONLY (delivery works; it is NOT
+   *  inbound-resolvable, so an inbound event on it fails admission LOUDLY). REQUIRED to be
+   *  inbound-resolvable. UNIQUE per kind across ALL bindings of ALL humans (one platform id =
+   *  exactly one human; a duplicate is a registration conflict, REFUSED). */
+  handle?: string;
 }
 
 export interface HumanPrefs {
@@ -126,11 +136,32 @@ export function validateHumanFragment(raw: unknown): ValidateResult {
       return { ok: false, error: `connectorBindings[${i}].role "${String(b.role)}" must be primary|secondary` };
     }
     if (b.role === "primary") primaryCount++;
-    bindings.push({ kind: "slack", connectorRef: b.connectorRef, secretsRef: b.secretsRef, role: b.role as "primary" | "secondary" });
+    // A6 v3: handle is OPTIONAL; when present it must be a clean platform id (ref-forgery-safe).
+    let handle: string | undefined;
+    if (b.handle !== undefined) {
+      if (typeof b.handle !== "string" || !HANDLE_PATTERN.test(b.handle)) {
+        return { ok: false, error: `connectorBindings[${i}].handle "${String(b.handle)}" must match ${HANDLE_PATTERN} (a platform id — no ':' '@' or whitespace, which could forge a ref)` };
+      }
+    }
+    const binding: HumanConnectorBinding = { kind: "slack", connectorRef: b.connectorRef, secretsRef: b.secretsRef, role: b.role as "primary" | "secondary" };
+    if (b.handle !== undefined) { handle = b.handle as string; binding.handle = handle; }
+    bindings.push(binding);
   }
   // EXACTLY ONE primary binding per entity = the default delivery channel.
   if (primaryCount !== 1) {
     return { ok: false, error: `exactly one connectorBinding must have role "primary" (found ${primaryCount}) — it is the default delivery channel` };
+  }
+  // A6 v3 pin-1 (within-fragment): a handle is UNIQUE per kind across this human's bindings —
+  // one human must not claim the same platform id twice. (Cross-fragment uniqueness is enforced
+  // in projectHumans, which sees every human at once.)
+  const seenHandles = new Set<string>();
+  for (const b of bindings) {
+    if (b.handle === undefined) continue;
+    const key = `${b.kind}:${b.handle}`;
+    if (seenHandles.has(key)) {
+      return { ok: false, error: `duplicate ${b.kind} handle "${b.handle}" across this human's bindings — a handle is unique per kind (one platform id = one human)` };
+    }
+    seenHandles.add(key);
   }
 
   if (!isObj(prefs)) return { ok: false, error: "prefs must be a mapping { deliveryClass, away? }" };
@@ -203,7 +234,56 @@ export function projectHumans(home: string = getOpenRigHome()): ProjectResult {
     }
   }
   entities.sort((a, b) => (a.entityId < b.entityId ? -1 : a.entityId > b.entityId ? 1 : 0));
+  // A6 v3 pin-1 (cross-fragment): a handle is UNIQUE per kind across ALL humans — one platform
+  // id maps to exactly one human, so the inbound resolver is unambiguous. A collision between two
+  // fragments is a registration conflict, REFUSED at projection (so add/load/drift all catch it).
+  const handleOwner = new Map<string, string>();
+  for (const e of entities) {
+    for (const b of e.connectorBindings) {
+      if (b.handle === undefined) continue;
+      const key = `${b.kind}:${b.handle}`;
+      const prior = handleOwner.get(key);
+      if (prior !== undefined && prior !== e.entityId) {
+        return { ok: false, error: `${b.kind} handle "${b.handle}" is claimed by both "${prior}" and "${e.entityId}" — a handle maps to exactly one human (registration conflict)` };
+      }
+      handleOwner.set(key, e.entityId);
+    }
+  }
   return { ok: true, body: PROJECTION_HEADER + stringifyYaml({ entities }), entities };
+}
+
+export type SlackHandleResolution =
+  | { kind: "registered"; entityId: string; address: string }
+  | { kind: "unregistered"; handle: string; error: string };
+
+/** A6 v3 pins 2+3 — resolve an INBOUND connector handle to its registered human. Walks every
+ *  human's bindings of `connectorKind` for one whose `handle` equals `handle`:
+ *   - a match          -> registered (admit as that entity; its address is the human-class source)
+ *   - no match         -> unregistered LOUD teaching (admit-iff-registered — never fabricate a
+ *                         human seat from a raw platform id; a handle-LESS binding is outbound-only
+ *                         and simply never matches, so it fails inbound here, loudly).
+ *  Cross-fragment uniqueness (projectHumans) guarantees at most one match. */
+export function resolveSlackHandle(
+  handle: string,
+  entities: readonly HumanFragment[],
+  connectorKind: "slack" = "slack",
+): SlackHandleResolution {
+  for (const e of entities) {
+    for (const b of e.connectorBindings) {
+      if (b.kind === connectorKind && b.handle !== undefined && b.handle === handle) {
+        return { kind: "registered", entityId: e.entityId, address: e.address };
+      }
+    }
+  }
+  return {
+    kind: "unregistered",
+    handle,
+    error:
+      `inbound ${connectorKind} sender "${handle}" is not a registered human (no binding with handle "${handle}"). ` +
+      `Register the human + their handle first: rig gateway human add <entityId> --display-name … ` +
+      `--binding ${connectorKind}:<connectorRef>:<secretsRef>:primary:handle=${handle} --delivery-class …; ` +
+      `until then this message is REFUSED (it was NOT landed as a fabricated human seat).`,
+  };
 }
 
 function atomicWrite(path: string, body: string): { ok: true } | { ok: false; error: string } {
@@ -246,6 +326,22 @@ export function addHumanFragment(
   const file = join(humansDir(home), `${v.fragment.entityId}.yaml`);
   if (!opts.replace && existsSync(file)) {
     return { ok: false, error: `human "${v.fragment.entityId}" already exists at ${file} — pass an explicit replace to update it (no silent overwrite)` };
+  }
+  // A6 v3 pin-1: reject a handle already claimed by a DIFFERENT human BEFORE writing (never leave a
+  // conflicting fragment on disk with a failed re-projection). projectHumans is the load-time backstop.
+  const existing = projectHumans(home);
+  if (!existing.ok) return { ok: false, error: `cannot validate handle uniqueness — existing registry is invalid: ${existing.error}` };
+  const claimed = new Map<string, string>();
+  for (const e of existing.entities) {
+    if (e.entityId === v.fragment.entityId) continue; // a replace of the same human is fine
+    for (const b of e.connectorBindings) if (b.handle !== undefined) claimed.set(`${b.kind}:${b.handle}`, e.entityId);
+  }
+  for (const b of v.fragment.connectorBindings) {
+    if (b.handle === undefined) continue;
+    const owner = claimed.get(`${b.kind}:${b.handle}`);
+    if (owner !== undefined) {
+      return { ok: false, error: `${b.kind} handle "${b.handle}" is already registered to human "${owner}" — a handle maps to exactly one human (registration conflict)` };
+    }
   }
   const w = atomicWrite(file, stringifyYaml(v.fragment));
   if (!w.ok) return { ok: false, error: w.error };
