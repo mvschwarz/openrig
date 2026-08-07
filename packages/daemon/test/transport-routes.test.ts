@@ -452,7 +452,12 @@ describe("transport routes", () => {
   });
 
   // OPR.0.4.3.30 — `rig send` fan-out via /broadcast: explicit list target + per-recipient envelope.
-  it("POST /broadcast with a sessions list wraps EACH recipient in its own From/To envelope (B1)", async () => {
+  // CONTRACT CHANGE (ruling 03c35295, review-visible): a `sessions` multi-send now renders the FULL
+  // recipient list on EVERY recipient's To line — the anti-storm behavior (each recipient sees WHO
+  // ELSE got it, so it never re-forwards to peers who already have it). This SUPERSEDES the prior
+  // per-recipient-isolated To (B1); the wrap is still per-recipient (own From + reply hint), only the
+  // To projection changed from <that seat> to <full list>.
+  it("POST /broadcast with a sessions list renders the FULL recipient list on every To (anti-storm, B1)", async () => {
     seedRig(); // dev-impl@my-rig + dev-qa@my-rig
     const delivered: string[] = [];
     const tmux = mockTmux({ sendText: async (_target: string, text: string) => { delivered.push(text); return { ok: true as const }; } });
@@ -474,15 +479,12 @@ describe("transport routes", () => {
     expect(body.total).toBe(2);
     expect(body.sent).toBe(2);
     expect(delivered).toHaveLength(2);
-    const implText = delivered.find((t) => t.includes("To: dev-impl@my-rig"))!;
-    const qaText = delivered.find((t) => t.includes("To: dev-qa@my-rig"))!;
-    expect(implText).toBeDefined();
-    expect(qaText).toBeDefined();
-    // Each recipient's own To: — NOT one shared string.
-    expect(implText).toContain("From: orch@my-rig");
-    expect(implText).not.toContain("To: dev-qa@my-rig");
-    expect(qaText).not.toContain("To: dev-impl@my-rig");
-    expect(implText).toContain("---\nhello team\n---");
+    // Both recipients get the SAME full-list To (WHO got it) — the anti-storm teeth.
+    for (const text of delivered) {
+      expect(text).toContain("To: dev-impl@my-rig, dev-qa@my-rig");
+      expect(text).toContain("From: orch@my-rig"); // still per-recipient wrapped (own From + reply)
+      expect(text).toContain("---\nhello team\n---");
+    }
   });
 
   it("POST /broadcast WITHOUT envelopeSender delivers raw text to all (rig broadcast unchanged)", async () => {
