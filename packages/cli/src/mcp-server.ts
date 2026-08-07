@@ -366,9 +366,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
     {
       rigName: z.string().describe("Rig name to send message to"),
       body: z.string().describe("Message body"),
-      sender: z.string().optional().describe("Sender name (default: mcp)"),
+      sender: z.string().optional().describe("(deprecated, ignored) the sender is derived from the seat env (X-OpenRig-Session, stamped by the MCP server's DaemonClient); the chat route derives it from the transport header"),
     },
-    async ({ rigName, body, sender }) => {
+    async ({ rigName, body }) => {
       try {
         // Resolve rig name → ID
         const summaryRes = await client.get<Array<{ id: string; name: string }>>("/api/rigs/summary");
@@ -382,8 +382,9 @@ export function createMcpServer(client: DaemonClient): McpServer {
         }
 
         const rigId = matches[0]!.id;
+        // P21: no body sender — the daemon derives it from the transport header (X-OpenRig-Session,
+        // stamped by the MCP server's DaemonClient from its seat env). A hardcoded 'mcp' would 409.
         const res = await client.post(`/api/rigs/${encodeURIComponent(rigId)}/chat/send`, {
-          sender: sender ?? "mcp",
           body,
         });
         return mapResult(res);

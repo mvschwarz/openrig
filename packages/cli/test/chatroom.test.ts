@@ -143,11 +143,21 @@ describe("Chatroom CLI", () => {
     return prog;
   }
 
-  it("chatroom send sends message", async () => {
-    const { logs } = await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "chatroom", "send", "my-rig", "hello world"]);
-    });
-    expect(logs.join("\n")).toContain("[cli] hello world");
+  it("chatroom send derives the sender from the seat env — echoes the derived seat, NOT the retired 'cli' default", async () => {
+    // P21: --sender is deprecated + ignored; the daemon derives the sender from the X-OpenRig-Session
+    // header (stamped from the seat env). The local echo now reflects that derived seat, never 'cli'.
+    const saved = process.env["OPENRIG_SESSION_NAME"];
+    process.env["OPENRIG_SESSION_NAME"] = "alice@my-rig";
+    try {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "chatroom", "send", "my-rig", "hello world"]);
+      });
+      expect(logs.join("\n")).toContain("[alice@my-rig] hello world");
+      expect(logs.join("\n")).not.toContain("[cli]");
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_SESSION_NAME"];
+      else process.env["OPENRIG_SESSION_NAME"] = saved;
+    }
   });
 
   it("chatroom history prints chronological", async () => {

@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
+import { readOpenRigEnv } from "../openrig-compat.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -44,8 +45,8 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
     .command("send")
     .argument("<rig>", "Rig name")
     .argument("<message>", "Message to send")
-    .option("--sender <name>", "Sender name", "cli")
-    .action(async (rig: string, message: string, opts: { sender: string }) => {
+    .option("--sender <name>", "(deprecated, ignored) the sender is derived from the seat env (X-OpenRig-Session); P21 made the chat route derive it from the transport header")
+    .action(async (rig: string, message: string, _opts: { sender?: string }) => {
       const client = await getClient();
       if (!client) return;
 
@@ -58,9 +59,11 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
         return;
       }
 
+      // P21: no body sender — the daemon derives it from the transport header (X-OpenRig-Session,
+      // stamped by DaemonClient from the seat env). A hardcoded 'cli' would 409 against the header.
       const res = await client.post<Record<string, unknown>>(
         `/api/rigs/${encodeURIComponent(rigId)}/chat/send`,
-        { sender: opts.sender, body: message },
+        { body: message },
       );
 
       if (res.status >= 400) {
@@ -69,7 +72,9 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
         return;
       }
 
-      console.log(`[${opts.sender}] ${message}`);
+      // P21: echo the DERIVED seat identity (the env the daemon stamps as X-OpenRig-Session), not the
+      // deprecated --sender flag — so the local confirmation matches what the chat route actually records.
+      console.log(`[${readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME") ?? "you"}] ${message}`);
     });
 
   // chatroom history <rig> [--topic <name>] [--limit N] [--json]
@@ -214,8 +219,8 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
     .argument("<rig>", "Rig name")
     .argument("<topic-name>", "Topic name")
     .option("--body <text>", "Optional body text")
-    .option("--sender <name>", "Sender name", "cli")
-    .action(async (rig: string, topicName: string, opts: { body?: string; sender: string }) => {
+    .option("--sender <name>", "(deprecated, ignored) the sender is derived from the seat env (X-OpenRig-Session); the chat topic route derives it from the transport header")
+    .action(async (rig: string, topicName: string, opts: { body?: string; sender?: string }) => {
       const client = await getClient();
       if (!client) return;
 
@@ -228,9 +233,10 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
         return;
       }
 
+      // P21: no body sender — the daemon derives it from the transport header (see chat/send).
       const res = await client.post<Record<string, unknown>>(
         `/api/rigs/${encodeURIComponent(rigId)}/chat/topic`,
-        { sender: opts.sender, topic: topicName, body: opts.body },
+        { topic: topicName, body: opts.body },
       );
 
       if (res.status >= 400) {
