@@ -9,6 +9,9 @@ import { coreSchema } from "../src/db/migrations/001_core_schema.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { watchdogJobsSchema } from "../src/db/migrations/031_watchdog_jobs.js";
 import { watchdogHistorySchema } from "../src/db/migrations/032_watchdog_history.js";
+import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
+import { occupantGenerationStampsSchema } from "../src/db/migrations/063_occupant_generation_stamps.js";
+import { watchdogTargetGenerationSchema } from "../src/db/migrations/066_watchdog_target_generation.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
@@ -294,5 +297,80 @@ describe("WatchdogPolicyEngine (PL-004 Phase C R1)", () => {
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+// ── GHOST-STAGE (i-c): fire-time TARGET-generation gate ──
+// A generation-bound wake (opt-in target_generation_uuid) must NOT fire at a target that has since
+// been handed over to a DIFFERENT live generation. Role-bound (NULL) jobs fire UNCHANGED; UNKNOWN live
+// generation fails OPEN (delivers — "unknown never skips", note-2 inversion); a MISMATCH skips LOUD.
+describe("WatchdogPolicyEngine — fire-time target-generation gate (i-c)", () => {
+  let db: Database.Database;
+  let bus: EventBus;
+  let jobsRepo: WatchdogJobsRepository;
+  let log: WatchdogHistoryLog;
+  let deliveryCalls: Array<{ targetSession: string; message: string }>;
+  let liveGenBySession: Map<string, string | null>;
+
+  function makeEngine(): WatchdogPolicyEngine {
+    return new WatchdogPolicyEngine({
+      jobsRepo,
+      historyLog: log,
+      eventBus: bus,
+      deliver: async (req) => { deliveryCalls.push(req); return { status: "ok" }; },
+      resolveTargetGeneration: (s) => liveGenBySession.get(s) ?? null,
+    });
+  }
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [coreSchema, eventsSchema, queueItemsSchema, watchdogJobsSchema, watchdogHistorySchema, occupantGenerationStampsSchema, watchdogTargetGenerationSchema]);
+    bus = new EventBus(db);
+    jobsRepo = new WatchdogJobsRepository(db);
+    log = new WatchdogHistoryLog(db);
+    deliveryCalls = [];
+    liveGenBySession = new Map();
+  });
+  afterEach(() => db.close());
+
+  const armReminder = (targetGenerationUuid?: string | null) => jobsRepo.register({
+    policy: "periodic-reminder",
+    specYaml: "policy: periodic-reminder\ntarget:\n  session: alice@rig\ninterval_seconds: 60\nmessage: ping\n",
+    targetSession: "alice@rig",
+    intervalSeconds: 60,
+    registeredBySession: "ops@kernel",
+    targetGenerationUuid,
+  });
+
+  it("ROLE-bound (NULL target gen) fires unchanged regardless of the live generation", async () => {
+    liveGenBySession.set("alice@rig", "gen-anything");
+    await makeEngine().evaluate(armReminder(null));
+    expect(deliveryCalls).toEqual([{ targetSession: "alice@rig", message: "ping" }]);
+  });
+
+  it("generation-bound + live generation MATCHES → delivers (still the intended target)", async () => {
+    liveGenBySession.set("alice@rig", "gen-A");
+    await makeEngine().evaluate(armReminder("gen-A"));
+    expect(deliveryCalls.length).toBe(1);
+  });
+
+  it("generation-bound + live generation MISMATCH → SKIP-LOUD, no delivery, audit names both gens", async () => {
+    liveGenBySession.set("alice@rig", "gen-B"); // target handed over since arm (armed for gen-A)
+    const job = armReminder("gen-A");
+    const result = await makeEngine().evaluate(job);
+    expect(deliveryCalls).toEqual([]); // NEVER fired at the successor
+    expect(result.outcome.action).toBe("skip");
+    if (result.outcome.action === "skip") expect(result.outcome.reason).toBe("target_generation_mismatch");
+    const hist = log.listForJob(job.jobId);
+    expect(hist[0]?.outcome).toBe("skipped");
+    expect(hist[0]?.skipReason).toBe("target_generation_mismatch");
+    // structured audit names BOTH generations (armed-for vs live).
+    expect(hist[0]?.evaluationNotes).toMatchObject({ armedForGeneration: "gen-A", liveGeneration: "gen-B" });
+  });
+
+  it("generation-bound + live generation UNKNOWN (null tenure) → DELIVERS (fail-open, unknown never skips)", async () => {
+    // no entry for alice@rig → resolveTargetGeneration returns null
+    await makeEngine().evaluate(armReminder("gen-A"));
+    expect(deliveryCalls.length).toBe(1);
   });
 });

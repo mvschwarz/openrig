@@ -1631,6 +1631,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           return { status: "failed", error: err instanceof Error ? err.message : String(err) };
         }
       },
+      // (i-c) fire-time target-generation gate: resolve the target's LIVE occupant-generation (P12
+      // occupant_tenures) so a generation-bound wake is refused once the target has handed over.
+      // UNKNOWN (null) fails open → deliver. A drop of this line disables the gate silently (gen-bound
+      // wakes would fire at the successor) — pinned in watchdog-target-gen-wiring.test.ts.
+      resolveTargetGeneration: (s) => sessionRegistry.currentOccupantGenerationForSession(s),
       // PL-004 Phase D: register workflow-keepalive policy alongside
       // Phase C's three built-in policies. workflow-keepalive reads
       // SQLite workflow_instances directly via the new Phase D tables

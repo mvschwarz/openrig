@@ -74,6 +74,14 @@ interface WatchdogPolicyEngineDeps {
    * daemon startup with a db handle injected).
    */
   additionalPolicies?: Policy[];
+  /**
+   * (i-c) FIRE-TIME target-generation gate. Resolve a target session's LIVE occupant-generation (P12
+   * `occupant_tenures`) so a GENERATION-bound wake (job.targetGeneration set) can be refused when the
+   * target has been handed over to a different generation since the job was armed. Absent → gate off
+   * (jobs fire unchanged). A null return = UNKNOWN → fail-open (deliver): the protective act is
+   * SKIPPING, so an unknown target-generation must never skip a legitimate wake (note-2 inversion).
+   */
+  resolveTargetGeneration?: (sessionName: string) => string | null;
 }
 
 const PHASE_C_BUILTIN_POLICIES: ReadonlyArray<Policy> = [
@@ -131,12 +139,14 @@ export class WatchdogPolicyEngine {
   private readonly parseSpec: PolicyContextParser;
   private readonly now: () => Date;
   private readonly policies: Map<string, Policy>;
+  private readonly resolveTargetGeneration?: (sessionName: string) => string | null;
 
   constructor(deps: WatchdogPolicyEngineDeps) {
     this.jobsRepo = deps.jobsRepo;
     this.historyLog = deps.historyLog;
     this.eventBus = deps.eventBus;
     this.deliver = deps.deliver;
+    this.resolveTargetGeneration = deps.resolveTargetGeneration;
     this.parseSpec = deps.parseSpec ?? defaultParseSpec;
     this.now = deps.now ?? (() => new Date());
     this.policies = new Map();
@@ -286,6 +296,44 @@ export class WatchdogPolicyEngine {
           history: null,
           delivery: null,
           meaningful: false,
+        };
+      }
+    }
+
+    // (i-c) FIRE-TIME target-generation gate. A generation-bound wake (job.targetGeneration set) must
+    // not fire at a target handed over to a DIFFERENT live generation since it was armed. Role-bound
+    // jobs (null) skip the gate → fire unchanged. UNKNOWN live generation (null) fails OPEN → deliver
+    // (the protective act is SKIPPING, so unknown never skips — note-2). Only a resolved MISMATCH
+    // skips LOUD (loud reason → recorded + emitted), with a structured audit naming BOTH generations.
+    if (job.targetGeneration !== null && this.resolveTargetGeneration) {
+      const liveGeneration = this.resolveTargetGeneration(outcome.target.session);
+      if (liveGeneration !== null && liveGeneration !== job.targetGeneration) {
+        const reason = "target_generation_mismatch";
+        this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, false);
+        this.jobsRepo.setActionable(job.jobId, false, evaluatedAt);
+        const history = this.historyLog.record({
+          jobId: job.jobId,
+          evaluatedAt,
+          outcome: "skipped",
+          skipReason: reason,
+          evaluationNotes: {
+            armedForGeneration: job.targetGeneration,
+            liveGeneration,
+            targetSession: outcome.target.session,
+          },
+        });
+        this.eventBus.emit({
+          type: "watchdog.evaluation_skipped",
+          jobId: job.jobId,
+          policy: job.policy,
+          skipReason: reason,
+        });
+        return {
+          job: this.jobsRepo.getByIdOrThrow(job.jobId),
+          outcome: { action: "skip", reason },
+          history,
+          delivery: null,
+          meaningful: true,
         };
       }
     }
