@@ -316,14 +316,35 @@ function tryReadPRD(sliceDir: string): string | null {
   }
 }
 
+/** P15 (WRITER-EXCEEDS-ITS-OWNERSHIP fix, PM-ruled 2026-08-07): the stamp is
+ *  sole-writer of its OWN keys and must byte-preserve every line it does not
+ *  own. The old implementation parsed and RE-SERIALIZED the whole block, so
+ *  stamping invalidated any seal taken over the file — seal-then-lock broke by
+ *  construction. Now: each owned key is serialized alone and spliced in by
+ *  index (replace-in-place when the key exists, append at the block end when
+ *  absent). Unowned bytes — folded scalars, quoting style, ordering — are
+ *  untouched, so stripping exactly the owned lines restores the pre-stamp
+ *  bytes. Index splicing (never String.replace with a dynamic replacement)
+ *  keeps $-metacharacters in values inert. */
 function writeFrontmatterFields(content: string, fields: Record<string, unknown>): string {
   const match = /^---\s*\n([\s\S]*?)\n---/.exec(content);
-  if (match) {
-    const existing = parseFrontmatter(content);
-    const merged = { ...existing, ...fields };
-    const yaml = YAML.stringify(merged).trimEnd();
-    return content.replace(/^---\s*\n[\s\S]*?\n---/, `---\n${yaml}\n---`);
+  if (!match) {
+    const yaml = YAML.stringify(fields).trimEnd();
+    return `---\n${yaml}\n---\n\n${content}`;
   }
-  const yaml = YAML.stringify(fields).trimEnd();
-  return `---\n${yaml}\n---\n\n${content}`;
+  let block = match[1]!;
+  for (const [key, value] of Object.entries(fields)) {
+    if (value === undefined) continue;
+    const rendered = YAML.stringify({ [key]: value }).trimEnd();
+    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // a top-level `key:` line plus its indented continuation lines (nested blocks)
+    const keyRe = new RegExp(`^${escaped}:[^\\n]*(?:\\n[ \\t]+[^\\n]*)*`, "m");
+    const existing = keyRe.exec(block);
+    if (existing) {
+      block = block.slice(0, existing.index) + rendered + block.slice(existing.index + existing[0].length);
+    } else {
+      block = block.length > 0 ? `${block}\n${rendered}` : rendered;
+    }
+  }
+  return content.slice(0, match.index) + `---\n${block}\n---` + content.slice(match.index + match[0].length);
 }
