@@ -1,5 +1,6 @@
 import { serve, type ServerType } from "@hono/node-server";
-import { readOpenRigEnv } from "./openrig-compat.js";
+import { readOpenRigEnv, OPENRIG_HOME } from "./openrig-compat.js";
+import { resolveDaemonDbPath } from "./daemon-db-path.js";
 import { createDaemon } from "./startup.js";
 import { runQueueRetentionSweep, RETENTION_DEFAULTS } from "./domain/queue-retention.js";
 import {
@@ -131,7 +132,9 @@ async function isTrustedLocalOrTailnetBind(host: string): Promise<boolean> {
 
 export async function startServer(port?: number) {
   const p = port ?? parseInt(readOpenRigEnv("OPENRIG_PORT", "RIGGED_PORT") ?? "7433", 10);
-  const dbPath = readOpenRigEnv("OPENRIG_DB", "RIGGED_DB") ?? "openrig.sqlite";
+  // D15 — anchor the default db under OPENRIG_HOME, never a bare CWD-relative
+  // filename (which could open the shared fleet db). Explicit OPENRIG_DB wins.
+  const dbPath = resolveDaemonDbPath(readOpenRigEnv("OPENRIG_DB", "RIGGED_DB"), OPENRIG_HOME);
 
   // bug-fix slice auth-bearer-tailscale-trust: distinguish "explicit
   // operator opt-in" from "default" by treating an undefined env as
