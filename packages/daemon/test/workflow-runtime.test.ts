@@ -25,19 +25,11 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
-import { coreSchema } from "../src/db/migrations/001_core_schema.js";
-import { eventsSchema } from "../src/db/migrations/003_events.js";
-import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
-import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
-import { workflowSpecsSchema } from "../src/db/migrations/033_workflow_specs.js";
-import { workflowInstancesSchema } from "../src/db/migrations/034_workflow_instances.js";
-import { workflowStepTrailsSchema } from "../src/db/migrations/035_workflow_step_trails.js";
-import { workflowInstanceVersionSchema } from "../src/db/migrations/049_workflow_instance_version.js";
-import { workflowSpecJsonSchema } from "../src/db/migrations/050_workflow_spec_json.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
 import { WorkflowProjectorError } from "../src/domain/workflow-projector.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 
 const SPEC = `workflow:
   id: fr1-three-step
@@ -79,20 +71,9 @@ const SPEC = `workflow:
       - failed
 `;
 
-const MIGRATIONS = [
-  coreSchema,
-  eventsSchema,
-  queueItemsSchema,
-  queueTransitionsSchema,
-  workflowSpecsSchema,
-  workflowInstancesSchema,
-  workflowStepTrailsSchema,
-  workflowInstanceVersionSchema,
-  workflowSpecJsonSchema,
-];
 
 function buildRuntime(db: Database.Database) {
-  migrate(db, MIGRATIONS);
+  migrate(db, ALL_MIGRATIONS);
   const bus = new EventBus(db);
   db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
   const queueRepo = new QueueRepository(db, bus, { validateRig: () => true });

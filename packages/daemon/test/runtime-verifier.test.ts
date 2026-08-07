@@ -2,25 +2,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
-import { coreSchema } from "../src/db/migrations/001_core_schema.js";
-import { bindingsSessionsSchema } from "../src/db/migrations/002_bindings_sessions.js";
-import { eventsSchema } from "../src/db/migrations/003_events.js";
-import { snapshotsSchema } from "../src/db/migrations/004_snapshots.js";
-import { checkpointsSchema } from "../src/db/migrations/005_checkpoints.js";
-import { resumeMetadataSchema } from "../src/db/migrations/006_resume_metadata.js";
-import { nodeSpecFieldsSchema } from "../src/db/migrations/007_node_spec_fields.js";
-import { packagesSchema } from "../src/db/migrations/008_packages.js";
-import { installJournalSchema } from "../src/db/migrations/009_install_journal.js";
-import { journalSeqSchema } from "../src/db/migrations/010_journal_seq.js";
-import { bootstrapSchema } from "../src/db/migrations/011_bootstrap.js";
 import { RuntimeVerifier } from "../src/domain/runtime-verifier.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 
-const ALL_MIGRATIONS = [
-  coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema,
-  checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema,
-  packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema,
-];
 
 function createMockExec(responses: Record<string, string | Error>): ExecFn {
   return vi.fn(async (cmd: string) => {

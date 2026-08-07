@@ -17,21 +17,10 @@ import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
-import { coreSchema } from "../src/db/migrations/001_core_schema.js";
-import { eventsSchema } from "../src/db/migrations/003_events.js";
-import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
-import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
-import { workflowSpecsSchema } from "../src/db/migrations/033_workflow_specs.js";
-import { workflowInstancesSchema } from "../src/db/migrations/034_workflow_instances.js";
-import { workflowStepTrailsSchema } from "../src/db/migrations/035_workflow_step_trails.js";
-import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summary.js";
-import { queueItemEvidenceRefSchema } from "../src/db/migrations/048_queue_item_evidence_ref.js";
-import { workflowInstanceVersionSchema } from "../src/db/migrations/049_workflow_instance_version.js";
-import { workflowSpecJsonSchema } from "../src/db/migrations/050_workflow_spec_json.js";
-import { workflowResumeSchema } from "../src/db/migrations/051_workflow_resume.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 
 const SPEC = `workflow:
   id: wf5-resume-pipeline
@@ -100,20 +89,6 @@ const LOOP_SPEC = `workflow:
     max_hops: 2
 `;
 
-const MIGRATIONS = [
-  coreSchema,
-  eventsSchema,
-  queueItemsSchema,
-  queueTransitionsSchema,
-  workflowSpecsSchema,
-  workflowInstancesSchema,
-  workflowStepTrailsSchema,
-  queueItemSummarySchema,
-  queueItemEvidenceRefSchema,
-  workflowInstanceVersionSchema,
-  workflowSpecJsonSchema,
-  workflowResumeSchema,
-];
 
 describe("WF-5 rev1-r2 B2: the SSE allow-list carries workflow.resumed", () => {
   it("run/watch followers stream resumes live (source pin — the WF-3 import-graph-pin precedent)", () => {
@@ -131,7 +106,7 @@ describe("WF-5 FR-4: resume (redrive)", () => {
 
   const build = () => {
     db = createDb();
-    migrate(db, MIGRATIONS);
+    migrate(db, ALL_MIGRATIONS);
     const bus = new EventBus(db);
     db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
     queueRepo = new QueueRepository(db, bus, { validateRig: () => true });

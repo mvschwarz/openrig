@@ -12,15 +12,12 @@ import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitio
 import { workflowSpecsSchema } from "../src/db/migrations/033_workflow_specs.js";
 import { workflowInstancesSchema } from "../src/db/migrations/034_workflow_instances.js";
 import { workflowStepTrailsSchema } from "../src/db/migrations/035_workflow_step_trails.js";
-import { workflowInstanceVersionSchema } from "../src/db/migrations/049_workflow_instance_version.js";
-import { workflowSpecJsonSchema } from "../src/db/migrations/050_workflow_spec_json.js";
-import { workflowResumeSchema } from "../src/db/migrations/051_workflow_resume.js";
-import { workflowInstanceBoundRigSchema } from "../src/db/migrations/052_workflow_instance_bound_rig.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
 import { WorkflowProjectorError } from "../src/domain/workflow-projector.js";
 import { WorkflowInstanceStore } from "../src/domain/workflow-instance-store.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 
 // OPR.0.4.6.FAC1 commit 2 — the instance is bound to a rig at
 // instantiation (AC-1; ARCH Q4; migration 052).
@@ -45,7 +42,7 @@ const SPEC_WITH_DEFAULT = `workflow:
   roles:
     worker:
       preferred_targets:
-        - worker@rig
+        - dev-worker@rig
   steps:
     - id: act
       actor_role: worker
@@ -63,7 +60,7 @@ const SPEC_NO_TARGET = `workflow:
   roles:
     worker:
       preferred_targets:
-        - worker@rig
+        - dev-worker@rig
   steps:
     - id: act
       actor_role: worker
@@ -71,19 +68,6 @@ const SPEC_NO_TARGET = `workflow:
         - done
 `;
 
-const ALL_MIGRATIONS = [
-  coreSchema,
-  eventsSchema,
-  queueItemsSchema,
-  queueTransitionsSchema,
-  workflowSpecsSchema,
-  workflowInstancesSchema,
-  workflowStepTrailsSchema,
-  workflowInstanceVersionSchema,
-  workflowSpecJsonSchema,
-  workflowResumeSchema,
-  workflowInstanceBoundRigSchema,
-];
 
 describe("FAC-1 C2: workflow instance bound rig (migration 052)", () => {
   let db: Database.Database;
@@ -103,6 +87,12 @@ describe("FAC-1 C2: workflow instance bound rig (migration 052)", () => {
     db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-a', 'factory-a')`).run();
     db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-b', 'factory-b')`).run();
     db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
+    // Full-schema fixture realism (P13): under the SHIPPED migration list the
+    // member-existence probe WORKS (the old subset schema made it error and
+    // skip — silently suppressing the advisory). Seed the member the specs
+    // name so the no-advisory assertions test what they always meant to.
+    db.prepare(`INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES ('n-w', 'r-1', 'dev.worker', 'claude-code')`).run();
+    db.prepare(`INSERT INTO sessions (id, node_id, session_name, status) VALUES ('s-w', 'n-w', 'dev-worker@rig', 'running')`).run();
     queueRepo = new QueueRepository(db, bus, { validateRig: () => true });
     tmp = mkdtempSync(join(tmpdir(), "wf-boundrig-"));
     defaultSpecPath = join(tmp, "default-rig.yaml");

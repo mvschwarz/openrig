@@ -21,12 +21,8 @@ import { InstallEngine, type EngineFsOps } from "../src/domain/install-engine.js
 import type { InstallPlanEntry } from "../src/domain/install-planner.js";
 import type { RefinedInstallPlan } from "../src/domain/conflict-detector.js";
 import type { PolicyResult } from "../src/domain/install-policy.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 
-const ALL_MIGRATIONS = [
-  coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema,
-  checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema,
-  packagesSchema, installJournalSchema, journalSeqSchema,
-];
 
 function realFs(tmpDir: string): EngineFsOps {
   return {

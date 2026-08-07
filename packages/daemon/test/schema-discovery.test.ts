@@ -13,8 +13,7 @@ import { packagesSchema } from "../src/db/migrations/008_packages.js";
 import { installJournalSchema } from "../src/db/migrations/009_install_journal.js";
 import { journalSeqSchema } from "../src/db/migrations/010_journal_seq.js";
 import { bootstrapSchema } from "../src/db/migrations/011_bootstrap.js";
-import { discoverySchema } from "../src/db/migrations/012_discovery.js";
-import { discoveryFkFix } from "../src/db/migrations/013_discovery_fk_fix.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 
 const PRE_DISCOVERY_MIGRATIONS = [
   coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema,
@@ -22,7 +21,6 @@ const PRE_DISCOVERY_MIGRATIONS = [
   packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema,
 ];
 
-const ALL_MIGRATIONS = [...PRE_DISCOVERY_MIGRATIONS, discoverySchema, discoveryFkFix];
 
 function setupDb(): Database.Database {
   const db = createDb();

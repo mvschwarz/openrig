@@ -5,16 +5,6 @@ import os from "node:os";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
-import { coreSchema } from "../src/db/migrations/001_core_schema.js";
-import { bindingsSessionsSchema } from "../src/db/migrations/002_bindings_sessions.js";
-import { eventsSchema } from "../src/db/migrations/003_events.js";
-import { snapshotsSchema } from "../src/db/migrations/004_snapshots.js";
-import { checkpointsSchema } from "../src/db/migrations/005_checkpoints.js";
-import { resumeMetadataSchema } from "../src/db/migrations/006_resume_metadata.js";
-import { nodeSpecFieldsSchema } from "../src/db/migrations/007_node_spec_fields.js";
-import { packagesSchema } from "../src/db/migrations/008_packages.js";
-import { installJournalSchema } from "../src/db/migrations/009_install_journal.js";
-import { journalSeqSchema } from "../src/db/migrations/010_journal_seq.js";
 import { PackageRepository } from "../src/domain/package-repository.js";
 import { InstallRepository } from "../src/domain/install-repository.js";
 import { InstallEngine, type EngineFsOps } from "../src/domain/install-engine.js";
@@ -22,12 +12,8 @@ import { InstallVerifier } from "../src/domain/install-verifier.js";
 import type { InstallPlanEntry } from "../src/domain/install-planner.js";
 import type { RefinedInstallPlan } from "../src/domain/conflict-detector.js";
 import type { PolicyResult } from "../src/domain/install-policy.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 
-const ALL_MIGRATIONS = [
-  coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema,
-  checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema,
-  packagesSchema, installJournalSchema, journalSeqSchema,
-];
 
 function realFs(): EngineFsOps {
   return {

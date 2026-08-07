@@ -2,20 +2,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
-import { coreSchema } from "../src/db/migrations/001_core_schema.js";
-import { bindingsSessionsSchema } from "../src/db/migrations/002_bindings_sessions.js";
-import { eventsSchema } from "../src/db/migrations/003_events.js";
-import { snapshotsSchema } from "../src/db/migrations/004_snapshots.js";
-import { checkpointsSchema } from "../src/db/migrations/005_checkpoints.js";
-import { resumeMetadataSchema } from "../src/db/migrations/006_resume_metadata.js";
-import { nodeSpecFieldsSchema } from "../src/db/migrations/007_node_spec_fields.js";
-import { packagesSchema } from "../src/db/migrations/008_packages.js";
-import { installJournalSchema } from "../src/db/migrations/009_install_journal.js";
-import { journalSeqSchema } from "../src/db/migrations/010_journal_seq.js";
-import { bootstrapSchema } from "../src/db/migrations/011_bootstrap.js";
-import { discoverySchema } from "../src/db/migrations/012_discovery.js";
-import { discoveryFkFix } from "../src/db/migrations/013_discovery_fk_fix.js";
-import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot.js";
 import { DiscoveryCoordinator } from "../src/domain/discovery-coordinator.js";
 import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -23,12 +9,8 @@ import { EventBus } from "../src/domain/event-bus.js";
 import type { TmuxDiscoveryScanner, ScannedPane, ScanResult } from "../src/domain/tmux-discovery-scanner.js";
 import type { SessionFingerprinter, FingerprintResult } from "../src/domain/session-fingerprinter.js";
 import type { SessionEnricher, EnrichmentResult } from "../src/domain/session-enricher.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 
-const ALL_MIGRATIONS = [
-  coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema,
-  checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema,
-  packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema,
-];
 
 function makePane(overrides?: Partial<ScannedPane>): ScannedPane {
   return { tmuxSession: "organic", tmuxWindow: "0", tmuxPane: "%0", pid: 1234, cwd: "/tmp", activeCommand: "claude", ...overrides };

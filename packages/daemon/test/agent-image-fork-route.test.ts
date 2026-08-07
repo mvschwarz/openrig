@@ -14,29 +14,14 @@ import type Database from "better-sqlite3";
 import { ulid } from "ulid";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
-import { coreSchema } from "../src/db/migrations/001_core_schema.js";
-import { bindingsSessionsSchema } from "../src/db/migrations/002_bindings_sessions.js";
-import { eventsSchema } from "../src/db/migrations/003_events.js";
-import { snapshotsSchema } from "../src/db/migrations/004_snapshots.js";
-import { checkpointsSchema } from "../src/db/migrations/005_checkpoints.js";
-import { resumeMetadataSchema } from "../src/db/migrations/006_resume_metadata.js";
-import { nodeSpecFieldsSchema } from "../src/db/migrations/007_node_spec_fields.js";
-import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot.js";
-import { podNamespaceSchema } from "../src/db/migrations/017_pod_namespace.js";
-import { contextUsageSchema } from "../src/db/migrations/018_context_usage.js";
-import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_cli_attachment.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { AgentImageLibraryService } from "../src/domain/agent-images/agent-image-library-service.js";
 import { evaluateProtection } from "../src/domain/agent-images/evidence-guard.js";
 import { agentImagesRoutes } from "../src/routes/agent-images.js";
 import type { SnapshotCapturer } from "../src/domain/agent-images/snapshot-capturer.js";
 import type { PodRigInstantiator, AddMemberOutcome } from "../src/domain/rigspec-instantiator.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 
-const MIGRATIONS = [
-  coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema,
-  resumeMetadataSchema, nodeSpecFieldsSchema, agentspecRebootSchema, podNamespaceSchema,
-  contextUsageSchema, externalCliAttachmentSchema,
-];
 
 const NATIVE_SECRET = "NATIVE-RESUME-ID-MUST-STAY-DAEMON-LOCAL";
 
@@ -60,7 +45,7 @@ describe("agent-images fork composer route (OPR.0.4.3.05)", () => {
     mkdirSync(libRoot, { recursive: true });
     mkdirSync(specRoot, { recursive: true });
     db = createDb();
-    migrate(db, MIGRATIONS);
+    migrate(db, ALL_MIGRATIONS);
     rigRepo = new RigRepository(db);
   });
 

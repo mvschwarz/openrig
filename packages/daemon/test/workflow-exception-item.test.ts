@@ -15,21 +15,11 @@ import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
-import { coreSchema } from "../src/db/migrations/001_core_schema.js";
-import { eventsSchema } from "../src/db/migrations/003_events.js";
-import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
-import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
-import { workflowSpecsSchema } from "../src/db/migrations/033_workflow_specs.js";
-import { workflowInstancesSchema } from "../src/db/migrations/034_workflow_instances.js";
-import { workflowStepTrailsSchema } from "../src/db/migrations/035_workflow_step_trails.js";
-import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summary.js";
-import { queueItemEvidenceRefSchema } from "../src/db/migrations/048_queue_item_evidence_ref.js";
-import { workflowInstanceVersionSchema } from "../src/db/migrations/049_workflow_instance_version.js";
-import { workflowSpecJsonSchema } from "../src/db/migrations/050_workflow_spec_json.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
 import { isHumanSeatSession } from "../src/domain/human-route-enforcer.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 
 const SPEC_WITH_ORCH = `workflow:
   id: wf5-exc-pipeline
@@ -73,19 +63,6 @@ const SPEC_HUMAN_ONLY = SPEC_WITH_ORCH.replace(
   "  exception_routing:\n    default: human_only\n    orchestrator_role: orch\n",
 ).replace("id: wf5-exc-pipeline", "id: wf5-exc-humanonly");
 
-const MIGRATIONS = [
-  coreSchema,
-  eventsSchema,
-  queueItemsSchema,
-  queueTransitionsSchema,
-  workflowSpecsSchema,
-  workflowInstancesSchema,
-  workflowStepTrailsSchema,
-  queueItemSummarySchema,
-  queueItemEvidenceRefSchema,
-  workflowInstanceVersionSchema,
-  workflowSpecJsonSchema,
-];
 
 function exceptionRows(db: Database.Database): Array<Record<string, unknown>> {
   return db
@@ -101,7 +78,7 @@ describe("WF-5 FR-2 class (a): born-in-txn exception item", () => {
 
   const build = (opts?: { validateRig?: (ref: string) => boolean; hostDefault?: () => "orchestrator" | "human_only" | null }) => {
     db = createDb();
-    migrate(db, MIGRATIONS);
+    migrate(db, ALL_MIGRATIONS);
     const bus = new EventBus(db);
     db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
     queueRepo = new QueueRepository(db, bus, {
