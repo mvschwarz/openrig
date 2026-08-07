@@ -37,6 +37,9 @@ export class CodexResumeAdapter {
     resumeToken: string | null,
     _cwd: string,
     codexConfigProfile?: string | null,
+    // 0.5.2-07: the seat's SPEC-pinned model. Threaded so the legacy (non-pod-aware) restore boots
+    // the resumed seat on its spec model, not the runtime default; absent → command byte-identical.
+    model?: string | null,
     // OPR.0.4.8.3 Seam B: persisted resolved posture threaded from restore.
     resolvedPosture?: "floor" | "full_bypass",
   ): Promise<ResumeResult> {
@@ -68,6 +71,7 @@ export class CodexResumeAdapter {
       resumeType === "codex_last",
       undefined,
       resolvedPosture,
+      model,
     );
 
     const textResult = await this.tmux.sendText(tmuxSessionName, cmd);

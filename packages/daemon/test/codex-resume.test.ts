@@ -64,6 +64,17 @@ describe("CodexResumeAdapter", () => {
       expect(sendText.mock.invocationCallOrder[0]).toBeLessThan(sendKeys.mock.invocationCallOrder[0]!);
     });
 
+    it("0.5.2-07: a SPEC-pinned model threads -m onto the legacy codex resume command", async () => {
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      const sendKeys = vi.fn(async () => ({ ok: true as const }));
+      const tmux = mockTmux({ sendText, sendKeys });
+      const adapter = new CodexResumeAdapter(tmux);
+
+      await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo", null, "gpt-5.4-cheap");
+
+      expect(sendText.mock.calls[0]![1]).toBe("codex -s workspace-write -m 'gpt-5.4-cheap' resume 'uuid-123'");
+    });
+
     it("codex_last: sendText posture-preserving codex -s workspace-write resume --last", async () => {
       const sendText = vi.fn(async () => ({ ok: true as const }));
       const sendKeys = vi.fn(async () => ({ ok: true as const }));

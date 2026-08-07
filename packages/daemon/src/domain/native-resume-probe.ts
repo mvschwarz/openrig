@@ -51,15 +51,22 @@ export function buildCodexResumeCore(
   // persisted/bound posture; the shared non-launch consumers (node inventory,
   // resume-metadata) omit it and keep byte-identical behavior.
   resolvedPosture?: "floor" | "full_bypass",
+  // 0.5.2-07: the seat's SPEC-pinned model. LAUNCH callers (legacy restore) thread it so the
+  // resumed seat boots on the spec model, not the runtime default; the non-launch consumers
+  // (node inventory, resume-metadata) omit it and stay byte-identical.
+  model?: string | null,
 ): string {
   // OPR.0.4.8.2: the RESUME path uses the SAME posture decision (codexPostureArg) as fresh/fork.
   // YOLO forces -s danger-full-access (overriding even a named profile); otherwise a named profile
   // governs itself and the no-profile case is OpenRig's explicit -s workspace-write floor flag.
   const profileArg = codexConfigProfile ? ` -p ${shellQuote(codexConfigProfile)}` : "";
   const profileOrPosture = codexPostureArg(profileArg, process.env, resolvedPosture);
+  // 0.5.2-07: -m is a top-level codex flag (matches the fresh-launch adapter), emitted before the
+  // resume subcommand.
+  const modelArg = model ? ` -m ${shellQuote(model)}` : "";
   const middle = extraArgs ? `${extraArgs} ` : "";
   const tokenArg = useLast ? "--last" : shellQuote(resumeToken);
-  return `codex${profileOrPosture} resume ${middle}${tokenArg}`;
+  return `codex${profileOrPosture}${modelArg} resume ${middle}${tokenArg}`;
 }
 
 export function assessNativeResumeProbe(

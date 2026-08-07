@@ -70,6 +70,18 @@ describe("ClaudeResumeAdapter", () => {
       expect(sendText.mock.invocationCallOrder[0]).toBeLessThan(sendKeys.mock.invocationCallOrder[0]!);
     });
 
+    it("0.5.2-07: a SPEC-pinned model emits --model on the legacy resume command", async () => {
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      const tmux = mockTmux({ sendText });
+      const adapter = new ClaudeResumeAdapter(tmux);
+
+      await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo", "gpt-5.4-cheap");
+
+      expect(sendText.mock.calls[0]![1]).toBe(
+        "claude --permission-mode acceptEdits --model 'gpt-5.4-cheap' --resume 'my-session'"
+      );
+    });
+
     it("returns { ok: true } on success", async () => {
       const adapter = new ClaudeResumeAdapter(mockTmux());
       const result = await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo");

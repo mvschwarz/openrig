@@ -54,6 +54,12 @@ describe("native resume probe", () => {
         "codex -p 'my-prof' resume --last"
       );
     });
+
+    it("0.5.2-07: a SPEC-pinned model emits -m before the resume subcommand (legacy restore carries the model)", () => {
+      expect(buildCodexResumeCore("tok-123", null, false, undefined, undefined, "gpt-5.4-cheap")).toBe(
+        "codex -s workspace-write -m 'gpt-5.4-cheap' resume 'tok-123'"
+      );
+    });
   });
 
   it("classifies Claude no-conversation output as failed", () => {

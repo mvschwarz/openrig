@@ -38,6 +38,9 @@ export class ClaudeResumeAdapter {
     resumeType: string | null,
     resumeToken: string | null,
     _cwd: string,
+    // 0.5.2-07: the seat's SPEC-pinned model. Threaded so the legacy (non-pod-aware) restore boots
+    // the resumed seat on its spec model, not the runtime default; absent → command byte-identical.
+    model?: string | null,
     // OPR.0.4.8.3 Seam B: the seat's PERSISTED resolved posture (restore re-derivation);
     // absent = the env decision (0.4.8.2), unchanged.
     resolvedPosture?: "floor" | "full_bypass",
@@ -48,7 +51,9 @@ export class ClaudeResumeAdapter {
 
     // OPR.0.4.8.2: the RESTORE path uses the SAME launch-posture decision as fresh launch (the
     // unconditional acceptEdits floor when OFF; the full bypass when YOLO is ON) — every seat.
-    const cmd = `claude ${claudePostureFlag(process.env, resolvedPosture)} --resume ${shellQuote(resumeToken!)}`;
+    // 0.5.2-07: --model matches the fresh-launch adapter (claude-code-adapter), emitted after posture.
+    const modelArg = model ? ` --model ${shellQuote(model)}` : "";
+    const cmd = `claude ${claudePostureFlag(process.env, resolvedPosture)}${modelArg} --resume ${shellQuote(resumeToken!)}`;
 
     const textResult = await this.tmux.sendText(tmuxSessionName, cmd);
     if (!textResult.ok) {
