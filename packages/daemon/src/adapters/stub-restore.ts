@@ -27,6 +27,12 @@ export interface FireRestoreOpts {
   bridgeScriptPath: string;
   /** The seat's canonical session name — the marker key (identity). */
   sessionName: string;
+  /** The seat's OWN authored transcript path — the SAME identity the compaction seam
+   *  recorded on the marker (marker.transcriptPath). The bridge's R5 premise gate delivers
+   *  ONLY when the delivery event's transcript_path MATCHES the marker's recorded
+   *  compaction — the real SessionStart/UserPromptSubmit event carries it. Omitting it made
+   *  the gate (correctly) refuse an identity-less event, so nothing was ever delivered. */
+  transcriptPath: string;
   /** OPENRIG_HOME the seam reads the restore-pending marker under. */
   openrigHome: string;
   /** The seat's managed cwd (part of the hook payload). */
@@ -74,6 +80,9 @@ export function fireRestore(opts: FireRestoreOpts): RestoreResult {
     hook_event_name: opts.hookEventName ?? "UserPromptSubmit",
     cwd: opts.cwd,
     session_name: opts.sessionName,
+    // Drive the marker's REAL compaction identity through the bridge's premise gate (the
+    // real event shape) — never weaken the gate. Without it the gate refuses delivery.
+    transcript_path: opts.transcriptPath,
   };
 
   const env: NodeJS.ProcessEnv = {

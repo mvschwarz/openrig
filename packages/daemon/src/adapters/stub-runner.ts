@@ -323,6 +323,9 @@ export async function runStubRunner(args: StubRunnerArgs): Promise<void> {
     fireRestore: () => fireRestore({
       bridgeScriptPath: resolveStubRestoreBridgePath(),
       sessionName: args.sessionName,
+      // Same authored transcript the compaction seam recorded on the marker — the identity
+      // the bridge's R5 premise gate matches to deliver (drive it through, never weaken it).
+      transcriptPath,
       openrigHome,
       cwd: args.cwd,
       injectClockNow: process.env.OPENRIG_TEST_CLOCK_NOW,
