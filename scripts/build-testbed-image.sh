@@ -77,6 +77,19 @@ docker build \
   -f "${CONTEXT}/Dockerfile" \
   "${CONTEXT}"
 
+# --- EFFECT PROOF (PM rider — assert-the-EFFECT-not-the-command; closes break #4's CLASS: 'the gate
+# was green while the install was broken'). This is the sealed Q2 ruling's effect-proof (a clean-target
+# install that LOADS the daemon) made resident. It MUST be a CONTAINER load, not a host clean-dir
+# install: the host has python/make/g++ so a host install of better-sqlite3 succeeds and would NOT
+# catch break #4 — only the toolchain-free image does. Assert the daemon actually LOADS (better-sqlite3
+# binds), not merely that `rig` exists (rig --version alone never opens the DB). Reuses the proven
+# L3-daemon-in-container load sequence (docker/testbed/runbooks/L3). A broken native install fails
+# `rig daemon start` here → set -e → non-zero → the build verb fails BEFORE the A/B pin. Not a per-fold
+# gate (a docker build per fold is unaffordable) — this rides the pre-pin build verb; the A/B pin
+# package REQUIRES it green. ---
+echo "[testbed] effect proof: daemon LOAD inside the container (better-sqlite3 must have built)" >&2
+docker run --rm "${IMAGE_TAG}" bash -lc 'set -euo pipefail; rig --version; rig daemon start; sleep 2; rig status; rig daemon stop'
+
 # --- emit the reproducible manifest + census receipt via the tested node orchestrator ---
 INPUTS="$(mktemp)"
 node -e \

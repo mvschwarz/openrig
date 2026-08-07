@@ -9,11 +9,18 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-# --- layer 1: userland + tmux + git + PTY/process essentials (most stable) ---
+# --- layer 1: userland + tmux + git + PTY/process essentials + the native-build toolchain (most stable) ---
+# python3/make/g++ are REQUIRED, not optional: the sealed Q2 packaging ruling builds better-sqlite3
+# FRESH ON TARGET (never a prebuilt/nested binary — that would risk a wrong-arch native module). Its
+# install is `prebuild-install || node-gyp rebuild`; with a self-contained tarball npm reaches that
+# step, prebuild-install is absent, and node-gyp needs python3+make+g++ to compile from source. Without
+# them layer 3 dies ('prebuild-install: not found' → 'Could not find any Python installation'). This is
+# testbed-image scope only (no multi-stage gold-plating — the image is a throwaway test target).
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      ca-certificates curl xz-utils git tmux tini procps; \
+      ca-certificates curl xz-utils git tmux tini procps \
+      python3 make g++; \
     rm -rf /var/lib/apt/lists/*
 
 # --- layer 2: pinned node (an in-range engines version — see scripts/check-engines) ---

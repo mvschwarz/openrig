@@ -12,9 +12,14 @@ import { dirname, join } from "node:path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, "build-testbed-image.sh");
+const DOCKERFILE = join(HERE, "..", "docker", "testbed", "Dockerfile");
 
 function readScript() {
   return readFileSync(SCRIPT, "utf8");
+}
+
+function readDockerfile() {
+  return readFileSync(DOCKERFILE, "utf8");
 }
 
 test("is a strict bash script (shebang + set -euo pipefail)", () => {
@@ -83,4 +88,23 @@ test("consumes the committed base-image slot + the stub-assets list (census scop
 test("emits the manifest via the tested node orchestrator", () => {
   const text = readScript();
   assert.match(text, /testbed-emit-manifest\.mjs/, "must emit the manifest via testbed-emit-manifest.mjs");
+});
+
+test("Q2 fix (break #4): the image installs the better-sqlite3 native-build toolchain (builds fresh on target)", () => {
+  // The sealed Q2 packaging ruling builds better-sqlite3 FROM SOURCE on target (never a prebuilt/nested
+  // binary). Its install is `prebuild-install || node-gyp rebuild`; node-gyp needs python3+make+g++.
+  // Without them layer 3's `npm install -g` dies ('prebuild-install: not found' → no Python). This
+  // static fence is the VM-authorable half; the behavioral RED→GREEN docker build runs host-side.
+  const df = readDockerfile();
+  assert.match(df, /python3 make g\+\+/, "layer 1 must install python3 make g++ (node-gyp toolchain)");
+});
+
+test("Q2 rider (effect proof): the build verb LOADS the daemon inside the container, not just `rig --version`", () => {
+  // assert-the-EFFECT-not-the-command: a green build over a broken native install is the break-#4 CLASS.
+  // Only a CONTAINER load catches it (the host has the toolchain, the image must not need it). The verb
+  // must run the freshly-built image and START the daemon (opens the DB → better-sqlite3 must have
+  // bound), failing the build if it can't. `rig --version` alone never opens the DB.
+  const text = readScript();
+  assert.match(text, /docker run\b[\s\S]*\$\{IMAGE_TAG\}/, "must run the freshly-built image (effect proof)");
+  assert.match(text, /rig daemon start/, "must LOAD the daemon (better-sqlite3 binds), not merely check rig exists");
 });
