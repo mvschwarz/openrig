@@ -119,3 +119,47 @@ export function rigReadEnv(bearerToken: string, baseUrl: string): Record<string,
   }
   return { [TERMINAL_BEARER_ENV]: bearerToken, OPENRIG_URL: baseUrl };
 }
+
+// ── STAGING: getting fixtures INTO a container correctly (one method, two consumers) ──
+//
+// Two defects were paid for here, both live: (1) staging under /root leaves the tree
+// unreadable to `USER openrig` (Dockerfile:61), and (2) `docker cp` preserves ROOT
+// ownership, so even a readable stage is NOT WRITABLE — and `rig up`'s pre-launch
+// delivery WRITES into it (AGENTS.md), failing EACCES at instantiate.
+//
+// The fix that avoids both by construction: stage under the openrig user's OWN home and
+// deliver by TAR-PIPE into a DEFAULT `docker exec`, which extracts AS `openrig`. No chown,
+// no root exec — the user the product runs as is the user that does the work.
+
+/** The exec user's home — everything staged lives under it. */
+export const CONTAINER_STAGE_ROOT = "/home/openrig";
+
+/** An in-container stage path. Consumers pass THIS to the daemon, never a host path:
+ *  the daemon reads the topology INSIDE the container. */
+export function containerStagePath(name: string): string {
+  if (!name || name.startsWith("/") || name.includes("..")) {
+    throw new Error(`testbed stage: expected a simple relative name, got ${JSON.stringify(name)}`);
+  }
+  return `${CONTAINER_STAGE_ROOT}/${name}`;
+}
+
+/** tar-side argv: stream the source directory's CONTENTS (note the trailing "."). */
+export function stageTarSourceArgv(hostDir: string): string[] {
+  return ["-C", hostDir, "-cf", "-", "."];
+}
+
+/** docker-side argv: extract as the DEFAULT exec user (openrig) — no `-u`, no chown.
+ *  Pipe stageTarSourceArgv's stdout into this process's stdin. */
+export function stageExtractArgv(container: string, stagePath: string): string[] {
+  return ["exec", "-i", container, "tar", "-C", stagePath, "-xf", "-"];
+}
+
+/** The pre-flight the stage must pass before anything depends on it: readable AND
+ *  WRITABLE as the exec user, probed by DOING (touch/rm) rather than by reading mode
+ *  bits — bits lie under ownership, ACLs, and read-only mounts. */
+export function stageFenceArgv(container: string, stagePath: string): string[] {
+  return [
+    "exec", container, "sh", "-c",
+    `test -r '${stagePath}' && touch '${stagePath}/.fence-write' && rm -f '${stagePath}/.fence-write'`,
+  ];
+}

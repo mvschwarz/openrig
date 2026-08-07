@@ -56,3 +56,29 @@ describe("published-daemon procedure — module/runbook parity", () => {
     expect(() => publishedDaemonEnv("")).toThrow(/REFUSES a non-loopback bind/);
   });
 });
+
+describe("staging helpers — one method for runbook and adapter", () => {
+  it("stage paths are in-container under the exec user's home, and reject host/escaping paths", async () => {
+    const m = await import("./helpers/testbed-published-daemon.js");
+    expect(m.containerStagePath("topologies")).toBe("/home/openrig/topologies");
+    expect(() => m.containerStagePath("/abs")).toThrow(/simple relative name/);
+    expect(() => m.containerStagePath("../escape")).toThrow(/simple relative name/);
+  });
+
+  it("delivery extracts as the DEFAULT exec user — no -u root, no chown (ownership by construction)", async () => {
+    const m = await import("./helpers/testbed-published-daemon.js");
+    const argv = m.stageExtractArgv("H_A", "/home/openrig/topologies");
+    expect(argv).toEqual(["exec", "-i", "H_A", "tar", "-C", "/home/openrig/topologies", "-xf", "-"]);
+    expect(argv).not.toContain("-u");
+    expect(argv.join(" ")).not.toMatch(/chown/);
+  });
+
+  it("the stage fence probes the FULL contract by DOING it (read + touch/rm), not by reading mode bits", async () => {
+    const m = await import("./helpers/testbed-published-daemon.js");
+    const cmd = m.stageFenceArgv("H_A", "/home/openrig/topologies").join(" ");
+    expect(cmd).toMatch(/test -r/);
+    expect(cmd).toMatch(/touch/);
+    expect(cmd).toMatch(/rm -f/);
+    expect(cmd).not.toMatch(/stat|ls -l/); // mode bits are not the assertion
+  });
+});
