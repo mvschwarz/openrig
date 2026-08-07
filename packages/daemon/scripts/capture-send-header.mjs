@@ -12,8 +12,12 @@ import { wrapPaneEnvelope } from "../src/lib/pane-envelope.js";
 
 const OUT = process.argv[2] ?? "send-header-captures";
 mkdirSync(OUT, { recursive: true });
-const SENDER = "orch-advisor@v-openrig-build";
-const HOST = "v-openrig-build";
+const SENDER = "orch-advisor@v-openrig-build"; // member@rig
+// The ORIGIN HOST id resolved per the 51-09 shipped rendering (host registry self-id) — the THIRD
+// triple slot. This is the real founder host (mm2), DISTINCT from the rig, so From/Reply render as a
+// clean member@rig@host. (Prior capture hardcoded the rig name here → a doubled 'rig@rig' teaching
+// surface; the CODE path itself resolves the real host_id via getSelfHostId/fetchSelfHostId.)
+const HOST = "mm2";
 const STAMP = "2026-08-07T00:42:00Z"; // fixed → deterministic captures
 
 const captures = {
