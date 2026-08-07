@@ -12,6 +12,7 @@ import { SuccessorSessionLauncher } from "./successor-session-launcher.js";
 import { deriveResumeToken, type ResumeTokenCaptureDeps } from "./resume-token-capture.js";
 import { validateResumeToken } from "./resume-token-validation.js";
 import type { RuntimeAdapter } from "./runtime-adapter.js";
+import type { OccupantInvalidator } from "./occupant-invalidator.js";
 import type { PersistedEvent } from "./types.js";
 
 export interface SeatHandoverMutationResult {
@@ -106,6 +107,13 @@ interface SeatHandoverServiceDeps {
    * mouse/status/clipboard defaults as a NodeLauncher-launched seat.
    */
   tmuxOptionDefaults?: TmuxOptionDefaultsApplier;
+  /**
+   * Ghost-stage (e) seam — the per-store retiring-occupant invalidator, authored by the ghost-stage
+   * slice and CALLED once at commit() so the cutover successor never inherits a predecessor's seat-name-
+   * keyed state. Optional: absent until the ghost-stage slice lands → the commit call is skipped (never
+   * blocking the handover). See occupant-invalidator.ts.
+   */
+  occupantInvalidator?: OccupantInvalidator;
 }
 
 export class SeatHandoverService {
@@ -119,6 +127,7 @@ export class SeatHandoverService {
   private tmuxAdapter: TmuxAdapter;
   private successorLauncher: SuccessorSessionLauncher;
   private captureDeps: ResumeTokenCaptureDeps;
+  private occupantInvalidator: OccupantInvalidator | null;
   private now: () => Date;
 
   constructor(deps: SeatHandoverServiceDeps) {
@@ -132,6 +141,7 @@ export class SeatHandoverService {
     this.discoveryRepo = deps.discoveryRepo;
     this.eventBus = deps.eventBus;
     this.tmuxAdapter = deps.tmuxAdapter;
+    this.occupantInvalidator = deps.occupantInvalidator ?? null;
     this.now = deps.now ?? (() => new Date());
     this.statusService = new SeatStatusService({ rigRepo: deps.rigRepo });
     this.planner = new SeatHandoverPlanner({ rigRepo: deps.rigRepo });
@@ -644,6 +654,18 @@ export class SeatHandoverService {
           handover_at = ?
         WHERE id = ?
       `).run(input.latestSession.session_name, handoverAt, input.node.id);
+
+      // Ghost-stage (e) re-key seam — the rebind is done; now invalidate the RETIRING occupant's
+      // seat-name-keyed stores so the successor never inherits a ghost (drained compaction stage, frozen
+      // telemetry sample, delayed lifecycle message to the retired generation). The ghost-stage slice
+      // owns the per-store impls behind OccupantInvalidator; this seat owns this single call. Under the
+      // cutover the successor reuses the seat name, so retiring === successor here (retiringGeneration is
+      // omitted until atom-B → Class-B stores no-op loud). Optional dep: absent → skipped, never blocks.
+      this.occupantInvalidator?.invalidateRetiringOccupant({
+        retiringSessionName: input.latestSession.session_name,
+        successorSessionName: input.discovered.tmuxSession,
+      });
+
       const event = this.eventBus.persistWithinTransaction({
         type: "seat.handover_completed",
         rigId: input.status.rig_id,

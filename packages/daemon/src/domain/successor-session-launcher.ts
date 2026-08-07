@@ -169,12 +169,10 @@ export class SuccessorSessionLauncher {
       };
     }
 
-    // SEAM (ghost-stage re-key, plan 411c43de): at the swap, the predecessor's resume token should be
-    // invalidated / re-keyed so a stale wake can never resume the retiree into a superseded state. The
-    // enumeration that drives this lands with the ghost-stage slice (orch-confirmed not-yet-landed); this
-    // seat CONSUMES it here when it does. It is a predecessor-token SAFETY step, separable and
-    // NON-BLOCKING for the scrollback money-proof, so it is a named seam, not a fabricated no-op — the
-    // recoverable-state invariant already holds via the durable provider session file above.
+    // Ghost-stage (e) re-key: the retiring occupant's seat-name-keyed stores are invalidated so the
+    // successor never inherits a ghost. That call is made ATOMICALLY at SeatHandoverService.commit()
+    // (inside the rebind tx, where the retiring + successor names are in scope), per the ghost-stage
+    // contract — NOT here at the swap, so it commits together with the rebind. See occupant-invalidator.ts.
 
     // 3. Route the successor through REAL runtime startup (launchHarness send-keys + readiness) so it
     //    becomes a LIVE, READY agent in the reused pane BEFORE it can be committed. UNWIND INVARIANT:

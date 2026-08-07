@@ -27,6 +27,7 @@ describe("SeatHandoverService", () => {
   let checkReady: ReturnType<typeof vi.fn>;
   let readSidecar: ReturnType<typeof vi.fn>;
   let captureCodexThreadId: ReturnType<typeof vi.fn>;
+  let invalidateRetiringOccupant: ReturnType<typeof vi.fn>;
   let service: SeatHandoverService;
 
   beforeEach(() => {
@@ -50,6 +51,7 @@ describe("SeatHandoverService", () => {
     // B2 — discovered-mode derive-helper deps (Codex thread-id capturer by default).
     readSidecar = vi.fn(() => ({ ok: true, data: { session_id: "claude-sid-123" } }));
     captureCodexThreadId = vi.fn(async () => "codex-discovered-tok");
+    invalidateRetiringOccupant = vi.fn();
     service = newService();
   });
 
@@ -78,6 +80,7 @@ describe("SeatHandoverService", () => {
       runtimeAdapters: { codex: codexAdapter() },
       contextUsageStore: { readSidecar } as never,
       resumeTokenCapturer: { captureCodexThreadId } as never,
+      occupantInvalidator: { invalidateRetiringOccupant },
       readinessTimeoutMs: 50,
       sleep: async () => {},
     });
@@ -326,6 +329,34 @@ describe("SeatHandoverService", () => {
       "SELECT resume_type, resume_token, resume_provenance FROM sessions WHERE node_id = ? AND session_name = ? ORDER BY id DESC LIMIT 1"
     ).get(node.id, "dev-impl@seat-rig") as Record<string, string | null>;
     expect(newSession).toMatchObject({ resume_type: "codex_id", resume_token: "codex-launch-tok", resume_provenance: "scrape" });
+  });
+
+  it("ghost-stage re-key seam: calls invalidateRetiringOccupant at commit with the retiring + successor names", async () => {
+    // The cutover invalidates the RETIRING occupant's seat-name-keyed stores so the successor never
+    // inherits a ghost (ghost-stage contract, dev50 slice). This seat OWNS the mechanical call at
+    // commit(); dev50 owns the per-store impls behind the OccupantInvalidator interface. In the cutover
+    // the successor REUSES the seat name, so retiring === successor here (retiringGeneration omitted
+    // until atom-B → Class-B stores no-op loud).
+    seedSeat({ runtime: "codex" });
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
+
+    expect(result.ok).toBe(true);
+    expect(invalidateRetiringOccupant).toHaveBeenCalledTimes(1);
+    expect(invalidateRetiringOccupant).toHaveBeenCalledWith({
+      retiringSessionName: "dev-impl@seat-rig",
+      successorSessionName: "dev-impl@seat-rig",
+    });
+  });
+
+  it("does NOT invalidate the retiring occupant when the handover fails before commit (no re-key on a non-committed handover)", async () => {
+    seedSeat({ runtime: "codex" });
+    respawnPane.mockResolvedValue({ ok: false, code: "no_server", message: "no server running" });
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
+
+    expect(result.ok).toBe(false);
+    expect(invalidateRetiringOccupant).not.toHaveBeenCalled();
   });
 
   it.each([
