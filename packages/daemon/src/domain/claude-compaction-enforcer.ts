@@ -618,6 +618,23 @@ export class ClaudeCompactionEnforcer {
     return this.manualCompactionState.get(sessionName) ?? null;
   }
 
+  /**
+   * GHOST-STAGE (e) Class-A invalidation: drop EVERY in-memory compaction-state entry for one seat
+   * name, so a handed-over successor under the same session name never inherits the predecessor's
+   * queued stage / dedup / cooldown (the ghost prompt). Called by the cutover seam's
+   * OccupantInvalidator at SeatHandoverService.commit(). Also closes the manualCompactionState leak
+   * (census 1f): that map was NEVER deleted on drain, so a same-name successor read a stale terminal
+   * record. Occupant-scoped (no atom-B): the retiring occupant is gone, so a name match IS the ghost.
+   */
+  invalidateOccupant(sessionName: string): void {
+    this.lastAutoCompactAt.delete(sessionName);
+    this.postCompactRestoreCooldownUntil.delete(sessionName);
+    this.triggeredAboveThreshold.delete(sessionName);
+    this.pendingPreCompactPrep.delete(sessionName);
+    this.pendingPostCompactRestore.delete(sessionName);
+    this.manualCompactionState.delete(sessionName);
+  }
+
   private setManualStage(sessionName: string, stage: ManualCompactionStage, reason?: string, operatorInitiated?: boolean): void {
     this.manualCompactionState.set(sessionName, { stage, reason, updatedAt: Date.now(), operatorInitiated });
   }

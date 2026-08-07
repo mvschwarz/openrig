@@ -288,6 +288,36 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send.mock.calls.length).toBe(queuedSendCount); // the queued stage did NOT fire
   });
 
+  it("GHOST-STAGE (e): invalidateOccupant drops a queued stage + the manualCompactionState leak — a same-name successor inherits nothing", async () => {
+    const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
+    const { transport, send } = makeSessionTransport();
+    const enforcer = new ClaudeCompactionEnforcer(settings, transport, {
+      dedupWindowMs: 60_000, postCompactRestoreCooldownMs: 0, openrigHome: "/tmp/openrig-test-home",
+    });
+    let now = 1_700_000_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+
+    // Queue a stage (prep -> /compact sets pendingPostCompactRestore) + a manual record for the seat.
+    await enforcer.maybeAutoCompact({ sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage: 90 });
+    now += 30_000;
+    await enforcer.maybeAutoCompact({ sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage: 95 });
+    await enforcer.triggerManualCompact({ sessionName: "other-seat@rig", runtime: "claude-code", usedPercentage: 20 }, { operatorInitiated: true });
+    expect(enforcer.getManualCompactionState("other-seat@rig")).not.toBeNull();
+    const queuedSends = send.mock.calls.length;
+
+    // Cutover: the retiring occupant hands over. invalidateOccupant drops ALL its in-mem state.
+    enforcer.invalidateOccupant("claude-seat@rig");
+    enforcer.invalidateOccupant("other-seat@rig");
+    expect(enforcer.getManualCompactionState("other-seat@rig")).toBeNull(); // 1f leak closed
+
+    // The successor under the SAME name gets a below-threshold tick: nothing drains (no ghost prompt).
+    const drain = await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage: 20, transcriptPath: "/tmp/claude.jsonl",
+    });
+    expect(drain).toEqual({ triggered: false, reason: "below_threshold" }); // the queued stage was invalidated
+    expect(send.mock.calls.length).toBe(queuedSends); // no inherited drain
+  });
+
   it("post-compact compliance prompt starts a cooldown so restore work cannot immediately trigger another /compact", async () => {
     const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
     const { transport, send } = makeSessionTransport();
