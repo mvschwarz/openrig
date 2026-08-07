@@ -1,6 +1,6 @@
 import type { PsEntry } from "./ps-projection.js";
 import type { Rig } from "./types.js";
-import type { SearchResult, ChatSearchResult, SeatSearchResult, SeatHit } from "./history-query.js";
+import type { SearchResult, ChatSearchResult, SeatSearchResult, SeatHit, SessionSearchResult } from "./history-query.js";
 import type { RigWithRelations } from "./types.js";
 import type { WhoamiResult } from "./whoami-service.js";
 
@@ -13,6 +13,7 @@ export interface AskDeps {
     search(rigName: string, question: string): Promise<SearchResult>;
     searchChat(rigId: string, question: string): ChatSearchResult[];
     searchSeat(rigName: string, seatSessionName: string, question: string): Promise<SeatSearchResult>;
+    searchSession(sessionToken: string, question: string): Promise<SessionSearchResult>;
   };
   transcriptsEnabled: boolean;
   whoamiService?: { resolve(query: { nodeId?: string; sessionName?: string }): WhoamiResult | null };
@@ -34,6 +35,15 @@ export interface AskSeatEvidence {
   advisory?: string;
 }
 
+export interface AskSessionEvidence {
+  token: string;
+  found: boolean;
+  path?: string;
+  excerpts: string[];
+  degraded?: { reason: string; message: string };
+  advisory?: string;
+}
+
 export interface AskResult {
   question: string;
   rig: AskRigInfo | null;
@@ -44,6 +54,8 @@ export interface AskResult {
   };
   /** L1 seat-scoped evidence — present only when a seat was addressed. */
   seat?: AskSeatEvidence;
+  /** L2 session-scoped evidence — present only when a session token was addressed. */
+  session?: AskSessionEvidence;
   insufficient: boolean;
   guidance?: string;
 }
@@ -61,7 +73,7 @@ export class AskService {
     this.deps = deps;
   }
 
-  async ask(rigName: string, question: string, context?: { nodeId?: string; sessionName?: string; seat?: string }): Promise<AskResult> {
+  async ask(rigName: string, question: string, context?: { nodeId?: string; sessionName?: string; seat?: string; session?: string }): Promise<AskResult> {
     // Resolve rig
     const rigs = this.deps.rigRepo.findRigsByName(rigName);
 
@@ -91,6 +103,37 @@ export class AskService {
     const rigInfo: AskRigInfo = psEntry
       ? { name: psEntry.name, status: psEntry.status, nodeCount: psEntry.nodeCount, runningCount: psEntry.runningCount, uptime: psEntry.uptime }
       : { name: rigName, status: "unknown", nodeCount: 0, runningCount: 0, uptime: null };
+
+    // L2 — session-scoped archaeology: an explicit session TOKEN searches that
+    // one session's provider JSONL (read-only, not the OpenRig transcripts, so
+    // transcriptsEnabled does not gate it). Honest-degraded surfaces as guidance.
+    if (context?.session) {
+      const r = await this.deps.historyQuery.searchSession(context.session, question);
+      let guidance: string | undefined;
+      if (r.degraded) {
+        guidance = r.degraded.message;
+      } else if (r.found && r.insufficient) {
+        guidance = `No matching content in session '${context.session}'. Try different search terms.`;
+      }
+      if (r.advisory) {
+        guidance = guidance ? `${r.advisory}\n${guidance}` : r.advisory;
+      }
+      return {
+        question,
+        rig: rigInfo,
+        evidence: { backend: r.backend, excerpts: r.excerpts },
+        session: {
+          token: r.token,
+          found: r.found,
+          path: r.path,
+          excerpts: r.excerpts,
+          degraded: r.degraded,
+          advisory: r.advisory,
+        },
+        insufficient: r.insufficient,
+        guidance,
+      };
+    }
 
     // L1 — seat-scoped archaeology: an explicit seat address searches ONE seat's
     // transcript across every generation (never the whole-rig grep, never the

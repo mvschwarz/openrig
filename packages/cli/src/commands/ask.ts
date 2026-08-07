@@ -21,6 +21,15 @@ interface AskSeatEvidence {
   advisory?: string;
 }
 
+interface AskSessionEvidence {
+  token: string;
+  found: boolean;
+  path?: string;
+  excerpts: string[];
+  degraded?: { reason: string; message: string };
+  advisory?: string;
+}
+
 interface AskResult {
   question: string;
   rig: AskRigInfo | null;
@@ -30,6 +39,7 @@ interface AskResult {
     chatExcerpts?: string[];
   };
   seat?: AskSeatEvidence;
+  session?: AskSessionEvidence;
   insufficient: boolean;
   guidance?: string;
 }
@@ -45,16 +55,20 @@ export function askCommand(depsOverride?: StatusDeps): Command {
     .argument("<question>", "Question to search for in transcripts")
     .option("--json", "JSON output for agents")
     .option("--seat <session>", "Scope the search to ONE seat's transcript across every generation that sat in it (cross-generation archaeology)")
+    .option("--session <token>", "Search ONE specific session's JSONL by its session token (read-only)")
     .addHelpText("after", `
 rig ask is one verb for information about the PAST, three ways to reach it:
-  1. rig ask <rig> "<q>"                 search the whole rig's transcripts
-  2. rig ask <rig> "<q>" --seat <seat>   scope to ONE seat, across every
-                                         generation that sat in it (L1)
+  1. rig ask <rig> "<q>"                    search the whole rig's transcripts
+  2. rig ask <rig> "<q>" --seat <seat>      scope to ONE seat, across every
+                                            generation that sat in it (L1)
+  3. rig ask <rig> "<q>" --session <token>  search ONE session's JSONL by
+                                            token — "I have the token, find it" (L2)
 
 Examples:
   rig ask my-rig "what decisions were made about deployment?"
   rig ask my-rig "error handling strategy" --json
   rig ask my-rig "what did we decide" --seat dev-planner@my-rig
+  rig ask my-rig "SECRET_MARKER" --session 3f2a-...-9c1
 
 Exit codes:
   0  Success
@@ -66,7 +80,7 @@ Exit codes:
     clientFactory: (url: string) => new DaemonClient(url),
   };
 
-  cmd.action(async (rig: string, question: string, opts: { json?: boolean; seat?: string }) => {
+  cmd.action(async (rig: string, question: string, opts: { json?: boolean; seat?: string; session?: string }) => {
     const deps = getDeps();
 
     const status = await getDaemonStatus(deps.lifecycleDeps);
@@ -80,6 +94,7 @@ Exit codes:
       nodeId: identity?.nodeId,
       sessionName: identity?.sessionName,
       seat: opts.seat,
+      session: opts.session,
     });
 
     if (res.status >= 400) {
@@ -109,6 +124,14 @@ Exit codes:
       console.log(`Seat: ${result.seat.name}  (${result.seat.generations} generation(s) searched)`);
       if (result.seat.advisory) {
         console.log(`  ⚠ ${result.seat.advisory}`);
+      }
+    }
+
+    if (result.session) {
+      const loc = result.session.found ? (result.session.path ?? "found") : "not found";
+      console.log(`Session: ${result.session.token}  [${loc}]`);
+      if (result.session.advisory) {
+        console.log(`  ⚠ ${result.session.advisory}`);
       }
     }
 
