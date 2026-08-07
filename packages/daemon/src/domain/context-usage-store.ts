@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { join } from "node:path";
 import os from "node:os";
-import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import type { ContextUsage, ContextUnknownReason } from "./types.js";
 
 /** Freshness threshold: samples older than this are considered stale for compact displays. */
@@ -83,6 +83,24 @@ export class ContextUsageStore {
     // Sanitize session name for filesystem safety
     const safe = sessionName.replace(/[^a-zA-Z0-9@._-]/g, "_");
     return join(this.stateDir, "context", `${safe}.json`);
+  }
+
+  /**
+   * GHOST-STAGE (e) Class-A 2a: remove a retiring occupant's name-keyed context sidecar so a
+   * same-name successor does not read the predecessor's frozen telemetry sample (the "gen-1 88%
+   * resurfaced as a live threshold flag" specimen). Safe by TIMING — the cutover seam
+   * (OccupantInvalidator) calls this inside SeatHandoverService.commit(), BEFORE the successor
+   * writes its own sidecar. Missing file = no-op; best-effort (a leftover is caught downstream by
+   * the freshness gate). NOTE: this is the DISK sidecar (name-keyed); the context_usage DB table is
+   * node_id-keyed + already session_mismatch-gated, so it needs no invalidation here.
+   */
+  invalidateOccupantSidecar(sessionName: string): void {
+    const filePath = this.getSidecarPath(sessionName);
+    try {
+      if (existsSync(filePath)) unlinkSync(filePath);
+    } catch {
+      /* best-effort — a stale leftover is still gated by isFresh downstream */
+    }
   }
 
   /** Read and parse a sidecar JSON file. Returns discriminated result. */
