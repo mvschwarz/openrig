@@ -69,13 +69,18 @@ describe("prepareHermeticEnv scaffold", () => {
   it("does NOT mutate the caller's env object nor process.env", () => {
     const base: Record<string, string | undefined> = { HOME: "/real-home", PATH: "/usr/bin" };
     const beforeHome = process.env.HOME;
+    // Capture BEFORE — the invariant is "process.env is UNCHANGED", not an absolute value. A bare
+    // `not.toBe("1")` was env-SENSITIVE: it false-fails when the ambient seat env already carries
+    // OPENRIG_NO_KERNEL="1" (the scaffold copies baseEnv via {...baseEnv} and never touches process.env;
+    // the old assertion assumed a clean ambient env — the very env-sensitivity this scaffold exists to cure).
+    const beforeNoKernel = process.env.OPENRIG_NO_KERNEL;
     const s = make(base);
     // caller's base object untouched
     expect(base.HOME).toBe("/real-home");
     expect(base.OPENRIG_HOME).toBeUndefined();
-    // process.env untouched
+    // process.env untouched (compared to its OWN before-value → insensitive to the ambient env)
     expect(process.env.HOME).toBe(beforeHome);
-    expect(process.env.OPENRIG_NO_KERNEL).not.toBe("1");
+    expect(process.env.OPENRIG_NO_KERNEL).toBe(beforeNoKernel);
     // the scaffold's env is a distinct object
     expect(s.env).not.toBe(base);
   });
