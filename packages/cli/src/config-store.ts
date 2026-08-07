@@ -2,7 +2,6 @@ import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync } from "
 import { join, dirname } from "node:path";
 import { userInfo } from "node:os";
 import {
-  getCompatibleOpenRigPath,
   getDefaultOpenRigPath,
   readOpenRigEnv,
 } from "./openrig-compat.js";
@@ -702,7 +701,37 @@ export class ConfigStore {
   readonly configPath: string;
 
   constructor(configPath?: string) {
-    this.configPath = configPath ?? getCompatibleOpenRigPath("config.json");
+    // GHOST-STAGE (d): the config default WRITE target must be the CANONICAL path the daemon READS
+    // (getOpenRigHome/config.json), NOT the existence-based getCompatibleOpenRigPath which prefers a
+    // legacy ~/.rigged/config.json when canonical is absent. That divergence let `rig config set`
+    // report success while writing a stale operator SIDECAR the daemon never reads (accept-and-drop
+    // family). Reads align to canonical too — the daemon already ignores ~/.rigged.
+    this.configPath = configPath ?? getDefaultOpenRigPath("config.json");
+  }
+
+  // GHOST-STAGE (d): verify-readback + fail-loud. After a write, RE-READ the file we wrote
+  // (this.configPath) and confirm the value actually persisted. For the DEFAULT store this path is
+  // the CANONICAL config the daemon reads (getOpenRigHome/config.json — the constructor no longer
+  // resolves the legacy ~/.rigged sidecar), so a persisted read here IS proof the daemon sees it.
+  // A read-back MISMATCH means the write silently did not take — we REFUSE loudly rather than report
+  // a phantom success (the accept-and-drop / config-set-success-without-persist class).
+  private verifyPersisted(keyPath: string[], expected: unknown): void {
+    let reread: Record<string, unknown>;
+    try {
+      reread = JSON.parse(readFileSync(this.configPath, "utf-8")) as Record<string, unknown>;
+    } catch (e) {
+      throw new Error(
+        `config write did NOT persist: could not read it back at ${this.configPath} (${(e as Error).message}). ` +
+          `Refusing to report success — the change did not take.`,
+      );
+    }
+    const got = getNestedValue(reread, keyPath);
+    if (JSON.stringify(got) !== JSON.stringify(expected)) {
+      throw new Error(
+        `config write did NOT persist to ${this.configPath}: it still shows ${JSON.stringify(got)} for ` +
+          `[${keyPath.join(".")}] (expected ${JSON.stringify(expected)}). Refusing to report a phantom success.`,
+      );
+    }
   }
 
   resolve(): RiggedConfig {
@@ -896,6 +925,7 @@ export class ConfigStore {
       setNestedValue(fcDyn, ["feed", "subscriptions", feedHost.hostId, "enabled"], coercedDyn);
       mkdirSync(dirname(this.configPath), { recursive: true });
       writeFileSync(this.configPath, JSON.stringify(fcDyn, null, 2) + "\n", "utf-8");
+      this.verifyPersisted(["feed", "subscriptions", feedHost.hostId, "enabled"], coercedDyn);
       return;
     }
     if (!isValidKey(key)) {
@@ -909,6 +939,7 @@ export class ConfigStore {
     setNestedValue(fileConfig, KEY_TO_PATH[key], coerced);
     mkdirSync(dirname(this.configPath), { recursive: true });
     writeFileSync(this.configPath, JSON.stringify(fileConfig, null, 2) + "\n", "utf-8");
+    this.verifyPersisted(KEY_TO_PATH[key], coerced);
   }
 
   /**

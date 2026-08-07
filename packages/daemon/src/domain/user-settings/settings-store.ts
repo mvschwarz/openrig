@@ -739,6 +739,28 @@ export class SettingsStore {
     };
   }
 
+  // GHOST-STAGE (d) twin of the CLI ConfigStore guard: verify-readback + fail-loud. After a write,
+  // re-read this.configPath (the canonical config) and confirm the value persisted; a mismatch means
+  // the write silently did not take, so REFUSE loudly rather than report a phantom success
+  // (config-set-success-without-persist). The daemon already writes canonical (DEFAULT_CONFIG_PATH),
+  // so this is the defense-in-depth half of the paired fix.
+  private verifyPersisted(keyPath: string[], expected: unknown): void {
+    let reread: Record<string, unknown>;
+    try {
+      reread = JSON.parse(readFileSync(this.configPath, "utf-8")) as Record<string, unknown>;
+    } catch (e) {
+      throw new Error(
+        `config write did NOT persist: could not read it back at ${this.configPath} (${(e as Error).message}). Refusing to report success.`,
+      );
+    }
+    const got = getNestedValue(reread, keyPath);
+    if (JSON.stringify(got) !== JSON.stringify(expected)) {
+      throw new Error(
+        `config write did NOT persist to ${this.configPath}: it still shows ${JSON.stringify(got)} for [${keyPath.join(".")}] (expected ${JSON.stringify(expected)}). Refusing to report a phantom success.`,
+      );
+    }
+  }
+
   set(key: string, value: string): void {
     // OPR.0.4.4.15: the ONE registered dynamic class is accepted here;
     // every OTHER unknown key keeps the reject-loud behavior below
@@ -750,6 +772,7 @@ export class SettingsStore {
       setNestedValue(fcDyn, ["feed", "subscriptions", feedHost.hostId, "enabled"], coercedDyn);
       mkdirSync(path.dirname(this.configPath), { recursive: true });
       writeFileSync(this.configPath, JSON.stringify(fcDyn, null, 2) + "\n", "utf-8");
+      this.verifyPersisted(["feed", "subscriptions", feedHost.hostId, "enabled"], coercedDyn);
       return;
     }
     if (!isSettingsValidKey(key)) {
@@ -761,6 +784,7 @@ export class SettingsStore {
     setNestedValue(fc, KEY_TO_PATH[key], coerced);
     mkdirSync(path.dirname(this.configPath), { recursive: true });
     writeFileSync(this.configPath, JSON.stringify(fc, null, 2) + "\n", "utf-8");
+    this.verifyPersisted(KEY_TO_PATH[key], coerced);
   }
 
   /** OPR.0.4.4.15 — resolve one dynamic feed-host subscription key.

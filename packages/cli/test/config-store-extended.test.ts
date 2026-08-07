@@ -833,3 +833,42 @@ describe("init-workspace runner", () => {
     expect(existsSync(workspaceRoot)).toBe(true);
   });
 });
+
+// GHOST-STAGE (d) — the CLI `rig config set` write-target must be the CANONICAL config the DAEMON
+// reads (getOpenRigHome/config.json), never the existence-based legacy ~/.rigged sidecar. The
+// operator hit config-set-success-without-persist: the setter wrote the sidecar, the daemon read
+// canonical, so `disabled` never took. RED provenance: on a host WITH a legacy ~/.rigged/config.json
+// the OLD getCompatibleOpenRigPath returns that real-home sidecar while OPENRIG_HOME points at the
+// canonical home — so `configPath` diverges and this pin RED-fails. (A host-independent RED needs
+// os.homedir() mocking — harness note.)
+describe("ConfigStore — GHOST-STAGE (d): write-canonical + verify-readback", () => {
+  let home: string;
+  let savedHome: string | undefined;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "cfg-d-home-"));
+    savedHome = process.env["OPENRIG_HOME"];
+    process.env["OPENRIG_HOME"] = home; // the canonical home the daemon resolves
+  });
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env["OPENRIG_HOME"];
+    else process.env["OPENRIG_HOME"] = savedHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("a DEFAULT store writes to <OPENRIG_HOME>/config.json (where the daemon reads), not a legacy sidecar", () => {
+    const store = new ConfigStore(); // no explicit path -> getDefaultOpenRigPath (the fix)
+    const canonical = join(home, "config.json");
+    expect(store.configPath).toBe(canonical); // writes EXACTLY where the daemon reads (the write-target fix)
+    store.set("policies.claude_compaction.enabled", "false");
+    // read it back the way the DAEMON does — via the canonical path — proving the write reached it
+    const daemonSees = JSON.parse(readFileSync(canonical, "utf-8")) as { policies?: { claudeCompaction?: { enabled?: boolean } } };
+    expect(daemonSees.policies?.claudeCompaction?.enabled).toBe(false);
+  });
+
+  it("verify-readback round-trips: a set() value is read back from the same file (no phantom success)", () => {
+    const store = new ConfigStore();
+    store.set("daemon.port", "9191");
+    expect(store.get("daemon.port")).toBe(9191);
+    expect((JSON.parse(readFileSync(join(home, "config.json"), "utf-8")) as { daemon?: { port?: number } }).daemon?.port).toBe(9191);
+  });
+});
