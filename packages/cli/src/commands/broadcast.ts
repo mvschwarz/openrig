@@ -18,6 +18,20 @@ import { readOpenRigEnv } from "../openrig-compat.js";
  */
 const BROADCAST_REMOTE_TIMEOUT_MS = 30_000;
 
+/**
+ * The enveloped-fan-out MARKER for a broadcast body — ONE origin, called by BOTH the local and cross-host
+ * paths. Its PRESENCE tells the daemon /broadcast to WRAP each recipient (the anti-storm scale header); its
+ * VALUE is IGNORED by the daemon, which derives the rendered From: from the transport identity
+ * (X-OpenRig-Session, stamped LAST on every DaemonClient request). Extracting it here keeps the session-less
+ * fall-open literal ("<unknown sender>") to a SINGLE origin — never duplicated across the host boundary.
+ * (When the seat env is unset, no header is stamped and the daemon refuses the marked-but-unattributed
+ * send 401 — the cross-host path inherits that refuse-loud guard for free, no local check needed.)
+ */
+function resolveEnvelopeMarker(): string {
+  const sender = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+  return sender && sender.trim().length > 0 ? sender : "<unknown sender>";
+}
+
 export interface BroadcastDeps extends StatusDeps {
   /** Test seam: inject a registry loader so no real ~/.openrig is touched. */
   hostRegistryLoader?: () => ReturnType<typeof loadHostRegistry>;
@@ -120,8 +134,7 @@ selection, not the agent@rig@host sugar.`)
       // SENDER_FALLBACK) so a session-less broadcast still carries the scale — no session-less storm.
       // (review-r1 flagged the prior raw fall-open as a founder call; closed symmetric with send per the
       // founder root-cause intent — trivially revert to raw-when-session-less if the founder prefers.)
-      const sender = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
-      body.envelopeSender = sender && sender.trim().length > 0 ? sender : "<unknown sender>";
+      body.envelopeSender = resolveEnvelopeMarker();
 
       const res = await client.post<Record<string, unknown>>("/api/transport/broadcast", body);
 
@@ -177,6 +190,12 @@ async function runCrossHostBroadcast(
   const body: Record<string, unknown> = { text, force: opts.force };
   if (opts.rig) body.rig = opts.rig;
   if (opts.pod) body.pod = opts.pod;
+  // P21 cross-host broadcast fix: ADD the enveloped-fan-out marker (this rebuild dropped it, so the remote
+  // rendered RAW while the local path — same helper — wrapped). The DaemonClient auto-stamps
+  // X-OpenRig-Session=origin env on this POST (client.ts:171, P18 chokepoint), so the remote derives the
+  // From: from the transport; the marker VALUE is ignored. No extra-headers stamp (that would be a second
+  // origin of an already-stamped header).
+  body.envelopeSender = resolveEnvelopeMarker();
 
   const result = await runRemoteHttpOp(hostId, "POST", "/api/transport/broadcast", body, deps, {
     timeoutMs: BROADCAST_REMOTE_TIMEOUT_MS,
