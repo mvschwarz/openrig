@@ -2,7 +2,23 @@
 // the honesty-gap leg set, and the C2 verdict are unit-tested; the CLI entrypoint (gate-lane.mjs) wires
 // the real mutex + subprocess exec + artifact write around these.
 
+import { rmSync } from "node:fs";
+import { join } from "node:path";
 import { resolveGateWithLedger, renderLedgerState } from "./gate-lane-ledger.mjs";
+
+/**
+ * SOURCE-TRUTH hygiene: remove the vendored daemon bundle at packages/cli/daemon before the legs run.
+ * That path is a GITIGNORED build artifact assembled by `npm run build:package`; a stale desk leftover
+ * there poisons test:repo's freshness guard (the guard correctly flags any assembled-but-stale bundle,
+ * but the gate is not a package-time context — it tests SOURCE truth). Removing it at gate start means a
+ * leftover can never poison a run; real package-time assembly is still guarded, and a fresh clone with no
+ * bundle is a `force:true` no-op. `rm` is injected for testability. Returns the removed path.
+ */
+export function cleanStaleVendoredBundle(repoRoot, rm = rmSync) {
+  const vendored = join(repoRoot, "packages", "cli", "daemon");
+  rm(vendored, { recursive: true, force: true });
+  return vendored;
+}
 
 /**
  * P5 — the refusal teaching text. ALWAYS hard-refuses; ALWAYS teaches the port constant. A gate holder is

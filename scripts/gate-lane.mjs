@@ -10,7 +10,7 @@ import { tmpdir, loadavg } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { acquireGateLane, GATE_LANE_PORT } from "./gate-lane-lock.mjs";
-import { renderRefusal, runLegs, buildVerdict, observeForeignLoad } from "./gate-lane-run.mjs";
+import { renderRefusal, runLegs, buildVerdict, observeForeignLoad, cleanStaleVendoredBundle } from "./gate-lane-run.mjs";
 
 const RUNTIME_DIR = (() => { const d = join(tmpdir(), "openrig-gate"); mkdirSync(d, { recursive: true }); return d; })();
 const HOLDER_INFO = join(RUNTIME_DIR, "gate-lane.holder.json");
@@ -48,6 +48,11 @@ async function main() {
   try {
     const foreignLoad = observeForeignLoad({ loadavg: loadavg(), processes: snapshotProcesses() });
     if (foreignLoad.advisory.length) console.warn(`⚠ advisory (exit UNCHANGED, recorded in verdict): ${foreignLoad.advisory.join("; ")}`);
+    // SOURCE-TRUTH: drop any stale vendored daemon bundle (a gitignored build:package leftover) before
+    // the legs run, so test:repo's freshness guard is never poisoned by a desk leftover. Real package-time
+    // assembly is still guarded; a fresh checkout is a no-op.
+    const removedBundle = cleanStaleVendoredBundle(process.cwd());
+    console.log(`[gate] source-truth: cleaned any stale vendored bundle at ${removedBundle}`);
     const exec = SMOKE
       ? async (cmd) => { console.log(`[smoke] skip: ${cmd}`); return { ok: true, code: 0 }; }
       : async (cmd) => { const r = spawnSync(cmd, { shell: true, stdio: "inherit" }); return { ok: r.status === 0, code: r.status }; };

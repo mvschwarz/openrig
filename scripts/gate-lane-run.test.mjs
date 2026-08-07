@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { renderRefusal, runLegs, buildVerdict, observeForeignLoad } from "./gate-lane-run.mjs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { renderRefusal, runLegs, buildVerdict, observeForeignLoad, cleanStaleVendoredBundle } from "./gate-lane-run.mjs";
 
 // F1 gate-lane runner logic (arch d6a6c1db, 5 pins). HONESTY (gap 1): the gate runs test:ui (npm test
 // excludes it); (gap 2) green = typecheck AND vitest BOTH legs. P5: refusal teaches the port constant,
@@ -81,4 +84,24 @@ test("exclusion-ledger — empty seed stays STRICT; an active resident covering 
   assert.equal(covered.gate, "pass");
   assert.equal(covered.ledger.activeExclusions.length, 1);
   assert.match(covered.ledgerState, /vitest/);
+});
+
+// The gate tests SOURCE truth. A stale desk leftover at packages/cli/daemon (a gitignored build
+// artifact from a prior `npm run build:package`) would poison test:repo's freshness guard — the guard
+// correctly flags an assembled-but-stale bundle, but the gate is not a package-time context. The runner
+// removes it at gate start so a leftover can never poison a run; real package-time assembly is still
+// guarded, and a fresh clone (no bundle) is a no-op.
+test("gate cleans a stale vendored daemon bundle at start so a desk leftover can't poison test:repo", () => {
+  const root = mkdtempSync(join(tmpdir(), "gate-vendored-"));
+  const bundleDist = join(root, "packages", "cli", "daemon", "dist");
+  mkdirSync(bundleDist, { recursive: true });
+  writeFileSync(join(bundleDist, "index.js"), "// stale leftover from an old build:package assembly");
+  assert.ok(existsSync(bundleDist), "planted stale bundle exists");
+
+  const removed = cleanStaleVendoredBundle(root);
+  assert.equal(existsSync(join(root, "packages", "cli", "daemon")), false, "the whole vendored daemon tree is removed");
+  assert.match(removed, /packages[\\/]cli[\\/]daemon$/);
+
+  // idempotent: a fresh clone with no bundle is a clean no-op (force:true), never a throw.
+  assert.doesNotThrow(() => cleanStaleVendoredBundle(root));
 });
