@@ -79,6 +79,9 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
         ? { readSessionFile: pi.readSessionFile.bind(pi) as (sessionName: string) => { ok: true; sessionFile: string } | { ok: false; reason: string } }
         : undefined;
     })(),
+    // GHOST-STAGE (e/Class-B) — the canonical OccupantInvalidator so commit()'s re-key call fires
+    // (invalidate the retiring occupant's seat-name-keyed stores before the successor accumulates any).
+    occupantInvalidator: (c.get("occupantInvalidator" as never) as import("../domain/occupant-invalidator.js").OccupantInvalidator | undefined) ?? undefined,
   });
   const result = await service.handover({
     seatRef: decodeURIComponent(c.req.param("seatRef")!),

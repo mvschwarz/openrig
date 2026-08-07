@@ -98,6 +98,25 @@ describe("createDaemon startup composition", () => {
     }
   }, 30000); // createDaemon full composition can exceed the 5s default on a cold start
 
+  // GHOST-STAGE (e/Class-B) seam-coexist pin: dev-driver's fold added the invalidateRetiringOccupant
+  // CALL at SeatHandoverService.commit() but no concrete invalidator was ever wired, so in production
+  // the call was a silent no-op. This asserts createDaemon now constructs + injects a real
+  // OccupantInvalidator — so the re-key invalidation actually FIRES (the service-level call-fires is
+  // pinned separately in seat-handover-service.test.ts). Never lose a live call while deduping.
+  it("wires a concrete OccupantInvalidator so the seat-handover re-key invalidation FIRES in production", async () => {
+    const cmuxFactory: CmuxTransportFactory = async () => {
+      throw Object.assign(new Error("no socket"), { code: "ENOENT" });
+    };
+    const tmuxExec: ExecFn = async () => "";
+    const { db, deps } = await createDaemon({ cmuxFactory, tmuxExec });
+    try {
+      expect(deps.occupantInvalidator, "AppDeps.occupantInvalidator must be constructed + injected").toBeDefined();
+      expect(typeof deps.occupantInvalidator!.invalidateRetiringOccupant).toBe("function");
+    } finally {
+      db.close();
+    }
+  }, 30000);
+
   // Slice 51-01 stub-runtime — STEP 3 (first PRODUCTION dispatch proof, RED-first): the assembled
   // PodRigInstantiator's PRIVATE adapters map (startup.ts:710 — a SEPARATE literal from the :898
   // runtimeAdapters map STEP2 checks) must DISPATCH a runtime:stub seat to the stub adapter so its

@@ -287,6 +287,12 @@ export interface AppDeps {
    * auto share one back-half state machine — no second restore path).
    */
   compactionEnforcer?: ClaudeCompactionEnforcer;
+  /**
+   * GHOST-STAGE (e/Class-B) — the canonical OccupantInvalidator, constructed once in startup and
+   * injected so SeatHandoverService.commit()'s re-key call actually FIRES (dev-driver's fold added
+   * the optional call but no concrete impl was wired — the invalidation was dead until this).
+   */
+  occupantInvalidator?: import("./domain/occupant-invalidator.js").OccupantInvalidator;
   nodeCmuxService?: import("./domain/node-cmux-service.js").NodeCmuxService;
   agentActivityStore?: AgentActivityStore;
   seatAttentionReconciler?: import("./domain/seat-attention-reconciler.js").SeatAttentionReconciler;
@@ -519,6 +525,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("contextUsageStore" as never, deps.contextUsageStore);
     c.set("contextMonitor" as never, deps.contextMonitor);
     c.set("compactionEnforcer" as never, deps.compactionEnforcer);
+    c.set("occupantInvalidator" as never, deps.occupantInvalidator);
     c.set("nodeCmuxService" as never, deps.nodeCmuxService);
     c.set("agentActivityStore" as never, deps.agentActivityStore);
     c.set("seatAttentionReconciler" as never, deps.seatAttentionReconciler);

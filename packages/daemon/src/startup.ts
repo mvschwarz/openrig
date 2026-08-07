@@ -1685,6 +1685,17 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // the manual back-half drain through the auto poll loop (no second path).
   deps.compactionEnforcer = compactionEnforcer;
 
+  // GHOST-STAGE (e/Class-B) — construct the canonical OccupantInvalidator now that both Class-A deps
+  // exist (the enforcer's in-mem maps 1a-1f + the context sidecar 2a). Injected into SeatHandoverService
+  // via the app context so commit()'s re-key call FIRES (it was a no-op until wired). An absent enforcer
+  // (degraded boot, no sessionTransport) falls back to a sidecar-only invalidator — never throws.
+  const { DefaultOccupantInvalidator } = await import("./domain/occupant-invalidator.js");
+  deps.occupantInvalidator = new DefaultOccupantInvalidator({
+    enforcer: compactionEnforcer ?? { invalidateOccupant: () => {} },
+    contextUsage: contextUsageStore,
+    log: (msg) => console.warn(msg),
+  });
+
   // OPR.0.3.4.9 — periodic snapshot scheduler (crash-insurance floor).
   const { PeriodicSnapshotScheduler } = await import("./domain/periodic-snapshot-scheduler.js");
   const periodicSnapshotScheduler = new PeriodicSnapshotScheduler({
