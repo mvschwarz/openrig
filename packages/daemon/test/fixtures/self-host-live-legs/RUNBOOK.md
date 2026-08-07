@@ -42,16 +42,32 @@ of permission defect this testbed exists to surface.
 ```bash
 STAGE=/home/openrig/topologies   # openrig-readable by construction (its own home)
 
-# copy the SAME file to both containers (never author a second copy)
-for h in H_A H_B; do docker cp packages/daemon/test/fixtures/self-host-live-legs/topologies "$h":"${STAGE}"; done
-
-# PRE-FLIGHT FENCE — readability AS THE EXEC USER, before anything depends on it. A future
-# USER/permissions change then self-diagnoses here instead of surfacing as a bare
-# "Permission denied" from sha256sum three steps later.
+# DELIVER AS THE PRODUCT'S OWN USER. `docker cp` preserves ROOT ownership, which
+# yields a stage that is readable but NOT WRITABLE to `openrig` — and `rig up`'s
+# pre-launch delivery WRITES into the stage (AGENTS.md), so a root-owned stage
+# fails EACCES before any seat exists. Tar-piping into a default `docker exec`
+# extracts AS `openrig`, so ownership is correct BY CONSTRUCTION — no chown step,
+# no root exec anywhere in the procedure (same principle as the probe: the user
+# the product runs as is the user that does the work).
+SRC=packages/daemon/test/fixtures/self-host-live-legs/topologies
 for h in H_A H_B; do
+  docker exec "$h" mkdir -p "${STAGE}"
+  tar -C "${SRC}" -cf - . | docker exec -i "$h" tar -C "${STAGE}" -xf -
+done
+
+# PRE-FLIGHT FENCE — the FULL product contract, AS THE EXEC USER, before anything
+# depends on it. The stage is not just read: `rig up`'s pre-launch delivery WRITES
+# into it, so read-only staging passes a read fence and then fails EACCES later.
+# Both halves are probed by DOING them (a real touch/rm), not by reading mode bits —
+# mode bits can lie under ownership, ACLs, or a read-only mount.
+for h in H_A H_B; do
+  AS="$(docker exec "$h" id -un)"
   docker exec "$h" test -r "${STAGE}/shared.yaml" || {
-    echo "ABORT: ${STAGE}/shared.yaml is not readable as $(docker exec "$h" id -un) on ${h} — the image declares USER openrig (Dockerfile:61); stage where that user can read, do not exec as root";
+    echo "ABORT: ${STAGE}/shared.yaml not READABLE as ${AS} on ${h} — image declares USER openrig (Dockerfile:61); stage where that user can read, never exec as root";
     docker exec "$h" ls -la "${STAGE}" 2>&1 | head -20; exit 1; }
+  docker exec "$h" sh -c "touch '${STAGE}/.fence-write' && rm -f '${STAGE}/.fence-write'" || {
+    echo "ABORT: ${STAGE} not WRITABLE as ${AS} on ${h} — rig up delivers AGENTS.md into the stage, so a root-owned (docker cp) stage fails EACCES at instantiate; deliver as the exec user (tar-pipe), never chown mid-proof";
+    docker exec "$h" ls -lad "${STAGE}" 2>&1; docker exec "$h" ls -la "${STAGE}" 2>&1 | head -20; exit 1; }
 done
 
 # ASSERT byte-identity of the collision spec across hosts, BEFORE any leg runs
