@@ -125,8 +125,10 @@ interface QueueItemRow {
 export interface QueueNudgeTransport {
   send(
     sessionName: string,
+    // (h): stampISO threads the nudge's compose time so the transport's delivered-latency calc can
+    // measure the wait for a handoff nudge too (the real impl is SessionTransport, which accepts it).
     text: string,
-    opts?: { verify?: boolean }
+    opts?: { verify?: boolean; stampISO?: string }
   ): Promise<{ ok: boolean; verified?: boolean; error?: string; reason?: string }>;
 }
 
@@ -429,6 +431,7 @@ export class QueueRepository {
   private readonly eventBus: EventBus;
   private readonly validateRig: (sessionRef: string) => boolean;
   private transport: QueueNudgeTransport | undefined;
+  private resolveOccupantGeneration?: (sessionName: string) => string | null;
   /** PL-007 Workspace Primitive — true when migration 038 has applied the
    *  queue_items.target_repo column. Older test fixtures that bypass the
    *  canonical migration list don't have the column; INSERTs degrade to
@@ -466,6 +469,14 @@ export class QueueRepository {
        * behavior.
        */
       workflowFrontierPredicate?: (qitemId: string) => { instanceId: string; workflowName: string } | null;
+      /**
+       * GHOST-STAGE (h): resolve the SOURCE seat's atom-B occupant generation-uuid so a handoff
+       * nudge carries the composing generation on its Sent: line (the injected-predicate precedent —
+       * the queue is the lower primitive and never imports the session domain; startup wires
+       * SessionRegistry.currentOccupantGenerationForSession in). Absent ⇒ UNKNOWN ⇒ the gen suffix
+       * is omitted (never forged).
+       */
+      resolveOccupantGeneration?: (sessionName: string) => string | null;
     }
   ) {
     this.db = db;
@@ -474,6 +485,7 @@ export class QueueRepository {
     this.validateRig = opts?.validateRig ?? (() => true);
     this.transport = opts?.transport;
     this.workflowFrontierPredicate = opts?.workflowFrontierPredicate;
+    this.resolveOccupantGeneration = opts?.resolveOccupantGeneration;
     this.hasTargetRepoColumn = detectQueueColumn(db, "target_repo");
     this.hasSummaryColumn = detectQueueColumn(db, "summary");
     this.hasEvidenceRefColumn = detectQueueColumn(db, "evidence_ref");
@@ -534,9 +546,18 @@ export class QueueRepository {
     // OPR.0.4.4.19 FR-7: bodyOverride lets the resolve verb carry the
     // decision text to the parked owner; default stays the handoff nudge.
     const bareBody = bodyOverride ?? `Queue handoff: ${qitemId} - check your queue.`;
-    const text = wrapPaneEnvelope(sourceSession, destinationSession, bareBody, getSelfHostId());
+    // GHOST-STAGE (h): the single HG-5 baseline change deferred from g — the handoff nudge now carries
+    // a Sent: stamp (so it renders byte-parically with a rig send) plus the SOURCE seat's occupant
+    // generation (g's already-wired render, resolved here; absent=UNKNOWN=omit, never forged). The
+    // stampISO also feeds the transport's delivered-latency flag so a nudge that waited on a busy /
+    // mid-handover successor shows ' · delivered +Ns' for free.
+    const stampISO = new Date().toISOString();
+    const genUuid = sourceSession
+      ? (this.resolveOccupantGeneration?.(sourceSession) ?? undefined)
+      : undefined;
+    const text = wrapPaneEnvelope(sourceSession, destinationSession, bareBody, getSelfHostId(), { stampISO, genUuid });
     try {
-      const res = await this.transport.send(destinationSession, text, { verify: true });
+      const res = await this.transport.send(destinationSession, text, { verify: true, stampISO });
       // OPR.0.3.2.21.FR-4(c) — wording rename: the prior literal
       // "sent-unverified" read as a failure even in the common case
       // (delivery confirmed but the synchronous ack window expired,

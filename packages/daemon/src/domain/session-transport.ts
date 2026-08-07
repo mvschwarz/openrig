@@ -5,7 +5,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
-import { wrapPaneEnvelope, type EnvelopeScope } from "../lib/pane-envelope.js";
+import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "../lib/pane-envelope.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
@@ -378,6 +378,9 @@ export interface SendOpts {
   dangerouslyInteract?: boolean;
   reason?: string;
   actorSession?: string | null;
+  // GHOST-STAGE (h): the envelope's compose stamp (ISO), threaded to send() so the WRITE-moment
+  // delivered-latency calc can measure how long the message waited. Absent ⇒ no delivered segment.
+  stampISO?: string;
 }
 
 // OPR.0.4.3.30 — options for the fan-out path (`broadcast()`). Superset of SendOpts.
@@ -387,9 +390,8 @@ export interface SendOpts {
 // `rig broadcast` (raw-to-all, unchanged) and for the CLI --raw / --dangerously-interact paths.
 export interface BroadcastOpts extends SendOpts {
   envelopeSender?: string;
-  /** Send/broadcast header (ruling 03c35295): the transport ISO stamp, computed ONCE at send-time.
-   *  Injectable for deterministic tests; defaults to `new Date().toISOString()` at dispatch. */
-  stampISO?: string;
+  // stampISO (ruling 03c35295: the transport ISO stamp, computed ONCE at send-time, injectable for
+  // deterministic tests) now lives on the base SendOpts — (h) send() reads it for delivered-latency.
 }
 
 export interface SendResult {
@@ -936,6 +938,14 @@ export class SessionTransport {
       }
     }
 
+    // GHOST-STAGE (h): delivered-at latency. At the WRITE moment (after any idle-wait), stamp how long
+    // the message waited since it was composed (opts.stampISO). appendDeliveredSegment flags ONLY a
+    // genuinely delayed delivery (≥ 10s) — a delayed-lifecycle-message forensic — and is a no-op for
+    // sub-threshold gaps or unenveloped sends. sent-ISO + the rendered delta = absolute delivered time.
+    if (opts?.stampISO) {
+      text = appendDeliveredSegment(text, this.now().getTime() - Date.parse(opts.stampISO));
+    }
+
     // 3. Send text (paste)
     const textResult = await this.runStage(
       "session_transport.send_text",
@@ -1283,7 +1293,9 @@ export class SessionTransport {
       const perRecipientText = opts?.envelopeSender
         ? wrapPaneEnvelope(opts.envelopeSender, session.sessionName, text, getSelfHostId(), { scope, stampISO, genUuid })
         : text;
-      const result = await this.send(session.sessionName, perRecipientText, opts);
+      // (h) thread the resolved stampISO so send()'s delivered-latency calc measures from the SAME
+      // compose stamp the envelope carries (opts may not have carried one; the local stampISO is truth).
+      const result = await this.send(session.sessionName, perRecipientText, { ...opts, stampISO });
       results.push(result);
     }
 

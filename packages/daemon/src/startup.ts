@@ -296,6 +296,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // INJECTED here (arch layering pin: the queue never imports the
     // workflow domain; startup wires them — the validateRig precedent).
     workflowFrontierPredicate: createWorkflowFrontierPredicate(db),
+    // GHOST-STAGE (h): resolve the source seat's atom-B generation for the handoff-nudge Sent: line
+    // (same injected-predicate layering — the queue never imports the session domain).
+    resolveOccupantGeneration: (sessionName) => sessionRegistry.currentOccupantGenerationForSession(sessionName),
   });
   // PL-004 Phase B — classifier lease manager. Constructed early so both
   // the leaseManager dep slot and project-classifier can share one instance.

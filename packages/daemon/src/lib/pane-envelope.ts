@@ -58,6 +58,33 @@ export function renderShortStamp(stampISO: string): string {
   return `${stampISO.slice(5, 7)}-${stampISO.slice(8, 10)} ${stampISO.slice(11, 16)}Z`;
 }
 
+/** GHOST-STAGE (h): a delivery is FLAGGED as delayed only once its compose→write gap crosses this
+ *  threshold. 10s is clearly beyond idle-wait jitter — unambiguously "this waited" — so sub-threshold
+ *  gaps render nothing (measured-telemetry: a flag, not sub-second noise). ONE named constant. */
+export const DELIVERED_LATENCY_FLAG_MS = 10_000;
+
+/** GHOST-STAGE (h): append the relative delivered-latency segment to the Sent: line at the WRITE
+ *  moment (daemon-side only — the CLI composes, it never delivers to a pane, so there is no compose
+ *  twin for this). `deltaMs` is (write-time − the Sent: stampISO): how long the message waited since
+ *  it was composed. Only a genuinely delayed delivery (deltaMs ≥ DELIVERED_LATENCY_FLAG_MS) renders a
+ *  segment; whole seconds, in the g gen-suffix style (' · delivered +12s'). sent-ISO + this delta
+ *  gives absolute delivered time for free. CONTAINMENT (the ' · delivered ' twin of g's ' · gen '):
+ *  the segment is appended ONLY to the Sent: line WITHIN the header block (before the first "\n---\n"),
+ *  so a body line that itself contains ' · delivered …' can never be mistaken for the real stamp. No
+ *  Sent: line (unenveloped / meta-less send) ⇒ returned unchanged. */
+export function appendDeliveredSegment(envelope: string, deltaMs: number): string {
+  if (!Number.isFinite(deltaMs) || deltaMs < DELIVERED_LATENCY_FLAG_MS) return envelope;
+  const marker = "\n---\n";
+  const idx = envelope.indexOf(marker);
+  const headerBlock = idx === -1 ? envelope : envelope.slice(0, idx);
+  const rest = idx === -1 ? "" : envelope.slice(idx);
+  const lines = headerBlock.split("\n");
+  const sentIdx = lines.findIndex((l) => l.startsWith("Sent: "));
+  if (sentIdx === -1) return envelope;
+  lines[sentIdx] = `${lines[sentIdx]} · delivered +${Math.floor(deltaMs / 1000)}s`;
+  return lines.join("\n") + rest;
+}
+
 /** Wrap a tmux-pane body with the canonical From/To envelope. The
  *  recipient pane sees both the sender's identity and a reply hint.
  *  Cross-host nudges should NOT double-wrap: the remote rig wraps

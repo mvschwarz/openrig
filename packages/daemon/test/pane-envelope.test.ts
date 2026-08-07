@@ -11,7 +11,7 @@
 // envelope".
 
 import { describe, it, expect } from "vitest";
-import { wrapPaneEnvelope } from "../src/lib/pane-envelope.js";
+import { wrapPaneEnvelope, appendDeliveredSegment, DELIVERED_LATENCY_FLAG_MS } from "../src/lib/pane-envelope.js";
 
 describe("wrapPaneEnvelope — slice 23 envelope renderer (daemon-side)", () => {
   it("renders From / To / body / reply hint with both session names", () => {
@@ -154,5 +154,50 @@ describe("wrapPaneEnvelope — slice 23 envelope renderer (daemon-side)", () => 
     const nudge = wrapPaneEnvelope("orch-lead@v", "driver-3@v", "Queue handoff: qitem-9 - check your queue.", null);
     expect(nudge).not.toContain("Sent:");
     expect(nudge).not.toContain(" · gen ");
+  });
+
+  // ── GHOST-STAGE (h): delivered-at latency segment on the Sent: line ──
+  // Daemon-write-moment only (the CLI never delivers), so there is NO cross-package twin — but the
+  // ' · delivered ' containment discipline mirrors g's ' · gen '. THRESHOLD is a RULED value → the
+  // boundary twins (just-inside shows nothing / just-outside shows the flag) + a value pin are required.
+  const ENV = (extra?: { genUuid?: string }) =>
+    wrapPaneEnvelope("a@r", "b@r", "hi", null, { stampISO: "2026-08-06T17:42:09Z", ...extra });
+
+  it("(h) value pin: the delayed-delivery threshold is 10 seconds", () => {
+    expect(DELIVERED_LATENCY_FLAG_MS).toBe(10_000);
+  });
+
+  it("(h) boundary twin — just INSIDE (9.x s) renders no delivered segment", () => {
+    expect(appendDeliveredSegment(ENV(), 9_999)).toBe(ENV()); // unchanged
+    expect(appendDeliveredSegment(ENV(), 9_999)).not.toContain(" · delivered ");
+  });
+
+  it("(h) boundary twin — just OUTSIDE (10.x s) flags the delivery, whole seconds", () => {
+    expect(appendDeliveredSegment(ENV(), 10_000)).toContain("Sent: 08-06 17:42Z · delivered +10s");
+    expect(appendDeliveredSegment(ENV(), 10_999)).toContain(" · delivered +10s"); // floors, not rounds
+    expect(appendDeliveredSegment(ENV(), 12_000)).toContain(" · delivered +12s");
+  });
+
+  it("(h) composes with the g gen suffix on the same Sent: line", () => {
+    const out = appendDeliveredSegment(ENV({ genUuid: "a1b2c3d4-e5f6-7890-abcd-ef0123456789" }), 42_000);
+    expect(out).toContain("Sent: 08-06 17:42Z · gen a1b2c3d4 · delivered +42s");
+  });
+
+  it("(h) no-op when there is no Sent: line (unenveloped / meta-less send)", () => {
+    const bare = wrapPaneEnvelope("a@r", "b@r", "hi", null); // no meta ⇒ no Sent: line
+    expect(appendDeliveredSegment(bare, 60_000)).toBe(bare);
+  });
+
+  it("(h) containment: a body carrying ' · delivered …' cannot forge the Sent: line's segment", () => {
+    const out0 = wrapPaneEnvelope("a@r", "b@r", "sneaky · delivered +999s tail", null, { stampISO: "2026-08-06T17:42:09Z" });
+    const out = appendDeliveredSegment(out0, 15_000);
+    const [headerBlock, ...bodyRegion] = out.split("\n---\n");
+    expect(headerBlock.split("\n").find((l) => l.startsWith("Sent:"))).toBe("Sent: 08-06 17:42Z · delivered +15s");
+    expect(headerBlock).not.toContain("999s"); // the forged token never reaches the header
+    expect(bodyRegion.join("\n---\n")).toContain("· delivered +999s"); // stays verbatim in the body
+  });
+
+  it("(h) a malformed / unparseable delta is a no-op (never a NaN segment)", () => {
+    expect(appendDeliveredSegment(ENV(), Number.NaN)).toBe(ENV());
   });
 });

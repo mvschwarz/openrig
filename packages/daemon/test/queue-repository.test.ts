@@ -315,6 +315,37 @@ describe("QueueRepository", () => {
       expect(fresh.lastNudgeResult).toBe("verified");
     });
 
+    it("(h) HG-5 baseline: the handoff nudge now carries a Sent: stamp + the source's gen suffix, and threads stampISO to send", async () => {
+      const sends: Array<{ session: string; text: string; opts?: { verify?: boolean; stampISO?: string } }> = [];
+      const stubTransport = {
+        send: async (session: string, text: string, opts?: { verify?: boolean; stampISO?: string }) => {
+          sends.push({ session, text, opts });
+          return { ok: true, verified: true };
+        },
+      };
+      const nudgingRepo = new QueueRepository(db, bus, {
+        transport: stubTransport,
+        resolveOccupantGeneration: (s) => (s === "alice@rig" ? "a1b2c3d4-e5f6-7890-abcd-ef0123456789" : null),
+      });
+      await nudgingRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "ping" });
+      expect(sends).toHaveLength(1);
+      const { text, opts } = sends[0]!;
+      expect(text).toContain("\nSent: "); // now stamped (was absent — the deferred HG-5 change lands here)
+      expect(text).toContain(" · gen a1b2c3d4"); // the source seat's generation rides g's render
+      expect(opts?.stampISO).toBeDefined(); // threaded so the transport's delivered-latency flag works
+    });
+
+    it("(h) absent resolver ⇒ the nudge stamps but OMITS the gen suffix (UNKNOWN, never forged)", async () => {
+      const sends: string[] = [];
+      const stubTransport = {
+        send: async (_s: string, text: string) => { sends.push(text); return { ok: true, verified: true }; },
+      };
+      const nudgingRepo = new QueueRepository(db, bus, { transport: stubTransport }); // no resolver wired
+      await nudgingRepo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "ping" });
+      expect(sends[0]).toContain("\nSent: ");
+      expect(sends[0]).not.toContain(" · gen ");
+    });
+
     it("create with nudge:false does NOT call transport (cold-queue opt-out)", async () => {
       const sends: Array<{ session: string; text: string }> = [];
       const stubTransport = {

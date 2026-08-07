@@ -1373,4 +1373,28 @@ describe("SessionTransport", () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]).toBe("raw ping"); // unchanged (the --raw carve-out)
   });
+
+  // ── GHOST-STAGE (h): delivered-at latency stamped at the WRITE moment ──
+  const H_ENVELOPE =
+    'From: a@r\nTo: dev-impl@my-rig\nSent: 08-06 17:42Z\n---\nhi\n---\n↩ Reply: rig send a@r "..."';
+
+  it("(h) send() flags a delayed delivery on the Sent: line when the compose→write gap exceeds 10s", async () => {
+    seedCanonicalRig();
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({ sendText: sendTextSpy });
+    // write-moment clock is 30s after the compose stamp (opts.stampISO)
+    const transport = createTransport(tmux, { now: () => new Date("2026-08-06T17:42:39Z") });
+    await transport.send("dev-impl@my-rig", H_ENVELOPE, { stampISO: "2026-08-06T17:42:09Z" });
+    expect(sendTextSpy).toHaveBeenCalledTimes(1);
+    expect(sendTextSpy.mock.calls[0]![1]).toContain("Sent: 08-06 17:42Z · delivered +30s");
+  });
+
+  it("(h) send() adds no delivered segment for a sub-threshold (3s) gap", async () => {
+    seedCanonicalRig();
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({ sendText: sendTextSpy });
+    const transport = createTransport(tmux, { now: () => new Date("2026-08-06T17:42:12Z") });
+    await transport.send("dev-impl@my-rig", H_ENVELOPE, { stampISO: "2026-08-06T17:42:09Z" });
+    expect(sendTextSpy.mock.calls[0]![1]).not.toContain(" · delivered ");
+  });
 });
