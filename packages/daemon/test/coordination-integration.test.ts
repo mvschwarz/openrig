@@ -110,7 +110,7 @@ describe("coordination integration — stream → queue → inbox handoff chain"
     // 3. Receiver absorbs into main queue
     const absorbRes = await app.request(`/api/queue/inbox/${inboxEntry.inboxId}/absorb`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "planning@conveyor" }, // P21 I3: receiver from the transport header
       body: JSON.stringify({ receiverSession: "planning@conveyor" }),
     });
     expect(absorbRes.status).toBe(200);

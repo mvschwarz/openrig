@@ -953,9 +953,11 @@ export function queueRoutes(): Hono {
   app.post("/inbox/:inboxId/absorb", async (c) => {
     const inboxId = c.req.param("inboxId");
     const body = await c.req.json<{ receiverSession?: string }>().catch(() => ({} as never));
-    if (!body.receiverSession) return c.json({ error: "receiverSession is required" }, 400);
+    // P21 I3: the receiver is the transport-derived sender, never body.receiverSession.
+    const identity = requireSenderIdentity(c, { verb: "inbox absorb", bodyClaim: body.receiverSession });
+    if (!identity.ok) return identity.response;
     try {
-      const result = await getInbox(c).absorb(inboxId, body.receiverSession);
+      const result = await getInbox(c).absorb(inboxId, identity.session, "transport:v1");
       return c.json(result);
     } catch (err) {
       return errorResponse(c, err);
@@ -965,10 +967,12 @@ export function queueRoutes(): Hono {
   app.post("/inbox/:inboxId/deny", async (c) => {
     const inboxId = c.req.param("inboxId");
     const body = await c.req.json<{ receiverSession?: string; reason?: string }>().catch(() => ({} as never));
-    if (!body.receiverSession) return c.json({ error: "receiverSession is required" }, 400);
+    // P21 I3: the receiver is the transport-derived sender, never body.receiverSession.
+    const identity = requireSenderIdentity(c, { verb: "inbox deny", bodyClaim: body.receiverSession });
+    if (!identity.ok) return identity.response;
     if (!body.reason) return c.json({ error: "reason is required" }, 400);
     try {
-      const entry = getInbox(c).deny(inboxId, body.receiverSession, body.reason);
+      const entry = getInbox(c).deny(inboxId, identity.session, body.reason);
       return c.json(entry);
     } catch (err) {
       return errorResponse(c, err);
@@ -1000,18 +1004,21 @@ export function queueRoutes(): Hono {
       urgency?: string;
       auditPointer?: string;
     }>().catch(() => ({} as never));
-    if (!body.senderSession) return c.json({ error: "senderSession is required" }, 400);
+    // P21 I3: the outbox sender is the transport-derived identity, never body.senderSession.
+    const identity = requireSenderIdentity(c, { verb: "outbox record", bodyClaim: body.senderSession });
+    if (!identity.ok) return identity.response;
     if (!body.destinationSession) return c.json({ error: "destinationSession is required" }, 400);
     if (!body.body) return c.json({ error: "body is required" }, 400);
 
     const entry = getOutbox(c).record({
       outboxId: body.outboxId,
-      senderSession: body.senderSession,
+      senderSession: identity.session,
       destinationSession: body.destinationSession,
       body: body.body,
       tags: body.tags,
       urgency: body.urgency,
       auditPointer: body.auditPointer,
+      identityProvenance: "transport:v1", // P21 §4 era-stamp: senderSession came from the transport chokepoint
     });
     return c.json(entry, 201);
   });

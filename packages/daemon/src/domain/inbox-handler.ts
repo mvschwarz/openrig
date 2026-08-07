@@ -151,7 +151,7 @@ export class InboxHandler {
    * Idempotent on inbox_id: if already absorbed, returns the existing
    * `absorbed_qitem_id` rather than creating a duplicate.
    */
-  async absorb(inboxId: string, receiverSession: string): Promise<{ entry: InboxEntry; qitemId: string }> {
+  async absorb(inboxId: string, receiverSession: string, identityProvenance?: string | null): Promise<{ entry: InboxEntry; qitemId: string }> {
     const entry = this.getById(inboxId);
     if (!entry) {
       throw new InboxHandlerError("inbox_not_found", `inbox ${inboxId} not found`);
@@ -182,6 +182,7 @@ export class InboxHandler {
       tags: entry.tags ?? undefined,
       priority: entry.urgency === "critical" ? "critical" : entry.urgency === "urgent" ? "urgent" : "routine",
       nudge: false,
+      identityProvenance: identityProvenance ?? null, // P21 §4 era-stamp: transport-derived receiver action
     });
 
     const ts = new Date().toISOString();

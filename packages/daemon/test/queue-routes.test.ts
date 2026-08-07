@@ -112,6 +112,121 @@ describe("queue routes", () => {
     expect(row?.identity_provenance).toBe("transport:v1");
   });
 
+  // P21 I3 — inbox absorb/deny (receiverSession) + outbox record (senderSession) were the LIVE
+  // allow-all body-supplied identity sites (specimen-5 family). I3 derives them from the header.
+  async function dropEntry(dest: string, sender: string): Promise<string> {
+    const res = await app.request("/api/queue/inbox/drop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": sender },
+      body: JSON.stringify({ destinationSession: dest, body: "hi" }),
+    });
+    return ((await res.json()) as { inboxId: string }).inboxId;
+  }
+
+  it("inbox absorb — 401 unattributable_sender when X-OpenRig-Session is absent", async () => {
+    const inboxId = await dropEntry("dest@rig", "sender@rig");
+    const res = await app.request(`/api/queue/inbox/${inboxId}/absorb`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ receiverSession: "dest@rig" }),
+    });
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+  });
+
+  it("inbox absorb — 409 identity_mismatch when body receiverSession differs from the transport identity", async () => {
+    const inboxId = await dropEntry("dest@rig", "sender@rig");
+    const res = await app.request(`/api/queue/inbox/${inboxId}/absorb`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "dest@rig" },
+      body: JSON.stringify({ receiverSession: "mallory@rig" }),
+    });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+  });
+
+  it("inbox absorb — derives receiver from the header + era-stamps the absorbed qitem transport:v1", async () => {
+    const inboxId = await dropEntry("dest@rig", "sender@rig");
+    const res = await app.request(`/api/queue/inbox/${inboxId}/absorb`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "dest@rig" },
+      body: JSON.stringify({ receiverSession: "dest@rig" }),
+    });
+    expect(res.status).toBe(200);
+    const { qitemId } = (await res.json()) as { qitemId: string };
+    // The absorb is a transport-derived receiver action → the created qitem's transition is transport:v1.
+    const row = db
+      .prepare("SELECT identity_provenance FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid ASC LIMIT 1")
+      .get(qitemId) as { identity_provenance: string | null } | undefined;
+    expect(row?.identity_provenance).toBe("transport:v1");
+  });
+
+  it("inbox deny — 401 unattributable_sender when X-OpenRig-Session is absent", async () => {
+    const inboxId = await dropEntry("dest@rig", "sender@rig");
+    const res = await app.request(`/api/queue/inbox/${inboxId}/deny`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ receiverSession: "dest@rig", reason: "nope" }),
+    });
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+  });
+
+  it("inbox deny — 409 identity_mismatch when body receiverSession differs from the transport identity", async () => {
+    const inboxId = await dropEntry("dest@rig", "sender@rig");
+    const res = await app.request(`/api/queue/inbox/${inboxId}/deny`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "dest@rig" },
+      body: JSON.stringify({ receiverSession: "mallory@rig", reason: "nope" }),
+    });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+  });
+
+  it("inbox deny — derives receiver from the header (200)", async () => {
+    const inboxId = await dropEntry("dest@rig", "sender@rig");
+    const res = await app.request(`/api/queue/inbox/${inboxId}/deny`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "dest@rig" },
+      body: JSON.stringify({ receiverSession: "dest@rig", reason: "not mine" }),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("outbox record — 401 unattributable_sender when X-OpenRig-Session is absent", async () => {
+    const res = await app.request("/api/queue/outbox/record", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ senderSession: "me@rig", destinationSession: "you@rig", body: "hi" }),
+    });
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+  });
+
+  it("outbox record — 409 identity_mismatch when body senderSession differs from the transport identity", async () => {
+    const res = await app.request("/api/queue/outbox/record", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "me@rig" },
+      body: JSON.stringify({ senderSession: "evil@rig", destinationSession: "you@rig", body: "hi" }),
+    });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+  });
+
+  it("outbox record — derives sender from the header + era-stamps outbox_entries transport:v1", async () => {
+    const res = await app.request("/api/queue/outbox/record", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "me@rig" },
+      body: JSON.stringify({ senderSession: "me@rig", destinationSession: "you@rig", body: "hi" }),
+    });
+    expect(res.status).toBe(201);
+    const { outboxId } = (await res.json()) as { outboxId: string };
+    const row = db
+      .prepare("SELECT identity_provenance FROM outbox_entries WHERE outbox_id = ?")
+      .get(outboxId) as { identity_provenance: string | null } | undefined;
+    expect(row?.identity_provenance).toBe("transport:v1");
+  });
+
   it("POST /api/queue/create creates a qitem", async () => {
     const res = await app.request("/api/queue/create", {
       method: "POST",
@@ -467,7 +582,7 @@ describe("queue routes", () => {
 
     const absorb = await app.request(`/api/queue/inbox/${entry.inboxId}/absorb`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" }, // P21 I3: receiver from the transport header
       body: JSON.stringify({ receiverSession: "b@r" }),
     });
     expect(absorb.status).toBe(200);
@@ -483,7 +598,7 @@ describe("queue routes", () => {
     const entry2 = (await drop2.json()) as { inboxId: string };
     const deny = await app.request(`/api/queue/inbox/${entry2.inboxId}/deny`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" }, // P21 I3: receiver from the transport header
       body: JSON.stringify({ receiverSession: "b@r", reason: "off-topic" }),
     });
     expect(deny.status).toBe(200);
@@ -492,7 +607,7 @@ describe("queue routes", () => {
   it("outbox record + list round-trip", async () => {
     const record = await app.request("/api/queue/outbox/record", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" }, // P21 I3: outbox sender from the transport header
       body: JSON.stringify({ senderSession: "a@r", destinationSession: "b@r", body: "fyi" }),
     });
     expect(record.status).toBe(201);

@@ -37,6 +37,9 @@ export interface OutboxRecordInput {
   tags?: string[];
   urgency?: string;
   auditPointer?: string;
+  /** P21 §4 era-stamp: the route passes `transport:v1` (senderSession derived from the transport
+   *  header chokepoint). Written onto the outbox row; absence = claimed-era. */
+  identityProvenance?: string | null;
 }
 
 export class OutboxHandlerError extends Error {
@@ -62,9 +65,15 @@ function newOutboxId(): string {
  */
 export class OutboxHandler {
   readonly db: Database.Database;
+  /** P21 §4: detected once — a curated-migration test DB (or a pre-067 daemon) may lack the
+   *  era-stamp column, so the writer degrades (omits it) instead of throwing. */
+  private readonly hasIdentityProvenanceColumn: boolean;
 
   constructor(db: Database.Database) {
     this.db = db;
+    this.hasIdentityProvenanceColumn = (
+      this.db.prepare("PRAGMA table_info(outbox_entries)").all() as Array<{ name: string }>
+    ).some((col) => col.name === "identity_provenance");
   }
 
   record(input: OutboxRecordInput): OutboxEntry {
@@ -76,22 +85,42 @@ export class OutboxHandler {
     const tags = input.tags ? JSON.stringify(input.tags) : null;
     const urgency = input.urgency ?? "routine";
 
-    this.db
-      .prepare(
-        `INSERT INTO outbox_entries (
-          outbox_id, sender_session, destination_session, body, tags, urgency, ts_dispatched, audit_pointer
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        id,
-        input.senderSession,
-        input.destinationSession,
-        input.body,
-        tags,
-        urgency,
-        ts,
-        input.auditPointer ?? null
-      );
+    if (this.hasIdentityProvenanceColumn) {
+      this.db
+        .prepare(
+          `INSERT INTO outbox_entries (
+            outbox_id, sender_session, destination_session, body, tags, urgency, ts_dispatched, audit_pointer, identity_provenance
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          id,
+          input.senderSession,
+          input.destinationSession,
+          input.body,
+          tags,
+          urgency,
+          ts,
+          input.auditPointer ?? null,
+          input.identityProvenance ?? null
+        );
+    } else {
+      this.db
+        .prepare(
+          `INSERT INTO outbox_entries (
+            outbox_id, sender_session, destination_session, body, tags, urgency, ts_dispatched, audit_pointer
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          id,
+          input.senderSession,
+          input.destinationSession,
+          input.body,
+          tags,
+          urgency,
+          ts,
+          input.auditPointer ?? null
+        );
+    }
 
     return this.getByIdOrThrow(id);
   }
