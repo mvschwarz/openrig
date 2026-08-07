@@ -21,11 +21,42 @@ export interface QitemLike {
   destinationSession?: string | null;
 }
 
+/** M1 A5b — an outbound image attachment. A media-bearing OutboundDecision carries these;
+ *  the connector renders each as a Slack Block Kit `image` block on the SHIPPED outbound path.
+ *  This is the T1076 seam finally wired (Slice-12's image relay), not a redesign. */
+export interface SlackMediaRef {
+  imageUrl: string; // a resolvable image URL (https). NEVER a secret-bearing URL (rejected below).
+  altText: string;  // accessibility + notification fallback text
+}
+
 export interface OutboundMessageOpts {
   sourceLabel: string; // where the queue lives (host/box/rig), from config — never hardcoded
   bodyExcerpt?: number;
   /** T1076 extension point: extra Block Kit blocks (e.g. future media). v1 unused. */
   extraBlocks?: unknown[];
+  /** M1 A5b: outbound image attachments, rendered as Block Kit `image` blocks (the wired seam). */
+  mediaRefs?: SlackMediaRef[];
+}
+
+const SLACK_ALT_TEXT_CAP = 2000; // Slack image alt_text hard limit.
+
+/** M1 A5b — turn media refs into Block Kit `image` blocks. Item-7 hygiene: a secret-bearing
+ *  image_url (e.g. a webhook URL smuggled as an image) is REFUSED, never forwarded. Alt text is
+ *  redacted + clamped. Returns only the well-formed, secret-free image blocks. */
+export function buildImageBlocks(mediaRefs: readonly SlackMediaRef[] | undefined): unknown[] {
+  if (!mediaRefs?.length) return [];
+  const blocks: unknown[] = [];
+  for (const m of mediaRefs) {
+    const url = String(m.imageUrl || "");
+    // Only forward a clean https URL that carries no secret (defense-in-depth, item 7).
+    if (!/^https:\/\/\S+$/.test(url) || containsSecret(url)) continue;
+    blocks.push({
+      type: "image",
+      image_url: url,
+      alt_text: clamp(redactSecrets(String(m.altText || "attachment")), SLACK_ALT_TEXT_CAP),
+    });
+  }
+  return blocks;
 }
 
 // Secret-looking patterns we refuse to forward (item 7 defense-in-depth).
@@ -78,8 +109,15 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
     { type: "section", text: { type: "mrkdwn", text: clamp(`:rotating_light: *${summary}*`, 3000) } },
   ];
   if (body.trim()) blocks.push({ type: "section", text: { type: "mrkdwn", text: clamp(body, 3000) } });
+  // M1 A5b — outbound image attachments (the wired T1076 seam). Secret-bearing URLs are dropped.
+  const imageBlocks = buildImageBlocks(opts.mediaRefs);
+  blocks.push(...imageBlocks);
   blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: footer }] });
   if (opts.extraBlocks?.length) blocks.push(...opts.extraBlocks);
 
-  return { text, blocks };
+  // Note the attachment count in the notification fallback so a text-only client still signals it.
+  const textWithMedia = imageBlocks.length > 0
+    ? clamp(`${text}\n_(${imageBlocks.length} image attachment${imageBlocks.length === 1 ? "" : "s"})_`, SLACK_TEXT_CAP)
+    : text;
+  return { text: textWithMedia, blocks };
 }

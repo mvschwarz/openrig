@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildOutboundMessage, containsSecret, redactSecrets, SLACK_TEXT_CAP } from "../src/slack/message.js";
+import { buildOutboundMessage, buildImageBlocks, containsSecret, redactSecrets, SLACK_TEXT_CAP } from "../src/slack/message.js";
 
 describe("Slice-11 outbound message — content hygiene (item 7)", () => {
   const opts = { sourceLabel: "vm-openrig-build" };
@@ -53,5 +53,42 @@ describe("Slice-11 outbound message — content hygiene (item 7)", () => {
     expect(containsSecret("xoxb-1-2-abc")).toBe(true);
     expect(containsSecret(redactSecrets("xoxb-1-2-abc"))).toBe(false);
     expect(containsSecret("nothing sensitive here")).toBe(false);
+  });
+});
+
+describe("M1 A5b — outbound image attachments (the wired T1076 seam)", () => {
+  const opts = { sourceLabel: "vm-openrig-build" };
+  const imageBlocks = (m: { blocks: unknown[] }) => m.blocks.filter((b) => (b as { type?: string }).type === "image") as { type: string; image_url: string; alt_text: string }[];
+
+  it("renders a media ref as a Block Kit image block + notes the attachment count in the fallback", () => {
+    const m = buildOutboundMessage(
+      { qitemId: "q1", summary: "chart ready", body: "see attached", destinationSession: "human-founder@kernel" },
+      { ...opts, mediaRefs: [{ imageUrl: "https://example.com/shot.png", altText: "the screenshot" }] },
+    );
+    const imgs = imageBlocks(m);
+    expect(imgs).toHaveLength(1);
+    expect(imgs[0]).toEqual({ type: "image", image_url: "https://example.com/shot.png", alt_text: "the screenshot" });
+    expect(m.text).toContain("1 image attachment");
+    // text content + hygiene still present
+    expect(m.text).toContain("chart ready");
+  });
+
+  it("REFUSES a secret-bearing or non-https image_url (item-7 hygiene — never forward a smuggled secret)", () => {
+    const blocks = buildImageBlocks([
+      { imageUrl: "https://hooks.slack.com/services/T00/B00/SECRETPART", altText: "leak" }, // webhook URL
+      { imageUrl: "http://insecure.example.com/x.png", altText: "insecure" },               // non-https
+      { imageUrl: "not-a-url", altText: "junk" },
+      { imageUrl: "https://ok.example.com/fine.png", altText: "fine" },                      // the only valid one
+    ]);
+    expect(blocks).toHaveLength(1);
+    expect((blocks[0] as { image_url: string }).image_url).toBe("https://ok.example.com/fine.png");
+  });
+
+  it("redacts a secret that leaks through alt_text; no media = no image block + no count", () => {
+    const blocks = buildImageBlocks([{ imageUrl: "https://ok.example.com/a.png", altText: "tok xoxb-EXAMPLE-000000-leak" }]);
+    expect(containsSecret((blocks[0] as { alt_text: string }).alt_text)).toBe(false);
+    const plain = buildOutboundMessage({ qitemId: "q2", summary: "x", body: "", destinationSession: "h@kernel" }, opts);
+    expect(imageBlocks(plain)).toHaveLength(0);
+    expect(plain.text).not.toContain("image attachment");
   });
 });

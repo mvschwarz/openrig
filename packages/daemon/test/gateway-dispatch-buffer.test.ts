@@ -42,4 +42,18 @@ describe("A4a DispatchBuffer (durable, ack-gated drain)", () => {
     b.ack("nope");
     expect(b.pending().map((d) => d.decisionId)).toEqual(["d1"]);
   });
+
+  it("A5b: a MEDIA-bearing decision retains + replays byte-identical (media survives like text — no-loss)", () => {
+    // The buffer is payload-agnostic: an image attachment on the decision is retained + replayed
+    // exactly like text (proof-4's screenshot must not be lost on a failed delivery).
+    const media: OutboundDecision = {
+      kind: "outbound_decision", decisionId: "m1", op: "post_message", entityBindingRef: "mike#slack-1",
+      payload: { qitemId: "q9", summary: "chart", body: "see attached", media: [{ imageUrl: "https://ok.example.com/shot.png", altText: "the screenshot" }] },
+    };
+    new DispatchBuffer(home).enqueue(media);
+    // restart-surviving read: the media payload comes back byte-identical (retained for replay).
+    const pending = new DispatchBuffer(home).pending();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toEqual(media); // full payload incl. media — nothing dropped or special-cased
+  });
 });

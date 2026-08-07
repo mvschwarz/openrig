@@ -5,9 +5,12 @@
 // then a 2xx proves ack-after-delivery — verify-not-assume, driven through the real code.
 
 import { postWebhook, type FetchImpl } from "./slack-api.js";
-import { buildOutboundMessage, type QitemLike } from "./message.js";
+import { buildOutboundMessage, type QitemLike, type SlackMediaRef } from "./message.js";
 import type { OutboundDecision } from "@openrig/daemon/gateway-protocol";
 import type { DeliveryOutcome } from "./connector-server.js";
+
+/** M1 A5b — the decision payload MAY carry image attachments alongside the queue content. */
+type DeliveryPayload = QitemLike & { media?: SlackMediaRef[] };
 
 export interface SlackDeliveryOpts {
   webhookUrl: string;
@@ -21,7 +24,7 @@ export interface SlackDeliveryOpts {
  *  failure class (so the gateway retains + replays — fail-visible, never a silent drop). */
 export function slackDeliverFn(opts: SlackDeliveryOpts): (d: OutboundDecision) => Promise<DeliveryOutcome> {
   return async (decision) => {
-    const q = (decision.payload ?? {}) as QitemLike;
+    const q = (decision.payload ?? {}) as DeliveryPayload;
     const payload = buildOutboundMessage(
       {
         qitemId: q.qitemId ?? decision.decisionId,
@@ -29,7 +32,8 @@ export function slackDeliverFn(opts: SlackDeliveryOpts): (d: OutboundDecision) =
         body: q.body,
         destinationSession: q.destinationSession ?? decision.entityBindingRef,
       },
-      { sourceLabel: opts.sourceLabel, bodyExcerpt: opts.bodyExcerpt },
+      // A5b: forward any image attachments on the decision (buildImageBlocks drops secret/non-https).
+      { sourceLabel: opts.sourceLabel, bodyExcerpt: opts.bodyExcerpt, mediaRefs: Array.isArray(q.media) ? q.media : undefined },
     );
     const res = await postWebhook(opts.webhookUrl, payload, opts.fetchImpl);
     if (res.ok) return { ok: true };
