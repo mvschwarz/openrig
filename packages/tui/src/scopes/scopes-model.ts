@@ -19,6 +19,7 @@ export interface SliceScopeSnap {
   miniRequirements: string[];
   proofContract: ScopeContractItem[];
   narrative: string | null;
+  specShaShort: string | null;
   prdExists: boolean;
 }
 export interface MissionScopesSnap { mission: string; slices: SliceScopeSnap[] }
@@ -81,8 +82,12 @@ export function scopesContentLines(
 
   // Header card (mock line 1): ● name ── mission ── stage ── proof N/M[ 🔒] ── ...
   lines.push({ text: `┌─ ${sliceGlyph(detail)} ${detail.dirName} ── ${mission ?? "?"} ── stage: ${detail.stage ?? "?"} ── ${proofBadge(detail)} ─┐` });
+  // D2 (answered at source): the store holds NO assignment field — the mock's `with:`
+  // segment is ASPIRATIONAL and is deliberately not rendered (render only what the
+  // store enforces — the founder's own truth rule beats mock fidelity here).
+  const specSha = detail.specShaShort ? ` · spec sha ${detail.specShaShort}` : "";
   const specLock = detail.locks.spec
-    ? `spec🔒 ${detail.locks.spec.at.slice(5, 10)} by ${detail.locks.spec.by.split("@")[0]}${detail.prdExists ? " · PRD: p" : ""}`
+    ? `spec🔒 ${detail.locks.spec.at.slice(5, 10)} by ${detail.locks.spec.by.split("@")[0]}${specSha}${detail.prdExists ? " · PRD: p" : ""}`
     : "spec: UNLOCKED (build-ahead; ratifies at PM recovery)";
   lines.push({ text: `│ ${specLock}` });
   lines.push({ text: `└${"─".repeat(Math.min(w, 78))}┘` });

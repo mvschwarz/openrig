@@ -118,3 +118,17 @@ describe("scope-view projection (store-direct)", () => {
     expect(m).not.toBeNull();
   });
 });
+
+// LOOK delta D1 — spec-sha computed from the LOCKED ARTIFACT'S BYTES at projection time
+// (the store carries the path, not a hash; computed = store-derived, never transcribed).
+import { createHash } from "node:crypto";
+describe("D1 — spec-sha from locked artifact bytes", () => {
+  it("specShaShort = sha256[:8] of the locked artifact file; null when the file is absent", () => {
+    const prd = "# the PRD bytes";
+    const files = { ...baseFiles, [`${S}/IMPLEMENTATION-PRD.md`]: prd };
+    const d = projectSliceScope(fsFixture(files, baseDirs), S)!;
+    expect(d.specShaShort).toBe(createHash("sha256").update(prd).digest("hex").slice(0, 8));
+    const d2 = projectSliceScope(fsFixture(baseFiles, baseDirs), S)!;
+    expect(d2.specShaShort).toBeNull(); // absent file = honest null, never fabricated
+  });
+});

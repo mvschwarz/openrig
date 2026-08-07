@@ -66,6 +66,7 @@ export function demoSnapshot(): FleetSnapshot {
               { index: 3, text: "An unregistered domain bounces loudly with the teaching error.", paired: true, drops: [{ file: "guard-bounce.md", artifactType: "guard", verdict: "CLEAR", media: [] }] },
             ],
             narrative: "- kickoff: A1 in build\n- A2 held on arch consult",
+            specShaShort: "fe92ffa9",
             prdExists: true,
           },
           {
@@ -81,6 +82,7 @@ export function demoSnapshot(): FleetSnapshot {
               { index: 4, text: "Onboarding menu lives here.", paired: true, drops: [{ file: "qa4.md", artifactType: "qa", verdict: "PASS", media: [] }] },
             ],
             narrative: null,
+            specShaShort: "0a1b2c3d",
             prdExists: true,
           },
         ],

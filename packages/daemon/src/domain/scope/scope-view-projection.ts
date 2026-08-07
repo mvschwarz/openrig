@@ -6,6 +6,7 @@
 // `n`; it is not read here at all. The render never asserts a proven-green the store
 // does not enforce: `paired` means exactly "≥1 C1 drop cites this contract item".
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 
 export interface ScopeFsDeps {
   exists: (p: string) => boolean;
@@ -177,6 +178,22 @@ function pairContract(items: string[], drops: C1Drop[]): ProofContractItem[] {
   });
 }
 
+function specShaFromLockedArtifacts(fs: ScopeFsDeps, sliceDir: string, fm: string): string | null {
+  // locked-artifacts is a nested YAML block list; take the first `path:` under a
+  // `kind: spec` entry (the plan-lock convention), else the PRD when present.
+  const lines = fm.split("\n");
+  let candidate: string | null = null;
+  for (let i = 0; i < lines.length; i += 1) {
+    const m = /^\s+path:\s*(.+)$/.exec(lines[i]!);
+    if (m) { candidate = m[1]!.trim(); break; }
+  }
+  if (!candidate) candidate = "IMPLEMENTATION-PRD.md";
+  const p = path.join(sliceDir, candidate);
+  const bytes = fs.exists(p) ? fs.readFile(p) : null;
+  if (bytes === null) return null;
+  return createHash("sha256").update(bytes).digest("hex").slice(0, 8);
+}
+
 export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string): SliceScopeDetail | null {
   const readmePath = path.join(sliceDir, "README.md");
   if (!fs.exists(readmePath)) return null;
@@ -213,7 +230,10 @@ export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string): SliceScope
     miniRequirements: miniRequirements(content),
     proofContract: contract,
     progressPath: fs.exists(progressPath) ? progressPath : null,
-    specShaShort: null, // reserved: the spec-sha line is mock-optional; landed when the store carries it
+    // LOOK delta D1 (answered at source): the store carries no sha, but it carries the
+    // locked artifact PATH — the hash is computed from the CURRENT bytes at projection
+    // time (store-DERIVED, live; never a transcribed value). First spec-kind artifact.
+    specShaShort: specShaFromLockedArtifacts(fs, sliceDir, fm),
     prdExists: fs.exists(path.join(sliceDir, "IMPLEMENTATION-PRD.md")) || fm.includes("IMPLEMENTATION-PRD"),
   };
 }
