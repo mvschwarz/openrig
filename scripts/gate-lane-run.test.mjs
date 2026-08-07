@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { renderRefusal, runLegs, buildVerdict, observeForeignLoad, cleanStaleVendoredBundle } from "./gate-lane-run.mjs";
+import { renderRefusal, runLegs, buildVerdict, runGate, observeForeignLoad, cleanStaleVendoredBundle } from "./gate-lane-run.mjs";
 
 // F1 gate-lane runner logic (arch d6a6c1db, 5 pins). HONESTY (gap 1): the gate runs test:ui (npm test
 // excludes it); (gap 2) green = typecheck AND vitest BOTH legs. P5: refusal teaches the port constant,
@@ -104,4 +104,45 @@ test("gate cleans a stale vendored daemon bundle at start so a desk leftover can
 
   // idempotent: a fresh clone with no bundle is a clean no-op (force:true), never a throw.
   assert.doesNotThrow(() => cleanStaleVendoredBundle(root));
+});
+
+// SELF-DESCRIBING VERDICT (gate-lane.mjs:56 smoke-indistinguishability fix). A SMOKE run skips every
+// leg but is sealed as a NORMAL PASS — hash-verifying the JSON proved the file authentic while proving
+// NOTHING about whether the gate RAN. The verdict must now CARRY its mode + per-leg evidence.
+test("SELF-DESCRIBING (pm GATE CONDITION): verdict.smoke tracks WHAT RAN via runGate — the SHIPPED wiring, not a mirror", async () => {
+  // Calls the SAME runGate gate-lane.mjs calls (ONE wiring origin — not a lookalike that could pass
+  // while production drifts). realExec is a SPY, so we observe the EFFECT without spawning real npm: on a
+  // smoking run runGate picks its skip branch and realExec is NEVER touched; on a real run runGate routes
+  // every leg through realExec. The field must coincide with what the spy saw — an env/hardcoded field
+  // cannot satisfy BOTH directions AND both effect assertions.
+  const gateWith = async (smoke) => {
+    const ran = [];
+    const realExec = async (cmd) => { ran.push(cmd); return { ok: true, code: 0 }; };
+    const verdict = await runGate({ smoke, realExec, foreignLoad: { advisory: [] }, startedAt: "t0", ledger: [] });
+    return { verdict, ran };
+  };
+  // NEGATIVE CONTROL A — a SMOKING run seals smoke:true AND runs nothing (a hardcoded smoke:false fails
+  // the first; a field decoupled from the wiring fails the second).
+  const smoked = await gateWith(true);
+  assert.equal(smoked.verdict.smoke, true, "the smoking run seals smoke:true");
+  assert.equal(smoked.ran.length, 0, "smoke:true coincides with ZERO real executions (the effect)");
+  // NEGATIVE CONTROL B — a REAL run seals smoke:false AND routes every leg through realExec (a hardcoded
+  // smoke:true fails). Both directions + both effect checks together forbid a constant that lies.
+  const real = await gateWith(false);
+  assert.equal(real.verdict.smoke, false, "the real run seals smoke:false");
+  assert.equal(real.ran.length, 3, "smoke:false coincides with all 3 legs routed through realExec (the effect)");
+  // FAIL-SAFE — buildVerdict without a smoke arg defaults false, never a silent true.
+  assert.equal(buildVerdict({ legs: [], foreignLoad: { advisory: [] }, startedAt: "t0", endedAt: "t1" }).smoke, false);
+});
+
+test("SELF-DESCRIBING: per-leg durationMs recorded (the mixed-mode discriminator a whole-run total hides)", async () => {
+  const exec = async () => ({ ok: true, code: 0 });
+  const legs = await runLegs(exec);
+  for (const l of legs) {
+    assert.equal(typeof l.durationMs, "number", `${l.name} carries a numeric durationMs`);
+    assert.ok(l.durationMs >= 0, `${l.name} durationMs is non-negative`);
+  }
+  // and buildVerdict carries them through PER LEG (not only the whole-run startedAt/endedAt).
+  const v = buildVerdict({ legs, foreignLoad: { advisory: [] }, startedAt: "t0", endedAt: "t1" });
+  assert.ok(v.legs.every((l) => typeof l.durationMs === "number"), "verdict.legs carry per-leg durationMs");
 });

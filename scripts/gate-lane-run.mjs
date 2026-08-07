@@ -53,8 +53,12 @@ export async function runLegs(exec) {
   ];
   const legs = [];
   for (const s of specs) {
+    // Per-leg wall-clock (ms) — the discriminator a whole-run total hides: a MIXED-mode run (some legs
+    // real, some smoked/skipped) still sums into a plausible band, but the skipped legs show ~0ms here.
+    const t0 = Date.now();
     const r = await exec(s.cmd);
-    legs.push({ name: s.name, cmd: s.cmd, ok: !!r.ok, code: r.code ?? null });
+    const durationMs = Date.now() - t0;
+    legs.push({ name: s.name, cmd: s.cmd, ok: !!r.ok, code: r.code ?? null, durationMs });
   }
   return legs;
 }
@@ -79,7 +83,7 @@ export function observeForeignLoad({ loadavg, processes }) {
  * is expired/invalid. With the shipped EMPTY seed the ledger holds no one, so this collapses to strict
  * "pass iff every leg ok" — the ledger state (0 exclusions) is still recorded in-band, loud.
  */
-export function buildVerdict({ legs, foreignLoad, startedAt, endedAt, ledger = [], now, cutCeiling }) {
+export function buildVerdict({ legs, foreignLoad, startedAt, endedAt, ledger = [], now, cutCeiling, smoke = false }) {
   const failures = legs.filter((l) => !l.ok).map((l) => l.name);
   const ledgerResult = resolveGateWithLedger({
     failures,
@@ -89,6 +93,16 @@ export function buildVerdict({ legs, foreignLoad, startedAt, endedAt, ledger = [
   });
   return {
     gate: ledgerResult.gate,
+    // SELF-DESCRIBING: the mode this verdict ran under, taken from the SINGLE choice point — the caller
+    // (gate-lane.mjs) computes SMOKE ONCE to pick the executor (:56) and passes THAT same value here. It
+    // is deliberately NOT a second, independent `process.env` read: buildVerdict never sees the injected
+    // executor, so reading the env here would record INTENT that can disagree with what actually ran (a
+    // smoking exec under an unset env → smoke:false over legs that never executed). Two reads of the same
+    // flag can diverge; one cannot. The per-leg durationMs below is the INDEPENDENT observed cross-check:
+    // declared mode vs observed effect — if they ever disagree, that disagreement is itself detectable.
+    // Without this a smoke run seals a normal PASS indistinguishable from a real one; hash-verifying the
+    // JSON proves the file authentic, never that the gate RAN.
+    smoke: smoke === true,
     legs,
     foreignLoad,
     ledger: ledgerResult,
@@ -96,4 +110,22 @@ export function buildVerdict({ legs, foreignLoad, startedAt, endedAt, ledger = [
     startedAt,
     endedAt,
   };
+}
+
+/**
+ * The gate WIRING, extracted so production and its test call ONE origin — not a mirror. The SINGLE
+ * `smoke` value BOTH picks the executor (the skip branch vs the injected real one) AND flows into the
+ * verdict, so smoke can never be set at one site and forgotten at the other (the two-origins failure).
+ * The real executor is INJECTED — a unit test can't spawn real npm, and this is the same exec-injection
+ * runLegs already uses — but the smoke→executor→verdict wiring lives HERE, once. gate-lane.mjs calls
+ * this to produce the sealed verdict; the test calls the SAME function, so its negative control guards
+ * the shipped path rather than a lookalike.
+ */
+export async function runGate({ smoke, realExec, foreignLoad, startedAt, ledger = [], cutCeiling }) {
+  const exec = smoke
+    ? async (cmd) => { console.log(`[smoke] skip: ${cmd}`); return { ok: true, code: 0 }; }
+    : realExec;
+  const legs = await runLegs(exec);
+  const endedAt = new Date().toISOString();
+  return buildVerdict({ legs, foreignLoad, startedAt, endedAt, ledger, now: endedAt, cutCeiling, smoke });
 }

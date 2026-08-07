@@ -10,7 +10,7 @@ import { tmpdir, loadavg } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { acquireGateLane, GATE_LANE_PORT } from "./gate-lane-lock.mjs";
-import { renderRefusal, runLegs, buildVerdict, observeForeignLoad, cleanStaleVendoredBundle } from "./gate-lane-run.mjs";
+import { renderRefusal, runGate, observeForeignLoad, cleanStaleVendoredBundle } from "./gate-lane-run.mjs";
 
 const RUNTIME_DIR = (() => { const d = join(tmpdir(), "openrig-gate"); mkdirSync(d, { recursive: true }); return d; })();
 const HOLDER_INFO = join(RUNTIME_DIR, "gate-lane.holder.json");
@@ -53,17 +53,18 @@ async function main() {
     // assembly is still guarded; a fresh checkout is a no-op.
     const removedBundle = cleanStaleVendoredBundle(process.cwd());
     console.log(`[gate] source-truth: cleaned any stale vendored bundle at ${removedBundle}`);
-    const exec = SMOKE
-      ? async (cmd) => { console.log(`[smoke] skip: ${cmd}`); return { ok: true, code: 0 }; }
-      : async (cmd) => { const r = spawnSync(cmd, { shell: true, stdio: "inherit" }); return { ok: r.status === 0, code: r.status }; };
-    const legs = await runLegs(exec);
-    const endedAt = new Date().toISOString();
+    // The REAL executor is injected into runGate (the skip branch lives INSIDE runGate). A smoke run
+    // never reaches spawnSync — runGate picks the skip branch on smoke=true.
+    const realExec = async (cmd) => { const r = spawnSync(cmd, { shell: true, stdio: "inherit" }); return { ok: r.status === 0, code: r.status }; };
     const { entries: ledger, cutCeiling } = loadLedger();
-    const verdict = buildVerdict({ legs, foreignLoad, startedAt, endedAt, ledger, now: endedAt, cutCeiling });
+    // SELF-DESCRIBING verdict via the ONE wiring origin (gate-lane-run.mjs:runGate): the SAME SMOKE
+    // picks the executor AND flows into the verdict, so the two can never disagree. The gate's own
+    // negative-control test calls THIS SAME runGate — it guards this shipped path, not a lookalike.
+    const verdict = await runGate({ smoke: SMOKE, realExec, foreignLoad, startedAt, ledger, cutCeiling });
     mkdirSync(dirname(VERDICT_PATH), { recursive: true }); // ensure the verdict's home exists
     writeFileSync(VERDICT_PATH, JSON.stringify(verdict, null, 2));
     console.log(verdict.ledgerState); // in-band LOUD: name every exclusion (or "0 exclusions")
-    console.log(`gate: ${verdict.gate.toUpperCase()} — verdict → ${VERDICT_PATH} (legs: ${legs.map((l) => `${l.name}=${l.ok ? "ok" : "FAIL"}`).join(", ")})`);
+    console.log(`gate: ${verdict.gate.toUpperCase()} — verdict → ${VERDICT_PATH} (legs: ${verdict.legs.map((l) => `${l.name}=${l.ok ? "ok" : "FAIL"}`).join(", ")})`);
     exitCode = verdict.gate === "pass" ? 0 : 1;
   } catch (e) {
     console.error("gate-lane legs threw:", e?.stack ?? e);
