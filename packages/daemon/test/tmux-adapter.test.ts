@@ -1069,6 +1069,44 @@ describe("TmuxAdapter", () => {
       expect(exec.mock.calls[0]![0]).toBe("tmux respawn-pane -k -t '%3' 'openrig-agent --resume tok'");
     });
 
+    it("with env + cwd injects -c and -e flags (successor self-identifies in the reused pane), command stays last", async () => {
+      // Seat-handover cutover: the successor takes over the retiree's pane via respawn-pane, so its
+      // OpenRig identity env must be injected on the reused pane exactly like createSession's -e flags
+      // (there is no fresh new-session to carry it). Mirrors createSession's -c/-e construction.
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+
+      await adapter.respawnPane("%3", "openrig-agent --resume tok", {
+        cwd: "/w",
+        env: { OPENRIG_NODE_ID: "node123", OPENRIG_SESSION_NAME: "dev-impl@rig" },
+      });
+
+      expect(exec).toHaveBeenCalledOnce();
+      expect(exec.mock.calls[0]![0]).toBe(
+        "tmux respawn-pane -k -t '%3' -c '/w' -e 'OPENRIG_NODE_ID=node123' -e 'OPENRIG_SESSION_NAME=dev-impl@rig' 'openrig-agent --resume tok'",
+      );
+    });
+
+    it("with NO command re-runs the pane's default login shell (omits the trailing command arg)", async () => {
+      // Seat-handover cutover: the successor takes over the retiree's pane and needs a FRESH login
+      // shell for launchHarness to send-keys the harness into. respawn-pane with no command re-runs
+      // the pane's creation command — which for every OpenRig seat is the default shell, because the
+      // harness is send-keys'd into a shell, never exec'd as the pane command (verified on tmux 3.6a).
+      // So we omit the command arg entirely (env/cwd still injected onto the reused pane).
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+
+      await adapter.respawnPane("%3", undefined, {
+        cwd: "/w",
+        env: { OPENRIG_SESSION_NAME: "dev-impl@rig" },
+      });
+
+      expect(exec).toHaveBeenCalledOnce();
+      expect(exec.mock.calls[0]![0]).toBe(
+        "tmux respawn-pane -k -t '%3' -c '/w' -e 'OPENRIG_SESSION_NAME=dev-impl@rig'",
+      );
+    });
+
     it("classifies a write error (no server) as a failure", async () => {
       const adapter = new TmuxAdapter(mockExec({ "respawn-pane": { error: NO_SERVER_ERROR } }));
       const result = await adapter.respawnPane("%3", "cmd");

@@ -385,9 +385,28 @@ export class TmuxAdapter {
   /** Seat-handover cutover (plan 411c43de): respawn a pane IN PLACE with a new command (`-k` kills the
    *  retiree's pane process first). The successor takes the retiree's EXACT pane, so native scrollback
    *  survives untouched — predecessor history stays above the successor boot, same window, same pane.
-   *  The command is shell-quoted as ONE unit (tmux runs it via the shell). */
-  async respawnPane(paneTarget: string, command: string): Promise<TmuxResult> {
-    const cmd = `tmux respawn-pane -k -t ${shellQuote(paneTarget)} ${shellQuote(command)}`;
+   *  The command is shell-quoted as ONE unit (tmux runs it via the shell).
+   *
+   *  Optional `cwd`/`env` inject the successor's start-directory + OpenRig identity env onto the reused
+   *  pane via respawn-pane's `-c`/`-e` flags (tmux ≥3.0) — the SAME mechanism createSession uses, because
+   *  a respawn (unlike new-session) carries no fresh environment of its own. Any flags precede the
+   *  command, which always stays LAST (tmux treats the trailing operand as the shell-command).
+   *
+   *  `command` is OPTIONAL: omitting it re-runs the pane's creation command, which for every OpenRig
+   *  seat is the default login shell (the harness is send-keys'd INTO a shell, never exec'd as the pane
+   *  command — verified on tmux 3.6a). That is exactly what the cutover successor wants: a fresh shell
+   *  in the retiree's pane for launchHarness to drive, with the predecessor scrollback intact above. */
+  async respawnPane(
+    paneTarget: string,
+    command?: string,
+    opts?: { cwd?: string; env?: Record<string, string> },
+  ): Promise<TmuxResult> {
+    const cwdFlag = opts?.cwd != null ? ` -c ${shellQuote(opts.cwd)}` : "";
+    const envFlags = opts?.env
+      ? Object.entries(opts.env).map(([k, v]) => ` -e ${shellQuote(`${k}=${v}`)}`).join("")
+      : "";
+    const commandArg = command != null && command.length > 0 ? ` ${shellQuote(command)}` : "";
+    const cmd = `tmux respawn-pane -k -t ${shellQuote(paneTarget)}${cwdFlag}${envFlags}${commandArg}`;
     try {
       await this.exec(cmd);
       return { ok: true };
