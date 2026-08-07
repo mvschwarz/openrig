@@ -82,3 +82,13 @@ describe("staging helpers — one method for runbook and adapter", () => {
     expect(cmd).not.toMatch(/stat|ls -l/); // mode bits are not the assertion
   });
 });
+
+describe("stageTopologyPlan — the ordering is the contract", () => {
+  it("orders mkdir -> extract -> fence, and the fence is never first (an empty stage passes a naive read check)", async () => {
+    const m = await import("./helpers/testbed-published-daemon.js");
+    const plan = m.stageTopologyPlan({ container: "H_A", hostDir: "/host/topologies" });
+    expect(plan.stagePath).toBe("/home/openrig/topologies");
+    expect(plan.steps.map((s: { label: string }) => s.label)).toEqual(["mkdir", "extract", "fence"]);
+    expect(plan.steps[1]!.stdinFrom).toEqual(["-C", "/host/topologies", "-cf", "-", "."]);
+  });
+});

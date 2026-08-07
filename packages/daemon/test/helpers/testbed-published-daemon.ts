@@ -163,3 +163,35 @@ export function stageFenceArgv(container: string, stagePath: string): string[] {
     `test -r '${stagePath}' && touch '${stagePath}/.fence-write' && rm -f '${stagePath}/.fence-write'`,
   ];
 }
+
+/**
+ * The staging sequence in its ONE correct order, composed so a consumer cannot
+ * re-derive it wrongly: mkdir -> extract (as the exec user) -> FENCE -> then, and
+ * only then, the in-container path to hand the daemon.
+ *
+ * Ordering is load-bearing: the fence must run AFTER extraction (an empty stage
+ * passes a naive read check) and BEFORE anything depends on the stage, or the
+ * first symptom is an EACCES from `rig up` three steps downstream instead of a
+ * named failure here.
+ *
+ * Returns docker argv arrays for the consumer's own docker seam; `tarSource` is
+ * the tar-side argv whose stdout pipes into `extract`'s stdin.
+ */
+export function stageTopologyPlan(opts: { container: string; hostDir: string; name?: string }): {
+  stagePath: string;
+  steps: Array<{ label: string; argv: string[]; stdinFrom?: string[] }>;
+} {
+  const stagePath = containerStagePath(opts.name ?? "topologies");
+  return {
+    stagePath,
+    steps: [
+      { label: "mkdir", argv: ["exec", opts.container, "mkdir", "-p", stagePath] },
+      {
+        label: "extract",
+        argv: stageExtractArgv(opts.container, stagePath),
+        stdinFrom: stageTarSourceArgv(opts.hostDir),
+      },
+      { label: "fence", argv: stageFenceArgv(opts.container, stagePath) },
+    ],
+  };
+}
