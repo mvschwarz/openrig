@@ -85,8 +85,9 @@ describe("config routes (User Settings v0)", () => {
     // + 1 OPR.0.4.6.WF5 (workflow.exception_routing)
     // + 1 OPR.0.4.6.02 (terminal.status_bar — the ratified sole v1 terminal key)
     // + 5 OPR.0.4.6.FS-1 W2 (retention.enabled / transitions_days / watchdog_days /
-    //   watchdog_keep_per_job / batch_size — the CLI-settable queue-retention knobs) → 49 total.
-    expect(Object.keys(body.settings).length).toBe(49);
+    //   watchdog_keep_per_job / batch_size — the CLI-settable queue-retention knobs;
+    //   + retention.usage_samples_days, 51-08 A2) → 50 total.
+    expect(Object.keys(body.settings).length).toBe(50);
     expect(body.settings["daemon.port"]?.source).toBe("default");
     expect(body.settings["ui.preview.refresh_interval_seconds"]?.value).toBe(3);
     expect(body.settings["ui.preview.max_pins"]?.value).toBe(4);

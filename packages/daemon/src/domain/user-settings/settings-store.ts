@@ -134,6 +134,7 @@ export const SETTINGS_VALID_KEYS = [
   "retention.enabled",
   "retention.transitions_days",
   "retention.watchdog_days",
+  "retention.usage_samples_days",
   "retention.watchdog_keep_per_job",
   "retention.batch_size",
 ] as const;
@@ -198,6 +199,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "retention.enabled": { primary: "OPENRIG_RETENTION_ENABLED" },
   "retention.transitions_days": { primary: "OPENRIG_RETENTION_TRANSITIONS_DAYS" },
   "retention.watchdog_days": { primary: "OPENRIG_RETENTION_WATCHDOG_DAYS" },
+  "retention.usage_samples_days": { primary: "OPENRIG_RETENTION_USAGE_SAMPLES_DAYS" },
   "retention.watchdog_keep_per_job": { primary: "OPENRIG_RETENTION_WATCHDOG_KEEP_PER_JOB" },
   "retention.batch_size": { primary: "OPENRIG_RETENTION_BATCH_SIZE" },
 };
@@ -250,6 +252,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "retention.enabled": ["retention", "enabled"],
   "retention.transitions_days": ["retention", "transitionsDays"],
   "retention.watchdog_days": ["retention", "watchdogDays"],
+  "retention.usage_samples_days": ["retention", "usageSamplesDays"],
   "retention.watchdog_keep_per_job": ["retention", "watchdogKeepPerJob"],
   "retention.batch_size": ["retention", "batchSize"],
 };
@@ -481,6 +484,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "retention.enabled": return true;
     case "retention.transitions_days": return 30;
     case "retention.watchdog_days": return 14;
+    case "retention.usage_samples_days": return 14;
     case "retention.watchdog_keep_per_job": return 50;
     case "retention.batch_size": return 500;
     default: return "";
@@ -566,6 +570,11 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
   "retention.watchdog_days": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
       throw new Error(`Invalid value for retention.watchdog_days: must be an integer >= 1, got "${raw}"`);
+    }
+  },
+  "retention.usage_samples_days": (raw, coerced) => {
+    if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(`Invalid value for retention.usage_samples_days: must be an integer >= 1, got "${raw}"`);
     }
   },
   "retention.watchdog_keep_per_job": (raw, coerced) => {

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import Database from "better-sqlite3";
+import { usageSamplesSchema } from "../src/db/migrations/062_usage_samples.js";
 import {
   archiveAgedTerminalTransitions,
   pruneWatchdogHistory,
@@ -36,6 +37,9 @@ function makeDb(): Database.Database {
       history_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, evaluated_at TEXT NOT NULL
     );
   `);
+  // 51-08 A2: the sweep now drains a usage_samples pass — the fixture installs
+  // the REAL migration (the module contract is "runs post-migration").
+  db.exec(usageSamplesSchema.sql);
   return db;
 }
 
@@ -152,5 +156,70 @@ describe("queue-retention — runQueueRetentionSweep", () => {
     expect(s.archivedQitems).toBe(2); // both terminal qitems archived across bounded batches
     expect(s.watchdogDeleted).toBe(1);
     expect(count(db, "SELECT COUNT(*) c FROM queue_transitions")).toBe(0);
+  });
+});
+
+// ── 51-08 A2 (plan-lock rev-1, PM decision 2: 14d rollover-then-delete, tunable) ──
+// usage_samples is TELEMETRY (the watchdog_history contract — plain bounded
+// DELETE, no audit archive). A seat idle past the window loses its rows and the
+// query surfaces render honest-unknown — never a fabricated last value.
+// RED-first: written before pruneUsageSamples existed.
+import { pruneUsageSamples, RETENTION_DEFAULTS } from "../src/domain/queue-retention.js";
+
+function makeUsageDb(): Database.Database {
+  return makeDb(); // makeDb installs the REAL 062 migration
+}
+
+function seedSample(db: Database.Database, seat: string, capturedAt: string): void {
+  db.prepare(
+    `INSERT INTO usage_samples (lane, seat_session, captured_at, used_percentage)
+     VALUES ('context', ?, ?, 10)`,
+  ).run(seat, capturedAt);
+}
+
+describe("51-08 A2 — pruneUsageSamples", () => {
+  const NOW = "2026-08-21T00:00:00.000Z"; // cutoff at 14d default = 2026-08-07T00:00:00.000Z
+  const count = (db: Database.Database) =>
+    (db.prepare("SELECT COUNT(*) AS n FROM usage_samples").get() as { n: number }).n;
+
+  it("default is the PM-ruled 14 days", () => {
+    expect(RETENTION_DEFAULTS.usageSamplesRetentionDays).toBe(14);
+  });
+
+  it("BOUNDARY TWINS (absolute): just-outside deleted, exact-cutoff and just-inside survive", () => {
+    const db = makeUsageDb();
+    seedSample(db, "a@r", "2026-08-06T23:59:59.999Z"); // just outside → deleted
+    seedSample(db, "b@r", "2026-08-07T00:00:00.000Z"); // exact cutoff → survives (< semantics)
+    seedSample(db, "c@r", "2026-08-07T00:00:00.001Z"); // just inside → survives
+    const res = pruneUsageSamples(db, { nowIso: NOW });
+    expect(res.deletedRows).toBe(1);
+    expect(count(db)).toBe(2);
+    const seats = (db.prepare("SELECT seat_session AS s FROM usage_samples ORDER BY s").all() as Array<{ s: string }>).map((r) => r.s);
+    expect(seats).toEqual(["b@r", "c@r"]);
+  });
+
+  it("retention window is tunable: usageSamplesRetentionDays overrides the default", () => {
+    const db = makeUsageDb();
+    seedSample(db, "a@r", "2026-08-19T00:00:00.000Z"); // 2d old
+    expect(pruneUsageSamples(db, { nowIso: NOW, usageSamplesRetentionDays: 1 }).deletedRows).toBe(1);
+    expect(count(db)).toBe(0);
+  });
+
+  it("bounded batches: a batch returns at most batchSize deletions; the loop terminates on the served empty batch", () => {
+    const db = makeUsageDb();
+    for (let i = 0; i < 7; i += 1) seedSample(db, `s${i}@r`, "2026-01-01T00:00:00.000Z");
+    expect(pruneUsageSamples(db, { nowIso: NOW, batchSize: 3 }).deletedRows).toBe(3);
+    expect(pruneUsageSamples(db, { nowIso: NOW, batchSize: 3 }).deletedRows).toBe(3);
+    expect(pruneUsageSamples(db, { nowIso: NOW, batchSize: 3 }).deletedRows).toBe(1);
+    expect(pruneUsageSamples(db, { nowIso: NOW, batchSize: 3 }).deletedRows).toBe(0);
+  });
+
+  it("the sweep entry point drains the usage pass beside the queue passes", async () => {
+    const db = makeUsageDb();
+    for (let i = 0; i < 5; i += 1) seedSample(db, `s${i}@r`, "2026-01-01T00:00:00.000Z");
+    seedSample(db, "fresh@r", "2026-08-20T00:00:00.000Z");
+    const summary = await runQueueRetentionSweep(db, { nowIso: NOW, batchSize: 2 });
+    expect(summary.usageSamplesDeleted).toBe(5);
+    expect(count(db)).toBe(1); // the in-window row survives the full sweep
   });
 });

@@ -16,6 +16,8 @@ import { TERMINAL_QUEUE_STATES } from "./queue-repository.js";
  *     NON-terminal qitem are NEVER touched, at any age. Enforced structurally —
  *     only qitems whose `queue_items.state` is terminal are ever selected.
  *
+ *  2b. `usage_samples` (51-08 A2) = telemetry, same contract as watchdog_history:
+ *     plain bounded DELETE past the PM-ruled 14d default (`retention.usage_samples_days`).
  *  2. `watchdog_history` = telemetry, no audit contract. Contract: plain DELETE
  *     older than the window, PLUS keep the most recent K per job regardless of
  *     age (respects `idx_watchdog_history_job_recent`, the recent-per-job reader).
@@ -76,6 +78,8 @@ export const RETENTION_DEFAULTS = {
   watchdogRetentionDays: 14,
   /** ... EXCEPT always keep this many most-recent rows per job */
   watchdogKeepPerJob: 50,
+  /** delete usage_samples telemetry older than this (51-08 A2, PM decision 2) */
+  usageSamplesRetentionDays: 14,
   /** rows/qitems touched per bounded batch (the anti-wedge bound) */
   batchSize: 500,
   /** safety cap on batches per table per sweep (defense-in-depth vs a runaway loop) */
@@ -89,6 +93,7 @@ export interface RetentionOptions {
   transitionsRetentionDays?: number;
   watchdogRetentionDays?: number;
   watchdogKeepPerJob?: number;
+  usageSamplesRetentionDays?: number;
   batchSize?: number;
   maxBatchesPerTable?: number;
 }
@@ -244,12 +249,42 @@ export function pruneWatchdogHistory(
   return { deletedRows: result.changes };
 }
 
+/**
+ * 51-08 A2 — ONE bounded batch: DELETE up to `batchSize` usage_samples rows
+ * whose captured_at predates the retention cutoff (PM-ruled default 14d,
+ * tunable). usage_samples is TELEMETRY under the watchdog_history contract —
+ * plain delete, no audit archive. A seat idle past the window loses its rows;
+ * the query surfaces render honest-unknown, never a preserved stale value.
+ * `<` semantics: an exact-cutoff row survives (over-keep, the safe direction).
+ */
+export function pruneUsageSamples(
+  db: Database.Database,
+  opts: RetentionOptions,
+): PruneBatchResult {
+  const batchSize = opts.batchSize ?? RETENTION_DEFAULTS.batchSize;
+  const cutoff = cutoffIso(
+    opts.nowIso,
+    opts.usageSamplesRetentionDays ?? RETENTION_DEFAULTS.usageSamplesRetentionDays,
+  );
+  const result = db
+    .prepare(
+      `DELETE FROM usage_samples
+        WHERE id IN (
+          SELECT id FROM usage_samples WHERE captured_at < ? LIMIT ?
+        )`,
+    )
+    .run(cutoff, batchSize);
+  return { deletedRows: result.changes };
+}
+
 export interface RetentionSweepSummary {
   archivedQitems: number;
   archivedRows: number;
   watchdogDeleted: number;
+  usageSamplesDeleted: number;
   transitionBatches: number;
   watchdogBatches: number;
+  usageSamplesBatches: number;
 }
 
 /**
@@ -267,8 +302,10 @@ export async function runQueueRetentionSweep(
     archivedQitems: 0,
     archivedRows: 0,
     watchdogDeleted: 0,
+    usageSamplesDeleted: 0,
     transitionBatches: 0,
     watchdogBatches: 0,
+    usageSamplesBatches: 0,
   };
 
   for (let i = 0; i < maxBatches; i++) {
@@ -285,6 +322,14 @@ export async function runQueueRetentionSweep(
     if (batch.deletedRows === 0) break;
     summary.watchdogDeleted += batch.deletedRows;
     summary.watchdogBatches++;
+    await yieldToLoop();
+  }
+
+  for (let i = 0; i < maxBatches; i++) {
+    const batch = pruneUsageSamples(db, opts);
+    if (batch.deletedRows === 0) break;
+    summary.usageSamplesDeleted += batch.deletedRows;
+    summary.usageSamplesBatches++;
     await yieldToLoop();
   }
 

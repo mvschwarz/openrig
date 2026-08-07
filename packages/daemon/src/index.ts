@@ -110,6 +110,7 @@ export function startQueueRetentionScheduler(deps: {
       transitionsRetentionDays: num("retention.transitions_days", RETENTION_DEFAULTS.transitionsRetentionDays),
       watchdogRetentionDays: num("retention.watchdog_days", RETENTION_DEFAULTS.watchdogRetentionDays),
       watchdogKeepPerJob: num("retention.watchdog_keep_per_job", RETENTION_DEFAULTS.watchdogKeepPerJob),
+      usageSamplesRetentionDays: num("retention.usage_samples_days", RETENTION_DEFAULTS.usageSamplesRetentionDays),
       batchSize: num("retention.batch_size", RETENTION_DEFAULTS.batchSize),
     }).catch((err: unknown) => {
       console.error(`[queue-retention] sweep error: ${err instanceof Error ? err.message : String(err)}`);
