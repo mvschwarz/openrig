@@ -1368,6 +1368,32 @@ export class QueueRepository {
       }
     }
 
+    // SWEEP-a (shape f2576102) — closure/blocked-field COHERENCE, beside the reference
+    // reject above: an incoherent field must never silently persist (worse than a drop —
+    // the COALESCE below would write it). Admits-map, derived from LIVE schema use:
+    //   closure_reason/closure_target → state "done", OR the PARK-RECORD form
+    //     (state "blocked" with closureReason "blocked_on" — the workflow gate/park
+    //     writers' established shape, workflow-runtime.ts:587/1013);
+    //   blocked_on → state "blocked" only.
+    const isParkRecord = input.state === "blocked" && input.closureReason === "blocked_on";
+    // Third live form (found by the neighborhood suites): the transactional handoff
+    // closes its source as state "handed-off" with closureReason "handed_off_to".
+    const isHandoffClose = input.state === "handed-off" && input.closureReason === "handed_off_to";
+    if (input.state !== "done" && !isParkRecord && !isHandoffClose && (input.closureReason != null || input.closureTarget != null)) {
+      throw new QueueRepositoryError(
+        "closure_fields_not_admitted",
+        `closure_reason/closure_target persist only on state=done (or the blocked park-record form); the '${input.state}' transition cannot store them. Close the item (--state done --closure-reason …) or drop the flags.`,
+        {},
+      );
+    }
+    if (input.blockedOn != null && input.state !== "blocked") {
+      throw new QueueRepositoryError(
+        "blocked_on_not_admitted",
+        `blocked_on persists only on state=blocked; the '${input.state}' transition cannot store it. Park the item (rig queue block --on …) or drop --blocked-on.`,
+        {},
+      );
+    }
+
     let effectiveSummary = qitem.summary;
     let effectiveEvidenceRef = qitem.evidenceRef;
     if (isHumanPark) {
