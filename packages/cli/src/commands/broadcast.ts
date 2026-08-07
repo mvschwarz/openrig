@@ -8,6 +8,7 @@ import { loadHostRegistry, resolveHost, hostDisplayTarget } from "../host-regist
 import { emitCrossHostError, emitRemoteHttpFailure } from "../cross-host-cli-helpers.js";
 import { runRemoteHttpOp } from "../remote-host-ops.js";
 import { resolveContextRef, walkSizedWarning } from "../context-resolve.js";
+import { readOpenRigEnv } from "../openrig-compat.js";
 
 /**
  * OPR.0.4.6.MH4 C3 — the cross-host broadcast deadline, named at the call
@@ -116,6 +117,12 @@ selection, not the agent@rig@host sugar.`)
       const body: Record<string, unknown> = { text: payload, force: opts.force };
       if (opts.rig) body.rig = opts.rig;
       if (opts.pod) body.pod = opts.pod;
+      // Send/broadcast header (ruling 03c35295): identify the broadcasting seat so the daemon fan-out
+      // WRAPS each recipient with the scale header ("broadcast to <rig> (N seats)" / topology) instead
+      // of delivering raw — a recipient tells it was a broadcast header-alone (the anti-storm teeth).
+      // Absent (no session env) falls open to today's raw delivery.
+      const sender = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+      if (sender) body.envelopeSender = sender;
 
       const res = await client.post<Record<string, unknown>>("/api/transport/broadcast", body);
 

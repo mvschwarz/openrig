@@ -413,7 +413,9 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         const warn = walkSizedWarning(resolved, session);
         if (warn && !opts.json) console.log(`Advisory: ${warn}`);
       }
-      const outboundText = raw ? payload : wrapSendBody(senderSession, session, payload, selfHostId);
+      // Send/broadcast header (ruling 03c35295): a directed `rig send` is a DM — stamp it at send-time
+      // (Sent: MM-DD HH:MMZ) so transcripts are timestamped; the To line stays the single recipient.
+      const outboundText = raw ? payload : wrapSendBody(senderSession, session, payload, selfHostId, { stampISO: new Date().toISOString() });
       let res: { status: number; data: Record<string, unknown> };
       try {
         res = await client.post<Record<string, unknown>>("/api/transport/send", {
@@ -587,7 +589,7 @@ async function runHttpHostSend(
 ): Promise<void> {
   const senderSession = opts.from ?? resolveSenderSession();
   const raw = Boolean(opts.raw || opts.dangerouslyInteract);
-  const outboundText = raw ? text : wrapSendBody(senderSession, session, text, selfHostId);
+  const outboundText = raw ? text : wrapSendBody(senderSession, session, text, selfHostId, { stampISO: new Date().toISOString() });
 
   const result = await runRemoteHttpOp(host.id, "POST", "/api/transport/send", {
     session, text: outboundText, verify: opts.verify, force: opts.force, waitForIdleMs,
