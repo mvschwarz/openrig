@@ -27,6 +27,10 @@ export interface OccupantInvalidator {
 export interface OccupantInvalidatorDeps {
   enforcer: { invalidateOccupant(sessionName: string): void };
   contextUsage: { invalidateOccupantSidecar(sessionName: string): void };
+  /** (e/Class-B) durable watchdog_jobs store — armed jobs registered by the retiring generation are
+   *  stopped at swap (a stale wake into the successor's context is the ghost). Optional: absent ⇒ the
+   *  watchdog branch is skipped (never a name-scoped fallback). */
+  watchdog?: { dropArmedByRegisteringGeneration(generationUuid: string): number };
   log?: (msg: string) => void;
 }
 
@@ -55,10 +59,18 @@ export class DefaultOccupantInvalidator implements OccupantInvalidator {
       );
       return;
     }
-    // atom-B present: gen-scoped queue_items/watchdog_jobs invalidation wires here (follow-on).
-    log(
-      `[occupant-invalidator] Class-B gen-scoped invalidation for "${retiringSessionName}" gen=${retiringGeneration} ` +
-        `— TODO: drop retired-gen in-flight queue_items/watchdog_jobs (atom-B follow-on).`,
-    );
+    // atom-B present → Class-B gen-scoped invalidation.
+    // Watchdog (3b): stop every ARMED job registered by the retiring generation — a stale wake firing
+    // into the successor's context is the specimen; the successor re-arms its own. Gen-scoped so the
+    // successor's OWN armed jobs (same name, live gen) are untouched.
+    const stopped = this.deps.watchdog?.dropArmedByRegisteringGeneration(retiringGeneration) ?? 0;
+    if (stopped > 0) {
+      log(
+        `[occupant-invalidator] Class-B: stopped ${stopped} armed watchdog job(s) registered by retired ` +
+          `generation ${retiringGeneration} (seat "${retiringSessionName}") — successor re-arms its own.`,
+      );
+    }
+    // Queue_items (3a) — claimed-by-retired-gen items RELEASE to pending (role work is durable, never
+    // hard-dropped); lands in the next sub-commit.
   }
 }

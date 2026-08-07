@@ -316,7 +316,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // PL-004 Phase C — watchdog supervision tree. Repository + history-log
   // are constructed early; the policy engine + scheduler are constructed
   // after SessionTransport is available so the engine can wire delivery.
-  const watchdogJobsRepoInstance = new WatchdogJobsRepository(db);
+  const watchdogJobsRepoInstance = new WatchdogJobsRepository(
+    db,
+    undefined, // now (default clock)
+    // GHOST-STAGE (e/Class-B): stamp the arming occupant's generation so a swap can drop its armed jobs.
+    (sessionName) => sessionRegistry.currentOccupantGenerationForSession(sessionName),
+  );
   const watchdogHistoryLogInstance = new WatchdogHistoryLog(db);
 
   const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand);
@@ -1693,6 +1698,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   deps.occupantInvalidator = new DefaultOccupantInvalidator({
     enforcer: compactionEnforcer ?? { invalidateOccupant: () => {} },
     contextUsage: contextUsageStore,
+    // (e/Class-B) watchdog store — armed jobs registered by the retiring generation stop at swap.
+    watchdog: watchdogJobsRepoInstance,
     log: (msg) => console.warn(msg),
   });
 

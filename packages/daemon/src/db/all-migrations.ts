@@ -63,9 +63,10 @@ import { nodePolicyProvenanceSchema } from "./migrations/057_node_policy_provena
 import { rigPolicyProvenanceSchema } from "./migrations/058_rig_policy_provenance.js";
 import { selfHostIdentitySchema } from "./migrations/059_self_host_identity.js";
 import { occupantTenuresSchema } from "./migrations/060_occupant_tenures.js";
+import { occupantGenerationStampsSchema } from "./migrations/063_occupant_generation_stamps.js";
 import type { Migration } from "./migrate.js";
 
-/** Ordered 001→060. Mirrors the daemon boot migration order exactly. */
+/** Ordered 001→063 (061 P7, 062 51-08 in flight elsewhere). Mirrors the daemon boot migration order. */
 export const ALL_MIGRATIONS: Migration[] = [
   coreSchema,
   bindingsSessionsSchema,
@@ -127,4 +128,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   rigPolicyProvenanceSchema,
   selfHostIdentitySchema,
   occupantTenuresSchema,
+  occupantGenerationStampsSchema,
 ];

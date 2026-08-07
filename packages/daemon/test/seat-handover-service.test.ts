@@ -340,13 +340,16 @@ describe("SeatHandoverService", () => {
     expect(newSession).toMatchObject({ resume_type: "codex_id", resume_token: "codex-launch-tok", resume_provenance: "scrape" });
   });
 
-  it("ghost-stage re-key seam: calls invalidateRetiringOccupant at commit with the retiring + successor names", async () => {
+  it("ghost-stage re-key seam: calls invalidateRetiringOccupant at commit with the retiring + successor names + the RETIRING generation", async () => {
     // The cutover invalidates the RETIRING occupant's seat-name-keyed stores so the successor never
     // inherits a ghost (ghost-stage contract, dev50 slice). This seat OWNS the mechanical call at
     // commit(); dev50 owns the per-store impls behind the OccupantInvalidator interface. In the cutover
-    // the successor REUSES the seat name, so retiring === successor here (retiringGeneration omitted
-    // until atom-B → Class-B stores no-op loud).
+    // the successor REUSES the seat name, so retiring === successor by NAME — Class-A is safe by TIMING
+    // and Class-B gen-scopes via retiringGeneration (atom-B): the RETIRING occupant's generation,
+    // captured BEFORE registerClaimedSession mints the successor's tenure under the reused name.
     seedSeat({ runtime: "codex" });
+    const retiringGen = sessionRegistry.currentOccupantGenerationForSession("dev-impl@seat-rig");
+    expect(retiringGen, "the retiree has an atom-B tenure to gen-scope by").toBeTruthy();
 
     const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
 
@@ -355,7 +358,12 @@ describe("SeatHandoverService", () => {
     expect(invalidateRetiringOccupant).toHaveBeenCalledWith({
       retiringSessionName: "dev-impl@seat-rig",
       successorSessionName: "dev-impl@seat-rig",
+      retiringGeneration: retiringGen, // captured pre-mint = the RETIREE's gen, not the successor's
     });
+    // Proof it captured the RETIRING generation: the handover minted a fresh successor tenure under
+    // the reused name, so the node's live generation now DIFFERS from what the invalidator received.
+    const successorGen = sessionRegistry.currentOccupantGenerationForSession("dev-impl@seat-rig");
+    expect(successorGen).not.toBe(retiringGen);
   });
 
   it("does NOT invalidate the retiring occupant when the handover fails before commit (no re-key on a non-committed handover)", async () => {

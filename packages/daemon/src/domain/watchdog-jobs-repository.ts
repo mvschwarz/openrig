@@ -55,6 +55,8 @@ export interface WatchdogJob {
   registeredBySession: string;
   registeredAt: string;
   terminalReason: string | null;
+  /** (e/Class-B) atom-B generation of the occupant that armed this job; null = UNKNOWN/pre-063. */
+  registeredByGeneration: string | null;
 }
 
 export interface RegisterWatchdogJobInput {
@@ -83,6 +85,7 @@ interface JobRow {
   registered_by_session: string;
   registered_at: string;
   terminal_reason: string | null;
+  registered_by_generation_uuid?: string | null;
 }
 
 export class WatchdogJobsError extends Error {
@@ -96,11 +99,29 @@ export class WatchdogJobsError extends Error {
   }
 }
 
+/** Defensive additive-column detect (mirrors queue-repository's detectQueueColumn): a harness whose
+ *  db predates migration 063 lacks the generation columns, so writers degrade instead of throwing. */
+function detectWatchdogColumn(db: Database.Database, columnName: string): boolean {
+  try {
+    return db.prepare("PRAGMA table_info(watchdog_jobs)").all()
+      .some((row) => (row as { name?: string }).name === columnName);
+  } catch {
+    return false;
+  }
+}
+
 export class WatchdogJobsRepository {
+  private readonly hasGenColumn: boolean;
   constructor(
     private readonly db: Database.Database,
     private readonly now: () => Date = () => new Date(),
-  ) {}
+    // GHOST-STAGE (e/Class-B): resolve the ARMING occupant's atom-B generation so a job carries the
+    // generation that registered it. null/absent ⇒ UNKNOWN → the column stays NULL and the swap-time
+    // gen predicate never matches it (never dropped on unknown). Injected in startup (SessionRegistry).
+    private readonly resolveOccupantGeneration?: (sessionName: string) => string | null,
+  ) {
+    this.hasGenColumn = detectWatchdogColumn(db, "registered_by_generation_uuid");
+  }
 
   register(input: RegisterWatchdogJobInput): WatchdogJob {
     if (!PHASE_D_POLICIES.includes(input.policy as WatchdogPolicyName)) {
@@ -126,26 +147,43 @@ export class WatchdogJobsRepository {
     }
     const jobId = ulid();
     const registeredAt = this.now().toISOString();
-    this.db
-      .prepare(
-        `INSERT INTO watchdog_jobs (
-          job_id, policy, spec_yaml, target_session,
-          interval_seconds, active_wake_interval_seconds, scan_interval_seconds,
-          last_evaluation_at, last_fire_at, state,
-          registered_by_session, registered_at, terminal_reason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'active', ?, ?, NULL)`,
-      )
-      .run(
-        jobId,
-        input.policy,
-        input.specYaml,
-        input.targetSession,
-        input.intervalSeconds,
-        input.activeWakeIntervalSeconds ?? null,
-        input.scanIntervalSeconds ?? null,
-        input.registeredBySession,
-        registeredAt,
-      );
+    // (e/Class-B): stamp the ARMING occupant's generation so a swap can drop THIS gen's armed jobs
+    // (a stale wake firing into the successor's context is the ghost). NULL when unresolved/pre-063.
+    const registeredByGeneration = this.hasGenColumn
+      ? (this.resolveOccupantGeneration?.(input.registeredBySession) ?? null)
+      : null;
+    if (this.hasGenColumn) {
+      this.db
+        .prepare(
+          `INSERT INTO watchdog_jobs (
+            job_id, policy, spec_yaml, target_session,
+            interval_seconds, active_wake_interval_seconds, scan_interval_seconds,
+            last_evaluation_at, last_fire_at, state,
+            registered_by_session, registered_at, terminal_reason,
+            registered_by_generation_uuid
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'active', ?, ?, NULL, ?)`,
+        )
+        .run(
+          jobId, input.policy, input.specYaml, input.targetSession,
+          input.intervalSeconds, input.activeWakeIntervalSeconds ?? null, input.scanIntervalSeconds ?? null,
+          input.registeredBySession, registeredAt, registeredByGeneration,
+        );
+    } else {
+      this.db
+        .prepare(
+          `INSERT INTO watchdog_jobs (
+            job_id, policy, spec_yaml, target_session,
+            interval_seconds, active_wake_interval_seconds, scan_interval_seconds,
+            last_evaluation_at, last_fire_at, state,
+            registered_by_session, registered_at, terminal_reason
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'active', ?, ?, NULL)`,
+        )
+        .run(
+          jobId, input.policy, input.specYaml, input.targetSession,
+          input.intervalSeconds, input.activeWakeIntervalSeconds ?? null, input.scanIntervalSeconds ?? null,
+          input.registeredBySession, registeredAt,
+        );
+    }
     return this.getByIdOrThrow(jobId);
   }
 
@@ -251,6 +289,25 @@ export class WatchdogJobsRepository {
       .run(reason, jobId);
     return this.getByIdOrThrow(jobId);
   }
+
+  /**
+   * GHOST-STAGE (e/Class-B): at a seat swap, stop every ARMED (state='active') job registered by the
+   * RETIRING generation — a stale wake firing into the successor's context is the specimen; the
+   * successor re-arms its own. Gen-scoped, NEVER name-scoped (the successor shares the seat name, so a
+   * name-scoped stop would kill the successor's own jobs). A NULL/empty generation never matches
+   * (UNKNOWN ≠ retired — note-2). Returns the count stopped. Auditable (terminal_reason), not a hard
+   * delete — the row stays for forensics. Pre-063 dbs no-op.
+   */
+  dropArmedByRegisteringGeneration(generationUuid: string): number {
+    if (!this.hasGenColumn || !generationUuid) return 0;
+    const res = this.db
+      .prepare(
+        `UPDATE watchdog_jobs SET state = 'stopped', terminal_reason = 'registering generation retired (seat handover)'
+         WHERE state = 'active' AND registered_by_generation_uuid = ?`,
+      )
+      .run(generationUuid);
+    return res.changes;
+  }
 }
 
 function rowToJob(row: JobRow): WatchdogJob {
@@ -270,5 +327,6 @@ function rowToJob(row: JobRow): WatchdogJob {
     registeredBySession: row.registered_by_session,
     registeredAt: row.registered_at,
     terminalReason: row.terminal_reason,
+    registeredByGeneration: row.registered_by_generation_uuid ?? null,
   };
 }

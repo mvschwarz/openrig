@@ -6,6 +6,8 @@ import { coreSchema } from "../src/db/migrations/001_core_schema.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { watchdogJobsSchema } from "../src/db/migrations/031_watchdog_jobs.js";
 import { watchdogHistorySchema } from "../src/db/migrations/032_watchdog_history.js";
+import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
+import { occupantGenerationStampsSchema } from "../src/db/migrations/063_occupant_generation_stamps.js";
 import {
   PHASE_C_POLICIES,
   WatchdogJobsError,
@@ -172,5 +174,74 @@ describe("WatchdogJobsRepository (PL-004 Phase C)", () => {
       expect(err).toBeInstanceOf(WatchdogJobsError);
       expect((err as WatchdogJobsError).code).toBe("job_not_found");
     }
+  });
+});
+
+// ── GHOST-STAGE (e/Class-B): occupant-generation stamp + gen-scoped swap drop ──
+describe("WatchdogJobsRepository — generation stamps (Class-B)", () => {
+  let db: Database.Database;
+  let repo: WatchdogJobsRepository;
+  let genBySession: Map<string, string | null>;
+
+  beforeEach(() => {
+    db = createDb();
+    // 063 ALTERs BOTH queue_items + watchdog_jobs (one migration), so both tables must exist first.
+    migrate(db, [coreSchema, eventsSchema, queueItemsSchema, watchdogJobsSchema, watchdogHistorySchema, occupantGenerationStampsSchema]);
+    genBySession = new Map();
+    repo = new WatchdogJobsRepository(db, undefined, (s) => genBySession.get(s) ?? null);
+  });
+  afterEach(() => db.close());
+
+  const input = (overrides: Record<string, unknown> = {}) => ({
+    policy: "periodic-reminder",
+    specYaml: "policy: periodic-reminder\ntarget: a@rig\ninterval_seconds: 60\ncontext:\n  target:\n    session: a@rig\n  message: hi\n",
+    targetSession: "a@rig",
+    intervalSeconds: 60,
+    registeredBySession: "seat@rig",
+    ...overrides,
+  });
+
+  it("stamps the ARMING occupant's generation at register", () => {
+    genBySession.set("seat@rig", "gen-1");
+    expect(repo.register(input()).registeredByGeneration).toBe("gen-1");
+  });
+
+  it("an unresolved arming generation stays NULL (UNKNOWN — never a false stamp)", () => {
+    expect(repo.register(input({ registeredBySession: "unknown@rig" })).registeredByGeneration).toBeNull();
+  });
+
+  it("drops ONLY armed jobs of the retiring generation — the successor's own job (same name, live gen) survives", () => {
+    genBySession.set("seat@rig", "gen-retired");
+    const retired = repo.register(input());
+    genBySession.set("seat@rig", "gen-live"); // successor resumes into the SAME seat name, new gen
+    const live = repo.register(input());
+
+    const stopped = repo.dropArmedByRegisteringGeneration("gen-retired");
+    expect(stopped).toBe(1);
+    expect(repo.getById(retired.jobId)!.state).toBe("stopped");
+    expect(repo.getById(retired.jobId)!.terminalReason).toContain("retired");
+    expect(repo.getById(live.jobId)!.state).toBe("active"); // NOT name-scoped — successor untouched
+  });
+
+  it("an empty generation is a no-op (never a catch-all drop)", () => {
+    genBySession.set("seat@rig", "gen-1");
+    repo.register(input());
+    expect(repo.dropArmedByRegisteringGeneration("")).toBe(0);
+  });
+
+  it("NULL-generation jobs are never matched (UNKNOWN != retired)", () => {
+    const job = repo.register(input({ registeredBySession: "unknown@rig" }));
+    expect(repo.dropArmedByRegisteringGeneration("gen-anything")).toBe(0);
+    expect(repo.getById(job.jobId)!.state).toBe("active");
+  });
+
+  it("pre-063 db (no gen column) degrades: register succeeds, gen NULL, drop no-ops (blast-radius containment)", () => {
+    const bareDb = createDb();
+    migrate(bareDb, [coreSchema, eventsSchema, watchdogJobsSchema, watchdogHistorySchema]); // NO 063
+    const bareRepo = new WatchdogJobsRepository(bareDb, undefined, () => "gen-x");
+    const job = bareRepo.register(input());
+    expect(job.registeredByGeneration).toBeNull();
+    expect(bareRepo.dropArmedByRegisteringGeneration("gen-x")).toBe(0);
+    bareDb.close();
   });
 });

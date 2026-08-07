@@ -675,6 +675,11 @@ export class SeatHandoverService {
         tmuxWindow: input.discovered.tmuxWindow,
         tmuxPane: input.discovered.tmuxPane,
       });
+      // (e/Class-B): capture the RETIRING occupant's generation BEFORE registerClaimedSession mints the
+      // successor's tenure below — after that mint the node's "current" generation IS the successor's
+      // (the name is reused), so this is the only point the retiree's generation is resolvable.
+      const retiringGeneration =
+        this.sessionRegistry.currentOccupantGenerationForSession(input.latestSession.session_name) ?? undefined;
       // atom-B: a seat handover mints a HANDOVER-kind occupant generation (not the default 'adopt').
       const newSession = this.sessionRegistry.registerClaimedSession(input.node.id, input.discovered.tmuxSession, "handover");
       // B2 (launched/fresh): persist the launch-scraped resume token atomically
@@ -702,11 +707,13 @@ export class SeatHandoverService {
       // seat-name-keyed stores so the successor never inherits a ghost (drained compaction stage, frozen
       // telemetry sample, delayed lifecycle message to the retired generation). The ghost-stage slice
       // owns the per-store impls behind OccupantInvalidator; this seat owns this single call. Under the
-      // cutover the successor reuses the seat name, so retiring === successor here (retiringGeneration is
-      // omitted until atom-B → Class-B stores no-op loud). Optional dep: absent → skipped, never blocks.
+      // cutover the successor reuses the seat name, so retiring === successor here — Class-A is safe by
+      // TIMING (runs before the successor writes) and Class-B is gen-scoped via retiringGeneration (the
+      // retiree's generation, captured above pre-mint). Optional dep: absent → skipped, never blocks.
       this.occupantInvalidator?.invalidateRetiringOccupant({
         retiringSessionName: input.latestSession.session_name,
         successorSessionName: input.discovered.tmuxSession,
+        retiringGeneration,
       });
 
       const event = this.eventBus.persistWithinTransaction({
