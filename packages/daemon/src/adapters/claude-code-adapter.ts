@@ -226,6 +226,15 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // OPR.0.4.8.3 Seam B: a per-seat resolved policy posture (binding.launchPosture) overrides env.
     const permissionMode = claudePostureFlag(process.env, binding.launchPosture);
 
+    // 51-07: a per-agent model declared in the spec (member.model ?? profile ?? defaults, resolved
+    // onto binding.model at instantiate) is emitted as `--model <x>` on the launch command. Absent →
+    // empty string → the command is byte-identical (regression pin). ADDITIVE ONLY: this sits beside
+    // the permissionMode/posture flag but never alters it (the D1 model-only fence). Mirrors codex's
+    // modelArg (codex-runtime-adapter.ts). NOTE: the restore path (claude-resume.ts) + the native
+    // resume-cmd builder are the named A2 restore-parity follow-on, not this atom.
+    const model = binding.model?.trim();
+    const modelArg = model ? ` --model ${shellQuote(model)}` : "";
+
     // Fork branch: build `claude --resume <parent> --fork-session --name <seat>`
     // and capture the NEW post-fork session id. The parent token is NEVER
     // persisted onto the new seat record (identity-honesty bedrock).
@@ -240,7 +249,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (!parentId) {
         return { ok: false, error: "claude-code fork: forkSource.value is required (parent native_id)" };
       }
-      const cmd = `claude ${permissionMode} --resume ${parentId} --fork-session --name ${opts.name}`;
+      const cmd = `claude ${permissionMode}${modelArg} --resume ${parentId} --fork-session --name ${opts.name}`;
       const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
@@ -266,8 +275,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     const generatedSessionId = opts.resumeToken ? null : this.sessionIdFactory();
     const cmd = opts.resumeToken
-      ? `claude ${permissionMode} --resume ${opts.resumeToken} --name ${opts.name}`
-      : `claude ${permissionMode} --session-id ${generatedSessionId} --name ${opts.name}`;
+      ? `claude ${permissionMode}${modelArg} --resume ${opts.resumeToken} --name ${opts.name}`
+      : `claude ${permissionMode}${modelArg} --session-id ${generatedSessionId} --name ${opts.name}`;
 
     const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
     if (!textResult.ok) {

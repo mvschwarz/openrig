@@ -3,6 +3,7 @@ import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/clau
 import type { NodeBinding, ResolvedStartupFile } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-planner.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
+import { claudePostureFlag } from "../src/adapters/yolo-mode.js";
 
 function mockTmux(): TmuxAdapter {
   return {
@@ -46,6 +47,58 @@ function makeEntry(overrides?: Partial<ProjectionEntry>): ProjectionEntry {
     classification: "safe_projection", ...overrides,
   };
 }
+
+// 51-07 A1 — a per-agent model declared in the spec must reach the claude launch command.
+// binding.model already arrives (resolver → instantiator :1728); this pins the ADAPTER emitting it
+// on all three launch builders. RED-first: the three --model tests fail on main (0 model refs in the
+// adapter); the byte-identical + posture pins are invariants that stay green through the change.
+describe("launchHarness — per-agent --model reaches the claude launch (51-07 A1)", () => {
+  const MODEL = "claude-haiku-4-5";
+  const POSTURE = claudePostureFlag(process.env, undefined); // the acceptEdits floor — the posture pin baseline
+
+  const withModel = (model?: string): NodeBinding => ({ ...makeBinding(), model } as NodeBinding);
+  const adapterWith = (tmux: TmuxAdapter) => new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+  const lastCmd = (tmux: TmuxAdapter): string => {
+    const calls = (tmux.sendText as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    return (calls[calls.length - 1]?.[1] as string) ?? "";
+  };
+
+  it("FRESH launch emits --model when the binding declares one", async () => {
+    const tmux = mockTmux();
+    await adapterWith(tmux).launchHarness(withModel(MODEL), { name: "seat" });
+    expect(lastCmd(tmux)).toContain(`--model '${MODEL}'`);
+  });
+
+  it("RESUME launch emits --model", async () => {
+    const tmux = mockTmux();
+    await adapterWith(tmux).launchHarness(withModel(MODEL), { name: "seat", resumeToken: "tok-123" });
+    expect(lastCmd(tmux)).toContain(`--model '${MODEL}'`);
+  });
+
+  it("FORK launch emits --model", async () => {
+    const tmux = mockTmux();
+    await adapterWith(tmux).launchHarness(withModel(MODEL), { name: "seat", forkSource: { kind: "native_id", value: "parent-xyz" } });
+    expect(lastCmd(tmux)).toContain(`--model '${MODEL}'`);
+  });
+
+  // absent → BYTE-IDENTICAL (the deterministic resume builder pins exact bytes — no --model added).
+  it("absent model → the resume command is byte-identical to main (no --model, posture intact)", async () => {
+    const tmux = mockTmux();
+    await adapterWith(tmux).launchHarness(withModel(undefined), { name: "seat", resumeToken: "tok-123" });
+    expect(lastCmd(tmux)).toBe(`claude ${POSTURE} --resume tok-123 --name seat`);
+  });
+
+  // D1 pin — posture BYTE-UNCHANGED both directions: the ONLY delta with/without model is the
+  // additive ` --model '<x>'`; posture and every other token are byte-identical.
+  it("adds ONLY --model — posture and structure byte-unchanged (additive-only)", async () => {
+    const tmuxNo = mockTmux(); await adapterWith(tmuxNo).launchHarness(withModel(undefined), { name: "seat", resumeToken: "T" });
+    const tmuxYes = mockTmux(); await adapterWith(tmuxYes).launchHarness(withModel(MODEL), { name: "seat", resumeToken: "T" });
+    const noModel = lastCmd(tmuxNo), withMdl = lastCmd(tmuxYes);
+    expect(noModel).toContain(POSTURE);
+    expect(withMdl).toContain(POSTURE);
+    expect(withMdl.replace(` --model '${MODEL}'`, "")).toBe(noModel);
+  });
+});
 
 describe("Claude Code runtime adapter", () => {
   // T1: implements all four methods
