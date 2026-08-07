@@ -179,14 +179,28 @@ function pairContract(items: string[], drops: C1Drop[]): ProofContractItem[] {
 }
 
 function specShaFromLockedArtifacts(fs: ScopeFsDeps, sliceDir: string, fm: string): string | null {
-  // locked-artifacts is a nested YAML block list; take the first `path:` under a
-  // `kind: spec` entry (the plan-lock convention), else the PRD when present.
-  const lines = fm.split("\n");
+  // locked-artifacts is a nested YAML block list; take the `path:` of the first
+  // `kind: spec` entry (the plan-lock convention), falling back to the first path of
+  // any kind, else the PRD. Entries are delimited by their `- ` item starts so a
+  // non-spec kind listed first cannot steal the hash (39a1c477 review nit).
   let candidate: string | null = null;
-  for (let i = 0; i < lines.length; i += 1) {
-    const m = /^\s+path:\s*(.+)$/.exec(lines[i]!);
-    if (m) { candidate = m[1]!.trim(); break; }
+  let firstPath: string | null = null;
+  let entryPath: string | null = null;
+  let entryIsSpec = false;
+  const closeEntry = () => {
+    if (entryPath && !firstPath) firstPath = entryPath;
+    if (entryPath && entryIsSpec && !candidate) candidate = entryPath;
+    entryPath = null;
+    entryIsSpec = false;
+  };
+  for (const line of fm.split("\n")) {
+    if (/^\s+-\s/.test(line)) closeEntry();
+    const p = /^\s+(?:-\s+)?path:\s*(.+)$/.exec(line);
+    if (p) entryPath = p[1]!.trim();
+    if (/^\s+(?:-\s+)?kind:\s*spec\s*$/.test(line)) entryIsSpec = true;
   }
+  closeEntry();
+  if (!candidate) candidate = firstPath;
   if (!candidate) candidate = "IMPLEMENTATION-PRD.md";
   const p = path.join(sliceDir, candidate);
   const bytes = fs.exists(p) ? fs.readFile(p) : null;

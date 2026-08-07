@@ -131,4 +131,29 @@ describe("D1 — spec-sha from locked artifact bytes", () => {
     const d2 = projectSliceScope(fsFixture(baseFiles, baseDirs), S)!;
     expect(d2.specShaShort).toBeNull(); // absent file = honest null, never fabricated
   });
+
+  it("39a1c477 nit: a NON-spec kind listed FIRST does not steal the hash — the `kind: spec` entry wins", () => {
+    const readme = README.replace(
+      `locked-artifacts:
+  - name: Implementation PRD
+    path: IMPLEMENTATION-PRD.md
+    kind: spec`,
+      `locked-artifacts:
+  - name: Pulse mockup
+    path: mockups/pulse-v4.html
+    kind: mockup
+  - name: Implementation PRD
+    path: IMPLEMENTATION-PRD.md
+    kind: spec`,
+    );
+    const prd = "# the PRD bytes";
+    const files = {
+      ...baseFiles,
+      [`${S}/README.md`]: readme,
+      [`${S}/IMPLEMENTATION-PRD.md`]: prd,
+      [`${S}/mockups/pulse-v4.html`]: "<html>WRONG ARTIFACT</html>",
+    };
+    const d = projectSliceScope(fsFixture(files, baseDirs), S)!;
+    expect(d.specShaShort).toBe(createHash("sha256").update(prd).digest("hex").slice(0, 8));
+  });
 });
