@@ -289,6 +289,7 @@ import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { resolveNodeConfig } from "./profile-resolver.js";
 import { resolveStartup } from "./startup-resolver.js";
 import { planProjection, claudeConflictTargetPath, projectionConflictWarnings, type ProjectionPlan } from "./projection-planner.js";
+import { ProjectionManifestStore } from "./projection-manifest-store.js";
 import { StartupOrchestrator } from "./startup-orchestrator.js";
 import { PodRepository } from "./pod-repository.js";
 import type { RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember, StartupAction, StartupFile } from "./types.js";
@@ -1669,6 +1670,11 @@ export class PodRigInstantiator {
       return { status: "failed", error: `No adapter for runtime "${input.member.runtime}"`, sessionName: canonicalSessionName, warnings: launchResult.warnings };
     }
 
+    // P20 — the projection manifest: consulted so a divergent target is
+    // discriminated operator-modified (protect) vs stale-projection (safe
+    // overwrite). REAL store-backed lookup on this.db (never a mock/null — the
+    // uninjected-service dead-invalidator class the P17 comment below records).
+    const projectionManifest = new ProjectionManifestStore(this.db);
     const planResult = planProjection({
       config: configResult.config,
       collisions: resolveResult.collisions,
@@ -1677,6 +1683,7 @@ export class PodRigInstantiator {
       // 4.8 restack dropped the warnings-site threading — without it every entry
       // classified safe_projection and divergent targets overwrote silently.
       resolveTargetPath: claudeConflictTargetPath,
+      lastHashLookup: (targetPath) => projectionManifest.lastHash(targetPath),
     });
     if (!planResult.ok) {
       return { status: "failed", error: planResult.errors.join("; "), sessionName: canonicalSessionName, warnings: launchResult.warnings };
