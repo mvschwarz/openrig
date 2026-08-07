@@ -50,3 +50,28 @@ describe("P20 atom-4 wiring pin — the instantiator delivers the PROTECT-filter
     expect(src).toMatch(/force:\s*opts\?\.force/);
   });
 });
+
+// P20 record-at-apply WRITE-SIDE wiring pin (review-r1 LOW — symmetry with the
+// lookup-side pin). recordProjection is proven invoked in the adapter
+// (claude-adapter-record-projection.test.ts), but it only records if STARTUP
+// actually constructs the store and passes a real record() callback. A drop here
+// SAFE-degrades to P17 (never a wrong overwrite), so it's LOW — but silent: the
+// manifest would simply never populate and every divergence would stay
+// hash_conflict forever. This pins the enable path so a drop is visible, not silent.
+describe("P20 record-at-apply wiring pin — startup wires recordProjection to the real store", () => {
+  const src = readFileSync(
+    fileURLToPath(new URL("../src/startup.ts", import.meta.url)),
+    "utf-8",
+  );
+
+  it("constructs a ProjectionManifestStore on the real db", () => {
+    expect(src).toMatch(/new ProjectionManifestStore\(db\)/);
+  });
+
+  it("passes recordProjection that records the written hash to that store (the enable path)", () => {
+    // recordProjection -> projectionManifestStore.record({ ..., lastHash: hashContent(content), ... }).
+    // A drop means the manifest never populates (silent degrade to P17-forever).
+    expect(src).toMatch(/recordProjection:\s*\([^)]*\)\s*=>\s*projectionManifestStore\.record\(/);
+    expect(src).toMatch(/lastHash:\s*hashContent\(content\)/);
+  });
+});

@@ -37,10 +37,20 @@ describe("classifyResourceProjection — P20 discrimination (manifest consult)",
     expect(classifyResourceProjection("src", "tgt_operator", "skill", undefined, fsOps)).toBe("hash_conflict");
   });
 
-  it("manifest lookup THROWS → FAIL-CLOSED to hash_conflict (never a wrong overwrite)", () => {
+  // BROKEN vs ABSENT (review-r1 MEDIUM). A manifest read that THREW is BROKEN: we
+  // cannot rule out an operator edit, and hash_conflict WOULD overwrite it. True
+  // fail-closed = PROTECT (operator_conflict). This is distinct from ABSENT (null,
+  // no entry) which is the benign P17 hash_conflict fallback (pinned just below).
+  it("manifest lookup THROWS (broken read) → operator_conflict (true fail-closed: PROTECT, never overwrite)", () => {
     const throwing = () => {
       throw new Error("db locked");
     };
-    expect(classifyResourceProjection("src", "tgt_operator", "skill", undefined, fsOps, throwing)).toBe("hash_conflict");
+    expect(classifyResourceProjection("src", "tgt_operator", "skill", undefined, fsOps, throwing)).toBe("operator_conflict");
+  });
+
+  it("BROKEN≠ABSENT: a returned null (no entry) stays hash_conflict, only a THROW protects", () => {
+    // guards the split — regression here would either re-conflate the two or over-protect absent targets.
+    expect(classifyResourceProjection("src", "tgt_operator", "skill", undefined, fsOps, () => null)).toBe("hash_conflict");
+    expect(classifyResourceProjection("src", "tgt_operator", "skill", undefined, fsOps, () => { throw new Error("x"); })).toBe("operator_conflict");
   });
 });

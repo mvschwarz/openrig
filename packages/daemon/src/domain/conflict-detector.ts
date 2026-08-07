@@ -153,7 +153,9 @@ export function classifyResourceProjection(
   fsOps: ProjectionFsOps,
   /** P20 — the projector's LAST-written hash for targetPath (manifest), or null.
    *  Optional so legacy 5-arg callers keep P17 behavior (no manifest → hash_conflict).
-   *  Consulted fail-closed: a throw is treated as no-manifest → hash_conflict. */
+   *  Consulted fail-closed, BROKEN≠ABSENT: a returned null (no entry) → hash_conflict
+   *  (P17 fallback); a THROW (broken read) → operator_conflict (PROTECT — a read
+   *  error must never overwrite what might be an operator edit). */
   lastHashLookup?: (targetPath: string) => string | null,
 ): ProjectionClassification {
   // Guidance with managed_block: always managed_merge
@@ -180,13 +182,18 @@ export function classifyResourceProjection(
     // P20 — target ≠ source. Consult the manifest to discriminate:
     //  - target == what WE last wrote → STALE projection (source advanced) → safe overwrite
     //  - target ≠ our last write (and ≠ source) → OPERATOR-modified → protect
-    //  - no manifest / lookup error → P17 fallback (overwrite-with-warning)
+    //  - manifest read ERROR (throw) → BROKEN, not ABSENT → operator_conflict (PROTECT)
+    //  - no manifest entry (null) → ABSENT → P17 fallback (hash_conflict, overwrite-with-warning)
     let lastHash: string | null = null;
     if (lastHashLookup) {
       try {
         lastHash = lastHashLookup(targetPath);
       } catch {
-        lastHash = null; // FAIL-CLOSED: a manifest read error must never green-light an overwrite
+        // BROKEN vs ABSENT: a read that THREW is broken — we cannot rule out an
+        // operator edit, and hash_conflict WOULD overwrite it. True fail-closed is
+        // to PROTECT (operator_conflict), distinct from a returned null (no entry)
+        // which is the benign P17 hash_conflict fallback below.
+        return "operator_conflict";
       }
     }
     if (lastHash !== null) {
