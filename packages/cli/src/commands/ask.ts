@@ -4,6 +4,7 @@ import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-life
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { resolveIdentitySource } from "./whoami.js";
+import { runWake, defaultWakeRunner, defaultWakeFileLocator, type WakeRunner } from "../ask-wake.js";
 
 interface AskRigInfo {
   name: string;
@@ -46,6 +47,8 @@ interface AskResult {
 
 interface AskCommandDeps extends StatusDeps {
   identityResolver?: typeof resolveIdentitySource;
+  wakeRunner?: WakeRunner;
+  wakeFileLocator?: (token: string) => { path: string; sizeBytes: number } | null;
 }
 
 export function askCommand(depsOverride?: StatusDeps): Command {
@@ -56,32 +59,78 @@ export function askCommand(depsOverride?: StatusDeps): Command {
     .option("--json", "JSON output for agents")
     .option("--seat <session>", "Scope the search to ONE seat's transcript across every generation that sat in it (cross-generation archaeology)")
     .option("--session <token>", "Search ONE specific session's JSONL by its session token (read-only)")
+    .option("--wake <token>", "EXECUTES: wake a session by its resume token — ask one question, get a snapshot answer, back to cold (runtime cost; explicit, never an implicit escalation from a search)")
+    .option("--runtime <runtime>", "runtime for --wake: claude (default) or codex")
+    .option("--wake-timeout <seconds>", "bounded wake timeout in seconds (default 180)")
     .addHelpText("after", `
 rig ask is one verb for information about the PAST, three ways to reach it:
   1. rig ask <rig> "<q>"                    search the whole rig's transcripts
   2. rig ask <rig> "<q>" --seat <seat>      scope to ONE seat, across every
-                                            generation that sat in it (L1)
+                                            generation that sat in it (L1, read-only)
   3. rig ask <rig> "<q>" --session <token>  search ONE session's JSONL by
-                                            token — "I have the token, find it" (L2)
+                                            token — "I have the token, find it" (L2, read-only)
+  4. rig ask <rig> "<q>" --wake <token>     WAKE that session, ask, get a snapshot
+                                            answer, back to cold (L3, EXECUTES)
+
+Levels 1-2 are read-only archaeology (cheap, safe). Level 3 (--wake) EXECUTES an
+agent — the only level with runtime cost. The answer is snapshot testimony:
+checked, not believed.
 
 Examples:
   rig ask my-rig "what decisions were made about deployment?"
-  rig ask my-rig "error handling strategy" --json
   rig ask my-rig "what did we decide" --seat dev-planner@my-rig
   rig ask my-rig "SECRET_MARKER" --session 3f2a-...-9c1
+  rig ask my-rig "summarize the gateway plan" --wake 3f2a-...-9c1
 
 Exit codes:
   0  Success
   1  Daemon not running
-  2  Failed to fetch data from daemon`);
+  2  Failed to fetch data from daemon (or wake timed out)`);
 
   const getDeps = (): AskCommandDeps => (depsOverride as AskCommandDeps | undefined) ?? {
     lifecycleDeps: realDeps(),
     clientFactory: (url: string) => new DaemonClient(url),
   };
 
-  cmd.action(async (rig: string, question: string, opts: { json?: boolean; seat?: string; session?: string }) => {
+  cmd.action(async (rig: string, question: string, opts: { json?: boolean; seat?: string; session?: string; wake?: string; runtime?: string; wakeTimeout?: string }) => {
     const deps = getDeps();
+
+    // L3 — WAKE: EXECUTES locally (spawns the runtime headless), so it takes the
+    // CLI-local path and never touches the daemon. Explicit --wake only — never
+    // an implicit escalation from a failed L1/L2 search.
+    if (opts.wake) {
+      const target = opts.wake;
+      const runtime = opts.runtime === "codex" ? "codex" : "claude";
+      const timeoutMs = opts.wakeTimeout ? Math.max(1, Number(opts.wakeTimeout)) * 1000 : undefined;
+
+      // Seat[@gen] resolution rides the session store (L3b). A raw token wakes
+      // directly; a seat address needs resolution not yet wired in this build.
+      if (target.includes("@")) {
+        console.error(`Waking '${target}' by seat needs seat->token resolution (via the session store — L3b, pending). Pass the raw session token to --wake, or use --seat/--session for read-only search.`);
+        process.exitCode = 2;
+        return;
+      }
+
+      const runner = deps.wakeRunner ?? defaultWakeRunner;
+      const fileLocator = deps.wakeFileLocator ?? defaultWakeFileLocator;
+      const outcome = await runWake({ runner, fileLocator }, { question, token: target, runtime, timeoutMs });
+
+      if (opts.json) {
+        console.log(JSON.stringify(outcome));
+        if (outcome.timedOut) process.exitCode = 2;
+        return;
+      }
+      if (outcome.advisory) console.log(`⚠ ${outcome.advisory}`);
+      if (outcome.timedOut) {
+        console.error(outcome.message);
+        process.exitCode = 2;
+        return;
+      }
+      console.log(`Woke ${runtime} session ${target} — snapshot answer (checked, not believed):`);
+      console.log("");
+      console.log(outcome.answer && outcome.answer.length > 0 ? outcome.answer : "(no answer returned)");
+      return;
+    }
 
     const status = await getDaemonStatus(deps.lifecycleDeps);
     if (!daemonStatusGuard(status)) return;
