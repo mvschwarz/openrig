@@ -1700,6 +1700,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     contextUsage: contextUsageStore,
     // (e/Class-B) watchdog store — armed jobs registered by the retiring generation stop at swap.
     watchdog: watchdogJobsRepoInstance,
+    // (e/Class-B) queue store — in-progress items claimed by the retiring generation release to pending.
+    queue: queueRepoInstance,
     log: (msg) => console.warn(msg),
   });
 

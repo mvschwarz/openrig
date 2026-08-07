@@ -31,6 +31,9 @@ export interface OccupantInvalidatorDeps {
    *  stopped at swap (a stale wake into the successor's context is the ghost). Optional: absent ⇒ the
    *  watchdog branch is skipped (never a name-scoped fallback). */
   watchdog?: { dropArmedByRegisteringGeneration(generationUuid: string): number };
+  /** (e/Class-B) durable queue_items store — in-progress items claimed by the retiring generation are
+   *  RELEASED to pending (never dropped: the role work is durable, the successor re-claims). Optional. */
+  queue?: { releaseClaimsByGeneration(generationUuid: string): number };
   log?: (msg: string) => void;
 }
 
@@ -70,7 +73,16 @@ export class DefaultOccupantInvalidator implements OccupantInvalidator {
           `generation ${retiringGeneration} (seat "${retiringSessionName}") — successor re-arms its own.`,
       );
     }
-    // Queue_items (3a) — claimed-by-retired-gen items RELEASE to pending (role work is durable, never
-    // hard-dropped); lands in the next sub-commit.
+    // Queue_items (3a): RELEASE (never drop) every in-progress item CLAIMED by the retiring generation
+    // back to pending — the role work is durable and the successor re-claims it; only the retiree's
+    // stale claim is the ghost. Gen-scoped via the claimant generation (the successor's own claims,
+    // under the reused name but its live gen, are untouched).
+    const released = this.deps.queue?.releaseClaimsByGeneration(retiringGeneration) ?? 0;
+    if (released > 0) {
+      log(
+        `[occupant-invalidator] Class-B: released ${released} in-progress queue item(s) claimed by retired ` +
+          `generation ${retiringGeneration} (seat "${retiringSessionName}") back to pending — successor re-claims.`,
+      );
+    }
   }
 }

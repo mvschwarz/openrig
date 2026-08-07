@@ -440,6 +440,8 @@ export class QueueRepository {
   private readonly hasTargetRepoColumn: boolean;
   private readonly hasSummaryColumn: boolean;
   private readonly hasEvidenceRefColumn: boolean;
+  private readonly hasMintingGenColumn: boolean;
+  private readonly hasClaimedGenColumn: boolean;
   /** OPR.0.4.6.WF3 FR-6 — injected by startup (never imported): the
    *  workflow domain's is-live-frontier-packet predicate. */
   private readonly workflowFrontierPredicate:
@@ -489,6 +491,10 @@ export class QueueRepository {
     this.hasTargetRepoColumn = detectQueueColumn(db, "target_repo");
     this.hasSummaryColumn = detectQueueColumn(db, "summary");
     this.hasEvidenceRefColumn = detectQueueColumn(db, "evidence_ref");
+    // GHOST-STAGE (e/Class-B): generation stamps (migration 063). Defensive detect so a pre-063
+    // harness degrades (writers skip the columns; the release predicate never matches unstamped rows).
+    this.hasMintingGenColumn = detectQueueColumn(db, "minting_generation_uuid");
+    this.hasClaimedGenColumn = detectQueueColumn(db, "claimed_by_generation_uuid");
 
     // OPR.0.3.2.20 — register the EXACT human-seat regex predicate as
     // a SQLite function so the attention query can apply the strict
@@ -728,6 +734,7 @@ export class QueueRepository {
     }
     this.persistSummary(id, input.summary ?? null);
     this.persistEvidenceRef(id, input.evidenceRef ?? null);
+    this.persistMintingGeneration(id, input.sourceSession);
     this.transitionLog.append({
       qitemId: id,
       state: "pending",
@@ -843,6 +850,7 @@ export class QueueRepository {
 
       this.persistSummary(newId, input.summary ?? null);
       this.persistEvidenceRef(newId, input.evidenceRef ?? null);
+      this.persistMintingGeneration(newId, input.fromSession);
 
       this.transitionLog.append({
         qitemId: newId,
@@ -983,6 +991,7 @@ export class QueueRepository {
 
       this.persistSummary(newId, input.summary ?? null);
       this.persistEvidenceRef(newId, input.evidenceRef ?? null);
+      this.persistMintingGeneration(newId, input.fromSession);
 
       this.transitionLog.append({
         qitemId: newId,
@@ -1204,17 +1213,32 @@ export class QueueRepository {
     const ts = new Date().toISOString();
     const closureRequiredAt = computeClosureRequiredAt(ts, qitem.tier);
 
+    // GHOST-STAGE (e/Class-B): stamp the CLAIMANT's occupant generation. THIS is the ghost
+    // discriminator — under a handover the successor reuses the seat name, so a name-scoped release
+    // would neutralize the successor's own claims; the retiring generation's claims are released by gen.
+    const claimedByGeneration = this.hasClaimedGenColumn
+      ? (this.resolveOccupantGeneration?.(input.destinationSession) ?? null)
+      : null;
+
     const txn = this.db.transaction(() => {
-      this.db
-        .prepare(
-          `UPDATE queue_items
-             SET state = 'in-progress',
-                 ts_updated = ?,
-                 claimed_at = ?,
-                 closure_required_at = ?
-           WHERE qitem_id = ?`
-        )
-        .run(ts, ts, closureRequiredAt, input.qitemId);
+      if (this.hasClaimedGenColumn) {
+        this.db
+          .prepare(
+            `UPDATE queue_items
+               SET state = 'in-progress', ts_updated = ?, claimed_at = ?, closure_required_at = ?,
+                   claimed_by_generation_uuid = ?
+             WHERE qitem_id = ?`
+          )
+          .run(ts, ts, closureRequiredAt, claimedByGeneration, input.qitemId);
+      } else {
+        this.db
+          .prepare(
+            `UPDATE queue_items
+               SET state = 'in-progress', ts_updated = ?, claimed_at = ?, closure_required_at = ?
+             WHERE qitem_id = ?`
+          )
+          .run(ts, ts, closureRequiredAt, input.qitemId);
+      }
 
       this.transitionLog.append({
         qitemId: input.qitemId,
@@ -1252,13 +1276,16 @@ export class QueueRepository {
     const ts = new Date().toISOString();
 
     const txn = this.db.transaction(() => {
+      // (e/Class-B): returning to pending releases the claim, so clear the claimant-generation stamp
+      // (the item is now unclaimed; a fresh claimant will re-stamp its own generation).
+      const clearGen = this.hasClaimedGenColumn ? ", claimed_by_generation_uuid = NULL" : "";
       this.db
         .prepare(
           `UPDATE queue_items
              SET state = 'pending',
                  ts_updated = ?,
                  claimed_at = NULL,
-                 closure_required_at = NULL
+                 closure_required_at = NULL${clearGen}
            WHERE qitem_id = ?`
         )
         .run(ts, qitemId);
@@ -1788,6 +1815,53 @@ export class QueueRepository {
     if (this.hasEvidenceRefColumn && evidenceRef !== null) {
       this.db.prepare("UPDATE queue_items SET evidence_ref = ? WHERE qitem_id = ?").run(evidenceRef, qitemId);
     }
+  }
+
+  /** GHOST-STAGE (e/Class-B) — persist the MINTING occupant-generation additively (same degrade
+   *  contract as persistSummary; NULL when unresolved/pre-063). Forensic provenance of the creator;
+   *  the RELEASE discriminator is claimed_by_generation_uuid (stamped at claim), not this. */
+  private persistMintingGeneration(qitemId: string, sourceSession: string): void {
+    if (!this.hasMintingGenColumn) return;
+    const gen = this.resolveOccupantGeneration?.(sourceSession) ?? null;
+    if (gen === null) return;
+    this.db.prepare("UPDATE queue_items SET minting_generation_uuid = ? WHERE qitem_id = ?").run(gen, qitemId);
+  }
+
+  /**
+   * GHOST-STAGE (e/Class-B) — at a seat swap, RELEASE (never hard-drop) every in-progress item CLAIMED
+   * by the RETIRING generation back to pending: the role work is durable and the successor re-claims it;
+   * only the retiree's stale claim is the ghost. Gen-scoped via claimed_by_generation_uuid (NOT the seat
+   * name — the successor shares it, so a name-scoped release would steal the successor's own claims). A
+   * NULL/empty generation never matches (UNKNOWN != retired). Clears the claim stamp + claimed_at and
+   * appends an audit transition per item. Returns the count released. Pre-063 dbs no-op.
+   */
+  releaseClaimsByGeneration(retiringGeneration: string): number {
+    if (!this.hasClaimedGenColumn || !retiringGeneration) return 0;
+    const rows = this.db
+      .prepare(`SELECT qitem_id FROM queue_items WHERE state = 'in-progress' AND claimed_by_generation_uuid = ?`)
+      .all(retiringGeneration) as Array<{ qitem_id: string }>;
+    if (rows.length === 0) return 0;
+    const ts = new Date().toISOString();
+    const txn = this.db.transaction(() => {
+      for (const { qitem_id } of rows) {
+        this.db
+          .prepare(
+            `UPDATE queue_items
+               SET state = 'pending', ts_updated = ?, claimed_at = NULL, closure_required_at = NULL,
+                   claimed_by_generation_uuid = NULL
+             WHERE qitem_id = ?`
+          )
+          .run(ts, qitem_id);
+        this.transitionLog.append({
+          qitemId: qitem_id,
+          state: "pending",
+          actorSession: "system",
+          transitionNote: "released: claimant generation retired (seat handover)",
+        });
+      }
+    });
+    txn();
+    return rows.length;
   }
 
   private rowToItem(row: QueueItemRow): QueueItem {

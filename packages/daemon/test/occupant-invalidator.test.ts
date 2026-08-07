@@ -61,4 +61,17 @@ describe("GHOST-STAGE (e) DefaultOccupantInvalidator", () => {
       inv.invalidateRetiringOccupant({ retiringSessionName: "s@r", successorSessionName: "s@r", retiringGeneration: "gen-x" }),
     ).not.toThrow();
   });
+
+  it("Class-B: with retiringGeneration, RELEASES the retiring generation's claimed queue items (gen-scoped)", () => {
+    const releaseClaimsByGeneration = vi.fn(() => 3);
+    const logs: string[] = [];
+    new DefaultOccupantInvalidator({
+      enforcer: { invalidateOccupant: () => {} },
+      contextUsage: { invalidateOccupantSidecar: () => {} },
+      queue: { releaseClaimsByGeneration },
+      log: (m) => logs.push(m),
+    }).invalidateRetiringOccupant({ retiringSessionName: "seat@rig", successorSessionName: "seat@rig", retiringGeneration: "gen-retired" });
+    expect(releaseClaimsByGeneration).toHaveBeenCalledWith("gen-retired");
+    expect(logs.some((l) => /released 3 in-progress queue item/.test(l))).toBe(true);
+  });
 });

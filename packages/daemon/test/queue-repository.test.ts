@@ -8,6 +8,8 @@ import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
 import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summary.js";
 import { queueItemEvidenceRefSchema } from "../src/db/migrations/048_queue_item_evidence_ref.js";
+import { watchdogJobsSchema } from "../src/db/migrations/031_watchdog_jobs.js";
+import { occupantGenerationStampsSchema } from "../src/db/migrations/063_occupant_generation_stamps.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import {
   QueueRepository,
@@ -821,5 +823,78 @@ describe("queue_items.evidence_ref column (OPR.0.4.4.19 FR-5 storage)", () => {
     });
     expect(item.evidenceRef).toBeNull();
     legacyDb.close();
+  });
+});
+
+// ── GHOST-STAGE (e/Class-B): queue_items generation stamps + release-to-pending at swap ──
+describe("QueueRepository — generation stamps (Class-B)", () => {
+  let db: Database.Database;
+  let bus: EventBus;
+  let repo: QueueRepository;
+  let genBySession: Map<string, string | null>;
+
+  beforeEach(() => {
+    db = createDb();
+    // 063 ALTERs BOTH queue_items + watchdog_jobs (one migration), so watchdog_jobs must exist too.
+    migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, watchdogJobsSchema, occupantGenerationStampsSchema]);
+    bus = new EventBus(db);
+    genBySession = new Map();
+    repo = new QueueRepository(db, bus, { resolveOccupantGeneration: (s) => genBySession.get(s) ?? null });
+  });
+  afterEach(() => db.close());
+
+  const col = (qitemId: string, name: string): string | null =>
+    (db.prepare(`SELECT ${name} AS v FROM queue_items WHERE qitem_id = ?`).get(qitemId) as { v: string | null }).v;
+
+  it("stamps minting_generation_uuid from the SOURCE occupant at create", async () => {
+    genBySession.set("alice@rig", "gen-src");
+    const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x" });
+    expect(col(item.qitemId, "minting_generation_uuid")).toBe("gen-src");
+  });
+
+  it("stamps claimed_by_generation_uuid from the CLAIMANT at claim, and clears it on unclaim", async () => {
+    const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x" });
+    genBySession.set("bob@rig", "gen-claimant");
+    repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+    expect(col(item.qitemId, "claimed_by_generation_uuid")).toBe("gen-claimant");
+    repo.unclaim(item.qitemId, "bob@rig", "stepping away");
+    expect(col(item.qitemId, "claimed_by_generation_uuid")).toBeNull();
+  });
+
+  it("RELEASES retired-gen in-progress items to pending (never drops), clears the claim, and audits", async () => {
+    const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x" });
+    genBySession.set("bob@rig", "gen-retired");
+    repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+
+    const released = repo.releaseClaimsByGeneration("gen-retired");
+    expect(released).toBe(1);
+    const after = repo.getById(item.qitemId)!;
+    expect(after.state).toBe("pending"); // RELEASED, not dropped — the item survives
+    expect(col(item.qitemId, "claimed_by_generation_uuid")).toBeNull();
+    const notes = repo.transitionLog.listForQitem(item.qitemId).map((t) => t.transitionNote ?? "");
+    expect(notes.some((n) => /claimant generation retired/.test(n))).toBe(true);
+  });
+
+  it("does NOT release the SUCCESSOR's own claim (same seat name, live gen) — gen-scoped, not name-scoped", async () => {
+    const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x" });
+    genBySession.set("bob@rig", "gen-live"); // the successor claims under the SAME name, a new generation
+    repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+    expect(repo.releaseClaimsByGeneration("gen-retired")).toBe(0);
+    expect(repo.getById(item.qitemId)!.state).toBe("in-progress"); // untouched
+  });
+
+  it("an empty generation is a no-op (never a catch-all release)", async () => {
+    const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "x" });
+    genBySession.set("bob@rig", "gen-1");
+    repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+    expect(repo.releaseClaimsByGeneration("")).toBe(0);
+    expect(repo.getById(item.qitemId)!.state).toBe("in-progress");
+  });
+
+  it("a PENDING (never-claimed) item is never released — claimed_by is NULL (UNKNOWN != retired)", async () => {
+    const pending = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "y" });
+    genBySession.set("bob@rig", "gen-retired");
+    expect(repo.releaseClaimsByGeneration("gen-retired")).toBe(0);
+    expect(repo.getById(pending.qitemId)!.state).toBe("pending");
   });
 });
