@@ -64,4 +64,21 @@ export class ProjectionManifestStore {
   lastHash(targetPath: string): string | null {
     return this.get(targetPath)?.lastHash ?? null;
   }
+
+  /**
+   * atom-4b — a BOOT-time whole-table readability probe, DISTINCT from a per-lookup throw. When the
+   * projection_manifest is unreadable (missing / migration-failed / corrupt), EVERY `lastHash` lookup
+   * throws → `classifyResourceProjection` returns `operator_conflict` for EVERY divergent projection →
+   * a SILENT protect-ALL degrade in which no projection ever applies. That systemic case is a safe
+   * degrade (no data loss) but must be VISIBLE: boot calls this probe to warn loudly, so an operator
+   * knows projections are held rather than silently discovering none apply. Cheap + NEVER throws.
+   */
+  isReadable(): boolean {
+    try {
+      this.db.prepare(`SELECT target_path FROM projection_manifest LIMIT 1`).get();
+      return true;
+    } catch {
+      return false;
+    }
+  }
 }

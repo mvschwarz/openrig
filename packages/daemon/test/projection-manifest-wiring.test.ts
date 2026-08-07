@@ -74,4 +74,11 @@ describe("P20 record-at-apply wiring pin — startup wires recordProjection to t
     expect(src).toMatch(/recordProjection:\s*\([^)]*\)\s*=>\s*projectionManifestStore\.record\(/);
     expect(src).toMatch(/lastHash:\s*hashContent\(content\)/);
   });
+
+  it("atom-4b: boot probes projectionManifestStore.isReadable() and warns loudly on an unreadable manifest (the boot enable path)", () => {
+    // A drop means a whole-table-unreadable manifest degrades EVERY projection to protect SILENTLY —
+    // the operator never learns nothing projects. The boot probe + loud warn is the enable path.
+    expect(src).toMatch(/projectionManifestStore\.isReadable\(\)/);
+    expect(src).toMatch(/UNREADABLE at boot/);
+  });
 });

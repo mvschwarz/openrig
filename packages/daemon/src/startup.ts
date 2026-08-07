@@ -576,6 +576,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const { ProjectionManifestStore } = await import("./domain/projection-manifest-store.js");
   const { hashContent } = await import("./domain/conflict-detector.js");
   const projectionManifestStore = new ProjectionManifestStore(db);
+  // atom-4b — probe the manifest's readability AT BOOT. A rare per-lookup throw protects that one
+  // target (conflict-detector: broken≠absent → operator_conflict); but a WHOLE-TABLE-unreadable
+  // manifest degrades EVERY projection to protect — no overwrite ever applies — a safe but otherwise
+  // SILENT systemic degrade. Warn loudly at boot so the operator knows projections are held pending a
+  // DB repair, rather than silently discovering nothing projects.
+  if (!projectionManifestStore.isReadable()) {
+    console.warn(
+      "projection-manifest UNREADABLE at boot — every projection will degrade to PROTECT (no overwrites apply) until the DB is repaired; investigate projection_manifest (migration 064).",
+    );
+  }
   const { CodexRuntimeAdapter } = await import("./adapters/codex-runtime-adapter.js");
   const { PiRuntimeAdapter } = await import("./adapters/pi-runtime-adapter.js");
 

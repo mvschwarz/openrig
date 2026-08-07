@@ -49,4 +49,15 @@ describe("ProjectionManifestStore — P20 atom 1 (mig-064)", () => {
     expect(e.sourceSpec).toBeNull();
     expect(e.category).toBeNull();
   });
+
+  // atom-4b — the BOOT-time whole-table readability probe, distinct from a per-lookup throw. When the
+  // whole projection_manifest is unreadable (missing / migration-failed / corrupt), EVERY lastHash
+  // lookup throws → EVERY divergent projection classifies operator_conflict → a SILENT protect-ALL
+  // degrade. isReadable lets boot detect that systemic case and warn loudly; it NEVER throws.
+  it("atom-4b: isReadable probes the whole-table boot state — true when migrated, false when the table is gone (never throws)", () => {
+    const s = new ProjectionManifestStore(db);
+    expect(s.isReadable()).toBe(true); // migrated table (mig-064) → readable at boot
+    db.exec("DROP TABLE projection_manifest"); // simulate a boot-unreadable manifest
+    expect(s.isReadable()).toBe(false); // the systemic case is reported, never thrown
+  });
 });
