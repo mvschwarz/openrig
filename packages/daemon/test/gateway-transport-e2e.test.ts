@@ -31,7 +31,7 @@ interface Stub { server: Server; received: OutboundDecision[]; sockets: Socket[]
 /** A minimal connector: on connect it sends the CapabilityDescriptor, records inbound
  *  outbound_decisions, and (optionally) acks each one. Unlinks a stale socket file first so a
  *  reconnect to the SAME path (the realistic case) does not EADDRINUSE. */
-function startStub(path: string, opts: { ackAll: boolean; sendCap?: boolean }): Promise<Stub> {
+function startStub(path: string, opts: { ackAll: boolean; sendCap?: boolean; failClass?: string }): Promise<Stub> {
   const received: OutboundDecision[] = [];
   const sockets: Socket[] = [];
   try { if (existsSync(path)) unlinkSync(path); } catch { /* fresh */ }
@@ -50,7 +50,12 @@ function startStub(path: string, opts: { ackAll: boolean; sendCap?: boolean }): 
         const d = decodeGatewayMessage(frame);
         if (d.ok && d.message.kind === "outbound_decision") {
           received.push(d.message);
-          if (opts.ackAll) sock.write(encodeGatewayMessage({ kind: "ack", decisionId: d.message.decisionId, ok: true }));
+          const id = d.message.decisionId;
+          if (opts.failClass !== undefined) {
+            sock.write(encodeGatewayMessage({ kind: "ack", decisionId: id, ok: false, failed: { class: opts.failClass } }));
+          } else if (opts.ackAll) {
+            sock.write(encodeGatewayMessage({ kind: "ack", decisionId: id, ok: true }));
+          }
         }
       }
     });
@@ -147,6 +152,41 @@ describe("A4a gateway transport e2e (real unix socket)", () => {
     cleanup.push(() => conn2.close());
     await waitFor(() => stub2.received.some((x) => x.decisionId === "d1")); // replayed on reconnect
     await waitFor(() => buf.pending().length === 0); // acked + drained
+    conn2.close();
+    await closeStub(stub2);
+  });
+
+  it("a FAILED delivery (ok:false ack) does NOT drain the row — it is retained + replayed (no loss)", async () => {
+    setup();
+    // round 1: the connector RECEIVES the decision but its delivery FAILS — it acks ok:false and
+    // does NOT record it (its contract: the gateway retains + replays). The gateway MUST NOT drain
+    // the buffer on an ok:false ack (draining here = a silently DROPPED notification: invariant-2).
+    let failErr = "";
+    const stub1 = await startStub(sockPath, { ackAll: true, failClass: "http-500" });
+    const buf = new DispatchBuffer(home);
+    const conn1 = connectGateway({
+      socketPath: sockPath, buffer: buf, newDecisionId: () => "d1",
+      onError: (e) => { failErr = e.message; },
+    });
+    cleanup.push(() => conn1.close());
+    await waitFor(() => conn1.dispatcher.connectorId === "slack-1");
+    conn1.dispatcher.dispatch("post_message", "mike#slack-1", { text: "hi" });
+    await waitFor(() => stub1.received.length === 1);
+    // the ok:false ack has been processed; the row MUST survive (this REDs against an
+    // unconditional onAck that drains on any ack).
+    await new Promise((res) => setTimeout(res, 80));
+    expect(buf.pending().map((x) => x.decisionId)).toEqual(["d1"]); // retained, NOT dropped
+    expect(failErr).toMatch(/http-500|delivery fail/i);            // surfaced for observability
+    conn1.close();
+    await closeStub(stub1);
+
+    // round 2: the connector recovers (acks ok:true). Reconnect replays the retained d1 -> delivered
+    // -> drained. End-to-end: a failed delivery is never lost.
+    const stub2 = await startStub(sockPath, { ackAll: true });
+    const conn2 = connectGateway({ socketPath: sockPath, buffer: new DispatchBuffer(home) });
+    cleanup.push(() => conn2.close());
+    await waitFor(() => stub2.received.some((x) => x.decisionId === "d1")); // replayed after the failure
+    await waitFor(() => buf.pending().length === 0); // finally delivered + drained
     conn2.close();
     await closeStub(stub2);
   });

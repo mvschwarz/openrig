@@ -64,7 +64,18 @@ export function connectGateway(opts: ConnectOpts): GatewayConnection {
         dispatcher.onCapability(msg);
         dispatcher.replayPending(); // reconnect no-loss: re-send un-Acked decisions
       } else if (msg.kind === "ack") {
-        dispatcher.onAck(msg.decisionId);
+        if (msg.ok) {
+          dispatcher.onAck(msg.decisionId); // delivered -> drain the durable row
+        } else {
+          // ok:false = the connector RECEIVED the decision but delivery FAILED and it did NOT
+          // record it (its contract: the gateway retains + replays). We must NOT drain here — a
+          // drain would silently DROP the notification (invariant-2 no-loss). Leave the row pending
+          // so replayPending re-sends it on the next (re)connect; the connector's decisionId dedup
+          // makes the eventual re-delivery a no-double-post. Surface the failure for observability.
+          opts.onError?.(new Error(
+            `connector reported delivery failure for decision ${msg.decisionId} (${msg.failed.class}${msg.failed.detail ? ": " + msg.failed.detail : ""}) — retained for replay`,
+          ));
+        }
       }
       // outbound_decision is gateway->connector only; receiving one is a protocol error
       else if (msg.kind === "outbound_decision") {
