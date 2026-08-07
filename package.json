@@ -21,7 +21,8 @@
     "build:package": "bash scripts/build-package.sh",
     "test:tui-package": "node scripts/test-tui-package.mjs",
     "mirror-skills": "node scripts/mirror-skills.mjs",
-    "mirror-skills:check": "node scripts/mirror-skills.mjs --check"
+    "mirror-skills:check": "node scripts/mirror-skills.mjs --check",
+    "gate": "node scripts/gate-lane.mjs"
   },
   "engines": {
     "node": "^20 || ^22 || ^24"

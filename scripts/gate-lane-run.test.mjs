@@ -1,0 +1,69 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { renderRefusal, runLegs, buildVerdict, observeForeignLoad } from "./gate-lane-run.mjs";
+
+// F1 gate-lane runner logic (arch d6a6c1db, 5 pins). HONESTY (gap 1): the gate runs test:ui (npm test
+// excludes it); (gap 2) green = typecheck AND vitest BOTH legs. P5: refusal teaches the port constant,
+// names the gate holder (pid/started-at) or honest-unknown for a foreign squatter, always hard-refuse.
+
+test("P5 refusal — gate holder is NAMED (pid/started-at) + teaches the port constant, always refuses", () => {
+  const t = renderRefusal({ reason: "gate-holder", holder: { pid: 4242, startedAt: "2026-08-07T09:00:00Z" } }, 40404);
+  assert.match(t, /40404/);            // teaches the port constant
+  assert.match(t, /4242/);             // names the holder pid
+  assert.match(t, /2026-08-07T09:00:00Z/); // + started-at
+  assert.match(t, /refus/i);           // hard-refuse
+});
+
+test("P5 refusal — foreign squatter is HONEST-UNKNOWN + still teaches the port constant + refuses", () => {
+  const t = renderRefusal({ reason: "foreign-holder" }, 40404);
+  assert.match(t, /40404/);
+  assert.match(t, /unknown|foreign/i); // honest-unknown, not a fabricated holder
+  assert.doesNotMatch(t, /pid \d/i);   // no fabricated pid
+  assert.match(t, /refus/i);
+});
+
+test("HONESTY gap-1: runLegs runs ALL THREE legs incl. test:ui (npm test excludes ui)", async () => {
+  const ran = [];
+  const exec = async (cmd) => { ran.push(cmd); return { ok: true, code: 0 }; };
+  const legs = await runLegs(exec);
+  const names = legs.map((l) => l.name);
+  assert.ok(names.includes("typecheck"), "typecheck leg");
+  assert.ok(names.includes("vitest"), "vitest leg (workspaces)");
+  assert.ok(names.includes("vitest:ui"), "vitest:ui leg — the excluded-from-npm-test honesty gap");
+  assert.ok(legs.every((l) => l.ok));
+});
+
+test("HONESTY gap-2: green = typecheck AND vitest BOTH — one failed leg fails the gate", async () => {
+  const exec = async (cmd) => ({ ok: !/ui/.test(cmd), code: /ui/.test(cmd) ? 1 : 0 }); // ui fails
+  const legs = await runLegs(exec);
+  const v = buildVerdict({ legs, foreignLoad: { advisory: [] }, startedAt: "t0", endedAt: "t1" });
+  assert.equal(v.gate, "fail");
+  assert.equal(v.legs.find((l) => l.name === "vitest:ui").ok, false);
+});
+
+test("advisory foreign-load — counts foreign node/vitest/tsc processes + loadavg (never the gate's own pid)", () => {
+  const fl = observeForeignLoad({
+    loadavg: [4.1, 3.2, 2.0],
+    processes: [
+      { pid: process.pid, command: "node scripts/gate-lane.mjs" }, // self — excluded
+      { pid: 111, command: "node …/vitest" },
+      { pid: 222, command: "tsc --noEmit" },
+      { pid: 333, command: "Finder" }, // non-toolchain — not counted
+    ],
+  });
+  assert.equal(fl.foreignProcessCount, 2);
+  assert.deepEqual(fl.loadavg, [4.1, 3.2, 2.0]);
+  assert.ok(fl.advisory.some((a) => /2 foreign/.test(a)));
+  assert.ok(fl.advisory.some((a) => /loadavg/.test(a)));
+});
+
+test("C2 verdict — a GREEN carries the foreign-load context it ran under (recorded, not just printed)", () => {
+  const v = buildVerdict({
+    legs: [{ name: "typecheck", ok: true }, { name: "vitest", ok: true }, { name: "vitest:ui", ok: true }],
+    foreignLoad: { advisory: ["3 foreign node processes, loadavg 4.10"] },
+    startedAt: "t0", endedAt: "t1",
+  });
+  assert.equal(v.gate, "pass");
+  assert.deepEqual(v.foreignLoad.advisory, ["3 foreign node processes, loadavg 4.10"]);
+  assert.equal(v.startedAt, "t0");
+});
