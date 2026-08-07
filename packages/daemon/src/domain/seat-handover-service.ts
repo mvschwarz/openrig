@@ -750,17 +750,24 @@ export class SeatHandoverService {
   }
 }
 
-/** Assemble the restore packet delivered to a fresh successor: seat identity +
- *  handover reason + predecessor session + the captured predecessor terminal. */
-function buildRestorePacket(info: {
+/** Assemble the restore packet delivered to a fresh successor: seat identity + handover reason +
+ *  predecessor session + the captured predecessor terminal, and (stopgap, plan 411c43de) a bounded
+ *  LABELED-FROM-RECORD recap of the last few predecessor exchanges + a receipt line naming the
+ *  predecessor record path (honest-degraded). Never called "scrollback" — the cutover's respawn-pane
+ *  owns real scrollback; this is the zero-product stopgap that ships first. Exported for unit test. */
+export function buildRestorePacket(info: {
   seatRef: string;
   reason: string;
   departingSession: string;
   handoverAt: string;
   capturedContext: string;
+  /** Stopgap: the last few predecessor exchanges read from the provider JSONL (parseJsonlExchanges). */
+  recap?: Array<{ role: string; content: string }>;
+  /** Stopgap: the predecessor provider record path (claude transcript_path / codex rollout_path). */
+  recordPath?: string | null;
 }): string {
   const captured = info.capturedContext.trim();
-  return [
+  const lines = [
     "=== OpenRig seat handover — restore context ===",
     `Seat: ${info.seatRef}`,
     `Reason: ${info.reason}`,
@@ -769,5 +776,18 @@ function buildRestorePacket(info: {
     "",
     "--- Predecessor terminal (captured) ---",
     captured.length > 0 ? captured : "(no capture available)",
-  ].join("\n");
+  ];
+  // Stopgap: the from-record recap + receipt, ONLY when a record is actually available (no
+  // fabrication — an absent record simply omits the sections).
+  if (info.recap && info.recap.length > 0 && info.recordPath) {
+    lines.push(
+      "",
+      "--- Recent exchanges (from record) ---",
+      ...info.recap.map((e) => `${e.role}: ${e.content}`),
+      "",
+      `Predecessor record: ${info.recordPath}`,
+      "  (honest-degraded: a bounded recap read from the predecessor's provider transcript, not the live terminal)",
+    );
+  }
+  return lines.join("\n");
 }
