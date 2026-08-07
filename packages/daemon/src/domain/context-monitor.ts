@@ -6,6 +6,7 @@ import {
   type NodeBinding,
   type ReadinessResult,
 } from "./runtime-adapter.js";
+import type { UsageSamplesStore, ProviderWindowSampleInput } from "./usage-samples-store.js";
 import type { ContextUsage } from "./types.js";
 
 /** Default polling interval: 30 seconds. */
@@ -46,6 +47,8 @@ export class ContextMonitor {
   private claudeContextProvisioner: ClaudeContextProvisioner | null;
   private compactionEnforcer: ClaudeCompactionEnforcer | null;
   private readinessCheckers: Record<string, RuntimeReadinessChecker | undefined>;
+  private usageSamples: UsageSamplesStore | null = null;
+  private providerWindowSampler: (() => ProviderWindowSampleInput[]) | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private activePoll: Promise<void> | null = null;
 
@@ -55,9 +58,13 @@ export class ContextMonitor {
     claudeContextProvisioner?: ClaudeContextProvisioner,
     compactionEnforcer?: ClaudeCompactionEnforcer,
     readinessCheckers?: Record<string, RuntimeReadinessChecker | undefined>,
+    usageSamples?: UsageSamplesStore,
+    providerWindowSampler?: () => ProviderWindowSampleInput[],
   ) {
     this.db = db;
     this.store = store;
+    this.usageSamples = usageSamples ?? null;
+    this.providerWindowSampler = providerWindowSampler ?? null;
     this.claudeContextProvisioner = claudeContextProvisioner ?? null;
     this.compactionEnforcer = compactionEnforcer ?? null;
     this.readinessCheckers = readinessCheckers ?? {};
@@ -87,6 +94,26 @@ export class ContextMonitor {
         try {
           observed = this.readContextUsage(session);
           this.store.persist(session.node_id, observed);
+          // 51-08 A1: the over-time twin — advance-only append on the SAME tick
+          // (PM decision 1: piggyback, no parallel sampler). Known samples only:
+          // unknown is a query-side judgment, never a stored zero (Option-A bar
+          // + BR-2 absent-never-zero).
+          if (this.usageSamples && observed.availability === "known") {
+            try {
+              this.usageSamples.appendContextSample(
+                {
+                  nodeId: session.node_id,
+                  seatSession: session.session_name,
+                  source: observed.source,
+                  sampledAt: observed.sampledAt,
+                  totalInputTokens: observed.totalInputTokens,
+                  totalOutputTokens: observed.totalOutputTokens,
+                  usedPercentage: observed.usedPercentage,
+                },
+                new Date().toISOString(),
+              );
+            } catch { /* series write must never break polling */ }
+          }
         } catch {
           observed = null;
           // One bad session must not crash polling for others
@@ -99,6 +126,19 @@ export class ContextMonitor {
       await this.normalizeStartupStatus(session);
       await this.maybeAutoCompact(session, observed);
     }
+    this.drainProviderWindowSamples();
+  }
+
+  /** 51-08 A1: drain the provider-window supplier once per tick, advance-only.
+   *  Defensive parity with the enforcer seam: a supplier fault never breaks polling. */
+  private drainProviderWindowSamples(): void {
+    if (!this.usageSamples || !this.providerWindowSampler) return;
+    try {
+      const capturedAt = new Date().toISOString();
+      for (const sample of this.providerWindowSampler()) {
+        this.usageSamples.appendProviderWindowSample(sample, capturedAt);
+      }
+    } catch { /* series write must never break polling */ }
   }
 
   /**

@@ -1679,11 +1679,18 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         { resolveOccupantGeneration: (sessionName) => sessionRegistry.currentOccupantGenerationForSession(sessionName) },
       )
     : undefined;
+  // 51-08 A1 — the over-time series rides the SAME 30s tick (PM decision 1):
+  // context lane appends beside the existing persist; the provider-window lane
+  // drains the same statusline cache directory the read model scans.
+  const { UsageSamplesStore, providerWindowSamplesFromSignals } = await import("./domain/usage-samples-store.js");
+  const usageSamplesStore = new UsageSamplesStore(db);
   const contextMonitor = new ContextMonitor(db, contextUsageStore, claudeAdapter, compactionEnforcer, {
     "claude-code": claudeAdapter,
     codex: codexAdapter,
     pi: piAdapter,
-  });
+  }, usageSamplesStore, () => providerWindowSamplesFromSignals(
+    collectClaudeSignalsFromProviderUsageDirectory(nodePath.join(OPENRIG_HOME, "provider-usage")),
+  ));
   deps.contextMonitor = contextMonitor;
   // OPR.0.4.3.14 — expose the SAME enforcer instance to routes for the manual
   // compaction trigger. Sharing one instance with ContextMonitor is what makes
