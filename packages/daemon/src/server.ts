@@ -104,6 +104,7 @@ import { filesRoutes } from "./routes/files.js";
 import { progressRoutes } from "./routes/progress.js";
 import { scopeAuditRoutes } from "./routes/scope-audit.js";
 import { scopesRoutes } from "./routes/scopes.js";
+import { telemetryRoutes } from "./routes/telemetry.js";
 import { scopeApproveRoutes } from "./routes/scope-approve.js";
 import { registerTerminalWs } from "./routes/terminal-ws.js";
 import { createNodeWebSocket } from "@hono/node-ws";
@@ -704,6 +705,8 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/scope/audit", scopeAuditRoutes());
   // SCOPES VIEW (d64d2f5c): the store-direct TUI read.
   app.route("/api/scopes", scopesRoutes());
+  // 51-08 A3 — usage series + top-N burn over usage_samples (one projection, CLI+HTTP).
+  app.route("/api/telemetry", telemetryRoutes({ db: () => deps.rigRepo.db }));
   // OPR.0.4.4.19 FR-9 — scope approve: frontmatter stamp + audit row.
   app.route("/api/scope/approve", scopeApproveRoutes());
   // Operator Surface Reconciliation v0 — steering composition + health summary.
