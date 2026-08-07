@@ -12,6 +12,10 @@
     "./gateway-human-registry": {
       "types": "./dist/gateway-human-registry-surface.d.ts",
       "import": "./dist/gateway-human-registry-surface.js"
+    },
+    "./gateway-protocol": {
+      "types": "./dist/gateway-protocol-surface.d.ts",
+      "import": "./dist/gateway-protocol-surface.js"
     }
   },
   "scripts": {
