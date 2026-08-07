@@ -47,6 +47,28 @@ test("runs docker build with the digest-pinned base + tarball build-args", () =>
   assert.match(text, /--build-arg\s+OPENRIG_TARBALL=/, "must pass OPENRIG_TARBALL (the local pack)");
 });
 
+test("Q2 fix A: packs the ASSEMBLED @openrig/cli (has the `rig` bin), NEVER the private monorepo root", () => {
+  const text = readScript();
+  // must assemble the publishable CLI first (bundles daemon/ui/tui + the bin) ...
+  assert.match(text, /build-package\.sh/, "must run scripts/build-package.sh to assemble @openrig/cli");
+  // ... and pack packages/cli, not the repo root (root = openrig@0.5.0, no bin -> rig --version exit 127)
+  assert.match(text, /packages\/cli["'}\s]*&&\s*npm pack|cd\s+"?\$\{REPO_ROOT\}\/packages\/cli/, "npm pack must run with cwd packages/cli");
+  assert.doesNotMatch(text, /cd\s+"?\$\{REPO_ROOT\}"?\s*&&\s*npm pack/, "must NOT pack the monorepo root");
+});
+
+test("Q2 fix B: resolves the target arch HOST-side + passes it explicitly, fail-CLOSED (never a silent amd64 default -> exit 133)", () => {
+  const text = readScript();
+  assert.match(text, /uname -m/, "must resolve the host arch (uname -m) so the legacy builder gets a real TARGETARCH");
+  assert.match(text, /--build-arg\s+TARGETARCH=/, "must pass TARGETARCH explicitly (builder-agnostic)");
+  assert.match(text, /uname -m[\s\S]*?exit\s+[1-9]/, "must fail-closed (non-zero exit) on an unresolvable arch");
+});
+
+test("Q2 fix B: the Dockerfile fails CLOSED on an empty TARGETARCH (no silent amd64 default)", () => {
+  const dockerfile = readFileSync(join(HERE, "..", "docker", "testbed", "Dockerfile"), "utf8");
+  assert.doesNotMatch(dockerfile, /TARGETARCH:-amd64/, "must NOT default TARGETARCH to amd64 (that installs wrong-arch Node)");
+  assert.match(dockerfile, /"".*exit\s+[1-9]/, "an empty TARGETARCH must exit non-zero (fail closed)");
+});
+
 test("NEVER pushes the image (the never-push fence)", () => {
   const text = readScript();
   assert.doesNotMatch(text, /docker\s+push/, "must NOT docker push");

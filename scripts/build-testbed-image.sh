@@ -34,9 +34,13 @@ CONTEXT="$(mktemp -d)"
 trap 'rm -rf "${CONTEXT}"' EXIT
 cp "${TESTBED_DIR}/Dockerfile" "${TESTBED_DIR}/entrypoint.sh" "${CONTEXT}/"
 
-# OpenRig from the TREE via npm pack (never the npm registry).
-TARBALL_NAME="$(cd "${REPO_ROOT}" && npm pack --silent | tail -n1)"
-mv "${REPO_ROOT}/${TARBALL_NAME}" "${CONTEXT}/openrig.tgz"
+# OpenRig CLI from the TREE (never the npm registry). ASSEMBLE the publishable @openrig/cli first
+# (build-package.sh bundles daemon/ui/tui + the `rig` bin into packages/cli), then pack THAT. Packing
+# the private monorepo ROOT yields openrig@0.5.0 with NO `bin` — Docker installs it "successfully" but
+# `rig --version` then fails with exit 127 (the whole point of the image is a runnable rig).
+bash "${REPO_ROOT}/scripts/build-package.sh" >&2
+TARBALL_NAME="$(cd "${REPO_ROOT}/packages/cli" && npm pack --silent | tail -n1)"
+mv "${REPO_ROOT}/packages/cli/${TARBALL_NAME}" "${CONTEXT}/openrig.tgz"
 
 # Stage the EXACT stub-asset set named in the census list (comment/blank tolerant); the same list is
 # the census scope the manifest hashes (census-scope-match-code-path — no recursive over-count).
@@ -53,11 +57,22 @@ STUB_FILES_JSON="$(node -e \
   'const fs=require("fs");const l=fs.readFileSync(process.argv[1],"utf8").split("\n").map(s=>s.replace(/#.*/,"").trim()).filter(Boolean);process.stdout.write(JSON.stringify(l))' \
   "${STUB_ASSETS_LIST}")"
 
+# --- resolve the target arch HOST-side and pass it EXPLICITLY (builder-agnostic: correct on the
+# legacy builder — which NEVER populates the automatic TARGETARCH build-arg — AND on BuildKit). Fail
+# CLOSED on an unknown arch rather than letting the Dockerfile silently default to amd64, which fetches
+# x64 Node into an arm64 image and dies with a Rosetta/ELF failure (exit 133).
+case "$(uname -m)" in
+  x86_64|amd64) TARGETARCH=amd64 ;;
+  arm64|aarch64) TARGETARCH=arm64 ;;
+  *) echo "[testbed] cannot resolve a supported TARGETARCH from 'uname -m'=$(uname -m); refusing to build (a silent amd64 default installs wrong-arch Node = exit 133)" >&2; exit 4 ;;
+esac
+
 # --- build (host-side) ---
 docker build \
   --build-arg BASE_IMAGE="${BASE_IMAGE}" \
   --build-arg NODE_VERSION="${NODE_VERSION}" \
   --build-arg OPENRIG_TARBALL=openrig.tgz \
+  --build-arg TARGETARCH="${TARGETARCH}" \
   -t "${IMAGE_TAG}" \
   -f "${CONTEXT}/Dockerfile" \
   "${CONTEXT}"

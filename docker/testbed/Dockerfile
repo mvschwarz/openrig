@@ -20,9 +20,10 @@ RUN set -eux; \
 ARG NODE_VERSION=22.22.1
 ARG TARGETARCH
 RUN set -eux; \
-    case "${TARGETARCH:-amd64}" in \
+    case "${TARGETARCH}" in \
       amd64) NODE_ARCH=x64 ;; \
       arm64) NODE_ARCH=arm64 ;; \
+      "") echo "TARGETARCH is empty — the legacy (non-BuildKit) builder does not populate it. Pass --build-arg TARGETARCH explicitly (build-testbed-image.sh does) or enable BuildKit. REFUSING to default to amd64, which would install wrong-arch Node." >&2; exit 1 ;; \
       *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     curl -fsSLo /tmp/node.tar.xz \
