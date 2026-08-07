@@ -810,7 +810,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // adoption-boundary capture (ClaimService) and FR-4 snapshot null-fill (refresher).
   // Also threaded through WhoamiService + routes below (same single instance).
   const { ContextUsageStore } = await import("./domain/context-usage-store.js");
-  const contextUsageStore = new ContextUsageStore(db, { stateDir: OPENRIG_HOME });
+  const contextUsageStore = new ContextUsageStore(db, {
+    stateDir: OPENRIG_HOME,
+    // GHOST-STAGE (c-id): reject context readings from before the live occupant booted (prior
+    // generation) so a frozen pre-handover sample can't drive the threshold. null = UNKNOWN (inert).
+    resolveOccupantBootAt: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.bootAt ?? null,
+  });
   // OPR.0.4.3.20 FR-4 — inject contextUsageStore so refresh() can null-fill a
   // Claude token from the sidecar during periodic/manual snapshot refresh.
   const resumeMetadataRefresher = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter, contextUsageStore });

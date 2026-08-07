@@ -321,4 +321,90 @@ describe("ContextUsageStore", () => {
     expect(results.get(node.id)?.availability).toBe("known");
     expect(results.get(node.id)?.usedPercentage).toBe(67);
   });
+
+  // ── GHOST-STAGE (c-id): generation guard ──────────────────────────────────
+  // Under handover the successor RESUMES INTO THE SAME PANE and REUSES the name, so
+  // session_mismatch cannot catch the retiree's frozen reading. The generation guard rejects a
+  // reading sampled BEFORE the live occupant booted (atom-B tenure boot_at) — evaluate current-gen
+  // only; a pre-boot sample reports insufficient-data, never the frozen percentage.
+  describe("c-id generation guard", () => {
+    let genStore: ContextUsageStore;
+    let bootAtByNode: Map<string, string | null>;
+
+    beforeEach(() => {
+      bootAtByNode = new Map();
+      genStore = new ContextUsageStore(db, {
+        stateDir: "/tmp/openrig-test",
+        resolveOccupantBootAt: (nodeId) => bootAtByNode.get(nodeId) ?? null,
+      });
+    });
+
+    // A reading carrying the frozen 88% from the RETIRED generation, name reused (so it survives
+    // session_mismatch). sampledAt lets each test place it relative to the successor's boot.
+    function persistFrozen(nodeId: string, sampledAtIso: string) {
+      genStore.persist(nodeId, genStore.normalizeSample({
+        ...VALID_SIDECAR,
+        session_name: "dev-impl@test-rig",
+        sampled_at: sampledAtIso,
+        context_window: { ...VALID_SIDECAR.context_window, used_percentage: 88, remaining_percentage: 12 },
+      }));
+    }
+
+    // MIXED-GEN WINDOW: successor booted AFTER the retiree's last sample; only the pre-boot reading
+    // exists → insufficient-data (stale_generation), and the frozen 88% must NOT leak through.
+    it("rejects a pre-boot reading and does not leak the frozen percentage (mixed-gen window)", () => {
+      const { node } = seedNode();
+      persistFrozen(node.id, "2026-08-07T08:00:00.000Z");
+      bootAtByNode.set(node.id, "2026-08-07T08:05:00.000Z"); // successor booted 5m later
+      const result = genStore.getForNode(node.id, "dev-impl@test-rig");
+      expect(result.availability).toBe("unknown");
+      expect(result.reason).toBe("stale_generation");
+      expect(result.usedPercentage).toBeNull(); // the 88 is not evaluated across the boundary
+    });
+
+    it("admits a reading sampled AT/AFTER the live occupant booted (current generation)", () => {
+      const { node } = seedNode();
+      persistFrozen(node.id, "2026-08-07T08:10:00.000Z"); // sampled after boot
+      bootAtByNode.set(node.id, "2026-08-07T08:05:00.000Z");
+      const result = genStore.getForNode(node.id, "dev-impl@test-rig");
+      expect(result.availability).toBe("known");
+      expect(result.usedPercentage).toBe(88);
+    });
+
+    it("admits a reading sampled exactly at boot (strict-before is the boundary)", () => {
+      const { node } = seedNode();
+      persistFrozen(node.id, "2026-08-07T08:05:00.000Z");
+      bootAtByNode.set(node.id, "2026-08-07T08:05:00.000Z");
+      const result = genStore.getForNode(node.id, "dev-impl@test-rig");
+      expect(result.availability).toBe("known");
+    });
+
+    // NOTE-2: absent tenure = UNKNOWN, never treat unknown as stale. Gate goes inert; the reading
+    // still faces session_mismatch + freshness, but is not rejected as prior-gen.
+    it("leaves the gate inert when boot time is UNKNOWN (absent tenure)", () => {
+      const { node } = seedNode();
+      persistFrozen(node.id, "2026-08-07T08:00:00.000Z");
+      bootAtByNode.set(node.id, null);
+      const result = genStore.getForNode(node.id, "dev-impl@test-rig");
+      expect(result.availability).toBe("known");
+    });
+
+    it("applies the same guard in the batch path (getForNodes)", () => {
+      const { node } = seedNode();
+      persistFrozen(node.id, "2026-08-07T08:00:00.000Z");
+      bootAtByNode.set(node.id, "2026-08-07T08:05:00.000Z");
+      const results = genStore.getForNodes([{ nodeId: node.id, currentSessionName: "dev-impl@test-rig" }]);
+      expect(results.get(node.id)?.reason).toBe("stale_generation");
+    });
+
+    it("never gates when no resolver is wired (opt-in)", () => {
+      const plain = new ContextUsageStore(db, { stateDir: "/tmp/openrig-test" });
+      const { node } = seedNode();
+      plain.persist(node.id, plain.normalizeSample({
+        ...VALID_SIDECAR, session_name: "dev-impl@test-rig", sampled_at: "2026-08-07T08:00:00.000Z",
+      }));
+      const result = plain.getForNode(node.id, "dev-impl@test-rig");
+      expect(result.availability).toBe("known");
+    });
+  });
 });

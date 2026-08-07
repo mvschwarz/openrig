@@ -1243,6 +1243,7 @@ export type ContextUnknownReason =
   | "parse_error"
   | "stale"
   | "session_mismatch"
+  | "stale_generation"
   | "no_data";
 
 export interface ContextUsage {

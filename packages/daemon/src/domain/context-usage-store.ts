@@ -10,6 +10,10 @@ export const FRESHNESS_THRESHOLD_MS = 600_000; // 10 minutes per PM spec
 export interface ContextUsageStoreOpts {
   stateDir: string;
   codexHomeDir?: string | null;
+  // GHOST-STAGE (c-id): resolve the LIVE occupant's boot time (atom-B tenure) for a node, so a
+  // reading sampled BEFORE the current occupant booted (a prior generation) is rejected instead of
+  // driving the threshold. null = UNKNOWN → the gate is inert (note-2).
+  resolveOccupantBootAt?: (nodeId: string) => string | null;
 }
 
 interface SidecarRaw {
@@ -72,10 +76,31 @@ export class ContextUsageStore {
   private stateDir: string;
   private codexHomeDir: string | null;
 
+  private readonly resolveOccupantBootAt?: (nodeId: string) => string | null;
   constructor(db: Database.Database, opts: ContextUsageStoreOpts) {
     this.db = db;
     this.stateDir = opts.stateDir;
     this.codexHomeDir = opts.codexHomeDir ?? safeHomeDir();
+    this.resolveOccupantBootAt = opts.resolveOccupantBootAt;
+  }
+
+  /**
+   * GHOST-STAGE (c-id): is this reading from a generation PRIOR to the node's live occupant?
+   * A reading sampled strictly before the current occupant booted belongs to a retired tenure
+   * (the frozen-88% specimen in the mixed-gen window after handover, where the name is reused so
+   * session_mismatch cannot catch it). Returns false when boot time is UNKNOWN or the reading has
+   * no sampled_at — the gate is inert (note-2: never treat unknown as stale), leaving
+   * session_mismatch + freshness as the remaining guards. Date.parse tolerates the format skew
+   * between the collector's ISO sampled_at and SQLite datetime('now') boot_at.
+   */
+  private isPriorGenerationReading(nodeId: string, sampledAt: string | null): boolean {
+    if (!sampledAt) return false;
+    const bootAt = this.resolveOccupantBootAt?.(nodeId) ?? null;
+    if (!bootAt) return false;
+    const sampled = Date.parse(sampledAt);
+    const boot = Date.parse(bootAt);
+    if (Number.isNaN(sampled) || Number.isNaN(boot)) return false;
+    return sampled < boot;
   }
 
   /** Get the sidecar file path for a session. */
@@ -273,6 +298,13 @@ export class ContextUsageStore {
       return this.unknownUsage("session_mismatch");
     }
 
+    // GHOST-STAGE (c-id): generation guard. Under handover the name is REUSED, so session_mismatch
+    // passes while the table still holds the retiree's pre-boot reading (the mixed-gen window).
+    // Reject readings from before the live occupant booted → insufficient-data, evaluate current-gen only.
+    if (this.isPriorGenerationReading(nodeId, row.sampled_at)) {
+      return this.unknownUsage("stale_generation");
+    }
+
     return this.rowToUsage(row);
   }
 
@@ -304,6 +336,12 @@ export class ContextUsageStore {
 
       if (row.session_name && row.session_name !== entry.currentSessionName) {
         result.set(entry.nodeId, this.unknownUsage("session_mismatch"));
+        continue;
+      }
+
+      // GHOST-STAGE (c-id): generation guard — see getForNode. Reject pre-boot (prior-gen) readings.
+      if (this.isPriorGenerationReading(entry.nodeId, row.sampled_at)) {
+        result.set(entry.nodeId, this.unknownUsage("stale_generation"));
         continue;
       }
 
