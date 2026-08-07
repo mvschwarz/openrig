@@ -1055,4 +1055,24 @@ describe("TmuxAdapter", () => {
       if (!result.ok) expect(result.code).toBe("session_not_found");
     });
   });
+
+  // Seat-handover cutover (plan 411c43de): the successor RESUMES INTO THE SAME PANE via respawn-pane,
+  // so native scrollback survives (predecessor history stays above the successor boot).
+  describe("respawnPane", () => {
+    it("respawns the pane in place (-k kills the retiree first) with the quoted target + command", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+
+      await adapter.respawnPane("%3", "openrig-agent --resume tok");
+
+      expect(exec).toHaveBeenCalledOnce();
+      expect(exec.mock.calls[0]![0]).toBe("tmux respawn-pane -k -t '%3' 'openrig-agent --resume tok'");
+    });
+
+    it("classifies a write error (no server) as a failure", async () => {
+      const adapter = new TmuxAdapter(mockExec({ "respawn-pane": { error: NO_SERVER_ERROR } }));
+      const result = await adapter.respawnPane("%3", "cmd");
+      expect(result.ok).toBe(false);
+    });
+  });
 });

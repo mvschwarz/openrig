@@ -382,6 +382,20 @@ export class TmuxAdapter {
     }
   }
 
+  /** Seat-handover cutover (plan 411c43de): respawn a pane IN PLACE with a new command (`-k` kills the
+   *  retiree's pane process first). The successor takes the retiree's EXACT pane, so native scrollback
+   *  survives untouched — predecessor history stays above the successor boot, same window, same pane.
+   *  The command is shell-quoted as ONE unit (tmux runs it via the shell). */
+  async respawnPane(paneTarget: string, command: string): Promise<TmuxResult> {
+    const cmd = `tmux respawn-pane -k -t ${shellQuote(paneTarget)} ${shellQuote(command)}`;
+    try {
+      await this.exec(cmd);
+      return { ok: true };
+    } catch (err) {
+      return classifyWriteError(err);
+    }
+  }
+
   /** Get the PID of the foreground process in a pane. Returns null if unavailable. */
   async getPanePid(paneId: string): Promise<number | null> {
     try {
