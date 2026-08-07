@@ -157,10 +157,16 @@ export function stageExtractArgv(container: string, stagePath: string): string[]
 /** The pre-flight the stage must pass before anything depends on it: readable AND
  *  WRITABLE as the exec user, probed by DOING (touch/rm) rather than by reading mode
  *  bits — bits lie under ownership, ACLs, and read-only mounts. */
-export function stageFenceArgv(container: string, stagePath: string): string[] {
+export function stageFenceArgv(container: string, stagePath: string, expectFile?: string): string[] {
+  // ASSERT CONTENT ARRIVED, not merely that the directory exists — `mkdir -p` created
+  // it, so a delivery that shipped NOTHING (a tar failure whose non-zero exit the pipe
+  // masked, since a shell pipeline reports only the LAST command's status) leaves an
+  // empty-but-perfectly-readable-and-writable stage. Fencing the directory alone would
+  // pass it and defer the real symptom to a file-not-found from `rig up` downstream.
+  const target = expectFile ? `${stagePath}/${expectFile}` : stagePath;
   return [
     "exec", container, "sh", "-c",
-    `test -r '${stagePath}' && touch '${stagePath}/.fence-write' && rm -f '${stagePath}/.fence-write'`,
+    `test -r '${target}' && touch '${stagePath}/.fence-write' && rm -f '${stagePath}/.fence-write'`,
   ];
 }
 
@@ -177,7 +183,7 @@ export function stageFenceArgv(container: string, stagePath: string): string[] {
  * Returns docker argv arrays for the consumer's own docker seam; `tarSource` is
  * the tar-side argv whose stdout pipes into `extract`'s stdin.
  */
-export function stageTopologyPlan(opts: { container: string; hostDir: string; name?: string }): {
+export function stageTopologyPlan(opts: { container: string; hostDir: string; name?: string; expectFile?: string }): {
   stagePath: string;
   steps: Array<{ label: string; argv: string[]; stdinFrom?: string[] }>;
 } {
@@ -191,7 +197,7 @@ export function stageTopologyPlan(opts: { container: string; hostDir: string; na
         argv: stageExtractArgv(opts.container, stagePath),
         stdinFrom: stageTarSourceArgv(opts.hostDir),
       },
-      { label: "fence", argv: stageFenceArgv(opts.container, stagePath) },
+      { label: "fence", argv: stageFenceArgv(opts.container, stagePath, opts.expectFile) },
     ],
   };
 }

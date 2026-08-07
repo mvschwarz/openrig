@@ -92,3 +92,18 @@ describe("stageTopologyPlan — the ordering is the contract", () => {
     expect(plan.steps[1]!.stdinFrom).toEqual(["-C", "/host/topologies", "-cf", "-", "."]);
   });
 });
+
+describe("stage fence asserts CONTENT ARRIVED, not just a directory", () => {
+  it("with expectFile the fence targets the FILE (an empty stage cannot pass)", async () => {
+    const m = await import("./helpers/testbed-published-daemon.js");
+    const cmd = m.stageFenceArgv("H_A", "/home/openrig/topologies", "shared.yaml").join(" ");
+    expect(cmd).toContain("test -r '/home/openrig/topologies/shared.yaml'");
+    expect(cmd).toContain("touch '/home/openrig/topologies/.fence-write'"); // writability still on the dir
+  });
+
+  it("stageTopologyPlan threads expectFile into the fence step", async () => {
+    const m = await import("./helpers/testbed-published-daemon.js");
+    const plan = m.stageTopologyPlan({ container: "H_A", hostDir: "/host/t", expectFile: "rig-a.yaml" });
+    expect(plan.steps[2]!.argv.join(" ")).toContain("/home/openrig/topologies/rig-a.yaml");
+  });
+});
