@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { planProjection, type ProjectionFsOps, type ProjectionInput } from "../src/domain/projection-planner.js";
+import { hashContent } from "../src/domain/conflict-detector.js";
 import type { ResolvedNodeConfig, QualifiedResource, ResolvedResources } from "../src/domain/profile-resolver.js";
 import type { ResourceCollision } from "../src/domain/agent-resolver.js";
 import type { StartupBlock, StartupFile } from "../src/domain/types.js";
@@ -145,6 +146,47 @@ describe("Projection planner", () => {
     if (result.ok) {
       expect(result.plan.entries[0]!.classification).toBe("hash_conflict");
       expect(result.plan.conflicts).toHaveLength(1);
+    }
+  });
+
+  it("P20: target == manifest last-projected (source advanced) → stale_overwrite, SAFE (0 conflicts)", () => {
+    const config = makeConfig({
+      selectedResources: { ...emptyResources(), skills: [makeQR("skill-a", "skills/a")] },
+    });
+    const fs = mockFs({
+      "/agents/base/skills/a": "source content NEW",
+      "/project/.claude/skills/skill-a/SKILL.md": "old projected content",
+    });
+    const result = planProjection({
+      config, collisions: [], fsOps: fs,
+      resolveTargetPath: () => "/project/.claude/skills/skill-a/SKILL.md",
+      lastHashLookup: () => hashContent("old projected content"), // manifest: we wrote exactly this
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.plan.entries[0]!.classification).toBe("stale_overwrite");
+      expect(result.plan.conflicts).toHaveLength(0); // safe refresh — NOT protected
+    }
+  });
+
+  it("P20: target diverges from BOTH manifest AND source → operator_conflict, PROTECTED (a conflict)", () => {
+    const config = makeConfig({
+      selectedResources: { ...emptyResources(), skills: [makeQR("skill-a", "skills/a")] },
+    });
+    const fs = mockFs({
+      "/agents/base/skills/a": "source content NEW",
+      "/project/.claude/skills/skill-a/SKILL.md": "OPERATOR HAND EDIT",
+    });
+    const result = planProjection({
+      config, collisions: [], fsOps: fs,
+      resolveTargetPath: () => "/project/.claude/skills/skill-a/SKILL.md",
+      lastHashLookup: () => hashContent("what we projected before"), // ≠ current target → operator edited
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.plan.entries[0]!.classification).toBe("operator_conflict");
+      expect(result.plan.conflicts).toHaveLength(1); // PROTECTED (not overwritten)
+      expect(result.plan.conflicts[0]!.conflictDetail?.reason).toMatch(/modified after/i);
     }
   });
 

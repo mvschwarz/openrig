@@ -7,7 +7,14 @@ import type { ResourceCollision } from "./agent-resolver.js";
 
 // -- Types --
 
-export type ProjectionClassification = "safe_projection" | "managed_merge" | "hash_conflict" | "no_op";
+export type ProjectionClassification =
+  | "safe_projection"
+  | "managed_merge"
+  | "hash_conflict"
+  | "no_op"
+  // P20 — manifest-discriminated splits of the old "target ≠ source" conflict:
+  | "stale_overwrite" // target == what WE last wrote; source advanced → safe to overwrite
+  | "operator_conflict"; // target diverged from BOTH our last write and the source → protect
 
 export interface ProjectionEntry {
   category: "skill" | "guidance" | "subagent" | "plugin" | "runtime_resource";
@@ -52,6 +59,10 @@ export interface ProjectionInput {
    *  P17: the source absolutePath rides as the 4th arg so file-shaped targets
    *  (subagent basenames) can be derived; existing 3-arg callers unaffected. */
   resolveTargetPath?: (category: string, effectiveId: string, cwd: string, sourcePath?: string) => string | null;
+  /** P20 — the projector's LAST-written hash for a target (from the projection
+   *  manifest), or null. Absent → classify falls back to P17 (hash_conflict).
+   *  Consulted fail-closed inside classify (a throw → no-manifest fallback). */
+  lastHashLookup?: (targetPath: string) => string | null;
 }
 
 export type PlanResult =
@@ -165,10 +176,17 @@ export function planProjection(input: ProjectionInput): PlanResult {
             catSingular,
             entry.mergeStrategy,
             fsOps,
+            input.lastHashLookup,
           );
           if (entry.classification === "hash_conflict") {
             entry.conflictDetail = {
               reason: `${catSingular} "${qr.effectiveId}" exists at target with different content`,
+            };
+          } else if (entry.classification === "operator_conflict") {
+            // P20 — the target diverges from BOTH our last projection AND the new
+            // source → operator edit. Protect it (a conflict, not an overwrite).
+            entry.conflictDetail = {
+              reason: `${catSingular} "${qr.effectiveId}" was modified after OpenRig last projected it (operator edit?) — not overwriting; move it aside or fold it into the spec, then re-project`,
             };
           }
         }
@@ -185,7 +203,11 @@ export function planProjection(input: ProjectionInput): PlanResult {
     return catCmp !== 0 ? catCmp : a.effectiveId.localeCompare(b.effectiveId);
   });
 
-  const conflicts = entries.filter((e) => e.classification === "hash_conflict");
+  // P20 — operator_conflict PROTECTS (a real conflict); stale_overwrite is SAFE
+  // (falls through to applied, silently — it's our own old output being refreshed).
+  const conflicts = entries.filter(
+    (e) => e.classification === "hash_conflict" || e.classification === "operator_conflict",
+  );
   const noOps = entries.filter((e) => e.classification === "no_op");
 
   return {

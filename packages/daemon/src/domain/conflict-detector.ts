@@ -11,7 +11,7 @@ export interface GuidanceConflictMeta {
   hasExistingBlock: boolean;
 }
 
-function hashContent(content: string): string {
+export function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
@@ -151,6 +151,10 @@ export function classifyResourceProjection(
   category: string,
   mergeStrategy: string | undefined,
   fsOps: ProjectionFsOps,
+  /** P20 — the projector's LAST-written hash for targetPath (manifest), or null.
+   *  Optional so legacy 5-arg callers keep P17 behavior (no manifest → hash_conflict).
+   *  Consulted fail-closed: a throw is treated as no-manifest → hash_conflict. */
+  lastHashLookup?: (targetPath: string) => string | null,
 ): ProjectionClassification {
   // Guidance with managed_block: always managed_merge
   if (category === "guidance" && mergeStrategy === "managed_block") {
@@ -171,6 +175,22 @@ export function classifyResourceProjection(
 
     if (sourceHash === targetHash) {
       return "no_op";
+    }
+
+    // P20 — target ≠ source. Consult the manifest to discriminate:
+    //  - target == what WE last wrote → STALE projection (source advanced) → safe overwrite
+    //  - target ≠ our last write (and ≠ source) → OPERATOR-modified → protect
+    //  - no manifest / lookup error → P17 fallback (overwrite-with-warning)
+    let lastHash: string | null = null;
+    if (lastHashLookup) {
+      try {
+        lastHash = lastHashLookup(targetPath);
+      } catch {
+        lastHash = null; // FAIL-CLOSED: a manifest read error must never green-light an overwrite
+      }
+    }
+    if (lastHash !== null) {
+      return targetHash === lastHash ? "stale_overwrite" : "operator_conflict";
     }
     return "hash_conflict";
   } catch {
