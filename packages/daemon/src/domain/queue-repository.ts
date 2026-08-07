@@ -228,6 +228,9 @@ export interface QueueHandoffInput {
   /** OPR.0.4.4.19 FR-5 — optional durable-artifact pointer for the NEW qitem.
    *  NOT inherited from the source (same authorship semantics as summary). */
   evidenceRef?: string | null;
+  /** P21 §4 era-stamp: the route passes `transport:v1` (fromSession derived from the transport
+   *  header chokepoint). Threaded onto both the source-close and new-item transitions. */
+  identityProvenance?: string | null;
 }
 
 /**
@@ -833,6 +836,7 @@ export class QueueRepository {
         transitionNote: input.transitionNote ?? `handed off to ${input.toSession}`,
         closureReason: "handed_off_to",
         closureTarget: input.toSession,
+        identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
       });
 
       if (this.hasTargetRepoColumn) {
@@ -864,6 +868,7 @@ export class QueueRepository {
         state: "pending",
         actorSession: input.fromSession,
         transitionNote: `handoff from ${source.qitemId}`,
+        identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
       });
 
       const handoffEvent = this.eventBus.persistWithinTransaction({
@@ -974,6 +979,7 @@ export class QueueRepository {
         transitionNote: input.transitionNote ?? `handoff-and-complete to ${input.toSession}`,
         closureReason: "handed_off_to",
         closureTarget: input.toSession,
+        identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
       });
 
       if (this.hasTargetRepoColumn) {

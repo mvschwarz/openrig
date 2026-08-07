@@ -213,6 +213,55 @@ describe("queue routes", () => {
     expect(row?.identity_provenance).toBe("transport:v1");
   });
 
+  // P21 I3 — handoff / handoff-and-complete derive fromSession from the transport header, never body.
+  async function createForHandoff(dest: string): Promise<string> {
+    const create = await app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@r" },
+      body: JSON.stringify({ sourceSession: "orch@r", destinationSession: dest, body: "x" }),
+    });
+    return ((await create.json()) as { qitemId: string }).qitemId;
+  }
+
+  for (const verb of ["handoff", "handoff-and-complete"] as const) {
+    it(`${verb} — 401 unattributable_sender when X-OpenRig-Session is absent`, async () => {
+      const qitemId = await createForHandoff("b@r");
+      const res = await app.request(`/api/queue/${qitemId}/${verb}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fromSession: "b@r", toSession: "c@r" }),
+      });
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+    });
+
+    it(`${verb} — 409 identity_mismatch when body fromSession differs from the transport identity`, async () => {
+      const qitemId = await createForHandoff("b@r");
+      const res = await app.request(`/api/queue/${qitemId}/${verb}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
+        body: JSON.stringify({ fromSession: "mallory@r", toSession: "c@r" }),
+      });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+    });
+
+    it(`${verb} — derives fromSession from the header + era-stamps the close transition transport:v1`, async () => {
+      const qitemId = await createForHandoff("b@r");
+      const res = await app.request(`/api/queue/${qitemId}/${verb}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
+        body: JSON.stringify({ fromSession: "b@r", toSession: "c@r" }),
+      });
+      expect(res.status).toBe(201);
+      // The source-close transition (handed-off/done) actor is transport-derived → transport:v1.
+      const closed = db
+        .prepare("SELECT identity_provenance FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid DESC LIMIT 1")
+        .get(qitemId) as { identity_provenance: string | null } | undefined;
+      expect(closed?.identity_provenance).toBe("transport:v1");
+    });
+  }
+
   it("POST /api/queue/:id/update with state=done WITHOUT closure_reason returns 400 with validReasons", async () => {
     const create = await app.request("/api/queue/create", {
       method: "POST",
@@ -269,7 +318,7 @@ describe("queue routes", () => {
 
     const handoff = await app.request(`/api/queue/${item.qitemId}/handoff`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" }, // P21 I3: handoff actor from the transport header
       body: JSON.stringify({ fromSession: "b@r", toSession: "c@r", transitionNote: "specialty" }),
     });
     expect(handoff.status).toBe(201);
@@ -906,7 +955,7 @@ describe("queue routes", () => {
       const item = (await created.json()) as { qitemId: string };
       const res = await strictApp.request(`/api/queue/${item.qitemId}/handoff`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "bob@known-rig" }, // P21 I3: handoff actor from the transport header
         body: JSON.stringify({
           fromSession: "bob@known-rig",
           toSession: "carol@phantom-rig",
@@ -930,7 +979,7 @@ describe("queue routes", () => {
       const item = (await created.json()) as { qitemId: string };
       const res = await strictApp.request(`/api/queue/${item.qitemId}/handoff-and-complete`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "bob@known-rig" }, // P21 I3: handoff actor from the transport header
         body: JSON.stringify({
           fromSession: "bob@known-rig",
           toSession: "carol@phantom-rig",
@@ -952,7 +1001,7 @@ describe("queue routes", () => {
       const item = (await created.json()) as { qitemId: string };
       const res = await app.request(`/api/queue/${item.qitemId}/handoff-and-complete`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "bob@r" }, // P21 I3: handoff actor from the transport header
         body: JSON.stringify({
           fromSession: "bob@r",
           toSession: "carol@r",
@@ -972,15 +1021,15 @@ describe("queue routes", () => {
       expect(result.created.body).toBe("carol's piece");
     });
 
-    it("POST /api/queue/:id/handoff-and-complete returns 400 on missing fromSession or toSession", async () => {
+    it("POST /api/queue/:id/handoff-and-complete returns 400 on missing toSession (fromSession is header-derived; missing-sender is the 401 path)", async () => {
       const res = await app.request("/api/queue/some-id/handoff-and-complete", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ toSession: "carol@r" }),
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "bob@r" },
+        body: JSON.stringify({ fromSession: "bob@r" }),
       });
       expect(res.status).toBe(400);
       const body = (await res.json()) as { error: string };
-      expect(body.error).toMatch(/fromSession/);
+      expect(body.error).toMatch(/toSession/);
     });
   });
 

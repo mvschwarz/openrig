@@ -129,7 +129,7 @@ describe("coordination integration — stream → queue → inbox handoff chain"
     // 5. Handoff to build station (transactional close + create)
     const handoffRes = await app.request(`/api/queue/${absorbed.qitemId}/handoff`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "planning@conveyor" }, // P21 I3: handoff actor from the transport header
       body: JSON.stringify({
         fromSession: "planning@conveyor",
         toSession: "build@conveyor",
@@ -213,7 +213,7 @@ describe("coordination integration — stream → queue → inbox handoff chain"
     });
     await app.request(`/api/queue/${item.qitemId}/handoff`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" }, // P21 I3: handoff actor from the transport header
       body: JSON.stringify({ fromSession: "b@r", toSession: "c@r" }),
     });
 

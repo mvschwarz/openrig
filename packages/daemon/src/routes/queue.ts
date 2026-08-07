@@ -585,7 +585,10 @@ export function queueRoutes(): Hono {
       // "" / "local" = today's local transactional path, byte-identical.
       hostId?: string;
     }>().catch(() => ({} as never));
-    if (!body.fromSession) return c.json({ error: "fromSession is required" }, 400);
+    // P21 I3: the handoff actor is the transport header, never body.fromSession.
+    const identity = requireSenderIdentity(c, { verb: "queue handoff", bodyClaim: body.fromSession });
+    if (!identity.ok) return identity.response;
+    const fromSession = identity.session;
     if (!body.toSession) return c.json({ error: "toSession is required" }, 400);
 
     // PL-007 — GUARD FIXBACK (Finding 1): an EXPLICIT targetRepo validates
@@ -593,13 +596,13 @@ export function queueRoutes(): Hono {
     // the create-route note). An inherited source.targetRepo (no override)
     // is NOT re-validated — it was already accepted on the source row.
     if (body.targetRepo) {
-      const validation = validateTargetRepo(c, body.fromSession, body.targetRepo);
+      const validation = validateTargetRepo(c, fromSession, body.targetRepo);
       if (!validation.ok) return c.json({ error: validation.error, message: validation.message, ...(validation.meta ?? {}) }, 400);
     }
 
     if (typeof body.hostId === "string" && body.hostId !== "" && body.hostId !== LOCAL_HOST_ID) {
       return crossHostHandoff(c, qitemId, body.hostId, "handed-off", {
-        fromSession: body.fromSession,
+        fromSession,
         toSession: body.toSession,
         body: body.body,
         transitionNote: body.transitionNote,
@@ -616,7 +619,7 @@ export function queueRoutes(): Hono {
     try {
       const result = await getRepo(c).handoff({
         qitemId,
-        fromSession: body.fromSession,
+        fromSession,
         toSession: body.toSession,
         body: body.body,
         transitionNote: body.transitionNote,
@@ -627,6 +630,7 @@ export function queueRoutes(): Hono {
         summary: body.summary,
         evidenceRef: body.evidenceRef,
         nudge: (body as { nudge?: boolean }).nudge,
+        identityProvenance: "transport:v1", // P21 §4 era-stamp: fromSession came from the transport chokepoint
       });
       return c.json(result, 201);
     } catch (err) {
@@ -655,19 +659,22 @@ export function queueRoutes(): Hono {
       // OPR.0.4.6.MH3 FR-1: the out-of-band host envelope (BR-1).
       hostId?: string;
     }>().catch(() => ({} as never));
-    if (!body.fromSession) return c.json({ error: "fromSession is required" }, 400);
+    // P21 I3: the handoff-and-complete actor is the transport header, never body.fromSession.
+    const identity = requireSenderIdentity(c, { verb: "queue handoff-and-complete", bodyClaim: body.fromSession });
+    if (!identity.ok) return identity.response;
+    const fromSession = identity.session;
     if (!body.toSession) return c.json({ error: "toSession is required" }, 400);
 
     // PL-007 — GUARD FIXBACK (Finding 1): same source-host-authority ordering
     // as handoff — explicit targetRepo validates BEFORE the cross-host branch.
     if (body.targetRepo) {
-      const validation = validateTargetRepo(c, body.fromSession, body.targetRepo);
+      const validation = validateTargetRepo(c, fromSession, body.targetRepo);
       if (!validation.ok) return c.json({ error: validation.error, message: validation.message, ...(validation.meta ?? {}) }, 400);
     }
 
     if (typeof body.hostId === "string" && body.hostId !== "" && body.hostId !== LOCAL_HOST_ID) {
       return crossHostHandoff(c, qitemId, body.hostId, "done", {
-        fromSession: body.fromSession,
+        fromSession,
         toSession: body.toSession,
         body: body.body,
         transitionNote: body.transitionNote,
@@ -684,7 +691,7 @@ export function queueRoutes(): Hono {
     try {
       const result = await getRepo(c).handoffAndComplete({
         qitemId,
-        fromSession: body.fromSession,
+        fromSession,
         toSession: body.toSession,
         body: body.body,
         transitionNote: body.transitionNote,
@@ -695,6 +702,7 @@ export function queueRoutes(): Hono {
         summary: body.summary,
         evidenceRef: body.evidenceRef,
         nudge: body.nudge,
+        identityProvenance: "transport:v1", // P21 §4 era-stamp: fromSession came from the transport chokepoint
       });
       return c.json(result, 201);
     } catch (err) {

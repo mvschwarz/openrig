@@ -68,9 +68,11 @@ function makeHarness(opts?: { fetchImpl?: typeof fetch }) {
 }
 
 function post(app: Hono, path: string, body: Record<string, unknown>) {
+  // P21 I3: handoff/create derive the sender from the transport header; header==body claim ⇒ tolerated.
+  const sender = body["fromSession"] ?? body["sourceSession"] ?? body["actorSession"];
   return app.request(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(sender ? { "X-OpenRig-Session": String(sender) } : {}) },
     body: JSON.stringify(body),
   });
 }
