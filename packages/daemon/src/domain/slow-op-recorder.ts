@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { Worker } from "node:worker_threads";
+import type { MiddlewareHandler } from "hono";
 
 export const SLOW_OPERATION_BARRIER_TIMEOUT_MS = 250;
 export const SLOW_OPERATION_THRESHOLD_MS = 250;
@@ -54,6 +55,31 @@ export interface SlowOperationInstrumentation {
   // cannot prove durability rejects (never a silent success); see index.ts.
   flush?(): Promise<void>;
   close?(): Promise<void>;
+}
+
+// The request-timing MIDDLEWARE, extracted as a wired seam (OPR request-observer). It is
+// MEASUREMENT-ONLY: the observer is invoked in a `finally` and isolated in its own try/catch, so a
+// throwing observer can NEVER replace the route's real status/body. `now` is injectable (default
+// real wall-clock) so the recorded durations are DETERMINISTIC under test — the same injectable-clock
+// discipline as the compaction-restore + mission-bucket seams. server.ts wires this via
+// `app.use("*", createSlowOpRequestMiddleware(recorder))`; the startup-wiring pin proves that enable path.
+export function createSlowOpRequestMiddleware(
+  recorder: Pick<SlowOperationInstrumentation, "recordRequest">,
+  now: () => number = () => Date.now(),
+): MiddlewareHandler {
+  return async (c, next) => {
+    const startedAt = now();
+    try {
+      await next();
+    } finally {
+      try {
+        recorder.recordRequest?.(`${c.req.method} ${c.req.path}`, now() - startedAt);
+      } catch (error) {
+        // A measurement throw must never re-enter Hono control flow (would turn the route into a 500).
+        console.error("[slow-operation] request observer failed", error);
+      }
+    }
+  };
 }
 
 interface SlowOpRecorderOptions {

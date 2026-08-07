@@ -132,4 +132,16 @@ describe("P16 — UNINJECTED-SERVICE findings ledger (routed to desk; todo gradu
     const ps = priv<unknown>(deps.askService, "deps") as { psProjectionService: unknown };
     expect(priv(ps.psProjectionService, "seatActivity"), "the ask path must inject seatActivity like the attention path does").toBeTruthy();
   });
+
+  it("SLOW-OP REQUEST MIDDLEWARE WIRED: server.ts app.use's the createSlowOpRequestMiddleware seam", () => {
+    // The middleware CONTRACT moved to hermetic unit tests (slow-op-recorder.test), which cannot cover
+    // 'the real server actually uses this middleware' — the uninjected-service enable-path gap. This pin
+    // closes it at the source: the seam must be imported AND app.use'd (an import alone leaves the
+    // request observer dead in prod).
+    const src = fs.readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+    expect(src, "server.ts must import the extracted seam").toContain("createSlowOpRequestMiddleware");
+    expect(src, "server.ts must app.use the seam, not just import it").toMatch(
+      /app\.use\(\s*["']\*["']\s*,\s*createSlowOpRequestMiddleware\(/,
+    );
+  });
 });

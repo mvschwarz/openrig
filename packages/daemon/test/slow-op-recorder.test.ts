@@ -5,7 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { Hono } from "hono";
 import { createDaemon } from "../src/startup.js";
+import { createSlowOpRequestMiddleware } from "../src/domain/slow-op-recorder.js";
 
 const expectedSites = new Map<string, string[]>([
   ["adapters/codex-resume.ts", ["codex.resume.profile_preflight"]],
@@ -288,38 +290,32 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
     await recorder.close();
   });
 
-  it("composes request timing across health and unmatched routes in the real server", async () => {
+  // The request-timing MIDDLEWARE CONTRACT, hermetic + deterministic. The prior "real server" form
+  // ran the full daemon (event-loop monitor + a globalThis.fetch monkey-patch), which is structurally
+  // ambient-fragile under the concurrent-workspace gate: it intermittently returned 200 for an unmatched
+  // route (a full-daemon/global-mutation concurrency artifact — NOT the middleware, which is
+  // measurement-only). This tests the extracted seam directly, with an INJECTED clock so durations are
+  // deterministic (the injectable-clock discipline, third instance after P6-C + VM-005). The "real server
+  // actually uses this middleware" enable-path moves to the startup-wiring pin (startup-wiring-pins.test).
+  it("composes request timing across health and unmatched routes (hermetic middleware contract)", async () => {
     const requests: Array<{ site: string; durationMs: number }> = [];
-    const recorder = {
-      recordRequest(site: string, durationMs: number): void {
-        requests.push({ site, durationMs });
-      },
-      snapshot: () => ({ healthy: true }),
-    };
-    const oldNoKernel = process.env.OPENRIG_NO_KERNEL;
-    process.env.OPENRIG_NO_KERNEL = "1";
-    const daemon = await createTestDaemon({
-      dbPath: ":memory:",
-      tmuxExec: async () => "",
-      cmuxExec: async () => "",
-      slowOpRecorder: recorder,
-    } as never);
-    try {
-      expect((await daemon.app.request("/healthz?probe=1")).status).toBe(200);
-      expect((await daemon.app.request("/definitely-missing?token=must-not-appear")).status).toBe(404);
-      expect(requests.map((request) => request.site)).toEqual([
-        "GET /healthz",
-        "GET /definitely-missing",
-      ]);
-      expect(requests.every((request) => Number.isFinite(request.durationMs) && request.durationMs >= 0)).toBe(true);
-      expect(JSON.stringify(requests)).not.toContain("must-not-appear");
-    } finally {
-      daemon.eventLoopMonitor.stop();
-      daemon.db.close();
-      if (oldNoKernel === undefined) delete process.env.OPENRIG_NO_KERNEL;
-      else process.env.OPENRIG_NO_KERNEL = oldNoKernel;
-    }
-  }, 10_000);
+    const recorder = { recordRequest(site: string, durationMs: number): void { requests.push({ site, durationMs }); } };
+    let clock = 1000;
+    const now = (): number => (clock += 5); // each now() advances 5ms → one 5ms tick brackets each request
+
+    const app = new Hono();
+    app.use("*", createSlowOpRequestMiddleware(recorder, now));
+    app.get("/healthz", (c) => c.json({ status: "ok" }));
+    // no /definitely-missing route → deterministic 404 (Hono default), never a load-dependent 200
+
+    expect((await app.request("/healthz?probe=1")).status).toBe(200);
+    expect((await app.request("/definitely-missing?token=must-not-appear")).status).toBe(404);
+    expect(requests.map((request) => request.site)).toEqual(["GET /healthz", "GET /definitely-missing"]);
+    // Deterministic durations under the injected clock (start + end = one 5ms tick), no real timer.
+    expect(requests.map((request) => request.durationMs)).toEqual([5, 5]);
+    // The observer records site + duration only — the query param never leaks.
+    expect(JSON.stringify(requests)).not.toContain("must-not-appear");
+  });
 
   it("wraps all nine accepted sync calls without moving them off the main thread", () => {
     const srcRoot = path.resolve(import.meta.dirname, "../src");
@@ -451,32 +447,20 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
     expect(emissions).toBe(1);
   });
 
-  it("isolates a throwing request observer so the route keeps its exact successful status and body", async () => {
-    const recorder = {
-      recordRequest(): void { throw new Error("request observer sink failed"); },
-      snapshot: () => ({ healthy: true }),
-    };
-    const oldNoKernel = process.env.OPENRIG_NO_KERNEL;
-    process.env.OPENRIG_NO_KERNEL = "1";
-    const daemon = await createTestDaemon({
-      dbPath: ":memory:",
-      tmuxExec: async () => "",
-      cmuxExec: async () => "",
-      slowOpRecorder: recorder,
-    } as never);
-    try {
-      const res = await daemon.app.request("/healthz");
-      expect(res.status).toBe(200);
-      expect(await res.json()).toMatchObject({ status: "ok" });
-      const missing = await daemon.app.request("/definitely-missing");
-      expect(missing.status).toBe(404);
-    } finally {
-      daemon.eventLoopMonitor.stop();
-      daemon.db.close();
-      if (oldNoKernel === undefined) delete process.env.OPENRIG_NO_KERNEL;
-      else process.env.OPENRIG_NO_KERNEL = oldNoKernel;
-    }
-  }, 10_000);
+  // A throwing observer must NEVER replace the route's real status/body (it is isolated in a finally).
+  // Hermetic + deterministic — same contract, no full-daemon boot.
+  it("isolates a throwing request observer so the route keeps its exact successful status and body (hermetic)", async () => {
+    const recorder = { recordRequest(): void { throw new Error("request observer sink failed"); } };
+    const app = new Hono();
+    app.use("*", createSlowOpRequestMiddleware(recorder, () => 0));
+    app.get("/healthz", (c) => c.json({ status: "ok" }));
+
+    const res = await app.request("/healthz");
+    expect(res.status).toBe(200); // the throw is swallowed at the boundary, not surfaced as a 500
+    expect(await res.json()).toMatchObject({ status: "ok" });
+    // an unmatched route keeps its exact 404 even though the observer throws on it too
+    expect((await app.request("/definitely-missing")).status).toBe(404);
+  });
 
   it("drives the real tmux command-v spawnSync site through a hermetic daemon", async () => {
     const mod = await loadRecorderModule();

@@ -112,7 +112,7 @@ import { createNodeWebSocket } from "@hono/node-ws";
 import { steeringRoutes } from "./routes/steering.js";
 import { healthSummaryRoutes } from "./routes/health-summary.js";
 import type { StreamStore } from "./domain/stream-store.js";
-import type { SlowOperationInstrumentation } from "./domain/slow-op-recorder.js";
+import { createSlowOpRequestMiddleware, type SlowOperationInstrumentation } from "./domain/slow-op-recorder.js";
 import type { QueueRepository } from "./domain/queue-repository.js";
 import type { InboxHandler } from "./domain/inbox-handler.js";
 import type { OutboxHandler } from "./domain/outbox-handler.js";
@@ -556,22 +556,11 @@ export function createApp(deps: AppDeps): Hono {
     app.use("*", createRouteTimingMiddleware(deps.routeTimingRecorder));
   }
 
+  // The request-timing observer, wired via the exported seam (createSlowOpRequestMiddleware) so the
+  // middleware contract is unit-tested hermetically and this line is the pinned enable path. Registered
+  // only when a recorder is wired (production); measurement-only + isolated (a throw never becomes a 500).
   if (deps.slowOpRecorder?.recordRequest) {
-    app.use("*", async (c, next) => {
-      const startedAt = Date.now();
-      try {
-        await next();
-      } finally {
-        // The observer is measurement-only: a throw here must never replace the
-        // route's real status/body with a 500. Isolate it at the boundary and
-        // log without re-entering Hono control flow.
-        try {
-          deps.slowOpRecorder?.recordRequest?.(`${c.req.method} ${c.req.path}`, Date.now() - startedAt);
-        } catch (error) {
-          console.error("[slow-operation] request observer failed", error);
-        }
-      }
-    });
+    app.use("*", createSlowOpRequestMiddleware(deps.slowOpRecorder));
   }
 
   // OPR.0.4.6.MH2 FR-2/FR-7 — the single-host READ-THROUGH edge (the read
