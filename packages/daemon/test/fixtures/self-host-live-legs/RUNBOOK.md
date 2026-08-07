@@ -55,6 +55,20 @@ ID_B="$(docker exec H_B bash -lc 'curl -fsS http://127.0.0.1:7433/healthz' | pyt
 
 Every `A`/`B` below means the CAPTURED `${ID_A}`/`${ID_B}` — the ids are random per boot.
 
+## REGISTRATION IS BIDIRECTIONAL (both legs reply ACROSS the link)
+
+L5.2 registers H_B on H_A so the outbound send resolves. BOTH legs then require the
+VERBATIM REPLY to run FROM H_B back to H_A — which needs H_A resolvable from H_B. Register
+the reverse direction with the SAME adopt-by-read procedure, opposite direction; a leg that
+only registers one way dies at the reply step, not at the send.
+
+```bash
+# forward (H_B known to H_A) — as L5.2 does:
+docker exec H_A bash -lc "rig host add --id '${ID_B}' --transport http --url http://H_B:7433 --bearer-env OPENRIG_AUTH_BEARER_TOKEN && rig host ls --json"
+# REVERSE (H_A known to H_B) — required by the reply half of both legs:
+docker exec H_B bash -lc "rig host add --id '${ID_A}' --transport http --url http://H_A:7433 --bearer-env OPENRIG_AUTH_BEARER_TOKEN && rig host ls --json"
+```
+
 ## LEG A — CROSS-HOST STAMPED-TRIPLE ROUND-TRIP (deferred from 4a/2a)
 
 **Claim:** a cross-host send stores a sender identity that names the ORIGIN host, and
