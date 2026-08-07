@@ -22,7 +22,15 @@ const PLUGIN_ROOT = nodePath.resolve(import.meta.dirname, "../assets/plugins/ope
 // agent CWD. Role-specific skills stay on the spec-selected edge; host-only
 // skills do not enter the product edges.
 const EXPECTED_SKILLS = [
+  // The Tier-A universal spine shipped in the product plugin. applying-a-permission-policy +
+  // delegating-work joined in the 0.4.8 whole-set mirror (commit 864cea6b), which declares both
+  // TIER-A explicitly ("applying-a-permission-policy (Tier-A: the agent-driven translation invoked
+  // by the shipped rig setup --policy verb)" + "delegating-work (Tier-A: every-agent distribution)")
+  // — so by the spine-only design's own rule they belong in the plugin. Kept in lockstep with the
+  // shipped skills dir + the openrig-skills index + the README count.
+  "applying-a-permission-policy",
   "claude-compaction-restore",
+  "delegating-work",
   "forming-an-openrig-mental-model",
   "messaging-the-human",
   "mission-slice-sop",
@@ -121,49 +129,49 @@ describe("openrig-core plugin — skills (HG-2.1 skill content per agentskills.i
     expect(actual.sort()).toEqual([...EXPECTED_SKILLS].sort());
   });
 
-  it("routes openrig-user readers through the global skill index", () => {
-    const userSkill = fs.readFileSync(
-      nodePath.join(PLUGIN_ROOT, "skills", "openrig-user", "SKILL.md"),
-      "utf-8",
-    );
-    expect(userSkill).toContain("openrig-skills");
-  });
-
-  it("gives a bare installed agent a resolvable one-hop path for every shipped skill", () => {
+  // The 0.5.0 whole-set mirror (commit cabd2b2f) REVERSED the routing: openrig-user is now a
+  // self-contained as-built `rig` CLI guide, and the openrig-skills index is THE router — it names
+  // every shipped skill and how to reach it (the CLAUDE.md bootstrap points a cold seat at the index).
+  it("the openrig-skills index is the router — it names every shipped skill (0.5.0 mirror cabd2b2f)", () => {
     const index = fs.readFileSync(
       nodePath.join(PLUGIN_ROOT, "skills", "openrig-skills", "SKILL.md"),
       "utf-8",
     );
-    const layout = JSON.parse(fs.readFileSync(
-      nodePath.resolve(import.meta.dirname, "../../../scripts/skill-edge-layout.generated.json"),
-      "utf-8",
-    )) as {
-      skills: Record<string, { edges: string[]; category: string | null }>;
-    };
-
-    expect(index).toContain("OPENRIG_CLI_ROOT");
-    for (const [skillId, placement] of Object.entries(layout.skills)) {
-      if (placement.edges.includes("plugin")) {
-        expect(index).toContain(`~/.openrig/plugins/openrig-core/skills/${skillId}/SKILL.md`);
-      } else {
-        expect(placement.category).not.toBeNull();
-        expect(index).toContain(
-          `\${OPENRIG_CLI_ROOT}/daemon/specs/agents/shared/skills/${placement.category}/${skillId}/SKILL.md`,
-        );
-      }
+    // Membership invariant (the index's own closing note: the index and the shipped set are one scope).
+    for (const skillId of EXPECTED_SKILLS) {
+      expect(index, `openrig-skills index must name the shipped skill '${skillId}'`).toContain(skillId);
     }
+    // openrig-user is listed as a spine skill (the index routes to it, not the reverse).
+    expect(index).toContain("openrig-user");
   });
 
-  it("routes rig authors through the advisory spec audit in the skill and startup guide", () => {
-    const architectSkill = fs.readFileSync(
-      nodePath.resolve(import.meta.dirname, "../specs/agents/shared/skills/core/openrig-architect/SKILL.md"),
+  it("the index gives a reachable repo load-path form for spec-shipped skills (0.5.0 mirror cabd2b2f: repo paths, superseding the old ${OPENRIG_CLI_ROOT} path table)", () => {
+    const index = fs.readFileSync(
+      nodePath.join(PLUGIN_ROOT, "skills", "openrig-skills", "SKILL.md"),
       "utf-8",
     );
+    // The rewritten index points profile-selected (spec-shipped) skills at their repo location; no row
+    // is a dead end. The prior ${OPENRIG_CLI_ROOT}/~.openrig path table was superseded by this human map.
+    expect(index).toContain("packages/daemon/specs/agents/shared/skills/core/");
+    expect(index).not.toContain("OPENRIG_CLI_ROOT"); // the old env-var path form is gone by design
+  });
+
+  // P6(B) desk/PM ruling: 864cea6b's mirror made an over-broad content-drop of the `rig spec audit
+  // rig.yaml` advisory-audit pointer from the openrig-architect SKILL.md (the command + the startup
+  // guide's line still exist — same heal-the-stranding class as the (A) pods). That skill is
+  // MIRROR-GENERATED from the external authored canon, so a pool-only restore would be silently
+  // re-deleted at the next mirror pass. PM ruled RESTORE UPSTREAM (mirror-law: fix at source), owned by
+  // dev-driver as 864cea6b remediation inside their (A) canon-restore increment (openrig-architect is
+  // edges=[canonical,spec] — internal, no public-edge exposure). This assertion is TEMP-relaxed to the
+  // STARTUP GUIDE only (agent-startup-guide.md — stable, hand-maintained, not mirror-generated).
+  // TODO(P6-B ← dev-driver (A) canon-restore): re-add `expect(architectSkill).toContain("rig spec
+  // audit rig.yaml")` (+ its readFileSync) once the upstream restore lands + mirrors — with the mirror
+  // on our side instead of against us.
+  it("routes rig authors through the advisory spec audit in the startup guide (TEMP: skill assertion re-adds on (A) canon-restore)", () => {
     const startupGuide = fs.readFileSync(
       nodePath.resolve(import.meta.dirname, "../../../docs/reference/agent-startup-guide.md"),
       "utf-8",
     );
-    expect(architectSkill).toContain("rig spec audit rig.yaml");
     expect(startupGuide).toContain("rig spec audit rig.yaml");
   });
 });
