@@ -491,6 +491,15 @@ export function validatePsLadder(opts: PsCliOptions, callerRig: string | undefin
   const isFanOut = !!(opts.allHosts || opts.hosts);
   const isSingleRemote = !!opts.host;
 
+  // SWEEP-b (shape f2576102) — `--session` is a --nodes filter; on the rig tier it was
+  // accepted-and-dropped (silent all-rigs listing). Reject with the valid form taught.
+  if (opts.session !== undefined && !opts.nodes) {
+    return [
+      "rig ps --session: '--session' filters NODES, so it needs the --nodes tier.",
+      "Valid form: rig ps --nodes --session <member@rig> (add --rig/-A for scope).",
+    ].join("\n");
+  }
+
   // FR-3: -A/--all-rigs has exactly ONE meaning — the --nodes fleet widener.
   if (opts.allRigs && !opts.nodes) {
     return [

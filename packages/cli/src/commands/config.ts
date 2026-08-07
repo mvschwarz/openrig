@@ -10,9 +10,35 @@ function summarizeSettings(store: ConfigStore): Record<ValidKey, ResolvedSetting
   return store.resolveAllWithSource();
 }
 
-export function configCommand(configPath?: string): Command {
+// SWEEP-c (shape f2576102) — keys the daemon reads ONLY at boot: a set while it runs
+// is stale-until-restart; the honest floor is the loud notice (live-reload = its own
+// arch item, not built here).
+const BOOT_ONLY_KEYS = ["daemon.port", "daemon.host", "db.path"];
+const BOOT_ONLY_PREFIXES = ["transcripts."];
+
+function isBootOnlyKey(key: string): boolean {
+  return BOOT_ONLY_KEYS.includes(key) || BOOT_ONLY_PREFIXES.some((p) => key.startsWith(p));
+}
+
+export function configCommand(
+  configPath?: string,
+  deps?: {
+    /** SWEEP-c test seam: is a daemon currently running? Production probes healthz. */
+    probeDaemonRunning?: () => Promise<boolean>;
+  },
+): Command {
   const cmd = new Command("config").description("Inspect and change OpenRig configuration");
   const store = new ConfigStore(configPath);
+  const probeDaemonRunning = deps?.probeDaemonRunning ?? (async () => {
+    try {
+      const { getDaemonStatus } = await import("../daemon-lifecycle.js");
+      const { realDeps } = await import("./daemon.js");
+      const status = await getDaemonStatus(realDeps());
+      return status.state === "running";
+    } catch {
+      return false; // probe failure = no notice (never a false claim)
+    }
+  });
 
   cmd
     .option("--json", "JSON output for agents (resolved RiggedConfig)")
@@ -112,10 +138,14 @@ Precedence: CLI flag > environment variable > config file > default`)
     .argument("<key>", "Config key (e.g. daemon.port)")
     .argument("<value>", "Value to set")
     .description("Set a config value")
-    .action((key: string, value: string) => {
+    .action(async (key: string, value: string) => {
       try {
         store.set(key, value);
         console.log(`${key} = ${store.get(key)}`);
+        // SWEEP-c: boot-only key + running daemon = stale-until-restart; say so loudly.
+        if (isBootOnlyKey(key) && (await probeDaemonRunning())) {
+          console.error(`note: '${key}' is read at daemon BOOT — the running daemon keeps its current value; this takes effect on the next daemon restart (rig daemon stop && rig daemon start).`);
+        }
       } catch (err) {
         console.error((err as Error).message);
         process.exitCode = 1;
