@@ -7,6 +7,8 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import { SeatStatusService } from "../domain/seat-status-service.js";
 import { SeatHandoverService } from "../domain/seat-handover-service.js";
 import { SeatSwitchClientService } from "../domain/seat-switch-client-service.js";
+import { makePredecessorRecapResolver } from "../domain/predecessor-recap-resolver.js";
+import type { ContextUsageStore } from "../domain/context-usage-store.js";
 
 export const seatRoutes = new Hono();
 
@@ -48,6 +50,26 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
     // B2 — discovered-mode resume-token capture derive-helper deps.
     contextUsageStore: (c.get("contextUsageStore" as never) as import("../domain/resume-token-capture.js").ResumeTokenCaptureDeps["contextUsageStore"]) ?? undefined,
     resumeTokenCapturer: (c.get("resumeMetadataRefresher" as never) as import("../domain/resume-token-capture.js").ResumeTokenCaptureDeps["resumeTokenCapturer"]) ?? undefined,
+    // Stopgap (plan 411c43de) — wire the predecessor-recap resolver so the successor boot packet fires
+    // with a bounded from-record recap. Reuses the full ContextUsageStore from context (readAndNormalize
+    // = claude transcript_path; readCodexAndNormalize = codex rollout_path) + a resume-token lookup for
+    // the codex thread id; parseJsonlExchanges is the resolver's default. Absent store → resolver omitted
+    // (recap sections omitted honestly). Firing proven live in the money-proof e2e.
+    predecessorRecapResolver: (() => {
+      const store = c.get("contextUsageStore" as never) as ContextUsageStore | undefined;
+      if (!store) return undefined;
+      const db = rigRepo.db;
+      return makePredecessorRecapResolver({
+        readClaudeTranscriptPath: (sessionName) => store.readAndNormalize(sessionName).transcriptPath,
+        readCodexTranscriptPath: (args) => store.readCodexAndNormalize(args).transcriptPath,
+        lookupResumeToken: (nodeId, sessionName) => {
+          const row = db
+            .prepare("SELECT resume_token FROM sessions WHERE node_id = ? AND session_name = ? ORDER BY id DESC LIMIT 1")
+            .get(nodeId, sessionName) as { resume_token: string | null } | undefined;
+          return row?.resume_token ?? null;
+        },
+      });
+    })(),
     // OPR.0.4.6.PI1 FR-6 — the Pi adapter in the runtime-adapter map exposes
     // the pi-runner sidecar reader; reuse it structurally (no new context var).
     piRunnerStateStore: (() => {
