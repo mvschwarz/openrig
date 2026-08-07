@@ -13,6 +13,7 @@ describe("SuccessorSessionLauncher", () => {
   let createSession: ReturnType<typeof vi.fn>;
   let listPanes: ReturnType<typeof vi.fn>;
   let killSession: ReturnType<typeof vi.fn>;
+  let respawnPane: ReturnType<typeof vi.fn>;
   let launchHarness: ReturnType<typeof vi.fn>;
   let checkReady: ReturnType<typeof vi.fn>;
 
@@ -22,9 +23,9 @@ describe("SuccessorSessionLauncher", () => {
     createSession = vi.fn(async () => ({ ok: true }));
     listPanes = vi.fn(async () => [{ id: "%7", index: 0, cwd: "/w", width: 80, height: 24, active: true }]);
     killSession = vi.fn(async () => ({ ok: true }));
-    // B1 — a live successor is launched via the runtime adapter (launchHarness +
-    // readiness), not left as a bare shell. Default mock: launches ready with a
-    // scraped resume token.
+    respawnPane = vi.fn(async () => ({ ok: true }));
+    // A live successor is launched via the runtime adapter (launchHarness + readiness), not left as a
+    // bare shell. Default mock: launches ready with a scraped resume token.
     launchHarness = vi.fn(async () => ({ ok: true, resumeToken: "codex-thread-xyz", resumeType: "codex_id" }));
     checkReady = vi.fn(async () => ({ ready: true }));
   });
@@ -36,7 +37,7 @@ describe("SuccessorSessionLauncher", () => {
   }
 
   function launcher(tmuxOptionDefaults?: TmuxOptionDefaultsApplier): SuccessorSessionLauncher {
-    const tmux = { createSession, listPanes, killSession } as unknown as TmuxAdapter;
+    const tmux = { createSession, listPanes, killSession, respawnPane } as unknown as TmuxAdapter;
     return new SuccessorSessionLauncher(tmux, discoveryRepo, {
       sessionEnv: { OPENRIG_HOME: "/home", HOME: "/daemon-home", CODEX_HOME: "/daemon-codex" },
       newId: () => "01ABCDEFG",
@@ -47,7 +48,13 @@ describe("SuccessorSessionLauncher", () => {
     });
   }
 
-  it("creates an UNMANAGED session (name,cwd,env) then resolves pane before upsert", async () => {
+  it("CUTOVER: respawns the successor into the DEPARTING pane (preserved name, same pane id) — no fresh session", async () => {
+    // A SEAT = one durable tmux session; the successor takes over the retiree's EXACT pane via
+    // respawn-pane so native scrollback survives (predecessor history stays above the successor boot).
+    // No fresh new-session, no -h shuffle: the canonical session name is preserved and the pane id is
+    // unchanged. respawn-pane with no command re-runs the pane's default login shell for launchHarness.
+    listPanes.mockResolvedValue([{ id: "%42", index: 0, cwd: "/w", width: 80, height: 24, active: true }]);
+
     const res = await launcher().createSuccessor({
       node: { id: "node-1", runtime: "codex", cwd: "/w" },
       departingSessionName: "dev-impl@rig",
@@ -55,188 +62,145 @@ describe("SuccessorSessionLauncher", () => {
 
     expect(res.ok).toBe(true);
     if (!res.ok) throw new Error("expected ok");
-    // Driver note 1: actual adapter signature createSession(name, cwd, env).
-    const [name, cwd, env] = createSession.mock.calls[0]!;
-    expect(name).toBe("dev-impl@rig-h1ABCDEFG");
-    expect(cwd).toBe("/w");
-    expect(env).toMatchObject({
+
+    // No fresh session — the retiree's pane is reused in place.
+    expect(createSession).not.toHaveBeenCalled();
+    // The DEPARTING session's pane is resolved (to take it over), then respawned in place.
+    expect(listPanes).toHaveBeenCalledWith("dev-impl@rig");
+    expect(respawnPane).toHaveBeenCalledTimes(1);
+    const [paneTarget, command, opts] = respawnPane.mock.calls[0]!;
+    expect(paneTarget).toBe("%42");
+    expect(command).toBeUndefined(); // no command → default login shell in the reused pane
+    expect(opts).toMatchObject({ cwd: "/w" });
+    // Identity env carries the PRESERVED canonical session name (never a -h successor name) + the
+    // daemon session env (self-identify + activity report like a launched seat).
+    expect(opts.env).toMatchObject({
       OPENRIG_NODE_ID: "node-1",
-      OPENRIG_SESSION_NAME: "dev-impl@rig-h1ABCDEFG",
+      OPENRIG_SESSION_NAME: "dev-impl@rig",
       OPENRIG_RUNTIME: "codex",
       OPENRIG_HOME: "/home",
       HOME: "/daemon-home",
       CODEX_HOME: "/daemon-codex",
     });
 
-    // Driver note 2: pane resolved after create, carried into the discovery candidate.
-    expect(listPanes.mock.invocationCallOrder[0]!).toBeGreaterThan(createSession.mock.invocationCallOrder[0]!);
-    expect(res.tmuxPane).toBe("%7");
-
-    // B1: the successor was launched into a LIVE, READY agent BEFORE the upsert —
-    // launchHarness + a readiness probe ran, and the launch resume token is
-    // captured and returned (persisted at commit by the composer, never here).
+    // launchHarness drives the harness into the SAME preserved session/pane; readiness ran; the
+    // launch resume token is captured + returned (persisted at commit by the composer, never here).
     expect(launchHarness).toHaveBeenCalledTimes(1);
     const [binding, launchOpts] = launchHarness.mock.calls[0]!;
-    expect(binding).toMatchObject({ tmuxSession: "dev-impl@rig-h1ABCDEFG", tmuxPane: "%7", cwd: "/w" });
-    expect(launchOpts).toMatchObject({ name: "dev-impl@rig-h1ABCDEFG" });
+    expect(binding).toMatchObject({ tmuxSession: "dev-impl@rig", tmuxPane: "%42", cwd: "/w" });
+    expect(launchOpts).toMatchObject({ name: "dev-impl@rig" });
     expect(checkReady).toHaveBeenCalled();
     expect(res.resumeToken).toBe("codex-thread-xyz");
     expect(res.resumeType).toBe("codex_id");
-    // launch happened AFTER pane resolve and BEFORE the discovery upsert.
-    expect(launchHarness.mock.invocationCallOrder[0]!).toBeGreaterThan(listPanes.mock.invocationCallOrder[0]!);
+    expect(res.tmuxSession).toBe("dev-impl@rig");
+    expect(res.tmuxPane).toBe("%42");
+    // Order: resolve departing pane → respawn in place → launch the harness into it.
+    expect(respawnPane.mock.invocationCallOrder[0]!).toBeGreaterThan(listPanes.mock.invocationCallOrder[0]!);
+    expect(launchHarness.mock.invocationCallOrder[0]!).toBeGreaterThan(respawnPane.mock.invocationCallOrder[0]!);
 
-    // Recorded as an ACTIVE, UNMANAGED discovery candidate (no binding/session created).
+    // Recorded as an ACTIVE, UNMANAGED discovery candidate on the PRESERVED name (commit rebinds to it);
+    // no binding/session rows are created here — the commit is the sole rebind.
     const row = discoveryRepo.getDiscoveredSession(res.discoveredId);
-    expect(row).toMatchObject({ tmuxSession: "dev-impl@rig-h1ABCDEFG", tmuxPane: "%7", status: "active", claimedNodeId: null });
+    expect(row).toMatchObject({ tmuxSession: "dev-impl@rig", tmuxPane: "%42", status: "active", claimedNodeId: null });
     expect(db.prepare("SELECT COUNT(*) AS n FROM bindings").get()).toEqual({ n: 0 });
     expect(db.prepare("SELECT COUNT(*) AS n FROM sessions").get()).toEqual({ n: 0 });
   });
 
-  it("B1: unwinds (kills the session, no candidate) when harness launch fails — no dead-shell successor", async () => {
+  it("UNWIND INVARIANT: a failed successor launch NEVER kills the retiree's preserved session — it stays re-wakeable from its session file", async () => {
+    // The new safety invariant (cutover): the retiree exits in place; its provider session file is the
+    // durable wake target. So when the successor's launch/readiness FAILS after the respawn, unwind must
+    // NOT killSession the preserved seat (that would destroy the recoverable state) — it returns a
+    // structured start_agent failure and leaves the re-wakeable shell in the pane.
     launchHarness.mockResolvedValue({ ok: false, error: "codex binary not found" });
-    const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
+
+    const res = await launcher().createSuccessor({
+      node: { id: "n", runtime: "codex", cwd: "/w" },
+      departingSessionName: "dev-impl@rig",
+    });
+
     expect(res).toMatchObject({ ok: false, step: "start_agent", code: "successor_launch_failed" });
     expect((res as { message: string }).message).toContain("codex binary not found");
-    expect(killSession).toHaveBeenCalledWith("a@r-h1ABCDEFG");
+    // The preserved seat's session is NEVER killed on unwind (retiree state stays recoverable).
+    expect(killSession).not.toHaveBeenCalled();
+    // No discovery candidate was committed for a failed successor.
     expect(discoveryRepo.listDiscovered()).toHaveLength(0);
   });
 
-  it("B1: unwinds when the successor never becomes ready (readiness timeout) — no dead-shell successor", async () => {
+  it("readiness timeout → structured start_agent failure, preserved seat NOT killed, no candidate", async () => {
     checkReady.mockResolvedValue({ ready: false, reason: "harness not interactive" });
     const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
     expect(res).toMatchObject({ ok: false, step: "start_agent", code: "successor_not_ready" });
-    expect(killSession).toHaveBeenCalledWith("a@r-h1ABCDEFG");
-    expect(discoveryRepo.listDiscovered()).toHaveLength(0);
-  });
-
-  it("B1 code-review fix: unwinds when checkReady THROWS (adapter/socket error) — no leaked session, no candidate, structured start_agent failure", async () => {
-    // A THROWN readiness probe (not a returned {ready:false}) must NOT reject
-    // createSuccessor before its kill/unwind runs — otherwise the just-created
-    // unmanaged successor leaks and the caller sees an unstructured 500.
-    checkReady.mockRejectedValue(new Error("tmux socket closed"));
-    const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
-    expect(res).toMatchObject({ ok: false, step: "start_agent", code: "successor_readiness_failed" });
-    expect((res as { message: string }).message).toContain("tmux socket closed");
-    expect(killSession).toHaveBeenCalledWith("a@r-h1ABCDEFG"); // session killed → no leak
-    expect(discoveryRepo.listDiscovered()).toHaveLength(0);    // no discovery candidate created
-  });
-
-  it("B1: unwinds when readiness reports attention_required (auth/trust gate)", async () => {
-    checkReady.mockResolvedValue({ ready: false, code: "trust_gate", reason: "trust prompt" });
-    const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
-    expect(res).toMatchObject({ ok: false, step: "start_agent", code: "successor_attention_required" });
-    expect(killSession).toHaveBeenCalledWith("a@r-h1ABCDEFG");
-    expect(discoveryRepo.listDiscovered()).toHaveLength(0);
-  });
-
-  it("B1: unwinds when no runtime adapter exists for the seat's runtime", async () => {
-    const tmux = { createSession, listPanes, killSession } as unknown as TmuxAdapter;
-    const noAdapter = new SuccessorSessionLauncher(tmux, discoveryRepo, { newId: () => "01ABCDEFG", runtimeAdapters: {} });
-    const res = await noAdapter.createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
-    expect(res).toMatchObject({ ok: false, step: "start_agent", code: "successor_runtime_unsupported" });
-    expect(killSession).toHaveBeenCalledWith("a@r-h1ABCDEFG");
-    expect(discoveryRepo.listDiscovered()).toHaveLength(0);
-  });
-
-  it("propagates a duplicate-session create failure without killing the pre-existing session", async () => {
-    createSession.mockResolvedValue({ ok: false, code: "duplicate_session", message: "dup" });
-    const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: null }, departingSessionName: "a@r" });
-    expect(res).toMatchObject({ ok: false, step: "create_successor" });
     expect(killSession).not.toHaveBeenCalled();
     expect(discoveryRepo.listDiscovered()).toHaveLength(0);
   });
 
-  it("best-effort kills the generated successor name when create fails after partial tmux side effects", async () => {
-    createSession.mockResolvedValue({ ok: false, code: "unknown", message: "hook failed after create" });
-    const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: null }, departingSessionName: "a@r" });
-    expect(res).toMatchObject({ ok: false, step: "create_successor", code: "unknown" });
-    expect(killSession).toHaveBeenCalledWith("a@r-h1ABCDEFG");
+  it("checkReady THROWS (adapter/socket error) → structured start_agent failure, preserved seat NOT killed, no candidate", async () => {
+    // A THROWN readiness probe must not reject createSuccessor with an unstructured error, and — under
+    // the cutover invariant — must not kill the preserved seat either.
+    checkReady.mockRejectedValue(new Error("tmux socket closed"));
+    const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
+    expect(res).toMatchObject({ ok: false, step: "start_agent", code: "successor_readiness_failed" });
+    expect((res as { message: string }).message).toContain("tmux socket closed");
+    expect(killSession).not.toHaveBeenCalled();
     expect(discoveryRepo.listDiscovered()).toHaveLength(0);
   });
 
-  it("kills the session and yields resolve_pane when no pane is resolvable", async () => {
+  it("readiness reports attention_required (auth/trust gate) → structured failure, preserved seat NOT killed", async () => {
+    checkReady.mockResolvedValue({ ready: false, code: "trust_gate", reason: "trust prompt" });
+    const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
+    expect(res).toMatchObject({ ok: false, step: "start_agent", code: "successor_attention_required" });
+    expect(killSession).not.toHaveBeenCalled();
+    expect(discoveryRepo.listDiscovered()).toHaveLength(0);
+  });
+
+  it("no runtime adapter for the seat's runtime → structured failure, preserved seat NOT killed", async () => {
+    const tmux = { createSession, listPanes, killSession, respawnPane } as unknown as TmuxAdapter;
+    const noAdapter = new SuccessorSessionLauncher(tmux, discoveryRepo, { newId: () => "01ABCDEFG", runtimeAdapters: {} });
+    const res = await noAdapter.createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
+    expect(res).toMatchObject({ ok: false, step: "start_agent", code: "successor_runtime_unsupported" });
+    expect(killSession).not.toHaveBeenCalled();
+    expect(discoveryRepo.listDiscovered()).toHaveLength(0);
+  });
+
+  it("respawn-pane failure → structured create_successor failure (no kill, no candidate)", async () => {
+    // If the in-place respawn itself fails, there is no successor; return a structured create_successor
+    // error and do NOT kill the pane — the seat stays re-wakeable from its session file.
+    respawnPane.mockResolvedValue({ ok: false, code: "no_server", message: "no server running" });
+    const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
+    expect(res).toMatchObject({ ok: false, step: "create_successor", code: "no_server" });
+    expect((res as { message: string }).message).toContain("no server running");
+    expect(launchHarness).not.toHaveBeenCalled();
+    expect(killSession).not.toHaveBeenCalled();
+    expect(discoveryRepo.listDiscovered()).toHaveLength(0);
+  });
+
+  it("no resolvable departing pane → structured resolve_pane failure BEFORE any respawn (seat untouched)", async () => {
     listPanes.mockResolvedValue([]);
     const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: null }, departingSessionName: "a@r" });
-    expect(res).toMatchObject({ ok: false, step: "resolve_pane" });
-    expect(killSession).toHaveBeenCalledWith("a@r-h1ABCDEFG");
+    expect(res).toMatchObject({ ok: false, step: "resolve_pane", code: "pane_unresolved" });
+    // Nothing was respawned/killed — the live retiree is wholly untouched.
+    expect(respawnPane).not.toHaveBeenCalled();
+    expect(killSession).not.toHaveBeenCalled();
     expect(discoveryRepo.listDiscovered()).toHaveLength(0);
   });
 
-  it("kills the session and yields a STRUCTURED resolve_pane failure when listPanes THROWS (no orphan, no rejection)", async () => {
-    // A probe that rethrows (permission/socket) must not escape uncaught and
-    // must not leave the just-created successor unmanaged.
+  it("listPanes THROWS → STRUCTURED resolve_pane failure (no rejection), no respawn, seat untouched", async () => {
     listPanes.mockRejectedValue(new Error("socket permission denied"));
-
     const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: null }, departingSessionName: "a@r" });
-
     expect(res).toMatchObject({ ok: false, step: "resolve_pane", code: "pane_probe_failed" });
     expect((res as { message: string }).message).toContain("socket permission denied");
-    // The just-created successor is killed; no discovery candidate leaked.
-    expect(killSession).toHaveBeenCalledWith("a@r-h1ABCDEFG");
+    expect(respawnPane).not.toHaveBeenCalled();
+    expect(killSession).not.toHaveBeenCalled();
     expect(discoveryRepo.listDiscovered()).toHaveLength(0);
   });
 
-  it("cleanup kills the session and marks the candidate vanished", async () => {
+  it("cleanup marks the candidate vanished WITHOUT killing the preserved session", async () => {
+    // Cutover cleanup unwinds a downstream failure (delivery/verify) — but the successor occupies the
+    // retiree's preserved pane, so cleanup must NEVER killSession (that destroys the recoverable seat).
     const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: null }, departingSessionName: "a@r" });
     if (!res.ok) throw new Error("expected ok");
     await launcher().cleanup(res.tmuxSession, res.discoveredId);
-    expect(killSession).toHaveBeenCalledWith("a@r-h1ABCDEFG");
+    expect(killSession).not.toHaveBeenCalled();
     expect(discoveryRepo.getDiscoveredSession(res.discoveredId)?.status).toBe("vanished");
-  });
-
-  // OPR.0.4.6.02 S1 — a FRESH successor is the same launch-only class as a
-  // NodeLauncher seat, so it gets the tmux option defaults; the exclusions
-  // (probe sessions, DISCOVERED/pre-existing successors) never reach this seam.
-  describe("tmux option defaults on the fresh successor (OPR.0.4.6.02 S1)", () => {
-    it("applies option defaults to the JUST-CREATED successor session (never the departing/pre-existing one)", async () => {
-      const applyToFreshSession = vi.fn(async () => [] as string[]);
-      const applier = { applyToFreshSession } as unknown as TmuxOptionDefaultsApplier;
-
-      const res = await launcher(applier).createSuccessor({
-        node: { id: "node-1", runtime: "codex", cwd: "/w" },
-        departingSessionName: "dev-impl@rig",
-      });
-
-      expect(res.ok).toBe(true);
-      // Applied exactly once, to the FRESH distinct successor name…
-      expect(applyToFreshSession).toHaveBeenCalledTimes(1);
-      expect(applyToFreshSession).toHaveBeenCalledWith("dev-impl@rig-h1ABCDEFG");
-      // …and NEVER to the departing (pre-existing) seat — the never-retro-flip rail.
-      expect(applyToFreshSession).not.toHaveBeenCalledWith("dev-impl@rig");
-    });
-
-    it("folds non-fatal option warnings into the ok result (omitted when clean)", async () => {
-      const withWarn = { applyToFreshSession: vi.fn(async () => ['tmux "mouse" option not set for s: boom']) } as unknown as TmuxOptionDefaultsApplier;
-      const res = await launcher(withWarn).createSuccessor({
-        node: { id: "n", runtime: "codex", cwd: "/w" },
-        departingSessionName: "dev-impl@rig",
-      });
-      expect(res.ok).toBe(true);
-      if (!res.ok) throw new Error("expected ok");
-      expect(res.warnings).toContain('tmux "mouse" option not set for s: boom');
-
-      // No applier → no warnings field (byte-compatible with pre-02 successors).
-      const clean = await launcher().createSuccessor({
-        node: { id: "n2", runtime: "codex", cwd: "/w" },
-        departingSessionName: "dev-impl@rig",
-      });
-      expect(clean.ok).toBe(true);
-      if (!clean.ok) throw new Error("expected ok");
-      expect(clean.warnings).toBeUndefined();
-    });
-
-    it("EXCLUSION: a failed createSession never applies option defaults (nothing to defaults on a session that was not created)", async () => {
-      createSession = vi.fn(async () => ({ ok: false, code: "unknown", message: "create failed" }));
-      const applyToFreshSession = vi.fn(async () => [] as string[]);
-      const applier = { applyToFreshSession } as unknown as TmuxOptionDefaultsApplier;
-
-      const res = await launcher(applier).createSuccessor({
-        node: { id: "node-1", runtime: "codex", cwd: "/w" },
-        departingSessionName: "dev-impl@rig",
-      });
-
-      expect(res.ok).toBe(false);
-      expect(applyToFreshSession).not.toHaveBeenCalled();
-    });
   });
 });

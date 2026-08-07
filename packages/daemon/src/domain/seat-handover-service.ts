@@ -261,19 +261,19 @@ export class SeatHandoverService {
       });
     }
 
-    // Full-cycle composer for fresh: capture -> create + LAUNCH a live successor
-    // -> deliver captured context -> verify continuity -> rebind. The original
-    // seat/binding is untouched until the commit inside finalizeWithDiscovered,
-    // which is the SOLE, LAST rebind. (fork/rebuild were rejected above;
-    // discovered was finalized above.)
+    // Full-cycle composer for fresh (CUTOVER): capture -> respawn a live successor INTO the departing
+    // pane in place -> deliver captured context -> verify continuity -> rebind. The registry BINDING is
+    // untouched until the commit inside finalizeWithDiscovered (the SOLE, LAST rebind), but the retiree
+    // PROCESS is force-replaced at the in-place respawn (it exits in place; its provider session file is
+    // the durable wake target). (fork/rebuild were rejected above; discovered was finalized above.)
 
-    // 1. Capture the departing seat's context BEFORE any successor exists.
+    // 1. Capture the departing seat's context BEFORE the respawn replaces it.
     const capturedContext = await this.captureDepartingContext(latestSession.session_name);
 
-    // 2. Create the UNMANAGED, discoverable successor and launch it into a LIVE,
-    //    READY agent (§2.1b seam, B1): createSession -> resolve pane -> real
-    //    runtime startup (launchHarness + readiness) -> upsertDiscoveredSession.
-    //    The successor is a live agent, not a bare shell, before it can commit.
+    // 2. Respawn the successor INTO the retiree's pane and launch it into a LIVE, READY agent (§2.1b
+    //    seam, B1): resolve departing pane -> respawn-pane in place (preserved name) -> real runtime
+    //    startup (launchHarness + readiness) -> upsertDiscoveredSession. The successor is a live agent,
+    //    not a bare shell, before it can commit.
     // Seam B Guard-F1: an ORGANIC seat has no node provenance — the inherited rig
     // attachment still carries to the successor (continuity of the same seat).
     const successorPosture = this.rigRepo.getNodePolicyProvenance(node.id)?.launchPosture
@@ -289,7 +289,10 @@ export class SeatHandoverService {
         ok: false,
         code: "successor_create_failed",
         message: `Handover failed at step "${launch.step}": ${launch.message}`,
-        guidance: "No successor was created and the original seat/binding is untouched. Inspect tmux/daemon logs and retry.",
+        // The registry binding is unchanged (commit never ran). A resolve_pane failure leaves the live
+        // retiree wholly untouched; a failure after the in-place respawn leaves the seat re-wakeable from
+        // its provider session file (never destroyed). Inspect tmux/daemon logs and retry.
+        guidance: "The seat's registry binding is unchanged. If the failure was after the in-place respawn, the seat is re-wakeable from its provider session file. Inspect tmux/daemon logs and retry.",
       };
     }
 
@@ -305,14 +308,15 @@ export class SeatHandoverService {
         capturedContext,
       });
       if (!delivered.ok) {
-        // Partial: successor created but context never landed — unwind the
-        // unmanaged successor, leave the original binding intact (no false-green).
+        // Partial: the successor is live in the preserved pane but the context packet never landed —
+        // unwind the discovery candidate (cleanup marks it vanished; it NEVER kills the preserved seat)
+        // and leave the binding unchanged (no false-green). The seat is re-wakeable from its session file.
         await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId);
         return {
           ok: false,
           code: "context_delivery_failed",
           message: `Handover failed at step "deliver-restore-packet": ${delivered.message}`,
-          guidance: "The created successor was unwound and the original seat/binding is untouched. Retry after tmux delivery is healthy.",
+          guidance: "The successor candidate was unwound and the seat's binding is unchanged; the seat is re-wakeable from its provider session file. Retry after tmux delivery is healthy.",
         };
       }
       contextDelivered = true;
@@ -380,7 +384,11 @@ export class SeatHandoverService {
         guidance: "Use an active, unclaimed discovered successor session.",
       });
     }
-    if (discovered.tmuxSession === input.latestSession.session_name) {
+    // The CUTOVER (fresh) successor INTENTIONALLY reuses the departing session's canonical name — it
+    // respawns into the retiree's pane in place, preserving the seat name (that is the whole point). Only
+    // a DISCOVERED-source successor must be a DISTINCT session; handing a seat to its own current session
+    // is a no-op there, so the guard applies to non-fresh sources only.
+    if (input.reportedSource.mode !== "fresh" && discovered.tmuxSession === input.latestSession.session_name) {
       return fail({
         ok: false,
         code: "successor_is_current",

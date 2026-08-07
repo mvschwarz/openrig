@@ -113,91 +113,84 @@ export class SuccessorSessionLauncher {
    * launch-scraped token the composer persists at commit (B2 for fresh).
    */
   async createSuccessor(input: { node: SuccessorNode; departingSessionName: string }): Promise<SuccessorLaunchResult> {
-    // Distinct successor name derived from the departing occupant's (valid)
-    // session name so it stays inside the tmux/OpenRig naming charset while
-    // never colliding with the current occupant.
-    const distinctName = `${input.departingSessionName}-h${this.newId().slice(-8)}`;
+    // CUTOVER MODEL (plan 411c43de): a SEAT = one durable tmux session; the successor takes over the
+    // retiree's EXACT pane via respawn-pane, so the canonical session name is PRESERVED (no -h shuffle)
+    // and native scrollback survives — predecessor history stays above the successor boot (the money
+    // proof). The retiree exits in place; its provider session file is the durable wake target, so the
+    // new unwind invariant is that a failed successor NEVER destroys that recoverable state.
+    const departingSession = input.departingSessionName;
 
-    // OpenRig identity env mirrors NodeLauncher.launchNode's pattern so the
-    // successor self-identifies + reports activity exactly like a launched seat.
+    // OpenRig identity env mirrors NodeLauncher.launchNode's pattern so the successor self-identifies +
+    // reports activity like a launched seat. OPENRIG_SESSION_NAME is the PRESERVED canonical name.
     const env = compactEnv({
       OPENRIG_NODE_ID: input.node.id,
-      OPENRIG_SESSION_NAME: distinctName,
+      OPENRIG_SESSION_NAME: departingSession,
       OPENRIG_RUNTIME: input.node.runtime ?? undefined,
       ...this.sessionEnv,
     });
     const cwd = input.node.cwd ?? undefined;
 
-    // Driver note 1: create via the ACTUAL adapter signature createSession(name, cwd, env).
-    const created = await this.tmuxAdapter.createSession(distinctName, cwd, env);
-    if (!created.ok) {
-      // tmux can run hooks after creating the session; if a hook fails,
-      // `new-session` can return non-zero while the unmanaged session remains.
-      // Do not kill on duplicate_session, which may be a real pre-existing
-      // collision. All other failed-create cases get best-effort cleanup.
-      if (created.code !== "duplicate_session") {
-        await this.killBestEffort(distinctName);
-      }
-      return { ok: false, code: created.code, step: "create_successor", message: created.message };
-    }
-
-    // OPR.0.4.6.02 S1 — a FRESH successor is a brand-new operator/agent seat
-    // (the same launch-only class as NodeLauncher), so apply the daemon's tmux
-    // option defaults (mouse/status/clipboard) to its JUST-CREATED session via
-    // the shared applier. `createSuccessor` only ever makes fresh sessions —
-    // DISCOVERED (pre-existing) successors never reach this seam — so the
-    // never-retro-flip rail (BR-1) holds. Failures are non-fatal (a handover
-    // must not die over a cosmetic option); the warnings ride the ok result.
-    const optionWarnings = this.tmuxOptionDefaults
-      ? await this.tmuxOptionDefaults.applyToFreshSession(distinctName)
-      : [];
-
-    // Driver note 2: resolve the real tmux pane AFTER create, BEFORE upsertDiscoveredSession —
-    // upsert requires a pane, and createSession returns only { ok: true }.
-    // A list-panes probe can THROW (permission/socket errors rethrow from the
-    // adapter); treat a throw EXACTLY like the null-pane case — kill the
-    // just-created successor and return the structured resolve_pane failure, so
-    // the unmanaged session is never left orphaned and the caller never sees an
-    // unstructured rejection/500.
+    // 1. Resolve the DEPARTING session's active pane — the retiree's pane we take over. A probe throw or
+    //    an empty result is a structured resolve_pane failure BEFORE any respawn, so the seat is wholly
+    //    untouched (still the live retiree; nothing to recover).
     let pane: { id: string } | undefined;
     try {
-      const panes = await this.tmuxAdapter.listPanes(distinctName);
+      const panes = await this.tmuxAdapter.listPanes(departingSession);
       pane = panes.find((p) => p.active) ?? panes[0];
     } catch (err) {
-      await this.tmuxAdapter.killSession(distinctName);
       return {
         ok: false,
         code: "pane_probe_failed",
         step: "resolve_pane",
-        message: `Could not probe tmux panes for successor session "${distinctName}": ${err instanceof Error ? err.message : String(err)}`,
+        message: `Could not probe tmux panes for departing session "${departingSession}": ${err instanceof Error ? err.message : String(err)}`,
       };
     }
     if (!pane) {
-      // No pane resolvable — kill the just-created session so nothing leaks.
-      await this.tmuxAdapter.killSession(distinctName);
       return {
         ok: false,
         code: "pane_unresolved",
         step: "resolve_pane",
-        message: `Could not resolve a tmux pane for successor session "${distinctName}".`,
+        message: `Could not resolve a tmux pane for departing session "${departingSession}".`,
       };
     }
 
-    // B1 — route the successor through REAL runtime startup so it becomes a LIVE,
-    // READY agent BEFORE it can be committed. On ANY launch/readiness failure,
-    // unwind (kill the unmanaged session) and fail loudly naming the step; the
-    // original seat/binding is untouched because commit never runs.
-    const started = await this.startAgent(input.node, distinctName, pane.id, cwd);
+    // 2. Respawn the successor INTO the retiree's pane in place. respawn-pane -k force-replaces the
+    //    retiree with a fresh default login shell (no command) carrying the successor's identity env +
+    //    cwd; the pane id and window are unchanged, so native scrollback survives. This is the swap: the
+    //    retiree exits in place (session file = wake target). A respawn failure returns a structured
+    //    create_successor error; we do NOT kill the pane (the seat stays re-wakeable from its file).
+    const respawned = await this.tmuxAdapter.respawnPane(pane.id, undefined, { cwd, env });
+    if (!respawned.ok) {
+      return {
+        ok: false,
+        code: (respawned as { code?: string }).code ?? "respawn_failed",
+        step: "create_successor",
+        message: `Could not respawn the successor into pane "${pane.id}" of "${departingSession}": ${(respawned as { message?: string }).message ?? "respawn-pane failed"}`,
+      };
+    }
+
+    // SEAM (ghost-stage re-key, plan 411c43de): at the swap, the predecessor's resume token should be
+    // invalidated / re-keyed so a stale wake can never resume the retiree into a superseded state. The
+    // enumeration that drives this lands with the ghost-stage slice (orch-confirmed not-yet-landed); this
+    // seat CONSUMES it here when it does. It is a predecessor-token SAFETY step, separable and
+    // NON-BLOCKING for the scrollback money-proof, so it is a named seam, not a fabricated no-op — the
+    // recoverable-state invariant already holds via the durable provider session file above.
+
+    // 3. Route the successor through REAL runtime startup (launchHarness send-keys + readiness) so it
+    //    becomes a LIVE, READY agent in the reused pane BEFORE it can be committed. UNWIND INVARIANT:
+    //    on ANY launch/readiness failure we do NOT killSession the preserved seat — that would destroy
+    //    the retiree's recoverable state. We return the structured failure and leave the re-wakeable
+    //    shell in the pane; commit never runs, so the binding is not repointed.
+    const started = await this.startAgent(input.node, departingSession, pane.id, cwd);
     if (!started.ok) {
-      await this.killBestEffort(distinctName);
       return { ok: false, code: started.code, step: "start_agent", message: started.message };
     }
 
     const discovered = this.discoveryRepo.upsertDiscoveredSession({
-      tmuxSession: distinctName,
+      tmuxSession: departingSession,
       tmuxPane: pane.id,
-      // The hint equals the node's own runtime, so the commit-path runtime check
-      // always matches; null runtime records as "unknown" (which the check skips).
+      // The hint equals the node's own runtime, so the commit-path runtime check always matches; null
+      // runtime records as "unknown" (which the check skips).
       runtimeHint: (input.node.runtime ?? "unknown") as RuntimeHint,
       confidence: "high",
       cwd: input.node.cwd ?? undefined,
@@ -206,11 +199,10 @@ export class SuccessorSessionLauncher {
     return {
       ok: true,
       discoveredId: discovered.id,
-      tmuxSession: distinctName,
+      tmuxSession: departingSession,
       tmuxPane: pane.id,
       resumeToken: started.resumeToken,
       resumeType: started.resumeType,
-      warnings: optionWarnings.length > 0 ? optionWarnings : undefined,
     };
   }
 
@@ -333,22 +325,14 @@ export class SuccessorSessionLauncher {
   }
 
   /**
-   * Failure cleanup for a created-but-not-committed successor. There is NO
-   * binding to unwind (commit never ran), so this only kills the unmanaged
-   * tmux session and marks the discovery candidate vanished. The original
-   * seat/binding is untouched.
+   * Composer unwind for a successor that launched but failed downstream (context delivery or continuity
+   * verify). CUTOVER INVARIANT: the successor occupies the retiree's PRESERVED pane, so cleanup NEVER
+   * kills the session — that would destroy the seat's recoverable state. It only marks the discovery
+   * candidate vanished; the re-wakeable shell stays in the pane and the seat is recoverable from its
+   * provider session file. (`tmuxSession` is retained for signature stability + call-site logging.)
    */
-  async cleanup(tmuxSession: string, discoveredId: string | null): Promise<void> {
-    await this.tmuxAdapter.killSession(tmuxSession);
+  async cleanup(_tmuxSession: string, discoveredId: string | null): Promise<void> {
     if (discoveredId) this.discoveryRepo.markVanished([discoveredId]);
-  }
-
-  private async killBestEffort(tmuxSession: string): Promise<void> {
-    try {
-      await this.tmuxAdapter.killSession(tmuxSession);
-    } catch {
-      // Cleanup must not mask the original failure.
-    }
   }
 }
 

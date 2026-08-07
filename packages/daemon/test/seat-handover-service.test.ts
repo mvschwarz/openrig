@@ -19,6 +19,7 @@ describe("SeatHandoverService", () => {
   let createSession: ReturnType<typeof vi.fn>;
   let listPanes: ReturnType<typeof vi.fn>;
   let killSession: ReturnType<typeof vi.fn>;
+  let respawnPane: ReturnType<typeof vi.fn>;
   let sendText: ReturnType<typeof vi.fn>;
   let sendKeys: ReturnType<typeof vi.fn>;
   let capturePaneScreen: ReturnType<typeof vi.fn>;
@@ -38,6 +39,7 @@ describe("SeatHandoverService", () => {
     createSession = vi.fn(async () => ({ ok: true }));
     listPanes = vi.fn(async () => [{ id: "%9", index: 0, cwd: "/project", width: 80, height: 24, active: true }]);
     killSession = vi.fn(async () => ({ ok: true }));
+    respawnPane = vi.fn(async () => ({ ok: true }));
     sendText = vi.fn(async () => ({ ok: true }));
     sendKeys = vi.fn(async () => ({ ok: true }));
     capturePaneScreen = vi.fn(async () => "predecessor screen tail");
@@ -56,7 +58,7 @@ describe("SeatHandoverService", () => {
   });
 
   function tmux(): TmuxAdapter {
-    return { hasSession, createSession, listPanes, killSession, sendText, sendKeys, capturePaneScreen } as unknown as TmuxAdapter;
+    return { hasSession, createSession, listPanes, killSession, respawnPane, sendText, sendKeys, capturePaneScreen } as unknown as TmuxAdapter;
   }
 
   function codexAdapter(): RuntimeAdapter {
@@ -231,8 +233,6 @@ describe("SeatHandoverService", () => {
     expect(durableRows()).toBe(before);
   });
 
-  const SUCCESSOR_NAME = "dev-impl@seat-rig-h1SUCCID0";
-
   it("Seam B (R2/Guard): a fresh handover for a NO-policy seat launches the REAL successor at EXPLICIT floor, even under ambient OPENRIG_YOLO", async () => {
     // Production altitude: the pin drives SeatHandoverService.handover() end-to-end and
     // asserts the binding the REAL launchHarness call received — never a re-computed
@@ -271,53 +271,60 @@ describe("SeatHandoverService", () => {
       ok: true,
       mutated: true,
       previousOccupant: "dev-impl@seat-rig",
-      currentOccupant: SUCCESSOR_NAME,
+      // Cutover: the seat keeps its canonical name; the OCCUPANT changed (new agent), the NAME did not.
+      currentOccupant: "dev-impl@seat-rig",
       source: { mode: "fresh" },
       sideEffects: { startupContextDelivered: true },
     });
 
-    // Driver note 1: createSession called with the successor name + node cwd + identity env.
-    expect(createSession).toHaveBeenCalledTimes(1);
-    const [name, cwd, env] = createSession.mock.calls[0]!;
-    expect(name).toBe(SUCCESSOR_NAME);
-    expect(cwd).toBe("/project");
-    expect(env).toMatchObject({
+    // Cutover: no fresh session — the successor respawns into the DEPARTING pane in place, carrying the
+    // PRESERVED canonical session name in its identity env (never a -h successor name).
+    expect(createSession).not.toHaveBeenCalled();
+    expect(listPanes).toHaveBeenCalledWith("dev-impl@seat-rig");
+    expect(respawnPane).toHaveBeenCalledTimes(1);
+    const [paneTarget, command, opts] = respawnPane.mock.calls[0]!;
+    expect(paneTarget).toBe("%9"); // the departing pane resolved from listPanes
+    expect(command).toBeUndefined(); // default login shell in the reused pane
+    expect(opts).toMatchObject({ cwd: "/project" });
+    expect(opts.env).toMatchObject({
       OPENRIG_NODE_ID: node.id,
-      OPENRIG_SESSION_NAME: SUCCESSOR_NAME,
+      OPENRIG_SESSION_NAME: "dev-impl@seat-rig",
       OPENRIG_RUNTIME: "codex",
     });
 
-    // Driver note 2: pane resolved AFTER create, BEFORE the discovery upsert; the
-    // resolved pane ("%9" from listPanes) is what the discovery candidate carries.
-    expect(listPanes.mock.invocationCallOrder[0]!).toBeGreaterThan(createSession.mock.invocationCallOrder[0]!);
+    // The departing pane is resolved BEFORE the in-place respawn; the discovery candidate carries it on
+    // the PRESERVED name (commit rebinds to it).
+    expect(listPanes.mock.invocationCallOrder[0]!).toBeLessThan(respawnPane.mock.invocationCallOrder[0]!);
     expect(result.result.discovery.tmuxPane).toBe("%9");
-    const successorRow = db.prepare("SELECT tmux_pane FROM discovered_sessions WHERE tmux_session = ?").get(SUCCESSOR_NAME) as { tmux_pane: string };
+    const successorRow = db.prepare("SELECT tmux_pane FROM discovered_sessions WHERE tmux_session = ?").get("dev-impl@seat-rig") as { tmux_pane: string };
     expect(successorRow.tmux_pane).toBe("%9");
 
-    // Driver note 3: the restore packet is delivered to the successor BEFORE the
-    // continuity-verify presence probe (never verify an un-restored seat).
+    // Driver note 3: the restore packet (stopgap recap) is delivered to the successor in the PRESERVED
+    // pane BEFORE the continuity-verify presence probe (never verify an un-restored seat).
     expect(sendText).toHaveBeenCalledTimes(1);
     const [target, packet] = sendText.mock.calls[0]!;
-    expect(target).toBe(SUCCESSOR_NAME);
+    expect(target).toBe("dev-impl@seat-rig");
     expect(packet).toContain("OpenRig seat handover");
     expect(packet).toContain("predecessor screen tail");
-    expect(sendKeys).toHaveBeenCalledWith(SUCCESSOR_NAME, ["C-m"]);
+    expect(sendKeys).toHaveBeenCalledWith("dev-impl@seat-rig", ["C-m"]);
     expect(sendText.mock.invocationCallOrder[0]!).toBeLessThan(hasSession.mock.invocationCallOrder[0]!);
 
     // B1: the successor was launched into a LIVE agent (launchHarness +
     // readiness) BEFORE commit — not a bare shell that only received text.
     expect(launchHarness).toHaveBeenCalledTimes(1);
     expect(checkReady).toHaveBeenCalled();
-    // Rebind landed on the created successor.
-    expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe(SUCCESSOR_NAME);
+    // Rebind landed on the PRESERVED seat name.
+    expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-impl@seat-rig");
     const nodeRow = db.prepare("SELECT occupant_lifecycle, handover_result, previous_occupant FROM nodes WHERE id = ?").get(node.id) as Record<string, string | null>;
     expect(nodeRow).toMatchObject({ occupant_lifecycle: "active", handover_result: "complete", previous_occupant: "dev-impl@seat-rig" });
 
-    // B2 (launched/fresh): the launch-scraped resume token is persisted on the
-    // new claimed session atomically with the commit (provenance scrape).
+    // B2 (launched/fresh): the launch-scraped resume token is persisted on the new claimed session
+    // atomically with the commit (provenance scrape). The cutover preserves the seat name, so two rows
+    // now share it (the superseded retiree + the active successor); take the NEWEST (the claimed one),
+    // exactly as the production latest-session lookup does (ORDER BY id DESC).
     const newSession = db.prepare(
-      "SELECT resume_type, resume_token, resume_provenance FROM sessions WHERE node_id = ? AND session_name = ?"
-    ).get(node.id, SUCCESSOR_NAME) as Record<string, string | null>;
+      "SELECT resume_type, resume_token, resume_provenance FROM sessions WHERE node_id = ? AND session_name = ? ORDER BY id DESC LIMIT 1"
+    ).get(node.id, "dev-impl@seat-rig") as Record<string, string | null>;
     expect(newSession).toMatchObject({ resume_type: "codex_id", resume_token: "codex-launch-tok", resume_provenance: "scrape" });
   });
 
@@ -401,25 +408,26 @@ describe("SeatHandoverService", () => {
     expect(JSON.parse(skipEvent.payload)).toMatchObject({ outcome: "skipped", reason: "probe_timeout", redacted: true });
   });
 
-  it("fails loudly and leaves the original binding when successor create fails", async () => {
+  it("fails loudly and leaves the binding when the in-place respawn fails", async () => {
     const { node } = seedSeat();
-    createSession.mockResolvedValue({ ok: false, code: "duplicate_session", message: "duplicate session" });
+    respawnPane.mockResolvedValue({ ok: false, code: "no_server", message: "no server running" });
     const before = durableRows();
 
     const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
 
     expect(result).toMatchObject({ ok: false, code: "successor_create_failed" });
     expect((result as { message: string }).message).toContain("create_successor");
+    expect(launchHarness).not.toHaveBeenCalled();
     expect(sendText).not.toHaveBeenCalled();
     expect(hasSession).not.toHaveBeenCalled();
-    // Original seat/binding untouched — commit never ran.
+    // The seat's binding is unchanged — commit never ran.
     expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-impl@seat-rig");
     expect(durableRows()).toBe(before);
   });
 
-  it("maps a listPanes THROW after create to a loud successor_create_failed (no rejection, binding intact)", async () => {
+  it("maps a listPanes THROW resolving the departing pane to a loud successor_create_failed (no rejection, seat untouched)", async () => {
     const { node } = seedSeat();
-    // Successor tmux session created, but the pane probe rethrows.
+    // The departing-pane probe rethrows BEFORE any respawn — the live retiree is wholly untouched.
     listPanes.mockRejectedValue(new Error("socket permission denied"));
     const before = durableRows();
 
@@ -427,15 +435,16 @@ describe("SeatHandoverService", () => {
 
     expect(result).toMatchObject({ ok: false, code: "successor_create_failed" });
     expect((result as { message: string }).message).toContain("resolve_pane");
-    // The launcher killed the orphan; verify + delivery never ran; original intact.
-    expect(killSession).toHaveBeenCalledWith(SUCCESSOR_NAME);
+    // CUTOVER INVARIANT: the preserved seat is NEVER killed on unwind; verify + delivery never ran.
+    expect(respawnPane).not.toHaveBeenCalled();
+    expect(killSession).not.toHaveBeenCalled();
     expect(sendText).not.toHaveBeenCalled();
     expect(hasSession).not.toHaveBeenCalled();
     expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-impl@seat-rig");
     expect(durableRows()).toBe(before);
   });
 
-  it("unwinds the created successor when context delivery fails (no false-green)", async () => {
+  it("unwinds when context delivery fails WITHOUT killing the preserved seat (no false-green)", async () => {
     const { node } = seedSeat();
     sendText.mockResolvedValue({ ok: false, code: "session_not_found", message: "can't find session" });
 
@@ -443,26 +452,27 @@ describe("SeatHandoverService", () => {
 
     expect(result).toMatchObject({ ok: false, code: "context_delivery_failed" });
     expect((result as { message: string }).message).toContain("deliver-restore-packet");
-    // Continuity verify never ran; the unmanaged successor is unwound.
+    // Continuity verify never ran; the successor candidate is unwound (vanished) — but the preserved
+    // seat is NEVER killed (it stays re-wakeable from its session file).
     expect(hasSession).not.toHaveBeenCalled();
-    expect(killSession).toHaveBeenCalledWith(SUCCESSOR_NAME);
-    const successorRow = db.prepare("SELECT status FROM discovered_sessions WHERE tmux_session = ?").get(SUCCESSOR_NAME) as { status: string };
+    expect(killSession).not.toHaveBeenCalled();
+    const successorRow = db.prepare("SELECT status FROM discovered_sessions WHERE tmux_session = ?").get("dev-impl@seat-rig") as { status: string };
     expect(successorRow.status).toBe("vanished");
-    // Original seat/binding intact.
+    // The seat's binding is unchanged — commit never ran.
     expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-impl@seat-rig");
   });
 
-  it("unwinds the created successor when continuity verify fails after delivery", async () => {
+  it("unwinds when continuity verify fails after delivery WITHOUT killing the preserved seat", async () => {
     const { node } = seedSeat();
     hasSession.mockResolvedValue(false);
 
     const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
 
     expect(result).toMatchObject({ ok: false, code: "successor_tmux_absent" });
-    // Delivery happened, THEN verify failed, THEN cleanup.
+    // Delivery happened, THEN verify failed, THEN unwind — candidate vanished, preserved seat NOT killed.
     expect(sendText).toHaveBeenCalledTimes(1);
-    expect(killSession).toHaveBeenCalledWith(SUCCESSOR_NAME);
-    const successorRow = db.prepare("SELECT status FROM discovered_sessions WHERE tmux_session = ?").get(SUCCESSOR_NAME) as { status: string };
+    expect(killSession).not.toHaveBeenCalled();
+    const successorRow = db.prepare("SELECT status FROM discovered_sessions WHERE tmux_session = ?").get("dev-impl@seat-rig") as { status: string };
     expect(successorRow.status).toBe("vanished");
     expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-impl@seat-rig");
   });
