@@ -106,5 +106,6 @@ test("Q2 rider (effect proof): the build verb LOADS the daemon inside the contai
   // bound), failing the build if it can't. `rig --version` alone never opens the DB.
   const text = readScript();
   assert.match(text, /docker run\b[\s\S]*\$\{IMAGE_TAG\}/, "must run the freshly-built image (effect proof)");
-  assert.match(text, /rig daemon start/, "must LOAD the daemon (better-sqlite3 binds), not merely check rig exists");
+  assert.match(text, /rig daemon start --no-kernel/, "must LOAD the daemon (better-sqlite3 binds) via the operator-corrected start, not merely check rig exists");
+  assert.match(text, /\/healthz/, "must confirm readiness deterministically via /healthz (operator correction — no fixed sleep)");
 });

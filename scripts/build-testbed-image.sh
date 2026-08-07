@@ -88,7 +88,11 @@ docker build \
 # gate (a docker build per fold is unaffordable) — this rides the pre-pin build verb; the A/B pin
 # package REQUIRES it green. ---
 echo "[testbed] effect proof: daemon LOAD inside the container (better-sqlite3 must have built)" >&2
-docker run --rm "${IMAGE_TAG}" bash -lc 'set -euo pipefail; rig --version; rig daemon start; sleep 2; rig status; rig daemon stop'
+# Operator-corrected load sequence (adopted verbatim from the host RED/GREEN run): start WITHOUT the
+# kernel, confirm readiness by hitting /healthz DIRECTLY (deterministic — no fixed sleep), then daemon
+# status; an EXIT trap stops the daemon so a failed assertion still tears down. A broken native install
+# fails `rig daemon start` here → set -e → non-zero → the build verb fails BEFORE the A/B pin.
+docker run --rm "${IMAGE_TAG}" bash -lc 'set -euo pipefail; trap "rig daemon stop >/dev/null 2>&1 || true" EXIT; rig --version; rig daemon start --no-kernel; curl -fsS http://127.0.0.1:7433/healthz; rig daemon status'
 
 # --- emit the reproducible manifest + census receipt via the tested node orchestrator ---
 INPUTS="$(mktemp)"

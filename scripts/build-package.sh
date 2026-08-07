@@ -102,7 +102,20 @@ fi
 DAEMON_NM="$CLI_DIR/node_modules/@openrig/daemon"
 rm -rf "$DAEMON_NM"
 mkdir -p "$DAEMON_NM/dist"
-cp "$DAEMON_DIR/package.json" "$DAEMON_NM/package.json"
+# Q2 break #5 fix: STRIP the bundled daemon's dependency fields. The daemon's runtime deps
+# (better-sqlite3 + @hono/node-server,@hono/node-ws,hono,tar,ulid,yaml) are a strict SUBSET of the
+# cli's own deps, so on target they must be fetched ONCE at the cli level from the registry (COMPLETE,
+# with better-sqlite3's binding.gyp) and resolved by node walking UP to <cli>/node_modules. If the
+# BUNDLED daemon package.json still DECLARES them, `npm install -g` treats them as bundle-provided
+# UNDER @openrig/daemon and leaves an EMPTY <cli>/node_modules/better-sqlite3 (no binding.gyp →
+# 'prebuild-install: not found' + 'binding.gyp not found' = break #5). Runtime is unaffected: node
+# resolves by hoisting; a package.json `dependencies` field is only consulted by npm at INSTALL time.
+node -e '
+  const fs = require("fs");
+  const p = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  delete p.dependencies; delete p.devDependencies; delete p.optionalDependencies; delete p.peerDependencies;
+  fs.writeFileSync(process.argv[2], JSON.stringify(p, null, 2) + "\n");
+' "$DAEMON_DIR/package.json" "$DAEMON_NM/package.json"
 cp -r "$DAEMON_DIR/dist/"* "$DAEMON_NM/dist/"
 
 # UI: dist
