@@ -942,6 +942,7 @@ export function queueRoutes(): Hono {
         tags: body.tags,
         urgency: body.urgency,
         auditPointer: body.auditPointer,
+        identityProvenance: "transport:v1", // P21 §4 era-stamp: senderSession came from the transport chokepoint
       });
       return c.json(entry, 201);
     } catch (err) {

@@ -97,6 +97,21 @@ describe("queue routes", () => {
     });
   });
 
+  it("inbox drop — era-stamps inbox_entries transport:v1 (P21 §4 derived-era boundary)", async () => {
+    const res = await app.request("/api/queue/inbox/drop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "sender@rig" },
+      body: JSON.stringify({ destinationSession: "dest@rig", body: "hi" }),
+    });
+    expect(res.status).toBe(201);
+    const { inboxId } = (await res.json()) as { inboxId: string };
+    // The dropped entry's sender is transport-derived → the channel-of-record row is stamped transport:v1.
+    const row = db
+      .prepare("SELECT identity_provenance FROM inbox_entries WHERE inbox_id = ?")
+      .get(inboxId) as { identity_provenance: string | null } | undefined;
+    expect(row?.identity_provenance).toBe("transport:v1");
+  });
+
   it("POST /api/queue/create creates a qitem", async () => {
     const res = await app.request("/api/queue/create", {
       method: "POST",

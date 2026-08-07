@@ -45,6 +45,9 @@ export interface InboxDropInput {
   tags?: string[];
   urgency?: string;
   auditPointer?: string;
+  /** P21 §4 era-stamp: the route passes `transport:v1` (senderSession derived from the transport
+   *  header chokepoint). Written onto the channel-of-record row; absence = claimed-era. */
+  identityProvenance?: string | null;
 }
 
 export class InboxHandlerError extends Error {
@@ -76,6 +79,9 @@ export class InboxHandler {
   readonly db: Database.Database;
   private readonly eventBus: EventBus;
   private readonly queueRepo: QueueRepository;
+  /** P21 §4: detected once — a curated-migration test DB (or a pre-067 daemon) may lack the
+   *  era-stamp column, so the writer degrades (omits it) instead of throwing. */
+  private readonly hasIdentityProvenanceColumn: boolean;
 
   constructor(
     db: Database.Database,
@@ -85,6 +91,9 @@ export class InboxHandler {
     this.db = db;
     this.eventBus = eventBus;
     this.queueRepo = queueRepo;
+    this.hasIdentityProvenanceColumn = (
+      this.db.prepare("PRAGMA table_info(inbox_entries)").all() as Array<{ name: string }>
+    ).some((col) => col.name === "identity_provenance");
   }
 
   drop(input: InboxDropInput): InboxEntry {
@@ -97,22 +106,42 @@ export class InboxHandler {
     const tags = input.tags ? JSON.stringify(input.tags) : null;
     const urgency = input.urgency ?? "routine";
 
-    this.db
-      .prepare(
-        `INSERT INTO inbox_entries (
-          inbox_id, destination_session, sender_session, body, tags, urgency, ts_dropped, audit_pointer
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        id,
-        input.destinationSession,
-        input.senderSession,
-        input.body,
-        tags,
-        urgency,
-        ts,
-        input.auditPointer ?? null
-      );
+    if (this.hasIdentityProvenanceColumn) {
+      this.db
+        .prepare(
+          `INSERT INTO inbox_entries (
+            inbox_id, destination_session, sender_session, body, tags, urgency, ts_dropped, audit_pointer, identity_provenance
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          id,
+          input.destinationSession,
+          input.senderSession,
+          input.body,
+          tags,
+          urgency,
+          ts,
+          input.auditPointer ?? null,
+          input.identityProvenance ?? null
+        );
+    } else {
+      this.db
+        .prepare(
+          `INSERT INTO inbox_entries (
+            inbox_id, destination_session, sender_session, body, tags, urgency, ts_dropped, audit_pointer
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          id,
+          input.destinationSession,
+          input.senderSession,
+          input.body,
+          tags,
+          urgency,
+          ts,
+          input.auditPointer ?? null
+        );
+    }
 
     return this.getByIdOrThrow(id);
   }
