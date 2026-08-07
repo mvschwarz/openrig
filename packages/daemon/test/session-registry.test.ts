@@ -425,3 +425,61 @@ describe("SessionRegistry", () => {
     expect(sessions[0]!.status).toBe("superseded");
   });
 });
+
+// GHOST-STAGE atom-B (P12 3548d8eb) — the occupant-generation TENURE ledger. A sessions row is a
+// REGISTRATION; the tenure is minted per OCCUPANT GENERATION at the register verbs, callers declare
+// kind, and a RELAUNCH (same native session) is a CONTINUATION (no new generation).
+describe("SessionRegistry — atom-B occupant tenures", () => {
+  let db: Database.Database;
+  let registry: SessionRegistry;
+  beforeEach(() => {
+    db = createFullTestDb();
+    registry = new SessionRegistry(db);
+    seedRig(db);
+  });
+  afterEach(() => { db.close(); });
+
+  it("registerSession mints an INITIAL generation-1 tenure; currentOccupantTenure returns it", () => {
+    registry.registerSession("node-1", "r01-dev1-impl");
+    const t = registry.currentOccupantTenure("node-1");
+    expect(t).not.toBeNull();
+    expect(t!.generationOrdinal).toBe(1);
+    expect(t!.kind).toBe("initial");
+    expect(t!.generationUuid).toMatch(/^[0-9a-f-]{36}$/i);
+  });
+
+  it("registerClaimedSession declares kind; successive registers on a node increment the generation ordinal", () => {
+    registry.registerSession("node-1", "r01-dev1-impl"); // gen 1, initial
+    registry.registerClaimedSession("node-1", "r01-dev1-impl", "handover"); // gen 2, handover
+    const t = registry.currentOccupantTenure("node-1");
+    expect(t!.generationOrdinal).toBe(2);
+    expect(t!.kind).toBe("handover");
+    const rows = db.prepare("SELECT generation_uuid FROM occupant_tenures WHERE node_id = ?").all("node-1") as { generation_uuid: string }[];
+    expect(new Set(rows.map((r) => r.generation_uuid)).size).toBe(2); // unique per generation
+  });
+
+  it("RELAUNCH is a CONTINUATION: the same native session id re-mints nothing (same generation)", () => {
+    const first = registry.mintOccupantTenure("node-1", "initial", "native-abc");
+    const relaunch = registry.mintOccupantTenure("node-1", "initial", "native-abc"); // same native = relaunch
+    expect(relaunch.generationUuid).toBe(first.generationUuid); // continuation, not a new generation
+    expect(relaunch.generationOrdinal).toBe(first.generationOrdinal);
+    expect((db.prepare("SELECT COUNT(*) AS c FROM occupant_tenures WHERE node_id = ?").get("node-1") as { c: number }).c).toBe(1);
+  });
+
+  it("a NEW native session id mints the NEXT generation", () => {
+    const g1 = registry.mintOccupantTenure("node-1", "initial", "native-abc");
+    const g2 = registry.mintOccupantTenure("node-1", "handover", "native-xyz"); // different native = new occupant
+    expect(g2.generationOrdinal).toBe(g1.generationOrdinal + 1);
+    expect(g2.generationUuid).not.toBe(g1.generationUuid);
+  });
+
+  it("ordinals are per-node; a node with no tenure returns null", () => {
+    registry.mintOccupantTenure("node-1", "initial");
+    registry.mintOccupantTenure("node-1", "handover");
+    registry.mintOccupantTenure("node-2", "initial");
+    expect(registry.currentOccupantTenure("node-1")!.generationOrdinal).toBe(2);
+    expect(registry.currentOccupantTenure("node-2")!.generationOrdinal).toBe(1);
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id, role, runtime) VALUES ('node-3','rig-1','dev1-x','worker','claude-code')").run();
+    expect(registry.currentOccupantTenure("node-3")).toBeNull();
+  });
+});

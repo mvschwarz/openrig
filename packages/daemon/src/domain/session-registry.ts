@@ -1,9 +1,31 @@
 import type Database from "better-sqlite3";
 import { monotonicFactory } from "ulid";
+import { randomUUID } from "node:crypto";
 
 const ulid = monotonicFactory();
 import type { Session, Binding } from "./types.js";
 import { validateSessionName } from "./session-name.js";
+
+// GHOST-STAGE atom-B (P12 3548d8eb) — the occupant-generation tenure.
+export type OccupantKind = "initial" | "handover" | "adopt";
+export interface OccupantTenure {
+  id: string;
+  nodeId: string;
+  generationOrdinal: number;
+  generationUuid: string;
+  kind: OccupantKind;
+  nativeSessionIdAtBoot: string | null;
+  bootAt: string;
+}
+interface OccupantTenureRow {
+  id: string;
+  node_id: string;
+  generation_ordinal: number;
+  generation_uuid: string;
+  kind: string;
+  native_session_id_at_boot: string | null;
+  boot_at: string;
+}
 
 interface BindingFields {
   attachmentType?: "tmux" | "external_cli";
@@ -50,7 +72,7 @@ export class SessionRegistry {
     this.db = db;
   }
 
-  registerSession(nodeId: string, sessionName: string): Session {
+  registerSession(nodeId: string, sessionName: string, kind: OccupantKind = "initial"): Session {
     if (!validateSessionName(sessionName)) {
       throw new Error(
         `Invalid session name "${sessionName}": must match legacy r{NN}-{suffix} or canonical {pod}-{member}@{rig} format with allowed characters (a-z, A-Z, 0-9, -, _, ., @)`
@@ -63,23 +85,100 @@ export class SessionRegistry {
         "INSERT INTO sessions (id, node_id, session_name) VALUES (?, ?, ?)"
       )
       .run(id, nodeId, sessionName);
+    this.mintOccupantTenureBestEffort(nodeId, kind); // atom-B: mint this occupant generation
     return this.rowToSession(
       this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow
     );
   }
 
   /** Register a claimed session — skips naming validation, sets origin='claimed', startup_status='ready'. */
-  registerClaimedSession(nodeId: string, sessionName: string): Session {
+  registerClaimedSession(nodeId: string, sessionName: string, kind: OccupantKind = "adopt"): Session {
     const id = ulid();
     this.db
       .prepare(
         "INSERT INTO sessions (id, node_id, session_name, status, origin, startup_status) VALUES (?, ?, ?, 'running', 'claimed', 'ready')"
       )
       .run(id, nodeId, sessionName);
+    this.mintOccupantTenureBestEffort(nodeId, kind); // atom-B: mint this occupant generation
 
     return this.rowToSession(
       this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow
     );
+  }
+
+  /**
+   * atom-B — mint (or CONTINUE) the occupant-generation tenure for a node. RELAUNCH is a CONTINUATION:
+   * if the same native session id is already recorded for this node, return the existing tenure WITHOUT
+   * minting a new generation. A new occupant (initial/handover/adopt, or a new/unknown native session)
+   * mints the next generation_ordinal with a fresh generation_uuid. Append-only — the ledger is never
+   * mutated. (Relaunch also naturally continues by NOT re-calling the register verbs; the native-session
+   * dedup here is the safety net for a re-register.)
+   */
+  /** atom-B — mint the occupant tenure at a register verb, but FAIL-ISOLATED: a session registration
+   *  (a core operation) must NOT die because the additive occupant-generation ledger write failed
+   *  (e.g. a db that has not run migration 060). On failure we LOG loudly (once per process — a
+   *  missing ledger table in production is a visible defect) and let the register succeed;
+   *  generation-scoped consumers degrade to loud-pending, never a silent-wrong. Direct callers that
+   *  REQUIRE the tenure use `mintOccupantTenure` (which throws). */
+  private mintOccupantTenureBestEffort(nodeId: string, kind: OccupantKind): void {
+    try {
+      this.mintOccupantTenure(nodeId, kind);
+    } catch (e) {
+      if (!SessionRegistry.tenureMintWarned) {
+        SessionRegistry.tenureMintWarned = true;
+        console.warn(
+          `[session-registry] occupant-tenure mint failed (${(e as Error).message}) — registration proceeds, ` +
+            `but generation-scoped ghost-stage invalidation is UNAVAILABLE. Ensure migration 060_occupant_tenures ran.`,
+        );
+      }
+    }
+  }
+  private static tenureMintWarned = false;
+
+  mintOccupantTenure(nodeId: string, kind: OccupantKind, nativeSessionIdAtBoot?: string | null): OccupantTenure {
+    if (nativeSessionIdAtBoot != null && nativeSessionIdAtBoot !== "") {
+      const existing = this.db
+        .prepare(
+          "SELECT * FROM occupant_tenures WHERE node_id = ? AND native_session_id_at_boot = ? ORDER BY generation_ordinal DESC LIMIT 1"
+        )
+        .get(nodeId, nativeSessionIdAtBoot) as OccupantTenureRow | undefined;
+      if (existing) return this.rowToTenure(existing); // continuation — no new generation
+    }
+    const nextOrdinal =
+      (((this.db
+        .prepare("SELECT MAX(generation_ordinal) AS m FROM occupant_tenures WHERE node_id = ?")
+        .get(nodeId) as { m: number | null }).m) ?? 0) + 1;
+    const id = ulid();
+    const generationUuid = randomUUID();
+    this.db
+      .prepare(
+        "INSERT INTO occupant_tenures (id, node_id, generation_ordinal, generation_uuid, kind, native_session_id_at_boot) VALUES (?, ?, ?, ?, ?, ?)"
+      )
+      .run(id, nodeId, nextOrdinal, generationUuid, kind, nativeSessionIdAtBoot ?? null);
+    return this.rowToTenure(
+      this.db.prepare("SELECT * FROM occupant_tenures WHERE id = ?").get(id) as OccupantTenureRow
+    );
+  }
+
+  /** The LIVE (latest) occupant generation for a node, or null. Consumers compare an entry's minting
+   *  generation_uuid to this to gate stale-generation state (the ghost-stage defect). */
+  currentOccupantTenure(nodeId: string): OccupantTenure | null {
+    const row = this.db
+      .prepare("SELECT * FROM occupant_tenures WHERE node_id = ? ORDER BY generation_ordinal DESC LIMIT 1")
+      .get(nodeId) as OccupantTenureRow | undefined;
+    return row ? this.rowToTenure(row) : null;
+  }
+
+  private rowToTenure(row: OccupantTenureRow): OccupantTenure {
+    return {
+      id: row.id,
+      nodeId: row.node_id,
+      generationOrdinal: row.generation_ordinal,
+      generationUuid: row.generation_uuid,
+      kind: row.kind as OccupantKind,
+      nativeSessionIdAtBoot: row.native_session_id_at_boot,
+      bootAt: row.boot_at,
+    };
   }
 
   updateStatus(sessionId: string, status: string): void {

@@ -675,7 +675,8 @@ export class SeatHandoverService {
         tmuxWindow: input.discovered.tmuxWindow,
         tmuxPane: input.discovered.tmuxPane,
       });
-      const newSession = this.sessionRegistry.registerClaimedSession(input.node.id, input.discovered.tmuxSession);
+      // atom-B: a seat handover mints a HANDOVER-kind occupant generation (not the default 'adopt').
+      const newSession = this.sessionRegistry.registerClaimedSession(input.node.id, input.discovered.tmuxSession, "handover");
       // B2 (launched/fresh): persist the launch-scraped resume token atomically
       // with the claim, provenance "scrape" (mirrors StartupOrchestrator's
       // launch-token capture). Validity-guarded; a malformed token is dropped,
