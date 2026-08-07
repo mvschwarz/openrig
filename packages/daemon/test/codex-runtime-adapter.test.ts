@@ -68,9 +68,16 @@ function expectedFreshLaunchCommand(options: { cwd?: string; model?: string; que
   return `codex -s workspace-write -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}`;
 }
 
-function expectedResumeCommand(token = "sess-456", queueRoot: string | null = testQueueRoot()): string {
+function expectedResumeCommand(token = "sess-456", queueRoot: string | null = testQueueRoot(), model?: string): string {
   const queueDirArg = queueRoot === null ? "" : `--add-dir ${quote(queueRoot)} `;
-  return `codex -s workspace-write resume ${queueDirArg}${quote(token)}`;
+  const modelArg = model ? ` -m ${quote(model)}` : "";
+  return `codex -s workspace-write${modelArg} resume ${queueDirArg}${quote(token)}`;
+}
+
+function expectedForkCommand(parentId = "parent-thread-id", options: { model?: string; queueRoot?: string | null } = {}): string {
+  const queueDirArg = options.queueRoot === null ? "" : ` --add-dir ${quote(options.queueRoot ?? testQueueRoot())}`;
+  const modelArg = options.model ? ` -m ${quote(options.model)}` : "";
+  return `codex -s workspace-write${modelArg} fork${queueDirArg} ${quote(parentId)}`;
 }
 
 function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: string; model?: string; queueRoot?: string | null } = {}): string {
@@ -776,6 +783,39 @@ describe("Codex runtime adapter", () => {
     expect(sendText).toHaveBeenCalledWith("r01-qa", expectedResumeCommand());
   });
 
+  it("0.5.2-07 A2-3: launchHarness threads the SPEC model onto the codex RESUME command (pod-aware restore gap)", async () => {
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs() });
+    const binding = { ...makeBinding(), model: "gpt-5.4-cheap" };
+
+    const result = await adapter.launchHarness(binding, { name: "dev-qa@test-rig", resumeToken: "sess-456" });
+
+    expect(result.ok).toBe(true);
+    const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
+    expect(sendText).toHaveBeenCalledWith("r01-qa", expectedResumeCommand("sess-456", testQueueRoot(), "gpt-5.4-cheap"));
+  });
+
+  it("0.5.2-07 A2-3: launchHarness threads the SPEC model onto the codex FORK command (fork-instantiate gap)", async () => {
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [],
+      sleep: async () => {},
+    });
+    const binding = { ...makeBinding(), model: "gpt-5.4-cheap" };
+
+    // The command is built + sent BEFORE the post-fork thread-id capture; assert the sent command
+    // even though thread capture is not mocked (fork ultimately returns not-captured).
+    await adapter.launchHarness(binding, {
+      name: "dev-qa@test-rig",
+      forkSource: { kind: "native_id", value: "parent-thread-id" },
+    });
+
+    const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
+    expect(sendText).toHaveBeenCalledWith("r01-qa", expectedForkCommand("parent-thread-id", { model: "gpt-5.4-cheap" }));
+  });
+
   it("launchHarness passes the requested Codex config profile on resume", async () => {
     const tmux = mockTmux();
     const adapter = new CodexRuntimeAdapter({
@@ -867,7 +907,12 @@ describe("Codex runtime adapter", () => {
     ]);
   });
 
-  it("launchHarness does not pass a model argument when resuming Codex", async () => {
+  // 0.5.2-07 A2-3 CONTRACT FLIP: this test previously asserted resume DROPPED the model
+  // (`.not.toContain("-m")`) — a pure characterization of the 51-07-A1-era increment-reasoning bug
+  // (fresh threaded -m, resume/fork did not), with no reason it should. That is the exact class this
+  // slice kills. Corrected: resume now CARRIES -m (top-level flag, same class as the shipped -p), and
+  // the queue --add-dir stays intact.
+  it("launchHarness passes the SPEC model argument (-m) when resuming Codex", async () => {
     const tmux = mockTmux();
     const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs() });
     const binding = { ...makeBinding(), model: "gpt-5.5" };
@@ -876,8 +921,8 @@ describe("Codex runtime adapter", () => {
 
     expect(result.ok).toBe(true);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
-    expect(sendText).toHaveBeenCalledWith("r01-qa", expectedResumeCommand());
-    expect(sendText.mock.calls[0]?.[1]).not.toContain("-m");
+    expect(sendText).toHaveBeenCalledWith("r01-qa", expectedResumeCommand("sess-456", testQueueRoot(), "gpt-5.5"));
+    expect(sendText.mock.calls[0]?.[1]).toContain(" -m 'gpt-5.5'");
     expect(sendText.mock.calls[0]?.[1]).toContain("--add-dir");
   });
 

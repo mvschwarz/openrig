@@ -342,7 +342,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // OPR.0.4.8.2: the FORK path uses the SAME posture decision (codexPostureArg) — YOLO forces
       // -s danger-full-access on every seat; otherwise the named profile, or OpenRig's explicit
       // -s workspace-write floor flag.
-      const cmd = `codex${codexPostureArg(profileArg, process.env, binding.launchPosture)} fork${queueStateDirArg} ${shellQuote(parentId)}`;
+      // 0.5.2-07 A2-3: the FORK path threads the SPEC model too (fork-instantiate reverted it before).
+      const cmd = `codex${codexPostureArg(profileArg, process.env, binding.launchPosture)}${modelArg} fork${queueStateDirArg} ${shellQuote(parentId)}`;
       const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
@@ -366,7 +367,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // -s danger-full-access (overrides even a named profile); otherwise the named profile, or
     // OpenRig's explicit -s workspace-write floor flag.
     const cmd = opts.resumeToken
-      ? buildCodexResumeCore(opts.resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture)
+      // 0.5.2-07 A2-3: the pod-aware RESUME path threads the SPEC model too (reverted before — the
+      // grounding map assumed codex parity with the claude adapter, but only fresh emitted -m).
+      ? buildCodexResumeCore(opts.resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model)
       : `codex${codexPostureArg(profileArg, process.env, binding.launchPosture)} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`;
 
     const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);

@@ -70,7 +70,7 @@ describe("CodexResumeAdapter", () => {
       const tmux = mockTmux({ sendText, sendKeys });
       const adapter = new CodexResumeAdapter(tmux);
 
-      await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo", null, "gpt-5.4-cheap");
+      await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo", null, undefined, "gpt-5.4-cheap");
 
       expect(sendText.mock.calls[0]![1]).toBe("codex -s workspace-write -m 'gpt-5.4-cheap' resume 'uuid-123'");
     });

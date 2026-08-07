@@ -38,12 +38,13 @@ export class ClaudeResumeAdapter {
     resumeType: string | null,
     resumeToken: string | null,
     _cwd: string,
-    // 0.5.2-07: the seat's SPEC-pinned model. Threaded so the legacy (non-pod-aware) restore boots
-    // the resumed seat on its spec model, not the runtime default; absent → command byte-identical.
-    model?: string | null,
     // OPR.0.4.8.3 Seam B: the seat's PERSISTED resolved posture (restore re-derivation);
     // absent = the env decision (0.4.8.2), unchanged.
     resolvedPosture?: "floor" | "full_bypass",
+    // 0.5.2-07: the seat's SPEC-pinned model. TRAILING param so existing positional callers that pass
+    // resolvedPosture as the 5th arg stay correct; threaded so the legacy (non-pod-aware) restore boots
+    // the resumed seat on its spec model, not the runtime default; absent → command byte-identical.
+    model?: string | null,
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Claude resume not available" };

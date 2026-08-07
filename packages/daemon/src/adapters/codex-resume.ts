@@ -37,11 +37,12 @@ export class CodexResumeAdapter {
     resumeToken: string | null,
     _cwd: string,
     codexConfigProfile?: string | null,
-    // 0.5.2-07: the seat's SPEC-pinned model. Threaded so the legacy (non-pod-aware) restore boots
-    // the resumed seat on its spec model, not the runtime default; absent → command byte-identical.
-    model?: string | null,
     // OPR.0.4.8.3 Seam B: persisted resolved posture threaded from restore.
     resolvedPosture?: "floor" | "full_bypass",
+    // 0.5.2-07: the seat's SPEC-pinned model. TRAILING param so existing positional callers that pass
+    // resolvedPosture as the 6th arg stay correct; threaded so the legacy (non-pod-aware) restore boots
+    // the resumed seat on its spec model, not the runtime default; absent → command byte-identical.
+    model?: string | null,
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Codex resume not available" };

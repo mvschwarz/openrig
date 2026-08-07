@@ -75,7 +75,7 @@ describe("ClaudeResumeAdapter", () => {
       const tmux = mockTmux({ sendText });
       const adapter = new ClaudeResumeAdapter(tmux);
 
-      await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo", "gpt-5.4-cheap");
+      await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo", undefined, "gpt-5.4-cheap");
 
       expect(sendText.mock.calls[0]![1]).toBe(
         "claude --permission-mode acceptEdits --model 'gpt-5.4-cheap' --resume 'my-session'"
