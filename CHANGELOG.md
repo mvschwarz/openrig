@@ -8,6 +8,193 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.5.0] - 2026-08-06
+
+**Status**: shipped; mission control TUI + context library + permission-policy built-ins + provider usage observability + plan amendment + honest CLI + build discipline. **0.5.0 contains 0.4.8 in full** via the back-merge that reconciles the 0.4.8 release-artifact history with the 0.5.0 working lineage.
+
+### Summary For Installing Agents
+
+- **Package version**: bumps from `0.4.8`.
+- **Migrations**: additive only.
+- **Node engines**: unchanged.
+- **New bundled skills**: `applying-a-permission-policy` and `delegating-work` join the shipped set alongside the 0.4.8 skills. Two additional 0.5.2-lane maturation-gated skills (`retiring-and-inheriting-a-seat` and `oversight-team`) sit in the oracle at draft stage and are correctly deferred to a later release per the maturation-gate contract.
+- **Behavior change**: `rig.yaml` startup `context_pack` entries are no longer delivered at instantiation — they are rejected with a teaching error pointing at `rig context compose` + delivery verbs.
+
+### Headline
+
+**Mission control in the terminal + context library + permission-policy built-ins.** Typing `rig` (or `rig tui`) opens the new TUI: file-tree navigator, dense agent detail (cwd, runtime as text, context %), topology graph with the whole fleet on one screen, honest status/activity language, motion design, working scrolling, and honest width-clip/scope indicators throughout. The context library ships as a first-class store-and-compose noun (`rig context`) with paced delivery via `rig walk` and attached-context on `send` / `broadcast` / `queue create` via `--context` / `--body-context`. The 0.4.8 permission-policy framework gets its **five built-in templates** (`locked | standard | open | yolo | none`) + an agent-driven translator skill.
+
+### Permission policies — built-in templates + custom + agent-driven translation
+
+Building on the v0.4.8 policy-spec system, v0.5.0 ships the built-in policy templates + the skill that applies them:
+
+- **Five built-in policy templates**: `locked`, `standard`, `open`, `yolo`, `none`. Read-only from the package; copy to customize.
+- **`rig setup --policy <name>`** — records the chosen policy into a rig spec. Takes a built-in name or a path to a custom policy file (`source: custom`).
+- **`applying-a-permission-policy` (bundled Tier-A skill)** — reads the policy spec at rig setup / preflight, grounds itself in the seat's current harness version (Claude 2.1.220 / Codex 0.120.0 / Pi 0.83.0 at ship time), shows the concrete diff before writing, and lands the config into Claude `~/.claude/settings.json` and/or Codex `config.toml`. Never blind writes.
+- **Two surfaces (unchanged from v0.4.8)** — LAUNCH-FLAG (stable, OpenRig-set deterministically): the FLOOR (Claude `acceptEdits`, Codex workspace-write) and YOLO (Claude `--dangerously-skip-permissions`, Codex full-bypass). CONFIG-FILE (chaotic, translated per harness version by the skill): the allow/ask/deny rules.
+- **Deterministic vs best-effort** — LAUNCH-FLAG floor + YOLO are deterministic. Fine-grained CONFIG-FILE rule translation is best-effort; the skill surfaces prefix-collision, target-first leaks, and Claude-only network-egress non-enforceability to the operator honestly via the diff-before-write flow.
+
+### Permission guarantee, now test-pinned
+
+- **OpenRig writes zero permission entries into your `~/.claude/settings.json`** — pinned by a permanent guard test plus an empty-writer sweep. The one sanctioned exception is the project-local `acceptEdits` floor that 0.4.8 itself defines.
+- **Warning ordering in `permission-policy-discovery`** — emits pre-existing main-floor warnings first, then the permission-policy attachment warning. Presentation-only; semantic fence unchanged.
+
+### Context library
+
+- **`rig context`** — stores and composes context packs. Nouns store and compose; `rig context` never delivers.
+- **`rig walk`** — delivers a stored context pack paced.
+- **`--context` / `--body-context`** — attach a stored context pack (by ref) to `rig send`, `rig broadcast`, or `rig queue create`. Snapshot + provenance preserved.
+- **Grammar (strict)**: nouns store and compose; verbs deliver. The 0.4.x context-window usage viewer is removed; the `rig context` name now belongs to the library.
+
+### Behavior change (0.4.8 → 0.5.0)
+
+- **`rig.yaml` startup `context_pack` entries are no longer delivered at instantiation.** They are rejected with a teaching error pointing at `rig context compose` + a delivery verb (`rig send --context`, `rig broadcast --context`, `rig walk`, or `--context` / `--body-context` on `queue create`). The bundle router populates the library store without delivering (delivery-free-noun ruling applied at the startup surface). Users who adopted startup `context_pack` on 0.4.8 (shipped days ago; tiny exposure) should migrate to the compose + delivery-verb pattern.
+
+### Provider usage observability
+
+- **`GET /api/provider/usage`** + **`rig provider status`** — the daemon tracks account-level usage per host so operators can answer "am I about to hit a usage limit". Honest explicit-unknown and conflict-shows-both-facts semantics. Codex account-switch flows preserved.
+
+### Plan amendment done right
+
+- **`rig scope slice approve --re-approve --reason "..."`** — re-stamps a locked plan with an append-only audit trail, killing the old `already_approved` Status-note workaround.
+
+### Honest CLI output
+
+- **`rig ps`** — says when it is showing one rig of many rather than silently limiting.
+- **`rig send --json`** — returns structured errors as `{fact, consequence, action}`.
+- **Activity-hook fix** — ends the fleet-wide "producer link stale" advisories that were firing on every send. Operator-facing quality improvement.
+
+### Build discipline
+
+- **Contributor gates/lanes SSOT** lives at `docs/reference/developing.md` (encoded by the slice-12 gates policy).
+
+### UI status (unchanged from v0.4.7)
+
+- **Web UI remains in maintenance mode** as introduced in v0.4.7 — still ships, still runs, no new feature work. CLI/TUI is the primary surface; v0.5.0's TUI (`rig` / `rig tui`) is where mission-control investment lands. Never "deprecated"; existing deployments continue to work.
+
+### Known Issues
+
+- **GAP-7 Codex-`HOME` product fix** (seal CLEAR `b7f4cb7d`) — accepted with fold-rides-release-sequencing but fell off the fold-wave enumeration and is **NOT in released 0.5.0 by content**. Ships in 0.5.1 as a ready-accepted early bugfix atom. Class: sibling of the slice-03 omission, caught by census not damage. Until 0.5.1 lands, the deployment invariant from v0.4.8 (daemon `HOME` == seat tmux `HOME`) remains the operator-side workaround for the permission-posture writes to reach Codex seats.
+
+---
+
+## [0.4.8] - 2026-08-05
+
+**Status**: shipped; permission-posture fast-follow + permission-policy framework.
+
+### Summary For Installing Agents
+
+- **Package version**: bumps from `0.4.7`.
+- **Migrations**: additive only. Existing v0.4.7 databases upgrade by running `rig daemon start` on the new daemon.
+- **Node engines**: unchanged.
+- **Default launch posture changed**: from hardcoded `--permission-mode acceptEdits` to configurable, default `dontAsk`. If a seat needs the prior behavior, `acceptEdits` remains selectable; a deliberate `bypassPermissions` is preserved untouched across writes.
+
+### Headline
+
+**Permission-posture fast-follow + permission-policy framework.** Launch posture is configurable, the deny set is clobber-resistant, and dangerous ops are bounded by an honest prefix-gate. The **permission-policy spec framework** (harness-neutral schema + `rig setup --policy` flag) lands as the foundation the built-in templates + `applying-a-permission-policy` skill ride on top of in v0.5.0.
+
+### Configurable launch posture
+
+- **`--permission-mode` no longer hardcoded** — replaced by a configurable posture defaulting to `dontAsk`. This kills the ask-hang / freeze class that could park an autonomous seat on a modal permission prompt with nobody to click through it. `dontAsk` is the default because it matches what an autonomous seat can actually respond to; `acceptEdits` remains selectable when a seat needs the prior behavior.
+
+### Clobber-resistant deny set
+
+- **Writes go to user-level `~/.claude/settings.json`** instead of the project-local one-off approval surface — so **deny wins over project-local approvals**. Writes are additive (never destructive to sibling keys) and forward-migrate a legacy `acceptEdits` value into the new schema. A deliberate `bypassPermissions` value is preserved verbatim.
+
+### Bounded-dangerous deny set
+
+- **Four bounded-dangerous ops gated by default**: `git push`, `gh pr create`, `npm publish`, and `rig down`.
+- **`rig down` gate via prefix superset `Bash(rig down:*)`** — harness rules at Claude 2.1.220 are prefix-only; flag-only patterns provably fail to gate target-first forms such as `rig down <rig> --force`, which were slipping through. The prefix gate is the only shape that actually holds at this harness version. Plain `rig down` is gated in 0.4.8; selective allowance (e.g. `rig down <rig>` for a specific target) is deferred to 0.5.0 server-side enforcement.
+
+### `rig up` un-gated
+
+- **`rig up`'s prior release ask-gate is superseded** — `rig up` is a reversible op and does not warrant an interactive gate.
+
+### Permission-policy framework (foundation for the 0.5.0 built-ins + skill)
+
+- **Harness-neutral policy schema** — the permission-policy spec ships as a harness-neutral surface with `default_posture`, `floor`, `allow`/`ask`/`deny` as **semantic actions** (`push_to_remote`, `force_push`, `delete_files`, `read_secrets`, `create_pr`, `publish_package`, `mutate_topology`, ...), `destructive_class`, and a `source: builtin|custom` marker.
+- **`rig setup --policy <name>`** — new flag on `rig setup` records a deliberate permission-policy choice into an existing rig spec. Takes a built-in name or a path to a custom spec. The **built-in policy files themselves land in v0.5.0**; 0.4.8 ships the framework that consumes them.
+- **Two surfaces documented** — LAUNCH-FLAG (Claude `--permission-mode`, Codex sandbox/bypass, Pi `--approve` / `--no-approve`) is stable and OpenRig-set deterministically — this is where the FLOOR and YOLO live. CONFIG-FILE (Claude `~/.claude/settings.json`, Codex `config.toml`) is chaotic across harness versions and translated interactively per harness version by an agent-driven skill (that skill lands as `applying-a-permission-policy` in v0.5.0).
+
+### Deployment Invariant (operators read this)
+
+- **The daemon's `HOME` must equal the seat's tmux `HOME`** for the posture writes to reach seats. This is a 2.1.220 settings-path class invariant that operators need to know for the remote-host leg of any upgrade. Local-only hosts satisfy this automatically; remote-host upgrades should verify HOME parity between the daemon process and the tmux seat process before treating the upgrade as complete. (v0.5.0 documents this as a Known Issue for Codex-`HOME` divergence via GAP-7; the product fix ships in 0.5.1.)
+
+### Superseded / Withdrawn
+
+- **Initial 0.4.8 attempt withdrawn pre-cut on final review** — the initial attempt baked `dontAsk` as a **platform default** across the product surface, which was rejected. The shipped 0.4.8 is a re-scoped permission-agnostic base + policy-spec system. Nothing from the withdrawn attempt shipped.
+
+---
+
+## [0.4.7] - 2026-08-03
+
+**Status**: shipped; recovery honesty + starter bootstrap + skills wave + Slack connector + UI maintenance-mode.
+
+### Summary For Installing Agents
+
+- **Package version**: bumps from `0.4.6`.
+- **Migrations**: additive only. Existing v0.4.6 databases upgrade by running `rig daemon start` on the new daemon.
+- **Node engines**: unchanged.
+- **Rig-spec starter behavior change**: rigs instantiated before 0.4.7 need re-instantiation (or spec-level patching) to pick up the starter fixes — the loader and audit changes apply immediately, but starter-spec content lands at instantiation.
+- **Web UI**: frozen in maintenance mode at this release (see below).
+
+### Headline
+
+**Recovery honesty is the through-line.** On a resumed restore, the startup orchestrator now bundles the applicable `after_ready` `send_text` preload action(s) in front of the first `send_text` post-launch file (`role.md`) and delivers them as the single leading turn — sequencing (not timing) guarantees the "load skills before doing anything" preload precedes the role-triggered first turn (the restore analogue of `deliverInitialSessionPrompt`'s fresh identity+`role.md` bundle). Compaction recovery and transcript ingest are honest; daemon liveness reporting is honest; CLI probes report uncertainty honestly. Alongside recovery, the release lands starter bootstrap hygiene, a broad skills-inventory wave, a first-class Slack connector, tightened CLI contract honesty, and the **UI maintenance-mode milestone** (CLI is primary from here forward).
+
+### Recovery honesty
+
+- **Startup orchestrator preload bundling** — on a resumed restore, applicable `after_ready` `send_text` preload actions are bundled in front of the first `send_text` post-launch file (`role.md`) and delivered as the single leading turn. Sequencing guarantees the "load skills before doing anything" preload precedes the role-triggered first turn.
+- **Claude transcript ingest** — fixed with explicit degraded signals so a stale capture no longer looks like a quiet transcript.
+- **Post-compact restore/audit is idle-gated** — restore-sent actually means delivered.
+- **Seat liveness API** — consumers should key seat liveness off `lifecycleState` (honest ~3s) rather than `sessionStatus` (staleness cleanup tracked for a subsequent release).
+- **Daemon `rig ps` + daemon-status** — report liveness honestly: a dead tmux seat drops effective running to 0 with `attention_required`; `send` and `capture` return `session_missing` when the seat is gone.
+- **CLI probes report uncertainty honestly** — unconfirmable status returns `UNKNOWN` with no false start advice; confirmed-stopped still `FAIL`s with guidance.
+
+### Starter bootstrap
+
+- **Product-team starter bootstrap hygiene** — plus product-team `send_text` skill-preload on `fresh_start` and `restore`.
+- **Default culture loads at startup** — rig specs are audited at load time.
+- **Rig-spec migration path** — rigs instantiated before 0.4.7 need re-instantiation (or spec-level patching) to pick up the starter fixes; loader and audit changes apply immediately, but starter-spec content lands at instantiation.
+
+### Skills wave
+
+- **Bundled skill layer** — gains public routing + a default projection, plus public-skill strip and mirror controls, plus a plugin fix that keeps the documented skill count honest.
+- **Vendored skill inventory** — canonical, shared, and bundled plugin — grows from a handful to broad coverage across core, PM, pod, and process families.
+
+### Slack connector + human queue
+
+- **First-class Slack connector shape** — CLI `commands/slack.ts` + supporting library. Hosted create crosses an inconclusive local probe to the real configured-daemon result.
+
+### CLI contract honesty
+
+- **`--json` errors, flag validation, and scoped overdue behavior** tightened for machine-readable use.
+
+### UI — moved to maintenance mode (milestone)
+
+- **The web UI is frozen at this release in maintenance mode.** Wording is CLI-primary — never "deprecated". The UI still ships and still runs; it is no longer receiving new feature work. CLI/TUI is the primary surface going forward.
+- What lands in 0.4.7 to make this explicit:
+  - A dismissible in-app banner in the web UI announcing the maintenance-mode status.
+  - A `rig ui open` stderr notice at launch time, so operators driving the CLI see the status before they open the browser.
+  - Documentation positioning updated across README / user-facing docs.
+- Existing 0.4.6 deployments keep working; nothing is removed. The substantive product investment shifts to the CLI and, from v0.5.0, the terminal TUI.
+
+### Queue, topology, review polish
+
+- **Queue compact-list rows** mark elided fields so *omitted* is not *empty*.
+- **Nested Approve** posts a missions-root-relative `scopePath`.
+- **Mission review card composition** is polished.
+- **Unverified delivered items** read `artifact-recorded` rather than "nothing delivered".
+- **Drawer `FileViewer`** resolves inline C1-body images via `/api/files/asset`.
+- **Proof-of-work Markdown links** open in the in-app drawer.
+- **Docs guard** encodes the ratified `docs/DESIGN.md` root placement.
+
+### Host sizing guidance
+
+- **Swap + per-box seat budget** — add swap and a sane per-box seat budget (~2GB RSS per seat observed baseline).
+
+---
+
 ## [0.4.6] - 2026-07-09
 
 **Status**: shipped; workflows + multi-host coordination + factory foundations theme. 0.4.5 was skipped (no cut).
