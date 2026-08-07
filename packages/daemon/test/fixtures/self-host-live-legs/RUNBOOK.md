@@ -31,15 +31,36 @@ steps below use the real derived names.
 **BYTE-IDENTITY IS THE COLLISION PREMISE — assert it, never assume it.** `shared.yaml` is
 ONE file copied to both hosts; the runbook VERIFIES equality by hash before the legs run.
 
+**STAGE WHERE THE PRODUCT'S OWN USER CAN READ.** The image declares `USER openrig`
+(`docker/testbed/Dockerfile:61`) with `WORKDIR /home/openrig` (`:62`), so a default
+`docker exec` runs as `openrig` — which cannot traverse root's home. Fixtures therefore
+stage under the openrig user's OWN home, the same posture L3.2 already proved with its
+`~/work` copy. We do NOT exec as root to reach them: the daemon runs as `openrig`, so a
+root-exec probe would test a user the product never uses AND would mask exactly the kind
+of permission defect this testbed exists to surface.
+
 ```bash
+STAGE=/home/openrig/topologies   # openrig-readable by construction (its own home)
+
 # copy the SAME file to both containers (never author a second copy)
-for h in H_A H_B; do docker cp packages/daemon/test/fixtures/self-host-live-legs/topologies "$h":/root/topologies; done
+for h in H_A H_B; do docker cp packages/daemon/test/fixtures/self-host-live-legs/topologies "$h":"${STAGE}"; done
+
+# PRE-FLIGHT FENCE — readability AS THE EXEC USER, before anything depends on it. A future
+# USER/permissions change then self-diagnoses here instead of surfacing as a bare
+# "Permission denied" from sha256sum three steps later.
+for h in H_A H_B; do
+  docker exec "$h" test -r "${STAGE}/shared.yaml" || {
+    echo "ABORT: ${STAGE}/shared.yaml is not readable as $(docker exec "$h" id -un) on ${h} — the image declares USER openrig (Dockerfile:61); stage where that user can read, do not exec as root";
+    docker exec "$h" ls -la "${STAGE}" 2>&1 | head -20; exit 1; }
+done
+
 # ASSERT byte-identity of the collision spec across hosts, BEFORE any leg runs
-SA="$(docker exec H_A sha256sum /root/topologies/shared.yaml | cut -d" " -f1)"
-SB="$(docker exec H_B sha256sum /root/topologies/shared.yaml | cut -d" " -f1)"
+SA="$(docker exec H_A sha256sum "${STAGE}/shared.yaml" | cut -d" " -f1)"
+SB="$(docker exec H_B sha256sum "${STAGE}/shared.yaml" | cut -d" " -f1)"
 [ "$SA" = "$SB" ] || { echo "ABORT: shared.yaml differs across hosts ($SA vs $SB) — the collision premise is void"; exit 1; }
-docker exec H_A bash -lc 'cd /root/topologies && rig up rig-a.yaml && rig up shared.yaml'
-docker exec H_B bash -lc 'cd /root/topologies && rig up rig-b.yaml && rig up shared.yaml'
+
+docker exec H_A bash -lc "cd '${STAGE}' && rig up rig-a.yaml && rig up shared.yaml"
+docker exec H_B bash -lc "cd '${STAGE}' && rig up rig-b.yaml && rig up shared.yaml"
 ```
 
 ## SELF-HOST IDS — ADOPT-BY-READ (the one shared procedure)
