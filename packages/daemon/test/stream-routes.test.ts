@@ -6,6 +6,11 @@ import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { streamItemsSchema } from "../src/db/migrations/023_stream_items.js";
+import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
+import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
+import { inboxEntriesSchema } from "../src/db/migrations/026_inbox_entries.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
+import { i3IdentityProvenanceSchema } from "../src/db/migrations/067_i3_identity_provenance.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { StreamStore } from "../src/domain/stream-store.js";
 import { streamRoutes } from "../src/routes/stream.js";
@@ -29,7 +34,17 @@ describe("stream routes", () => {
 
   beforeEach(() => {
     db = createDb();
-    migrate(db, [coreSchema, eventsSchema, streamItemsSchema]);
+    migrate(db, [
+      coreSchema,
+      eventsSchema,
+      streamItemsSchema,
+      // 067's 4 ALTERs need their base tables present in this DB
+      queueItemsSchema,
+      queueTransitionsSchema,
+      inboxEntriesSchema,
+      outboxEntriesSchema,
+      i3IdentityProvenanceSchema, // P21 §4 era-stamp column on stream_items (+ the other spine stores)
+    ]);
     bus = new EventBus(db);
     store = new StreamStore(db, bus);
     app = buildApp({ eventBus: bus, streamStore: store });
@@ -40,7 +55,7 @@ describe("stream routes", () => {
   it("POST /api/stream/emit creates and returns the item", async () => {
     const res = await app.request("/api/stream/emit", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@rig" }, // P21 I3: source from the transport header
       body: JSON.stringify({
         sourceSession: "alice@rig",
         body: "hello",
@@ -55,15 +70,51 @@ describe("stream routes", () => {
     expect(data.streamItemId).toMatch(/^[0-9A-Z]{26}$/);
   });
 
-  it("POST /api/stream/emit rejects missing required fields", async () => {
+  it("POST /api/stream/emit rejects missing body (source is header-derived; missing-source is the 401 path)", async () => {
     const res = await app.request("/api/stream/emit", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@rig" },
       body: JSON.stringify({ sourceSession: "alice@rig" }),
     });
     expect(res.status).toBe(400);
     const data = (await res.json()) as { error: string };
     expect(data.error).toMatch(/body/);
+  });
+
+  // P21 I3 — stream emit was an allow-all body-supplied sourceSession site; I3 derives it from the header.
+  it("emit — 401 unattributable_sender when X-OpenRig-Session is absent", async () => {
+    const res = await app.request("/api/stream/emit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceSession: "alice@rig", body: "hi" }),
+    });
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+  });
+
+  it("emit — 409 identity_mismatch when body sourceSession differs from the transport identity", async () => {
+    const res = await app.request("/api/stream/emit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@rig" },
+      body: JSON.stringify({ sourceSession: "evil@rig", body: "hi" }),
+    });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+  });
+
+  it("emit — derives source from the header + era-stamps stream_items transport:v1", async () => {
+    const res = await app.request("/api/stream/emit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@rig" },
+      body: JSON.stringify({ sourceSession: "alice@rig", body: "hi" }),
+    });
+    expect(res.status).toBe(201);
+    const { streamItemId } = (await res.json()) as { streamItemId: string };
+    const row = db
+      .prepare("SELECT source_session, identity_provenance FROM stream_items WHERE stream_item_id = ?")
+      .get(streamItemId) as { source_session: string; identity_provenance: string | null } | undefined;
+    expect(row?.source_session).toBe("alice@rig");
+    expect(row?.identity_provenance).toBe("transport:v1");
   });
 
   it("GET /api/stream/list returns chronological items with filters", async () => {

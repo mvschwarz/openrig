@@ -29,6 +29,9 @@ export interface StreamEmitInput {
   hintDestination?: string | null;
   hintTags?: string[] | null;
   interrupt?: boolean;
+  /** P21 §4 era-stamp: the route passes `transport:v1` (sourceSession derived from the transport
+   *  header chokepoint). Written onto the stream row; absence = claimed-era. */
+  identityProvenance?: string | null;
 }
 
 export interface StreamListOptions {
@@ -65,10 +68,16 @@ interface StreamItemRow {
 export class StreamStore {
   readonly db: Database.Database;
   private readonly eventBus: EventBus;
+  /** P21 §4: detected once — a curated-migration test DB (or a pre-067 daemon) may lack the
+   *  era-stamp column, so the writer degrades (omits it) instead of throwing. */
+  private readonly hasIdentityProvenanceColumn: boolean;
 
   constructor(db: Database.Database, eventBus: EventBus) {
     this.db = db;
     this.eventBus = eventBus;
+    this.hasIdentityProvenanceColumn = (
+      this.db.prepare("PRAGMA table_info(stream_items)").all() as Array<{ name: string }>
+    ).some((col) => col.name === "identity_provenance");
   }
 
   /**
@@ -86,26 +95,50 @@ export class StreamStore {
     const tagsJson = input.hintTags ? JSON.stringify(input.hintTags) : null;
 
     const persistTxn = this.db.transaction(() => {
-      this.db
-        .prepare(
-          `INSERT INTO stream_items (
-            stream_item_id, ts_emitted, stream_sort_key, source_session, body,
-            format, hint_type, hint_urgency, hint_destination, hint_tags, interrupt
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        )
-        .run(
-          id,
-          tsEmitted,
-          sortKey,
-          input.sourceSession,
-          input.body,
-          input.format ?? "text",
-          input.hintType ?? null,
-          input.hintUrgency ?? null,
-          input.hintDestination ?? null,
-          tagsJson,
-          interrupt
-        );
+      if (this.hasIdentityProvenanceColumn) {
+        this.db
+          .prepare(
+            `INSERT INTO stream_items (
+              stream_item_id, ts_emitted, stream_sort_key, source_session, body,
+              format, hint_type, hint_urgency, hint_destination, hint_tags, interrupt, identity_provenance
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(
+            id,
+            tsEmitted,
+            sortKey,
+            input.sourceSession,
+            input.body,
+            input.format ?? "text",
+            input.hintType ?? null,
+            input.hintUrgency ?? null,
+            input.hintDestination ?? null,
+            tagsJson,
+            interrupt,
+            input.identityProvenance ?? null
+          );
+      } else {
+        this.db
+          .prepare(
+            `INSERT INTO stream_items (
+              stream_item_id, ts_emitted, stream_sort_key, source_session, body,
+              format, hint_type, hint_urgency, hint_destination, hint_tags, interrupt
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(
+            id,
+            tsEmitted,
+            sortKey,
+            input.sourceSession,
+            input.body,
+            input.format ?? "text",
+            input.hintType ?? null,
+            input.hintUrgency ?? null,
+            input.hintDestination ?? null,
+            tagsJson,
+            interrupt
+          );
+      }
 
       return this.eventBus.persistWithinTransaction({
         type: "stream.emitted",

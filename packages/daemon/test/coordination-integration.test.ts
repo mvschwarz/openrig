@@ -82,7 +82,7 @@ describe("coordination integration — stream → queue → inbox handoff chain"
     // 1. Stream emit (intake / audit root)
     const streamRes = await app.request("/api/stream/emit", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "intake@conveyor" }, // P21 I3: stream source from the transport header
       body: JSON.stringify({
         sourceSession: "intake@conveyor",
         body: "found regression in planning handoff",
@@ -197,7 +197,7 @@ describe("coordination integration — stream → queue → inbox handoff chain"
 
     await app.request("/api/stream/emit", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" }, // P21 I3: stream source from the transport header
       body: JSON.stringify({ sourceSession: "a@r", body: "x" }),
     });
     const create = await app.request("/api/queue/create", {

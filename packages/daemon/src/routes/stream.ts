@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { EventBus } from "../domain/event-bus.js";
 import type { StreamStore } from "../domain/stream-store.js";
+import { requireSenderIdentity } from "./require-sender-identity.js";
 
 const ISO_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
@@ -65,13 +66,15 @@ export function streamRoutes(): Hono {
       interrupt?: boolean;
     }>().catch(() => ({} as never));
 
-    if (!body.sourceSession) return c.json({ error: "sourceSession is required" }, 400);
+    // P21 I3: the stream source is the transport-derived identity, never body.sourceSession.
+    const identity = requireSenderIdentity(c, { verb: "stream emit", bodyClaim: body.sourceSession });
+    if (!identity.ok) return identity.response;
     if (!body.body) return c.json({ error: "body is required" }, 400);
 
     const store = getStore(c);
     const item = store.emit({
       streamItemId: body.streamItemId,
-      sourceSession: body.sourceSession,
+      sourceSession: identity.session,
       body: body.body,
       format: body.format,
       hintType: body.hintType ?? null,
@@ -79,6 +82,7 @@ export function streamRoutes(): Hono {
       hintDestination: body.hintDestination ?? null,
       hintTags: body.hintTags ?? null,
       interrupt: body.interrupt,
+      identityProvenance: "transport:v1", // P21 §4 era-stamp: sourceSession came from the transport chokepoint
     });
     return c.json(item, 201);
   });
