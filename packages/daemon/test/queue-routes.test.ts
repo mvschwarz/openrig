@@ -5,11 +5,13 @@ import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
+import { streamItemsSchema } from "../src/db/migrations/023_stream_items.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
 import { inboxEntriesSchema } from "../src/db/migrations/026_inbox_entries.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { queueTargetRepoSchema } from "../src/db/migrations/039_queue_target_repo.js";
+import { i3IdentityProvenanceSchema } from "../src/db/migrations/067_i3_identity_provenance.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { InboxHandler } from "../src/domain/inbox-handler.js";
@@ -48,11 +50,13 @@ describe("queue routes", () => {
     migrate(db, [
       coreSchema,
       eventsSchema,
+      streamItemsSchema, // 067's stream_items ALTER needs its base table present
       queueItemsSchema,
       queueTransitionsSchema,
       inboxEntriesSchema,
       outboxEntriesSchema,
       queueTargetRepoSchema, // OPR.0.3.2.20: required for attention=1&targetRepo=X composition tests
+      i3IdentityProvenanceSchema, // P21 §4 era-stamp column on the queue-spine stores (last: needs all 4 tables)
     ]);
     bus = new EventBus(db);
     queueRepo = new QueueRepository(db, bus);
@@ -146,6 +150,21 @@ describe("queue routes", () => {
     expect(row?.source_session).toBe("alice@rig");
   });
 
+  it("create — era-stamps the created transition transport:v1 (P21 §4 derived-era boundary)", async () => {
+    const res = await app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@rig" },
+      body: JSON.stringify({ sourceSession: "alice@rig", destinationSession: "dst@rig", body: "hi" }),
+    });
+    expect(res.status).toBe(201);
+    const { qitemId } = (await res.json()) as { qitemId: string };
+    // The 'created' transition's actor is transport-derived → stamped transport:v1 (absence = claimed-era).
+    const row = db
+      .prepare("SELECT identity_provenance FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid ASC LIMIT 1")
+      .get(qitemId) as { identity_provenance: string | null } | undefined;
+    expect(row?.identity_provenance).toBe("transport:v1");
+  });
+
   // P21 I3 — update's actor is the transport header (X-OpenRig-Session), NEVER a body claim.
   async function createForUpdate(session: string): Promise<string> {
     const create = await app.request("/api/queue/create", {
@@ -187,9 +206,11 @@ describe("queue routes", () => {
     });
     expect(res.status).toBe(200);
     const row = db
-      .prepare("SELECT actor_session FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid DESC LIMIT 1")
-      .get(qitemId) as { actor_session: string } | undefined;
+      .prepare("SELECT actor_session, identity_provenance FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid DESC LIMIT 1")
+      .get(qitemId) as { actor_session: string; identity_provenance: string | null } | undefined;
     expect(row?.actor_session).toBe("worker@r");
+    // P21 §4 era-stamp: a transport-derived actor is stamped transport:v1 (absence = claimed-era).
+    expect(row?.identity_provenance).toBe("transport:v1");
   });
 
   it("POST /api/queue/:id/update with state=done WITHOUT closure_reason returns 400 with validReasons", async () => {
@@ -819,10 +840,12 @@ describe("queue routes", () => {
       migrate(strictDb, [
         coreSchema,
         eventsSchema,
+        streamItemsSchema, // 067's stream_items ALTER needs its base table present
         queueItemsSchema,
         queueTransitionsSchema,
         inboxEntriesSchema,
         outboxEntriesSchema,
+        i3IdentityProvenanceSchema, // P21 §4 era-stamp column (last: needs all 4 tables)
       ]);
       strictBus = new EventBus(strictDb);
       strictRepo = new QueueRepository(strictDb, strictBus, {

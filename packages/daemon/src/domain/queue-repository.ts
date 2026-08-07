@@ -158,6 +158,9 @@ export interface QueueCreateInput {
    * Operators opt out with `nudge: false` for cold-queue cases.
    */
   nudge?: boolean;
+  /** P21 §4 era-stamp: the route passes `transport:v1` (sourceSession derived from the transport
+   *  header chokepoint). Threaded onto the 'created' transition; absence = claimed-era. */
+  identityProvenance?: string | null;
 }
 
 export interface QueueUpdateInput {
@@ -199,6 +202,9 @@ export interface QueueUpdateInput {
    */
   summary?: string | null;
   evidenceRef?: string | null;
+  /** P21 §4 era-stamp: the route passes `transport:v1` (actorSession derived from the transport
+   *  header chokepoint). Threaded onto the transition; absence = claimed-era. */
+  identityProvenance?: string | null;
 }
 
 export interface QueueHandoffInput {
@@ -740,6 +746,7 @@ export class QueueRepository {
       state: "pending",
       actorSession: input.sourceSession,
       transitionNote: "created",
+      identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
     });
     const persistedEvent = this.eventBus.persistWithinTransaction({
       type: "queue.created",
@@ -1524,6 +1531,7 @@ export class QueueRepository {
       transitionNote: input.transitionNote,
       closureReason: validation.closureReason ?? undefined,
       closureTarget: validation.closureTarget ?? undefined,
+      identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
     });
 
     return this.eventBus.persistWithinTransaction({

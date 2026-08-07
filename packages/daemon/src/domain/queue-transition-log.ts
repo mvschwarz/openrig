@@ -10,6 +10,9 @@ export interface QueueTransition {
   actorSession: string;
   closureReason: ClosureReason | null;
   closureTarget: string | null;
+  /** P21 §4 era-stamp: how actorSession was established. `transport:v1` = derived from the
+   *  transport chokepoint; null/absent = claimed-era (pre-verification), never re-labeled. */
+  identityProvenance: string | null;
 }
 
 export interface QueueTransitionInput {
@@ -19,6 +22,9 @@ export interface QueueTransitionInput {
   transitionNote?: string;
   closureReason?: ClosureReason;
   closureTarget?: string;
+  /** P21 §4 era-stamp: the route passes `transport:v1` when actorSession came from the transport
+   *  header chokepoint; omit (null) for system/claimed-era transitions — absence is the marker. */
+  identityProvenance?: string | null;
 }
 
 interface QueueTransitionRow {
@@ -30,6 +36,7 @@ interface QueueTransitionRow {
   actor_session: string;
   closure_reason: string | null;
   closure_target: string | null;
+  identity_provenance?: string | null;
 }
 
 /**
@@ -38,9 +45,15 @@ interface QueueTransitionRow {
  */
 export class QueueTransitionLog {
   readonly db: Database.Database;
+  /** P21 §4: detected once — a curated-migration test DB (or a pre-067 daemon) may lack the
+   *  era-stamp column, so the writer degrades (omits it) instead of throwing. */
+  private readonly hasIdentityProvenanceColumn: boolean;
 
   constructor(db: Database.Database) {
     this.db = db;
+    this.hasIdentityProvenanceColumn = (
+      this.db.prepare("PRAGMA table_info(queue_transitions)").all() as Array<{ name: string }>
+    ).some((c) => c.name === "identity_provenance");
   }
 
   /**
@@ -50,21 +63,38 @@ export class QueueTransitionLog {
    */
   append(input: QueueTransitionInput): QueueTransition {
     const ts = new Date().toISOString();
-    const result = this.db
-      .prepare(
-        `INSERT INTO queue_transitions (
-          qitem_id, ts, state, transition_note, actor_session, closure_reason, closure_target
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        input.qitemId,
-        ts,
-        input.state,
-        input.transitionNote ?? null,
-        input.actorSession,
-        input.closureReason ?? null,
-        input.closureTarget ?? null
-      );
+    const result = this.hasIdentityProvenanceColumn
+      ? this.db
+          .prepare(
+            `INSERT INTO queue_transitions (
+              qitem_id, ts, state, transition_note, actor_session, closure_reason, closure_target, identity_provenance
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(
+            input.qitemId,
+            ts,
+            input.state,
+            input.transitionNote ?? null,
+            input.actorSession,
+            input.closureReason ?? null,
+            input.closureTarget ?? null,
+            input.identityProvenance ?? null
+          )
+      : this.db
+          .prepare(
+            `INSERT INTO queue_transitions (
+              qitem_id, ts, state, transition_note, actor_session, closure_reason, closure_target
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(
+            input.qitemId,
+            ts,
+            input.state,
+            input.transitionNote ?? null,
+            input.actorSession,
+            input.closureReason ?? null,
+            input.closureTarget ?? null
+          );
 
     const row = this.db
       .prepare("SELECT * FROM queue_transitions WHERE transition_id = ?")
@@ -101,6 +131,7 @@ export class QueueTransitionLog {
       actorSession: row.actor_session,
       closureReason: row.closure_reason as ClosureReason | null,
       closureTarget: row.closure_target,
+      identityProvenance: row.identity_provenance ?? null,
     };
   }
 }

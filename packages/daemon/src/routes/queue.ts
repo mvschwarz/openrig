@@ -467,6 +467,7 @@ export function queueRoutes(): Hono {
         summary: body.summary,
         evidenceRef: body.evidenceRef,
         nudge: (body as { nudge?: boolean }).nudge,
+        identityProvenance: "transport:v1", // P21 §4 era-stamp: sourceSession came from the transport chokepoint
       });
       return c.json(item, 201);
     } catch (err) {
@@ -555,6 +556,7 @@ export function queueRoutes(): Hono {
         blockedOn: body.blockedOn,
         summary: body.summary,
         evidenceRef: body.evidenceRef,
+        identityProvenance: "transport:v1", // P21 §4 era-stamp: actorSession came from the transport chokepoint
       });
       return c.json(item);
     } catch (err) {
