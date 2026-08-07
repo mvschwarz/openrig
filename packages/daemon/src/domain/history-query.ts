@@ -1,4 +1,5 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 export type ExecDep = (cmd: string, args: string[]) => Promise<{ stdout: string; exitCode: number }>;
@@ -48,6 +49,20 @@ interface HistoryQueryOpts {
   transcriptsRoot: string;
   exec: ExecDep;
   chatSearchFn?: (rigId: string, pattern: string) => ChatSearchResult[];
+  /** root of per-session provider JSONL (Claude): ~/.claude/projects. Injectable for tests. */
+  claudeProjectsRoot?: string;
+}
+
+export interface SessionSearchResult {
+  backend: "rg" | "grep" | "none";
+  token: string;
+  found: boolean;
+  path?: string;
+  sizeBytes?: number;
+  excerpts: string[];
+  insufficient: boolean;
+  degraded?: { reason: "session_not_found" | "unreadable"; message: string };
+  advisory?: string;
 }
 
 const STOP_WORDS = new Set([
@@ -69,6 +84,11 @@ const STOP_WORDS = new Set([
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** A JSONL event line can be huge; cap what we echo so a hit stays readable. */
+function truncateExcerpt(line: string, max = 240): string {
+  return line.length > max ? `${line.slice(0, max)}…` : line;
 }
 
 export function extractKeywords(question: string): string[] {
@@ -113,11 +133,105 @@ export class HistoryQuery {
   private readonly transcriptsRoot: string;
   private readonly exec: ExecDep;
   private readonly chatSearchFn?: (rigId: string, pattern: string) => ChatSearchResult[];
+  private readonly claudeProjectsRoot: string;
 
   constructor(opts: HistoryQueryOpts) {
     this.transcriptsRoot = opts.transcriptsRoot;
     this.exec = opts.exec;
     this.chatSearchFn = opts.chatSearchFn;
+    this.claudeProjectsRoot = opts.claudeProjectsRoot ?? join(homedir(), ".claude", "projects");
+  }
+
+  /** Locate a session's JSONL by token: `<projectsRoot>/<any-encoded-cwd>/<token>.jsonl`.
+   *  Token alone is enough (we scan the encoded-cwd dirs) — the founder's "I have
+   *  the token, go find something". Returns null when nothing matches. */
+  private locateSessionFile(token: string): string | null {
+    const root = this.claudeProjectsRoot;
+    if (!existsSync(root)) return null;
+    let dirs: string[];
+    try {
+      dirs = readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
+    } catch {
+      return null;
+    }
+    for (const d of dirs) {
+      const candidate = join(root, d, `${token}.jsonl`);
+      if (existsSync(candidate)) return candidate;
+    }
+    return null;
+  }
+
+  /**
+   * L2 — search ONE session's JSONL by its token (read-only). Locates the file
+   * under ~/.claude/projects/<encoded-cwd>/<token>.jsonl and greps it (rg→grep
+   * fallback; streaming, so a large 100s-of-MB session file is safe). Honest:
+   * a token with no session file returns session_not_found teaching, never a
+   * silent empty; a large file surfaces an advisory (pin 5).
+   */
+  async searchSession(sessionToken: string, question: string): Promise<SessionSearchResult> {
+    const filePath = this.locateSessionFile(sessionToken);
+    if (!filePath) {
+      return {
+        backend: "none",
+        token: sessionToken,
+        found: false,
+        excerpts: [],
+        insufficient: true,
+        degraded: {
+          reason: "session_not_found",
+          message: `No session JSONL found for token '${sessionToken}' under ${this.claudeProjectsRoot}. Check the token — or the session may have run under a different host/home.`,
+        },
+      };
+    }
+
+    let sizeBytes: number;
+    try {
+      sizeBytes = statSync(filePath).size;
+    } catch {
+      return {
+        backend: "none",
+        token: sessionToken,
+        found: true,
+        path: filePath,
+        excerpts: [],
+        insufficient: true,
+        degraded: { reason: "unreadable", message: `Session JSONL for '${sessionToken}' exists but could not be read.` },
+      };
+    }
+
+    const advisory = sizeBytes > SEAT_LARGE_FILE_BYTES
+      ? `Session JSONL is large (${(sizeBytes / 1024 / 1024).toFixed(1)} MB); the search streams via rg/grep — a broad query may take a moment.`
+      : undefined;
+
+    const keywords = extractKeywords(question);
+    if (keywords.length === 0) {
+      return { backend: "none", token: sessionToken, found: true, path: filePath, sizeBytes, excerpts: [], insufficient: true, advisory };
+    }
+    const pattern = keywords.join("|");
+
+    const rg = await this.exec("rg", ["-i", "--no-filename", "-e", pattern, filePath]);
+    if (rg.exitCode === 0 || rg.exitCode === 1) {
+      const excerpts = this.parseExcerpts(rg.stdout).map((e) => truncateExcerpt(e));
+      return { backend: "rg", token: sessionToken, found: true, path: filePath, sizeBytes, excerpts, insufficient: excerpts.length === 0, advisory };
+    }
+
+    const grep = await this.exec("grep", ["-E", "-i", "-h", "-e", pattern, filePath]);
+    if (grep.exitCode === 0 || grep.exitCode === 1) {
+      const excerpts = this.parseExcerpts(grep.stdout).map((e) => truncateExcerpt(e));
+      return { backend: "grep", token: sessionToken, found: true, path: filePath, sizeBytes, excerpts, insufficient: excerpts.length === 0, advisory };
+    }
+
+    return {
+      backend: "none",
+      token: sessionToken,
+      found: true,
+      path: filePath,
+      sizeBytes,
+      excerpts: [],
+      insufficient: true,
+      advisory,
+      degraded: { reason: "unreadable", message: "Search backends (rg, grep) both failed on the session JSONL." },
+    };
   }
 
   async search(rigName: string, question: string): Promise<SearchResult> {
