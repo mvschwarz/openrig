@@ -164,10 +164,45 @@ host-qualified triple naming the ORIGIN (`orch-main@rig-a@${ID_A}`, stamp-at-for
 incr 4a); the shipped `from-host:` tag is present and unchanged (lock item 6).
 **A2 asserts NOTHING about the pane** — the envelope is A1's surface.
 
-*Coverage note for the gate: the lock's item 3 names a THIRD surface, `broadcast`. This
-leg proves send + queue LIVE; whether broadcast's live capture is required here or is
-covered by item 3's "tests" half is a gate call, not a runbook choice — flagged rather
-than silently omitted.*
+### LEG A3 — BROADCAST SURFACE (`rig broadcast --host`): the third surface item 3 names
+
+**Why this is a LIVE leg and not "covered by tests" (PM ruling, reversed on grounding).**
+The tests-half reading rested on send and broadcast rendering through one composition
+chokepoint. They do not, in the part that matters: broadcast's `envelopeSender` is
+authored CLIENT-SIDE from raw env and falls open to the literal `<unknown sender>`
+(`packages/cli/src/commands/broadcast.ts:123-124`), a provenance path differing IN KIND
+from send's. A live send capture therefore proves nothing about broadcast, and no
+hermetic test asserts the broadcast sender triple either (searched: the broadcast cases
+in `pane-envelope.test.ts` / `send-header.test.ts` assert the `To:` scope line only; the
+triple suites `self-host-envelope-triple.test.ts` / `-sweep.test.ts` drive the shared
+root directly and name no broadcast case).
+
+```bash
+# (i) STAMP PATH, NOT FALLBACK: set the sender env EXPLICITLY. Without this the container
+# exec may carry no OPENRIG_SESSION_NAME and the capture would render "<unknown sender>" —
+# testing the fall-open instead of the property, a fixture defect wearing a product face.
+export BBODY="lega3-$(date +%s)"
+docker exec -e OPENRIG_SESSION_NAME=orch-main@rig-a H_A bash -lc \
+  "rig broadcast --rig rig-b --host '${ID_B}' 'broadcast triple probe ${BBODY}'" | tee "${EVID}/L5-leg-a3-send.txt"
+
+# capture the RECIPIENT pane on H_B and assert the full triple, host token in its fixed position
+docker exec H_B bash -lc "rig capture dev-main@rig-b" | tee "${EVID}/L5-leg-a3-recv.txt"
+grep -q "From: orch-main@rig-a@${ID_A}" "${EVID}/L5-leg-a3-recv.txt" || {
+  echo "LEG A3 FAIL: recipient envelope does not carry the ORIGIN triple orch-main@rig-a@${ID_A}"; exit 1; }
+grep -q "<unknown sender>" "${EVID}/L5-leg-a3-recv.txt" && {
+  echo "LEG A3 FAIL: rendered the FALL-OPEN sender — the capture tested the fallback, not the stamp path (set OPENRIG_SESSION_NAME on the exec)"; exit 1; }
+```
+
+**A3 PASS (quoting lock item 3 verbatim as the predicate):** the recipient's rendered
+envelope carries the sender triple `member@rig@host` — `orch-main@rig-a@${ID_A}` —
+*"unconditionally … with the host token in one fixed deterministic position"*, naming the
+ORIGIN host, never `${ID_B}` and never the fall-open literal.
+
+*P21 CENSUS OBSERVATION (recorded, NOT a leg gate): broadcast's `envelopeSender` is
+client-authored from raw env with a `<unknown sender>` fall-open — census site #14 in the
+body-identity class. The leg pins the env so it tests the stamp path; the provenance
+question itself belongs to P21's pooled sweep, not to this leg's verdict.*
+
 
 ---
 
