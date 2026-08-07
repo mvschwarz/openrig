@@ -119,7 +119,7 @@ describe("coordination integration — stream → queue → inbox handoff chain"
     // 4. Claim
     const claimRes = await app.request(`/api/queue/${absorbed.qitemId}/claim`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "planning@conveyor" }, // P21 I3: claimant from the transport header
       body: JSON.stringify({ destinationSession: "planning@conveyor" }),
     });
     expect(claimRes.status).toBe(200);
@@ -148,7 +148,7 @@ describe("coordination integration — stream → queue → inbox handoff chain"
     const newQitem = handoff.created.qitemId;
     await app.request(`/api/queue/${newQitem}/claim`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "build@conveyor" }, // P21 I3: claimant from the transport header
       body: JSON.stringify({ destinationSession: "build@conveyor" }),
     });
     const closeRes = await app.request(`/api/queue/${newQitem}/update`, {
@@ -208,7 +208,7 @@ describe("coordination integration — stream → queue → inbox handoff chain"
     const item = (await create.json()) as { qitemId: string };
     await app.request(`/api/queue/${item.qitemId}/claim`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" }, // P21 I3: claimant from the transport header
       body: JSON.stringify({ destinationSession: "b@r" }),
     });
     await app.request(`/api/queue/${item.qitemId}/handoff`, {

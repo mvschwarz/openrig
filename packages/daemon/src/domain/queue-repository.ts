@@ -245,6 +245,9 @@ export interface QueueHandoffAndCompleteInput extends QueueHandoffInput {}
 export interface QueueClaimInput {
   qitemId: string;
   destinationSession: string;
+  /** P21 §4 era-stamp: the route passes `transport:v1` (destinationSession derived from the
+   *  transport header chokepoint). Threaded onto the claim transition; absence = claimed-era. */
+  identityProvenance?: string | null;
 }
 
 export interface QueueListOptions {
@@ -1258,6 +1261,7 @@ export class QueueRepository {
         state: "in-progress",
         actorSession: input.destinationSession,
         transitionNote: "claimed",
+        identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
       });
 
       return this.eventBus.persistWithinTransaction({
@@ -1275,7 +1279,7 @@ export class QueueRepository {
     return this.getByIdOrThrow(input.qitemId);
   }
 
-  unclaim(qitemId: string, destinationSession: string, reason: string): QueueItem {
+  unclaim(qitemId: string, destinationSession: string, reason: string, identityProvenance?: string | null): QueueItem {
     const qitem = this.getById(qitemId);
     if (!qitem) {
       throw new QueueRepositoryError("qitem_not_found", `qitem ${qitemId} not found`);
@@ -1308,6 +1312,7 @@ export class QueueRepository {
         state: "pending",
         actorSession: destinationSession,
         transitionNote: `unclaimed: ${reason}`,
+        identityProvenance: identityProvenance ?? null, // P21 §4 era-stamp
       });
 
       return this.eventBus.persistWithinTransaction({

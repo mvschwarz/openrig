@@ -479,9 +479,12 @@ export function queueRoutes(): Hono {
   app.post("/:qitemId/claim", async (c) => {
     const qitemId = c.req.param("qitemId");
     const body = await c.req.json<{ destinationSession?: string }>().catch(() => ({} as never));
-    if (!body.destinationSession) return c.json({ error: "destinationSession is required" }, 400);
+    // P21 I3: the claimant is the transport-derived sender, never body.destinationSession.
+    const identity = requireSenderIdentity(c, { verb: "queue claim", bodyClaim: body.destinationSession });
+    if (!identity.ok) return identity.response;
+    const destinationSession = identity.session;
     try {
-      const item = getRepo(c).claim({ qitemId, destinationSession: body.destinationSession });
+      const item = getRepo(c).claim({ qitemId, destinationSession, identityProvenance: "transport:v1" });
       return c.json(item);
     } catch (err) {
       return errorResponse(c, err);
@@ -492,9 +495,12 @@ export function queueRoutes(): Hono {
   app.post("/:qitemId/unclaim", async (c) => {
     const qitemId = c.req.param("qitemId");
     const body = await c.req.json<{ destinationSession?: string; reason?: string }>().catch(() => ({} as never));
-    if (!body.destinationSession) return c.json({ error: "destinationSession is required" }, 400);
+    // P21 I3: the claimant is the transport-derived sender, never body.destinationSession.
+    const identity = requireSenderIdentity(c, { verb: "queue unclaim", bodyClaim: body.destinationSession });
+    if (!identity.ok) return identity.response;
+    const destinationSession = identity.session;
     try {
-      const item = getRepo(c).unclaim(qitemId, body.destinationSession, body.reason ?? "manual");
+      const item = getRepo(c).unclaim(qitemId, destinationSession, body.reason ?? "manual", "transport:v1");
       return c.json(item);
     } catch (err) {
       return errorResponse(c, err);

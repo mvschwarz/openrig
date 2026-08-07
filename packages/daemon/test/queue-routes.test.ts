@@ -262,6 +262,92 @@ describe("queue routes", () => {
     });
   }
 
+  // P21 I3 — claim/unclaim derive the claimant (destinationSession) from the transport header.
+  // The repo still enforces you can only (un)claim an item assigned to your identity.
+  async function createAndClaim(dest: string): Promise<string> {
+    const qitemId = await createForHandoff(dest);
+    await app.request(`/api/queue/${qitemId}/claim`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": dest },
+      body: JSON.stringify({ destinationSession: dest }),
+    });
+    return qitemId;
+  }
+
+  it("claim — 401 unattributable_sender when X-OpenRig-Session is absent", async () => {
+    const qitemId = await createForHandoff("b@r");
+    const res = await app.request(`/api/queue/${qitemId}/claim`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ destinationSession: "b@r" }),
+    });
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+  });
+
+  it("claim — 409 identity_mismatch when body destinationSession differs from the transport identity", async () => {
+    const qitemId = await createForHandoff("b@r");
+    const res = await app.request(`/api/queue/${qitemId}/claim`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
+      body: JSON.stringify({ destinationSession: "mallory@r" }),
+    });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+  });
+
+  it("claim — derives the claimant from the header + era-stamps the transition transport:v1", async () => {
+    const qitemId = await createForHandoff("b@r");
+    const res = await app.request(`/api/queue/${qitemId}/claim`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
+      body: JSON.stringify({ destinationSession: "b@r" }),
+    });
+    expect(res.status).toBe(200);
+    const row = db
+      .prepare("SELECT actor_session, identity_provenance FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid DESC LIMIT 1")
+      .get(qitemId) as { actor_session: string; identity_provenance: string | null } | undefined;
+    expect(row?.actor_session).toBe("b@r");
+    expect(row?.identity_provenance).toBe("transport:v1");
+  });
+
+  it("unclaim — 401 unattributable_sender when X-OpenRig-Session is absent", async () => {
+    const qitemId = await createAndClaim("b@r");
+    const res = await app.request(`/api/queue/${qitemId}/unclaim`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ destinationSession: "b@r" }),
+    });
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+  });
+
+  it("unclaim — 409 identity_mismatch when body destinationSession differs from the transport identity", async () => {
+    const qitemId = await createAndClaim("b@r");
+    const res = await app.request(`/api/queue/${qitemId}/unclaim`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
+      body: JSON.stringify({ destinationSession: "mallory@r" }),
+    });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+  });
+
+  it("unclaim — derives the claimant from the header + era-stamps the transition transport:v1", async () => {
+    const qitemId = await createAndClaim("b@r");
+    const res = await app.request(`/api/queue/${qitemId}/unclaim`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
+      body: JSON.stringify({ destinationSession: "b@r" }),
+    });
+    expect(res.status).toBe(200);
+    const row = db
+      .prepare("SELECT actor_session, identity_provenance FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid DESC LIMIT 1")
+      .get(qitemId) as { actor_session: string; identity_provenance: string | null } | undefined;
+    expect(row?.actor_session).toBe("b@r");
+    expect(row?.identity_provenance).toBe("transport:v1");
+  });
+
   it("POST /api/queue/:id/update with state=done WITHOUT closure_reason returns 400 with validReasons", async () => {
     const create = await app.request("/api/queue/create", {
       method: "POST",
@@ -1054,7 +1140,7 @@ describe("queue routes", () => {
       });
       await app.request(`/api/queue/${itemA.qitemId}/claim`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "bob@r" }, // P21 I3: claimant from the transport header
         body: JSON.stringify({ destinationSession: "bob@r" }),
       });
 
