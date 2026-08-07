@@ -1338,4 +1338,39 @@ describe("SessionTransport", () => {
       ]),
     );
   });
+
+  // Send/broadcast header (ruling 03c35295) — the fan-out threads the scale scope + a Sent stamp
+  // through the daemon-side wrap, so every recipient's header carries the same envelope facts.
+  it("multi-send fan-out renders the FULL recipient list + a Sent stamp on each recipient's To header", async () => {
+    seedCanonicalRig(); // dev-impl@my-rig
+    seedLegacyRig(); // r00-legacy-worker-a
+    const sent: string[] = [];
+    const tmux = mockTmux({ sendText: async (_t, text) => { sent.push(text); return { ok: true }; } });
+    const transport = createTransport(tmux);
+
+    await transport.broadcast(
+      { sessions: ["dev-impl@my-rig", "r00-legacy-worker-a"] },
+      "status",
+      { envelopeSender: "orch@my-rig", stampISO: "2026-08-06T17:42:09Z" },
+    );
+
+    expect(sent).toHaveLength(2);
+    for (const text of sent) {
+      expect(text).toContain("To: dev-impl@my-rig, r00-legacy-worker-a"); // full list (WHO got it)
+      expect(text).toContain("Sent: 08-06 17:42Z"); // the transport stamp
+      expect(text).toContain("status");
+    }
+  });
+
+  it("raw broadcast (no envelopeSender) is delivered unwrapped — no header change", async () => {
+    seedCanonicalRig();
+    const sent: string[] = [];
+    const tmux = mockTmux({ sendText: async (_t, text) => { sent.push(text); return { ok: true }; } });
+    const transport = createTransport(tmux);
+
+    await transport.broadcast({ rig: "my-rig" }, "raw ping", {});
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toBe("raw ping"); // unchanged (the --raw carve-out)
+  });
 });

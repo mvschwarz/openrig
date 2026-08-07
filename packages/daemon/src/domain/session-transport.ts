@@ -387,6 +387,9 @@ export interface SendOpts {
 // `rig broadcast` (raw-to-all, unchanged) and for the CLI --raw / --dangerously-interact paths.
 export interface BroadcastOpts extends SendOpts {
   envelopeSender?: string;
+  /** Send/broadcast header (ruling 03c35295): the transport ISO stamp, computed ONCE at send-time.
+   *  Injectable for deterministic tests; defaults to `new Date().toISOString()` at dispatch. */
+  stampISO?: string;
 }
 
 export interface SendResult {
@@ -1257,14 +1260,21 @@ export class SessionTransport {
       };
     }
 
+    // Send/broadcast header (ruling 03c35295): the scope (recipient-scale truth) + the timestamp are
+    // computed ONCE per fan-out at send-time — every recipient's header carries the same envelope facts.
+    const recipientNames = resolved.sessions.map((s) => s.sessionName);
+    const scope = scopeForTarget(target, recipientNames);
+    const stampISO = opts?.stampISO ?? new Date().toISOString();
+
     const results: SendResult[] = [];
     for (const session of resolved.sessions) {
-      // OPR.0.4.3.30 — per-recipient From/To envelope for `rig send` fan-out: each recipient
-      // gets its OWN `To:` header rendered daemon-side (the CLI can't wrap per recipient because
-      // it doesn't know each resolved seat). When envelopeSender is absent (`rig broadcast`,
-      // --raw, --dangerously-interact) the text is delivered raw, exactly as before.
+      // OPR.0.4.3.30 — per-recipient From/To envelope for `rig send` fan-out, rendered daemon-side (the
+      // CLI can't wrap per recipient because it doesn't know each resolved seat). Ruling 03c35295: the
+      // To line now projects the SCALE (multi = full list; rig/pod/topology = the broadcast scale) + a
+      // Sent stamp, so a recipient tells DM from broadcast header-alone (anti-storm). Raw paths
+      // (--raw / --dangerously-interact, absent envelopeSender) still deliver unwrapped.
       const perRecipientText = opts?.envelopeSender
-        ? wrapPaneEnvelope(opts.envelopeSender, session.sessionName, text, getSelfHostId())
+        ? wrapPaneEnvelope(opts.envelopeSender, session.sessionName, text, getSelfHostId(), { scope, stampISO })
         : text;
       const result = await this.send(session.sessionName, perRecipientText, opts);
       results.push(result);
