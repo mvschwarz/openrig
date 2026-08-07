@@ -62,3 +62,27 @@ describe("B8-1b — chokepoint adoption census (the grep-guard pin)", () => {
     expect(offenders).toEqual([]); // every precheck RENDER routes through the ONE helper
   });
 });
+
+// ── B8-2: send timeout = delivery-UNCONFIRMED, never "not sent" ─────────────────
+import { printTransportFailureForTest } from "../src/commands/send.js";
+import { DaemonTimeoutError, DaemonConnectionError } from "../src/client.js";
+
+describe("B8-2 — send transport honesty (indeterminate ≠ failed)", () => {
+  let errSpy2: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => { errSpy2 = vi.spyOn(console, "error").mockImplementation(() => {}); });
+  afterEach(() => errSpy2.mockRestore());
+
+  it("a TIMEOUT renders delivery-unconfirmed + reconcile-by-effect — NEVER 'was not sent'", () => {
+    printTransportFailureForTest(new DaemonTimeoutError("Request to /api/transport/send timed out after 5000ms"));
+    const out = errSpy2.mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(out).toMatch(/delivery unconfirmed|may have received/i);
+    expect(out).toMatch(/check the (pane|target)|reconcile/i);
+    expect(out).not.toMatch(/was not sent/i);
+  });
+
+  it("a connection REFUSAL keeps the hard 'not sent' truth", () => {
+    printTransportFailureForTest(new DaemonConnectionError("fetch failed: ECONNREFUSED"));
+    const out = errSpy2.mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(out).toMatch(/was not sent/i);
+  });
+});

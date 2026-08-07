@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { resolveEffectiveHost } from "../host-selection.js";
-import { DaemonClient, DaemonConnectionError, terminalAuthHeaders } from "../client.js";
+import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, fetchSelfHostId } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -114,11 +114,19 @@ function printTransportFailure(err: DaemonConnectionError, opts?: { json?: boole
   // (daemon-lifecycle.ts) so an agent on the --json path gets a parseable record
   // instead of empty stdout plus human prose on stderr.
   const fact = err.message;
-  const consequence = "The message was not sent.";
-  const action =
-    "Inspect the configured target with 'rig status'; a failed health probe does not prove the daemon is stopped. " +
-    "If the target is wrong, check OPENRIG_URL / RIGGED_URL or daemon.host + daemon.port. " +
-    "If the daemon is confirmed stopped, run 'rig daemon start'.";
+  // B8-2 (shape 73ee4b25): a TIMEOUT is delivery-UNCONFIRMED — the daemon may have
+  // received AND delivered (two seats proved delivery-after-"not sent" live). Only a
+  // hard connection failure earns the "was not sent" consequence.
+  const timedOut = err instanceof DaemonTimeoutError;
+  const consequence = timedOut
+    ? "Delivery UNCONFIRMED — the daemon may have received and delivered the message."
+    : "The message was not sent.";
+  const action = timedOut
+    ? "Reconcile by EFFECT before any resend: check the pane/target for the message (rig capture <session>). " +
+      "A resend without checking risks a duplicate. Then 'rig daemon status' for the probe picture."
+    : "Inspect the configured target with 'rig status'; a failed health probe does not prove the daemon is stopped. " +
+      "If the target is wrong, check OPENRIG_URL / RIGGED_URL or daemon.host + daemon.port. " +
+      "If the daemon is confirmed stopped, run 'rig daemon start'.";
   if (opts?.json) {
     console.log(JSON.stringify({ error: { fact, consequence, action } }));
     return;
@@ -746,4 +754,9 @@ function transportRequestOptions(waitForIdleMs?: number): { timeoutMs?: number; 
     ...(waitOptions ?? {}),
     ...(hasHeaders ? { headers } : {}),
   };
+}
+
+/** B8-2 test seam: the transport-failure renderer, exported for the honesty pins. */
+export function printTransportFailureForTest(err: DaemonConnectionError, opts?: { json?: boolean }): void {
+  printTransportFailure(err, opts);
 }
