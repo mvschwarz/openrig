@@ -61,7 +61,10 @@ const docker = (args) => new Promise((res) => {
 
 // Container-mode: inject the ScenarioDaemon-shaped container adapter + the manifest id.
 const daemon = (scaffold /*, opts */) => spawnContainerDaemon(scaffold, { image, docker });
-const scenario = `${SCENARIO}/` + (process.env.L6_SCENARIO ?? "scenario-collision.yaml");
+// COMMITTED scenario (the prior literal `scenario-collision.yaml` DOES NOT EXIST in the tree —
+// operator-caught at the L4/L6 re-entry). L6 proves the container RUNNER, so it drives a real
+// shipped scenario; override with L6_SCENARIO to run another COMMITTED file, never an improvised one.
+const scenario = `${SCENARIO}/` + (process.env.L6_SCENARIO ?? "scenario-02-baton.yaml");
 const baseEnv = { HOME: process.env.HOME, PATH: process.env.PATH, TERM: "xterm" };
 
 const records = [];
@@ -87,7 +90,7 @@ Run the IDENTICAL scenario in **host-mode** (no `daemon` override, no `imageId`)
 
 ```bash
 L6_MODE=host node --import tsx packages/daemon/scripts/run-scenarios.mjs \
-  packages/daemon/test/fixtures/scenarios/scenario-collision.yaml | tee "${EVID}/L6-host.txt"
+  packages/daemon/test/fixtures/scenarios/scenario-02-baton.yaml | tee "${EVID}/L6-host.txt"
 ```
 
 **PASS:** the host-mode verdict for the same scenario matches the container-mode verdict from L6.1 —
@@ -108,7 +111,7 @@ import { spawnContainerDaemon } from "./packages/daemon/test/helpers/scenario-co
 const [image] = process.argv.slice(2);
 const daemon = (scaffold) => spawnContainerDaemon(scaffold, { image, docker: async () => ({ stdout: "", stderr: "", code: 0 }) });
 try {
-  await runScenarioFile(resolve("packages/daemon/test/fixtures/scenarios/scenario-collision.yaml"),
+  await runScenarioFile(resolve("packages/daemon/test/fixtures/scenarios/scenario-02-baton.yaml"),
     { rigBin: resolve("packages/cli/dist/bin-wrapper.js"), baseEnv: process.env, daemon });
   console.log("NO-REFUSAL"); process.exit(0);
 } catch (e) { console.error("REFUSED: " + e.message); process.exit(7); }
