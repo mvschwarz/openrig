@@ -226,10 +226,12 @@ describe("ScopeApproveService — re-approve/re-stamp (OPR.0.5.0.18)", () => {
     });
     app.route("/api/scope/approve", scopeApproveRoutes());
 
-    const post = (body: Record<string, unknown>) =>
+    // P21 I1: the approver identity is the transport header (X-OpenRig-Session), stamped by the CLI
+    // from the seat env. The legit caller provides it; body.actorSession is the transitional claim.
+    const post = (body: Record<string, unknown>, session = "pm@rig") =>
       app.request("/api/scope/approve", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "X-OpenRig-Session": session },
         body: JSON.stringify(body),
       });
 
@@ -244,13 +246,52 @@ describe("ScopeApproveService — re-approve/re-stamp (OPR.0.5.0.18)", () => {
     expect(noReason.status).toBe(400);
     expect(((await noReason.json()) as { error: string }).error).toBe("reason_required");
     // full amendment through the wire → 201 with the amendment result fields
-    const ok = await post({ ...wire, actorSession: "planner@rig", reApprove: true, reason: "wire-level amend" });
+    const ok = await post({ ...wire, actorSession: "planner@rig", reApprove: true, reason: "wire-level amend" }, "planner@rig");
     expect(ok.status).toBe(201);
     const okBody = (await ok.json()) as { reApproved: boolean; priorApprovedBy: string };
     expect(okBody.reApproved).toBe(true);
     expect(okBody.priorApprovedBy).toBe("pm@rig");
     const rows = auditBrowse.query({ scopeId: "OPR.X.18", approvalScope: "spec" }).rows;
     expect(rows.some((r) => (r.auditNotes as Record<string, unknown>)["reason"] === "wire-level amend")).toBe(true);
+  });
+
+  it("P21 I1: the signing surface derives the approver from the transport header — forged/absent identity refuses LOUD", async () => {
+    const { Hono } = await import("hono");
+    const { scopeApproveRoutes } = await import("../src/routes/scope-approve.js");
+    const indexerStub = { isReady: () => true, slicesRoot: missionsRoot };
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("sliceIndexer" as never, indexerStub as never);
+      c.set("missionControlActionLog" as never, actionLog as never);
+      await next();
+    });
+    app.route("/api/scope/approve", scopeApproveRoutes());
+    const req = (headers: Record<string, string>, body: Record<string, unknown>) =>
+      app.request("/api/scope/approve", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body: JSON.stringify(body),
+      });
+    const wire = { scopeTier: "slice", scopePath: base.scopePath, approvalScope: "spec" };
+
+    // (1) absent header → refuse-unattributable LOUD (401); a body actor claim is NOT a fallback.
+    const noHeader = await req({}, { ...wire, actorSession: "mallory@rig" });
+    expect(noHeader.status).toBe(401);
+    expect(((await noHeader.json()) as { error: string }).error).toBe("unattributable_sender");
+
+    // (2) body claim DIFFERENT from the header → refuse-loud identity_mismatch naming BOTH (never prefer either).
+    const mismatch = await req({ "X-OpenRig-Session": "pm@rig" }, { ...wire, actorSession: "mallory@rig" });
+    expect(mismatch.status).toBe(409);
+    const mm = (await mismatch.json()) as { error: string; message: string };
+    expect(mm.error).toBe("identity_mismatch");
+    expect(mm.message).toContain("pm@rig");
+    expect(mm.message).toContain("mallory@rig");
+
+    // (3) header-derivation: with NO body actorSession, the RECORDED approver is the transport identity.
+    const derived = await req({ "X-OpenRig-Session": "pm@rig" }, wire);
+    expect(derived.status).toBe(201);
+    const rows = auditBrowse.query({ scopeId: "OPR.X.18", approvalScope: "spec" }).rows;
+    expect(rows[0]!.actorSession).toBe("pm@rig"); // transport-derived, never the body claim
   });
 
   it("REGRESSION: a plain first-time approve carries NO amendment fields (byte-identical first-approve behavior)", () => {

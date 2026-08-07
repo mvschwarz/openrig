@@ -7,6 +7,7 @@ import { Hono } from "hono";
 import type { SliceIndexer } from "../domain/slices/slice-indexer.js";
 import type { MissionControlActionLog } from "../domain/mission-control/mission-control-action-log.js";
 import { ScopeApproveError, ScopeApproveService, type ApprovalScope, type ScopeTier } from "../domain/scope/scope-approve.js";
+import { requireSenderIdentity } from "./require-sender-identity.js";
 
 export function scopeApproveRoutes(): Hono {
   const app = new Hono();
@@ -26,7 +27,13 @@ export function scopeApproveRoutes(): Hono {
       return c.json({ error: "scope_tier_invalid", message: "scopeTier must be 'slice' or 'mission'" }, 400);
     }
     if (!body.scopePath) return c.json({ error: "scope_path_required", message: "scopePath is required" }, 400);
-    if (!body.actorSession) return c.json({ error: "actor_session_required", message: "actorSession is required" }, 400);
+    // P21 I1 (the signing surface): the approver identity is DERIVED from the authenticated transport
+    // header, never the request body. body.actorSession is the transitional adopt-and-drop claim —
+    // tolerated only when equal to the header; a different claim refuses-loud identity_mismatch; absent
+    // header refuses-loud unattributable_sender. onBehalfOf stays a body field recorded BESIDE the
+    // transport-derived actor (delegation stays data — the reference pair the sweep generalizes).
+    const identity = requireSenderIdentity(c, { verb: "scope approval", bodyClaim: body.actorSession });
+    if (!identity.ok) return identity.response;
     // Omitting approvalScope means delivery (back-compatible default).
     const approvalScope: ApprovalScope = body.approvalScope === undefined ? "delivery" : (body.approvalScope as ApprovalScope);
     if (approvalScope !== "spec" && approvalScope !== "delivery") {
@@ -47,7 +54,7 @@ export function scopeApproveRoutes(): Hono {
         scopeTier: body.scopeTier as ScopeTier,
         scopePath: body.scopePath,
         approvalScope,
-        actorSession: body.actorSession,
+        actorSession: identity.session, // transport-derived, authoritative
         onBehalfOf: body.onBehalfOf ?? null,
         reApprove: body.reApprove === true,
         reason: typeof body.reason === "string" ? body.reason : null,
