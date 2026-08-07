@@ -5,7 +5,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
-import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
+import { wrapPaneEnvelope, type EnvelopeScope } from "../lib/pane-envelope.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
@@ -339,6 +339,17 @@ function countOccurrences(haystack: string, needle: string): number {
     start = index + needle.length;
   }
   return count;
+}
+
+/** Map a resolved fan-out target + its recipient list → the EnvelopeScope (ruling 03c35295). The
+ *  transport knows the target shape + resolved seats, so it builds the honest scale daemon-side:
+ *  DM / multi (full list) / rig- or pod-scoped broadcast (with seat count) / topology. */
+export function scopeForTarget(target: TargetSpec, recipients: string[]): EnvelopeScope {
+  if ("session" in target) return { kind: "dm" };
+  if ("sessions" in target) return { kind: "multi", recipients };
+  if ("rig" in target && !("pod" in target)) return { kind: "rig-broadcast", rig: target.rig, seats: recipients.length };
+  if ("pod" in target) return { kind: "rig-broadcast", rig: target.rig ? `${target.rig}/${target.pod}` : target.pod, seats: recipients.length };
+  return { kind: "topology" }; // { global: true }
 }
 
 export type TargetSpec =
