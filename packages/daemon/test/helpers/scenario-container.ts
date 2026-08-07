@@ -16,8 +16,18 @@
 // refuses an inherited foreign target BEFORE any docker runs (the container is not an
 // excuse to weaken the DAEMON_TARGET guard; the L4 claim).
 
+import { randomBytes } from "node:crypto";
 import { assertNoForeignDaemon, type HermeticScaffold } from "./hermetic-env.js";
-import { findFreePort, type ScenarioDaemon } from "./scenario-daemon.js";
+import { type ScenarioDaemon } from "./scenario-daemon.js";
+// The ONE published-daemon procedure — imported, never re-derived (drift is what the
+// module's parity fence exists to catch): explicit 0.0.0.0 bind + the bearer that bind
+// demands, the unqualified `P:C` publish, and the explicit non-ephemeral host port.
+import {
+  CONTAINER_PORT,
+  L3_HOST_PORT,
+  publishArg,
+  publishedDaemonEnvFlags,
+} from "./testbed-published-daemon.js";
 
 /** The exit-carrying result of an injected docker invocation (mirrors RigResult). */
 export interface DockerResult {
@@ -35,18 +45,20 @@ export class ContainerDaemonError extends Error {
   }
 }
 
-/** The daemon port INSIDE the container (the shipped default). */
-const DEFAULT_CONTAINER_PORT = 7433;
-
 export interface SpawnContainerDaemonOptions {
   /** The testbed image identity to run (manifest.image, e.g. "openrig-testbed:<gitSha>"). */
   image: string;
   /** Injected docker invoker — the container analogue of runRig's `node <rigBin>` seam. */
   docker: (args: string[]) => Promise<DockerResult>;
-  /** The daemon port INSIDE the container (default 7433). */
+  /** The daemon port INSIDE the container (default CONTAINER_PORT = 7433). */
   containerPort?: number;
-  /** Override the published host port (default: an ephemeral free port). */
+  /** Override the published host port. Default L3_HOST_PORT (19433) — EXPLICIT + non-ephemeral;
+   *  `publishArg` throws on 0 (Apple container 1.2.0 rejects an ephemeral publish). */
   hostPort?: number;
+  /** The bearer the 0.0.0.0 bind requires (assertBindAuthInvariant). Default: a fresh random token.
+   *  Set on the daemon (OPENRIG_AUTH_BEARER_TOKEN) AND carried in readEnv so host-side `rig` reads
+   *  authenticate to the guarded routes. */
+  bearerToken?: string;
 }
 
 /**
@@ -64,9 +76,12 @@ export async function spawnContainerDaemon(
   assertNoForeignDaemon(scaffold.env);
 
   const { image, docker } = opts;
-  const containerPort = opts.containerPort ?? DEFAULT_CONTAINER_PORT;
-  const hostPort = opts.hostPort ?? (await findFreePort());
-  const publish = `127.0.0.1:${hostPort}:${containerPort}`;
+  const containerPort = opts.containerPort ?? CONTAINER_PORT;
+  const hostPort = opts.hostPort ?? L3_HOST_PORT;
+  const bearerToken = opts.bearerToken ?? randomBytes(16).toString("hex");
+  // Unqualified `P:C` — Apple container 1.2.0 RESETS on the `127.0.0.1:P:C` form (and rejects an
+  // ephemeral 0). publishArg throws on a non-positive port, so ephemeral allocation cannot sneak back.
+  const publish = publishArg(hostPort, containerPort);
 
   // Start a long-lived container (entrypoint seeds the self-host id then execs the CMD);
   // `tail -f /dev/null` keeps PID 1 alive so the daemon can be started + probed via exec.
@@ -87,6 +102,10 @@ export async function spawnContainerDaemon(
   const startProc = async () => {
     const start = await docker([
       "exec",
+      // Explicit bind (OPENRIG_HOST=0.0.0.0) + the bearer the bind demands — a published port is
+      // unreachable on the default 127.0.0.1 bind, and the daemon REFUSES a non-loopback bind without
+      // the bearer (assertBindAuthInvariant). Satisfy the guard; never weaken it.
+      ...publishedDaemonEnvFlags(bearerToken),
       containerId,
       "rig",
       "daemon",
@@ -118,7 +137,14 @@ export async function spawnContainerDaemon(
   // readEnv = { ...scaffold.env, OPENRIG_URL: <our own published url> } — the exact
   // scenario-daemon.ts:148 shape; the URL is self-created by the adapter that spawned
   // the container (not foreign), so the host-side `rig` reads hit THIS container.
-  const readEnv: Record<string, string | undefined> = { ...scaffold.env, OPENRIG_URL: baseUrl };
+  const readEnv: Record<string, string | undefined> = {
+    ...scaffold.env,
+    OPENRIG_URL: baseUrl,
+    // The guarded probe route (/api/transport/*) checks the TERMINAL token; the host-side `rig` reads
+    // send it via OPENRIG_TERMINAL_BEARER_TOKEN (client.ts resolveTerminalToken). On a non-trusted
+    // 0.0.0.0 bind the daemon uses the SAME token for both (index.ts:160), so this is that token.
+    OPENRIG_TERMINAL_BEARER_TOKEN: bearerToken,
+  };
 
   return {
     port: hostPort,
