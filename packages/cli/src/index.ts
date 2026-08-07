@@ -50,6 +50,7 @@ import { fileCommand } from "./commands/file.js";
 import { preflightCommand } from "./commands/preflight.js";
 import { authCommand } from "./commands/auth.js";
 import { providerCommand } from "./commands/provider.js";
+import { usageCommand } from "./commands/usage.js";
 import { doctorCommand } from "./commands/doctor.js";
 import { expandCommand } from "./commands/expand.js";
 import { addMemberCommand } from "./commands/add.js";
@@ -217,6 +218,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(preflightCommand());
   program.addCommand(authCommand());
   program.addCommand(providerCommand());
+  program.addCommand(usageCommand());
   program.addCommand(doctorCommand());
   program.addCommand(expandCommand(depsOverride?.expandDeps));
   program.addCommand(addMemberCommand(depsOverride?.addDeps));
