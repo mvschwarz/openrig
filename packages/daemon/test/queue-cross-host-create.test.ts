@@ -66,9 +66,15 @@ function makeApp(opts: {
 }
 
 function post(app: Hono, body: Record<string, unknown>) {
+  // P21 I3: create derives the sender from the transport header; header==body claim ⇒ tolerated
+  // (bodies untouched, incl. the already-triple sourceSession the forward-restamp tests assert).
+  const sender = body["sourceSession"] ?? body["fromSession"] ?? body["actorSession"];
   return app.request("/api/queue/create", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(sender ? { "X-OpenRig-Session": String(sender) } : {}),
+    },
     body: JSON.stringify(body),
   });
 }

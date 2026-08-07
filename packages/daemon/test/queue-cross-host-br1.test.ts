@@ -62,8 +62,15 @@ describe("MH-3 C4 — BR-1 sweep: no @host in ANY persisted session carrier afte
       await next();
     });
     app.route("/api/queue", queueRoutes());
-    const post = (path: string, body: Record<string, unknown>) =>
-      app.request(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const post = (path: string, body: Record<string, unknown>) => {
+      // P21 I3: create/handoff derive the sender from the transport header; header==body claim ⇒ tolerated.
+      const sender = body["sourceSession"] ?? body["fromSession"] ?? body["actorSession"];
+      return app.request(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(sender ? { "X-OpenRig-Session": String(sender) } : {}) },
+        body: JSON.stringify(body),
+      });
+    };
 
     // The walk: every writer path MH-3 touches, local and cross-host.
     expect((await post("/api/queue/create", { sourceSession: "orch@rig-a", destinationSession: "w1@rig-a", body: "local", nudge: false })).status).toBe(201);

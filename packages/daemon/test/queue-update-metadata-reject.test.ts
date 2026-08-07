@@ -102,9 +102,10 @@ describe("51-06 D2 — non-park queue update metadata reject", () => {
   });
 
   it("ROUTE: POST /:id/update non-park + summary -> HTTP 400 naming invalidFields", async () => {
-    const created = await app.request("/api/queue/create", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sourceSession: "orch@rig", destinationSession: "dev-x@rig", body: "r" }) });
+    // P21 I3: create/update derive the sender from the transport header; header==body claim ⇒ tolerated.
+    const created = await app.request("/api/queue/create", { method: "POST", headers: { "content-type": "application/json", "X-OpenRig-Session": "orch@rig" }, body: JSON.stringify({ sourceSession: "orch@rig", destinationSession: "dev-x@rig", body: "r" }) });
     const id = ((await created.json()) as { qitemId: string }).qitemId;
-    const res = await app.request(`/api/queue/${id}/update`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ actorSession: "dev-x@rig", state: "in-progress", summary: "DROPME" }) });
+    const res = await app.request(`/api/queue/${id}/update`, { method: "POST", headers: { "content-type": "application/json", "X-OpenRig-Session": "dev-x@rig" }, body: JSON.stringify({ actorSession: "dev-x@rig", state: "in-progress", summary: "DROPME" }) });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string; invalidFields?: string[] };
     expect(body.error).toBe(REJECT_CODE);

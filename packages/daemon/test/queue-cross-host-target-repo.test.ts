@@ -63,8 +63,15 @@ function makeHarness() {
     await next();
   });
   app.route("/api/queue", queueRoutes());
-  const post = (path: string, body: Record<string, unknown>) =>
-    app.request(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const post = (path: string, body: Record<string, unknown>) => {
+    // P21 I3: create/handoff derive the sender from the transport header; header==body claim ⇒ tolerated.
+    const sender = body["sourceSession"] ?? body["fromSession"] ?? body["actorSession"];
+    return app.request(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(sender ? { "X-OpenRig-Session": String(sender) } : {}) },
+      body: JSON.stringify(body),
+    });
+  };
   const rowCount = () => (db.prepare("SELECT COUNT(*) c FROM queue_items").get() as { c: number }).c;
   return { db, repo, post, rowCount, forwards: () => forwardCount };
 }

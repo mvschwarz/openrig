@@ -153,7 +153,7 @@ describe("coordination integration — stream → queue → inbox handoff chain"
     });
     const closeRes = await app.request(`/api/queue/${newQitem}/update`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "build@conveyor" }, // P21 I3: update derives actor from the transport header
       body: JSON.stringify({
         actorSession: "build@conveyor",
         state: "done",
@@ -175,14 +175,14 @@ describe("coordination integration — stream → queue → inbox handoff chain"
   it("hot-potato strict-rejection blocks done without closure_reason at every layer", async () => {
     const create = await app.request("/api/queue/create", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" }, // P21 I3: create derives sender from the transport header
       body: JSON.stringify({ sourceSession: "a@r", destinationSession: "b@r", body: "x" }),
     });
     const item = (await create.json()) as { qitemId: string };
 
     const update = await app.request(`/api/queue/${item.qitemId}/update`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" }, // P21 I3: update derives actor from the transport header
       body: JSON.stringify({ actorSession: "b@r", state: "done" }),
     });
     expect(update.status).toBe(400);
@@ -202,7 +202,7 @@ describe("coordination integration — stream → queue → inbox handoff chain"
     });
     const create = await app.request("/api/queue/create", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" }, // P21 I3: create derives sender from the transport header
       body: JSON.stringify({ sourceSession: "a@r", destinationSession: "b@r", body: "y" }),
     });
     const item = (await create.json()) as { qitemId: string };
