@@ -118,11 +118,17 @@ export function checkModeAbsolute(sourceDir, targetDir, exec = execFileSync) {
   return { stale: changes.length > 0, changes, output };
 }
 
-const SHIP_CATEGORIES = [
+// The product_public categories the mirror's ship set CONSUMES. Exported so the refs→membership
+// chain gate (leg 2) can prove every oracle category is consumed — a category present in the oracle
+// but absent here is silently accepted-and-dropped (the 0.4.8/864cea6b stranding: the PM's
+// `restored_role_pm_selected` re-add landed in the oracle but this list never read it, so the 10
+// pod/pm skills were never re-shipped despite being membership-selected).
+export const SHIP_CATEGORIES = [
   "clean",
   "ship_after_fix",
   "ship_misses_add",
   "sanitize_borderlines_ship",
+  "restored_role_pm_selected",
 ];
 
 export function shipSetFromMembership(membership) {

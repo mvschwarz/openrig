@@ -534,7 +534,7 @@ test("stagePublicSkills is deterministic for the same clean input", async () => 
   }
 });
 
-test("shipSetFromMembership consumes exactly the five shipping categories", async () => {
+test("shipSetFromMembership consumes exactly the six shipping categories", async () => {
   const mirror = await import("./mirror-skills.mjs");
   assert.equal(
     typeof mirror.shipSetFromMembership,
@@ -549,6 +549,9 @@ test("shipSetFromMembership consumes exactly the five shipping categories", asyn
       ship_after_fix: ["after", "duplicate"],
       ship_misses_add: ["miss"],
       sanitize_borderlines_ship: ["sanitize"],
+      // P6(A) leg-2 fix: restored_role_pm_selected is now a CONSUMED ship category. Before the fix
+      // this member fell out of the ship set silently (the 0.4.8/864cea6b stranding); it must ship.
+      restored_role_pm_selected: ["restored"],
     },
     vendored_ship_with_provenance: ["vendored"],
     not_public: {
@@ -563,6 +566,7 @@ test("shipSetFromMembership consumes exactly the five shipping categories", asyn
     "clean",
     "duplicate",
     "miss",
+    "restored",
     "sanitize",
     "vendored",
   ]);
