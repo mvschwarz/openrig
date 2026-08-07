@@ -20,6 +20,9 @@ describe("SeatHandoverService", () => {
   let listPanes: ReturnType<typeof vi.fn>;
   let killSession: ReturnType<typeof vi.fn>;
   let respawnPane: ReturnType<typeof vi.fn>;
+  let setRemainOnExit: ReturnType<typeof vi.fn>;
+  let signalPaneProcess: ReturnType<typeof vi.fn>;
+  let isPaneDead: ReturnType<typeof vi.fn>;
   let sendText: ReturnType<typeof vi.fn>;
   let sendKeys: ReturnType<typeof vi.fn>;
   let capturePaneScreen: ReturnType<typeof vi.fn>;
@@ -42,6 +45,9 @@ describe("SeatHandoverService", () => {
     listPanes = vi.fn(async () => [{ id: "%9", index: 0, cwd: "/project", width: 80, height: 24, active: true }]);
     killSession = vi.fn(async () => ({ ok: true }));
     respawnPane = vi.fn(async () => ({ ok: true }));
+    setRemainOnExit = vi.fn(async () => ({ ok: true }));
+    signalPaneProcess = vi.fn(async () => ({ ok: true }));
+    isPaneDead = vi.fn(async () => true); // cutover: retiree exits gracefully on SIGTERM
     sendText = vi.fn(async () => ({ ok: true }));
     sendKeys = vi.fn(async () => ({ ok: true }));
     capturePaneScreen = vi.fn(async () => "predecessor screen tail");
@@ -62,7 +68,7 @@ describe("SeatHandoverService", () => {
   });
 
   function tmux(): TmuxAdapter {
-    return { hasSession, createSession, listPanes, killSession, respawnPane, sendText, sendKeys, capturePaneScreen } as unknown as TmuxAdapter;
+    return { hasSession, createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, sendText, sendKeys, capturePaneScreen } as unknown as TmuxAdapter;
   }
 
   function codexAdapter(): RuntimeAdapter {

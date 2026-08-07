@@ -382,20 +382,20 @@ export class TmuxAdapter {
     }
   }
 
-  /** Seat-handover cutover (plan 411c43de): respawn a pane IN PLACE with a new command (`-k` kills the
-   *  retiree's pane process first). The successor takes the retiree's EXACT pane, so native scrollback
-   *  survives untouched — predecessor history stays above the successor boot, same window, same pane.
-   *  The command is shell-quoted as ONE unit (tmux runs it via the shell).
+  /** Seat-handover cutover (plan 411c43de): respawn a pane IN PLACE (reuse the retiree's EXACT pane) so
+   *  the successor boots below the predecessor's history — same window, same pane, predecessor scrollback
+   *  PRESERVED above the boot. The command is shell-quoted as ONE unit (tmux runs it via the shell).
+   *
+   *  ⚠ NO `-k`: empirically (tmux 3.6a) `respawn-pane -k` force-kills+respawns atomically and CLEARS the
+   *  pane's scrollback — defeating the money-proof. So the cutover terminates the retiree FIRST (graceful
+   *  exit + `setRemainOnExit(true)` so the pane survives dead), waits for `isPaneDead`, then calls this
+   *  WITHOUT -k on the already-dead pane — which preserves the history. respawn-pane refuses a still-live
+   *  pane ("still active"), which is the correct guard: never respawn over a live retiree.
    *
    *  Optional `cwd`/`env` inject the successor's start-directory + OpenRig identity env onto the reused
-   *  pane via respawn-pane's `-c`/`-e` flags (tmux ≥3.0) — the SAME mechanism createSession uses, because
-   *  a respawn (unlike new-session) carries no fresh environment of its own. Any flags precede the
-   *  command, which always stays LAST (tmux treats the trailing operand as the shell-command).
-   *
-   *  `command` is OPTIONAL: omitting it re-runs the pane's creation command, which for every OpenRig
-   *  seat is the default login shell (the harness is send-keys'd INTO a shell, never exec'd as the pane
-   *  command — verified on tmux 3.6a). That is exactly what the cutover successor wants: a fresh shell
-   *  in the retiree's pane for launchHarness to drive, with the predecessor scrollback intact above. */
+   *  pane via respawn-pane's `-c`/`-e` flags (tmux ≥3.0), the SAME mechanism createSession uses. Any flags
+   *  precede the command, which always stays LAST. `command` is OPTIONAL: omitting it re-runs the pane's
+   *  creation command (the default login shell) — the fresh shell the cutover successor's launchHarness drives. */
   async respawnPane(
     paneTarget: string,
     command?: string,
@@ -406,9 +406,50 @@ export class TmuxAdapter {
       ? Object.entries(opts.env).map(([k, v]) => ` -e ${shellQuote(`${k}=${v}`)}`).join("")
       : "";
     const commandArg = command != null && command.length > 0 ? ` ${shellQuote(command)}` : "";
-    const cmd = `tmux respawn-pane -k -t ${shellQuote(paneTarget)}${cwdFlag}${envFlags}${commandArg}`;
+    const cmd = `tmux respawn-pane -t ${shellQuote(paneTarget)}${cwdFlag}${envFlags}${commandArg}`;
     try {
       await this.exec(cmd);
+      return { ok: true };
+    } catch (err) {
+      return classifyWriteError(err);
+    }
+  }
+
+  /** Seat-handover cutover: set the pane-scoped `remain-on-exit` so the pane SURVIVES (goes dead, not
+   *  destroyed) when the retiree process exits — holding its scrollback for the successor's respawn.
+   *  Set to `on` BEFORE the retiree is signalled to exit (else the pane is destroyed on exit and there
+   *  is nothing to respawn into). */
+  async setRemainOnExit(paneTarget: string, on: boolean): Promise<TmuxResult> {
+    const cmd = `tmux set-option -p -t ${shellQuote(paneTarget)} remain-on-exit ${on ? "on" : "off"}`;
+    try {
+      await this.exec(cmd);
+      return { ok: true };
+    } catch (err) {
+      return classifyWriteError(err);
+    }
+  }
+
+  /** Seat-handover cutover: is the pane's process dead (the retiree exited; the pane held by
+   *  remain-on-exit)? The gate the cutover polls before respawn-no-k. Never throws → false on error. */
+  async isPaneDead(paneId: string): Promise<boolean> {
+    try {
+      const output = await this.exec(`tmux display-message -p -t ${shellQuote(paneId)} "#{pane_dead}"`);
+      return output.trim() === "1";
+    } catch {
+      return false;
+    }
+  }
+
+  /** Seat-handover cutover: signal the pane's foreground process (the retiree) — `TERM` for the graceful
+   *  exit-in-place, `KILL` for the bounded-timeout force fallback. Resolves the pane pid then `kill`s it;
+   *  an unresolvable pid is a structured, non-throwing failure. */
+  async signalPaneProcess(paneId: string, signal: "TERM" | "KILL"): Promise<TmuxResult> {
+    const pid = await this.getPanePid(paneId);
+    if (pid == null) {
+      return { ok: false, code: "pane_pid_unavailable", message: `Could not resolve the pane pid for "${paneId}".` };
+    }
+    try {
+      await this.exec(`kill -${signal} ${pid}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);

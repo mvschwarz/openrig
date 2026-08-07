@@ -14,6 +14,9 @@ describe("SuccessorSessionLauncher", () => {
   let listPanes: ReturnType<typeof vi.fn>;
   let killSession: ReturnType<typeof vi.fn>;
   let respawnPane: ReturnType<typeof vi.fn>;
+  let setRemainOnExit: ReturnType<typeof vi.fn>;
+  let signalPaneProcess: ReturnType<typeof vi.fn>;
+  let isPaneDead: ReturnType<typeof vi.fn>;
   let launchHarness: ReturnType<typeof vi.fn>;
   let checkReady: ReturnType<typeof vi.fn>;
 
@@ -24,6 +27,10 @@ describe("SuccessorSessionLauncher", () => {
     listPanes = vi.fn(async () => [{ id: "%7", index: 0, cwd: "/w", width: 80, height: 24, active: true }]);
     killSession = vi.fn(async () => ({ ok: true }));
     respawnPane = vi.fn(async () => ({ ok: true }));
+    setRemainOnExit = vi.fn(async () => ({ ok: true }));
+    signalPaneProcess = vi.fn(async () => ({ ok: true }));
+    // Cutover: default = retiree exits gracefully (dead right after SIGTERM), so no forced fallback.
+    isPaneDead = vi.fn(async () => true);
     // A live successor is launched via the runtime adapter (launchHarness + readiness), not left as a
     // bare shell. Default mock: launches ready with a scraped resume token.
     launchHarness = vi.fn(async () => ({ ok: true, resumeToken: "codex-thread-xyz", resumeType: "codex_id" }));
@@ -37,22 +44,24 @@ describe("SuccessorSessionLauncher", () => {
   }
 
   function launcher(tmuxOptionDefaults?: TmuxOptionDefaultsApplier): SuccessorSessionLauncher {
-    const tmux = { createSession, listPanes, killSession, respawnPane } as unknown as TmuxAdapter;
+    const tmux = { createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead } as unknown as TmuxAdapter;
     return new SuccessorSessionLauncher(tmux, discoveryRepo, {
       sessionEnv: { OPENRIG_HOME: "/home", HOME: "/daemon-home", CODEX_HOME: "/daemon-codex" },
       newId: () => "01ABCDEFG",
       runtimeAdapters: { codex: fakeAdapter("codex") },
       readinessTimeoutMs: 50,
       sleep: async () => {},
+      exitPollMs: 1,
+      exitTimeoutMs: 5,
       tmuxOptionDefaults,
     });
   }
 
-  it("CUTOVER: respawns the successor into the DEPARTING pane (preserved name, same pane id) — no fresh session", async () => {
-    // A SEAT = one durable tmux session; the successor takes over the retiree's EXACT pane via
-    // respawn-pane so native scrollback survives (predecessor history stays above the successor boot).
-    // No fresh new-session, no -h shuffle: the canonical session name is preserved and the pane id is
-    // unchanged. respawn-pane with no command re-runs the pane's default login shell for launchHarness.
+  it("CUTOVER: terminates the retiree then respawns (no -k) into the DEPARTING pane (preserved name, same pane id)", async () => {
+    // A SEAT = one durable tmux session; the successor takes over the retiree's EXACT pane so native
+    // scrollback survives. The retiree is terminated IN PLACE first (remain-on-exit → graceful SIGTERM),
+    // then respawn-pane WITHOUT -k reuses the dead pane (respawn -k would CLEAR scrollback). No fresh
+    // new-session, no -h shuffle: the canonical session name is preserved and the pane id is unchanged.
     listPanes.mockResolvedValue([{ id: "%42", index: 0, cwd: "/w", width: 80, height: 24, active: true }]);
 
     const res = await launcher().createSuccessor({
@@ -83,6 +92,14 @@ describe("SuccessorSessionLauncher", () => {
       CODEX_HOME: "/daemon-codex",
     });
 
+    // Retiree terminated IN PLACE before the respawn: remain-on-exit set, then GRACEFUL SIGTERM; the
+    // pane went dead on the first probe, so NO forced KILL. respawn happens only after the pane is dead.
+    expect(setRemainOnExit).toHaveBeenCalledWith("%42", true);
+    expect(signalPaneProcess).toHaveBeenCalledWith("%42", "TERM");
+    expect(signalPaneProcess).not.toHaveBeenCalledWith("%42", "KILL");
+    expect(setRemainOnExit.mock.invocationCallOrder[0]!).toBeLessThan(signalPaneProcess.mock.invocationCallOrder[0]!);
+    expect(respawnPane.mock.invocationCallOrder[0]!).toBeGreaterThan(signalPaneProcess.mock.invocationCallOrder[0]!);
+
     // launchHarness drives the harness into the SAME preserved session/pane; readiness ran; the
     // launch resume token is captured + returned (persisted at commit by the composer, never here).
     expect(launchHarness).toHaveBeenCalledTimes(1);
@@ -94,7 +111,7 @@ describe("SuccessorSessionLauncher", () => {
     expect(res.resumeType).toBe("codex_id");
     expect(res.tmuxSession).toBe("dev-impl@rig");
     expect(res.tmuxPane).toBe("%42");
-    // Order: resolve departing pane → respawn in place → launch the harness into it.
+    // Order: resolve departing pane → terminate → respawn in place → launch the harness into it.
     expect(respawnPane.mock.invocationCallOrder[0]!).toBeGreaterThan(listPanes.mock.invocationCallOrder[0]!);
     expect(launchHarness.mock.invocationCallOrder[0]!).toBeGreaterThan(respawnPane.mock.invocationCallOrder[0]!);
 
@@ -104,6 +121,35 @@ describe("SuccessorSessionLauncher", () => {
     expect(row).toMatchObject({ tmuxSession: "dev-impl@rig", tmuxPane: "%42", status: "active", claimedNodeId: null });
     expect(db.prepare("SELECT COUNT(*) AS n FROM bindings").get()).toEqual({ n: 0 });
     expect(db.prepare("SELECT COUNT(*) AS n FROM sessions").get()).toEqual({ n: 0 });
+  });
+
+  it("CUTOVER forced fallback: retiree survives graceful SIGTERM → bounded SIGKILL, then respawns", async () => {
+    listPanes.mockResolvedValue([{ id: "%42", index: 0, cwd: "/w", width: 80, height: 24, active: true }]);
+    // The pane stays live through the graceful window; only the forced KILL makes it dead.
+    let killed = false;
+    signalPaneProcess.mockImplementation(async (_p: string, sig: string) => { if (sig === "KILL") killed = true; return { ok: true }; });
+    isPaneDead.mockImplementation(async () => killed);
+
+    const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "dev-impl@rig" });
+
+    expect(res.ok).toBe(true);
+    expect(signalPaneProcess).toHaveBeenCalledWith("%42", "TERM");
+    expect(signalPaneProcess).toHaveBeenCalledWith("%42", "KILL"); // graceful failed → forced fallback
+    expect(respawnPane).toHaveBeenCalledTimes(1); // respawn only after the pane died (post-KILL)
+    expect(launchHarness).toHaveBeenCalledTimes(1);
+  });
+
+  it("retiree NEVER exits (survives TERM and KILL) → structured retiree_not_terminated, NO respawn (never clobber a live retiree)", async () => {
+    isPaneDead.mockResolvedValue(false); // never becomes dead
+    const res = await launcher().createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
+    expect(res).toMatchObject({ ok: false, step: "create_successor", code: "retiree_not_terminated" });
+    expect(signalPaneProcess).toHaveBeenCalledWith("%7", "TERM");
+    expect(signalPaneProcess).toHaveBeenCalledWith("%7", "KILL");
+    // The pane never died → we NEVER respawn (respawn over a live retiree would fail/clobber) and never launch.
+    expect(respawnPane).not.toHaveBeenCalled();
+    expect(launchHarness).not.toHaveBeenCalled();
+    expect(killSession).not.toHaveBeenCalled();
+    expect(discoveryRepo.listDiscovered()).toHaveLength(0);
   });
 
   it("UNWIND INVARIANT: a failed successor launch NEVER kills the retiree's preserved session — it stays re-wakeable from its session file", async () => {
@@ -154,8 +200,8 @@ describe("SuccessorSessionLauncher", () => {
   });
 
   it("no runtime adapter for the seat's runtime → structured failure, preserved seat NOT killed", async () => {
-    const tmux = { createSession, listPanes, killSession, respawnPane } as unknown as TmuxAdapter;
-    const noAdapter = new SuccessorSessionLauncher(tmux, discoveryRepo, { newId: () => "01ABCDEFG", runtimeAdapters: {} });
+    const tmux = { createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead } as unknown as TmuxAdapter;
+    const noAdapter = new SuccessorSessionLauncher(tmux, discoveryRepo, { newId: () => "01ABCDEFG", runtimeAdapters: {}, exitPollMs: 1, exitTimeoutMs: 5 });
     const res = await noAdapter.createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
     expect(res).toMatchObject({ ok: false, step: "start_agent", code: "successor_runtime_unsupported" });
     expect(killSession).not.toHaveBeenCalled();

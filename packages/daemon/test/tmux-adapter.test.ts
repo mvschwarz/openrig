@@ -1059,20 +1059,21 @@ describe("TmuxAdapter", () => {
   // Seat-handover cutover (plan 411c43de): the successor RESUMES INTO THE SAME PANE via respawn-pane,
   // so native scrollback survives (predecessor history stays above the successor boot).
   describe("respawnPane", () => {
-    it("respawns the pane in place (-k kills the retiree first) with the quoted target + command", async () => {
+    it("respawns the pane in place WITHOUT -k (retiree already exited; -k would CLEAR scrollback)", async () => {
+      // Empirically (tmux 3.6a): respawn-pane -k CLEARS the pane's scrollback, defeating the money-proof.
+      // The cutover terminates the retiree FIRST (graceful exit + remain-on-exit), then respawns the
+      // now-dead pane with NO -k — which PRESERVES the predecessor history above the successor boot.
       const exec = vi.fn<ExecFn>().mockResolvedValue("");
       const adapter = new TmuxAdapter(exec);
 
       await adapter.respawnPane("%3", "openrig-agent --resume tok");
 
       expect(exec).toHaveBeenCalledOnce();
-      expect(exec.mock.calls[0]![0]).toBe("tmux respawn-pane -k -t '%3' 'openrig-agent --resume tok'");
+      expect(exec.mock.calls[0]![0]).toBe("tmux respawn-pane -t '%3' 'openrig-agent --resume tok'");
+      expect(exec.mock.calls[0]![0]).not.toContain(" -k"); // -k clears scrollback — never used
     });
 
     it("with env + cwd injects -c and -e flags (successor self-identifies in the reused pane), command stays last", async () => {
-      // Seat-handover cutover: the successor takes over the retiree's pane via respawn-pane, so its
-      // OpenRig identity env must be injected on the reused pane exactly like createSession's -e flags
-      // (there is no fresh new-session to carry it). Mirrors createSession's -c/-e construction.
       const exec = vi.fn<ExecFn>().mockResolvedValue("");
       const adapter = new TmuxAdapter(exec);
 
@@ -1083,16 +1084,11 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux respawn-pane -k -t '%3' -c '/w' -e 'OPENRIG_NODE_ID=node123' -e 'OPENRIG_SESSION_NAME=dev-impl@rig' 'openrig-agent --resume tok'",
+        "tmux respawn-pane -t '%3' -c '/w' -e 'OPENRIG_NODE_ID=node123' -e 'OPENRIG_SESSION_NAME=dev-impl@rig' 'openrig-agent --resume tok'",
       );
     });
 
     it("with NO command re-runs the pane's default login shell (omits the trailing command arg)", async () => {
-      // Seat-handover cutover: the successor takes over the retiree's pane and needs a FRESH login
-      // shell for launchHarness to send-keys the harness into. respawn-pane with no command re-runs
-      // the pane's creation command — which for every OpenRig seat is the default shell, because the
-      // harness is send-keys'd into a shell, never exec'd as the pane command (verified on tmux 3.6a).
-      // So we omit the command arg entirely (env/cwd still injected onto the reused pane).
       const exec = vi.fn<ExecFn>().mockResolvedValue("");
       const adapter = new TmuxAdapter(exec);
 
@@ -1103,7 +1099,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux respawn-pane -k -t '%3' -c '/w' -e 'OPENRIG_SESSION_NAME=dev-impl@rig'",
+        "tmux respawn-pane -t '%3' -c '/w' -e 'OPENRIG_SESSION_NAME=dev-impl@rig'",
       );
     });
 
@@ -1111,6 +1107,53 @@ describe("TmuxAdapter", () => {
       const adapter = new TmuxAdapter(mockExec({ "respawn-pane": { error: NO_SERVER_ERROR } }));
       const result = await adapter.respawnPane("%3", "cmd");
       expect(result.ok).toBe(false);
+    });
+  });
+
+  describe("setRemainOnExit", () => {
+    it("sets the pane-scoped remain-on-exit option so the pane survives the retiree's exit (for respawn)", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+      await adapter.setRemainOnExit("%3", true);
+      expect(exec.mock.calls[0]![0]).toBe("tmux set-option -p -t '%3' remain-on-exit on");
+    });
+    it("clears it with off", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+      await adapter.setRemainOnExit("%3", false);
+      expect(exec.mock.calls[0]![0]).toBe("tmux set-option -p -t '%3' remain-on-exit off");
+    });
+  });
+
+  describe("isPaneDead", () => {
+    it("returns true when pane_dead is 1 (retiree has exited; pane held by remain-on-exit)", async () => {
+      const adapter = new TmuxAdapter(mockExec({ "display-message": { stdout: "1\n" } }));
+      expect(await adapter.isPaneDead("%3")).toBe(true);
+    });
+    it("returns false when pane_dead is 0 (retiree still live)", async () => {
+      const adapter = new TmuxAdapter(mockExec({ "display-message": { stdout: "0\n" } }));
+      expect(await adapter.isPaneDead("%3")).toBe(false);
+    });
+    it("returns false (never throws) when the probe errors", async () => {
+      const adapter = new TmuxAdapter(mockExec({ "display-message": { error: NO_SERVER_ERROR } }));
+      expect(await adapter.isPaneDead("%3")).toBe(false);
+    });
+  });
+
+  describe("signalPaneProcess", () => {
+    it("sends the given signal to the pane's foreground pid (graceful TERM / fallback KILL)", async () => {
+      const calls: string[] = [];
+      const exec = vi.fn<ExecFn>(async (cmd: string) => { calls.push(cmd); return cmd.includes("pane_pid") ? "4242\n" : ""; });
+      const adapter = new TmuxAdapter(exec);
+      const res = await adapter.signalPaneProcess("%3", "TERM");
+      expect(res.ok).toBe(true);
+      expect(calls.some((c) => c.includes("#{pane_pid}") && c.includes("'%3'"))).toBe(true);
+      expect(calls).toContain("kill -TERM 4242");
+    });
+    it("returns a failure (no throw) when the pane pid is unavailable", async () => {
+      const adapter = new TmuxAdapter(mockExec({ "display-message": { stdout: "\n" } }));
+      const res = await adapter.signalPaneProcess("%3", "KILL");
+      expect(res.ok).toBe(false);
     });
   });
 });

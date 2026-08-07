@@ -71,6 +71,8 @@ export class SuccessorSessionLauncher {
   private readinessTimeoutMs: number;
   private sleep: (ms: number) => Promise<void>;
   private tmuxOptionDefaults: TmuxOptionDefaultsApplier | null;
+  private exitPollMs: number;
+  private exitTimeoutMs: number;
 
   constructor(
     tmuxAdapter: TmuxAdapter,
@@ -92,6 +94,9 @@ export class SuccessorSessionLauncher {
        * its just-created session. Omitted → option application is skipped.
        */
       tmuxOptionDefaults?: TmuxOptionDefaultsApplier;
+      /** Cutover retiree-exit poll interval + total bounded timeout (per graceful/forced phase). */
+      exitPollMs?: number;
+      exitTimeoutMs?: number;
     } = {},
   ) {
     this.tmuxAdapter = tmuxAdapter;
@@ -102,6 +107,8 @@ export class SuccessorSessionLauncher {
     this.readinessTimeoutMs = opts.readinessTimeoutMs ?? 30_000;
     this.sleep = opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.tmuxOptionDefaults = opts.tmuxOptionDefaults ?? null;
+    this.exitPollMs = opts.exitPollMs ?? 100;
+    this.exitTimeoutMs = opts.exitTimeoutMs ?? 3_000;
   }
 
   /**
@@ -154,11 +161,15 @@ export class SuccessorSessionLauncher {
       };
     }
 
-    // 2. Respawn the successor INTO the retiree's pane in place. respawn-pane -k force-replaces the
-    //    retiree with a fresh default login shell (no command) carrying the successor's identity env +
-    //    cwd; the pane id and window are unchanged, so native scrollback survives. This is the swap: the
-    //    retiree exits in place (session file = wake target). A respawn failure returns a structured
-    //    create_successor error; we do NOT kill the pane (the seat stays re-wakeable from its file).
+    // 2. Terminate the retiree IN PLACE, then respawn the now-dead pane WITHOUT -k so native scrollback
+    //    survives (respawn-pane -k CLEARS the pane history — verified on tmux 3.6a; that would defeat the
+    //    money-proof). The swap: set remain-on-exit so the pane survives the exit → graceful SIGTERM
+    //    ("exits in place"; also protects the provider session state the successor's resume depends on) →
+    //    bounded-timeout SIGKILL fallback (pinned degraded path) → respawn-pane (no -k) on the dead pane.
+    const terminated = await this.terminateRetiree(pane.id);
+    if (!terminated.ok) {
+      return { ok: false, code: "retiree_not_terminated", step: "create_successor", message: terminated.message };
+    }
     const respawned = await this.tmuxAdapter.respawnPane(pane.id, undefined, { cwd, env });
     if (!respawned.ok) {
       return {
@@ -320,6 +331,37 @@ export class SuccessorSessionLauncher {
       await this.sleep(delay);
       delay = Math.min(delay * 2, maxDelay);
     }
+  }
+
+  /**
+   * Cutover: terminate the retiree occupant in its pane so the successor can respawn into it WHILE
+   * PRESERVING scrollback. `setRemainOnExit(true)` FIRST (so the pane survives dead, not destroyed, on
+   * exit); graceful SIGTERM ("exits in place" — a clean exit also protects the provider session state the
+   * successor's resume depends on); a bounded-timeout SIGKILL is the pinned DEGRADED fallback. Returns
+   * which path terminated the retiree, or a failure if it never became dead (then commit never runs).
+   * (Graceful signal = SIGTERM as the desk-provisional default under build-ahead; dev-planner ratifies
+   * the exact graceful mechanism — SIGTERM vs a runtime-specific quit — at their resume.)
+   */
+  private async terminateRetiree(
+    paneId: string,
+  ): Promise<{ ok: true; path: "graceful" | "forced" } | { ok: false; message: string }> {
+    await this.tmuxAdapter.setRemainOnExit(paneId, true);
+    await this.tmuxAdapter.signalPaneProcess(paneId, "TERM");
+    if (await this.waitPaneDead(paneId)) return { ok: true, path: "graceful" };
+    // Graceful window elapsed — force-kill (the pinned degraded path).
+    await this.tmuxAdapter.signalPaneProcess(paneId, "KILL");
+    if (await this.waitPaneDead(paneId)) return { ok: true, path: "forced" };
+    return { ok: false, message: `Retiree in pane "${paneId}" did not exit after graceful TERM + forced KILL.` };
+  }
+
+  /** Poll `isPaneDead` up to the bounded exit timeout (count-bounded so injected no-op sleeps stay fast). */
+  private async waitPaneDead(paneId: string): Promise<boolean> {
+    const maxPolls = Math.max(1, Math.ceil(this.exitTimeoutMs / this.exitPollMs));
+    for (let i = 0; i < maxPolls; i++) {
+      if (await this.tmuxAdapter.isPaneDead(paneId)) return true;
+      await this.sleep(this.exitPollMs);
+    }
+    return this.tmuxAdapter.isPaneDead(paneId);
   }
 
   /**
