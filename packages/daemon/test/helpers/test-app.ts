@@ -103,6 +103,47 @@ import fs from "node:fs";
  *  DB-reopen tests migrate IDENTICALLY to createFullTestDb. */
 export const migrationsForFullTestDb = [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, rigPolicyProvenanceSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, resumeVerificationSchema, seatIdentityVerdictsSchema, selfHostIdentitySchema, occupantTenuresSchema, daemonLifecycleSchema, watchdogJobsSchema, occupantGenerationStampsSchema, projectionManifestSchema, watchdogTargetGenerationSchema];
 
+/**
+ * P24 — the DECLARED exclusions for {@link migrationsForFullTestDb}. That list is deliberately a
+ * schema-MINIMAL core-topology DB (node / rig / session / pod / discovery / stream / queue items+
+ * transitions / projection) shared by ~135 suites; each per-subsystem table below is a shipped
+ * migration intentionally omitted so the shared fixture stays lean. The exclusion is SAFE evidence,
+ * not a guess: the fixture omits these AND all ~135 consumers pass, which proves no createFullTestDb
+ * consumer reads them — a subsystem that needs its table migrates that migration in its own suite's
+ * inline list. The P24 guard (migration-fixture-parity.test.ts) fails LOUD if a shipped migration is
+ * neither in the list above nor declared here (the 064/066/067 silent-omission tax).
+ *
+ * TO RE-EVALUATE any entry: check whether a createFullTestDb consumer now reads that table/column
+ * (e.g. a new shared read). If one does, the migration must MOVE INTO migrationsForFullTestDb (delete
+ * its exclusion); the guard's redundant-exclusion check then keeps the two in sync.
+ */
+export const migrationsForFullTestDbExclusions: Record<string, string> = {
+  "026_inbox_entries.sql": "inbox subsystem table — not on the shared core edge (inbox suites migrate it inline).",
+  "027_outbox_entries.sql": "outbox subsystem table — not on the shared core edge (outbox suites migrate it inline).",
+  "028_project_classifications.sql": "project-classification subsystem table — classifier suites migrate it inline.",
+  "029_classifier_leases.sql": "project-classification subsystem table — classifier-lease suites migrate it inline.",
+  "030_views_custom.sql": "custom-views subsystem table — views suites migrate it inline.",
+  "032_watchdog_history.sql": "watchdog history table — watchdog suites migrate it inline (watchdog_jobs is the only watchdog base the core edge carries).",
+  "033_workflow_specs.sql": "workflow subsystem table — workflow-* suites migrate the workflow schema inline.",
+  "034_workflow_instances.sql": "workflow subsystem table — workflow-* suites migrate the workflow schema inline.",
+  "035_workflow_step_trails.sql": "workflow subsystem table — workflow-* suites migrate the workflow schema inline.",
+  "036_watchdog_policy_enum_extension.sql": "watchdog policy extension — watchdog suites migrate it inline.",
+  "037_mission_control_actions.sql": "mission-control subsystem table — mission-control + review-freeze suites migrate it inline.",
+  "038_workspace_primitive.sql": "workspace subsystem table — workspace suites migrate it inline.",
+  "039_queue_target_repo.sql": "queue-spine EXTENSION beyond core items+transitions — suites needing target_repo (queue-routes, queue-target-repo) migrate it inline.",
+  "040_workflow_specs_diagnostic.sql": "workflow subsystem table — workflow-* suites migrate the workflow schema inline.",
+  "044_queue_item_summary.sql": "queue-spine EXTENSION column — suites needing the summary column migrate it inline.",
+  "047_events_node_type_index.sql": "events perf index — index/perf suites add it inline; the core edge uses the base events table.",
+  "048_queue_item_evidence_ref.sql": "queue-spine EXTENSION column — suites needing evidence_ref migrate it inline.",
+  "049_workflow_instance_version.sql": "workflow subsystem column — workflow-* suites migrate the workflow schema inline.",
+  "050_workflow_spec_json.sql": "workflow subsystem column — workflow-* suites migrate the workflow schema inline.",
+  "051_workflow_resume.sql": "workflow subsystem column — workflow-* suites migrate the workflow schema inline.",
+  "052_workflow_instance_bound_rig.sql": "workflow subsystem column — workflow-* suites migrate the workflow schema inline.",
+  "053_sessions_node_id_index.sql": "sessions perf index — index/perf suites add it inline; the core edge uses the base sessions table.",
+  "054_queue_transitions_archive.sql": "queue-retention EXTENSION table — queue-retention suites migrate it inline.",
+  "062_usage_samples.sql": "usage-metering subsystem table — usage suites migrate it inline.",
+};
+
 export function createFullTestDb(): Database.Database {
   const db = createDb();
   migrate(db, migrationsForFullTestDb);
