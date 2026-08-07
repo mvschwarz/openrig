@@ -95,6 +95,12 @@ describe("seat-handover cutover money-proof (isolated tmux, both retiree-exit pa
           readinessTimeoutMs: 3000, sleep,
         });
 
+        // (i-a) capture the retiree PROCESS (the pane's shell PID) BEFORE cutover — the
+        // ghost-wake source (specimen 5) was gen-1's SESSION-LOCAL memory-only cron, which
+        // lives and dies INSIDE this process. Proving the retiree is dead post-handover is
+        // the class-closing pin: a session-local automation cannot fire once its process is gone.
+        const retireePid = (await tmux(`list-panes -t ${q(SEAT)} -F '#{pane_pid}'`)).trim();
+
         const result: any = await service.handover({ seatRef: SEAT, reason: "context ~85%", source: "fresh", operator: "orch@seat" });
         await sleep(500);
         const paneAfter = (await tmux(`list-panes -t ${q(SEAT)} -F '#{pane_id}'`)).trim();
@@ -107,6 +113,15 @@ describe("seat-handover cutover money-proof (isolated tmux, both retiree-exit pa
         expect(predLines, "predecessor deep history PRESERVED in native scrollback").toBeGreaterThan(0);
         expect(cap, "successor booted in the same pane").toContain("SUCCESSOR v2");
         expect(cap, "stopgap from-record recap fired").toContain("from record");
+
+        // (i-a) THE CLASS-CLOSING PIN: the retiree process is DEAD post-handover, so its
+        // session-local memory-only automations (crons/timers registered in-process — the
+        // ghost-wake source) died with it. A regression that let the retiree survive the
+        // cutover (or respawned WITHOUT terminating it first) flips this red.
+        let retireeAlive = true;
+        try { execFileSync("sh", ["-c", `kill -0 ${retireePid}`], { env: cleanEnv, stdio: "ignore" }); }
+        catch { retireeAlive = false; }
+        expect(retireeAlive, `${graceful ? "graceful" : "forced"} retiree process (pid ${retireePid}) DEAD post-handover — session-local automations die with it`).toBe(false);
         db.close();
       }
     },
