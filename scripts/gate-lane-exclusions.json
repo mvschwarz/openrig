@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "note": "F1 exclusion-ledger — base-health suites EXCLUDED from the gate. EMPTY by design: the named-6 were KILLED (E/C/D/A + B), not excluded, so main is truly green. Any resident MUST carry suite+reason+receipt(A/B)+owner+expiry, expiry MUST NOT outlive cutCeiling, and a past-expiry resident flips the gate RED (mechanical, self-dying). See scripts/gate-lane-ledger.mjs.",
+  "cutCeiling": "2026-09-30",
+  "entries": []
+}

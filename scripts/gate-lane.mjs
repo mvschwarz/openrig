@@ -5,9 +5,10 @@
 //   (advisory, recorded) → run BOTH legs (typecheck AND vitest AND vitest:ui — the two honesty gaps) →
 //   write the C2 verdict (green carries the load it ran under) → release (kernel also frees on death).
 import { spawnSync, execSync } from "node:child_process";
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir, loadavg } from "node:os";
 import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { acquireGateLane, GATE_LANE_PORT } from "./gate-lane-lock.mjs";
 import { renderRefusal, runLegs, buildVerdict, observeForeignLoad } from "./gate-lane-run.mjs";
 
@@ -15,6 +16,18 @@ const RUNTIME_DIR = (() => { const d = join(tmpdir(), "openrig-gate"); mkdirSync
 const HOLDER_INFO = join(RUNTIME_DIR, "gate-lane.holder.json");
 const VERDICT_PATH = process.env.OPENRIG_GATE_VERDICT ?? join(process.cwd(), "gate-lane-verdict.json");
 const SMOKE = process.env.OPENRIG_GATE_LANE_SMOKE === "1"; // skip the real legs (mutex/verdict wiring smoke)
+
+// F1 exclusion-ledger seed (empty by design). Absent/corrupt → treat as EMPTY (strict gate), never a
+// silent skip. cutCeiling comes from the seed so the desk owns it in one place.
+const LEDGER_PATH = join(dirname(fileURLToPath(import.meta.url)), "gate-lane-exclusions.json");
+function loadLedger() {
+  try {
+    const doc = JSON.parse(readFileSync(LEDGER_PATH, "utf8"));
+    return { entries: Array.isArray(doc.entries) ? doc.entries : [], cutCeiling: doc.cutCeiling };
+  } catch {
+    return { entries: [], cutCeiling: undefined };
+  }
+}
 
 function snapshotProcesses() {
   try {
@@ -39,9 +52,12 @@ async function main() {
       ? async (cmd) => { console.log(`[smoke] skip: ${cmd}`); return { ok: true, code: 0 }; }
       : async (cmd) => { const r = spawnSync(cmd, { shell: true, stdio: "inherit" }); return { ok: r.status === 0, code: r.status }; };
     const legs = await runLegs(exec);
-    const verdict = buildVerdict({ legs, foreignLoad, startedAt, endedAt: new Date().toISOString() });
+    const endedAt = new Date().toISOString();
+    const { entries: ledger, cutCeiling } = loadLedger();
+    const verdict = buildVerdict({ legs, foreignLoad, startedAt, endedAt, ledger, now: endedAt, cutCeiling });
     mkdirSync(dirname(VERDICT_PATH), { recursive: true }); // ensure the verdict's home exists
     writeFileSync(VERDICT_PATH, JSON.stringify(verdict, null, 2));
+    console.log(verdict.ledgerState); // in-band LOUD: name every exclusion (or "0 exclusions")
     console.log(`gate: ${verdict.gate.toUpperCase()} — verdict → ${VERDICT_PATH} (legs: ${legs.map((l) => `${l.name}=${l.ok ? "ok" : "FAIL"}`).join(", ")})`);
     exitCode = verdict.gate === "pass" ? 0 : 1;
   } catch (e) {

@@ -67,3 +67,18 @@ test("C2 verdict — a GREEN carries the foreign-load context it ran under (reco
   assert.deepEqual(v.foreignLoad.advisory, ["3 foreign node processes, loadavg 4.10"]);
   assert.equal(v.startedAt, "t0");
 });
+
+test("exclusion-ledger — empty seed stays STRICT; an active resident covering a failed leg → PASS + named", () => {
+  const legs = [{ name: "typecheck", ok: true }, { name: "vitest", ok: false }, { name: "vitest:ui", ok: true }];
+  // EMPTY seed (the shipped reality): the failed vitest leg is uncovered → gate FAIL (strict).
+  const strict = buildVerdict({ legs, foreignLoad: { advisory: [] }, startedAt: "t0", endedAt: "2025-08-10", ledger: [] });
+  assert.equal(strict.gate, "fail");
+  assert.equal(strict.ledger.activeExclusions.length, 0);
+  assert.match(strict.ledgerState, /0 exclusion|no exclusion/i);
+  // With an ACTIVE resident excluding the failed leg → gate PASS, exclusion NAMED in the verdict.
+  const excl = [{ suite: "vitest", reason: "known-flaky", receipt: "A/B abc", owner: "dev-driver", expiry: "2025-08-20" }];
+  const covered = buildVerdict({ legs, foreignLoad: { advisory: [] }, startedAt: "t0", endedAt: "2025-08-10", ledger: excl, cutCeiling: "2025-09-01" });
+  assert.equal(covered.gate, "pass");
+  assert.equal(covered.ledger.activeExclusions.length, 1);
+  assert.match(covered.ledgerState, /vitest/);
+});

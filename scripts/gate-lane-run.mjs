@@ -2,6 +2,8 @@
 // the honesty-gap leg set, and the C2 verdict are unit-tested; the CLI entrypoint (gate-lane.mjs) wires
 // the real mutex + subprocess exec + artifact write around these.
 
+import { resolveGateWithLedger, renderLedgerState } from "./gate-lane-ledger.mjs";
+
 /**
  * P5 — the refusal teaching text. ALWAYS hard-refuses; ALWAYS teaches the port constant. A gate holder is
  * NAMED (pid/started-at); a foreign squatter is HONEST-UNKNOWN (never a fabricated holder).
@@ -56,13 +58,25 @@ export function observeForeignLoad({ loadavg, processes }) {
 
 /**
  * C2-style verdict: a green carries the load context it ran under (RECORDED, not just printed) — a green
- * is only as good as what could have been red. gate = pass iff every leg ok.
+ * is only as good as what could have been red. The gate is resolved AGAINST THE EXCLUSION LEDGER (F1
+ * 4 rails): pass iff every failed leg is COVERED by an active, valid, unexpired resident AND no resident
+ * is expired/invalid. With the shipped EMPTY seed the ledger holds no one, so this collapses to strict
+ * "pass iff every leg ok" — the ledger state (0 exclusions) is still recorded in-band, loud.
  */
-export function buildVerdict({ legs, foreignLoad, startedAt, endedAt }) {
+export function buildVerdict({ legs, foreignLoad, startedAt, endedAt, ledger = [], now, cutCeiling }) {
+  const failures = legs.filter((l) => !l.ok).map((l) => l.name);
+  const ledgerResult = resolveGateWithLedger({
+    failures,
+    ledger,
+    now: now ?? endedAt,
+    ...(cutCeiling ? { cutCeiling } : {}),
+  });
   return {
-    gate: legs.every((l) => l.ok) ? "pass" : "fail",
+    gate: ledgerResult.gate,
     legs,
     foreignLoad,
+    ledger: ledgerResult,
+    ledgerState: renderLedgerState(ledgerResult),
     startedAt,
     endedAt,
   };
