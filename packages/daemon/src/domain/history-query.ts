@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 export type ExecDep = (cmd: string, args: string[]) => Promise<{ stdout: string; exitCode: number }>;
@@ -9,6 +9,33 @@ export interface SearchResult {
   insufficient: boolean;
   noTranscriptDir?: boolean;
   error?: string;
+}
+
+/** One keyword hit from a seat-scoped search, labeled with the generation
+ *  (tenure) segment it fell in — the segments are delimited by the
+ *  `--- SESSION BOUNDARY … ---` markers a seat's log accumulates across tenures. */
+export interface SeatHit {
+  generation: number;
+  text: string;
+}
+
+export type SeatDegradeReason =
+  | "capture_missing"
+  | "capture_empty"
+  | "capture_unreadable"
+  | "boundary_only";
+
+export interface SeatSearchResult {
+  backend: "read" | "none";
+  seat: string;
+  /** count of tenure segments = (boundary markers seen) + 1 */
+  generations: number;
+  hits: SeatHit[];
+  insufficient: boolean;
+  /** honest-degraded signal — never a silent zero-hits that implies the seat never spoke */
+  degraded?: { reason: SeatDegradeReason; message: string };
+  /** large-file advisory (pin 5) — surfaced, never a silent slow read */
+  advisory?: string;
 }
 
 export interface ChatSearchResult {
@@ -74,6 +101,14 @@ function stripAnsi(text: string): string {
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
 }
 
+/** Matches a session-boundary marker line (transcript-store.writeBoundaryMarker
+ *  format): `--- SESSION BOUNDARY: <reason> at <ts> ---`. */
+const SEAT_BOUNDARY_RE = /^--- SESSION BOUNDARY: .* at .* ---\s*$/;
+
+/** Above this size a seat search surfaces a large-file advisory (pin 5) rather
+ *  than reading silently — the full read still runs; the caller is told. */
+const SEAT_LARGE_FILE_BYTES = 25 * 1024 * 1024; // 25 MB
+
 export class HistoryQuery {
   private readonly transcriptsRoot: string;
   private readonly exec: ExecDep;
@@ -124,6 +159,98 @@ export class HistoryQuery {
 
     // Both backends failed (exit code 2+) — honest error
     return { backend: "none", excerpts: [], insufficient: true, error: "Search backends (rg, grep) both failed. Check that rg or grep is installed and the transcript directory is readable." };
+  }
+
+  /**
+   * L1 — seat-scoped, cross-generation transcript search. Scopes to ONE seat's
+   * `<rig>/<sessionName>.log` (never the whole rig dir) and labels every hit with
+   * the generation (tenure) it fell in — the generations are the segments between
+   * `--- SESSION BOUNDARY … ---` markers the seat's log accumulates as agents come
+   * and go. Cross-generation is the point: a hit from before and after a boundary
+   * proves the search spans tenures. Honest-degraded (never a silent zero-hits):
+   * a missing / empty / boundary-only transcript says so.
+   */
+  async searchSeat(rigName: string, seatSessionName: string, question: string): Promise<SeatSearchResult> {
+    const base = { backend: "read" as const, seat: seatSessionName, generations: 0, hits: [] as SeatHit[] };
+    const filePath = join(this.transcriptsRoot, rigName, `${seatSessionName}.log`);
+
+    if (!existsSync(filePath)) {
+      return {
+        ...base,
+        insufficient: true,
+        degraded: {
+          reason: "capture_missing",
+          message: `No transcript captured for seat '${seatSessionName}' in rig '${rigName}' — the seat may never have been managed on this host, or capture is disabled. This is not proof the seat never spoke.`,
+        },
+      };
+    }
+
+    let sizeBytes: number;
+    let content: string;
+    try {
+      sizeBytes = statSync(filePath).size;
+      if (sizeBytes === 0) {
+        return {
+          ...base,
+          insufficient: true,
+          degraded: {
+            reason: "capture_empty",
+            message: `Transcript for seat '${seatSessionName}' is empty (0 bytes) — no captured history yet, not proof the seat never spoke.`,
+          },
+        };
+      }
+      content = readFileSync(filePath, "utf-8");
+    } catch {
+      return {
+        ...base,
+        insufficient: true,
+        degraded: {
+          reason: "capture_unreadable",
+          message: `Transcript for seat '${seatSessionName}' exists but could not be read (permissions or a transient FS error).`,
+        },
+      };
+    }
+
+    const advisory = sizeBytes > SEAT_LARGE_FILE_BYTES
+      ? `Transcript is large (${(sizeBytes / 1024 / 1024).toFixed(1)} MB); the full file was read — for a very large seat history prefer a more specific question.`
+      : undefined;
+
+    const keywords = extractKeywords(question);
+    const pattern = keywords.length > 0 ? new RegExp(keywords.join("|"), "i") : null;
+
+    let generation = 1;
+    let sawConversation = false;
+    const hits: SeatHit[] = [];
+    for (const raw of content.split("\n")) {
+      if (SEAT_BOUNDARY_RE.test(raw)) {
+        generation += 1;
+        continue;
+      }
+      const line = stripAnsi(raw).trim();
+      if (line === "") continue;
+      sawConversation = true;
+      if (pattern && pattern.test(line)) hits.push({ generation, text: line });
+    }
+    const generations = generation; // boundaries + 1
+
+    if (!sawConversation) {
+      return {
+        ...base,
+        generations,
+        insufficient: true,
+        advisory,
+        degraded: {
+          reason: "boundary_only",
+          message: `Seat '${seatSessionName}' transcript contains only session-boundary markers — no captured conversation. This host may be on boundary-only transcript capture; the record is degraded, not absent.`,
+        },
+      };
+    }
+
+    if (!pattern) {
+      return { backend: "none", seat: seatSessionName, generations, hits: [], insufficient: true, advisory };
+    }
+
+    return { ...base, generations, hits, insufficient: hits.length === 0, advisory };
   }
 
   private parseExcerpts(stdout: string): string[] {
