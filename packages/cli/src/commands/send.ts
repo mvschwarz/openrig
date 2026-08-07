@@ -634,8 +634,10 @@ async function runHttpHostSend(
 
 // OPR.0.4.3.30 — fan-out send (`--to` / `--pod` / `--rig`). Reuses the DAEMON's broadcast
 // machinery (resolve → per-seat send loop → per-recipient results) via /api/transport/broadcast.
-// The message is sent BARE; the daemon wraps each recipient in its OWN From/To envelope
-// (envelopeSender), so every seat gets `To: <that seat>` — byte-identical to a single send.
+// The message is sent BARE; the daemon wraps each recipient in its own From/To envelope
+// (envelopeSender). Ruling 03c35295: the daemon now renders the SCALE on the To line —
+// a `--to` multi-send shows the FULL recipient list (WHO got it), a `--rig`/`--pod` shows the
+// broadcast scale — plus a Sent stamp, so a recipient tells DM from broadcast header-alone.
 // --raw / --dangerously-interact send exact text with NO envelope (envelopeSender omitted).
 // Each recipient is guarded INDEPENDENTLY server-side; one refusal never aborts the set.
 async function runFanOutSend(params: {

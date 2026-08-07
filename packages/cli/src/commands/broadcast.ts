@@ -120,9 +120,12 @@ selection, not the agent@rig@host sugar.`)
       // Send/broadcast header (ruling 03c35295): identify the broadcasting seat so the daemon fan-out
       // WRAPS each recipient with the scale header ("broadcast to <rig> (N seats)" / topology) instead
       // of delivering raw — a recipient tells it was a broadcast header-alone (the anti-storm teeth).
-      // Absent (no session env) falls open to today's raw delivery.
+      // Session-less falls open to the <unknown sender> WRAP (symmetric with the fan-out send path's
+      // SENDER_FALLBACK) so a session-less broadcast still carries the scale — no session-less storm.
+      // (review-r1 flagged the prior raw fall-open as a founder call; closed symmetric with send per the
+      // founder root-cause intent — trivially revert to raw-when-session-less if the founder prefers.)
       const sender = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
-      if (sender) body.envelopeSender = sender;
+      body.envelopeSender = sender && sender.trim().length > 0 ? sender : "<unknown sender>";
 
       const res = await client.post<Record<string, unknown>>("/api/transport/broadcast", body);
 
