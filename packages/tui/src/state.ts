@@ -14,6 +14,7 @@ import type {
   ViewStateStore,
 } from "./types.js";
 import { SECTION_REGISTRY } from "./sections.js";
+import { scopesExplorerRows } from "./scopes/scopes-model.js";
 import { GRAPH_STYLE_NAMES } from "./topology/render-graph.js";
 import { rowStatusGlyph } from "./topology/glyphs.js";
 
@@ -59,6 +60,9 @@ export function createViewState(options: CreateViewStateOptions): ViewStateStore
     notice: null,
     lastError: null,
     palette: null,
+    scopesSelected: null,
+    scopesCollapseReqs: false,
+    scopesNarrative: false,
   };
   const listeners = new Set<(s: ViewState) => void>();
 
@@ -87,6 +91,8 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
     case "error":
       return { ...next, lastError: action.message };
     case "jump": {
+      // scopes: jumping anywhere (incl. back to :scopes) closes the opened slice.
+      next.scopesSelected = null;
       if (!state.sections.some((s) => s.name === action.section))
         return { ...next, lastError: `unknown section "${action.section}"` };
       return syncSelection(
@@ -94,6 +100,12 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
         snap,
       );
     }
+    case "scopes-open":
+      return resetContent({ ...next, section: "scopes", scopesSelected: { mission: action.mission, slice: action.slice }, scopesNarrative: false });
+    case "scopes-reqs":
+      return { ...next, scopesCollapseReqs: !next.scopesCollapseReqs };
+    case "scopes-narrative":
+      return { ...next, scopesNarrative: !next.scopesNarrative };
     case "palette-open":
       return { ...next, palette: { query: "", selection: 0 } };
     case "palette-close":
@@ -422,6 +434,11 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
             : section.name.toUpperCase();
     rows.push({ label: `${active ? "▾" : "▸"} ${label}`, action: { type: "jump", section: section.name }, key: `section:${section.name}` });
     if (!active) continue;
+    if (section.name === "scopes") {
+      const expanded = new Set(state.expanded);
+      rows.push(...scopesExplorerRows(snap.scopes, expanded, "  "));
+      continue;
+    }
     if (section.name === "topology") {
       // ROUND-4 item 4: rigs + pods by default; agents appear when a pod is
       // expanded (drilling a pod expands it) — "tighter visually".

@@ -120,6 +120,8 @@ const FIXTURES: Record<string, unknown> = {
   },
   // PULSE exception joins (increment 2) — default empty; per-test responses override
   "/api/queue/list?attention=1": [],
+
+  "/api/scopes?detail=1": { missions: [] },
   "/api/queue/list?state=blocked": [],
   // PULSE ◌ PARKED WITH BATON source (increment 2b) — in-progress qitems
   "/api/queue/list?state=in-progress": [],

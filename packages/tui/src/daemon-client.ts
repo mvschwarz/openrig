@@ -92,6 +92,11 @@ export class DaemonClient {
   }
 
   // --- Needs-You (§4.A rows 5–6): composeNeedsYou legs + host/rig-down beside ---
+  /** SCOPES view (d64d2f5c): the store-direct one-read hydrate. */
+  scopesDetailed() {
+    return this.get("/api/scopes?detail=1");
+  }
+
   queueAttention() {
     return this.get(`/api/queue/list?attention=1`);
   }

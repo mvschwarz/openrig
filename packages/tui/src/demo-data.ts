@@ -47,6 +47,45 @@ export function demoSnapshot(): FleetSnapshot {
     humanQueueProbed: true,
     // PULSE ▲ NEEDS YOU source — shaped like the shipped attention read (the
     // daemon already returns exactly the human-facing set).
+    scopes: [
+      {
+        mission: "release-0.5.2",
+        slices: [
+          {
+            dirName: "gateway-m1", id: "OPR.0.5.2.9", displayName: "gateway-m1", status: "spec", stage: "building",
+            locks: { spec: { by: "pm-openrig@openrig-pm", at: "2026-08-06T10:00:00.000Z" }, delivery: null },
+            proof: { paired: 2, total: 9 },
+            intent: '"Milestone cut: the functionality we need today — Slack to the founder — on the bones we keep."',
+            miniRequirements: [
+              "The daemon resolves @external addresses to the gateway path via domain-class admission; an unregistered domain bounces loudly.",
+              "Human specs are one file per human; the registry is a generated projection.",
+            ],
+            proofContract: [
+              { index: 1, text: "The ack-after-delivery repair demonstrated on the SHIPPED relay path.", paired: true, drops: [{ file: "qa-relay.md", artifactType: "qa", verdict: "PASS", media: ["relay-repair-e2e.txt"] }] },
+              { index: 2, text: "A registered entity cold-DMs from Slack and it queues exactly as today.", paired: false, drops: [] },
+              { index: 3, text: "An unregistered domain bounces loudly with the teaching error.", paired: true, drops: [{ file: "guard-bounce.md", artifactType: "guard", verdict: "CLEAR", media: [] }] },
+            ],
+            narrative: "- kickoff: A1 in build\n- A2 held on arch consult",
+            prdExists: true,
+          },
+          {
+            dirName: "crash-cart", id: "OPR.0.5.2.5", displayName: "crash-cart", status: "done", stage: "established",
+            locks: { spec: { by: "pm-openrig@openrig-pm", at: "2026-08-05T10:00:00.000Z" }, delivery: { by: "pm-openrig@openrig-pm", at: "2026-08-06T20:00:00.000Z" } },
+            proof: { paired: 4, total: 4 },
+            intent: "The daemon-down cockpit.",
+            miniRequirements: ["One keystroke restore."],
+            proofContract: [
+              { index: 1, text: "Restore everything works.", paired: true, drops: [{ file: "qa1.md", artifactType: "qa", verdict: "PASS", media: [] }] },
+              { index: 2, text: "Daemon-only start works.", paired: true, drops: [{ file: "qa2.md", artifactType: "qa", verdict: "PASS", media: [] }] },
+              { index: 3, text: "Inspect works.", paired: true, drops: [{ file: "qa3.md", artifactType: "qa", verdict: "PASS", media: [] }] },
+              { index: 4, text: "Onboarding menu lives here.", paired: true, drops: [{ file: "qa4.md", artifactType: "qa", verdict: "PASS", media: [] }] },
+            ],
+            narrative: null,
+            prdExists: true,
+          },
+        ],
+      },
+    ],
     attention: [
       { qitemId: "q1", state: "in-progress", destinationSession: "human-yeah@kernel", blockedOn: null, handedOffTo: null, tier: "human-gate", tags: null, summary: "0.5.0 cut packet ready · waiting on you", body: "", claimedAt: "2026-08-05T09:38:00.000Z", tsUpdated: "2026-08-05T09:38:00.000Z" },
       { qitemId: "q2", state: "pending", destinationSession: "human-yeah@kernel", blockedOn: null, handedOffTo: null, tier: "human-gate", tags: null, summary: "slice-20 routing pixels · waiting on you", body: "", claimedAt: "2026-08-05T07:00:00.000Z", tsUpdated: "2026-08-05T07:00:00.000Z" },

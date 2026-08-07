@@ -6,6 +6,7 @@
 // swap touches only this module (spike verdict revisit trigger).
 import { computeExplorerRows, findAgent, findSpec, findAgentBySession, agentsRunningSpec, agentsRunningSpecTargets, specDetailArrowsScroll } from "./state.js";
 import { filterPalette } from "./commands/palette.js";
+import { scopesContentLines } from "./scopes/scopes-model.js";
 import { COMMAND_REGISTRY } from "./commands/registry.js";
 import { navigatorDisplay } from "./navigator.js";
 import { renderGraphStyle } from "./topology/render-graph.js";
@@ -656,6 +657,19 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
     } else if (!snap.needs.some((item) => item.source === "agent"))
       lines.push({ text: "  human-queue: no items (proven empty — surfacing adoption pending)" });
     return lines;
+  }
+  if (state.section === "scopes") {
+    // SCOPES (d64d2f5c): the opened slice rides scopesSelected; store-direct detail.
+    const sel = state.scopesSelected;
+    const missionName = sel?.mission ?? null;
+    const detail = sel
+      ? (snap.scopes ?? []).find((m) => m.mission === sel.mission)?.slices.find((sl) => sl.dirName === sel.slice) ?? null
+      : null;
+    return scopesContentLines(detail, missionName, {
+      collapseReqs: state.scopesCollapseReqs,
+      narrative: state.scopesNarrative,
+      width: contentWidth,
+    });
   }
   return [{ text: `(${state.section})` }];
 }

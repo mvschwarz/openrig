@@ -13,6 +13,11 @@ export const SECTION_REGISTRY: readonly SectionDef[] = [
     drillShape: "kind>spec",
   },
   {
+    name: "scopes",
+    sourceRead: "GET /api/scopes?detail=1 (store-direct: locks + C1 proof drops)",
+    drillShape: "mission>slice",
+  },
+  {
     name: "needs",
     sourceRead: "GET /api/review/fleet + /api/queue/list?attention=1 (existing)",
     drillShape: "flat",

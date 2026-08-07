@@ -182,7 +182,11 @@ export interface SeatActivitySummary {
   lastActivityAt: string | null;
 }
 
+import type { MissionScopesSnap } from "./scopes/scopes-model.js";
+
 export interface FleetSnapshot {
+  /** SCOPES view (d64d2f5c): store-direct mission/slice projections; absent on old daemons (honest-empty). */
+  scopes?: MissionScopesSnap[];
   hosts: HostNode[];
   specs: SpecEntry[];
   /** grounded composeNeedsYou union in daemon priority order, VERBATIM (PIN 3) */
@@ -258,6 +262,10 @@ export type Action =
   /** slice-17: the graph-render style dimension rides the command bar */
   | { type: "style"; name: string }
   /** REGISTRY I3 — the command palette (open/query/move/close ride dispatch like all state). */
+  /** SCOPES view: m collapse + n narrative toggles (dispatch-riding). */
+  | { type: "scopes-open"; mission: string; slice: string }
+  | { type: "scopes-reqs" }
+  | { type: "scopes-narrative" }
   | { type: "palette-open" }
   | { type: "palette-close" }
   | { type: "palette-query"; query: string }
@@ -278,6 +286,11 @@ export interface SectionDef {
 }
 
 export interface ViewState {
+  /** SCOPES view: the opened slice (null = tree only). */
+  scopesSelected: { mission: string; slice: string } | null;
+  /** SCOPES view flags: mini-reqs collapsed · narrative panel open. */
+  scopesCollapseReqs: boolean;
+  scopesNarrative: boolean;
   /** REGISTRY I3 — open command palette (null = closed). */
   palette: { query: string; selection: number } | null;
   instanceId: string;

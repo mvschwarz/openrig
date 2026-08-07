@@ -182,6 +182,26 @@ export const COMMAND_REGISTRY: readonly CommandEntry[] = [
     sample: "help",
     build: () => ({ type: "palette-open" }),
   },
+  {
+    // SCOPES view (d64d2f5c): the m-key accelerator's command form.
+    name: "reqs",
+    aliases: [],
+    args: "",
+    description: "toggle mini-requirements collapse (scopes view)",
+    context: "standard",
+    sample: "reqs",
+    build: () => ({ type: "scopes-reqs" }),
+  },
+  {
+    // SCOPES view: PROGRESS.md as the human narrative log — DISPLAY only, never data.
+    name: "narrative",
+    aliases: [],
+    args: "",
+    description: "toggle the PROGRESS.md narrative panel (scopes view)",
+    context: "standard",
+    sample: "narrative",
+    build: () => ({ type: "scopes-narrative" }),
+  },
   ...RESOURCES.map(drillEntry),
 ];
 

@@ -275,7 +275,7 @@ export async function hydrateSnapshot(
     }
   }
 
-  const [agg, summaries, library, review, streamItems, attention, blocked, inProgress, pending, recentlyFinished] = await Promise.all([
+  const [agg, summaries, library, review, streamItems, attention, blocked, inProgress, pending, recentlyFinished, scopesRead] = await Promise.all([
     safe<AttentionAggregateRead>("attention-aggregate", () => client.attentionAggregate()),
     safe<RigSummaryRead[]>("rigs-summary", () => client.rigsSummary()),
     safe<SpecLibraryRead[]>("specs-library", () => client.specsLibrary()),
@@ -288,6 +288,7 @@ export async function hydrateSnapshot(
     // PULSE UP NEXT + JUST FINISHED lane reads (increment 3) — same shipped /list route
     safe<QueueItemRead[]>("queue-pending", () => client.queuePending()),
     safe<QueueItemRead[]>("queue-recently-finished", () => client.queueRecentlyFinished()),
+    safe<{ missions: unknown[] }>("scopes", () => client.scopesDetailed() as Promise<{ missions: unknown[] }>),
   ]);
 
   const agentSpecNames = new Set((library ?? []).filter((entry) => entry.kind === "agent").map((entry) => entry.name));
@@ -500,6 +501,7 @@ export async function hydrateSnapshot(
     needs,
     humanQueueProbed: review != null && !review.registryError && Array.isArray(review.hosts) && review.hosts.length > 0
       && review.hosts.every((host) => host.status.status === "ok"),
+    scopes: (scopesRead?.missions ?? []) as FleetSnapshot["scopes"],
     attention: (attention ?? []).map(toQueueRead),
     blocked: blockedResolved,
     inProgress: (inProgress ?? []).map(toQueueRead),

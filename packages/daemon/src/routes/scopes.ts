@@ -7,7 +7,7 @@ import { Hono } from "hono";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { SliceIndexer } from "../domain/slices/slice-indexer.js";
-import { projectMissionScopes, projectSliceScope, type ScopeFsDeps } from "../domain/scope/scope-view-projection.js";
+import { projectMissionScopes, projectSliceScope, type ScopeFsDeps, type SliceScopeDetail } from "../domain/scope/scope-view-projection.js";
 
 const realFs: ScopeFsDeps = {
   exists: (p) => fs.existsSync(p),
@@ -30,15 +30,27 @@ export function scopesRoutes(): Hono {
     const r = rootOf(c);
     if ("error" in r) return r.error;
     const mission = c.req.query("mission");
+    const wantDetail = c.req.query("detail") === "1";
+    const detailFor = (missionName: string, dirName: string): (SliceScopeDetail & { narrative: string | null }) | null => {
+      const d = projectSliceScope(realFs, path.join(r.root, missionName, "slices", dirName));
+      if (!d) return null;
+      // The TUI one-read hydrate: narrative CONTENT rides inline for the `n` DISPLAY —
+      // still never a data source (the projection never reads it for counts).
+      const narrative = d.progressPath ? realFs.readFile(d.progressPath) : null;
+      return { ...d, narrative };
+    };
     if (mission) {
       const m = projectMissionScopes(realFs, r.root, mission);
-      return m ? c.json(m) : c.json({ error: "mission_not_found", mission }, 404);
+      if (!m) return c.json({ error: "mission_not_found", mission }, 404);
+      if (!wantDetail) return c.json(m);
+      return c.json({ mission: m.mission, slices: m.slices.map((sl) => detailFor(mission, sl.dirName)).filter(Boolean) });
     }
-    // No mission param: list every mission with its slice summaries (the explorer tree).
-    const missions = realFs.listDir(r.root)
-      .filter((e) => realFs.isDirectory(path.join(r.root, e)))
+    // No mission param: list every mission (the explorer tree); ?detail=1 upgrades rows to details.
+    const missionNames = realFs.listDir(r.root).filter((e) => realFs.isDirectory(path.join(r.root, e)));
+    const missions = missionNames
       .map((e) => projectMissionScopes(realFs, r.root, e))
-      .filter((m): m is NonNullable<typeof m> => m !== null);
+      .filter((m): m is NonNullable<typeof m> => m !== null)
+      .map((m) => (wantDetail ? { mission: m.mission, slices: m.slices.map((sl) => detailFor(m.mission, sl.dirName)).filter(Boolean) } : m));
     return c.json({ missions });
   });
 

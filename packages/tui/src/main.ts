@@ -191,6 +191,11 @@ async function run(): Promise<void> {
         continue;
       }
       if (ev.type === "char") {
+        // SCOPES accelerators: m/n ride the REGISTERED commands (one path).
+        if (inputLine === "" && view.get().section === "scopes" && view.get().scopesSelected) {
+          if (ev.ch === "m") { perform(parseCommand("reqs", view.get().sections)); continue; }
+          if (ev.ch === "n") { perform(parseCommand("narrative", view.get().sections)); continue; }
+        }
         if (ev.ch === "?" && inputLine === "") {
           // The registered palette trigger — through the grammar, never beside it.
           perform(parseCommand("?", view.get().sections));
