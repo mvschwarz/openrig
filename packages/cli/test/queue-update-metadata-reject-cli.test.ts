@@ -4,7 +4,7 @@
 // No pre-baked response: if the daemon route/repo stopped rejecting (or mutated before responding),
 // these tests would fail. Proves normal + --json reject, UNCHANGED item/transition/event state after
 // the HTTP call, and the successful human-park control — all end to end.
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
@@ -97,7 +97,15 @@ const eventCount = () => (db.prepare("SELECT count(*) c FROM events").get() as {
 
 describe("51-06 D2 — real CLI->loopback HTTP->queueRoutes/QueueRepository acceptance", () => {
   let id: string;
-  beforeEach(async () => { id = (await repo.create({ sourceSession: "orch@rig", destinationSession: "dev-x@rig", body: "e2e" })).qitemId; });
+  // P21 HERMETIC: the update route derives the actor from the seat env (X-OpenRig-Session, stamped by the
+  // CLI DaemonClient); --actor is deprecated + ignored. Stub a deterministic seat so the real loopback call
+  // reaches the 400-reject path instead of aborting pre-POST on an env-less harness. Unstubbed per test so
+  // it never leaks across files (singleFork shares the process).
+  beforeEach(async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "dev-x@rig");
+    id = (await repo.create({ sourceSession: "orch@rig", destinationSession: "dev-x@rig", body: "e2e" })).qitemId;
+  });
+  afterEach(() => { vi.unstubAllEnvs(); });
 
   it("normal: --summary on a non-park update -> real 400, nonzero exit, item/transition/event UNCHANGED", async () => {
     const beforeTxns = txnCount(id), beforeEvents = eventCount();

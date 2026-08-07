@@ -17,7 +17,7 @@
 //      with an honest NONZERO exit, in BOTH json and human modes, and NEVER daemon-not-running
 //      language for a bad/slow response. Exit codes asserted UNPIPED (in-process).
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   DaemonClient,
   DaemonConnectionError,
@@ -116,15 +116,18 @@ describe("client response integrity — three distinct failure classes", () => {
 });
 
 describe("render response integrity — 3-part error + honest exit, never daemon-down language", () => {
-  beforeEach(() => { process.exitCode = undefined; });
+  // P21 HERMETIC: queue update derives the actor from the seat env (X-OpenRig-Session); stub a
+  // deterministic seat so the daemon-response path under test is REACHED, not aborted pre-POST on an
+  // env-less harness. Unstubbed per test (singleFork shares the process).
+  beforeEach(() => { vi.stubEnv("OPENRIG_SESSION_NAME", "harness@rig"); process.exitCode = undefined; });
+  afterEach(() => { vi.unstubAllEnvs(); });
 
   it("bad-response renders fact/consequence/action JSON with nonzero exit (json)", async () => {
     const err = new DaemonResponseError(502, "<html>502 Bad Gateway</html>");
     const { out, exitCode } = await runCli(
-      // --actor: queue update requires it when OPENRIG_SESSION_NAME is unset (the hermetic setup
-      // scrubs it); without it the command short-circuits before the daemon-response path under
-      // test. Product requirement is correct — the fixture was stale (base-health, distinct from
-      // the P11 createProgram flap).
+      // P21: --actor is deprecated + IGNORED; queue update derives the actor from the seat env, which the
+      // describe's beforeEach now stubs (harness@rig) so this reaches the daemon-response path under test.
+      // (--actor left in the argv is harmless — the daemon ignores it.)
       ["queue", "update", "qitem-x", "--actor", "harness@rig", "--state", "done", "--closure-reason", "denied", "--json"],
       depsThrowing(err),
     );

@@ -12,7 +12,7 @@
 //     (the resolver is pure; the commands add no selection fallback);
 //   - local invocations post byte-identical bodies (no hostId key at all).
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { QueueDeps } from "../src/commands/queue.js";
 import { resolveQueueHostDestination } from "../src/commands/queue.js";
 import { createProgram } from "../src/index.js";
@@ -89,11 +89,15 @@ describe("resolveQueueHostDestination (D-3)", () => {
 
 describe("rig queue cross-host CLI wiring (C3)", () => {
   beforeEach(() => {
+    // P21 HERMETIC: cross-host queue verbs derive the origin/actor from the seat env (X-OpenRig-Session);
+    // stub a deterministic seat so an env-less harness doesn't abort pre-POST (was masked by the ambient env).
+    vi.stubEnv("OPENRIG_SESSION_NAME", "seat@rig");
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     process.exitCode = undefined;
   });
+  afterEach(() => { vi.unstubAllEnvs(); }); // P21: don't leak the seat stub into later files (singleFork)
 
   it("create --host <id>: body carries the 2-part destination + the hostId envelope", async () => {
     const { deps, calls } = makeDeps();

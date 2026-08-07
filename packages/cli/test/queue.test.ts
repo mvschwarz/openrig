@@ -75,6 +75,11 @@ describe("rig queue CLI", () => {
 
   beforeEach(() => {
     vi.unstubAllEnvs();
+    // P21 HERMETIC: the queue verbs derive source/actor from the seat env (X-OpenRig-Session), so an
+    // env-less harness aborts pre-POST. Stub a deterministic seat so these tests never depend on the
+    // AMBIENT OPENRIG_SESSION_NAME (which masked the env-less break in a managed runner). Per-test stubs
+    // that need a specific seat override this.
+    vi.stubEnv("OPENRIG_SESSION_NAME", "seat@rig");
     logs = [];
     errors = [];
     vi.spyOn(console, "log").mockImplementation((...args) => logs.push(args.join(" ")));

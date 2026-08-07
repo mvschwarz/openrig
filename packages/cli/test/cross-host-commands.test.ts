@@ -101,7 +101,10 @@ describe("send --host (cross-host short-circuit)", () => {
     expect(argv[argv.indexOf("--from") + 1]).toBe("orch-lead@rig-a");
   });
 
-  it("explicit --from wins over the ambient origin in the reconstructed argv", async () => {
+  // P21 I4 (REVISED, was "explicit --from wins"): --from is DEPRECATED + IGNORED — the cross-host origin
+  // is the relay's OWN authenticated seat env (its X-OpenRig-Session), never a caller-supplied override,
+  // which was the forgeable surface. A forged --from must NOT appear in the reconstructed argv.
+  it("explicit --from is IGNORED — the reconstructed argv carries the DERIVED seat origin, never a --from override", async () => {
     vi.stubEnv("OPENRIG_SESSION_NAME", "orch-lead@rig-a");
     const captureCalls: { argv?: readonly string[] } = {};
     const cmd = sendCommand(deps({
@@ -109,7 +112,8 @@ describe("send --host (cross-host short-circuit)", () => {
     }));
     await cmd.parseAsync(["--host", "vm-a", "dev-impl@my-rig", "hi", "--from", "worker@rig-a"], { from: "user" });
     const argv = captureCalls.argv!;
-    expect(argv[argv.indexOf("--from") + 1]).toBe("worker@rig-a");
+    expect(argv[argv.indexOf("--from") + 1]).toBe("orch-lead@rig-a"); // the seat env, not the forged --from
+    expect(argv).not.toContain("worker@rig-a"); // the --from override never rides the wire
   });
 
   it("--verify honesty: SSH success + remote 'Verified: no' surfaces in output, NOT collapsed into success+silence", async () => {

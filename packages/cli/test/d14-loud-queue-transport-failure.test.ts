@@ -17,10 +17,14 @@ function lifecycleStub(): QueueDeps["lifecycleDeps"] {
 describe("D14 — queue transport failures are LOUD", () => {
   let errSpy: ReturnType<typeof vi.spyOn>;
   beforeEach(() => {
+    // P21 HERMETIC: the queue verb under test derives the actor from the seat env; stub a deterministic
+    // seat so an env-less harness reaches the transport-failure path instead of aborting pre-POST.
+    vi.stubEnv("OPENRIG_SESSION_NAME", "seat@rig");
     errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     process.exitCode = undefined;
   });
   afterEach(() => {
+    vi.unstubAllEnvs(); // P21: don't leak the seat stub into later files (singleFork shares the process)
     errSpy.mockRestore();
     process.exitCode = undefined;
   });
