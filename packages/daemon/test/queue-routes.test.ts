@@ -96,7 +96,7 @@ describe("queue routes", () => {
   it("POST /api/queue/create creates a qitem", async () => {
     const res = await app.request("/api/queue/create", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@rig" },
       body: JSON.stringify({
         sourceSession: "alice@rig",
         destinationSession: "bob@rig",
@@ -110,10 +110,46 @@ describe("queue routes", () => {
     expect(data.priority).toBe("urgent");
   });
 
+  // P21 I3 — create's sender is the transport header (X-OpenRig-Session), NEVER a body claim.
+  // Adopt-drop window: a body sourceSession is tolerated ONLY when it EQUALS the transport identity.
+  it("create — 401 unattributable_sender when X-OpenRig-Session is absent", async () => {
+    const res = await app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceSession: "bob@rig", destinationSession: "dst@rig", body: "hi" }),
+    });
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+  });
+
+  it("create — 409 identity_mismatch when the body sourceSession differs from the transport identity", async () => {
+    const res = await app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@rig" },
+      body: JSON.stringify({ sourceSession: "bob@rig", destinationSession: "dst@rig", body: "hi" }),
+    });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+  });
+
+  it("create — derives source_session from the transport header, never the body (equal claim tolerated)", async () => {
+    const res = await app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@rig" },
+      body: JSON.stringify({ sourceSession: "alice@rig", destinationSession: "dst@rig", body: "hi" }),
+    });
+    expect(res.status).toBe(201);
+    const { qitemId } = (await res.json()) as { qitemId: string };
+    const row = db
+      .prepare("SELECT source_session FROM queue_items WHERE qitem_id = ?")
+      .get(qitemId) as { source_session: string } | undefined;
+    expect(row?.source_session).toBe("alice@rig");
+  });
+
   it("POST /api/queue/:id/update with state=done WITHOUT closure_reason returns 400 with validReasons", async () => {
     const create = await app.request("/api/queue/create", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
       body: JSON.stringify({ sourceSession: "a@r", destinationSession: "b@r", body: "x" }),
     });
     const item = (await create.json()) as { qitemId: string };
@@ -133,7 +169,7 @@ describe("queue routes", () => {
     for (const reason of CLOSURE_REASONS) {
       const create = await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
         body: JSON.stringify({ sourceSession: "a@r", destinationSession: "b@r", body: `for-${reason}` }),
       });
       const item = (await create.json()) as { qitemId: string };
@@ -159,7 +195,7 @@ describe("queue routes", () => {
   it("POST /api/queue/:id/handoff returns closed + created in one transaction", async () => {
     const create = await app.request("/api/queue/create", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
       body: JSON.stringify({ sourceSession: "a@r", destinationSession: "b@r", body: "x" }),
     });
     const item = (await create.json()) as { qitemId: string };
@@ -185,7 +221,7 @@ describe("queue routes", () => {
   it("GET /api/queue/:id returns the qitem; transitions endpoint returns the log", async () => {
     const create = await app.request("/api/queue/create", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
       body: JSON.stringify({ sourceSession: "a@r", destinationSession: "b@r", body: "x" }),
     });
     const item = (await create.json()) as { qitemId: string };
@@ -254,12 +290,12 @@ describe("queue routes", () => {
   it("GET /api/queue/list filters by destination + state", async () => {
     await app.request("/api/queue/create", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
       body: JSON.stringify({ sourceSession: "a@r", destinationSession: "b@r", body: "1" }),
     });
     await app.request("/api/queue/create", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
       body: JSON.stringify({ sourceSession: "a@r", destinationSession: "c@r", body: "2" }),
     });
     const res = await app.request("/api/queue/list?destinationSession=b@r");
@@ -279,7 +315,7 @@ describe("queue routes", () => {
     it("HG-4 positive (approval class): tier='human-gate' open qitem is returned", async () => {
       await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
         body: JSON.stringify({
           sourceSession: "a@r",
           destinationSession: "b@r",
@@ -299,7 +335,7 @@ describe("queue routes", () => {
     it("HG-4 positive (action-required class): destination=human-foo@kernel open qitem is returned", async () => {
       await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
         body: JSON.stringify({
           sourceSession: "a@r",
           destinationSession: "human-bob@kernel",
@@ -317,7 +353,7 @@ describe("queue routes", () => {
     it("HG-4 positive: destination=human@host (bare human prefix) open qitem is returned", async () => {
       await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
         body: JSON.stringify({
           sourceSession: "a@r",
           destinationSession: "human@host",
@@ -334,7 +370,7 @@ describe("queue routes", () => {
     it("HG-4 negative: routine pending qitem (non-attention tier + non-human destination) is NOT returned", async () => {
       await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
         body: JSON.stringify({
           sourceSession: "a@r",
           destinationSession: "b@r",
@@ -349,7 +385,7 @@ describe("queue routes", () => {
     it("HG-4 negative: closed attention qitem (state=done) is NOT returned", async () => {
       const create = await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
         body: JSON.stringify({
           sourceSession: "a@r",
           destinationSession: "human-x@kernel",
@@ -378,7 +414,7 @@ describe("queue routes", () => {
       for (let i = 0; i < 5; i++) {
         await app.request("/api/queue/create", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
           body: JSON.stringify({
             sourceSession: "a@r",
             destinationSession: `human-${i}@kernel`,
@@ -395,7 +431,7 @@ describe("queue routes", () => {
       // Seed ONE attention-class item first
       await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
         body: JSON.stringify({
           sourceSession: "a@r",
           destinationSession: "b@r",
@@ -412,7 +448,7 @@ describe("queue routes", () => {
       for (let i = 0; i < 110; i++) {
         await app.request("/api/queue/create", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-OpenRig-Session": `routine-${i}@r` },
           body: JSON.stringify({
             sourceSession: `routine-${i}@r`,
             destinationSession: `other-${i}@r`,
@@ -438,7 +474,7 @@ describe("queue routes", () => {
       // Seed 2 attention items at different destinations.
       await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "advisor@r1" },
         body: JSON.stringify({
           sourceSession: "advisor@r1",
           destinationSession: "human-alice@kernel",
@@ -449,7 +485,7 @@ describe("queue routes", () => {
       });
       await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "advisor@r2" },
         body: JSON.stringify({
           sourceSession: "advisor@r2",
           destinationSession: "human-bob@kernel",
@@ -463,7 +499,7 @@ describe("queue routes", () => {
       // it must not appear.
       await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "advisor@r1" },
         body: JSON.stringify({
           sourceSession: "advisor@r1",
           destinationSession: "human-alice@kernel",
@@ -487,7 +523,7 @@ describe("queue routes", () => {
     it("BLOCKER re-verify-2: attention=1 + sourceSession=X returns only X-sourced attention items", async () => {
       await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "advisor-a@r" },
         body: JSON.stringify({
           sourceSession: "advisor-a@r",
           destinationSession: "human-x@kernel",
@@ -498,7 +534,7 @@ describe("queue routes", () => {
       });
       await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "advisor-b@r" },
         body: JSON.stringify({
           sourceSession: "advisor-b@r",
           destinationSession: "human-y@kernel",
@@ -518,7 +554,7 @@ describe("queue routes", () => {
     it("BLOCKER re-verify-2: attention=1 unscoped still returns the global attention set (composition is OPT-IN, not required)", async () => {
       await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
         body: JSON.stringify({
           sourceSession: "a@r",
           destinationSession: "human-x@kernel",
@@ -529,7 +565,7 @@ describe("queue routes", () => {
       });
       await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
         body: JSON.stringify({
           sourceSession: "b@r",
           destinationSession: "human-y@kernel",
@@ -564,7 +600,7 @@ describe("queue routes", () => {
       // Seed 1 valid attention item.
       await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "advisor@r" },
         body: JSON.stringify({
           sourceSession: "advisor@r",
           destinationSession: "human-alice@kernel",
@@ -588,7 +624,7 @@ describe("queue routes", () => {
               : "human-x/@kernel";   // slash (forbidden char)
         await app.request("/api/queue/create", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-OpenRig-Session": `garbage-${i}@r` },
           body: JSON.stringify({
             sourceSession: `garbage-${i}@r`,
             destinationSession: dest,
@@ -621,7 +657,7 @@ describe("queue routes", () => {
       // Seed attention items in different repos.
       await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
         body: JSON.stringify({
           sourceSession: "a@r",
           destinationSession: "human-bob@kernel",
@@ -633,7 +669,7 @@ describe("queue routes", () => {
       });
       await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
         body: JSON.stringify({
           sourceSession: "a@r",
           destinationSession: "human-carol@kernel",
@@ -655,7 +691,7 @@ describe("queue routes", () => {
       // Seed 1 attention item with targetRepo=repo-X.
       await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
         body: JSON.stringify({
           sourceSession: "a@r",
           destinationSession: "human-z@kernel",
@@ -671,7 +707,7 @@ describe("queue routes", () => {
       for (let i = 0; i < 1100; i++) {
         await app.request("/api/queue/create", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-OpenRig-Session": `routine-${i}@r` },
           body: JSON.stringify({
             sourceSession: `routine-${i}@r`,
             destinationSession: `other-${i}@r`,
@@ -690,7 +726,7 @@ describe("queue routes", () => {
     it("BLOCKER-1: attention item surfaces even when >1100 newer routine OPEN qitems exist (SQL predicate pushdown)", async () => {
       await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "old@r" },
         body: JSON.stringify({
           sourceSession: "old@r",
           destinationSession: "b@r",
@@ -707,7 +743,7 @@ describe("queue routes", () => {
       for (let i = 0; i < 1100; i++) {
         await app.request("/api/queue/create", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-OpenRig-Session": `routine-${i}@r` },
           body: JSON.stringify({
             sourceSession: `routine-${i}@r`,
             destinationSession: `other-${i}@r`,
@@ -762,7 +798,7 @@ describe("queue routes", () => {
     it("POST /api/queue/create rejects unknown rig with 400 + structured error", async () => {
       const res = await strictApp.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@known-rig" },
         body: JSON.stringify({
           sourceSession: "alice@known-rig",
           destinationSession: "bob@phantom-rig",
@@ -778,7 +814,7 @@ describe("queue routes", () => {
     it("POST /api/queue/create accepts known rig with 201", async () => {
       const res = await strictApp.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@known-rig" },
         body: JSON.stringify({
           sourceSession: "alice@known-rig",
           destinationSession: "bob@known-rig",
@@ -791,7 +827,7 @@ describe("queue routes", () => {
     it("POST /api/queue/:id/handoff rejects unknown destination rig", async () => {
       const created = await strictApp.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@known-rig" },
         body: JSON.stringify({
           sourceSession: "alice@known-rig",
           destinationSession: "bob@known-rig",
@@ -815,7 +851,7 @@ describe("queue routes", () => {
     it("POST /api/queue/:id/handoff-and-complete rejects unknown destination rig", async () => {
       const created = await strictApp.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@known-rig" },
         body: JSON.stringify({
           sourceSession: "alice@known-rig",
           destinationSession: "bob@known-rig",
@@ -841,7 +877,7 @@ describe("queue routes", () => {
     it("POST /api/queue/:id/handoff-and-complete closes source as done + creates new", async () => {
       const created = await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@r" },
         body: JSON.stringify({ sourceSession: "alice@r", destinationSession: "bob@r", body: "x" }),
       });
       const item = (await created.json()) as { qitemId: string };
@@ -884,18 +920,18 @@ describe("queue routes", () => {
       // Seed: 2 pending + 1 in-progress for bob; 1 unrelated for carol.
       const a = await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@r" },
         body: JSON.stringify({ sourceSession: "alice@r", destinationSession: "bob@r", body: "1" }),
       });
       const itemA = (await a.json()) as { qitemId: string };
       await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@r" },
         body: JSON.stringify({ sourceSession: "alice@r", destinationSession: "bob@r", body: "2" }),
       });
       await app.request("/api/queue/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@r" },
         body: JSON.stringify({ sourceSession: "alice@r", destinationSession: "carol@r", body: "3" }),
       });
       await app.request(`/api/queue/${itemA.qitemId}/claim`, {

@@ -9,6 +9,7 @@ import type {
 import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelfHostSuffix } from "../domain/queue-repository.js";
 import type { QueueItem } from "../domain/queue-repository.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
+import { requireSenderIdentity } from "./require-sender-identity.js";
 import { hostname as osHostname } from "node:os";
 import type { InboxHandler } from "../domain/inbox-handler.js";
 import { InboxHandlerError } from "../domain/inbox-handler.js";
@@ -407,7 +408,12 @@ export function queueRoutes(): Hono {
       hostId?: string;
     }>().catch(() => ({} as never));
 
-    if (!body.sourceSession) return c.json({ error: "sourceSession is required" }, 400);
+    // P21 I3 — the source is the transport-derived sender (X-OpenRig-Session), NEVER the body claim.
+    // Absent header → 401 unattributable; a body sourceSession that DIFFERS → 409 identity_mismatch;
+    // an equal body claim is tolerated in the adopt-drop window. `sourceSession` below is authoritative.
+    const identity = requireSenderIdentity(c, { verb: "queue create", bodyClaim: body.sourceSession });
+    if (!identity.ok) return identity.response;
+    const sourceSession = identity.session;
     if (!body.destinationSession) return c.json({ error: "destinationSession is required" }, 400);
     if (!body.body) return c.json({ error: "body is required" }, 400);
 
@@ -426,7 +432,7 @@ export function queueRoutes(): Hono {
     // check cannot recover it. Local ordering is unchanged (the cross-host
     // branch is a no-op without hostId).
     if (body.targetRepo) {
-      const validation = validateTargetRepo(c, body.sourceSession, body.targetRepo);
+      const validation = validateTargetRepo(c, sourceSession, body.targetRepo);
       if (!validation.ok) return c.json({ error: validation.error, message: validation.message, ...(validation.meta ?? {}) }, 400);
     }
 
@@ -439,7 +445,7 @@ export function queueRoutes(): Hono {
         // 51-09 incr 4a — stamp-at-FORWARD: this forwarding daemon is the origin,
         // so it stamps its OWN self-id (overriding the bare spread) before the
         // remote create() runs — else the remote would forge member@rig@RECEIVER.
-        sourceSession: stampSelfHostSuffix(body.sourceSession),
+        sourceSession: stampSelfHostSuffix(sourceSession),
         tags: crossHostProvenanceTags(body.tags),
       };
       const fwd = await forwardQueueWrite(c, body.hostId, "/api/queue/create", forwardBody);
@@ -449,7 +455,7 @@ export function queueRoutes(): Hono {
     try {
       const item = await getRepo(c).create({
         qitemId: body.qitemId,
-        sourceSession: body.sourceSession,
+        sourceSession,
         destinationSession: body.destinationSession,
         body: body.body,
         priority: body.priority,
