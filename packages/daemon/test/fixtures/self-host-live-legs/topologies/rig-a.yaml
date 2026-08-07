@@ -1,0 +1,15 @@
+# 51-09 live-leg fixture — LEG A origin rig (runs on H_A)
+# Canonical seat = <pod>-<member>@<rigName> (deriveCanonicalSessionName) => orch-main@rig-a
+version: "0.2"
+name: rig-a
+culture_file: culture.md
+pods:
+  - id: orch
+    label: Orch
+    members:
+      - id: main
+        agent_ref: "local:agents/orch"
+        profile: default
+        runtime: stub
+        cwd: .
+    edges: []

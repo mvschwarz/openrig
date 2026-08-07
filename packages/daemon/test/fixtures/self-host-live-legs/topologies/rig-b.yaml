@@ -1,0 +1,15 @@
+# 51-09 live-leg fixture — LEG A destination rig (runs on H_B)
+# Canonical seat = <pod>-<member>@<rigName> (deriveCanonicalSessionName) => dev-main@rig-b
+version: "0.2"
+name: rig-b
+culture_file: culture.md
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: main
+        agent_ref: "local:agents/dev"
+        profile: default
+        runtime: stub
+        cwd: .
+    edges: []
