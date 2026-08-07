@@ -14,6 +14,8 @@ import type { SlowOperationInstrumentation } from "./domain/slow-op-recorder.js"
 
 /** OPR.0.4.3.21 (51elv2) — bound the graceful-shutdown recorder drain. */
 export const SLOW_OP_SHUTDOWN_DRAIN_TIMEOUT_MS = 5_000;
+/** P7 — lifecycle heartbeat cadence; last-seen granularity = this interval. */
+export const HEARTBEAT_INTERVAL_MS = 5_000;
 
 /**
  * OPR.0.4.3.21 (51elv2) — drain + close the slow-operation recorder on graceful
@@ -177,6 +179,8 @@ export async function startServer(port?: number) {
   // once after the first successful bind callback fires.
   let monitorsStarted = false;
   let retentionTimer: ReturnType<typeof setInterval> | null = null;
+  // P7 — lifecycle heartbeat: advance last-seen every tick while running.
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   const servers: ServerType[] = [];
   for (const host of bindHosts) {
     const srv = serve({ fetch: app.fetch, port: p, hostname: host }, (info) => {
@@ -201,6 +205,16 @@ export async function startServer(port?: number) {
         // OPR.0.4.6.FS-1 W2 — boot sweep + daily retention tick (bounded,
         // yields between batches; a sweep failure is logged, never fatal).
         retentionTimer = startQueueRetentionScheduler(deps);
+        // P7 — lifecycle heartbeat (advances last-seen). A write failure logs and
+        // continues (the render degrades to an older last-seen honestly); the
+        // store guards not-stopped so a tick can never pass stopped_at.
+        heartbeatTimer = setInterval(() => {
+          try {
+            deps.daemonLifecycleStore.recordHeartbeat(new Date().toISOString());
+          } catch (err) {
+            console.error("[lifecycle-heartbeat] write failed (non-fatal)", err);
+          }
+        }, HEARTBEAT_INTERVAL_MS);
       }
     });
     injectWebSocket(srv);
@@ -236,6 +250,22 @@ export async function startServer(port?: number) {
       if (retentionTimer) clearInterval(retentionTimer);
     } catch (err) {
       console.error("[queue-retention] shutdown error", err);
+    }
+    // P7 write-order pin: stop the heartbeat timer BEFORE the stop-write, so no
+    // stray tick can advance last-seen after stopped_at (the store also guards
+    // not-stopped as belt-and-suspenders).
+    try {
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+    } catch (err) {
+      console.error("[lifecycle-heartbeat] shutdown error", err);
+    }
+    // P7 — the clean-shutdown mark for THIS epoch, AFTER the timer is stopped. A
+    // failed stop-write surfaces as no-clean-shutdown (render sees no stopped_at),
+    // never a false clean.
+    try {
+      deps.daemonLifecycleStore.recordStop(deps.daemonBootEpoch, new Date().toISOString());
+    } catch (err) {
+      console.error("[lifecycle-stop] stop-write failed — no clean shutdown recorded", err);
     }
     try {
       // OPR.0.4.3.21 — disable the event-loop histogram + clear its tick interval.

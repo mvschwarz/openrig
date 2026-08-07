@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { stampFields } from "./build-info.js";
 import type { RigRepository } from "./domain/rig-repository.js";
 import type { SessionRegistry } from "./domain/session-registry.js";
+import type { DaemonLifecycleStore } from "./domain/daemon-lifecycle-store.js";
 import type { EventBus } from "./domain/event-bus.js";
 import type { NodeLauncher } from "./domain/node-launcher.js";
 import type { TmuxOptionDefaultsApplier } from "./domain/tmux-option-defaults.js";
@@ -131,6 +132,9 @@ import { createRouteTimingMiddleware } from "./domain/route-timing-recorder.js";
 export interface AppDeps {
   rigRepo: RigRepository;
   sessionRegistry: SessionRegistry;
+  /** P7 — daemon lifecycle record store + this boot's epoch (heartbeat + clean-shutdown). */
+  daemonLifecycleStore: DaemonLifecycleStore;
+  daemonBootEpoch: string;
   eventBus: EventBus;
   nodeLauncher: NodeLauncher;
   tmuxAdapter: TmuxAdapter;

@@ -58,6 +58,8 @@ import { PsProjectionService } from "./domain/ps-projection.js";
 import { SeatActivityService } from "./domain/seat-activity-service.js";
 import { SeatIdentityReconciler, reconcileSelfHostIdentity } from "./domain/seat-identity-reconciler.js";
 import { SelfHostIdentityStore } from "./domain/seat-identity-store.js";
+import { DaemonLifecycleStore } from "./domain/daemon-lifecycle-store.js";
+import { randomUUID } from "node:crypto";
 import { setSelfHostId } from "./domain/hosts/fanout-contract.js";
 import { UpCommandRouter } from "./domain/up-command-router.js";
 import { RigTeardownOrchestrator } from "./domain/rig-teardown.js";
@@ -230,6 +232,15 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // addressed to THIS host's own id HOME, instead of dialing/validating it as a
   // remote/unknown host. Distinct spelling from the 'local' sentinel.
   setSelfHostId(selfHost.hostId);
+
+  // P7 — the daemon's LIFECYCLE record (distinct from the 059 identity record).
+  // A new boot mints a fresh epoch, stamps started_at, and clears any prior run's
+  // stopped_at/heartbeat. The heartbeat (index.ts post-bind) advances last-seen
+  // while running; a clean shutdown (index.ts shutdown, AFTER stopping the timer)
+  // stamps stopped_at for THIS epoch.
+  const daemonLifecycleStore = new DaemonLifecycleStore(db);
+  const daemonBootEpoch = randomUUID();
+  daemonLifecycleStore.recordBoot(daemonBootEpoch, new Date().toISOString());
 
   const rigRepo = new RigRepository(db);
   const sessionRegistry = new SessionRegistry(db);
@@ -871,6 +882,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const deps: AppDeps = {
     rigRepo,
     sessionRegistry,
+    daemonLifecycleStore,
+    daemonBootEpoch,
     eventBus,
     nodeLauncher,
     tmuxAdapter,
