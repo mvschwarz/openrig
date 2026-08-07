@@ -50,6 +50,13 @@ export interface ScenarioDaemon {
   restart: () => Promise<void>;
   /** Stop the daemon (via the shipped `rig daemon stop`) and remove the scaffold. */
   stop: () => Promise<void>;
+  /**
+   * L6 STEP-0 — translate a HOST topology path to a path the daemon can read. Host-mode omits this
+   * (identity: the daemon reads the host path directly). CONTAINER-mode implements it by staging the
+   * topology's directory INTO the container and returning the in-container path, so `rig up` is never
+   * handed a host-absolute path a container daemon cannot resolve ("Source not found").
+   */
+  stageTopology?: (hostTopologyPath: string) => Promise<string>;
 }
 
 export interface SpawnScenarioDaemonOptions {

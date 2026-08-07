@@ -19,6 +19,7 @@
 import { randomBytes } from "node:crypto";
 import { assertNoForeignDaemon, type HermeticScaffold } from "./hermetic-env.js";
 import { type ScenarioDaemon } from "./scenario-daemon.js";
+import { makeContainerStageTopology, type StagingDocker } from "./scenario-container-stage.js";
 // The ONE published-daemon procedure — imported, never re-derived (drift is what the
 // module's parity fence exists to catch): explicit 0.0.0.0 bind + the bearer that bind
 // demands, the unqualified `P:C` publish, and the explicit non-ephemeral host port.
@@ -48,8 +49,9 @@ export class ContainerDaemonError extends Error {
 export interface SpawnContainerDaemonOptions {
   /** The testbed image identity to run (manifest.image, e.g. "openrig-testbed:<gitSha>"). */
   image: string;
-  /** Injected docker invoker — the container analogue of runRig's `node <rigBin>` seam. */
-  docker: (args: string[]) => Promise<DockerResult>;
+  /** Injected docker invoker — the container analogue of runRig's `node <rigBin>` seam. Extended to
+   *  carry a step's stdin (the topology-stage tar-pipe); see StagingDocker for the dual-exit contract. */
+  docker: StagingDocker;
   /** The daemon port INSIDE the container (default CONTAINER_PORT = 7433). */
   containerPort?: number;
   /** Override the published host port. Default L3_HOST_PORT (19433) — EXPLICIT + non-ephemeral;
@@ -159,5 +161,9 @@ export async function spawnContainerDaemon(
       await docker(["rm", "-f", containerId]).catch(() => {});
       scaffold.cleanup();
     },
+    // L6 STEP-0 — container-mode path translation: stage the topology's dir into the container and
+    // return its in-container path, so `rig up` never receives a host-absolute path the container
+    // daemon cannot read. buildRealDeps/the pipeline consumes this before `up`; host-mode omits it.
+    stageTopology: makeContainerStageTopology(containerId, docker),
   };
 }

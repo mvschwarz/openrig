@@ -251,10 +251,17 @@ export async function runScenarioFile(
   mkdirSync(seatCwd, { recursive: true });
   const daemon = await resolveScenarioDaemonSpawner(opts)(scaffold, opts);
   try {
+    // L6 STEP-0 — container-mode translates the HOST topology path to the in-container staged path
+    // (host-mode has no stageTopology → the host path passes through unchanged). A stage/fence
+    // failure throws here (loud, named) and the finally tears the container down — never a mystery
+    // "Source not found" from `rig up` reading a host path it cannot see inside the container.
+    const upTopologyPath = daemon.stageTopology
+      ? await daemon.stageTopology(loaded.loaded.topologyPath)
+      : loaded.loaded.topologyPath;
     const baseDeps = buildRealDeps({
       daemon,
       rigBin: opts.rigBin,
-      topologyPath: loaded.loaded.topologyPath,
+      topologyPath: upTopologyPath,
       seatCwd,
       ...opts.deps,
       // Container-mode stamps the image id onto every ledger row; host-mode (no
