@@ -8,6 +8,7 @@ import { watchdogJobsSchema } from "../src/db/migrations/031_watchdog_jobs.js";
 import { watchdogHistorySchema } from "../src/db/migrations/032_watchdog_history.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { occupantGenerationStampsSchema } from "../src/db/migrations/063_occupant_generation_stamps.js";
+import { watchdogTargetGenerationSchema } from "../src/db/migrations/066_watchdog_target_generation.js";
 import {
   PHASE_C_POLICIES,
   WatchdogJobsError,
@@ -242,6 +243,55 @@ describe("WatchdogJobsRepository — generation stamps (Class-B)", () => {
     const job = bareRepo.register(input());
     expect(job.registeredByGeneration).toBeNull();
     expect(bareRepo.dropArmedByRegisteringGeneration("gen-x")).toBe(0);
+    bareDb.close();
+  });
+});
+
+// ── GHOST-STAGE (i-c): opt-in TARGET-generation stamp (fire-time gen-gate input) ──
+describe("WatchdogJobsRepository — target-generation stamp (i-c, opt-in)", () => {
+  let db: Database.Database;
+  let repo: WatchdogJobsRepository;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [coreSchema, eventsSchema, queueItemsSchema, watchdogJobsSchema, watchdogHistorySchema, occupantGenerationStampsSchema, watchdogTargetGenerationSchema]);
+    repo = new WatchdogJobsRepository(db);
+  });
+  afterEach(() => db.close());
+
+  const input = (overrides: Record<string, unknown> = {}) => ({
+    policy: "periodic-reminder",
+    specYaml: "policy: periodic-reminder\ntarget: a@rig\ninterval_seconds: 60\ncontext:\n  target:\n    session: a@rig\n  message: hi\n",
+    targetSession: "a@rig",
+    intervalSeconds: 60,
+    registeredBySession: "seat@rig",
+    ...overrides,
+  });
+
+  // THE CRUX PIN (ratified): a job with no target generation is ROLE-bound — NULL, fires unchanged.
+  it("defaults to NULL (role-bound) when no target generation is supplied", () => {
+    expect(repo.register(input()).targetGeneration).toBeNull();
+  });
+
+  it("stamps + round-trips an opt-in target generation (generation-bound wake)", () => {
+    const job = repo.register(input({ targetGenerationUuid: "gen-target-7" }));
+    expect(job.targetGeneration).toBe("gen-target-7");
+    expect(repo.getById(job.jobId)!.targetGeneration).toBe("gen-target-7");
+  });
+
+  it("role-bound stays role-bound alongside a generation-bound sibling (independent columns)", () => {
+    const roleBound = repo.register(input());
+    const genBound = repo.register(input({ targetGenerationUuid: "gen-9" }));
+    expect(repo.getById(roleBound.jobId)!.targetGeneration).toBeNull();
+    expect(repo.getById(genBound.jobId)!.targetGeneration).toBe("gen-9");
+  });
+
+  it("pre-066 db (no target-gen column) degrades: register succeeds, targetGeneration NULL", () => {
+    const bareDb = createDb();
+    migrate(bareDb, [coreSchema, eventsSchema, watchdogJobsSchema, watchdogHistorySchema]); // NO 066
+    const bareRepo = new WatchdogJobsRepository(bareDb);
+    const job = bareRepo.register(input({ targetGenerationUuid: "gen-x" }));
+    expect(job.targetGeneration).toBeNull(); // column absent → opt-in silently degrades to role-bound
     bareDb.close();
   });
 });

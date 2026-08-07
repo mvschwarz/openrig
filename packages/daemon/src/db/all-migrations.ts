@@ -67,6 +67,7 @@ import { daemonLifecycleSchema } from "./migrations/061_daemon_lifecycle.js";
 import { usageSamplesSchema } from "./migrations/062_usage_samples.js";
 import { occupantGenerationStampsSchema } from "./migrations/063_occupant_generation_stamps.js";
 import { projectionManifestSchema } from "./migrations/064_projection_manifest.js";
+import { watchdogTargetGenerationSchema } from "./migrations/066_watchdog_target_generation.js";
 import type { Migration } from "./migrate.js";
 
 /** Ordered 001→064. Mirrors the daemon boot migration order. */
@@ -135,4 +136,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   usageSamplesSchema,
   occupantGenerationStampsSchema,
   projectionManifestSchema,
+  watchdogTargetGenerationSchema,
 ];

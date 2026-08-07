@@ -57,6 +57,9 @@ export interface WatchdogJob {
   terminalReason: string | null;
   /** (e/Class-B) atom-B generation of the occupant that armed this job; null = UNKNOWN/pre-063. */
   registeredByGeneration: string | null;
+  /** (i-c) opt-in target occupant-generation this wake is bound to; null = ROLE-bound (fire at whoever
+   *  occupies the seat name). Only a non-null value opts the job into the fire-time gen-gate. */
+  targetGeneration: string | null;
 }
 
 export interface RegisterWatchdogJobInput {
@@ -67,6 +70,9 @@ export interface RegisterWatchdogJobInput {
   activeWakeIntervalSeconds?: number | null;
   scanIntervalSeconds?: number | null;
   registeredBySession: string;
+  /** (i-c) opt-in: the occupant-generation this wake is bound to. Omit/null = ROLE-bound (the common
+   *  case — fires at whoever occupies the seat, unchanged). Non-null opts into the fire-time gen-gate. */
+  targetGenerationUuid?: string | null;
 }
 
 interface JobRow {
@@ -86,6 +92,7 @@ interface JobRow {
   registered_at: string;
   terminal_reason: string | null;
   registered_by_generation_uuid?: string | null;
+  target_generation_uuid?: string | null;
 }
 
 export class WatchdogJobsError extends Error {
@@ -112,6 +119,7 @@ function detectWatchdogColumn(db: Database.Database, columnName: string): boolea
 
 export class WatchdogJobsRepository {
   private readonly hasGenColumn: boolean;
+  private readonly hasTargetGenColumn: boolean;
   constructor(
     private readonly db: Database.Database,
     private readonly now: () => Date = () => new Date(),
@@ -121,6 +129,7 @@ export class WatchdogJobsRepository {
     private readonly resolveOccupantGeneration?: (sessionName: string) => string | null,
   ) {
     this.hasGenColumn = detectWatchdogColumn(db, "registered_by_generation_uuid");
+    this.hasTargetGenColumn = detectWatchdogColumn(db, "target_generation_uuid");
   }
 
   register(input: RegisterWatchdogJobInput): WatchdogJob {
@@ -152,7 +161,26 @@ export class WatchdogJobsRepository {
     const registeredByGeneration = this.hasGenColumn
       ? (this.resolveOccupantGeneration?.(input.registeredBySession) ?? null)
       : null;
-    if (this.hasGenColumn) {
+    // (i-c) opt-in TARGET generation: caller-supplied (NULL = role-bound). Stored only when the 066
+    // column exists; pre-066 dbs silently degrade the opt-in to role-bound. 066 ⟹ 063 (additive order).
+    const targetGenerationUuid = this.hasTargetGenColumn ? (input.targetGenerationUuid ?? null) : null;
+    if (this.hasTargetGenColumn) {
+      this.db
+        .prepare(
+          `INSERT INTO watchdog_jobs (
+            job_id, policy, spec_yaml, target_session,
+            interval_seconds, active_wake_interval_seconds, scan_interval_seconds,
+            last_evaluation_at, last_fire_at, state,
+            registered_by_session, registered_at, terminal_reason,
+            registered_by_generation_uuid, target_generation_uuid
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'active', ?, ?, NULL, ?, ?)`,
+        )
+        .run(
+          jobId, input.policy, input.specYaml, input.targetSession,
+          input.intervalSeconds, input.activeWakeIntervalSeconds ?? null, input.scanIntervalSeconds ?? null,
+          input.registeredBySession, registeredAt, registeredByGeneration, targetGenerationUuid,
+        );
+    } else if (this.hasGenColumn) {
       this.db
         .prepare(
           `INSERT INTO watchdog_jobs (
@@ -328,5 +356,6 @@ function rowToJob(row: JobRow): WatchdogJob {
     registeredAt: row.registered_at,
     terminalReason: row.terminal_reason,
     registeredByGeneration: row.registered_by_generation_uuid ?? null,
+    targetGeneration: row.target_generation_uuid ?? null,
   };
 }
