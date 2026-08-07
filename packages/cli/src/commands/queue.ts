@@ -306,7 +306,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
   cmd
     .command("create")
     .description("Create a new qitem")
-    .requiredOption("--source <session>", "Source session")
+    .option("--source <session>", "(deprecated, ignored) the source is derived from the seat env (X-OpenRig-Session); P21 I3 made the create route derive it from the transport header")
     .requiredOption("--destination <session>", "Destination session (the seat that owns the work)")
     .option("--body <text>", "Qitem body inline (use - to read from stdin; mutually exclusive with --body-file)")
     .option("--body-file <path>", "Read qitem body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class for multiline bodies.")
@@ -326,7 +326,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--no-nudge", "Suppress the default destination nudge (cold-queue)")
     .option("--json", "JSON output for agents")
     .action(async (opts: {
-      source: string;
+      source?: string;
       destination: string;
       body?: string;
       bodyFile?: string;
@@ -382,6 +382,9 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           "warning: rig queue create called without --summary. New qitems should carry a short human-readable summary; the Story node degrades to a body truncation without it. A good summary is 1-2 plain sentences a human skims in the needs-you view — what the work is and why it needs this seat, not the agent-speak --body. Proceeding (pre-18 callers exempt).\n"
         );
       }
+      // P21 I3 reconcile: the source is DERIVED from the seat env (X-OpenRig-Session) — --source
+      // deprecated + ignored, no body sourceSession. Verify the env or the daemon refuses-loud 401.
+      if (!resolveCurrentSession(undefined, "source")) return;
       const deps = getDeps();
       // OPR.0.3.2.21.FR-4(b) — first-class --mission / --slice flags
       // translate to canonical mission:<id> / slice:<id> tags. Composes
@@ -419,7 +422,6 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         }
         const res = await client.post<Record<string, unknown>>("/api/queue/create", {
           qitemId: opts.id,
-          sourceSession: opts.source,
           destinationSession: hostResolved.destination,
           body: resolvedBody,
           summary: opts.summary,
@@ -441,16 +443,15 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
   cmd
     .command("claim <qitemId>")
     .description("Claim a qitem (pending → in-progress); computes closure_required_at from tier")
-    .option("--destination <session>", "Destination session claiming the qitem (defaults to OPENRIG_SESSION_NAME)")
+    .option("--destination <session>", "(deprecated, ignored) the claimant is derived from the seat env (X-OpenRig-Session); P21 I3 made the claim route derive it from the transport header")
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: { destination?: string; json?: boolean }) => {
-      const destination = resolveCurrentSession(opts.destination, "destination");
-      if (!destination) return;
+      // P21 I3 reconcile: the claimant is DERIVED from the seat env — --destination deprecated + ignored,
+      // no body claim. Verify the env (the header source) or the daemon refuses-loud 401.
+      if (!resolveCurrentSession(undefined, "destination")) return;
       const deps = getDeps();
       await withClient(deps, async (client) => {
-        const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {
-          destinationSession: destination,
-        });
+        const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {});
         printResult(opts.json ?? false, res.data, res.status);
       });
     });
@@ -458,16 +459,16 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
   cmd
     .command("unclaim <qitemId>")
     .description("Release a claimed qitem (in-progress → pending)")
-    .option("--destination <session>", "Destination session releasing the qitem (defaults to OPENRIG_SESSION_NAME)")
+    .option("--destination <session>", "(deprecated, ignored) the releaser is derived from the seat env (X-OpenRig-Session); the unclaim route derives it from the transport header")
     .option("--reason <text>", "Reason for unclaim", "manual")
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: { destination?: string; reason: string; json?: boolean }) => {
-      const destination = resolveCurrentSession(opts.destination, "destination");
-      if (!destination) return;
+      // P21 I3 reconcile: the releaser is DERIVED from the seat env — --destination deprecated + ignored,
+      // no body claim. Verify the env or the daemon refuses-loud 401.
+      if (!resolveCurrentSession(undefined, "destination")) return;
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/unclaim`, {
-          destinationSession: destination,
           reason: opts.reason,
         });
         printResult(opts.json ?? false, res.data, res.status);
@@ -477,7 +478,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
   cmd
     .command("update <qitemId>")
     .description("Mutate qitem state. state=done REQUIRES --closure-reason (one of: handed_off_to, blocked_on, denied, canceled, no-follow-on, escalation). Closure ≠ acceptance: handed_off_to records delivery to the next stage; acceptance is the next stage's verdict on its own qitem, not this closure.")
-    .option("--actor <session>", "Actor session performing the transition (defaults to OPENRIG_SESSION_NAME)")
+    .option("--actor <session>", "(deprecated, ignored) the actor is derived from the seat env (X-OpenRig-Session); P21 I3 made the update route derive it from the transport header")
     .requiredOption("--state <state>", "New state: pending | in-progress | done | blocked | failed | denied | canceled | handed-off")
     .option("--closure-reason <reason>", "Required for state=done")
     .option("--closure-target <target>", "Required for handed_off_to, blocked_on, escalation")
@@ -497,12 +498,13 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       note?: string;
       json?: boolean;
     }) => {
-      const actor = resolveCurrentSession(opts.actor, "actor");
-      if (!actor) return;
+      // P21 I3 reconcile: the actor is DERIVED from the seat env (X-OpenRig-Session, stamped by
+      // DaemonClient) — --actor is deprecated + ignored, no body actorSession. Verify the env (the
+      // header source) or the daemon refuses-loud 401 unattributable_sender. Matches `resolve`.
+      if (!resolveCurrentSession(undefined, "actor")) return;
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
-          actorSession: actor,
           state: opts.state,
           closureReason: opts.closureReason,
           closureTarget: opts.closureTarget,
@@ -526,7 +528,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .command("block <qitemId>")
     .description("Park a qitem as state=blocked on a blocker (qitem id, or a human seat for a needs-human park). Non-terminal: the owner keeps the item; resolution returns to it (rig queue resolve).")
     .requiredOption("--on <blocker>", "The blocker: a qitem id, or a human-seat session (e.g. human-review@kernel) for the needs-human park")
-    .option("--actor <session>", "Acting session (defaults to OPENRIG_SESSION_NAME)")
+    .option("--actor <session>", "(deprecated, ignored) the actor is derived from the seat env (X-OpenRig-Session); the park writes via the same P21 I3 header-deriving update route")
     .option("--summary <text>", "Plain-language summary of the decision owed (required for human-seat parks unless already on the item)")
     .option("--evidence-ref <path>", "Durable artifact the human judges (required for human-seat parks unless already on the item)")
     .option("--note <text>", "Transition note for the audit log")
@@ -539,12 +541,12 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       note?: string;
       json?: boolean;
     }) => {
-      const actor = resolveCurrentSession(opts.actor, "actor");
-      if (!actor) return;
+      // P21 I3 reconcile: actor DERIVED from the seat env (X-OpenRig-Session) — --actor deprecated +
+      // ignored, no body actorSession. Verify the env or the daemon refuses-loud. Matches `resolve`.
+      if (!resolveCurrentSession(undefined, "actor")) return;
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
-          actorSession: actor,
           state: "blocked",
           blockedOn: opts.on,
           summary: opts.summary,
@@ -601,7 +603,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
   cmd
     .command("handoff <qitemId>")
     .description("Transactional handoff: closes source as handed-off + creates new qitem owned by --to")
-    .option("--from <session>", "Source seat handing off (defaults to OPENRIG_SESSION_NAME)")
+    .option("--from <session>", "(deprecated, ignored) the handing-off seat is derived from the seat env (X-OpenRig-Session); P21 I3 made the handoff route derive it from the transport header")
     .requiredOption("--to <session>", "Destination seat receiving the new qitem")
     .option("--body <text>", "New qitem body inline (use - to read from stdin; mutually exclusive with --body-file). Omit both to keep the source body.")
     .option("--body-file <path>", "Read the new qitem body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class.")
@@ -633,8 +635,9 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       nudge?: boolean;
       json?: boolean;
     }) => {
-      const from = resolveCurrentSession(opts.from, "from");
-      if (!from) return;
+      // P21 I3 reconcile: the handing-off seat is DERIVED from the seat env (X-OpenRig-Session) —
+      // --from deprecated + ignored, no body fromSession. Verify the env or the daemon refuses-loud 401.
+      if (!resolveCurrentSession(undefined, "from")) return;
       // slice-08 OPR.0.4.7.8 — body-input parity. Resolve through the shipped
       // resolveQueueBody ONLY when a body source is supplied; neither preserves
       // today's source-body default (POST body undefined). Both/invalid reject
@@ -674,7 +677,6 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       const tags = dedupedTags.length > 0 ? dedupedTags : undefined;
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/handoff`, {
-          fromSession: from,
           toSession: hostResolved.destination,
           body: resolvedBody,
           summary: opts.summary,
@@ -696,7 +698,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .description(
       "Atomic close (state=done, closure_reason=handed_off_to) + create new qitem owned by --to. Variant of handoff that fully terminates the source qitem."
     )
-    .option("--from <session>", "Source seat handing off (defaults to OPENRIG_SESSION_NAME)")
+    .option("--from <session>", "(deprecated, ignored) the handing-off seat is derived from the seat env (X-OpenRig-Session); P21 I3 made the handoff route derive it from the transport header")
     .requiredOption("--to <session>", "Destination seat receiving the new qitem")
     .option("--body <text>", "New qitem body inline (use - to read from stdin; mutually exclusive with --body-file). Omit both to keep the source body.")
     .option("--body-file <path>", "Read the new qitem body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class.")
@@ -728,8 +730,9 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       nudge?: boolean;
       json?: boolean;
     }) => {
-      const from = resolveCurrentSession(opts.from, "from");
-      if (!from) return;
+      // P21 I3 reconcile: the handing-off seat is DERIVED from the seat env (X-OpenRig-Session) —
+      // --from deprecated + ignored, no body fromSession. Verify the env or the daemon refuses-loud 401.
+      if (!resolveCurrentSession(undefined, "from")) return;
       // slice-08 OPR.0.4.7.8 — body-input parity (same contract as handoff):
       // resolve only when a body source is supplied; neither keeps the
       // source-body default; both/invalid reject before daemon contact.
@@ -767,7 +770,6 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       const tags = dedupedTags.length > 0 ? dedupedTags : undefined;
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/handoff-and-complete`, {
-          fromSession: from,
           toSession: hostResolved.destination,
           body: resolvedBody,
           summary: opts.summary,
@@ -1080,7 +1082,7 @@ Examples:
   cmd
     .command("outbox-record")
     .description("Record an outbound dispatch in the sender's outbox")
-    .requiredOption("--sender <session>", "Sender session")
+    .option("--sender <session>", "(deprecated, ignored) the sender is derived from the seat env (X-OpenRig-Session); P21 I3 made the outbox-record route derive it from the transport header")
     .requiredOption("--destination <session>", "Destination session")
     .option("--body <text>", "Outbox body inline (use - to read from stdin; mutually exclusive with --body-file).")
     .option("--body-file <path>", "Read the outbox body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class.")
@@ -1090,7 +1092,7 @@ Examples:
     .option("--id <outboxId>", "Idempotent outbox_id")
     .option("--json", "JSON output for agents")
     .action(async (opts: {
-      sender: string;
+      sender?: string;
       destination: string;
       body?: string;
       bodyFile?: string;
@@ -1110,12 +1112,14 @@ Examples:
         emitBodyResolveError(err as Error & { fact?: string; consequence?: string; action?: string }, opts.json ?? false);
         return;
       }
+      // P21 I3 reconcile: the sender is DERIVED from the seat env (X-OpenRig-Session) — --sender
+      // deprecated + ignored, no body senderSession. Verify the env or the daemon refuses-loud 401.
+      if (!resolveCurrentSession(undefined, "sender")) return;
       const deps = getDeps();
       const tags = opts.tags ? opts.tags.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>("/api/queue/outbox/record", {
           outboxId: opts.id,
-          senderSession: opts.sender,
           destinationSession: opts.destination,
           body: resolvedBody,
           tags,

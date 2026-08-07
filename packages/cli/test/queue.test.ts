@@ -101,28 +101,37 @@ describe("rig queue CLI", () => {
     expect(subs).toContain("show");
   });
 
-  it("create POSTs to /api/queue/create with sourceSession + destinationSession + body", async () => {
-    const { deps, calls } = makeDeps({
-      routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "qitem-x", state: "pending" } } },
-    });
-    const program = createProgram({ queueDeps: deps });
-    program.exitOverride();
-    await program.parseAsync([
-      "node", "rig", "queue", "create",
-      "--source", "alice@rig",
-      "--destination", "bob@rig",
-      "--body", "do thing",
-      "--json",
-    ]);
-    const create = calls.find((c) => c.path === "/api/queue/create");
-    expect(create).toBeDefined();
-    const body = create!.body as Record<string, unknown>;
-    expect(body.sourceSession).toBe("alice@rig");
-    expect(body.destinationSession).toBe("bob@rig");
-    expect(body.body).toBe("do thing");
-    // R1: commander's --no-nudge sets opts.nudge to true by default.
-    // The CLI sends nudge: true, and the daemon treats nudge !== false as nudging.
-    expect(body.nudge).toBe(true);
+  it("create sends NO body sourceSession — the source derives from the transport header (X-OpenRig-Session); an explicit --source is dropped, never forwarded as a body claim", async () => {
+    const saved = process.env["OPENRIG_SESSION_NAME"];
+    process.env["OPENRIG_SESSION_NAME"] = "alice@rig"; // the seat env == the X-OpenRig-Session the DaemonClient stamps
+    try {
+      const { deps, calls } = makeDeps({
+        routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "qitem-x", state: "pending" } } },
+      });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync([
+        "node", "rig", "queue", "create",
+        "--source", "forged@evil", // P21: IGNORED — must not ride the body
+        "--destination", "bob@rig",
+        "--body", "do thing",
+        "--json",
+      ]);
+      const create = calls.find((c) => c.path === "/api/queue/create");
+      expect(create).toBeDefined();
+      const body = create!.body as Record<string, unknown>;
+      // P21 I3 reconcile: no body identity claim — the daemon derives the source from the header, and
+      // the forged --source is DROPPED (not forwarded). The destination is the TARGET, a legit body field.
+      expect(body.sourceSession).toBeUndefined();
+      expect(body.destinationSession).toBe("bob@rig");
+      expect(body.body).toBe("do thing");
+      // R1: commander's --no-nudge sets opts.nudge to true by default.
+      // The CLI sends nudge: true, and the daemon treats nudge !== false as nudging.
+      expect(body.nudge).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_SESSION_NAME"];
+      else process.env["OPENRIG_SESSION_NAME"] = saved;
+    }
   });
 
   // Slice-03 Atom 6b — --body-context snapshot + provenance rule.
@@ -557,33 +566,42 @@ describe("rig queue CLI", () => {
     expect(out).toContain("validReasons");
   });
 
-  it("handoff-and-complete POSTs to /api/queue/:id/handoff-and-complete with from + to", async () => {
-    const { deps, calls } = makeDeps({
-      routes: {
-        "POST /api/queue/qitem-src/handoff-and-complete": {
-          status: 201,
-          data: {
-            closed: { state: "done", closureReason: "handed_off_to" },
-            created: { state: "pending", qitemId: "qitem-new" },
+  it("handoff-and-complete sends NO body fromSession — the handing-off seat derives from the transport header (X-OpenRig-Session); --from is dropped, --to stays the target", async () => {
+    const saved = process.env["OPENRIG_SESSION_NAME"];
+    process.env["OPENRIG_SESSION_NAME"] = "bob@rig"; // the seat env == the X-OpenRig-Session the DaemonClient stamps
+    try {
+      const { deps, calls } = makeDeps({
+        routes: {
+          "POST /api/queue/qitem-src/handoff-and-complete": {
+            status: 201,
+            data: {
+              closed: { state: "done", closureReason: "handed_off_to" },
+              created: { state: "pending", qitemId: "qitem-new" },
+            },
           },
         },
-      },
-    });
-    const program = createProgram({ queueDeps: deps });
-    program.exitOverride();
-    await program.parseAsync([
-      "node", "rig", "queue", "handoff-and-complete", "qitem-src",
-      "--from", "bob@rig",
-      "--to", "carol@rig",
-      "--body", "carol's piece",
-      "--json",
-    ]);
-    const call = calls.find((c) => c.path === "/api/queue/qitem-src/handoff-and-complete");
-    expect(call).toBeDefined();
-    const body = call!.body as Record<string, unknown>;
-    expect(body.fromSession).toBe("bob@rig");
-    expect(body.toSession).toBe("carol@rig");
-    expect(body.body).toBe("carol's piece");
+      });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync([
+        "node", "rig", "queue", "handoff-and-complete", "qitem-src",
+        "--from", "forged@evil", // P21: IGNORED — must not ride the body
+        "--to", "carol@rig",
+        "--body", "carol's piece",
+        "--json",
+      ]);
+      const call = calls.find((c) => c.path === "/api/queue/qitem-src/handoff-and-complete");
+      expect(call).toBeDefined();
+      const body = call!.body as Record<string, unknown>;
+      // P21 I3 reconcile: no body identity claim — the daemon derives fromSession from the header, and
+      // the forged --from is DROPPED. toSession is the TARGET, a legit body field.
+      expect(body.fromSession).toBeUndefined();
+      expect(body.toSession).toBe("carol@rig");
+      expect(body.body).toBe("carol's piece");
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_SESSION_NAME"];
+      else process.env["OPENRIG_SESSION_NAME"] = saved;
+    }
   });
 
   it("whoami GETs /api/queue/whoami with session + recentLimit query params", async () => {
@@ -643,7 +661,7 @@ describe("rig queue CLI", () => {
     }
   });
 
-  it("claim defaults the destination from OPENRIG_SESSION_NAME when --destination is omitted", async () => {
+  it("claim sends NO body destinationSession — the claimant derives from the transport header (X-OpenRig-Session); env present ⇒ POST fires", async () => {
     const saved = process.env["OPENRIG_SESSION_NAME"];
     process.env["OPENRIG_SESSION_NAME"] = "bob@rig";
     try {
@@ -661,14 +679,16 @@ describe("rig queue CLI", () => {
 
       const call = calls.find((c) => c.path === "/api/queue/qitem-x/claim");
       expect(call).toBeDefined();
-      expect((call!.body as { destinationSession: string }).destinationSession).toBe("bob@rig");
+      // P21 I3 reconcile: the claimant is NOT a body claim — the daemon derives it from the
+      // X-OpenRig-Session header (env present ⇒ pre-check passes ⇒ POST fires). No forgeable body field.
+      expect((call!.body as Record<string, unknown>).destinationSession).toBeUndefined();
     } finally {
       if (saved === undefined) delete process.env["OPENRIG_SESSION_NAME"];
       else process.env["OPENRIG_SESSION_NAME"] = saved;
     }
   });
 
-  it("update defaults the actor from OPENRIG_SESSION_NAME when --actor is omitted", async () => {
+  it("update sends NO body actorSession — the actor derives from the transport header (X-OpenRig-Session); env present ⇒ POST fires", async () => {
     const saved = process.env["OPENRIG_SESSION_NAME"];
     process.env["OPENRIG_SESSION_NAME"] = "bob@rig";
     try {
@@ -691,14 +711,15 @@ describe("rig queue CLI", () => {
 
       const call = calls.find((c) => c.path === "/api/queue/qitem-x/update");
       expect(call).toBeDefined();
-      expect((call!.body as { actorSession: string }).actorSession).toBe("bob@rig");
+      // P21 I3 reconcile: the actor is NOT a body claim — the daemon derives it from the header.
+      expect((call!.body as Record<string, unknown>).actorSession).toBeUndefined();
     } finally {
       if (saved === undefined) delete process.env["OPENRIG_SESSION_NAME"];
       else process.env["OPENRIG_SESSION_NAME"] = saved;
     }
   });
 
-  it("handoff defaults the source from OPENRIG_SESSION_NAME when --from is omitted", async () => {
+  it("handoff sends NO body fromSession — the handing-off seat derives from the transport header (X-OpenRig-Session); env present ⇒ POST fires", async () => {
     const saved = process.env["OPENRIG_SESSION_NAME"];
     process.env["OPENRIG_SESSION_NAME"] = "bob@rig";
     try {
@@ -720,7 +741,8 @@ describe("rig queue CLI", () => {
 
       const call = calls.find((c) => c.path === "/api/queue/qitem-x/handoff");
       expect(call).toBeDefined();
-      expect((call!.body as { fromSession: string }).fromSession).toBe("bob@rig");
+      // P21 I3 reconcile: the handing-off seat is NOT a body claim — the daemon derives it from the header.
+      expect((call!.body as Record<string, unknown>).fromSession).toBeUndefined();
     } finally {
       if (saved === undefined) delete process.env["OPENRIG_SESSION_NAME"];
       else process.env["OPENRIG_SESSION_NAME"] = saved;
