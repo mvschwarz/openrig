@@ -203,9 +203,10 @@ describe("UI Enhancement Pack v0 — /api/files routes", () => {
       expect(row.actor).toBe("test@r");
       expect(row.root).toBe("workspace");
       expect(row.path).toBe("STEERING.md");
-      // P21 I5 NAMED DEFERRAL: header-absent (the UI/browser path) records the body actor but stamps
-      // identity_provenance NULL (claimed-era, honest pre-verification) — never refused, never broken.
-      expect((row as { identity_provenance: string | null }).identity_provenance).toBeNull();
+      // P21 I5 NAMED DEFERRAL: header-absent (the UI/browser path) records the body actor stamped
+      // the DECLARED claimed-era variant `claimed:v1` (PM pin — never null; null now = pre-sweep-legacy
+      // ONLY, so a legacy row and a founder UI tap today stay distinguishable). Never refused/broken.
+      expect((row as { identity_provenance: string | null }).identity_provenance).toBe("claimed:v1");
     });
 
     // P21 I5 — files write is a founder-visible surface; resolveActorWithDeferral splits the two paths:

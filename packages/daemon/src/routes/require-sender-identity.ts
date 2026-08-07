@@ -52,8 +52,24 @@ export function requireSenderIdentity(
   return { ok: true, session };
 }
 
+/**
+ * P21 — the CLOSED era-provenance union stamped on identity-carrying rows (PM-ratified pin). A shared
+ * type so every producer (this helper, the forwarding re-stamp, the recorded-provenance decider) speaks
+ * the same closed alphabet:
+ *   - `transport:v1` — derived from the transport chokepoint (X-OpenRig-Session on a local request).
+ *   - `relay:v1`     — a forwarding daemon re-stamped from its OWN authenticated context (cross-host).
+ *   - `claimed:v1`   — a founder-visible-surface UI/MCP tap under a not-yet-plumbed principal (the named
+ *                      deferral); honest "pre-verification" of a TODAY actor.
+ * NULL / absent is deliberately NOT a member — it is reserved for pre-sweep-legacy / unstamped rows, so a
+ * legacy row stays distinguishable from a `claimed:v1` tap today (the era boundary). A forward must
+ * PRESERVE `claimed:v1` (never upgrade it to transport:v1/relay:v1 — that would launder unverified→verified).
+ */
+export type IdentityProvenance = "transport:v1" | "relay:v1" | "claimed:v1";
+
 export type ActorWithDeferral =
-  | { ok: true; session: string; provenance: "transport:v1" | null }
+  // provenance is the NON-RELAY subset: this helper only ever produces transport:v1 (header present) or
+  // claimed:v1 (the deferral); relay:v1 belongs to the cross-host forward, not a local route derivation.
+  | { ok: true; session: string; provenance: Exclude<IdentityProvenance, "relay:v1"> }
   | { ok: false; response: Response };
 
 /**
@@ -61,12 +77,13 @@ export type ActorWithDeferral =
  * Header PRESENT ⇒ identical transport derivation (derive + 409-on-mismatch + `transport:v1`).
  * Header ABSENT ⇒ a NAMED PER-SURFACE DEFERRAL instead of refuse-loud: refusing would break a shipped
  * founder-visible flow (the browser UI review-actions + useFiles sites the CLI chokepoint can't reach),
- * so the body-supplied actor is recorded CLAIMED-era (`provenance: null`, honest "pre-verification").
- * This is NEVER silent-accept — the null era-stamp IS the visible gap — and NEVER silent-break. A body
- * actor is still required (some actor must be on the record); its verification is the named gap whose
- * owner + plumbing-path are documented per increment. Use ONLY on surfaces PM-ruled founder-visible-
- * flow-breaking (d00c468d: ui review approve/resolve/refreeze + useFiles write); everything else uses
- * requireSenderIdentity (refuse-loud default).
+ * so the body-supplied actor is recorded as the DECLARED claimed-era variant `claimed:v1` (a TODAY tap
+ * under a not-yet-plumbed principal — honest "pre-verification", distinct from a legacy null row).
+ * This is NEVER silent-accept — the claimed:v1 era-stamp IS the visible gap — and NEVER silent-break. A
+ * body actor is still required (some actor must be on the record); its verification is the named gap
+ * whose owner + plumbing-path are documented per increment. Use ONLY on surfaces PM-ruled founder-
+ * visible-flow-breaking (d00c468d: ui review approve/resolve/refreeze + useFiles write); everything else
+ * uses requireSenderIdentity (refuse-loud default).
  */
 export function resolveActorWithDeferral(
   c: Context,
@@ -91,8 +108,8 @@ export function resolveActorWithDeferral(
     }
     return { ok: true, session, provenance: "transport:v1" };
   }
-  // Header absent = the browser UI / MCP path → NAMED DEFERRAL (never-break): record the body actor
-  // CLAIMED-era (provenance NULL). A claimed-era actor is still required.
+  // Header absent = the browser UI / MCP path → NAMED DEFERRAL (never-break): record the body actor as
+  // the DECLARED claimed-era variant `claimed:v1` (not null). A claimed-era actor is still required.
   if (!claim) {
     return {
       ok: false,
@@ -104,5 +121,5 @@ export function resolveActorWithDeferral(
       }, 400),
     };
   }
-  return { ok: true, session: claim, provenance: null };
+  return { ok: true, session: claim, provenance: "claimed:v1" };
 }

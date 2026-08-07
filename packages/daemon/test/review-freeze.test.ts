@@ -121,7 +121,8 @@ describe("POST /api/review/freeze", () => {
     expect(res.status).toBe(200);
     const row = lastAuditRow();
     expect(row.actor).toBe("approver@host");
-    expect(row.identity_provenance).toBeNull();
+    // PM pin: the deferral records the DECLARED claimed-era variant `claimed:v1`, never null.
+    expect(row.identity_provenance).toBe("claimed:v1");
   });
 
   it("freeze — header absent + no body actor → 400", async () => {
