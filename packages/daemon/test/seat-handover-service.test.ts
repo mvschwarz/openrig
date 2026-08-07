@@ -95,9 +95,9 @@ describe("SeatHandoverService", () => {
     });
   }
 
-  function seedSeat(opts?: { runtime?: string; withSession?: boolean }) {
+  function seedSeat(opts?: { runtime?: string; withSession?: boolean; model?: string }) {
     const rig = rigRepo.createRig("seat-rig");
-    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: opts?.runtime ?? "codex", cwd: "/project" });
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: opts?.runtime ?? "codex", cwd: "/project", model: opts?.model });
     let sessionId: string | null = null;
     if (opts?.withSession !== false) {
       const session = sessionRegistry.registerSession(node.id, "dev-impl@seat-rig");
@@ -265,6 +265,24 @@ describe("SeatHandoverService", () => {
       // ambient YOLO must not widen an attachment-less successor.
       expect(successorBinding.launchPosture).toBe("floor");
     } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("MONEY PROOF (0.5.2-07): a SPEC-pinned model seat's handover launches the successor on the SPEC model — the REAL lookupNode→createSuccessor→launchHarness path, not an injected node", async () => {
+    // Same shape as Seam B: asserts the binding the REAL launchHarness received, driven end-to-end by
+    // service.handover(). The launcher-level money proof injects node.model directly and cannot catch
+    // lookupNode dropping the column — this one does. RED on main: lookupNode SELECTs only id/runtime/cwd,
+    // so the spec-pinned model is lost before the successor binding is ever built (the handover-reverts gap).
+    seedSeat({ runtime: "codex", model: "gpt-5.4-cheap" });
+    const result = await service.handover({
+      seatRef: "dev-impl@seat-rig",
+      reason: "context-wall",
+      source: "fresh",
+      operator: "orch-lead@seat-rig",
+    });
+    expect(result.ok).toBe(true);
+    expect(launchHarness).toHaveBeenCalledTimes(1);
+    const successorBinding = launchHarness.mock.calls[0]![0] as { model?: string };
+    expect(successorBinding.model).toBe("gpt-5.4-cheap");
   });
 
   it("composes the full cycle for a fresh source: create -> deliver -> verify -> rebind", async () => {

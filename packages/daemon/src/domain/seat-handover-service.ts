@@ -75,6 +75,9 @@ interface NodeRow {
   id: string;
   runtime: string | null;
   cwd: string | null;
+  // 0.5.2-07: the seat's SPEC-pinned model, threaded onto the successor binding so handover
+  // does not silently revert a spec-pinned seat to the runtime default (adapter emits -m/--model).
+  model: string | null;
 }
 
 interface SessionRow {
@@ -315,7 +318,9 @@ export class SeatHandoverService {
       ?? "floor"; // R2 terminal: absence = the locked floor on the continuity edge too
     const launch = await this.successorLauncher.createSuccessor({
       // Seam B: the successor is the SAME seat continuing — persisted policy posture carries.
-      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, launchPosture: successorPosture },
+      // 0.5.2-07 model fidelity: carry the seat's SPEC-pinned model so the successor launch reads the
+      // spec (else the running topology drifts from the founder-designed one at every handover).
+      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, launchPosture: successorPosture, model: node.model },
       departingSessionName: latestSession.session_name,
     });
     if (!launch.ok) {
@@ -613,7 +618,7 @@ export class SeatHandoverService {
 
   private lookupNode(status: SeatStatus): NodeRow {
     return this.db.prepare(
-      "SELECT id, runtime, cwd FROM nodes WHERE rig_id = ? AND logical_id = ?"
+      "SELECT id, runtime, cwd, model FROM nodes WHERE rig_id = ? AND logical_id = ?"
     ).get(status.rig_id, status.logical_id) as NodeRow;
   }
 

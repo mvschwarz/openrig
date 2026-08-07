@@ -42,6 +42,11 @@ export interface SuccessorNode {
    *  the successor is a CONTINUITY edge of the same seat, so its policy posture
    *  carries (populated by the caller from node provenance; absent = env decision). */
   launchPosture?: "floor" | "full_bypass";
+  /** 0.5.2-07 model fidelity: the seat's SPEC-pinned model (nodes.model). The successor is a continuity
+   *  edge of the same seat, so its launch must READ THE SPEC — a launch path that drops it makes the
+   *  running topology drift from the founder-designed one. Populated by the caller from node provenance;
+   *  absent → the adapter emits no model flag (unchanged for legacy/unpinned seats). */
+  model?: string | null;
 }
 
 export type SuccessorLaunchResult =
@@ -239,11 +244,11 @@ export class SuccessorSessionLauncher {
 
     // Transient binding for the adapter launch/readiness probe — the successor
     // is unmanaged, so there is no persisted binding row (id/updatedAt are inert
-    // for the adapter; it reads tmuxSession/tmuxPane/cwd). Model/config profile
-    // are not resolved here (v0): a fresh successor launches with the runtime's
-    // default profile, not the departing seat's AgentSpec-configured model —
-    // a live default-config agent beats a dead shell; full-fidelity relaunch is
-    // a tracked follow-on.
+    // for the adapter; it reads tmuxSession/tmuxPane/cwd/model). 0.5.2-07 (model
+    // fidelity): the SPEC-pinned model IS carried now — a successor is a continuity
+    // edge of the same seat, so its launch must read the seat's spec, else the
+    // running topology silently drifts from the founder-designed one at every
+    // handover. (config profile is still a tracked follow-on.)
     const binding: NodeBinding = {
       id: "",
       nodeId: node.id,
@@ -257,6 +262,8 @@ export class SuccessorSessionLauncher {
       cwd: cwd ?? "",
       // Seam B: continuity — the successor launches at the departing seat's posture.
       ...(node.launchPosture ? { launchPosture: node.launchPosture } : {}),
+      // 0.5.2-07: the successor reads the seat's SPEC-pinned model (adapter emits -m/--model).
+      model: node.model ?? undefined,
     };
 
     let launch: Awaited<ReturnType<RuntimeAdapter["launchHarness"]>>;

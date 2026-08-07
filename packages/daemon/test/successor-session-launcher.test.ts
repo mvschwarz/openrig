@@ -57,6 +57,21 @@ describe("SuccessorSessionLauncher", () => {
     });
   }
 
+  it("MONEY PROOF (0.5.2-07): the successor's launch binding carries the SPEC-pinned model, not the runtime default", async () => {
+    // Boot cheap → hand over → the successor LAUNCH must carry the spec's model. The adapter emits
+    // -m/--model from binding.model (51-07 A1); this pins that the handover FEEDS it the spec model.
+    // Absent = the founder-designed topology silently drifts from its spec at every handover.
+    listPanes.mockResolvedValue([{ id: "%42", index: 0, cwd: "/w", width: 80, height: 24, active: true }]);
+    const res = await launcher().createSuccessor({
+      node: { id: "node-1", runtime: "codex", cwd: "/w", model: "gpt-5.4-cheap" },
+      departingSessionName: "dev-impl@rig",
+    });
+    expect(res.ok).toBe(true);
+    expect(launchHarness).toHaveBeenCalledTimes(1);
+    const binding = launchHarness.mock.calls[0]![0] as { model?: string };
+    expect(binding.model).toBe("gpt-5.4-cheap");
+  });
+
   it("CUTOVER: terminates the retiree then respawns (no -k) into the DEPARTING pane (preserved name, same pane id)", async () => {
     // A SEAT = one durable tmux session; the successor takes over the retiree's EXACT pane so native
     // scrollback survives. The retiree is terminated IN PLACE first (remain-on-exit → graceful SIGTERM),
