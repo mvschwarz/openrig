@@ -92,13 +92,34 @@ HOME (fence breach).
 ## L3.2 — `rig up` settles a zero-token stub topology
 
 Ship a minimal `runtime: stub` `rig.yaml` (+ agent fixture + culture.md) as the staged stub assets;
-copy it into a container-local workspace and `rig up`.
+copy it into a container-local workspace and `rig up` it BY EXPLICIT SOURCE.
+
+**STAGED PAYLOAD PATH — nested, and deliberately so.** The build verb stages each census entry
+preserving its full REPO-RELATIVE path (`scripts/build-testbed-image.sh:51-52`:
+`cp "${REPO_ROOT}/${rel}" "${CONTEXT}/stub-assets/${rel}"`), and the Dockerfile copies that context
+dir wholesale (`docker/testbed/Dockerfile:52`). So in-container the trio lands at
+`/opt/openrig-testbed/stub-assets/docker/testbed/stub-assets/`, NOT at the stub-assets root. That
+nesting is load-bearing, not an accident: the same relative paths are what the manifest hashes into
+the byte-reproducible census receipt (`build-testbed-image.sh:101`), so flattening the staging would
+change the receipt bytes r1 verified. The RUNBOOK adapts to the staged reality; the staging stands.
+(This exact failure was PREDICTED and scoped to this runbook —
+`51-04-STUB-ASSET-TRIO-REVIEW-VERDICT-review-r1.md` sha-16 5d4a8bb1d0a1605b, "Honest forward-flag";
+the note simply never reached the text until now.)
+
+**EXPLICIT SOURCE — never bare `rig up`.** `rig up` takes a REQUIRED positional
+(`packages/cli/src/commands/up.ts:77`: `.argument("<source>", "Path to a .yaml rig spec or
+.rigbundle, or a library name…")`); a bare invocation exits `missing required argument 'source'`,
+which is what the operator hit.
 
 ```bash
 "${RUNTIME}" exec "${NAME}" bash -lc '
   set -e
-  mkdir -p ~/work && cp -r /opt/openrig-testbed/stub-assets/* ~/work/ 2>/dev/null || true
-  cd ~/work && rig up && sleep 3 && rig ps --json' | tee "${EVID}/L3-topology.txt"
+  STAGED=/opt/openrig-testbed/stub-assets/docker/testbed/stub-assets
+  # Pre-flight fence: assert the payload where the build actually stages it. A staging change must
+  # fail LOUD here naming the path, never as a downstream "missing required argument".
+  [ -f "${STAGED}/rig.yaml" ] || { echo "L3.2 FAIL: no rig.yaml at ${STAGED} — staged payload moved; reconcile the runbook against scripts/build-testbed-image.sh"; ls -R /opt/openrig-testbed/stub-assets | head -40; exit 1; }
+  mkdir -p ~/work && cp -r "${STAGED}/." ~/work/
+  cd ~/work && rig up rig.yaml && sleep 3 && rig ps --json' | tee "${EVID}/L3-topology.txt"
 ```
 
 **PASS:** the stub seat(s) reach a settled/ready state (zero LLM tokens consumed — `runtime: stub`).
