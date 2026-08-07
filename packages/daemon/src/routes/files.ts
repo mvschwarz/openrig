@@ -21,6 +21,7 @@
 import { Hono } from "hono";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { resolveActorWithDeferral } from "./require-sender-identity.js";
 import {
   resolveAllowedDirectory,
   resolveAllowedFile,
@@ -248,7 +249,11 @@ export function filesRoutes(): Hono {
     if (typeof body.content !== "string") return c.json({ error: "content_required" }, 400);
     if (!body.expectedMtime) return c.json({ error: "expectedMtime_required" }, 400);
     if (!body.expectedContentHash) return c.json({ error: "expectedContentHash_required" }, 400);
-    if (!body.actor) return c.json({ error: "actor_required" }, 400);
+    // P21 I5: files write is a founder-visible surface — the transport header rules when present
+    // (transport:v1); when absent (the browser UI path) the body actor is recorded CLAIMED-era
+    // (identity_provenance null) rather than refused — the named deferral (owner=dev50, d00c468d).
+    const identity = resolveActorWithDeferral(c, { verb: "files write", bodyClaim: body.actor });
+    if (!identity.ok) return identity.response;
     try {
       const result = deps.writeService.writeAtomic({
         rootName: body.root,
@@ -256,7 +261,8 @@ export function filesRoutes(): Hono {
         content: body.content,
         expectedMtime: body.expectedMtime,
         expectedContentHash: body.expectedContentHash,
-        actor: body.actor,
+        actor: identity.session,
+        identityProvenance: identity.provenance,
       });
       return c.json({
         root: body.root,

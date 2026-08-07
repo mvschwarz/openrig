@@ -40,6 +40,9 @@ export interface FileWriteRequest {
   expectedContentHash: string;
   /** Operator session that initiated the write (for the audit row). */
   actor: string;
+  /** P21 §4 era-stamp for the audit row: `transport:v1` when the actor came from the transport
+   *  header chokepoint; null = claimed-era (the UI/MCP named-deferral path). */
+  identityProvenance?: string | null;
 }
 
 export interface FileWriteResult {
@@ -184,6 +187,7 @@ export class FileWriteService {
     const auditRow = {
       ts: this.now().toISOString(),
       actor: req.actor,
+      identity_provenance: req.identityProvenance ?? null, // P21 §4 era-stamp (null = claimed-era / UI deferral)
       root: req.rootName,
       path: req.path,
       absolutePath: target,
@@ -266,6 +270,7 @@ export class FileWriteService {
     const auditRow = {
       ts: this.now().toISOString(),
       actor: req.actor,
+      identity_provenance: req.identityProvenance ?? null, // P21 §4 era-stamp (null = claimed-era / UI deferral)
       root: req.rootName,
       path: req.path,
       absolutePath: target,

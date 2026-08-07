@@ -51,3 +51,58 @@ export function requireSenderIdentity(
   }
   return { ok: true, session };
 }
+
+export type ActorWithDeferral =
+  | { ok: true; session: string; provenance: "transport:v1" | null }
+  | { ok: false; response: Response };
+
+/**
+ * P21 §2 + rail-addendum d00c468d — the FOUNDER-VISIBLE-surface variant of requireSenderIdentity.
+ * Header PRESENT ⇒ identical transport derivation (derive + 409-on-mismatch + `transport:v1`).
+ * Header ABSENT ⇒ a NAMED PER-SURFACE DEFERRAL instead of refuse-loud: refusing would break a shipped
+ * founder-visible flow (the browser UI review-actions + useFiles sites the CLI chokepoint can't reach),
+ * so the body-supplied actor is recorded CLAIMED-era (`provenance: null`, honest "pre-verification").
+ * This is NEVER silent-accept — the null era-stamp IS the visible gap — and NEVER silent-break. A body
+ * actor is still required (some actor must be on the record); its verification is the named gap whose
+ * owner + plumbing-path are documented per increment. Use ONLY on surfaces PM-ruled founder-visible-
+ * flow-breaking (d00c468d: ui review approve/resolve/refreeze + useFiles write); everything else uses
+ * requireSenderIdentity (refuse-loud default).
+ */
+export function resolveActorWithDeferral(
+  c: Context,
+  opts?: { verb?: string; bodyClaim?: string | null },
+): ActorWithDeferral {
+  const verb = opts?.verb ?? "this action";
+  const session = c.req.header(SENDER_IDENTITY_HEADER)?.trim();
+  const claim = opts?.bodyClaim?.trim();
+  if (session) {
+    // Transport path (CLI/DaemonClient stamped the header): derive + 409 on a differing body claim.
+    if (claim && claim !== session) {
+      return {
+        ok: false,
+        response: c.json({
+          error: "identity_mismatch",
+          message:
+            `Refusing ${verb}: the request body claims actor "${claim}" but the authenticated transport ` +
+            `identity is "${session}". The body-supplied actor is not accepted — remove it (the transport ` +
+            "header is authoritative).",
+        }, 409),
+      };
+    }
+    return { ok: true, session, provenance: "transport:v1" };
+  }
+  // Header absent = the browser UI / MCP path → NAMED DEFERRAL (never-break): record the body actor
+  // CLAIMED-era (provenance NULL). A claimed-era actor is still required.
+  if (!claim) {
+    return {
+      ok: false,
+      response: c.json({
+        error: "actor_required",
+        message:
+          `Refusing ${verb}: no authenticated transport identity (X-OpenRig-Session absent) and no body ` +
+          "actor to record. The channel of record needs at least a claimed-era actor.",
+      }, 400),
+    };
+  }
+  return { ok: true, session: claim, provenance: null };
+}

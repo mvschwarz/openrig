@@ -203,6 +203,54 @@ describe("UI Enhancement Pack v0 — /api/files routes", () => {
       expect(row.actor).toBe("test@r");
       expect(row.root).toBe("workspace");
       expect(row.path).toBe("STEERING.md");
+      // P21 I5 NAMED DEFERRAL: header-absent (the UI/browser path) records the body actor but stamps
+      // identity_provenance NULL (claimed-era, honest pre-verification) — never refused, never broken.
+      expect((row as { identity_provenance: string | null }).identity_provenance).toBeNull();
+    });
+
+    // P21 I5 — files write is a founder-visible surface; resolveActorWithDeferral splits the two paths:
+    // header present (CLI/DaemonClient) => derive + transport:v1 + 409-on-mismatch; header absent
+    // (browser UI) => claimed-era (NULL provenance), never-break (the named deferral, owner=dev50).
+    it("write — header present derives the actor + stamps the audit identity_provenance transport:v1", async () => {
+      const target = join(tempDir, "workspace", "STEERING.md");
+      const expectedMtime = statSync(target).mtime.toISOString();
+      const expectedContentHash = sha256(readFileSync(target));
+      const res = await app.request("/api/files/write", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "cli@r" },
+        body: JSON.stringify({ root: "workspace", path: "STEERING.md", content: "# via cli\n", expectedMtime, expectedContentHash }),
+      });
+      expect(res.status).toBe(200);
+      const audit = readFileSync(join(tempDir, "audit.jsonl"), "utf-8").trim().split("\n");
+      const row = JSON.parse(audit[audit.length - 1]!) as { actor: string; identity_provenance: string | null };
+      expect(row.actor).toBe("cli@r");
+      expect(row.identity_provenance).toBe("transport:v1");
+    });
+
+    it("write — header present + differing body actor → 409 identity_mismatch", async () => {
+      const target = join(tempDir, "workspace", "STEERING.md");
+      const expectedMtime = statSync(target).mtime.toISOString();
+      const expectedContentHash = sha256(readFileSync(target));
+      const res = await app.request("/api/files/write", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "cli@r" },
+        body: JSON.stringify({ root: "workspace", path: "STEERING.md", content: "x", expectedMtime, expectedContentHash, actor: "mallory@r" }),
+      });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+    });
+
+    it("write — header absent + no body actor → 400 actor_required (the deferral still needs some actor)", async () => {
+      const target = join(tempDir, "workspace", "STEERING.md");
+      const expectedMtime = statSync(target).mtime.toISOString();
+      const expectedContentHash = sha256(readFileSync(target));
+      const res = await app.request("/api/files/write", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ root: "workspace", path: "STEERING.md", content: "x", expectedMtime, expectedContentHash }),
+      });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe("actor_required");
     });
 
     it("rejects missing required fields with 400", async () => {
