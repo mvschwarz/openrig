@@ -288,7 +288,7 @@ import { rigPreflight, preflightValidatedSpec } from "./rigspec-preflight.js";
 import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { resolveNodeConfig } from "./profile-resolver.js";
 import { resolveStartup } from "./startup-resolver.js";
-import { planProjection, claudeConflictTargetPath, projectionConflictWarnings, type ProjectionPlan } from "./projection-planner.js";
+import { planProjection, claudeConflictTargetPath, projectionConflictWarnings, filterProtectedProjections, type ProjectionPlan } from "./projection-planner.js";
 import { ProjectionManifestStore } from "./projection-manifest-store.js";
 import { StartupOrchestrator } from "./startup-orchestrator.js";
 import { PodRepository } from "./pod-repository.js";
@@ -1022,7 +1022,7 @@ export class PodRigInstantiator {
     };
   }
 
-  async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { cwdOverride?: string; prelaunchHook?: (rigId: string) => Promise<{ ok: true } | { ok: false; code: string; message: string }> }): Promise<InstantiateOutcome> {
+  async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { cwdOverride?: string; force?: boolean; prelaunchHook?: (rigId: string) => Promise<{ ok: true } | { ok: false; code: string; message: string }> }): Promise<InstantiateOutcome> {
     // 1. Parse + validate
     let rigSpec: PodRigSpec;
     try {
@@ -1226,6 +1226,7 @@ export class PodRigInstantiator {
           rigSpec,
           rigRoot,
           cwdOverride: opts?.cwdOverride,
+          force: opts?.force,
           pod,
           member,
           qualifiedId,
@@ -1597,6 +1598,9 @@ export class PodRigInstantiator {
     qualifiedId: string;
     nodeId: string;
     cwdOverride?: string;
+    /** P20 atom-4 — operator override: overwrite operator-edited (operator_conflict)
+     *  projection targets instead of protecting them. Absent = protect (safe default). */
+    force?: boolean;
     resolveResult?: ReturnType<typeof resolveAgentRef> extends infer T ? T : never;
     configResult?: ReturnType<typeof resolveNodeConfig> extends infer T ? T : never;
   }): Promise<{ status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string; warnings?: string[] }> {
@@ -1701,7 +1705,15 @@ export class PodRigInstantiator {
       input.pod,
       input.member,
     );
-    const dedupedResolvedFiles = this.dedupeProjectedManagedStartupFiles(planResult.plan, resolvedFiles);
+    const managedDedupedFiles = this.dedupeProjectedManagedStartupFiles(planResult.plan, resolvedFiles);
+    // P20 atom-4 PROTECT: hold back operator-edited skill targets (operator_conflict)
+    // so the adapter never overwrites an operator's edit — unless the operator forces
+    // it (input.force). The per-conflict warning already tells the operator this.
+    const dedupedResolvedFiles = filterProtectedProjections(
+      managedDedupedFiles,
+      planResult.plan,
+      { force: input.force },
+    ).delivered;
 
     const binding: NodeBinding = {
       id: launchResult.binding.id,

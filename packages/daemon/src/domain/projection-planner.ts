@@ -4,6 +4,7 @@ import type { StartupBlock } from "./types.js";
 import { classifyResourceProjection } from "./conflict-detector.js";
 import type { ResolvedNodeConfig, QualifiedResource, ResolvedResources } from "./profile-resolver.js";
 import type { ResourceCollision } from "./agent-resolver.js";
+import type { ResolvedStartupFile } from "./runtime-adapter.js";
 
 // -- Types --
 
@@ -312,6 +313,47 @@ export function claudeConflictTargetPath(
 export function projectionConflictWarnings(plan: Pick<ProjectionPlan, "conflicts">): string[] {
   return plan.conflicts.map((c) => {
     const reason = c.conflictDetail?.reason ?? `${c.category} "${c.effectiveId}" diverges from the projection source`;
-    return `projection conflict: ${reason} — the target will be overwritten by re-projection; if this is an operator edit, move it aside or fold it into the spec source`;
+    if (c.classification === "operator_conflict") {
+      // P20 PROTECT: the manifest tells us the target diverged from BOTH our last
+      // write and the source — an operator edited it. filterProtectedProjections
+      // holds the file back, so "not overwritten" is now TRUE (not just a warning).
+      return `projection conflict: ${reason} — PROTECTED: the target is NOT overwritten; re-run projection with --force to overwrite it, or fold the operator edit into the spec source`;
+    }
+    // hash_conflict — the P17 fallback: no projection manifest for this target yet,
+    // so an operator edit can't be told apart from a stale projection. We overwrite
+    // WITH a warning (softened, transitional): the write records the manifest, and a
+    // future divergence then classifies operator_conflict and becomes protectable.
+    return `projection conflict: ${reason} — no projection manifest for this target yet, so an operator edit can't be told apart from a stale projection; the target will be overwritten by re-projection (the write records the manifest, making future edits protectable). If this is an operator edit, move it aside or fold it into the spec source`;
   });
+}
+
+/** P20 atom-4 — PROTECT. An operator_conflict means the target diverged from BOTH
+ *  our last recorded write and the current source: an operator edited a projected
+ *  file. Hold those files back from delivery so the adapter never overwrites the
+ *  edit — unless the operator explicitly forces re-projection. hash_conflict (no
+ *  manifest yet) is NOT protected: it stays the P17 overwrite-with-warning fallback,
+ *  since operator-vs-stale can't be told apart without a recorded last hash.
+ *  Returns the files to deliver and the files held back (for reporting). */
+export function filterProtectedProjections(
+  files: ResolvedStartupFile[],
+  plan: Pick<ProjectionPlan, "conflicts">,
+  opts?: { force?: boolean },
+): { delivered: ResolvedStartupFile[]; protected: ResolvedStartupFile[] } {
+  if (opts?.force) return { delivered: [...files], protected: [] };
+  const protectedRoots = new Set(
+    plan.conflicts
+      .filter((c) => c.classification === "operator_conflict")
+      .map((c) => c.absolutePath),
+  );
+  if (protectedRoots.size === 0) return { delivered: [...files], protected: [] };
+  const delivered: ResolvedStartupFile[] = [];
+  const held: ResolvedStartupFile[] = [];
+  for (const f of files) {
+    // skill targets live at <entry.absolutePath>/SKILL.md; file-shaped targets
+    // match the entry path directly. Match either shape so a held-back skill's
+    // SKILL.md is caught by its parent-dir entry.
+    const matches = protectedRoots.has(f.absolutePath) || protectedRoots.has(nodePath.dirname(f.absolutePath));
+    (matches ? held : delivered).push(f);
+  }
+  return { delivered, protected: held };
 }

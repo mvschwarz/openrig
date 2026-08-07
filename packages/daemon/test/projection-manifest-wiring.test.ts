@@ -26,3 +26,27 @@ describe("P20 wiring pin — rigspec-instantiator injects the REAL manifest look
     expect(src).toMatch(/lastHashLookup:\s*\(targetPath\)\s*=>\s*projectionManifest\.lastHash\(targetPath\)/);
   });
 });
+
+// P20 atom-4 PROTECT wiring pin. filterProtectedProjections is unit-proven
+// (projection-protect.test.ts), but it only ACTS if the instantiator actually
+// filters the delivered files through it AND threads the operator's force flag.
+// A drop of either (stop calling the filter, or hardcode force) silently reverts
+// to "overwrite operator edits" while the warning still claims "not overwritten".
+describe("P20 atom-4 wiring pin — the instantiator delivers the PROTECT-filtered set with the real force flag", () => {
+  const src = readFileSync(
+    fileURLToPath(new URL("../src/domain/rigspec-instantiator.ts", import.meta.url)),
+    "utf-8",
+  );
+
+  it("filters the delivered projection files through filterProtectedProjections and takes .delivered", () => {
+    expect(src).toMatch(/filterProtectedProjections\(/);
+    expect(src).toMatch(/\}\s*,?\s*\)\.delivered/);
+  });
+
+  it("threads the operator force flag into the filter (not a hardcoded value)", () => {
+    // the filter is gated on { force: input.force } — the node input's force, which
+    // the pod loop feeds from opts?.force. A hardcoded force:true would defeat protect.
+    expect(src).toMatch(/\{\s*force:\s*input\.force\s*\}/);
+    expect(src).toMatch(/force:\s*opts\?\.force/);
+  });
+});
