@@ -119,8 +119,8 @@ describe("mission-control routes Phase B (PL-005)", () => {
       const created = await queueRepo.create({ sourceSession: "s@r", destinationSession: "d@r", body: "x" });
       const res = await app.request("/api/mission-control/action", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ verb: "approve", qitemId: created.qitemId, actorSession: "h@r" }),
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "h@r" },
+        body: JSON.stringify({ verb: "approve", qitemId: created.qitemId }),
       });
       expect(res.status).toBe(401);
       const body = (await res.json()) as { error: string };
@@ -132,8 +132,8 @@ describe("mission-control routes Phase B (PL-005)", () => {
       const created = await queueRepo.create({ sourceSession: "s@r", destinationSession: "d@r", body: "x" });
       const res = await app.request("/api/mission-control/action", {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: "Bearer secret" },
-        body: JSON.stringify({ verb: "approve", qitemId: created.qitemId, actorSession: "h@r" }),
+        headers: { "Content-Type": "application/json", Authorization: "Bearer secret", "X-OpenRig-Session": "h@r" },
+        body: JSON.stringify({ verb: "approve", qitemId: created.qitemId }),
       });
       expect(res.status).toBe(200);
     });
@@ -143,8 +143,8 @@ describe("mission-control routes Phase B (PL-005)", () => {
       const created = await queueRepo.create({ sourceSession: "s@r", destinationSession: "d@r", body: "x" });
       const res = await app.request("/api/mission-control/action", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ verb: "approve", qitemId: created.qitemId, actorSession: "h@r" }),
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "h@r" },
+        body: JSON.stringify({ verb: "approve", qitemId: created.qitemId }),
       });
       expect(res.status).toBe(200);
     });
@@ -162,11 +162,10 @@ describe("mission-control routes Phase B (PL-005)", () => {
       const created = await queueRepo.create({ sourceSession: "s@r", destinationSession: "d@r", body: "x" });
       const res = await app.request("/api/mission-control/action", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "human@kernel" },
         body: JSON.stringify({
           verb: "resolve",
           qitemId: created.qitemId,
-          actorSession: "human@kernel",
           decision: "   ",
         }),
       });
@@ -180,11 +179,10 @@ describe("mission-control routes Phase B (PL-005)", () => {
       const created = await queueRepo.create({ sourceSession: "s@r", destinationSession: "d@r", body: "x" });
       const res = await app.request("/api/mission-control/action", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "human@kernel" },
         body: JSON.stringify({
           verb: "resolve",
           qitemId: created.qitemId,
-          actorSession: "human@kernel",
           decision: "approved",
         }),
       });
@@ -322,8 +320,8 @@ describe("mission-control routes Phase B (PL-005)", () => {
       const created = await queueRepo.create({ sourceSession: "s@r", destinationSession: "d@r", body: "x" });
       const actionRes = await app.request("/api/mission-control/action", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ verb: "approve", qitemId: created.qitemId, actorSession: "h@r" }),
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "h@r" },
+        body: JSON.stringify({ verb: "approve", qitemId: created.qitemId }),
       });
       expect(actionRes.status).toBe(200);
     });

@@ -3,7 +3,7 @@ import { streamSSE } from "hono/streaming";
 import type Database from "better-sqlite3";
 import type { EventBus } from "../domain/event-bus.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
-import { LOCAL_HOST_ID } from "../domain/hosts/fanout-contract.js";
+import { LOCAL_HOST_ID, getSelfHostId } from "../domain/hosts/fanout-contract.js";
 import { loadHostRegistry, resolveHost } from "../domain/hosts/hosts-registry-reader.js";
 import { remoteJsonRequest } from "../domain/hosts/remote-daemon-http.js";
 
@@ -28,6 +28,7 @@ import {
 import type { MissionControlFleetCliCapability } from "../domain/mission-control/mission-control-fleet-cli-capability.js";
 import type { MissionControlAuditBrowse } from "../domain/mission-control/audit-browse.js";
 import type { MissionControlNotificationDispatcher } from "../domain/mission-control/notification-dispatcher.js";
+import { requireSenderIdentity } from "./require-sender-identity.js";
 
 /**
  * Mission Control HTTP routes (PL-005 Phase A). Backs the integrated
@@ -336,7 +337,11 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
       );
     }
     if (!body.qitemId) return c.json({ error: "qitemId is required" }, 400);
-    if (!body.actorSession) return c.json({ error: "actorSession is required" }, 400);
+    // P21 I2: the acting seat is DERIVED from the transport chokepoint, never body.actorSession. Runs
+    // BEFORE both the local write AND the cross-host forward — the forward re-stamps THIS derived actor
+    // (never the inbound body claim). body.actorSession is the transitional claim (tolerated iff equal).
+    const identity = requireSenderIdentity(c, { verb: `mission-control ${body.verb}`, bodyClaim: body.actorSession });
+    if (!identity.ok) return identity.response;
     if (typeof body.hostId === "string" && body.hostId !== "" && body.hostId !== LOCAL_HOST_ID) {
       // Remote forward (arch ruling 4: ONE write-path, ONE verb allowlist —
       // the checks above already ran; the origin daemon re-validates on its
@@ -355,12 +360,20 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
       if (resolved.host.transport !== "http") {
         return fail(`host '${hostId}' is SSH-declared; remote actions require an http-transport registry entry (url; bearer optional)`, "unsupported-transport");
       }
-      const { hostId: _dropped, ...forwardBody } = body as Record<string, unknown>;
+      // P21 I2 cross-host re-stamp: strip the inbound identity claim (hostId AND actorSession) and
+      // RE-STAMP X-OpenRig-Session from THIS daemon's derived actor (`identity.session`, from the
+      // chokepoint above) + mark relay provenance — the origin derives the RE-STAMPED actor, never the
+      // forwarded body claim (the census's #5/#17 forward sites).
+      const { hostId: _dropped, actorSession: _claim, ...forwardBody } = body as Record<string, unknown>;
       const res = await remoteJsonRequest(resolved.host, "/api/mission-control/action", {
         method: "POST",
         body: forwardBody,
         timeoutMs: REMOTE_ACTION_TIMEOUT_MS,
         fetchImpl,
+        headers: {
+          "X-OpenRig-Session": identity.session,
+          "X-OpenRig-Relay": getSelfHostId() ?? "unknown",
+        },
       });
       if (res.ok) {
         // The origin's structured success response, verbatim — no
@@ -390,7 +403,11 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
       const result = await getWriteContract(c).act({
         verb: body.verb,
         qitemId: body.qitemId,
-        actorSession: body.actorSession,
+        actorSession: identity.session, // transport-derived, authoritative
+        // P21 era-stamp: transport:v1 for a direct call; relay:v1 when a forwarding daemon re-stamped
+        // the header (X-OpenRig-Relay present) — the actor was derived one hop away, honestly recorded.
+        identityProvenance: c.req.header("x-openrig-relay") ? "relay:v1" : "transport:v1",
+
         destinationSession: body.destinationSession,
         body: body.body,
         annotation: body.annotation,

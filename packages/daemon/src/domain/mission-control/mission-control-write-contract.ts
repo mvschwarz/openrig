@@ -65,6 +65,9 @@ export interface MissionControlActionInput {
   verb: MissionControlVerb;
   qitemId: string;
   actorSession: string;
+  /** P21 era-stamp: how actorSession was established. The route passes `transport:v1` (derived from
+   *  the transport chokepoint); omitted/null ⇒ claimed-era, never re-labeled. Recorded on the audit row. */
+  identityProvenance?: string | null;
   /** Required for `route` and `handoff`. */
   destinationSession?: string;
   /** Body for the new packet on `route`/`handoff`; defaults to source body. */
@@ -204,6 +207,7 @@ export class MissionControlWriteContract {
         notifyAttempted: false,
         notifyResult: null,
         auditNotes: input.auditNotes ?? null,
+        identityProvenance: input.identityProvenance ?? null, // P21 era-stamp on the audit row
       });
 
       // 4. Persist the mission_control.action_executed event in same txn.
@@ -287,6 +291,7 @@ export class MissionControlWriteContract {
         afterState: snapshot,
         annotation: input.annotation!,
         auditNotes: input.auditNotes ?? null,
+        identityProvenance: input.identityProvenance ?? null, // P21 era-stamp on the audit row
       });
       persistedEvents.push(
         this.eventBus.persistWithinTransaction({
@@ -394,6 +399,7 @@ export class MissionControlWriteContract {
         afterState: resolvedQitem ? snapshotQitem(resolvedQitem) : null,
         reason: decision,
         auditNotes: input.auditNotes ?? null,
+        identityProvenance: input.identityProvenance ?? null, // P21 era-stamp on the audit row
       });
 
       persistedEvents.push(

@@ -107,11 +107,11 @@ describe("mission-control routes (PL-005 Phase A)", () => {
     });
     const res = await app.request("/api/mission-control/action", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      // P21: the actor is the transport header (X-OpenRig-Session), not a body claim.
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "human@r" },
       body: JSON.stringify({
         verb: "approve",
         qitemId: created.qitemId,
-        actorSession: "human@r",
       }),
     });
     expect(res.status).toBe(200);
@@ -135,13 +135,13 @@ describe("mission-control routes (PL-005 Phase A)", () => {
     const created = await queueRepo.create({ sourceSession: "s@r", destinationSession: "d@r", body: "x" });
     await app.request("/api/mission-control/action", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ verb: "approve", qitemId: created.qitemId, actorSession: "h@r" }),
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "h@r" },
+      body: JSON.stringify({ verb: "approve", qitemId: created.qitemId }),
     });
     const res = await app.request("/api/mission-control/action", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ verb: "approve", qitemId: created.qitemId, actorSession: "h@r" }),
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "h@r" },
+      body: JSON.stringify({ verb: "approve", qitemId: created.qitemId }),
     });
     expect(res.status).toBe(409);
     const body = (await res.json()) as { error: string };
@@ -151,17 +151,37 @@ describe("mission-control routes (PL-005 Phase A)", () => {
   it("POST /action annotate on missing qitem returns 404 + qitem_not_found", async () => {
     const res = await app.request("/api/mission-control/action", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "human@r" },
       body: JSON.stringify({
         verb: "annotate",
         qitemId: "qitem-missing",
-        actorSession: "human@r",
         annotation: "operator note",
       }),
     });
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe("qitem_not_found");
+  });
+
+  it("P21 I2: derives the actor from the transport header — forged/absent identity refuses LOUD", async () => {
+    const created = await queueRepo.create({ sourceSession: "s@r", destinationSession: "d@r", body: "x" });
+    const req = (headers: Record<string, string>, extra: Record<string, unknown> = {}) =>
+      app.request("/api/mission-control/action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers },
+        body: JSON.stringify({ verb: "approve", qitemId: created.qitemId, ...extra }),
+      });
+    // absent header → 401 unattributable (a body actorSession claim is NOT a fallback)
+    const noHeader = await req({}, { actorSession: "mallory@r" });
+    expect(noHeader.status).toBe(401);
+    expect(((await noHeader.json()) as { error: string }).error).toBe("unattributable_sender");
+    // body claim ≠ header → 409 identity_mismatch naming BOTH (never prefer either)
+    const mismatch = await req({ "X-OpenRig-Session": "human@r" }, { actorSession: "mallory@r" });
+    expect(mismatch.status).toBe(409);
+    const mm = (await mismatch.json()) as { error: string; message: string };
+    expect(mm.error).toBe("identity_mismatch");
+    expect(mm.message).toContain("human@r");
+    expect(mm.message).toContain("mallory@r");
   });
 
   it("GET /cli-capabilities returns fleet roll-up", async () => {

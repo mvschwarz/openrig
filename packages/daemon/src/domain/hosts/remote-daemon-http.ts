@@ -34,6 +34,10 @@ export interface RemoteJsonOptions extends RemoteJsonDeps {
   body?: unknown;
   /** REQUIRED — the caller names its deadline class explicitly. */
   timeoutMs: number;
+  /** P21: extra request headers (e.g. the re-stamped X-OpenRig-Session + X-OpenRig-Relay on a
+   *  cross-host forward). Merged AFTER Content-Type/Authorization so a forwarder's identity re-stamp
+   *  is what the remote reads — never the inbound body claim. */
+  headers?: Record<string, string>;
 }
 
 export type RemoteJsonFailureKind = "bearer" | "timeout" | "network" | "http";
@@ -113,6 +117,7 @@ export async function remoteJsonRequest(host: HttpHostEntry, path: string, opts:
       headers: {
         ...(opts.body !== undefined ? { "Content-Type": "application/json" } : {}),
         ...(bearer.token ? { Authorization: `Bearer ${bearer.token}` } : {}),
+        ...(opts.headers ?? {}),
       },
       ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
       signal: controller.signal,

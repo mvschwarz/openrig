@@ -565,7 +565,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .command("resolve <qitemId>")
     .description("Resolve a leg-1 parked qitem (state=blocked on a human seat): records the decision text durably in queue_transitions, unparks blocked -> in-progress, and nudges the owner. Non-closure.")
     .requiredOption("--decision <text>", "The human's decision text (non-empty; lands in transition_note + the audit row)")
-    .option("--actor <session>", "Resolving session (defaults to OPENRIG_SESSION_NAME)")
+    .option("--actor <session>", "(deprecated, ignored) resolver is derived from the seat env (X-OpenRig-Session)")
     .option("--bearer <token>", "Operator bearer token for the mission-control write gate (or set OPENRIG_AUTH_BEARER_TOKEN; loopback daemons without a configured bearer need none)")
     .option("--no-notify", "Skip the best-effort owner nudge (the unpark still commits)")
     .option("--json", "JSON output for agents")
@@ -576,8 +576,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       notify?: boolean;
       json?: boolean;
     }) => {
-      const actor = resolveCurrentSession(opts.actor, "actor");
-      if (!actor) return;
+      // P21: the resolver is DERIVED from the seat env (X-OpenRig-Session, stamped by DaemonClient) —
+      // --actor is deprecated + ignored. The pre-check verifies the env (the header source); else the
+      // daemon refuses-loud 401 unattributable_sender.
+      if (!resolveCurrentSession(undefined, "actor")) return;
       const deps = getDeps();
       const bearer = opts.bearer ?? process.env.OPENRIG_AUTH_BEARER_TOKEN;
       await withClient(deps, async (client) => {
@@ -586,7 +588,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           {
             verb: "resolve",
             qitemId,
-            actorSession: actor,
+            // P21: no body actorSession — the daemon derives the resolver from the transport header.
             decision: opts.decision,
             notify: opts.notify,
           },
