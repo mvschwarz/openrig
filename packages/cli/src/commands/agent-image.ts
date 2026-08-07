@@ -15,7 +15,7 @@
 
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
-import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl , statusGuardMessage} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -116,7 +116,8 @@ Examples:
     const deps = getDeps();
     const status = await getDaemonStatus(deps.lifecycleDeps);
     if (status.state !== "running" || status.healthy === false) {
-      throw new Error("Daemon not running. Start it with: rig daemon start");
+      // B8-1b: epistemic-matched language via the one helper (down ≠ busy).
+      const gm = statusGuardMessage(status); throw new Error(`${gm.fact} ${gm.action}`);
     }
     return deps.clientFactory(getDaemonUrl(status));
   }

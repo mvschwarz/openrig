@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { Command } from "commander";
 import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, DaemonResponseError } from "../client.js";
-import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { sessionRigOf, isHumanSeatSessionRef } from "../session-name.js";
 import { realDeps } from "./daemon.js";
@@ -36,12 +36,8 @@ async function withClient<T>(
   const positiveDown = status.state === "stopped" || status.state === "stale";
   if (positiveDown || (status.state === "running" && status.healthy === false)) {
     if (!attemptWhenProbeUnconfirmed) {
-      if (positiveDown) {
-        console.error("Daemon not running. Start it with: rig daemon start");
-      } else {
-        console.error("Daemon present but unhealthy — queue write not attempted. Check: rig daemon status");
-      }
-      process.exitCode = 1;
+      // B8-1b: the ONE epistemic-matched guard renders both branches.
+      daemonStatusGuard(status);
       return undefined;
     }
   }
@@ -58,11 +54,13 @@ async function withClient<T>(
     return await fn(client);
   } catch (err) {
     if (err instanceof DaemonConnectionError || err instanceof DaemonTimeoutError || err instanceof DaemonResponseError) {
+      // D14 + B8 reconciliation (pre-existing main conflict, found at B8 A/B): the D14
+      // context lines print here, then the typed error RETHROWS so the SHARED runProgram
+      // render owns the 3-part fact/consequence/action + the io exit (response-integrity
+      // contract). One render authority, layered context — never a swallowed exit.
       const where = hostContext ? ` (routing to host '${hostContext}')` : "";
       console.error(`queue transport failure${where}: ${err.message}`);
       console.error("The write outcome is INDETERMINATE if the request may have reached a daemon — reconcile by ID before any retry.");
-      process.exitCode = 1;
-      return undefined;
     }
     throw err;
   }

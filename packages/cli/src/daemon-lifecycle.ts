@@ -83,6 +83,42 @@ export function daemonNotRunningError(): DaemonNotRunningError {
  * `{ json: true }` for the agent-facing `{ error: { fact, consequence, action } }`
  * envelope (matching commands/queue.ts JSON output).
  */
+
+/** B8-1b (shape 73ee4b25) — the epistemic-matched guard message: language derives from
+ *  what the probe KNOWS. UNVERIFIED/unhealthy = "did not respond" (down ≠ busy);
+ *  stopped/stale = the plain not-running truth. Pure so every surface shares it. */
+export function statusGuardMessage(status: DaemonStatus): DaemonNotRunningError {
+  if (status.state === "stopped" || status.state === "stale") {
+    return daemonNotRunningError();
+  }
+  // unverified, or running-but-unhealthy: we do NOT know it is down.
+  return {
+    fact: "Daemon did not respond — it may be busy or stopped (state not confirmed).",
+    consequence: "This command needs a responsive daemon; the outcome of proceeding would be indeterminate.",
+    action: "Re-check with 'rig daemon status'. If it is confirmed stopped, run 'rig up' or 'rig daemon start'.",
+  };
+}
+
+/** B8-1b — THE precheck chokepoint: returns true when the daemon is running+healthy;
+ *  otherwise prints the epistemic-matched 3-part (+ the wrong-home sibling hint when
+ *  present), sets exit 1, returns false. Replaces the ~55 hand-rolled verbatim guards. */
+export function daemonStatusGuard(status: DaemonStatus, opts?: { json?: boolean }): boolean {
+  if (status.state === "running" && status.healthy !== false) return true;
+  const err = statusGuardMessage(status);
+  if (opts?.json) {
+    console.log(JSON.stringify({ error: err }));
+  } else {
+    console.error(`Error: ${err.fact}`);
+    console.error(`  ${err.consequence}`);
+    console.error(`  ${err.action}`);
+  }
+  if (status.siblingHint) {
+    console.error(`  note: OPENRIG_HOME may be wrong — resolved ${status.siblingHint.resolvedHome}, live sibling ${status.siblingHint.siblingHome}`);
+  }
+  process.exitCode = 1;
+  return false;
+}
+
 export function printDaemonNotRunning(opts?: { json?: boolean }): void {
   const err = daemonNotRunningError();
   if (opts?.json) {

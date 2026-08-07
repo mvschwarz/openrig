@@ -5,7 +5,7 @@
 
 import { Command } from "commander";
 import { DaemonClient, terminalAuthHeaders } from "../client.js";
-import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -59,11 +59,7 @@ reported as projection drift; conversation continuity is never claimed.`)
 
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (status.state !== "running" || status.healthy === false) {
-        console.error("Daemon not running. Start it with: rig daemon start");
-        process.exitCode = 1;
-        return;
-      }
+      if (!daemonStatusGuard(status)) return;
 
       const body: Record<string, unknown> = {};
       if (opts.rig) body["rigId"] = opts.rig;

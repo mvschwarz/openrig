@@ -6,6 +6,7 @@ import {
   getDaemonStatus,
   getDaemonUrl,
   type LifecycleDeps,
+  statusGuardMessage,
 } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import { ConfigStore } from "../config-store.js";
@@ -41,7 +42,7 @@ export function statusCommand(depsOverride?: StatusDeps): Command {
     const status = await getDaemonStatus(deps.lifecycleDeps);
 
     if (status.state === "stopped" || status.state === "stale") {
-      console.log("Daemon not running");
+      console.log(statusGuardMessage(status).fact); // B8-1b: one language source
       return;
     }
 

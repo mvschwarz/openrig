@@ -12,7 +12,7 @@ import { execFileSync } from "node:child_process";
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { attestationLineage, type AttestationLineage } from "../lib/scope/attestation-lineage.js";
-import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl , statusGuardMessage} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 
 import {
@@ -1693,7 +1693,7 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
         const status = await getDaemonStatus(lifecycleDeps);
         if (status.state !== "running" || status.healthy === false) {
           throw new ScopeCliError({
-            fact: "Daemon not running.",
+            fact: statusGuardMessage(status).fact, // B8-1b: down ≠ busy
             consequence: "scope approve writes the stamp + audit row through the daemon (one operation).",
             action: "Start it with: rig daemon start",
           });

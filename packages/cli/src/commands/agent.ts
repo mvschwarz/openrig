@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import fs from "node:fs";
 import { DaemonClient } from "../client.js";
-import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -41,15 +41,7 @@ export function agentCommand(depsOverride?: AgentDeps): Command {
       }
 
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (status.state !== "running" || status.healthy === false) {
-        if (status.state === "running" && status.healthy === false) {
-          console.error("Daemon unhealthy — healthz check failed. Restart with: rig daemon start");
-        } else {
-          console.error("Daemon not running. Start it with: rig daemon start");
-        }
-        process.exitCode = 1;
-        return;
-      }
+      if (!daemonStatusGuard(status)) return;
 
       const client = deps.clientFactory(getDaemonUrl(status));
 

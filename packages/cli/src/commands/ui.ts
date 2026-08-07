@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { getDaemonStatus, getDaemonUrl, type LifecycleDeps } from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl, type LifecycleDeps , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { realDeps } from "./daemon.js";
 
@@ -44,15 +44,7 @@ export function uiCommand(depsOverride?: UiDeps): Command {
 
       // Default: derive UI URL from daemon status (daemon serves the UI)
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (status.state !== "running" || status.healthy === false) {
-        if (status.state === "running" && status.healthy === false) {
-          console.error("Daemon unhealthy — healthz failed");
-        } else {
-          console.error("Daemon not running");
-        }
-        process.exitCode = 1;
-        return;
-      }
+      if (!daemonStatusGuard(status)) return;
 
       const url = getDaemonUrl(status);
       console.log(url);

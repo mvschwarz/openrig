@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { resolveEffectiveHost } from "../host-selection.js";
 import { DaemonClient } from "../client.js";
-import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { loadHostRegistry, resolveHost, hostDisplayTarget } from "../host-registry.js";
@@ -89,11 +89,7 @@ selection, not the agent@rig@host sugar.`)
 
       const status = await getDaemonStatus(deps.lifecycleDeps);
 
-      if (status.state !== "running" || status.healthy === false) {
-        console.error("Daemon not running. Start it with: rig daemon start");
-        process.exitCode = 1;
-        return;
-      }
+      if (!daemonStatusGuard(status)) return;
 
       const client = deps.clientFactory(getDaemonUrl(status));
 

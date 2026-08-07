@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { DaemonClient } from "../client.js";
-import { getDaemonStatus, type LifecycleDeps } from "../daemon-lifecycle.js";
+import { getDaemonStatus, type LifecycleDeps , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { createMcpServer } from "../mcp-server.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -32,11 +32,7 @@ export function mcpCommand(depsOverride?: StatusDeps): Command {
         }
       } else {
         const status = await getDaemonStatus(deps.lifecycleDeps);
-        if (status.state !== "running" || status.healthy === false) {
-          console.error("Daemon not running. Start with: rig daemon start");
-          process.exitCode = 1;
-          return;
-        }
+        if (!daemonStatusGuard(status)) return;
         daemonPort = status.port!;
       }
 

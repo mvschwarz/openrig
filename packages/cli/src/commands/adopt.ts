@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { Command } from "commander";
 import { parse as parseYaml } from "yaml";
 import { DaemonClient } from "../client.js";
-import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { ImportDeps } from "./import.js";
 
@@ -144,11 +144,7 @@ export function adoptCommand(depsOverride?: AdoptDeps): Command {
       }
 
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (status.state !== "running" || status.healthy === false) {
-        console.error(status.state === "running" ? "Daemon unhealthy — healthz check failed. Restart with: rig daemon start" : "Daemon not running. Start it with: rig daemon start");
-        process.exitCode = 1;
-        return;
-      }
+      if (!daemonStatusGuard(status)) return;
 
       const client = deps.clientFactory(getDaemonUrl(status));
       const rigRoot = opts.rigRoot ? nodePath.resolve(opts.rigRoot) : nodePath.dirname(nodePath.resolve(filePath));

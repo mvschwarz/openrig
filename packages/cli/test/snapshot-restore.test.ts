@@ -413,7 +413,7 @@ describe("rig snapshot + restore", () => {
     const program = new Command();
     program.addCommand(restoreCommand(deps));
     const logs = await captureLogs(() => program.parseAsync(["node", "rig", "restore", "snap-1", "--rig", "rig-1"]));
-    expect(logs.join("\n")).toMatch(/unhealthy/i);
+    expect(logs.join("\n")).toMatch(/did not respond|busy or stopped|unhealthy/i) // B8 supersession: epistemic guard language;
     expect(deps.clientFactory).not.toHaveBeenCalled();
   });
 

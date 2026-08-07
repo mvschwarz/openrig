@@ -169,7 +169,7 @@ describe("rig ui open", () => {
     program.addCommand(uiCommand(deps));
     const logs = await captureLogs(() => program.parseAsync(["node", "rig", "ui", "open"]));
 
-    expect(logs.join("\n")).toMatch(/unhealthy/i);
+    expect(logs.join("\n")).toMatch(/did not respond|busy or stopped|unhealthy/i) // B8 supersession: epistemic guard language;
     expect(execFn).not.toHaveBeenCalled();
   });
 

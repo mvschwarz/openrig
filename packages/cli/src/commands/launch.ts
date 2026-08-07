@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { resolveEffectiveHost } from "../host-selection.js";
 import { DaemonClient } from "../client.js";
-import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -36,10 +36,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
 
   async function getClient(deps: StatusDeps): Promise<DaemonClient | null> {
     const status = await getDaemonStatus(deps.lifecycleDeps);
-    if (status.state !== "running" || status.healthy === false) {
-      console.error("Daemon not running. Start it with: rig daemon start");
-      return null;
-    }
+    if (!daemonStatusGuard(status)) return null;
     return deps.clientFactory(getDaemonUrl(status));
   }
 

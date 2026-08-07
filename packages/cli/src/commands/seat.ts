@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { DaemonClient, terminalAuthHeaders } from "../client.js";
-import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -231,11 +231,7 @@ Examples:
     .action(async (seat: string, opts: { json?: boolean }) => {
       const deps = getDeps();
       const daemon = await getDaemonStatus(deps.lifecycleDeps);
-      if (daemon.state !== "running" || daemon.healthy === false) {
-        console.error("Daemon not running. Start it with: rig daemon start");
-        process.exitCode = 1;
-        return;
-      }
+      if (!daemonStatusGuard(daemon)) return;
 
       const client = deps.clientFactory(getDaemonUrl(daemon));
       const res = await client.get<SeatStatusResponse | SeatStatusError>(`/api/seat/status/${encodeURIComponent(seat)}`);
@@ -314,11 +310,7 @@ rig seat handover, THEN retarget the view. Examples:
 
       const deps = getDeps();
       const daemon = await getDaemonStatus(deps.lifecycleDeps);
-      if (daemon.state !== "running" || daemon.healthy === false) {
-        console.error("Daemon not running. Start it with: rig daemon start");
-        process.exitCode = 1;
-        return;
-      }
+      if (!daemonStatusGuard(daemon)) return;
 
       const client = deps.clientFactory(getDaemonUrl(daemon));
       const res = await client.post<SeatSwitchClientResponse | SeatStatusError>(
@@ -357,11 +349,7 @@ Examples:
     .action(async (session: string, opts: { reason?: string; json?: boolean }) => {
       const deps = getDeps();
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (status.state !== "running") {
-        console.error("Daemon not running.");
-        process.exitCode = 1;
-        return;
-      }
+      if (!daemonStatusGuard(status)) return;
       const client = deps.clientFactory(getDaemonUrl(status));
       const res = await client.post<Record<string, unknown>>(
         `/api/sessions/${encodeURIComponent(session)}/clear-attention`,
@@ -414,11 +402,7 @@ The token is read from STDIN only (never an argument). Examples:
         return;
       }
       const status = await getDaemonStatus(deps.lifecycleDeps);
-      if (status.state !== "running") {
-        console.error("Daemon not running.");
-        process.exitCode = 1;
-        return;
-      }
+      if (!daemonStatusGuard(status)) return;
       const client = deps.clientFactory(getDaemonUrl(status));
       const res = await client.post<Record<string, unknown>>(
         `/api/sessions/${encodeURIComponent(session)}/resume-token`,
@@ -471,11 +455,7 @@ export async function runSeatHandover(seat: string, opts: HandoverActionOpts, de
   }
 
   const daemon = await getDaemonStatus(deps.lifecycleDeps);
-  if (daemon.state !== "running" || daemon.healthy === false) {
-    console.error("Daemon not running. Start it with: rig daemon start");
-    process.exitCode = 1;
-    return;
-  }
+  if (!daemonStatusGuard(daemon)) return; // B8-1b: epistemic-matched
 
   const client = deps.clientFactory(getDaemonUrl(daemon));
   const res = await client.post<SeatHandoverPlan | SeatHandoverMutationResult | SeatStatusError>(`/api/seat/handover/${encodeURIComponent(seat)}`, {

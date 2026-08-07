@@ -32,16 +32,25 @@ describe("D14 — queue transport failures are LOUD", () => {
         post: vi.fn(async () => { throw new DaemonTimeoutError("POST /api/queue/create timed out after 5000ms"); }),
       }) as unknown as ReturnType<QueueDeps["clientFactory"]>,
     };
-    const cmd = queueCommand(deps);
-    await cmd.parseAsync([
-      "node", "rig", "create",
+    // B8 supersession (reconciles D14 with the response-integrity render authority):
+    // withClient prints the D14 context lines then RETHROWS; the shared runProgram
+    // render owns the 3-part + exit. This test now drives the full layered path.
+    const { runProgram } = await import("../src/cli-error.js");
+    const { Command } = await import("commander");
+    const program = new Command();
+    program.addCommand(queueCommand(deps));
+    let ioExit = 0;
+    const ioErr: string[] = [];
+    await runProgram(program, [
+      "node", "rig", "queue", "create",
       "--source", "a@rig", "--destination", "b@rig", "--body", "x",
       "--summary", "s", "--host", "downhost", "--no-nudge",
-    ]);
-    const all = errSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+    ], { out: () => {}, err: (l: string) => ioErr.push(l), exit: (c: number) => { ioExit = c; } });
+    const spyOut = errSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+    const all = spyOut + "\n" + ioErr.join("\n");
     expect(all.length).toBeGreaterThan(0); // NEVER silent
     expect(all).toMatch(/timed out|transport|unreachable/i);
-    expect(all).toContain("downhost"); // the host context is named
-    expect(process.exitCode).toBe(1);
+    expect(all).toContain("downhost"); // the D14 host context is named
+    expect(ioExit === 1 || process.exitCode === 1).toBe(true); // honest nonzero via the shared render
   });
 });

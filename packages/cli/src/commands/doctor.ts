@@ -226,7 +226,7 @@ export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; port
       try {
         const healthRes = await fetchFn(`${daemonBase}/healthz`);
         if (!healthRes.ok) {
-          return { name: "cmux_daemon", status: "skipped", message: "Daemon not running. Skipping daemon cmux check." };
+          return { name: "cmux_daemon", status: "skipped", message: "Daemon healthz not ok. Skipping daemon cmux check." };
         }
       } catch {
         return { name: "cmux_daemon", status: "skipped", message: "Daemon not reachable. Skipping daemon cmux check." };
