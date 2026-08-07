@@ -189,9 +189,34 @@ describe("Tier A — FR-4 bucket coherence (differential: named RED at base)", (
         slices: [slice({ lastActivityAt: RECENT })],
       },
     ] as Parameters<typeof partitionProjectMissions>[0];
-    const { current, archive } = partitionProjectMissions(groups);
+    // Inject the fixture clock (NOW) so the fixed-timestamp RECENT slice is evaluated against the
+    // instant it was authored for — NOT wall-clock. Without this the differential rotted to RED as
+    // real time advanced 27 days past the 36h window (the excluded ui leg hid it until F1's gap-1).
+    const { current, archive } = partitionProjectMissions(groups, NOW);
     expect(archive.map((m) => m.id)).toEqual(["auth"]);
     expect(current.map((m) => m.id)).toEqual(["act"]);
+  });
+});
+
+// VM-005 time-bomb CLASS-KILL: recency bucketing must follow the INJECTED clock, never wall-clock.
+// A fixed-timestamp fixture that reaches un-injected production time rots to the wrong bucket as real
+// time advances — exactly the failure F1's closed gap-1 surfaced. This pin proves the seam is honored,
+// so any fixed-clock differential can (and must) inject `now` and stay deterministic forever.
+describe("Tier A — clock-determinism guard (time-bomb class-kill)", () => {
+  it("projectMissionBucket + partitionProjectMissions bucket by the injected now, not Date.now()", () => {
+    const fixed = "2020-01-01T00:00:00.000Z"; // long-dead wall-clock: under real Date.now() ALWAYS archive
+    const at = Date.parse(fixed);
+    const m = {
+      id: "m", label: "m", status: "active", statusSource: "derived",
+      slices: [slice({ lastActivityAt: fixed })],
+    } as Parameters<typeof projectMissionBucket>[0];
+    // Within-window of the INJECTED now → current (would be archive if the fn read Date.now()).
+    expect(projectMissionBucket(m, at + 60_000)).toBe("current");
+    // Past the window of the injected now → archive — deterministic regardless of real time.
+    expect(projectMissionBucket(m, at + PROJECT_CURRENT_ACTIVITY_WINDOW_MS + 60_000)).toBe("archive");
+    // partitionProjectMissions threads the same clock end-to-end.
+    expect(partitionProjectMissions([m], at + 60_000).current.map((x) => x.id)).toEqual(["m"]);
+    expect(partitionProjectMissions([m], at + PROJECT_CURRENT_ACTIVITY_WINDOW_MS + 60_000).archive.map((x) => x.id)).toEqual(["m"]);
   });
 });
 

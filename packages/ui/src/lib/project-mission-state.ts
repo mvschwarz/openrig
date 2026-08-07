@@ -147,12 +147,18 @@ function deriveMissionStatusFromSlices(slices: ProjectSliceRow[], now: number): 
   return "idle";
 }
 
-export function projectMissionBucket(mission: ProjectMissionGroup): ProjectMissionBucket {
+export function projectMissionBucket(
+  mission: ProjectMissionGroup,
+  now = Date.now(),
+): ProjectMissionBucket {
   // VM-005 FR-4: an AUTHORED shipped-family status buckets archive regardless
   // of slice recency (normalizeAuthored maps complete/completed/done/shipped
   // → "shipped", so source+state is exactly the shipped-family test).
   if (mission.statusSource === "authored" && mission.status === "shipped") return "archive";
-  if (mission.slices.some((s) => isCurrentProjectSlice(s))) return "current";
+  // `now` is threaded through to isCurrentProjectSlice (not left to its Date.now() default) so
+  // recency bucketing is DETERMINISTIC under an injected clock — a fixed-timestamp fixture must not
+  // rot to a different bucket as wall-clock advances past the 36h activity window.
+  if (mission.slices.some((s) => isCurrentProjectSlice(s, now))) return "current";
   if (mission.slices.length === 0 && mission.status !== "shipped") return "current";
   return "archive";
 }
@@ -177,11 +183,12 @@ export function sortProjectMissions(
 
 export function partitionProjectMissions<T extends ProjectMissionGroup>(
   missions: T[],
+  now = Date.now(),
 ): { current: T[]; archive: T[] } {
   const current: T[] = [];
   const archive: T[] = [];
   for (const mission of missions) {
-    if (projectMissionBucket(mission) === "current") current.push(mission);
+    if (projectMissionBucket(mission, now) === "current") current.push(mission);
     else archive.push(mission);
   }
   return {
