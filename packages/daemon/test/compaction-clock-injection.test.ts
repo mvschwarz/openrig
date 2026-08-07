@@ -19,7 +19,7 @@
 // observes at PreCompact/SessionStart/PostCompact time.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { spawnSync } from "node:child_process";
+import { spawnSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, resolve, dirname } from "node:path";
@@ -46,6 +46,10 @@ function assetEnv(openrigHome: string, injectClockNow?: string): NodeJS.ProcessE
     RIGGED_HOME: undefined,
     // Absence => production real-time fallback; presence => deterministic injection.
     OPENRIG_TEST_CLOCK_NOW: injectClockNow,
+    // P6(C): every test owns a UNIQUE packet output-root under its own tmp home, so two
+    // concurrent writers (same injected clock => same stamp) never collide on the shared
+    // /tmp/claude-compaction-restore path — the desk-ruled cross-writer flake, killed.
+    OPENRIG_COMPACTION_OUT_ROOT: join(dirname(openrigHome), "packets"),
   } as NodeJS.ProcessEnv;
 }
 
@@ -159,7 +163,11 @@ describe("A3-R3 compaction-asset clock/stamp injection (real-spawn)", () => {
       const home = join(mkdtempSync(join(tmpdir(), "compaction-clock-run-")), ".openrig");
       const jsonl = writeFixtureJsonl(dirname(home));
       expect(runHook(home, { transcript_path: jsonl, cwd: dirname(home) }, INJECTED_ISO).status).toBe(0);
-      expect(runBridge(home, { hook_event_name: "UserPromptSubmit" }, INJECTED_ISO).status).toBe(0);
+      // The delivery event carries the SAME transcript identity the marker recorded (the real
+      // SessionStart/UserPromptSubmit event shape). The bridge's R5 premise gate delivers ONLY
+      // for the matching compaction — a bare, identity-less payload is (correctly) gated to
+      // no-deliver, so exercising the deliveredAt stamp requires passing the real identity.
+      expect(runBridge(home, { hook_event_name: "UserPromptSubmit", transcript_path: jsonl }, INJECTED_ISO).status).toBe(0);
       expect(runBridge(home, { hook_event_name: "PostCompact" }, INJECTED_ISO).status).toBe(0);
       const m = readMarker(home);
       // Normalize the ephemeral per-run tmp prefix out of outputDir — the timestamped
@@ -186,5 +194,84 @@ describe("A3-R3 compaction-asset clock/stamp injection (real-spawn)", () => {
     // A valid ISO instant that is NOT the injected sentinel — the fallback ran.
     expect(deliveredAt).not.toBe(INJECTED_ISO);
     expect(Number.isNaN(Date.parse(deliveredAt))).toBe(false);
+  });
+});
+
+// P6(C) — the compaction PACKET output-root isolation seam. The shipped scripts hardcode
+// the packet base to the FIXED /tmp/claude-compaction-restore (precompact-hook.mjs + the
+// restore-from-jsonl child). Under the injected clock the timestamp STAMP is fixed, so two
+// concurrent writers with the same sessionId land on the SAME `${sessionId}-${stamp}` dir
+// and race the same restore-summary.json — the desk-ruled cross-writer interference that
+// flaked the suite under fleet load. The fix mirrors the injectable-clock seam: a bounded
+// injectable output-root (OPENRIG_COMPACTION_OUT_ROOT) — real /tmp default in production,
+// per-run isolated when the hermetic env-var is set, so each test owns a unique outputDir.
+describe("P6(C) compaction packet output-root injection (per-run isolation)", () => {
+  let tmpDir: string;
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "compaction-outroot-"));
+  });
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function runHookWithRoot(
+    openrigHome: string,
+    outRoot: string,
+    input: Record<string, unknown>,
+  ): { stdout: string; stderr: string; status: number | null } {
+    const result = spawnSync(process.execPath, [HOOK_SCRIPT], {
+      input: JSON.stringify(input),
+      encoding: "utf8",
+      env: { ...assetEnv(openrigHome, INJECTED_ISO), OPENRIG_COMPACTION_OUT_ROOT: outRoot } as NodeJS.ProcessEnv,
+    });
+    return { stdout: result.stdout || "", stderr: result.stderr || "", status: result.status };
+  }
+
+  it("SEAM: the hook writes the packet UNDER the injected OPENRIG_COMPACTION_OUT_ROOT, never the shared /tmp default", () => {
+    const home = join(tmpDir, ".openrig");
+    const outRoot = join(tmpDir, "packets");
+    const jsonl = writeFixtureJsonl(tmpDir);
+    const hook = runHookWithRoot(home, outRoot, { transcript_path: jsonl, cwd: tmpDir });
+    expect(hook.status).toBe(0);
+    const marker = readMarker(home);
+    // The isolation that stops two concurrent writers (same clock => same stamp) from
+    // colliding on the fixed /tmp/claude-compaction-restore path.
+    expect(String(marker["outputDir"]).startsWith(outRoot)).toBe(true);
+    expect(String(marker["outputDir"]).startsWith("/tmp/claude-compaction-restore")).toBe(false);
+    expect(existsSync(String(marker["outputDir"]))).toBe(true);
+  });
+
+  it("ISOLATION PIN: two CONCURRENT writers (same injected clock + same sessionId) under DISTINCT roots produce independent, uncorrupted packets — no shared-path collision", async () => {
+    const mk = (tag: string) => {
+      const cwd = join(tmpDir, tag);
+      mkdirSync(cwd, { recursive: true });
+      return { home: join(cwd, ".openrig"), outRoot: join(cwd, "packets"), cwd, jsonl: writeFixtureJsonl(cwd) };
+    };
+    const a = mk("w-a");
+    const b = mk("w-b");
+    const spawnOne = (w: ReturnType<typeof mk>): Promise<number | null> =>
+      new Promise((res) => {
+        const cp = spawn(process.execPath, [HOOK_SCRIPT], {
+          env: { ...assetEnv(w.home, INJECTED_ISO), OPENRIG_COMPACTION_OUT_ROOT: w.outRoot } as NodeJS.ProcessEnv,
+        });
+        cp.stdin.end(JSON.stringify({ transcript_path: w.jsonl, cwd: w.cwd }));
+        cp.on("close", (code) => res(code));
+      });
+    const [ca, cb] = await Promise.all([spawnOne(a), spawnOne(b)]);
+    expect(ca).toBe(0);
+    expect(cb).toBe(0);
+    const ma = readMarker(a.home);
+    const mb = readMarker(b.home);
+    // Each marker's createdAt is the injected clock, uncorrupted by the sibling writer ...
+    expect(ma["createdAt"]).toBe(INJECTED_ISO);
+    expect(mb["createdAt"]).toBe(INJECTED_ISO);
+    // ... and each packet lives under ITS OWN root (never the other's, never shared /tmp) ...
+    expect(String(ma["outputDir"]).startsWith(a.outRoot)).toBe(true);
+    expect(String(mb["outputDir"]).startsWith(b.outRoot)).toBe(true);
+    // ... and each on-disk restore-summary.json is intact (neither clobbered the other's).
+    const sa = JSON.parse(readFileSync(join(String(ma["outputDir"]), "restore-summary.json"), "utf8"));
+    const sb = JSON.parse(readFileSync(join(String(mb["outputDir"]), "restore-summary.json"), "utf8"));
+    expect(sa.sessionId).toBe("fixture-sess");
+    expect(sb.sessionId).toBe("fixture-sess");
   });
 });

@@ -5,7 +5,10 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 const TEXT_LIMIT = 4000;
-const DEFAULT_OUT = "/tmp/claude-compaction-restore";
+// P6(C) injectable output-root (mirrors precompact-hook.mjs): per-run isolation when
+// OPENRIG_COMPACTION_OUT_ROOT is set, real /tmp default in production. Guards a direct
+// invocation (the hook passes --out explicitly) against the same cross-writer collision.
+const DEFAULT_OUT = process.env.OPENRIG_COMPACTION_OUT_ROOT || "/tmp/claude-compaction-restore";
 
 function parseArgs(argv) {
   const args = {

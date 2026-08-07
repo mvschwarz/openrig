@@ -6,7 +6,12 @@ import { spawnSync } from "node:child_process";
 
 const skillRoot = path.resolve(new URL("..", import.meta.url).pathname);
 const restoreScript = path.join(skillRoot, "scripts", "restore-from-jsonl.mjs");
-const outRoot = "/tmp/claude-compaction-restore";
+// P6(C) injectable output-root: the packet base defaults to the shared
+// /tmp/claude-compaction-restore (production), but becomes per-run isolated when the
+// hermetic env-var OPENRIG_COMPACTION_OUT_ROOT is set — so concurrent writers with the
+// same injected clock + sessionId no longer collide on the same `${sessionId}-${stamp}`
+// dir. Mirrors the injectable-clock seam (OPENRIG_TEST_CLOCK_NOW). Empty/absent = /tmp.
+const outRoot = process.env.OPENRIG_COMPACTION_OUT_ROOT || "/tmp/claude-compaction-restore";
 const defaultRestoreInstruction =
   "Read the claude-compaction-restore skill and follow its \"If You Just Compacted\" protocol.";
 
