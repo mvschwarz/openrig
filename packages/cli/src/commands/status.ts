@@ -8,6 +8,7 @@ import {
   type LifecycleDeps,
   statusGuardMessage,
 } from "../daemon-lifecycle.js";
+import { readLifecycleDescription } from "../daemon-lifecycle-status.js";
 import { realDeps } from "./daemon.js";
 import { ConfigStore } from "../config-store.js";
 
@@ -43,6 +44,15 @@ export function statusCommand(depsOverride?: StatusDeps): Command {
 
     if (status.state === "stopped" || status.state === "stale") {
       console.log(statusGuardMessage(status).fact); // B8-1b: one language source
+      // P7 — crash-surviving lifecycle read: a clean stop recorded stopped_at; its
+      // ABSENCE (with a boot record) is a crash/kill-9/power-loss. SQLite survives a
+      // dead pid; daemon.json does not — so this reads the db, never daemon.json.
+      const life = readLifecycleDescription();
+      if (life.kind === "clean-shutdown") {
+        console.log(`  cleanly shut down at ${life.stoppedAt}`);
+      } else if (life.kind === "no-clean-shutdown") {
+        console.log(`  ⚠ no clean shutdown recorded — last seen ${life.lastSeen}`);
+      }
       return;
     }
 
