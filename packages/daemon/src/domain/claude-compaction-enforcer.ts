@@ -108,7 +108,8 @@ export type EnforcerSkipReason =
   | "dedup_window"
   | "post_restore_cooldown"
   | "send_failed"
-  | "invalid_policy";
+  | "invalid_policy"
+  | "stale_generation";
 
 function buildCompactCommand(compactInstruction: string): string {
   const normalized = compactInstruction.trim().replace(/\s+/g, " ");
@@ -306,11 +307,16 @@ export class ClaudeCompactionEnforcer {
   // OPR.0.4.3.14 — per-seat manual-trigger surfaced state (AC-3). In-memory,
   // non-persisted (a daemon restart reset is the safe-failure direction).
   private readonly manualCompactionState = new Map<string, ManualCompactionStatus>();
+  // GHOST-STAGE (b): the occupant GENERATION captured when a restore stage was queued (or null when
+  // unknown). At drain we compare it to the LIVE generation; a mismatch = a successor inheriting a
+  // retired-generation stage → refuse. Injected resolver (atom-B's currentOccupantTenure by session).
+  private readonly pendingStageGeneration = new Map<string, string | null>();
+  private readonly resolveOccupantGeneration?: (sessionName: string) => string | null;
 
   constructor(
     settingsStore: SettingsStore,
     sessionTransport: SessionTransport,
-    opts?: { dedupWindowMs?: number; openrigHome?: string; postCompactRestoreCooldownMs?: number; manualPrepWaitMs?: number; postCompactSendWaitMs?: number },
+    opts?: { dedupWindowMs?: number; openrigHome?: string; postCompactRestoreCooldownMs?: number; manualPrepWaitMs?: number; postCompactSendWaitMs?: number; resolveOccupantGeneration?: (sessionName: string) => string | null },
   ) {
     this.settingsStore = settingsStore;
     this.sessionTransport = sessionTransport;
@@ -319,6 +325,7 @@ export class ClaudeCompactionEnforcer {
     this.openrigHome = opts?.openrigHome ?? defaultOpenRigHome();
     this.manualPrepWaitMs = opts?.manualPrepWaitMs ?? MANUAL_PREP_WAIT_MS_DEFAULT;
     this.postCompactSendWaitMs = opts?.postCompactSendWaitMs ?? POST_COMPACT_SEND_WAIT_MS_DEFAULT;
+    this.resolveOccupantGeneration = opts?.resolveOccupantGeneration;
   }
 
   /**
@@ -365,6 +372,19 @@ export class ClaudeCompactionEnforcer {
       // surfaced in the handoff for the PM evidence read (veto there if the literal reading was meant).
       if (!policy.enabled && this.manualCompactionState.get(input.sessionName)?.operatorInitiated !== true) {
         return { triggered: false, reason: "disabled" };
+      }
+      // GHOST-STAGE (b): gen-scoped stages. A stage minted by a RETIRED occupant generation must be
+      // undeliverable to the successor. Compare the queue-time generation to the LIVE one. NOTE-2: an
+      // ABSENT/unknown tenure on EITHER side is UNKNOWN — the gate is INERT (never treat the captured
+      // stale generation as if it were live; the enabled-gate (a) + cutover invalidation (e) remain the
+      // fail-closed layers when identity is unknown). Only a KNOWN mismatch refuses + drops the ghost.
+      const stageGen = this.pendingStageGeneration.get(input.sessionName);
+      if (stageGen != null) {
+        const liveGen = this.resolveOccupantGeneration?.(input.sessionName) ?? null;
+        if (liveGen != null && liveGen !== stageGen) {
+          this.invalidateOccupant(input.sessionName); // drop the retired-generation ghost stage
+          return { triggered: false, reason: "stale_generation" };
+        }
       }
       const pendingStage = this.pendingPostCompactRestore.get(input.sessionName);
       if (pendingStage === "turn_boundary") {
@@ -420,6 +440,7 @@ export class ClaudeCompactionEnforcer {
           return { triggered: false, reason: "send_failed" };
         }
         this.pendingPostCompactRestore.delete(input.sessionName);
+        this.pendingStageGeneration.delete(input.sessionName); // GHOST-STAGE (b): stage completed → drop its gen
         this.postCompactRestoreCooldownUntil.set(
           input.sessionName,
           Date.now() + this.postCompactRestoreCooldownMs,
@@ -492,6 +513,8 @@ export class ClaudeCompactionEnforcer {
     this.triggeredAboveThreshold.add(input.sessionName);
     this.pendingPreCompactPrep.delete(input.sessionName);
     this.pendingPostCompactRestore.set(input.sessionName, "turn_boundary");
+    // GHOST-STAGE (b): capture the occupant generation at queue time (or null when unknown).
+    this.pendingStageGeneration.set(input.sessionName, this.resolveOccupantGeneration?.(input.sessionName) ?? null);
     return { triggered: true };
   }
 
@@ -609,6 +632,8 @@ export class ClaudeCompactionEnforcer {
     this.triggeredAboveThreshold.add(input.sessionName);
     this.pendingPreCompactPrep.delete(input.sessionName);
     this.pendingPostCompactRestore.set(input.sessionName, "turn_boundary");
+    // GHOST-STAGE (b): capture the occupant generation at queue time (or null when unknown).
+    this.pendingStageGeneration.set(input.sessionName, this.resolveOccupantGeneration?.(input.sessionName) ?? null);
     this.setManualStage(input.sessionName, "compact-sent", undefined, opts.operatorInitiated === true);
     return { triggered: true, stage: "compact-sent" };
   }
@@ -633,6 +658,7 @@ export class ClaudeCompactionEnforcer {
     this.pendingPreCompactPrep.delete(sessionName);
     this.pendingPostCompactRestore.delete(sessionName);
     this.manualCompactionState.delete(sessionName);
+    this.pendingStageGeneration.delete(sessionName); // GHOST-STAGE (b): drop the captured queue-time gen
   }
 
   private setManualStage(sessionName: string, stage: ManualCompactionStage, reason?: string, operatorInitiated?: boolean): void {

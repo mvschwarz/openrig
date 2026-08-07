@@ -318,6 +318,58 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send.mock.calls.length).toBe(queuedSends); // no inherited drain
   });
 
+  // GHOST-STAGE (b) — gen-scoped stages. A stage minted by a retired occupant generation is
+  // undeliverable to the successor (identity layer). NOTE-2: an unknown tenure is INERT, never a
+  // false pass by comparing the stale generation as if live.
+  async function queueStageWithGen(gen: string | null) {
+    const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
+    const { transport, send } = makeSessionTransport();
+    let liveGen = gen;
+    const enforcer = new ClaudeCompactionEnforcer(settings, transport, {
+      dedupWindowMs: 60_000, postCompactRestoreCooldownMs: 0, openrigHome: "/tmp/openrig-test-home",
+      resolveOccupantGeneration: () => liveGen,
+    });
+    let now = 1_700_000_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    await enforcer.maybeAutoCompact({ sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage: 90 });
+    now += 30_000;
+    await enforcer.maybeAutoCompact({ sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage: 95 }); // queues turn_boundary + captures gen
+    return { enforcer, send, setLiveGen: (g: string | null) => { liveGen = g; }, queuedSends: send.mock.calls.length };
+  }
+  const belowTick = (enforcer: ClaudeCompactionEnforcer) =>
+    enforcer.maybeAutoCompact({ sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage: 20, transcriptPath: "/tmp/c.jsonl" });
+
+  it("GHOST-STAGE (b): a stage from a RETIRED generation is REFUSED (stale_generation) + dropped for the successor", async () => {
+    const { enforcer, send, setLiveGen, queuedSends } = await queueStageWithGen("gen-uuid-1");
+    setLiveGen("gen-uuid-2"); // a successor occupant now holds the seat name
+    expect(await belowTick(enforcer)).toEqual({ triggered: false, reason: "stale_generation" });
+    expect(send.mock.calls.length).toBe(queuedSends); // no ghost prompt fired
+    expect(await belowTick(enforcer)).toEqual({ triggered: false, reason: "below_threshold" }); // stage was dropped
+  });
+
+  it("GHOST-STAGE (b): a MATCHING generation drains normally (same occupant)", async () => {
+    const { enforcer } = await queueStageWithGen("gen-uuid-1"); // live stays gen-uuid-1
+    expect(await belowTick(enforcer)).toEqual({ triggered: true }); // turn_boundary drains
+  });
+
+  it("GHOST-STAGE (b) NOTE-2: an UNKNOWN live tenure is INERT — drains normally, never false-refuses or compares-old-as-live", async () => {
+    const { enforcer, setLiveGen } = await queueStageWithGen("gen-uuid-1");
+    setLiveGen(null); // live tenure UNKNOWN (mint failed / no ledger) — the gate must NOT discriminate on it
+    expect(await belowTick(enforcer)).toEqual({ triggered: true }); // inert: normal drain; (a)/(e) are the fail-closed layers
+  });
+
+  it("GHOST-STAGE (b): with NO resolver (backward-compat) the gate is inert — stages drain as before", async () => {
+    const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
+    const { transport, send } = makeSessionTransport();
+    const enforcer = new ClaudeCompactionEnforcer(settings, transport, { dedupWindowMs: 60_000, postCompactRestoreCooldownMs: 0, openrigHome: "/tmp/h" });
+    let now = 1_700_000_000_000; vi.spyOn(Date, "now").mockImplementation(() => now);
+    await enforcer.maybeAutoCompact({ sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage: 90 });
+    now += 30_000;
+    await enforcer.maybeAutoCompact({ sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage: 95 });
+    void send;
+    expect(await belowTick(enforcer)).toEqual({ triggered: true }); // no resolver -> gate inert -> drains
+  });
+
   it("post-compact compliance prompt starts a cooldown so restore work cannot immediately trigger another /compact", async () => {
     const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
     const { transport, send } = makeSessionTransport();

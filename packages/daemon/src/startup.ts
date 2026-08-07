@@ -1660,6 +1660,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     ? new ClaudeCompactionEnforcer(
         new ContextPackSettingsStore(),
         deps.sessionTransport,
+        // GHOST-STAGE (b): resolve the LIVE occupant generation (atom-B tenure ledger) for a session
+        // so a stage minted by a retired generation is refused for the successor. null = UNKNOWN → the
+        // gate is inert (never compares a stale generation as if live).
+        { resolveOccupantGeneration: (sessionName) => sessionRegistry.currentOccupantGenerationForSession(sessionName) },
       )
     : undefined;
   const contextMonitor = new ContextMonitor(db, contextUsageStore, claudeAdapter, compactionEnforcer, {

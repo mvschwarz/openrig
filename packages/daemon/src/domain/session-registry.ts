@@ -126,9 +126,12 @@ export class SessionRegistry {
     } catch (e) {
       if (!SessionRegistry.tenureMintWarned) {
         SessionRegistry.tenureMintWarned = true;
+        // Attributable (node_id + kind/verb) so a failed mint is traceable from logs (orch note 1);
+        // once-per-process to avoid spamming a stale-migration db, but the FIRST failure pins the node.
         console.warn(
-          `[session-registry] occupant-tenure mint failed (${(e as Error).message}) — registration proceeds, ` +
-            `but generation-scoped ghost-stage invalidation is UNAVAILABLE. Ensure migration 060_occupant_tenures ran.`,
+          `[session-registry] occupant-tenure mint FAILED for node_id="${nodeId}" (kind=${kind}): ${(e as Error).message} — ` +
+            `registration proceeds, but generation-scoped ghost-stage protection is UNAVAILABLE for this node. ` +
+            `Ensure migration 060_occupant_tenures ran. (Further mint failures suppressed this process.)`,
         );
       }
     }
@@ -167,6 +170,22 @@ export class SessionRegistry {
       .prepare("SELECT * FROM occupant_tenures WHERE node_id = ? ORDER BY generation_ordinal DESC LIMIT 1")
       .get(nodeId) as OccupantTenureRow | undefined;
     return row ? this.rowToTenure(row) : null;
+  }
+
+  /** ghost-stage (b): the LIVE occupant generation_uuid for the node currently backing a session
+   *  NAME, or null when UNKNOWN (no session row / no node / no tenure — consumers treat null as
+   *  UNKNOWN, never as a match against a stale generation). This is the resolver the compaction
+   *  enforcer's gen-scoped stage gate consumes. Never throws (a bad lookup returns null). */
+  currentOccupantGenerationForSession(sessionName: string): string | null {
+    try {
+      const row = this.db
+        .prepare("SELECT node_id FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1")
+        .get(sessionName) as { node_id: string } | undefined;
+      if (!row) return null;
+      return this.currentOccupantTenure(row.node_id)?.generationUuid ?? null;
+    } catch {
+      return null; // UNKNOWN on any lookup failure (e.g. a db without the tenure ledger)
+    }
   }
 
   private rowToTenure(row: OccupantTenureRow): OccupantTenure {
