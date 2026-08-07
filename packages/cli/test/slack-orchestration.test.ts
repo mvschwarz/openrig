@@ -150,7 +150,9 @@ describe("Slice-11 INBOUND routing — never-drop (items 4,8)", () => {
     const fs = memFs();
     const seen = new SeenStore("/s/seen.jsonl", fs, clock);
     const dead = new DeadLetterStore<SlackEvent>("/s/dead.jsonl", fs, clock);
-    const router = new InboundRouter({ runner, seen, deadLetter: dead, destination: "operator-agent@kernel" });
+    // These tests exercise inbound LANDING mechanics (dedup/dead-letter/seen), not the A6 gate,
+    // so inject an admit-all resolver that stamps the legacy human-class source.
+    const router = new InboundRouter({ runner, seen, deadLetter: dead, destination: "operator-agent@kernel", resolveSender: (u) => ({ admitted: true, source: `human-${u}@kernel` }) });
     return { runner, calls, seen, dead, router, createCount: () => n };
   };
   const ev: SlackEvent = { type: "message", user: "U1", text: "hi team", ts: "100.1", channel: "C1" };
@@ -217,6 +219,7 @@ describe("Slice-11 INBOUND handleEnvelope — fast-ack (item 8)", () => {
       seen: new SeenStore("/s/seen.jsonl", fs, clock),
       deadLetter: new DeadLetterStore<SlackEvent>("/s/dead.jsonl", fs, clock),
       destination: "operator-agent@kernel",
+      resolveSender: (u) => ({ admitted: true, source: `human-${u}@kernel` }),
     });
   };
 

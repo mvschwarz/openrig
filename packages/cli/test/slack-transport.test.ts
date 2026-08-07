@@ -43,7 +43,7 @@ describe("Slice-11 INBOUND transport — real runInboundLoop / open / message / 
     const dead = new DeadLetterStore<SlackEvent>("/s/dead.jsonl", fsx, clock);
     const runner = async (args: string[]): Promise<RunResult> =>
       args[0] === "queue" && args[1] === "create" ? { ok: true, stdout: "created qitem-xyz", stderr: "", code: 0 } : { ok: false, stdout: "", stderr: "no", code: 1 };
-    const router = new InboundRouter({ runner, seen, deadLetter: dead, destination: "operator-agent@kernel", log: () => {} });
+    const router = new InboundRouter({ runner, seen, deadLetter: dead, destination: "operator-agent@kernel", resolveSender: (u) => ({ admitted: true, source: `human-${u}@kernel` }), log: () => {} });
 
     // pre-seed a dead-letter that will land on the ON-CONNECT retry
     dead.append({ type: "message", user: "U0", text: "queued during outage", ts: "D1", channel: "C0" }, 1);

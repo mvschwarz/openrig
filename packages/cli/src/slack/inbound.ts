@@ -39,11 +39,22 @@ export function shouldIngest(ev: SlackEvent): boolean {
   return true;
 }
 
+/** A6 v3: the sender-admission verdict. An inbound Slack message may become a human-provenance
+ *  qitem ONLY if its sender resolves to a REGISTERED human (admit-iff-registered); the stamped
+ *  `source` is that human's canonical ref (never a raw platform id). An unregistered sender — or a
+ *  registry that itself failed to load — is REFUSED with LOUD teaching, never a fabricated seat. */
+export type InboundSenderResolution =
+  | { admitted: true; source: string }
+  | { admitted: false; teaching: string };
+
 export interface InboundDeps {
   runner: QueueRunner;
   seen: SeenStore;
   deadLetter: DeadLetterStore<SlackEvent>;
   destination: string; // first-class config; default operator-agent@kernel
+  /** A6 v3 registration gate. Resolves ev.user -> a registered human (or refuses). Injected so
+   *  this core stays pure/testable; the runner wires it via the daemon human-registry resolver. */
+  resolveSender: (slackUserId: string) => InboundSenderResolution;
   sourceLabel?: string;
   log?: (msg: string) => void;
 }
@@ -67,16 +78,24 @@ export class InboundRouter {
    * failure so callers dead-letter ONLY real failures. On success, marks seen
    * (durable qitem exists → safe).
    */
-  private async attemptLand(ev: SlackEvent): Promise<{ landed: boolean; qitemId?: string; reason?: "dup" | "create_failed" }> {
+  private async attemptLand(ev: SlackEvent): Promise<{ landed: boolean; qitemId?: string; reason?: "dup" | "create_failed" | "unregistered" }> {
     const ts = ev.ts ?? "";
     if (!ts || this.inflight.has(ts) || this.deps.seen.load().has(ts)) return { landed: false, reason: "dup" };
+    // A6 v3 registration gate: admit-iff-registered. An unregistered sender is REFUSED here —
+    // never landed as a fabricated human-<slackid>@kernel seat. This is a POLICY refusal, not a
+    // transient failure, so it is NOT dead-lettered (retrying can't help until the human registers).
+    const who = this.deps.resolveSender(ev.user ?? "");
+    if (!who.admitted) {
+      this.deps.log?.(`inbound REFUSED — unregistered sender ${ev.user} (ts=${ts}): ${who.teaching}`);
+      return { landed: false, reason: "unregistered" };
+    }
     this.inflight.add(ts);
     try {
       const { summary, body } = this.summaryOf(ev);
       let qitemId: string;
       try {
         qitemId = await createQitem(this.deps.runner, {
-          source: `human-${ev.user}@kernel`, // provenance classifies as human (name convention)
+          source: who.source, // the REGISTERED human's canonical ref (human-class), never a raw platform id
           destination: this.deps.destination,
           priority: "routine",
           tags: ["founder-slack", "inbound"],

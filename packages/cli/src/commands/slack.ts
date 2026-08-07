@@ -19,6 +19,7 @@ import { SeenStore, DeadLetterStore } from "../slack/state-store.js";
 import { makeExecRunner, type QueueRunner } from "../slack/queue-bridge.js";
 import { runOutboundOnce, seedBacklogOnEnable } from "../slack/outbound.js";
 import { InboundRouter, handleEnvelope, type SlackEvent, type SocketEnvelope } from "../slack/inbound.js";
+import { makeInboundSenderResolver, type RegistrySurface } from "../slack/inbound-admission.js";
 import { verifyScopes, verifyChannelMembership, openSocketConnection, type FetchImpl } from "../slack/slack-api.js";
 
 const SECRET_WEBHOOK = "SLACK_WEBHOOK_URL";
@@ -229,7 +230,12 @@ export function slackCommand(deps: SlackDeps = {}): Command {
       const runner = makeRunner(cfg);
       const seen = new SeenStore(path.join(stateDir(home), "slack-inbound-seen.jsonl"), undefined, now);
       const dead = new DeadLetterStore<SlackEvent>(path.join(stateDir(home), "slack-inbound-deadletter.jsonl"), undefined, now);
-      const router = new InboundRouter({ runner, seen, deadLetter: dead, destination: cfg.inboundDestination, log });
+      // A6 v3 registration gate: resolve every inbound sender against the human registry (lazy
+      // daemon import per dep rail). loadHumanRegistry runs per-message so a newly-registered human
+      // is admitted without a restart. An unregistered sender is REFUSED — never a fabricated seat.
+      const registrySurface = (await import("@openrig/daemon/gateway-human-registry")) as unknown as RegistrySurface;
+      const resolveSender = makeInboundSenderResolver(registrySurface, home);
+      const router = new InboundRouter({ runner, seen, deadLetter: dead, destination: cfg.inboundDestination, resolveSender, log });
       await runInboundLoop(s.app, router, deps, log);
     });
 

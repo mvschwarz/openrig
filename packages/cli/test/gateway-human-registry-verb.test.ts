@@ -48,6 +48,24 @@ describe("rig gateway human add verb (post-relocate)", () => {
     }
   });
 
+  it("A6 v3: an OPTIONAL handle= token parses alongside a ':'-bearing secretsRef (inbound-resolvable)", async () => {
+    const program = createProgram();
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "gateway", "human", "add", "mike",
+      "--display-name", "Mike",
+      "--binding", "slack:main:vault://slack/mike:primary:handle=U012AB3CD",
+      "--delivery-class", "B",
+    ]);
+    const loaded = loadHumanRegistry(home);
+    expect(loaded.ok).toBe(true);
+    if (loaded.ok) {
+      const b = loaded.entities[0]!.connectorBindings[0]!;
+      expect(b.secretsRef).toBe("vault://slack/mike"); // the ':'-bearing pointer survived intact
+      expect(b.handle).toBe("U012AB3CD");              // and the handle was extracted
+    }
+  });
+
   it("add REFUSES an existing entityId (no silent clobber; exit 1)", async () => {
     const args = [
       "node", "rig", "gateway", "human", "add", "mike",

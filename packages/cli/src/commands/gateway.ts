@@ -14,24 +14,37 @@ interface BindingSpec {
   connectorRef: string;
   secretsRef: string;
   role: string;
+  handle?: string;
 }
 
-/** --binding kind:connectorRef:secretsRef:role. secretsRef is a vault POINTER and may
- *  itself contain ':' (e.g. "vault://slack/mike"), so kind/connectorRef are the first
- *  two fields, role is the LAST, and secretsRef is everything between (colons intact). */
+/** --binding kind:connectorRef:secretsRef:role[:handle=<id>]. secretsRef is a vault POINTER and
+ *  may itself contain ':' (e.g. "vault://slack/mike"), so kind/connectorRef are the first two
+ *  fields, role is the LAST positional, and secretsRef is everything between (colons intact).
+ *  A6 v3: an OPTIONAL `handle=<id>` token (the human's platform id, e.g. Slack user id) may appear
+ *  anywhere; it is extracted first so it never disturbs the positional parse. A handle-less binding
+ *  is outbound-only (not inbound-resolvable). */
 function parseBinding(spec: string): BindingSpec | { error: string } {
-  const parts = spec.split(":");
+  const all = spec.split(":");
+  const handleTokens = all.filter((p) => p.startsWith("handle="));
+  if (handleTokens.length > 1) {
+    return { error: `--binding must carry at most one handle= token (got "${spec}")` };
+  }
+  const handle = handleTokens.length === 1 ? handleTokens[0]!.slice("handle=".length) : undefined;
+  if (handle !== undefined && handle.length === 0) {
+    return { error: `--binding handle= must be non-empty (got "${spec}")` };
+  }
+  const parts = all.filter((p) => !p.startsWith("handle="));
   if (parts.length < 4) {
-    return { error: `--binding must be kind:connectorRef:secretsRef:role (got "${spec}")` };
+    return { error: `--binding must be kind:connectorRef:secretsRef:role[:handle=<id>] (got "${spec}")` };
   }
   const kind = parts[0]!;
   const connectorRef = parts[1]!;
   const role = parts[parts.length - 1]!;
   const secretsRef = parts.slice(2, -1).join(":");
   if (!kind || !connectorRef || !secretsRef || !role) {
-    return { error: `--binding fields must be non-empty: kind:connectorRef:secretsRef:role (got "${spec}")` };
+    return { error: `--binding fields must be non-empty: kind:connectorRef:secretsRef:role[:handle=<id>] (got "${spec}")` };
   }
-  return { kind, connectorRef, secretsRef, role };
+  return handle !== undefined ? { kind, connectorRef, secretsRef, role, handle } : { kind, connectorRef, secretsRef, role };
 }
 
 export function gatewayCommand(): Command {
@@ -43,8 +56,8 @@ export function gatewayCommand(): Command {
     .description("Add a human fragment (verb-add-only; the fragment is truth, the registry is a GENERATED projection)")
     .requiredOption("--display-name <name>", "Human-readable display name")
     .requiredOption(
-      "--binding <kind:connectorRef:secretsRef:role>",
-      "Connector binding (repeatable); role primary|secondary, EXACTLY ONE primary",
+      "--binding <kind:connectorRef:secretsRef:role[:handle=<id>]>",
+      "Connector binding (repeatable); role primary|secondary, EXACTLY ONE primary. Optional handle=<platform id> makes the binding inbound-resolvable (unique per kind); omit it for outbound-only.",
       (v: string, acc: string[] = []) => { acc.push(v); return acc; },
     )
     .requiredOption("--delivery-class <A|B|C|D>", "Notification loudness class (the notifications register selection)")
