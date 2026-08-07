@@ -18,6 +18,7 @@ import * as path from "node:path";
 import type { ReviewGatherer } from "../domain/review/gather.js";
 import type { AgentsScope } from "../domain/review/types.js";
 import { FileWriteService, sha256Hex } from "../domain/files/file-write-service.js";
+import { resolveActorWithDeferral } from "./require-sender-identity.js";
 import type { AllowlistRoot } from "../domain/files/path-safety.js";
 import { freezeSliceExport, resolveAllowlisted } from "../domain/review/freeze.js";
 import { applyBriefSpine } from "../domain/review/brief-spine.js";
@@ -133,11 +134,15 @@ export function reviewRoutes(): Hono {
     } catch {
       return c.json({ error: "body_invalid", hint: 'POST JSON {"scope":"slice","name":"<slice>","actor":"<session>"}' }, 400);
     }
-    if (body.scope !== "slice" || !body.name || !body.actor) {
+    if (body.scope !== "slice" || !body.name) {
       // Mission-tier freeze rides the same path once mission approval ships
       // end-to-end (Packet 1 FR-9 mission semantics); slice is the v1 surface.
       return c.json({ error: "freeze_request_invalid", hint: 'required: {"scope":"slice","name":"<slice>","actor":"<session>"}' }, 400);
     }
+    // P21 I5: review freeze is a founder-visible surface — resolveActorWithDeferral: header present ⇒
+    // derive + transport:v1 + 409-on-mismatch (CLI); header absent (browser UI) ⇒ claimed-era, never-break.
+    const identity = resolveActorWithDeferral(c, { verb: "review freeze", bodyClaim: body.actor });
+    if (!identity.ok) return identity.response;
     const ctx = gatherer.composeSliceWithContext(body.name);
     if (!ctx) return c.json({ error: "slice_not_found", name: body.name }, 404);
     const outcome = freezeSliceExport({
@@ -146,7 +151,8 @@ export function reviewRoutes(): Hono {
       mediaRefs: ctx.mediaRefs,
       allowlist,
       writeService,
-      actor: body.actor,
+      actor: identity.session,
+      identityProvenance: identity.provenance,
     });
     if (!outcome.ok) {
       const status = outcome.error === "stamp_missing" ? 409 : outcome.error === "allowlist_missing" ? 403 : 500;
@@ -178,7 +184,8 @@ export function reviewRoutes(): Hono {
                 content: applied,
                 expectedMtime: stat.mtime.toISOString(),
                 expectedContentHash: sha256Hex(target.content),
-                actor: body.actor,
+                actor: identity.session,
+                identityProvenance: identity.provenance,
               });
               briefWrite = "spine updated";
             }

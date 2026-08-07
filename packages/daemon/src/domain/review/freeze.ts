@@ -241,6 +241,9 @@ export function freezeSliceExport(opts: {
   allowlist: AllowlistRoot[];
   writeService: FileWriteService;
   actor: string;
+  /** P21 §4 era-stamp for the freeze audit row: `transport:v1` (transport-derived) or null
+   *  (the UI named-deferral / claimed-era path). Threaded to the createAtomic audit. */
+  identityProvenance?: string | null;
 }): FreezeOutcome {
   const { composed } = opts;
   if (!composed.delivered.lock) {
@@ -263,7 +266,7 @@ export function freezeSliceExport(opts: {
   const relPath = path.join(mapped.rel, fileName);
   const html = renderFrozenSliceHtml(composed, opts.sliceDir, opts.mediaRefs);
   try {
-    const result = opts.writeService.createAtomic({ rootName: mapped.root, path: relPath, content: html, actor: opts.actor });
+    const result = opts.writeService.createAtomic({ rootName: mapped.root, path: relPath, content: html, actor: opts.actor, identityProvenance: opts.identityProvenance ?? null });
     return { ok: true, path: result.absolutePath, alreadyFrozen: false };
   } catch (err) {
     if (err instanceof FileWriteError && err.code === "target_exists") {

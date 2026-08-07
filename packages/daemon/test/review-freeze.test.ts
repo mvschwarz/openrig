@@ -83,6 +83,58 @@ describe("POST /api/review/freeze", () => {
     });
   }
 
+  // P21 I5 — review freeze is a founder-visible surface (the hill-climb): resolveActorWithDeferral.
+  function freezeAs(name: string, session: string, bodyActor?: string) {
+    return app.request("/api/review/freeze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": session },
+      body: JSON.stringify({ scope: "slice", name, ...(bodyActor !== undefined ? { actor: bodyActor } : {}) }),
+    });
+  }
+  function lastAuditRow(): { actor: string; identity_provenance: string | null } {
+    const lines = fs.readFileSync(path.join(ws.root, "audit.jsonl"), "utf8").trim().split("\n");
+    return JSON.parse(lines[lines.length - 1]!) as { actor: string; identity_provenance: string | null };
+  }
+
+  it("freeze — header present derives the actor + stamps the audit identity_provenance transport:v1", async () => {
+    const dir = approvedSlice("40-id");
+    writeFullGateSet(dir, "40-id", "cand40");
+    const res = await freezeAs("40-id", "cli@host");
+    expect(res.status).toBe(200);
+    const row = lastAuditRow();
+    expect(row.actor).toBe("cli@host");
+    expect(row.identity_provenance).toBe("transport:v1");
+  });
+
+  it("freeze — header present + differing body actor → 409 identity_mismatch", async () => {
+    const dir = approvedSlice("41-id");
+    writeFullGateSet(dir, "41-id", "cand41");
+    const res = await freezeAs("41-id", "cli@host", "mallory@host");
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+  });
+
+  it("freeze — header absent records the body actor CLAIMED-era (identity_provenance null, never-break)", async () => {
+    const dir = approvedSlice("42-id");
+    writeFullGateSet(dir, "42-id", "cand42");
+    const res = await freeze("42-id"); // no header, body actor approver@host (the UI deferral path)
+    expect(res.status).toBe(200);
+    const row = lastAuditRow();
+    expect(row.actor).toBe("approver@host");
+    expect(row.identity_provenance).toBeNull();
+  });
+
+  it("freeze — header absent + no body actor → 400", async () => {
+    const dir = approvedSlice("43-id");
+    writeFullGateSet(dir, "43-id", "cand43");
+    const res = await app.request("/api/review/freeze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scope: "slice", name: "43-id" }),
+    });
+    expect(res.status).toBe(400);
+  });
+
   it("writes exactly one self-contained HTML file: inlined images, video by LINK with poster, no video bytes, no external fetches", async () => {
     const dir = approvedSlice("30-freeze");
     // A tiny valid PNG + a "video" file + its poster, referenced from PROOF.md.
