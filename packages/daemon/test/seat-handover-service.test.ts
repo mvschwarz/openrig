@@ -28,6 +28,7 @@ describe("SeatHandoverService", () => {
   let readSidecar: ReturnType<typeof vi.fn>;
   let captureCodexThreadId: ReturnType<typeof vi.fn>;
   let invalidateRetiringOccupant: ReturnType<typeof vi.fn>;
+  let resolvePredecessorRecap: ReturnType<typeof vi.fn>;
   let service: SeatHandoverService;
 
   beforeEach(() => {
@@ -52,6 +53,7 @@ describe("SeatHandoverService", () => {
     readSidecar = vi.fn(() => ({ ok: true, data: { session_id: "claude-sid-123" } }));
     captureCodexThreadId = vi.fn(async () => "codex-discovered-tok");
     invalidateRetiringOccupant = vi.fn();
+    resolvePredecessorRecap = vi.fn(() => null);
     service = newService();
   });
 
@@ -81,6 +83,7 @@ describe("SeatHandoverService", () => {
       contextUsageStore: { readSidecar } as never,
       resumeTokenCapturer: { captureCodexThreadId } as never,
       occupantInvalidator: { invalidateRetiringOccupant },
+      predecessorRecapResolver: resolvePredecessorRecap as never,
       readinessTimeoutMs: 50,
       sleep: async () => {},
     });
@@ -357,6 +360,43 @@ describe("SeatHandoverService", () => {
 
     expect(result.ok).toBe(false);
     expect(invalidateRetiringOccupant).not.toHaveBeenCalled();
+  });
+
+  it("stopgap: threads the predecessor recap + record path into the delivered restore packet when a record resolves", async () => {
+    // The stopgap fires: resolve the predecessor's provider record → a bounded labeled-from-record recap
+    // → threaded into the packet delivered to the successor (honest-degraded, never called "scrollback").
+    seedSeat({ runtime: "codex" });
+    resolvePredecessorRecap.mockReturnValue({
+      recap: [
+        { role: "user", content: "finish the atom" },
+        { role: "assistant", content: "atom finished; handing over" },
+      ],
+      recordPath: "/home/.claude/projects/x/abc.jsonl",
+    });
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
+
+    expect(result.ok).toBe(true);
+    expect(resolvePredecessorRecap).toHaveBeenCalledTimes(1);
+    const [target, packet] = sendText.mock.calls[0]!;
+    expect(target).toBe("dev-impl@seat-rig");
+    expect(packet).toContain("Recent exchanges (from record)");
+    expect(packet).toContain("user: finish the atom");
+    expect(packet).toContain("/home/.claude/projects/x/abc.jsonl");
+    expect(packet.toLowerCase()).toContain("honest-degraded");
+  });
+
+  it("stopgap: omits the recap sections honestly when no predecessor record resolves (no fabrication)", async () => {
+    seedSeat({ runtime: "codex" });
+    resolvePredecessorRecap.mockReturnValue(null);
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
+
+    expect(result.ok).toBe(true);
+    const [, packet] = sendText.mock.calls[0]!;
+    expect(packet).not.toContain("Recent exchanges (from record)");
+    // the base packet still delivers the captured predecessor terminal.
+    expect(packet).toContain("predecessor screen tail");
   });
 
   it.each([

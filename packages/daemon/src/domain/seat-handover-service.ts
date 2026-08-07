@@ -13,7 +13,22 @@ import { deriveResumeToken, type ResumeTokenCaptureDeps } from "./resume-token-c
 import { validateResumeToken } from "./resume-token-validation.js";
 import type { RuntimeAdapter } from "./runtime-adapter.js";
 import type { OccupantInvalidator } from "./occupant-invalidator.js";
+import type { JsonlExchange } from "./session-jsonl.js";
 import type { PersistedEvent } from "./types.js";
+
+/** Stopgap: a bounded labeled-from-record recap of the predecessor's last exchanges + the record path,
+ *  resolved from the predecessor's provider transcript (claude transcript_path / codex rollout_path). */
+export interface PredecessorRecap {
+  recap: JsonlExchange[];
+  recordPath: string;
+}
+/** Resolve the predecessor's bounded recap for the successor boot packet, or null when no record is
+ *  available (honest-degraded — the recap sections are simply omitted, never fabricated). */
+export type PredecessorRecapResolver = (args: {
+  nodeId: string;
+  runtime: string | null;
+  sessionName: string;
+}) => PredecessorRecap | null;
 
 export interface SeatHandoverMutationResult {
   ok: true;
@@ -114,6 +129,13 @@ interface SeatHandoverServiceDeps {
    * blocking the handover). See occupant-invalidator.ts.
    */
   occupantInvalidator?: OccupantInvalidator;
+  /**
+   * Stopgap (plan 411c43de) — resolves the predecessor's bounded from-record recap for the successor
+   * boot packet (claude transcript_path / codex rollout_path → parseJsonlExchanges). Optional: absent →
+   * the recap sections are omitted honestly (the money-proof is the preserved scrollback; this is the
+   * labeled fallback). Wired in production to ContextUsageStore + parseJsonlExchanges.
+   */
+  predecessorRecapResolver?: PredecessorRecapResolver;
 }
 
 export class SeatHandoverService {
@@ -128,6 +150,7 @@ export class SeatHandoverService {
   private successorLauncher: SuccessorSessionLauncher;
   private captureDeps: ResumeTokenCaptureDeps;
   private occupantInvalidator: OccupantInvalidator | null;
+  private predecessorRecapResolver: PredecessorRecapResolver | null;
   private now: () => Date;
 
   constructor(deps: SeatHandoverServiceDeps) {
@@ -142,6 +165,7 @@ export class SeatHandoverService {
     this.eventBus = deps.eventBus;
     this.tmuxAdapter = deps.tmuxAdapter;
     this.occupantInvalidator = deps.occupantInvalidator ?? null;
+    this.predecessorRecapResolver = deps.predecessorRecapResolver ?? null;
     this.now = deps.now ?? (() => new Date());
     this.statusService = new SeatStatusService({ rigRepo: deps.rigRepo });
     this.planner = new SeatHandoverPlanner({ rigRepo: deps.rigRepo });
@@ -311,11 +335,21 @@ export class SeatHandoverService {
     //    discovered is operator-prepared and needs no delivery.
     let contextDelivered = false;
     if (parsed.source.mode === "fresh") {
+      // Stopgap: resolve the predecessor's bounded from-record recap (claude transcript_path / codex
+      // rollout_path → parseJsonlExchanges) so the successor boots with a labeled recap. Absent →
+      // the recap sections are omitted honestly (the preserved scrollback is the money-proof).
+      const predecessorRecap = this.predecessorRecapResolver?.({
+        nodeId: node.id,
+        runtime: node.runtime,
+        sessionName: latestSession.session_name,
+      }) ?? null;
       const delivered = await this.deliverRestorePacket(launch.tmuxSession, {
         seatRef: input.seatRef,
         reason,
         departingSession: latestSession.session_name,
         capturedContext,
+        recap: predecessorRecap?.recap,
+        recordPath: predecessorRecap?.recordPath,
       });
       if (!delivered.ok) {
         // Partial: the successor is live in the preserved pane but the context packet never landed —
@@ -543,7 +577,15 @@ export class SeatHandoverService {
    *  orchestrator's initial-prompt delivery. */
   private async deliverRestorePacket(
     successorSession: string,
-    info: { seatRef: string; reason: string; departingSession: string; capturedContext: string },
+    info: {
+      seatRef: string;
+      reason: string;
+      departingSession: string;
+      capturedContext: string;
+      /** Stopgap: the predecessor's bounded from-record recap + record path (omitted when unresolved). */
+      recap?: JsonlExchange[];
+      recordPath?: string;
+    },
   ): Promise<{ ok: true } | { ok: false; message: string }> {
     const packet = buildRestorePacket({ ...info, handoverAt: this.now().toISOString() });
     const sent = await this.tmuxAdapter.sendText(successorSession, packet);
