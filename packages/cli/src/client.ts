@@ -9,6 +9,21 @@ export function terminalAuthHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+/** The header carrying the caller's seat identity, derived ONCE at the transport chokepoint. */
+export const SENDER_IDENTITY_HEADER = "X-OpenRig-Session";
+
+/**
+ * P18 sender-provenance — derive the caller's identity from the seat ENV (never a request-body
+ * claim). Routes that record authorship into the channel of record read ONLY this header, so a
+ * buggy/stale caller cannot write false history by fat-fingering or stale-copying a body field.
+ * Absent env ⇒ no header ⇒ the daemon refuses-unattributable LOUD (the approve-actor pattern). One
+ * chokepoint: `DaemonClient.fetch` stamps this on every request; callers never set it by hand.
+ */
+export function senderIdentityHeaders(): Record<string, string> {
+  const session = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
+  return session ? { [SENDER_IDENTITY_HEADER]: session } : {};
+}
+
 function resolveTerminalToken(): string | null {
   const env = process.env.OPENRIG_TERMINAL_BEARER_TOKEN?.trim();
   if (env) return env;
@@ -151,6 +166,9 @@ export class DaemonClient {
     if (options?.headers) {
       init = { ...init, headers: { ...(init.headers as Record<string, string> ?? {}), ...options.headers } };
     }
+    // P18 sender-provenance: stamp the seat-derived identity header LAST, so the transport — never a
+    // caller-supplied header or a request body — decides the caller identity the channel of record records.
+    init = { ...init, headers: { ...(init.headers as Record<string, string> ?? {}), ...senderIdentityHeaders() } };
     try {
       return await fetchWithTimeout(
         this.fetchImpl,

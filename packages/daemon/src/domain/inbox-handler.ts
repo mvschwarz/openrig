@@ -62,38 +62,32 @@ function newInboxId(): string {
 }
 
 /**
- * Inbox mailbox handler. Authenticated drop-and-go path.
- * Receiver chooses absorb (promote to queue_item) or deny (record reason).
+ * Inbox mailbox handler. Drop-and-go path; the receiver chooses absorb (promote to queue_item) or
+ * deny (record reason).
  *
- * `authenticate` is the contract surface that lets routes plug in identity
- * verification. Default is permissive (accept any sender_session); routes
- * SHOULD verify against the calling principal.
+ * P18 sender-provenance: `input.senderSession` is authoritative and MUST be a transport-derived
+ * identity supplied by the caller route (the /inbox/drop route derives it from the X-OpenRig-Session
+ * header, refusing when absent). This handler no longer carries a pluggable `authenticate` predicate
+ * or an `authenticatedSender` parameter — the prior allow-all default + body-forwarded principal were
+ * the fabricated-authority surface (P18); identity verification now lives at the ONE transport
+ * chokepoint, not behind a re-introducible body-claim fallback here.
  */
 export class InboxHandler {
   readonly db: Database.Database;
   private readonly eventBus: EventBus;
   private readonly queueRepo: QueueRepository;
-  private readonly authenticate: (sender: string, claimed: string) => boolean;
 
   constructor(
     db: Database.Database,
     eventBus: EventBus,
     queueRepo: QueueRepository,
-    opts?: { authenticate?: (sender: string, claimed: string) => boolean }
   ) {
     this.db = db;
     this.eventBus = eventBus;
     this.queueRepo = queueRepo;
-    this.authenticate = opts?.authenticate ?? (() => true);
   }
 
-  drop(input: InboxDropInput, authenticatedSender?: string): InboxEntry {
-    if (authenticatedSender !== undefined && !this.authenticate(authenticatedSender, input.senderSession)) {
-      throw new InboxHandlerError(
-        "auth_failed",
-        `authenticated principal ${authenticatedSender} cannot send as ${input.senderSession}`
-      );
-    }
+  drop(input: InboxDropInput): InboxEntry {
 
     const id = input.inboxId ?? newInboxId();
     const existing = this.getByIdRaw(id);

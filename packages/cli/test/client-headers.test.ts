@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from "vitest";
-import { DaemonClient } from "../src/client.js";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { DaemonClient, senderIdentityHeaders, SENDER_IDENTITY_HEADER } from "../src/client.js";
 
 function mockFetch(handler: (url: string, init: RequestInit) => Promise<Response>): typeof fetch {
   return handler as unknown as typeof fetch;
@@ -59,5 +59,51 @@ describe("DaemonClient header merge", () => {
 
     const res = await client.post("/test", { data: 1 });
     expect(res.status).toBe(200);
+  });
+});
+
+// ── P18 sender-provenance: the seat identity is derived from the env ONCE at the transport chokepoint ──
+describe("DaemonClient sender-identity header (P18)", () => {
+  const savedSession = process.env.OPENRIG_SESSION_NAME;
+  const savedRigged = process.env.RIGGED_SESSION_NAME;
+  afterEach(() => {
+    if (savedSession === undefined) delete process.env.OPENRIG_SESSION_NAME; else process.env.OPENRIG_SESSION_NAME = savedSession;
+    if (savedRigged === undefined) delete process.env.RIGGED_SESSION_NAME; else process.env.RIGGED_SESSION_NAME = savedRigged;
+  });
+
+  const captureHeaders = () => {
+    const box: { headers: Record<string, string> } = { headers: {} };
+    const client = new DaemonClient("http://localhost:7433", {
+      fetchImpl: mockFetch(async (_url, init) => {
+        box.headers = Object.fromEntries(Object.entries((init.headers ?? {}) as Record<string, string>));
+        return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+      }),
+    });
+    return { client, box };
+  };
+
+  it("derives the identity header from OPENRIG_SESSION_NAME", () => {
+    process.env.OPENRIG_SESSION_NAME = "dev50-driver@rig";
+    expect(senderIdentityHeaders()).toEqual({ [SENDER_IDENTITY_HEADER]: "dev50-driver@rig" });
+  });
+
+  it("emits NO header when the seat env is absent (the daemon refuses; the CLI never fabricates)", () => {
+    delete process.env.OPENRIG_SESSION_NAME;
+    delete process.env.RIGGED_SESSION_NAME;
+    expect(senderIdentityHeaders()).toEqual({});
+  });
+
+  it("stamps the seat identity on EVERY request at the ONE transport chokepoint", async () => {
+    process.env.OPENRIG_SESSION_NAME = "alice@rig";
+    const { client, box } = captureHeaders();
+    await client.post("/inbox/drop", { destinationSession: "bob@rig", body: "x" });
+    expect(box.headers[SENDER_IDENTITY_HEADER]).toBe("alice@rig");
+  });
+
+  it("the transport identity is AUTHORITATIVE — a caller cannot override it via options.headers", async () => {
+    process.env.OPENRIG_SESSION_NAME = "alice@rig";
+    const { client, box } = captureHeaders();
+    await client.post("/inbox/drop", { body: "x" }, { headers: { [SENDER_IDENTITY_HEADER]: "mallory@rig" } });
+    expect(box.headers[SENDER_IDENTITY_HEADER]).toBe("alice@rig"); // the seat env wins, not the caller's claim
   });
 });

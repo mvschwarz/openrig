@@ -96,10 +96,10 @@ describe("coordination integration — stream → queue → inbox handoff chain"
     // 2. Drop into planning's inbox (mailbox path; not direct queue write)
     const dropRes = await app.request("/api/queue/inbox/drop", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      // P18: the sender is the transport-derived identity header, not a body claim.
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "intake@conveyor" },
       body: JSON.stringify({
         destinationSession: "planning@conveyor",
-        senderSession: "intake@conveyor",
         body: "investigate regression — see stream item",
         urgency: "urgent",
       }),

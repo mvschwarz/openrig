@@ -883,33 +883,40 @@ export function queueRoutes(): Hono {
   // ---- Inbox routes (mailbox) ----
 
   app.post("/inbox/drop", async (c) => {
+    // P18 sender-provenance: the sender is DERIVED from the authenticated transport header (stamped
+    // once by the CLI from the seat env), NEVER from the request body. senderSession/authenticatedSender
+    // are intentionally NOT read from the body — a body-supplied identity is forgeable false history in
+    // the channel of record (inbox_entries.sender_session → absorb → the receiver's queue).
     const body = await c.req.json<{
       inboxId?: string;
       destinationSession?: string;
-      senderSession?: string;
       body?: string;
       tags?: string[];
       urgency?: string;
       auditPointer?: string;
-      authenticatedSender?: string;
     }>().catch(() => ({} as never));
+    // Refuse-unattributable LOUD (approve-actor): no transport identity ⇒ reject, naming what was missing.
+    const senderSession = c.req.header("x-openrig-session")?.trim();
+    if (!senderSession) {
+      return c.json({
+        error: "unattributable_sender",
+        message: "Refusing inbox drop: no authenticated sender identity (X-OpenRig-Session header absent). " +
+          "The channel of record records only a transport-derived sender, never a request-body claim.",
+      }, 401);
+    }
     if (!body.destinationSession) return c.json({ error: "destinationSession is required" }, 400);
-    if (!body.senderSession) return c.json({ error: "senderSession is required" }, 400);
     if (!body.body) return c.json({ error: "body is required" }, 400);
 
     try {
-      const entry = getInbox(c).drop(
-        {
-          inboxId: body.inboxId,
-          destinationSession: body.destinationSession,
-          senderSession: body.senderSession,
-          body: body.body,
-          tags: body.tags,
-          urgency: body.urgency,
-          auditPointer: body.auditPointer,
-        },
-        body.authenticatedSender
-      );
+      const entry = getInbox(c).drop({
+        inboxId: body.inboxId,
+        destinationSession: body.destinationSession,
+        senderSession, // transport-derived, authoritative
+        body: body.body,
+        tags: body.tags,
+        urgency: body.urgency,
+        auditPointer: body.auditPointer,
+      });
       return c.json(entry, 201);
     } catch (err) {
       return errorResponse(c, err);

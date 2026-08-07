@@ -63,6 +63,36 @@ describe("queue routes", () => {
 
   afterEach(() => db.close());
 
+  // ── P18 sender-provenance: /inbox/drop derives the sender from the authenticated transport
+  // header (X-OpenRig-Session), never a request-body claim; refuses-unattributable LOUD when absent. ──
+  describe("P18 sender-provenance", () => {
+    it("records the TRANSPORT-DERIVED sender (header), IGNORING a forged body senderSession/authenticatedSender", async () => {
+      const res = await app.request("/api/queue/inbox/drop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@rig" },
+        body: JSON.stringify({
+          destinationSession: "bob@rig", body: "hi",
+          senderSession: "mallory@rig", authenticatedSender: "mallory@rig", // forged body claims — must be ignored
+        }),
+      });
+      expect(res.status).toBe(201);
+      const entry = await res.json() as { senderSession: string };
+      expect(entry.senderSession).toBe("alice@rig"); // the header wins; the forged body claim never lands
+    });
+
+    it("REFUSES-unattributable LOUD (401) when the identity header is absent, naming the missing header", async () => {
+      const res = await app.request("/api/queue/inbox/drop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" }, // NO X-OpenRig-Session
+        body: JSON.stringify({ destinationSession: "bob@rig", body: "hi", senderSession: "mallory@rig" }),
+      });
+      expect(res.status).toBe(401);
+      const err = await res.json() as { error: string; message: string };
+      expect(err.error).toBe("unattributable_sender");
+      expect(err.message).toMatch(/X-OpenRig-Session/);
+    });
+  });
+
   it("POST /api/queue/create creates a qitem", async () => {
     const res = await app.request("/api/queue/create", {
       method: "POST",
@@ -173,10 +203,9 @@ describe("queue routes", () => {
   it("inbox drop / absorb / deny round-trip", async () => {
     const drop = await app.request("/api/queue/inbox/drop", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" }, // P18: transport-derived sender
       body: JSON.stringify({
         destinationSession: "b@r",
-        senderSession: "a@r",
         body: "async",
       }),
     });
@@ -195,8 +224,8 @@ describe("queue routes", () => {
     // Second drop + deny path
     const drop2 = await app.request("/api/queue/inbox/drop", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ destinationSession: "b@r", senderSession: "a@r", body: "skip" }),
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" }, // P18: transport-derived sender
+      body: JSON.stringify({ destinationSession: "b@r", body: "skip" }),
     });
     const entry2 = (await drop2.json()) as { inboxId: string };
     const deny = await app.request(`/api/queue/inbox/${entry2.inboxId}/deny`, {

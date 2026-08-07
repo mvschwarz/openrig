@@ -70,16 +70,14 @@ describe("InboxHandler", () => {
     expect(b.body).toBe("first");
   });
 
-  it("auth check rejects spoofed sender_session", () => {
-    const strictInbox = new InboxHandler(db, bus, queueRepo, {
-      authenticate: (sender, claimed) => sender === claimed,
-    });
-    expect(() =>
-      strictInbox.drop(
-        { destinationSession: "bob@rig", senderSession: "alice@rig", body: "x" },
-        "mallory@rig"
-      )
-    ).toThrow(InboxHandlerError);
+  // P18 sender-provenance: identity verification moved OUT of the handler to the ONE transport
+  // chokepoint. The handler no longer carries an `authenticate` predicate — its allow-all default +
+  // body-forwarded principal WERE the fabricated-authority surface. It faithfully records the
+  // transport-derived senderSession its caller (the /inbox/drop route) supplies; the forged-sender
+  // proof (header-derived vs body-claim + refuse-unattributable) lives at the route.
+  it("records exactly the (transport-derived) senderSession it is given", () => {
+    const entry = inbox.drop({ destinationSession: "bob@rig", senderSession: "alice@rig", body: "x" });
+    expect(entry.senderSession).toBe("alice@rig");
   });
 
   it("absorb promotes pending entry to a queue_item, emits inbox.absorbed", async () => {

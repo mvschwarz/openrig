@@ -981,7 +981,9 @@ Examples:
   cmd
     .command("inbox-drop <destinationSession>")
     .description("Drop a mailbox-style entry into a destination's inbox")
-    .requiredOption("--sender <session>", "Sender session")
+    // P18: the sender is derived from the seat env (X-OpenRig-Session, stamped by the transport), not a
+    // flag. --sender is deprecated + IGNORED (kept optional so existing callers don't break).
+    .option("--sender <session>", "(deprecated, ignored) sender is derived from the authenticated seat env")
     .option("--body <text>", "Inbox body inline (use - to read from stdin; mutually exclusive with --body-file).")
     .option("--body-file <path>", "Read the inbox body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class.")
     .option("--tags <tags>", "Comma-separated tags")
@@ -990,7 +992,7 @@ Examples:
     .option("--id <inboxId>", "Idempotent inbox_id")
     .option("--json", "JSON output for agents")
     .action(async (destinationSession: string, opts: {
-      sender: string;
+      sender?: string; // P18: deprecated + ignored (sender derived from the seat env)
       body?: string;
       bodyFile?: string;
       tags?: string;
@@ -1012,10 +1014,11 @@ Examples:
       const deps = getDeps();
       const tags = opts.tags ? opts.tags.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
       await withClient(deps, async (client) => {
+        // P18: the sender is the transport-derived identity header (stamped once by DaemonClient from
+        // the seat env), NOT a body claim/flag — the daemon ignores any body-supplied sender.
         const res = await client.post<unknown>("/api/queue/inbox/drop", {
           inboxId: opts.id,
           destinationSession,
-          senderSession: opts.sender,
           body: resolvedBody,
           tags,
           urgency: opts.urgency,
