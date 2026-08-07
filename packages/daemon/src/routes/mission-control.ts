@@ -28,7 +28,7 @@ import {
 import type { MissionControlFleetCliCapability } from "../domain/mission-control/mission-control-fleet-cli-capability.js";
 import type { MissionControlAuditBrowse } from "../domain/mission-control/audit-browse.js";
 import type { MissionControlNotificationDispatcher } from "../domain/mission-control/notification-dispatcher.js";
-import { requireSenderIdentity } from "./require-sender-identity.js";
+import { resolveActorWithDeferral, resolveRecordedProvenance } from "./require-sender-identity.js";
 
 /**
  * Mission Control HTTP routes (PL-005 Phase A). Backs the integrated
@@ -337,11 +337,16 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
       );
     }
     if (!body.qitemId) return c.json({ error: "qitemId is required" }, 400);
-    // P21 I2: the acting seat is DERIVED from the transport chokepoint, never body.actorSession. Runs
-    // BEFORE both the local write AND the cross-host forward — the forward re-stamps THIS derived actor
-    // (never the inbound body claim). body.actorSession is the transitional claim (tolerated iff equal).
-    const identity = requireSenderIdentity(c, { verb: `mission-control ${body.verb}`, bodyClaim: body.actorSession });
+    // P21 I2 + review-actions deferral: mission-control /action is a FOUNDER-VISIBLE surface — the browser
+    // UI fires approve/deny/etc HEADERLESS (bearer only, body actorSession), so refuse-loud would break the
+    // founder's one-tap review flow (d00c468d). resolveActorWithDeferral: CLI header ⇒ transport:v1 + 409
+    // on mismatch; UI headerless ⇒ the body actor recorded claimed:v1 (declared-but-unverified), never
+    // refused, never laundered. Runs BEFORE the local write AND the cross-host forward.
+    const identity = resolveActorWithDeferral(c, { verb: `mission-control ${body.verb}`, bodyClaim: body.actorSession });
     if (!identity.ok) return identity.response;
+    // The SOLE provenance decider (rail 2): transport:v1 ONLY when transport proved it at THIS hop; relay:v1
+    // one hop away; claimed:v1 for the UI deferral OR an unpropagatable/legacy marker (degrade-down default).
+    const recordedProvenance = resolveRecordedProvenance(c, identity);
     if (typeof body.hostId === "string" && body.hostId !== "" && body.hostId !== LOCAL_HOST_ID) {
       // Remote forward (arch ruling 4: ONE write-path, ONE verb allowlist —
       // the checks above already ran; the origin daemon re-validates on its
@@ -373,6 +378,12 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
         headers: {
           "X-OpenRig-Session": identity.session,
           "X-OpenRig-Relay": getSelfHostId() ?? "unknown",
+          // Carry the provenance THIS hop resolved so the origin NEVER launders a claimed-era actor into a
+          // verified one: identity.provenance is transport:v1 (CLI) or claimed:v1 (UI deferral). The origin's
+          // resolveRecordedProvenance degrades — a transport:v1 marker ⇒ relay:v1, everything else ⇒ claimed:v1.
+          // (Literal capitalized key, matching the sibling X-OpenRig-Session/Relay send convention; the
+          // receive side reads it case-insensitively via IDENTITY_PROVENANCE_HEADER.)
+          "X-OpenRig-Provenance": identity.provenance,
         },
       });
       if (res.ok) {
@@ -403,10 +414,10 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
       const result = await getWriteContract(c).act({
         verb: body.verb,
         qitemId: body.qitemId,
-        actorSession: identity.session, // transport-derived, authoritative
-        // P21 era-stamp: transport:v1 for a direct call; relay:v1 when a forwarding daemon re-stamped
-        // the header (X-OpenRig-Relay present) — the actor was derived one hop away, honestly recorded.
-        identityProvenance: c.req.header("x-openrig-relay") ? "relay:v1" : "transport:v1",
+        actorSession: identity.session, // derived (CLI) or the declared claimed-era actor (UI deferral)
+        // P21 era-stamp — the resolver is the SOLE source (rail 2), never hardcoded: transport:v1 (proven
+        // here) | relay:v1 (one hop away) | claimed:v1 (UI deferral, or a degraded/legacy relay marker).
+        identityProvenance: recordedProvenance,
 
         destinationSession: body.destinationSession,
         body: body.body,

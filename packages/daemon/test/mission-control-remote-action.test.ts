@@ -96,10 +96,37 @@ describe("POST /action — FR-4 remote forwarding", () => {
     // and DROPS the inbound body actorSession claim — the origin derives the re-stamped actor.
     expect(fwdHeaders["X-OpenRig-Session"]).toBe("human@host"); // re-stamped from the derived actor
     expect(fwdHeaders["X-OpenRig-Relay"]).toBeTruthy(); // relay provenance marked
+    // P21 review-actions deferral: the forward CARRIES the resolved provenance so the origin never
+    // launders it. A CLI-derived (header-present) actor is carried as transport:v1 (origin ⇒ relay:v1).
+    expect(fwdHeaders["X-OpenRig-Provenance"]).toBe("transport:v1");
     const forwarded = JSON.parse(String(capture.init?.body)) as Record<string, unknown>;
     expect(forwarded).toEqual({ verb: "resolve", qitemId: "qitem-1", annotation: "from the merged feed" }); // hostId AND actorSession stripped
     expect(forwarded).not.toHaveProperty("actorSession"); // the inbound claim never rides the wire
     expect(localActs).toEqual([]); // arch pin: local mission_control_actions CLEAN after forward
+  });
+
+  it("P21 forward PRESERVES claimed-era: a HEADERLESS (browser UI) action forwarded carries the claimed actor + X-OpenRig-Provenance=claimed:v1 — never upgraded to transport:v1", async () => {
+    const capture: { init?: RequestInit } = {};
+    const { app, localActs } = makeApp({
+      fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => {
+        capture.init = init;
+        return new Response(JSON.stringify({ ok: true, actionId: "origin-act-ui" }), {
+          status: 200, headers: { "Content-Type": "application/json" },
+        });
+      }) as typeof fetch,
+    });
+    // Browser UI: NO X-OpenRig-Session header (bearer only), a body actorSession, targeting a REMOTE item.
+    const res = await app.request("/api/mission-control/action", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ verb: "resolve", qitemId: "qitem-1", actorSession: "founder@host", hostId: "vps-b" }),
+    });
+    expect(res.status).toBe(200);
+    const fwdHeaders = capture.init?.headers as Record<string, string>;
+    expect(fwdHeaders["X-OpenRig-Session"]).toBe("founder@host"); // the claimed actor rides the header
+    expect(fwdHeaders["X-OpenRig-Provenance"]).toBe("claimed:v1"); // PRESERVED — the origin cannot launder it to verified
+    expect(JSON.parse(String(capture.init?.body))).not.toHaveProperty("actorSession"); // body claim still stripped
+    expect(localActs).toEqual([]);
   });
 
   it("origin REFUSAL passes through as structured failure — no fake success, local contract untouched", async () => {

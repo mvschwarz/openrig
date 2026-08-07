@@ -11,6 +11,7 @@ import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitio
 import { viewsCustomSchema } from "../src/db/migrations/030_views_custom.js";
 import { missionControlActionsSchema } from "../src/db/migrations/037_mission_control_actions.js";
 import { rigArchiveSchema } from "../src/db/migrations/042_rig_archive.js";
+import { identityProvenanceSchema } from "../src/db/migrations/065_identity_provenance.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { StreamStore } from "../src/domain/stream-store.js";
@@ -56,6 +57,7 @@ describe("mission-control routes (PL-005 Phase A)", () => {
       coreSchema, eventsSchema, streamItemsSchema,
       queueItemsSchema, queueTransitionsSchema, viewsCustomSchema,
       missionControlActionsSchema, rigArchiveSchema,
+      identityProvenanceSchema,
     ]);
     db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
     bus = new EventBus(db);
@@ -163,25 +165,71 @@ describe("mission-control routes (PL-005 Phase A)", () => {
     expect(body.error).toBe("qitem_not_found");
   });
 
-  it("P21 I2: derives the actor from the transport header — forged/absent identity refuses LOUD", async () => {
-    const created = await queueRepo.create({ sourceSession: "s@r", destinationSession: "d@r", body: "x" });
-    const req = (headers: Record<string, string>, extra: Record<string, unknown> = {}) =>
+  // P21 REVISED (was "forged/absent identity refuses LOUD"). Contract change, deliberate: mission-control
+  // /action is a FOUNDER-VISIBLE review-actions surface (d00c468d) — the browser UI fires approve/deny/etc
+  // HEADERLESS (bearer only + body actorSession). Refuse-loud would break the founder's one-tap review, so
+  // an absent header now DEFERS (records the body actor as the declared claimed-era variant `claimed:v1`),
+  // never 401. The CLI forgery guard (header present, differing body claim → 409) is UNCHANGED.
+  it("P21 review-actions deferral: UI headerless records claimed:v1 (never refused, never null); CLI header ⇒ transport:v1; body≠header ⇒ 409", async () => {
+    const mk = async (body: string) => (await queueRepo.create({ sourceSession: "s@r", destinationSession: "d@r", body })).qitemId;
+    const [qUi, qCli, qMm] = [await mk("u"), await mk("c"), await mk("m")];
+    const req = (qitemId: string, headers: Record<string, string>, extra: Record<string, unknown> = {}) =>
       app.request("/api/mission-control/action", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...headers },
-        body: JSON.stringify({ verb: "approve", qitemId: created.qitemId, ...extra }),
+        body: JSON.stringify({ verb: "annotate", qitemId, annotation: "n", ...extra }),
       });
-    // absent header → 401 unattributable (a body actorSession claim is NOT a fallback)
-    const noHeader = await req({}, { actorSession: "mallory@r" });
-    expect(noHeader.status).toBe(401);
-    expect(((await noHeader.json()) as { error: string }).error).toBe("unattributable_sender");
-    // body claim ≠ header → 409 identity_mismatch naming BOTH (never prefer either)
-    const mismatch = await req({ "X-OpenRig-Session": "human@r" }, { actorSession: "mallory@r" });
+    const provenanceOf = (qitemId: string) =>
+      (db.prepare("SELECT identity_provenance FROM mission_control_actions WHERE qitem_id = ? ORDER BY rowid DESC LIMIT 1").get(qitemId) as { identity_provenance: string | null } | undefined)?.identity_provenance ?? null;
+
+    // UI path: headerless + body actorSession → NOT refused; recorded claimed-era (declared variant).
+    const ui = await req(qUi, {}, { actorSession: "founder@r" });
+    expect(ui.status).toBe(200);
+    expect(provenanceOf(qUi)).toBe("claimed:v1");
+
+    // CLI path: transport header present → derived, era-stamped transport:v1.
+    const cli = await req(qCli, { "X-OpenRig-Session": "human@r" });
+    expect(cli.status).toBe(200);
+    expect(provenanceOf(qCli)).toBe("transport:v1");
+
+    // Forgery guard unchanged: header present + differing body claim → 409 naming BOTH (no write).
+    const mismatch = await req(qMm, { "X-OpenRig-Session": "human@r" }, { actorSession: "mallory@r" });
     expect(mismatch.status).toBe(409);
     const mm = (await mismatch.json()) as { error: string; message: string };
     expect(mm.error).toBe("identity_mismatch");
     expect(mm.message).toContain("human@r");
     expect(mm.message).toContain("mallory@r");
+    expect(provenanceOf(qMm)).toBeNull(); // refused before any write
+  });
+
+  // P21 NEGATIVE CONTROL (rail 4) — the anti-laundering pin. Without this a future refactor could silently
+  // re-upgrade a relayed claimed-era actor to transport:v1 and the audit trail would lie again.
+  it("P21: a RELAYED claimed-era action records claimed:v1 (never transport:v1 — no laundering); transport marker ⇒ relay:v1; MISSING marker ⇒ claimed:v1 (degrade-down)", async () => {
+    const mk = async (body: string) => (await queueRepo.create({ sourceSession: "s@r", destinationSession: "d@r", body })).qitemId;
+    const [qClaimed, qTransport, qMissing] = [await mk("a"), await mk("b"), await mk("c")];
+    const req = (qitemId: string, headers: Record<string, string>) =>
+      app.request("/api/mission-control/action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "origin@r", ...headers },
+        body: JSON.stringify({ verb: "annotate", qitemId, annotation: "n" }),
+      });
+    const provenanceOf = (qitemId: string) =>
+      (db.prepare("SELECT identity_provenance FROM mission_control_actions WHERE qitem_id = ? ORDER BY rowid DESC LIMIT 1").get(qitemId) as { identity_provenance: string | null } | undefined)?.identity_provenance ?? null;
+
+    // Relayed CLAIMED-era origin actor (marker says claimed:v1): the origin records claimed:v1, NEVER
+    // transport:v1 — an unverified actor cannot be laundered into a verified one by crossing a hop.
+    await req(qClaimed, { "X-OpenRig-Relay": "host-a", "X-OpenRig-Provenance": "claimed:v1" });
+    expect(provenanceOf(qClaimed)).toBe("claimed:v1");
+
+    // Relayed TRANSPORT-verified actor: relay:v1 (verified one hop away — honest about distance), never
+    // transport:v1 (which would falsely claim THIS hop verified it).
+    await req(qTransport, { "X-OpenRig-Relay": "host-a", "X-OpenRig-Provenance": "transport:v1" });
+    expect(provenanceOf(qTransport)).toBe("relay:v1");
+
+    // Rail 1 default-weaker: a relayed request with NO marker (old forwarder) degrades DOWN to claimed:v1,
+    // never transport:v1 — a missing marker is indistinguishable from claimed-era and both are unverified.
+    await req(qMissing, { "X-OpenRig-Relay": "host-a" });
+    expect(provenanceOf(qMissing)).toBe("claimed:v1");
   });
 
   it("GET /cli-capabilities returns fleet roll-up", async () => {

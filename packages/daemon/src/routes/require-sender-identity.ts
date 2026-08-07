@@ -123,3 +123,39 @@ export function resolveActorWithDeferral(
   }
   return { ok: true, session: claim, provenance: "claimed:v1" };
 }
+
+/**
+ * The wire header a FORWARDING daemon stamps to carry the provenance it resolved for the actor it is
+ * re-stamping, so the origin hop records the TRUTH about that actor's verification instead of inferring
+ * it from the mere presence of a re-stamped X-OpenRig-Session. SAME token alphabet as the store
+ * (IdentityProvenance) — never an ad-hoc string. Its absence is meaningful (see resolveRecordedProvenance).
+ */
+export const IDENTITY_PROVENANCE_HEADER = "x-openrig-provenance";
+/** Set by a forwarding daemon to mark "this arrived via a relay hop" (the actor was derived elsewhere). */
+export const RELAY_HEADER = "x-openrig-relay";
+
+/**
+ * P21 §4 — the SOLE decider of the provenance RECORDED on a row (rail 2: exactly one place can ever say
+ * `transport:v1`, and only when the transport actually proved it at THIS hop). `identity` is the local
+ * derivation from resolveActorWithDeferral (transport:v1 = header present; claimed:v1 = the deferral).
+ *
+ * Direct request (no relay hop): record exactly what this hop proved — identity.provenance verbatim.
+ *
+ * Relayed request (a forwarding daemon re-stamped the header): NEVER `transport:v1` — the actor was, at
+ * best, verified ONE HOP AWAY, so the strongest honest claim is `relay:v1`, and ONLY when the forwarder
+ * explicitly carried a `transport:v1` marker. Rail 1 — DEGRADE DOWN AS THE DEFAULT BRANCH: any other
+ * carried value, AND a MISSING marker (an old forwarder that predates this plumbing), records `claimed:v1`.
+ * NB the honesty nuance: a missing marker and a forwarder-declared `claimed:v1` are INDISTINGUISHABLE here
+ * and that is correct — both are "not verified at this boundary". `claimed:v1` on a relayed row therefore
+ * means "unverified", NEVER proof the origin action was a UI tap. Uncertainty weakens the claim; it can
+ * never strengthen it — a claimed-era actor can never be laundered into a verified one across a hop.
+ */
+export function resolveRecordedProvenance(
+  c: Context,
+  identity: { provenance: Exclude<IdentityProvenance, "relay:v1"> },
+): IdentityProvenance {
+  const relayed = !!c.req.header(RELAY_HEADER)?.trim();
+  if (!relayed) return identity.provenance; // transport:v1 (proven here) | claimed:v1 (the deferral)
+  const carried = c.req.header(IDENTITY_PROVENANCE_HEADER)?.trim();
+  return carried === "transport:v1" ? "relay:v1" : "claimed:v1";
+}
