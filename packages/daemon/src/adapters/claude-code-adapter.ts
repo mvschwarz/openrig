@@ -56,6 +56,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private autoDriveProviderPrompts: boolean;
   private activityRelayPath: string | null;
   private claudeHooksManifestPath: string | null;
+  /** P20 — called after a projected file is written to a target, so the manifest
+   *  records what we last wrote (→ operator-vs-stale discrimination). No-op by default. */
+  private recordProjection: (targetPath: string, content: string) => void;
 
   constructor(deps: {
     tmux: TmuxAdapter;
@@ -70,6 +73,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     /** DI source of the canonical claude.json hooks manifest — the event vocabulary
      *  is derived (filtered to relay events) from it, not a parallel constant. */
     claudeHooksManifestPath?: string;
+    /** P20 — record-at-apply hook (startup wires it to the projection manifest store).
+     *  Absent → no-op (the manifest stays empty → discrimination safe-degrades to P17). */
+    recordProjection?: (targetPath: string, content: string) => void;
   }) {
     this.tmux = deps.tmux;
     this.fs = deps.fsOps;
@@ -80,6 +86,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.autoDriveProviderPrompts = deps.autoDriveProviderPrompts ?? false;
     this.activityRelayPath = deps.activityRelayPath ?? null;
     this.claudeHooksManifestPath = deps.claudeHooksManifestPath ?? null;
+    this.recordProjection = deps.recordProjection ?? (() => {});
   }
 
   async listInstalled(binding: NodeBinding): Promise<InstalledResource[]> {
@@ -173,7 +180,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
           case "skill_install": {
             const targetDir = nodePath.join(binding.cwd, ".claude", "skills", nodePath.basename(nodePath.dirname(file.absolutePath)));
             this.fs.mkdirp(targetDir);
-            this.fs.writeFile(nodePath.join(targetDir, nodePath.basename(file.path)), content);
+            const skillTarget = nodePath.join(targetDir, nodePath.basename(file.path));
+            this.fs.writeFile(skillTarget, content);
+            // P20 — record what we just wrote so the next projection can tell a
+            // stale re-projection (safe overwrite) from an operator edit (protect).
+            this.recordProjection(skillTarget, content);
             break;
           }
           case "send_text": {
