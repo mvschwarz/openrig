@@ -133,9 +133,10 @@ Exit codes:
 
       if (target.includes("@")) {
         const status = await getDaemonStatus(deps.lifecycleDeps);
-        if (status.state !== "running" || status.healthy === false) {
-          console.error("Daemon not running (needed to resolve a seat). Start it with: rig daemon start — or pass a raw session token to --wake.");
-          process.exitCode = 1;
+        // B8-1b chokepoint (missed-site fix): the shared guard renders the epistemic
+        // 3-part; the wake-specific escape hatch rides as a supplementary tip.
+        if (!daemonStatusGuard(status)) {
+          console.error("  tip: seat resolution needs the daemon — or pass a raw session token to --wake.");
           return;
         }
         const client = deps.clientFactory(getDaemonUrl(status));
