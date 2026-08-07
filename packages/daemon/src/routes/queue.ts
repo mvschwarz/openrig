@@ -535,13 +535,17 @@ export function queueRoutes(): Hono {
       summary?: string | null;
       evidenceRef?: string | null;
     }>().catch(() => ({} as never));
-    if (!body.actorSession) return c.json({ error: "actorSession is required" }, 400);
+    // P21 I3 — the actor is the transport-derived sender (X-OpenRig-Session), NEVER a body claim.
+    // Absent → 401 unattributable; a differing body actorSession → 409 identity_mismatch; equal tolerated.
+    const identity = requireSenderIdentity(c, { verb: "queue update", bodyClaim: body.actorSession });
+    if (!identity.ok) return identity.response;
+    const actorSession = identity.session;
     if (!body.state) return c.json({ error: "state is required" }, 400);
 
     try {
       const item = getRepo(c).update({
         qitemId,
-        actorSession: body.actorSession,
+        actorSession,
         state: body.state,
         transitionNote: body.transitionNote,
         closureReason: body.closureReason,

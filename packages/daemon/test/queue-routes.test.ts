@@ -146,6 +146,52 @@ describe("queue routes", () => {
     expect(row?.source_session).toBe("alice@rig");
   });
 
+  // P21 I3 — update's actor is the transport header (X-OpenRig-Session), NEVER a body claim.
+  async function createForUpdate(session: string): Promise<string> {
+    const create = await app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": session },
+      body: JSON.stringify({ sourceSession: session, destinationSession: "worker@r", body: "x" }),
+    });
+    return ((await create.json()) as { qitemId: string }).qitemId;
+  }
+
+  it("update — 401 unattributable_sender when X-OpenRig-Session is absent", async () => {
+    const qitemId = await createForUpdate("a@r");
+    const res = await app.request(`/api/queue/${qitemId}/update`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ actorSession: "worker@r", state: "in-progress" }),
+    });
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+  });
+
+  it("update — 409 identity_mismatch when the body actorSession differs from the transport identity", async () => {
+    const qitemId = await createForUpdate("a@r");
+    const res = await app.request(`/api/queue/${qitemId}/update`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "worker@r" },
+      body: JSON.stringify({ actorSession: "mallory@r", state: "in-progress" }),
+    });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+  });
+
+  it("update — derives the transition actor from the transport header, never the body", async () => {
+    const qitemId = await createForUpdate("a@r");
+    const res = await app.request(`/api/queue/${qitemId}/update`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "worker@r" },
+      body: JSON.stringify({ actorSession: "worker@r", state: "in-progress" }),
+    });
+    expect(res.status).toBe(200);
+    const row = db
+      .prepare("SELECT actor_session FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid DESC LIMIT 1")
+      .get(qitemId) as { actor_session: string } | undefined;
+    expect(row?.actor_session).toBe("worker@r");
+  });
+
   it("POST /api/queue/:id/update with state=done WITHOUT closure_reason returns 400 with validReasons", async () => {
     const create = await app.request("/api/queue/create", {
       method: "POST",
@@ -156,7 +202,7 @@ describe("queue routes", () => {
 
     const update = await app.request(`/api/queue/${item.qitemId}/update`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
       body: JSON.stringify({ actorSession: "b@r", state: "done" }),
     });
     expect(update.status).toBe(400);
@@ -177,7 +223,7 @@ describe("queue routes", () => {
       const requiresTarget = reason === "handed_off_to" || reason === "blocked_on" || reason === "escalation";
       const update = await app.request(`/api/queue/${item.qitemId}/update`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
         body: JSON.stringify({
           actorSession: "b@r",
           state: "done",
@@ -397,7 +443,7 @@ describe("queue routes", () => {
       const item = (await create.json()) as { qitemId: string };
       await app.request(`/api/queue/${item.qitemId}/update`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "human-x@kernel" },
         body: JSON.stringify({
           actorSession: "human-x@kernel",
           state: "done",
