@@ -70,4 +70,15 @@ describe("rig ask --wake (L3 CLI)", () => {
     expect(out).toMatch(/did not return|bounded timeout/i);
     expect(exitCode).toBe(2);
   });
+
+  it("renders a FAILED wake honestly (exit N + stderr), non-zero exit — never a fake success", async () => {
+    const runner: WakeRunner = vi.fn(async () => ({ stdout: "", stderr: "resume: invalid session token", code: 1, timedOut: false }));
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd(runner).parseAsync(["node", "rig", "ask", "my-rig", "q", "--wake", "bad"]);
+    });
+    const out = logs.join("\n");
+    expect(out).toMatch(/wake failed.*exit 1/i);
+    expect(out).not.toMatch(/no answer returned/i);
+    expect(exitCode).toBe(2);
+  });
 });

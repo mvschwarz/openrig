@@ -55,4 +55,15 @@ describe("runWake — L3 headless one-shot wake", () => {
     expect(out.advisory).toBeDefined();
     expect(out.advisory).toMatch(/large|MB|minute/i);
   });
+
+  it("reports a NON-ZERO exit as a FAILURE, not a silent empty answer (honest-degraded parity)", async () => {
+    // bad token / missing binary / auth fail: code=1, empty stdout. Must NOT read
+    // as a successful empty answer.
+    const runner: WakeRunner = vi.fn(async () => ({ stdout: "", stderr: "resume: invalid session token", code: 1, timedOut: false }));
+    const out = await runWake({ runner }, { question: "q?", token: "bad", runtime: "claude" });
+    expect(out.failed).toBe(true);
+    expect(out.code).toBe(1);
+    expect(out.answer).toBeUndefined();
+    expect(out.message).toMatch(/fail|exit 1|invalid session token/i);
+  });
 });

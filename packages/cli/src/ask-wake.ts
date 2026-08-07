@@ -30,6 +30,10 @@ export interface WakeOutcome {
   ran: boolean;
   answer?: string;
   timedOut?: boolean;
+  /** true when the wake process exited non-zero (bad token / missing binary /
+   *  auth fail) — an honest failure, NOT a successful empty answer. */
+  failed?: boolean;
+  code?: number;
   message?: string;
   advisory?: string;
 }
@@ -113,6 +117,19 @@ export async function runWake(deps: WakeDeps, args: WakeArgs): Promise<WakeOutco
       timedOut: true,
       advisory,
       message: `Wake did not return within ${Math.round(timeoutMs / 1000)}s. The session may be large or slow — retry with a longer --wake-timeout or a background wake. This is a bounded timeout, not a silent hang.`,
+    };
+  }
+
+  // A non-zero exit is a FAILURE, not a successful empty answer — surface it
+  // honestly (same doctrine as L1/L2 honest-degraded). Only exit 0 is an answer.
+  if (res.code !== 0) {
+    const detail = res.stderr.trim();
+    return {
+      ran: true,
+      failed: true,
+      code: res.code ?? undefined,
+      advisory,
+      message: `Wake failed (exit ${res.code ?? "unknown"})${detail ? `: ${detail}` : ""}. The token may be invalid/expired, the runtime binary missing, or auth required.`,
     };
   }
 

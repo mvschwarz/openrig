@@ -117,11 +117,11 @@ Exit codes:
 
       if (opts.json) {
         console.log(JSON.stringify(outcome));
-        if (outcome.timedOut) process.exitCode = 2;
+        if (outcome.timedOut || outcome.failed) process.exitCode = 2;
         return;
       }
       if (outcome.advisory) console.log(`⚠ ${outcome.advisory}`);
-      if (outcome.timedOut) {
+      if (outcome.timedOut || outcome.failed) {
         console.error(outcome.message);
         process.exitCode = 2;
         return;
