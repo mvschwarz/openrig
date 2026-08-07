@@ -366,3 +366,55 @@ describe("WorkflowRuntime facade + FR-1 KEEP-fence pins (OPR.0.4.6.WF1)", () => 
     }
   });
 });
+
+// ── P19 A4 (finding graduated): the runtime OWNS a default seat-liveness check ──
+// The advisory role_no_live_preferred_target existed but nothing ever
+// constructed a SeatLivenessCheckFn — dead in prod (instantiate passed
+// undefined EXPLICITLY). The runtime now defaults it from its own DB, the
+// hostRegistryLookup sibling precedent. RED-first.
+const LIVENESS_SPEC = `workflow:
+  id: p19-liveness
+  version: 1
+  objective: liveness probe
+  entry:
+    role: worker
+  roles:
+    worker:
+      preferred_targets:
+        - dev-worker@lrig
+  steps:
+    - id: act
+      actor_role: worker
+      allowed_exits:
+        - done
+  invariants:
+    allowed_exits:
+      - done
+`;
+
+describe("P19 A4 — default seat-liveness check (validator advisory is live in prod)", () => {
+  it("no running session -> role_no_live_preferred_target warns; running silences; stopped re-warns", () => {
+    const db = createDb();
+    const { runtime } = buildRuntime(db);
+    const tmp = mkdtempSync(join(tmpdir(), "wf-p19-"));
+    const specPath = join(tmp, "liveness.yaml");
+    writeFileSync(specPath, LIVENESS_SPEC);
+    try {
+      const dead = runtime.validate(specPath);
+      expect(dead.issues.some((i) => i.code === "role_no_live_preferred_target")).toBe(true);
+
+      db.prepare(`INSERT INTO rigs (id, name) VALUES ('lr', 'lrig')`).run();
+      db.prepare(`INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES ('ln', 'lr', 'dev.worker', 'claude-code')`).run();
+      db.prepare(`INSERT INTO sessions (id, node_id, session_name, status) VALUES ('ls', 'ln', 'dev-worker@lrig', 'running')`).run();
+      const alive = runtime.validate(specPath);
+      expect(alive.issues.some((i) => i.code === "role_no_live_preferred_target")).toBe(false);
+
+      db.prepare(`UPDATE sessions SET status = 'stopped' WHERE id = 'ls'`).run();
+      const stopped = runtime.validate(specPath);
+      expect(stopped.issues.some((i) => i.code === "role_no_live_preferred_target")).toBe(true);
+    } finally {
+      db.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});

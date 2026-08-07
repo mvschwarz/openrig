@@ -992,7 +992,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           .all(seat) as WakeSessionRow[],
     }),
     askService: (() => {
-      const psProjectionService = new PsProjectionService({ db, agentActivity: agentActivityStore });
+      // P19 A5 (finding graduated): inject seatActivity like the attention path
+      // (line ~919) — one terminalActive truth, never two divergent projections.
+      const psProjectionService = new PsProjectionService({ db, seatActivity: seatActivityService, agentActivity: agentActivityStore });
       const execDep = (cmd: string, args: string[]): Promise<{ stdout: string; exitCode: number }> =>
         new Promise((resolve) => {
           execFile(cmd, args, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {

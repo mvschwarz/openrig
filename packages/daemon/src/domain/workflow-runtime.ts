@@ -204,9 +204,31 @@ export class WorkflowRuntime {
     return { registered: ids.includes(hostId), registeredIds: ids };
   };
 
+  /** P19 A4 (finding graduated): the runtime OWNS the default liveness probe —
+   *  the hostRegistryLookup sibling precedent. A preferred target is live iff a
+   *  session with that exact name is currently `running` in this daemon's DB.
+   *  Callers may still inject a custom check (tests, remote-aware futures). */
+  private seatLivenessCheck: SeatLivenessCheckFn = (sessionRef: string) => {
+    // ADVISORY-NEVER-THROW (the member-advisory precedent): a partial-schema DB
+    // (bare fixtures without the sessions table) means the probe cannot vouch
+    // EITHER way — report alive so no warning fires, and never let an advisory
+    // path fail validate/instantiate.
+    try {
+      const row = this.db
+        .prepare(
+          `SELECT s.status AS status FROM sessions s WHERE s.session_name = ? ORDER BY s.created_at DESC LIMIT 1`,
+        )
+        .get(sessionRef) as { status: string } | undefined;
+      if (!row) return { alive: false, reason: "no_session_with_this_name" };
+      return row.status === "running" ? { alive: true } : { alive: false, reason: `session_status_${row.status}` };
+    } catch {
+      return { alive: true };
+    }
+  };
+
   validate(specPath: string, seatLivenessCheck?: SeatLivenessCheckFn): ValidationResult {
     const specRow = this.specCache.readThrough(specPath);
-    return this.validator.validate(specRow.spec, seatLivenessCheck, this.hostRegistryLookup);
+    return this.validator.validate(specRow.spec, seatLivenessCheck ?? this.seatLivenessCheck, this.hostRegistryLookup);
   }
 
   /**
@@ -224,7 +246,7 @@ export class WorkflowRuntime {
     // the bare name straight to readThrough -> spec_file_missing.
     const resolvedSpecPath = this.specCache.resolveSourcePathByName(input.specPath) ?? input.specPath;
     const specRow = this.specCache.readThrough(resolvedSpecPath);
-    const validation = this.validator.validate(specRow.spec, undefined, this.hostRegistryLookup);
+    const validation = this.validator.validate(specRow.spec, this.seatLivenessCheck, this.hostRegistryLookup);
     if (!validation.ok) {
       throw new WorkflowProjectorError(
         "spec_invalid",

@@ -128,5 +128,8 @@ describe("P16 — UNINJECTED-SERVICE findings ledger (routed to desk; todo gradu
   it.todo("FINDING A2: projection-planner resolveTargetPath UNINJECTED (rigspec-instantiator.ts:1672) — hash_conflict classification dead; operator-modified files silently overwritten");
   it.todo("FINDING A3: InboxHandler.authenticate UNINJECTED (startup.ts:950) — sender-spoofing gate is allow-all; route forwards client-supplied authenticatedSender");
   it.todo("FINDING A4: WorkflowValidator seatLivenessCheck never constructed — role_no_live_preferred_target advisory dead; instances stall at step 1 unwarned");
-  it.todo("FINDING A5: AskService's PsProjectionService omits seatActivity (startup.ts:969) while the attention path injects it (startup.ts:906) — divergent terminalActive truth");
+  it("A5 GRADUATED (P19): AskService's PsProjectionService carries seatActivity — one terminalActive truth across both paths", () => {
+    const ps = priv<unknown>(deps.askService, "deps") as { psProjectionService: unknown };
+    expect(priv(ps.psProjectionService, "seatActivity"), "the ask path must inject seatActivity like the attention path does").toBeTruthy();
+  });
 });
