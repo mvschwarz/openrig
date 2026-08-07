@@ -29,6 +29,8 @@ export interface ConnectOpts {
    *  ECONNREFUSED/EPIPE never crashes the daemon — the durable buffer already guarantees
    *  no-loss and the spawn wrapper drives reconnect; this is only the observability surface. */
   onError?: (error: Error) => void;
+  /** The socket closed (connector went away). The spawn wrapper uses this to re-dial. */
+  onClose?: () => void;
   newDecisionId?: () => string;
 }
 
@@ -47,6 +49,7 @@ export function connectGateway(opts: ConnectOpts): GatewayConnection {
   socket.setEncoding("utf8");
   // Always-attached error handler: a down/dropped connector must not throw uncaught.
   socket.on("error", (err: Error) => opts.onError?.(err));
+  socket.on("close", () => opts.onClose?.());
   socket.on("data", (chunk: string) => {
     acc += chunk;
     let nl: number;
