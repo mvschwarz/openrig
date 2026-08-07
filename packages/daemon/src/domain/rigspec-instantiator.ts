@@ -288,7 +288,7 @@ import { rigPreflight, preflightValidatedSpec } from "./rigspec-preflight.js";
 import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { resolveNodeConfig } from "./profile-resolver.js";
 import { resolveStartup } from "./startup-resolver.js";
-import { planProjection, type ProjectionPlan } from "./projection-planner.js";
+import { planProjection, claudeConflictTargetPath, projectionConflictWarnings, type ProjectionPlan } from "./projection-planner.js";
 import { StartupOrchestrator } from "./startup-orchestrator.js";
 import { PodRepository } from "./pod-repository.js";
 import type { RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember, StartupAction, StartupFile } from "./types.js";
@@ -1673,10 +1673,17 @@ export class PodRigInstantiator {
       config: configResult.config,
       collisions: resolveResult.collisions,
       fsOps: this.deps.fsOps,
+      // P17 (finding A2): the conflict detector's resolver, UNINJECTED since the
+      // 4.8 restack dropped the warnings-site threading — without it every entry
+      // classified safe_projection and divergent targets overwrote silently.
+      resolveTargetPath: claudeConflictTargetPath,
     });
     if (!planResult.ok) {
       return { status: "failed", error: planResult.errors.join("; "), sessionName: canonicalSessionName, warnings: launchResult.warnings };
     }
+    // P17: a divergent target is never SILENT again — each conflict rides the
+    // instantiate warnings surface with the file, reason, and consequence.
+    (launchResult.warnings ??= []).push(...projectionConflictWarnings(planResult.plan));
 
     const resolvedFiles = this.buildResolvedStartupFiles(
       resolveResult.resolved.spec,

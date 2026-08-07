@@ -48,8 +48,10 @@ export interface ProjectionInput {
   config: ResolvedNodeConfig;
   collisions: ResourceCollision[];
   fsOps: ProjectionFsOps;
-  /** Optional: resolve target path for conflict detection. If absent, all entries are safe_projection. */
-  resolveTargetPath?: (category: string, effectiveId: string, cwd: string) => string | null;
+  /** Optional: resolve target path for conflict detection. If absent, all entries are safe_projection.
+   *  P17: the source absolutePath rides as the 4th arg so file-shaped targets
+   *  (subagent basenames) can be derived; existing 3-arg callers unaffected. */
+  resolveTargetPath?: (category: string, effectiveId: string, cwd: string, sourcePath?: string) => string | null;
 }
 
 export type PlanResult =
@@ -149,10 +151,16 @@ export function planProjection(input: ProjectionInput): PlanResult {
 
       // Classify using hash-based conflict detection
       if (input.resolveTargetPath) {
-        const targetPath = input.resolveTargetPath(catSingular, qr.effectiveId, config.cwd);
+        const targetPath = input.resolveTargetPath(catSingular, qr.effectiveId, config.cwd, entry.absolutePath);
         if (targetPath) {
+          // P17 dir-shaped realism: a skill source is a DIRECTORY — compare the
+          // representative SKILL.md (readFile on a dir would throw the classifier
+          // into a false hash_conflict). File-shaped sources compare as-is.
+          const skillRep = `${entry.absolutePath}/SKILL.md`;
+          const compareSource =
+            catSingular === "skill" && fsOps.exists(skillRep) ? skillRep : entry.absolutePath;
           entry.classification = classifyResourceProjection(
-            entry.absolutePath,
+            compareSource,
             targetPath,
             catSingular,
             entry.mergeStrategy,
@@ -248,4 +256,40 @@ function resolvePluginPath(rawPath: string, specSourcePath: string): string {
   if (rawPath.startsWith("~/")) return nodePath.join(os.homedir(), rawPath.slice(2));
   if (nodePath.isAbsolute(rawPath)) return rawPath;
   return nodePath.resolve(specSourcePath, rawPath);
+}
+
+// ── P17 (finding A2): the PRODUCTION conflict-target resolver + loud surfacing ──
+
+/** Map a projection entry to the concrete FILE the claude adapter would write,
+ *  for hash-conflict detection. Mirrors claude-code-adapter.resolveTargetDir:
+ *  categories whose write is a merge or a whole directory return null —
+ *  their classification stays deferred to the adapter, exactly as before. */
+export function claudeConflictTargetPath(
+  category: string,
+  effectiveId: string,
+  cwd: string,
+  sourcePath?: string,
+): string | null {
+  switch (category) {
+    case "skill":
+      return nodePath.join(cwd, ".claude", "skills", effectiveId, "SKILL.md");
+    case "subagent":
+      return sourcePath ? nodePath.join(cwd, ".claude", "agents", nodePath.basename(sourcePath)) : null;
+    case "guidance":
+      return nodePath.join(cwd, "CLAUDE.md");
+    default:
+      return null; // plugin / runtime_resource: merged or dir-shaped — deferred
+  }
+}
+
+/** Render plan conflicts as LOUD instantiate warnings: the file, the reason,
+ *  and the consequence stated plainly. Restores the warnings-site threading the
+ *  4.8 restack dropped — a divergent target is never silently overwritten again
+ *  (it is overwritten WITH a named warning; manifest-based operator-vs-stale
+ *  discrimination is the routed follow-on). */
+export function projectionConflictWarnings(plan: Pick<ProjectionPlan, "conflicts">): string[] {
+  return plan.conflicts.map((c) => {
+    const reason = c.conflictDetail?.reason ?? `${c.category} "${c.effectiveId}" diverges from the projection source`;
+    return `projection conflict: ${reason} — the target will be overwritten by re-projection; if this is an operator edit, move it aside or fold it into the spec source`;
+  });
 }

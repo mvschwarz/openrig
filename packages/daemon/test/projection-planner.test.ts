@@ -260,3 +260,94 @@ describe("Projection planner", () => {
     }
   });
 });
+
+// ── P17 (finding A2, finder-owns): the dead hash-conflict detector, wired ──
+// The planner's conflict lane existed but PRODUCTION never injected
+// resolveTargetPath (dropped in the 4.8 restack — the instantiator's own §6
+// comment records the warnings-site threading loss), so every entry classified
+// safe_projection and operator-modified targets were silently overwritten.
+// RED-first against: (1) the missing production resolver, (2) dir-shaped skill
+// realism (a real skill source is a DIRECTORY; the classifier must compare the
+// representative SKILL.md, not readFile(dir)-throw its way to a false verdict),
+// (3) the conflicts->warnings surfacing helper.
+import {
+  claudeConflictTargetPath,
+  projectionConflictWarnings,
+} from "../src/domain/projection-planner.js";
+
+describe("P17 — production conflict-target resolver (claudeConflictTargetPath)", () => {
+  it("maps skill -> the projected SKILL.md, subagent -> agents/<source basename>, guidance -> CLAUDE.md", () => {
+    expect(claudeConflictTargetPath("skill", "skill-a", "/w", "/agents/base/skills/a")).toBe(
+      "/w/.claude/skills/skill-a/SKILL.md",
+    );
+    expect(claudeConflictTargetPath("subagent", "rev", "/w", "/agents/base/subagents/reviewer.md")).toBe(
+      "/w/.claude/agents/reviewer.md",
+    );
+    expect(claudeConflictTargetPath("guidance", "tdd", "/w", "/agents/base/guidance/tdd.md")).toBe("/w/CLAUDE.md");
+  });
+
+  it("returns null for merged/complex categories (plugin, runtime_resource) — classification stays deferred", () => {
+    expect(claudeConflictTargetPath("plugin", "p", "/w", "/agents/base/plugins/p")).toBeNull();
+    expect(claudeConflictTargetPath("runtime_resource", "r", "/w", "/agents/base/rr/r")).toBeNull();
+  });
+});
+
+describe("P17 — dir-shaped skill sources compare the representative SKILL.md", () => {
+  it("an operator-modified projected SKILL.md classifies hash_conflict; an untouched one no_ops", () => {
+    const config = makeConfig({
+      selectedResources: { ...emptyResources(), skills: [makeQR("skill-a", "skills/a")] },
+    });
+    // dir-shaped source: readFile on the dir path is NOT defined (a real fs throws);
+    // the representative file is what exists.
+    const fs = mockFs({
+      "/agents/base/skills/a/SKILL.md": "shipped content",
+      "/w/.claude/skills/skill-a/SKILL.md": "OPERATOR EDITED",
+    });
+    const result = planProjection({
+      config, collisions: [], fsOps: fs,
+      resolveTargetPath: (cat, id, _cwd, src) => claudeConflictTargetPath(cat, id, "/w", src),
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.plan.entries[0]!.classification).toBe("hash_conflict");
+      expect(result.plan.conflicts).toHaveLength(1);
+    }
+    const clean = planProjection({
+      config, collisions: [],
+      fsOps: mockFs({
+        "/agents/base/skills/a/SKILL.md": "shipped content",
+        "/w/.claude/skills/skill-a/SKILL.md": "shipped content",
+      }),
+      resolveTargetPath: (cat, id, _cwd, src) => claudeConflictTargetPath(cat, id, "/w", src),
+    });
+    expect(clean.ok).toBe(true);
+    if (clean.ok) expect(clean.plan.entries[0]!.classification).toBe("no_op");
+  });
+});
+
+describe("P17 — conflicts surface LOUDLY (never a silent overwrite)", () => {
+  it("projectionConflictWarnings names the file, the reason, and the resolution path", () => {
+    const warnings = projectionConflictWarnings({
+      conflicts: [
+        {
+          category: "skill", effectiveId: "skill-a",
+          absolutePath: "/agents/base/skills/a",
+          classification: "hash_conflict",
+          conflictDetail: { reason: 'skill "skill-a" exists at target with different content' },
+        },
+      ],
+    } as never);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/skill-a/);
+    expect(warnings[0]).toMatch(/different content/);
+    expect(warnings[0]).toMatch(/overwritten/i); // the consequence is stated, not implied
+  });
+
+  it("WIRING PIN (the P16 class): the production planProjection call injects the resolver and threads conflict warnings", () => {
+    const fsMod = require("node:fs") as typeof import("node:fs");
+    const src = fsMod.readFileSync(new URL("../src/domain/rigspec-instantiator.ts", import.meta.url), "utf8");
+    const callBlock = /planProjection\(\{[\s\S]{0,600}?\}\);/.exec(src)?.[0] ?? "";
+    expect(callBlock, "planProjection call must inject resolveTargetPath").toContain("resolveTargetPath: claudeConflictTargetPath");
+    expect(src, "conflict warnings must be threaded to the warnings surface").toContain("projectionConflictWarnings(planResult.plan)");
+  });
+});
