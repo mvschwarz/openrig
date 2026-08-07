@@ -55,6 +55,7 @@ export function scopeApproveRoutes(): Hono {
         scopePath: body.scopePath,
         approvalScope,
         actorSession: identity.session, // transport-derived, authoritative
+        identityProvenance: "transport:v1", // P21 era-stamp: this actor came from the transport chokepoint
         onBehalfOf: body.onBehalfOf ?? null,
         reApprove: body.reApprove === true,
         reason: typeof body.reason === "string" ? body.reason : null,

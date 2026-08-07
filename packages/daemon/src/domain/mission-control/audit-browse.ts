@@ -55,6 +55,7 @@ interface ActionRow {
   notify_attempted: number;
   notify_result: string | null;
   audit_notes_json: string | null;
+  identity_provenance?: string | null;
 }
 
 const DEFAULT_LIMIT = 50;
@@ -165,5 +166,6 @@ function rowToEntry(row: ActionRow): MissionControlActionEntry {
     auditNotes: row.audit_notes_json
       ? (JSON.parse(row.audit_notes_json) as Record<string, unknown>)
       : null,
+    identityProvenance: row.identity_provenance ?? null,
   };
 }

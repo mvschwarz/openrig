@@ -39,6 +39,9 @@ export interface MissionControlActionRecordInput {
   notifyAttempted?: boolean;
   notifyResult?: string | null;
   auditNotes?: Record<string, unknown> | null;
+  /** P21 era-stamp: the identity provenance of `actorSession`. The transport chokepoint writes
+   *  `transport:v1`; absent/null = claimed-era (pre-verification), never re-labeled. */
+  identityProvenance?: string | null;
 }
 
 export interface MissionControlActionEntry {
@@ -54,6 +57,7 @@ export interface MissionControlActionEntry {
   notifyAttempted: boolean;
   notifyResult: string | null;
   auditNotes: Record<string, unknown> | null;
+  identityProvenance: string | null;
 }
 
 interface ActionRow {
@@ -69,6 +73,7 @@ interface ActionRow {
   notify_attempted: number;
   notify_result: string | null;
   audit_notes_json: string | null;
+  identity_provenance?: string | null;
 }
 
 export class MissionControlActionLogError extends Error {
@@ -82,8 +87,22 @@ export class MissionControlActionLogError extends Error {
   }
 }
 
+/** Defensive additive-column detect: a harness whose db predates migration 065 lacks
+ *  identity_provenance, so the writer degrades (omits it) instead of throwing. */
+function hasIdentityProvenanceColumn(db: Database.Database): boolean {
+  try {
+    return db.prepare("PRAGMA table_info(mission_control_actions)").all()
+      .some((row) => (row as { name?: string }).name === "identity_provenance");
+  } catch {
+    return false;
+  }
+}
+
 export class MissionControlActionLog {
-  constructor(private readonly db: Database.Database) {}
+  private readonly hasProvenanceCol: boolean;
+  constructor(private readonly db: Database.Database) {
+    this.hasProvenanceCol = hasIdentityProvenanceColumn(db);
+  }
 
   /**
    * Append an action record. Validates verb-specific required fields
@@ -114,28 +133,41 @@ export class MissionControlActionLog {
       );
     }
     const actionId = ulid();
-    this.db
-      .prepare(
-        `INSERT INTO mission_control_actions (
-           action_id, action_verb, qitem_id, actor_session, acted_at,
-           before_state_json, after_state_json, reason, annotation,
-           notify_attempted, notify_result, audit_notes_json
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        actionId,
-        input.actionVerb,
-        input.qitemId ?? null,
-        input.actorSession,
-        input.actedAt,
-        input.beforeState ? JSON.stringify(input.beforeState) : null,
-        input.afterState ? JSON.stringify(input.afterState) : null,
-        input.reason ?? null,
-        input.annotation ?? null,
-        input.notifyAttempted ? 1 : 0,
-        input.notifyResult ?? null,
-        input.auditNotes ? JSON.stringify(input.auditNotes) : null,
-      );
+    const baseCols = [
+      actionId,
+      input.actionVerb,
+      input.qitemId ?? null,
+      input.actorSession,
+      input.actedAt,
+      input.beforeState ? JSON.stringify(input.beforeState) : null,
+      input.afterState ? JSON.stringify(input.afterState) : null,
+      input.reason ?? null,
+      input.annotation ?? null,
+      input.notifyAttempted ? 1 : 0,
+      input.notifyResult ?? null,
+      input.auditNotes ? JSON.stringify(input.auditNotes) : null,
+    ];
+    if (this.hasProvenanceCol) {
+      this.db
+        .prepare(
+          `INSERT INTO mission_control_actions (
+             action_id, action_verb, qitem_id, actor_session, acted_at,
+             before_state_json, after_state_json, reason, annotation,
+             notify_attempted, notify_result, audit_notes_json, identity_provenance
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(...baseCols, input.identityProvenance ?? null);
+    } else {
+      this.db
+        .prepare(
+          `INSERT INTO mission_control_actions (
+             action_id, action_verb, qitem_id, actor_session, acted_at,
+             before_state_json, after_state_json, reason, annotation,
+             notify_attempted, notify_result, audit_notes_json
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(...baseCols);
+    }
     return {
       actionId,
       actionVerb: input.actionVerb,
@@ -149,6 +181,7 @@ export class MissionControlActionLog {
       notifyAttempted: Boolean(input.notifyAttempted),
       notifyResult: input.notifyResult ?? null,
       auditNotes: input.auditNotes ?? null,
+      identityProvenance: input.identityProvenance ?? null,
     };
   }
 
@@ -210,5 +243,6 @@ function rowToEntry(row: ActionRow): MissionControlActionEntry {
     auditNotes: row.audit_notes_json
       ? (JSON.parse(row.audit_notes_json) as Record<string, unknown>)
       : null,
+    identityProvenance: row.identity_provenance ?? null,
   };
 }

@@ -17,6 +17,7 @@ import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { missionControlActionsSchema } from "../src/db/migrations/037_mission_control_actions.js";
+import { identityProvenanceSchema } from "../src/db/migrations/065_identity_provenance.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { MissionControlAuditBrowse } from "../src/domain/mission-control/audit-browse.js";
 import { ScopeApproveError, ScopeApproveService } from "../src/domain/scope/scope-approve.js";
@@ -44,7 +45,7 @@ describe("ScopeApproveService — re-approve/re-stamp (OPR.0.5.0.18)", () => {
 
   beforeEach(() => {
     db = createDb();
-    migrate(db, [coreSchema, queueItemsSchema, missionControlActionsSchema]);
+    migrate(db, [coreSchema, queueItemsSchema, missionControlActionsSchema, identityProvenanceSchema]);
     actionLog = new MissionControlActionLog(db);
     auditBrowse = new MissionControlAuditBrowse(db);
     missionsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "scope-reapprove-"));
@@ -292,6 +293,19 @@ describe("ScopeApproveService — re-approve/re-stamp (OPR.0.5.0.18)", () => {
     expect(derived.status).toBe(201);
     const rows = auditBrowse.query({ scopeId: "OPR.X.18", approvalScope: "spec" }).rows;
     expect(rows[0]!.actorSession).toBe("pm@rig"); // transport-derived, never the body claim
+    // P21 era-stamp: the audit row + the frontmatter both carry transport:v1 (derived-era, renderable
+    // as verified — vs a NULL/absent claimed-era row that renders "recorded (pre-verification era)").
+    expect(rows[0]!.identityProvenance).toBe("transport:v1");
+    expect(frontmatterOf(readmePath)["provenance"]).toBe("transport:v1");
+  });
+
+  it("P21 I1 era-stamp: a DIRECT service approve (no transport chokepoint) leaves identity_provenance NULL — claimed-era, never fabricated", () => {
+    // The service records the actor faithfully but does NOT invent provenance: absence IS the claimed-era
+    // marker (the pre-P21/direct-caller row). No backfill, no re-label (house absent-never-fabricated).
+    service().approve({ scopeTier: "slice", scopePath: base.scopePath, approvalScope: "spec", actorSession: "human@kernel" });
+    const rows = auditBrowse.query({ scopeId: "OPR.X.18", approvalScope: "spec" }).rows;
+    expect(rows[0]!.identityProvenance).toBeNull();
+    expect(frontmatterOf(readmePath)["provenance"]).toBeUndefined();
   });
 
   it("REGRESSION: a plain first-time approve carries NO amendment fields (byte-identical first-approve behavior)", () => {

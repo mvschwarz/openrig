@@ -37,6 +37,10 @@ export interface ScopeApproveInput {
   /** The REAL invoking session (honest provenance — never overwritten by
    *  delegation). */
   actorSession: string;
+  /** P21 era-stamp: how actorSession was established. The route passes `transport:v1` when it derived
+   *  the actor from the authenticated transport chokepoint; omitted (null) ⇒ claimed-era (a direct
+   *  caller / pre-P21 row), rendered "recorded (pre-verification era)", never re-labeled. */
+  identityProvenance?: string | null;
   /** DELEGATED APPROVAL: whose decision this stamp records when an agent
    *  invokes on the founder's behalf. Recorded in the audit notes only. */
   onBehalfOf?: string | null;
@@ -216,6 +220,9 @@ export class ScopeApproveService {
       // local) scope audit can show lineage; the rows hold the full history.
       ...(isReApprove ? { [fields.priors]: priorCount + 1 } : {}),
       ...(isPlanLock ? { "locked-artifacts": lockedArtifacts } : {}),
+      // P21 era-stamp: a `provenance:` line beside the approved-by stamp records how the approver
+      // identity was established. Present (`transport:v1`) ⇒ transport-derived; absent ⇒ claimed-era.
+      ...(input.identityProvenance ? { provenance: input.identityProvenance } : {}),
     });
     fs.writeFileSync(readmePath, updated, "utf8");
 
@@ -256,6 +263,7 @@ export class ScopeApproveService {
         actedAt: approvedAt,
         reason: isReApprove ? `${baseReason} re-approve: ${reason}` : baseReason,
         auditNotes,
+        identityProvenance: input.identityProvenance ?? null,
       });
       actionId = entry.actionId;
     } catch (err) {

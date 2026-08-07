@@ -1628,7 +1628,7 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
     .argument(tier === "slice" ? "<slice-path>" : "<mission>", tier === "slice" ? "Slice path (absolute, relative, or NN-slug)" : "Mission name")
     .option("--mission <name>", tier === "slice" ? "Hint mission when slice-path is just NN-slug" : "(unused at mission tier)")
     .option("--scope <scope>", "Approval scope: spec | delivery (default delivery)")
-    .option("--actor <session>", "Approving session (defaults to OPENRIG_SESSION_NAME)")
+    .option("--actor <session>", "(deprecated, ignored) approver is derived from the seat env (X-OpenRig-Session)")
     .option("--on-behalf-of <human>", "Record the delegation: whose decision this stamp records (actor stays the real invoking session)")
     .option("--re-approve", "OPR.0.5.0.18 amend/re-stamp: supersede an existing stamp with a new reasoned attestation (prior preserved in the append-only audit log). Requires --reason.")
     .option("--reason <why>", "Why the stamp is being amended (required with --re-approve; recorded on the audit row)")
@@ -1668,12 +1668,14 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
             action: "Drop --reason for a first approval, or add --re-approve to amend an existing stamp.",
           });
         }
-        const actor = opts.actor ?? process.env.OPENRIG_SESSION_NAME;
-        if (!actor) {
+        // P21: the approver is DERIVED from the seat env (X-OpenRig-Session, stamped by DaemonClient
+        // from OPENRIG_SESSION_NAME) — never a flag/body claim. --actor is deprecated + ignored. Fail
+        // early with a friendly message if the env is unset (else the daemon refuses-loud 401).
+        if (!process.env.OPENRIG_SESSION_NAME) {
           throw new ScopeCliError({
-            fact: "No acting session: --actor not passed and OPENRIG_SESSION_NAME is unset.",
-            consequence: "The approval stamp requires honest actor provenance.",
-            action: "Pass --actor <session> or run from a managed seat.",
+            fact: "No seat identity: OPENRIG_SESSION_NAME is unset (the approver is derived from the seat env, not a flag).",
+            consequence: "The daemon refuses an unattributable approval write (401 unattributable_sender).",
+            action: "Run from a managed seat (OPENRIG_SESSION_NAME set).",
           });
         }
         // Resolve the scope target LOCALLY (rich NN-slug resolution), then
@@ -1703,7 +1705,7 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
           scopeTier: tier,
           scopePath,
           approvalScope: opts.scope,
-          actorSession: actor,
+          // P21: no body actorSession — the daemon derives the approver from the transport header.
           onBehalfOf: opts.onBehalfOf ?? null,
           reApprove: opts.reApprove === true,
           reason: opts.reason ?? null,
