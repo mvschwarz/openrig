@@ -1,44 +1,88 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-// 51-04 Q2 — ARTIFACT-level proof for the testbed build's pack step. The old guard only
-// string-matched `npm pack`, so it stayed GREEN while the script packed the WRONG package (the
-// private monorepo root `openrig@0.5.0`, no `bin`) -> the image's `rig --version` smoke died with
-// exit 127. This test packs the REAL @openrig/cli tarball (what the FIXED build-testbed packs) and
-// inspects it: it must be @openrig/cli and SHIP the `rig` bin file. That falsifies the wrong-package
-// regression at the artifact level, offline.
-//
-// NOTE (flagged to orch): the STRONGER required proof — `npm install -g <tgz>` + `rig --version` —
-// is currently BLOCKED by a separate packaging defect: @openrig/cli hard-depends on @openrig/daemon
-// ("*"), which is 404/unpublished and imported at runtime via a bare specifier
-// (await import("@openrig/daemon/...")), while build-package.sh bundles the daemon to <cli>/daemon/
-// NOT <cli>/node_modules/@openrig/daemon. So a standalone install fails to resolve @openrig/daemon.
-// The full install+run proof rides that packaging fix (self-contained cli); this artifact proof is
-// the offline half that already pins the exit-127 wrong-package regression.
+// 51-04 Q2 — the pack-step proof. The old guard only string-matched `npm pack`, so it stayed GREEN
+// over THREE stacked breaks (root package / no bin / non-standalone-installable). Tiers:
+//   1. fast OFFLINE pre-check — the tarball is @openrig/cli, ships the `rig` bin, and BUNDLES the
+//      (unpublished) @openrig/daemon;
+//   2. BUNDLE PROOF (host-runnable) — assemble via build-package.sh + pack, and prove the tarball
+//      ships <cli>/node_modules/@openrig/daemon with the EXACT exports-map surfaces the cli's four
+//      bare-specifier value-imports resolve to. This is what makes the standalone install stop 404ing
+//      on @openrig/daemon (verified: the install now progresses past it to the native build);
+//   3. FULL install+LOAD GATE (opt-in RUN_TESTBED_PACK_GATE=1) — the desk-ruled effect proof on a
+//      CLEAN target: install + run a command that LOADS the daemon. It requires TARGET build tools
+//      because better-sqlite3 is NEVER prebuilt and builds fresh on target (desk caveat 1); on a host
+//      without them it stops at that native build, so the operator's Debian Docker rerun IS this gate.
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, "..");
 const CLI_DIR = join(REPO_ROOT, "packages", "cli");
+// The 3 daemon exports-map subpaths the cli's runtime value-imports resolve through.
+const DAEMON_SURFACES = [
+  "node_modules/@openrig/daemon/dist/gateway-protocol-surface.js",
+  "node_modules/@openrig/daemon/dist/gateway-human-registry-surface.js",
+  "node_modules/@openrig/daemon/dist/crash-cart-surface.js",
+];
 
-test("the packed tarball is @openrig/cli and SHIPS the `rig` bin (the exit-127 wrong-package pin)", () => {
-  // Identity: the packable package must be @openrig/cli with a `rig` bin. The monorepo root has
-  // neither (that IS the exit-127 bug — Docker installs a package with no `rig`).
+test("pre-check: @openrig/cli, ships the `rig` bin, and BUNDLES the unpublished @openrig/daemon", () => {
   const pkg = JSON.parse(readFileSync(join(CLI_DIR, "package.json"), "utf8"));
-  assert.equal(pkg.name, "@openrig/cli", "the packed package must be @openrig/cli, not the root openrig");
+  assert.equal(pkg.name, "@openrig/cli", "must pack @openrig/cli, not the root openrig");
   assert.equal(pkg.bin?.rig, "dist/bin-wrapper.js", "@openrig/cli must declare the `rig` bin");
+  assert.ok(Array.isArray(pkg.bundledDependencies) && pkg.bundledDependencies.includes("@openrig/daemon"),
+    "@openrig/daemon (unpublished) must be in bundledDependencies so npm install uses the bundle, never the 404 registry");
+});
 
-  // Effect: pack the REAL tarball and prove it SHIPS the bin file (root pack ships no bin-wrapper.js).
+test("bundle proof: the assembled tarball ships @openrig/daemon's exports-map surfaces (standalone resolution)", () => {
+  // assemble (bundles daemon into <cli>/node_modules/@openrig/daemon) — heavy but no install/native build
+  execFileSync("bash", [join(REPO_ROOT, "scripts", "build-package.sh")], { cwd: REPO_ROOT, stdio: "inherit" });
+  assert.ok(existsSync(join(CLI_DIR, "node_modules", "@openrig", "daemon", "package.json")),
+    "build-package.sh must assemble a resolver-visible <cli>/node_modules/@openrig/daemon");
+
   const tgz = execFileSync("npm", ["pack", "--silent"], { cwd: CLI_DIR, encoding: "utf8" }).trim().split("\n").filter(Boolean).pop();
   const tgzPath = join(CLI_DIR, tgz);
   try {
-    assert.match(tgz, /^openrig-cli-/, "npm pack must produce the @openrig/cli tarball (openrig-cli-*.tgz), never openrig-*.tgz");
     const listing = execFileSync("tar", ["-tzf", tgzPath], { encoding: "utf8" });
-    assert.match(listing, /(^|\n)package\/dist\/bin-wrapper\.js(\n|$)/, "the tarball must SHIP the `rig` bin (dist/bin-wrapper.js) — a root pack ships none");
+    assert.match(listing, /^package\/dist\/bin-wrapper\.js$/m, "the tarball must ship the `rig` bin");
+    assert.match(listing, /^package\/node_modules\/@openrig\/daemon\/package\.json$/m, "must BUNDLE @openrig/daemon (its package.json + exports map)");
+    for (const surface of DAEMON_SURFACES) {
+      assert.match(listing, new RegExp(`^package/${surface.replace(/[.]/g, "\\.")}$`, "m"),
+        `the bundled daemon must ship ${surface} (a value-import resolution target)`);
+    }
+    // better-sqlite3 (native) must NOT be nested under the bundled daemon — it stays hoisted (caveat 1)
+    assert.doesNotMatch(listing, /node_modules\/@openrig\/daemon\/node_modules\/better-sqlite3/,
+      "better-sqlite3 must NOT be nested under the bundled daemon (it stays a hoisted cli dep, builds fresh on target)");
   } finally {
     rmSync(tgzPath, { force: true });
+  }
+});
+
+const RUN_GATE = process.env.RUN_TESTBED_PACK_GATE === "1";
+test("GATE (target-native): install the tarball + a cli command LOADS the daemon subpath", { skip: RUN_GATE ? false : "opt-in RUN_TESTBED_PACK_GATE=1; needs TARGET build tools (better-sqlite3 builds fresh) — the operator's Docker rerun is this gate" }, () => {
+  execFileSync("bash", [join(REPO_ROOT, "scripts", "build-package.sh")], { cwd: REPO_ROOT, stdio: "inherit" });
+  const prefix = mkdtempSync(join(tmpdir(), "q2-gate-prefix-"));
+  const home = mkdtempSync(join(tmpdir(), "q2-gate-home-"));
+  let tgzPath;
+  try {
+    const tgz = execFileSync("npm", ["pack", "--silent"], { cwd: CLI_DIR, encoding: "utf8" }).trim().split("\n").filter(Boolean).pop();
+    tgzPath = join(CLI_DIR, tgz);
+    execFileSync("npm", ["install", "-g", "--prefix", prefix, tgzPath], { cwd: REPO_ROOT, stdio: "inherit" });
+    const rigBin = join(prefix, "bin", "rig");
+    const out = execFileSync(rigBin, [
+      "gateway", "human", "add", "gateuser",
+      "--display-name", "Gate User",
+      "--binding", "slack:main:vault://slack/gate:primary:handle=UGATE",
+      "--delivery-class", "B",
+    ], { encoding: "utf8", env: { ...process.env, OPENRIG_HOME: home } });
+    assert.match(out, /"ok":\s*true|gateuser/, "`rig gateway human add` must succeed, proving @openrig/daemon resolved on a clean install");
+    assert.ok(existsSync(join(home, "gateway", "humans", "gateuser.yaml")), "the daemon-backed verb must have written the fragment");
+  } finally {
+    if (tgzPath) rmSync(tgzPath, { force: true });
+    rmSync(prefix, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   }
 });

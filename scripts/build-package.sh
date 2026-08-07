@@ -88,6 +88,23 @@ if [ -d "$REPO_ROOT/docs/reference" ]; then
   cp -r "$REPO_ROOT/docs/reference/"* "$CLI_DIR/daemon/docs/reference/"
 fi
 
+# RESOLVER-VISIBLE daemon (Q2 packaging fix). The cli's RUNTIME bare-specifier value-imports —
+# await import("@openrig/daemon/{crash-cart,gateway-protocol,gateway-human-registry}") — resolve via
+# @openrig/daemon's EXPORTS MAP, so the daemon must live where node's resolver looks:
+# <cli>/node_modules/@openrig/daemon. (The <cli>/daemon dir above is resolver-INVISIBLE — it is the
+# path the cli SPAWNS the daemon PROCESS from, not an import target.) @openrig/daemon is UNPUBLISHED,
+# so packages/cli lists it in "bundledDependencies": npm pack ships THIS copy in the tarball and npm
+# install uses it, never the 404 registry. We assemble a CLEAN copy (package.json + dist only) that
+# REPLACES the dev workspace symlink. The daemon's own runtime deps (hono/tar/ulid/yaml/@hono/*) and
+# better-sqlite3 (NATIVE — builds fresh on target, never prebuilt) are NOT nested here: the daemon dep
+# set is a SUBSET of the cli's, so they stay HOISTED as the cli's own deps and resolve by node walking
+# up to <cli>/node_modules.
+DAEMON_NM="$CLI_DIR/node_modules/@openrig/daemon"
+rm -rf "$DAEMON_NM"
+mkdir -p "$DAEMON_NM/dist"
+cp "$DAEMON_DIR/package.json" "$DAEMON_NM/package.json"
+cp -r "$DAEMON_DIR/dist/"* "$DAEMON_NM/dist/"
+
 # UI: dist
 mkdir -p "$CLI_DIR/ui/dist"
 cp -r "$UI_DIR/dist/"* "$CLI_DIR/ui/dist/"
