@@ -69,13 +69,19 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     // absent / stale / unknown we pass null (never invent a value); the enforcer
     // returns an honest `no_usage_data` reason for a Claude seat.
     const usage = usageStore.getForNode(row.node_id, sessionName);
-    const outcome = await enforcer.triggerManualCompact({
-      sessionName,
-      runtime: row.runtime,
-      usedPercentage: usage.availability === "known" ? usage.usedPercentage : null,
-      transcriptPath: usage.transcriptPath,
-      sessionId: usage.sessionId,
-    });
+    const outcome = await enforcer.triggerManualCompact(
+      {
+        sessionName,
+        runtime: row.runtime,
+        usedPercentage: usage.availability === "known" ? usage.usedPercentage : null,
+        transcriptPath: usage.transcriptPath,
+        sessionId: usage.sessionId,
+      },
+      // This is the OPERATOR's manual-trigger verb (bearer-auth'd); the resulting sequence is
+      // drain-exempt while auto-compaction is disabled. GHOST-STAGE fix (a) actor-gate: automation
+      // paths that do NOT set this are NOT exempt, so they cannot launder a drain past the gate.
+      { operatorInitiated: true },
+    );
 
     if (outcome.triggered) {
       return c.json({ ok: true, session: sessionName, stage: outcome.stage });

@@ -89,6 +89,10 @@ export interface ManualCompactionStatus {
   stage: ManualCompactionStage;
   reason?: string;
   updatedAt: number;
+  /** GHOST-STAGE fix (a) — was this manual sequence started by a real OPERATOR (vs automation
+   *  calling the manual verb)? Only an operator-initiated sequence is exempt from the disabled
+   *  drain gate; automation is NOT exempt (PM pin — the exemption must not launder a drain). */
+  operatorInitiated?: boolean;
 }
 
 export type ManualCompactionOutcome =
@@ -348,6 +352,20 @@ export class ClaudeCompactionEnforcer {
       return { triggered: false, reason: "invalid_policy" };
     }
     if (input.usedPercentage < policy.thresholdPercent) {
+      // GHOST-STAGE FIX (a) — gate the DRAIN by `enabled`. A disabled system drains NOTHING: the
+      // legacy compaction-stage defect (operator-confirmed ruling 05c174e0) proved that draining a
+      // queued stage while disabled fires a GHOST prompt — a handed-over successor inherits the
+      // predecessor's queued AUTO stage and it is delivered as an unenveloped user-channel prompt
+      // with fabricated telemetry. This SUPERSEDES OPR.0.4.3.14 (which drained the below-threshold
+      // back-half regardless of `enabled`). EXEMPTION: an OPERATOR-INITIATED manual sequence is
+      // enabled-independent by construction (the operator IS the live premise). The exemption is
+      // ACTOR-GATED (PM pin): automation calling the manual verb records operatorInitiated=false and
+      // is NOT exempt, so it cannot launder a drain past this gate. The manual-INHERITED-across-
+      // generations residue is covered by fix (b)'s generation gate (layered defense). Interpretation
+      // surfaced in the handoff for the PM evidence read (veto there if the literal reading was meant).
+      if (!policy.enabled && this.manualCompactionState.get(input.sessionName)?.operatorInitiated !== true) {
+        return { triggered: false, reason: "disabled" };
+      }
       const pendingStage = this.pendingPostCompactRestore.get(input.sessionName);
       if (pendingStage === "turn_boundary") {
         const boundary = await this.sessionTransport.send(
@@ -496,7 +514,10 @@ export class ClaudeCompactionEnforcer {
    * - Non-Claude runtime → rejected with a clear reason (never a silent no-op).
    * - Bounded to the one triggered seat; no fan-out, no broadcast.
    */
-  async triggerManualCompact(input: EnforcerInput): Promise<ManualCompactionOutcome> {
+  async triggerManualCompact(
+    input: EnforcerInput,
+    opts: { operatorInitiated?: boolean } = {},
+  ): Promise<ManualCompactionOutcome> {
     // OPR.0.4.3.14 rev1-r2 fix — SAME-SEAT IN-PROGRESS GUARD (race-safe), at the
     // VERY TOP before ANY recordManualFailure path. This synchronous check-and-set
     // runs BEFORE the first await; because JS is run-to-completion, two concurrent
@@ -541,7 +562,8 @@ export class ClaudeCompactionEnforcer {
 
     // Synchronously mark in-progress (the guarded set — no longer a blind write):
     // this happens before the first await, so it is the marker the guard above reads.
-    this.setManualStage(input.sessionName, "preparing");
+    // Record operatorInitiated (fail-safe: absent/false = automation = NOT drain-exempt).
+    this.setManualStage(input.sessionName, "preparing", undefined, opts.operatorInitiated === true);
 
     // Phase 1 — pre-compact prep (write the restore map). Normal guarded send.
     const prep = await this.sessionTransport.send(
@@ -587,7 +609,7 @@ export class ClaudeCompactionEnforcer {
     this.triggeredAboveThreshold.add(input.sessionName);
     this.pendingPreCompactPrep.delete(input.sessionName);
     this.pendingPostCompactRestore.set(input.sessionName, "turn_boundary");
-    this.setManualStage(input.sessionName, "compact-sent");
+    this.setManualStage(input.sessionName, "compact-sent", undefined, opts.operatorInitiated === true);
     return { triggered: true, stage: "compact-sent" };
   }
 
@@ -596,8 +618,8 @@ export class ClaudeCompactionEnforcer {
     return this.manualCompactionState.get(sessionName) ?? null;
   }
 
-  private setManualStage(sessionName: string, stage: ManualCompactionStage, reason?: string): void {
-    this.manualCompactionState.set(sessionName, { stage, reason, updatedAt: Date.now() });
+  private setManualStage(sessionName: string, stage: ManualCompactionStage, reason?: string, operatorInitiated?: boolean): void {
+    this.manualCompactionState.set(sessionName, { stage, reason, updatedAt: Date.now(), operatorInitiated });
   }
 
   private recordManualFailure(sessionName: string, reason: string): ManualCompactionOutcome {
@@ -613,8 +635,10 @@ export class ClaudeCompactionEnforcer {
    * `audit-sent`, so no `from` matches).
    */
   private advanceManualStage(sessionName: string, from: ManualCompactionStage, to: ManualCompactionStage): void {
-    if (this.manualCompactionState.get(sessionName)?.stage === from) {
-      this.setManualStage(sessionName, to);
+    const current = this.manualCompactionState.get(sessionName);
+    if (current?.stage === from) {
+      // Preserve operatorInitiated across advances so the drain exemption holds for the whole sequence.
+      this.setManualStage(sessionName, to, undefined, current.operatorInitiated);
     }
   }
 }

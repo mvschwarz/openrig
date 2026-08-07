@@ -252,6 +252,42 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send).toHaveBeenCalledTimes(6);
   });
 
+  it("GHOST-STAGE (a): a DISABLED policy drains NOTHING — a stage queued while enabled never fires after disable (proof seed 1)", async () => {
+    // Legacy compaction stage defect (ruling 05c174e0): a queued restore stage that drains while
+    // the policy is disabled fires a ghost prompt (a handed-over successor inherits the
+    // predecessor's queued stage). Supersedes OPR.0.4.3.14's "below-threshold back-half drains
+    // regardless of enabled". A disabled system MUST drain nothing.
+    const policy: ClaudeCompactionPolicy = { ...POLICY_ENABLED_AT_80 }; // mutable so we can disable mid-sequence
+    const settings = makeSettingsStore(policy);
+    const { transport, send } = makeSessionTransport();
+    const enforcer = new ClaudeCompactionEnforcer(settings, transport, {
+      dedupWindowMs: 60_000,
+      postCompactRestoreCooldownMs: 0,
+      openrigHome: "/tmp/openrig-test-home",
+    });
+    let now = 1_700_000_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+
+    // Queue a stage WHILE ENABLED: prep (90) then /compact (95) sets pendingPostCompactRestore.
+    await enforcer.maybeAutoCompact({ sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage: 90 });
+    now += 30_000;
+    await enforcer.maybeAutoCompact({ sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage: 95 });
+    const queuedSendCount = send.mock.calls.length; // prep + compact only
+
+    // Now DISABLE (operator flips it off / a successor inherits the queued stage under disabled policy).
+    policy.enabled = false;
+
+    // A below-threshold tick must drain NOTHING — no ghost prompt.
+    const outcome = await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig",
+      runtime: "claude-code",
+      usedPercentage: 20,
+      transcriptPath: "/tmp/claude.jsonl",
+    });
+    expect(outcome).toEqual({ triggered: false, reason: "disabled" });
+    expect(send.mock.calls.length).toBe(queuedSendCount); // the queued stage did NOT fire
+  });
+
   it("post-compact compliance prompt starts a cooldown so restore work cannot immediately trigger another /compact", async () => {
     const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
     const { transport, send } = makeSessionTransport();
@@ -919,13 +955,13 @@ describe("ClaudeCompactionEnforcer", () => {
 
       const outcome = await enforcer.triggerManualCompact({
         sessionName: SEAT, runtime: "claude-code", usedPercentage: 20, transcriptPath: "/tmp/claude.jsonl",
-      });
+      }, { operatorInitiated: true }); // GHOST-STAGE (a): OPERATOR-initiated → drain-exempt while disabled
       expect(outcome).toEqual({ triggered: true, stage: "compact-sent" });
       expect(send.mock.calls[0]![1]).toContain("OpenRig automatic compaction preparation");
       expect(send.mock.calls[1]![1]).toContain("/compact");
       expect(send).toHaveBeenCalledTimes(2);
 
-      // The below-threshold back-half must drain even though enabled=false.
+      // The below-threshold back-half must drain even though enabled=false (operator-initiated exemption).
       expect(await enforcer.maybeAutoCompact({
         sessionName: SEAT, runtime: "claude-code", usedPercentage: 20, transcriptPath: "/tmp/claude.jsonl",
       })).toEqual({ triggered: true });
@@ -937,6 +973,28 @@ describe("ClaudeCompactionEnforcer", () => {
         sessionName: SEAT, runtime: "claude-code", usedPercentage: 20,
       })).toEqual({ triggered: true });
       expect(send).toHaveBeenLastCalledWith(SEAT, expect.stringContaining("Now audit your compaction restore"), { waitForIdleMs: expect.any(Number) });
+    });
+
+    it("GHOST-STAGE (a) PM-pin: an AUTOMATION-initiated manual trigger is NOT drain-exempt — a disabled tick drains nothing (no laundering bypass)", async () => {
+      const settings = makeSettingsStore(POLICY_DISABLED);
+      const { transport, send } = makeSessionTransport();
+      const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: HOME });
+
+      // Automation calls the manual verb WITHOUT operator initiation (fail-safe default). The verb
+      // still runs (prep + /compact), but the resulting stage must NOT be drain-exempt — otherwise
+      // the manual entrypoint launders exactly the drains fix (a) kills.
+      const outcome = await enforcer.triggerManualCompact({
+        sessionName: SEAT, runtime: "claude-code", usedPercentage: 20, transcriptPath: "/tmp/claude.jsonl",
+      }); // NO { operatorInitiated: true } — automation actor
+      expect(outcome).toEqual({ triggered: true, stage: "compact-sent" });
+      const afterTriggerSends = send.mock.calls.length; // prep + /compact only
+
+      // A disabled below-threshold tick MUST refuse to drain the automation-seeded stage.
+      const drain = await enforcer.maybeAutoCompact({
+        sessionName: SEAT, runtime: "claude-code", usedPercentage: 20, transcriptPath: "/tmp/claude.jsonl",
+      });
+      expect(drain).toEqual({ triggered: false, reason: "disabled" });
+      expect(send.mock.calls.length).toBe(afterTriggerSends); // no ghost drain — not exempt
     });
 
     it("auto path preserved after the enabled-gate reorder: a disabled policy still does NOT auto-trigger above threshold", async () => {
