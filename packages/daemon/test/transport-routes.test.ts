@@ -466,7 +466,7 @@ describe("transport routes", () => {
 
     const res = await app.request("/api/transport/broadcast", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" }, // P21: From: derives from the header
       body: JSON.stringify({
         sessions: ["dev-impl@my-rig", "dev-qa@my-rig"],
         text: "hello team",
@@ -533,7 +533,7 @@ describe("transport routes", () => {
 
     const res = await app.request("/api/transport/broadcast", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" }, // P21: From: derives from the header
       body: JSON.stringify({ sessions: ["dev-impl@my-rig", "dev-qa@my-rig"], text: "x", force: true, envelopeSender: "orch@my-rig" }),
     });
     expect(res.status).toBe(200);
@@ -568,7 +568,7 @@ describe("transport routes", () => {
 
     const res = await app.request("/api/transport/broadcast", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" }, // P21: From: derives from the header
       body: JSON.stringify({
         sessions: ["dev-impl@my-rig", "dev-qa@my-rig"],
         text: "union seam",
@@ -603,7 +603,7 @@ describe("transport routes", () => {
 
     await app.request("/api/transport/broadcast", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" }, // P21: From: derives from the header
       body: JSON.stringify({
         sessions: ["dev-impl@my-rig", "dev-qa@my-rig"],
         text: "unblock please",
@@ -639,5 +639,59 @@ describe("transport routes", () => {
     expect(body.sent).toBe(0);
     expect(body.failed).toBe(1);
     expect(body.results[0]!.reason).toBe("transport_unavailable");
+  });
+
+  // ── P21 I4: the rendered From: + the override audit actor derive from the transport, never the body ──
+  it("P21 I4: the From: line derives from the transport header, IGNORING a forged body.envelopeSender (specimen-5 kill)", async () => {
+    seedRig();
+    const delivered: string[] = [];
+    const tmux = mockTmux({ sendText: async (_t: string, text: string) => { delivered.push(text); return { ok: true as const }; } });
+    const app = createApp({ sessionTransport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux }) });
+    const res = await app.request("/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" }, // the REAL sender
+      body: JSON.stringify({ sessions: ["dev-impl@my-rig"], text: "hi", force: true, envelopeSender: "pm-lead@my-rig" }), // FORGED From:
+    });
+    expect(res.status).toBe(200);
+    for (const text of delivered) {
+      expect(text).toContain("From: orch@my-rig"); // the transport identity, NOT the forged pm-lead claim
+      expect(text).not.toContain("From: pm-lead@my-rig"); // the false From: the incident acted upon never renders
+    }
+  });
+
+  it("P21 I4: an enveloped send with NO authenticated identity refuses-loud (never renders an unverified From:)", async () => {
+    seedRig();
+    const app = createApp({ sessionTransport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux() }) });
+    const res = await app.request("/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }, // NO X-OpenRig-Session
+      body: JSON.stringify({ sessions: ["dev-impl@my-rig"], text: "hi", force: true, envelopeSender: "anyone@my-rig" }),
+    });
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+  });
+
+  it("P21 I4: --dangerously-interact with NO identity refuses-loud (the override audit must be attributable)", async () => {
+    seedRig();
+    const app = createApp({ sessionTransport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux() }) });
+    const res = await app.request("/api/transport/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }, // NO X-OpenRig-Session
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "drive it", dangerouslyInteract: true, reason: "why" }),
+    });
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+  });
+
+  it("P21 I4: a body actorSession that DIFFERS from the header refuses-loud identity_mismatch", async () => {
+    seedRig();
+    const app = createApp({ sessionTransport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux() }) });
+    const res = await app.request("/api/transport/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "x", actorSession: "mallory@my-rig" }),
+    });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
   });
 });

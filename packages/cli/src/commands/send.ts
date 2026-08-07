@@ -222,7 +222,7 @@ export function sendCommand(depsOverride?: SendDeps): Command {
     .option("--dangerously-interact", "DANGEROUS: deliberately drive an interactive prompt/permission block (implies --raw; requires --reason). The ONLY override of the prompt/permission guard.")
     .option("--reason <text>", "Why the prompt is being driven (required with --dangerously-interact; recorded in the audit log)")
     .option("--host <id>", "Send on a remote host declared in ~/.openrig/hosts.yaml (ssh hosts shell out; http hosts go CLI-direct to the remote daemon)")
-    .option("--from <session>", "Originating session for the envelope sender/actor (provenance; defaults to $OPENRIG_SESSION_NAME). Plumbed through cross-host ssh sends so the remote envelope names the origin, not the relay.")
+    .option("--from <session>", "DEPRECATED + IGNORED (P21 I4). The rendered From:/actor now DERIVES from the transport identity ($OPENRIG_SESSION_NAME, stamped as X-OpenRig-Session) — never a caller-supplied string, which was specimen-5's forgeable surface. Cross-host origin is carried by the relay re-stamping from its authenticated context.")
     .option("--context <ref>", "Deliver a context pack by its path-like ref (e.g. packs/compaction-restore). The resolved content is sent; an oversized ref is flagged as 'walk-sized'.")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
@@ -410,7 +410,11 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       // the resolver takes that probe lazily, and skips it entirely when an
       // explicit env alias already names the target.
       const client = deps.clientFactory(localDaemonUrl);
-      const senderSession = opts.from ?? resolveSenderSession();
+      // P21 I4: the rendered From: (specimen-5's forged surface) derives from the SEAT ENV, never
+      // --from. --from is deprecated + ignored here (its cross-host origin-carry is superseded by the
+      // relay re-stamping from its authenticated context). Env == the X-OpenRig-Session the DaemonClient
+      // stamps, so the client-side From: + the body actor stay consistent with the daemon's derived actor.
+      const senderSession = resolveSenderSession();
       // --raw (and --dangerously-interact, which implies it) send EXACT text with no messaging envelope.
       const raw = Boolean(opts.raw || opts.dangerouslyInteract);
 
@@ -542,9 +546,14 @@ async function runCrossHostSend(
   if (opts.reason !== undefined) argv.push("--reason", opts.reason);
   // Sender provenance: the ssh relay re-runs `rig send` on the remote, which
   // would otherwise resolve ITS OWN session and degrade the envelope sender
-  // to "unknown". Carry the origin (explicit --from, else $OPENRIG_SESSION_NAME)
-  // so the remote envelope names the originating session. Plumbing, not a gate.
-  const originSender = opts.from ?? resolveSenderSession();
+  // to "unknown". Carry the origin so the remote envelope names the originating
+  // session. Plumbing, not a gate.
+  // P21 I4 rail 2: the origin is THIS relay's authenticated context ($OPENRIG_SESSION_NAME),
+  // never a caller-supplied --from string (deprecated + ignored). NOTE: the remote now derives
+  // From:/actor from ITS X-OpenRig-Session header, so the proper cross-host re-stamp is to set the
+  // remote env (OPENRIG_SESSION_NAME=originTriple) rather than the --from argv below — the argv is a
+  // deprecated no-op on the shipped remote pending that runner env-plumbing (flagged to orch).
+  const originSender = resolveSenderSession();
   // 51-09 increment 3: carry the ORIGIN's full <member>@<rig>@<selfHostId> triple
   // so the remote envelope names the ORIGIN host, not the relay's. Append this
   // host's self-id only when the origin isn't already a triple (a --from already
@@ -606,7 +615,9 @@ async function runHttpHostSend(
   hint?: string,
   selfHostId?: string,
 ): Promise<void> {
-  const senderSession = opts.from ?? resolveSenderSession();
+  // P21 I4: cross-host send — the origin is the LOCAL seat env (this daemon's authenticated context per
+  // rail 2), never a caller --from string. The remote renders From: = env; --from is deprecated + ignored.
+  const senderSession = resolveSenderSession();
   const raw = Boolean(opts.raw || opts.dangerouslyInteract);
   const outboundText = raw ? text : wrapSendBody(senderSession, session, text, selfHostId, { stampISO: new Date().toISOString() });
 
@@ -676,11 +687,11 @@ async function runFanOutSend(params: {
   // as the single-seat path, including ff13bcdf's lazy probe (see
   // resolveLocalDaemonUrl).
   const client = deps.clientFactory(await resolveLocalDaemonUrl(deps));
-  // ba41fea2 — explicit provenance wins, ambient identity is the fallback:
-  // identical to the single-seat and cross-host paths. Feeds BOTH
-  // actorSession (audit attribution) and envelopeSender (what each
-  // recipient sees), so one resolution corrects both surfaces.
-  const senderSession = opts.from ?? resolveSenderSession();
+  // P21 I4: the fan-out From: (specimen-5's forged surface, rendered into every recipient's terminal) is
+  // DERIVED daemon-side from the transport header — the body envelopeSender is now only the enveloped
+  // MARKER (its presence, not its value). So the origin is the seat env, never --from (deprecated +
+  // ignored). Env == the stamped X-OpenRig-Session, so the body actor matches the derived actor.
+  const senderSession = resolveSenderSession();
   const raw = Boolean(opts.raw || opts.dangerouslyInteract);
 
   const body: Record<string, unknown> = {

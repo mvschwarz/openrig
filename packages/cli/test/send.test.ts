@@ -354,15 +354,23 @@ describe("Send CLI", () => {
     expect(String(lastSendBody?.text)).toContain("---\nhello\n---");
   });
 
-  // Sender provenance (addendum): an explicit --from names the originating
-  // session in BOTH the wrapped envelope and the actorSession field, so a
-  // reconstructed cross-host send does not degrade the sender to "unknown".
-  it("send --from <origin> sets From: <origin> in the envelope and actorSession=<origin>", async () => {
-    await captureLogs(async () => {
-      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--from", "orch-lead@rig-a"]);
-    });
-    expect(String(lastSendBody?.text)).toContain("From: orch-lead@rig-a");
-    expect(lastSendBody?.actorSession).toBe("orch-lead@rig-a");
+  // P21 I4 (specimen-5 security fix, REVERSES ba41fea2): --from is DEPRECATED + IGNORED. The rendered
+  // From: and the actorSession DERIVE from the transport identity ($OPENRIG_SESSION_NAME, stamped as
+  // X-OpenRig-Session), NEVER a caller-supplied --from string (the forgeable "From: pm-lead" surface the
+  // live incident acted upon). A forged --from must not appear anywhere in the outbound envelope.
+  it("send --from <origin> is IGNORED — From:/actor derive from the ambient transport identity, not --from", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "seat@my-rig");
+    vi.stubEnv("RIGGED_SESSION_NAME", "");
+    try {
+      await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--from", "orch-lead@rig-a"]);
+      });
+      expect(String(lastSendBody?.text)).toContain("From: seat@my-rig");
+      expect(String(lastSendBody?.text)).not.toContain("orch-lead@rig-a"); // the forged origin never renders
+      expect(lastSendBody?.actorSession).toBe("seat@my-rig");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("send --dangerously-interact --reason posts the override fields with raw (exact) text", async () => {
@@ -1012,8 +1020,8 @@ describe("Send CLI", () => {
   // try/finally — an un-restored vi.stubEnv would leak into every later test
   // in this file (the same ambient-env class ff13bcdf finding 2 fixed).
   // -------------------------------------------------------------------------
-  describe("ba41fea2 — fan-out honors explicit --from provenance", () => {
-    it("F1 RED: --from is threaded into fan-out — BOTH envelopeSender and actorSession name the explicit origin, not the ambient relay", async () => {
+  describe("P21 I4 — fan-out IGNORES --from; identity derives from the transport (reverses ba41fea2)", () => {
+    it("--from is IGNORED in fan-out — BOTH envelopeSender and actorSession name the ambient transport identity, never the forged --from origin", async () => {
       vi.stubEnv("OPENRIG_URL", `http://127.0.0.1:${port}`);
       vi.stubEnv("RIGGED_URL", "");
       // Ambient identity is STUBBED, never inherited from the surrounding
@@ -1030,11 +1038,11 @@ describe("Send CLI", () => {
           ]);
         });
         expect(lastBroadcastBody).not.toBeNull();
-        // The send SUCCEEDS today; only the attribution is wrong. Asserting
-        // delivery alone would pass against the defect — these two fields are
-        // the whole discriminator.
-        expect(lastBroadcastBody?.actorSession).toBe("origin@my-rig");
-        expect(lastBroadcastBody?.envelopeSender).toBe("origin@my-rig");
+        // P21 I4: --from ("origin@my-rig") is the forgeable surface — it is IGNORED. Both attribution
+        // fields resolve to the ambient transport identity; the daemon then re-derives them from the
+        // X-OpenRig-Session header regardless, so a forged --from can never name the From:.
+        expect(lastBroadcastBody?.actorSession).toBe("ambient-relay@my-rig");
+        expect(lastBroadcastBody?.envelopeSender).toBe("ambient-relay@my-rig");
       } finally {
         vi.unstubAllEnvs();
       }

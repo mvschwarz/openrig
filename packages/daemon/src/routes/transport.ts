@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { SessionTransport, TargetSpec } from "../domain/session-transport.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
+import { requireSenderIdentity } from "./require-sender-identity.js";
 
 export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
   const router = new Hono();
@@ -57,6 +58,24 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       }
     }
 
+    // P21 I4: the actor (the --dangerously-interact override AUDIT actor) is DERIVED from the transport
+    // header, never body.actorSession. A body claim that DIFFERS from the header refuses-loud; a
+    // drive-the-prompt override MUST be attributable, so an absent header refuses-loud (the override
+    // writes an audit row that names who drove the prompt — it cannot be a forgeable claim).
+    const derivedActor = c.req.header("x-openrig-session")?.trim() || null;
+    if (body.actorSession && derivedActor && body.actorSession.trim() !== derivedActor) {
+      return c.json({
+        ok: false, error: "identity_mismatch",
+        message: `The request body claims actor "${body.actorSession}" but the authenticated transport identity is "${derivedActor}". Remove the body actor (the transport header is authoritative).`,
+      }, 409);
+    }
+    if (body.dangerouslyInteract && !derivedActor) {
+      return c.json({
+        ok: false, error: "unattributable_sender",
+        message: "Refusing --dangerously-interact: no authenticated sender identity (X-OpenRig-Session header absent). The override audit records only a transport-derived actor, never a request-body claim.",
+      }, 401);
+    }
+
     // Check for ambiguity first
     const resolved = await transport.resolveSessions({ session: body.session });
     if (!resolved.ok) {
@@ -70,7 +89,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       waitForIdleMs: body.waitForIdleMs,
       dangerouslyInteract: body.dangerouslyInteract,
       reason: body.reason,
-      actorSession: body.actorSession ?? null,
+      actorSession: derivedActor, // transport-derived, never the body claim
     });
 
     if (!result.ok) {
@@ -169,6 +188,40 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       return c.json({ error: "Missing required field: text" }, 400);
     }
 
+    // P21 I4: the --dangerously-interact override AUDIT actor is DERIVED from the transport header (see
+    // /send). The envelopeSender (the From: rendered into every recipient's terminal) derives too — orch
+    // ruled (a): the header re-stamp is authoritative and the body value is ignored (see below).
+    const derivedActor = c.req.header("x-openrig-session")?.trim() || null;
+    if (body.actorSession && derivedActor && body.actorSession.trim() !== derivedActor) {
+      return c.json({
+        error: "identity_mismatch",
+        message: `The request body claims actor "${body.actorSession}" but the authenticated transport identity is "${derivedActor}". Remove the body actor (the transport header is authoritative).`,
+      }, 409);
+    }
+    if (body.dangerouslyInteract && !derivedActor) {
+      return c.json({
+        error: "unattributable_sender",
+        message: "Refusing --dangerously-interact: no authenticated sender identity (X-OpenRig-Session header absent). The override audit records only a transport-derived actor.",
+      }, 401);
+    }
+
+    // P21 I4 (orch ruling from specimen 5 — the false "From: pm-lead" the incident acted upon): the
+    // From: line rendered into every recipient's terminal MUST DERIVE from the transport identity, never
+    // the body value. A present body.envelopeSender signals the ENVELOPED fan-out (rig send); its value
+    // is IGNORED and the From: is the derived actor. A cross-host relay re-stamps X-OpenRig-Session from
+    // ITS authenticated context (not a caller --from string). Unattributable enveloped send ⇒ refuse-loud
+    // — never render an unverified name (no silent fallback to the body). Raw `rig broadcast` = no envelope.
+    let envelopeSender: string | undefined = undefined;
+    if (body.envelopeSender !== undefined && body.envelopeSender !== null) {
+      if (!derivedActor) {
+        return c.json({
+          error: "unattributable_sender",
+          message: "Refusing an enveloped send: no authenticated sender identity (X-OpenRig-Session header absent). The rendered From: derives from the transport, never a request-body claim.",
+        }, 401);
+      }
+      envelopeSender = derivedActor;
+    }
+
     const target: TargetSpec =
       body.sessions && body.sessions.length > 0
         ? { sessions: body.sessions }
@@ -184,8 +237,8 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       waitForIdleMs: body.waitForIdleMs,
       dangerouslyInteract: body.dangerouslyInteract,
       reason: body.reason,
-      actorSession: body.actorSession ?? null,
-      envelopeSender: body.envelopeSender ?? undefined,
+      actorSession: derivedActor, // transport-derived, never the body claim
+      envelopeSender, // the From: is the DERIVED identity (never the body value) — orch ruling (a)
     });
 
     return c.json(result);
