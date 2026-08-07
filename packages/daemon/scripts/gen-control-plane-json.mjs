@@ -131,7 +131,12 @@ export async function extractSkillEdgeLayout({
   };
 }
 
-function buildEdgeDigests({ repoRoot, layout }) {
+// Exported for the disk-truth digest regen (scripts/regen-edge-digests.mjs): digests derive purely
+// from the on-disk edge files + the (already-correct) in-repo layout — no founder authority YAMLs. This
+// refreshes file-integrity hashes to match folded reality WITHOUT re-deriving membership/denylist/layout
+// (those stay founder-gated). It hashes PRESENT files only; a layout-demanded file missing from disk is
+// never given a digest here, so the staleness check stays loud about it (layout=authority, disk=reality).
+export function buildEdgeDigests({ repoRoot, layout }) {
   return {
     version: 1,
     edges: Object.fromEntries(

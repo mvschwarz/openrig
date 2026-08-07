@@ -706,6 +706,70 @@ test("checkGeneratedEdges detects layout and digest drift without invoking the l
   }
 });
 
+test("checkGeneratedEdges — external-canon-pending allowlist: named-missing tolerated, OTHER-missing loud, reappearance flagged stale", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  const root = mkdtempSync(join(tmpdir(), "openrig-extcanon-"));
+  try {
+    const specPath = "packages/daemon/specs/agents/shared/skills";
+    const canonicalPath = "skills/_canonical";
+    const pluginPath = "packages/daemon/assets/plugins/openrig-core/skills";
+    write(join(root, specPath, "core", "alpha", "SKILL.md"), "# Alpha\n"); // present + digested control
+    write(join(root, canonicalPath, "core", "alpha", "SKILL.md"), "# Alpha\n");
+    write(join(root, pluginPath, "alpha", "SKILL.md"), "# Alpha\n");
+    const layout = {
+      version: 0,
+      edges: {
+        spec: { path: specPath, layout: "categorized" },
+        canonical: { path: canonicalPath, layout: "mirror-of-spec" },
+        plugin: { path: pluginPath, layout: "flat" },
+      },
+      skills: {
+        alpha: { edges: ["spec", "canonical", "plugin"], category: "core" },
+        // external-canon-pending: in the layout ship set, NOT on disk → tolerated.
+        "oversight-team": { edges: ["spec"], category: "pods" },
+        // a DIFFERENT layout-demanded skill missing from disk → must stay LOUD (never blessed).
+        "real-skill-gone": { edges: ["spec"], category: "core" },
+      },
+    };
+    const alphaSha = sha256("# Alpha\n");
+    const digests = {
+      version: 1,
+      edges: {
+        spec: { "core/alpha/SKILL.md": alphaSha },
+        canonical: { "core/alpha/SKILL.md": alphaSha },
+        plugin: { "alpha/SKILL.md": alphaSha },
+      },
+    };
+
+    const res = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests });
+    const tag = (c) => `${c.path}:${c.reason}`;
+    assert.ok(
+      !res.changes.some((c) => c.path === "oversight-team" && c.reason === "layout-missing"),
+      "the named external-canon-pending skill is tolerated (no layout-missing)",
+    );
+    assert.ok(
+      res.changes.some((c) => c.path === "real-skill-gone" && c.reason === "layout-missing"),
+      "a NON-allowlisted layout-demanded missing skill stays LOUD",
+    );
+    assert.ok(
+      !res.changes.some((c) => c.reason === "external-canon-allowlist-stale"),
+      "no stale flag while the allowlisted skill is genuinely absent from disk",
+    );
+
+    // Self-destruct: when the allowlisted skill REAPPEARS on disk, its exemption is flagged stale.
+    write(join(root, specPath, "pods", "oversight-team", "SKILL.md"), "# Oversight\n");
+    const res2 = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests });
+    assert.ok(
+      res2.changes.some(
+        (c) => c.path === "oversight-team" && c.reason === "external-canon-allowlist-stale",
+      ),
+      `reappeared allowlist entry flagged stale (got: ${res2.changes.map(tag).join(", ")})`,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("checkGeneratedEdges fails closed on empty or malformed control manifests", async () => {
   const mirror = await import("./mirror-skills.mjs");
 
