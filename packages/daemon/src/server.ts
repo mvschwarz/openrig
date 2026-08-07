@@ -56,7 +56,9 @@ import { compactionRoutes } from "./routes/compaction.js";
 import type { ClaudeCompactionEnforcer } from "./domain/claude-compaction-enforcer.js";
 import { activityRoutes } from "./routes/activity.js";
 import { askRoutes } from "./routes/ask.js";
+import { wakeResolveRoutes } from "./routes/wake-resolve.js";
 import type { AskService } from "./domain/ask-service.js";
+import type { WakeResolveService } from "./domain/wake-resolve-service.js";
 import { specReviewRoutes } from "./routes/spec-review.js";
 import { specLibraryRoutes } from "./routes/spec-library.js";
 // Phase 3a slice 3.3 — plugin discovery routes (read-only).
@@ -175,6 +177,7 @@ export interface AppDeps {
   transcriptStore?: TranscriptStore;
   sessionTransport?: SessionTransport;
   askService?: AskService;
+  wakeResolveService?: WakeResolveService;
   chatRepo?: ChatRepository;
   streamStore?: StreamStore;
   slowOpRecorder?: SlowOperationInstrumentation;
@@ -471,6 +474,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("transcriptStore" as never, deps.transcriptStore);
     c.set("sessionTransport" as never, deps.sessionTransport);
     c.set("askService" as never, deps.askService);
+    c.set("wakeResolveService" as never, deps.wakeResolveService);
     c.set("chatRepo" as never, deps.chatRepo);
     c.set("streamStore" as never, deps.streamStore);
     c.set("queueRepo" as never, deps.queueRepo);
@@ -638,6 +642,7 @@ export function createApp(deps: AppDeps): Hono {
   }
   app.route("/api/activity", activityRoutes);
   app.route("/api/ask", askRoutes);
+  app.route("/api/wake-resolve", wakeResolveRoutes);
   app.route("/api/specs/review", specReviewRoutes());
   app.route("/api/specs/library", specLibraryRoutes());
   app.route("/api/plugins", pluginsRoutes());

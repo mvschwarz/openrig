@@ -68,6 +68,8 @@ import { SessionTransport } from "./domain/session-transport.js";
 import { AgentActivityStore } from "./domain/agent-activity-store.js";
 import { HistoryQuery } from "./domain/history-query.js";
 import { AskService } from "./domain/ask-service.js";
+import { WakeResolveService } from "./domain/wake-resolve-service.js";
+import type { WakeSessionRow } from "./domain/wake-resolver.js";
 import { ChatRepository } from "./domain/chat-repository.js";
 import { StreamStore } from "./domain/stream-store.js";
 import { SlowOpRecorder, type SlowOperationInstrumentation } from "./domain/slow-op-recorder.js";
@@ -952,6 +954,17 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     viewProjector: viewProjectorInstance,
     watchdogJobsRepo: watchdogJobsRepoInstance,
     watchdogHistoryLog: watchdogHistoryLogInstance,
+    wakeResolveService: new WakeResolveService({
+      listSessionsBySeat: (seat: string) =>
+        db
+          .prepare(
+            `SELECT s.id AS id, s.session_name AS sessionName, s.resume_token AS resumeToken,
+                    n.runtime AS runtime, s.created_at AS createdAt
+               FROM sessions s JOIN nodes n ON s.node_id = n.id
+              WHERE s.session_name = ? ORDER BY s.id DESC`,
+          )
+          .all(seat) as WakeSessionRow[],
+    }),
     askService: (() => {
       const psProjectionService = new PsProjectionService({ db, agentActivity: agentActivityStore });
       const execDep = (cmd: string, args: string[]): Promise<{ stdout: string; exitCode: number }> =>

@@ -31,6 +31,29 @@ interface AskSessionEvidence {
   advisory?: string;
 }
 
+interface CliKnownTenure {
+  generation: number;
+  sessionId: number;
+  tokenPresent: boolean;
+  createdAt: string;
+}
+
+type WakeResolution =
+  | { resolved: true; token: string; runtime: "claude" | "codex"; sessionId: number }
+  | { resolved: false; reason: string; known: CliKnownTenure[] };
+
+/** Parse a --wake seat target with an optional trailing @<generation>. A seat is
+ *  `member@rig` (one @); `member@rig@2` means generation 2. Only a purely-numeric
+ *  final @-segment is treated as the generation. */
+function parseSeatGen(target: string): { seat: string; generation?: number } {
+  const parts = target.split("@");
+  const last = parts[parts.length - 1]!;
+  if (parts.length >= 3 && /^\d+$/.test(last)) {
+    return { seat: parts.slice(0, -1).join("@"), generation: Number(last) };
+  }
+  return { seat: target };
+}
+
 interface AskResult {
   question: string;
   rig: AskRigInfo | null;
@@ -57,9 +80,9 @@ export function askCommand(depsOverride?: StatusDeps): Command {
     .argument("<rig>", "Rig name to search")
     .argument("<question>", "Question to search for in transcripts")
     .option("--json", "JSON output for agents")
-    .option("--seat <session>", "Scope the search to ONE seat's transcript across every generation that sat in it (cross-generation archaeology)")
+    .option("--seat <session-name>", "Scope the search to ONE seat's transcript across every generation that sat in it (cross-generation archaeology)")
     .option("--session <token>", "Search ONE specific session's JSONL by its session token (read-only)")
-    .option("--wake <token>", "EXECUTES: wake a session by its resume token — ask one question, get a snapshot answer, back to cold (runtime cost; explicit, never an implicit escalation from a search)")
+    .option("--wake <seat[@gen]|token>", "EXECUTES: wake a session (by seat[@generation] or raw resume token) — ask one question, get a snapshot answer, back to cold (runtime cost; explicit, never an implicit escalation from a search)")
     .option("--runtime <runtime>", "runtime for --wake: claude (default) or codex")
     .option("--wake-timeout <seconds>", "bounded wake timeout in seconds (default 180)")
     .addHelpText("after", `
@@ -69,7 +92,9 @@ rig ask is one verb for information about the PAST, three ways to reach it:
                                             generation that sat in it (L1, read-only)
   3. rig ask <rig> "<q>" --session <token>  search ONE session's JSONL by
                                             token — "I have the token, find it" (L2, read-only)
-  4. rig ask <rig> "<q>" --wake <token>     WAKE that session, ask, get a snapshot
+  4. rig ask <rig> "<q>" --wake <seat[@gen]|token>
+                                            WAKE that session (by seat[@generation]
+                                            or raw token), ask, get a snapshot
                                             answer, back to cold (L3, EXECUTES)
 
 Levels 1-2 are read-only archaeology (cheap, safe). Level 3 (--wake) EXECUTES an
@@ -95,25 +120,51 @@ Exit codes:
   cmd.action(async (rig: string, question: string, opts: { json?: boolean; seat?: string; session?: string; wake?: string; runtime?: string; wakeTimeout?: string }) => {
     const deps = getDeps();
 
-    // L3 — WAKE: EXECUTES locally (spawns the runtime headless), so it takes the
-    // CLI-local path and never touches the daemon. Explicit --wake only — never
-    // an implicit escalation from a failed L1/L2 search.
+    // L3 — WAKE: EXECUTES the runtime headless. A raw token wakes CLI-locally; a
+    // seat[@gen] target is resolved to a token via the daemon first. Explicit
+    // --wake only — never an implicit escalation from a failed L1/L2 search, and
+    // an unresolvable seat REFUSES with teaching (never a guessed wake).
     if (opts.wake) {
       const target = opts.wake;
-      const runtime = opts.runtime === "codex" ? "codex" : "claude";
       const timeoutMs = opts.wakeTimeout ? Math.max(1, Number(opts.wakeTimeout)) * 1000 : undefined;
 
-      // Seat[@gen] resolution rides the session store (L3b). A raw token wakes
-      // directly; a seat address needs resolution not yet wired in this build.
+      let token = target;
+      let runtime: "claude" | "codex" = opts.runtime === "codex" ? "codex" : "claude";
+
       if (target.includes("@")) {
-        console.error(`Waking '${target}' by seat needs seat->token resolution (via the session store — L3b, pending). Pass the raw session token to --wake, or use --seat/--session for read-only search.`);
-        process.exitCode = 2;
-        return;
+        const status = await getDaemonStatus(deps.lifecycleDeps);
+        if (status.state !== "running" || status.healthy === false) {
+          console.error("Daemon not running (needed to resolve a seat). Start it with: rig daemon start — or pass a raw session token to --wake.");
+          process.exitCode = 1;
+          return;
+        }
+        const client = deps.clientFactory(getDaemonUrl(status));
+        const { seat, generation } = parseSeatGen(target);
+        const res = await client.post<WakeResolution>("/api/wake-resolve", { seat, generation });
+        if (res.status >= 400) {
+          console.error(`Failed to resolve seat (HTTP ${res.status}). Check daemon status with: rig status`);
+          process.exitCode = 2;
+          return;
+        }
+        const resolution = res.data;
+        if (!resolution.resolved) {
+          console.error(resolution.reason);
+          if (resolution.known && resolution.known.length > 0) {
+            console.error("Known tenures for this seat (newest first):");
+            for (const t of resolution.known) {
+              console.error(`  gen ${t.generation}: session ${t.sessionId}${t.tokenPresent ? "" : " (no resume token)"}  ${t.createdAt}`);
+            }
+          }
+          process.exitCode = 2;
+          return;
+        }
+        token = resolution.token;
+        runtime = resolution.runtime;
       }
 
       const runner = deps.wakeRunner ?? defaultWakeRunner;
       const fileLocator = deps.wakeFileLocator ?? defaultWakeFileLocator;
-      const outcome = await runWake({ runner, fileLocator }, { question, token: target, runtime, timeoutMs });
+      const outcome = await runWake({ runner, fileLocator }, { question, token, runtime, timeoutMs });
 
       if (opts.json) {
         console.log(JSON.stringify(outcome));
