@@ -44,6 +44,30 @@ export const BIND_VALUE = "0.0.0.0";
 /** Env carrying the bearer the bind guard requires (auth-bearer-token.ts:240). */
 export const BEARER_ENV = "OPENRIG_AUTH_BEARER_TOKEN";
 
+/**
+ * Env a host-side `rig` READ needs to reach a guarded route (client.ts's
+ * terminal-token resolution). DISTINCT FROM `BEARER_ENV` — and the difference is
+ * load-bearing:
+ *
+ * The guarded routers are gated by the TERMINAL token
+ * (`server.ts:632` passes `deps.terminalBearerToken` into `transportRoutes`), not
+ * the auth token. Those are separate values in general. They coincide HERE only
+ * because `index.ts:160` copies auth -> terminal when the bind is NOT trusted
+ * (loopback/tailscale short-circuit) — i.e. exactly the `0.0.0.0` bind this
+ * procedure mandates. So under this procedure ONE token value serves both, and:
+ *   • a DIRECT curl carrying `Authorization: Bearer <token>` works as-is;
+ *   • a host-side `rig` read needs the token under THIS env name.
+ *
+ * WHY THE NEGATIVE CONTROL IS NOT OPTIONAL: when the terminal token is null the
+ * middleware PASSES EVERYTHING THROUGH (`auth-bearer-token.ts:98-101`) — an
+ * unguarded route. If the bind were ever softened to loopback while keeping a
+ * bearer, `terminalBearerToken` would stay null, the guarded probe would answer
+ * without auth, and an auth-probe-only runbook would report a green that proves
+ * nothing. The negative control (same call, NO header, MUST be 401) is what
+ * detects that state — it is the assertion that the guard is armed at all.
+ */
+export const TERMINAL_BEARER_ENV = "OPENRIG_TERMINAL_BEARER_TOKEN";
+
 /** Unauthenticated reachability probe. */
 export const HEALTH_PATH = "/healthz";
 
@@ -79,4 +103,19 @@ export function publishedDaemonEnv(bearerToken: string): Record<string, string> 
 /** Docker/Apple `run` flags for the env above (flat -e pairs, adapter-friendly). */
 export function publishedDaemonEnvFlags(bearerToken: string): string[] {
   return Object.entries(publishedDaemonEnv(bearerToken)).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
+}
+
+/**
+ * Env for a host-side `rig` read against the published daemon: the terminal
+ * token (see TERMINAL_BEARER_ENV) plus the daemon URL the read should target.
+ * Use this instead of hand-assembling env in each consumer.
+ */
+export function rigReadEnv(bearerToken: string, baseUrl: string): Record<string, string> {
+  if (!bearerToken) {
+    throw new Error(
+      "testbed rig-read: a non-empty token is required — a guarded route answers 401 without it, " +
+        "and a NULL terminal token would leave the route unguarded entirely (see TERMINAL_BEARER_ENV).",
+    );
+  }
+  return { [TERMINAL_BEARER_ENV]: bearerToken, OPENRIG_URL: baseUrl };
 }

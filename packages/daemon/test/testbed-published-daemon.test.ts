@@ -8,6 +8,7 @@ import { resolve } from "node:path";
 import {
   BIND_ENV, BIND_VALUE, BEARER_ENV, L3_HOST_PORT, CONTAINER_PORT,
   HEALTH_PATH, GUARDED_PROBE_PATH, publishArg, publishedDaemonEnv,
+  TERMINAL_BEARER_ENV, rigReadEnv,
 } from "./helpers/testbed-published-daemon.js";
 
 const RUNBOOK = readFileSync(
@@ -31,6 +32,23 @@ describe("published-daemon procedure — module/runbook parity", () => {
     expect(publishArg(L3_HOST_PORT)).toBe(`${L3_HOST_PORT}:${CONTAINER_PORT}`);
     expect(publishArg(L3_HOST_PORT)).not.toContain("127.0.0.1");
     expect(() => publishArg(0)).toThrow(/explicit positive integer/);
+  });
+
+  it("rig READS carry the TERMINAL token env — distinct name, same value under this procedure", () => {
+    expect(TERMINAL_BEARER_ENV).toBe("OPENRIG_TERMINAL_BEARER_TOKEN");
+    expect(TERMINAL_BEARER_ENV).not.toBe(BEARER_ENV); // separate concepts; coincide only via the non-trusted-bind copy
+    expect(rigReadEnv("t", "http://127.0.0.1:19433")).toEqual({
+      [TERMINAL_BEARER_ENV]: "t",
+      OPENRIG_URL: "http://127.0.0.1:19433",
+    });
+    expect(() => rigReadEnv("", "http://x")).toThrow(/non-empty token/);
+  });
+
+  it("the runbook keeps the NEGATIVE CONTROL — the only assertion that the guard is armed", () => {
+    // A null terminal token leaves the guarded route wide open (middleware passes
+    // through), so an auth-probe-only runbook could go green while proving nothing.
+    expect(RUNBOOK).toMatch(/NEGATIVE CONTROL/i);
+    expect(RUNBOOK).toMatch(/401/);
   });
 
   it("the env helper refuses an empty bearer — the guard is satisfied, never weakened", () => {
