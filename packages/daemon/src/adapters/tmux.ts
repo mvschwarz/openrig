@@ -442,7 +442,7 @@ export class TmuxAdapter {
       const output = await this.exec(`tmux display-message -p -t ${shellQuote(paneId)} "#{pane_dead}"`);
       return output.trim() === "1";
     } catch (error) {
-      return isPaneAbsenceError(error);
+      return isNoServerError(error) || isPaneAbsenceError(error);
     }
   }
 

@@ -1138,10 +1138,17 @@ describe("TmuxAdapter", () => {
       const adapter = new TmuxAdapter(async () => { throw new Error("can't find pane: %3"); });
       expect(await adapter.isPaneDead("%3")).toBe(true);
     });
-    it("returns false (never throws) when the probe errors", async () => {
+    it("returns true when the sole pane exit removes the tmux server", async () => {
       const adapter = new TmuxAdapter(mockExec({ "display-message": { error: NO_SERVER_ERROR } }));
-      expect(await adapter.isPaneDead("%3")).toBe(false);
+      expect(await adapter.isPaneDead("%3")).toBe(true);
     });
+    it.each(["permission denied", "unrecognized tmux probe failure"])(
+      "returns false (never throws) for unproven probe failure: %s",
+      async (message) => {
+        const adapter = new TmuxAdapter(async () => { throw new Error(message); });
+        expect(await adapter.isPaneDead("%3")).toBe(false);
+      },
+    );
   });
 
   describe("signalPaneProcess", () => {

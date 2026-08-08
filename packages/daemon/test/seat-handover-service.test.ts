@@ -13,7 +13,7 @@ import { WatchdogPolicyEngine, type DeliveryFn } from "../src/domain/watchdog-po
 import { makeIdleGateQitemPolicy } from "../src/domain/policies/idle-gate-qitem.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { watchdogHistorySchema } from "../src/db/migrations/032_watchdog_history.js";
-import type { TmuxAdapter } from "../src/adapters/tmux.js";
+import { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { observeCodexSandbox } from "../src/domain/permission-drift.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
@@ -89,14 +89,14 @@ describe("SeatHandoverService", () => {
     return { runtime: "codex", launchHarness, checkReady } as unknown as RuntimeAdapter;
   }
 
-  function newService(): SeatHandoverService {
+  function newService(adapter: TmuxAdapter = tmux()): SeatHandoverService {
     return new SeatHandoverService({
       db,
       rigRepo,
       sessionRegistry,
       discoveryRepo,
       eventBus,
-      tmuxAdapter: tmux(),
+      tmuxAdapter: adapter,
       now: () => new Date("2026-04-24T18:30:00.000Z"),
       newSuccessorId: () => "01SUCCID0",
       runtimeAdapters: { codex: codexAdapter() },
@@ -820,6 +820,34 @@ describe("SeatHandoverService", () => {
     expect(store.recordGeneration(generation, observeCodexSandbox(" -s danger-full-access"))).toBe(false);
     releaseReady();
     await pending;
+  });
+
+  it("invalidates predecessor posture before a failed respawn when sole-pane exit removes the tmux server", async () => {
+    const { node } = seedSeat();
+    const store = new AppliedLaunchObservationStore(db);
+    const generation = sessionRegistry.currentOccupantTenure(node.id)!.generationUuid;
+    store.recordGeneration(generation, observeCodexSandbox(" -s workspace-write"));
+
+    const adapter = new TmuxAdapter(async () => {
+      throw new Error("no server running on /private/tmp/tmux-501/w3");
+    });
+    vi.spyOn(adapter, "capturePaneScreen").mockResolvedValue("predecessor screen tail");
+    vi.spyOn(adapter, "listPanes").mockResolvedValue([
+      { id: "%9", index: 0, cwd: "/project", width: 80, height: 24, active: true },
+    ]);
+    vi.spyOn(adapter, "setRemainOnExit").mockResolvedValue({ ok: false, code: "no_server", message: "no server running" });
+    vi.spyOn(adapter, "signalPaneProcess").mockResolvedValue({ ok: true });
+    vi.spyOn(adapter, "respawnPane").mockImplementation(async () => {
+      expect(store.readCurrent(node.id)).toBeNull();
+      return { ok: false, code: "no_server", message: "no server running" };
+    });
+    service = newService(adapter);
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
+
+    expect(result).toMatchObject({ ok: false, code: "successor_create_failed" });
+    expect(adapter.respawnPane).toHaveBeenCalledTimes(1);
+    expect(store.readCurrent(node.id)).toBeNull();
   });
 
   it("unwinds when context delivery fails WITHOUT killing the preserved seat (no false-green)", async () => {
