@@ -61,12 +61,15 @@ describe("AppliedLaunchObservationStore", () => {
     expect(launchedGeneration).not.toBe(successorGeneration);
   });
 
-  it("can invalidate only the physically replaced generation", () => {
+  it("irreversibly invalidates only the physically replaced generation", () => {
     registry.registerSession("node-1", "dev-impl@r1");
     const generation = registry.currentOccupantTenure("node-1")!.generationUuid;
     store.recordGeneration(generation, observeClaudePermission("--permission-mode acceptEdits"));
-    expect(store.deleteGeneration(generation)).toBe(true);
+    expect(store.invalidateGeneration(generation)).toBe(true);
     expect(store.readCurrent("node-1")).toBeNull();
+    expect(store.recordGeneration(generation, observeClaudePermission("--permission-mode acceptEdits"))).toBe(false);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM applied_launch_observation_invalidations WHERE generation_uuid = ?").get(generation)).toEqual({ n: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM applied_launch_observations WHERE generation_uuid = ?").get(generation)).toEqual({ n: 0 });
   });
 
   it("keeps adopted/discovered/unlaunched occupants unknown until a successful launch records an effect", () => {
@@ -79,7 +82,7 @@ describe("AppliedLaunchObservationStore", () => {
     try {
       const missing = new AppliedLaunchObservationStore(bare);
       expect(missing.recordGeneration("missing-generation", observeClaudePermission("--permission-mode acceptEdits"))).toBe(false);
-      expect(missing.deleteGeneration("missing-generation")).toBe(false);
+      expect(missing.invalidateGeneration("missing-generation")).toBe(false);
       expect(missing.readCurrent("node-1")).toBeNull();
     } finally {
       bare.close();

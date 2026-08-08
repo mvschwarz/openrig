@@ -72,9 +72,10 @@ import { watchdogTargetGenerationSchema } from "./migrations/066_watchdog_target
 import { i3IdentityProvenanceSchema } from "./migrations/067_i3_identity_provenance.js";
 import { enforcerDecisionsSchema } from "./migrations/068_enforcer_decisions.js";
 import { appliedLaunchObservationsSchema } from "./migrations/069_applied_launch_observations.js";
+import { appliedLaunchObservationInvalidationsSchema } from "./migrations/070_applied_launch_observation_invalidations.js";
 import type { Migration } from "./migrate.js";
 
-/** Ordered 001→069 (068 enforcer decisions, 069 W3 applied-launch observations). */
+/** Ordered 001→070 (068 enforcer decisions, 069/070 W3 launch truth). */
 export const ALL_MIGRATIONS: Migration[] = [
   coreSchema,
   bindingsSessionsSchema,
@@ -145,4 +146,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   i3IdentityProvenanceSchema,
   enforcerDecisionsSchema,
   appliedLaunchObservationsSchema,
+  appliedLaunchObservationInvalidationsSchema,
 ];

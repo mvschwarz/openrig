@@ -69,12 +69,20 @@ export class ClaudePermissionModeCache {
   }
 }
 
-function productionFs(permissionModes: ClaudePermissionModeCache): PermissionDriftFs {
+type AccessSync = (path: string, mode?: number) => void;
+
+function productionFs(permissionModes: ClaudePermissionModeCache, accessSync: AccessSync): PermissionDriftFs {
   return {
     readFile: (path) => fs.readFileSync(path, "utf8"),
     cwdReadable: (path) => {
-      fs.accessSync(path, fs.constants.R_OK);
-      return true;
+      try {
+        accessSync(path, fs.constants.R_OK);
+        return true;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "EACCES" || code === "EPERM") return false;
+        throw error;
+      }
     },
     commandAvailable,
     claudePermissionModes: () => permissionModes.read(),
@@ -93,12 +101,13 @@ export class PermissionDriftObserver implements PermissionDriftReader {
       fs?: PermissionDriftFs;
       now?: () => Date;
       permissionModes?: ClaudePermissionModeCache;
+      accessSync?: AccessSync;
     },
   ) {
     this.observations = new AppliedLaunchObservationStore(input.db);
     const permissionModes = input.permissionModes ?? new ClaudePermissionModeCache();
     permissionModes.warm();
-    this.fs = input.fs ?? productionFs(permissionModes);
+    this.fs = input.fs ?? productionFs(permissionModes, input.accessSync ?? ((path, mode) => fs.accessSync(path, mode)));
     this.now = input.now;
   }
 

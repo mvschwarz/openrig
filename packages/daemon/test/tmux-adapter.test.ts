@@ -1134,6 +1134,10 @@ describe("TmuxAdapter", () => {
       const adapter = new TmuxAdapter(mockExec({ "display-message": { stdout: "0\n" } }));
       expect(await adapter.isPaneDead("%3")).toBe(false);
     });
+    it("returns true when tmux proves the pane disappeared after TERM", async () => {
+      const adapter = new TmuxAdapter(async () => { throw new Error("can't find pane: %3"); });
+      expect(await adapter.isPaneDead("%3")).toBe(true);
+    });
     it("returns false (never throws) when the probe errors", async () => {
       const adapter = new TmuxAdapter(mockExec({ "display-message": { error: NO_SERVER_ERROR } }));
       expect(await adapter.isPaneDead("%3")).toBe(false);

@@ -802,6 +802,26 @@ describe("SeatHandoverService", () => {
     },
   );
 
+  it("invalidates predecessor posture at physical cutover before successor readiness", async () => {
+    const { node } = seedSeat();
+    const store = new AppliedLaunchObservationStore(db);
+    const generation = sessionRegistry.currentOccupantTenure(node.id)!.generationUuid;
+    store.recordGeneration(generation, observeCodexSandbox(" -s workspace-write"));
+    let releaseReady!: () => void;
+    const readyGate = new Promise<void>((resolve) => { releaseReady = resolve; });
+    checkReady.mockImplementation(async () => {
+      await readyGate;
+      return { ready: true };
+    });
+
+    const pending = service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
+    await vi.waitFor(() => expect(checkReady).toHaveBeenCalledTimes(1));
+    expect(store.readCurrent(node.id)).toBeNull();
+    expect(store.recordGeneration(generation, observeCodexSandbox(" -s danger-full-access"))).toBe(false);
+    releaseReady();
+    await pending;
+  });
+
   it("unwinds when context delivery fails WITHOUT killing the preserved seat (no false-green)", async () => {
     const { node } = seedSeat();
     sendText.mockResolvedValue({ ok: false, code: "session_not_found", message: "can't find session" });

@@ -192,6 +192,29 @@ describe("StartupOrchestrator", () => {
     });
   });
 
+  it("never resurrects an invalidated generation when delayed readiness completes", async () => {
+    const seed = seedSession();
+    const generation = sessionRegistry.currentOccupantTenure(seed.nodeId)!.generationUuid;
+    let releaseReady!: () => void;
+    const readyGate = new Promise<void>((resolve) => { releaseReady = resolve; });
+    const adapter = mockAdapter({
+      launchHarness: vi.fn(async () => ({ ok: true as const, appliedLaunch: observeClaudePermission("--permission-mode acceptEdits") })),
+      checkReady: vi.fn(async () => {
+        await readyGate;
+        return { ready: true as const };
+      }),
+    });
+
+    const pending = createOrchestrator().startNode(makeInput(seed, { adapter }));
+    await vi.waitFor(() => expect(adapter.checkReady).toHaveBeenCalledTimes(1));
+    expect(new AppliedLaunchObservationStore(db).invalidateGeneration(generation)).toBe(true);
+    releaseReady();
+    expect((await pending).ok).toBe(true);
+
+    expect(new AppliedLaunchObservationStore(db).readCurrent(seed.nodeId)).toBeNull();
+    expect(db.prepare("SELECT COUNT(*) AS n FROM applied_launch_observations WHERE generation_uuid = ?").get(generation)).toEqual({ n: 0 });
+  });
+
   it("does not record an attempted effect when the managed launch fails", async () => {
     const seed = seedSession();
     const adapter = mockAdapter({ launchHarness: vi.fn(async () => ({ ok: false, error: "provider refused" })) });

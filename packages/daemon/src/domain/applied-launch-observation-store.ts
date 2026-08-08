@@ -27,10 +27,16 @@ export class AppliedLaunchObservationStore {
 
   recordGeneration(generationUuid: string, observation: AppliedLaunchObservation): boolean {
     try {
-      this.db.prepare(`
+      const result = this.db.prepare(`
         INSERT INTO applied_launch_observations (
           generation_uuid, runtime, axis, observation_state, value, reason, observed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+        )
+        SELECT ?, ?, ?, ?, ?, ?, datetime('now')
+         WHERE NOT EXISTS (
+           SELECT 1
+             FROM applied_launch_observation_invalidations
+            WHERE generation_uuid = ?
+         )
         ON CONFLICT(generation_uuid) DO UPDATE SET
           runtime = excluded.runtime,
           axis = excluded.axis,
@@ -45,17 +51,28 @@ export class AppliedLaunchObservationStore {
         observation.state,
         observation.value,
         observation.reason ?? null,
+        generationUuid,
       );
-      return true;
+      return result.changes > 0;
     } catch {
       return false;
     }
   }
 
-  deleteGeneration(generationUuid: string): boolean {
+  invalidateGeneration(generationUuid: string): boolean {
     try {
-      this.db.prepare("DELETE FROM applied_launch_observations WHERE generation_uuid = ?").run(generationUuid);
-      return true;
+      return this.db.transaction(() => {
+        const exists = this.db.prepare(
+          "SELECT 1 FROM occupant_tenures WHERE generation_uuid = ?",
+        ).get(generationUuid);
+        if (!exists) return false;
+        this.db.prepare(`
+          INSERT OR IGNORE INTO applied_launch_observation_invalidations (generation_uuid)
+          VALUES (?)
+        `).run(generationUuid);
+        this.db.prepare("DELETE FROM applied_launch_observations WHERE generation_uuid = ?").run(generationUuid);
+        return true;
+      })();
     } catch {
       return false;
     }
@@ -74,6 +91,9 @@ export class AppliedLaunchObservationStore {
           ) current_tenure
           JOIN applied_launch_observations o
             ON o.generation_uuid = current_tenure.generation_uuid
+          LEFT JOIN applied_launch_observation_invalidations invalidated
+            ON invalidated.generation_uuid = current_tenure.generation_uuid
+         WHERE invalidated.generation_uuid IS NULL
       `).get(nodeId) as ObservationRow | undefined;
       if (!row) return null;
       return {

@@ -137,6 +137,8 @@ export class SuccessorSessionLauncher {
     node: SuccessorNode;
     departingSessionName: string;
     occupantGeneration?: string | null;
+    /** Synchronous physical-cutover observer; runs after the retiree is proven gone and before respawn. */
+    onReplacementStarted?: () => void;
   }): Promise<SuccessorLaunchResult> {
     // CUTOVER MODEL (plan 411c43de): a SEAT = one durable tmux session; the successor takes over the
     // retiree's EXACT pane via respawn-pane, so the canonical session name is PRESERVED (no -h shuffle)
@@ -191,6 +193,7 @@ export class SuccessorSessionLauncher {
     if (!terminated.ok) {
       return { ok: false, code: "retiree_not_terminated", step: "create_successor", message: terminated.message, replacementStarted: false };
     }
+    input.onReplacementStarted?.();
     const respawned = await this.tmuxAdapter.respawnPane(pane.id, undefined, { cwd, env });
     if (!respawned.ok) {
       return {
@@ -370,13 +373,18 @@ export class SuccessorSessionLauncher {
   private async terminateRetiree(
     paneId: string,
   ): Promise<{ ok: true; path: "graceful" | "forced" } | { ok: false; message: string }> {
-    await this.tmuxAdapter.setRemainOnExit(paneId, true);
-    await this.tmuxAdapter.signalPaneProcess(paneId, "TERM");
+    const failures: string[] = [];
+    const remain = await this.tmuxAdapter.setRemainOnExit(paneId, true);
+    if (!remain.ok) failures.push(`remain-on-exit: ${remain.message}`);
+    const term = await this.tmuxAdapter.signalPaneProcess(paneId, "TERM");
+    if (!term.ok) failures.push(`TERM: ${term.message}`);
     if (await this.waitPaneDead(paneId)) return { ok: true, path: "graceful" };
     // Graceful window elapsed — force-kill (the pinned degraded path).
-    await this.tmuxAdapter.signalPaneProcess(paneId, "KILL");
+    const kill = await this.tmuxAdapter.signalPaneProcess(paneId, "KILL");
+    if (!kill.ok) failures.push(`KILL: ${kill.message}`);
     if (await this.waitPaneDead(paneId)) return { ok: true, path: "forced" };
-    return { ok: false, message: `Retiree in pane "${paneId}" did not exit after graceful TERM + forced KILL.` };
+    const detail = failures.length > 0 ? ` Tmux failures: ${failures.join("; ")}.` : "";
+    return { ok: false, message: `Retiree in pane "${paneId}" did not exit after graceful TERM + forced KILL.${detail}` };
   }
 
   /** Poll `isPaneDead` up to the bounded exit timeout (count-bounded so injected no-op sleeps stay fast). */

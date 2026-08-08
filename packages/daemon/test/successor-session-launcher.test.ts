@@ -189,6 +189,44 @@ describe("SuccessorSessionLauncher", () => {
     expect(discoveryRepo.listDiscovered()).toHaveLength(0);
   });
 
+  it("preserves structured tmux failures when process/pane truth cannot prove cutover", async () => {
+    setRemainOnExit.mockResolvedValue({ ok: false, code: "option_failed", message: "remain rejected" });
+    signalPaneProcess.mockImplementation(async (_pane: string, signal: string) => ({
+      ok: false,
+      code: "signal_failed",
+      message: `${signal} rejected`,
+    }));
+    isPaneDead.mockResolvedValue(false);
+
+    const result = await launcher().createSuccessor({
+      node: { id: "n", runtime: "codex", cwd: "/w" },
+      departingSessionName: "a@r",
+    });
+
+    expect(result).toMatchObject({ ok: false, code: "retiree_not_terminated", replacementStarted: false });
+    expect((result as { message: string }).message).toContain("remain-on-exit: remain rejected");
+    expect((result as { message: string }).message).toContain("TERM: TERM rejected");
+    expect((result as { message: string }).message).toContain("KILL: KILL rejected");
+  });
+
+  it("marks physical replacement before respawn when remain-on-exit fails but TERM removes the pane", async () => {
+    const replacementStarted = vi.fn();
+    setRemainOnExit.mockResolvedValue({ ok: false, code: "unknown", message: "option rejected" });
+    signalPaneProcess.mockResolvedValue({ ok: true });
+    isPaneDead.mockResolvedValue(true); // production adapter: a known-missing pane proves the retiree is gone
+    respawnPane.mockResolvedValue({ ok: false, code: "session_not_found", message: "can't find pane" });
+
+    const result = await launcher().createSuccessor({
+      node: { id: "n", runtime: "codex", cwd: "/w" },
+      departingSessionName: "a@r",
+      onReplacementStarted: replacementStarted,
+    });
+
+    expect(result).toMatchObject({ ok: false, replacementStarted: true });
+    expect(replacementStarted).toHaveBeenCalledTimes(1);
+    expect(replacementStarted.mock.invocationCallOrder[0]!).toBeLessThan(respawnPane.mock.invocationCallOrder[0]!);
+  });
+
   it("UNWIND INVARIANT: a failed successor launch NEVER kills the retiree's preserved session — it stays re-wakeable from its session file", async () => {
     // The new safety invariant (cutover): the retiree exits in place; its provider session file is the
     // durable wake target. So when the successor's launch/readiness FAILS after the respawn, unwind must

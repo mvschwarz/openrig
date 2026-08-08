@@ -5,9 +5,8 @@
 //     EITHER stream means a script is involved, so the front door does NOT
 //     own the invocation and the normal commander usage path runs (prints
 //     usage, exits fast, never hangs — `echo x | rig` must not block);
-//   - first-impression degrade: daemon-down and TUI-init-failure print
-//     HELPFUL usage ("daemon not running — try: rig up"), never a stack
-//     trace — daemon-down is the likely first-run state;
+//   - first-impression degrade: transport, cwd/read, command/PATH, and
+//     enforcement remain distinct typed axes; TUI-init failures stay concise;
 //   - `--help`, `--version`, and every subcommand are ARGS, so they are
 //     naturally excluded from bare invocation and behave unchanged.
 import path from "node:path";
@@ -21,7 +20,7 @@ import {
 } from "./client.js";
 
 interface FrontDoorPermissionDiagnostic {
-  transport: { state: "healthy" | "connect" | "timeout" | "response" };
+  transport: { state: "healthy" | "connect" | "timeout" | "response"; detail?: string };
   cwdRead: { state: "visible" | "denied" | "unknown" };
   commandPath: { state: "available" | "missing" | "unknown" };
   enforcement: {
@@ -37,16 +36,17 @@ interface FrontDoorPermissionDiagnostic {
 
 export type FrontDoorProbeResult =
   | { state: "ready" }
-  | { state: "diagnostic"; diagnostic: FrontDoorPermissionDiagnostic }
-  | { state: "connect" | "timeout" | "response"; message: string };
+  | { state: "diagnostic"; diagnostic: FrontDoorPermissionDiagnostic };
+
+type LegacyTransportProbeResult = { state: "connect" | "timeout" | "response"; message: string };
 
 interface FrontDoorProbeClient {
   get(path: string, options?: { timeoutMs?: number }): Promise<{ status: number; data: unknown }>;
 }
 
-function transportDiagnostic(state: "connect" | "timeout" | "response"): FrontDoorPermissionDiagnostic {
+function transportDiagnostic(state: "connect" | "timeout" | "response", detail?: string): FrontDoorPermissionDiagnostic {
   return {
-    transport: { state },
+    transport: { state, ...(detail ? { detail } : {}) },
     cwdRead: { state: "unknown" },
     commandPath: { state: "unknown" },
     enforcement: {
@@ -91,7 +91,7 @@ export interface FrontDoorIo {
   err?: (line: string) => void;
   exit?: (code: number) => void;
   /** Typed daemon/current-seat probe (legacy booleans remain accepted for injected callers). */
-  probeDaemon?: () => Promise<boolean | FrontDoorProbeResult>;
+  probeDaemon?: () => Promise<boolean | FrontDoorProbeResult | LegacyTransportProbeResult>;
   /** launch the TUI and resolve with its exit code */
   launchTui?: () => Promise<number>;
 }
@@ -123,15 +123,16 @@ export async function probeFrontDoor(input: {
   try {
     const res = await client.get(path, { timeoutMs: 1500 });
     if (res.status < 200 || res.status >= 300) {
-      return { state: "diagnostic", diagnostic: transportDiagnostic("response") };
+      return { state: "diagnostic", diagnostic: transportDiagnostic("response", `daemon returned HTTP ${res.status}`) };
     }
     if (!identityQuery) return { state: "ready" };
     const diagnostic = (res.data as { permissionDrift?: FrontDoorPermissionDiagnostic } | null)?.permissionDrift;
     if (!diagnostic) {
-      return { state: "diagnostic", diagnostic: transportDiagnostic("response") };
+      return { state: "diagnostic", diagnostic: transportDiagnostic("response", "daemon response omitted permission diagnostics") };
     }
     if (
-      diagnostic.cwdRead.state === "visible"
+      diagnostic.transport.state === "healthy"
+      && diagnostic.cwdRead.state === "visible"
       && diagnostic.commandPath.state === "available"
       && diagnostic.enforcement.state === "aligned"
     ) {
@@ -139,17 +140,26 @@ export async function probeFrontDoor(input: {
     }
     return { state: "diagnostic", diagnostic };
   } catch (error) {
-    if (error instanceof DaemonTimeoutError) return { state: "diagnostic", diagnostic: transportDiagnostic("timeout") };
-    if (error instanceof DaemonResponseError) return { state: "diagnostic", diagnostic: transportDiagnostic("response") };
-    if (error instanceof DaemonConnectionError) return { state: "diagnostic", diagnostic: transportDiagnostic("connect") };
-    return { state: "diagnostic", diagnostic: transportDiagnostic("response") };
+    const detail = error instanceof Error ? error.message : String(error);
+    if (error instanceof DaemonTimeoutError) return { state: "diagnostic", diagnostic: transportDiagnostic("timeout", detail) };
+    if (error instanceof DaemonResponseError) return { state: "diagnostic", diagnostic: transportDiagnostic("response", detail) };
+    if (error instanceof DaemonConnectionError) return { state: "diagnostic", diagnostic: transportDiagnostic("connect", detail) };
+    return { state: "diagnostic", diagnostic: transportDiagnostic("response", detail) };
   }
 }
 
-function normalizeProbe(result: boolean | FrontDoorProbeResult): FrontDoorProbeResult {
+function normalizeProbe(result: boolean | FrontDoorProbeResult | LegacyTransportProbeResult): FrontDoorProbeResult {
   if (result === true) return { state: "ready" };
-  if (result === false) return { state: "connect", message: "cannot connect to the OpenRig daemon" };
-  return result;
+  if (result === false) return { state: "diagnostic", diagnostic: transportDiagnostic("connect", "cannot connect to the OpenRig daemon") };
+  switch (result.state) {
+    case "ready":
+    case "diagnostic":
+      return result;
+    case "connect":
+    case "timeout":
+    case "response":
+      return { state: "diagnostic", diagnostic: transportDiagnostic(result.state, result.message) };
+  }
 }
 
 function renderDiagnostic(diagnostic: FrontDoorPermissionDiagnostic): string {
@@ -165,6 +175,7 @@ function renderDiagnostic(diagnostic: FrontDoorPermissionDiagnostic): string {
     `command/PATH: ${diagnostic.commandPath.state}`,
     `${label}: ${diagnostic.enforcement.state.toUpperCase()}`,
   ];
+  if (diagnostic.transport.detail) parts.push(`detail=${diagnostic.transport.detail}`);
   if (diagnostic.enforcement.expected) parts.push(`expected=${diagnostic.enforcement.expected}`);
   if (effective) parts.push(`effective=${effective}`);
   if (diagnostic.enforcement.sourcePath) parts.push(`source=${diagnostic.enforcement.sourcePath}`);
@@ -206,14 +217,8 @@ export async function openMissionControl(io: FrontDoorIo = {}): Promise<void> {
   if (probeResult.state !== "ready") {
     for (const line of USAGE_LINES) err(line);
     err("");
-    if (probeResult.state === "diagnostic") {
-      err(`runtime posture: ${diagnosticVerdict(probeResult.diagnostic)}`);
-      err(renderDiagnostic(probeResult.diagnostic));
-    } else if (probeResult.state === "connect") {
-      err(`transport: connect · ${probeResult.message} · try: rig up`);
-    } else {
-      err(`transport: ${probeResult.state} · ${probeResult.message}`);
-    }
+    err(`runtime posture: ${diagnosticVerdict(probeResult.diagnostic)}`);
+    err(renderDiagnostic(probeResult.diagnostic));
     exit(1);
     return;
   }

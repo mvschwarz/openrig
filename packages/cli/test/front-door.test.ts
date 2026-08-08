@@ -188,12 +188,46 @@ describe("bare-rig front door — first-impression degrade (never a stack trace)
   });
 
   it.each(["timeout", "response"] as const)("%s stays a transport/response verdict and never becomes permission drift", async (state) => {
-    const deps = io({ probeDaemon: async () => ({ state, message: `${state} detail` }) });
+    const deps = io({
+      probeDaemon: async () => ({
+        state: "diagnostic" as const,
+        diagnostic: {
+          transport: { state, detail: `${state} detail` },
+          cwdRead: { state: "unknown" as const },
+          commandPath: { state: "unknown" as const },
+          enforcement: { axis: "not_applicable" as const, state: "unknown" as const, expected: null, effective: null, sourcePath: null, reason: "transport_unavailable" },
+          observedAt: "2026-08-08T00:00:00.000Z",
+        },
+      }),
+    });
     await runFrontDoor(["node", "rig"], deps);
     const text = deps.errLines.join("\n");
     expect(text).toContain(`transport: ${state}`);
+    expect(text).toContain(`${state} detail`);
     expect(text).not.toContain("PERMISSION_DRIFT");
     expect(text).not.toMatch(/daemon not running/i);
+  });
+
+  it("normalizes the legacy false probe into a complete four-axis diagnostic", async () => {
+    const deps = io({ probeDaemon: async () => false });
+    await runFrontDoor(["node", "rig"], deps);
+    const text = deps.errLines.join("\n");
+    expect(text).toContain("runtime posture: TRANSPORT_CONNECT");
+    expect(text).toContain("transport: connect");
+    expect(text).toContain("cwd/read: unknown");
+    expect(text).toContain("command/PATH: unknown");
+    expect(text).toContain("not_applicable: UNKNOWN");
+  });
+
+  it("normalizes a legacy transport-only result into the complete four-axis diagnostic", async () => {
+    const deps = io({ probeDaemon: async () => ({ state: "timeout", message: "legacy timeout detail" }) });
+    await runFrontDoor(["node", "rig"], deps);
+    const text = deps.errLines.join("\n");
+    expect(text).toContain("runtime posture: TRANSPORT_TIMEOUT");
+    expect(text).toContain("cwd/read: unknown");
+    expect(text).toContain("command/PATH: unknown");
+    expect(text).toContain("not_applicable: UNKNOWN");
+    expect(text).toContain("legacy timeout detail");
   });
 
   it("TUI init failure → helpful usage with the failure line, exit 1, no stack trace", async () => {
@@ -271,6 +305,27 @@ describe("front-door probe routing", () => {
     });
   });
 
+  it("never reports ready when transport is not healthy even if every local axis aligns", async () => {
+    const result = await probeFrontDoor({
+      env: { OPENRIG_NODE_ID: "node-1" },
+      client: {
+        get: async () => ({
+          status: 200,
+          data: {
+            permissionDrift: {
+              transport: { state: "timeout", detail: "upstream timed out" },
+              cwdRead: { state: "visible" },
+              commandPath: { state: "available" },
+              enforcement: { axis: "permission", state: "aligned", expected: "acceptEdits", effective: "acceptEdits", sourcePath: null },
+              observedAt: "2026-08-08T00:00:00.000Z",
+            },
+          },
+        }),
+      },
+    });
+    expect(result).toMatchObject({ state: "diagnostic", diagnostic: { transport: { state: "timeout", detail: "upstream timed out" } } });
+  });
+
   it.each([
     ["connect", new DaemonConnectionError("refused")],
     ["timeout", new DaemonTimeoutError("slow")],
@@ -289,6 +344,7 @@ describe("front-door probe routing", () => {
         enforcement: { state: "unknown", reason: "transport_unavailable" },
       },
     });
+    expect((result as { diagnostic: { transport: { detail?: string } } }).diagnostic.transport.detail).toContain(error.message);
   });
 });
 

@@ -333,11 +333,11 @@ export class SeatHandoverService {
       node: { id: node.id, runtime: node.runtime, cwd: node.cwd, launchPosture: successorPosture, model: node.model },
       departingSessionName: latestSession.session_name,
       occupantGeneration,
+      ...(predecessorGeneration
+        ? { onReplacementStarted: () => { this.appliedLaunchObservations.invalidateGeneration(predecessorGeneration); } }
+        : {}),
     });
     if (!launch.ok) {
-      if (launch.replacementStarted && predecessorGeneration) {
-        this.appliedLaunchObservations.deleteGeneration(predecessorGeneration);
-      }
       return {
         ok: false,
         code: "successor_create_failed",
@@ -347,13 +347,6 @@ export class SeatHandoverService {
         // its provider session file (never destroyed). Inspect tmux/daemon logs and retry.
         guidance: "The seat's registry binding is unchanged. If the failure was after the in-place respawn, the seat is re-wakeable from its provider session file. Inspect tmux/daemon logs and retry.",
       };
-    }
-
-    // The predecessor process is gone even though the registry commit is still
-    // pending. Its launch truth must not remain readable through downstream
-    // delivery/verification failures.
-    if (predecessorGeneration) {
-      this.appliedLaunchObservations.deleteGeneration(predecessorGeneration);
     }
 
     // 3. fresh: deliver the captured restore packet to the live successor BEFORE

@@ -106,6 +106,12 @@ function isSessionAbsenceError(err: unknown): boolean {
     msg.includes("no session");
 }
 
+function isPaneAbsenceError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message.toLowerCase();
+  return msg.includes("can't find pane") || msg.includes("pane not found") || msg.includes("no such pane");
+}
+
 // Post-reboot the tmux socket file at /tmp/tmux-<uid>/<name> is gone, so
 // `tmux has-session` exits non-zero with a transport-absent message rather than
 // a server/session-absent message. Treat that case as "no session" so cold-start
@@ -430,13 +436,13 @@ export class TmuxAdapter {
   }
 
   /** Seat-handover cutover: is the pane's process dead (the retiree exited; the pane held by
-   *  remain-on-exit)? The gate the cutover polls before respawn-no-k. Never throws → false on error. */
+   *  remain-on-exit)? A known-missing pane also proves physical cutover; unknown probe errors stay false. */
   async isPaneDead(paneId: string): Promise<boolean> {
     try {
       const output = await this.exec(`tmux display-message -p -t ${shellQuote(paneId)} "#{pane_dead}"`);
       return output.trim() === "1";
-    } catch {
-      return false;
+    } catch (error) {
+      return isPaneAbsenceError(error);
     }
   }
 

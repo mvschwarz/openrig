@@ -3,7 +3,7 @@ import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
-import { observeClaudePermission } from "../src/domain/permission-drift.js";
+import { observeClaudePermission, observeCodexSandbox } from "../src/domain/permission-drift.js";
 import { ClaudePermissionModeCache, PermissionDriftObserver } from "../src/domain/permission-drift-observer.js";
 
 describe("PermissionDriftObserver", () => {
@@ -69,5 +69,58 @@ describe("PermissionDriftObserver", () => {
     expect(cache.read()).toEqual(["acceptEdits", "manual"]);
     await vi.waitFor(() => expect(cache.read()).toEqual(["acceptEdits", "manual", "futureMode"]));
     expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it("classifies a production accessSync EACCES as cwd denied", () => {
+    const db = createFullTestDb();
+    try {
+      const rigs = new RigRepository(db);
+      const sessions = new SessionRegistry(db);
+      const rig = rigs.createRig("observer-eacces");
+      const node = rigs.addNode(rig.id, "dev.impl", { runtime: "codex", cwd: "/work/denied" });
+      sessions.registerClaimedSession(node.id, "dev-impl@observer-eacces");
+      const generation = sessions.currentOccupantTenure(node.id)!.generationUuid;
+      new AppliedLaunchObservationStore(db).recordGeneration(generation, observeCodexSandbox("-s workspace-write"));
+      const denied = Object.assign(new Error("permission denied"), { code: "EACCES" });
+      const observer = new PermissionDriftObserver({
+        db,
+        accessSync: (path: string) => {
+          if (path === "/work/denied") throw denied;
+        },
+      });
+
+      expect(observer.diagnose(node.id)).toMatchObject({
+        transport: { state: "healthy" },
+        cwdRead: { state: "denied" },
+        enforcement: { axis: "sandbox", state: "aligned" },
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it("keeps a non-permission production access error at cwd unknown", () => {
+    const db = createFullTestDb();
+    try {
+      const rigs = new RigRepository(db);
+      const sessions = new SessionRegistry(db);
+      const rig = rigs.createRig("observer-eio");
+      const node = rigs.addNode(rig.id, "dev.impl", { runtime: "codex", cwd: "/work/uncapturable" });
+      sessions.registerClaimedSession(node.id, "dev-impl@observer-eio");
+      const generation = sessions.currentOccupantTenure(node.id)!.generationUuid;
+      new AppliedLaunchObservationStore(db).recordGeneration(generation, observeCodexSandbox("-s workspace-write"));
+      const observer = new PermissionDriftObserver({
+        db,
+        accessSync: () => { throw Object.assign(new Error("I/O failure"), { code: "EIO" }); },
+      });
+
+      expect(observer.diagnose(node.id)).toMatchObject({
+        transport: { state: "healthy" },
+        cwdRead: { state: "unknown" },
+        enforcement: { axis: "sandbox", state: "aligned" },
+      });
+    } finally {
+      db.close();
+    }
   });
 });
