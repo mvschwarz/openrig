@@ -323,6 +323,10 @@ export class ClaudeCompactionEnforcer {
   // retired-generation stage → refuse. Injected resolver (atom-B's currentOccupantTenure by session).
   private readonly pendingStageGeneration = new Map<string, string | null>();
   private readonly pendingStageAuthorization = new Map<string, PendingStageAuthorization>();
+  // Monotonic per-seat invalidation identity. Unlike the occupant state maps, this survives
+  // invalidation so an already-awaiting manual trigger can detect a same-name handover even when
+  // best-effort successor tenure minting failed and the durable generation still appears equal.
+  private readonly occupantInvalidationEpoch = new Map<string, number>();
   private readonly resolveOccupantGeneration?: (sessionName: string) => string | null;
   private readonly decisionStore?: Pick<
     EnforcerDecisionStore,
@@ -715,6 +719,7 @@ export class ClaudeCompactionEnforcer {
       resolveCurrentSessionName?: (sessionName: string) => string | null;
     } = {},
   ): Promise<ManualCompactionOutcome> {
+    const startingInvalidationEpoch = this.occupantInvalidationEpoch.get(input.sessionName) ?? 0;
     const startingGenerationUuid = this.resolveOccupantGeneration?.(input.sessionName) ?? null;
     const activeHold = this.findAndObserveHold(input.sessionName, startingGenerationUuid);
     if (activeHold) {
@@ -834,6 +839,13 @@ export class ClaudeCompactionEnforcer {
               error: `Session '${input.sessionName}' changed occupant generation during manual compaction preparation.`,
             };
           }
+          if ((this.occupantInvalidationEpoch.get(input.sessionName) ?? 0) !== startingInvalidationEpoch) {
+            preCompactCheck.reason = "occupant_generation_changed";
+            return {
+              reason: preCompactCheck.reason,
+              error: `Session '${input.sessionName}' was invalidated during manual compaction preparation.`,
+            };
+          }
           return null;
         },
       },
@@ -889,6 +901,10 @@ export class ClaudeCompactionEnforcer {
    * record. Occupant-scoped (no atom-B): the retiring occupant is gone, so a name match IS the ghost.
    */
   invalidateOccupant(sessionName: string): void {
+    this.occupantInvalidationEpoch.set(
+      sessionName,
+      (this.occupantInvalidationEpoch.get(sessionName) ?? 0) + 1,
+    );
     this.lastAutoCompactAt.delete(sessionName);
     this.postCompactRestoreCooldownUntil.delete(sessionName);
     this.triggeredAboveThreshold.delete(sessionName);

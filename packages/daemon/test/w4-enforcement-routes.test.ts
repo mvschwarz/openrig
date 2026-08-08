@@ -8,6 +8,7 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { ClaudeCompactionEnforcer } from "../src/domain/claude-compaction-enforcer.js";
 import { EnforcerDecisionStore } from "../src/domain/enforcer-decision-store.js";
+import { DefaultOccupantInvalidator } from "../src/domain/occupant-invalidator.js";
 import { compactionRoutes } from "../src/routes/compaction.js";
 
 const IDENTITY = "orch-lead@rig";
@@ -513,6 +514,47 @@ describe("W4 compaction-control routes", () => {
       reason: "occupant_generation_changed",
     });
     expect(tx.delivered).toHaveLength(1);
+  });
+
+  it("the public manual trigger refuses a same-alias handover when successor tenure minting fails", async () => {
+    const store = new EnforcerDecisionStore(db, {
+      now: () => new Date("2026-08-08T18:00:00.000Z"),
+      authorizeTtlMinutes: () => 15,
+    });
+    const startingGeneration = sessionRegistry.currentOccupantGenerationForSession(SEAT);
+    let invalidator: DefaultOccupantInvalidator;
+    const tx = makeBoundaryTransport(() => {
+      const mint = vi.spyOn(sessionRegistry, "mintOccupantTenure").mockImplementationOnce(() => {
+        throw new Error("forced successor tenure mint failure");
+      });
+      sessionRegistry.registerClaimedSession(nodeId, SEAT, "handover");
+      mint.mockRestore();
+
+      expect(sessionRegistry.currentOccupantGenerationForSession(SEAT)).toBe(startingGeneration);
+      expect(
+        (db.prepare("SELECT session_name FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1")
+          .get(nodeId) as { session_name: string }).session_name,
+      ).toBe(SEAT);
+      invalidator.invalidateRetiringOccupant({
+        retiringSessionName: SEAT,
+        successorSessionName: SEAT,
+        retiringGeneration: startingGeneration ?? undefined,
+      });
+    });
+    installManualHarness(store, tx.transport);
+    invalidator = new DefaultOccupantInvalidator({
+      enforcer: manualDeps!.enforcer,
+      contextUsage: { invalidateOccupantSidecar: vi.fn() },
+    });
+
+    const response = await request("/api/compaction/trigger", { session: SEAT });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      reason: "occupant_generation_changed",
+    });
+    expect(tx.delivered).toHaveLength(1);
+    expect(tx.delivered[0]).toContain("automatic compaction preparation");
   });
 
   it("lists durable observation fields without requiring a write identity", async () => {
