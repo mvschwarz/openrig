@@ -126,6 +126,10 @@ activityRoutes.post("/hooks", async (c) => {
     hookEvent: typeof body.hookEvent === "string" ? body.hookEvent : "",
     subtype: stringOrNull(body.subtype),
     occurredAt: stringOrNull(body.occurredAt),
+    // W2a-1 — source-bound emitting generation, carried by the producer/relay. Until the relay/env
+    // injection lands (a filed prerequisite), this is absent ⇒ stamped null ⇒ unresolved at read
+    // (detection inert-but-sound; never false-fresh).
+    generation: stringOrNull(body.generation),
   });
 
   if (!result.ok) {

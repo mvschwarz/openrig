@@ -272,6 +272,11 @@ describe("Slice-04 C4 correction — public-altitude eligibility gate + producer
     registryRuntime?: string;
     seatRuntime?: string;
     now?: string;
+    // W2a-1 — mint a realistic occupant tenure for the seat (default true). A real registered seat has
+    // one (minted at the register verbs), so the activity resolves RESOLVED provenance and stays fresh,
+    // letting the eligibility discriminators (runtime / profile / event-class) actually run. mintTenure:
+    // false leaves the seat tenure-less ⇒ UNRESOLVED provenance, for the deliberate interim-drop guard.
+    mintTenure?: boolean;
   }
 
   function publicFixture(options: PublicFixtureOptions = {}) {
@@ -296,6 +301,13 @@ describe("Slice-04 C4 correction — public-altitude eligibility gate + producer
     ).run("node-1", "rig-1", "dev.impl", options.seatRuntime ?? "codex", "/project", "pod-1", "local:agents/impl", "default", "impl", "1.0.0", "abc123");
     db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status) VALUES (?, ?, ?, ?, ?)").run("session-1", "node-1", SESSION, "running", "ready");
     db.prepare("INSERT INTO bindings (id, node_id, tmux_session) VALUES (?, ?, ?)").run("binding-1", "node-1", SESSION);
+    if (options.mintTenure !== false) {
+      // A real registered seat mints an occupant tenure at the register verbs — reproduce it so the
+      // read resolves RESOLVED provenance (fresh), not the tenure-less UNRESOLVED path.
+      db.prepare(
+        "INSERT INTO occupant_tenures (id, node_id, generation_ordinal, generation_uuid, kind, native_session_id_at_boot) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run("tenure-node-1", "node-1", 1, "gen-uuid-node-1", "initial", null);
+    }
 
     const testApp = createTestApp(db, { activityHookToken: TOKEN });
     const service = new ProviderServiceImpl({
@@ -310,7 +322,7 @@ describe("Slice-04 C4 correction — public-altitude eligibility gate + producer
 
   async function postHook(
     app: ReturnType<typeof createTestApp>["app"],
-    input: { runtime?: string; hookEvent?: string; subtype?: string; occurredAt?: string },
+    input: { runtime?: string; hookEvent?: string; subtype?: string; occurredAt?: string; generation?: string | null },
   ): Promise<Response> {
     return app.request("/api/activity/hooks", {
       method: "POST",
@@ -321,6 +333,10 @@ describe("Slice-04 C4 correction — public-altitude eligibility gate + producer
         hookEvent: input.hookEvent ?? "Notification",
         subtype: input.subtype,
         occurredAt: input.occurredAt ?? EVENT_AT,
+        // W2a-1 — the emitting occupant's generation, carried source-bound (simulate the WIRED producer).
+        // Defaults to the fixture's minted tenure generation so the read RESOLVES (carried == live) and
+        // the eligibility discriminators actually run; pass null to exercise the INERT unwired path.
+        generation: input.generation === undefined ? "gen-uuid-node-1" : input.generation,
       }),
     });
   }
@@ -341,6 +357,19 @@ describe("Slice-04 C4 correction — public-altitude eligibility gate + producer
       staleAfter: STALE_AFTER,
       automationUse: "allow_switch_decision",
     }]);
+  });
+
+  // W2a-1 CONSUMER-LEVEL guard — the INERT-until-producer state. The seat HAS a tenure (the read-side
+  // resolver returns a live generation), but the relay/env producer-carry is NOT yet wired, so the hook
+  // carries NO generation ⇒ recorded null ⇒ generation_unverifiable ⇒ unknown/stale on the ACTIVITY
+  // (asserted in agent-activity-store.test.ts). This fold ships the STORE half + route ingestion only;
+  // the source-bound producer-carry (relay/env) is a filed PREREQUISITE and the tap's verify-demotion
+  // is a filed FOLLOW-ON. So the unchanged tap discards the unverifiable read → no reactive row yet.
+  // Sound (never false-fresh), inert until the carry lands; pins it honestly, NOT a restored false-fresh.
+  it("W2a-1 (interim/inert): producer not carrying the generation (hook carries none) ⇒ unverifiable ⇒ store-delivered unknown, tap does not yet emit", async () => {
+    const fx = publicFixture(); // seat HAS a tenure; the relay/env generation-carry is unwired
+    expect((await postHook(fx.app, { runtime: "codex", hookEvent: "rate_limit", generation: null })).status).toBe(200);
+    expect(reactiveRows(await fx.service.getReadModel())).toEqual([]);
   });
 
   it("HIGH-1a: a claude-code activity attached to a Codex seat must NOT emit a Codex row", async () => {

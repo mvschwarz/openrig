@@ -11,6 +11,11 @@ export interface HookActivityInput {
   hookEvent: string;
   subtype?: string | null;
   occurredAt?: string | null;
+  /** W2a-1 — the EMITTING occupant's generation, CARRIED source-bound on the hook (the producer/relay
+   *  supplies it at fire time; the route ingests it). NOT inferred from record-time state — that
+   *  inference mis-attributes a delayed prior-occupant hook to the live occupant. Absent (producer not
+   *  yet wired) ⇒ stamped null ⇒ unresolved at read (never false-fresh). */
+  generation?: string | null;
 }
 
 export type RecordHookActivityResult =
@@ -22,6 +27,13 @@ interface AgentActivityStoreDeps {
   eventBus: EventBus;
   now?: () => Date;
   freshnessMs?: number;
+  /** W2a-1 — resolve the LIVE occupant generation for a node (the shipped occupant-tenure
+   *  generation_uuid), or null when UNKNOWN. Injected (not self-constructed) so the store stays
+   *  decoupled from SessionRegistry and unit-testable with a fake. When ABSENT the store applies no
+   *  generation gate — legacy clock-only freshness — so the existing callers are unchanged until the
+   *  producer wiring injects the real resolver. Resolution is SYNCHRONOUS (a better-sqlite3 read),
+   *  which is why the gate lives inline in the sync read path with no signature churn to 9 callers. */
+  resolveOccupantGeneration?: (nodeId: string) => string | null;
 }
 
 interface SessionLookupRow {
@@ -40,12 +52,14 @@ export class AgentActivityStore {
   private readonly eventBus: EventBus;
   private readonly now: () => Date;
   private readonly freshnessMs: number;
+  private readonly resolveOccupantGeneration?: (nodeId: string) => string | null;
 
   constructor(deps: AgentActivityStoreDeps) {
     this.db = deps.db;
     this.eventBus = deps.eventBus;
     this.now = deps.now ?? (() => new Date());
     this.freshnessMs = deps.freshnessMs ?? AGENT_ACTIVITY_FRESHNESS_MS;
+    this.resolveOccupantGeneration = deps.resolveOccupantGeneration;
   }
 
   recordHookEvent(input: HookActivityInput): RecordHookActivityResult {
@@ -68,12 +82,22 @@ export class AgentActivityStore {
 
     const sampledAt = this.now().toISOString();
     const eventAt = parseTimestamp(input.occurredAt) ?? sampledAt;
+    // W2a-1 — SOURCE-BOUND stamp: the emitting occupant's generation is CARRIED on the hook (supplied
+    // by the producer/relay at fire time, ingested by the route), NEVER inferred from record-time
+    // state. A delayed prior-occupant hook recorded after a new tenure minted carries its OWN (prior)
+    // generation, so the read detects a mismatch rather than crediting it to the live occupant — and
+    // this is immune to boot_at precision / clock skew because nothing is timed. Absent (the relay/env
+    // producer-carry is a filed prerequisite, inert until it lands) ⇒ null ⇒ unresolved at read (the
+    // P21 claimed-era pattern: absence recorded as its own state, never false-fresh). No record-time
+    // resolver call — the live-gen resolver is used only at READ, for the comparison.
+    const generation = input.generation ?? null;
     const activity = normalizeHookActivity({
       runtime: input.runtime ?? session.runtime,
       hookEvent: input.hookEvent,
       subtype: input.subtype ?? null,
       sampledAt,
       eventAt,
+      generation,
     });
 
     const event = this.eventBus.emit({
@@ -108,6 +132,49 @@ export class AgentActivityStore {
     if (input.sessionName && payload.sessionName !== input.sessionName) return null;
 
     const referenceTime = input.now ?? this.now();
+
+    // W2a-1 — compare-at-read against the shipped occupant-tenure generation_uuid (pm ruling
+    // 2026-08-08, the fully-specified Variant C):
+    //  (1) both generations known and DIFFERENT ⇒ MISMATCH: positive evidence the claim belongs to a
+    //      prior, dead tenure ⇒ unknown + `generation_mismatch`, stale:true, provenance RESOLVED —
+    //      REFUSED, so no dead tenure is honored as the live seat (detection fires).
+    //  (2) both known and EQUAL (incl. a same-native-session relaunch — the ledger treats it as a
+    //      continuation with no new generation) ⇒ provenance RESOLVED, deliver normally (fresh).
+    //  (3) null on EITHER side ⇒ UNRESOLVABLE: ABSENCE of evidence, not a dead-tenure finding. State
+    //      UNKNOWN + its distinct reason, stale:true — NEVER fresh (fresh is a positive liveness claim
+    //      the seat has not earned; marking null-tenure fresh is bare-attribution one field over). The
+    //      STORE delivers the row carrying generationProvenance='unresolved' at the ACTIVITY layer. The
+    //      tap's discard-condition change that turns this label into a still-flowing consumer row is a
+    //      FOLLOW-ON (qitem-20260808183747-f7f04662, verify-demotion) — NOT this fold; in the INTERIM
+    //      the unchanged tap still discards it (a bounded regression whose exposure is the mint-race
+    //      transient; mm2 is unaffected — its daemon carries no occupant_tenures table until 0.5.1).
+    //      Ignorance and evidence get DIFFERENT verdicts; the two paths must not collapse.
+    // Gate runs only when a resolver is injected (else legacy clock-only, no label).
+    let generationProvenance: "resolved" | "unresolved" | undefined;
+    if (this.resolveOccupantGeneration) {
+      let liveGeneration: string | null;
+      try {
+        liveGeneration = this.resolveOccupantGeneration(nodeId);
+      } catch {
+        // Resolver EXCEPTION (e.g. a transient ledger/db fault) ⇒ DEGRADE to a distinct unknown
+        // branch: never crash the read, never render fresh. Distinct from a clean null (unresolvable).
+        return this.generationDegraded(activity, referenceTime);
+      }
+      const recordedGeneration = activity.generation ?? null;
+      if (liveGeneration !== null && recordedGeneration !== null) {
+        if (recordedGeneration !== liveGeneration) {
+          return this.generationMismatch(activity, referenceTime);
+        }
+        generationProvenance = "resolved";
+      } else {
+        return this.generationUnresolved(
+          activity,
+          referenceTime,
+          liveGeneration === null ? "generation_unresolvable" : "generation_unverifiable",
+        );
+      }
+    }
+
     const eventTime = activity.eventAt ? Date.parse(activity.eventAt) : NaN;
     if (Number.isFinite(eventTime) && referenceTime.getTime() - eventTime > this.freshnessMs) {
       return {
@@ -118,6 +185,7 @@ export class AgentActivityStore {
         sampledAt: referenceTime.toISOString(),
         fallback: false,
         stale: true,
+        generationProvenance,
       };
     }
 
@@ -126,6 +194,67 @@ export class AgentActivityStore {
       sampledAt: referenceTime.toISOString(),
       fallback: false,
       stale: false,
+      generationProvenance,
+    };
+  }
+
+  /** W2a-1 — the dead-tenure verdict: the claim's occupant generation is KNOWN and DIFFERENT from the
+   *  live one, so it must not be honored as the live seat. Returns unknown + `generation_mismatch`,
+   *  stale:true (detection fires), provenance `resolved` (both generations WERE resolved — they simply
+   *  differ). This is the ONLY generation case that abstains; a null on either side is UNRESOLVED
+   *  provenance and is DELIVERED labelled, never routed here. */
+  private generationMismatch(activity: AgentActivity, referenceTime: Date): AgentActivity {
+    return {
+      ...activity,
+      state: "unknown",
+      reason: "generation_mismatch",
+      generationProvenance: "resolved",
+      evidenceSource: "runtime_hook",
+      sampledAt: referenceTime.toISOString(),
+      fallback: false,
+      stale: true,
+    };
+  }
+
+  /** W2a-1 — the UNRESOLVABLE-provenance verdict (ABSENCE of evidence, not a dead-tenure finding).
+   *  State UNKNOWN + a distinct reason + stale:true so no consumer reads it as verified-live (fresh is
+   *  a positive liveness claim). The STORE delivers the row carrying generationProvenance:"unresolved"
+   *  at the ACTIVITY layer; turning that label into a still-flowing CONSUMER row is the tap FOLLOW-ON
+   *  (verify-demotion, qitem-20260808183747-f7f04662) — the unchanged tap still discards it in the
+   *  INTERIM (a bounded regression, mint-race-transient exposure; mm2 has no occupant_tenures table
+   *  until 0.5.1). Kept DISTINCT from generationMismatch: ignorance and evidence get different verdicts,
+   *  and the paths must not collapse — at the store now, and at the tap when the follow-on lands. */
+  private generationUnresolved(
+    activity: AgentActivity,
+    referenceTime: Date,
+    reason: "generation_unresolvable" | "generation_unverifiable",
+  ): AgentActivity {
+    return {
+      ...activity,
+      state: "unknown",
+      reason,
+      generationProvenance: "unresolved",
+      evidenceSource: "runtime_hook",
+      sampledAt: referenceTime.toISOString(),
+      fallback: false,
+      stale: true,
+    };
+  }
+
+  /** W2a-1 — the resolver-EXCEPTION verdict: the live-generation resolver threw (a transient ledger/db
+   *  fault). DEGRADE to unknown + a DISTINCT reason (`generation_resolver_error`) + stale:true, so the
+   *  read never crashes and the claim is never rendered fresh; provenance `unresolved`. Kept separate
+   *  from a clean null (unresolvable) so a resolver FAULT is distinguishable from an honest ABSENCE. */
+  private generationDegraded(activity: AgentActivity, referenceTime: Date): AgentActivity {
+    return {
+      ...activity,
+      state: "unknown",
+      reason: "generation_resolver_error",
+      generationProvenance: "unresolved",
+      evidenceSource: "runtime_hook",
+      sampledAt: referenceTime.toISOString(),
+      fallback: false,
+      stale: true,
     };
   }
 
@@ -171,6 +300,7 @@ function normalizeHookActivity(input: {
   subtype: string | null;
   sampledAt: string;
   eventAt: string;
+  generation?: string | null;
 }): AgentActivity {
   const rawEvent = input.hookEvent;
   const rawSubtype = input.subtype;
@@ -222,6 +352,7 @@ function normalizeHookActivity(input: {
     runtime,
     fallback: false,
     stale: false,
+    generation: input.generation ?? null,
   };
 }
 

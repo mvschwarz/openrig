@@ -643,6 +643,9 @@ describe("Session routes", () => {
       hookEvent: "Notification",
       subtype: "permission_prompt",
       occurredAt: new Date().toISOString(),
+      // W2a-1 — carry the emitting occupant generation (source-bound) so the read RESOLVES and the fresh
+      // hook state is honored, rather than degrading to generation_unverifiable.
+      generation: sessionRegistry.currentOccupantTenure(node.id)?.generationUuid ?? null,
     });
 
     const res = await app.request(`/api/rigs/${rig.id}/nodes`);
@@ -680,6 +683,9 @@ describe("Session routes", () => {
       sessionName: "dev-impl@test-rig",
       hookEvent: "UserPromptSubmit",
       occurredAt: "2000-01-01T00:00:00.000Z",
+      // W2a-1 — carry the emitting generation so the read RESOLVES, letting the CLOCK-staleness verdict
+      // (stale_runtime_hook) fire — rather than the generation gate short-circuiting to unverifiable.
+      generation: sessionRegistry.currentOccupantTenure(node.id)?.generationUuid ?? null,
     });
 
     const res = await app.request(`/api/rigs/${rig.id}/nodes`);

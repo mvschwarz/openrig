@@ -443,6 +443,19 @@ export interface AgentActivity {
   runtime?: string | null;
   fallback?: boolean;
   stale?: boolean;
+  /** W2a-1 — the occupant-tenure generation_uuid in force when this claim was recorded — the per-tenure
+   *  occupant identity that CHANGES for a new occupant (a handover/swap to a different occupant mints a
+   *  new generation) and persists only WITHIN a single tenure (a same-native-session relaunch is a
+   *  continuation, same generation); null = UNKNOWN at record time. node_id, NOT this, is what is stable
+   *  across handover — that is exactly why comparing generation detects a dead tenure. */
+  generation?: string | null;
+  /** W2a-1 — the read-side provenance verdict for the occupant generation (present only when the
+   *  read resolved through an injected generation resolver): `resolved` = both the recorded and the
+   *  live generation were known (equal here; a KNOWN mismatch returns state:"unknown" instead);
+   *  `unresolved` = null on either side, so the claim is DELIVERED carrying this honest label rather
+   *  than dropped or bare-attributed (pm ruling 2026-08-08, the P21 claimed-era pattern). Absent when
+   *  no resolver is wired (legacy clock-only path). */
+  generationProvenance?: "resolved" | "unresolved";
 }
 
 export interface NodeRecoveryGuidance {

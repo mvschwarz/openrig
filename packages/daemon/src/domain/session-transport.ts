@@ -1171,6 +1171,28 @@ export class SessionTransport {
     if (!latest || latest.evidenceSource !== "runtime_hook") {
       return `daemon-ingest link DOWN — no activity hook has ever been received for this seat; the ingest is rejecting posts (token mismatch → 401, or ingest unconfigured → 503) or Codex hook-trust is uncleared. Verify the seat was OpenRig-launched with hook-trust cleared`;
     }
+    // W2a-1 — a GENERATION verdict is stale:true but the hook is RECENT (age ~0); collapsing it to
+    // "beyond the store window / seat quiet" mislabels producer-not-landed / dead-tenure as a DARK
+    // seat and defeats the inert-visible differentiation. Distinguish the generation cause explicitly
+    // BEFORE the clock-stale fallback. generation_unverifiable is the INERT signal (producer-carry not
+    // yet wired — sound, not dark); the others name a real generation condition, not a quiet seat.
+    if (latest.stale === true && typeof latest.reason === "string" && latest.reason.startsWith("generation_")) {
+      const ageS = latest.eventAt ? Math.round((this.now().getTime() - Date.parse(latest.eventAt)) / 1000) : null;
+      const age = ageS !== null ? `${ageS}s ago` : "recently";
+      switch (latest.reason) {
+        case "generation_unverifiable":
+          // Carried generation was null — the MECHANISM, not a single cause: EITHER the source-bound
+          // producer-carry (relay/env) is not yet wired (inert), OR the emitting occupant had no tenure
+          // at fire time (mint-race / pre-060 upgrade-transition). Sound, not dark; not a quiet seat.
+          return `producer link OK — a recent hook exists (${age}) but carried NO occupant generation; either the source-bound producer-carry (relay/env) is not yet wired, OR the emitting occupant had no tenure at fire time (mint-race / pre-060 upgrade). Generation UNVERIFIABLE, not a quiet seat`;
+        case "generation_unresolvable":
+          return `producer link OK — a recent hook exists (${age}) but the LIVE occupant generation could not be resolved (no tenure row); generation UNRESOLVABLE, not a quiet seat`;
+        case "generation_mismatch":
+          return `producer link OK — a recent hook exists (${age}) but it belongs to a PRIOR occupant generation (a dead tenure), not this live occupant; the seat is NOT quiet`;
+        case "generation_resolver_error":
+          return `producer link OK — a recent hook exists (${age}) but the occupant-generation resolver errored; generation verdict DEGRADED, not a quiet seat`;
+      }
+    }
     if (latest.stale === true) {
       const ageS = latest.eventAt ? Math.round((this.now().getTime() - Date.parse(latest.eventAt)) / 1000) : null;
       return `producer link OK but STALE — the last activity hook arrived ${ageS !== null ? `${ageS}s ago` : "long ago"} (beyond the store window); the seat has gone quiet or its hooks stopped firing`;

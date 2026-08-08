@@ -329,6 +329,10 @@ export function createTestApp(
     db,
     eventBus,
     freshnessMs: opts?.activityFreshnessMs,
+    // W2a-1 — mirror the production producer wiring so integration tests exercise generation-honesty.
+    // Fixtures mint occupant tenures at registerSession, so same-tenure reads stay fresh; a test that
+    // reads across a minted new generation (or with no tenure) sees the honest UNKNOWN.
+    resolveOccupantGeneration: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
   });
 
   const podBundleSourceResolver = new PodBundleSourceResolver();

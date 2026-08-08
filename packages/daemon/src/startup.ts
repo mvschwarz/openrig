@@ -895,7 +895,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // (ContextUsageStore is constructed above, ahead of ClaimService, for FR-3.)
   const whoamiService = new WhoamiService({ db, rigRepo, sessionRegistry, transcriptStore, contextUsageStore });
   const nodeCmuxService = new NodeCmuxService(rigRepo, sessionRegistry, cmuxAdapter, tmuxAdapter);
-  const agentActivityStore = new AgentActivityStore({ db, eventBus });
+  // W2a-1 — producer wiring: the live occupant generation resolves synchronously from the shipped
+  // occupant-tenure ledger. generation_uuid CHANGES for a new occupant and persists only within one
+  // tenure (a same-session relaunch is a continuation with no new generation); node_id is the stable-
+  // across-handover key, not this. null = UNKNOWN, honored by the store as abstain (never a stale claim
+  // rendered live). No tmux exec — a better-sqlite3 read on the hot path.
+  const agentActivityStore = new AgentActivityStore({
+    db,
+    eventBus,
+    resolveOccupantGeneration: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
+  });
   const { SeatAttentionReconciler } = await import("./domain/seat-attention-reconciler.js");
   const seatAttentionReconciler = new SeatAttentionReconciler({
     sessionRegistry, eventBus, agentActivityStore, db,

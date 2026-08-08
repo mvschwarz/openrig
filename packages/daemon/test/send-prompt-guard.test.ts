@@ -407,6 +407,48 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(sendText).toHaveBeenCalled();
   });
 
+  // W2a-1 round-3 — the producer-link advisory must NOT collapse a FRESH generation verdict into a
+  // false clock-stale/seat-quiet warning. A resolver-backed store + a hook that carried NO generation
+  // ⇒ generation_unverifiable (state unknown, stale:true, but age ~0). The advisory must name the
+  // generation cause honestly (UNVERIFIABLE — either not-wired OR no-tenure-at-fire), never "beyond the
+  // store window / seat quiet". This is the inert-visible differentiation at the SessionTransport seam.
+  it("W2a-1: a FRESH generation_unverifiable read yields a generation-distinct advisory, NOT clock-stale/seat-quiet", async () => {
+    const now = new Date("2026-06-27T12:00:00.000Z");
+    // The seat HAS a tenure (registerSession minted one), so the live generation resolves; the hook
+    // carries NO generation ⇒ generation_unverifiable (fresh, age ~0).
+    const genStore = new AgentActivityStore({
+      db,
+      eventBus,
+      now: () => now,
+      resolveOccupantGeneration: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
+    });
+    genStore.recordHookEvent({
+      runtime: "claude-code",
+      sessionName: "dev-impl@my-rig",
+      hookEvent: "UserPromptSubmit",
+      occurredAt: now.toISOString(),
+      // deliberately NO generation carried ⇒ recorded null ⇒ unverifiable
+    });
+    const { sendText } = spies();
+    const t = new SessionTransport({
+      db,
+      rigRepo,
+      sessionRegistry,
+      eventBus,
+      tmuxAdapter: mockTmux({ capturePaneContent: async () => "xyzzy no prompt here", sendText }),
+      agentActivityStore: genStore,
+      now: () => now,
+    });
+    const r = await t.send("dev-impl@my-rig", "hi");
+    expect(r.ok).toBe(true);
+    expect(r.warning).toContain("producer-link:");
+    expect(r.warning).toContain("carried NO occupant generation"); // generation-distinct, not clock-stale
+    expect(r.warning).toContain("UNVERIFIABLE, not a quiet seat");
+    expect(r.warning).not.toContain("beyond the store window");
+    expect(r.warning).not.toContain("gone quiet");
+    expect(sendText).toHaveBeenCalled();
+  });
+
   it("AMEND: a hook fresh within the send window (idle) is authoritative and the send proceeds", async () => {
     const fixedNow = new Date("2026-06-27T12:00:00.000Z");
     agentActivityStore.recordHookEvent({
