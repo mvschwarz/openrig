@@ -14,6 +14,7 @@ import {
   WatchdogJobsError,
   WatchdogJobsRepository,
 } from "../src/domain/watchdog-jobs-repository.js";
+import { createFullTestDb } from "./helpers/test-app.js";
 
 describe("WatchdogJobsRepository (PL-004 Phase C)", () => {
   let db: Database.Database;
@@ -293,5 +294,117 @@ describe("WatchdogJobsRepository — target-generation stamp (i-c, opt-in)", () 
     const job = bareRepo.register(input({ targetGenerationUuid: "gen-x" }));
     expect(job.targetGeneration).toBeNull(); // column absent → opt-in silently degrades to role-bound
     bareDb.close();
+  });
+});
+
+// OPR.0.5.1 51-06 W2c — auto-registration is an exact-tuple ensure, not a blind
+// register. These are deliberately repository-altitude: a newer terminal row
+// must not hide an older runnable duplicate, and stopped is a durable operator
+// opt-out rather than a row to resurrect.
+describe("WatchdogJobsRepository — W2c exact-tuple auto-registration", () => {
+  let db: Database.Database;
+  let repo: WatchdogJobsRepository;
+
+  beforeEach(() => {
+    db = createFullTestDb();
+    repo = new WatchdogJobsRepository(db);
+  });
+  afterEach(() => db.close());
+
+  const input = (targetSession: string) => ({
+    policy: "idle-gate-qitem",
+    specYaml:
+      `policy: idle-gate-qitem\n` +
+      `generated_by: openrig-daemon\n` +
+      `target:\n  session: ${targetSession}\n` +
+      `interval_seconds: 60\n` +
+      `scan_interval_seconds: 60\n` +
+      `active_wake_interval_seconds: 900\n`,
+    targetSession,
+    intervalSeconds: 60,
+    scanIntervalSeconds: 60,
+    activeWakeIntervalSeconds: 900,
+    registeredBySession: "daemon@kernel",
+    targetGenerationUuid: null,
+  });
+
+  function ensureFn() {
+    const ensure = (repo as unknown as {
+      ensureAutoRegistration?: (value: ReturnType<typeof input>) => ReturnType<WatchdogJobsRepository["register"]>;
+    }).ensureAutoRegistration;
+    expect(ensure, "repository must expose the state-aware W2c exact-tuple ensure").toBeTypeOf("function");
+    return ensure!.bind(repo);
+  }
+
+  it("reuses the sole active row and preserves role-bound daemon identity across handover", () => {
+    const first = repo.register(input("active@rig"));
+    const ensured = ensureFn()(input("active@rig"));
+    expect(ensured.jobId).toBe(first.jobId);
+    expect(ensured).toMatchObject({
+      state: "active",
+      registeredBySession: "daemon@kernel",
+      registeredByGeneration: null,
+      targetGeneration: null,
+    });
+    expect(repo.dropArmedByRegisteringGeneration("retiring-generation")).toBe(0);
+    expect(repo.getById(first.jobId)?.state).toBe("active");
+  });
+
+  it("preserves the sole stopped row as an operator opt-out", () => {
+    const stopped = repo.register(input("stopped@rig"));
+    repo.stop(stopped.jobId, "operator_stopped");
+    const ensured = ensureFn()(input("stopped@rig"));
+    expect(ensured.jobId).toBe(stopped.jobId);
+    expect(ensured.state).toBe("stopped");
+    expect(repo.listAll().filter((job) => job.targetSession === "stopped@rig")).toHaveLength(1);
+  });
+
+  it("terminal-only history creates one replacement and subsequent ensure reuses it", () => {
+    const terminal = repo.register(input("terminal@rig"));
+    repo.markTerminal(terminal.jobId, "completed");
+    const ensure = ensureFn();
+    const replacement = ensure(input("terminal@rig"));
+    expect(replacement.jobId).not.toBe(terminal.jobId);
+    expect(replacement.state).toBe("active");
+    expect(ensure(input("terminal@rig")).jobId).toBe(replacement.jobId);
+    expect(repo.listAll().filter((job) => job.targetSession === "terminal@rig")).toHaveLength(2);
+  });
+
+  it("inspects full history: older active plus newer terminal reuses the active row", () => {
+    const active = repo.register(input("history@rig"));
+    const terminal = repo.register(input("history@rig"));
+    repo.markTerminal(terminal.jobId, "newer terminal history");
+    const ensured = ensureFn()(input("history@rig"));
+    expect(ensured.jobId).toBe(active.jobId);
+    expect(repo.listAll().filter((job) => job.targetSession === "history@rig")).toHaveLength(2);
+  });
+
+  it("fails loudly on every ambiguous nonterminal cardinality with all job ids and states", () => {
+    const scenarios = [
+      { target: "two-active@rig", states: ["active", "active"] as const },
+      { target: "two-stopped@rig", states: ["stopped", "stopped"] as const },
+      { target: "active-stopped@rig", states: ["active", "stopped"] as const },
+    ];
+    const ensure = ensureFn();
+
+    for (const scenario of scenarios) {
+      const rows = scenario.states.map((state) => {
+        const row = repo.register(input(scenario.target));
+        if (state === "stopped") repo.stop(row.jobId, "operator_stopped");
+        return repo.getByIdOrThrow(row.jobId);
+      });
+      try {
+        ensure(input(scenario.target));
+        throw new Error("expected ambiguous auto-registration to fail");
+      } catch (error) {
+        expect(error).toBeInstanceOf(WatchdogJobsError);
+        expect((error as WatchdogJobsError).code).toBe("auto_registration_ambiguous");
+        expect((error as WatchdogJobsError).details).toMatchObject({
+          targetSession: scenario.target,
+          rows: expect.arrayContaining(rows.map((row) => ({ jobId: row.jobId, state: row.state }))),
+        });
+      }
+      expect(repo.listAll().filter((job) => job.targetSession === scenario.target)).toHaveLength(2);
+    }
   });
 });

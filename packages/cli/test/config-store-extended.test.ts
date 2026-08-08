@@ -66,6 +66,8 @@ function clearEnv(): () => void {
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_INLINE",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_FILE_PATH",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION",
+    "OPENRIG_POLICIES_IDLE_GATE_QITEM_SCAN_INTERVAL_SECONDS",
+    "OPENRIG_POLICIES_IDLE_GATE_QITEM_ACTIVE_WAKE_INTERVAL_SECONDS",
     "RIGGED_PORT", "RIGGED_HOST", "RIGGED_DB",
     "RIGGED_TRANSCRIPTS_ENABLED", "RIGGED_TRANSCRIPTS_PATH",
   ];
@@ -141,6 +143,9 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "policies.claude_compaction.message_inline",
       "policies.claude_compaction.message_file_path",
       "policies.claude_compaction.post_restore_audit_instruction",
+      // OPR.0.5.1 51-06 W2c — tunable watchdog auto-registration cadence.
+      "policies.idle_gate_qitem.scan_interval_seconds",
+      "policies.idle_gate_qitem.active_wake_interval_seconds",
       "snapshots.periodic.enabled",
       "snapshots.periodic.interval_seconds",
       "snapshots.periodic.retention_keep",
@@ -154,6 +159,47 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "retention.batch_size",
     ];
     expect([...VALID_KEYS]).toEqual(expected);
+  });
+
+  it("W2c idle-gate-qitem cadence defaults to scan=60 and active-wake=900", () => {
+    const config = new ConfigStore(configPath).resolve();
+    const idleGate = (config.policies as typeof config.policies & {
+      idleGateQitem?: { scanIntervalSeconds: number; activeWakeIntervalSeconds: number };
+    }).idleGateQitem;
+    expect(idleGate).toEqual({
+      scanIntervalSeconds: 60,
+      activeWakeIntervalSeconds: 900,
+    });
+  });
+
+  it("W2c idle-gate-qitem cadence resolves env over file", () => {
+    const store = new ConfigStore(configPath);
+    expect(() => store.set("policies.idle_gate_qitem.scan_interval_seconds", "120")).not.toThrow();
+    expect(() => store.set("policies.idle_gate_qitem.active_wake_interval_seconds", "1800")).not.toThrow();
+    expect(store.resolveWithSource("policies.idle_gate_qitem.scan_interval_seconds"))
+      .toMatchObject({ value: 120, source: "file" });
+    expect(store.resolveWithSource("policies.idle_gate_qitem.active_wake_interval_seconds"))
+      .toMatchObject({ value: 1800, source: "file" });
+
+    process.env.OPENRIG_POLICIES_IDLE_GATE_QITEM_SCAN_INTERVAL_SECONDS = "30";
+    process.env.OPENRIG_POLICIES_IDLE_GATE_QITEM_ACTIVE_WAKE_INTERVAL_SECONDS = "450";
+    expect(store.resolveWithSource("policies.idle_gate_qitem.scan_interval_seconds"))
+      .toMatchObject({ value: 30, source: "env" });
+    expect(store.resolveWithSource("policies.idle_gate_qitem.active_wake_interval_seconds"))
+      .toMatchObject({ value: 450, source: "env" });
+  });
+
+  it("W2c idle-gate-qitem cadence rejects zero, negative, fractional, and partial numbers", () => {
+    const store = new ConfigStore(configPath);
+    for (const key of [
+      "policies.idle_gate_qitem.scan_interval_seconds",
+      "policies.idle_gate_qitem.active_wake_interval_seconds",
+    ]) {
+      for (const raw of ["0", "-1", "1.5", "60abc"]) {
+        expect(() => store.set(key, raw), `${key} must reject ${raw}`)
+          .toThrow(/positive integer/i);
+      }
+    }
   });
 
   // OPR.0.3.4.9 — CLI config resolve shape + malformed write rejection.
@@ -844,14 +890,19 @@ describe("init-workspace runner", () => {
 describe("ConfigStore — GHOST-STAGE (d): write-canonical + verify-readback", () => {
   let home: string;
   let savedHome: string | undefined;
+  let savedPort: string | undefined;
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "cfg-d-home-"));
     savedHome = process.env["OPENRIG_HOME"];
+    savedPort = process.env["OPENRIG_PORT"];
+    delete process.env["OPENRIG_PORT"];
     process.env["OPENRIG_HOME"] = home; // the canonical home the daemon resolves
   });
   afterEach(() => {
     if (savedHome === undefined) delete process.env["OPENRIG_HOME"];
     else process.env["OPENRIG_HOME"] = savedHome;
+    if (savedPort === undefined) delete process.env["OPENRIG_PORT"];
+    else process.env["OPENRIG_PORT"] = savedPort;
     rmSync(home, { recursive: true, force: true });
   });
 

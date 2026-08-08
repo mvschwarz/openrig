@@ -75,6 +75,8 @@ export interface RegisterWatchdogJobInput {
   targetGenerationUuid?: string | null;
 }
 
+export type EnsureAutoRegistrationInput = RegisterWatchdogJobInput;
+
 interface JobRow {
   job_id: string;
   policy: string;
@@ -213,6 +215,57 @@ export class WatchdogJobsRepository {
         );
     }
     return this.getByIdOrThrow(jobId);
+  }
+
+  /**
+   * Ensure the daemon-owned, role-bound auto-registration tuple has exactly
+   * one nonterminal row. Stopped is an operator opt-out and is therefore as
+   * durable as active; terminal-only history is replaced. The table has no
+   * uniqueness constraint, so every matching row must be inspected.
+   */
+  ensureAutoRegistration(input: EnsureAutoRegistrationInput): WatchdogJob {
+    const rows = this.listExactTuple(
+      input.policy,
+      input.targetSession,
+      input.targetGenerationUuid ?? null,
+    );
+    const nonterminal = rows.filter((row) => row.state !== "terminal");
+    if (nonterminal.length === 1) return nonterminal[0]!;
+    if (nonterminal.length > 1) {
+      throw new WatchdogJobsError(
+        "auto_registration_ambiguous",
+        `auto-registration is ambiguous for ${input.policy}/${input.targetSession}: ${nonterminal.length} nonterminal rows`,
+        {
+          policy: input.policy,
+          targetSession: input.targetSession,
+          targetGenerationUuid: input.targetGenerationUuid ?? null,
+          rows: nonterminal.map((row) => ({ jobId: row.jobId, state: row.state })),
+        },
+      );
+    }
+    return this.register(input);
+  }
+
+  /** All rows for the exact policy/seat/generation tuple, including history. */
+  listExactTuple(
+    policy: string,
+    targetSession: string,
+    targetGenerationUuid: string | null,
+  ): WatchdogJob[] {
+    const targetClause = this.hasTargetGenColumn
+      ? "target_generation_uuid IS ?"
+      : targetGenerationUuid === null
+        ? "1 = 1"
+        : "0 = 1";
+    const params = this.hasTargetGenColumn
+      ? [policy, targetSession, targetGenerationUuid]
+      : [policy, targetSession];
+    const rows = this.db.prepare(
+      `SELECT * FROM watchdog_jobs
+       WHERE policy = ? AND target_session = ? AND ${targetClause}
+       ORDER BY registered_at ASC, job_id ASC`,
+    ).all(...params) as JobRow[];
+    return rows.map(rowToJob);
   }
 
   getById(jobId: string): WatchdogJob | null {

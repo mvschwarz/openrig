@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -481,5 +481,79 @@ describe("SessionRegistry — atom-B occupant tenures", () => {
     expect(registry.currentOccupantTenure("node-2")!.generationOrdinal).toBe(1);
     db.prepare("INSERT INTO nodes (id, rig_id, logical_id, role, runtime) VALUES ('node-3','rig-1','dev1-x','worker','claude-code')").run();
     expect(registry.currentOccupantTenure("node-3")).toBeNull();
+  });
+});
+
+// OPR.0.5.1 51-06 W2c — both live-seat mint verbs share one watchdog seam.
+// The normal launch hook is intentionally observed while the just-inserted
+// session is still `unknown`; NodeLauncher promotes it to running afterwards.
+describe("SessionRegistry — W2c live-seat watchdog mint seam", () => {
+  let db: Database.Database;
+  beforeEach(() => {
+    db = createFullTestDb();
+    seedRig(db);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    db.close();
+  });
+
+  type Observer = {
+    ensure(nodeId: string, sessionName: string): void;
+    assertCoverage(nodeId: string, sessionName: string): void;
+  };
+
+  function withObserver(observer: Observer): SessionRegistry {
+    return new (SessionRegistry as unknown as new (
+      db: Database.Database,
+      observer: Observer,
+    ) => SessionRegistry)(db, observer);
+  }
+
+  function statusAtHook(nodeId: string, sessionName: string): string | undefined {
+    return (db.prepare(
+      "SELECT status FROM sessions WHERE node_id = ? AND session_name = ? ORDER BY created_at DESC LIMIT 1",
+    ).get(nodeId, sessionName) as { status: string } | undefined)?.status;
+  }
+
+  it("registerSession calls ensure then coverage at status=unknown", () => {
+    const seen: string[] = [];
+    const registry = withObserver({
+      ensure: (nodeId, sessionName) => seen.push(`ensure:${statusAtHook(nodeId, sessionName)}`),
+      assertCoverage: (nodeId, sessionName) => seen.push(`coverage:${statusAtHook(nodeId, sessionName)}`),
+    });
+    const session = registry.registerSession("node-1", "dev-impl@test-rig");
+    expect(session.status).toBe("unknown");
+    expect(seen).toEqual(["ensure:unknown", "coverage:unknown"]);
+  });
+
+  it("registerClaimedSession calls the same ensure/coverage seam at status=running", () => {
+    const seen: string[] = [];
+    const registry = withObserver({
+      ensure: (nodeId, sessionName) => seen.push(`ensure:${statusAtHook(nodeId, sessionName)}`),
+      assertCoverage: (nodeId, sessionName) => seen.push(`coverage:${statusAtHook(nodeId, sessionName)}`),
+    });
+    const session = registry.registerClaimedSession("node-1", "dev-impl@test-rig");
+    expect(session.status).toBe("running");
+    expect(seen).toEqual(["ensure:running", "coverage:running"]);
+  });
+
+  it("watchdog failures never roll back the session; ensure warns once and coverage stays loud", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const ensure = vi.fn(() => { throw new Error("injected ensure failure"); });
+    const assertCoverage = vi.fn(() => { throw new Error("missing auto-registration"); });
+    const registry = withObserver({ ensure, assertCoverage });
+
+    expect(() => registry.registerSession("node-1", "dev-impl@test-rig")).not.toThrow();
+    expect(() => registry.registerClaimedSession("node-2", "dev-qa@test-rig")).not.toThrow();
+    expect(registry.getSessionsForRig("rig-1")).toHaveLength(2);
+    expect(ensure).toHaveBeenCalledTimes(2);
+    expect(assertCoverage).toHaveBeenCalledTimes(2);
+
+    const lines = warn.mock.calls.map((args) => args.map(String).join(" "));
+    expect(lines.filter((line) => line.includes("injected ensure failure"))).toHaveLength(1);
+    expect(lines.filter((line) => line.includes("missing auto-registration"))).toHaveLength(2);
+    expect(lines.some((line) => line.includes("node-1") && line.includes("dev-impl@test-rig"))).toBe(true);
+    expect(lines.some((line) => line.includes("node-2") && line.includes("dev-qa@test-rig"))).toBe(true);
   });
 });

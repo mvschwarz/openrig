@@ -73,6 +73,8 @@ Keys:
   policies.claude_compaction.*
                          enabled, threshold_percent, compact_instruction,
                          message_inline, message_file_path
+  policies.idle_gate_qitem.scan_interval_seconds
+  policies.idle_gate_qitem.active_wake_interval_seconds
   snapshots.periodic.*   enabled, interval_seconds, retention_keep
   retention.*            enabled, transitions_days, watchdog_days,
                          watchdog_keep_per_job, batch_size

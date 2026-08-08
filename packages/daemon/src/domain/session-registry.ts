@@ -66,10 +66,22 @@ export interface LatestLiveSession {
   cwd: string | null;
 }
 
+export interface WatchdogRegistrationObserver {
+  ensure(nodeId: string, sessionName: string): unknown;
+  assertCoverage(nodeId: string, sessionName: string): unknown;
+  isEligibleSessionName?(sessionName: string): boolean;
+}
+
 export class SessionRegistry {
   readonly db: Database.Database;
-  constructor(db: Database.Database) {
+  private watchdogRegistrationObserver?: WatchdogRegistrationObserver;
+  constructor(db: Database.Database, watchdogRegistrationObserver?: WatchdogRegistrationObserver) {
     this.db = db;
+    this.watchdogRegistrationObserver = watchdogRegistrationObserver;
+  }
+
+  setWatchdogRegistrationObserver(observer: WatchdogRegistrationObserver): void {
+    this.watchdogRegistrationObserver = observer;
   }
 
   registerSession(nodeId: string, sessionName: string, kind: OccupantKind = "initial"): Session {
@@ -86,6 +98,7 @@ export class SessionRegistry {
       )
       .run(id, nodeId, sessionName);
     this.mintOccupantTenureBestEffort(nodeId, kind); // atom-B: mint this occupant generation
+    this.observeWatchdogRegistration(nodeId, sessionName);
     return this.rowToSession(
       this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow
     );
@@ -100,6 +113,7 @@ export class SessionRegistry {
       )
       .run(id, nodeId, sessionName);
     this.mintOccupantTenureBestEffort(nodeId, kind); // atom-B: mint this occupant generation
+    this.observeWatchdogRegistration(nodeId, sessionName);
 
     return this.rowToSession(
       this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow
@@ -137,6 +151,32 @@ export class SessionRegistry {
     }
   }
   private static tenureMintWarned = false;
+
+  private observeWatchdogRegistration(nodeId: string, sessionName: string): void {
+    const observer = this.watchdogRegistrationObserver;
+    if (!observer || observer.isEligibleSessionName?.(sessionName) === false) return;
+    try {
+      observer.ensure(nodeId, sessionName);
+    } catch (error) {
+      if (!SessionRegistry.watchdogEnsureWarned) {
+        SessionRegistry.watchdogEnsureWarned = true;
+        console.warn(
+          `[session-registry] watchdog auto-registration FAILED for node_id="${nodeId}" ` +
+          `session="${sessionName}": ${error instanceof Error ? error.message : String(error)} ` +
+          `(further ensure failures suppressed this process)`,
+        );
+      }
+    }
+    try {
+      observer.assertCoverage(nodeId, sessionName);
+    } catch (error) {
+      console.warn(
+        `[session-registry] watchdog coverage FAILED for node_id="${nodeId}" ` +
+        `session="${sessionName}": ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  private static watchdogEnsureWarned = false;
 
   mintOccupantTenure(nodeId: string, kind: OccupantKind, nativeSessionIdAtBoot?: string | null): OccupantTenure {
     if (nativeSessionIdAtBoot != null && nativeSessionIdAtBoot !== "") {

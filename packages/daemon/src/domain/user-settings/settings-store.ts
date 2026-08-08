@@ -116,6 +116,8 @@ export const SETTINGS_VALID_KEYS = [
   "policies.claude_compaction.message_inline",
   "policies.claude_compaction.message_file_path",
   "policies.claude_compaction.post_restore_audit_instruction",
+  "policies.idle_gate_qitem.scan_interval_seconds",
+  "policies.idle_gate_qitem.active_wake_interval_seconds",
   "snapshots.periodic.enabled",
   "snapshots.periodic.interval_seconds",
   "snapshots.periodic.retention_keep",
@@ -190,6 +192,8 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "policies.claude_compaction.message_inline": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_INLINE" },
   "policies.claude_compaction.message_file_path": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_FILE_PATH" },
   "policies.claude_compaction.post_restore_audit_instruction": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION" },
+  "policies.idle_gate_qitem.scan_interval_seconds": { primary: "OPENRIG_POLICIES_IDLE_GATE_QITEM_SCAN_INTERVAL_SECONDS" },
+  "policies.idle_gate_qitem.active_wake_interval_seconds": { primary: "OPENRIG_POLICIES_IDLE_GATE_QITEM_ACTIVE_WAKE_INTERVAL_SECONDS" },
   "snapshots.periodic.enabled": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_ENABLED" },
   "snapshots.periodic.interval_seconds": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_INTERVAL_SECONDS" },
   "snapshots.periodic.retention_keep": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_RETENTION_KEEP" },
@@ -245,6 +249,8 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "policies.claude_compaction.message_inline": ["policies", "claudeCompaction", "messageInline"],
   "policies.claude_compaction.message_file_path": ["policies", "claudeCompaction", "messageFilePath"],
   "policies.claude_compaction.post_restore_audit_instruction": ["policies", "claudeCompaction", "postRestoreAuditInstruction"],
+  "policies.idle_gate_qitem.scan_interval_seconds": ["policies", "idleGateQitem", "scanIntervalSeconds"],
+  "policies.idle_gate_qitem.active_wake_interval_seconds": ["policies", "idleGateQitem", "activeWakeIntervalSeconds"],
   "snapshots.periodic.enabled": ["snapshots", "periodic", "enabled"],
   "snapshots.periodic.interval_seconds": ["snapshots", "periodic", "intervalSeconds"],
   "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
@@ -471,6 +477,8 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "policies.claude_compaction.message_inline": return DEFAULT_CLAUDE_COMPACTION_RESTORE_INSTRUCTION;
     case "policies.claude_compaction.message_file_path": return defaultClaudeCompactionExtraInstructionFilePath();
     case "policies.claude_compaction.post_restore_audit_instruction": return DEFAULT_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION;
+    case "policies.idle_gate_qitem.scan_interval_seconds": return 60;
+    case "policies.idle_gate_qitem.active_wake_interval_seconds": return 900;
     case "snapshots.periodic.enabled": return true;
     case "snapshots.periodic.interval_seconds": return 300;
     case "snapshots.periodic.retention_keep": return 10;
@@ -510,7 +518,17 @@ function coerceValue(key: SettingsValidKey, raw: string, workspaceRoot: string):
 // in `set()`. Lockstep with cli/src/config-store.ts KEY_CONSTRAINTS so the
 // daemon's HTTP write surface (/api/config POST) rejects the same input
 // the CLI rejects.
+function positiveIntegerConstraint(key: string) {
+  return (raw: string, coerced: string | number | boolean): void => {
+    if (!/^\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced <= 0) {
+      throw new Error(`Invalid value for ${key}: must be a positive integer, got "${raw}"`);
+    }
+  };
+}
+
 const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: string | number | boolean) => void>> = {
+  "policies.idle_gate_qitem.scan_interval_seconds": positiveIntegerConstraint("policies.idle_gate_qitem.scan_interval_seconds"),
+  "policies.idle_gate_qitem.active_wake_interval_seconds": positiveIntegerConstraint("policies.idle_gate_qitem.active_wake_interval_seconds"),
   // Policy threshold: integer in [1, 100]. Documented contract from
   // slice 27 README. parseInt's permissive coercion ("80abc" → 80;
   // "80.5" → 80) is not safe for a key the daemon's compaction trigger

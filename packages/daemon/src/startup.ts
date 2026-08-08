@@ -85,6 +85,7 @@ import { ClassifierLeaseManager } from "./domain/classifier-lease-manager.js";
 import { ViewProjector } from "./domain/view-projector.js";
 import { wireViewEventBridge } from "./domain/view-event-bridge.js";
 import { WatchdogJobsRepository } from "./domain/watchdog-jobs-repository.js";
+import { WatchdogAutoRegistration } from "./domain/watchdog-auto-registration.js";
 import { WatchdogHistoryLog } from "./domain/watchdog-history-log.js";
 import { WatchdogPolicyEngine } from "./domain/watchdog-policy-engine.js";
 import { WatchdogScheduler } from "./domain/watchdog-scheduler.js";
@@ -333,6 +334,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // GHOST-STAGE (e/Class-B): stamp the arming occupant's generation so a swap can drop its armed jobs.
     (sessionName) => sessionRegistry.currentOccupantGenerationForSession(sessionName),
   );
+  const watchdogAutoRegistration = new WatchdogAutoRegistration({
+    db,
+    jobsRepo: watchdogJobsRepoInstance,
+    settingsStore: new ContextPackSettingsStore(),
+    warn: (message) => console.warn(message),
+  });
+  sessionRegistry.setWatchdogRegistrationObserver(watchdogAutoRegistration);
+  // Existing sessions predate the structural mint hook. Audit them at every
+  // boot without creating jobs: additive coverage stays loud, core boot stays live.
+  watchdogAutoRegistration.assertLiveSeatCoverage();
   const watchdogHistoryLogInstance = new WatchdogHistoryLog(db);
 
   const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand);
@@ -1122,6 +1133,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       return roots;
     },
   };
+  Object.assign(deps, { watchdogAutoRegistration });
 
   // Copy bundled reference docs to ~/.openrig/reference/ so agents can find them at a stable path
   try {

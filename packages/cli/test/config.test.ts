@@ -413,4 +413,16 @@ describe("Config CLI", () => {
       expect(found, `rig config --help text must mention "${prefix}" (or one of ${accepted.join(", ")})`).toBe(true);
     }
   });
+
+  it("W2c: rig config --help names both idle-gate-qitem cadence keys", () => {
+    const cmd = configCommand(join(tmpDir, "config.json"));
+    let combined = "";
+    cmd.configureOutput({
+      writeOut: (text) => { combined += text; },
+      writeErr: () => {},
+    });
+    cmd.outputHelp();
+    expect(combined).toContain("policies.idle_gate_qitem.scan_interval_seconds");
+    expect(combined).toContain("policies.idle_gate_qitem.active_wake_interval_seconds");
+  });
 });

@@ -49,6 +49,8 @@ function clearEnv(): () => void {
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_INLINE",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_FILE_PATH",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION",
+    "OPENRIG_POLICIES_IDLE_GATE_QITEM_SCAN_INTERVAL_SECONDS",
+    "OPENRIG_POLICIES_IDLE_GATE_QITEM_ACTIVE_WAKE_INTERVAL_SECONDS",
     "RIGGED_PORT", "RIGGED_HOST", "RIGGED_DB",
     "RIGGED_TRANSCRIPTS_ENABLED", "RIGGED_TRANSCRIPTS_PATH",
   ];
@@ -123,6 +125,9 @@ describe("SettingsStore (User Settings v0)", () => {
       "policies.claude_compaction.message_inline",
       "policies.claude_compaction.message_file_path",
       "policies.claude_compaction.post_restore_audit_instruction",
+      // OPR.0.5.1 51-06 W2c — tunable daemon auto-registration cadence.
+      "policies.idle_gate_qitem.scan_interval_seconds",
+      "policies.idle_gate_qitem.active_wake_interval_seconds",
       "snapshots.periodic.enabled",
       "snapshots.periodic.interval_seconds",
       "snapshots.periodic.retention_keep",
@@ -136,6 +141,48 @@ describe("SettingsStore (User Settings v0)", () => {
       "retention.watchdog_keep_per_job",
       "retention.batch_size",
     ]);
+  });
+
+  it("W2c idle-gate-qitem cadence defaults to scan=60 and active-wake=900", () => {
+    const store = new SettingsStore(configPath);
+    expect(() => store.resolveOne("policies.idle_gate_qitem.scan_interval_seconds"))
+      .not.toThrow();
+    expect(() => store.resolveOne("policies.idle_gate_qitem.active_wake_interval_seconds"))
+      .not.toThrow();
+    expect(store.resolveOne("policies.idle_gate_qitem.scan_interval_seconds"))
+      .toMatchObject({ value: 60, source: "default", defaultValue: 60 });
+    expect(store.resolveOne("policies.idle_gate_qitem.active_wake_interval_seconds"))
+      .toMatchObject({ value: 900, source: "default", defaultValue: 900 });
+  });
+
+  it("W2c idle-gate-qitem cadence resolves env over file", () => {
+    const store = new SettingsStore(configPath);
+    expect(() => store.set("policies.idle_gate_qitem.scan_interval_seconds", "120")).not.toThrow();
+    expect(() => store.set("policies.idle_gate_qitem.active_wake_interval_seconds", "1800")).not.toThrow();
+    expect(store.resolveOne("policies.idle_gate_qitem.scan_interval_seconds"))
+      .toMatchObject({ value: 120, source: "file" });
+    expect(store.resolveOne("policies.idle_gate_qitem.active_wake_interval_seconds"))
+      .toMatchObject({ value: 1800, source: "file" });
+
+    process.env.OPENRIG_POLICIES_IDLE_GATE_QITEM_SCAN_INTERVAL_SECONDS = "30";
+    process.env.OPENRIG_POLICIES_IDLE_GATE_QITEM_ACTIVE_WAKE_INTERVAL_SECONDS = "450";
+    expect(store.resolveOne("policies.idle_gate_qitem.scan_interval_seconds"))
+      .toMatchObject({ value: 30, source: "env" });
+    expect(store.resolveOne("policies.idle_gate_qitem.active_wake_interval_seconds"))
+      .toMatchObject({ value: 450, source: "env" });
+  });
+
+  it("W2c idle-gate-qitem cadence rejects zero, negative, fractional, and partial numbers", () => {
+    const store = new SettingsStore(configPath);
+    for (const key of [
+      "policies.idle_gate_qitem.scan_interval_seconds",
+      "policies.idle_gate_qitem.active_wake_interval_seconds",
+    ]) {
+      for (const raw of ["0", "-1", "1.5", "60abc"]) {
+        expect(() => store.set(key, raw), `${key} must reject ${raw}`)
+          .toThrow(/positive integer/i);
+      }
+    }
   });
 
   it("resolveAllWithSource returns every key with source + default", () => {

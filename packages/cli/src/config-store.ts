@@ -117,6 +117,10 @@ export interface RiggedConfig {
       messageFilePath: string;
       postRestoreAuditInstruction: string;
     };
+    idleGateQitem: {
+      scanIntervalSeconds: number;
+      activeWakeIntervalSeconds: number;
+    };
   };
   snapshots: {
     periodic: {
@@ -230,6 +234,10 @@ const DEFAULTS = {
       messageFilePath: DEFAULT_CLAUDE_COMPACTION_EXTRA_INSTRUCTION_FILE_PATH,
       postRestoreAuditInstruction: DEFAULT_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION,
     },
+    idleGateQitem: {
+      scanIntervalSeconds: 60,
+      activeWakeIntervalSeconds: 900,
+    },
   },
   snapshots: {
     periodic: {
@@ -318,6 +326,8 @@ export const VALID_KEYS = [
   "policies.claude_compaction.message_inline",
   "policies.claude_compaction.message_file_path",
   "policies.claude_compaction.post_restore_audit_instruction",
+  "policies.idle_gate_qitem.scan_interval_seconds",
+  "policies.idle_gate_qitem.active_wake_interval_seconds",
   "snapshots.periodic.enabled",
   "snapshots.periodic.interval_seconds",
   "snapshots.periodic.retention_keep",
@@ -387,6 +397,8 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "policies.claude_compaction.message_inline": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_INLINE" },
   "policies.claude_compaction.message_file_path": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_FILE_PATH" },
   "policies.claude_compaction.post_restore_audit_instruction": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION" },
+  "policies.idle_gate_qitem.scan_interval_seconds": { primary: "OPENRIG_POLICIES_IDLE_GATE_QITEM_SCAN_INTERVAL_SECONDS" },
+  "policies.idle_gate_qitem.active_wake_interval_seconds": { primary: "OPENRIG_POLICIES_IDLE_GATE_QITEM_ACTIVE_WAKE_INTERVAL_SECONDS" },
   "snapshots.periodic.enabled": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_ENABLED" },
   "snapshots.periodic.interval_seconds": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_INTERVAL_SECONDS" },
   "snapshots.periodic.retention_keep": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_RETENTION_KEEP" },
@@ -444,6 +456,8 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "policies.claude_compaction.message_inline": ["policies", "claudeCompaction", "messageInline"],
   "policies.claude_compaction.message_file_path": ["policies", "claudeCompaction", "messageFilePath"],
   "policies.claude_compaction.post_restore_audit_instruction": ["policies", "claudeCompaction", "postRestoreAuditInstruction"],
+  "policies.idle_gate_qitem.scan_interval_seconds": ["policies", "idleGateQitem", "scanIntervalSeconds"],
+  "policies.idle_gate_qitem.active_wake_interval_seconds": ["policies", "idleGateQitem", "activeWakeIntervalSeconds"],
   "snapshots.periodic.enabled": ["snapshots", "periodic", "enabled"],
   "snapshots.periodic.interval_seconds": ["snapshots", "periodic", "intervalSeconds"],
   "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
@@ -587,7 +601,17 @@ function coerceValue(key: ValidKey, raw: string, workspaceRoot: string): string 
 // banked feedback_static_gates_mirror_runtime_validators, the runtime
 // validator is the source of truth and must reject what the contract
 // forbids.
+function positiveIntegerConstraint(key: string) {
+  return (raw: string, coerced: string | number | boolean): void => {
+    if (!/^\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced <= 0) {
+      throw new Error(`Invalid value for ${key}: must be a positive integer, got "${raw}"`);
+    }
+  };
+}
+
 const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | number | boolean) => void>> = {
+  "policies.idle_gate_qitem.scan_interval_seconds": positiveIntegerConstraint("policies.idle_gate_qitem.scan_interval_seconds"),
+  "policies.idle_gate_qitem.active_wake_interval_seconds": positiveIntegerConstraint("policies.idle_gate_qitem.active_wake_interval_seconds"),
   // Policy threshold: integer in [1, 100]. Documented contract from
   // slice 27 README §"What the operator gets" — operator can lower to
   // e.g. 50 = compact earlier; range is 1-100 inclusive. A value of 0
@@ -815,6 +839,10 @@ export class ConfigStore {
           messageInline: v("policies.claude_compaction.message_inline") as string,
           messageFilePath: v("policies.claude_compaction.message_file_path") as string,
           postRestoreAuditInstruction: v("policies.claude_compaction.post_restore_audit_instruction") as string,
+        },
+        idleGateQitem: {
+          scanIntervalSeconds: v("policies.idle_gate_qitem.scan_interval_seconds") as number,
+          activeWakeIntervalSeconds: v("policies.idle_gate_qitem.active_wake_interval_seconds") as number,
         },
       },
       snapshots: {
