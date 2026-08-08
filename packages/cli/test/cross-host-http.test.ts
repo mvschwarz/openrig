@@ -16,6 +16,7 @@ import { captureCommand, type CaptureDeps } from "../src/commands/capture.js";
 import { transcriptCommand, type TranscriptDeps } from "../src/commands/transcript.js";
 import { broadcastCommand, type BroadcastDeps } from "../src/commands/broadcast.js";
 import { resolveCrossHostTarget } from "../src/cross-host-target.js";
+import { DaemonClient, SENDER_IDENTITY_HEADER } from "../src/client.js";
 import type { CrossHostResult } from "../src/cross-host-executor.js";
 import type { HostRegistryLoadResult } from "../src/host-registry.js";
 
@@ -578,5 +579,52 @@ describe("broadcast --host (net-new, CLI-direct POST)", () => {
     await cmd.parseAsync(["--rig", "r", "msg"], { from: "user" });
     expect(h.calls.length).toBe(1);
     expect(h.calls[0]!.url).toBe("http://vps-b:7433");
+  });
+
+  // A4 PIN 1 — THE MONEY PIN (the receipt's exact failure). A broadcast relayed over HTTP stamps the
+  // ORIGIN triple member@rig@<origin selfHostId> on X-OpenRig-Session, so the remote daemon renders the
+  // ORIGIN host (not its own). End-to-end through the REAL broadcast --host path: a real DaemonClient
+  // stamps the header (mocks can't — they bypass DaemonClient.fetch); lifecycleDeps answers the LOCAL
+  // /healthz with this host's selfHostId; the wire header is asserted == the triple.
+  it("PIN 1 (money) — broadcast --host stamps the ORIGIN triple on X-OpenRig-Session (remote renders the origin, not the destination)", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "dev50@v-rig"); // 2-part seat
+    vi.stubEnv("OPENRIG_URL", "http://local-daemon:7433"); // the LOCAL daemon resolveOriginSelfHostId reads
+    const wire: { headers: Record<string, string> } = { headers: {} };
+    const realClientFactory = (url: string) => new DaemonClient(url, {
+      fetchImpl: (async (_u: string, init: RequestInit) => {
+        wire.headers = Object.fromEntries(Object.entries((init.headers ?? {}) as Record<string, string>));
+        return new Response(JSON.stringify({ results: [], sent: 0, total: 0, failed: 0 }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }) as unknown as typeof fetch,
+    });
+    // lifecycleDeps.fetch answers the LOCAL /healthz with THIS host's selfHostId (the origin id).
+    const lifecycleDeps = {
+      exists: () => false,
+      fetch: async (u: string) => (u.includes("/healthz")
+        ? { ok: true, json: async () => ({ selfHostId: "origin-host" }) }
+        : { ok: false }),
+    } as never;
+    const deps = httpDeps(mockClient(() => ({ status: 200, data: {} })), { clientFactory: realClientFactory, lifecycleDeps });
+    const cmd = broadcastCommand(deps);
+    await cmd.parseAsync(["--host", "vps-b", "--rig", "remote-rig", "coordinate"], { from: "user" });
+    expect(wire.headers[SENDER_IDENTITY_HEADER]).toBe("dev50@v-rig@origin-host"); // ORIGIN triple, not "dev50@v-rig@vps-b"
+  });
+
+  // A4 PIN 5 (fail-open at the site) — when the local selfHostId is unavailable (no /healthz answer), the
+  // broadcast still ships, stamping the 2-part header: no new failure mode, degrades to today's behavior.
+  it("PIN 5 (fail-open) — local selfHostId unavailable ⇒ 2-part header, broadcast still ships", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "dev50@v-rig");
+    vi.stubEnv("OPENRIG_URL", "http://local-daemon:7433");
+    const wire: { headers: Record<string, string> } = { headers: {} };
+    const realClientFactory = (url: string) => new DaemonClient(url, {
+      fetchImpl: (async (_u: string, init: RequestInit) => {
+        wire.headers = Object.fromEntries(Object.entries((init.headers ?? {}) as Record<string, string>));
+        return new Response(JSON.stringify({ results: [], sent: 0, total: 0, failed: 0 }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }) as unknown as typeof fetch,
+    });
+    const lifecycleDeps = { exists: () => false, fetch: async () => ({ ok: false }) } as never; // /healthz fails ⇒ no selfHostId
+    const deps = httpDeps(mockClient(() => ({ status: 200, data: {} })), { clientFactory: realClientFactory, lifecycleDeps });
+    const cmd = broadcastCommand(deps);
+    await cmd.parseAsync(["--host", "vps-b", "--rig", "remote-rig", "coordinate"], { from: "user" });
+    expect(wire.headers[SENDER_IDENTITY_HEADER]).toBe("dev50@v-rig"); // 2-part, fail-open — no new failure mode
   });
 });

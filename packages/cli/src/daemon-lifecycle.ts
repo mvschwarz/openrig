@@ -832,6 +832,24 @@ export async function fetchSelfHostId(deps: LifecycleDeps, url: string): Promise
   }
 }
 
+/**
+ * A4 HTTP-path origin-triple carry: resolve THIS host's `selfHostId` for a REMOTE-targeting client,
+ * so the stamped X-OpenRig-Session becomes the origin TRIPLE (member@rig@selfHostId) and the remote
+ * daemon renders the ORIGIN host. The id comes from the LOCAL daemon's /healthz (env OPENRIG_URL,
+ * else the running local daemon), via the shipped fail-open `fetchSelfHostId`. C1 fail-open all the
+ * way down: no env URL and no running local daemon ⇒ `undefined` ⇒ the 2-part header stamps (today's
+ * behavior, no new failure mode). This is THIS host's own derived id, never a caller-supplied string.
+ */
+export async function resolveOriginSelfHostId(deps: LifecycleDeps): Promise<string | undefined> {
+  let localUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
+  if (!localUrl) {
+    const status = await getDaemonStatus(deps);
+    if (status.state === "running" && status.port !== undefined) localUrl = getDaemonUrl(status);
+  }
+  if (!localUrl) return undefined;
+  return fetchSelfHostId(deps, localUrl);
+}
+
 const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**

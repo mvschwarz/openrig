@@ -1,8 +1,8 @@
 import { Command } from "commander";
 import { readOwnHostName, resolveEffectiveHost } from "../host-selection.js";
 import { execSync } from "node:child_process";
-import { DaemonClient } from "../client.js";
-import { getDaemonStatus, getDaemonUrl } from "../daemon-lifecycle.js";
+import { DaemonClient, remoteDaemonClient } from "../client.js";
+import { getDaemonStatus, getDaemonUrl, resolveOriginSelfHostId } from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -426,7 +426,9 @@ async function runHttpWhoami(
   }
 
   const { classifyHttpFailedStep: classifyStatus } = await import("../host-registry.js");
-  const client = deps.clientFactory(host.url);
+  // A4: stamp the origin triple on this remote read (fail-open to 2-part when unavailable).
+  const originSelfHostId = await resolveOriginSelfHostId(deps.lifecycleDeps);
+  const client = remoteDaemonClient(deps.clientFactory, host.url, originSelfHostId);
   const headers = bearerAuthHeaders(bearerResult.token);
 
   try {
@@ -498,6 +500,9 @@ async function runFanOutWhoami(opts: WhoamiCliOptions, deps: WhoamiDeps): Promis
     error?: string;
   }
 
+  // A4: resolve the origin triple ONCE (THIS host's id, identical for every fan-out leg), then stamp
+  // it on each remote client — fail-open to 2-part when the local selfHostId is unavailable.
+  const originSelfHostId = await resolveOriginSelfHostId(deps.lifecycleDeps);
   const results: HostIdentityResult[] = await Promise.all(
     targetIds.map(async (id): Promise<HostIdentityResult> => {
       const host = allHosts.find((h) => h.id === id);
@@ -510,7 +515,7 @@ async function runFanOutWhoami(opts: WhoamiCliOptions, deps: WhoamiDeps): Promis
       if (!bearerResult.ok) {
         return { host: id, ok: false, failedStep: bearerResult.failedStep, error: bearerResult.error };
       }
-      const client = deps.clientFactory(httpHost.url);
+      const client = remoteDaemonClient(deps.clientFactory, httpHost.url, originSelfHostId);
       const headers = bearerAuthHeaders(bearerResult.token);
       try {
         const { classifyHttpFailedStep: classifyStatus } = await import("../host-registry.js");

@@ -1,10 +1,18 @@
-import { DaemonClient } from "./client.js";
+import { DaemonClient, remoteDaemonClient } from "./client.js";
 import { loadHostRegistry, resolveHost, resolveRemoteBearer, bearerAuthHeaders, classifyHttpFailedStep, classifyHttpError, type HttpHostEntry } from "./host-registry.js";
+import { resolveOriginSelfHostId, type LifecycleDeps } from "./daemon-lifecycle.js";
 import type { FailedStep } from "./cross-host-types.js";
 
 export interface RemoteHostDeps {
   clientFactory: (url: string) => DaemonClient;
   hostRegistryLoader?: () => ReturnType<typeof loadHostRegistry>;
+  /**
+   * A4: present ⇒ `runRemoteHttpOp` resolves THIS host's `selfHostId` (fail-open) and stamps the origin
+   * TRIPLE on the remote request so the remote daemon renders the ORIGIN host. Absent (some test mocks)
+   * ⇒ the 2-part header stamps, fail-open — no new failure mode. The 8 command modules that call this
+   * pass their command deps (which carry `lifecycleDeps`), so the production remote path stamps the triple.
+   */
+  lifecycleDeps?: LifecycleDeps;
 }
 
 export interface RemoteOpResult {
@@ -45,7 +53,10 @@ export async function runRemoteHttpOp(
     return { ok: false, failedStep: bearerResult.failedStep, error: bearerResult.error };
   }
 
-  const client = deps.clientFactory(httpHost.url);
+  // A4: the SINGLE remote-origin construction for the 8 modules that route through this chokepoint —
+  // stamp the origin triple (fail-open to 2-part when the local selfHostId is unavailable / no lifecycleDeps).
+  const originSelfHostId = deps.lifecycleDeps ? await resolveOriginSelfHostId(deps.lifecycleDeps) : undefined;
+  const client = remoteDaemonClient(deps.clientFactory, httpHost.url, originSelfHostId);
   const headers = bearerAuthHeaders(bearerResult.token);
   const requestOptions = opts.timeoutMs !== undefined ? { headers, timeoutMs: opts.timeoutMs } : { headers };
 

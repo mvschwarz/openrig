@@ -1,5 +1,22 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { DaemonClient, remoteDaemonClient, senderIdentityHeaders, SENDER_IDENTITY_HEADER } from "../src/client.js";
+
+/** Walk every non-test, non-dist .ts under a package's src/, returning [absPath, contents]. */
+function srcFiles(pkg: string): Array<[string, string]> {
+  const root = path.resolve(process.cwd(), "..", pkg, "src");
+  const out: Array<[string, string]> = [];
+  const walk = (dir: string): void => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) { if (e.name !== "node_modules" && e.name !== "dist" && e.name !== "test") walk(full); }
+      else if (e.isFile() && e.name.endsWith(".ts") && !e.name.endsWith(".d.ts")) out.push([full, fs.readFileSync(full, "utf8")]);
+    }
+  };
+  if (fs.existsSync(root)) walk(root);
+  return out;
+}
 
 function mockFetch(handler: (url: string, init: RequestInit) => Promise<Response>): typeof fetch {
   return handler as unknown as typeof fetch;
@@ -173,5 +190,33 @@ describe("A4 — origin-triple carry (senderIdentityHeaders + remoteDaemonClient
     expect(client.originSelfHostId).toBeUndefined();
     await client.post("/api/transport/send", { text: "hi" });
     expect(box.headers[SENDER_IDENTITY_HEADER]).toBe("dev50@v-rig"); // unchanged — no triple on the local path
+  });
+
+  // ── A4 GREP-GUARD — the two structural laws, asserted as EFFECTS (canonicity, not comments). ──
+  describe("grep-guard (structural properties, not conventions)", () => {
+    it("clause 1 — NO remote client is constructed directly: zero clientFactory(<registry host>.url) in src (all 5 route through remoteDaemonClient)", () => {
+      const hits: string[] = [];
+      for (const [file, body] of srcFiles("cli")) {
+        body.split("\n").forEach((line, i) => {
+          // a registry host url passed straight to clientFactory — the remote-targeting pattern the fix routes.
+          if (/clientFactory\(\s*(host|httpHost)\.url\s*\)/.test(line)) hits.push(`${path.basename(file)}:${i + 1}`);
+        });
+      }
+      expect(hits, `direct remote constructions must route through remoteDaemonClient; found: ${hits.join(", ")}`).toEqual([]);
+    });
+
+    it("clause 2 — pin 3 structurally true: `.originSelfHostId =` is ASSIGNED in EXACTLY ONE place (remoteDaemonClient, client.ts)", () => {
+      const hits: string[] = [];
+      for (const [file, body] of srcFiles("cli")) {
+        body.split("\n").forEach((line, i) => {
+          const t = line.trim();
+          if (t.startsWith("//") || t.startsWith("*") || t.startsWith("/*")) return; // skip comments
+          // an ASSIGNMENT to the field (`x.originSelfHostId = …`), not the declaration (`originSelfHostId?: string`).
+          if (/\.originSelfHostId\s*=\s*[^=]/.test(line)) hits.push(`${path.basename(file)}:${i + 1}`);
+        });
+      }
+      expect(hits.length, `originSelfHostId must be assigned in exactly ONE place; found: ${hits.join(", ")}`).toBe(1);
+      expect(hits[0]).toMatch(/^client\.ts:/);
+    });
   });
 });

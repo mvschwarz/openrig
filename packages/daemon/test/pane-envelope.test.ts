@@ -51,6 +51,18 @@ describe("wrapPaneEnvelope — slice 23 envelope renderer (daemon-side)", () => 
     expect(out).toMatch(/^From: from@a\nTo: to@b\n---\n/);
   });
 
+  // A4 PIN 2 — the preserve branch, now REACHABLE. A4 makes the CLI stamp a 3-part origin triple on
+  // X-OpenRig-Session; the remote daemon derives that 3-part actor and renders it HERE. This asserts the
+  // daemon renders an already-3-part sender VERBATIM — never re-stamped with THIS (destination) host's
+  // selfHostId, which would forge the origin as the destination (the receipt's exact bug). Previously
+  // this branch never fired (nothing 3-part arrived); A4 relies on it, so it is covered explicitly.
+  it("A4 pin 2 — an arriving 3-part origin sender is rendered VERBATIM, never re-stamped with this host", () => {
+    const out = wrapPaneEnvelope("dev50@v-rig@origin-host", "guard@my-rig", "hi", "destination-host");
+    expect(out).toContain("From: dev50@v-rig@origin-host"); // the ORIGIN host, preserved
+    expect(out).not.toContain("@destination-host"); // NOT re-stamped with the destination's id (no forgery)
+    expect(out).toContain('↩ Reply: rig send dev50@v-rig@origin-host "..."'); // reply hint round-trips the origin
+  });
+
   // V0.3.1 slice 23 — the queue-handoff nudge body MUST remain a
   // grep-able substring (banked compat note in IMPL-PRD §2 BC). This
   // test asserts the canonical bare-line is preserved inside the
