@@ -142,6 +142,16 @@ function inspectClaude(
   if (!applied || applied.runtime !== "claude-code" || applied.axis !== "permission" || applied.state !== "observed" || !expected) {
     return unknownEnforcement("permission", expected, sourcePath, applied?.reason ?? "applied_launch_unknown");
   }
+  if (expected === "bypassPermissions") {
+    return {
+      axis: "permission",
+      state: "aligned",
+      expected,
+      effective: expected,
+      sourcePath: null,
+      reason: "launch_bypasses_project_permissions",
+    };
+  }
 
   let raw: string;
   try {

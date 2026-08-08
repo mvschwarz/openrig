@@ -4,7 +4,7 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
 import { observeClaudePermission } from "../src/domain/permission-drift.js";
-import { PermissionDriftObserver } from "../src/domain/permission-drift-observer.js";
+import { ClaudePermissionModeCache, PermissionDriftObserver } from "../src/domain/permission-drift-observer.js";
 
 describe("PermissionDriftObserver", () => {
   it("reads only the exact current generation and runtime-native effective surface", () => {
@@ -15,7 +15,8 @@ describe("PermissionDriftObserver", () => {
       const rig = rigs.createRig("observer-rig");
       const node = rigs.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: "/work/project" });
       sessions.registerClaimedSession(node.id, "dev-impl@observer-rig");
-      new AppliedLaunchObservationStore(db).recordCurrent(node.id, observeClaudePermission("--permission-mode acceptEdits"));
+      const generation = sessions.currentOccupantTenure(node.id)!.generationUuid;
+      new AppliedLaunchObservationStore(db).recordGeneration(generation, observeClaudePermission("--permission-mode acceptEdits"));
       const readFile = vi.fn(() => JSON.stringify({ permissions: { defaultMode: "manual", allow: [], ask: [], deny: [] } }));
       const observer = new PermissionDriftObserver({
         db,
@@ -44,5 +45,29 @@ describe("PermissionDriftObserver", () => {
     } finally {
       db.close();
     }
+  });
+
+  it("never blocks a request on a cold or slow Claude help process", async () => {
+    let resolve!: (modes: string[] | null) => void;
+    const cache = new ClaudePermissionModeCache(() => new Promise((done) => { resolve = done; }));
+    cache.warm();
+    expect(cache.read()).toBeNull();
+    resolve(["acceptEdits", "manual"]);
+    await vi.waitFor(() => expect(cache.read()).toEqual(["acceptEdits", "manual"]));
+  });
+
+  it("refreshes harness vocabulary asynchronously after its cache expires", async () => {
+    let now = 1;
+    let modes = ["acceptEdits", "manual"];
+    const load = vi.fn(async () => modes);
+    const cache = new ClaudePermissionModeCache(load, 10, () => now);
+    cache.warm();
+    await vi.waitFor(() => expect(cache.read()).toEqual(["acceptEdits", "manual"]));
+
+    modes = ["acceptEdits", "manual", "futureMode"];
+    now = 12;
+    expect(cache.read()).toEqual(["acceptEdits", "manual"]);
+    await vi.waitFor(() => expect(cache.read()).toEqual(["acceptEdits", "manual", "futureMode"]));
+    expect(load).toHaveBeenCalledTimes(2);
   });
 });

@@ -101,6 +101,33 @@ describe("strict read-only effective observer", () => {
     expect(diagnostic.enforcement).toMatchObject({ axis: "permission", state: "aligned", expected: "acceptEdits" });
   });
 
+  it("treats an actually-applied full bypass as authoritative over project policy", () => {
+    const diagnostic = diagnoseRuntimePosture({
+      runtime: "claude-code",
+      cwd,
+      applied: observeClaudePermission("--dangerously-skip-permissions"),
+      fs: fsFixture({ [settingsPath]: JSON.stringify({ permissions: { defaultMode: "manual", deny: ["Read(/**)"] } }) }),
+    });
+    expect(diagnostic.enforcement).toMatchObject({
+      axis: "permission",
+      state: "aligned",
+      expected: "bypassPermissions",
+      effective: "bypassPermissions",
+      sourcePath: null,
+      reason: "launch_bypasses_project_permissions",
+    });
+  });
+
+  it("does not let ordinary acceptEdits bypass a narrowed project policy", () => {
+    const diagnostic = diagnoseRuntimePosture({
+      runtime: "claude-code",
+      cwd,
+      applied: observeClaudePermission("--permission-mode acceptEdits"),
+      fs: fsFixture({ [settingsPath]: JSON.stringify({ permissions: { defaultMode: "manual" } }) }),
+    });
+    expect(diagnostic.enforcement).toMatchObject({ state: "drift", expected: "acceptEdits" });
+  });
+
   it("reports UNKNOWN-EFFECTIVE when live harness semantics cannot be resolved", () => {
     const diagnostic = diagnoseRuntimePosture({
       runtime: "claude-code",
@@ -131,19 +158,39 @@ describe("strict read-only effective observer", () => {
     expect(diagnostic.enforcement).toMatchObject({ axis: "permission", state: "unknown", reason, sourcePath: settingsPath });
   });
 
-  it("keeps unreadable cwd/file and missing command separate from permission truth", () => {
+  it.each([
+    ["cwd/read", false, true, "denied", "available"],
+    ["command/PATH", true, false, "visible", "missing"],
+  ] as const)("isolates the %s axis while every other local axis stays healthy", (_axis, cwdVisible, commandPresent, cwdState, commandState) => {
+    const diagnostic = diagnoseRuntimePosture({
+      runtime: "claude-code",
+      cwd,
+      applied: observeClaudePermission("--permission-mode acceptEdits"),
+      fs: {
+        ...fsFixture({ [settingsPath]: JSON.stringify({ permissions: { defaultMode: "acceptEdits" } }) }, cwdVisible),
+        commandAvailable: () => commandPresent,
+      },
+    });
+    expect(diagnostic.transport.state).toBe("healthy");
+    expect(diagnostic.cwdRead.state).toBe(cwdState);
+    expect(diagnostic.commandPath.state).toBe(commandState);
+    expect(diagnostic.enforcement.state).toBe("aligned");
+  });
+
+  it("keeps unreadable settings separate from healthy transport, cwd, and command axes", () => {
     const denied = Object.assign(new Error("EACCES"), { code: "EACCES" });
     const diagnostic = diagnoseRuntimePosture({
       runtime: "claude-code",
       cwd,
       applied: observeClaudePermission("--permission-mode acceptEdits"),
       fs: {
-        ...fsFixture({ [settingsPath]: denied }, false),
-        commandAvailable: () => false,
+        ...fsFixture({ [settingsPath]: denied }, true),
+        commandAvailable: () => true,
       },
     });
-    expect(diagnostic.cwdRead.state).toBe("denied");
-    expect(diagnostic.commandPath.state).toBe("missing");
+    expect(diagnostic.transport.state).toBe("healthy");
+    expect(diagnostic.cwdRead.state).toBe("visible");
+    expect(diagnostic.commandPath.state).toBe("available");
     expect(diagnostic.enforcement).toMatchObject({ state: "unknown", reason: "settings_unreadable" });
   });
 

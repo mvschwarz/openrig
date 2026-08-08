@@ -67,7 +67,14 @@ export type SuccessorLaunchResult =
        */
       warnings?: string[];
     }
-  | { ok: false; code: string; step: "create_successor" | "resolve_pane" | "start_agent"; message: string };
+  | {
+      ok: false;
+      code: string;
+      step: "create_successor" | "resolve_pane" | "start_agent";
+      message: string;
+      /** True once the predecessor process has been replaced in its pane. */
+      replacementStarted: boolean;
+    };
 
 export class SuccessorSessionLauncher {
   private tmuxAdapter: TmuxAdapter;
@@ -161,6 +168,7 @@ export class SuccessorSessionLauncher {
         ok: false,
         code: "pane_probe_failed",
         step: "resolve_pane",
+        replacementStarted: false,
         message: `Could not probe tmux panes for departing session "${departingSession}": ${err instanceof Error ? err.message : String(err)}`,
       };
     }
@@ -169,6 +177,7 @@ export class SuccessorSessionLauncher {
         ok: false,
         code: "pane_unresolved",
         step: "resolve_pane",
+        replacementStarted: false,
         message: `Could not resolve a tmux pane for departing session "${departingSession}".`,
       };
     }
@@ -180,7 +189,7 @@ export class SuccessorSessionLauncher {
     //    bounded-timeout SIGKILL fallback (pinned degraded path) → respawn-pane (no -k) on the dead pane.
     const terminated = await this.terminateRetiree(pane.id);
     if (!terminated.ok) {
-      return { ok: false, code: "retiree_not_terminated", step: "create_successor", message: terminated.message };
+      return { ok: false, code: "retiree_not_terminated", step: "create_successor", message: terminated.message, replacementStarted: false };
     }
     const respawned = await this.tmuxAdapter.respawnPane(pane.id, undefined, { cwd, env });
     if (!respawned.ok) {
@@ -188,6 +197,7 @@ export class SuccessorSessionLauncher {
         ok: false,
         code: (respawned as { code?: string }).code ?? "respawn_failed",
         step: "create_successor",
+        replacementStarted: true,
         message: `Could not respawn the successor into pane "${pane.id}" of "${departingSession}": ${(respawned as { message?: string }).message ?? "respawn-pane failed"}`,
       };
     }
@@ -204,7 +214,7 @@ export class SuccessorSessionLauncher {
     //    shell in the pane; commit never runs, so the binding is not repointed.
     const started = await this.startAgent(input.node, departingSession, pane.id, cwd);
     if (!started.ok) {
-      return { ok: false, code: started.code, step: "start_agent", message: started.message };
+      return { ok: false, code: started.code, step: "start_agent", message: started.message, replacementStarted: true };
     }
 
     const discovered = this.discoveryRepo.upsertDiscoveredSession({

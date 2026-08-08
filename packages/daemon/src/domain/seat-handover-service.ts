@@ -312,6 +312,7 @@ export class SeatHandoverService {
 
     // 1. Capture the departing seat's context BEFORE the respawn replaces it.
     const capturedContext = await this.captureDepartingContext(latestSession.session_name);
+    const predecessorGeneration = this.sessionRegistry.currentOccupantTenure(node.id)?.generationUuid;
 
     // 2. Respawn the successor INTO the retiree's pane and launch it into a LIVE, READY agent (§2.1b
     //    seam, B1): resolve departing pane -> respawn-pane in place (preserved name) -> real runtime
@@ -334,6 +335,9 @@ export class SeatHandoverService {
       occupantGeneration,
     });
     if (!launch.ok) {
+      if (launch.replacementStarted && predecessorGeneration) {
+        this.appliedLaunchObservations.deleteGeneration(predecessorGeneration);
+      }
       return {
         ok: false,
         code: "successor_create_failed",
@@ -343,6 +347,13 @@ export class SeatHandoverService {
         // its provider session file (never destroyed). Inspect tmux/daemon logs and retry.
         guidance: "The seat's registry binding is unchanged. If the failure was after the in-place respawn, the seat is re-wakeable from its provider session file. Inspect tmux/daemon logs and retry.",
       };
+    }
+
+    // The predecessor process is gone even though the registry commit is still
+    // pending. Its launch truth must not remain readable through downstream
+    // delivery/verification failures.
+    if (predecessorGeneration) {
+      this.appliedLaunchObservations.deleteGeneration(predecessorGeneration);
     }
 
     // 3. fresh: deliver the captured restore packet to the live successor BEFORE
@@ -717,7 +728,10 @@ export class SeatHandoverService {
       // The store is best-effort, so observation persistence can never make an
       // otherwise successful handover fail.
       if (input.appliedLaunch) {
-        this.appliedLaunchObservations.recordCurrent(input.node.id, input.appliedLaunch);
+        const successorGeneration = this.sessionRegistry.currentOccupantTenure(input.node.id)?.generationUuid;
+        if (successorGeneration) {
+          this.appliedLaunchObservations.recordGeneration(successorGeneration, input.appliedLaunch);
+        }
       }
       // B2 (launched/fresh): persist the launch-scraped resume token atomically
       // with the claim, provenance "scrape" (mirrors StartupOrchestrator's

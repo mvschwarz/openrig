@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import nodePath from "node:path";
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import type Database from "better-sqlite3";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import {
@@ -29,7 +29,47 @@ function commandAvailable(command: string): boolean {
   return false;
 }
 
-function productionFs(): PermissionDriftFs {
+async function loadClaudePermissionModes(): Promise<string[] | null> {
+  return await new Promise((resolve) => {
+    execFile("claude", ["--help"], {
+      encoding: "utf8",
+      timeout: 1_000,
+      maxBuffer: 1024 * 1024,
+    }, (error, stdout) => resolve(error ? null : parseClaudePermissionModes(stdout)));
+  });
+}
+
+/** Warmed outside request handling; cold reads are immediate UNKNOWN. */
+export class ClaudePermissionModeCache {
+  private value: string[] | null = null;
+  private loading = false;
+  private loadedAt = 0;
+
+  constructor(
+    private readonly load: () => Promise<string[] | null> = loadClaudePermissionModes,
+    private readonly ttlMs = 60_000,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  warm(): void {
+    if (this.loading || (this.loadedAt > 0 && this.now() - this.loadedAt < this.ttlMs)) return;
+    this.loading = true;
+    void this.load()
+      .then((value) => { this.value = value; })
+      .catch(() => { this.value = null; })
+      .finally(() => {
+        this.loadedAt = this.now();
+        this.loading = false;
+      });
+  }
+
+  read(): string[] | null {
+    this.warm();
+    return this.value;
+  }
+}
+
+function productionFs(permissionModes: ClaudePermissionModeCache): PermissionDriftFs {
   return {
     readFile: (path) => fs.readFileSync(path, "utf8"),
     cwdReadable: (path) => {
@@ -37,15 +77,7 @@ function productionFs(): PermissionDriftFs {
       return true;
     },
     commandAvailable,
-    claudePermissionModes: () => {
-      const result = spawnSync("claude", ["--help"], {
-        encoding: "utf8",
-        timeout: 2_000,
-        maxBuffer: 1024 * 1024,
-      });
-      if (result.status !== 0 || result.error) return null;
-      return parseClaudePermissionModes(result.stdout);
-    },
+    claudePermissionModes: () => permissionModes.read(),
   };
 }
 
@@ -56,10 +88,17 @@ export class PermissionDriftObserver implements PermissionDriftReader {
   private readonly now?: () => Date;
 
   constructor(
-    private readonly input: { db: Database.Database; fs?: PermissionDriftFs; now?: () => Date },
+    private readonly input: {
+      db: Database.Database;
+      fs?: PermissionDriftFs;
+      now?: () => Date;
+      permissionModes?: ClaudePermissionModeCache;
+    },
   ) {
     this.observations = new AppliedLaunchObservationStore(input.db);
-    this.fs = input.fs ?? productionFs();
+    const permissionModes = input.permissionModes ?? new ClaudePermissionModeCache();
+    permissionModes.warm();
+    this.fs = input.fs ?? productionFs(permissionModes);
     this.now = input.now;
   }
 

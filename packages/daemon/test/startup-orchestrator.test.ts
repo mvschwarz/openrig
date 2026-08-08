@@ -168,6 +168,30 @@ describe("StartupOrchestrator", () => {
     expect(new AppliedLaunchObservationStore(db).readCurrent(seed.nodeId)).toMatchObject(appliedLaunch);
   });
 
+  it("binds a delayed launch observation to the generation that actually launched", async () => {
+    const seed = seedSession();
+    const launchedGeneration = sessionRegistry.currentOccupantTenure(seed.nodeId)!.generationUuid;
+    let releaseLaunch!: () => void;
+    const launchGate = new Promise<void>((resolve) => { releaseLaunch = resolve; });
+    const adapter = mockAdapter({
+      launchHarness: vi.fn(async () => {
+        await launchGate;
+        return { ok: true as const, appliedLaunch: observeClaudePermission("--permission-mode acceptEdits") };
+      }),
+    });
+
+    const pending = createOrchestrator().startNode(makeInput(seed, { adapter }));
+    await vi.waitFor(() => expect(adapter.launchHarness).toHaveBeenCalledTimes(1));
+    sessionRegistry.mintOccupantTenure(seed.nodeId, "handover");
+    releaseLaunch();
+    expect((await pending).ok).toBe(true);
+
+    expect(new AppliedLaunchObservationStore(db).readCurrent(seed.nodeId)).toBeNull();
+    expect(db.prepare("SELECT generation_uuid FROM applied_launch_observations").get()).toEqual({
+      generation_uuid: launchedGeneration,
+    });
+  });
+
   it("does not record an attempted effect when the managed launch fails", async () => {
     const seed = seedSession();
     const adapter = mockAdapter({ launchHarness: vi.fn(async () => ({ ok: false, error: "provider refused" })) });

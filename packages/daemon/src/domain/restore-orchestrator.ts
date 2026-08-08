@@ -1324,10 +1324,11 @@ export class RestoreOrchestrator {
     | { kind: "failed"; message: string }
     | { kind: "attention_required"; message: string; evidence?: string }
   > {
+    const launchGeneration = this.sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid;
     if (this.claudeResume.canResume(resumeType, resumeToken)) {
       const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model);
       if (result.ok) {
-        if (result.appliedLaunch) this.appliedLaunchStore.recordCurrent(nodeId, result.appliedLaunch);
+        if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };
       }
       if (result.code === "retry_fresh") return { kind: "retry_fresh" };
@@ -1345,7 +1346,7 @@ export class RestoreOrchestrator {
     if (this.codexResume.canResume(resumeType, resumeToken)) {
       const result = await this.codexResume.resume(sessionName, resumeType, resumeToken, cwd, codexConfigProfile, resolvedPosture, model);
       if (result.ok) {
-        if (result.appliedLaunch) this.appliedLaunchStore.recordCurrent(nodeId, result.appliedLaunch);
+        if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };
       }
       if (result.code === "retry_fresh") return { kind: "retry_fresh" };
@@ -1369,7 +1370,7 @@ export class RestoreOrchestrator {
     if (this.piResume?.canResume(resumeType, resumeToken)) {
       const result = await this.piResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture);
       if (result.ok) {
-        if (result.appliedLaunch) this.appliedLaunchStore.recordCurrent(nodeId, result.appliedLaunch);
+        if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };
       }
       if (result.code === "retry_fresh") return { kind: "retry_fresh" };

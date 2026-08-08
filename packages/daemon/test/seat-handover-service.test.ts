@@ -774,6 +774,34 @@ describe("SeatHandoverService", () => {
     expect(durableRows()).toBe(before);
   });
 
+  it("preserves predecessor posture truth when handover fails before physical replacement", async () => {
+    const { node } = seedSeat();
+    const store = new AppliedLaunchObservationStore(db);
+    const generation = sessionRegistry.currentOccupantTenure(node.id)!.generationUuid;
+    store.recordGeneration(generation, observeCodexSandbox(" -s workspace-write"));
+    listPanes.mockRejectedValue(new Error("socket unavailable"));
+
+    expect((await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" })).ok).toBe(false);
+    expect(store.readCurrent(node.id)).toMatchObject({ generationUuid: generation, value: "workspace-write" });
+  });
+
+  it.each(["launch", "readiness", "context-delivery"] as const)(
+    "invalidates predecessor posture truth when %s fails after physical replacement",
+    async (failure) => {
+      const { node } = seedSeat();
+      const store = new AppliedLaunchObservationStore(db);
+      const generation = sessionRegistry.currentOccupantTenure(node.id)!.generationUuid;
+      store.recordGeneration(generation, observeCodexSandbox(" -s workspace-write"));
+      if (failure === "launch") launchHarness.mockResolvedValue({ ok: false, error: "provider refused" });
+      if (failure === "readiness") checkReady.mockResolvedValue({ ready: false, reason: "not interactive" });
+      if (failure === "context-delivery") sendText.mockResolvedValue({ ok: false, code: "denied", message: "denied" });
+
+      expect((await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" })).ok).toBe(false);
+      expect(store.readCurrent(node.id)).toBeNull();
+      expect(db.prepare("SELECT COUNT(*) AS n FROM applied_launch_observations WHERE generation_uuid = ?").get(generation)).toEqual({ n: 0 });
+    },
+  );
+
   it("unwinds when context delivery fails WITHOUT killing the preserved seat (no false-green)", async () => {
     const { node } = seedSeat();
     sendText.mockResolvedValue({ ok: false, code: "session_not_found", message: "can't find session" });

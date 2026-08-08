@@ -25,12 +25,8 @@ interface ObservationRow {
 export class AppliedLaunchObservationStore {
   constructor(private readonly db: Database.Database) {}
 
-  recordCurrent(nodeId: string, observation: AppliedLaunchObservation): boolean {
+  recordGeneration(generationUuid: string, observation: AppliedLaunchObservation): boolean {
     try {
-      const tenure = this.db.prepare(
-        "SELECT generation_uuid FROM occupant_tenures WHERE node_id = ? ORDER BY generation_ordinal DESC LIMIT 1",
-      ).get(nodeId) as { generation_uuid: string } | undefined;
-      if (!tenure) return false;
       this.db.prepare(`
         INSERT INTO applied_launch_observations (
           generation_uuid, runtime, axis, observation_state, value, reason, observed_at
@@ -43,13 +39,22 @@ export class AppliedLaunchObservationStore {
           reason = excluded.reason,
           observed_at = excluded.observed_at
       `).run(
-        tenure.generation_uuid,
+        generationUuid,
         observation.runtime,
         observation.axis,
         observation.state,
         observation.value,
         observation.reason ?? null,
       );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  deleteGeneration(generationUuid: string): boolean {
+    try {
+      this.db.prepare("DELETE FROM applied_launch_observations WHERE generation_uuid = ?").run(generationUuid);
       return true;
     } catch {
       return false;

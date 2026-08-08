@@ -124,6 +124,7 @@ export class StartupOrchestrator {
           ? "rebuilt"
           : "fresh";
     let appliedLaunch: AppliedLaunchObservation | undefined;
+    const launchGeneration = this.sessionRegistry.currentOccupantTenure(input.nodeId)?.generationUuid;
 
     // 1. Mark pending
     this.sessionRegistry.updateStartupStatus(input.sessionId, "pending");
@@ -260,7 +261,9 @@ export class StartupOrchestrator {
     // The adapter returned the exact enforcing value it inserted, and readiness
     // proved this managed launch became live. Persistence is deliberately
     // best-effort: observation failure yields UNKNOWN, never a failed launch.
-    if (appliedLaunch) this.appliedLaunchStore.recordCurrent(input.nodeId, appliedLaunch);
+    if (appliedLaunch && launchGeneration) {
+      this.appliedLaunchStore.recordGeneration(launchGeneration, appliedLaunch);
+    }
 
     // OPR.0.4.3.06 — a fresh or fresh-fallback MANAGED launch is challenged so
     // orientation can be proved (never assumed). Resumed restores (excluded by

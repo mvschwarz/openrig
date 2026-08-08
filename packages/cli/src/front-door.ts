@@ -44,6 +44,23 @@ interface FrontDoorProbeClient {
   get(path: string, options?: { timeoutMs?: number }): Promise<{ status: number; data: unknown }>;
 }
 
+function transportDiagnostic(state: "connect" | "timeout" | "response"): FrontDoorPermissionDiagnostic {
+  return {
+    transport: { state },
+    cwdRead: { state: "unknown" },
+    commandPath: { state: "unknown" },
+    enforcement: {
+      axis: "not_applicable",
+      state: "unknown",
+      expected: null,
+      effective: null,
+      sourcePath: null,
+      reason: "transport_unavailable",
+    },
+    observedAt: new Date().toISOString(),
+  };
+}
+
 /** Monorepo-first, bundled-fallback TUI entry resolution — the exact
  * resolveDaemonPath pattern (see daemon-lifecycle.ts): a dev checkout's
  * `packages/tui/dist` is the source of truth; an npm-install layout ships
@@ -106,12 +123,12 @@ export async function probeFrontDoor(input: {
   try {
     const res = await client.get(path, { timeoutMs: 1500 });
     if (res.status < 200 || res.status >= 300) {
-      return { state: "response", message: `daemon replied HTTP ${res.status}` };
+      return { state: "diagnostic", diagnostic: transportDiagnostic("response") };
     }
     if (!identityQuery) return { state: "ready" };
     const diagnostic = (res.data as { permissionDrift?: FrontDoorPermissionDiagnostic } | null)?.permissionDrift;
     if (!diagnostic) {
-      return { state: "response", message: "current-seat diagnostic was absent from the daemon response" };
+      return { state: "diagnostic", diagnostic: transportDiagnostic("response") };
     }
     if (
       diagnostic.cwdRead.state === "visible"
@@ -122,10 +139,10 @@ export async function probeFrontDoor(input: {
     }
     return { state: "diagnostic", diagnostic };
   } catch (error) {
-    if (error instanceof DaemonTimeoutError) return { state: "timeout", message: error.message };
-    if (error instanceof DaemonResponseError) return { state: "response", message: error.message };
-    if (error instanceof DaemonConnectionError) return { state: "connect", message: error.message };
-    return { state: "response", message: error instanceof Error ? error.message : String(error) };
+    if (error instanceof DaemonTimeoutError) return { state: "diagnostic", diagnostic: transportDiagnostic("timeout") };
+    if (error instanceof DaemonResponseError) return { state: "diagnostic", diagnostic: transportDiagnostic("response") };
+    if (error instanceof DaemonConnectionError) return { state: "diagnostic", diagnostic: transportDiagnostic("connect") };
+    return { state: "diagnostic", diagnostic: transportDiagnostic("response") };
   }
 }
 
@@ -155,6 +172,14 @@ function renderDiagnostic(diagnostic: FrontDoorPermissionDiagnostic): string {
   return parts.join(" · ");
 }
 
+function diagnosticVerdict(diagnostic: FrontDoorPermissionDiagnostic): string {
+  if (diagnostic.transport.state !== "healthy") return `TRANSPORT_${diagnostic.transport.state.toUpperCase()}`;
+  if (diagnostic.cwdRead.state !== "visible") return `CWD_READ_${diagnostic.cwdRead.state.toUpperCase()}`;
+  if (diagnostic.commandPath.state !== "available") return `COMMAND_PATH_${diagnostic.commandPath.state.toUpperCase()}`;
+  if (diagnostic.enforcement.state === "drift") return "PERMISSION_DRIFT";
+  return "UNKNOWN_EFFECTIVE";
+}
+
 async function defaultLaunchTui(): Promise<number> {
   const entry = resolveTuiPath(import.meta.dirname);
   if (!entry) throw new Error("mission-control TUI is not installed (no tui/dist/main.js next to this CLI)");
@@ -182,10 +207,7 @@ export async function openMissionControl(io: FrontDoorIo = {}): Promise<void> {
     for (const line of USAGE_LINES) err(line);
     err("");
     if (probeResult.state === "diagnostic") {
-      const verdict = probeResult.diagnostic.enforcement.state === "drift"
-        ? "PERMISSION_DRIFT"
-        : "UNKNOWN_EFFECTIVE";
-      err(`runtime posture: ${verdict}`);
+      err(`runtime posture: ${diagnosticVerdict(probeResult.diagnostic)}`);
       err(renderDiagnostic(probeResult.diagnostic));
     } else if (probeResult.state === "connect") {
       err(`transport: connect · ${probeResult.message} · try: rig up`);

@@ -9,6 +9,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { runFrontDoor, resolveTuiPath, probeFrontDoor, type FrontDoorIo } from "../src/front-door.js";
+import { DaemonConnectionError, DaemonResponseError, DaemonTimeoutError } from "../src/client.js";
 
 function io(overrides: Partial<FrontDoorIo> = {}): FrontDoorIo & {
   outLines: string[];
@@ -72,18 +73,85 @@ describe("bare-rig front door — ownership rules", () => {
 });
 
 describe("bare-rig front door — first-impression degrade (never a stack trace)", () => {
-  it("transport connect failure → typed helpful usage naming `rig up`, never generic daemon-down", async () => {
-    const deps = io({ probeDaemon: async () => false });
+  it("transport connect failure → four typed axes naming `rig up`, never generic daemon-down", async () => {
+    const deps = io({
+      probeDaemon: async () => ({
+        state: "diagnostic" as const,
+        diagnostic: {
+          transport: { state: "connect" as const },
+          cwdRead: { state: "unknown" as const },
+          commandPath: { state: "unknown" as const },
+          enforcement: { axis: "not_applicable" as const, state: "unknown" as const, expected: null, effective: null, sourcePath: null, reason: "transport_unavailable" },
+          observedAt: "2026-08-08T00:00:00.000Z",
+        },
+      }),
+    });
     const handled = await runFrontDoor(["node", "rig"], deps);
     expect(handled).toBe(true);
     expect(deps.launches).toBe(0);
     const text = deps.errLines.join("\n");
     expect(text).toMatch(/transport: connect/i);
+    expect(text).toContain("cwd/read: unknown");
+    expect(text).toContain("command/PATH: unknown");
+    expect(text).toContain("not_applicable: UNKNOWN");
+    expect(text).toContain("runtime posture: TRANSPORT_CONNECT");
     expect(text).toMatch(/rig up/);
     expect(text).toMatch(/rig --help/);
     expect(text).not.toMatch(/daemon not running/i);
     expect(text).not.toMatch(/\n\s+at /); // no stack frames
     expect(deps.exits).toEqual([1]);
+  });
+
+  it.each([
+    ["cwd denied", "visible", "available", "aligned", "CWD_READ_DENIED"],
+    ["command missing", "visible", "missing", "aligned", "COMMAND_PATH_MISSING"],
+    ["permission drift", "visible", "available", "drift", "PERMISSION_DRIFT"],
+    ["permission unknown", "visible", "available", "unknown", "UNKNOWN_EFFECTIVE"],
+  ] as const)("renders an axis-specific verdict for %s", async (_label, _healthyCwd, commandState, enforcementState, verdict) => {
+    const cwdState = _label === "cwd denied" ? "denied" as const : "visible" as const;
+    const deps = io({
+      probeDaemon: async () => ({
+        state: "diagnostic" as const,
+        diagnostic: {
+          transport: { state: "healthy" as const },
+          cwdRead: { state: cwdState },
+          commandPath: { state: commandState },
+          enforcement: {
+            axis: "permission" as const,
+            state: enforcementState,
+            expected: "acceptEdits",
+            effective: enforcementState === "unknown" ? null : { defaultMode: enforcementState === "drift" ? "manual" : "acceptEdits" },
+            sourcePath: "/work/.claude/settings.local.json",
+            ...(enforcementState === "unknown" ? { reason: "settings_unparseable" } : {}),
+          },
+          observedAt: "2026-08-08T00:00:00.000Z",
+        },
+      }),
+    });
+    await runFrontDoor(["node", "rig"], deps);
+    const text = deps.errLines.join("\n");
+    expect(text).toContain(`runtime posture: ${verdict}`);
+    expect(text).not.toMatch(/daemon not running/i);
+  });
+
+  it("front-door unreadable settings stays UNKNOWN_EFFECTIVE and never becomes daemon-down", async () => {
+    const deps = io({
+      probeDaemon: async () => ({
+        state: "diagnostic" as const,
+        diagnostic: {
+          transport: { state: "healthy" as const },
+          cwdRead: { state: "visible" as const },
+          commandPath: { state: "available" as const },
+          enforcement: { axis: "permission" as const, state: "unknown" as const, expected: "acceptEdits", effective: null, sourcePath: "/work/.claude/settings.local.json", reason: "settings_unreadable" },
+          observedAt: "2026-08-08T00:00:00.000Z",
+        },
+      }),
+    });
+    await runFrontDoor(["node", "rig"], deps);
+    const text = deps.errLines.join("\n");
+    expect(text).toContain("runtime posture: UNKNOWN_EFFECTIVE");
+    expect(text).toContain("reason=settings_unreadable");
+    expect(text).not.toMatch(/daemon not running/i);
   });
 
   it("permission drift renders all four axes plus expected/effective/source and never launches", async () => {
@@ -185,6 +253,42 @@ describe("front-door probe routing", () => {
     });
     expect(result).toEqual({ state: "ready" });
     expect(paths).toEqual(["/healthz"]);
+  });
+
+  it("normalizes a non-2xx daemon response into a complete four-axis diagnostic", async () => {
+    const result = await probeFrontDoor({
+      env: { OPENRIG_NODE_ID: "node-1" },
+      client: { get: async () => ({ status: 503, data: {} }) },
+    });
+    expect(result).toMatchObject({
+      state: "diagnostic",
+      diagnostic: {
+        transport: { state: "response" },
+        cwdRead: { state: "unknown" },
+        commandPath: { state: "unknown" },
+        enforcement: { state: "unknown", reason: "transport_unavailable" },
+      },
+    });
+  });
+
+  it.each([
+    ["connect", new DaemonConnectionError("refused")],
+    ["timeout", new DaemonTimeoutError("slow")],
+    ["response", new DaemonResponseError(502, "bad")],
+  ] as const)("normalizes a %s exception into the same complete four-axis diagnostic", async (state, error) => {
+    const result = await probeFrontDoor({
+      env: { OPENRIG_NODE_ID: "node-1" },
+      client: { get: async () => { throw error; } },
+    });
+    expect(result).toMatchObject({
+      state: "diagnostic",
+      diagnostic: {
+        transport: { state },
+        cwdRead: { state: "unknown" },
+        commandPath: { state: "unknown" },
+        enforcement: { state: "unknown", reason: "transport_unavailable" },
+      },
+    });
   });
 });
 
