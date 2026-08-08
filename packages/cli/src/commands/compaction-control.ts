@@ -99,7 +99,35 @@ export function compactionControlCommand(depsOverride?: CompactionControlDeps): 
         const response = await client.get(`/api/compaction/control${query}`, {
           headers: terminalAuthHeaders(),
         });
-        printResponse(response, options.json, "Compaction decisions listed.");
+        if (options.json || response.status >= 400) {
+          printResponse(response, options.json, "Compaction decisions listed.");
+          return;
+        }
+        const data = response.data as {
+          decisions?: Array<{
+            decisionId?: string;
+            sessionName?: string;
+            direction?: string;
+            active?: boolean;
+            lastObservedAt?: string | null;
+            lastObservedOutcome?: string | null;
+          }>;
+        };
+        const decisions = data.decisions ?? [];
+        if (decisions.length === 0) {
+          console.log("No compaction decisions.");
+          return;
+        }
+        for (const decision of decisions) {
+          console.log([
+            decision.decisionId ?? "unknown-id",
+            decision.sessionName ?? "unknown-session",
+            decision.direction ?? "unknown-direction",
+            decision.active === false ? "inactive" : "active",
+            `lastObservedAt=${decision.lastObservedAt ?? "never"}`,
+            `lastObservedOutcome=${decision.lastObservedOutcome ?? "none"}`,
+          ].join(" "));
+        }
       }),
   );
 

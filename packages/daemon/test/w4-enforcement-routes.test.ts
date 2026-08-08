@@ -6,6 +6,8 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
+import { ClaudeCompactionEnforcer } from "../src/domain/claude-compaction-enforcer.js";
+import { EnforcerDecisionStore } from "../src/domain/enforcer-decision-store.js";
 import { compactionRoutes } from "../src/routes/compaction.js";
 
 const IDENTITY = "orch-lead@rig";
@@ -14,6 +16,7 @@ const SEAT = "claude-seat@rig";
 describe("W4 compaction-control routes", () => {
   let db: Database.Database;
   let sessionRegistry: SessionRegistry;
+  let nodeId: string;
   let generationUuid: string;
   let decisions: {
     create: ReturnType<typeof vi.fn>;
@@ -21,6 +24,11 @@ describe("W4 compaction-control routes", () => {
     clear: ReturnType<typeof vi.fn>;
   };
   let app: Hono;
+  let manualDeps: {
+    enforcer: ClaudeCompactionEnforcer;
+    transport: Record<string, unknown>;
+    usageStore: Record<string, unknown>;
+  } | null;
 
   beforeEach(() => {
     db = createDb();
@@ -29,6 +37,7 @@ describe("W4 compaction-control routes", () => {
     sessionRegistry = new SessionRegistry(db);
     const rig = rigs.createRig("rig");
     const node = rigs.addNode(rig.id, "claude.seat", { runtime: "claude-code" });
+    nodeId = node.id;
     sessionRegistry.registerSession(node.id, SEAT);
     generationUuid = sessionRegistry.currentOccupantGenerationForSession(SEAT)!;
     decisions = {
@@ -43,11 +52,17 @@ describe("W4 compaction-control routes", () => {
       }]),
       clear: vi.fn((input) => ({ decisionId: input.decisionId, active: false, releaseKind: "cleared" })),
     };
+    manualDeps = null;
     app = new Hono();
     app.use("*", async (c, next) => {
       c.set("db" as never, db);
       c.set("sessionRegistry" as never, sessionRegistry);
       c.set("enforcerDecisionStore" as never, decisions);
+      if (manualDeps) {
+        c.set("compactionEnforcer" as never, manualDeps.enforcer);
+        c.set("sessionTransport" as never, manualDeps.transport);
+        c.set("contextUsageStore" as never, manualDeps.usageStore);
+      }
       await next();
     });
     app.route("/api/compaction", compactionRoutes());
@@ -168,6 +183,106 @@ describe("W4 compaction-control routes", () => {
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ error: "generation_unavailable" });
     expect(decisions.create).not.toHaveBeenCalled();
+  });
+
+  it.each(["hold", "authorize"] as const)(
+    "rejects historical session aliases for %s and accepts only the current alias",
+    async (direction) => {
+      const currentSeat = "claude-seat-next@rig";
+      sessionRegistry.registerSession(nodeId, currentSeat);
+      const automaticReason = direction === "authorize" ? "disabled" : undefined;
+      const body = {
+        session: SEAT,
+        direction,
+        ...(automaticReason ? { automaticReason } : {}),
+        reason: `current-generation ${direction}`,
+      };
+
+      const stale = await request("/api/compaction/control", body);
+      expect(stale.status).toBe(409);
+      expect(await stale.json()).toMatchObject({
+        error: "session_not_current",
+        currentSession: currentSeat,
+      });
+      expect(decisions.create).not.toHaveBeenCalled();
+
+      const current = await request("/api/compaction/control", { ...body, session: currentSeat });
+      expect(current.status).toBe(201);
+      expect(decisions.create).toHaveBeenCalledWith(expect.objectContaining({
+        sessionName: currentSeat,
+        generationUuid: sessionRegistry.currentOccupantGenerationForSession(currentSeat),
+        direction,
+      }));
+    },
+  );
+
+  it("the public manual trigger honors a current hold, records observation, and sends nothing", async () => {
+    const store = new EnforcerDecisionStore(db, {
+      now: () => new Date("2026-08-08T18:00:00.000Z"),
+      authorizeTtlMinutes: () => 15,
+    });
+    const hold = store.create({
+      enforcerKind: "claude_compaction",
+      sessionName: SEAT,
+      generationUuid,
+      direction: "hold",
+      automaticReason: null,
+      reason: "finish the current atomic action",
+      actorSession: IDENTITY,
+      identityProvenance: "transport:v1",
+    });
+    const send = vi.fn(async () => ({ ok: true as const }));
+    const transport = {
+      send,
+      resolveSessions: vi.fn(async () => ({ ok: true as const, sessions: [SEAT] })),
+    };
+    const enforcer = new ClaudeCompactionEnforcer(
+      {
+        resolveClaudeCompactionPolicy: () => ({
+          enabled: true,
+          thresholdPercent: 80,
+          preCompactInstruction: "prepare",
+          compactInstruction: "",
+          messageInline: "",
+          messageFilePath: "",
+          postRestoreAuditInstruction: "audit",
+          authorizeTtlMinutes: 15,
+        }),
+      } as never,
+      transport as never,
+      {
+        resolveOccupantGeneration: (sessionName: string) =>
+          sessionRegistry.currentOccupantGenerationForSession(sessionName),
+        decisionStore: store,
+      },
+    );
+    manualDeps = {
+      enforcer,
+      transport,
+      usageStore: {
+        getForNode: () => ({
+          availability: "known",
+          usedPercentage: 90,
+          transcriptPath: "/tmp/claude.jsonl",
+          sessionId: "claude-session",
+        }),
+      },
+    };
+    decisions = store as never;
+
+    const response = await request("/api/compaction/trigger", { session: SEAT });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      reason: "human_hold",
+      decisionId: hold.decisionId,
+    });
+    expect(send).not.toHaveBeenCalled();
+    expect(store.list({ sessionName: SEAT })).toContainEqual(expect.objectContaining({
+      decisionId: hold.decisionId,
+      lastObservedOutcome: "human_hold",
+      lastObservedAt: "2026-08-08T18:00:00.000Z",
+    }));
   });
 
   it("lists durable observation fields without requiring a write identity", async () => {

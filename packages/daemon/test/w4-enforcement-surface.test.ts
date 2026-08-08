@@ -445,19 +445,30 @@ describe("W4 ClaudeCompactionEnforcer decision consumption", () => {
         decisionId: authorization["decisionId"],
         liftedReason: "disabled",
       });
+      expect(row()).toMatchObject({ active: true });
+      expect(row()?.["consumedAt"] ?? null).toBeNull();
+      expect(tx.send).toHaveBeenCalledTimes(1);
+      expect(tx.send.mock.calls[0]?.[1]).toContain("automatic compaction preparation");
+
+      await expect(enforcer.maybeAutoCompact(highInput())).resolves.toEqual({
+        triggered: true,
+        decisionId: authorization["decisionId"],
+        liftedReason: "disabled",
+      });
       expect(row()).toMatchObject({
         active: false,
         consumedByEnforcerKind: KIND,
         liftedReason: "disabled",
         attemptOutcome: "succeeded",
       });
-      expect(tx.send).toHaveBeenCalledTimes(1);
+      expect(tx.send).toHaveBeenCalledTimes(2);
+      expect(tx.send.mock.calls[1]?.[1]).toMatch(/^\/compact/);
 
       await expect(enforcer.maybeAutoCompact(highInput())).resolves.toEqual({
         triggered: false,
         reason: "disabled",
       });
-      expect(tx.send).toHaveBeenCalledTimes(1);
+      expect(tx.send).toHaveBeenCalledTimes(2);
     } finally {
       db.close();
     }
@@ -481,6 +492,14 @@ describe("W4 ClaudeCompactionEnforcer decision consumption", () => {
       liftedReason: "disabled",
     });
     expect(tx.send).toHaveBeenCalledTimes(1);
+    expect(decisions.consumeAuthorizationForAttempt).not.toHaveBeenCalled();
+
+    await expect(enforcer.maybeAutoCompact(highInput())).resolves.toEqual({
+      triggered: true,
+      decisionId: "authorize-1",
+      liftedReason: "disabled",
+    });
+    expect(tx.send).toHaveBeenCalledTimes(2);
     expect(decisions.consumeAuthorizationForAttempt).toHaveBeenCalledTimes(1);
     expect(decisions.recordAuthorizationAttempt).toHaveBeenCalledWith(expect.objectContaining({
       decisionId: "authorize-1",
@@ -528,6 +547,13 @@ describe("W4 ClaudeCompactionEnforcer decision consumption", () => {
         decisionId: "authorize-1",
         liftedReason: "post_restore_cooldown",
       });
+      expect(decisions.consumeAuthorizationForAttempt).not.toHaveBeenCalled();
+      now += 1_000;
+      await expect(enforcer.maybeAutoCompact(highInput())).resolves.toEqual({
+        triggered: true,
+        decisionId: "authorize-1",
+        liftedReason: "post_restore_cooldown",
+      });
       expect(decisions.consumeAuthorizationForAttempt).toHaveBeenCalledTimes(1);
     } finally {
       vi.restoreAllMocks();
@@ -558,8 +584,10 @@ describe("W4 ClaudeCompactionEnforcer decision consumption", () => {
     expect(decisions.consumeAuthorizationForAttempt).toHaveBeenCalledTimes(1);
   });
 
-  it("consumes authorization on a failed attempt and records the actual failure", async () => {
-    const send = vi.fn(async () => ({ ok: false as const, reason: "send_failed" }));
+  it("consumes authorization on a failed compact attempt and records the actual failure", async () => {
+    const send = vi.fn()
+      .mockResolvedValueOnce({ ok: true as const })
+      .mockResolvedValueOnce({ ok: false as const, reason: "send_failed" });
     const decisions = decisionHarness({ authorizationReason: "disabled" });
     const enforcer = new ClaudeCompactionEnforcer(
       settings({ ...BASE_POLICY, enabled: false }),
@@ -569,6 +597,13 @@ describe("W4 ClaudeCompactionEnforcer decision consumption", () => {
         decisionStore: decisions,
       } as never,
     );
+
+    await expect(enforcer.maybeAutoCompact(highInput())).resolves.toEqual({
+      triggered: true,
+      decisionId: "authorize-1",
+      liftedReason: "disabled",
+    });
+    expect(decisions.consumeAuthorizationForAttempt).not.toHaveBeenCalled();
 
     await expect(enforcer.maybeAutoCompact(highInput())).resolves.toEqual({
       triggered: false,
@@ -596,9 +631,9 @@ describe("W4 ClaudeCompactionEnforcer decision consumption", () => {
         automaticReason: "disabled",
         reason: "allow one attempted send",
       }));
-      const send = vi.fn(async () => {
-        throw new Error("transport exploded");
-      });
+      const send = vi.fn()
+        .mockResolvedValueOnce({ ok: true as const })
+        .mockRejectedValueOnce(new Error("transport exploded"));
       const enforcer = new ClaudeCompactionEnforcer(
         settings({ ...BASE_POLICY, enabled: false }),
         { send } as unknown as SessionTransport,
@@ -607,6 +642,17 @@ describe("W4 ClaudeCompactionEnforcer decision consumption", () => {
           decisionStore: store,
         } as never,
       );
+
+      await expect(enforcer.maybeAutoCompact(highInput())).resolves.toEqual({
+        triggered: true,
+        decisionId: authorization["decisionId"],
+        liftedReason: "disabled",
+      });
+      expect(store.list({ sessionName: SEAT })).toContainEqual(expect.objectContaining({
+        decisionId: authorization["decisionId"],
+        active: true,
+        consumedAt: null,
+      }));
 
       await expect(enforcer.maybeAutoCompact(highInput())).resolves.toEqual({
         triggered: false,
@@ -625,7 +671,7 @@ describe("W4 ClaudeCompactionEnforcer decision consumption", () => {
         triggered: false,
         reason: "disabled",
       });
-      expect(send).toHaveBeenCalledTimes(1);
+      expect(send).toHaveBeenCalledTimes(2);
     } finally {
       db.close();
     }

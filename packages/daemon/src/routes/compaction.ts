@@ -63,6 +63,28 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
       }
     }
 
+    const currentSession = sessionRegistry.db.prepare(`
+      WITH target AS (
+        SELECT node_id
+        FROM sessions
+        WHERE session_name = ?
+        ORDER BY id DESC
+        LIMIT 1
+      )
+      SELECT session_name
+      FROM sessions
+      WHERE node_id = (SELECT node_id FROM target)
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(sessionName) as { session_name: string } | undefined;
+    if (currentSession && currentSession.session_name !== sessionName) {
+      return c.json({
+        ok: false,
+        error: "session_not_current",
+        currentSession: currentSession.session_name,
+      }, 409);
+    }
+
     const generationUuid = sessionRegistry.currentOccupantGenerationForSession(sessionName);
     if (!generationUuid) {
       return c.json({ ok: false, error: "generation_unavailable" }, 409);
@@ -199,6 +221,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
       tmux_unavailable: 503,
       send_failed: 502,
       submit_failed: 502,
+      human_hold: 409,
     };
     const status = (statusMap[outcome.reason] ?? 409) as 400 | 404 | 409 | 422 | 502 | 503;
     return c.json({
@@ -206,6 +229,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
       session: sessionName,
       stage: outcome.stage,
       reason: outcome.reason,
+      ...(outcome.decisionId ? { decisionId: outcome.decisionId } : {}),
       error: manualReasonMessage(sessionName, outcome.reason),
     }, status);
   });
@@ -239,6 +263,8 @@ function manualReasonMessage(sessionName: string, reason: string): string {
       return `Refused: '${sessionName}' activity could not be determined; failing closed so /compact cannot land on a prompt.`;
     case "wait_for_idle_timeout":
       return `Prep was sent to '${sessionName}' but it did not go idle in time, so /compact was NOT sent. Retry once the prep turn completes.`;
+    case "human_hold":
+      return `Refused: '${sessionName}' has an active human compaction hold.`;
     default:
       return `Manual compaction for '${sessionName}' did not complete (${reason}).`;
   }

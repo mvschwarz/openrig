@@ -102,7 +102,7 @@ export interface ManualCompactionStatus {
 
 export type ManualCompactionOutcome =
   | { triggered: true; stage: "compact-sent" }
-  | { triggered: false; stage: "skipped-or-failed"; reason: string };
+  | { triggered: false; stage: "skipped-or-failed"; reason: string; decisionId?: string };
 
 export type EnforcerSkipReason =
   | "runtime_filter"
@@ -372,16 +372,8 @@ export class ClaudeCompactionEnforcer {
     }
 
     const liveGenerationUuid = this.resolveOccupantGeneration?.(input.sessionName) ?? null;
-    const activeHold = this.decisionStore?.findActiveHold({
-      enforcerKind: "claude_compaction",
-      sessionName: input.sessionName,
-      liveGenerationUuid,
-    });
+    const activeHold = this.findAndObserveHold(input.sessionName, liveGenerationUuid);
     if (activeHold) {
-      this.decisionStore?.observeHold({
-        decisionId: activeHold.decisionId,
-        outcome: "human_hold",
-      });
       return {
         triggered: false,
         reason: "human_hold",
@@ -407,40 +399,49 @@ export class ClaudeCompactionEnforcer {
     const sendAttempt = async (
       message: string,
       opts?: SendOpts,
+      consumeAuthorization = true,
     ): Promise<{ ok: boolean; result: SendResult | null; outcome: EnforcerOutcome }> => {
       const lifted = authorization as {
         decisionId: string;
         liftedReason: AuthorizableCompactionReason;
       } | null;
-      if (lifted && !this.decisionStore?.consumeAuthorizationForAttempt({
-        decisionId: lifted.decisionId,
-        enforcerKind: "claude_compaction",
-        liftedReason: lifted.liftedReason,
-      })) {
-        return {
-          ok: false,
-          result: null,
-          outcome: { triggered: false, reason: lifted.liftedReason },
-        };
+      let consumed = false;
+      if (lifted && consumeAuthorization) {
+        consumed = this.decisionStore?.consumeAuthorizationForAttempt({
+          decisionId: lifted.decisionId,
+          enforcerKind: "claude_compaction",
+          liftedReason: lifted.liftedReason,
+        }) ?? false;
+        if (!consumed) {
+          return {
+            ok: false,
+            result: null,
+            outcome: { triggered: false, reason: lifted.liftedReason },
+          };
+        }
       }
 
       let result: SendResult;
       try {
-        result = await this.sessionTransport.send(input.sessionName, message, opts);
+        result = opts === undefined
+          ? await this.sessionTransport.send(input.sessionName, message)
+          : await this.sessionTransport.send(input.sessionName, message, opts);
       } catch (error) {
         if (!lifted) throw error;
-        this.decisionStore?.recordAuthorizationAttempt({
-          decisionId: lifted.decisionId,
-          outcome: "failed",
-          failureReason: error instanceof Error ? error.message : String(error),
-        });
+        if (consumed) {
+          this.decisionStore?.recordAuthorizationAttempt({
+            decisionId: lifted.decisionId,
+            outcome: "failed",
+            failureReason: error instanceof Error ? error.message : String(error),
+          });
+        }
         return {
           ok: false,
           result: null,
           outcome: { triggered: false, reason: "send_failed" },
         };
       }
-      if (lifted) {
+      if (lifted && consumed) {
         this.decisionStore?.recordAuthorizationAttempt({
           decisionId: lifted.decisionId,
           outcome: result.ok ? "succeeded" : "failed",
@@ -621,6 +622,8 @@ export class ClaudeCompactionEnforcer {
           thresholdPercent: policy.thresholdPercent,
           preCompactInstruction: policy.preCompactInstruction,
         }),
+        undefined,
+        false,
       );
       if (!prep.ok) {
         return prep.outcome;
@@ -667,6 +670,17 @@ export class ClaudeCompactionEnforcer {
     input: EnforcerInput,
     opts: { operatorInitiated?: boolean } = {},
   ): Promise<ManualCompactionOutcome> {
+    const liveGenerationUuid = this.resolveOccupantGeneration?.(input.sessionName) ?? null;
+    const activeHold = this.findAndObserveHold(input.sessionName, liveGenerationUuid);
+    if (activeHold) {
+      return {
+        triggered: false,
+        stage: "skipped-or-failed",
+        reason: "human_hold",
+        decisionId: activeHold.decisionId,
+      };
+    }
+
     // OPR.0.4.3.14 rev1-r2 fix — SAME-SEAT IN-PROGRESS GUARD (race-safe), at the
     // VERY TOP before ANY recordManualFailure path. This synchronous check-and-set
     // runs BEFORE the first await; because JS is run-to-completion, two concurrent
@@ -794,6 +808,24 @@ export class ClaudeCompactionEnforcer {
   private recordManualFailure(sessionName: string, reason: string): ManualCompactionOutcome {
     this.setManualStage(sessionName, "skipped-or-failed", reason);
     return { triggered: false, stage: "skipped-or-failed", reason };
+  }
+
+  private findAndObserveHold(
+    sessionName: string,
+    liveGenerationUuid: string | null,
+  ): EnforcerDecision | null {
+    const hold = this.decisionStore?.findActiveHold({
+      enforcerKind: "claude_compaction",
+      sessionName,
+      liveGenerationUuid,
+    }) ?? null;
+    if (hold) {
+      this.decisionStore?.observeHold({
+        decisionId: hold.decisionId,
+        outcome: "human_hold",
+      });
+    }
+    return hold;
   }
 
   /**

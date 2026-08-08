@@ -149,6 +149,20 @@ describe("rig compaction-control", () => {
     });
   });
 
+  it("human list output exposes decision identity and durable observation fields", async () => {
+    const factory = await loadCommand();
+    const { deps } = makeDeps();
+    const command = factory(deps);
+    await command.parseAsync([
+      "node", "rig", "list", "--session", "claude-seat@rig",
+    ]);
+    const rendered = logs.join("\n");
+    expect(rendered).toContain("hold-1");
+    expect(rendered).toContain("claude-seat@rig");
+    expect(rendered).toContain("2026-08-08T18:00:30.000Z");
+    expect(rendered).toContain("human_hold");
+  });
+
   it("clear records a human reason through the decision-specific route", async () => {
     const factory = await loadCommand();
     const { calls, deps } = makeDeps();

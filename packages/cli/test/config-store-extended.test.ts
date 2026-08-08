@@ -143,6 +143,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "policies.claude_compaction.message_inline",
       "policies.claude_compaction.message_file_path",
       "policies.claude_compaction.post_restore_audit_instruction",
+      "policies.claude_compaction.authorize_ttl_minutes",
       // OPR.0.5.1 51-06 W2c — tunable watchdog auto-registration cadence.
       "policies.idle_gate_qitem.scan_interval_seconds",
       "policies.idle_gate_qitem.active_wake_interval_seconds",
