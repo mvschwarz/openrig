@@ -574,7 +574,11 @@ async function runCrossHostSend(
   if (originTriple) argv.push("--from", originTriple);
   if (opts.json) argv.push("--json");
 
-  const result = await runner(host, argv);
+  // A2 (P23): ADDITIVELY set OPENRIG_SESSION_NAME=<origin triple> on the remote command line so the
+  // remote's rig derives the ORIGIN identity from its env (the shipped derivation path), not its own
+  // seat. --from STAYS on argv above (a pre-I4 remote still reads origin from it; the argv removal is a
+  // separate P23-D1-gated increment). Same triple for both, composed once above.
+  const result = await runner(host, argv, originTriple ? { originTriple } : {});
 
   if (opts.json) {
     console.log(JSON.stringify({

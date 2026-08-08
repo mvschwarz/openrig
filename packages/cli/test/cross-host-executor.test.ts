@@ -152,6 +152,37 @@ describe("runCrossHostCommand", () => {
     ]);
   });
 
+  // A2 — P23: the SSH relay re-runs `rig` in a NON-login shell that resolves ITS OWN seat identity,
+  // degrading the origin. Prefix OPENRIG_SESSION_NAME=<origin triple> INSIDE the sh -lc line so the
+  // remote's DaemonClient stamps the ORIGIN identity (matching A4's HTTP header). Byte-exact via the
+  // real shellQuote (the design's "byte-asserted, quoting included"): the env assignment precedes the
+  // argv, and --from STAYS on the argv (additive per the P23-D1 expiry — a pre-I4 remote reads origin
+  // from --from, so an early removal would silently degrade attribution in the mixed-version window).
+  it("A2 — prefixes OPENRIG_SESSION_NAME=<origin triple> into the sh -lc line; --from stays additive", async () => {
+    const capture: { command?: string; args?: readonly string[] } = {};
+    const spawn = mockSpawnFor({ exitCode: 0, stdout: "ok\n", capture });
+    const triple = "dev50@v-rig@origin-host";
+    const argv = ["rig", "send", "dev-impl@rig", "hi", "--from", triple];
+    await runCrossHostCommand(HOST, argv, { spawn, originTriple: triple });
+    const line = String(capture.args?.[capture.args.length - 1] ?? "");
+    // byte-exact composition, via the same shellQuote the impl uses:
+    const expectedInner = `OPENRIG_SESSION_NAME=${shellQuote(triple)} ${argv.map(shellQuote).join(" ")}`;
+    expect(line).toBe(`sh -lc ${shellQuote(expectedInner)}`);
+    // and the additive-state guarantees, resilient to quoting:
+    expect(line).toContain("OPENRIG_SESSION_NAME=");
+    expect(line).toContain("--from"); // STAYS (P23-D1) — a premature removal fails here
+    expect(line.indexOf("OPENRIG_SESSION_NAME=")).toBeLessThan(line.indexOf("send")); // env precedes the command
+  });
+
+  it("A2 — NO originTriple ⇒ NO env prefix (backward-compatible; the local/no-origin path is byte-unchanged)", async () => {
+    const capture: { command?: string; args?: readonly string[] } = {};
+    const spawn = mockSpawnFor({ exitCode: 0, stdout: "ok\n", capture });
+    await runCrossHostCommand(HOST, ["rig", "ps"], { spawn });
+    const line = String(capture.args?.[capture.args.length - 1] ?? "");
+    expect(line).not.toContain("OPENRIG_SESSION_NAME=");
+    expect(line).toBe(`sh -lc ${shellQuote(["rig", "ps"].map(shellQuote).join(" "))}`);
+  });
+
   it("includes -l <user> when host.user is set", async () => {
     const capture: { command?: string; args?: readonly string[] } = {};
     const spawn = mockSpawnFor({ exitCode: 0, capture });

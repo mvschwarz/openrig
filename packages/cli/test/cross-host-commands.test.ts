@@ -3,7 +3,7 @@ import { sendCommand, type SendDeps } from "../src/commands/send.js";
 import { captureCommand, type CaptureDeps } from "../src/commands/capture.js";
 import { psCommand, type PsDeps } from "../src/commands/ps.js";
 import { whoamiCommand, type WhoamiDeps } from "../src/commands/whoami.js";
-import type { CrossHostResult } from "../src/cross-host-executor.js";
+import type { CrossHostResult, RunCrossHostCommandOpts } from "../src/cross-host-executor.js";
 import type { HostRegistryLoadResult } from "../src/host-registry.js";
 
 // Capture stdout / stderr / exitCode for command actions.
@@ -58,7 +58,7 @@ const KNOWN_REGISTRY: HostRegistryLoadResult = {
   },
 };
 
-function deps(overrides: { run?: (h: never, argv: readonly string[]) => Promise<CrossHostResult>; registry?: HostRegistryLoadResult } = {}): SendDeps & CaptureDeps {
+function deps(overrides: { run?: (h: never, argv: readonly string[], opts?: RunCrossHostCommandOpts) => Promise<CrossHostResult>; registry?: HostRegistryLoadResult } = {}): SendDeps & CaptureDeps {
   const lifecycleDeps = { exists: () => false } as never;
   const clientFactory = (() => ({}) as never) as never;
   return {
@@ -117,6 +117,23 @@ describe("send --host (cross-host short-circuit)", () => {
     const argv = captureCalls.argv!;
     expect(argv[argv.indexOf("--from") + 1]).toBe("orch-lead@rig-a"); // the seat env, not the forged --from
     expect(argv).not.toContain("worker@rig-a"); // the --from override never rides the wire
+  });
+
+  // A2 (P23): the send --host relay passes the ORIGIN triple to the executor as the env-prefix identity
+  // (OPENRIG_SESSION_NAME=<triple>), so the remote's rig derives the origin from its env. --from STAYS
+  // additive (P23-D1: a pre-I4 remote still reads origin from it). A 3-part origin (an upstream relay's
+  // triple) is preserved VERBATIM — never re-stamped with this host's id.
+  it("A2 — passes the origin triple to the runner (env-prefix); --from stays additive; a 3-part origin is verbatim", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "orch-lead@rig-a@upstream-host"); // already 3-part (upstream relay)
+    const captured: { argv?: readonly string[]; opts?: RunCrossHostCommandOpts } = {};
+    const cmd = sendCommand(deps({
+      run: async (_h, argv, opts) => { captured.argv = argv; captured.opts = opts; return { ok: true, failedStep: "none", stdout: "", stderr: "", remoteExitCode: 0 }; },
+    }));
+    await cmd.parseAsync(["--host", "vm-a", "dev-impl@my-rig", "hi"], { from: "user" });
+    expect(captured.opts?.originTriple).toBe("orch-lead@rig-a@upstream-host"); // env-prefix identity, 3-part preserved verbatim
+    const argv = captured.argv!;
+    expect(argv).toContain("--from"); // STAYS (additive, P23-D1)
+    expect(argv[argv.indexOf("--from") + 1]).toBe("orch-lead@rig-a@upstream-host"); // same origin on both surfaces
   });
 
   it("--verify honesty: SSH success + remote 'Verified: no' surfaces in output, NOT collapsed into success+silence", async () => {

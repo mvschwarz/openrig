@@ -37,6 +37,15 @@ export interface RunCrossHostCommandOpts {
   spawn?: SpawnFn;
   /** Connect timeout in seconds for the underlying ssh invocation. Default: 10. */
   connectTimeoutSeconds?: number;
+  /**
+   * A2 (P23) HTTP/SSH origin parity: the ORIGIN's identity triple (member@rig@selfHostId), composed by
+   * the caller from the seat env + this host's selfHostId (an upstream triple preserved verbatim, never
+   * re-stamped). When present, it is prefixed as `OPENRIG_SESSION_NAME=<triple>` INSIDE the remote
+   * `sh -lc` line so the remote's DaemonClient stamps the ORIGIN identity (matching A4's HTTP header) —
+   * the SSH relay would otherwise resolve its OWN seat and degrade attribution. Absent ⇒ no prefix
+   * (byte-unchanged). This is a DERIVED origin, never a caller-supplied identity claim.
+   */
+  originTriple?: string;
 }
 
 /**
@@ -83,7 +92,14 @@ export async function runCrossHostCommand(
   // D13 — ssh runs the remote command in a NON-login shell (no operator PATH → `rig`
   // exits 127 on nvm/npm-global installs). Run it under `sh -lc` so the operator's own
   // login PATH resolves it — one exec, zero config; `sh` exists everywhere POSIX.
-  const remoteCommandLine = `sh -lc ${shellQuote(argv.map(shellQuote).join(" "))}`;
+  // A2 (P23): when the caller supplies the ORIGIN triple, prefix `OPENRIG_SESSION_NAME=<triple>`
+  // INSIDE the sh -lc line so the remote's rig derives the ORIGIN identity, not its own seat. The
+  // prefix rides the SAME shellQuote layer as the argv; absent ⇒ byte-unchanged from D13.
+  const quotedArgv = argv.map(shellQuote).join(" ");
+  const innerCommand = opts.originTriple
+    ? `OPENRIG_SESSION_NAME=${shellQuote(opts.originTriple)} ${quotedArgv}`
+    : quotedArgv;
+  const remoteCommandLine = `sh -lc ${shellQuote(innerCommand)}`;
   const fullArgs = [...sshOpts, sshHost.target, remoteCommandLine];
 
   const spawn = opts.spawn ?? (nodeSpawn as unknown as SpawnFn);
