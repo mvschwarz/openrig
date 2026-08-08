@@ -122,6 +122,26 @@ The C1 header's five required fields: `slice`, `candidate_sha`,
 - `artifact_type`: `guard | qa | rev1-r1 | rev1-r2 | adjudication`
 - `verdict`: `CLEAR | BLOCKING | CONCERNING | PASS | NOT-CLEAR`
 
+### A cited hash STATES WHAT IT COVERS
+
+A hash offered as evidence is only checkable if the reader knows what bytes it
+was taken over. **State the coverage with the hash**, in one of two forms:
+
+- **whole-file** — and say so, including whether a **trailing newline** is
+  inside the hashed bytes; or
+- **file + an exact span definition** — the span is *part of the definition*,
+  not a hint about where to look.
+
+Two honest people can hash the same artifact and get different digests without
+either being wrong (for example, one over the frontmatter block and one over
+the whole file). Coverage is what makes a cited hash verifiable rather than
+merely impressive.
+
+**Canonical convention (the ONE origin — cite it, do not restate it here):**
+`openrig-work/conventions/artifact-cross-citation-path-plus-lineage.md`,
+section *span-is-part-of-the-definition* (2026-08-08), which carries the
+specimen (twin frontmatter hashes, neither wrong) and the full rule.
+
 `candidate_sha` is the join key: the proven candidate tip this artifact
 judges. `--evidences` names which proof-contract deliverable(s) the drop
 covers (item text or 1-based index) — that reference populates the
