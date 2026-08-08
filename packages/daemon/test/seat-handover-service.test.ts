@@ -12,6 +12,7 @@ import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { WatchdogPolicyEngine, type DeliveryFn } from "../src/domain/watchdog-policy-engine.js";
 import { makeIdleGateQitemPolicy } from "../src/domain/policies/idle-gate-qitem.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import { watchdogHistorySchema } from "../src/db/migrations/032_watchdog_history.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 
@@ -295,6 +296,71 @@ describe("SeatHandoverService", () => {
       }
     },
   );
+
+  it("neutralizes the retired watchdog when a real handover admits a noncanonical discovered successor", async () => {
+    const now = new Date("2026-04-24T18:30:00.000Z");
+    db.exec(watchdogHistorySchema.sql);
+    const jobsRepo = new WatchdogJobsRepository(db, () => now);
+    sessionRegistry.setWatchdogRegistrationObserver(new WatchdogAutoRegistration({
+      db,
+      jobsRepo,
+      settingsStore: {
+        resolveOne(key: string) {
+          return { value: key.endsWith("active_wake_interval_seconds") ? 900 : 60 };
+        },
+      } as never,
+    }));
+
+    seedSeat();
+    const retiredSession = "dev-impl@seat-rig";
+    const original = jobsRepo.listActive().find((job) => job.policy === "idle-gate-qitem");
+    expect(original).toBeDefined();
+    if (!original) return;
+    db.prepare(
+      `INSERT INTO queue_items
+        (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, body)
+       VALUES
+        ('q-retired-noncanonical', '2026-04-24T18:00:00Z', '2026-04-24T18:00:00Z',
+         'orch@seat-rig', ?, 'pending', 'urgent', 'deep', '["gate:guard"]', 'retired target')`,
+    ).run(retiredSession);
+    const activity = new AgentActivityStore({ db, eventBus, now: () => now });
+    expect(activity.recordHookEvent({
+      runtime: "codex",
+      sessionName: retiredSession,
+      hookEvent: "Stop",
+      occurredAt: "2026-04-24T18:29:00.000Z",
+    }).ok).toBe(true);
+
+    const discovered = seedDiscovery();
+    const result = await service.handover({
+      seatRef: retiredSession,
+      reason: "noncanonical-watchdog-proof",
+      source: `discovered:${discovered.id}`,
+      operator: "orch-lead@seat-rig",
+    });
+    expect(result.ok).toBe(true);
+
+    const activeRoleJobs = jobsRepo.listActive().filter((job) =>
+      job.policy === "idle-gate-qitem" && job.targetGeneration === null
+    );
+    const deliveries: Array<{ targetSession: string; message: string }> = [];
+    const deliver: DeliveryFn = async (request) => {
+      deliveries.push(request);
+      return { status: "ok" };
+    };
+    const engine = new WatchdogPolicyEngine({
+      jobsRepo,
+      historyLog: new WatchdogHistoryLog(db),
+      eventBus,
+      deliver,
+      now: () => now,
+      additionalPolicies: [makeIdleGateQitemPolicy({ db, agentActivityStore: activity })],
+    });
+    for (const job of activeRoleJobs) await engine.evaluate(job);
+
+    expect.soft(activeRoleJobs.filter((job) => job.targetSession === retiredSession)).toEqual([]);
+    expect.soft(deliveries.filter((delivery) => delivery.targetSession === retiredSession)).toEqual([]);
+  });
 
   it("keeps dry-run side-effect free", async () => {
     seedSeat();

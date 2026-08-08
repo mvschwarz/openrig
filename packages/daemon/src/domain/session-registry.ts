@@ -71,6 +71,7 @@ export interface WatchdogRegistrationObserver {
   ensure(nodeId: string, sessionName: string): unknown;
   assertCoverage(nodeId: string, sessionName: string): unknown;
   isEligibleSessionName?(sessionName: string): boolean;
+  reconcileHandover?(nodeId: string, sessionName: string): unknown;
 }
 
 export class SessionRegistry {
@@ -99,7 +100,7 @@ export class SessionRegistry {
       )
       .run(id, nodeId, sessionName);
     this.mintOccupantTenureBestEffort(nodeId, kind); // atom-B: mint this occupant generation
-    this.observeWatchdogRegistration(nodeId, sessionName);
+    this.observeWatchdogRegistration(nodeId, sessionName, kind);
     return this.rowToSession(
       this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow
     );
@@ -114,7 +115,7 @@ export class SessionRegistry {
       )
       .run(id, nodeId, sessionName);
     this.mintOccupantTenureBestEffort(nodeId, kind); // atom-B: mint this occupant generation
-    this.observeWatchdogRegistration(nodeId, sessionName);
+    this.observeWatchdogRegistration(nodeId, sessionName, kind);
 
     return this.rowToSession(
       this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow
@@ -153,11 +154,29 @@ export class SessionRegistry {
   }
   private static tenureMintWarned = false;
 
-  private observeWatchdogRegistration(nodeId: string, sessionName: string): void {
+  private observeWatchdogRegistration(nodeId: string, sessionName: string, kind: OccupantKind): void {
     const observer = this.watchdogRegistrationObserver;
-    if (!observer || observer.isEligibleSessionName?.(sessionName) === false) return;
+    if (!observer) return;
+    if (observer.isEligibleSessionName?.(sessionName) === false) {
+      if (kind === "handover" && observer.reconcileHandover) {
+        this.runWatchdogEnsure(nodeId, sessionName, () => observer.reconcileHandover!(nodeId, sessionName));
+      }
+      return;
+    }
+    this.runWatchdogEnsure(nodeId, sessionName, () => observer.ensure(nodeId, sessionName));
     try {
-      observer.ensure(nodeId, sessionName);
+      observer.assertCoverage(nodeId, sessionName);
+    } catch (error) {
+      console.warn(
+        `[session-registry] watchdog coverage FAILED for node_id="${nodeId}" ` +
+        `session="${sessionName}": ${formatWatchdogRegistrationError(error)}`,
+      );
+    }
+  }
+
+  private runWatchdogEnsure(nodeId: string, sessionName: string, ensure: () => unknown): void {
+    try {
+      ensure();
     } catch (error) {
       if (!SessionRegistry.watchdogEnsureWarned) {
         SessionRegistry.watchdogEnsureWarned = true;
@@ -167,14 +186,6 @@ export class SessionRegistry {
           `(further ensure failures suppressed this process)`,
         );
       }
-    }
-    try {
-      observer.assertCoverage(nodeId, sessionName);
-    } catch (error) {
-      console.warn(
-        `[session-registry] watchdog coverage FAILED for node_id="${nodeId}" ` +
-        `session="${sessionName}": ${formatWatchdogRegistrationError(error)}`,
-      );
     }
   }
   private static watchdogEnsureWarned = false;

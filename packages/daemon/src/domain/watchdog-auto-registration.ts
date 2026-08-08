@@ -71,6 +71,36 @@ export class WatchdogAutoRegistration {
     return validateSessionName(sessionName) && parseSessionName(sessionName).kind === "canonical";
   }
 
+  /**
+   * A discovered handover may legitimately claim a noncanonical tmux name.
+   * It is not eligible for a new role job, but the retired canonical target
+   * must stop being deliverable. Terminal history lets a later canonical
+   * occupant create a fresh active job; an operator-stopped row stays stopped.
+   */
+  reconcileHandover(nodeId: string, sessionName: string): WatchdogJob | null {
+    const row = this.deps.db.prepare(
+      `SELECT n.id AS node_id, n.rig_id AS rig_id, r.name AS rig_name
+         FROM nodes n LEFT JOIN rigs r ON r.id = n.rig_id
+        WHERE n.id = ?`,
+    ).get(nodeId) as RawTopologyRow | undefined;
+    if (!row || row.rig_name === null) {
+      throw new WatchdogAutoRegistrationError(
+        "target_mismatch",
+        `watchdog handover topology missing for node_id="${nodeId}" session="${sessionName}"`,
+        { nodeId, sessionName, actualRig: row?.rig_name ?? null },
+      );
+    }
+    const job = this.deps.jobsRepo.findAutoRegistration(
+      POLICY,
+      sessionName,
+      null,
+      this.canonicalAliases(nodeId, row.rig_name, sessionName),
+    );
+    if (!job || job.state === "stopped") return job;
+    this.deps.jobsRepo.markTerminal(job.jobId, "handover_noncanonical_successor");
+    return this.deps.jobsRepo.getByIdOrThrow(job.jobId);
+  }
+
   ensure(nodeId: string, sessionName: string): WatchdogJob | null {
     const topology = this.resolveTopology(nodeId, sessionName);
     if (!topology) return null;
