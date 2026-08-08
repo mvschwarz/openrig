@@ -19,9 +19,44 @@ export const SENDER_IDENTITY_HEADER = "X-OpenRig-Session";
  * Absent env ⇒ no header ⇒ the daemon refuses-unattributable LOUD (the approve-actor pattern). One
  * chokepoint: `DaemonClient.fetch` stamps this on every request; callers never set it by hand.
  */
-export function senderIdentityHeaders(): Record<string, string> {
+export function senderIdentityHeaders(originSelfHostId?: string): Record<string, string> {
   const session = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
-  return session ? { [SENDER_IDENTITY_HEADER]: session } : {};
+  if (!session) return {};
+  // A4 HTTP-path origin-triple carry: on a REMOTE-targeting client, compose the origin TRIPLE
+  // (member@rig@<this host's selfHostId>) at stamp time so the remote daemon's wrapPaneEnvelope
+  // renders the ORIGIN host, not the destination's (its preserve branch fires on a 3-part sender).
+  // The identity stays DERIVED — env session + THIS host's own selfHostId — never a caller-supplied
+  // string (Rail 1 anti-forgery: `originSelfHostId` signals only THAT the client targets a remote host,
+  // never WHO it is). An already-3-part origin (an upstream relay's triple) is preserved verbatim,
+  // never re-stamped with this host's id (which would forge the origin). Local clients pass no
+  // `originSelfHostId` and stamp the 2-part value, byte-identical to today.
+  const value =
+    originSelfHostId && originSelfHostId.length > 0 && session.split("@").length < 3
+      ? `${session}@${originSelfHostId}`
+      : session;
+  return { [SENDER_IDENTITY_HEADER]: value };
+}
+
+/**
+ * A4 — the SINGLE remote-origin construction point (shape b). Every remote-targeting client is built
+ * HERE so the origin triple is stamped uniformly. Two structural laws the A4 grep-guard enforces:
+ * (1) no remote site constructs a client by calling `clientFactory(<registry host>.url)` directly —
+ * they all route through here; (2) `originSelfHostId` is ASSIGNED in exactly ONE place: this function
+ * (the sole-assignment law, so pin 3 "no caller-supplied identity path" is structurally true).
+ *
+ * `originSelfHostId` is THIS host's own id (resolved fail-open via `fetchSelfHostId` on the LOCAL
+ * daemon), NOT a caller-supplied identity — the caller only signals it targets a remote host. Preserves
+ * the injected-mock `clientFactory` test seam: the client is built by the injected factory; this only
+ * sets a field on it afterward (an injected mock harmlessly carries the extra property).
+ */
+export function remoteDaemonClient(
+  clientFactory: (baseUrl: string) => DaemonClient,
+  url: string,
+  originSelfHostId?: string,
+): DaemonClient {
+  const client = clientFactory(url);
+  client.originSelfHostId = originSelfHostId;
+  return client;
 }
 
 function resolveTerminalToken(): string | null {
@@ -93,6 +128,15 @@ export class DaemonClient {
   readonly baseUrl: string;
   private fetchImpl: typeof fetch = fetch;
   private timeoutMs = 5_000;
+  /**
+   * A4 HTTP-path origin-triple carry: THIS host's `selfHostId`, set ONLY when this client targets a
+   * REMOTE host, so `senderIdentityHeaders` stamps the origin TRIPLE (member@rig@selfHostId) instead of
+   * the 2-part local value. Undefined for local clients (2-part stamp, unchanged). Assigned in EXACTLY
+   * ONE place — `remoteDaemonClient` — enforced by the A4 grep-guard (the sole-assignment law); this is
+   * NOT a caller identity string (Rail 1: it is THIS host's derived id, never who the caller claims to
+   * be). Public (not ctor-injected) to keep the injected-mock `clientFactory` test seam untouched.
+   */
+  originSelfHostId?: string;
 
   constructor(baseUrl?: string, options?: DaemonClientOptions) {
     if (baseUrl) {
@@ -168,7 +212,9 @@ export class DaemonClient {
     }
     // P18 sender-provenance: stamp the seat-derived identity header LAST, so the transport — never a
     // caller-supplied header or a request body — decides the caller identity the channel of record records.
-    init = { ...init, headers: { ...(init.headers as Record<string, string> ?? {}), ...senderIdentityHeaders() } };
+    // A4: a remote-targeting client (originSelfHostId set by remoteDaemonClient) stamps the origin TRIPLE;
+    // local clients stamp the 2-part value, byte-identical to today.
+    init = { ...init, headers: { ...(init.headers as Record<string, string> ?? {}), ...senderIdentityHeaders(this.originSelfHostId) } };
     try {
       return await fetchWithTimeout(
         this.fetchImpl,
