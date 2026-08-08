@@ -137,10 +137,21 @@ either being wrong (for example, one over the frontmatter block and one over
 the whole file). Coverage is what makes a cited hash verifiable rather than
 merely impressive.
 
-**Canonical convention (the ONE origin — cite it, do not restate it here):**
-`openrig-work/conventions/artifact-cross-citation-path-plus-lineage.md`,
-section *span-is-part-of-the-definition* (2026-08-08), which carries the
-specimen (twin frontmatter hashes, neither wrong) and the full rule.
+**Canonical convention (the ONE origin — cite it, do not restate it here),
+cited in the form that convention itself prescribes — path + section anchor +
+dated whole-file hash:**
+
+- **path:** `/Users/wrandom/code/substrate/shared-docs/openrig-work/conventions/artifact-cross-citation-path-plus-lineage.md`
+- **anchor:** *A cited hash STATES ITS COVERAGE — span is part of the definition*
+  (pm-openrig, 2026-08-08)
+- **hash:** `sha256 14d9a273d542648ab1e0a82c7fd98e8a8c59cb02a83be76b8af9abfb717b34d2`
+  — **coverage: WHOLE FILE, bytes as stored, INCLUDING the trailing newline**
+  (0x0a terminal byte verified), 229 lines, as-of 2026-08-08.
+
+The **path + anchor is the AUTHORITY**; the whole-file hash **DATES** the
+citation. That artifact is a living doc: the hash goes stale at the next
+legitimate append, the anchor does not — the CURRENT-line convention applied to
+a citation.
 
 `candidate_sha` is the join key: the proven candidate tip this artifact
 judges. `--evidences` names which proof-contract deliverable(s) the drop
