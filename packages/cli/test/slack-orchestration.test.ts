@@ -301,3 +301,45 @@ describe("M1 A5b — outbound sweep emits image blocks for an evidence-bearing a
     expect((payload.blocks ?? []).filter((b) => b.type === "image")).toHaveLength(0);
   });
 });
+
+// ── P28 — the ignore path must explain its own discard ───────────────────────
+// The log printed type/subtype/files — three fields that have all just PASSED when a
+// message is dropped for bot_id or missing user/text — and omitted both the failing
+// branch and the channel id. Live consequence: three plain-message events were discarded
+// with no recoverable reason, and with channels:read ungranted there was no read that
+// could even name the conversation they came from. Privacy rail: channel id and a branch
+// LABEL only — never bodies, tokens, user ids, or text content/length.
+describe("P28 — ignore-path telemetry discriminates the rejection branch", () => {
+  const mkRouterStub = () => new InboundRouter({ runner: async () => ({ ok: true, stdout: "", stderr: "", code: 0 }), seen: new SeenStore("/s/p28.jsonl", memFs(), clock), dead: new DeadLetterStore("/s/p28d.jsonl", memFs(), clock), destination: "operator-agent@kernel", resolveSender: () => ({ admitted: true, source: "human-founder@external" }) });
+
+  async function logFor(ev: Record<string, unknown>): Promise<string> {
+    const lines: string[] = [];
+    await handleEnvelope({ envelope_id: "e", type: "events_api", payload: { event: ev } }, () => {}, mkRouterStub(), (m) => lines.push(m));
+    return lines.join("\n");
+  }
+
+  it("names the CHANNEL and the bot_id branch", async () => {
+    const out = await logFor({ type: "message", bot_id: "B1", user: "U1", text: "x", channel: "C090L0VFB0U" });
+    expect(out).toContain("channel=C090L0VFB0U");
+    expect(out).toContain("reason=bot_id");
+  });
+
+  it("names the missing-user branch DISTINCTLY (not conflated with bot_id)", async () => {
+    const out = await logFor({ type: "message", text: "x", channel: "D0BLHF6VC86" });
+    expect(out).toContain("channel=D0BLHF6VC86");
+    expect(out).toContain("reason=no-user");
+    expect(out).not.toContain("reason=bot_id");
+  });
+
+  it("names the empty-text branch DISTINCTLY", async () => {
+    const out = await logFor({ type: "message", user: "U1", text: "   ", channel: "C3" });
+    expect(out).toContain("reason=empty-text");
+    expect(out).not.toContain("reason=no-user");
+  });
+
+  it("PRIVACY RAIL: never leaks the user id or the message text", async () => {
+    const out = await logFor({ type: "message", user: "U09DAG5D14M", text: "secret body text", channel: "C4" });
+    expect(out).not.toContain("U09DAG5D14M");
+    expect(out).not.toContain("secret body text");
+  });
+});

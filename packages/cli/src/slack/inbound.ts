@@ -30,13 +30,26 @@ export interface SlackEvent {
  * and — T1076 — anything carrying files/images. v1 ignores non-text CLEANLY:
  * a false return is a clean skip, never a crash or partial ingestion.
  */
+/** P28 — the rejection BRANCH, as data. The ignore path used to log type/subtype/files, which
+ *  are precisely the fields that have all PASSED when a message dies on bot_id or on
+ *  missing-user/empty-text — so a silent discard could not be explained, and with `channels:read`
+ *  ungranted there was no read that could even name the source conversation. This is the SINGLE
+ *  definition of the ingest decision; `shouldIngest` is a thin wrapper over it so the branch logic
+ *  has one origin and the log can never drift from the behaviour it describes. */
+export type IngestReason = "type" | "bot_id" | "subtype" | "files" | "no-user" | "empty-text";
+
+export function ingestDecision(ev: SlackEvent): { ingest: true } | { ingest: false; reason: IngestReason } {
+  if (ev.type !== "message" && ev.type !== "app_mention") return { ingest: false, reason: "type" };
+  if (ev.bot_id) return { ingest: false, reason: "bot_id" }; // never ingest our own / any bot post
+  if (ev.subtype) return { ingest: false, reason: "subtype" }; // edits, joins, file_share, etc.
+  if (ev.files && ev.files.length > 0) return { ingest: false, reason: "files" }; // T1076 (Slice-12)
+  if (!ev.user) return { ingest: false, reason: "no-user" };
+  if (!ev.text || !ev.text.trim()) return { ingest: false, reason: "empty-text" };
+  return { ingest: true };
+}
+
 export function shouldIngest(ev: SlackEvent): boolean {
-  if (ev.type !== "message" && ev.type !== "app_mention") return false;
-  if (ev.bot_id) return false; // never ingest our own / any bot post
-  if (ev.subtype) return false; // edits, joins, file_share, etc.
-  if (ev.files && ev.files.length > 0) return false; // T1076: image/file events ignored cleanly (Slice-12)
-  if (!ev.user || !ev.text || !ev.text.trim()) return false;
-  return true;
+  return ingestDecision(ev).ingest;
 }
 
 /** A6 v3: the sender-admission verdict. An inbound Slack message may become a human-provenance
@@ -171,8 +184,16 @@ export async function handleEnvelope(env: SocketEnvelope, ack: () => void, route
   if (env.type === "disconnect") return;
   if (env.type !== "events_api") return;
   const ev = env.payload?.event ?? {};
-  if (!shouldIngest(ev)) {
-    if (ev.type) log?.(`ignored non-ingestible event type=${ev.type} subtype=${ev.subtype ?? "-"} files=${ev.files?.length ?? 0}`);
+  const decision = ingestDecision(ev);
+  if (!decision.ingest) {
+    // P28: name the branch that FIRED and the conversation it came from. Privacy rail — a channel
+    // id and a branch LABEL only: never bodies, tokens, user ids, or text content/length.
+    if (ev.type) {
+      log?.(
+        `ignored non-ingestible event type=${ev.type} subtype=${ev.subtype ?? "-"} files=${ev.files?.length ?? 0}` +
+          ` channel=${ev.channel ?? "-"} reason=${decision.reason}`,
+      );
+    }
     return;
   }
   await router.route(ev);
