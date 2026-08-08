@@ -584,6 +584,65 @@ describe("W4 ClaudeCompactionEnforcer decision consumption", () => {
     expect(decisions.consumeAuthorizationForAttempt).toHaveBeenCalledTimes(1);
   });
 
+  it("carries one real stale_generation authorization through the inherited restore occurrence", async () => {
+    const EnforcerDecisionStore = await loadDecisionStore();
+    const db = makeDb();
+    try {
+      const store = new EnforcerDecisionStore(db, {
+        now: () => new Date("2026-08-08T18:00:00.000Z"),
+        authorizeTtlMinutes: () => 15,
+      });
+      const tx = transport();
+      let generation = "gen-N";
+      const enforcer = new ClaudeCompactionEnforcer(settings(), tx.value, {
+        dedupWindowMs: 0,
+        postCompactRestoreCooldownMs: 0,
+        openrigHome: "/tmp/openrig-w4",
+        resolveOccupantGeneration: () => generation,
+        decisionStore: store,
+      } as never);
+
+      await enforcer.maybeAutoCompact(highInput());
+      await enforcer.maybeAutoCompact(highInput());
+      generation = "gen-N+1";
+      const authorization = store.create(humanInput({
+        generationUuid: generation,
+        direction: "authorize",
+        automaticReason: "stale_generation",
+        reason: "allow the inherited restore occurrence once",
+      }));
+      const lifted = {
+        triggered: true,
+        decisionId: authorization["decisionId"],
+        liftedReason: "stale_generation",
+      };
+
+      await expect(enforcer.maybeAutoCompact(highInput(20))).resolves.toEqual(lifted);
+      await expect(enforcer.maybeAutoCompact(highInput(20))).resolves.toEqual(lifted);
+      await expect(enforcer.maybeAutoCompact(highInput(20))).resolves.toEqual(lifted);
+
+      expect(tx.send).toHaveBeenCalledTimes(5);
+      expect(tx.send.mock.calls[2]?.[1]).toContain("post-compaction turn boundary");
+      expect(tx.send.mock.calls[3]?.[1]).toContain("restoring this Claude session");
+      expect(tx.send.mock.calls[4]?.[1]).toContain("audit your compaction restore");
+      expect(store.list({ sessionName: SEAT })).toContainEqual(expect.objectContaining({
+        decisionId: authorization["decisionId"],
+        active: false,
+        consumedByEnforcerKind: KIND,
+        liftedReason: "stale_generation",
+        attemptOutcome: "succeeded",
+      }));
+
+      await expect(enforcer.maybeAutoCompact(highInput(20))).resolves.toEqual({
+        triggered: false,
+        reason: "below_threshold",
+      });
+      expect(tx.send).toHaveBeenCalledTimes(5);
+    } finally {
+      db.close();
+    }
+  });
+
   it("consumes authorization on a failed compact attempt and records the actual failure", async () => {
     const send = vi.fn()
       .mockResolvedValueOnce({ ok: true as const })

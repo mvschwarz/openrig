@@ -294,6 +294,11 @@ function buildPostCompactTurnBoundaryPrompt(): string {
 
 type PendingPostCompactStage = "turn_boundary" | "restore_prompt" | "compliance_prompt";
 type PendingPreCompactStage = "prep_prompt_sent";
+type PendingStageAuthorization = {
+  decisionId: string;
+  liftedReason: "stale_generation";
+  generationUuid: string;
+};
 
 export class ClaudeCompactionEnforcer {
   private readonly settingsStore: SettingsStore;
@@ -317,6 +322,7 @@ export class ClaudeCompactionEnforcer {
   // unknown). At drain we compare it to the LIVE generation; a mismatch = a successor inheriting a
   // retired-generation stage → refuse. Injected resolver (atom-B's currentOccupantTenure by session).
   private readonly pendingStageGeneration = new Map<string, string | null>();
+  private readonly pendingStageAuthorization = new Map<string, PendingStageAuthorization>();
   private readonly resolveOccupantGeneration?: (sessionName: string) => string | null;
   private readonly decisionStore?: Pick<
     EnforcerDecisionStore,
@@ -384,6 +390,8 @@ export class ClaudeCompactionEnforcer {
     let authorization: {
       decisionId: string;
       liftedReason: AuthorizableCompactionReason;
+      generationUuid: string | null;
+      alreadyConsumed: boolean;
     } | null = null;
     const lift = (automaticReason: AuthorizableCompactionReason): boolean => {
       const found = this.decisionStore?.findMatchingAuthorization({
@@ -393,20 +401,30 @@ export class ClaudeCompactionEnforcer {
         automaticReason,
       }) as EnforcerDecision | null | undefined;
       if (!found) return false;
-      authorization = { decisionId: found.decisionId, liftedReason: automaticReason };
+      authorization = {
+        decisionId: found.decisionId,
+        liftedReason: automaticReason,
+        generationUuid: found.generationUuid ?? liveGenerationUuid,
+        alreadyConsumed: false,
+      };
       return true;
     };
     const sendAttempt = async (
       message: string,
       opts?: SendOpts,
-      consumeAuthorization = true,
+      authorizationOptions: {
+        consume?: boolean;
+        finalize?: boolean;
+      } = {},
     ): Promise<{ ok: boolean; result: SendResult | null; outcome: EnforcerOutcome }> => {
       const lifted = authorization as {
         decisionId: string;
         liftedReason: AuthorizableCompactionReason;
+        generationUuid: string | null;
+        alreadyConsumed: boolean;
       } | null;
-      let consumed = false;
-      if (lifted && consumeAuthorization) {
+      let consumed = lifted?.alreadyConsumed ?? false;
+      if (lifted && (authorizationOptions.consume ?? true) && !consumed) {
         consumed = this.decisionStore?.consumeAuthorizationForAttempt({
           decisionId: lifted.decisionId,
           enforcerKind: "claude_compaction",
@@ -418,6 +436,13 @@ export class ClaudeCompactionEnforcer {
             result: null,
             outcome: { triggered: false, reason: lifted.liftedReason },
           };
+        }
+        if (lifted.liftedReason === "stale_generation" && lifted.generationUuid) {
+          this.pendingStageAuthorization.set(input.sessionName, {
+            decisionId: lifted.decisionId,
+            liftedReason: lifted.liftedReason,
+            generationUuid: lifted.generationUuid,
+          });
         }
       }
 
@@ -441,7 +466,7 @@ export class ClaudeCompactionEnforcer {
           outcome: { triggered: false, reason: "send_failed" },
         };
       }
-      if (lifted && consumed) {
+      if (lifted && consumed && (!result.ok || (authorizationOptions.finalize ?? true))) {
         this.decisionStore?.recordAuthorizationAttempt({
           decisionId: lifted.decisionId,
           outcome: result.ok ? "succeeded" : "failed",
@@ -509,7 +534,13 @@ export class ClaudeCompactionEnforcer {
       if (stageGen != null) {
         const liveGen = this.resolveOccupantGeneration?.(input.sessionName) ?? null;
         if (liveGen != null && liveGen !== stageGen) {
-          if (!lift("stale_generation")) {
+          const carried = this.pendingStageAuthorization.get(input.sessionName);
+          if (carried?.generationUuid === liveGen) {
+            authorization = { ...carried, alreadyConsumed: true };
+          } else {
+            this.pendingStageAuthorization.delete(input.sessionName);
+          }
+          if (!authorization && !lift("stale_generation")) {
             this.invalidateOccupant(input.sessionName); // drop the retired-generation ghost stage
             return { triggered: false, reason: "stale_generation" };
           }
@@ -520,6 +551,7 @@ export class ClaudeCompactionEnforcer {
         const boundary = await sendAttempt(
           buildPostCompactTurnBoundaryPrompt(),
           { waitForIdleMs: this.postCompactSendWaitMs },
+          { finalize: false },
         );
         if (!boundary.ok) {
           // Busy/never-idle → no delivery, no advance; the SAME stage retries next tick.
@@ -543,6 +575,7 @@ export class ClaudeCompactionEnforcer {
             ignoredWrongSeatExtra: extra.ignoredWrongSeat,
           }),
           { waitForIdleMs: this.postCompactSendWaitMs },
+          { finalize: false },
         );
         if (!restore.ok) {
           // Restore is exact-once + operator-authorized: if the seat is still busy
@@ -567,6 +600,7 @@ export class ClaudeCompactionEnforcer {
         }
         this.pendingPostCompactRestore.delete(input.sessionName);
         this.pendingStageGeneration.delete(input.sessionName); // GHOST-STAGE (b): stage completed → drop its gen
+        this.pendingStageAuthorization.delete(input.sessionName);
         this.postCompactRestoreCooldownUntil.set(
           input.sessionName,
           Date.now() + this.postCompactRestoreCooldownMs,
@@ -578,6 +612,7 @@ export class ClaudeCompactionEnforcer {
       }
       this.triggeredAboveThreshold.delete(input.sessionName);
       this.pendingPreCompactPrep.delete(input.sessionName);
+      this.pendingStageAuthorization.delete(input.sessionName);
       return { triggered: false, reason: "below_threshold" };
     }
 
@@ -623,7 +658,7 @@ export class ClaudeCompactionEnforcer {
           preCompactInstruction: policy.preCompactInstruction,
         }),
         undefined,
-        false,
+        { consume: false },
       );
       if (!prep.ok) {
         return prep.outcome;
@@ -642,6 +677,7 @@ export class ClaudeCompactionEnforcer {
     this.triggeredAboveThreshold.add(input.sessionName);
     this.pendingPreCompactPrep.delete(input.sessionName);
     this.pendingPostCompactRestore.set(input.sessionName, "turn_boundary");
+    this.pendingStageAuthorization.delete(input.sessionName);
     // GHOST-STAGE (b): capture the occupant generation at queue time (or null when unknown).
     this.pendingStageGeneration.set(input.sessionName, this.resolveOccupantGeneration?.(input.sessionName) ?? null);
     return attempt.outcome;
@@ -772,6 +808,7 @@ export class ClaudeCompactionEnforcer {
     this.triggeredAboveThreshold.add(input.sessionName);
     this.pendingPreCompactPrep.delete(input.sessionName);
     this.pendingPostCompactRestore.set(input.sessionName, "turn_boundary");
+    this.pendingStageAuthorization.delete(input.sessionName);
     // GHOST-STAGE (b): capture the occupant generation at queue time (or null when unknown).
     this.pendingStageGeneration.set(input.sessionName, this.resolveOccupantGeneration?.(input.sessionName) ?? null);
     this.setManualStage(input.sessionName, "compact-sent", undefined, opts.operatorInitiated === true);
@@ -799,6 +836,7 @@ export class ClaudeCompactionEnforcer {
     this.pendingPostCompactRestore.delete(sessionName);
     this.manualCompactionState.delete(sessionName);
     this.pendingStageGeneration.delete(sessionName); // GHOST-STAGE (b): drop the captured queue-time gen
+    this.pendingStageAuthorization.delete(sessionName);
   }
 
   private setManualStage(sessionName: string, stage: ManualCompactionStage, reason?: string, operatorInitiated?: boolean): void {
