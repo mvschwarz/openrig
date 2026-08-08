@@ -267,6 +267,34 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       envelopeSender, // the From: is the DERIVED identity (never the body value) — orch ruling (a)
     });
 
+    // A3b (P22 follow-on, planner-ruled IN scope): auto-record the fan-out — N rows, ONE per RESOLVED
+    // recipient. The schema is a per-recipient design (destination_session is typed + indexed; per-row
+    // delivery_state), so a partial fan-out records the TRUTH per recipient, never a lossy aggregate.
+    // STRICTLY DOWNSTREAM of the certified derivation (derivedActor above): each row's sender is the
+    // already-derived actor; destination = the RESOLVED session, NEVER the TargetSpec (which would poison
+    // the typed session column). Best-effort per row: the fan-out is already dispatched, so a rare
+    // audit-write failure is logged, never a false-negative on delivery.
+    if (derivedActor) {
+      const outbox = c.get("outboxHandler" as never) as OutboxHandler | undefined;
+      if (outbox) {
+        for (const r of result.results) {
+          if (!r.sessionName) continue;
+          try {
+            const entry = outbox.record({
+              senderSession: derivedActor,
+              destinationSession: r.sessionName,
+              body: body.text,
+              identityProvenance: "transport:v1",
+            });
+            if (r.ok) outbox.markDelivered(entry.outboxId);
+            else outbox.markFailed(entry.outboxId);
+          } catch (err) {
+            console.warn(`[transport/broadcast] outbox auto-record failed for ${r.sessionName} (fan-out already dispatched): ${(err as Error).message}`);
+          }
+        }
+      }
+    }
+
     return c.json(result);
   });
 

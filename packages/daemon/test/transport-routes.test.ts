@@ -188,6 +188,74 @@ describe("transport routes", () => {
     expect(outboxRows()).toHaveLength(0); // but no derived sender ⇒ no auto-record, never a null-sender row
   });
 
+  // ── A3b (P22 follow-on, planner-ruled IN scope) — the /broadcast fan-out auto-records N rows, ONE per
+  //    RESOLVED recipient (the schema's typed+indexed destination_session + per-row delivery_state is a
+  //    per-recipient design; a TargetSpec would poison the typed column). Same downstream-of-derivation
+  //    shape as /send. ──
+  it("A3b — a broadcast auto-records N rows, one per RESOLVED recipient (sender=derived, provenance=transport:v1, destination=each session, never the TargetSpec)", async () => {
+    seedRig();
+    const res = await sendApp().request("/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" },
+      body: JSON.stringify({ rig: "my-rig", text: "team update" }),
+    });
+    expect(res.status).toBe(200);
+    const rows = outboxRows();
+    expect(rows).toHaveLength(2); // one per resolved recipient, NOT one broadcast row
+    expect(rows.map((r) => r["destination_session"]).sort()).toEqual(["dev-impl@my-rig", "dev-qa@my-rig"]);
+    for (const r of rows) {
+      expect(r["sender_session"]).toBe("orch@my-rig"); // the DERIVED actor, per row
+      expect(r["identity_provenance"]).toBe("transport:v1");
+      expect(String(r["destination_session"])).not.toContain("rig:"); // a resolved session, never the TargetSpec
+      expect(r["delivery_state"]).toBe("delivered"); // all landed (mockTmux) ⇒ per-row state
+    }
+  });
+
+  it("A3b — a PARTIAL fan-out records per-row delivery_state (delivered vs failed) — the truth one row could not express", async () => {
+    seedRig();
+    const transport = new SessionTransport({
+      db, rigRepo, sessionRegistry,
+      // dev-qa's pane is missing ⇒ its send fails; dev-impl lands. A partial fan-out.
+      tmuxAdapter: mockTmux({ hasSession: async (name: string) => name !== "dev-qa@my-rig" }),
+    });
+    migrate(db, [outboxEntriesSchema]);
+    if (!(db.prepare("PRAGMA table_info(outbox_entries)").all() as Array<{ name: string }>).some((c) => c.name === "identity_provenance")) {
+      db.exec("ALTER TABLE outbox_entries ADD COLUMN identity_provenance TEXT");
+    }
+    const app = createApp({ sessionTransport: transport, outboxHandler: new OutboxHandler(db) });
+    const res = await app.request("/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" },
+      body: JSON.stringify({ rig: "my-rig", text: "team update" }),
+    });
+    expect(res.status).toBe(200);
+    const byDest = Object.fromEntries(outboxRows().map((r) => [r["destination_session"], r["delivery_state"]]));
+    expect(byDest["dev-impl@my-rig"]).toBe("delivered");
+    expect(byDest["dev-qa@my-rig"]).toBe("failed"); // per-recipient truth, not a lossy aggregate
+  });
+
+  it("A3b — a REFUSED broadcast (body actor != header ⇒ 409) writes NO outbox rows", async () => {
+    seedRig();
+    const res = await sendApp().request("/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" },
+      body: JSON.stringify({ rig: "my-rig", text: "hi", actorSession: "mallory@my-rig" }),
+    });
+    expect(res.status).toBe(409);
+    expect(outboxRows()).toHaveLength(0);
+  });
+
+  it("A3b — a header-LESS broadcast auto-records NO rows (no derived sender to attribute)", async () => {
+    seedRig();
+    const res = await sendApp().request("/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rig: "my-rig", text: "hi" }),
+    });
+    expect(res.status).toBe(200);
+    expect(outboxRows()).toHaveLength(0);
+  });
+
   // OPR.99.0.6.3 — the additive outcome field auto-surfaces through the
   // c.json(result) passthrough; failure HTTP mapping unchanged.
   it("POST /send with verify surfaces the outcome field in the JSON response (passthrough)", async () => {
