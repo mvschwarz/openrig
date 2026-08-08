@@ -330,7 +330,10 @@ describe("WatchdogJobsRepository — W2c exact-tuple auto-registration", () => {
 
   function ensureFn() {
     const ensure = (repo as unknown as {
-      ensureAutoRegistration?: (value: ReturnType<typeof input>) => ReturnType<WatchdogJobsRepository["register"]>;
+      ensureAutoRegistration?: (
+        value: ReturnType<typeof input>,
+        historicalTargetSessions?: string[],
+      ) => ReturnType<WatchdogJobsRepository["register"]>;
     }).ensureAutoRegistration;
     expect(ensure, "repository must expose the state-aware W2c exact-tuple ensure").toBeTypeOf("function");
     return ensure!.bind(repo);
@@ -405,6 +408,63 @@ describe("WatchdogJobsRepository — W2c exact-tuple auto-registration", () => {
         });
       }
       expect(repo.listAll().filter((job) => job.targetSession === scenario.target)).toHaveLength(2);
+    }
+  });
+
+  it.each(["active", "stopped"] as const)(
+    "retargets the sole %s role-bound historical alias without changing job identity",
+    (state) => {
+      const old = repo.register(input("old-seat@rig"));
+      if (state === "stopped") repo.stop(old.jobId, "operator_stopped");
+      const ensured = ensureFn()(input("new-seat@rig"), ["old-seat@rig", "new-seat@rig"]);
+      expect(ensured).toMatchObject({ jobId: old.jobId, state, targetSession: "new-seat@rig" });
+      expect(ensured.specYaml).toContain("session: new-seat@rig");
+      expect(ensured.specYaml).not.toContain("session: old-seat@rig");
+      expect(repo.listAll().filter((job) => job.state !== "terminal")).toHaveLength(1);
+    },
+  );
+
+  it("rejects conflicts across historical aliases with every row in structured details", () => {
+    const old = repo.register(input("old-seat@rig"));
+    const current = repo.register(input("new-seat@rig"));
+    try {
+      ensureFn()(input("new-seat@rig"), ["old-seat@rig", "new-seat@rig"]);
+      throw new Error("expected alias conflict");
+    } catch (error) {
+      expect(error).toBeInstanceOf(WatchdogJobsError);
+      expect((error as WatchdogJobsError).code).toBe("auto_registration_ambiguous");
+      expect((error as WatchdogJobsError).details).toMatchObject({
+        targetSession: "new-seat@rig",
+        rows: expect.arrayContaining([
+          { jobId: old.jobId, state: "active" },
+          { jobId: current.jobId, state: "active" },
+        ]),
+      });
+    }
+  });
+
+  it("terminal-only alias history creates one replacement for the current seat", () => {
+    const old = repo.register(input("old-seat@rig"));
+    repo.markTerminal(old.jobId, "completed");
+    const replacement = ensureFn()(input("new-seat@rig"), ["old-seat@rig", "new-seat@rig"]);
+    expect(replacement).toMatchObject({ state: "active", targetSession: "new-seat@rig" });
+    expect(replacement.jobId).not.toBe(old.jobId);
+    expect(repo.listAll()).toHaveLength(2);
+  });
+
+  it("refuses any persisted state outside active, stopped, and terminal", () => {
+    const invalid = repo.register(input("paused@rig"));
+    db.prepare("UPDATE watchdog_jobs SET state = 'paused' WHERE job_id = ?").run(invalid.jobId);
+    try {
+      ensureFn()(input("paused@rig"));
+      throw new Error("expected invalid state refusal");
+    } catch (error) {
+      expect(error).toBeInstanceOf(WatchdogJobsError);
+      expect((error as WatchdogJobsError).code).toBe("auto_registration_state_invalid");
+      expect((error as WatchdogJobsError).details).toMatchObject({
+        targetSession: "paused@rig",
+        rows: [{ jobId: invalid.jobId, state: "paused" }],
+      });
     }
   });
 });

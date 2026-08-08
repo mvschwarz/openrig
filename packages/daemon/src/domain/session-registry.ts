@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 const ulid = monotonicFactory();
 import type { Session, Binding } from "./types.js";
 import { validateSessionName } from "./session-name.js";
+import { formatWatchdogRegistrationError } from "./watchdog-auto-registration.js";
 
 // GHOST-STAGE atom-B (P12 3548d8eb) — the occupant-generation tenure.
 export type OccupantKind = "initial" | "handover" | "adopt";
@@ -162,7 +163,7 @@ export class SessionRegistry {
         SessionRegistry.watchdogEnsureWarned = true;
         console.warn(
           `[session-registry] watchdog auto-registration FAILED for node_id="${nodeId}" ` +
-          `session="${sessionName}": ${error instanceof Error ? error.message : String(error)} ` +
+          `session="${sessionName}": ${formatWatchdogRegistrationError(error)} ` +
           `(further ensure failures suppressed this process)`,
         );
       }
@@ -172,7 +173,7 @@ export class SessionRegistry {
     } catch (error) {
       console.warn(
         `[session-registry] watchdog coverage FAILED for node_id="${nodeId}" ` +
-        `session="${sessionName}": ${error instanceof Error ? error.message : String(error)}`,
+        `session="${sessionName}": ${formatWatchdogRegistrationError(error)}`,
       );
     }
   }

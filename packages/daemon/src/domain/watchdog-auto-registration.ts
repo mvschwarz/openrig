@@ -1,8 +1,7 @@
 import type Database from "better-sqlite3";
-import { parseSessionName } from "./session-name.js";
+import { parseSessionName, validateSessionName } from "./session-name.js";
 import type { SettingsStore } from "./user-settings/settings-store.js";
 import {
-  WatchdogJobsError,
   type WatchdogJob,
   type WatchdogJobsRepository,
 } from "./watchdog-jobs-repository.js";
@@ -25,6 +24,12 @@ export class WatchdogAutoRegistrationError extends Error {
 interface TopologyRow {
   node_id: string;
   rig_id: string;
+  rig_name: string;
+}
+
+interface RawTopologyRow {
+  node_id: string;
+  rig_id: string;
   rig_name: string | null;
 }
 
@@ -41,6 +46,14 @@ export interface WatchdogAutoRegistrationDeps {
   warn?: (message: string) => void;
 }
 
+export function formatWatchdogRegistrationError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const details = typeof error === "object" && error !== null && "details" in error
+    ? (error as { details?: unknown }).details
+    : undefined;
+  return details === undefined ? message : `${message}; details=${JSON.stringify(details)}`;
+}
+
 /**
  * W2c's one structural seam: every canonical seat mint ensures its role-bound
  * idle-gate job, while startup only audits existing live-like seats. Core seat
@@ -55,49 +68,52 @@ export class WatchdogAutoRegistration {
 
   /** Named exclusions: flat legacy and noncanonical/external seats cannot own qitems. */
   isEligibleSessionName(sessionName: string): boolean {
-    return parseSessionName(sessionName).kind === "canonical";
+    return validateSessionName(sessionName) && parseSessionName(sessionName).kind === "canonical";
   }
 
   ensure(nodeId: string, sessionName: string): WatchdogJob | null {
     const topology = this.resolveTopology(nodeId, sessionName);
     if (!topology) return null;
     const cadence = this.resolveCadence();
-    return this.deps.jobsRepo.ensureAutoRegistration({
-      policy: POLICY,
-      specYaml: this.generatedSpec(sessionName, cadence.scan, cadence.activeWake),
-      targetSession: sessionName,
-      intervalSeconds: cadence.scan,
-      scanIntervalSeconds: cadence.scan,
-      activeWakeIntervalSeconds: cadence.activeWake,
-      registeredBySession: REGISTRAR,
-      targetGenerationUuid: null,
-    });
+    return this.deps.jobsRepo.ensureAutoRegistration(
+      {
+        policy: POLICY,
+        specYaml: this.generatedSpec(sessionName, cadence.scan, cadence.activeWake),
+        targetSession: sessionName,
+        intervalSeconds: cadence.scan,
+        scanIntervalSeconds: cadence.scan,
+        activeWakeIntervalSeconds: cadence.activeWake,
+        registeredBySession: REGISTRAR,
+        targetGenerationUuid: null,
+      },
+      this.canonicalAliases(nodeId, topology.rig_name, sessionName),
+    );
   }
 
   assertCoverage(nodeId: string, sessionName: string): WatchdogJob | null {
     const topology = this.resolveTopology(nodeId, sessionName);
     if (!topology) return null;
-    const rows = this.deps.jobsRepo.listExactTuple(POLICY, sessionName, null);
-    const nonterminal = rows.filter((row) => row.state !== "terminal");
-    if (nonterminal.length === 0) {
+    const job = this.deps.jobsRepo.findAutoRegistration(
+      POLICY,
+      sessionName,
+      null,
+      this.canonicalAliases(nodeId, topology.rig_name, sessionName),
+    );
+    if (!job || job.targetSession !== sessionName) {
       throw new WatchdogAutoRegistrationError(
         "missing",
         `watchdog auto-registration missing for node_id="${nodeId}" session="${sessionName}"`,
-        { nodeId, sessionName, policy: POLICY },
-      );
-    }
-    if (nonterminal.length > 1) {
-      throw new WatchdogJobsError(
-        "auto_registration_ambiguous",
-        `auto-registration is ambiguous for ${POLICY}/${sessionName}: ${nonterminal.length} nonterminal rows`,
         {
           nodeId,
-          targetSession: sessionName,
-          rows: nonterminal.map((row) => ({ jobId: row.jobId, state: row.state })),
+          sessionName,
+          policy: POLICY,
+          staleTargetSession: job?.targetSession ?? null,
+          staleJobId: job?.jobId ?? null,
+          staleState: job?.state ?? null,
         },
       );
     }
-    return nonterminal[0]!;
+    return job;
   }
 
   /** Audit every latest live-like seat at startup; never create or delete rows. */
@@ -118,20 +134,21 @@ export class WatchdogAutoRegistration {
       } catch (error) {
         this.warn(
           `[watchdog-auto-registration] startup coverage FAILED for node_id="${row.node_id}" ` +
-          `session="${row.session_name}": ${error instanceof Error ? error.message : String(error)}`,
+          `session="${row.session_name}": ${formatWatchdogRegistrationError(error)}`,
         );
       }
     }
   }
 
   private resolveTopology(nodeId: string, sessionName: string): TopologyRow | null {
+    if (!validateSessionName(sessionName)) return null;
     const parsed = parseSessionName(sessionName);
     if (parsed.kind !== "canonical") return null;
     const row = this.deps.db.prepare(
       `SELECT n.id AS node_id, n.rig_id AS rig_id, r.name AS rig_name
          FROM nodes n LEFT JOIN rigs r ON r.id = n.rig_id
         WHERE n.id = ?`,
-    ).get(nodeId) as TopologyRow | undefined;
+    ).get(nodeId) as RawTopologyRow | undefined;
     if (!row || row.rig_name === null || row.rig_name !== parsed.rig) {
       throw new WatchdogAutoRegistrationError(
         "target_mismatch",
@@ -139,7 +156,18 @@ export class WatchdogAutoRegistration {
         { nodeId, sessionName, parsedRig: parsed.rig, actualRig: row?.rig_name ?? null },
       );
     }
-    return row;
+    return row as TopologyRow;
+  }
+
+  private canonicalAliases(nodeId: string, rigName: string, currentSession: string): string[] {
+    const rows = this.deps.db.prepare(
+      `SELECT session_name FROM sessions WHERE node_id = ? ORDER BY created_at ASC, id ASC`,
+    ).all(nodeId) as Array<{ session_name: string }>;
+    return [...new Set([...rows.map((row) => row.session_name), currentSession])].filter((candidate) => {
+      if (!validateSessionName(candidate)) return false;
+      const parsed = parseSessionName(candidate);
+      return parsed.kind === "canonical" && parsed.rig === rigName;
+    });
   }
 
   private resolveCadence(): { scan: number; activeWake: number } {

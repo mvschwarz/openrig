@@ -148,15 +148,79 @@ describe("W2c watchdog auto-registration — production composition", () => {
 
       deps.sessionRegistry.registerSession(node.id, "r01-dev-qa");
       deps.sessionRegistry.registerClaimedSession(claimed.id, "external-seat-without-canonical-rig");
+      deps.sessionRegistry.registerClaimedSession(node.id, "bad:seat@exclusion-rig");
 
       expect(register).not.toHaveBeenCalled();
       if (ensure) expect(ensure).not.toHaveBeenCalled();
       if (coverage) expect(coverage).not.toHaveBeenCalled();
       expect(autoRows(db, "r01-dev-qa")).toHaveLength(0);
       expect(autoRows(db, "external-seat-without-canonical-rig")).toHaveLength(0);
+      expect(autoRows(db, "bad:seat@exclusion-rig")).toHaveLength(0);
       const lines = warn.mock.calls.map((args) => args.map(String).join(" "));
-      expect(lines.some((line) => line.includes("r01-dev-qa") || line.includes("external-seat-without-canonical-rig")))
+      expect(lines.some((line) =>
+        line.includes("r01-dev-qa") ||
+        line.includes("external-seat-without-canonical-rig") ||
+        line.includes("bad:seat@exclusion-rig")
+      ))
         .toBe(false);
+    } finally {
+      eventLoopMonitor.stop();
+      db.close();
+    }
+  }, 30_000);
+
+  it("coverage refuses a formerly valid row after its persisted state mutates outside the closed set", async () => {
+    const { db, deps, eventLoopMonitor } = await createDaemon({
+      dbPath: ":memory:",
+      tmuxExec: async () => "",
+      cmuxExec: async () => "",
+    });
+    try {
+      const { node, sessionName } = seedCanonicalNode(db, "state-rig");
+      deps.sessionRegistry.registerSession(node.id, sessionName);
+      const [row] = autoRows(db, sessionName);
+      expect(row).toBeDefined();
+      db.prepare("UPDATE watchdog_jobs SET state = 'paused' WHERE job_id = ?").run(row!.jobId);
+      const auto = (deps as unknown as {
+        watchdogAutoRegistration: { assertCoverage(nodeId: string, seat: string): unknown };
+      }).watchdogAutoRegistration;
+      expect(() => auto.assertCoverage(node.id, sessionName)).toThrow(/auto_registration_state_invalid/);
+    } finally {
+      eventLoopMonitor.stop();
+      db.close();
+    }
+  }, 30_000);
+
+  it("coverage warnings retain node, seat, and every conflicting job id/state", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { db, deps, eventLoopMonitor } = await createDaemon({
+      dbPath: ":memory:",
+      tmuxExec: async () => "",
+      cmuxExec: async () => "",
+    });
+    try {
+      const { node, sessionName } = seedCanonicalNode(db, "conflict-rig");
+      deps.sessionRegistry.registerSession(node.id, sessionName);
+      const first = autoRows(db, sessionName)[0]!;
+      const second = deps.watchdogJobsRepo!.register({
+        policy: AUTO_POLICY,
+        specYaml: first.specYaml,
+        targetSession: sessionName,
+        intervalSeconds: 60,
+        scanIntervalSeconds: 60,
+        activeWakeIntervalSeconds: 900,
+        registeredBySession: AUTO_REGISTRAR,
+        targetGenerationUuid: null,
+      });
+
+      deps.sessionRegistry.registerClaimedSession(node.id, sessionName, "handover");
+      const lines = warn.mock.calls.map((args) => args.map(String).join(" "));
+      const coverage = lines.find((line) => line.includes("watchdog coverage FAILED"));
+      expect(coverage).toContain(node.id);
+      expect(coverage).toContain(sessionName);
+      expect(coverage).toContain(first.jobId);
+      expect(coverage).toContain(second.jobId);
+      expect(coverage).toContain('"state":"active"');
     } finally {
       eventLoopMonitor.stop();
       db.close();

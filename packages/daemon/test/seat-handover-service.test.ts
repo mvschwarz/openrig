@@ -6,6 +6,12 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { SeatHandoverService } from "../src/domain/seat-handover-service.js";
+import { WatchdogAutoRegistration } from "../src/domain/watchdog-auto-registration.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
+import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
+import { WatchdogPolicyEngine, type DeliveryFn } from "../src/domain/watchdog-policy-engine.js";
+import { makeIdleGateQitemPolicy } from "../src/domain/policies/idle-gate-qitem.js";
+import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 
@@ -203,6 +209,92 @@ describe("SeatHandoverService", () => {
       operator: "orch-lead@seat-rig",
     });
   });
+
+  it.each(["active", "stopped"] as const)(
+    "keeps the role-bound watchdog baton on a distinct discovered successor when %s",
+    async (initialState) => {
+      const now = new Date("2026-04-24T18:30:00.000Z");
+      const jobsRepo = new WatchdogJobsRepository(db, () => now);
+      const autoRegistration = new WatchdogAutoRegistration({
+        db,
+        jobsRepo,
+        settingsStore: {
+          resolveOne(key: string) {
+            return { value: key.endsWith("active_wake_interval_seconds") ? 900 : 60 };
+          },
+        } as never,
+      });
+      sessionRegistry.setWatchdogRegistrationObserver(autoRegistration);
+
+      const { node } = seedSeat();
+      const retiredSession = "dev-impl@seat-rig";
+      const successorSession = "dev-successor@seat-rig";
+      const [original] = jobsRepo.listAll().filter((job) => job.policy === "idle-gate-qitem");
+      expect(original).toBeDefined();
+      if (!original) return;
+      if (initialState === "stopped") {
+        db.prepare("UPDATE watchdog_jobs SET state = 'stopped' WHERE job_id = ?").run(original.jobId);
+      }
+
+      const discovered = seedDiscovery({ tmuxSession: successorSession });
+      const result = await service.handover({
+        seatRef: retiredSession,
+        reason: "watchdog-baton-proof",
+        source: `discovered:${discovered.id}`,
+        operator: "orch-lead@seat-rig",
+      });
+      expect(result.ok).toBe(true);
+
+      const roleRows = jobsRepo.listAll().filter((job) =>
+        job.policy === "idle-gate-qitem" && job.targetGeneration === null
+      );
+      const held = roleRows.filter((job) => job.state === "active" || job.state === "stopped");
+      expect(held).toHaveLength(1);
+      expect(held[0]).toMatchObject({
+        jobId: original.jobId,
+        state: initialState,
+        targetSession: successorSession,
+      });
+      expect(held[0]?.specYaml).toContain(`target:\n  session: ${successorSession}\n`);
+      expect(roleRows.filter((job) => job.targetSession === retiredSession && job.state === "active")).toEqual([]);
+
+      if (initialState === "active" && held[0]) {
+        db.prepare(
+          `INSERT INTO queue_items
+            (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, body)
+           VALUES
+            ('q-retired-watchdog', '2026-04-24T18:00:00Z', '2026-04-24T18:00:00Z',
+             'orch@seat-rig', ?, 'pending', 'urgent', 'deep', '["gate:guard"]', 'retired target')`,
+        ).run(retiredSession);
+        const activity = new AgentActivityStore({ db, eventBus, now: () => now });
+        expect(activity.recordHookEvent({
+          runtime: "codex",
+          sessionName: retiredSession,
+          hookEvent: "Stop",
+          occurredAt: "2026-04-24T18:29:00.000Z",
+        }).ok).toBe(true);
+        const deliveries: Array<{ targetSession: string; message: string }> = [];
+        const deliver: DeliveryFn = async (request) => {
+          deliveries.push(request);
+          return { status: "ok" };
+        };
+        const engine = new WatchdogPolicyEngine({
+          jobsRepo,
+          historyLog: new WatchdogHistoryLog(db),
+          eventBus,
+          deliver,
+          now: () => now,
+          additionalPolicies: [makeIdleGateQitemPolicy({ db, agentActivityStore: activity })],
+        });
+
+        const evaluation = await engine.evaluate(jobsRepo.getByIdOrThrow(held[0].jobId));
+        expect(evaluation.outcome).toEqual({ action: "skip", reason: "no_pending_gate" });
+        expect(deliveries, "the retired session no longer holds a deliverable watchdog").toEqual([]);
+      } else {
+        expect(jobsRepo.listActive()).toEqual([]);
+      }
+    },
+  );
 
   it("keeps dry-run side-effect free", async () => {
     seedSeat();

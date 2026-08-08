@@ -223,27 +223,76 @@ export class WatchdogJobsRepository {
    * durable as active; terminal-only history is replaced. The table has no
    * uniqueness constraint, so every matching row must be inspected.
    */
-  ensureAutoRegistration(input: EnsureAutoRegistrationInput): WatchdogJob {
-    const rows = this.listExactTuple(
+  ensureAutoRegistration(
+    input: EnsureAutoRegistrationInput,
+    historicalTargetSessions: string[] = [input.targetSession],
+  ): WatchdogJob {
+    const existing = this.findAutoRegistration(
       input.policy,
       input.targetSession,
       input.targetGenerationUuid ?? null,
+      historicalTargetSessions,
     );
-    const nonterminal = rows.filter((row) => row.state !== "terminal");
-    if (nonterminal.length === 1) return nonterminal[0]!;
+    if (existing) {
+      this.db.prepare(
+        `UPDATE watchdog_jobs
+            SET spec_yaml = ?, target_session = ?, interval_seconds = ?,
+                active_wake_interval_seconds = ?, scan_interval_seconds = ?
+          WHERE job_id = ?`,
+      ).run(
+        input.specYaml,
+        input.targetSession,
+        input.intervalSeconds,
+        input.activeWakeIntervalSeconds ?? null,
+        input.scanIntervalSeconds ?? null,
+        existing.jobId,
+      );
+      return this.getByIdOrThrow(existing.jobId);
+    }
+    return this.register(input);
+  }
+
+  /**
+   * Resolve the one active/stopped role-bound row across every historical
+   * session alias for a node. Persisted states are intentionally closed:
+   * unknown values are neither runnable jobs nor operator opt-outs.
+   */
+  findAutoRegistration(
+    policy: string,
+    targetSession: string,
+    targetGenerationUuid: string | null,
+    historicalTargetSessions: string[] = [targetSession],
+  ): WatchdogJob | null {
+    const rows = this.listAliasTuples(policy, historicalTargetSessions, targetGenerationUuid);
+    const invalid = rows.filter((row) =>
+      row.state !== "active" && row.state !== "stopped" && row.state !== "terminal"
+    );
+    if (invalid.length > 0) {
+      throw new WatchdogJobsError(
+        "auto_registration_state_invalid",
+        `auto_registration_state_invalid: auto-registration has invalid persisted state for ${policy}/${targetSession}`,
+        {
+          policy,
+          targetSession,
+          targetGenerationUuid,
+          rows: invalid.map((row) => ({ jobId: row.jobId, state: row.state })),
+        },
+      );
+    }
+    const nonterminal = rows.filter((row) => row.state === "active" || row.state === "stopped");
     if (nonterminal.length > 1) {
       throw new WatchdogJobsError(
         "auto_registration_ambiguous",
-        `auto-registration is ambiguous for ${input.policy}/${input.targetSession}: ${nonterminal.length} nonterminal rows`,
+        `auto-registration is ambiguous for ${policy}/${targetSession}: ${nonterminal.length} nonterminal rows`,
         {
-          policy: input.policy,
-          targetSession: input.targetSession,
-          targetGenerationUuid: input.targetGenerationUuid ?? null,
+          policy,
+          targetSession,
+          targetGenerationUuid,
           rows: nonterminal.map((row) => ({ jobId: row.jobId, state: row.state })),
         },
       );
     }
-    return this.register(input);
+    return nonterminal[0] ?? null;
   }
 
   /** All rows for the exact policy/seat/generation tuple, including history. */
@@ -263,6 +312,30 @@ export class WatchdogJobsRepository {
     const rows = this.db.prepare(
       `SELECT * FROM watchdog_jobs
        WHERE policy = ? AND target_session = ? AND ${targetClause}
+       ORDER BY registered_at ASC, job_id ASC`,
+    ).all(...params) as JobRow[];
+    return rows.map(rowToJob);
+  }
+
+  private listAliasTuples(
+    policy: string,
+    targetSessions: string[],
+    targetGenerationUuid: string | null,
+  ): WatchdogJob[] {
+    const aliases = [...new Set(targetSessions)];
+    if (aliases.length === 0) return [];
+    const targetClause = this.hasTargetGenColumn
+      ? "target_generation_uuid IS ?"
+      : targetGenerationUuid === null
+        ? "1 = 1"
+        : "0 = 1";
+    const placeholders = aliases.map(() => "?").join(", ");
+    const params = this.hasTargetGenColumn
+      ? [policy, ...aliases, targetGenerationUuid]
+      : [policy, ...aliases];
+    const rows = this.db.prepare(
+      `SELECT * FROM watchdog_jobs
+       WHERE policy = ? AND target_session IN (${placeholders}) AND ${targetClause}
        ORDER BY registered_at ASC, job_id ASC`,
     ).all(...params) as JobRow[];
     return rows.map(rowToJob);
