@@ -2,6 +2,13 @@ import { describe, it, expect, vi } from "vitest";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 
+const CLAUDE_FLOOR_EFFECT = {
+  runtime: "claude-code",
+  axis: "permission",
+  state: "observed",
+  value: "acceptEdits",
+} as const;
+
 function mockTmux(overrides?: {
   sendText?: (target: string, text: string) => Promise<TmuxResult>;
   sendKeys?: (target: string, keys: string[]) => Promise<TmuxResult>;
@@ -85,7 +92,7 @@ describe("ClaudeResumeAdapter", () => {
     it("returns { ok: true } on success", async () => {
       const adapter = new ClaudeResumeAdapter(mockTmux());
       const result = await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo");
-      expect(result).toEqual({ ok: true });
+      expect(result).toEqual({ ok: true, appliedLaunch: CLAUDE_FLOOR_EFFECT });
     });
 
     it("returns { ok: false, code: 'resume_failed' } on sendText failure", async () => {
@@ -177,7 +184,7 @@ describe("ClaudeResumeAdapter", () => {
 
       const result = await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo");
 
-      expect(result).toEqual({ ok: true });
+      expect(result).toEqual({ ok: true, appliedLaunch: CLAUDE_FLOOR_EFFECT });
       expect(getPaneCommand).toHaveBeenCalledTimes(2);
     });
 
@@ -204,7 +211,7 @@ describe("ClaudeResumeAdapter", () => {
 
       const result = await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo");
 
-      expect(result).toEqual({ ok: true });
+      expect(result).toEqual({ ok: true, appliedLaunch: CLAUDE_FLOOR_EFFECT });
     });
 
     // OPR.0.3.4.5 — regression guard behavior 05: CONSUMER human gate.
@@ -278,7 +285,7 @@ describe("ClaudeResumeAdapter", () => {
 
       const result = await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo");
 
-      expect(result).toEqual({ ok: true });
+      expect(result).toEqual({ ok: true, appliedLaunch: CLAUDE_FLOOR_EFFECT });
     });
   });
 });

@@ -13,7 +13,36 @@
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { DaemonClient } from "./client.js";
+import {
+  DaemonClient,
+  DaemonConnectionError,
+  DaemonResponseError,
+  DaemonTimeoutError,
+} from "./client.js";
+
+interface FrontDoorPermissionDiagnostic {
+  transport: { state: "healthy" | "connect" | "timeout" | "response" };
+  cwdRead: { state: "visible" | "denied" | "unknown" };
+  commandPath: { state: "available" | "missing" | "unknown" };
+  enforcement: {
+    axis: "permission" | "sandbox" | "resource_trust" | "not_applicable";
+    state: "aligned" | "drift" | "unknown";
+    expected: string | null;
+    effective: string | { defaultMode: string } | null;
+    sourcePath: string | null;
+    reason?: string;
+  };
+  observedAt: string;
+}
+
+export type FrontDoorProbeResult =
+  | { state: "ready" }
+  | { state: "diagnostic"; diagnostic: FrontDoorPermissionDiagnostic }
+  | { state: "connect" | "timeout" | "response"; message: string };
+
+interface FrontDoorProbeClient {
+  get(path: string, options?: { timeoutMs?: number }): Promise<{ status: number; data: unknown }>;
+}
 
 /** Monorepo-first, bundled-fallback TUI entry resolution — the exact
  * resolveDaemonPath pattern (see daemon-lifecycle.ts): a dev checkout's
@@ -44,26 +73,86 @@ export interface FrontDoorIo {
   out?: (line: string) => void;
   err?: (line: string) => void;
   exit?: (code: number) => void;
-  /** fast daemon reachability probe (default: GET /healthz, 1.5s cap) */
-  probeDaemon?: () => Promise<boolean>;
+  /** Typed daemon/current-seat probe (legacy booleans remain accepted for injected callers). */
+  probeDaemon?: () => Promise<boolean | FrontDoorProbeResult>;
   /** launch the TUI and resolve with its exit code */
   launchTui?: () => Promise<number>;
 }
 
-async function defaultProbeDaemon(): Promise<boolean> {
+function envValue(env: NodeJS.ProcessEnv, current: string, legacy: string): string | undefined {
+  return env[current]?.trim() || env[legacy]?.trim() || undefined;
+}
+
+/**
+ * Managed seats request the strict current-seat diagnostic. Unmanaged shells
+ * keep the cheap health-only path. Transport classes remain distinct.
+ */
+export async function probeFrontDoor(input: {
+  client?: FrontDoorProbeClient;
+  env?: NodeJS.ProcessEnv;
+} = {}): Promise<FrontDoorProbeResult> {
+  const client = input.client ?? new DaemonClient(undefined, { timeoutMs: 1500 });
+  const env = input.env ?? process.env;
+  const nodeId = envValue(env, "OPENRIG_NODE_ID", "RIGGED_NODE_ID");
+  const sessionName = envValue(env, "OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+  const identityQuery = nodeId
+    ? `nodeId=${encodeURIComponent(nodeId)}`
+    : sessionName
+      ? `sessionName=${encodeURIComponent(sessionName)}`
+      : null;
+  const path = identityQuery
+    ? `/api/whoami?${identityQuery}&compact=1&diagnostics=permission`
+    : "/healthz";
   try {
-    const client = new DaemonClient();
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 1500);
-    try {
-      const res = await fetch(`${client.baseUrl}/healthz`, { signal: controller.signal });
-      return res.ok;
-    } finally {
-      clearTimeout(timer);
+    const res = await client.get(path, { timeoutMs: 1500 });
+    if (res.status < 200 || res.status >= 300) {
+      return { state: "response", message: `daemon replied HTTP ${res.status}` };
     }
-  } catch {
-    return false;
+    if (!identityQuery) return { state: "ready" };
+    const diagnostic = (res.data as { permissionDrift?: FrontDoorPermissionDiagnostic } | null)?.permissionDrift;
+    if (!diagnostic) {
+      return { state: "response", message: "current-seat diagnostic was absent from the daemon response" };
+    }
+    if (
+      diagnostic.cwdRead.state === "visible"
+      && diagnostic.commandPath.state === "available"
+      && diagnostic.enforcement.state === "aligned"
+    ) {
+      return { state: "ready" };
+    }
+    return { state: "diagnostic", diagnostic };
+  } catch (error) {
+    if (error instanceof DaemonTimeoutError) return { state: "timeout", message: error.message };
+    if (error instanceof DaemonResponseError) return { state: "response", message: error.message };
+    if (error instanceof DaemonConnectionError) return { state: "connect", message: error.message };
+    return { state: "response", message: error instanceof Error ? error.message : String(error) };
   }
+}
+
+function normalizeProbe(result: boolean | FrontDoorProbeResult): FrontDoorProbeResult {
+  if (result === true) return { state: "ready" };
+  if (result === false) return { state: "connect", message: "cannot connect to the OpenRig daemon" };
+  return result;
+}
+
+function renderDiagnostic(diagnostic: FrontDoorPermissionDiagnostic): string {
+  const label = diagnostic.enforcement.axis === "resource_trust"
+    ? "resource trust"
+    : diagnostic.enforcement.axis;
+  const effective = typeof diagnostic.enforcement.effective === "object" && diagnostic.enforcement.effective !== null
+    ? diagnostic.enforcement.effective.defaultMode
+    : diagnostic.enforcement.effective;
+  const parts = [
+    `transport: ${diagnostic.transport.state}`,
+    `cwd/read: ${diagnostic.cwdRead.state}`,
+    `command/PATH: ${diagnostic.commandPath.state}`,
+    `${label}: ${diagnostic.enforcement.state.toUpperCase()}`,
+  ];
+  if (diagnostic.enforcement.expected) parts.push(`expected=${diagnostic.enforcement.expected}`);
+  if (effective) parts.push(`effective=${effective}`);
+  if (diagnostic.enforcement.sourcePath) parts.push(`source=${diagnostic.enforcement.sourcePath}`);
+  if (diagnostic.enforcement.reason) parts.push(`reason=${diagnostic.enforcement.reason}`);
+  return parts.join(" · ");
 }
 
 async function defaultLaunchTui(): Promise<number> {
@@ -85,13 +174,24 @@ async function defaultLaunchTui(): Promise<number> {
 export async function openMissionControl(io: FrontDoorIo = {}): Promise<void> {
   const err = io.err ?? ((l: string) => process.stderr.write(l + "\n"));
   const exit = io.exit ?? ((c: number) => process.exit(c));
-  const probe = io.probeDaemon ?? defaultProbeDaemon;
+  const probe = io.probeDaemon ?? probeFrontDoor;
   const launch = io.launchTui ?? defaultLaunchTui;
 
-  if (!(await probe())) {
+  const probeResult = normalizeProbe(await probe());
+  if (probeResult.state !== "ready") {
     for (const line of USAGE_LINES) err(line);
     err("");
-    err("daemon not running — try: rig up   (then bare `rig` opens mission control)");
+    if (probeResult.state === "diagnostic") {
+      const verdict = probeResult.diagnostic.enforcement.state === "drift"
+        ? "PERMISSION_DRIFT"
+        : "UNKNOWN_EFFECTIVE";
+      err(`runtime posture: ${verdict}`);
+      err(renderDiagnostic(probeResult.diagnostic));
+    } else if (probeResult.state === "connect") {
+      err(`transport: connect · ${probeResult.message} · try: rig up`);
+    } else {
+      err(`transport: ${probeResult.state} · ${probeResult.message}`);
+    }
     exit(1);
     return;
   }

@@ -39,8 +39,9 @@ describe("0.5.2-07 A2-3 — model-fidelity enumeration guard", () => {
 
   it("codex adapter: the resume branch passes the model into buildCodexResumeCore", () => {
     const src = read("adapters/codex-runtime-adapter.ts");
-    // The LAUNCH resume call threads binding.launchPosture then the model as the final positional arg.
-    expect(src).toMatch(/buildCodexResumeCore\([^;]*binding\.launchPosture,\s*model\)/);
+    // The LAUNCH resume call threads binding.launchPosture, model, then the exact precomputed
+    // posture segment. The latter prevents W3 observation from re-deciding policy.
+    expect(src).toMatch(/buildCodexResumeCore\([^;]*binding\.launchPosture,\s*model,\s*postureArg\)/);
   });
 
   it("claude adapter: every claude seat-launch template threads modelArg", () => {
@@ -65,7 +66,7 @@ describe("0.5.2-07 A2-3 — model-fidelity enumeration guard", () => {
 
   it("shared buildCodexResumeCore accepts a model param and emits -m before the resume subcommand", () => {
     const src = read("domain/native-resume-probe.ts");
-    expect(src).toMatch(/model\?: string \| null,\n\): string/);
+    expect(src).toMatch(/model\?: string \| null,\n\s*\/\*\*[^]*?\*\/\n\s*precomputedPostureArg\?: string,\n\): string/);
     expect(src).toMatch(/const modelArg = model \? ` -m \$\{shellQuote\(model\)\}`/);
     expect(src).toContain("`codex${profileOrPosture}${modelArg} resume ");
   });

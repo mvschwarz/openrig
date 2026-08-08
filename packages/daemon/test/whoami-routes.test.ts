@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
@@ -36,12 +36,13 @@ describe("whoami routes", () => {
 
   afterEach(() => { db.close(); });
 
-  function createApp() {
+  function createApp(permissionDriftObserver?: { diagnose(nodeId: string): unknown }) {
     const transcriptStore = new TranscriptStore({ transcriptsRoot: "/tmp/transcripts", enabled: true });
     const svc = new WhoamiService({ db, rigRepo, sessionRegistry, transcriptStore });
     const app = new Hono();
     app.use("*", async (c, next) => {
       c.set("whoamiService" as never, svc);
+      c.set("permissionDriftObserver" as never, permissionDriftObserver);
       await next();
     });
     app.route("/api/whoami", whoamiRoutes());
@@ -80,6 +81,31 @@ describe("whoami routes", () => {
     const body = await res.json();
     expect(body.resolvedBy).toBe("session_name");
     expect(body.identity.logicalId).toBe("dev.impl");
+  });
+
+  it("runs the permission observer only for the explicit current-seat diagnostic", async () => {
+    const { node } = seedRig();
+    const diagnose = vi.fn(() => ({
+      transport: { state: "healthy" },
+      cwdRead: { state: "visible" },
+      commandPath: { state: "available" },
+      enforcement: { axis: "permission", state: "drift", expected: "acceptEdits", effective: { defaultMode: "denyAll", allow: [], ask: [], deny: [] }, sourcePath: "/work/.claude/settings.local.json" },
+      observedAt: "2026-08-08T00:00:00.000Z",
+    }));
+    const app = createApp({ diagnose });
+
+    const ordinary = await app.request(`/api/whoami?nodeId=${node.id}`);
+    expect(ordinary.status).toBe(200);
+    expect((await ordinary.json()).permissionDrift).toBeUndefined();
+    expect(diagnose).not.toHaveBeenCalled();
+
+    const diagnostic = await app.request(`/api/whoami?nodeId=${node.id}&diagnostics=permission`);
+    expect(diagnostic.status).toBe(200);
+    expect((await diagnostic.json()).permissionDrift).toMatchObject({
+      enforcement: { state: "drift", sourcePath: "/work/.claude/settings.local.json" },
+    });
+    expect(diagnose).toHaveBeenCalledOnce();
+    expect(diagnose).toHaveBeenCalledWith(node.id);
   });
 
   it("GET /api/whoami with no params returns 400", async () => {

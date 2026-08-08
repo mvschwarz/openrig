@@ -15,6 +15,8 @@ import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { watchdogHistorySchema } from "../src/db/migrations/032_watchdog_history.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
+import { observeCodexSandbox } from "../src/domain/permission-drift.js";
+import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
 
 describe("SeatHandoverService", () => {
   let db: Database.Database;
@@ -60,7 +62,12 @@ describe("SeatHandoverService", () => {
     capturePaneScreen = vi.fn(async () => "predecessor screen tail");
     // B1 — a fresh successor is launched into a live agent (launchHarness +
     // readiness) with a scraped resume token (B2 launched-mode).
-    launchHarness = vi.fn(async () => ({ ok: true, resumeToken: "codex-launch-tok", resumeType: "codex_id" }));
+    launchHarness = vi.fn(async () => ({
+      ok: true,
+      resumeToken: "codex-launch-tok",
+      resumeType: "codex_id",
+      appliedLaunch: observeCodexSandbox(" -s workspace-write"),
+    }));
     checkReady = vi.fn(async () => ({ ready: true }));
     // B2 — discovered-mode derive-helper deps (Codex thread-id capturer by default).
     readSidecar = vi.fn(() => ({ ok: true, data: { session_id: "claude-sid-123" } }));
@@ -423,6 +430,26 @@ describe("SeatHandoverService", () => {
       // ambient YOLO must not widen an attachment-less successor.
       expect(successorBinding.launchPosture).toBe("floor");
     } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("persists the successor's applied effect only after the handover generation is minted", async () => {
+    const { node } = seedSeat({ runtime: "codex" });
+    const predecessor = sessionRegistry.currentOccupantTenure(node.id)!;
+    const result = await service.handover({
+      seatRef: "dev-impl@seat-rig",
+      reason: "context-wall",
+      source: "fresh",
+      operator: "orch-lead@seat-rig",
+    });
+    expect(result.ok).toBe(true);
+    const successor = sessionRegistry.currentOccupantTenure(node.id)!;
+    expect(successor.generationUuid).not.toBe(predecessor.generationUuid);
+    expect(new AppliedLaunchObservationStore(db).readCurrent(node.id)).toMatchObject({
+      generationUuid: successor.generationUuid,
+      runtime: "codex",
+      axis: "sandbox",
+      value: "workspace-write",
+    });
   });
 
   it("MONEY PROOF (0.5.2-07): a SPEC-pinned model seat's handover launches the successor on the SPEC model — the REAL lookupNode→createSuccessor→launchHarness path, not an injected node", async () => {

@@ -76,7 +76,7 @@ export function isAttentionRequiredReadinessCode(code: string | undefined): bool
 export type HarnessLaunchRecovery = "retry_fresh" | "attention_required";
 
 export type HarnessLaunchResult =
-  | { ok: true; resumeToken?: string; resumeType?: string }
+  | { ok: true; resumeToken?: string; resumeType?: string; appliedLaunch?: import("./permission-drift.js").AppliedLaunchObservation }
   // `evidence` carries the last-N pane lines for `attention_required` outcomes
   // so the failure can flow honest evidence through to RestoreNodeResult's
   // attentionEvidence field. Omitted for non-attention recoveries.

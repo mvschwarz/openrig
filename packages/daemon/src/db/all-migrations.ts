@@ -71,9 +71,10 @@ import { identityProvenanceSchema } from "./migrations/065_identity_provenance.j
 import { watchdogTargetGenerationSchema } from "./migrations/066_watchdog_target_generation.js";
 import { i3IdentityProvenanceSchema } from "./migrations/067_i3_identity_provenance.js";
 import { enforcerDecisionsSchema } from "./migrations/068_enforcer_decisions.js";
+import { appliedLaunchObservationsSchema } from "./migrations/069_applied_launch_observations.js";
 import type { Migration } from "./migrate.js";
 
-/** Ordered 001→067 (064/066 from main, 065 + 067 the P21 identity_provenance era-stamps — all additive/independent). */
+/** Ordered 001→069 (068 enforcer decisions, 069 W3 applied-launch observations). */
 export const ALL_MIGRATIONS: Migration[] = [
   coreSchema,
   bindingsSessionsSchema,
@@ -143,4 +144,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   watchdogTargetGenerationSchema,
   i3IdentityProvenanceSchema,
   enforcerDecisionsSchema,
+  appliedLaunchObservationsSchema,
 ];

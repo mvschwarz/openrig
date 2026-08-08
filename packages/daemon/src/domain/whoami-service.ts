@@ -65,6 +65,8 @@ export interface WhoamiResult {
    *  rig's RigSpec declares one. null when the rig has no workspace
    *  declaration; agents fall back to cwd-only orientation. */
   workspace?: WhoamiWorkspaceBlock | null;
+  /** W3 explicit current-seat diagnostic; omitted from ordinary whoami reads. */
+  permissionDrift?: import("./permission-drift.js").PermissionDriftDiagnostic | null;
 }
 
 export type RuntimeContext =

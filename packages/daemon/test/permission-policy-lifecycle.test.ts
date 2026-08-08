@@ -32,6 +32,8 @@ import type { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { NodeBinding, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { claudePostureFlag, codexPostureArg, piTrust } from "../src/adapters/yolo-mode.js";
+import { observeClaudePermission } from "../src/domain/permission-drift.js";
+import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
 
 const CUSTOM_POLICY = `---
 policy_schema_version: 1
@@ -128,7 +130,10 @@ describe("F1 — rig-level custom provenance is RESTART-COMPLETE", () => {
     const tmux = mockTmux();
     const claudeResume = {
       canResume: vi.fn((t: string | null) => t === "claude_id" || t === "claude_name"),
-      resume: vi.fn(async (): Promise<ResumeResult> => ({ ok: true })),
+      resume: vi.fn(async (): Promise<ResumeResult> => ({
+        ok: true,
+        appliedLaunch: observeClaudePermission("--dangerously-skip-permissions"),
+      })),
     } as unknown as ClaudeResumeAdapter;
     const orch = new RestoreOrchestrator({
       db: db2, rigRepo: rigRepo2, sessionRegistry: sessionRegistry2, eventBus: eventBus2,
@@ -145,6 +150,12 @@ describe("F1 — rig-level custom provenance is RESTART-COMPLETE", () => {
     const call = (claudeResume.resume as ReturnType<typeof vi.fn>).mock.calls.find((c) => c[2] === "tok-123");
     expect(call, "organic seat resume should have been attempted").toBeDefined();
     expect(call![4]).toBe("full_bypass"); // 5th arg = resolvedPosture from RIG provenance
+    expect(new AppliedLaunchObservationStore(db2).readCurrent(organic.id)).toMatchObject({
+      runtime: "claude-code",
+      axis: "permission",
+      state: "observed",
+      value: "bypassPermissions",
+    });
     db2.close();
   });
 
@@ -309,9 +320,15 @@ describe("F4 — REAL adapter command pins (floor + full_bypass on every launch 
       for (const [posture, expected] of [["full_bypass", "--dangerously-skip-permissions"], ["floor", "--permission-mode acceptEdits"]] as const) {
         const tmux = mockTmux();
         const adapter = new ClaudeCodeAdapter({ tmux, fsOps: claudeMockFs(), sessionIdFactory: () => "11111111-1111-4111-8111-111111111111" });
-        await adapter.launchHarness(binding(posture), { name: "dev-impl@test-rig" });
+        const result = await adapter.launchHarness(binding(posture), { name: "dev-impl@test-rig" });
         const cmd = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
         expect(cmd).toContain(expected);
+        expect(result.ok && result.appliedLaunch).toMatchObject({
+          runtime: "claude-code",
+          axis: "permission",
+          state: "observed",
+          value: posture === "floor" ? "acceptEdits" : "bypassPermissions",
+        });
         if (posture === "floor") expect(cmd).not.toContain("--dangerously-skip-permissions");
       }
     } finally { vi.unstubAllEnvs(); }
@@ -322,18 +339,20 @@ describe("F4 — REAL adapter command pins (floor + full_bypass on every launch 
     // fresh
     for (const [posture, expected, absent] of [["full_bypass", " -s danger-full-access", ""], ["floor", " -s workspace-write", "danger-full-access"]] as const) {
       const tmux = mockTmux();
-      await new CodexRuntimeAdapter({ sleep: async () => {}, tmux, fsOps: codexFs as never }).launchHarness(binding(posture), { name: "dev-qa@test-rig" });
+      const result = await new CodexRuntimeAdapter({ sleep: async () => {}, tmux, fsOps: codexFs as never }).launchHarness(binding(posture), { name: "dev-qa@test-rig" });
       const cmd = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
       expect(cmd).toContain(expected);
+      expect(result.ok && result.appliedLaunch).toMatchObject({ axis: "sandbox", state: "observed", value: posture === "floor" ? "workspace-write" : "danger-full-access" });
       if (absent) expect(cmd).not.toContain(absent);
     }
     // native fork (the Slice-02 helper remains the only flag translator)
     for (const [posture, expected] of [["full_bypass", " -s danger-full-access"], ["floor", " -s workspace-write"]] as const) {
       const tmux = mockTmux();
-      await new CodexRuntimeAdapter({ sleep: async () => {}, tmux, fsOps: codexFs as never }).launchHarness(binding(posture), { name: "dev-qa@test-rig", forkSource: { kind: "native_id", value: "parent-thread-1" } as never });
+      const result = await new CodexRuntimeAdapter({ sleep: async () => {}, tmux, fsOps: codexFs as never }).launchHarness(binding(posture), { name: "dev-qa@test-rig", forkSource: { kind: "native_id", value: "parent-thread-1" } as never });
       const cmd = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
       expect(cmd).toContain("fork");
       expect(cmd).toContain(expected);
+      if (result.ok) expect(result.appliedLaunch).toMatchObject({ axis: "sandbox", value: posture === "floor" ? "workspace-write" : "danger-full-access" });
     }
   });
 
@@ -344,11 +363,12 @@ describe("F4 — REAL adapter command pins (floor + full_bypass on every launch 
       for (const [posture, expected] of [["full_bypass", "--dangerously-skip-permissions"], ["floor", "--permission-mode acceptEdits"]] as const) {
         const tmux = mockTmux();
         const adapter = new RealClaudeResume(tmux);
-        await adapter.resume("s1", "claude_id", "tok-1", "/w", posture);
+        const result = await adapter.resume("s1", "claude_id", "tok-1", "/w", posture);
         const cmd = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
         expect(cmd).toContain("claude");
         expect(cmd).toContain("--resume");
         expect(cmd).toContain(expected);
+        expect(result.ok && result.appliedLaunch).toMatchObject({ axis: "permission", value: posture === "floor" ? "acceptEdits" : "bypassPermissions" });
       }
     } finally { vi.unstubAllEnvs(); }
   });
@@ -505,11 +525,13 @@ describe("GF2 — the COMPLETE production-altitude launch/restore matrix", () =>
       for (const [posture, expected, absent] of [["full_bypass", " -s danger-full-access", ""], ["floor", " -s workspace-write", "danger-full-access"]] as const) {
         const tmux = mockTmux();
         const adapter = new RealCodexResume(tmux, { sleep: async () => {} });
-        await adapter.resume("s1", "codex_id", "thread-1", "/w", null, posture);
+        (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("codex");
+        const result = await adapter.resume("s1", "codex_id", "thread-1", "/w", null, posture);
         const cmd = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string;
         expect(cmd).toContain("codex");
         expect(cmd).toContain("resume");
         expect(cmd).toContain(expected);
+        expect(result.ok && result.appliedLaunch).toMatchObject({ axis: "sandbox", value: posture === "floor" ? "workspace-write" : "danger-full-access" });
         if (absent) expect(cmd).not.toContain(absent);
       }
     } finally { vi.unstubAllEnvs(); }

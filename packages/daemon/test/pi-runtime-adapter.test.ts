@@ -18,6 +18,12 @@ const STATE_ROOT = "/openrig-home/state/pi";
 const RUNNER = "/daemon-dist/adapters/pi-runner.js";
 const SESSION = "devpi-a@some-rig";
 const SESSION_FILE = `${STATE_ROOT}/${SESSION}/sessions/2026-07-06T10-00-00_0197a2f0.jsonl`;
+const PI_FLOOR_EFFECT = {
+  runtime: "pi",
+  axis: "resource_trust",
+  state: "observed",
+  value: "no-approve",
+} as const;
 
 function mockTmux(overrides?: {
   sendText?: (target: string, text: string) => Promise<TmuxResult>;
@@ -216,7 +222,7 @@ describe("PiRuntimeAdapter.launchHarness", () => {
     const adapter = adapterWith(fs, mockTmux({ sendText }));
 
     const result = await adapter.launchHarness(binding, { name: SESSION });
-    expect(result).toEqual({ ok: true, resumeToken: SESSION_FILE, resumeType: "pi_session_file" });
+    expect(result).toEqual({ ok: true, resumeToken: SESSION_FILE, resumeType: "pi_session_file", appliedLaunch: PI_FLOOR_EFFECT });
     // Seat isolation dirs were created.
     expect(fs.dirs.has(piSeatPaths(STATE_ROOT, SESSION).agentDir)).toBe(true);
     expect(fs.dirs.has(piSeatPaths(STATE_ROOT, SESSION).sessionsDir)).toBe(true);
@@ -255,7 +261,7 @@ describe("PiRuntimeAdapter.launchHarness", () => {
     });
     const adapter = adapterWith(fs, mockTmux({ sendText }));
     const result = await adapter.launchHarness(binding, { name: SESSION, resumeToken: SESSION_FILE });
-    expect(result).toEqual({ ok: true, resumeToken: SESSION_FILE, resumeType: "pi_session_file" });
+    expect(result).toEqual({ ok: true, resumeToken: SESSION_FILE, resumeType: "pi_session_file", appliedLaunch: PI_FLOOR_EFFECT });
     expect(sendText).toHaveBeenCalledOnce();
   });
 
@@ -287,7 +293,7 @@ describe("PiRuntimeAdapter.launchHarness", () => {
     const result = await adapter.launchHarness(binding, {
       name: SESSION, forkSource: { kind: "native_id", value: parent },
     });
-    expect(result).toEqual({ ok: true, resumeToken: child, resumeType: "pi_session_file" });
+    expect(result).toEqual({ ok: true, resumeToken: child, resumeType: "pi_session_file", appliedLaunch: PI_FLOOR_EFFECT });
   });
 
   it("fork FAILS if the runner reports the parent file as the session (post-fork token rule)", async () => {
@@ -405,7 +411,7 @@ describe("PiResumeAdapter", () => {
     });
     const a = resumeAdapter(fs, mockTmux({ sendText }));
     const result = await a.resume(SESSION, "pi_session_file", SESSION_FILE, "/work");
-    expect(result).toEqual({ ok: true });
+    expect(result).toEqual({ ok: true, appliedLaunch: PI_FLOOR_EFFECT });
   });
 
   it("fails honestly when the runner reports a DIFFERENT session file than requested", async () => {
@@ -456,7 +462,7 @@ describe("launch-attempt scoping — stale artifacts never count", () => {
     });
     const adapter = adapterWith(fs, mockTmux({ sendText }));
     const result = await adapter.launchHarness(binding, { name: SESSION });
-    expect(result).toEqual({ ok: true, resumeToken: NEW_FILE, resumeType: "pi_session_file" });
+    expect(result).toEqual({ ok: true, resumeToken: NEW_FILE, resumeType: "pi_session_file", appliedLaunch: PI_FLOOR_EFFECT });
   });
 
   it("fresh launch ignores a PRE-EXISTING exited sidecar (no instant attention_required)", async () => {
@@ -542,7 +548,7 @@ describe("PiResumeAdapter — stale-artifact scoping", () => {
     });
     const a = resumeAdapter(fs, mockTmux({ sendText }));
     const result = await a.resume(SESSION, "pi_session_file", SESSION_FILE, "/work");
-    expect(result).toEqual({ ok: true });
+    expect(result).toEqual({ ok: true, appliedLaunch: PI_FLOOR_EFFECT });
   });
 
   it("this attempt's sidecar ready WITHOUT a sessionFile is not proof (no optional match)", async () => {
@@ -604,7 +610,7 @@ describe("durable catch-up cursor survives launch-attempt resets", () => {
       pollMs: 1, maxWaitMs: 5, sleep: async () => {},
     });
     const result = await a.resume(SESSION, "pi_session_file", SESSION_FILE, "/work");
-    expect(result).toEqual({ ok: true });
+    expect(result).toEqual({ ok: true, appliedLaunch: PI_FLOOR_EFFECT });
     expect(sendText).toHaveBeenCalledOnce();
   });
 

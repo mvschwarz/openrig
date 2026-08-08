@@ -2,6 +2,13 @@ import { describe, it, expect, vi } from "vitest";
 import { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 
+const CODEX_FLOOR_EFFECT = {
+  runtime: "codex",
+  axis: "sandbox",
+  state: "observed",
+  value: "workspace-write",
+} as const;
+
 function mockTmux(overrides?: {
   sendText?: (target: string, text: string) => Promise<TmuxResult>;
   sendKeys?: (target: string, keys: string[]) => Promise<TmuxResult>;
@@ -91,7 +98,7 @@ describe("CodexResumeAdapter", () => {
     it("returns { ok: true } on success", async () => {
       const adapter = new CodexResumeAdapter(mockTmux());
       const result = await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo");
-      expect(result).toEqual({ ok: true });
+      expect(result).toEqual({ ok: true, appliedLaunch: CODEX_FLOOR_EFFECT });
     });
 
     it("returns { ok: false, code: 'resume_failed' } on failure", async () => {
@@ -197,7 +204,7 @@ describe("CodexResumeAdapter", () => {
 
       const result = await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo");
 
-      expect(result).toEqual({ ok: true });
+      expect(result).toEqual({ ok: true, appliedLaunch: CODEX_FLOOR_EFFECT });
       expect(getPaneCommand).toHaveBeenCalled();
     });
 
@@ -212,7 +219,7 @@ describe("CodexResumeAdapter", () => {
 
       const result = await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo");
 
-      expect(result).toEqual({ ok: true });
+      expect(result).toEqual({ ok: true, appliedLaunch: CODEX_FLOOR_EFFECT });
     });
 
     it("probe sees `No saved session found` -> { ok: false, code: 'retry_fresh' }", async () => {
@@ -283,7 +290,7 @@ describe("CodexResumeAdapter", () => {
 
       const result = await adapter.resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo");
 
-      expect(result).toEqual({ ok: true });
+      expect(result).toEqual({ ok: true, appliedLaunch: CODEX_FLOOR_EFFECT });
       expect(attempt).toBeGreaterThanOrEqual(2);
     });
 

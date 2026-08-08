@@ -15,6 +15,8 @@ import type { RuntimeAdapter } from "./runtime-adapter.js";
 import type { OccupantInvalidator } from "./occupant-invalidator.js";
 import type { JsonlExchange } from "./session-jsonl.js";
 import type { PersistedEvent } from "./types.js";
+import type { AppliedLaunchObservation } from "./permission-drift.js";
+import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 
 /** Stopgap: a bounded labeled-from-record recap of the predecessor's last exchanges + the record path,
  *  resolved from the predecessor's provider transcript (claude transcript_path / codex rollout_path). */
@@ -154,6 +156,7 @@ export class SeatHandoverService {
   private captureDeps: ResumeTokenCaptureDeps;
   private occupantInvalidator: OccupantInvalidator | null;
   private predecessorRecapResolver: PredecessorRecapResolver | null;
+  private appliedLaunchObservations: AppliedLaunchObservationStore;
   private now: () => Date;
 
   constructor(deps: SeatHandoverServiceDeps) {
@@ -169,6 +172,7 @@ export class SeatHandoverService {
     this.tmuxAdapter = deps.tmuxAdapter;
     this.occupantInvalidator = deps.occupantInvalidator ?? null;
     this.predecessorRecapResolver = deps.predecessorRecapResolver ?? null;
+    this.appliedLaunchObservations = new AppliedLaunchObservationStore(deps.db);
     this.now = deps.now ?? (() => new Date());
     this.statusService = new SeatStatusService({ rigRepo: deps.rigRepo });
     this.planner = new SeatHandoverPlanner({ rigRepo: deps.rigRepo });
@@ -295,6 +299,7 @@ export class SeatHandoverService {
         contextDelivered: false,
         launchToken: null,
         occupantGeneration: null,
+        appliedLaunch: null,
         cleanup: null,
       });
     }
@@ -392,6 +397,7 @@ export class SeatHandoverService {
       // successor launcher is persisted atomically at commit (provenance scrape).
       launchToken: launch.resumeToken ? { token: launch.resumeToken, resumeType: launch.resumeType } : null,
       occupantGeneration,
+      appliedLaunch: launch.appliedLaunch ?? null,
       cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId),
     });
   }
@@ -417,6 +423,8 @@ export class SeatHandoverService {
     launchToken: { token: string; resumeType?: string } | null;
     /** Source-bound generation reserved before a fresh successor started; null for discovered seats. */
     occupantGeneration: string | null;
+    /** Exact enforcing value returned by the launch adapter; absent for adopted/discovered successors. */
+    appliedLaunch: AppliedLaunchObservation | null;
     cleanup: (() => Promise<void>) | null;
   }): Promise<SeatHandoverResult> {
     const fail = async (result: SeatHandoverResult): Promise<SeatHandoverResult> => {
@@ -499,6 +507,7 @@ export class SeatHandoverService {
       contextDelivered: input.contextDelivered,
       launchToken: input.launchToken,
       occupantGeneration: input.occupantGeneration,
+      appliedLaunch: input.appliedLaunch,
     });
     if (!committed.ok) return fail(committed);
 
@@ -670,6 +679,7 @@ export class SeatHandoverService {
     contextDelivered: boolean;
     launchToken: { token: string; resumeType?: string } | null;
     occupantGeneration: string | null;
+    appliedLaunch: AppliedLaunchObservation | null;
   }): SeatHandoverResult {
     const handoverAt = this.now().toISOString();
     const tx = this.db.transaction(() => {
@@ -702,6 +712,13 @@ export class SeatHandoverService {
         "handover",
         input.occupantGeneration,
       );
+      // W3: registerClaimedSession mints the successor generation. Only now may
+      // the exact adapter-returned launch effect be attached to that tenure.
+      // The store is best-effort, so observation persistence can never make an
+      // otherwise successful handover fail.
+      if (input.appliedLaunch) {
+        this.appliedLaunchObservations.recordCurrent(input.node.id, input.appliedLaunch);
+      }
       // B2 (launched/fresh): persist the launch-scraped resume token atomically
       // with the claim, provenance "scrape" (mirrors StartupOrchestrator's
       // launch-token capture). Validity-guarded; a malformed token is dropped,

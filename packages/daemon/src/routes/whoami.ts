@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { WhoamiService, WhoamiAmbiguousError } from "../domain/whoami-service.js";
+import type { PermissionDriftReader } from "../domain/permission-drift-observer.js";
 
 export function whoamiRoutes(): Hono {
   const router = new Hono();
@@ -13,6 +14,7 @@ export function whoamiRoutes(): Hono {
     // compute). A direct /api/whoami with NO compact param stays FULL (API
     // back-compat for external consumers).
     const compact = c.req.query("compact") === "1";
+    const permissionDiagnostics = c.req.query("diagnostics") === "permission";
 
     if (!nodeId && !sessionName) {
       return c.json({
@@ -33,6 +35,11 @@ export function whoamiRoutes(): Hono {
         return c.json({
           error: `Session or node '${identifier}' not found in any managed rig. Check available sessions with: rig ps --nodes`,
         }, 404);
+      }
+
+      if (permissionDiagnostics) {
+        const observer = c.get("permissionDriftObserver" as never) as PermissionDriftReader | undefined;
+        if (observer) result.permissionDrift = observer.diagnose(result.identity.nodeId);
       }
 
       return c.json(result);

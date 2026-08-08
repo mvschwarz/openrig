@@ -28,6 +28,7 @@ import type {
   Checkpoint,
   RigServicesRecord,
 } from "./types.js";
+import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 
 // L3: result shape for runtime-truth reconciliation. A reconciliation that
 // does NOT meet all four evidence preconditions is a no-op with a missing
@@ -119,6 +120,7 @@ export class RestoreOrchestrator {
   private piResume: PiResumeAdapter | null;
   private transcriptStore: TranscriptStore | null;
   private serviceOrchestrator: import("./service-orchestrator.js").ServiceOrchestrator | null;
+  private appliedLaunchStore: AppliedLaunchObservationStore;
 
   constructor(deps: RestoreOrchestratorDeps) {
     if (deps.db !== deps.rigRepo.db) {
@@ -156,6 +158,7 @@ export class RestoreOrchestrator {
     this.piResume = deps.piResume ?? null;
     this.transcriptStore = deps.transcriptStore ?? null;
     this.serviceOrchestrator = deps.serviceOrchestrator ?? null;
+    this.appliedLaunchStore = new AppliedLaunchObservationStore(deps.db);
   }
 
   async restore(snapshotId: string, opts?: {
@@ -984,7 +987,7 @@ export class RestoreOrchestrator {
         await this.rollbackToZeroSession(node.id, sessionName, launchResult?.session.id, priorState);
         return { nodeId: node.id, logicalId: node.logicalId, status: "awaiting-decision", error: `Original session unresumable: resume requested but no token available. No session is running. Re-run with --fresh ${node.logicalId} for a deliberate fresh-primed seat, or restore the original session manually.` };
       } else {
-        const resumeOutcome = await this.attemptResume(sessionName, resumeType, resumeToken, node.cwd ?? "/", node.codexConfigProfile, node.model, this.resolveRestorePosture(node.id, rigId));
+        const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, node.cwd ?? "/", node.codexConfigProfile, node.model, this.resolveRestorePosture(node.id, rigId));
         if (resumeOutcome.kind === "resumed") {
           baseStatus = "resumed";
         } else if (resumeOutcome.kind === "attention_required") {
@@ -1305,6 +1308,7 @@ export class RestoreOrchestrator {
   }
 
   private async attemptResume(
+    nodeId: string,
     sessionName: string,
     resumeType: string,
     resumeToken: string | null,
@@ -1322,7 +1326,10 @@ export class RestoreOrchestrator {
   > {
     if (this.claudeResume.canResume(resumeType, resumeToken)) {
       const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model);
-      if (result.ok) return { kind: "resumed" };
+      if (result.ok) {
+        if (result.appliedLaunch) this.appliedLaunchStore.recordCurrent(nodeId, result.appliedLaunch);
+        return { kind: "resumed" };
+      }
       if (result.code === "retry_fresh") return { kind: "retry_fresh" };
       // L3: surface attention_required from the Claude probe (resume-selection prompt).
       if (result.code === "attention_required") {
@@ -1337,7 +1344,10 @@ export class RestoreOrchestrator {
 
     if (this.codexResume.canResume(resumeType, resumeToken)) {
       const result = await this.codexResume.resume(sessionName, resumeType, resumeToken, cwd, codexConfigProfile, resolvedPosture, model);
-      if (result.ok) return { kind: "resumed" };
+      if (result.ok) {
+        if (result.appliedLaunch) this.appliedLaunchStore.recordCurrent(nodeId, result.appliedLaunch);
+        return { kind: "resumed" };
+      }
       if (result.code === "retry_fresh") return { kind: "retry_fresh" };
       // Codex auth-refusal: stored OAuth token can no longer be refreshed.
       // Recoverable — operator runs `codex login` and the seat continues.
@@ -1358,7 +1368,10 @@ export class RestoreOrchestrator {
     // awaiting-decision stop-and-ask — never a silent fresh start (BR-6).
     if (this.piResume?.canResume(resumeType, resumeToken)) {
       const result = await this.piResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture);
-      if (result.ok) return { kind: "resumed" };
+      if (result.ok) {
+        if (result.appliedLaunch) this.appliedLaunchStore.recordCurrent(nodeId, result.appliedLaunch);
+        return { kind: "resumed" };
+      }
       if (result.code === "retry_fresh") return { kind: "retry_fresh" };
       if (result.code === "attention_required") {
         return {

@@ -3,6 +3,9 @@ import type { TmuxAdapter } from "./tmux.js";
 import type { ResumeResult } from "./claude-resume.js";
 import { assessNativeResumeProbe, buildCodexResumeCore } from "../domain/native-resume-probe.js";
 import { runSyncSite } from "../domain/sync-site-wrap.js";
+import { shellQuote } from "./shell-quote.js";
+import { codexPostureArg } from "./yolo-mode.js";
+import { observeCodexSandbox } from "../domain/permission-drift.js";
 
 const CODEX_TYPES = new Set(["codex_id", "codex_last"]);
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
@@ -66,6 +69,9 @@ export class CodexResumeAdapter {
       }
     }
 
+    const profileArg = codexConfigProfile ? ` -p ${shellQuote(codexConfigProfile)}` : "";
+    const postureArg = codexPostureArg(profileArg, process.env, resolvedPosture);
+    const appliedLaunch = observeCodexSandbox(postureArg);
     const cmd = buildCodexResumeCore(
       resumeToken ?? "",
       codexConfigProfile,
@@ -73,6 +79,7 @@ export class CodexResumeAdapter {
       undefined,
       resolvedPosture,
       model,
+      postureArg,
     );
 
     const textResult = await this.tmux.sendText(tmuxSessionName, cmd);
@@ -89,7 +96,8 @@ export class CodexResumeAdapter {
       return { ok: false, code: "resume_failed", message: keyResult.message };
     }
 
-    return this.verifyResume(tmuxSessionName);
+    const result = await this.verifyResume(tmuxSessionName);
+    return result.ok ? { ...result, appliedLaunch } : result;
   }
 
   // Mirrors ClaudeResumeAdapter.verifyResume: poll the pane, run the native

@@ -3,9 +3,10 @@ import type { TmuxAdapter } from "./tmux.js";
 import { shellQuote } from "./shell-quote.js";
 import { claudePostureFlag } from "./yolo-mode.js";
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
+import { observeClaudePermission, type AppliedLaunchObservation } from "../domain/permission-drift.js";
 
 export type ResumeResult =
-  | { ok: true }
+  | { ok: true; appliedLaunch?: AppliedLaunchObservation }
   // L3: `attention_required` is a non-terminal failure — Claude is alive and
   // recoverable, but the resume-selection prompt is blocking. Caller maps to
   // restoreOutcome=attention_required (do NOT auto-answer per Decision 2).
@@ -54,7 +55,9 @@ export class ClaudeResumeAdapter {
     // unconditional acceptEdits floor when OFF; the full bypass when YOLO is ON) — every seat.
     // 0.5.2-07: --model matches the fresh-launch adapter (claude-code-adapter), emitted after posture.
     const modelArg = model ? ` --model ${shellQuote(model)}` : "";
-    const cmd = `claude ${claudePostureFlag(process.env, resolvedPosture)}${modelArg} --resume ${shellQuote(resumeToken!)}`;
+    const permissionMode = claudePostureFlag(process.env, resolvedPosture);
+    const appliedLaunch = observeClaudePermission(permissionMode);
+    const cmd = `claude ${permissionMode}${modelArg} --resume ${shellQuote(resumeToken!)}`;
 
     const textResult = await this.tmux.sendText(tmuxSessionName, cmd);
     if (!textResult.ok) {
@@ -70,7 +73,8 @@ export class ClaudeResumeAdapter {
       return { ok: false, code: "resume_failed", message: keyResult.message };
     }
 
-    return this.verifyResume(tmuxSessionName);
+    const result = await this.verifyResume(tmuxSessionName);
+    return result.ok ? { ...result, appliedLaunch } : result;
   }
 
   private async verifyResume(tmuxSessionName: string): Promise<ResumeResult> {

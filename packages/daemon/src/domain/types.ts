@@ -707,6 +707,8 @@ export interface NodeDetailCompactSpec {
 }
 
 export interface NodeDetailEntry extends NodeInventoryEntry {
+  /** W3 opt-in single-seat diagnostic; never populated on inventory lists. */
+  permissionDrift?: import("./permission-drift.js").PermissionDriftDiagnostic | null;
   binding: Binding | null;
   startupFiles: Array<{ path: string; deliveryHint: string; required: boolean }>;
   startupActions: Array<{ type: string; value: string }>;

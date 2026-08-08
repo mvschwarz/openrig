@@ -10,6 +10,8 @@ import type {
 import { isAttentionRequiredReadinessCode, resolveConcreteHint } from "./runtime-adapter.js";
 import type { ProjectionPlan } from "./projection-planner.js";
 import { issueStartupChallenge } from "./startup-proof.js";
+import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
+import type { AppliedLaunchObservation } from "./permission-drift.js";
 
 // -- Types --
 
@@ -96,6 +98,7 @@ export class StartupOrchestrator {
   private eventBus: EventBus;
   private tmuxAdapter: TmuxAdapter;
   private sleep: (ms: number) => Promise<void>;
+  private appliedLaunchStore: AppliedLaunchObservationStore;
 
   constructor(deps: StartupOrchestratorDeps) {
     if (deps.db !== deps.sessionRegistry.db) throw new Error("StartupOrchestrator: sessionRegistry must share the same db handle");
@@ -106,6 +109,7 @@ export class StartupOrchestrator {
     this.tmuxAdapter = deps.tmuxAdapter;
     this.readFile = deps.readFile ?? (() => "");
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.appliedLaunchStore = new AppliedLaunchObservationStore(deps.db);
   }
 
   private readFile: (path: string) => string;
@@ -119,6 +123,7 @@ export class StartupOrchestrator {
         : input.rebuildArtifacts && input.rebuildArtifacts.length > 0
           ? "rebuilt"
           : "fresh";
+    let appliedLaunch: AppliedLaunchObservation | undefined;
 
     // 1. Mark pending
     this.sessionRegistry.updateStartupStatus(input.sessionId, "pending");
@@ -193,6 +198,7 @@ export class StartupOrchestrator {
             ...(input.forkSource && !launchResumeToken ? { forkSource: input.forkSource } : {}),
           });
           if (launchResult.ok) {
+            appliedLaunch = launchResult.appliedLaunch;
             const normalizedResumeToken = launchResult.resumeToken?.trim();
             if (normalizedResumeToken) {
               try {
@@ -250,6 +256,11 @@ export class StartupOrchestrator {
       errors.push(`Readiness check error: ${(err as Error).message}`);
       return this.fail(input, "failed", errors);
     }
+
+    // The adapter returned the exact enforcing value it inserted, and readiness
+    // proved this managed launch became live. Persistence is deliberately
+    // best-effort: observation failure yields UNKNOWN, never a failed launch.
+    if (appliedLaunch) this.appliedLaunchStore.recordCurrent(input.nodeId, appliedLaunch);
 
     // OPR.0.4.3.06 — a fresh or fresh-fallback MANAGED launch is challenged so
     // orientation can be proved (never assumed). Resumed restores (excluded by

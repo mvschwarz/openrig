@@ -8,7 +8,7 @@ import { describe, it, expect, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { runFrontDoor, resolveTuiPath, type FrontDoorIo } from "../src/front-door.js";
+import { runFrontDoor, resolveTuiPath, probeFrontDoor, type FrontDoorIo } from "../src/front-door.js";
 
 function io(overrides: Partial<FrontDoorIo> = {}): FrontDoorIo & {
   outLines: string[];
@@ -72,17 +72,60 @@ describe("bare-rig front door — ownership rules", () => {
 });
 
 describe("bare-rig front door — first-impression degrade (never a stack trace)", () => {
-  it("daemon down → helpful usage naming `rig up`, exit 1, launch NOT attempted", async () => {
+  it("transport connect failure → typed helpful usage naming `rig up`, never generic daemon-down", async () => {
     const deps = io({ probeDaemon: async () => false });
     const handled = await runFrontDoor(["node", "rig"], deps);
     expect(handled).toBe(true);
     expect(deps.launches).toBe(0);
     const text = deps.errLines.join("\n");
-    expect(text).toMatch(/daemon not running/i);
+    expect(text).toMatch(/transport: connect/i);
     expect(text).toMatch(/rig up/);
     expect(text).toMatch(/rig --help/);
+    expect(text).not.toMatch(/daemon not running/i);
     expect(text).not.toMatch(/\n\s+at /); // no stack frames
     expect(deps.exits).toEqual([1]);
+  });
+
+  it("permission drift renders all four axes plus expected/effective/source and never launches", async () => {
+    const deps = io({
+      probeDaemon: async () => ({
+        state: "diagnostic" as const,
+        diagnostic: {
+          transport: { state: "healthy" as const },
+          cwdRead: { state: "visible" as const },
+          commandPath: { state: "available" as const },
+          enforcement: {
+            axis: "permission" as const,
+            state: "drift" as const,
+            expected: "acceptEdits",
+            effective: { defaultMode: "denyAll", allow: [], ask: [], deny: ["Read(/outside/**)"] },
+            sourcePath: "/work/.claude/settings.local.json",
+          },
+          observedAt: "2026-08-08T00:00:00.000Z",
+        },
+      }),
+    });
+    await runFrontDoor(["node", "rig"], deps);
+    const text = deps.errLines.join("\n");
+    expect(text).toContain("transport: healthy");
+    expect(text).toContain("cwd/read: visible");
+    expect(text).toContain("command/PATH: available");
+    expect(text).toContain("permission: DRIFT");
+    expect(text).toContain("expected=acceptEdits");
+    expect(text).toContain("effective=denyAll");
+    expect(text).toContain("source=/work/.claude/settings.local.json");
+    expect(text).not.toMatch(/daemon not running/i);
+    expect(deps.launches).toBe(0);
+    expect(deps.exits).toEqual([1]);
+  });
+
+  it.each(["timeout", "response"] as const)("%s stays a transport/response verdict and never becomes permission drift", async (state) => {
+    const deps = io({ probeDaemon: async () => ({ state, message: `${state} detail` }) });
+    await runFrontDoor(["node", "rig"], deps);
+    const text = deps.errLines.join("\n");
+    expect(text).toContain(`transport: ${state}`);
+    expect(text).not.toContain("PERMISSION_DRIFT");
+    expect(text).not.toMatch(/daemon not running/i);
   });
 
   it("TUI init failure → helpful usage with the failure line, exit 1, no stack trace", async () => {
@@ -104,6 +147,44 @@ describe("bare-rig front door — first-impression degrade (never a stack trace)
     const deps = io({ launchTui: async () => 3 });
     await runFrontDoor(["node", "rig"], deps);
     expect(deps.exits).toEqual([3]);
+  });
+});
+
+describe("front-door probe routing", () => {
+  it("uses explicit current-seat whoami diagnostics for a managed seat", async () => {
+    const paths: string[] = [];
+    const result = await probeFrontDoor({
+      env: { OPENRIG_NODE_ID: "node/1" },
+      client: {
+        get: async (path: string) => {
+          paths.push(path);
+          return {
+            status: 200,
+            data: {
+              permissionDrift: {
+                transport: { state: "healthy" },
+                cwdRead: { state: "visible" },
+                commandPath: { state: "available" },
+                enforcement: { axis: "sandbox", state: "aligned", expected: "workspace-write", effective: "workspace-write", sourcePath: null },
+                observedAt: "2026-08-08T00:00:00.000Z",
+              },
+            },
+          };
+        },
+      },
+    });
+    expect(result).toEqual({ state: "ready" });
+    expect(paths).toEqual(["/api/whoami?nodeId=node%2F1&compact=1&diagnostics=permission"]);
+  });
+
+  it("uses cheap health for an unmanaged shell", async () => {
+    const paths: string[] = [];
+    const result = await probeFrontDoor({
+      env: {},
+      client: { get: async (path: string) => { paths.push(path); return { status: 200, data: { status: "ok" } }; } },
+    });
+    expect(result).toEqual({ state: "ready" });
+    expect(paths).toEqual(["/healthz"]);
   });
 });
 
@@ -137,12 +218,12 @@ describe("PUBLIC bin ownership (guard finding 1 — the wrapper is the real fron
     );
     expect(run.status).toBe(0);
     let text = "";
-    for (let i = 0; i < 20 && !/daemon not running|Usage: rig/.test(text); i++) {
+    for (let i = 0; i < 20 && !/transport: connect|Usage: rig/.test(text); i++) {
       spawnSync("sleep", ["0.5"]);
       text = spawnSync("tmux", ["capture-pane", "-t", session, "-p"], { encoding: "utf-8", timeout: 5000 }).stdout ?? "";
     }
     spawnSync("tmux", ["kill-session", "-t", session], { encoding: "utf-8" });
-    expect(text).toMatch(/daemon not running — try: rig up/);
+    expect(text).toMatch(/transport: connect/);
     expect(text).not.toMatch(/Usage: rig \[options\] \[command\]/); // NOT the commander bypass
     expect(text).not.toMatch(/\n\s+at /);
   });
@@ -154,7 +235,7 @@ describe("PUBLIC bin ownership (guard finding 1 — the wrapper is the real fron
       { encoding: "utf-8", timeout: 10000, env: { ...process.env, OPENRIG_URL: "http://127.0.0.1:9" } },
     );
     const text = `${probe.stdout}${probe.stderr}`;
-    expect(text).toMatch(/daemon not running — try: rig up/);
+    expect(text).toMatch(/transport: connect/);
     expect(text).not.toMatch(/\n\s+at /);
   });
 

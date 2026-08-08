@@ -596,6 +596,31 @@ describe("Session routes", () => {
     expect(body[0].canonicalSessionName).toBe("dev-impl@test-rig");
   });
 
+  it("keeps permission observation off the fleet list and attaches it only to single-node detail", async () => {
+    const diagnose = vi.fn(() => ({
+      transport: { state: "healthy" as const },
+      cwdRead: { state: "visible" as const },
+      commandPath: { state: "available" as const },
+      enforcement: { axis: "sandbox" as const, state: "aligned" as const, expected: "workspace-write", effective: "workspace-write", sourcePath: null },
+      observedAt: "2026-08-08T00:00:00.000Z",
+    }));
+    const { app, rigRepo, sessionRegistry } = createTestApp(db, { permissionDriftObserver: { diagnose } });
+    const rig = rigRepo.createRig("test-rig");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex" });
+    sessionRegistry.registerClaimedSession(node.id, "dev-impl@test-rig");
+
+    const list = await app.request(`/api/rigs/${rig.id}/nodes?full=true`);
+    expect(list.status).toBe(200);
+    expect((await list.json())[0].permissionDrift).toBeUndefined();
+    expect(diagnose).not.toHaveBeenCalled();
+
+    const detail = await app.request(`/api/rigs/${rig.id}/nodes/${encodeURIComponent("dev.impl")}`);
+    expect(detail.status).toBe(200);
+    expect((await detail.json()).permissionDrift).toMatchObject({ enforcement: { axis: "sandbox", state: "aligned" } });
+    expect(diagnose).toHaveBeenCalledOnce();
+    expect(diagnose).toHaveBeenCalledWith(node.id);
+  });
+
   it("GET /api/rigs/:rigId/nodes includes read-only agent activity evidence", async () => {
     const tmux = {
       hasSession: vi.fn(async () => true),

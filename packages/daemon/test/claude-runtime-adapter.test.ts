@@ -477,6 +477,7 @@ describe("Claude Code runtime adapter", () => {
       ok: true,
       resumeToken: "abc-123",
       resumeType: "claude_id",
+      appliedLaunch: { runtime: "claude-code", axis: "permission", state: "observed", value: "acceptEdits" },
     });
     expect(tmux.sendKeys).toHaveBeenCalledTimes(2);
     expect(tmux.sendKeys).toHaveBeenNthCalledWith(2, "r01-impl", ["Enter"]);
@@ -508,6 +509,7 @@ describe("Claude Code runtime adapter", () => {
       ok: true,
       resumeToken: "abc-123",
       resumeType: "claude_id",
+      appliedLaunch: { runtime: "claude-code", axis: "permission", state: "observed", value: "acceptEdits" },
     });
   });
 

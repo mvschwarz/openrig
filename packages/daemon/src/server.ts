@@ -84,6 +84,7 @@ import { whoamiRoutes } from "./routes/whoami.js";
 import { providerRoutes } from "./routes/provider.js";
 import type { ProviderService } from "./domain/provider/provider-service.js";
 import type { WhoamiService } from "./domain/whoami-service.js";
+import { PermissionDriftObserver, type PermissionDriftReader } from "./domain/permission-drift-observer.js";
 import { chatRoutes } from "./routes/chat.js";
 import { streamRoutes } from "./routes/stream.js";
 import { queueRoutes } from "./routes/queue.js";
@@ -283,6 +284,8 @@ export interface AppDeps {
    *  per scan so newly-installed specs get picked up). */
   agentImageSpecRoots?: () => readonly string[];
   whoamiService?: WhoamiService;
+  /** W3 single-seat, read-only runtime-policy observer. */
+  permissionDriftObserver?: PermissionDriftReader;
   contextUsageStore?: import("./domain/context-usage-store.js").ContextUsageStore;
   contextMonitor?: { pollOnce(): Promise<void> };
   /**
@@ -437,6 +440,8 @@ export function createApp(deps: AppDeps): Hono {
   }
 
   const app = new Hono();
+  const permissionDriftObserver = deps.permissionDriftObserver
+    ?? new PermissionDriftObserver({ db: deps.rigRepo.db });
 
   // Inject dependencies into context for all routes
   app.use("*", async (c, next) => {
@@ -528,6 +533,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("agentImageLibrary" as never, deps.agentImageLibrary);
     c.set("snapshotCapturer" as never, deps.snapshotCapturer);
     c.set("whoamiService" as never, deps.whoamiService);
+    c.set("permissionDriftObserver" as never, permissionDriftObserver);
     c.set("contextUsageStore" as never, deps.contextUsageStore);
     c.set("contextMonitor" as never, deps.contextMonitor);
     c.set("compactionEnforcer" as never, deps.compactionEnforcer);

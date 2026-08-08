@@ -22,6 +22,7 @@ import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
 import { validateResumeToken } from "../domain/resume-token-validation.js";
 import { mergeManagedBlock } from "../domain/managed-blocks.js";
+import { observePiResourceTrust } from "../domain/permission-drift.js";
 import {
   piSeatPaths, parsePiRunnerState, buildPiRunnerCommand, buildPendingRunnerState,
   PI_RUNNER_READY_MARKER, PI_RUNNER_ERROR_MARKER, PI_RUNNER_EXIT_MARKER,
@@ -233,6 +234,8 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       JSON.stringify(buildPendingRunnerState(launchId, new Date().toISOString(), prior)),
     );
 
+    const trust = piTrust(this.trustPosture, process.env, binding.launchPosture);
+    const appliedLaunch = observePiResourceTrust(trust);
     const cmd = buildPiRunnerCommand({
       runnerEntryPath: this.runnerEntryPath,
       sessionName,
@@ -241,7 +244,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       model: binding.model,
       // OPR.0.4.8.2: Pi RESOURCE TRUST (not a permission policy). YOLO forces `approve` on every
       // seat; otherwise the configured posture. Same decision used on the restore path (pi-resume).
-      trust: piTrust(this.trustPosture, process.env, binding.launchPosture),
+      trust,
       sessionFile: opts.resumeToken,
       forkRef,
       launchId,
@@ -275,7 +278,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       return { ok: false, error: `pi launch: the runner reported a malformed session file (${validation.error})` };
     }
 
-    return { ok: true, resumeToken: validation.token, resumeType: "pi_session_file" };
+    return { ok: true, resumeToken: validation.token, resumeType: "pi_session_file", appliedLaunch };
   }
 
   async checkReady(binding: NodeBinding): Promise<ReadinessResult> {

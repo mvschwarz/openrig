@@ -29,6 +29,7 @@ import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import type { MiddlewareHandler } from "hono";
 import type { EventBus } from "../domain/event-bus.js";
 import { validateResumeToken } from "../domain/resume-token-validation.js";
+import type { PermissionDriftReader } from "../domain/permission-drift-observer.js";
 
 function terminalAuthGuard(): MiddlewareHandler {
   return async (c, next) => {
@@ -155,6 +156,15 @@ nodesRoutes.get("/:logicalId", async (c) => {
     hasAssignedWork: detailWithTerminalAndWork?.hasAssignedWork,
     pendingWorkCount: detailWithTerminalAndWork?.pendingWorkCount,
   });
+
+  // W3: detail is a single explicit seat, so this read-only filesystem
+  // observation is allowed here. It is deliberately absent from the list path.
+  const observer = c.get("permissionDriftObserver" as never) as PermissionDriftReader | undefined;
+  if (observer) {
+    const row = deps.rigRepo.db.prepare("SELECT id FROM nodes WHERE rig_id = ? AND logical_id = ?")
+      .get(rigId, logicalId) as { id: string } | undefined;
+    if (row) detail.permissionDrift = observer.diagnose(row.id);
+  }
 
   // PL-019 item 5: surface in-progress qitems on node-detail when the
   // node has a session name (matches /graph payload's enrichment shape).

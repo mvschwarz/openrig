@@ -24,13 +24,14 @@ describe("rig tui — alias of the bare-rig front-door mission-control path (no 
     expect(exit).toHaveBeenCalledWith(0);
   });
 
-  it("daemon DOWN → identical friendly degrade (same USAGE + 'rig up' line), exit 1, no launch", async () => {
+  it("transport connect failure → identical typed degrade, exit 1, no launch", async () => {
     const launchTui = vi.fn(async () => 0);
     const errs: string[] = [];
     const exit = vi.fn();
     await run({ stdoutIsTTY: true, probeDaemon: async () => false, launchTui, exit, err: (l: string) => errs.push(l) });
     expect(launchTui).not.toHaveBeenCalled();
-    expect(errs.join("\n")).toMatch(/daemon not running — try: rig up/);
+    expect(errs.join("\n")).toMatch(/transport: connect/);
+    expect(errs.join("\n")).not.toMatch(/daemon not running/);
     expect(exit).toHaveBeenCalledWith(1);
   });
 

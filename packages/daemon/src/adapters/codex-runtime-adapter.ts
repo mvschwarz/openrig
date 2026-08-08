@@ -16,6 +16,7 @@ import type {
 import type { CodexProfileProbeResult } from "../domain/codex-profile-preflight.js";
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
+import { observeCodexSandbox } from "../domain/permission-drift.js";
 import {
   defaultResolveHomeDirByPid,
   readCodexThreadIdFromCandidateHomes,
@@ -308,6 +309,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const modelArg = model ? ` -m ${shellQuote(model)}` : "";
     const profile = binding.codexConfigProfile?.trim();
     const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
+    const postureArg = codexPostureArg(profileArg, process.env, binding.launchPosture);
+    const appliedLaunch = observeCodexSandbox(postureArg);
 
     // OPR.0.3.4.7 — profile-LOAD probe before launch/resume. A legacy
     // [profiles.<name>] table or invalid TOML must fail BEFORE the opaque
@@ -343,7 +346,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // -s danger-full-access on every seat; otherwise the named profile, or OpenRig's explicit
       // -s workspace-write floor flag.
       // 0.5.2-07 A2-3: the FORK path threads the SPEC model too (fork-instantiate reverted it before).
-      const cmd = `codex${codexPostureArg(profileArg, process.env, binding.launchPosture)}${modelArg} fork${queueStateDirArg} ${shellQuote(parentId)}`;
+      const cmd = `codex${postureArg}${modelArg} fork${queueStateDirArg} ${shellQuote(parentId)}`;
       const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
@@ -360,7 +363,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           error: "codex fork: could not capture new post-fork thread id",
         };
       }
-      return { ok: true, resumeToken: threadId, resumeType: "codex_id" };
+      return { ok: true, resumeToken: threadId, resumeType: "codex_id", appliedLaunch };
     }
 
     // OPR.0.4.8.2: one posture decision (codexPostureArg) for the fresh launch too — YOLO forces
@@ -369,8 +372,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const cmd = opts.resumeToken
       // 0.5.2-07 A2-3: the pod-aware RESUME path threads the SPEC model too (reverted before — the
       // grounding map assumed codex parity with the claude adapter, but only fresh emitted -m).
-      ? buildCodexResumeCore(opts.resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model)
-      : `codex${codexPostureArg(profileArg, process.env, binding.launchPosture)} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`;
+      ? buildCodexResumeCore(opts.resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, postureArg)
+      : `codex${postureArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`;
 
     const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
     if (!textResult.ok) {
@@ -386,15 +389,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     if (opts.resumeToken) {
       const verification = await this.verifyResumeLaunch(binding.tmuxSession, { resumeToken: opts.resumeToken });
       if (!verification.ok) return verification;
-      return { ok: true, resumeToken: opts.resumeToken, resumeType: "codex_id" };
+      return { ok: true, resumeToken: opts.resumeToken, resumeType: "codex_id", appliedLaunch };
     }
 
     const threadId = await this.captureFreshThreadId(binding);
     if (threadId) {
-      return { ok: true, resumeToken: threadId, resumeType: "codex_id" };
+      return { ok: true, resumeToken: threadId, resumeType: "codex_id", appliedLaunch };
     }
 
-    return { ok: true };
+    return { ok: true, appliedLaunch };
   }
 
   private buildQueueStateAddDirArg(sessionName: string): string {

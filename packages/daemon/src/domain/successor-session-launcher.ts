@@ -4,6 +4,7 @@ import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { RuntimeHint } from "./discovery-types.js";
 import type { RuntimeAdapter, NodeBinding, ReadinessResult } from "./runtime-adapter.js";
 import { isAttentionRequiredReadinessCode } from "./runtime-adapter.js";
+import type { AppliedLaunchObservation } from "./permission-drift.js";
 import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
 
 /**
@@ -57,6 +58,7 @@ export type SuccessorLaunchResult =
       tmuxPane: string;
       resumeToken?: string;
       resumeType?: string;
+      appliedLaunch?: AppliedLaunchObservation;
       /**
        * OPR.0.4.6.02 S1 — non-fatal tmux option-default warnings from the
        * fresh successor's launch (mouse/status/clipboard). Present only when
@@ -222,6 +224,7 @@ export class SuccessorSessionLauncher {
       tmuxPane: pane.id,
       resumeToken: started.resumeToken,
       resumeType: started.resumeType,
+      appliedLaunch: started.appliedLaunch,
     };
   }
 
@@ -237,7 +240,7 @@ export class SuccessorSessionLauncher {
     tmuxSession: string,
     tmuxPane: string,
     cwd: string | undefined,
-  ): Promise<{ ok: true; resumeToken?: string; resumeType?: string } | { ok: false; code: string; message: string }> {
+  ): Promise<{ ok: true; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation } | { ok: false; code: string; message: string }> {
     const adapter = node.runtime ? this.runtimeAdapters[node.runtime] : undefined;
     if (!adapter) {
       return {
@@ -316,7 +319,7 @@ export class SuccessorSessionLauncher {
       };
     }
 
-    return { ok: true, resumeToken, resumeType };
+    return { ok: true, resumeToken, resumeType, appliedLaunch: launch.appliedLaunch };
   }
 
   /**

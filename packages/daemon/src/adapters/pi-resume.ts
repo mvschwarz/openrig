@@ -16,6 +16,7 @@ import { piTrust } from "./yolo-mode.js";
 import {
   piSeatPaths, parsePiRunnerState, buildPiRunnerCommand, buildPendingRunnerState,
 } from "./pi-runner-protocol.js";
+import { observePiResourceTrust } from "../domain/permission-drift.js";
 
 export { type ResumeResult };
 
@@ -82,6 +83,8 @@ export class PiResumeAdapter {
       JSON.stringify(buildPendingRunnerState(launchId, new Date().toISOString(), prior)),
     );
 
+    const trust = piTrust(this.options.trustPosture, process.env, resolvedPosture);
+    const appliedLaunch = observePiResourceTrust(trust);
     const cmd = buildPiRunnerCommand({
       runnerEntryPath: this.paths.runnerEntryPath,
       sessionName: tmuxSessionName,
@@ -92,7 +95,7 @@ export class PiResumeAdapter {
       model: model ?? undefined,
       // OPR.0.4.8.2: Pi RESOURCE TRUST (not a permission policy). Same decision as the launch path:
       // YOLO forces `approve` on every restored seat; otherwise the configured posture.
-      trust: piTrust(this.options.trustPosture, process.env, resolvedPosture),
+      trust,
       sessionFile,
       launchId,
     });
@@ -109,7 +112,8 @@ export class PiResumeAdapter {
       return { ok: false, code: "resume_failed", message: keyResult.message };
     }
 
-    return this.verifyResume(tmuxSessionName, sessionFile, launchId);
+    const result = await this.verifyResume(tmuxSessionName, sessionFile, launchId);
+    return result.ok ? { ...result, appliedLaunch } : result;
   }
 
   // Poll the runner's launch-scoped sidecar ONLY — never stale pane

@@ -929,6 +929,16 @@ describe("session_source Pi rows (OPR.0.4.6.PI1)", () => {
     expect(typedCommand).toMatch(/--(no-)?approve/); // explicit trust, always
 
     // Post-fork token rule: the NEW child file is persisted, never the parent.
-    expect(result).toEqual({ ok: true, resumeToken: PI_CHILD, resumeType: "pi_session_file" });
+    expect(result).toEqual({
+      ok: true,
+      resumeToken: PI_CHILD,
+      resumeType: "pi_session_file",
+      appliedLaunch: {
+        runtime: "pi",
+        axis: "resource_trust",
+        state: "observed",
+        value: "no-approve",
+      },
+    });
   });
 });

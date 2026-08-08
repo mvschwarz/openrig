@@ -14,6 +14,7 @@ import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
 import { mergeManagedBlock } from "../domain/managed-blocks.js";
 import { shellQuote } from "./shell-quote.js";
 import { validateClaudeActivityHookDelivery } from "../domain/claude-activity-hooks.js";
+import { observeClaudePermission } from "../domain/permission-drift.js";
 
 export interface ClaudeAdapterFsOps {
   readFile(path: string): string;
@@ -225,6 +226,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // The SAME decision (claudePostureFlag) is used on the restore path (claude-resume.ts).
     // OPR.0.4.8.3 Seam B: a per-seat resolved policy posture (binding.launchPosture) overrides env.
     const permissionMode = claudePostureFlag(process.env, binding.launchPosture);
+    const appliedLaunch = observeClaudePermission(permissionMode);
 
     // 51-07: a per-agent model declared in the spec (member.model ?? profile ?? defaults, resolved
     // onto binding.model at instantiate) is emitted as `--model <x>` on the launch command. Absent →
@@ -270,7 +272,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
           error: `claude-code fork: could not capture new post-fork session id from claude session storage after ${FORK_POLL_ATTEMPTS} polls (${(FORK_POLL_ATTEMPTS * FORK_POLL_DELAY_MS) / 1000}s ceiling)`,
         };
       }
-      return { ok: true, resumeToken: newToken, resumeType: "claude_id" };
+      return { ok: true, resumeToken: newToken, resumeType: "claude_id", appliedLaunch };
     }
 
     const generatedSessionId = opts.resumeToken ? null : this.sessionIdFactory();
@@ -291,13 +293,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     if (opts.resumeToken) {
       const verification = await this.verifyResumeLaunch(binding.tmuxSession);
       if (!verification.ok) return verification;
-      return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id" };
+      return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id", appliedLaunch };
     }
 
     // Belt-and-suspenders: prefer an immediately discoverable persisted session,
     // but fall back to the UUID we assigned explicitly at launch time.
     const token = this.captureResumeToken(opts.name);
-    return { ok: true, resumeToken: token ?? generatedSessionId ?? undefined, resumeType: "claude_id" };
+    return { ok: true, resumeToken: token ?? generatedSessionId ?? undefined, resumeType: "claude_id", appliedLaunch };
   }
 
   async checkReady(binding: NodeBinding): Promise<ReadinessResult> {

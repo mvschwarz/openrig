@@ -8,6 +8,13 @@ import type { NodeBinding, ResolvedStartupFile } from "../src/domain/runtime-ada
 import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-planner.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
+const CODEX_FLOOR_EFFECT = {
+  runtime: "codex",
+  axis: "sandbox",
+  state: "observed",
+  value: "workspace-write",
+} as const;
+
 function mockTmux(overrides?: Partial<TmuxAdapter>): TmuxAdapter {
   return {
     sendText: vi.fn(async () => ({ ok: true as const })),
@@ -565,6 +572,7 @@ describe("Codex runtime adapter", () => {
       ok: true,
       resumeToken: "019d45bc-117d-78a3-a4ad-6fb186e5a86d",
       resumeType: "codex_id",
+      appliedLaunch: CODEX_FLOOR_EFFECT,
     });
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText.mock.calls).toEqual([
@@ -645,6 +653,7 @@ describe("Codex runtime adapter", () => {
       ok: true,
       resumeToken: "019d45bc-117d-78a3-a4ad-6fb186e5a86d",
       resumeType: "codex_id",
+      appliedLaunch: CODEX_FLOOR_EFFECT,
     });
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText.mock.calls).toEqual([
@@ -674,6 +683,7 @@ describe("Codex runtime adapter", () => {
       ok: true,
       resumeToken: "019d45bc-117d-78a3-a4ad-6fb186e5a86d",
       resumeType: "codex_id",
+      appliedLaunch: CODEX_FLOOR_EFFECT,
     });
   });
 
@@ -699,6 +709,7 @@ describe("Codex runtime adapter", () => {
       ok: true,
       resumeToken: "019d45bc-117d-78a3-a4ad-6fb186e5a86d",
       resumeType: "codex_id",
+      appliedLaunch: CODEX_FLOOR_EFFECT,
     });
   });
 
@@ -734,6 +745,7 @@ describe("Codex runtime adapter", () => {
       ok: true,
       resumeToken: "019d45bc-117d-78a3-a4ad-6fb186e5a86d",
       resumeType: "codex_id",
+      appliedLaunch: CODEX_FLOOR_EFFECT,
     });
   });
 
@@ -769,6 +781,7 @@ describe("Codex runtime adapter", () => {
       ok: true,
       resumeToken: "019d45bc-117d-78a3-a4ad-6fb186e5a86d",
       resumeType: "codex_id",
+      appliedLaunch: CODEX_FLOOR_EFFECT,
     });
   });
 
@@ -894,7 +907,7 @@ describe("Codex runtime adapter", () => {
 
     const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig", resumeToken: "sess-456" });
 
-    expect(result).toEqual({ ok: true, resumeToken: "sess-456", resumeType: "codex_id" });
+    expect(result).toEqual({ ok: true, resumeToken: "sess-456", resumeType: "codex_id", appliedLaunch: CODEX_FLOOR_EFFECT });
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText.mock.calls).toEqual([
       ["r01-qa", expectedResumeCommand()],

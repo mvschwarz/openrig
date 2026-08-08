@@ -11,6 +11,8 @@ import type { ProjectionPlan } from "../src/domain/projection-planner.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { StartupAction } from "../src/domain/types.js";
 import { deriveOriented } from "../src/domain/startup-proof.js";
+import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
+import { observeClaudePermission } from "../src/domain/permission-drift.js";
 
 // -- Mocks --
 
@@ -155,6 +157,34 @@ describe("StartupOrchestrator", () => {
     const row = db.prepare("SELECT startup_status, startup_completed_at FROM sessions WHERE id = ?").get(seed.sessionId) as { startup_status: string; startup_completed_at: string | null };
     expect(row.startup_status).toBe("ready");
     expect(row.startup_completed_at).not.toBeNull();
+  });
+
+  it("records the exact adapter-returned launch effect only after successful managed launch", async () => {
+    const seed = seedSession();
+    const appliedLaunch = observeClaudePermission("--permission-mode acceptEdits");
+    const adapter = mockAdapter({ launchHarness: vi.fn(async () => ({ ok: true, appliedLaunch })) });
+    const result = await createOrchestrator().startNode(makeInput(seed, { adapter }));
+    expect(result.ok).toBe(true);
+    expect(new AppliedLaunchObservationStore(db).readCurrent(seed.nodeId)).toMatchObject(appliedLaunch);
+  });
+
+  it("does not record an attempted effect when the managed launch fails", async () => {
+    const seed = seedSession();
+    const adapter = mockAdapter({ launchHarness: vi.fn(async () => ({ ok: false, error: "provider refused" })) });
+    const result = await createOrchestrator().startNode(makeInput(seed, { adapter }));
+    expect(result.ok).toBe(false);
+    expect(new AppliedLaunchObservationStore(db).readCurrent(seed.nodeId)).toBeNull();
+  });
+
+  it("keeps a successful provider launch successful when observation persistence is unavailable", async () => {
+    const seed = seedSession();
+    db.exec("DROP TABLE applied_launch_observations");
+    const adapter = mockAdapter({
+      launchHarness: vi.fn(async () => ({ ok: true, appliedLaunch: observeClaudePermission("--permission-mode acceptEdits") })),
+    });
+    const result = await createOrchestrator().startNode(makeInput(seed, { adapter }));
+    expect(result.ok).toBe(true);
+    expect(result.startupStatus).toBe("ready");
   });
 
   // T3: delivery failure transitions to failed

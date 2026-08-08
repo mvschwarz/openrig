@@ -373,7 +373,15 @@ describe("Lifecycle reboot/recovery scenario matrix (Tier 1)", () => {
 
         const r = await adapter.resume("r99-worker", "codex_id", "tok-abc", "/tmp");
 
-        expect(r).toEqual({ ok: true });
+        expect(r).toEqual({
+          ok: true,
+          appliedLaunch: {
+            runtime: "codex",
+            axis: "sandbox",
+            state: "observed",
+            value: "workspace-write",
+          },
+        });
       });
 
       it("probe sees `No saved session found` → {ok:false, code:'retry_fresh'} (NOT silent ok:true)", async () => {
