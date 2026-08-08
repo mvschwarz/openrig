@@ -28,6 +28,7 @@ function clearEnv(): () => void {
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_INLINE",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_FILE_PATH",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION",
+    "OPENRIG_POLICIES_CLAUDE_COMPACTION_AUTHORIZE_TTL_MINUTES",
   ];
   const saved: Record<string, string | undefined> = {};
   for (const k of keys) {
@@ -78,7 +79,7 @@ describe("config routes (User Settings v0)", () => {
     // + 2 V1 pre-release Item 1 (transcripts.lines / transcripts.poll_interval_seconds)
     // + 1 plugin-primitive Phase 3a slice 3.5 (runtime.codex.hooks_enabled)
     // + 1 V0.3.1 slice 05 (workspace.operator_seat_name)
-    // + 7 slice 27 (policies.claude_compaction.*)
+    // + 8 slice 27 + W4 (policies.claude_compaction.*)
     // + 3 OPR.0.3.4.9 (snapshots.periodic.*)
     // + 1 OPR.0.4.0.1 (ui.terminal.max_live_terminals)
     // + 2 OPR.0.4.6.MH1 (host.selected / host.name)
@@ -88,14 +89,18 @@ describe("config routes (User Settings v0)", () => {
     //   watchdog_keep_per_job / batch_size — the CLI-settable queue-retention knobs;
     //   + retention.usage_samples_days, 51-08 A2)
     // + 2 OPR.0.5.1 W2c (policies.idle_gate_qitem.scan_interval_seconds /
-    //   active_wake_interval_seconds) → 52 total.
-    expect(Object.keys(body.settings).length).toBe(52);
+    //   active_wake_interval_seconds) → 53 total.
+    expect(Object.keys(body.settings).length).toBe(53);
     expect(body.settings["daemon.port"]?.source).toBe("default");
     expect(body.settings["ui.preview.refresh_interval_seconds"]?.value).toBe(3);
     expect(body.settings["ui.preview.max_pins"]?.value).toBe(4);
     expect(body.settings["ui.preview.default_lines"]?.value).toBe(50);
     expect(body.settings["recovery.auto_drive_provider_prompts"]?.value).toBe(false);
     expect(body.settings["recovery.provider_auth_env_allowlist"]?.value).toBe("");
+    expect(body.settings["policies.claude_compaction.authorize_ttl_minutes"]).toMatchObject({
+      value: 15,
+      source: "default",
+    });
     expect(body.settings["host.selected"]).toMatchObject({ value: "local", source: "default" });
     expect(body.settings["host.name"]).toMatchObject({ value: "localhost", source: "default" });
     expect(String(body.settings["workspace.dogfood_evidence_root"]?.value)).toMatch(/dogfood-evidence$/);

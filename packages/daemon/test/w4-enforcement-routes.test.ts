@@ -80,6 +80,74 @@ describe("W4 compaction-control routes", () => {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
 
+  function makeBoundaryTransport(afterPrep: () => void) {
+    const delivered: string[] = [];
+    const send = vi.fn(async (
+      _sessionName: string,
+      message: string,
+      opts?: {
+        beforeSend?: () =>
+          | { reason: string; error?: string }
+          | null
+          | Promise<{ reason: string; error?: string } | null>;
+      },
+    ) => {
+      if (send.mock.calls.length === 1) {
+        delivered.push(message);
+        afterPrep();
+        return { ok: true as const };
+      }
+      const refusal = await opts?.beforeSend?.();
+      if (refusal) return { ok: false as const, sessionName: SEAT, sent: false, ...refusal };
+      delivered.push(message);
+      return { ok: true as const };
+    });
+    return {
+      delivered,
+      send,
+      transport: {
+        send,
+        resolveSessions: vi.fn(async () => ({ ok: true as const, sessions: [SEAT] })),
+      },
+    };
+  }
+
+  function installManualHarness(store: EnforcerDecisionStore, transport: Record<string, unknown>): void {
+    const enforcer = new ClaudeCompactionEnforcer(
+      {
+        resolveClaudeCompactionPolicy: () => ({
+          enabled: true,
+          thresholdPercent: 80,
+          preCompactInstruction: "prepare",
+          compactInstruction: "",
+          messageInline: "",
+          messageFilePath: "",
+          postRestoreAuditInstruction: "audit",
+          authorizeTtlMinutes: 15,
+        }),
+      } as never,
+      transport as never,
+      {
+        resolveOccupantGeneration: (sessionName: string) =>
+          sessionRegistry.currentOccupantGenerationForSession(sessionName),
+        decisionStore: store,
+      },
+    );
+    manualDeps = {
+      enforcer,
+      transport,
+      usageStore: {
+        getForNode: () => ({
+          availability: "known",
+          usedPercentage: 90,
+          transcriptPath: "/tmp/claude.jsonl",
+          sessionId: "claude-session",
+        }),
+      },
+    };
+    decisions = store as never;
+  }
+
   it("refuses an unattributable hold before writing any record", async () => {
     const response = await request("/api/compaction/control", {
       session: SEAT,
@@ -283,6 +351,168 @@ describe("W4 compaction-control routes", () => {
       lastObservedOutcome: "human_hold",
       lastObservedAt: "2026-08-08T18:00:00.000Z",
     }));
+  });
+
+  it("the public manual trigger rejects a historical alias before it can miss the current alias hold", async () => {
+    const currentSeat = "claude-seat-next@rig";
+    sessionRegistry.registerSession(nodeId, currentSeat);
+    const currentGeneration = sessionRegistry.currentOccupantGenerationForSession(currentSeat)!;
+    const store = new EnforcerDecisionStore(db, {
+      now: () => new Date("2026-08-08T18:00:00.000Z"),
+      authorizeTtlMinutes: () => 15,
+    });
+    const hold = store.create({
+      enforcerKind: "claude_compaction",
+      sessionName: currentSeat,
+      generationUuid: currentGeneration,
+      direction: "hold",
+      automaticReason: null,
+      reason: "finish the current atomic action",
+      actorSession: IDENTITY,
+      identityProvenance: "transport:v1",
+    });
+    const send = vi.fn(async () => ({ ok: true as const }));
+    const transport = {
+      send,
+      resolveSessions: vi.fn(async () => ({ ok: true as const, sessions: [SEAT] })),
+    };
+    const enforcer = new ClaudeCompactionEnforcer(
+      {
+        resolveClaudeCompactionPolicy: () => ({
+          enabled: true,
+          thresholdPercent: 80,
+          preCompactInstruction: "prepare",
+          compactInstruction: "",
+          messageInline: "",
+          messageFilePath: "",
+          postRestoreAuditInstruction: "audit",
+          authorizeTtlMinutes: 15,
+        }),
+      } as never,
+      transport as never,
+      {
+        resolveOccupantGeneration: (sessionName: string) =>
+          sessionRegistry.currentOccupantGenerationForSession(sessionName),
+        decisionStore: store,
+      },
+    );
+    manualDeps = {
+      enforcer,
+      transport,
+      usageStore: {
+        getForNode: () => ({
+          availability: "known",
+          usedPercentage: 90,
+          transcriptPath: "/tmp/claude.jsonl",
+          sessionId: "claude-session",
+        }),
+      },
+    };
+    decisions = store as never;
+
+    const stale = await request("/api/compaction/trigger", { session: SEAT });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({
+      ok: false,
+      error: "session_not_current",
+      currentSession: currentSeat,
+    });
+    expect(send).not.toHaveBeenCalled();
+    expect(store.list({ sessionName: currentSeat })).toContainEqual(expect.objectContaining({
+      decisionId: hold.decisionId,
+      active: true,
+      lastObservedAt: null,
+    }));
+
+    const current = await request("/api/compaction/trigger", { session: currentSeat });
+    expect(current.status).toBe(409);
+    expect(await current.json()).toMatchObject({
+      ok: false,
+      reason: "human_hold",
+      decisionId: hold.decisionId,
+    });
+    expect(send).not.toHaveBeenCalled();
+    expect(store.list({ sessionName: currentSeat })).toContainEqual(expect.objectContaining({
+      decisionId: hold.decisionId,
+      lastObservedOutcome: "human_hold",
+    }));
+  });
+
+  it("the public manual trigger observes a new-current-alias hold activated during preparation", async () => {
+    const currentSeat = "claude-seat-next@rig";
+    const store = new EnforcerDecisionStore(db, {
+      now: () => new Date("2026-08-08T18:00:00.000Z"),
+      authorizeTtlMinutes: () => 15,
+    });
+    let hold: ReturnType<EnforcerDecisionStore["create"]> | null = null;
+    const tx = makeBoundaryTransport(() => {
+      sessionRegistry.registerSession(nodeId, currentSeat, "handover");
+      hold = store.create({
+        enforcerKind: "claude_compaction",
+        sessionName: currentSeat,
+        generationUuid: sessionRegistry.currentOccupantGenerationForSession(currentSeat)!,
+        direction: "hold",
+        automaticReason: null,
+        reason: "hold the new occupant",
+        actorSession: IDENTITY,
+        identityProvenance: "transport:v1",
+      });
+    });
+    installManualHarness(store, tx.transport);
+
+    const response = await request("/api/compaction/trigger", { session: SEAT });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      reason: "human_hold",
+      decisionId: hold?.decisionId,
+    });
+    expect(tx.delivered).toHaveLength(1);
+    expect(tx.delivered[0]).toContain("automatic compaction preparation");
+    expect(store.list({ sessionName: currentSeat })).toContainEqual(expect.objectContaining({
+      decisionId: hold?.decisionId,
+      lastObservedOutcome: "human_hold",
+      lastObservedAt: "2026-08-08T18:00:00.000Z",
+    }));
+  });
+
+  it("the public manual trigger refuses an alias turnover without a hold at the final boundary", async () => {
+    const currentSeat = "claude-seat-next@rig";
+    const store = new EnforcerDecisionStore(db, {
+      now: () => new Date("2026-08-08T18:00:00.000Z"),
+      authorizeTtlMinutes: () => 15,
+    });
+    const tx = makeBoundaryTransport(() => {
+      sessionRegistry.registerSession(nodeId, currentSeat, "handover");
+    });
+    installManualHarness(store, tx.transport);
+
+    const response = await request("/api/compaction/trigger", { session: SEAT });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      reason: "session_not_current",
+    });
+    expect(tx.delivered).toHaveLength(1);
+  });
+
+  it("the public manual trigger refuses same-alias occupant-tenure drift at the final boundary", async () => {
+    const store = new EnforcerDecisionStore(db, {
+      now: () => new Date("2026-08-08T18:00:00.000Z"),
+      authorizeTtlMinutes: () => 15,
+    });
+    const tx = makeBoundaryTransport(() => {
+      sessionRegistry.mintOccupantTenure(nodeId, "handover");
+    });
+    installManualHarness(store, tx.transport);
+
+    const response = await request("/api/compaction/trigger", { session: SEAT });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      reason: "occupant_generation_changed",
+    });
+    expect(tx.delivered).toHaveLength(1);
   });
 
   it("lists durable observation fields without requiring a write identity", async () => {

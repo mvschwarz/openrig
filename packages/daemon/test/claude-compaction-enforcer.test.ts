@@ -911,7 +911,10 @@ describe("ClaudeCompactionEnforcer", () => {
       expect(send.mock.calls[0]![2]).toBeUndefined();
       // Phase 2 — /compact WITH the trust-bridge AND wait-for-idle (two-phase).
       expect(send.mock.calls[1]![1]).toContain("/compact In the continuity summary, preserve this trust-channel note");
-      expect(send.mock.calls[1]![2]).toEqual({ waitForIdleMs: expect.any(Number) });
+      expect(send.mock.calls[1]![2]).toEqual({
+        waitForIdleMs: expect.any(Number),
+        beforeSend: expect.any(Function),
+      });
       expect(send).toHaveBeenCalledTimes(2);
 
       // The SAME maybeAutoCompact back-half (single restore path) drains it.

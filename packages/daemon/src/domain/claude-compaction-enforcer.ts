@@ -710,10 +710,13 @@ export class ClaudeCompactionEnforcer {
    */
   async triggerManualCompact(
     input: EnforcerInput,
-    opts: { operatorInitiated?: boolean } = {},
+    opts: {
+      operatorInitiated?: boolean;
+      resolveCurrentSessionName?: (sessionName: string) => string | null;
+    } = {},
   ): Promise<ManualCompactionOutcome> {
-    const liveGenerationUuid = this.resolveOccupantGeneration?.(input.sessionName) ?? null;
-    const activeHold = this.findAndObserveHold(input.sessionName, liveGenerationUuid);
+    const startingGenerationUuid = this.resolveOccupantGeneration?.(input.sessionName) ?? null;
+    const activeHold = this.findAndObserveHold(input.sessionName, startingGenerationUuid);
     if (activeHold) {
       return {
         triggered: false,
@@ -786,12 +789,63 @@ export class ClaudeCompactionEnforcer {
     // Phase 2 — WAIT for the prep turn to complete (seat idle), THEN send
     // /compact. `waitForIdleMs` makes the transport block on explicit idle
     // evidence before pasting /compact, guaranteeing prep-before-compact.
+    const preCompactCheck = {
+      reason: null as string | null,
+      decisionId: undefined as string | undefined,
+    };
     const compact = await this.sessionTransport.send(
       input.sessionName,
       buildCompactCommand(policy.compactInstruction),
-      { waitForIdleMs: this.manualPrepWaitMs },
+      {
+        waitForIdleMs: this.manualPrepWaitMs,
+        beforeSend: () => {
+          const currentSessionName = opts.resolveCurrentSessionName
+            ? opts.resolveCurrentSessionName(input.sessionName)
+            : input.sessionName;
+          if (!currentSessionName) {
+            preCompactCheck.reason = "session_not_current";
+            return {
+              reason: preCompactCheck.reason,
+              error: `Session '${input.sessionName}' is no longer current.`,
+            };
+          }
+
+          const currentGenerationUuid = this.resolveOccupantGeneration?.(currentSessionName) ?? null;
+          const currentHold = this.findAndObserveHold(currentSessionName, currentGenerationUuid);
+          if (currentHold) {
+            preCompactCheck.reason = "human_hold";
+            preCompactCheck.decisionId = currentHold.decisionId;
+            return {
+              reason: preCompactCheck.reason,
+              error: `Session '${currentSessionName}' has an active human compaction hold.`,
+            };
+          }
+          if (currentSessionName !== input.sessionName) {
+            preCompactCheck.reason = "session_not_current";
+            return {
+              reason: preCompactCheck.reason,
+              error: `Session '${input.sessionName}' is no longer current; current session is '${currentSessionName}'.`,
+            };
+          }
+          if (currentGenerationUuid !== startingGenerationUuid) {
+            preCompactCheck.reason = "occupant_generation_changed";
+            return {
+              reason: preCompactCheck.reason,
+              error: `Session '${input.sessionName}' changed occupant generation during manual compaction preparation.`,
+            };
+          }
+          return null;
+        },
+      },
     );
     if (!compact.ok) {
+      if (preCompactCheck.reason) {
+        return this.recordManualFailure(
+          input.sessionName,
+          preCompactCheck.reason,
+          preCompactCheck.decisionId,
+        );
+      }
       return this.recordManualFailure(input.sessionName, compact.reason ?? "send_failed");
     }
 
@@ -849,9 +903,14 @@ export class ClaudeCompactionEnforcer {
     this.manualCompactionState.set(sessionName, { stage, reason, updatedAt: Date.now(), operatorInitiated });
   }
 
-  private recordManualFailure(sessionName: string, reason: string): ManualCompactionOutcome {
+  private recordManualFailure(sessionName: string, reason: string, decisionId?: string): ManualCompactionOutcome {
     this.setManualStage(sessionName, "skipped-or-failed", reason);
-    return { triggered: false, stage: "skipped-or-failed", reason };
+    return {
+      triggered: false,
+      stage: "skipped-or-failed",
+      reason,
+      ...(decisionId ? { decisionId } : {}),
+    };
   }
 
   private findAndObserveHold(

@@ -394,6 +394,58 @@ describe("W4 ClaudeCompactionEnforcer decision consumption", () => {
     }
   });
 
+  it("rechecks the real hold store after manual preparation and before the final action", async () => {
+    const EnforcerDecisionStore = await loadDecisionStore();
+    const db = makeDb();
+    try {
+      const store = new EnforcerDecisionStore(db, {
+        now: () => new Date("2026-08-08T18:00:00.000Z"),
+        authorizeTtlMinutes: () => 15,
+      });
+      let hold: Record<string, unknown> | null = null;
+      const delivered: string[] = [];
+      const send = vi.fn(async (
+        _sessionName: string,
+        message: string,
+        opts?: { beforeSend?: () => Promise<{ reason: string; error?: string } | null> },
+      ) => {
+        if (send.mock.calls.length === 1) {
+          hold = store.create(humanInput({
+            generationUuid: "gen-N",
+            reason: "hold activated during manual preparation",
+          }));
+        }
+        const refusal = await opts?.beforeSend?.();
+        if (refusal) return { ok: false as const, sessionName: SEAT, sent: false, ...refusal };
+        delivered.push(message);
+        return { ok: true as const };
+      });
+      const enforcer = new ClaudeCompactionEnforcer(settings(), { send } as never, {
+        resolveOccupantGeneration: () => "gen-N",
+        decisionStore: store,
+      } as never);
+
+      await expect(enforcer.triggerManualCompact(highInput(), { operatorInitiated: true })).resolves.toEqual({
+        triggered: false,
+        stage: "skipped-or-failed",
+        reason: "human_hold",
+        decisionId: expect.any(String),
+      });
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(delivered).toHaveLength(1);
+      expect(delivered[0]).toContain("automatic compaction preparation");
+      expect(hold).not.toBeNull();
+      expect(store.list({ sessionName: SEAT })).toContainEqual(expect.objectContaining({
+        decisionId: hold?.["decisionId"],
+        active: true,
+        lastObservedOutcome: "human_hold",
+        lastObservedAt: "2026-08-08T18:00:00.000Z",
+      }));
+    } finally {
+      db.close();
+    }
+  });
+
   it("consumes a persisted authorization only for matching known generation N and only once", async () => {
     const EnforcerDecisionStore = await loadDecisionStore();
     const db = makeDb();

@@ -495,6 +495,47 @@ describe("SessionTransport", () => {
     expect(callOrder).toEqual(["capture", "capture", "sendText", "sendKeys"]);
   });
 
+  it("send with wait-for-idle runs its final check after idle and can refuse before delivery", async () => {
+    seedCanonicalRig();
+    const callOrder: string[] = [];
+    let captureCount = 0;
+    const sendTextSpy = vi.fn(async () => {
+      callOrder.push("sendText");
+      return { ok: true as const };
+    });
+    const tmux = mockTmux({
+      capturePaneContent: async () => {
+        callOrder.push("capture");
+        captureCount++;
+        return captureCount === 1
+          ? "Working on task...\n⠋ Processing files\nesc to interrupt"
+          : "Ready\n❯ ";
+      },
+      sendText: sendTextSpy,
+    });
+    const transport = createTransport(tmux, {
+      sleep: async () => undefined,
+      waitForIdlePollMs: 1,
+    });
+
+    const result = await transport.send("dev-impl@my-rig", "hello", {
+      waitForIdleMs: 50,
+      beforeSend: async () => {
+        callOrder.push("beforeSend");
+        return { reason: "human_hold", error: "Compaction hold became active." };
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      reason: "human_hold",
+      sent: false,
+      attempts: 2,
+    });
+    expect(callOrder).toEqual(["capture", "capture", "beforeSend"]);
+    expect(sendTextSpy).not.toHaveBeenCalled();
+  });
+
   it("send with wait-for-idle waits through current Claude thinking evidence and sends after idle", async () => {
     seedCanonicalRig();
     const callOrder: string[] = [];

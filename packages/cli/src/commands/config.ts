@@ -73,7 +73,7 @@ Keys:
   policies.claude_compaction.*
                          enabled, threshold_percent, compact_instruction,
                          message_inline, message_file_path,
-                         authorize_ttl_minutes
+                         policies.claude_compaction.authorize_ttl_minutes
   policies.idle_gate_qitem.scan_interval_seconds
   policies.idle_gate_qitem.active_wake_interval_seconds
   snapshots.periodic.*   enabled, interval_seconds, retention_keep

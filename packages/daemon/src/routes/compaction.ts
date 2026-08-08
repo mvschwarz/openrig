@@ -63,25 +63,12 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
       }
     }
 
-    const currentSession = sessionRegistry.db.prepare(`
-      WITH target AS (
-        SELECT node_id
-        FROM sessions
-        WHERE session_name = ?
-        ORDER BY id DESC
-        LIMIT 1
-      )
-      SELECT session_name
-      FROM sessions
-      WHERE node_id = (SELECT node_id FROM target)
-      ORDER BY id DESC
-      LIMIT 1
-    `).get(sessionName) as { session_name: string } | undefined;
-    if (currentSession && currentSession.session_name !== sessionName) {
+    const currentSession = currentSessionName(sessionRegistry.db, sessionName);
+    if (currentSession && currentSession !== sessionName) {
       return c.json({
         ok: false,
         error: "session_not_current",
-        currentSession: currentSession.session_name,
+        currentSession,
       }, 409);
     }
 
@@ -169,6 +156,15 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
       return c.json({ ok: false, error: resolved.error }, status);
     }
 
+    const currentSession = currentSessionName(db, sessionName);
+    if (currentSession && currentSession !== sessionName) {
+      return c.json({
+        ok: false,
+        error: "session_not_current",
+        currentSession,
+      }, 409);
+    }
+
     // Resolve the DB node id + runtime for the latest session row.
     const row = db.prepare(`
       SELECT n.id AS node_id, n.runtime AS runtime
@@ -201,7 +197,10 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
       // This is the OPERATOR's manual-trigger verb (bearer-auth'd); the resulting sequence is
       // drain-exempt while auto-compaction is disabled. GHOST-STAGE fix (a) actor-gate: automation
       // paths that do NOT set this are NOT exempt, so they cannot launder a drain past the gate.
-      { operatorInitiated: true },
+      {
+        operatorInitiated: true,
+        resolveCurrentSessionName: (candidate) => currentSessionName(db, candidate),
+      },
     );
 
     if (outcome.triggered) {
@@ -222,6 +221,8 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
       send_failed: 502,
       submit_failed: 502,
       human_hold: 409,
+      session_not_current: 409,
+      occupant_generation_changed: 409,
     };
     const status = (statusMap[outcome.reason] ?? 409) as 400 | 404 | 409 | 422 | 502 | 503;
     return c.json({
@@ -249,6 +250,24 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
   return router;
 }
 
+function currentSessionName(db: Database.Database, sessionName: string): string | null {
+  const row = db.prepare(`
+    WITH target AS (
+      SELECT node_id
+      FROM sessions
+      WHERE session_name = ?
+      ORDER BY id DESC
+      LIMIT 1
+    )
+    SELECT session_name
+    FROM sessions
+    WHERE node_id = (SELECT node_id FROM target)
+    ORDER BY id DESC
+    LIMIT 1
+  `).get(sessionName) as { session_name: string } | undefined;
+  return row?.session_name ?? null;
+}
+
 function manualReasonMessage(sessionName: string, reason: string): string {
   switch (reason) {
     case "runtime_filter":
@@ -265,6 +284,10 @@ function manualReasonMessage(sessionName: string, reason: string): string {
       return `Prep was sent to '${sessionName}' but it did not go idle in time, so /compact was NOT sent. Retry once the prep turn completes.`;
     case "human_hold":
       return `Refused: '${sessionName}' has an active human compaction hold.`;
+    case "session_not_current":
+      return `Refused: '${sessionName}' is no longer the current session for its node.`;
+    case "occupant_generation_changed":
+      return `Refused: '${sessionName}' changed occupant generation during compaction preparation.`;
     default:
       return `Manual compaction for '${sessionName}' did not complete (${reason}).`;
   }
