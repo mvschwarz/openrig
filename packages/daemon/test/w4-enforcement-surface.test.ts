@@ -643,6 +643,82 @@ describe("W4 ClaudeCompactionEnforcer decision consumption", () => {
     }
   });
 
+  it.each([
+    {
+      failure: "result-false",
+      failNextSend: (send: ReturnType<typeof vi.fn>) => send.mockResolvedValueOnce({
+        ok: false as const,
+        reason: "boundary refused",
+      }),
+      failureReason: "boundary refused",
+    },
+    {
+      failure: "thrown",
+      failNextSend: (send: ReturnType<typeof vi.fn>) => send.mockRejectedValueOnce(
+        new Error("boundary exploded"),
+      ),
+      failureReason: "boundary exploded",
+    },
+  ])("clears a failed real stale_generation carry after a $failure send", async ({
+    failNextSend,
+    failureReason,
+  }) => {
+    const EnforcerDecisionStore = await loadDecisionStore();
+    const db = makeDb();
+    try {
+      const store = new EnforcerDecisionStore(db, {
+        now: () => new Date("2026-08-08T18:00:00.000Z"),
+        authorizeTtlMinutes: () => 15,
+      });
+      const tx = transport();
+      let generation = "gen-N";
+      const enforcer = new ClaudeCompactionEnforcer(settings(), tx.value, {
+        dedupWindowMs: 0,
+        postCompactRestoreCooldownMs: 0,
+        openrigHome: "/tmp/openrig-w4",
+        resolveOccupantGeneration: () => generation,
+        decisionStore: store,
+      } as never);
+
+      await enforcer.maybeAutoCompact(highInput());
+      await enforcer.maybeAutoCompact(highInput());
+      generation = "gen-N+1";
+      const authorization = store.create(humanInput({
+        generationUuid: generation,
+        direction: "authorize",
+        automaticReason: "stale_generation",
+        reason: "allow one inherited boundary attempt",
+      }));
+      failNextSend(tx.send);
+
+      await expect(enforcer.maybeAutoCompact(highInput(20))).resolves.toEqual({
+        triggered: false,
+        reason: "send_failed",
+      });
+      expect(tx.send).toHaveBeenCalledTimes(3);
+      expect(store.list({ sessionName: SEAT })).toContainEqual(expect.objectContaining({
+        decisionId: authorization["decisionId"],
+        active: false,
+        consumedByEnforcerKind: KIND,
+        liftedReason: "stale_generation",
+        attemptOutcome: "failed",
+        attemptFailureReason: failureReason,
+      }));
+
+      await expect(enforcer.maybeAutoCompact(highInput(20))).resolves.toEqual({
+        triggered: false,
+        reason: "stale_generation",
+      });
+      await expect(enforcer.maybeAutoCompact(highInput(20))).resolves.toEqual({
+        triggered: false,
+        reason: "below_threshold",
+      });
+      expect(tx.send).toHaveBeenCalledTimes(3);
+    } finally {
+      db.close();
+    }
+  });
+
   it("consumes authorization on a failed compact attempt and records the actual failure", async () => {
     const send = vi.fn()
       .mockResolvedValueOnce({ ok: true as const })

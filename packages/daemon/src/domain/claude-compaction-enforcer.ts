@@ -459,6 +459,9 @@ export class ClaudeCompactionEnforcer {
             outcome: "failed",
             failureReason: error instanceof Error ? error.message : String(error),
           });
+          if (lifted.liftedReason === "stale_generation") {
+            this.pendingStageAuthorization.delete(input.sessionName);
+          }
         }
         return {
           ok: false,
@@ -474,6 +477,9 @@ export class ClaudeCompactionEnforcer {
         });
       }
       if (!result.ok) {
+        if (lifted?.liftedReason === "stale_generation" && consumed) {
+          this.pendingStageAuthorization.delete(input.sessionName);
+        }
         return {
           ok: false,
           result,
