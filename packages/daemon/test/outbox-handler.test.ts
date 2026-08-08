@@ -79,6 +79,61 @@ describe("OutboxHandler", () => {
     expect(failed.deliveryState).toBe("failed");
   });
 
+  // W1-b (transactional closure) — INDETERMINATE is the ambiguous-outcome state:
+  // a delivery whose landing could not be confirmed (transport res.ok but not
+  // verified) records `indeterminate`, never silently `delivered` and never
+  // `failed`. It is a holding state resolved out-of-band, not a retry state.
+  it("markIndeterminate transitions pending → indeterminate (CAS from pending)", () => {
+    const e = outbox.record({
+      senderSession: "alice@rig",
+      destinationSession: "bob@rig",
+      body: "x",
+    });
+    const indet = outbox.markIndeterminate(e.outboxId);
+    expect(indet.deliveryState).toBe("indeterminate");
+  });
+
+  it("markIndeterminate NEVER clobbers a confirmed delivery (delivered stays delivered)", () => {
+    const e = outbox.record({
+      senderSession: "alice@rig",
+      destinationSession: "bob@rig",
+      body: "x",
+    });
+    outbox.markDelivered(e.outboxId);
+    // A late/racing indeterminate resolution must not overwrite a delivered row —
+    // the CAS guards on delivery_state='pending', so this is a no-op.
+    const after = outbox.markIndeterminate(e.outboxId);
+    expect(after.deliveryState).toBe("delivered");
+  });
+
+  // RULED (W1-b, planner-confirmed): indeterminate is TERMINAL-BY-CAS. markDelivered
+  // and markFailed both gate on delivery_state='pending', so neither can afterwards
+  // touch an indeterminate row. This is intended — an ambiguous outcome is never
+  // silently flipped to delivered (we cannot confirm) nor to failed (it may have
+  // landed); re-delivering would risk a double-send. Reconciliation of an
+  // indeterminate row is an out-of-scope follow-on, not a W1 transition.
+  it("indeterminate is terminal-by-CAS: markDelivered is a no-op on it", () => {
+    const e = outbox.record({
+      senderSession: "alice@rig",
+      destinationSession: "bob@rig",
+      body: "x",
+    });
+    outbox.markIndeterminate(e.outboxId);
+    const after = outbox.markDelivered(e.outboxId);
+    expect(after.deliveryState).toBe("indeterminate");
+  });
+
+  it("indeterminate is terminal-by-CAS: markFailed is a no-op on it", () => {
+    const e = outbox.record({
+      senderSession: "alice@rig",
+      destinationSession: "bob@rig",
+      body: "x",
+    });
+    outbox.markIndeterminate(e.outboxId);
+    const after = outbox.markFailed(e.outboxId);
+    expect(after.deliveryState).toBe("indeterminate");
+  });
+
   it("listForSender returns reverse-chronological", () => {
     outbox.record({ senderSession: "a@r", destinationSession: "b@r", body: "1" });
     outbox.record({ senderSession: "a@r", destinationSession: "b@r", body: "2" });

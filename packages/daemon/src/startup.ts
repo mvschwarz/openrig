@@ -312,6 +312,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // (same injected-predicate layering — the queue never imports the session domain).
     resolveOccupantGeneration: (sessionName) => sessionRegistry.currentOccupantGenerationForSession(sessionName),
   });
+  // W1 (transactional closure): ONE OutboxHandler shared between the deps slot
+  // (sender-side audit surface) and the queue repo's durable wake-intent
+  // staging. Same `db`, so a stageWakeIntent() call inside a terminal
+  // db.transaction commits atomically with the close + successor create.
+  const outboxHandlerInstance = new OutboxHandler(db);
+  queueRepoInstance.attachOutbox(outboxHandlerInstance);
   // PL-004 Phase B — classifier lease manager. Constructed early so both
   // the leaseManager dep slot and project-classifier can share one instance.
   // isAlive is post-attached after whoami-service is constructed.
@@ -1000,7 +1006,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     slowOpRecorder,
     queueRepo: queueRepoInstance,
     inboxHandler: new InboxHandler(db, eventBus, queueRepoInstance),
-    outboxHandler: new OutboxHandler(db),
+    outboxHandler: outboxHandlerInstance,
     classifierLeaseManager: classifierLeaseManagerInstance,
     projectClassifier: new ProjectClassifier(db, eventBus, classifierLeaseManagerInstance),
     viewProjector: viewProjectorInstance,
@@ -1706,6 +1712,26 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           `workflow boot sweep: failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
         );
       }
+    }
+
+    // W1 (transactional closure) FR — the wake-intent RECOVERY SWEEP. Deliver
+    // any wake intents a crash left committed-but-undelivered (the terminal txn
+    // committed, so the intent is durable, but the process died before the
+    // post-commit deliver). Runs after transport is wired so the re-deliveries
+    // actually land. Non-fatal — a sweep failure must not bring the daemon down.
+    // No periodic timer (ruled out of scope): a transient failure lands the row
+    // in a VISIBLE state and is retried on the next start.
+    try {
+      const drained = await queueRepoInstance.drainPendingWakeIntents();
+      if (drained.delivered || drained.indeterminate || drained.failed) {
+        console.log(
+          `wake-intent recovery sweep: delivered=${drained.delivered} indeterminate=${drained.indeterminate} failed=${drained.failed}`,
+        );
+      }
+    } catch (err) {
+      console.warn(
+        `wake-intent recovery sweep: failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 

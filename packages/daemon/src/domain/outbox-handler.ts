@@ -1,7 +1,31 @@
 import type Database from "better-sqlite3";
 
-export const OUTBOX_DELIVERY_STATES = ["pending", "delivered", "failed"] as const;
+// W1 (transactional closure): `indeterminate` is the ambiguous-delivery outcome —
+// a send that landed on the wire but whose render could not be CONFIRMED (transport
+// res.ok && !verified). It is never silently promoted to `delivered` (unconfirmed)
+// nor demoted to `failed` (it may have landed); the CAS transitions gate on 'pending',
+// so an indeterminate row is TERMINAL-BY-CAS (reconciliation is an out-of-scope
+// follow-on, not a W1 transition).
+export const OUTBOX_DELIVERY_STATES = ["pending", "delivered", "failed", "indeterminate"] as const;
 export type OutboxDeliveryState = (typeof OUTBOX_DELIVERY_STATES)[number];
+
+/**
+ * Validate a raw `delivery_state` cell against the closed union before it is typed
+ * as an {@link OutboxDeliveryState}. Replaces the prior unchecked `as` cast: a cast
+ * never fails, so a stray DB value (corruption, a newer daemon's state read by an
+ * older one) would silently masquerade as a typed value and make every downstream
+ * narrowing unsound. We control every writer, so an unknown value is a real defect —
+ * fail loud rather than fabricate a type.
+ */
+export function parseDeliveryState(raw: string): OutboxDeliveryState {
+  if ((OUTBOX_DELIVERY_STATES as readonly string[]).includes(raw)) {
+    return raw as OutboxDeliveryState;
+  }
+  throw new OutboxHandlerError(
+    "invalid_delivery_state",
+    `outbox row has unknown delivery_state ${JSON.stringify(raw)} (expected one of ${OUTBOX_DELIVERY_STATES.join(", ")})`,
+  );
+}
 
 export interface OutboxEntry {
   outboxId: string;
@@ -158,6 +182,30 @@ export class OutboxHandler {
     return this.getByIdOrThrow(outboxId);
   }
 
+  /**
+   * W1 (transactional closure): record an AMBIGUOUS delivery outcome — the send
+   * landed but its render could not be confirmed (transport res.ok && !verified).
+   * Same compare-and-set shape as markFailed/markDelivered (guards on 'pending'),
+   * so it is idempotent and NEVER clobbers a row that already resolved. An
+   * indeterminate row is terminal-by-CAS: it is never silently promoted to
+   * delivered nor demoted to failed by the drain.
+   */
+  markIndeterminate(outboxId: string): OutboxEntry {
+    const result = this.db
+      .prepare(
+        `UPDATE outbox_entries
+           SET delivery_state = 'indeterminate'
+         WHERE outbox_id = ? AND delivery_state = 'pending'`
+      )
+      .run(outboxId);
+    if (result.changes === 0) {
+      const entry = this.getById(outboxId);
+      if (!entry) throw new OutboxHandlerError("outbox_not_found", `outbox ${outboxId} not found`);
+      return entry;
+    }
+    return this.getByIdOrThrow(outboxId);
+  }
+
   getById(outboxId: string): OutboxEntry | null {
     const row = this.getByIdRaw(outboxId);
     return row ? this.rowToEntry(row) : null;
@@ -169,6 +217,24 @@ export class OutboxHandler {
         `SELECT * FROM outbox_entries WHERE sender_session = ? ORDER BY ts_dispatched DESC, rowid DESC LIMIT ?`
       )
       .all(senderSession, limit) as OutboxEntryRow[];
+    return rows.map((r) => this.rowToEntry(r));
+  }
+
+  /**
+   * W1 (transactional closure): list still-`pending` rows whose outbox_id begins
+   * with `idPrefix`, oldest first. The drain uses this to recover intents a crash
+   * left committed-but-undelivered. `idPrefix` is a trusted compile-time constant
+   * (e.g. "wake-intent-") with no LIKE wildcards. Oldest-first + bounded `limit`
+   * so a caller can page and terminate on a served short batch (never a silent cap).
+   */
+  listPending(idPrefix: string, limit = 200): OutboxEntry[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM outbox_entries
+          WHERE delivery_state = 'pending' AND outbox_id LIKE ?
+          ORDER BY ts_dispatched ASC, rowid ASC LIMIT ?`
+      )
+      .all(idPrefix + "%", limit) as OutboxEntryRow[];
     return rows.map((r) => this.rowToEntry(r));
   }
 
@@ -193,7 +259,7 @@ export class OutboxHandler {
       tags: row.tags ? (JSON.parse(row.tags) as string[]) : null,
       urgency: row.urgency,
       tsDispatched: row.ts_dispatched,
-      deliveryState: row.delivery_state as OutboxDeliveryState,
+      deliveryState: parseDeliveryState(row.delivery_state),
       deliveredAt: row.delivered_at,
       auditPointer: row.audit_pointer,
     };

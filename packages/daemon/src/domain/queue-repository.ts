@@ -5,6 +5,7 @@ import { loadHumanRegistry } from "./gateway/human-registry.js";
 import { resolveExternal } from "./gateway/external-admission.js";
 import type { PersistedEvent } from "./types.js";
 import { QueueTransitionLog } from "./queue-transition-log.js";
+import type { OutboxHandler } from "./outbox-handler.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName } from "./session-name.js";
@@ -443,6 +444,14 @@ export class QueueRepository {
   private readonly eventBus: EventBus;
   private readonly validateRig: (sessionRef: string) => boolean;
   private transport: QueueNudgeTransport | undefined;
+  /** W1 (transactional closure): the durable wake-intent store. A terminal act
+   *  (handoff / handoff-and-complete) stages an outbox intent row INSIDE its
+   *  db.transaction so close + transition + intent commit as one act or none;
+   *  the delivery drains from that committed intent afterward. Wired post-
+   *  construction by startup (dep-graph ordering, like transport). Absent =
+   *  test/bootstrap path with no durable-intent requirement (the wake still
+   *  fires best-effort via maybeNudge, exactly as pre-W1). */
+  private outbox: OutboxHandler | undefined;
   private resolveOccupantGeneration?: (sessionName: string) => string | null;
   /** PL-007 Workspace Primitive — true when migration 038 has applied the
    *  queue_items.target_repo column. Older test fixtures that bypass the
@@ -536,6 +545,170 @@ export class QueueRepository {
   }
 
   /**
+   * W1 (transactional closure): attach the durable wake-intent store AFTER
+   * construction (same dep-graph reason as {@link attachTransport}). Once
+   * attached, handoff / handoff-and-complete stage an outbox intent row inside
+   * their terminal transaction, so the close and its wake intent are one commit.
+   */
+  attachOutbox(outbox: OutboxHandler): void {
+    this.outbox = outbox;
+  }
+
+  /**
+   * W1 (transactional closure): stage the durable WAKE INTENT for a successor
+   * qitem, to be called from INSIDE a terminal act's `db.transaction` so it
+   * commits atomically with the close + transition. The pane nudge itself is a
+   * post-commit side effect (reversed-never — a pane write inside the txn would
+   * make the transaction lie); what is durable is this intent row, which the
+   * delivery drains afterward.
+   *
+   * Idempotent by a deterministic outbox id keyed on the successor qitem. When
+   * no outbox is attached (test/bootstrap) this is a no-op — the pre-W1 best-
+   * effort maybeNudge still fires; W1's durability guarantee simply does not
+   * apply where there is no intent store to make durable.
+   */
+  private stageWakeIntent(
+    successorQitemId: string,
+    fromSession: string,
+    toSession: string,
+    identityProvenance: string | null,
+    nudge: boolean | undefined,
+  ): void {
+    // No wake intended (nudge:false) ⇒ no durable intent to make durable. The
+    // W1-c guard is nudge-aware for the same reason: absence of an intent is a
+    // defect only when a wake WAS intended.
+    if (nudge === false) return;
+    if (!this.outbox) return;
+    this.outbox.record({
+      outboxId: `wake-intent-${successorQitemId}`,
+      senderSession: fromSession,
+      destinationSession: toSession,
+      body: `Queue handoff: ${successorQitemId} - check your queue.`,
+      auditPointer: successorQitemId,
+      identityProvenance: identityProvenance ?? null,
+    });
+  }
+
+  /**
+   * W1-c (transactional closure): the runtime SEAM GUARD. Called as the LAST
+   * statement inside a terminal act's db.transaction, it makes an
+   * executed-but-unwoken close UNWRITABLE: if this transaction wrote a terminal
+   * close AND a wake was intended, a durable wake intent for the successor MUST
+   * exist in the same transaction. If it does not, throw — the whole act rolls
+   * back at the seam, not at review.
+   *
+   * Nudge-aware: nudge:false intends no wake, so no intent is required. No-op
+   * where there is no intent store (test/bootstrap) — W1's durability guarantee
+   * only binds where an intent store exists to make durable.
+   */
+  private assertTerminalClosureHasIntent(
+    sourceQitemId: string,
+    successorQitemId: string,
+    nudge: boolean | undefined,
+  ): void {
+    if (nudge === false) return; // no wake intended ⇒ no intent required
+    if (!this.outbox) return; // no durable-intent store ⇒ guarantee n/a
+    // Reads the txn-visible (uncommitted) state on this connection.
+    const src = this.getById(sourceQitemId);
+    if (!src || !isTerminalState(src.state)) return; // not a terminal close
+    const intent = this.outbox.getById(`wake-intent-${successorQitemId}`);
+    if (!intent) {
+      throw new QueueRepositoryError(
+        "terminal_close_without_wake_intent",
+        `terminal closure of ${sourceQitemId} committed without staging its wake intent for ${successorQitemId} — one act or none is violated`,
+      );
+    }
+  }
+
+  /**
+   * W1-b: deliver ONE committed wake intent and CAS-mark its outcome. Idempotent
+   * — the compare-and-set transitions (markDelivered / markIndeterminate /
+   * markFailed) all gate on `delivery_state='pending'`, so a second delivery of
+   * an already-resolved intent is a no-op (this is what makes "drain twice,
+   * delivered once" true). Returns what happened for the drain's tally.
+   *
+   *   verified       → delivered
+   *   ok, unverified → indeterminate   (ambiguous; never silently delivered/failed)
+   *   not-ok / throw → failed          (visible, not left lingering pending)
+   */
+  private async deliverWakeIntent(
+    outboxId: string,
+  ): Promise<"delivered" | "indeterminate" | "failed" | "skipped"> {
+    if (!this.outbox) return "skipped";
+    const intent = this.outbox.getById(outboxId);
+    if (!intent || intent.deliveryState !== "pending") return "skipped";
+    if (!this.transport) return "skipped"; // no transport → stays pending for a later drain
+    const qitemId = intent.auditPointer ?? outboxId;
+    const outcome = await this.performWakeSend(qitemId, intent.destinationSession, intent.senderSession);
+    this.recordNudgeAttempt(qitemId, outcome.nudgeResult);
+    switch (outcome.classified) {
+      case "verified":
+        this.outbox.markDelivered(outboxId);
+        return "delivered";
+      case "indeterminate":
+        this.outbox.markIndeterminate(outboxId);
+        return "indeterminate";
+      case "failed":
+        this.outbox.markFailed(outboxId);
+        return "failed";
+    }
+  }
+
+  /**
+   * W1-b: the post-commit delivery for a successor's wake. When the durable
+   * intent store is present (production), deliver the just-committed intent
+   * (marking it). When it is absent (test/bootstrap), fall back to the pre-W1
+   * best-effort nudge so behavior is unchanged where there is no intent to make
+   * durable. Called AFTER the terminal transaction commits (reversed-never: a
+   * pane write must not join the db transaction).
+   */
+  private async deliverWakeForSuccessor(
+    successorQitemId: string,
+    toSession: string,
+    fromSession: string,
+    nudge: boolean | undefined,
+  ): Promise<void> {
+    if (nudge === false) return;
+    if (this.outbox) {
+      await this.deliverWakeIntent(`wake-intent-${successorQitemId}`);
+      return;
+    }
+    await this.maybeNudge(successorQitemId, toSession, nudge, fromSession);
+  }
+
+  /**
+   * W1-b: the startup-recovery sweep. Delivers wake intents a crash left
+   * committed-but-undelivered (the terminal txn committed, the process died
+   * before the post-commit deliver). Pages in bounded batches and TERMINATES on
+   * a served short batch or on a no-progress round (a flapping transport marks
+   * rows failed = visible, so it still progresses) — never a silent cap, never a
+   * spin. No periodic timer (out of scope, ruled): a transient failure while the
+   * daemon keeps running lands the row in a visible state and is retried on the
+   * next start.
+   */
+  async drainPendingWakeIntents(): Promise<{ delivered: number; indeterminate: number; failed: number }> {
+    const tally = { delivered: 0, indeterminate: 0, failed: 0 };
+    if (!this.outbox || !this.transport) return tally;
+    const BATCH = 200;
+    for (;;) {
+      const pending = this.outbox.listPending("wake-intent-", BATCH);
+      if (pending.length === 0) break;
+      let progressed = 0;
+      for (const intent of pending) {
+        const outcome = await this.deliverWakeIntent(intent.outboxId);
+        if (outcome === "delivered") { tally.delivered++; progressed++; }
+        else if (outcome === "indeterminate") { tally.indeterminate++; progressed++; }
+        else if (outcome === "failed") { tally.failed++; progressed++; }
+      }
+      // Nothing left pending changed state this round (e.g. transport gone
+      // mid-sweep) — stop rather than spin; the next daemon start retries.
+      if (progressed === 0) break;
+      if (pending.length < BATCH) break; // served short batch ⇒ drained
+    }
+    return tally;
+  }
+
+  /**
    * Issue a default nudge to the destination after a create / handoff /
    * handoff-and-complete commit. Records the result via recordNudgeAttempt.
    * Errors are caught and surfaced as nudge_result strings — they do not
@@ -566,6 +739,29 @@ export class QueueRepository {
   ): Promise<void> {
     if (nudgeOpt === false) return;
     if (!this.transport) return;
+    const outcome = await this.performWakeSend(qitemId, destinationSession, sourceSession, bodyOverride);
+    this.recordNudgeAttempt(qitemId, outcome.nudgeResult);
+  }
+
+  /**
+   * W1 (transactional closure): the shared wake-send CORE. Builds the pane
+   * envelope, sends with verify, and CLASSIFIES the transport result into the W1
+   * delivery vocabulary (verified | indeterminate | failed). It touches NO
+   * persistence — callers decide what to record: {@link maybeNudge} records the
+   * nudge attempt; {@link deliverWakeIntent} additionally CAS-marks the durable
+   * intent row. Only ever called when `this.transport` is set (callers guard).
+   *
+   * The `indeterminate` classification is the ambiguous face: `res.ok && !res.verified`
+   * — the delivery LANDED on the wire but its render could not be confirmed
+   * (the "delivered-ack-pending" nudge literal). It is never promoted to
+   * delivered nor demoted to failed.
+   */
+  private async performWakeSend(
+    qitemId: string,
+    destinationSession: string,
+    sourceSession?: string,
+    bodyOverride?: string,
+  ): Promise<{ classified: "verified" | "indeterminate" | "failed"; nudgeResult: string }> {
     // OPR.0.4.4.19 FR-7: bodyOverride lets the resolve verb carry the
     // decision text to the parked owner; default stays the handoff nudge.
     const bareBody = bodyOverride ?? `Queue handoff: ${qitemId} - check your queue.`;
@@ -580,7 +776,7 @@ export class QueueRepository {
       : undefined;
     const text = wrapPaneEnvelope(sourceSession, destinationSession, bareBody, getSelfHostId(), { stampISO, genUuid });
     try {
-      const res = await this.transport.send(destinationSession, text, { verify: true, stampISO });
+      const res = await this.transport!.send(destinationSession, text, { verify: true, stampISO });
       // OPR.0.3.2.21.FR-4(c) — wording rename: the prior literal
       // "sent-unverified" read as a failure even in the common case
       // (delivery confirmed but the synchronous ack window expired,
@@ -588,13 +784,15 @@ export class QueueRepository {
       // "delivered-ack-pending" reads as healthy. The old "verified"
       // case is unchanged for backward-compat with any tooling that
       // already consumed the positive literal.
-      const result = res.ok
-        ? (res.verified ? "verified" : "delivered-ack-pending")
-        : `failed:${res.error ?? res.reason ?? "unknown"}`;
-      this.recordNudgeAttempt(qitemId, result);
+      if (res.ok) {
+        return res.verified
+          ? { classified: "verified", nudgeResult: "verified" }
+          : { classified: "indeterminate", nudgeResult: "delivered-ack-pending" };
+      }
+      return { classified: "failed", nudgeResult: `failed:${res.error ?? res.reason ?? "unknown"}` };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      this.recordNudgeAttempt(qitemId, `failed:${msg}`);
+      return { classified: "failed", nudgeResult: `failed:${msg}` };
     }
   }
 
@@ -879,6 +1077,11 @@ export class QueueRepository {
         identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
       });
 
+      // W1-a: the durable wake intent joins the SAME transaction as the close +
+      // successor create. If this (or anything above) throws, the whole act rolls
+      // back — one act or none.
+      this.stageWakeIntent(newId, input.fromSession, input.toSession, input.identityProvenance ?? null, input.nudge);
+
       const handoffEvent = this.eventBus.persistWithinTransaction({
         type: "queue.handed_off",
         qitemId: source.qitemId,
@@ -899,6 +1102,11 @@ export class QueueRepository {
         summary: input.summary ?? null,
       });
       events.push({ name: "queue.created", payload: createdEvent });
+
+      // W1-c: the seam guard — the LAST statement in the terminal txn. A close
+      // that intended a wake cannot commit without its durable intent; a throw
+      // here rolls the whole act back at the seam.
+      this.assertTerminalClosureHasIntent(source.qitemId, newId, input.nudge);
     });
 
     txn();
@@ -906,7 +1114,9 @@ export class QueueRepository {
       this.eventBus.notifySubscribers(e.payload as import("./types.js").PersistedEvent);
     }
 
-    await this.maybeNudge(newId, input.toSession, input.nudge, input.fromSession);
+    // W1-b: deliver the just-committed wake intent (marking it), or the pre-W1
+    // best-effort nudge when no intent store is attached. Post-commit only.
+    await this.deliverWakeForSuccessor(newId, input.toSession, input.fromSession, input.nudge);
 
     return {
       closed: this.getByIdOrThrow(source.qitemId),
@@ -1021,6 +1231,10 @@ export class QueueRepository {
         transitionNote: `handoff-and-complete from ${source.qitemId}`,
       });
 
+      // W1-a: the durable wake intent joins the SAME transaction as the close +
+      // successor create — one act or none (symmetric with handoff()).
+      this.stageWakeIntent(newId, input.fromSession, input.toSession, input.identityProvenance ?? null, input.nudge);
+
       const handoffEvent = this.eventBus.persistWithinTransaction({
         type: "queue.handed_off",
         qitemId: source.qitemId,
@@ -1041,6 +1255,11 @@ export class QueueRepository {
         summary: input.summary ?? null,
       });
       events.push({ name: "queue.created", payload: createdEvent });
+
+      // W1-c: the seam guard — the LAST statement in the terminal txn. A close
+      // that intended a wake cannot commit without its durable intent; a throw
+      // here rolls the whole act back at the seam.
+      this.assertTerminalClosureHasIntent(source.qitemId, newId, input.nudge);
     });
 
     txn();
@@ -1048,7 +1267,9 @@ export class QueueRepository {
       this.eventBus.notifySubscribers(e.payload as import("./types.js").PersistedEvent);
     }
 
-    await this.maybeNudge(newId, input.toSession, input.nudge, input.fromSession);
+    // W1-b: deliver the just-committed wake intent (marking it), or the pre-W1
+    // best-effort nudge when no intent store is attached. Post-commit only.
+    await this.deliverWakeForSuccessor(newId, input.toSession, input.fromSession, input.nudge);
 
     return {
       closed: this.getByIdOrThrow(source.qitemId),
