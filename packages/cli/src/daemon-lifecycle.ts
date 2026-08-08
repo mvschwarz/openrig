@@ -841,13 +841,20 @@ export async function fetchSelfHostId(deps: LifecycleDeps, url: string): Promise
  * behavior, no new failure mode). This is THIS host's own derived id, never a caller-supplied string.
  */
 export async function resolveOriginSelfHostId(deps: LifecycleDeps): Promise<string | undefined> {
-  let localUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
-  if (!localUrl) {
-    const status = await getDaemonStatus(deps);
-    if (status.state === "running" && status.port !== undefined) localUrl = getDaemonUrl(status);
+  // C1 fail-open around the WHOLE resolution, not just fetchSelfHostId: a remote op must NEVER depend on
+  // local daemon health. getDaemonStatus can throw (down / mid-restart / minimal test deps); ANY failure
+  // ⇒ undefined ⇒ the 2-part header stamps (today's behavior). Pin 5: no new failure mode on the remote path.
+  try {
+    let localUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
+    if (!localUrl) {
+      const status = await getDaemonStatus(deps);
+      if (status.state === "running" && status.port !== undefined) localUrl = getDaemonUrl(status);
+    }
+    if (!localUrl) return undefined;
+    return await fetchSelfHostId(deps, localUrl);
+  } catch {
+    return undefined;
   }
-  if (!localUrl) return undefined;
-  return fetchSelfHostId(deps, localUrl);
 }
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));

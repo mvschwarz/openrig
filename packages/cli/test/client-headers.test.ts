@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { DaemonClient, remoteDaemonClient, senderIdentityHeaders, SENDER_IDENTITY_HEADER } from "../src/client.js";
+import { resolveOriginSelfHostId } from "../src/daemon-lifecycle.js";
 
 /** Walk every non-test, non-dist .ts under a package's src/, returning [absPath, contents]. */
 function srcFiles(pkg: string): Array<[string, string]> {
@@ -161,6 +162,20 @@ describe("A4 — origin-triple carry (senderIdentityHeaders + remoteDaemonClient
     delete process.env.OPENRIG_SESSION_NAME;
     delete process.env.RIGGED_SESSION_NAME;
     expect(senderIdentityHeaders("mm2-openrig1")).toEqual({});
+  });
+
+  it("pin 5 (fail-open, whole resolution) — resolveOriginSelfHostId SWALLOWS a throwing local probe ⇒ undefined; a remote op NEVER depends on local daemon health", async () => {
+    const savedUrl = process.env.OPENRIG_URL; const savedRurl = process.env.RIGGED_URL;
+    delete process.env.OPENRIG_URL; delete process.env.RIGGED_URL; // force the getDaemonStatus branch
+    try {
+      // deps whose probe throws — getDaemonStatus is OUTSIDE fetchSelfHostId's own catch, so only a
+      // whole-body try/catch keeps this fail-open (the regression the full gate caught).
+      const deps = { fetch: async () => { throw new Error("local probe exploded"); }, exists: () => { throw new Error("boom"); } } as never;
+      await expect(resolveOriginSelfHostId(deps)).resolves.toBeUndefined();
+    } finally {
+      if (savedUrl === undefined) delete process.env.OPENRIG_URL; else process.env.OPENRIG_URL = savedUrl;
+      if (savedRurl === undefined) delete process.env.RIGGED_URL; else process.env.RIGGED_URL = savedRurl;
+    }
   });
 
   it("remoteDaemonClient ⇒ the constructed client stamps the TRIPLE on the wire (via the injected factory)", async () => {
