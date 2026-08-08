@@ -122,6 +122,26 @@ The C1 header's five required fields: `slice`, `candidate_sha`,
 - `artifact_type`: `guard | qa | rev1-r1 | rev1-r2 | adjudication`
 - `verdict`: `CLEAR | BLOCKING | CONCERNING | PASS | NOT-CLEAR`
 
+### Public-repo surfaces read as product engineering
+
+Commit messages, code comments, and markdown/docs are **public-repo surfaces**: they
+ship to readers who have no access to — and no interest in — how the work was
+governed internally. Two rules, **forward-only** (existing history is not rewritten
+for these):
+
+- **No verbatim internal quotes**, and especially not emotional or frustrated ones.
+  Quote the *technical content* of a decision, never the person or the mood in which
+  it was made.
+- **No governance framing.** Write what the change does and why it is correct on its
+  own terms — not who ruled it, who approved it, or which internal gate it passed.
+  "The guard fires at lock because a placeholder would otherwise satisfy the join"
+  is product engineering. "X ruled this at the Y gate" is internal governance leaking
+  into a public artifact.
+
+The test: a reader outside the project should be able to act on the text without
+knowing any internal role, seat, or process name. This is the same principle applied
+to attribution and tone rather than to vocabulary.
+
 ### A cited hash STATES WHAT IT COVERS
 
 A hash offered as evidence is only checkable if the reader knows what bytes it
