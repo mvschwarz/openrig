@@ -19,6 +19,8 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import { transportRoutes } from "../src/routes/transport.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 
 function setupDb(): Database.Database {
@@ -49,10 +51,11 @@ function mockTmux(overrides?: Partial<{
   } as unknown as TmuxAdapter;
 }
 
-function createApp(deps: { sessionTransport: SessionTransport }): Hono {
+function createApp(deps: { sessionTransport: SessionTransport; outboxHandler?: OutboxHandler }): Hono {
   const app = new Hono();
   app.use("*", async (c, next) => {
     c.set("sessionTransport" as never, deps.sessionTransport);
+    if (deps.outboxHandler) c.set("outboxHandler" as never, deps.outboxHandler);
     await next();
   });
   app.route("/api/transport", transportRoutes());
@@ -114,6 +117,75 @@ describe("transport routes", () => {
     const body = await res.json();
     expect(body.ok).toBe(true);
     expect(body.sessionName).toBe("dev-impl@my-rig");
+  });
+
+  // ── A3 (P22) — auto-record dispatched sends into the sender-side outbox, so a DERIVED send cannot
+  //    accept-and-drop at the audit layer (the specimen-5 window: no outbox row, attribution survived
+  //    only via provider JSONL). Strictly DOWNSTREAM of the certified header-derivation (uses the
+  //    already-derived actor, never re-derives). ──
+  function outboxRows(): Array<Record<string, unknown>> {
+    return db.prepare("SELECT * FROM outbox_entries ORDER BY rowid").all() as Array<Record<string, unknown>>;
+  }
+  function sendApp() {
+    // createFullTestDb excludes 027 (outbox is not on the shared core edge — P24); migrate it inline,
+    // plus the 067 identity_provenance column (outbox part), so the auto-record can stamp the era.
+    migrate(db, [outboxEntriesSchema]);
+    const hasProv = (db.prepare("PRAGMA table_info(outbox_entries)").all() as Array<{ name: string }>)
+      .some((c) => c.name === "identity_provenance");
+    if (!hasProv) db.exec("ALTER TABLE outbox_entries ADD COLUMN identity_provenance TEXT");
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux() });
+    return createApp({ sessionTransport: transport, outboxHandler: new OutboxHandler(db) });
+  }
+
+  it("A3 — a DERIVED send auto-records exactly ONE outbox row (sender=derived actor, provenance=transport:v1)", async () => {
+    seedRig();
+    const res = await sendApp().request("/api/transport/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "hello" }),
+    });
+    expect(res.status).toBe(200);
+    const rows = outboxRows();
+    expect(rows).toHaveLength(1); // exactly one, not zero, not two
+    expect(rows[0]!["sender_session"]).toBe("orch@my-rig"); // the DERIVED actor, never a body claim
+    expect(rows[0]!["destination_session"]).toBe("dev-impl@my-rig");
+    expect(rows[0]!["body"]).toBe("hello");
+    expect(rows[0]!["identity_provenance"]).toBe("transport:v1"); // era-stamp from the run, not hardcoded-lying
+  });
+
+  it("A3 — a cross-host send records the ORIGIN triple (the derived header), never the relay's seat", async () => {
+    seedRig();
+    const res = await sendApp().request("/api/transport/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@rig-a@origin-host" }, // 3-part origin (A2/A4 carry)
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "coordinate" }),
+    });
+    expect(res.status).toBe(200);
+    const rows = outboxRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!["sender_session"]).toBe("orch@rig-a@origin-host"); // ORIGIN triple, not the relay
+  });
+
+  it("A3 — a REFUSED send (body actor != header ⇒ 409 identity_mismatch) writes NO outbox row", async () => {
+    seedRig();
+    const res = await sendApp().request("/api/transport/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "hi", actorSession: "mallory@my-rig" }),
+    });
+    expect(res.status).toBe(409);
+    expect(outboxRows()).toHaveLength(0); // refused before dispatch → nothing recorded
+  });
+
+  it("A3 — a header-LESS send (no derived actor) auto-records NO row (nothing to attribute; no fabricated sender)", async () => {
+    seedRig();
+    const res = await sendApp().request("/api/transport/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }, // no X-OpenRig-Session
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "hi" }),
+    });
+    expect(res.status).toBe(200); // delivers (non-interactive send tolerates a null actor)
+    expect(outboxRows()).toHaveLength(0); // but no derived sender ⇒ no auto-record, never a null-sender row
   });
 
   // OPR.99.0.6.3 — the additive outcome field auto-surfaces through the

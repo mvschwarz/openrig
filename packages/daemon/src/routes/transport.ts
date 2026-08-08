@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { SessionTransport, TargetSpec } from "../domain/session-transport.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { requireSenderIdentity } from "./require-sender-identity.js";
+import type { OutboxHandler } from "../domain/outbox-handler.js";
 
 export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
   const router = new Hono();
@@ -110,6 +111,31 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       };
       const status = (statusMap[result.reason ?? ""] ?? 500) as 400 | 404 | 409 | 500 | 502 | 503;
       return c.json(result, status);
+    }
+
+    // A3 (P22): auto-record the DISPATCHED send into the sender-side outbox, so a derived send cannot
+    // accept-and-drop at the audit layer (the specimen-5 window: no outbox row, attribution survived only
+    // via provider JSONL). STRICTLY DOWNSTREAM of the certified header-derivation (line 65): it consumes
+    // the already-derived `derivedActor`, never re-derives or alters it. Records only a DERIVED send —
+    // `derivedActor` present — with the era-stamp `transport:v1` (the sole mode this header-derived route
+    // produces; a cross-host relay's header IS the origin triple, so the recorded sender is the ORIGIN,
+    // never the relay). A null-actor send has no derived sender to attribute (no fabricated row). The
+    // send is already committed, so a rare audit-write failure is LOGGED, never a false-negative on a
+    // delivered send.
+    if (derivedActor) {
+      const outbox = c.get("outboxHandler" as never) as OutboxHandler | undefined;
+      if (outbox) {
+        try {
+          outbox.record({
+            senderSession: derivedActor,
+            destinationSession: body.session,
+            body: body.text,
+            identityProvenance: "transport:v1",
+          });
+        } catch (err) {
+          console.warn(`[transport/send] outbox auto-record failed (send already delivered): ${(err as Error).message}`);
+        }
+      }
     }
 
     return c.json(result);
