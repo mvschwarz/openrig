@@ -3,7 +3,14 @@ import type Database from "better-sqlite3";
 import type { ClaudeCompactionEnforcer } from "../domain/claude-compaction-enforcer.js";
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
 import type { SessionTransport } from "../domain/session-transport.js";
+import type { SessionRegistry } from "../domain/session-registry.js";
+import {
+  AUTHORIZABLE_COMPACTION_REASONS,
+  CLAUDE_COMPACTION_ENFORCER_KIND,
+  type EnforcerDecisionStore,
+} from "../domain/enforcer-decision-store.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
+import { requireSenderIdentity } from "./require-sender-identity.js";
 
 /**
  * OPR.0.4.3.14 — manual configurable compaction trigger route.
@@ -20,6 +27,98 @@ import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
   const router = new Hono();
   router.use("*", authBearerTokenMiddleware({ expectedToken: opts?.bearerToken ?? null }));
+
+  router.post("/control", async (c) => {
+    const identity = requireSenderIdentity(c, { verb: "compaction control create" });
+    if (!identity.ok) return identity.response;
+    const store = c.get("enforcerDecisionStore" as never) as EnforcerDecisionStore | undefined;
+    const sessionRegistry = c.get("sessionRegistry" as never) as SessionRegistry | undefined;
+    if (!store || !sessionRegistry) {
+      return c.json({ ok: false, error: "compaction_control_unavailable" }, 503);
+    }
+
+    type ControlBody = {
+      session?: string;
+      direction?: string;
+      automaticReason?: string;
+      reason?: string;
+    };
+    const body = await c.req.json<ControlBody>().catch((): ControlBody => ({}));
+    const sessionName = body.session?.trim();
+    if (!sessionName) return c.json({ ok: false, error: "session_required" }, 400);
+    const reason = body.reason?.trim();
+    if (!reason) return c.json({ ok: false, error: "reason_required" }, 400);
+    if (body.direction !== "hold" && body.direction !== "authorize") {
+      return c.json({ ok: false, error: "direction_invalid" }, 400);
+    }
+
+    let automaticReason: string | null = null;
+    if (body.direction === "authorize") {
+      automaticReason = body.automaticReason?.trim() ?? "";
+      if (!automaticReason) {
+        return c.json({ ok: false, error: "automatic_reason_required" }, 400);
+      }
+      if (!(AUTHORIZABLE_COMPACTION_REASONS as readonly string[]).includes(automaticReason)) {
+        return c.json({ ok: false, error: "automatic_reason_not_authorizable" }, 400);
+      }
+    }
+
+    const generationUuid = sessionRegistry.currentOccupantGenerationForSession(sessionName);
+    if (!generationUuid) {
+      return c.json({ ok: false, error: "generation_unavailable" }, 409);
+    }
+
+    try {
+      const decision = store.create({
+        enforcerKind: CLAUDE_COMPACTION_ENFORCER_KIND,
+        sessionName,
+        generationUuid,
+        direction: body.direction,
+        automaticReason,
+        reason,
+        actorSession: identity.session,
+        identityProvenance: "transport:v1",
+      });
+      return c.json({ ok: true, decision }, 201);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const status = /active hold|already exists/i.test(message) ? 409 : 400;
+      return c.json({ ok: false, error: "decision_rejected", message }, status as 400 | 409);
+    }
+  });
+
+  router.get("/control", (c) => {
+    const store = c.get("enforcerDecisionStore" as never) as EnforcerDecisionStore | undefined;
+    if (!store) return c.json({ ok: false, error: "compaction_control_unavailable" }, 503);
+    const sessionName = c.req.query("session")?.trim();
+    return c.json({
+      ok: true,
+      decisions: store.list(sessionName ? { sessionName } : {}),
+    });
+  });
+
+  router.post("/control/:decisionId/clear", async (c) => {
+    const identity = requireSenderIdentity(c, { verb: "compaction control clear" });
+    if (!identity.ok) return identity.response;
+    const store = c.get("enforcerDecisionStore" as never) as EnforcerDecisionStore | undefined;
+    if (!store) return c.json({ ok: false, error: "compaction_control_unavailable" }, 503);
+    type ClearBody = { reason?: string };
+    const body = await c.req.json<ClearBody>().catch((): ClearBody => ({}));
+    const reason = body.reason?.trim();
+    if (!reason) return c.json({ ok: false, error: "reason_required" }, 400);
+    try {
+      const decision = store.clear({
+        decisionId: c.req.param("decisionId"),
+        actorSession: identity.session,
+        identityProvenance: "transport:v1",
+        reason,
+      });
+      return c.json({ ok: true, decision });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return c.json({ ok: false, error: "decision_not_active", message }, 404);
+    }
+  });
 
   router.post("/trigger", async (c) => {
     const enforcer = c.get("compactionEnforcer" as never) as ClaudeCompactionEnforcer | undefined;

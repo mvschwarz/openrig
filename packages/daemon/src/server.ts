@@ -292,6 +292,7 @@ export interface AppDeps {
    * auto share one back-half state machine — no second restore path).
    */
   compactionEnforcer?: ClaudeCompactionEnforcer;
+  enforcerDecisionStore?: import("./domain/enforcer-decision-store.js").EnforcerDecisionStore;
   /**
    * GHOST-STAGE (e/Class-B) — the canonical OccupantInvalidator, constructed once in startup and
    * injected so SeatHandoverService.commit()'s re-key call actually FIRES (dev-driver's fold added
@@ -530,6 +531,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("contextUsageStore" as never, deps.contextUsageStore);
     c.set("contextMonitor" as never, deps.contextMonitor);
     c.set("compactionEnforcer" as never, deps.compactionEnforcer);
+    c.set("enforcerDecisionStore" as never, deps.enforcerDecisionStore);
     c.set("occupantInvalidator" as never, deps.occupantInvalidator);
     c.set("nodeCmuxService" as never, deps.nodeCmuxService);
     c.set("agentActivityStore" as never, deps.agentActivityStore);

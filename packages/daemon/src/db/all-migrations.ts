@@ -70,6 +70,7 @@ import { projectionManifestSchema } from "./migrations/064_projection_manifest.j
 import { identityProvenanceSchema } from "./migrations/065_identity_provenance.js";
 import { watchdogTargetGenerationSchema } from "./migrations/066_watchdog_target_generation.js";
 import { i3IdentityProvenanceSchema } from "./migrations/067_i3_identity_provenance.js";
+import { enforcerDecisionsSchema } from "./migrations/068_enforcer_decisions.js";
 import type { Migration } from "./migrate.js";
 
 /** Ordered 001→067 (064/066 from main, 065 + 067 the P21 identity_provenance era-stamps — all additive/independent). */
@@ -141,4 +142,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   identityProvenanceSchema,
   watchdogTargetGenerationSchema,
   i3IdentityProvenanceSchema,
+  enforcerDecisionsSchema,
 ];

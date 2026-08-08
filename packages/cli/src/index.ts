@@ -77,6 +77,10 @@ import { restoreCheckCommand } from "./commands/restore-check.js";
 import { restorePacketCommand, type RestorePacketDeps } from "./commands/restore-packet.js";
 import { compactPlanCommand, type CompactPlanDeps } from "./commands/compact-plan.js";
 import { compactCommand, type CompactDeps } from "./commands/compact.js";
+import {
+  compactionControlCommand,
+  type CompactionControlDeps,
+} from "./commands/compaction-control.js";
 import { heartbeatCommand, type HeartbeatDeps } from "./commands/heartbeat.js";
 import { seatCommand, handoverCommand, type SeatDeps } from "./commands/seat.js";
 import { rigPolicyCommand, type RigPolicyDeps } from "./commands/rig-policy.js";
@@ -144,6 +148,7 @@ export interface ProgramDeps {
   restorePacketDeps?: RestorePacketDeps;
   compactPlanDeps?: CompactPlanDeps;
   compactDeps?: CompactDeps;
+  compactionControlDeps?: CompactionControlDeps;
   heartbeatDeps?: HeartbeatDeps;
   seatDeps?: SeatDeps;
   rigPolicyDeps?: RigPolicyDeps;
@@ -235,6 +240,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(restorePacketCommand(depsOverride?.restorePacketDeps));
   program.addCommand(compactPlanCommand(depsOverride?.compactPlanDeps));
   program.addCommand(compactCommand(depsOverride?.compactDeps));
+  program.addCommand(compactionControlCommand(depsOverride?.compactionControlDeps));
   program.addCommand(heartbeatCommand(depsOverride?.heartbeatDeps));
   program.addCommand(seatCommand(depsOverride?.seatDeps));
   program.addCommand(handoverCommand(depsOverride?.seatDeps));

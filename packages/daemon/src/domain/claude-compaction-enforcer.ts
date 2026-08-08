@@ -1,5 +1,10 @@
-import type { SessionTransport } from "./session-transport.js";
+import type { SendOpts, SendResult, SessionTransport } from "./session-transport.js";
 import type { SettingsStore } from "./user-settings/settings-store.js";
+import type {
+  AuthorizableCompactionReason,
+  EnforcerDecision,
+  EnforcerDecisionStore,
+} from "./enforcer-decision-store.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -68,8 +73,8 @@ export interface EnforcerInput {
 }
 
 export type EnforcerOutcome =
-  | { triggered: true }
-  | { triggered: false; reason: EnforcerSkipReason };
+  | { triggered: true; decisionId?: string; liftedReason?: AuthorizableCompactionReason }
+  | { triggered: false; reason: EnforcerSkipReason; decisionId?: string };
 
 /**
  * OPR.0.4.3.14 — manual compaction trigger surfaced stages (AC-3). `preparing`
@@ -109,7 +114,8 @@ export type EnforcerSkipReason =
   | "post_restore_cooldown"
   | "send_failed"
   | "invalid_policy"
-  | "stale_generation";
+  | "stale_generation"
+  | "human_hold";
 
 function buildCompactCommand(compactInstruction: string): string {
   const normalized = compactInstruction.trim().replace(/\s+/g, " ");
@@ -312,11 +318,34 @@ export class ClaudeCompactionEnforcer {
   // retired-generation stage → refuse. Injected resolver (atom-B's currentOccupantTenure by session).
   private readonly pendingStageGeneration = new Map<string, string | null>();
   private readonly resolveOccupantGeneration?: (sessionName: string) => string | null;
+  private readonly decisionStore?: Pick<
+    EnforcerDecisionStore,
+    | "findActiveHold"
+    | "findMatchingAuthorization"
+    | "observeHold"
+    | "consumeAuthorizationForAttempt"
+    | "recordAuthorizationAttempt"
+  >;
 
   constructor(
     settingsStore: SettingsStore,
     sessionTransport: SessionTransport,
-    opts?: { dedupWindowMs?: number; openrigHome?: string; postCompactRestoreCooldownMs?: number; manualPrepWaitMs?: number; postCompactSendWaitMs?: number; resolveOccupantGeneration?: (sessionName: string) => string | null },
+    opts?: {
+      dedupWindowMs?: number;
+      openrigHome?: string;
+      postCompactRestoreCooldownMs?: number;
+      manualPrepWaitMs?: number;
+      postCompactSendWaitMs?: number;
+      resolveOccupantGeneration?: (sessionName: string) => string | null;
+      decisionStore?: Pick<
+        EnforcerDecisionStore,
+        | "findActiveHold"
+        | "findMatchingAuthorization"
+        | "observeHold"
+        | "consumeAuthorizationForAttempt"
+        | "recordAuthorizationAttempt"
+      >;
+    },
   ) {
     this.settingsStore = settingsStore;
     this.sessionTransport = sessionTransport;
@@ -326,6 +355,7 @@ export class ClaudeCompactionEnforcer {
     this.manualPrepWaitMs = opts?.manualPrepWaitMs ?? MANUAL_PREP_WAIT_MS_DEFAULT;
     this.postCompactSendWaitMs = opts?.postCompactSendWaitMs ?? POST_COMPACT_SEND_WAIT_MS_DEFAULT;
     this.resolveOccupantGeneration = opts?.resolveOccupantGeneration;
+    this.decisionStore = opts?.decisionStore;
   }
 
   /**
@@ -340,6 +370,102 @@ export class ClaudeCompactionEnforcer {
     if (input.usedPercentage == null) {
       return { triggered: false, reason: "no_usage_data" };
     }
+
+    const liveGenerationUuid = this.resolveOccupantGeneration?.(input.sessionName) ?? null;
+    const activeHold = this.decisionStore?.findActiveHold({
+      enforcerKind: "claude_compaction",
+      sessionName: input.sessionName,
+      liveGenerationUuid,
+    });
+    if (activeHold) {
+      this.decisionStore?.observeHold({
+        decisionId: activeHold.decisionId,
+        outcome: "human_hold",
+      });
+      return {
+        triggered: false,
+        reason: "human_hold",
+        decisionId: activeHold.decisionId,
+      };
+    }
+
+    let authorization: {
+      decisionId: string;
+      liftedReason: AuthorizableCompactionReason;
+    } | null = null;
+    const lift = (automaticReason: AuthorizableCompactionReason): boolean => {
+      const found = this.decisionStore?.findMatchingAuthorization({
+        enforcerKind: "claude_compaction",
+        sessionName: input.sessionName,
+        liveGenerationUuid,
+        automaticReason,
+      }) as EnforcerDecision | null | undefined;
+      if (!found) return false;
+      authorization = { decisionId: found.decisionId, liftedReason: automaticReason };
+      return true;
+    };
+    const sendAttempt = async (
+      message: string,
+      opts?: SendOpts,
+    ): Promise<{ ok: boolean; result: SendResult | null; outcome: EnforcerOutcome }> => {
+      const lifted = authorization as {
+        decisionId: string;
+        liftedReason: AuthorizableCompactionReason;
+      } | null;
+      if (lifted && !this.decisionStore?.consumeAuthorizationForAttempt({
+        decisionId: lifted.decisionId,
+        enforcerKind: "claude_compaction",
+        liftedReason: lifted.liftedReason,
+      })) {
+        return {
+          ok: false,
+          result: null,
+          outcome: { triggered: false, reason: lifted.liftedReason },
+        };
+      }
+
+      let result: SendResult;
+      try {
+        result = await this.sessionTransport.send(input.sessionName, message, opts);
+      } catch (error) {
+        if (!lifted) throw error;
+        this.decisionStore?.recordAuthorizationAttempt({
+          decisionId: lifted.decisionId,
+          outcome: "failed",
+          failureReason: error instanceof Error ? error.message : String(error),
+        });
+        return {
+          ok: false,
+          result: null,
+          outcome: { triggered: false, reason: "send_failed" },
+        };
+      }
+      if (lifted) {
+        this.decisionStore?.recordAuthorizationAttempt({
+          decisionId: lifted.decisionId,
+          outcome: result.ok ? "succeeded" : "failed",
+          ...(result.ok ? {} : { failureReason: result.reason ?? result.error ?? "send_failed" }),
+        });
+      }
+      if (!result.ok) {
+        return {
+          ok: false,
+          result,
+          outcome: { triggered: false, reason: "send_failed" },
+        };
+      }
+      return {
+        ok: true,
+        result,
+        outcome: lifted
+          ? {
+              triggered: true,
+              decisionId: lifted.decisionId,
+              liftedReason: lifted.liftedReason,
+            }
+          : { triggered: true },
+      };
+    };
 
     const policy = this.settingsStore.resolveClaudeCompactionPolicy();
     // Defense in depth: the CLI + daemon set() paths reject invalid
@@ -371,7 +497,7 @@ export class ClaudeCompactionEnforcer {
       // generations residue is covered by fix (b)'s generation gate (layered defense). Interpretation
       // surfaced in the handoff for the PM evidence read (veto there if the literal reading was meant).
       if (!policy.enabled && this.manualCompactionState.get(input.sessionName)?.operatorInitiated !== true) {
-        return { triggered: false, reason: "disabled" };
+        if (!lift("disabled")) return { triggered: false, reason: "disabled" };
       }
       // GHOST-STAGE (b): gen-scoped stages. A stage minted by a RETIRED occupant generation must be
       // undeliverable to the successor. Compare the queue-time generation to the LIVE one. NOTE-2: an
@@ -382,30 +508,30 @@ export class ClaudeCompactionEnforcer {
       if (stageGen != null) {
         const liveGen = this.resolveOccupantGeneration?.(input.sessionName) ?? null;
         if (liveGen != null && liveGen !== stageGen) {
-          this.invalidateOccupant(input.sessionName); // drop the retired-generation ghost stage
-          return { triggered: false, reason: "stale_generation" };
+          if (!lift("stale_generation")) {
+            this.invalidateOccupant(input.sessionName); // drop the retired-generation ghost stage
+            return { triggered: false, reason: "stale_generation" };
+          }
         }
       }
       const pendingStage = this.pendingPostCompactRestore.get(input.sessionName);
       if (pendingStage === "turn_boundary") {
-        const boundary = await this.sessionTransport.send(
-          input.sessionName,
+        const boundary = await sendAttempt(
           buildPostCompactTurnBoundaryPrompt(),
           { waitForIdleMs: this.postCompactSendWaitMs },
         );
         if (!boundary.ok) {
           // Busy/never-idle → no delivery, no advance; the SAME stage retries next tick.
-          return { triggered: false, reason: "send_failed" };
+          return boundary.outcome;
         }
         this.pendingPostCompactRestore.set(input.sessionName, "restore_prompt");
-        return { triggered: true };
+        return boundary.outcome;
       }
       if (pendingStage === "restore_prompt") {
         // OPR.0.4.1.09: resolve the extra FOR THIS SEAT (per-seat preferred; the legacy
         // global is refused if it declares a different seat) - never inject wrong-seat state.
         const extra = resolvePostCompactExtra(input.sessionName, this.openrigHome, policy.messageFilePath);
-        const restore = await this.sessionTransport.send(
-          input.sessionName,
+        const restore = await sendAttempt(
           buildPostCompactRestorePrompt({
             sessionName: input.sessionName,
             openrigHome: this.openrigHome,
@@ -421,23 +547,22 @@ export class ClaudeCompactionEnforcer {
           // Restore is exact-once + operator-authorized: if the seat is still busy
           // (mid-compaction/boundary), do NOT advance to restore-sent on an
           // undelivered send — retry the SAME stage next tick.
-          return { triggered: false, reason: "send_failed" };
+          return restore.outcome;
         }
         this.pendingPostCompactRestore.set(input.sessionName, "compliance_prompt");
         // OPR.0.4.3.14 — surface manual-trigger progress (no-op for auto seats).
         this.advanceManualStage(input.sessionName, "compact-sent", "restore-sent");
-        return { triggered: true };
+        return restore.outcome;
       }
       if (pendingStage === "compliance_prompt") {
-        const compliance = await this.sessionTransport.send(
-          input.sessionName,
+        const compliance = await sendAttempt(
           buildPostCompactCompliancePrompt(policy.postRestoreAuditInstruction),
           { waitForIdleMs: this.postCompactSendWaitMs },
         );
         if (!compliance.ok) {
           // Audit cannot overtake restore: only advances once the restore turn is
           // idle and this send delivers; a busy tick retries the SAME stage.
-          return { triggered: false, reason: "send_failed" };
+          return compliance.outcome;
         }
         this.pendingPostCompactRestore.delete(input.sessionName);
         this.pendingStageGeneration.delete(input.sessionName); // GHOST-STAGE (b): stage completed → drop its gen
@@ -448,7 +573,7 @@ export class ClaudeCompactionEnforcer {
         this.triggeredAboveThreshold.delete(input.sessionName);
         // OPR.0.4.3.14 — terminal manual-trigger stage (no-op for auto seats).
         this.advanceManualStage(input.sessionName, "restore-sent", "audit-sent");
-        return { triggered: true };
+        return compliance.outcome;
       }
       this.triggeredAboveThreshold.delete(input.sessionName);
       this.pendingPreCompactPrep.delete(input.sessionName);
@@ -465,16 +590,19 @@ export class ClaudeCompactionEnforcer {
     // constant policy), while a manual trigger's restore/audit half can finish
     // via this single shared path even when auto-compaction is disabled.
     if (!policy.enabled) {
-      return { triggered: false, reason: "disabled" };
+      if (!lift("disabled")) return { triggered: false, reason: "disabled" };
     }
 
     const now = Date.now();
     const postRestoreCooldownUntil = this.postCompactRestoreCooldownUntil.get(input.sessionName);
     if (postRestoreCooldownUntil !== undefined) {
       if (now < postRestoreCooldownUntil) {
-        return { triggered: false, reason: "post_restore_cooldown" };
+        if (!lift("post_restore_cooldown")) {
+          return { triggered: false, reason: "post_restore_cooldown" };
+        }
+      } else {
+        this.postCompactRestoreCooldownUntil.delete(input.sessionName);
       }
-      this.postCompactRestoreCooldownUntil.delete(input.sessionName);
     }
 
     const last = this.lastAutoCompactAt.get(input.sessionName);
@@ -487,8 +615,7 @@ export class ClaudeCompactionEnforcer {
 
     const preCompactStage = this.pendingPreCompactPrep.get(input.sessionName);
     if (preCompactStage === undefined) {
-      const prep = await this.sessionTransport.send(
-        input.sessionName,
+      const prep = await sendAttempt(
         buildPreCompactPrepPrompt({
           usedPercentage: input.usedPercentage,
           thresholdPercent: policy.thresholdPercent,
@@ -496,18 +623,17 @@ export class ClaudeCompactionEnforcer {
         }),
       );
       if (!prep.ok) {
-        return { triggered: false, reason: "send_failed" };
+        return prep.outcome;
       }
       this.pendingPreCompactPrep.set(input.sessionName, "prep_prompt_sent");
-      return { triggered: true };
+      return prep.outcome;
     }
 
-    const result = await this.sessionTransport.send(
-      input.sessionName,
+    const attempt = await sendAttempt(
       buildCompactCommand(policy.compactInstruction),
     );
-    if (!result.ok) {
-      return { triggered: false, reason: "send_failed" };
+    if (!attempt.ok) {
+      return attempt.outcome;
     }
     this.lastAutoCompactAt.set(input.sessionName, now);
     this.triggeredAboveThreshold.add(input.sessionName);
@@ -515,7 +641,7 @@ export class ClaudeCompactionEnforcer {
     this.pendingPostCompactRestore.set(input.sessionName, "turn_boundary");
     // GHOST-STAGE (b): capture the occupant generation at queue time (or null when unknown).
     this.pendingStageGeneration.set(input.sessionName, this.resolveOccupantGeneration?.(input.sessionName) ?? null);
-    return { triggered: true };
+    return attempt.outcome;
   }
 
   /**
