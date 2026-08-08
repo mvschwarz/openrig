@@ -246,3 +246,58 @@ describe("Slice-11 INBOUND handleEnvelope — fast-ack (item 8)", () => {
     expect(acked).toBe(1);
   });
 });
+
+// ── M1 A5b WIRING — the outbound sweep must actually EMIT image blocks ────────
+// The renderer (buildImageBlocks) and the consumer (slackDeliverFn) were both built
+// and unit-tested, but slackDeliverFn had ZERO non-test callers and the sweep passed
+// no mediaRefs — so the shipped path posted TEXT ONLY. A seam with no construction
+// site is not wired; a founder acceptance fired through it would have been a false pass.
+describe("M1 A5b — outbound sweep emits image blocks for an evidence-bearing alert", () => {
+  const filter = { alertTag: "founder-alert" };
+  const IMG = "https://example.invalid/PROGRAM-BOARD-M1-row.png";
+  const ALERT_IMG: QueueItem = { ...ALERT, qitemId: "qitem-img", evidenceRef: IMG };
+
+  function capturingFetch(): { fetchImpl: FetchImpl; bodies: string[] } {
+    const bodies: string[] = [];
+    return {
+      bodies,
+      fetchImpl: async (_url: string, init?: { body?: string }) => {
+        bodies.push(String(init?.body ?? ""));
+        return new Response("ok", { status: 200 });
+      },
+    } as { fetchImpl: FetchImpl; bodies: string[] };
+  }
+
+  const mkRunnerImg = () =>
+    fakeRunner((args) => {
+      if (args[0] === "queue" && args[1] === "list") return okOut(JSON.stringify([ALERT_IMG]));
+      if (args[0] === "queue" && args[1] === "show") return okOut(JSON.stringify(ALERT_IMG));
+      return failOut("unexpected");
+    });
+
+  it("posts an image block carrying the alert's https evidenceRef", async () => {
+    const { runner } = mkRunnerImg();
+    const seen = new SeenStore("/s/seen-img.jsonl", memFs(), clock);
+    const { fetchImpl, bodies } = capturingFetch();
+    const r = await runOutboundOnce({ runner, seen, webhookUrl: "https://hooks.slack.com/x", fetchImpl, sourceLabel: "vm", filter });
+    expect(r.posted).toEqual(["qitem-img"]);
+    const payload = JSON.parse(bodies[0]) as { blocks?: { type?: string; image_url?: string }[] };
+    const images = (payload.blocks ?? []).filter((b) => b.type === "image");
+    expect(images).toHaveLength(1);
+    expect(images[0].image_url).toBe(IMG);
+  });
+
+  it("NEGATIVE CONTROL: a non-https evidenceRef emits NO image block (hygiene rail intact)", async () => {
+    const local: QueueItem = { ...ALERT, qitemId: "qitem-local", evidenceRef: "/tmp/local-only.png" };
+    const { runner } = fakeRunner((args) => {
+      if (args[0] === "queue" && args[1] === "list") return okOut(JSON.stringify([local]));
+      if (args[0] === "queue" && args[1] === "show") return okOut(JSON.stringify(local));
+      return failOut("unexpected");
+    });
+    const seen = new SeenStore("/s/seen-local.jsonl", memFs(), clock);
+    const { fetchImpl, bodies } = capturingFetch();
+    await runOutboundOnce({ runner, seen, webhookUrl: "https://hooks.slack.com/x", fetchImpl, sourceLabel: "vm", filter });
+    const payload = JSON.parse(bodies[0]) as { blocks?: { type?: string }[] };
+    expect((payload.blocks ?? []).filter((b) => b.type === "image")).toHaveLength(0);
+  });
+});

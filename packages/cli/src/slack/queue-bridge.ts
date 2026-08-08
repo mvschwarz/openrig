@@ -60,6 +60,11 @@ export interface QueueItem {
   tier?: string | null;
   summary?: string | null;
   body?: string | null;
+  /** M1 A5b: the durable artifact a human judges. When it is an https image URL the outbound
+   *  sweep forwards it as a Block Kit image attachment (buildImageBlocks is the SINGLE gate that
+   *  decides what is forwardable — non-https and secret-bearing URLs are dropped there, so the
+   *  predicate is not duplicated here). */
+  evidenceRef?: string | null;
 }
 
 function parseArray(stdout: string): QueueItem[] {

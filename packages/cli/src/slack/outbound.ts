@@ -47,7 +47,17 @@ export async function runOutboundOnce(deps: OutboundDeps): Promise<OutboundResul
     const full = (await showFull(deps.runner, a.qitemId)) ?? a;
     const payload = buildOutboundMessage(
       { qitemId: a.qitemId, summary: full.summary ?? a.summary, body: full.body, destinationSession: a.destinationSession },
-      { sourceLabel: deps.sourceLabel, bodyExcerpt: deps.bodyExcerpt },
+      // M1 A5b WIRING: the image seam had a renderer and a consumer but NO production caller —
+      // the sweep posted text only. An alert's evidenceRef IS the artifact the human judges, so
+      // when it is an https image URL it rides as a Block Kit image block. buildImageBlocks is the
+      // single gate (drops non-https / secret-bearing), so the predicate lives in ONE place.
+      {
+        sourceLabel: deps.sourceLabel,
+        bodyExcerpt: deps.bodyExcerpt,
+        mediaRefs: (full.evidenceRef ?? a.evidenceRef)
+          ? [{ imageUrl: String(full.evidenceRef ?? a.evidenceRef), altText: full.summary ?? a.summary ?? "attachment" }]
+          : undefined,
+      },
     );
     const res = await postWebhook(deps.webhookUrl, payload, deps.fetchImpl);
     if (res.ok) {
