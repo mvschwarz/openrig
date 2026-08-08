@@ -5,12 +5,13 @@
 //   (advisory, recorded) → run BOTH legs (typecheck AND vitest AND vitest:ui — the two honesty gaps) →
 //   write the C2 verdict (green carries the load it ran under) → release (kernel also frees on death).
 import { spawnSync, execSync } from "node:child_process";
-import { writeFileSync, readFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, readFileSync, mkdirSync, realpathSync, unlinkSync } from "node:fs";
 import { tmpdir, loadavg } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { acquireGateLane, GATE_LANE_PORT } from "./gate-lane-lock.mjs";
 import { renderRefusal, runGate, observeForeignLoad, cleanStaleVendoredBundle } from "./gate-lane-run.mjs";
+import { checkDependencyRoot } from "./gate-lane-hermeticity.mjs";
 
 const RUNTIME_DIR = (() => { const d = join(tmpdir(), "openrig-gate"); mkdirSync(d, { recursive: true }); return d; })();
 const HOLDER_INFO = join(RUNTIME_DIR, "gate-lane.holder.json");
@@ -37,6 +38,53 @@ function snapshotProcesses() {
   } catch { return []; }
 }
 
+function runGit(args, cwd) {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr.trim()}`);
+  return result.stdout;
+}
+
+function readCandidateSha(repoRoot) {
+  const sha = runGit(["rev-parse", "HEAD"], repoRoot).trim();
+  if (!sha) throw new Error("candidate HEAD is empty");
+  return sha;
+}
+
+function canonicalVerdictRelativePath(repoRoot) {
+  const verdictPath = resolve(VERDICT_PATH);
+  let canonicalPath = verdictPath;
+  try {
+    canonicalPath = realpathSync(verdictPath);
+  } catch {
+    try { canonicalPath = join(realpathSync(dirname(verdictPath)), basename(verdictPath)); } catch { /* absent parent: no status entry can match */ }
+  }
+  const rel = relative(realpathSync(repoRoot), canonicalPath);
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return null;
+  return rel.split(sep).join("/");
+}
+
+function assertCandidateClean(repoRoot) {
+  const canonicalVerdict = canonicalVerdictRelativePath(repoRoot);
+  const records = runGit(["status", "--porcelain=v1", "-z", "--untracked-files=all"], repoRoot)
+    .split("\0")
+    .filter(Boolean);
+  const unexpected = records.filter((record) => {
+    if (record.length < 4 || record[2] !== " ") return true;
+    return record.slice(3).split(sep).join("/") !== canonicalVerdict;
+  });
+  if (unexpected.length > 0) {
+    throw new Error(`candidate worktree is dirty: ${unexpected.join(" | ")}`);
+  }
+}
+
+function invalidatePriorVerdict() {
+  try {
+    unlinkSync(VERDICT_PATH);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+}
+
 async function main() {
   const startedAt = new Date().toISOString();
   const lane = await acquireGateLane({ port: GATE_LANE_PORT, holderInfoPath: HOLDER_INFO });
@@ -46,8 +94,15 @@ async function main() {
   }
   let exitCode = 3;
   try {
+    // This acquired run supersedes every earlier receipt, including for the same HEAD.
+    invalidatePriorVerdict();
     const foreignLoad = observeForeignLoad({ loadavg: loadavg(), processes: snapshotProcesses() });
     if (foreignLoad.advisory.length) console.warn(`⚠ advisory (exit UNCHANGED, recorded in verdict): ${foreignLoad.advisory.join("; ")}`);
+    // Bind the run to one clean, worktree-local candidate BEFORE the first repository mutation.
+    const repoRoot = process.cwd();
+    const candidateSha = readCandidateSha(repoRoot);
+    assertCandidateClean(repoRoot);
+    checkDependencyRoot(repoRoot);
     // SOURCE-TRUTH: drop any stale vendored daemon bundle (a gitignored build:package leftover) before
     // the legs run, so test:repo's freshness guard is never poisoned by a desk leftover. Real package-time
     // assembly is still guarded; a fresh checkout is a no-op.
@@ -61,6 +116,13 @@ async function main() {
     // picks the executor AND flows into the verdict, so the two can never disagree. The gate's own
     // negative-control test calls THIS SAME runGate — it guards this shipped path, not a lookalike.
     const verdict = await runGate({ smoke: SMOKE, realExec, foreignLoad, startedAt, ledger, cutCeiling });
+    const endingSha = readCandidateSha(repoRoot);
+    if (endingSha !== candidateSha) {
+      throw new Error(`candidate HEAD changed during gate (started ${candidateSha}, ended ${endingSha})`);
+    }
+    assertCandidateClean(repoRoot);
+    checkDependencyRoot(repoRoot);
+    verdict.candidateSha = candidateSha;
     mkdirSync(dirname(VERDICT_PATH), { recursive: true }); // ensure the verdict's home exists
     writeFileSync(VERDICT_PATH, JSON.stringify(verdict, null, 2));
     console.log(verdict.ledgerState); // in-band LOUD: name every exclusion (or "0 exclusions")
