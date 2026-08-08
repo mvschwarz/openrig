@@ -36,6 +36,10 @@ beforeEach(() => {
   console.error = (...args: unknown[]) => { captured.stderrLines.push(args.map(String).join(" ")); };
   process.exitCode = undefined;
   delete process.env.OPENRIG_HOST_SELECTED;
+  // A1: send/broadcast are attributable-only — a resolvable seat is required to dispatch (the
+  // seat-boundary guard refuses otherwise). Establish one so the cross-host dispatch paths run.
+  vi.stubEnv("OPENRIG_SESSION_NAME", "relay@my-rig");
+  vi.stubEnv("RIGGED_SESSION_NAME", "");
 });
 
 afterEach(() => {
@@ -46,6 +50,7 @@ afterEach(() => {
   // and made the exit-code checks vacuous). This hook only resets state.
   process.exitCode = undefined;
   delete process.env.OPENRIG_HOST_SELECTED;
+  vi.unstubAllEnvs();
 });
 
 // A registry with BOTH transports + a second http host for precedence cases.
@@ -513,10 +518,11 @@ describe("broadcast --host (net-new, CLI-direct POST)", () => {
     await cmd.parseAsync(["--host", "vps-b", "--rig", "remote-rig", "coordinate"], { from: "user" });
     const call = h.calls[0]!;
     expect(call.path).toBe("/api/transport/broadcast");
-    // P21 fix (203078d7): the cross-host broadcast now CARRIES the enveloped-fan-out marker (it was dropped
-    // → the remote rendered raw while the local path wrapped). Its PRESENCE is the signal; its VALUE is
-    // env-derived (the seat, or the single-origin "<unknown sender>" fallback) and IGNORED by the daemon,
-    // which derives the From: from the auto-stamped X-OpenRig-Session. Strict body + any-string marker.
+    // P21 fix (203078d7) + A1: the cross-host broadcast CARRIES the enveloped-fan-out marker (it was dropped
+    // → the remote rendered raw while the local path wrapped). Its PRESENCE is the signal; its VALUE is the
+    // RESOLVED seat (A1 refuses an unattributable broadcast at the boundary, so the deleted "<unknown
+    // sender>" fallback can no longer appear) and IGNORED by the daemon, which derives the From: from the
+    // auto-stamped X-OpenRig-Session. Strict body + any-string marker.
     expect(call.body).toEqual({ text: "coordinate", force: undefined, rig: "remote-rig", envelopeSender: expect.any(String) });
     expect(captured.stdoutLines).toContain("[via host=vps-b (http://vps-b:7433)]");
     expect(captured.stdoutLines).toContain("a@remote-rig: sent");

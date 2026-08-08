@@ -10,11 +10,10 @@ import { emitCrossHostError, emitCrossHostFailure, emitRemoteHttpFailure } from 
 import { resolveCrossHostTarget } from "../cross-host-target.js";
 import { runRemoteHttpOp } from "../remote-host-ops.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
+import { requireAttributableSender } from "../sender-identity.js";
 import { resolveContextRef, walkSizedWarning } from "../context-resolve.js";
 
 const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
-
-const SENDER_FALLBACK = "<unknown sender>";
 
 /**
  * Wrap a `rig send` body with an email-style envelope so the recipient
@@ -23,12 +22,15 @@ const SENDER_FALLBACK = "<unknown sender>";
  * runs the same command, and double-wrapping would nest envelopes.
  *
  * V0.3.1 slice 23 parity contract: `packages/daemon/src/lib/pane-envelope.ts`
- * exports `wrapPaneEnvelope` with BYTE-IDENTICAL output for the same
- * inputs. The two implementations live in separate packages because
- * cli + daemon don't cross-import today. Daemon-side nudges from
- * `rig queue create|handoff` use the daemon helper so queue nudges
- * render the same envelope as peer-to-peer `rig send`. If you update
- * this function, update wrapPaneEnvelope in lockstep.
+ * exports `wrapPaneEnvelope` with BYTE-IDENTICAL output for every RESOLVED
+ * sender — the only input domain this CLI twin produces. A1 (identity/audit
+ * family) refuses an unattributable `rig send`/`broadcast` at the seat boundary,
+ * so this twin now REQUIRES a resolved sender and drops the `<unknown sender>`
+ * fallback; the daemon twin RETAINS it for the non-refusable queue-nudge sender.
+ * The two intentionally diverge ONLY at the undefined sender the CLI can no
+ * longer emit. The implementations live in separate packages because cli +
+ * daemon don't cross-import today. If you update this function, update
+ * wrapPaneEnvelope in lockstep (for resolved senders — the shared domain).
  */
 /** Send/broadcast header envelope metadata (ruling 03c35295) — the BYTE-IDENTICAL twin of the daemon's
  *  pane-envelope EnvelopeMeta. Envelope = machine truth; rendered header = projection. */
@@ -61,25 +63,27 @@ export function renderShortStamp(stampISO: string): string {
 }
 
 export function wrapSendBody(
-  sender: string | undefined,
+  sender: string,
   recipient: string,
   body: string,
   selfHostId?: string | null,
   meta?: EnvelopeMeta,
 ): string {
-  const senderLabel = sender && sender.trim().length > 0 ? sender : SENDER_FALLBACK;
-  // 51-09 increment 3 (ruling cb19867f Q2 always-suffix + 2e1b737f C1 fail-open):
-  // when the origin's boot-reconciled self-host id is known, the sender renders
-  // as the <member>@<rig>@<selfHostId> triple ALWAYS (local included) so the
-  // signature is self-describing and the reply hint is verbatim-usable. When it
-  // is absent (daemon pre-reconcile / unknown sender), fall open to today's exact
-  // two-part form — no new failure mode. A sender that ALREADY carries a host (a
-  // --from relay passing the ORIGIN's full triple) is preserved verbatim, never
+  // A1 REFUSE-LOUD: `sender` is a RESOLVED seat identity — the seat-boundary guard
+  // (sender-identity.ts :: requireAttributableSender) refuses an unattributable send BEFORE this
+  // renders, so there is NO `<unknown sender>` fallback branch here (the CLI can never put that marker
+  // on the wire). The daemon twin wrapPaneEnvelope keeps the fallback for its non-refusable nudge; the
+  // twins are byte-identical for every resolved sender and diverge only at the undefined input above.
+  //
+  // 51-09 increment 3 (ruling cb19867f Q2 always-suffix): when the origin's boot-reconciled self-host
+  // id is known, the sender renders as the <member>@<rig>@<selfHostId> triple ALWAYS (local included)
+  // so the signature is self-describing and the reply hint is verbatim-usable. A sender that ALREADY
+  // carries a host (a --from relay passing the ORIGIN's full triple) is preserved verbatim, never
   // re-stamped with THIS host's id (which would forge the origin).
   const senderTriple =
-    selfHostId && selfHostId.length > 0 && senderLabel !== SENDER_FALLBACK && senderLabel.split("@").length < 3
-      ? `${senderLabel}@${selfHostId}`
-      : senderLabel;
+    selfHostId && selfHostId.length > 0 && sender.split("@").length < 3
+      ? `${sender}@${selfHostId}`
+      : sender;
   const header = [`From: ${senderTriple}`, renderToLine(recipient, meta?.scope)];
   if (meta?.stampISO) {
     // GHOST-STAGE (g): the sender's occupant generation rides the Sent: line as a short suffix
@@ -91,10 +95,6 @@ export function wrapSendBody(
     header.push(`Sent: ${renderShortStamp(meta.stampISO)}${genSuffix}`);
   }
   return [...header, "---", body, "---", `↩ Reply: rig send ${senderTriple} "..."`].join("\n");
-}
-
-function resolveSenderSession(): string | undefined {
-  return readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
 }
 
 /**
@@ -322,6 +322,14 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
 
       const deps = getDeps();
 
+      // A1 REFUSE-LOUD (identity/audit family) — the seat boundary. A `rig send` is attributable-only:
+      // if the seat identity is unresolvable (no OPENRIG_SESSION_NAME/RIGGED_SESSION_NAME; --from is
+      // deprecated + ignored), REFUSE here before ANY dispatch path (fan-out, cross-host, single-seat) —
+      // nothing rendered, nothing on the wire. Mirrors the shipped daemon 401 unattributable_sender
+      // (routes/transport.ts, P21-I4): both surfaces record only a DERIVED sender, never a body claim.
+      const seatSender = requireAttributableSender();
+      if (seatSender === null) return;
+
       if (isFanOut) {
         // With a targeting flag the FIRST positional IS the message; a second positional (or a
         // bare seat name) means the caller mixed a single-seat and a fan-out target — reject.
@@ -346,7 +354,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
           process.exitCode = 1;
           return;
         }
-        await runFanOutSend({ toList, pod: opts.pod, rig: opts.rig, message, opts, deps });
+        await runFanOutSend({ toList, pod: opts.pod, rig: opts.rig, message, opts, deps, seatSender });
         return;
       }
 
@@ -400,7 +408,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         // text is validated-defined here: --context is rejected with --host (above,
         // for both explicit and sugar forms), and the single-seat (no text && no
         // context) guard requires it on this path.
-        await runCrossHostSend(opts.host, session, text!, opts, deps, waitForIdleMs, crossHostHint, selfHostId);
+        await runCrossHostSend(opts.host, session, text!, opts, deps, waitForIdleMs, crossHostHint, selfHostId, seatSender);
         return;
       }
 
@@ -414,7 +422,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       // --from. --from is deprecated + ignored here (its cross-host origin-carry is superseded by the
       // relay re-stamping from its authenticated context). Env == the X-OpenRig-Session the DaemonClient
       // stamps, so the client-side From: + the body actor stay consistent with the daemon's derived actor.
-      const senderSession = resolveSenderSession();
+      const senderSession = seatSender; // A1: the seat-boundary guard above already refused if unresolvable.
       // --raw (and --dangerously-interact, which implies it) send EXACT text with no messaging envelope.
       const raw = Boolean(opts.raw || opts.dangerouslyInteract);
 
@@ -509,6 +517,7 @@ async function runCrossHostSend(
   waitForIdleMs?: number,
   hint?: string,
   selfHostId?: string,
+  seatSender: string = "",
 ): Promise<void> {
   const loader = deps.hostRegistryLoader ?? loadHostRegistry;
   const runner = deps.crossHostRun ?? runCrossHostCommand;
@@ -531,7 +540,7 @@ async function runCrossHostSend(
   // byte-verbatim for ssh hosts (transport is dictated by the host entry —
   // ssh XOR http, never a fallback).
   if (host.transport === "http") {
-    await runHttpHostSend(host, session, text, opts, deps, waitForIdleMs, hint, selfHostId);
+    await runHttpHostSend(host, session, text, opts, deps, waitForIdleMs, hint, selfHostId, seatSender);
     return;
   }
 
@@ -553,7 +562,7 @@ async function runCrossHostSend(
   // From:/actor from ITS X-OpenRig-Session header, so the proper cross-host re-stamp is to set the
   // remote env (OPENRIG_SESSION_NAME=originTriple) rather than the --from argv below — the argv is a
   // deprecated no-op on the shipped remote pending that runner env-plumbing (flagged to orch).
-  const originSender = resolveSenderSession();
+  const originSender = seatSender; // A1: resolved at the seat boundary (guard refused otherwise).
   // 51-09 increment 3: carry the ORIGIN's full <member>@<rig>@<selfHostId> triple
   // so the remote envelope names the ORIGIN host, not the relay's. Append this
   // host's self-id only when the origin isn't already a triple (a --from already
@@ -614,10 +623,11 @@ async function runHttpHostSend(
   waitForIdleMs?: number,
   hint?: string,
   selfHostId?: string,
+  seatSender: string = "",
 ): Promise<void> {
   // P21 I4: cross-host send — the origin is the LOCAL seat env (this daemon's authenticated context per
   // rail 2), never a caller --from string. The remote renders From: = env; --from is deprecated + ignored.
-  const senderSession = resolveSenderSession();
+  const senderSession = seatSender; // A1: resolved at the seat boundary (guard refused otherwise).
   const raw = Boolean(opts.raw || opts.dangerouslyInteract);
   const outboundText = raw ? text : wrapSendBody(senderSession, session, text, selfHostId, { stampISO: new Date().toISOString() });
 
@@ -680,8 +690,10 @@ async function runFanOutSend(params: {
   // (single-seat + both cross-host paths always honored it).
   opts: { verify?: boolean; force?: boolean; raw?: boolean; dangerouslyInteract?: boolean; reason?: string; from?: string; json?: boolean };
   deps: SendDeps;
+  /** A1: the RESOLVED seat identity from the seat-boundary guard (never undefined here). */
+  seatSender: string;
 }): Promise<void> {
-  const { toList, pod, rig, message, opts, deps } = params;
+  const { toList, pod, rig, message, opts, deps, seatSender } = params;
 
   // qitem-c113bd41 — same advisory-probe/transport-authoritative contract
   // as the single-seat path, including ff13bcdf's lazy probe (see
@@ -691,7 +703,7 @@ async function runFanOutSend(params: {
   // DERIVED daemon-side from the transport header — the body envelopeSender is now only the enveloped
   // MARKER (its presence, not its value). So the origin is the seat env, never --from (deprecated +
   // ignored). Env == the stamped X-OpenRig-Session, so the body actor matches the derived actor.
-  const senderSession = resolveSenderSession();
+  const senderSession = seatSender; // A1: resolved at the seat boundary (guard refused otherwise).
   const raw = Boolean(opts.raw || opts.dangerouslyInteract);
 
   const body: Record<string, unknown> = {
@@ -705,10 +717,12 @@ async function runFanOutSend(params: {
   if (toList) body.sessions = toList;
   else if (pod) body.pod = pod;
   else if (rig) body.rig = rig;
-  // Per-recipient envelope daemon-side unless raw/danger. Always pass a truthy sender (falling
-  // back to the same "<unknown sender>" marker single-send uses) so the wrap fires for parity.
+  // Per-recipient envelope daemon-side unless raw/danger. `senderSession` is the RESOLVED seat (the
+  // seat-boundary guard refused an unattributable send), so the marker is always the real sender —
+  // never the deleted `<unknown sender>` fallback. Its VALUE is ignored daemon-side (I4); presence
+  // signals the enveloped fan-out so the daemon derives From: from the transport header.
   if (!raw) {
-    body.envelopeSender = senderSession && senderSession.trim().length > 0 ? senderSession : SENDER_FALLBACK;
+    body.envelopeSender = senderSession;
   }
 
   let res: { status: number; data: Record<string, unknown> };

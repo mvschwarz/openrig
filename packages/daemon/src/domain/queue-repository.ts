@@ -549,8 +549,13 @@ export class QueueRepository {
    * is now wrapped with the same From/To/---/body/---/↩ Reply envelope
    * that `rig send` uses. `sourceSession` is the seat that triggered
    * the create/handoff so the recipient pane shows where the nudge
-   * came from + a reply hint. When undefined, the envelope falls back
-   * to the canonical "<unknown sender>" marker (matches wrapPaneEnvelope).
+   * came from + a reply hint. A queue nudge is the ONE non-refusable
+   * sender — it has no seat to send an error back to — so when
+   * `sourceSession` is undefined `wrapPaneEnvelope` applies its own
+   * `<unknown sender>` fallback internally (`pane-envelope.ts`). After
+   * A1 that is the SOLE definition of the marker in the tree (the CLI
+   * copies were deleted, refused at the seat boundary instead); this
+   * site holds no copy of its own.
    */
   async maybeNudge(
     qitemId: string,

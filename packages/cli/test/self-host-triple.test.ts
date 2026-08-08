@@ -37,11 +37,10 @@ describe("wrapSendBody — always-suffix sender triple", () => {
     expect(a1.split("host-aaaa").join("host-bbbb")).toBe(b);
   });
 
-  it("never suffixes the <unknown sender> fallback", () => {
-    const out = wrapSendBody(undefined, "peer@rig", "hi", SELF);
-    expect(out).toContain("From: <unknown sender>");
-    expect(out).not.toContain(`@${SELF}`);
-  });
+  // A1 REFUSE-LOUD: `wrapSendBody` requires a resolved sender (the seat-boundary guard refuses an
+  // unattributable send), so the undefined-sender fallback this asserted is gone from the CLI twin —
+  // it survives only on the daemon `wrapPaneEnvelope` for the non-refusable nudge (never suffixed
+  // there either; tested in packages/daemon/test/pane-envelope.test.ts).
 
   it("--from relay: a sender ALREADY carrying an origin triple is preserved verbatim, never re-stamped with THIS host", () => {
     const originTriple = `${SENDER}@origin-host`;

@@ -155,13 +155,88 @@ describe("Send CLI", () => {
   beforeEach(() => {
     lastSendBody = null;
     lastBroadcastBody = null;
+    // A1: a send is attributable-only — the seat-boundary guard refuses when the seat env is
+    // unresolvable. Establish a resolvable seat for every test so the dispatch paths run; the
+    // refuse-loud test overrides it to empty. (Hermetic-gate default is env-UNSET.) Nested describes
+    // that stub their own envs re-run after this; the block afterEach restores so no stub leaks.
+    vi.stubEnv("OPENRIG_SESSION_NAME", "sender@my-rig");
+    vi.stubEnv("RIGGED_SESSION_NAME", "");
   });
+  afterEach(() => { vi.unstubAllEnvs(); });
 
   it("send prints success output", async () => {
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello world"]);
     });
     expect(logs.join("\n")).toContain("Sent to dev-impl@my-rig");
+  });
+
+  // A1 REFUSE-LOUD (identity/audit family, atom 1): an unattributable send — no --from (deprecated +
+  // ignored) AND no resolvable OPENRIG_SESSION_NAME/RIGGED_SESSION_NAME — must REFUSE at the seat boundary:
+  // non-zero exit, and NOTHING dispatched. The load-bearing assertion is the ABSENCE OF A DISPATCH
+  // (lastSendBody stays null), not merely the message — the channel of record records only a derived sender.
+  it("A1: an unattributable send refuses LOUD — non-zero exit, NOTHING rendered or dispatched", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", ""); // override the block seat-stub → unresolvable
+    vi.stubEnv("RIGGED_SESSION_NAME", "");
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello world"]);
+    });
+    expect(exitCode).toBe(1);
+    expect(lastSendBody).toBeNull(); // ABSENCE OF DISPATCH — nothing reached the wire
+    expect(logs.join("\n")).toMatch(/unattributable|no resolvable seat|nothing was sent/i);
+  });
+
+  it("A1: a resolvable seat still SENDS (the guard admits an attributable send) — dispatch reaches the wire", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "driver@my-rig");
+    vi.stubEnv("RIGGED_SESSION_NAME", "");
+    const { exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello world"]);
+    });
+    expect(exitCode).toBeFalsy(); // sent (not refused)
+    expect(lastSendBody).not.toBeNull(); // dispatch reached the wire
+    expect((lastSendBody as Record<string, unknown>)["actorSession"]).toBe("driver@my-rig");
+  });
+
+  // A1 NEGATIVE CONTROL — canonicity asserted as an EFFECT, not a prose comment. After A1 the CLI
+  // `<unknown sender>` fallbacks are DELETED, so the literal has exactly ONE definition in the whole
+  // src tree: the daemon's pane-envelope.ts (the non-refusable queue-nudge sender). This guard fails
+  // the moment a SECOND definition reappears ANYWHERE in src — the drift a lockstep comment could not
+  // prevent. Comment mentions are excluded (they document, they don't define).
+  it("A1: the '<unknown sender>' literal is DEFINED exactly once in the src tree — pane-envelope.ts", () => {
+    const repoRoot = path.resolve(process.cwd(), "../..");
+    const packagesDir = path.join(repoRoot, "packages");
+    const LITERAL = '"<unknown sender>"'; // the double-quoted string-literal token (a definition, not prose)
+
+    const srcFiles: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name === "node_modules" || entry.name === "dist" || entry.name === "test") continue;
+          walk(full);
+        } else if (entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".d.ts") && full.includes(`${path.sep}src${path.sep}`)) {
+          srcFiles.push(full);
+        }
+      }
+    };
+    for (const pkg of fs.readdirSync(packagesDir)) {
+      const srcDir = path.join(packagesDir, pkg, "src");
+      if (fs.existsSync(srcDir)) walk(srcDir);
+    }
+
+    const hits: string[] = [];
+    for (const file of srcFiles) {
+      const lines = fs.readFileSync(file, "utf8").split("\n");
+      lines.forEach((line, i) => {
+        const trimmed = line.trim();
+        // Skip comment lines (line comments, JSDoc/block-comment bodies) — prose mentions don't count.
+        if (trimmed.startsWith("//") || trimmed.startsWith("*") || trimmed.startsWith("/*")) return;
+        if (line.includes(LITERAL)) hits.push(`${path.relative(repoRoot, file)}:${i + 1}`);
+      });
+    }
+
+    expect(hits.length, `expected exactly ONE definition of ${LITERAL}, found: ${hits.join(", ")}`).toBe(1);
+    expect(hits[0]).toMatch(/pane-envelope\.ts:/);
   });
 
   it("send with 409 mid-work prints error and exits non-zero", async () => {

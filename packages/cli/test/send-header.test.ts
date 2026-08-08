@@ -26,13 +26,11 @@ describe("wrapSendBody — pre-release CLI/daemon Item 2 (email-style envelope)"
     expect(out).toContain('↩ Reply: rig send a@r "..."');
   });
 
-  it("falls back to a marker when the sender is undefined or empty", () => {
-    const undef = wrapSendBody(undefined, "b@r", "hi");
-    expect(undef).toContain("From: <unknown sender>");
-    expect(undef).toContain('↩ Reply: rig send <unknown sender> "..."');
-    const blank = wrapSendBody("   ", "b@r", "hi");
-    expect(blank).toContain("From: <unknown sender>");
-  });
+  // A1 REFUSE-LOUD removed the CLI `<unknown sender>` fallback: `wrapSendBody` now REQUIRES a resolved
+  // sender (the seat-boundary guard refuses an unattributable send before this renders), so the
+  // undefined/blank input this test exercised is unreachable AND a type error. The fallback-render
+  // behavior legitimately survives ONLY on the daemon twin `wrapPaneEnvelope` (the non-refusable
+  // queue-nudge sender) and is tested there: packages/daemon/test/pane-envelope.test.ts.
 
   it("uses the literal recipient string in the To header so cross-rig addresses survive", () => {
     const out = wrapSendBody("from@a", "to@b", "x");

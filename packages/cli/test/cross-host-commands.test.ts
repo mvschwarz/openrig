@@ -22,11 +22,12 @@ let originalStdoutWrite: typeof process.stdout.write;
 let originalStderrWrite: typeof process.stderr.write;
 
 beforeEach(() => {
-  // Hermetic sender provenance: the ambient OPENRIG_SESSION_NAME (set when
-  // the suite runs inside a rig seat) would otherwise make the SSH send
-  // reconstruction auto-append `--from <origin>`. Clear it so the exact-argv
-  // assertions below are deterministic; the provenance test stubs it explicitly.
-  vi.stubEnv("OPENRIG_SESSION_NAME", "");
+  // A1 REFUSE-LOUD: a send is attributable-only — an unresolvable seat REFUSES at the boundary, so the
+  // prior empty-seat default now means "refuse" (no dispatch). Stub a DETERMINISTIC origin seat instead:
+  // the SSH reconstruction always appends `--from <origin>` from it (the origin is now always resolved),
+  // so the exact-argv assertions stay deterministic — they just include the derived `--from`. Individual
+  // provenance tests override the seat explicitly.
+  vi.stubEnv("OPENRIG_SESSION_NAME", "origin@rig-a");
   vi.stubEnv("RIGGED_SESSION_NAME", "");
   captured = { stdoutLines: [], stderrLines: [], stdoutWrites: [], stderrWrites: [], exitCode: undefined };
   originalLog = console.log;
@@ -82,7 +83,9 @@ describe("send --host (cross-host short-circuit)", () => {
       },
     }));
     await cmd.parseAsync(["--host", "vm-a", "dev-impl@my-rig", "hello world", "--verify"], { from: "user" });
-    expect(captureCalls.argv).toEqual(["rig", "send", "dev-impl@my-rig", "hello world", "--verify"]);
+    // A1: the origin seat is always resolved (refuse otherwise), so the reconstruction deterministically
+    // appends `--from <derived origin>` (the seat env, never a caller override).
+    expect(captureCalls.argv).toEqual(["rig", "send", "dev-impl@my-rig", "hello world", "--verify", "--from", "origin@rig-a"]);
     expect(captured.stdoutLines[0]).toBe("[via host=vm-a (vm-a.local)]");
     const stdoutText = captured.stdoutWrites.join("");
     expect(stdoutText).toContain("Verified: yes");

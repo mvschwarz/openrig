@@ -8,7 +8,7 @@ import { loadHostRegistry, resolveHost, hostDisplayTarget } from "../host-regist
 import { emitCrossHostError, emitRemoteHttpFailure } from "../cross-host-cli-helpers.js";
 import { runRemoteHttpOp } from "../remote-host-ops.js";
 import { resolveContextRef, walkSizedWarning } from "../context-resolve.js";
-import { readOpenRigEnv } from "../openrig-compat.js";
+import { requireAttributableSender } from "../sender-identity.js";
 
 /**
  * OPR.0.4.6.MH4 C3 — the cross-host broadcast deadline, named at the call
@@ -17,20 +17,6 @@ import { readOpenRigEnv } from "../openrig-compat.js";
  * needs more than the 5s read-class default.
  */
 const BROADCAST_REMOTE_TIMEOUT_MS = 30_000;
-
-/**
- * The enveloped-fan-out MARKER for a broadcast body — ONE origin, called by BOTH the local and cross-host
- * paths. Its PRESENCE tells the daemon /broadcast to WRAP each recipient (the anti-storm scale header); its
- * VALUE is IGNORED by the daemon, which derives the rendered From: from the transport identity
- * (X-OpenRig-Session, stamped LAST on every DaemonClient request). Extracting it here keeps the session-less
- * fall-open literal ("<unknown sender>") to a SINGLE origin — never duplicated across the host boundary.
- * (When the seat env is unset, no header is stamped and the daemon refuses the marked-but-unattributed
- * send 401 — the cross-host path inherits that refuse-loud guard for free, no local check needed.)
- */
-function resolveEnvelopeMarker(): string {
-  const sender = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
-  return sender && sender.trim().length > 0 ? sender : "<unknown sender>";
-}
 
 export interface BroadcastDeps extends StatusDeps {
   /** Test seam: inject a registry loader so no real ~/.openrig is touched. */
@@ -91,13 +77,21 @@ selection, not the agent@rig@host sugar.`)
         return;
       }
 
+      // A1 REFUSE-LOUD (identity/audit family) — the seat boundary. A broadcast is attributable-only: if
+      // the seat identity is unresolvable, REFUSE here before either dispatch path (cross-host or local) —
+      // nothing on the wire. Replaces the prior session-less `<unknown sender>` fall-open marker (which
+      // relied on the daemon's downstream 401): the CLI now refuses at the boundary, so no unattributable
+      // broadcast is ever dispatched. Mirrors `rig send`'s guard and the daemon 401 unattributable_sender.
+      const seatSender = requireAttributableSender();
+      if (seatSender === null) return;
+
       // --- Cross-host path (CLI-direct POST to the remote daemon's shipped
       // /api/transport/broadcast; its own fan-out engine resolves the
       // TargetSpec on ITS topology; daemon untouched). ---
       if (opts.host) {
         // text is validated-defined here: --context is rejected with --host, and
         // the (no text && no context) guard above requires it on the host path.
-        await runCrossHostBroadcast(opts.host, text!, opts, deps);
+        await runCrossHostBroadcast(opts.host, text!, opts, deps, seatSender);
         return;
       }
 
@@ -130,11 +124,11 @@ selection, not the agent@rig@host sugar.`)
       // Send/broadcast header (ruling 03c35295): identify the broadcasting seat so the daemon fan-out
       // WRAPS each recipient with the scale header ("broadcast to <rig> (N seats)" / topology) instead
       // of delivering raw — a recipient tells it was a broadcast header-alone (the anti-storm teeth).
-      // Session-less falls open to the <unknown sender> WRAP (symmetric with the fan-out send path's
-      // SENDER_FALLBACK) so a session-less broadcast still carries the scale — no session-less storm.
-      // (review-r1 flagged the prior raw fall-open as a founder call; closed symmetric with send per the
-      // founder root-cause intent — trivially revert to raw-when-session-less if the founder prefers.)
-      body.envelopeSender = resolveEnvelopeMarker();
+      // A1: `seatSender` is the RESOLVED broadcasting seat (the seat-boundary guard refused an
+      // unattributable broadcast), so the marker is always the real sender — never a session-less
+      // fall-open literal. Its VALUE is ignored daemon-side (the fan-out derives From: from the transport
+      // header); its PRESENCE is the anti-storm signal to WRAP each recipient with the scale header.
+      body.envelopeSender = seatSender;
 
       const res = await client.post<Record<string, unknown>>("/api/transport/broadcast", body);
 
@@ -173,6 +167,7 @@ async function runCrossHostBroadcast(
   text: string,
   opts: { rig?: string; pod?: string; force?: boolean; json?: boolean },
   deps: BroadcastDeps,
+  seatSender: string = "",
 ): Promise<void> {
   const loader = deps.hostRegistryLoader ?? loadHostRegistry;
   const registry = loader();
@@ -190,12 +185,12 @@ async function runCrossHostBroadcast(
   const body: Record<string, unknown> = { text, force: opts.force };
   if (opts.rig) body.rig = opts.rig;
   if (opts.pod) body.pod = opts.pod;
-  // P21 cross-host broadcast fix: ADD the enveloped-fan-out marker (this rebuild dropped it, so the remote
-  // rendered RAW while the local path — same helper — wrapped). The DaemonClient auto-stamps
-  // X-OpenRig-Session=origin env on this POST (client.ts:171, P18 chokepoint), so the remote derives the
-  // From: from the transport; the marker VALUE is ignored. No extra-headers stamp (that would be a second
-  // origin of an already-stamped header).
-  body.envelopeSender = resolveEnvelopeMarker();
+  // P21 cross-host broadcast fix + A1: ADD the enveloped-fan-out marker (a rebuild once dropped it, so the
+  // remote rendered RAW while the local path wrapped). `seatSender` is the RESOLVED origin seat (the
+  // seat-boundary guard refused otherwise). The DaemonClient auto-stamps X-OpenRig-Session=origin env on
+  // this POST (client.ts:171, P18 chokepoint), so the remote derives From: from the transport; the marker
+  // VALUE is ignored. No extra-headers stamp (that would be a second origin of an already-stamped header).
+  body.envelopeSender = seatSender;
 
   const result = await runRemoteHttpOp(hostId, "POST", "/api/transport/broadcast", body, deps, {
     timeoutMs: BROADCAST_REMOTE_TIMEOUT_MS,

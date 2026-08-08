@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
 import { broadcastCommand } from "../src/commands/broadcast.js";
@@ -69,6 +69,16 @@ describe("Broadcast CLI", () => {
   });
 
   afterAll(() => { server.close(); });
+
+  // A1: a broadcast is attributable-only — the seat-boundary guard refuses when the seat env is
+  // unresolvable. Establish a resolvable seat for every test so the dispatch paths run; the
+  // refuse-loud test below overrides it to empty. (Hermetic-gate default is env-UNSET, so without
+  // this every broadcast test would refuse.) Restored by afterEach so no stub leaks across tests.
+  beforeEach(() => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "broadcaster@my-rig");
+    vi.stubEnv("RIGGED_SESSION_NAME", "");
+  });
+  afterEach(() => { vi.unstubAllEnvs(); });
 
   function makeCmd(): Command {
     const prog = new Command(); prog.exitOverride();
@@ -146,41 +156,37 @@ describe("Broadcast CLI", () => {
   }
 
   it("P21: cross-host broadcast CARRIES the enveloped marker (was dropped → remote rendered raw); value = the seat, but the daemon derives the From: from the auto-stamped X-OpenRig-Session", async () => {
-    const saved = process.env["OPENRIG_SESSION_NAME"];
-    process.env["OPENRIG_SESSION_NAME"] = "orch@rig-a";
-    try {
-      const { posts, deps } = crossHostBcast();
-      const prog = new Command(); prog.exitOverride();
-      prog.addCommand(broadcastCommand(deps));
-      await captureLogs(async () => {
-        await prog.parseAsync(["node", "rig", "broadcast", "--host", "vm-a", "--rig", "my-rig", "hi team"]);
-      });
-      const bcast = posts.find((p) => p.path.includes("/api/transport/broadcast"));
-      expect(bcast).toBeDefined();
-      expect(bcast!.body["envelopeSender"]).toBe("orch@rig-a"); // marker PRESENT (the fix) — value ignored daemon-side
-      expect(bcast!.body["text"]).toBe("hi team");
-    } finally {
-      if (saved === undefined) delete process.env["OPENRIG_SESSION_NAME"]; else process.env["OPENRIG_SESSION_NAME"] = saved;
-    }
+    vi.stubEnv("OPENRIG_SESSION_NAME", "orch@rig-a");
+    vi.stubEnv("RIGGED_SESSION_NAME", "");
+    const { posts, deps } = crossHostBcast();
+    const prog = new Command(); prog.exitOverride();
+    prog.addCommand(broadcastCommand(deps));
+    await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "broadcast", "--host", "vm-a", "--rig", "my-rig", "hi team"]);
+    });
+    const bcast = posts.find((p) => p.path.includes("/api/transport/broadcast"));
+    expect(bcast).toBeDefined();
+    expect(bcast!.body["envelopeSender"]).toBe("orch@rig-a"); // marker PRESENT (the fix) — value ignored daemon-side
+    expect(bcast!.body["text"]).toBe("hi team");
   });
 
-  it("P21: session-less cross-host broadcast still SETS the marker as the SINGLE-ORIGIN '<unknown sender>' (never duplicated across the host boundary); marker-present + no header ⇒ the daemon's existing I4 401 fires — refuse-loud inherited, not a silent raw send", async () => {
-    const savedS = process.env["OPENRIG_SESSION_NAME"]; const savedR = process.env["RIGGED_SESSION_NAME"];
-    delete process.env["OPENRIG_SESSION_NAME"]; delete process.env["RIGGED_SESSION_NAME"];
-    try {
-      const { posts, deps } = crossHostBcast();
-      const prog = new Command(); prog.exitOverride();
-      prog.addCommand(broadcastCommand(deps));
-      await captureLogs(async () => {
-        await prog.parseAsync(["node", "rig", "broadcast", "--host", "vm-a", "--rig", "my-rig", "hi team"]);
-      });
-      const bcast = posts.find((p) => p.path.includes("/api/transport/broadcast"));
-      expect(bcast).toBeDefined();
-      expect(bcast!.body["envelopeSender"]).toBe("<unknown sender>"); // marker present (enveloped) — daemon 401s (no header)
-    } finally {
-      if (savedS === undefined) delete process.env["OPENRIG_SESSION_NAME"]; else process.env["OPENRIG_SESSION_NAME"] = savedS;
-      if (savedR === undefined) delete process.env["RIGGED_SESSION_NAME"]; else process.env["RIGGED_SESSION_NAME"] = savedR;
-    }
+  // A1 REFUSE-LOUD (supersedes the P21 session-less pin): an unattributable cross-host broadcast now
+  // REFUSES at the CLI seat boundary — nothing is dispatched. The prior behavior (SET the marker to
+  // "<unknown sender>" and lean on the remote daemon's 401) put a marked-but-unattributed body on the
+  // wire; A1 refuses BEFORE the POST, so the daemon 401 is a backstop the CLI no longer reaches. The
+  // load-bearing assertion is the ABSENCE OF A DISPATCH (no broadcast POST), not just the exit code.
+  it("A1: a session-less cross-host broadcast REFUSES LOUD at the seat boundary — non-zero exit, NOTHING dispatched (no marker on the wire)", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "");
+    vi.stubEnv("RIGGED_SESSION_NAME", "");
+    const { posts, deps } = crossHostBcast();
+    const prog = new Command(); prog.exitOverride();
+    prog.addCommand(broadcastCommand(deps));
+    const { logs, exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "broadcast", "--host", "vm-a", "--rig", "my-rig", "hi team"]);
+    });
+    expect(exitCode).toBe(1);
+    expect(posts.find((p) => p.path.includes("/api/transport/broadcast"))).toBeUndefined(); // ABSENCE OF DISPATCH
+    expect(logs.join("\n")).toMatch(/unattributable|no resolvable seat|nothing was sent/i);
   });
 
   it("broadcast --json prints raw JSON", async () => {
