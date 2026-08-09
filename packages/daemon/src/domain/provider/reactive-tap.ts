@@ -20,6 +20,34 @@ export interface ReactiveTapDeps {
   freshnessMs: number;
 }
 
+export type ReactiveVerificationReason =
+  | "generation_unverifiable"
+  | "generation_unresolvable"
+  | "generation_resolver_error";
+
+export interface ReactiveVerificationTrigger {
+  kind: "verification_required";
+  provider: "codex";
+  seatSession: string;
+  accountRef: string;
+  activityReason: ReactiveVerificationReason;
+  blockedBy: "provider_probe_unavailable";
+}
+
+export type ReactiveDiscard = {
+  kind: "discarded";
+  provider: "codex";
+  seatSession: string;
+  accountRef: string;
+  reason: "generation_mismatch" | "malformed_generation_verdict";
+};
+
+export interface ReactiveTapResult {
+  signals: ProviderSignal[];
+  triggers: ReactiveVerificationTrigger[];
+  discards: ReactiveDiscard[];
+}
+
 const EVENT_KINDS: Readonly<Record<string, ReactiveEventKind>> = {
   at_limit: "at_limit",
   rate_limit: "at_limit",
@@ -29,15 +57,22 @@ const EVENT_KINDS: Readonly<Record<string, ReactiveEventKind>> = {
   stop_error: "stop_error",
 };
 
+const VERIFICATION_REASONS = new Set<ReactiveVerificationReason>([
+  "generation_unverifiable",
+  "generation_unresolvable",
+  "generation_resolver_error",
+]);
+
 /**
  * Map the current structured activity for each honestly identified Codex seat into reactive
  * provider rows. Generic needs-input activity is deliberately insufficient: permission prompts
  * are blocked seats too, but are not provider interruptions. Only the exact typed vocabulary above
  * is accepted, with raw subtype taking precedence over raw event and normalized reason.
  */
-export function collectReactiveEventSignals(deps: ReactiveTapDeps): ProviderSignal[] {
+export function collectReactiveEventSignals(deps: ReactiveTapDeps): ReactiveTapResult {
+  const empty = (): ReactiveTapResult => ({ signals: [], triggers: [], discards: [] });
   const nowMs = Date.parse(deps.now);
-  if (!Number.isFinite(nowMs) || !Number.isFinite(deps.freshnessMs) || deps.freshnessMs <= 0) return [];
+  if (!Number.isFinite(nowMs) || !Number.isFinite(deps.freshnessMs) || deps.freshnessMs <= 0) return empty();
 
   // Honest reactive eligibility, centralized. The account ref must name a KNOWN auth
   // profile (a file in auth-profiles/), not merely a nonempty registry token: a registry
@@ -50,6 +85,8 @@ export function collectReactiveEventSignals(deps: ReactiveTapDeps): ProviderSign
       .map((seat) => [seat.seat, seat.authProfile] as const),
   );
   const signals: ProviderSignal[] = [];
+  const triggers: ReactiveVerificationTrigger[] = [];
+  const discards: ReactiveDiscard[] = [];
 
   for (const seat of deps.seats) {
     if (seat.runtime !== "codex") continue;
@@ -60,7 +97,7 @@ export function collectReactiveEventSignals(deps: ReactiveTapDeps): ProviderSign
       sessionName: seat.seatSession,
       now: new Date(nowMs),
     });
-    if (!event || event.stale) continue;
+    if (!event) continue;
     // The PERSISTED activity runtime must itself be Codex. A claude-code activity attached
     // to a Codex inventory/registry seat is NOT Codex provider evidence and must never be
     // relabeled as one — eligibility follows the event, not just the seat.
@@ -71,6 +108,40 @@ export function collectReactiveEventSignals(deps: ReactiveTapDeps): ProviderSign
     if (!kind || typeof eventAt !== "string") continue;
     const eventAtMs = Date.parse(eventAt);
     if (!Number.isFinite(eventAtMs)) continue;
+
+    // W2a tap — generation routing happens only after all existing provider-event eligibility
+    // gates, but BEFORE generic staleness: unresolved and mismatch rows are intentionally stale.
+    if (event.generationProvenance === "unresolved") {
+      if (isVerificationReason(event.reason)) {
+        triggers.push({
+          kind: "verification_required",
+          provider: "codex",
+          seatSession: seat.seatSession,
+          accountRef,
+          activityReason: event.reason,
+          blockedBy: "provider_probe_unavailable",
+        });
+      } else {
+        discards.push(discard(seat.seatSession, accountRef, "malformed_generation_verdict"));
+      }
+      continue;
+    }
+
+    if (event.generationProvenance !== "resolved") {
+      discards.push(discard(seat.seatSession, accountRef, "malformed_generation_verdict"));
+      continue;
+    }
+
+    if (event.reason === "generation_mismatch") {
+      discards.push(discard(seat.seatSession, accountRef, "generation_mismatch"));
+      continue;
+    }
+    if (isVerificationReason(event.reason)) {
+      discards.push(discard(seat.seatSession, accountRef, "malformed_generation_verdict"));
+      continue;
+    }
+    if (event.stale) continue;
+
     const staleAfterMs = eventAtMs + deps.freshnessMs;
     // BR-2 expiry is inclusive: at the bound, the event is already stale.
     if (nowMs >= staleAfterMs) continue;
@@ -84,7 +155,19 @@ export function collectReactiveEventSignals(deps: ReactiveTapDeps): ProviderSign
     }));
   }
 
-  return signals;
+  return { signals, triggers, discards };
+}
+
+function isVerificationReason(reason: string | undefined): reason is ReactiveVerificationReason {
+  return typeof reason === "string" && VERIFICATION_REASONS.has(reason as ReactiveVerificationReason);
+}
+
+function discard(
+  seatSession: string,
+  accountRef: string,
+  reason: ReactiveDiscard["reason"],
+): ReactiveDiscard {
+  return { kind: "discarded", provider: "codex", seatSession, accountRef, reason };
 }
 
 // Classification binds to the structured provider-interruption PRODUCER CLASS — the

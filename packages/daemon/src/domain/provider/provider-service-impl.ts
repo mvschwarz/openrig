@@ -30,6 +30,8 @@ export interface ProviderServiceImplDeps {
   collectClaudeSignals?: () => ProviderSignal[];
   /** Slice-04 C4: the shipped structured activity detector. Undefined keeps the reactive lane empty. */
   agentActivityStore?: Pick<AgentActivityStore, "getLatestForNode">;
+  /** W2a tap: operator-visible disposition sink. Observability only; never a verification producer. */
+  warn?: (message: string) => void;
   env?: NodeJS.ProcessEnv;
   now?: () => string;
 }
@@ -44,20 +46,27 @@ export class ProviderServiceImpl implements ProviderService {
     let seats: ProviderSeat[] | undefined;
     const readAuth = () => auth ??= readCodexAuthMetadata(env);
     const listSeats = () => seats ??= this.listSeats();
+    const collectReactiveSignals = (): ProviderSignal[] => {
+      if (!this.deps.agentActivityStore) return [];
+      const result = collectReactiveEventSignals({
+        seats: listSeats(),
+        auth: readAuth(),
+        activity: this.deps.agentActivityStore,
+        now: asOf,
+        freshnessMs: AGENT_ACTIVITY_FRESHNESS_MS,
+      });
+      const warn = this.deps.warn ?? ((message: string) => console.warn(message));
+      for (const disposition of [...result.triggers, ...result.discards]) {
+        warn(`[provider-reactive-tap] ${JSON.stringify(disposition)}`);
+      }
+      return result.signals;
+    };
     return collectFourBlockReadModel({
       readCodexAuth: readAuth,
       listSeats,
       collectSignals: () => [
         ...(this.deps.collectClaudeSignals?.() ?? []),
-        ...(this.deps.agentActivityStore
-          ? collectReactiveEventSignals({
-            seats: listSeats(),
-            auth: readAuth(),
-            activity: this.deps.agentActivityStore,
-            now: asOf,
-            freshnessMs: AGENT_ACTIVITY_FRESHNESS_MS,
-          })
-          : []),
+        ...collectReactiveSignals(),
       ],
       now: () => asOf,
     });

@@ -7,6 +7,7 @@ import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { ProviderServiceImpl } from "../src/domain/provider/provider-service-impl.js";
+import { collectReactiveEventSignals } from "../src/domain/provider/reactive-tap.js";
 import type { AgentActivity } from "../src/domain/types.js";
 
 const NOW = "2026-08-04T12:00:00.000Z";
@@ -73,7 +74,13 @@ function fixture(options: FixtureOptions = {}): Fixture {
     .run("binding-1", "node-1", SESSION);
 
   const bus = new EventBus(db);
-  const store = new AgentActivityStore({ db, eventBus: bus, now: () => new Date(now) });
+  const store = new AgentActivityStore({
+    db,
+    eventBus: bus,
+    now: () => new Date(now),
+    resolveOccupantGeneration: () => "gen-uuid-node-1",
+    isRegisteredOccupantGeneration: (_nodeId, generation) => generation === "gen-uuid-node-1",
+  });
   // Intentionally inject the real shipped detector. A separate source pin below proves production
   // startup also supplies this singleton, preventing the C3-style "test-only injection" false green.
   const serviceDeps = {
@@ -94,6 +101,7 @@ function recordToken(fx: Fixture, token: string, source: "rawSubtype" | "rawEven
     hookEvent: source === "rawEvent" ? token : "Notification",
     subtype: source === "rawSubtype" ? token : undefined,
     occurredAt,
+    generation: "gen-uuid-node-1",
   });
   expect(result.ok).toBe(true);
 }
@@ -120,6 +128,7 @@ function activity(overrides: Partial<AgentActivity> = {}): AgentActivity {
     rawEvent: "rate_limit",
     rawSubtype: null,
     runtime: "codex",
+    generation: "gen-uuid-node-1",
     fallback: false,
     stale: false,
     ...overrides,
@@ -134,6 +143,136 @@ const acceptedTokens = [
   ["stream_fail", "advisory_only"],
   ["stop_error", "advisory_only"],
 ] as const;
+
+interface ExpectedTapResult {
+  signals: unknown[];
+  triggers: unknown[];
+  discards: unknown[];
+}
+
+function tapOutcome(
+  event: AgentActivity,
+  options: {
+    profiles?: string[];
+    seatRuntime?: string;
+    registryRuntime?: string;
+  } = {},
+): ExpectedTapResult {
+  return collectReactiveEventSignals({
+    seats: [{ seatSession: SESSION, runtime: options.seatRuntime ?? "codex" }],
+    auth: {
+      profiles: options.profiles ?? [ACCOUNT],
+      seats: [{
+        seat: SESSION,
+        rig: "test-rig",
+        runtime: options.registryRuntime ?? "codex",
+        cwd: "/project",
+        authProfile: ACCOUNT,
+        updatedTs: EVENT_AT,
+      }],
+    },
+    activity: { getLatestForNode: () => event },
+    now: NOW,
+    freshnessMs: 5 * 60 * 1000,
+  }) as unknown as ExpectedTapResult;
+}
+
+describe("W2a tap — provenance disposition routing", () => {
+  it("resolved + fresh preserves the decision-grade signal with no trigger/discard", () => {
+    const result = tapOutcome(activity({ generationProvenance: "resolved" }));
+    expect(result.signals).toEqual([{
+      provider: "codex",
+      accountRef: ACCOUNT,
+      sourceClass: "provider_event",
+      authority: "reactive_error",
+      asOf: EVENT_AT,
+      staleAfter: STALE_AFTER,
+      automationUse: "allow_switch_decision",
+    }]);
+    expect(result.triggers).toEqual([]);
+    expect(result.discards).toEqual([]);
+  });
+
+  it.each([
+    "generation_unverifiable",
+    "generation_unresolvable",
+    "generation_resolver_error",
+  ] as const)("unresolved %s becomes one typed verification trigger before stale-drop", (activityReason) => {
+    const result = tapOutcome(activity({
+      state: "unknown",
+      reason: activityReason,
+      generationProvenance: "unresolved",
+      stale: true,
+    }));
+    expect(result.signals).toEqual([]);
+    expect(result.triggers).toEqual([{
+      kind: "verification_required",
+      provider: "codex",
+      seatSession: SESSION,
+      accountRef: ACCOUNT,
+      activityReason,
+      blockedBy: "provider_probe_unavailable",
+    }]);
+    expect(result.discards).toEqual([]);
+  });
+
+  it("refuses a generation mismatch at the tap even if a hostile reader marks it non-stale", () => {
+    const result = tapOutcome(activity({
+      state: "unknown",
+      reason: "generation_mismatch",
+      generationProvenance: "resolved",
+      stale: false,
+    }));
+    expect(result.signals).toEqual([]);
+    expect(result.triggers).toEqual([]);
+    expect(result.discards).toEqual([{
+      kind: "discarded",
+      provider: "codex",
+      seatSession: SESSION,
+      accountRef: ACCOUNT,
+      reason: "generation_mismatch",
+    }]);
+  });
+
+  it.each([
+    ["missing provenance", activity({ generationProvenance: undefined })],
+    ["invalid provenance", activity({ generationProvenance: "invalid" as never })],
+    ["unresolved with non-generation reason", activity({
+      generationProvenance: "unresolved",
+      reason: "rate_limit",
+      stale: true,
+    })],
+  ] as const)("loudly discards malformed generation verdict: %s", (_label, event) => {
+    const result = tapOutcome(event);
+    expect(result.signals).toEqual([]);
+    expect(result.triggers).toEqual([]);
+    expect(result.discards).toEqual([{
+      kind: "discarded",
+      provider: "codex",
+      seatSession: SESSION,
+      accountRef: ACCOUNT,
+      reason: "malformed_generation_verdict",
+    }]);
+  });
+
+  it("keeps resolved clock-stale activity ordinary: no output, not malformed", () => {
+    const result = tapOutcome(activity({
+      state: "unknown",
+      reason: "stale_runtime_hook",
+      generationProvenance: "resolved",
+      stale: true,
+    }));
+    expect(result).toEqual({ signals: [], triggers: [], discards: [] });
+  });
+
+  it.each([
+    ["Claude persisted runtime", activity({ runtime: "claude-code", generationProvenance: "unresolved", reason: "generation_unverifiable", stale: true }), {}],
+    ["missing auth profile", activity({ generationProvenance: "unresolved", reason: "generation_unverifiable", stale: true }), { profiles: [] }],
+    ["generic PermissionRequest", activity({ rawEvent: "PermissionRequest", generationProvenance: "unresolved", reason: "generation_unverifiable", stale: true }), {}],
+  ] as const)("eligibility gate precedes trigger: %s", (_label, event, options) => {
+    expect(tapOutcome(event, options)).toEqual({ signals: [], triggers: [], discards: [] });
+  });
+});
 
 describe("Slice-04 C4 — production reactive activity tap", () => {
   it.each(acceptedTokens)("maps exact structured event class %s through real getReadModel", async (token, automationUse) => {
@@ -310,14 +449,16 @@ describe("Slice-04 C4 correction — public-altitude eligibility gate + producer
     }
 
     const testApp = createTestApp(db, { activityHookToken: TOKEN });
+    const warnings: string[] = [];
     const service = new ProviderServiceImpl({
       db,
       listRigs: () => [{ id: "rig-1" }],
       env: { CODEX_HOME: codexHome } as NodeJS.ProcessEnv,
       now: () => options.now ?? NOW,
       agentActivityStore: testApp.agentActivityStore,
+      warn: (message: string) => warnings.push(message),
     });
-    return { app: testApp.app, service };
+    return { app: testApp.app, service, warnings };
   }
 
   async function postHook(
@@ -359,16 +500,16 @@ describe("Slice-04 C4 correction — public-altitude eligibility gate + producer
     }]);
   });
 
-  // W2a-1 CONSUMER-LEVEL guard — explicit per-path absence. The seat HAS a tenure (the read-side
-  // resolver returns a live generation), but this hook deliberately carries NO generation, modeling a
-  // legacy/excluded or no-tenure emitting path. It is recorded null ⇒ generation_unverifiable ⇒
-  // unknown/stale on the ACTIVITY (asserted in agent-activity-store.test.ts), so the unchanged tap
-  // discards the unverifiable read → no reactive row. Sound (never false-fresh), while managed launch
-  // and fresh-handover producers carry the generation.
-  it("W2a-1: an emitting path carrying no generation ⇒ unverifiable ⇒ store-delivered unknown, tap does not emit", async () => {
+  // W2a tap follow-on — explicit per-path absence. The unresolved observation remains non-actionable
+  // but now reaches the typed verification-required seam, visibly blocked because no provider probe
+  // producer exists. The warning sink is observability only; it never returns a verification result.
+  it("W2a tap: no carried generation ⇒ zero ProviderSignal + one visible blocked verification trigger", async () => {
     const fx = publicFixture(); // seat HAS a tenure; this hook explicitly carries no generation
     expect((await postHook(fx.app, { runtime: "codex", hookEvent: "rate_limit", generation: null })).status).toBe(200);
     expect(reactiveRows(await fx.service.getReadModel())).toEqual([]);
+    expect(fx.warnings).toEqual([
+      `[provider-reactive-tap] {"kind":"verification_required","provider":"codex","seatSession":"${SESSION}","accountRef":"${ACCOUNT}","activityReason":"generation_unverifiable","blockedBy":"provider_probe_unavailable"}`,
+    ]);
   });
 
   it("HIGH-1a: a claude-code activity attached to a Codex seat must NOT emit a Codex row", async () => {
