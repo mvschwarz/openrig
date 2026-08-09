@@ -7,6 +7,7 @@ import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
@@ -16,6 +17,7 @@ import { workflowStepTrailsSchema } from "../src/db/migrations/035_workflow_step
 import { workflowInstanceVersionSchema } from "../src/db/migrations/049_workflow_instance_version.js";
 import { workflowSpecJsonSchema } from "../src/db/migrations/050_workflow_spec_json.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository, QueueRepositoryError } from "../src/domain/queue-repository.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
 import { createWorkflowFrontierPredicate } from "../src/domain/workflow-frontier-guard.js";
@@ -70,6 +72,7 @@ describe("workflow frontier close-path guard (WF3 FR-6)", () => {
   beforeEach(() => {
     db = createDb();
     migrate(db, [
+      outboxEntriesSchema,
       coreSchema, eventsSchema,
       queueItemsSchema, queueTransitionsSchema,
       workflowSpecsSchema, workflowInstancesSchema, workflowStepTrailsSchema,
@@ -83,6 +86,9 @@ describe("workflow frontier close-path guard (WF3 FR-6)", () => {
       validateRig: () => true,
       workflowFrontierPredicate: createWorkflowFrontierPredicate(db),
     });
+    // P34: the W1 seam is fail-closed (MF2) — a nudge-intended terminal
+    // close needs a SAME-DB intent store to make its wake durable.
+    queueRepo.attachOutbox(new OutboxHandler(db));
     runtime = new WorkflowRuntime({ db, eventBus: bus, queueRepo });
     tmp = mkdtempSync(join(tmpdir(), "wf-guard-"));
     specPath = join(tmp, "spec.yaml");
@@ -180,6 +186,9 @@ describe("workflow frontier close-path guard (WF3 FR-6)", () => {
 
     // Repo WITHOUT any predicate (legacy shape) — same fields, same result.
     const bareRepo = new QueueRepository(db, bus, { validateRig: () => true });
+    // P34: the W1 seam is fail-closed (MF2) — a nudge-intended terminal
+    // close needs a SAME-DB intent store to make its wake durable.
+    bareRepo.attachOutbox(new OutboxHandler(db));
     const created2 = await bareRepo.create({
       sourceSession: "a@rig",
       destinationSession: "b@rig",

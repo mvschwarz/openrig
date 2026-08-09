@@ -7,6 +7,7 @@ import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { bindingsSessionsSchema } from "../src/db/migrations/002_bindings_sessions.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
@@ -19,6 +20,7 @@ import { queueItemEvidenceRefSchema } from "../src/db/migrations/048_queue_item_
 import { workflowInstanceVersionSchema } from "../src/db/migrations/049_workflow_instance_version.js";
 import { workflowSpecJsonSchema } from "../src/db/migrations/050_workflow_spec_json.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
 import { WorkflowProjectorError } from "../src/domain/workflow-projector.js";
@@ -130,6 +132,7 @@ describe("workflow route (WF3 FR-4 — close+recreate+rebind)", () => {
   beforeEach(() => {
     db = createDb();
     migrate(db, [
+      outboxEntriesSchema,
       coreSchema, bindingsSessionsSchema, eventsSchema,
       queueItemsSchema, queueTransitionsSchema,
       queueItemSummarySchema, queueItemEvidenceRefSchema,
@@ -139,6 +142,9 @@ describe("workflow route (WF3 FR-4 — close+recreate+rebind)", () => {
     bus = new EventBus(db);
     db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
     queueRepo = new QueueRepository(db, bus, { validateRig: () => true });
+    // P34: the W1 seam is fail-closed (MF2) — a nudge-intended terminal
+    // close needs a SAME-DB intent store to make its wake durable.
+    queueRepo.attachOutbox(new OutboxHandler(db));
     runtime = new WorkflowRuntime({ db, eventBus: bus, queueRepo });
     app = buildApp({ eventBus: bus, runtime });
     tmp = mkdtempSync(join(tmpdir(), "wf-route-"));

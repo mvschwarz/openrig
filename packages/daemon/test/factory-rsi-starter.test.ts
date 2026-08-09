@@ -19,6 +19,7 @@ import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
@@ -31,6 +32,7 @@ import { workflowStepTrailsSchema } from "../src/db/migrations/035_workflow_step
 import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summary.js";
 import { queueItemEvidenceRefSchema } from "../src/db/migrations/048_queue_item_evidence_ref.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
 import { WorkflowValidator } from "../src/domain/workflow-validator.js";
@@ -48,6 +50,7 @@ describe("OPR.0.4.6.FAC2 factory-rsi factory workflow", () => {
   beforeEach(() => {
     db = createDb();
     migrate(db, [
+      outboxEntriesSchema,
       coreSchema,
       eventsSchema,
       queueItemsSchema,
@@ -61,6 +64,9 @@ describe("OPR.0.4.6.FAC2 factory-rsi factory workflow", () => {
     eventBus = new EventBus(db);
     db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-factory-rsi', 'factory-rsi')`).run();
     queueRepo = new QueueRepository(db, eventBus, { validateRig: () => true });
+    // P34: the W1 seam is fail-closed (MF2) — a nudge-intended terminal
+    // close needs a SAME-DB intent store to make its wake durable.
+    queueRepo.attachOutbox(new OutboxHandler(db));
     runtime = new WorkflowRuntime({ db, eventBus, queueRepo });
   });
 

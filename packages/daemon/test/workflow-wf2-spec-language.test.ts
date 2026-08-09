@@ -13,6 +13,7 @@ import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { bindingsSessionsSchema } from "../src/db/migrations/002_bindings_sessions.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
@@ -26,6 +27,7 @@ import { workflowInstanceVersionSchema } from "../src/db/migrations/049_workflow
 import { workflowSpecJsonSchema } from "../src/db/migrations/050_workflow_spec_json.js";
 import { missionControlActionsSchema } from "../src/db/migrations/037_mission_control_actions.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
@@ -183,6 +185,7 @@ describe("OPR.0.4.6.WF2 — spec language", () => {
   beforeEach(() => {
     db = createDb();
     migrate(db, [
+      outboxEntriesSchema,
       coreSchema,
       bindingsSessionsSchema,
       eventsSchema,
@@ -200,6 +203,9 @@ describe("OPR.0.4.6.WF2 — spec language", () => {
     bus = new EventBus(db);
     db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
     queueRepo = new QueueRepository(db, bus, { validateRig: () => true });
+    // P34: the W1 seam is fail-closed (MF2) — a nudge-intended terminal
+    // close needs a SAME-DB intent store to make its wake durable.
+    queueRepo.attachOutbox(new OutboxHandler(db));
     tmp = mkdtempSync(join(tmpdir(), "wf2-lang-"));
     runtime = new WorkflowRuntime({ db, eventBus: bus, queueRepo });
   });

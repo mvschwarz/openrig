@@ -26,6 +26,7 @@ import Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
 import { WorkflowProjectorError } from "../src/domain/workflow-projector.js";
@@ -77,6 +78,9 @@ function buildRuntime(db: Database.Database) {
   const bus = new EventBus(db);
   db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
   const queueRepo = new QueueRepository(db, bus, { validateRig: () => true });
+  // P34: the W1 seam is fail-closed (MF2) — a nudge-intended terminal
+  // close needs a SAME-DB intent store to make its wake durable.
+  queueRepo.attachOutbox(new OutboxHandler(db));
   const runtime = new WorkflowRuntime({ db, eventBus: bus, queueRepo });
   return { bus, queueRepo, runtime };
 }

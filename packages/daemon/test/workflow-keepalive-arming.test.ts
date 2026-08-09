@@ -21,6 +21,7 @@ import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
@@ -31,6 +32,7 @@ import { workflowStepTrailsSchema } from "../src/db/migrations/035_workflow_step
 import { workflowInstanceVersionSchema } from "../src/db/migrations/049_workflow_instance_version.js";
 import { workflowSpecJsonSchema } from "../src/db/migrations/050_workflow_spec_json.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
@@ -80,6 +82,7 @@ describe("FR-3: keepalive auto-arm in-txn + disarm", () => {
   beforeEach(() => {
     db = createDb();
     migrate(db, [
+      outboxEntriesSchema,
       coreSchema,
       eventsSchema,
       queueItemsSchema,
@@ -94,6 +97,9 @@ describe("FR-3: keepalive auto-arm in-txn + disarm", () => {
     const bus = new EventBus(db);
     db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
     queueRepo = new QueueRepository(db, bus, { validateRig: () => true });
+    // P34: the W1 seam is fail-closed (MF2) — a nudge-intended terminal
+    // close needs a SAME-DB intent store to make its wake durable.
+    queueRepo.attachOutbox(new OutboxHandler(db));
     watchdogRepo = new WatchdogJobsRepository(db);
     runtime = new WorkflowRuntime({
       db,
@@ -252,6 +258,7 @@ describe("FR-3/FR-2: the deadline-gated keepalive policy behavior", () => {
   beforeEach(() => {
     db = createDb();
     migrate(db, [
+      outboxEntriesSchema,
       coreSchema,
       eventsSchema,
       queueItemsSchema,
@@ -266,6 +273,9 @@ describe("FR-3/FR-2: the deadline-gated keepalive policy behavior", () => {
     const bus = new EventBus(db);
     db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
     queueRepo = new QueueRepository(db, bus, { validateRig: () => true });
+    // P34: the W1 seam is fail-closed (MF2) — a nudge-intended terminal
+    // close needs a SAME-DB intent store to make its wake durable.
+    queueRepo.attachOutbox(new OutboxHandler(db));
     watchdogRepo = new WatchdogJobsRepository(db);
     runtime = new WorkflowRuntime({
       db,

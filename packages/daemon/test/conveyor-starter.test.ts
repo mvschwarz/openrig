@@ -5,6 +5,7 @@ import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
@@ -12,6 +13,7 @@ import { workflowSpecsSchema } from "../src/db/migrations/033_workflow_specs.js"
 import { workflowInstancesSchema } from "../src/db/migrations/034_workflow_instances.js";
 import { workflowStepTrailsSchema } from "../src/db/migrations/035_workflow_step_trails.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
 import { WorkflowValidator } from "../src/domain/workflow-validator.js";
@@ -31,6 +33,7 @@ describe("0.3.0 conveyor starter workflow specs", () => {
   beforeEach(() => {
     db = createDb();
     migrate(db, [
+      outboxEntriesSchema,
       coreSchema,
       eventsSchema,
       queueItemsSchema,
@@ -42,6 +45,9 @@ describe("0.3.0 conveyor starter workflow specs", () => {
     eventBus = new EventBus(db);
     db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-conveyor', 'conveyor')`).run();
     const queueRepo = new QueueRepository(db, eventBus, { validateRig: () => true });
+    // P34: the W1 seam is fail-closed (MF2) — a nudge-intended terminal
+    // close needs a SAME-DB intent store to make its wake durable.
+    queueRepo.attachOutbox(new OutboxHandler(db));
     runtime = new WorkflowRuntime({ db, eventBus, queueRepo });
   });
 

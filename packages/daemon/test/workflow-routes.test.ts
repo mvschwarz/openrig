@@ -7,6 +7,7 @@ import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
@@ -14,6 +15,7 @@ import { workflowSpecsSchema } from "../src/db/migrations/033_workflow_specs.js"
 import { workflowInstancesSchema } from "../src/db/migrations/034_workflow_instances.js";
 import { workflowStepTrailsSchema } from "../src/db/migrations/035_workflow_step_trails.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
 import { workflowRoutes } from "../src/routes/workflow.js";
@@ -78,6 +80,7 @@ describe("workflow routes (PL-004 Phase D)", () => {
   beforeEach(() => {
     db = createDb();
     migrate(db, [
+      outboxEntriesSchema,
       coreSchema, eventsSchema,
       queueItemsSchema, queueTransitionsSchema,
       workflowSpecsSchema, workflowInstancesSchema, workflowStepTrailsSchema,
@@ -85,6 +88,9 @@ describe("workflow routes (PL-004 Phase D)", () => {
     bus = new EventBus(db);
     db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
     const queueRepo = new QueueRepository(db, bus, { validateRig: () => true });
+    // P34: the W1 seam is fail-closed (MF2) — a nudge-intended terminal
+    // close needs a SAME-DB intent store to make its wake durable.
+    queueRepo.attachOutbox(new OutboxHandler(db));
     runtime = new WorkflowRuntime({ db, eventBus: bus, queueRepo });
     app = buildApp({ eventBus: bus, runtime });
     tmp = mkdtempSync(join(tmpdir(), "wf-routes-"));
@@ -170,6 +176,9 @@ describe("workflow routes (PL-004 Phase D)", () => {
 
   it("POST /instantiate surfaces queue destination validation as 400", async () => {
     const rejectingQueueRepo = new QueueRepository(db, bus, { validateRig: () => false });
+    // P34: the W1 seam is fail-closed (MF2) — a nudge-intended terminal
+    // close needs a SAME-DB intent store to make its wake durable.
+    rejectingQueueRepo.attachOutbox(new OutboxHandler(db));
     const rejectingRuntime = new WorkflowRuntime({
       db,
       eventBus: bus,
@@ -373,6 +382,7 @@ describe("FR-5 route contract: instance_version_conflict is HTTP 409 with expect
   it("POST /project as the stale concurrent loser returns 409, never 500", async () => {
     const db2 = createDb();
     migrate(db2, [
+      outboxEntriesSchema,
       coreSchema,
       eventsSchema,
       queueItemsSchema,
@@ -386,6 +396,9 @@ describe("FR-5 route contract: instance_version_conflict is HTTP 409 with expect
     const bus2 = new EventBus(db2);
     db2.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
     const queueRepo2 = new QueueRepository(db2, bus2, { validateRig: () => true });
+    // P34: the W1 seam is fail-closed (MF2) — a nudge-intended terminal
+    // close needs a SAME-DB intent store to make its wake durable.
+    queueRepo2.attachOutbox(new OutboxHandler(db2));
     const runtime2 = new WorkflowRuntime({ db: db2, eventBus: bus2, queueRepo: queueRepo2 });
     const app2 = buildApp({ eventBus: bus2, runtime: runtime2 });
     const tmp2 = mkdtempSync(join(tmpdir(), "wf-route-409-"));
@@ -456,6 +469,7 @@ describe("FR-7 route contract: strict-validation rejections are structured 400s,
   beforeEach(() => {
     db3 = createDb();
     migrate(db3, [
+      outboxEntriesSchema,
       coreSchema,
       eventsSchema,
       queueItemsSchema,
@@ -469,6 +483,9 @@ describe("FR-7 route contract: strict-validation rejections are structured 400s,
     const bus3 = new EventBus(db3);
     db3.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
     const queueRepo3 = new QueueRepository(db3, bus3, { validateRig: () => true });
+    // P34: the W1 seam is fail-closed (MF2) — a nudge-intended terminal
+    // close needs a SAME-DB intent store to make its wake durable.
+    queueRepo3.attachOutbox(new OutboxHandler(db3));
     const runtime3 = new WorkflowRuntime({ db: db3, eventBus: bus3, queueRepo: queueRepo3 });
     app3 = buildApp({ eventBus: bus3, runtime: runtime3 });
     tmp3 = mkdtempSync(join(tmpdir(), "wf-route-400-"));
@@ -542,6 +559,7 @@ describe("workflow routes — WF-2 structured error boundaries", () => {
     db = createDb();
     const { bindingsSessionsSchema } = await import("../src/db/migrations/002_bindings_sessions.js");
     migrate(db, [
+      outboxEntriesSchema,
       coreSchema,
       bindingsSessionsSchema,
       eventsSchema,
@@ -554,6 +572,9 @@ describe("workflow routes — WF-2 structured error boundaries", () => {
     bus = new EventBus(db);
     db.prepare(`INSERT INTO rigs (id, name) VALUES ('r-1', 'rig')`).run();
     queueRepo = new QueueRepository(db, bus, { validateRig: () => true });
+    // P34: the W1 seam is fail-closed (MF2) — a nudge-intended terminal
+    // close needs a SAME-DB intent store to make its wake durable.
+    queueRepo.attachOutbox(new OutboxHandler(db));
     runtime = new WorkflowRuntime({ db, eventBus: bus, queueRepo });
     app = buildApp({ eventBus: bus, runtime });
     tmp = mkdtempSync(join(tmpdir(), "wf2-routes-"));
@@ -681,6 +702,7 @@ describe("workflow routes — FAC-1 bound-rig HTTP status mapping (guard blocker
   beforeEach(() => {
     db = createFullTestDb();
     migrate(db, [
+      outboxEntriesSchema,
       queueItemSummarySchema, queueItemEvidenceRefSchema,
       workflowSpecsSchema, workflowInstancesSchema, workflowStepTrailsSchema,
       workflowInstanceVersionSchema, workflowSpecJsonSchema, workflowResumeSchema,
@@ -688,6 +710,9 @@ describe("workflow routes — FAC-1 bound-rig HTTP status mapping (guard blocker
     ]);
     bus = new EventBus(db);
     const queueRepo = new QueueRepository(db, bus, { validateRig: () => true });
+    // P34: the W1 seam is fail-closed (MF2) — a nudge-intended terminal
+    // close needs a SAME-DB intent store to make its wake durable.
+    queueRepo.attachOutbox(new OutboxHandler(db));
     runtime = new WorkflowRuntime({ db, eventBus: bus, queueRepo });
     app = buildApp({ eventBus: bus, runtime });
     rigRepo = new RigRepository(db);

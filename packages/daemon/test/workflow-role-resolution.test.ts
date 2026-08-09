@@ -6,6 +6,7 @@ import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { migrate } from "../src/db/migrate.js";
 import { workflowSpecsSchema } from "../src/db/migrations/033_workflow_specs.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { workflowInstancesSchema } from "../src/db/migrations/034_workflow_instances.js";
 import { workflowStepTrailsSchema } from "../src/db/migrations/035_workflow_step_trails.js";
 import { workflowInstanceVersionSchema } from "../src/db/migrations/049_workflow_instance_version.js";
@@ -15,6 +16,7 @@ import { workflowInstanceBoundRigSchema } from "../src/db/migrations/052_workflo
 import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summary.js";
 import { queueItemEvidenceRefSchema } from "../src/db/migrations/048_queue_item_evidence_ref.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
 import { WorkflowProjectorError } from "../src/domain/workflow-projector.js";
@@ -228,6 +230,7 @@ describe("FAC-1 C3: the six owner-resolution call sites on a bound rig", () => {
     // columns — VM-caught: without them the gate item's create-carried
     // summary silently drops and validateHumanPark fails at park).
     migrate(db, [
+      outboxEntriesSchema,
       queueItemSummarySchema,
       queueItemEvidenceRefSchema,
       workflowSpecsSchema,
@@ -240,6 +243,9 @@ describe("FAC-1 C3: the six owner-resolution call sites on a bound rig", () => {
     ]);
     bus = new EventBus(db);
     queueRepo = new QueueRepository(db, bus, { validateRig: () => true });
+    // P34: the W1 seam is fail-closed (MF2) — a nudge-intended terminal
+    // close needs a SAME-DB intent store to make its wake durable.
+    queueRepo.attachOutbox(new OutboxHandler(db));
     rigRepo = new RigRepository(db);
     podRepo = new PodRepository(db);
     const rigA = rigRepo.createRig("factory-a");
