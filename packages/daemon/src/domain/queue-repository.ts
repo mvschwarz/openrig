@@ -708,21 +708,43 @@ export class QueueRepository {
   }
 
   /**
-   * W1-b: the post-commit delivery for a successor's wake. When the durable
-   * intent store is present (production), deliver the just-committed intent
-   * (marking it). When it is absent (test/bootstrap), fall back to the pre-W1
-   * best-effort nudge so behavior is unchanged where there is no intent to make
-   * durable. Called AFTER the terminal transaction commits (reversed-never: a
-   * pane write must not join the db transaction).
+   * W1-b: the post-commit delivery for a successor's wake, and the ONE shared
+   * staged-intent delivery path. When the durable intent store is present
+   * (production), deliver the just-committed intent — which CLAIMS and FINALIZES
+   * the row, so a later recovery sweep cannot send it a second time. When it is
+   * absent (test/bootstrap), fall back to the pre-W1 best-effort nudge so behavior
+   * is unchanged where there is no intent to make durable. Called AFTER the
+   * terminal transaction commits (reversed-never: a pane write must not join the
+   * db transaction).
+   *
+   * PUBLIC as of P34: every terminal-closing writer that stages an intent must
+   * deliver through THIS path rather than {@link maybeNudge}. `maybeNudge` sends
+   * WITHOUT claiming or finalizing, so a staged intent would remain `pending` and
+   * the startup recovery sweep would deliver the same wake AGAIN. One staged
+   * intent, one delivery, one finalized row.
+   *
+   * P34 correction: the no-outbox fallback above was documented here but never
+   * implemented — `deliverWakeIntent` simply returns "skipped" with no outbox
+   * attached, so the nudge vanished SILENTLY (a skip is not an error, so nothing
+   * surfaced it). The pre-W1 callers reached this path only after the MF2 guard
+   * had already proven an outbox was attached, which is why it never showed. P34
+   * routes writers here whose harnesses attach no outbox, so the fallback is now
+   * real code rather than a promise in a comment.
    */
-  private async deliverWakeForSuccessor(
+  async deliverWakeForSuccessor(
     successorQitemId: string,
+    destinationSession: string,
     nudge: boolean | undefined,
+    sourceSession?: string,
   ): Promise<void> {
     if (nudge === false) return;
-    // MF2: the seam guard (assertTerminalClosureHasIntent) has already enforced
-    // that an outbox is attached for a nudge-intended terminal act, so the
-    // committed intent exists here. Deliver it (post-commit, reversed-never).
+    // No durable intent store ⇒ there is no intent to claim/finalize. Fall back to
+    // the pre-W1 best-effort nudge so the wake still happens (the documented
+    // contract), rather than silently skipping it.
+    if (!this.outbox) {
+      await this.maybeNudge(successorQitemId, destinationSession, nudge, sourceSession);
+      return;
+    }
     await this.deliverWakeIntent(`${WAKE_INTENT_PREFIX}${successorQitemId}`);
   }
 
@@ -1207,7 +1229,7 @@ export class QueueRepository {
 
     // W1-b: deliver the just-committed wake intent (marking it), or the pre-W1
     // best-effort nudge when no intent store is attached. Post-commit only.
-    await this.deliverWakeForSuccessor(newId, input.nudge);
+    await this.deliverWakeForSuccessor(newId, input.toSession, input.nudge, input.fromSession);
 
     return {
       closed: this.getByIdOrThrow(source.qitemId),
@@ -1360,7 +1382,7 @@ export class QueueRepository {
 
     // W1-b: deliver the just-committed wake intent (marking it), or the pre-W1
     // best-effort nudge when no intent store is attached. Post-commit only.
-    await this.deliverWakeForSuccessor(newId, input.nudge);
+    await this.deliverWakeForSuccessor(newId, input.toSession, input.nudge, input.fromSession);
 
     return {
       closed: this.getByIdOrThrow(source.qitemId),

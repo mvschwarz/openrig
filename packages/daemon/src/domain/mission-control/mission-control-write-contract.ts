@@ -190,6 +190,16 @@ export class MissionControlWriteContract {
         createdDestination = created.destinationSession;
         createdNudge = created.nudge;
         persistedEvents.push(created.persistedEvent);
+        // P34: stage the successor's WAKE INTENT inside this transaction, so the
+        // close and the durable wake commit as ONE act or NONE. The pane write
+        // itself stays post-commit (reversed-never).
+        this.queueRepo.stageWakeIntent(
+          created.qitemId,
+          input.actorSession,
+          created.destinationSession,
+          input.identityProvenance ?? null,
+          created.nudge,
+        );
       }
 
       // 3. Append the audit record. Snapshot the closed qitem state.
@@ -220,6 +230,18 @@ export class MissionControlWriteContract {
           actorSession: input.actorSession,
         }),
       );
+
+      // P34: the W1 seam, run as the LAST statement of this transaction. If this
+      // act terminally closed the source AND created a successor, the successor's
+      // wake intent must be durable in the SAME transaction — otherwise the whole
+      // act rolls back here rather than committing an executed-but-unwoken item.
+      // A non-terminal transition (the `hold` park) returns early inside the
+      // primitive itself (queue-repository.ts, isTerminalState), so park callers
+      // are untouched by construction; a terminal close with NO successor has
+      // nothing to wake and is not paired here.
+      if (createdQitemId && createdDestination) {
+        this.queueRepo.assertTerminalClosureHasIntent(input.qitemId, createdQitemId, createdNudge);
+      }
     });
 
     try {
@@ -242,7 +264,16 @@ export class MissionControlWriteContract {
       try {
         // V0.3.1 slice 23: thread actorSession as the source so the
         // nudge envelope shows where the route/handoff came from.
-        await this.queueRepo.maybeNudge(createdQitemId, createdDestination, createdNudge, input.actorSession);
+        // P34: deliver through the SHARED staged-intent path, not maybeNudge —
+        // it claims and finalizes the intent row this txn staged, so the startup
+        // recovery sweep cannot send the same wake a second time. With no intent
+        // store attached it falls back to the pre-W1 best-effort nudge.
+        await this.queueRepo.deliverWakeForSuccessor(
+          createdQitemId,
+          createdDestination,
+          createdNudge,
+          input.actorSession,
+        );
         notifyAttempted = createdNudge !== false;
         notifyResult = notifyAttempted ? "attempted-best-effort" : "skipped";
       } catch (err) {

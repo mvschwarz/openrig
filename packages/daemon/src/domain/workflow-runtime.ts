@@ -811,12 +811,23 @@ export class WorkflowRuntime {
       });
       persistedEvents.push(created.persistedEvent);
       nudgeTo = { qitemId: created.qitemId, session: created.destinationSession, nudge: created.nudge };
+      // P34: stage the redrive packet's wake intent inside this transaction.
+      this.queueRepo.stageWakeIntent(
+        created.qitemId,
+        input.actorSession,
+        created.destinationSession,
+        null,
+        created.nudge,
+      );
 
       // Resolve+resume CLOSES the occurrence: open exception items for
       // THIS episode close honestly with resume provenance. A later
       // re-failure mints a NEW packet id = a NEW occurrence (never
       // hidden behind this resolved past).
       let exceptionItemsClosed = 0;
+      // P34: anchors the structural predicate below — the first terminal close
+      // this transaction performs, paired with the redrive packet as successor.
+      let firstClosedExceptionId: string | null = null;
       if (failedPacketId) {
         const openItems = this.db
           .prepare(
@@ -837,6 +848,7 @@ export class WorkflowRuntime {
           });
           persistedEvents.push(closedItem.persistedEvent);
           exceptionItemsClosed += 1;
+          firstClosedExceptionId ??= row.qitem_id;
         }
       }
 
@@ -882,6 +894,30 @@ export class WorkflowRuntime {
         resumeCount: (instance.resumeCount ?? 0) + 1,
         exceptionItemsClosed,
       };
+
+      // P34 (site :791). The ruled predicate is STRUCTURAL: a terminal close plus
+      // a createWithinTransaction in the SAME transaction ⇒ the successor's wake
+      // must be durable. This transaction terminally closes the open exception
+      // items and creates the redrive packet, so the seam pairs THAT close with
+      // THAT successor.
+      //
+      // Note what is deliberately NOT done: the exception closes are not each
+      // paired with this packet as "their" successor. They close `no-follow-on`
+      // and have no successor of their own; asserting per-close would satisfy the
+      // seam against an unrelated successor — a check that could only pass. One
+      // close from this txn anchors the predicate; the successor is the packet.
+      //
+      // When this txn closed nothing terminally (no open exception items), there
+      // is no close to pair with. The intent is still staged above, and the seam
+      // is skipped rather than being called with a non-terminal source, which
+      // would return early and read as a check that ran when it did not.
+      if (firstClosedExceptionId) {
+        this.queueRepo.assertTerminalClosureHasIntent(
+          firstClosedExceptionId,
+          created.qitemId,
+          created.nudge,
+        );
+      }
     });
     txn();
 
@@ -892,7 +928,15 @@ export class WorkflowRuntime {
     // track the txn-closure write, so narrow via the cast.
     const resumeNudge = nudgeTo as { qitemId: string; session: string; nudge: boolean | undefined } | null;
     if (resumeNudge) {
-      await this.queueRepo.maybeNudge(resumeNudge.qitemId, resumeNudge.session, resumeNudge.nudge);
+      // P34: deliver via the SHARED staged-intent path (claims + finalizes the
+      // row staged in the txn, so recovery cannot re-send it); falls back to the
+      // best-effort nudge when no intent store is attached.
+      await this.queueRepo.deliverWakeForSuccessor(
+        resumeNudge.qitemId,
+        resumeNudge.session,
+        resumeNudge.nudge,
+        input.actorSession,
+      );
     }
     return result;
   }
@@ -1019,6 +1063,15 @@ export class WorkflowRuntime {
       });
       persistedEvents.push(created.persistedEvent);
       nudgeTo = { qitemId: created.qitemId, session: created.destinationSession, nudge: created.nudge };
+      // P34 (site :992): stage the re-routed packet's wake intent in the same
+      // transaction that closed the old frontier packet.
+      this.queueRepo.stageWakeIntent(
+        created.qitemId,
+        input.actorSession,
+        created.destinationSession,
+        null,
+        created.nudge,
+      );
 
       // A parked (waiting) frontier packet keeps its park on the
       // successor — route changes the owner, never the recorded state.
@@ -1089,13 +1142,19 @@ export class WorkflowRuntime {
         toSession: input.toSession,
         instanceStatus: instance.status,
       };
+
+      // P34 (site :992): the W1 seam, LAST statement of this transaction. Route
+      // always closes the old frontier packet terminally (handed-off) and always
+      // creates its successor, so the pairing here is unconditional.
+      this.queueRepo.assertTerminalClosureHasIntent(oldPacketId, created.qitemId, created.nudge);
     });
     txn();
 
     for (const e of persistedEvents) this.eventBus.notifySubscribers(e);
     if (nudgeTo) {
       const n = nudgeTo as { qitemId: string; session: string; nudge: boolean | undefined };
-      await this.queueRepo.maybeNudge(n.qitemId, n.session, n.nudge, input.actorSession);
+      // P34: shared staged-intent delivery (see the resume path above).
+      await this.queueRepo.deliverWakeForSuccessor(n.qitemId, n.session, n.nudge, input.actorSession);
     }
     return result;
   }

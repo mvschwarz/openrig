@@ -463,6 +463,8 @@ export class WorkflowProjector {
                 parkOn: gateCompile.parkOn,
               })
             : null;
+        // P34 (site :466, the ROUTES branch) — the stage call follows the create
+        // immediately below; see the seam assert at the end of this transaction.
         createdNext = this.queueRepo.createWithinTransaction({
           qitemId: gateQitemId,
           sourceSession: input.actorSession,
@@ -494,6 +496,15 @@ export class WorkflowProjector {
           destinationSession: createdNext.destinationSession,
           nudge: createdNext.nudge,
         };
+        // P34: stage the next-step packet's wake intent in THIS transaction, so
+        // the close and the durable wake are one act or none.
+        this.queueRepo.stageWakeIntent(
+          createdNext.qitemId,
+          input.actorSession,
+          createdNext.destinationSession,
+          null,
+          createdNext.nudge,
+        );
         // OPR.0.4.6.WF2 FR-5 (guard blocker 1): a HUMAN gate packet PARKS
         // in the same txn — state=blocked, blocked_on=<human seat> — the
         // exact leg-1 shape the shipped `rig queue resolve` verb acts on
@@ -760,7 +771,40 @@ export class WorkflowProjector {
             destinationSession: createdException.destinationSession,
             nudge: createdException.nudge,
           };
+          // P34 (site :729, the FAILED branch): stage the exception item's wake
+          // intent inside this transaction. The never-lost AC already binds the
+          // ITEM to this commit; this binds its WAKE to the same commit.
+          this.queueRepo.stageWakeIntent(
+            createdException.qitemId,
+            input.actorSession,
+            createdException.destinationSession,
+            null,
+            createdException.nudge,
+          );
         }
+      }
+
+      // P34: the W1 seam, LAST statement of this transaction. The two successor
+      // branches are MUTUALLY EXCLUSIVE — nextStatus==="failed" requires
+      // routes===false (see the status ladder above), so :466 and :729 are
+      // alternatives within one execution, never two successors. Each branch is
+      // therefore asserted on its own. A park (`waiting`) or a no-successor
+      // closure reaches neither arm: the primitive itself returns early on a
+      // non-terminal source, and a closure with no successor has no wake to make
+      // durable.
+      const excStaged = exceptionItemPostCommit as (PostCommitNudge & { qitemId: string }) | null;
+      if (createdNext) {
+        this.queueRepo.assertTerminalClosureHasIntent(
+          input.currentPacketId,
+          createdNext.qitemId,
+          createdNext.nudge,
+        );
+      } else if (excStaged) {
+        this.queueRepo.assertTerminalClosureHasIntent(
+          input.currentPacketId,
+          excStaged.qitemId,
+          excStaged.nudge,
+        );
       }
     });
 
@@ -773,16 +817,27 @@ export class WorkflowProjector {
     // OPR.0.4.6.WF5 FR-2: best-effort nudge for the exception item (the
     // shipped non-fatal delivery pattern — the durable item is the
     // guarantee, the nudge is a courtesy).
+    // P34: both deliveries go through the SHARED staged-intent path, which claims
+    // and finalizes the row staged in the transaction above. maybeNudge would send
+    // without finalizing, leaving the intent `pending` for the startup recovery
+    // sweep to deliver a SECOND time. With no intent store attached the shared
+    // path falls back to the same best-effort nudge as before.
     const excPost = exceptionItemPostCommit as (PostCommitNudge & { qitemId: string }) | null;
     if (excPost) {
-      await this.queueRepo.maybeNudge(excPost.qitemId, excPost.destinationSession, excPost.nudge);
+      await this.queueRepo.deliverWakeForSuccessor(
+        excPost.qitemId,
+        excPost.destinationSession,
+        excPost.nudge,
+        input.actorSession,
+      );
     }
     const postCommit = nextQitemCreatePostCommit as PostCommitNudge | null;
     if (nextQitemId && postCommit) {
-      await this.queueRepo.maybeNudge(
+      await this.queueRepo.deliverWakeForSuccessor(
         nextQitemId,
         postCommit.destinationSession,
         postCommit.nudge,
+        input.actorSession,
       );
     }
 
