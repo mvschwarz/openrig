@@ -788,7 +788,12 @@ export class ClaudeCompactionEnforcer {
       }),
     );
     if (!prep.ok) {
-      return this.recordManualFailure(input.sessionName, prep.reason ?? "send_failed");
+      return this.recordManualFailure(
+        input.sessionName,
+        prep.reason ?? "send_failed",
+        undefined,
+        startingInvalidationEpoch,
+      );
     }
 
     // Phase 2 — WAIT for the prep turn to complete (seat idle), THEN send
@@ -856,9 +861,15 @@ export class ClaudeCompactionEnforcer {
           input.sessionName,
           preCompactCheck.reason,
           preCompactCheck.decisionId,
+          startingInvalidationEpoch,
         );
       }
-      return this.recordManualFailure(input.sessionName, compact.reason ?? "send_failed");
+      return this.recordManualFailure(
+        input.sessionName,
+        compact.reason ?? "send_failed",
+        undefined,
+        startingInvalidationEpoch,
+      );
     }
 
     // Seed the EXISTING post-compact back-half (turn_boundary → restore_prompt
@@ -919,8 +930,18 @@ export class ClaudeCompactionEnforcer {
     this.manualCompactionState.set(sessionName, { stage, reason, updatedAt: Date.now(), operatorInitiated });
   }
 
-  private recordManualFailure(sessionName: string, reason: string, decisionId?: string): ManualCompactionOutcome {
-    this.setManualStage(sessionName, "skipped-or-failed", reason);
+  private recordManualFailure(
+    sessionName: string,
+    reason: string,
+    decisionId?: string,
+    expectedInvalidationEpoch?: number,
+  ): ManualCompactionOutcome {
+    if (
+      expectedInvalidationEpoch === undefined
+      || (this.occupantInvalidationEpoch.get(sessionName) ?? 0) === expectedInvalidationEpoch
+    ) {
+      this.setManualStage(sessionName, "skipped-or-failed", reason);
+    }
     return {
       triggered: false,
       stage: "skipped-or-failed",

@@ -990,6 +990,73 @@ describe("ClaudeCompactionEnforcer", () => {
         await first;
       });
 
+      it("a retiring invocation refusal does not clobber its same-name successor's preparing marker", async () => {
+        const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
+        let reachRetireeBoundary!: () => void;
+        let releaseRetiree!: () => void;
+        let reachSuccessorBoundary!: () => void;
+        let releaseSuccessor!: () => void;
+        const retireeAtBoundary = new Promise<void>((resolve) => { reachRetireeBoundary = resolve; });
+        const retireeReleased = new Promise<void>((resolve) => { releaseRetiree = resolve; });
+        const successorAtBoundary = new Promise<void>((resolve) => { reachSuccessorBoundary = resolve; });
+        const successorReleased = new Promise<void>((resolve) => { releaseSuccessor = resolve; });
+        let compactAttempt = 0;
+        const send = vi.fn(async (
+          _sessionName: string,
+          message: string,
+          opts?: { beforeSend?: () => { reason: string; error?: string } | null },
+        ) => {
+          if (!message.startsWith("/compact")) return { ok: true as const };
+          compactAttempt += 1;
+          if (compactAttempt === 1) {
+            reachRetireeBoundary();
+            await retireeReleased;
+          } else if (compactAttempt === 2) {
+            reachSuccessorBoundary();
+            await successorReleased;
+          } else {
+            return { ok: false as const, reason: "unexpected_duplicate" };
+          }
+          const refusal = opts?.beforeSend?.();
+          return refusal
+            ? { ok: false as const, sent: false, sessionName: SEAT, ...refusal }
+            : { ok: true as const };
+        });
+        const enforcer = new ClaudeCompactionEnforcer(
+          settings,
+          { send } as unknown as SessionTransport,
+          { openrigHome: HOME },
+        );
+
+        const retiree = enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
+        await retireeAtBoundary;
+        enforcer.invalidateOccupant(SEAT);
+
+        const successor = enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
+        await successorAtBoundary;
+        expect(enforcer.getManualCompactionState(SEAT)?.stage).toBe("preparing");
+
+        releaseRetiree();
+        const retireeOutcome = await retiree;
+        const stateAfterRetiree = enforcer.getManualCompactionState(SEAT)?.stage;
+        const sendsBeforeThird = send.mock.calls.length;
+        const third = await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
+        const sendsAfterThird = send.mock.calls.length;
+
+        releaseSuccessor();
+        const successorOutcome = await successor;
+
+        expect(retireeOutcome).toEqual({
+          triggered: false,
+          stage: "skipped-or-failed",
+          reason: "occupant_generation_changed",
+        });
+        expect(stateAfterRetiree).toBe("preparing");
+        expect(third).toEqual({ triggered: false, stage: "skipped-or-failed", reason: "already_in_progress" });
+        expect(sendsAfterThird).toBe(sendsBeforeThird);
+        expect(successorOutcome).toEqual({ triggered: true, stage: "compact-sent" });
+      });
+
       it("sequential call after compact-sent but before the back-half drains: no second prep, no second /compact", async () => {
         const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
         const { transport, send } = makeSessionTransport();
