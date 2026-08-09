@@ -294,6 +294,7 @@ export class SeatHandoverService {
         operator,
         contextDelivered: false,
         launchToken: null,
+        occupantGeneration: null,
         cleanup: null,
       });
     }
@@ -316,12 +317,16 @@ export class SeatHandoverService {
     const successorPosture = this.rigRepo.getNodePolicyProvenance(node.id)?.launchPosture
       ?? this.rigRepo.getRigPolicyProvenance(statusResult.status.rig_id)?.launchPosture
       ?? "floor"; // R2 terminal: absence = the locked floor on the continuity edge too
+    // The successor must carry its own generation from its first byte. This reservation writes no
+    // ledger row; commit consumes it, while every failed pre-commit branch remains unregistered.
+    const occupantGeneration = this.sessionRegistry.reserveOccupantGeneration();
     const launch = await this.successorLauncher.createSuccessor({
       // Seam B: the successor is the SAME seat continuing — persisted policy posture carries.
       // 0.5.2-07 model fidelity: carry the seat's SPEC-pinned model so the successor launch reads the
       // spec (else the running topology drifts from the founder-designed one at every handover).
       node: { id: node.id, runtime: node.runtime, cwd: node.cwd, launchPosture: successorPosture, model: node.model },
       departingSessionName: latestSession.session_name,
+      occupantGeneration,
     });
     if (!launch.ok) {
       return {
@@ -386,6 +391,7 @@ export class SeatHandoverService {
       // B2 (launched/fresh): the launch-scraped resume token captured by the
       // successor launcher is persisted atomically at commit (provenance scrape).
       launchToken: launch.resumeToken ? { token: launch.resumeToken, resumeType: launch.resumeType } : null,
+      occupantGeneration,
       cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId),
     });
   }
@@ -409,6 +415,8 @@ export class SeatHandoverService {
     contextDelivered: boolean;
     /** Launch-scraped resume token for a fresh successor (persisted at commit). */
     launchToken: { token: string; resumeType?: string } | null;
+    /** Source-bound generation reserved before a fresh successor started; null for discovered seats. */
+    occupantGeneration: string | null;
     cleanup: (() => Promise<void>) | null;
   }): Promise<SeatHandoverResult> {
     const fail = async (result: SeatHandoverResult): Promise<SeatHandoverResult> => {
@@ -490,6 +498,7 @@ export class SeatHandoverService {
       discovered,
       contextDelivered: input.contextDelivered,
       launchToken: input.launchToken,
+      occupantGeneration: input.occupantGeneration,
     });
     if (!committed.ok) return fail(committed);
 
@@ -660,6 +669,7 @@ export class SeatHandoverService {
     discovered: ReturnType<DiscoveryRepository["getDiscoveredSession"]> & NonNullable<unknown>;
     contextDelivered: boolean;
     launchToken: { token: string; resumeType?: string } | null;
+    occupantGeneration: string | null;
   }): SeatHandoverResult {
     const handoverAt = this.now().toISOString();
     const tx = this.db.transaction(() => {
@@ -686,7 +696,12 @@ export class SeatHandoverService {
       const retiringGeneration =
         this.sessionRegistry.currentOccupantGenerationForSession(input.latestSession.session_name) ?? undefined;
       // atom-B: a seat handover mints a HANDOVER-kind occupant generation (not the default 'adopt').
-      const newSession = this.sessionRegistry.registerClaimedSession(input.node.id, input.discovered.tmuxSession, "handover");
+      const newSession = this.sessionRegistry.registerClaimedSession(
+        input.node.id,
+        input.discovered.tmuxSession,
+        "handover",
+        input.occupantGeneration,
+      );
       // B2 (launched/fresh): persist the launch-scraped resume token atomically
       // with the claim, provenance "scrape" (mirrors StartupOrchestrator's
       // launch-token capture). Validity-guarded; a malformed token is dropped,

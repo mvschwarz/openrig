@@ -124,7 +124,11 @@ export class SuccessorSessionLauncher {
    * tmux-present (just created). The returned resume token (if any) is the
    * launch-scraped token the composer persists at commit (B2 for fresh).
    */
-  async createSuccessor(input: { node: SuccessorNode; departingSessionName: string }): Promise<SuccessorLaunchResult> {
+  async createSuccessor(input: {
+    node: SuccessorNode;
+    departingSessionName: string;
+    occupantGeneration?: string | null;
+  }): Promise<SuccessorLaunchResult> {
     // CUTOVER MODEL (plan 411c43de): a SEAT = one durable tmux session; the successor takes over the
     // retiree's EXACT pane via respawn-pane, so the canonical session name is PRESERVED (no -h shuffle)
     // and native scrollback survives — predecessor history stays above the successor boot (the money
@@ -139,6 +143,7 @@ export class SuccessorSessionLauncher {
       OPENRIG_SESSION_NAME: departingSession,
       OPENRIG_RUNTIME: input.node.runtime ?? undefined,
       ...this.sessionEnv,
+      OPENRIG_OCCUPANT_GENERATION: input.occupantGeneration ?? undefined,
     });
     const cwd = input.node.cwd ?? undefined;
 

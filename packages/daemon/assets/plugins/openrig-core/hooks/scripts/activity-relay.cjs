@@ -45,6 +45,7 @@ function buildOpenRigPayload(providerPayload, env = process.env, now = () => new
   const sessionName = firstString(env.OPENRIG_SESSION_NAME, env.RIGGED_SESSION_NAME);
   const nodeId = firstString(env.OPENRIG_NODE_ID, env.RIGGED_NODE_ID);
   const runtime = firstString(env.OPENRIG_RUNTIME, env.RIGGED_RUNTIME);
+  const generation = firstString(env.OPENRIG_OCCUPANT_GENERATION, env.RIGGED_OCCUPANT_GENERATION);
   const hookEvent = firstString(
     providerPayload.hookEvent,
     providerPayload.hookEventName,
@@ -69,6 +70,7 @@ function buildOpenRigPayload(providerPayload, env = process.env, now = () => new
     sessionName,
     nodeId,
     runtime,
+    generation,
     hookEvent,
     subtype,
     occurredAt: now().toISOString(),

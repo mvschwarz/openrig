@@ -516,4 +516,60 @@ describe("AgentActivityStore — generation identity (W2a-1)", () => {
       generationProvenance: "unresolved",
     });
   });
+
+  it("a carried generation absent from this node's ledger is unresolvable, never mismatch", () => {
+    const { node, sessionName } = seedGenSession();
+    const unregistered = sessionRegistry.reserveOccupantGeneration();
+    expect(unregistered).not.toBeNull();
+    const store = new AgentActivityStore({
+      db,
+      eventBus,
+      now: () => NOW,
+      resolveOccupantGeneration: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
+      isRegisteredOccupantGeneration: (nodeId, generation) =>
+        sessionRegistry.isOccupantGenerationRegistered(nodeId, generation),
+    });
+
+    store.recordHookEvent({
+      runtime: "codex",
+      sessionName,
+      hookEvent: "Stop",
+      generation: unregistered,
+    });
+
+    expect(store.getLatestForNode({ nodeId: node.id, sessionName, now: NOW })).toMatchObject({
+      state: "unknown",
+      reason: "generation_unresolvable",
+      stale: true,
+      generationProvenance: "unresolved",
+    });
+  });
+
+  it("registered-generation membership resolver faults stay generation_resolver_error", () => {
+    const { node, sessionName } = seedGenSession();
+    const liveGeneration = sessionRegistry.currentOccupantTenure(node.id)!.generationUuid;
+    const store = new AgentActivityStore({
+      db,
+      eventBus,
+      now: () => NOW,
+      resolveOccupantGeneration: () => liveGeneration,
+      isRegisteredOccupantGeneration: () => {
+        throw new Error("membership lookup failed");
+      },
+    });
+
+    store.recordHookEvent({
+      runtime: "codex",
+      sessionName,
+      hookEvent: "Stop",
+      generation: liveGeneration,
+    });
+
+    expect(store.getLatestForNode({ nodeId: node.id, sessionName, now: NOW })).toMatchObject({
+      state: "unknown",
+      reason: "generation_resolver_error",
+      stale: true,
+      generationProvenance: "unresolved",
+    });
+  });
 });

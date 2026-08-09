@@ -138,6 +138,28 @@ describe("SuccessorSessionLauncher", () => {
     expect(db.prepare("SELECT COUNT(*) AS n FROM sessions").get()).toEqual({ n: 0 });
   });
 
+  it("carries the supplied generation exactly and never lets ambient session env override it", async () => {
+    const tmux = { createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead } as unknown as TmuxAdapter;
+    const subject = new SuccessorSessionLauncher(tmux, discoveryRepo, {
+      sessionEnv: { OPENRIG_OCCUPANT_GENERATION: "stale-ambient-generation" },
+      newId: () => "01ABCDEFG",
+      runtimeAdapters: { codex: fakeAdapter("codex") },
+      readinessTimeoutMs: 50,
+      sleep: async () => {},
+      exitPollMs: 1,
+      exitTimeoutMs: 5,
+    });
+
+    const result = await subject.createSuccessor({
+      node: { id: "node-1", runtime: "codex", cwd: "/w" },
+      departingSessionName: "dev-impl@rig",
+      occupantGeneration: "reserved-generation",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(respawnPane.mock.calls[0]![2]!.env.OPENRIG_OCCUPANT_GENERATION).toBe("reserved-generation");
+  });
+
   it("CUTOVER forced fallback: retiree survives graceful SIGTERM → bounded SIGKILL, then respawns", async () => {
     listPanes.mockResolvedValue([{ id: "%42", index: 0, cwd: "/w", width: 80, height: 24, active: true }]);
     // The pane stays live through the graceful window; only the forced KILL makes it dead.

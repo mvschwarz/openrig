@@ -478,6 +478,7 @@ describe("SeatHandoverService", () => {
       OPENRIG_NODE_ID: node.id,
       OPENRIG_SESSION_NAME: "dev-impl@seat-rig",
       OPENRIG_RUNTIME: "codex",
+      OPENRIG_OCCUPANT_GENERATION: expect.any(String),
     });
 
     // The departing pane is resolved BEFORE the in-place respawn; the discovery candidate carries it on
@@ -514,6 +515,47 @@ describe("SeatHandoverService", () => {
       "SELECT resume_type, resume_token, resume_provenance FROM sessions WHERE node_id = ? AND session_name = ? ORDER BY id DESC LIMIT 1"
     ).get(node.id, "dev-impl@seat-rig") as Record<string, string | null>;
     expect(newSession).toMatchObject({ resume_type: "codex_id", resume_token: "codex-launch-tok", resume_provenance: "scrape" });
+    expect(sessionRegistry.currentOccupantTenure(node.id)?.generationUuid)
+      .toBe(opts.env.OPENRIG_OCCUPANT_GENERATION);
+  });
+
+  it("a failed handover commit leaves its carried reservation unregistered and non-mismatch", async () => {
+    const { node } = seedSeat({ runtime: "codex" });
+    vi.spyOn(eventBus, "persistWithinTransaction").mockImplementationOnce(() => {
+      throw new Error("injected commit failure");
+    });
+
+    const result = await service.handover({
+      seatRef: "dev-impl@seat-rig",
+      reason: "commit-failure-proof",
+      source: "fresh",
+    });
+
+    expect(result).toMatchObject({ ok: false, code: "handover_commit_failed" });
+    const env = respawnPane.mock.calls[0]![2]!.env as Record<string, string>;
+    const reserved = env.OPENRIG_OCCUPANT_GENERATION;
+    expect(reserved).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(sessionRegistry.isOccupantGenerationRegistered(node.id, reserved)).toBe(false);
+
+    const store = new AgentActivityStore({
+      db,
+      eventBus,
+      resolveOccupantGeneration: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
+      isRegisteredOccupantGeneration: (nodeId, generation) =>
+        sessionRegistry.isOccupantGenerationRegistered(nodeId, generation),
+    });
+    store.recordHookEvent({
+      runtime: "codex",
+      sessionName: "dev-impl@seat-rig",
+      hookEvent: "Stop",
+      generation: reserved,
+    });
+
+    expect(store.getLatestForNode({ nodeId: node.id, sessionName: "dev-impl@seat-rig" })).toMatchObject({
+      state: "unknown",
+      reason: "generation_unresolvable",
+      generationProvenance: "unresolved",
+    });
   });
 
   it("ghost-stage re-key seam: calls invalidateRetiringOccupant at commit with the retiring + successor names + the RETIRING generation", async () => {

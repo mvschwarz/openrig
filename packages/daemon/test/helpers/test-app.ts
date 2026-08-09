@@ -333,6 +333,8 @@ export function createTestApp(
     // Fixtures mint occupant tenures at registerSession, so same-tenure reads stay fresh; a test that
     // reads across a minted new generation (or with no tenure) sees the honest UNKNOWN.
     resolveOccupantGeneration: (nodeId) => sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
+    isRegisteredOccupantGeneration: (nodeId, generation) =>
+      sessionRegistry.isOccupantGenerationRegistered(nodeId, generation),
   });
 
   const podBundleSourceResolver = new PodBundleSourceResolver();

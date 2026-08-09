@@ -118,12 +118,17 @@ export class NodeLauncher {
       };
     }
 
-    // 3. Create tmux session with OpenRig identity env vars (handle stale duplicate by killing and retrying)
+    // 3. Reserve the source-bound occupant generation before the process starts. Reservation is
+    // side-effect-free and fail-open: an unavailable ledger yields null and the launch remains valid.
+    const occupantGeneration = this.sessionRegistry.reserveOccupantGeneration();
+
+    // Create tmux session with OpenRig identity env vars (handle stale duplicate by killing and retrying)
     const openRigEnv = compactEnv({
       OPENRIG_NODE_ID: node.id,
       OPENRIG_SESSION_NAME: sessionName,
       OPENRIG_RUNTIME: node.runtime ?? undefined,
       ...this.sessionEnv,
+      OPENRIG_OCCUPANT_GENERATION: occupantGeneration ?? undefined,
     });
     const sessionCwd = opts?.cwd ?? node.cwd ?? undefined;
     let tmuxResult = await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv);
@@ -171,7 +176,7 @@ export class NodeLauncher {
     let createdSessionId: string | null = null;
     try {
       const txn = this.db.transaction(() => {
-        const session = this.sessionRegistry.registerSession(node.id, sessionName);
+        const session = this.sessionRegistry.registerSession(node.id, sessionName, "initial", occupantGeneration);
         createdSessionId = session.id;
         this.sessionRegistry.updateStatus(session.id, "running");
         this.sessionRegistry.updateBinding(node.id, { tmuxSession: sessionName });

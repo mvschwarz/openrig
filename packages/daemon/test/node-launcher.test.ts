@@ -144,9 +144,50 @@ describe("NodeLauncher", () => {
       OPENRIG_NODE_ID: expect.any(String),
       OPENRIG_SESSION_NAME: "r00-test-rig-dev-qa",
       OPENRIG_RUNTIME: "codex",
+      OPENRIG_OCCUPANT_GENERATION: expect.any(String),
       OPENRIG_URL: "http://127.0.0.1:7644",
       OPENRIG_ACTIVITY_HOOK_TOKEN: "secret-token",
     });
+  });
+
+  it("carries the exact prelaunch reservation into tmux and registers that same generation", async () => {
+    const { rig, node } = seedRigWithNode();
+    let launchEnv: Record<string, string> | undefined;
+    const launcher = createLauncher(
+      mockTmuxAdapter({
+        createSession: async (_name, _cwd, env) => {
+          launchEnv = env;
+          return { ok: true };
+        },
+      }),
+      { OPENRIG_OCCUPANT_GENERATION: "stale-ambient-generation" },
+    );
+
+    const result = await launcher.launchNode(rig.id, "dev1-impl");
+
+    expect(result.ok).toBe(true);
+    expect(launchEnv?.OPENRIG_OCCUPANT_GENERATION).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(launchEnv?.OPENRIG_OCCUPANT_GENERATION).not.toBe("stale-ambient-generation");
+    expect(sessionRegistry.currentOccupantTenure(node.id)?.generationUuid)
+      .toBe(launchEnv?.OPENRIG_OCCUPANT_GENERATION);
+  });
+
+  it("keeps launch fail-open and omits generation when the tenure ledger is unavailable", async () => {
+    const { rig } = seedRigWithNode();
+    db.exec("DROP TABLE occupant_tenures");
+    let launchEnv: Record<string, string> | undefined;
+    const launcher = createLauncher(mockTmuxAdapter({
+      createSession: async (_name, _cwd, env) => {
+        launchEnv = env;
+        return { ok: true };
+      },
+    }));
+
+    const result = await launcher.launchNode(rig.id, "dev1-impl");
+
+    expect(result.ok).toBe(true);
+    expect(launchEnv).not.toHaveProperty("OPENRIG_OCCUPANT_GENERATION");
+    expect(sessionRegistry.getSessionsForRig(rig.id)).toHaveLength(1);
   });
 
   it("explicit sessionName override used when provided", async () => {

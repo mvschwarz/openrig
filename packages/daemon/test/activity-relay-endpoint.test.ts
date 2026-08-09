@@ -10,6 +10,11 @@ import nodePath from "node:path";
 const require = createRequire(import.meta.url);
 const relay = require("../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs") as {
   resolveEndpoint: (env: Record<string, string | undefined>) => { baseUrl?: string; token?: string };
+  buildOpenRigPayload: (
+    providerPayload: Record<string, unknown>,
+    env: Record<string, string | undefined>,
+    now?: () => Date,
+  ) => Record<string, unknown> | null;
 };
 
 describe("activity-relay resolveEndpoint (OPR.0.4.3.28 B1+B3)", () => {
@@ -52,5 +57,31 @@ describe("activity-relay resolveEndpoint (OPR.0.4.3.28 B1+B3)", () => {
     const r = relay.resolveEndpoint({ OPENRIG_HOME: home }); // home has no endpoint.json
     expect(r.baseUrl).toBeFalsy();
     expect(r.token).toBeFalsy();
+  });
+});
+
+describe("activity-relay occupant generation carry (W2a producer)", () => {
+  const identity = {
+    OPENRIG_SESSION_NAME: "dev-qa@producer-rig",
+    OPENRIG_NODE_ID: "node-1",
+    OPENRIG_RUNTIME: "codex",
+  };
+
+  it("carries the exact launch generation", () => {
+    const payload = relay.buildOpenRigPayload(
+      { hookEvent: "Stop" },
+      { ...identity, OPENRIG_OCCUPANT_GENERATION: "generation-A" },
+      () => new Date("2026-08-09T00:00:00.000Z"),
+    );
+    expect(payload).toMatchObject({ generation: "generation-A" });
+  });
+
+  it("emits explicit null when the launch generation is absent", () => {
+    const payload = relay.buildOpenRigPayload(
+      { hookEvent: "Stop" },
+      identity,
+      () => new Date("2026-08-09T00:00:00.000Z"),
+    );
+    expect(payload).toHaveProperty("generation", null);
   });
 });

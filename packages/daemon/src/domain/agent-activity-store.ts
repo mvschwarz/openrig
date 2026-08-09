@@ -34,6 +34,9 @@ interface AgentActivityStoreDeps {
    *  producer wiring injects the real resolver. Resolution is SYNCHRONOUS (a better-sqlite3 read),
    *  which is why the gate lives inline in the sync read path with no signature churn to 9 callers. */
   resolveOccupantGeneration?: (nodeId: string) => string | null;
+  /** Confirm that a carried generation is registered for this node. A side-effect-free reservation
+   * that never committed must remain unresolvable, not become positive mismatch evidence. */
+  isRegisteredOccupantGeneration?: (nodeId: string, generation: string) => boolean;
 }
 
 interface SessionLookupRow {
@@ -53,6 +56,7 @@ export class AgentActivityStore {
   private readonly now: () => Date;
   private readonly freshnessMs: number;
   private readonly resolveOccupantGeneration?: (nodeId: string) => string | null;
+  private readonly isRegisteredOccupantGeneration?: (nodeId: string, generation: string) => boolean;
 
   constructor(deps: AgentActivityStoreDeps) {
     this.db = deps.db;
@@ -60,6 +64,7 @@ export class AgentActivityStore {
     this.now = deps.now ?? (() => new Date());
     this.freshnessMs = deps.freshnessMs ?? AGENT_ACTIVITY_FRESHNESS_MS;
     this.resolveOccupantGeneration = deps.resolveOccupantGeneration;
+    this.isRegisteredOccupantGeneration = deps.isRegisteredOccupantGeneration;
   }
 
   recordHookEvent(input: HookActivityInput): RecordHookActivityResult {
@@ -135,9 +140,10 @@ export class AgentActivityStore {
 
     // W2a-1 — compare-at-read against the shipped occupant-tenure generation_uuid (pm ruling
     // 2026-08-08, the fully-specified Variant C):
-    //  (1) both generations known and DIFFERENT ⇒ MISMATCH: positive evidence the claim belongs to a
-    //      prior, dead tenure ⇒ unknown + `generation_mismatch`, stale:true, provenance RESOLVED —
-    //      REFUSED, so no dead tenure is honored as the live seat (detection fires).
+    //  (1) the carried generation is REGISTERED FOR THIS NODE and differs from live ⇒ MISMATCH:
+    //      positive evidence the claim belongs to a prior, dead tenure ⇒ unknown +
+    //      `generation_mismatch`, stale:true, provenance RESOLVED. An unregistered prelaunch
+    //      reservation is absence of evidence and stays UNRESOLVABLE, never mismatch.
     //  (2) both known and EQUAL (incl. a same-native-session relaunch — the ledger treats it as a
     //      continuation with no new generation) ⇒ provenance RESOLVED, deliver normally (fresh).
     //  (3) null on EITHER side ⇒ UNRESOLVABLE: ABSENCE of evidence, not a dead-tenure finding. State
@@ -162,6 +168,17 @@ export class AgentActivityStore {
       }
       const recordedGeneration = activity.generation ?? null;
       if (liveGeneration !== null && recordedGeneration !== null) {
+        if (this.isRegisteredOccupantGeneration) {
+          let registered: boolean;
+          try {
+            registered = this.isRegisteredOccupantGeneration(nodeId, recordedGeneration);
+          } catch {
+            return this.generationDegraded(activity, referenceTime);
+          }
+          if (!registered) {
+            return this.generationUnresolved(activity, referenceTime, "generation_unresolvable");
+          }
+        }
         if (recordedGeneration !== liveGeneration) {
           return this.generationMismatch(activity, referenceTime);
         }
@@ -198,8 +215,10 @@ export class AgentActivityStore {
     };
   }
 
-  /** W2a-1 — the dead-tenure verdict: the claim's occupant generation is KNOWN and DIFFERENT from the
-   *  live one, so it must not be honored as the live seat. Returns unknown + `generation_mismatch`,
+  /** W2a-1 — the dead-tenure verdict: the claim's occupant generation is REGISTERED FOR THIS NODE and
+   *  DIFFERENT from the live generation. The membership gate runs before this helper, so an uncommitted
+   *  reservation can never manufacture a positive dead-tenure finding.
+   *  It must not be honored as the live seat. Returns unknown + `generation_mismatch`,
    *  stale:true (detection fires), provenance `resolved` (both generations WERE resolved — they simply
    *  differ). This is the ONLY generation case that abstains; a null on either side is UNRESOLVED
    *  provenance and is DELIVERED labelled, never routed here. */

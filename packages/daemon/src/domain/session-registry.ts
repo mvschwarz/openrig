@@ -86,7 +86,12 @@ export class SessionRegistry {
     this.watchdogRegistrationObserver = observer;
   }
 
-  registerSession(nodeId: string, sessionName: string, kind: OccupantKind = "initial"): Session {
+  registerSession(
+    nodeId: string,
+    sessionName: string,
+    kind: OccupantKind = "initial",
+    reservedGeneration?: string | null,
+  ): Session {
     if (!validateSessionName(sessionName)) {
       throw new Error(
         `Invalid session name "${sessionName}": must match legacy r{NN}-{suffix} or canonical {pod}-{member}@{rig} format with allowed characters (a-z, A-Z, 0-9, -, _, ., @)`
@@ -99,7 +104,7 @@ export class SessionRegistry {
         "INSERT INTO sessions (id, node_id, session_name) VALUES (?, ?, ?)"
       )
       .run(id, nodeId, sessionName);
-    this.mintOccupantTenureBestEffort(nodeId, kind); // atom-B: mint this occupant generation
+    this.mintOccupantTenureBestEffort(nodeId, kind, reservedGeneration); // atom-B: mint this occupant generation
     this.observeWatchdogRegistration(nodeId, sessionName, kind);
     return this.rowToSession(
       this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow
@@ -107,14 +112,19 @@ export class SessionRegistry {
   }
 
   /** Register a claimed session — skips naming validation, sets origin='claimed', startup_status='ready'. */
-  registerClaimedSession(nodeId: string, sessionName: string, kind: OccupantKind = "adopt"): Session {
+  registerClaimedSession(
+    nodeId: string,
+    sessionName: string,
+    kind: OccupantKind = "adopt",
+    reservedGeneration?: string | null,
+  ): Session {
     const id = ulid();
     this.db
       .prepare(
         "INSERT INTO sessions (id, node_id, session_name, status, origin, startup_status) VALUES (?, ?, ?, 'running', 'claimed', 'ready')"
       )
       .run(id, nodeId, sessionName);
-    this.mintOccupantTenureBestEffort(nodeId, kind); // atom-B: mint this occupant generation
+    this.mintOccupantTenureBestEffort(nodeId, kind, reservedGeneration); // atom-B: mint this occupant generation
     this.observeWatchdogRegistration(nodeId, sessionName, kind);
 
     return this.rowToSession(
@@ -136,9 +146,13 @@ export class SessionRegistry {
    *  missing ledger table in production is a visible defect) and let the register succeed;
    *  generation-scoped consumers degrade to loud-pending, never a silent-wrong. Direct callers that
    *  REQUIRE the tenure use `mintOccupantTenure` (which throws). */
-  private mintOccupantTenureBestEffort(nodeId: string, kind: OccupantKind): void {
+  private mintOccupantTenureBestEffort(
+    nodeId: string,
+    kind: OccupantKind,
+    reservedGeneration?: string | null,
+  ): void {
     try {
-      this.mintOccupantTenure(nodeId, kind);
+      this.mintOccupantTenure(nodeId, kind, null, reservedGeneration);
     } catch (e) {
       if (!SessionRegistry.tenureMintWarned) {
         SessionRegistry.tenureMintWarned = true;
@@ -190,7 +204,31 @@ export class SessionRegistry {
   }
   private static watchdogEnsureWarned = false;
 
-  mintOccupantTenure(nodeId: string, kind: OccupantKind, nativeSessionIdAtBoot?: string | null): OccupantTenure {
+  /** Reserve the generation that a managed process will carry before it starts. The capability probe
+   * is read-only: a failed/missing ledger yields null and launch continues without fabricating state. */
+  reserveOccupantGeneration(): string | null {
+    try {
+      this.db.prepare("SELECT 1 FROM occupant_tenures LIMIT 1").get();
+      return randomUUID();
+    } catch {
+      return null;
+    }
+  }
+
+  /** True only when this exact generation is registered for this exact node. Throws on ledger faults so
+   * callers can preserve the distinct generation_resolver_error verdict. */
+  isOccupantGenerationRegistered(nodeId: string, generationUuid: string): boolean {
+    return Boolean(this.db.prepare(
+      "SELECT 1 FROM occupant_tenures WHERE node_id = ? AND generation_uuid = ? LIMIT 1",
+    ).get(nodeId, generationUuid));
+  }
+
+  mintOccupantTenure(
+    nodeId: string,
+    kind: OccupantKind,
+    nativeSessionIdAtBoot?: string | null,
+    reservedGeneration?: string | null,
+  ): OccupantTenure {
     if (nativeSessionIdAtBoot != null && nativeSessionIdAtBoot !== "") {
       const existing = this.db
         .prepare(
@@ -204,7 +242,7 @@ export class SessionRegistry {
         .prepare("SELECT MAX(generation_ordinal) AS m FROM occupant_tenures WHERE node_id = ?")
         .get(nodeId) as { m: number | null }).m) ?? 0) + 1;
     const id = ulid();
-    const generationUuid = randomUUID();
+    const generationUuid = reservedGeneration || randomUUID();
     this.db
       .prepare(
         "INSERT INTO occupant_tenures (id, node_id, generation_ordinal, generation_uuid, kind, native_session_id_at_boot) VALUES (?, ?, ?, ?, ?, ?)"
