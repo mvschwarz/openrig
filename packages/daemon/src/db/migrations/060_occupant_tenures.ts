@@ -5,9 +5,12 @@ import type { Migration } from "../migrate.js";
 // A `sessions` row is a REGISTRATION, not a tenure — treating a row as a generation mints PHANTOM
 // generations. This append-only ledger records ONE row per OCCUPANT GENERATION on a node, minted in
 // the registry at registerSession / registerClaimedSession (callers declare `kind`). `generation_uuid`
-// is the STABLE occupant identity that survives handover/swap/repair (the provider's native session id
-// is a separate POINTER — the 51-09 split); consumers compare it to gate stale-generation state
-// (the ghost-stage defect). node_id is stable across handover/swap/repair.
+// identifies ONE occupant tenure: it PERSISTS within a tenure (a same-native relaunch is a
+// continuation, not a new generation) but CHANGES for a new occupant — a handover/swap/repair to a
+// different native session mints a NEW generation_uuid (the provider's native session id is a separate
+// POINTER — the 51-09 split). Consumers compare recorded-vs-live generation_uuid to gate
+// stale-generation state (the ghost-stage defect): a CHANGED generation is the dead-tenure signal.
+// node_id is the identity that IS stable across handover/swap/repair — the cross-handover key.
 //
 // HONEST BOUNDARY: node_id does NOT survive a `rig` teardown-recreate of the node — out of scope for
 // this ledger (a recreated node is a genuinely new identity), and labelled here so no consumer assumes
