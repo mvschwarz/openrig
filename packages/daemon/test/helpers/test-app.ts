@@ -144,6 +144,7 @@ export const migrationsForFullTestDbExclusions: Record<string, string> = {
   "062_usage_samples.sql": "usage-metering subsystem table — usage suites migrate it inline.",
   "065_identity_provenance.sql": "P21 additive era-stamp column on 037_mission_control_actions (itself excluded) — mission-control / review-freeze / scope suites migrate it inline where they assert provenance.",
   "067_i3_identity_provenance.sql": "P21 additive era-stamp columns; it ALTERs inbox_entries + outbox_entries (both excluded from the core edge) alongside queue_transitions/stream_items, so it cannot ride the core-edge list — queue / inbox / outbox / stream suites asserting provenance migrate it inline.",
+  "068_enforcer_decisions.sql": "compaction-enforcement decision subsystem table — W4 suites migrate ALL_MIGRATIONS inline; no shared full-test DB consumer reads it.",
 };
 
 export function createFullTestDb(): Database.Database {
