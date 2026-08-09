@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
+import { allowFetchTarget } from "./fetch-guard.js";
 import { broadcastCommand } from "../src/commands/broadcast.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
@@ -84,6 +85,9 @@ describe("Broadcast CLI", () => {
     // test is a bug independent of routing; this makes the fixture the only reachable target.
     vi.stubEnv("OPENRIG_URL", `http://127.0.0.1:${port}`);
     vi.stubEnv("OPENRIG_PORT", String(port));
+    // P37: register this in-process fixture with the request-layer guard so its real
+    // requests are PERMITTED (the guard fails closed on unregistered targets).
+    allowFetchTarget(`http://127.0.0.1:${port}`);
   });
   afterEach(() => { vi.unstubAllEnvs(); });
 

@@ -60,3 +60,12 @@ delete process.env["RIGGED_HOME"];
 const { OPENRIG_HOME } = await import("../src/openrig-compat.js");
 const { assertFixtureScopedHome } = await import("./live-daemon-guard.js");
 assertFixtureScopedHome(OPENRIG_HOME);
+
+// (4) P37 REQUEST-LAYER GUARD — the universal outbound-request chokepoint. The two
+// guards above close the DISCOVERY paths (connection env, state-file home); this closes
+// the REQUEST layer, where a hardcoded :7433 literal, a mocked URL getter with an
+// un-mocked client, or a production default constant still issues a real request that
+// no env-scrub or fixture-home can catch. Fail-closed on any unregistered target; an
+// in-process fixture registers its origin (allowFetchTarget) when it binds.
+const { installFetchGuard } = await import("./fetch-guard.js");
+installFetchGuard();
