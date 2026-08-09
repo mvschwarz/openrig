@@ -97,6 +97,30 @@ test("candidate binding: same verdict basename at a different path is not exclud
   assertCandidateRefusal(await runGate(root), /sub\/dir\/gate-lane-verdict\.json|candidate.*dirty/i);
 });
 
+test("candidate binding: a tracked verdict destination is refused without replacing owner data", async () => {
+  const root = makeRepo();
+  const verdictPath = join(root, "tracked.txt");
+  const ownerData = readFileSync(verdictPath, "utf8");
+
+  const result = await runGate(root, { OPENRIG_GATE_VERDICT: verdictPath });
+
+  assertCandidateRefusal(result, /verdict.*tracked|tracked.*verdict/i);
+  assert.equal(readFileSync(verdictPath, "utf8"), ownerData);
+});
+
+test("candidate binding: a foreign verdict destination is refused without replacing owner data", async () => {
+  const root = makeRepo();
+  const foreignRoot = mkdtempSync(join(tmpdir(), "gate-foreign-owner-"));
+  const verdictPath = join(foreignRoot, "owner.txt");
+  const ownerData = "foreign owner data\n";
+  write(verdictPath, ownerData);
+
+  const result = await runGate(root, { OPENRIG_GATE_VERDICT: verdictPath });
+
+  assertCandidateRefusal(result, /verdict.*(outside|worktree)|outside.*worktree/i);
+  assert.equal(readFileSync(verdictPath, "utf8"), ownerData);
+});
+
 test("candidate binding: only the canonical verdict path may be present and the verdict binds HEAD", async () => {
   const root = makeRepo();
   const verdictPath = join(root, "receipts/current-verdict.json");

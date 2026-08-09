@@ -5,7 +5,7 @@
 //   (advisory, recorded) → run BOTH legs (typecheck AND vitest AND vitest:ui — the two honesty gaps) →
 //   write the C2 verdict (green carries the load it ran under) → release (kernel also frees on death).
 import { spawnSync, execSync } from "node:child_process";
-import { writeFileSync, readFileSync, mkdirSync, realpathSync, unlinkSync } from "node:fs";
+import { writeFileSync, readFileSync, mkdirSync, realpathSync, unlinkSync, lstatSync } from "node:fs";
 import { tmpdir, loadavg } from "node:os";
 import { join, dirname, basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,36 +50,60 @@ function readCandidateSha(repoRoot) {
   return sha;
 }
 
-function canonicalVerdictRelativePath(repoRoot) {
-  const verdictPath = resolve(VERDICT_PATH);
-  let canonicalPath = verdictPath;
-  try {
-    canonicalPath = realpathSync(verdictPath);
-  } catch {
-    try { canonicalPath = join(realpathSync(dirname(verdictPath)), basename(verdictPath)); } catch { /* absent parent: no status entry can match */ }
+function canonicalizeDestination(destination) {
+  let cursor = resolve(destination);
+  const missingSegments = [];
+  while (true) {
+    let exists = true;
+    try {
+      lstatSync(cursor);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      exists = false;
+    }
+    if (exists) {
+      return resolve(realpathSync(cursor), ...missingSegments);
+    }
+    const parent = dirname(cursor);
+    if (parent === cursor) throw new Error(`cannot resolve verdict destination: ${destination}`);
+    missingSegments.unshift(basename(cursor));
+    cursor = parent;
   }
-  const rel = relative(realpathSync(repoRoot), canonicalPath);
-  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return null;
-  return rel.split(sep).join("/");
 }
 
-function assertCandidateClean(repoRoot) {
-  const canonicalVerdict = canonicalVerdictRelativePath(repoRoot);
+function resolveVerdictDestination(repoRoot) {
+  const root = realpathSync(repoRoot);
+  const absolutePath = canonicalizeDestination(VERDICT_PATH);
+  const rel = relative(root, absolutePath);
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+    throw new Error(`verdict destination must be inside the current worktree: ${absolutePath}`);
+  }
+  const relativePath = rel.split(sep).join("/");
+  const tracked = runGit(["--literal-pathspecs", "ls-files", "-z", "--", relativePath], repoRoot)
+    .split("\0")
+    .filter(Boolean);
+  if (tracked.includes(relativePath)) {
+    throw new Error(`verdict destination must be untracked: ${relativePath}`);
+  }
+  return { absolutePath, relativePath };
+}
+
+function assertCandidateClean(repoRoot, verdictRelativePath) {
   const records = runGit(["status", "--porcelain=v1", "-z", "--untracked-files=all"], repoRoot)
     .split("\0")
     .filter(Boolean);
   const unexpected = records.filter((record) => {
     if (record.length < 4 || record[2] !== " ") return true;
-    return record.slice(3).split(sep).join("/") !== canonicalVerdict;
+    return record.slice(3).split(sep).join("/") !== verdictRelativePath;
   });
   if (unexpected.length > 0) {
     throw new Error(`candidate worktree is dirty: ${unexpected.join(" | ")}`);
   }
 }
 
-function invalidatePriorVerdict() {
+function invalidatePriorVerdict(verdictPath) {
   try {
-    unlinkSync(VERDICT_PATH);
+    unlinkSync(verdictPath);
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
@@ -94,14 +118,15 @@ async function main() {
   }
   let exitCode = 3;
   try {
+    const repoRoot = process.cwd();
+    const verdictDestination = resolveVerdictDestination(repoRoot);
     // This acquired run supersedes every earlier receipt, including for the same HEAD.
-    invalidatePriorVerdict();
+    invalidatePriorVerdict(verdictDestination.absolutePath);
     const foreignLoad = observeForeignLoad({ loadavg: loadavg(), processes: snapshotProcesses() });
     if (foreignLoad.advisory.length) console.warn(`⚠ advisory (exit UNCHANGED, recorded in verdict): ${foreignLoad.advisory.join("; ")}`);
     // Bind the run to one clean, worktree-local candidate BEFORE the first repository mutation.
-    const repoRoot = process.cwd();
     const candidateSha = readCandidateSha(repoRoot);
-    assertCandidateClean(repoRoot);
+    assertCandidateClean(repoRoot, verdictDestination.relativePath);
     checkDependencyRoot(repoRoot);
     // SOURCE-TRUTH: drop any stale vendored daemon bundle (a gitignored build:package leftover) before
     // the legs run, so test:repo's freshness guard is never poisoned by a desk leftover. Real package-time
@@ -120,13 +145,13 @@ async function main() {
     if (endingSha !== candidateSha) {
       throw new Error(`candidate HEAD changed during gate (started ${candidateSha}, ended ${endingSha})`);
     }
-    assertCandidateClean(repoRoot);
+    assertCandidateClean(repoRoot, verdictDestination.relativePath);
     checkDependencyRoot(repoRoot);
     verdict.candidateSha = candidateSha;
-    mkdirSync(dirname(VERDICT_PATH), { recursive: true }); // ensure the verdict's home exists
-    writeFileSync(VERDICT_PATH, JSON.stringify(verdict, null, 2));
+    mkdirSync(dirname(verdictDestination.absolutePath), { recursive: true }); // ensure the verdict's home exists
+    writeFileSync(verdictDestination.absolutePath, JSON.stringify(verdict, null, 2));
     console.log(verdict.ledgerState); // in-band LOUD: name every exclusion (or "0 exclusions")
-    console.log(`gate: ${verdict.gate.toUpperCase()} — verdict → ${VERDICT_PATH} (legs: ${verdict.legs.map((l) => `${l.name}=${l.ok ? "ok" : "FAIL"}`).join(", ")})`);
+    console.log(`gate: ${verdict.gate.toUpperCase()} — verdict → ${verdictDestination.absolutePath} (legs: ${verdict.legs.map((l) => `${l.name}=${l.ok ? "ok" : "FAIL"}`).join(", ")})`);
     exitCode = verdict.gate === "pass" ? 0 : 1;
   } catch (e) {
     console.error("gate-lane legs threw:", e?.stack ?? e);
