@@ -13,7 +13,7 @@ import { requireSenderIdentity } from "./require-sender-identity.js";
 import { hostname as osHostname } from "node:os";
 import type { InboxHandler } from "../domain/inbox-handler.js";
 import { InboxHandlerError } from "../domain/inbox-handler.js";
-import type { OutboxHandler } from "../domain/outbox-handler.js";
+import { WAKE_INTENT_PREFIX, type OutboxHandler } from "../domain/outbox-handler.js";
 import { aggregateAttention } from "../domain/feed/attention-aggregator.js";
 import type { AttentionItem } from "../domain/feed/attention-aggregator.js";
 import { loadHostRegistry, resolveHost } from "../domain/hosts/hosts-registry-reader.js";
@@ -1007,6 +1007,16 @@ export function queueRoutes(): Hono {
     // P21 I3: the outbox sender is the transport-derived identity, never body.senderSession.
     const identity = requireSenderIdentity(c, { verb: "outbox record", bodyClaim: body.senderSession });
     if (!identity.ok) return identity.response;
+    // MF5: the wake-intent id namespace is RESERVED for daemon-internal wake intents
+    // that the startup drain EXECUTES. A public audit write must not be able to
+    // forge one (an ordinary /outbox/record would otherwise become a real startup
+    // wake for an arbitrary/nonexistent qitem).
+    if (body.outboxId && body.outboxId.startsWith(WAKE_INTENT_PREFIX)) {
+      return c.json(
+        { error: `outboxId prefix '${WAKE_INTENT_PREFIX}' is reserved for daemon-internal wake intents and may not be set by callers` },
+        400,
+      );
+    }
     if (!body.destinationSession) return c.json({ error: "destinationSession is required" }, 400);
     if (!body.body) return c.json({ error: "body is required" }, 400);
 

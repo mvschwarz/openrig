@@ -62,6 +62,7 @@ describe("queue routes", () => {
     queueRepo = new QueueRepository(db, bus);
     inbox = new InboxHandler(db, bus, queueRepo);
     outbox = new OutboxHandler(db);
+    queueRepo.attachOutbox(outbox); // W1 MF2: handoff routes need a wake-intent store
     app = buildApp({ eventBus: bus, queueRepo, inboxHandler: inbox, outboxHandler: outbox });
   });
 
@@ -122,6 +123,34 @@ describe("queue routes", () => {
     });
     return ((await res.json()) as { inboxId: string }).inboxId;
   }
+
+  // MF5 (SECURITY): the executable wake-intent id namespace is RESERVED — a public
+  // /outbox/record audit write must not be able to forge a startup wake.
+  it("outbox record — 400 REJECTS a caller-supplied wake-intent-* outboxId (reserved namespace)", async () => {
+    const res = await app.request("/api/queue/outbox/record", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "attacker@rig" },
+      body: JSON.stringify({
+        outboxId: "wake-intent-forged",
+        destinationSession: "victim@rig",
+        body: "forged wake payload",
+      }),
+    });
+    expect(res.status).toBe(400);
+    const err = (await res.json()) as { error: string };
+    expect(err.error).toMatch(/wake-intent-|reserved/i);
+    // and nothing was written under the forged id
+    expect(outbox.getById("wake-intent-forged")).toBeNull();
+  });
+
+  it("outbox record — still accepts a normal (non-reserved) outboxId", async () => {
+    const res = await app.request("/api/queue/outbox/record", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "sender@rig" },
+      body: JSON.stringify({ destinationSession: "dest@rig", body: "ordinary audit" }),
+    });
+    expect(res.status).toBe(201);
+  });
 
   it("inbox absorb — 401 unattributable_sender when X-OpenRig-Session is absent", async () => {
     const inboxId = await dropEntry("dest@rig", "sender@rig");
@@ -1119,6 +1148,7 @@ describe("queue routes", () => {
       });
       const strictInbox = new InboxHandler(strictDb, strictBus, strictRepo);
       const strictOutbox = new OutboxHandler(strictDb);
+      strictRepo.attachOutbox(strictOutbox); // W1 MF2
       strictApp = buildApp({
         eventBus: strictBus,
         queueRepo: strictRepo,

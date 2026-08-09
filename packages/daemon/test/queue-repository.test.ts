@@ -10,7 +10,9 @@ import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summ
 import { queueItemEvidenceRefSchema } from "../src/db/migrations/048_queue_item_evidence_ref.js";
 import { watchdogJobsSchema } from "../src/db/migrations/031_watchdog_jobs.js";
 import { occupantGenerationStampsSchema } from "../src/db/migrations/063_occupant_generation_stamps.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import {
   QueueRepository,
   QueueRepositoryError,
@@ -26,9 +28,12 @@ describe("QueueRepository", () => {
 
   beforeEach(() => {
     db = createDb();
-    migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema]);
+    migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, outboxEntriesSchema]);
     bus = new EventBus(db);
     repo = new QueueRepository(db, bus);
+    // W1 MF2: a nudge-intended terminal handoff now requires an attached wake-intent
+    // store (production always wires one at startup) — mirror that in the harness.
+    repo.attachOutbox(new OutboxHandler(db));
     captured = [];
     bus.subscribe((e) => captured.push(e));
   });
@@ -417,6 +422,7 @@ describe("QueueRepository", () => {
         },
       };
       const nudgingRepo = new QueueRepository(db, bus, { transport: stubTransport });
+      nudgingRepo.attachOutbox(new OutboxHandler(db)); // W1 MF2: handoff needs a wake-intent store
       const original = await nudgingRepo.create({
         sourceSession: "alice@rig",
         destinationSession: "bob@rig",

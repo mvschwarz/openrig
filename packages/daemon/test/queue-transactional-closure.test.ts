@@ -41,13 +41,14 @@ interface SendCall {
 
 /** A mock wake transport that records every send and lets a test dictate the
  *  outcome (ok+verified, ok+unverified = the ambiguous face, not-ok, or throw). */
+type SendMode = "verified" | "unverified" | "notok" | "timeout" | "throw" | "throw-timeout";
 function makeMockTransport(): {
   transport: QueueNudgeTransport;
   calls: SendCall[];
-  outcome: { mode: "verified" | "unverified" | "notok" | "throw"; error?: string };
+  outcome: { mode: SendMode; error?: string };
 } {
   const calls: SendCall[] = [];
-  const outcome: { mode: "verified" | "unverified" | "notok" | "throw"; error?: string } = {
+  const outcome: { mode: SendMode; error?: string } = {
     mode: "verified",
   };
   const transport: QueueNudgeTransport = {
@@ -60,15 +61,20 @@ function makeMockTransport(): {
           return { ok: true, verified: false };
         case "notok":
           return { ok: false, error: outcome.error ?? "unreachable" };
+        case "timeout":
+          // A timeout is AMBIGUOUS: the send may or may not have landed.
+          return { ok: false, reason: "verify timeout waiting for render ack" };
         case "throw":
           throw new Error(outcome.error ?? "transport exploded");
+        case "throw-timeout":
+          throw new Error("send ETIMEDOUT after 5000ms");
       }
     },
   };
   return { transport, calls, outcome };
 }
 
-function makeHarness() {
+function makeHarness(opts?: { deferTransport?: boolean; resolveOccupantGeneration?: () => string | null }) {
   const db = createDb();
   migrate(db, [
     coreSchema,
@@ -81,11 +87,80 @@ function makeHarness() {
   const bus = new EventBus(db);
   const outbox = new OutboxHandler(db);
   const { transport, calls, outcome } = makeMockTransport();
-  const repo = new QueueRepository(db, bus, { validateRig: () => true });
-  repo.attachTransport(transport);
+  const repo = new QueueRepository(db, bus, {
+    validateRig: () => true,
+    resolveOccupantGeneration: opts?.resolveOccupantGeneration,
+  });
+  // deferTransport leaves the intent PENDING after a real handoff (the immediate
+  // post-commit deliver is skipped without a transport) — the crash window a drain
+  // recovers from.
+  if (!opts?.deferTransport) repo.attachTransport(transport);
   repo.attachOutbox(outbox);
-  return { db, bus, outbox, repo, calls, outcome };
+  return {
+    db, bus, outbox, repo, calls, outcome, transport,
+    attachTransport: () => repo.attachTransport(transport),
+  };
 }
+
+// MF2 (guard HOLD): the atomic seam must NOT be optional and must NOT span two
+// databases. A durable wake intent only commits atomically with the close when it
+// is written on the SAME connection inside the same transaction; and a
+// nudge-intended terminal act with no intent store cannot make good on W1's
+// guarantee, so it must fail closed rather than silently close without an intent.
+describe("W1 MF2 — the atomic seam is mandatory and single-DB", () => {
+  it("attachOutbox REJECTS an outbox backed by a different DB connection (split-DB)", () => {
+    const db1 = createDb();
+    migrate(db1, [
+      coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema,
+      queueTargetRepoSchema, outboxEntriesSchema,
+    ]);
+    const db2 = createDb();
+    migrate(db2, [outboxEntriesSchema]);
+    const repo = new QueueRepository(db1, new EventBus(db1), { validateRig: () => true });
+    const foreignOutbox = new OutboxHandler(db2); // different connection
+    expect(() => repo.attachOutbox(foreignOutbox)).toThrow(/db|connection|same/i);
+    db1.close();
+    db2.close();
+  });
+
+  it("a nudge-intended terminal handoff with NO outbox attached FAILS CLOSED (no silent close-without-intent)", async () => {
+    const db = createDb();
+    migrate(db, [
+      coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema,
+      queueTargetRepoSchema, outboxEntriesSchema,
+    ]);
+    const { transport } = makeMockTransport();
+    const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    repo.attachTransport(transport);
+    // deliberately NO attachOutbox
+    const source = await repo.create({
+      sourceSession: "planner@rig", destinationSession: "driver@rig", body: "x",
+    });
+    await expect(
+      repo.handoff({ qitemId: source.qitemId, fromSession: "driver@rig", toSession: "reviewer@rig", body: "y" }),
+    ).rejects.toThrow(/intent store|outbox|unavailable/i);
+    // the close rolled back — source stays open
+    expect(repo.getById(source.qitemId)!.state).toBe("pending");
+    db.close();
+  });
+
+  it("a nudge:false terminal handoff with NO outbox is allowed (no wake intended ⇒ no store needed)", async () => {
+    const db = createDb();
+    migrate(db, [
+      coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema,
+      queueTargetRepoSchema, outboxEntriesSchema,
+    ]);
+    const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    const source = await repo.create({
+      sourceSession: "planner@rig", destinationSession: "driver@rig", body: "x",
+    });
+    const { closed } = await repo.handoff({
+      qitemId: source.qitemId, fromSession: "driver@rig", toSession: "reviewer@rig", body: "y", nudge: false,
+    });
+    expect(closed.state).toBe("handed-off");
+    db.close();
+  });
+});
 
 describe("W1 transactional closure — W1-a: the durable intent row joins the terminal txn", () => {
   let h: ReturnType<typeof makeHarness>;
@@ -247,28 +322,31 @@ describe("W1 transactional closure — W1-b: the drain, with indeterminate-outco
     expect(row!.deliveryState).toBe("failed");
   });
 
-  it("demo1 — drain a crash-orphaned pending intent, IDEMPOTENTLY: drain twice, delivered ONCE", async () => {
-    // A committed-but-undelivered wake intent models the crash window: the
-    // terminal txn committed (intent durable) but the process died before the
-    // post-commit deliver. The startup-recovery sweep is the retry.
-    h.outbox.record({
-      outboxId: "wake-intent-qX",
-      senderSession: "driver@rig",
-      destinationSession: "reviewer@rig",
-      body: "Queue handoff: qX - check your queue.",
-      auditPointer: "qX",
+  it("demo1 — a crash-orphaned intent from a REAL handoff drains idempotently: drain twice, delivered ONCE", async () => {
+    // Drive the REAL emitter (proof contract): a handoff with NO transport attached
+    // commits the durable intent but skips the immediate deliver — exactly a crash
+    // after commit / before drain. Then the recovery sweep delivers it, once.
+    const g = makeHarness({ deferTransport: true });
+    const source = await g.repo.create({ sourceSession: "planner@rig", destinationSession: "driver@rig", body: "x" });
+    const { created } = await g.repo.handoff({
+      qitemId: source.qitemId, fromSession: "driver@rig", toSession: "reviewer@rig", body: "y",
     });
-    h.outcome.mode = "verified";
+    // committed but PENDING, and never sent — the crash window.
+    expect(g.outbox.getById(`wake-intent-${created.qitemId}`)!.deliveryState).toBe("pending");
+    expect(g.calls).toHaveLength(0);
 
-    const first = await h.repo.drainPendingWakeIntents();
+    g.attachTransport();
+    g.outcome.mode = "verified";
+    const first = await g.repo.drainPendingWakeIntents();
     expect(first.delivered).toBe(1);
-    expect(h.calls).toHaveLength(1);
-    expect(h.outbox.getById("wake-intent-qX")!.deliveryState).toBe("delivered");
+    expect(g.calls).toHaveLength(1);
+    expect(g.outbox.getById(`wake-intent-${created.qitemId}`)!.deliveryState).toBe("delivered");
 
     // Second drain finds nothing pending — the compare-and-set makes it a no-op.
-    const second = await h.repo.drainPendingWakeIntents();
+    const second = await g.repo.drainPendingWakeIntents();
     expect(second.delivered).toBe(0);
-    expect(h.calls).toHaveLength(1); // delivered exactly once
+    expect(g.calls).toHaveLength(1); // delivered exactly once
+    g.db.close();
   });
 });
 
@@ -337,5 +415,163 @@ describe("W1 transactional closure — W1-c: the seam guard (a terminal close ca
 
     expect(closed.state).toBe("handed-off");
     spy.mockRestore();
+  });
+});
+
+// MF6 (guard HOLD): the LOCK requires a timeout/ambiguous outcome to record
+// `indeterminate`. The prior code classified only ok&&!verified that way; a
+// timeout-shaped non-OK became `failed`, and because recovery drains only
+// `pending`, a `failed` row is never retried despite the prose. Fix: classify a
+// timeout as indeterminate from the typed result; keep the honest retry policy
+// (only `pending` is retried; failed/indeterminate are terminal-visible).
+describe("W1 MF6 — timeout classifies as indeterminate; retry policy is honest", () => {
+  let h: ReturnType<typeof makeHarness>;
+  beforeEach(() => { h = makeHarness(); });
+  afterEach(() => h.db.close());
+
+  async function doHandoff() {
+    const source = await h.repo.create({
+      sourceSession: "planner@rig", destinationSession: "driver@rig", body: "x",
+    });
+    h.calls.length = 0;
+    return h.repo.handoff({
+      qitemId: source.qitemId, fromSession: "driver@rig", toSession: "reviewer@rig", body: "y",
+    });
+  }
+
+  it("a transport TIMEOUT (ok:false, timeout reason) records INDETERMINATE, not failed", async () => {
+    h.outcome.mode = "timeout";
+    const { created } = await doHandoff();
+    expect(h.outbox.getById(`wake-intent-${created.qitemId}`)!.deliveryState).toBe("indeterminate");
+  });
+
+  it("a THROWN timeout (ETIMEDOUT) also records INDETERMINATE", async () => {
+    h.outcome.mode = "throw-timeout";
+    const { created } = await doHandoff();
+    expect(h.outbox.getById(`wake-intent-${created.qitemId}`)!.deliveryState).toBe("indeterminate");
+  });
+
+  it("a genuine hard failure (unreachable) still records FAILED", async () => {
+    h.outcome.mode = "notok";
+    const { created } = await doHandoff();
+    expect(h.outbox.getById(`wake-intent-${created.qitemId}`)!.deliveryState).toBe("failed");
+  });
+
+  it("retry policy is honest: a FAILED intent is NOT re-drained by the recovery sweep", async () => {
+    h.outcome.mode = "notok";
+    const { created } = await doHandoff();
+    expect(h.outbox.getById(`wake-intent-${created.qitemId}`)!.deliveryState).toBe("failed");
+    h.calls.length = 0;
+    h.outcome.mode = "verified";
+    const tally = await h.repo.drainPendingWakeIntents();
+    // recovery drains only `pending` — a terminal `failed` is left visible, not resent.
+    expect(tally).toEqual({ delivered: 0, indeterminate: 0, failed: 0 });
+    expect(h.calls).toHaveLength(0);
+    expect(h.outbox.getById(`wake-intent-${created.qitemId}`)!.deliveryState).toBe("failed");
+  });
+});
+
+// MF3 (guard HOLD): overlapping drains must send the external wake ONCE, not just
+// converge to one final state. The claim-before-send (pending→sending) makes the
+// losing drain find nothing to claim.
+describe("W1 MF3 — overlapping drains send the external wake exactly once", () => {
+  let h: ReturnType<typeof makeHarness>;
+  beforeEach(() => { h = makeHarness(); });
+  afterEach(() => h.db.close());
+
+  it("two concurrent drains of the same crash-orphaned intent: ONE send, honest tallies", async () => {
+    const g = makeHarness({ deferTransport: true });
+    const source = await g.repo.create({ sourceSession: "planner@rig", destinationSession: "driver@rig", body: "x" });
+    const { created } = await g.repo.handoff({
+      qitemId: source.qitemId, fromSession: "driver@rig", toSession: "reviewer@rig", body: "y",
+    });
+    g.attachTransport();
+    g.outcome.mode = "verified";
+    const [ta, tb] = await Promise.all([
+      g.repo.drainPendingWakeIntents(),
+      g.repo.drainPendingWakeIntents(),
+    ]);
+    expect(g.calls).toHaveLength(1); // the external wake happened exactly ONCE
+    expect(ta.delivered + tb.delivered).toBe(1); // per-drain tallies sum to one, not two
+    expect(g.outbox.getById(`wake-intent-${created.qitemId}`)!.deliveryState).toBe("delivered");
+    g.db.close();
+  });
+});
+
+// MF4 (guard HOLD): recovery must not forge the CURRENT occupant's generation onto
+// an old intent. The intent freezes the emitting envelope (generation resolved at
+// stage time) and delivery replays it verbatim.
+describe("W1 MF4 — the intent freezes its emitting generation/envelope", () => {
+  const ALL = [
+    coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema,
+    queueTargetRepoSchema, outboxEntriesSchema,
+  ];
+
+  it("freeze: the staged intent carries the SOURCE generation resolved at STAGE time", async () => {
+    const db = createDb();
+    migrate(db, ALL);
+    const { transport } = makeMockTransport();
+    const repo = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      resolveOccupantGeneration: () => "11111111-aaaa-bbbb-cccc-dddddddddddd",
+    });
+    repo.attachTransport(transport);
+    const outbox = new OutboxHandler(db);
+    repo.attachOutbox(outbox);
+    const source = await repo.create({ sourceSession: "planner@rig", destinationSession: "driver@rig", body: "x" });
+    const { created } = await repo.handoff({
+      qitemId: source.qitemId, fromSession: "driver@rig", toSession: "reviewer@rig", body: "y",
+    });
+    const intent = outbox.getById(`wake-intent-${created.qitemId}`);
+    expect(intent!.body).toContain("gen 11111111"); // frozen at stage
+    db.close();
+  });
+
+  it("no relabel: recovery delivers the FROZEN envelope verbatim after a tenure swap", async () => {
+    const db = createDb();
+    migrate(db, ALL);
+    const { transport, calls, outcome } = makeMockTransport();
+    // A resolver that would relabel to the CURRENT occupant if delivery re-resolved.
+    const repo = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      resolveOccupantGeneration: () => "22222222-current-occupant-tenure",
+    });
+    const outbox = new OutboxHandler(db);
+    repo.attachOutbox(outbox);
+    // A REAL successor qitem so the intent references an existing target (MF5).
+    const successor = await repo.create({ sourceSession: "driver@rig", destinationSession: "reviewer@rig", body: "z" });
+    // A committed-but-undelivered intent whose frozen envelope carries the ORIGINAL gen.
+    const FROZEN =
+      `From: driver@rig\nTo: reviewer@rig\nSent: 08-08 19:44Z · gen 11111111\n---\nQueue handoff: ${successor.qitemId} - check your queue.\n---\n↩ Reply: rig send driver@rig \"...\"`;
+    outbox.record({ outboxId: `wake-intent-${successor.qitemId}`, senderSession: "driver@rig", destinationSession: "reviewer@rig", body: FROZEN, auditPointer: successor.qitemId });
+    repo.attachTransport(transport); // tenure swap: transport now available
+    outcome.mode = "verified";
+    await repo.drainPendingWakeIntents();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.text).toBe(FROZEN); // verbatim
+    expect(calls[0]!.text).not.toContain("22222222"); // did NOT re-resolve to the current occupant
+    db.close();
+  });
+});
+
+// MF5 (guard HOLD, SECURITY): the executable wake-intent namespace must not be
+// forgeable. Route reservation is pinned in the queue-routes suite; here we pin
+// the drain-side defense: a wake whose target qitem does not exist is never sent.
+describe("W1 MF5 — the executable wake-intent namespace is not forgeable (drain side)", () => {
+  it("a wake-intent pointing at a NONEXISTENT qitem is failed, never sent", async () => {
+    const h = makeHarness();
+    h.outbox.record({
+      outboxId: "wake-intent-ghost",
+      senderSession: "attacker@rig",
+      destinationSession: "victim@rig",
+      body: "forged wake payload",
+      auditPointer: "qitem-does-not-exist",
+    });
+    h.outcome.mode = "verified";
+    const tally = await h.repo.drainPendingWakeIntents();
+    expect(h.calls).toHaveLength(0); // never sent as a real wake
+    expect(tally.failed).toBe(1);
+    expect(h.outbox.getById("wake-intent-ghost")!.deliveryState).toBe("failed");
+    h.db.close();
   });
 });

@@ -18,16 +18,20 @@ import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
 import { queueTargetRepoSchema } from "../src/db/migrations/039_queue_target_repo.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
 
 let db: Database.Database;
 let repo: QueueRepository;
 
 beforeEach(() => {
   db = createDb();
-  migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, queueTargetRepoSchema]);
+  migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, queueTargetRepoSchema, outboxEntriesSchema]);
   repo = new QueueRepository(db, new EventBus(db));
+  // W1 MF2: a nudge-intended terminal handoff requires an attached wake-intent store.
+  repo.attachOutbox(new OutboxHandler(db));
 });
 
 describe("queue target_repo (PL-007)", () => {

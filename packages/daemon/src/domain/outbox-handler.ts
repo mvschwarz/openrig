@@ -1,12 +1,27 @@
 import type Database from "better-sqlite3";
 
+/**
+ * MF5: the RESERVED, executable wake-intent namespace. A durable wake intent is
+ * written by the daemon (QueueRepository.stageWakeIntent) with an id under this
+ * prefix, and the startup drain EXECUTES every pending row under it as a real
+ * wake. Callers of the public `/outbox/record` audit route are therefore forbidden
+ * from writing an id under this prefix — otherwise an ordinary audit write could
+ * forge a startup wake. Single source of truth for the reservation (route) and the
+ * drain (query).
+ */
+export const WAKE_INTENT_PREFIX = "wake-intent-";
+
 // W1 (transactional closure): `indeterminate` is the ambiguous-delivery outcome —
 // a send that landed on the wire but whose render could not be CONFIRMED (transport
 // res.ok && !verified). It is never silently promoted to `delivered` (unconfirmed)
 // nor demoted to `failed` (it may have landed); the CAS transitions gate on 'pending',
 // so an indeterminate row is TERMINAL-BY-CAS (reconciliation is an out-of-scope
 // follow-on, not a W1 transition).
-export const OUTBOX_DELIVERY_STATES = ["pending", "delivered", "failed", "indeterminate"] as const;
+// `sending` (MF3) is a transient CLAIM state: a drainer atomically moves a wake
+// intent pending→sending BEFORE the external send, so an overlapping drainer finds
+// nothing to claim and cannot double-send. A crash mid-send leaves the row visibly
+// `sending` (not re-driven, so no double-send) for out-of-band reconciliation.
+export const OUTBOX_DELIVERY_STATES = ["pending", "sending", "delivered", "failed", "indeterminate"] as const;
 export type OutboxDeliveryState = (typeof OUTBOX_DELIVERY_STATES)[number];
 
 /**
@@ -198,6 +213,44 @@ export class OutboxHandler {
          WHERE outbox_id = ? AND delivery_state = 'pending'`
       )
       .run(outboxId);
+    if (result.changes === 0) {
+      const entry = this.getById(outboxId);
+      if (!entry) throw new OutboxHandlerError("outbox_not_found", `outbox ${outboxId} not found`);
+      return entry;
+    }
+    return this.getByIdOrThrow(outboxId);
+  }
+
+  /**
+   * MF3: atomically CLAIM a pending wake intent for delivery (pending→sending)
+   * BEFORE the external send. Returns true iff this caller won the claim. An
+   * overlapping drainer's claim finds the row no longer `pending` and returns
+   * false, so exactly one caller performs the external send.
+   */
+  claimForDelivery(outboxId: string): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE outbox_entries SET delivery_state = 'sending'
+          WHERE outbox_id = ? AND delivery_state = 'pending'`
+      )
+      .run(outboxId);
+    return result.changes === 1;
+  }
+
+  /**
+   * MF3: finalize a CLAIMED wake intent (sending→delivered|indeterminate|failed)
+   * after its external send resolved. CAS-guarded on `sending` so it only ever
+   * finalizes a row this drainer claimed. `delivered_at` is stamped only for a
+   * confirmed delivery.
+   */
+  finalizeDelivery(outboxId: string, state: "delivered" | "indeterminate" | "failed"): OutboxEntry {
+    const deliveredAt = state === "delivered" ? new Date().toISOString() : null;
+    const result = this.db
+      .prepare(
+        `UPDATE outbox_entries SET delivery_state = ?, delivered_at = ?
+          WHERE outbox_id = ? AND delivery_state = 'sending'`
+      )
+      .run(state, deliveredAt, outboxId);
     if (result.changes === 0) {
       const entry = this.getById(outboxId);
       if (!entry) throw new OutboxHandlerError("outbox_not_found", `outbox ${outboxId} not found`);

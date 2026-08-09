@@ -73,6 +73,7 @@ describe("coordination integration — stream → queue → inbox handoff chain"
     repo = new QueueRepository(db, bus);
     inbox = new InboxHandler(db, bus, repo);
     outbox = new OutboxHandler(db);
+    repo.attachOutbox(outbox); // W1 MF2: handoff needs a wake-intent store
     app = buildApp({ bus, store, repo, inbox, outbox });
   });
 
