@@ -410,7 +410,7 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
   // W2a-1 round-3 — the producer-link advisory must NOT collapse a FRESH generation verdict into a
   // false clock-stale/seat-quiet warning. A resolver-backed store + a hook that carried NO generation
   // ⇒ generation_unverifiable (state unknown, stale:true, but age ~0). The advisory must name the
-  // generation cause honestly (UNVERIFIABLE — either not-wired OR no-tenure-at-fire), never "beyond the
+  // generation cause honestly (UNVERIFIABLE — this emitting path carried none), never "beyond the
   // store window / seat quiet". This is the inert-visible differentiation at the SessionTransport seam.
   it("W2a-1: a FRESH generation_unverifiable read yields a generation-distinct advisory, NOT clock-stale/seat-quiet", async () => {
     const now = new Date("2026-06-27T12:00:00.000Z");
@@ -443,7 +443,9 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(r.ok).toBe(true);
     expect(r.warning).toContain("producer-link:");
     expect(r.warning).toContain("carried NO occupant generation"); // generation-distinct, not clock-stale
+    expect(r.warning).toContain("the emitting launch path supplied NO occupant generation");
     expect(r.warning).toContain("UNVERIFIABLE, not a quiet seat");
+    expect(r.warning).not.toContain("not yet wired");
     expect(r.warning).not.toContain("beyond the store window");
     expect(r.warning).not.toContain("gone quiet");
     expect(sendText).toHaveBeenCalled();

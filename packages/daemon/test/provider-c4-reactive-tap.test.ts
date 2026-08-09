@@ -335,7 +335,7 @@ describe("Slice-04 C4 correction — public-altitude eligibility gate + producer
         occurredAt: input.occurredAt ?? EVENT_AT,
         // W2a-1 — the emitting occupant's generation, carried source-bound (simulate the WIRED producer).
         // Defaults to the fixture's minted tenure generation so the read RESOLVES (carried == live) and
-        // the eligibility discriminators actually run; pass null to exercise the INERT unwired path.
+        // the eligibility discriminators actually run; pass null to exercise explicit per-path absence.
         generation: input.generation === undefined ? "gen-uuid-node-1" : input.generation,
       }),
     });
@@ -359,15 +359,14 @@ describe("Slice-04 C4 correction — public-altitude eligibility gate + producer
     }]);
   });
 
-  // W2a-1 CONSUMER-LEVEL guard — the INERT-until-producer state. The seat HAS a tenure (the read-side
-  // resolver returns a live generation), but the relay/env producer-carry is NOT yet wired, so the hook
-  // carries NO generation ⇒ recorded null ⇒ generation_unverifiable ⇒ unknown/stale on the ACTIVITY
-  // (asserted in agent-activity-store.test.ts). This fold ships the STORE half + route ingestion only;
-  // the source-bound producer-carry (relay/env) is a filed PREREQUISITE and the tap's verify-demotion
-  // is a filed FOLLOW-ON. So the unchanged tap discards the unverifiable read → no reactive row yet.
-  // Sound (never false-fresh), inert until the carry lands; pins it honestly, NOT a restored false-fresh.
-  it("W2a-1 (interim/inert): producer not carrying the generation (hook carries none) ⇒ unverifiable ⇒ store-delivered unknown, tap does not yet emit", async () => {
-    const fx = publicFixture(); // seat HAS a tenure; the relay/env generation-carry is unwired
+  // W2a-1 CONSUMER-LEVEL guard — explicit per-path absence. The seat HAS a tenure (the read-side
+  // resolver returns a live generation), but this hook deliberately carries NO generation, modeling a
+  // legacy/excluded or no-tenure emitting path. It is recorded null ⇒ generation_unverifiable ⇒
+  // unknown/stale on the ACTIVITY (asserted in agent-activity-store.test.ts), so the unchanged tap
+  // discards the unverifiable read → no reactive row. Sound (never false-fresh), while managed launch
+  // and fresh-handover producers carry the generation.
+  it("W2a-1: an emitting path carrying no generation ⇒ unverifiable ⇒ store-delivered unknown, tap does not emit", async () => {
+    const fx = publicFixture(); // seat HAS a tenure; this hook explicitly carries no generation
     expect((await postHook(fx.app, { runtime: "codex", hookEvent: "rate_limit", generation: null })).status).toBe(200);
     expect(reactiveRows(await fx.service.getReadModel())).toEqual([]);
   });

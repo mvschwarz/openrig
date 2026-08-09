@@ -1172,19 +1172,19 @@ export class SessionTransport {
       return `daemon-ingest link DOWN — no activity hook has ever been received for this seat; the ingest is rejecting posts (token mismatch → 401, or ingest unconfigured → 503) or Codex hook-trust is uncleared. Verify the seat was OpenRig-launched with hook-trust cleared`;
     }
     // W2a-1 — a GENERATION verdict is stale:true but the hook is RECENT (age ~0); collapsing it to
-    // "beyond the store window / seat quiet" mislabels producer-not-landed / dead-tenure as a DARK
+    // "beyond the store window / seat quiet" mislabels per-path missing carry / dead-tenure as a DARK
     // seat and defeats the inert-visible differentiation. Distinguish the generation cause explicitly
-    // BEFORE the clock-stale fallback. generation_unverifiable is the INERT signal (producer-carry not
-    // yet wired — sound, not dark); the others name a real generation condition, not a quiet seat.
+    // BEFORE the clock-stale fallback. generation_unverifiable is the per-hook no-generation signal
+    // (sound, not dark); the others name a real generation condition, not a quiet seat.
     if (latest.stale === true && typeof latest.reason === "string" && latest.reason.startsWith("generation_")) {
       const ageS = latest.eventAt ? Math.round((this.now().getTime() - Date.parse(latest.eventAt)) / 1000) : null;
       const age = ageS !== null ? `${ageS}s ago` : "recently";
       switch (latest.reason) {
         case "generation_unverifiable":
-          // Carried generation was null — the MECHANISM, not a single cause: EITHER the source-bound
-          // producer-carry (relay/env) is not yet wired (inert), OR the emitting occupant had no tenure
-          // at fire time (mint-race / pre-060 upgrade-transition). Sound, not dark; not a quiet seat.
-          return `producer link OK — a recent hook exists (${age}) but carried NO occupant generation; either the source-bound producer-carry (relay/env) is not yet wired, OR the emitting occupant had no tenure at fire time (mint-race / pre-060 upgrade). Generation UNVERIFIABLE, not a quiet seat`;
+          // Carried generation was null on THIS hook. Managed launch and fresh-handover producers carry
+          // it; legacy/excluded launch paths or an occupant with no tenure at fire time may not. Sound,
+          // not dark; not a quiet seat.
+          return `producer link OK — a recent hook exists (${age}) but carried NO occupant generation; the emitting launch path supplied NO occupant generation (legacy/excluded path), or the emitting occupant had no tenure at fire time. Generation UNVERIFIABLE, not a quiet seat`;
         case "generation_unresolvable":
           return `producer link OK — a recent hook exists (${age}) but the LIVE occupant generation could not be resolved (no tenure row); generation UNRESOLVABLE, not a quiet seat`;
         case "generation_mismatch":

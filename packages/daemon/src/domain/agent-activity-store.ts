@@ -13,8 +13,8 @@ export interface HookActivityInput {
   occurredAt?: string | null;
   /** W2a-1 — the EMITTING occupant's generation, CARRIED source-bound on the hook (the producer/relay
    *  supplies it at fire time; the route ingests it). NOT inferred from record-time state — that
-   *  inference mis-attributes a delayed prior-occupant hook to the live occupant. Absent (producer not
-   *  yet wired) ⇒ stamped null ⇒ unresolved at read (never false-fresh). */
+   *  inference mis-attributes a delayed prior-occupant hook to the live occupant. Absent on a legacy,
+   *  excluded, or no-tenure emitting path ⇒ stamped null ⇒ unresolved at read (never false-fresh). */
   generation?: string | null;
 }
 
@@ -91,9 +91,9 @@ export class AgentActivityStore {
     // by the producer/relay at fire time, ingested by the route), NEVER inferred from record-time
     // state. A delayed prior-occupant hook recorded after a new tenure minted carries its OWN (prior)
     // generation, so the read detects a mismatch rather than crediting it to the live occupant — and
-    // this is immune to boot_at precision / clock skew because nothing is timed. Absent (the relay/env
-    // producer-carry is a filed prerequisite, inert until it lands) ⇒ null ⇒ unresolved at read (the
-    // P21 claimed-era pattern: absence recorded as its own state, never false-fresh). No record-time
+    // this is immune to boot_at precision / clock skew because nothing is timed. Absent on a legacy,
+    // excluded, or no-tenure emitting path ⇒ null ⇒ unresolved at read (the P21 claimed-era pattern:
+    // absence recorded as its own state, never false-fresh). No record-time
     // resolver call — the live-gen resolver is used only at READ, for the comparison.
     const generation = input.generation ?? null;
     const activity = normalizeHookActivity({

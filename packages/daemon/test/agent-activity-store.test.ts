@@ -237,8 +237,8 @@ describe("AgentActivityStore", () => {
 // on EITHER side ⇒ UNRESOLVABLE (absence of evidence): unknown + a DISTINCT reason (unresolvable = live
 // null / unverifiable = carried none) + stale — NEVER fresh — with generationProvenance='unresolved'
 // riding alongside so the row is DELIVERED (tap verify-demotion is a follow-on). The carried-none case
-// is the INERT-until-producer state: sound, never false-fresh, detection off until the relay/env carry
-// lands (a filed prerequisite); (4) no resolver ⇒ legacy, no label; (5) resolver EXCEPTION ⇒ degrade
+// is explicit per-path absence: sound and never false-fresh even though managed launch/fresh-handover
+// producers now carry the generation; (4) no resolver ⇒ legacy, no label; (5) resolver EXCEPTION ⇒ degrade
 // (generation_resolver_error). Ignorance and evidence get different verdicts and must not collapse.
 describe("AgentActivityStore — generation identity (W2a-1)", () => {
   let db: Database.Database;
@@ -358,11 +358,11 @@ describe("AgentActivityStore — generation identity (W2a-1)", () => {
     });
   });
 
-  // (3b) UNVERIFIABLE — carried side. The hook carried NO generation (the relay/env producer-carry is a
-  // filed prerequisite, not yet wired ⇒ absent ⇒ null), so it cannot be verified against the live
-  // generation. Same family as (3a) — unknown + label, never fresh — but a DISTINCT reason (keep them
-  // separate; ignorance has more than one shape and collapsing them loses forensics). This is the
-  // INERT-until-producer state: sound, never false-fresh, detection off until the carry lands.
+  // (3b) UNVERIFIABLE — carried side. This hook carried NO generation (legacy/excluded or no-tenure
+  // emitting path ⇒ absent ⇒ null), so it cannot be verified against the live generation. Same family
+  // as (3a) — unknown + label, never fresh — but a DISTINCT reason (keep them separate; ignorance has
+  // more than one shape and collapsing them loses forensics). Managed launch/fresh-handover producers
+  // carry the generation; explicit absence remains sound and never false-fresh.
   it("unverifiable carried generation (hook carried none) ⇒ unknown/generation_unverifiable + unresolved, stale", () => {
     const { node, sessionName } = seedGenSession();
     const store = new AgentActivityStore({
@@ -372,7 +372,7 @@ describe("AgentActivityStore — generation identity (W2a-1)", () => {
       resolveOccupantGeneration: () => "gen-B",
     });
 
-    // Producer did NOT carry a generation ⇒ recorded null (the inert-but-sound path until the carry lands).
+    // This emitting path did NOT carry a generation ⇒ recorded null (sound per-path absence).
     store.recordHookEvent({
       runtime: "codex",
       sessionName,
