@@ -20,7 +20,8 @@ export const WAKE_INTENT_PREFIX = "wake-intent-";
 // `sending` (MF3) is a transient CLAIM state: a drainer atomically moves a wake
 // intent pending→sending BEFORE the external send, so an overlapping drainer finds
 // nothing to claim and cannot double-send. A crash mid-send leaves the row visibly
-// `sending` (not re-driven, so no double-send) for out-of-band reconciliation.
+// `sending`; the recovery boundary (`reconcileAbandonedSending`, run once at
+// startup) reconciles it to `indeterminate` — the send is never blindly re-driven.
 export const OUTBOX_DELIVERY_STATES = ["pending", "sending", "delivered", "failed", "indeterminate"] as const;
 export type OutboxDeliveryState = (typeof OUTBOX_DELIVERY_STATES)[number];
 

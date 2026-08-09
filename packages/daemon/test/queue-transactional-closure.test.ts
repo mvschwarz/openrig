@@ -33,6 +33,9 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import type { QueueNudgeTransport } from "../src/domain/queue-repository.js";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { rmSync } from "node:fs";
 
 interface SendCall {
   session: string;
@@ -623,5 +626,58 @@ describe("W1 re-seal BLOCKING 2 — the executable drain selector is exact-case"
     expect(tally.delivered).toBe(0);
     expect(h.outbox.getById(variantId)!.deliveryState).toBe("pending"); // untouched
     h.db.close();
+  });
+});
+
+// Re-seal #3 (guard): a REAL file-backed close/reopen crash boundary. The earlier
+// BLOCKING 1 test reused one still-open in-memory Database, so it did not actually
+// cross a restart. This one persists to disk, CLOSES the connection (the crash),
+// then reopens the SAME file with FRESH objects (a new process) before recovering.
+// The before-send and after-send/before-finalize windows share the same persisted
+// `sending` state, so one equivalence pin suffices.
+describe("W1 re-seal #3 — real file-backed close/reopen crash boundary", () => {
+  const ALL = [
+    coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema,
+    queueTargetRepoSchema, outboxEntriesSchema,
+  ];
+
+  it("a claimed `sending` intent survives a db CLOSE/REOPEN and reconciles to indeterminate, never re-sent", async () => {
+    const dbPath = join(tmpdir(), `w1-reopen-${Date.now()}-${process.pid}.sqlite`);
+    try {
+      // --- process 1: real handoff, claim the intent, then CRASH (close the db) ---
+      const db1 = createDb(dbPath);
+      migrate(db1, ALL);
+      const outbox1 = new OutboxHandler(db1);
+      const repo1 = new QueueRepository(db1, new EventBus(db1), { validateRig: () => true });
+      repo1.attachOutbox(outbox1); // no transport ⇒ immediate deliver skipped ⇒ intent pending
+      const source = await repo1.create({ sourceSession: "planner@rig", destinationSession: "driver@rig", body: "x" });
+      const { created } = await repo1.handoff({ qitemId: source.qitemId, fromSession: "driver@rig", toSession: "reviewer@rig", body: "y" });
+      const intentId = `wake-intent-${created.qitemId}`;
+      outbox1.claimForDelivery(intentId); // claim, then die before finalize
+      expect(outbox1.getById(intentId)!.deliveryState).toBe("sending");
+      db1.close(); // the crash: connection gone; row persisted on disk as `sending`
+
+      // --- process 2: reopen the SAME db file with FRESH objects, then recover ---
+      const db2 = createDb(dbPath);
+      const outbox2 = new OutboxHandler(db2);
+      const { transport, calls } = makeMockTransport();
+      const repo2 = new QueueRepository(db2, new EventBus(db2), { validateRig: () => true });
+      repo2.attachOutbox(outbox2);
+      repo2.attachTransport(transport);
+      expect(outbox2.getById(intentId)!.deliveryState).toBe("sending"); // survived the reopen
+
+      const reconciled = repo2.reconcileAbandonedWakeIntents();
+      const tally = await repo2.drainPendingWakeIntents();
+
+      expect(reconciled).toBe(1);
+      expect(outbox2.getById(intentId)!.deliveryState).toBe("indeterminate");
+      expect(calls).toHaveLength(0); // NEVER re-sent across the restart
+      expect(tally).toEqual({ delivered: 0, indeterminate: 0, failed: 0 }); // no re-drive
+      db2.close();
+    } finally {
+      for (const suffix of ["", "-journal", "-wal", "-shm"]) {
+        try { rmSync(`${dbPath}${suffix}`, { force: true }); } catch { /* best effort */ }
+      }
+    }
   });
 });
