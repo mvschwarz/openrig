@@ -71,18 +71,70 @@ function canonicalizeDestination(destination) {
   }
 }
 
+function containedRelativePath(root, candidate) {
+  const rel = relative(root, candidate);
+  if (rel === "" || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null;
+  return rel.split(sep).join("/");
+}
+
+function isInsideOrEqual(root, candidate) {
+  const rel = relative(root, candidate);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+function configuredPathRelativeToRoot(root, destination) {
+  let cursor = resolve(destination);
+  const segments = [];
+  let match = null;
+  while (true) {
+    try {
+      if (realpathSync(cursor) === root) match = segments.join("/");
+    } catch (error) {
+      if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") throw error;
+    }
+    const parent = dirname(cursor);
+    if (parent === cursor) return match;
+    segments.unshift(basename(cursor));
+    cursor = parent;
+  }
+}
+
 function resolveVerdictDestination(repoRoot) {
   const root = realpathSync(repoRoot);
+  const configuredPath = resolve(VERDICT_PATH);
+  const configuredRelativePath = configuredPathRelativeToRoot(root, configuredPath);
+  if (!configuredRelativePath) {
+    throw new Error(`verdict destination must be inside the current worktree: ${configuredPath}`);
+  }
+  if (configuredRelativePath === ".git" || configuredRelativePath.startsWith(".git/")) {
+    throw new Error(`verdict destination must not use Git administrative paths: ${configuredRelativePath}`);
+  }
+
+  const trackedEntries = new Set(runGit(["ls-files", "-z"], repoRoot).split("\0").filter(Boolean));
+  const configuredSegments = configuredRelativePath.split("/");
+  let configuredPrefix = "";
+  for (const segment of configuredSegments) {
+    configuredPrefix = configuredPrefix ? `${configuredPrefix}/${segment}` : segment;
+    if (trackedEntries.has(configuredPrefix)) {
+      throw new Error(`verdict destination must not traverse a tracked path: ${configuredPrefix}`);
+    }
+  }
+
   const absolutePath = canonicalizeDestination(VERDICT_PATH);
-  const rel = relative(root, absolutePath);
-  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+  const relativePath = containedRelativePath(root, absolutePath);
+  if (!relativePath) {
     throw new Error(`verdict destination must be inside the current worktree: ${absolutePath}`);
   }
-  const relativePath = rel.split(sep).join("/");
-  const tracked = runGit(["--literal-pathspecs", "ls-files", "-z", "--", relativePath], repoRoot)
-    .split("\0")
-    .filter(Boolean);
-  if (tracked.includes(relativePath)) {
+
+  const gitAdminRoots = runGit(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], repoRoot)
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((path) => realpathSync(path));
+  if (gitAdminRoots.some((gitAdminRoot) => isInsideOrEqual(gitAdminRoot, absolutePath))) {
+    throw new Error(`verdict destination must not use Git administrative paths: ${absolutePath}`);
+  }
+  if (trackedEntries.has(relativePath)) {
     throw new Error(`verdict destination must be untracked: ${relativePath}`);
   }
   return { absolutePath, relativePath };
