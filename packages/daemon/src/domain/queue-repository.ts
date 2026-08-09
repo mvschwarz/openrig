@@ -742,6 +742,20 @@ export class QueueRepository {
    * periodic timer (out of scope, ruled); a bounded retry of failed rows is the
    * NAMED residue, not a silent guarantee.
    */
+  /**
+   * BLOCKING 1 (guard re-seal): the recovery-boundary reconciliation, called ONCE
+   * at startup (NOT inside the drain, which can be invoked concurrently). Moves any
+   * abandoned `sending` wake intents — a prior crashed process's claims — to
+   * `indeterminate`, WITHOUT re-sending: a claim left `sending` is ambiguous (the
+   * send may or may not have landed). Kept SEPARATE from drainPendingWakeIntents so
+   * an overlapping drain can never reconcile another drain's in-flight claim.
+   * Returns the count reconciled.
+   */
+  reconcileAbandonedWakeIntents(): number {
+    if (!this.outbox) return 0;
+    return this.outbox.reconcileAbandonedSending(WAKE_INTENT_PREFIX);
+  }
+
   async drainPendingWakeIntents(): Promise<{ delivered: number; indeterminate: number; failed: number }> {
     const tally = { delivered: 0, indeterminate: 0, failed: 0 };
     if (!this.outbox || !this.transport) return tally;

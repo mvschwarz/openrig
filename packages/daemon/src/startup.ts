@@ -1722,10 +1722,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // No periodic timer (ruled out of scope): a transient failure lands the row
     // in a VISIBLE state and is retried on the next start.
     try {
+      // BLOCKING 1: reconcile abandoned `sending` claims (a prior crash) FIRST,
+      // then drain committed `pending` intents. Reconcile is a one-time boundary
+      // step, separate from the drain.
+      const reconciled = queueRepoInstance.reconcileAbandonedWakeIntents();
       const drained = await queueRepoInstance.drainPendingWakeIntents();
-      if (drained.delivered || drained.indeterminate || drained.failed) {
+      if (drained.delivered || drained.indeterminate || drained.failed || reconciled) {
         console.log(
-          `wake-intent recovery sweep: delivered=${drained.delivered} indeterminate=${drained.indeterminate} failed=${drained.failed}`,
+          `wake-intent recovery sweep: delivered=${drained.delivered} indeterminate=${drained.indeterminate} failed=${drained.failed} reconciled=${reconciled}`,
         );
       }
     } catch (err) {

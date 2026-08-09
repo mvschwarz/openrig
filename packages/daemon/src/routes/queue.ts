@@ -1010,10 +1010,12 @@ export function queueRoutes(): Hono {
     // MF5: the wake-intent id namespace is RESERVED for daemon-internal wake intents
     // that the startup drain EXECUTES. A public audit write must not be able to
     // forge one (an ordinary /outbox/record would otherwise become a real startup
-    // wake for an arbitrary/nonexistent qitem).
-    if (body.outboxId && body.outboxId.startsWith(WAKE_INTENT_PREFIX)) {
+    // wake for an arbitrary/nonexistent qitem). BLOCKING 2 (guard re-seal): reject
+    // CASE VARIANTS too (toLowerCase) so the reservation is at least as broad as any
+    // selector — a `WAKE-INTENT-…` variant must never slip the route.
+    if (body.outboxId && body.outboxId.toLowerCase().startsWith(WAKE_INTENT_PREFIX)) {
       return c.json(
-        { error: `outboxId prefix '${WAKE_INTENT_PREFIX}' is reserved for daemon-internal wake intents and may not be set by callers` },
+        { error: `outboxId prefix '${WAKE_INTENT_PREFIX}' (any case) is reserved for daemon-internal wake intents and may not be set by callers` },
         400,
       );
     }

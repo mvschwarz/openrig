@@ -575,3 +575,53 @@ describe("W1 MF5 — the executable wake-intent namespace is not forgeable (drai
     h.db.close();
   });
 });
+
+// Re-seal BLOCKING 1 (guard): an abandoned `sending` claim (a crash after claim,
+// before finalize — same persisted state whether the send landed or not) must
+// reconcile to `indeterminate` at the recovery boundary, WITHOUT re-sending.
+describe("W1 re-seal BLOCKING 1 — abandoned `sending` claims reconcile to indeterminate", () => {
+  it("a claimed intent left `sending` by a crash becomes `indeterminate` on recovery, never re-sent", async () => {
+    const g = makeHarness({ deferTransport: true });
+    const source = await g.repo.create({ sourceSession: "planner@rig", destinationSession: "driver@rig", body: "x" });
+    const { created } = await g.repo.handoff({
+      qitemId: source.qitemId, fromSession: "driver@rig", toSession: "reviewer@rig", body: "y",
+    });
+    const intentId = `wake-intent-${created.qitemId}`;
+    // Simulate the crash window: claim (pending->sending), then die before finalize.
+    g.outbox.claimForDelivery(intentId);
+    expect(g.outbox.getById(intentId)!.deliveryState).toBe("sending");
+
+    // Reopen: a fresh repo on the SAME db runs the startup recovery sweep.
+    const reopened = new QueueRepository(g.db, new EventBus(g.db), { validateRig: () => true });
+    reopened.attachOutbox(g.outbox);
+    reopened.attachTransport(g.transport);
+    g.outcome.mode = "verified";
+    const reconciled = reopened.reconcileAbandonedWakeIntents();
+    const tally = await reopened.drainPendingWakeIntents();
+
+    expect(reconciled).toBe(1);
+    expect(g.calls).toHaveLength(0); // NEVER re-sent
+    expect(tally.delivered).toBe(0); // reconciled to indeterminate ⇒ nothing pending to deliver
+    expect(g.outbox.getById(intentId)!.deliveryState).toBe("indeterminate");
+    g.db.close();
+  });
+});
+
+// Re-seal BLOCKING 2 (guard): the executable drain selector is EXACT-CASE, so a
+// `WAKE-INTENT-…` variant (which the public route also now rejects) is never
+// selected/executed.
+describe("W1 re-seal BLOCKING 2 — the executable drain selector is exact-case", () => {
+  it("a WAKE-INTENT- case variant is NOT selected by the drain (never executed)", async () => {
+    const h = makeHarness();
+    const q = await h.repo.create({ sourceSession: "driver@rig", destinationSession: "reviewer@rig", body: "z" });
+    h.calls.length = 0; // ignore the create-time nudge; count only drain sends
+    const variantId = `WAKE-INTENT-${q.qitemId}`; // uppercase variant, real target qitem
+    h.outbox.record({ outboxId: variantId, senderSession: "attacker@rig", destinationSession: "victim@rig", body: "variant", auditPointer: q.qitemId });
+    h.outcome.mode = "verified";
+    const tally = await h.repo.drainPendingWakeIntents();
+    expect(h.calls).toHaveLength(0); // the variant was never selected/sent
+    expect(tally.delivered).toBe(0);
+    expect(h.outbox.getById(variantId)!.deliveryState).toBe("pending"); // untouched
+    h.db.close();
+  });
+});

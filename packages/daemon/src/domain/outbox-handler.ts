@@ -281,14 +281,38 @@ export class OutboxHandler {
    * so a caller can page and terminate on a served short batch (never a silent cap).
    */
   listPending(idPrefix: string, limit = 200): OutboxEntry[] {
+    // BLOCKING 2 (guard re-seal): EXACT-CASE prefix match. SQLite `LIKE` is
+    // case-insensitive by default, so a `LIKE 'wake-intent-%'` selector would
+    // execute a `WAKE-INTENT-…` variant that the case-sensitive route reservation
+    // passes — a forgeable gap. `substr(...) = ?` uses the binary collation
+    // (case-sensitive), aligning the executable selector with the reservation.
     const rows = this.db
       .prepare(
         `SELECT * FROM outbox_entries
-          WHERE delivery_state = 'pending' AND outbox_id LIKE ?
+          WHERE delivery_state = 'pending' AND substr(outbox_id, 1, ?) = ?
           ORDER BY ts_dispatched ASC, rowid ASC LIMIT ?`
       )
-      .all(idPrefix + "%", limit) as OutboxEntryRow[];
+      .all(idPrefix.length, idPrefix, limit) as OutboxEntryRow[];
     return rows.map((r) => this.rowToEntry(r));
+  }
+
+  /**
+   * BLOCKING 1 (guard re-seal): at a process/recovery boundary, atomically
+   * reconcile ABANDONED claims — rows a crashed process left in the transient
+   * `sending` state — to `indeterminate` WITHOUT re-sending. A `sending` row is
+   * ambiguous (the external send may or may not have landed after the claim), so
+   * it records `indeterminate`, never a forever-transient claim and never a blind
+   * re-send. EXACT-CASE prefix, matching the executable selector. Returns the
+   * count reconciled.
+   */
+  reconcileAbandonedSending(idPrefix: string): number {
+    const result = this.db
+      .prepare(
+        `UPDATE outbox_entries SET delivery_state = 'indeterminate'
+          WHERE delivery_state = 'sending' AND substr(outbox_id, 1, ?) = ?`
+      )
+      .run(idPrefix.length, idPrefix);
+    return result.changes;
   }
 
   private getByIdRaw(outboxId: string): OutboxEntryRow | undefined {

@@ -143,6 +143,16 @@ describe("queue routes", () => {
     expect(outbox.getById("wake-intent-forged")).toBeNull();
   });
 
+  it("outbox record — 400 REJECTS a CASE-VARIANT wake-intent id (BLOCKING 2: route ⊇ selector)", async () => {
+    const res = await app.request("/api/queue/outbox/record", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "attacker@rig" },
+      body: JSON.stringify({ outboxId: "WAKE-INTENT-forged", destinationSession: "victim@rig", body: "variant" }),
+    });
+    expect(res.status).toBe(400);
+    expect(outbox.getById("WAKE-INTENT-forged")).toBeNull();
+  });
+
   it("outbox record — still accepts a normal (non-reserved) outboxId", async () => {
     const res = await app.request("/api/queue/outbox/record", {
       method: "POST",
