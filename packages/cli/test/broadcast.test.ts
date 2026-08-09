@@ -77,6 +77,13 @@ describe("Broadcast CLI", () => {
   beforeEach(() => {
     vi.stubEnv("OPENRIG_SESSION_NAME", "broadcaster@my-rig");
     vi.stubEnv("RIGGED_SESSION_NAME", "");
+    // Broadcast-leak containment: EXPLICITLY bind every broadcast in this file to the
+    // in-process fixture daemon, so an unscoped broadcast cannot reach the live
+    // topology via any code path (ambient env or STATE_FILE fallback) — belt-and-
+    // braces on top of the setup-level fixture-home guard. An unscoped broadcast in a
+    // test is a bug independent of routing; this makes the fixture the only reachable target.
+    vi.stubEnv("OPENRIG_URL", `http://127.0.0.1:${port}`);
+    vi.stubEnv("OPENRIG_PORT", String(port));
   });
   afterEach(() => { vi.unstubAllEnvs(); });
 
