@@ -276,3 +276,195 @@ describe("P34 RED 1 — the CURRENT MISS: terminal close + successor create stag
     expect(intentFor(h, resumed.newPacketId)).not.toBeNull();
   });
 });
+
+// ── THE CONTROLS ──────────────────────────────────────────────────────────────
+// RED 1 proves the wiring WORKS. These prove it FAILS CORRECTLY — which is the
+// half that decides whether the atom is honest or merely green. A guard that
+// condemns correct callers gets reverted within the hour; a guard that examines
+// nothing reports the same green as one that examines everything.
+
+describe("P34 RED 4 — NO-FALSE-POSITIVE: a PARK is not a closure and requires no intent", () => {
+  let h: Harness;
+  beforeEach(() => { h = makeHarness(); });
+  afterEach(() => { h.db.close(); rmSync(h.tmp, { recursive: true, force: true }); });
+
+  it("mission-control `hold` parks the item and stages NO intent — the park path is untouched", async () => {
+    const source = await h.repo.create({
+      sourceSession: "src@rig",
+      destinationSession: "dst@rig",
+      body: "work",
+    });
+    await h.mc.act({
+      verb: "hold",
+      qitemId: source.qitemId,
+      actorSession: "human@rig",
+      reason: "external-gate",
+    });
+
+    const parked = h.repo.getById(source.qitemId);
+    expect(parked?.state).toBe("blocked");
+    // Non-terminal ⇒ nothing to wake. This falls out of the PRIMITIVE (it returns
+    // early on a non-terminal txn-visible source), not out of a condition written
+    // at the call site — which is why no park site needed an edit.
+    expect(intentFor(h, source.qitemId)).toBeNull();
+  });
+
+  it("a human-gated workflow entry PARKS in-txn without tripping the seam", async () => {
+    // The gate park is an in-transaction update on a freshly created packet — the
+    // shape most likely to be mistaken for a closure by an update-keyed guard.
+    const inst = await h.runtime.instantiate({
+      specPath: h.specPath,
+      rootObjective: "x",
+      createdBySession: "ops@rig",
+    });
+    expect(h.repo.getById(inst.entryQitemId)?.state).toBe("pending");
+    expect(intentFor(h, inst.entryQitemId)).toBeNull();
+  });
+});
+
+describe("P34 RED 4b — NO-FALSE-POSITIVE: a TERMINAL CLOSE with NO SUCCESSOR requires no intent", () => {
+  let h: Harness;
+  beforeEach(() => { h = makeHarness(); });
+  afterEach(() => { h.db.close(); rmSync(h.tmp, { recursive: true, force: true }); });
+
+  it("mission-control `approve` closes done/no-follow-on with no successor — no intent, no throw", async () => {
+    const source = await h.repo.create({
+      sourceSession: "src@rig",
+      destinationSession: "dst@rig",
+      body: "work",
+    });
+    // This is THE THIRD STATE. Not a park (it IS terminal) and not a paired
+    // closure (there is no successor). A guard keyed on "terminal close" alone —
+    // rather than on "terminal close + a create in the same txn" — would fire here
+    // and condemn correct code, one state over from the park case.
+    const result = await h.mc.act({
+      verb: "approve",
+      qitemId: source.qitemId,
+      actorSession: "human@rig",
+    });
+
+    expect(h.repo.getById(source.qitemId)?.state).toBe("done");
+    expect(h.repo.getById(source.qitemId)?.closureReason).toBe("no-follow-on");
+    expect(result.createdQitemId).toBeNull();
+    expect(intentFor(h, source.qitemId)).toBeNull();
+  });
+
+  it("the resume path's exception closes carry no intents of their own", async () => {
+    const inst = await h.runtime.instantiate({
+      specPath: h.specPath,
+      rootObjective: "x",
+      createdBySession: "ops@rig",
+    });
+    await h.runtime.project({
+      instanceId: inst.instance.instanceId,
+      currentPacketId: inst.entryQitemId,
+      exit: "failed",
+      actorSession: "producer@rig",
+      resultNote: "blew up",
+    });
+    const exceptionIds = (
+      h.db.prepare(`SELECT qitem_id FROM queue_items WHERE tags LIKE '%workflow-exception%'`)
+        .all() as Array<{ qitem_id: string }>
+    ).map((r) => r.qitem_id);
+    expect(exceptionIds.length).toBeGreaterThan(0);
+
+    // The assertion is on the DELTA, not on absence. Each exception item already
+    // HAS an intent — it was itself a successor when :729 created it. What must be
+    // true is that terminally CLOSING it adds no new one: the close has no
+    // successor, so there is nothing to wake.
+    const idsBefore = new Set(
+      (h.db.prepare(`SELECT outbox_id FROM outbox_entries`).all() as Array<{ outbox_id: string }>)
+        .map((r) => r.outbox_id),
+    );
+
+    const resumed = await h.runtime.resume({
+      instanceId: inst.instance.instanceId,
+      actorSession: "ops@rig",
+    });
+
+    for (const id of exceptionIds) {
+      expect(h.repo.getById(id)?.state).toBe("done");
+    }
+    const idsAfter = (
+      h.db.prepare(`SELECT outbox_id FROM outbox_entries`).all() as Array<{ outbox_id: string }>
+    ).map((r) => r.outbox_id);
+    const added = idsAfter.filter((id) => !idsBefore.has(id));
+
+    // EXACTLY ONE new intent, and it belongs to the redrive packet — never to any
+    // of the N closes. If the closes were each paired with the redrive packet as
+    // "their" successor, this count would still be one and the test would pass
+    // vacuously, which is why it also names WHICH id was added.
+    expect(added).toEqual([`wake-intent-${resumed.newPacketId}`]);
+  });
+});
+
+describe("P34 — NO DOUBLE SEND: the staged intent is finalized, so recovery cannot re-send it", () => {
+  let h: Harness;
+  beforeEach(() => { h = makeHarness(); });
+  afterEach(() => { h.db.close(); rmSync(h.tmp, { recursive: true, force: true }); });
+
+  it("after a wired close+create, the intent row is FINALIZED and a recovery drain delivers nothing", async () => {
+    const source = await h.repo.create({
+      sourceSession: "src@rig",
+      destinationSession: "dst@rig",
+      body: "work",
+    });
+    const result = await h.mc.act({
+      verb: "handoff",
+      qitemId: source.qitemId,
+      actorSession: "human@rig",
+      destinationSession: "next@rig",
+    });
+
+    // The defect this pins: maybeNudge SENDS without claiming or finalizing, so the
+    // row would still read `pending` and the startup sweep would deliver the same
+    // wake a SECOND time. Delivering through the shared path finalizes it.
+    const intent = intentFor(h, result.createdQitemId!);
+    expect(intent).not.toBeNull();
+    expect(intent!.deliveryState).not.toBe("pending");
+
+    const drained = await h.repo.drainPendingWakeIntents();
+    expect(drained.delivered).toBe(0);
+    expect(drained.indeterminate).toBe(0);
+    expect(drained.failed).toBe(0);
+  });
+});
+
+describe("P34 — THE FALLBACK CONTROL: no intent store ⇒ the wake still happens", () => {
+  it("a writer with NO outbox attached still nudges, and does not silently skip", async () => {
+    // The docstring promised this fallback; the code did not implement it
+    // (deliverWakeIntent returns "skipped" with no store, and a skip is not an
+    // error, so the vanished nudge surfaced nowhere). This is the control that
+    // would have caught it.
+    const h = makeHarness();
+    try {
+      const sends: string[] = [];
+      const repoNoOutbox = new QueueRepository(h.db, h.bus, { validateRig: () => true });
+      repoNoOutbox.attachTransport({
+        async send(session: string) {
+          sends.push(session);
+          return { ok: true, verified: true };
+        },
+      });
+      // Deliberately NO attachOutbox — the test/bootstrap shape.
+      const created = await repoNoOutbox.create({
+        sourceSession: "src@rig",
+        destinationSession: "dst@rig",
+        body: "work",
+      });
+      // create() nudges its destination on its own. Isolate the fallback's send,
+      // or this control would pass on the create's nudge alone and prove nothing
+      // about deliverWakeForSuccessor.
+      sends.length = 0;
+
+      await repoNoOutbox.deliverWakeForSuccessor(created.qitemId, "dst@rig", undefined, "src@rig");
+
+      // Exactly one send, from the fallback itself. Before P34 this was ZERO:
+      // deliverWakeIntent returned "skipped" with no store attached.
+      expect(sends).toEqual(["dst@rig"]);
+    } finally {
+      h.db.close();
+      rmSync(h.tmp, { recursive: true, force: true });
+    }
+  });
+});
