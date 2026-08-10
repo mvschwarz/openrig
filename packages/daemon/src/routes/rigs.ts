@@ -18,6 +18,7 @@ import { projectionLane } from "../domain/projection-lane.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import type { SeatActivityService } from "../domain/seat-activity-service.js";
+import type { SeatStructuralActivityService } from "../domain/seat-structural-activity-service.js";
 import { deriveRigLifecycleState } from "../domain/ps-projection.js";
 import { assessCurrentStateRehydrateEligibility } from "../domain/rehydrate-eligibility.js";
 import { buildRestorePlanPreview, collectPreviewSessionRows } from "../domain/restore-plan-preview.js";
@@ -321,8 +322,9 @@ rigsRoutes.get("/:id/graph", async (c) => {
   // capture) — the 30s topology poll colors dots from the snapshot (running/idle) +
   // hook activity; ?full=true opts into the per-node needs_input capture.
   const graphFull = c.req.query("full") === "true";
+  const seatStructuralActivityService = c.get("seatStructuralActivityService" as never) as SeatStructuralActivityService | undefined;
   const inventoryWithActivityOnly = tmuxAdapter
-    ? await attachAgentActivity(inventory, { tmuxAdapter, activityStore: agentActivityStore, captureFallback: graphFull })
+    ? await attachAgentActivity(inventory, { tmuxAdapter, activityStore: agentActivityStore, structuralActivity: seatStructuralActivityService, captureFallback: graphFull })
     : inventory;
   const seatActivityService = c.get("seatActivityService" as never) as SeatActivityService | undefined;
   const inventoryWithActivity = attachTerminalActivityAndWork(inventoryWithActivityOnly, {

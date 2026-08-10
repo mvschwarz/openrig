@@ -197,6 +197,8 @@ export async function startServer(port?: number) {
         // PsProjectionService + node-inventory enrichment serve
         // fresh data on each request.
         deps.seatActivityService?.start(deps.rigRepo.db);
+        // 5b82324b — the structural pane-activity cache, on the same 1Hz cadence.
+        deps.seatStructuralActivityService?.start(deps.rigRepo.db);
         // OPR.0.4.3.19 — start the liveness identity reconciler (5s default).
         // Persists the per-seat pane PID/command verdict so node-inventory
         // gates the running/active projection on verified process identity.
@@ -233,6 +235,7 @@ export async function startServer(port?: number) {
     }
     try {
       deps.seatActivityService?.stop();
+      deps.seatStructuralActivityService?.stop();
     } catch (err) {
       console.error("[seat-activity] shutdown error", err);
     }

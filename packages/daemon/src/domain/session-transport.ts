@@ -317,7 +317,7 @@ export async function probeSessionActivity(input: {
   }
 }
 
-function mapPaneState(state: PaneActivityClassification["state"]): AgentActivity["state"] {
+export function mapPaneState(state: PaneActivityClassification["state"]): AgentActivity["state"] {
   if (state === "agent_active") return "running";
   if (state === "attention") return "needs_input";
   if (state === "agent_idle") return "idle";

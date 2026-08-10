@@ -199,6 +199,8 @@ export function createTestApp(
     adapters?: Partial<Record<string, RuntimeAdapter>>;
     activityHookToken?: string;
     activityFreshnessMs?: number;
+    /** 5b82324b — inject a structural activity cache so route tests can prove the default /nodes ACTIVITY consumes it. */
+    seatStructuralActivityService?: import("../../src/domain/seat-structural-activity-service.js").SeatStructuralActivityService;
     // OPR.0.4.3.21 — opt-in event-loop health instrumentation for the health/
     // stress proofs. Omitted by default so every existing test keeps the exact
     // legacy `/healthz` `{ status: "ok" }` body.
@@ -369,6 +371,7 @@ export function createTestApp(
     whoamiService,
     nodeCmuxService,
     agentActivityStore,
+    seatStructuralActivityService: opts?.seatStructuralActivityService,
     activityHookToken: opts?.activityHookToken,
     eventLoopMonitor: opts?.eventLoopMonitor,
     routeTimingRecorder: opts?.routeTimingRecorder,

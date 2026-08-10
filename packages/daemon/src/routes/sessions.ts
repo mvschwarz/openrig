@@ -8,6 +8,7 @@ import type { NodeCmuxService } from "../domain/node-cmux-service.js";
 import type { TranscriptStore } from "../domain/transcript-store.js";
 import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import type { SeatActivityService } from "../domain/seat-activity-service.js";
+import type { SeatStructuralActivityService } from "../domain/seat-structural-activity-service.js";
 import {
   attachAgentActivity,
   attachTerminalActivityAndWork,
@@ -52,6 +53,7 @@ function getDeps(c: { get: (key: string) => unknown }) {
     cmuxAdapter: c.get("cmuxAdapter" as never) as CmuxAdapter,
     agentActivityStore: c.get("agentActivityStore" as never) as AgentActivityStore | undefined,
     seatActivityService: c.get("seatActivityService" as never) as SeatActivityService | undefined,
+    seatStructuralActivityService: c.get("seatStructuralActivityService" as never) as SeatStructuralActivityService | undefined,
     rigLifecycleService: c.get("rigLifecycleService" as never) as RigLifecycleService | undefined,
     restoreOrchestrator: c.get("restoreOrchestrator" as never) as RestoreOrchestrator | undefined,
   };
@@ -119,6 +121,7 @@ nodesRoutes.get("/", async (c) => {
   const withActivity = await attachAgentActivity(inventory, {
     tmuxAdapter: deps.tmuxAdapter,
     activityStore: deps.agentActivityStore,
+    structuralActivity: deps.seatStructuralActivityService,
     captureFallback: full,
   });
   const withTerminalAndWork = attachTerminalActivityAndWork(withActivity, {

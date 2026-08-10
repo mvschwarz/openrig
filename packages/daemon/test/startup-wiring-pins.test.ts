@@ -74,6 +74,7 @@ describe("P16 — AppDeps members with safety semantics are composed (definednes
     "watchdogPolicyEngine", "watchdogScheduler", "periodicSnapshotScheduler",
     "workflowRuntime", "selfAttachService", "rigLifecycleService",
     "resumeMetadataRefresher", "runtimeAdapters",
+    "seatStructuralActivityService",
     "streamStore", "askService", "wakeResolveService", "projectClassifier",
     "classifierLeaseManager", "viewProjector", "tmuxOptionDefaults",
   ];

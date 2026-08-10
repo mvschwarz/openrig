@@ -9,7 +9,8 @@ import type { TranscriptStore } from "./transcript-store.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
 import type { SeatActivityService } from "./seat-activity-service.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
-import { probeSessionActivity } from "./session-transport.js";
+import { probeSessionActivity, mapPaneState } from "./session-transport.js";
+import type { StructuralObservation } from "./seat-structural-activity-service.js";
 import { findLatestUsableSnapshot, findLatestUsableSnapshotsForAllRigs } from "./rig-repository.js";
 import { resolveNodeWorkspace } from "./workspace/workspace-resolver.js";
 import { deriveCanonicalSessionName } from "./session-name.js";
@@ -1061,6 +1062,10 @@ export async function attachAgentActivity(
   deps: {
     tmuxAdapter: TmuxAdapter;
     activityStore?: AgentActivityStore;
+    /** 5b82324b — the cached STRUCTURAL pane observation (SeatStructuralActivityService). READ-only
+     *  and capture-FREE: lifts structural motion into the ACTIVITY signal on the DEFAULT path so a
+     *  live hook-less/stale-hook seat stops rendering as `unknown`. Absent = the pre-5b behavior. */
+    structuralActivity?: { getStructuralActivity(sessionName: string): StructuralObservation | null };
     now?: Date;
     // OPR.0.4.3 healthz-wedge amplification fix: cheap by default. The per-node
     // tmux `capturePaneContent` fallback (probeSessionActivity) is the storm that
@@ -1084,6 +1089,39 @@ export async function attachAgentActivity(
       sessionName: entry.canonicalSessionName,
       now: sampledAt,
     });
+    // A fresh POSITIVE hook (running/needs_input/idle) is authoritative — use it directly.
+    if (hookActivity && hookActivity.state !== "unknown") {
+      return {
+        ...entry,
+        agentActivity: hookActivity,
+      };
+    }
+
+    // Hook ABSENT or unknown/stale → consult the CACHED structural observation. This read is
+    // capture-FREE: the pane capture already happened on the background SeatStructuralActivityService
+    // tick, never here (the healthz-wedge no-per-request-capture invariant is preserved). A structural
+    // motion verdict is a LIVENESS signal that OVERRIDES an absent/stale hook (constraint 2 — liveness
+    // beats hook-arrival age) and makes ACTIVITY real on the DEFAULT path for hook-less / Codex /
+    // just-finished-a-turn seats: the exact fleet-blindness this fix targets. Structural discrimination
+    // is STRUCTURAL (spinner shapes / esc-to-interrupt / idle prompt), never a verb allowlist.
+    const structural = entry.canonicalSessionName
+      ? deps.structuralActivity?.getStructuralActivity(entry.canonicalSessionName)
+      : null;
+    if (structural && structural.state !== "unknown") {
+      return {
+        ...entry,
+        agentActivity: {
+          state: mapPaneState(structural.state),
+          reason: structural.reason,
+          evidenceSource: "pane_heuristic",
+          sampledAt: structural.observedAt,
+          evidence: structural.evidence,
+        },
+      };
+    }
+
+    // No positive hook and no structural motion. A stale/unknown hook, if one exists, is delivered
+    // HONESTLY as-is (unknown/stale) — never upgraded to a quiet-seat verdict on arrival age alone.
     if (hookActivity) {
       return {
         ...entry,

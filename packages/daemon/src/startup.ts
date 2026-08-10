@@ -56,6 +56,7 @@ import { LegacyBundleSourceResolver as BundleSourceResolver } from "./domain/bun
 import { PodBundleSourceResolver } from "./domain/bundle-source-resolver.js";
 import { PsProjectionService } from "./domain/ps-projection.js";
 import { SeatActivityService } from "./domain/seat-activity-service.js";
+import { SeatStructuralActivityService } from "./domain/seat-structural-activity-service.js";
 import { SeatIdentityReconciler, reconcileSelfHostIdentity } from "./domain/seat-identity-reconciler.js";
 import { SelfHostIdentityStore } from "./domain/seat-identity-store.js";
 import { DaemonLifecycleStore } from "./domain/daemon-lifecycle-store.js";
@@ -365,6 +366,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     defaultWindowSeconds: 3,
     eventBus,
   });
+  // 5b82324b — the STRUCTURAL activity cache (sibling of SeatActivityService). Captures pane TEXT once
+  // per running seat per tick + classifies motion STRUCTURALLY, so the `rig ps` ACTIVITY column reflects
+  // real liveness for hook-less / stale-hook / turn-boundary seats WITHOUT a per-request capture storm.
+  const seatStructuralActivityService = new SeatStructuralActivityService(tmuxAdapter);
   // OPR.0.4.3.19 — SeatIdentityReconciler owns the liveness identity verdict
   // (the THIRD axis). Reconciles each running seat's pane PID/command against
   // the registered binding and persists the verdict so node-inventory can gate
@@ -969,6 +974,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // + UI surfaces read the latest observation per seat. NEVER reads
     // queue/assignment state (non-inference contract; see slice 15 IMPL-PRD §2.3).
     seatActivityService,
+    seatStructuralActivityService,
     seatIdentityReconciler,
     // OPR.0.4.4.21 — agentActivity feeds the rig-rollup attention
     // predicate's needs_input signal (synchronous events lookup only).
