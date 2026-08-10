@@ -18,10 +18,10 @@
 //      after state snapshots.
 //   5. Persist the mission_control.action_executed event.
 //
-// Post-commit (outside the transaction): notifySubscribers + opt-in
-// best-effort transport notify. Notify failure does NOT roll back
-// durable mutations (PRD invariant: "notify failure does NOT roll
-// back durable mutations").
+// Post-commit (outside the transaction): the event envelope drains to
+// subscribers, then opt-in best-effort transport notify runs. Notify failure
+// does NOT roll back durable mutations (PRD invariant: "notify failure does
+// NOT roll back durable mutations").
 //
 // Verb mappings:
 //   approve   → state="done",        closure_reason="no-follow-on"
@@ -153,108 +153,101 @@ export class MissionControlWriteContract {
     let createdDestination: string | undefined;
     let createdNudge: boolean | undefined;
     let actionEntry: ReturnType<MissionControlActionLog["record"]> | null = null;
-    const persistedEvents: PersistedEvent[] = [];
-
-    const txn = this.db.transaction(() => {
-      // 1. Close/transition the source via Phase A's queue closure primitive.
-      const closeResult = this.queueRepo.updateWithinTransaction({
-        qitemId: input.qitemId,
-        actorSession: input.actorSession,
-        state: closure.state,
-        closureReason: closure.closureReason,
-        closureTarget: closure.closureTarget ?? undefined,
-        handedOffTo: closure.handedOffTo,
-        blockedOn: closure.blockedOn,
-        transitionNote: `mission-control:${input.verb}${input.reason ? ` (${input.reason})` : ""}`,
-      });
-      persistedEvents.push(closeResult.persistedEvent);
-
-      // 2. For route/handoff: create the destination packet in same txn.
-      if ((input.verb === "route" || input.verb === "handoff") && input.destinationSession) {
-        const created = this.queueRepo.createWithinTransaction({
-          sourceSession: input.actorSession,
-          destinationSession: input.destinationSession,
-          body: input.body ?? source.body,
-          priority: source.priority,
-          tier: source.tier ?? undefined,
-          summary: source.summary,
-          evidenceRef: source.evidenceRef,
-          tags: source.tags
-            ? [...source.tags, `mission-control:${input.verb}`]
-            : [`mission-control:${input.verb}`],
-          chainOfRecord: [...(source.chainOfRecord ?? []), input.qitemId],
-          // Default nudge handled post-commit per Phase D pattern.
-          nudge: input.notify,
+    try {
+      this.eventBus.withNotifyEnvelope((register) => {
+        // 1. Close/transition the source via Phase A's queue closure primitive.
+        const closeResult = this.queueRepo.updateWithinTransaction({
+          qitemId: input.qitemId,
+          actorSession: input.actorSession,
+          state: closure.state,
+          closureReason: closure.closureReason,
+          closureTarget: closure.closureTarget ?? undefined,
+          handedOffTo: closure.handedOffTo,
+          blockedOn: closure.blockedOn,
+          transitionNote: `mission-control:${input.verb}${input.reason ? ` (${input.reason})` : ""}`,
         });
-        createdQitemId = created.qitemId;
-        createdDestination = created.destinationSession;
-        createdNudge = created.nudge;
-        persistedEvents.push(created.persistedEvent);
-        // P34: stage the successor's WAKE INTENT inside this transaction, so the
-        // close and the durable wake commit as ONE act or NONE. The pane write
-        // itself stays post-commit (reversed-never).
-        this.queueRepo.stageWakeIntent(
-          created.qitemId,
-          input.actorSession,
-          created.destinationSession,
-          input.identityProvenance ?? null,
-          created.nudge,
-        );
-      }
+        register(closeResult.persistedEvent);
 
-      // 3. Append the audit record. Snapshot the closed qitem state.
-      const closedQitem = this.queueRepo.getById(input.qitemId);
-      const afterSnapshot = closedQitem ? snapshotQitem(closedQitem) : null;
-      actionEntry = this.actionLog.record({
-        actionVerb: input.verb,
-        qitemId: input.qitemId,
-        actorSession: input.actorSession,
-        actedAt: evaluatedAt,
-        beforeState: beforeSnapshot,
-        afterState: afterSnapshot,
-        reason: input.reason ?? null,
-        annotation: input.annotation ?? null,
-        notifyAttempted: false,
-        notifyResult: null,
-        auditNotes: input.auditNotes ?? null,
-        identityProvenance: input.identityProvenance ?? null, // P21 era-stamp on the audit row
-      });
+        // 2. For route/handoff: create the destination packet in same txn.
+        if ((input.verb === "route" || input.verb === "handoff") && input.destinationSession) {
+          const created = this.queueRepo.createWithinTransaction({
+            sourceSession: input.actorSession,
+            destinationSession: input.destinationSession,
+            body: input.body ?? source.body,
+            priority: source.priority,
+            tier: source.tier ?? undefined,
+            summary: source.summary,
+            evidenceRef: source.evidenceRef,
+            tags: source.tags
+              ? [...source.tags, `mission-control:${input.verb}`]
+              : [`mission-control:${input.verb}`],
+            chainOfRecord: [...(source.chainOfRecord ?? []), input.qitemId],
+            // Default nudge handled post-commit per Phase D pattern.
+            nudge: input.notify,
+          });
+          createdQitemId = created.qitemId;
+          createdDestination = created.destinationSession;
+          createdNudge = created.nudge;
+          register(created.persistedEvent);
+          // P34: stage the successor's WAKE INTENT inside this transaction, so the
+          // close and the durable wake commit as ONE act or NONE. The pane write
+          // itself stays post-commit (reversed-never).
+          this.queueRepo.stageWakeIntent(
+            created.qitemId,
+            input.actorSession,
+            created.destinationSession,
+            input.identityProvenance ?? null,
+            created.nudge,
+          );
+        }
 
-      // 4. Persist the mission_control.action_executed event in same txn.
-      persistedEvents.push(
-        this.eventBus.persistWithinTransaction({
-          type: "mission_control.action_executed",
-          actionId: actionEntry.actionId,
+        // 3. Append the audit record. Snapshot the closed qitem state.
+        const closedQitem = this.queueRepo.getById(input.qitemId);
+        const afterSnapshot = closedQitem ? snapshotQitem(closedQitem) : null;
+        actionEntry = this.actionLog.record({
           actionVerb: input.verb,
           qitemId: input.qitemId,
           actorSession: input.actorSession,
-        }),
-      );
+          actedAt: evaluatedAt,
+          beforeState: beforeSnapshot,
+          afterState: afterSnapshot,
+          reason: input.reason ?? null,
+          annotation: input.annotation ?? null,
+          notifyAttempted: false,
+          notifyResult: null,
+          auditNotes: input.auditNotes ?? null,
+          identityProvenance: input.identityProvenance ?? null, // P21 era-stamp on the audit row
+        });
 
-      // P34: the W1 seam, run as the LAST statement of this transaction. If this
-      // act terminally closed the source AND created a successor, the successor's
-      // wake intent must be durable in the SAME transaction — otherwise the whole
-      // act rolls back here rather than committing an executed-but-unwoken item.
-      // A non-terminal transition (the `hold` park) returns early inside the
-      // primitive itself (queue-repository.ts, isTerminalState), so park callers
-      // are untouched by construction; a terminal close with NO successor has
-      // nothing to wake and is not paired here.
-      if (createdQitemId && createdDestination) {
-        this.queueRepo.assertTerminalClosureHasIntent(input.qitemId, createdQitemId, createdNudge);
-      }
-    });
+        // 4. Persist the mission_control.action_executed event in same txn.
+        register(
+          this.eventBus.persistWithinTransaction({
+            type: "mission_control.action_executed",
+            actionId: actionEntry.actionId,
+            actionVerb: input.verb,
+            qitemId: input.qitemId,
+            actorSession: input.actorSession,
+          }),
+        );
 
-    try {
-      txn();
+        // P34: the W1 seam, run as the LAST statement of this transaction. If this
+        // act terminally closed the source AND created a successor, the successor's
+        // wake intent must be durable in the SAME transaction — otherwise the whole
+        // act rolls back here rather than committing an executed-but-unwoken item.
+        // A non-terminal transition (the `hold` park) returns early inside the
+        // primitive itself (queue-repository.ts, isTerminalState), so park callers
+        // are untouched by construction; a terminal close with NO successor has
+        // nothing to wake and is not paired here.
+        if (createdQitemId && createdDestination) {
+          this.queueRepo.assertTerminalClosureHasIntent(input.qitemId, createdQitemId, createdNudge);
+        }
+      });
     } catch (err) {
       if (err instanceof MissionControlActionLogError) {
         throw new MissionControlWriteContractError(err.code, err.message, err.details);
       }
       throw err;
     }
-
-    // Post-commit: fan out events.
-    for (const e of persistedEvents) this.eventBus.notifySubscribers(e);
 
     // Post-commit best-effort notify on handoff/route. Default true per
     // PL-004 R1 pattern; failure does NOT roll back durable mutations.
@@ -403,57 +396,51 @@ export class MissionControlWriteContract {
     const evaluatedAt = this.now().toISOString();
     const beforeSnapshot = snapshotQitem(source);
     let actionEntry: ReturnType<MissionControlActionLog["record"]> | null = null;
-    const persistedEvents: PersistedEvent[] = [];
+    try {
+      this.eventBus.withNotifyEnvelope((register) => {
+        // Rail 2+3: blocked → in-progress; decision text = transition_note;
+        // actor_session = the resolving human/relay session. Emits
+        // queue.updated (the P2 refresh-after-action contract). blocked_on is
+        // deliberately retained as provenance of whom it was parked on — the
+        // attention query keys on state='blocked', so the resolved item drops
+        // out of attention regardless.
+        const updateResult = this.queueRepo.updateWithinTransaction({
+          qitemId: input.qitemId,
+          actorSession: input.actorSession,
+          state: "in-progress",
+          transitionNote: decision,
+        });
+        register(updateResult.persistedEvent);
 
-    const txn = this.db.transaction(() => {
-      // Rail 2+3: blocked → in-progress; decision text = transition_note;
-      // actor_session = the resolving human/relay session. Emits
-      // queue.updated (the P2 refresh-after-action contract). blocked_on is
-      // deliberately retained as provenance of whom it was parked on — the
-      // attention query keys on state='blocked', so the resolved item drops
-      // out of attention regardless.
-      const updateResult = this.queueRepo.updateWithinTransaction({
-        qitemId: input.qitemId,
-        actorSession: input.actorSession,
-        state: "in-progress",
-        transitionNote: decision,
-      });
-      persistedEvents.push(updateResult.persistedEvent);
-
-      const resolvedQitem = this.queueRepo.getById(input.qitemId);
-      actionEntry = this.actionLog.record({
-        actionVerb: "resolve",
-        qitemId: input.qitemId,
-        actorSession: input.actorSession,
-        actedAt: evaluatedAt,
-        beforeState: beforeSnapshot,
-        afterState: resolvedQitem ? snapshotQitem(resolvedQitem) : null,
-        reason: decision,
-        auditNotes: input.auditNotes ?? null,
-        identityProvenance: input.identityProvenance ?? null, // P21 era-stamp on the audit row
-      });
-
-      persistedEvents.push(
-        this.eventBus.persistWithinTransaction({
-          type: "mission_control.action_executed",
-          actionId: actionEntry.actionId,
+        const resolvedQitem = this.queueRepo.getById(input.qitemId);
+        actionEntry = this.actionLog.record({
           actionVerb: "resolve",
           qitemId: input.qitemId,
           actorSession: input.actorSession,
-        }),
-      );
-    });
+          actedAt: evaluatedAt,
+          beforeState: beforeSnapshot,
+          afterState: resolvedQitem ? snapshotQitem(resolvedQitem) : null,
+          reason: decision,
+          auditNotes: input.auditNotes ?? null,
+          identityProvenance: input.identityProvenance ?? null, // P21 era-stamp on the audit row
+        });
 
-    try {
-      txn();
+        register(
+          this.eventBus.persistWithinTransaction({
+            type: "mission_control.action_executed",
+            actionId: actionEntry.actionId,
+            actionVerb: "resolve",
+            qitemId: input.qitemId,
+            actorSession: input.actorSession,
+          }),
+        );
+      });
     } catch (err) {
       if (err instanceof MissionControlActionLogError) {
         throw new MissionControlWriteContractError(err.code, err.message, err.details);
       }
       throw err;
     }
-
-    for (const e of persistedEvents) this.eventBus.notifySubscribers(e);
 
     // Rail 3 + BR-8: best-effort nudge to the PARKED OWNER carrying the
     // decision text, after the commit — nudge outcome recorded via the

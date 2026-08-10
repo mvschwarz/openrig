@@ -12,7 +12,6 @@
 import type Database from "better-sqlite3";
 import type { EventBus } from "./event-bus.js";
 import type { QueueRepository } from "./queue-repository.js";
-import type { PersistedEvent } from "./types.js";
 import {
   type CreateWorkflowInstanceInput,
   WorkflowInstanceStore,
@@ -535,9 +534,7 @@ export class WorkflowRuntime {
     let entryQitemDestinationSession: string | undefined;
     let entryQitemNudge: boolean | undefined;
     let instanceId: string | undefined;
-    const persistedEvents: PersistedEvent[] = [];
-
-    const txn = this.db.transaction(() => {
+    this.eventBus.withNotifyEnvelope((register) => {
       const instance = this.instanceStore.create({
         workflowName: specRow.name,
         workflowVersion: specRow.version,
@@ -598,7 +595,7 @@ export class WorkflowRuntime {
       entryQitemId = created.qitemId;
       entryQitemDestinationSession = created.destinationSession;
       entryQitemNudge = created.nudge;
-      persistedEvents.push(created.persistedEvent);
+      register(created.persistedEvent);
 
       // OPR.0.4.6.WF2 FR-5 (guard blocker 1): a HUMAN-gated ENTRY parks
       // in the same txn — the leg-1 blocked_on human-seat shape the
@@ -614,7 +611,7 @@ export class WorkflowRuntime {
           blockedOn: entryGate.parkOn,
           transitionNote: `workflow gate: parked on ${entryGate.parkOn} pending sign-off`,
         });
-        persistedEvents.push(parked.persistedEvent);
+        register(parked.persistedEvent);
       }
 
       this.instanceStore.updateFrontier(instance.instanceId, [created.qitemId], entryGate ? "waiting" : "active", {
@@ -634,7 +631,7 @@ export class WorkflowRuntime {
         });
       }
 
-      persistedEvents.push(
+      register(
         this.eventBus.persistWithinTransaction({
           type: "workflow.instantiated",
           instanceId: instance.instanceId,
@@ -644,9 +641,6 @@ export class WorkflowRuntime {
         }),
       );
     });
-    txn();
-
-    for (const e of persistedEvents) this.eventBus.notifySubscribers(e);
     if (entryQitemId && entryQitemDestinationSession) {
       await this.queueRepo.maybeNudge(entryQitemId, entryQitemDestinationSession, entryQitemNudge);
     }
@@ -714,7 +708,6 @@ export class WorkflowRuntime {
     resumeCount: number;
     exceptionItemsClosed: number;
   }> {
-    const persistedEvents: PersistedEvent[] = [];
     let result!: {
       instanceId: string;
       stepId: string;
@@ -725,7 +718,7 @@ export class WorkflowRuntime {
     };
     let nudgeTo: { qitemId: string; session: string; nudge: boolean | undefined } | null = null;
 
-    const txn = this.db.transaction(() => {
+    this.eventBus.withNotifyEnvelope((register) => {
       const instance = this.instanceStore.getByIdOrThrow(input.instanceId);
       if (instance.status !== "failed") {
         throw new WorkflowProjectorError(
@@ -809,7 +802,7 @@ export class WorkflowRuntime {
         ],
         chainOfRecord: failedPacketId ? [failedPacketId] : undefined,
       });
-      persistedEvents.push(created.persistedEvent);
+      register(created.persistedEvent);
       nudgeTo = { qitemId: created.qitemId, session: created.destinationSession, nudge: created.nudge };
       // P34: stage the redrive packet's wake intent inside this transaction.
       this.queueRepo.stageWakeIntent(
@@ -843,7 +836,7 @@ export class WorkflowRuntime {
             closureReason: "no-follow-on",
             transitionNote: `workflow resume: occurrence resolved by ${input.actorSession} redriving step ${step.id}${input.decision ? ` — ${input.decision}` : ""}`,
           });
-          persistedEvents.push(closedItem.persistedEvent);
+          register(closedItem.persistedEvent);
           exceptionItemsClosed += 1;
         }
       }
@@ -870,7 +863,7 @@ export class WorkflowRuntime {
         });
       }
 
-      persistedEvents.push(
+      register(
         this.eventBus.persistWithinTransaction({
           type: "workflow.resumed",
           instanceId: instance.instanceId,
@@ -911,11 +904,6 @@ export class WorkflowRuntime {
       // the seam to roll back against, and inventing one would buy a green check
       // that asserts nothing.
     });
-    txn();
-
-    for (const e of persistedEvents) {
-      this.eventBus.notifySubscribers(e);
-    }
     // Closure-assignment cast (the shipped post-commit idiom): TS cannot
     // track the txn-closure write, so narrow via the cast.
     const resumeNudge = nudgeTo as { qitemId: string; session: string; nudge: boolean | undefined } | null;
@@ -947,7 +935,6 @@ export class WorkflowRuntime {
     toSession: string;
     instanceStatus: WorkflowInstance["status"];
   }> {
-    const persistedEvents: PersistedEvent[] = [];
     let result!: {
       instanceId: string;
       stepId: string | null;
@@ -959,7 +946,7 @@ export class WorkflowRuntime {
     };
     let nudgeTo: { qitemId: string; session: string; nudge: boolean | undefined } | null = null;
 
-    const txn = this.db.transaction(() => {
+    this.eventBus.withNotifyEnvelope((register) => {
       const instance = this.instanceStore.getByIdOrThrow(input.instanceId);
       if (instance.status !== "active" && instance.status !== "waiting") {
         throw new WorkflowProjectorError(
@@ -1012,7 +999,7 @@ export class WorkflowRuntime {
         handedOffTo: input.toSession,
         transitionNote: `workflow route: ${input.actorSession} re-routed step ${instance.currentStepId ?? "?"} from ${fromSession} to ${input.toSession}${input.reason ? ` — ${input.reason}` : ""}`,
       });
-      persistedEvents.push(closed.persistedEvent);
+      register(closed.persistedEvent);
 
       // Recreate the SAME step for the new owner (step identity is the
       // work's continuity — the qitem id is a storage artifact of the
@@ -1053,7 +1040,7 @@ export class WorkflowRuntime {
         evidenceRef: oldPacket.evidenceRef ?? undefined,
         targetRepo: oldPacket.targetRepo ?? undefined,
       });
-      persistedEvents.push(created.persistedEvent);
+      register(created.persistedEvent);
       nudgeTo = { qitemId: created.qitemId, session: created.destinationSession, nudge: created.nudge };
       // P34 (site :992): stage the re-routed packet's wake intent in the same
       // transaction that closed the old frontier packet.
@@ -1085,7 +1072,7 @@ export class WorkflowRuntime {
           blockedOn: oldPacket.blockedOn,
           transitionNote: `workflow route: park preserved (${oldPacket.blockedOn})`,
         });
-        persistedEvents.push(reparked.persistedEvent);
+        register(reparked.persistedEvent);
       }
 
       // (2)+(5)+(7) frontier REBIND: same step, new packet, version
@@ -1111,7 +1098,7 @@ export class WorkflowRuntime {
       }
 
       // (6) the shipped event shape {rigName, cause} extended ADDITIVELY.
-      persistedEvents.push(
+      register(
         this.eventBus.persistWithinTransaction({
           type: "workflow.routing_table_changed",
           // OPR.0.4.6.FAC1 (display-only): the instance's actual bound
@@ -1140,9 +1127,6 @@ export class WorkflowRuntime {
       // creates its successor, so the pairing here is unconditional.
       this.queueRepo.assertTerminalClosureHasIntent(oldPacketId, created.qitemId, created.nudge);
     });
-    txn();
-
-    for (const e of persistedEvents) this.eventBus.notifySubscribers(e);
     if (nudgeTo) {
       const n = nudgeTo as { qitemId: string; session: string; nudge: boolean | undefined };
       // P34: shared staged-intent delivery (see the resume path above).

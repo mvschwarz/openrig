@@ -355,8 +355,11 @@ export class WorkflowProjector {
     // (delivery is best-effort; the durable item is the guarantee).
     let exceptionItemPostCommit: (PostCommitNudge & { qitemId: string }) | null = null;
     const persistedEvents: PersistedEvent[] = [];
-
-    const txn = this.db.transaction(() => {
+    this.eventBus.withNotifyEnvelope((register) => {
+      const registerEvent = (event: PersistedEvent): void => {
+        persistedEvents.push(event);
+        register(event);
+      };
       // 1. Resolve next owner BEFORE closing prior so closure_target is set.
       // OPR.0.4.6.WF2: owner resolution runs for ANY route (structural
       // handoff or branch-mapped exit). A gated target step compiles to
@@ -413,7 +416,7 @@ export class WorkflowProjector {
         blockedOn: closure.blockedOn,
         transitionNote: closure.transitionNote,
       });
-      persistedEvents.push(queueUpdate.persistedEvent);
+      registerEvent(queueUpdate.persistedEvent);
 
       // 3. If this close routes (structural handoff OR branch-mapped
       // exit): create the next-step qitem in the same txn. A gated
@@ -520,7 +523,7 @@ export class WorkflowProjector {
             blockedOn: gateCompile.parkOn,
             transitionNote: `workflow gate: parked on ${gateCompile.parkOn} pending sign-off`,
           });
-          persistedEvents.push(parked.persistedEvent);
+          registerEvent(parked.persistedEvent);
         }
       }
 
@@ -659,7 +662,7 @@ export class WorkflowProjector {
       }
 
       // 6. Persist workflow events within the same txn.
-      persistedEvents.push(
+      registerEvent(
         this.eventBus.persistWithinTransaction({
           type: "workflow.step_closed",
           instanceId: instance.instanceId,
@@ -670,8 +673,8 @@ export class WorkflowProjector {
         }),
       );
       if (createdNext && nextStep && resolvedNextOwner) {
-        persistedEvents.push(createdNext.persistedEvent);
-        persistedEvents.push(
+        registerEvent(createdNext.persistedEvent);
+        registerEvent(
           this.eventBus.persistWithinTransaction({
             type: "workflow.next_qitem_projected",
             instanceId: instance.instanceId,
@@ -682,7 +685,7 @@ export class WorkflowProjector {
         );
       }
       if (nextStatus === "completed") {
-        persistedEvents.push(
+        registerEvent(
           this.eventBus.persistWithinTransaction({
             type: "workflow.completed",
             instanceId: instance.instanceId,
@@ -690,7 +693,7 @@ export class WorkflowProjector {
           }),
         );
       } else if (nextStatus === "failed") {
-        persistedEvents.push(
+        registerEvent(
           this.eventBus.persistWithinTransaction({
             type: "workflow.failed",
             instanceId: instance.instanceId,
@@ -765,7 +768,7 @@ export class WorkflowProjector {
               "human-gate",
             );
           }
-          persistedEvents.push(createdException.persistedEvent);
+          registerEvent(createdException.persistedEvent);
           exceptionItemPostCommit = {
             qitemId: createdException.qitemId,
             destinationSession: createdException.destinationSession,
@@ -808,12 +811,6 @@ export class WorkflowProjector {
       }
     });
 
-    txn();
-
-    // Post-commit fan-out: notify subscribers + nudge next owner.
-    for (const e of persistedEvents) {
-      this.eventBus.notifySubscribers(e);
-    }
     // OPR.0.4.6.WF5 FR-2: best-effort nudge for the exception item (the
     // shipped non-fatal delivery pattern — the durable item is the
     // guarantee, the nudge is a courtesy).

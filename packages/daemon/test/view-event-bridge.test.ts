@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -59,7 +59,10 @@ describe("view-event-bridge (PL-004 Phase B R1; BLOCKER 2 fix)", () => {
     wireViewEventBridge(bus, projector);
   });
 
-  afterEach(() => db.close());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    db.close();
+  });
 
   function viewChangedEvents(): Array<{ viewName: string; cause: string }> {
     return captured
@@ -217,15 +220,77 @@ describe("view-event-bridge (PL-004 Phase B R1; BLOCKER 2 fix)", () => {
     expect(events.filter((e) => e.cause === "classifier.lease_acquired")).toHaveLength(0);
   });
 
-  it("view.changed itself does NOT trigger view.changed (no feedback loop)", () => {
+  it("notifyViewChanged persists only and view.changed does not echo through the bridge", () => {
     projector.notifyViewChanged("recently-active", "manual-test");
     captured.length = 0;
     projector.notifyViewChanged("recently-active", "manual-test-2");
-    // The bridge should not re-emit view.changed in response to view.changed.
-    const newViewChangedEvents = captured.filter((e) => e.type === "view.changed");
-    // Only the direct notifyViewChanged call's event; no echo.
-    expect(newViewChangedEvents).toHaveLength(1);
-    expect((newViewChangedEvents[0] as { cause: string }).cause).toBe("manual-test-2");
+    expect(captured).toEqual([]);
+    const persisted = bus.replayAll(0).filter((event) => event.type === "view.changed");
+    expect(persisted).toHaveLength(2);
+    expect(persisted.map((event) => event.cause)).toEqual(["manual-test", "manual-test-2"]);
+  });
+
+  it("W2b drains outer events before re-entrant view.changed rows and delivers each exactly once", () => {
+    captured.length = 0;
+
+    bus.withNotifyEnvelope((register) => {
+      register(bus.persistWithinTransaction({
+        type: "queue.handed_off",
+        qitemId: "q-w2b-handoff",
+        fromSession: "alice@rig",
+        toSession: "bob@rig",
+        closureReason: "handed_off_to",
+        summary: null,
+      }));
+      register(bus.persistWithinTransaction({
+        type: "inbox.denied",
+        inboxId: "inbox-w2b-denied",
+        destinationSession: "bob@rig",
+        senderSession: "alice@rig",
+        reason: "ordering discriminator",
+      }));
+    });
+
+    expect(captured.slice(0, 2).map((event) => event.type)).toEqual([
+      "queue.handed_off",
+      "inbox.denied",
+    ]);
+    const replayed = bus.replayAll(0);
+    expect(captured.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(captured.map((event) => event.seq)).toEqual(replayed.map((event) => event.seq));
+    expect(new Set(captured.map((event) => event.seq)).size).toBe(captured.length);
+    expect(
+      captured
+        .filter((event) => event.type === "view.changed")
+        .map((event) => `${event.viewName}:${event.cause}`),
+    ).toEqual([
+      "recently-active:queue.handed_off",
+      "pod-load:queue.handed_off",
+      "activity:queue.handed_off",
+      "activity:inbox.denied",
+    ]);
+  });
+
+  it("W2b keeps drain-time delivery failures outside the bridge best-effort persist catch", () => {
+    const originalNotify = bus.notifySubscribers.bind(bus);
+    vi.spyOn(bus, "notifySubscribers").mockImplementation((event) => {
+      if (event.type === "view.changed") throw new Error("drain delivery failed");
+      originalNotify(event);
+    });
+
+    expect(() =>
+      bus.withNotifyEnvelope((register) => {
+        register(bus.persistWithinTransaction({
+          type: "queue.created",
+          qitemId: "q-w2b-delivery-error",
+          sourceSession: "alice@rig",
+          destinationSession: "bob@rig",
+          priority: "routine",
+          tier: null,
+          summary: null,
+        }));
+      }),
+    ).toThrow("drain delivery failed");
   });
 
   it("unsubscribe stops the bridge", async () => {

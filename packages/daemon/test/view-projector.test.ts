@@ -197,10 +197,15 @@ describe("ViewProjector (PL-004 Phase B; L5 read-only projections)", () => {
     expect(result.custom[0]!.viewName).toBe("my-view");
   });
 
-  it("notifyViewChanged emits view.changed event", () => {
+  it("notifyViewChanged persists view.changed for the enclosing drain without direct delivery", () => {
     const captured: unknown[] = [];
     bus.subscribe((e) => captured.push(e));
     projector.notifyViewChanged("recently-active", "queue.created");
-    expect(captured.some((e) => (e as { type: string }).type === "view.changed")).toBe(true);
+    expect(captured).toEqual([]);
+    expect(bus.replayAll(0).at(-1)).toMatchObject({
+      type: "view.changed",
+      viewName: "recently-active",
+      cause: "queue.created",
+    });
   });
 });

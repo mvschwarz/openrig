@@ -327,12 +327,11 @@ export class ViewProjector {
    * subscribe to event-bus events and trigger this notify.
    */
   notifyViewChanged(viewName: string, cause: string): void {
-    const persisted = this.eventBus.persistWithinTransaction({
+    this.eventBus.persistWithinTransaction({
       type: "view.changed",
       viewName,
       cause,
     });
-    this.eventBus.notifySubscribers(persisted);
   }
 
   private getCustomViewByIdOrThrow(viewId: string): CustomView {

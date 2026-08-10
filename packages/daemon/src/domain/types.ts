@@ -101,6 +101,7 @@ export interface Session {
 // -- Event types --
 
 export type RigEvent =
+  | { type: "event.delivery_poisoned"; poisonedSeq: number; error: string; payloadSha: string }
   | { type: "rig.created"; rigId: string }
   | { type: "rig.deleted"; rigId: string }
   | { type: "node.added"; rigId: string; nodeId: string; logicalId: string }
