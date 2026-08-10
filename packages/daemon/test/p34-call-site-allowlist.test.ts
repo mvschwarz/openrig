@@ -32,24 +32,49 @@ import { describe, it, expect } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-/** Which case each sanctioned caller is. The label is the point: adding a writer
- *  means stating what it does, not just silencing a checker. */
+// ── REV 2 (review-r2 HIGH-1) — THE GRANULARITY FIX ───────────────────────────
+// Rev 1 sanctioned FILENAMES and counted FILES. That is coarser than the thing it
+// constrains: an added unguarded call INSIDE an already-sanctioned file left the
+// file count unchanged and stayed GREEN — the guard could not fail for the very
+// case it exists to catch. It also matched a raw regex over the whole file, so
+// COMMENTS mentioning the primitive inflated the count and alias bindings escaped
+// it entirely.
 //
+// Rev 2 constrains CALL SITES. Each sanctioned entry declares HOW MANY sites that
+// file may hold and why; any added, removed, or relocated call changes the count
+// and fails BY NAME. Comment lines are excluded, alias bindings are counted, and
+// the method DEFINITION is not a call site.
+//
+// Rev 1's counts were also simply wrong, which is its own evidence: it matched
+// `.updateWithinTransaction(` including comment lines, reporting 4/3/2 where the
+// real code holds 4/2/2 and queue-repository holds ZERO (line 1711 is the
+// declaration). A guard whose measurement is off by a comment is not measuring
+// the constraint.
+
+/** Which case each sanctioned caller is, and how many call sites it may hold. The
+ *  label is the point: adding a writer means stating what it does, not just
+ *  silencing a checker. */
+const SANCTIONED: Record<string, { sites: number; why: string }> = {
+  "domain/mission-control/mission-control-write-contract.ts": {
+    sites: 2,
+    why: "P34 terminal close + successor create (route/handoff) at :160; the non-terminal resolve update at :415",
+  },
+  "domain/workflow-projector.ts": {
+    sites: 2,
+    why: "P34 terminal close at :405 (routes and failed branches are exclusive successors of it); the gate park at :514",
+  },
+  "domain/workflow-runtime.ts": {
+    sites: 4,
+    why: "P34 route close at :1013; the no-successor exception closes at :842; the entry-gate park at :608; the route re-park at :1087",
+  },
+};
+
 // NOT listed, deliberately: domain/queue-repository.ts. It DEFINES
 // updateWithinTransaction and reaches its own write path through the private
-// updateInTransactionalContext — it is the definer, never an external caller. The
-// exact-count assertion below caught this on the guard's first run, when the list
-// had been written from memory rather than from the corpus: four entries against
-// three real call sites. If the repository ever does call the primitive on itself,
-// that is a NEW call site and this guard will demand it be written down.
-const SANCTIONED: Record<string, string> = {
-  "domain/mission-control/mission-control-write-contract.ts":
-    "P34 site: terminal close + successor create (route/handoff); also a non-terminal park (hold) and resolve",
-  "domain/workflow-projector.ts":
-    "P34 sites: the routes branch and the failed branch (mutually exclusive); also the gate park",
-  "domain/workflow-runtime.ts":
-    "P34 sites: route, and the resume redrive; also the entry-gate park, the route re-park, and the no-successor exception closes",
-};
+// updateInTransactionalContext — definer, never caller, so it holds ZERO call
+// sites. Rev 1 listed it and was caught by the count assertion. If the repository
+// ever calls the primitive on itself, that is a NEW site and this guard demands it
+// be written down.
 
 const SRC = join(import.meta.dirname, "..", "src");
 
@@ -70,21 +95,64 @@ interface Corpus {
 
 interface GuardResult {
   violations: string[];
+  /** TOTAL CALL SITES examined — not files. The rev-1 defect was counting the
+   *  coarser unit, which cannot notice a site added inside a counted file. */
   examined: number;
-  /** Set when the guard examined NO call sites at all — a check that verified
-   *  nothing must not report the same green as one that verified everything. */
   vacuous: boolean;
 }
 
-/** The guard itself: a pure function over a corpus, so it can be shown FIRING on a
- *  synthetic fourth writer without adding one to src/. */
-export function checkCallSites(corpus: Corpus[], sanctioned: Record<string, string>): GuardResult {
+/** Is this line comment-only? Cheap and line-oriented on purpose: a whole-file
+ *  regex strip is what silently ate a real call while rev 2 was being written. */
+function isCommentLine(line: string): boolean {
+  const t = line.trim();
+  return t.startsWith("//") || t.startsWith("*") || t.startsWith("/*");
+}
+
+/** Call sites of the primitive in one file's source.
+ *  Counts:  `x.updateWithinTransaction(`      — the ordinary call
+ *           `const { updateWithinTransaction }` / `= obj.updateWithinTransaction;`
+ *                                             — ALIAS BINDINGS, which rev 1 missed
+ *                                               entirely and which can call it later
+ *  Excludes: comment lines, and the method DECLARATION itself. */
+export function countCallSites(content: string): number {
+  let n = 0;
+  for (const line of content.split("\n")) {
+    if (isCommentLine(line)) continue;
+    if (/^\s*updateWithinTransaction\s*\(/.test(line)) continue; // the declaration
+    for (const _ of line.matchAll(/\.updateWithinTransaction\s*\(/g)) n += 1;
+    // Alias binding: the identifier appears WITHOUT being an immediate call on a
+    // receiver — destructured, or captured into a variable for later invocation.
+    if (/(?:\{[^}]*\bupdateWithinTransaction\b[^}]*\}\s*=)|(?:=\s*[\w.]*\.?updateWithinTransaction\s*[;,)])/.test(line)) {
+      n += 1;
+    }
+  }
+  return n;
+}
+
+/** The guard: a pure function over a corpus, so it can be shown FIRING without
+ *  adding a rogue writer to src/. */
+export function checkCallSites(
+  corpus: Corpus[],
+  sanctioned: Record<string, { sites: number; why: string }>,
+): GuardResult {
   const violations: string[] = [];
   let examined = 0;
   for (const { path, content } of corpus) {
-    if (!/\.updateWithinTransaction\s*\(/.test(content)) continue;
-    examined += 1;
-    if (!(path in sanctioned)) violations.push(path);
+    const sites = countCallSites(content);
+    if (sites === 0) {
+      // A sanctioned entry that no longer holds any site is list ROT — the
+      // allowlist would silently over-permit a file that stopped being a writer.
+      if (path in sanctioned) violations.push(`stale-entry:${path} (sanctioned for ${sanctioned[path]!.sites}, holds 0)`);
+      continue;
+    }
+    examined += sites;
+    const entry = sanctioned[path];
+    if (!entry) {
+      violations.push(`unsanctioned-file:${path} (${sites} call site${sites === 1 ? "" : "s"})`);
+    } else if (entry.sites !== sites) {
+      // THE REV-1 GAP: this is the case a file-granular guard cannot see.
+      violations.push(`count-mismatch:${path} (sanctioned ${entry.sites}, found ${sites})`);
+    }
   }
   return { violations, examined, vacuous: examined === 0 };
 }
@@ -96,17 +164,67 @@ function realCorpus(): Corpus[] {
   }));
 }
 
-describe("P34 RED 3 — the enumeration guard", () => {
-  it("the LIVE set of in-transaction queue writers is exactly the sanctioned set", () => {
+const TOTAL_SITES = Object.values(SANCTIONED).reduce((n, e) => n + e.sites, 0);
+
+/** Rev 1's semantics, kept ONLY as a negative control: sanction filenames, count
+ *  FILES. review-r2's HIGH-1 is that this cannot fail for a call added inside an
+ *  already-sanctioned file. The test below proves that by running it. */
+function checkFileGranular(corpus: Corpus[]): { violations: string[]; examined: number } {
+  const violations: string[] = [];
+  let examined = 0;
+  for (const { path, content } of corpus) {
+    if (!/\.updateWithinTransaction\s*\(/.test(content)) continue;
+    examined += 1;
+    if (!(path in SANCTIONED)) violations.push(path);
+  }
+  return { violations, examined };
+}
+
+/** The corpus with ONE extra call spliced into an already-sanctioned file — the
+ *  exact shape rev 1 could not see. */
+function corpusWithExtraCallInSanctionedFile(): Corpus[] {
+  const corpus = realCorpus();
+  const target = corpus.find((c) => c.path === "domain/workflow-projector.ts");
+  if (!target) throw new Error("fixture precondition failed: sanctioned file not in corpus");
+  return corpus.map((c) =>
+    c === target
+      ? {
+          ...c,
+          content:
+            c.content +
+            `\nfunction smuggledWriter(q: any, id: string) { q.updateWithinTransaction({ qitemId: id, state: "done" }); }\n`,
+        }
+      : c,
+  );
+}
+
+describe("P34 RED 3 — the enumeration guard (rev 2: call-site granularity)", () => {
+  it("the LIVE corpus matches the sanctioned set exactly, by CALL SITE", () => {
     const result = checkCallSites(realCorpus(), SANCTIONED);
     expect(result.violations).toEqual([]);
-    // Guards against the sanctioned list rotting into a superset of reality: if a
-    // listed writer is deleted or renamed, the count drops and this fails, forcing
-    // the list to be re-stated rather than quietly over-permitting.
-    expect(result.examined).toBe(Object.keys(SANCTIONED).length);
+    // Counts SITES, not files. 8 sites across 3 files.
+    expect(result.examined).toBe(TOTAL_SITES);
+    expect(result.examined).toBe(8);
+    expect(result.vacuous).toBe(false);
   });
 
-  it("FIRES on a synthetic FOURTH writer added outside the primitive — demonstrated, not merely present", () => {
+  it("HIGH-1: FIRES BY NAME on a call added inside an ALREADY-SANCTIONED file", () => {
+    const result = checkCallSites(corpusWithExtraCallInSanctionedFile(), SANCTIONED);
+    expect(result.violations).toEqual([
+      "count-mismatch:domain/workflow-projector.ts (sanctioned 2, found 3)",
+    ]);
+  });
+
+  it("HIGH-1 negative control: the REV-1 file-granular guard MISSES that same call", () => {
+    // Disabling the granularity — reverting to rev 1's semantics — and watching the
+    // intended violation NOT be caught is what makes the fix evidence rather than
+    // assertion. A control never observed failing is not evidence.
+    const mutated = corpusWithExtraCallInSanctionedFile();
+    expect(checkFileGranular(mutated).violations).toEqual([]); // rev 1: silent
+    expect(checkCallSites(mutated, SANCTIONED).violations).toHaveLength(1); // rev 2: loud
+  });
+
+  it("FIRES on a synthetic FOURTH writer in a NEW file, with its state computed", () => {
     const corpus = [
       ...realCorpus(),
       {
@@ -114,9 +232,6 @@ describe("P34 RED 3 — the enumeration guard", () => {
         content: `
           export class RogueWriter {
             close(id: string) {
-              // A fourth writer closing terminally + creating a successor, with no
-              // stageWakeIntent and no seam assert. The state is computed, so a
-              // value-tracking guard would return violations=[] here.
               const state = Math.random() > 0.5 ? "done" : "blocked";
               this.queueRepo.updateWithinTransaction({ qitemId: id, state });
               this.queueRepo.createWithinTransaction({ body: "successor" });
@@ -125,41 +240,74 @@ describe("P34 RED 3 — the enumeration guard", () => {
         `,
       },
     ];
-    const result = checkCallSites(corpus, SANCTIONED);
-    expect(result.violations).toEqual(["domain/rogue-writer.ts"]);
+    // The state is computed exactly the way that defeated the W2b rev-1 guard.
+    expect(checkCallSites(corpus, SANCTIONED).violations).toEqual([
+      "unsanctioned-file:domain/rogue-writer.ts (1 call site)",
+    ]);
   });
 
-  it("a sanctioned entry does not license OTHER files — the allowlist is per-path, not a pattern", () => {
+  it("counts ALIAS BINDINGS, which rev 1 missed entirely", () => {
+    const aliased = [
+      {
+        path: "domain/aliaser.ts",
+        content: `const { updateWithinTransaction } = queueRepo;\nupdateWithinTransaction({ state: "done" });`,
+      },
+    ];
+    expect(checkCallSites(aliased, SANCTIONED).violations).toEqual([
+      "unsanctioned-file:domain/aliaser.ts (1 call site)",
+    ]);
+  });
+
+  it("does NOT count comment mentions — a doc reference is not a call site", () => {
+    const corpus = realCorpus().map((c) =>
+      c.path === "domain/workflow-projector.ts"
+        ? { ...c, content: c.content + "\n// see QueueRepository.updateWithinTransaction for the contract\n" }
+        : c,
+    );
+    // Rev 1 inflated its counts exactly this way.
+    expect(checkCallSites(corpus, SANCTIONED).violations).toEqual([]);
+  });
+
+  it("FIRES on list ROT — a sanctioned file that no longer calls the primitive", () => {
+    const corpus = realCorpus().map((c) =>
+      c.path === "domain/workflow-projector.ts"
+        ? { ...c, content: c.content.split(".updateWithinTransaction(").join(".somethingElse(") }
+        : c,
+    );
+    expect(checkCallSites(corpus, SANCTIONED).violations).toEqual([
+      "stale-entry:domain/workflow-projector.ts (sanctioned for 2, holds 0)",
+    ]);
+  });
+
+  it("a near-miss filename does not inherit a sanction — the allowlist is per-path", () => {
     const corpus = [
       {
         path: "domain/workflow-projector-v2.ts",
         content: `this.queueRepo.updateWithinTransaction({ state: "done" });`,
       },
     ];
-    // A near-miss name must not inherit the sanction of workflow-projector.ts.
-    expect(checkCallSites(corpus, SANCTIONED).violations).toEqual(["domain/workflow-projector-v2.ts"]);
+    expect(checkCallSites(corpus, SANCTIONED).violations).toEqual([
+      "unsanctioned-file:domain/workflow-projector-v2.ts (1 call site)",
+    ]);
   });
 });
 
 describe("P34 RED 5 — KNOWN-NEGATIVE: a guard that examines nothing must FAIL", () => {
   it("reports vacuous on an empty corpus rather than a clean pass", () => {
-    // A check that verified nothing reports the same green as one that verified
-    // everything. This is what tells them apart — and it is why the live test above
-    // asserts an exact `examined` count rather than only an empty violations list.
     const result = checkCallSites([], SANCTIONED);
     expect(result.violations).toEqual([]);
     expect(result.vacuous).toBe(true);
   });
 
-  it("reports vacuous when the corpus has files but NONE call the primitive", () => {
-    const result = checkCallSites(
-      [{ path: "domain/unrelated.ts", content: "export const x = 1;" }],
-      SANCTIONED,
-    );
-    expect(result.vacuous).toBe(true);
+  it("reports vacuous when files exist but NONE call the primitive", () => {
+    expect(
+      checkCallSites([{ path: "domain/unrelated.ts", content: "export const x = 1;" }], SANCTIONED).vacuous,
+    ).toBe(true);
   });
 
-  it("the LIVE run is NOT vacuous — the real corpus really was examined", () => {
-    expect(checkCallSites(realCorpus(), SANCTIONED).vacuous).toBe(false);
+  it("the LIVE run is NOT vacuous and examined the expected number of SITES", () => {
+    const live = checkCallSites(realCorpus(), SANCTIONED);
+    expect(live.vacuous).toBe(false);
+    expect(live.examined).toBe(8);
   });
 });

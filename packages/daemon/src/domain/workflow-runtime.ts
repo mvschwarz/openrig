@@ -825,9 +825,6 @@ export class WorkflowRuntime {
       // re-failure mints a NEW packet id = a NEW occurrence (never
       // hidden behind this resolved past).
       let exceptionItemsClosed = 0;
-      // P34: anchors the structural predicate below — the first terminal close
-      // this transaction performs, paired with the redrive packet as successor.
-      let firstClosedExceptionId: string | null = null;
       if (failedPacketId) {
         const openItems = this.db
           .prepare(
@@ -848,7 +845,6 @@ export class WorkflowRuntime {
           });
           persistedEvents.push(closedItem.persistedEvent);
           exceptionItemsClosed += 1;
-          firstClosedExceptionId ??= row.qitem_id;
         }
       }
 
@@ -895,29 +891,25 @@ export class WorkflowRuntime {
         exceptionItemsClosed,
       };
 
-      // P34 (site :791). The ruled predicate is STRUCTURAL: a terminal close plus
-      // a createWithinTransaction in the SAME transaction ⇒ the successor's wake
-      // must be durable. This transaction terminally closes the open exception
-      // items and creates the redrive packet, so the seam pairs THAT close with
-      // THAT successor.
+      // P34 (site :791) — NO SEAM ASSERT HERE, deliberately.
       //
-      // Note what is deliberately NOT done: the exception closes are not each
-      // paired with this packet as "their" successor. They close `no-follow-on`
-      // and have no successor of their own; asserting per-close would satisfy the
-      // seam against an unrelated successor — a check that could only pass. One
-      // close from this txn anchors the predicate; the successor is the packet.
+      // Canonical correction, transition 5764 on qitem-20260809175537-8e25384f:
+      // "Intent goes on :791; the assert runs only where a real source->successor
+      // pair exists." This transaction has no such pair. The N exception closes
+      // above are terminal closes with NO successor of their own (`no-follow-on`),
+      // and the redrive packet's own predecessor — the failed packet — was closed
+      // in an EARLIER transaction, not this one.
       //
-      // When this txn closed nothing terminally (no open exception items), there
-      // is no close to pair with. The intent is still staged above, and the seam
-      // is skipped rather than being called with a non-terminal source, which
-      // would return early and read as a check that ran when it did not.
-      if (firstClosedExceptionId) {
-        this.queueRepo.assertTerminalClosureHasIntent(
-          firstClosedExceptionId,
-          created.qitemId,
-          created.nudge,
-        );
-      }
+      // Anchoring the seam on one of those closes against this packet would pair a
+      // close with a successor that is not its own: the assert would pass because
+      // the intent for an UNRELATED successor exists, so it could never fail. That
+      // is the exact pairing 5764 forbids, and a prior revision of this file did
+      // it once rather than N times, which made it no less vacuous.
+      //
+      // The redrive packet's wake is still DURABLE — stageWakeIntent above commits
+      // it atomically with this transaction. What is absent is a paired close for
+      // the seam to roll back against, and inventing one would buy a green check
+      // that asserts nothing.
     });
     txn();
 
