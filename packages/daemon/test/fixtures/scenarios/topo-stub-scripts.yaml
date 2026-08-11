@@ -1,0 +1,30 @@
+# 51-02 delta D1 fixture — THREE runtime:stub seats in one pod.
+#
+# Exercises per-seat script delivery: two seats get DIFFERENT scenario-resolved
+# scripts, the third is unmapped and must fall to 51-01's built-in default. The
+# relative closure (culture_file + local: agent_ref) is what makes staging a lone
+# YAML impossible — both resolve against the rig-spec directory, so the whole
+# source root is staged.
+version: "0.2"
+name: scn-scripts
+culture_file: culture.md
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: alpha
+        agent_ref: "local:agents/worker"
+        profile: default
+        runtime: stub
+        cwd: .
+      - id: beta
+        agent_ref: "local:agents/worker"
+        profile: default
+        runtime: stub
+        cwd: .
+      - id: gamma
+        agent_ref: "local:agents/worker"
+        profile: default
+        runtime: stub
+        cwd: .
+    edges: []

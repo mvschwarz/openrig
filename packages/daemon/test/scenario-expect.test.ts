@@ -112,3 +112,28 @@ describe("formatDiff", () => {
     expect(d).toContain("pending");
   });
 });
+
+describe("D11 — contains matches the SHIPPED text-surface shape, not just a bare string", () => {
+  it("matches inside a capture payload {ok, sessionName, content, lines}", () => {
+    const capture = {
+      ok: true,
+      sessionName: "dev-alpha@scn-scripts",
+      content: "[stub-runner] READY\n[alpha-script] per-seat delivery reached alpha\n",
+      lines: 20,
+    };
+    expect(containsMatch(capture, "[alpha-script]")).toBe(true);
+    expect(containsMatch(capture, "[beta-script]")).toBe(false);
+  });
+
+  it("matches inside a transcript payload {session, lines, content, ingestHealth}", () => {
+    const transcript = { session: "dev-alpha@r", lines: 3, content: "restored\n", ingestHealth: "ok" };
+    expect(containsMatch(transcript, "restored")).toBe(true);
+  });
+
+  it("still matches a bare string, and never matches a shape with no text field", () => {
+    expect(containsMatch("plain text here", "text")).toBe(true);
+    expect(containsMatch({ sessionName: "needle-in-the-name" }, "needle")).toBe(false);
+    expect(containsMatch(null, "x")).toBe(false);
+    expect(containsMatch({ content: 42 }, "42")).toBe(false);
+  });
+});

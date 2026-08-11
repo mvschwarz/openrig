@@ -32,6 +32,7 @@ import {
 import { buildRealDeps, type RealDepsOptions } from "./scenario-real-deps.js";
 import { runValidatedScenario, type RunScenarioResult } from "./scenario-runner.js";
 import type { RunRecord } from "./scenario-run-record.js";
+import { stageTopologyRoot, deliverStubScripts, resolveStubScriptTargets } from "./scenario-stage.js";
 
 /** Thrown when a scenario file cannot be read or parsed (loud I/O/syntax floor). */
 export class ScenarioLoadError extends Error {
@@ -49,6 +50,32 @@ export class ScenarioPreconditionError extends Error {
     super(`scenario precondition failed: ${detail}`);
     this.name = "ScenarioPreconditionError";
   }
+}
+
+/** Thrown when a scenario asks for a capability this daemon mode cannot honor. */
+export class ScenarioModeUnsupportedError extends Error {
+  constructor(detail: string) {
+    super(detail);
+    this.name = "ScenarioModeUnsupportedError";
+  }
+}
+
+/** Extract + shape-check `env.stub_scripts` (D1). Shape is validator-checked at
+ *  load; this is the pipeline's own read of the same field. */
+export function extractStubScripts(env: Record<string, unknown> | undefined): Record<string, string> {
+  const raw = env?.stub_scripts;
+  if (raw === undefined) return {};
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ScenarioPreconditionError("env.stub_scripts must be a mapping of <seat> → <script path>");
+  }
+  const out: Record<string, string> = {};
+  for (const [seat, p] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof p !== "string" || p.length === 0) {
+      throw new ScenarioPreconditionError(`env.stub_scripts.${seat}: a non-empty script path is required`);
+    }
+    out[seat] = p;
+  }
+  return out;
 }
 
 /**
@@ -253,6 +280,18 @@ export async function runScenarioFile(
   }
 
   const preconditions = extractQueuePreconditions(loaded.loaded.scenario.env);
+  const stubScripts = extractStubScripts(loaded.loaded.scenario.env);
+
+  // D1 key contract, checked against the SOURCE topology BEFORE any filesystem
+  // or process effect: a misspelled/ambiguous/duplicate/non-stub target must
+  // fail here, not after a daemon and a rig full of seats are already up.
+  if (Object.keys(stubScripts).length > 0) {
+    resolveStubScriptTargets(
+      parseYaml(readFileSync(loaded.loaded.topologyPath, "utf-8")),
+      stubScripts,
+    );
+  }
+
   const scaffold = prepareHermeticEnv(opts.baseEnv ? { baseEnv: opts.baseEnv } : {});
   // Seats launch with cwd under the scaffold so their managed writes (AGENTS.md,
   // the stub sidecar) stay in scratch and never pollute the launch cwd.
@@ -264,14 +303,46 @@ export async function runScenarioFile(
     // (host-mode has no stageTopology → the host path passes through unchanged). A stage/fence
     // failure throws here (loud, named) and the finally tears the container down — never a mystery
     // "Source not found" from `rig up` reading a host path it cannot see inside the container.
-    const upTopologyPath = daemon.stageTopology
-      ? await daemon.stageTopology(loaded.loaded.topologyPath)
-      : loaded.loaded.topologyPath;
+    // D1 per-seat scripts (host-mode only). Container mode translates host paths
+    // into the container; composing that with host-side per-seat staging is not
+    // proven, so a scripted scenario there fails LOUD and named (routed to 51-04)
+    // rather than silently delivering scripts the container cannot see. Container
+    // mode WITHOUT scripts keeps its existing stage path byte-untouched.
+    const wantsStubScripts = Object.keys(stubScripts).length > 0;
+    if (wantsStubScripts && daemon.stageTopology) {
+      throw new ScenarioModeUnsupportedError(
+        "env.stub_scripts is not supported in container mode yet: per-seat script delivery stages a " +
+          "host-side topology root with per-seat CWDs, which the container's own path translation does " +
+          "not yet compose with. Run this scenario in host mode (51-04 owns the container binding).",
+      );
+    }
+
+    // Host mode with scripts: stage a SELF-CONTAINED topology root (the relative
+    // culture_file / local: agent closure travels), author a distinct cwd per seat
+    // in the staged copy, and deliver each mapped seat's script into its own cwd.
+    // No `--cwd` override then — resolveLaunchCwd would make one dir win for every
+    // seat, which is exactly what makes per-seat scripts impossible.
+    let staged: ReturnType<typeof stageTopologyRoot> | undefined;
+    if (wantsStubScripts) {
+      staged = stageTopologyRoot(loaded.loaded.topologyPath, join(scaffold.root, "topology"));
+      deliverStubScripts(staged, stubScripts, dirname(path));
+    }
+
+    const upTopologyPath = staged
+      ? staged.topologyPath
+      : daemon.stageTopology
+        ? await daemon.stageTopology(loaded.loaded.topologyPath)
+        : loaded.loaded.topologyPath;
     const baseDeps = buildRealDeps({
       daemon,
       rigBin: opts.rigBin,
       topologyPath: upTopologyPath,
-      seatCwd,
+      // Staged runs author per-seat cwds IN the spec; a --cwd override would
+      // collapse them back to one directory.
+      seatCwd: staged ? undefined : seatCwd,
+      scopeMission: typeof loaded.loaded.scenario.env?.scope_mission === "string"
+        ? (loaded.loaded.scenario.env.scope_mission as string)
+        : undefined,
       ...opts.deps,
       // Container-mode stamps the image id onto every ledger row; host-mode (no
       // imageId) leaves opts.deps.appendRecord exactly as supplied (byte-intact).

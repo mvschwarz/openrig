@@ -1,0 +1,39 @@
+# Scenario — per-seat scenario-resolved stub scripts (51-02 mini-req 5, delta D1).
+#
+# PROVES, in one real host-mode run:
+#   R1  the committed fixture's RELATIVE closure (culture_file: culture.md,
+#       agent_ref: local:agents/worker) still resolves after staging — `up`
+#       succeeds, which it cannot do if staging rebased the spec root;
+#   R2  two seats with DIFFERENT scripts each run only their OWN;
+#   R3  a scripted seat beside an UNMAPPED seat leaves the latter on 51-01's
+#       built-in default (never a neighbour's script).
+#
+# Delivery is at `up`: the pipeline stages a self-contained topology root, authors
+# a distinct cwd per seat in the staged copy, and writes each mapped seat's script
+# to <that seat's cwd>/.openrig/stub/script.json — the shipped stub's own contract.
+scenario: per-seat-stub-scripts
+topology: ./topo-stub-scripts.yaml
+env:
+  stub_scripts:
+    dev-alpha: ./scripts/alpha.json
+    dev-beta: ./scripts/beta.json
+    # dev-gamma is deliberately unmapped (R3)
+steps:
+  - up: {}
+  - expect:
+      surface: pane
+      seat: dev-alpha@scn-scripts
+      within: 30s
+      contains: "[alpha-script]"
+  - expect:
+      surface: pane
+      seat: dev-beta@scn-scripts
+      within: 30s
+      contains: "[beta-script]"
+  # the unmapped seat runs the BUILT-IN default, not a neighbour's script
+  - expect:
+      surface: pane
+      seat: dev-gamma@scn-scripts
+      within: 30s
+      contains: "[stub] scripted reply: acknowledged"
+  - down: {}
