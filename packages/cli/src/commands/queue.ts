@@ -980,6 +980,33 @@ Examples:
       });
     });
 
+  cmd
+    .command("undelivered")
+    .description("List PENDING qitems whose create-path nudge FAILED (delivery never reached the destination; current rig, bounded, body-free by default)")
+    .option("--rig <name>", "Scope to a specific rig (default: current rig from OPENRIG_SESSION_NAME)")
+    .option("-A, --all-rigs", "Cross-rig breadth (default is current rig only)")
+    .option("--full", "Include complete per-item fields (body, chain-of-record)")
+    .option("--limit <n>", "Result limit", positiveIntArg, 50)
+    .option("--json", "JSON output for agents")
+    .addHelpText("after", "\nSurfaces the create-path delivery strands: pending rows whose nudge recorded failed:<reason> and which nothing else reconciles. Read-only; the sender believed delivery succeeded but the destination was never woken.\nUse --full for bodies, -A for all rigs, --rig <name> to target another rig.")
+    .action(async (opts: { rig?: string; allRigs?: boolean; full?: boolean; limit?: number; json?: boolean }) => {
+      const deps = getDeps();
+      const params = new URLSearchParams();
+      if (opts.rig) {
+        params.set("rig", opts.rig);
+      } else if (!opts.allRigs) {
+        const sessionName = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+        const rigName = sessionName ? extractRigName(sessionName) : undefined;
+        if (rigName) params.set("rig", rigName);
+      }
+      if (!opts.full) params.set("compact", "1");
+      if (opts.limit) params.set("limit", String(opts.limit));
+      await withClient(deps, async (client) => {
+        const res = await client.get<unknown>(`/api/queue/undelivered?${params.toString()}`);
+        printResult(opts.json ?? false, res.data, res.status);
+      });
+    });
+
   // ---- Inbox subcommands ----
 
   cmd

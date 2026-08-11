@@ -855,6 +855,19 @@ export function queueRoutes(): Hono {
     return c.json(items);
   });
 
+  // GET /undelivered — 0.5.1-54 DR-1: surfaces PENDING qitems whose create-path nudge FAILED
+  // (last_nudge_result LIKE 'failed:%'). Rig-scoped + bounded + compact-by-default, mirroring /overdue.
+  // MUST precede /:qitemId. READ-only (no retry — DR-2 is PM-gated on this surface's measurement).
+  app.get("/undelivered", (c) => {
+    const q = c.req.query();
+    const rig = q.rig || undefined;
+    const limitRaw = q.limit !== undefined ? Number.parseInt(q.limit, 10) : undefined;
+    const limit = limitRaw !== undefined && Number.isInteger(limitRaw) && limitRaw > 0 ? limitRaw : undefined;
+    const compact = q.compact === "1" || q.compact === "true";
+    const items = getRepo(c).findUndelivered({ rig, limit, compact });
+    return c.json(items);
+  });
+
   // ---- SSE watch over coordination events ----
   // MUST precede /:qitemId so the literal `watch` and `sse` paths win
   // over the bare-param route (otherwise GET /api/queue/sse resolves as

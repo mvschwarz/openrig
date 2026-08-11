@@ -68,6 +68,20 @@ describe("queue routes", () => {
 
   afterEach(() => db.close());
 
+  // 0.5.1-54 DR-1 — the create-path failed-nudge surface (the NAMED, human/agent-visible read path).
+  it("DR-1: GET /undelivered surfaces the failed-nudge pending strand, V1-only", async () => {
+    const failed = await queueRepo.create({ sourceSession: "a@rig", destinationSession: "b@rig", body: "x" });
+    queueRepo.recordNudgeAttempt(failed.qitemId, "failed:Session 'b@rig' not found");
+    const delivered = await queueRepo.create({ sourceSession: "a@rig", destinationSession: "b@rig", body: "y" });
+    queueRepo.recordNudgeAttempt(delivered.qitemId, "verified");
+    const res = await app.request("/api/queue/undelivered");
+    expect(res.status).toBe(200);
+    const items = (await res.json()) as Array<{ qitemId: string }>;
+    const ids = items.map((i) => i.qitemId);
+    expect(ids, "the failed-nudge strand is surfaced").toContain(failed.qitemId);
+    expect(ids, "V1-only: a delivered row is not surfaced").not.toContain(delivered.qitemId);
+  });
+
   // ── P18 sender-provenance: /inbox/drop derives the sender from the authenticated transport
   // header (X-OpenRig-Session), never a request-body claim; refuses-unattributable LOUD when absent. ──
   describe("P18 sender-provenance", () => {

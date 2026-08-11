@@ -2200,6 +2200,39 @@ export class QueueRepository {
     return rows.map((r) => this.rowToItem(r));
   }
 
+  /**
+   * 0.5.1-54 DR-1 — surface the create-path failed-nudge strands. `last_nudge_result` is written by
+   * `recordNudgeAttempt` (from `maybeNudge`) but nothing ever queries it, so a create whose nudge FAILED
+   * (`failed:<msg>`) is invisible: the sender records a successful create while the destination was never
+   * woken. This is the `/overdue` analogue for pending-undelivered create-path work — a READ only (no
+   * retry, no unwind; DR-2 retry is PM-gated on DR-1's live measurement).
+   *
+   * V1-ONLY predicate, NO false-positive mode: `state='pending' AND last_nudge_result LIKE 'failed:%'`.
+   *   - A delivered row (`verified` / `delivered-ack-pending`) is excluded — it was woken.
+   *   - A NEVER-ATTEMPTED row (`last_nudge_result IS NULL` — a deliberate cold-park or a no-transport create)
+   *     is excluded. That class is FP-dominated (a legitimate cold-park is indistinguishable from a real
+   *     never-reached strand at the row) and stays DEFERRED behind a forward create-time intent bit; surfacing
+   *     it here would train the reader to ignore the signal. The reason it is excluded lives in this comment
+   *     AND the PRD, not in chat — it must outlive the excluder.
+   */
+  findUndelivered(opts?: { rig?: string; limit?: number; compact?: boolean }): QueueItem[] {
+    const conditions = ["state = 'pending'", "last_nudge_result LIKE 'failed:%'"];
+    const params: unknown[] = [];
+    if (opts?.rig) {
+      const escaped = opts.rig.replace(/%/g, "\\%").replace(/_/g, "\\_");
+      conditions.push("(destination_session LIKE ? ESCAPE '\\' OR source_session LIKE ? ESCAPE '\\')");
+      params.push(`%@${escaped}`, `%@${escaped}`);
+    }
+    const columns = opts?.compact ? COMPACT_QUEUE_COLUMNS : "*";
+    let sql = `SELECT ${columns} FROM queue_items WHERE ${conditions.join(" AND ")} ORDER BY ts_created ASC`;
+    if (opts?.limit !== undefined) {
+      sql += " LIMIT ?";
+      params.push(opts.limit);
+    }
+    const rows = this.db.prepare(sql).all(...params) as QueueItemRow[];
+    return rows.map((r) => this.rowToItem(r));
+  }
+
   recordNudgeAttempt(qitemId: string, result: string): void {
     const ts = new Date().toISOString();
     this.db

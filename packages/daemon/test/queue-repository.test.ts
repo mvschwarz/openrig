@@ -55,6 +55,29 @@ describe("QueueRepository", () => {
     expect(transitions[0]!.state).toBe("pending");
   });
 
+  // 0.5.1-54 DR-1 — surface create-path failed-nudge strands. last_nudge_result is written but never
+  // queried, so a create whose nudge FAILED (`failed:<msg>`) is invisible (the sender believes delivery
+  // succeeded; the destination was never woken). findUndelivered surfaces exactly that class:
+  // state='pending' AND last_nudge_result LIKE 'failed:%'. V1-ONLY, no false-positive mode — a delivered
+  // row and a never-attempted (NULL) cold-park are both excluded; the never-attempted class stays deferred
+  // behind a forward create-time intent bit (FP-dominated). DR-1 only READS (no retry, no unwind).
+  it("DR-1 findUndelivered: surfaces pending failed:% strands, excludes delivered + never-attempted", async () => {
+    const failed = await repo.create({ sourceSession: "a@rig", destinationSession: "b@rig", body: "failed nudge" });
+    repo.recordNudgeAttempt(failed.qitemId, "failed:Session 'b@rig' not found");
+    const delivered = await repo.create({ sourceSession: "a@rig", destinationSession: "b@rig", body: "delivered" });
+    repo.recordNudgeAttempt(delivered.qitemId, "verified");
+    // never-attempted: this harness has no transport → maybeNudge no-ops → last_nudge_result stays NULL.
+    const neverAttempted = await repo.create({ sourceSession: "a@rig", destinationSession: "b@rig", body: "cold park" });
+    const ids = repo.findUndelivered().map((s) => s.qitemId);
+    expect(ids, "(a) the failed-nudge strand is surfaced").toContain(failed.qitemId);
+    expect(ids, "(b) V1-only: a delivered row is NOT surfaced").not.toContain(delivered.qitemId);
+    expect(ids, "(b) never-attempted (NULL) cold-park is NOT surfaced").not.toContain(neverAttempted.qitemId);
+    // (c) the nudge-does-NOT-unwind invariant: DR-1 only READS — surfacing a strand must not mutate it.
+    const after = repo.getById(failed.qitemId)!;
+    expect(after.state, "(c) surfacing does not unwind/close the durable row").toBe("pending");
+    expect(after.lastNudgeResult, "(c) the failure record is untouched by the read").toContain("failed:");
+  });
+
   it("create rejects unknown rig when validateRig denies", async () => {
     const strictRepo = new QueueRepository(db, bus, {
       validateRig: (s) => s.endsWith("@known-rig"),
