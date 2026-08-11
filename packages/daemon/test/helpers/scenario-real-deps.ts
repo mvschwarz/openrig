@@ -39,7 +39,15 @@ export class UnboundActionError extends Error {
     super(
       `action verb "${verb}" is UNBOUND in v1: it has no shipped runtime binding, so the ` +
         `runner FAILS LOUD here rather than fabricating a call (its binding rides 51-03 / A5 ` +
-        `items 6-8). This is not a silently-skipped action.`,
+        `items 6-8). This is not a silently-skipped action.` +
+        (verb === "emit"
+          ? ` WHY (measured at source): the stub runner has NO input channel — no stdin reader, ` +
+            `no socket, no CLI/daemon route triggers a behavior; behaviors execute only from the ` +
+            `LAUNCH script it reads at boot. A step-time emit therefore cannot be honestly bound ` +
+            `without 51-01 source work (routed to the 51-01 backlog), and simulating one would be ` +
+            `a green that means nothing. THE V1 PATH: declare env.stub_scripts to deliver a ` +
+            `per-seat launch script whose steps carry the behaviors you need.`
+          : ""),
     );
     this.name = "UnboundActionError";
     this.verb = verb;

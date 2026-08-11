@@ -98,3 +98,21 @@ describe("buildRealDeps runAction verb->rig map", () => {
     expect(deps.defaults.pollIntervalMs).toBeGreaterThan(0);
   });
 });
+
+describe("D2 — the unbound-verb message states WHY and names the v1 path", () => {
+  it("emit's refusal names the missing input channel and points at env.stub_scripts", async () => {
+    const deps = buildRealDeps({
+      daemon: { readEnv: {}, baseUrl: "http://127.0.0.1:1", sigterm: async () => {}, restart: async () => {} },
+      rigBin: "/bin/rig",
+      topologyPath: "/t.yaml",
+    });
+    let msg = "";
+    try { await deps.runAction("emit", { seat: "a@r", behavior: "compaction" }, "a@r"); } catch (e) { msg = (e as Error).message; }
+    // the measured reason: the stub runner has no stdin/input channel, so a
+    // step-time emit cannot be honestly bound without 51-01 source work
+    expect(msg).toContain("input channel");
+    // and the path that DOES work today
+    expect(msg).toContain("env.stub_scripts");
+    expect(msg.toLowerCase()).toContain("launch");
+  });
+});

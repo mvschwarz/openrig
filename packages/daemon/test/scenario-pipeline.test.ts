@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, isAbsolute, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -139,5 +139,60 @@ describe("queue-baton preconditions (post-P21 identity: env-carried, never a bod
     expect(() => extractQueuePreconditions({ queue: [{ id: "x" }] })).toThrow(ScenarioPreconditionError);
     expect(() => extractQueuePreconditions({ queue: "nope" })).toThrow(ScenarioPreconditionError);
     expect(extractQueuePreconditions(undefined)).toEqual([]);
+  });
+});
+
+describe("D3 — env.scope_mission survives the WHOLE path into the shipped argv", () => {
+  it("load → env-extract → real-deps → reader produces `rig scope audit --mission <name> --json`", async () => {
+    const { runScenarioFile } = await import("./helpers/scenario-pipeline.js");
+    const d = mkdtempSync(join(tmpdir(), "scope-mission-"));
+    try {
+      const argvLog = join(d, "argv.log");
+      // A stand-in `rig` bin: records the REAL argv the pipeline invokes, so this
+      // pins the composed path (a helper-level argv spy could pass while the
+      // pipeline silently dropped the field).
+      const fakeRig = join(d, "fake-rig.mjs");
+      writeFileSync(fakeRig, [
+        'import { appendFileSync } from "node:fs";',
+        `appendFileSync(${JSON.stringify(argvLog)}, JSON.stringify(process.argv.slice(2)) + "\\n");`,
+        'process.stdout.write("{}");',
+        "",
+      ].join("\n"));
+      writeFileSync(join(d, "topo.yaml"), [
+        'version: "0.2"', "name: scn-scope", "pods:", "  - id: dev", "    label: Dev",
+        "    members:", "      - id: worker", '        agent_ref: "local:agents/worker"',
+        "        profile: default", "        runtime: stub", "        cwd: .", "    edges: []", "",
+      ].join("\n"));
+      const scenarioPath = join(d, "scope.yaml");
+      writeFileSync(scenarioPath, [
+        "scenario: scope-mission-plumbing",
+        "topology: ./topo.yaml",
+        "env:",
+        "  scope_mission: release-0.5.1",
+        "steps:",
+        "  - expect:",
+        "      surface: scope",
+        "      within: 0ms",
+        "      match: { findings: [] }",
+        "",
+      ].join("\n"));
+
+      const fakeDaemon = async () => ({
+        // a real ScenarioDaemon's readEnv carries the scaffold env (PATH included)
+        readEnv: { PATH: process.env.PATH }, baseUrl: "http://127.0.0.1:1",
+        sigterm: async () => {}, restart: async () => {}, stop: async () => {},
+      });
+      await runScenarioFile(scenarioPath, {
+        rigBin: fakeRig,
+        baseEnv: { HOME: d, PATH: process.env.PATH, TERM: "xterm" },
+        daemon: fakeDaemon as never,
+        deps: { defaults: { withinMs: 0, pollIntervalMs: 1 } },
+      });
+
+      const invocations = readFileSync(argvLog, "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+      expect(invocations).toContainEqual(["scope", "audit", "--mission", "release-0.5.1", "--json"]);
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
   });
 });
