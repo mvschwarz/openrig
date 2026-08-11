@@ -40,6 +40,29 @@ export function isTerminalState(state: string): boolean {
   return (TERMINAL_QUEUE_STATES as readonly string[]).includes(state);
 }
 
+/** 0.5.1-53 — the ACTIVE (still-progressing) states. A blocker is "live" iff active; any other
+ *  state (done/handed-off/canceled/denied/failed) means the block will never lift. This is DISTINCT
+ *  from the archiver's TERMINAL_QUEUE_STATES (done/handed-off) — a narrower concept — so it is named
+ *  separately and derived from QUEUE_STATES (the `satisfies` guard fails if a state is removed). */
+export const ACTIVE_QUEUE_STATES = ["pending", "in-progress", "blocked"] as const satisfies readonly QueueState[];
+export function isBlockerLive(state: string): boolean {
+  return (ACTIVE_QUEUE_STATES as readonly string[]).includes(state);
+}
+
+/** 0.5.1-53 Atom 1a — typed non-qitem gate blocker prefixes. A park may be gated on a fold / auth /
+ *  external condition that is NOT a qitem and NOT a human seat; these prefixes make such a gate a
+ *  first-class, compact-visible, downstream-classifiable blocker (the ruling detail rides a transition). */
+export const TYPED_GATE_BLOCKER_PREFIXES = ["fold:", "auth:", "external:"] as const;
+export function typedGateBlockerPrefix(value: string): string | null {
+  return TYPED_GATE_BLOCKER_PREFIXES.find((p) => value.startsWith(p)) ?? null;
+}
+/** A well-formed typed gate blocker: a recognized prefix AND a non-empty gate body. */
+export function isTypedGateBlocker(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const p = typedGateBlockerPrefix(value);
+  return p != null && value.slice(p.length).trim().length > 0;
+}
+
 export const QUEUE_PRIORITIES = ["routine", "urgent", "critical"] as const;
 export type QueuePriority = (typeof QUEUE_PRIORITIES)[number];
 
@@ -1825,32 +1848,38 @@ export class QueueRepository {
       );
     }
 
-    // 0.5.1-53 Atom 1b(ii) — validate-at-park. A QITEM-reference blocker must name a real, LIVE
-    // blocker: a nonexistent blocker can never complete (the row can never unpark), and a terminal
-    // one is already done — both are dead-blocker parks that read as patience and never self-clear.
-    // Scoped to qitem-refs ("qitem-…"): human-seat parks (isHumanPark) enforce their own contract,
-    // and bare gate-names are the Atom 1a typed-blocker surface — neither is validated here.
-    if (
-      input.state === "blocked" &&
-      !isHumanPark &&
-      typeof effectiveBlockedOn === "string" &&
-      effectiveBlockedOn.startsWith("qitem-")
-    ) {
-      const blocker = this.getById(effectiveBlockedOn);
-      if (!blocker) {
-        throw new QueueRepositoryError(
-          "blocker_not_found",
-          `blocked_on names a qitem that does not exist: ${effectiveBlockedOn}. A park must name a real, live blocker — a nonexistent blocker can never complete, so the row could never unpark.`,
-          { blockedOn: effectiveBlockedOn },
-        );
-      }
-      const TERMINAL_STATES = ["done", "failed", "denied", "canceled", "handed-off"];
-      if (TERMINAL_STATES.includes(blocker.state)) {
-        throw new QueueRepositoryError(
-          "blocker_not_live",
-          `blocked_on names a terminal qitem: ${effectiveBlockedOn} is '${blocker.state}'. A park must name a LIVE blocker — parking on a completed/closed row is a dead-blocker park that never self-clears.`,
-          { blockedOn: effectiveBlockedOn, blockerState: blocker.state },
-        );
+    // 0.5.1-53 Atom 1b(ii) + 1a — blocker validation at the park moment. Non-human blocker kinds:
+    //   qitem-ref ("qitem-…")        → must EXIST and be LIVE (1b-ii); a ghost or dead blocker never lifts.
+    //   typed gate (fold:/auth:/…)   → first-class (1a), but a bare prefix with no gate body is malformed
+    //                                   (a typo must not masquerade as a gate).
+    //   anything else (legacy gate-name) → left as-is; out of this slice.
+    // Human-seat parks (isHumanPark) enforce their own FR-6 contract above.
+    if (input.state === "blocked" && !isHumanPark && typeof effectiveBlockedOn === "string") {
+      if (effectiveBlockedOn.startsWith("qitem-")) {
+        const blocker = this.getById(effectiveBlockedOn);
+        if (!blocker) {
+          throw new QueueRepositoryError(
+            "blocker_not_found",
+            `blocked_on names a qitem that does not exist: ${effectiveBlockedOn}. A park must name a real, live blocker — a nonexistent blocker can never complete, so the row could never unpark.`,
+            { blockedOn: effectiveBlockedOn },
+          );
+        }
+        if (!isBlockerLive(blocker.state)) {
+          throw new QueueRepositoryError(
+            "blocker_not_live",
+            `blocked_on names a resolved qitem: ${effectiveBlockedOn} is '${blocker.state}'. A park must name a LIVE blocker — parking on a completed/closed row is a dead-blocker park that never self-clears.`,
+            { blockedOn: effectiveBlockedOn, blockerState: blocker.state },
+          );
+        }
+      } else {
+        const typedPrefix = typedGateBlockerPrefix(effectiveBlockedOn);
+        if (typedPrefix && !isTypedGateBlocker(effectiveBlockedOn)) {
+          throw new QueueRepositoryError(
+            "blocker_malformed",
+            `blocked_on '${effectiveBlockedOn}' is a bare '${typedPrefix}' prefix with no gate body. A typed gate blocker must name its gate (e.g. fold:one-home+attestation).`,
+            { blockedOn: effectiveBlockedOn },
+          );
+        }
       }
     }
 
@@ -1925,8 +1954,7 @@ export class QueueRepository {
     // When THIS qitem reaches a terminal state, auto-unpark every row parked on it (blocked_on = this,
     // state='blocked') to pending, clear its (now-resolved) blocker, log the transition, and emit an
     // event so watchers/sweeps see the unblock without a fetch.
-    const TERMINAL_STATES = ["done", "failed", "denied", "canceled", "handed-off"];
-    if (TERMINAL_STATES.includes(input.state)) {
+    if (!isBlockerLive(input.state)) {
       const blockedRows = this.db
         .prepare("SELECT qitem_id FROM queue_items WHERE blocked_on = ? AND state = 'blocked'")
         .all(input.qitemId) as Array<{ qitem_id: string }>;

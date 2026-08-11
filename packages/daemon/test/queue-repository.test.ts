@@ -205,6 +205,30 @@ describe("QueueRepository", () => {
     expect(after.blockedOn, "auto-unpark clears the (now-resolved) blocker").toBeNull();
   });
 
+  // 0.5.1-53 Atom 1a — typed non-qitem blocker contract. A park gated on a fold/auth/external
+  // condition (not a qitem, not a human seat) is a first-class blocker: `fold:<what>` etc. It is
+  // compact-visible (blocked_on is carried in the compact projection), settable at the PARK moment,
+  // and the ruling detail rides a transition. A well-formed typed blocker is ACCEPTED; a malformed
+  // one (a bare prefix with no gate body) is refused loud so a typo cannot masquerade as a gate.
+  it("Atom 1a: a well-formed typed non-qitem blocker (fold:) is accepted and legible", async () => {
+    const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "gated work" });
+    repo.update({ qitemId: item.qitemId, actorSession: "bob@rig", state: "blocked", blockedOn: "fold:one-home+attestation" });
+    const row = repo.getById(item.qitemId)!;
+    expect(row.state).toBe("blocked");
+    expect(row.blockedOn, "the typed gate is legible on the row (compact-carried)").toBe("fold:one-home+attestation");
+  });
+
+  it("Atom 1a: a malformed typed blocker (bare prefix, empty body) is refused loud", async () => {
+    const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "gated work" });
+    try {
+      repo.update({ qitemId: item.qitemId, actorSession: "bob@rig", state: "blocked", blockedOn: "fold:" });
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(QueueRepositoryError);
+      expect((err as QueueRepositoryError).code).toBe("blocker_malformed");
+    }
+  });
+
   it("update state=done WITHOUT closure_reason rejected with missing_closure_reason", async () => {
     const item = await repo.create({
       sourceSession: "alice@rig",
