@@ -41,7 +41,16 @@ echo "[6/6] Assembling package..."
 # runtime cross-package import.
 STAMP_SEMVER="$(node -p "require('$CLI_DIR/package.json').version")"
 STAMP_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD)"
-if [ -n "$(git -C "$REPO_ROOT" status --porcelain)" ]; then STAMP_DIRTY=true; else STAMP_DIRTY=false; fi
+# DIRTY = the BUILD INPUTS differ from the commit, not "the working dir has scratch in it".
+# Bare `git status --porcelain` counts UNTRACKED files repo-wide, so ordinary scratch
+# (.mcp.json, workspace/, scratch dirs) stamped every build on a working machine as
+# dirty=true — and a dirty stamp is unidentifiable, which defeats the whole point of
+# pinning a runtime to a commit. Untracked files are NOT blanket-ignored (a new
+# untracked .ts under packages/*/src really would compile in), so the check is SCOPED
+# to the build inputs: anything under packages/ or scripts/, tracked or not, counts
+# (scripts/ included because build-package.sh IS the builder — if it differs from the
+# commit, the artifact is not reproducible from that commit either).
+if [ -n "$(git -C "$REPO_ROOT" status --porcelain -- packages scripts)" ]; then STAMP_DIRTY=true; else STAMP_DIRTY=false; fi
 STAMP_BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "Build identity: ${STAMP_SEMVER} (${STAMP_COMMIT}) dirty=${STAMP_DIRTY} at ${STAMP_BUILT_AT}"
 
