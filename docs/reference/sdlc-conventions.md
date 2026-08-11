@@ -155,7 +155,35 @@ The **path + anchor is the AUTHORITY**; the whole-file hash **DATES** the
 citation. That artifact is a living doc: the hash goes stale at the next
 legitimate append, the anchor does not — the CURRENT-line convention applied to
 a citation.
-## A4. The elastic middle (proportionality — no minted ceremony)
+## A4. When implementation finds the intent rested on something that does not exist
+
+A slice's intent can only be honoured to the extent its assumptions hold. Sometimes implementation
+discovers that a LOCKED intent depends on functionality that **is not there** — not a missing
+detail, a missing capability.
+
+**The honest response is to revise the ambition DOWN to what reality supports, and name the missing
+functionality as its own work.** Mark the slice **PARTIAL**, and write one document that tells a
+downstream reader the accurate story:
+
+1. what the intent asked for (quote the locked text)
+2. what actually shipped, and how it was verified BY EFFECT
+3. **what did not ship and precisely why** — name each missing capability, at source, with the file
+   and line that proves it is absent
+4. what the delivery does NOT cover, stated plainly — a scenario or feature that overstates its
+   coverage is worse than one that does not exist
+5. **follow-on slices scoped from what you know NOW**, including which release you think they belong
+   in — the agents holding the context at discovery time are the most knowledgeable readers that
+   problem will ever have, and a downstream planner should not have to rediscover any of it
+
+**What is NOT acceptable:** silently narrowing the claim; quietly expanding the slice to build the
+missing capability; or declaring victory on a reduced surface while still using the original slice's
+name. **Building the missing pieces inside the slice IS the scope creep.** Discovering them and
+routing them is the slice working correctly — and a slice that reveals a real product gap has
+produced something more valuable than the feature it set out to deliver.
+
+Do not over-engineer this. The entire goal is an accurate story for whoever reads it next.
+
+## A5. The elastic middle (proportionality — no minted ceremony)
 
 The SDLC has exactly three fixed capture points: **intent** → a
 **proportional structured requirement** → **proof**. Everything between is
@@ -164,7 +192,7 @@ mini-requirements may BE the whole PRD — the convention sections must be
 present so the slice projects, but their contents scale to the work. Gates
 are losslessness checks on the decompression from intent to delivery, not
 paperwork. Scaffolding emits the sections; it must never mint ceremony.
-## A5. The audit (advisory, fail-open — always)
+## A6. The audit (advisory, fail-open — always)
 
 `rig scope audit` (and the advisory rows in `rig workspace validate` /
 `doctor`) checks these conventions: the section headings present, the proof
@@ -172,7 +200,7 @@ contract well-formed, `proof/` artifacts carrying valid C1 headers, UI slices
 referencing a mockup. Every finding **records and advises — it never blocks a
 write path and never changes exit semantics into a gate**. Unknown is
 reported as unknown, not failure.
-## A6. Where the knowledge lives (the four pointers)
+## A7. Where the knowledge lives (the four pointers)
 
 - **This document** — the SSOT.
 - **Scaffold**: `rig scope slice create` emits the convention sections +

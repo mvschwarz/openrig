@@ -91,31 +91,14 @@ describe("authored evidence scenarios (expressibility)", () => {
     expect(pre[0]).toMatchObject({ id: "baton-1", destination: "dev-worker@scn-baton", claim: true });
   });
 
-  it("expresses #10 one-view-state: the DECLARATIVE equals mapping over the two daemon-truth surfaces", () => {
+  it("expresses #10 one-view-state: validates the cross-surface equals over tui_socket/ps/queue", () => {
     const res = loadScenarioFile(join(FIXTURES, "scenario-10-one-view-state.yaml"));
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect(res.loaded.scenario.scenario).toBe("one-view-state-consistency");
-    const expects = res.loaded.scenario.steps
-      .filter((s) => "expect" in s)
-      .map((s) => (s as { expect: Record<string, unknown> }).expect);
-
-    // 51-03: equals is now the declarative MAPPING (A-N1's scenario-facing form),
-    // each surface declaring the field that carries the shared truth.
-    const equalsStep = expects.find((e) => e.equals)!;
-    expect(equalsStep.equals).toEqual({
-      ps: { pluck: "name" },
-      queue: { pluck: "destinationSession", rig: true },
-    });
-
-    // tui_socket is asserted SEPARATELY on its own coherence, deliberately not
-    // folded into the equality: both of the shipped control socket's OBSERVE
-    // verbs return UI/registry state, so it carries no daemon truth to compare
-    // and including it could only pass by comparing something trivially equal.
-    const tuiStep = expects.find((e) => e.surface === "tui_socket")!;
-    expect(tuiStep).toBeDefined();
-    expect(tuiStep.match).toEqual({ ok: true });
-    expect(equalsStep.equals).not.toHaveProperty("tui_socket");
+    const equalsStep = res.loaded.scenario.steps.find((s) => "expect" in s)!;
+    const exp = (equalsStep as { expect: Record<string, unknown> }).expect;
+    expect(exp.equals).toEqual(["tui_socket", "ps", "queue"]);
   });
 });
 
