@@ -409,8 +409,9 @@ export function queueRoutes(): Hono {
     }>().catch(() => ({} as never));
 
     // P21 I3 — the source is the transport-derived sender (X-OpenRig-Session), NEVER the body claim.
-    // Absent header → 401 unattributable; a body sourceSession that DIFFERS → 409 identity_mismatch;
-    // an equal body claim is tolerated in the adopt-drop window. `sourceSession` below is authoritative.
+    // P18 deliver-and-label: absent header + a body sourceSession → recorded as the claimed-era stamp
+    // claimed:v1; absent header + no body → 400 actor_required; a body sourceSession that DIFFERS from the
+    // header → the wire SUPERSEDES it (transport:v1), not a 409. `sourceSession` below is authoritative.
     const identity = requireSenderIdentity(c, { verb: "queue create", bodyClaim: body.sourceSession });
     if (!identity.ok) return identity.response;
     const sourceSession = identity.session;
@@ -543,7 +544,9 @@ export function queueRoutes(): Hono {
       evidenceRef?: string | null;
     }>().catch(() => ({} as never));
     // P21 I3 — the actor is the transport-derived sender (X-OpenRig-Session), NEVER a body claim.
-    // Absent → 401 unattributable; a differing body actorSession → 409 identity_mismatch; equal tolerated.
+    // P18 deliver-and-label: absent header + a body actor → claimed:v1; absent + no body → 400
+    // actor_required; a differing body actorSession → the wire SUPERSEDES it (transport:v1), not a 409;
+    // an equal body claim is a no-op.
     const identity = requireSenderIdentity(c, { verb: "queue update", bodyClaim: body.actorSession });
     if (!identity.ok) return identity.response;
     const actorSession = identity.session;

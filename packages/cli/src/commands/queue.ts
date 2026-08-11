@@ -383,7 +383,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         );
       }
       // P21 I3 reconcile: the source is DERIVED from the seat env (X-OpenRig-Session) — --source
-      // deprecated + ignored, no body sourceSession. Verify the env or the daemon refuses-loud 401.
+      // deprecated + ignored, no body sourceSession. Verify the env or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal).
       if (!resolveCurrentSession(undefined, "source")) return;
       const deps = getDeps();
       // OPR.0.3.2.21.FR-4(b) — first-class --mission / --slice flags
@@ -447,7 +447,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: { destination?: string; json?: boolean }) => {
       // P21 I3 reconcile: the claimant is DERIVED from the seat env — --destination deprecated + ignored,
-      // no body claim. Verify the env (the header source) or the daemon refuses-loud 401.
+      // no body claim. Verify the env (the header source) or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal).
       if (!resolveCurrentSession(undefined, "destination")) return;
       const deps = getDeps();
       await withClient(deps, async (client) => {
@@ -464,7 +464,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: { destination?: string; reason: string; json?: boolean }) => {
       // P21 I3 reconcile: the releaser is DERIVED from the seat env — --destination deprecated + ignored,
-      // no body claim. Verify the env or the daemon refuses-loud 401.
+      // no body claim. Verify the env or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal).
       if (!resolveCurrentSession(undefined, "destination")) return;
       const deps = getDeps();
       await withClient(deps, async (client) => {
@@ -500,7 +500,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     }) => {
       // P21 I3 reconcile: the actor is DERIVED from the seat env (X-OpenRig-Session, stamped by
       // DaemonClient) — --actor is deprecated + ignored, no body actorSession. Verify the env (the
-      // header source) or the daemon refuses-loud 401 unattributable_sender. Matches `resolve`.
+      // header source) or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal). Matches `resolve`.
       if (!resolveCurrentSession(undefined, "actor")) return;
       const deps = getDeps();
       await withClient(deps, async (client) => {
@@ -542,7 +542,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       json?: boolean;
     }) => {
       // P21 I3 reconcile: actor DERIVED from the seat env (X-OpenRig-Session) — --actor deprecated +
-      // ignored, no body actorSession. Verify the env or the daemon refuses-loud. Matches `resolve`.
+      // ignored, no body actorSession. Verify the env, else the daemon returns 400 actor_required (no seat identity to record). Matches `resolve`.
       if (!resolveCurrentSession(undefined, "actor")) return;
       const deps = getDeps();
       await withClient(deps, async (client) => {
@@ -580,7 +580,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     }) => {
       // P21: the resolver is DERIVED from the seat env (X-OpenRig-Session, stamped by DaemonClient) —
       // --actor is deprecated + ignored. The pre-check verifies the env (the header source); else the
-      // daemon refuses-loud 401 unattributable_sender.
+      // daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal).
       if (!resolveCurrentSession(undefined, "actor")) return;
       const deps = getDeps();
       const bearer = opts.bearer ?? process.env.OPENRIG_AUTH_BEARER_TOKEN;
@@ -636,7 +636,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       json?: boolean;
     }) => {
       // P21 I3 reconcile: the handing-off seat is DERIVED from the seat env (X-OpenRig-Session) —
-      // --from deprecated + ignored, no body fromSession. Verify the env or the daemon refuses-loud 401.
+      // --from deprecated + ignored, no body fromSession. Verify the env or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal).
       if (!resolveCurrentSession(undefined, "from")) return;
       // slice-08 OPR.0.4.7.8 — body-input parity. Resolve through the shipped
       // resolveQueueBody ONLY when a body source is supplied; neither preserves
@@ -731,7 +731,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       json?: boolean;
     }) => {
       // P21 I3 reconcile: the handing-off seat is DERIVED from the seat env (X-OpenRig-Session) —
-      // --from deprecated + ignored, no body fromSession. Verify the env or the daemon refuses-loud 401.
+      // --from deprecated + ignored, no body fromSession. Verify the env or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal).
       if (!resolveCurrentSession(undefined, "from")) return;
       // slice-08 OPR.0.4.7.8 — body-input parity (same contract as handoff):
       // resolve only when a body source is supplied; neither keeps the
@@ -1113,7 +1113,7 @@ Examples:
         return;
       }
       // P21 I3 reconcile: the sender is DERIVED from the seat env (X-OpenRig-Session) — --sender
-      // deprecated + ignored, no body senderSession. Verify the env or the daemon refuses-loud 401.
+      // deprecated + ignored, no body senderSession. Verify the env or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal).
       if (!resolveCurrentSession(undefined, "sender")) return;
       const deps = getDeps();
       const tags = opts.tags ? opts.tags.split(",").map((s) => s.trim()).filter(Boolean) : undefined;

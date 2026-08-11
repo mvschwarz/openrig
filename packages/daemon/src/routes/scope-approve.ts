@@ -29,9 +29,10 @@ export function scopeApproveRoutes(): Hono {
     if (!body.scopePath) return c.json({ error: "scope_path_required", message: "scopePath is required" }, 400);
     // P21 I1 (the signing surface): the approver identity is DERIVED from the authenticated transport
     // header, never the request body. body.actorSession is the transitional adopt-and-drop claim —
-    // tolerated only when equal to the header; a different claim refuses-loud identity_mismatch; absent
-    // header refuses-loud unattributable_sender. onBehalfOf stays a body field recorded BESIDE the
-    // transport-derived actor (delegation stays data — the reference pair the sweep generalizes).
+    // recorded beside the wire identity; P18 deliver-and-label: a different claim is SUPERSEDED by the
+    // header (transport:v1), not refused; absent header + no body actor → 400 actor_required (parameter
+    // completeness). onBehalfOf stays a body field recorded BESIDE the transport-derived actor
+    // (delegation stays data — the reference pair the sweep generalizes).
     const identity = requireSenderIdentity(c, { verb: "scope approval", bodyClaim: body.actorSession });
     if (!identity.ok) return identity.response;
     // Omitting approvalScope means delivery (back-compatible default).

@@ -1670,11 +1670,12 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
         }
         // P21: the approver is DERIVED from the seat env (X-OpenRig-Session, stamped by DaemonClient
         // from OPENRIG_SESSION_NAME) — never a flag/body claim. --actor is deprecated + ignored. Fail
-        // early with a friendly message if the env is unset (else the daemon refuses-loud 401).
+        // early with a friendly message if the env is unset (else the daemon returns 400 actor_required —
+        // no seat identity to attribute the write to; P18 retired the 401 refusal).
         if (!process.env.OPENRIG_SESSION_NAME) {
           throw new ScopeCliError({
             fact: "No seat identity: OPENRIG_SESSION_NAME is unset (the approver is derived from the seat env, not a flag).",
-            consequence: "The daemon refuses an unattributable approval write (401 unattributable_sender).",
+            consequence: "The daemon has no seat identity to attribute the approval write to (400 actor_required — a missing parameter, not a distrust refusal).",
             action: "Run from a managed seat (OPENRIG_SESSION_NAME set).",
           });
         }

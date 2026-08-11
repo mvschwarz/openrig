@@ -338,10 +338,10 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
     }
     if (!body.qitemId) return c.json({ error: "qitemId is required" }, 400);
     // P21 I2 + review-actions deferral: mission-control /action is a FOUNDER-VISIBLE surface — the browser
-    // UI fires approve/deny/etc HEADERLESS (bearer only, body actorSession), so refuse-loud would break the
-    // founder's one-tap review flow (d00c468d). resolveActorWithDeferral: CLI header ⇒ transport:v1 + 409
-    // on mismatch; UI headerless ⇒ the body actor recorded claimed:v1 (declared-but-unverified), never
-    // refused, never laundered. Runs BEFORE the local write AND the cross-host forward.
+    // UI fires approve/deny/etc HEADERLESS (bearer only, body actorSession). resolveActorWithDeferral,
+    // P18 deliver-and-label: CLI header ⇒ transport:v1, the wire SUPERSEDES a mismatched body (the 409 is
+    // retired, ruling A); UI headerless ⇒ the body actor recorded claimed:v1 (declared-but-unverified),
+    // never refused, never laundered. Runs BEFORE the local write AND the cross-host forward.
     const identity = resolveActorWithDeferral(c, { verb: `mission-control ${body.verb}`, bodyClaim: body.actorSession });
     if (!identity.ok) return identity.response;
     // The SOLE provenance decider (rail 2): transport:v1 ONLY when transport proved it at THIS hop; relay:v1

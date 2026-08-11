@@ -24,7 +24,8 @@ export function chatRoutes(): Hono {
     if (!body.body) return c.json({ error: "Missing body" }, 400);
 
     // P21 I5: the chat sender is the transport-derived identity, never body.sender (the `?? "anonymous"`
-    // silent default). Chat is not a founder-visible-flow-breaking surface → refuse-loud is the default.
+    // silent default). P18 deliver-and-label: a body.sender is SUPERSEDED by the wire (transport:v1),
+    // header-absent + body.sender records claimed:v1, and no header + no body → 400 actor_required.
     const identity = requireSenderIdentity(c, { verb: "chat send", bodyClaim: body.sender });
     if (!identity.ok) return identity.response;
     const sender = identity.session;
@@ -130,7 +131,8 @@ export function chatRoutes(): Hono {
     const body = await c.req.json<{ sender?: string; topic?: string; body?: string }>().catch(() => ({} as { sender?: string; topic?: string; body?: string }));
     if (!body.topic) return c.json({ error: "Missing topic" }, 400);
 
-    // P21 I5: the topic sender is the transport-derived identity, never body.sender (refuse-loud default).
+    // P21 I5: the topic sender is the transport-derived identity, never body.sender (P18 deliver-and-label:
+    // the wire supersedes a body.sender; header-absent records claimed:v1; no actor → 400 actor_required).
     const identity = requireSenderIdentity(c, { verb: "chat topic", bodyClaim: body.sender });
     if (!identity.ok) return identity.response;
     const sender = identity.session;
