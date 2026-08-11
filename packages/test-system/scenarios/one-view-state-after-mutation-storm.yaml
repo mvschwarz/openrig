@@ -14,6 +14,11 @@
 # Deps: R-13 (equals normalizer). Storm = an explicit bounded sequence (no loop verb).
 scenario: one-view-state-after-mutation-storm
 topology: ./mutation-pod-stub.yaml
+env:
+  # D7 (51-02 delta): tui_socket expects require the TUI opt-in — the pipeline
+  # provisions the shipped TUI (isolated tmux server + scaffold socket) only when
+  # declared, so the surface read never races a socket that never listens.
+  tui: true
 steps:
   - up: {}
   # Bounded mutation storm: interleave sends and structural edits.

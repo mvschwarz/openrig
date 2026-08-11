@@ -35,12 +35,20 @@ export const EXPECT_SURFACES = [
   "queue",
   "stream",
   "scope",
-  "proof",
   "pane",
   "transcript",
   "tui_socket",
   "policy_provenance",
 ] as const;
+
+/**
+ * RESERVED surfaces — named by the arch shape but NOT currently backed by a
+ * shipped read verb, so the format must not promise what the product cannot
+ * answer. `proof` moved here by PM lock amendment (ruling row
+ * qitem-20260811092250-a80735bc): `rig proof` ships only `add`; the surface
+ * re-enters EXPECT_SURFACES by un-reserving when a read verb ships.
+ */
+export const RESERVED_SURFACES = ["proof"] as const;
 
 /** The stub's locked four-behavior emit repertoire (shared vocab with 51-01). */
 export const EMIT_BEHAVIORS = ["compaction", "slow_output", "mid_turn_death", "restore"] as const;
@@ -69,6 +77,12 @@ export type ValidationErrorCode =
   | "UNKNOWN_STEP_VERB"
   | "EXPECT_NOT_OBJECT"
   | "UNKNOWN_EXPECT_SURFACE"
+  | "RESERVED_EXPECT_SURFACE"
+  | "STUB_SCRIPTS_NOT_A_MAP"
+  | "STUB_SCRIPT_PATH_INVALID"
+  | "SCOPE_MISSION_MISSING"
+  | "TUI_NOT_DECLARED"
+  | "ENV_TUI_NOT_BOOLEAN"
   | "EXPECT_MATCH_MODE_MISSING"
   | "EXPECT_MATCH_MODE_AMBIGUOUS"
   | "WITHIN_NOT_A_DURATION"
@@ -138,10 +152,17 @@ export function validateScenario(
     push("ENV_NOT_OBJECT", "env: must be a mapping of preconditions when present", "env");
   }
 
+  if (isPlainObject(doc.env)) validateEnvBlock(doc.env, push);
+
   if (!Array.isArray(doc.steps)) {
     push("STEPS_MISSING", "steps: a non-empty ordered list of step objects is required", "steps");
   } else {
     doc.steps.forEach((step, i) => validateStep(step, i, topologyKind, push));
+    validateEnvStepCrossRequirements(
+      isPlainObject(doc.env) ? doc.env : undefined,
+      doc.steps,
+      push,
+    );
   }
 
   if (errors.length > 0) return { ok: false, errors };
@@ -154,6 +175,75 @@ export function validateScenario(
       steps: doc.steps as Array<Record<string, unknown>>,
     },
   };
+}
+
+/** Shape-check the delta env fields (D1 stub_scripts, D7 tui). Pure shape only —
+ *  the stub_scripts KEY CONTRACT (each key resolves to exactly one runtime:stub
+ *  member) needs the parsed topology and is enforced at the pipeline boundary. */
+function validateEnvBlock(
+  env: Record<string, unknown>,
+  push: (code: ValidationErrorCode, message: string, path: string) => void,
+): void {
+  const scripts = env.stub_scripts;
+  if (scripts !== undefined) {
+    if (!isPlainObject(scripts)) {
+      push(
+        "STUB_SCRIPTS_NOT_A_MAP",
+        "env.stub_scripts: must be a mapping of <seat member> → <script path relative to the scenario file>",
+        "env.stub_scripts",
+      );
+    } else {
+      for (const [seat, p] of Object.entries(scripts)) {
+        if (typeof p !== "string" || p.length === 0) {
+          push(
+            "STUB_SCRIPT_PATH_INVALID",
+            `env.stub_scripts.${seat}: a non-empty script path string is required`,
+            `env.stub_scripts.${seat}`,
+          );
+        }
+      }
+    }
+  }
+  if (env.tui !== undefined && typeof env.tui !== "boolean") {
+    push("ENV_TUI_NOT_BOOLEAN", "env.tui: must be a boolean (true opts the scenario into TUI provisioning)", "env.tui");
+  }
+}
+
+/** Teaching cross-requirements between declared env and the surfaces steps read:
+ *  a scope expect needs env.scope_mission (the shipped `rig scope audit` read has
+ *  --mission as a requiredOption); a tui_socket expect needs env.tui:true (the
+ *  control socket exists only inside a provisioned TUI — without the opt-in the
+ *  read would race a socket that never listens). Load-time teaching beats a
+ *  runtime surprise. */
+function validateEnvStepCrossRequirements(
+  env: Record<string, unknown> | undefined,
+  steps: unknown[],
+  push: (code: ValidationErrorCode, message: string, path: string) => void,
+): void {
+  const surfacesRead = new Set<string>();
+  steps.forEach((step) => {
+    if (!isPlainObject(step)) return;
+    const ex = step.expect;
+    if (isPlainObject(ex) && typeof ex.surface === "string") surfacesRead.add(ex.surface);
+  });
+
+  if (surfacesRead.has("scope")) {
+    const mission = env?.scope_mission;
+    if (typeof mission !== "string" || mission.length === 0) {
+      push(
+        "SCOPE_MISSION_MISSING",
+        "env.scope_mission: required (non-empty string) when any step expects the scope surface — the shipped read is `rig scope audit --mission <name> --json` and --mission is a requiredOption",
+        "env.scope_mission",
+      );
+    }
+  }
+  if (surfacesRead.has("tui_socket") && env?.tui !== true) {
+    push(
+      "TUI_NOT_DECLARED",
+      "env.tui: true is required when any step expects the tui_socket surface — the control socket exists only inside the TUI the pipeline provisions on opt-in",
+      "env.tui",
+    );
+  }
 }
 
 function validateStep(
@@ -205,7 +295,16 @@ function validateExpect(
     return;
   }
   const surface = value.surface;
-  if (typeof surface !== "string" || !(EXPECT_SURFACES as readonly string[]).includes(surface)) {
+  if (typeof surface === "string" && (RESERVED_SURFACES as readonly string[]).includes(surface)) {
+    push(
+      "RESERVED_EXPECT_SURFACE",
+      `${path}.surface: "${surface}" is reserved, not readable — no shipped read verb exists for it ` +
+        `(\`rig proof\` ships only \`add\`), so the format must not promise what the product cannot answer. ` +
+        `Reserved until a read verb ships (PM ruling qitem-20260811092250-a80735bc); it re-enters the ` +
+        `readable set by un-reserving then.`,
+      `${path}.surface`,
+    );
+  } else if (typeof surface !== "string" || !(EXPECT_SURFACES as readonly string[]).includes(surface)) {
     push(
       "UNKNOWN_EXPECT_SURFACE",
       `${path}.surface: unknown surface ${JSON.stringify(surface)} — the shipped-observable set is: ${EXPECT_SURFACES.join(", ")}`,

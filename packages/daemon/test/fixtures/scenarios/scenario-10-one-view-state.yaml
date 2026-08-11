@@ -10,6 +10,11 @@
 # surfaces compared.
 scenario: one-view-state-consistency
 topology: ./topo-stub-baton.yaml
+env:
+  # D7 (51-02 delta): tui_socket expects require the TUI opt-in — the pipeline
+  # provisions the shipped TUI (isolated tmux server + scaffold socket) only when
+  # declared, so the surface read never races a socket that never listens.
+  tui: true
 steps:
   - up: {}
   - expect:

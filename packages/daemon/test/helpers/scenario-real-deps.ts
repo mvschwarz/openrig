@@ -77,8 +77,13 @@ export interface RealDepsOptions {
   appendRecord?: (rec: RunRecord) => void;
   /** The single default within/poll pair. */
   defaults?: { withinMs: number; pollIntervalMs: number };
-  /** Optional cross-surface normalizer for the `equals` mode (its shape rides 51-03). */
+  /** The v1 runner-internal normalizer seam for the `equals` mode (lock amendment
+   *  A-N1: runner-internal interface of record; the DECLARATIVE artifact remains
+   *  the only scenario-facing form, rides 51-03, and lowers to this seam). */
   normalizer?: (surface: ExpectSurface, value: unknown) => unknown;
+  /** The mission scope reads audit (D3) — threaded from the scenario's
+   *  env.scope_mission into `rig scope audit --mission <name> --json`. */
+  scopeMission?: string;
 }
 
 /** `rig up` is heavy (real tmux seat launch) — give it a generous ceiling. */
@@ -147,7 +152,11 @@ export function buildRealDeps(opts: RealDepsOptions): ScenarioRunnerDeps {
   };
 
   const observe = (surface: ExpectSurface, o: { seat?: string }): Promise<unknown> =>
-    readSurface(surface, { rigBin, readEnv: daemon.readEnv, baseUrl: daemon.baseUrl }, { seat: o.seat });
+    readSurface(
+      surface,
+      { rigBin, readEnv: daemon.readEnv, baseUrl: daemon.baseUrl },
+      { seat: o.seat, scopeMission: opts.scopeMission },
+    );
 
   return {
     runAction,

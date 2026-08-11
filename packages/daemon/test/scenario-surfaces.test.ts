@@ -18,17 +18,19 @@ const realBaseEnv = () => ({ HOME: process.env.HOME, PATH: process.env.PATH, TER
 
 // Slice 51-02 — surface readers: read each shipped-observable surface via the
 // shipped `rig` invocation and parse it into the observable the runner asserts
-// on. The FLAG-1 fail-closed floor (PM ruling): the `proof` surface VALIDATES
-// (locked name) but the runner FAILS LOUD at execution with a named unbound
-// error — it never fabricates a read from scope-audit or anywhere else.
+// on. `proof` is RESERVED at the format level (PM lock amendment, ruling row
+// qitem-20260811092250-a80735bc) — the validator rejects it at load, and the
+// reader keeps a defense-in-depth unbound error for a runtime-smuggled value.
 
-describe("surface readers — FLAG-1 proof unbound floor + dispatch (pure)", () => {
+describe("surface readers — reserved-proof defense-in-depth + dispatch (pure)", () => {
   const ctx: SurfaceContext = { rigBin: RIG_BIN, readEnv: {}, baseUrl: "http://127.0.0.1:1" };
 
-  it("readSurface('proof') FAILS LOUD with a named UnboundSurfaceError (never fabricates, never skips)", async () => {
-    await expect(readSurface("proof", ctx)).rejects.toBeInstanceOf(UnboundSurfaceError);
+  it("a runtime-smuggled 'proof' read still FAILS LOUD with a named UnboundSurfaceError (defense-in-depth)", async () => {
+    // "proof" left the ExpectSurface type (RESERVED); only a cast can reach here.
+    const smuggled = "proof" as never;
+    await expect(readSurface(smuggled, ctx)).rejects.toBeInstanceOf(UnboundSurfaceError);
     let msg = "";
-    try { await readSurface("proof", ctx); } catch (e) { msg = (e as Error).message; }
+    try { await readSurface(smuggled, ctx); } catch (e) { msg = (e as Error).message; }
     expect(msg).toContain("proof");
     expect(msg.toLowerCase()).toContain("unbound");
     // it must NOT claim success or return a value

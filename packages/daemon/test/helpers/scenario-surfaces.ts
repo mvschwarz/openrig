@@ -8,11 +8,12 @@
  * --full so `body` is not blanked; tui_socket is a unix socket, send exactly
  * `state`; policy provenance is `policy effective`).
  *
- * FLAG-1 FAIL-CLOSED FLOOR (PM ruling, binding 51-02 v1): the `proof` surface has
- * NO shipped read binding — it VALIDATES (locked name) but the runner FAILS LOUD
- * here with a named UnboundSurfaceError, never fabricating a read from scope-audit
- * or anywhere else. Unbound is not silently-skipped (fallbacks need explicit
- * success signals). The real binding decision rides 51-03 by amendment.
+ * RESERVED surfaces (PM lock amendment, ruling row qitem-20260811092250-a80735bc):
+ * `proof` has NO shipped read verb, so the VALIDATOR now rejects it at load
+ * (RESERVED_EXPECT_SURFACE) — it never reaches this reader through the typed
+ * path. The default leg below keeps a defense-in-depth UnboundSurfaceError for a
+ * runtime-smuggled reserved value: unbound is never silently-skipped (fallbacks
+ * need explicit success signals).
  */
 
 import net from "node:net";
@@ -30,6 +31,10 @@ export interface ReadSurfaceOptions {
   seat?: string;
   /** Timeout for a socket/CLI read (ms). */
   timeoutMs?: number;
+  /** The mission a scope read audits (D3): `rig scope audit` has --mission as a
+   *  requiredOption, so a scope read without it can never succeed. Sourced from
+   *  the scenario's env.scope_mission (validator-required for scope expects). */
+  scopeMission?: string;
 }
 
 /** Thrown when an `expect` names a locked-but-unbound surface (FLAG-1 floor). */
@@ -60,8 +65,16 @@ export async function readSurface(
       return jsonRig(["queue", "list", "--json", "--full"], ctx);
     case "stream":
       return jsonRig(["stream", "list", "--json"], ctx);
-    case "scope":
-      return jsonRig(["scope", "audit", "--json"], ctx);
+    case "scope": {
+      // --mission is a requiredOption on the shipped read (scope.ts) — absent
+      // here means the pipeline failed to thread env.scope_mission through.
+      if (!opts.scopeMission) {
+        throw new Error(
+          `expect surface "scope" requires a mission — declare env.scope_mission (the shipped read is \`rig scope audit --mission <name> --json\`)`,
+        );
+      }
+      return jsonRig(["scope", "audit", "--mission", opts.scopeMission, "--json"], ctx);
+    }
     case "pane":
       return jsonRig(["capture", requireSeat(surface, opts), "--json"], ctx);
     case "transcript":
@@ -70,10 +83,10 @@ export async function readSurface(
       return jsonRig(["policy", "effective", "--json"], ctx);
     case "tui_socket":
       return readTuiSocket(ctx, opts);
-    case "proof":
-      // FLAG-1 floor — no shipped read; fail loud, never fabricate.
-      throw new UnboundSurfaceError("proof");
     default:
+      // Defense-in-depth: a RESERVED value (e.g. "proof") smuggled past the
+      // validator by a cast still fails loud and named, never fabricated.
+      if ((surface as string) === "proof") throw new UnboundSurfaceError("proof");
       throw new Error(`unknown expect surface: ${JSON.stringify(surface)}`);
   }
 }
