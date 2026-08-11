@@ -22,6 +22,9 @@ export const CLOSURE_REASONS = [
   "canceled",
   "no-follow-on",
   "escalation",
+  // 0.5.1-53 Atom 2a — a row corrected by cancel-and-replace records SUPERSEDED (with the successor
+  // as closure_target) so it is distinguishable from an abandoned cancel (closure_reason=null).
+  "superseded",
 ] as const;
 
 export type ClosureReason = (typeof CLOSURE_REASONS)[number];

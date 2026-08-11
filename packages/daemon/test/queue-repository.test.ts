@@ -229,6 +229,46 @@ describe("QueueRepository", () => {
     }
   });
 
+  // 0.5.1-53 Atom 2a — supersession-cancel is an ADMITTED FORM. A row corrected by cancel-and-replace
+  // must record that it was SUPERSEDED (reason=superseded + target=successor), not read as abandoned.
+  // Today the closure-coherence whitelist admits reason/target only on done / park-record / handoff-close,
+  // so state=canceled + a reason is refused (closure_fields_not_admitted) — which is exactly why a
+  // superseded row is indistinguishable from an abandoned one (both closureReason=null).
+  it("Atom 2a: a supersession-cancel (canceled + reason=superseded + target) is admitted and recorded", async () => {
+    const successor = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "successor" });
+    const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "original" });
+    repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+    repo.update({
+      qitemId: item.qitemId, actorSession: "bob@rig", state: "canceled",
+      closureReason: "superseded", closureTarget: successor.qitemId,
+    });
+    const row = repo.getById(item.qitemId)!;
+    expect(row.state).toBe("canceled");
+    expect(row.closureReason, "a superseded row records it (not null = distinguishable from abandoned)").toBe("superseded");
+    expect(row.closureTarget).toBe(successor.qitemId);
+  });
+
+  it("Atom 2a: a plain cancel (no reason) stays abandoned — closureReason null", async () => {
+    const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "abandon me" });
+    repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+    repo.update({ qitemId: item.qitemId, actorSession: "bob@rig", state: "canceled" });
+    expect(repo.getById(item.qitemId)!.closureReason, "abandoned = no supersession reason").toBeNull();
+  });
+
+  it("Atom 2a: superseded WITHOUT a successor target is refused loud (no silent no-op)", async () => {
+    const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "orig" });
+    repo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+    try {
+      repo.update({ qitemId: item.qitemId, actorSession: "bob@rig", state: "canceled", closureReason: "superseded" });
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(QueueRepositoryError);
+      expect((err as QueueRepositoryError).code).toBe("missing_closure_target");
+    }
+    // the loud rejection must NOT have half-applied: the row stays as it was (in-progress), not canceled.
+    expect(repo.getById(item.qitemId)!.state, "a rejected close must not silently mutate the row").toBe("in-progress");
+  });
+
   it("update state=done WITHOUT closure_reason rejected with missing_closure_reason", async () => {
     const item = await repo.create({
       sourceSession: "alice@rig",
