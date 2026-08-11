@@ -370,11 +370,6 @@ export interface SendOpts {
   verify?: boolean;
   force?: boolean;
   waitForIdleMs?: number;
-  /** Final fail-loud check after any idle wait and immediately before delivery. */
-  beforeSend?: () =>
-    | { reason: string; error?: string }
-    | null
-    | Promise<{ reason: string; error?: string } | null>;
   // OPR.0.4.1.10 — interactive-prompt / permission guard.
   // `dangerouslyInteract` is the ONLY override of the prompt/permission guard (force does NOT bypass
   // it). It requires `reason` and writes an auditable `transport.prompt_override` record before the
@@ -949,31 +944,6 @@ export class SessionTransport {
     // sub-threshold gaps or unenveloped sends. sent-ISO + the rendered delta = absolute delivered time.
     if (opts?.stampISO) {
       text = appendDeliveredSegment(text, this.now().getTime() - Date.parse(opts.stampISO));
-    }
-
-    if (opts?.beforeSend) {
-      try {
-        const refusal = await opts.beforeSend();
-        if (refusal) {
-          return {
-            ok: false,
-            sessionName,
-            reason: refusal.reason,
-            error: refusal.error,
-            sent: false,
-            ...waitEvidence,
-          };
-        }
-      } catch (error) {
-        return {
-          ok: false,
-          sessionName,
-          reason: "before_send_check_failed",
-          error: error instanceof Error ? error.message : String(error),
-          sent: false,
-          ...waitEvidence,
-        };
-      }
     }
 
     // 3. Send text (paste)

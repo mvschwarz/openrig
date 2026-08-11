@@ -50,6 +50,10 @@ function readCandidateSha(repoRoot) {
   return sha;
 }
 
+// Canonicalize the destination so containment compares like with like. This is NOT an adversary
+// guard: repoRoot is realpath'd, and on macOS an ordinary tmpdir is `/var/...` symlinked to
+// `/private/var/...`, so without this an entirely honest path reads as "outside the worktree".
+// Resolves the existing prefix and re-appends the not-yet-created segments.
 function canonicalizeDestination(destination) {
   let cursor = resolve(destination);
   const missingSegments = [];
@@ -77,65 +81,16 @@ function containedRelativePath(root, candidate) {
   return rel.split(sep).join("/");
 }
 
-function isInsideOrEqual(root, candidate) {
-  const rel = relative(root, candidate);
-  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
-}
-
-function configuredPathRelativeToRoot(root, destination) {
-  let cursor = resolve(destination);
-  const segments = [];
-  let match = null;
-  while (true) {
-    try {
-      if (realpathSync(cursor) === root) match = segments.join("/");
-    } catch (error) {
-      if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") throw error;
-    }
-    const parent = dirname(cursor);
-    if (parent === cursor) return match;
-    segments.unshift(basename(cursor));
-    cursor = parent;
-  }
-}
-
+// Plain containment: a verdict written outside the worktree is a TYPO, and this catches it before the
+// run mutates anything. The former tracked-path / tracked-symlink-leaf / .git-administrative legs were
+// unbuilt (founder ruling, over-engineering audit): each needed an adversary inside this trust domain,
+// and the only caller is the desk running its own gate.
 function resolveVerdictDestination(repoRoot) {
   const root = realpathSync(repoRoot);
-  const configuredPath = resolve(VERDICT_PATH);
-  const configuredRelativePath = configuredPathRelativeToRoot(root, configuredPath);
-  if (!configuredRelativePath) {
-    throw new Error(`verdict destination must be inside the current worktree: ${configuredPath}`);
-  }
-  if (configuredRelativePath === ".git" || configuredRelativePath.startsWith(".git/")) {
-    throw new Error(`verdict destination must not use Git administrative paths: ${configuredRelativePath}`);
-  }
-
-  const trackedEntries = new Set(runGit(["ls-files", "-z"], repoRoot).split("\0").filter(Boolean));
-  const configuredSegments = configuredRelativePath.split("/");
-  let configuredPrefix = "";
-  for (const segment of configuredSegments) {
-    configuredPrefix = configuredPrefix ? `${configuredPrefix}/${segment}` : segment;
-    if (trackedEntries.has(configuredPrefix)) {
-      throw new Error(`verdict destination must not traverse a tracked path: ${configuredPrefix}`);
-    }
-  }
-
   const absolutePath = canonicalizeDestination(VERDICT_PATH);
   const relativePath = containedRelativePath(root, absolutePath);
   if (!relativePath) {
     throw new Error(`verdict destination must be inside the current worktree: ${absolutePath}`);
-  }
-
-  const gitAdminRoots = runGit(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], repoRoot)
-    .trim()
-    .split("\n")
-    .filter(Boolean)
-    .map((path) => realpathSync(path));
-  if (gitAdminRoots.some((gitAdminRoot) => isInsideOrEqual(gitAdminRoot, absolutePath))) {
-    throw new Error(`verdict destination must not use Git administrative paths: ${absolutePath}`);
-  }
-  if (trackedEntries.has(relativePath)) {
-    throw new Error(`verdict destination must be untracked: ${relativePath}`);
   }
   return { absolutePath, relativePath };
 }

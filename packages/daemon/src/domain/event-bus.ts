@@ -206,17 +206,17 @@ export class EventBus {
               ? "invalid event payload JSON"
               : "invalid event payload shape";
             const payloadSha = createHash("sha256").update(row.payload).digest("hex");
+            this.notifyDrainStatus = {
+              state: "unparseable",
+              watermark: row.seq,
+              lastPoison: { seq: row.seq, error, payloadSha },
+            };
             this.persistWithinTransaction({
               type: "event.delivery_poisoned",
               poisonedSeq: row.seq,
               error,
               payloadSha,
             });
-            this.notifyDrainStatus = {
-              state: "unparseable",
-              watermark: row.seq,
-              lastPoison: { seq: row.seq, error, payloadSha },
-            };
             cursor = row.seq;
             continue;
           }

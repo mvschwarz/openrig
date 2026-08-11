@@ -1,13 +1,16 @@
 import type Database from "better-sqlite3";
 
 /**
- * MF5: the RESERVED, executable wake-intent namespace. A durable wake intent is
- * written by the daemon (QueueRepository.stageWakeIntent) with an id under this
- * prefix, and the startup drain EXECUTES every pending row under it as a real
- * wake. Callers of the public `/outbox/record` audit route are therefore forbidden
- * from writing an id under this prefix — otherwise an ordinary audit write could
- * forge a startup wake. Single source of truth for the reservation (route) and the
- * drain (query).
+ * The EXECUTABLE wake-intent namespace. A durable wake intent is written by the
+ * daemon (QueueRepository.stageWakeIntent) with an id under this prefix, and the
+ * startup drain EXECUTES every pending row under it as a real wake.
+ *
+ * NOT a route reservation: the public `/outbox/record` audit route no longer
+ * refuses caller-supplied ids under this prefix (the W4-era MF5 guard was unbuilt —
+ * founder ruling, over-engineering audit: its justification required an adversary
+ * inside this trust domain, where the only caller is the daemon's own localhost
+ * client). A caller CAN now record an id under this prefix and the drain will
+ * select it. Single source of truth for the drain query only.
  */
 export const WAKE_INTENT_PREFIX = "wake-intent-";
 
@@ -282,11 +285,12 @@ export class OutboxHandler {
    * so a caller can page and terminate on a served short batch (never a silent cap).
    */
   listPending(idPrefix: string, limit = 200): OutboxEntry[] {
-    // BLOCKING 2 (guard re-seal): EXACT-CASE prefix match. SQLite `LIKE` is
-    // case-insensitive by default, so a `LIKE 'wake-intent-%'` selector would
-    // execute a `WAKE-INTENT-…` variant that the case-sensitive route reservation
-    // passes — a forgeable gap. `substr(...) = ?` uses the binary collation
-    // (case-sensitive), aligning the executable selector with the reservation.
+    // EXACT-CASE prefix match. SQLite `LIKE` is case-insensitive by default, so a
+    // `LIKE 'wake-intent-%'` selector would also execute `WAKE-INTENT-…` variants.
+    // `substr(...) = ?` uses the binary collation (case-sensitive), so exactly one
+    // spelling is executable. With the route-side prefix refusal unbuilt, this
+    // narrowness is the ONLY thing keeping a recorded case variant out of the
+    // executable drain — widen it and variants become executable.
     const rows = this.db
       .prepare(
         `SELECT * FROM outbox_entries

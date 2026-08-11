@@ -124,35 +124,6 @@ describe("queue routes", () => {
     return ((await res.json()) as { inboxId: string }).inboxId;
   }
 
-  // MF5 (SECURITY): the executable wake-intent id namespace is RESERVED — a public
-  // /outbox/record audit write must not be able to forge a startup wake.
-  it("outbox record — 400 REJECTS a caller-supplied wake-intent-* outboxId (reserved namespace)", async () => {
-    const res = await app.request("/api/queue/outbox/record", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "attacker@rig" },
-      body: JSON.stringify({
-        outboxId: "wake-intent-forged",
-        destinationSession: "victim@rig",
-        body: "forged wake payload",
-      }),
-    });
-    expect(res.status).toBe(400);
-    const err = (await res.json()) as { error: string };
-    expect(err.error).toMatch(/wake-intent-|reserved/i);
-    // and nothing was written under the forged id
-    expect(outbox.getById("wake-intent-forged")).toBeNull();
-  });
-
-  it("outbox record — 400 REJECTS a CASE-VARIANT wake-intent id (BLOCKING 2: route ⊇ selector)", async () => {
-    const res = await app.request("/api/queue/outbox/record", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "attacker@rig" },
-      body: JSON.stringify({ outboxId: "WAKE-INTENT-forged", destinationSession: "victim@rig", body: "variant" }),
-    });
-    expect(res.status).toBe(400);
-    expect(outbox.getById("WAKE-INTENT-forged")).toBeNull();
-  });
-
   it("outbox record — still accepts a normal (non-reserved) outboxId", async () => {
     const res = await app.request("/api/queue/outbox/record", {
       method: "POST",

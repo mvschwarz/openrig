@@ -557,10 +557,11 @@ describe("W1 MF4 — the intent freezes its emitting generation/envelope", () =>
   });
 });
 
-// MF5 (guard HOLD, SECURITY): the executable wake-intent namespace must not be
-// forgeable. Route reservation is pinned in the queue-routes suite; here we pin
-// the drain-side defense: a wake whose target qitem does not exist is never sent.
-describe("W1 MF5 — the executable wake-intent namespace is not forgeable (drain side)", () => {
+// The drain refuses a wake whose target qitem does not exist. The route-side prefix
+// refusal was unbuilt (founder ruling), so a caller CAN record an id under the
+// executable prefix; this pin is what stops such a row being sent as a real wake
+// when it points at nothing.
+describe("W1 — the drain never sends a wake for a nonexistent qitem", () => {
   it("a wake-intent pointing at a NONEXISTENT qitem is failed, never sent", async () => {
     const h = makeHarness();
     h.outbox.record({
@@ -610,10 +611,13 @@ describe("W1 re-seal BLOCKING 1 — abandoned `sending` claims reconcile to inde
   });
 });
 
-// Re-seal BLOCKING 2 (guard): the executable drain selector is EXACT-CASE, so a
-// `WAKE-INTENT-…` variant (which the public route also now rejects) is never
-// selected/executed.
-describe("W1 re-seal BLOCKING 2 — the executable drain selector is exact-case", () => {
+// The executable drain selector is EXACT-CASE, so a `WAKE-INTENT-…` variant is never
+// selected/executed. NOTE: the public /outbox/record route no longer rejects reserved-prefix
+// ids (the W4-era MF5 route guard was unbuilt — founder ruling: its justification required an
+// adversary inside this trust domain, where the only caller is the daemon's own localhost
+// client). That makes this selector pin MORE load-bearing, not less: it is now the only thing
+// keeping a recorded case-variant id out of the executable drain.
+describe("W1 — the executable drain selector is exact-case", () => {
   it("a WAKE-INTENT- case variant is NOT selected by the drain (never executed)", async () => {
     const h = makeHarness();
     const q = await h.repo.create({ sourceSession: "driver@rig", destinationSession: "reviewer@rig", body: "z" });

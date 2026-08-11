@@ -1763,24 +1763,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // the type narrow for downstream consumers).
   const { ContextMonitor } = await import("./domain/context-monitor.js");
   const { ClaudeCompactionEnforcer } = await import("./domain/claude-compaction-enforcer.js");
-  const { EnforcerDecisionStore } = await import("./domain/enforcer-decision-store.js");
-  const compactionSettingsStore = new ContextPackSettingsStore();
-  const enforcerDecisionStore = new EnforcerDecisionStore(db, {
-    now: () => new Date(),
-    authorizeTtlMinutes: () => compactionSettingsStore.resolveClaudeCompactionPolicy().authorizeTtlMinutes,
-  });
-  deps.enforcerDecisionStore = enforcerDecisionStore;
   const compactionEnforcer = deps.sessionTransport
     ? new ClaudeCompactionEnforcer(
-        compactionSettingsStore,
+        new ContextPackSettingsStore(),
         deps.sessionTransport,
         // GHOST-STAGE (b): resolve the LIVE occupant generation (atom-B tenure ledger) for a session
         // so a stage minted by a retired generation is refused for the successor. null = UNKNOWN → the
         // gate is inert (never compares a stale generation as if live).
-        {
-          resolveOccupantGeneration: (sessionName) => sessionRegistry.currentOccupantGenerationForSession(sessionName),
-          decisionStore: enforcerDecisionStore,
-        },
+        { resolveOccupantGeneration: (sessionName) => sessionRegistry.currentOccupantGenerationForSession(sessionName) },
       )
     : undefined;
   // 51-08 A1 — the over-time series rides the SAME 30s tick (PM decision 1):

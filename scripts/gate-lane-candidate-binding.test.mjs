@@ -4,11 +4,9 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
-  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readlinkSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -77,14 +75,6 @@ function assertCandidateRefusal(result, pattern) {
   assert.match(`${result.stdout}\n${result.stderr}`, pattern);
 }
 
-function symlinkMatches(path, target) {
-  try {
-    return lstatSync(path).isSymbolicLink() && readlinkSync(path) === target;
-  } catch {
-    return false;
-  }
-}
-
 test("candidate binding: tracked dirt refuses before the first cleanup mutation", async () => {
   const root = makeRepo();
   const sentinel = join(root, "packages/cli/daemon/sentinel.txt");
@@ -107,101 +97,10 @@ test("candidate binding: same verdict basename at a different path is not exclud
   assertCandidateRefusal(await runGate(root), /sub\/dir\/gate-lane-verdict\.json|candidate.*dirty/i);
 });
 
-test("candidate binding: a tracked verdict destination is refused without replacing owner data", async () => {
-  const root = makeRepo();
-  const verdictPath = join(root, "tracked.txt");
-  const ownerData = readFileSync(verdictPath, "utf8");
-
-  const result = await runGate(root, { OPENRIG_GATE_VERDICT: verdictPath });
-
-  assertCandidateRefusal(result, /verdict.*tracked|tracked.*verdict/i);
-  assert.equal(readFileSync(verdictPath, "utf8"), ownerData);
-});
-
-test("candidate binding: a tracked symlink verdict destination is refused without replacing owner data", async () => {
-  const root = makeRepo();
-  const ownerPath = join(root, "receipts/owner.json");
-  const ownerData = "contained owner data\n";
-  const verdictPath = join(root, "tracked-verdict.json");
-  const linkTarget = "receipts/owner.json";
-  write(ownerPath, ownerData);
-  symlinkSync(linkTarget, verdictPath);
-  git(root, "add", "tracked-verdict.json");
-  git(root, "commit", "-qm", "track verdict symlink");
-
-  const result = await runGate(root, { OPENRIG_GATE_VERDICT: verdictPath });
-
-  assert.deepEqual(
-    {
-      refused: result.status !== 0,
-      ownerPreserved: existsSync(ownerPath) && readFileSync(ownerPath, "utf8") === ownerData,
-      linkPreserved: symlinkMatches(verdictPath, linkTarget),
-    },
-    { refused: true, ownerPreserved: true, linkPreserved: true },
-    result.stderr,
-  );
-});
-
-test("candidate binding: a tracked symlink parent is refused without replacing owner data", async () => {
-  const root = makeRepo();
-  const ownerPath = join(root, "owner-receipts/current-verdict.json");
-  const ownerData = "contained parent owner data\n";
-  const linkPath = join(root, "tracked-receipts");
-  const linkTarget = "owner-receipts";
-  write(ownerPath, ownerData);
-  symlinkSync(linkTarget, linkPath);
-  git(root, "add", "tracked-receipts");
-  git(root, "commit", "-qm", "track verdict parent symlink");
-
-  const result = await runGate(root, { OPENRIG_GATE_VERDICT: join(linkPath, "current-verdict.json") });
-
-  assert.deepEqual(
-    {
-      refused: result.status !== 0,
-      ownerPreserved: existsSync(ownerPath) && readFileSync(ownerPath, "utf8") === ownerData,
-      linkPreserved: symlinkMatches(linkPath, linkTarget),
-    },
-    { refused: true, ownerPreserved: true, linkPreserved: true },
-    result.stderr,
-  );
-});
-
-test("candidate binding: Git metadata is refused without replacing owner data", async () => {
-  const root = makeRepo();
-  const verdictPath = join(root, ".git/config");
-  const ownerData = readFileSync(verdictPath, "utf8");
-
-  const result = await runGate(root, { OPENRIG_GATE_VERDICT: verdictPath });
-
-  assert.deepEqual(
-    {
-      refused: result.status !== 0,
-      ownerPreserved: existsSync(verdictPath) && readFileSync(verdictPath, "utf8") === ownerData,
-    },
-    { refused: true, ownerPreserved: true },
-    result.stderr,
-  );
-});
-
-test("candidate binding: a linked worktree Git pointer is refused without replacing owner data", async () => {
-  const root = makeRepo();
-  const linkedRoot = join(tmpdir(), `gate-linked-${process.pid}-${Date.now()}`);
-  git(root, "worktree", "add", "-q", "-b", "linked", linkedRoot);
-  const verdictPath = join(linkedRoot, ".git");
-  const ownerData = readFileSync(verdictPath, "utf8");
-
-  const result = await runGate(linkedRoot, { OPENRIG_GATE_VERDICT: verdictPath });
-
-  assert.deepEqual(
-    {
-      refused: result.status !== 0,
-      ownerPreserved: existsSync(verdictPath) && readFileSync(verdictPath, "utf8") === ownerData,
-    },
-    { refused: true, ownerPreserved: true },
-    result.stderr,
-  );
-});
-
+// The tracked-destination, tracked-symlink-leaf, tracked-symlink-parent, .git-metadata and
+// linked-worktree-pointer fixtures were unbuilt with the legs they pinned (founder ruling,
+// over-engineering audit — each required an adversary inside this trust domain). The plain
+// outside-the-worktree typo guard below is the one that stayed.
 test("candidate binding: a foreign verdict destination is refused without replacing owner data", async () => {
   const root = makeRepo();
   const foreignRoot = mkdtempSync(join(tmpdir(), "gate-foreign-owner-"));

@@ -6,7 +6,6 @@ import http from "node:http";
 import { Command } from "commander";
 import { ConfigStore, VALID_KEYS } from "../src/config-store.js";
 import { configCommand } from "../src/commands/config.js";
-import { SETTINGS_VALID_KEYS } from "../../daemon/src/domain/user-settings/settings-store.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
@@ -425,116 +424,5 @@ describe("Config CLI", () => {
     cmd.outputHelp();
     expect(combined).toContain("policies.idle_gate_qitem.scan_interval_seconds");
     expect(combined).toContain("policies.idle_gate_qitem.active_wake_interval_seconds");
-  });
-});
-
-describe("W4 compaction authorization TTL config", () => {
-  const key = "policies.claude_compaction.authorize_ttl_minutes";
-  const envKey = "OPENRIG_POLICIES_CLAUDE_COMPACTION_AUTHORIZE_TTL_MINUTES";
-  let tmpDir: string;
-  let configPath: string;
-  let savedEnv: string | undefined;
-
-  beforeEach(() => {
-    tmpDir = mkdtempSync(join(tmpdir(), "w4-config-test-"));
-    configPath = join(tmpDir, "config.json");
-    savedEnv = process.env[envKey];
-    delete process.env[envKey];
-  });
-
-  afterEach(() => {
-    rmSync(tmpDir, { recursive: true, force: true });
-    if (savedEnv === undefined) delete process.env[envKey];
-    else process.env[envKey] = savedEnv;
-  });
-
-  it("keeps the daemon and CLI compaction key registries exactly aligned", () => {
-    const compactionKeys = (keys: readonly string[]) =>
-      keys.filter((candidate) => candidate.startsWith("policies.claude_compaction."));
-    expect(compactionKeys(VALID_KEYS)).toEqual(compactionKeys(SETTINGS_VALID_KEYS));
-    expect(VALID_KEYS).toContain(key);
-  });
-
-  it("defaults to 15 and exposes the typed policy field", () => {
-    const store = new ConfigStore(configPath);
-    expect(store.resolveWithSource(key)).toEqual({
-      value: 15,
-      source: "default",
-      defaultValue: 15,
-    });
-    expect(store.resolve().policies.claudeCompaction.authorizeTtlMinutes).toBe(15);
-  });
-
-  it("accepts a valid environment override", () => {
-    process.env[envKey] = "30";
-    expect(new ConfigStore(configPath).resolveWithSource(key)).toEqual({
-      value: 30,
-      source: "env",
-      defaultValue: 15,
-    });
-  });
-
-  it.each(["0", "61", "15.5", "bad"])(
-    "invalid env %s falls back to 15 and reports loudly",
-    (raw) => {
-      process.env[envKey] = raw;
-      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-      try {
-        expect(new ConfigStore(configPath).resolveWithSource(key)).toEqual({
-          value: 15,
-          source: "default",
-          defaultValue: 15,
-        });
-        expect(stderr.mock.calls.some((call) => String(call[0]).includes(
-          `env override for ${key} rejected`,
-        ))).toBe(true);
-      } finally {
-        stderr.mockRestore();
-      }
-    },
-  );
-
-  it.each([0, 61, 15.5, "bad"])(
-    "invalid file value %s falls back to 15 and reports loudly",
-    (raw) => {
-      writeFileSync(configPath, JSON.stringify({
-        policies: { claudeCompaction: { authorizeTtlMinutes: raw } },
-      }));
-      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-      try {
-        expect(new ConfigStore(configPath).resolveWithSource(key)).toEqual({
-          value: 15,
-          source: "default",
-          defaultValue: 15,
-        });
-        expect(stderr.mock.calls.some((call) => String(call[0]).includes(
-          `file value for ${key} rejected`,
-        ))).toBe(true);
-      } finally {
-        stderr.mockRestore();
-      }
-    },
-  );
-
-  it("accepts exactly 1..60 through set and rejects values outside the range", () => {
-    const store = new ConfigStore(configPath);
-    for (const value of ["1", "15", "60"]) {
-      store.set(key, value);
-      expect(store.get(key)).toBe(Number(value));
-    }
-    for (const value of ["0", "61", "15.5", "bad"]) {
-      expect(() => store.set(key, value)).toThrow(/integer|\[1, 60\]|number/i);
-    }
-  });
-
-  it("prints the literal key in rig config help", () => {
-    const command = configCommand(configPath);
-    let output = "";
-    command.configureOutput({
-      writeOut: (text) => { output += text; },
-      writeErr: () => {},
-    });
-    command.outputHelp();
-    expect(output).toContain(key);
   });
 });

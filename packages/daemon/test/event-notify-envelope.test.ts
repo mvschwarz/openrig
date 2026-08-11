@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -14,10 +14,7 @@ describe("W2b exact-set notify envelope", () => {
     bus = new EventBus(db);
   });
 
-  afterEach(() => {
-    vi.restoreAllMocks();
-    db.close();
-  });
+  afterEach(() => db.close());
 
   function persisted(label: string) {
     return bus.persistWithinTransaction({
@@ -189,65 +186,6 @@ describe("W2b exact-set notify envelope", () => {
       type: "event.delivery_poisoned",
       poisonedSeq: malformedSeq,
       payloadSha: status.lastPoison?.payloadSha,
-    });
-  });
-
-  it("retries a malformed row when its first poison write fails", () => {
-    const received: PersistedEvent[] = [];
-    bus.subscribe((event) => received.push(event));
-    const initialStatus = bus.getNotifyDrainStatus();
-    const persist = bus.persistWithinTransaction.bind(bus);
-    let rejectFirstPoison = true;
-    vi.spyOn(bus, "persistWithinTransaction").mockImplementation((event) => {
-      if (event.type === "event.delivery_poisoned" && rejectFirstPoison) {
-        rejectFirstPoison = false;
-        throw new Error("simulated poison write failure");
-      }
-      return persist(event);
-    });
-
-    let malformedSeq = 0;
-    let laterSeq = 0;
-    expect(() =>
-      bus.withNotifyEnvelope(() => {
-        malformedSeq = Number(
-          db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)")
-            .run(null, null, "malformed.fixture", "{not-json")
-            .lastInsertRowid,
-        );
-        laterSeq = Number(
-          db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, ?, ?)")
-            .run(
-              null,
-              null,
-              "view.changed",
-              JSON.stringify({ type: "view.changed", viewName: "later", cause: "poison-retry" }),
-            )
-            .lastInsertRowid,
-        );
-      }),
-    ).toThrow("simulated poison write failure");
-
-    expect(bus.getNotifyDrainStatus()).toEqual(initialStatus);
-    expect(db.prepare("SELECT COUNT(*) AS count FROM events WHERE type = 'event.delivery_poisoned'").get())
-      .toEqual({ count: 0 });
-    expect(received).toEqual([]);
-
-    bus.withNotifyEnvelope(() => undefined);
-
-    const poisonRows = db.prepare(
-      "SELECT seq, payload FROM events WHERE type = 'event.delivery_poisoned' ORDER BY seq",
-    ).all() as Array<{ seq: number; payload: string }>;
-    expect(poisonRows).toHaveLength(1);
-    expect(JSON.parse(poisonRows[0]!.payload)).toMatchObject({
-      type: "event.delivery_poisoned",
-      poisonedSeq: malformedSeq,
-    });
-    expect(received.map((event) => event.seq)).toEqual([laterSeq, poisonRows[0]!.seq]);
-    expect(received.map((event) => event.type)).toEqual(["view.changed", "event.delivery_poisoned"]);
-    expect(bus.getNotifyDrainStatus()).toMatchObject({
-      state: "unparseable",
-      lastPoison: { seq: malformedSeq },
     });
   });
 

@@ -116,7 +116,6 @@ export const SETTINGS_VALID_KEYS = [
   "policies.claude_compaction.message_inline",
   "policies.claude_compaction.message_file_path",
   "policies.claude_compaction.post_restore_audit_instruction",
-  "policies.claude_compaction.authorize_ttl_minutes",
   "policies.idle_gate_qitem.scan_interval_seconds",
   "policies.idle_gate_qitem.active_wake_interval_seconds",
   "snapshots.periodic.enabled",
@@ -193,7 +192,6 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "policies.claude_compaction.message_inline": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_INLINE" },
   "policies.claude_compaction.message_file_path": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_FILE_PATH" },
   "policies.claude_compaction.post_restore_audit_instruction": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION" },
-  "policies.claude_compaction.authorize_ttl_minutes": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_AUTHORIZE_TTL_MINUTES" },
   "policies.idle_gate_qitem.scan_interval_seconds": { primary: "OPENRIG_POLICIES_IDLE_GATE_QITEM_SCAN_INTERVAL_SECONDS" },
   "policies.idle_gate_qitem.active_wake_interval_seconds": { primary: "OPENRIG_POLICIES_IDLE_GATE_QITEM_ACTIVE_WAKE_INTERVAL_SECONDS" },
   "snapshots.periodic.enabled": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_ENABLED" },
@@ -251,7 +249,6 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "policies.claude_compaction.message_inline": ["policies", "claudeCompaction", "messageInline"],
   "policies.claude_compaction.message_file_path": ["policies", "claudeCompaction", "messageFilePath"],
   "policies.claude_compaction.post_restore_audit_instruction": ["policies", "claudeCompaction", "postRestoreAuditInstruction"],
-  "policies.claude_compaction.authorize_ttl_minutes": ["policies", "claudeCompaction", "authorizeTtlMinutes"],
   "policies.idle_gate_qitem.scan_interval_seconds": ["policies", "idleGateQitem", "scanIntervalSeconds"],
   "policies.idle_gate_qitem.active_wake_interval_seconds": ["policies", "idleGateQitem", "activeWakeIntervalSeconds"],
   "snapshots.periodic.enabled": ["snapshots", "periodic", "enabled"],
@@ -480,7 +477,6 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "policies.claude_compaction.message_inline": return DEFAULT_CLAUDE_COMPACTION_RESTORE_INSTRUCTION;
     case "policies.claude_compaction.message_file_path": return defaultClaudeCompactionExtraInstructionFilePath();
     case "policies.claude_compaction.post_restore_audit_instruction": return DEFAULT_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION;
-    case "policies.claude_compaction.authorize_ttl_minutes": return 15;
     case "policies.idle_gate_qitem.scan_interval_seconds": return 60;
     case "policies.idle_gate_qitem.active_wake_interval_seconds": return 900;
     case "snapshots.periodic.enabled": return true;
@@ -553,19 +549,6 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
     if (coerced < 1 || coerced > 100) {
       throw new Error(
         `Invalid value for policies.claude_compaction.threshold_percent: must be in [1, 100], got ${coerced}`,
-      );
-    }
-  },
-  "policies.claude_compaction.authorize_ttl_minutes": (raw, coerced) => {
-    const trimmed = (raw ?? "").trim();
-    if (!/^-?\d+$/.test(trimmed) || typeof coerced !== "number" || !Number.isInteger(coerced)) {
-      throw new Error(
-        `Invalid value for policies.claude_compaction.authorize_ttl_minutes: expected an integer in [1, 60], got "${raw}"`,
-      );
-    }
-    if (coerced < 1 || coerced > 60) {
-      throw new Error(
-        `Invalid value for policies.claude_compaction.authorize_ttl_minutes: must be in [1, 60], got ${coerced}`,
       );
     }
   },
@@ -660,7 +643,6 @@ export interface ClaudeCompactionPolicy {
   messageInline: string;
   messageFilePath: string;
   postRestoreAuditInstruction: string;
-  authorizeTtlMinutes: number;
 }
 
 export interface ResolvedConfig {
@@ -781,7 +763,6 @@ export class SettingsStore {
       messageInline: this.resolveOne("policies.claude_compaction.message_inline", fc, wr).value as string,
       messageFilePath: this.resolveOne("policies.claude_compaction.message_file_path", fc, wr).value as string,
       postRestoreAuditInstruction: this.resolveOne("policies.claude_compaction.post_restore_audit_instruction", fc, wr).value as string,
-      authorizeTtlMinutes: this.resolveOne("policies.claude_compaction.authorize_ttl_minutes", fc, wr).value as number,
     };
   }
 

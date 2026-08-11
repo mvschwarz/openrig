@@ -688,10 +688,10 @@ export class QueueRepository {
     if (!this.outbox.claimForDelivery(outboxId)) return "skipped";
     const intent = this.outbox.getById(outboxId);
     if (!intent) return "skipped"; // unreachable post-claim; defensive
-    // MF5 (defense in depth): only deliver a wake for a qitem that actually exists.
-    // A wake intent whose target qitem is missing — a forgery that slipped the
-    // route reservation, or a successor already swept — is finalized `failed`,
-    // never sent as a real wake.
+    // Only deliver a wake for a qitem that actually exists. A wake intent whose
+    // target qitem is missing — a caller-recorded id under this prefix (the route
+    // no longer refuses those), or a successor already swept — is finalized
+    // `failed`, never sent as a real wake.
     if (!intent.auditPointer || !this.getById(intent.auditPointer)) {
       this.outbox.finalizeDelivery(outboxId, "failed");
       return "failed";

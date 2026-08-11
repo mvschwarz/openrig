@@ -49,7 +49,6 @@ function clearEnv(): () => void {
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_INLINE",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_MESSAGE_FILE_PATH",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION",
-    "OPENRIG_POLICIES_CLAUDE_COMPACTION_AUTHORIZE_TTL_MINUTES",
     "OPENRIG_POLICIES_IDLE_GATE_QITEM_SCAN_INTERVAL_SECONDS",
     "OPENRIG_POLICIES_IDLE_GATE_QITEM_ACTIVE_WAKE_INTERVAL_SECONDS",
     "RIGGED_PORT", "RIGGED_HOST", "RIGGED_DB",
@@ -126,7 +125,6 @@ describe("SettingsStore (User Settings v0)", () => {
       "policies.claude_compaction.message_inline",
       "policies.claude_compaction.message_file_path",
       "policies.claude_compaction.post_restore_audit_instruction",
-      "policies.claude_compaction.authorize_ttl_minutes",
       // OPR.0.5.1 51-06 W2c — tunable daemon auto-registration cadence.
       "policies.idle_gate_qitem.scan_interval_seconds",
       "policies.idle_gate_qitem.active_wake_interval_seconds",
@@ -341,7 +339,6 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(policy.messageFilePath).toMatch(/^\//);
     expect(policy.messageFilePath.endsWith(DEFAULT_EXTRA_INSTRUCTION_FILE_SUFFIX)).toBe(true);
     expect(policy.postRestoreAuditInstruction).toContain(DEFAULT_AUDIT_INSTRUCTION_FRAGMENT);
-    expect(policy.authorizeTtlMinutes).toBe(15);
   });
 
   it("HG-10: resolveClaudeCompactionPolicy picks up direct config.json edits without daemon restart (single resolve call rereads file)", () => {
@@ -360,7 +357,6 @@ describe("SettingsStore (User Settings v0)", () => {
             messageInline: "carry-forward note",
             messageFilePath: "",
             postRestoreAuditInstruction: "verify the reads",
-            authorizeTtlMinutes: 30,
           },
         },
       }),
@@ -374,7 +370,6 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(updated.messageInline).toBe("carry-forward note");
     expect(updated.messageFilePath.endsWith(DEFAULT_EXTRA_INSTRUCTION_FILE_SUFFIX)).toBe(true);
     expect(updated.postRestoreAuditInstruction).toBe("verify the reads");
-    expect(updated.authorizeTtlMinutes).toBe(30);
   });
 
   it("Slice 27: ensureDefaultClaudeCompactionFiles creates the user-owned extra instruction placeholder without overwriting edits", () => {
@@ -401,7 +396,6 @@ describe("SettingsStore (User Settings v0)", () => {
     store.set("policies.claude_compaction.message_inline", "rehydrate the agent");
     store.set("policies.claude_compaction.message_file_path", "/tmp/msg.txt");
     store.set("policies.claude_compaction.post_restore_audit_instruction", "audit reads");
-    store.set("policies.claude_compaction.authorize_ttl_minutes", "30");
 
     const raw = JSON.parse(require("node:fs").readFileSync(configPath, "utf-8"));
     expect(raw.policies.claudeCompaction.enabled).toBe(true);
@@ -411,7 +405,6 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(raw.policies.claudeCompaction.messageInline).toBe("rehydrate the agent");
     expect(raw.policies.claudeCompaction.messageFilePath).toBe("/tmp/msg.txt");
     expect(raw.policies.claudeCompaction.postRestoreAuditInstruction).toBe("audit reads");
-    expect(raw.policies.claudeCompaction.authorizeTtlMinutes).toBe(30);
 
     expect(store.resolveOne("policies.claude_compaction.enabled").value).toBe(true);
     expect(store.resolveOne("policies.claude_compaction.threshold_percent").value).toBe(60);
@@ -420,76 +413,11 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(store.resolveOne("policies.claude_compaction.message_inline").value).toBe("rehydrate the agent");
     expect(store.resolveOne("policies.claude_compaction.message_file_path").value).toBe("/tmp/msg.txt");
     expect(store.resolveOne("policies.claude_compaction.post_restore_audit_instruction").value).toBe("audit reads");
-    expect(store.resolveOne("policies.claude_compaction.authorize_ttl_minutes").value).toBe(30);
   });
 
   it("HG-1: invalid threshold rejected by coerceValue (non-numeric raises)", () => {
     const store = new SettingsStore(configPath);
     expect(() => store.set("policies.claude_compaction.threshold_percent", "not-a-number")).toThrow(/expected a number/);
-  });
-
-  describe("W4 authorize TTL config contract", () => {
-    it("accepts the exact inclusive 1..60 range through the write path", () => {
-      const store = new SettingsStore(configPath);
-      for (const value of ["1", "15", "60"]) {
-        store.set("policies.claude_compaction.authorize_ttl_minutes", value);
-        expect(store.resolveOne("policies.claude_compaction.authorize_ttl_minutes")).toMatchObject({
-          value: Number(value),
-          source: "file",
-          defaultValue: 15,
-        });
-      }
-      for (const value of ["0", "61", "15.5", "bad"]) {
-        expect(() => store.set("policies.claude_compaction.authorize_ttl_minutes", value)).toThrow(/integer|\[1, 60\]|number/i);
-      }
-    });
-
-    it("uses a valid env override", () => {
-      process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_AUTHORIZE_TTL_MINUTES"] = "30";
-      expect(new SettingsStore(configPath).resolveOne(
-        "policies.claude_compaction.authorize_ttl_minutes",
-      )).toMatchObject({ value: 30, source: "env", defaultValue: 15 });
-    });
-
-    it.each(["0", "61", "15.5", "bad"])(
-      "invalid env %s falls back to 15 and reports loudly",
-      (raw) => {
-        process.env["OPENRIG_POLICIES_CLAUDE_COMPACTION_AUTHORIZE_TTL_MINUTES"] = raw;
-        const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-        try {
-          const resolved = new SettingsStore(configPath).resolveOne(
-            "policies.claude_compaction.authorize_ttl_minutes",
-          );
-          expect(resolved).toMatchObject({ value: 15, source: "default", defaultValue: 15 });
-          expect(stderr.mock.calls.some((call) => String(call[0]).includes(
-            "env override for policies.claude_compaction.authorize_ttl_minutes rejected",
-          ))).toBe(true);
-        } finally {
-          stderr.mockRestore();
-        }
-      },
-    );
-
-    it.each([0, 61, 15.5, "bad"])(
-      "invalid file value %s falls back to 15 and reports loudly",
-      (raw) => {
-        writeFileSync(configPath, JSON.stringify({
-          policies: { claudeCompaction: { authorizeTtlMinutes: raw } },
-        }));
-        const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-        try {
-          const resolved = new SettingsStore(configPath).resolveOne(
-            "policies.claude_compaction.authorize_ttl_minutes",
-          );
-          expect(resolved).toMatchObject({ value: 15, source: "default", defaultValue: 15 });
-          expect(stderr.mock.calls.some((call) => String(call[0]).includes(
-            "file value for policies.claude_compaction.authorize_ttl_minutes rejected",
-          ))).toBe(true);
-        } finally {
-          stderr.mockRestore();
-        }
-      },
-    );
   });
 
   // Slice 27 BLOCKING-FIX-2 — env + file source resolution must also

@@ -73,9 +73,10 @@ import { i3IdentityProvenanceSchema } from "./migrations/067_i3_identity_provena
 import { enforcerDecisionsSchema } from "./migrations/068_enforcer_decisions.js";
 import { appliedLaunchObservationsSchema } from "./migrations/069_applied_launch_observations.js";
 import { appliedLaunchObservationInvalidationsSchema } from "./migrations/070_applied_launch_observation_invalidations.js";
+import { dropEnforcerDecisionsSchema } from "./migrations/071_drop_enforcer_decisions.js";
 import type { Migration } from "./migrate.js";
 
-/** Ordered 001→070 (068 enforcer decisions, 069/070 W3 launch truth). */
+/** Ordered 001→071 (068 enforcer decisions, dropped forward by 071; 069/070 W3 launch truth). */
 export const ALL_MIGRATIONS: Migration[] = [
   coreSchema,
   bindingsSessionsSchema,
@@ -147,4 +148,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   enforcerDecisionsSchema,
   appliedLaunchObservationsSchema,
   appliedLaunchObservationInvalidationsSchema,
+  dropEnforcerDecisionsSchema,
 ];
