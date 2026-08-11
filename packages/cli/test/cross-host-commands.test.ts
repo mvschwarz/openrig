@@ -22,11 +22,11 @@ let originalStdoutWrite: typeof process.stdout.write;
 let originalStderrWrite: typeof process.stderr.write;
 
 beforeEach(() => {
-  // A1 REFUSE-LOUD: a send is attributable-only — an unresolvable seat REFUSES at the boundary, so the
-  // prior empty-seat default now means "refuse" (no dispatch). Stub a DETERMINISTIC origin seat instead:
-  // the SSH reconstruction always appends `--from <origin>` from it (the origin is now always resolved),
-  // so the exact-argv assertions stay deterministic — they just include the derived `--from`. Individual
-  // provenance tests override the seat explicitly.
+  // P18: an env-less send DELIVERS-and-labels (no boundary refusal). Stub a DETERMINISTIC origin seat so
+  // the SSH reconstruction's exact-argv assertions stay deterministic: with a resolved origin the relay
+  // appends `--from <derived origin>` from the seat env — the P23-D1 skew-compat shim for pre-I4 remotes
+  // (PM ruled --from removal to P23-D1, qitem-20260811055900-f5920c0e), NOT a boundary guard. An env-less
+  // origin would simply omit `--from`. Individual provenance tests override the seat explicitly.
   vi.stubEnv("OPENRIG_SESSION_NAME", "origin@rig-a");
   vi.stubEnv("RIGGED_SESSION_NAME", "");
   captured = { stdoutLines: [], stderrLines: [], stdoutWrites: [], stderrWrites: [], exitCode: undefined };
@@ -83,8 +83,9 @@ describe("send --host (cross-host short-circuit)", () => {
       },
     }));
     await cmd.parseAsync(["--host", "vm-a", "dev-impl@my-rig", "hello world", "--verify"], { from: "user" });
-    // A1: the origin seat is always resolved (refuse otherwise), so the reconstruction deterministically
-    // appends `--from <derived origin>` (the seat env, never a caller override).
+    // P18: with a resolved origin seat (stubbed above) the reconstruction deterministically appends
+    // `--from <derived origin>` from the seat env (never a caller override) — the P23-D1 skew-compat shim
+    // for pre-I4 remotes, not a boundary guard. An env-less origin would omit `--from`.
     expect(captureCalls.argv).toEqual(["rig", "send", "dev-impl@my-rig", "hello world", "--verify", "--from", "origin@rig-a"]);
     expect(captured.stdoutLines[0]).toBe("[via host=vm-a (vm-a.local)]");
     const stdoutText = captured.stdoutWrites.join("");

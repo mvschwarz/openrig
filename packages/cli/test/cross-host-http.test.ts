@@ -37,8 +37,8 @@ beforeEach(() => {
   console.error = (...args: unknown[]) => { captured.stderrLines.push(args.map(String).join(" ")); };
   process.exitCode = undefined;
   delete process.env.OPENRIG_HOST_SELECTED;
-  // A1: send/broadcast are attributable-only — a resolvable seat is required to dispatch (the
-  // seat-boundary guard refuses otherwise). Establish one so the cross-host dispatch paths run.
+  // P18: establish a RESOLVED seat so the cross-host dispatch paths render the real sender (an env-less
+  // send would deliver-and-label with the `<unknown sender>` marker rather than refuse).
   vi.stubEnv("OPENRIG_SESSION_NAME", "relay@my-rig");
   vi.stubEnv("RIGGED_SESSION_NAME", "");
 });

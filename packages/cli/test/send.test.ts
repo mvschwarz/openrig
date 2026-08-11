@@ -156,10 +156,10 @@ describe("Send CLI", () => {
   beforeEach(() => {
     lastSendBody = null;
     lastBroadcastBody = null;
-    // A1: a send is attributable-only — the seat-boundary guard refuses when the seat env is
-    // unresolvable. Establish a resolvable seat for every test so the dispatch paths run; the
-    // refuse-loud test overrides it to empty. (Hermetic-gate default is env-UNSET.) Nested describes
-    // that stub their own envs re-run after this; the block afterEach restores so no stub leaks.
+    // P18: establish a RESOLVED seat for every test so dispatch renders the real sender; the
+    // deliver-and-label test overrides it to empty to exercise the `<unknown sender>` fall-open.
+    // (Hermetic-gate default is env-UNSET, so without this env-less delivery would render the unknown
+    // marker.) Nested describes that stub their own envs re-run after this; the block afterEach restores.
     vi.stubEnv("OPENRIG_SESSION_NAME", "sender@my-rig");
     vi.stubEnv("RIGGED_SESSION_NAME", "");
   });
@@ -191,7 +191,7 @@ describe("Send CLI", () => {
     expect((lastSendBody as Record<string, unknown>).actorSession).toBeNull();
   });
 
-  it("A1: a resolvable seat still SENDS (the guard admits an attributable send) — dispatch reaches the wire", async () => {
+  it("P18: a resolvable seat SENDS with its attributed identity — actorSession derived from the seat env, never forged", async () => {
     vi.stubEnv("OPENRIG_SESSION_NAME", "driver@my-rig");
     vi.stubEnv("RIGGED_SESSION_NAME", "");
     const { exitCode } = await captureLogs(async () => {

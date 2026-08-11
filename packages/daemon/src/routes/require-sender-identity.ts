@@ -92,16 +92,18 @@ export type ActorWithDeferral =
 
 /**
  * P21 §2 + rail-addendum d00c468d — the FOUNDER-VISIBLE-surface variant of requireSenderIdentity.
- * Header PRESENT ⇒ identical transport derivation (derive + 409-on-mismatch + `transport:v1`).
- * Header ABSENT ⇒ a NAMED PER-SURFACE DEFERRAL instead of refuse-loud: refusing would break a shipped
- * founder-visible flow (the browser UI review-actions + useFiles sites the CLI chokepoint can't reach),
- * so the body-supplied actor is recorded as the DECLARED claimed-era variant `claimed:v1` (a TODAY tap
- * under a not-yet-plumbed principal — honest "pre-verification", distinct from a legacy null row).
- * This is NEVER silent-accept — the claimed:v1 era-stamp IS the visible gap — and NEVER silent-break. A
- * body actor is still required (some actor must be on the record); its verification is the named gap
+ * Header PRESENT ⇒ identical transport derivation (derive + wire-SUPERSEDES a disagreeing body claim +
+ * `transport:v1`); the former 409-on-mismatch is RETIRED (P18 ruling A) — the wire decides the actor and
+ * the body is superseded, not refused.
+ * Header ABSENT ⇒ the body-supplied actor is recorded as the DECLARED claimed-era variant `claimed:v1`
+ * (a TODAY tap under a not-yet-plumbed principal — honest "pre-verification", distinct from a legacy null
+ * row). This is NEVER silent-accept — the claimed:v1 era-stamp IS the visible gap — and NEVER silent-break.
+ * A body actor is still required (some actor must be on the record); its verification is the named gap
  * whose owner + plumbing-path are documented per increment. Use ONLY on surfaces PM-ruled founder-
  * visible-flow-breaking (d00c468d: ui review approve/resolve/refreeze + useFiles write); everything else
- * uses requireSenderIdentity (refuse-loud default).
+ * uses requireSenderIdentity. Post-P18 the two helpers SHARE the deliver-and-label semantics (both
+ * supersede a mismatched body, both deliver header-absent under claimed:v1); this helper's remaining
+ * distinction is its surface scope, not a different refusal behavior.
  */
 export function resolveActorWithDeferral(
   c: Context,
