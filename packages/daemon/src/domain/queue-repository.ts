@@ -1845,6 +1845,13 @@ export class QueueRepository {
     const ts = new Date().toISOString();
     const fromState = qitem.state;
 
+    // 0.5.1-53 Atom 1b(i) — clear-on-exit. blocked_on is set EXPLICITLY, not COALESCE'd:
+    // a row keeps its blocker ONLY while `state=blocked` (effectiveBlockedOn = the new
+    // blocker, else the one it already carried), and any exit from blocked CLEARS it to
+    // NULL. The prior `COALESCE(?, blocked_on)` preserved the blocker on every non-blocked
+    // transition, leaving dead blockers that nothing audits (the root-cause strand).
+    const nextBlockedOn = input.state === "blocked" ? effectiveBlockedOn : null;
+
     this.db
       .prepare(
         `UPDATE queue_items
@@ -1853,7 +1860,7 @@ export class QueueRepository {
                closure_reason = COALESCE(?, closure_reason),
                closure_target = COALESCE(?, closure_target),
                handed_off_to = COALESCE(?, handed_off_to),
-               blocked_on = COALESCE(?, blocked_on)
+               blocked_on = ?
          WHERE qitem_id = ?`
       )
       .run(
@@ -1862,7 +1869,7 @@ export class QueueRepository {
         validation.closureReason,
         validation.closureTarget,
         input.handedOffTo ?? null,
-        input.blockedOn ?? null,
+        nextBlockedOn,
         input.qitemId
       );
 

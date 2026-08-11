@@ -144,6 +144,21 @@ describe("QueueRepository", () => {
     expect(evt!.toState).toBe("blocked");
   });
 
+  // 0.5.1-53 Atom 1b(i) — clear-on-exit. ROOT CAUSE: the update SET writes
+  // `blocked_on = COALESCE(?, blocked_on)`, so exiting `blocked` (input.blockedOn=null)
+  // PRESERVES the old blocker. A non-blocked row must NEVER carry a blocker — a stale
+  // blocked_on is a dead-blocker strand (nothing audits it; the desk sat on one for hours).
+  it("Atom 1b(i): exiting blocked CLEARS blocked_on (no stale dead-blocker)", async () => {
+    const blocker = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "blocker" });
+    const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "work" });
+    // Park it on the blocker qitem.
+    repo.update({ qitemId: item.qitemId, actorSession: "bob@rig", state: "blocked", blockedOn: blocker.qitemId });
+    expect(repo.getById(item.qitemId)!.blockedOn).toBe(blocker.qitemId);
+    // Exit blocked (unpark). RED at base: blocked_on still reads the blocker (COALESCE preserved it).
+    repo.update({ qitemId: item.qitemId, actorSession: "bob@rig", state: "in-progress" });
+    expect(repo.getById(item.qitemId)!.blockedOn, "a non-blocked row must not carry a blocker").toBeNull();
+  });
+
   it("update state=done WITHOUT closure_reason rejected with missing_closure_reason", async () => {
     const item = await repo.create({
       sourceSession: "alice@rig",
