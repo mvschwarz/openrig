@@ -1,27 +1,52 @@
-# Scenario #10 — one-view-state consistency (51-02 proof item 7, parse + interface).
+# Scenario #10 — one-view-state consistency (the 5.1 crowning assertion).
 #
-# INTENT: a single point in time must read consistently across surfaces — the TUI
-# control socket, `rig ps`, and `rig queue` should agree on the one view state
-# (the cross-surface `equals` assertion). This scenario exercises the equals PARSE
-# + the declarative-normalizer INTERFACE; the normalizer's final shape (which fields
-# of each surface map onto the shared comparison form) rides 51-03 shaping, so the
-# runner takes an injected normalizer here. The locked schema requires a nominal
-# `surface` on every expect, so `surface: ps` names the anchor; `equals` lists the
-# surfaces compared.
+# INTENT: at a single point in time the shipped surfaces must AGREE about one
+# world. This is the automated form of the failure class that costs real time —
+# one surface confidently reporting a world another surface cannot see.
+#
+# WHAT IS COMPARED, and why these two: `rig ps` and `rig queue` are both
+# daemon-truth surfaces, so the rigs ps reports and the rigs the queue's items are
+# destined for must be the SAME SET. A qitem addressed to a rig ps does not know
+# about — or a rig running with its queue work invisible — breaks this and fails
+# the scenario. The declarative mapping below is what makes the comparison
+# possible: the surfaces answer in different shapes (rig records vs qitems whose
+# destinationSession is <pod>-<member>@<rig>), so each DECLARES the field carrying
+# the shared truth. Per A-N1 the mapping is the only scenario-facing form; it
+# lowers to the runner-internal seam.
+#
+# WHAT tui_socket CONTRIBUTES, stated honestly: its own coherence, asserted
+# separately below — NOT membership in the equality. MEASURED at source: both of
+# the control socket's OBSERVE verbs return UI/registry state
+# (`state` -> {screen, drill, viewTab}; `commands` -> the command registry), so
+# the shipped socket carries NO daemon truth to compare. Folding it into the
+# equality could only pass by comparing something trivially equal, which would be
+# a false green. The gap is a TUI finding (the state query would need to expose
+# the rig/queue view it renders), not something this scenario can paper over.
 scenario: one-view-state-consistency
 topology: ./topo-stub-baton.yaml
 env:
-  # D7 (51-02 delta): tui_socket expects require the TUI opt-in — the pipeline
-  # provisions the shipped TUI (isolated tmux server + scaffold socket) only when
-  # declared, so the surface read never races a socket that never listens.
   tui: true
+  # give the queue a real item so both surfaces have a rig to agree about; an
+  # all-empty comparison would pass without proving anything
+  queue:
+    - id: view-1
+      source: harness@scn-baton
+      destination: dev-worker@scn-baton
+      summary: "#10 one-view-state — the queue's rig must be a rig ps knows"
+      claim: true
 steps:
   - up: {}
+  # the TUI is live and coherent at this instant (its own state, its own claim)
+  - expect:
+      surface: tui_socket
+      within: 20s
+      match:
+        ok: true
+  # THE INVARIANT: ps and queue name the same rig set
   - expect:
       surface: ps
       within: 20s
       equals:
-        - tui_socket
-        - ps
-        - queue
+        ps: { pluck: name }
+        queue: { pluck: destinationSession, rig: true }
   - down: {}

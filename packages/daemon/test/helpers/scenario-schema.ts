@@ -86,6 +86,8 @@ export type ValidationErrorCode =
   | "EXPECT_MATCH_MODE_MISSING"
   | "EXPECT_MATCH_MODE_AMBIGUOUS"
   | "WITHIN_NOT_A_DURATION"
+  | "EQUALS_PROJECTION_INVALID"
+  | "EQUALS_SURFACE_UNKNOWN"
   | "EMIT_NOT_OBJECT"
   | "UNKNOWN_EMIT_BEHAVIOR"
   | "USAGE_LIMIT_IN_STUB_TOPOLOGY"
@@ -317,6 +319,37 @@ function validateExpect(
   } else if (modes.length > 1) {
     push("EXPECT_MATCH_MODE_AMBIGUOUS", `${path}: only one of match | contains | equals is allowed, found [${modes.join(", ")}]`, path);
   }
+  // 51-03: the declarative `equals` mapping (surface -> projection). Validated
+  // here so an authoring error is a load-time teaching failure, not a scenario
+  // that runs and compares nothing.
+  if (isPlainObject(value.equals)) {
+    for (const [surf, spec] of Object.entries(value.equals)) {
+      if (!(EXPECT_SURFACES as readonly string[]).includes(surf)) {
+        push(
+          "EQUALS_SURFACE_UNKNOWN",
+          `${path}.equals.${surf}: not a readable surface — the shipped-observable set is: ${EXPECT_SURFACES.join(", ")}`,
+          `${path}.equals.${surf}`,
+        );
+        continue;
+      }
+      if (!isPlainObject(spec)) {
+        push("EQUALS_PROJECTION_INVALID", `${path}.equals.${surf}: must be a projection mapping, e.g. { pluck: name }`, `${path}.equals.${surf}`);
+        continue;
+      }
+      for (const key of Object.keys(spec)) {
+        if (!["pluck", "rig", "path"].includes(key)) {
+          push("EQUALS_PROJECTION_INVALID", `${path}.equals.${surf}.${key}: unknown projection key — allowed: pluck, rig, path`, `${path}.equals.${surf}.${key}`);
+        }
+      }
+      if (spec.pluck !== undefined && typeof spec.pluck !== "string") {
+        push("EQUALS_PROJECTION_INVALID", `${path}.equals.${surf}.pluck: must be a field name string`, `${path}.equals.${surf}.pluck`);
+      }
+      if (spec.rig !== undefined && typeof spec.rig !== "boolean") {
+        push("EQUALS_PROJECTION_INVALID", `${path}.equals.${surf}.rig: must be a boolean`, `${path}.equals.${surf}.rig`);
+      }
+    }
+  }
+
   if (value.within !== undefined) {
     if (typeof value.within !== "string" || !DURATION_RE.test(value.within)) {
       push(

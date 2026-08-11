@@ -15,6 +15,7 @@
 import type { ExpectSurface, ValidatedScenario } from "./scenario-schema.js";
 import { structuralSubsetMatch, containsMatch, pollUntilMatch } from "./scenario-expect.js";
 import type { RunRecord } from "./scenario-run-record.js";
+import { buildDeclarativeNormalizer, isEqualsMapping } from "./scenario-normalizer.js";
 
 export interface ActionResult {
   code: number;
@@ -149,12 +150,16 @@ async function runEqualsExpect(
   deps: ScenarioRunnerDeps,
 ): Promise<string | null> {
   const surfaces = extractEqualsSurfaces(equalsPayload);
-  if (!deps.normalizer) {
+  // 51-03: the DECLARATIVE mapping is the scenario-facing form and LOWERS to the
+  // runner-internal seam (A-N1) — the seam signature is unchanged, and a scenario
+  // that declares its mapping no longer depends on an injected normalizer.
+  const declared = isEqualsMapping(equalsPayload) ? buildDeclarativeNormalizer(equalsPayload) : undefined;
+  const normalizer = declared ?? deps.normalizer;
+  if (!normalizer) {
     throw new Error(
-      "`equals` requires a declarative cross-surface normalizer (its shape rides 51-03 shaping)",
+      "`equals` requires a declarative cross-surface mapping (surface -> projection) or an injected normalizer",
     );
   }
-  const normalizer = deps.normalizer;
   const observeAllEqual = async (): Promise<{ equal: boolean; snapshot: unknown[] }> => {
     const snapshot = await Promise.all(
       surfaces.map(async (s) => normalizer(s, await deps.observe(s, {}))),
