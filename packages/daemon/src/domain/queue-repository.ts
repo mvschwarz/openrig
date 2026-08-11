@@ -1825,6 +1825,35 @@ export class QueueRepository {
       );
     }
 
+    // 0.5.1-53 Atom 1b(ii) — validate-at-park. A QITEM-reference blocker must name a real, LIVE
+    // blocker: a nonexistent blocker can never complete (the row can never unpark), and a terminal
+    // one is already done — both are dead-blocker parks that read as patience and never self-clear.
+    // Scoped to qitem-refs ("qitem-…"): human-seat parks (isHumanPark) enforce their own contract,
+    // and bare gate-names are the Atom 1a typed-blocker surface — neither is validated here.
+    if (
+      input.state === "blocked" &&
+      !isHumanPark &&
+      typeof effectiveBlockedOn === "string" &&
+      effectiveBlockedOn.startsWith("qitem-")
+    ) {
+      const blocker = this.getById(effectiveBlockedOn);
+      if (!blocker) {
+        throw new QueueRepositoryError(
+          "blocker_not_found",
+          `blocked_on names a qitem that does not exist: ${effectiveBlockedOn}. A park must name a real, live blocker — a nonexistent blocker can never complete, so the row could never unpark.`,
+          { blockedOn: effectiveBlockedOn },
+        );
+      }
+      const TERMINAL_STATES = ["done", "failed", "denied", "canceled", "handed-off"];
+      if (TERMINAL_STATES.includes(blocker.state)) {
+        throw new QueueRepositoryError(
+          "blocker_not_live",
+          `blocked_on names a terminal qitem: ${effectiveBlockedOn} is '${blocker.state}'. A park must name a LIVE blocker — parking on a completed/closed row is a dead-blocker park that never self-clears.`,
+          { blockedOn: effectiveBlockedOn, blockerState: blocker.state },
+        );
+      }
+    }
+
     let effectiveSummary = qitem.summary;
     let effectiveEvidenceRef = qitem.evidenceRef;
     if (isHumanPark) {

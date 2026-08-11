@@ -159,6 +159,35 @@ describe("QueueRepository", () => {
     expect(repo.getById(item.qitemId)!.blockedOn, "a non-blocked row must not carry a blocker").toBeNull();
   });
 
+  // 0.5.1-53 Atom 1b(ii) — validate-at-park. A park on a QITEM-reference blocker must name a real,
+  // LIVE blocker; a nonexistent or terminal blocker is a dead-blocker park that can never self-clear
+  // (the exact 21-22 day strands). Scoped to qitem-refs ("qitem-…"): human-seat blockers (member@rig)
+  // and bare gate-names ("external-gate", handled by Atom 1a) are NOT validated here.
+  it("Atom 1b(ii): parking on a NONEXISTENT qitem blocker is refused loud", async () => {
+    const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "work" });
+    try {
+      repo.update({ qitemId: item.qitemId, actorSession: "bob@rig", state: "blocked", blockedOn: "qitem-19990101000000-deadbeef" });
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(QueueRepositoryError);
+      expect((err as QueueRepositoryError).code).toBe("blocker_not_found");
+    }
+  });
+
+  it("Atom 1b(ii): parking on a TERMINAL (done) qitem blocker is refused loud", async () => {
+    const blocker = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "blocker" });
+    repo.claim({ qitemId: blocker.qitemId, destinationSession: "bob@rig" });
+    repo.update({ qitemId: blocker.qitemId, actorSession: "bob@rig", state: "done", closureReason: "no-follow-on" });
+    const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "work" });
+    try {
+      repo.update({ qitemId: item.qitemId, actorSession: "bob@rig", state: "blocked", blockedOn: blocker.qitemId });
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(QueueRepositoryError);
+      expect((err as QueueRepositoryError).code).toBe("blocker_not_live");
+    }
+  });
+
   it("update state=done WITHOUT closure_reason rejected with missing_closure_reason", async () => {
     const item = await repo.create({
       sourceSession: "alice@rig",
