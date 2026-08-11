@@ -13,6 +13,8 @@ import {
   resolveCmuxSettingsPath,
 } from "../cmux-config.js";
 import { buildTmuxControlFailure, probeTmuxControl } from "../tmux-health.js";
+import { parse as parseYaml } from "yaml";
+import { compareSpecToLive, topologyFromRigSpec, topologyFromLiveLogicalIds } from "@openrig/daemon/spec-conformance";
 
 interface DoctorCheck {
   name: string;
@@ -33,6 +35,17 @@ export interface DoctorDeps {
   mkdirp?: (path: string) => void;
   checkWritable?: (path: string) => void;
   fetch?: (url: string) => Promise<{ ok: boolean; json?: () => Promise<unknown> }>;
+  /**
+   * Build B — path to a rig spec to check against the RUNNING rig of the same name (`--spec`).
+   *
+   * Supplied explicitly because it cannot be discovered. Nothing persists a running rig's spec
+   * path: the `rigs` table has no spec/rigRoot column, `rig_services.rig_root` is empty, and
+   * `projection_manifest.source_spec` is empty. The daemon does not remember which file described
+   * the rig it is running. Absent, the check SKIPS with that reason rather than passing.
+   */
+  specPath?: string;
+  /** Live seat ids (`<pod>.<member>`) for the spec's rig; null when the topology cannot be read. */
+  fetchLiveLogicalIds?: (rigName: string) => Promise<string[] | null>;
 }
 
 const MIN_NODE_MAJOR = 20;
@@ -248,7 +261,76 @@ export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; port
     asyncChecks.push(daemonCmuxCheck);
   }
 
+  asyncChecks.push(buildSpecConformanceCheck(deps));
+
   return { checks, portCheck, asyncChecks };
+}
+
+/**
+ * Build B — does the rig spec still describe the rig that is running?
+ *
+ * Nothing writes a spec back after `rig expand`, and the spec is what a bundle export copies
+ * verbatim, so a rig can outgrow its own description silently. This is the check that says so —
+ * and, once a spec is reconciled by hand, the check that VERIFIES the write-back landed instead of
+ * someone eyeballing YAML.
+ *
+ * SKIPS rather than passes when it has no input. A check that cannot find its subject and stays
+ * quiet is indistinguishable from one that looked and found nothing wrong.
+ */
+async function buildSpecConformanceCheck(deps: DoctorDeps): Promise<DoctorCheck> {
+  const name = "spec_live_conformance";
+  if (!deps.specPath) {
+    return {
+      name,
+      status: "skipped",
+      message: "No --spec given; spec-vs-live topology not checked.",
+      reason:
+        "A running rig's spec path is not persisted anywhere (the rigs table has no spec/rigRoot column), so this check cannot discover it.",
+      fix: "rig doctor --spec <path/to/rig.yaml>",
+    };
+  }
+
+  const raw = deps.readFile(deps.specPath);
+  if (raw === null) {
+    return { name, status: "fail", message: `Rig spec could not be read at ${deps.specPath}.` };
+  }
+
+  let spec: { name?: unknown; pods?: unknown };
+  try {
+    spec = parseYaml(raw) as { name?: unknown; pods?: unknown };
+  } catch (err) {
+    return { name, status: "fail", message: `Rig spec at ${deps.specPath} is not valid YAML: ${(err as Error).message}` };
+  }
+  const rigName = typeof spec?.name === "string" ? spec.name : "";
+  if (!rigName || !Array.isArray(spec?.pods)) {
+    return { name, status: "fail", message: `Rig spec at ${deps.specPath} declares no name or no pods.` };
+  }
+
+  const liveIds = deps.fetchLiveLogicalIds ? await deps.fetchLiveLogicalIds(rigName) : null;
+  if (liveIds === null) {
+    return {
+      name,
+      status: "skipped",
+      message: `Live topology for '${rigName}' could not be read; conformance unknown.`,
+      reason: "Absence of live data is not evidence of conformance, so this is reported as unknown rather than passing.",
+    };
+  }
+
+  const result = compareSpecToLive(topologyFromRigSpec(spec as never), topologyFromLiveLogicalIds(liveIds));
+  if (result.conforms) {
+    return {
+      name,
+      status: "pass",
+      message: `Spec matches the running rig '${rigName}' (${result.spec.pods} pods/${result.spec.seats} seats).`,
+    };
+  }
+  return {
+    name,
+    status: "warn",
+    message: `Rig '${rigName}': ${result.message}`,
+    reason: "A bundle export copies the SPEC verbatim, so this rig would export smaller than it runs.",
+    fix: "Reconcile the spec with the running topology, then re-run this check to verify the write-back.",
+  };
 }
 
 function readCmuxSocketControlMode(deps: DoctorDeps) {
@@ -305,7 +387,8 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
 
   cmd
     .option("--json", "JSON output for agents")
-    .action(async (opts: { json?: boolean }) => {
+    .option("--spec <path>", "Rig spec to check against the running rig of the same name (spec-vs-live topology)")
+    .action(async (opts: { json?: boolean; spec?: string }) => {
       const deps: DoctorDeps = depsOverride ?? {
         exists: existsSync,
         baseDir: import.meta.dirname,
@@ -315,6 +398,26 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
         configStore: new ConfigStore(),
         mkdirp: (dirPath: string) => mkdirSync(dirPath, { recursive: true }),
         checkWritable: (dirPath: string) => accessSync(dirPath, constants.W_OK),
+        specPath: opts.spec ? path.resolve(opts.spec) : undefined,
+        // Returns null on ANY failure to read the live side. The conformance check treats null as
+        // "unknown" and skips — an unreachable daemon must never read as a matching topology.
+        fetchLiveLogicalIds: async (rigName: string): Promise<string[] | null> => {
+          try {
+            const cfg = new ConfigStore().resolve();
+            const base = `http://${cfg.daemon.host ?? "127.0.0.1"}:${cfg.daemon.port ?? DEFAULT_PORT}`;
+            const rigsRes = await fetch(`${base}/api/rigs`);
+            if (!rigsRes.ok) return null;
+            const rigs = (await rigsRes.json()) as Array<{ id?: string; name?: string }>;
+            const rig = rigs.find((r) => r.name === rigName);
+            if (!rig?.id) return null;
+            const nodesRes = await fetch(`${base}/api/rigs/${rig.id}/nodes`);
+            if (!nodesRes.ok) return null;
+            const nodes = (await nodesRes.json()) as Array<{ logicalId?: string | null }>;
+            return nodes.map((n) => n.logicalId ?? "");
+          } catch {
+            return null;
+          }
+        },
       };
 
       const { checks, asyncChecks } = runDoctorChecks(deps);

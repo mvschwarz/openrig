@@ -16,6 +16,10 @@
     "./gateway-protocol": {
       "types": "./dist/gateway-protocol-surface.d.ts",
       "import": "./dist/gateway-protocol-surface.js"
+    },
+    "./spec-conformance": {
+      "types": "./dist/spec-conformance-surface.d.ts",
+      "import": "./dist/spec-conformance-surface.js"
     }
   },
   "scripts": {

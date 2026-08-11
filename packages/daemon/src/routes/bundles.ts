@@ -10,6 +10,7 @@ import { PodBundleAssembler, type PodAssemblerFsOps } from "../domain/pod-bundle
 import { computeIntegrity, writeIntegrity, verifyIntegrity, type IntegrityFsOps } from "../domain/bundle-integrity.js";
 import { pack, unpack, verifyArchiveDigest } from "../domain/bundle-archive.js";
 import { resolvePackage } from "../domain/package-resolve-helper.js";
+import { compareSpecToLive, topologyFromRigSpec, topologyFromLiveLogicalIds, bundleExportWarning } from "../domain/spec-live-conformance.js";
 import { LegacyRigSpecCodec } from "../domain/rigspec-codec.js";
 import { LegacyRigSpecSchema } from "../domain/rigspec-schema.js";
 import { RigSpecCodec } from "../domain/rigspec-codec.js";
@@ -234,6 +235,38 @@ function realFsOps(): FsOps {
       return r;
     },
   };
+}
+
+/**
+ * Build B — compare the spec about to be exported against the RUNNING rig of the same name.
+ *
+ * The assembler copies the spec text VERBATIM into the bundle and never reads the live DB, so a rig
+ * expanded at runtime (nothing writes the spec back) exports as the smaller, stale topology in
+ * complete silence. This says the delta out loud.
+ *
+ * Returns null — and the caller then says nothing at all — when there is genuinely nothing to
+ * report: no repo, a spec whose rig is not running (authoring a NEW rig is not drift), or agreement.
+ * Reporting only: never mutates, never blocks, never throws into the export path.
+ */
+export function describeSpecLiveDrift(rawParsed: unknown, rigRepo: RigRepository | undefined): string | null {
+  try {
+    if (!rigRepo) return null;
+    const spec = rawParsed as { name?: unknown; pods?: unknown } | null;
+    const rigName = typeof spec?.name === "string" ? spec.name : "";
+    if (!rigName || !Array.isArray(spec?.pods)) return null;
+    const rig = rigRepo.listRigs().find((r) => r.name === rigName);
+    if (!rig) return null;
+    const rows = rigRepo.db
+      .prepare("SELECT logical_id FROM nodes WHERE rig_id = ?")
+      .all(rig.id) as Array<{ logical_id: string | null }>;
+    return bundleExportWarning(compareSpecToLive(
+      topologyFromRigSpec(spec as never),
+      topologyFromLiveLogicalIds(rows.map((r) => r.logical_id)),
+    ));
+  } catch {
+    // A reporting path must never be the reason an export fails.
+    return null;
+  }
 }
 
 function assemblerFsOps(): AssemblerFsOps {
@@ -850,6 +883,12 @@ bundleRoutes.post("/create", async (c) => {
     const rawParsed = RigSpecCodec.parse(specYaml);
     const isPodAware = rawParsed && typeof rawParsed === "object" && Array.isArray((rawParsed as Record<string, unknown>).pods);
 
+    // Build B — the bundle carries the SPEC verbatim and never consults the live DB, so when a rig
+    // has been expanded at runtime (no code path writes the spec back) an export silently ships a
+    // SMALLER rig than the one running. Report the delta; never block, never mutate.
+    const driftWarning = describeSpecLiveDrift(rawParsed, getDeps(c).rigRepo);
+    if (driftWarning) console.warn(`[bundle-create] ${driftWarning}`);
+
     if (isPodAware) {
       // Pod-aware bundle creation
       const podValidation = RigSpecSchema.validate(rawParsed);
@@ -878,7 +917,7 @@ bundleRoutes.post("/create", async (c) => {
 
         const archiveHash = await pack(tmpStaging, nodePath.resolve(outputPath));
         eventBus.emit({ type: "bundle.created", bundleName, bundleVersion, archiveHash });
-        return c.json({ bundleName, bundleVersion, archiveHash, schemaVersion: 2, agents: result.manifest.agents.length }, 201);
+        return c.json({ bundleName, bundleVersion, archiveHash, schemaVersion: 2, agents: result.manifest.agents.length, ...(driftWarning ? { warning: driftWarning } : {}) }, 201);
       } finally {
         fs.rmSync(tmpStaging, { recursive: true, force: true });
       }
@@ -952,7 +991,7 @@ bundleRoutes.post("/create", async (c) => {
 
       const archiveHash = await pack(tmpStaging, nodePath.resolve(outputPath));
       eventBus.emit({ type: "bundle.created", bundleName, bundleVersion, archiveHash });
-      return c.json({ bundleName, bundleVersion, archiveHash, packages: manifest.packages.length }, 201);
+      return c.json({ bundleName, bundleVersion, archiveHash, packages: manifest.packages.length, ...(driftWarning ? { warning: driftWarning } : {}) }, 201);
     } finally {
       fs.rmSync(tmpStaging, { recursive: true, force: true });
     }
