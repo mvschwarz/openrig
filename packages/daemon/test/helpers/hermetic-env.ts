@@ -170,6 +170,73 @@ export function assertNoAmbientClock(env: EnvLike = process.env): void {
 }
 
 /**
+ * The tmux ATTACHMENT var (D5). A scenario `up` stands up REAL tmux seats; if the
+ * scaffold does not own the server dir, those seats land on the OPERATOR's tmux
+ * server — a live fleet-safety hazard (a kill-server from a seat reaps the whole
+ * fleet, and a stray seat pollutes the operator's session list). `TMUX` present
+ * means this process is INSIDE a tmux client: spawned children would inherit that
+ * attachment and act on a server the helper did not create, which is the tmux
+ * edition of the silent-retarget class. Its own hazard category so the refusal
+ * message is accurate — distinct from a daemon target and from a clock leak.
+ *
+ * TMUX_TMPDIR is deliberately NOT a refusal trigger: it names a server DIRECTORY
+ * rather than an active attachment, and the scaffold simply overrides it with an
+ * owned one (proven absent-and-replaced by the D5 pins).
+ */
+export const TMUX_ATTACHMENT_ENV_VARS = ["TMUX"] as const;
+
+export type TmuxAttachmentEnvVar = (typeof TMUX_ATTACHMENT_ENV_VARS)[number];
+
+/** A detected ambient tmux attachment: the offending var name and its value. */
+export interface AmbientTmuxHazard {
+  name: TmuxAttachmentEnvVar;
+  value: string;
+}
+
+/** Hard-refusal error thrown when the ambient env is attached to a tmux server. */
+export class AmbientTmuxHazardError extends Error {
+  readonly hazard: AmbientTmuxHazard;
+  constructor(hazard: AmbientTmuxHazard) {
+    super(
+      `hermetic env refused: ambient tmux attachment ${hazard.name}=${hazard.value} is present — ` +
+        `scenario seats would land on a tmux SERVER the helper did not create (the operator's/fleet ` +
+        `server), where a stray kill-server reaps live seats. The scaffold owns its own server dir ` +
+        `via TMUX_TMPDIR; an inherited attachment is a leak. Fail-closed; zero traffic sent, no ` +
+        `scaffold created. Unset ${hazard.name} (run outside tmux, or via env -u ${hazard.name}).`,
+    );
+    this.name = "AmbientTmuxHazardError";
+    this.hazard = hazard;
+  }
+}
+
+/**
+ * Inspect an environment for an inherited tmux attachment. Returns the first
+ * non-empty match, or null when clean. Empty (`TMUX=`) is absent. Pure and
+ * synchronous — no network, no side effects.
+ */
+export function detectAmbientTmuxHazard(env: EnvLike = process.env): AmbientTmuxHazard | null {
+  for (const name of TMUX_ATTACHMENT_ENV_VARS) {
+    const value = env[name];
+    if (typeof value === "string" && value.length > 0) {
+      return { name, value };
+    }
+  }
+  return null;
+}
+
+/**
+ * FAIL-CLOSED assertion: throw AmbientTmuxHazardError if the environment carries a
+ * tmux attachment. Call before any scaffold/process side effect — scenario seats
+ * must only ever reach a server the scaffold owns. Sends ZERO traffic.
+ */
+export function assertNoAmbientTmux(env: EnvLike = process.env): void {
+  const hazard = detectAmbientTmuxHazard(env);
+  if (hazard) {
+    throw new AmbientTmuxHazardError(hazard);
+  }
+}
+
+/**
  * Credential vars scrubbed from the child env alongside the daemon-target vars.
  * Not fail-closed triggers on their own (they carry no target address), but they
  * must never bleed into a scenario-local daemon's environment.
@@ -186,6 +253,12 @@ export interface HermeticScaffold {
   openrigHome: string;
   /** Scratch state dir (the scenario-local daemon's db lives here). */
   stateDir: string;
+  /**
+   * The scaffold-OWNED tmux server dir (D5). Exported as TMUX_TMPDIR in the child
+   * env so `up`'s real seats land on a server this scaffold created and cleanup
+   * removes — never the operator's/fleet server.
+   */
+  tmuxTmpDir: string;
   /**
    * A CLEAN environment for child processes (the scenario-local daemon + `rig`
    * CLI invocations): the caller's env with daemon-target + credential vars
@@ -232,12 +305,18 @@ export function prepareHermeticEnv(opts: PrepareHermeticEnvOptions = {}): Hermet
   // leaked injected-clock var (temporal silent-retarget) both hard-refuse here.
   assertNoForeignDaemon(baseEnv);
   assertNoAmbientClock(baseEnv);
+  // D5: an inherited tmux ATTACHMENT would put real scenario seats on the
+  // operator's server. Refuse before any filesystem effect, like the others.
+  assertNoAmbientTmux(baseEnv);
 
   const root = mkdtempSync(join(tmpdir(), "openrig-scenario-"));
   const home = join(root, "home");
   const openrigHome = join(root, "openrig-home");
   const stateDir = join(root, "state");
-  for (const dir of [home, openrigHome, stateDir]) {
+  // Short segment on purpose: tmux appends `/tmux-<uid>/default` and the unix
+  // socket path is capped near 104 bytes (sun_path).
+  const tmuxTmpDir = join(root, "tx");
+  for (const dir of [home, openrigHome, stateDir, tmuxTmpDir]) {
     mkdirSync(dir, { recursive: true });
   }
 
@@ -254,6 +333,10 @@ export function prepareHermeticEnv(opts: PrepareHermeticEnvOptions = {}): Hermet
   env.XDG_DATA_HOME = join(home, ".local", "share");
   env.XDG_CACHE_HOME = join(home, ".cache");
   env.OPENRIG_HOME = openrigHome;
+  // D5: OWN the tmux server dir. Any inherited TMUX_TMPDIR is overwritten here
+  // (absent-and-replaced), so `up`'s seats can only reach a scaffold-owned server
+  // that cleanup() removes. The refusal above covers the attachment half.
+  env.TMUX_TMPDIR = tmuxTmpDir;
   // Forced-local: never resolve/attach the shared fleet kernel.
   env.OPENRIG_NO_KERNEL = "1";
   // A3-R3 injected clock: the ONLY sanctioned way OPENRIG_TEST_CLOCK_NOW is set —
@@ -268,6 +351,7 @@ export function prepareHermeticEnv(opts: PrepareHermeticEnvOptions = {}): Hermet
     home,
     openrigHome,
     stateDir,
+    tmuxTmpDir,
     env,
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };

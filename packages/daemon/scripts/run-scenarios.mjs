@@ -11,13 +11,15 @@
  *
  * With no args it runs the committed evidence scenarios under
  * test/fixtures/scenarios/. Prerequisite: the built rig bin (npm run build -w
- * packages/cli and -w packages/daemon). The up step stands up real tmux seats, so
- * set TMUX_TMPDIR to an isolated dir to keep off the shared fleet server.
+ * packages/cli and -w packages/daemon). The up step stands up real tmux seats on a
+ * server the hermetic scaffold OWNS (it sets TMUX_TMPDIR itself and refuses to run
+ * from inside a tmux attachment), so a run cannot reach the operator/fleet server.
  *
- * The equals mode uses an IDENTITY normalizer here (a v1 interface placeholder;
- * the declarative cross-surface normalizer final shape rides 51-03), so a
- * cross-surface scenario exercises the equals interface but is not expected green
- * until 51-03 supplies the real normalizer.
+ * The equals mode uses the runner-internal normalizer seam (lock amendment A-N1)
+ * with an IDENTITY placeholder here; the DECLARATIVE mapping is the scenario-facing
+ * form, its shape rides 51-03, and it lowers to this seam when it lands. So a
+ * cross-surface scenario exercises the equals path but is not expected green until
+ * 51-03 supplies the real mapping.
  */
 import { readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
