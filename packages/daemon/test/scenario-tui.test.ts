@@ -228,3 +228,105 @@ describe("D7 — provisioning is wired THROUGH runScenarioFile (opt-in, torn dow
     expect(spawned).toBe(false);
   });
 });
+
+// Guard finding 3: the failure matrix below was helper-only. A helper pin cannot
+// show that runScenarioFile PROPAGATES the named failure and still tears down —
+// so all three cases now cross the pipeline boundary.
+describe("D7 — the FAILURE matrix crosses runScenarioFile (named outcome + teardown, every path)", () => {
+  const setup = () => {
+    const d = mkdtempSync(join(tmpdir(), "tui-fail-"));
+    dirs.push(d);
+    writeFileSync(join(d, "topo.yaml"), [
+      'version: "0.2"', "name: scn-tuifail", "pods:", "  - id: dev", "    label: Dev",
+      "    members:", "      - id: worker", '        agent_ref: "local:agents/worker"',
+      "        profile: default", "        runtime: stub", "        cwd: .", "    edges: []", "",
+    ].join("\n"));
+    writeFileSync(join(d, "s.yaml"), [
+      "scenario: tui-failure", "topology: ./topo.yaml", "env:", "  tui: true",
+      "steps:", "  - up: {}",
+      "  - expect: { surface: tui_socket, within: 1s, match: { ok: true } }", "",
+    ].join("\n"));
+    writeFileSync(join(d, "rig.mjs"), 'process.stdout.write(JSON.stringify({rigId:"r1",rigName:"scn-tuifail"}));\n');
+    return d;
+  };
+
+  const daemonStops: number[] = [];
+  const spawner = () => {
+    let stops = 0;
+    daemonStops.push(0);
+    const idx = daemonStops.length - 1;
+    return {
+      spawn: (async (scaffold: { env: Record<string, string | undefined> }) => ({
+        readEnv: { ...scaffold.env, OPENRIG_URL: "http://127.0.0.1:1" },
+        baseUrl: "http://127.0.0.1:1",
+        sigterm: async () => {}, restart: async () => {},
+        stop: async () => { stops++; daemonStops[idx] = stops; },
+      })) as never,
+      stopped: () => daemonStops[idx],
+    };
+  };
+
+  it("DELAYED readiness within the bound: the run proceeds through the pipeline", async () => {
+    const { runScenarioFile } = await import("./helpers/scenario-pipeline.js");
+    const d = setup();
+    const proc = fakeProc();
+    const dae = spawner();
+    const result = await runScenarioFile(join(d, "s.yaml"), {
+      rigBin: join(d, "rig.mjs"),
+      baseEnv: { HOME: d, PATH: process.env.PATH, TERM: "xterm" },
+      daemon: dae.spawn,
+      tuiReadiness: { readinessTimeoutMs: 5_000, probeIntervalMs: 20 },
+      spawnTui: (env) => {
+        // starts listening only after a real delay — the race that aborted #10
+        setTimeout(() => { void listenStateServer(env.OPENRIG_TUI_SOCKET!); }, 150);
+        return proc;
+      },
+      deps: { defaults: { withinMs: 3000, pollIntervalMs: 25 } },
+    });
+    expect(result.verdict).toBe("PASS");
+    expect(proc.killed).toBe(true);
+    expect(dae.stopped()).toBe(1);
+  }, 60_000);
+
+  it("EARLY EXIT: runScenarioFile rejects with early_exit AND tears the daemon down", async () => {
+    const { runScenarioFile } = await import("./helpers/scenario-pipeline.js");
+    const d = setup();
+    const proc = fakeProc();
+    proc.exit(1);
+    const dae = spawner();
+    let err: TuiProvisioningError | undefined;
+    try {
+      await runScenarioFile(join(d, "s.yaml"), {
+        rigBin: join(d, "rig.mjs"),
+        baseEnv: { HOME: d, PATH: process.env.PATH, TERM: "xterm" },
+        daemon: dae.spawn,
+        tuiReadiness: { readinessTimeoutMs: 5_000, probeIntervalMs: 10 },
+        spawnTui: () => proc,
+      });
+    } catch (e) { err = e as TuiProvisioningError; }
+    expect(err).toBeInstanceOf(TuiProvisioningError);
+    expect(err!.reason).toBe("early_exit");
+    expect(dae.stopped()).toBe(1); // finally-block teardown on the failure path
+  }, 60_000);
+
+  it("NEVER LISTENS: runScenarioFile rejects with readiness_timeout AND tears down", async () => {
+    const { runScenarioFile } = await import("./helpers/scenario-pipeline.js");
+    const d = setup();
+    const proc = fakeProc();
+    const dae = spawner();
+    let err: TuiProvisioningError | undefined;
+    try {
+      await runScenarioFile(join(d, "s.yaml"), {
+        rigBin: join(d, "rig.mjs"),
+        baseEnv: { HOME: d, PATH: process.env.PATH, TERM: "xterm" },
+        daemon: dae.spawn,
+        tuiReadiness: { readinessTimeoutMs: 120, probeIntervalMs: 20 },
+        spawnTui: () => proc, // nothing ever listens on the socket
+      });
+    } catch (e) { err = e as TuiProvisioningError; }
+    expect(err).toBeInstanceOf(TuiProvisioningError);
+    expect(err!.reason).toBe("readiness_timeout");
+    expect(proc.killed).toBe(true);
+    expect(dae.stopped()).toBe(1);
+  }, 60_000);
+});

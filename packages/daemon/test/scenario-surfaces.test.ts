@@ -5,9 +5,10 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve, join } from "node:path";
 import { prepareHermeticEnv, type HermeticScaffold } from "./helpers/hermetic-env.js";
-import { spawnScenarioDaemon, type ScenarioDaemon } from "./helpers/scenario-daemon.js";
+import { spawnScenarioDaemon, runRig, type ScenarioDaemon } from "./helpers/scenario-daemon.js";
 import {
   readSurface,
+  transcriptReadArgv,
   UnboundSurfaceError,
   type SurfaceContext,
 } from "./helpers/scenario-surfaces.js";
@@ -94,5 +95,34 @@ describe("surface readers — live daemon (integration)", () => {
     expect(Array.isArray(ps)).toBe(true);
     const queue = await readSurface("queue", ctx);
     expect(Array.isArray(queue)).toBe(true);
+  }, 60_000);
+
+  // Guard finding 1 (false-green): the transcript reader emitted `--tail --json`,
+  // but `--tail <lines>` takes a REQUIRED value, so Commander consumed "--json"
+  // AS the tail value ({"tail":"--json"}) and JSON mode was never set. The
+  // containsMatch unit pin never crossed this reader/CLI boundary, so "D11 covers
+  // transcript" was false for transcript. This crosses it for real.
+  it("the transcript reader reaches JSON mode at the REAL CLI boundary (not human text)", async () => {
+    scaffold = prepareHermeticEnv({ baseEnv: realBaseEnv() });
+    daemon = await spawnScenarioDaemon(scaffold, { rigBin: RIG_BIN });
+
+    // Drive the shipped CLI with the reader's OWN argv, then assert on the effect:
+    // stdout must PARSE as JSON. Human text parses as nothing.
+    const argv = transcriptReadArgv("no-such-seat@scn-none");
+    expect(argv).toContain("--json");
+    const tailIdx = argv.indexOf("--tail");
+    expect(tailIdx).toBeGreaterThanOrEqual(0);
+    expect(argv[tailIdx + 1]).toMatch(/^\d+$/); // a VALUE, never the next flag
+
+    const r = await runRig(argv, daemon.readEnv, RIG_BIN);
+    expect(() => JSON.parse(r.stdout)).not.toThrow();
+
+    // Negative control: the OLD argv shape does NOT reach JSON mode — proving the
+    // discriminator can actually tell the two apart.
+    const broken = ["transcript", "no-such-seat@scn-none", "--tail", "--json"];
+    const rBroken = await runRig(broken, daemon.readEnv, RIG_BIN);
+    let brokenIsJson = true;
+    try { JSON.parse(rBroken.stdout); } catch { brokenIsJson = false; }
+    expect(brokenIsJson).toBe(false);
   }, 60_000);
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runScenarioFile } from "./helpers/scenario-pipeline.js";
@@ -40,7 +40,11 @@ function scenarioDir(): string {
   // A rig bin whose observable output is FIXED — so any run-to-run difference
   // would come from the runner, which is exactly what this pins.
   writeFileSync(join(d, "rig.mjs"), [
+    'import { appendFileSync } from "node:fs";',
     'const args = process.argv.slice(2);',
+    // record the clock the pipeline actually handed the child — the caller-boundary
+    // pin that catches the pipeline DROPPING the option (the false-green guard found)
+    `appendFileSync(${JSON.stringify(join(d, "clock.log"))}, String(process.env.OPENRIG_TEST_CLOCK_NOW) + "\\n");`,
     'if (args[0] === "up") { process.stdout.write(JSON.stringify({ rigId: "r1", rigName: "scn-det" })); }',
     'else if (args[0] === "queue") { process.stdout.write(JSON.stringify([{ qitemId: "fixed-1", state: "pending" }])); }',
     'else { process.stdout.write("{}"); }',
@@ -68,8 +72,15 @@ async function runOnce(d: string, records: RunRecord[]) {
   return runScenarioFile(join(d, "s.yaml"), {
     rigBin: join(d, "rig.mjs"),
     baseEnv: { HOME: d, PATH: process.env.PATH, TERM: "xterm" },
-    daemon: (async () => ({
-      readEnv: { PATH: process.env.PATH }, baseUrl: "http://127.0.0.1:1",
+    // the claim is "under the injected clock" — so actually inject it
+    injectClockNow: INJECTED_CLOCK,
+    // Mirror the REAL spawner: readEnv derives from the scaffold the pipeline
+    // built (scenario-daemon.ts:155 = {...scaffold.env, OPENRIG_URL}). A fake
+    // that fabricates its own env would pin the fake, not the pipeline — which
+    // is how the dropped clock stayed invisible.
+    daemon: (async (scaffold: { env: Record<string, string | undefined> }) => ({
+      readEnv: { ...scaffold.env, OPENRIG_URL: "http://127.0.0.1:1" },
+      baseUrl: "http://127.0.0.1:1",
       sigterm: async () => {}, restart: async () => {}, stop: async () => {},
     })) as never,
     deps: {
@@ -98,6 +109,14 @@ describe("D8 — the same scenario twice under the injected clock is byte-identi
     expect(b.diff).toBe(a.diff);
     expect(recordsB.map(normalizeRecord)).toEqual(recordsA.map(normalizeRecord));
     expect(recordsA.length).toBeGreaterThan(0);
+
+    // CALLER-BOUNDARY PIN (guard finding 2): the pipeline must not DROP the
+    // injected clock. Every child invocation across both runs saw the SAME
+    // injected instant — asserted from what the child actually received, not
+    // from the option we passed in.
+    const seen = readFileSync(join(d, "clock.log"), "utf-8").trim().split("\n");
+    expect(seen.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(seen)).toEqual(new Set([INJECTED_CLOCK]));
   });
 
   it("FAILS when one observed byte differs while clock and scenario stay fixed (the pin has teeth)", async () => {

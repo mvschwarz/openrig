@@ -35,6 +35,20 @@ export interface ReadSurfaceOptions {
    *  requiredOption, so a scope read without it can never succeed. Sourced from
    *  the scenario's env.scope_mission (validator-required for scope expects). */
   scopeMission?: string;
+  /** Lines for a transcript read's `--tail <lines>` (a value-taking option). */
+  transcriptTail?: number;
+}
+
+/** Default tail depth for a transcript surface read. */
+export const DEFAULT_TRANSCRIPT_TAIL = 200;
+
+/**
+ * The argv for a transcript surface read. Exported so a test can drive the REAL
+ * CLI with the reader's own argv — the boundary a matcher-shape unit test does
+ * not cross, and where the `--tail --json` value-swallow hid.
+ */
+export function transcriptReadArgv(seat: string, tail?: number): string[] {
+  return ["transcript", seat, "--tail", String(tail ?? DEFAULT_TRANSCRIPT_TAIL), "--json"];
 }
 
 /** Thrown when an `expect` names a locked-but-unbound surface (FLAG-1 floor). */
@@ -78,7 +92,10 @@ export async function readSurface(
     case "pane":
       return jsonRig(["capture", requireSeat(surface, opts), "--json"], ctx);
     case "transcript":
-      return jsonRig(["transcript", requireSeat(surface, opts), "--tail", "--json"], ctx);
+      // `--tail <lines>` takes a REQUIRED value: `--tail --json` makes Commander
+      // consume "--json" AS the tail value ({"tail":"--json"}), so JSON mode is
+      // never set and the read returns human text. Pass an explicit tail count.
+      return jsonRig(transcriptReadArgv(requireSeat(surface, opts), opts.transcriptTail), ctx);
     case "policy_provenance":
       return jsonRig(["policy", "effective", "--json"], ctx);
     case "tui_socket":

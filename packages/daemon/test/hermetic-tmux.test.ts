@@ -105,28 +105,71 @@ describe("D5 p2 — an inherited TMUX_TMPDIR is ABSENT from the child and REPLAC
   });
 });
 
-describe("D5 p3 (integration) — a REAL scenario run leaves the ambient tmux dir UNCHANGED", () => {
-  it("stands up real seats without touching the operator's server directory", async () => {
-    const { runScenarioFile } = await import("./helpers/scenario-pipeline.js");
+// Guard finding 4: the previous version snapshotted only top-level `tmux-*`
+// DIRECTORY NAMES after a run that ends in `down` — so it could not detect the
+// contamination it claimed to exclude (the scenario cleans up after itself, and
+// a name-set is unchanged by connecting to or mutating an existing server). A
+// falsification proved it toothless: with the TMUX_TMPDIR replacement DISABLED
+// it still passed.
+//
+// This version observes WHILE SEATS ARE ALIVE and asserts BOTH directions:
+// the inherited sentinel server gains nothing, and the scaffold-owned server is
+// where the seats actually are. Disable the replacement and both legs flip.
+describe("D5 p3 (integration) — an INHERITED tmux server is replaced, proven while seats live", () => {
+  it("seats land on the scaffold-owned server; the inherited sentinel server gains nothing", async () => {
+    const { spawnScenarioDaemon, runRig } = await import("./helpers/scenario-daemon.js");
     const { fileURLToPath } = await import("node:url");
     const { dirname, resolve } = await import("node:path");
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const run = promisify(execFile);
+
     const HERE = dirname(fileURLToPath(import.meta.url));
     const rigBin = resolve(HERE, "../../cli/dist/bin-wrapper.js");
-    const scenario = join(HERE, "fixtures", "scenarios", "scenario-01-per-seat-scripts.yaml");
+    const topology = join(HERE, "fixtures", "scenarios", "topo-stub-baton.yaml");
 
-    // The operator/fleet server dir. The fleet legitimately HAS one, so the
-    // assertion is UNCHANGED — never "absent".
-    const ambientDir = process.env.TMUX_TMPDIR ?? tmpdir();
-    const snapshot = () =>
-      readdirSync(ambientDir).filter((n) => n.startsWith("tmux-")).sort().join(",");
-    const before = snapshot();
+    const sentinelDir = mkdtempSync(join(tmpdir(), "sent-"));
+    dirs.push(sentinelDir);
+    const envFor = (tmpd: string) => {
+      const e = { ...process.env, TMUX_TMPDIR: tmpd } as Record<string, string | undefined>;
+      delete e.TMUX;
+      return e as NodeJS.ProcessEnv;
+    };
+    const sessionsIn = async (tmpd: string): Promise<string> => {
+      try {
+        const { stdout } = await run("tmux", ["list-sessions", "-F", "#{session_name}"], { env: envFor(tmpd) });
+        return stdout.trim().split("\n").filter(Boolean).sort().join(",");
+      } catch { return ""; } // no server = no sessions
+    };
 
-    const result = await runScenarioFile(scenario, {
-      rigBin,
-      baseEnv: { HOME: process.env.HOME, PATH: process.env.PATH, TERM: "xterm" },
+    await run("tmux", ["new-session", "-d", "-s", "sentinel-only", "sleep 600"], { env: envFor(sentinelDir) });
+    const before = await sessionsIn(sentinelDir);
+    expect(before).toBe("sentinel-only"); // the sentinel is real and reachable
+
+    // INHERIT the sentinel dir through the real helper.
+    const scaffold = prepareHermeticEnv({
+      baseEnv: { HOME: process.env.HOME, PATH: process.env.PATH, TERM: "xterm", TMUX_TMPDIR: sentinelDir },
     });
+    scaffolds.push(scaffold);
+    expect(scaffold.env.TMUX_TMPDIR).toBe(scaffold.tmuxTmpDir);
+    expect(scaffold.env.TMUX_TMPDIR).not.toBe(sentinelDir);
 
-    expect(result.verdict).toBe("PASS");
-    expect(snapshot()).toBe(before);
+    const daemon = await spawnScenarioDaemon(scaffold, { rigBin });
+    try {
+      const up = await runRig(["up", topology, "--json", "--yes"], daemon.readEnv, rigBin, 120_000);
+      expect(up.code).toBe(0);
+
+      // WHILE THE SEATS ARE ALIVE (no `down` yet) — both directions:
+      const ownedNow = await sessionsIn(scaffold.tmuxTmpDir);
+      const sentinelNow = await sessionsIn(sentinelDir);
+      expect(ownedNow).toContain("scn-baton");   // the seats are HERE...
+      expect(sentinelNow).toBe(before);          // ...and the inherited server gained nothing
+      expect(sentinelNow).not.toContain("scn-baton");
+    } finally {
+      await runRig(["down", "scn-baton", "--json", "--force"], daemon.readEnv, rigBin, 60_000).catch(() => {});
+      await run("tmux", ["kill-server"], { env: envFor(scaffold.tmuxTmpDir) }).catch(() => {});
+      await daemon.stop().catch(() => {});
+      await run("tmux", ["kill-server"], { env: envFor(sentinelDir) }).catch(() => {});
+    }
   }, 300_000);
 });

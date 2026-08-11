@@ -239,6 +239,22 @@ export interface RunScenarioFileOptions {
   spawnTui?: (env: Record<string, string | undefined>) => TuiProcessLike;
   /** D7: path to the shipped TUI entry (defaults to the built tui package main). */
   tuiBin?: string;
+  /**
+   * D8: the A3-R3 injected clock (an ISO instant) for this run. Threaded into the
+   * hermetic scaffold, which sets OPENRIG_TEST_CLOCK_NOW for every child — the
+   * daemon, the `rig` CLI, and the stub runner — so compaction-asset stamps and
+   * the stub's own stamps are deterministic. ABSENT => unset => real wall clock
+   * (production behavior). A determinism claim that does not pass this is
+   * asserting stability it never asked for.
+   */
+  injectClockNow?: string;
+  /**
+   * D7: readiness bounds for TUI provisioning. Exposed so the failure matrix can
+   * be exercised THROUGH this function (guard finding 3) rather than only against
+   * the helper — a helper-only pin cannot show that the pipeline propagates the
+   * named failure and still tears down.
+   */
+  tuiReadiness?: { readinessTimeoutMs?: number; probeIntervalMs?: number };
 }
 
 /**
@@ -306,7 +322,10 @@ export async function runScenarioFile(
     );
   }
 
-  const scaffold = prepareHermeticEnv(opts.baseEnv ? { baseEnv: opts.baseEnv } : {});
+  const scaffold = prepareHermeticEnv({
+    ...(opts.baseEnv ? { baseEnv: opts.baseEnv } : {}),
+    ...(opts.injectClockNow !== undefined ? { injectClockNow: opts.injectClockNow } : {}),
+  });
   // Seats launch with cwd under the scaffold so their managed writes (AGENTS.md,
   // the stub sidecar) stay in scratch and never pollute the launch cwd.
   const seatCwd = join(scaffold.root, "seat-cwd");
@@ -387,6 +406,7 @@ export async function runScenarioFile(
         tui = await provisionTui({
           socketPath: tuiSocketPath,
           spawnTui: () => (opts.spawnTui ? opts.spawnTui(tuiEnv) : spawnShippedTui(resolveTuiBin(opts), tuiEnv)),
+          ...(opts.tuiReadiness ?? {}),
         });
         // the surface reader finds the socket through the SAME env the CLI reads
         daemon.readEnv.OPENRIG_TUI_SOCKET = tuiSocketPath;
