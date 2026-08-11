@@ -70,18 +70,26 @@ export function isTypedGateBlocker(value: unknown): boolean {
  *     succeed here — a local-registry lookup reporting "not found" for a seat that lives on another
  *     daemon). Retrying is a guaranteed-permanent failure repeated on a schedule → NOT retryable;
  *     these belong to the ADDRESSING family, not to retry machinery. (The live corpus: 9/10 strands.)
- *   - "transient": a live, resolvable seat that refused THIS attempt (e.g. busy at an interactive
- *     prompt, or a timeout) — the only class a future bounded re-attempt (DR-2, held n=1) would touch.
+ *   - "transient": a live, resolvable seat that refused THIS attempt (busy at an interactive prompt) or
+ *     the attempt timed out — the only class a future bounded re-attempt (DR-2, held n=1) would touch.
+ *   - "unknown": a failure whose text matches NEITHER known pattern. NOT silently defaulted to transient
+ *     (ship-block ruling qitem-20260811170941-5eadb968): defaulting would assert "a live seat refused
+ *     this attempt" for a string that only means "did not match the permanent pattern" — two different
+ *     claims. An unknown must read as unknown (the same rule the ACTIVITY hookless=unknown ruling names);
+ *     a default that collapses unknown into a known class is the exact sin, mirrored.
  * Returns null when `lastNudgeResult` is not a recorded failure (`failed:%`).
  *
- * DR-2 (retry) stays HELD at n=1; this is READ-side labeling only — it acts on nothing, it makes the
- * strand's nature legible so a human/agent routes it correctly (addressing-fix vs wake-vs-retry).
+ * Each class is a POSITIVE match — there is no default class. DR-2 (retry) stays HELD at n=1; this is
+ * READ-side labeling only, making the strand's nature legible (addressing-fix vs retry vs triage-the-unknown).
  */
-export function classifyNudgeFailure(lastNudgeResult: string | null | undefined): "permanent-topology" | "transient" | null {
+export function classifyNudgeFailure(lastNudgeResult: string | null | undefined): "permanent-topology" | "transient" | "unknown" | null {
   if (typeof lastNudgeResult !== "string" || !lastNudgeResult.startsWith("failed:")) return null;
-  // "not found" is the local-registry-can't-resolve signature (the exact VM→host cross-daemon miss).
+  // permanent-topology: local-registry "not found" — the destination is not resolvable on THIS daemon.
   if (/\bnot found\b/i.test(lastNudgeResult)) return "permanent-topology";
-  return "transient";
+  // transient: a live seat refused this attempt (busy at a prompt) or the attempt timed out.
+  if (/interactive prompt|\btimed?\s?out\b/i.test(lastNudgeResult)) return "transient";
+  // unknown: matched neither — do NOT collapse into transient. Honest label > convenient default.
+  return "unknown";
 }
 
 export const QUEUE_PRIORITIES = ["routine", "urgent", "critical"] as const;
