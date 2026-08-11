@@ -161,9 +161,9 @@ merely impressive.
 cited in the form that convention itself prescribes — path + section anchor +
 dated whole-file hash:**
 
-- **path:** `/Users/wrandom/code/substrate/shared-docs/openrig-work/conventions/artifact-cross-citation-path-plus-lineage.md`
+- **path:** `artifact-cross-citation-path-plus-lineage.md` (internal authoring convention — not shipped in this public repo)
 - **anchor:** *A cited hash STATES ITS COVERAGE — span is part of the definition*
-  (pm-openrig, 2026-08-08)
+  (2026-08-08)
 - **hash:** `sha256 14d9a273d542648ab1e0a82c7fd98e8a8c59cb02a83be76b8af9abfb717b34d2`
   — **coverage: WHOLE FILE, bytes as stored, INCLUDING the trailing newline**
   (0x0a terminal byte verified), 229 lines, as-of 2026-08-08.
