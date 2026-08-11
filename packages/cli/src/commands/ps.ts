@@ -49,6 +49,7 @@ interface NodeEntry {
   canonicalSessionName: string | null;
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
+  model: string | null;
   sessionStatus: string | null;
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
   restoreOutcome: string;
@@ -572,7 +573,23 @@ function needsAttention(node: NodeEntry): boolean {
 // source-available identity + state + resume-summary fields an orchestrator
 // needs at a glance, WITHOUT leaking the resume token value or resumeCommand
 // (security). recoveryGuidance/currentUsage stay on the node detail (slice 26).
-function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, unknown>> {
+
+// 0.5.1 rig ps telemetry (founder-directed): render the DECLARED model.
+//
+// A blank here must NOT join the em-dash family every other empty cell uses.
+// 13 of 15 claude-code seats carry no declared model, and a reader seeing "—"
+// would reasonably conclude the seat HAS no model rather than that none was
+// declared. "not-declared" is the honest word for an absent declaration.
+//
+// SCOPE, stated because the column invites a wider reading: this is the
+// SPEC-DECLARED model (nodes.model), NOT the model the seat is running. The
+// running model has no producer today — it is the ACTIVITY-umbrella rider.
+export function formatDeclaredModel(model: string | null | undefined): string {
+  const m = (model ?? "").trim();
+  return m.length > 0 ? m : "not-declared";
+}
+
+export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, unknown>> {
   return nodes.map((n) => {
     const attention = needsAttention(n);
     const compact: Record<string, unknown> = {
@@ -581,6 +598,13 @@ function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, unknown
       rigName: n.rigName,
       logicalId: n.logicalId,
       canonicalSessionName: n.canonicalSessionName,
+      // 0.5.1 founder-directed telemetry: runtime + DECLARED model.
+      // node-inventory carries both; this projection dropped them, which is why
+      // an orchestrator could not tell a rate-limited seat from a stalled one.
+      // runtime is complete fleet-wide; model is a DECLARATION, absent on 13 of
+      // 15 claude-code seats — see formatDeclaredModel for the render rule.
+      runtime: n.runtime ?? null,
+      model: n.model ?? null,
       // lifecycle + session/startup state.
       sessionStatus: n.sessionStatus,
       startupStatus: n.startupStatus,
@@ -1146,7 +1170,7 @@ async function handleNodes(
       ));
     }
   } else {
-    const header = padNodeRow("RIG", "POD", "MEMBER", "SESSION", "RUNTIME", "STATUS", "STARTUP", "ORIENTED", "LIFECYCLE", "TERMINAL", "WORK", "ACTIVITY", "CTX", "RESTORE", "ERROR");
+    const header = padNodeRow("RIG", "POD", "MEMBER", "SESSION", "RUNTIME", "MODEL(DECLARED)", "STATUS", "STARTUP", "ORIENTED", "LIFECYCLE", "TERMINAL", "WORK", "ACTIVITY", "CTX", "RESTORE", "ERROR");
     console.log(header);
     for (const n of humanList as NodeEntry[]) {
       const parts = n.logicalId.split(".");
@@ -1159,6 +1183,7 @@ async function handleNodes(
         member,
         n.canonicalSessionName ?? "—",
         n.runtime ?? "—",
+        formatDeclaredModel(n.model),
         n.sessionStatus ?? "—",
         n.startupStatus ?? "—",
         n.oriented ?? "—",
@@ -1218,13 +1243,14 @@ function padRigRow(rig: string, nodes: string, running: string, active: string, 
   ].join("");
 }
 
-function padNodeRow(rig: string, pod: string, member: string, session: string, runtime: string, status: string, startup: string, oriented: string, lifecycle: string, terminal: string, work: string, activity: string, ctx: string, restore: string, error: string): string {
+export function padNodeRow(rig: string, pod: string, member: string, session: string, runtime: string, model: string, status: string, startup: string, oriented: string, lifecycle: string, terminal: string, work: string, activity: string, ctx: string, restore: string, error: string): string {
   return [
     fitCell(rig, 30),
     fitCell(pod, 10),
     fitCell(member, 14),
     fitCell(session, 34),
     fitCell(runtime, 12),
+    fitCell(model, 17),
     fitCell(status, 10),
     fitCell(startup, 10),
     // OPR.0.4.3.06 — challenge-verified orientation, distinct from STARTUP.
@@ -1240,7 +1266,7 @@ function padNodeRow(rig: string, pod: string, member: string, session: string, r
   ].join("");
 }
 
-function padCompactNodeRow(rig: string, session: string, lifecycle: string, activity: string, work: string, reason: string): string {
+export function padCompactNodeRow(rig: string, session: string, lifecycle: string, activity: string, work: string, reason: string): string {
   return [
     fitCell(rig, 22),
     fitCell(session, 38),
