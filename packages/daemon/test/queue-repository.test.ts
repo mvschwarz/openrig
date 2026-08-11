@@ -269,6 +269,23 @@ describe("QueueRepository", () => {
     expect(repo.getById(item.qitemId)!.state, "a rejected close must not silently mutate the row").toBe("in-progress");
   });
 
+  // 0.5.1-53 Atom 2b — the supersession back-link. A cancel-and-replace must NOT produce an unlinked
+  // orphan pair: the successor records handedOffFrom = the original, so a reader can traverse from the
+  // successor back to what it replaced (proof e). Combined with 2a's forward link (original.closureTarget
+  // = successor), a supersession is fully traversable in both directions and never reads as abandonment.
+  it("Atom 2b: a supersession successor records handedOffFrom = the original (both links present)", async () => {
+    const original = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "original (metadata wrong)" });
+    const successor = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "corrected", handedOffFrom: original.qitemId });
+    expect(successor.handedOffFrom, "successor -> original back-link").toBe(original.qitemId);
+    // supersede the original toward the successor (2a forward link).
+    repo.claim({ qitemId: original.qitemId, destinationSession: "bob@rig" });
+    repo.update({ qitemId: original.qitemId, actorSession: "bob@rig", state: "canceled", closureReason: "superseded", closureTarget: successor.qitemId });
+    const orig = repo.getById(original.qitemId)!;
+    expect(orig.closureReason, "superseded, not abandoned").toBe("superseded");
+    expect(orig.closureTarget, "original -> successor forward link").toBe(successor.qitemId);
+    expect(repo.getById(successor.qitemId)!.handedOffFrom, "successor -> original back link").toBe(original.qitemId);
+  });
+
   it("update state=done WITHOUT closure_reason rejected with missing_closure_reason", async () => {
     const item = await repo.create({
       sourceSession: "alice@rig",

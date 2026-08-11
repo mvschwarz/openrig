@@ -166,6 +166,12 @@ export interface QueueCreateInput {
   tags?: string[];
   expiresAt?: string;
   chainOfRecord?: string[];
+  /** 0.5.1-53 Atom 2b — supersession back-link. When this qitem is the SUCCESSOR of a
+   *  cancel-and-replace (the original recorded state=canceled + closure_reason=superseded +
+   *  closure_target=<this>), handedOffFrom records the original so the successor is traversable
+   *  back to what it replaced — the same lineage primitive handoff-and-complete already sets,
+   *  now reachable from the raw create path so a supersession is not an unlinked orphan pair. */
+  handedOffFrom?: string | null;
   /** PL-007 — typed repo scope for this qitem. Route validates against
    *  source rig's workspace.repos[]; unknown names rejected upstream. */
   targetRepo?: string | null;
@@ -1063,25 +1069,27 @@ export class QueueRepository {
     const chain = input.chainOfRecord ? JSON.stringify(input.chainOfRecord) : null;
     const expiresAt = input.expiresAt ?? null;
     const targetRepo = input.targetRepo ?? null;
+    // 0.5.1-53 Atom 2b — supersession back-link (successor -> the row it replaced). Absent for a normal create.
+    const handedOffFrom = input.handedOffFrom ?? null;
 
     if (this.hasTargetRepoColumn) {
       this.db
         .prepare(
           `INSERT INTO queue_items (
             qitem_id, ts_created, ts_updated, source_session, destination_session,
-            state, priority, tier, tags, expires_at, chain_of_record, body, target_repo
-          ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`
+            state, priority, tier, tags, expires_at, chain_of_record, handed_off_from, body, target_repo
+          ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`
         )
-        .run(id, ts, ts, input.sourceSession, input.destinationSession, priority, tier, tags, expiresAt, chain, input.body, targetRepo);
+        .run(id, ts, ts, input.sourceSession, input.destinationSession, priority, tier, tags, expiresAt, chain, handedOffFrom, input.body, targetRepo);
     } else {
       this.db
         .prepare(
           `INSERT INTO queue_items (
             qitem_id, ts_created, ts_updated, source_session, destination_session,
-            state, priority, tier, tags, expires_at, chain_of_record, body
-          ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`
+            state, priority, tier, tags, expires_at, chain_of_record, handed_off_from, body
+          ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`
         )
-        .run(id, ts, ts, input.sourceSession, input.destinationSession, priority, tier, tags, expiresAt, chain, input.body);
+        .run(id, ts, ts, input.sourceSession, input.destinationSession, priority, tier, tags, expiresAt, chain, handedOffFrom, input.body);
     }
     this.persistSummary(id, input.summary ?? null);
     this.persistEvidenceRef(id, input.evidenceRef ?? null);
