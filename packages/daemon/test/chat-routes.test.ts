@@ -69,24 +69,24 @@ describe("chat routes", () => {
   // P21 I5 — chat send derives the sender from the transport header (X-OpenRig-Session), never
   // body.sender (the `?? "anonymous"` silent default was the worst-validated site in the census).
   // Chat is not a founder-visible-flow-breaking surface → refuse-loud is the default (no deferral).
-  it("send — 401 unattributable_sender when X-OpenRig-Session is absent", async () => {
+  it("send — header absent + body sender → delivers under the claimed actor (201), sender alice", async () => {
     const res = await app.request(`/api/rigs/${rigId}/chat/send`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sender: "alice", body: "hi" }),
     });
-    expect(res.status).toBe(401);
-    expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+    expect(res.status).toBe(201);
+    expect((await res.json()).sender).toBe("alice");
   });
 
-  it("send — 409 identity_mismatch when body sender differs from the transport identity", async () => {
+  it("send — header present + differing body sender → wire supersedes (sender alice, 201); 409 retired", async () => {
     const res = await app.request(`/api/rigs/${rigId}/chat/send`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice" },
-      body: JSON.stringify({ sender: "mallory", body: "hi" }),
+      body: JSON.stringify({ sender: "mallory", body: "hi" }), // superseded by the wire identity
     });
-    expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+    expect(res.status).toBe(201);
+    expect((await res.json()).sender).toBe("alice");
   });
 
   it("send — derives the sender from the header, never the body (body sender absent)", async () => {
@@ -137,24 +137,24 @@ describe("chat routes", () => {
     expect(data.topic).toBe("standup");
   });
 
-  it("topic — 401 unattributable_sender when X-OpenRig-Session is absent", async () => {
+  it("topic — header absent + body sender → delivers under the claimed actor (201), sender alice", async () => {
     const res = await app.request(`/api/rigs/${rigId}/chat/topic`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sender: "alice", topic: "standup", body: "daily" }),
     });
-    expect(res.status).toBe(401);
-    expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+    expect(res.status).toBe(201);
+    expect((await res.json()).sender).toBe("alice");
   });
 
-  it("topic — 409 identity_mismatch when body sender differs from the transport identity", async () => {
+  it("topic — header present + differing body sender → wire supersedes (sender alice, 201); 409 retired", async () => {
     const res = await app.request(`/api/rigs/${rigId}/chat/topic`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice" },
-      body: JSON.stringify({ sender: "mallory", topic: "standup", body: "daily" }),
+      body: JSON.stringify({ sender: "mallory", topic: "standup", body: "daily" }), // superseded by the wire identity
     });
-    expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+    expect(res.status).toBe(201);
+    expect((await res.json()).sender).toBe("alice");
   });
 
   it("topic — derives the sender from the header, never the body (body sender absent)", async () => {

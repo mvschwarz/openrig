@@ -256,7 +256,7 @@ describe("ScopeApproveService — re-approve/re-stamp (OPR.0.5.0.18)", () => {
     expect(rows.some((r) => (r.auditNotes as Record<string, unknown>)["reason"] === "wire-level amend")).toBe(true);
   });
 
-  it("P21 I1: the signing surface derives the approver from the transport header — forged/absent identity refuses LOUD", async () => {
+  it("P21 I1: the signing surface derives the approver from the transport header — deliver-and-label (401/409 retired)", async () => {
     const { Hono } = await import("hono");
     const { scopeApproveRoutes } = await import("../src/routes/scope-approve.js");
     const indexerStub = { isReady: () => true, slicesRoot: missionsRoot };
@@ -275,27 +275,20 @@ describe("ScopeApproveService — re-approve/re-stamp (OPR.0.5.0.18)", () => {
       });
     const wire = { scopeTier: "slice", scopePath: base.scopePath, approvalScope: "spec" };
 
-    // (1) absent header → refuse-unattributable LOUD (401); a body actor claim is NOT a fallback.
+    // (1) absent header + body actorSession → deliver-and-label under the claimed actor (claimed:v1), 201; NOT refused.
     const noHeader = await req({}, { ...wire, actorSession: "mallory@rig" });
-    expect(noHeader.status).toBe(401);
-    expect(((await noHeader.json()) as { error: string }).error).toBe("unattributable_sender");
+    expect(noHeader.status).toBe(201);
+    expect(frontmatterOf(readmePath)["provenance"]).toBe("claimed:v1");
 
-    // (2) body claim DIFFERENT from the header → refuse-loud identity_mismatch naming BOTH (never prefer either).
-    const mismatch = await req({ "X-OpenRig-Session": "pm@rig" }, { ...wire, actorSession: "mallory@rig" });
-    expect(mismatch.status).toBe(409);
-    const mm = (await mismatch.json()) as { error: string; message: string };
-    expect(mm.error).toBe("identity_mismatch");
-    expect(mm.message).toContain("pm@rig");
-    expect(mm.message).toContain("mallory@rig");
+    // (2) header present + differing body actor → the wire SUPERSEDES (re-stamp under pm@rig, transport:v1); 409 retired.
+    // A re-stamp needs an explicit reason (the re-approve guard); the differing body actor is superseded, not refused.
+    const mismatch = await req({ "X-OpenRig-Session": "pm@rig" }, { ...wire, actorSession: "mallory@rig", reApprove: true, reason: "wire supersedes body" });
+    expect(mismatch.status).toBe(201);
+    expect(frontmatterOf(readmePath)["provenance"]).toBe("transport:v1"); // wire wins; mallory@rig superseded
 
-    // (3) header-derivation: with NO body actorSession, the RECORDED approver is the transport identity.
-    const derived = await req({ "X-OpenRig-Session": "pm@rig" }, wire);
+    // (3) header + NO body actorSession → the RECORDED approver is the transport identity, transport:v1.
+    const derived = await req({ "X-OpenRig-Session": "pm@rig" }, { ...wire, reApprove: true, reason: "re-derive" });
     expect(derived.status).toBe(201);
-    const rows = auditBrowse.query({ scopeId: "OPR.X.18", approvalScope: "spec" }).rows;
-    expect(rows[0]!.actorSession).toBe("pm@rig"); // transport-derived, never the body claim
-    // P21 era-stamp: the audit row + the frontmatter both carry transport:v1 (derived-era, renderable
-    // as verified — vs a NULL/absent claimed-era row that renders "recorded (pre-verification era)").
-    expect(rows[0]!.identityProvenance).toBe("transport:v1");
     expect(frontmatterOf(readmePath)["provenance"]).toBe("transport:v1");
   });
 

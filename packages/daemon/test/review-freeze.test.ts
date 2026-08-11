@@ -106,12 +106,14 @@ describe("POST /api/review/freeze", () => {
     expect(row.identity_provenance).toBe("transport:v1");
   });
 
-  it("freeze — header present + differing body actor → 409 identity_mismatch", async () => {
+  it("freeze — header present + differing body actor → wire supersedes (actor cli@host, transport:v1); 409 retired", async () => {
     const dir = approvedSlice("41-id");
     writeFullGateSet(dir, "41-id", "cand41");
-    const res = await freezeAs("41-id", "cli@host", "mallory@host");
-    expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+    const res = await freezeAs("41-id", "cli@host", "mallory@host"); // body mallory@host superseded by the wire
+    expect(res.status).toBe(200);
+    const row = lastAuditRow();
+    expect(row.actor).toBe("cli@host");
+    expect(row.identity_provenance).toBe("transport:v1");
   });
 
   it("freeze — header absent records the body actor CLAIMED-era (identity_provenance null, never-break)", async () => {

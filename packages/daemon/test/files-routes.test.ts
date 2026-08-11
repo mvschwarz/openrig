@@ -228,17 +228,20 @@ describe("UI Enhancement Pack v0 — /api/files routes", () => {
       expect(row.identity_provenance).toBe("transport:v1");
     });
 
-    it("write — header present + differing body actor → 409 identity_mismatch", async () => {
+    it("write — header present + differing body actor → wire supersedes (actor cli@r, transport:v1); 409 retired", async () => {
       const target = join(tempDir, "workspace", "STEERING.md");
       const expectedMtime = statSync(target).mtime.toISOString();
       const expectedContentHash = sha256(readFileSync(target));
       const res = await app.request("/api/files/write", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-OpenRig-Session": "cli@r" },
-        body: JSON.stringify({ root: "workspace", path: "STEERING.md", content: "x", expectedMtime, expectedContentHash, actor: "mallory@r" }),
+        body: JSON.stringify({ root: "workspace", path: "STEERING.md", content: "x", expectedMtime, expectedContentHash, actor: "mallory@r" }), // superseded
       });
-      expect(res.status).toBe(409);
-      expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+      expect(res.status).toBe(200);
+      const audit = readFileSync(join(tempDir, "audit.jsonl"), "utf-8").trim().split("\n");
+      const row = JSON.parse(audit[audit.length - 1]!) as { actor: string; identity_provenance: string | null };
+      expect(row.actor).toBe("cli@r"); // wire wins; mallory@r superseded
+      expect(row.identity_provenance).toBe("transport:v1");
     });
 
     it("write — header absent + no body actor → 400 actor_required (the deferral still needs some actor)", async () => {

@@ -82,24 +82,34 @@ describe("stream routes", () => {
   });
 
   // P21 I3 — stream emit was an allow-all body-supplied sourceSession site; I3 derives it from the header.
-  it("emit — 401 unattributable_sender when X-OpenRig-Session is absent", async () => {
+  it("emit — header absent + body sourceSession → delivers under the claimed actor, stream_items claimed:v1", async () => {
     const res = await app.request("/api/stream/emit", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sourceSession: "alice@rig", body: "hi" }),
     });
-    expect(res.status).toBe(401);
-    expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+    expect(res.status).toBe(201);
+    const { streamItemId } = (await res.json()) as { streamItemId: string };
+    const row = db
+      .prepare("SELECT source_session, identity_provenance FROM stream_items WHERE stream_item_id = ?")
+      .get(streamItemId) as { source_session: string; identity_provenance: string | null } | undefined;
+    expect(row?.source_session).toBe("alice@rig");
+    expect(row?.identity_provenance).toBe("claimed:v1");
   });
 
-  it("emit — 409 identity_mismatch when body sourceSession differs from the transport identity", async () => {
+  it("emit — header present + differing body sourceSession → wire supersedes (source alice@rig, transport:v1); 409 retired", async () => {
     const res = await app.request("/api/stream/emit", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@rig" },
-      body: JSON.stringify({ sourceSession: "evil@rig", body: "hi" }),
+      body: JSON.stringify({ sourceSession: "evil@rig", body: "hi" }), // superseded by the wire identity
     });
-    expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+    expect(res.status).toBe(201);
+    const { streamItemId } = (await res.json()) as { streamItemId: string };
+    const row = db
+      .prepare("SELECT source_session, identity_provenance FROM stream_items WHERE stream_item_id = ?")
+      .get(streamItemId) as { source_session: string; identity_provenance: string | null } | undefined;
+    expect(row?.source_session).toBe("alice@rig");
+    expect(row?.identity_provenance).toBe("transport:v1");
   });
 
   it("emit — derives source from the header + era-stamps stream_items transport:v1", async () => {

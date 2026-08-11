@@ -85,15 +85,17 @@ describe("queue routes", () => {
       expect(entry.senderSession).toBe("alice@rig"); // the header wins; the forged body claim never lands
     });
 
-    it("REFUSES-unattributable LOUD (401) when the identity header is absent, naming the missing header", async () => {
+    it("header absent (no body sender read) → 400 actor_required (P18 sweep: parameter completeness, not the retired 401 refusal)", async () => {
       const res = await app.request("/api/queue/inbox/drop", {
         method: "POST",
         headers: { "Content-Type": "application/json" }, // NO X-OpenRig-Session
         body: JSON.stringify({ destinationSession: "bob@rig", body: "hi", senderSession: "mallory@rig" }),
       });
-      expect(res.status).toBe(401);
+      // inbox/drop never reads a body sender (forgeable), so with no header there is no actor to LABEL →
+      // 400 actor_required (the queue.ts:215 class), NOT the retired 401 refusal-of-an-uncertifiable-sender.
+      expect(res.status).toBe(400);
       const err = await res.json() as { error: string; message: string };
-      expect(err.error).toBe("unattributable_sender");
+      expect(err.error).toBe("actor_required");
       expect(err.message).toMatch(/X-OpenRig-Session/);
     });
   });
@@ -133,26 +135,34 @@ describe("queue routes", () => {
     expect(res.status).toBe(201);
   });
 
-  it("inbox absorb — 401 unattributable_sender when X-OpenRig-Session is absent", async () => {
+  it("inbox absorb — header absent + body receiverSession → delivers under the claimed actor, transition claimed:v1 (deliver-and-label)", async () => {
     const inboxId = await dropEntry("dest@rig", "sender@rig");
     const res = await app.request(`/api/queue/inbox/${inboxId}/absorb`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ receiverSession: "dest@rig" }),
     });
-    expect(res.status).toBe(401);
-    expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+    expect(res.status).toBe(200);
+    const { qitemId } = (await res.json()) as { qitemId: string };
+    const row = db
+      .prepare("SELECT identity_provenance FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid ASC LIMIT 1")
+      .get(qitemId) as { identity_provenance: string | null } | undefined;
+    expect(row?.identity_provenance).toBe("claimed:v1");
   });
 
-  it("inbox absorb — 409 identity_mismatch when body receiverSession differs from the transport identity", async () => {
+  it("inbox absorb — header present + differing body receiverSession → wire supersedes (delivers under dest@rig, transport:v1); 409 retired", async () => {
     const inboxId = await dropEntry("dest@rig", "sender@rig");
     const res = await app.request(`/api/queue/inbox/${inboxId}/absorb`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-OpenRig-Session": "dest@rig" },
-      body: JSON.stringify({ receiverSession: "mallory@rig" }),
+      body: JSON.stringify({ receiverSession: "mallory@rig" }), // superseded by the wire identity
     });
-    expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+    expect(res.status).toBe(200);
+    const { qitemId } = (await res.json()) as { qitemId: string };
+    const row = db
+      .prepare("SELECT identity_provenance FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid ASC LIMIT 1")
+      .get(qitemId) as { identity_provenance: string | null } | undefined;
+    expect(row?.identity_provenance).toBe("transport:v1");
   });
 
   it("inbox absorb — derives receiver from the header + era-stamps the absorbed qitem transport:v1", async () => {
@@ -171,26 +181,24 @@ describe("queue routes", () => {
     expect(row?.identity_provenance).toBe("transport:v1");
   });
 
-  it("inbox deny — 401 unattributable_sender when X-OpenRig-Session is absent", async () => {
+  it("inbox deny — header absent + body receiverSession → delivers under the claimed actor (200); 401 retired", async () => {
     const inboxId = await dropEntry("dest@rig", "sender@rig");
     const res = await app.request(`/api/queue/inbox/${inboxId}/deny`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ receiverSession: "dest@rig", reason: "nope" }),
     });
-    expect(res.status).toBe(401);
-    expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+    expect(res.status).toBe(200);
   });
 
-  it("inbox deny — 409 identity_mismatch when body receiverSession differs from the transport identity", async () => {
+  it("inbox deny — header present + differing body receiverSession → wire supersedes, delivers (200); 409 retired", async () => {
     const inboxId = await dropEntry("dest@rig", "sender@rig");
     const res = await app.request(`/api/queue/inbox/${inboxId}/deny`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-OpenRig-Session": "dest@rig" },
-      body: JSON.stringify({ receiverSession: "mallory@rig", reason: "nope" }),
+      body: JSON.stringify({ receiverSession: "mallory@rig", reason: "nope" }), // superseded by the wire identity
     });
-    expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+    expect(res.status).toBe(200);
   });
 
   it("inbox deny — derives receiver from the header (200)", async () => {
@@ -203,24 +211,32 @@ describe("queue routes", () => {
     expect(res.status).toBe(200);
   });
 
-  it("outbox record — 401 unattributable_sender when X-OpenRig-Session is absent", async () => {
+  it("outbox record — header absent + body senderSession → delivers under the claimed actor, outbox_entries claimed:v1", async () => {
     const res = await app.request("/api/queue/outbox/record", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ senderSession: "me@rig", destinationSession: "you@rig", body: "hi" }),
     });
-    expect(res.status).toBe(401);
-    expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+    expect(res.status).toBe(201);
+    const { outboxId } = (await res.json()) as { outboxId: string };
+    const row = db
+      .prepare("SELECT identity_provenance FROM outbox_entries WHERE outbox_id = ?")
+      .get(outboxId) as { identity_provenance: string | null } | undefined;
+    expect(row?.identity_provenance).toBe("claimed:v1");
   });
 
-  it("outbox record — 409 identity_mismatch when body senderSession differs from the transport identity", async () => {
+  it("outbox record — header present + differing body senderSession → wire supersedes (transport:v1); 409 retired", async () => {
     const res = await app.request("/api/queue/outbox/record", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-OpenRig-Session": "me@rig" },
-      body: JSON.stringify({ senderSession: "evil@rig", destinationSession: "you@rig", body: "hi" }),
+      body: JSON.stringify({ senderSession: "evil@rig", destinationSession: "you@rig", body: "hi" }), // superseded
     });
-    expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+    expect(res.status).toBe(201);
+    const { outboxId } = (await res.json()) as { outboxId: string };
+    const row = db
+      .prepare("SELECT identity_provenance FROM outbox_entries WHERE outbox_id = ?")
+      .get(outboxId) as { identity_provenance: string | null } | undefined;
+    expect(row?.identity_provenance).toBe("transport:v1");
   });
 
   it("outbox record — derives sender from the header + era-stamps outbox_entries transport:v1", async () => {
@@ -256,24 +272,36 @@ describe("queue routes", () => {
 
   // P21 I3 — create's sender is the transport header (X-OpenRig-Session), NEVER a body claim.
   // Adopt-drop window: a body sourceSession is tolerated ONLY when it EQUALS the transport identity.
-  it("create — 401 unattributable_sender when X-OpenRig-Session is absent", async () => {
+  it("create — header absent + body sourceSession → delivers under the claimed actor, transition claimed:v1", async () => {
     const res = await app.request("/api/queue/create", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sourceSession: "bob@rig", destinationSession: "dst@rig", body: "hi" }),
     });
-    expect(res.status).toBe(401);
-    expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+    expect(res.status).toBe(201);
+    const { qitemId } = (await res.json()) as { qitemId: string };
+    const t = db
+      .prepare("SELECT identity_provenance FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid ASC LIMIT 1")
+      .get(qitemId) as { identity_provenance: string | null } | undefined;
+    expect(t?.identity_provenance).toBe("claimed:v1");
   });
 
-  it("create — 409 identity_mismatch when the body sourceSession differs from the transport identity", async () => {
+  it("create — header present + differing body sourceSession → wire supersedes (source alice@rig, transport:v1); 409 retired", async () => {
     const res = await app.request("/api/queue/create", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@rig" },
-      body: JSON.stringify({ sourceSession: "bob@rig", destinationSession: "dst@rig", body: "hi" }),
+      body: JSON.stringify({ sourceSession: "bob@rig", destinationSession: "dst@rig", body: "hi" }), // superseded
     });
-    expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+    expect(res.status).toBe(201);
+    const { qitemId } = (await res.json()) as { qitemId: string };
+    const row = db
+      .prepare("SELECT source_session FROM queue_items WHERE qitem_id = ?")
+      .get(qitemId) as { source_session: string } | undefined;
+    expect(row?.source_session).toBe("alice@rig");
+    const t = db
+      .prepare("SELECT identity_provenance FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid ASC LIMIT 1")
+      .get(qitemId) as { identity_provenance: string | null } | undefined;
+    expect(t?.identity_provenance).toBe("transport:v1");
   });
 
   it("create — derives source_session from the transport header, never the body (equal claim tolerated)", async () => {
@@ -315,26 +343,34 @@ describe("queue routes", () => {
     return ((await create.json()) as { qitemId: string }).qitemId;
   }
 
-  it("update — 401 unattributable_sender when X-OpenRig-Session is absent", async () => {
+  it("update — header absent + body actorSession → delivers under the claimed actor, transition claimed:v1", async () => {
     const qitemId = await createForUpdate("a@r");
     const res = await app.request(`/api/queue/${qitemId}/update`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ actorSession: "worker@r", state: "in-progress" }),
     });
-    expect(res.status).toBe(401);
-    expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+    expect(res.status).toBe(200);
+    const row = db
+      .prepare("SELECT actor_session, identity_provenance FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid DESC LIMIT 1")
+      .get(qitemId) as { actor_session: string; identity_provenance: string | null } | undefined;
+    expect(row?.actor_session).toBe("worker@r");
+    expect(row?.identity_provenance).toBe("claimed:v1");
   });
 
-  it("update — 409 identity_mismatch when the body actorSession differs from the transport identity", async () => {
+  it("update — header present + differing body actorSession → wire supersedes (actor worker@r, transport:v1); 409 retired", async () => {
     const qitemId = await createForUpdate("a@r");
     const res = await app.request(`/api/queue/${qitemId}/update`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-OpenRig-Session": "worker@r" },
-      body: JSON.stringify({ actorSession: "mallory@r", state: "in-progress" }),
+      body: JSON.stringify({ actorSession: "mallory@r", state: "in-progress" }), // superseded by the wire identity
     });
-    expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+    expect(res.status).toBe(200);
+    const row = db
+      .prepare("SELECT actor_session, identity_provenance FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid DESC LIMIT 1")
+      .get(qitemId) as { actor_session: string; identity_provenance: string | null } | undefined;
+    expect(row?.actor_session).toBe("worker@r");
+    expect(row?.identity_provenance).toBe("transport:v1");
   });
 
   it("update — derives the transition actor from the transport header, never the body", async () => {
@@ -364,26 +400,32 @@ describe("queue routes", () => {
   }
 
   for (const verb of ["handoff", "handoff-and-complete"] as const) {
-    it(`${verb} — 401 unattributable_sender when X-OpenRig-Session is absent`, async () => {
+    it(`${verb} — header absent + body fromSession → delivers under the claimed actor, close transition claimed:v1`, async () => {
       const qitemId = await createForHandoff("b@r");
       const res = await app.request(`/api/queue/${qitemId}/${verb}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ fromSession: "b@r", toSession: "c@r" }),
       });
-      expect(res.status).toBe(401);
-      expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+      expect(res.status).toBe(201);
+      const closed = db
+        .prepare("SELECT identity_provenance FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid DESC LIMIT 1")
+        .get(qitemId) as { identity_provenance: string | null } | undefined;
+      expect(closed?.identity_provenance).toBe("claimed:v1");
     });
 
-    it(`${verb} — 409 identity_mismatch when body fromSession differs from the transport identity`, async () => {
+    it(`${verb} — header present + differing body fromSession → wire supersedes (delivers, transport:v1); 409 retired`, async () => {
       const qitemId = await createForHandoff("b@r");
       const res = await app.request(`/api/queue/${qitemId}/${verb}`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
-        body: JSON.stringify({ fromSession: "mallory@r", toSession: "c@r" }),
+        body: JSON.stringify({ fromSession: "mallory@r", toSession: "c@r" }), // superseded by the wire identity
       });
-      expect(res.status).toBe(409);
-      expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+      expect(res.status).toBe(201);
+      const closed = db
+        .prepare("SELECT identity_provenance FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid DESC LIMIT 1")
+        .get(qitemId) as { identity_provenance: string | null } | undefined;
+      expect(closed?.identity_provenance).toBe("transport:v1");
     });
 
     it(`${verb} — derives fromSession from the header + era-stamps the close transition transport:v1`, async () => {
@@ -414,26 +456,34 @@ describe("queue routes", () => {
     return qitemId;
   }
 
-  it("claim — 401 unattributable_sender when X-OpenRig-Session is absent", async () => {
+  it("claim — header absent + body destinationSession → delivers under the claimed actor, transition claimed:v1", async () => {
     const qitemId = await createForHandoff("b@r");
     const res = await app.request(`/api/queue/${qitemId}/claim`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ destinationSession: "b@r" }),
     });
-    expect(res.status).toBe(401);
-    expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+    expect(res.status).toBe(200);
+    const row = db
+      .prepare("SELECT actor_session, identity_provenance FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid DESC LIMIT 1")
+      .get(qitemId) as { actor_session: string; identity_provenance: string | null } | undefined;
+    expect(row?.actor_session).toBe("b@r");
+    expect(row?.identity_provenance).toBe("claimed:v1");
   });
 
-  it("claim — 409 identity_mismatch when body destinationSession differs from the transport identity", async () => {
+  it("claim — header present + differing body destinationSession → wire supersedes (claimant b@r, transport:v1); 409 retired", async () => {
     const qitemId = await createForHandoff("b@r");
     const res = await app.request(`/api/queue/${qitemId}/claim`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
-      body: JSON.stringify({ destinationSession: "mallory@r" }),
+      body: JSON.stringify({ destinationSession: "mallory@r" }), // superseded by the wire identity
     });
-    expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+    expect(res.status).toBe(200);
+    const row = db
+      .prepare("SELECT actor_session, identity_provenance FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid DESC LIMIT 1")
+      .get(qitemId) as { actor_session: string; identity_provenance: string | null } | undefined;
+    expect(row?.actor_session).toBe("b@r");
+    expect(row?.identity_provenance).toBe("transport:v1");
   });
 
   it("claim — derives the claimant from the header + era-stamps the transition transport:v1", async () => {
@@ -451,26 +501,34 @@ describe("queue routes", () => {
     expect(row?.identity_provenance).toBe("transport:v1");
   });
 
-  it("unclaim — 401 unattributable_sender when X-OpenRig-Session is absent", async () => {
+  it("unclaim — header absent + body destinationSession → delivers under the claimed actor, transition claimed:v1", async () => {
     const qitemId = await createAndClaim("b@r");
     const res = await app.request(`/api/queue/${qitemId}/unclaim`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ destinationSession: "b@r" }),
     });
-    expect(res.status).toBe(401);
-    expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+    expect(res.status).toBe(200);
+    const row = db
+      .prepare("SELECT actor_session, identity_provenance FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid DESC LIMIT 1")
+      .get(qitemId) as { actor_session: string; identity_provenance: string | null } | undefined;
+    expect(row?.actor_session).toBe("b@r");
+    expect(row?.identity_provenance).toBe("claimed:v1");
   });
 
-  it("unclaim — 409 identity_mismatch when body destinationSession differs from the transport identity", async () => {
+  it("unclaim — header present + differing body destinationSession → wire supersedes (b@r, transport:v1); 409 retired", async () => {
     const qitemId = await createAndClaim("b@r");
     const res = await app.request(`/api/queue/${qitemId}/unclaim`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
-      body: JSON.stringify({ destinationSession: "mallory@r" }),
+      body: JSON.stringify({ destinationSession: "mallory@r" }), // superseded by the wire identity
     });
-    expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+    expect(res.status).toBe(200);
+    const row = db
+      .prepare("SELECT actor_session, identity_provenance FROM queue_transitions WHERE qitem_id = ? ORDER BY rowid DESC LIMIT 1")
+      .get(qitemId) as { actor_session: string; identity_provenance: string | null } | undefined;
+    expect(row?.actor_session).toBe("b@r");
+    expect(row?.identity_provenance).toBe("transport:v1");
   });
 
   it("unclaim — derives the claimant from the header + era-stamps the transition transport:v1", async () => {

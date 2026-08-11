@@ -170,7 +170,7 @@ describe("mission-control routes (PL-005 Phase A)", () => {
   // HEADERLESS (bearer only + body actorSession). Refuse-loud would break the founder's one-tap review, so
   // an absent header now DEFERS (records the body actor as the declared claimed-era variant `claimed:v1`),
   // never 401. The CLI forgery guard (header present, differing body claim → 409) is UNCHANGED.
-  it("P21 review-actions deferral: UI headerless records claimed:v1 (never refused, never null); CLI header ⇒ transport:v1; body≠header ⇒ 409", async () => {
+  it("P21 review-actions deferral: UI headerless records claimed:v1 (never refused, never null); CLI header ⇒ transport:v1; body≠header ⇒ wire supersedes (transport:v1, 409 retired)", async () => {
     const mk = async (body: string) => (await queueRepo.create({ sourceSession: "s@r", destinationSession: "d@r", body })).qitemId;
     const [qUi, qCli, qMm] = [await mk("u"), await mk("c"), await mk("m")];
     const req = (qitemId: string, headers: Record<string, string>, extra: Record<string, unknown> = {}) =>
@@ -192,14 +192,11 @@ describe("mission-control routes (PL-005 Phase A)", () => {
     expect(cli.status).toBe(200);
     expect(provenanceOf(qCli)).toBe("transport:v1");
 
-    // Forgery guard unchanged: header present + differing body claim → 409 naming BOTH (no write).
+    // P18 SWEEP: header present + differing body claim → the wire SUPERSEDES (200), recorded transport:v1.
+    // The 409 is retired here too, so this deferral helper and its requireSenderIdentity sibling agree.
     const mismatch = await req(qMm, { "X-OpenRig-Session": "human@r" }, { actorSession: "mallory@r" });
-    expect(mismatch.status).toBe(409);
-    const mm = (await mismatch.json()) as { error: string; message: string };
-    expect(mm.error).toBe("identity_mismatch");
-    expect(mm.message).toContain("human@r");
-    expect(mm.message).toContain("mallory@r");
-    expect(provenanceOf(qMm)).toBeNull(); // refused before any write
+    expect(mismatch.status).toBe(200);
+    expect(provenanceOf(qMm)).toBe("transport:v1"); // wire wins; mallory@r superseded
   });
 
   // P21 NEGATIVE CONTROL (rail 4) — the anti-laundering pin. Without this a future refactor could silently
