@@ -515,9 +515,17 @@ export class QueueRepository {
    *  (handoff / handoff-and-complete) stages an outbox intent row INSIDE its
    *  db.transaction so close + transition + intent commit as one act or none;
    *  the delivery drains from that committed intent afterward. Wired post-
-   *  construction by startup (dep-graph ordering, like transport). Absent =
-   *  test/bootstrap path with no durable-intent requirement (the wake still
-   *  fires best-effort via maybeNudge, exactly as pre-W1). */
+   *  construction by startup (dep-graph ordering, like transport).
+   *
+   *  ABSENT = the test/bootstrap path, and what that means differs by caller —
+   *  it is NOT a blanket best-effort fallback:
+   *   • a nudge-intended TERMINAL close+successor act FAILS CLOSED (MF2):
+   *     {@link assertTerminalClosureHasIntent} throws `wake_intent_store_unavailable`
+   *     rather than produce an executed-but-unwoken item (pass `nudge:false` for a
+   *     wake-less close);
+   *   • {@link deliverWakeForSuccessor} — and only it — falls back to the pre-W1
+   *     best-effort {@link maybeNudge} when no store is attached (P34 made that
+   *     fallback real code rather than a promise in a comment). */
   private outbox: OutboxHandler | undefined;
   private resolveOccupantGeneration?: (sessionName: string) => string | null;
   /** PL-007 Workspace Primitive — true when migration 038 has applied the
