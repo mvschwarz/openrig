@@ -323,10 +323,13 @@ rigsRoutes.get("/:id/graph", async (c) => {
   // hook activity; ?full=true opts into the per-node needs_input capture.
   const graphFull = c.req.query("full") === "true";
   const seatStructuralActivityService = c.get("seatStructuralActivityService" as never) as SeatStructuralActivityService | undefined;
-  const inventoryWithActivityOnly = tmuxAdapter
-    ? await attachAgentActivity(inventory, { tmuxAdapter, activityStore: agentActivityStore, structuralActivity: seatStructuralActivityService, captureFallback: graphFull })
-    : inventory;
+  // ACTIVITY D1+D2 — resolved BEFORE attachAgentActivity now, because the ACTIVITY ladder reads the
+  // same motion observation the TERMINAL column reads. Order matters only for this declaration; the
+  // two enrichments still read their own sources independently.
   const seatActivityService = c.get("seatActivityService" as never) as SeatActivityService | undefined;
+  const inventoryWithActivityOnly = tmuxAdapter
+    ? await attachAgentActivity(inventory, { tmuxAdapter, activityStore: agentActivityStore, structuralActivity: seatStructuralActivityService, seatActivity: seatActivityService, captureFallback: graphFull })
+    : inventory;
   const inventoryWithActivity = attachTerminalActivityAndWork(inventoryWithActivityOnly, {
     db: getRepo(c).db,
     seatActivity: seatActivityService,

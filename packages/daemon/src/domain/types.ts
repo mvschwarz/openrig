@@ -428,6 +428,12 @@ export type AgentActivityState = "running" | "needs_input" | "idle" | "unknown";
 export type AgentActivityEvidenceSource =
   | "runtime_hook"
   | "pane_heuristic"
+  /** ACTIVITY D1+D2 — tmux `#{window_activity}` motion (SeatActivityService). A fact about BYTES on
+   *  the pane, so it is runtime-AGNOSTIC: it sees a generating Codex seat and a generating Claude
+   *  seat identically, where a TUI-string matcher has to be re-taught on every provider reskin. The
+   *  UI has called this source `terminal_activity` since slice 15 (activity-visuals.ts); the daemon
+   *  reports under the SAME name rather than minting a second word for one signal. */
+  | "terminal_activity"
   | "tmux_session"
   | "external_cli"
   | "session_registry";

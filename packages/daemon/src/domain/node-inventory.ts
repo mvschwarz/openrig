@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeOriented, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot, WorkspaceSpec, SeatIdentityVerdict, SeatIdentityVerdictKind } from "./types.js";
+import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeOriented, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot, WorkspaceSpec, SeatIdentityVerdict, SeatIdentityVerdictKind, AgentActivity, SeatActivity } from "./types.js";
 import { identityVerdictDownranksRunning } from "./types.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { buildOrientedMap } from "./startup-proof.js";
@@ -1066,6 +1066,15 @@ export async function attachAgentActivity(
      *  and capture-FREE: lifts structural motion into the ACTIVITY signal on the DEFAULT path so a
      *  live hook-less/stale-hook seat stops rendering as `unknown`. Absent = the pre-5b behavior. */
     structuralActivity?: { getStructuralActivity(sessionName: string): StructuralObservation | null };
+    /** ACTIVITY D1+D2 — the cached MOTION observation (SeatActivityService, tmux
+     *  `#{window_activity}` at 1Hz). READ-only and capture-FREE, same as `structuralActivity`.
+     *
+     *  This signal was already computed per seat and already rendered — in the SEPARATE `TERMINAL`
+     *  column, and in the UI's own activity fold (activity-visuals.ts has returned
+     *  `{state: "running", source: "terminal_activity"}` on `terminalActive === true` since slice
+     *  15). ACTIVITY was the one consumer that never read it, which is why the web UI could show a
+     *  seat working while `rig ps` called the same seat `unknown`. Absent = the pre-fix behavior. */
+    seatActivity?: { getSeatActivity(sessionName: string): SeatActivity | null };
     now?: Date;
     // OPR.0.4.3 healthz-wedge amplification fix: cheap by default. The per-node
     // tmux `capturePaneContent` fallback (probeSessionActivity) is the storm that
@@ -1085,15 +1094,66 @@ export async function attachAgentActivity(
   const sampledAt = deps.now ?? new Date();
   const captureFallback = deps.captureFallback ?? false;
   return Promise.all(entries.map(async (entry) => {
+    // ACTIVITY D1+D2 — the MOTION reading, resolved once and applied to every exit below.
+    const motion = entry.canonicalSessionName
+      ? deps.seatActivity?.getSeatActivity(entry.canonicalSessionName) ?? null
+      : null;
+    const motionRunning = motion?.isActiveWithinWindow === true;
+
+    /**
+     * ACTIVITY D1+D2 — ONE precedence rule, applied at EVERY exit of the ladder:
+     *
+     *     needs_input > running > MOTION > idle / unknown
+     *
+     * Live motion UPGRADES a verdict of `idle` or `unknown`; it never touches `needs_input` or an
+     * already-`running` verdict, and it never MANUFACTURES `idle`. That asymmetry is the whole
+     * safety argument, and it is what each half of the defect needs:
+     *
+     *   D1 (Codex → unknown) is COVERAGE. A Codex seat has no hook, and the structural matcher is
+     *     Claude-shaped over a fixed 8-line tail window, so a tall Codex footer pushes the real work
+     *     line out of view and the seat falls to `unknown`. Motion is a fact about bytes on the pane,
+     *     so it covers every runtime without a matcher per provider — the treadmill this avoids.
+     *   D2 (Claude → idle) is PRECEDENCE. A seat that Stopped and then RESUMED still carries the
+     *     stale positive `idle` hook as its latest, and the old early-return handed that back as
+     *     authoritative before anything else was consulted. A perfect motion source placed further
+     *     down the ladder would still have lost to it. Motion has to outrank a POSITIVE idle hook,
+     *     not merely an absent one.
+     *
+     * Why `needs_input` outranks motion: motion cannot tell "working" from "waiting at a prompt" —
+     * any per-second redraw keeps the window fresh. If motion outranked a needs_input TEXT verdict,
+     * a seat asking for permission would be relabelled `running`, and the parking watch would step
+     * over the one seat that is actually blocked.
+     *
+     * Why motion never yields `idle`: a silent window is not evidence of a quiet agent (a seat can
+     * think for a long time without printing). Deriving `idle` from silence would satisfy
+     * "not unknown" by relabelling the default, which is the closed union rotting rather than the
+     * signal improving. Silence therefore leaves the prior verdict exactly as it was.
+     */
+    const withMotion = (activity: AgentActivity): AgentActivity => {
+      if (!motionRunning) return activity;
+      if (activity.state !== "idle" && activity.state !== "unknown") return activity;
+      return {
+        state: "running",
+        reason: "window_activity_motion",
+        evidenceSource: "terminal_activity",
+        sampledAt: motion!.lastObservedAt,
+        // The RAW `#{window_activity}` timestamp that earned the verdict — a reader can age it
+        // against their own clock and see for themselves why this seat reads running.
+        evidence: motion!.lastActivityAt ?? null,
+        runtime: entry.runtime ?? null,
+      };
+    };
+
     const hookActivity = deps.activityStore?.getLatestForNode({
       sessionName: entry.canonicalSessionName,
       now: sampledAt,
     });
-    // A fresh POSITIVE hook (running/needs_input/idle) is authoritative — use it directly.
+    // A fresh POSITIVE hook (running/needs_input/idle) is authoritative — EXCEPT that a positive
+    // `idle` hook now yields to live motion (D2). running/needs_input hooks are untouched.
     if (hookActivity && hookActivity.state !== "unknown") {
       return {
         ...entry,
-        agentActivity: hookActivity,
+        agentActivity: withMotion(hookActivity),
       };
     }
 
@@ -1110,51 +1170,55 @@ export async function attachAgentActivity(
     if (structural && structural.state !== "unknown") {
       return {
         ...entry,
-        agentActivity: {
+        agentActivity: withMotion({
           state: mapPaneState(structural.state),
           reason: structural.reason,
           evidenceSource: "pane_heuristic",
           sampledAt: structural.observedAt,
           evidence: structural.evidence,
-        },
+        }),
       };
     }
 
-    // No positive hook and no structural motion. A stale/unknown hook, if one exists, is delivered
+    // No positive hook and no structural verdict. A stale/unknown hook, if one exists, is delivered
     // HONESTLY as-is (unknown/stale) — never upgraded to a quiet-seat verdict on arrival age alone.
+    // Live motion DOES upgrade it, and on this fleet that is the common case rather than the exotic
+    // one: every seat's hook currently arrives and is then demoted to unknown because the occupant
+    // generation cannot be resolved, so a demoted hook — not a positive idle one — is what stands
+    // between a working seat and a truthful label.
     if (hookActivity) {
       return {
         ...entry,
-        agentActivity: hookActivity,
+        agentActivity: withMotion(hookActivity),
       };
     }
 
     if (!captureFallback) {
-      // CHEAP DEFAULT — no per-node tmux capture. running/idle is supplied by the
-      // SeatActivityService snapshot (terminalActive) at higher precedence; a
-      // hook-less seat's pane-heuristic needs_input requires ?full/?refresh.
+      // CHEAP DEFAULT — no per-node tmux capture. A hook-less seat's pane-heuristic needs_input
+      // still requires ?full/?refresh; running now comes from the capture-FREE motion read above,
+      // so the honest `unknown` placeholder is reached only by a seat that is genuinely silent.
       return {
         ...entry,
-        agentActivity: {
+        agentActivity: withMotion({
           state: "unknown",
           reason: "no_runtime_hook",
           evidenceSource: "session_registry",
           sampledAt: sampledAt.toISOString(),
           evidence: null,
           fallback: true,
-        },
+        }),
       };
     }
 
     return {
       ...entry,
-      agentActivity: await probeSessionActivity({
+      agentActivity: withMotion(await probeSessionActivity({
       sessionName: entry.canonicalSessionName,
       runtime: entry.runtime,
       attachmentType: entry.attachmentType,
       tmuxAdapter: deps.tmuxAdapter,
       now: sampledAt,
-    }),
+    })),
     };
   }));
 }
