@@ -188,6 +188,23 @@ describe("QueueRepository", () => {
     }
   });
 
+  // 0.5.1-53 Atom 1b(iii) — propagate-completion. blocked_on PROMISES "A waits until B completes";
+  // that promise never fired (the desk sat on a done blocker for hours). When B reaches a terminal
+  // state, the rows blocked ON it must auto-unpark — the semantic blocked_on always owed.
+  it("Atom 1b(iii): terminalizing a blocker auto-unparks the rows blocked on it", async () => {
+    const blocker = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "blocker" });
+    const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "work" });
+    repo.update({ qitemId: item.qitemId, actorSession: "bob@rig", state: "blocked", blockedOn: blocker.qitemId });
+    expect(repo.getById(item.qitemId)!.state).toBe("blocked");
+    // Complete the blocker.
+    repo.claim({ qitemId: blocker.qitemId, destinationSession: "bob@rig" });
+    repo.update({ qitemId: blocker.qitemId, actorSession: "bob@rig", state: "done", closureReason: "no-follow-on" });
+    // RED at 1b(ii): the blocked row stays blocked forever (completion never propagated).
+    const after = repo.getById(item.qitemId)!;
+    expect(after.state, "a row blocked on a now-terminal blocker must auto-unpark").toBe("pending");
+    expect(after.blockedOn, "auto-unpark clears the (now-resolved) blocker").toBeNull();
+  });
+
   it("update state=done WITHOUT closure_reason rejected with missing_closure_reason", async () => {
     const item = await repo.create({
       sourceSession: "alice@rig",

@@ -1920,6 +1920,39 @@ export class QueueRepository {
       identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
     });
 
+    // 0.5.1-53 Atom 1b(iii) — propagate-completion. blocked_on PROMISES "A waits until B completes";
+    // that promise never fired on this runtime (rows sat blocked on done/canceled blockers for days).
+    // When THIS qitem reaches a terminal state, auto-unpark every row parked on it (blocked_on = this,
+    // state='blocked') to pending, clear its (now-resolved) blocker, log the transition, and emit an
+    // event so watchers/sweeps see the unblock without a fetch.
+    const TERMINAL_STATES = ["done", "failed", "denied", "canceled", "handed-off"];
+    if (TERMINAL_STATES.includes(input.state)) {
+      const blockedRows = this.db
+        .prepare("SELECT qitem_id FROM queue_items WHERE blocked_on = ? AND state = 'blocked'")
+        .all(input.qitemId) as Array<{ qitem_id: string }>;
+      for (const r of blockedRows) {
+        this.db
+          .prepare("UPDATE queue_items SET state = 'pending', blocked_on = NULL, ts_updated = ? WHERE qitem_id = ?")
+          .run(ts, r.qitem_id);
+        this.transitionLog.append({
+          qitemId: r.qitem_id,
+          state: "pending",
+          actorSession: input.actorSession,
+          transitionNote: `auto-unparked: blocker ${input.qitemId} reached terminal state '${input.state}'`,
+        });
+        this.eventBus.persistWithinTransaction({
+          type: "queue.updated",
+          qitemId: r.qitem_id,
+          fromState: "blocked",
+          toState: "pending",
+          closureReason: null,
+          closureTarget: null,
+          actorSession: input.actorSession,
+          summary: null,
+        });
+      }
+    }
+
     return this.eventBus.persistWithinTransaction({
       type: "queue.updated",
       qitemId: input.qitemId,
