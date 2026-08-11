@@ -17,23 +17,70 @@ markdown on disk** — agents change the files, the UI re-projects. These
 conventions define "well-formed." Everything here is **advisory / fail-open
 for agents**: nothing below blocks a write; the audit records and advises.
 
-## 1. The flow in one pass
+
+## WHERE YOU ARE DECIDES WHICH LOOP YOU RUN — the VM inner loop vs the host outer loop
+
+The parent host's SDLC was being applied wholesale to the VM. **They are different worlds with
+different responsibilities**, and conflating them is what turned this document into friction.
+
+| | **INNER LOOP — the VM** | **OUTER LOOP — the parent host** |
+|---|---|---|
+| **question it answers** | *does it actually work?* | *does what was delivered match what was intended?* |
+| **method** | ground → fix → upgrade in place → **run it and look** → iterate | intent-vs-delivered comparison, commit-message review, privacy/leak scrub, release management, publish |
+| **definition of done** | to the best of our knowledge the code is **completely functional and works**, and needs **no heavy refactoring** to be release-ready | the release is shippable and honest |
+| **ceremony** | **Part A only.** Part B is not the default here. | **Part B applies.** The release itself earns it. |
+
+**WHY the ceremony belongs there and not here — the rule that makes this self-enforcing:** the
+proof ceremony is a **protocol for transmitting confidence to someone who was not there.**
+Plan-lock, proof contracts, C1 drops and intent-vs-delivered all exist so a reader who did NOT
+watch the work happen can verify that it did. On the host that is exactly the situation, so the
+artifacts must carry the confidence. **On the VM the builder IS there** — they ran it and looked at
+it. Running the ceremony there re-encodes, at high cost, something already known, for an audience
+standing in the room.
+
+**WHERE A FIX GOES — go where the validation is POSSIBLE, not where the ceremony lives:**
+
+- **Needs a live daemon to verify → the VM.** That is the only place it CAN be verified. (Worked
+  example: proving the ACTIVITY telemetry was really fixed required cutting the runtime over and
+  reading real values; no amount of host-side review could establish it.)
+- **Verifiable by reading — docs, comment scrubs, message hygiene → the host.**
+
+**The VM's north star for a release:** hand the host code that, to the best of our knowledge, is
+completely functional and works. Not a proof pack. **Effect-verified functionality.**
+
+
+## HOW TO READ THIS DOCUMENT — two parts, and only one of them is the default
+
+| | applies | contents |
+|---|---|---|
+| **PART A — THE SIMPLE SDLC** | **ALWAYS. This is the default.** | artifact conventions, proportionality, the advisory audit, the honesty rails |
+| **PART B — THE RIGOROUS OVERLAY** | **ONLY when the founder, or an orchestrator relaying the founder, ASSIGNS the heavy path to a NAMED piece of work** | the proof-contract format, the two locks, C1 proof drops, the locked role contracts |
+
+**You may not select Part B for yourself.** If you believe something earns it, say so in ONE
+sentence and continue on Part A until told otherwise. Part A corresponds to the `mission-slice-sop`
+skill; Part B to `mission-slice-intent-proof-sop`.
+
+# PART A — THE SIMPLE SDLC (applies always)
+
+## A1. The flow in one pass
 
 ```
-intent → mini-requirements + proof contract → (UI slices: mockups)
-      → plan-lock (rig scope slice approve --scope spec)
-      → build the LOCKED set
-      → QA: mockup ↔ delivered VISUAL compare
-      → proof drops (rig proof add <slice> …)
-      → proof-lock (rig scope slice approve --scope delivery)
+intent (what is this for, what does done look like)
+      → build it
+      → test it with your own eyes
+      → record honestly what you verified, and what you did NOT
+      → hand off (rig queue handoff) or stop
 ```
 
-The human should almost never see something that doesn't match what was
-planned — QA catches mismatches and kicks them back. When the human looks,
-they map intent → plan → delivered at a glance, mostly by scanning screenshots
-down a single column, and give the final 1% approval.
+One full-breadth review at the end, not per increment. Bring work when it is **done**. The human
+should almost never see something that doesn't match what was planned — QA catches mismatches and
+kicks them back. When the human looks, they map intent → plan → delivered at a glance, mostly by
+scanning screenshots down a single column, and give the final 1% approval.
 
-## 2. Slice artifact conventions (what the UI projects)
+**The heavier flow — proof contracts, plan-lock, C1 drops, proof-lock — is PART B and is not in
+force unless assigned.**
+
+## A2. Slice artifact conventions (what the UI projects)
 
 Each slice directory carries:
 
@@ -57,70 +104,7 @@ stack of **INTENT → PLAN → DELIVERED**. A slice missing a section still
 renders (the projection degrades to a muted "—", never invents content) —
 but it does not carry its weight in review.
 
-## 3. The proof contract format
-
-`## Proof contract` is a markdown checkbox list; each item is one promised
-deliverable, written as an observable outcome:
-
-```markdown
-## Proof contract
-
-- [ ] The consolidated `rig ps` default renders all rigs with a rollup footer — captured.
-- [ ] UI: the slice review tab renders the three-section stack — screenshot vs the locked mockup.
-```
-
-- Each item is joined (by item text or 1-based index) to the proof artifacts
-  that evidence it — that pairing is what the DELIVERED section renders, so
-  the human never hunts through dozens of artifacts to find which one proves
-  what.
-- **UI deliverables carry a planned mockup** (`plannedRef`): the planning
-  agent produces the mockup and attaches it to the locked set. A UI slice
-  with no mockup in its locked set is an incomplete plan. Non-UI slices
-  (backend, skills, markdown) have no mockup and no `plannedRef` — that is
-  not a gap and not a gate.
-- A deliverable QA did not actually verify shows as `unverified`/`missing`
-  in the UI — visible, never hard-blocking.
-
-## 4. The two locks (shipped verb — not new machinery)
-
-Two deliberate stamps, both written by the SAME shipped verb
-(`rig scope slice approve`, one daemon-side write path: frontmatter stamp +
-append-only audit row land together):
-
-- **Plan-lock:** `rig scope slice approve <slice> --scope spec` — "the PRD
-  matches my intent; THIS artifact set is what gets built." Pins the locked
-  artifact set (spec/PRD/mockups) out of everything else in the folder.
-- **Proof-lock:** `rig scope slice approve <slice> --scope delivery`
-  (the default scope) — the terminal "this is done" sign-off; fires the
-  freeze.
-
-Approval is freeze/sign-off — **never** proven-green. Proven-green requires a
-recorded verdict (a C1 proof artifact, §5); presence of an approval stamp does
-not assert the work was proven. `--on-behalf-of` records delegation honestly
-(the actor stays the real invoking session).
-
-## 5. Proof drops and the C1 header (closed sets)
-
-Proof artifacts land in `proof/` via the shipped verb:
-
-```bash
-rig proof add <slice> \
-  --artifact-type qa \
-  --verdict PASS \
-  --candidate-sha <the-proven-tip> \
-  --money-evidence "one line of money evidence" \
-  --file <artifact.md> \
-  --evidences "1,3" \
-  --media "walk.webm,panel.png" \
-  --self-check "I looked at the captures; they show the claim"
-```
-
-The C1 header's five required fields: `slice`, `candidate_sha`,
-`artifact_type`, `verdict`, `money_evidence`. Two **ratified closed sets**
-(extending either is a convention change, not a local edit):
-
-- `artifact_type`: `guard | qa | rev1-r1 | rev1-r2 | adjudication`
-- `verdict`: `CLEAR | BLOCKING | CONCERNING | PASS | NOT-CLEAR`
+## A3. Honesty rails (public surfaces + cited hashes)
 
 ### Public-repo surfaces read as product engineering
 
@@ -141,7 +125,6 @@ for these):
 The test: a reader outside the project should be able to act on the text without
 knowing any internal role, seat, or process name. This is the same principle applied
 to attribution and tone rather than to vocabulary.
-
 ### A cited hash STATES WHAT IT COVERS
 
 A hash offered as evidence is only checkable if the reader knows what bytes it
@@ -172,6 +155,121 @@ The **path + anchor is the AUTHORITY**; the whole-file hash **DATES** the
 citation. That artifact is a living doc: the hash goes stale at the next
 legitimate append, the anchor does not — the CURRENT-line convention applied to
 a citation.
+## A4. The elastic middle (proportionality — no minted ceremony)
+
+The SDLC has exactly three fixed capture points: **intent** → a
+**proportional structured requirement** → **proof**. Everything between is
+elastic. For a small slice (a bug fix, a research note), the
+mini-requirements may BE the whole PRD — the convention sections must be
+present so the slice projects, but their contents scale to the work. Gates
+are losslessness checks on the decompression from intent to delivery, not
+paperwork. Scaffolding emits the sections; it must never mint ceremony.
+## A5. The audit (advisory, fail-open — always)
+
+`rig scope audit` (and the advisory rows in `rig workspace validate` /
+`doctor`) checks these conventions: the section headings present, the proof
+contract well-formed, `proof/` artifacts carrying valid C1 headers, UI slices
+referencing a mockup. Every finding **records and advises — it never blocks a
+write path and never changes exit semantics into a gate**. Unknown is
+reported as unknown, not failure.
+## A6. Where the knowledge lives (the four pointers)
+
+- **This document** — the SSOT.
+- **Scaffold**: `rig scope slice create` emits the convention sections +
+  `proof/` + an `IMPLEMENTATION-PRD.md` skeleton for every template kind;
+  `rig scope mission create` emits the convention pointer.
+- **Skills — TWO, matching this document's two parts**: `mission-slice-sop`
+  teaches **Part A**, the light default; `mission-slice-intent-proof-sop`
+  teaches **Part B**, the assigned overlay. Assigned-only, never self-selected.
+- **Bootstrap**: the shipped agent overlay points fresh seats at the skill
+  and this document at boot.
+
+# PART B — THE RIGOROUS OVERLAY (assigned only)
+
+> **ENTRY CONDITION:** everything below applies **only** when the founder — or an orchestrator
+> explicitly relaying the founder — has assigned the heavy path to a **named** piece of work.
+> If you arrived here without an assignment, stop and use Part A.
+>
+> **Rails:** the locks are **two, and only two**. Nothing here authorizes a second gate round on
+> the same work, a gate on documentation / comments / tests / fixtures, or asking a peer to gate
+> what you can verify with your own eyes. **Cut rounds, never checks.** The tier is **re-chosen**
+> when the surface changes.
+
+## B0. The assigned flow in one pass
+
+```
+intent → mini-requirements + proof contract → (UI slices: mockups)
+      → plan-lock (rig scope slice approve --scope spec)
+      → build the LOCKED set
+      → QA: mockup ↔ delivered VISUAL compare
+      → proof drops (rig proof add <slice> …)
+      → proof-lock (rig scope slice approve --scope delivery)
+```
+
+## B1. The proof contract format
+
+`## Proof contract` is a markdown checkbox list; each item is one promised
+deliverable, written as an observable outcome:
+
+```markdown
+## Proof contract
+
+- [ ] The consolidated `rig ps` default renders all rigs with a rollup footer — captured.
+- [ ] UI: the slice review tab renders the three-section stack — screenshot vs the locked mockup.
+```
+
+- Each item is joined (by item text or 1-based index) to the proof artifacts
+  that evidence it — that pairing is what the DELIVERED section renders, so
+  the human never hunts through dozens of artifacts to find which one proves
+  what.
+- **UI deliverables carry a planned mockup** (`plannedRef`): the planning
+  agent produces the mockup and attaches it to the locked set. A UI slice
+  with no mockup in its locked set is an incomplete plan. Non-UI slices
+  (backend, skills, markdown) have no mockup and no `plannedRef` — that is
+  not a gap and not a gate.
+- A deliverable QA did not actually verify shows as `unverified`/`missing`
+  in the UI — visible, never hard-blocking.
+
+## B2. The two locks (shipped verb — not new machinery)
+
+Two deliberate stamps, both written by the SAME shipped verb
+(`rig scope slice approve`, one daemon-side write path: frontmatter stamp +
+append-only audit row land together):
+
+- **Plan-lock:** `rig scope slice approve <slice> --scope spec` — "the PRD
+  matches my intent; THIS artifact set is what gets built." Pins the locked
+  artifact set (spec/PRD/mockups) out of everything else in the folder.
+- **Proof-lock:** `rig scope slice approve <slice> --scope delivery`
+  (the default scope) — the terminal "this is done" sign-off; fires the
+  freeze.
+
+Approval is freeze/sign-off — **never** proven-green. Proven-green requires a
+recorded verdict (a C1 proof artifact, §5); presence of an approval stamp does
+not assert the work was proven. `--on-behalf-of` records delegation honestly
+(the actor stays the real invoking session).
+
+## B3. Proof drops and the C1 header (closed sets)
+
+Proof artifacts land in `proof/` via the shipped verb:
+
+```bash
+rig proof add <slice> \
+  --artifact-type qa \
+  --verdict PASS \
+  --candidate-sha <the-proven-tip> \
+  --money-evidence "one line of money evidence" \
+  --file <artifact.md> \
+  --evidences "1,3" \
+  --media "walk.webm,panel.png" \
+  --self-check "I looked at the captures; they show the claim"
+```
+
+The C1 header's five required fields: `slice`, `candidate_sha`,
+`artifact_type`, `verdict`, `money_evidence`. Two **ratified closed sets**
+(extending either is a convention change, not a local edit):
+
+- `artifact_type`: `guard | qa | rev1-r1 | rev1-r2 | adjudication`
+- `verdict`: `CLEAR | BLOCKING | CONCERNING | PASS | NOT-CLEAR`
 
 `candidate_sha` is the join key: the proven candidate tip this artifact
 judges. `--evidences` names which proof-contract deliverable(s) the drop
@@ -186,7 +284,7 @@ in `proof/` without a drop is the anti-pattern**: the deliverable stays
 unpaired and `unverified` in the DELIVERED view — always attach media via
 `--media` on a drop.
 
-## 6. Role contracts (what makes the structure self-enforcing)
+## B4. Role contracts (what makes the structure self-enforcing)
 
 - **Planning agent:** authors intent verbatim, the mini-requirements, and the
   `## Proof contract` (each UI deliverable with its mockup `plannedRef`);
@@ -206,33 +304,3 @@ what it looks like now" evidence the agent stands behind — bounded, mapped
 1:1 (or few:1) to deliverables. The fix-loop's full artifact history stays in
 `proof/`, one drill-in down, NEVER in the primary view. The anti-pattern:
 an append-only pile where the human can't tell final from superseded.
-
-## 7. The elastic middle (proportionality — no minted ceremony)
-
-The SDLC has exactly three fixed capture points: **intent** → a
-**proportional structured requirement** → **proof**. Everything between is
-elastic. For a small slice (a bug fix, a research note), the
-mini-requirements may BE the whole PRD — the convention sections must be
-present so the slice projects, but their contents scale to the work. Gates
-are losslessness checks on the decompression from intent to delivery, not
-paperwork. Scaffolding emits the sections; it must never mint ceremony.
-
-## 8. The audit (advisory, fail-open — always)
-
-`rig scope audit` (and the advisory rows in `rig workspace validate` /
-`doctor`) checks these conventions: the section headings present, the proof
-contract well-formed, `proof/` artifacts carrying valid C1 headers, UI slices
-referencing a mockup. Every finding **records and advises — it never blocks a
-write path and never changes exit semantics into a gate**. Unknown is
-reported as unknown, not failure.
-
-## 9. Where the knowledge lives (the four pointers)
-
-- **This document** — the SSOT.
-- **Scaffold**: `rig scope slice create` emits the convention sections +
-  `proof/` + an `IMPLEMENTATION-PRD.md` skeleton for every template kind;
-  `rig scope mission create` emits the convention pointer.
-- **Skill**: `mission-slice-sop` teaches the full flow (shipped in the
-  product skill tree and the bundled plugin, mechanically mirrored).
-- **Bootstrap**: the shipped agent overlay points fresh seats at the skill
-  and this document at boot.
