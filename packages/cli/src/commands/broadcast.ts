@@ -8,7 +8,7 @@ import { loadHostRegistry, resolveHost, hostDisplayTarget } from "../host-regist
 import { emitCrossHostError, emitRemoteHttpFailure } from "../cross-host-cli-helpers.js";
 import { runRemoteHttpOp } from "../remote-host-ops.js";
 import { resolveContextRef, walkSizedWarning } from "../context-resolve.js";
-import { requireAttributableSender } from "../sender-identity.js";
+import { resolveSenderSession, SENDER_FALLBACK } from "../sender-identity.js";
 
 /**
  * OPR.0.4.6.MH4 C3 — the cross-host broadcast deadline, named at the call
@@ -77,13 +77,12 @@ selection, not the agent@rig@host sugar.`)
         return;
       }
 
-      // A1 REFUSE-LOUD (identity/audit family) — the seat boundary. A broadcast is attributable-only: if
-      // the seat identity is unresolvable, REFUSE here before either dispatch path (cross-host or local) —
-      // nothing on the wire. Replaces the prior session-less `<unknown sender>` fall-open marker (which
-      // relied on the daemon's downstream 401): the CLI now refuses at the boundary, so no unattributable
-      // broadcast is ever dispatched. Mirrors `rig send`'s guard and the daemon 401 unattributable_sender.
-      const seatSender = requireAttributableSender();
-      if (seatSender === null) return;
+      // P18 DELIVER-AND-LABEL — the seat boundary no longer refuses. Resolve the broadcasting seat from the
+      // seat env; when it is unresolvable the broadcast STILL proceeds carrying the honest `<unknown sender>`
+      // marker (so the anti-storm scale header is always present — no session-less storm), delivered-and-
+      // labelled rather than refused. `seatSender` is `string | undefined`, threaded to both dispatch paths.
+      // Mirrors the daemon half, which delivers-and-labels the header-absent write (no 401).
+      const seatSender = resolveSenderSession();
 
       // --- Cross-host path (CLI-direct POST to the remote daemon's shipped
       // /api/transport/broadcast; its own fan-out engine resolves the
@@ -124,11 +123,11 @@ selection, not the agent@rig@host sugar.`)
       // Send/broadcast header (ruling 03c35295): identify the broadcasting seat so the daemon fan-out
       // WRAPS each recipient with the scale header ("broadcast to <rig> (N seats)" / topology) instead
       // of delivering raw — a recipient tells it was a broadcast header-alone (the anti-storm teeth).
-      // A1: `seatSender` is the RESOLVED broadcasting seat (the seat-boundary guard refused an
-      // unattributable broadcast), so the marker is always the real sender — never a session-less
-      // fall-open literal. Its VALUE is ignored daemon-side (the fan-out derives From: from the transport
-      // header); its PRESENCE is the anti-storm signal to WRAP each recipient with the scale header.
-      body.envelopeSender = seatSender;
+      // P18: `seatSender` is the broadcasting seat, or the `<unknown sender>` fall-open when unresolvable —
+      // the marker is ALWAYS present so its PRESENCE stays the anti-storm signal to WRAP each recipient with
+      // the scale header. Its VALUE is ignored daemon-side (the fan-out derives From: from the transport
+      // header). An env-less broadcast delivers-and-labels rather than refusing.
+      body.envelopeSender = seatSender ?? SENDER_FALLBACK;
 
       const res = await client.post<Record<string, unknown>>("/api/transport/broadcast", body);
 
@@ -167,7 +166,7 @@ async function runCrossHostBroadcast(
   text: string,
   opts: { rig?: string; pod?: string; force?: boolean; json?: boolean },
   deps: BroadcastDeps,
-  seatSender: string = "",
+  seatSender: string | undefined = undefined,
 ): Promise<void> {
   const loader = deps.hostRegistryLoader ?? loadHostRegistry;
   const registry = loader();
@@ -185,12 +184,13 @@ async function runCrossHostBroadcast(
   const body: Record<string, unknown> = { text, force: opts.force };
   if (opts.rig) body.rig = opts.rig;
   if (opts.pod) body.pod = opts.pod;
-  // P21 cross-host broadcast fix + A1: ADD the enveloped-fan-out marker (a rebuild once dropped it, so the
-  // remote rendered RAW while the local path wrapped). `seatSender` is the RESOLVED origin seat (the
-  // seat-boundary guard refused otherwise). The DaemonClient auto-stamps X-OpenRig-Session=origin env on
-  // this POST (client.ts:171, P18 chokepoint), so the remote derives From: from the transport; the marker
-  // VALUE is ignored. No extra-headers stamp (that would be a second origin of an already-stamped header).
-  body.envelopeSender = seatSender;
+  // P21 cross-host broadcast fix + P18: ADD the enveloped-fan-out marker (a rebuild once dropped it, so the
+  // remote rendered RAW while the local path wrapped). `seatSender` is the origin seat, or the
+  // `<unknown sender>` fall-open when unresolvable — the marker is ALWAYS present. The DaemonClient
+  // auto-stamps X-OpenRig-Session=origin env on this POST (client.ts:171, P18 chokepoint), so the remote
+  // derives From: from the transport; the marker VALUE is ignored. No extra-headers stamp (that would be a
+  // second origin of an already-stamped header).
+  body.envelopeSender = seatSender ?? SENDER_FALLBACK;
 
   const result = await runRemoteHttpOp(hostId, "POST", "/api/transport/broadcast", body, deps, {
     timeoutMs: BROADCAST_REMOTE_TIMEOUT_MS,

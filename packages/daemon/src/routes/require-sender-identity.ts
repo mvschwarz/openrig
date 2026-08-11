@@ -10,24 +10,21 @@ import type { Context } from "hono";
  * refusals this helper used to raise both asserted "this sender is ILLEGITIMATE" when the only thing
  * actually known was "I cannot verify this sender at this boundary". Those are different claims and
  * the system was making the confident one:
- *   - 401 `unattributable_sender` (header absent) — DELETED. A missing header means an unmanaged
- *     terminal, not an attacker; this trust domain's only caller is the operator's own client.
- *     The honest response is to DELIVER and record the weaker era-stamp `claimed:v1`.
+ *   - 401 `unattributable_sender` (header absent) — DELETED. A missing header means the sender cannot be
+ *     certified at this boundary; the honest response is to DELIVER and record the weaker era-stamp
+ *     `claimed:v1`.
  *   - 409 `identity_mismatch` (body claim ≠ transport identity) — DELETED (PM, 2026-08-11, ruling (A):
  *     both refusals die, folded into this ONE sweep — the earlier one-atom-each split was retired as
- *     unnecessary ceremony). The fact that this sender IS certified is exactly why refusing them was
- *     wrong: the wire decides the actor and the body never does, so a disagreeing body claim is NOISE TO
- *     BE SUPERSEDED, not an attack to be refused. Deliver under the wire identity, labelled transport:v1;
- *     the discrepancy is NOT persisted (no new field/schema). The incident transport matrix showed this
- *     409 firing on honest-but-skewed clients (stale env / legacy --actor / relay skew), never adversaries.
- *     The byte-identical 409 in resolveActorWithDeferral (below) is retired the same way so the two
- *     sibling helpers agree on the supersede rule.
+ *     unnecessary ceremony). A certified wire identity is exactly why refusing was wrong: the wire decides
+ *     the actor and the body never does, so a disagreeing body claim is NOISE TO BE SUPERSEDED, not a
+ *     reason to refuse. Deliver under the wire identity, labelled transport:v1; the discrepancy is NOT
+ *     persisted (no new field/schema). The byte-identical 409 in resolveActorWithDeferral (below) is
+ *     retired the same way so the two sibling helpers agree on the supersede rule.
  *
- * What remains beyond that is NOT an adversary boundary: with neither a transport header nor a body
- * actor there is no actor to put on the ledger row at all, so the caller is asked for the missing
- * parameter (400 `actor_required`) — the same shape PM ruled a deliberate keep at queue.ts:215.
- * Requiring a parameter is honest help; refusing a named actor because it cannot be cryptographically
- * vouched for is not.
+ * With NEITHER a transport header NOR a body actor there is no actor to put on the ledger row at all, so
+ * the caller is asked for the missing parameter (400 `actor_required`) — the same shape PM ruled a
+ * deliberate keep at queue.ts:215. Requiring a present-but-absent parameter is honest help; it is not a
+ * refusal of a named sender.
  *
  * The label half is NOT new machinery: `resolveRecordedProvenance` below already degrades down as its
  * default branch, and `resolveActorWithDeferral` already did deliver-and-label on founder-visible

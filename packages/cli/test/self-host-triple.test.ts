@@ -37,10 +37,15 @@ describe("wrapSendBody — always-suffix sender triple", () => {
     expect(a1.split("host-aaaa").join("host-bbbb")).toBe(b);
   });
 
-  // A1 REFUSE-LOUD: `wrapSendBody` requires a resolved sender (the seat-boundary guard refuses an
-  // unattributable send), so the undefined-sender fallback this asserted is gone from the CLI twin —
-  // it survives only on the daemon `wrapPaneEnvelope` for the non-refusable nudge (never suffixed
-  // there either; tested in packages/daemon/test/pane-envelope.test.ts).
+  // P18: the RESTORED `<unknown sender>` fallback is NEVER host-suffixed — there is no origin host to name.
+  // Even with a resolved selfHostId, an undefined sender renders the BARE marker (not `<unknown sender>@host`),
+  // exercising the `senderLabel !== SENDER_FALLBACK` branch of the triple logic.
+  it("P18: the `<unknown sender>` fallback is NEVER suffixed with this host's selfHostId", () => {
+    const out = wrapSendBody(undefined, "peer@rig", "hi", "host-aaaa");
+    expect(out).toContain("From: <unknown sender>\n");
+    expect(out).not.toContain("<unknown sender>@host-aaaa");
+    expect(out).toContain('↩ Reply: rig send <unknown sender> "..."');
+  });
 
   it("--from relay: a sender ALREADY carrying an origin triple is preserved verbatim, never re-stamped with THIS host", () => {
     const originTriple = `${SENDER}@origin-host`;

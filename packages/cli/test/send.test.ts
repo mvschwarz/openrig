@@ -3,6 +3,7 @@ import http from "node:http";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { sendCommand, type SendDeps } from "../src/commands/send.js";
 import { DaemonClient } from "../src/client.js";
@@ -171,19 +172,23 @@ describe("Send CLI", () => {
     expect(logs.join("\n")).toContain("Sent to dev-impl@my-rig");
   });
 
-  // A1 REFUSE-LOUD (identity/audit family, atom 1): an unattributable send — no --from (deprecated +
-  // ignored) AND no resolvable OPENRIG_SESSION_NAME/RIGGED_SESSION_NAME — must REFUSE at the seat boundary:
-  // non-zero exit, and NOTHING dispatched. The load-bearing assertion is the ABSENCE OF A DISPATCH
-  // (lastSendBody stays null), not merely the message — the channel of record records only a derived sender.
-  it("A1: an unattributable send refuses LOUD — non-zero exit, NOTHING rendered or dispatched", async () => {
+  // P18 DELIVER-AND-LABEL (deletion atom): an env-less send — no --from (deprecated + ignored) AND no
+  // resolvable OPENRIG_SESSION_NAME/RIGGED_SESSION_NAME — now DELIVERS, carrying an HONEST `<unknown sender>`
+  // label rather than refusing. The reset's north star: deleting a refusal must not manufacture a laundering
+  // path, so an unattributable send is DISPATCHED with a truthful marker and a NULL actorSession — never a
+  // forged actor. This REVERSES A1's seat-boundary refusal; the daemon half already delivers-and-labels the
+  // header-absent write (no downstream 401), so the marker reaches the pane instead of being refused.
+  it("P18: an env-less send DELIVERS with an honest `<unknown sender>` label — dispatched, actorSession null", async () => {
     vi.stubEnv("OPENRIG_SESSION_NAME", ""); // override the block seat-stub → unresolvable
     vi.stubEnv("RIGGED_SESSION_NAME", "");
-    const { logs, exitCode } = await captureLogs(async () => {
+    const { exitCode } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello world"]);
     });
-    expect(exitCode).toBe(1);
-    expect(lastSendBody).toBeNull(); // ABSENCE OF DISPATCH — nothing reached the wire
-    expect(logs.join("\n")).toMatch(/unattributable|no resolvable seat|nothing was sent/i);
+    expect(exitCode).toBeFalsy(); // DELIVERED, not refused
+    expect(lastSendBody).not.toBeNull(); // dispatch reached the wire
+    // Honest label on the rendered envelope; NO forged actor identity on the record.
+    expect((lastSendBody as Record<string, unknown>).text).toContain("From: <unknown sender>");
+    expect((lastSendBody as Record<string, unknown>).actorSession).toBeNull();
   });
 
   it("A1: a resolvable seat still SENDS (the guard admits an attributable send) — dispatch reaches the wire", async () => {
@@ -197,15 +202,42 @@ describe("Send CLI", () => {
     expect((lastSendBody as Record<string, unknown>)["actorSession"]).toBe("driver@my-rig");
   });
 
-  // A1 NEGATIVE CONTROL — canonicity asserted as an EFFECT, not a prose comment. After A1 the CLI
-  // `<unknown sender>` fallbacks are DELETED, so the literal has exactly ONE definition in the whole
-  // src tree: the daemon's pane-envelope.ts (the non-refusable queue-nudge sender). This guard fails
-  // the moment a SECOND definition reappears ANYWHERE in src — the drift a lockstep comment could not
-  // prevent. Comment mentions are excluded (they document, they don't define).
-  it("A1: the '<unknown sender>' literal is DEFINED exactly once in the src tree — pane-envelope.ts", () => {
-    const repoRoot = path.resolve(process.cwd(), "../..");
+  // P18 CANONICITY GUARD (rework of the A1 negative control). Two intents, split so the one that still
+  // holds cannot ride on the one that no longer does:
+  //   SURVIVES — NO SCATTERED FALLBACKS: the `<unknown sender>` literal is DEFINED only at its legitimate
+  //     twin sites; a THIRD definition ANYWHERE in src is exactly the drift a lockstep comment cannot catch.
+  //   DIES — "exactly ONCE because A1 deleted the CLI fallbacks": P18 (deletion atom) REVERSES A1. An
+  //     env-less send now DELIVERS carrying the honest `<unknown sender>` marker (the daemon half delivers-
+  //     and-labels the header-absent write), so the CLI RE-GAINS a SINGLE origin — sender-identity.ts,
+  //     IMPORTED by send.ts + broadcast.ts (never re-declared). The literal now lives at EXACTLY TWO
+  //     byte-identical twin sites: the CLI envelope origin and the daemon's pane-envelope.ts.
+  // Asserted as EXACT SET MEMBERSHIP with BOTH twins NAMED — NOT a count/upper bound. A 3rd file fails BY
+  // NAME (the offender is printed), and a MISSING twin fails too. cwd-INDEPENDENT: repoRoot is derived from
+  // THIS file's own location (walk up to the packages root), never process.cwd() — so the guard is correct
+  // whether vitest runs from packages/cli or the repo root.
+  it("P18 canonicity: '<unknown sender>' is DEFINED at EXACTLY the two named twin sites — a third fails BY NAME", () => {
+    const findRepoRoot = (start: string): string => {
+      let dir = start;
+      for (let i = 0; i < 25; i++) {
+        if (
+          fs.existsSync(path.join(dir, "packages", "cli", "src")) &&
+          fs.existsSync(path.join(dir, "packages", "daemon", "src"))
+        ) return dir;
+        const parent = path.dirname(dir);
+        if (parent === dir) break;
+        dir = parent;
+      }
+      throw new Error(`repo root (with packages/cli/src + packages/daemon/src) not found upward from ${start}`);
+    };
+    const repoRoot = findRepoRoot(path.dirname(fileURLToPath(import.meta.url)));
     const packagesDir = path.join(repoRoot, "packages");
     const LITERAL = '"<unknown sender>"'; // the double-quoted string-literal token (a definition, not prose)
+
+    // The two legitimate twin definition sites, NAMED (byte-identical envelope twins):
+    const EXPECTED_TWINS = [
+      "packages/cli/src/sender-identity.ts",       // the SOLE CLI origin — send.ts + broadcast.ts IMPORT it
+      "packages/daemon/src/lib/pane-envelope.ts",  // the daemon origin — wrapPaneEnvelope + non-refusable nudge
+    ].sort();
 
     const srcFiles: string[] = [];
     const walk = (dir: string): void => {
@@ -226,17 +258,28 @@ describe("Send CLI", () => {
 
     const hits: string[] = [];
     for (const file of srcFiles) {
+      const rel = path.relative(repoRoot, file).split(path.sep).join("/"); // normalized, forward-slash
       const lines = fs.readFileSync(file, "utf8").split("\n");
       lines.forEach((line, i) => {
         const trimmed = line.trim();
         // Skip comment lines (line comments, JSDoc/block-comment bodies) — prose mentions don't count.
         if (trimmed.startsWith("//") || trimmed.startsWith("*") || trimmed.startsWith("/*")) return;
-        if (line.includes(LITERAL)) hits.push(`${path.relative(repoRoot, file)}:${i + 1}`);
+        if (line.includes(LITERAL)) hits.push(`${rel}:${i + 1}`);
       });
     }
 
-    expect(hits.length, `expected exactly ONE definition of ${LITERAL}, found: ${hits.join(", ")}`).toBe(1);
-    expect(hits[0]).toMatch(/pane-envelope\.ts:/);
+    // (1) EXACT SET of files that DEFINE the literal — a 3rd file (or a missing twin) fails BY NAME.
+    const filesWithDef = [...new Set(hits.map((h) => h.slice(0, h.lastIndexOf(":"))))].sort();
+    expect(
+      filesWithDef,
+      `expected '<unknown sender>' DEFINED at EXACTLY: ${EXPECTED_TWINS.join(", ")} — found definitions: ${hits.join(", ") || "(none)"}`,
+    ).toEqual(EXPECTED_TWINS);
+
+    // (2) exactly ONE definition PER TWIN (not two literals hiding in one named file).
+    for (const twin of EXPECTED_TWINS) {
+      const perTwin = hits.filter((h) => h.startsWith(`${twin}:`));
+      expect(perTwin.length, `expected exactly ONE definition in ${twin}, found ${perTwin.length}: ${perTwin.join(", ")}`).toBe(1);
+    }
   });
 
   it("send with 409 mid-work prints error and exits non-zero", async () => {

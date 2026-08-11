@@ -1,12 +1,18 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { DaemonClient, remoteDaemonClient, senderIdentityHeaders, SENDER_IDENTITY_HEADER } from "../src/client.js";
 import { resolveOriginSelfHostId } from "../src/daemon-lifecycle.js";
 
 /** Walk every non-test, non-dist .ts under a package's src/, returning [absPath, contents]. */
 function srcFiles(pkg: string): Array<[string, string]> {
-  const root = path.resolve(process.cwd(), "..", pkg, "src");
+  // cwd-INDEPENDENT: derive the path from THIS test file's location, never process.cwd(). The old
+  // `path.resolve(process.cwd(), "..", pkg, "src")` vacuously returned [] when vitest ran from the repo
+  // root, silently no-op'ing the grep-guards below (clause 1's `.toEqual([])` would false-green). See the
+  // P18 guard rework in send.test.ts for the same fix.
+  const here = path.dirname(fileURLToPath(import.meta.url)); // .../packages/cli/test
+  const root = path.resolve(here, "..", "..", pkg, "src");   // .../packages/<pkg>/src
   const out: Array<[string, string]> = [];
   const walk = (dir: string): void => {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -210,6 +216,8 @@ describe("A4 — origin-triple carry (senderIdentityHeaders + remoteDaemonClient
   // ── A4 GREP-GUARD — the two structural laws, asserted as EFFECTS (canonicity, not comments). ──
   describe("grep-guard (structural properties, not conventions)", () => {
     it("clause 1 — NO remote client is constructed directly: zero clientFactory(<registry host>.url) in src (all 5 route through remoteDaemonClient)", () => {
+      // Non-empty operand: a `.toEqual([])` over an empty walk would vacuously pass (absence ≠ proof).
+      expect(srcFiles("cli").length, "src walk returned no files — cwd/path resolution is broken").toBeGreaterThan(0);
       const hits: string[] = [];
       for (const [file, body] of srcFiles("cli")) {
         body.split("\n").forEach((line, i) => {

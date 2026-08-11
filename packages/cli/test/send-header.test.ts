@@ -26,11 +26,18 @@ describe("wrapSendBody — pre-release CLI/daemon Item 2 (email-style envelope)"
     expect(out).toContain('↩ Reply: rig send a@r "..."');
   });
 
-  // A1 REFUSE-LOUD removed the CLI `<unknown sender>` fallback: `wrapSendBody` now REQUIRES a resolved
-  // sender (the seat-boundary guard refuses an unattributable send before this renders), so the
-  // undefined/blank input this test exercised is unreachable AND a type error. The fallback-render
-  // behavior legitimately survives ONLY on the daemon twin `wrapPaneEnvelope` (the non-refusable
-  // queue-nudge sender) and is tested there: packages/daemon/test/pane-envelope.test.ts.
+  // P18 DELIVER-AND-LABEL RESTORED the CLI `<unknown sender>` fallback: an env-less send DELIVERS carrying
+  // the honest marker (the daemon half delivers-and-labels the header-absent write — no refusal, no forged
+  // actor). This is the path the deletion atom RE-CREATED, so it gets a direct positive test (per the
+  // lesson: a deleted refusal manufactures an execution path that must be tested). Byte-identical with the
+  // daemon twin `wrapPaneEnvelope` (packages/daemon/test/pane-envelope.test.ts).
+  it("P18: an undefined/blank sender falls open to `From: <unknown sender>` (deliver-and-label, never forged)", () => {
+    expect(wrapSendBody(undefined, "b@r", "hi")).toContain("From: <unknown sender>");
+    expect(wrapSendBody("", "b@r", "hi")).toContain("From: <unknown sender>");
+    expect(wrapSendBody("   ", "b@r", "hi")).toContain("From: <unknown sender>");
+    // the reply hint routes to the honest marker, not a fabricated identity:
+    expect(wrapSendBody(undefined, "b@r", "hi")).toContain('↩ Reply: rig send <unknown sender> "..."');
+  });
 
   it("uses the literal recipient string in the To header so cross-rig addresses survive", () => {
     const out = wrapSendBody("from@a", "to@b", "x");

@@ -71,10 +71,10 @@ describe("Broadcast CLI", () => {
 
   afterAll(() => { server.close(); });
 
-  // A1: a broadcast is attributable-only — the seat-boundary guard refuses when the seat env is
-  // unresolvable. Establish a resolvable seat for every test so the dispatch paths run; the
-  // refuse-loud test below overrides it to empty. (Hermetic-gate default is env-UNSET, so without
-  // this every broadcast test would refuse.) Restored by afterEach so no stub leaks across tests.
+  // P18: establish a RESOLVED seat for every test so the marker renders as the real sender
+  // ("broadcaster@my-rig"); the deliver-and-label test below overrides it to empty to exercise the
+  // `<unknown sender>` fall-open. (Hermetic-gate default is env-UNSET, so without this every broadcast
+  // would render the unknown marker.) Restored by afterEach so no stub leaks across tests.
   beforeEach(() => {
     vi.stubEnv("OPENRIG_SESSION_NAME", "broadcaster@my-rig");
     vi.stubEnv("RIGGED_SESSION_NAME", "");
@@ -181,23 +181,25 @@ describe("Broadcast CLI", () => {
     expect(bcast!.body["text"]).toBe("hi team");
   });
 
-  // A1 REFUSE-LOUD (supersedes the P21 session-less pin): an unattributable cross-host broadcast now
-  // REFUSES at the CLI seat boundary — nothing is dispatched. The prior behavior (SET the marker to
-  // "<unknown sender>" and lean on the remote daemon's 401) put a marked-but-unattributed body on the
-  // wire; A1 refuses BEFORE the POST, so the daemon 401 is a backstop the CLI no longer reaches. The
-  // load-bearing assertion is the ABSENCE OF A DISPATCH (no broadcast POST), not just the exit code.
-  it("A1: a session-less cross-host broadcast REFUSES LOUD at the seat boundary — non-zero exit, NOTHING dispatched (no marker on the wire)", async () => {
+  // P18 DELIVER-AND-LABEL (deletion atom; REVERSES A1, supersedes the P21 session-less pin): an env-less
+  // cross-host broadcast now DELIVERS carrying the honest `<unknown sender>` marker rather than refusing.
+  // The marker's PRESENCE (not its value) is the anti-storm signal, so a session-less broadcast still
+  // WRAPS each recipient (no session-less storm); the daemon half delivers-and-labels the header-absent
+  // write (no downstream 401). Load-bearing: a dispatch DID happen and the marker on the wire is the
+  // honest fallback — never a forged sender.
+  it("P18: an env-less cross-host broadcast DELIVERS with the honest `<unknown sender>` marker on the wire", async () => {
     vi.stubEnv("OPENRIG_SESSION_NAME", "");
     vi.stubEnv("RIGGED_SESSION_NAME", "");
     const { posts, deps } = crossHostBcast();
     const prog = new Command(); prog.exitOverride();
     prog.addCommand(broadcastCommand(deps));
-    const { logs, exitCode } = await captureLogs(async () => {
+    const { exitCode } = await captureLogs(async () => {
       await prog.parseAsync(["node", "rig", "broadcast", "--host", "vm-a", "--rig", "my-rig", "hi team"]);
     });
-    expect(exitCode).toBe(1);
-    expect(posts.find((p) => p.path.includes("/api/transport/broadcast"))).toBeUndefined(); // ABSENCE OF DISPATCH
-    expect(logs.join("\n")).toMatch(/unattributable|no resolvable seat|nothing was sent/i);
+    expect(exitCode).toBeFalsy(); // DELIVERED, not refused
+    const bcast = posts.find((p) => p.path.includes("/api/transport/broadcast"));
+    expect(bcast).toBeDefined(); // dispatch reached the wire
+    expect(bcast!.body["envelopeSender"]).toBe("<unknown sender>"); // honest marker present (anti-storm), never forged
   });
 
   it("broadcast --json prints raw JSON", async () => {

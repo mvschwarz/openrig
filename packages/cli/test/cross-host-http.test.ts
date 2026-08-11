@@ -519,11 +519,11 @@ describe("broadcast --host (net-new, CLI-direct POST)", () => {
     await cmd.parseAsync(["--host", "vps-b", "--rig", "remote-rig", "coordinate"], { from: "user" });
     const call = h.calls[0]!;
     expect(call.path).toBe("/api/transport/broadcast");
-    // P21 fix (203078d7) + A1: the cross-host broadcast CARRIES the enveloped-fan-out marker (it was dropped
+    // P21 fix (203078d7) + P18: the cross-host broadcast CARRIES the enveloped-fan-out marker (it was dropped
     // → the remote rendered raw while the local path wrapped). Its PRESENCE is the signal; its VALUE is the
-    // RESOLVED seat (A1 refuses an unattributable broadcast at the boundary, so the deleted "<unknown
-    // sender>" fallback can no longer appear) and IGNORED by the daemon, which derives the From: from the
-    // auto-stamped X-OpenRig-Session. Strict body + any-string marker.
+    // resolved seat, or the honest "<unknown sender>" fall-open when env-less (P18 delivers-and-labels rather
+    // than refusing) — and IGNORED by the daemon, which derives the From: from the auto-stamped
+    // X-OpenRig-Session. Strict body + any-string marker (robust to either sender value).
     expect(call.body).toEqual({ text: "coordinate", force: undefined, rig: "remote-rig", envelopeSender: expect.any(String) });
     expect(captured.stdoutLines).toContain("[via host=vps-b (http://vps-b:7433)]");
     expect(captured.stdoutLines).toContain("a@remote-rig: sent");
