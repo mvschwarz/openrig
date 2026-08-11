@@ -105,7 +105,16 @@ export interface PreconditionContext {
   ) => Promise<RigResult>;
 }
 
-/** Apply the queue-baton preconditions via shipped `rig queue` writes. Fail-closed. */
+/**
+ * Apply the queue-baton preconditions via shipped `rig queue` writes. Fail-closed.
+ *
+ * Identity (post-P21): `--source` was RETIRED by P21 I3 (c4fad7b39, 2026-08-07 —
+ * deprecated + IGNORED; queue-spine verbs stop sending body identity). The sender
+ * now rides the transport header, which the CLI derives from OPENRIG_SESSION_NAME.
+ * The fixture's declared provenance therefore travels as the per-call ENV identity
+ * — creator = `source`, claimant = `destination` — the same transport-not-body
+ * doctrine the product enforces, converging with it rather than working around it.
+ */
 export async function applyQueuePreconditions(
   preconditions: QueuePrecondition[],
   ctx: PreconditionContext,
@@ -113,9 +122,9 @@ export async function applyQueuePreconditions(
   const runRig = ctx.runRig ?? realRunRig;
   for (const p of preconditions) {
     const create = await runRig(
-      ["queue", "create", "--id", p.id, "--source", p.source, "--destination", p.destination,
+      ["queue", "create", "--id", p.id, "--destination", p.destination,
         "--summary", p.summary ?? p.id, "--body", p.body ?? `51-02 precondition baton ${p.id}`, "--json"],
-      ctx.readEnv, ctx.rigBin,
+      { ...ctx.readEnv, OPENRIG_SESSION_NAME: p.source }, ctx.rigBin,
     );
     if (create.code !== 0) {
       throw new ScenarioPreconditionError(`queue create ${p.id} (exit ${create.code}): ${create.stderr || create.stdout}`);
@@ -123,7 +132,7 @@ export async function applyQueuePreconditions(
     if (p.claim) {
       const claim = await runRig(
         ["queue", "claim", p.id, "--destination", p.destination, "--json"],
-        ctx.readEnv, ctx.rigBin,
+        { ...ctx.readEnv, OPENRIG_SESSION_NAME: p.destination }, ctx.rigBin,
       );
       if (claim.code !== 0) {
         throw new ScenarioPreconditionError(`queue claim ${p.id} (exit ${claim.code}): ${claim.stderr || claim.stdout}`);

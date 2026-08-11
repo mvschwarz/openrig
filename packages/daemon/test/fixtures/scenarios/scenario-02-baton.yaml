@@ -9,10 +9,14 @@
 # verb (verb set = topology/seat + daemon:{op}). The pipeline runs these shipped
 # `rig queue` writes BEFORE the steps, so a reviewer sees exactly where the baton
 # comes from (queue state is daemon-side, independent of any seat process):
-#   rig queue create --id baton-1 --source harness@scn-baton \
-#                    --destination dev-worker@scn-baton --summary "..."
-#   rig queue claim  baton-1 --destination dev-worker@scn-baton
+#   OPENRIG_SESSION_NAME=harness@scn-baton    rig queue create --id baton-1 \
+#       --destination dev-worker@scn-baton --summary "..."
+#   OPENRIG_SESSION_NAME=dev-worker@scn-baton rig queue claim baton-1 \
+#       --destination dev-worker@scn-baton
 # => qitem baton-1 is state=in-progress, owned by dev-worker@scn-baton, up front.
+# (Identity rides the env→transport header per P21 I3 — the old --source flag is
+# retired: deprecated + IGNORED by the shipped CLI. The `source:` field below is
+# the DECLARED provenance the pipeline carries as the per-call env identity.)
 #
 # DEFERRED ASSERTION (items-6-8 gate — VISIBLY annotated, NOT silently dropped):
 # the locked #2 also asserts `expect { surface: pane, seat: dev-worker,
