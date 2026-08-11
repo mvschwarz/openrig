@@ -88,6 +88,8 @@ export type ValidationErrorCode =
   | "WITHIN_NOT_A_DURATION"
   | "EQUALS_PROJECTION_INVALID"
   | "EQUALS_SURFACE_UNKNOWN"
+  | "EQUALS_NOT_DECLARATIVE"
+  | "EQUALS_TOO_FEW_SURFACES"
   | "EMIT_NOT_OBJECT"
   | "UNKNOWN_EMIT_BEHAVIOR"
   | "USAGE_LIMIT_IN_STUB_TOPOLOGY"
@@ -322,7 +324,32 @@ function validateExpect(
   // 51-03: the declarative `equals` mapping (surface -> projection). Validated
   // here so an authoring error is a load-time teaching failure, not a scenario
   // that runs and compares nothing.
+  if (value.equals !== undefined && !isPlainObject(value.equals)) {
+    // Guard finding: the legacy list form still parsed, so a scenario could name
+    // surfaces without declaring HOW they compare — which is what left the
+    // comparison to an injected placeholder. A-N1 makes the declarative mapping
+    // the only scenario-facing form; refuse anything else at load and teach it.
+    push(
+      "EQUALS_NOT_DECLARATIVE",
+      `${path}.equals: must be the DECLARATIVE mapping of surface -> projection, e.g. ` +
+        `{ ps: { pluck: name }, queue: { pluck: destinationSession, rig: true } }. ` +
+        `A bare list of surfaces names what to compare without declaring HOW, so the comparison cannot be honest.`,
+      `${path}.equals`,
+    );
+  }
   if (isPlainObject(value.equals)) {
+    // A comparison needs at least TWO sides. One surface (or none) is vacuous by
+    // construction — it passes whatever the data is.
+    const declaredSurfaces = Object.keys(value.equals);
+    if (declaredSurfaces.length < 2) {
+      push(
+        "EQUALS_TOO_FEW_SURFACES",
+        `${path}.equals: needs at least TWO surfaces to compare, found ${declaredSurfaces.length}` +
+          `${declaredSurfaces.length ? ` (${declaredSurfaces.join(", ")})` : ""} — a one-sided equality passes ` +
+          `regardless of the data and proves nothing.`,
+        `${path}.equals`,
+      );
+    }
     for (const [surf, spec] of Object.entries(value.equals)) {
       if (!(EXPECT_SURFACES as readonly string[]).includes(surf)) {
         push(
@@ -343,6 +370,11 @@ function validateExpect(
       }
       if (spec.pluck !== undefined && typeof spec.pluck !== "string") {
         push("EQUALS_PROJECTION_INVALID", `${path}.equals.${surf}.pluck: must be a field name string`, `${path}.equals.${surf}.pluck`);
+      }
+      if (spec.path !== undefined && typeof spec.path !== "string") {
+        // was accepted at load and then threw `path.split is not a function` at
+        // runtime — a TypeError must never be the first signal.
+        push("EQUALS_PROJECTION_INVALID", `${path}.equals.${surf}.path: must be a dot-path string`, `${path}.equals.${surf}.path`);
       }
       if (spec.rig !== undefined && typeof spec.rig !== "boolean") {
         push("EQUALS_PROJECTION_INVALID", `${path}.equals.${surf}.rig: must be a boolean`, `${path}.equals.${surf}.rig`);

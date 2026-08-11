@@ -196,7 +196,14 @@ describe("D1 R4/R5 — pipeline-level fences", () => {
         "",
       ].join("\n"),
     );
-    const before = readdirSync(tmpdir()).filter((n) => n.startsWith("openrig-scenario-"));
+    // Measure in a PRIVATE temp root: scaffolds land under os.tmpdir(), which reads
+    // TMPDIR per call, so counting the SHARED /tmp made this flake whenever another
+    // suite created a scaffold concurrently (same self-induced contention the D5
+    // pre-effect pin hit).
+    const priv = mkdtempSync(join(tmpdir(), "r4-preeffect-"));
+    dirs.push(priv);
+    const savedTmp = process.env.TMPDIR;
+    process.env.TMPDIR = priv;
     let spawned = false;
     await expect(
       runScenarioFile(scenarioPath, {
@@ -207,9 +214,10 @@ describe("D1 R4/R5 — pipeline-level fences", () => {
       }),
     ).rejects.toThrow(StubScriptTargetError);
     expect(spawned).toBe(false);
-    // no scaffold was created either
-    const after = readdirSync(tmpdir()).filter((n) => n.startsWith("openrig-scenario-"));
-    expect(after.length).toBe(before.length);
+    // no scaffold was created either — the private root is still empty
+    expect(readdirSync(priv)).toEqual([]);
+    if (savedTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = savedTmp;
   });
 
   it("R5: container mode REFUSES scripted scenarios by name, and is untouched without scripts", async () => {

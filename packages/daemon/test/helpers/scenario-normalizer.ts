@@ -25,6 +25,23 @@
 
 import type { ExpectSurface } from "./scenario-schema.js";
 
+/**
+ * Thrown when a declared projection extracts NOTHING from a NON-EMPTY surface.
+ *
+ * Guard finding on a7b6b7c85: two surfaces both plucking a field neither has both
+ * normalize to [], and `[] === []` made a vacuous comparison GREEN. Seeding a real
+ * qitem cannot defend against this, because the PROJECTION is what empties the
+ * set. Empty-from-empty is legal (a surface really can hold nothing);
+ * empty-from-NON-empty means the declaration does not match the surface, and that
+ * must fail visibly instead of becoming equality evidence.
+ */
+export class ProjectionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProjectionError";
+  }
+}
+
 /** One surface's declared projection onto the shared comparison form. */
 export interface SurfaceProjection {
   /** Field to take from each element of an array surface (e.g. `name`). */
@@ -57,14 +74,29 @@ export function rigOf(session: string): string {
 }
 
 /** Apply one surface's declared projection. Total: never throws on a shape it did not expect. */
-export function projectSurface(value: unknown, spec: SurfaceProjection): unknown {
+export function projectSurface(
+  value: unknown,
+  spec: SurfaceProjection,
+  surface = "surface",
+): unknown {
   const base = spec.path ? readPath(value, spec.path) : value;
   if (!spec.pluck) return base;
   const items = Array.isArray(base) ? base : [base];
+  const nonEmptyInput = items.some((i) => i !== undefined && i !== null);
   const plucked = items
     .map((item) => (item && typeof item === "object" ? (item as Record<string, unknown>)[spec.pluck!] : undefined))
     .filter((v): v is string => typeof v === "string" && v.length > 0)
     .map((v) => (spec.rig ? rigOf(v) : v));
+  // A declaration that matches nothing on a surface that HAS data is a broken
+  // declaration, not evidence of agreement. Fail loud; never return [] here.
+  if (plucked.length === 0 && nonEmptyInput) {
+    throw new ProjectionError(
+      `${surface}: projection { pluck: "${spec.pluck}"${spec.path ? `, path: "${spec.path}"` : ""} } extracted NOTHING ` +
+        `from a non-empty surface (${items.length} item(s)). An empty projection from real data cannot be equality ` +
+        `evidence — two surfaces both extracting nothing compare equal and prove nothing. Check the declared field ` +
+        `against the surface's actual shape.`,
+    );
+  }
   // Set semantics: dedupe + sort, so agreement on the SET is not defeated by order
   // or by one surface listing the same rig twice (N qitems, one rig).
   return [...new Set(plucked)].sort();
@@ -80,6 +112,6 @@ export function buildDeclarativeNormalizer(
 ): (surface: ExpectSurface, value: unknown) => unknown {
   return (surface, value) => {
     const spec = mapping[surface];
-    return spec ? projectSurface(value, spec) : value;
+    return spec ? projectSurface(value, spec, surface) : value;
   };
 }
