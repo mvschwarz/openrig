@@ -4,19 +4,41 @@ import type { Context } from "hono";
  * P21 sender-provenance chokepoint — the ONE shared route helper that generalizes P18's inline
  * `/inbox/drop` form (b2437104) across every caller-identity site. The acting seat's identity is
  * DERIVED from the authenticated transport header the CLI's DaemonClient stamps once from the seat
- * env (X-OpenRig-Session); the channel of record records only that derived identity, never a
- * request-body claim (a body-supplied actor is forgeable false history — the ranked buggy/stale-caller
- * class). Absent header ⇒ refuse-unattributable LOUD (401), naming the verb.
+ * env (X-OpenRig-Session), and the row records WHICH ERA that derivation came from.
  *
- * Adopt-and-drop transitional window (per the P21 plan): while a surface still carries its legacy body
- * identity field + CLI flag, a body claim is tolerated ONLY when it EQUALS the transport identity;
- * a DIFFERENT claim refuses-loud `identity_mismatch` (409) naming BOTH values — never silently prefer
- * either. The field + flag drop at the surface's completion fold, after which no bodyClaim is passed.
+ * P18 DELIVER-AND-LABEL (founder ruling, over-engineering audit — the refusals are deleted). The two
+ * refusals this helper used to raise both asserted "this sender is ILLEGITIMATE" when the only thing
+ * actually known was "I cannot verify this sender at this boundary". Those are different claims and
+ * the system was making the confident one:
+ *   - 401 `unattributable_sender` (header absent) — DELETED. A missing header means an unmanaged
+ *     terminal, not an attacker; this trust domain's only caller is the operator's own client.
+ *     The honest response is to DELIVER and record the weaker era-stamp `claimed:v1`.
+ *   - 409 `identity_mismatch` (body claim ≠ transport identity) — **ALSO RULED FOR DELETION, DEFERRED
+ *     TO ITS OWN FOLLOW-ON ATOM** (PM, 2026-08-11: both refusals die, one atom each). It STANDS in
+ *     this code today — deliberately, not by oversight. PM's reasoning is worth keeping: the fact that
+ *     this sender IS certified is exactly why refusing them is wrong. The wire decides the actor and
+ *     the body never does, so a disagreeing body claim is NOISE TO BE SUPERSEDED, not an attack to be
+ *     refused — and the incident transport matrix showed this 409 firing on honest-but-skewed clients
+ *     during an outage. It is split off because taking it here would drag 12 test files, including the
+ *     ui package, into a light-path atom.
+ *
+ * What remains beyond that is NOT an adversary boundary: with neither a transport header nor a body
+ * actor there is no actor to put on the ledger row at all, so the caller is asked for the missing
+ * parameter (400 `actor_required`) — the same shape PM ruled a deliberate keep at queue.ts:215.
+ * Requiring a parameter is honest help; refusing a named actor because it cannot be cryptographically
+ * vouched for is not.
+ *
+ * The label half is NOT new machinery: `resolveRecordedProvenance` below already degrades down as its
+ * default branch, and `resolveActorWithDeferral` already did deliver-and-label on founder-visible
+ * surfaces. This extends that existing, correctly-degrading pattern to the sites that used to refuse.
  */
 export const SENDER_IDENTITY_HEADER = "x-openrig-session";
 
 export type SenderIdentity =
-  | { ok: true; session: string }
+  // `provenance` is the NON-RELAY subset — this helper only ever derives locally: transport:v1 when the
+  // header proved it here, claimed:v1 when it did not. relay:v1 belongs to the cross-host forward and is
+  // decided by resolveRecordedProvenance, never here.
+  | { ok: true; session: string; provenance: Exclude<IdentityProvenance, "relay:v1"> }
   | { ok: false; response: Response };
 
 export function requireSenderIdentity(
@@ -25,31 +47,39 @@ export function requireSenderIdentity(
 ): SenderIdentity {
   const verb = opts?.verb ?? "this action";
   const session = c.req.header(SENDER_IDENTITY_HEADER)?.trim();
-  if (!session) {
-    return {
-      ok: false,
-      response: c.json({
-        error: "unattributable_sender",
-        message:
-          `Refusing ${verb}: no authenticated sender identity (X-OpenRig-Session header absent). ` +
-          "The channel of record records only a transport-derived actor, never a request-body claim.",
-      }, 401),
-    };
-  }
   const claim = opts?.bodyClaim?.trim();
-  if (claim && claim !== session) {
-    return {
-      ok: false,
-      response: c.json({
-        error: "identity_mismatch",
-        message:
-          `Refusing ${verb}: the request body claims actor "${claim}" but the authenticated transport ` +
-          `identity is "${session}". The body-supplied actor is not accepted — remove it (the transport ` +
-          "header is authoritative).",
-      }, 409),
-    };
+  if (session) {
+    // Transport path — the header PROVED the actor at this hop. The mismatch refusal STANDS here
+    // pending PM's ruling on whether amendment 2's "refusal paths" includes it (see the header note):
+    // this sender is certified, so it is not the uncertifiable-sender case P18 deletes.
+    if (claim && claim !== session) {
+      return {
+        ok: false,
+        response: c.json({
+          error: "identity_mismatch",
+          message:
+            `Refusing ${verb}: the request body claims actor "${claim}" but the authenticated transport ` +
+            `identity is "${session}". The body-supplied actor is not accepted — remove it (the transport ` +
+            "header is authoritative).",
+        }, 409),
+      };
+    }
+    return { ok: true, session, provenance: "transport:v1" };
   }
-  return { ok: true, session };
+  // No transport identity: deliver under the body-declared actor, labelled honestly as claimed-era.
+  if (claim) return { ok: true, session: claim, provenance: "claimed:v1" };
+  // Neither a derived identity nor a declared one — nothing to attribute the row to. Parameter
+  // completeness, not distrust.
+  return {
+    ok: false,
+    response: c.json({
+      error: "actor_required",
+      message:
+        `Cannot record ${verb}: no authenticated transport identity (X-OpenRig-Session absent) and no ` +
+        "actor named in the request body. The channel of record needs an actor to attribute the row to — " +
+        "name one, or run from a managed seat so the identity is derived for you.",
+    }, 400),
+  };
 }
 
 /**
