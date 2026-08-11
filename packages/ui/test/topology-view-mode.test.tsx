@@ -7,10 +7,13 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, cleanup, fireEvent, waitFor } from "@testing-library/react";
-import { createMemoryHistory, RouterProvider, createRouter } from "@tanstack/react-router";
+import { createMemoryHistory, RouterProvider, createRouter, createRootRoute, createRoute, Outlet } from "@tanstack/react-router";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { createMockEventSourceClass } from "./helpers/mock-event-source.js";
+import { AppShell } from "../src/components/AppShell.js";
+import { HostScopePage, RigScopePage } from "../src/components/topology/ScopePages.js";
 
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch;
@@ -31,11 +34,35 @@ afterEach(() => {
   cleanup();
 });
 
+// Slice 52 (UI wall-clock hardening): the timed fixture no longer imports
+// ../src/routes.js. The scope pages + AppShell chrome are what these tests
+// assert; the full route tree (all lazy page modules) was the wall-clock-heavy
+// import that raced the 5000ms waitFor under fleet load. A minimal router with
+// AppShell as the root and only the topology scope routes mounts the SAME
+// components with no heavy import and no clock to race. HostScopePage takes no
+// params; RigScopePage reads useParams({ from: "/topology/rig/$rigId" }), so
+// that route path is spelled exactly to preserve the strict param binding.
+function buildTopologyRouter(initialPath: string) {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  const rootRoute = createRootRoute({
+    component: () => (
+      <QueryClientProvider client={queryClient}>
+        <AppShell>
+          <Outlet />
+        </AppShell>
+      </QueryClientProvider>
+    ),
+  });
+  const hostRoute = createRoute({ getParentRoute: () => rootRoute, path: "/topology", component: HostScopePage });
+  const rigRoute = createRoute({ getParentRoute: () => rootRoute, path: "/topology/rig/$rigId", component: RigScopePage });
+  const catchAll = createRoute({ getParentRoute: () => rootRoute, path: "$", component: () => null });
+  const routeTree = rootRoute.addChildren([hostRoute, rigRoute, catchAll]);
+  return createRouter({ routeTree, history: createMemoryHistory({ initialEntries: [initialPath] }) });
+}
+
 async function renderTopologyAt(initialPath: string) {
   Object.defineProperty(window, "innerWidth", { configurable: true, value: 1440, writable: true });
-  const { router } = await import("../src/routes.js");
-  const history = createMemoryHistory({ initialEntries: [initialPath] });
-  const r = createRouter({ routeTree: router.routeTree, history });
+  const r = buildTopologyRouter(initialPath);
   const result = render(<RouterProvider router={r} />);
   // Wait for the app rail to mount (route resolution complete);
   // each test then waits for its scope-specific tab list.
@@ -112,10 +139,11 @@ describe("Seat scope tabs (direct render — bypasses route fetching)", () => {
 // during driver self-walk. guard-3 process gate: this test must be in CI.
 describe("Class B negative assertion: non-topology routes never get vellum overlay (ritual #8)", () => {
   async function renderAndWait(initialPath: string) {
+    // Slice 52: minimal router (no ../src/routes.js import) — same as
+    // renderTopologyAt above. Non-topology routes fall through to the
+    // catch-all stub; AppShell still computes their surface from the pathname.
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1440, writable: true });
-    const { router } = await import("../src/routes.js");
-    const history = createMemoryHistory({ initialEntries: [initialPath] });
-    const r = createRouter({ routeTree: router.routeTree, history });
+    const r = buildTopologyRouter(initialPath);
     const result = render(<RouterProvider router={r} />);
     await waitFor(() => {
       expect(result.container.querySelector("[data-testid='app-rail']")).toBeTruthy();

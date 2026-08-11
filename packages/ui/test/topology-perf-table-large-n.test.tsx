@@ -8,10 +8,15 @@
 //
 // What this test asserts (and what it does NOT — be explicit):
 //
-//   DOES assert (smoke gate):
-//     - Initial mount of N=20 rows completes synchronously under
-//       happy-dom in <2s. Guards against runaway synchronous render
-//       (infinite re-render loop, O(N²) render path, etc.).
+//   DOES assert:
+//     - Mounting N=20 rows across 4 rigs issues a BOUNDED, deterministic
+//       fetch pattern: exactly one /api/rigs/summary + exactly one
+//       /api/rigs/rig-N/nodes per rig (each rig once), with no duplicate
+//       and no unknown paths. Re-querying inventory per row / per render
+//       is the over-fetch class behind the scale hang; this catches it
+//       deterministically. (Slice 52: replaced a flaky `elapsedMs < 2000`
+//       assertion that measured machine load, not the code, and
+//       false-failed under fleet contention.)
 //     - DOM cell cardinality is exactly N per cell kind (StatusCell,
 //       ContextCell, TokenCell) — i.e., no row double-mounts.
 //     - Re-rendering the parent with stable props leaves the table's
@@ -19,13 +24,14 @@
 //       NOT a memoization proof).
 //
 //   Does NOT assert:
+//     - Any wall-clock / render-time bound. happy-dom timing is a function
+//       of machine load, not of the code path, so a time threshold proves
+//       nothing under contention (that was this file's original defect).
 //     - Chrome painting/compositing perf at scale (happy-dom doesn't
 //       paint or composite — only Chrome can tell us about the hang).
 //     - That the React.memo wrappers on the cell components actually
 //       skip re-renders. (This test cannot discriminate the memo'd
-//       vs un-memo'd build — it would pass either way. The memo
-//       wrappers are a scale-perf win whose verification belongs in a
-//       real Chrome DevTools profile at production scale.)
+//       vs un-memo'd build — it would pass either way.)
 //     - That the Table hang root cause is fixed.
 //
 // Limitations:
@@ -124,18 +130,41 @@ function withQueryClient(ui: React.ReactNode) {
 }
 
 describe("TopologyTableView large-N smoke (bug-fix slice topology-perf)", () => {
-  it("renders N=20 seats across 4 rigs without runaway synchronous render time", async () => {
-    const t0 = performance.now();
+  it("mounts N=20 seats with a bounded fetch pattern: exactly 1 summary + one /nodes per rig, no duplicates or unknowns", async () => {
     const { container } = withQueryClient(<TopologyTableView />);
     await waitFor(() => {
       const rows = container.querySelectorAll("[data-testid^='topology-table-row-']");
       expect(rows.length).toBe(TOTAL_SEATS);
     });
-    const elapsedMs = performance.now() - t0;
-    // happy-dom initial render of 20 rows should complete in <2s.
-    // Anything higher is a red flag for runaway synchronous render
-    // (infinite re-render loop, O(N²) pattern, etc.).
-    expect(elapsedMs).toBeLessThan(2000);
+
+    // Slice 52: replaces a flaky wall-clock threshold (elapsedMs < 2000, which
+    // measured machine load and false-failed under fleet contention) with the
+    // DETERMINISTIC invariant the scale hang actually violates — an over-fetch
+    // of inventory. TopologyTableView demand-loads each rig's nodes exactly
+    // once (useQueries keyed per rig) on top of the single rig-roster summary.
+    const urls = mockFetch.mock.calls.map(([u]) => String(u));
+    const NODES_RE = /\/api\/rigs\/rig-(\d+)\/nodes/;
+    const summaryCalls = urls.filter((u) => u.includes("/api/rigs/summary"));
+    const nodeCalls = urls.filter((u) => NODES_RE.test(u));
+    const unknownCalls = urls.filter(
+      (u) => !u.includes("/api/rigs/summary") && !NODES_RE.test(u),
+    );
+
+    // Exactly one rig-roster summary.
+    expect(summaryCalls).toHaveLength(1);
+    // One /nodes fetch per rig, each rig fetched exactly once. The Set-size
+    // check is load-bearing independently of the count: a duplicated inventory
+    // query for one rig that drops another (e.g. [0,1,1,2]) keeps nodeCalls at
+    // length 4 but collapses the Set to 3 — RED on this line, not vacuously
+    // green. (Falsification only covers the axis it perturbs — assert both.)
+    const rigIdxSet = new Set(nodeCalls.map((u) => u.match(NODES_RE)![1]));
+    expect(nodeCalls).toHaveLength(RIG_COUNT);
+    expect(rigIdxSet.size).toBe(RIG_COUNT);
+    // No fetches to unexpected paths.
+    expect(unknownCalls).toHaveLength(0);
+    // Total fetch budget is exactly five: 1 summary + 4 rig inventories. A
+    // straight duplicate (any rig fetched twice) makes this and nodeCalls RED.
+    expect(urls).toHaveLength(1 + RIG_COUNT);
   });
 
   it("renders exactly N cells of each kind (one per row); count is bounded by N (no double-mounts)", async () => {

@@ -19,10 +19,11 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, cleanup, waitFor } from "@testing-library/react";
-import { createMemoryHistory, RouterProvider, createRouter } from "@tanstack/react-router";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { createMockEventSourceClass } from "./helpers/mock-event-source.js";
+import { createAppTestRouter } from "./helpers/test-router.js";
+import { AppShell } from "../src/components/AppShell.js";
 
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch;
@@ -56,13 +57,24 @@ afterEach(() => {
   window.dispatchEvent(new Event("resize"));
 });
 
-async function renderAt(initialPath: string) {
-  Object.defineProperty(window, "innerWidth", { configurable: true, value: 1440, writable: true });
+// Slice 52 (UI wall-clock hardening): the timed fixture no longer imports
+// ../src/routes.js. Mounting the whole route tree (all lazy page modules) was
+// the wall-clock-heavy step that lost a race against the 5000ms waitFor under
+// fleet load, false-failing the SC-1 strict count. The chrome these tests
+// assert on (rail + Explorer + surface) is computed by AppShell from the router
+// PATHNAME (surfaceForPath), not by the route tree — so a minimal router with
+// AppShell as the root and a catch-all stub renders IDENTICAL chrome with no
+// heavy import and no clock to race.
+async function renderAt(initialPath: string, opts: { innerWidth?: number } = {}) {
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: opts.innerWidth ?? 1440, writable: true });
   window.dispatchEvent(new Event("resize"));
-  const { router } = await import("../src/routes.js");
-  const memoryHistory = createMemoryHistory({ initialEntries: [initialPath] });
-  const memoryRouter = createRouter({ routeTree: router.routeTree, history: memoryHistory });
-  const result = render(<RouterProvider router={memoryRouter} />);
+  const result = render(
+    createAppTestRouter({
+      routes: [{ path: "$", component: () => null }],
+      rootComponent: ({ children }) => <AppShell>{children}</AppShell>,
+      initialPath,
+    }),
+  );
   // TanStack Router resolves route component async; wait for chrome to land.
   await waitFor(() => {
     expect(result.container.querySelector("[data-testid='app-rail']")).toBeTruthy();
@@ -262,16 +274,9 @@ describe("AppShell — Phase 2 chrome", () => {
 
   describe("SC-8: mobile rail collapses to slide-over tray", () => {
     it("mobile rail tray renders only at narrow viewport (conditional)", async () => {
-      const { router } = await import("../src/routes.js");
-      Object.defineProperty(window, "innerWidth", { configurable: true, value: 375, writable: true });
-      window.dispatchEvent(new Event("resize"));
-      const memoryHistory = createMemoryHistory({ initialEntries: ["/"] });
-      const memoryRouter = createRouter({ routeTree: router.routeTree, history: memoryHistory });
-      const { container } = render(<RouterProvider router={memoryRouter} />);
-      await waitFor(() => {
-        const topbar = container.querySelector("[data-testid='app-topbar']") as HTMLElement;
-        expect(topbar).toBeTruthy();
-      });
+      const { container } = await renderAt("/", { innerWidth: 375 });
+      const topbar = container.querySelector("[data-testid='app-topbar']") as HTMLElement;
+      expect(topbar).toBeTruthy();
       const tray = container.querySelector("[data-testid='mobile-rail-tray']") as HTMLElement;
       expect(tray).toBeTruthy();
       expect(tray.className).toContain("-translate-x-full");
@@ -283,15 +288,7 @@ describe("AppShell — Phase 2 chrome", () => {
     // The slide-over tray is closed by default; we assert against the
     // rendered DOM regardless of open state (className is fixed at mount).
     it("slice 20: mobile slide-over Rail renders vertical (flex-col) — not horizontal scroll", async () => {
-      const { router } = await import("../src/routes.js");
-      Object.defineProperty(window, "innerWidth", { configurable: true, value: 375, writable: true });
-      window.dispatchEvent(new Event("resize"));
-      const memoryHistory = createMemoryHistory({ initialEntries: ["/"] });
-      const memoryRouter = createRouter({ routeTree: router.routeTree, history: memoryHistory });
-      const { container } = render(<RouterProvider router={memoryRouter} />);
-      await waitFor(() => {
-        expect(container.querySelector("[data-testid='mobile-rail-tray']")).toBeTruthy();
-      });
+      const { container } = await renderAt("/", { innerWidth: 375 });
       const tray = container.querySelector("[data-testid='mobile-rail-tray']") as HTMLElement;
       const rail = tray.querySelector("[data-testid='app-rail']") as HTMLElement;
       expect(rail, "rail nav inside mobile slide-over tray").toBeTruthy();
