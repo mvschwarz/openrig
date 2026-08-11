@@ -129,9 +129,12 @@ nodesRoutes.get("/", async (c) => {
     // computed at POLL time, while ACTIVITY re-ages the raw `lastActivityAt` against the REQUEST
     // clock. When the tmux read has been failing, `pollSeat` leaves the last record in place, so the
     // cached boolean can stay `true` long after the pane went quiet — TERMINAL keeps reporting that
-    // stale `true` and ACTIVITY refuses it. That divergence IS the stale-cache protection working,
-    // not a bug to reconcile: only one of these two surfaces makes an affirmative liveness claim
-    // that a reader will act on, and it is the one that re-checks.
+    // stale `true` and ACTIVITY refuses it.
+    //
+    // That divergence IS the stale-cache protection working, not an inconsistency to reconcile. Do
+    // not "fix" it by making ACTIVITY trust the cached boolean again: the re-aging is the guard, and
+    // removing it restores a state where an unavailable observation reads as an affirmative liveness
+    // claim.
     seatActivity: deps.seatActivityService,
     captureFallback: full,
   });
