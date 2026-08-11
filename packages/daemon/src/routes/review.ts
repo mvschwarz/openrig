@@ -139,8 +139,9 @@ export function reviewRoutes(): Hono {
       // end-to-end (Packet 1 FR-9 mission semantics); slice is the v1 surface.
       return c.json({ error: "freeze_request_invalid", hint: 'required: {"scope":"slice","name":"<slice>","actor":"<session>"}' }, 400);
     }
-    // P21 I5: review freeze is a founder-visible surface — resolveActorWithDeferral: header present ⇒
-    // derive + transport:v1 + 409-on-mismatch (CLI); header absent (browser UI) ⇒ claimed-era, never-break.
+    // P21 I5: review freeze is a founder-visible surface — resolveActorWithDeferral, P18 deliver-and-label:
+    // header present ⇒ derive + transport:v1, the wire SUPERSEDES a mismatched body (409 retired, ruling A);
+    // header absent (browser UI) ⇒ claimed:v1, never-break.
     const identity = resolveActorWithDeferral(c, { verb: "review freeze", bodyClaim: body.actor });
     if (!identity.ok) return identity.response;
     const ctx = gatherer.composeSliceWithContext(body.name);

@@ -383,7 +383,8 @@ export function createMcpServer(client: DaemonClient): McpServer {
 
         const rigId = matches[0]!.id;
         // P21: no body sender — the daemon derives it from the transport header (X-OpenRig-Session,
-        // stamped by the MCP server's DaemonClient from its seat env). A hardcoded 'mcp' would 409.
+        // stamped by the MCP server's DaemonClient from its seat env). A hardcoded 'mcp' differing from the
+        // header would be SUPERSEDED by it (transport:v1), not persisted (P18: the 409 mismatch is retired).
         const res = await client.post(`/api/rigs/${encodeURIComponent(rigId)}/chat/send`, {
           body,
         });

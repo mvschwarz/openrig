@@ -16,7 +16,8 @@ export const SENDER_IDENTITY_HEADER = "X-OpenRig-Session";
  * P18 sender-provenance — derive the caller's identity from the seat ENV (never a request-body
  * claim). Routes that record authorship into the channel of record read ONLY this header, so a
  * buggy/stale caller cannot write false history by fat-fingering or stale-copying a body field.
- * Absent env ⇒ no header ⇒ the daemon refuses-unattributable LOUD (the approve-actor pattern). One
+ * Absent env ⇒ no header ⇒ the daemon DELIVERS and labels the write `claimed:v1` (P18 deliver-and-label;
+ * a write with no actor at all is 400 actor_required — parameter completeness, not a refusal). One
  * chokepoint: `DaemonClient.fetch` stamps this on every request; callers never set it by hand.
  */
 export function senderIdentityHeaders(originSelfHostId?: string): Record<string, string> {
