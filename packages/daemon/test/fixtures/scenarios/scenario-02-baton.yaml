@@ -45,18 +45,30 @@ steps:
         - qitemId: baton-1
           state: in-progress
           destinationSession: dev-worker@scn-baton
-  # RESTART = a daemon restart (kill + re-spawn on the SAME db). The baton lives in
-  # the daemon's SQLite, so it must survive the daemon lifecycle. Empirically proven:
-  # the qitem is byte-identical (in-progress + owner) before and after the restart.
+  # DAEMON restart — and the scope of that claim is deliberate.
   #
-  # Why daemon-restart and not a seat relaunch: `rig launch <rig> <node>` on a
-  # RUNNING node is a no-op ("already_running") and on a down node needs a snapshot
-  # (no snapshot-free per-seat kill+relaunch verb exists). The locked #2 named a seat
-  # restart; the seat-level relaunch + its `expect pane "restored"` observable both
-  # ride A5 items 6-8 (the stub `restore` behavior). Daemon-restart is the faithful,
-  # v1-green reading of "queue baton survives a restart" and exercises the locked
-  # daemon:{op} verb. RATIFICATION PENDING (orch/PM): finding artifact
-  # FINDING-51-02-e2e-viability.md documents the choice + the seat-restart path.
+  # RATIFIED (orch-advisor, 2026-08-11): this proves a STRICTLY HARDER durability
+  # property than the locked #2 asks for. A seat relaunch never touches daemon
+  # state, so the locked form tests baton survival against a process that does not
+  # OWN the baton; this kills and re-spawns the process that owns the SQLite and
+  # shows the qitem byte-identical across it.
+  #
+  # TWO DIFFERENT FAILURE MODES — do not read one as the other:
+  #   PROVEN here      — does the ROW survive its OWNER dying?
+  #   NOT proven here  — does a RELAUNCHED SEAT re-attach to its claimed baton,
+  #                      and does its pane show "restored"? That is what the
+  #                      locked #2 was aimed at, and it is UNTESTED.
+  #
+  # The seat-relaunch half is not expressible with the shipped verb set: `rig
+  # launch` on a RUNNING node is a no-op ("already_running"), on a down node it
+  # needs a snapshot, and no snapshot-free per-seat kill+relaunch verb exists.
+  # That product gap — not a choice of convenience — is why the half is DEFERRED
+  # to A5 items 6-8, and the arch acceptance table's "expressible today" mark for
+  # row 2 is routed to PM as a 0.5.1 finding.
+  #
+  # The locked format keeps these verbs distinct (PRD line 20: neither routes
+  # through the other), so daemon-restart is NOT a substitute reading of the
+  # seat-level restart — it is a different, harder property standing beside it.
   - daemon: { op: restart }
   - expect:
       surface: queue
