@@ -123,8 +123,15 @@ nodesRoutes.get("/", async (c) => {
     activityStore: deps.agentActivityStore,
     structuralActivity: deps.seatStructuralActivityService,
     // ACTIVITY D1+D2 — the SAME SeatActivityService instance `attachTerminalActivityAndWork` reads
-    // just below. One observation, now serving both the TERMINAL column and the ACTIVITY verdict,
-    // so the two columns can no longer disagree about whether a seat is producing output.
+    // just below. One observation now feeds both the TERMINAL column and the ACTIVITY verdict.
+    //
+    // They can still DISAGREE, deliberately: TERMINAL projects the cached `isActiveWithinWindow`
+    // computed at POLL time, while ACTIVITY re-ages the raw `lastActivityAt` against the REQUEST
+    // clock. When the tmux read has been failing, `pollSeat` leaves the last record in place, so the
+    // cached boolean can stay `true` long after the pane went quiet — TERMINAL keeps reporting that
+    // stale `true` and ACTIVITY refuses it. That divergence IS the stale-cache protection working,
+    // not a bug to reconcile: only one of these two surfaces makes an affirmative liveness claim
+    // that a reader will act on, and it is the one that re-checks.
     seatActivity: deps.seatActivityService,
     captureFallback: full,
   });

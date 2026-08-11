@@ -324,8 +324,13 @@ rigsRoutes.get("/:id/graph", async (c) => {
   const graphFull = c.req.query("full") === "true";
   const seatStructuralActivityService = c.get("seatStructuralActivityService" as never) as SeatStructuralActivityService | undefined;
   // ACTIVITY D1+D2 — resolved BEFORE attachAgentActivity now, because the ACTIVITY ladder reads the
-  // same motion observation the TERMINAL column reads. Order matters only for this declaration; the
-  // two enrichments still read their own sources independently.
+  // same motion observation the TERMINAL column reads. Order matters only for this declaration.
+  //
+  // Sharing that observation does NOT collapse the slice-15 non-inference contract, which is between
+  // `terminalActive` and `hasAssignedWork` — ACTIVITY still reads no queue/assignment state. And the
+  // two surfaces can legitimately disagree: ACTIVITY re-ages the raw timestamp at read time while
+  // TERMINAL projects the poll-time boolean (see the sessions route for why that gap is the
+  // stale-cache protection rather than an inconsistency).
   const seatActivityService = c.get("seatActivityService" as never) as SeatActivityService | undefined;
   const inventoryWithActivityOnly = tmuxAdapter
     ? await attachAgentActivity(inventory, { tmuxAdapter, activityStore: agentActivityStore, structuralActivity: seatStructuralActivityService, seatActivity: seatActivityService, captureFallback: graphFull })
