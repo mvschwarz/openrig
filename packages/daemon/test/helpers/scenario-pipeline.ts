@@ -16,6 +16,7 @@
 
 import { readFileSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import {
   validateScenario,
@@ -33,6 +34,10 @@ import { buildRealDeps, type RealDepsOptions } from "./scenario-real-deps.js";
 import { runValidatedScenario, type RunScenarioResult } from "./scenario-runner.js";
 import type { RunRecord } from "./scenario-run-record.js";
 import { stageTopologyRoot, deliverStubScripts, resolveStubScriptTargets } from "./scenario-stage.js";
+import { provisionTui, spawnShippedTui, type ProvisionedTui, type TuiProcessLike } from "./scenario-tui.js";
+
+/** The tui package root, resolved from this helper's own location. */
+const TUI_PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "tui");
 
 /** Thrown when a scenario file cannot be read or parsed (loud I/O/syntax floor). */
 export class ScenarioLoadError extends Error {
@@ -225,6 +230,15 @@ export interface RunScenarioFileOptions {
    * runs are comparable across image versions (plan §4). ABSENT in host-mode.
    */
   imageId?: string;
+  /**
+   * D7: how the shipped TUI is spawned when a scenario declares `env.tui: true`
+   * (the tui_socket surface reads a control socket that exists only inside a
+   * running TUI). ABSENT => the real binary. Injected by tests so the readiness
+   * and early-exit paths are exercisable without a terminal.
+   */
+  spawnTui?: (env: Record<string, string | undefined>) => TuiProcessLike;
+  /** D7: path to the shipped TUI entry (defaults to the built tui package main). */
+  tuiBin?: string;
 }
 
 /**
@@ -298,6 +312,7 @@ export async function runScenarioFile(
   const seatCwd = join(scaffold.root, "seat-cwd");
   mkdirSync(seatCwd, { recursive: true });
   const daemon = await resolveScenarioDaemonSpawner(opts)(scaffold, opts);
+  let tui: ProvisionedTui | undefined;
   try {
     // L6 STEP-0 — container-mode translates the HOST topology path to the in-container staged path
     // (host-mode has no stageTopology → the host path passes through unchanged). A stage/fence
@@ -354,17 +369,40 @@ export async function runScenarioFile(
     // (unknown_destination_rig), so the baton cannot precede `up`. It is still setup,
     // not an asserted observable — visibly declared in the scenario `env` block.
     let batonApplied = preconditions.length === 0;
+    // D7: the control socket lives INSIDE a running TUI, so an opted-in scenario
+    // provisions one after `up` — bounded readiness on a real `state` round-trip,
+    // named failure on early exit/timeout, and the socket path threaded into the
+    // read env so the tui_socket surface can find it. Never the operator's TUI:
+    // it runs in the scaffold's own tmux server (D5) on a scaffold socket path.
+    const wantsTui = loaded.loaded.scenario.env?.tui === true;
+    const tuiSocketPath = join(scaffold.root, "tui.sock");
     const runAction: typeof baseDeps.runAction = async (verb, payload, seat) => {
       const res = await baseDeps.runAction(verb, payload, seat);
       if (!batonApplied && verb === "up" && res.code === 0) {
         batonApplied = true;
         await applyQueuePreconditions(preconditions, { rigBin: opts.rigBin, readEnv: daemon.readEnv });
       }
+      if (wantsTui && !tui && verb === "up" && res.code === 0) {
+        const tuiEnv = { ...daemon.readEnv, OPENRIG_TUI_SOCKET: tuiSocketPath };
+        tui = await provisionTui({
+          socketPath: tuiSocketPath,
+          spawnTui: () => (opts.spawnTui ? opts.spawnTui(tuiEnv) : spawnShippedTui(resolveTuiBin(opts), tuiEnv)),
+        });
+        // the surface reader finds the socket through the SAME env the CLI reads
+        daemon.readEnv.OPENRIG_TUI_SOCKET = tuiSocketPath;
+      }
       return res;
     };
 
     return await runValidatedScenario(loaded.loaded.scenario, { ...baseDeps, runAction });
   } finally {
+    // Teardown on EVERY path — success, assertion failure, or provisioning error.
+    await tui?.stop().catch(() => {});
     await daemon.stop().catch(() => {});
   }
+}
+
+/** The shipped TUI entry (built package main); overridable for container/test runs. */
+function resolveTuiBin(opts: RunScenarioFileOptions): string {
+  return opts.tuiBin ?? resolve(TUI_PACKAGE_ROOT, "dist", "main.js");
 }
