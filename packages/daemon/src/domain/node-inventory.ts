@@ -1098,7 +1098,37 @@ export async function attachAgentActivity(
     const motion = entry.canonicalSessionName
       ? deps.seatActivity?.getSeatActivity(entry.canonicalSessionName) ?? null
       : null;
-    const motionRunning = motion?.isActiveWithinWindow === true;
+
+    /**
+     * Freshness is decided HERE, at read time, from the RAW `lastActivityAt` against the request
+     * clock — NEVER from the cached `isActiveWithinWindow` boolean alone.
+     *
+     * WHY (dev50-guard HOLD on 29ad1b2b9): `SeatActivityService.pollSeat` returns null on a tmux
+     * error BEFORE it replaces or deletes the cached record, and `pollAllRunningTmuxSeats` only
+     * evicts seats that are no longer running in the DB. A seat still marked running whose tmux read
+     * keeps failing therefore KEEPS its last observation forever — including a `true`. Trusting that
+     * boolean turned an UNAVAILABLE observation into an affirmative liveness claim: ACTIVITY would
+     * report `running` indefinitely after the instrument went dark.
+     *
+     * That is this ladder's own no-fabrication rule broken in the unwatched direction. Three guards
+     * below stop motion inventing `idle` from silence; none of them stopped a dead cache inventing
+     * `running`. A silent seat and a seat we can no longer SEE are different states, and only the
+     * raw timestamp distinguishes them.
+     *
+     * Fail CLOSED when the fact cannot be aged (absent or unparseable): an un-ageable affirmative is
+     * indistinguishable from a long-dead one, so it must not become a liveness claim.
+     *
+     * The seat's OWN `silenceWindowSeconds` is the threshold — the same one the service used at poll
+     * time. No second threshold is invented here. A negative age (raw fact slightly ahead of the
+     * request clock) still reads live, preserving pollSeat's deliberate clock-skew tolerance.
+     */
+    const motionRunning = (() => {
+      if (motion?.isActiveWithinWindow !== true) return false;
+      const rawMs = motion.lastActivityAt ? Date.parse(motion.lastActivityAt) : Number.NaN;
+      if (!Number.isFinite(rawMs)) return false;
+      const ageSeconds = (sampledAt.getTime() - rawMs) / 1000;
+      return ageSeconds < motion.silenceWindowSeconds;
+    })();
 
     /**
      * ACTIVITY D1+D2 — ONE precedence rule, applied at EVERY exit of the ladder:

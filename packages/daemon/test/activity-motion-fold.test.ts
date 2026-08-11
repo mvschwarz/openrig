@@ -49,8 +49,15 @@ function entries(sessionName: string, runtime = "claude-code") {
   return [{ canonicalSessionName: sessionName, runtime, attachmentType: "tmux", logicalId: "dev.impl" }] as never;
 }
 
-/** The cached MOTION observation, as SeatActivityService exposes it. A cache read, never a capture. */
-function mkMotion(isActiveWithinWindow: boolean | null) {
+/** A request clock, so observation age is a variable the tests control independently of the cache. */
+const NOW = new Date("2026-08-11T04:52:00.000Z");
+
+/** The cached MOTION observation, as SeatActivityService exposes it. A cache read, never a capture.
+ *  `lastActivityAt` defaults FRESH relative to NOW; the stale-cache tests override it. */
+function mkMotion(
+  isActiveWithinWindow: boolean | null,
+  lastActivityAt: string | null = "2026-08-11T04:51:59.000Z",
+) {
   return {
     getSeatActivity: () =>
       isActiveWithinWindow === null
@@ -60,7 +67,7 @@ function mkMotion(isActiveWithinWindow: boolean | null) {
           isActiveWithinWindow,
           silenceWindowSeconds: 3,
           lastObservedAt: "2026-08-11T04:52:00.000Z",
-          lastActivityAt: "2026-08-11T04:51:59.000Z",
+          lastActivityAt,
         },
   } as never;
 }
@@ -88,7 +95,7 @@ function hook(state: AgentActivity["state"], reason: string, extra: Partial<Agen
 const store = (activity: AgentActivity | null) => ({ getLatestForNode: () => activity }) as never;
 
 async function activityOf(deps: Record<string, unknown>, runtime = "claude-code"): Promise<AgentActivity> {
-  const out = (await attachAgentActivity(entries("s@rig", runtime), deps as never)) as Array<{
+  const out = (await attachAgentActivity(entries("s@rig", runtime), { now: NOW, ...deps } as never)) as Array<{
     agentActivity: AgentActivity;
   }>;
   return out[0]!.agentActivity;
@@ -209,6 +216,103 @@ describe("ACTIVITY D1+D2 — motion folded into the ladder", () => {
     });
     expect(activity.state).toBe("unknown");
     expect(activity.reason).toBe("generation_unverifiable");
+  });
+
+  // ---------------------------------------------------------------------------------------------
+  // STALE-CACHE CONTROLS (dev50-guard HOLD on 29ad1b2b9, 2026-08-11T05:12:46Z).
+  //
+  // `SeatActivityService.pollSeat` returns null on a tmux error BEFORE it replaces or deletes the
+  // cached record (seat-activity-service.ts:74), and `pollAllRunningTmuxSeats` only evicts seats that
+  // are no longer running in the DB. So a seat still marked running whose tmux read keeps failing
+  // KEEPS its last observation indefinitely — including `isActiveWithinWindow: true`.
+  //
+  // The original fold read that boolean and never aged the raw fact, so a DEAD OBSERVATION became an
+  // affirmative liveness claim. That is this atom's own no-fabrication rule broken in the direction
+  // nobody was watching: three guards existed against motion inventing IDLE from silence, and none
+  // against an unavailable instrument inventing RUNNING.
+  //
+  // The nine tests above could not catch it because every one of them varies the cached boolean and
+  // none varies observation AGE independently of it. These do.
+  // ---------------------------------------------------------------------------------------------
+
+  it("A9 [stale cache] isActiveWithinWindow=true with an HOUR-OLD raw fact must NOT upgrade unknown", async () => {
+    const activity = await activityOf({
+      tmuxAdapter: mkTmux({ captures: 0 }),
+      activityStore: store(hook("unknown", "generation_unverifiable", { stale: true })),
+      structuralActivity: mkStructural("unknown"),
+      seatActivity: mkMotion(true, "2026-08-11T03:59:59.000Z"), // 52 minutes before NOW, window is 3s
+    });
+    expect(activity.state).toBe("unknown");
+    expect(activity.reason).not.toBe("window_activity_motion");
+  });
+
+  it("A10 [stale cache] the same stale true must NOT overturn a positive idle hook", async () => {
+    const activity = await activityOf({
+      tmuxAdapter: mkTmux({ captures: 0 }),
+      activityStore: store(hook("idle", "stop_hook")),
+      structuralActivity: mkStructural(null),
+      seatActivity: mkMotion(true, "2026-08-11T03:59:59.000Z"),
+    });
+    expect(activity.state).toBe("idle");
+  });
+
+  it("A11 [fail closed] a cached true whose raw fact cannot be AGED must not upgrade anything", async () => {
+    // If the observation carries no usable timestamp there is no way to tell live from long-dead, and
+    // an un-ageable affirmative is exactly the input that must not become a liveness claim.
+    for (const raw of [null, "not-a-timestamp"]) {
+      const activity = await activityOf({
+        tmuxAdapter: mkTmux({ captures: 0 }),
+        activityStore: store(null),
+        structuralActivity: mkStructural("unknown"),
+        seatActivity: mkMotion(true, raw),
+      });
+      expect(activity.state).toBe("unknown");
+    }
+  });
+
+  it("A12 [not over-corrected] a fresh raw fact still upgrades — the fix must not disable motion", async () => {
+    // The mirror of A9. A correction that made every motion read stale would pass A9/A10/A11 and
+    // silently restore the original defect, so freshness is pinned from BOTH sides.
+    const activity = await activityOf({
+      tmuxAdapter: mkTmux({ captures: 0 }),
+      activityStore: store(hook("idle", "stop_hook")),
+      structuralActivity: mkStructural(null),
+      seatActivity: mkMotion(true, "2026-08-11T04:51:59.000Z"), // 1s before NOW
+    });
+    expect(activity.state).toBe("running");
+    expect(activity.reason).toBe("window_activity_motion");
+  });
+
+  it("A13 [boundary] freshness is judged against the seat's OWN silence window, both sides of it", async () => {
+    // Just INSIDE the 3s window.
+    const inside = await activityOf({
+      tmuxAdapter: mkTmux({ captures: 0 }),
+      activityStore: store(null),
+      structuralActivity: mkStructural("unknown"),
+      seatActivity: mkMotion(true, "2026-08-11T04:51:57.500Z"), // 2.5s old
+    });
+    expect(inside.state).toBe("running");
+
+    // Just OUTSIDE it.
+    const outside = await activityOf({
+      tmuxAdapter: mkTmux({ captures: 0 }),
+      activityStore: store(null),
+      structuralActivity: mkStructural("unknown"),
+      seatActivity: mkMotion(true, "2026-08-11T04:51:56.500Z"), // 3.5s old
+    });
+    expect(outside.state).toBe("unknown");
+  });
+
+  it("A14 [clock skew] a raw fact slightly AHEAD of the request clock still reads as live", async () => {
+    // pollSeat deliberately treats negative age as active (the daemon's clock can lag tmux briefly).
+    // Read-time aging must keep that behavior rather than reading the future as stale.
+    const activity = await activityOf({
+      tmuxAdapter: mkTmux({ captures: 0 }),
+      activityStore: store(null),
+      structuralActivity: mkStructural("unknown"),
+      seatActivity: mkMotion(true, "2026-08-11T04:52:01.000Z"), // 1s in the future
+    });
+    expect(activity.state).toBe("running");
   });
 
   it("A8 [the live fleet shape] an unverifiable-generation hook + LIVE motion reports running", async () => {
