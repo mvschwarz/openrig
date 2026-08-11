@@ -65,11 +65,26 @@ function scenarioDir(): string {
     "          state: in-progress",
     "",
   ].join("\n"));
+  // A PASSING scenario over the SAME fixed observable — the approved secondary
+  // leg (rev-2): verdict + normalized run-record stability across two runs.
+  writeFileSync(join(d, "pass.yaml"), [
+    "scenario: determinism-pass-twice",
+    "topology: ./topo.yaml",
+    "steps:",
+    "  - up: {}",
+    "  - expect:",
+    "      surface: queue",
+    "      within: 2s",
+    "      match:",
+    "        - qitemId: fixed-1",
+    "          state: pending",
+    "",
+  ].join("\n"));
   return d;
 }
 
-async function runOnce(d: string, records: RunRecord[]) {
-  return runScenarioFile(join(d, "s.yaml"), {
+async function runOnce(d: string, records: RunRecord[], file = "s.yaml") {
+  return runScenarioFile(join(d, file), {
     rigBin: join(d, "rig.mjs"),
     baseEnv: { HOME: d, PATH: process.env.PATH, TERM: "xterm" },
     // the claim is "under the injected clock" — so actually inject it
@@ -116,6 +131,28 @@ describe("D8 — the same scenario twice under the injected clock is byte-identi
     // from the option we passed in.
     const seen = readFileSync(join(d, "clock.log"), "utf-8").trim().split("\n");
     expect(seen.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(seen)).toEqual(new Set([INJECTED_CLOCK]));
+  });
+
+  // Guard finding (fresh gate): the approved rev-2 contract named a PASS-twice
+  // secondary leg alongside the stable-FAIL discriminator. The FAIL leg proves
+  // the observed bytes are stable; this proves a GREEN verdict and its ledger row
+  // are stable too — the everyday case a scenario author actually reruns.
+  it("SECONDARY LEG: a PASSING scenario run twice yields identical verdict and normalized records", async () => {
+    const d = scenarioDir();
+    const recordsA: RunRecord[] = [];
+    const recordsB: RunRecord[] = [];
+    const a = await runOnce(d, recordsA, "pass.yaml");
+    const b = await runOnce(d, recordsB, "pass.yaml");
+
+    expect(a.verdict).toBe("PASS");
+    expect(b.verdict).toBe(a.verdict);
+    expect(b.failedStep).toBe(a.failedStep); // both undefined on PASS
+    expect(recordsA.length).toBeGreaterThan(0);
+    expect(recordsB.map(normalizeRecord)).toEqual(recordsA.map(normalizeRecord));
+
+    // and both PASS runs saw the SAME injected clock (no wall-clock leak)
+    const seen = readFileSync(join(d, "clock.log"), "utf-8").trim().split("\n");
     expect(new Set(seen)).toEqual(new Set([INJECTED_CLOCK]));
   });
 

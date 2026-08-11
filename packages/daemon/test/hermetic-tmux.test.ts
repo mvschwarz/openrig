@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { existsSync, readdirSync, mkdtempSync, rmSync } from "node:fs";
+import { stageTopologyRoot } from "./helpers/scenario-stage.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -126,7 +127,8 @@ describe("D5 p3 (integration) — an INHERITED tmux server is replaced, proven w
 
     const HERE = dirname(fileURLToPath(import.meta.url));
     const rigBin = resolve(HERE, "../../cli/dist/bin-wrapper.js");
-    const topology = join(HERE, "fixtures", "scenarios", "topo-stub-baton.yaml");
+    const sourceTopology = join(HERE, "fixtures", "scenarios", "topo-stub-baton.yaml");
+    const pkgRoot = resolve(HERE, "..");
 
     const sentinelDir = mkdtempSync(join(tmpdir(), "sent-"));
     dirs.push(sentinelDir);
@@ -154,9 +156,22 @@ describe("D5 p3 (integration) — an INHERITED tmux server is replaced, proven w
     expect(scaffold.env.TMUX_TMPDIR).toBe(scaffold.tmuxTmpDir);
     expect(scaffold.env.TMUX_TMPDIR).not.toBe(sentinelDir);
 
+    // Guard finding 2: the earlier version ran `up` on a topology whose seats
+    // declare `cwd: .`, with no staged cwd and no --cwd — so the daemon resolved
+    // seat cwd into the SOURCE TREE and the seats wrote AGENTS.md and
+    // .openrig/stub/** into packages/daemon. A pin that proves tmux isolation
+    // while corrupting the owner tree is not a hermeticity pin. Stage per-seat
+    // scaffold cwds with the slice's OWN staging helper instead.
+    const staged = stageTopologyRoot(sourceTopology, join(scaffold.root, "topology"));
+    const managedInSource = () => [
+      join(pkgRoot, "AGENTS.md"),
+      join(pkgRoot, ".openrig"),
+    ].filter((f) => existsSync(f));
+    expect(managedInSource()).toEqual([]); // clean before
+
     const daemon = await spawnScenarioDaemon(scaffold, { rigBin });
     try {
-      const up = await runRig(["up", topology, "--json", "--yes"], daemon.readEnv, rigBin, 120_000);
+      const up = await runRig(["up", staged.topologyPath, "--json", "--yes"], daemon.readEnv, rigBin, 120_000);
       expect(up.code).toBe(0);
 
       // WHILE THE SEATS ARE ALIVE (no `down` yet) — both directions:
@@ -165,6 +180,12 @@ describe("D5 p3 (integration) — an INHERITED tmux server is replaced, proven w
       expect(ownedNow).toContain("scn-baton");   // the seats are HERE...
       expect(sentinelNow).toBe(before);          // ...and the inherited server gained nothing
       expect(sentinelNow).not.toContain("scn-baton");
+
+      // EFFECT PIN (guard finding 2): the source/launch tree received no managed
+      // seat files — the seats' writes landed in the scaffold, where they belong.
+      expect(managedInSource()).toEqual([]);
+      const seatCwd = staged.seatCwds["dev-worker"]!;
+      expect(existsSync(join(seatCwd, ".openrig", "stub", "state.json"))).toBe(true);
     } finally {
       await runRig(["down", "scn-baton", "--json", "--force"], daemon.readEnv, rigBin, 60_000).catch(() => {});
       await run("tmux", ["kill-server"], { env: envFor(scaffold.tmuxTmpDir) }).catch(() => {});
