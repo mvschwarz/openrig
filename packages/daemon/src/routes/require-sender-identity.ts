@@ -13,14 +13,15 @@ import type { Context } from "hono";
  *   - 401 `unattributable_sender` (header absent) — DELETED. A missing header means an unmanaged
  *     terminal, not an attacker; this trust domain's only caller is the operator's own client.
  *     The honest response is to DELIVER and record the weaker era-stamp `claimed:v1`.
- *   - 409 `identity_mismatch` (body claim ≠ transport identity) — **ALSO RULED FOR DELETION, DEFERRED
- *     TO ITS OWN FOLLOW-ON ATOM** (PM, 2026-08-11: both refusals die, one atom each). It STANDS in
- *     this code today — deliberately, not by oversight. PM's reasoning is worth keeping: the fact that
- *     this sender IS certified is exactly why refusing them is wrong. The wire decides the actor and
- *     the body never does, so a disagreeing body claim is NOISE TO BE SUPERSEDED, not an attack to be
- *     refused — and the incident transport matrix showed this 409 firing on honest-but-skewed clients
- *     during an outage. It is split off because taking it here would drag 12 test files, including the
- *     ui package, into a light-path atom.
+ *   - 409 `identity_mismatch` (body claim ≠ transport identity) — DELETED (PM, 2026-08-11, ruling (A):
+ *     both refusals die, folded into this ONE sweep — the earlier one-atom-each split was retired as
+ *     unnecessary ceremony). The fact that this sender IS certified is exactly why refusing them was
+ *     wrong: the wire decides the actor and the body never does, so a disagreeing body claim is NOISE TO
+ *     BE SUPERSEDED, not an attack to be refused. Deliver under the wire identity, labelled transport:v1;
+ *     the discrepancy is NOT persisted (no new field/schema). The incident transport matrix showed this
+ *     409 firing on honest-but-skewed clients (stale env / legacy --actor / relay skew), never adversaries.
+ *     The byte-identical 409 in resolveActorWithDeferral (below) is retired the same way so the two
+ *     sibling helpers agree on the supersede rule.
  *
  * What remains beyond that is NOT an adversary boundary: with neither a transport header nor a body
  * actor there is no actor to put on the ledger row at all, so the caller is asked for the missing
@@ -49,21 +50,11 @@ export function requireSenderIdentity(
   const session = c.req.header(SENDER_IDENTITY_HEADER)?.trim();
   const claim = opts?.bodyClaim?.trim();
   if (session) {
-    // Transport path — the header PROVED the actor at this hop. The mismatch refusal STANDS here
-    // pending PM's ruling on whether amendment 2's "refusal paths" includes it (see the header note):
-    // this sender is certified, so it is not the uncertifiable-sender case P18 deletes.
-    if (claim && claim !== session) {
-      return {
-        ok: false,
-        response: c.json({
-          error: "identity_mismatch",
-          message:
-            `Refusing ${verb}: the request body claims actor "${claim}" but the authenticated transport ` +
-            `identity is "${session}". The body-supplied actor is not accepted — remove it (the transport ` +
-            "header is authoritative).",
-        }, 409),
-      };
-    }
+    // Transport path — the header PROVED the actor at this hop. P18 SWEEP: the wire SUPERSEDES any body
+    // claim (the 409 identity_mismatch refusal is retired). A disagreeing body actor is noise to be
+    // superseded, not an attack to refuse — the wire decides the actor, the body never does. Deliver
+    // under the certified transport identity, labelled transport:v1 as shipped; the discrepancy is not
+    // persisted (ruling (A) — no new field/schema). `claim` is intentionally ignored on this path.
     return { ok: true, session, provenance: "transport:v1" };
   }
   // No transport identity: deliver under the body-declared actor, labelled honestly as claimed-era.
@@ -123,19 +114,10 @@ export function resolveActorWithDeferral(
   const session = c.req.header(SENDER_IDENTITY_HEADER)?.trim();
   const claim = opts?.bodyClaim?.trim();
   if (session) {
-    // Transport path (CLI/DaemonClient stamped the header): derive + 409 on a differing body claim.
-    if (claim && claim !== session) {
-      return {
-        ok: false,
-        response: c.json({
-          error: "identity_mismatch",
-          message:
-            `Refusing ${verb}: the request body claims actor "${claim}" but the authenticated transport ` +
-            `identity is "${session}". The body-supplied actor is not accepted — remove it (the transport ` +
-            "header is authoritative).",
-        }, 409),
-      };
-    }
+    // Transport path (CLI/DaemonClient stamped the header). P18 SWEEP: the wire SUPERSEDES any body
+    // claim — the 409 identity_mismatch is retired here too, so the two sibling helpers agree that a
+    // disagreeing body actor is noise to be superseded, never an attack to refuse. Deliver under the
+    // certified transport identity, labelled transport:v1 as shipped; the discrepancy is not persisted.
     return { ok: true, session, provenance: "transport:v1" };
   }
   // Header absent = the browser UI / MCP path → NAMED DEFERRAL (never-break): record the body actor as

@@ -9,7 +9,7 @@ import type {
 import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelfHostSuffix } from "../domain/queue-repository.js";
 import type { QueueItem } from "../domain/queue-repository.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
-import { requireSenderIdentity } from "./require-sender-identity.js";
+import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
 import { hostname as osHostname } from "node:os";
 import type { InboxHandler } from "../domain/inbox-handler.js";
 import { InboxHandlerError } from "../domain/inbox-handler.js";
@@ -467,7 +467,7 @@ export function queueRoutes(): Hono {
         summary: body.summary,
         evidenceRef: body.evidenceRef,
         nudge: (body as { nudge?: boolean }).nudge,
-        identityProvenance: "transport:v1", // P21 §4 era-stamp: sourceSession came from the transport chokepoint
+        identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
       return c.json(item, 201);
     } catch (err) {
@@ -484,7 +484,7 @@ export function queueRoutes(): Hono {
     if (!identity.ok) return identity.response;
     const destinationSession = identity.session;
     try {
-      const item = getRepo(c).claim({ qitemId, destinationSession, identityProvenance: "transport:v1" });
+      const item = getRepo(c).claim({ qitemId, destinationSession, identityProvenance: resolveRecordedProvenance(c, identity) });
       return c.json(item);
     } catch (err) {
       return errorResponse(c, err);
@@ -500,7 +500,7 @@ export function queueRoutes(): Hono {
     if (!identity.ok) return identity.response;
     const destinationSession = identity.session;
     try {
-      const item = getRepo(c).unclaim(qitemId, destinationSession, body.reason ?? "manual", "transport:v1");
+      const item = getRepo(c).unclaim(qitemId, destinationSession, body.reason ?? "manual", resolveRecordedProvenance(c, identity));
       return c.json(item);
     } catch (err) {
       return errorResponse(c, err);
@@ -562,7 +562,7 @@ export function queueRoutes(): Hono {
         blockedOn: body.blockedOn,
         summary: body.summary,
         evidenceRef: body.evidenceRef,
-        identityProvenance: "transport:v1", // P21 §4 era-stamp: actorSession came from the transport chokepoint
+        identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
       return c.json(item);
     } catch (err) {
@@ -636,7 +636,7 @@ export function queueRoutes(): Hono {
         summary: body.summary,
         evidenceRef: body.evidenceRef,
         nudge: (body as { nudge?: boolean }).nudge,
-        identityProvenance: "transport:v1", // P21 §4 era-stamp: fromSession came from the transport chokepoint
+        identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
       return c.json(result, 201);
     } catch (err) {
@@ -708,7 +708,7 @@ export function queueRoutes(): Hono {
         summary: body.summary,
         evidenceRef: body.evidenceRef,
         nudge: body.nudge,
-        identityProvenance: "transport:v1", // P21 §4 era-stamp: fromSession came from the transport chokepoint
+        identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
       return c.json(result, 201);
     } catch (err) {
@@ -921,15 +921,14 @@ export function queueRoutes(): Hono {
       urgency?: string;
       auditPointer?: string;
     }>().catch(() => ({} as never));
-    // Refuse-unattributable LOUD (approve-actor): no transport identity ⇒ reject, naming what was missing.
-    const senderSession = c.req.header("x-openrig-session")?.trim();
-    if (!senderSession) {
-      return c.json({
-        error: "unattributable_sender",
-        message: "Refusing inbox drop: no authenticated sender identity (X-OpenRig-Session header absent). " +
-          "The channel of record records only a transport-derived sender, never a request-body claim.",
-      }, 401);
-    }
+    // P18 SWEEP (actor-to-label test): the sender is DERIVED from the transport header, NEVER the body
+    // — a body-supplied identity is forgeable false history. No body claim is read, so with no header
+    // there is no actor at all to LABEL → 400 actor_required (parameter completeness, the queue.ts:215
+    // class), NOT the retired 401 refusal-of-an-uncertifiable-sender. Converges on the shape
+    // resolveActorWithDeferral already uses for nothing-to-record.
+    const identity = requireSenderIdentity(c, { verb: "inbox drop" });
+    if (!identity.ok) return identity.response;
+    const senderSession = identity.session; // transport-derived, authoritative
     if (!body.destinationSession) return c.json({ error: "destinationSession is required" }, 400);
     if (!body.body) return c.json({ error: "body is required" }, 400);
 
@@ -942,7 +941,7 @@ export function queueRoutes(): Hono {
         tags: body.tags,
         urgency: body.urgency,
         auditPointer: body.auditPointer,
-        identityProvenance: "transport:v1", // P21 §4 era-stamp: senderSession came from the transport chokepoint
+        identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 (or relay:v1 on a relayed hop) — no body sender is read, so claimed:v1 cannot arise here
       });
       return c.json(entry, 201);
     } catch (err) {
@@ -957,7 +956,7 @@ export function queueRoutes(): Hono {
     const identity = requireSenderIdentity(c, { verb: "inbox absorb", bodyClaim: body.receiverSession });
     if (!identity.ok) return identity.response;
     try {
-      const result = await getInbox(c).absorb(inboxId, identity.session, "transport:v1");
+      const result = await getInbox(c).absorb(inboxId, identity.session, resolveRecordedProvenance(c, identity));
       return c.json(result);
     } catch (err) {
       return errorResponse(c, err);
@@ -1018,7 +1017,7 @@ export function queueRoutes(): Hono {
       tags: body.tags,
       urgency: body.urgency,
       auditPointer: body.auditPointer,
-      identityProvenance: "transport:v1", // P21 §4 era-stamp: senderSession came from the transport chokepoint
+      identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
     });
     return c.json(entry, 201);
   });

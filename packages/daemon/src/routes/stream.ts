@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { EventBus } from "../domain/event-bus.js";
 import type { StreamStore } from "../domain/stream-store.js";
-import { requireSenderIdentity } from "./require-sender-identity.js";
+import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
 
 const ISO_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
@@ -82,7 +82,7 @@ export function streamRoutes(): Hono {
       hintDestination: body.hintDestination ?? null,
       hintTags: body.hintTags ?? null,
       interrupt: body.interrupt,
-      identityProvenance: "transport:v1", // P21 §4 era-stamp: sourceSession came from the transport chokepoint
+      identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
     });
     return c.json(item, 201);
   });

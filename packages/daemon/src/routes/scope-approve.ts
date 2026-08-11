@@ -7,7 +7,7 @@ import { Hono } from "hono";
 import type { SliceIndexer } from "../domain/slices/slice-indexer.js";
 import type { MissionControlActionLog } from "../domain/mission-control/mission-control-action-log.js";
 import { ScopeApproveError, ScopeApproveService, type ApprovalScope, type ScopeTier } from "../domain/scope/scope-approve.js";
-import { requireSenderIdentity } from "./require-sender-identity.js";
+import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
 
 export function scopeApproveRoutes(): Hono {
   const app = new Hono();
@@ -55,7 +55,7 @@ export function scopeApproveRoutes(): Hono {
         scopePath: body.scopePath,
         approvalScope,
         actorSession: identity.session, // transport-derived, authoritative
-        identityProvenance: "transport:v1", // P21 era-stamp: this actor came from the transport chokepoint
+        identityProvenance: resolveRecordedProvenance(c, identity), // P21 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
         onBehalfOf: body.onBehalfOf ?? null,
         reApprove: body.reApprove === true,
         reason: typeof body.reason === "string" ? body.reason : null,
