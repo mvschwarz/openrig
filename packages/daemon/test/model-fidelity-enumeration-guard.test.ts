@@ -94,4 +94,27 @@ describe("0.5.2-07 A2-3 — model-fidelity enumeration guard", () => {
     // And it IS still used by the metadata/inventory surface (classification is live, not dead).
     expect(callers.sort()).toEqual(["node-inventory.ts", "resume-metadata-refresher.ts"]);
   });
+
+  // 0.5.2-07 A4-profile — extend the fence to the codex_config_profile field. The codex adapter already
+  // emits `-p` from binding.codexConfigProfile; the HANDOVER path (the A2-1 fix's sibling) must SELECT
+  // the column at lookupNode AND carry it onto the successor binding, exactly as it now does for model.
+  // A future edit that threads the profile into the binding but forgets the SELECT (or vice-versa) fails HERE.
+  it("handover threads codex_config_profile: lookupNode SELECTs it AND the successor binding carries it", () => {
+    const handover = read("domain/seat-handover-service.ts");
+    // The lookupNode query must SELECT the column (mirrors the A2-1 model SELECT, one field over).
+    expect(handover, "seat-handover-service lookupNode must SELECT codex_config_profile").toMatch(
+      /SELECT id, runtime, cwd, model, codex_config_profile FROM nodes/,
+    );
+    // The NodeRow shape must carry it, and createSuccessor must forward it onto the successor node.
+    expect(handover, "NodeRow must carry codex_config_profile").toMatch(/codex_config_profile: string \| null/);
+    expect(handover, "createSuccessor must forward the profile onto the successor node").toMatch(
+      /codexConfigProfile: node\.codex_config_profile/,
+    );
+    // The launcher must thread it from the successor node onto the transient binding the adapter reads.
+    const launcher = read("domain/successor-session-launcher.ts");
+    expect(launcher, "SuccessorNode must declare codexConfigProfile").toMatch(/codexConfigProfile\?: string \| null/);
+    expect(launcher, "the transient binding must thread codexConfigProfile").toMatch(
+      /codexConfigProfile: node\.codexConfigProfile/,
+    );
+  });
 });

@@ -109,9 +109,9 @@ describe("SeatHandoverService", () => {
     });
   }
 
-  function seedSeat(opts?: { runtime?: string; withSession?: boolean; model?: string }) {
+  function seedSeat(opts?: { runtime?: string; withSession?: boolean; model?: string; codexConfigProfile?: string }) {
     const rig = rigRepo.createRig("seat-rig");
-    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: opts?.runtime ?? "codex", cwd: "/project", model: opts?.model });
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: opts?.runtime ?? "codex", cwd: "/project", model: opts?.model, codexConfigProfile: opts?.codexConfigProfile });
     let sessionId: string | null = null;
     if (opts?.withSession !== false) {
       const session = sessionRegistry.registerSession(node.id, "dev-impl@seat-rig");
@@ -468,6 +468,26 @@ describe("SeatHandoverService", () => {
     expect(launchHarness).toHaveBeenCalledTimes(1);
     const successorBinding = launchHarness.mock.calls[0]![0] as { model?: string };
     expect(successorBinding.model).toBe("gpt-5.4-cheap");
+  });
+
+  it("MONEY PROOF (0.5.2-07 A4-profile): a codex_config_profile-pinned seat's handover launches the successor with that profile — the REAL lookupNode→createSuccessor→launchHarness path", async () => {
+    // A4-profile mirrors A2-1 for the codex_config_profile column. The codex adapter already emits
+    // `-p <profile>` from binding.codexConfigProfile; the gap is the HANDOVER threading — lookupNode
+    // must SELECT codex_config_profile and createSuccessor must carry it onto the successor binding.
+    // RED on this base: lookupNode SELECTs only id/runtime/cwd/model, so the pinned profile is lost
+    // before the successor binding is ever built — the same handover-reverts gap as the model, one
+    // field over. The restore path already threads it (restore-orchestrator.ts); handover did not.
+    seedSeat({ runtime: "codex", codexConfigProfile: "prod-sandboxed" });
+    const result = await service.handover({
+      seatRef: "dev-impl@seat-rig",
+      reason: "context-wall",
+      source: "fresh",
+      operator: "orch-lead@seat-rig",
+    });
+    expect(result.ok).toBe(true);
+    expect(launchHarness).toHaveBeenCalledTimes(1);
+    const successorBinding = launchHarness.mock.calls[0]![0] as { codexConfigProfile?: string };
+    expect(successorBinding.codexConfigProfile).toBe("prod-sandboxed");
   });
 
   it("composes the full cycle for a fresh source: create -> deliver -> verify -> rebind", async () => {

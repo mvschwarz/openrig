@@ -80,6 +80,9 @@ interface NodeRow {
   // 0.5.2-07: the seat's SPEC-pinned model, threaded onto the successor binding so handover
   // does not silently revert a spec-pinned seat to the runtime default (adapter emits -m/--model).
   model: string | null;
+  // 0.5.2-07 A4-profile: the seat's SPEC-pinned codex config profile (nodes.codex_config_profile),
+  // threaded onto the successor binding for the same reason as model — the adapter emits `-p <profile>`.
+  codex_config_profile: string | null;
 }
 
 interface SessionRow {
@@ -330,7 +333,9 @@ export class SeatHandoverService {
       // Seam B: the successor is the SAME seat continuing — persisted policy posture carries.
       // 0.5.2-07 model fidelity: carry the seat's SPEC-pinned model so the successor launch reads the
       // spec (else the running topology drifts from the founder-designed one at every handover).
-      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, launchPosture: successorPosture, model: node.model },
+      // A4-profile: likewise carry the codex config profile (adapter emits -p) — the restore path
+      // already threads it; handover must too, or a profile-pinned codex seat reverts at handover.
+      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, launchPosture: successorPosture, model: node.model, codexConfigProfile: node.codex_config_profile ?? undefined },
       departingSessionName: latestSession.session_name,
       occupantGeneration,
       ...(predecessorGeneration
@@ -640,7 +645,7 @@ export class SeatHandoverService {
 
   private lookupNode(status: SeatStatus): NodeRow {
     return this.db.prepare(
-      "SELECT id, runtime, cwd, model FROM nodes WHERE rig_id = ? AND logical_id = ?"
+      "SELECT id, runtime, cwd, model, codex_config_profile FROM nodes WHERE rig_id = ? AND logical_id = ?"
     ).get(status.rig_id, status.logical_id) as NodeRow;
   }
 

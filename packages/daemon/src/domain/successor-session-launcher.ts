@@ -48,6 +48,10 @@ export interface SuccessorNode {
    *  running topology drift from the founder-designed one. Populated by the caller from node provenance;
    *  absent → the adapter emits no model flag (unchanged for legacy/unpinned seats). */
   model?: string | null;
+  /** 0.5.2-07 A4-profile: the seat's SPEC-pinned codex config profile (nodes.codex_config_profile).
+   *  Same continuity rationale as model — populated by the caller from node provenance; absent → the
+   *  adapter emits no -p flag (unchanged for legacy/unpinned seats). */
+  codexConfigProfile?: string | null;
 }
 
 export type SuccessorLaunchResult =
@@ -285,6 +289,8 @@ export class SuccessorSessionLauncher {
       ...(node.launchPosture ? { launchPosture: node.launchPosture } : {}),
       // 0.5.2-07: the successor reads the seat's SPEC-pinned model (adapter emits -m/--model).
       model: node.model ?? undefined,
+      // 0.5.2-07 A4-profile: the successor reads the seat's SPEC-pinned codex config profile (adapter emits -p).
+      codexConfigProfile: node.codexConfigProfile ?? undefined,
     };
 
     let launch: Awaited<ReturnType<RuntimeAdapter["launchHarness"]>>;
