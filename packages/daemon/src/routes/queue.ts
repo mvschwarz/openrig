@@ -6,7 +6,7 @@ import type {
   QueuePriority,
   QueueState,
 } from "../domain/queue-repository.js";
-import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelfHostSuffix } from "../domain/queue-repository.js";
+import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelfHostSuffix, classifyNudgeFailure } from "../domain/queue-repository.js";
 import type { QueueItem } from "../domain/queue-repository.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
 import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
@@ -865,7 +865,11 @@ export function queueRoutes(): Hono {
     const limit = limitRaw !== undefined && Number.isInteger(limitRaw) && limitRaw > 0 ? limitRaw : undefined;
     const compact = q.compact === "1" || q.compact === "true";
     const items = getRepo(c).findUndelivered({ rig, limit, compact });
-    return c.json(items);
+    // 0.5.1-54 classifier fold (PM ruling): LABEL each strand transient vs permanent-topology so the
+    // count is actionable — permanent-topology (destination unresolvable on this daemon) routes to the
+    // addressing family, not retry; transient is the only class a future DR-2 (held n=1) would touch.
+    const classified = items.map((it) => ({ ...it, deliveryFailureClass: classifyNudgeFailure(it.lastNudgeResult) }));
+    return c.json(classified);
   });
 
   // ---- SSE watch over coordination events ----

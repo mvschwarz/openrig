@@ -76,10 +76,13 @@ describe("queue routes", () => {
     queueRepo.recordNudgeAttempt(delivered.qitemId, "verified");
     const res = await app.request("/api/queue/undelivered");
     expect(res.status).toBe(200);
-    const items = (await res.json()) as Array<{ qitemId: string }>;
+    const items = (await res.json()) as Array<{ qitemId: string; deliveryFailureClass: string | null }>;
     const ids = items.map((i) => i.qitemId);
     expect(ids, "the failed-nudge strand is surfaced").toContain(failed.qitemId);
     expect(ids, "V1-only: a delivered row is not surfaced").not.toContain(delivered.qitemId);
+    // classifier fold: the not-found strand is labeled permanent-topology (unresolvable on this daemon).
+    const strand = items.find((i) => i.qitemId === failed.qitemId)!;
+    expect(strand.deliveryFailureClass, "the not-found strand is labeled permanent-topology").toBe("permanent-topology");
   });
 
   // ── P18 sender-provenance: /inbox/drop derives the sender from the authenticated transport

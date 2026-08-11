@@ -147,6 +147,34 @@ describe("Slice 15 — CLI contract honesty", () => {
     });
   });
 
+  // 0.5.1-54 DR-1 — `queue undelivered` mirrors `overdue` (rig-scoped, bounded, body-free by default).
+  describe("DR-1 — queue undelivered scoped + bounded + body-free by default", () => {
+    it("default: rig-scoped (current rig) + compact=1 + a default limit, hits /api/queue/undelivered", async () => {
+      vi.stubEnv("OPENRIG_SESSION_NAME", "dev@my-rig");
+      const { deps, calls } = makeQueueDeps();
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "undelivered", "--json"]);
+      const call = calls.find((c) => c.path.startsWith("/api/queue/undelivered"));
+      expect(call).toBeDefined();
+      expect(call!.path).toContain("rig=my-rig");
+      expect(call!.path).toContain("compact=1");
+      expect(call!.path).toMatch(/limit=\d+/);
+      vi.unstubAllEnvs();
+    });
+    it("--full drops compact; -A drops the rig scope", async () => {
+      vi.stubEnv("OPENRIG_SESSION_NAME", "dev@my-rig");
+      const { deps, calls } = makeQueueDeps();
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "undelivered", "-A", "--full"]);
+      const call = calls.find((c) => c.path.startsWith("/api/queue/undelivered"));
+      expect(call!.path).not.toContain("compact=1");
+      expect(call!.path).not.toContain("rig=");
+      vi.unstubAllEnvs();
+    });
+  });
+
   describe("finding 5 — ps --active honest at rig tier", () => {
     it("bare `ps --active` (no --nodes) fails loudly with nonzero exit — not a silent no-op", async () => {
       const errs: string[] = [];

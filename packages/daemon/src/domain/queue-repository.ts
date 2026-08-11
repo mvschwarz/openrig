@@ -63,6 +63,27 @@ export function isTypedGateBlocker(value: unknown): boolean {
   return p != null && value.slice(p.length).trim().length > 0;
 }
 
+/**
+ * 0.5.1-54 DR-1 (classifier fold, PM ruling qitem-20260811163927-74493d76) — classify a create-path
+ * nudge FAILURE so the surfaced count becomes ACTIONABLE (constraint iii). Two classes:
+ *   - "permanent-topology": the destination is not resolvable on THIS daemon (the nudge can never
+ *     succeed here — a local-registry lookup reporting "not found" for a seat that lives on another
+ *     daemon). Retrying is a guaranteed-permanent failure repeated on a schedule → NOT retryable;
+ *     these belong to the ADDRESSING family, not to retry machinery. (The live corpus: 9/10 strands.)
+ *   - "transient": a live, resolvable seat that refused THIS attempt (e.g. busy at an interactive
+ *     prompt, or a timeout) — the only class a future bounded re-attempt (DR-2, held n=1) would touch.
+ * Returns null when `lastNudgeResult` is not a recorded failure (`failed:%`).
+ *
+ * DR-2 (retry) stays HELD at n=1; this is READ-side labeling only — it acts on nothing, it makes the
+ * strand's nature legible so a human/agent routes it correctly (addressing-fix vs wake-vs-retry).
+ */
+export function classifyNudgeFailure(lastNudgeResult: string | null | undefined): "permanent-topology" | "transient" | null {
+  if (typeof lastNudgeResult !== "string" || !lastNudgeResult.startsWith("failed:")) return null;
+  // "not found" is the local-registry-can't-resolve signature (the exact VM→host cross-daemon miss).
+  if (/\bnot found\b/i.test(lastNudgeResult)) return "permanent-topology";
+  return "transient";
+}
+
 export const QUEUE_PRIORITIES = ["routine", "urgent", "critical"] as const;
 export type QueuePriority = (typeof QUEUE_PRIORITIES)[number];
 

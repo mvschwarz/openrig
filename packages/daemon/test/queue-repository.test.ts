@@ -16,6 +16,7 @@ import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import {
   QueueRepository,
   QueueRepositoryError,
+  classifyNudgeFailure,
 } from "../src/domain/queue-repository.js";
 import { CLOSURE_REASONS } from "../src/domain/hot-potato-enforcer.js";
 import type { PersistedEvent } from "../src/domain/types.js";
@@ -76,6 +77,17 @@ describe("QueueRepository", () => {
     const after = repo.getById(failed.qitemId)!;
     expect(after.state, "(c) surfacing does not unwind/close the durable row").toBe("pending");
     expect(after.lastNudgeResult, "(c) the failure record is untouched by the read").toContain("failed:");
+  });
+
+  // 0.5.1-54 DR-1 classifier fold (PM ruling) — label a strand transient vs permanent-topology so the
+  // count is actionable. permanent-topology = the destination is not resolvable on THIS daemon ("not
+  // found"), route to the addressing family, NOT retry. transient = a live seat refused this attempt.
+  it("DR-1 classifyNudgeFailure: permanent-topology for 'not found', transient otherwise, null for non-failure", () => {
+    expect(classifyNudgeFailure("failed:Session 'operator-agent@kernel' not found. Check available sessions"), "not-found = unresolvable on this daemon").toBe("permanent-topology");
+    expect(classifyNudgeFailure("failed:Refused: 'orch-advisor@v-openrig-build' is at an interactive prompt"), "a live seat refusing this attempt is transient").toBe("transient");
+    expect(classifyNudgeFailure("failed:timeout after 5000ms"), "a timeout to a resolvable seat is transient").toBe("transient");
+    expect(classifyNudgeFailure("verified"), "a delivered result is not a failure").toBeNull();
+    expect(classifyNudgeFailure(null), "no nudge record is not a failure").toBeNull();
   });
 
   it("create rejects unknown rig when validateRig denies", async () => {
