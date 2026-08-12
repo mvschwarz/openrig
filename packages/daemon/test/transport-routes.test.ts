@@ -166,15 +166,57 @@ describe("transport routes", () => {
     expect(rows[0]!["sender_session"]).toBe("orch@rig-a@origin-host"); // ORIGIN triple, not the relay
   });
 
-  it("A3 — a REFUSED send (body actor != header ⇒ 409 identity_mismatch) writes NO outbox row", async () => {
+  // Was: "a REFUSED send writes NO outbox row". The refusal class is RULED DELETED
+  // (PM (A), 2026-08-11) — a disagreeing body claim is superseded, not refused — so
+  // the send now DELIVERS and the row records the wire identity. What this pin is
+  // for is unchanged: the body claim must never reach the ledger.
+  it("A3 — a send whose body actor differs is DELIVERED, and the outbox row carries the HEADER identity", async () => {
     seedRig();
     const res = await sendApp().request("/api/transport/send", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" },
       body: JSON.stringify({ session: "dev-impl@my-rig", text: "hi", actorSession: "mallory@my-rig" }),
     });
-    expect(res.status).toBe(409);
-    expect(outboxRows()).toHaveLength(0); // refused before dispatch → nothing recorded
+    expect(res.status).toBe(200);
+    const rows = outboxRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!["sender_session"]).toBe("orch@my-rig");
+    expect(rows[0]!["sender_session"]).not.toContain("mallory");
+  });
+
+  // 5.1 RELEASE BLOCKER (L5 leg A3, reproduced at route level): 51-09 appended the
+  // origin host to the transport identity, so the header carries a TRIPLE while the
+  // body still carries the PAIR. Those values do NOT disagree — the triple is the
+  // same actor with its origin added — but a literal string comparison read it as a
+  // mismatch and 409'd the first real cross-host send at the SAME SHA.
+  it("L5 A3 — header TRIPLE + body PAIR delivers, and records the WIRE identity (not the body claim)", async () => {
+    seedRig();
+    const res = await sendApp().request("/api/transport/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch-main@rig-a@host-a16b0df1" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "cross-host probe", actorSession: "orch-main@rig-a" }),
+    });
+    expect(res.status).toBe(200); // was 409 identity_mismatch — the release blocker
+    const rows = outboxRows();
+    expect(rows).toHaveLength(1);
+    // provenance unchanged: the WIRE decides the actor and the body never does. If the
+    // body PAIR leaked into the recorded sender, deleting the guard would be wrong.
+    expect(rows[0]!["sender_session"]).toBe("orch-main@rig-a@host-a16b0df1");
+    expect(rows[0]!["sender_session"]).not.toBe("orch-main@rig-a");
+  });
+
+  it("L5 A3 — a body claim naming a DIFFERENT actor is SUPERSEDED, never trusted, and never refuses", async () => {
+    seedRig();
+    const res = await sendApp().request("/api/transport/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "hi", actorSession: "mallory@my-rig" }),
+    });
+    expect(res.status).toBe(200);
+    const rows = outboxRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!["sender_session"]).toBe("orch@my-rig"); // wire wins
+    expect(rows[0]!["sender_session"]).not.toContain("mallory"); // body DISCARDED, not recorded
   });
 
   it("A3 — a header-LESS send (no derived actor) auto-records NO row (nothing to attribute; no fabricated sender)", async () => {
@@ -234,15 +276,21 @@ describe("transport routes", () => {
     expect(byDest["dev-qa@my-rig"]).toBe("failed"); // per-recipient truth, not a lossy aggregate
   });
 
-  it("A3b — a REFUSED broadcast (body actor != header ⇒ 409) writes NO outbox rows", async () => {
+  // Same conversion on the fan-out path (the second deleted guard, transport.ts:223).
+  it("A3b — a broadcast whose body actor differs is DELIVERED, and every row carries the HEADER identity", async () => {
     seedRig();
     const res = await sendApp().request("/api/transport/broadcast", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" },
       body: JSON.stringify({ rig: "my-rig", text: "hi", actorSession: "mallory@my-rig" }),
     });
-    expect(res.status).toBe(409);
-    expect(outboxRows()).toHaveLength(0);
+    expect(res.status).toBe(200);
+    const rows = outboxRows();
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(row["sender_session"]).toBe("orch@my-rig");
+      expect(row["sender_session"]).not.toContain("mallory");
+    }
   });
 
   it("A3b — a header-LESS broadcast auto-records NO rows (no derived sender to attribute)", async () => {
@@ -823,7 +871,7 @@ describe("transport routes", () => {
     expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
   });
 
-  it("P21 I4: a body actorSession that DIFFERS from the header refuses-loud identity_mismatch", async () => {
+  it("P21 I4: a body actorSession that DIFFERS from the header is SUPERSEDED (no identity_mismatch refusal)", async () => {
     seedRig();
     const app = createApp({ sessionTransport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux() }) });
     const res = await app.request("/api/transport/send", {
@@ -831,7 +879,8 @@ describe("transport routes", () => {
       headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" },
       body: JSON.stringify({ session: "dev-impl@my-rig", text: "x", actorSession: "mallory@my-rig" }),
     });
-    expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toBe("identity_mismatch");
+    expect(res.status).toBe(200);
+    // the refusal is gone from this path entirely — not merely a different status
+    expect(JSON.stringify(await res.json())).not.toContain("identity_mismatch");
   });
 });

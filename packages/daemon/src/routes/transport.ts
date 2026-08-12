@@ -60,16 +60,15 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     }
 
     // P21 I4: the actor (the --dangerously-interact override AUDIT actor) is DERIVED from the transport
-    // header, never body.actorSession. A body claim that DIFFERS from the header refuses-loud; a
-    // drive-the-prompt override MUST be attributable, so an absent header refuses-loud (the override
-    // writes an audit row that names who drove the prompt — it cannot be a forgeable claim).
+    // header, never body.actorSession. A drive-the-prompt override MUST be attributable, so an absent
+    // header refuses-loud (the override writes an audit row that names who drove the prompt — it cannot
+    // be a forgeable claim). A body claim that DIFFERS is simply SUPERSEDED, never a refusal: the wire
+    // decides the actor and the body never does, so a disagreeing body value is noise to be discarded
+    // (PM ruling (A), 2026-08-11 — see require-sender-identity.ts:16-22, which both sibling helpers
+    // already implement). The 409 here also broke real cross-host sends: 51-09 host-qualified the
+    // transport identity, so a header TRIPLE and a body PAIR are the SAME actor and a literal string
+    // comparison read that as a mismatch.
     const derivedActor = c.req.header("x-openrig-session")?.trim() || null;
-    if (body.actorSession && derivedActor && body.actorSession.trim() !== derivedActor) {
-      return c.json({
-        ok: false, error: "identity_mismatch",
-        message: `The request body claims actor "${body.actorSession}" but the authenticated transport identity is "${derivedActor}". Remove the body actor (the transport header is authoritative).`,
-      }, 409);
-    }
     if (body.dangerouslyInteract && !derivedActor) {
       return c.json({
         ok: false, error: "unattributable_sender",
@@ -216,14 +215,11 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
 
     // P21 I4: the --dangerously-interact override AUDIT actor is DERIVED from the transport header (see
     // /send). The envelopeSender (the From: rendered into every recipient's terminal) derives too — orch
-    // ruled (a): the header re-stamp is authoritative and the body value is ignored (see below).
+    // ruled (a): the header re-stamp is authoritative and the body value is IGNORED (see below). Ignored
+    // means SUPERSEDED, not refused — the guard that used to sit here contradicted this very comment and
+    // 409'd host-qualified cross-host sends (header TRIPLE vs body PAIR: the same actor, not a
+    // disagreement). PM ruling (A), 2026-08-11.
     const derivedActor = c.req.header("x-openrig-session")?.trim() || null;
-    if (body.actorSession && derivedActor && body.actorSession.trim() !== derivedActor) {
-      return c.json({
-        error: "identity_mismatch",
-        message: `The request body claims actor "${body.actorSession}" but the authenticated transport identity is "${derivedActor}". Remove the body actor (the transport header is authoritative).`,
-      }, 409);
-    }
     if (body.dangerouslyInteract && !derivedActor) {
       return c.json({
         error: "unattributable_sender",
