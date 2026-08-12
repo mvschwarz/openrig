@@ -62,8 +62,9 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
     .option("--notes <text>", "Operator notes captured in bundle provenance metadata")
     .option("--min-daemon-version <ver>", "Minimum daemon version required to install this bundle (Item 2 compatibility)")
     .option("--min-cli-version <ver>", "Minimum CLI version required to install this bundle (Item 2 compatibility)")
+    .option("--allow-drift", "Bundle a spec that disagrees with the running rig of the same name; the divergence is stamped into bundle provenance")
     .option("--json", "JSON output")
-    .action(async (spec: string, opts: { output: string; name: string; bundleVersion: string; includePackages?: string[]; rigRoot?: string; notes?: string; minDaemonVersion?: string; minCliVersion?: string; json?: boolean }) => {
+    .action(async (spec: string, opts: { output: string; name: string; bundleVersion: string; includePackages?: string[]; rigRoot?: string; notes?: string; minDaemonVersion?: string; minCliVersion?: string; allowDrift?: boolean; json?: boolean }) => {
       const deps = getDepsF();
       const client = await getClient(deps);
       if (!client) { process.exitCode = 1; return; }
@@ -90,6 +91,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
         rigRoot: opts.rigRoot ? nodePath.resolve(opts.rigRoot) : undefined,
         provenance: buildClientProvenance(opts.notes),
         ...(hasCompatibility ? { compatibility } : {}),
+        ...(opts.allowDrift ? { allowDrift: true } : {}),
       }, { timeoutMs: 120_000 });
 
       if (opts.json) {
@@ -101,6 +103,9 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       console.log(`Bundle created: ${opts.output}`);
       console.log(`  Name: ${res.data["bundleName"]} v${res.data["bundleVersion"]}`);
       console.log(`  Hash: ${res.data["archiveHash"]}`);
+      // The daemon has returned this on every drifted export since Build B and the human path
+      // dropped it — the operator saw a clean success while shipping a rig that does not exist.
+      if (typeof res.data["warning"] === "string") console.warn(`\n${res.data["warning"]}`);
     });
 
   // rig bundle inspect <path>

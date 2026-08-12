@@ -59,9 +59,24 @@ describe("bundle export — spec-vs-live drift warning", () => {
     expect(describeSpecLiveDrift(SPEC, repo)).toBeNull();
   });
 
-  it("SILENT for a legacy non-pod-aware spec, and for a nameless one", () => {
+  // SUPERSEDED 2026-08-12, and the old expectation is kept named here rather than deleted.
+  //
+  // Build B shipped this as `SILENT for a legacy non-pod-aware spec` — a deliberate scope limit, not
+  // a property of legacy specs. It was wrong in the way that matters: a v1 spec exports through the
+  // same create endpoint and produces the same confidently-wrong artifact, so silence there was the
+  // defect wearing a passing test. Legacy now compares too (flat `nodes:` ids against flat
+  // `logical_id`s), and the route refuses a legacy spec that would drop live seats.
+  it("WARNS for a legacy non-pod-aware spec — the format never made the drift safe", () => {
     seedRig("drift-rig", ["orch.lead", "dev.driver", "dev50.driver"]);
-    expect(describeSpecLiveDrift({ name: "drift-rig", nodes: [{ id: "dev" }] }, repo)).toBeNull();
+    const warning = describeSpecLiveDrift({ name: "drift-rig", nodes: [{ id: "dev" }] }, repo);
+    expect(warning).not.toBeNull();
+    expect(warning).toContain("dev.driver");
+  });
+
+  // Still silent, and for a reason the legacy change does not touch: with no `name:` there is no rig
+  // to look up, so there is nothing to compare against and nothing honest to say.
+  it("SILENT for a nameless spec", () => {
+    seedRig("drift-rig", ["orch.lead", "dev.driver", "dev50.driver"]);
     expect(describeSpecLiveDrift({ pods: SPEC.pods }, repo)).toBeNull();
   });
 

@@ -10,7 +10,10 @@ import { PodBundleAssembler, type PodAssemblerFsOps } from "../domain/pod-bundle
 import { computeIntegrity, writeIntegrity, verifyIntegrity, type IntegrityFsOps } from "../domain/bundle-integrity.js";
 import { pack, unpack, verifyArchiveDigest } from "../domain/bundle-archive.js";
 import { resolvePackage } from "../domain/package-resolve-helper.js";
-import { compareSpecToLive, topologyFromRigSpec, topologyFromLiveLogicalIds, bundleExportWarning } from "../domain/spec-live-conformance.js";
+import {
+  compareSpecToLive, topologyFromRigSpec, topologyFromLiveLogicalIds, bundleExportWarning,
+  topologyFromLegacyRigSpec, topologyFromLiveNodeIds, type ConformanceResult,
+} from "../domain/spec-live-conformance.js";
 import { LegacyRigSpecCodec } from "../domain/rigspec-codec.js";
 import { LegacyRigSpecSchema } from "../domain/rigspec-schema.js";
 import { RigSpecCodec } from "../domain/rigspec-codec.js";
@@ -249,24 +252,66 @@ function realFsOps(): FsOps {
  * Reporting only: never mutates, never blocks, never throws into the export path.
  */
 export function describeSpecLiveDrift(rawParsed: unknown, rigRepo: RigRepository | undefined): string | null {
+  const result = assessSpecLiveDrift(rawParsed, rigRepo);
+  return result ? bundleExportWarning(result) : null;
+}
+
+/**
+ * The same comparison as `describeSpecLiveDrift`, returned STRUCTURED rather than as a sentence.
+ *
+ * The warning string is for a human; a refusal has to reason about the DIRECTION of the delta, which
+ * a sentence cannot be asked to do. Same null contract: no repo, a rig that is not running, or an
+ * unparseable spec all yield null and the caller says nothing.
+ */
+export function assessSpecLiveDrift(rawParsed: unknown, rigRepo: RigRepository | undefined): ConformanceResult | null {
   try {
     if (!rigRepo) return null;
-    const spec = rawParsed as { name?: unknown; pods?: unknown } | null;
+    const spec = rawParsed as { name?: unknown; pods?: unknown; nodes?: unknown } | null;
     const rigName = typeof spec?.name === "string" ? spec.name : "";
-    if (!rigName || !Array.isArray(spec?.pods)) return null;
+    if (!rigName) return null;
+    // Pod-aware and legacy specs both reach this endpoint and both ship the same wrong artifact.
+    // One comparator, two readers — the format only decides how ids are read, never what "drift"
+    // means.
+    const isPodAware = Array.isArray(spec?.pods);
+    const isLegacy = !isPodAware && Array.isArray(spec?.nodes);
+    if (!isPodAware && !isLegacy) return null;
     const rig = rigRepo.listRigs().find((r) => r.name === rigName);
     if (!rig) return null;
     const rows = rigRepo.db
       .prepare("SELECT logical_id FROM nodes WHERE rig_id = ?")
       .all(rig.id) as Array<{ logical_id: string | null }>;
-    return bundleExportWarning(compareSpecToLive(
-      topologyFromRigSpec(spec as never),
-      topologyFromLiveLogicalIds(rows.map((r) => r.logical_id)),
-    ));
+    const liveIds = rows.map((r) => r.logical_id);
+    return isPodAware
+      ? compareSpecToLive(topologyFromRigSpec(spec as never), topologyFromLiveLogicalIds(liveIds))
+      : compareSpecToLive(topologyFromLegacyRigSpec(spec as never), topologyFromLiveNodeIds(liveIds));
   } catch {
     // A reporting path must never be the reason an export fails.
     return null;
   }
+}
+
+/**
+ * Does this delta mean the bundle would DROP something that is running?
+ *
+ * Only one direction of drift corrupts a recovery artifact. A spec that declares MORE than is live
+ * is a bundle whose job is to bring the rest up — refusing that would fire the guard on exactly the
+ * case it exists to serve. A spec that declares LESS silently deletes running pods and seats from
+ * the only record of them, and presents as success while doing it. That is the one we refuse.
+ */
+export function driftDropsLiveTopology(result: ConformanceResult | null): boolean {
+  if (!result) return false;
+  return result.podsMissingFromSpec.length > 0 || result.seatsMissingFromSpec.length > 0;
+}
+
+/** The refusal an operator can act on: what disagrees, what would be lost, and the way through. */
+export function bundleExportRefusal(result: ConformanceResult): string {
+  return [
+    `Refusing to bundle: this spec does not describe the rig it names — ${result.message}.`,
+    `The bundle would instantiate ${result.spec.pods} pods/${result.spec.seats} seats and the running`,
+    `topology above would not survive a restore from it.`,
+    `Update the spec to match, or pass --allow-drift to bundle it as-is (the divergence is then`,
+    `stamped into the bundle's provenance so the artifact carries its own caveat).`,
+  ].join(" ");
 }
 
 function assemblerFsOps(): AssemblerFsOps {
@@ -864,9 +909,11 @@ bundleRoutes.post("/create", async (c) => {
   const rigRoot = typeof body["rigRoot"] === "string" ? body["rigRoot"] : undefined;
   const includePackages = Array.isArray(body["includePackages"]) ? body["includePackages"] as string[] : undefined;
 
+  const allowDrift = body["allowDrift"] === true;
+
   // Item 1 / slice-05: build provenance from request body + inject daemonVersion server-side
   const clientProvenance = provenanceFromRequestBody(body["provenance"]);
-  const provenance: BundleProvenance | undefined = clientProvenance
+  let provenance: BundleProvenance | undefined = clientProvenance
     ? { ...clientProvenance, daemonVersion: getDaemonVersion() }
     : undefined;
 
@@ -883,11 +930,29 @@ bundleRoutes.post("/create", async (c) => {
     const rawParsed = RigSpecCodec.parse(specYaml);
     const isPodAware = rawParsed && typeof rawParsed === "object" && Array.isArray((rawParsed as Record<string, unknown>).pods);
 
-    // Build B — the bundle carries the SPEC verbatim and never consults the live DB, so when a rig
-    // has been expanded at runtime (no code path writes the spec back) an export silently ships a
-    // SMALLER rig than the one running. Report the delta; never block, never mutate.
-    const driftWarning = describeSpecLiveDrift(rawParsed, getDeps(c).rigRepo);
+    // The bundle carries the SPEC verbatim and never consults the live DB, so when a rig has been
+    // expanded at runtime (no code path writes the spec back) an export ships a SMALLER rig than the
+    // one running. Build B made that delta sayable; saying it on a 201 was not enough. A .rigbundle
+    // is a recovery artifact, and a warning stapled to a success is read at the one moment it is
+    // least affordable — so drift that would DROP running topology refuses here.
+    const drift = assessSpecLiveDrift(rawParsed, getDeps(c).rigRepo);
+    const driftWarning = drift ? bundleExportWarning(drift) : null;
     if (driftWarning) console.warn(`[bundle-create] ${driftWarning}`);
+
+    if (driftDropsLiveTopology(drift) && !allowDrift) {
+      return c.json({ error: bundleExportRefusal(drift!) }, 409);
+    }
+
+    // Overridden: the operator says they mean it, so the divergence rides INTO the artifact. An HTTP
+    // warning dies with the terminal that printed it; whoever restores this bundle months from now
+    // reads the manifest, and it must not present as a faithful snapshot of the rig.
+    if (driftWarning && allowDrift) {
+      const stamp = `EXPORTED WITH --allow-drift: ${driftWarning}`;
+      provenance = {
+        ...(provenance ?? { daemonVersion: getDaemonVersion() }),
+        notes: provenance?.notes ? `${provenance.notes} | ${stamp}` : stamp,
+      };
+    }
 
     if (isPodAware) {
       // Pod-aware bundle creation

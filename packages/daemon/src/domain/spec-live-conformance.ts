@@ -129,6 +129,40 @@ export function topologyFromLiveLogicalIds(logicalIds: readonly (string | null |
   return { pods, seats };
 }
 
+/**
+ * Seats as a LEGACY (v1) spec declares them — a flat `nodes:` list with no pods.
+ *
+ * A v1 spec exports through the same create endpoint and produces the same confidently-wrong
+ * artifact, so it needs the same comparison. It does not need a second comparator: a legacy rig is
+ * just a topology with no pod level, and `compareSpecToLive` already handles an empty pod list.
+ */
+export function topologyFromLegacyRigSpec(spec: { nodes?: ReadonlyArray<{ id?: unknown }> }): Topology {
+  const seats: string[] = [];
+  for (const node of spec.nodes ?? []) {
+    if (typeof node?.id === "string" && node.id.trim() !== "") seats.push(node.id.trim());
+  }
+  return { pods: [], seats };
+}
+
+/**
+ * Seats as the daemon is running them, read FLAT — the legacy counterpart to
+ * `topologyFromLiveLogicalIds`.
+ *
+ * For a legacy rig a node's `logical_id` IS the spec's `node.id`; there is no `<pod>.<member>` to
+ * split. Reusing the pod-aware reader here would parse every flat id as malformed and report an
+ * empty live rig, which reads as "nothing is running" — a false absence, and the most dangerous
+ * possible answer for a guard whose whole job is noticing what would be dropped.
+ */
+export function topologyFromLiveNodeIds(logicalIds: readonly (string | null | undefined)[]): Topology {
+  const seats: string[] = [];
+  for (const id of logicalIds) {
+    if (typeof id !== "string") continue;
+    const trimmed = id.trim();
+    if (trimmed !== "") seats.push(trimmed);
+  }
+  return { pods: [], seats };
+}
+
 /** The one-line export banner. Null when there is nothing to say. */
 export function bundleExportWarning(result: ConformanceResult): string | null {
   if (result.message === null) return null;

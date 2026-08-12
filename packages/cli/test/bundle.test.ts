@@ -27,11 +27,15 @@ function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCod
     const logs: string[] = [];
     const origLog = console.log;
     const origErr = console.error;
+    const origWarn = console.warn;
     const origExitCode = process.exitCode;
     process.exitCode = undefined;
     console.log = (...args: unknown[]) => logs.push(args.join(" "));
     console.error = (...args: unknown[]) => logs.push(args.join(" "));
-    try { await fn(); } finally { console.log = origLog; console.error = origErr; }
+    // The drift banner goes to stderr via console.warn — stdout stays clean for piping. Capture it
+    // here or a test asserting the operator SEES the warning would pass on an empty transcript.
+    console.warn = (...args: unknown[]) => logs.push(args.join(" "));
+    try { await fn(); } finally { console.log = origLog; console.error = origErr; console.warn = origWarn; }
     const exitCode = process.exitCode;
     process.exitCode = origExitCode;
     resolve({ logs, exitCode });
@@ -74,12 +78,22 @@ describe("Bundle CLI", () => {
           res.end(JSON.stringify({ error: "Missing package" }));
           return;
         }
+        // Drift fixtures: the daemon refuses a spec that would drop live topology, unless the
+        // operator passed --allow-drift, in which case it succeeds and returns the warning.
+        if (String(parsed.specPath ?? "").includes("drifted") && parsed.allowDrift !== true) {
+          res.writeHead(409, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Refusing to bundle: spec declares 1 pods/1 seats; live rig has 2/3" }));
+          return;
+        }
         res.writeHead(201, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
           bundleName: parsed.bundleName ?? "test",
           bundleVersion: parsed.bundleVersion ?? "0.1.0",
           archiveHash: "abc123",
           packages: 1,
+          ...(String(parsed.specPath ?? "").includes("drifted")
+            ? { warning: "WARNING: this bundle describes the SPEC, not the live rig — spec declares 1 pods/1 seats; live rig has 2/3" }
+            : {}),
         }));
       } else if (req.url === "/api/bundles/inspect" && req.method === "POST") {
         const parsed = JSON.parse(body || "{}");
@@ -141,6 +155,53 @@ describe("Bundle CLI", () => {
     });
     expect(logs.some((l) => l.includes("Bundle created"))).toBe(true);
     expect(logs.some((l) => l.includes("abc123"))).toBe(true);
+  });
+
+  // The daemon has returned a drift `warning` on the 201 since Build B; the human success path
+  // printed Bundle created / Name / Hash and dropped it. Detected-then-hidden is indistinguishable
+  // from never-detected for the operator holding the artifact.
+  it("bundle create surfaces the daemon's drift warning on the human success path", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "create", "/tmp/drifted.yaml", "-o", "/tmp/d.rigbundle", "--allow-drift"]);
+    });
+    expect(logs.some((l) => l.includes("Bundle created"))).toBe(true);
+    expect(logs.some((l) => l.includes("live rig has 2/3"))).toBe(true);
+    expect(exitCode).toBeUndefined();
+  });
+
+  // PRESERVE — --json already exposed the warning by printing the whole response. The human-path
+  // repair must not change what a script parsing this output receives.
+  it("bundle create --json still prints the entire response including the warning", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "create", "/tmp/drifted.yaml", "-o", "/tmp/d.rigbundle", "--allow-drift", "--json"]);
+    });
+    const parsed = JSON.parse(logs.find((l) => l.trim().startsWith("{"))!);
+    expect(parsed.warning).toContain("live rig has 2/3");
+    expect(parsed.archiveHash).toBe("abc123");
+  });
+
+  it("bundle create refuses drift by default and shows the operator why", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "create", "/tmp/drifted.yaml", "-o", "/tmp/d.rigbundle"]);
+    });
+    expect(logs.some((l) => l.includes("Refusing to bundle"))).toBe(true);
+    expect(logs.some((l) => l.includes("Bundle created"))).toBe(false);
+    expect(exitCode).toBe(2);
+  });
+
+  it("bundle create --allow-drift wires allowDrift into the request body", async () => {
+    capturedCreateBodies = [];
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "create", "/tmp/drifted.yaml", "-o", "/tmp/d.rigbundle", "--allow-drift"]);
+    });
+    expect(capturedCreateBodies[0]!.allowDrift).toBe(true);
+
+    // Absent by default — an override must be asked for, never defaulted on.
+    capturedCreateBodies = [];
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "create", "/tmp/rig.yaml", "-o", "/tmp/t.rigbundle"]);
+    });
+    expect(capturedCreateBodies[0]!.allowDrift).toBeUndefined();
   });
 
   it("bundle create uses --bundle-version without colliding with the CLI version flag", async () => {
