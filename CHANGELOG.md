@@ -8,6 +8,57 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.5.1] - 2026-08-12
+
+**Status**: shipped; a test system for the product, plus reliability fixes shipped through it. **v0.5.1 contains v0.5.0 in full** — one lineage, no divergence.
+
+### Summary For Installing Agents
+
+- **Package version**: bumps from `0.5.0`.
+- **Migrations**: additive only. Existing v0.5.0 databases upgrade by running `rig daemon start` on the new daemon.
+- **Node engines**: unchanged.
+- **API surface**: preserved from v0.5.0; no CLI-command or flag removals or renames.
+- **New bundled skills**: none (this release is test-system + reliability focus).
+
+### Headline
+
+**A test system for the product, plus reliability fixes shipped through it.** Scenarios drive the real product through the same commands a person uses, so it can prove its own behaviour without a human checking by hand. The reliability fixes of this window ship through the test system — proving its value on its first cycle.
+
+### Test system
+
+- **Stub runtime for tests** — a fake agent runtime that scenarios can drive. Lets scenarios exercise the daemon end-to-end without needing a real Claude or Codex process.
+- **Scenario format + runner** — a text-based scenario format and an executor that runs scenarios against the real product. Includes a real fix that surfaced from writing the runner: text-matching against a pane or transcript could never match its two intended surfaces; now it does.
+- **Seed scenarios** — three seed scenarios that run green end-to-end against the real product. See Known Limits for the seed-scenario one that could not be built.
+
+### Container test bed — scaffolding
+
+- **Scaffolding for container mode** — argument builders, image-identity stamping, runbooks, and a unit suite. **The runner does not yet execute in containers** — this is scaffolding you will see in the tree but that no test currently drives. Container-mode execution is scoped forward.
+
+### Reliability fixes shipped through the test system
+
+- **Honest render for daemon transport failures** — the operator sees the actual failure rather than a silent no-op or generic error.
+- **Queue-persistence** — two fixes ensuring queue records reflect what actually happened after they were written.
+- **Cross-machine send regression** — found and fixed during verification. The test system doing its job: proving product behaviour across machines and catching a regression before release.
+
+### Small features
+
+- **Per-agent model from spec** — each agent's model comes from its spec rather than a fleet-wide default, so different agents can run on different providers or models.
+- **Token usage tracked over time** — the daemon records token use so operators can see trends and predict when a seat is approaching a usage limit.
+- **Machine-of-origin on messages** — messages carry the machine they came from, so multi-host coordination is legible.
+
+### Other
+
+- **UI timing hardening** — UI tests no longer fail on load-timing flakes.
+- **Queue records tell the truth after they are written** — a class of wrote-it-and-it-did-not-stick issues closed.
+- **Unreached-message visibility** — show messages that never reached an agent. On landing, this surfaced nine real handoffs that had been silently lost since 8 August.
+
+### Known Limits
+
+- **Container mode is scaffolded but not driven** — no test currently executes in a container. Scoped forward.
+- **Seed scenarios: three of the intended set run green** — the tenth cannot be built without two capabilities that do not yet exist in the product (a scenario cannot mutate the running system's shape; the terminal interface exposes navigation state rather than fleet inventory). Both scoped forward.
+
+---
+
 ## [0.5.0] - 2026-08-06
 
 **Status**: shipped; mission control TUI + context library + permission-policy built-ins + provider usage observability + plan amendment + honest CLI + build discipline. **v0.5.0 includes everything from v0.4.8** — there is no divergence between the two releases.
