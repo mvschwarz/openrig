@@ -214,19 +214,94 @@ describe("bundle create — refuses a spec that disagrees with the live rig", ()
     expect(fs.existsSync(path.join(tmpDir, "legacy-conforming.rigbundle"))).toBe(true);
   });
 
-  // PRESERVE 3 — the drift that runs the OTHER way (spec declares more than is running) is a
-  // legitimate export: a bundle whose job is to bring the missing pods up. Refusing it would make
-  // the guard fire on exactly the recovery case it exists to protect.
-  it("does not refuse when the spec declares MORE than is currently running", async () => {
+  // DIRECTION IS NOT THE TEST — DISAGREEMENT IS. An earlier revision let this case through, reasoning
+  // that a spec declaring MORE than is live is a bundle whose job is to bring the rest up. That read
+  // the `nodes` rows as "currently-running sessions"; they are the rig's PERSISTED topology. A
+  // restore that raises seats the spec never declared yields a different rig just as surely as one
+  // that drops them, so it refuses too, and --allow-drift is the way through.
+  it("refuses when the spec declares MORE than the rig's persisted topology", async () => {
     seedLiveRig(RIG_NAME, ["dev.impl"]);
     const specPath = writeSpec(RIG_NAME, [
       { id: "dev", members: ["impl"] },
       { id: "orch", members: ["lead"] },
     ]);
 
-    const res = await create(specPath, "recovery");
+    const res = await create(specPath, "extra");
+
+    expect(res.status).toBe(409);
+    const body = await res.json() as { error: string };
+    expect(body.error).toContain("orch.lead");
+    expect(fs.existsSync(path.join(tmpDir, "extra.rigbundle"))).toBe(false);
+  });
+
+  it("still exports the over-declaring spec when the operator passes allowDrift", async () => {
+    seedLiveRig(RIG_NAME, ["dev.impl"]);
+    const specPath = writeSpec(RIG_NAME, [
+      { id: "dev", members: ["impl"] },
+      { id: "orch", members: ["lead"] },
+    ]);
+
+    const res = await create(specPath, "extra-allowed", { allowDrift: true });
 
     expect(res.status).toBe(201);
-    expect(fs.existsSync(path.join(tmpDir, "recovery.rigbundle"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "extra-allowed.rigbundle"))).toBe(true);
+  });
+
+  // A MALFORMED SPEC IS A BROKEN FILE, NOT A DRIFTED RIG. Both fixtures below are ALSO in drift, so
+  // an implementation that assesses before validating answers 409 and sends the operator off to
+  // reconcile a topology when the real answer is "this spec does not parse".
+  it("returns the schema 400 — not a drift 409 — for a malformed pod-aware spec", async () => {
+    seedLiveRig(RIG_NAME, ["dev.impl", "dev.qa", "orch.lead"]);
+    const specPath = path.join(tmpDir, "malformed-pod.yaml");
+    fs.writeFileSync(specPath, [
+      'version: "0.2"',
+      `name: ${RIG_NAME}`,
+      "pods:",
+      "  - id: dev",
+      "    label: Dev",
+      "    members:",
+      "      - id: impl",           // no agent_ref, no runtime, no profile
+      "    edges: []",
+      "edges: []",
+    ].join("\n"));
+
+    const res = await create(specPath, "malformed-pod");
+
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string };
+    expect(body.error).toContain("Invalid pod-aware rig spec");
+  });
+
+  it("returns the schema 400 — not a drift 409 — for a malformed legacy spec", async () => {
+    seedLiveRig(RIG_NAME, ["dev", "qa", "lead"]);
+    const specPath = path.join(tmpDir, "malformed-legacy.yaml");
+    fs.writeFileSync(specPath, [
+      "schema_version: 1",
+      `name: ${RIG_NAME}`,
+      'version: "1.0"',
+      "nodes:",
+      "  - id: dev",                // no runtime
+      "edges: []",
+    ].join("\n"));
+
+    const res = await create(specPath, "malformed-legacy");
+
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string };
+    expect(body.error).toContain("Invalid rig spec");
+  });
+
+  // FAIL CLOSED. If the comparison itself cannot be performed, the one answer that must never be
+  // produced is "no drift, exported". A guard that reports clean because its own query threw is
+  // worse than no guard: it is a green nobody can trust, on a recovery artifact.
+  it("fails closed when the topology query itself fails — never a silent clean export", async () => {
+    seedLiveRig(RIG_NAME, ["dev.impl", "dev.qa"]);
+    const specPath = writeSpec(RIG_NAME, [{ id: "dev", members: ["impl"] }]);
+    db.prepare("DROP TABLE nodes").run();
+
+    const res = await create(specPath, "db-broken");
+
+    expect(res.status).toBe(500);
+    expect(fs.existsSync(path.join(tmpDir, "db-broken.rigbundle"))).toBe(false);
   });
 });

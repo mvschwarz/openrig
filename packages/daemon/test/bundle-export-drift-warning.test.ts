@@ -84,6 +84,17 @@ describe("bundle export — spec-vs-live drift warning", () => {
     expect(describeSpecLiveDrift(SPEC, undefined)).toBeNull();
   });
 
+  // The two helpers deliberately DIVERGE on repository failure, and this pins the reporting half.
+  // `describeSpecLiveDrift` swallows it — the worst case for a banner is a missing banner. The
+  // enforcement half (`assessSpecLiveDrift`) propagates instead, so the create route fails closed
+  // rather than exporting on a comparison that never ran; that side is pinned at the route.
+  it("SILENT rather than throwing when the topology query itself fails", () => {
+    seedRig("drift-rig", ["orch.lead", "dev.driver"]);
+    db.prepare("DROP TABLE nodes").run();
+    expect(() => describeSpecLiveDrift(SPEC, repo)).not.toThrow();
+    expect(describeSpecLiveDrift(SPEC, repo)).toBeNull();
+  });
+
   it("never throws into the export path, even on a hostile spec value", () => {
     seedRig("drift-rig", ["orch.lead"]);
     for (const bad of [null, undefined, 42, "a string", { name: "drift-rig", pods: "not-an-array" }]) {

@@ -252,63 +252,70 @@ function realFsOps(): FsOps {
  * Reporting only: never mutates, never blocks, never throws into the export path.
  */
 export function describeSpecLiveDrift(rawParsed: unknown, rigRepo: RigRepository | undefined): string | null {
-  const result = assessSpecLiveDrift(rawParsed, rigRepo);
-  return result ? bundleExportWarning(result) : null;
-}
-
-/**
- * The same comparison as `describeSpecLiveDrift`, returned STRUCTURED rather than as a sentence.
- *
- * The warning string is for a human; a refusal has to reason about the DIRECTION of the delta, which
- * a sentence cannot be asked to do. Same null contract: no repo, a rig that is not running, or an
- * unparseable spec all yield null and the caller says nothing.
- */
-export function assessSpecLiveDrift(rawParsed: unknown, rigRepo: RigRepository | undefined): ConformanceResult | null {
   try {
-    if (!rigRepo) return null;
-    const spec = rawParsed as { name?: unknown; pods?: unknown; nodes?: unknown } | null;
-    const rigName = typeof spec?.name === "string" ? spec.name : "";
-    if (!rigName) return null;
-    // Pod-aware and legacy specs both reach this endpoint and both ship the same wrong artifact.
-    // One comparator, two readers — the format only decides how ids are read, never what "drift"
-    // means.
-    const isPodAware = Array.isArray(spec?.pods);
-    const isLegacy = !isPodAware && Array.isArray(spec?.nodes);
-    if (!isPodAware && !isLegacy) return null;
-    const rig = rigRepo.listRigs().find((r) => r.name === rigName);
-    if (!rig) return null;
-    const rows = rigRepo.db
-      .prepare("SELECT logical_id FROM nodes WHERE rig_id = ?")
-      .all(rig.id) as Array<{ logical_id: string | null }>;
-    const liveIds = rows.map((r) => r.logical_id);
-    return isPodAware
-      ? compareSpecToLive(topologyFromRigSpec(spec as never), topologyFromLiveLogicalIds(liveIds))
-      : compareSpecToLive(topologyFromLegacyRigSpec(spec as never), topologyFromLiveNodeIds(liveIds));
+    const result = assessSpecLiveDrift(rawParsed, rigRepo);
+    return result ? bundleExportWarning(result) : null;
   } catch {
-    // A reporting path must never be the reason an export fails.
+    // REPORTING contract, deliberately different from the enforcement one below: a banner must never
+    // be the reason an export fails. Enforcement cannot afford this and does not share it.
     return null;
   }
 }
 
 /**
- * Does this delta mean the bundle would DROP something that is running?
+ * The same comparison as `describeSpecLiveDrift`, returned STRUCTURED rather than as a sentence.
  *
- * Only one direction of drift corrupts a recovery artifact. A spec that declares MORE than is live
- * is a bundle whose job is to bring the rest up — refusing that would fire the guard on exactly the
- * case it exists to serve. A spec that declares LESS silently deletes running pods and seats from
- * the only record of them, and presents as success while doing it. That is the one we refuse.
+ * Null means there is genuinely nothing to compare: no repository, a spec with no `name:`, a shape
+ * that is neither pod-aware nor legacy, or no rig of that name on record. Those are all honest
+ * absences of a comparison.
+ *
+ * A REPOSITORY OR QUERY FAILURE IS NOT ONE OF THEM AND PROPAGATES. The reporting helper above may
+ * swallow it, because the worst case there is a missing banner. Enforcement may not: translating a
+ * failed DB read into "no drift" would let the export proceed on the strength of a comparison that
+ * never happened, which is the fail-open this guard exists to remove. Callers fail closed.
  */
-export function driftDropsLiveTopology(result: ConformanceResult | null): boolean {
-  if (!result) return false;
-  return result.podsMissingFromSpec.length > 0 || result.seatsMissingFromSpec.length > 0;
+export function assessSpecLiveDrift(rawParsed: unknown, rigRepo: RigRepository | undefined): ConformanceResult | null {
+  if (!rigRepo) return null;
+  const spec = rawParsed as { name?: unknown; pods?: unknown; nodes?: unknown } | null;
+  const rigName = typeof spec?.name === "string" ? spec.name : "";
+  if (!rigName) return null;
+  // Pod-aware and legacy specs both reach this endpoint and both ship the same wrong artifact.
+  // One comparator, two readers — the format only decides how ids are read, never what "drift"
+  // means.
+  const isPodAware = Array.isArray(spec?.pods);
+  const isLegacy = !isPodAware && Array.isArray(spec?.nodes);
+  if (!isPodAware && !isLegacy) return null;
+  const rig = rigRepo.listRigs().find((r) => r.name === rigName);
+  if (!rig) return null;
+  const rows = rigRepo.db
+    .prepare("SELECT logical_id FROM nodes WHERE rig_id = ?")
+    .all(rig.id) as Array<{ logical_id: string | null }>;
+  const liveIds = rows.map((r) => r.logical_id);
+  return isPodAware
+    ? compareSpecToLive(topologyFromRigSpec(spec as never), topologyFromLiveLogicalIds(liveIds))
+    : compareSpecToLive(topologyFromLegacyRigSpec(spec as never), topologyFromLiveNodeIds(liveIds));
 }
 
-/** The refusal an operator can act on: what disagrees, what would be lost, and the way through. */
+/**
+ * Does this spec describe a different rig than the one on record — in EITHER direction?
+ *
+ * An earlier revision refused only the drop direction, on the reasoning that a spec declaring MORE
+ * than is live is a bundle whose job is to bring the rest up. That was wrong, and the reason is what
+ * the DB rows actually are: `nodes` is the rig's PERSISTED topology, not a list of currently-running
+ * sessions. A restore that brings up seats the spec never declared produces a different rig just as
+ * surely as one that drops them. Direction is not the test; disagreement is. `--allow-drift` is the
+ * honest way through for an operator who means it.
+ */
+export function specDivergesFromLive(result: ConformanceResult | null): boolean {
+  return result ? !result.conforms : false;
+}
+
+/** The refusal an operator can act on: what disagrees, and the way through. */
 export function bundleExportRefusal(result: ConformanceResult): string {
   return [
     `Refusing to bundle: this spec does not describe the rig it names — ${result.message}.`,
-    `The bundle would instantiate ${result.spec.pods} pods/${result.spec.seats} seats and the running`,
-    `topology above would not survive a restore from it.`,
+    `The bundle would instantiate ${result.spec.pods} pods/${result.spec.seats} seats, which is not`,
+    `the topology on record for this rig.`,
     `Update the spec to match, or pass --allow-drift to bundle it as-is (the divergence is then`,
     `stamped into the bundle's provenance so the artifact carries its own caveat).`,
   ].join(" ");
@@ -930,16 +937,32 @@ bundleRoutes.post("/create", async (c) => {
     const rawParsed = RigSpecCodec.parse(specYaml);
     const isPodAware = rawParsed && typeof rawParsed === "object" && Array.isArray((rawParsed as Record<string, unknown>).pods);
 
-    // The bundle carries the SPEC verbatim and never consults the live DB, so when a rig has been
-    // expanded at runtime (no code path writes the spec back) an export ships a SMALLER rig than the
-    // one running. Build B made that delta sayable; saying it on a 201 was not enough. A .rigbundle
+    // VALIDATE BEFORE ASSESSING. A malformed spec has no trustworthy topology to compare, and a
+    // drift 409 raised on one would blame the rig for what is actually a broken file — sending the
+    // operator to reconcile a topology when the real answer is "this spec does not parse". Schema
+    // errors keep their existing 400 and return before the guard ever runs.
+    if (isPodAware) {
+      const podValidation = RigSpecSchema.validate(rawParsed);
+      if (!podValidation.valid) return c.json({ error: "Invalid pod-aware rig spec", errors: podValidation.errors }, 400);
+    } else {
+      const legacyValidation = LegacyRigSpecSchema.validate(rawParsed);
+      if (!legacyValidation.valid) return c.json({ error: "Invalid rig spec", errors: legacyValidation.errors }, 400);
+    }
+
+    // The bundle carries the SPEC verbatim and never consults the live DB, so when a rig's persisted
+    // topology has moved (no code path writes the spec back) an export ships a DIFFERENT rig than the
+    // one on record. Build B made that delta sayable; saying it on a 201 was not enough. A .rigbundle
     // is a recovery artifact, and a warning stapled to a success is read at the one moment it is
-    // least affordable — so drift that would DROP running topology refuses here.
+    // least affordable — so any non-conforming topology refuses here.
+    //
+    // This throws rather than returning null when the repository read itself fails, and that is the
+    // point: an enforcement path that swallows a DB error would report "no drift" and export, which
+    // is the fail-OPEN this guard exists to remove. It fails closed through the 500 below.
     const drift = assessSpecLiveDrift(rawParsed, getDeps(c).rigRepo);
     const driftWarning = drift ? bundleExportWarning(drift) : null;
     if (driftWarning) console.warn(`[bundle-create] ${driftWarning}`);
 
-    if (driftDropsLiveTopology(drift) && !allowDrift) {
+    if (specDivergesFromLive(drift) && !allowDrift) {
       return c.json({ error: bundleExportRefusal(drift!) }, 409);
     }
 
@@ -956,9 +979,7 @@ bundleRoutes.post("/create", async (c) => {
 
     if (isPodAware) {
       // Pod-aware bundle creation
-      const podValidation = RigSpecSchema.validate(rawParsed);
-      if (!podValidation.valid) return c.json({ error: "Invalid pod-aware rig spec", errors: podValidation.errors }, 400);
-
+      // Validated above, before the drift guard ran.
       const effectiveRigRoot = rigRoot ? nodePath.resolve(rigRoot) : nodePath.dirname(nodePath.resolve(specPath));
       const tmpStaging = fs.mkdtempSync(nodePath.join(os.tmpdir(), "pod-bundle-create-"));
       try {
@@ -989,8 +1010,7 @@ bundleRoutes.post("/create", async (c) => {
     }
 
     // Legacy bundle creation
-    const validation = LegacyRigSpecSchema.validate(rawParsed);
-    if (!validation.valid) return c.json({ error: "Invalid rig spec", errors: validation.errors }, 400);
+    // Validated above, before the drift guard ran.
     const spec = LegacyRigSpecSchema.normalize(rawParsed);
 
     const specDir = nodePath.dirname(nodePath.resolve(specPath));
