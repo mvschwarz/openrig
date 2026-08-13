@@ -176,7 +176,7 @@ describe("OPR.0.4.4.23 slice create — every kind lands the full convention art
       expect(r.exitCode, `slice create failed for kind "${kind}"`).toBe(0);
       const slicePath = JSON.parse(r.stdout).slice.path as string;
 
-      const readme = fs.readFileSync(path.join(slicePath, "README.md"), "utf8");
+      const readme = fs.readFileSync(path.join(slicePath, "SPEC.md"), "utf8");
       for (const section of CONVENTION_SECTIONS) {
         expect(readme, `created README for kind "${kind}" is missing "${section}"`).toContain(section);
       }

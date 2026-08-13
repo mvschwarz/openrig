@@ -21,6 +21,7 @@ import * as path from "node:path";
 import YAML from "yaml";
 import type { MissionControlActionLog } from "../mission-control/mission-control-action-log.js";
 import { derivePlanLockArtifacts } from "./plan-lock-artifacts.js";
+import { NODE_FILE_PRECEDENCE, resolveNodeFile } from "./node-file.js";
 
 export type ScopeTier = "slice" | "mission";
 export type ApprovalScope = "spec" | "delivery";
@@ -137,11 +138,11 @@ export class ScopeApproveService {
         { scopePath: input.scopePath },
       );
     }
-    const readmePath = path.join(resolved, "README.md");
-    if (!fs.existsSync(readmePath)) {
+    const readmePath = resolveNodeFile(resolved);
+    if (!readmePath) {
       throw new ScopeApproveError(
         "scope_not_found",
-        `No README.md at ${input.scopePath} under the missions root — not a declared ${input.scopeTier}.`,
+        `No ${NODE_FILE_PRECEDENCE.join(" or ")} at ${input.scopePath} under the missions root — not a declared ${input.scopeTier}.`,
         { scopePath: input.scopePath, scopeTier: input.scopeTier },
       );
     }

@@ -166,7 +166,7 @@ describe("rig scope slice create", () => {
       "--template", "bug-fix", "--json",
     ], env.missionsRoot);
     const parsed = JSON.parse(r.stdout);
-    const readme = fs.readFileSync(path.join(parsed.slice.path, "README.md"), "utf8");
+    const readme = fs.readFileSync(path.join(parsed.slice.path, "SPEC.md"), "utf8");
     expect(readme).toMatch(/## Repro/);
     expect(readme).toMatch(/## Expected/);
   });
@@ -176,7 +176,7 @@ describe("rig scope slice create", () => {
       "slice", "create", "release-0.3.2", "tdd-foo", "--json",
     ], env.missionsRoot);
     const parsed = JSON.parse(r.stdout);
-    const fm = readFrontmatter(path.join(parsed.slice.path, "README.md"));
+    const fm = readFrontmatter(path.join(parsed.slice.path, "SPEC.md"));
     expect(fm.id).toBe("OPR.0.3.2.2");
     expect(typeof fm.id === "string" && /^OPR\.0\.3\.2\.\d+$/.test(fm.id as string)).toBe(true);
   });
@@ -223,7 +223,7 @@ describe("rig scope slice create", () => {
     const parsed = JSON.parse(r.stdout);
     const progressPath = path.join(parsed.slice.path, "PROGRESS.md");
     expect(fs.existsSync(progressPath)).toBe(false);
-    const readme = fs.readFileSync(path.join(parsed.slice.path, "README.md"), "utf8");
+    const readme = fs.readFileSync(path.join(parsed.slice.path, "SPEC.md"), "utf8");
     expect(readme).toMatch(/progress_rail:\s*readme-only/);
   });
 });
@@ -374,7 +374,7 @@ describe("rig scope mission create (HG-14 + HG-15)", () => {
     const r = await run(["mission", "create", "release-0.5.0", "--json"], env.missionsRoot);
     const parsed = JSON.parse(r.stdout);
     expect(parsed.mission.id).toBe("OPR.0.5.0");
-    const fm = readFrontmatter(path.join(parsed.mission.path, "README.md"));
+    const fm = readFrontmatter(path.join(parsed.mission.path, "SPEC.md"));
     expect(fm.id).toBe("OPR.0.5.0");
   });
 
@@ -598,7 +598,7 @@ describe("BC-2 BLOCK 2 — README-less dirs are not declared missions at any mut
     expect(r.exitCode).toBe(1);
     const parsed = JSON.parse(r.stdout);
     expect(parsed.ok).toBe(false);
-    expect(parsed.error.fact).toMatch(/no README\.md|not a declared mission/);
+    expect(parsed.error.fact).toMatch(/no SPEC\.md or README\.md|no README\.md|not a declared mission/);
   });
 
   it("slice create no-readme exits 1 + does NOT create slices/foo/", async () => {
@@ -1172,16 +1172,33 @@ describe("rig scope create regression-lock (OPR.0.4.1.6 FR-3)", () => {
   it("AC-3: fresh slice create writes id + stage + a well-formed verified line", async () => {
     const r = await run(["slice", "create", "release-0.3.2", "new-feature", "--json"], substrate.missionsRoot);
     expect(r.exitCode).toBe(0);
-    const fm = readFrontmatter(path.join(substrate.missionsRoot, "release-0.3.2", "slices", "02-new-feature", "README.md"));
+    const fm = readFrontmatter(path.join(substrate.missionsRoot, "release-0.3.2", "slices", "02-new-feature", "SPEC.md"));
     expect(fm.id).toBe("OPR.0.3.2.2");
     expect(fm.stage).toBe("wip");
     expect(String(fm.verified)).toMatch(WELL_FORMED_VERIFIED);
   });
 
+  // Requirement 4 — new scaffolds author the CURRENT node filename. Pinned explicitly rather than
+  // implied by the reads above: those would also pass if create wrote both files, and a scaffold
+  // that leaves two authored files behind is the collision state the resolver has to arbitrate.
+  it("fresh create authors SPEC.md and does not also leave a README.md", async () => {
+    const r = await run(["slice", "create", "release-0.3.2", "spec-named", "--json"], substrate.missionsRoot);
+    expect(r.exitCode).toBe(0);
+    const slicePath = JSON.parse(r.stdout).slice.path as string;
+    expect(fs.existsSync(path.join(slicePath, "SPEC.md"))).toBe(true);
+    expect(fs.existsSync(path.join(slicePath, "README.md"))).toBe(false);
+
+    const m = await run(["mission", "create", "release-0.9.9", "--json"], substrate.missionsRoot);
+    expect(m.exitCode).toBe(0);
+    const missionPath = JSON.parse(m.stdout).mission.path as string;
+    expect(fs.existsSync(path.join(missionPath, "SPEC.md"))).toBe(true);
+    expect(fs.existsSync(path.join(missionPath, "README.md"))).toBe(false);
+  });
+
   it("AC-3: fresh mission create writes id + stage + a well-formed verified line", async () => {
     const r = await run(["mission", "create", "release-0.5.0", "--json"], substrate.missionsRoot);
     expect(r.exitCode).toBe(0);
-    const fm = readFrontmatter(path.join(substrate.missionsRoot, "release-0.5.0", "README.md"));
+    const fm = readFrontmatter(path.join(substrate.missionsRoot, "release-0.5.0", "SPEC.md"));
     expect(typeof fm.id).toBe("string");
     expect((fm.id as string).length).toBeGreaterThan(0);
     expect(fm.stage).toBe("wip");

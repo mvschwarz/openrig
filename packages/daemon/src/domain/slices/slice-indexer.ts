@@ -17,6 +17,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type Database from "better-sqlite3";
 import { parseScopeTags } from "./qitem-membership.js";
+import { resolveNodeFile, withSpecFirst } from "../scope/node-file.js";
 
 export type SliceStatus = "active" | "done" | "blocked" | "draft";
 
@@ -381,7 +382,8 @@ export class SliceIndexer {
   /** Lockstep twin of routes/missions.ts readMissionStatus (see the sidecar
    *  doc above; the lockstep test pins both reads agree on the same bytes). */
   private readMissionAuthoredStatus(missionPath: string): string | null {
-    const readmePath = path.join(missionPath, "README.md");
+    const readmePath = resolveNodeFile(missionPath);
+    if (!readmePath) return null;
     let raw: string;
     try {
       raw = fs.readFileSync(readmePath, "utf8");
@@ -578,7 +580,7 @@ export class SliceIndexer {
     // last so the current lifecycle cursor overrides older dispatch metadata
     // while README.md/IMPLEMENTATION-PRD.md still supply slice title, rail item,
     // and source refs when PROGRESS.md is sparse.
-    const candidates = ["IMPLEMENTATION-PRD.md", "README.md", "PROGRESS.md"];
+    const candidates = withSpecFirst(["IMPLEMENTATION-PRD.md", "README.md", "PROGRESS.md"]);
     const merged: Record<string, unknown> = {};
     for (const candidate of candidates) {
       const fullPath = path.join(slicePath, candidate);
@@ -609,7 +611,7 @@ export class SliceIndexer {
     if (typeof frontmatter["title"] === "string") return frontmatter["title"] as string;
     if (typeof frontmatter["slice"] === "string") return frontmatter["slice"] as string;
     // Pull the first H1 from the primary doc.
-    for (const candidate of ["README.md", "IMPLEMENTATION-PRD.md", "PROGRESS.md"]) {
+    for (const candidate of withSpecFirst(["README.md", "IMPLEMENTATION-PRD.md", "PROGRESS.md"])) {
       const fullPath = path.join(slicePath, candidate);
       if (!fs.existsSync(fullPath)) continue;
       const content = fs.readFileSync(fullPath, "utf8");

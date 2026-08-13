@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { classifyScopeItem, type ScopeAuditResult } from "../domain/scope/scope-audit.js";
 import type { SliceIndexer } from "../domain/slices/slice-indexer.js";
+import { resolveNodeFile } from "../domain/scope/node-file.js";
 
 function extractFrontmatterRaw(content: string): string | null {
   if (!content.startsWith("---")) return null;
@@ -65,7 +66,7 @@ export function scopeAuditRoutes(): Hono {
     // (pre-scope: each uncached get built its own 2-scan batch — 2N total
     // queue scans, 80 at 40 slices). Handler body is fully synchronous.
     return indexer.withMembershipBatch(() => {
-      const missionReadme = path.join(missionDir, "README.md");
+      const missionReadme = resolveNodeFile(missionDir) ?? path.join(missionDir, "SPEC.md");
       const missionProgress = path.join(missionDir, "PROGRESS.md");
       const missionBrief = path.join(missionDir, "MISSION_BRIEF.md");
       const missionNotes = path.join(missionDir, "MISSION_NOTES.md");
@@ -113,7 +114,7 @@ export function scopeAuditRoutes(): Hono {
         for (const entry of fs.readdirSync(slicesDir)) {
           const sliceDir = path.join(slicesDir, entry);
           if (!fs.statSync(sliceDir).isDirectory()) continue;
-          const sliceReadme = path.join(sliceDir, "README.md");
+          const sliceReadme = resolveNodeFile(sliceDir) ?? path.join(sliceDir, "SPEC.md");
           const sliceProgress = path.join(sliceDir, "PROGRESS.md");
           const proofFile = path.join(sliceDir, "PROOF.md");
           const proofDir = path.join(sliceDir, "proof");

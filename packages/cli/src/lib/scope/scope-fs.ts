@@ -132,10 +132,34 @@ export function resolveMissionsRoot(opts: {
   });
 }
 
+/**
+ * The authored contract file at a work node, most-preferred first.
+ *
+ * `SPEC.md` is the current name; `README.md` is the legacy one and stays valid indefinitely. There
+ * is no migration: dormant missions and historical proof receipts are README-backed and must keep
+ * resolving untouched. A node carrying both is not an error here — SPEC.md wins and `scope audit`
+ * advises about the second file.
+ */
+export const NODE_FILE_PRECEDENCE = ["SPEC.md", "README.md"] as const;
+
+/**
+ * Resolve a work node's authored contract file, or null when the directory declares no node.
+ *
+ * Null is the "not a declared mission/slice" signal every caller already keys on — this changes
+ * WHICH filenames count, never what absence means.
+ */
+export function resolveNodeFile(absPath: string): string | null {
+  for (const name of NODE_FILE_PRECEDENCE) {
+    const candidate = path.join(absPath, name);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
 /** List mission folders under the missions root. A mission is any
- *  top-level folder containing a README.md (per IMPLEMENTATION-PRD
- *  §2.1 / HG-8). Directories without a README.md are skipped — they
- *  represent scratch/junk, not declared missions. */
+ *  top-level folder containing an authored node file (SPEC.md, or legacy
+ *  README.md — per IMPLEMENTATION-PRD §2.1 / HG-8). Directories with
+ *  neither are skipped — they represent scratch/junk, not declared missions. */
 export function listMissions(missionsRoot: string): MissionInfo[] {
   if (!fs.existsSync(missionsRoot)) return [];
   const entries = fs.readdirSync(missionsRoot, { withFileTypes: true });
@@ -143,8 +167,8 @@ export function listMissions(missionsRoot: string): MissionInfo[] {
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const absPath = path.join(missionsRoot, entry.name);
-    const readmePath = path.join(absPath, "README.md");
-    const hasReadme = fs.existsSync(readmePath);
+    const readmePath = resolveNodeFile(absPath);
+    const hasReadme = readmePath !== null;
     if (!hasReadme) continue;
     const frontmatter = readFrontmatter(readmePath);
     const slicesDir = path.join(absPath, "slices");
@@ -191,12 +215,11 @@ export function findMission(missionsRoot: string, identifier: string): MissionIn
   ];
   for (const candidate of candidates) {
     if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
-      const readmePath = path.join(candidate, "README.md");
-      if (!fs.existsSync(readmePath)) {
+      if (resolveNodeFile(candidate) === null) {
         throw new ScopeCliError({
-          fact: `Directory "${identifier}" exists at ${candidate} but contains no README.md.`,
+          fact: `Directory "${identifier}" exists at ${candidate} but contains no ${NODE_FILE_PRECEDENCE.join(" or ")}.`,
           consequence: "It is not a declared mission. Command did not run.",
-          action: "Create it as a mission with: rig scope mission create " + identifier + ". Or add a README.md if the folder is intended to be a mission.",
+          action: "Create it as a mission with: rig scope mission create " + identifier + ". Or add a SPEC.md if the folder is intended to be a mission.",
         });
       }
       return buildMissionInfo(missionsRoot, candidate);
@@ -210,13 +233,12 @@ export function findMission(missionsRoot: string, identifier: string): MissionIn
 }
 
 function buildMissionInfo(missionsRoot: string, absPath: string): MissionInfo {
-  const readmePath = path.join(absPath, "README.md");
-  const hasReadme = fs.existsSync(readmePath);
-  const frontmatter = hasReadme ? readFrontmatter(readmePath) : {};
+  const readmePath = resolveNodeFile(absPath);
+  const frontmatter = readmePath ? readFrontmatter(readmePath) : {};
   return {
     name: path.basename(absPath),
     absPath,
-    readmePath: hasReadme ? readmePath : null,
+    readmePath,
     frontmatter,
     id: pickIdFromFrontmatter(frontmatter),
     activeSliceCount: countSliceDirs(path.join(absPath, "slices")),
@@ -268,15 +290,14 @@ function buildSliceInfo(mission: MissionInfo, sliceRoot: string, dirName: string
   const nn = m ? Number(m[1]) : null;
   const slug = m ? m[2]! : null;
   const absPath = path.join(sliceRoot, dirName);
-  const readmePath = path.join(absPath, "README.md");
-  const hasReadme = fs.existsSync(readmePath);
-  const frontmatter = hasReadme ? readFrontmatter(readmePath) : {};
+  const readmePath = resolveNodeFile(absPath);
+  const frontmatter = readmePath ? readFrontmatter(readmePath) : {};
   const id = pickIdFromFrontmatter(frontmatter);
   const status = typeof frontmatter.status === "string" ? (frontmatter.status as string).toLowerCase() : null;
   return {
     name: dirName,
     absPath,
-    readmePath: hasReadme ? readmePath : null,
+    readmePath,
     frontmatter,
     nn,
     slug,

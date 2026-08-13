@@ -39,6 +39,7 @@ import {
   ensureMissionId,
   ensureMissionIdPersisted,
   findMission,
+  resolveNodeFile,
   findSlice,
   gitTopLevel,
   listMissions,
@@ -330,7 +331,8 @@ function buildSliceCreateCommand(): Command {
         });
         fs.mkdirSync(sliceAbs, { recursive: true });
         fs.mkdirSync(path.join(sliceAbs, "proof"), { recursive: true });
-        const readmePath = path.join(sliceAbs, "README.md");
+        // New scaffolds author SPEC.md; existing README-backed nodes are never rewritten.
+        const readmePath = path.join(sliceAbs, "SPEC.md");
         const readmeOnly = Boolean(opts.readmeOnly);
         if (readmeOnly) {
           const markerBody = body.replace(
@@ -395,8 +397,8 @@ function buildSliceShipCommand(): Command {
         const { usedGit, repoRoot } = moveSlice(slice.absPath, destAbs);
         const targetId = ensureMissionIdPersisted(target, missionsRoot);
         const newSliceId = sliceIdFromMission(targetId, newNN);
-        const newReadme = path.join(destAbs, "README.md");
-        if (fs.existsSync(newReadme)) {
+        const newReadme = resolveNodeFile(destAbs);
+        if (newReadme) {
           updateFrontmatter(newReadme, {
             id: newSliceId,
             mission: target.name,
@@ -455,8 +457,8 @@ function buildSliceCloseCommand(): Command {
         const destName = slice.name;
         const destAbs = path.join(closedDir, destName);
         const { usedGit, repoRoot } = moveSlice(slice.absPath, destAbs);
-        const newReadme = path.join(destAbs, "README.md");
-        if (fs.existsSync(newReadme)) {
+        const newReadme = resolveNodeFile(destAbs);
+        if (newReadme) {
           const updates: Record<string, unknown> = {
             status: `closed-${reason}`,
             "closed-on": todayDateISO(),
@@ -513,8 +515,8 @@ function buildSliceMoveCommand(): Command {
         const { usedGit, repoRoot } = moveSlice(slice.absPath, destAbs);
         const targetId = ensureMissionIdPersisted(target, missionsRoot);
         const newSliceId = sliceIdFromMission(targetId, newNN);
-        const newReadme = path.join(destAbs, "README.md");
-        if (fs.existsSync(newReadme)) {
+        const newReadme = resolveNodeFile(destAbs);
+        if (newReadme) {
           updateFrontmatter(newReadme, {
             id: newSliceId,
             mission: target.name,
@@ -720,7 +722,8 @@ function buildMissionCreateCommand(): Command {
         // All renders succeeded — safe to touch the filesystem.
         fs.mkdirSync(absPath, { recursive: true });
         fs.mkdirSync(path.join(absPath, "slices"), { recursive: true });
-        const readmePath = path.join(absPath, "README.md");
+        // New scaffolds author SPEC.md; existing README-backed nodes are never rewritten.
+        const readmePath = path.join(absPath, "SPEC.md");
         fs.writeFileSync(readmePath, readmeBody, "utf8");
         const progressPath = path.join(absPath, "PROGRESS.md");
         fs.writeFileSync(progressPath, progressBody, "utf8");
@@ -812,7 +815,7 @@ function buildAuditCommand(): Command {
           throw new ScopeCliError({ fact: `Mission "${missionName}" not found at ${missionDir}.`, consequence: "Cannot audit.", action: "Check the mission name." });
         }
 
-        const missionReadme = path.join(missionDir, "README.md");
+        const missionReadme = resolveNodeFile(missionDir) ?? path.join(missionDir, "SPEC.md");
         const missionProgress = path.join(missionDir, "PROGRESS.md");
         const missionBrief = path.join(missionDir, "MISSION_BRIEF.md");
         const missionNotes = path.join(missionDir, "MISSION_NOTES.md");
@@ -869,7 +872,7 @@ function buildAuditCommand(): Command {
           for (const entry of fs.readdirSync(slicesDir)) {
             const sliceDir = path.join(slicesDir, entry);
             if (!fs.statSync(sliceDir).isDirectory()) continue;
-            const sliceReadme = path.join(sliceDir, "README.md");
+            const sliceReadme = resolveNodeFile(sliceDir) ?? path.join(sliceDir, "SPEC.md");
             const sliceProgress = path.join(sliceDir, "PROGRESS.md");
             const proofFile = path.join(sliceDir, "PROOF.md");
             const proofDir = path.join(sliceDir, "proof");
@@ -1097,8 +1100,8 @@ function resolveProgressTarget(scopeDir: string, level: "mission" | "slice"): {
 } {
   const progressPath = path.join(scopeDir, "PROGRESS.md");
   if (fs.existsSync(progressPath)) return { targetPath: progressPath, kind: "progress" };
-  const readmePath = path.join(scopeDir, "README.md");
-  if (fs.existsSync(readmePath)) {
+  const readmePath = resolveNodeFile(scopeDir);
+  if (readmePath) {
     const fm = readFrontmatter(readmePath);
     if (String(fm.progress_rail ?? "") === "readme-only") {
       return { targetPath: readmePath, kind: "readme-only" };
@@ -1243,8 +1246,8 @@ function backfillTitle(level: "mission" | "slice", scopeDir: string): string {
  *  scopes). */
 function backfillScopeProgress(scopeDir: string, level: "mission" | "slice"): BackfillResult {
   const name = path.basename(scopeDir);
-  const readmePath = path.join(scopeDir, "README.md");
-  if (!fs.existsSync(readmePath)) {
+  const readmePath = resolveNodeFile(scopeDir);
+  if (!readmePath) {
     return { scope: level, name, created: false, reason: "no-readme (not a declared scope)", path: null };
   }
   const progressPath = path.join(scopeDir, "PROGRESS.md");

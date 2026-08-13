@@ -35,6 +35,7 @@ import type {
 import { parseWorkflowSpecRef } from "../domain/slices/slice-indexer.js";
 import type { WorkflowSpecCache } from "../domain/workflow-spec-cache.js";
 import { projectSpecGraph } from "../domain/workflow/slice-workflow-projection.js";
+import { resolveNodeFile } from "../domain/scope/node-file.js";
 
 export function missionsRoutes(): Hono {
   const app = new Hono();
@@ -127,8 +128,11 @@ export function missionsRoutes(): Hono {
  *  replacing an existing status field when present. Idempotent.
  *  Preserves unrelated frontmatter fields. */
 function writeMissionStatusComplete(missionPath: string): void {
-  const readmePath = path.join(missionPath, "README.md");
-  let body = fs.existsSync(readmePath) ? fs.readFileSync(readmePath, "utf-8") : "";
+  // Mutate the node file the mission actually has; only a mission with neither gets a new one, and
+  // a new one is authored under the current name.
+  const resolved = resolveNodeFile(missionPath);
+  const readmePath = resolved ?? path.join(missionPath, "SPEC.md");
+  let body = resolved ? fs.readFileSync(resolved, "utf-8") : "";
   const fmMatch = body.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (fmMatch) {
     const fmInner = fmMatch[1] ?? "";
@@ -161,8 +165,8 @@ function computeMissionPath(slice: SliceListEntry): string {
  *  the field is absent. Powers the durable storytelling-filter for
  *  Getting Started complete-and-hide. */
 export function readMissionStatus(missionPath: string): string | null {
-  const readmePath = path.join(missionPath, "README.md");
-  if (!fs.existsSync(readmePath)) return null;
+  const readmePath = resolveNodeFile(missionPath);
+  if (!readmePath) return null;
   const raw = fs.readFileSync(readmePath, "utf-8");
   const fm = parseSimpleFrontmatter(raw);
   const value = fm["status"];
@@ -174,8 +178,8 @@ export function readMissionStatus(missionPath: string): string | null {
  *  field is absent / malformed. Uses the same parseWorkflowSpecRef
  *  helper the slice-indexer uses so both surfaces stay in lockstep. */
 function readMissionWorkflowSpec(missionPath: string): WorkflowSpecRef | null {
-  const readmePath = path.join(missionPath, "README.md");
-  if (!fs.existsSync(readmePath)) return null;
+  const readmePath = resolveNodeFile(missionPath);
+  if (!readmePath) return null;
   const raw = fs.readFileSync(readmePath, "utf-8");
   const fm = parseSimpleFrontmatter(raw);
   return parseWorkflowSpecRef(fm["workflow_spec"]);

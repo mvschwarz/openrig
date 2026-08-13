@@ -61,7 +61,7 @@ describe("OPR.0.4.1.11.3a intent visual scaffold slot", () => {
     const r = await run(["slice", "create", "release-0.4.1", "visual-slot", "--json"], substrate.missionsRoot);
 
     expect(r.exitCode).toBe(0);
-    const readmePath = path.join(JSON.parse(r.stdout).slice.path, "README.md");
+    const readmePath = path.join(JSON.parse(r.stdout).slice.path, "SPEC.md");
     const readme = fs.readFileSync(readmePath, "utf8");
 
     expect(readme).toContain("## Intent visual");

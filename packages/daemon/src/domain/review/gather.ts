@@ -38,6 +38,7 @@ import { readProofArtifacts } from "./proof-io.js";
 import { evaluateStepDeadline } from "../workflow-deadline.js";
 import type { AgentActivityStore } from "../agent-activity-store.js";
 import { isHumanSeatSession } from "../human-route-enforcer.js";
+import { resolveNodeFileVia } from "../scope/node-file.js";
 
 export interface ReviewGathererDeps {
   db: Database.Database;
@@ -217,7 +218,7 @@ export class ReviewGatherer {
     const slice = this.indexer.get(name);
     if (!slice) return null;
 
-    const readme = this.readFile(path.join(slice.slicePath, "README.md"));
+    const readme = resolveNodeFileVia(slice.slicePath, (p) => this.readFile(p))?.content ?? null;
     const prd = this.readFile(path.join(slice.slicePath, "IMPLEMENTATION-PRD.md"));
     const proofMd = this.readFile(path.join(slice.slicePath, "PROOF.md"));
 
@@ -291,7 +292,7 @@ export class ReviewGatherer {
     const anySlice = this.indexer.list().find((s) => s.missionId === mission);
     if (anySlice) {
       const missionDir = path.dirname(path.dirname(anySlice.slicePath));
-      const readme = this.readFile(path.join(missionDir, "README.md"));
+      const readme = resolveNodeFileVia(missionDir, (p) => this.readFile(p))?.content ?? null;
       const fm = this.parseFrontmatter(readme);
       // FR-8: the brief's "What & why" projects VERBATIM as the intent opener.
       const brief = this.readFile(path.join(missionDir, "MISSION_BRIEF.md"));

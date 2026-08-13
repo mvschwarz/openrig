@@ -149,7 +149,7 @@ describe("rig scope slice progress (FR-3 add/set)", () => {
     const r = await run(["slice", "progress", slicePath, "--add", "Rail item", "--json"], env.missionsRoot);
     expect(r.exitCode).toBe(0);
     expect(fs.existsSync(path.join(slicePath, "PROGRESS.md"))).toBe(false); // still no PROGRESS.md
-    const readme = fs.readFileSync(path.join(slicePath, "README.md"), "utf8");
+    const readme = fs.readFileSync(path.join(slicePath, "SPEC.md"), "utf8");
     expect(readme).toMatch(/## Rail\n\n- \[ \] Rail item/);
     expect(readme).toMatch(/progress_rail:\s*readme-only/); // frontmatter preserved
   });

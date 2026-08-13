@@ -20,6 +20,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { decodeAllowlist } from "../files/path-safety.js";
+import { resolveNodeFile, withSpecFirst } from "../scope/node-file.js";
 
 export type CheckStatus = "ok" | "warn" | "fail";
 
@@ -377,7 +378,7 @@ export interface CheckSliceDocsInput {
   missionsRoot: string;
 }
 
-const SLICE_DOC_FILES = ["README.md", "IMPLEMENTATION-PRD.md", "IMPL-PRD.md"] as const;
+const SLICE_DOC_FILES = withSpecFirst(["README.md", "IMPLEMENTATION-PRD.md", "IMPL-PRD.md"]);
 
 interface BareSlice {
   mission: string;
@@ -505,10 +506,10 @@ export function checkSdlcConventionSections(opts: CheckSliceDocsInput): DoctorCh
     }
     for (const slice of slices) {
       const slicePath = path.join(slicesDir, slice);
-      const readmePath = path.join(slicePath, "README.md");
+      const readmePath = resolveNodeFile(slicePath);
       let readme: string;
       try {
-        readme = fs.readFileSync(readmePath, "utf-8");
+        readme = fs.readFileSync(readmePath ?? path.join(slicePath, "SPEC.md"), "utf-8");
       } catch {
         continue; // no README = check #6's finding, not a section finding
       }

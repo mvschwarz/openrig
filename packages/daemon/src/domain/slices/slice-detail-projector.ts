@@ -44,6 +44,7 @@ import {
   parseLogicalCheckboxes,
 } from "../review/compose.js";
 import { readProofArtifacts } from "../review/proof-io.js";
+import { isNodeFile, withSpecFirst } from "../scope/node-file.js";
 import {
   projectSpecGraph,
   projectPhaseDefinitions,
@@ -473,7 +474,7 @@ export class SliceDetailProjector {
     const items: AcceptanceItem[] = [];
     // Parse README + IMPLEMENTATION-PRD + PROGRESS.md for [ ]/[x] checkbox lines.
     // Source citation = file + 1-based line number so the operator can jump.
-    const candidateFiles = ["README.md", "IMPLEMENTATION-PRD.md", "PROGRESS.md", "IMPLEMENTATION.md"];
+    const candidateFiles = withSpecFirst(["README.md", "IMPLEMENTATION-PRD.md", "PROGRESS.md", "IMPLEMENTATION.md"]);
     const sliceDir = slice.slicePath;
     // VM-006: the PRD bytes are captured during this existing scan — zero new
     // IO for the proof-contract extraction below. PM dogfood #1: the README
@@ -486,7 +487,9 @@ export class SliceDetailProjector {
       if (!fs.existsSync(full)) continue;
       const content = fs.readFileSync(full, "utf8");
       if (fname === "IMPLEMENTATION-PRD.md") prdContent = content;
-      if (fname === "README.md") readmeContent = content;
+      // SPEC.md and the legacy README.md are the same role — whichever is present carries the
+      // node body the contract extraction below reads.
+      if (isNodeFile(fname) && readmeContent === null) readmeContent = content;
       // qitem-render-driver B — the SHARED logical-checkbox relation (the
       // same parser Review's proof contract consumes). rawText carries any
       // joined continuation and IS the VM-006 join key, so acceptance rows

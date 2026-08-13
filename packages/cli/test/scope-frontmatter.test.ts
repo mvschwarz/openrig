@@ -61,7 +61,7 @@ describe("FR-5 — create writes the 2 mandatory frontmatter fields (stage + ver
 
   it("slice create README carries both stage and a provenance-bearing verified", async () => {
     const r = await run(["slice", "create", "release-0.4.0", "fm-slice", "--json"], env.missionsRoot);
-    const fm = readFrontmatter(path.join(JSON.parse(r.stdout).slice.path, "README.md"));
+    const fm = readFrontmatter(path.join(JSON.parse(r.stdout).slice.path, "SPEC.md"));
     expect(typeof fm.stage).toBe("string");
     expect(typeof fm.verified).toBe("string");
     expect(String(fm.verified)).toMatch(VERIFIED_RE);
@@ -69,7 +69,7 @@ describe("FR-5 — create writes the 2 mandatory frontmatter fields (stage + ver
 
   it("mission create README carries both stage and a provenance-bearing verified", async () => {
     const r = await run(["mission", "create", "release-0.5.0", "--json"], env.missionsRoot);
-    const fm = readFrontmatter(path.join(JSON.parse(r.stdout).mission.path, "README.md"));
+    const fm = readFrontmatter(path.join(JSON.parse(r.stdout).mission.path, "SPEC.md"));
     expect(typeof fm.stage).toBe("string");
     expect(typeof fm.verified).toBe("string");
     expect(String(fm.verified)).toMatch(VERIFIED_RE);
@@ -77,7 +77,7 @@ describe("FR-5 — create writes the 2 mandatory frontmatter fields (stage + ver
 
   it("readme-only slice still carries stage + verified alongside the progress_rail marker", async () => {
     const r = await run(["slice", "create", "release-0.4.0", "fm-readme-only", "--readme-only", "--json"], env.missionsRoot);
-    const readmePath = path.join(JSON.parse(r.stdout).slice.path, "README.md");
+    const readmePath = path.join(JSON.parse(r.stdout).slice.path, "SPEC.md");
     const fm = readFrontmatter(readmePath);
     expect(fm.progress_rail).toBe("readme-only");
     expect(typeof fm.verified).toBe("string");

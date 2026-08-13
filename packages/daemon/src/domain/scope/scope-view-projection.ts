@@ -7,6 +7,7 @@
 // does not enforce: `paired` means exactly "≥1 C1 drop cites this contract item".
 import * as path from "node:path";
 import { createHash } from "node:crypto";
+import { NODE_FILE_PRECEDENCE } from "./node-file.js";
 
 export interface ScopeFsDeps {
   exists: (p: string) => boolean;
@@ -209,8 +210,10 @@ function specShaFromLockedArtifacts(fs: ScopeFsDeps, sliceDir: string, fm: strin
 }
 
 export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string): SliceScopeDetail | null {
-  const readmePath = path.join(sliceDir, "README.md");
-  if (!fs.exists(readmePath)) return null;
+  const readmePath = NODE_FILE_PRECEDENCE
+    .map((n) => path.join(sliceDir, n))
+    .find((p) => fs.exists(p));
+  if (!readmePath) return null;
   const content = fs.readFile(readmePath);
   if (!content) return null;
   const fm = extractFrontmatterRaw(content) ?? "";
