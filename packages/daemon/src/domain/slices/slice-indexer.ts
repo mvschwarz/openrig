@@ -580,7 +580,17 @@ export class SliceIndexer {
     // last so the current lifecycle cursor overrides older dispatch metadata
     // while README.md/IMPLEMENTATION-PRD.md still supply slice title, rail item,
     // and source refs when PROGRESS.md is sparse.
-    const candidates = withSpecFirst(["IMPLEMENTATION-PRD.md", "README.md", "PROGRESS.md"]);
+    // THIS MERGE IS LATER-WINS (the Object.assign below), so the node file must sit in the SLOT
+    // README.md always held — not at the front. Prepending SPEC.md let a stale README.md or
+    // IMPLEMENTATION-PRD.md overwrite the live SPEC.md field by field, silently, on exactly the
+    // both-present nodes this compatibility work exists to serve. Resolve ONE node file and keep
+    // the original order around it; PROGRESS.md stays last as the lifecycle cursor.
+    const selectedNode = resolveNodeFile(slicePath);
+    const candidates = [
+      "IMPLEMENTATION-PRD.md",
+      ...(selectedNode ? [path.basename(selectedNode)] : []),
+      "PROGRESS.md",
+    ];
     const merged: Record<string, unknown> = {};
     for (const candidate of candidates) {
       const fullPath = path.join(slicePath, candidate);

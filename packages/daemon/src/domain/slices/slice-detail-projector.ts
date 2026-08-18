@@ -44,7 +44,7 @@ import {
   parseLogicalCheckboxes,
 } from "../review/compose.js";
 import { readProofArtifacts } from "../review/proof-io.js";
-import { isNodeFile, withSpecFirst } from "../scope/node-file.js";
+import { isNodeFile, resolveNodeFile } from "../scope/node-file.js";
 import {
   projectSpecGraph,
   projectPhaseDefinitions,
@@ -474,8 +474,17 @@ export class SliceDetailProjector {
     const items: AcceptanceItem[] = [];
     // Parse README + IMPLEMENTATION-PRD + PROGRESS.md for [ ]/[x] checkbox lines.
     // Source citation = file + 1-based line number so the operator can jump.
-    const candidateFiles = withSpecFirst(["README.md", "IMPLEMENTATION-PRD.md", "PROGRESS.md", "IMPLEMENTATION.md"]);
     const sliceDir = slice.slicePath;
+    // Scan the SELECTED node file once. Scanning both SPEC.md and README.md on a both-present node
+    // parses the shadowed file too, so every checkbox it shares with the live one becomes a second
+    // acceptance row — a duplicated or stale contract presented as the slice's own.
+    const selectedNode = resolveNodeFile(sliceDir);
+    const candidateFiles = [
+      ...(selectedNode ? [path.basename(selectedNode)] : []),
+      "IMPLEMENTATION-PRD.md",
+      "PROGRESS.md",
+      "IMPLEMENTATION.md",
+    ];
     // VM-006: the PRD bytes are captured during this existing scan — zero new
     // IO for the proof-contract extraction below. PM dogfood #1: the README
     // bytes are captured the same way (this scan already reads them) so the

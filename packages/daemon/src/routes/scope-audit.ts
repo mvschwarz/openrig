@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { attestationLineage, type AttestationLineage } from "../domain/scope/attestation-lineage.generated.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { classifyScopeItem, type ScopeAuditResult } from "../domain/scope/scope-audit.js";
+import { type AuditFinding, classifyScopeItem, type ScopeAuditResult } from "../domain/scope/scope-audit.js";
 import type { SliceIndexer } from "../domain/slices/slice-indexer.js";
 import { resolveNodeFile } from "../domain/scope/node-file.js";
 
@@ -37,6 +37,24 @@ function listProofArtifactsForAudit(proofDir: string): Array<{ path: string; fro
   }
 }
 
+
+/**
+ * Advisory-only: a work node carrying BOTH authored files. The daemon twin of the CLI finding of the
+ * same name — same contract, separate code, because the daemon cannot import packages/cli.
+ *
+ * SPEC.md wins and nothing blocks. The point is that a shadowed README.md is invisible otherwise,
+ * and any surface still reading the legacy name is reading the OTHER file.
+ */
+function shadowedNodeFileFinding(dir: string, level: "mission" | "slice"): AuditFinding | null {
+  if (!fs.existsSync(path.join(dir, "SPEC.md")) || !fs.existsSync(path.join(dir, "README.md"))) return null;
+  return {
+    kind: "shadowed_node_file",
+    severity: "low",
+    path: dir,
+    message: `${level} has BOTH SPEC.md and README.md; SPEC.md is the authored node file and wins, so README.md is shadowed and any surface still reading the legacy name sees different content.`,
+    remediation: "Fold anything still needed from README.md into SPEC.md and remove the shadowed file. Advisory only — nothing is blocked.",
+  };
+}
 
 export function scopeAuditRoutes(): Hono {
   const app = new Hono();
@@ -108,6 +126,9 @@ export function scopeAuditRoutes(): Hono {
       }
 
       const slicesDir = path.join(missionDir, "slices");
+      const missionShadow = shadowedNodeFileFinding(missionDir, "mission");
+      if (missionShadow) missionResult.findings.push(missionShadow);
+
       const sliceResults: Array<{ name: string; result: ScopeAuditResult; attestations?: AttestationLineage }> = [];
 
       if (fs.existsSync(slicesDir)) {
@@ -192,6 +213,11 @@ export function scopeAuditRoutes(): Hono {
 
           sliceResults.push({ name: entry, result: sliceResult, attestations: attestationLineage(sliceFm) });
         }
+      }
+
+      for (const sr of sliceResults) {
+        const shadow = shadowedNodeFileFinding(path.join(slicesDir, sr.name), "slice");
+        if (shadow) sr.result.findings.push(shadow);
       }
 
       const allFindings = [

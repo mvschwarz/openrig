@@ -84,6 +84,47 @@ describe("GET /api/scope/audit", () => {
     expect(res.status).toBe(404);
   });
 
+  // SPEC.md compatibility — a node carrying BOTH authored files is invisible without this. Advisory
+  // by construction: low severity, and `ok` must stay true so it can never gate a build.
+  it("advises (never blocks) when a mission AND a slice each carry both SPEC.md and README.md", async () => {
+    const missionDir = path.join(missionsRoot, "both-mission");
+    fs.mkdirSync(missionDir, { recursive: true });
+    fs.writeFileSync(path.join(missionDir, "SPEC.md"), "---\nid: OPR.99.0.2\n---\n# live\n", "utf8");
+    fs.writeFileSync(path.join(missionDir, "README.md"), "---\nid: OPR.99.0.2\n---\n# stale\n", "utf8");
+    fs.writeFileSync(path.join(missionDir, "PROGRESS.md"), "# Progress\n", "utf8");
+    const sliceDir = path.join(missionDir, "slices", "01-both");
+    fs.mkdirSync(sliceDir, { recursive: true });
+    fs.writeFileSync(path.join(sliceDir, "SPEC.md"), "---\nid: OPR.99.0.2.1\n---\n# live\n", "utf8");
+    fs.writeFileSync(path.join(sliceDir, "README.md"), "---\nid: OPR.99.0.2.1\n---\n# stale\n", "utf8");
+    fs.writeFileSync(path.join(sliceDir, "PROGRESS.md"), "# Progress\n", "utf8");
+
+    const res = await app.request("/api/scope/audit?mission=both-mission");
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      mission: { findings: Array<{ kind: string; severity: string; message: string }> };
+      slices: Array<{ name: string; findings: Array<{ kind: string; severity: string }> }>;
+    };
+
+    const m = body.mission.findings.find((f) => f.kind === "shadowed_node_file");
+    expect(m).toBeDefined();
+    expect(m!.severity).toBe("low");
+    expect(m!.message).toContain("SPEC.md");
+    const sl = body.slices.find((s) => s.name === "01-both")!.findings.find((f) => f.kind === "shadowed_node_file");
+    expect(sl).toBeDefined();
+    expect(sl!.severity).toBe("low");
+  });
+
+  it("says nothing about a node that has only ONE authored file", async () => {
+    const missionDir = path.join(missionsRoot, "single-mission");
+    fs.mkdirSync(missionDir, { recursive: true });
+    fs.writeFileSync(path.join(missionDir, "SPEC.md"), "---\nid: OPR.99.0.3\n---\n# only\n", "utf8");
+    fs.writeFileSync(path.join(missionDir, "PROGRESS.md"), "# Progress\n", "utf8");
+
+    const res = await app.request("/api/scope/audit?mission=single-mission");
+    const body = await res.json() as { mission: { findings: Array<{ kind: string }> } };
+    expect(body.mission.findings.some((f) => f.kind === "shadowed_node_file")).toBe(false);
+  });
+
   it("README-less NN-slug slice dir with no PROGRESS emits missing_id + missing_progress", async () => {
     const missionDir = path.join(missionsRoot, "test-mission");
     fs.mkdirSync(missionDir, { recursive: true });

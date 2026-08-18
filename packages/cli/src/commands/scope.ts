@@ -856,6 +856,9 @@ function buildAuditCommand(): Command {
           });
         }
 
+        const missionShadow = shadowedNodeFileFinding(missionDir, "mission");
+        if (missionShadow) missionResult.findings.push(missionShadow);
+
         const slicesDir = path.join(missionDir, "slices");
         const dogfoodEvidenceRoot = defaultDogfoodEvidenceRoot(missionsRoot);
         // Git-derived input for the committed-without-PROGRESS check (CLI-only).
@@ -967,6 +970,11 @@ function buildAuditCommand(): Command {
 
             sliceResults.push({ name: entry, result: sliceResult, attestations: attestationLineage(sliceFm) });
           }
+        }
+
+        for (const sr of sliceResults) {
+          const shadow = shadowedNodeFileFinding(path.join(slicesDir, sr.name), "slice");
+          if (shadow) sr.result.findings.push(shadow);
         }
 
         const allFindings = [
@@ -1741,6 +1749,26 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
 // ---------------------------------------------------------------------
 // Aggregate
 // ---------------------------------------------------------------------
+
+/**
+ * Advisory-only: a work node carrying BOTH authored files.
+ *
+ * SPEC.md wins and nothing here blocks — but a shadowed README.md is a real hazard worth naming,
+ * because every surface that still reads the legacy name is quietly reading the OTHER file. Low
+ * severity on purpose: a state to notice, not a failure to gate on.
+ */
+function shadowedNodeFileFinding(dir: string, level: "mission" | "slice"): {
+  kind: "shadowed_node_file"; severity: "low"; path: string; message: string; remediation: string;
+} | null {
+  if (!fs.existsSync(path.join(dir, "SPEC.md")) || !fs.existsSync(path.join(dir, "README.md"))) return null;
+  return {
+    kind: "shadowed_node_file",
+    severity: "low",
+    path: dir,
+    message: `${level} has BOTH SPEC.md and README.md; SPEC.md is the authored node file and wins, so README.md is shadowed and any surface still reading the legacy name sees different content.`,
+    remediation: "Fold anything still needed from README.md into SPEC.md and remove the shadowed file. Advisory only — nothing is blocked.",
+  };
+}
 
 export function scopeCommand(): Command {
   const cmd = new Command("scope")
