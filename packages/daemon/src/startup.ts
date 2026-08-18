@@ -57,11 +57,11 @@ import { PodBundleSourceResolver } from "./domain/bundle-source-resolver.js";
 import { PsProjectionService } from "./domain/ps-projection.js";
 import { SeatActivityService } from "./domain/seat-activity-service.js";
 import { SeatStructuralActivityService } from "./domain/seat-structural-activity-service.js";
-import { SeatIdentityReconciler, reconcileSelfHostIdentity } from "./domain/seat-identity-reconciler.js";
+import { deriveSelfHostIdSource, SeatIdentityReconciler, reconcileSelfHostIdentity } from "./domain/seat-identity-reconciler.js";
 import { SelfHostIdentityStore } from "./domain/seat-identity-store.js";
 import { DaemonLifecycleStore } from "./domain/daemon-lifecycle-store.js";
 import { randomUUID } from "node:crypto";
-import { setSelfHostId } from "./domain/hosts/fanout-contract.js";
+import { setSelfHostId, setSelfHostIdSource } from "./domain/hosts/fanout-contract.js";
 import { UpCommandRouter } from "./domain/up-command-router.js";
 import { RigTeardownOrchestrator } from "./domain/rig-teardown.js";
 import { ResumeMetadataRefresher } from "./domain/resume-metadata-refresher.js";
@@ -225,15 +225,19 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // boot (mint on first boot, reconcile thereafter). host.name is a display-only
   // CANDIDATE SEED (arch ruling cb19867f / DP4). Boot proceeds on a host.name
   // conflict (the stored id is kept and the conflict is surfaced loudly).
+  const hostNameCandidate = new ContextPackSettingsStore().resolveOne("host.name").value as string;
   const selfHost = reconcileSelfHostIdentity(new SelfHostIdentityStore(db), {
     nowIso: new Date().toISOString(),
-    hostNameCandidate: new ContextPackSettingsStore().resolveOne("host.name").value as string,
+    hostNameCandidate,
   });
   // 51-09 increment 2 — publish the resolved self-host id so the read-through
   // (and, in increment 4, the queue-destination validator) resolve a request
   // addressed to THIS host's own id HOME, instead of dialing/validating it as a
   // remote/unknown host. Distinct spelling from the 'local' sentinel.
   setSelfHostId(selfHost.hostId);
+  // Slice 14 §2c — derived from the SAME candidate the reconcile just used, so the two can never
+  // disagree, and computed here rather than per request (see fanout-contract).
+  setSelfHostIdSource(deriveSelfHostIdSource(selfHost.hostId, hostNameCandidate));
 
   // P7 — the daemon's LIFECYCLE record (distinct from the 059 identity record).
   // A new boot mints a fresh epoch, stamps started_at, and clears any prior run's

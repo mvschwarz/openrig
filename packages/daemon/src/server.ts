@@ -74,7 +74,7 @@ import type { SkillLibraryDiscoveryService } from "./domain/skill-library-discov
 import { configRoutes } from "./routes/config.js";
 import { hostsRoutes } from "./routes/hosts.js";
 import { hostReadThrough } from "./domain/hosts/read-through.js";
-import { getSelfHostId } from "./domain/hosts/fanout-contract.js";
+import { getSelfHostId, getSelfHostIdSource } from "./domain/hosts/fanout-contract.js";
 import { contextPacksRoutes } from "./routes/context-packs.js";
 import { agentImagesRoutes } from "./routes/agent-images.js";
 import type { SpecReviewService } from "./domain/spec-review-service.js";
@@ -129,8 +129,6 @@ import { envRoutes } from "./routes/env.js";
 import type { RigLifecycleService } from "./domain/rig-lifecycle-service.js";
 import { seatRoutes } from "./routes/seat.js";
 import { createRouteTimingMiddleware } from "./domain/route-timing-recorder.js";
-import { deriveSelfHostIdSource } from "./domain/seat-identity-reconciler.js";
-import { SettingsStore as ContextPackSettingsStore } from "./domain/user-settings/settings-store.js";
 
 export interface AppDeps {
   rigRepo: RigRepository;
@@ -603,10 +601,7 @@ export function createApp(deps: AppDeps): Hono {
     const selfHost = self
       ? {
           selfHostId: self,
-          selfHostIdSource: deriveSelfHostIdSource(
-            self,
-            new ContextPackSettingsStore().resolveOne("host.name").value as string,
-          ),
+          selfHostIdSource: getSelfHostIdSource(),
         }
       : {};
     const monitor = deps.eventLoopMonitor;

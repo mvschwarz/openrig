@@ -36,6 +36,24 @@ export function getSelfHostId(): string | null {
   return selfHostId;
 }
 
+// Slice 14 §2c — the id's PROVENANCE, resolved once at boot beside the id itself.
+//
+// Deliberately NOT derived per request: it needs the operator's configured `host.name`, and reading
+// settings inside the /healthz handler put file I/O on the hottest path in the daemon and blew the
+// ps+summary burst latency budget (caught by ps-summary-stall-red). Same lifecycle as the id: set
+// once at boot, read for free thereafter.
+let selfHostIdSource: string | null = null;
+
+/** Publish the boot-derived self-host id source (startup, once). null resets (tests). */
+export function setSelfHostIdSource(source: string | null): void {
+  selfHostIdSource = source;
+}
+
+/** The boot-derived self-host id source, or null before boot has reconciled it. */
+export function getSelfHostIdSource(): string | null {
+  return selfHostIdSource;
+}
+
 /**
  * The shared self-resolution convention: does a host token route to THIS host?
  * True for an absent/empty token, the `LOCAL_HOST_ID` positional sentinel, and
