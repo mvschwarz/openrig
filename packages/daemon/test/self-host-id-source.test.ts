@@ -26,6 +26,23 @@ describe("deriveSelfHostIdSource", () => {
     expect(deriveSelfHostIdSource("host-84c37990", "mm2-openrig1")).toBe("indeterminate");
   });
 
+  // THE REAL PATH, and the case the first cut got wrong. SettingsStore DEFAULTS host.name to
+  // "localhost", a reserved display token the reconciler refuses as a seed — so on a freshly
+  // generated host the candidate is present-but-unusable, and testing for mere presence reported
+  // `indeterminate` for the most ordinary machine there is: one nobody named.
+  it("reports generated when host.name is the untouched 'localhost' default", () => {
+    expect(deriveSelfHostIdSource("host-84c37990", "localhost")).toBe("generated");
+    expect(deriveSelfHostIdSource("host-84c37990", "LocalHost")).toBe("generated");
+  });
+
+  // Same rule for every other seed the mint branch refuses: reserved tokens and format-invalid
+  // names both fall back to a generated id, so both must read `generated`, not `indeterminate`.
+  it("reports generated for any seed the reconciler would refuse", () => {
+    for (const refused of ["local", "kernel", "host", "external", "a/b", ".hidden", "  "]) {
+      expect(deriveSelfHostIdSource("host-84c37990", refused), `seed ${JSON.stringify(refused)}`).toBe("generated");
+    }
+  });
+
   it("reports indeterminate for an unnamed host whose id fits neither story", () => {
     expect(deriveSelfHostIdSource("some-legacy-id", null)).toBe("indeterminate");
     expect(deriveSelfHostIdSource("host-NOTHEX0", null)).toBe("indeterminate");

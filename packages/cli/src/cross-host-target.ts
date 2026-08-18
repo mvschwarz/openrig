@@ -107,7 +107,17 @@ export function resolveCrossHostTarget(
     return { ok: true, target: rawTarget, sugarHost: undefined, hint: unregisteredHint };
   }
 
-  if (explicitHost !== undefined && explicitHost !== suffix) {
+  // TWO SPELLINGS OF ONE HOST ARE NOT A CONFLICT. `--host mm2-host` beside a target suffix of
+  // `@host-84c37990` names the SAME machine once the suffix can match a join key — rejecting it
+  // would punish an operator for pasting back the reply hint we printed them, which is the exact
+  // workflow this slice exists to make work. Compare the RESOLVED entries, not the raw strings.
+  // A genuinely different host, or an explicit host that resolves to nothing, still conflicts loudly.
+  const explicitResolved = explicitHost !== undefined
+    ? resolveHost(registry.registry, explicitHost)
+    : undefined;
+  const namesSameEntry = explicitResolved?.ok === true && explicitResolved.host.id === resolved.host.id;
+
+  if (explicitHost !== undefined && explicitHost !== suffix && !namesSameEntry) {
     return {
       ok: false,
       error: `ambiguous host: --host ${explicitHost} conflicts with the target's host qualifier @${suffix} — name one host`,

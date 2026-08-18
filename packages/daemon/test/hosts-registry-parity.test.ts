@@ -64,6 +64,12 @@ const SHARED_FIXTURES: Array<{ label: string; parsed: unknown; ok: boolean }> = 
   { label: "invalid: non-string hostId", parsed: { hosts: [{ id: "vm-a", transport: "ssh", target: "a", hostId: 42 }] }, ok: false },
   { label: "invalid: path-bearing hostId 'a/b'", parsed: { hosts: [{ id: "vm-a", transport: "ssh", target: "a", hostId: "a/b" }] }, ok: false },
   { label: "invalid: dot-leading hostId '.hidden'", parsed: { hosts: [{ id: "vm-a", transport: "ssh", target: "a", hostId: ".hidden" }] }, ok: false },
+  // A join key names a real machine's OWN identity, so it can never be one of the tokens that are
+  // not machines. The first cut applied only the format regex to hostId and accepted `local`.
+  { label: "invalid: reserved hostId 'local'", parsed: { hosts: [{ id: "vm-a", transport: "ssh", target: "a", hostId: "local" }] }, ok: false },
+  { label: "invalid: reserved hostId 'kernel'", parsed: { hosts: [{ id: "vm-a", transport: "ssh", target: "a", hostId: "kernel" }] }, ok: false },
+  { label: "invalid: reserved hostId 'host'", parsed: { hosts: [{ id: "vm-a", transport: "ssh", target: "a", hostId: "host" }] }, ok: false },
+  { label: "invalid: reserved hostId 'external'", parsed: { hosts: [{ id: "vm-a", transport: "http", url: "http://x", hostId: "external" }] }, ok: false },
 ];
 
 describe("hosts-registry reader — CLI/daemon validator parity (shared fixtures)", () => {

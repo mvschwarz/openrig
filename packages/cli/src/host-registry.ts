@@ -218,6 +218,12 @@ export function validateHostRegistry(parsed: unknown, sourcePath: string): HostR
       if (typeof hostId !== "string" || hostId.trim() === "") {
         return { ok: false, error: `${prefix}.hostId: optional, but if present must be a non-empty string` };
       }
+      if (RESERVED_HOST_IDS.has(hostId)) {
+        return {
+          ok: false,
+          error: `${prefix}.hostId: '${hostId}' is a reserved host id (reserved set: ${[...RESERVED_HOST_IDS].sort().join(", ")}) — a join key names a real machine's own identity and can never be one of these.`,
+        };
+      }
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(hostId)) {
         return {
           ok: false,

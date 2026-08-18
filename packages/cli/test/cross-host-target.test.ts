@@ -69,6 +69,39 @@ describe("cross-host target resolution — alias -> id -> transport", () => {
     expect(r.hint).toContain("no registered host 'host-84c37990'");
   });
 
+  // Two spellings of ONE host. An operator who pastes back the reply hint we printed them AND
+  // passes --host with the human alias is naming the same machine twice, not two machines.
+  it("accepts --host alias beside a target suffix that is the same entry's join key", () => {
+    const r = resolveCrossHostTarget("pm@some-rig@host-84c37990", "mm2-host", boundRegistry, undefined);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.target).toBe("pm@some-rig");
+    expect(r.sugarHost).toBe("mm2-host");
+  });
+
+  it("still rejects --host naming a genuinely DIFFERENT registered host", () => {
+    const two = () => ({
+      ok: true as const,
+      registry: {
+        hosts: [
+          { id: "mm2-host", transport: "http" as const, url: "http://x:7433", hostId: "host-84c37990" },
+          { id: "other-host", transport: "http" as const, url: "http://y:7433", hostId: "host-deadbeef" },
+        ],
+      },
+    });
+    const r = resolveCrossHostTarget("pm@some-rig@host-84c37990", "other-host", two, undefined);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error).toContain("ambiguous host");
+  });
+
+  it("still rejects an --host that resolves to nothing", () => {
+    const r = resolveCrossHostTarget("pm@some-rig@host-84c37990", "not-registered", boundRegistry, undefined);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error).toContain("ambiguous host");
+  });
+
   it("leaves a plain two-part target alone", () => {
     const r = resolveCrossHostTarget("pm@some-rig", undefined, boundRegistry, undefined);
     expect(r.ok).toBe(true);

@@ -298,12 +298,22 @@ export function deriveSelfHostIdSource(
   hostNameCandidate: string | null | undefined,
 ): SelfHostIdSource | null {
   if (typeof hostId !== "string" || hostId.trim() === "") return null;
+  // ADMISSIBILITY MUST MATCH THE MINT BRANCH EXACTLY, not merely "is it set".
+  // `host.name` DEFAULTS to "localhost", which is a reserved display token the reconciler refuses as
+  // a seed — so on a freshly generated host the candidate is present-but-unusable. Testing only for
+  // presence reported `indeterminate` for the most ordinary machine there is: one nobody named.
   const candidate = normalizeCandidate(hostNameCandidate);
+  const admissibleSeed =
+    candidate !== null && !isReservedSeed(candidate) && isRegistryValidSelfId(candidate)
+      ? candidate
+      : null;
+
   // Seeded from the operator's name and still agreeing with it.
-  if (candidate !== null && candidate === hostId) return "named";
-  // Nobody named this machine and the id carries the generated shape: the founder-kept fallback.
-  if (candidate === null && GENERATED_SELF_HOST_ID.test(hostId)) return "generated";
-  // A configured name that disagrees, or an id whose shape matches neither story.
+  if (admissibleSeed !== null && admissibleSeed === hostId) return "named";
+  // Nobody usably named this machine and the id carries the generated shape: the founder-kept fallback.
+  if (admissibleSeed === null && GENERATED_SELF_HOST_ID.test(hostId)) return "generated";
+  // An admissible name that DISAGREES (the conflict the reconciler keeps and warns about), or an id
+  // whose shape fits neither story. Unprovable, and said so.
   return "indeterminate";
 }
 
