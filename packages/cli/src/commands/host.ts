@@ -755,7 +755,15 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
         // pre-MH1 consumers keep working): each row gains `selected` +
         // `status`; the scriptable selection pointer is the true row (or
         // `rig config get host.selected`).
-        console.log(JSON.stringify(loaded.registry.hosts.map((h, i) => ({ ...h, selected: h.id === selected, status: statuses[i] }))));
+        // Slice 14: `hostId` rides through the spread when present, but ABSENT-as-missing-key makes
+        // "never learned this peer's identity" indistinguishable from a consumer that forgot to
+        // look. Emit it explicitly as null so unbound is a value, not an absence.
+        console.log(JSON.stringify(loaded.registry.hosts.map((h, i) => ({
+          ...h,
+          hostId: h.hostId ?? null,
+          selected: h.id === selected,
+          status: statuses[i],
+        }))));
         return;
       }
       if (loaded.registry.hosts.length === 0) {
@@ -772,11 +780,13 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
         console.log(`This host: ${ownName}\n`);
       }
       const pad = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + "…" : s.padEnd(n));
-      console.log(`${pad("", 2)}${pad("ID", 20)} ${pad("TRANSPORT", 10)} ${pad("TARGET", 30)} ${pad("STATUS", 12)} ${pad("AUTH", 24)} NOTES`);
+      console.log(`${pad("", 2)}${pad("ID", 20)} ${pad("HOST-ID", 18)} ${pad("TRANSPORT", 10)} ${pad("TARGET", 30)} ${pad("STATUS", 12)} ${pad("AUTH", 24)} NOTES`);
       for (let i = 0; i < loaded.registry.hosts.length; i++) {
         const h = loaded.registry.hosts[i]!;
         const marker = h.id === selected ? "* " : "  ";
-        console.log(`${marker}${pad(h.id, 20)} ${pad(h.transport, 10)} ${pad(hostDisplayTarget(h), 30)} ${pad(statuses[i]!, 12)} ${pad(authPointer(h), 24)} ${h.notes ?? "—"}`);
+        // "unbound" is the whole point of the column: an operator can SEE which entries have never
+        // learned their peer's self-id, instead of finding out when a cross-machine message fails.
+        console.log(`${marker}${pad(h.id, 20)} ${pad(h.hostId ?? "unbound", 18)} ${pad(h.transport, 10)} ${pad(hostDisplayTarget(h), 30)} ${pad(statuses[i]!, 12)} ${pad(authPointer(h), 24)} ${h.notes ?? "—"}`);
       }
       if (selected !== "local") {
         console.log(`\nSelected host: ${selected} (return with: rig host select local)`);

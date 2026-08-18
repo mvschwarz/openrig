@@ -833,6 +833,32 @@ export async function fetchSelfHostId(deps: LifecycleDeps, url: string): Promise
 }
 
 /**
+ * This host's own identity AND where it came from, for the surfaces that must make the state legible
+ * before a cross-machine message fails. Same fail-open contract as `fetchSelfHostId`: unreachable
+ * daemon yields undefined rather than a new failure mode.
+ */
+export async function fetchSelfHostIdentity(
+  deps: LifecycleDeps,
+  url: string,
+): Promise<{ selfHostId: string; selfHostIdSource?: string } | undefined> {
+  try {
+    const base = url.replace(/\/+$/, "");
+    const res = await fetchDaemonProbe(deps, `${base}/healthz`, HEALTHZ_PROBE_TIMEOUT_MS);
+    if (!res.ok || !res.json) return undefined;
+    const body = (await res.json()) as { selfHostId?: unknown; selfHostIdSource?: unknown } | null;
+    const id = body?.selfHostId;
+    if (typeof id !== "string" || id.length === 0) return undefined;
+    const source = body?.selfHostIdSource;
+    return {
+      selfHostId: id,
+      ...(typeof source === "string" && source.length > 0 ? { selfHostIdSource: source } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * A4 HTTP-path origin-triple carry: resolve THIS host's `selfHostId` for a REMOTE-targeting client,
  * so the stamped X-OpenRig-Session becomes the origin TRIPLE (member@rig@selfHostId) and the remote
  * daemon renders the ORIGIN host. The id comes from the LOCAL daemon's /healthz (env OPENRIG_URL,

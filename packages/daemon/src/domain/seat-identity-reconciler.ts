@@ -274,6 +274,39 @@ export function assertNeverReservedHostId(hostId: string): void {
   }
 }
 
+/**
+ * Where a live self-host id CAME FROM, derived at read time — `named`, `generated`, or the honest
+ * `indeterminate`.
+ *
+ * WHY DERIVED AND NOT READ: `self_host_identity` stores `host_id`, `minted_at`, `reconciled_at` and
+ * NOTHING about provenance, so there is no record to consult. Recording it properly is a migration
+ * and belongs with the population work, not here.
+ *
+ * `indeterminate` is load-bearing, not a cop-out. It is exactly the CONFLICT state the reconciler
+ * already warns about: an operator sets `host.name` AFTER the id was minted, the reconciler keeps
+ * the original id (a durable identity is never silently re-keyed), and from then on the configured
+ * name and the live id disagree. Calling that `generated` would be a false claim about a machine
+ * someone did name, and an unknown that reads as a known state is the whole defect this slice is
+ * about.
+ */
+export type SelfHostIdSource = "named" | "generated" | "indeterminate";
+
+const GENERATED_SELF_HOST_ID = /^host-[0-9a-f]{8}$/;
+
+export function deriveSelfHostIdSource(
+  hostId: string | null | undefined,
+  hostNameCandidate: string | null | undefined,
+): SelfHostIdSource | null {
+  if (typeof hostId !== "string" || hostId.trim() === "") return null;
+  const candidate = normalizeCandidate(hostNameCandidate);
+  // Seeded from the operator's name and still agreeing with it.
+  if (candidate !== null && candidate === hostId) return "named";
+  // Nobody named this machine and the id carries the generated shape: the founder-kept fallback.
+  if (candidate === null && GENERATED_SELF_HOST_ID.test(hostId)) return "generated";
+  // A configured name that disagrees, or an id whose shape matches neither story.
+  return "indeterminate";
+}
+
 /** A collision-safe generated self-host id, used when no unambiguous operator seed exists. */
 function generateSelfHostId(): string {
   return `host-${randomUUID().slice(0, 8)}`;

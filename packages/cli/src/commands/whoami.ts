@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { readOwnHostName, resolveEffectiveHost } from "../host-selection.js";
 import { execSync } from "node:child_process";
 import { DaemonClient, remoteDaemonClient } from "../client.js";
-import { getDaemonStatus, getDaemonUrl, resolveOriginSelfHostId } from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl, resolveOriginSelfHostId, fetchSelfHostIdentity } from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -307,6 +307,16 @@ workspace block). The compact form omits the Context line; use 'rig context' or
       const ownHostName = readOwnHostName();
       if (ownHostName !== "localhost") {
         console.log(`Host:       ${ownHostName}`);
+      }
+      // Slice 14 §2c — THIS host's own identity, and where it came from. `host.name` above is a
+      // DISPLAY name; the self-host id is what this daemon stamps into every outbound envelope and
+      // what a remote registry must be able to resolve. They are different things, and conflating
+      // them is the defect. A `generated` id means no remote can route a reply hint back here — say
+      // so now, not when a cross-machine message fails.
+      const selfIdentity = await fetchSelfHostIdentity(deps.lifecycleDeps, getDaemonUrl(status));
+      if (selfIdentity) {
+        const src = selfIdentity.selfHostIdSource;
+        console.log(`Self host:  ${selfIdentity.selfHostId}${src ? ` (${src})` : ""}`);
       }
       console.log(`Rig:        ${id.rigName}`);
       console.log(`Logical ID: ${id.logicalId}`);

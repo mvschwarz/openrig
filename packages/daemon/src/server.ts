@@ -129,6 +129,8 @@ import { envRoutes } from "./routes/env.js";
 import type { RigLifecycleService } from "./domain/rig-lifecycle-service.js";
 import { seatRoutes } from "./routes/seat.js";
 import { createRouteTimingMiddleware } from "./domain/route-timing-recorder.js";
+import { deriveSelfHostIdSource } from "./domain/seat-identity-reconciler.js";
+import { SettingsStore as ContextPackSettingsStore } from "./domain/user-settings/settings-store.js";
 
 export interface AppDeps {
   rigRepo: RigRepository;
@@ -595,7 +597,18 @@ export function createApp(deps: AppDeps): Hono {
     // is null → {} → no invented identity, legacy bodies byte-preserved). NEVER
     // ownName/host.name (display-only, DP4 — the conflation this slice kills).
     const self = getSelfHostId();
-    const selfHost = self ? { selfHostId: self } : {};
+    // Slice 14 §2c — legibility BEFORE the cross-machine failure. A host running a generated id is
+    // in a materially different state from one running its registered name (remote callers cannot
+    // resolve it), and until now nothing said which state you were in until a message failed.
+    const selfHost = self
+      ? {
+          selfHostId: self,
+          selfHostIdSource: deriveSelfHostIdSource(
+            self,
+            new ContextPackSettingsStore().resolveOne("host.name").value as string,
+          ),
+        }
+      : {};
     const monitor = deps.eventLoopMonitor;
     const slowOperations = deps.slowOpRecorder?.snapshot
       ? { slowOperations: deps.slowOpRecorder.snapshot() }
