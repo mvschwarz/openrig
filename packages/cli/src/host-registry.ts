@@ -61,6 +61,15 @@ export function classifyHttpError(_err: unknown): FailedStep {
 
 export interface SshHostEntry {
   id: string;
+  /**
+   * The observed, immutable self-id of the host this entry points at — the JOIN KEY.
+   *
+   * `id` is MY label for that machine; `hostId` is what that machine calls itself and stamps into
+   * every envelope it sends. Optional because every entry that exists today predates the field:
+   * absent means "never learned", which resolves exactly as it does now. Nothing populates this
+   * automatically in this slice.
+   */
+  hostId?: string;
   transport: "ssh";
   target: string;
   user?: string;
@@ -69,6 +78,8 @@ export interface SshHostEntry {
 
 export interface HttpHostEntry {
   id: string;
+  /** The observed self-id of the host this entry points at — the join key. See SshHostEntry.hostId. */
+  hostId?: string;
   transport: "http";
   url: string;
   bearer_env?: string;
@@ -200,6 +211,20 @@ export function validateHostRegistry(parsed: unknown, sourcePath: string): HostR
     if (notes !== undefined && typeof notes !== "string") {
       return { ok: false, error: `${prefix}.notes: optional, but if present must be a string` };
     }
+    // The join key is an id like any other, so it earns the SAME rules `id` already has — it can
+    // reach a table and a path just as easily. The generated `host-XXXXXXXX` form passes them.
+    const hostId = entry["hostId"];
+    if (hostId !== undefined) {
+      if (typeof hostId !== "string" || hostId.trim() === "") {
+        return { ok: false, error: `${prefix}.hostId: optional, but if present must be a non-empty string` };
+      }
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(hostId)) {
+        return {
+          ok: false,
+          error: `${prefix}.hostId: '${hostId}' is not a valid host id — allowed: letters, digits, dot, underscore, dash (starting with a letter or digit).`,
+        };
+      }
+    }
 
     if (transport === "ssh") {
       const target = entry["target"];
@@ -212,6 +237,7 @@ export function validateHostRegistry(parsed: unknown, sourcePath: string): HostR
       }
       validated.push({
         id,
+        ...(hostId !== undefined ? { hostId: hostId as string } : {}),
         transport: "ssh",
         target,
         ...(user !== undefined ? { user: user as string } : {}),
@@ -240,6 +266,7 @@ export function validateHostRegistry(parsed: unknown, sourcePath: string): HostR
       }
       validated.push({
         id,
+        ...(hostId !== undefined ? { hostId: hostId as string } : {}),
         transport: "http",
         url: url as string,
         ...(hasEnv ? { bearer_env: bearerEnv as string } : {}),
@@ -260,7 +287,11 @@ export function hostDisplayTarget(host: HostEntry): string {
 }
 
 export function resolveHost(registry: HostRegistry, id: string): HostResolution {
-  const match = registry.hosts.find((h) => h.id === id);
+  // alias -> id -> transport. The human alias is the intentional handle, so an `id` match is tried
+  // across the WHOLE registry before any join key — that tiebreak is defined rather than accidental,
+  // even though a collision with a random self-id is near-impossible.
+  const match = registry.hosts.find((h) => h.id === id)
+    ?? registry.hosts.find((h) => h.hostId === id);
   if (match) return { ok: true, host: match };
   const knownIds = registry.hosts.map((h) => h.id).slice(0, 10);
   const idsHint = knownIds.length > 0

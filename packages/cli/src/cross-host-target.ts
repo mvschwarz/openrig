@@ -114,5 +114,8 @@ export function resolveCrossHostTarget(
     };
   }
 
-  return { ok: true, target: base, sugarHost: suffix, hint: undefined };
+  // NORMALIZE TO THE ALIAS. The suffix may have matched the entry's join key rather than its id
+  // (a peer's reply hint carries that peer's self-id). Everything downstream treats sugarHost as a
+  // registry id and compares it against `h.id`, so hand back the canonical alias, not what was typed.
+  return { ok: true, target: base, sugarHost: resolved.host.id, hint: undefined };
 }

@@ -54,6 +54,16 @@ const SHARED_FIXTURES: Array<{ label: string; parsed: unknown; ok: boolean }> = 
   { label: "invalid: slash-bearing id 'a/b'", parsed: { hosts: [{ id: "a/b", transport: "ssh", target: "a" }] }, ok: false },
   { label: "invalid: dot-leading id '.hidden'", parsed: { hosts: [{ id: ".hidden", transport: "ssh", target: "a" }] }, ok: false },
   { label: "valid: hostname-shaped id keeps working", parsed: { hosts: [{ id: "vm-a.local", transport: "ssh", target: "a" }] }, ok: true },
+  // Slice 14 — the optional join key. A schema edit that lands on only ONE twin passes nothing:
+  // these fixtures are what force the CLI validator and the daemon reader to agree about it.
+  { label: "valid: ssh entry carrying the hostId join key", parsed: { hosts: [{ id: "vm-a", transport: "ssh", target: "a", hostId: "host-84c37990" }] }, ok: true },
+  { label: "valid: http entry carrying the hostId join key", parsed: { hosts: [{ id: "vps-b", transport: "http", url: "http://vps-b:7433", hostId: "host-deadbeef" }] }, ok: true },
+  { label: "valid: entry with NO hostId (every entry that exists today)", parsed: { hosts: [{ id: "legacy", transport: "http", url: "http://legacy:7433" }] }, ok: true },
+  { label: "valid: hostname-shaped hostId", parsed: { hosts: [{ id: "vm-a", transport: "ssh", target: "a", hostId: "mm2-openrig1.local" }] }, ok: true },
+  { label: "invalid: empty hostId", parsed: { hosts: [{ id: "vm-a", transport: "ssh", target: "a", hostId: "  " }] }, ok: false },
+  { label: "invalid: non-string hostId", parsed: { hosts: [{ id: "vm-a", transport: "ssh", target: "a", hostId: 42 }] }, ok: false },
+  { label: "invalid: path-bearing hostId 'a/b'", parsed: { hosts: [{ id: "vm-a", transport: "ssh", target: "a", hostId: "a/b" }] }, ok: false },
+  { label: "invalid: dot-leading hostId '.hidden'", parsed: { hosts: [{ id: "vm-a", transport: "ssh", target: "a", hostId: ".hidden" }] }, ok: false },
 ];
 
 describe("hosts-registry reader — CLI/daemon validator parity (shared fixtures)", () => {
