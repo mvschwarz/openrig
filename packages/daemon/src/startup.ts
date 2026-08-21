@@ -1711,6 +1711,83 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     deps.watchdogPolicyEngine = watchdogPolicyEngine;
     deps.watchdogScheduler = watchdogScheduler;
 
+    // B8 / slice-07 A3 — the MODEL-DIVERGENCE MONITOR: cause-agnostic effective-vs-pinned
+    // comparison at the earliest reliable per-runtime read, one verdict per occupant generation,
+    // LOUD four-channel proclamation on divergence (orch seats + operator + oversight + the named
+    // Slack deferral per DS2). Channel targets per the desk ruling 2026-08-21: orch = the seat's
+    // own rig's orch.* seats; operator = derived from workspace.operator_seat_name (never
+    // hardcoded); oversight = the fleet judgment seat, locally resolvable or a NAMED deferral
+    // (no daemon-side cross-host send seam exists yet — the deferral names that, never silence).
+    {
+      const { ModelDivergenceMonitor } = await import("./domain/model-divergence/model-divergence-monitor.js");
+      const { readClaudeEffectiveModel, readCodexEffectiveModel } = await import("./domain/model-divergence/effective-model-readers.js");
+      const OVERSIGHT_SEAT = "watch-lead@oversight";
+      const modelDivergenceMonitor = new ModelDivergenceMonitor({
+        listPinnedSeats: () => {
+          const rows = db.prepare(`
+            SELECT n.id AS nodeId, r.id AS rigId, r.name AS rigName, n.runtime AS runtime, n.model AS pinnedModel,
+                   (SELECT s.session_name FROM sessions s
+                     WHERE s.node_id = n.id AND s.status = 'running'
+                     ORDER BY s.created_at DESC, s.id DESC LIMIT 1) AS sessionName
+              FROM nodes n JOIN rigs r ON r.id = n.rig_id
+             WHERE n.model IS NOT NULL AND n.model <> ''
+          `).all() as Array<{ nodeId: string; rigId: string; rigName: string; runtime: string | null; pinnedModel: string; sessionName: string | null }>;
+          return rows
+            .filter((row): row is typeof row & { sessionName: string } => row.sessionName !== null)
+            .map((row) => ({ ...row, generation: sessionRegistry.currentOccupantGenerationForSession(row.sessionName) }));
+        },
+        readEffectiveModel: (seat) => {
+          if (seat.runtime === "codex") {
+            const tokenRow = db.prepare("SELECT resume_token FROM sessions WHERE node_id = ? AND session_name = ? ORDER BY id DESC LIMIT 1")
+              .get(seat.nodeId, seat.sessionName) as { resume_token: string | null } | undefined;
+            const rollout = contextUsageStore.readCodexAndNormalize({ threadId: tokenRow?.resume_token ?? null, sessionName: seat.sessionName }).transcriptPath;
+            return rollout ? readCodexEffectiveModel(rollout) : null;
+          }
+          if (seat.runtime === "claude-code") {
+            const transcript = contextUsageStore.readAndNormalize(seat.sessionName).transcriptPath;
+            return transcript ? readClaudeEffectiveModel(transcript) : null;
+          }
+          return null; // no reliable effective read for this runtime yet — stays pending, never assumed
+        },
+        sendToSession: async (target, message) => {
+          try {
+            const result = await sessionTransport.send(target, message);
+            return result.ok ? { ok: true } : { ok: false, error: result.error };
+          } catch (err) {
+            return { ok: false, error: err instanceof Error ? err.message : String(err) };
+          }
+        },
+        resolveOrchSeats: (rigName) => (db.prepare(`
+          SELECT s.session_name AS sessionName
+            FROM sessions s JOIN nodes n ON n.id = s.node_id JOIN rigs r ON r.id = n.rig_id
+           WHERE r.name = ? AND s.status = 'running' AND n.logical_id LIKE 'orch.%'
+        `).all(rigName) as Array<{ sessionName: string }>).map((row) => row.sessionName),
+        resolveOperatorSeat: () => {
+          const value = deps.settingsStore?.resolveOne("workspace.operator_seat_name").value;
+          return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+        },
+        resolveOversightSeat: () => {
+          const row = db.prepare("SELECT session_name FROM sessions WHERE session_name = ? AND status = 'running' LIMIT 1").get(OVERSIGHT_SEAT);
+          return row ? OVERSIGHT_SEAT : null;
+        },
+        recordProclamation: (proclamation) => {
+          eventBus.emit({
+            type: "seat.model_divergence",
+            rigId: proclamation.rigId,
+            nodeId: proclamation.nodeId,
+            sessionName: proclamation.sessionName,
+            runtime: proclamation.runtime,
+            pinnedModel: proclamation.pinnedModel,
+            effectiveModel: proclamation.effectiveModel,
+            diagnosis: proclamation.diagnosis,
+            channels: proclamation.channels,
+          });
+        },
+      });
+      modelDivergenceMonitor.startPolling(60_000);
+      deps.modelDivergenceMonitor = modelDivergenceMonitor;
+    }
+
     // OPR.0.4.6.WF1 FR-4: the workflow startup resume sweep — re-arm
     // keepalives, reissue lost post-commit nudges (pending frontier
     // packets never nudged), surface stuck instances. Runs after the

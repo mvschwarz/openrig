@@ -199,6 +199,8 @@ export interface AppDeps {
   watchdogHistoryLog?: WatchdogHistoryLog;
   watchdogPolicyEngine?: WatchdogPolicyEngine;
   watchdogScheduler?: WatchdogScheduler;
+  /** B8 / slice-07 A3 — the model-divergence monitor (effective-vs-pinned, four-channel proclaim). */
+  modelDivergenceMonitor?: import("./domain/model-divergence/model-divergence-monitor.js").ModelDivergenceMonitor;
   periodicSnapshotScheduler?: import("./domain/periodic-snapshot-scheduler.js").PeriodicSnapshotScheduler;
   workflowRuntime?: WorkflowRuntime;
   /**

@@ -1,0 +1,191 @@
+// B8 / slice-07 A3 — MODEL-DIVERGENCE DETECTOR + four-channel proclamation (founder-ruled).
+//
+// DETECT THE DIVERGENCE, NOT THE CAUSES (pm-ruled): the trigger is one comparison — the runtime's
+// EFFECTIVE model vs the seat's PINNED model — at the earliest reliable read. No cause enumeration:
+// specimen #1 was model-invalid (400 silently degraded), specimen #2 was environment-invalid (a
+// missing --add-dir degraded the tier); a 400-handler catches one and misses the other, this
+// comparison catches both. The cause string, when known, rides the proclamation as DIAGNOSIS only.
+//
+// "AT READINESS", operationally: the check ARMS when a pinned seat's occupant generation appears
+// and FIRES at the first reliable effective-model read. A claude seat has no assistant turn at
+// readiness (the effective signal does not exist yet), so the monitor polls and each generation
+// stays PENDING until its runtime produces the signal — then exactly ONE verdict per generation.
+// Every-occurrence semantics live at the generation grain: every new occupant of a diverged seat
+// proclaims again (founder-classed every-occurrence, not digest), while one generation never spams.
+//
+// FOUR CHANNELS, per the desk's target ruling (2026-08-21): orchestrator = the seat's own rig's
+// orch.* seats; operator = the seat resolved from the workspace operator config (derived, never
+// hardcoded — may be cross-host); oversight = the fleet oversight judgment seat (cross-host via the
+// registered route); human-via-Slack = NAMED DEFERRAL ("deferred: M1 not landed") until the M1
+// gateway contract lands — no shadow path. Every channel's delivery OUTCOME is recorded on the
+// proclamation event; an unreachable channel is a named failure/deferral, never a silence.
+
+export interface PinnedSeat {
+  nodeId: string;
+  sessionName: string;
+  rigId: string;
+  rigName: string;
+  runtime: string | null;
+  pinnedModel: string;
+  /** Occupant generation (null = unknown; falls back to sessionName grain). */
+  generation: string | null;
+}
+
+export interface ChannelOutcome {
+  channel: "orchestrator" | "operator" | "oversight" | "slack";
+  target: string | null;
+  status: "delivered" | "failed" | "deferred";
+  detail?: string;
+}
+
+export interface ModelDivergenceProclamation {
+  nodeId: string;
+  sessionName: string;
+  rigId: string;
+  rigName: string;
+  runtime: string | null;
+  pinnedModel: string;
+  effectiveModel: string;
+  diagnosis: string | null;
+  detectedAt: string;
+  channels: ChannelOutcome[];
+}
+
+export interface ModelDivergenceMonitorDeps {
+  /** Every running canonical seat carrying a model pin (the detector's whole population). */
+  listPinnedSeats: () => PinnedSeat[];
+  /** Per-runtime effective read; null = signal not yet available (stay pending). */
+  readEffectiveModel: (seat: PinnedSeat) => string | null;
+  /** In-daemon send to a session (the watchdog delivery seam). */
+  sendToSession: (sessionName: string, message: string) => Promise<{ ok: boolean; error?: string }>;
+  /** The seat's own rig's orchestrator seats (session names). */
+  resolveOrchSeats: (rigName: string) => string[];
+  /** The configured operator seat (derived from config, never hardcoded). Null = unconfigured. */
+  resolveOperatorSeat: () => string | null;
+  /** The fleet oversight judgment seat (cross-host target), or null when unroutable. */
+  resolveOversightSeat: () => string | null;
+  /** Durable record of the proclamation + its per-channel outcomes. */
+  recordProclamation: (p: ModelDivergenceProclamation) => void;
+  /** Optional cause string when a rejection signal is known (diagnosis, NEVER the trigger). */
+  diagnose?: (seat: PinnedSeat) => string | null;
+  now?: () => Date;
+  warn?: (message: string) => void;
+}
+
+export const SLACK_DEFERRAL_LINE = "human-via-Slack: deferred: M1 not landed";
+
+export function formatProclamation(p: Omit<ModelDivergenceProclamation, "channels">): string {
+  return [
+    `MODEL DIVERGENCE on ${p.sessionName}: pinned=${p.pinnedModel} effective=${p.effectiveModel}`,
+    `The seat is RUNNING (graceful degrade held) but on a model nobody chose.`,
+    p.diagnosis ? `Diagnosis (informational): ${p.diagnosis}` : `Diagnosis: none captured — the divergence itself is the trigger.`,
+    `Detected ${p.detectedAt} (runtime ${p.runtime ?? "unknown"}, node ${p.nodeId}).`,
+  ].join("\n");
+}
+
+export class ModelDivergenceMonitor {
+  /** Generations already given their one verdict (match or proclaimed divergence). */
+  private readonly settled = new Set<string>();
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private readonly warn: (message: string) => void;
+
+  constructor(private readonly deps: ModelDivergenceMonitorDeps) {
+    this.warn = deps.warn ?? ((m) => console.warn(m));
+  }
+
+  startPolling(intervalMs: number): void {
+    if (this.timer) return;
+    this.timer = setInterval(() => {
+      void this.checkOnce().catch((err) => this.warn(`[model-divergence] check failed: ${err instanceof Error ? err.message : String(err)}`));
+    }, intervalMs);
+    this.timer.unref?.();
+  }
+
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  }
+
+  /** One pass over the pinned population. Returns the proclamations fired this pass (for tests). */
+  async checkOnce(): Promise<ModelDivergenceProclamation[]> {
+    const fired: ModelDivergenceProclamation[] = [];
+    for (const seat of this.deps.listPinnedSeats()) {
+      const key = `${seat.nodeId}:${seat.generation ?? seat.sessionName}`;
+      if (this.settled.has(key)) continue;
+      const effective = this.deps.readEffectiveModel(seat);
+      if (effective === null) continue; // signal not yet available — PENDING, never assumed
+      if (modelsMatch(seat.pinnedModel, effective)) {
+        this.settled.add(key);
+        continue;
+      }
+      const proclamation = await this.proclaim(seat, effective);
+      this.settled.add(key);
+      fired.push(proclamation);
+    }
+    return fired;
+  }
+
+  private async proclaim(seat: PinnedSeat, effectiveModel: string): Promise<ModelDivergenceProclamation> {
+    const detectedAt = (this.deps.now?.() ?? new Date()).toISOString();
+    const base = {
+      nodeId: seat.nodeId,
+      sessionName: seat.sessionName,
+      rigId: seat.rigId,
+      rigName: seat.rigName,
+      runtime: seat.runtime,
+      pinnedModel: seat.pinnedModel,
+      effectiveModel,
+      diagnosis: this.deps.diagnose?.(seat) ?? null,
+      detectedAt,
+    };
+    const message = formatProclamation(base);
+    const channels: ChannelOutcome[] = [];
+
+    const orchSeats = this.deps.resolveOrchSeats(seat.rigName);
+    if (orchSeats.length === 0) {
+      channels.push({ channel: "orchestrator", target: null, status: "failed", detail: `no orch seats found in rig ${seat.rigName}` });
+    } else {
+      for (const target of orchSeats) channels.push(await this.deliver("orchestrator", target, message));
+    }
+
+    const operator = this.deps.resolveOperatorSeat();
+    channels.push(operator
+      ? await this.deliver("operator", operator, message)
+      : { channel: "operator", target: null, status: "failed", detail: "no operator seat configured" });
+
+    const oversight = this.deps.resolveOversightSeat();
+    channels.push(oversight
+      ? await this.deliver("oversight", oversight, message)
+      : { channel: "oversight", target: null, status: "deferred", detail: "deferred: no oversight route registered from this host" });
+
+    // DS2 (founder-locked transport): Slack rides ONLY the M1 gateway contract. Until M1 lands this
+    // channel refuses loudly with its named deferral — never an improvised shadow path.
+    channels.push({ channel: "slack", target: null, status: "deferred", detail: SLACK_DEFERRAL_LINE });
+
+    const proclamation: ModelDivergenceProclamation = { ...base, channels };
+    try {
+      this.deps.recordProclamation(proclamation);
+    } catch (err) {
+      this.warn(`[model-divergence] proclamation record failed for ${seat.sessionName}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return proclamation;
+  }
+
+  private async deliver(channel: ChannelOutcome["channel"], target: string, message: string): Promise<ChannelOutcome> {
+    try {
+      const res = await this.deps.sendToSession(target, message);
+      return res.ok
+        ? { channel, target, status: "delivered" }
+        : { channel, target, status: "failed", detail: res.error ?? "send failed" };
+    } catch (err) {
+      return { channel, target, status: "failed", detail: err instanceof Error ? err.message : String(err) };
+    }
+  }
+}
+
+/** Pin comparison: exact, case-insensitive, after trimming — a pin names one model; anything else
+ *  is the divergence. Deliberately NO prefix/alias fuzziness: "the effective model" is whatever the
+ *  runtime records, and a pin that means a family should pin what the runtime reports. */
+export function modelsMatch(pinned: string, effective: string): boolean {
+  return pinned.trim().toLowerCase() === effective.trim().toLowerCase();
+}

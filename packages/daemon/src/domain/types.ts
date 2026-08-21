@@ -103,6 +103,19 @@ export interface Session {
 export type RigEvent =
   | { type: "event.delivery_poisoned"; poisonedSeq: number; error: string; payloadSha: string }
   | { type: "rig.created"; rigId: string }
+  // B8 / slice-07 A3 — the durable model-divergence proclamation record: effective vs pinned at the
+  // earliest reliable read, with every channel's delivery outcome (delivered/failed/deferred) named.
+  | {
+      type: "seat.model_divergence";
+      rigId: string;
+      nodeId: string;
+      sessionName: string;
+      runtime: string | null;
+      pinnedModel: string;
+      effectiveModel: string;
+      diagnosis: string | null;
+      channels: Array<{ channel: string; target: string | null; status: string; detail?: string }>;
+    }
   | { type: "rig.deleted"; rigId: string }
   | { type: "node.added"; rigId: string; nodeId: string; logicalId: string }
   | { type: "node.removed"; rigId: string; nodeId: string }
