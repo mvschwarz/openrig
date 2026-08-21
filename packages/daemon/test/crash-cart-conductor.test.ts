@@ -5,7 +5,7 @@
 // dep wraps findLatestRestoreUsable + RestoreOrchestrator.restore; verified by the
 // integration + door test).
 import { describe, it, expect } from "vitest";
-import { RestoreConductor, createDefaultRestoreRig, type PerRigOutcome } from "../src/domain/crash-cart-conductor.js";
+import { RestoreConductor, createDefaultRestoreRig, listRigsInKernelFirstOrder, type PerRigOutcome } from "../src/domain/crash-cart-conductor.js";
 
 // kernel FIRST, then the rest — the founder's order the conductor must honor.
 const rigsInOrder = () => [
@@ -115,5 +115,25 @@ describe("createDefaultRestoreRig — composes findLatestRestoreUsable + restore
     });
     const r = await restoreRig("alpha");
     expect(r.outcome).toBe("failed");
+  });
+});
+
+describe("listRigsInKernelFirstOrder (R2 — kernel supervisor first)", () => {
+  it("puts the kernel rig first, then the rest in listRigs order", () => {
+    const ordered = listRigsInKernelFirstOrder({
+      listRigs: () => [
+        { id: "r-alpha", name: "alpha" },
+        { id: "r-kernel", name: "kernel" },
+        { id: "r-beta", name: "beta" },
+      ],
+    });
+    expect(ordered.map((r) => r.rigId)).toEqual(["r-kernel", "r-alpha", "r-beta"]);
+    expect(ordered[0]!.isKernel).toBe(true);
+    expect(ordered.slice(1).every((r) => !r.isKernel)).toBe(true);
+  });
+
+  it("no kernel rig → all rigs, none flagged kernel (honest, not fabricated)", () => {
+    const ordered = listRigsInKernelFirstOrder({ listRigs: () => [{ id: "r-a", name: "a" }] });
+    expect(ordered).toEqual([{ rigId: "r-a", isKernel: false }]);
   });
 });

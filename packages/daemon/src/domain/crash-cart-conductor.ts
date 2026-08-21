@@ -96,3 +96,21 @@ export function createDefaultRestoreRig(
     return { outcome: outcomeResult, receiptRef };
   };
 }
+
+export interface RigOrderDeps {
+  /** All (non-archived) rigs on this host — the conductor's fleet scope, v1. */
+  listRigs: () => Array<{ id: string; name: string }>;
+}
+
+/** R2 — the founder's order: the KERNEL rig (the supervisor, name "kernel") restores
+ *  FIRST, then the remaining rigs in listRigs order. No kernel rig → all rigs, none
+ *  flagged kernel (honest, never fabricated). This is the `listRigsInOrder` source the
+ *  conductor consumes. */
+export function listRigsInKernelFirstOrder(
+  deps: RigOrderDeps,
+): Array<{ rigId: string; isKernel: boolean }> {
+  const all = deps.listRigs();
+  const kernel = all.filter((r) => r.name === "kernel");
+  const rest = all.filter((r) => r.name !== "kernel");
+  return [...kernel, ...rest].map((r) => ({ rigId: r.id, isKernel: r.name === "kernel" }));
+}
