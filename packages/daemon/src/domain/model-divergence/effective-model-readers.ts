@@ -137,9 +137,15 @@ export function readCodexEffectiveModel(rolloutPath: string, maxScanBytes = MAX_
       const model = newestCodexModel(lines);
       if (model !== null) return model;
       if (start === scanFloor) break;
-      // Monotonic progress guard: a single record wider than the whole window cannot be recovered
-      // (no such record observed; cap accepts a stale-or-null read there rather than looping).
-      end = Math.min(end - 1, start + droppedBytes + 1);
+      // Fragment-sized step-back — UNLESS the fragment fills the whole window (a single line wider
+      // than 512KB: real, r1 measured 44 such lines on this box, longest 8.2MB). In that case
+      // `start + droppedBytes + 1` would be ≥ end and the old `min(end - 1, …)` guard degraded to
+      // ONE-BYTE steps re-reading 512KB each — r1 measured a 6MB file grinding past 30s
+      // (extrapolated ~1.4TB of reads) on the exact deep-scan file the cap exists to serve. When
+      // fragment sizing yields no progress, step a FULL window instead: the giant line cannot be
+      // recovered whole either way (the accepted tradeoff), but the scan terminates.
+      const next = start + droppedBytes + 1;
+      end = next < end ? next : start;
     }
     return null;
   } catch {

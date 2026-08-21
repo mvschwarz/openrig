@@ -113,6 +113,22 @@ describe("readCodexEffectiveModel", () => {
   });
 });
 
+describe("readCodexEffectiveModel — window-wide lines", () => {
+  it("r1 regression: a single line WIDER THAN THE WINDOW terminates fast (full-window step), instead of 1-byte grinding", () => {
+    const p = tmp("r.jsonl", "");
+    appendFileSync(p, codexWorldState("gpt-5.6-luna") + "\n");
+    // One 2MB line (wider than the 512KB window) between the signal and EOF — the pathology needs
+    // a record bigger than the WINDOW, not bigger than the overlap.
+    appendFileSync(p, JSON.stringify({ type: "event_msg", filler: "x".repeat(2 * 1024 * 1024) }) + "\n");
+    for (let i = 0; i < 300; i++) appendFileSync(p, JSON.stringify({ type: "event_msg", filler: "x".repeat(1000) }) + "\n");
+    const t0 = Date.now();
+    const model = readCodexEffectiveModel(p);
+    const ms = Date.now() - t0;
+    expect(model).toBe("gpt-5.6-luna"); // the signal beyond the giant line is still reached
+    expect(ms).toBeLessThan(2_000); // pre-fix this ground 1-byte steps (r1: >30s on a real 6MB file)
+  });
+});
+
 describe("readTailLines", () => {
   it("drops the possibly-truncated first line when the read starts mid-file", () => {
     const p = tmp("f.txt", "aaaa\nbbbb\ncccc\n");
