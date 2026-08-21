@@ -1721,6 +1721,18 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     {
       const { ModelDivergenceMonitor } = await import("./domain/model-divergence/model-divergence-monitor.js");
       const { readClaudeEffectiveModel, readCodexEffectiveModel } = await import("./domain/model-divergence/effective-model-readers.js");
+      const { resolveLiveClaudeSessionId, resolveLiveCodexThreadId } = await import("./domain/model-divergence/current-generation-record.js");
+      const { defaultListProcesses } = await import("./domain/resume-metadata-refresher.js");
+      const { readCodexThreadIdFromCandidateHomes, defaultResolveHomeDirByPid } = await import("./domain/codex-thread-id.js");
+      const nodeOs = await import("node:os");
+      const nodePathMod = await import("node:path");
+      const nodeFs = await import("node:fs");
+      const currentGenDeps = {
+        getPanePid: async (sessionTarget: string) => tmuxAdapter.getPanePid ? tmuxAdapter.getPanePid(sessionTarget) : null,
+        listProcesses: defaultListProcesses,
+        readThreadIdByPid: async (pid: number) =>
+          readCodexThreadIdFromCandidateHomes(pid, [await defaultResolveHomeDirByPid(pid), nodeOs.homedir()]),
+      };
       const OVERSIGHT_SEAT = "watch-lead@oversight";
       const modelDivergenceMonitor = new ModelDivergenceMonitor({
         listPinnedSeats: () => {
@@ -1736,18 +1748,40 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
             .filter((row): row is typeof row & { sessionName: string } => row.sessionName !== null)
             .map((row) => ({ ...row, generation: sessionRegistry.currentOccupantGenerationForSession(row.sessionName) }));
         },
-        readEffectiveModel: (seat) => {
+        // D-a — the CURRENT GENERATION's record via the live pane process, never a name/token
+        // lookup alone: on the live specimen (dev.planner) the name-keyed sidecar AND the newest
+        // registry row were stale TOGETHER while the pane ran a different session — the old wiring
+        // read the old generation's transcript and MASKED a real divergence. The stored records are
+        // now only corroboration; the pane process is the join. Every no-answer is a named reason.
+        readEffectiveModel: async (seat) => {
           if (seat.runtime === "codex") {
-            const tokenRow = db.prepare("SELECT resume_token FROM sessions WHERE node_id = ? AND session_name = ? ORDER BY id DESC LIMIT 1")
-              .get(seat.nodeId, seat.sessionName) as { resume_token: string | null } | undefined;
-            const rollout = contextUsageStore.readCodexAndNormalize({ threadId: tokenRow?.resume_token ?? null, sessionName: seat.sessionName }).transcriptPath;
-            return rollout ? readCodexEffectiveModel(rollout) : null;
+            const live = await resolveLiveCodexThreadId(seat.sessionName, currentGenDeps);
+            if (!live.ok) return { ok: false as const, reason: live.reason };
+            const rollout = contextUsageStore.readCodexAndNormalize({ threadId: live.id, sessionName: seat.sessionName }).transcriptPath;
+            if (!rollout) return { ok: false as const, reason: `live thread ${live.id.slice(0, 8)}… has no readable rollout` };
+            const model = readCodexEffectiveModel(rollout);
+            return model ? { ok: true as const, model } : { ok: false as const, reason: `no model signal in the bounded read of ${rollout}` };
           }
           if (seat.runtime === "claude-code") {
-            const transcript = contextUsageStore.readAndNormalize(seat.sessionName).transcriptPath;
-            return transcript ? readClaudeEffectiveModel(transcript) : null;
+            const live = await resolveLiveClaudeSessionId(seat.sessionName, currentGenDeps);
+            if (!live.ok) return { ok: false as const, reason: live.reason };
+            const usage = contextUsageStore.readAndNormalize(seat.sessionName);
+            let transcript: string | null = null;
+            if (usage.sessionId === live.id && usage.transcriptPath) {
+              transcript = usage.transcriptPath; // sidecar corroborates the live occupant
+            } else if (usage.transcriptPath) {
+              // Sidecar is another generation's — derive the CURRENT transcript beside it (same
+              // seat, same cwd → same provider project dir). Stale-generation state stays named.
+              const candidate = nodePathMod.join(nodePathMod.dirname(usage.transcriptPath), `${live.id}.jsonl`);
+              if (nodeFs.existsSync(candidate)) transcript = candidate;
+              else return { ok: false as const, reason: `sidecar record belongs to session ${String(usage.sessionId).slice(0, 8)}…, live occupant is ${live.id.slice(0, 8)}…, and no transcript for the live session exists beside it (stale-generation record)` };
+            } else {
+              return { ok: false as const, reason: `no sidecar transcript path for ${seat.sessionName} to anchor the live session ${live.id.slice(0, 8)}…` };
+            }
+            const model = readClaudeEffectiveModel(transcript);
+            return model ? { ok: true as const, model } : { ok: false as const, reason: `no assistant turn yet in the live session's transcript ${transcript}` };
           }
-          return null; // no reliable effective read for this runtime yet — stays pending, never assumed
+          return { ok: false as const, reason: `runtime ${seat.runtime ?? "unknown"} has no effective-model reader yet` };
         },
         sendToSession: async (target, message) => {
           try {

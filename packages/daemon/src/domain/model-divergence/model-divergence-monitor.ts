@@ -51,11 +51,16 @@ export interface ModelDivergenceProclamation {
   channels: ChannelOutcome[];
 }
 
+/** D-a — the effective read carries a NAMED reason on every no-answer outcome, and may be async
+ *  (the current-generation join reads the live process table). */
+export type EffectiveModelRead = { ok: true; model: string } | { ok: false; reason: string };
+
 export interface ModelDivergenceMonitorDeps {
   /** Every running canonical seat carrying a model pin (the detector's whole population). */
   listPinnedSeats: () => PinnedSeat[];
-  /** Per-runtime effective read; null = signal not yet available (stay pending). */
-  readEffectiveModel: (seat: PinnedSeat) => string | null;
+  /** Per-runtime effective read via the CURRENT GENERATION's own record (D-a: never a name/token
+   *  lookup that can silently cross a generation boundary). No-answer = named reason = pending. */
+  readEffectiveModel: (seat: PinnedSeat) => Promise<EffectiveModelRead> | EffectiveModelRead;
   /** In-daemon send to a session (the watchdog delivery seam). */
   sendToSession: (sessionName: string, message: string) => Promise<{ ok: boolean; error?: string }>;
   /** The seat's own rig's orchestrator seats (session names). */
@@ -93,6 +98,7 @@ export class ModelDivergenceMonitor {
    *  silence is the failure class one layer under channel silence: a seat whose effective model
    *  never reads must be VISIBLE as never-checked, not skipped by a bare continue forever. */
   private readonly pendingPolls = new Map<string, number>();
+  private readonly pendingReasons = new Map<string, string>();
   private readonly pendingWarned = new Set<string>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly warn: (message: string) => void;
@@ -116,8 +122,8 @@ export class ModelDivergenceMonitor {
 
   /** Pinned generations currently pending (no effective read yet) with their poll counts — the
    *  observable face of detection-pending (tests + any future status surface). */
-  pendingSeats(): Array<{ key: string; polls: number }> {
-    return [...this.pendingPolls.entries()].map(([key, polls]) => ({ key, polls }));
+  pendingSeats(): Array<{ key: string; polls: number; reason: string | null }> {
+    return [...this.pendingPolls.entries()].map(([key, polls]) => ({ key, polls, reason: this.pendingReasons.get(key) ?? null }));
   }
 
   /** One pass over the pinned population. Returns the proclamations fired this pass (for tests). */
@@ -126,30 +132,31 @@ export class ModelDivergenceMonitor {
     for (const seat of this.deps.listPinnedSeats()) {
       const key = `${seat.nodeId}:${seat.generation ?? seat.sessionName}`;
       if (this.settled.has(key)) continue;
-      const effective = this.deps.readEffectiveModel(seat);
-      if (effective === null) {
+      const read = await this.deps.readEffectiveModel(seat);
+      if (!read.ok) {
         // PENDING, never assumed — and never invisible: past the threshold this generation is
         // named ONCE as never-checked (r1 measured real codex rollouts whose signal sat outside
         // the bounded read; without this line such a seat would be skipped silently forever).
         const polls = (this.pendingPolls.get(key) ?? 0) + 1;
         this.pendingPolls.set(key, polls);
+        this.pendingReasons.set(key, read.reason);
         if (polls >= PENDING_VISIBILITY_POLLS && !this.pendingWarned.has(key)) {
           this.pendingWarned.add(key);
           this.warn(
             `[model-divergence] ${seat.sessionName} (pin ${seat.pinnedModel}) has NO effective-model ` +
-            `read after ${polls} polls — this seat is pinned but UNCHECKED (signal absent from the ` +
-            `bounded record read, or runtime ${seat.runtime ?? "unknown"} has no reader). ` +
+            `read after ${polls} polls — this seat is pinned but UNCHECKED (${read.reason}). ` +
             `A divergence here would currently be invisible.`,
           );
         }
         continue;
       }
       this.pendingPolls.delete(key);
-      if (modelsMatch(seat.pinnedModel, effective)) {
+      this.pendingReasons.delete(key);
+      if (modelsMatch(seat.pinnedModel, read.model)) {
         this.settled.add(key);
         continue;
       }
-      const proclamation = await this.proclaim(seat, effective);
+      const proclamation = await this.proclaim(seat, read.model);
       this.settled.add(key);
       fired.push(proclamation);
     }

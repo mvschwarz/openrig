@@ -28,7 +28,7 @@ function makeMonitor(overrides?: Partial<ConstructorParameters<typeof ModelDiver
   const recorded: unknown[] = [];
   const monitor = new ModelDivergenceMonitor({
     listPinnedSeats: () => [SEAT],
-    readEffectiveModel: () => "gpt-5.4-mini", // specimen #1's silent fallback
+    readEffectiveModel: () => ({ ok: true as const, model: "gpt-5.4-mini" }), // specimen #1's silent fallback
     sendToSession: async (target, message) => { sent.push({ target, message }); return { ok: true }; },
     resolveOrchSeats: () => ["orch-lead@r", "orch-advisor@r"],
     resolveOperatorSeat: () => "operator-admin@kernel",
@@ -79,7 +79,7 @@ describe("ModelDivergenceMonitor — the cause-agnostic comparison", () => {
 
   it("MATCH settles the generation silently; PENDING (no signal yet) keeps checking until a read exists", async () => {
     let effective: string | null = null;
-    const { monitor, recorded } = makeMonitor({ readEffectiveModel: () => effective });
+    const { monitor, recorded } = makeMonitor({ readEffectiveModel: () => (effective ? { ok: true as const, model: effective } : { ok: false as const, reason: "no signal" }) });
 
     await monitor.checkOnce();
     expect(recorded).toHaveLength(0); // pending — never assumed, never settled
@@ -122,19 +122,22 @@ describe("ModelDivergenceMonitor — the cause-agnostic comparison", () => {
 
   it("r1 finding — OBSERVABLE PENDING: a pinned seat with no signal is named ONCE as unchecked after the threshold, never skipped silently forever", async () => {
     const warn = vi.fn();
-    const { monitor } = makeMonitor({ readEffectiveModel: () => null, warn });
+    const { monitor } = makeMonitor({ readEffectiveModel: () => ({ ok: false as const, reason: "sidecar record belongs to session aaaa…, live occupant is bbbb… (stale-generation record)" }), warn });
     for (let i = 0; i < PENDING_VISIBILITY_POLLS + 5; i++) await monitor.checkOnce();
     const unchecked = warn.mock.calls.filter((c) => String(c[0]).includes("UNCHECKED"));
     expect(unchecked).toHaveLength(1); // named once, not spammed
     expect(String(unchecked[0]![0])).toContain("dev-impl@r");
     expect(String(unchecked[0]![0])).toContain("gpt-5.1-codex-mini");
+    // D-a — the READER's named reason rides the warning and the pending surface verbatim.
+    expect(String(unchecked[0]![0])).toContain("stale-generation record");
     expect(monitor.pendingSeats()).toHaveLength(1);
     expect(monitor.pendingSeats()[0]!.polls).toBe(PENDING_VISIBILITY_POLLS + 5);
+    expect(monitor.pendingSeats()[0]!.reason).toContain("stale-generation");
   });
 
   it("a late-arriving signal clears the pending state and settles normally", async () => {
     let effective: string | null = null;
-    const { monitor, recorded } = makeMonitor({ readEffectiveModel: () => effective });
+    const { monitor, recorded } = makeMonitor({ readEffectiveModel: () => (effective ? { ok: true as const, model: effective } : { ok: false as const, reason: "no signal" }) });
     await monitor.checkOnce();
     expect(monitor.pendingSeats()).toHaveLength(1);
     effective = "gpt-5.1-codex-mini";
@@ -144,7 +147,7 @@ describe("ModelDivergenceMonitor — the cause-agnostic comparison", () => {
   });
 
   it("no pin = no detector involvement at all", async () => {
-    const read = vi.fn(() => "anything");
+    const read = vi.fn(() => ({ ok: true as const, model: "anything" }));
     const { monitor, recorded } = makeMonitor({ listPinnedSeats: () => [], readEffectiveModel: read });
     await monitor.checkOnce();
     expect(read).not.toHaveBeenCalled();
