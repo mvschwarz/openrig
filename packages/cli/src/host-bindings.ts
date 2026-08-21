@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, rmdirSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { getDefaultOpenRigPath } from "./openrig-compat.js";
 
@@ -80,6 +80,39 @@ export function loadHostBindings(path: string = defaultHostBindingsPath()): Host
   }
 }
 
+// r1 B4 follow-on (F2) — the read-modify-write needs a concurrency guard: 15 seats run
+// send/capture/doctor concurrently, and an interleaved write could erase a sibling's binding —
+// benign for a BINDING (TOFU re-learns) but not for a CONFLICT record, whose loss is the exact
+// silence the known_hosts lesson forbids. Guard: an mkdir-based advisory lock (atomic on every
+// platform) held across load→mutate→rename, with bounded busy-wait retries and a stale-lock
+// takeover. If the lock cannot be won inside the budget the write proceeds UNGUARDED (fail-open —
+// availability over the rare loss; the conflict re-records on the next contradicting observation).
+const LOCK_RETRIES = 40;
+const LOCK_RETRY_MS = 5;
+const LOCK_STALE_MS = 2_000;
+
+function acquireLock(lockDir: string): boolean {
+  for (let i = 0; i < LOCK_RETRIES; i++) {
+    try {
+      mkdirSync(lockDir);
+      return true;
+    } catch {
+      try {
+        if (Date.now() - statSync(lockDir).mtimeMs > LOCK_STALE_MS) rmdirSync(lockDir);
+      } catch {
+        /* raced away — retry */
+      }
+      const until = Date.now() + LOCK_RETRY_MS;
+      while (Date.now() < until) { /* bounded busy-wait: sync API, sub-ms slices */ }
+    }
+  }
+  return false;
+}
+
+function releaseLock(lockDir: string): void {
+  try { rmdirSync(lockDir); } catch { /* best-effort */ }
+}
+
 export type HostObservationOutcome =
   | { outcome: "bound"; binding: HostBinding }
   | { outcome: "confirmed"; binding: HostBinding }
@@ -98,27 +131,37 @@ export function recordHostObservation(args: {
 }): HostObservationOutcome {
   const path = args.path ?? defaultHostBindingsPath();
   const at = (args.now ?? (() => new Date()))().toISOString();
+  mkdirSync(dirname(path), { recursive: true });
+  const lockDir = `${path}.lock`;
+  const locked = acquireLock(lockDir);
+  try {
+    return recordUnderLock(args.alias, args.observedHostId, at, path);
+  } finally {
+    if (locked) releaseLock(lockDir);
+  }
+}
+
+function recordUnderLock(alias: string, observedHostId: string, at: string, path: string): HostObservationOutcome {
   const file = loadHostBindings(path);
-  const existing = file.bindings[args.alias];
+  const existing = file.bindings[alias];
 
   let result: HostObservationOutcome;
   if (!existing) {
-    const binding: HostBinding = { hostId: args.observedHostId, firstObservedAt: at, lastObservedAt: at };
-    file.bindings[args.alias] = binding;
+    const binding: HostBinding = { hostId: observedHostId, firstObservedAt: at, lastObservedAt: at };
+    file.bindings[alias] = binding;
     result = { outcome: "bound", binding };
-  } else if (existing.hostId === args.observedHostId) {
+  } else if (existing.hostId === observedHostId) {
     const binding: HostBinding = { ...existing, lastObservedAt: at };
     // A re-observation of the ORIGINAL id after a recorded conflict does not clear the conflict —
     // a flapping identity is more alarming than a stable contradiction, not less.
-    file.bindings[args.alias] = binding;
+    file.bindings[alias] = binding;
     result = { outcome: "confirmed", binding };
   } else {
-    const binding: HostBinding = { ...existing, conflict: { hostId: args.observedHostId, observedAt: at } };
-    file.bindings[args.alias] = binding;
+    const binding: HostBinding = { ...existing, conflict: { hostId: observedHostId, observedAt: at } };
+    file.bindings[alias] = binding;
     result = { outcome: "conflict", binding };
   }
 
-  mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}`;
   writeFileSync(tmp, JSON.stringify(file, null, 2) + "\n", "utf-8");
   renameSync(tmp, path);

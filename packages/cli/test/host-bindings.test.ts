@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadHostBindings, recordHostObservation, describeBindingConflict } from "../src/host-bindings.js";
+import { mkdirSync as fs2Mkdir, utimesSync as fs2Utimes } from "node:fs";
 import { resolveHost, type HostRegistry } from "../src/host-registry.js";
 import { resolveCrossHostTarget } from "../src/cross-host-target.js";
 
@@ -230,6 +231,58 @@ describe("doctorLegs — Source-1 learning from the healthz body already in hand
       httpGet: async () => ({ status: 200, body: JSON.stringify({ selfHostId: "host-84c37990" }) }),
     } as never);
     expect(rows.find((r) => r.step === "host-identity-binding")).toBeUndefined();
+  });
+});
+
+describe("F2 — concurrency guard: conflict records survive concurrent writers", () => {
+  it("sequential writers on different aliases both land (baseline)", () => {
+    const path = tmpPath();
+    recordHostObservation({ alias: "a-host", observedHostId: "host-aaaa", now: fixedNow, path });
+    recordHostObservation({ alias: "b-host", observedHostId: "host-bbbb", now: fixedNow, path });
+    const loaded = loadHostBindings(path);
+    expect(loaded.bindings["a-host"]?.hostId).toBe("host-aaaa");
+    expect(loaded.bindings["b-host"]?.hostId).toBe("host-bbbb");
+  });
+
+  it("REAL multi-process contention: N parallel writers, every binding and the conflict record survive", async () => {
+    const path = tmpPath();
+    const { spawn } = await import("node:child_process");
+    // CONTENTION SMOKE, not a deterministic discriminator: the pre-guard loss requires a specific
+    // interleave, so a green run does not prove the guard alone — the guard's serialization claim
+    // rests on mkdir's atomicity; this proves the locked path survives real parallel writers.
+    // Seed a binding, then race 6 child processes: 5 write distinct aliases, 1 writes a
+    // CONTRADICTING id for the seeded alias.
+    recordHostObservation({ alias: "seed", observedHostId: "host-orig", now: fixedNow, path });
+    const runner = (alias: string, id: string) => new Promise<void>((resolve, reject) => {
+      const child = spawn(process.execPath, ["--import", "tsx", "-e",
+        `import { recordHostObservation } from ${JSON.stringify(new URL("../src/host-bindings.ts", import.meta.url).href)};` +
+        `recordHostObservation({ alias: ${JSON.stringify(alias)}, observedHostId: ${JSON.stringify(id)}, path: ${JSON.stringify(path)} });`,
+      ], { cwd: new URL("..", import.meta.url).pathname, stdio: "ignore" });
+      child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`writer ${alias} exited ${code}`))));
+      child.on("error", reject);
+    });
+    await Promise.all([
+      runner("w1", "host-1111"), runner("w2", "host-2222"), runner("w3", "host-3333"),
+      runner("w4", "host-4444"), runner("w5", "host-5555"), runner("seed", "host-CONTRA"),
+    ]);
+    const loaded = loadHostBindings(path);
+    for (const [alias, id] of [["w1","host-1111"],["w2","host-2222"],["w3","host-3333"],["w4","host-4444"],["w5","host-5555"]] as const) {
+      expect(loaded.bindings[alias]?.hostId, alias).toBe(id);
+    }
+    expect(loaded.bindings["seed"]?.hostId).toBe("host-orig"); // never silently adopted
+    expect(loaded.bindings["seed"]?.conflict?.hostId).toBe("host-CONTRA"); // the record SURVIVED the race
+  }, 30_000);
+
+  it("a stale lock (crashed writer) is taken over, not waited on forever", () => {
+    const path = tmpPath();
+    const lockDir = `${path}.lock`;
+    fs2Mkdir(lockDir);
+    // Backdate the lock beyond the stale threshold.
+    const old = Date.now() / 1000 - 10;
+    fs2Utimes(lockDir, old, old);
+    const out = recordHostObservation({ alias: "x", observedHostId: "host-xxxx", now: fixedNow, path });
+    expect(out.outcome).toBe("bound");
+    expect(loadHostBindings(path).bindings["x"]?.hostId).toBe("host-xxxx");
   });
 });
 
