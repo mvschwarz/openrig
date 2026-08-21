@@ -73,7 +73,7 @@ describe("SeatHandoverService", () => {
     readSidecar = vi.fn(() => ({ ok: true, data: { session_id: "claude-sid-123" } }));
     captureCodexThreadId = vi.fn(async () => "codex-discovered-tok");
     invalidateRetiringOccupant = vi.fn();
-    resolvePredecessorRecap = vi.fn(() => null);
+    resolvePredecessorRecap = vi.fn(() => ({ unavailableReason: "test default: no record" }));
     service = newService();
   });
 
@@ -671,17 +671,30 @@ describe("SeatHandoverService", () => {
     expect(packet.toLowerCase()).toContain("honest-degraded");
   });
 
-  it("recap leg: omits the recap sections honestly when no predecessor record resolves (no fabrication)", async () => {
+  it("recap leg (B16): an unresolved recap rides the packet as a NAMED unavailable line, never a silent omission", async () => {
     seedSeat({ runtime: "codex" });
-    resolvePredecessorRecap.mockReturnValue(null);
+    resolvePredecessorRecap.mockReturnValue({ unavailableReason: "no resume token recorded for the departing codex session" });
 
     const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
 
     expect(result.ok).toBe(true);
     const [, packet] = sendText.mock.calls[0]!;
     expect(packet).not.toContain("Predecessor recap (replayed from record");
+    expect(packet).toContain("--- Predecessor recap unavailable: no resume token recorded for the departing codex session ---");
     // the base packet still delivers the captured predecessor terminal.
     expect(packet).toContain("predecessor screen tail");
+  });
+
+  it("recap leg (B16): the resolver runs BEFORE the successor launches (the successor overwrites the name-keyed sidecar)", async () => {
+    seedSeat({ runtime: "codex" });
+    resolvePredecessorRecap.mockReturnValue({ recap: [{ role: "user", content: "pre-launch read" }], recordPath: "/p/a.jsonl" });
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
+
+    expect(result.ok).toBe(true);
+    const resolveOrder = resolvePredecessorRecap.mock.invocationCallOrder[0]!;
+    const launchOrder = launchHarness.mock.invocationCallOrder[0]!;
+    expect(resolveOrder).toBeLessThan(launchOrder);
   });
 
   it.each([

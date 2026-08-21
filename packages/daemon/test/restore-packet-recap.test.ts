@@ -46,6 +46,28 @@ describe("buildRestorePacket — recap + receipt (labeled-from-record)", () => {
     expect(packet).toContain("Seat: dev.driver@my-rig");
   });
 
+  it("B16: an unavailable recap renders its NAMED reason as a labeled line (never a silent omission)", () => {
+    const packet = buildRestorePacket({
+      ...base,
+      recap: [],
+      recordPath: null,
+      recapUnavailableReason: "the name-keyed context sidecar is missing or carries no transcript_path",
+    });
+    expect(packet).toContain("--- Predecessor recap unavailable: the name-keyed context sidecar is missing or carries no transcript_path ---");
+    expect(packet).not.toContain("scrollback"); // the fence holds on the unavailable line too
+  });
+
+  it("B16: a RESOLVED recap suppresses the unavailable line even if a reason was passed", () => {
+    const packet = buildRestorePacket({
+      ...base,
+      recap: [{ role: "user", content: "x" }],
+      recordPath: "/p/abc.jsonl",
+      recapUnavailableReason: "should not render",
+    });
+    expect(packet).toContain("Predecessor recap (replayed from record");
+    expect(packet).not.toContain("recap unavailable");
+  });
+
   it("stays backward-compatible when recap/recordPath are omitted entirely", () => {
     const packet = buildRestorePacket(base);
     expect(packet).toContain("Seat: dev.driver@my-rig");

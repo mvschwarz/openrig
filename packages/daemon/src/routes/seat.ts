@@ -60,7 +60,12 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
       if (!store) return undefined;
       const db = rigRepo.db;
       return makePredecessorRecapResolver({
-        readClaudeTranscriptPath: (sessionName) => store.readAndNormalize(sessionName).transcriptPath,
+        // B16 — session_id rides the read so the resolver can verify the name-keyed sidecar is the
+        // PREDECESSOR's (canonical-name reuse means a booted successor overwrites it).
+        readClaudeRecord: (sessionName) => {
+          const usage = store.readAndNormalize(sessionName);
+          return { transcriptPath: usage.transcriptPath, sessionId: usage.sessionId ?? null };
+        },
         readCodexTranscriptPath: (args) => store.readCodexAndNormalize(args).transcriptPath,
         lookupResumeToken: (nodeId, sessionName) => {
           const row = db

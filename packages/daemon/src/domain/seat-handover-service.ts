@@ -26,13 +26,17 @@ export interface PredecessorRecap {
   recap: JsonlExchange[];
   recordPath: string;
 }
-/** Resolve the predecessor's bounded recap for the successor boot packet, or null when no record is
- *  available (honest-degraded — the recap sections are simply omitted, never fabricated). */
+/** B16 — every no-recap outcome is NAMED: the resolver returns either the recap or the reason it
+ *  is unavailable, and the packet prints that reason (honest-degraded means labeled, not silent). */
+export type PredecessorRecapResolution = PredecessorRecap | { unavailableReason: string };
+
+/** Resolve the predecessor's bounded recap for the successor boot packet, or a named unavailable
+ *  verdict (never a silent null — the packet renders the reason). */
 export type PredecessorRecapResolver = (args: {
   nodeId: string;
   runtime: string | null;
   sessionName: string;
-}) => PredecessorRecap | null;
+}) => PredecessorRecapResolution;
 
 export interface SeatHandoverMutationResult {
   ok: true;
@@ -320,6 +324,19 @@ export class SeatHandoverService {
     const capturedContext = await this.captureDepartingContext(latestSession.session_name);
     const predecessorGeneration = this.sessionRegistry.currentOccupantTenure(node.id)?.generationUuid;
 
+    // 1b. B16 — resolve the predecessor's from-record recap NOW, before the successor exists: the
+    // claude sidecar is keyed by SESSION NAME and the cutover reuses the canonical name, so once the
+    // successor harness boots it overwrites the very sidecar the resolver reads (the live defect:
+    // the resolver ran post-launch, read the successor's fresh sidecar, and honestly found nothing —
+    // silently). Resolution is a pure read; nothing downstream of it depends on the launch.
+    const rawRecapResolution = this.predecessorRecapResolver
+      ? this.predecessorRecapResolver({ nodeId: node.id, runtime: node.runtime, sessionName: latestSession.session_name })
+      : undefined;
+    // Defensive against the pre-B16 resolver contract (null = silent no-recap): an injected legacy
+    // resolver must not crash the handover — its null becomes a named unavailable like every other.
+    const predecessorRecapResolution: PredecessorRecapResolution =
+      rawRecapResolution ?? { unavailableReason: this.predecessorRecapResolver ? "recap resolver returned no result" : "no recap resolver wired on this daemon" };
+
     // 2. Respawn the successor INTO the retiree's pane and launch it into a LIVE, READY agent (§2.1b
     //    seam, B1): resolve departing pane -> respawn-pane in place (preserved name) -> real runtime
     //    startup (launchHarness + readiness) -> upsertDiscoveredSession. The successor is a live agent,
@@ -362,21 +379,17 @@ export class SeatHandoverService {
     //    discovered is operator-prepared and needs no delivery.
     let contextDelivered = false;
     if (parsed.source.mode === "fresh") {
-      // Resolve the predecessor's bounded from-record recap (claude transcript_path / codex
-      // rollout_path → parseJsonlExchanges) so the successor boots with a labeled recap. Absent →
-      // the recap sections are omitted honestly.
-      const predecessorRecap = this.predecessorRecapResolver?.({
-        nodeId: node.id,
-        runtime: node.runtime,
-        sessionName: latestSession.session_name,
-      }) ?? null;
+      // B16 — the recap was resolved at step 1b (pre-launch); an unavailable verdict rides the
+      // packet as a NAMED line, never a silent omission.
+      const resolved = "recap" in predecessorRecapResolution ? predecessorRecapResolution : null;
       const delivered = await this.deliverRestorePacket(launch.tmuxSession, {
         seatRef: input.seatRef,
         reason,
         departingSession: latestSession.session_name,
         capturedContext,
-        recap: predecessorRecap?.recap,
-        recordPath: predecessorRecap?.recordPath,
+        recap: resolved?.recap,
+        recordPath: resolved?.recordPath,
+        recapUnavailableReason: resolved ? undefined : (predecessorRecapResolution as { unavailableReason: string }).unavailableReason,
       });
       if (!delivered.ok) {
         // Partial: the successor is live in the preserved pane but the context packet never landed —
@@ -620,6 +633,8 @@ export class SeatHandoverService {
       /** The predecessor's bounded from-record recap + record path (omitted when unresolved). */
       recap?: JsonlExchange[];
       recordPath?: string;
+      /** B16 — when the recap did not resolve, the NAMED reason (rendered, never silent). */
+      recapUnavailableReason?: string;
     },
   ): Promise<{ ok: true } | { ok: false; message: string }> {
     const packet = buildRestorePacket({ ...info, handoverAt: this.now().toISOString() });
@@ -901,6 +916,9 @@ export function buildRestorePacket(info: {
   recap?: Array<{ role: string; content: string }>;
   /** The predecessor provider record path (claude transcript_path / codex rollout_path). */
   recordPath?: string | null;
+  /** B16 — the NAMED reason when no recap resolved; rendered as its own labeled line so the absence
+   *  is visible in the pane (honest-degraded means labeled, not silent). */
+  recapUnavailableReason?: string;
 }): string {
   const captured = info.capturedContext.trim();
   const lines = [
@@ -913,8 +931,10 @@ export function buildRestorePacket(info: {
     "--- Predecessor terminal (captured) ---",
     captured.length > 0 ? captured : "(no capture available)",
   ];
-  // The from-record recap + receipt, ONLY when a record is actually available (no fabrication —
-  // an absent record simply omits the sections).
+  // The from-record recap + receipt, ONLY when a record is actually available (no fabrication).
+  // B16 — an absent recap is no longer a silent omission: the packet names the reason, so a
+  // successor (and the operator reading the pane) can tell "nothing resolved because X" from
+  // "the feature never ran".
   if (info.recap && info.recap.length > 0 && info.recordPath) {
     lines.push(
       "",
@@ -923,6 +943,11 @@ export function buildRestorePacket(info: {
       "",
       `Predecessor record: ${info.recordPath}`,
       "  (honest-degraded: durable, true, and grep-able — not human-scrollable; the recap above is replayed from it)",
+    );
+  } else if (info.recapUnavailableReason) {
+    lines.push(
+      "",
+      `--- Predecessor recap unavailable: ${info.recapUnavailableReason} ---`,
     );
   }
   return lines.join("\n");
