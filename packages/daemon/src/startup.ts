@@ -1721,7 +1721,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     {
       const { ModelDivergenceMonitor } = await import("./domain/model-divergence/model-divergence-monitor.js");
       const { readClaudeEffectiveModel, readCodexEffectiveModel } = await import("./domain/model-divergence/effective-model-readers.js");
-      const { resolveLiveClaudeSessionId, resolveLiveCodexThreadId } = await import("./domain/model-divergence/current-generation-record.js");
+      const { paneClaudeSessionIdArgument, selectLiveClaudeRecord, resolveLiveCodexThreadId } = await import("./domain/model-divergence/current-generation-record.js");
       const { defaultListProcesses } = await import("./domain/resume-metadata-refresher.js");
       const { readCodexThreadIdFromCandidateHomes, defaultResolveHomeDirByPid } = await import("./domain/codex-thread-id.js");
       const nodeOs = await import("node:os");
@@ -1763,23 +1763,29 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
             return model ? { ok: true as const, model } : { ok: false as const, reason: `no model signal in the bounded read of ${rollout}` };
           }
           if (seat.runtime === "claude-code") {
-            const live = await resolveLiveClaudeSessionId(seat.sessionName, currentGenDeps);
-            if (!live.ok) return { ok: false as const, reason: live.reason };
+            // D-a — RECORD-LIVENESS selection: no single pointer (sidecar, registry row, pane
+            // argument) is generation-true; the transcript being WRITTEN is. Gather all candidate
+            // ids, anchor paths beside the sidecar's project dir, pick the freshest-mtime record.
             const usage = contextUsageStore.readAndNormalize(seat.sessionName);
-            let transcript: string | null = null;
-            if (usage.sessionId === live.id && usage.transcriptPath) {
-              transcript = usage.transcriptPath; // sidecar corroborates the live occupant
-            } else if (usage.transcriptPath) {
-              // Sidecar is another generation's — derive the CURRENT transcript beside it (same
-              // seat, same cwd → same provider project dir). Stale-generation state stays named.
-              const candidate = nodePathMod.join(nodePathMod.dirname(usage.transcriptPath), `${live.id}.jsonl`);
-              if (nodeFs.existsSync(candidate)) transcript = candidate;
-              else return { ok: false as const, reason: `sidecar record belongs to session ${String(usage.sessionId).slice(0, 8)}…, live occupant is ${live.id.slice(0, 8)}…, and no transcript for the live session exists beside it (stale-generation record)` };
-            } else {
-              return { ok: false as const, reason: `no sidecar transcript path for ${seat.sessionName} to anchor the live session ${live.id.slice(0, 8)}…` };
-            }
-            const model = readClaudeEffectiveModel(transcript);
-            return model ? { ok: true as const, model } : { ok: false as const, reason: `no assistant turn yet in the live session's transcript ${transcript}` };
+            const projectDir = usage.transcriptPath ? nodePathMod.dirname(usage.transcriptPath) : null;
+            const pathFor = (id: string | null | undefined): string | null =>
+              id && projectDir ? nodePathMod.join(projectDir, `${id}.jsonl`) : null;
+            const tokenRow = db.prepare("SELECT resume_token FROM sessions WHERE node_id = ? AND session_name = ? ORDER BY id DESC LIMIT 1")
+              .get(seat.nodeId, seat.sessionName) as { resume_token: string | null } | undefined;
+            const paneArg = await paneClaudeSessionIdArgument(seat.sessionName, currentGenDeps);
+            const selection = selectLiveClaudeRecord(
+              [
+                { source: "sidecar", id: usage.sessionId ?? "", path: usage.transcriptPath ?? pathFor(usage.sessionId) },
+                { source: "registry", id: tokenRow?.resume_token ?? "", path: pathFor(tokenRow?.resume_token) },
+                { source: "pane-argument", id: paneArg.ok ? paneArg.id : "", path: pathFor(paneArg.ok ? paneArg.id : null) },
+              ],
+              (path) => { try { return nodeFs.statSync(path).mtimeMs; } catch { return null; } },
+            );
+            if (!selection.ok) return { ok: false as const, reason: selection.reason };
+            const model = readClaudeEffectiveModel(selection.path);
+            return model
+              ? { ok: true as const, model }
+              : { ok: false as const, reason: `no assistant turn yet in the live record ${selection.path} (selected by liveness from ${selection.source})` };
           }
           return { ok: false as const, reason: `runtime ${seat.runtime ?? "unknown"} has no effective-model reader yet` };
         },

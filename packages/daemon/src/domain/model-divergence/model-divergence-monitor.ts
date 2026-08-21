@@ -221,9 +221,18 @@ export class ModelDivergenceMonitor {
   }
 }
 
-/** Pin comparison: exact, case-insensitive, after trimming — a pin names one model; anything else
- *  is the divergence. Deliberately NO prefix/alias fuzziness: "the effective model" is whatever the
- *  runtime records, and a pin that means a family should pin what the runtime reports. */
+/** Pin comparison: exact case-insensitive match, OR the pin as a WHOLE HYPHEN-TOKEN of the
+ *  effective id. ~~"Deliberately NO prefix/alias fuzziness"~~ — REVERSED on live data (D-a): the
+ *  fleet's real pins are SPEC aliases (nodes.model carries "fable"; the adapter passes the alias to
+ *  the runtime, which accepts it and then reports the full id "claude-fable-5"). Under exact-match
+ *  the detector would proclaim divergence on every healthy pinned claude seat — a false-positive
+ *  storm the moment the claude leg works. Token containment keeps the comparison narrow: "fable"
+ *  matches claude-fable-5; "opus" matches claude-opus-5; full-id pins (gpt-5.1-codex-mini) still
+ *  require the exact id; a pin like "5" cannot match (numeric-only tokens are excluded). */
 export function modelsMatch(pinned: string, effective: string): boolean {
-  return pinned.trim().toLowerCase() === effective.trim().toLowerCase();
+  const pin = pinned.trim().toLowerCase();
+  const eff = effective.trim().toLowerCase();
+  if (pin === eff) return true;
+  if (/^\d+(\.\d+)*$/.test(pin)) return false; // a bare version number is not an alias
+  return eff.split("-").includes(pin);
 }

@@ -162,10 +162,21 @@ describe("ModelDivergenceMonitor — the cause-agnostic comparison", () => {
   });
 });
 
-describe("modelsMatch", () => {
-  it("exact case-insensitive trim; no alias fuzziness", () => {
+describe("modelsMatch — exact id OR pin-as-whole-token (the fleet pins ALIASES: nodes.model='fable')", () => {
+  it("exact ids still match case-insensitively", () => {
     expect(modelsMatch("gpt-5.6-luna", " GPT-5.6-Luna ")).toBe(true);
-    expect(modelsMatch("gpt-5.6-luna", "gpt-5.6")).toBe(false);
     expect(modelsMatch("claude-fable-5", "claude-fable-5")).toBe(true);
+  });
+
+  it("a SPEC alias pin matches the runtime's full id (the live false-positive class this kills)", () => {
+    expect(modelsMatch("fable", "claude-fable-5")).toBe(true); // dev.planner, measured live
+    expect(modelsMatch("opus", "claude-opus-5")).toBe(true);
+  });
+
+  it("genuine divergence still fails: wrong family, partial ids, bare version numbers", () => {
+    expect(modelsMatch("fable", "claude-opus-5")).toBe(false); // the real divergence shape
+    expect(modelsMatch("gpt-5.6-luna", "gpt-5.6")).toBe(false);
+    expect(modelsMatch("gpt-5.1-codex-mini", "gpt-5.4-mini")).toBe(false);
+    expect(modelsMatch("5", "claude-fable-5")).toBe(false); // numeric-only never aliases
   });
 });

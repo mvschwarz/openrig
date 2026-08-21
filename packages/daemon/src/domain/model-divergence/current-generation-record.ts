@@ -1,22 +1,25 @@
-// D-a (B8-family) — resolve the CURRENT OCCUPANT's provider record via the LIVE PANE PROCESS.
+// D-a (B8-family) — resolve the CURRENT OCCUPANT's provider record by RECORD-LIVENESS.
 //
-// Third cross-generation-keying specimen tonight forced this: name/token-keyed lookups silently
-// cross generation boundaries (B16's sidecar overwrite, slice-13's resume_type carry-forward, and
-// now the detector itself quoting an OLD generation's transcript — masking a REAL divergence on
-// dev.planner, which ran claude-opus-5 unpinned while the reader proclaimed a stale alias).
+// Fourth cross-generation-keying lesson tonight, and this module's own first cut was specimen #4:
+// ~~"the pane's process tree is the only record that IS the occupant"~~ — WRONG, withdrawn by the
+// author before review. Measured on dev.planner: the pane process's --session-id ARGUMENT pointed
+// at a transcript dormant for a day (reading an old model), while the sidecar/registry id matched
+// the transcript being APPENDED that minute (reading the pinned model). Claude rolls session ids
+// internally — the launch argument records what was LAUNCHED; hooks report what RUNS (the slice-13
+// lesson, met again from the other side). On the B16 specimen the SIDECAR was the stale one. So no
+// single pointer — argument, sidecar, or registry row — is generation-true.
 //
-// Why the pane process is the join, measured live on the specimen before building:
-//   - occupant_tenures.native_session_id_at_boot is NULL on every tenure on this box (the ledger
-//     field the fix shape named is unpopulated — flagged upstream; when it fills, it becomes a
-//     cheaper first check, not a replacement for this).
-//   - the name-keyed sidecar AND the newest sessions-registry row were BOTH stale together
-//     (sidecar session_id 1cb8cd8b == newest row's token, while the live pane process ran
-//     --session-id daaeb7b4). Stored records can agree with each other and still not be the
-//     occupant. The pane's process tree is the only record that IS the occupant.
+// What IS generation-true: the record being WRITTEN. selectLiveClaudeRecord gathers every candidate
+// session id this seat is associated with (sidecar, newest registry hook row, pane argument),
+// resolves each to its transcript, and selects the freshest-mtime one. Codex differs: the
+// pid-to-logs join reads the live process's OWN log rows, so it needs no selection.
 //
-// All process reads are async (the F1/B12 discipline): pane pid via tmux, one bounded process-table
-// sample, argument parse. Every failure is a NAMED reason, never a silent fall-through to a stored
-// (possibly stale) record — the ruled shape: honest INDETERMINATE over a masked old-gen read.
+// Also measured: occupant_tenures.native_session_id_at_boot is NULL on every tenure on this box
+// (the ledger join the fix shape named is unpopulated — flagged upstream; when backfilled it joins
+// the candidate set, it does not replace liveness).
+//
+// All process reads are async (the F1/B12 discipline). Every no-answer is a NAMED reason, never a
+// silent fall-through — the ruled shape: honest INDETERMINATE over a masked stale read.
 
 export interface ProcessRow {
   pid: number;
@@ -64,9 +67,11 @@ function commandBasenameIs(name: string): (command: string) => boolean {
   });
 }
 
-/** The live claude occupant's session uuid, read from its own launch arguments (--session-id /
- *  --resume <uuid> forms). The process IS the generation; no stored record can go stale under it. */
-export async function resolveLiveClaudeSessionId(
+/** The pane process's claude session-id LAUNCH ARGUMENT — one CANDIDATE, never the answer alone:
+ *  measured on the live specimen, claude rolls session ids internally (the slice-13 lesson — the
+ *  argument records what was LAUNCHED; hooks report what RUNS), so the argument can be the stale
+ *  pointer while the sidecar is current. Feed it into selectLiveClaudeRecord with the others. */
+export async function paneClaudeSessionIdArgument(
   sessionTarget: string,
   deps: Pick<CurrentGenerationDeps, "getPanePid" | "listProcesses">,
 ): Promise<CurrentRecordResolution> {
@@ -81,6 +86,46 @@ export async function resolveLiveClaudeSessionId(
     if (match?.[1]) return { ok: true, id: match[1] };
   }
   return { ok: false, reason: `live claude process under ${sessionTarget} carries no --session-id/--resume argument` };
+}
+
+export interface ClaudeRecordCandidate {
+  /** Where this candidate id came from (sidecar / registry / pane-argument) — rides the verdict. */
+  source: string;
+  id: string;
+  /** Absolute transcript path for the id, when derivable. */
+  path: string | null;
+}
+
+export type ClaudeRecordSelection =
+  | { ok: true; id: string; path: string; source: string; mtimeMs: number }
+  | { ok: false; reason: string };
+
+/** D-a (redesigned after the first candidate inverted the mask): the CURRENT claude record is the
+ *  one being WRITTEN — record-liveness, not any single stored pointer. Measured on the live
+ *  specimen: sidecar id and registry token agreed with the actively-appended transcript while the
+ *  pane launch ARGUMENT pointed at a file dormant for a day; on the B16 specimen the sidecar was
+ *  the stale one. No single source is generation-true; the freshest-mtime transcript among the
+ *  seat's candidate ids is. Zero readable candidates = named INDETERMINATE, never a guess. */
+export function selectLiveClaudeRecord(
+  candidates: ClaudeRecordCandidate[],
+  statMtimeMs: (path: string) => number | null,
+): ClaudeRecordSelection {
+  const seen = new Set<string>();
+  const scored: Array<{ id: string; path: string; source: string; mtimeMs: number }> = [];
+  const dead: string[] = [];
+  for (const c of candidates) {
+    if (!c.id || seen.has(c.id)) continue;
+    seen.add(c.id);
+    if (!c.path) { dead.push(`${c.source}:${c.id.slice(0, 8)}… (no path)`); continue; }
+    const mtimeMs = statMtimeMs(c.path);
+    if (mtimeMs === null) { dead.push(`${c.source}:${c.id.slice(0, 8)}… (no file)`); continue; }
+    scored.push({ id: c.id, path: c.path, source: c.source, mtimeMs });
+  }
+  if (scored.length === 0) {
+    return { ok: false, reason: `no readable transcript for any candidate session (${dead.join(", ") || "no candidates"})` };
+  }
+  scored.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return { ok: true, ...scored[0]! };
 }
 
 /** The live codex occupant's thread id, via its own pid's log join — bypasses the stored resume
