@@ -1643,6 +1643,7 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
     .option("--on-behalf-of <human>", "Record the delegation: whose decision this stamp records (actor stays the real invoking session)")
     .option("--re-approve", "OPR.0.5.0.18 amend/re-stamp: supersede an existing stamp with a new reasoned attestation (prior preserved in the append-only audit log). Requires --reason.")
     .option("--reason <why>", "Why the stamp is being amended (required with --re-approve; recorded on the audit row)")
+    .option("--locked-artifacts <paths>", "PLAN-LOCK ONLY (--scope spec): comma-separated slice-relative paths naming the artifact set this lock freezes — replaces the derived default entirely. Each file must exist. Without it, a derivation that would freeze only a missing/scaffold PRD refuses.")
     .option("--json", "Machine-readable output")
     .action(async (target: string, opts: {
       mission?: string;
@@ -1651,6 +1652,7 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
       onBehalfOf?: string;
       reApprove?: boolean;
       reason?: string;
+      lockedArtifacts?: string;
       json?: boolean;
     }, command: Command) => {
       const out = makeStdout();
@@ -1677,6 +1679,18 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
             fact: "--reason was passed without --re-approve.",
             consequence: "A first-time approval carries no amendment reason; nothing was written.",
             action: "Drop --reason for a first approval, or add --re-approve to amend an existing stamp.",
+          });
+        }
+        // B14 — the explicit set is a PLAN-LOCK concept; on a delivery approval it
+        // would silently do nothing, and silence around lock content is the defect.
+        const lockedArtifactsList = typeof opts.lockedArtifacts === "string"
+          ? opts.lockedArtifacts.split(",").map((p) => p.trim()).filter((p) => p.length > 0)
+          : null;
+        if (lockedArtifactsList && (tier !== "slice" || opts.scope !== "spec")) {
+          throw new ScopeCliError({
+            fact: "--locked-artifacts applies only to a slice plan-lock (--scope spec).",
+            consequence: "Nothing was written.",
+            action: "Re-run with --scope spec, or drop the flag for a delivery/mission approval.",
           });
         }
         // P21: the approver is DERIVED from the seat env (X-OpenRig-Session, stamped by DaemonClient
@@ -1721,15 +1735,16 @@ function buildApproveCommand(tier: "slice" | "mission"): Command {
           onBehalfOf: opts.onBehalfOf ?? null,
           reApprove: opts.reApprove === true,
           reason: opts.reason ?? null,
+          lockedArtifacts: lockedArtifactsList,
         });
         if (res.status >= 400) {
-          const err = res.data as { error?: string; message?: string };
+          const err = res.data as { error?: string; message?: string; action?: string };
           throw new ScopeCliError({
             fact: `Approve failed (${err.error ?? res.status}): ${err.message ?? "unknown error"}.`,
             consequence: "No stamp and no audit row were left behind (no half-stamp).",
             action: err.error === "already_approved"
               ? 'The scope already carries this stamp; amend it with --re-approve --reason "<why>" (new attestation; prior preserved in the audit log).'
-              : "Fix the named issue and re-run.",
+              : err.action ?? "Fix the named issue and re-run.",
           });
         }
         const data = res.data;

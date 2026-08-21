@@ -20,7 +20,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import YAML from "yaml";
 import type { MissionControlActionLog } from "../mission-control/mission-control-action-log.js";
-import { derivePlanLockArtifacts } from "./plan-lock-artifacts.js";
+import { derivePlanLockArtifacts, isContentlessPlanLockSet } from "./plan-lock-artifacts.js";
+import { sliceRelativeMediaPath } from "../review/compose.js";
 import { NODE_FILE_PRECEDENCE, resolveNodeFile } from "./node-file.js";
 
 export type ScopeTier = "slice" | "mission";
@@ -53,6 +54,10 @@ export interface ScopeApproveInput {
   reApprove?: boolean;
   /** REQUIRED with reApprove (a reasoned deliberate act, never an accident). */
   reason?: string | null;
+  /** PLAN-LOCK ONLY — the stamper's EXPLICIT locked-artifact set (slice-relative paths). When
+   *  present it REPLACES the derived default entirely: the set is chosen, not inherited. Each path
+   *  must exist in the slice directory. Ignored for delivery/mission approvals. */
+  lockedArtifacts?: string[] | null;
 }
 
 export interface ScopeApproveResult {
@@ -205,10 +210,36 @@ export class ScopeApproveService {
     // Stage-3 Lever A — plan-lock snapshot: ONLY a slice SPEC approval derives +
     // co-serializes the `locked-artifacts` set (mission/delivery NEVER create it;
     // a delivery merge preserves an existing list). PRD read fails open to null.
+    //
+    // B14 — the set must be CHOSEN, not inherited. An explicit `lockedArtifacts`
+    // replaces derivation entirely (validated to exist, slice-relative). Without
+    // it the derived default still applies, but a set that would freeze only a
+    // missing/scaffold PRD refuses loudly: a plan-lock says "THIS artifact set
+    // is what gets built", and two live locks froze placeholder bytes before
+    // this check existed.
     const isPlanLock = input.scopeTier === "slice" && input.approvalScope === "spec";
-    const lockedArtifacts = isPlanLock
-      ? derivePlanLockArtifacts(originalBytes, tryReadPRD(resolved))
-      : undefined;
+    let lockedArtifacts: ReturnType<typeof derivePlanLockArtifacts> | undefined;
+    if (isPlanLock) {
+      const explicit = Array.isArray(input.lockedArtifacts)
+        ? input.lockedArtifacts.map((p) => String(p).trim()).filter((p) => p.length > 0)
+        : [];
+      if (explicit.length > 0) {
+        lockedArtifacts = resolveExplicitPlanLockArtifacts(explicit, resolved, input.scopePath);
+      } else {
+        const prd = tryReadPRD(resolved);
+        lockedArtifacts = derivePlanLockArtifacts(originalBytes, prd);
+        if (isContentlessPlanLockSet(prd, lockedArtifacts)) {
+          throw new ScopeApproveError(
+            "plan_lock_contentless",
+            `${input.scopePath}: the derived locked-artifacts set is only the default IMPLEMENTATION-PRD.md pin, and that file is ${prd === null ? "missing" : "still unfilled scaffold"} — the lock would freeze content nobody chose.`,
+            {
+              scopePath: input.scopePath,
+              action: "Author the PRD (or its README sections) so the plan carries real content, or name the real set explicitly: rig scope slice approve <slice> --scope spec --locked-artifacts \"SPEC.md,PLAN-….md\".",
+            },
+          );
+        }
+      }
+    }
 
     // 1. Frontmatter FIRST (the arch-pinned ordering). The stamp AND the
     // co-serialized `locked-artifacts` land in ONE writeFrontmatterFields +
@@ -323,6 +354,46 @@ function tryReadPRD(sliceDir: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** B14 — the stamper's explicit plan-lock set: slice-relative, normalized by the SAME rules as the
+ *  derived path (no scheme/absolute/escape), each file verified to EXIST — a chosen set naming a
+ *  missing file is the same defect the explicit path exists to end. Dedup, first wins. */
+function resolveExplicitPlanLockArtifacts(
+  raw: string[],
+  sliceDir: string,
+  scopePath: string,
+): ReturnType<typeof derivePlanLockArtifacts> {
+  const out: ReturnType<typeof derivePlanLockArtifacts> = [];
+  const seen = new Set<string>();
+  for (const ref of raw) {
+    if (/^[a-z][a-z0-9+.-]*:/i.test(ref)) {
+      throw new ScopeApproveError(
+        "locked_artifact_invalid",
+        `${scopePath}: locked artifact "${ref}" carries a URI scheme — every locked-artifact path is slice-relative.`,
+        { scopePath, ref },
+      );
+    }
+    const norm = sliceRelativeMediaPath(ref, "");
+    if (norm === null) {
+      throw new ScopeApproveError(
+        "locked_artifact_invalid",
+        `${scopePath}: locked artifact "${ref}" is absolute or escapes the slice directory — every locked-artifact path is slice-relative.`,
+        { scopePath, ref },
+      );
+    }
+    if (!fs.existsSync(path.join(sliceDir, norm))) {
+      throw new ScopeApproveError(
+        "locked_artifact_missing",
+        `${scopePath}: locked artifact "${norm}" does not exist in the slice directory — a chosen set must name real files.`,
+        { scopePath, ref: norm },
+      );
+    }
+    if (seen.has(norm)) continue;
+    seen.add(norm);
+    out.push({ name: norm, path: norm, kind: "spec" });
+  }
+  return out;
 }
 
 /** P15 (WRITER-EXCEEDS-ITS-OWNERSHIP fix, PM-ruled 2026-08-07): the stamp is

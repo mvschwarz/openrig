@@ -15,6 +15,7 @@ import {
   extractMediaRefs,
   sliceRelativeMediaPath,
 } from "../review/compose.js";
+import { isScaffoldPlaceholderText } from "./scaffold-placeholder.js";
 
 /**
  * Derive the ordered, deduped `locked-artifacts` set for a slice plan-lock.
@@ -62,4 +63,39 @@ export function derivePlanLockArtifacts(readme: string | null, prd: string | nul
   }
 
   return out;
+}
+
+/**
+ * True when a DERIVED plan-lock set would freeze nothing anybody authored: the set is only the
+ * unconditional PRD pin, and the PRD file is missing or still shipped-template scaffold (no authored
+ * intent prose, no authored mini-req, no authored proof-contract row — the ONE scaffold grammar).
+ *
+ * A plan-lock's entire meaning is "THIS artifact set is what gets built"; letting the default pin a
+ * placeholder writes the strongest structural claim in the SDLC with content nobody chose. Two live
+ * locks did exactly that before this check existed. Approve refuses on this predicate unless the
+ * stamper names the set explicitly.
+ */
+export function isContentlessPlanLockSet(prd: string | null, artifacts: LockedArtifact[]): boolean {
+  if (artifacts.length > 1) return false; // plannedRefs / intent visuals = chosen content beyond the pin
+  if (prd === null) return true; // the pin names a file that does not exist / cannot be read
+  return !prdHasAuthoredContent(prd);
+}
+
+/** Any line that survives stripping frontmatter, HTML comments, headings, and list/checkbox markers,
+ *  and is not the shipped bracket-placeholder grammar, is authored content — free-prose PRDs count,
+ *  only the untouched scaffold (and emptiness) does not. */
+function prdHasAuthoredContent(prd: string): boolean {
+  const body = prd
+    .replace(/^---\n[\s\S]*?\n---\n?/, "") // frontmatter
+    .replace(/<!--[\s\S]*?-->/g, ""); // scaffold guidance comments
+  for (const rawLine of body.split("\n")) {
+    let line = rawLine.trim();
+    if (line.length === 0) continue;
+    if (/^#{1,6}\s/.test(line)) continue; // headings are template structure
+    line = line.replace(/^(?:[-*]\s+(?:\[[ xX]\]\s+)?|\d+[.)]\s+)/, ""); // list / checkbox markers
+    if (line.length === 0) continue;
+    if (isScaffoldPlaceholderText(line)) continue;
+    return true;
+  }
+  return false;
 }

@@ -21,6 +21,7 @@ export function scopeApproveRoutes(): Hono {
       onBehalfOf?: string | null;
       reApprove?: boolean;
       reason?: string | null;
+      lockedArtifacts?: unknown;
     }>().catch(() => ({} as never));
 
     if (body.scopeTier !== "slice" && body.scopeTier !== "mission") {
@@ -60,6 +61,10 @@ export function scopeApproveRoutes(): Hono {
         onBehalfOf: body.onBehalfOf ?? null,
         reApprove: body.reApprove === true,
         reason: typeof body.reason === "string" ? body.reason : null,
+        // B14 — the stamper's explicit plan-lock set; strings only, validated in the service.
+        lockedArtifacts: Array.isArray(body.lockedArtifacts)
+          ? body.lockedArtifacts.filter((p): p is string => typeof p === "string")
+          : null,
       });
       return c.json(result, 201);
     } catch (err) {

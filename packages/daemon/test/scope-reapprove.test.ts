@@ -53,6 +53,9 @@ describe("ScopeApproveService — re-approve/re-stamp (OPR.0.5.0.18)", () => {
     fs.mkdirSync(sliceDir, { recursive: true });
     readmePath = path.join(sliceDir, "README.md");
     fs.writeFileSync(readmePath, "---\nid: OPR.X.18\nstatus: building\n---\n\n# The slice\nbody prose stays intact\n");
+    // B14 — spec approvals refuse a contentless derived set; these tests premise a
+    // normal approve, so the fixture PRD carries authored prose.
+    fs.writeFileSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md"), "---\ntitle: prd\n---\n\n# Spec\n\nauthored requirement prose\n");
   });
 
   afterEach(() => {
@@ -203,12 +206,12 @@ describe("ScopeApproveService — re-approve/re-stamp (OPR.0.5.0.18)", () => {
   });
 
   it("a spec re-stamp RE-DERIVES the plan-lock artifact set (the amended PRD becomes the locked set)", () => {
-    fs.writeFileSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md"), "---\nid: OPR.X.18\n---\n# PRD v1\n");
+    fs.writeFileSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md"), "---\nid: OPR.X.18\n---\n# PRD v1\n\nversion one requirements\n");
     approveOnce("spec");
     const fm1 = frontmatterOf(readmePath);
     expect(Array.isArray(fm1["locked-artifacts"])).toBe(true);
     // amend the PRD, re-stamp: the locked set is derived FRESH at the new attestation
-    fs.writeFileSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md"), "---\nid: OPR.X.18\n---\n# PRD v2 amended\n");
+    fs.writeFileSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md"), "---\nid: OPR.X.18\n---\n# PRD v2 amended\n\nversion two requirements\n");
     service().approve({ ...base, approvalScope: "spec", reApprove: true, reason: "PRD amended" });
     const fm2 = frontmatterOf(readmePath);
     expect(Array.isArray(fm2["locked-artifacts"])).toBe(true);
