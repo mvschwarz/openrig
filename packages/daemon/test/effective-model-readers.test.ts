@@ -125,6 +125,9 @@ describe("readCodexEffectiveModel — window-wide lines", () => {
     const model = readCodexEffectiveModel(p);
     const ms = Date.now() - t0;
     expect(model).toBe("gpt-5.6-luna"); // the signal beyond the giant line is still reached
+    // NOTE (r1): if this test HANGS, that IS the regression firing — the grind is synchronous, so
+    // no timer (including vitest's own testTimeout) can interrupt it and the bound below is never
+    // reached. A stuck CI job on this file is the failure signal, not flaky infrastructure.
     expect(ms).toBeLessThan(2_000); // pre-fix this ground 1-byte steps (r1: >30s on a real 6MB file)
   });
 });
