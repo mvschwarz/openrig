@@ -166,6 +166,8 @@ export class SeatHandoverService {
   private captureDeps: ResumeTokenCaptureDeps;
   private occupantInvalidator: OccupantInvalidator | null;
   private predecessorRecapResolver: PredecessorRecapResolver | null;
+  /** Injectable sleep (tests): also carries the shared paste-then-submit settle in deliverRestorePacket. */
+  private sleep: (ms: number) => Promise<void>;
   private appliedLaunchObservations: AppliedLaunchObservationStore;
   private now: () => Date;
 
@@ -182,6 +184,7 @@ export class SeatHandoverService {
     this.tmuxAdapter = deps.tmuxAdapter;
     this.occupantInvalidator = deps.occupantInvalidator ?? null;
     this.predecessorRecapResolver = deps.predecessorRecapResolver ?? null;
+    this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.appliedLaunchObservations = new AppliedLaunchObservationStore(deps.db);
     this.now = deps.now ?? (() => new Date());
     this.statusService = new SeatStatusService({ rigRepo: deps.rigRepo });
@@ -642,6 +645,12 @@ export class SeatHandoverService {
     if (!sent.ok) {
       return { ok: false, message: (sent as { message?: string }).message ?? "send_text failed" };
     }
+    // B16 rework (r2 live door finding): the SHARED paste-then-submit sequencing — the transport's
+    // spike-proven 200ms settle between send_text and C-m (session-transport.ts, "Wait 200ms").
+    // Without it the multi-KB packet sat STAGED-UNSENT as collapsed paste blocks in the successor's
+    // input box (r2 measured 46s until a manual Enter) — the handover committed complete while the
+    // packet was never consumed: the staged-not-consumed class, shipped by the product itself.
+    await this.sleep(200);
     const submit = await this.tmuxAdapter.sendKeys(successorSession, ["C-m"]);
     if (!submit.ok) {
       return { ok: false, message: (submit as { message?: string }).message ?? "submit failed" };

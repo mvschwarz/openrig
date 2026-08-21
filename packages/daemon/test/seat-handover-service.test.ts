@@ -685,6 +685,40 @@ describe("SeatHandoverService", () => {
     expect(packet).toContain("predecessor screen tail");
   });
 
+  it("B16 rework: packet delivery uses the shared paste-then-submit sequencing — a settle sleep BETWEEN send_text and C-m (r2 live: without it the packet sat staged-unsent 46s)", async () => {
+    seedSeat({ runtime: "codex" });
+    const sleeps: number[] = [];
+    const orderedCalls: string[] = [];
+    sendText.mockImplementation(async () => { orderedCalls.push("send_text"); return { ok: true }; });
+    sendKeys.mockImplementation(async () => { orderedCalls.push("submit"); return { ok: true }; });
+    const sleepSpy = async (ms: number) => { sleeps.push(ms); if (orderedCalls[orderedCalls.length - 1] === "send_text") orderedCalls.push(`sleep(${ms})`); };
+    service = new SeatHandoverService({
+      db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
+      tmuxAdapter: tmux(),
+      now: () => new Date("2026-04-24T18:30:00.000Z"),
+      newSuccessorId: () => "01SUCCID0",
+      runtimeAdapters: { codex: codexAdapter() },
+      contextUsageStore: { readSidecar } as never,
+      resumeTokenCapturer: { captureCodexThreadId } as never,
+      occupantInvalidator: { invalidateRetiringOccupant },
+      predecessorRecapResolver: resolvePredecessorRecap as never,
+      readinessTimeoutMs: 50,
+      sleep: sleepSpy,
+    });
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
+
+    expect(result.ok).toBe(true);
+    // The settle sleep sits BETWEEN the paste and the submit — the transport's proven contract.
+    const sendIdx = orderedCalls.indexOf("send_text");
+    const settleIdx = orderedCalls.indexOf("sleep(200)");
+    const submitIdx = orderedCalls.indexOf("submit");
+    expect(sendIdx).toBeGreaterThanOrEqual(0);
+    expect(settleIdx).toBeGreaterThan(sendIdx);
+    expect(submitIdx).toBeGreaterThan(settleIdx);
+    expect(sleeps).toContain(200);
+  });
+
   it("recap leg (B16): the resolver runs BEFORE the successor launches (the successor overwrites the name-keyed sidecar)", async () => {
     seedSeat({ runtime: "codex" });
     resolvePredecessorRecap.mockReturnValue({ recap: [{ role: "user", content: "pre-launch read" }], recordPath: "/p/a.jsonl" });
