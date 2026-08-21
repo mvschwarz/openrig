@@ -9,7 +9,7 @@ applies-when: |
   JSON output, cross-host, coordination primitives.
 siblings: [README.md, architecture/daemon-core.md]
 prerequisite-reads: [README.md]
-last-verified-against-source: 8d55ea60
+last-verified-against-source: b13a8e4c7
 last-updated: 2026-06-20
 ---
 
