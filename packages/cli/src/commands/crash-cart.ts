@@ -2,6 +2,19 @@ import { Command } from "commander";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { DaemonClient } from "../client.js";
+import { getDaemonStatus, getDaemonUrl, daemonStatusGuard, type LifecycleDeps } from "../daemon-lifecycle.js";
+import { realDeps } from "./daemon.js";
+
+/** The `POST /api/crash-cart/restore-fleet` response — the conductor's FleetRollup + derived verdict. */
+interface FleetRestoreResponse {
+  rollup: {
+    counts: Record<string, number>;
+    sequence: Array<{ rigId: string; outcome: string; receiptRef?: number }>;
+    attention_required: Array<{ rigId: string; seat: string; need: string }>;
+  };
+  verdict: string;
+}
 
 // `rig crash-cart --json` — the daemon-DOWN recovery verdict emit (plan c015d9ed §C3, coupling ruling
 // option A). Prints ONE JSON = the 3-state detector verdict + (on DOWN) the discovery — READ-ONLY, a
@@ -26,6 +39,11 @@ export interface CrashCartCommandDeps {
   emit: () => Promise<CrashCartEmit>;
   /** Emit one line (default: stdout). */
   write: (line: string) => void;
+  /** For `restore-fleet`: acquire the daemon client (default: status → guard → DaemonClient);
+   *  injectable so the conductor call is testable without a live daemon. */
+  getRestoreClient?: (opts: { json?: boolean }) => Promise<DaemonClient | null>;
+  lifecycleDeps?: LifecycleDeps;
+  clientFactory?: (url: string) => DaemonClient;
 }
 
 function openrigHome(): string {
@@ -115,5 +133,51 @@ export function crashCartCommand(deps?: Partial<CrashCartCommandDeps>): Command 
     // A non-zero exit is a HINT only (not-cleanly-up); the JSON remains the contract.
     process.exitCode = result.state === "up" ? 0 : 1;
   });
+
+  // `rig crash-cart restore-fleet [--json]` — drive the daemon-side conductor (Atom B):
+  // POST /api/crash-cart/restore-fleet → the FleetRollup + derived verdict. Requires the
+  // daemon UP (the ⏎ flow's `s` step runs first); fail-closed if not.
+  cmd
+    .command("restore-fleet")
+    .description("Restore every rig on this host kernel-first — the crash-cart conductor.")
+    .option("--json", "emit the FleetRollup + verdict as JSON")
+    .action(async (_opts: { json?: boolean }, command: Command) => {
+      // --json can be parsed as the parent's global option (crash-cart also declares it),
+      // so read the merged view.
+      const json = (command.optsWithGlobals() as { json?: boolean }).json === true;
+      const write = deps?.write ?? ((line: string) => process.stdout.write(line + "\n"));
+      const client = deps?.getRestoreClient
+        ? await deps.getRestoreClient({ json })
+        : await (async () => {
+            const lifecycleDeps = deps?.lifecycleDeps ?? realDeps();
+            const status = await getDaemonStatus(lifecycleDeps);
+            if (!daemonStatusGuard(status, { json })) return null;
+            const factory = deps?.clientFactory ?? ((url: string) => new DaemonClient(url));
+            return factory(getDaemonUrl(status));
+          })();
+      if (!client) {
+        process.exitCode = 1;
+        return;
+      }
+      const res = await client.post<FleetRestoreResponse>("/api/crash-cart/restore-fleet");
+      if (res.status >= 400) {
+        const err = (res.data as { error?: string })?.error ?? `HTTP ${res.status}`;
+        write(json ? JSON.stringify({ error: err }) : `Fleet restore failed: ${err}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (json) {
+        write(JSON.stringify(res.data));
+        return;
+      }
+      const { rollup, verdict } = res.data;
+      write(`Fleet restore: ${verdict}`);
+      for (const r of rollup.sequence) write(`  ${r.rigId}: ${r.outcome}`);
+      if (rollup.attention_required.length > 0) {
+        write("Needs attention:");
+        for (const a of rollup.attention_required) write(`  ${a.rigId}/${a.seat} — ${a.need}`);
+      }
+    });
+
   return cmd;
 }

@@ -21,6 +21,7 @@ import { createLiveRefresh } from "./live.js";
 import { execFile } from "node:child_process";
 import { probeCrashCart, type CrashCartRenderOpts } from "./crash-cart/from-emit.js";
 import { resolveCrashCartKey, type CrashCartKeyAction } from "./crash-cart/keys.js";
+import { driveRestoreEverything } from "./crash-cart/restore-drive.js";
 import type { Action, FleetSnapshot, Screen } from "./types.js";
 import type { SpecReviewCache } from "./hydrate.js";
 
@@ -96,8 +97,34 @@ async function run(): Promise<void> {
   // the C1 batch conductor that RESTORE ultimately drives is EXCLUDED this wave) then re-probe; retry
   // re-probes (UNVERIFIED). inspect/onboarding are entry-point seams this wave.
   function performCrashCart(action: CrashCartKeyAction): void {
-    if (action === "start-daemon" || action === "restore") {
+    if (action === "start-daemon") {
       execFile("rig", ["daemon", "start"], { timeout: 30_000 }, () => void refreshCrashCart());
+      return;
+    }
+    if (action === "restore") {
+      // 5.2 crash-cart: ⏎ RESTORE EVERYTHING now DRIVES the C1 batch conductor — the `s`
+      // step (start daemon) then `rig crash-cart restore-fleet` against it — then re-probe
+      // (the rollup/triage surfaces via the refreshed cockpit). A start failure never
+      // proceeds to restore. (D-cart=CONDUCTOR; replaces the prior start-only labeled seam.)
+      void driveRestoreEverything({
+        startDaemon: () =>
+          new Promise<void>((resolve, reject) =>
+            execFile("rig", ["daemon", "start"], { timeout: 30_000 }, (err) => (err ? reject(err) : resolve())),
+          ),
+        callRestoreFleet: () =>
+          new Promise<string>((resolve) =>
+            execFile(
+              "rig",
+              ["crash-cart", "restore-fleet", "--json"],
+              { timeout: 120_000, maxBuffer: 16 * 1024 * 1024 },
+              (_err, stdout) => resolve(stdout ?? ""),
+            ),
+          ),
+      })
+        .catch(() => {
+          /* best-effort: the refreshed cockpit shows the honest post-restore state */
+        })
+        .finally(() => void refreshCrashCart());
       return;
     }
     if (action === "retry") void refreshCrashCart();
