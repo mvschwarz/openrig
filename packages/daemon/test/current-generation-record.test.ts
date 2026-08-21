@@ -77,6 +77,26 @@ describe("LiveClaudeRecordSelector — CROSS-POLL advancement, stateful per seat
     if (!afterChange.ok) expect(afterChange.reason).toContain("first observation");
   });
 
+  it("r2 round-5 discriminator: a RETAINED id rebinds to this poll's readable path — the cached path dying must not mask the same-id fallback", () => {
+    const RAW = "/p/raw-a.jsonl"; const DERIVED = "/p/derived-a.jsonl";
+    const TWO_PATH = [
+      { source: "sidecar", id: "id-a", path: RAW },
+      { source: "registry", id: "id-a", path: DERIVED },
+      { source: "pane-argument", id: "id-b", path: B },
+    ];
+    const sel = new LiveClaudeRecordSelector();
+    // poll 1: first observation, indeterminate.
+    expect(sel.select("seat", TWO_PATH, statFn({ [RAW]: [1000, 100], [DERIVED]: [1000, 100], [B]: [2000, 900] })).ok).toBe(false);
+    // poll 2: raw-a advances → selects id-a AT the raw path.
+    const p2 = sel.select("seat", TWO_PATH, statFn({ [RAW]: [5000, 150], [DERIVED]: [5000, 150], [B]: [2000, 900] }));
+    expect(p2).toMatchObject({ ok: true, id: "id-a", path: RAW });
+    // poll 3: raw path dies while derived stays readable and advancing — retention must return the
+    // path THIS poll proved readable, never the cached dead one (the temporal form of the
+    // dead-first-path defect; returning RAW here sends the reader to a nonexistent file).
+    const p3 = sel.select("seat", TWO_PATH, statFn({ [RAW]: null, [DERIVED]: [9000, 300], [B]: [2000, 900] }));
+    expect(p3).toMatchObject({ ok: true, id: "id-a", path: DERIVED });
+  });
+
   it("neither advancing across polls stays INDETERMINATE (idle seat), and resolves on the poll where exactly one advances", () => {
     const sel = new LiveClaudeRecordSelector();
     sel.select("seat", CAND, statFn({ [A]: [1000, 100], [B]: [2000, 900] }));

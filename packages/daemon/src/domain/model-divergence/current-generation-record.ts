@@ -171,10 +171,17 @@ export class LiveClaudeRecordSelector {
 
     const idSetKey = byIdKey(byId);
     const state = this.perSeat.get(seatKey);
-    if (state && state.idSetKey === idSetKey && state.selected && readable.some((r) => r.id === state.selected!.id)) {
-      // RETAIN the resolved generation until the candidate set changes (r2 round-4 remedy).
-      this.rememberStats(seatKey, idSetKey, readable, state.selected);
-      return { ok: true, ...state.selected };
+    const retainedCurrent = state && state.idSetKey === idSetKey && state.selected
+      ? readable.find((r) => r.id === state.selected!.id)
+      : undefined;
+    if (retainedCurrent) {
+      // RETAIN the resolved ID until the candidate set changes (r2 round-4 remedy) — but rebind
+      // path/source to THIS poll's readable entry (r2 round-5): the cached path can die while a
+      // same-id fallback path stays readable, and returning the cached path verbatim is the
+      // temporal form of the dead-first-path-masks-readable-second defect.
+      const selected = { id: retainedCurrent.id, path: retainedCurrent.path, source: retainedCurrent.source };
+      this.rememberSelection(seatKey, idSetKey, readable, selected);
+      return { ok: true, ...selected };
     }
     const prev = state && state.idSetKey === idSetKey ? state.prevStats : null;
     if (prev) {
