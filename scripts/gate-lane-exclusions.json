@@ -12,9 +12,9 @@
     },
     {
       "suite": "vitest:ui",
-      "reason": "Slice-11's documented specimen: p5-mobile-polish false-fails only in the loaded parallel suite (full-route import inside a 5s-budget fixture, measured 4.847s under load), passes alone. Founder conditional ruling now TRIGGERED: the cut gates on the UI suite, so slice-11's one-fixture fix returns to the 5.2 wave; this resident dies when it lands or at expiry.",
-      "receipt": "A: gate run 1 at c5635c229 UI leg green 1723-pass (same fixture, lighter load). B: tip b8d446069 single-file green 9/9 under jsdom config (01:30Z) vs gate-suite red 2-fail under load. Historic: slice-11 row records pass-alone at 2339/2335ms base/candidate.",
-      "owner": "slice-11-ui-contention-sweep (5.2 wave re-entry per founder conditional ruling)",
+      "reason": "Load-margin UI-leg reds under gate/wave contention, leg-covered. SPECIMEN 1 (p5-mobile, slice-11): FIXED by B13 2026-08-21 - struck from this reason, passes in-suite; kept in history via the verdict artifacts. SPECIMEN 2 (opr-0.4.1.13-table-crash STRESS): passes uncontended with 7-8x headroom on BOTH v22.22.1 (760ms) and v26.5.0 (614ms) vs 5s budget - r1 ran the finder's own runtime to kill the runtime hypothesis; red only under loaded parallel suite. Same class, same receipts shape. Resident dies at expiry or when specimen 2 is fixed.",
+      "receipt": "A: gate run 1 at c5635c229 UI leg green 1723-pass (same fixture, lighter load). B: tip b8d446069 single-file green 9/9 under jsdom config (01:30Z) vs gate-suite red 2-fail under load. Historic: slice-11 row records pass-alone at 2339/2335ms base/candidate. AMENDED 2026-08-21 02:4x: specimen-2 A/B - uncontended green 760ms/614ms both runtimes (r1) vs loaded-suite red; specimen-1 struck (B13 fix, r1 CLEAR c2f0cc7b + door test).",
+      "owner": "opr-0.4.1.13-table-crash STRESS (load-margin family; slice-11 fix landed, B13)",
       "expiry": "2026-08-28"
     }
   ]
