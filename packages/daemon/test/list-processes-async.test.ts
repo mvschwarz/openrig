@@ -46,3 +46,44 @@ describe.each(SITES)("B12-T real async list_processes — %s", (_site, listProce
     expect(turnedBeforeResolve).toBe(true);
   });
 });
+
+// F1 — resolve_home rides the same discriminator: the per-PID `ps eww` spawn must hand control
+// back to the event loop (pre-F1 it ran execFileSync inside the 8-attempt capture loops — measured
+// live at 28.9s/15min of burst blocking). Same ordering property as the sites above.
+//
+// The probe target is a SPAWNED child with a known HOME: `ps eww` cannot read the vitest worker's
+// own env on this platform (measured: 21-byte output, no env), so asserting on process.pid is
+// environment-hostage; a child we spawn with an explicit env is deterministic.
+describe("F1 real async resolve_home — codex-thread-id", () => {
+  async function withChild<T>(fn: (pid: number) => Promise<T>): Promise<T> {
+    const { spawn } = await import("node:child_process");
+    const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 15000)"], {
+      env: { HOME: "/tmp/f1-probe-home", PATH: process.env.PATH ?? "" },
+      stdio: "ignore",
+    });
+    try {
+      await new Promise((r) => setTimeout(r, 100)); // let it exec
+      return await fn(child.pid!);
+    } finally {
+      child.kill("SIGKILL");
+    }
+  }
+
+  it("runs the REAL ps eww path and resolves a spawned child's HOME from its environment", async () => {
+    const { defaultResolveHomeDirByPid } = await import("../src/domain/codex-thread-id.js");
+    const home = await withChild((pid) => defaultResolveHomeDirByPid(pid));
+    expect(home).toBe("/tmp/f1-probe-home");
+  });
+
+  it("hands control back to the event loop instead of blocking for the spawn (RED on the pre-F1 sync implementation)", async () => {
+    const { defaultResolveHomeDirByPid } = await import("../src/domain/codex-thread-id.js");
+    const { home, turnedBeforeResolve } = await withChild(async (pid) => {
+      const pending = defaultResolveHomeDirByPid(pid);
+      let loopTurnedFirst = false;
+      setTimeout(() => { loopTurnedFirst = true; }, 0);
+      return Promise.resolve(pending).then((h) => ({ home: h, turnedBeforeResolve: loopTurnedFirst }));
+    });
+    expect(home).toBe("/tmp/f1-probe-home"); // the fast return was not an empty shortcut
+    expect(turnedBeforeResolve).toBe(true);
+  });
+});

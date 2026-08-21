@@ -31,7 +31,7 @@ interface ResumeMetadataRefresherDeps {
   sessionRegistry: SessionRegistry;
   tmuxAdapter: TmuxAdapter;
   listProcesses?: () => Array<{ pid: number; ppid: number; command: string }> | Promise<Array<{ pid: number; ppid: number; command: string }>>;
-  readCodexThreadIdByPid?: (pid: number) => string | undefined;
+  readCodexThreadIdByPid?: (pid: number) => Promise<string | undefined> | string | undefined;
   probeClaudeResume?: (sessionName: string, resumeToken: string, cwd?: string | null) => Promise<"resumable" | "not_resumable" | "inconclusive">;
   resolveHomeDirByPid?: ResolveHomeDirByPid;
   sleep?: (ms: number) => Promise<void>;
@@ -49,7 +49,7 @@ export class ResumeMetadataRefresher {
   private sessionRegistry: SessionRegistry;
   private tmuxAdapter: TmuxAdapter;
   private listProcesses: () => Array<{ pid: number; ppid: number; command: string }> | Promise<Array<{ pid: number; ppid: number; command: string }>>;
-  private readCodexThreadIdByPid: (pid: number) => string | undefined;
+  private readCodexThreadIdByPid: (pid: number) => Promise<string | undefined> | string | undefined;
   private probeClaudeResume: (sessionName: string, resumeToken: string, cwd?: string | null) => Promise<"resumable" | "not_resumable" | "inconclusive">;
   private resolveHomeDirByPid: ResolveHomeDirByPid;
   private sleep: (ms: number) => Promise<void>;
@@ -61,9 +61,9 @@ export class ResumeMetadataRefresher {
     this.tmuxAdapter = deps.tmuxAdapter;
     this.listProcesses = deps.listProcesses ?? defaultListProcesses;
     this.resolveHomeDirByPid = deps.resolveHomeDirByPid ?? defaultResolveHomeDirByPid;
-    this.readCodexThreadIdByPid = deps.readCodexThreadIdByPid ?? ((pid) => readCodexThreadIdFromLogs(
+    this.readCodexThreadIdByPid = deps.readCodexThreadIdByPid ?? (async (pid) => readCodexThreadIdFromLogs(
       pid,
-      this.resolveHomeDirByPid,
+      await this.resolveHomeDirByPid(pid),
       deps.homeDir ?? os.homedir()
     ));
     this.probeClaudeResume = deps.probeClaudeResume ?? ((sessionName, resumeToken, cwd) => this.defaultProbeClaudeResume(sessionName, resumeToken, cwd));
@@ -186,7 +186,7 @@ export class ResumeMetadataRefresher {
       if (shellPid) {
         const codexPids = findCodexDescendantPids(await this.listProcesses(), shellPid);
         for (const codexPid of codexPids) {
-          const threadId = this.readCodexThreadIdByPid(codexPid);
+          const threadId = await this.readCodexThreadIdByPid(codexPid);
           if (threadId) return threadId;
         }
       }
@@ -329,10 +329,10 @@ function findCodexDescendantPids(
 
 function readCodexThreadIdFromLogs(
   pid: number,
-  resolveHomeDirByPid: ResolveHomeDirByPid,
+  resolvedHome: string | undefined,
   homeDir: string
 ): string | undefined {
-  return readCodexThreadIdFromCandidateHomes(pid, [resolveHomeDirByPid(pid), homeDir, os.homedir()]);
+  return readCodexThreadIdFromCandidateHomes(pid, [resolvedHome, homeDir, os.homedir()]);
 }
 
 function commandLooksLikeCodex(command: string): boolean {

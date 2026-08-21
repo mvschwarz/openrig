@@ -1,19 +1,26 @@
 import os from "node:os";
 import nodePath from "node:path";
 import fs from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import Database from "better-sqlite3";
-import { runSyncSite } from "./sync-site-wrap.js";
+import { runAsyncSite } from "./sync-site-wrap.js";
 
-export type ResolveHomeDirByPid = (pid: number) => string | undefined;
+const execFileAsync = promisify(execFile);
 
-export function defaultResolveHomeDirByPid(pid: number): string | undefined {
+/** F1 (B12's completion): may return a plain value (test stubs stay sync) or a Promise — every
+ *  caller awaits it, and the DEFAULT is async so the per-PID `ps eww` spawn no longer blocks the
+ *  event loop (measured live: 28.9s/15min of burst blocking inside the 8-attempt capture loops). */
+export type ResolveHomeDirByPid = (pid: number) => Promise<string | undefined> | string | undefined;
+
+export async function defaultResolveHomeDirByPid(pid: number): Promise<string | undefined> {
   try {
     // BSD/macOS `ps` supports `eww` to expose the full process environment.
     // If OpenRig grows a Linux daemon target, this likely needs a /proc-based path.
-    const output = runSyncSite("codex_thread_id.resolve_home", () =>
-      execFileSync("ps", ["eww", "-p", String(pid), "-o", "command="], { encoding: "utf-8" })
-    ).trim();
+    const output = (await runAsyncSite("codex_thread_id.resolve_home", async () => {
+      const { stdout } = await execFileAsync("ps", ["eww", "-p", String(pid), "-o", "command="], { encoding: "utf-8" });
+      return stdout;
+    })).trim();
     if (!output) return undefined;
     const match = output.match(/(?:^|\s)HOME=([^\s]+)/);
     return match?.[1];

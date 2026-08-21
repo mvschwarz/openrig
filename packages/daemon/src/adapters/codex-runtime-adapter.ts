@@ -53,7 +53,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private tmux: TmuxAdapter;
   private fs: CodexAdapterFsOps;
   private listProcesses: () => Array<{ pid: number; ppid: number; command: string }> | Promise<Array<{ pid: number; ppid: number; command: string }>>;
-  private readThreadIdByPid: (pid: number) => string | undefined;
+  private readThreadIdByPid: (pid: number) => Promise<string | undefined> | string | undefined;
   private sleep: (ms: number) => Promise<void>;
   private resolveHomeDirByPid: ResolveHomeDirByPid;
   private codexHome?: string;
@@ -74,7 +74,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     tmux: TmuxAdapter;
     fsOps: CodexAdapterFsOps;
     listProcesses?: () => Array<{ pid: number; ppid: number; command: string }> | Promise<Array<{ pid: number; ppid: number; command: string }>>;
-    readThreadIdByPid?: (pid: number) => string | undefined;
+    readThreadIdByPid?: (pid: number) => Promise<string | undefined> | string | undefined;
     resolveHomeDirByPid?: ResolveHomeDirByPid;
     sleep?: (ms: number) => Promise<void>;
     activityRelayPath?: string;
@@ -701,7 +701,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       if (shellPid) {
         const codexPids = await this.findCodexDescendantPids(shellPid);
         for (const codexPid of codexPids) {
-          const threadId = this.readThreadIdByPid(codexPid);
+          const threadId = await this.readThreadIdByPid(codexPid);
           if (threadId) return threadId;
         }
       }
@@ -821,10 +821,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return findCodexDescendantPids(processes, parentPid);
   }
 
-  private readThreadIdFromLogs(pid: number): string | undefined {
+  private async readThreadIdFromLogs(pid: number): Promise<string | undefined> {
     return readCodexThreadIdFromCandidateHomes(
       pid,
-      [this.resolveHomeDirByPid(pid), this.fs.homedir, os.homedir()],
+      [await this.resolveHomeDirByPid(pid), this.fs.homedir, os.homedir()],
       (path) => this.fs.exists(path)
     );
   }
