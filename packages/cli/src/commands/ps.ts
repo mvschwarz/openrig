@@ -182,6 +182,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "logicalId",
   "podId",
   "podNamespace",
+  "hostSelfId",
   "canonicalSessionName",
   "nodeKind",
   "runtime",

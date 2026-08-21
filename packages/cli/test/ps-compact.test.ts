@@ -81,6 +81,10 @@ function makeFatNode(rigId: string, rigName: string, logicalId: string, opts?: {
     podId: `pod-${logicalId.split(".")[0]}`,
     podNamespace: logicalId.split(".")[0],
     canonicalSessionName: `${logicalId.replace(".", "-")}@${rigName}`,
+    // Slice 13 fix 2 — the daemon stamps every served row with its boot-reconciled
+    // self-id; the fixture mirrors the served shape so the compact/full ratio guard
+    // measures real surfaces.
+    hostSelfId: "host-84c37990",
     nodeKind: "agent" as const,
     runtime: "claude-code",
     sessionStatus: "running",
@@ -217,8 +221,13 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     const defaultOutput = defaultLogs.join("");
     const fullOutput = fullLogs.join("");
 
-    // Compact must be significantly smaller than full
-    expect(defaultOutput.length).toBeLessThan(fullOutput.length / 3);
+    // Compact must be significantly smaller than full. Re-based /3 → /2.8 for
+    // slice 13 fix 2: hostSelfId is one ruled scalar added to BOTH projections
+    // (host attribution must ride the token-safe default — a merged roster
+    // without it reads as authoritative), which moves the ratio without any
+    // heavy field returning. The real regression guard — heavy fields stay
+    // omitted from compact — is asserted directly in AC-7.
+    expect(defaultOutput.length).toBeLessThan(fullOutput.length / 2.8);
     // Sanity: full output exists and is nontrivial
     expect(fullOutput.length).toBeGreaterThan(1000);
   });
@@ -405,8 +414,8 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     expect(Array.isArray(full)).toBe(true);
     expect(compact.length).toBe(full.length);
 
-    // Compact is much smaller
-    expect(compactLogs.join("").length).toBeLessThan(fullLogs.join("").length / 3);
+    // Compact is much smaller (re-based /3 → /2.8 with AC-1 — see its comment)
+    expect(compactLogs.join("").length).toBeLessThan(fullLogs.join("").length / 2.8);
 
     // Full preserves all fields; compact omits heavy ones
     expect(full[0].contextUsage).toBeDefined();
