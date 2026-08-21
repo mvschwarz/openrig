@@ -2,7 +2,7 @@
 // F1 gate-lane runner ENTRYPOINT (arch d6a6c1db, mechanism (B) bound-port, 5 pins). Wires the machine-wide
 // mutex (gate-lane-lock) + the honesty-gap legs + the C2 verdict (gate-lane-run) into one gate:
 //   acquire lane (non-blocking) → refuse+teach+exit-nonzero on contention (P5) → observe foreign load
-//   (advisory, recorded) → run BOTH legs (typecheck AND vitest AND vitest:ui — the two honesty gaps) →
+//   (advisory, recorded) → run BOTH legs (typecheck AND vitest) →
 //   write the C2 verdict (green carries the load it ran under) → release (kernel also frees on death).
 import { spawnSync, execSync } from "node:child_process";
 import { writeFileSync, readFileSync, mkdirSync, realpathSync, unlinkSync, lstatSync } from "node:fs";

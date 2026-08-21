@@ -41,15 +41,18 @@ export function renderRefusal(result, port) {
 }
 
 /**
- * HONESTY gaps closed here: the gate runs ALL THREE legs — typecheck (lint) AND vitest (test, the
- * workspaces) AND vitest:ui (test:ui — which `npm test` EXCLUDES). All legs run (not fail-fast) so the
- * verdict records every result; green = every leg ok. `exec(cmd)` is injected → `{ok, code}`.
+ * The gate runs BOTH legs — typecheck (lint) AND vitest (test: repo scripts + the supported
+ * workspaces: daemon, cli, tui). All legs run (not fail-fast) so the verdict records every result;
+ * green = every leg ok. `exec(cmd)` is injected → `{ok, code}`.
+ *
+ * The web UI (packages/ui) is deliberately NOT a gate leg. Founder ruling 2026-08-21: the web UI
+ * went best-effort experimental at the 0.5.0 TUI pivot and releases must not spend gate time or
+ * block on it. `npm run test:ui` still exists for manual runs; it gates nothing.
  */
 export async function runLegs(exec) {
   const specs = [
-    { name: "typecheck", cmd: "npm run lint" },      // gap-2 leg A: tsc ×4 (incl. P9 typecheck:prep)
-    { name: "vitest", cmd: "npm run test" },          // gap-2 leg B: test:repo + workspaces
-    { name: "vitest:ui", cmd: "npm run test:ui" },    // gap-1: the leg npm test omits
+    { name: "typecheck", cmd: "npm run lint" },      // tsc ×4 (incl. P9 typecheck:prep)
+    { name: "vitest", cmd: "npm run test" },          // test:repo + supported workspaces (no packages/ui)
   ];
   const legs = [];
   for (const s of specs) {

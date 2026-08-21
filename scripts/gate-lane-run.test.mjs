@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { renderRefusal, runLegs, buildVerdict, runGate, observeForeignLoad, cleanStaleVendoredBundle } from "./gate-lane-run.mjs";
 
-// F1 gate-lane runner logic (arch d6a6c1db, 5 pins). HONESTY (gap 1): the gate runs test:ui (npm test
-// excludes it); (gap 2) green = typecheck AND vitest BOTH legs. P5: refusal teaches the port constant,
-// names the gate holder (pid/started-at) or honest-unknown for a foreign squatter, always hard-refuse.
+// F1 gate-lane runner logic (arch d6a6c1db, 5 pins). Legs: typecheck AND vitest (repo + supported
+// workspaces). The web-UI leg is ruled OUT (founder, 2026-08-21) — see the absence test below.
+// P5: refusal teaches the port constant, names the gate holder or honest-unknown, always hard-refuse.
 
 test("P5 refusal — gate holder is NAMED (pid/started-at) + teaches the port constant, always refuses", () => {
   const t = renderRefusal({ reason: "gate-holder", holder: { pid: 4242, startedAt: "2026-08-07T09:00:00Z" } }, 40404);
@@ -25,23 +25,26 @@ test("P5 refusal — foreign squatter is HONEST-UNKNOWN + still teaches the port
   assert.match(t, /refus/i);
 });
 
-test("HONESTY gap-1: runLegs runs ALL THREE legs incl. test:ui (npm test excludes ui)", async () => {
+test("runLegs runs the two supported legs — and the web-UI leg is ruled OUT, never present", async () => {
   const ran = [];
   const exec = async (cmd) => { ran.push(cmd); return { ok: true, code: 0 }; };
   const legs = await runLegs(exec);
   const names = legs.map((l) => l.name);
   assert.ok(names.includes("typecheck"), "typecheck leg");
-  assert.ok(names.includes("vitest"), "vitest leg (workspaces)");
-  assert.ok(names.includes("vitest:ui"), "vitest:ui leg — the excluded-from-npm-test honesty gap");
+  assert.ok(names.includes("vitest"), "vitest leg (repo + supported workspaces)");
+  // Founder ruling 2026-08-21: the web UI is best-effort experimental since the 0.5.0 TUI pivot —
+  // the gate must not run or block on packages/ui. This absence is deliberate; do not re-add.
+  assert.ok(!names.includes("vitest:ui"), "no web-UI leg — ruled out, not forgotten");
+  assert.ok(ran.every((c) => !/test:ui/.test(c)), "gate never invokes test:ui");
   assert.ok(legs.every((l) => l.ok));
 });
 
-test("HONESTY gap-2: green = typecheck AND vitest BOTH — one failed leg fails the gate", async () => {
-  const exec = async (cmd) => ({ ok: !/ui/.test(cmd), code: /ui/.test(cmd) ? 1 : 0 }); // ui fails
+test("green = typecheck AND vitest BOTH — one failed leg fails the gate", async () => {
+  const exec = async (cmd) => ({ ok: !/lint/.test(cmd), code: /lint/.test(cmd) ? 1 : 0 }); // typecheck fails
   const legs = await runLegs(exec);
   const v = buildVerdict({ legs, foreignLoad: { advisory: [] }, startedAt: "t0", endedAt: "t1" });
   assert.equal(v.gate, "fail");
-  assert.equal(v.legs.find((l) => l.name === "vitest:ui").ok, false);
+  assert.equal(v.legs.find((l) => l.name === "typecheck").ok, false);
 });
 
 test("advisory foreign-load — counts foreign node/vitest/tsc processes + loadavg (never the gate's own pid)", () => {
@@ -130,7 +133,7 @@ test("SELF-DESCRIBING (pm GATE CONDITION): verdict.smoke tracks WHAT RAN via run
   // smoke:true fails). Both directions + both effect checks together forbid a constant that lies.
   const real = await gateWith(false);
   assert.equal(real.verdict.smoke, false, "the real run seals smoke:false");
-  assert.equal(real.ran.length, 3, "smoke:false coincides with all 3 legs routed through realExec (the effect)");
+  assert.equal(real.ran.length, 2, "smoke:false coincides with both legs routed through realExec (the effect)");
   // FAIL-SAFE — buildVerdict without a smoke arg defaults false, never a silent true.
   assert.equal(buildVerdict({ legs: [], foreignLoad: { advisory: [] }, startedAt: "t0", endedAt: "t1" }).smoke, false);
 });
