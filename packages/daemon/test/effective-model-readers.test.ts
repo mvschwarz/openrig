@@ -88,9 +88,24 @@ describe("readCodexEffectiveModel", () => {
     expect(readCodexEffectiveModel(p, 1024 * 1024)).toBeNull(); // 1MB cap; signal ~2MB deep
   });
 
-  it("a record STRADDLING a window boundary is still read (the overlap step)", () => {
+  it("r1 by-construction case: a REAL-SIZED (20KB) sole-signal record straddling a window boundary is read whole, not lost", () => {
+    // r1 proved the old fixed 4KB overlap lost exactly this shape (real world_state records reach
+    // ~22KB); the overlap is now sized from the dropped fragment, so size cannot defeat mechanism.
+    const bigRecord = JSON.stringify({
+      timestamp: "t", ordinal: 4, type: "world_state",
+      payload: { full: true, state: { collaboration_mode: { mode: "default", model: "gpt-5.6-luna" }, filler: "w".repeat(20_000) } },
+    });
+    for (const prePad of [500, 505, 510]) { // sweep the boundary so SOME run genuinely straddles
+      const p = tmp("r.jsonl", "");
+      for (let i = 0; i < prePad; i++) appendFileSync(p, JSON.stringify({ type: "event_msg", filler: "x".repeat(1000) }) + "\n");
+      appendFileSync(p, bigRecord + "\n");
+      for (let i = 0; i < 520; i++) appendFileSync(p, JSON.stringify({ type: "event_msg", filler: "x".repeat(1000) }) + "\n");
+      expect(readCodexEffectiveModel(p), `prePad=${prePad}`).toBe("gpt-5.6-luna");
+    }
+  });
+
+  it("a small straddling record is still read (the original overlap case)", () => {
     const p = tmp("r.jsonl", "");
-    // Fill so the world_state record crosses the 512KB boundary from EOF: pad, signal, pad-to-cross.
     for (let i = 0; i < 500; i++) appendFileSync(p, JSON.stringify({ type: "event_msg", filler: "x".repeat(1000) }) + "\n");
     appendFileSync(p, codexWorldState("gpt-5.6-luna") + "\n");
     for (let i = 0; i < 520; i++) appendFileSync(p, JSON.stringify({ type: "event_msg", filler: "x".repeat(1000) }) + "\n");

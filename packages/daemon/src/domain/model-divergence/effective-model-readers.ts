@@ -66,9 +66,12 @@ export function readClaudeEffectiveModel(transcriptPath: string): string | null 
 function newestCodexModel(lines: string[]): string | null {
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!;
-    // PRIMARY: turn_context.payload.model — present in BOTH rollout formats observed live (old
-    // July-era records carry NO collaboration_mode in world_state; turn_context.model exists in
-    // both and recurs every turn, so it sits near EOF on a live seat).
+    // PRIMARY: turn_context.payload.model — preferred for DENSITY, not existence. (~~"old July-era
+    // records carry NO collaboration_mode"~~ — WRONG, r1 measured 14/72 world_states carrying it in
+    // the same July file; the truth is collaboration_mode is SPARSE WITHIN world_state, while
+    // turn_context.model recurs every turn — 232 occurrences in that file — so it sits near EOF on
+    // any live seat. A reader deciding whether the world_state belt can be dropped: it cannot; both
+    // signals are real, turn_context is just denser.)
     if (line.includes('"turn_context"')) {
       try {
         const obj = JSON.parse(line) as { type?: unknown; payload?: { model?: unknown } };
@@ -120,13 +123,23 @@ export function readCodexEffectiveModel(rolloutPath: string, maxScanBytes = MAX_
       const buf = Buffer.alloc(end - start);
       readSync(fd, buf, 0, buf.length, start);
       const lines = buf.toString("utf-8").split("\n");
-      if (start > 0) lines.shift(); // possibly cut mid-record; that record is covered by the next window
+      // The first line may be a record's TAIL cut at the window boundary. Drop it here — and size
+      // the next window to END just past that fragment, so the straddling record is re-read WHOLE
+      // from its own line start. A fixed small overlap loses any straddler longer than it (r1
+      // proved a 20KB record vanishing over a 4KB overlap — and a lost straddler usually means a
+      // STALE model read, the exact silence this detector exists to end; real world_state records
+      // reach ~22KB). Sizing from the dropped fragment makes the overlap exact by construction.
+      let droppedBytes = 0;
+      if (start > 0 && lines.length > 0) {
+        droppedBytes = Buffer.byteLength(lines[0]!, "utf-8");
+        lines.shift();
+      }
       const model = newestCodexModel(lines);
       if (model !== null) return model;
-      // Overlap one line-length margin is unnecessary: the shifted first line's record straddles the
-      // boundary and is re-read whole in the next (earlier) window because windows share the boundary.
-      end = start + Math.min(4 * 1024, TAIL_BYTES); // step back with a 4KB overlap for the straddler
-      end = start === scanFloor ? scanFloor : end;
+      if (start === scanFloor) break;
+      // Monotonic progress guard: a single record wider than the whole window cannot be recovered
+      // (no such record observed; cap accepts a stale-or-null read there rather than looping).
+      end = Math.min(end - 1, start + droppedBytes + 1);
     }
     return null;
   } catch {
