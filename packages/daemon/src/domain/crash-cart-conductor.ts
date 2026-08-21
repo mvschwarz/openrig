@@ -59,3 +59,40 @@ export class RestoreConductor {
     return results;
   }
 }
+
+/** Deps for the DEFAULT per-rig restore — structurally typed so the conductor stays
+ *  decoupled from the full orchestrator (the real wiring passes
+ *  `snapshotRepo.findLatestRestoreUsable` and `RestoreOrchestrator.restore`, whose
+ *  RestoreOutcome satisfies this shape). */
+export interface RestoreRigDeps {
+  /** Newest restore-usable snapshot for the rig, or null (→ `not_attempted`; never a silent substitute). */
+  findLatestRestoreUsable: (rigId: string) => { id: string } | null;
+  /** The shipped per-rig restore. `onAttemptStarted` yields the restore-started event seq = the receipt ref. */
+  restore: (
+    snapshotId: string,
+    opts?: { onAttemptStarted?: (attemptId: number) => void },
+  ) => Promise<{ ok: boolean; result?: { rigResult: PerRigOutcome } }>;
+}
+
+/** Build the default `restoreRig` dep: COMPOSE findLatestRestoreUsable → restore →
+ *  rigResult. A rig with no usable snapshot is `not_attempted` (restore never runs);
+ *  a restore that fails outright is `failed`. Never re-authors restore logic. */
+export function createDefaultRestoreRig(
+  _deps: RestoreRigDeps,
+): (rigId: string) => Promise<{ outcome: PerRigOutcome; receiptRef?: number }> {
+  return async (rigId) => {
+    const snapshot = _deps.findLatestRestoreUsable(rigId);
+    if (!snapshot) return { outcome: "not_attempted" }; // no usable snapshot — never a silent substitute
+    let receiptRef: number | undefined;
+    const outcome = await _deps.restore(snapshot.id, {
+      onAttemptStarted: (attemptId) => {
+        receiptRef = attemptId;
+      },
+    });
+    // ok:true → result.rigResult; ok:false WITH a result (e.g. pre-restore validation
+    // fail → `not_attempted`) → its rigResult; ok:false with no result (a hard failure:
+    // snapshot/rig not found, rig not stopped, restore in progress) → `failed`.
+    const outcomeResult: PerRigOutcome = outcome.result?.rigResult ?? "failed";
+    return { outcome: outcomeResult, receiptRef };
+  };
+}

@@ -5,7 +5,7 @@
 // dep wraps findLatestRestoreUsable + RestoreOrchestrator.restore; verified by the
 // integration + door test).
 import { describe, it, expect } from "vitest";
-import { RestoreConductor, type PerRigOutcome } from "../src/domain/crash-cart-conductor.js";
+import { RestoreConductor, createDefaultRestoreRig, type PerRigOutcome } from "../src/domain/crash-cart-conductor.js";
 
 // kernel FIRST, then the rest — the founder's order the conductor must honor.
 const rigsInOrder = () => [
@@ -74,5 +74,46 @@ describe("RestoreConductor — Atom B core", () => {
     });
     const results = await c.restoreFleet();
     expect(results[0]!.receiptRef).toBe(4242);
+  });
+});
+
+describe("createDefaultRestoreRig — composes findLatestRestoreUsable + restore (R3/R4)", () => {
+  it("R3: no usable snapshot → not_attempted, and restore is NEVER called (no silent substitute)", async () => {
+    let restoreCalled = false;
+    const restoreRig = createDefaultRestoreRig({
+      findLatestRestoreUsable: () => null,
+      restore: async () => {
+        restoreCalled = true;
+        return { ok: true, result: { rigResult: "fully_restored" } };
+      },
+    });
+    const r = await restoreRig("alpha");
+    expect(r.outcome).toBe("not_attempted");
+    expect(restoreCalled).toBe(false);
+  });
+
+  it("usable snapshot → restore(snapshot.id) and returns its rigResult + the attemptId receiptRef", async () => {
+    let usedSnapshotId: string | undefined;
+    const restoreRig = createDefaultRestoreRig({
+      findLatestRestoreUsable: () => ({ id: "snap-7" }),
+      restore: async (snapshotId, opts) => {
+        usedSnapshotId = snapshotId;
+        opts?.onAttemptStarted?.(99); // the restore-started event seq
+        return { ok: true, result: { rigResult: "partially_restored" } };
+      },
+    });
+    const r = await restoreRig("alpha");
+    expect(usedSnapshotId).toBe("snap-7");
+    expect(r.outcome).toBe("partially_restored");
+    expect(r.receiptRef).toBe(99);
+  });
+
+  it("restore ok:false (no result) → failed", async () => {
+    const restoreRig = createDefaultRestoreRig({
+      findLatestRestoreUsable: () => ({ id: "snap-1" }),
+      restore: async () => ({ ok: false }),
+    });
+    const r = await restoreRig("alpha");
+    expect(r.outcome).toBe("failed");
   });
 });
