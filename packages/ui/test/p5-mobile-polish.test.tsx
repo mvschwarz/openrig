@@ -13,17 +13,14 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, cleanup, waitFor, fireEvent } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import {
-  createMemoryHistory,
-  RouterProvider,
-  createRouter,
-} from "@tanstack/react-router";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { useShellViewport } from "../src/hooks/useShellViewport.js";
 import { renderHook, act } from "@testing-library/react";
 import { createMockEventSourceClass } from "./helpers/mock-event-source.js";
+import { createAppTestRouter } from "./helpers/test-router.js";
+import { AppShell } from "../src/components/AppShell.js";
+import { HostScopePage } from "../src/components/topology/ScopePages.js";
 
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch;
@@ -64,10 +61,16 @@ async function renderAt(initialPath: string, viewportWidth: number) {
     writable: true,
   });
   window.dispatchEvent(new Event("resize"));
-  const { router } = await import("../src/routes.js");
-  const memoryHistory = createMemoryHistory({ initialEntries: [initialPath] });
-  const memoryRouter = createRouter({ routeTree: router.routeTree, history: memoryHistory });
-  const result = render(<RouterProvider router={memoryRouter} />);
+  const result = render(
+    createAppTestRouter({
+      routes: [
+        { path: "/topology", component: HostScopePage },
+        { path: "$", component: () => null },
+      ],
+      rootComponent: ({ children }) => <AppShell>{children}</AppShell>,
+      initialPath,
+    }),
+  );
   await waitFor(() => {
     expect(result.container.querySelector("[data-testid='app-rail']")).toBeTruthy();
   }, { timeout: 5000 });
