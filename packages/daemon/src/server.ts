@@ -39,6 +39,7 @@ import { bootstrapRoutes } from "./routes/bootstrap.js";
 import { discoveryRoutes } from "./routes/discovery.js";
 import { bundleRoutes } from "./routes/bundles.js";
 import { restoreCheckRoutes } from "./routes/restore-check.js";
+import { crashCartRoutes } from "./routes/crash-cart.js";
 import { agentsRoutes } from "./routes/agents.js";
 import { psRoutes } from "./routes/ps.js";
 import type { PsProjectionService } from "./domain/ps-projection.js";
@@ -634,6 +635,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/events", eventsRoute);
   app.route("/api/rigs/:rigId/snapshots", snapshotsRoutes);
   app.route("/api/rigs/:rigId/restore", restoreRoutes);
+  app.route("/api/crash-cart", crashCartRoutes);
   app.route("/api/rigs/import", rigspecImportRoutes);
   app.get("/api/rigs/:rigId/spec", handleExportYaml);
   app.get("/api/rigs/:rigId/spec.json", handleExportJson);
