@@ -1432,7 +1432,25 @@ Notes:
 - Restate-and-confirm posture (HG-4): `set` is restate-only until `--confirm` is passed. This prevents accidental script application.
 - `--qualifier` strict reject for `global_host` (HG-7 guard finding): operators who type `--scope global_host --qualifier <id>` get an error and the daemon is never contacted. The CLI does NOT silently drop the qualifier.
 - Operator-edit mutations (`set --confirm`, `unset`) require an operator bearer token (`--bearer` or `OPENRIG_AUTH_BEARER_TOKEN` env).
-- Surface source-verified against `packages/cli/src/commands/rig-policy.ts` at `53794fbe` (v0.3.3).
+- Surface source-verified against `packages/cli/src/commands/rig-mode.ts` at `b13a8e4c7` (0.5.2 rename).
+
+### `rig policy`
+
+Usage: `rig policy <subcommand>` — the top-level PERMISSION-POLICY verb, introduced in 0.5.2 after
+the context-mode verb moved to `rig mode` (RULING-rig-mode-rig-policy-naming). OpenRig bakes NO
+allow/ask/deny permission policy — the harness-native permissions are the control surface. This verb
+TEACHES and RECORDS into RigSpec (`permission_policy: builtin:<name> | none`); it never enforces at
+runtime.
+
+Subcommands:
+- `list [--json]` — the built-in templates (`locked | standard | open | yolo`) plus the reserved
+  deliberate-`none` choice, each with its ref form.
+- `show <name> [--json]` — one choice: its ref form and what recording it means.
+- `current --spec <path> [--json]` — the `permission_policy` value recorded in a rig spec and how it
+  classifies (absent = the floor; `none` = deliberate; `builtin:<name>`; custom relative path).
+- `apply <name> --spec <path> [--json]` — record the choice into an EXISTING spec via the same
+  comment-preserving flow as `rig setup --policy` (which stays as the setup-step composition, not an
+  alias). A new install has no spec; nothing is written and the floor holds by absence.
 
 ## Commands Not Present
 

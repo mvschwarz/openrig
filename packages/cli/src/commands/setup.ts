@@ -112,7 +112,7 @@ const DARWIN_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure = {
   purpose: "Set cmux socket control to an OpenRig-compatible automation mode.",
 };
 
-function defaultDeps(): SetupDeps {
+export function defaultDeps(): SetupDeps {
   return {
     exec: (cmd: string, opts?: { timeoutMs?: number }) =>
       execSync(cmd, {
@@ -245,7 +245,7 @@ function policyRefFor(choice: PolicyChoice): string {
  * directory containing a root spec. Uses deps.readFile as the read+existence probe (null = absent), so
  * the resolver stays fs-injectable and never mints a spec — RULING-C: no scaffold-authoring here.
  */
-function resolveExistingSpecPath(deps: SetupDeps, specPath: string): string | null {
+export function resolveExistingSpecPath(deps: SetupDeps, specPath: string): string | null {
   if (deps.readFile(specPath) !== null) return specPath;
   for (const name of ROOT_SPEC_NAMES) {
     const candidate = path.join(specPath, name);
@@ -259,7 +259,7 @@ function resolveExistingSpecPath(deps: SetupDeps, specPath: string): string | nu
  * Only called when the operator explicitly passed --policy (P3). Unknown choice or no resolvable
  * existing spec => a `fail` step and NOTHING is written (P1 + RULING-C new-install-writes-nothing).
  */
-function recordPermissionPolicyStep(deps: SetupDeps, choice: string, specPath: string | undefined): SetupStep {
+export function recordPermissionPolicyStep(deps: SetupDeps, choice: string, specPath: string | undefined): SetupStep {
   if (!(POLICY_CHOICES as readonly string[]).includes(choice)) {
     return {
       id: "policy_record",

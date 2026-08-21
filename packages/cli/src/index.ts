@@ -80,6 +80,7 @@ import { compactCommand, type CompactDeps } from "./commands/compact.js";
 import { heartbeatCommand, type HeartbeatDeps } from "./commands/heartbeat.js";
 import { seatCommand, handoverCommand, type SeatDeps } from "./commands/seat.js";
 import { rigModeCommand, type RigModeDeps } from "./commands/rig-mode.js";
+import { policyCommand } from "./commands/policy.js";
 import { startupProofCommand, type StartupProofDeps } from "./commands/startup-proof.js";
 import type { LifecycleDeps } from "./daemon-lifecycle.js";
 import { CLI_VERSION } from "./version.js";
@@ -212,6 +213,8 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(forkCommand(depsOverride?.forkDeps));
   program.addCommand(workspaceCommand(depsOverride?.workspaceDeps));
   program.addCommand(rigModeCommand(depsOverride?.rigModeDeps));
+  // B7 — the reintroduced permission-policy verb (the context-mode verb above is now `rig mode`).
+  program.addCommand(policyCommand());
   program.addCommand(whoamiCommand(depsOverride?.whoamiDeps));
   program.addCommand(configCommand(depsOverride?.configPath));
   program.addCommand(fileCommand());
