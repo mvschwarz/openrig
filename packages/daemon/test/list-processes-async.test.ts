@@ -6,8 +6,8 @@
 // pre-B12 implementation violated: invoking the sampler must hand control back to the event loop
 // immediately instead of blocking for the whole spawn. The old code ran ps via execSync inside the
 // async body, so the CALL ITSELF stalled for the full ps duration (measured ~100-220ms on this
-// class of box) and every HTTP request queued behind it. The async execFile version returns its
-// promise in single-digit milliseconds; the 50ms bound leaves 2-4x margin on both sides.
+// class of box) and every HTTP request queued behind it. The discriminator is an ORDERING
+// property, not a wall-clock bound — the inline note records why a bound was tried and dropped.
 // Door test: revert the async wrap locally and this fails; on the candidate it passes.
 
 import { describe, it, expect } from "vitest";
