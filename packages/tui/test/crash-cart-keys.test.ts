@@ -23,6 +23,35 @@ describe("resolveCrashCartKey — cockpit action keys (gated on daemon-down)", (
     expect(resolveCrashCartKey("enter", opts("down", "recovery"))).toBe("restore");
   });
 
+  it("H2: ⏎ consults the one-click gate — zero-generation (all seats resumable) → direct restore", () => {
+    const zeroGen: CrashCartRenderOpts = {
+      daemonState: "down",
+      crashCart: {
+        mode: "recovery",
+        header: { lastSeen: "", uptimeText: "", reasonText: "" },
+        foundOnHost: [{ name: "kernel", seatCount: 4, resumableCount: 4, lastActive: "" }],
+        whereWorkStopped: [],
+      },
+    };
+    expect(resolveCrashCartKey("enter", zeroGen)).toBe("restore");
+  });
+
+  it("H2: ⏎ with a non-resumable seat → restore-confirm (NOT a silent one-click)", () => {
+    const withDelta: CrashCartRenderOpts = {
+      daemonState: "down",
+      crashCart: {
+        mode: "recovery",
+        header: { lastSeen: "", uptimeText: "", reasonText: "" },
+        foundOnHost: [
+          { name: "kernel", seatCount: 4, resumableCount: 4, lastActive: "" },
+          { name: "openrig-pm", seatCount: 13, resumableCount: 7, lastActive: "" }, // 6 non-resumable
+        ],
+        whereWorkStopped: [],
+      },
+    };
+    expect(resolveCrashCartKey("enter", withDelta)).toBe("restore-confirm");
+  });
+
   it("first-run: only start-daemon + onboarding (no restore-of-nothing, no inspect)", () => {
     expect(resolveCrashCartKey("s", opts("down", "first-run"))).toBe("start-daemon");
     expect(resolveCrashCartKey("n", opts("down", "first-run"))).toBe("onboarding");

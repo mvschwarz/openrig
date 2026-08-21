@@ -72,7 +72,11 @@ describe("RestoreConductor — Atom B core", () => {
     // kernel (in-flight) completed; alpha/beta never started
     expect(attempted).toEqual(["kernel"]);
     expect(results.find((r) => r.rigId === "kernel")!.outcome).toBe("fully_restored");
-    expect(results.find((r) => r.rigId === "alpha")!.outcome).toBe("not_attempted");
+    const alpha = results.find((r) => r.rigId === "alpha")!;
+    expect(alpha.outcome).toBe("not_attempted");
+    // R3: the cancel-skipped rig carries WHY + the fix (never a blank not_attempted)
+    expect(alpha.reason).toMatch(/cancel/i);
+    expect(alpha.remediation).toMatch(/re-run/i);
     expect(results.find((r) => r.rigId === "beta")!.outcome).toBe("not_attempted");
   });
 
@@ -83,6 +87,18 @@ describe("RestoreConductor — Atom B core", () => {
     });
     const results = await c.restoreFleet();
     expect(results[0]!.receiptRef).toBe(4242);
+  });
+
+  it("r1-root: emits onRigDone per rig AS IT COMPLETES (the progress stream), in order", async () => {
+    const streamed: Array<{ rigId: string; outcome: PerRigOutcome }> = [];
+    const c = new RestoreConductor({
+      listRigsInOrder: rigsInOrder,
+      restoreRig: async (rigId) => ({ outcome: (rigId === "alpha" ? "failed" : "fully_restored") as PerRigOutcome }),
+    });
+    const results = await c.restoreFleet({ onRigDone: (r) => streamed.push({ rigId: r.rigId, outcome: r.outcome }) });
+    // every rig streamed as it finished, in kernel-first order, matching the final sequence
+    expect(streamed.map((r) => r.rigId)).toEqual(["kernel", "alpha", "beta"]);
+    expect(streamed).toEqual(results.map((r) => ({ rigId: r.rigId, outcome: r.outcome })));
   });
 });
 
@@ -115,6 +131,17 @@ describe("createDefaultRestoreRig — composes findLatestRestoreUsable + restore
     expect(usedSnapshotId).toBe("snap-7");
     expect(r.outcome).toBe("partially_restored");
     expect(r.receiptRef).toBe(99);
+  });
+
+  it("R3: no usable snapshot → not_attempted CARRIES a reason + remediation (no blank gap)", async () => {
+    const restoreRig = createDefaultRestoreRig({
+      findLatestRestoreUsable: () => null,
+      restore: async () => ({ ok: true, result: { rigResult: "fully_restored" } }),
+    });
+    const r = await restoreRig("alpha");
+    expect(r.outcome).toBe("not_attempted");
+    expect(r.reason).toMatch(/no restore-usable snapshot/i);
+    expect(r.remediation).toMatch(/snapshot/i);
   });
 
   it("restore ok:false (no result) → failed", async () => {

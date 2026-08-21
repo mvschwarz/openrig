@@ -22,6 +22,10 @@ export interface ConductorRigResult {
   /** Per-rig triage rows (seats needing operator action) — the fleet
    *  attention_required is the UNION of these across the sequence. */
   attention?: AttentionRow[];
+  /** R3 — for a `not_attempted` rig, WHY it was skipped (no honest gap left blank). */
+  reason?: string;
+  /** R3 — the operator action that would let this rig be restored next time. */
+  remediation?: string;
 }
 
 export interface RestoreConductorDeps {
@@ -30,7 +34,9 @@ export interface RestoreConductorDeps {
   /** Restore ONE rig. Default (wired at the route) = findLatestRestoreUsable(rigId) →
    *  RestoreOrchestrator.restore(snapshotId) → rollupRestoreRigResult; a rig with no
    *  usable snapshot returns `not_attempted` (never a silent older/partial substitute). */
-  restoreRig: (rigId: string) => Promise<{ outcome: PerRigOutcome; receiptRef?: string | number; attention?: AttentionRow[] }>;
+  restoreRig: (
+    rigId: string,
+  ) => Promise<{ outcome: PerRigOutcome; receiptRef?: string | number; attention?: AttentionRow[]; reason?: string; remediation?: string }>;
   /** Cancel signal, polled at each rig BOUNDARY (stop-before-next-rig). Optional. */
   isCancelled?: () => boolean;
 }
@@ -40,23 +46,43 @@ export class RestoreConductor {
 
   /** Restore the fleet, kernel-first, best-effort, honoring stop-before-next-rig cancel.
    *  Returns the ordered per-rig sequence (Atom C aggregates it into the FleetRollup). */
-  async restoreFleet(): Promise<ConductorRigResult[]> {
+  async restoreFleet(opts?: { onRigDone?: (result: ConductorRigResult) => void }): Promise<ConductorRigResult[]> {
     const rigs = this.deps.listRigsInOrder(); // kernel first, then the rest
     const results: ConductorRigResult[] = [];
+    // Progress "stream": each rig's result is emitted as it completes so the
+    // route can update a pollable rollup while the fleet restore continues
+    // (the locked async shape — the route answers on-commit, never blocks to
+    // completion). onRigDone stubbed until wired below (RED-first).
+    const record = (result: ConductorRigResult) => {
+      results.push(result);
+      opts?.onRigDone?.(result); // emit progress as each rig completes
+    };
     for (const rig of rigs) {
       // Stop-before-next-rig: poll cancel at the rig BOUNDARY, before this rig
       // starts. A rig already in flight is never interrupted; rigs not yet
       // reached become `not_attempted` (honest, never silently dropped).
       if (this.deps.isCancelled?.()) {
-        results.push({ rigId: rig.rigId, outcome: "not_attempted" });
+        record({
+          rigId: rig.rigId,
+          outcome: "not_attempted",
+          reason: "cancelled before this rig started (stop-before-next-rig)",
+          remediation: "re-run the fleet restore to attempt this rig",
+        });
         continue;
       }
       try {
         const r = await this.deps.restoreRig(rig.rigId);
-        results.push({ rigId: rig.rigId, outcome: r.outcome, receiptRef: r.receiptRef, attention: r.attention });
+        record({
+          rigId: rig.rigId,
+          outcome: r.outcome,
+          receiptRef: r.receiptRef,
+          attention: r.attention,
+          reason: r.reason,
+          remediation: r.remediation,
+        });
       } catch {
         // Best-effort continue: one rig's failure never halts the fleet.
-        results.push({ rigId: rig.rigId, outcome: "failed" });
+        record({ rigId: rig.rigId, outcome: "failed" });
       }
     }
     return results;
@@ -82,10 +108,16 @@ export interface RestoreRigDeps {
  *  a restore that fails outright is `failed`. Never re-authors restore logic. */
 export function createDefaultRestoreRig(
   _deps: RestoreRigDeps,
-): (rigId: string) => Promise<{ outcome: PerRigOutcome; receiptRef?: number }> {
+): (rigId: string) => Promise<{ outcome: PerRigOutcome; receiptRef?: number; reason?: string; remediation?: string }> {
   return async (rigId) => {
     const snapshot = _deps.findLatestRestoreUsable(rigId);
-    if (!snapshot) return { outcome: "not_attempted" }; // no usable snapshot — never a silent substitute
+    if (!snapshot)
+      // no usable snapshot — never a silent substitute; R3: carry WHY + the fix.
+      return {
+        outcome: "not_attempted",
+        reason: "no restore-usable snapshot for this rig",
+        remediation: "take a snapshot (rig snapshot create) or mark an existing one restore-usable",
+      };
     let receiptRef: number | undefined;
     const outcome = await _deps.restore(snapshot.id, {
       onAttemptStarted: (attemptId) => {

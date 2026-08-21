@@ -6,8 +6,18 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, daemonStatusGuard, type LifecycleDeps } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 
-/** The `POST /api/crash-cart/restore-fleet` response — the conductor's FleetRollup + derived verdict. */
-interface FleetRestoreResponse {
+/** The `POST /api/crash-cart/restore-fleet` on-commit response — the fleet-attempt handle
+ *  (the restore runs in the daemon BACKGROUND; the CLI polls the status endpoint below). */
+interface FleetKickResponse {
+  fleetAttemptId: string;
+  status: string;
+}
+
+/** The `GET /api/crash-cart/restore-fleet/:id` status — progress + the FleetRollup + verdict,
+ *  updated as rigs complete. The CLI polls this until `done` (never treats the kick as the result). */
+interface FleetStatusResponse {
+  done: boolean;
+  cancelled: boolean;
   rollup: {
     counts: Record<string, number>;
     sequence: Array<{ rigId: string; outcome: string; receiptRef?: number }>;
@@ -44,6 +54,8 @@ export interface CrashCartCommandDeps {
   getRestoreClient?: (opts: { json?: boolean }) => Promise<DaemonClient | null>;
   lifecycleDeps?: LifecycleDeps;
   clientFactory?: (url: string) => DaemonClient;
+  /** Poll delay between status reads (default 500ms); injected as a no-op in tests. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 function openrigHome(): string {
@@ -159,23 +171,71 @@ export function crashCartCommand(deps?: Partial<CrashCartCommandDeps>): Command 
         process.exitCode = 1;
         return;
       }
-      const res = await client.post<FleetRestoreResponse>("/api/crash-cart/restore-fleet");
-      if (res.status >= 400) {
-        const err = (res.data as { error?: string })?.error ?? `HTTP ${res.status}`;
-        write(json ? JSON.stringify({ error: err }) : `Fleet restore failed: ${err}`);
+      const sleep = deps?.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+      const POLL_INTERVAL_MS = 500;
+      const MAX_POLLS = 1200; // ~10 min ceiling; on exhaustion the restore keeps running (re-poll by id)
+      try {
+        // Kick the async verb — the daemon answers on-commit with a fleet-attempt handle
+        // and restores in the background. A single bounded POST would time out on a real
+        // seconds-per-seat fleet restore and discard the rollup; we POLL to completion.
+        const kick = await client.post<FleetKickResponse>("/api/crash-cart/restore-fleet");
+        if (kick.status >= 400) {
+          const err = (kick.data as { error?: string })?.error ?? `HTTP ${kick.status}`;
+          write(json ? JSON.stringify({ error: err }) : `Fleet restore failed: ${err}`);
+          process.exitCode = 1;
+          return;
+        }
+        const fleetAttemptId = kick.data?.fleetAttemptId;
+        if (!fleetAttemptId) {
+          write(json ? JSON.stringify({ error: "no fleetAttemptId" }) : "Fleet restore failed: no fleet-attempt id returned");
+          process.exitCode = 1;
+          return;
+        }
+
+        let final: FleetStatusResponse | undefined;
+        for (let i = 0; i < MAX_POLLS; i++) {
+          const status = await client.get<FleetStatusResponse>(`/api/crash-cart/restore-fleet/${fleetAttemptId}`);
+          if (status.status >= 400) {
+            const err = (status.data as { error?: string })?.error ?? `HTTP ${status.status}`;
+            write(json ? JSON.stringify({ error: err }) : `Fleet restore failed: ${err}`);
+            process.exitCode = 1;
+            return;
+          }
+          if (status.data?.done) {
+            final = status.data;
+            break;
+          }
+          await sleep(POLL_INTERVAL_MS);
+        }
+        if (!final) {
+          // Still running past the ceiling — honest, never a false verdict. The restore
+          // continues in the daemon; the operator can re-poll by id.
+          write(
+            json
+              ? JSON.stringify({ error: "still running", fleetAttemptId })
+              : `Fleet restore still running (attempt ${fleetAttemptId}) — poll again shortly.`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+
+        if (json) {
+          write(JSON.stringify({ rollup: final.rollup, verdict: final.verdict }));
+          return;
+        }
+        const { rollup, verdict } = final;
+        write(`Fleet restore: ${verdict}${final.cancelled ? " (cancelled)" : ""}`);
+        for (const r of rollup.sequence) write(`  ${r.rigId}: ${r.outcome}`);
+        if (rollup.attention_required.length > 0) {
+          write("Needs attention:");
+          for (const a of rollup.attention_required) write(`  ${a.rigId}/${a.seat} — ${a.need}`);
+        }
+      } catch (e) {
+        // r1: the sync action had NO error handling — a thrown client error killed the verb
+        // with an unhandled rejection. Structured, honest failure instead.
+        const msg = e instanceof Error ? e.message : String(e);
+        write(json ? JSON.stringify({ error: msg }) : `Fleet restore failed: ${msg}`);
         process.exitCode = 1;
-        return;
-      }
-      if (json) {
-        write(JSON.stringify(res.data));
-        return;
-      }
-      const { rollup, verdict } = res.data;
-      write(`Fleet restore: ${verdict}`);
-      for (const r of rollup.sequence) write(`  ${r.rigId}: ${r.outcome}`);
-      if (rollup.attention_required.length > 0) {
-        write("Needs attention:");
-        for (const a of rollup.attention_required) write(`  ${a.rigId}/${a.seat} — ${a.need}`);
       }
     });
 
