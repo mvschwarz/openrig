@@ -45,6 +45,11 @@ export function loadHostBindings(path: string = defaultHostBindingsPath()): Host
   try {
     const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
     if (!parsed || typeof parsed !== "object") return empty;
+    // A declared version other than 1 is a FUTURE sidecar shape — treat it as unreadable (empty,
+    // fail-open) rather than mis-parsing v2 fields through v1 eyes. Absent version reads as v1
+    // (files this code wrote always carry it; hand-trimmed ones stay readable).
+    const version = (parsed as { version?: unknown }).version;
+    if (version !== undefined && version !== 1) return empty;
     const bindings = (parsed as { bindings?: unknown }).bindings;
     if (!bindings || typeof bindings !== "object") return empty;
     const out: Record<string, HostBinding> = {};

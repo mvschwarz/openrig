@@ -230,6 +230,13 @@ export function resolveHost(registry: HostRegistry, id: string): HostResolution 
   // alias -> id -> transport. The human alias is the intentional handle, so an `id` match is tried
   // across the WHOLE registry before any join key — that tiebreak is defined rather than accidental,
   // even though a collision with a random self-id is near-impossible.
+  //
+  // DELIBERATE TWIN DIVERGENCE: the CLI twin's resolveHost additionally accepts sidecar-LEARNED
+  // bindings (host-bindings.json) so a pasted reply hint ending in a learned self-id resolves at the
+  // CLI edge. This daemon copy does NOT take that parameter, on purpose: it serves PLACEMENT, which
+  // resolves operator-authored aliases from topology manifests, and the daemon never sees a 3-part
+  // target (BR-1 — the CLI edge strips the host qualifier). Mirroring the learned-binding merge here
+  // would be dead surface. If placement ever grows a self-id lookup, take the CLI twin's shape.
   const match = registry.hosts.find((h) => h.id === id)
     ?? registry.hosts.find((h) => h.hostId === id);
   if (match) return { ok: true, host: match };

@@ -79,6 +79,12 @@ describe("loadHostBindings — fail-open by contract", () => {
     expect(loadHostBindings(path)).toEqual({ version: 1, bindings: {} });
   });
 
+  it("a FUTURE declared version reads as empty (fail-open), never mis-parsed through v1 eyes", () => {
+    const path = tmpPath();
+    writeFileSync(path, JSON.stringify({ version: 2, bindings: { h: { hostId: "host-1111", firstObservedAt: "x", lastObservedAt: "x" } } }), "utf-8");
+    expect(loadHostBindings(path)).toEqual({ version: 1, bindings: {} });
+  });
+
   it("entries without a hostId are skipped, well-formed siblings survive", () => {
     const path = tmpPath();
     writeFileSync(path, JSON.stringify({ version: 1, bindings: { bad: {}, good: { hostId: "host-1111", firstObservedAt: "x", lastObservedAt: "x" } } }), "utf-8");
