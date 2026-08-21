@@ -37,12 +37,17 @@ describe("POST /api/crash-cart/restore-fleet — the conductor batch verb", () =
 
     const res = await app.request("/api/crash-cart/restore-fleet", { method: "POST" });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { sequence: Array<{ rigId: string; outcome: string }> };
+    const body = (await res.json()) as {
+      rollup: { sequence: Array<{ rigId: string; outcome: string }>; counts: Record<string, number> };
+      verdict: string;
+    };
 
     // kernel restored FIRST, then alpha
     expect(restored).toEqual(["snap-r-kernel", "snap-r-alpha"]);
-    expect(body.sequence.map((r) => r.rigId)).toEqual(["r-kernel", "r-alpha"]);
-    expect(body.sequence.every((r) => r.outcome === "fully_restored")).toBe(true);
+    expect(body.rollup.sequence.map((r) => r.rigId)).toEqual(["r-kernel", "r-alpha"]);
+    expect(body.rollup.sequence.every((r) => r.outcome === "fully_restored")).toBe(true);
+    expect(body.rollup.counts.fully_restored).toBe(2);
+    expect(body.verdict).toBe("all_fully_restored");
   });
 
   it("a rig with no usable snapshot is not_attempted; the fleet still proceeds", async () => {
@@ -56,8 +61,9 @@ describe("POST /api/crash-cart/restore-fleet — the conductor batch verb", () =
       restoreOrchestrator: { restore: async () => ({ ok: true, result: { rigResult: "fully_restored" } }) },
     });
     const res = await app.request("/api/crash-cart/restore-fleet", { method: "POST" });
-    const body = (await res.json()) as { sequence: Array<{ rigId: string; outcome: string }> };
-    expect(body.sequence.find((r) => r.rigId === "r-kernel")!.outcome).toBe("fully_restored");
-    expect(body.sequence.find((r) => r.rigId === "r-beta")!.outcome).toBe("not_attempted");
+    const body = (await res.json()) as { rollup: { sequence: Array<{ rigId: string; outcome: string }>; counts: Record<string, number> } };
+    expect(body.rollup.sequence.find((r) => r.rigId === "r-kernel")!.outcome).toBe("fully_restored");
+    expect(body.rollup.sequence.find((r) => r.rigId === "r-beta")!.outcome).toBe("not_attempted");
+    expect(body.rollup.counts).toEqual({ fully_restored: 1, partially_restored: 0, failed: 0, not_attempted: 1 });
   });
 });

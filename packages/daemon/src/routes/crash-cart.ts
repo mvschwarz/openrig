@@ -11,6 +11,8 @@ import {
   RestoreConductor,
   createDefaultRestoreRig,
   listRigsInKernelFirstOrder,
+  aggregateFleetRollup,
+  deriveFleetVerdict,
 } from "../domain/crash-cart-conductor.js";
 
 export const crashCartRoutes = new Hono();
@@ -35,5 +37,9 @@ crashCartRoutes.post("/restore-fleet", async (c) => {
     }),
   });
   const sequence = await conductor.restoreFleet();
-  return c.json({ sequence });
+  // Atom C — pure aggregation over the per-rig sequence. The verdict is DERIVED
+  // f(counts), computed here and NEVER stored on the rollup. attention_required is
+  // wired from the shipped per-rig restore-check attention projection (next increment).
+  const rollup = aggregateFleetRollup(sequence);
+  return c.json({ rollup, verdict: deriveFleetVerdict(rollup.counts) });
 });

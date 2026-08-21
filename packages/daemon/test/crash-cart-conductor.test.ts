@@ -5,7 +5,15 @@
 // dep wraps findLatestRestoreUsable + RestoreOrchestrator.restore; verified by the
 // integration + door test).
 import { describe, it, expect } from "vitest";
-import { RestoreConductor, createDefaultRestoreRig, listRigsInKernelFirstOrder, type PerRigOutcome } from "../src/domain/crash-cart-conductor.js";
+import {
+  RestoreConductor,
+  createDefaultRestoreRig,
+  listRigsInKernelFirstOrder,
+  aggregateFleetRollup,
+  deriveFleetVerdict,
+  type PerRigOutcome,
+  type ConductorRigResult,
+} from "../src/domain/crash-cart-conductor.js";
 
 // kernel FIRST, then the rest — the founder's order the conductor must honor.
 const rigsInOrder = () => [
@@ -135,5 +143,41 @@ describe("listRigsInKernelFirstOrder (R2 — kernel supervisor first)", () => {
   it("no kernel rig → all rigs, none flagged kernel (honest, not fabricated)", () => {
     const ordered = listRigsInKernelFirstOrder({ listRigs: () => [{ id: "r-a", name: "a" }] });
     expect(ordered).toEqual([{ rigId: "r-a", isKernel: false }]);
+  });
+});
+
+describe("aggregateFleetRollup + deriveFleetVerdict (R6 / ARCH-RULING Q2 — pure aggregation)", () => {
+  const seq: ConductorRigResult[] = [
+    { rigId: "kernel", outcome: "fully_restored", receiptRef: 1 },
+    { rigId: "alpha", outcome: "failed" },
+    { rigId: "beta", outcome: "not_attempted" },
+    { rigId: "gamma", outcome: "partially_restored", receiptRef: 4 },
+  ];
+
+  it("counts by the CLOSED union; not_attempted is first-class (never folded into failed)", () => {
+    const rollup = aggregateFleetRollup(seq);
+    expect(rollup.counts).toEqual({ fully_restored: 1, partially_restored: 1, failed: 1, not_attempted: 1 });
+  });
+
+  it("sequence is a view carrying receiptRef; NO verdict field is stored on the rollup", () => {
+    const rollup = aggregateFleetRollup(seq);
+    expect(rollup.sequence).toBe(seq);
+    expect(rollup.sequence.find((r) => r.rigId === "kernel")!.receiptRef).toBe(1);
+    expect((rollup as Record<string, unknown>)["verdict"]).toBeUndefined(); // verdict is derived, not stored
+  });
+
+  it("attention_required is the passed union (a view over per-rig attention)", () => {
+    const attention = [{ rigId: "alpha", seat: "dev.driver", need: "codex auth" }];
+    const rollup = aggregateFleetRollup(seq, attention);
+    expect(rollup.attention_required).toEqual(attention);
+    expect(aggregateFleetRollup(seq).attention_required).toEqual([]); // default empty
+  });
+
+  it("deriveFleetVerdict is f(counts): all→all_fully_restored, all-failed→all_failed, all-not_attempted→none_attempted, mix→mixed", () => {
+    expect(deriveFleetVerdict({ fully_restored: 3, partially_restored: 0, failed: 0, not_attempted: 0 })).toBe("all_fully_restored");
+    expect(deriveFleetVerdict({ fully_restored: 0, partially_restored: 0, failed: 2, not_attempted: 0 })).toBe("all_failed");
+    expect(deriveFleetVerdict({ fully_restored: 0, partially_restored: 0, failed: 0, not_attempted: 2 })).toBe("none_attempted");
+    expect(deriveFleetVerdict(aggregateFleetRollup(seq).counts)).toBe("mixed");
+    expect(deriveFleetVerdict({ fully_restored: 0, partially_restored: 0, failed: 0, not_attempted: 0 })).toBe("none_attempted");
   });
 });

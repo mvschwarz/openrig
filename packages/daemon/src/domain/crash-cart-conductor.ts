@@ -114,3 +114,52 @@ export function listRigsInKernelFirstOrder(
   const rest = all.filter((r) => r.name !== "kernel");
   return [...kernel, ...rest].map((r) => ({ rigId: r.id, isKernel: r.name === "kernel" }));
 }
+
+// ── Atom C — fleet rollup (PURE AGGREGATION, ARCH-RULING Q2) ──────────────────
+
+/** A triage row: a seat + exactly what it needs (picker/auth/remediation), sourced
+ *  from the shipped per-rig restore-check attention projection. The fleet
+ *  `attention_required` is the UNION of these across rigs — a VIEW, not a parallel record. */
+export interface AttentionRow {
+  rigId: string;
+  seat: string;
+  need: string;
+}
+
+/** Fleet rollup — PURE AGGREGATION over the conductor's per-rig sequence. The per-rig
+ *  outcome stays the shipped CLOSED union (never widened). NO fleet verdict is stored
+ *  here — a stored verdict could drift from the per-rig truth; derive it on demand via
+ *  {@link deriveFleetVerdict}. `not_attempted` is first-class (never folded into failed). */
+export interface FleetRollup {
+  counts: Record<PerRigOutcome, number>;
+  sequence: ConductorRigResult[];
+  attention_required: AttentionRow[];
+}
+
+/** The fleet verdict is a DERIVED function of the counts — never a stored field. */
+export type FleetVerdict = "all_fully_restored" | "all_failed" | "none_attempted" | "mixed";
+
+export function aggregateFleetRollup(
+  sequence: ConductorRigResult[],
+  attention: AttentionRow[] = [],
+): FleetRollup {
+  // All four closed-union keys initialized — `not_attempted` is first-class, never
+  // absent and never folded into `failed`.
+  const counts: Record<PerRigOutcome, number> = {
+    fully_restored: 0,
+    partially_restored: 0,
+    failed: 0,
+    not_attempted: 0,
+  };
+  for (const r of sequence) counts[r.outcome] += 1;
+  return { counts, sequence, attention_required: attention };
+}
+
+/** DERIVED f(counts) — computed, never stored (a stored verdict could drift). */
+export function deriveFleetVerdict(counts: Record<PerRigOutcome, number>): FleetVerdict {
+  const total = counts.fully_restored + counts.partially_restored + counts.failed + counts.not_attempted;
+  if (total === 0 || counts.not_attempted === total) return "none_attempted";
+  if (counts.fully_restored === total) return "all_fully_restored";
+  if (counts.failed === total) return "all_failed";
+  return "mixed";
+}
