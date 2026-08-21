@@ -36,7 +36,6 @@ import {
   BUILTIN_POLICY_NAMES,
   validatePermissionPolicyRef,
   resolvePermissionPolicyAttachment,
-  resolvePermissionPolicyRefValue,
   type ResolvedPolicyAttachment,
 } from "../lib/permission-policy/policy-ref.js";
 import { parsePolicySpec, validatePolicySpec } from "../lib/permission-policy/policy-spec.js";
@@ -61,20 +60,26 @@ const readFileDep = { readFile: (p: string) => fs.readFileSync(p, "utf-8") };
 
 interface SpecRefSite {
   site: string; // "rig" | "pods[i].members[j] (<logical id>)"
-  ref: string | null;
+  /** The RAW declared value: undefined = the key is truly absent; anything else (including a
+   *  non-string YAML value) is PRESENT and goes to the authoritative validator — a present
+   *  non-string must surface as INVALID, never quietly become "absent → floor" (r2 round 3). */
+  ref: unknown;
 }
 
-/** Collect every permission_policy declaration site in a parsed rig spec (rig level + members). */
+/** Collect every permission_policy declaration site in a parsed rig spec (rig level + members).
+ *  Presence is keyed on the KEY existing, not on the value being a string. */
 function collectRefSites(doc: Record<string, unknown>): SpecRefSite[] {
-  const sites: SpecRefSite[] = [{ site: "rig", ref: typeof doc["permission_policy"] === "string" ? (doc["permission_policy"] as string) : null }];
+  const sites: SpecRefSite[] = [{
+    site: "rig",
+    ref: Object.prototype.hasOwnProperty.call(doc, "permission_policy") ? doc["permission_policy"] : undefined,
+  }];
   const pods = Array.isArray(doc["pods"]) ? (doc["pods"] as Array<Record<string, unknown>>) : [];
   pods.forEach((pod, pi) => {
     const members = Array.isArray(pod["members"]) ? (pod["members"] as Array<Record<string, unknown>>) : [];
     members.forEach((member, mi) => {
-      const ref = typeof member["permission_policy"] === "string" ? (member["permission_policy"] as string) : null;
-      if (ref !== null) {
+      if (member && typeof member === "object" && Object.prototype.hasOwnProperty.call(member, "permission_policy")) {
         const id = [pod["id"], member["id"]].filter(Boolean).join(".");
-        sites.push({ site: `pods[${pi}].members[${mi}]${id ? ` (${id})` : ""}`, ref });
+        sites.push({ site: `pods[${pi}].members[${mi}]${id ? ` (${id})` : ""}`, ref: member["permission_policy"] });
       }
     });
   });
@@ -131,13 +136,14 @@ export function policyCommand(): Command {
         } else {
           const declaringDir = path.dirname(loaded.resolved);
           for (const { site, ref } of collectRefSites(loaded.doc)) {
-            if (ref === null || ref === "none" || ref.startsWith("builtin:")) continue;
+            if (ref === undefined) continue; // truly absent
+            if (typeof ref === "string" && (ref === "none" || ref.startsWith("builtin:"))) continue;
             const invalid = validatePermissionPolicyRef(ref, `${site}.permission_policy`);
             if (invalid) {
               custom.push({ site, ref, invalid });
               continue;
             }
-            const a = resolvePermissionPolicyAttachment(ref, declaringDir, readFileDep);
+            const a = resolvePermissionPolicyAttachment(ref as string, declaringDir, readFileDep);
             custom.push({ site, ref, resolvedTarget: a.resolvedTarget, surface: a.surface ?? null, launchPosture: a.launchPosture, contentResolved: a.contentResolved });
           }
         }
@@ -261,17 +267,19 @@ export function policyCommand(): Command {
       const rigRef = sites[0]!.ref;
       let anyInvalid = false;
       const report = sites.map(({ site, ref }) => {
-        const effective = site === "rig" ? ref : resolvePermissionPolicyRefValue(ref, rigRef) ?? null;
-        if (effective === null) {
+        // member > rig precedence on PRESENCE (a present member value overrides, even an invalid one —
+        // it must surface as ITS OWN defect, never silently disappear behind the rig ref).
+        const effective = site === "rig" ? ref : (ref !== undefined ? ref : rigRef);
+        if (effective === undefined) {
           return { site, ref: null, effective: null, applies: "absent — the floor (honest absence; nothing recorded)" };
         }
         const invalid = validatePermissionPolicyRef(effective, `${site}.permission_policy`);
         if (invalid) {
           anyInvalid = true;
-          return { site, ref, effective, invalid };
+          return { site, ref: ref ?? null, effective, invalid };
         }
-        const a = resolvePermissionPolicyAttachment(effective, declaringDir, readFileDep);
-        return { site, ref, effective, applies: describeAttachment(a), attachment: a };
+        const a = resolvePermissionPolicyAttachment(effective as string, declaringDir, readFileDep);
+        return { site, ref: ref ?? null, effective, applies: describeAttachment(a), attachment: a };
       });
       const out = { spec: loaded.resolved, sites: report, enforcement: HONESTY_PIN };
       if (opts.json) console.log(JSON.stringify(out));

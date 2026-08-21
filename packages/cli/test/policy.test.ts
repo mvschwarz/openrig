@@ -172,6 +172,32 @@ body
     expect(String(out.sites[0]!.applies)).toContain("advisory FLOOR");
   });
 
+  it("r2 round 3: a PRESENT non-string rig value is INVALID (exit 1), never reported as absent/floor", async () => {
+    fs.writeFileSync(path.join(dir, "rig.yaml"), "name: r\npermission_policy: 42\n");
+    const { logs, exitCode } = await runCapture(["policy", "current", "--spec", path.join(dir, "rig.yaml"), "--json"]);
+    expect(exitCode).toBe(1);
+    const out = JSON.parse(logs.join("")) as { sites: Array<Record<string, unknown>> };
+    expect(String(out.sites[0]!.invalid)).toContain("must be a non-empty string ref");
+  });
+
+  it("r2 round 3: a PRESENT non-string member value surfaces as ITS OWN site defect, never silently omitted", async () => {
+    fs.writeFileSync(path.join(dir, "rig.yaml"), "name: r\npermission_policy: builtin:standard\npods:\n  - id: dev\n    members:\n      - id: qa\n        permission_policy: { nested: true }\n");
+    const { logs, exitCode } = await runCapture(["policy", "current", "--spec", path.join(dir, "rig.yaml"), "--json"]);
+    expect(exitCode).toBe(1);
+    const out = JSON.parse(logs.join("")) as { sites: Array<Record<string, unknown>> };
+    expect(out.sites).toHaveLength(2);
+    expect(String(out.sites[1]!.site)).toContain("dev.qa");
+    expect(String(out.sites[1]!.invalid)).toContain("must be a non-empty string ref");
+  });
+
+  it("r2 round 3: list --spec surfaces a present non-string as INVALID in the custom set", async () => {
+    fs.writeFileSync(path.join(dir, "rig.yaml"), "name: r\npermission_policy: 42\n");
+    const { logs } = await runCapture(["policy", "list", "--spec", path.join(dir, "rig.yaml"), "--json"]);
+    const out = JSON.parse(logs.join("")) as { custom: Array<Record<string, unknown>> };
+    expect(out.custom).toHaveLength(1);
+    expect(String(out.custom[0]!.invalid)).toContain("must be a non-empty string ref");
+  });
+
   it("current reports member-level overrides per site (member > rig)", async () => {
     fs.writeFileSync(path.join(dir, "rig.yaml"), "name: r\npermission_policy: builtin:standard\npods:\n  - id: dev\n    members:\n      - id: qa\n        permission_policy: builtin:yolo\n");
     const { logs } = await runCapture(["policy", "current", "--spec", path.join(dir, "rig.yaml"), "--json"]);
