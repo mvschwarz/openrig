@@ -166,14 +166,21 @@ export function renderRestoreLifecycleView(vm: RestoreLifecycleVM): Line[] {
         { text: `  — ${total} of the fleet done so far`, token: "dim" },
       ]),
       line([countsSeg]),
-      { text: "" },
     ];
+    // HIGH-1 — an ACCEPTED cancel is honestly rendered: the state SAYS cancellation was requested and
+    // the current rig will finish, and it no longer offers the initial `c cancel` affordance.
+    if (vm.cancelled) out.push(line([{ text: "⚠ cancellation requested — the current rig will finish, then stop", token: "warn" }]));
+    out.push({ text: "" });
     for (const p of vm.progress) {
       const g = outcomeGlyph(p.outcome);
       out.push(line([{ text: ` ${g.glyph} `, token: g.token }, { text: p.rigId, token: "bright" }, { text: `  ${p.outcome}`, token: "dim" }]));
     }
     out.push({ text: "" });
-    out.push(line([{ text: "  c cancel (stop-before-next-rig)  ·  restore continues per rig", token: "dim" }]));
+    out.push(
+      vm.cancelled
+        ? line([{ text: "  cancellation accepted — waiting for the current rig; the restore stops before the next", token: "dim" }])
+        : line([{ text: "  c cancel (stop-before-next-rig)  ·  restore continues per rig", token: "dim" }]),
+    );
     return out;
   }
 
@@ -188,14 +195,20 @@ export function renderRestoreLifecycleView(vm: RestoreLifecycleVM): Line[] {
       ]),
       line([{ text: "the live view paused past its window; the restore is CONTINUING on the daemon, not stopped.", token: "dim" }]),
       line([countsSeg]),
-      { text: "" },
     ];
+    // HIGH-1 — if cancel was already requested, say so and drop the `c cancel` offer; reattach confirms it.
+    if (vm.cancelled) out.push(line([{ text: "⚠ cancellation requested — reattach to confirm it lands on the daemon", token: "warn" }]));
+    out.push({ text: "" });
     for (const p of vm.progress) {
       const g = outcomeGlyph(p.outcome);
       out.push(line([{ text: ` ${g.glyph} `, token: g.token }, { text: p.rigId, token: "bright" }, { text: `  ${p.outcome}`, token: "dim" }]));
     }
     out.push({ text: "" });
-    out.push(line([{ text: "  r reattach (resume the live view)  ·  c cancel (stop-before-next-rig)  ·  any key dismiss", token: "dim" }]));
+    out.push(
+      vm.cancelled
+        ? line([{ text: "  r reattach (confirm the cancellation)  ·  any key dismiss", token: "dim" }])
+        : line([{ text: "  r reattach (resume the live view)  ·  c cancel (stop-before-next-rig)  ·  any key dismiss", token: "dim" }]),
+    );
     return out;
   }
 

@@ -22,6 +22,7 @@ import { execFile } from "node:child_process";
 import { probeCrashCart, type CrashCartRenderOpts } from "./crash-cart/from-emit.js";
 import { resolveCrashCartKey, type CrashCartKeyAction } from "./crash-cart/keys.js";
 import { driveRestoreLifecycle, buildRestoreLifecycleVM } from "./crash-cart/restore-lifecycle.js";
+import { restoreKeyAction, type RestoreInputEvent } from "./crash-cart/restore-input.js";
 import { evaluateOneClickGate, restoreConfirmMessage } from "./crash-cart/one-click-gate.js";
 import type { Action, FleetSnapshot, Screen } from "./types.js";
 import type { SpecReviewCache } from "./hydrate.js";
@@ -275,57 +276,49 @@ async function run(): Promise<void> {
         }
         continue;
       }
-      // An ACTIVE fleet restore owns its keys (takes precedence over cockpit/command-bar). 'q' still quits.
+      // An ACTIVE fleet restore owns its keys (takes precedence over cockpit/command-bar). The key→action
+      // decision is the PURE restoreKeyAction reducer (r1: every affordance the screen advertises must
+      // act in that state); main.ts here is only the executor. Scroll works in EVERY phase, so the
+      // "↑↓ scroll" the footer advertises when overflowing is real — and the lifecycle action row below
+      // the fold on a large fleet is reachable.
       if (crashCartOpts.restore) {
-        if (ev.type === "char" && ev.ch === "q" && inputLine === "") {
-          void shutdown();
-          return;
-        }
-        const phase = crashCartOpts.restore.phase;
-        if (phase === "running") {
-          if (ev.type === "char" && ev.ch === "c" && !restoreCancelRequested) {
+        const rvm = crashCartOpts.restore;
+        const action = restoreKeyAction(ev as RestoreInputEvent, {
+          phase: rvm.phase,
+          cancelled: rvm.cancelled,
+          offset: restoreScrollOffset,
+          maxOffset: lastScreen?.contentMaxOffset ?? 0,
+        });
+        switch (action.kind) {
+          case "quit":
+            void shutdown();
+            return;
+          case "scroll":
+            restoreScrollOffset = action.offset;
+            draw();
+            continue;
+          case "cancel":
             restoreCancelRequested = true;
             view.dispatch({ type: "notice", message: "cancelling after the current rig…" });
             draw();
-          }
-          continue; // swallow other keys while the fleet is restoring
-        }
-        if (phase === "detached") {
-          // The live view paused but the restore CONTINUES on the daemon. r reattaches (resumes the live
-          // view); c cancels — set the flag then reattach so the resumed driver POSTs cancel and the
-          // operator SEES it land (observable, not a silent POST); any other key dismisses.
-          const attemptId = crashCartOpts.restore.attemptId;
-          if (ev.type === "char" && ev.ch === "r") {
-            reattachRestore(attemptId);
             continue;
-          }
-          if (ev.type === "char" && ev.ch === "c") {
+          case "reattach":
+            reattachRestore(rvm.attemptId);
+            continue;
+          case "cancel-reattach":
             restoreCancelRequested = true;
-            view.dispatch({ type: "notice", message: "cancel sent — reattaching to confirm…" });
-            reattachRestore(attemptId);
+            // r1 LOW: "requested", not "sent" — no POST has happened yet (the reattached driver POSTs,
+            // and in the unreachable-daemon case that caused the detach it may not land).
+            view.dispatch({ type: "notice", message: "cancel requested — reattaching to confirm…" });
+            reattachRestore(rvm.attemptId);
             continue;
-          }
-          crashCartOpts = { ...crashCartOpts, restore: undefined };
-          void refreshCrashCart();
-          continue;
+          case "dismiss":
+            crashCartOpts = { ...crashCartOpts, restore: undefined };
+            void refreshCrashCart();
+            continue;
+          case "none":
+            continue; // swallowed while the fleet restores
         }
-        // phase "done": HIGH-2 — the triage list is keyboard-walkable. Arrow/j-k scroll it; any other
-        // key dismisses → back to the normal TUI (re-probe the daemon).
-        if (ev.type === "key" && (ev.key === "down" || ev.key === "up")) {
-          const max = lastScreen?.contentMaxOffset ?? 0;
-          restoreScrollOffset = Math.max(0, Math.min(max, restoreScrollOffset + (ev.key === "down" ? 1 : -1)));
-          draw();
-          continue;
-        }
-        if (ev.type === "char" && (ev.ch === "j" || ev.ch === "k")) {
-          const max = lastScreen?.contentMaxOffset ?? 0;
-          restoreScrollOffset = Math.max(0, Math.min(max, restoreScrollOffset + (ev.ch === "j" ? 1 : -1)));
-          draw();
-          continue;
-        }
-        crashCartOpts = { ...crashCartOpts, restore: undefined };
-        void refreshCrashCart();
-        continue;
       }
       if (ev.type === "char") {
         // SCOPES accelerators: m/n ride the REGISTERED commands (one path).
