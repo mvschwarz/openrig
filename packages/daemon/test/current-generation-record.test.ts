@@ -39,36 +39,60 @@ describe("paneClaudeSessionIdArgument (a CANDIDATE source, never the answer alon
   });
 });
 
-describe("selectLiveClaudeRecord — the record being WRITTEN wins", () => {
+describe("selectLiveClaudeRecord — FAIL-CLOSED: disagreement demands write-liveness (r2 HIGH-1)", () => {
+  const NOW = 10_000_000;
+  const nowMs = () => NOW;
   const MTIMES: Record<string, number | null> = {
-    "/p/rolled-current.jsonl": 4_000_000, // appended minutes ago
-    "/p/launch-arg-stale.jsonl": 1_000_000, // dormant since yesterday (the D-a specimen)
-    "/p/registry.jsonl": 4_000_000 - 60_000,
+    "/p/rolled-current.jsonl": NOW - 60_000, // appended a minute ago — provably live
+    "/p/launch-arg-stale.jsonl": NOW - 86_400_000, // dormant a day (the D-a specimen)
+    "/p/registry.jsonl": NOW - 120_000,
   };
   const stat = (path: string) => MTIMES[path] ?? null;
 
-  it("the D-a specimen, replayed: the dormant launch-argument record LOSES to the actively-written sidecar record", () => {
+  it("the D-a specimen, replayed: disagreeing ids, but the winner is LIVE-written — the dormant argument record loses", () => {
     const out = selectLiveClaudeRecord([
       { source: "sidecar", id: "rolled-current", path: "/p/rolled-current.jsonl" },
       { source: "registry", id: "registry-id", path: "/p/registry.jsonl" },
       { source: "pane-argument", id: "launch-arg-stale", path: "/p/launch-arg-stale.jsonl" },
-    ], stat);
+    ], stat, nowMs);
     expect(out).toMatchObject({ ok: true, id: "rolled-current", source: "sidecar" });
   });
 
-  it("the B16 specimen direction, replayed: a stale SIDECAR loses to a fresher record from another source", () => {
+  it("r2's discriminator: an UNREADABLE current contender + a readable stale record = NAMED INDETERMINATE, never confident stale truth", () => {
     const out = selectLiveClaudeRecord([
-      { source: "sidecar", id: "launch-arg-stale", path: "/p/launch-arg-stale.jsonl" },
-      { source: "pane-argument", id: "rolled-current", path: "/p/rolled-current.jsonl" },
-    ], stat);
-    expect(out).toMatchObject({ ok: true, id: "rolled-current", source: "pane-argument" });
+      { source: "sidecar", id: "rolled-current", path: "/p/missing.jsonl" }, // current session, record not readable yet
+      { source: "pane-argument", id: "launch-arg-stale", path: "/p/launch-arg-stale.jsonl" }, // readable but dormant
+    ], stat, nowMs);
+    expect(out.ok).toBe(false);
+    if (!out.ok) {
+      expect(out.reason).toContain("disagree");
+      expect(out.reason).toContain("rolled-c"); // the unreadable contender is named (8-char prefix)
+      expect(out.reason).toContain("not provably the record being written now");
+    }
+  });
+
+  it("disagreeing readable ids where even the freshest is BEYOND the liveness window = NAMED INDETERMINATE", () => {
+    const out = selectLiveClaudeRecord([
+      { source: "sidecar", id: "old-a", path: "/p/registry.jsonl" },
+      { source: "pane-argument", id: "launch-arg-stale", path: "/p/launch-arg-stale.jsonl" },
+    ], stat, () => NOW + 60 * 60 * 1000); // an hour later, nothing written since
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.reason).toContain("not provably the record being written now");
+  });
+
+  it("UNANIMOUS candidates need no recency: one id everywhere resolves even when idle for hours", () => {
+    const out = selectLiveClaudeRecord([
+      { source: "sidecar", id: "only-id", path: "/p/launch-arg-stale.jsonl" },
+      { source: "pane-argument", id: "only-id", path: "/p/launch-arg-stale.jsonl" },
+    ], stat, nowMs);
+    expect(out).toMatchObject({ ok: true, id: "only-id" });
   });
 
   it("zero readable candidates = NAMED INDETERMINATE listing every dead candidate, never a guess", () => {
     const out = selectLiveClaudeRecord([
       { source: "sidecar", id: "ghost-1", path: "/p/missing.jsonl" },
       { source: "registry", id: "ghost-2", path: null },
-    ], stat);
+    ], stat, nowMs);
     expect(out.ok).toBe(false);
     if (!out.ok) {
       expect(out.reason).toContain("sidecar:ghost-1");
@@ -76,12 +100,12 @@ describe("selectLiveClaudeRecord — the record being WRITTEN wins", () => {
     }
   });
 
-  it("duplicate ids across sources dedupe (first source wins the label)", () => {
+  it("an id readable via ONE source is readable, period (dedupe keeps the readable path)", () => {
     const out = selectLiveClaudeRecord([
+      { source: "registry", id: "rolled-current", path: null },
       { source: "sidecar", id: "rolled-current", path: "/p/rolled-current.jsonl" },
-      { source: "pane-argument", id: "rolled-current", path: "/p/rolled-current.jsonl" },
-    ], stat);
-    expect(out).toMatchObject({ ok: true, source: "sidecar" });
+    ], stat, nowMs);
+    expect(out).toMatchObject({ ok: true, id: "rolled-current" });
   });
 });
 

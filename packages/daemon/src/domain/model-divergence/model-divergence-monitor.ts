@@ -221,18 +221,30 @@ export class ModelDivergenceMonitor {
   }
 }
 
-/** Pin comparison: exact case-insensitive match, OR the pin as a WHOLE HYPHEN-TOKEN of the
- *  effective id. ~~"Deliberately NO prefix/alias fuzziness"~~ — REVERSED on live data (D-a): the
- *  fleet's real pins are SPEC aliases (nodes.model carries "fable"; the adapter passes the alias to
- *  the runtime, which accepts it and then reports the full id "claude-fable-5"). Under exact-match
- *  the detector would proclaim divergence on every healthy pinned claude seat — a false-positive
- *  storm the moment the claude leg works. Token containment keeps the comparison narrow: "fable"
- *  matches claude-fable-5; "opus" matches claude-opus-5; full-id pins (gpt-5.1-codex-mini) still
- *  require the exact id; a pin like "5" cannot match (numeric-only tokens are excluded). */
+/** Pin comparison: EXACT, case-insensitive, after trimming. This ruling has now traveled the full
+ *  arc and lands where it started, with the reasons on record: exact was ruled at build; this seat
+ *  reversed it to whole-token alias matching when the live census showed alias pins ("fable") vs
+ *  full effective ids ("claude-fable-5"); r2 REVERSED IT BACK — generic token containment lets one
+ *  pin bless multiple distinct models ("codex" matched gpt-5.6-codex AND gpt-5.1-codex-mini), and
+ *  the ruled remedy is DATA-side: canonicalize the fleet's three alias pins at the spec layer
+ *  (orch's lane, in-wave). TRANSITION HAZARD, named loudly: until pins read canonical, an
+ *  alias-pinned claude seat compares "fable" vs "claude-fable-5" and PROCLAIMS — the detector's
+ *  claude leg must not roll ahead of pin canonicalization. If a transition tolerance is ever
+ *  needed, it is an explicit provider-aware mapping with an expiry, never token containment. */
 export function modelsMatch(pinned: string, effective: string): boolean {
   const pin = pinned.trim().toLowerCase();
   const eff = effective.trim().toLowerCase();
   if (pin === eff) return true;
-  if (/^\d+(\.\d+)*$/.test(pin)) return false; // a bare version number is not an alias
-  return eff.split("-").includes(pin);
+  return CLAUDE_ALIAS_MIGRATION_BRIDGE[pin] === eff;
 }
+
+/** MIGRATION BRIDGE (r2 addendum, desk-ruled 05:03Z) — provider-specific, ONE measured pair, and
+ *  MECHANICALLY SELF-EXPIRING: it fires only while a nodes.model row still carries the pre-spec
+ *  alias pin, so the moment the three affected seats relaunch with canonical pins (expiry
+ *  condition 2) the map is inert by data — exact-only semantics restore automatically, no code
+ *  change on the hot path. REMOVE this constant at the 5.3 spec-validation advisory (expiry
+ *  condition 1) if condition 2 has not already made it dead; the bridge test pins that exactly
+ *  this one pair maps and ambiguous strings ("codex", "mini") never do. */
+export const CLAUDE_ALIAS_MIGRATION_BRIDGE: Record<string, string> = {
+  fable: "claude-fable-5",
+};

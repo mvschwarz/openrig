@@ -162,21 +162,27 @@ describe("ModelDivergenceMonitor — the cause-agnostic comparison", () => {
   });
 });
 
-describe("modelsMatch — exact id OR pin-as-whole-token (the fleet pins ALIASES: nodes.model='fable')", () => {
-  it("exact ids still match case-insensitively", () => {
+describe("modelsMatch — EXACT, plus the narrow self-expiring fable migration bridge (r2 addendum)", () => {
+  it("exact ids match case-insensitively", () => {
     expect(modelsMatch("gpt-5.6-luna", " GPT-5.6-Luna ")).toBe(true);
     expect(modelsMatch("claude-fable-5", "claude-fable-5")).toBe(true);
   });
 
-  it("a SPEC alias pin matches the runtime's full id (the live false-positive class this kills)", () => {
-    expect(modelsMatch("fable", "claude-fable-5")).toBe(true); // dev.planner, measured live
-    expect(modelsMatch("opus", "claude-opus-5")).toBe(true);
+  it("the bridge maps EXACTLY the measured pre-spec pair and nothing else", () => {
+    expect(modelsMatch("fable", "claude-fable-5")).toBe(true); // the one live migration pair
+    expect(modelsMatch("fable", "claude-fable-6")).toBe(false); // not a family bless
+    expect(modelsMatch("opus", "claude-opus-5")).toBe(false); // unmeasured alias: NOT bridged
   });
 
-  it("genuine divergence still fails: wrong family, partial ids, bare version numbers", () => {
-    expect(modelsMatch("fable", "claude-opus-5")).toBe(false); // the real divergence shape
+  it("r2's ambiguity discriminators stay false: one pin can never bless multiple distinct models", () => {
+    expect(modelsMatch("codex", "gpt-5.6-codex")).toBe(false);
+    expect(modelsMatch("codex", "gpt-5.1-codex-mini")).toBe(false);
+    expect(modelsMatch("mini", "gpt-5.4-mini")).toBe(false);
+  });
+
+  it("genuine divergence fails: wrong family, partial ids", () => {
+    expect(modelsMatch("fable", "claude-opus-5")).toBe(false);
     expect(modelsMatch("gpt-5.6-luna", "gpt-5.6")).toBe(false);
     expect(modelsMatch("gpt-5.1-codex-mini", "gpt-5.4-mini")).toBe(false);
-    expect(modelsMatch("5", "claude-fable-5")).toBe(false); // numeric-only never aliases
   });
 });

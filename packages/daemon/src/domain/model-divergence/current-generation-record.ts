@@ -100,32 +100,55 @@ export type ClaudeRecordSelection =
   | { ok: true; id: string; path: string; source: string; mtimeMs: number }
   | { ok: false; reason: string };
 
-/** D-a (redesigned after the first candidate inverted the mask): the CURRENT claude record is the
- *  one being WRITTEN — record-liveness, not any single stored pointer. Measured on the live
- *  specimen: sidecar id and registry token agreed with the actively-appended transcript while the
- *  pane launch ARGUMENT pointed at a file dormant for a day; on the B16 specimen the sidecar was
- *  the stale one. No single source is generation-true; the freshest-mtime transcript among the
- *  seat's candidate ids is. Zero readable candidates = named INDETERMINATE, never a guess. */
+/** How recently the winning record must have been written when candidate ids DISAGREE — the proof
+ *  it is the record "being written now" rather than merely the freshest survivor. Unanimous
+ *  candidates need no window (there is nothing to disambiguate). */
+export const RECORD_LIVENESS_WINDOW_MS = 10 * 60 * 1000;
+
+/** The CURRENT claude record, FAIL-CLOSED (r2's second HIGH on this family): "freshest file that
+ *  exists" is NOT "record being written now". Semantics:
+ *  - candidates dedupe by id (an id is readable if ANY of its paths stat).
+ *  - all readable candidates one id + no unreadable contender with a different id → that record,
+ *    no recency demanded (unanimity has nothing to disambiguate).
+ *  - DISAGREEMENT (differing readable ids, or an unreadable contender with a different id): the
+ *    freshest readable record wins ONLY if written within RECORD_LIVENESS_WINDOW_MS — an idle or
+ *    unreadable-contender disagreement stays a NAMED INDETERMINATE. A current session before its
+ *    first readable record must never be outvoted by a confident old-generation file (r2's
+ *    discriminator: dead rolled-current + readable stale argument returned the stale one). */
 export function selectLiveClaudeRecord(
   candidates: ClaudeRecordCandidate[],
   statMtimeMs: (path: string) => number | null,
+  nowMs: () => number = () => Date.now(),
 ): ClaudeRecordSelection {
-  const seen = new Set<string>();
-  const scored: Array<{ id: string; path: string; source: string; mtimeMs: number }> = [];
-  const dead: string[] = [];
+  const byId = new Map<string, { source: string; path: string | null }>();
   for (const c of candidates) {
-    if (!c.id || seen.has(c.id)) continue;
-    seen.add(c.id);
-    if (!c.path) { dead.push(`${c.source}:${c.id.slice(0, 8)}… (no path)`); continue; }
-    const mtimeMs = statMtimeMs(c.path);
-    if (mtimeMs === null) { dead.push(`${c.source}:${c.id.slice(0, 8)}… (no file)`); continue; }
-    scored.push({ id: c.id, path: c.path, source: c.source, mtimeMs });
+    if (!c.id) continue;
+    const existing = byId.get(c.id);
+    if (!existing || (existing.path === null && c.path !== null)) byId.set(c.id, { source: c.source, path: c.path });
   }
-  if (scored.length === 0) {
-    return { ok: false, reason: `no readable transcript for any candidate session (${dead.join(", ") || "no candidates"})` };
+  const readable: Array<{ id: string; path: string; source: string; mtimeMs: number }> = [];
+  const unreadable: string[] = [];
+  for (const [id, { source, path }] of byId) {
+    const mtimeMs = path ? statMtimeMs(path) : null;
+    if (path && mtimeMs !== null) readable.push({ id, path, source, mtimeMs });
+    else unreadable.push(`${source}:${id.slice(0, 8)}… (${path ? "no file" : "no path"})`);
   }
-  scored.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  return { ok: true, ...scored[0]! };
+  if (readable.length === 0) {
+    return { ok: false, reason: `no readable transcript for any candidate session (${unreadable.join(", ") || "no candidates"})` };
+  }
+  readable.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const winner = readable[0]!;
+  const disagreement = readable.some((r) => r.id !== winner.id) || unreadable.length > 0;
+  if (!disagreement) return { ok: true, ...winner };
+  const ageMs = nowMs() - winner.mtimeMs;
+  if (ageMs <= RECORD_LIVENESS_WINDOW_MS) return { ok: true, ...winner };
+  return {
+    ok: false,
+    reason:
+      `candidate sessions disagree (readable: ${readable.map((r) => `${r.source}:${r.id.slice(0, 8)}…`).join(", ")}` +
+      `${unreadable.length ? `; unreadable: ${unreadable.join(", ")}` : ""}) and the freshest record is ` +
+      `${Math.round(ageMs / 1000)}s old — not provably the record being written now`,
+  };
 }
 
 /** The live codex occupant's thread id, via its own pid's log join — bypasses the stored resume
