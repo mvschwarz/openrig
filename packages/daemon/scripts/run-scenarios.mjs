@@ -32,6 +32,20 @@ const RIG_BIN = resolve(DAEMON_ROOT, "..", "cli", "dist", "bin-wrapper.js");
 const FIXTURES = join(DAEMON_ROOT, "test", "fixtures", "scenarios");
 
 const argv = process.argv.slice(2);
+
+// B12-S safety refusal (ruled). This runner takes scenario YAML paths ONLY. Before this
+// guard, a dash-prefixed arg was resolve()'d into a bogus path that threw mid-loop and was
+// counted as one failed "scenario" WHILE the remaining files still ran in host-mode — so
+// `run-scenarios.mjs --container x.yaml` printed one [ERROR] plus a partial-success summary
+// that a reader could mistake for container mode having run. Refuse BEFORE anything executes
+// so an unknown flag runs ZERO scenarios (no PASS/FAIL lines, no partial summary). A flagless
+// invocation is byte-identical to before.
+const flagArg = argv.find((a) => a.startsWith("-"));
+if (flagArg) {
+  console.error(`[REFUSED] unknown flag '${flagArg}' — this runner takes scenario YAML paths only; container mode is not a flag (see slice 15).`);
+  process.exit(2);
+}
+
 const files = argv.length > 0
   ? argv.map((a) => resolve(a))
   : readdirSync(FIXTURES).filter((f) => /^scenario-.*\.ya?ml$/.test(f)).sort().map((f) => join(FIXTURES, f));
