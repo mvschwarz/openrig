@@ -177,6 +177,28 @@ export function renderRestoreLifecycleView(vm: RestoreLifecycleVM): Line[] {
     return out;
   }
 
+  if (vm.phase === "detached") {
+    // The live view paused past its window (poll ceiling, or a sustained poll-error streak) — the
+    // restore is CONTINUING on the daemon, not stopped. An explicit, OPERABLE state: reattach resumes
+    // the live view, cancel stops-before-next-rig by the retained id (both observable via the resumed poll).
+    const out: Line[] = [
+      line([
+        { text: "⚠ RESTORE STILL RUNNING ON THE DAEMON", token: "warn", bold: true },
+        { text: `  — attempt ${vm.attemptId}`, token: "dim" },
+      ]),
+      line([{ text: "the live view paused past its window; the restore is CONTINUING on the daemon, not stopped.", token: "dim" }]),
+      line([countsSeg]),
+      { text: "" },
+    ];
+    for (const p of vm.progress) {
+      const g = outcomeGlyph(p.outcome);
+      out.push(line([{ text: ` ${g.glyph} `, token: g.token }, { text: p.rigId, token: "bright" }, { text: `  ${p.outcome}`, token: "dim" }]));
+    }
+    out.push({ text: "" });
+    out.push(line([{ text: "  r reattach (resume the live view)  ·  c cancel (stop-before-next-rig)  ·  any key dismiss", token: "dim" }]));
+    return out;
+  }
+
   // done
   const out: Line[] = [
     line([

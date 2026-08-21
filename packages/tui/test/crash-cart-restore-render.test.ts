@@ -60,6 +60,33 @@ describe("renderRestoreLifecycleView — done", () => {
   });
 });
 
+describe("renderRestoreLifecycleView — detached (HIGH-1: honest, operable, never frozen)", () => {
+  it("names the attempt, says the restore CONTINUES on the daemon, and offers reattach + cancel", () => {
+    const vm = buildRestoreLifecycleVM(
+      frame({
+        phase: "detached",
+        done: false,
+        verdict: "none_attempted",
+        rollup: {
+          counts: { fully_restored: 2, partially_restored: 0, failed: 0, not_attempted: 0 },
+          sequence: [
+            { rigId: "kernel", outcome: "fully_restored" },
+            { rigId: "alpha", outcome: "fully_restored" },
+          ],
+          attention_required: [],
+        },
+      }),
+    );
+    const body = renderRestoreLifecycleView(vm).map((l) => l.text).join("\n");
+    expect(body).toContain("STILL RUNNING ON THE DAEMON");
+    expect(body).toContain("fleet-1"); // the retained attempt id (from the frame default)
+    expect(body).toContain("CONTINUING on the daemon"); // r1's keeper: detached ≠ stopped
+    expect(body).toContain("r reattach");
+    expect(body).toContain("c cancel");
+    expect(body).not.toMatch(/RESTORING FLEET\b/); // not the running header
+  });
+});
+
 describe("renderRestoreLifecycleView — running (mid-run progress frame)", () => {
   it("shows a per-rig progress list + the cancel affordance while running", () => {
     const vm = buildRestoreLifecycleVM(

@@ -111,6 +111,41 @@ describe("renderScreen — ACTIVE restore takes precedence (mid-run progress fra
   });
 });
 
+describe("renderScreen — restore triage is KEYBOARD-WALKABLE beyond the viewport (r2 HIGH-2)", () => {
+  // r2's exact probe: 28 attention rows at 120x32. At offset 0 the tail need is off-screen; the shell
+  // must report a navigable contentMaxOffset, and scrolling to it must bring the final need on-screen.
+  // Short needs (fit one line, no wrap) so this isolates VERTICAL reachability (HIGH-2) from width-wrap.
+  const attention = Array.from({ length: 28 }, (_, i) => ({
+    rigId: "kernel",
+    seat: `seat${i}`,
+    need: `NEED-${i}: resume seat ${i}`,
+  }));
+  const vm = buildRestoreLifecycleVM(
+    frame({
+      phase: "done",
+      done: true,
+      verdict: "mixed",
+      rollup: { counts: { fully_restored: 1, partially_restored: 0, failed: 0, not_attempted: 0 }, sequence: [{ rigId: "kernel", outcome: "fully_restored" }], attention_required: attention },
+    }),
+  );
+
+  it("at offset 0 the list overflows the viewport → a navigable contentMaxOffset is reported", () => {
+    const screen = renderScreen(view.get(), snap, { cols: 120, rows: 32, daemonState: "down", crashCart: demoCrashCartModel(), restore: vm, restoreScroll: 0 });
+    expect(screen.contentMaxOffset).toBeGreaterThan(0); // scrollable, not a dead fixed window
+    const body = screen.lines.join("\n");
+    expect(body).toContain("NEED-0"); // first need on-screen
+    expect(body).not.toContain("NEED-27"); // the tail is off-screen at offset 0 (the defect r2 probed)
+  });
+
+  it("scrolling to contentMaxOffset brings the FINAL row's exact need on-screen (reachable)", () => {
+    const max = renderScreen(view.get(), snap, { cols: 120, rows: 32, daemonState: "down", crashCart: demoCrashCartModel(), restore: vm, restoreScroll: 0 }).contentMaxOffset;
+    const scrolled = renderScreen(view.get(), snap, { cols: 120, rows: 32, daemonState: "down", crashCart: demoCrashCartModel(), restore: vm, restoreScroll: max });
+    const body = scrolled.lines.join("\n");
+    expect(body).toContain("NEED-27: resume seat 27"); // the exact final need is now reachable — R5
+    expect(body).toContain("seat27@kernel"); // its seat too
+  });
+});
+
 describe("renderScreen daemon-down — UNVERIFIED in-shell (explorer present, no restore)", () => {
   const screen = renderScreen(view.get(), snap, {
     cols: 120,

@@ -703,6 +703,9 @@ export interface RenderOptions {
   /** B1 ROUND 2 — the live fleet-restore lifecycle; when present it renders (progress → rollup+triage)
    *  and takes precedence over the cockpit, so restore progress and the triage list are visible. */
   restore?: RestoreLifecycleVM;
+  /** B1 ROUND 3 (HIGH-2) — vertical scroll offset into the restore content, so a triage list longer
+   *  than the viewport stays keyboard-walkable (the shell reports contentMaxOffset for clamping). */
+  restoreScroll?: number;
 }
 
 /** replace ONE character at a plain-text position inside a token-segment row
@@ -989,7 +992,7 @@ function crashCartShell(
   cols: number,
   rows: number,
   inputLine: string,
-  opts?: { wrap?: boolean },
+  opts?: { wrap?: boolean; scroll?: number },
 ): Screen {
   const lines: string[] = [];
   const segRows: NonNullable<Screen["segRows"]> = {};
@@ -1001,23 +1004,29 @@ function crashCartShell(
   const contentWidth = Math.max(cols - EXPL_W - 2, 0);
   if (opts?.wrap) content = wrapContentLines(content, contentWidth);
   const bodyRows = Math.max(rows - 2 - 3, 1); // minus cmd bar + top rule + (bottom rule, hints, status)
+  // HIGH-2 — when content exceeds the viewport, it is VERTICALLY SCROLLABLE: contentMaxOffset is the
+  // furthest row the operator can scroll to, and the rendered window starts at the clamped scroll offset.
+  // A list that fits (offset 0, maxOffset 0) is unchanged. Only the content pane scrolls; the explorer stays.
+  const contentMaxOffset = Math.max(0, content.length - bodyRows);
+  const scroll = Math.max(0, Math.min(contentMaxOffset, opts?.scroll ?? 0));
   for (let i = 0; i < bodyRows; i++) {
     const y = lines.length + 1;
     const left = pad(leftRows[i] ?? "", EXPL_W);
-    const citem = content[i];
+    const citem = content[scroll + i];
     const contentText = (citem?.text ?? "").slice(0, contentWidth);
     lines.push(pad(`${left}│ ${contentText}`, cols));
     if (citem?.segs) segRows[y] = truncateSegs(citem.segs, contentWidth);
   }
   lines.push(paneRule(cols, "┴"));
   lines.push(pad("", cols));
-  lines.push(pad(`[crash-cart] daemon down · explorer ${led.note}`, cols));
+  const scrollHint = contentMaxOffset > 0 ? ` · ↑↓ scroll (${scroll}/${contentMaxOffset})` : "";
+  lines.push(pad(`[crash-cart] daemon down · explorer ${led.note}${scrollHint}`, cols));
   while (lines.length < rows) lines.push("");
   return {
     lines: lines.slice(0, rows),
     hitMap: [],
     contentTargets: [],
-    contentMaxOffset: 0,
+    contentMaxOffset,
     explorerRows: [],
     segRows,
   };
@@ -1034,8 +1043,12 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   if (options.restore) {
     const led = buildLedgerExplorer(options.crashCart?.foundOnHost ?? []);
     // wrap: the triage needs are full sentences — wrap them to the pane so the EXACT need is never
-    // clipped off the edge (the short lifecycle view can afford the extra rows).
-    return crashCartShell(renderRestoreLifecycleView(options.restore), led, "RESTORE", cols, rows, inputLine, { wrap: true });
+    // clipped off the edge. scroll: a triage list longer than the viewport is vertically scrollable so
+    // the final row's exact need is reachable (HIGH-2 — keyboard-walkable, not viewport-truncated).
+    return crashCartShell(renderRestoreLifecycleView(options.restore), led, "RESTORE", cols, rows, inputLine, {
+      wrap: true,
+      scroll: options.restoreScroll ?? 0,
+    });
   }
   if (options.daemonState === "down" && options.crashCart) {
     const led = buildLedgerExplorer(options.crashCart.foundOnHost);

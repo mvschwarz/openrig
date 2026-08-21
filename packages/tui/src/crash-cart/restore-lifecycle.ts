@@ -15,10 +15,13 @@ export interface RestoreLifecycleClient {
   cancelRestoreFleet(id: string): Promise<unknown>;
 }
 
-/** One rendered frame of the lifecycle — a poll's status plus the retained attempt id + phase. */
+/** One rendered frame of the lifecycle — a poll's status plus the retained attempt id + phase.
+ *  `detached` = the driver stopped polling (poll ceiling reached, or repeated poll errors) while the
+ *  restore is STILL running on the daemon — an explicit, operable state (reattach / cancel by id), NEVER
+ *  a frozen `running` screen with a dead cancel key. */
 export interface RestoreFrame extends RestoreFleetStatus {
   attemptId: string;
-  phase: "running" | "done";
+  phase: "running" | "done" | "detached";
 }
 
 /** Per-rig progress row for the running view (one per rig in the rollup sequence so far). */
@@ -30,13 +33,15 @@ export interface RestoreProgressRow {
 /** The render model for the restore lifecycle surface — progress while running, rollup + the
  *  keyboard-walkable triage list when done. Built purely from a frame so the render stays testable. */
 export interface RestoreLifecycleVM {
-  phase: "running" | "done";
+  phase: "running" | "done" | "detached";
   cancelled: boolean;
   verdict: string;
   counts: RestoreFleetStatus["rollup"]["counts"];
   progress: RestoreProgressRow[];
   /** The triage list (attention seats + not_attempted rigs) as shipped TriageRow[] — fed to renderTriage. */
   triage: TriageRow[];
+  /** The retained attempt id — the detached view needs it for the reattach / direct-cancel affordances. */
+  attemptId: string;
 }
 
 /** Adapt a lifecycle frame into the render VM. The triage list is the UNION of two honest sources,
@@ -69,43 +74,82 @@ export function buildRestoreLifecycleVM(frame: RestoreFrame): RestoreLifecycleVM
     counts: frame.rollup.counts,
     progress: frame.rollup.sequence.map((r) => ({ rigId: r.rigId, outcome: r.outcome })),
     triage: [...attentionRows, ...notAttemptedRows],
+    attemptId: frame.attemptId,
   };
 }
 
 export interface RestoreLifecycleDeps {
   client: RestoreLifecycleClient;
-  /** Called with EVERY poll (running frames included) — this is the progress stream the TUI renders. */
+  /** Called with EVERY poll (running + detached frames included) — the progress stream the TUI renders. */
   onFrame: (frame: RestoreFrame) => void;
   /** Polled each tick; when true, the driver POSTs cancel once (stop-before-next-rig). */
   isCancelRequested: () => boolean;
+  /** Reattach to an EXISTING attempt (skip the kick) — the detached view's `r` re-enters the loop. */
+  attemptId?: string;
   /** Injected in tests (no real delay); production uses setTimeout. */
   sleep?: (ms: number) => Promise<void>;
   pollIntervalMs?: number;
   maxPolls?: number;
+  /** Consecutive poll ERRORS tolerated before detaching (a transient blip must NOT kill the driver). */
+  maxConsecutiveErrors?: number;
 }
 
-/** Drive one fleet restore end-to-end from the TUI: kick the async verb, retain the attempt id, poll
- *  the status emitting a frame each time (so a mid-run frame is observable), request cancel when the
- *  operator asks, and resolve on done. On the poll ceiling it returns the last (not-done) frame — the
- *  restore keeps running on the daemon; the caller stays honest about that. */
+/** Drive one fleet restore from the TUI: kick (or reattach), retain the attempt id, poll emitting a
+ *  frame each time (mid-run observable), request cancel when the operator asks, resolve on done. Two
+ *  guarantees the operator lifecycle depends on:
+ *   - a TRANSIENT poll error never ends the lifecycle — it is tolerated and retried; only
+ *     `maxConsecutiveErrors` in a row (a genuinely unreachable daemon) DETACHES.
+ *   - reaching the poll ceiling DETACHES (phase "detached"), it does NOT return a frozen "running"
+ *     frame — so the caller never renders a live-looking screen whose cancel key is dead. A detached
+ *     frame is an explicit, operable state: the caller reattaches or cancels by the retained id. */
 export async function driveRestoreLifecycle(deps: RestoreLifecycleDeps): Promise<RestoreFrame> {
-  const { fleetAttemptId } = await deps.client.restoreFleet();
+  const fleetAttemptId = deps.attemptId ?? (await deps.client.restoreFleet()).fleetAttemptId;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const interval = deps.pollIntervalMs ?? 400;
-  const maxPolls = deps.maxPolls ?? 1500; // ~10 min ceiling at 400ms; restore continues past it on the daemon
+  const maxPolls = deps.maxPolls ?? 4500; // generous — a real fleet restore is bounded by daemon work
+  const maxConsecutiveErrors = deps.maxConsecutiveErrors ?? 5;
   let cancelSent = false;
-  let last: RestoreFrame | undefined;
+  let consecutiveErrors = 0;
+  let last: RestoreFleetStatus | undefined;
+  const detached = (): RestoreFrame => ({
+    ...(last ?? { done: false, cancelled: false, verdict: "none_attempted", rollup: { counts: { fully_restored: 0, partially_restored: 0, failed: 0, not_attempted: 0 }, sequence: [], attention_required: [] } }),
+    done: false,
+    attemptId: fleetAttemptId,
+    phase: "detached",
+  });
   for (let i = 0; i < maxPolls; i++) {
     if (deps.isCancelRequested() && !cancelSent) {
       cancelSent = true;
-      await deps.client.cancelRestoreFleet(fleetAttemptId); // reach the endpoint that exists
+      try {
+        await deps.client.cancelRestoreFleet(fleetAttemptId); // reach the endpoint that exists
+      } catch {
+        cancelSent = false; // a failed cancel POST may retry next tick (never swallow the operator's intent)
+      }
     }
-    const status = await deps.client.restoreFleetStatus(fleetAttemptId);
+    let status: RestoreFleetStatus;
+    try {
+      status = await deps.client.restoreFleetStatus(fleetAttemptId);
+      consecutiveErrors = 0; // a good poll clears the transient-error streak
+    } catch {
+      // TRANSIENT poll failure (r1 refinement 2): tolerate, DO NOT end the lifecycle on one. Only a
+      // sustained streak (a genuinely unreachable daemon) detaches to the operable reattach state.
+      if (++consecutiveErrors >= maxConsecutiveErrors) {
+        const frame = detached();
+        deps.onFrame(frame);
+        return frame;
+      }
+      await sleep(interval);
+      continue;
+    }
     const frame: RestoreFrame = { ...status, attemptId: fleetAttemptId, phase: status.done ? "done" : "running" };
     deps.onFrame(frame); // a frame EVERY poll — the operator sees progress before completion
-    last = frame;
+    last = status;
     if (status.done) return frame;
     await sleep(interval);
   }
-  return last!;
+  // Poll ceiling: DETACH (never a frozen "running" frame — r1 refinement 1). The restore continues on
+  // the daemon; the caller offers reattach / cancel-by-id from this explicit state.
+  const frame = detached();
+  deps.onFrame(frame);
+  return frame;
 }

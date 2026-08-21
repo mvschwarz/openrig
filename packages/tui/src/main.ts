@@ -56,6 +56,9 @@ async function run(): Promise<void> {
   // B1 ROUND 2 — the operator's mid-run cancel request for the active fleet restore (the lifecycle
   // driver polls this and reaches the cancel endpoint stop-before-next-rig).
   let restoreCancelRequested = false;
+  // B1 ROUND 3 (HIGH-2) — vertical scroll offset into the restore triage list, so a fleet with more
+  // needs than the viewport stays keyboard-walkable (arrow/j-k on the done view).
+  let restoreScrollOffset = 0;
   const inputDecoder = createInputDecoder();
   const style = createStyle(args.includes("--no-color") ? "none" : detectColorMode());
 
@@ -74,7 +77,7 @@ async function run(): Promise<void> {
     const rows = process.stdout.rows ?? 32;
     const nowMs = Date.now();
     if (live) snapshot = live.snapshot();
-    const opts = { cols, rows, nowMs, colorMode: style.mode, commandContext: currentCommandContext(crashCartOpts.daemonState ?? null), ...crashCartOpts, ...(live ? { load: live.load(), rowFlashes: live.flashes() } : {}) };
+    const opts = { cols, rows, nowMs, colorMode: style.mode, commandContext: currentCommandContext(crashCartOpts.daemonState ?? null), ...crashCartOpts, restoreScroll: restoreScrollOffset, ...(live ? { load: live.load(), rowFlashes: live.flashes() } : {}) };
     lastScreen = renderScreen(view.get(), snapshot, opts, inputLine);
     if (view.get().contentMaxOffset !== lastScreen.contentMaxOffset || view.get().contentTargetCount !== lastScreen.contentTargets.length) {
       view.dispatch({ type: "layout", contentMaxOffset: lastScreen.contentMaxOffset, contentTargetCount: lastScreen.contentTargets.length });
@@ -107,6 +110,27 @@ async function run(): Promise<void> {
   // against it — kick/poll/cancel via the daemon client, retaining the attempt id (r2: no more blind
   // delegation to a buffered child). Each poll updates the restore render (progress from the rollup
   // stream); on done the rollup + keyboard-walkable triage list render; 'c' cancels mid-run.
+  // Poll one restore attempt to done/detached, rendering a frame per poll. Shared by the initial ⏎
+  // restore and by reattach (attemptId set) from the detached view. The driver TOLERATES transient poll
+  // errors internally (it detaches after a sustained streak, never throws on a blip), so this .catch
+  // fires ONLY on a genuine kick/start-side failure — never on a single blipped poll (r1 refinement 2).
+  function pollRestore(daemonClient: DaemonClient, attemptId?: string): void {
+    void driveRestoreLifecycle({
+      client: daemonClient,
+      attemptId,
+      onFrame: (frame) => {
+        // render progress from the poll stream — a mid-run frame every poll, not only at completion
+        crashCartOpts = { ...crashCartOpts, restore: buildRestoreLifecycleVM(frame) };
+        draw();
+      },
+      isCancelRequested: () => restoreCancelRequested,
+    }).catch((e: unknown) => {
+      crashCartOpts = { ...crashCartOpts, restore: undefined };
+      view.dispatch({ type: "notice", message: `fleet restore failed: ${e instanceof Error ? e.message : String(e)}` });
+      void refreshCrashCart();
+    });
+  }
+
   function runFleetRestore(): void {
     if (!client) {
       view.dispatch({ type: "notice", message: "demo mode: restore disabled" });
@@ -115,25 +139,24 @@ async function run(): Promise<void> {
     }
     const daemonClient = client;
     restoreCancelRequested = false;
+    restoreScrollOffset = 0;
     new Promise<void>((resolve, reject) =>
       execFile("rig", ["daemon", "start"], { timeout: 30_000 }, (err) => (err ? reject(err) : resolve())),
     )
-      .then(() =>
-        driveRestoreLifecycle({
-          client: daemonClient,
-          onFrame: (frame) => {
-            // render progress from the poll stream — a mid-run frame every poll, not only at completion
-            crashCartOpts = { ...crashCartOpts, restore: buildRestoreLifecycleVM(frame) };
-            draw();
-          },
-          isCancelRequested: () => restoreCancelRequested,
-        }),
-      )
+      .then(() => pollRestore(daemonClient))
       .catch((e: unknown) => {
         crashCartOpts = { ...crashCartOpts, restore: undefined };
         view.dispatch({ type: "notice", message: `fleet restore failed: ${e instanceof Error ? e.message : String(e)}` });
         void refreshCrashCart();
       });
+  }
+
+  // Detached view `r`/`c`: resume the live view against the STILL-RUNNING attempt. `c` sets the cancel
+  // flag first so the resumed driver POSTs cancel and the operator SEES it take effect (observable
+  // confirmation, not a silent successful POST — r1 question 1). Reattach never resets the cancel flag.
+  function reattachRestore(attemptId: string): void {
+    if (!client) return;
+    pollRestore(client, attemptId);
   }
 
   function performCrashCart(action: CrashCartKeyAction): void {
@@ -252,14 +275,14 @@ async function run(): Promise<void> {
         }
         continue;
       }
-      // B1 ROUND 2 — an ACTIVE fleet restore owns its keys (takes precedence over cockpit/command-bar):
-      // 'c' cancels while running (stop-before-next-rig); any key dismisses the done view; 'q' still quits.
+      // An ACTIVE fleet restore owns its keys (takes precedence over cockpit/command-bar). 'q' still quits.
       if (crashCartOpts.restore) {
         if (ev.type === "char" && ev.ch === "q" && inputLine === "") {
           void shutdown();
           return;
         }
-        if (crashCartOpts.restore.phase === "running") {
+        const phase = crashCartOpts.restore.phase;
+        if (phase === "running") {
           if (ev.type === "char" && ev.ch === "c" && !restoreCancelRequested) {
             restoreCancelRequested = true;
             view.dispatch({ type: "notice", message: "cancelling after the current rig…" });
@@ -267,7 +290,39 @@ async function run(): Promise<void> {
           }
           continue; // swallow other keys while the fleet is restoring
         }
-        // phase "done": any key dismisses the result → back to the normal TUI (re-probe the daemon).
+        if (phase === "detached") {
+          // The live view paused but the restore CONTINUES on the daemon. r reattaches (resumes the live
+          // view); c cancels — set the flag then reattach so the resumed driver POSTs cancel and the
+          // operator SEES it land (observable, not a silent POST); any other key dismisses.
+          const attemptId = crashCartOpts.restore.attemptId;
+          if (ev.type === "char" && ev.ch === "r") {
+            reattachRestore(attemptId);
+            continue;
+          }
+          if (ev.type === "char" && ev.ch === "c") {
+            restoreCancelRequested = true;
+            view.dispatch({ type: "notice", message: "cancel sent — reattaching to confirm…" });
+            reattachRestore(attemptId);
+            continue;
+          }
+          crashCartOpts = { ...crashCartOpts, restore: undefined };
+          void refreshCrashCart();
+          continue;
+        }
+        // phase "done": HIGH-2 — the triage list is keyboard-walkable. Arrow/j-k scroll it; any other
+        // key dismisses → back to the normal TUI (re-probe the daemon).
+        if (ev.type === "key" && (ev.key === "down" || ev.key === "up")) {
+          const max = lastScreen?.contentMaxOffset ?? 0;
+          restoreScrollOffset = Math.max(0, Math.min(max, restoreScrollOffset + (ev.key === "down" ? 1 : -1)));
+          draw();
+          continue;
+        }
+        if (ev.type === "char" && (ev.ch === "j" || ev.ch === "k")) {
+          const max = lastScreen?.contentMaxOffset ?? 0;
+          restoreScrollOffset = Math.max(0, Math.min(max, restoreScrollOffset + (ev.ch === "j" ? 1 : -1)));
+          draw();
+          continue;
+        }
         crashCartOpts = { ...crashCartOpts, restore: undefined };
         void refreshCrashCart();
         continue;
