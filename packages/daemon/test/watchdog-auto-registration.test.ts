@@ -535,6 +535,36 @@ describe("B6 — idle-gate auto-registration default-off / opt-in gate", () => {
     } finally { db.close(); }
   });
 
+  it('store-to-enforcer: a validator-accepted whitespace-padded " all " opts the fleet in (the gate compares the same normalization the validator accepted)', async () => {
+    const { SettingsStore } = await import("../src/domain/user-settings/settings-store.js");
+    const home = mkdtempSync(join(tmpdir(), "b6-trim-"));
+    const prevEnv = process.env.OPENRIG_POLICIES_IDLE_GATE_QITEM_AUTO_REGISTER;
+    process.env.OPENRIG_POLICIES_IDLE_GATE_QITEM_AUTO_REGISTER = " all ";
+    try {
+      const realStore = new SettingsStore(join(home, "config.yaml"));
+      // The REAL store hands the padded value through as valid env config…
+      expect(String(realStore.resolveOne("policies.idle_gate_qitem.auto_register").value)).toBe(" all ");
+      // …and the enforcement gate must read it as the mode the validator accepted.
+      const { WatchdogAutoRegistration } = await import("../src/domain/watchdog-auto-registration.js");
+      const db = createFullTestDb();
+      const { node, sessionName } = seedCanonicalNode(db, "trim-rig");
+      new SessionRegistry(db).registerSession(node.id, sessionName);
+      const unit = new WatchdogAutoRegistration({
+        db,
+        jobsRepo: new WatchdogJobsRepository(db),
+        settingsStore: realStore as never,
+        warn: () => {},
+      });
+      expect(unit.ensure(node.id, sessionName)).not.toBeNull();
+      expect(autoRows(db, sessionName)).toHaveLength(1);
+      db.close();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENRIG_POLICIES_IDLE_GATE_QITEM_AUTO_REGISTER;
+      else process.env.OPENRIG_POLICIES_IDLE_GATE_QITEM_AUTO_REGISTER = prevEnv;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it('auto_register "all" restores fleet-wide registration', async () => {
     const { db, node, sessionName, unit } = await build("all");
     try {

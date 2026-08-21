@@ -108,7 +108,10 @@ export class WatchdogAutoRegistration {
    * default flip, and their alias refresh must not silently stop.
    */
   private autoRegisterAllowed(sessionName: string): boolean {
-    const mode = String(this.deps.settingsStore.resolveOne("policies.idle_gate_qitem.auto_register").value ?? "off");
+    // Trimmed at the enforcement seam: the validator accepts whitespace-padded enum values
+    // (it validates the trimmed raw), so the gate must compare the same normalization — an
+    // accepted " all " silently behaving as "off" is a config that lies.
+    const mode = String(this.deps.settingsStore.resolveOne("policies.idle_gate_qitem.auto_register").value ?? "off").trim();
     if (mode === "all") return true;
     const optIn = String(this.deps.settingsStore.resolveOne("policies.idle_gate_qitem.opt_in_sessions").value ?? "");
     return optIn.split(",").map((s) => s.trim()).filter(Boolean).includes(sessionName);
