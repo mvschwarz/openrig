@@ -11,7 +11,7 @@
 //   - chained inline subcommands: `cmd.command("create").requiredOption(...)`,
 //   - factory indirection: `parent.addCommand(buildChildCommand())` where the
 //     builder returns `new Command("child")...`.
-// The registration NAME wins over the filename (the `rig-policy.ts` file's
+// The registration NAME wins over the filename (the `rig-mode.ts` file's
 // `new Command("policy")` surfaces as `policy`, never `rig-policy`).
 
 import ts from "typescript";

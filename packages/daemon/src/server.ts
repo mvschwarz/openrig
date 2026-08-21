@@ -96,7 +96,7 @@ import { workflowRoutes } from "./routes/workflow.js";
 import { missionControlRoutes } from "./routes/mission-control.js";
 import { slicesRoutes } from "./routes/slices.js";
 import { reviewRoutes } from "./routes/review.js";
-import { rigPolicyRoutes } from "./routes/rig-policy.js";
+import { rigModeRoutes } from "./routes/rig-mode.js";
 import { missionsRoutes } from "./routes/missions.js";
 import { rigCmuxRoutes } from "./routes/rig-cmux.js";
 import { terminalRoutes, rigTerminalRoutes } from "./routes/terminal.js";
@@ -318,7 +318,7 @@ export interface AppDeps {
   kernelBootTracker?: import("./domain/kernel-boot-tracker.js").KernelBootTracker;
   /** Slice 09 (OPR.0.3.2.9) — operator-context-mode bindings store.
    *  Optional: when absent, the rig-policy routes return 503. */
-  rigPolicyStore?: import("./domain/rig-policy/rig-policy-store.js").RigPolicyStore;
+  rigModeStore?: import("./domain/rig-mode/rig-mode-store.js").RigModeStore;
   /**
    * OPR.0.4.3.21 — daemon event-loop health monitor. Optional: when absent
    * (e.g. direct-construction test harnesses) `/healthz` keeps its exact
@@ -551,7 +551,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("serviceOrchestrator" as never, deps.serviceOrchestrator);
     c.set("composeAdapter" as never, deps.composeAdapter);
     c.set("kernelBootTracker" as never, deps.kernelBootTracker);
-    c.set("rigPolicyStore" as never, deps.rigPolicyStore);
+    c.set("rigModeStore" as never, deps.rigModeStore);
     c.set("db" as never, deps.rigRepo.db);
     c.set("terminalBearerToken" as never, deps.terminalBearerToken ?? null);
     await next();
@@ -727,8 +727,8 @@ export function createApp(deps: AppDeps): Hono {
   // Slice 09 (OPR.0.3.2.9) — rig-policy bindings (operator context mode).
   // Same operator-bearer posture as mission-control; HG-SAFE preserved.
   app.route(
-    "/api/rig-policy",
-    rigPolicyRoutes({ bearerToken: deps.missionControlBearerToken ?? null }),
+    "/api/rig-mode",
+    rigModeRoutes({ bearerToken: deps.missionControlBearerToken ?? null }),
   );
 
   const uiDistDir = deps.uiDistDir ?? resolveDefaultUiDistDir();

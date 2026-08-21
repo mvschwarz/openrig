@@ -19,7 +19,7 @@ import type {
   OperatorContextScope,
   PermissionPromptPosture,
   UpdateDetail,
-} from "./rig-policy-types.js";
+} from "./rig-mode-types.js";
 
 /**
  * The seven per-mode setting defaults (Component 3 §Recommended

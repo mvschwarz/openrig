@@ -13,9 +13,9 @@ import {
   SAFE_PERMISSION_PROMPT_POSTURES,
   SCOPE_SPECIFICITY,
   STALE_RULES,
-} from "../src/domain/rig-policy/rig-policy-types.js";
+} from "../src/domain/rig-mode/rig-mode-types.js";
 
-describe("rig-policy types — slice 09 frozen contract", () => {
+describe("rig-mode types — slice 09 frozen contract", () => {
   // HG-1 — six modes, exact, reserved, closed.
   it("HG-1: exposes exactly the six reserved mode names (lowercase single words)", () => {
     expect([...OPERATOR_CONTEXT_MODES]).toEqual([
@@ -77,7 +77,7 @@ describe("rig-policy types — slice 09 frozen contract", () => {
   // The constant list mirrors the union; the union has no auto-accept
   // literal; therefore no caller can express auto-accept through the
   // type system. The runtime validator enforces the same for inputs
-  // that bypass types (JSON, env, etc.) — see rig-policy-validator tests.
+  // that bypass types (JSON, env, etc.) — see rig-mode-validator tests.
   it("HG-SAFE (type-level): SAFE_PERMISSION_PROMPT_POSTURES enumerates the only three safe values; auto-accept is absent", () => {
     expect([...SAFE_PERMISSION_PROMPT_POSTURES]).toEqual([
       "normal",

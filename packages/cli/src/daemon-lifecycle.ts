@@ -312,7 +312,7 @@ export function resolveCliBaseDir(baseDir: string): string {
  * stale daemon through `rig daemon start` whenever they've rebuilt
  * `@openrig/daemon` but haven't rerun `build-package.sh`. That hid the
  * fact that QA on local main 55e01f2e was getting a daemon WITHOUT the
- * shipped slice-09 `/api/rig-policy/*` routes (qitem-20260518054224).
+ * shipped slice-09 `/api/rig-mode/*` routes (qitem-20260518054224).
  *
  * In an npm-install layout `packages/daemon/dist` does not exist
  * (only the bundled `packages/cli/daemon` lives next to the cli);

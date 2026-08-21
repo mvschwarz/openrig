@@ -1,16 +1,16 @@
-// Slice 09 (OPR.0.3.2.9) — `rig policy` CLI: operator-context-mode
+// Slice 09 (OPR.0.3.2.9) — `rig mode` CLI (renamed from `rig policy`, 0.5.2 B7 — clean rename, zero adoption; `rig policy` is now the permission-policy verb): operator-context-mode
 // surface. Pairs with the daemon's typed-primitive store.
 //
 // Subcommands:
-//   rig policy set <mode> [--scope ...] [--qualifier ...] [--<field> ...]
+//   rig mode set <mode> [--scope ...] [--qualifier ...] [--<field> ...]
 //                         [--evidence ...] [--confirm]
 //                         → restate-and-confirm; PUT only when --confirm
-//   rig policy show       → list all bindings (defaults to JSON-when-piped)
-//   rig policy effective  → resolve effective for a read context
-//   rig policy cite       → emit the citation line per convention §Component 5
-//   rig policy unset <scope> [qualifier]
+//   rig mode show       → list all bindings (defaults to JSON-when-piped)
+//   rig mode effective  → resolve effective for a read context
+//   rig mode cite       → emit the citation line per convention §Component 5
+//   rig mode unset <scope> [qualifier]
 //                         → DELETE one binding (operator-only)
-//   rig policy defaults   → recommended 6×7 + per-mode scope + stale rule
+//   rig mode defaults   → recommended 6×7 + per-mode scope + stale rule
 //
 // HG-4 / HG-7 anchored here:
 //   - `set` never silently applies. Without `--confirm` it echoes the
@@ -28,7 +28,7 @@ import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-life
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
-export interface RigPolicyDeps extends StatusDeps {}
+export interface RigModeDeps extends StatusDeps {}
 
 // Mirror of daemon enums + structure. We keep these inline so the CLI
 // doesn't grow a build-time dep on the daemon package; the validator
@@ -88,7 +88,7 @@ interface EffectiveResponse {
 }
 
 async function withClient<T>(
-  deps: RigPolicyDeps,
+  deps: RigModeDeps,
   fn: (client: DaemonClient) => Promise<T>,
 ): Promise<T | undefined> {
   const status = await getDaemonStatus(deps.lifecycleDeps);
@@ -142,12 +142,12 @@ function formatCitation(b: BindingResponse["binding"]): string {
   return `Operating in \`${b.mode}\` mode at \`${scope}${qualifierPart}\` per operator (set_at ${b.setAt})`;
 }
 
-export function rigPolicyCommand(depsOverride?: RigPolicyDeps): Command {
-  const cmd = new Command("policy").description(
+export function rigModeCommand(depsOverride?: RigModeDeps): Command {
+  const cmd = new Command("mode").description(
     "Slice 09 — operator-context-mode bindings (sleep/desk/mobile/away/focus/debug × global_host/rig/workstream/qitem).",
   );
 
-  const getDeps = (): RigPolicyDeps =>
+  const getDeps = (): RigModeDeps =>
     depsOverride ?? {
       lifecycleDeps: realDeps(),
       clientFactory: (url: string) => new DaemonClient(url),
@@ -228,7 +228,7 @@ export function rigPolicyCommand(depsOverride?: RigPolicyDeps): Command {
 
       const deps = getDeps();
       await withClient(deps, async (client) => {
-        const defaultsRes = await client.get<RecommendedDefaultsResponse>("/api/rig-policy/defaults");
+        const defaultsRes = await client.get<RecommendedDefaultsResponse>("/api/rig-mode/defaults");
         if (defaultsRes.status >= 400) {
           console.error(JSON.stringify(defaultsRes.data, null, 2));
           process.exitCode = 1;
@@ -296,7 +296,7 @@ export function rigPolicyCommand(depsOverride?: RigPolicyDeps): Command {
         if (bearer) headers.Authorization = `Bearer ${bearer}`;
         const qualifierPath = qualifier ? `/${encodeURIComponent(qualifier)}` : "";
         const res = await client.put<BindingResponse | { error: string; errors?: string[] }>(
-          `/api/rig-policy/bindings/${scope}${qualifierPath}`,
+          `/api/rig-mode/bindings/${scope}${qualifierPath}`,
           { mode, record },
           { headers },
         );
@@ -342,7 +342,7 @@ export function rigPolicyCommand(depsOverride?: RigPolicyDeps): Command {
     .action(async (opts: { json?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
-        const res = await client.get<ListResponse>("/api/rig-policy/bindings");
+        const res = await client.get<ListResponse>("/api/rig-mode/bindings");
         if (res.status >= 400) {
           console.error(JSON.stringify(res.data, null, 2));
           process.exitCode = 1;
@@ -377,7 +377,7 @@ export function rigPolicyCommand(depsOverride?: RigPolicyDeps): Command {
         if (opts.rig) qs.set("rig", opts.rig);
         if (opts.workstream) qs.set("workstream", opts.workstream);
         if (opts.qitem) qs.set("qitem", opts.qitem);
-        const path = qs.toString() ? `/api/rig-policy/effective?${qs.toString()}` : "/api/rig-policy/effective";
+        const path = qs.toString() ? `/api/rig-mode/effective?${qs.toString()}` : "/api/rig-mode/effective";
         const res = await client.get<EffectiveResponse>(path);
         if (res.status >= 400) {
           console.error(JSON.stringify(res.data, null, 2));
@@ -415,7 +415,7 @@ export function rigPolicyCommand(depsOverride?: RigPolicyDeps): Command {
         if (opts.rig) qs.set("rig", opts.rig);
         if (opts.workstream) qs.set("workstream", opts.workstream);
         if (opts.qitem) qs.set("qitem", opts.qitem);
-        const path = qs.toString() ? `/api/rig-policy/effective?${qs.toString()}` : "/api/rig-policy/effective";
+        const path = qs.toString() ? `/api/rig-mode/effective?${qs.toString()}` : "/api/rig-mode/effective";
         const res = await client.get<EffectiveResponse>(path);
         if (res.status >= 400 || !res.data.effective) {
           console.log("Operating without an explicit operator-context-mode binding (unknown_posture).");
@@ -462,7 +462,7 @@ export function rigPolicyCommand(depsOverride?: RigPolicyDeps): Command {
         const headers: Record<string, string> = {};
         const bearer = opts.bearer ?? process.env.OPENRIG_AUTH_BEARER_TOKEN;
         if (bearer) headers.Authorization = `Bearer ${bearer}`;
-        const res = await client.delete<{ removed: boolean }>(`/api/rig-policy/bindings/${scope}${qualifierPath}`, { headers });
+        const res = await client.delete<{ removed: boolean }>(`/api/rig-mode/bindings/${scope}${qualifierPath}`, { headers });
         if (res.status >= 400) {
           if (opts.json) {
             console.log(JSON.stringify({ ok: false, ...(res.data as object) }, null, 2));
@@ -488,7 +488,7 @@ export function rigPolicyCommand(depsOverride?: RigPolicyDeps): Command {
     .action(async (opts: { json?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
-        const res = await client.get<RecommendedDefaultsResponse>("/api/rig-policy/defaults");
+        const res = await client.get<RecommendedDefaultsResponse>("/api/rig-mode/defaults");
         if (res.status >= 400) {
           console.error(JSON.stringify(res.data, null, 2));
           process.exitCode = 1;

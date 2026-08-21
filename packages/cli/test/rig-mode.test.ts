@@ -12,7 +12,7 @@
 //     (short-prose with mode + scope(:qualifier) + operator source).
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { rigPolicyCommand, __test__, type RigPolicyDeps } from "../src/commands/rig-policy.js";
+import { rigModeCommand, __test__, type RigModeDeps } from "../src/commands/rig-mode.js";
 import type { LifecycleDeps } from "../src/daemon-lifecycle.js";
 
 vi.mock("../src/daemon-lifecycle.js", async () => {
@@ -38,7 +38,7 @@ function fakeClient(opts: {
   const client = {
     get: vi.fn(async (path: string) => {
       calls.push({ method: "GET", path });
-      if (path.startsWith("/api/rig-policy/defaults")) {
+      if (path.startsWith("/api/rig-mode/defaults")) {
         return opts.defaultsResponse ?? {
           status: 200,
           data: {
@@ -55,7 +55,7 @@ function fakeClient(opts: {
           },
         };
       }
-      if (path.startsWith("/api/rig-policy/effective")) {
+      if (path.startsWith("/api/rig-mode/effective")) {
         return opts.effectiveResponse ?? { status: 200, data: { effective: null, posture: "unknown_posture", hint: "..." } };
       }
       return opts.getResponse ?? { status: 200, data: { bindings: [] } };
@@ -73,10 +73,10 @@ function fakeClient(opts: {
   return { client, calls };
 }
 
-function deps(client: unknown): RigPolicyDeps {
+function deps(client: unknown): RigModeDeps {
   return {
     lifecycleDeps: {} as LifecycleDeps,
-    clientFactory: () => client as ReturnType<RigPolicyDeps["clientFactory"]>,
+    clientFactory: () => client as ReturnType<RigModeDeps["clientFactory"]>,
   };
 }
 
@@ -149,7 +149,7 @@ describe("formatCitation (Component 5)", () => {
 describe("rig policy set — restate-and-confirm gate (HG-7)", () => {
   it("WITHOUT --confirm: restates + exits 2 + does NOT call PUT", async () => {
     const { client, calls } = fakeClient({});
-    const cmd = rigPolicyCommand(deps(client));
+    const cmd = rigModeCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "set", "debug", "--qualifier", "q-1"]);
     expect(process.exitCode).toBe(2);
     const puts = calls.filter((c) => c.method === "PUT");
@@ -160,7 +160,7 @@ describe("rig policy set — restate-and-confirm gate (HG-7)", () => {
 
   it("WITHOUT --confirm + --json: ok:false + confirm_required:true", async () => {
     const { client, calls } = fakeClient({});
-    const cmd = rigPolicyCommand(deps(client));
+    const cmd = rigModeCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "set", "debug", "--qualifier", "q-1", "--json"]);
     expect(process.exitCode).toBe(2);
     const joined = logs.join("\n");
@@ -174,12 +174,12 @@ describe("rig policy set — restate-and-confirm gate (HG-7)", () => {
 
   it("WITH --confirm: PUTs { mode, record } to the daemon and prints citation", async () => {
     const { client, calls } = fakeClient({});
-    const cmd = rigPolicyCommand(deps(client));
+    const cmd = rigModeCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "set", "debug", "--qualifier", "q-1", "--confirm"]);
     expect(process.exitCode).toBeUndefined();
     const puts = calls.filter((c) => c.method === "PUT");
     expect(puts).toHaveLength(1);
-    expect(puts[0]!.path).toBe("/api/rig-policy/bindings/qitem/q-1");
+    expect(puts[0]!.path).toBe("/api/rig-mode/bindings/qitem/q-1");
     const putBody = puts[0]!.body as { mode: string; record: Record<string, string> };
     expect(putBody.mode).toBe("debug");
     // BLOCKING-1: record must NOT carry `mode` inside.
@@ -190,7 +190,7 @@ describe("rig policy set — restate-and-confirm gate (HG-7)", () => {
 
   it("HG-4: --bearer forwards Authorization: Bearer <token>", async () => {
     const { client, calls } = fakeClient({});
-    const cmd = rigPolicyCommand(deps(client));
+    const cmd = rigModeCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "set", "debug", "--qualifier", "q-1", "--confirm", "--bearer", "operator-token"]);
     const put = calls.find((c) => c.method === "PUT")!;
     expect(put.options?.headers?.Authorization).toBe("Bearer operator-token");
@@ -198,18 +198,18 @@ describe("rig policy set — restate-and-confirm gate (HG-7)", () => {
 
   it("HG-7 mode:<name> prefix: works the same as bare word", async () => {
     const { client, calls } = fakeClient({});
-    const cmd = rigPolicyCommand(deps(client));
+    const cmd = rigModeCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "set", "mode:focus", "--qualifier", "ws-1", "--confirm"]);
     const put = calls.find((c) => c.method === "PUT")!;
     const body = put.body as { mode: string; record: Record<string, string> };
     expect(body.mode).toBe("focus");
     expect(body.record.scope).toBe("workstream");
-    expect(put.path).toBe("/api/rig-policy/bindings/workstream/ws-1");
+    expect(put.path).toBe("/api/rig-mode/bindings/workstream/ws-1");
   });
 
   it("rejects unknown mode with exit=1; daemon NOT called", async () => {
     const { client, calls } = fakeClient({});
-    const cmd = rigPolicyCommand(deps(client));
+    const cmd = rigModeCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "set", "banana", "--qualifier", "q-1"]);
     expect(process.exitCode).toBe(1);
     expect(calls.filter((c) => c.method === "PUT")).toHaveLength(0);
@@ -218,7 +218,7 @@ describe("rig policy set — restate-and-confirm gate (HG-7)", () => {
 
   it("forwards 401 from daemon with operator hint", async () => {
     const { client } = fakeClient({ putResponse: { status: 401, data: { error: "unauthorized" } } });
-    const cmd = rigPolicyCommand(deps(client));
+    const cmd = rigModeCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "set", "debug", "--qualifier", "q-1", "--confirm"]);
     expect(process.exitCode).toBe(1);
     expect(errs.join("\n")).toMatch(/Unauthorized/);
@@ -228,7 +228,7 @@ describe("rig policy set — restate-and-confirm gate (HG-7)", () => {
 describe("rig policy effective — Q6 unknown_posture surfaced", () => {
   it("prints 'unknown_posture' when daemon returns null effective", async () => {
     const { client } = fakeClient({});
-    const cmd = rigPolicyCommand(deps(client));
+    const cmd = rigModeCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "effective", "--qitem", "q-1"]);
     expect(logs.join("\n")).toContain("unknown_posture");
   });
@@ -237,7 +237,7 @@ describe("rig policy effective — Q6 unknown_posture surfaced", () => {
 describe("rig policy cite — convention citation rules", () => {
   it("prints unknown_posture fallback when no binding resolves", async () => {
     const { client } = fakeClient({});
-    const cmd = rigPolicyCommand(deps(client));
+    const cmd = rigModeCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "cite", "--qitem", "q-1"]);
     expect(logs.join("\n")).toContain("without an explicit");
   });
@@ -262,7 +262,7 @@ describe("rig policy cite — convention citation rules", () => {
         },
       },
     });
-    const cmd = rigPolicyCommand(deps(client));
+    const cmd = rigModeCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "cite", "--qitem", "q-1"]);
     const line = logs.join("\n");
     expect(line).toMatch(/Operating in `debug` mode at `qitem:q-1` per operator/);
@@ -296,7 +296,7 @@ describe("normalizeScopeQualifier (CLI mirror of daemon-route parseScopeAndQuali
 describe("BLOCKING re-verify-2 (qitem-20260518045300): explicit --scope global_host --qualifier <X> rejected BEFORE any daemon contact", () => {
   it("WITHOUT --confirm: exits 1; daemon NOT contacted at all (no GET /defaults, no PUT, no restate)", async () => {
     const { client, calls } = fakeClient({});
-    const cmd = rigPolicyCommand(deps(client));
+    const cmd = rigModeCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "set", "sleep", "--scope", "global_host", "--qualifier", "unexpected"]);
     expect(process.exitCode).toBe(1);
     // BLOCKING re-verify-2 evidence: zero daemon calls of any kind.
@@ -307,7 +307,7 @@ describe("BLOCKING re-verify-2 (qitem-20260518045300): explicit --scope global_h
 
   it("WITH --confirm: exits 1; daemon NOT contacted (no GET /defaults, no PUT)", async () => {
     const { client, calls } = fakeClient({});
-    const cmd = rigPolicyCommand(deps(client));
+    const cmd = rigModeCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "set", "sleep", "--scope", "global_host", "--qualifier", "unexpected", "--confirm"]);
     expect(process.exitCode).toBe(1);
     expect(calls).toHaveLength(0);
@@ -316,7 +316,7 @@ describe("BLOCKING re-verify-2 (qitem-20260518045300): explicit --scope global_h
 
   it("WITH --json: emits ok:false + qualifier_invalid; zero daemon calls", async () => {
     const { client, calls } = fakeClient({});
-    const cmd = rigPolicyCommand(deps(client));
+    const cmd = rigModeCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "set", "sleep", "--scope", "global_host", "--qualifier", "unexpected", "--json"]);
     expect(process.exitCode).toBe(1);
     expect(calls).toHaveLength(0);
@@ -327,7 +327,7 @@ describe("BLOCKING re-verify-2 (qitem-20260518045300): explicit --scope global_h
 
   it("Explicit non-global scope missing qualifier ALSO preflighted: zero daemon calls", async () => {
     const { client, calls } = fakeClient({});
-    const cmd = rigPolicyCommand(deps(client));
+    const cmd = rigModeCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "set", "debug", "--scope", "rig"]);
     expect(process.exitCode).toBe(1);
     expect(calls).toHaveLength(0);
@@ -336,7 +336,7 @@ describe("BLOCKING re-verify-2 (qitem-20260518045300): explicit --scope global_h
 
   it("Explicit unknown scope rejected locally: zero daemon calls", async () => {
     const { client, calls } = fakeClient({});
-    const cmd = rigPolicyCommand(deps(client));
+    const cmd = rigModeCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "set", "debug", "--scope", "banana", "--qualifier", "q-1"]);
     expect(process.exitCode).toBe(1);
     expect(calls).toHaveLength(0);
@@ -345,28 +345,28 @@ describe("BLOCKING re-verify-2 (qitem-20260518045300): explicit --scope global_h
 
   it("Positive: set sleep --scope global_host --confirm → PUT /bindings/global_host (one GET /defaults + one PUT)", async () => {
     const { client, calls } = fakeClient({});
-    const cmd = rigPolicyCommand(deps(client));
+    const cmd = rigModeCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "set", "sleep", "--scope", "global_host", "--confirm"]);
     expect(process.exitCode).toBeUndefined();
     const put = calls.find((c) => c.method === "PUT")!;
-    expect(put.path).toBe("/api/rig-policy/bindings/global_host");
+    expect(put.path).toBe("/api/rig-mode/bindings/global_host");
   });
 
   it("Implicit-default-scope path STILL fetches defaults (no preflight rejection): set debug without --scope reaches GET /defaults + PUT", async () => {
     const { client, calls } = fakeClient({});
-    const cmd = rigPolicyCommand(deps(client));
+    const cmd = rigModeCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "set", "debug", "--qualifier", "q-1", "--confirm"]);
     expect(process.exitCode).toBeUndefined();
-    const gets = calls.filter((c) => c.method === "GET" && c.path.startsWith("/api/rig-policy/defaults"));
+    const gets = calls.filter((c) => c.method === "GET" && c.path.startsWith("/api/rig-mode/defaults"));
     const puts = calls.filter((c) => c.method === "PUT");
     expect(gets.length).toBe(1);
     expect(puts.length).toBe(1);
-    expect(puts[0]!.path).toBe("/api/rig-policy/bindings/qitem/q-1");
+    expect(puts[0]!.path).toBe("/api/rig-mode/bindings/qitem/q-1");
   });
 
   it("Implicit-default-scope path still rejects missing qualifier when default scope needs one (no PUT)", async () => {
     const { client, calls } = fakeClient({});
-    const cmd = rigPolicyCommand(deps(client));
+    const cmd = rigModeCommand(deps(client));
     // `debug` default scope is `qitem`; without --qualifier the post-defaults normalization rejects.
     await cmd.parseAsync(["node", "rig", "set", "debug"]);
     expect(process.exitCode).toBe(1);
@@ -378,16 +378,16 @@ describe("BLOCKING re-verify-2 (qitem-20260518045300): explicit --scope global_h
 describe("rig policy unset — operator-only DELETE", () => {
   it("calls DELETE with Authorization when --bearer is provided", async () => {
     const { client, calls } = fakeClient({});
-    const cmd = rigPolicyCommand(deps(client));
+    const cmd = rigModeCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "unset", "qitem", "q-1", "--bearer", "operator-token"]);
     const del = calls.find((c) => c.method === "DELETE")!;
-    expect(del.path).toBe("/api/rig-policy/bindings/qitem/q-1");
+    expect(del.path).toBe("/api/rig-mode/bindings/qitem/q-1");
     expect(del.options?.headers?.Authorization).toBe("Bearer operator-token");
   });
 
   it("rejects unknown scope with exit=1; daemon NOT called", async () => {
     const { client, calls } = fakeClient({});
-    const cmd = rigPolicyCommand(deps(client));
+    const cmd = rigModeCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "unset", "banana", "x"]);
     expect(process.exitCode).toBe(1);
     expect(calls.filter((c) => c.method === "DELETE")).toHaveLength(0);
@@ -398,7 +398,7 @@ describe("rig policy unset — operator-only DELETE", () => {
   // host row. Same shape as set; same shared helper.
   it("BLOCKING re-verify: unset global_host unexpected → exits 1; daemon NOT called", async () => {
     const { client, calls } = fakeClient({});
-    const cmd = rigPolicyCommand(deps(client));
+    const cmd = rigModeCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "unset", "global_host", "unexpected"]);
     expect(process.exitCode).toBe(1);
     expect(calls.filter((c) => c.method === "DELETE")).toHaveLength(0);
@@ -407,10 +407,10 @@ describe("rig policy unset — operator-only DELETE", () => {
 
   it("Positive: unset global_host (no qualifier) targets /bindings/global_host", async () => {
     const { client, calls } = fakeClient({});
-    const cmd = rigPolicyCommand(deps(client));
+    const cmd = rigModeCommand(deps(client));
     await cmd.parseAsync(["node", "rig", "unset", "global_host"]);
     expect(process.exitCode).toBeUndefined();
     const del = calls.find((c) => c.method === "DELETE")!;
-    expect(del.path).toBe("/api/rig-policy/bindings/global_host");
+    expect(del.path).toBe("/api/rig-mode/bindings/global_host");
   });
 });

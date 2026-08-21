@@ -6,7 +6,7 @@ import {
   disambiguateModeInvocation,
   validateModeName,
   validateRecord,
-} from "../src/domain/rig-policy/rig-policy-validator.js";
+} from "../src/domain/rig-mode/rig-mode-validator.js";
 
 // Per guard BLOCKING-1: the record is the FROZEN Component-3 10-field
 // settings schema. `mode` (Component 2 vocabulary) lives at the binding

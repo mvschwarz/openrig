@@ -1,13 +1,13 @@
 // Slice 09 — Rig Policy (operator context mode) HTTP routes.
 //
 // Surface (binding-related ONLY — HG-SAFE):
-//   GET    /api/rig-policy/bindings                      — list bindings
-//   GET    /api/rig-policy/bindings/:scope/:qualifier?   — read one binding
-//   PUT    /api/rig-policy/bindings/:scope/:qualifier?   — upsert (operator)
-//   DELETE /api/rig-policy/bindings/:scope/:qualifier?   — unset (operator)
-//   GET    /api/rig-policy/effective                     — resolve effective
+//   GET    /api/rig-mode/bindings                      — list bindings
+//   GET    /api/rig-mode/bindings/:scope/:qualifier?   — read one binding
+//   PUT    /api/rig-mode/bindings/:scope/:qualifier?   — upsert (operator)
+//   DELETE /api/rig-mode/bindings/:scope/:qualifier?   — unset (operator)
+//   GET    /api/rig-mode/effective                     — resolve effective
 //                                                          (?rig=&workstream=&qitem=)
-//   GET    /api/rig-policy/defaults                      — recommended
+//   GET    /api/rig-mode/defaults                      — recommended
 //                                                          per-mode 6×7
 //                                                          + default scope
 //                                                          + DEFAULT_STALE_RULE
@@ -21,22 +21,22 @@
 //
 // HG-SAFE preserved: this router NEVER touches permission allowlists /
 // runtime configs / auth tokens / tmux / lifecycle. It calls a single
-// store (RigPolicyStore) whose surface area is itself binding-limited.
+// store (RigModeStore) whose surface area is itself binding-limited.
 
 import { Hono } from "hono";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
-import type { RigPolicyStore } from "../domain/rig-policy/rig-policy-store.js";
+import type { RigModeStore } from "../domain/rig-mode/rig-mode-store.js";
 import {
   OPERATOR_CONTEXT_SCOPES,
   type OperatorContextScope,
-} from "../domain/rig-policy/rig-policy-types.js";
+} from "../domain/rig-mode/rig-mode-types.js";
 import {
   DEFAULT_STALE_RULE,
   RECOMMENDED_DEFAULT_SCOPE,
   RECOMMENDED_MODE_DEFAULTS,
-} from "../domain/rig-policy/rig-policy-defaults.js";
+} from "../domain/rig-mode/rig-mode-defaults.js";
 
-export interface RigPolicyRoutesOpts {
+export interface RigModeRoutesOpts {
   /** Operator bearer token (same one Mission Control uses). When null,
    * the daemon's listen layer is loopback-only and write verbs pass
    * through; non-null requires `Authorization: Bearer <token>`. */
@@ -87,7 +87,7 @@ function parseScopeAndQualifier(scopeRaw: string, qualifierRaw: string | undefin
         status: 400,
         body: {
           error: "qualifier_forbidden",
-          hint: "Global-host bindings cannot carry a qualifier. Use /api/rig-policy/bindings/global_host with no trailing path segment.",
+          hint: "Global-host bindings cannot carry a qualifier. Use /api/rig-mode/bindings/global_host with no trailing path segment.",
         },
       };
     }
@@ -106,12 +106,12 @@ function parseScopeAndQualifier(scopeRaw: string, qualifierRaw: string | undefin
   return { ok: true, scope, qualifier: qualifierRaw };
 }
 
-function getStore(c: { get: (key: string) => unknown }): RigPolicyStore | null {
-  const store = c.get("rigPolicyStore" as never) as RigPolicyStore | undefined;
+function getStore(c: { get: (key: string) => unknown }): RigModeStore | null {
+  const store = c.get("rigModeStore" as never) as RigModeStore | undefined;
   return store ?? null;
 }
 
-export function rigPolicyRoutes(opts?: RigPolicyRoutesOpts): Hono {
+export function rigModeRoutes(opts?: RigModeRoutesOpts): Hono {
   const router = new Hono();
   const bearer = opts?.bearerToken ?? null;
   const requireOperator = authBearerTokenMiddleware({ expectedToken: bearer });

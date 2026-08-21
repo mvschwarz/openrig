@@ -1,6 +1,6 @@
 // Slice 09 — runtime validator for OperatorContextModeRecord input.
 //
-// The type system (rig-policy-types.ts) blocks invalid values at
+// The type system (rig-mode-types.ts) blocks invalid values at
 // compile time when callers go through the typed surface. This
 // validator is the defense for inputs that bypass types: JSON file
 // reads, HTTP request bodies, env-var-derived configuration, CLI
@@ -30,7 +30,7 @@ import {
   OPERATOR_CONTEXT_SCOPES,
   SAFE_PERMISSION_PROMPT_POSTURES,
   STALE_RULES,
-} from "./rig-policy-types.js";
+} from "./rig-mode-types.js";
 
 const ALLOWED_AUTONOMY_SCOPES: readonly AutonomyScope[] = [
   "pre_approved_only",

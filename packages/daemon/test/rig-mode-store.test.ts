@@ -13,12 +13,12 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
-import { RigPolicyStore } from "../src/domain/rig-policy/rig-policy-store.js";
+import { RigModeStore } from "../src/domain/rig-mode/rig-mode-store.js";
 import {
   type OperatorContextMode,
   type OperatorContextModeRecord,
   type OperatorContextScope,
-} from "../src/domain/rig-policy/rig-policy-types.js";
+} from "../src/domain/rig-mode/rig-mode-types.js";
 
 function makeRecord(
   overrides?: Partial<OperatorContextModeRecord>,
@@ -38,13 +38,13 @@ function makeRecord(
   };
 }
 
-describe("RigPolicyStore — slice 09 persistence + resolution", () => {
+describe("RigModeStore — slice 09 persistence + resolution", () => {
   let db: Database.Database;
-  let store: RigPolicyStore;
+  let store: RigModeStore;
 
   beforeEach(() => {
     db = createFullTestDb();
-    store = new RigPolicyStore(db);
+    store = new RigModeStore(db);
   });
 
   afterEach(() => {
@@ -214,7 +214,7 @@ describe("RigPolicyStore — slice 09 persistence + resolution", () => {
     store.setBinding("global_host", null, "sleep", makeRecord({ scope: "global_host" }));
     store.setBinding("qitem", "q-1", "debug", makeRecord({ scope: "qitem" }));
 
-    const fresh = new RigPolicyStore(db);
+    const fresh = new RigModeStore(db);
     expect(fresh.listBindings().length).toBe(2);
     expect(fresh.getBinding("global_host", null)?.mode).toBe("sleep");
     expect(fresh.getBinding("qitem", "q-1")?.mode).toBe("debug");
@@ -249,7 +249,7 @@ describe("RigPolicyStore — slice 09 persistence + resolution", () => {
   // HG-SAFE — defense audit: setBinding writes to ONE table. The store
   // does not expose any method that touches permission allowlists,
   // runtime config, or auth surfaces. This test pins the surface area.
-  it("HG-SAFE: RigPolicyStore exposes ONLY binding-related methods (no permission/auth/runtime-config surface)", () => {
+  it("HG-SAFE: RigModeStore exposes ONLY binding-related methods (no permission/auth/runtime-config surface)", () => {
     const expected = new Set([
       "setBinding",
       "getBinding",
@@ -258,7 +258,7 @@ describe("RigPolicyStore — slice 09 persistence + resolution", () => {
       "resolveEffective",
     ]);
     const actual = new Set(
-      Object.getOwnPropertyNames(RigPolicyStore.prototype).filter((m) => m !== "constructor"),
+      Object.getOwnPropertyNames(RigModeStore.prototype).filter((m) => m !== "constructor"),
     );
     for (const m of actual) {
       expect(expected.has(m)).toBe(true);
@@ -271,13 +271,13 @@ describe("RigPolicyStore — slice 09 persistence + resolution", () => {
   // Per-scope grep negative: no permission-related identifier in the
   // source. This anchors the gate-zero "NO permission/runtime-config
   // write anywhere" rule at the store source level.
-  it("HG-SAFE: rig-policy-store source contains no permission / auth / tmux / lifecycle identifiers", async () => {
+  it("HG-SAFE: rig-mode-store source contains no permission / auth / tmux / lifecycle identifiers", async () => {
     const fs = await import("node:fs");
     const path = await import("node:path");
     const url = await import("node:url");
     const here = path.dirname(url.fileURLToPath(import.meta.url));
     const src = fs.readFileSync(
-      path.join(here, "..", "src", "domain", "rig-policy", "rig-policy-store.ts"),
+      path.join(here, "..", "src", "domain", "rig-mode", "rig-mode-store.ts"),
       "utf-8",
     );
     for (const forbidden of [

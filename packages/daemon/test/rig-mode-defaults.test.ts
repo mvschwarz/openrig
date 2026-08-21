@@ -5,14 +5,14 @@ import {
   DEFAULT_STALE_RULE,
   RECOMMENDED_DEFAULT_SCOPE,
   RECOMMENDED_MODE_DEFAULTS,
-} from "../src/domain/rig-policy/rig-policy-defaults.js";
+} from "../src/domain/rig-mode/rig-mode-defaults.js";
 import {
   OPERATOR_CONTEXT_MODES,
   SAFE_PERMISSION_PROMPT_POSTURES,
-} from "../src/domain/rig-policy/rig-policy-types.js";
-import { validateRecord } from "../src/domain/rig-policy/rig-policy-validator.js";
+} from "../src/domain/rig-mode/rig-mode-types.js";
+import { validateRecord } from "../src/domain/rig-mode/rig-mode-validator.js";
 
-describe("rig-policy defaults — slice 09 §Component 3 + §Component 4", () => {
+describe("rig-mode defaults — slice 09 §Component 3 + §Component 4", () => {
   // HG-6 — every mode has a default row in the 6×7 matrix.
   it("HG-6: every mode has a recommended-defaults row", () => {
     for (const mode of OPERATOR_CONTEXT_MODES) {

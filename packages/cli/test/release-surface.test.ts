@@ -31,13 +31,13 @@ const FROM = "v0.3.1";
 const TO = "v0.3.2";
 
 describe("release-surface parser - extract (unit)", () => {
-  it("AC-2 crux: emits the registration name `policy`, never the filename `rig-policy`", () => {
-    const surface = extractSurfaceFromSources([readSource("src/commands/rig-policy.ts")]);
-    expect(surface.commands.has("policy")).toBe(true);
-    expect([...surface.commands].some((c) => c.includes("rig-policy"))).toBe(false);
-    // a few known subcommands of `policy`
-    expect(surface.commands.has("policy set")).toBe(true);
-    expect(surface.commands.has("policy defaults")).toBe(true);
+  it("AC-2 crux: emits the registration name `mode`, never the filename `rig-mode` (verb renamed from `policy`, B7)", () => {
+    const surface = extractSurfaceFromSources([readSource("src/commands/rig-mode.ts")]);
+    expect(surface.commands.has("mode")).toBe(true);
+    expect([...surface.commands].some((c) => c.includes("rig-mode"))).toBe(false);
+    // a few known subcommands of `mode`
+    expect(surface.commands.has("mode set")).toBe(true);
+    expect(surface.commands.has("mode defaults")).toBe(true);
   });
 
   it("AC-3: captures the option name-token despite a template-literal description", () => {

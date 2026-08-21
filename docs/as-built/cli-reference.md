@@ -1403,16 +1403,21 @@ Composes with the existing `scripts/mirror-skills.mjs` guardrails — the audit 
 
 ## Operator Context-Mode Bindings (v0.3.2)
 
-One top-level command first shipped in v0.3.2 (`rigPolicyCommand`,
-defined in `packages/cli/src/commands/rig-policy.ts`; release-0.3.2
-slice 09). Pairs with the daemon's typed-primitive store at
-`packages/daemon/src/db/migrations/041_rig_policy.ts`. Operates the
-operator context-mode binding surface (sleep / desk / mobile / away /
-focus / debug) used by mode-aware agent posture.
+One top-level command first shipped in v0.3.2 as `rig policy`
+(release-0.3.2 slice 09), renamed to `rig mode` in 0.5.2 per the PM
+ruling RULING-rig-mode-rig-policy-naming (clean rename, no alias —
+zero adoption confirmed; `rig policy` is being reintroduced as the
+permission-policy verb). Defined in `rigModeCommand`
+(`packages/cli/src/commands/rig-mode.ts`). Pairs with the daemon's
+typed-primitive store at
+`packages/daemon/src/db/migrations/041_rig_policy.ts` (DB artifact
+names keep their shipped forms). Operates the operator context-mode
+binding surface (sleep / desk / mobile / away / focus / debug) used by
+mode-aware agent posture.
 
-### `rig policy`
+### `rig mode`
 
-Usage: `rig policy <subcommand>`
+Usage: `rig mode <subcommand>`
 
 Subcommands:
 - `set <mode> [--scope <scope>] [--qualifier <id>] [--<field> ...] [--evidence <citation>] [--confirm] [--bearer <token>] [--json]` — propose a binding. Without `--confirm` the CLI echoes the proposed binding and exits with `exit 2` so scripts cannot accidentally apply; `--confirm` is the explicit operator action. `<scope>` is one of `global_host | rig | workstream | qitem` (defaults to the per-mode recommendation). `--qualifier <id>` is required for `rig | workstream | qitem` scopes and rejected for `global_host`. Per-field tuning flags: `--autonomy-scope`, `--heartbeat-cadence`, `--inspection-depth`, `--update-detail`, `--escalation-threshold`, `--concurrency-limit`, `--permission-prompt-posture` (one of `normal | batch_for_human | do_not_prompt_unless_blocked`; `auto_accept` is FORBIDDEN by convention), `--expiry-or-stale-rule`. `--evidence` carries a free-text operator citation (message id, file pointer, chatroom topic, etc.).

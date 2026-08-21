@@ -1,4 +1,4 @@
-// Slice 09 — rig-policy HTTP route tests.
+// Slice 09 — rig-mode HTTP route tests.
 //
 // HG-4 + HG-SAFE anchored at the route layer:
 //   - PUT/DELETE require operator bearer when configured (HG-4 — agent
@@ -23,9 +23,9 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
-import { RigPolicyStore } from "../src/domain/rig-policy/rig-policy-store.js";
-import { rigPolicyRoutes } from "../src/routes/rig-policy.js";
-import type { OperatorContextMode, OperatorContextModeRecord } from "../src/domain/rig-policy/rig-policy-types.js";
+import { RigModeStore } from "../src/domain/rig-mode/rig-mode-store.js";
+import { rigModeRoutes } from "../src/routes/rig-mode.js";
+import type { OperatorContextMode, OperatorContextModeRecord } from "../src/domain/rig-mode/rig-mode-types.js";
 
 function makeRecord(overrides?: Partial<OperatorContextModeRecord>): OperatorContextModeRecord {
   return {
@@ -47,18 +47,18 @@ function putBody(mode: OperatorContextMode, recordOverrides?: Partial<OperatorCo
   return { mode, record: makeRecord(recordOverrides) };
 }
 
-function buildApp(db: Database.Database, bearer: string | null): { app: Hono; store: RigPolicyStore } {
-  const store = new RigPolicyStore(db);
+function buildApp(db: Database.Database, bearer: string | null): { app: Hono; store: RigModeStore } {
+  const store = new RigModeStore(db);
   const app = new Hono();
   app.use("*", async (c, next) => {
-    c.set("rigPolicyStore" as never, store);
+    c.set("rigModeStore" as never, store);
     await next();
   });
-  app.route("/api/rig-policy", rigPolicyRoutes({ bearerToken: bearer }));
+  app.route("/api/rig-mode", rigModeRoutes({ bearerToken: bearer }));
   return { app, store };
 }
 
-describe("rig-policy HTTP routes — slice 09", () => {
+describe("rig-mode HTTP routes — slice 09", () => {
   let db: Database.Database;
 
   beforeEach(() => {
@@ -71,7 +71,7 @@ describe("rig-policy HTTP routes — slice 09", () => {
 
   it("GET /defaults returns the 6×7 + default-scope + DEFAULT_STALE_RULE", async () => {
     const { app } = buildApp(db, null);
-    const res = await app.request("/api/rig-policy/defaults");
+    const res = await app.request("/api/rig-mode/defaults");
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       recommendedModeDefaults: Record<string, unknown>;
@@ -85,7 +85,7 @@ describe("rig-policy HTTP routes — slice 09", () => {
 
   it("HG-4: PUT requires the operator bearer when configured", async () => {
     const { app } = buildApp(db, "operator-token");
-    const res = await app.request("/api/rig-policy/bindings/qitem/q-1", {
+    const res = await app.request("/api/rig-mode/bindings/qitem/q-1", {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(putBody("debug")),
@@ -95,7 +95,7 @@ describe("rig-policy HTTP routes — slice 09", () => {
 
   it("HG-4 (BLOCKING-1): PUT accepts { mode, record } and round-trips via GET", async () => {
     const { app } = buildApp(db, "operator-token");
-    const put = await app.request("/api/rig-policy/bindings/qitem/q-1", {
+    const put = await app.request("/api/rig-mode/bindings/qitem/q-1", {
       method: "PUT",
       headers: {
         "content-type": "application/json",
@@ -110,7 +110,7 @@ describe("rig-policy HTTP routes — slice 09", () => {
     // The record itself does NOT carry `mode`.
     expect(putBodyResp.binding.record.mode).toBeUndefined();
 
-    const get = await app.request("/api/rig-policy/bindings/qitem/q-1");
+    const get = await app.request("/api/rig-mode/bindings/qitem/q-1");
     expect(get.status).toBe(200);
     const getBody = (await get.json()) as { binding: { mode: string; record: Record<string, unknown> } };
     expect(getBody.binding.mode).toBe("debug");
@@ -119,7 +119,7 @@ describe("rig-policy HTTP routes — slice 09", () => {
 
   it("BLOCKING-1: PUT body missing `mode` is rejected with body_shape_invalid", async () => {
     const { app } = buildApp(db, null);
-    const res = await app.request("/api/rig-policy/bindings/qitem/q-1", {
+    const res = await app.request("/api/rig-mode/bindings/qitem/q-1", {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ record: makeRecord() }),
@@ -131,7 +131,7 @@ describe("rig-policy HTTP routes — slice 09", () => {
 
   it("BLOCKING-1: PUT body that smuggles `mode` inside record is rejected as Unknown field", async () => {
     const { app } = buildApp(db, null);
-    const res = await app.request("/api/rig-policy/bindings/qitem/q-1", {
+    const res = await app.request("/api/rig-mode/bindings/qitem/q-1", {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ mode: "debug", record: { ...makeRecord(), mode: "debug" } }),
@@ -144,7 +144,7 @@ describe("rig-policy HTTP routes — slice 09", () => {
 
   it("HG-SAFE: PUT with permission_prompt_posture='auto_accept' is rejected (runtime defense)", async () => {
     const { app } = buildApp(db, null);
-    const res = await app.request("/api/rig-policy/bindings/qitem/q-1", {
+    const res = await app.request("/api/rig-mode/bindings/qitem/q-1", {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -163,14 +163,14 @@ describe("rig-policy HTTP routes — slice 09", () => {
     store.setBinding("global_host", null, "sleep", makeRecord({ scope: "global_host" }));
     store.setBinding("qitem", "q-1", "debug", makeRecord({ scope: "qitem" }));
 
-    const r1 = await app.request("/api/rig-policy/effective?qitem=q-1");
+    const r1 = await app.request("/api/rig-mode/effective?qitem=q-1");
     expect(r1.status).toBe(200);
     const r1body = (await r1.json()) as { effective: { resolvedScope: string; binding: { mode: string } }; posture: string };
     expect(r1body.effective.resolvedScope).toBe("qitem");
     expect(r1body.effective.binding.mode).toBe("debug");
     expect(r1body.posture).toBe("known");
 
-    const r2 = await app.request("/api/rig-policy/effective?qitem=q-other");
+    const r2 = await app.request("/api/rig-mode/effective?qitem=q-other");
     const r2body = (await r2.json()) as { effective: { resolvedScope: string; binding: { mode: string } } };
     expect(r2body.effective.resolvedScope).toBe("global_host");
     expect(r2body.effective.binding.mode).toBe("sleep");
@@ -178,7 +178,7 @@ describe("rig-policy HTTP routes — slice 09", () => {
 
   it("Q6 unknown_posture: GET /effective with no matching binding returns null + unknown_posture", async () => {
     const { app } = buildApp(db, null);
-    const res = await app.request("/api/rig-policy/effective?qitem=q-1");
+    const res = await app.request("/api/rig-mode/effective?qitem=q-1");
     expect(res.status).toBe(200);
     const body = (await res.json()) as { effective: unknown; posture: string };
     expect(body.effective).toBeNull();
@@ -189,7 +189,7 @@ describe("rig-policy HTTP routes — slice 09", () => {
     const { app, store } = buildApp(db, null);
     store.setBinding("global_host", null, "sleep", makeRecord({ scope: "global_host" }));
     store.setBinding("rig", "rig-a", "focus", makeRecord({ scope: "rig" }));
-    const res = await app.request("/api/rig-policy/bindings");
+    const res = await app.request("/api/rig-mode/bindings");
     expect(res.status).toBe(200);
     const body = (await res.json()) as { bindings: Array<{ id: string }> };
     expect(body.bindings.map((b) => b.id).sort()).toEqual(["global_host:host", "rig:rig-a"]);
@@ -198,9 +198,9 @@ describe("rig-policy HTTP routes — slice 09", () => {
   it("HG-4: DELETE requires operator bearer when configured", async () => {
     const { app, store } = buildApp(db, "operator-token");
     store.setBinding("rig", "rig-a", "focus", makeRecord({ scope: "rig" }));
-    const noAuth = await app.request("/api/rig-policy/bindings/rig/rig-a", { method: "DELETE" });
+    const noAuth = await app.request("/api/rig-mode/bindings/rig/rig-a", { method: "DELETE" });
     expect(noAuth.status).toBe(401);
-    const auth = await app.request("/api/rig-policy/bindings/rig/rig-a", {
+    const auth = await app.request("/api/rig-mode/bindings/rig/rig-a", {
       method: "DELETE",
       headers: { authorization: "Bearer operator-token" },
     });
@@ -211,7 +211,7 @@ describe("rig-policy HTTP routes — slice 09", () => {
 
   it("scope_invalid rejects unknown scope at the route layer", async () => {
     const { app } = buildApp(db, null);
-    const res = await app.request("/api/rig-policy/bindings/banana/x", {
+    const res = await app.request("/api/rig-mode/bindings/banana/x", {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(putBody("debug")),
@@ -223,7 +223,7 @@ describe("rig-policy HTTP routes — slice 09", () => {
 
   it("qualifier_required: GET /bindings/rig (no qualifier) returns 400", async () => {
     const { app } = buildApp(db, null);
-    const res = await app.request("/api/rig-policy/bindings/rig");
+    const res = await app.request("/api/rig-mode/bindings/rig");
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe("qualifier_required");
@@ -232,7 +232,7 @@ describe("rig-policy HTTP routes — slice 09", () => {
   it("GET /bindings/global_host (no qualifier) reads the host binding", async () => {
     const { app, store } = buildApp(db, null);
     store.setBinding("global_host", null, "sleep", makeRecord({ scope: "global_host" }));
-    const res = await app.request("/api/rig-policy/bindings/global_host");
+    const res = await app.request("/api/rig-mode/bindings/global_host");
     expect(res.status).toBe(200);
     const body = (await res.json()) as { binding: { mode: string } };
     expect(body.binding.mode).toBe("sleep");
@@ -240,7 +240,7 @@ describe("rig-policy HTTP routes — slice 09", () => {
 
   it("404 on a missing binding", async () => {
     const { app } = buildApp(db, null);
-    const res = await app.request("/api/rig-policy/bindings/rig/rig-not-there");
+    const res = await app.request("/api/rig-mode/bindings/rig/rig-not-there");
     expect(res.status).toBe(404);
   });
 
@@ -251,7 +251,7 @@ describe("rig-policy HTTP routes — slice 09", () => {
   describe("BLOCKING-2: global_host + non-empty qualifier rejected (no hidden inference)", () => {
     it("GET /bindings/global_host/unexpected → 400 qualifier_forbidden", async () => {
       const { app } = buildApp(db, null);
-      const res = await app.request("/api/rig-policy/bindings/global_host/unexpected");
+      const res = await app.request("/api/rig-mode/bindings/global_host/unexpected");
       expect(res.status).toBe(400);
       const body = (await res.json()) as { error: string };
       expect(body.error).toBe("qualifier_forbidden");
@@ -261,7 +261,7 @@ describe("rig-policy HTTP routes — slice 09", () => {
       const { app, store } = buildApp(db, null);
       store.setBinding("global_host", null, "sleep", makeRecord({ scope: "global_host" }));
       const before = store.getBinding("global_host", null)!;
-      const res = await app.request("/api/rig-policy/bindings/global_host/unexpected", {
+      const res = await app.request("/api/rig-mode/bindings/global_host/unexpected", {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(putBody("debug", { scope: "global_host" })),
@@ -277,7 +277,7 @@ describe("rig-policy HTTP routes — slice 09", () => {
     it("DELETE /bindings/global_host/unexpected → 400 qualifier_forbidden; the global-host row is NOT removed", async () => {
       const { app, store } = buildApp(db, null);
       store.setBinding("global_host", null, "sleep", makeRecord({ scope: "global_host" }));
-      const res = await app.request("/api/rig-policy/bindings/global_host/unexpected", {
+      const res = await app.request("/api/rig-mode/bindings/global_host/unexpected", {
         method: "DELETE",
       });
       expect(res.status).toBe(400);
@@ -290,13 +290,13 @@ describe("rig-policy HTTP routes — slice 09", () => {
   // HG-SAFE source-level — the route file does NOT reference permission
   // allowlist / runtime config / tmux / lifecycle identifiers. The route
   // is purely a binding-related surface (HG-SAFE).
-  it("HG-SAFE: rig-policy route source contains no permission / auth-token / tmux / lifecycle identifiers", async () => {
+  it("HG-SAFE: rig-mode route source contains no permission / auth-token / tmux / lifecycle identifiers", async () => {
     const fs = await import("node:fs");
     const path = await import("node:path");
     const url = await import("node:url");
     const here = path.dirname(url.fileURLToPath(import.meta.url));
     const src = fs.readFileSync(
-      path.join(here, "..", "src", "routes", "rig-policy.ts"),
+      path.join(here, "..", "src", "routes", "rig-mode.ts"),
       "utf-8",
     );
     for (const forbidden of [

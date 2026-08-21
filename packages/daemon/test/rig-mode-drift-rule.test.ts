@@ -14,17 +14,17 @@
 //      in the closed enum.
 //   3. The store NEVER mutates bindings during a read. resolveEffective
 //      is pure — same binding, same setAt, repeatable.
-//   4. Source grep: rig-policy domain code contains NO identifiers
+//   4. Source grep: rig-mode domain code contains NO identifiers
 //      that imply automatic mode-switching (auto-switch / auto-apply /
 //      signal-based / etc.).
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
-import { RigPolicyStore } from "../src/domain/rig-policy/rig-policy-store.js";
-import { DEFAULT_STALE_RULE } from "../src/domain/rig-policy/rig-policy-defaults.js";
-import { STALE_RULES, type OperatorContextModeRecord } from "../src/domain/rig-policy/rig-policy-types.js";
-import { validateRecord } from "../src/domain/rig-policy/rig-policy-validator.js";
+import { RigModeStore } from "../src/domain/rig-mode/rig-mode-store.js";
+import { DEFAULT_STALE_RULE } from "../src/domain/rig-mode/rig-mode-defaults.js";
+import { STALE_RULES, type OperatorContextModeRecord } from "../src/domain/rig-mode/rig-mode-types.js";
+import { validateRecord } from "../src/domain/rig-mode/rig-mode-validator.js";
 
 function makeRecord(overrides?: Partial<OperatorContextModeRecord>): OperatorContextModeRecord {
   return {
@@ -65,11 +65,11 @@ describe("HG-8 drift-rule mechanism — convention §Component 4 + §Q3", () => 
 
 describe("HG-8 — store reads NEVER mutate bindings (no silent switch path)", () => {
   let db: Database.Database;
-  let store: RigPolicyStore;
+  let store: RigModeStore;
 
   beforeEach(() => {
     db = createFullTestDb();
-    store = new RigPolicyStore(db);
+    store = new RigModeStore(db);
   });
 
   afterEach(() => {
@@ -109,13 +109,13 @@ describe("HG-8 — store reads NEVER mutate bindings (no silent switch path)", (
   // module mutates a binding's mode from a signal / timer / external
   // observation. This is the source-level discriminator for
   // "no silent switch path exists" (HG-8).
-  it("HG-8 source grep: rig-policy domain code contains no auto-switch / auto-apply / signal-driven identifiers", async () => {
+  it("HG-8 source grep: rig-mode domain code contains no auto-switch / auto-apply / signal-driven identifiers", async () => {
     const fs = await import("node:fs");
     const path = await import("node:path");
     const url = await import("node:url");
     const here = path.dirname(url.fileURLToPath(import.meta.url));
-    const domainDir = path.join(here, "..", "src", "domain", "rig-policy");
-    const sources = ["rig-policy-types.ts", "rig-policy-validator.ts", "rig-policy-defaults.ts", "rig-policy-store.ts"];
+    const domainDir = path.join(here, "..", "src", "domain", "rig-mode");
+    const sources = ["rig-mode-types.ts", "rig-mode-validator.ts", "rig-mode-defaults.ts", "rig-mode-store.ts"];
     const combined = sources.map((f) => fs.readFileSync(path.join(domainDir, f), "utf-8")).join("\n");
     for (const forbidden of [
       "autoSwitch",
@@ -131,7 +131,7 @@ describe("HG-8 — store reads NEVER mutate bindings (no silent switch path)", (
       "autoSetMode",
       "auto_set_mode",
     ]) {
-      expect(combined.includes(forbidden), `forbidden token '${forbidden}' must not appear in rig-policy domain source`).toBe(false);
+      expect(combined.includes(forbidden), `forbidden token '${forbidden}' must not appear in rig-mode domain source`).toBe(false);
     }
   });
 });

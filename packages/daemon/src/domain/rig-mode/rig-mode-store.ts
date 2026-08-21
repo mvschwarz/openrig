@@ -35,8 +35,8 @@ import {
   type OperatorContextReadContext,
   type OperatorContextScope,
   SCOPE_SPECIFICITY,
-} from "./rig-policy-types.js";
-import { validateModeName, validateRecord } from "./rig-policy-validator.js";
+} from "./rig-mode-types.js";
+import { validateModeName, validateRecord } from "./rig-mode-validator.js";
 
 interface BindingRow {
   id: string;
@@ -73,16 +73,16 @@ export interface SetBindingError {
   errors: string[];
 }
 
-export interface RigPolicyStoreOpts {
+export interface RigModeStoreOpts {
   /** Override the clock for tests; defaults to new Date(). */
   now?: () => Date;
 }
 
-export class RigPolicyStore {
+export class RigModeStore {
   private readonly db: Database.Database;
   private readonly now: () => Date;
 
-  constructor(db: Database.Database, opts?: RigPolicyStoreOpts) {
+  constructor(db: Database.Database, opts?: RigModeStoreOpts) {
     this.db = db;
     this.now = opts?.now ?? (() => new Date());
   }
@@ -190,7 +190,7 @@ export class RigPolicyStore {
    * `unknown_posture` per convention §Q6 (do NOT default to `desk`).
    *
    * Specificity ranks (qitem > workstream > rig > global_host) are
-   * defined in rig-policy-types.SCOPE_SPECIFICITY. For each scope the
+   * defined in rig-mode-types.SCOPE_SPECIFICITY. For each scope the
    * resolver picks the binding whose qualifier matches the read
    * context. Among multiple matching bindings, the most-specific
    * scope wins.

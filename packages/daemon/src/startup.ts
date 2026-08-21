@@ -115,7 +115,7 @@ import nodePath from "node:path";
 // Slice 11 (release-0.3.1 workflow-spec-folder-discovery) — adds
 // status + error_message columns to workflow_specs so the scanner
 // can record diagnostic rows. SC-29 #10 declared verbatim in commit body.
-import { RigPolicyStore } from "./domain/rig-policy/rig-policy-store.js";
+import { RigModeStore } from "./domain/rig-mode/rig-mode-store.js";
 import { MissionControlActionLog } from "./domain/mission-control/mission-control-action-log.js";
 import { MissionControlWriteContract } from "./domain/mission-control/mission-control-write-contract.js";
 import { MissionControlReadLayer } from "./domain/mission-control/mission-control-read-layer.js";
@@ -1143,7 +1143,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     snapshotCapturer,
     // Slice 09 (OPR.0.3.2.9) — operator-context-mode bindings store
     // (typed primitive on the shared db handle; HG-5: no parallel store).
-    rigPolicyStore: new RigPolicyStore(db),
+    rigModeStore: new RigModeStore(db),
     agentImageSpecRoots: () => {
       // Spec-library roots scanned by the evidence guard. v0: user
       // specs under ~/.openrig/specs + workspace-local specs root

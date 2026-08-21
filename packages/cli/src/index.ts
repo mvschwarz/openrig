@@ -79,7 +79,7 @@ import { compactPlanCommand, type CompactPlanDeps } from "./commands/compact-pla
 import { compactCommand, type CompactDeps } from "./commands/compact.js";
 import { heartbeatCommand, type HeartbeatDeps } from "./commands/heartbeat.js";
 import { seatCommand, handoverCommand, type SeatDeps } from "./commands/seat.js";
-import { rigPolicyCommand, type RigPolicyDeps } from "./commands/rig-policy.js";
+import { rigModeCommand, type RigModeDeps } from "./commands/rig-mode.js";
 import { startupProofCommand, type StartupProofDeps } from "./commands/startup-proof.js";
 import type { LifecycleDeps } from "./daemon-lifecycle.js";
 import { CLI_VERSION } from "./version.js";
@@ -146,7 +146,7 @@ export interface ProgramDeps {
   compactDeps?: CompactDeps;
   heartbeatDeps?: HeartbeatDeps;
   seatDeps?: SeatDeps;
-  rigPolicyDeps?: RigPolicyDeps;
+  rigModeDeps?: RigModeDeps;
   startupProofDeps?: StartupProofDeps;
   startDeps?: StartDeps;
   configPath?: string;
@@ -211,7 +211,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(agentImageCommand(depsOverride?.agentImageDeps));
   program.addCommand(forkCommand(depsOverride?.forkDeps));
   program.addCommand(workspaceCommand(depsOverride?.workspaceDeps));
-  program.addCommand(rigPolicyCommand(depsOverride?.rigPolicyDeps));
+  program.addCommand(rigModeCommand(depsOverride?.rigModeDeps));
   program.addCommand(whoamiCommand(depsOverride?.whoamiDeps));
   program.addCommand(configCommand(depsOverride?.configPath));
   program.addCommand(fileCommand());
