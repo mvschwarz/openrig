@@ -238,13 +238,14 @@ export function modelsMatch(pinned: string, effective: string): boolean {
   return CLAUDE_ALIAS_MIGRATION_BRIDGE[pin] === eff;
 }
 
-/** MIGRATION BRIDGE (r2 addendum, desk-ruled 05:03Z) — provider-specific, ONE measured pair, and
- *  MECHANICALLY SELF-EXPIRING: it fires only while a nodes.model row still carries the pre-spec
- *  alias pin, so the moment the three affected seats relaunch with canonical pins (expiry
- *  condition 2) the map is inert by data — exact-only semantics restore automatically, no code
- *  change on the hot path. REMOVE this constant at the 5.3 spec-validation advisory (expiry
- *  condition 1) if condition 2 has not already made it dead; the bridge test pins that exactly
- *  this one pair maps and ambiguous strings ("codex", "mini") never do. */
+/** MIGRATION BRIDGE (r2 addendum, desk-ruled 05:03Z) — provider-specific, ONE measured pair, with
+ *  an EXECUTABLE expiry (r2 round-3: prose expiry is no expiry):
+ *  - condition 2 (dormancy): fires only while a nodes.model row still carries the alias pin;
+ *    canonical relaunches make it inert by data.
+ *  - condition 1 (removal): the bridge's pin test is a TRIPWIRE — the moment a module matching
+ *    *spec-validation-advisory* lands in packages/daemon/src (the 5.3 advisory, per the desk
+ *    ruling's own name for it), the suite goes RED until this constant is emptied and deleted.
+ *    5.3 implementers: name your advisory module accordingly, or this tripwire is your reminder. */
 export const CLAUDE_ALIAS_MIGRATION_BRIDGE: Record<string, string> = {
   fable: "claude-fable-5",
 };

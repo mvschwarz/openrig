@@ -8,6 +8,7 @@ import {
   ModelDivergenceMonitor,
   SLACK_DEFERRAL_LINE,
   PENDING_VISIBILITY_POLLS,
+  CLAUDE_ALIAS_MIGRATION_BRIDGE,
   modelsMatch,
   formatProclamation,
   type PinnedSeat,
@@ -166,6 +167,30 @@ describe("modelsMatch — EXACT, plus the narrow self-expiring fable migration b
   it("exact ids match case-insensitively", () => {
     expect(modelsMatch("gpt-5.6-luna", " GPT-5.6-Luna ")).toBe(true);
     expect(modelsMatch("claude-fable-5", "claude-fable-5")).toBe(true);
+  });
+
+  it("EXECUTABLE EXPIRY TRIPWIRE: the bridge dies with the 5.3 spec-validation advisory", async () => {
+    // The desk ruled the bridge expires at the 5.3 spec-validation advisory. This test is the
+    // mechanical half: when any *spec-validation-advisory* module exists under src, the bridge
+    // must be EMPTY — landing the advisory turns this suite red until the bridge is deleted.
+    const { readdirSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
+    const srcRoot = fileURLToPath(new URL("../src", import.meta.url));
+    const hits: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.includes("spec-validation-advisory")) hits.push(p);
+      }
+    };
+    walk(srcRoot);
+    if (hits.length > 0) {
+      expect(Object.keys(CLAUDE_ALIAS_MIGRATION_BRIDGE), `5.3 advisory landed (${hits[0]}) — delete the migration bridge`).toHaveLength(0);
+    } else {
+      expect(CLAUDE_ALIAS_MIGRATION_BRIDGE).toEqual({ fable: "claude-fable-5" }); // the one measured pair, pre-advisory
+    }
   });
 
   it("the bridge maps EXACTLY the measured pre-spec pair and nothing else", () => {

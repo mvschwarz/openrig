@@ -1773,13 +1773,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
             const tokenRow = db.prepare("SELECT resume_token FROM sessions WHERE node_id = ? AND session_name = ? ORDER BY id DESC LIMIT 1")
               .get(seat.nodeId, seat.sessionName) as { resume_token: string | null } | undefined;
             const paneArg = await paneClaudeSessionIdArgument(seat.sessionName, currentGenDeps);
-            const selection = selectLiveClaudeRecord(
+            const selection = await selectLiveClaudeRecord(
               [
                 { source: "sidecar", id: usage.sessionId ?? "", path: usage.transcriptPath ?? pathFor(usage.sessionId) },
                 { source: "registry", id: tokenRow?.resume_token ?? "", path: pathFor(tokenRow?.resume_token) },
                 { source: "pane-argument", id: paneArg.ok ? paneArg.id : "", path: pathFor(paneArg.ok ? paneArg.id : null) },
               ],
-              (path) => { try { return nodeFs.statSync(path).mtimeMs; } catch { return null; } },
+              (path) => { try { const st = nodeFs.statSync(path); return { mtimeMs: st.mtimeMs, size: st.size }; } catch { return null; } },
             );
             if (!selection.ok) return { ok: false as const, reason: selection.reason };
             const model = readClaudeEffectiveModel(selection.path);

@@ -97,57 +97,84 @@ export interface ClaudeRecordCandidate {
 }
 
 export type ClaudeRecordSelection =
-  | { ok: true; id: string; path: string; source: string; mtimeMs: number }
+  | { ok: true; id: string; path: string; source: string }
   | { ok: false; reason: string };
 
-/** How recently the winning record must have been written when candidate ids DISAGREE — the proof
- *  it is the record "being written now" rather than merely the freshest survivor. Unanimous
- *  candidates need no window (there is nothing to disambiguate). */
-export const RECORD_LIVENESS_WINDOW_MS = 10 * 60 * 1000;
+export interface RecordStat {
+  mtimeMs: number;
+  size: number;
+}
 
-/** The CURRENT claude record, FAIL-CLOSED (r2's second HIGH on this family): "freshest file that
- *  exists" is NOT "record being written now". Semantics:
- *  - candidates dedupe by id (an id is readable if ANY of its paths stat).
- *  - all readable candidates one id + no unreadable contender with a different id → that record,
- *    no recency demanded (unanimity has nothing to disambiguate).
- *  - DISAGREEMENT (differing readable ids, or an unreadable contender with a different id): the
- *    freshest readable record wins ONLY if written within RECORD_LIVENESS_WINDOW_MS — an idle or
- *    unreadable-contender disagreement stays a NAMED INDETERMINATE. A current session before its
- *    first readable record must never be outvoted by a confident old-generation file (r2's
- *    discriminator: dead rolled-current + readable stale argument returned the stale one). */
-export function selectLiveClaudeRecord(
+/** Gap between the two advancement samples: long enough for a working seat to append, short enough
+ *  to stay inside one monitor poll even across several claude seats. */
+export const ADVANCEMENT_PROBE_MS = 1_500;
+
+/** The CURRENT claude record, FAIL-CLOSED (r2 rounds 2+3 on this family): neither existence nor
+ *  RECENCY proves a record is being written — the old record can take its final write seconds
+ *  before the new one becomes readable at exactly the handover boundary this hardening covers.
+ *  Semantics:
+ *  - candidates dedupe by id (an id is readable if ANY of its paths stats).
+ *  - an UNREADABLE contender with a different id → ALWAYS a named INDETERMINATE (it might be the
+ *    advancing one we cannot see; no readable evidence can outvote it).
+ *  - exactly one readable id, no differing unreadable contender → that record (unanimity has
+ *    nothing to disambiguate).
+ *  - multiple readable ids → OBSERVED ADVANCEMENT across two samples: stat all, wait
+ *    ADVANCEMENT_PROBE_MS, stat again; exactly ONE record advancing (size or mtime) wins. None
+ *    advancing (idle seat) or several advancing → named INDETERMINATE — and the monitor's pending
+ *    machinery re-probes every poll, so the ambiguity resolves the moment the live session writes. */
+export async function selectLiveClaudeRecord(
   candidates: ClaudeRecordCandidate[],
-  statMtimeMs: (path: string) => number | null,
-  nowMs: () => number = () => Date.now(),
-): ClaudeRecordSelection {
+  statRecord: (path: string) => RecordStat | null,
+  opts?: { probeDelayMs?: number; sleep?: (ms: number) => Promise<void> },
+): Promise<ClaudeRecordSelection> {
+  const sleep = opts?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const probeDelayMs = opts?.probeDelayMs ?? ADVANCEMENT_PROBE_MS;
+
   const byId = new Map<string, { source: string; path: string | null }>();
   for (const c of candidates) {
     if (!c.id) continue;
     const existing = byId.get(c.id);
     if (!existing || (existing.path === null && c.path !== null)) byId.set(c.id, { source: c.source, path: c.path });
   }
-  const readable: Array<{ id: string; path: string; source: string; mtimeMs: number }> = [];
+  const readable: Array<{ id: string; path: string; source: string; first: RecordStat }> = [];
   const unreadable: string[] = [];
   for (const [id, { source, path }] of byId) {
-    const mtimeMs = path ? statMtimeMs(path) : null;
-    if (path && mtimeMs !== null) readable.push({ id, path, source, mtimeMs });
+    const stat = path ? statRecord(path) : null;
+    if (path && stat) readable.push({ id, path, source, first: stat });
     else unreadable.push(`${source}:${id.slice(0, 8)}… (${path ? "no file" : "no path"})`);
   }
   if (readable.length === 0) {
     return { ok: false, reason: `no readable transcript for any candidate session (${unreadable.join(", ") || "no candidates"})` };
   }
-  readable.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  const winner = readable[0]!;
-  const disagreement = readable.some((r) => r.id !== winner.id) || unreadable.length > 0;
-  if (!disagreement) return { ok: true, ...winner };
-  const ageMs = nowMs() - winner.mtimeMs;
-  if (ageMs <= RECORD_LIVENESS_WINDOW_MS) return { ok: true, ...winner };
+  const readableIds = new Set(readable.map((r) => r.id));
+  if (unreadable.length > 0) {
+    // ALWAYS indeterminate: the unreadable contender may be the current record before its first
+    // readable byte — confident stale truth here is the exact defect class (r2 round-2 + round-3).
+    return {
+      ok: false,
+      reason: `candidate sessions disagree and ${unreadable.length} contender(s) are unreadable (${unreadable.join(", ")}; readable: ${readable.map((r) => `${r.source}:${r.id.slice(0, 8)}…`).join(", ")}) — the unreadable one may be the record being written`,
+    };
+  }
+  if (readableIds.size === 1) {
+    const only = readable[0]!;
+    return { ok: true, id: only.id, path: only.path, source: only.source };
+  }
+  await sleep(probeDelayMs);
+  const advanced = readable.filter((r) => {
+    const second = statRecord(r.path);
+    return second !== null && (second.size !== r.first.size || second.mtimeMs !== r.first.mtimeMs);
+  });
+  if (advanced.length === 1) {
+    const winner = advanced[0]!;
+    return { ok: true, id: winner.id, path: winner.path, source: winner.source };
+  }
   return {
     ok: false,
     reason:
-      `candidate sessions disagree (readable: ${readable.map((r) => `${r.source}:${r.id.slice(0, 8)}…`).join(", ")}` +
-      `${unreadable.length ? `; unreadable: ${unreadable.join(", ")}` : ""}) and the freshest record is ` +
-      `${Math.round(ageMs / 1000)}s old — not provably the record being written now`,
+      `candidate sessions disagree (${readable.map((r) => `${r.source}:${r.id.slice(0, 8)}…`).join(", ")}) and ` +
+      (advanced.length === 0
+        ? `no record advanced during the ${probeDelayMs}ms probe — idle or between writes; re-probed next poll`
+        : `${advanced.length} records advanced simultaneously — genuinely ambiguous`),
   };
 }
 
