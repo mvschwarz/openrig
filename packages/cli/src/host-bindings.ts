@@ -89,6 +89,12 @@ export function loadHostBindings(path: string = defaultHostBindingsPath()): Host
 // availability over the rare loss; the conflict re-records on the next contradicting observation).
 const LOCK_RETRIES = 40;
 const LOCK_RETRY_MS = 5;
+// NAMED TAIL (r1 F2 review, not built for): after a stale takeover the ORIGINAL holder still
+// believes it holds the lock, so its release rmdirs the NEW holder's lock — in principle that
+// cascades. Low: the critical section is fully synchronous (the loop cannot preempt it) and 2s is
+// ~3 orders of magnitude over normal hold time — but this box has run loadavg 9-11 with
+// multi-minute stalls, so the tail is not zero. The token-verified-release fix is more machinery
+// than a fail-open advisory lock over a self-healing cache justifies.
 const LOCK_STALE_MS = 2_000;
 
 function acquireLock(lockDir: string): boolean {
