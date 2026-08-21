@@ -118,6 +118,13 @@ export const SETTINGS_VALID_KEYS = [
   "policies.claude_compaction.post_restore_audit_instruction",
   "policies.idle_gate_qitem.scan_interval_seconds",
   "policies.idle_gate_qitem.active_wake_interval_seconds",
+  // B6 founder ruling — idle-gate auto-registration is NOT default-on. "off"
+  // (default) registers no new jobs; "all" restores fleet-wide registration.
+  // opt_in_sessions is a comma-separated list of canonical session names that
+  // get a job while the mode is off. Existing registered jobs always survive
+  // and keep being maintained regardless of either key.
+  "policies.idle_gate_qitem.auto_register",
+  "policies.idle_gate_qitem.opt_in_sessions",
   "snapshots.periodic.enabled",
   "snapshots.periodic.interval_seconds",
   "snapshots.periodic.retention_keep",
@@ -194,6 +201,8 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "policies.claude_compaction.post_restore_audit_instruction": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION" },
   "policies.idle_gate_qitem.scan_interval_seconds": { primary: "OPENRIG_POLICIES_IDLE_GATE_QITEM_SCAN_INTERVAL_SECONDS" },
   "policies.idle_gate_qitem.active_wake_interval_seconds": { primary: "OPENRIG_POLICIES_IDLE_GATE_QITEM_ACTIVE_WAKE_INTERVAL_SECONDS" },
+  "policies.idle_gate_qitem.auto_register": { primary: "OPENRIG_POLICIES_IDLE_GATE_QITEM_AUTO_REGISTER" },
+  "policies.idle_gate_qitem.opt_in_sessions": { primary: "OPENRIG_POLICIES_IDLE_GATE_QITEM_OPT_IN_SESSIONS" },
   "snapshots.periodic.enabled": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_ENABLED" },
   "snapshots.periodic.interval_seconds": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_INTERVAL_SECONDS" },
   "snapshots.periodic.retention_keep": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_RETENTION_KEEP" },
@@ -251,6 +260,8 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "policies.claude_compaction.post_restore_audit_instruction": ["policies", "claudeCompaction", "postRestoreAuditInstruction"],
   "policies.idle_gate_qitem.scan_interval_seconds": ["policies", "idleGateQitem", "scanIntervalSeconds"],
   "policies.idle_gate_qitem.active_wake_interval_seconds": ["policies", "idleGateQitem", "activeWakeIntervalSeconds"],
+  "policies.idle_gate_qitem.auto_register": ["policies", "idleGateQitem", "autoRegister"],
+  "policies.idle_gate_qitem.opt_in_sessions": ["policies", "idleGateQitem", "optInSessions"],
   "snapshots.periodic.enabled": ["snapshots", "periodic", "enabled"],
   "snapshots.periodic.interval_seconds": ["snapshots", "periodic", "intervalSeconds"],
   "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
@@ -479,6 +490,9 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "policies.claude_compaction.post_restore_audit_instruction": return DEFAULT_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION;
     case "policies.idle_gate_qitem.scan_interval_seconds": return 60;
     case "policies.idle_gate_qitem.active_wake_interval_seconds": return 900;
+    // B6 — NOT default-on by founder ruling; "all" is the explicit fleet opt-in.
+    case "policies.idle_gate_qitem.auto_register": return "off";
+    case "policies.idle_gate_qitem.opt_in_sessions": return "";
     case "snapshots.periodic.enabled": return true;
     case "snapshots.periodic.interval_seconds": return 300;
     case "snapshots.periodic.retention_keep": return 10;
@@ -529,6 +543,12 @@ function positiveIntegerConstraint(key: string) {
 const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: string | number | boolean) => void>> = {
   "policies.idle_gate_qitem.scan_interval_seconds": positiveIntegerConstraint("policies.idle_gate_qitem.scan_interval_seconds"),
   "policies.idle_gate_qitem.active_wake_interval_seconds": positiveIntegerConstraint("policies.idle_gate_qitem.active_wake_interval_seconds"),
+  "policies.idle_gate_qitem.auto_register": (raw) => {
+    const v = (raw ?? "").trim();
+    if (v !== "off" && v !== "all") {
+      throw new Error(`Invalid value for policies.idle_gate_qitem.auto_register: must be "off" or "all", got "${raw}"`);
+    }
+  },
   // Policy threshold: integer in [1, 100]. Documented contract from
   // slice 27 README. parseInt's permissive coercion ("80abc" → 80;
   // "80.5" → 80) is not safe for a key the daemon's compaction trigger

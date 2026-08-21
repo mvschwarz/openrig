@@ -88,8 +88,10 @@ describe("config routes (User Settings v0)", () => {
     //   watchdog_keep_per_job / batch_size — the CLI-settable queue-retention knobs;
     //   + retention.usage_samples_days, 51-08 A2)
     // + 2 OPR.0.5.1 W2c (policies.idle_gate_qitem.scan_interval_seconds /
-    //   active_wake_interval_seconds) → 52 total.
-    expect(Object.keys(body.settings).length).toBe(52);
+    //   active_wake_interval_seconds)
+    // + 2 B6 founder ruling (policies.idle_gate_qitem.auto_register /
+    //   opt_in_sessions — the not-default-on gate) → 54 total.
+    expect(Object.keys(body.settings).length).toBe(54);
     expect(body.settings["daemon.port"]?.source).toBe("default");
     expect(body.settings["ui.preview.refresh_interval_seconds"]?.value).toBe(3);
     expect(body.settings["ui.preview.max_pins"]?.value).toBe(4);

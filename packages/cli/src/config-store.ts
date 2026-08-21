@@ -120,6 +120,8 @@ export interface RiggedConfig {
     idleGateQitem: {
       scanIntervalSeconds: number;
       activeWakeIntervalSeconds: number;
+      autoRegister: string;
+      optInSessions: string;
     };
   };
   snapshots: {
@@ -237,6 +239,8 @@ const DEFAULTS = {
     idleGateQitem: {
       scanIntervalSeconds: 60,
       activeWakeIntervalSeconds: 900,
+      autoRegister: "off",
+      optInSessions: "",
     },
   },
   snapshots: {
@@ -328,6 +332,10 @@ export const VALID_KEYS = [
   "policies.claude_compaction.post_restore_audit_instruction",
   "policies.idle_gate_qitem.scan_interval_seconds",
   "policies.idle_gate_qitem.active_wake_interval_seconds",
+  // B6 founder ruling — idle-gate auto-registration is NOT default-on; twin of
+  // the daemon settings-store keys (see there for semantics).
+  "policies.idle_gate_qitem.auto_register",
+  "policies.idle_gate_qitem.opt_in_sessions",
   "snapshots.periodic.enabled",
   "snapshots.periodic.interval_seconds",
   "snapshots.periodic.retention_keep",
@@ -399,6 +407,8 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "policies.claude_compaction.post_restore_audit_instruction": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_POST_RESTORE_AUDIT_INSTRUCTION" },
   "policies.idle_gate_qitem.scan_interval_seconds": { primary: "OPENRIG_POLICIES_IDLE_GATE_QITEM_SCAN_INTERVAL_SECONDS" },
   "policies.idle_gate_qitem.active_wake_interval_seconds": { primary: "OPENRIG_POLICIES_IDLE_GATE_QITEM_ACTIVE_WAKE_INTERVAL_SECONDS" },
+  "policies.idle_gate_qitem.auto_register": { primary: "OPENRIG_POLICIES_IDLE_GATE_QITEM_AUTO_REGISTER" },
+  "policies.idle_gate_qitem.opt_in_sessions": { primary: "OPENRIG_POLICIES_IDLE_GATE_QITEM_OPT_IN_SESSIONS" },
   "snapshots.periodic.enabled": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_ENABLED" },
   "snapshots.periodic.interval_seconds": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_INTERVAL_SECONDS" },
   "snapshots.periodic.retention_keep": { primary: "OPENRIG_SNAPSHOTS_PERIODIC_RETENTION_KEEP" },
@@ -458,6 +468,8 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "policies.claude_compaction.post_restore_audit_instruction": ["policies", "claudeCompaction", "postRestoreAuditInstruction"],
   "policies.idle_gate_qitem.scan_interval_seconds": ["policies", "idleGateQitem", "scanIntervalSeconds"],
   "policies.idle_gate_qitem.active_wake_interval_seconds": ["policies", "idleGateQitem", "activeWakeIntervalSeconds"],
+  "policies.idle_gate_qitem.auto_register": ["policies", "idleGateQitem", "autoRegister"],
+  "policies.idle_gate_qitem.opt_in_sessions": ["policies", "idleGateQitem", "optInSessions"],
   "snapshots.periodic.enabled": ["snapshots", "periodic", "enabled"],
   "snapshots.periodic.interval_seconds": ["snapshots", "periodic", "intervalSeconds"],
   "snapshots.periodic.retention_keep": ["snapshots", "periodic", "retentionKeep"],
@@ -612,6 +624,12 @@ function positiveIntegerConstraint(key: string) {
 const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | number | boolean) => void>> = {
   "policies.idle_gate_qitem.scan_interval_seconds": positiveIntegerConstraint("policies.idle_gate_qitem.scan_interval_seconds"),
   "policies.idle_gate_qitem.active_wake_interval_seconds": positiveIntegerConstraint("policies.idle_gate_qitem.active_wake_interval_seconds"),
+  "policies.idle_gate_qitem.auto_register": (raw) => {
+    const v = (raw ?? "").trim();
+    if (v !== "off" && v !== "all") {
+      throw new Error(`Invalid value for policies.idle_gate_qitem.auto_register: must be "off" or "all", got "${raw}"`);
+    }
+  },
   // Policy threshold: integer in [1, 100]. Documented contract from
   // slice 27 README §"What the operator gets" — operator can lower to
   // e.g. 50 = compact earlier; range is 1-100 inclusive. A value of 0
@@ -843,6 +861,8 @@ export class ConfigStore {
         idleGateQitem: {
           scanIntervalSeconds: v("policies.idle_gate_qitem.scan_interval_seconds") as number,
           activeWakeIntervalSeconds: v("policies.idle_gate_qitem.active_wake_interval_seconds") as number,
+          autoRegister: v("policies.idle_gate_qitem.auto_register") as string,
+          optInSessions: v("policies.idle_gate_qitem.opt_in_sessions") as string,
         },
       },
       snapshots: {

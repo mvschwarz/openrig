@@ -128,6 +128,9 @@ describe("SettingsStore (User Settings v0)", () => {
       // OPR.0.5.1 51-06 W2c — tunable daemon auto-registration cadence.
       "policies.idle_gate_qitem.scan_interval_seconds",
       "policies.idle_gate_qitem.active_wake_interval_seconds",
+      // B6 founder ruling — auto-registration is not default-on.
+      "policies.idle_gate_qitem.auto_register",
+      "policies.idle_gate_qitem.opt_in_sessions",
       "snapshots.periodic.enabled",
       "snapshots.periodic.interval_seconds",
       "snapshots.periodic.retention_keep",

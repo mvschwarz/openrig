@@ -41,15 +41,22 @@ function seedCanonicalNode(db: Database.Database, rigName = "auto-rig") {
 
 describe("W2c watchdog auto-registration — production composition", () => {
   const originalNoKernel = process.env.OPENRIG_NO_KERNEL;
+  const originalAutoRegister = process.env.OPENRIG_POLICIES_IDLE_GATE_QITEM_AUTO_REGISTER;
   const tempRoots: string[] = [];
 
   beforeAll(() => {
     process.env.OPENRIG_NO_KERNEL = "1";
+    // B6 — auto-registration is no longer default-on; this suite exercises the
+    // registration machinery, so it runs under the explicit fleet opt-in. The
+    // ruled default ("off") has its own describe below.
+    process.env.OPENRIG_POLICIES_IDLE_GATE_QITEM_AUTO_REGISTER = "all";
   });
 
   afterAll(() => {
     if (originalNoKernel === undefined) delete process.env.OPENRIG_NO_KERNEL;
     else process.env.OPENRIG_NO_KERNEL = originalNoKernel;
+    if (originalAutoRegister === undefined) delete process.env.OPENRIG_POLICIES_IDLE_GATE_QITEM_AUTO_REGISTER;
+    else process.env.OPENRIG_POLICIES_IDLE_GATE_QITEM_AUTO_REGISTER = originalAutoRegister;
     for (const root of tempRoots) rmSync(root, { recursive: true, force: true });
   });
 
@@ -478,5 +485,75 @@ describe("W2c watchdog auto-registration — mint altitude", () => {
     } finally {
       db.close();
     }
+  });
+});
+
+// B6 founder ruling — the RULED DEFAULT: auto-registration is NOT default-on. These tests build the
+// registration unit directly with a fake settings store so the gate is exercised without env plumbing.
+describe("B6 — idle-gate auto-registration default-off / opt-in gate", () => {
+  const settings = (autoRegister: string, optIn = "") => ({
+    resolveOne: (key: string) => {
+      if (key === "policies.idle_gate_qitem.auto_register") return { value: autoRegister };
+      if (key === "policies.idle_gate_qitem.opt_in_sessions") return { value: optIn };
+      if (key === "policies.idle_gate_qitem.scan_interval_seconds") return { value: 60 };
+      if (key === "policies.idle_gate_qitem.active_wake_interval_seconds") return { value: 900 };
+      throw new Error(`unexpected settings key ${key}`);
+    },
+  });
+
+  async function build(autoRegister: string, optIn = "") {
+    const { WatchdogAutoRegistration } = await import("../src/domain/watchdog-auto-registration.js");
+    const db = createFullTestDb();
+    const { rig, node, sessionName } = seedCanonicalNode(db, "gate-rig");
+    new SessionRegistry(db).registerSession(node.id, sessionName);
+    const jobsRepo = new WatchdogJobsRepository(db);
+    const unit = new WatchdogAutoRegistration({
+      db,
+      jobsRepo,
+      settingsStore: settings(autoRegister, optIn) as never,
+      warn: () => {},
+    });
+    return { db, rig, node, sessionName, jobsRepo, unit };
+  }
+
+  it("default off: a fresh canonical seat gets NO job, and coverage reads that as the ruled state (null, no throw)", async () => {
+    const { db, node, sessionName, unit } = await build("off");
+    try {
+      expect(unit.ensure(node.id, sessionName)).toBeNull();
+      expect(autoRows(db, sessionName)).toHaveLength(0);
+      expect(unit.assertCoverage(node.id, sessionName)).toBeNull();
+    } finally { db.close(); }
+  });
+
+  it("a seat named in opt_in_sessions gets exactly its job while the mode is off", async () => {
+    const { db, node, sessionName, unit } = await build("off", ` other@rig , ${"dev-qa@gate-rig"} `);
+    try {
+      const job = unit.ensure(node.id, sessionName);
+      expect(job).not.toBeNull();
+      expect(autoRows(db, sessionName)).toHaveLength(1);
+      expect(unit.assertCoverage(node.id, sessionName)).not.toBeNull();
+    } finally { db.close(); }
+  });
+
+  it('auto_register "all" restores fleet-wide registration', async () => {
+    const { db, node, sessionName, unit } = await build("all");
+    try {
+      expect(unit.ensure(node.id, sessionName)).not.toBeNull();
+      expect(autoRows(db, sessionName)).toHaveLength(1);
+    } finally { db.close(); }
+  });
+
+  it("an EXISTING job survives the default flip and keeps being maintained (ensure still returns it, coverage still audits)", async () => {
+    const { db, node, sessionName, jobsRepo, unit } = await build("all");
+    try {
+      expect(unit.ensure(node.id, sessionName)).not.toBeNull();
+      // The fleet later flips to the ruled default; the surviving job must not be dropped or ignored.
+      const flipped = new (unit.constructor as new (deps: unknown) => typeof unit)({
+        db, jobsRepo, settingsStore: settings("off") as never, warn: () => {},
+      });
+      expect(flipped.ensure(node.id, sessionName)).not.toBeNull();
+      expect(autoRows(db, sessionName)).toHaveLength(1);
+      expect(flipped.assertCoverage(node.id, sessionName)).not.toBeNull();
+    } finally { db.close(); }
   });
 });

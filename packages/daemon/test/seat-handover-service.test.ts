@@ -228,6 +228,9 @@ describe("SeatHandoverService", () => {
         jobsRepo,
         settingsStore: {
           resolveOne(key: string) {
+            // B6 — these baton tests PREMISE an existing job, so the fake opts the fleet in.
+            if (key.endsWith("auto_register")) return { value: "all" };
+            if (key.endsWith("opt_in_sessions")) return { value: "" };
             return { value: key.endsWith("active_wake_interval_seconds") ? 900 : 60 };
           },
         } as never,
@@ -313,6 +316,9 @@ describe("SeatHandoverService", () => {
       jobsRepo,
       settingsStore: {
         resolveOne(key: string) {
+          // B6 — this test premises an existing job; the fake opts the fleet in.
+          if (key.endsWith("auto_register")) return { value: "all" };
+          if (key.endsWith("opt_in_sessions")) return { value: "" };
           return { value: key.endsWith("active_wake_interval_seconds") ? 900 : 60 };
         },
       } as never,

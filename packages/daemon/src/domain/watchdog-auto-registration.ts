@@ -101,9 +101,31 @@ export class WatchdogAutoRegistration {
     return this.deps.jobsRepo.getByIdOrThrow(job.jobId);
   }
 
+  /**
+   * B6 founder ruling — auto-registration is NOT default-on. A NEW job is created only when the
+   * fleet opted in (`auto_register: "all"`) or this seat is named in `opt_in_sessions`. A seat that
+   * ALREADY HAS a job keeps being maintained regardless: existing registered jobs survive the
+   * default flip, and their alias refresh must not silently stop.
+   */
+  private autoRegisterAllowed(sessionName: string): boolean {
+    const mode = String(this.deps.settingsStore.resolveOne("policies.idle_gate_qitem.auto_register").value ?? "off");
+    if (mode === "all") return true;
+    const optIn = String(this.deps.settingsStore.resolveOne("policies.idle_gate_qitem.opt_in_sessions").value ?? "");
+    return optIn.split(",").map((s) => s.trim()).filter(Boolean).includes(sessionName);
+  }
+
   ensure(nodeId: string, sessionName: string): WatchdogJob | null {
     const topology = this.resolveTopology(nodeId, sessionName);
     if (!topology) return null;
+    if (!this.autoRegisterAllowed(sessionName)) {
+      const existing = this.deps.jobsRepo.findAutoRegistration(
+        POLICY,
+        sessionName,
+        null,
+        this.canonicalAliases(nodeId, topology.rig_name, sessionName),
+      );
+      if (!existing) return null; // fresh seat, not opted in — no job, by ruling
+    }
     const cadence = this.resolveCadence();
     return this.deps.jobsRepo.ensureAutoRegistration(
       {
@@ -130,6 +152,9 @@ export class WatchdogAutoRegistration {
       this.canonicalAliases(nodeId, topology.rig_name, sessionName),
     );
     if (!job || job.targetSession !== sessionName) {
+      // B6 — no job on a seat that is not opted in is the RULED default, not a
+      // coverage failure; only an opted-in seat (or a stale-targeted job) pages.
+      if (!job && !this.autoRegisterAllowed(sessionName)) return null;
       throw new WatchdogAutoRegistrationError(
         "missing",
         `watchdog auto-registration missing for node_id="${nodeId}" session="${sessionName}"`,
@@ -160,6 +185,8 @@ export class WatchdogAutoRegistration {
       if (TERMINAL_SESSION_STATUSES.has(row.status)) continue;
       if (!this.isEligibleSessionName(row.session_name)) continue;
       try {
+        // B6 — assertCoverage is gate-aware: a non-opted seat with no job returns
+        // null (the ruled default) instead of warning at every startup audit.
         this.assertCoverage(row.node_id, row.session_name);
       } catch (error) {
         this.warn(
