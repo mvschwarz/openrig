@@ -21,9 +21,8 @@ import { createLiveRefresh } from "./live.js";
 import { execFile } from "node:child_process";
 import { probeCrashCart, type CrashCartRenderOpts } from "./crash-cart/from-emit.js";
 import { resolveCrashCartKey, type CrashCartKeyAction } from "./crash-cart/keys.js";
-import { driveRestoreEverything } from "./crash-cart/restore-drive.js";
-import { parseRestoreRollup, summarizeRestoreRollup } from "./crash-cart/restore-rollup.js";
-import { evaluateOneClickGate } from "./crash-cart/one-click-gate.js";
+import { driveRestoreLifecycle, buildRestoreLifecycleVM } from "./crash-cart/restore-lifecycle.js";
+import { evaluateOneClickGate, restoreConfirmMessage } from "./crash-cart/one-click-gate.js";
 import type { Action, FleetSnapshot, Screen } from "./types.js";
 import type { SpecReviewCache } from "./hydrate.js";
 
@@ -51,9 +50,12 @@ async function run(): Promise<void> {
   // 5.2 crash-cart: the daemon-down verdict (probed from the `rig crash-cart --json` verb). Empty ⇒
   // normal fleet views; DOWN ⇒ the recovery cockpit; UNVERIFIED ⇒ the cannot-verify screen.
   let crashCartOpts: CrashCartRenderOpts = {};
-  // H2 — a non-zero-generation ⏎ arms a confirm: the NEXT ⏎ proceeds (fresh-priming the named
-  // deltas), Esc cancels. Never a silent one-click resume→fresh downgrade.
+  // H2 — a non-zero-generation ⏎ arms a confirm: the NEXT ⏎ proceeds, Esc cancels. Never a silent
+  // resume→fresh downgrade — the confirm NAMES the seats that will need a decision.
   let pendingRestoreConfirm = false;
+  // B1 ROUND 2 — the operator's mid-run cancel request for the active fleet restore (the lifecycle
+  // driver polls this and reaches the cancel endpoint stop-before-next-rig).
+  let restoreCancelRequested = false;
   const inputDecoder = createInputDecoder();
   const style = createStyle(args.includes("--no-color") ? "none" : detectColorMode());
 
@@ -101,35 +103,37 @@ async function run(): Promise<void> {
   // Perform a cockpit action key. start-daemon/restore exec `rig daemon start` (the ⏎ flow's `s` step;
   // the C1 batch conductor that RESTORE ultimately drives is EXCLUDED this wave) then re-probe; retry
   // re-probes (UNVERIFIED). inspect/onboarding are entry-point seams this wave.
-  // ⏎ RESTORE EVERYTHING drives the C1 batch conductor: the `s` step (start daemon) then
-  // `rig crash-cart restore-fleet --json` against it (which polls to completion). The returned
-  // rollup is PARSED and surfaced on the notice line (H4 — never discarded), which persists after
-  // the daemon comes UP and the cockpit is gone. A start failure never proceeds to restore.
+  // ⏎ RESTORE EVERYTHING: start the daemon (the `s` step), then the TUI OWNS the restore lifecycle
+  // against it — kick/poll/cancel via the daemon client, retaining the attempt id (r2: no more blind
+  // delegation to a buffered child). Each poll updates the restore render (progress from the rollup
+  // stream); on done the rollup + keyboard-walkable triage list render; 'c' cancels mid-run.
   function runFleetRestore(): void {
-    void driveRestoreEverything({
-      startDaemon: () =>
-        new Promise<void>((resolve, reject) =>
-          execFile("rig", ["daemon", "start"], { timeout: 30_000 }, (err) => (err ? reject(err) : resolve())),
-        ),
-      callRestoreFleet: () =>
-        new Promise<string>((resolve) =>
-          execFile(
-            "rig",
-            ["crash-cart", "restore-fleet", "--json"],
-            { timeout: 600_000, maxBuffer: 16 * 1024 * 1024 },
-            (_err, stdout) => resolve(stdout ?? ""),
-          ),
-        ),
-    })
-      .then((out) => {
-        // H4 — surface the rollup + triage + not_attempted reasons on the notice line.
-        const model = typeof out === "string" ? parseRestoreRollup(out) : null;
-        if (model) view.dispatch({ type: "notice", message: summarizeRestoreRollup(model) });
-      })
-      .catch(() => {
-        /* best-effort: the refreshed cockpit / notice shows the honest post-restore state */
-      })
-      .finally(() => void refreshCrashCart());
+    if (!client) {
+      view.dispatch({ type: "notice", message: "demo mode: restore disabled" });
+      draw();
+      return;
+    }
+    const daemonClient = client;
+    restoreCancelRequested = false;
+    new Promise<void>((resolve, reject) =>
+      execFile("rig", ["daemon", "start"], { timeout: 30_000 }, (err) => (err ? reject(err) : resolve())),
+    )
+      .then(() =>
+        driveRestoreLifecycle({
+          client: daemonClient,
+          onFrame: (frame) => {
+            // render progress from the poll stream — a mid-run frame every poll, not only at completion
+            crashCartOpts = { ...crashCartOpts, restore: buildRestoreLifecycleVM(frame) };
+            draw();
+          },
+          isCancelRequested: () => restoreCancelRequested,
+        }),
+      )
+      .catch((e: unknown) => {
+        crashCartOpts = { ...crashCartOpts, restore: undefined };
+        view.dispatch({ type: "notice", message: `fleet restore failed: ${e instanceof Error ? e.message : String(e)}` });
+        void refreshCrashCart();
+      });
   }
 
   function performCrashCart(action: CrashCartKeyAction): void {
@@ -152,12 +156,10 @@ async function run(): Promise<void> {
           resumableCount: r.resumableCount,
         })),
       });
-      const names = gate.deltas.map((d) => `${d.rigName} (${d.nonResumable}/${d.seatCount} fresh-primed)`).join(", ");
       pendingRestoreConfirm = true;
-      view.dispatch({
-        type: "notice",
-        message: `⏎ RESTORE will FRESH-PRIME non-resumable seats: ${names}. Press ⏎ to proceed, Esc to cancel.`,
-      });
+      // Truthful (r2 HIGH-2): describe the awaiting-decision the restore actually produces — never a
+      // fresh-prime the parameterless restore does not request.
+      view.dispatch({ type: "notice", message: restoreConfirmMessage(gate.deltas) });
       return;
     }
     if (action === "retry") void refreshCrashCart();
@@ -248,6 +250,26 @@ async function run(): Promise<void> {
           }
           continue;
         }
+        continue;
+      }
+      // B1 ROUND 2 — an ACTIVE fleet restore owns its keys (takes precedence over cockpit/command-bar):
+      // 'c' cancels while running (stop-before-next-rig); any key dismisses the done view; 'q' still quits.
+      if (crashCartOpts.restore) {
+        if (ev.type === "char" && ev.ch === "q" && inputLine === "") {
+          void shutdown();
+          return;
+        }
+        if (crashCartOpts.restore.phase === "running") {
+          if (ev.type === "char" && ev.ch === "c" && !restoreCancelRequested) {
+            restoreCancelRequested = true;
+            view.dispatch({ type: "notice", message: "cancelling after the current rig…" });
+            draw();
+          }
+          continue; // swallow other keys while the fleet is restoring
+        }
+        // phase "done": any key dismisses the result → back to the normal TUI (re-probe the daemon).
+        crashCartOpts = { ...crashCartOpts, restore: undefined };
+        void refreshCrashCart();
         continue;
       }
       if (ev.type === "char") {

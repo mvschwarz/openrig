@@ -94,6 +94,39 @@ describe("rig crash-cart restore-fleet (async poll)", () => {
     process.exitCode = 0;
   });
 
+  it("cancel-fleet <id> reaches the cancel endpoint with the id (operator trigger for R8)", async () => {
+    const lines: string[] = [];
+    const posted: string[] = [];
+    const cancelClient = {
+      post: async (path: string) => {
+        posted.push(path);
+        return { status: 200, data: { ok: true, cancelled: true } };
+      },
+    } as unknown as DaemonClient;
+    const cmd = crashCartCommand({
+      emit: async () => ({ state: "up" }),
+      write: (l) => lines.push(l),
+      getRestoreClient: async () => cancelClient,
+    });
+    await cmd.parseAsync(["cancel-fleet", "fleet-abc"], { from: "user" });
+    expect(posted).toEqual(["/api/crash-cart/restore-fleet/fleet-abc/cancel"]);
+    expect(lines.join("\n")).toContain("Cancel requested for fleet-abc");
+  });
+
+  it("cancel-fleet fail-closed: no client → exit 1, no output", async () => {
+    const lines: string[] = [];
+    const cmd = crashCartCommand({
+      emit: async () => ({ state: "down" }),
+      write: (l) => lines.push(l),
+      getRestoreClient: async () => null,
+    });
+    process.exitCode = 0;
+    await cmd.parseAsync(["cancel-fleet", "fleet-abc"], { from: "user" });
+    expect(process.exitCode).toBe(1);
+    expect(lines).toEqual([]);
+    process.exitCode = 0;
+  });
+
   it("a thrown client error is caught and reported (r1: the sync action had none)", async () => {
     const lines: string[] = [];
     const throwingClient = { post: vi.fn(async () => { throw new Error("ECONNREFUSED"); }) } as unknown as DaemonClient;

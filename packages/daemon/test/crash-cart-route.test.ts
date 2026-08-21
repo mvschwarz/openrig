@@ -197,6 +197,34 @@ describe("POST /api/crash-cart/restore-fleet — the async conductor batch verb"
     expect(body.rollup.sequence.find((r) => r.rigId === "r-beta")!.outcome).toBe("not_attempted");
   });
 
+  // R6 / ARCH-RULING Q2 — the fleet verdict is DERIVED at read from the current counts, never a
+  // stored field on the attempt. The status verdict must equal f(the rollup counts it returns).
+  it("derives the verdict from the returned counts (not a stored second truth)", async () => {
+    const app = appWith({
+      rigRepo: { listRigs: () => [
+        { id: "r-kernel", name: "kernel" },
+        { id: "r-beta", name: "beta" },
+      ] },
+      snapshotRepo: { findLatestRestoreUsable: (rigId: string) => (rigId === "r-beta" ? null : { id: `snap-${rigId}` }) },
+      restoreOrchestrator: { restore: async () => ({ ok: true, result: { rigResult: "fully_restored" } }) },
+    });
+    const id = await kickFleet(app);
+    const body = await pollUntilDone(app, id);
+    // 1 fully_restored + 1 not_attempted = mixed, and it is exactly f(counts) of what GET returned
+    const c = body.rollup.counts;
+    const total = c.fully_restored + c.partially_restored + c.failed + c.not_attempted;
+    const expected =
+      total === 0 || c.not_attempted === total
+        ? "none_attempted"
+        : c.fully_restored === total
+          ? "all_fully_restored"
+          : c.failed === total
+            ? "all_failed"
+            : "mixed";
+    expect(body.verdict).toBe(expected);
+    expect(body.verdict).toBe("mixed");
+  });
+
   it("status/cancel of an unknown fleet-attempt id → 404", async () => {
     const app = appWith({
       rigRepo: { listRigs: () => [] },

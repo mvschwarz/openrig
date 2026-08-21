@@ -12,7 +12,8 @@ import { navigatorDisplay } from "./navigator.js";
 import { renderGraphStyle } from "./topology/render-graph.js";
 import { buildPulseModel } from "./pulse/pulse-model.js";
 import { renderPulseView, pulseLaneTargets } from "./pulse/render-pulse.js";
-import { renderCrashCartView, renderUnverifiedView } from "./crash-cart/render-crash-cart.js";
+import { renderCrashCartView, renderUnverifiedView, renderRestoreLifecycleView } from "./crash-cart/render-crash-cart.js";
+import type { RestoreLifecycleVM } from "./crash-cart/restore-lifecycle.js";
 import { buildLedgerExplorer } from "./crash-cart/ledger-explorer.js";
 import type { CrashCartModel } from "./crash-cart/crash-cart-model.js";
 import type { DaemonState, DaemonUnverifiedEvidence } from "./crash-cart/contract.js";
@@ -699,6 +700,9 @@ export interface RenderOptions {
   crashCart?: CrashCartModel;
   /** evidence for the UNVERIFIED screen — rendered when daemonState === "unverified". */
   daemonEvidence?: DaemonUnverifiedEvidence;
+  /** B1 ROUND 2 — the live fleet-restore lifecycle; when present it renders (progress → rollup+triage)
+   *  and takes precedence over the cockpit, so restore progress and the triage list are visible. */
+  restore?: RestoreLifecycleVM;
 }
 
 /** replace ONE character at a plain-text position inside a token-segment row
@@ -945,13 +949,47 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
 // standard explorer│content shell — the LEDGER-FED explorer on the left (honestly marked), the
 // approved content on the right. Mirrors renderPulseScreen's split; content segs paint via the normal
 // split-pane path (stylize │ branch), so no full-width bypass. All rails live in the content builders.
+type PaneContentLine = { text: string; segs?: Array<{ text: string; token?: Token; bold?: boolean; bg?: Token; inverse?: boolean }> };
+
+/** Word-wrap long content lines to the pane width with a hanging indent, so nothing is silently
+ *  clipped off the right edge. Used ONLY where the content is short enough to afford the extra rows
+ *  (the restore lifecycle view) — the fixed-height cockpit still clips to preserve its row layout. */
+function wrapContentLines(content: PaneContentLine[], width: number): PaneContentLine[] {
+  if (width <= 0) return content;
+  const out: PaneContentLine[] = [];
+  const indent = "     ";
+  for (const item of content) {
+    const text = item.text ?? "";
+    if (text.length <= width) {
+      out.push(item);
+      continue;
+    }
+    let rest = text;
+    let first = true;
+    while (rest.length > 0) {
+      const w = first ? width : Math.max(1, width - indent.length);
+      let cut = rest.length <= w ? rest.length : w;
+      if (cut < rest.length) {
+        const sp = rest.lastIndexOf(" ", cut);
+        if (sp > 0 && sp >= Math.floor(w * 0.5)) cut = sp; // break on a word boundary when reasonable
+      }
+      const chunk = rest.slice(0, cut).trimEnd();
+      rest = rest.slice(cut).replace(/^\s+/, "");
+      out.push(first ? { text: chunk, segs: item.segs } : { text: indent + chunk });
+      first = false;
+    }
+  }
+  return out;
+}
+
 function crashCartShell(
-  content: Array<{ text: string; segs?: Array<{ text: string; token?: Token; bold?: boolean; bg?: Token; inverse?: boolean }> }>,
+  content: PaneContentLine[],
   led: ReturnType<typeof buildLedgerExplorer>,
   contentTitle: string,
   cols: number,
   rows: number,
   inputLine: string,
+  opts?: { wrap?: boolean },
 ): Screen {
   const lines: string[] = [];
   const segRows: NonNullable<Screen["segRows"]> = {};
@@ -961,6 +999,7 @@ function crashCartShell(
   // The ledger-fed explorer column: the honest marker, then one row per rig (name + seat count).
   const leftRows: string[] = [led.note, "", ...led.rows.map((r) => `${r.label} (${r.seatCount})`)];
   const contentWidth = Math.max(cols - EXPL_W - 2, 0);
+  if (opts?.wrap) content = wrapContentLines(content, contentWidth);
   const bodyRows = Math.max(rows - 2 - 3, 1); // minus cmd bar + top rule + (bottom rule, hints, status)
   for (let i = 0; i < bodyRows; i++) {
     const y = lines.length + 1;
@@ -990,6 +1029,14 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   // view inside the standard shell — the explorer sidebar is ALWAYS present, ledger-fed + honestly
   // marked (from the SAME one-JSON discovery, never a second read). Content moves into the right pane
   // verbatim; all rails stand. DOWN → cockpit; UNVERIFIED → cannot-verify (no restore).
+  // B1 ROUND 2 — an ACTIVE fleet restore takes precedence over the cockpit: the operator sees live
+  // progress (from the poll stream) and, on done, the rollup + keyboard-walkable triage list.
+  if (options.restore) {
+    const led = buildLedgerExplorer(options.crashCart?.foundOnHost ?? []);
+    // wrap: the triage needs are full sentences — wrap them to the pane so the EXACT need is never
+    // clipped off the edge (the short lifecycle view can afford the extra rows).
+    return crashCartShell(renderRestoreLifecycleView(options.restore), led, "RESTORE", cols, rows, inputLine, { wrap: true });
+  }
   if (options.daemonState === "down" && options.crashCart) {
     const led = buildLedgerExplorer(options.crashCart.foundOnHost);
     return crashCartShell(renderCrashCartView(options.crashCart), led, "CRASH-CART", cols, rows, inputLine);

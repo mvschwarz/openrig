@@ -146,6 +146,18 @@ export function crashCartCommand(deps?: Partial<CrashCartCommandDeps>): Command 
     process.exitCode = result.state === "up" ? 0 : 1;
   });
 
+  // Acquire the daemon client for the fleet verbs (status → guard → DaemonClient), injectable in tests.
+  const acquireClient = async (json: boolean): Promise<DaemonClient | null> =>
+    deps?.getRestoreClient
+      ? deps.getRestoreClient({ json })
+      : await (async () => {
+          const lifecycleDeps = deps?.lifecycleDeps ?? realDeps();
+          const status = await getDaemonStatus(lifecycleDeps);
+          if (!daemonStatusGuard(status, { json })) return null;
+          const factory = deps?.clientFactory ?? ((url: string) => new DaemonClient(url));
+          return factory(getDaemonUrl(status));
+        })();
+
   // `rig crash-cart restore-fleet [--json]` — drive the daemon-side conductor (Atom B):
   // POST /api/crash-cart/restore-fleet → the FleetRollup + derived verdict. Requires the
   // daemon UP (the ⏎ flow's `s` step runs first); fail-closed if not.
@@ -158,15 +170,7 @@ export function crashCartCommand(deps?: Partial<CrashCartCommandDeps>): Command 
       // so read the merged view.
       const json = (command.optsWithGlobals() as { json?: boolean }).json === true;
       const write = deps?.write ?? ((line: string) => process.stdout.write(line + "\n"));
-      const client = deps?.getRestoreClient
-        ? await deps.getRestoreClient({ json })
-        : await (async () => {
-            const lifecycleDeps = deps?.lifecycleDeps ?? realDeps();
-            const status = await getDaemonStatus(lifecycleDeps);
-            if (!daemonStatusGuard(status, { json })) return null;
-            const factory = deps?.clientFactory ?? ((url: string) => new DaemonClient(url));
-            return factory(getDaemonUrl(status));
-          })();
+      const client = await acquireClient(json);
       if (!client) {
         process.exitCode = 1;
         return;
@@ -191,6 +195,8 @@ export function crashCartCommand(deps?: Partial<CrashCartCommandDeps>): Command 
           process.exitCode = 1;
           return;
         }
+        // Surface the attempt id so a user can cancel from another terminal (the operator lifecycle).
+        if (!json) write(`Fleet restore started (attempt ${fleetAttemptId}) — 'rig crash-cart cancel-fleet ${fleetAttemptId}' to stop.`);
 
         let final: FleetStatusResponse | undefined;
         for (let i = 0; i < MAX_POLLS; i++) {
@@ -235,6 +241,39 @@ export function crashCartCommand(deps?: Partial<CrashCartCommandDeps>): Command 
         // with an unhandled rejection. Structured, honest failure instead.
         const msg = e instanceof Error ? e.message : String(e);
         write(json ? JSON.stringify({ error: msg }) : `Fleet restore failed: ${msg}`);
+        process.exitCode = 1;
+      }
+    });
+
+  // `rig crash-cart cancel-fleet <fleetAttemptId> [--json]` — reach the cancel endpoint for a running
+  // fleet restore (stop-before-next-rig). The operator-facing CLI trigger for the endpoint that exists,
+  // so cancel is reachable off the cockpit path too (r2 HIGH-1 / plan R8).
+  cmd
+    .command("cancel-fleet <fleetAttemptId>")
+    .description("Cancel a running fleet restore (stop-before-next-rig).")
+    .option("--json", "emit the cancel result as JSON")
+    .action(async (fleetAttemptId: string, _opts: { json?: boolean }, command: Command) => {
+      const json = (command.optsWithGlobals() as { json?: boolean }).json === true;
+      const write = deps?.write ?? ((line: string) => process.stdout.write(line + "\n"));
+      const client = await acquireClient(json);
+      if (!client) {
+        process.exitCode = 1;
+        return;
+      }
+      try {
+        const res = await client.post<{ ok?: boolean; cancelled?: boolean; error?: string }>(
+          `/api/crash-cart/restore-fleet/${encodeURIComponent(fleetAttemptId)}/cancel`,
+        );
+        if (res.status >= 400) {
+          const err = res.data?.error ?? `HTTP ${res.status}`;
+          write(json ? JSON.stringify({ error: err }) : `Cancel failed: ${err}`);
+          process.exitCode = 1;
+          return;
+        }
+        write(json ? JSON.stringify(res.data) : `Cancel requested for ${fleetAttemptId} (stop-before-next-rig).`);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        write(json ? JSON.stringify({ error: msg }) : `Cancel failed: ${msg}`);
         process.exitCode = 1;
       }
     });

@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { restoreConfirmMessage } from "../src/crash-cart/one-click-gate.js";
 import { evaluateOneClickGate } from "../src/crash-cart/one-click-gate.js";
 
 // Crash-cart C3 — the one-click rule (founder, binding on ⏎): ⏎ is ONE keystroke IFF the plan is
@@ -31,5 +32,17 @@ describe("evaluateOneClickGate — zero-generation proxy over C2 discovery", () 
     const g = evaluateOneClickGate({ foundOnHost: [] });
     expect(g.zeroGeneration).toBe(true);
     expect(g.deltas).toEqual([]);
+  });
+});
+
+describe("restoreConfirmMessage — TRUTHFUL (r2 HIGH-2: no false fresh-prime promise)", () => {
+  it("names the deltas and describes the awaiting-DECISION, never claims the restore fresh-primes", () => {
+    const msg = restoreConfirmMessage([{ rigName: "openrig-pm", seatCount: 13, resumableCount: 7, nonResumable: 6 }]);
+    expect(msg).toContain("openrig-pm (6/13)"); // names the delta (R7 — no silent downgrade)
+    expect(msg).toContain("can't resume");
+    expect(msg).toContain("need a decision (fresh-prime or skip)"); // the decision the restore actually produces
+    expect(msg).toContain("triage list");
+    // it must NOT promise that RESTORE itself fresh-primes (the false claim r2 caught)
+    expect(msg).not.toMatch(/will fresh-prime/i);
   });
 });

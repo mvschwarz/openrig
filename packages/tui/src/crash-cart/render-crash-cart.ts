@@ -5,6 +5,8 @@
 import type { Token } from "../theme.js";
 import type { CrashCartModel } from "./crash-cart-model.js";
 import type { DaemonUnverifiedEvidence } from "./contract.js";
+import type { RestoreLifecycleVM } from "./restore-lifecycle.js";
+import { renderTriage } from "./triage.js";
 
 interface Seg {
   text: string;
@@ -129,6 +131,65 @@ export function renderCrashCartView(model: CrashCartModel): Line[] {
     { text: "" },
     ...renderActions(),
   ];
+}
+
+/** Glyph for a per-rig progress row by its rollup outcome. */
+function outcomeGlyph(outcome: string): { glyph: string; token: Token } {
+  switch (outcome) {
+    case "fully_restored":
+      return { glyph: "✓", token: "ok" };
+    case "partially_restored":
+      return { glyph: "◑", token: "warn" };
+    case "failed":
+      return { glyph: "✗", token: "error" };
+    default:
+      return { glyph: "◌", token: "dim" }; // not_attempted
+  }
+}
+
+/** The RESTORE LIFECYCLE view (B1 ROUND 2). While running: a live header + a per-rig progress list
+ *  updated from each poll (the rollup stream) + the cancel affordance. When done: the verdict + counts
+ *  and the SHIPPED keyboard-walkable triage list (renderTriage) — each seat/rig on its own row with its
+ *  EXACT need, NOT a width-clipped one-line footer summary. */
+export function renderRestoreLifecycleView(vm: RestoreLifecycleVM): Line[] {
+  const c = vm.counts;
+  const total = c.fully_restored + c.partially_restored + c.failed + c.not_attempted;
+  const countsSeg: Seg = {
+    text: `${c.fully_restored} restored · ${c.partially_restored} partial · ${c.failed} failed · ${c.not_attempted} not attempted`,
+    token: "dim",
+  };
+
+  if (vm.phase === "running") {
+    const out: Line[] = [
+      line([
+        { text: "⟳ RESTORING FLEET", token: "bright", bold: true },
+        { text: `  — ${total} of the fleet done so far`, token: "dim" },
+      ]),
+      line([countsSeg]),
+      { text: "" },
+    ];
+    for (const p of vm.progress) {
+      const g = outcomeGlyph(p.outcome);
+      out.push(line([{ text: ` ${g.glyph} `, token: g.token }, { text: p.rigId, token: "bright" }, { text: `  ${p.outcome}`, token: "dim" }]));
+    }
+    out.push({ text: "" });
+    out.push(line([{ text: "  c cancel (stop-before-next-rig)  ·  restore continues per rig", token: "dim" }]));
+    return out;
+  }
+
+  // done
+  const out: Line[] = [
+    line([
+      { text: `✓ FLEET RESTORE: ${vm.verdict}`, token: "bright", bold: true },
+      ...(vm.cancelled ? [{ text: " (cancelled)", token: "warn" as Token }] : []),
+    ]),
+    line([countsSeg]),
+    { text: "" },
+    // The shipped triage renderer — one keyboard-walkable row per need (seat + exact remediation),
+    // or the all-clean line. This is the surface the door test asserts.
+    ...renderTriage(vm.triage),
+  ];
+  return out;
 }
 
 /** The UNVERIFIED screen (planner+PM ruling): a minimal DISTINCT view — evidence VERBATIM + retry +

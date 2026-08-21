@@ -24,6 +24,15 @@ export interface OneClickGate {
   deltas: OneClickDelta[];
 }
 
+/** The confirm-screen message for a non-zero-generation restore. TRUTHFUL (r2 HIGH-2): the restore
+ *  does NOT auto-fresh-prime — non-resumable seats land in the triage list AWAITING A DECISION
+ *  (fresh-prime or skip). It NAMES the deltas (R7: no silent resume→fresh downgrade) and describes the
+ *  decision that follows; it never promises an action the restore doesn't request. */
+export function restoreConfirmMessage(deltas: OneClickDelta[]): string {
+  const names = deltas.map((d) => `${d.rigName} (${d.nonResumable}/${d.seatCount})`).join(", ");
+  return `⏎ RESTORE: ${names} have seats that can't resume — they'll need a decision (fresh-prime or skip) in the triage list. Press ⏎ to proceed, Esc to cancel.`;
+}
+
 /** Evaluate the one-click gate over the C2 discovery's per-rig resumable/seat counts. */
 export function evaluateOneClickGate(discovery: { foundOnHost: OneClickRigInput[] }): OneClickGate {
   const deltas: OneClickDelta[] = discovery.foundOnHost

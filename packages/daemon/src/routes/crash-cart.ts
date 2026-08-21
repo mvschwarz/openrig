@@ -19,18 +19,18 @@ import {
   aggregateFleetRollup,
   deriveFleetVerdict,
   type FleetRollup,
-  type FleetVerdict,
   type ConductorRigResult,
 } from "../domain/crash-cart-conductor.js";
 
 export const crashCartRoutes = new Hono();
 
 /** A live fleet-restore attempt — the pollable progress/rollup state, updated by the
- *  background conductor as each rig completes. In-memory per daemon process (v1). */
+ *  background conductor as each rig completes. In-memory per daemon process (v1).
+ *  NO verdict field: per ARCH-RULING Q2 / plan R6 the fleet verdict is a DERIVED
+ *  f(counts), never a stored second truth — it is computed in the GET handler. */
 interface FleetAttempt {
   sequence: ConductorRigResult[];
   rollup: FleetRollup;
-  verdict: FleetVerdict;
   done: boolean;
   cancelled: boolean;
 }
@@ -54,7 +54,6 @@ function getDeps(c: { get: (key: string) => unknown }) {
 
 function recompute(attempt: FleetAttempt): void {
   attempt.rollup = aggregateFleetRollup(attempt.sequence);
-  attempt.verdict = deriveFleetVerdict(attempt.rollup.counts);
 }
 
 // POST /api/crash-cart/restore-fleet — start the fleet restore, answer ON-COMMIT.
@@ -64,7 +63,6 @@ crashCartRoutes.post("/restore-fleet", (c) => {
   const attempt: FleetAttempt = {
     sequence: [],
     rollup: aggregateFleetRollup([]),
-    verdict: deriveFleetVerdict(aggregateFleetRollup([]).counts),
     done: false,
     cancelled: false,
   };
@@ -112,7 +110,13 @@ crashCartRoutes.post("/restore-fleet", (c) => {
 crashCartRoutes.get("/restore-fleet/:fleetAttemptId", (c) => {
   const attempt = fleetAttempts.get(c.req.param("fleetAttemptId"));
   if (!attempt) return c.json({ error: "unknown fleet restore attempt" }, 404);
-  return c.json({ done: attempt.done, cancelled: attempt.cancelled, rollup: attempt.rollup, verdict: attempt.verdict });
+  // Verdict DERIVED at read from the current counts (R6 / ARCH-RULING Q2) — never a stored field.
+  return c.json({
+    done: attempt.done,
+    cancelled: attempt.cancelled,
+    rollup: attempt.rollup,
+    verdict: deriveFleetVerdict(attempt.rollup.counts),
+  });
 });
 
 // POST /api/crash-cart/restore-fleet/:fleetAttemptId/cancel — stop-before-next-rig.

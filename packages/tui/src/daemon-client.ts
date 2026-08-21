@@ -8,6 +8,19 @@ export interface DaemonClientOptions {
   fetchImpl?: typeof fetch;
 }
 
+/** One poll of a fleet-restore attempt (the daemon's GET status shape). The verdict is
+ *  derived server-side from the rollup counts (never a stored field). */
+export interface RestoreFleetStatus {
+  done: boolean;
+  cancelled: boolean;
+  verdict: string;
+  rollup: {
+    counts: { fully_restored: number; partially_restored: number; failed: number; not_attempted: number };
+    sequence: Array<{ rigId: string; outcome: string; reason?: string; remediation?: string }>;
+    attention_required: Array<{ rigId: string; seat: string; need: string }>;
+  };
+}
+
 export interface TerminalOpenResult {
   provider: string;
   ok: boolean;
@@ -59,6 +72,25 @@ export class DaemonClient {
       throw new Error(`daemon write failed: POST ${route} → ${res.status}${detail}`);
     }
     return parsed;
+  }
+
+  // --- Crash-cart fleet restore (B1 conductor — the TUI OWNS the kick/poll/cancel
+  //     lifecycle so it can retain the attempt id, render progress from the poll stream,
+  //     and reach the cancel endpoint; it no longer delegates blind to a buffered child) ---
+  /** Kick the async fleet restore; the daemon answers on-commit with a fleet-attempt handle. */
+  restoreFleet(): Promise<{ fleetAttemptId: string; status: string }> {
+    return this.post("/api/crash-cart/restore-fleet", {}) as Promise<{ fleetAttemptId: string; status: string }>;
+  }
+  /** Poll one fleet-attempt's progress + rollup + derived verdict. */
+  restoreFleetStatus(id: string): Promise<RestoreFleetStatus> {
+    return this.get(`/api/crash-cart/restore-fleet/${encodeURIComponent(id)}`) as Promise<RestoreFleetStatus>;
+  }
+  /** Request stop-before-next-rig cancel on a running fleet attempt. */
+  cancelRestoreFleet(id: string): Promise<{ ok: boolean; cancelled: boolean }> {
+    return this.post(`/api/crash-cart/restore-fleet/${encodeURIComponent(id)}/cancel`, {}) as Promise<{
+      ok: boolean;
+      cancelled: boolean;
+    }>;
   }
 
   // --- Topology (§4.A rows 1–3) ---

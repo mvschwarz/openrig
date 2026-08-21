@@ -4,6 +4,7 @@
 // renders the cockpit — it falls to the normal TUI.
 import type { DaemonState, DaemonUnverifiedEvidence } from "./contract.js";
 import { buildCrashCartModel, type CrashCartDiscoveryInput, type CrashCartModel } from "./crash-cart-model.js";
+import type { RestoreLifecycleVM } from "./restore-lifecycle.js";
 
 /** The `rig crash-cart --json` payload (mirrors the daemon verb's emit — the documented JSON contract). */
 export interface CrashCartEmit {
@@ -18,6 +19,10 @@ export interface CrashCartRenderOpts {
   daemonState?: DaemonState;
   crashCart?: CrashCartModel;
   daemonEvidence?: DaemonUnverifiedEvidence;
+  /** B1 ROUND 2 — the live fleet-restore lifecycle surface (progress while running, rollup + triage
+   *  when done). Set by main.ts as the operator-owned lifecycle polls; takes precedence over the
+   *  cockpit while present, so the operator sees progress and the triage list rather than a bare refresh. */
+  restore?: RestoreLifecycleVM;
 }
 
 /** Verdict → render opts. DOWN+discovery → cockpit; UNVERIFIED+evidence → cannot-verify; else (UP, or
