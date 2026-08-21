@@ -58,6 +58,7 @@ selection).`)
       }
       session = targetResolution.target;
       const crossHostHint = targetResolution.hint;
+      if (targetResolution.warning) console.error(targetResolution.warning);
       opts.host = explicitHost ?? targetResolution.sugarHost ?? opts.host;
 
       // --grep takes precedence over --tail when both given

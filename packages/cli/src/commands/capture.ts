@@ -73,6 +73,7 @@ Supported notes:
         }
         session = targetResolution.target;
         crossHostHint = targetResolution.hint;
+        if (targetResolution.warning) console.error(targetResolution.warning);
         opts.host = explicitHost ?? targetResolution.sugarHost ?? opts.host;
       }
 

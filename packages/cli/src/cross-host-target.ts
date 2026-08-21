@@ -1,4 +1,5 @@
 import { loadHostRegistry, resolveHost } from "./host-registry.js";
+import { loadHostBindings, describeBindingConflict, type HostBindingsFile } from "./host-bindings.js";
 
 /**
  * OPR.0.4.6.MH4 §4 — the host-qualified TARGET sugar + precedence contract,
@@ -41,6 +42,12 @@ export interface CrossHostTargetResolution {
    * this target; it never changes behavior on success paths.
    */
   hint: string | undefined;
+  /**
+   * Non-fatal loud surface: set when resolution went through a registry entry whose LEARNED
+   * identity binding has a recorded contradiction (the known_hosts loud-fail property). Callers
+   * print it to stderr and proceed — a contradiction warns, it never blocks.
+   */
+  warning?: string;
 }
 
 export interface CrossHostTargetConflict {
@@ -53,6 +60,7 @@ export function resolveCrossHostTarget(
   explicitHost: string | undefined,
   registryLoader?: () => ReturnType<typeof loadHostRegistry>,
   selfHostId?: string | undefined | null,
+  bindingsLoader?: () => HostBindingsFile,
 ): CrossHostTargetResolution | CrossHostTargetConflict {
   const atCount = rawTarget.split("@").length - 1;
   if (atCount < 2) {
@@ -102,7 +110,10 @@ export function resolveCrossHostTarget(
     return { ok: true, target: rawTarget, sugarHost: undefined, hint: unregisteredHint };
   }
 
-  const resolved = resolveHost(registry.registry, suffix);
+  // Sidecar-learned bindings join the match set: a suffix equal to a LEARNED self-id resolves the
+  // alias it was learned for (fail-open — a missing/corrupt sidecar is just an empty set).
+  const bindings = (bindingsLoader ?? loadHostBindings)().bindings;
+  const resolved = resolveHost(registry.registry, suffix, bindings);
   if (!resolved.ok) {
     return { ok: true, target: rawTarget, sugarHost: undefined, hint: unregisteredHint };
   }
@@ -113,7 +124,7 @@ export function resolveCrossHostTarget(
   // workflow this slice exists to make work. Compare the RESOLVED entries, not the raw strings.
   // A genuinely different host, or an explicit host that resolves to nothing, still conflicts loudly.
   const explicitResolved = explicitHost !== undefined
-    ? resolveHost(registry.registry, explicitHost)
+    ? resolveHost(registry.registry, explicitHost, bindings)
     : undefined;
   const namesSameEntry = explicitResolved?.ok === true && explicitResolved.host.id === resolved.host.id;
 
@@ -127,5 +138,8 @@ export function resolveCrossHostTarget(
   // NORMALIZE TO THE ALIAS. The suffix may have matched the entry's join key rather than its id
   // (a peer's reply hint carries that peer's self-id). Everything downstream treats sugarHost as a
   // registry id and compares it against `h.id`, so hand back the canonical alias, not what was typed.
-  return { ok: true, target: base, sugarHost: resolved.host.id, hint: undefined };
+  // A resolved entry whose learned binding carries a recorded contradiction warns loudly (never blocks).
+  const binding = bindings[resolved.host.id];
+  const warning = binding?.conflict ? describeBindingConflict(resolved.host.id, binding) : undefined;
+  return { ok: true, target: base, sugarHost: resolved.host.id, hint: undefined, ...(warning ? { warning } : {}) };
 }

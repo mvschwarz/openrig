@@ -390,6 +390,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       }
       session = targetResolution.target;
       const crossHostHint = targetResolution.hint;
+      if (targetResolution.warning) console.error(targetResolution.warning);
       opts.host = explicitHost ?? targetResolution.sugarHost ?? opts.host;
 
       // Atom 6b QA fix (root cause): re-reject --context on the cross-host path

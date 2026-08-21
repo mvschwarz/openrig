@@ -292,12 +292,18 @@ export function hostDisplayTarget(host: HostEntry): string {
   return host.transport === "ssh" ? host.target : host.url;
 }
 
-export function resolveHost(registry: HostRegistry, id: string): HostResolution {
+export function resolveHost(
+  registry: HostRegistry,
+  id: string,
+  learnedBindings?: Record<string, { hostId: string }>,
+): HostResolution {
   // alias -> id -> transport. The human alias is the intentional handle, so an `id` match is tried
   // across the WHOLE registry before any join key — that tiebreak is defined rather than accidental,
-  // even though a collision with a random self-id is near-impossible.
+  // even though a collision with a random self-id is near-impossible. A registry-declared `hostId`
+  // outranks a sidecar-learned binding for the same reason: the operator wrote it down.
   const match = registry.hosts.find((h) => h.id === id)
-    ?? registry.hosts.find((h) => h.hostId === id);
+    ?? registry.hosts.find((h) => h.hostId === id)
+    ?? (learnedBindings ? registry.hosts.find((h) => learnedBindings[h.id]?.hostId === id) : undefined);
   if (match) return { ok: true, host: match };
   const knownIds = registry.hosts.map((h) => h.id).slice(0, 10);
   const idsHint = knownIds.length > 0

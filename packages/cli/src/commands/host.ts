@@ -20,6 +20,7 @@ import { connect } from "node:net";
 import { getOpenRigHome } from "../openrig-compat.js";
 import { addHostEntry, defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, hostDisplayTarget, resolveHost, resolveRemoteBearer, bearerAuthHeaders, type HostEntry, type HttpHostEntry } from "../host-registry.js";
 import { runCrossHostCommand, type CrossHostResult } from "../cross-host-executor.js";
+import { recordHostObservation, loadHostBindings, describeBindingConflict, defaultHostBindingsPath, type HostObservationOutcome } from "../host-bindings.js";
 import { DaemonClient } from "../client.js";
 import { readOwnHostName, readSelectedHost } from "../host-selection.js";
 
@@ -46,6 +47,10 @@ export interface DoctorDeps {
   httpPost?: (url: string, body: unknown) => Promise<{ status: number; body: string }>;
   /** TCP connect probe: "open" (connected) | "closed" (refused/filtered/timeout) | "unknown" (probe itself failed). */
   tcpProbe: (target: string, port: number, timeoutMs: number) => Promise<"open" | "closed" | "unknown">;
+  /** Slice 14 Source-1: record an observed `/healthz` selfHostId for a registry alias in the learned
+   *  sidecar (TOFU + loud-conflict). Optional so existing fixtures keep compiling AND unit runs never
+   *  write the real sidecar — absent means learning is skipped, which is the fail-open contract. */
+  learnHostBinding?: (alias: string, observedHostId: string) => HostObservationOutcome;
 }
 
 function nestedBoolean(obj: unknown, path: readonly string[]): boolean | undefined {
@@ -88,6 +93,7 @@ function defaultDoctorDeps(): DoctorDeps {
         sock.on("timeout", () => { sock.destroy(); resolve("closed"); });
         sock.on("error", () => { sock.destroy(); resolve("closed"); });
       }),
+    learnHostBinding: (alias, observedHostId) => recordHostObservation({ alias, observedHostId }),
   };
 }
 
@@ -211,6 +217,34 @@ export async function doctorLegs(host: HostEntry, deps: DoctorDeps): Promise<Che
     }
     rows.push({ step: "transport-reachability", status: "pass", detail: `healthz ok at ${(host as HttpHostEntry).url}` });
     rows.push({ step: "remote-daemon-health", status: "pass", detail: "healthz IS the daemon health check on http transport" });
+    // Slice 14 Source-1: the healthz body we ALREADY hold carries the peer's selfHostId — record it
+    // in the learned sidecar (TOFU first contact; a contradiction surfaces loudly and never
+    // overwrites). Exact correlation: we asked THIS entry's URL, so the id is this entry's.
+    // Absence (no learner wired, body unparseable, no selfHostId in an older daemon) is fail-open: no row.
+    if (deps.learnHostBinding) {
+      try {
+        const parsed = JSON.parse(health.body) as { selfHostId?: unknown };
+        if (typeof parsed.selfHostId === "string" && parsed.selfHostId.length > 0) {
+          const obs = deps.learnHostBinding(host.id, parsed.selfHostId);
+          rows.push(obs.outcome === "conflict"
+            ? {
+                step: "host-identity-binding",
+                status: "fail",
+                detail: describeBindingConflict(host.id, obs.binding),
+                fix: `if the re-key is legitimate, delete the '${host.id}' entry in ${defaultHostBindingsPath()} and re-run doctor to re-learn`,
+              }
+            : {
+                step: "host-identity-binding",
+                status: "pass",
+                detail: obs.outcome === "bound"
+                  ? `learned host identity '${obs.binding.hostId}' (first contact) — reply hints ending @${obs.binding.hostId} now resolve to '${host.id}'`
+                  : `host identity '${obs.binding.hostId}' confirmed`,
+              });
+        }
+      } catch {
+        // body not JSON — an older or non-daemon endpoint; learning is skipped, nothing breaks.
+      }
+    }
   } catch (err) {
     rows.push({ step: "transport-reachability", status: "fail", detail: `daemon unreachable at ${(host as HttpHostEntry).url}: ${(err as Error).message}`, fix: "check tailnet connectivity and that the remote daemon is running (rig daemon start on the host)" });
     return rows;
@@ -757,10 +791,14 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
         // `rig config get host.selected`).
         // Slice 14: `hostId` rides through the spread when present, but ABSENT-as-missing-key makes
         // "never learned this peer's identity" indistinguishable from a consumer that forgot to
-        // look. Emit it explicitly as null so unbound is a value, not an absence.
+        // look. Emit it explicitly as null so unbound is a value, not an absence. `learnedHostId`
+        // (the Source-1 sidecar binding) and `idChanged` (a recorded contradiction) are additive keys.
+        const jsonBindings = loadHostBindings().bindings;
         console.log(JSON.stringify(loaded.registry.hosts.map((h, i) => ({
           ...h,
           hostId: h.hostId ?? null,
+          learnedHostId: jsonBindings[h.id]?.hostId ?? null,
+          idChanged: Boolean(jsonBindings[h.id]?.conflict),
           selected: h.id === selected,
           status: statuses[i],
         }))));
@@ -780,13 +818,23 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
         console.log(`This host: ${ownName}\n`);
       }
       const pad = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + "…" : s.padEnd(n));
+      const bindings = loadHostBindings().bindings;
       console.log(`${pad("", 2)}${pad("ID", 20)} ${pad("HOST-ID", 18)} ${pad("TRANSPORT", 10)} ${pad("TARGET", 30)} ${pad("STATUS", 12)} ${pad("AUTH", 24)} NOTES`);
       for (let i = 0; i < loaded.registry.hosts.length; i++) {
         const h = loaded.registry.hosts[i]!;
         const marker = h.id === selected ? "* " : "  ";
         // "unbound" is the whole point of the column: an operator can SEE which entries have never
         // learned their peer's self-id, instead of finding out when a cross-machine message fails.
-        console.log(`${marker}${pad(h.id, 20)} ${pad(h.hostId ?? "unbound", 18)} ${pad(h.transport, 10)} ${pad(hostDisplayTarget(h), 30)} ${pad(statuses[i]!, 12)} ${pad(authPointer(h), 24)} ${h.notes ?? "—"}`);
+        // Registry-declared hostId outranks the sidecar-learned binding; a recorded contradiction
+        // flags the cell and prints its full story under the table (loud, never silent).
+        const binding = bindings[h.id];
+        const effectiveId = h.hostId ?? binding?.hostId ?? "unbound";
+        const cell = binding?.conflict ? `${effectiveId} id-changed!` : effectiveId;
+        console.log(`${marker}${pad(h.id, 20)} ${pad(cell, 18)} ${pad(h.transport, 10)} ${pad(hostDisplayTarget(h), 30)} ${pad(statuses[i]!, 12)} ${pad(authPointer(h), 24)} ${h.notes ?? "—"}`);
+      }
+      for (const h of loaded.registry.hosts) {
+        const binding = bindings[h.id];
+        if (binding?.conflict) console.log(`\n! ${describeBindingConflict(h.id, binding)}`);
       }
       if (selected !== "local") {
         console.log(`\nSelected host: ${selected} (return with: rig host select local)`);
