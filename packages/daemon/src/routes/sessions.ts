@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { getSelfHostId } from "../domain/hosts/fanout-contract.js";
 import type { RigRepository } from "../domain/rig-repository.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import type { NodeLauncher } from "../domain/node-launcher.js";
@@ -142,7 +143,14 @@ nodesRoutes.get("/", async (c) => {
     db: deps.rigRepo.db,
     seatActivity: deps.seatActivityService,
   });
-  return c.json(withTerminalAndWork);
+  // Slice 13 fix 2 — HOST ATTRIBUTION AT THE SOURCE. A daemon only inventories its own seats, so
+  // every row it serves lives on THIS host; stamping the boot-reconciled self-id here means a
+  // merged multi-host roster stays attributable row-by-row (a roster missing a host is legible as
+  // partial instead of looking authoritative). Explicit null before the boot reconcile: the key is
+  // always present, so "not yet known" is a value, never an absence a consumer can misread.
+  // selfHostId ONLY — never host.name (display-only; the DP4 conflation healthz already refuses).
+  const hostSelfId = getSelfHostId();
+  return c.json(withTerminalAndWork.map((n) => ({ ...n, hostSelfId })));
 });
 
 // GET /api/rigs/:rigId/nodes/:logicalId — node detail
@@ -172,6 +180,8 @@ nodesRoutes.get("/:logicalId", async (c) => {
     lastActivityAt: detailWithTerminalAndWork?.lastActivityAt,
     hasAssignedWork: detailWithTerminalAndWork?.hasAssignedWork,
     pendingWorkCount: detailWithTerminalAndWork?.pendingWorkCount,
+    // Slice 13 fix 2 — same host attribution as the list route (see its comment).
+    hostSelfId: getSelfHostId(),
   });
 
   // W3: detail is a single explicit seat, so this read-only filesystem

@@ -79,7 +79,16 @@ activityRoutes.post("/hooks", async (c) => {
       return c.json({ ok: true, sessionId, provenance: "rpc", tokenPersisted: validation.ok });
     }
 
-    sessionRegistry.updateResumeToken(resolved.sessionId, "codex_id", sessionId, "hook");
+    // The resume-type label derives from the RUNTIME, never a fixed default: this line used to stamp
+    // "codex_id" for every non-pi runtime, so claude-code seats carried a codex-typed label over a
+    // correct token value — and a restore path selecting its resume MECHANISM by label would pick the
+    // wrong one while looking healthy. The relay only posts session_identity with a runtime present;
+    // an unmapped runtime skips the persist (tokenPersisted: false) rather than guessing a label.
+    const { validateResumeToken } = await import("../domain/resume-token-validation.js");
+    const validation = validateResumeToken(runtime, sessionId);
+    if (validation.ok) {
+      sessionRegistry.updateResumeToken(resolved.sessionId, validation.resumeType, validation.token, "hook");
+    }
     eventBus.emit({
       type: "agent.session_identity",
       rigId: resolved.rigId,
@@ -90,7 +99,7 @@ activityRoutes.post("/hooks", async (c) => {
       provenance: "hook",
     });
 
-    return c.json({ ok: true, sessionId, provenance: "hook" });
+    return c.json({ ok: true, sessionId, provenance: "hook", tokenPersisted: validation.ok });
   }
 
   // OPR.0.4.3.06 — startup proof ingestion. Mirrors session_identity: reuses

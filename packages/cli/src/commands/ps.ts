@@ -46,6 +46,10 @@ interface NodeEntry {
   logicalId: string;
   podId: string | null;
   podNamespace?: string | null;
+  /** Slice 13 fix 2 — the serving daemon's boot-reconciled self-id, stamped per row at the source
+   *  (null before the daemon reconciles). Distinct from the -A fan-out's `hostId`, which is the
+   *  CALLER'S registry alias for the host it queried. */
+  hostSelfId?: string | null;
   canonicalSessionName: string | null;
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
@@ -598,6 +602,9 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       rigName: n.rigName,
       logicalId: n.logicalId,
       canonicalSessionName: n.canonicalSessionName,
+      // Slice 13 fix 2 — host attribution rides the compact projection too; a
+      // projected roster must stay attributable or partial reads as authoritative.
+      hostSelfId: n.hostSelfId ?? null,
       // 0.5.1 founder-directed telemetry: runtime + DECLARED model.
       // node-inventory carries both; this projection dropped them, which is why
       // an orchestrator could not tell a rate-limited seat from a stalled one.
