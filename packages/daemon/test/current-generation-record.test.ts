@@ -5,7 +5,7 @@
 import { describe, it, expect } from "vitest";
 import {
   paneClaudeSessionIdArgument,
-  selectLiveClaudeRecord,
+  LiveClaudeRecordSelector,
   resolveLiveCodexThreadId,
   type ProcessRow,
 } from "../src/domain/model-divergence/current-generation-record.js";
@@ -39,102 +39,97 @@ describe("paneClaudeSessionIdArgument (a CANDIDATE source, never the answer alon
   });
 });
 
-describe("selectLiveClaudeRecord — FAIL-CLOSED via OBSERVED ADVANCEMENT (r2 HIGH-1, rounds 2+3)", () => {
-  // Two-sample harness: stats(path) returns first-sample then second-sample values.
-  function twoSampleStat(first: Record<string, [number, number] | null>, second: Record<string, [number, number] | null>) {
-    let probed = false;
-    return {
-      stat: (path: string) => {
-        const v = (probed ? second : first)[path] ?? null;
-        return v ? { mtimeMs: v[0], size: v[1] } : null;
-      },
-      sleep: async () => { probed = true; },
+describe("LiveClaudeRecordSelector — CROSS-POLL advancement, stateful per seat (r2 round-4)", () => {
+  const A = "/p/a.jsonl"; const B = "/p/b.jsonl";
+  function statFn(table: Record<string, [number, number] | null>) {
+    return (path: string) => {
+      const v = table[path] ?? null;
+      return v ? { mtimeMs: v[0], size: v[1] } : null;
     };
   }
+  const CAND = [
+    { source: "sidecar", id: "id-a", path: A },
+    { source: "pane-argument", id: "id-b", path: B },
+  ];
 
-  it("the D-a specimen, replayed: disagreeing ids — the record that ADVANCES between samples wins, regardless of mtime rank", async () => {
-    const { stat, sleep } = twoSampleStat(
-      { "/p/current.jsonl": [1_000, 500], "/p/stale.jsonl": [2_000, 900] }, // stale even has the FRESHER mtime
-      { "/p/current.jsonl": [1_500, 620], "/p/stale.jsonl": [2_000, 900] }, // only current advances
-    );
-    const out = await selectLiveClaudeRecord([
-      { source: "sidecar", id: "current", path: "/p/current.jsonl" },
-      { source: "pane-argument", id: "stale", path: "/p/stale.jsonl" },
-    ], stat, { sleep, probeDelayMs: 0 });
-    expect(out).toMatchObject({ ok: true, id: "current", source: "sidecar" });
+  it("r2 round-4 discriminator: advancement observed on one poll is NOT forgotten — the selection RETAINS across idle polls", () => {
+    const sel = new LiveClaudeRecordSelector();
+    // poll 1: first observation of a disagreeing set → INDETERMINATE by construction, named.
+    const p1 = sel.select("seat", CAND, statFn({ [A]: [1000, 100], [B]: [2000, 900] }));
+    expect(p1.ok).toBe(false);
+    if (!p1.ok) expect(p1.reason).toContain("first observation");
+    // poll 2: id-a advanced across the FULL poll interval (any intervening write counts).
+    const p2 = sel.select("seat", CAND, statFn({ [A]: [5000, 150], [B]: [2000, 900] }));
+    expect(p2).toMatchObject({ ok: true, id: "id-a" });
+    // poll 3: everything idle — the resolved generation is RETAINED, not re-litigated.
+    const p3 = sel.select("seat", CAND, statFn({ [A]: [5000, 150], [B]: [2000, 900] }));
+    expect(p3).toMatchObject({ ok: true, id: "id-a" });
   });
 
-  it("r2 round-3 case 1: an UNREADABLE contender ALWAYS forces INDETERMINATE — even when the readable record was written seconds ago", async () => {
-    const { stat, sleep } = twoSampleStat(
-      { "/p/stale.jsonl": [9_999, 900] },
-      { "/p/stale.jsonl": [10_050, 950] }, // the stale record is even actively advancing
-    );
-    const out = await selectLiveClaudeRecord([
-      { source: "sidecar", id: "rolled-current", path: "/p/missing.jsonl" },
-      { source: "pane-argument", id: "stale", path: "/p/stale.jsonl" },
-    ], stat, { sleep, probeDelayMs: 0 });
+  it("the retained selection DROPS when the candidate id set changes (a new generation appears)", () => {
+    const sel = new LiveClaudeRecordSelector();
+    sel.select("seat", CAND, statFn({ [A]: [1000, 100], [B]: [2000, 900] }));
+    const resolved = sel.select("seat", CAND, statFn({ [A]: [5000, 150], [B]: [2000, 900] }));
+    expect(resolved.ok).toBe(true);
+    const NEW = [...CAND, { source: "registry", id: "id-c", path: "/p/c.jsonl" }];
+    const afterChange = sel.select("seat", NEW, statFn({ [A]: [5000, 150], [B]: [2000, 900], "/p/c.jsonl": [9000, 10] }));
+    expect(afterChange.ok).toBe(false); // fresh set → first observation again
+    if (!afterChange.ok) expect(afterChange.reason).toContain("first observation");
+  });
+
+  it("neither advancing across polls stays INDETERMINATE (idle seat), and resolves on the poll where exactly one advances", () => {
+    const sel = new LiveClaudeRecordSelector();
+    sel.select("seat", CAND, statFn({ [A]: [1000, 100], [B]: [2000, 900] }));
+    const idle = sel.select("seat", CAND, statFn({ [A]: [1000, 100], [B]: [2000, 900] }));
+    expect(idle.ok).toBe(false);
+    if (!idle.ok) expect(idle.reason).toContain("no record advanced since the previous poll");
+    const resolved = sel.select("seat", CAND, statFn({ [A]: [1000, 100], [B]: [2500, 950] }));
+    expect(resolved).toMatchObject({ ok: true, id: "id-b" });
+  });
+
+  it("both advancing = genuinely ambiguous, named", () => {
+    const sel = new LiveClaudeRecordSelector();
+    sel.select("seat", CAND, statFn({ [A]: [1000, 100], [B]: [2000, 900] }));
+    const both = sel.select("seat", CAND, statFn({ [A]: [1500, 130], [B]: [2500, 950] }));
+    expect(both.ok).toBe(false);
+    if (!both.ok) expect(both.reason).toContain("2 records advanced");
+  });
+
+  it("an UNREADABLE contender with a different id ALWAYS forces INDETERMINATE — even after a prior resolution", () => {
+    const sel = new LiveClaudeRecordSelector();
+    sel.select("seat", CAND, statFn({ [A]: [1000, 100], [B]: [2000, 900] }));
+    sel.select("seat", CAND, statFn({ [A]: [5000, 150], [B]: [2000, 900] })); // resolved id-a
+    const withGhost = [...CAND, { source: "registry", id: "ghost", path: "/p/missing.jsonl" }];
+    const out = sel.select("seat", withGhost, statFn({ [A]: [6000, 180], [B]: [2000, 900] }));
     expect(out.ok).toBe(false);
     if (!out.ok) {
       expect(out.reason).toContain("unreadable");
-      expect(out.reason).toContain("rolled-c");
-      expect(out.reason).toContain("may be the record being written");
+      expect(out.reason).toContain("ghost");
     }
   });
 
-  it("r2 round-3 case 2: two readable ids written 61s and 60s ago, NEITHER advancing = INDETERMINATE (recency proves nothing)", async () => {
-    const { stat, sleep } = twoSampleStat(
-      { "/p/a.jsonl": [61_000, 100], "/p/b.jsonl": [60_000, 100] },
-      { "/p/a.jsonl": [61_000, 100], "/p/b.jsonl": [60_000, 100] },
-    );
-    const out = await selectLiveClaudeRecord([
-      { source: "sidecar", id: "id-a", path: "/p/a.jsonl" },
-      { source: "pane-argument", id: "id-b", path: "/p/b.jsonl" },
-    ], stat, { sleep, probeDelayMs: 0 });
-    expect(out.ok).toBe(false);
-    if (!out.ok) expect(out.reason).toContain("no record advanced");
+  it("r2 adjacent pin: a dead first path does NOT mask a readable second path for the SAME id", () => {
+    const sel = new LiveClaudeRecordSelector();
+    const out = sel.select("seat", [
+      { source: "sidecar", id: "only-id", path: "/p/dead.jsonl" },
+      { source: "sidecar", id: "only-id", path: A },
+    ], statFn({ [A]: [1000, 100] }));
+    expect(out).toMatchObject({ ok: true, id: "only-id", path: A });
   });
 
-  it("multiple records advancing simultaneously = INDETERMINATE named as genuinely ambiguous", async () => {
-    const { stat, sleep } = twoSampleStat(
-      { "/p/a.jsonl": [1_000, 100], "/p/b.jsonl": [1_000, 100] },
-      { "/p/a.jsonl": [2_000, 150], "/p/b.jsonl": [2_000, 160] },
-    );
-    const out = await selectLiveClaudeRecord([
-      { source: "sidecar", id: "id-a", path: "/p/a.jsonl" },
-      { source: "pane-argument", id: "id-b", path: "/p/b.jsonl" },
-    ], stat, { sleep, probeDelayMs: 0 });
-    expect(out.ok).toBe(false);
-    if (!out.ok) expect(out.reason).toContain("advanced simultaneously");
-  });
-
-  it("UNANIMITY needs no probe: one readable id everywhere resolves immediately even when dormant", async () => {
-    let slept = false;
-    const out = await selectLiveClaudeRecord([
-      { source: "sidecar", id: "only-id", path: "/p/a.jsonl" },
-      { source: "pane-argument", id: "only-id", path: "/p/a.jsonl" },
-    ], () => ({ mtimeMs: 1, size: 1 }), { sleep: async () => { slept = true; }, probeDelayMs: 0 });
-    expect(out).toMatchObject({ ok: true, id: "only-id" });
-    expect(slept).toBe(false);
-  });
-
-  it("zero readable candidates = NAMED INDETERMINATE listing every dead candidate", async () => {
-    const out = await selectLiveClaudeRecord([
+  it("UNANIMITY resolves immediately even when dormant; zero readable = named INDETERMINATE listing dead candidates", () => {
+    const sel = new LiveClaudeRecordSelector();
+    const ok = sel.select("s1", [{ source: "sidecar", id: "only", path: A }], statFn({ [A]: [1, 1] }));
+    expect(ok).toMatchObject({ ok: true, id: "only" });
+    const none = sel.select("s2", [
       { source: "sidecar", id: "ghost-1", path: "/p/missing.jsonl" },
       { source: "registry", id: "ghost-2", path: null },
-    ], () => null, { sleep: async () => {}, probeDelayMs: 0 });
-    expect(out.ok).toBe(false);
-    if (!out.ok) {
-      expect(out.reason).toContain("sidecar:ghost-1");
-      expect(out.reason).toContain("registry:ghost-2");
+    ], statFn({}));
+    expect(none.ok).toBe(false);
+    if (!none.ok) {
+      expect(none.reason).toContain("sidecar:ghost-1");
+      expect(none.reason).toContain("registry:ghost-2");
     }
-  });
-
-  it("an id readable via ONE source is readable, period (dedupe keeps the readable path)", async () => {
-    const out = await selectLiveClaudeRecord([
-      { source: "registry", id: "current", path: null },
-      { source: "sidecar", id: "current", path: "/p/a.jsonl" },
-    ], () => ({ mtimeMs: 1, size: 1 }), { sleep: async () => {}, probeDelayMs: 0 });
-    expect(out).toMatchObject({ ok: true, id: "current" });
   });
 });
 

@@ -9,7 +9,7 @@
 // lesson, met again from the other side). On the B16 specimen the SIDECAR was the stale one. So no
 // single pointer — argument, sidecar, or registry row — is generation-true.
 //
-// What IS generation-true: the record being WRITTEN. selectLiveClaudeRecord gathers every candidate
+// What IS generation-true: the record being WRITTEN. LiveClaudeRecordSelector gathers every candidate
 // session id this seat is associated with (sidecar, newest registry hook row, pane argument),
 // resolves each to its transcript, and selects the freshest-mtime one. Codex differs: the
 // pid-to-logs join reads the live process's OWN log rows, so it needs no selection.
@@ -70,7 +70,7 @@ function commandBasenameIs(name: string): (command: string) => boolean {
 /** The pane process's claude session-id LAUNCH ARGUMENT — one CANDIDATE, never the answer alone:
  *  measured on the live specimen, claude rolls session ids internally (the slice-13 lesson — the
  *  argument records what was LAUNCHED; hooks report what RUNS), so the argument can be the stale
- *  pointer while the sidecar is current. Feed it into selectLiveClaudeRecord with the others. */
+ *  pointer while the sidecar is current. Feed it into LiveClaudeRecordSelector with the others. */
 export async function paneClaudeSessionIdArgument(
   sessionTarget: string,
   deps: Pick<CurrentGenerationDeps, "getPanePid" | "listProcesses">,
@@ -105,77 +105,131 @@ export interface RecordStat {
   size: number;
 }
 
-/** Gap between the two advancement samples: long enough for a working seat to append, short enough
- *  to stay inside one monitor poll even across several claude seats. */
-export const ADVANCEMENT_PROBE_MS = 1_500;
+/** The CURRENT claude record via CROSS-POLL OBSERVED ADVANCEMENT (r2 rounds 2-4 on this family):
+ *  neither existence, nor recency, nor a 1.5s in-poll sample proves a record is being written —
+ *  the in-poll window forgot everything between polls and oscillated truth/indeterminate with
+ *  write timing (r2 round-4). This selector is STATEFUL per seat:
+ *  - an id is readable if ANY of its candidate paths stats (all paths retained per id — r2's
+ *    adjacent pin: a dead sidecar path must not mask a readable registry-derived one).
+ *  - an UNREADABLE contender with a different id → ALWAYS a named INDETERMINATE.
+ *  - exactly one readable id, no differing unreadable contender → that record (unanimity).
+ *  - multiple readable ids → advancement is observed ACROSS POLLS: current stats vs the previous
+ *    poll's cached stats (the full poll interval is the observation window, catching every
+ *    intervening write). Exactly one record advanced → selected and RETAINED until the candidate
+ *    id set changes; none/several advanced → named INDETERMINATE, re-observed next poll. The
+ *    first observation of a disagreeing set is INDETERMINATE by construction (nothing to compare
+ *    against yet — named as such). */
+export class LiveClaudeRecordSelector {
+  private readonly perSeat = new Map<string, {
+    idSetKey: string;
+    prevStats: Map<string, RecordStat>;
+    selected: { id: string; path: string; source: string } | null;
+  }>();
 
-/** The CURRENT claude record, FAIL-CLOSED (r2 rounds 2+3 on this family): neither existence nor
- *  RECENCY proves a record is being written — the old record can take its final write seconds
- *  before the new one becomes readable at exactly the handover boundary this hardening covers.
- *  Semantics:
- *  - candidates dedupe by id (an id is readable if ANY of its paths stats).
- *  - an UNREADABLE contender with a different id → ALWAYS a named INDETERMINATE (it might be the
- *    advancing one we cannot see; no readable evidence can outvote it).
- *  - exactly one readable id, no differing unreadable contender → that record (unanimity has
- *    nothing to disambiguate).
- *  - multiple readable ids → OBSERVED ADVANCEMENT across two samples: stat all, wait
- *    ADVANCEMENT_PROBE_MS, stat again; exactly ONE record advancing (size or mtime) wins. None
- *    advancing (idle seat) or several advancing → named INDETERMINATE — and the monitor's pending
- *    machinery re-probes every poll, so the ambiguity resolves the moment the live session writes. */
-export async function selectLiveClaudeRecord(
-  candidates: ClaudeRecordCandidate[],
-  statRecord: (path: string) => RecordStat | null,
-  opts?: { probeDelayMs?: number; sleep?: (ms: number) => Promise<void> },
-): Promise<ClaudeRecordSelection> {
-  const sleep = opts?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const probeDelayMs = opts?.probeDelayMs ?? ADVANCEMENT_PROBE_MS;
+  select(
+    seatKey: string,
+    candidates: ClaudeRecordCandidate[],
+    statRecord: (path: string) => RecordStat | null,
+  ): ClaudeRecordSelection {
+    // Dedupe by id, RETAINING every path offered for the id (first source labels it).
+    const byId = new Map<string, { source: string; paths: string[] }>();
+    for (const c of candidates) {
+      if (!c.id) continue;
+      const entry = byId.get(c.id) ?? { source: c.source, paths: [] };
+      if (c.path && !entry.paths.includes(c.path)) entry.paths.push(c.path);
+      byId.set(c.id, entry);
+    }
+    const readable: Array<{ id: string; path: string; source: string; stat: RecordStat }> = [];
+    const unreadable: string[] = [];
+    for (const [id, { source, paths }] of byId) {
+      let hit: { path: string; stat: RecordStat } | null = null;
+      for (const path of paths) {
+        const stat = statRecord(path);
+        if (stat) { hit = { path, stat }; break; }
+      }
+      if (hit) readable.push({ id, path: hit.path, source, stat: hit.stat });
+      else unreadable.push(`${source}:${id.slice(0, 8)}… (${paths.length ? "no file" : "no path"})`);
+    }
+    if (readable.length === 0) {
+      this.perSeat.delete(seatKey);
+      return { ok: false, reason: `no readable transcript for any candidate session (${unreadable.join(", ") || "no candidates"})` };
+    }
+    if (unreadable.length > 0) {
+      // ALWAYS indeterminate: the unreadable contender may be the current record before its first
+      // readable byte — confident stale truth here is the exact defect class.
+      this.rememberStats(seatKey, byIdKey(byId), readable);
+      return {
+        ok: false,
+        reason: `candidate sessions disagree and ${unreadable.length} contender(s) are unreadable (${unreadable.join(", ")}; readable: ${readable.map((r) => `${r.source}:${r.id.slice(0, 8)}…`).join(", ")}) — the unreadable one may be the record being written`,
+      };
+    }
+    if (readable.length === 1) {
+      const only = readable[0]!;
+      this.rememberSelection(seatKey, byIdKey(byId), readable, only);
+      return { ok: true, id: only.id, path: only.path, source: only.source };
+    }
 
-  const byId = new Map<string, { source: string; path: string | null }>();
-  for (const c of candidates) {
-    if (!c.id) continue;
-    const existing = byId.get(c.id);
-    if (!existing || (existing.path === null && c.path !== null)) byId.set(c.id, { source: c.source, path: c.path });
-  }
-  const readable: Array<{ id: string; path: string; source: string; first: RecordStat }> = [];
-  const unreadable: string[] = [];
-  for (const [id, { source, path }] of byId) {
-    const stat = path ? statRecord(path) : null;
-    if (path && stat) readable.push({ id, path, source, first: stat });
-    else unreadable.push(`${source}:${id.slice(0, 8)}… (${path ? "no file" : "no path"})`);
-  }
-  if (readable.length === 0) {
-    return { ok: false, reason: `no readable transcript for any candidate session (${unreadable.join(", ") || "no candidates"})` };
-  }
-  const readableIds = new Set(readable.map((r) => r.id));
-  if (unreadable.length > 0) {
-    // ALWAYS indeterminate: the unreadable contender may be the current record before its first
-    // readable byte — confident stale truth here is the exact defect class (r2 round-2 + round-3).
+    const idSetKey = byIdKey(byId);
+    const state = this.perSeat.get(seatKey);
+    if (state && state.idSetKey === idSetKey && state.selected && readable.some((r) => r.id === state.selected!.id)) {
+      // RETAIN the resolved generation until the candidate set changes (r2 round-4 remedy).
+      this.rememberStats(seatKey, idSetKey, readable, state.selected);
+      return { ok: true, ...state.selected };
+    }
+    const prev = state && state.idSetKey === idSetKey ? state.prevStats : null;
+    if (prev) {
+      const advanced = readable.filter((r) => {
+        const before = prev.get(r.id);
+        return before !== undefined && (before.size !== r.stat.size || before.mtimeMs !== r.stat.mtimeMs);
+      });
+      if (advanced.length === 1) {
+        const winner = advanced[0]!;
+        const selected = { id: winner.id, path: winner.path, source: winner.source };
+        this.rememberSelection(seatKey, idSetKey, readable, selected);
+        return { ok: true, ...selected };
+      }
+      this.rememberStats(seatKey, idSetKey, readable);
+      return {
+        ok: false,
+        reason:
+          `candidate sessions disagree (${readable.map((r) => `${r.source}:${r.id.slice(0, 8)}…`).join(", ")}) and ` +
+          (advanced.length === 0
+            ? "no record advanced since the previous poll — idle; re-observed next poll"
+            : `${advanced.length} records advanced since the previous poll — genuinely ambiguous`),
+      };
+    }
+    this.rememberStats(seatKey, idSetKey, readable);
     return {
       ok: false,
-      reason: `candidate sessions disagree and ${unreadable.length} contender(s) are unreadable (${unreadable.join(", ")}; readable: ${readable.map((r) => `${r.source}:${r.id.slice(0, 8)}…`).join(", ")}) — the unreadable one may be the record being written`,
+      reason: `candidate sessions disagree (${readable.map((r) => `${r.source}:${r.id.slice(0, 8)}…`).join(", ")}) — first observation of this candidate set; advancement compares from the next poll`,
     };
   }
-  if (readableIds.size === 1) {
-    const only = readable[0]!;
-    return { ok: true, id: only.id, path: only.path, source: only.source };
+
+  private rememberStats(
+    seatKey: string,
+    idSetKey: string,
+    readable: Array<{ id: string; stat: RecordStat }>,
+    selected: { id: string; path: string; source: string } | null = null,
+  ): void {
+    this.perSeat.set(seatKey, {
+      idSetKey,
+      prevStats: new Map(readable.map((r) => [r.id, r.stat])),
+      selected,
+    });
   }
-  await sleep(probeDelayMs);
-  const advanced = readable.filter((r) => {
-    const second = statRecord(r.path);
-    return second !== null && (second.size !== r.first.size || second.mtimeMs !== r.first.mtimeMs);
-  });
-  if (advanced.length === 1) {
-    const winner = advanced[0]!;
-    return { ok: true, id: winner.id, path: winner.path, source: winner.source };
+
+  private rememberSelection(
+    seatKey: string,
+    idSetKey: string,
+    readable: Array<{ id: string; stat: RecordStat }>,
+    selected: { id: string; path: string; source: string },
+  ): void {
+    this.rememberStats(seatKey, idSetKey, readable, selected);
   }
-  return {
-    ok: false,
-    reason:
-      `candidate sessions disagree (${readable.map((r) => `${r.source}:${r.id.slice(0, 8)}…`).join(", ")}) and ` +
-      (advanced.length === 0
-        ? `no record advanced during the ${probeDelayMs}ms probe — idle or between writes; re-probed next poll`
-        : `${advanced.length} records advanced simultaneously — genuinely ambiguous`),
-  };
+}
+
+function byIdKey(byId: Map<string, unknown>): string {
+  return [...byId.keys()].sort().join("|");
 }
 
 /** The live codex occupant's thread id, via its own pid's log join — bypasses the stored resume

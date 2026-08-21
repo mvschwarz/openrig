@@ -1721,7 +1721,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     {
       const { ModelDivergenceMonitor } = await import("./domain/model-divergence/model-divergence-monitor.js");
       const { readClaudeEffectiveModel, readCodexEffectiveModel } = await import("./domain/model-divergence/effective-model-readers.js");
-      const { paneClaudeSessionIdArgument, selectLiveClaudeRecord, resolveLiveCodexThreadId } = await import("./domain/model-divergence/current-generation-record.js");
+      const { paneClaudeSessionIdArgument, LiveClaudeRecordSelector, resolveLiveCodexThreadId } = await import("./domain/model-divergence/current-generation-record.js");
+      const liveClaudeRecordSelector = new LiveClaudeRecordSelector();
       const { defaultListProcesses } = await import("./domain/resume-metadata-refresher.js");
       const { readCodexThreadIdFromCandidateHomes, defaultResolveHomeDirByPid } = await import("./domain/codex-thread-id.js");
       const nodeOs = await import("node:os");
@@ -1773,9 +1774,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
             const tokenRow = db.prepare("SELECT resume_token FROM sessions WHERE node_id = ? AND session_name = ? ORDER BY id DESC LIMIT 1")
               .get(seat.nodeId, seat.sessionName) as { resume_token: string | null } | undefined;
             const paneArg = await paneClaudeSessionIdArgument(seat.sessionName, currentGenDeps);
-            const selection = await selectLiveClaudeRecord(
+            const selection = liveClaudeRecordSelector.select(
+              `${seat.nodeId}:${seat.generation ?? seat.sessionName}`,
               [
-                { source: "sidecar", id: usage.sessionId ?? "", path: usage.transcriptPath ?? pathFor(usage.sessionId) },
+                // every path variant rides per id — a dead sidecar path must not mask a readable
+                // derived one (r2 round-4 adjacent pin)
+                { source: "sidecar", id: usage.sessionId ?? "", path: usage.transcriptPath ?? null },
+                { source: "sidecar", id: usage.sessionId ?? "", path: pathFor(usage.sessionId) },
                 { source: "registry", id: tokenRow?.resume_token ?? "", path: pathFor(tokenRow?.resume_token) },
                 { source: "pane-argument", id: paneArg.ok ? paneArg.id : "", path: pathFor(paneArg.ok ? paneArg.id : null) },
               ],

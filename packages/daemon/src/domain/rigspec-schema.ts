@@ -25,6 +25,14 @@ import * as path from "node:path";
 // kinds against the SAME canonical set as a rigspec pod-local edge (no second,
 // looser edge input path).
 export const VALID_EDGE_KINDS = new Set(["delegates_to", "spawned_by", "can_observe", "collaborates_with", "escalates_to"]);
+
+/** SPEC-VALIDATION CAPABILITY REGISTRY (B8-family, r2-ruled expiry coupling). Behavioral sentinel,
+ *  not a filename: a validation feature that other code must react to REGISTERS itself here, and
+ *  consumers gate on the capability. Current contract (desk ruling 05:03Z): the 5.3
+ *  spec-validation ADVISORY, when it lands model-pin canonicalization, MUST add
+ *  "model-pin-canonicalization" — that single line mechanically kills the claude alias migration
+ *  bridge at runtime AND turns its pin test red until the bridge constant is deleted. */
+export const SPEC_VALIDATION_CAPABILITIES: ReadonlySet<string> = new Set([]);
 const VALID_SYNC_TRIGGERS = new Set(["pre_compaction", "pre_shutdown", "manual", "milestone"]);
 const VALID_RESTORE_POLICIES = new Set(["resume_if_possible", "relaunch_fresh", "checkpoint_only"]);
 const VALID_IMPORT_PREFIXES = ["local:", "path:"];

@@ -20,6 +20,8 @@
 // gateway contract lands — no shadow path. Every channel's delivery OUTCOME is recorded on the
 // proclamation event; an unreachable channel is a named failure/deferral, never a silence.
 
+import { SPEC_VALIDATION_CAPABILITIES } from "../rigspec-schema.js";
+
 export interface PinnedSeat {
   nodeId: string;
   sessionName: string;
@@ -235,17 +237,20 @@ export function modelsMatch(pinned: string, effective: string): boolean {
   const pin = pinned.trim().toLowerCase();
   const eff = effective.trim().toLowerCase();
   if (pin === eff) return true;
+  // The bridge is DEAD CODE the moment the 5.3 advisory registers its capability — runtime-gated
+  // on the behavioral sentinel, not on anyone remembering a comment (r2 round-4 HIGH-2).
+  if (SPEC_VALIDATION_CAPABILITIES.has("model-pin-canonicalization")) return false;
   return CLAUDE_ALIAS_MIGRATION_BRIDGE[pin] === eff;
 }
 
 /** MIGRATION BRIDGE (r2 addendum, desk-ruled 05:03Z) — provider-specific, ONE measured pair, with
- *  an EXECUTABLE expiry (r2 round-3: prose expiry is no expiry):
- *  - condition 2 (dormancy): fires only while a nodes.model row still carries the alias pin;
- *    canonical relaunches make it inert by data.
- *  - condition 1 (removal): the bridge's pin test is a TRIPWIRE — the moment a module matching
- *    *spec-validation-advisory* lands in packages/daemon/src (the 5.3 advisory, per the desk
- *    ruling's own name for it), the suite goes RED until this constant is emptied and deleted.
- *    5.3 implementers: name your advisory module accordingly, or this tripwire is your reminder. */
+ *  a BEHAVIORAL executable expiry (r2 round-4: a filename tripwire is not a coupling — the
+ *  advisory can land inside an existing validator file):
+ *  - condition 2 (dormancy): fires only while a nodes.model row still carries the alias pin.
+ *  - condition 1 (removal): gated at RUNTIME on rigspec-schema's SPEC_VALIDATION_CAPABILITIES —
+ *    when the 5.3 advisory registers "model-pin-canonicalization" there (its registry contract),
+ *    modelsMatch stops consulting this map in code, and the pin test goes RED until the constant
+ *    is deleted. The registry's own doc-comment carries the 5.3 obligation. */
 export const CLAUDE_ALIAS_MIGRATION_BRIDGE: Record<string, string> = {
   fable: "claude-fable-5",
 };
