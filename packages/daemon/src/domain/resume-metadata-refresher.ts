@@ -273,7 +273,10 @@ export class ResumeMetadataRefresher {
   }
 }
 
-async function defaultListProcesses(): Promise<Array<{ pid: number; ppid: number; command: string }>> {
+// Exported for unit test (B12-T): the REAL async sampling path — the anti-vacuity test drives
+// this default directly (every other suite injects sync stubs) and asserts the non-blocking
+// property that the pre-B12 sync implementation violated.
+export async function defaultListProcesses(): Promise<Array<{ pid: number; ppid: number; command: string }>> {
   try {
     const output = await runAsyncSite("resume_metadata.list_processes", async () => {
       const { stdout } = await execFileAsync("ps", ["-Ao", "pid,ppid,command"], { encoding: "utf-8", maxBuffer: 8 * 1024 * 1024 });
