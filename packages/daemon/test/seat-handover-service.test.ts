@@ -535,7 +535,7 @@ describe("SeatHandoverService", () => {
     const successorRow = db.prepare("SELECT tmux_pane FROM discovered_sessions WHERE tmux_session = ?").get("dev-impl@seat-rig") as { tmux_pane: string };
     expect(successorRow.tmux_pane).toBe("%9");
 
-    // Driver note 3: the restore packet (stopgap recap) is delivered to the successor in the PRESERVED
+    // Driver note 3: the restore packet (boot recap) is delivered to the successor in the PRESERVED
     // pane BEFORE the continuity-verify presence probe (never verify an un-restored seat).
     expect(sendText).toHaveBeenCalledTimes(1);
     const [target, packet] = sendText.mock.calls[0]!;
@@ -641,8 +641,8 @@ describe("SeatHandoverService", () => {
     expect(invalidateRetiringOccupant).not.toHaveBeenCalled();
   });
 
-  it("stopgap: threads the predecessor recap + record path into the delivered restore packet when a record resolves", async () => {
-    // The stopgap fires: resolve the predecessor's provider record → a bounded labeled-from-record recap
+  it("recap leg: threads the predecessor recap + record path into the delivered restore packet when a record resolves", async () => {
+    // The recap leg fires: resolve the predecessor's provider record → a bounded labeled-from-record recap
     // → threaded into the packet delivered to the successor (honest-degraded, never called "scrollback").
     seedSeat({ runtime: "codex" });
     resolvePredecessorRecap.mockReturnValue({
@@ -659,13 +659,13 @@ describe("SeatHandoverService", () => {
     expect(resolvePredecessorRecap).toHaveBeenCalledTimes(1);
     const [target, packet] = sendText.mock.calls[0]!;
     expect(target).toBe("dev-impl@seat-rig");
-    expect(packet).toContain("Recent exchanges (from record)");
+    expect(packet).toContain("Predecessor recap (replayed from record, not the live terminal)");
     expect(packet).toContain("user: finish the atom");
     expect(packet).toContain("/home/.claude/projects/x/abc.jsonl");
     expect(packet.toLowerCase()).toContain("honest-degraded");
   });
 
-  it("stopgap: omits the recap sections honestly when no predecessor record resolves (no fabrication)", async () => {
+  it("recap leg: omits the recap sections honestly when no predecessor record resolves (no fabrication)", async () => {
     seedSeat({ runtime: "codex" });
     resolvePredecessorRecap.mockReturnValue(null);
 
@@ -673,7 +673,7 @@ describe("SeatHandoverService", () => {
 
     expect(result.ok).toBe(true);
     const [, packet] = sendText.mock.calls[0]!;
-    expect(packet).not.toContain("Recent exchanges (from record)");
+    expect(packet).not.toContain("Predecessor recap (replayed from record");
     // the base packet still delivers the captured predecessor terminal.
     expect(packet).toContain("predecessor screen tail");
   });

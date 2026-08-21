@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseJsonlExchanges } from "../src/domain/session-jsonl.js";
 
-// Seat-handover stopgap (plan 411c43de): read the PROVIDER session JSONL (claude sidecar
+// Seat-handover boot recap: read the PROVIDER session JSONL (claude sidecar
 // transcript_path / codex rollout_path) into the last-N {role, content} exchanges for the boot recap.
 // Defensive / honest-degraded: metadata + thinking/tool_use-only lines carry no user text and are
 // skipped; unparseable lines are skipped (a corrupt tail never throws). Grounded on the real

@@ -50,7 +50,7 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
     // B2 — discovered-mode resume-token capture derive-helper deps.
     contextUsageStore: (c.get("contextUsageStore" as never) as import("../domain/resume-token-capture.js").ResumeTokenCaptureDeps["contextUsageStore"]) ?? undefined,
     resumeTokenCapturer: (c.get("resumeMetadataRefresher" as never) as import("../domain/resume-token-capture.js").ResumeTokenCaptureDeps["resumeTokenCapturer"]) ?? undefined,
-    // Stopgap (plan 411c43de) — wire the predecessor-recap resolver so the successor boot packet fires
+    // Wire the predecessor-recap resolver so the successor boot packet fires
     // with a bounded from-record recap. Reuses the full ContextUsageStore from context (readAndNormalize
     // = claude transcript_path; readCodexAndNormalize = codex rollout_path) + a resume-token lookup for
     // the codex thread id; parseJsonlExchanges is the resolver's default. Absent store → resolver omitted

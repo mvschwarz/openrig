@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { makePredecessorRecapResolver } from "../src/domain/predecessor-recap-resolver.js";
 
-// Production resolver for the seat-handover stopgap (plan 411c43de): given the departing seat's
+// Production resolver for the seat-handover boot recap (the permanent claude-runtime leg of
+// scrollback preservation): given the departing seat's
 // node/runtime/session, resolve its provider record path (claude transcript_path / codex rollout_path)
 // and parse the last N exchanges. Pure + injected deps → unit-testable without a live daemon.
 
@@ -69,6 +70,42 @@ describe("makePredecessorRecapResolver", () => {
 
     expect(resolve({ nodeId: "n", runtime: "claude-code", sessionName: "s" })).toBeNull();
     expect(parseExchanges).not.toHaveBeenCalled();
+  });
+
+  it("bounds each exchange's content at maxCharsPerExchange with a visible truncation marker", () => {
+    const long = "x".repeat(800);
+    const resolve = makePredecessorRecapResolver({
+      readClaudeTranscriptPath: () => "/p/abc.jsonl",
+      readCodexTranscriptPath: () => null,
+      lookupResumeToken: () => null,
+      parseExchanges: () => [
+        { role: "user", content: "short" },
+        { role: "assistant", content: long },
+      ],
+      maxCharsPerExchange: 100,
+    });
+
+    const out = resolve({ nodeId: "n", runtime: "claude-code", sessionName: "s" });
+
+    expect(out!.recap[0]).toEqual({ role: "user", content: "short" });
+    expect(out!.recap[1]!.content).toHaveLength(100 + "… [truncated; full text in the predecessor record]".length);
+    expect(out!.recap[1]!.content.startsWith("x".repeat(100))).toBe(true);
+    expect(out!.recap[1]!.content).toContain("[truncated; full text in the predecessor record]");
+  });
+
+  it("caps per-exchange content at 500 chars by default (a pasted-file exchange must not flood the successor pane)", () => {
+    const resolve = makePredecessorRecapResolver({
+      readClaudeTranscriptPath: () => "/p/abc.jsonl",
+      readCodexTranscriptPath: () => null,
+      lookupResumeToken: () => null,
+      parseExchanges: () => [{ role: "user", content: "y".repeat(10_000) }],
+    });
+
+    const out = resolve({ nodeId: "n", runtime: "claude-code", sessionName: "s" });
+
+    expect(out!.recap[0]!.content.startsWith("y".repeat(500))).toBe(true);
+    expect(out!.recap[0]!.content).toContain("[truncated; full text in the predecessor record]");
+    expect(out!.recap[0]!.content.length).toBeLessThan(600);
   });
 
   it("returns null when the record resolves but yields zero exchanges (no fabrication)", () => {

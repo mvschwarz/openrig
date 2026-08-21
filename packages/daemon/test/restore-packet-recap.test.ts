@@ -1,10 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { buildRestorePacket } from "../src/domain/seat-handover-service.js";
 
-// Seat-handover stopgap (plan 411c43de, addendum): the successor boot packet gains a bounded
-// LABELED-FROM-RECORD recap of the last few predecessor exchanges (from the provider JSONL) + a
-// receipt line naming the predecessor record path, labeled honest-degraded. Never called "scrollback"
-// (the cutover's respawn-pane owns real scrollback; this is the zero-product stopgap that ships first).
+// The successor boot packet carries a bounded LABELED-FROM-RECORD recap of the last few predecessor
+// exchanges (from the provider JSONL) + a receipt line naming the predecessor record path, labeled
+// honest-degraded. The recap is the permanent claude-runtime leg of scrollback preservation
+// (alternate-screen seats keep no native scrollback); it is never called "scrollback" — the label
+// must make replay unmistakable.
 
 const base = {
   seatRef: "dev.driver@my-rig",
@@ -14,8 +15,8 @@ const base = {
   capturedContext: "",
 };
 
-describe("buildRestorePacket — stopgap recap + receipt (labeled-from-record)", () => {
-  it("renders the bounded recap from the predecessor exchanges, labeled from-record (not scrollback)", () => {
+describe("buildRestorePacket — recap + receipt (labeled-from-record)", () => {
+  it("renders the bounded recap from the predecessor exchanges, labeled replayed-from-record (not scrollback)", () => {
     const packet = buildRestorePacket({
       ...base,
       recap: [
@@ -24,21 +25,23 @@ describe("buildRestorePacket — stopgap recap + receipt (labeled-from-record)",
       ],
       recordPath: "/home/.claude/projects/x/abc.jsonl",
     });
-    expect(packet).toContain("Recent exchanges (from record)");
+    expect(packet).toContain("Predecessor recap (replayed from record, not the live terminal)");
     expect(packet).not.toContain("scrollback");
     expect(packet).toContain("user: finish the atom");
     expect(packet).toContain("assistant: atom finished; handing over");
   });
 
-  it("renders the receipt line naming the predecessor record path, labeled honest-degraded", () => {
+  it("renders the receipt line naming the predecessor record path, labeled honest-degraded (durable, grep-able, not human-scrollable)", () => {
     const packet = buildRestorePacket({ ...base, recap: [{ role: "user", content: "x" }], recordPath: "/p/abc.jsonl" });
-    expect(packet).toContain("/p/abc.jsonl");
+    expect(packet).toContain("Predecessor record: /p/abc.jsonl");
     expect(packet.toLowerCase()).toContain("honest-degraded");
+    expect(packet).toContain("not human-scrollable");
   });
 
   it("omits the recap/receipt sections honestly when no record is available (no fabrication)", () => {
     const packet = buildRestorePacket({ ...base, recap: [], recordPath: null });
-    expect(packet).not.toContain("Recent exchanges (from record)");
+    expect(packet).not.toContain("Predecessor recap (replayed from record");
+    expect(packet).not.toContain("Predecessor record:");
     // the base packet (seat/reason/predecessor/handover) still renders
     expect(packet).toContain("Seat: dev.driver@my-rig");
   });
@@ -46,6 +49,6 @@ describe("buildRestorePacket — stopgap recap + receipt (labeled-from-record)",
   it("stays backward-compatible when recap/recordPath are omitted entirely", () => {
     const packet = buildRestorePacket(base);
     expect(packet).toContain("Seat: dev.driver@my-rig");
-    expect(packet).not.toContain("Recent exchanges (from record)");
+    expect(packet).not.toContain("Predecessor recap (replayed from record");
   });
 });

@@ -1,4 +1,4 @@
-// Seat-handover stopgap (plan 411c43de) — the shared provider-JSONL role/content reader. Reads a
+// Seat-handover boot recap — the shared provider-JSONL role/content reader. Reads a
 // KNOWN provider session-transcript path (claude sidecar `transcript_path` / codex `rollout_path`)
 // into the last-N {role, content} exchanges for the successor's boot recap. DEFENSIVE / honest-degraded
 // by contract: metadata lines, thinking/tool_use-only messages, and unparseable lines carry no user

@@ -18,8 +18,10 @@ import type { PersistedEvent } from "./types.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 
-/** Stopgap: a bounded labeled-from-record recap of the predecessor's last exchanges + the record path,
- *  resolved from the predecessor's provider transcript (claude transcript_path / codex rollout_path). */
+/** A bounded labeled-from-record recap of the predecessor's last exchanges + the record path,
+ *  resolved from the predecessor's provider transcript (claude transcript_path / codex rollout_path).
+ *  The permanent claude-runtime leg of scrollback preservation (alternate-screen seats keep no
+ *  native scrollback); renders on codex seats too, where native scrollback is the money proof. */
 export interface PredecessorRecap {
   recap: JsonlExchange[];
   recordPath: string;
@@ -138,10 +140,11 @@ interface SeatHandoverServiceDeps {
    */
   occupantInvalidator?: OccupantInvalidator;
   /**
-   * Stopgap (plan 411c43de) — resolves the predecessor's bounded from-record recap for the successor
-   * boot packet (claude transcript_path / codex rollout_path → parseJsonlExchanges). Optional: absent →
-   * the recap sections are omitted honestly (the money-proof is the preserved scrollback; this is the
-   * labeled fallback). Wired in production to ContextUsageStore + parseJsonlExchanges.
+   * Resolves the predecessor's bounded from-record recap for the successor boot packet (claude
+   * transcript_path / codex rollout_path → parseJsonlExchanges). Optional: absent → the recap
+   * sections are omitted honestly. The recap is the permanent claude-runtime leg of scrollback
+   * preservation (alternate-screen seats keep no native scrollback); on codex seats the preserved
+   * native scrollback is the money proof. Wired in production to ContextUsageStore + parseJsonlExchanges.
    */
   predecessorRecapResolver?: PredecessorRecapResolver;
 }
@@ -359,9 +362,9 @@ export class SeatHandoverService {
     //    discovered is operator-prepared and needs no delivery.
     let contextDelivered = false;
     if (parsed.source.mode === "fresh") {
-      // Stopgap: resolve the predecessor's bounded from-record recap (claude transcript_path / codex
+      // Resolve the predecessor's bounded from-record recap (claude transcript_path / codex
       // rollout_path → parseJsonlExchanges) so the successor boots with a labeled recap. Absent →
-      // the recap sections are omitted honestly (the preserved scrollback is the money-proof).
+      // the recap sections are omitted honestly.
       const predecessorRecap = this.predecessorRecapResolver?.({
         nodeId: node.id,
         runtime: node.runtime,
@@ -614,7 +617,7 @@ export class SeatHandoverService {
       reason: string;
       departingSession: string;
       capturedContext: string;
-      /** Stopgap: the predecessor's bounded from-record recap + record path (omitted when unresolved). */
+      /** The predecessor's bounded from-record recap + record path (omitted when unresolved). */
       recap?: JsonlExchange[];
       recordPath?: string;
     },
@@ -880,19 +883,23 @@ export class SeatHandoverService {
 }
 
 /** Assemble the restore packet delivered to a fresh successor: seat identity + handover reason +
- *  predecessor session + the captured predecessor terminal, and (stopgap, plan 411c43de) a bounded
- *  LABELED-FROM-RECORD recap of the last few predecessor exchanges + a receipt line naming the
- *  predecessor record path (honest-degraded). Never called "scrollback" — the cutover's respawn-pane
- *  owns real scrollback; this is the zero-product stopgap that ships first. Exported for unit test. */
+ *  predecessor session + the captured predecessor terminal, and a bounded LABELED-FROM-RECORD recap
+ *  of the last few predecessor exchanges + a receipt line naming the predecessor record path
+ *  (honest-degraded). The recap is the permanent claude-runtime leg of scrollback preservation —
+ *  claude-code seats run in the tmux alternate screen, which keeps no scrollback buffer, so no
+ *  successor pane can natively scroll into the predecessor conversation there; the cutover's
+ *  respawn-pane owns native scrollback on codex seats. Never called "scrollback": the label must
+ *  make replay unmistakable, because passing a replayed recap off as native history is the one
+ *  thing the requirement cannot survive. Exported for unit test. */
 export function buildRestorePacket(info: {
   seatRef: string;
   reason: string;
   departingSession: string;
   handoverAt: string;
   capturedContext: string;
-  /** Stopgap: the last few predecessor exchanges read from the provider JSONL (parseJsonlExchanges). */
+  /** The last few predecessor exchanges read from the provider JSONL, bounded on count and per-exchange length. */
   recap?: Array<{ role: string; content: string }>;
-  /** Stopgap: the predecessor provider record path (claude transcript_path / codex rollout_path). */
+  /** The predecessor provider record path (claude transcript_path / codex rollout_path). */
   recordPath?: string | null;
 }): string {
   const captured = info.capturedContext.trim();
@@ -906,16 +913,16 @@ export function buildRestorePacket(info: {
     "--- Predecessor terminal (captured) ---",
     captured.length > 0 ? captured : "(no capture available)",
   ];
-  // Stopgap: the from-record recap + receipt, ONLY when a record is actually available (no
-  // fabrication — an absent record simply omits the sections).
+  // The from-record recap + receipt, ONLY when a record is actually available (no fabrication —
+  // an absent record simply omits the sections).
   if (info.recap && info.recap.length > 0 && info.recordPath) {
     lines.push(
       "",
-      "--- Recent exchanges (from record) ---",
+      "--- Predecessor recap (replayed from record, not the live terminal) ---",
       ...info.recap.map((e) => `${e.role}: ${e.content}`),
       "",
       `Predecessor record: ${info.recordPath}`,
-      "  (honest-degraded: a bounded recap read from the predecessor's provider transcript, not the live terminal)",
+      "  (honest-degraded: durable, true, and grep-able — not human-scrollable; the recap above is replayed from it)",
     );
   }
   return lines.join("\n");
