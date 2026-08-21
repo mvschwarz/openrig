@@ -11,6 +11,7 @@ import {
   listRigsInKernelFirstOrder,
   aggregateFleetRollup,
   deriveFleetVerdict,
+  attentionRowsFromNodes,
   type PerRigOutcome,
   type ConductorRigResult,
 } from "../src/domain/crash-cart-conductor.js";
@@ -124,6 +125,26 @@ describe("createDefaultRestoreRig — composes findLatestRestoreUsable + restore
     const r = await restoreRig("alpha");
     expect(r.outcome).toBe("failed");
   });
+
+  it("surfaces per-rig attention (triage rows) from the restore result's nodes", async () => {
+    const restoreRig = createDefaultRestoreRig({
+      findLatestRestoreUsable: () => ({ id: "snap-x" }),
+      restore: async () => ({
+        ok: true,
+        result: {
+          rigResult: "partially_restored",
+          nodes: [
+            { logicalId: "dev.guard", status: "attention_required", attentionEvidence: "pick a conversation" },
+            { logicalId: "dev.driver", status: "resumed" },
+          ],
+        },
+      }),
+    });
+    const r = await restoreRig("myrig");
+    expect(r.attention).toEqual([
+      { rigId: "myrig", seat: "dev.guard", need: "live runtime prompt — pick a conversation" },
+    ]);
+  });
 });
 
 describe("listRigsInKernelFirstOrder (R2 — kernel supervisor first)", () => {
@@ -166,11 +187,16 @@ describe("aggregateFleetRollup + deriveFleetVerdict (R6 / ARCH-RULING Q2 — pur
     expect((rollup as Record<string, unknown>)["verdict"]).toBeUndefined(); // verdict is derived, not stored
   });
 
-  it("attention_required is the passed union (a view over per-rig attention)", () => {
-    const attention = [{ rigId: "alpha", seat: "dev.driver", need: "codex auth" }];
-    const rollup = aggregateFleetRollup(seq, attention);
-    expect(rollup.attention_required).toEqual(attention);
-    expect(aggregateFleetRollup(seq).attention_required).toEqual([]); // default empty
+  it("attention_required is the UNION of per-rig triage rows carried in the sequence", () => {
+    const seqWithAttention: ConductorRigResult[] = [
+      { rigId: "kernel", outcome: "fully_restored" },
+      { rigId: "alpha", outcome: "failed", attention: [{ rigId: "alpha", seat: "dev.driver", need: "codex auth" }] },
+      { rigId: "beta", outcome: "not_attempted" },
+    ];
+    expect(aggregateFleetRollup(seqWithAttention).attention_required).toEqual([
+      { rigId: "alpha", seat: "dev.driver", need: "codex auth" },
+    ]);
+    expect(aggregateFleetRollup(seq).attention_required).toEqual([]); // no per-rig attention → empty
   });
 
   it("deriveFleetVerdict is f(counts): all→all_fully_restored, all-failed→all_failed, all-not_attempted→none_attempted, mix→mixed", () => {
@@ -179,5 +205,25 @@ describe("aggregateFleetRollup + deriveFleetVerdict (R6 / ARCH-RULING Q2 — pur
     expect(deriveFleetVerdict({ fully_restored: 0, partially_restored: 0, failed: 0, not_attempted: 2 })).toBe("none_attempted");
     expect(deriveFleetVerdict(aggregateFleetRollup(seq).counts)).toBe("mixed");
     expect(deriveFleetVerdict({ fully_restored: 0, partially_restored: 0, failed: 0, not_attempted: 0 })).toBe("none_attempted");
+  });
+});
+
+describe("attentionRowsFromNodes (R5 — triage: seat + exact need)", () => {
+  it("maps attention_required / awaiting-decision / failed nodes to triage rows; running nodes are excluded", () => {
+    const rows = attentionRowsFromNodes("kernel", [
+      { logicalId: "dev.driver", status: "resumed" }, // running — no triage
+      { logicalId: "dev.guard", status: "attention_required", attentionEvidence: "select a conversation to resume" },
+      { logicalId: "dev.qa", status: "awaiting-decision" },
+      { logicalId: "orch.lead", status: "failed", error: "spawn ENOENT" },
+    ]);
+    expect(rows.map((r) => r.seat)).toEqual(["dev.guard", "dev.qa", "orch.lead"]);
+    expect(rows.find((r) => r.seat === "dev.guard")!.need).toContain("select a conversation");
+    expect(rows.find((r) => r.seat === "dev.qa")!.need).toContain("choose");
+    expect(rows.find((r) => r.seat === "orch.lead")!.need).toContain("spawn ENOENT");
+    expect(rows.every((r) => r.rigId === "kernel")).toBe(true);
+  });
+
+  it("no attention-needing nodes → empty (never fabricated)", () => {
+    expect(attentionRowsFromNodes("r", [{ logicalId: "a", status: "resumed" }, { logicalId: "b", status: "fresh-primed" }])).toEqual([]);
   });
 });

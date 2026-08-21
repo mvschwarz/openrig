@@ -19,6 +19,9 @@ export interface ConductorRigResult {
   rigId: string;
   outcome: PerRigOutcome;
   receiptRef?: string | number;
+  /** Per-rig triage rows (seats needing operator action) — the fleet
+   *  attention_required is the UNION of these across the sequence. */
+  attention?: AttentionRow[];
 }
 
 export interface RestoreConductorDeps {
@@ -27,7 +30,7 @@ export interface RestoreConductorDeps {
   /** Restore ONE rig. Default (wired at the route) = findLatestRestoreUsable(rigId) →
    *  RestoreOrchestrator.restore(snapshotId) → rollupRestoreRigResult; a rig with no
    *  usable snapshot returns `not_attempted` (never a silent older/partial substitute). */
-  restoreRig: (rigId: string) => Promise<{ outcome: PerRigOutcome; receiptRef?: string | number }>;
+  restoreRig: (rigId: string) => Promise<{ outcome: PerRigOutcome; receiptRef?: string | number; attention?: AttentionRow[] }>;
   /** Cancel signal, polled at each rig BOUNDARY (stop-before-next-rig). Optional. */
   isCancelled?: () => boolean;
 }
@@ -50,7 +53,7 @@ export class RestoreConductor {
       }
       try {
         const r = await this.deps.restoreRig(rig.rigId);
-        results.push({ rigId: rig.rigId, outcome: r.outcome, receiptRef: r.receiptRef });
+        results.push({ rigId: rig.rigId, outcome: r.outcome, receiptRef: r.receiptRef, attention: r.attention });
       } catch {
         // Best-effort continue: one rig's failure never halts the fleet.
         results.push({ rigId: rig.rigId, outcome: "failed" });
@@ -71,7 +74,7 @@ export interface RestoreRigDeps {
   restore: (
     snapshotId: string,
     opts?: { onAttemptStarted?: (attemptId: number) => void },
-  ) => Promise<{ ok: boolean; result?: { rigResult: PerRigOutcome } }>;
+  ) => Promise<{ ok: boolean; result?: { rigResult: PerRigOutcome; nodes?: RestoreNodeLite[] } }>;
 }
 
 /** Build the default `restoreRig` dep: COMPOSE findLatestRestoreUsable → restore →
@@ -93,7 +96,10 @@ export function createDefaultRestoreRig(
     // fail → `not_attempted`) → its rigResult; ok:false with no result (a hard failure:
     // snapshot/rig not found, rig not stopped, restore in progress) → `failed`.
     const outcomeResult: PerRigOutcome = outcome.result?.rigResult ?? "failed";
-    return { outcome: outcomeResult, receiptRef };
+    // Triage rows for this rig's seats that need operator action (from the restore
+    // result's nodes) — the shipped per-rig attention, unioned at the fleet layer.
+    const attention = outcome.result?.nodes ? attentionRowsFromNodes(rigId, outcome.result.nodes) : [];
+    return { outcome: outcomeResult, receiptRef, attention };
   };
 }
 
@@ -139,10 +145,43 @@ export interface FleetRollup {
 /** The fleet verdict is a DERIVED function of the counts — never a stored field. */
 export type FleetVerdict = "all_fully_restored" | "all_failed" | "none_attempted" | "mixed";
 
-export function aggregateFleetRollup(
-  sequence: ConductorRigResult[],
-  attention: AttentionRow[] = [],
-): FleetRollup {
+/** A restore node (structural subset of the shipped RestoreNodeResult) — enough to
+ *  build a triage row from the seats that need operator action. */
+export interface RestoreNodeLite {
+  logicalId: string;
+  status: string;
+  error?: string;
+  attentionEvidence?: string | null;
+}
+
+/** R5 — map a rig's restore nodes → triage rows: the seats needing operator action
+ *  (a LIVE runtime prompt, an unresumable session, or a hard failure), each with its
+ *  EXACT need. Running/resumed nodes are excluded. Never fabricates a need. */
+export function attentionRowsFromNodes(rigId: string, nodes: RestoreNodeLite[]): AttentionRow[] {
+  const rows: AttentionRow[] = [];
+  for (const n of nodes) {
+    if (n.status === "attention_required") {
+      rows.push({
+        rigId,
+        seat: n.logicalId,
+        need: n.attentionEvidence
+          ? `live runtime prompt — ${n.attentionEvidence}`
+          : "live runtime prompt (resume selection / auth) — needs operator",
+      });
+    } else if (n.status === "awaiting-decision") {
+      rows.push({
+        rigId,
+        seat: n.logicalId,
+        need: "original session not resumable and no --fresh — choose fresh-prime or skip",
+      });
+    } else if (n.status === "failed") {
+      rows.push({ rigId, seat: n.logicalId, need: n.error ? `restore failed: ${n.error}` : "restore failed" });
+    }
+  }
+  return rows;
+}
+
+export function aggregateFleetRollup(sequence: ConductorRigResult[]): FleetRollup {
   // All four closed-union keys initialized — `not_attempted` is first-class, never
   // absent and never folded into `failed`.
   const counts: Record<PerRigOutcome, number> = {
@@ -152,7 +191,9 @@ export function aggregateFleetRollup(
     not_attempted: 0,
   };
   for (const r of sequence) counts[r.outcome] += 1;
-  return { counts, sequence, attention_required: attention };
+  // attention_required = the UNION of per-rig triage rows carried in the sequence (a view).
+  const attention_required = sequence.flatMap((r) => r.attention ?? []);
+  return { counts, sequence, attention_required };
 }
 
 /** DERIVED f(counts) — computed, never stored (a stored verdict could drift). */
