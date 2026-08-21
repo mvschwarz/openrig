@@ -37,27 +37,27 @@ command -v docker >/dev/null || { echo "BLOCKER: docker not on PATH"; exit 1; }
 
 The operator runs the runner in container-mode by supplying the step-3 `daemon` spawner + `imageId`.
 This wiring composes only already-tested helpers (`spawnContainerDaemon`, `runScenarioFile`,
-`withImageId`); the only new-at-runtime piece is the REAL `docker` invoker (the container analogue of
-`runRig`'s `node <rigBin>`). Run it host-side with the tsx loader:
+`withImageId`, `makeRealStagingDocker`). The REAL `docker` invoker is a COMMITTED helper, imported —
+never re-inlined here. (The prior inline `execFile` invoker predated the `stdinFrom` tar-pipe
+contract and ignored it, leaving the in-container `tar -xf -` an open never-fed stdin: the 08-12
+seven-minute extraction hang, row 42576855. The committed helper feeds the pipe, checks BOTH exits,
+and bounds every step with a timeout so a stall is a NAMED failure — proven hermetically in
+`test/staging-docker-invoker.test.ts`. That proof covers the invoker only; live containment on a
+real engine still rides THIS leg.) Run it host-side with the tsx loader:
 
 ```bash
 node --import tsx - "$IMAGE" "$(jq -r .manifestDigest dist/testbed-image/manifest.json)" <<'RUN' | tee "${EVID}/L6-container.txt"
-import { execFile } from "node:child_process";
 import { resolve } from "node:path";
 import { runScenarioFile } from "./packages/daemon/test/helpers/scenario-pipeline.ts";
 import { spawnContainerDaemon } from "./packages/daemon/test/helpers/scenario-container.ts";
+import { makeRealStagingDocker } from "./packages/daemon/test/helpers/staging-docker-invoker.ts";
 
 const [image, imageId] = process.argv.slice(2);
 const RIG_BIN = resolve("packages/cli/dist/bin-wrapper.js");
 const SCENARIO = resolve("packages/daemon/test/fixtures/scenarios"); // pick one committed scenario file below
 
-// The REAL docker invoker — mirrors runRig: never rejects, returns the exit code.
-const docker = (args) => new Promise((res) => {
-  execFile("docker", args, { maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) => {
-    const code = err && typeof err.code === "number" ? err.code : err ? 1 : 0;
-    res({ stdout: stdout ?? "", stderr: stderr ?? "", code });
-  });
-});
+// The committed real invoker: two-process tar pipe, dual-exit check, per-step timeout.
+const docker = makeRealStagingDocker();
 
 // Container-mode: inject the ScenarioDaemon-shaped container adapter + the manifest id.
 const daemon = (scaffold /*, opts */) => spawnContainerDaemon(scaffold, { image, docker });
