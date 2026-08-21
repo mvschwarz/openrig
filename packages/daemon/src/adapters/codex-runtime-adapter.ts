@@ -2,7 +2,8 @@ import nodePath from "node:path";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import Database from "better-sqlite3";
 import type { TmuxAdapter } from "./tmux.js";
 import { codexPostureArg } from "./yolo-mode.js";
@@ -26,7 +27,9 @@ import { assessNativeResumeProbe, buildCodexResumeCore, type NativeResumeProbeRe
 import { mergeManagedBlock } from "../domain/managed-blocks.js";
 import { parseSessionName } from "../domain/session-name.js";
 import { shellQuote } from "./shell-quote.js";
-import { runSyncSite } from "../domain/sync-site-wrap.js";
+import { runSyncSite, runAsyncSite } from "../domain/sync-site-wrap.js";
+
+const execFileAsync = promisify(execFile);
 
 export interface CodexAdapterFsOps {
   readFile(path: string): string;
@@ -49,7 +52,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   readonly runtime = "codex";
   private tmux: TmuxAdapter;
   private fs: CodexAdapterFsOps;
-  private listProcesses: () => Array<{ pid: number; ppid: number; command: string }>;
+  private listProcesses: () => Array<{ pid: number; ppid: number; command: string }> | Promise<Array<{ pid: number; ppid: number; command: string }>>;
   private readThreadIdByPid: (pid: number) => string | undefined;
   private sleep: (ms: number) => Promise<void>;
   private resolveHomeDirByPid: ResolveHomeDirByPid;
@@ -70,7 +73,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   constructor(deps: {
     tmux: TmuxAdapter;
     fsOps: CodexAdapterFsOps;
-    listProcesses?: () => Array<{ pid: number; ppid: number; command: string }>;
+    listProcesses?: () => Array<{ pid: number; ppid: number; command: string }> | Promise<Array<{ pid: number; ppid: number; command: string }>>;
     readThreadIdByPid?: (pid: number) => string | undefined;
     resolveHomeDirByPid?: ResolveHomeDirByPid;
     sleep?: (ms: number) => Promise<void>;
@@ -696,7 +699,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     for (let attempt = 0; attempt < 20; attempt++) {
       const shellPid = await this.tmux.getPanePid(target);
       if (shellPid) {
-        const codexPids = this.findCodexDescendantPids(shellPid);
+        const codexPids = await this.findCodexDescendantPids(shellPid);
         for (const codexPid of codexPids) {
           const threadId = this.readThreadIdByPid(codexPid);
           if (threadId) return threadId;
@@ -813,8 +816,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     };
   }
 
-  private findCodexDescendantPids(parentPid: number): number[] {
-    const processes = this.listProcesses();
+  private async findCodexDescendantPids(parentPid: number): Promise<number[]> {
+    const processes = await this.listProcesses();
     return findCodexDescendantPids(processes, parentPid);
   }
 
@@ -1207,11 +1210,12 @@ async function defaultProfilePreflight(profile: string): Promise<CodexProfilePro
   return verifyCodexProfileLoads(profile, execFn);
 }
 
-function defaultListProcesses(): Array<{ pid: number; ppid: number; command: string }> {
+async function defaultListProcesses(): Promise<Array<{ pid: number; ppid: number; command: string }>> {
   try {
-    const output = runSyncSite("codex.runtime.list_processes", () =>
-      execFileSync("ps", ["-Ao", "pid,ppid,command"], { encoding: "utf-8" })
-    );
+    const output = await runAsyncSite("codex.runtime.list_processes", async () => {
+      const { stdout } = await execFileAsync("ps", ["-Ao", "pid,ppid,command"], { encoding: "utf-8", maxBuffer: 8 * 1024 * 1024 });
+      return stdout;
+    });
     return output
       .split("\n")
       .slice(1)

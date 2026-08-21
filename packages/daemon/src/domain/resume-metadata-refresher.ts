@@ -1,6 +1,7 @@
 import os from "node:os";
 import nodePath from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import {
@@ -13,7 +14,9 @@ import {
   buildNativeResumeCommand,
   isProbeShellReady,
 } from "./native-resume-probe.js";
-import { runSyncSite } from "./sync-site-wrap.js";
+import { runAsyncSite } from "./sync-site-wrap.js";
+
+const execFileAsync = promisify(execFile);
 
 export interface ResumeRefreshSession {
   sessionId: string;
@@ -27,7 +30,7 @@ export interface ResumeRefreshSession {
 interface ResumeMetadataRefresherDeps {
   sessionRegistry: SessionRegistry;
   tmuxAdapter: TmuxAdapter;
-  listProcesses?: () => Array<{ pid: number; ppid: number; command: string }>;
+  listProcesses?: () => Array<{ pid: number; ppid: number; command: string }> | Promise<Array<{ pid: number; ppid: number; command: string }>>;
   readCodexThreadIdByPid?: (pid: number) => string | undefined;
   probeClaudeResume?: (sessionName: string, resumeToken: string, cwd?: string | null) => Promise<"resumable" | "not_resumable" | "inconclusive">;
   resolveHomeDirByPid?: ResolveHomeDirByPid;
@@ -45,7 +48,7 @@ interface ResumeMetadataRefresherDeps {
 export class ResumeMetadataRefresher {
   private sessionRegistry: SessionRegistry;
   private tmuxAdapter: TmuxAdapter;
-  private listProcesses: () => Array<{ pid: number; ppid: number; command: string }>;
+  private listProcesses: () => Array<{ pid: number; ppid: number; command: string }> | Promise<Array<{ pid: number; ppid: number; command: string }>>;
   private readCodexThreadIdByPid: (pid: number) => string | undefined;
   private probeClaudeResume: (sessionName: string, resumeToken: string, cwd?: string | null) => Promise<"resumable" | "not_resumable" | "inconclusive">;
   private resolveHomeDirByPid: ResolveHomeDirByPid;
@@ -181,7 +184,7 @@ export class ResumeMetadataRefresher {
     for (let attempt = 0; attempt < 8; attempt++) {
       const shellPid = await this.tmuxAdapter.getPanePid(sessionTarget);
       if (shellPid) {
-        const codexPids = findCodexDescendantPids(this.listProcesses(), shellPid);
+        const codexPids = findCodexDescendantPids(await this.listProcesses(), shellPid);
         for (const codexPid of codexPids) {
           const threadId = this.readCodexThreadIdByPid(codexPid);
           if (threadId) return threadId;
@@ -270,11 +273,12 @@ export class ResumeMetadataRefresher {
   }
 }
 
-function defaultListProcesses(): Array<{ pid: number; ppid: number; command: string }> {
+async function defaultListProcesses(): Promise<Array<{ pid: number; ppid: number; command: string }>> {
   try {
-    const output = runSyncSite("resume_metadata.list_processes", () =>
-      execFileSync("ps", ["-Ao", "pid,ppid,command"], { encoding: "utf-8" })
-    );
+    const output = await runAsyncSite("resume_metadata.list_processes", async () => {
+      const { stdout } = await execFileAsync("ps", ["-Ao", "pid,ppid,command"], { encoding: "utf-8", maxBuffer: 8 * 1024 * 1024 });
+      return stdout;
+    });
     return output
       .split("\n")
       .slice(1)
