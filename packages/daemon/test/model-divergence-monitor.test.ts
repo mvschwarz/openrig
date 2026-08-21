@@ -7,6 +7,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   ModelDivergenceMonitor,
   SLACK_DEFERRAL_LINE,
+  PENDING_VISIBILITY_POLLS,
   modelsMatch,
   formatProclamation,
   type PinnedSeat,
@@ -117,6 +118,29 @@ describe("ModelDivergenceMonitor — the cause-agnostic comparison", () => {
     expect(fired).toHaveLength(1);
     expect(sent.length).toBeGreaterThan(0);
     expect(warn).toHaveBeenCalled();
+  });
+
+  it("r1 finding — OBSERVABLE PENDING: a pinned seat with no signal is named ONCE as unchecked after the threshold, never skipped silently forever", async () => {
+    const warn = vi.fn();
+    const { monitor } = makeMonitor({ readEffectiveModel: () => null, warn });
+    for (let i = 0; i < PENDING_VISIBILITY_POLLS + 5; i++) await monitor.checkOnce();
+    const unchecked = warn.mock.calls.filter((c) => String(c[0]).includes("UNCHECKED"));
+    expect(unchecked).toHaveLength(1); // named once, not spammed
+    expect(String(unchecked[0]![0])).toContain("dev-impl@r");
+    expect(String(unchecked[0]![0])).toContain("gpt-5.1-codex-mini");
+    expect(monitor.pendingSeats()).toHaveLength(1);
+    expect(monitor.pendingSeats()[0]!.polls).toBe(PENDING_VISIBILITY_POLLS + 5);
+  });
+
+  it("a late-arriving signal clears the pending state and settles normally", async () => {
+    let effective: string | null = null;
+    const { monitor, recorded } = makeMonitor({ readEffectiveModel: () => effective });
+    await monitor.checkOnce();
+    expect(monitor.pendingSeats()).toHaveLength(1);
+    effective = "gpt-5.1-codex-mini";
+    await monitor.checkOnce();
+    expect(monitor.pendingSeats()).toHaveLength(0);
+    expect(recorded).toHaveLength(0); // match — settled
   });
 
   it("no pin = no detector involvement at all", async () => {

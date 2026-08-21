@@ -74,6 +74,9 @@ export interface ModelDivergenceMonitorDeps {
 
 export const SLACK_DEFERRAL_LINE = "human-via-Slack: deferred: M1 not landed";
 
+/** Polls a pinned generation may stay signal-less before it is loudly named as unchecked. */
+export const PENDING_VISIBILITY_POLLS = 10;
+
 export function formatProclamation(p: Omit<ModelDivergenceProclamation, "channels">): string {
   return [
     `MODEL DIVERGENCE on ${p.sessionName}: pinned=${p.pinnedModel} effective=${p.effectiveModel}`,
@@ -86,6 +89,11 @@ export function formatProclamation(p: Omit<ModelDivergenceProclamation, "channel
 export class ModelDivergenceMonitor {
   /** Generations already given their one verdict (match or proclaimed divergence). */
   private readonly settled = new Set<string>();
+  /** r1 B8 finding — OBSERVABLE PENDING: consecutive no-signal polls per generation. Detection
+   *  silence is the failure class one layer under channel silence: a seat whose effective model
+   *  never reads must be VISIBLE as never-checked, not skipped by a bare continue forever. */
+  private readonly pendingPolls = new Map<string, number>();
+  private readonly pendingWarned = new Set<string>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly warn: (message: string) => void;
 
@@ -106,6 +114,12 @@ export class ModelDivergenceMonitor {
     this.timer = null;
   }
 
+  /** Pinned generations currently pending (no effective read yet) with their poll counts — the
+   *  observable face of detection-pending (tests + any future status surface). */
+  pendingSeats(): Array<{ key: string; polls: number }> {
+    return [...this.pendingPolls.entries()].map(([key, polls]) => ({ key, polls }));
+  }
+
   /** One pass over the pinned population. Returns the proclamations fired this pass (for tests). */
   async checkOnce(): Promise<ModelDivergenceProclamation[]> {
     const fired: ModelDivergenceProclamation[] = [];
@@ -113,7 +127,24 @@ export class ModelDivergenceMonitor {
       const key = `${seat.nodeId}:${seat.generation ?? seat.sessionName}`;
       if (this.settled.has(key)) continue;
       const effective = this.deps.readEffectiveModel(seat);
-      if (effective === null) continue; // signal not yet available — PENDING, never assumed
+      if (effective === null) {
+        // PENDING, never assumed — and never invisible: past the threshold this generation is
+        // named ONCE as never-checked (r1 measured real codex rollouts whose signal sat outside
+        // the bounded read; without this line such a seat would be skipped silently forever).
+        const polls = (this.pendingPolls.get(key) ?? 0) + 1;
+        this.pendingPolls.set(key, polls);
+        if (polls >= PENDING_VISIBILITY_POLLS && !this.pendingWarned.has(key)) {
+          this.pendingWarned.add(key);
+          this.warn(
+            `[model-divergence] ${seat.sessionName} (pin ${seat.pinnedModel}) has NO effective-model ` +
+            `read after ${polls} polls — this seat is pinned but UNCHECKED (signal absent from the ` +
+            `bounded record read, or runtime ${seat.runtime ?? "unknown"} has no reader). ` +
+            `A divergence here would currently be invisible.`,
+          );
+        }
+        continue;
+      }
+      this.pendingPolls.delete(key);
       if (modelsMatch(seat.pinnedModel, effective)) {
         this.settled.add(key);
         continue;

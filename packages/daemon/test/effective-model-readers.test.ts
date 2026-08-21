@@ -72,6 +72,30 @@ describe("readCodexEffectiveModel", () => {
     const p = tmp("r.jsonl", JSON.stringify({ type: "turn_context", payload: {} }) + "\n");
     expect(readCodexEffectiveModel(p)).toBeNull();
   });
+
+  it("r1 finding: a SPARSE world_state deep in a large rollout is found by the backward scan (r1 measured 0.80MB from EOF on a live 65.9MB rollout)", () => {
+    const p = tmp("r.jsonl", "");
+    appendFileSync(p, codexWorldState("gpt-5.6-luna") + "\n");
+    // ~1.5MB of post-signal noise — the signal sits ~3 tail-windows from EOF.
+    for (let i = 0; i < 1500; i++) appendFileSync(p, JSON.stringify({ type: "event_msg", filler: "x".repeat(1000) }) + "\n");
+    expect(readCodexEffectiveModel(p)).toBe("gpt-5.6-luna");
+  });
+
+  it("the backward scan is CAPPED: a signal beyond maxScanBytes reads null (bounded, named unknown — never a stall)", () => {
+    const p = tmp("r.jsonl", "");
+    appendFileSync(p, codexWorldState("gpt-5.6-luna") + "\n");
+    for (let i = 0; i < 2000; i++) appendFileSync(p, JSON.stringify({ type: "event_msg", filler: "x".repeat(1000) }) + "\n");
+    expect(readCodexEffectiveModel(p, 1024 * 1024)).toBeNull(); // 1MB cap; signal ~2MB deep
+  });
+
+  it("a record STRADDLING a window boundary is still read (the overlap step)", () => {
+    const p = tmp("r.jsonl", "");
+    // Fill so the world_state record crosses the 512KB boundary from EOF: pad, signal, pad-to-cross.
+    for (let i = 0; i < 500; i++) appendFileSync(p, JSON.stringify({ type: "event_msg", filler: "x".repeat(1000) }) + "\n");
+    appendFileSync(p, codexWorldState("gpt-5.6-luna") + "\n");
+    for (let i = 0; i < 520; i++) appendFileSync(p, JSON.stringify({ type: "event_msg", filler: "x".repeat(1000) }) + "\n");
+    expect(readCodexEffectiveModel(p)).toBe("gpt-5.6-luna");
+  });
 });
 
 describe("readTailLines", () => {
