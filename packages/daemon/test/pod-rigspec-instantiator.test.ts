@@ -333,20 +333,32 @@ profiles:
     expect(content).not.toContain("full stop on new production");
   });
 
-  it("openrig-start.md asset exists on disk", () => {
+  it("openrig-start.md asset exists on disk and guards the thin-overlay contract", () => {
     const { existsSync, readFileSync } = require("node:fs");
     const { resolve } = require("node:path");
     const assetPath = resolve(import.meta.dirname, "../src/domain/../../assets/guidance/openrig-start.md");
     expect(existsSync(assetPath)).toBe(true);
     const content = readFileSync(assetPath, "utf8");
-    expect(content).toContain("thin bootstrap overlay");
-    expect(content).toContain("openrig-skills");
-    expect(content).toContain("~/.claude/skills/openrig-skills/SKILL.md");
-    expect(content).toContain("~/.agents/skills/openrig-skills/SKILL.md");
-    expect(content).toContain("openrig-user");
-    expect(content).toContain("current project or workspace");
-    expect(content).toContain("usually sees it under `.claude/skills/openrig-user/SKILL.md`");
-    expect(content).toContain("usually sees it under `.agents/skills/openrig-user/SKILL.md`");
+    // The thin overlay's positive guarantees: identity first, the two peer verbs,
+    // the thin-transcript warning (guards a live per-runtime recording condition),
+    // and an explicit ask-don't-infer close.
+    expect(content).toContain("rig whoami --json");
+    expect(content).toContain("rig send");
+    expect(content).toContain("rig capture");
+    // (wrap-safe fragments: the source is hard-wrapped markdown)
+    expect(content).toContain("transcript capture is unreliable");
+    expect(content).toContain("mean the session was quiet");
+    expect(content).toContain("say so rather than inferring");
+    // The founder-ruled walk-back, pinned as absences: no operating-model SDLC and
+    // no skill-library routing may ride the default boot overlay (they are opt-in
+    // layers, delivered by profile/startup config, never hardcoded here).
+    expect(content).not.toContain("mission-slice-sop");
+    expect(content).not.toContain("plan-lock");
+    expect(content).not.toContain("openrig-user");
+    expect(content).not.toContain("openrig-skills");
+    // Thin means thin: a hard ceiling so accretion back toward the 3.6KB pre-trim
+    // overlay fails loudly instead of silently.
+    expect(content.length).toBeLessThan(2500);
   });
 
   // T4: partial failure — one node startup fails, other succeeds

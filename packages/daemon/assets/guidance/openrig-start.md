@@ -1,82 +1,39 @@
 # OpenRig Start
 
-You are running inside an OpenRig-managed topology.
+You are running inside an OpenRig-managed topology — a persistent team of agents in separate
+terminals, each with a name and a role, talking to each other directly.
 
-This file is the thin bootstrap overlay, not the full OpenRig manual.
-Use it to recover identity, communicate, and regain context after launch or compaction.
+**This file is deliberately thin.** Its only job is to get you your identity. It is not an
+orientation, and it cannot tell you what your rig is for or what you are supposed to be doing.
 
-When you are unsure which packaged skill applies, start with the global `openrig-skills` index. It routes to every shipped skill in one hop:
-
-- Claude Code: `~/.claude/skills/openrig-skills/SKILL.md`
-- Codex: `~/.agents/skills/openrig-skills/SKILL.md`
-
-For the full OpenRig command surface, load the packaged `openrig-user` skill now.
-If your runtime supports skills, use that mechanism.
-If it does not auto-load skills reliably, read the packaged copy directly from your current project or workspace:
-
-- Claude Code usually sees it under `.claude/skills/openrig-user/SKILL.md`
-- Codex usually sees it under `.agents/skills/openrig-user/SKILL.md`
-
-That skill covers the broader surface, including chatroom, discovery, adopt/bind/attach, lifecycle, specs, bundles, and richer operator workflows.
-
-Your per-session startup guidance also names the process skills for your role and pod.
-Load AND invoke those now, before proceeding with any work, using your runtime's supported skill mechanism.
-This shared overlay is only the common bootstrap floor, not the full operating manual for your seat.
-
-## Working missions and slices (the SDLC)
-
-If your seat works missions or slices, load the packaged `mission-slice-sop` skill BEFORE authoring or building — it teaches the flow the Living Notes UI projects: intent → mini-requirements + proof contract (→ mockups for UI slices) → plan-lock (`rig scope slice approve --scope spec`) → build the locked set → QA visual compare → `rig proof add … --media` drops (the C1 drop verb — never hand-place proof files) → proof-lock (`--scope delivery`).
-
-The conventions themselves (section names, proof-contract format, the two locks, C1 proof headers) live in ONE shipped document: `docs/reference/sdlc-conventions.md` in the repo, materialized at `$OPENRIG_HOME/reference/sdlc-conventions.md` (default `~/.openrig/reference/sdlc-conventions.md`) on an installed package. `rig scope slice create` scaffolds the convention sections for every template kind; `rig scope audit` is the advisory backstop — it records and advises, it never blocks your work.
-
-## Identity
-
-Run this first after launch or compaction to recover your identity:
+## Identity — run this first
 
 ```bash
 rig whoami --json
 ```
 
-This returns your rig, pod, member, peers, edges, and transcript path. Treat it as ground truth.
+Returns your rig, pod, member, peers, edges, and transcript path. **Treat it as ground truth.**
+A startup overlay can be stale; this one is small precisely so it has less room to be wrong.
 
-## Communication
+Run it again after any compaction, restart or restore — **before** concluding anything about
+where you are or what you were doing. And if a predecessor's transcript looks thin or empty,
+know that transcript capture is unreliable on some runtimes — **little or no output does not
+mean the session was quiet.**
 
-Send a message to a peer:
+## Reaching a peer
+
 ```bash
-rig send <session> "message" --verify
+rig send <session> "message"     # types into their terminal and presses enter
+rig capture <session>            # reads what is on their screen
 ```
 
-Read a peer's terminal output:
-```bash
-rig capture <session>
-```
+The session name is the address. `rig --help` lists the rest of the surface.
 
-Broadcast to all peers in your rig:
-```bash
-rig broadcast --rig <name> "message"
-```
+## What this file is not
 
-## Secondary Transcript Check
+It is not the manual, and these commands are a fraction of what is available.
 
-After compaction, recover work from durable artifacts first: the restore map,
-current `MISSION_NOTES.md`, and your owned queue items. Transcript output is a
-secondary check and may be unavailable or incomplete for some runtimes. Little
-or no output does not mean the session was quiet.
-
-Read recent transcript output:
-```bash
-rig transcript <session> --tail 100
-```
-
-Search transcripts for specific content:
-```bash
-rig transcript <session> --grep "pattern"
-```
-
-## After Compaction
-
-If you lose context, run `rig whoami --json` immediately. It tells you who you
-are, who your peers are, and how to reach them. Rebuild the work from the
-restore map, current `MISSION_NOTES.md`, and your owned queue items. Use
-`rig transcript` only as a secondary check; if it returns little or nothing,
-do not conclude that the session was quiet.
+**If nobody has walked you through this system, say so rather than inferring it.** What your rig
+is for, how work moves here, and what you are allowed to do are not in this file and are not
+guessable from it — and guessing your way into a rig is how an agent builds the wrong thing
+correctly.
