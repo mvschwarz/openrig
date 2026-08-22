@@ -1,8 +1,14 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, chmodSync, existsSync, rmSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, chmodSync, existsSync, rmSync, statSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { TranscriptStore } from "../src/domain/transcript-store.js";
+import {
+  startTranscriptRotation,
+  stopTranscriptRotation,
+  clearAllTranscriptRotationsForTest,
+} from "../src/domain/transcript-rotation.js";
+import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
 describe("TranscriptStore", () => {
   let tmpDir: string;
@@ -558,5 +564,96 @@ describe("TranscriptStore", () => {
       expect(result![0]).toBe("MARKER_LINE_10000");
       expect(result![3]).toBe("MARKER_LINE_40000");
     });
+  });
+});
+
+// Hotfix addendum (r1 finding on candidate 753591407): the unchanged-content
+// write-suppression freezes the transcript file mtime on an idle seat, so a
+// health signal that reads mtime would falsely report capture_stale while
+// capture is running fine every tick. getIngestHealth must read the rotation's
+// in-memory last-capture time (mtime fallback only when no rotation records it).
+describe("TranscriptStore.getIngestHealth — liveness decoupled from mtime", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "transcript-health-"));
+  });
+  afterEach(() => {
+    clearAllTranscriptRotationsForTest();
+    if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("reports capture_fresh for an idle seat whose write was suppressed but capture is still live", async () => {
+    const store = new TranscriptStore({ transcriptsRoot: tmpDir, staleAfterMs: 1000 });
+    const rig = "hrig";
+    const session = "dev@hrig";
+    store.ensureTranscriptDir(rig);
+    const outputPath = store.getTranscriptPath(rig, session);
+    const adapter = { capturePaneContent: vi.fn(async () => "static-pane\n") };
+
+    // Tick 1: writes the file and records liveness.
+    startTranscriptRotation(adapter as unknown as TmuxAdapter, session, outputPath, {
+      lines: 1000,
+      pollIntervalMs: 60_000,
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(existsSync(outputPath)).toBe(true);
+
+    // Age the FILE mtime well past staleAfterMs (deterministic — no sleep).
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(outputPath, old, old);
+
+    // Tick 2: identical capture -> write SUPPRESSED (mtime stays 60s old),
+    // but liveness is refreshed to ~now.
+    startTranscriptRotation(adapter as unknown as TmuxAdapter, session, outputPath, {
+      lines: 1000,
+      pollIntervalMs: 60_000,
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // The file mtime is stale ...
+    expect(Date.now() - statSync(outputPath).mtimeMs).toBeGreaterThan(1000);
+    // ... but capture is live, so health reads the in-memory time, not mtime.
+    const health = store.getIngestHealth(rig, session);
+    expect(health.reason).toBe("capture_fresh");
+    expect(health.state).toBe("live");
+
+    stopTranscriptRotation(session);
+  });
+
+  it("falls back to mtime (capture_stale) when no rotation is recording for the session", () => {
+    const store = new TranscriptStore({ transcriptsRoot: tmpDir, staleAfterMs: 1000 });
+    const rig = "hrig";
+    const session = "orphan@hrig";
+    store.ensureTranscriptDir(rig);
+    const outputPath = store.getTranscriptPath(rig, session);
+    writeFileSync(outputPath, "left-behind\n");
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(outputPath, old, old);
+
+    // No rotation ever recorded this session -> getLastCaptureAt undefined -> mtime.
+    const health = store.getIngestHealth(rig, session);
+    expect(health.reason).toBe("capture_stale");
+    expect(health.state).toBe("degraded");
+  });
+
+  it("still reports capture_stale once rotation has STOPPED (liveness record dropped)", async () => {
+    const store = new TranscriptStore({ transcriptsRoot: tmpDir, staleAfterMs: 1000 });
+    const rig = "hrig";
+    const session = "gone@hrig";
+    store.ensureTranscriptDir(rig);
+    const outputPath = store.getTranscriptPath(rig, session);
+    const adapter = { capturePaneContent: vi.fn(async () => "content\n") };
+    startTranscriptRotation(adapter as unknown as TmuxAdapter, session, outputPath, {
+      lines: 1000,
+      pollIntervalMs: 60_000,
+    });
+    await new Promise((r) => setImmediate(r));
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(outputPath, old, old);
+    stopTranscriptRotation(session); // liveness record dropped -> mtime fallback
+
+    const health = store.getIngestHealth(rig, session);
+    expect(health.reason).toBe("capture_stale");
   });
 });

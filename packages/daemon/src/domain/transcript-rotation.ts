@@ -48,6 +48,21 @@ function parsePositiveInt(raw: string | undefined, fallback: number): number {
 
 const activeTimers = new Map<string, NodeJS.Timeout>();
 
+// Liveness decoupled from the file mtime. Every SUCCESSFUL capture records a
+// timestamp here, whether or not the tick actually rewrote the file. The
+// unchanged-content guard freezes the file mtime on an idle seat whose pane is
+// static, so a health signal that read mtime would falsely report the seat's
+// capture as stale within staleAfterMs; getIngestHealth reads THIS instead
+// (with an mtime fallback). Keyed by sessionName, symmetric with activeTimers.
+const lastCaptureAtBySession = new Map<string, number>();
+
+/** Last successful capture time (epoch ms) for a session, or undefined if no
+ *  rotation has captured for it in this process. getIngestHealth reads this so
+ *  ingest liveness is decoupled from the (write-suppressed) file mtime. */
+export function getLastCaptureAt(sessionName: string): number | undefined {
+  return lastCaptureAtBySession.get(sessionName);
+}
+
 /** Start a per-session capture-pane rotation timer. Idempotent: a
  *  second start for the same session replaces the first timer. The
  *  first tick fires immediately so the transcript file is populated
@@ -64,6 +79,11 @@ export function startTranscriptRotation(
     try {
       const content = await tmuxAdapter.capturePaneContent(sessionName, opts.lines);
       if (content === null) return;
+
+      // Record liveness on every successful capture, BEFORE the unchanged-content
+      // guard's early return — so an idle (suppressed-write) seat still reports a
+      // fresh capture time to getIngestHealth even though its file mtime is frozen.
+      lastCaptureAtBySession.set(sessionName, Date.now());
 
       // Preserve SESSION BOUNDARY lines that the restore orchestrator
       // writes to the transcript file before launch. The capture-pane
@@ -121,6 +141,9 @@ export function stopTranscriptRotation(sessionName: string): void {
     clearInterval(timer);
     activeTimers.delete(sessionName);
   }
+  // Drop the liveness record: once rotation stops, capture really has stopped,
+  // so getIngestHealth should fall back to mtime (which correctly reads stale).
+  lastCaptureAtBySession.delete(sessionName);
 }
 
 /** Test-only: count of active rotators. Production code should not
@@ -134,4 +157,5 @@ export function getActiveRotationCount(): number {
 export function clearAllTranscriptRotationsForTest(): void {
   for (const timer of activeTimers.values()) clearInterval(timer);
   activeTimers.clear();
+  lastCaptureAtBySession.clear();
 }

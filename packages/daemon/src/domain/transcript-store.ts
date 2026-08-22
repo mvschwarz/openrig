@@ -2,6 +2,7 @@ import { mkdirSync, appendFileSync, existsSync, openSync, readSync, closeSync, s
 import { join, dirname } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
+import { getLastCaptureAt } from "./transcript-rotation.js";
 
 export interface TranscriptStoreOpts {
   transcriptsRoot?: string;
@@ -211,11 +212,17 @@ export class TranscriptStore {
         return { state: "unavailable", reason: "capture_missing", lastCapturedAt: null };
       }
       const stat = statSync(filePath);
-      const lastCapturedAt = stat.mtime.toISOString();
+      // Liveness is decoupled from the file mtime: the unchanged-content guard in
+      // transcript rotation freezes mtime on an idle seat whose pane is static,
+      // even though capture is still running every tick. Prefer the in-memory
+      // last-capture timestamp; fall back to mtime when no rotation record exists
+      // for this session (adopted sessions, or before this process's first tick).
+      const lastCaptureMs = getLastCaptureAt(sessionName) ?? stat.mtimeMs;
+      const lastCapturedAt = new Date(lastCaptureMs).toISOString();
       if (stat.size === 0) {
         return { state: "degraded", reason: "capture_empty", lastCapturedAt };
       }
-      if (Date.now() - stat.mtimeMs > this.staleAfterMs) {
+      if (Date.now() - lastCaptureMs > this.staleAfterMs) {
         return { state: "degraded", reason: "capture_stale", lastCapturedAt };
       }
       return { state: "live", reason: "capture_fresh", lastCapturedAt };
