@@ -6,6 +6,7 @@ import type { RuntimeAdapter, NodeBinding, ReadinessResult } from "./runtime-ada
 import { isAttentionRequiredReadinessCode } from "./runtime-adapter.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
+import { isShellForeground } from "./shell-classifier.js";
 
 /**
  * OPR.0.4.3.04 — the explicit successor-creation seam for the seat-handover
@@ -219,7 +220,7 @@ export class SuccessorSessionLauncher {
     // or a loud refusal — never a launch driven into a resumed harness that then gets committed as a
     // fresh successor. One bounded retry absorbs the shell's spawn latency. On failure the seat is
     // preserved (unwind invariant: never killSession) and no discovery candidate exists yet.
-    const blank = await this.verifyPaneIsBlankShell(pane.id);
+    const blank = await this.verifyPaneIsBlankShell(pane.id, blankShell);
     if (!blank.ok) {
       return {
         ok: false,
@@ -415,14 +416,17 @@ export class SuccessorSessionLauncher {
   }
 
   /** KI-14: is the respawned pane's foreground a bare shell? A non-shell here means the pane booted
-   *  a baked-in command (the resumed-old-context defect) or the respawn was ignored. One bounded
-   *  retry absorbs shell spawn latency; a null probe counts as unverified (refuse, never assume). */
-  private async verifyPaneIsBlankShell(paneId: string): Promise<{ ok: true } | { ok: false; observed: string | null }> {
+   *  a baked-in command (the resumed-old-context defect) or the respawn was ignored. Classification
+   *  is the shared shell-classifier PLUS the basename of the shell this launcher itself selected
+   *  (r2-B1: a configured tcsh/csh — or any configured default shell — is a valid blank; a
+   *  hard-coded set here false-refused AFTER the destructive cutover). One bounded retry absorbs
+   *  shell spawn latency; a null probe counts as unverified (refuse, never assume). */
+  private async verifyPaneIsBlankShell(paneId: string, expectedShell: string): Promise<{ ok: true } | { ok: false; observed: string | null }> {
     let observed = await this.tmuxAdapter.getPaneCommand(paneId);
-    if (observed && SHELL_BASENAMES.has(observed)) return { ok: true };
+    if (observed && isShellForeground(observed, expectedShell)) return { ok: true };
     await this.sleep(this.exitPollMs);
     observed = await this.tmuxAdapter.getPaneCommand(paneId);
-    if (observed && SHELL_BASENAMES.has(observed)) return { ok: true };
+    if (observed && isShellForeground(observed, expectedShell)) return { ok: true };
     return { ok: false, observed };
   }
 
@@ -447,11 +451,6 @@ export class SuccessorSessionLauncher {
     if (discoveredId) this.discoveryRepo.markVanished([discoveredId]);
   }
 }
-
-/** KI-14: foreground commands that count as a blank shell after the fresh respawn
- *  (pane_current_command reports the basename). Mirrors the shell set the codex resume
- *  verifier uses, minus tmux (a nested tmux is not a blank successor shell). */
-const SHELL_BASENAMES = new Set(["bash", "zsh", "sh", "fish", "nu", "dash", "ksh"]);
 
 function compactEnv(input: Record<string, string | undefined>): Record<string, string> {
   const result: Record<string, string> = {};
