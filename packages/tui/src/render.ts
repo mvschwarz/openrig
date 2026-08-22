@@ -12,7 +12,7 @@ import { navigatorDisplay } from "./navigator.js";
 import { renderGraphStyle } from "./topology/render-graph.js";
 import { buildPulseModel } from "./pulse/pulse-model.js";
 import { renderPulseView, pulseLaneTargets } from "./pulse/render-pulse.js";
-import { renderCrashCartView, renderUnverifiedView, renderRestoreLifecycleView } from "./crash-cart/render-crash-cart.js";
+import { renderCrashCartView, renderUnverifiedView, renderRestoreLifecycleView, renderConfirmBanner } from "./crash-cart/render-crash-cart.js";
 import type { RestoreLifecycleVM } from "./crash-cart/restore-lifecycle.js";
 import { buildLedgerExplorer } from "./crash-cart/ledger-explorer.js";
 import type { CrashCartModel } from "./crash-cart/crash-cart-model.js";
@@ -706,6 +706,9 @@ export interface RenderOptions {
   /** B1 ROUND 3 (HIGH-2) — vertical scroll offset into the restore content, so a triage list longer
    *  than the viewport stays keyboard-walkable (the shell reports contentMaxOffset for clamping). */
   restoreScroll?: number;
+  /** B1 ROUND 10 — the ⏎ confirm banner text (non-zero-generation restore). Rendered IN the cockpit so
+   *  the confirm is visible where the operator looks (ViewState.notice is not shown in the cockpit). */
+  confirm?: string;
 }
 
 /** replace ONE character at a plain-text position inside a token-segment row
@@ -1052,7 +1055,12 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   }
   if (options.daemonState === "down" && options.crashCart) {
     const led = buildLedgerExplorer(options.crashCart.foundOnHost);
-    return crashCartShell(renderCrashCartView(options.crashCart), led, "CRASH-CART", cols, rows, inputLine);
+    // B1 ROUND 10 — when a confirm is armed, render it at the TOP of the cockpit (where the operator
+    // looks) so the first ⏎ is visibly acknowledged; wrap so the sentence is not clipped at the pane edge.
+    const content = options.confirm
+      ? [...renderConfirmBanner(options.confirm), ...renderCrashCartView(options.crashCart)]
+      : renderCrashCartView(options.crashCart);
+    return crashCartShell(content, led, "CRASH-CART", cols, rows, inputLine, options.confirm ? { wrap: true } : undefined);
   }
   if (options.daemonState === "unverified" && options.daemonEvidence) {
     const led = buildLedgerExplorer([]); // no rigs listed when we cannot verify — honest empty ledger

@@ -23,6 +23,10 @@ export interface CrashCartRenderOpts {
    *  when done). Set by main.ts as the operator-owned lifecycle polls; takes precedence over the
    *  cockpit while present, so the operator sees progress and the triage list rather than a bare refresh. */
   restore?: RestoreLifecycleVM;
+  /** B1 ROUND 10 — the ⏎ confirm banner (non-zero-generation restore). Rendered IN the cockpit where the
+   *  operator looks; ViewState.notice is NOT rendered in the daemon-down cockpit, so the confirm was
+   *  invisible (first ⏎ appeared to do nothing). Present ⇔ pendingRestoreConfirm. */
+  confirm?: string;
 }
 
 /** Verdict → render opts. DOWN+discovery → cockpit; UNVERIFIED+evidence → cannot-verify; else (UP, or

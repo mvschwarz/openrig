@@ -242,6 +242,18 @@ export function renderRestoreLifecycleView(vm: RestoreLifecycleVM): Line[] {
   return out;
 }
 
+/** B1 ROUND 10 — the ⏎ confirm banner, rendered at the TOP of the cockpit so the operator SEES the
+ *  confirmation where they look. The first ⏎ used to be invisible because the confirm went to
+ *  ViewState.notice, which the daemon-down cockpit does not render. The message already names the deltas
+ *  and the ⏎-proceed / Esc-cancel affordance. */
+export function renderConfirmBanner(message: string): Line[] {
+  return [
+    line([{ text: "⚠ CONFIRM RESTORE", token: "warn", bold: true }]),
+    line([{ text: message, token: "bright" }]),
+    { text: "" },
+  ];
+}
+
 /** The UNVERIFIED screen (planner+PM ruling): a minimal DISTINCT view — evidence VERBATIM + retry +
  *  quit + the rig-status hint, and ZERO recovery actions (never the cockpit, never RESTORE). */
 export function renderUnverifiedView(evidence: DaemonUnverifiedEvidence): Line[] {

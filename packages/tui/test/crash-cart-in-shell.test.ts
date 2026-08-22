@@ -146,6 +146,26 @@ describe("renderScreen — restore triage is KEYBOARD-WALKABLE beyond the viewpo
   });
 });
 
+// B1 ROUND 10 (gap 1) — the ⏎ confirm must be VISIBLE in the cockpit (not only in ViewState.notice,
+// which the daemon-down cockpit does not render — the first ⏎ used to appear to do nothing).
+describe("renderScreen daemon-down — the ⏎ confirm banner renders IN the cockpit", () => {
+  const confirm = "⏎ RESTORE: openrig-pm (6/13) have seats that can't resume — they'll need a decision (fresh-prime or skip) in the triage list. Press ⏎ to proceed, Esc to cancel.";
+  it("shows the confirm banner + the proceed/cancel affordance where the operator looks", () => {
+    const screen = renderScreen(view.get(), snap, { cols: 120, rows: 32, daemonState: "down", crashCart: demoCrashCartModel(), confirm });
+    const body = screen.lines.join("\n");
+    expect(body).toContain("CONFIRM RESTORE");
+    expect(body).toContain("can't resume");
+    expect(body).toContain("proceed"); // ⏎ proceed advertised in the cockpit
+    expect(body).toContain("cancel"); // Esc cancel advertised in the cockpit
+  });
+  it("without a confirm, the cockpit shows no confirm banner (RESTORE EVERYTHING is the primary action)", () => {
+    const screen = renderScreen(view.get(), snap, { cols: 120, rows: 32, daemonState: "down", crashCart: demoCrashCartModel() });
+    const body = screen.lines.join("\n");
+    expect(body).not.toContain("CONFIRM RESTORE");
+    expect(body).toContain("RESTORE EVERYTHING");
+  });
+});
+
 describe("renderScreen daemon-down — UNVERIFIED in-shell (explorer present, no restore)", () => {
   const screen = renderScreen(view.get(), snap, {
     cols: 120,

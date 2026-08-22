@@ -182,8 +182,13 @@ async function run(): Promise<void> {
       });
       pendingRestoreConfirm = true;
       // Truthful (r2 HIGH-2): describe the awaiting-decision the restore actually produces — never a
-      // fresh-prime the parameterless restore does not request.
-      view.dispatch({ type: "notice", message: restoreConfirmMessage(gate.deltas) });
+      // fresh-prime the parameterless restore does not request. ROUND 10: render it IN the cockpit
+      // (crashCartOpts.confirm) — ViewState.notice is not shown in the daemon-down cockpit, so the
+      // first ⏎ used to appear to do nothing. The notice is kept as a belt for non-cockpit contexts.
+      const confirmMsg = restoreConfirmMessage(gate.deltas);
+      crashCartOpts = { ...crashCartOpts, confirm: confirmMsg };
+      view.dispatch({ type: "notice", message: confirmMsg });
+      draw();
       return;
     }
     if (action === "retry") void refreshCrashCart();
@@ -353,9 +358,11 @@ async function run(): Promise<void> {
         inputLine = inputLine.slice(0, -1);
       } else if (ev.type === "key" && ev.key === "escape") {
         if (pendingRestoreConfirm) {
-          // H2 — cancel the armed restore confirm (no fresh-prime happens).
+          // H2 — cancel the armed restore confirm (no fresh-prime happens). Clear the cockpit banner.
           pendingRestoreConfirm = false;
+          crashCartOpts = { ...crashCartOpts, confirm: undefined };
           view.dispatch({ type: "notice", message: "restore cancelled" });
+          draw();
         }
         inputLine = "";
       } else if (ev.type === "key" && ev.key === "enter") {
@@ -363,8 +370,9 @@ async function run(): Promise<void> {
           perform(parseCommand(inputLine, view.get().sections));
           inputLine = "";
         } else if (pendingRestoreConfirm) {
-          // H2 — the operator confirmed the non-zero-generation restore: proceed (fresh-prime the deltas).
+          // H2 — the operator confirmed the non-zero-generation restore: proceed. Clear the cockpit banner.
           pendingRestoreConfirm = false;
+          crashCartOpts = { ...crashCartOpts, confirm: undefined };
           runFleetRestore();
         } else if (crashCartOpts.daemonState) {
           // 5.2 crash-cart: ⏎ is the cockpit primary action (RESTORE EVERYTHING) when daemon-down.
