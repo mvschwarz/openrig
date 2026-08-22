@@ -292,6 +292,28 @@ describe("AMENDMENT 2 — per-rig LIVE/DEAD-panes branch in createDefaultRestore
     for (const row of r.attention ?? []) expect(row.need).toContain("No usable snapshot");
   });
 
+  it("r1 LOW: an adopt-FAILED seat the launcher proves alreadyRunning is RUNNING — the stale failed node is dropped, triage never names a running seat", async () => {
+    const restoreRig = createDefaultRestoreRig(restoreDeps(), {
+      probeLiveSessions: async () => [
+        { sessionName: "dev-planner@r", logicalId: "dev.planner" },
+        { sessionName: "dev-qa@r", logicalId: "dev.qa" },
+      ],
+      // dev.qa's adopt errors transiently — but its pane IS live, which the shipped
+      // launcher then proves (alreadyRunning). The seat is running; triage must not
+      // carry the stale adopt-failure as its "exact need".
+      reconcileSession: async (name) =>
+        name === "dev-qa@r" ? { ok: false, code: "reconcile_error", message: "transient" } : { ok: true },
+      listRigSeats: () => ["dev.planner", "dev.qa"],
+      launchNodeSubset: async (_rigId, ids) => {
+        expect(ids).toEqual(["dev.qa"]); // the adopt-failed seat reaches verification
+        return { ok: true, launched: [], alreadyRunning: [{ logicalId: "dev.qa" }] };
+      },
+    });
+    const r = await restoreRig("rig-1");
+    expect(r.attention ?? []).toEqual([]); // no triage row for a seat that is RUNNING
+    expect(r.outcome).toBe("fully_restored");
+  });
+
   it("held + failed subset targets become triage rows (never silent); outcome stays in the CLOSED union", async () => {
     const restoreRig = createDefaultRestoreRig(restoreDeps(), {
       probeLiveSessions: async () => [{ sessionName: "dev-planner@r", logicalId: "dev.planner" }],
