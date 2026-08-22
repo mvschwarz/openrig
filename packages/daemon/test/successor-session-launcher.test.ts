@@ -19,6 +19,8 @@ describe("SuccessorSessionLauncher", () => {
   let isPaneDead: ReturnType<typeof vi.fn>;
   let launchHarness: ReturnType<typeof vi.fn>;
   let checkReady: ReturnType<typeof vi.fn>;
+  let getDefaultShell: ReturnType<typeof vi.fn>;
+  let getPaneCommand: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     db = createFullTestDb();
@@ -29,6 +31,9 @@ describe("SuccessorSessionLauncher", () => {
     respawnPane = vi.fn(async () => ({ ok: true }));
     setRemainOnExit = vi.fn(async () => ({ ok: true }));
     signalPaneProcess = vi.fn(async () => ({ ok: true }));
+    // KI-14: default = healthy pane; the respawned pane comes up as a blank shell.
+    getDefaultShell = vi.fn(async () => "/bin/zsh");
+    getPaneCommand = vi.fn(async () => "zsh");
     // Cutover: default = retiree exits gracefully (dead right after SIGTERM), so no forced fallback.
     isPaneDead = vi.fn(async () => true);
     // A live successor is launched via the runtime adapter (launchHarness + readiness), not left as a
@@ -44,7 +49,7 @@ describe("SuccessorSessionLauncher", () => {
   }
 
   function launcher(tmuxOptionDefaults?: TmuxOptionDefaultsApplier): SuccessorSessionLauncher {
-    const tmux = { createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead } as unknown as TmuxAdapter;
+    const tmux = { createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
     return new SuccessorSessionLauncher(tmux, discoveryRepo, {
       sessionEnv: { OPENRIG_HOME: "/home", HOME: "/daemon-home", CODEX_HOME: "/daemon-codex" },
       newId: () => "01ABCDEFG",
@@ -323,5 +328,69 @@ describe("SuccessorSessionLauncher", () => {
     await launcher().cleanup(res.tmuxSession, res.discoveredId);
     expect(killSession).not.toHaveBeenCalled();
     expect(discoveryRepo.getDiscoveredSession(res.discoveredId)?.status).toBe("vanished");
+  });
+
+  describe("KI-14 (5.3 wave-1): fresh must produce a VERIFIED blank shell, never the pane's baked-in command", () => {
+    // The live defect (2026-08-22 reinstall wave, four Codex seats): tmux `respawn-pane` WITHOUT a
+    // command re-runs the pane's CREATION (or last-respawn) command — and adopted/hand-recovered
+    // panes carry `codex … resume <old-token>` as that command, so a "fresh" respawn boots the OLD
+    // context while every downstream label reports fresh. These mocks model the real tmux
+    // semantics: respawn with no command → the pane re-runs its baked-in codex resume (foreground
+    // "node", the codex wrapper); respawn with an explicit shell → the pane is that shell.
+    let paneStartCommandRerun: string;
+    beforeEach(() => {
+      paneStartCommandRerun = "node"; // the baked-in `codex … resume <old>` wrapper
+      getDefaultShell.mockResolvedValue("/bin/zsh");
+      getPaneCommand.mockImplementation(async () => {
+        const call = respawnPane.mock.calls[respawnPane.mock.calls.length - 1];
+        const explicit = call?.[1] as string | undefined;
+        if (explicit && explicit.length > 0) return explicit.split("/").pop() ?? explicit;
+        return paneStartCommandRerun; // tmux re-ran the pane's original command
+      });
+    });
+
+    it("respawns with an EXPLICIT default shell — never `undefined`, which re-runs the pane's creation command", async () => {
+      const res = await launcher().createSuccessor({
+        node: { id: "n", runtime: "codex", cwd: "/w" },
+        departingSessionName: "dev-guard@rig",
+      });
+      expect(res.ok).toBe(true);
+      // The whole defect: `undefined` here delegates the successor's identity to pane history.
+      const [, command] = respawnPane.mock.calls[0]!;
+      expect(command).toBe("/bin/zsh");
+      // And the launch only proceeded because the pane was VERIFIED to be a shell.
+      expect(getPaneCommand).toHaveBeenCalled();
+      expect(launchHarness).toHaveBeenCalledTimes(1);
+    });
+
+    it("a pane that still boots a NON-shell after respawn → structured successor_pane_not_blank; launchHarness NEVER runs; seat preserved", async () => {
+      // Hostile/poisoned pane: whatever we respawn, the foreground comes up as the old codex wrapper
+      // (e.g. tmux default-command poisoning, or a respawn the server ignored). The fresh contract is
+      // a VERIFIED blank slate or a LOUD refusal — never a launch into a resumed context that then
+      // gets stamped complete.
+      getPaneCommand.mockResolvedValue("node");
+      const res = await launcher().createSuccessor({
+        node: { id: "n", runtime: "codex", cwd: "/w" },
+        departingSessionName: "dev-guard@rig",
+      });
+      expect(res).toMatchObject({ ok: false, code: "successor_pane_not_blank", step: "create_successor", replacementStarted: true });
+      expect((res as { message: string }).message).toContain("node");
+      // The old context must never be driven as if it were the fresh successor.
+      expect(launchHarness).not.toHaveBeenCalled();
+      // Unwind invariant: never kill the preserved seat; no candidate registered.
+      expect(killSession).not.toHaveBeenCalled();
+      expect(discoveryRepo.listDiscovered()).toHaveLength(0);
+    });
+
+    it("getDefaultShell unavailable → falls back to /bin/sh rather than an undefined respawn", async () => {
+      getDefaultShell.mockResolvedValue(null);
+      const res = await launcher().createSuccessor({
+        node: { id: "n", runtime: "codex", cwd: "/w" },
+        departingSessionName: "dev-guard@rig",
+      });
+      expect(res.ok).toBe(true);
+      const [, command] = respawnPane.mock.calls[0]!;
+      expect(command).toBe("/bin/sh");
+    });
   });
 });

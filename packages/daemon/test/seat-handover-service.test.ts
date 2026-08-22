@@ -41,6 +41,8 @@ describe("SeatHandoverService", () => {
   let captureCodexThreadId: ReturnType<typeof vi.fn>;
   let invalidateRetiringOccupant: ReturnType<typeof vi.fn>;
   let resolvePredecessorRecap: ReturnType<typeof vi.fn>;
+  let getDefaultShell: ReturnType<typeof vi.fn>;
+  let getPaneCommand: ReturnType<typeof vi.fn>;
   let service: SeatHandoverService;
 
   beforeEach(() => {
@@ -74,6 +76,9 @@ describe("SeatHandoverService", () => {
     captureCodexThreadId = vi.fn(async () => "codex-discovered-tok");
     invalidateRetiringOccupant = vi.fn();
     resolvePredecessorRecap = vi.fn(() => ({ unavailableReason: "test default: no record" }));
+    // KI-14: healthy default — the respawned pane comes up as a blank shell.
+    getDefaultShell = vi.fn(async () => "/bin/zsh");
+    getPaneCommand = vi.fn(async () => "zsh");
     service = newService();
   });
 
@@ -82,7 +87,7 @@ describe("SeatHandoverService", () => {
   });
 
   function tmux(): TmuxAdapter {
-    return { hasSession, createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, sendText, sendKeys, capturePaneScreen } as unknown as TmuxAdapter;
+    return { hasSession, createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, sendText, sendKeys, capturePaneScreen, getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
   }
 
   function codexAdapter(): RuntimeAdapter {
@@ -570,6 +575,26 @@ describe("SeatHandoverService", () => {
     expect(newSession).toMatchObject({ resume_type: "codex_id", resume_token: "codex-launch-tok", resume_provenance: "scrape" });
     expect(sessionRegistry.currentOccupantTenure(node.id)?.generationUuid)
       .toBe(opts.env.OPENRIG_OCCUPANT_GENERATION);
+  });
+
+  it("KI-14 (5.3 wave-1): a fresh handover commit stamps continuity_outcome='fresh' — NEVER NULL, which lets a STALE restore_outcome impersonate the new occupant's continuity", async () => {
+    // The live defect's label half (2026-08-22 wave): commit wrote continuity_outcome=NULL and
+    // node-inventory then DERIVED the seat's continuity from restore_outcome — a stamp from a
+    // restore days earlier — so dev-qa/dev-guard reported fresh/fresh-primed while their panes ran
+    // `codex resume <14-day-old-token>`. The recorded label must describe THIS launch.
+    const { node } = seedSeat({ runtime: "codex" });
+
+    const result = await service.handover({
+      seatRef: "dev-impl@seat-rig",
+      reason: "context-wall",
+      source: "fresh",
+      operator: "orch-lead@seat-rig",
+    });
+    expect(result.ok).toBe(true);
+
+    const row = db.prepare("SELECT continuity_outcome, handover_result FROM nodes WHERE id = ?").get(node.id) as Record<string, string | null>;
+    expect(row.handover_result).toBe("complete");
+    expect(row.continuity_outcome).toBe("fresh");
   });
 
   it("a failed handover commit leaves its carried reservation unregistered and non-mismatch", async () => {
