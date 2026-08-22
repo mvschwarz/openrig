@@ -174,6 +174,145 @@ describe("createDefaultRestoreRig — composes findLatestRestoreUsable + restore
   });
 });
 
+// ── AMENDMENT 2 (stamped, body hash 72757e81) — the surviving-panes ADOPT branch ──
+// The round-10 door: daemon killed, panes ALIVE → restore() fail-closes 409 → the fleet
+// read "failed" and the non-resumable seat never reached triage. The amendment sanctions
+// ONE change: per rig, LIVE panes compose the SHIPPED reconcile/adopt + per-seat resume
+// verification; DEAD panes take the existing restore path byte-unchanged. The union stays
+// CLOSED (four members) and adoption touches session state only (R9).
+describe("AMENDMENT 2 — per-rig LIVE/DEAD-panes branch in createDefaultRestoreRig", () => {
+  // The shipped restore in its 409 shape: a live-panes rig fail-closes with NO result —
+  // exactly what the conductor read as `failed` at round 10.
+  const restore409 = async () => ({ ok: false as const });
+  const restoreDeps = () => ({
+    findLatestRestoreUsable: () => ({ id: "snap-1" }),
+    restore: restore409,
+  });
+
+  it("THE DOOR (unit form): a live-panes rig that today 409s must ADOPT — restore is never called, outcome is not `failed`", async () => {
+    let restoreCalled = false;
+    const restoreRig = createDefaultRestoreRig(
+      {
+        findLatestRestoreUsable: () => ({ id: "snap-1" }),
+        restore: async () => { restoreCalled = true; return { ok: false }; },
+      },
+      {
+        probeLiveSessions: async () => [
+          { sessionName: "dev-planner@r", logicalId: "dev.planner" },
+          { sessionName: "dev-driver@r", logicalId: "dev.driver" },
+        ],
+        reconcileSession: async () => ({ ok: true }),
+        listRigSeats: () => ["dev.planner", "dev.driver"],
+        launchNodeSubset: async () => { throw new Error("no remaining seats — must not be called"); },
+      },
+    );
+    const r = await restoreRig("rig-1");
+    expect(restoreCalled).toBe(false); // adopt branch, never the 409
+    expect(r.outcome).toBe("fully_restored"); // all seats re-attached
+    expect(r.attention ?? []).toEqual([]);
+  });
+
+  it("some seats adopted + the engineered non-resumable seat lands on triage with its EXACT --fresh line → partially_restored", async () => {
+    const subsetCalls: string[][] = [];
+    const restoreRig = createDefaultRestoreRig(restoreDeps(), {
+      probeLiveSessions: async () => [{ sessionName: "dev-planner@r", logicalId: "dev.planner" }],
+      reconcileSession: async () => ({ ok: true }),
+      listRigSeats: () => ["dev.planner", "dev.qa"],
+      launchNodeSubset: async (_rigId, ids) => {
+        subsetCalls.push(ids);
+        return {
+          ok: true,
+          launched: [{
+            logicalId: "dev.qa",
+            status: "awaiting-decision",
+            error: "Original session not resumable. Use --fresh dev.qa to fresh-prime, or skip.",
+          }],
+        };
+      },
+    });
+    const r = await restoreRig("rig-1");
+    expect(subsetCalls).toEqual([["dev.qa"]]); // only the not-adopted seat is verified
+    expect(r.outcome).toBe("partially_restored");
+    expect(r.attention).toEqual([
+      { rigId: "rig-1", seat: "dev.qa", need: "Original session not resumable. Use --fresh dev.qa to fresh-prime, or skip." },
+    ]);
+  });
+
+  it("mis-probe (probe LIVE, panes died before adopt): every adoption fails → not_attempted with reason+remediation; the subset launcher is NEVER reached", async () => {
+    let subsetCalled = false;
+    const restoreRig = createDefaultRestoreRig(restoreDeps(), {
+      probeLiveSessions: async () => [{ sessionName: "dev-planner@r", logicalId: "dev.planner" }],
+      reconcileSession: async () => ({ ok: false, code: "session_not_found", message: "No live tmux session" }),
+      listRigSeats: () => ["dev.planner", "dev.qa"],
+      launchNodeSubset: async () => { subsetCalled = true; return { ok: true, launched: [] }; },
+    });
+    const r = await restoreRig("rig-1");
+    expect(r.outcome).toBe("not_attempted"); // adopt fails EMPTY (honest) — the stamped mis-probe analysis
+    expect(subsetCalled).toBe(false);
+    expect(r.reason).toBeTruthy();
+    expect(r.remediation).toBeTruthy();
+  });
+
+  it("DEAD panes (probe empty): the existing restore composition runs UNCHANGED", async () => {
+    let restored: string | null = null;
+    const restoreRig = createDefaultRestoreRig(
+      {
+        findLatestRestoreUsable: () => ({ id: "snap-9" }),
+        restore: async (snapshotId) => { restored = snapshotId; return { ok: true, result: { rigResult: "fully_restored" } }; },
+      },
+      {
+        probeLiveSessions: async () => [],
+        reconcileSession: async () => { throw new Error("must not adopt a dead rig"); },
+        listRigSeats: () => [],
+        launchNodeSubset: async () => { throw new Error("must not launch on the dead path"); },
+      },
+    );
+    const r = await restoreRig("rig-1");
+    expect(restored).toBe("snap-9");
+    expect(r.outcome).toBe("fully_restored");
+  });
+
+  it("no adopt deps wired (today's callers): behavior is byte-identical to the existing composition", async () => {
+    const restoreRig = createDefaultRestoreRig(restoreDeps());
+    const r = await restoreRig("rig-1");
+    expect(r.outcome).toBe("failed"); // the pre-amendment reading of a 409 — unchanged when no adopt deps exist
+  });
+
+  it("subset launcher refusal (e.g. no usable snapshot) + failed targets fold LOUD: rows for every unverified seat, outcome partially_restored", async () => {
+    const restoreRig = createDefaultRestoreRig(restoreDeps(), {
+      probeLiveSessions: async () => [{ sessionName: "dev-planner@r", logicalId: "dev.planner" }],
+      reconcileSession: async () => ({ ok: true }),
+      listRigSeats: () => ["dev.planner", "dev.qa", "dev.guard"],
+      launchNodeSubset: async () => ({ ok: false, code: "no_usable_snapshot", message: "No usable snapshot for rig rig-1" }),
+    });
+    const r = await restoreRig("rig-1");
+    expect(r.outcome).toBe("partially_restored"); // the adopted seat is real; the unverified ones are named
+    const seats = (r.attention ?? []).map((a) => a.seat).sort();
+    expect(seats).toEqual(["dev.guard", "dev.qa"]);
+    for (const row of r.attention ?? []) expect(row.need).toContain("No usable snapshot");
+  });
+
+  it("held + failed subset targets become triage rows (never silent); outcome stays in the CLOSED union", async () => {
+    const restoreRig = createDefaultRestoreRig(restoreDeps(), {
+      probeLiveSessions: async () => [{ sessionName: "dev-planner@r", logicalId: "dev.planner" }],
+      reconcileSession: async () => ({ ok: true }),
+      listRigSeats: () => ["dev.planner", "dev.qa", "dev.guard"],
+      launchNodeSubset: async () => ({
+        ok: true,
+        launched: [],
+        held: [{ logicalId: "dev.qa", reason: "operator hold" }],
+        failedTargets: [{ logicalId: "dev.guard", reason: "tmux probe failed (fail-closed)" }],
+      }),
+    });
+    const r = await restoreRig("rig-1");
+    expect(r.outcome).toBe("partially_restored");
+    const bySeat = Object.fromEntries((r.attention ?? []).map((a) => [a.seat, a.need]));
+    expect(bySeat["dev.qa"]).toContain("held");
+    expect(bySeat["dev.guard"]).toContain("tmux probe failed");
+    expect(["fully_restored", "partially_restored", "failed", "not_attempted"]).toContain(r.outcome);
+  });
+});
+
 describe("listRigsInKernelFirstOrder (R2 — kernel supervisor first)", () => {
   it("puts the kernel rig first, then the rest in listRigs order", () => {
     const ordered = listRigsInKernelFirstOrder({
