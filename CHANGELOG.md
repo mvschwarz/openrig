@@ -8,6 +8,73 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.5.2] - 2026-08-22
+
+**Status**: shipped; test system exercises for real, crash-cart fleet-restore conductor, reliability fixes shipped through the test system. **v0.5.2 contains v0.5.1 in full** — one lineage, no divergence.
+
+### Summary For Installing Agents
+
+- **Package version**: bumps from `0.5.1`.
+- **Migrations**: none in this release. v0.5.1 shipped migrations 068-071 (068 CREATE + 071 DROP-IF-EXISTS pair, net no-op for any v0.5.0→v0.5.1 upgrader); v0.5.2 stays at 071.
+- **Node engines**: unchanged.
+- **API surface**: preserved from v0.5.1; no CLI-command or flag removals or renames.
+- **New bundled skills**: none (this release is crash-cart + reliability focus).
+
+### Headline
+
+**A test system that catches real bugs on its own product, plus a crash-cart fleet-restore conductor.** The reliability fixes in this release were found and validated by scenarios that drive the real product through the same commands a person uses. Type bare `rig` at a dead daemon and you now reach a truthful cockpit; one Enter restores the fleet kernel-first with surviving tmux panes adopted.
+
+### Crash-cart fleet-restore conductor
+
+Type bare `rig` at a dead daemon and reach a truthful cockpit — no cryptic error, no silent failure. One Enter restores the fleet kernel-first, adopts any surviving tmux panes (never clobbers them), and presents an exact per-seat remediation walkable in one keystroke. Cancel is honest. Destructive restore is only offered when adoption cannot succeed. Ten build rounds, four independent gates, non-author QA door test.
+
+### Daemon event-loop no longer hangs under load
+
+A class of daemon event-loop freeze under load is fixed and measured. If your daemon was going unresponsive under fleet-wide activity, that's this class.
+
+### Unattended Claude seat handover
+
+Outgoing Claude seat writes a recap and submits its packet automatically at handover (compaction, session boundary, explicit handover); incoming seat picks up with the recap in hand rather than a cold start. Door-proven end-to-end.
+
+### `rig policy` honest under adversarial input
+
+Malformed or hostile policy input now produces honest structured errors rather than silent failure or unexpected behaviour. Three review rounds.
+
+### Cross-host messages carry their machine of origin
+
+Messages sent across hosts now include the machine they came from, so multi-host coordination reads correctly at the receiving end. Enforced end-to-end via door tests.
+
+### Codex model-config drift detector
+
+A new detector for a class of Codex model-config drift that would previously go unnoticed. Caught real cases on landing.
+
+### Test-integrity
+
+- Test runner refuses to run against a dirty tree — a green run means green source.
+- Hermetic test roots.
+- Flaky fixtures isolated.
+
+### Governance in code
+
+- Plan locks are explicit (chosen when you ask for one), not inherited from ambient state.
+- Wake is opt-in.
+
+### Container tar-file hang eliminated at the seam
+
+A class of container tar-file hang is dead by construction — not worked around, but the seam that made it possible is closed.
+
+### Known Limitations (5.3 backlog)
+
+- **Reply-hint self-qualify** — reply-hints on some cross-host messages address themselves via machine-ID rather than registered host name; using the reply-hint directly may fail with "no registered host X". Substitute the registered host name from `rig host list`. Fix in 5.3.
+- **`rig queue handoff --summary`** warns yet the field is unsettable on its own output. Fix in 5.3.
+- **`rig send --verify` does not detect staged-unsent** for multi-line sends toward Claude seats. Multi-line sends can stage silently.
+- **Claude transcripts thin under fullscreen upsell** — upstream fullscreen upsell writes `"tui":"fullscreen"`; one accepted prompt can re-flip a fleet. Fix + pin + prevention in 5.3.
+- **Test runners can silently skip on unbuilt trees** — a final-gate rule (build CLI + assert zero skips) is adopted for the release ceremony; product-side fix in 5.3.
+- **`seat-handover` model-fidelity real-Codex end-to-end** fails identically on main (environment-vs-product distinction unrooted). Isolation fix in 5.3.
+- Plus internal debt items ledgered for maintenance.
+
+---
+
 ## [0.5.1] - 2026-08-12
 
 **Status**: shipped; a test system for the product, plus reliability fixes shipped through it. **v0.5.1 contains v0.5.0 in full** — one lineage, no divergence.
