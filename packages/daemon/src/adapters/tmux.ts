@@ -400,8 +400,12 @@ export class TmuxAdapter {
    *
    *  Optional `cwd`/`env` inject the successor's start-directory + OpenRig identity env onto the reused
    *  pane via respawn-pane's `-c`/`-e` flags (tmux ≥3.0), the SAME mechanism createSession uses. Any flags
-   *  precede the command, which always stays LAST. `command` is OPTIONAL: omitting it re-runs the pane's
-   *  creation command (the default login shell) — the fresh shell the cutover successor's launchHarness drives. */
+   *  precede the command, which always stays LAST.
+   *
+   *  ⚠ KI-14: omitting `command` re-runs the pane's CREATION (or last-respawn) command — which is the
+   *  default shell ONLY for panes createSession made. Adopted/hand-recovered panes can carry a full
+   *  harness invocation there (`codex … resume <old-token>`), so an undefined respawn silently boots the
+   *  OLD context. Callers that need a blank pane must pass an explicit shell (see getDefaultShell). */
   async respawnPane(
     paneTarget: string,
     command?: string,
@@ -469,6 +473,19 @@ export class TmuxAdapter {
       const trimmed = output.trim();
       const parsed = parseInt(trimmed, 10);
       return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** KI-14: the server's `default-shell` option — what a createSession pane runs when no command is
+   *  given. Used to make a respawn EXPLICIT about the blank shell instead of inheriting whatever
+   *  command the pane was created with. Returns null if unavailable (caller falls back). */
+  async getDefaultShell(): Promise<string | null> {
+    try {
+      const output = await this.exec(`tmux show-options -gv default-shell`);
+      const trimmed = output.trim();
+      return trimmed || null;
     } catch {
       return null;
     }

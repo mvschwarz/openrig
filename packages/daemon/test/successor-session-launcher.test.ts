@@ -99,7 +99,9 @@ describe("SuccessorSessionLauncher", () => {
     expect(respawnPane).toHaveBeenCalledTimes(1);
     const [paneTarget, command, opts] = respawnPane.mock.calls[0]!;
     expect(paneTarget).toBe("%42");
-    expect(command).toBeUndefined(); // no command → default login shell in the reused pane
+    // KI-14: EXPLICIT blank shell — an undefined command re-runs the pane's creation command,
+    // which on adopted panes is a full `codex … resume <old-token>` invocation.
+    expect(command).toBe("/bin/zsh");
     expect(opts).toMatchObject({ cwd: "/w" });
     // Identity env carries the PRESERVED canonical session name (never a -h successor name) + the
     // daemon session env (self-identify + activity report like a launched seat).
@@ -144,7 +146,7 @@ describe("SuccessorSessionLauncher", () => {
   });
 
   it("carries the supplied generation exactly and never lets ambient session env override it", async () => {
-    const tmux = { createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead } as unknown as TmuxAdapter;
+    const tmux = { createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
     const subject = new SuccessorSessionLauncher(tmux, discoveryRepo, {
       sessionEnv: { OPENRIG_OCCUPANT_GENERATION: "stale-ambient-generation" },
       newId: () => "01ABCDEFG",
@@ -280,7 +282,7 @@ describe("SuccessorSessionLauncher", () => {
   });
 
   it("no runtime adapter for the seat's runtime → structured failure, preserved seat NOT killed", async () => {
-    const tmux = { createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead } as unknown as TmuxAdapter;
+    const tmux = { createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
     const noAdapter = new SuccessorSessionLauncher(tmux, discoveryRepo, { newId: () => "01ABCDEFG", runtimeAdapters: {}, exitPollMs: 1, exitTimeoutMs: 5 });
     const res = await noAdapter.createSuccessor({ node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r" });
     expect(res).toMatchObject({ ok: false, step: "start_agent", code: "successor_runtime_unsupported" });

@@ -769,15 +769,21 @@ export class SeatHandoverService {
         }
       }
       this.discoveryRepo.markClaimed(input.discovered.id, input.node.id);
+      // KI-14: the continuity label must describe THIS launch. A NULL here let node-inventory derive
+      // the seat's continuity from restore_outcome — a stamp from a restore days earlier — so the
+      // 2026-08-22 wave's seats reported fresh/fresh-primed while their panes ran resumed contexts.
+      // fresh mode is now verified-blank at launch (successor_pane_not_blank guards it), so 'fresh'
+      // is earned; a discovered successor's continuity is genuinely unknown and stays NULL.
+      const continuityOutcome = input.reportedSource.mode === "fresh" ? "fresh" : null;
       this.db.prepare(`
         UPDATE nodes SET
           occupant_lifecycle = 'active',
-          continuity_outcome = NULL,
+          continuity_outcome = ?,
           handover_result = 'complete',
           previous_occupant = ?,
           handover_at = ?
         WHERE id = ?
-      `).run(input.latestSession.session_name, handoverAt, input.node.id);
+      `).run(continuityOutcome, input.latestSession.session_name, handoverAt, input.node.id);
 
       // Ghost-stage (e) re-key seam — the rebind is done; now invalidate the RETIRING occupant's
       // seat-name-keyed stores so the successor never inherits a ghost (drained compaction stage, frozen

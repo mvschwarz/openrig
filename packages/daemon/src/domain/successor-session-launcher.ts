@@ -198,7 +198,13 @@ export class SuccessorSessionLauncher {
       return { ok: false, code: "retiree_not_terminated", step: "create_successor", message: terminated.message, replacementStarted: false };
     }
     input.onReplacementStarted?.();
-    const respawned = await this.tmuxAdapter.respawnPane(pane.id, undefined, { cwd, env });
+    // KI-14: the respawn command must be EXPLICIT. `respawn-pane` without a command re-runs the
+    // pane's creation (or last-respawn) command — the default shell only for createSession panes.
+    // Adopted/hand-recovered panes carry a full harness invocation there (`codex … resume
+    // <old-token>`), which is exactly how the 2026-08-22 wave's "fresh" successors booted 14-day-old
+    // contexts. An explicit shell also resets the pane's respawn default, self-healing the pane.
+    const blankShell = (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
+    const respawned = await this.tmuxAdapter.respawnPane(pane.id, blankShell, { cwd, env });
     if (!respawned.ok) {
       return {
         ok: false,
@@ -206,6 +212,21 @@ export class SuccessorSessionLauncher {
         step: "create_successor",
         replacementStarted: true,
         message: `Could not respawn the successor into pane "${pane.id}" of "${departingSession}": ${(respawned as { message?: string }).message ?? "respawn-pane failed"}`,
+      };
+    }
+
+    // KI-14: VERIFY the blank slate before any launch. The fresh contract is a verified blank shell
+    // or a loud refusal — never a launch driven into a resumed harness that then gets committed as a
+    // fresh successor. One bounded retry absorbs the shell's spawn latency. On failure the seat is
+    // preserved (unwind invariant: never killSession) and no discovery candidate exists yet.
+    const blank = await this.verifyPaneIsBlankShell(pane.id);
+    if (!blank.ok) {
+      return {
+        ok: false,
+        code: "successor_pane_not_blank",
+        step: "create_successor",
+        replacementStarted: true,
+        message: `Fresh successor pane "${pane.id}" of "${departingSession}" is running "${blank.observed ?? "unknown"}" instead of a blank shell — refusing to launch into a non-blank pane. The pane's start command likely bakes in a harness invocation; recreate the pane (or hand over with --source discovered:<id>) and retry.`,
       };
     }
 
@@ -393,6 +414,18 @@ export class SuccessorSessionLauncher {
     return { ok: false, message: `Retiree in pane "${paneId}" did not exit after graceful TERM + forced KILL.${detail}` };
   }
 
+  /** KI-14: is the respawned pane's foreground a bare shell? A non-shell here means the pane booted
+   *  a baked-in command (the resumed-old-context defect) or the respawn was ignored. One bounded
+   *  retry absorbs shell spawn latency; a null probe counts as unverified (refuse, never assume). */
+  private async verifyPaneIsBlankShell(paneId: string): Promise<{ ok: true } | { ok: false; observed: string | null }> {
+    let observed = await this.tmuxAdapter.getPaneCommand(paneId);
+    if (observed && SHELL_BASENAMES.has(observed)) return { ok: true };
+    await this.sleep(this.exitPollMs);
+    observed = await this.tmuxAdapter.getPaneCommand(paneId);
+    if (observed && SHELL_BASENAMES.has(observed)) return { ok: true };
+    return { ok: false, observed };
+  }
+
   /** Poll `isPaneDead` up to the bounded exit timeout (count-bounded so injected no-op sleeps stay fast). */
   private async waitPaneDead(paneId: string): Promise<boolean> {
     const maxPolls = Math.max(1, Math.ceil(this.exitTimeoutMs / this.exitPollMs));
@@ -414,6 +447,11 @@ export class SuccessorSessionLauncher {
     if (discoveredId) this.discoveryRepo.markVanished([discoveredId]);
   }
 }
+
+/** KI-14: foreground commands that count as a blank shell after the fresh respawn
+ *  (pane_current_command reports the basename). Mirrors the shell set the codex resume
+ *  verifier uses, minus tmux (a nested tmux is not a blank successor shell). */
+const SHELL_BASENAMES = new Set(["bash", "zsh", "sh", "fish", "nu", "dash", "ksh"]);
 
 function compactEnv(input: Record<string, string | undefined>): Record<string, string> {
   const result: Record<string, string> = {};

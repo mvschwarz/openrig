@@ -530,7 +530,8 @@ describe("SeatHandoverService", () => {
     expect(respawnPane).toHaveBeenCalledTimes(1);
     const [paneTarget, command, opts] = respawnPane.mock.calls[0]!;
     expect(paneTarget).toBe("%9"); // the departing pane resolved from listPanes
-    expect(command).toBeUndefined(); // default login shell in the reused pane
+    // KI-14: EXPLICIT blank shell (undefined would re-run the pane's baked-in creation command).
+    expect(command).toBe("/bin/zsh");
     expect(opts).toMatchObject({ cwd: "/project" });
     expect(opts.env).toMatchObject({
       OPENRIG_NODE_ID: node.id,
