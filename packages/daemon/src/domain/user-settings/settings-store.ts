@@ -29,6 +29,27 @@ const DEFAULT_WORKSPACE_ROOT = path.join(
   "workspace",
 );
 
+// OPR.0.5.3.6 D1/D2 — the topology tree's derived default. The instance
+// altitude is the TOP of this root: <root>/<CHAIN>.md, then
+// <root>/rigs/<rig>/<CHAIN>.md, then <root>/rigs/<rig>/seats/<seat>/<CHAIN>.md.
+const DEFAULT_TOPOLOGY_ROOT = path.join(
+  process.env["OPENRIG_HOME"] || process.env["RIGGED_HOME"] || path.join(os.homedir(), ".openrig"),
+  "topology",
+);
+
+/** OPR.0.5.3.6 — the LEGACY topology location (`<home>/shared-docs/rigs`),
+ *  ruled an arbitrary folder (founder, 2026-08-14) but kept readable so
+ *  pre-convention rigs migrate instead of flag-daying. This helper is the ONE
+ *  home for the literal: walkers call it for their fallback and must emit the
+ *  named advisory when a read resolves here instead of under topology.root. */
+export function resolveLegacyTopologyRigsRoot(): string {
+  return path.join(
+    process.env["OPENRIG_HOME"] || process.env["RIGGED_HOME"] || path.join(os.homedir(), ".openrig"),
+    "shared-docs",
+    "rigs",
+  );
+}
+
 export const SETTINGS_VALID_KEYS = [
   "daemon.port",
   "daemon.host",
@@ -59,6 +80,15 @@ export const SETTINGS_VALID_KEYS = [
   "workspace.field_notes_root",
   "workspace.specs_root",
   "workspace.dogfood_evidence_root",
+  // OPR.0.5.3.6 D1 — the TOPOLOGY tree root (instance altitude at its top,
+  // rigs/<rig>/seats/<seat> beneath). Derived default $OPENRIG_HOME/topology;
+  // keying to the home makes the ~/.openrig-vs-$OPENRIG_HOME split a
+  // non-question (a box with two homes is two instances, each with its own
+  // topology tree). Legacy shared-docs/rigs stays readable as a fallback WITH
+  // a named advisory — resolveLegacyTopologyRigsRoot below is the one home
+  // for that literal, so walkers carry none. Lockstep with the CLI
+  // config-store twin (each side's parity test pins its own list).
+  "topology.root",
   "files.allowlist",
   "progress.scan_roots",
   "ui.preview.refresh_interval_seconds",
@@ -166,6 +196,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "workspace.field_notes_root": { primary: "OPENRIG_WORKSPACE_FIELD_NOTES_ROOT" },
   "workspace.specs_root": { primary: "OPENRIG_WORKSPACE_SPECS_ROOT" },
   "workspace.dogfood_evidence_root": { primary: "OPENRIG_DOGFOOD_EVIDENCE_ROOT" },
+  "topology.root": { primary: "OPENRIG_TOPOLOGY_ROOT" },
   "files.allowlist": { primary: "OPENRIG_FILES_ALLOWLIST" },
   "progress.scan_roots": { primary: "OPENRIG_PROGRESS_SCAN_ROOTS" },
   "ui.preview.refresh_interval_seconds": { primary: "OPENRIG_UI_PREVIEW_REFRESH_INTERVAL_SECONDS" },
@@ -231,6 +262,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "workspace.field_notes_root": ["workspace", "fieldNotesRoot"],
   "workspace.specs_root": ["workspace", "specsRoot"],
   "workspace.dogfood_evidence_root": ["workspace", "dogfoodEvidenceRoot"],
+  "topology.root": ["topology", "root"],
   "files.allowlist": ["files", "allowlist"],
   "progress.scan_roots": ["progress", "scanRoots"],
   "ui.preview.refresh_interval_seconds": ["ui", "preview", "refreshIntervalSeconds"],
@@ -452,6 +484,8 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // OPR.0.4.6.MH1 FR-4 — the own-host display-name default (PRD-named).
     case "host.name": return "localhost";
     case "workspace.root": return DEFAULT_WORKSPACE_ROOT;
+    // OPR.0.5.3.6 D1 — derived under $OPENRIG_HOME, never a shared-docs literal.
+    case "topology.root": return DEFAULT_TOPOLOGY_ROOT;
     // Preview Terminal v0 (PL-018) defaults — match cli/src/config-store.ts.
     case "ui.preview.refresh_interval_seconds": return 3;
     case "ui.preview.max_pins": return 4;

@@ -97,6 +97,8 @@ describe("SettingsStore (User Settings v0)", () => {
       "workspace.root", "workspace.slices_root", "workspace.steering_path",
       "workspace.field_notes_root", "workspace.specs_root",
       "workspace.dogfood_evidence_root",
+      // OPR.0.5.3.6 D1 — the topology tree root (instance at its top).
+      "topology.root",
       "files.allowlist", "progress.scan_roots",
       "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines",
       // OPR.0.4.0.1 — global live-terminal cap.

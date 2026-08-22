@@ -41,6 +41,11 @@ export interface RiggedConfig {
     dogfoodEvidenceRoot: string;
     operatorSeatName: string;
   };
+  // OPR.0.5.3.6 D1 — the TOPOLOGY tree root (the other tree: instance at its
+  // top, rigs/<rig>/seats/<seat> beneath). Twin of the daemon settings-store.
+  topology: {
+    root: string;
+  };
   // User Settings v0 — UEP env-var graduation.
   // Values are stored as raw named-pair strings ("name:/abs/path,...")
   // matching the OPENRIG_FILES_ALLOWLIST / OPENRIG_PROGRESS_SCAN_ROOTS
@@ -186,6 +191,8 @@ const DEFAULTS = {
     // module-load time.
     operatorSeatName: "",
   },
+  // OPR.0.5.3.6 D1 — derived under the OpenRig home, never a shared-docs literal.
+  topology: { root: getDefaultOpenRigPath("topology") },
   files: { allowlist: "" },
   progress: { scanRoots: "" },
   ui: {
@@ -298,6 +305,11 @@ export const VALID_KEYS = [
   "workspace.field_notes_root",
   "workspace.specs_root",
   "workspace.dogfood_evidence_root",
+  // OPR.0.5.3.6 D1 — the topology tree root; lockstep with the daemon
+  // settings-store twin. Derived default $OPENRIG_HOME/topology; the legacy
+  // shared-docs/rigs location stays readable via the daemon's
+  // resolveLegacyTopologyRigsRoot fallback (advisory-emitting).
+  "topology.root",
   "files.allowlist",
   "progress.scan_roots",
   "ui.preview.refresh_interval_seconds",
@@ -375,6 +387,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "workspace.field_notes_root": { primary: "OPENRIG_WORKSPACE_FIELD_NOTES_ROOT" },
   "workspace.specs_root": { primary: "OPENRIG_WORKSPACE_SPECS_ROOT" },
   "workspace.dogfood_evidence_root": { primary: "OPENRIG_DOGFOOD_EVIDENCE_ROOT" },
+  "topology.root": { primary: "OPENRIG_TOPOLOGY_ROOT" },
   // UEP env-var graduation: existing OPENRIG_FILES_ALLOWLIST /
   // OPENRIG_PROGRESS_SCAN_ROOTS become the env override for the new
   // typed keys (no breaking change).
@@ -443,6 +456,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "workspace.field_notes_root": ["workspace", "fieldNotesRoot"],
   "workspace.specs_root": ["workspace", "specsRoot"],
   "workspace.dogfood_evidence_root": ["workspace", "dogfoodEvidenceRoot"],
+  "topology.root": ["topology", "root"],
   "files.allowlist": ["files", "allowlist"],
   "progress.scan_roots": ["progress", "scanRoots"],
   "ui.preview.refresh_interval_seconds": ["ui", "preview", "refreshIntervalSeconds"],
@@ -812,6 +826,9 @@ export class ConfigStore {
         specsRoot: v("workspace.specs_root") as string,
         dogfoodEvidenceRoot: v("workspace.dogfood_evidence_root") as string,
         operatorSeatName: v("workspace.operator_seat_name") as string,
+      },
+      topology: {
+        root: v("topology.root") as string,
       },
       files: {
         allowlist: v("files.allowlist") as string,
