@@ -92,6 +92,20 @@ describe("classifyProbeError — fetch rejection → probe result", () => {
     });
     expect(classifyProbeError(Object.assign(new TypeError("fetch failed"), { cause: agg }))).toBe("refused");
   });
+
+  // GUARD round-8 blocker: "no known-bad sibling" (a negated code-Set) ERASES a CODE-LESS terminal
+  // failure — it is in no set, so refused+codeless spuriously promoted to down. The POSITIVE form (every
+  // terminal attempt IS ECONNREFUSED) cannot be fooled: a code-less attempt is not a refusal → ambiguous.
+  it("refused + a CODE-LESS terminal sibling → timeout (positive form: not ALL refused)", () => {
+    const agg = Object.assign(new Error("all attempts failed"), {
+      name: "AggregateError",
+      errors: [Object.assign(new Error("refused"), { code: "ECONNREFUSED" }), new Error("terminal failure without a code")],
+    });
+    expect(classifyProbeError(Object.assign(new TypeError("fetch failed"), { cause: agg }))).toBe("timeout");
+  });
+  it("outer wrappers never count as terminal attempts — a bare 'fetch failed' with no cause → timeout, not refused", () => {
+    expect(classifyProbeError(new TypeError("fetch failed"))).toBe("timeout");
+  });
 });
 
 describe("probeHealthz — PRODUCTION PATH: a REAL refused socket, not a fabricated error", () => {

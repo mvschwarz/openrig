@@ -5,40 +5,44 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DaemonStateFile, HealthzProbeResult } from "./crash-cart-detect.js";
 
-/** Collect every `code`/`name` across a rejection's cause chain. Node/Undici's global fetch rejects a
- *  refused TCP connection with an OUTER `TypeError {message:"fetch failed", code:undefined}` and the real
- *  `ECONNREFUSED` nested in `cause` (and, for a host that resolves to several addresses, an
- *  `AggregateError` whose `.errors[]` each carry the code). Checking only the outer error misses it — so
- *  a provably-down daemon read as "timeout" → "unverified" → no cockpit. We walk the chain to see it. */
-function collectErrorSignals(err: unknown): { codes: Set<string>; names: Set<string> } {
-  const codes = new Set<string>();
-  const names = new Set<string>();
+/** Collect the TERMINAL ATTEMPTS from a rejection tree — the leaf error nodes that represent an actual
+ *  connect attempt. Node/Undici's global fetch wraps a refused socket as an OUTER `TypeError
+ *  {message:"fetch failed", code:undefined}` → `cause` (single address), or an `AggregateError` whose
+ *  `.errors[]` are the per-address attempts. A node WITH a `cause` or non-empty `errors[]` is a WRAPPER
+ *  (it recurses, never counts as a terminal attempt); a node with neither is a terminal attempt — which
+ *  may carry a `code` (ECONNREFUSED/ETIMEDOUT/…) or NONE at all. A code-less attempt is retained here,
+ *  which a flattened code-Set would erase. Depth-bounded (cycle-safe); a node hit at the cap is treated
+ *  as a terminal attempt (its code, typically absent, then counts — conservatively). */
+function collectTerminalAttempts(err: unknown): Array<{ code?: string; name?: string }> {
+  const attempts: Array<{ code?: string; name?: string }> = [];
   const visit = (e: unknown, depth: number): void => {
-    if (!e || typeof e !== "object" || depth > 5) return;
+    if (!e || typeof e !== "object") return;
     const o = e as { code?: unknown; name?: unknown; cause?: unknown; errors?: unknown };
-    if (typeof o.code === "string") codes.add(o.code);
-    if (typeof o.name === "string") names.add(o.name);
-    if (o.cause) visit(o.cause, depth + 1);
-    if (Array.isArray(o.errors)) for (const sub of o.errors) visit(sub, depth + 1);
+    const children: unknown[] = [];
+    if (depth < 6) {
+      if (o.cause) children.push(o.cause);
+      if (Array.isArray(o.errors)) children.push(...(o.errors as unknown[]));
+    }
+    if (children.length === 0) {
+      attempts.push({ code: typeof o.code === "string" ? o.code : undefined, name: typeof o.name === "string" ? o.name : undefined });
+    } else {
+      for (const c of children) visit(c, depth + 1);
+    }
   };
   visit(err, 0);
-  return { codes, names };
+  return attempts;
 }
 
-/** Classify a fetch REJECTION into a probe result. ECONNREFUSED ANYWHERE in the cause chain = the strong
- *  DOWN signal (the daemon socket refused). Abort/connect-timeout = unverified; anything else = timeout
- *  (conservative — never a fabricated down). Handles both a raw `{code}` and the wrapped Undici shape. */
+/** Classify a fetch REJECTION into a probe result — POSITIVE-FORM predicate (guard/orch rail):
+ *  DOWN (refused) ONLY when (a) at least one terminal attempt exists AND (b) EVERY terminal attempt is
+ *  recognizably ECONNREFUSED. Anything else — a timeout, an abort, another code, or a CODE-LESS /
+ *  unrecognized failure — is ambiguous evidence and stays timeout/unverified (a timeout never promotes to
+ *  a confirmed down; the cart never offers RESTORE on partial evidence). "No known-bad sibling" (a negated
+ *  code-Set) erased a code-less sibling; "ALL known-good" (this positive form) closes the whole family. */
 export function classifyProbeError(err: unknown): HealthzProbeResult {
-  const { codes, names } = collectErrorSignals(err);
-  // DOWN (refused) requires UNAMBIGUOUS refusal: ECONNREFUSED on the terminal attempts with NO
-  // non-refused sibling (no timeout/abort/unknown code alongside it). A mixed multi-address
-  // AggregateError — e.g. ECONNREFUSED on one address + ETIMEDOUT on another — is AMBIGUOUS evidence, so
-  // it stays timeout/unverified: a timeout NEVER promotes to a confirmed down (the detector contract), and
-  // the cart must not offer RESTORE EVERYTHING on partial evidence. (Refusal no longer wins by precedence.)
-  const nonRefusedSibling = names.has("AbortError") || [...codes].some((c) => c !== "ECONNREFUSED");
-  if (codes.has("ECONNREFUSED") && !nonRefusedSibling) return "refused";
-  if (names.has("AbortError") || codes.has("ETIMEDOUT") || codes.has("UND_ERR_CONNECT_TIMEOUT")) return "timeout";
-  return "timeout";
+  const attempts = collectTerminalAttempts(err);
+  const refusedUnanimous = attempts.length > 0 && attempts.every((a) => a.code === "ECONNREFUSED");
+  return refusedUnanimous ? "refused" : "timeout";
 }
 
 export interface ProbeDeps {
