@@ -384,6 +384,46 @@ describe("SuccessorSessionLauncher", () => {
       expect(discoveryRepo.listDiscovered()).toHaveLength(0);
     });
 
+    it("r2 B1 regression: a configured NON-listed default shell (tcsh) is a VALID blank — never a false successor_pane_not_blank after the retiree is gone", async () => {
+      // r2's behavioral proof (tmux 3.6a): default-shell /bin/tcsh → pane_current_command "tcsh".
+      // The verifier must accept the basename of the shell the launcher ITSELF selected — a
+      // hard-coded set rejecting the configured shell refuses a valid blank pane AFTER the
+      // destructive cutover already happened.
+      getDefaultShell.mockResolvedValue("/bin/tcsh");
+      const res = await launcher().createSuccessor({
+        node: { id: "n", runtime: "codex", cwd: "/w" },
+        departingSessionName: "dev-guard@rig",
+      });
+      expect(res.ok).toBe(true);
+      const [, command] = respawnPane.mock.calls[0]!;
+      expect(command).toBe("/bin/tcsh");
+      expect(launchHarness).toHaveBeenCalledTimes(1);
+    });
+
+    it("r2-B1: an arbitrary configured default shell is accepted when the pane comes up as exactly that shell", async () => {
+      // The generalization r2 asked for: the launcher chose the respawn command, so the pane
+      // reporting that command's basename IS the verified blank slate — for any configured shell,
+      // not only the enumerated common set. (Mock semantics: getPaneCommand echoes the basename of
+      // the explicit respawn command.)
+      getDefaultShell.mockResolvedValue("/opt/oddshells/bin/osh");
+      const res = await launcher().createSuccessor({
+        node: { id: "n", runtime: "codex", cwd: "/w" },
+        departingSessionName: "dev-guard@rig",
+      });
+      expect(res.ok).toBe(true);
+      expect(launchHarness).toHaveBeenCalledTimes(1);
+    });
+
+    it("r2-B1: a login-shell '-' prefix on pane_current_command still reads as the blank shell", async () => {
+      getPaneCommand.mockResolvedValue("-zsh");
+      const res = await launcher().createSuccessor({
+        node: { id: "n", runtime: "codex", cwd: "/w" },
+        departingSessionName: "dev-guard@rig",
+      });
+      expect(res.ok).toBe(true);
+      expect(launchHarness).toHaveBeenCalledTimes(1);
+    });
+
     it("getDefaultShell unavailable → falls back to /bin/sh rather than an undefined respawn", async () => {
       getDefaultShell.mockResolvedValue(null);
       const res = await launcher().createSuccessor({
