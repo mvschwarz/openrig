@@ -13,21 +13,40 @@ import type { DaemonStateFile, HealthzProbeResult } from "./crash-cart-detect.js
  *  may carry a `code` (ECONNREFUSED/ETIMEDOUT/…) or NONE at all. A code-less attempt is retained here,
  *  which a flattened code-Set would erase. Depth-bounded (cycle-safe); a node hit at the cap is treated
  *  as a terminal attempt (its code, typically absent, then counts — conservatively). */
-function collectTerminalAttempts(err: unknown): Array<{ code?: string; name?: string }> {
-  const attempts: Array<{ code?: string; name?: string }> = [];
+const MAX_WALK_DEPTH = 10; // real Undici chains are 2–3 deep; this is generous. Beyond it = UNRESOLVED.
+
+function collectTerminalAttempts(err: unknown): Array<{ code?: string; name?: string; unresolved?: boolean }> {
+  const attempts: Array<{ code?: string; name?: string; unresolved?: boolean }> = [];
+  const onPath = new Set<object>(); // cycle detection by IDENTITY (a back-edge cannot be resolved)
   const visit = (e: unknown, depth: number): void => {
-    if (!e || typeof e !== "object") return;
+    // A non-object rejection (string/undefined/…) is not a resolvable terminal → unknown (non-refused).
+    if (!e || typeof e !== "object") {
+      attempts.push({ unresolved: true });
+      return;
+    }
     const o = e as { code?: unknown; name?: unknown; cause?: unknown; errors?: unknown };
+    // CYCLE: this exact object is already on the current path — it cannot be fully resolved → unknown.
+    if (onPath.has(o)) {
+      attempts.push({ unresolved: true });
+      return;
+    }
     const children: unknown[] = [];
-    if (depth < 6) {
-      if (o.cause) children.push(o.cause);
-      if (Array.isArray(o.errors)) children.push(...(o.errors as unknown[]));
-    }
+    if (o.cause) children.push(o.cause);
+    if (Array.isArray(o.errors)) children.push(...(o.errors as unknown[]));
     if (children.length === 0) {
+      // A FULLY-RESOLVED terminal attempt (no cause, no errors): its own code is real evidence.
       attempts.push({ code: typeof o.code === "string" ? o.code : undefined, name: typeof o.name === "string" ? o.name : undefined });
-    } else {
-      for (const c of children) visit(c, depth + 1);
+      return;
     }
+    // A WRAPPER (has children). If depth is exhausted, we CANNOT resolve it → record an UNKNOWN attempt;
+    // NEVER reinterpret an unresolved wrapper's OWN code as terminal evidence (exhaustion is not evidence).
+    if (depth >= MAX_WALK_DEPTH) {
+      attempts.push({ unresolved: true });
+      return;
+    }
+    onPath.add(o);
+    for (const c of children) visit(c, depth + 1);
+    onPath.delete(o);
   };
   visit(err, 0);
   return attempts;

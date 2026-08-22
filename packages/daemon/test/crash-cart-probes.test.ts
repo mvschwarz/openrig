@@ -106,6 +106,29 @@ describe("classifyProbeError — fetch rejection → probe result", () => {
   it("outer wrappers never count as terminal attempts — a bare 'fetch failed' with no cause → timeout, not refused", () => {
     expect(classifyProbeError(new TypeError("fetch failed"))).toBe("timeout");
   });
+
+  // GUARD round-9 blocker: exhaustion must not become evidence. A chain deeper than the walk cap, where
+  // the capped node is an ECONNREFUSED WRAPPER whose real terminal (code-less) is below the cap, must NOT
+  // count the wrapper's own code — cap-exhaustion-with-children is UNRESOLVED → fails unanimity → timeout.
+  it("deep capped wrapper (ECONNREFUSED wrapper past the cap over a code-less terminal) → timeout, never a promoted down", () => {
+    let node: unknown = new Error("code-less terminal deep below the walk cap"); // no code
+    for (let i = 0; i < 30; i++) node = Object.assign(new Error(`wrapper ${i}`), { code: "ECONNREFUSED", cause: node });
+    expect(classifyProbeError(node)).toBe("timeout");
+  });
+  // A self-referential cause cycle cannot be fully resolved → unknown → timeout (and it must TERMINATE).
+  it("a self-cycle cause (a.cause = a) → timeout (cycle is unknown, not a promoted down; and no infinite loop)", () => {
+    const a = Object.assign(new Error("self"), { code: "ECONNREFUSED" }) as Error & { cause?: unknown };
+    a.cause = a;
+    expect(classifyProbeError(a)).toBe("timeout");
+  });
+  // A two-node cycle across an AggregateError branch also resolves to unknown → timeout.
+  it("a mutual cycle (a.cause=b, b.cause=a) → timeout", () => {
+    const a = Object.assign(new Error("a"), { code: "ECONNREFUSED" }) as Error & { cause?: unknown };
+    const b = Object.assign(new Error("b"), { code: "ECONNREFUSED" }) as Error & { cause?: unknown };
+    a.cause = b;
+    b.cause = a;
+    expect(classifyProbeError(a)).toBe("timeout");
+  });
 });
 
 describe("probeHealthz — PRODUCTION PATH: a REAL refused socket, not a fabricated error", () => {
