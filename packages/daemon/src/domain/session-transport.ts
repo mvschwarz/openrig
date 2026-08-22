@@ -1032,15 +1032,20 @@ export class SessionTransport {
     // middle outcome `rendered-unconfirmed` — never a failure (OPR.99.0.6.3).
     if (opts?.verify) {
       await this.sleep(500);
-      let content: string | null = null;
-      try {
-        content = await this.runStage(
-          "session_transport.post_capture",
-          () => this.tmuxAdapter.capturePaneContent(sessionName, 30),
-        );
-      } catch {
-        content = null;
-      }
+      const tryCapture = async (): Promise<string | null> => {
+        try {
+          return await this.runStage(
+            "session_transport.post_capture",
+            () => this.tmuxAdapter.capturePaneContent(sessionName, 30),
+          );
+        } catch {
+          return null;
+        }
+      };
+      // A throwing first capture is usually a redraw race: one retry before
+      // giving up, so a draft visible behind the race still gets judged.
+      let content = await tryCapture();
+      if (content === null) content = await tryCapture();
 
       // Draft-race healing (issue #14): if the sent text's tail still occupies
       // the pane's bottom line, Enter raced the paste render and the message is
@@ -1062,26 +1067,18 @@ export class SessionTransport {
         if (!retry.ok) break;
         extraSubmits++;
         await this.sleep(SUBMIT_HEAL_SETTLE_MS);
-        try {
-          content = await this.runStage(
-            "session_transport.post_capture",
-            () => this.tmuxAdapter.capturePaneContent(sessionName, 30),
-          );
-        } catch {
-          break;
-        }
+        const next = await tryCapture();
+        if (next === null) break; // can no longer observe; stop rather than blind-fire Enters
+        content = next;
       }
       const stillStuck =
         content !== null && looksStuckInComposer(content, text);
 
       try {
         if (content === null) {
-          // The original behavior: a throwing capture is the middle outcome,
-          // never a failure — unless a heal pass already proved stuckness.
-          content = await this.runStage(
-            "session_transport.post_capture",
-            () => this.tmuxAdapter.capturePaneContent(sessionName, 30),
-          );
+          // Both capture attempts failed: the middle outcome, never a failure
+          // (OPR.99.0.6.3).
+          throw new Error("post-send capture unavailable");
         }
         const snippet = text.substring(0, Math.min(text.length, 40));
         const preCount = countOccurrences(preVerifyContent ?? "", snippet);

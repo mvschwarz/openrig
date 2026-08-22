@@ -456,8 +456,10 @@ describe("SessionTransport", () => {
 
   it("surfaces submit_failed when the draft persists after bounded retries", async () => {
     seedCanonicalRig();
+    const sendKeysSpy = vi.fn(async (_t: string, _keys: string[]) => ({ ok: true as const }));
     const tmux = mockTmux({
       capturePaneContent: async () => "prior output\n❯ unsubmitted tail here\n",
+      sendKeys: sendKeysSpy,
     });
     const transport = createTransport(tmux);
 
@@ -466,6 +468,8 @@ describe("SessionTransport", () => {
     expect(result.ok).toBe(false);
     expect(result.reason).toBe("submit_failed");
     expect(result.outcome).toBe("failed");
+    // One initial submit plus exactly SUBMIT_HEAL_MAX_EXTRA bounded retries.
+    expect(sendKeysSpy).toHaveBeenCalledTimes(4);
   });
 
   it("a transcript echo of a delivered message is never mistaken for a stuck draft", async () => {
@@ -475,8 +479,10 @@ describe("SessionTransport", () => {
       capturePaneContent: async () => {
         captureCount++;
         if (captureCount <= 2) return "idle prompt\n❯ ";
-        // Delivered: marker-prefixed echo happens to be the bottom line.
-        return "> hello\n❯ ";
+        // Delivered: the marker-prefixed echo sits AFTER the fresh prompt and
+        // IS the bottom line — the hardest case for the detector, which must
+        // exclude it by its marker rather than by position.
+        return "❯ \n> hello";
       },
     });
     const transport = createTransport(tmux);
