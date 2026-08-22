@@ -201,10 +201,13 @@ export function attentionRowsFromNodes(rigId: string, nodes: RestoreNodeLite[]):
           : "live runtime prompt (resume selection / auth) — needs operator",
       });
     } else if (n.status === "awaiting-decision") {
+      // BLOCKER 3 — preserve the shipped orchestrator's EXACT error/remediation (it carries the concrete
+      // `--fresh <logicalId>` command and reason); only fall back to the generic sentence when the node
+      // carried none. The exact need reaching the operator IS the door's "seat + exact need" acceptance.
       rows.push({
         rigId,
         seat: n.logicalId,
-        need: "original session not resumable and no --fresh — choose fresh-prime or skip",
+        need: n.error ? n.error : "original session not resumable and no --fresh — choose fresh-prime or skip",
       });
     } else if (n.status === "failed") {
       rows.push({ rigId, seat: n.logicalId, need: n.error ? `restore failed: ${n.error}` : "restore failed" });

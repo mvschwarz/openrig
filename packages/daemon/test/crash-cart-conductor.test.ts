@@ -250,6 +250,19 @@ describe("attentionRowsFromNodes (R5 — triage: seat + exact need)", () => {
     expect(rows.every((r) => r.rigId === "kernel")).toBe(true);
   });
 
+  it("BLOCKER 3: awaiting-decision PRESERVES the exact node error/remediation (the --fresh command), not a generic sentence", () => {
+    const exact = "session for dev.qa not resumable (resume_token expired); run: rig restore snap-7 --fresh dev.qa — or skip this seat";
+    const rows = attentionRowsFromNodes("myrig", [{ logicalId: "dev.qa", status: "awaiting-decision", error: exact }]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.need).toBe(exact); // the EXACT evidence reaches the operator (the door's acceptance sentence)
+    expect(rows[0]!.need).toContain("--fresh dev.qa");
+  });
+
+  it("awaiting-decision with NO node error falls back to the generic sentence (never blank)", () => {
+    const rows = attentionRowsFromNodes("r", [{ logicalId: "dev.x", status: "awaiting-decision" }]);
+    expect(rows[0]!.need).toContain("choose fresh-prime or skip");
+  });
+
   it("no attention-needing nodes → empty (never fabricated)", () => {
     expect(attentionRowsFromNodes("r", [{ logicalId: "a", status: "resumed" }, { logicalId: "b", status: "fresh-primed" }])).toEqual([]);
   });

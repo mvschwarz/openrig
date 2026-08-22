@@ -6,7 +6,8 @@
 // behave unchanged. New file; shipped CLI floors untouched.
 import { describe, it, expect, vi } from "vitest";
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runFrontDoor, resolveTuiPath, probeFrontDoor, type FrontDoorIo } from "../src/front-door.js";
 import { DaemonConnectionError, DaemonResponseError, DaemonTimeoutError } from "../src/client.js";
@@ -73,7 +74,7 @@ describe("bare-rig front door — ownership rules", () => {
 });
 
 describe("bare-rig front door — first-impression degrade (never a stack trace)", () => {
-  it("transport connect failure → four typed axes naming `rig up`, never generic daemon-down", async () => {
+  it("BLOCKER 1: transport connect (daemon DOWN) LAUNCHES the crash-cart TUI, not a degrade-and-exit", async () => {
     const deps = io({
       probeDaemon: async () => ({
         state: "diagnostic" as const,
@@ -88,18 +89,28 @@ describe("bare-rig front door — first-impression degrade (never a stack trace)
     });
     const handled = await runFrontDoor(["node", "rig"], deps);
     expect(handled).toBe(true);
-    expect(deps.launches).toBe(0);
+    // The daemon-down state is exactly what the crash-cart cockpit exists for — bare `rig` must REACH it.
+    expect(deps.launches).toBe(1);
+    expect(deps.exits).toEqual([0]); // exits with the TUI's code, not a forced degrade exit(1)
     const text = deps.errLines.join("\n");
-    expect(text).toMatch(/transport: connect/i);
-    expect(text).toContain("cwd/read: unknown");
-    expect(text).toContain("command/PATH: unknown");
-    expect(text).toContain("not_applicable: UNKNOWN");
-    expect(text).toContain("runtime posture: TRANSPORT_CONNECT");
-    expect(text).toMatch(/rig up/);
-    expect(text).toMatch(/rig --help/);
-    expect(text).not.toMatch(/daemon not running/i);
-    expect(text).not.toMatch(/\n\s+at /); // no stack frames
-    expect(deps.exits).toEqual([1]);
+    expect(text).not.toMatch(/runtime posture: TRANSPORT_CONNECT/); // no degrade-and-exit for daemon-down
+  });
+
+  it("BLOCKER 1 PRODUCTION PATH: bare rig + daemon down via the REAL probeFrontDoor → the crash-cart TUI launches", async () => {
+    // Not a mocked probe result — the real probeFrontDoor classification runs; only the socket is stubbed
+    // to the daemon-down failure (ECONNREFUSED → DaemonConnectionError). The whole front-door composition
+    // (probe → normalize → openMissionControl launch decision) is exercised, which is the seam that hid
+    // the defect: the prior tests injected a probe RESULT and asserted launches:0.
+    const stubClient = {
+      get: async () => {
+        throw new DaemonConnectionError("connect ECONNREFUSED 127.0.0.1:7433");
+      },
+    };
+    const deps = io({ probeDaemon: () => probeFrontDoor({ client: stubClient, env: {} }) });
+    const handled = await runFrontDoor(["node", "rig"], deps);
+    expect(handled).toBe(true);
+    expect(deps.launches).toBe(1); // bare-rig + daemon-down → TUI launched into the crash-cart path
+    expect(deps.errLines.join("\n")).not.toMatch(/runtime posture/); // not a degrade-and-exit
   });
 
   it.each([
@@ -187,7 +198,7 @@ describe("bare-rig front door — first-impression degrade (never a stack trace)
     expect(deps.exits).toEqual([1]);
   });
 
-  it.each(["timeout", "response"] as const)("%s stays a transport/response verdict and never becomes permission drift", async (state) => {
+  it.each(["timeout", "response"] as const)("BLOCKER 1: transport %s (daemon not ready) LAUNCHES the TUI (its probe makes the down/unverified call)", async (state) => {
     const deps = io({
       probeDaemon: async () => ({
         state: "diagnostic" as const,
@@ -201,33 +212,22 @@ describe("bare-rig front door — first-impression degrade (never a stack trace)
       }),
     });
     await runFrontDoor(["node", "rig"], deps);
-    const text = deps.errLines.join("\n");
-    expect(text).toContain(`transport: ${state}`);
-    expect(text).toContain(`${state} detail`);
-    expect(text).not.toContain("PERMISSION_DRIFT");
-    expect(text).not.toMatch(/daemon not running/i);
+    expect(deps.launches).toBe(1); // not-ready → the TUI; its own crash-cart probe renders down vs unverified
+    expect(deps.errLines.join("\n")).not.toMatch(/runtime posture/); // no degrade-and-exit
   });
 
-  it("normalizes the legacy false probe into a complete four-axis diagnostic", async () => {
+  it("normalizes the legacy `false` probe (daemon down) → LAUNCHES the crash-cart TUI", async () => {
     const deps = io({ probeDaemon: async () => false });
     await runFrontDoor(["node", "rig"], deps);
-    const text = deps.errLines.join("\n");
-    expect(text).toContain("runtime posture: TRANSPORT_CONNECT");
-    expect(text).toContain("transport: connect");
-    expect(text).toContain("cwd/read: unknown");
-    expect(text).toContain("command/PATH: unknown");
-    expect(text).toContain("not_applicable: UNKNOWN");
+    expect(deps.launches).toBe(1); // false → connect diagnostic → daemon-down → the cockpit, not a degrade
+    expect(deps.errLines.join("\n")).not.toMatch(/runtime posture/);
   });
 
-  it("normalizes a legacy transport-only result into the complete four-axis diagnostic", async () => {
+  it("normalizes a legacy transport-only timeout result (not ready) → LAUNCHES the TUI", async () => {
     const deps = io({ probeDaemon: async () => ({ state: "timeout", message: "legacy timeout detail" }) });
     await runFrontDoor(["node", "rig"], deps);
-    const text = deps.errLines.join("\n");
-    expect(text).toContain("runtime posture: TRANSPORT_TIMEOUT");
-    expect(text).toContain("cwd/read: unknown");
-    expect(text).toContain("command/PATH: unknown");
-    expect(text).toContain("not_applicable: UNKNOWN");
-    expect(text).toContain("legacy timeout detail");
+    expect(deps.launches).toBe(1); // timeout → not ready → TUI (its probe renders unverified)
+    expect(deps.errLines.join("\n")).not.toMatch(/runtime posture/);
   });
 
   it("TUI init failure → helpful usage with the failure line, exit 1, no stack trace", async () => {
@@ -362,42 +362,43 @@ describe("resolveTuiPath — monorepo-first, bundled fallback (the daemon resolv
 describe("PUBLIC bin ownership (guard finding 1 — the wrapper is the real front door)", () => {
   const binWrapper = join(__dirname, "..", "dist", "bin-wrapper.js");
   const hasTmux = spawnSync("tmux", ["-V"], { encoding: "utf-8" }).status === 0;
-  it.skipIf(!existsSync(binWrapper) || !hasTmux)("bare PUBLIC bin under a REAL PTY reaches the front-door path (daemon-down degrade proves ownership)", () => {
-    // tmux gives the process a real TTY on BOTH streams (BSD script(1) cannot
-    // allocate one under a piped test runner). A dead daemon URL forces the
-    // front door's degrade branch — its distinctive message proves
-    // runFrontDoor ran on the PUBLIC path (commander's usage text would mean
-    // the bypass guard reported).
+  it.skipIf(!existsSync(binWrapper) || !hasTmux)("bare PUBLIC bin under a REAL PTY reaches the crash-cart COCKPIT when the daemon is down (BLOCKER 1 ownership + reachability)", () => {
+    // tmux gives the process a real TTY on BOTH streams. A dead daemon URL is exactly the crash-cart's
+    // state: post-fix the front door LAUNCHES the TUI, which renders the daemon-down cockpit
+    // ("daemon not running") — stronger ownership proof than the old degrade message (it reaches the
+    // actual feature). Commander's usage bypass would mean the front door did NOT own the invocation.
+    // Isolated OPENRIG_HOME so the launched TUI never reads the live rig (fully contained + read-only).
     const session = `frontdoor-pin-${process.pid}`;
+    const home = mkdtempSync(join(tmpdir(), "fd-tmux-home-"));
     spawnSync("tmux", ["kill-session", "-t", session], { encoding: "utf-8" });
     const run = spawnSync(
       "tmux",
       ["new-session", "-d", "-s", session, "-x", "120", "-y", "30",
-        `OPENRIG_URL=http://127.0.0.1:9 ${process.execPath} ${binWrapper}; sleep 15`],
+        `OPENRIG_HOME=${home} OPENRIG_URL=http://127.0.0.1:9 ${process.execPath} ${binWrapper}; sleep 15`],
       { encoding: "utf-8", timeout: 10000 },
     );
     expect(run.status).toBe(0);
     let text = "";
-    for (let i = 0; i < 20 && !/transport: connect|Usage: rig/.test(text); i++) {
+    for (let i = 0; i < 20 && !/EXPLORER|mission control could not start|Usage: rig/.test(text); i++) {
       spawnSync("sleep", ["0.5"]);
       text = spawnSync("tmux", ["capture-pane", "-t", session, "-p"], { encoding: "utf-8", timeout: 5000 }).stdout ?? "";
     }
     spawnSync("tmux", ["kill-session", "-t", session], { encoding: "utf-8" });
-    expect(text).toMatch(/transport: connect/);
-    expect(text).not.toMatch(/Usage: rig \[options\] \[command\]/); // NOT the commander bypass
-    expect(text).not.toMatch(/\n\s+at /);
+    rmSync(home, { recursive: true, force: true });
+    // The daemon being unreachable, the front door LAUNCHED the TUI (its universal chrome — the EXPLORER
+    // pane — renders), or degraded honestly if the TUI is not installed. Either proves the PUBLIC bin ran
+    // the front-door path; commander's usage bypass would mean it did NOT. (The crash-cart cockpit render
+    // itself is covered by the TUI's own tests; the launch decision by the deterministic production-path test.)
+    expect(text).toMatch(/EXPLORER|mission control could not start/);
+    expect(text).not.toMatch(/Usage: rig \[options\] \[command\]/);
   });
 
-  it.skipIf(!existsSync(binWrapper))("compiled wrapper wiring: forced-TTY in-process run reaches the degrade branch (belt for PTY-less environments)", () => {
-    const probe = spawnSync(
-      process.execPath,
-      ["-e", `process.stdin.isTTY = true; process.stdout.isTTY = true; process.argv[1] = ${JSON.stringify(binWrapper)}; import(${JSON.stringify(binWrapper)});`],
-      { encoding: "utf-8", timeout: 10000, env: { ...process.env, OPENRIG_URL: "http://127.0.0.1:9" } },
-    );
-    const text = `${probe.stdout}${probe.stderr}`;
-    expect(text).toMatch(/transport: connect/);
-    expect(text).not.toMatch(/\n\s+at /);
-  });
+  // (Removed the in-process forced-TTY "reaches the degrade branch" belt: its premise was a FAST
+  //  daemon-down DEGRADE, which BLOCKER 1's fix replaces with launching the crash-cart TUI. Forcing a
+  //  TTY in-process would spawn an INTERACTIVE TUI child (no clean exit) — not a safe/deterministic unit
+  //  test. Compiled-wrapper ownership is covered by the tmux cockpit test above (contained + killed) and
+  //  the piped-baseline test below; the front-door LAUNCH decision is covered deterministically by the
+  //  "PRODUCTION PATH … REAL probeFrontDoor" test earlier, with no real TUI spawned.)
 
   it.skipIf(!existsSync(binWrapper))("piped PUBLIC bin keeps the commander usage baseline (no TUI, fast exit)", () => {
     const result = spawnSync(process.execPath, [binWrapper], {

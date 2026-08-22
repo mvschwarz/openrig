@@ -214,7 +214,18 @@ export async function openMissionControl(io: FrontDoorIo = {}): Promise<void> {
   const launch = io.launchTui ?? defaultLaunchTui;
 
   const probeResult = normalizeProbe(await probe());
-  if (probeResult.state !== "ready") {
+  // The daemon-DOWN / not-reachable states are EXACTLY what the crash-cart TUI exists to render — bare
+  // `rig` with the daemon down must reach the cockpit, not exit (BLOCKER 1: the whole conductor is
+  // unreachable from its entry point otherwise). So when the transport is not healthy (connect → down,
+  // timeout → unverified), LAUNCH the TUI: its own `rig crash-cart --json` probe makes the honest
+  // confirmed-down vs unverified distinction and renders the cockpit or the cannot-verify screen.
+  // A diagnostic with a HEALTHY transport (daemon UP but cwd/command/permission drift) is a genuine
+  // first-impression degrade — keep the concise diagnostic + exit; launching would MASK the drift by
+  // rendering normal mission control.
+  const shouldLaunchTui =
+    probeResult.state === "ready"
+    || (probeResult.state === "diagnostic" && probeResult.diagnostic.transport.state !== "healthy");
+  if (!shouldLaunchTui) {
     for (const line of USAGE_LINES) err(line);
     err("");
     err(`runtime posture: ${diagnosticVerdict(probeResult.diagnostic)}`);

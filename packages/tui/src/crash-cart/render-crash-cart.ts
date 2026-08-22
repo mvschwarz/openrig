@@ -133,6 +133,20 @@ export function renderCrashCartView(model: CrashCartModel): Line[] {
   ];
 }
 
+/** Glyph + token for the DONE header by the DERIVED fleet verdict — the conclusion must match the
+ *  truth: only an all-restored fleet wears the success ✓; all_failed is ✗; none_attempted / mixed carry
+ *  a warning, never a success glyph (BLOCKER 2 — the rollup was truthful, the header was not). */
+function verdictGlyph(verdict: string): { glyph: string; token: Token } {
+  switch (verdict) {
+    case "all_fully_restored":
+      return { glyph: "✓", token: "ok" };
+    case "all_failed":
+      return { glyph: "✗", token: "error" };
+    default:
+      return { glyph: "⚠", token: "warn" }; // none_attempted / mixed / partially — not a success
+  }
+}
+
 /** Glyph for a per-rig progress row by its rollup outcome. */
 function outcomeGlyph(outcome: string): { glyph: string; token: Token } {
   switch (outcome) {
@@ -213,9 +227,10 @@ export function renderRestoreLifecycleView(vm: RestoreLifecycleVM): Line[] {
   }
 
   // done
+  const vg = verdictGlyph(vm.verdict);
   const out: Line[] = [
     line([
-      { text: `✓ FLEET RESTORE: ${vm.verdict}`, token: "bright", bold: true },
+      { text: `${vg.glyph} FLEET RESTORE: ${vm.verdict}`, token: vg.token, bold: true },
       ...(vm.cancelled ? [{ text: " (cancelled)", token: "warn" as Token }] : []),
     ]),
     line([countsSeg]),

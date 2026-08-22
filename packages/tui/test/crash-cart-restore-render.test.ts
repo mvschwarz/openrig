@@ -87,6 +87,34 @@ describe("renderRestoreLifecycleView — detached (HIGH-1: honest, operable, nev
   });
 });
 
+describe("renderRestoreLifecycleView — done header glyph matches the verdict (BLOCKER 2)", () => {
+  const header = (verdict: string) =>
+    renderRestoreLifecycleView(
+      buildRestoreLifecycleVM(
+        frame({ phase: "done", done: true, verdict, rollup: { counts: { fully_restored: 0, partially_restored: 0, failed: 1, not_attempted: 0 }, sequence: [], attention_required: [] } }),
+      ),
+    )[0]!.text;
+
+  it("all_failed does NOT wear the success ✓ — it shows ✗", () => {
+    const h = header("all_failed");
+    expect(h).toContain("FLEET RESTORE: all_failed");
+    expect(h).not.toContain("✓");
+    expect(h).toContain("✗");
+  });
+
+  it("none_attempted and mixed wear a warning, never ✓", () => {
+    for (const v of ["none_attempted", "mixed"]) {
+      const h = header(v);
+      expect(h, `${v} header`).not.toContain("✓");
+      expect(h, `${v} header`).toContain("⚠");
+    }
+  });
+
+  it("all_fully_restored still wears the success ✓", () => {
+    expect(header("all_fully_restored")).toContain("✓ FLEET RESTORE: all_fully_restored");
+  });
+});
+
 describe("renderRestoreLifecycleView — running (mid-run progress frame)", () => {
   it("shows a per-rig progress list + the cancel affordance while running", () => {
     const vm = buildRestoreLifecycleVM(

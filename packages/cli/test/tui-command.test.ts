@@ -24,15 +24,14 @@ describe("rig tui — alias of the bare-rig front-door mission-control path (no 
     expect(exit).toHaveBeenCalledWith(0);
   });
 
-  it("transport connect failure → identical typed degrade, exit 1, no launch", async () => {
+  it("BLOCKER 1: transport connect failure (daemon DOWN) LAUNCHES the crash-cart TUI (rig tui = bare rig)", async () => {
     const launchTui = vi.fn(async () => 0);
     const errs: string[] = [];
     const exit = vi.fn();
     await run({ stdoutIsTTY: true, probeDaemon: async () => false, launchTui, exit, err: (l: string) => errs.push(l) });
-    expect(launchTui).not.toHaveBeenCalled();
-    expect(errs.join("\n")).toMatch(/transport: connect/);
-    expect(errs.join("\n")).not.toMatch(/daemon not running/);
-    expect(exit).toHaveBeenCalledWith(1);
+    expect(launchTui).toHaveBeenCalledTimes(1); // daemon down must REACH the cockpit, not degrade-and-exit
+    expect(errs.join("\n")).not.toMatch(/runtime posture/);
+    expect(exit).toHaveBeenCalledWith(0); // exits with the TUI's code
   });
 
   it("stdout NOT a TTY → degrades (same TTY-awareness on stdout), never launches into a pipe", async () => {
