@@ -424,6 +424,69 @@ describe("SessionTransport", () => {
     expect(result.outcome).toBeUndefined();
   });
 
+  // Issue #14 — draft-race healing: a C-m that outruns the paste render leaves
+  // the message parked in the composer, and plain occurrence counting reports
+  // it as rendered (the reporter saw "Verified: yes" on a stuck draft).
+  it("re-submits when the sent text is still sitting in the composer", async () => {
+    seedCanonicalRig();
+    let captureCount = 0;
+    const sendKeysSpy = vi.fn(async (_t: string, _keys: string[]) => ({ ok: true as const }));
+    const tmux = mockTmux({
+      // Captures: readiness probe + pre-capture are idle; the first post-send
+      // capture shows the raw draft on the composer line; a later capture
+      // finally shows the delivered echo above a fresh prompt.
+      capturePaneContent: async () => {
+        captureCount++;
+        if (captureCount <= 2) return "idle prompt\n❯ ";
+        if (captureCount === 3) return "hello from the rig\n❯ hello from the rig\n"; // stuck draft
+        return "> hello from the rig\n❯ "; // delivered: marker echo + clear composer
+      },
+      sendKeys: sendKeysSpy,
+    });
+    const transport = createTransport(tmux);
+
+    const result = await transport.send("dev-impl@my-rig", "hello from the rig", { verify: true });
+
+    expect(result.ok).toBe(true);
+    expect(result.verified).toBe(true);
+    expect(result.outcome).toBe("delivered");
+    // Initial submit plus exactly one healing re-submit.
+    expect(sendKeysSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("surfaces submit_failed when the draft persists after bounded retries", async () => {
+    seedCanonicalRig();
+    const tmux = mockTmux({
+      capturePaneContent: async () => "prior output\n❯ unsubmitted tail here\n",
+    });
+    const transport = createTransport(tmux);
+
+    const result = await transport.send("dev-impl@my-rig", "unsubmitted tail here", { verify: true });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("submit_failed");
+    expect(result.outcome).toBe("failed");
+  });
+
+  it("a transcript echo of a delivered message is never mistaken for a stuck draft", async () => {
+    seedCanonicalRig();
+    let captureCount = 0;
+    const tmux = mockTmux({
+      capturePaneContent: async () => {
+        captureCount++;
+        if (captureCount <= 2) return "idle prompt\n❯ ";
+        // Delivered: marker-prefixed echo happens to be the bottom line.
+        return "> hello\n❯ ";
+      },
+    });
+    const transport = createTransport(tmux);
+
+    const result = await transport.send("dev-impl@my-rig", "hello", { verify: true });
+
+    expect(result.ok).toBe(true);
+    expect(result.outcome).toBe("delivered");
+  });
+
   // Test 7: send with mid-work detected → DELIVER WITH ADVISORY (OPR.0.4.3.28 fast-follow —
   // mid_work downgraded from a hard refuse to a non-blocking advisory; busy is not a block).
   it("send with mid-work detected DELIVERS with a non-blocking advisory (not a refusal)", async () => {

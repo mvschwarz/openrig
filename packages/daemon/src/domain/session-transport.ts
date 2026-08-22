@@ -341,6 +341,49 @@ function countOccurrences(haystack: string, needle: string): number {
   return count;
 }
 
+// Issue #14 — draft-race healing constants. A C-m that outruns the TUI's
+// consumption of pasted bytes leaves the message sitting unsubmitted in the
+// composer; occurrence counting alone then reports it as rendered. These
+// bound the re-submit attempt: extra Enters on an already-delivered message
+// are inert in every supported TUI, so the bias is toward retrying.
+const SUBMIT_HEAL_MAX_EXTRA = 3;
+const SUBMIT_HEAL_SETTLE_MS = 400;
+
+function collapseWs(s: string): string {
+  return s.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * True when `content` looks like the sent text is still parked unsubmitted in
+ * the seat's composer: the tail of the text occupies the pane's bottom line.
+ *
+ * Transcript echoes are excluded by prefix — delivered user messages render
+ * with a marker ("> ", "› ") and scroll above a fresh composer, while a stuck
+ * draft sits raw on the input line. Matching uses the last few characters of
+ * the text with whitespace collapsed, so composer wrapping does not defeat it.
+ */
+export function looksStuckInComposer(content: string | null, text: string): boolean {
+  if (!content || !text) return false;
+  const lines = content.split("\n");
+  let bottom = "";
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const raw = lines[i];
+    if (!raw) continue;
+    const t = collapseWs(raw);
+    if (t) {
+      bottom = t;
+      break;
+    }
+  }
+  if (!bottom) return false;
+  // A transcript echo of a DELIVERED message keeps its marker prefix.
+  if (/^(>|›)\s/.test(bottom)) return false;
+  const tailSource = collapseWs(text);
+  const needle = tailSource.slice(-12);
+  if (!needle) return false;
+  return bottom.includes(needle);
+}
+
 /** Map a resolved fan-out target + its recipient list → the EnvelopeScope (ruling 03c35295). The
  *  transport knows the target shape + resolved seats, so it builds the honest scale daemon-side:
  *  DM / multi (full list) / rig- or pod-scoped broadcast (with seat count) / topology. */
@@ -989,15 +1032,73 @@ export class SessionTransport {
     // middle outcome `rendered-unconfirmed` — never a failure (OPR.99.0.6.3).
     if (opts?.verify) {
       await this.sleep(500);
+      let content: string | null = null;
       try {
-        const content = await this.runStage(
+        content = await this.runStage(
           "session_transport.post_capture",
           () => this.tmuxAdapter.capturePaneContent(sessionName, 30),
         );
+      } catch {
+        content = null;
+      }
+
+      // Draft-race healing (issue #14): if the sent text's tail still occupies
+      // the pane's bottom line, Enter raced the paste render and the message is
+      // parked unsubmitted in the composer. Re-submit, bounded, with settle
+      // delays; occurrence counting alone cannot see this state because a raw
+      // draft satisfies it just as well as a delivered echo does.
+      let extraSubmits = 0;
+      while (
+        content !== null &&
+        looksStuckInComposer(content, text) &&
+        extraSubmits < SUBMIT_HEAL_MAX_EXTRA
+      ) {
+        await this.sleep(SUBMIT_HEAL_SETTLE_MS);
+        const retry = await this.runStage(
+          "session_transport.resubmit",
+          () => this.tmuxAdapter.sendKeys(sessionName, ["C-m"]),
+          (result) => (result.ok ? "ok" : "failed"),
+        );
+        if (!retry.ok) break;
+        extraSubmits++;
+        await this.sleep(SUBMIT_HEAL_SETTLE_MS);
+        try {
+          content = await this.runStage(
+            "session_transport.post_capture",
+            () => this.tmuxAdapter.capturePaneContent(sessionName, 30),
+          );
+        } catch {
+          break;
+        }
+      }
+      const stillStuck =
+        content !== null && looksStuckInComposer(content, text);
+
+      try {
+        if (content === null) {
+          // The original behavior: a throwing capture is the middle outcome,
+          // never a failure — unless a heal pass already proved stuckness.
+          content = await this.runStage(
+            "session_transport.post_capture",
+            () => this.tmuxAdapter.capturePaneContent(sessionName, 30),
+          );
+        }
         const snippet = text.substring(0, Math.min(text.length, 40));
         const preCount = countOccurrences(preVerifyContent ?? "", snippet);
         const postCount = countOccurrences(content ?? "", snippet);
-        const verified = postCount > preCount;
+        const verified = postCount > preCount && !stillStuck;
+        if (!verified && stillStuck) {
+          // A draft we could not clear after bounded re-submits is materially
+          // "text visible, not submitted": surface the same failure vocabulary.
+          return {
+            ok: false,
+            sessionName,
+            reason: "submit_failed",
+            outcome: "failed",
+            error: `Text remains unsubmitted in '${sessionName}' composer after ${1 + extraSubmits} submit attempts. The agent may need manual attention.`,
+            ...(waitMode ? { sent: true, ...waitEvidence } : {}),
+          };
+        }
         return { ok: true, sessionName, verified, outcome: verified ? "delivered" : "rendered-unconfirmed", ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) };
       } catch {
         return { ok: true, sessionName, verified: false, outcome: "rendered-unconfirmed", ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) };
