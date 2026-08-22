@@ -126,7 +126,15 @@ describe("seat-handover model-fidelity money-proof (real codex, isolated tmux)",
         // approves it. We simulate that approval CONCURRENTLY (below) so the readiness window observes a
         // genuinely-ready agent — the handover's not-ready signal is HONEST, not a false-negative, so we
         // must make the successor actually ready rather than assert around it.
-        readinessTimeoutMs: 30000, sleep,
+        //
+        // 90s, NOT 30s (post-5.2-cut root-cause, 2026-08-22): under FULL-SUITE conditions on this
+        // 4-core box the successor becomes ready at ~30s (measured: an in-suite pass at 29,997ms —
+        // 3ms under the old ceiling) versus ~8s on a quiet box, so 30s sat exactly ON the loaded
+        // boot time and the test failed by timing, not by product (each failure showed the service's
+        // HONEST not-ready, and every green run renders the pinned model verbatim). Synthetic
+        // loadavg 29 alone does NOT reproduce it — the mechanism is the suite's process/API
+        // contention, not CPU. Headroom belongs in the TEST; the service default is untouched.
+        readinessTimeoutMs: 90000, sleep,
       });
 
       // Approve the codex workspace-trust gate DURING the readiness window (what a trusted workspace /
@@ -135,7 +143,10 @@ describe("seat-handover model-fidelity money-proof (real codex, isolated tmux)",
       // appears, then stop. (Unconditional/repeated Enters over-navigate codex mid-resolution and can
       // flip the effective model — a real trap this proof must not fall into.)
       const trustApprover = (async () => {
-        for (let i = 0; i < 25; i++) {
+        // 85 polls, matching the 90s readiness window: under loaded-suite conditions the trust
+        // gate itself can appear late, and an approver that gives up at 25s makes the readiness
+        // headroom above unreachable in exactly the case it exists for.
+        for (let i = 0; i < 85; i++) {
           await sleep(1000);
           const c = await tmux(`capture-pane -p -t ${q(pane)}`).catch(() => "");
           if (/Do you trust the contents of this directory/.test(c)) {
