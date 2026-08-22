@@ -118,6 +118,108 @@ describe("startTranscriptRotation — capture-pane invocation contract", () => {
   });
 });
 
+describe("startTranscriptRotation — unchanged-content write suppression (hotfix qitem-20260822222746-3a64ae43)", () => {
+  // The 2s-cadence tick rewrote the transcript file unconditionally on every
+  // tick; across hundreds of live seats macOS amplifies each rename through
+  // fseventsd into a host CPU/RSS storm. Two byte-identical captures must
+  // perform NO second temp-write/rename. Observed via inode stability: the
+  // atomic rename replaces the file's inode, so an unchanged inode proves no
+  // rewrite occurred — no fs mocking required.
+  it("does NOT temp-write/rename when two successive captures are byte-identical (inode stable)", async () => {
+    const adapter = makeFakeAdapter("stable-1\nstable-2\n");
+    const outputPath = path.join(tmpDir, "rig", "session.log");
+
+    startTranscriptRotation(
+      adapter as unknown as TmuxAdapter,
+      "session@rig",
+      outputPath,
+      { lines: 1000, pollIntervalMs: 60_000 },
+    );
+    await new Promise((r) => setImmediate(r));
+    expect(fs.readFileSync(outputPath, "utf8")).toBe("stable-1\nstable-2\n");
+    const inoAfterFirst = fs.statSync(outputPath).ino;
+
+    // Second immediate tick captures identical content (idempotent replace).
+    startTranscriptRotation(
+      adapter as unknown as TmuxAdapter,
+      "session@rig",
+      outputPath,
+      { lines: 1000, pollIntervalMs: 60_000 },
+    );
+    await new Promise((r) => setImmediate(r));
+
+    // Bounded output preserved ...
+    expect(fs.readFileSync(outputPath, "utf8")).toBe("stable-1\nstable-2\n");
+    // ... and NO second temp-write/rename occurred (inode unchanged, no tmp litter).
+    expect(fs.statSync(outputPath).ino).toBe(inoAfterFirst);
+    expect(
+      fs.readdirSync(path.dirname(outputPath)).filter((e) => e.includes(".tmp.")),
+    ).toEqual([]);
+
+    stopTranscriptRotation("session@rig");
+  });
+
+  it("STILL rewrites when the capture content genuinely changes (no over-suppression)", async () => {
+    const adapter = makeFakeAdapter("first\n");
+    const outputPath = path.join(tmpDir, "rig", "session.log");
+    startTranscriptRotation(
+      adapter as unknown as TmuxAdapter,
+      "session@rig",
+      outputPath,
+      { lines: 1000, pollIntervalMs: 60_000 },
+    );
+    await new Promise((r) => setImmediate(r));
+    const inoAfterFirst = fs.statSync(outputPath).ino;
+
+    adapter.capturePaneContent.mockResolvedValue("second\n");
+    startTranscriptRotation(
+      adapter as unknown as TmuxAdapter,
+      "session@rig",
+      outputPath,
+      { lines: 1000, pollIntervalMs: 60_000 },
+    );
+    await new Promise((r) => setImmediate(r));
+
+    expect(fs.readFileSync(outputPath, "utf8")).toBe("second\n");
+    expect(fs.statSync(outputPath).ino).not.toBe(inoAfterFirst);
+    stopTranscriptRotation("session@rig");
+  });
+
+  it("preserves the SESSION BOUNDARY header while suppressing an unchanged rewrite", async () => {
+    const adapter = makeFakeAdapter("scrollback-A\n");
+    const outputPath = path.join(tmpDir, "rig", "session.log");
+    // Restore orchestrator seeds a boundary line before launch.
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    fs.writeFileSync(outputPath, "--- SESSION BOUNDARY: 2026-08-22 restore\n");
+
+    startTranscriptRotation(
+      adapter as unknown as TmuxAdapter,
+      "session@rig",
+      outputPath,
+      { lines: 1000, pollIntervalMs: 60_000 },
+    );
+    await new Promise((r) => setImmediate(r));
+    expect(fs.readFileSync(outputPath, "utf8")).toBe(
+      "--- SESSION BOUNDARY: 2026-08-22 restore\nscrollback-A\n",
+    );
+    const inoAfterFirst = fs.statSync(outputPath).ino;
+
+    // Identical second tick: boundary + body byte-identical → suppressed.
+    startTranscriptRotation(
+      adapter as unknown as TmuxAdapter,
+      "session@rig",
+      outputPath,
+      { lines: 1000, pollIntervalMs: 60_000 },
+    );
+    await new Promise((r) => setImmediate(r));
+    expect(fs.readFileSync(outputPath, "utf8")).toBe(
+      "--- SESSION BOUNDARY: 2026-08-22 restore\nscrollback-A\n",
+    );
+    expect(fs.statSync(outputPath).ino).toBe(inoAfterFirst);
+    stopTranscriptRotation("session@rig");
+  });
+});
+
 describe("startTranscriptRotation — timer lifecycle", () => {
   it("registers exactly one active timer per session and replaces on second start", () => {
     const adapter = makeFakeAdapter();

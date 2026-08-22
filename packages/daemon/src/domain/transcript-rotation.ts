@@ -72,21 +72,32 @@ export function startTranscriptRotation(
       // expected to carry across rotations; everything else is
       // terminal-scrollback content from capture-pane.
       let header = "";
+      let prevContent: string | null = null;
       try {
         if (fs.existsSync(outputPath)) {
           const prev = fs.readFileSync(outputPath, "utf8");
+          prevContent = prev;
           const boundaryLines = prev
             .split("\n")
             .filter((line) => line.startsWith("--- SESSION BOUNDARY:"));
           if (boundaryLines.length > 0) header = boundaryLines.join("\n") + "\n";
         }
       } catch {
-        // Best-effort header read; missing file or read error means no header.
+        // Best-effort header read; missing file or read error means no header
+        // (and no prevContent, so the guard below cannot suppress a real write).
       }
+
+      // Unchanged-content guard: if the transcript file already holds exactly
+      // these bytes, skip the temp-write + rename. The 2s-cadence tick otherwise
+      // rewrote every transcript file unconditionally, which macOS amplifies
+      // through fseventsd into a host CPU/RSS storm across hundreds of seats.
+      // `prevContent` is the SAME read used for boundary extraction — no extra I/O.
+      const payload = header + content;
+      if (prevContent !== null && prevContent === payload) return;
 
       fs.mkdirSync(path.dirname(outputPath), { recursive: true });
       const tmpPath = `${outputPath}.tmp.${process.pid}`;
-      fs.writeFileSync(tmpPath, header + content);
+      fs.writeFileSync(tmpPath, payload);
       fs.renameSync(tmpPath, outputPath);
     } catch {
       // Best-effort capture: target session may have died, output path
