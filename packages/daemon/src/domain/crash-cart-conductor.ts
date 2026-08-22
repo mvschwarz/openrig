@@ -103,13 +103,125 @@ export interface RestoreRigDeps {
   ) => Promise<{ ok: boolean; result?: { rigResult: PerRigOutcome; nodes?: RestoreNodeLite[] } }>;
 }
 
+// ── AMENDMENT 2 (stamped, body hash 72757e81) — the surviving-panes ADOPT branch ──
+// The contradiction it resolves: for a daemon-only crash (panes SURVIVE), restore()
+// fail-closes 409 `rig_not_stopped` BY DESIGN, yet the locked acceptance requires
+// resumable seats to RETURN in their panes — achievable only by ADOPTION. Per rig:
+// LIVE panes compose the SHIPPED reconcile/adopt + per-seat resume verification;
+// DEAD panes take the restore composition below byte-unchanged. R9 boundary: adoption
+// touches SESSION state only (bindings/sessions/events) — never queue state.
+
+/** One seat of the subset-launch result, structurally the shipped RestoreNodeResult
+ *  subset the triage mapper reads. */
+export interface AdoptSubsetSeat extends RestoreNodeLite {
+  logicalId: string;
+}
+
+/** Structural slice of RestoreOrchestrator.launchNodeSubset's result — the shipped
+ *  per-seat resume-verification machinery (FR-7: an unverifiable resume fail-closes
+ *  to awaiting-decision carrying the exact `--fresh <logicalId>` remediation). */
+export interface AdoptSubsetResult {
+  ok: boolean;
+  code?: string;
+  message?: string;
+  launched?: AdoptSubsetSeat[];
+  held?: Array<{ logicalId: string; reason: string }>;
+  alreadyRunning?: Array<{ logicalId: string }>;
+  failedTargets?: Array<{ logicalId: string; reason: string }>;
+}
+
+export interface AdoptRigDeps {
+  /** The rig's DB-running sessions whose tmux panes are ALIVE — the same
+   *  classification restore's 409 guard runs (sessionRegistry rows ×
+   *  tmuxAdapter.hasSession); the conductor never invents a probe. */
+  probeLiveSessions: (rigId: string) => Promise<Array<{ sessionName: string; logicalId: string }>>;
+  /** The shipped no-launch adopt (ClaimService.reconcileSession — the
+   *  `rig reconcile-session` precedent): session state only, never input. */
+  reconcileSession: (sessionName: string) => Promise<{ ok: boolean; code?: string; message?: string }>;
+  /** The rig's full seat roster (logical ids) — adoption's complement is what
+   *  per-seat resume verification must cover. */
+  listRigSeats: (rigId: string) => string[];
+  /** The shipped subset launcher over the NOT-adopted seats. */
+  launchNodeSubset: (rigId: string, logicalIds: string[]) => Promise<AdoptSubsetResult>;
+}
+
+/** LIVE-panes branch: adopt every surviving session, then per-seat resume
+ *  verification for the rest, folding into the UNCHANGED closed union. A seat is
+ *  OK iff it yields no triage row (attentionRowsFromNodes is the single non-OK
+ *  authority, so the fold cannot invent a fifth outcome or a second mapping). */
+async function adoptLivePanesRig(
+  rigId: string,
+  live: Array<{ sessionName: string; logicalId: string }>,
+  deps: AdoptRigDeps,
+): Promise<{ outcome: PerRigOutcome; attention?: AttentionRow[]; reason?: string; remediation?: string }> {
+  const nodes: RestoreNodeLite[] = [];
+  const adoptedIds = new Set<string>();
+  for (const seat of live) {
+    const adopted = await deps.reconcileSession(seat.sessionName);
+    if (adopted.ok) {
+      adoptedIds.add(seat.logicalId);
+      nodes.push({ logicalId: seat.logicalId, status: "resumed" });
+    } else {
+      nodes.push({
+        logicalId: seat.logicalId,
+        status: "failed",
+        error: `adopt failed for surviving session "${seat.sessionName}": ${adopted.message ?? adopted.code ?? "unknown"}`,
+      });
+    }
+  }
+  if (adoptedIds.size === 0) {
+    // The stamped mis-probe analysis: probe-says-LIVE on a dead rig → adopt fails
+    // EMPTY (honest). Never proceed to launches on a rig the adoption itself just
+    // proved has no surviving session — re-running takes the restore path.
+    return {
+      outcome: "not_attempted",
+      reason: "probe saw live panes but no surviving session could be adopted (panes likely died between probe and adopt)",
+      remediation: "re-run the fleet restore — a genuinely stopped rig takes the snapshot-restore path",
+      attention: attentionRowsFromNodes(rigId, nodes),
+    };
+  }
+  const remaining = deps.listRigSeats(rigId).filter((id) => !adoptedIds.has(id));
+  if (remaining.length > 0) {
+    const subset = await deps.launchNodeSubset(rigId, remaining);
+    if (subset.ok) {
+      for (const n of subset.launched ?? []) nodes.push(n);
+      for (const a of subset.alreadyRunning ?? []) nodes.push({ logicalId: a.logicalId, status: "resumed" });
+      for (const f of subset.failedTargets ?? [])
+        nodes.push({ logicalId: f.logicalId, status: "failed", error: `resume verification could not run: ${f.reason}` });
+      for (const h of subset.held ?? [])
+        nodes.push({ logicalId: h.logicalId, status: "attention_required", attentionEvidence: `held from launch — ${h.reason}` });
+    } else {
+      // A whole-subset refusal (e.g. no usable snapshot) leaves every remaining seat
+      // unverified — each gets a NAMED row; silence here would be the round-10 gap again.
+      for (const id of remaining)
+        nodes.push({ logicalId: id, status: "failed", error: `per-seat resume verification unavailable: ${subset.message ?? subset.code ?? "launch subset failed"}` });
+    }
+  }
+  const attention = attentionRowsFromNodes(rigId, nodes);
+  // R6 closed union, per the amendment: all seats re-attached+verified →
+  // fully_restored; some non-resumable → partially_restored (their exact needs ride
+  // the triage rows). adoptedIds.size > 0 guarantees at least one OK seat here.
+  return attention.length === 0
+    ? { outcome: "fully_restored", attention }
+    : { outcome: "partially_restored", attention };
+}
+
 /** Build the default `restoreRig` dep: COMPOSE findLatestRestoreUsable → restore →
  *  rigResult. A rig with no usable snapshot is `not_attempted` (restore never runs);
- *  a restore that fails outright is `failed`. Never re-authors restore logic. */
+ *  a restore that fails outright is `failed`. Never re-authors restore logic.
+ *  With `adoptDeps` wired (Amendment 2), a rig whose panes survived takes the ADOPT
+ *  branch above; DEAD panes (and callers without adoptDeps) run unchanged. */
 export function createDefaultRestoreRig(
   _deps: RestoreRigDeps,
-): (rigId: string) => Promise<{ outcome: PerRigOutcome; receiptRef?: number; reason?: string; remediation?: string }> {
+  adoptDeps?: AdoptRigDeps,
+): (rigId: string) => Promise<{ outcome: PerRigOutcome; receiptRef?: number; attention?: AttentionRow[]; reason?: string; remediation?: string }> {
   return async (rigId) => {
+    if (adoptDeps) {
+      const live = await adoptDeps.probeLiveSessions(rigId);
+      // Adopt has NO restore-attempt receipt: its ledger lineage is the
+      // node.reconciled events the shipped adopt emits per seat.
+      if (live.length > 0) return adoptLivePanesRig(rigId, live, adoptDeps);
+    }
     const snapshot = _deps.findLatestRestoreUsable(rigId);
     if (!snapshot)
       // no usable snapshot — never a silent substitute; R3: carry WHY + the fix.

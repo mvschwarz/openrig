@@ -10,13 +10,16 @@ import { crashCartRoutes, __resetFleetAttempts } from "../src/routes/crash-cart.
 
 beforeEach(() => __resetFleetAttempts());
 
-function appWith(deps: { rigRepo: unknown; snapshotRepo: unknown; restoreOrchestrator: unknown; runtimeAdapters?: unknown }) {
+function appWith(deps: { rigRepo: unknown; snapshotRepo: unknown; restoreOrchestrator: unknown; runtimeAdapters?: unknown; sessionRegistry?: unknown; tmuxAdapter?: unknown; claimService?: unknown }) {
   const app = new Hono();
   app.use("*", async (c, next) => {
     c.set("rigRepo" as never, deps.rigRepo as never);
     c.set("snapshotRepo" as never, deps.snapshotRepo as never);
     c.set("restoreOrchestrator" as never, deps.restoreOrchestrator as never);
     if (deps.runtimeAdapters !== undefined) c.set("runtimeAdapters" as never, deps.runtimeAdapters as never);
+    if (deps.sessionRegistry !== undefined) c.set("sessionRegistry" as never, deps.sessionRegistry as never);
+    if (deps.tmuxAdapter !== undefined) c.set("tmuxAdapter" as never, deps.tmuxAdapter as never);
+    if (deps.claimService !== undefined) c.set("claimService" as never, deps.claimService as never);
     await next();
   });
   app.route("/api/crash-cart", crashCartRoutes);
@@ -223,6 +226,70 @@ describe("POST /api/crash-cart/restore-fleet — the async conductor batch verb"
             : "mixed";
     expect(body.verdict).toBe(expected);
     expect(body.verdict).toBe("mixed");
+  });
+
+  // AMENDMENT 2 (stamped, 72757e81) — THE ROUND-10 DOOR IN ROUTE FORM. Daemon-only crash:
+  // DB says running, panes are ALIVE, restore() would 409. Through the REAL route the rig
+  // must ADOPT (reconcile the surviving session, resume-verify the rest), land the
+  // engineered non-resumable seat on triage with its EXACT --fresh need, and never call
+  // restore(). This is the composition the round-10 fleet read as 3-failed/8-not_attempted.
+  it("AMENDMENT 2 door: live panes → adopted via the shipped reconcile + subset verify; restore never called; triage carries the exact --fresh need", async () => {
+    const reconciled: string[] = [];
+    const subsetTargets: string[][] = [];
+    let restoreCalled = false;
+    const app = appWith({
+      rigRepo: {
+        listRigs: () => [{ id: "r-kernel", name: "kernel" }],
+        getRig: () => ({
+          rig: { name: "kernel" },
+          nodes: [
+            { id: "n1", logicalId: "dev.planner" },
+            { id: "n2", logicalId: "dev.qa" },
+          ],
+        }),
+      },
+      snapshotRepo: { findLatestRestoreUsable: () => ({ id: "snap-k" }) },
+      sessionRegistry: {
+        getSessionsForRig: () => [
+          { id: "s1", nodeId: "n1", sessionName: "dev-planner@kernel", status: "running" },
+          { id: "s2", nodeId: "n2", sessionName: "dev-qa@kernel", status: "running" },
+        ],
+      },
+      // dev.planner's pane survived; dev.qa's pane died with the crash.
+      tmuxAdapter: { hasSession: async (name: string) => name === "dev-planner@kernel" },
+      claimService: {
+        reconcileSession: async ({ sessionName }: { sessionName: string }) => {
+          reconciled.push(sessionName);
+          return { ok: true, result: { sessionName } };
+        },
+      },
+      restoreOrchestrator: {
+        restore: async () => { restoreCalled = true; return { ok: false, code: "rig_not_stopped" }; },
+        launchNodeSubset: async (_rigId: string, ids: string[]) => {
+          subsetTargets.push(ids);
+          return {
+            ok: true,
+            launched: [{
+              nodeId: "n2", logicalId: "dev.qa", status: "awaiting-decision",
+              error: "Original session not resumable. Use --fresh dev.qa to fresh-prime, or skip.",
+            }],
+          };
+        },
+      },
+    });
+
+    const id = await kickFleet(app);
+    const body = await pollUntilDone(app, id);
+
+    expect(restoreCalled).toBe(false); // the 409 path is never entered on a live-panes rig
+    expect(reconciled).toEqual(["dev-planner@kernel"]); // the surviving session is ADOPTED
+    expect(subsetTargets).toEqual([["dev.qa"]]); // only the dead seat is resume-verified
+    const kernel = body.rollup.sequence.find((r) => r.rigId === "r-kernel")!;
+    expect(kernel.outcome).toBe("partially_restored");
+    expect(body.rollup.attention_required).toEqual([
+      { rigId: "r-kernel", seat: "dev.qa", need: "Original session not resumable. Use --fresh dev.qa to fresh-prime, or skip." },
+    ]);
+    expect(body.verdict).toBe("mixed"); // f(counts): a lone partially_restored rig derives mixed
   });
 
   it("status/cancel of an unknown fleet-attempt id → 404", async () => {

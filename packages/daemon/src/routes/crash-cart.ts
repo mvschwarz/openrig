@@ -12,12 +12,16 @@ import type { RigRepository } from "../domain/rig-repository.js";
 import type { SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
 import type { RuntimeAdapter } from "../domain/runtime-adapter.js";
+import type { SessionRegistry } from "../domain/session-registry.js";
+import type { TmuxAdapter } from "../adapters/tmux.js";
+import type { ClaimService } from "../domain/claim-service.js";
 import {
   RestoreConductor,
   createDefaultRestoreRig,
   listRigsInKernelFirstOrder,
   aggregateFleetRollup,
   deriveFleetVerdict,
+  type AdoptRigDeps,
   type FleetRollup,
   type ConductorRigResult,
 } from "../domain/crash-cart-conductor.js";
@@ -49,6 +53,47 @@ function getDeps(c: { get: (key: string) => unknown }) {
     // H1 — the app's runtime adapters + fs, WITHOUT which the orchestrator fail-closes
     // a pod-aware resume to awaiting-decision (seats can't return in their panes).
     runtimeAdapters: c.get("runtimeAdapters" as never) as Record<string, RuntimeAdapter> | undefined,
+    // AMENDMENT 2 — the shipped machinery the adopt branch composes.
+    sessionRegistry: c.get("sessionRegistry" as never) as SessionRegistry | undefined,
+    tmuxAdapter: c.get("tmuxAdapter" as never) as TmuxAdapter | undefined,
+    claimService: c.get("claimService" as never) as ClaimService | undefined,
+  };
+}
+
+/** AMENDMENT 2 — build the adopt deps from the SHIPPED machinery, or undefined when a
+ *  degraded daemon lacks any of it (the conductor then behaves exactly pre-amendment:
+ *  a live-panes rig fail-closes through restore's own 409 — no clobber, no new path). */
+function buildAdoptDeps(deps: ReturnType<typeof getDeps>): AdoptRigDeps | undefined {
+  const { rigRepo, sessionRegistry, tmuxAdapter, claimService, restoreOrchestrator, runtimeAdapters } = deps;
+  if (!sessionRegistry || !tmuxAdapter || !claimService) return undefined;
+  return {
+    // The same classification restore's 409 guard runs: DB-running sessions × tmux
+    // reality. A tmux error is NOT live (fail-closed both ways: an unprobeable pane
+    // never adopts here, and restore's own unknown-blocks guard still refuses).
+    probeLiveSessions: async (rigId) => {
+      const rig = rigRepo.getRig(rigId);
+      if (!rig) return [];
+      const logicalByNodeId = new Map(rig.nodes.map((n) => [n.id, n.logicalId]));
+      const live: Array<{ sessionName: string; logicalId: string }> = [];
+      for (const session of sessionRegistry.getSessionsForRig(rigId)) {
+        if (session.status !== "running") continue;
+        const logicalId = logicalByNodeId.get(session.nodeId);
+        if (!logicalId) continue;
+        try {
+          if (await tmuxAdapter.hasSession(session.sessionName)) {
+            live.push({ sessionName: session.sessionName, logicalId });
+          }
+        } catch { /* fail-closed: unprobeable ≠ live */ }
+      }
+      return live;
+    },
+    reconcileSession: (sessionName) => claimService.reconcileSession({ sessionName }),
+    listRigSeats: (rigId) => rigRepo.getRig(rigId)?.nodes.map((n) => n.logicalId) ?? [],
+    launchNodeSubset: (rigId, logicalIds) =>
+      restoreOrchestrator.launchNodeSubset(rigId, logicalIds, {
+        adapters: runtimeAdapters ?? {},
+        fsOps: { exists: (p: string) => existsSync(p) },
+      }),
   };
 }
 
@@ -58,7 +103,8 @@ function recompute(attempt: FleetAttempt): void {
 
 // POST /api/crash-cart/restore-fleet — start the fleet restore, answer ON-COMMIT.
 crashCartRoutes.post("/restore-fleet", (c) => {
-  const { rigRepo, snapshotRepo, restoreOrchestrator, runtimeAdapters } = getDeps(c);
+  const deps = getDeps(c);
+  const { rigRepo, snapshotRepo, restoreOrchestrator, runtimeAdapters } = deps;
   const fleetAttemptId = `fleet-${randomUUID()}`;
   const attempt: FleetAttempt = {
     sequence: [],
@@ -70,16 +116,20 @@ crashCartRoutes.post("/restore-fleet", (c) => {
 
   const conductor = new RestoreConductor({
     listRigsInOrder: () => listRigsInKernelFirstOrder({ listRigs: () => rigRepo.listRigs() }),
-    restoreRig: createDefaultRestoreRig({
-      findLatestRestoreUsable: (rigId) => snapshotRepo.findLatestRestoreUsable(rigId),
-      // H1 — thread the app's adapters + fsOps into the shipped restore.
-      restore: (snapshotId, opts) =>
-        restoreOrchestrator.restore(snapshotId, {
-          ...opts,
-          adapters: runtimeAdapters ?? {},
-          fsOps: { exists: (p: string) => existsSync(p) },
-        }),
-    }),
+    restoreRig: createDefaultRestoreRig(
+      {
+        findLatestRestoreUsable: (rigId) => snapshotRepo.findLatestRestoreUsable(rigId),
+        // H1 — thread the app's adapters + fsOps into the shipped restore.
+        restore: (snapshotId, opts) =>
+          restoreOrchestrator.restore(snapshotId, {
+            ...opts,
+            adapters: runtimeAdapters ?? {},
+            fsOps: { exists: (p: string) => existsSync(p) },
+          }),
+      },
+      // AMENDMENT 2 — LIVE panes adopt via the shipped machinery; DEAD panes unchanged.
+      buildAdoptDeps(deps),
+    ),
     // H3 — the running attempt's cancel flag, polled stop-before-next-rig.
     isCancelled: () => attempt.cancelled,
   });
