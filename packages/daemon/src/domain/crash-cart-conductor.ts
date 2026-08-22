@@ -185,7 +185,14 @@ async function adoptLivePanesRig(
     const subset = await deps.launchNodeSubset(rigId, remaining);
     if (subset.ok) {
       for (const n of subset.launched ?? []) nodes.push(n);
-      for (const a of subset.alreadyRunning ?? []) nodes.push({ logicalId: a.logicalId, status: "resumed" });
+      for (const a of subset.alreadyRunning ?? []) {
+        // r1 LOW: a seat whose ADOPT failed can still be proven LIVE by the launcher
+        // (it classifies targets against tmux itself). The seat is RUNNING — drop the
+        // stale adopt-failure node, or triage would name a running seat as its "need".
+        const staleFailed = nodes.findIndex((n) => n.logicalId === a.logicalId && n.status === "failed");
+        if (staleFailed >= 0) nodes.splice(staleFailed, 1);
+        nodes.push({ logicalId: a.logicalId, status: "resumed" });
+      }
       for (const f of subset.failedTargets ?? [])
         nodes.push({ logicalId: f.logicalId, status: "failed", error: `resume verification could not run: ${f.reason}` });
       for (const h of subset.held ?? [])
