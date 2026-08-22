@@ -57,6 +57,41 @@ describe("classifyProbeError — fetch rejection → probe result", () => {
     });
     expect(classifyProbeError(wrapped)).toBe("timeout");
   });
+
+  // GUARD round-7 blocker: a MIXED multi-address AggregateError (one address refused, another timed out)
+  // is AMBIGUOUS. Refusal must NOT win by precedence — a timeout never promotes to a confirmed down, so
+  // the cart never offers RESTORE EVERYTHING on partial evidence.
+  it("MIXED aggregate (ECONNREFUSED + ETIMEDOUT) → timeout, never a promoted down", () => {
+    const agg = Object.assign(new Error("all attempts failed"), {
+      name: "AggregateError",
+      errors: [
+        Object.assign(new Error("v6 refused"), { code: "ECONNREFUSED" }),
+        Object.assign(new Error("v4 timed out"), { code: "ETIMEDOUT" }),
+      ],
+    });
+    expect(classifyProbeError(Object.assign(new TypeError("fetch failed"), { cause: agg }))).toBe("timeout");
+  });
+  it("refused requires ALL terminal attempts to be refusal — a refused + unknown sibling stays timeout", () => {
+    const agg = Object.assign(new Error("all attempts failed"), {
+      name: "AggregateError",
+      errors: [{ code: "ECONNREFUSED" }, { code: "EHOSTUNREACH" }],
+    });
+    expect(classifyProbeError(Object.assign(new TypeError("fetch failed"), { cause: agg }))).toBe("timeout");
+  });
+  it("a refused + abort sibling stays timeout (abort never co-promotes a down)", () => {
+    const agg = Object.assign(new Error("all attempts failed"), {
+      name: "AggregateError",
+      errors: [Object.assign(new Error("refused"), { code: "ECONNREFUSED" }), Object.assign(new Error("aborted"), { name: "AbortError" })],
+    });
+    expect(classifyProbeError(Object.assign(new TypeError("fetch failed"), { cause: agg }))).toBe("timeout");
+  });
+  it("an all-refused multi-address aggregate is still refused (the fix does not over-narrow)", () => {
+    const agg = Object.assign(new Error("all attempts failed"), {
+      name: "AggregateError",
+      errors: [{ code: "ECONNREFUSED" }, { code: "ECONNREFUSED" }],
+    });
+    expect(classifyProbeError(Object.assign(new TypeError("fetch failed"), { cause: agg }))).toBe("refused");
+  });
 });
 
 describe("probeHealthz — PRODUCTION PATH: a REAL refused socket, not a fabricated error", () => {

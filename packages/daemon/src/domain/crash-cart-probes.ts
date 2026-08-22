@@ -30,7 +30,13 @@ function collectErrorSignals(err: unknown): { codes: Set<string>; names: Set<str
  *  (conservative — never a fabricated down). Handles both a raw `{code}` and the wrapped Undici shape. */
 export function classifyProbeError(err: unknown): HealthzProbeResult {
   const { codes, names } = collectErrorSignals(err);
-  if (codes.has("ECONNREFUSED")) return "refused";
+  // DOWN (refused) requires UNAMBIGUOUS refusal: ECONNREFUSED on the terminal attempts with NO
+  // non-refused sibling (no timeout/abort/unknown code alongside it). A mixed multi-address
+  // AggregateError — e.g. ECONNREFUSED on one address + ETIMEDOUT on another — is AMBIGUOUS evidence, so
+  // it stays timeout/unverified: a timeout NEVER promotes to a confirmed down (the detector contract), and
+  // the cart must not offer RESTORE EVERYTHING on partial evidence. (Refusal no longer wins by precedence.)
+  const nonRefusedSibling = names.has("AbortError") || [...codes].some((c) => c !== "ECONNREFUSED");
+  if (codes.has("ECONNREFUSED") && !nonRefusedSibling) return "refused";
   if (names.has("AbortError") || codes.has("ETIMEDOUT") || codes.has("UND_ERR_CONNECT_TIMEOUT")) return "timeout";
   return "timeout";
 }
