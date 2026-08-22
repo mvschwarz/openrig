@@ -5,11 +5,33 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DaemonStateFile, HealthzProbeResult } from "./crash-cart-detect.js";
 
-/** Classify a fetch REJECTION into a probe result. ECONNREFUSED = the only strong down signal; an
- *  abort/timeout = unverified; anything else = timeout (conservative — never a fabricated down). */
-export function classifyProbeError(err: { code?: string; name?: string }): HealthzProbeResult {
-  if (err.code === "ECONNREFUSED") return "refused";
-  if (err.name === "AbortError" || err.code === "ETIMEDOUT" || err.code === "UND_ERR_CONNECT_TIMEOUT") return "timeout";
+/** Collect every `code`/`name` across a rejection's cause chain. Node/Undici's global fetch rejects a
+ *  refused TCP connection with an OUTER `TypeError {message:"fetch failed", code:undefined}` and the real
+ *  `ECONNREFUSED` nested in `cause` (and, for a host that resolves to several addresses, an
+ *  `AggregateError` whose `.errors[]` each carry the code). Checking only the outer error misses it — so
+ *  a provably-down daemon read as "timeout" → "unverified" → no cockpit. We walk the chain to see it. */
+function collectErrorSignals(err: unknown): { codes: Set<string>; names: Set<string> } {
+  const codes = new Set<string>();
+  const names = new Set<string>();
+  const visit = (e: unknown, depth: number): void => {
+    if (!e || typeof e !== "object" || depth > 5) return;
+    const o = e as { code?: unknown; name?: unknown; cause?: unknown; errors?: unknown };
+    if (typeof o.code === "string") codes.add(o.code);
+    if (typeof o.name === "string") names.add(o.name);
+    if (o.cause) visit(o.cause, depth + 1);
+    if (Array.isArray(o.errors)) for (const sub of o.errors) visit(sub, depth + 1);
+  };
+  visit(err, 0);
+  return { codes, names };
+}
+
+/** Classify a fetch REJECTION into a probe result. ECONNREFUSED ANYWHERE in the cause chain = the strong
+ *  DOWN signal (the daemon socket refused). Abort/connect-timeout = unverified; anything else = timeout
+ *  (conservative — never a fabricated down). Handles both a raw `{code}` and the wrapped Undici shape. */
+export function classifyProbeError(err: unknown): HealthzProbeResult {
+  const { codes, names } = collectErrorSignals(err);
+  if (codes.has("ECONNREFUSED")) return "refused";
+  if (names.has("AbortError") || codes.has("ETIMEDOUT") || codes.has("UND_ERR_CONNECT_TIMEOUT")) return "timeout";
   return "timeout";
 }
 

@@ -9,8 +9,23 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:net";
 import { runFrontDoor, resolveTuiPath, probeFrontDoor, type FrontDoorIo } from "../src/front-door.js";
-import { DaemonConnectionError, DaemonResponseError, DaemonTimeoutError } from "../src/client.js";
+import { DaemonClient, DaemonConnectionError, DaemonResponseError, DaemonTimeoutError } from "../src/client.js";
+
+// A GUARANTEED-refused local port (bind an ephemeral port, capture it, close → connecting refuses).
+// A REAL socket refusal, not a hand-built error — buys the actual Node/undici rejection shape.
+async function refusedPort(): Promise<number> {
+  return await new Promise<number>((resolve, reject) => {
+    const srv = createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      srv.close(() => resolve(port));
+    });
+  });
+}
 
 function io(overrides: Partial<FrontDoorIo> = {}): FrontDoorIo & {
   outLines: string[];
@@ -96,17 +111,14 @@ describe("bare-rig front door — first-impression degrade (never a stack trace)
     expect(text).not.toMatch(/runtime posture: TRANSPORT_CONNECT/); // no degrade-and-exit for daemon-down
   });
 
-  it("BLOCKER 1 PRODUCTION PATH: bare rig + daemon down via the REAL probeFrontDoor → the crash-cart TUI launches", async () => {
-    // Not a mocked probe result — the real probeFrontDoor classification runs; only the socket is stubbed
-    // to the daemon-down failure (ECONNREFUSED → DaemonConnectionError). The whole front-door composition
-    // (probe → normalize → openMissionControl launch decision) is exercised, which is the seam that hid
-    // the defect: the prior tests injected a probe RESULT and asserted launches:0.
-    const stubClient = {
-      get: async () => {
-        throw new DaemonConnectionError("connect ECONNREFUSED 127.0.0.1:7433");
-      },
-    };
-    const deps = io({ probeDaemon: () => probeFrontDoor({ client: stubClient, env: {} }) });
+  it("BLOCKER 1 PRODUCTION PATH: bare rig + daemon down via a REAL refused socket → the crash-cart TUI launches", async () => {
+    // r1/guard round-6 rule: a stubbed error is a claim about Node's behavior — buy it with a REAL socket.
+    // The REAL DaemonClient hits a REAL closed port (guaranteed-refused via bind→close); the real
+    // probeFrontDoor classification + openMissionControl launch decision run over the actual undici
+    // rejection shape. No fabricated error at the seam under test.
+    const port = await refusedPort();
+    const realClient = new DaemonClient(`http://127.0.0.1:${port}`, { timeoutMs: 1500 });
+    const deps = io({ probeDaemon: () => probeFrontDoor({ client: realClient, env: {} }) });
     const handled = await runFrontDoor(["node", "rig"], deps);
     expect(handled).toBe(true);
     expect(deps.launches).toBe(1); // bare-rig + daemon-down → TUI launched into the crash-cart path
