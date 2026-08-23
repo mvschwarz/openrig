@@ -57,18 +57,24 @@ export function readCodexThreadIdFromCandidateHomes(
  *      retry (a dying `ps` under load must not poison the pid).
  */
 export class CodexThreadIdResolver {
-  /** Bounded pid→home cache of SUCCESSFUL resolutions — INCLUDING the default
-   *  home (a stable default-home pid with no thread log must not re-run
-   *  `ps eww` every poll). Entries carry a timestamp and EXPIRE after
-   *  homeTtlMs (r2-B1 / r1 BLOCKING-1: a pid can be REUSED by a new process
-   *  with a different HOME — an unexpiring cache served the retired
-   *  occupant's thread id indefinitely, which is exactly a wrong resume
-   *  token). Staleness is now bounded by the TTL, not just the entry count. */
-  private readonly homeByPid = new Map<number, { home: string; at: number; identity?: string }>();
-  /** Per-pid in-flight home resolution — concurrent resolves for the same pid
-   *  coalesce onto ONE subprocess; a failure rejects all waiters and caches
-   *  nothing. */
-  private readonly inFlightByPid = new Map<number, Promise<string | undefined>>();
+  /** Bounded (pid,identity)→home cache of SUCCESSFUL resolutions — INCLUDING
+   *  the default home (a stable default-home pid with no thread log must not
+   *  re-run `ps eww` every poll). KEYED BY IDENTITY (r2 round-3): a reused
+   *  pid carries a different startedAt, so it structurally MISSES the retired
+   *  occupant's entry — no read-time mismatch check to get wrong, and a late
+   *  stale-probe completion writes only its own key, never clobbering the
+   *  newer occupant's. Entries also EXPIRE after homeTtlMs (r2-B1/r1
+   *  BLOCKING-1): the TTL is the staleness bound for identity-less callers
+   *  and the memory bound for retired keys ahead of size eviction. */
+  private readonly homeByKey = new Map<string, { home: string; at: number }>();
+  /** In-flight home resolution, keyed by pid+IDENTITY (r2 round-3): a known
+   *  identity must never join a probe belonging to a different or
+   *  identity-less occupant — under the measured 8-36s probes a pid can be
+   *  reused MID-PROBE, and pid-only coalescing handed the new occupant the
+   *  retired occupant's answer before the completed-cache check could run.
+   *  Same (pid, identity) still coalesces onto ONE subprocess; a failure
+   *  rejects all waiters of that key and caches nothing. */
+  private readonly inFlightByKey = new Map<string, Promise<string | undefined>>();
 
   constructor(
     private readonly opts: {
@@ -96,38 +102,42 @@ export class CodexThreadIdResolver {
     const fromDefault = readFromLogs(pid, defaultHome);
     if (fromDefault) return fromDefault;
 
-    // 2. Cached home for this pid: no subprocess. PROCESS IDENTITY first
-    //    (r1's pid-reuse remedy): callers thread the census row's start time,
-    //    and a mismatch means the pid was REUSED — invalidate IMMEDIATELY,
-    //    inside any TTL. The TTL stays as the fallback staleness bound for
-    //    identity-less callers. A cached DEFAULT means the subprocess already
-    //    answered "default" once — step 1 covered it.
-    const cached = this.homeByPid.get(pid);
+    // 2. FRESH cached home for this (pid, identity): no subprocess. A reused
+    //    pid carries a new identity and structurally MISSES here (r1's
+    //    remedy); identity-less callers get their own TTL-bounded slot. A
+    //    cached DEFAULT means the subprocess already answered "default" once
+    //    — step 1 covered it.
+    const key = `${pid}|${identity ?? ""}`;
+    const cached = this.homeByKey.get(key);
     if (cached) {
-      const identityMismatch = identity !== undefined && cached.identity !== undefined && identity !== cached.identity;
-      if (!identityMismatch && now() - cached.at <= ttl) {
+      if (now() - cached.at <= ttl) {
         return cached.home === defaultHome ? undefined : readFromLogs(pid, cached.home);
       }
-      this.homeByPid.delete(pid);
+      this.homeByKey.delete(key);
     }
 
-    // 3. Subprocess resolution, pid-coalesced: concurrent callers share one probe.
-    const inFlight = this.inFlightByPid.get(pid);
+    // 3. Subprocess resolution, coalesced by the SAME (pid, identity) key:
+    //    only callers holding the same identity share a probe (r2 round-3 —
+    //    under the measured 8-36s probes a pid can be reused MID-PROBE, and
+    //    pid-only coalescing handed the new occupant the retired occupant's
+    //    answer). A completion writes only its own key, so a late stale
+    //    probe never clobbers the newer occupant's entry.
+    const inFlight = this.inFlightByKey.get(key);
     const homePromise = inFlight ?? (() => {
       const resolver = this.opts.resolveHomeDirByPid ?? defaultResolveHomeDirByPid;
       const p = Promise.resolve(resolver(pid)).then(
         (home) => {
-          this.inFlightByPid.delete(pid);
-          if (home) this.cacheHome(pid, home, identity);
+          this.inFlightByKey.delete(key);
+          if (home) this.cacheHome(key, home);
           return home;
         },
         (err) => {
           // Honest failure: nothing cached, next call retries.
-          this.inFlightByPid.delete(pid);
+          this.inFlightByKey.delete(key);
           throw err;
         },
       );
-      this.inFlightByPid.set(pid, p);
+      this.inFlightByKey.set(key, p);
       return p;
     })();
     const home = await homePromise;
@@ -135,13 +145,13 @@ export class CodexThreadIdResolver {
     return readFromLogs(pid, home);
   }
 
-  private cacheHome(pid: number, home: string, identity?: string): void {
+  private cacheHome(key: string, home: string): void {
     const max = this.opts.maxCachedPids ?? 256;
-    if (!this.homeByPid.has(pid) && this.homeByPid.size >= max) {
-      const oldest = this.homeByPid.keys().next().value;
-      if (oldest !== undefined) this.homeByPid.delete(oldest);
+    if (!this.homeByKey.has(key) && this.homeByKey.size >= max) {
+      const oldest = this.homeByKey.keys().next().value;
+      if (oldest !== undefined) this.homeByKey.delete(oldest);
     }
-    this.homeByPid.set(pid, { home, at: (this.opts.now ?? Date.now)(), identity });
+    this.homeByKey.set(key, { home, at: (this.opts.now ?? Date.now)() });
   }
 }
 

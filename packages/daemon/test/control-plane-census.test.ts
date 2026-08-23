@@ -224,6 +224,42 @@ describe("OPR.0.5.3.10 — one census per cycle", () => {
     expect(rows.some((r) => r.command.length > 0)).toBe(true);
   });
 
+  it("r2 round-3: a known identity NEVER joins an in-flight probe belonging to a DIFFERENT identity (pid reused mid-probe)", async () => {
+    // r2's deferred-pressure discriminator: probe A for pid 4242 (identity-A)
+    // is in flight when the pid is reused and B resolves with identity-B.
+    // Coalescing by pid alone handed B the retired occupant's answer — B must
+    // start its OWN probe and get the NEW thread, in both completion orders,
+    // and a late A completion must not clobber B's cached entry.
+    for (const order of ["a-first", "b-first"] as const) {
+      const waiters = new Map<string, (home: string) => void>();
+      let probeSeq = 0;
+      const resolveHome = vi.fn((_pid: number) => new Promise<string>((r) => { waiters.set(`p${++probeSeq}`, r); }));
+      const resolver = new CodexThreadIdResolver({
+        defaultHome: "/home/me",
+        resolveHomeDirByPid: resolveHome as never,
+        readFromLogs: (_pid, home) => (home === "/home/old" ? "old-thread" : home === "/home/new" ? "new-thread" : undefined),
+        homeTtlMs: 60_000,
+        now: () => 0,
+      });
+      const a = resolver.resolve(4242, "identity-A");
+      const b = resolver.resolve(4242, "identity-B");
+      expect(resolveHome).toHaveBeenCalledTimes(2); // B started its OWN probe
+      if (order === "a-first") {
+        waiters.get("p1")!("/home/old");
+        waiters.get("p2")!("/home/new");
+      } else {
+        waiters.get("p2")!("/home/new");
+        waiters.get("p1")!("/home/old");
+      }
+      expect(await a).toBe("old-thread");
+      expect(await b).toBe("new-thread");
+      // B's cached entry survives regardless of completion order: a subsequent
+      // B read is served fresh/cached with no third probe.
+      expect(await resolver.resolve(4242, "identity-B")).toBe("new-thread");
+      expect(resolveHome).toHaveBeenCalledTimes(2);
+    }
+  });
+
   it("r2-B2: the census's PRODUCTION lister REJECTS on enumeration failure — a failed ps is never cached as an empty success", async () => {
     // r2's discriminator: defaultListProcesses swallows a spawn failure into []
     // — through the census that empty array became a CACHED SUCCESS for the
