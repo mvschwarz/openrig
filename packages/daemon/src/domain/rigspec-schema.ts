@@ -1086,6 +1086,9 @@ const LEGACY_KNOWN_EDGE_KINDS = new Set(["delegates_to", "spawned_by", "can_obse
 export class LegacyRigSpecSchema {
   static validate(raw: unknown): ValidationResult {
     const errors: string[] = [];
+    // OPR.0.5.3.3 (r2 HIGH-1): the legacy auto-detected path must ALSO surface alias-pin
+    // advisories — fail-open, never affecting valid/errors (the pod-aware path already does).
+    const advisories: string[] = [];
 
     if (!raw || typeof raw !== "object") {
       return { valid: false, errors: ["spec must be an object"] };
@@ -1125,6 +1128,10 @@ export class LegacyRigSpecSchema {
         }
         nodeIds.add(node["id"] as string);
 
+        // OPR.0.5.3.3 (r2 HIGH-1): legacy nodes carry the same alias-form model pin — advise here too.
+        const pinAdvisory = aliasModelPinAdvisory(node["model"], `nodes.${node["id"]}`);
+        if (pinAdvisory) advisories.push(pinAdvisory);
+
         if (!node["runtime"] || typeof node["runtime"] !== "string") {
           errors.push(`node ${node["id"]}: runtime is required`);
         } else if (!LEGACY_KNOWN_RUNTIMES.has(node["runtime"] as string)) {
@@ -1162,7 +1169,7 @@ export class LegacyRigSpecSchema {
       }
     }
 
-    return { valid: errors.length === 0, errors };
+    return { valid: errors.length === 0, errors, ...(advisories.length ? { advisories } : {}) };
   }
 
   static normalize(raw: unknown): LegacyRigSpec {
