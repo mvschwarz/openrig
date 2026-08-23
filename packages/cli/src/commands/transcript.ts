@@ -42,6 +42,14 @@ fails with the structured transport-requirement error). Output shape is the
 origin's, verbatim. A session of the form agent@rig@host is sugar for --host
 when the suffix is a REGISTERED host id (explicit --host > sugar > persisted
 selection).`)
+    .addHelpText("after", `
+Thin output for a CLAUDE seat almost always means the seat runs Claude Code's
+fullscreen renderer, which draws to the terminal ALTERNATE screen and emits no
+scrollback — so tmux capture-pane, and therefore this command, see almost
+nothing. OpenRig launches Claude seats with CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1
+by default (classic renderer, native scrollback). A thin transcript means the
+seat predates that default or was launched with
+OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN=0 — relaunch it to restore scrollback.`)
     .action(async (session: string, opts: { tail?: string; grep?: string; host?: string; json?: boolean }) => {
       // OPR.0.4.6.MH4 C2 — cross-host observe: explicit --host > the
       // `agent@rig@host` target sugar > the persisted host selection
@@ -171,12 +179,32 @@ function renderTranscript(data: Record<string, unknown>, useGrep: boolean): void
     }
   } else {
     const content = data["content"] as string | undefined;
+    let printed = 0;
     if (content) {
       // Print each line via console.log for consistent capture in tests and terminal
       const lines = content.split("\n");
       for (const line of lines) {
-        if (line) console.log(line);
+        if (line) {
+          console.log(line);
+          printed++;
+        }
       }
     }
+    // OPR.0.5.3.1 item 4 — point-of-use hint: a near-empty transcript for a Claude
+    // seat almost always means the fullscreen renderer (alternate screen → no
+    // scrollback). Emit to stderr so it never pollutes the content on stdout.
+    if (printed <= THIN_TRANSCRIPT_LINES) emitThinTranscriptHint(printed);
   }
+}
+
+/** Line count at or below which a transcript is treated as suspiciously thin. */
+const THIN_TRANSCRIPT_LINES = 5;
+
+function emitThinTranscriptHint(printed: number): void {
+  console.error(
+    `note: only ${printed} line(s) captured. For a CLAUDE seat this usually means the ` +
+      `fullscreen renderer (alternate screen emits no scrollback). OpenRig launches Claude ` +
+      `seats with CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 by default; a thin transcript means ` +
+      `the seat predates that or has OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN=0 — relaunch it.`,
+  );
 }

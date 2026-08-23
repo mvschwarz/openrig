@@ -60,6 +60,12 @@ Keys:
   daemon.*               port, host
   db.path
   transcripts.*          enabled, path, lines, poll_interval_seconds
+                         (lines/poll_interval set scrollback CAPTURE depth + cadence.
+                         Thin CLAUDE transcripts usually are NOT these — they mean the
+                         seat's fullscreen renderer, whose alternate screen emits no
+                         scrollback. OpenRig launches Claude with
+                         CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 by default; set
+                         OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN=0 to opt back into fullscreen.)
   workspace.*            root, slices_root, steering_path, field_notes_root,
                          specs_root, dogfood_evidence_root, operator_seat_name
   topology.root          the topology tree root (instance altitude at its top; default $OPENRIG_HOME/topology)

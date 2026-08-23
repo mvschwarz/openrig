@@ -62,6 +62,10 @@ describe("Transcript CLI", () => {
       if (url.startsWith("/api/transcripts/dev-impl@my-rig/tail")) {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ session: "dev-impl@my-rig", lines: 10, content: "line1\nline2\nline3\n" }));
+      } else if (url.startsWith("/api/transcripts/dev-impl@thick-rig/tail")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        const many = Array.from({ length: 12 }, (_, i) => `content line ${i}`).join("\n");
+        res.end(JSON.stringify({ session: "dev-impl@thick-rig", lines: 12, content: many }));
       } else if (url.startsWith("/api/transcripts/dev-impl@my-rig/grep")) {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ session: "dev-impl@my-rig", pattern: "decision", matches: ["decision made", "decision final"] }));
@@ -93,6 +97,25 @@ describe("Transcript CLI", () => {
     const output = logs.join("\n");
     expect(output).toContain("line1");
     expect(output).toContain("line2");
+  });
+
+  it("thin transcript emits the fullscreen-renderer point-of-use note (OPR.0.5.3.1 item 4)", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "transcript", "dev-impl@my-rig", "--tail", "10"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("line1"); // content still printed
+    expect(output).toContain("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"); // names the lever
+    expect(output.toLowerCase()).toContain("fullscreen renderer"); // names the cause
+  });
+
+  it("a healthy (non-thin) transcript does NOT emit the renderer note", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "transcript", "dev-impl@thick-rig", "--tail", "10"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("content line 0");
+    expect(output).not.toContain("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN");
   });
 
   it("--grep prints matching lines", async () => {
