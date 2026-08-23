@@ -251,6 +251,8 @@ export function modelsMatch(pinned: string, effective: string): boolean {
  *    when the 5.3 advisory registers "model-pin-canonicalization" there (its registry contract),
  *    modelsMatch stops consulting this map in code, and the pin test goes RED until the constant
  *    is deleted. The registry's own doc-comment carries the 5.3 obligation. */
-export const CLAUDE_ALIAS_MIGRATION_BRIDGE: Record<string, string> = {
-  fable: "claude-fable-5",
-};
+// EXPIRED at OPR.0.5.3.3: the spec-validation advisory registered "model-pin-canonicalization" in
+// SPEC_VALIDATION_CAPABILITIES, so modelsMatch's sentinel gate now returns false before consulting
+// this map — pins must be exact/canonical, no alias tolerance. Emptied per the migration-bridge
+// deletion contract (the map is now the completed, no-tolerance state).
+export const CLAUDE_ALIAS_MIGRATION_BRIDGE: Record<string, string> = {};

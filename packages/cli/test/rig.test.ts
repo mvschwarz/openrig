@@ -76,6 +76,10 @@ function createMockDaemon() {
         if (body.includes("INVALID")) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ valid: false, errors: ["missing schema_version", "name is required"] }));
+        } else if (body.includes("ALIASPIN")) {
+          // OPR.0.5.3.3: valid + a fail-open alias-pin advisory naming the canonical id.
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ valid: true, errors: [], advisories: ['pods.dev.members.driver: model pin "fable" is an alias form — pin the canonical id "claude-fable-5" (5.3 requires exact/canonical pins).'] }));
         } else {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ valid: true, errors: [] }));
@@ -150,6 +154,19 @@ describe("rig spec", () => {
     expect(output).toContain("missing schema_version");
     expect(output).toContain("name is required");
     expect(exitCode).toBe(1);
+  });
+
+  // OPR.0.5.3.3 item 2: alias-pin advisories print (fail-open — spec still valid, exit not 1).
+  it("rig spec validate prints alias-pin advisories naming the canonical id, fail-open", async () => {
+    const deps = rigDeps("ALIASPIN");
+    const program = new Command();
+    program.addCommand(rigCommand(deps));
+    const { logs, exitCode } = await captureLogs(() => program.parseAsync(["node", "rig", "spec", "validate", "rig.yaml"]));
+    const output = logs.join("\n");
+    expect(output).toContain("spec advisory"); // advisory surfaced
+    expect(output).toContain("claude-fable-5"); // names the canonical id
+    expect(output).toContain("Rig spec valid"); // fail-open: still valid
+    expect(exitCode).not.toBe(1);
   });
 
   // Slice 16 (item 2): rig spec audit flags stale seat ids in the culture.

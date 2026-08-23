@@ -156,7 +156,7 @@ export function rigCommand(depsOverride?: RigDeps): Command {
 
       const client = deps.clientFactory(getDaemonUrl(status));
 
-      const res = await client.postText<{ valid?: boolean; errors?: string[]; name?: string }>("/api/rigs/import/validate", yaml);
+      const res = await client.postText<{ valid?: boolean; errors?: string[]; name?: string; advisories?: string[] }>("/api/rigs/import/validate", yaml);
 
       if (opts.json) {
         console.log(JSON.stringify(res.data));
@@ -176,6 +176,10 @@ export function rigCommand(depsOverride?: RigDeps): Command {
       }
 
       const data = res.data;
+      // OPR.0.5.3.3 — advisories are printed regardless of validity (fail-open; never an error).
+      if (data.advisories && data.advisories.length > 0) {
+        for (const a of data.advisories) console.error(`⚠ spec advisory: ${a}`);
+      }
       if (data.valid) {
         const nameMatch = yaml.match(/^name:\s*(.+)$/m);
         const name = nameMatch?.[1]?.replace(/^["']|["']$/g, "").trim() ?? "unknown";

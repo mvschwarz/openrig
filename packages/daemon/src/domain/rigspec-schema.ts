@@ -14,6 +14,7 @@ import type {
 } from "./types.js";
 import { WORKSPACE_KINDS } from "./types.js";
 import { validateSafePath } from "./path-safety.js";
+import { aliasModelPinAdvisory } from "./spec-validation-advisory.js";
 import { validatePermissionPolicyRef } from "./permission-policy/policy-ref.js";
 import { validateStartupBlock, normalizeStartupBlock } from "./startup-validation.js";
 import { COMPOSE_PROJECT_NAME_PATTERN, deriveComposeProjectName } from "./compose-project-name.js";
@@ -32,7 +33,7 @@ export const VALID_EDGE_KINDS = new Set(["delegates_to", "spawned_by", "can_obse
  *  spec-validation ADVISORY, when it lands model-pin canonicalization, MUST add
  *  "model-pin-canonicalization" — that single line mechanically kills the claude alias migration
  *  bridge at runtime AND turns its pin test red until the bridge constant is deleted. */
-export const SPEC_VALIDATION_CAPABILITIES: ReadonlySet<string> = new Set([]);
+export const SPEC_VALIDATION_CAPABILITIES: ReadonlySet<string> = new Set(["model-pin-canonicalization"]);
 const VALID_SYNC_TRIGGERS = new Set(["pre_compaction", "pre_shutdown", "manual", "milestone"]);
 const VALID_RESTORE_POLICIES = new Set(["resume_if_possible", "relaunch_fresh", "checkpoint_only"]);
 const VALID_IMPORT_PREFIXES = ["local:", "path:"];
@@ -52,6 +53,8 @@ export class RigSpecSchema {
    */
   static validate(raw: unknown, opts?: { externalQualifiedIds?: Iterable<string> }): ValidationResult {
     const errors: string[] = [];
+    // OPR.0.5.3.3 — fail-open advisories (never affect `valid`); e.g. alias-form model pins.
+    const advisories: string[] = [];
 
     if (!raw || typeof raw !== "object") {
       return { valid: false, errors: ["rig spec must be an object"] };
@@ -142,6 +145,8 @@ export class RigSpecSchema {
         if (podId && Array.isArray(members)) {
           for (const m of members) {
             if (m["id"]) allQualifiedIds.add(`${podId}.${m["id"]}`);
+            const pinAdvisory = aliasModelPinAdvisory(m["model"], `pods.${podId}.members.${m["id"] ?? "?"}`);
+            if (pinAdvisory) advisories.push(pinAdvisory);
           }
         }
       }
@@ -158,7 +163,7 @@ export class RigSpecSchema {
       }
     }
 
-    return { valid: errors.length === 0, errors };
+    return { valid: errors.length === 0, errors, ...(advisories.length ? { advisories } : {}) };
   }
 
   /**

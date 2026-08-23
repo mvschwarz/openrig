@@ -13,6 +13,7 @@ import {
   formatProclamation,
   type PinnedSeat,
 } from "../src/domain/model-divergence/model-divergence-monitor.js";
+import { SPEC_VALIDATION_CAPABILITIES } from "../src/domain/rigspec-schema.js";
 
 const SEAT: PinnedSeat = {
   nodeId: "n1",
@@ -193,10 +194,18 @@ describe("modelsMatch — EXACT, plus the narrow self-expiring fable migration b
     }
   });
 
-  it("the bridge maps EXACTLY the measured pre-spec pair and nothing else", () => {
-    expect(modelsMatch("fable", "claude-fable-5")).toBe(true); // the one live migration pair
-    expect(modelsMatch("fable", "claude-fable-6")).toBe(false); // not a family bless
-    expect(modelsMatch("opus", "claude-opus-5")).toBe(false); // unmeasured alias: NOT bridged
+  it("OPR.0.5.3.3: the alias bridge is EXPIRED — even the one measured pair no longer matches", () => {
+    // Registration of "model-pin-canonicalization" fired the sentinel gate in modelsMatch, so the
+    // fable->claude-fable-5 tolerance is gone. RED-without/GREEN-with: on main (unregistered) the
+    // first assertion was `true`; registering the capability flips it to `false`.
+    expect(modelsMatch("fable", "claude-fable-5")).toBe(false); // bridge expired
+    expect(modelsMatch("fable", "claude-fable-6")).toBe(false);
+    expect(modelsMatch("opus", "claude-opus-5")).toBe(false);
+    expect(modelsMatch("claude-fable-5", "claude-fable-5")).toBe(true); // exact still matches
+  });
+
+  it("OPR.0.5.3.3: model-pin-canonicalization is REGISTERED (the sentinel the bridge observes)", () => {
+    expect(SPEC_VALIDATION_CAPABILITIES.has("model-pin-canonicalization")).toBe(true);
   });
 
   it("r2's ambiguity discriminators stay false: one pin can never bless multiple distinct models", () => {

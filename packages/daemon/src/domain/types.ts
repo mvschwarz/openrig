@@ -1141,6 +1141,9 @@ export interface RigServicesRecord {
 export interface ValidationResult {
   valid: boolean;
   errors: string[];
+  /** OPR.0.5.3.3 — non-blocking advisories (e.g. alias-form model pins). Fail-open: advisories
+   *  never affect `valid`. Absent/empty when there is nothing to advise. */
+  advisories?: string[];
 }
 
 export interface PreflightResult {
