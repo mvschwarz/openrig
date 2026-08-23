@@ -11,6 +11,7 @@ import {
   startTranscriptRotation,
   stopTranscriptRotation,
   getActiveRotationCount,
+  getLastCaptureAt,
   getTranscriptRotationOptionsFromEnv,
   clearAllTranscriptRotationsForTest,
   DEFAULT_TRANSCRIPT_LINES,
@@ -294,5 +295,66 @@ describe("getTranscriptRotationOptionsFromEnv — env override + defaults", () =
     const opts = getTranscriptRotationOptionsFromEnv();
     expect(opts.lines).toBe(DEFAULT_TRANSCRIPT_LINES);
     expect(opts.pollIntervalMs).toBe(DEFAULT_TRANSCRIPT_POLL_INTERVAL_MS);
+  });
+});
+
+describe("startTranscriptRotation — generation guard (r2 HIGH-2: in-flight tick after stop)", () => {
+  it("does NOT resurrect liveness or write when a tick is in-flight during stop", async () => {
+    let resolveCapture!: (v: string) => void;
+    const deferred = new Promise<string>((res) => {
+      resolveCapture = res;
+    });
+    const adapter = { capturePaneContent: vi.fn(() => deferred) };
+    const outputPath = path.join(tmpDir, "rig", "session.log");
+
+    startTranscriptRotation(
+      adapter as unknown as TmuxAdapter,
+      "s@rig",
+      outputPath,
+      { lines: 1000, pollIntervalMs: 60_000 },
+    );
+    // The immediate first tick is now awaiting the deferred capture.
+    stopTranscriptRotation("s@rig"); // invalidates the generation
+    resolveCapture("late-content\n"); // capture resolves AFTER stop
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    expect(getLastCaptureAt("s@rig")).toBeUndefined(); // no resurrection
+    expect(fs.existsSync(outputPath)).toBe(false); // no write after stop
+  });
+
+  it("a stale in-flight tick from a REPLACED start does not clobber the newer rotation", async () => {
+    let resolveFirst!: (v: string) => void;
+    const firstCapture = new Promise<string>((res) => {
+      resolveFirst = res;
+    });
+    const adapterA = { capturePaneContent: vi.fn(() => firstCapture) };
+    const outputPath = path.join(tmpDir, "rig", "s.log");
+
+    startTranscriptRotation(
+      adapterA as unknown as TmuxAdapter,
+      "s@rig",
+      outputPath,
+      { lines: 1000, pollIntervalMs: 60_000 },
+    );
+    // First tick in-flight; REPLACE with a new start whose capture resolves at once.
+    const adapterB = { capturePaneContent: vi.fn(async () => "new-gen\n") };
+    startTranscriptRotation(
+      adapterB as unknown as TmuxAdapter,
+      "s@rig",
+      outputPath,
+      { lines: 1000, pollIntervalMs: 60_000 },
+    );
+    await new Promise((r) => setImmediate(r));
+    expect(getLastCaptureAt("s@rig")).toBeDefined();
+    expect(fs.readFileSync(outputPath, "utf8")).toBe("new-gen\n");
+
+    // Now resolve A's stale capture — it must NOT overwrite B's file or record.
+    resolveFirst("old-gen\n");
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    expect(fs.readFileSync(outputPath, "utf8")).toBe("new-gen\n");
+
+    stopTranscriptRotation("s@rig");
   });
 });

@@ -656,4 +656,38 @@ describe("TranscriptStore.getIngestHealth — liveness decoupled from mtime", ()
     const health = store.getIngestHealth(rig, session);
     expect(health.reason).toBe("capture_stale");
   });
+
+  // r2 HIGH-1: a successful capture whose required WRITE fails must not advertise
+  // freshness over the stale on-disk bytes. Liveness is recorded only for a
+  // completed healthy tick (after rename / on the unchanged early-return).
+  it("does NOT report capture_fresh when capture succeeds but the required write fails", async () => {
+    const store = new TranscriptStore({ transcriptsRoot: tmpDir, staleAfterMs: 1000 });
+    const rig = "hrig";
+    const session = "diskfull@hrig";
+    store.ensureTranscriptDir(rig);
+    const outputPath = store.getTranscriptPath(rig, session);
+    // Pre-existing nonempty transcript with OLD bytes, aged mtime.
+    writeFileSync(outputPath, "old\n");
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(outputPath, old, old);
+    // Make the containing dir non-writable so the tmp write/rename fails.
+    const rigDir = join(tmpDir, rig);
+    chmodSync(rigDir, 0o500);
+    try {
+      // Capture returns CHANGED content -> not suppressed -> write attempted -> throws.
+      const adapter = { capturePaneContent: vi.fn(async () => "new-content\n") };
+      startTranscriptRotation(adapter as unknown as TmuxAdapter, session, outputPath, {
+        lines: 1000,
+        pollIntervalMs: 60_000,
+      });
+      await new Promise((r) => setImmediate(r));
+      // The file still holds the OLD bytes (write failed) ...
+      expect(readFileSync(outputPath, "utf8")).toBe("old\n");
+      // ... so health must be capture_stale (mtime fallback), NOT a false capture_fresh.
+      expect(store.getIngestHealth(rig, session).reason).toBe("capture_stale");
+    } finally {
+      chmodSync(rigDir, 0o700); // restore so afterEach cleanup can remove tmpDir
+      stopTranscriptRotation(session);
+    }
+  });
 });

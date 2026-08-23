@@ -48,13 +48,20 @@ function parsePositiveInt(raw: string | undefined, fallback: number): number {
 
 const activeTimers = new Map<string, NodeJS.Timeout>();
 
-// Liveness decoupled from the file mtime. Every SUCCESSFUL capture records a
-// timestamp here, whether or not the tick actually rewrote the file. The
-// unchanged-content guard freezes the file mtime on an idle seat whose pane is
-// static, so a health signal that read mtime would falsely report the seat's
-// capture as stale within staleAfterMs; getIngestHealth reads THIS instead
-// (with an mtime fallback). Keyed by sessionName, symmetric with activeTimers.
+// Liveness decoupled from the file mtime. A COMPLETED HEALTHY tick records a
+// timestamp here — on the unchanged-content early return (the file already holds
+// the current bytes) or after a successful atomic rename — NOT merely on a
+// successful capture: a capture whose required persistence then fails must not
+// advertise freshness over stale on-disk bytes. getIngestHealth reads THIS
+// (with an mtime fallback). Keyed by sessionName (globally unique: {pod}-{member}@{rig}).
 const lastCaptureAtBySession = new Map<string, number>();
+
+// Per-start generation token. stop() and a replacing start() invalidate the
+// session's entry, so an in-flight tick that resumes after its async capture
+// cannot resurrect liveness (or write the file) for a session that has since
+// been stopped or replaced.
+let rotationGeneration = 0;
+const activeGeneration = new Map<string, number>();
 
 /** Last successful capture time (epoch ms) for a session, or undefined if no
  *  rotation has captured for it in this process. getIngestHealth reads this so
@@ -75,15 +82,21 @@ export function startTranscriptRotation(
 ): void {
   stopTranscriptRotation(sessionName);
 
+  const myGeneration = ++rotationGeneration;
+  activeGeneration.set(sessionName, myGeneration);
+  // True only while THIS start is the current rotation for the session — false
+  // once stop() or a replacing start() has run. Guards the async gap so a stale
+  // in-flight tick performs no write and records no liveness.
+  const isCurrent = (): boolean => activeGeneration.get(sessionName) === myGeneration;
+
   const tick = async (): Promise<void> => {
     try {
+      if (!isCurrent()) return;
       const content = await tmuxAdapter.capturePaneContent(sessionName, opts.lines);
-      if (content === null) return;
-
-      // Record liveness on every successful capture, BEFORE the unchanged-content
-      // guard's early return — so an idle (suppressed-write) seat still reports a
-      // fresh capture time to getIngestHealth even though its file mtime is frozen.
-      lastCaptureAtBySession.set(sessionName, Date.now());
+      // Re-check AFTER the async capture: stop()/replacement may have run while we
+      // awaited. A dead session (null) is deliberately not recorded either way,
+      // so getIngestHealth falls back to a stale mtime for it.
+      if (content === null || !isCurrent()) return;
 
       // Preserve SESSION BOUNDARY lines that the restore orchestrator
       // writes to the transcript file before launch. The capture-pane
@@ -113,12 +126,22 @@ export function startTranscriptRotation(
       // through fseventsd into a host CPU/RSS storm across hundreds of seats.
       // `prevContent` is the SAME read used for boundary extraction — no extra I/O.
       const payload = header + content;
-      if (prevContent !== null && prevContent === payload) return;
+      if (prevContent !== null && prevContent === payload) {
+        // The file already holds exactly these bytes (persisted + current), so
+        // this IS a completed healthy tick — record liveness, skip the rewrite.
+        lastCaptureAtBySession.set(sessionName, Date.now());
+        return;
+      }
 
       fs.mkdirSync(path.dirname(outputPath), { recursive: true });
       const tmpPath = `${outputPath}.tmp.${process.pid}`;
       fs.writeFileSync(tmpPath, payload);
       fs.renameSync(tmpPath, outputPath);
+      // Persistence succeeded — only NOW is the tick healthy, so record liveness.
+      // A throw above jumps to the catch and never reaches here, so a failed
+      // required write leaves liveness un-advanced and getIngestHealth reads the
+      // (correctly stale) file mtime.
+      lastCaptureAtBySession.set(sessionName, Date.now());
     } catch {
       // Best-effort capture: target session may have died, output path
       // may be unwritable, etc. The next tick retries; failure here
@@ -144,6 +167,9 @@ export function stopTranscriptRotation(sessionName: string): void {
   // Drop the liveness record: once rotation stops, capture really has stopped,
   // so getIngestHealth should fall back to mtime (which correctly reads stale).
   lastCaptureAtBySession.delete(sessionName);
+  // Invalidate the generation so any in-flight tick from this start bails out
+  // after its async capture instead of resurrecting liveness / writing.
+  activeGeneration.delete(sessionName);
 }
 
 /** Test-only: count of active rotators. Production code should not
@@ -158,4 +184,5 @@ export function clearAllTranscriptRotationsForTest(): void {
   for (const timer of activeTimers.values()) clearInterval(timer);
   activeTimers.clear();
   lastCaptureAtBySession.clear();
+  activeGeneration.clear();
 }
