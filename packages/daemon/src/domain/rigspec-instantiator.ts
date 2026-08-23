@@ -296,6 +296,7 @@ import type { RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember, StartupAction
 import type { RuntimeAdapter, NodeBinding, ResolvedStartupFile } from "./runtime-adapter.js";
 import { resolveConcreteHint } from "./runtime-adapter.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
+import { installTopologyDefaults } from "./topology-defaults-installer.js";
 
 function defaultCultureStartupFile(): ResolvedStartupFile {
   const assetsRoot = nodePath.resolve(import.meta.dirname, "../../assets");
@@ -330,6 +331,10 @@ interface PodInstantiatorDeps {
    *  source surfaces a structured error at instantiation time. */
   agentImageLibrary?: import("./agent-images/agent-image-library-service.js").AgentImageLibraryService;
   exec?: (cmd: string) => Promise<string>;
+  /** OPR.0.5.3.6 — resolves the typed topology.root so a spec's shipped
+   *  `topology/` chain-file defaults install at materialization (copy-if-absent,
+   *  best-effort). Absent → no defaults install (tests, legacy composition). */
+  topologyRootResolver?: () => string;
 }
 
 export interface MaterializeResult {
@@ -680,6 +685,22 @@ export class PodRigInstantiator {
       tx();
       for (const event of persistedEvents) {
         this.deps.eventBus.notifySubscribers(event);
+      }
+
+      // OPR.0.5.3.6 — install the spec's shipped topology chain-file defaults
+      // under topology.root (copy-if-absent: earned context is never
+      // overwritten). Best-effort AFTER the persistence tx: a rig never fails
+      // to materialize over a defaults copy, but failures are surfaced as
+      // named warnings, never swallowed.
+      if (this.deps.topologyRootResolver) {
+        const defaults = installTopologyDefaults({
+          specDir: rigRoot,
+          rigName: rigSpec.name,
+          topologyRoot: this.deps.topologyRootResolver(),
+        });
+        for (const f of defaults.failed) {
+          preflightWarnings.push(`topology-defaults: could not install ${f.path}: ${f.error}`);
+        }
       }
 
       return {

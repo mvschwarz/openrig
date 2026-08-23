@@ -792,6 +792,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     tmuxAdapter,
     agentImageLibrary,
     exec,
+    // OPR.0.5.3.6 — shipped topology chain-file defaults install under the
+    // typed topology.root at materialization (copy-if-absent).
+    topologyRootResolver: () => String(new ContextPackSettingsStore().resolveOne("topology.root").value),
   });
 
   const podBundleSourceResolver = new PodBundleSourceResolver();
