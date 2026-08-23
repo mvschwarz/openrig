@@ -222,6 +222,7 @@ Examples:
   rig context add ./my-pack
   rig context rm packs/compaction-restore
   rig context sync
+  rig context trace --rig product-team --seat orch1-lead --name LEARNED.md
 `);
 
   const getDeps = (): StatusDeps => depsOverride ?? {
@@ -238,6 +239,47 @@ Examples:
     }
     return deps.clientFactory(getDaemonUrl(status));
   }
+
+  // OPR.0.5.3.6 — the productized chain-file trace. Daemon-independent by
+  // design: the walk is a config read + filesystem reads, so it works on a
+  // box whose daemon is down (orientation is exactly when that happens).
+  cmd.command("trace")
+    .description("Walk the topology tree for one chain filename (instance -> rig -> seat), keyed off topology.root")
+    .requiredOption("--rig <rig>", "Rig name (the rigs/<rig> altitude)")
+    .option("--seat <seat>", "Seat id (the seats/<seat> altitude); omit for a rig-level trace")
+    .requiredOption("--name <file>", "Chain filename, identical at every altitude (e.g. LEARNED.md, CULTURE.md)")
+    .option("--json", "JSON output for agents")
+    .action(async (opts: { rig: string; seat?: string; name: string; json?: boolean }) => {
+      const { ConfigStore } = await import("../config-store.js");
+      const { traceTopologyChain } = await import("../lib/topology-trace.js");
+      const store = new ConfigStore();
+      const resolved = store.resolveWithSource("topology.root");
+      const result = traceTopologyChain({
+        topologyRoot: String(resolved.value),
+        name: opts.name,
+        rig: opts.rig,
+        seat: opts.seat ?? null,
+      });
+      // Advisories go to stderr on BOTH output modes — a legacy read must
+      // never pass silently, and stdout stays clean for piping.
+      for (const level of result.levels) {
+        if (level.advisory) console.error(`ADVISORY ${level.advisory}`);
+      }
+      if (opts.json) {
+        console.log(JSON.stringify({ topologyRootSource: resolved.source, ...result }, null, 2));
+        return;
+      }
+      console.log(`chain "${result.name}" under topology.root=${result.topologyRoot} (source: ${resolved.source})`);
+      for (const level of result.levels) {
+        if (level.source === "absent") {
+          console.log(`\n== ${level.altitude} — absent (${level.path})`);
+          continue;
+        }
+        const origin = level.source === "legacy" ? ` [LEGACY: ${level.resolvedPath}]` : "";
+        console.log(`\n== ${level.altitude} — ${level.path}${origin}`);
+        console.log(level.content?.trimEnd() ?? "");
+      }
+    });
 
   cmd.command("compose")
     .description("Compose ordered files into a durable context-pack ref (never delivers)")
