@@ -53,13 +53,13 @@ export interface TraceFs {
  *  empties, and NULs do not. */
 function assertSafeSegment(value: string, field: "rig" | "seat" | "name"): void {
   if (
-    value.length === 0
+    value.trim().length === 0
     || value === "." || value === ".."
     || value.includes("/") || value.includes("\\")
     || value.includes("\0")
   ) {
     throw new Error(
-      `invalid ${field} "${value}": must be a single path segment (no separators or dot-segments)`,
+      `invalid ${field} "${value}": must be a non-blank single path segment (no separators or dot-segments)`,
     );
   }
 }
@@ -82,7 +82,9 @@ export function traceTopologyChain(input: {
   fs?: TraceFs;
 }): TraceResult {
   assertSafeSegment(input.rig, "rig");
-  if (input.seat) assertSafeSegment(input.seat, "seat");
+  // r2 residual: an explicitly EMPTY seat is user error — only true omission
+  // (undefined/null) means a rig-level trace.
+  if (input.seat != null) assertSafeSegment(input.seat, "seat");
   assertSafeSegment(input.name, "name");
 
   const fs = input.fs ?? realFs;

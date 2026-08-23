@@ -93,6 +93,20 @@ describe("installTopologyDefaults", () => {
     expect(files[join(ROOT, "rigs", "product-team", "seats", "s1", "SEAT.md")]).toBe("seat good");
   });
 
+  it("r2 residual: the INITIAL topology/ root probe throwing is NAMED, never thrown (the total contract has no first-line exception)", () => {
+    const { ops } = memFs({ [join(SPEC, "topology", "rig", "X.md")]: "x" });
+    const failingOps: TopologyDefaultsFsOps = {
+      ...ops,
+      isDirectory: (p) => {
+        if (p === join(SPEC, "topology")) throw new Error("EACCES root probe");
+        return ops.isDirectory(p);
+      },
+    };
+    const res = installTopologyDefaults({ specDir: SPEC, rigName: "r", topologyRoot: ROOT, fsOps: failingOps });
+    expect(res.failed).toEqual([{ path: join(SPEC, "topology"), error: "EACCES root probe" }]);
+    expect(res.none).toBe(false);
+  });
+
   it("r2-B2: a listDirs failure on seats/ is NAMED, not thrown", () => {
     const { ops } = memFs({ [join(SPEC, "topology", "seats", "s1", "SEAT.md")]: "x" });
     const failingOps: TopologyDefaultsFsOps = {

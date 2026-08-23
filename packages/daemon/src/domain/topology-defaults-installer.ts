@@ -59,8 +59,15 @@ export function installTopologyDefaults(input: {
   const ops = input.fsOps ?? realFsOps;
   const result: TopologyDefaultsResult = { installed: [], preserved: [], failed: [], none: false };
   const topologyDir = nodePath.join(input.specDir, "topology");
-  if (!ops.isDirectory(topologyDir)) {
-    result.none = true;
+  // r2 residual: the total never-throw contract has no first-line exception —
+  // even the root probe failing is a NAMED failure, not a throw and not `none`.
+  try {
+    if (!ops.isDirectory(topologyDir)) {
+      result.none = true;
+      return result;
+    }
+  } catch (err) {
+    result.failed.push({ path: topologyDir, error: err instanceof Error ? err.message : String(err) });
     return result;
   }
 

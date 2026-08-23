@@ -189,6 +189,38 @@ describe("rig context CLI (PL-014)", () => {
     return dir;
   }
 
+  it("trace rejects explicitly blank --seat values while omission stays rig-level", async () => {
+    const topologyRoot = mkdtempSync(join(tmpdir(), "openrig-context-trace-"));
+    const savedTopologyRoot = process.env["OPENRIG_TOPOLOGY_ROOT"];
+    process.env["OPENRIG_TOPOLOGY_ROOT"] = topologyRoot;
+    try {
+      for (const seat of ["", " \t "]) {
+        const rejected = await captureLogs(async () => {
+          await makeCmd().parseAsync([
+            "node", "rig", "context", "trace",
+            "--rig", "product-team", "--seat", seat, "--name", "CRAFT.md", "--json",
+          ]);
+        });
+        expect(rejected.exitCode, JSON.stringify(seat)).toBe(1);
+        expect(rejected.errLogs.join("\n"), JSON.stringify(seat)).toMatch(/invalid seat/i);
+      }
+
+      const omitted = await captureLogs(async () => {
+        await makeCmd().parseAsync([
+          "node", "rig", "context", "trace",
+          "--rig", "product-team", "--name", "CRAFT.md", "--json",
+        ]);
+      });
+      expect(omitted.exitCode).toBeUndefined();
+      const result = JSON.parse(omitted.logs.join("")) as { levels: Array<{ altitude: string }> };
+      expect(result.levels.map((level) => level.altitude)).toEqual(["instance", "rig"]);
+    } finally {
+      if (savedTopologyRoot === undefined) delete process.env["OPENRIG_TOPOLOGY_ROOT"];
+      else process.env["OPENRIG_TOPOLOGY_ROOT"] = savedTopologyRoot;
+      rmSync(topologyRoot, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     [
       "path traversal",

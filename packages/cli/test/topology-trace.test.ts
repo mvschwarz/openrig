@@ -112,6 +112,20 @@ describe("traceTopologyChain", () => {
     expect(reads).toEqual([]); // rejection happens BEFORE any filesystem contact
   });
 
+  it("r2 residual: an EXPLICITLY EMPTY seat is rejected, not silently treated as omitted", () => {
+    // `--seat ""` is user error, not a rig-level trace request. Omission
+    // (undefined/null) stays the sanctioned rig-level form.
+    expect(() => traceTopologyChain({
+      topologyRoot: ROOT, name: "LEARNED.md", rig: "r", seat: "",
+      legacyRigsRoot: LEGACY, fs: fsOf({}),
+    })).toThrow(/invalid seat/i);
+    const omitted = traceTopologyChain({
+      topologyRoot: ROOT, name: "LEARNED.md", rig: "r", seat: null,
+      legacyRigsRoot: LEGACY, fs: fsOf({}),
+    });
+    expect(omitted.levels.map((l) => l.altitude)).toEqual(["instance", "rig"]);
+  });
+
   it("r2-B3: ordinary dotted names stay valid (LEARNED.md, a.b.c.md, seat ids with dashes/underscores)", () => {
     const result = traceTopologyChain({
       topologyRoot: ROOT, name: "a.b.c.md", rig: "product-team", seat: "orch1_lead-2",
