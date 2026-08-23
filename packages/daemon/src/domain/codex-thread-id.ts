@@ -183,7 +183,7 @@ function readCodexThreadIdFromLogs(
   // OPR.0.5.3.10 r2 round-4 — the logs key is pid:<pid>:<opaque-uuid>, so a
   // pid-only read can return a RETIRED occupant's row to a reused pid. When
   // the caller knows the current occupant's start time (minTs, epoch
-  // seconds), only rows written at/after it are that occupant's. Identity-less
+  // seconds), only rows written strictly AFTER its start second are provably that occupant's. Identity-less
   // callers keep the legacy unbounded read.
   for (const dbPath of resolveCodexLogDbPaths(homeDir, exists)) {
     try {
@@ -194,7 +194,7 @@ function readCodexThreadIdFromLogs(
            FROM logs
            WHERE process_uuid LIKE ?
              AND thread_id IS NOT NULL
-             AND ts >= ?
+             AND ts > ?
            ORDER BY ts DESC, ts_nanos DESC, id DESC
            LIMIT 1`
         ).get(`pid:${pid}:%`, minTs ?? 0) as { thread_id?: string } | undefined;
@@ -212,12 +212,13 @@ function readCodexThreadIdFromLogs(
 }
 
 /** Parse `ps lstart` ("Sun Aug 23 19:30:00 2026", local time) to epoch
- *  SECONDS — EXACT, no slack (r2 round-5): both `ts` and lstart are
- *  second-aligned and a process cannot emit its own log BEFORE its start
- *  second, so `ts >= startTs` admits every current-occupant row and no
- *  retired one; any slack readmits the retired token at the reuse boundary.
- *  Unparseable → undefined (the caller falls back to the ungated read rather
- *  than inventing a gate). */
+ *  SECONDS. The reader gates STRICTLY (`ts > startTs`, r2 round-6): lstart
+ *  carries no subsecond component, so ownership of a row INSIDE the start
+ *  second is undecidable — retired A can log at ts == B.startTs in the same
+ *  second B reuses the pid. The ambiguous second fails CLOSED (honest
+ *  INDETERMINATE; a genuinely-current same-second row resolves one poll
+ *  later), rows after it resolve. Unparseable → undefined (the caller falls
+ *  back to the ungated read rather than inventing a gate). */
 export function lstartToMinTs(identity: string | undefined): number | undefined {
   if (!identity) return undefined;
   const m = identity.match(/^\w{3}\s+(\w{3})\s+(\d+)\s+(\d{2}:\d{2}:\d{2})\s+(\d{4})$/);

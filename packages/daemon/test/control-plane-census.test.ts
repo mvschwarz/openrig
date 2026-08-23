@@ -332,11 +332,60 @@ describe("OPR.0.5.3.10 — one census per cycle", () => {
       const resolver = new CodexThreadIdResolver({ defaultHome: home, resolveHomeDirByPid: homeProbes as never });
       expect(await resolver.resolve(4242, "Sun Aug 23 19:30:00 2026")).toBeUndefined();
 
-      // B's own SAME-SECOND row (ts == startTs) resolves — no earlier rows admitted.
+      // r2 round-6 superseded round-5's same-second acceptance: ownership
+      // inside the start second is undecidable (no subsecond lstart), so a
+      // same-second row — even B's own — fails CLOSED; the next second resolves.
       const db2 = new BetterSqlite3(nodePath.join(home, ".codex", "logs_1.sqlite"));
       db2.prepare("INSERT INTO logs (ts, ts_nanos, level, process_uuid, thread_id) VALUES (?, 0, 'info', ?, ?)")
         .run(startTs, "pid:4242:new-process-uuid", "new-thread");
       db2.close();
+      expect(await resolver.resolve(4242, "Sun Aug 23 19:30:00 2026")).toBeUndefined();
+      const db3 = new BetterSqlite3(nodePath.join(home, ".codex", "logs_1.sqlite"));
+      db3.prepare("INSERT INTO logs (ts, ts_nanos, level, process_uuid, thread_id) VALUES (?, 0, 'info', ?, ?)")
+        .run(startTs + 1, "pid:4242:new-process-uuid", "new-thread");
+      db3.close();
+      expect(await resolver.resolve(4242, "Sun Aug 23 19:30:00 2026")).toBe("new-thread");
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("r2 round-6: the AMBIGUOUS start second fails CLOSED — no row at ts == startTs resolves; a row after it does (real sqlite)", async () => {
+    // r2's same-second control: retired A can log at ts == B.startTs and exit,
+    // B reuses the pid in the same second — lstart carries no subsecond
+    // component, so ownership inside that second is UNDECIDABLE. The ruled
+    // shape is honest INDETERMINATE over masked stale: ts > startTs strictly;
+    // a genuinely-current same-second row resolves one poll later instead of
+    // a retired token resolving now.
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const nodePath = await import("node:path");
+    const BetterSqlite3 = (await import("better-sqlite3")).default;
+    const home = fs.mkdtempSync(nodePath.join(os.tmpdir(), "s10-r6-home-"));
+    try {
+      fs.mkdirSync(nodePath.join(home, ".codex"), { recursive: true });
+      const startTs = Math.floor(new Date("Aug 23, 2026 19:30:00").getTime() / 1000);
+      const db = new BetterSqlite3(nodePath.join(home, ".codex", "logs_1.sqlite"));
+      db.exec("CREATE TABLE logs (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, ts_nanos INTEGER NOT NULL, level TEXT, process_uuid TEXT, thread_id TEXT)");
+      // ONLY retired A's row, INSIDE B's start second.
+      db.prepare("INSERT INTO logs (ts, ts_nanos, level, process_uuid, thread_id) VALUES (?, 100000000, 'info', ?, ?)")
+        .run(startTs, "pid:4242:retired-process-uuid", "retired-thread");
+      db.close();
+
+      const resolver = new CodexThreadIdResolver({ defaultHome: home, resolveHomeDirByPid: (async () => home) as never });
+      // The ambiguous second fails closed: the retired row must not resolve…
+      expect(await resolver.resolve(4242, "Sun Aug 23 19:30:00 2026")).toBeUndefined();
+      // …and even B's OWN same-second row stays unresolved (undecidable ownership).
+      const db2 = new BetterSqlite3(nodePath.join(home, ".codex", "logs_1.sqlite"));
+      db2.prepare("INSERT INTO logs (ts, ts_nanos, level, process_uuid, thread_id) VALUES (?, 200000000, 'info', ?, ?)")
+        .run(startTs, "pid:4242:new-process-uuid", "new-thread");
+      db2.close();
+      expect(await resolver.resolve(4242, "Sun Aug 23 19:30:00 2026")).toBeUndefined();
+      // A row strictly AFTER the start second resolves.
+      const db3 = new BetterSqlite3(nodePath.join(home, ".codex", "logs_1.sqlite"));
+      db3.prepare("INSERT INTO logs (ts, ts_nanos, level, process_uuid, thread_id) VALUES (?, 0, 'info', ?, ?)")
+        .run(startTs + 1, "pid:4242:new-process-uuid", "new-thread");
+      db3.close();
       expect(await resolver.resolve(4242, "Sun Aug 23 19:30:00 2026")).toBe("new-thread");
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
