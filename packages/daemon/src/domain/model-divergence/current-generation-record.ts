@@ -25,13 +25,19 @@ export interface ProcessRow {
   pid: number;
   ppid: number;
   command: string;
+  /** OPR.0.5.3.10 — the process start time (`ps lstart`), the identity half
+   *  of pid+start-time: pid reuse changes it, so consumers can invalidate
+   *  cached per-pid answers without another spawn. Optional: injected legacy
+   *  rows without it fall back to the resolver's TTL bound. */
+  startedAt?: string;
 }
 
 export interface CurrentGenerationDeps {
   getPanePid: (sessionTarget: string) => Promise<number | null>;
   listProcesses: () => Promise<ProcessRow[]>;
-  /** Codex: thread id for a live codex pid (the logs join; async post-F1). */
-  readThreadIdByPid: (pid: number) => Promise<string | undefined> | string | undefined;
+  /** Codex: thread id for a live codex pid (the logs join; async post-F1).
+   *  `identity` = the census row's startedAt (pid+start-time reuse guard). */
+  readThreadIdByPid: (pid: number, identity?: string) => Promise<string | undefined> | string | undefined;
 }
 
 export type CurrentRecordResolution =
@@ -251,7 +257,7 @@ export async function resolveLiveCodexThreadId(
   const codexPids = findDescendants(processes, panePid, commandBasenameIs("codex"));
   if (codexPids.length === 0) return { ok: false, reason: `no codex process under the live pane of ${sessionTarget}` };
   for (const pid of codexPids) {
-    const threadId = await deps.readThreadIdByPid(pid);
+    const threadId = await deps.readThreadIdByPid(pid, processes.find((p) => p.pid === pid)?.startedAt);
     if (threadId) return { ok: true, id: threadId };
   }
   return { ok: false, reason: `live codex process under ${sessionTarget} yielded no thread id from its logs` };

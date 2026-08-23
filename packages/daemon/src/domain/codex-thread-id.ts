@@ -64,7 +64,7 @@ export class CodexThreadIdResolver {
    *  with a different HOME — an unexpiring cache served the retired
    *  occupant's thread id indefinitely, which is exactly a wrong resume
    *  token). Staleness is now bounded by the TTL, not just the entry count. */
-  private readonly homeByPid = new Map<number, { home: string; at: number }>();
+  private readonly homeByPid = new Map<number, { home: string; at: number; identity?: string }>();
   /** Per-pid in-flight home resolution — concurrent resolves for the same pid
    *  coalesce onto ONE subprocess; a failure rejects all waiters and caches
    *  nothing. */
@@ -86,7 +86,7 @@ export class CodexThreadIdResolver {
     } = {},
   ) {}
 
-  async resolve(pid: number): Promise<string | undefined> {
+  async resolve(pid: number, identity?: string): Promise<string | undefined> {
     const readFromLogs = this.opts.readFromLogs ?? ((p: number, home: string) => readCodexThreadIdFromLogs(p, home));
     const defaultHome = this.opts.defaultHome ?? safeUserHomeDir() ?? os.homedir();
     const now = this.opts.now ?? Date.now;
@@ -96,12 +96,16 @@ export class CodexThreadIdResolver {
     const fromDefault = readFromLogs(pid, defaultHome);
     if (fromDefault) return fromDefault;
 
-    // 2. FRESH cached home for this pid: no subprocess. A cached DEFAULT means
-    //    the subprocess already answered "default" once — step 1 covered it.
-    //    An EXPIRED entry is dropped and the pid re-probes (r2-B1).
+    // 2. Cached home for this pid: no subprocess. PROCESS IDENTITY first
+    //    (r1's pid-reuse remedy): callers thread the census row's start time,
+    //    and a mismatch means the pid was REUSED — invalidate IMMEDIATELY,
+    //    inside any TTL. The TTL stays as the fallback staleness bound for
+    //    identity-less callers. A cached DEFAULT means the subprocess already
+    //    answered "default" once — step 1 covered it.
     const cached = this.homeByPid.get(pid);
     if (cached) {
-      if (now() - cached.at <= ttl) {
+      const identityMismatch = identity !== undefined && cached.identity !== undefined && identity !== cached.identity;
+      if (!identityMismatch && now() - cached.at <= ttl) {
         return cached.home === defaultHome ? undefined : readFromLogs(pid, cached.home);
       }
       this.homeByPid.delete(pid);
@@ -114,7 +118,7 @@ export class CodexThreadIdResolver {
       const p = Promise.resolve(resolver(pid)).then(
         (home) => {
           this.inFlightByPid.delete(pid);
-          if (home) this.cacheHome(pid, home);
+          if (home) this.cacheHome(pid, home, identity);
           return home;
         },
         (err) => {
@@ -131,13 +135,13 @@ export class CodexThreadIdResolver {
     return readFromLogs(pid, home);
   }
 
-  private cacheHome(pid: number, home: string): void {
+  private cacheHome(pid: number, home: string, identity?: string): void {
     const max = this.opts.maxCachedPids ?? 256;
     if (!this.homeByPid.has(pid) && this.homeByPid.size >= max) {
       const oldest = this.homeByPid.keys().next().value;
       if (oldest !== undefined) this.homeByPid.delete(oldest);
     }
-    this.homeByPid.set(pid, { home, at: (this.opts.now ?? Date.now)() });
+    this.homeByPid.set(pid, { home, at: (this.opts.now ?? Date.now)(), identity });
   }
 }
 

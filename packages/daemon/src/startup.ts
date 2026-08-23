@@ -1741,7 +1741,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       const currentGenDeps = {
         getPanePid: async (sessionTarget: string) => tmuxAdapter.getPanePid ? tmuxAdapter.getPanePid(sessionTarget) : null,
         listProcesses: () => divergenceCensus.list(),
-        readThreadIdByPid: (pid: number) => codexThreadIdResolver.resolve(pid),
+        readThreadIdByPid: (pid: number, identity?: string) => codexThreadIdResolver.resolve(pid, identity),
       };
       const OVERSIGHT_SEAT = "watch-lead@oversight";
       const modelDivergenceMonitor = new ModelDivergenceMonitor({

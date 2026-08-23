@@ -32,7 +32,7 @@ interface ResumeMetadataRefresherDeps {
   sessionRegistry: SessionRegistry;
   tmuxAdapter: TmuxAdapter;
   listProcesses?: () => Array<{ pid: number; ppid: number; command: string }> | Promise<Array<{ pid: number; ppid: number; command: string }>>;
-  readCodexThreadIdByPid?: (pid: number) => Promise<string | undefined> | string | undefined;
+  readCodexThreadIdByPid?: (pid: number, identity?: string) => Promise<string | undefined> | string | undefined;
   probeClaudeResume?: (sessionName: string, resumeToken: string, cwd?: string | null) => Promise<"resumable" | "not_resumable" | "inconclusive">;
   resolveHomeDirByPid?: ResolveHomeDirByPid;
   sleep?: (ms: number) => Promise<void>;
@@ -50,7 +50,7 @@ export class ResumeMetadataRefresher {
   private sessionRegistry: SessionRegistry;
   private tmuxAdapter: TmuxAdapter;
   private listProcesses: () => Array<{ pid: number; ppid: number; command: string }> | Promise<Array<{ pid: number; ppid: number; command: string }>>;
-  private readCodexThreadIdByPid: (pid: number) => Promise<string | undefined> | string | undefined;
+  private readCodexThreadIdByPid: (pid: number, identity?: string) => Promise<string | undefined> | string | undefined;
   private probeClaudeResume: (sessionName: string, resumeToken: string, cwd?: string | null) => Promise<"resumable" | "not_resumable" | "inconclusive">;
   private resolveHomeDirByPid: ResolveHomeDirByPid;
   private sleep: (ms: number) => Promise<void>;
@@ -70,7 +70,7 @@ export class ResumeMetadataRefresher {
       defaultHome: deps.homeDir ?? os.homedir(),
       resolveHomeDirByPid: this.resolveHomeDirByPid,
     });
-    this.readCodexThreadIdByPid = deps.readCodexThreadIdByPid ?? ((pid) => threadIdResolver.resolve(pid));
+    this.readCodexThreadIdByPid = deps.readCodexThreadIdByPid ?? ((pid, identity) => threadIdResolver.resolve(pid, identity));
     this.probeClaudeResume = deps.probeClaudeResume ?? ((sessionName, resumeToken, cwd) => this.defaultProbeClaudeResume(sessionName, resumeToken, cwd));
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.homeDir = deps.homeDir ?? os.homedir();
@@ -212,9 +212,12 @@ export class ResumeMetadataRefresher {
     for (let attempt = 0; attempt < attempts; attempt++) {
       const shellPid = await this.tmuxAdapter.getPanePid(sessionTarget);
       if (shellPid) {
-        const codexPids = findCodexDescendantPids(await listProcesses(), shellPid);
+        const rows = await listProcesses();
+        const codexPids = findCodexDescendantPids(rows, shellPid);
         for (const codexPid of codexPids) {
-          const threadId = await this.readCodexThreadIdByPid(codexPid);
+          // pid+start-time identity from the SAME census (r1's reuse guard).
+          const identity = (rows.find((r) => r.pid === codexPid) as { startedAt?: string } | undefined)?.startedAt;
+          const threadId = await this.readCodexThreadIdByPid(codexPid, identity);
           if (threadId) return threadId;
         }
       }
@@ -318,9 +321,12 @@ export async function defaultListProcesses(): Promise<Array<{ pid: number; ppid:
  *  empty SUCCESS for the whole freshness window (r2's discriminator: 0 rows
  *  cached while 520 were live). The lenient variant keeps its contract for
  *  the direct per-call consumers that want best-effort. */
-export async function defaultListProcessesStrict(): Promise<Array<{ pid: number; ppid: number; command: string }>> {
+export async function defaultListProcessesStrict(): Promise<Array<{ pid: number; ppid: number; command: string; startedAt: string }>> {
   const output = await runAsyncSite("resume_metadata.list_processes", async () => {
-    const { stdout } = await execFileAsync("ps", ["-Ao", "pid,ppid,command"], { encoding: "utf-8", maxBuffer: 8 * 1024 * 1024 });
+    // lstart = the process START TIME — the identity half of pid+start-time
+    // (r1's pid-reuse remedy): a reused pid changes lstart, so a consumer
+    // holding last cycle's identity can invalidate without any extra spawn.
+    const { stdout } = await execFileAsync("ps", ["-Ao", "pid,ppid,lstart,command"], { encoding: "utf-8", maxBuffer: 8 * 1024 * 1024 });
     return stdout;
   });
   return output
@@ -329,15 +335,17 @@ export async function defaultListProcessesStrict(): Promise<Array<{ pid: number;
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => {
-      const match = line.match(/^(\d+)\s+(\d+)\s+(.*)$/);
+      // lstart is a fixed 5-token block: "Sun Aug 23 18:52:01 2026".
+      const match = line.match(/^(\d+)\s+(\d+)\s+(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$/);
       if (!match) return null;
       return {
         pid: Number(match[1]),
         ppid: Number(match[2]),
-        command: match[3] ?? "",
+        startedAt: match[3] ?? "",
+        command: match[4] ?? "",
       };
     })
-    .filter((row): row is { pid: number; ppid: number; command: string } => row !== null);
+    .filter((row): row is { pid: number; ppid: number; command: string; startedAt: string } => row !== null);
 }
 
 function findCodexDescendantPids(
