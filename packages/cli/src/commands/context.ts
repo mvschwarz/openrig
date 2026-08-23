@@ -418,6 +418,39 @@ Examples:
       }
     });
 
+  // OPR.0.5.3.7 R1 — the PULL verb: an agent-facing serving verb over the EXISTING assembler
+  // path (the same by-ref/preview machinery `preview` uses — never a parallel assembler).
+  // `preview` is the operator's pre-send check; `get` is what a seat runs on demand to LOAD a
+  // library entry. Output is the assembled bundle itself (so the agent consumes exactly those
+  // bytes), warnings to stderr; `--json` for programmatic use. Naming ruled: `rig context get`
+  // (one library, one verb — NOT `rig skills get`; "skills" is an org category in the library).
+  cmd.command("get")
+    .argument("<name-or-ref>", "Context library entry name or path-like ref")
+    .description("Serve the assembled bundle for an agent to load on demand (the pull verb)")
+    .option("--json", "JSON output")
+    .action(async (nameOrRef: string, opts: { json?: boolean }) => {
+      try {
+        const client = await getClient();
+        const entry = await resolvePack(client, nameOrRef);
+        const res = await client.get<PreviewWire>(`/api/context-packs/library/by-ref/preview?ref=${encodeURIComponent(entry.relativePath)}`);
+        if (res.status !== 200) throw new Error(`Daemon returned HTTP ${res.status}`);
+        const bundle = res.data;
+        if (opts.json) {
+          console.log(JSON.stringify(bundle, null, 2));
+          return;
+        }
+        // Warnings go to stderr so stdout is exactly the served bundle bytes.
+        if (bundle.missingFiles.length > 0) {
+          console.error(`Warning: ${bundle.missingFiles.length} file(s) referenced by manifest are missing on disk.`);
+          for (const m of bundle.missingFiles) console.error(`  - ${m.path} (role: ${m.role})`);
+        }
+        console.log(bundle.bundleText);
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    });
+
   cmd.command("sync")
     .description("Re-walk discovery roots and refresh the library index")
     .option("--json", "JSON output")

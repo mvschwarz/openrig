@@ -381,6 +381,29 @@ files:
     expect(logs.join("\n")).toContain("Smoke body");
   });
 
+  // OPR.0.5.3.7 R1 — the pull verb: `get` serves the assembled bundle for an agent, over the same
+  // assembler path as preview, but WITHOUT the operator preview framing.
+  it("get serves the assembled bundle bytes for agent pull (no operator preview framing)", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "context", "get", "smoke"]);
+    });
+    const out = logs.join("\n");
+    expect(out).toContain("# OpenRig Context Pack: smoke v1"); // the bundle content itself
+    expect(out).toContain("Smoke body");
+    expect(out).not.toContain("# Preview:"); // no operator framing on the pull verb
+    expect(out).not.toContain("# Bundle:");
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("get --json returns the structured bundle wire", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "context", "get", "smoke", "--json"]);
+    });
+    const parsed = JSON.parse(logs.join("\n"));
+    expect(parsed.name).toBe("smoke");
+    expect(parsed.bundleText).toContain("Smoke body");
+  });
+
   it("is a delivery-free noun: no send subcommand or send help", () => {
     const command = contextCommand(runningDeps(port));
     expect(command.commands.map((sub) => sub.name())).not.toContain("send");
