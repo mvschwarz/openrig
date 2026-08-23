@@ -225,6 +225,33 @@ describe("f7dfca0c — alias-pin false positives end AT THE DETECTOR via the one
     expect(recorded).toHaveLength(0);
   });
 
+  it("r2 BLOCKING-1: prototype-key pins are UNKNOWN aliases, not inherited Object members — they diverge, never throw", () => {
+    // r2's discriminator: CANONICAL_MODEL_PINS[pin] on an ordinary object returns inherited
+    // Object.prototype members for valid string pins like "constructor"/"__proto__" — `?? pin`
+    // never runs and `.toLowerCase()` throws, aborting the WHOLE detector pass. Lookup must be
+    // own-property-only.
+    expect(modelsMatch("constructor", "claude-opus-5")).toBe(false);
+    expect(modelsMatch("__proto__", "claude-opus-5")).toBe(false);
+    expect(modelsMatch("hasOwnProperty", "claude-opus-5")).toBe(false);
+  });
+
+  it("r2 BLOCKING-1 (monitor level): a prototype-key pin proclaims RAW and does NOT blind later seats in the pass", async () => {
+    const evil: PinnedSeat = { ...SEAT, nodeId: "n-evil", sessionName: "evil@r", runtime: "claude", pinnedModel: "constructor" };
+    const later: PinnedSeat = { ...SEAT, nodeId: "n-later", sessionName: "later@r", pinnedModel: "gpt-5.1-codex-mini" };
+    const { monitor, recorded } = makeMonitor({
+      listPinnedSeats: () => [evil, later],
+      readEffectiveModel: (seat: PinnedSeat) =>
+        ({ ok: true as const, model: seat.sessionName === "evil@r" ? "claude-opus-5" : "gpt-5.4-mini" }),
+    });
+    const fired = await monitor.checkOnce();
+    // Both divergences proclaim — the pass survives the adversarial pin, raw strings intact.
+    expect(fired).toHaveLength(2);
+    expect(fired[0]!.pinnedModel).toBe("constructor");
+    expect(fired[0]!.effectiveModel).toBe("claude-opus-5");
+    expect(fired[1]!.pinnedModel).toBe("gpt-5.1-codex-mini");
+    expect(recorded).toHaveLength(2);
+  });
+
   it("control (monitor level): alias pin on the WRONG model proclaims with RAW strings preserved", async () => {
     const seat: PinnedSeat = { ...SEAT, runtime: "claude", pinnedModel: "fable" };
     const { monitor } = makeMonitor({

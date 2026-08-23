@@ -22,6 +22,14 @@ describe("aliasModelPinAdvisory — names the canonical id for an alias pin", ()
     expect(aliasModelPinAdvisory(undefined, "x")).toBeNull();
     expect(aliasModelPinAdvisory(42 as unknown, "x")).toBeNull();
   });
+
+  it("r2 BLOCKING-1: prototype-key pins are UNKNOWN — null, never a fabricated advisory from inherited Object members", () => {
+    // Ordinary-object lookup returned Object.prototype members for these valid string pins,
+    // fabricating advisories naming `function Object() { [native code] }` as a canonical id.
+    expect(aliasModelPinAdvisory("constructor", "x")).toBeNull();
+    expect(aliasModelPinAdvisory("__proto__", "x")).toBeNull();
+    expect(aliasModelPinAdvisory("hasOwnProperty", "x")).toBeNull();
+  });
 });
 
 describe("RigSpecSchema.validate — alias pins surface as advisories, never errors (fail-open)", () => {
