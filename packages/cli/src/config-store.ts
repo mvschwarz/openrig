@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { userInfo } from "node:os";
+import { userInfo, homedir } from "node:os";
 import {
   getDefaultOpenRigPath,
   readOpenRigEnv,
@@ -155,6 +155,19 @@ export interface RiggedConfig {
 }
 
 const DEFAULT_WORKSPACE_ROOT = getDefaultOpenRigPath("workspace");
+
+/** OPR.0.5.3.6 — twin of the daemon settings-store helper. The LEGACY topology
+ *  location, kept readable (advisory-emitting fallback) so pre-convention rigs
+ *  migrate instead of flag-daying. Resolves where legacy code ACTUALLY wrote —
+ *  the codex adapter's shared-docs precedent (OPENRIG_SHARED_DOCS_ROOT env,
+ *  else the literal ~/.openrig/shared-docs), NOT $OPENRIG_HOME: boxes with a
+ *  non-default home still carry their legacy tree at ~/.openrig/shared-docs.
+ *  This is the ONE CLI home for the literal; walkers import it and carry none. */
+export function resolveLegacyTopologyRigsRoot(): string {
+  const sharedDocsRoot = process.env["OPENRIG_SHARED_DOCS_ROOT"]?.trim()
+    || join(homedir(), ".openrig", "shared-docs");
+  return join(sharedDocsRoot, "rigs");
+}
 
 const DEFAULT_CLAUDE_COMPACTION_PRE_COMPACT_INSTRUCTION =
   "Read the claude-compaction-restore skill and follow its \"If You Are About To Compact\" protocol. Create or update the mental-model restore map before compaction. If you are in the middle of a tiny atomic step, finish that step first; otherwise this preparation is the next priority.";

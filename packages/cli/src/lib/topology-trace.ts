@@ -8,7 +8,7 @@
 //   <topology.root>/rigs/<rig>/seats/<seat>/<NAME>  — seat
 //
 // The root comes from the typed `topology.root` config key — never a literal
-// (D1). The pre-convention location (`<home>/shared-docs/rigs/...`) stays
+// (D1). The pre-convention location (resolveLegacyTopologyRigsRoot) stays
 // readable as a per-level fallback that MUST surface the named advisory: the
 // read succeeds, and the caller is told the content came from the legacy tree
 // and how to migrate. The legacy literal lives in ONE helper here (the CLI
@@ -16,12 +16,7 @@
 // walk itself carries no path literal.
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { getDefaultOpenRigPath } from "../openrig-compat.js";
-
-/** Twin of the daemon settings-store's resolveLegacyTopologyRigsRoot. */
-export function resolveLegacyTopologyRigsRoot(): string {
-  return getDefaultOpenRigPath(join("shared-docs", "rigs"));
-}
+import { resolveLegacyTopologyRigsRoot } from "../config-store.js";
 
 export type TraceAltitude = "instance" | "rig" | "seat";
 

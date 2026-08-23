@@ -37,17 +37,18 @@ const DEFAULT_TOPOLOGY_ROOT = path.join(
   "topology",
 );
 
-/** OPR.0.5.3.6 — the LEGACY topology location (`<home>/shared-docs/rigs`),
- *  ruled an arbitrary folder (founder, 2026-08-14) but kept readable so
- *  pre-convention rigs migrate instead of flag-daying. This helper is the ONE
- *  home for the literal: walkers call it for their fallback and must emit the
- *  named advisory when a read resolves here instead of under topology.root. */
+/** OPR.0.5.3.6 — the LEGACY topology location, ruled an arbitrary folder
+ *  (founder, 2026-08-14) but kept readable so pre-convention rigs migrate
+ *  instead of flag-daying. Resolves where legacy code ACTUALLY wrote —
+ *  mirroring the codex adapter's shared-docs precedent (OPENRIG_SHARED_DOCS_ROOT
+ *  env, else the literal ~/.openrig/shared-docs), NOT $OPENRIG_HOME: boxes with
+ *  a non-default home still carry their legacy tree at ~/.openrig/shared-docs.
+ *  This helper is the ONE home for the literal: walkers call it for their
+ *  fallback and must emit the named advisory when a read resolves here. */
 export function resolveLegacyTopologyRigsRoot(): string {
-  return path.join(
-    process.env["OPENRIG_HOME"] || process.env["RIGGED_HOME"] || path.join(os.homedir(), ".openrig"),
-    "shared-docs",
-    "rigs",
-  );
+  const sharedDocsRoot = process.env["OPENRIG_SHARED_DOCS_ROOT"]?.trim()
+    || path.join(os.homedir(), ".openrig", "shared-docs");
+  return path.join(sharedDocsRoot, "rigs");
 }
 
 export const SETTINGS_VALID_KEYS = [
