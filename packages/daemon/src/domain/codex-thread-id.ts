@@ -63,10 +63,22 @@ export class CodexThreadIdResolver {
    *  pid carries a different startedAt, so it structurally MISSES the retired
    *  occupant's entry — no read-time mismatch check to get wrong, and a late
    *  stale-probe completion writes only its own key, never clobbering the
-   *  newer occupant's. Entries also EXPIRE after homeTtlMs (r2-B1/r1
-   *  BLOCKING-1): the TTL is the staleness bound for identity-less callers
-   *  and the memory bound for retired keys ahead of size eviction. */
-  private readonly homeByKey = new Map<string, { home: string; at: number }>();
+   *  newer occupant's.
+   *
+   *  SETTLED entries never time-expire (e91d7a94 — the expiry-herd fix): a
+   *  probe that STARTED strictly after the identity's lstart second closed
+   *  observed the FINAL occupant of this (pid, lstart) key — same-pid
+   *  same-second reuse is impossible once the second passes, and a live
+   *  process's HOME cannot change — so the answer is valid for the key's
+   *  lifetime and is removed only by identity mismatch (a new key) or FIFO
+   *  size eviction. Probe START time is the predicate, NOT completion time
+   *  (orch-lead 22:39Z): a probe started inside the second can observe the
+   *  retired occupant and complete after it. UNSETTLED entries — probe
+   *  started inside the ambiguous second, unparseable identity, or
+   *  identity-less callers — expire after homeTtlMs (r2-B1/W-5.3-1): the
+   *  TTL is their staleness bound and the finite recovery path for the
+   *  same-second collision. */
+  private readonly homeByKey = new Map<string, { home: string; at: number; settled: boolean }>();
   /** In-flight home resolution, keyed by pid+IDENTITY (r2 round-3): a known
    *  identity must never join a probe belonging to a different or
    *  identity-less occupant — under the measured 8-36s probes a pid can be
@@ -83,18 +95,15 @@ export class CodexThreadIdResolver {
       readFromLogs?: (pid: number, homeDir: string) => string | undefined;
       /** Bounded cache size; oldest-inserted evicts first. Default 256. */
       maxCachedPids?: number;
-      /** Freshness bound for IDENTITY-LESS cache entries — past it the pid
-       *  re-probes. Default 60s. */
+      /** Freshness bound for UNSETTLED cache entries — identity-less
+       *  callers, unparseable identities, and probes that started inside
+       *  the identity's ambiguous lstart second. Past it the pid re-probes;
+       *  this is the finite recovery path for the same-second collision
+       *  (W-5.3-1). Settled entries never consult it. Default 60s.
+       *  (The former identityHomeTtlMs tier is gone — e91d7a94: ANY
+       *  periodic expiry of settled entries synchronizes an unnecessary
+       *  probe herd, measured live as resolve_home +20 in 1.5s.) */
       homeTtlMs?: number;
-      /** Freshness bound for IDENTITY-KEYED entries. Default 15 min (soak
-       *  finding: a 60s TTL equal to the 60s poll cadence expired entries
-       *  exactly when next needed — resolve_home +53/5min live). Time is not
-       *  load-bearing here: pid reuse is invalidated STRUCTURALLY by the
-       *  identity key (rounds 3-6), and the cache holds only the pid's HOME —
-       *  never a thread id — so a thread roll inside the window is picked up
-       *  immediately by the per-resolve log read, and a live process's HOME
-       *  cannot change. */
-      identityHomeTtlMs?: number;
       /** Injectable clock (tests). */
       now?: () => number;
     } = {},
@@ -115,9 +124,10 @@ export class CodexThreadIdResolver {
    * EXPLICIT ungated escape hatch — reads WITHOUT the identity start-time gate (a reused pid can
    * match a retired occupant's rows). Use ONLY for genuinely identity-less callers (tests, adoption
    * paths that carry no census identity). Every new identity-less read must NAME this method; do
-   * not re-open resolve() to an optional identity. By construction it takes the identity-LESS TTL:
-   * it delegates with identity=undefined, and resolveInternal's TTL selector reads homeTtlMs (60s),
-   * never identityHomeTtlMs (15 min) — see the TTL split (fix OPR.0.5.3.10) below.
+   * not re-open resolve() to an optional identity. By construction its cache entries can never be
+   * SETTLED: it delegates with identity=undefined, so minTs is undefined, the settled predicate is
+   * false, and every entry it writes stays bounded by homeTtlMs (60s) — see the settled-permanence
+   * rule (e91d7a94) on the cache above.
    */
   async resolveUngatedLegacy(pid: number): Promise<string | undefined> {
     return this.resolveInternal(pid, undefined);
@@ -131,9 +141,7 @@ export class CodexThreadIdResolver {
       ?? ((p: number, home: string) => readCodexThreadIdFromLogs(p, home, undefined, minTs));
     const defaultHome = this.opts.defaultHome ?? safeUserHomeDir() ?? os.homedir();
     const now = this.opts.now ?? Date.now;
-    const ttl = identity !== undefined
-      ? (this.opts.identityHomeTtlMs ?? 900_000)
-      : (this.opts.homeTtlMs ?? 60_000);
+    const ttl = this.opts.homeTtlMs ?? 60_000;
 
     // 1. Default home: no subprocess.
     const fromDefault = readFromLogs(pid, defaultHome);
@@ -147,7 +155,7 @@ export class CodexThreadIdResolver {
     const key = `${pid}|${identity ?? ""}`;
     const cached = this.homeByKey.get(key);
     if (cached) {
-      if (now() - cached.at <= ttl) {
+      if (cached.settled || now() - cached.at <= ttl) {
         return cached.home === defaultHome ? undefined : readFromLogs(pid, cached.home);
       }
       this.homeByKey.delete(key);
@@ -162,10 +170,17 @@ export class CodexThreadIdResolver {
     const inFlight = this.inFlightByKey.get(key);
     const homePromise = inFlight ?? (() => {
       const resolver = this.opts.resolveHomeDirByPid ?? defaultResolveHomeDirByPid;
+      // Settledness is decided by the probe's START time (orch-lead 22:39Z):
+      // only a probe started strictly AFTER the identity's lstart second
+      // closed is guaranteed to observe the final occupant of this key. A
+      // deferred probe that started inside the second may describe the
+      // retired occupant even if it completes later, so its entry keeps the
+      // short TTL. Coalesced waiters inherit the ORIGINAL probe's verdict.
+      const settled = minTs !== undefined && now() >= (minTs + 1) * 1000;
       const p = Promise.resolve(resolver(pid)).then(
         (home) => {
           this.inFlightByKey.delete(key);
-          if (home) this.cacheHome(key, home);
+          if (home) this.cacheHome(key, home, settled);
           return home;
         },
         (err) => {
@@ -182,13 +197,13 @@ export class CodexThreadIdResolver {
     return readFromLogs(pid, home);
   }
 
-  private cacheHome(key: string, home: string): void {
+  private cacheHome(key: string, home: string, settled: boolean): void {
     const max = this.opts.maxCachedPids ?? 256;
     if (!this.homeByKey.has(key) && this.homeByKey.size >= max) {
       const oldest = this.homeByKey.keys().next().value;
       if (oldest !== undefined) this.homeByKey.delete(oldest);
     }
-    this.homeByKey.set(key, { home, at: (this.opts.now ?? Date.now)() });
+    this.homeByKey.set(key, { home, at: (this.opts.now ?? Date.now)(), settled });
   }
 }
 

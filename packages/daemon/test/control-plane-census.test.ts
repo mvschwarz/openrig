@@ -407,10 +407,16 @@ describe("OPR.0.5.3.10 — one census per cycle", () => {
     // resolve_home +53/5min — the 60s TTL EQUALS the 60s divergence cadence,
     // so identity-keyed entries expired exactly when next needed and every
     // pending codex seat re-probed every poll. Identity invalidates pid
-    // reuse STRUCTURALLY (rounds 3-6), so time is not load-bearing for
-    // identity-keyed entries: their TTL defaults long (15 min); the 60s
-    // bound remains for identity-less callers only.
-    let t = 0;
+    // reuse STRUCTURALLY (rounds 3-6), so time is not load-bearing for a
+    // settled identity-keyed entry (e91d7a94: probe started after the
+    // identity's start second closed — no time expiry at all); the 60s
+    // bound remains for identity-less callers only. Clocks are
+    // identity-consistent (base after the start second) because the
+    // permanence rule reads probe START time against it; assertions are
+    // unchanged from the original soak-finding pin.
+    const START = lstartToMinTs("Sun Aug 23 10:00:00 2026")!;
+    const BASE = (START + 10) * 1000;
+    let t = BASE;
     const resolveHome = vi.fn(async () => "/other/home");
     const resolver = new CodexThreadIdResolver({
       defaultHome: "/home/me",
@@ -419,18 +425,18 @@ describe("OPR.0.5.3.10 — one census per cycle", () => {
       now: () => t,
     });
     expect(await resolver.resolve(500, "Sun Aug 23 10:00:00 2026")).toBe("thread-x");
-    t = 61_000; // the next divergence poll
+    t = BASE + 61_000; // the next divergence poll
     expect(await resolver.resolve(500, "Sun Aug 23 10:00:00 2026")).toBe("thread-x");
-    t = 601_000; // ten minutes on, same identity: still cached
+    t = BASE + 601_000; // ten minutes on, same identity: still cached
     expect(await resolver.resolve(500, "Sun Aug 23 10:00:00 2026")).toBe("thread-x");
     expect(resolveHome).toHaveBeenCalledTimes(1);
     // Identity-less callers keep the SHORT bound: their slot serves within
     // 60s and re-probes after it.
     expect(await resolver.resolveUngatedLegacy(501)).toBe("thread-x"); // probe #2
-    t = 631_000; // +30s: inside the identity-less TTL — cached, no probe
+    t = BASE + 631_000; // +30s: inside the identity-less TTL — cached, no probe
     expect(await resolver.resolveUngatedLegacy(501)).toBe("thread-x");
     expect(resolveHome).toHaveBeenCalledTimes(2);
-    t = 692_000; // +61s past the entry: expired — re-probe
+    t = BASE + 692_000; // +61s past the entry: expired — re-probe
     expect(await resolver.resolveUngatedLegacy(501)).toBe("thread-x"); // probe #3
     expect(resolveHome).toHaveBeenCalledTimes(3);
   });
@@ -530,8 +536,9 @@ describe("OPR.0.5.3.10 — one census per cycle", () => {
     release("/home/old");
     expect(await first).toBeUndefined(); // fails closed (strict gate)
     expect(resolveHome).toHaveBeenCalledTimes(1);
-    // Past the short bound the doomed entry must expire and re-probe.
-    t = START * 1000 + 400 + 61_500;
+    // Past the short bound (60s from CACHE-WRITE, i.e. probe completion at
+    // START+5s) the doomed entry must expire and re-probe.
+    t = (START + 66) * 1000;
     resolveHome.mockImplementation(async () => "/home/new");
     expect(await resolver.resolve(4242, "Sun Aug 23 10:00:00 2026")).toBe("new-thread");
     expect(resolveHome).toHaveBeenCalledTimes(2);
