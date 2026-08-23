@@ -1118,6 +1118,13 @@ export class LegacyRigSpecSchema {
     const nodeIds = new Set<string>();
     if (Array.isArray(obj["nodes"])) {
       for (const node of obj["nodes"] as Record<string, unknown>[]) {
+        // OPR.0.5.3.3 (r2 HIGH-1, round 2): the alias advisory is INDEPENDENT of id validity — a
+        // fable-pinned node still needs the migration nudge even when it fails the id guard below.
+        // Collect it BEFORE the early continue, with a `?` fallback location (mirrors the pod-aware path).
+        const nodeWhere = typeof node["id"] === "string" && node["id"] ? (node["id"] as string) : "?";
+        const pinAdvisory = aliasModelPinAdvisory(node["model"], `nodes.${nodeWhere}`);
+        if (pinAdvisory) advisories.push(pinAdvisory);
+
         if (!node["id"] || typeof node["id"] !== "string") {
           errors.push("each node must have a string id");
           continue;
@@ -1127,10 +1134,6 @@ export class LegacyRigSpecSchema {
           errors.push(`duplicate node id: ${node["id"]}`);
         }
         nodeIds.add(node["id"] as string);
-
-        // OPR.0.5.3.3 (r2 HIGH-1): legacy nodes carry the same alias-form model pin — advise here too.
-        const pinAdvisory = aliasModelPinAdvisory(node["model"], `nodes.${node["id"]}`);
-        if (pinAdvisory) advisories.push(pinAdvisory);
 
         if (!node["runtime"] || typeof node["runtime"] !== "string") {
           errors.push(`node ${node["id"]}: runtime is required`);

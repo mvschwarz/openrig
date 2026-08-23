@@ -65,4 +65,19 @@ describe("LegacyRigSpecSchema.validate — alias pins surface as advisories on t
     expect(aliasResult.valid).toBe(canonResult.valid);
     expect(aliasResult.errors).toEqual(canonResult.errors);
   });
+
+  // r2 HIGH-1 round 2: the advisory is INDEPENDENT of id validity — a fable-pinned node that also
+  // lacks an id (fails the id guard) must STILL emit the advisory, at the `?` fallback location.
+  it("emits the advisory for an alias pin even when the node is missing its id", () => {
+    const result = LegacyRigSpecSchema.validate({
+      schema_version: 1,
+      name: "legacy-rig",
+      version: "1",
+      nodes: [{ runtime: "claude-code", model: "fable" }], // no id -> invalid, but still alias-pinned
+    });
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain("each node must have a string id");
+    expect(result.advisories?.some((a) => a.includes("claude-fable-5"))).toBe(true);
+    expect(result.advisories?.some((a) => a.includes("nodes.?"))).toBe(true); // fallback location
+  });
 });
