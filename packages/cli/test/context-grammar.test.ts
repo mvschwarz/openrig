@@ -15,7 +15,10 @@ import type { Command } from "commander";
 import { createProgram } from "../src/index.js";
 
 const VIEWER_DESCRIPTION_FRAGMENT = "context-usage across running agents";
-const LIBRARY_SUBCOMMANDS = ["compose", "list", "show", "preview", "sync", "add", "rm"];
+// OPR.0.5.3.6: `trace` joined the library — the topology chain walk is a pure
+// read (config + filesystem, daemon-independent) with no delivery seam, which
+// is exactly the class this grammar admits.
+const LIBRARY_SUBCOMMANDS = ["trace", "compose", "list", "show", "preview", "sync", "add", "rm"];
 
 function topLevelNames(program: Command): string[] {
   return program.commands.map((c) => c.name());
