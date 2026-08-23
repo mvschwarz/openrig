@@ -57,7 +57,16 @@ export function readCodexThreadIdFromCandidateHomes(
  *      retry (a dying `ps` under load must not poison the pid).
  */
 export class CodexThreadIdResolver {
+  /** Bounded pid→home cache of SUCCESSFUL resolutions — INCLUDING the default
+   *  home (explicit decision: a pid's HOME cannot change for the life of the
+   *  process, so a stable default-home pid with no thread log must not re-run
+   *  `ps eww` every poll; pid-reuse staleness is bounded by the cache size and
+   *  accepted for both cases alike). */
   private readonly homeByPid = new Map<number, string>();
+  /** Per-pid in-flight home resolution — concurrent resolves for the same pid
+   *  coalesce onto ONE subprocess; a failure rejects all waiters and caches
+   *  nothing. */
+  private readonly inFlightByPid = new Map<number, Promise<string | undefined>>();
 
   constructor(
     private readonly opts: {
@@ -77,28 +86,44 @@ export class CodexThreadIdResolver {
     const fromDefault = readFromLogs(pid, defaultHome);
     if (fromDefault) return fromDefault;
 
-    // 2. Cached non-default home for this pid: no subprocess.
+    // 2. Cached home for this pid: no subprocess. A cached DEFAULT means the
+    //    subprocess already answered "default" once — step 1 covered it; done.
     const cached = this.homeByPid.get(pid);
     if (cached) {
-      const fromCached = readFromLogs(pid, cached);
-      if (fromCached) return fromCached;
+      return cached === defaultHome ? undefined : readFromLogs(pid, cached);
     }
 
-    // 3. Subprocess resolution — cache only a SUCCESSFUL, non-default answer.
-    const resolver = this.opts.resolveHomeDirByPid ?? defaultResolveHomeDirByPid;
-    const home = await resolver(pid);
-    if (!home) return undefined;
-    if (home !== defaultHome) {
-      const max = this.opts.maxCachedPids ?? 256;
-      if (!this.homeByPid.has(pid) && this.homeByPid.size >= max) {
-        const oldest = this.homeByPid.keys().next().value;
-        if (oldest !== undefined) this.homeByPid.delete(oldest);
-      }
-      this.homeByPid.set(pid, home);
-      return readFromLogs(pid, home);
+    // 3. Subprocess resolution, pid-coalesced: concurrent callers share one probe.
+    const inFlight = this.inFlightByPid.get(pid);
+    const homePromise = inFlight ?? (() => {
+      const resolver = this.opts.resolveHomeDirByPid ?? defaultResolveHomeDirByPid;
+      const p = Promise.resolve(resolver(pid)).then(
+        (home) => {
+          this.inFlightByPid.delete(pid);
+          if (home) this.cacheHome(pid, home);
+          return home;
+        },
+        (err) => {
+          // Honest failure: nothing cached, next call retries.
+          this.inFlightByPid.delete(pid);
+          throw err;
+        },
+      );
+      this.inFlightByPid.set(pid, p);
+      return p;
+    })();
+    const home = await homePromise;
+    if (!home || home === defaultHome) return undefined;
+    return readFromLogs(pid, home);
+  }
+
+  private cacheHome(pid: number, home: string): void {
+    const max = this.opts.maxCachedPids ?? 256;
+    if (!this.homeByPid.has(pid) && this.homeByPid.size >= max) {
+      const oldest = this.homeByPid.keys().next().value;
+      if (oldest !== undefined) this.homeByPid.delete(oldest);
     }
-    // Resolver answered the default home — already tried; nothing more to read.
-    return undefined;
+    this.homeByPid.set(pid, home);
   }
 }
 

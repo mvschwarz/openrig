@@ -132,6 +132,40 @@ describe("OPR.0.5.3.10 — one census per cycle", () => {
     expect(failing).toHaveBeenCalledTimes(2);
   });
 
+  it("addendum coalescing: two CONCURRENT resolves for the same non-default pid spawn at most ONE home probe", async () => {
+    let release!: (home: string) => void;
+    const resolveHome = vi.fn(() => new Promise<string>((r) => { release = r; }));
+    const resolver = new CodexThreadIdResolver({
+      defaultHome: "/home/me",
+      resolveHomeDirByPid: resolveHome as never,
+      readFromLogs: (_pid, home) => (home === "/other/home" ? "thread-9" : undefined),
+    });
+    const a = resolver.resolve(77);
+    const b = resolver.resolve(77);
+    release("/other/home");
+    expect(await a).toBe("thread-9");
+    expect(await b).toBe("thread-9");
+    expect(resolveHome).toHaveBeenCalledTimes(1);
+  });
+
+  it("addendum stability: a pid whose HOME resolves to the DEFAULT (no thread log anywhere) is cached — no repeat subprocess every poll", async () => {
+    // Explicit decision: a pid's HOME cannot change for the life of the process,
+    // so a successful HOME=default answer is cached like any other; the default
+    // home was already read first, so later resolves for that pid spawn nothing.
+    // (Bounded-staleness tradeoff on pid reuse is the same class as the
+    // non-default cache and is accepted.)
+    const resolveHome = vi.fn(async () => "/home/me");
+    const resolver = new CodexThreadIdResolver({
+      defaultHome: "/home/me",
+      resolveHomeDirByPid: resolveHome as never,
+      readFromLogs: () => undefined,
+    });
+    expect(await resolver.resolve(88)).toBeUndefined();
+    expect(await resolver.resolve(88)).toBeUndefined();
+    expect(await resolver.resolve(88)).toBeUndefined();
+    expect(resolveHome).toHaveBeenCalledTimes(1);
+  });
+
   it("mini-req 4 guard: the adoption-boundary capture keeps its retry loop (attempts default is unchanged off the snapshot path)", async () => {
     const db = createFullTestDb();
     const sessionRegistry = new SessionRegistry(db);
