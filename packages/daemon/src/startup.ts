@@ -1731,14 +1731,21 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       const nodeOs = await import("node:os");
       const nodePathMod = await import("node:path");
       const nodeFs = await import("node:fs");
+      // OPR.0.5.3.10 — ONE shared census + ONE PID-home resolver for the whole
+      // divergence surface: no more `ps -Ao` per seat per poll, no more `ps eww`
+      // per pid (default-home-first + bounded PID cache).
+      const { ProcessCensus } = await import("./domain/process-census.js");
+      const { CodexThreadIdResolver } = await import("./domain/codex-thread-id.js");
+      const divergenceCensus = new ProcessCensus();
+      const codexThreadIdResolver = new CodexThreadIdResolver({ defaultHome: nodeOs.homedir() });
       const currentGenDeps = {
         getPanePid: async (sessionTarget: string) => tmuxAdapter.getPanePid ? tmuxAdapter.getPanePid(sessionTarget) : null,
-        listProcesses: defaultListProcesses,
-        readThreadIdByPid: async (pid: number) =>
-          readCodexThreadIdFromCandidateHomes(pid, [await defaultResolveHomeDirByPid(pid), nodeOs.homedir()]),
+        listProcesses: () => divergenceCensus.list(),
+        readThreadIdByPid: (pid: number) => codexThreadIdResolver.resolve(pid),
       };
       const OVERSIGHT_SEAT = "watch-lead@oversight";
       const modelDivergenceMonitor = new ModelDivergenceMonitor({
+        processCensus: divergenceCensus,
         listPinnedSeats: () => {
           const rows = db.prepare(`
             SELECT n.id AS nodeId, r.id AS rigId, r.name AS rigName, n.runtime AS runtime, n.model AS pinnedModel,
@@ -1757,9 +1764,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         // registry row were stale TOGETHER while the pane ran a different session — the old wiring
         // read the old generation's transcript and MASKED a real divergence. The stored records are
         // now only corroboration; the pane process is the join. Every no-answer is a named reason.
-        readEffectiveModel: async (seat) => {
+        readEffectiveModel: async (seat, cycle) => {
+          // OPR.0.5.3.10 mini-req 1 — the poll-scoped census (one ps per pass) when the
+          // monitor threads it; the shared coalescing census otherwise.
+          const genDeps = cycle ? { ...currentGenDeps, listProcesses: cycle.listProcesses } : currentGenDeps;
           if (seat.runtime === "codex") {
-            const live = await resolveLiveCodexThreadId(seat.sessionName, currentGenDeps);
+            const live = await resolveLiveCodexThreadId(seat.sessionName, genDeps);
             if (!live.ok) return { ok: false as const, reason: live.reason };
             const rollout = contextUsageStore.readCodexAndNormalize({ threadId: live.id, sessionName: seat.sessionName }).transcriptPath;
             if (!rollout) return { ok: false as const, reason: `live thread ${live.id.slice(0, 8)}… has no readable rollout` };
@@ -1776,7 +1786,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
               id && projectDir ? nodePathMod.join(projectDir, `${id}.jsonl`) : null;
             const tokenRow = db.prepare("SELECT resume_token FROM sessions WHERE node_id = ? AND session_name = ? ORDER BY id DESC LIMIT 1")
               .get(seat.nodeId, seat.sessionName) as { resume_token: string | null } | undefined;
-            const paneArg = await paneClaudeSessionIdArgument(seat.sessionName, currentGenDeps);
+            const paneArg = await paneClaudeSessionIdArgument(seat.sessionName, genDeps);
             const selection = liveClaudeRecordSelector.select(
               `${seat.nodeId}:${seat.generation ?? seat.sessionName}`,
               [
@@ -1937,10 +1947,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
   // OPR.0.3.4.9 — periodic snapshot scheduler (crash-insurance floor).
   const { PeriodicSnapshotScheduler } = await import("./domain/periodic-snapshot-scheduler.js");
+  // OPR.0.5.3.10 — the snapshot tick shares ONE census across all rigs/seats.
+  const { ProcessCensus: SnapshotProcessCensus } = await import("./domain/process-census.js");
+  const snapshotProcessCensus = new SnapshotProcessCensus();
   const periodicSnapshotScheduler = new PeriodicSnapshotScheduler({
     db, snapshotCapture, snapshotRepo,
     // OPR.0.4.3.20 FR-4 — refresh live tokens before each periodic snapshot serializes.
     sessionRegistry, resumeMetadataRefresher,
+    processCensus: snapshotProcessCensus,
   });
   deps.periodicSnapshotScheduler = periodicSnapshotScheduler;
 

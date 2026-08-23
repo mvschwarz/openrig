@@ -61,8 +61,16 @@ export interface ModelDivergenceMonitorDeps {
   /** Every running canonical seat carrying a model pin (the detector's whole population). */
   listPinnedSeats: () => PinnedSeat[];
   /** Per-runtime effective read via the CURRENT GENERATION's own record (D-a: never a name/token
-   *  lookup that can silently cross a generation boundary). No-answer = named reason = pending. */
-  readEffectiveModel: (seat: PinnedSeat) => Promise<EffectiveModelRead> | EffectiveModelRead;
+   *  lookup that can silently cross a generation boundary). No-answer = named reason = pending.
+   *  OPR.0.5.3.10 mini-req 1: `cycle`, when passed, carries the POLL-SCOPED process lister — one
+   *  census for every seat in the pass, never a `ps` per seat. */
+  readEffectiveModel: (
+    seat: PinnedSeat,
+    cycle?: { listProcesses: () => Promise<Array<{ pid: number; ppid: number; command: string }>> },
+  ) => Promise<EffectiveModelRead> | EffectiveModelRead;
+  /** OPR.0.5.3.10 — the shared census; when present, checkOnce() threads a cycle-scoped lister
+   *  into every readEffectiveModel call (lazy: a pass with every seat settled spawns nothing). */
+  processCensus?: { cycleLister(): () => Promise<Array<{ pid: number; ppid: number; command: string }>> };
   /** In-daemon send to a session (the watchdog delivery seam). */
   sendToSession: (sessionName: string, message: string) => Promise<{ ok: boolean; error?: string }>;
   /** The seat's own rig's orchestrator seats (session names). */
@@ -131,10 +139,13 @@ export class ModelDivergenceMonitor {
   /** One pass over the pinned population. Returns the proclamations fired this pass (for tests). */
   async checkOnce(): Promise<ModelDivergenceProclamation[]> {
     const fired: ModelDivergenceProclamation[] = [];
+    // OPR.0.5.3.10 mini-req 1 — at most ONE process census for the whole pass.
+    const cycleList = this.deps.processCensus?.cycleLister();
+    const cycle = cycleList ? { listProcesses: cycleList } : undefined;
     for (const seat of this.deps.listPinnedSeats()) {
       const key = `${seat.nodeId}:${seat.generation ?? seat.sessionName}`;
       if (this.settled.has(key)) continue;
-      const read = await this.deps.readEffectiveModel(seat);
+      const read = await this.deps.readEffectiveModel(seat, cycle);
       if (!read.ok) {
         // PENDING, never assumed — and never invisible: past the threshold this generation is
         // named ONCE as never-checked (r1 measured real codex rollouts whose signal sat outside

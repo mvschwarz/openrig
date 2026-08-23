@@ -1,0 +1,153 @@
+// OPR.0.5.3.10 mini-req 5 — deterministic invocation-counting discriminators.
+// Each test pins "how many times did the underlying process enumeration run"
+// across a full cycle. At base (pre-correction) these counts were per-seat and
+// per-attempt: the divergence poll spawned one `ps` PER SEAT, the snapshot
+// refresh up to EIGHT per codex seat — the measured control-plane collapse
+// (171 list_processes spans, mean 9.39s; 298 resolve_home spans, mean 8.24s).
+import { describe, it, expect, vi } from "vitest";
+import { ProcessCensus } from "../src/domain/process-census.js";
+import { ModelDivergenceMonitor } from "../src/domain/model-divergence/model-divergence-monitor.js";
+import { resolveLiveCodexThreadId } from "../src/domain/model-divergence/current-generation-record.js";
+import { CodexThreadIdResolver } from "../src/domain/codex-thread-id.js";
+import { ResumeMetadataRefresher } from "../src/domain/resume-metadata-refresher.js";
+import { PeriodicSnapshotScheduler } from "../src/domain/periodic-snapshot-scheduler.js";
+import { createFullTestDb } from "./helpers/test-app.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
+import type { TmuxAdapter } from "../src/adapters/tmux.js";
+
+const ROWS = [{ pid: 10, ppid: 1, command: "zsh" }];
+
+function advancingClock(step = 60_000): () => number {
+  let t = 0;
+  return () => (t += step);
+}
+
+describe("OPR.0.5.3.10 — one census per cycle", () => {
+  it("mini-req 1: a divergence pass over THREE pinned seats runs the underlying enumeration ONCE", async () => {
+    const underlying = vi.fn(async () => ROWS);
+    // freshness defeated by the advancing clock: only the cycle memo can dedupe.
+    const census = new ProcessCensus({ list: underlying, freshnessMs: 0, now: advancingClock() });
+    const seats = ["a", "b", "c"].map((id) => ({
+      nodeId: `n-${id}`, rigId: "r", rigName: "rig", runtime: "codex",
+      pinnedModel: "gpt-x", sessionName: `${id}@rig`, generation: `gen-${id}`,
+    }));
+    const monitor = new ModelDivergenceMonitor({
+      processCensus: census,
+      listPinnedSeats: () => seats,
+      // Mirrors the startup closure's shape: the cycle lister when threaded,
+      // a per-seat enumeration otherwise (the BASE behavior — at base this
+      // test counts 3, which is the discriminator).
+      readEffectiveModel: async (seat, cycle) => {
+        const live = await resolveLiveCodexThreadId(seat.sessionName, {
+          getPanePid: async () => 10,
+          listProcesses: cycle ? cycle.listProcesses : () => census.list(),
+          readThreadIdByPid: () => undefined,
+        });
+        return live.ok ? { ok: true, model: "gpt-x" } : { ok: false, reason: live.reason };
+      },
+      sendToSession: async () => ({ ok: true }),
+      resolveOrchSeats: () => [],
+      resolveOperatorSeat: () => null,
+      resolveOversightSeat: () => null,
+      recordProclamation: () => {},
+    });
+    await monitor.checkOnce();
+    expect(underlying).toHaveBeenCalledTimes(1);
+  });
+
+  it("mini-req 2: a snapshot tick over TWO rigs with codex seats runs the underlying enumeration ONCE, single-attempt", async () => {
+    const db = createFullTestDb();
+    const rigRepo = new RigRepository(db);
+    const sessionRegistry = new SessionRegistry(db);
+    for (const rigName of ["rig-a", "rig-b"]) {
+      const rig = rigRepo.createRig(rigName);
+      const node = rigRepo.addNode(rig.id, "dev.qa", { runtime: "codex", cwd: "/w" });
+      const session = sessionRegistry.registerSession(node.id, `dev-qa@${rigName}`);
+      sessionRegistry.updateStatus(session.id, "running");
+    }
+
+    const underlying = vi.fn(async () => ROWS);
+    const census = new ProcessCensus({ list: underlying, freshnessMs: 0, now: advancingClock() });
+    const getPanePid = vi.fn(async () => 10);
+    const sleep = vi.fn(async () => {});
+    const refresher = new ResumeMetadataRefresher({
+      sessionRegistry,
+      tmuxAdapter: { getPanePid } as unknown as TmuxAdapter,
+      // The instance lister COUNTS too: if the tick bypassed the census and fell
+      // back here, the count assertion below catches it.
+      listProcesses: () => { throw new Error("tick must use the cycle census, not the instance lister"); },
+      readCodexThreadIdByPid: () => undefined,
+      sleep,
+    });
+    const scheduler = new PeriodicSnapshotScheduler({
+      db,
+      snapshotCapture: { captureSnapshot: () => {} } as never,
+      snapshotRepo: { pruneSnapshotsByKind: () => {} } as never,
+      sessionRegistry,
+      resumeMetadataRefresher: refresher,
+      processCensus: census,
+    });
+    await scheduler.tick();
+    // ONE enumeration for both rigs' seats…
+    expect(underlying).toHaveBeenCalledTimes(1);
+    // …and SINGLE-ATTEMPT discovery: no inter-attempt sleeps at all (base ran
+    // the 8-attempt loop: 7+ sleeps per tokenless codex seat).
+    expect(sleep).not.toHaveBeenCalled();
+    // Each seat's pane was probed exactly once.
+    expect(getPanePid).toHaveBeenCalledTimes(2);
+    db.close();
+  });
+
+  it("addendum: default-home thread-id hit spawns ZERO pid-home resolutions; a non-default home is resolved once then cached; failure is never cached", async () => {
+    // Default-home hit: no resolver call.
+    const resolveHome = vi.fn(async () => "/other/home");
+    const hitDefault = new CodexThreadIdResolver({
+      defaultHome: "/home/me",
+      resolveHomeDirByPid: resolveHome,
+      readFromLogs: (_pid, home) => (home === "/home/me" ? "thread-1" : undefined),
+    });
+    expect(await hitDefault.resolve(42)).toBe("thread-1");
+    expect(resolveHome).toHaveBeenCalledTimes(0);
+
+    // Non-default home: resolved once, then served from the bounded cache.
+    const resolver = new CodexThreadIdResolver({
+      defaultHome: "/home/me",
+      resolveHomeDirByPid: resolveHome,
+      readFromLogs: (_pid, home) => (home === "/other/home" ? "thread-2" : undefined),
+    });
+    expect(await resolver.resolve(43)).toBe("thread-2");
+    expect(await resolver.resolve(43)).toBe("thread-2");
+    expect(resolveHome).toHaveBeenCalledTimes(1);
+
+    // A FAILED resolution is not cached: the next call retries.
+    const failing = vi.fn(async () => { throw new Error("ps died"); });
+    const failed = new CodexThreadIdResolver({
+      defaultHome: "/home/me",
+      resolveHomeDirByPid: failing as never,
+      readFromLogs: () => undefined,
+    });
+    await expect(failed.resolve(44)).rejects.toThrow("ps died");
+    await expect(failed.resolve(44)).rejects.toThrow("ps died");
+    expect(failing).toHaveBeenCalledTimes(2);
+  });
+
+  it("mini-req 4 guard: the adoption-boundary capture keeps its retry loop (attempts default is unchanged off the snapshot path)", async () => {
+    const db = createFullTestDb();
+    const sessionRegistry = new SessionRegistry(db);
+    const listProcesses = vi.fn(async () => ROWS);
+    const sleep = vi.fn(async () => {});
+    const refresher = new ResumeMetadataRefresher({
+      sessionRegistry,
+      tmuxAdapter: { getPanePid: async () => 10 } as unknown as TmuxAdapter,
+      listProcesses,
+      readCodexThreadIdByPid: () => undefined,
+      sleep,
+    });
+    await refresher.captureCodexThreadId("seat@rig");
+    // The direct (non-snapshot) capture still makes its 8 attempts.
+    expect(listProcesses).toHaveBeenCalledTimes(8);
+    expect(sleep).toHaveBeenCalledTimes(7);
+    db.close();
+  });
+});

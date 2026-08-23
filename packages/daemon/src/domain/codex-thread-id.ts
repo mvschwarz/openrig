@@ -41,6 +41,67 @@ export function readCodexThreadIdFromCandidateHomes(
   return undefined;
 }
 
+/**
+ * OPR.0.5.3.10 (addendum) — thread-id resolution WITHOUT the per-call PID-home
+ * subprocess. The measured amplifier: 298 `codex_thread_id.resolve_home` spans
+ * in the last 500 slow spans (mean 8.24s, max 36.72s) — a `ps eww` per pid,
+ * per attempt, per tick, when nearly every codex seat's logs live under the
+ * DEFAULT home.
+ *
+ * Order of costs:
+ *   1. DEFAULT home first — a pure file/sqlite read, ZERO subprocess. Hit = done.
+ *   2. Bounded PID-keyed cache of previously RESOLVED non-default homes — a
+ *      pid's HOME does not change for the life of the process. Hit = file read.
+ *   3. Only then the subprocess resolver — and its SUCCESS is cached (bounded,
+ *      FIFO eviction). A FAILED resolution is never cached: the next call may
+ *      retry (a dying `ps` under load must not poison the pid).
+ */
+export class CodexThreadIdResolver {
+  private readonly homeByPid = new Map<number, string>();
+
+  constructor(
+    private readonly opts: {
+      defaultHome?: string;
+      resolveHomeDirByPid?: ResolveHomeDirByPid;
+      readFromLogs?: (pid: number, homeDir: string) => string | undefined;
+      /** Bounded cache size; oldest-inserted evicts first. Default 256. */
+      maxCachedPids?: number;
+    } = {},
+  ) {}
+
+  async resolve(pid: number): Promise<string | undefined> {
+    const readFromLogs = this.opts.readFromLogs ?? ((p: number, home: string) => readCodexThreadIdFromLogs(p, home));
+    const defaultHome = this.opts.defaultHome ?? safeUserHomeDir() ?? os.homedir();
+
+    // 1. Default home: no subprocess.
+    const fromDefault = readFromLogs(pid, defaultHome);
+    if (fromDefault) return fromDefault;
+
+    // 2. Cached non-default home for this pid: no subprocess.
+    const cached = this.homeByPid.get(pid);
+    if (cached) {
+      const fromCached = readFromLogs(pid, cached);
+      if (fromCached) return fromCached;
+    }
+
+    // 3. Subprocess resolution — cache only a SUCCESSFUL, non-default answer.
+    const resolver = this.opts.resolveHomeDirByPid ?? defaultResolveHomeDirByPid;
+    const home = await resolver(pid);
+    if (!home) return undefined;
+    if (home !== defaultHome) {
+      const max = this.opts.maxCachedPids ?? 256;
+      if (!this.homeByPid.has(pid) && this.homeByPid.size >= max) {
+        const oldest = this.homeByPid.keys().next().value;
+        if (oldest !== undefined) this.homeByPid.delete(oldest);
+      }
+      this.homeByPid.set(pid, home);
+      return readFromLogs(pid, home);
+    }
+    // Resolver answered the default home — already tried; nothing more to read.
+    return undefined;
+  }
+}
+
 function uniqueHomes(candidateHomes: Array<string | undefined>): string[] {
   const homes = candidateHomes.filter((home): home is string => Boolean(home));
   const userHome = safeUserHomeDir();

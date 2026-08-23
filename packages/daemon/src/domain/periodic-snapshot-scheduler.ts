@@ -7,6 +7,7 @@ import type { SnapshotCapture } from "./snapshot-capture.js";
 import type { SnapshotRepository } from "./snapshot-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { ResumeMetadataRefresher } from "./resume-metadata-refresher.js";
+import type { ProcessCensus } from "./process-census.js";
 
 export interface PeriodicSnapshotSchedulerDeps {
   db: Database.Database;
@@ -16,6 +17,9 @@ export interface PeriodicSnapshotSchedulerDeps {
   // periodic snapshot serializes it (optional: absent → no refresh, as before).
   sessionRegistry?: SessionRegistry;
   resumeMetadataRefresher?: ResumeMetadataRefresher;
+  /** OPR.0.5.3.10 mini-req 2 — ONE process census per tick for ALL rigs and
+   *  seats (absent → the refresher's own lister, the pre-slice behavior). */
+  processCensus?: ProcessCensus;
 }
 
 export class PeriodicSnapshotScheduler {
@@ -54,6 +58,10 @@ export class PeriodicSnapshotScheduler {
     this.running = true;
     try {
       const runningRigs = this.getRunningNonArchivedRigs();
+      // OPR.0.5.3.10 mini-req 2 — one CYCLE-SCOPED census for the whole tick:
+      // every rig's refresh shares it, lazily (a tick with no codex discovery
+      // spawns no `ps` at all).
+      const tickListProcesses = this.deps.processCensus?.cycleLister();
       for (const rigId of runningRigs) {
         try {
           // OPR.0.4.3.20 FR-4 — refresh live tokens before serialize, in its OWN
@@ -65,7 +73,7 @@ export class PeriodicSnapshotScheduler {
               // clears a present one (rev1-r2 fix — keep stale-present for FR-6).
               await this.deps.resumeMetadataRefresher.refresh(
                 this.deps.sessionRegistry.getLatestLiveSessions(rigId),
-                { fillNullOnly: true },
+                { fillNullOnly: true, ...(tickListProcesses ? { listProcesses: tickListProcesses } : {}) },
               );
             } catch { /* best-effort — the snapshot still writes below */ }
           }

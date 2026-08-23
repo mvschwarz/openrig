@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import type { SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import {
+  CodexThreadIdResolver,
   defaultResolveHomeDirByPid,
   readCodexThreadIdFromCandidateHomes,
   type ResolveHomeDirByPid,
@@ -61,11 +62,15 @@ export class ResumeMetadataRefresher {
     this.tmuxAdapter = deps.tmuxAdapter;
     this.listProcesses = deps.listProcesses ?? defaultListProcesses;
     this.resolveHomeDirByPid = deps.resolveHomeDirByPid ?? defaultResolveHomeDirByPid;
-    this.readCodexThreadIdByPid = deps.readCodexThreadIdByPid ?? (async (pid) => readCodexThreadIdFromLogs(
-      pid,
-      await this.resolveHomeDirByPid(pid),
-      deps.homeDir ?? os.homedir()
-    ));
+    // OPR.0.5.3.10 (addendum): the default thread-id read goes default-home-first
+    // with bounded PID-home caching — zero `ps eww` for the common case (298
+    // resolve_home spans, mean 8.24s, in one live slow-span sample). An injected
+    // readCodexThreadIdByPid (tests, adoption paths) is untouched.
+    const threadIdResolver = new CodexThreadIdResolver({
+      defaultHome: deps.homeDir ?? os.homedir(),
+      resolveHomeDirByPid: this.resolveHomeDirByPid,
+    });
+    this.readCodexThreadIdByPid = deps.readCodexThreadIdByPid ?? ((pid) => threadIdResolver.resolve(pid));
     this.probeClaudeResume = deps.probeClaudeResume ?? ((sessionName, resumeToken, cwd) => this.defaultProbeClaudeResume(sessionName, resumeToken, cwd));
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.homeDir = deps.homeDir ?? os.homedir();
@@ -96,8 +101,20 @@ export class ResumeMetadataRefresher {
    * at-shutdown check — unchanged here; FR-6 §2.1b owns unifying the clear semantics
    * across all callers).
    */
-  async refresh(sessions: ResumeRefreshSession[], opts?: { fillNullOnly?: boolean }): Promise<void> {
+  async refresh(
+    sessions: ResumeRefreshSession[],
+    opts?: {
+      fillNullOnly?: boolean;
+      /** OPR.0.5.3.10 mini-req 2 — a CYCLE-SCOPED process lister (one census for
+       *  the whole tick, all rigs and seats). Absent → the instance lister. */
+      listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
+    },
+  ): Promise<void> {
     const fillNullOnly = opts?.fillNullOnly === true;
+    // Snapshot-time discovery is SINGLE-ATTEMPT (mini-req 2): the 8-attempt
+    // 250ms-sleep loop exists for the adoption boundary racing a booting codex;
+    // on a recurring tick it multiplied `ps` spawns per seat, forever.
+    const captureOpts = { attempts: fillNullOnly ? 1 : undefined, listProcesses: opts?.listProcesses };
     for (const session of sessions) {
       if (session.runtime === "codex") {
         if (session.resumeToken) {
@@ -107,7 +124,7 @@ export class ResumeMetadataRefresher {
           // SAME pure-read helper FR-3 uses (getPanePid → pid-keyed logs; NO probe/spawn,
           // NO `claude --resume`, NO launch) and refresh freshness ONLY on an EXACT match.
           if (fillNullOnly) {
-            const derived = await this.captureCodexThreadId(session.sessionName);
+            const derived = await this.captureCodexThreadId(session.sessionName, captureOpts);
             if (derived && derived === session.resumeToken) {
               // Present + matching = genuine positive evidence; stamp freshness via the
               // FR-6 marker (never updateResumeToken → no token/provenance clobber).
@@ -119,7 +136,7 @@ export class ResumeMetadataRefresher {
           continue;
         }
 
-        const threadId = await this.captureCodexThreadId(session.sessionName);
+        const threadId = await this.captureCodexThreadId(session.sessionName, captureOpts);
         if (threadId) {
           this.sessionRegistry.updateResumeToken(session.sessionId, "codex_id", threadId, "scrape");
         }
@@ -178,19 +195,30 @@ export class ResumeMetadataRefresher {
    *  codex descendant pids → pid-keyed logs sqlite). Async, returns undefined
    *  on timeout/absence. Public for reuse by adoption-boundary capture
    *  (OPR.0.4.3.20 FR-3) — no behavior change to the teardown-path scrape. */
-  async captureCodexThreadId(sessionTarget: string): Promise<string | undefined> {
+  async captureCodexThreadId(
+    sessionTarget: string,
+    opts?: {
+      /** OPR.0.5.3.10 mini-req 2 — snapshot refresh passes 1: the retry loop is
+       *  for the adoption boundary racing a booting codex, never a recurring tick. */
+      attempts?: number;
+      /** Cycle-scoped census override (one `ps` per tick, all seats). */
+      listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
+    },
+  ): Promise<string | undefined> {
     if (!this.tmuxAdapter.getPanePid) return undefined;
+    const attempts = Math.max(1, opts?.attempts ?? 8);
+    const listProcesses = opts?.listProcesses ?? this.listProcesses;
 
-    for (let attempt = 0; attempt < 8; attempt++) {
+    for (let attempt = 0; attempt < attempts; attempt++) {
       const shellPid = await this.tmuxAdapter.getPanePid(sessionTarget);
       if (shellPid) {
-        const codexPids = findCodexDescendantPids(await this.listProcesses(), shellPid);
+        const codexPids = findCodexDescendantPids(await listProcesses(), shellPid);
         for (const codexPid of codexPids) {
           const threadId = await this.readCodexThreadIdByPid(codexPid);
           if (threadId) return threadId;
         }
       }
-      await this.sleep(250);
+      if (attempt < attempts - 1) await this.sleep(250);
     }
 
     return undefined;
