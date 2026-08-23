@@ -376,7 +376,13 @@ export function createTestApp(
     activityHookToken: opts?.activityHookToken,
     eventLoopMonitor: opts?.eventLoopMonitor,
     routeTimingRecorder: opts?.routeTimingRecorder,
-    permissionDriftObserver: opts?.permissionDriftObserver,
+    // Hermeticity (hotfix qitem-20260822230440-da0d2ad6 FIX 2): default to a
+    // null observer — leaving this undefined makes createApp construct the
+    // PRODUCTION PermissionDriftObserver, whose constructor warms the claude
+    // permission-mode cache via execFile("claude","--help") (162 real launches
+    // across the suite). Tests for the observer itself construct it directly
+    // and pass it here explicitly.
+    permissionDriftObserver: opts?.permissionDriftObserver ?? { diagnose: () => null },
   });
   return {
     app, rigRepo, sessionRegistry, eventBus, nodeLauncher, snapshotRepo,

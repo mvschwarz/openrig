@@ -105,8 +105,13 @@ export class PermissionDriftObserver implements PermissionDriftReader {
     },
   ) {
     this.observations = new AppliedLaunchObservationStore(input.db);
+    // Hermeticity (hotfix qitem-20260822230440-da0d2ad6 FIX 2): construction no
+    // longer eagerly warms the mode cache — `read()` self-warms (see the cache),
+    // so the eager call added nothing but an execFile("claude","--help") from
+    // every constructed-but-unconsulted observer (the daemon test suite built
+    // ~72 such apps per run). The production daemon keeps its boot-time warm:
+    // startup.ts constructs the observer with an explicitly warmed cache.
     const permissionModes = input.permissionModes ?? new ClaudePermissionModeCache();
-    permissionModes.warm();
     this.fs = input.fs ?? productionFs(permissionModes, input.accessSync ?? ((path, mode) => fs.accessSync(path, mode)));
     this.now = input.now;
   }
