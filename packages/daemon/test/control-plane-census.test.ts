@@ -8,7 +8,7 @@ import { describe, it, expect, vi } from "vitest";
 import { ProcessCensus } from "../src/domain/process-census.js";
 import { ModelDivergenceMonitor } from "../src/domain/model-divergence/model-divergence-monitor.js";
 import { resolveLiveCodexThreadId } from "../src/domain/model-divergence/current-generation-record.js";
-import { CodexThreadIdResolver } from "../src/domain/codex-thread-id.js";
+import { CodexThreadIdResolver, lstartToMinTs } from "../src/domain/codex-thread-id.js";
 import { ResumeMetadataRefresher } from "../src/domain/resume-metadata-refresher.js";
 import { PeriodicSnapshotScheduler } from "../src/domain/periodic-snapshot-scheduler.js";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -433,6 +433,108 @@ describe("OPR.0.5.3.10 — one census per cycle", () => {
     t = 692_000; // +61s past the entry: expired — re-probe
     expect(await resolver.resolveUngatedLegacy(501)).toBe("thread-x"); // probe #3
     expect(resolveHome).toHaveBeenCalledTimes(3);
+  });
+
+  it("expiry-herd fix (qitem-...e91d7a94): a SETTLED identity-keyed entry NEVER time-expires — same pid+identity past 15 minutes makes ONE probe total", async () => {
+    // Live specimen (quiet-window receipt 20260823T222324Z): resolve_home +20
+    // in a 1.5s burst — the 5m snapshot surface's ~20 codex seats crossing
+    // the 15-min identityHomeTtlMs together, a synchronized expiry herd of
+    // otherwise unnecessary `ps eww` probes. A probe that STARTS after the
+    // identity's lstart second has closed observes the surviving occupant
+    // of (pid, lstart) by construction — same-pid same-second reuse is
+    // impossible once the second passes (completion time is NOT sufficient:
+    // a probe started inside the second can observe the retired occupant
+    // and complete later — see the deferred-probe pin) — so that entry is SETTLED:
+    // valid for the key's lifetime, removed only by identity mismatch (a new
+    // key) or FIFO size eviction. With no periodic expiry left to
+    // synchronize, the herd cannot return. (Neighbors pin the other edges:
+    // "r1 remedy" pins immediate identity-mismatch re-probe, "soak finding"
+    // pins the identity-less 60s re-probe, and the collision pin below pins
+    // the finite recovery of the one UNSETTLED case.)
+    const START = lstartToMinTs("Sun Aug 23 10:00:00 2026")!;
+    let t = (START + 10) * 1000; // probe STARTS well past the start second: settled
+    const resolveHome = vi.fn(async () => "/other/home");
+    const resolver = new CodexThreadIdResolver({
+      defaultHome: "/home/me",
+      resolveHomeDirByPid: resolveHome as never,
+      readFromLogs: (_pid, home) => (home === "/other/home" ? "thread-x" : undefined),
+      now: () => t,
+    });
+    expect(await resolver.resolve(500, "Sun Aug 23 10:00:00 2026")).toBe("thread-x");
+    t += 900_001; // past the former identityHomeTtlMs: must still be cached
+    expect(await resolver.resolve(500, "Sun Aug 23 10:00:00 2026")).toBe("thread-x");
+    t += 3 * 3_600_000; // hours on, same identity: still ONE probe ever
+    expect(await resolver.resolve(500, "Sun Aug 23 10:00:00 2026")).toBe("thread-x");
+    expect(resolveHome).toHaveBeenCalledTimes(1);
+  });
+
+  it("expiry-herd fix (qitem-...e91d7a94): W-5.3-1 collision pin — an entry probed INSIDE the ambiguous start second recovers within the 60s bound, not 15 minutes", async () => {
+    // The one window where a cached HOME can be stale: `ps lstart` is
+    // second-granular, so a pid reused WITHIN the identity's start second
+    // keeps the SAME key, and a probe completing inside that second may
+    // describe the retired occupant. The strict ts > startTs gate keeps this
+    // fail-CLOSED (undefined, never a wrong thread — W-5.3-1), but under the
+    // 15-min identityHomeTtlMs the seat stayed thread-unresolvable until
+    // expiry. The unsettled entry must instead take the SHORT bound: the
+    // finite miss-recovery path is homeTtlMs (60s) + one poll.
+    const START = lstartToMinTs("Sun Aug 23 10:00:00 2026")!;
+    let t = START * 1000 + 500; // probe completes INSIDE the start second
+    let liveHome = "/home/old"; // the retired occupant still holds the pid
+    const resolveHome = vi.fn(async () => liveHome);
+    const resolver = new CodexThreadIdResolver({
+      defaultHome: "/home/me",
+      resolveHomeDirByPid: resolveHome as never,
+      // Only the NEW occupant's home ever yields a gated row; the retired
+      // occupant's rows fail the strict ts > startTs gate (round-6).
+      readFromLogs: (_pid, home) => (home === "/home/new" ? "new-thread" : undefined),
+      now: () => t,
+    });
+    // First resolve races the seat's first second: caches the doomed answer,
+    // fails closed (no thread).
+    expect(await resolver.resolve(4242, "Sun Aug 23 10:00:00 2026")).toBeUndefined();
+    expect(resolveHome).toHaveBeenCalledTimes(1);
+    // The pid is reused by the NEW occupant within the SAME second (same
+    // key), with a different HOME.
+    liveHome = "/home/new";
+    // Next poll past the short bound: the unsettled entry has expired — the
+    // re-probe finds the survivor's home and the thread resolves.
+    t = START * 1000 + 61_500;
+    expect(await resolver.resolve(4242, "Sun Aug 23 10:00:00 2026")).toBe("new-thread");
+    expect(resolveHome).toHaveBeenCalledTimes(2);
+  });
+
+  it("expiry-herd fix (qitem-...e91d7a94): DEFERRED-PROBE adversarial pin — a probe STARTED inside the ambiguous second stays short-lived even when it COMPLETES after it", async () => {
+    // orch-lead's timing correction: completion time is NOT a safe
+    // permanence predicate. A probe can START inside second S, observe the
+    // retired occupant, and complete after S has closed — after the pid was
+    // reused within S under the SAME lstart key. Caching that answer
+    // permanently recreates W-5.3-1 unbounded. Permanence must key off
+    // probe START time strictly after S; this probe started inside S, so
+    // its entry keeps the 60s bound regardless of completion time.
+    const START = lstartToMinTs("Sun Aug 23 10:00:00 2026")!;
+    let t = START * 1000 + 400; // probe STARTS inside the start second
+    let release!: (home: string) => void;
+    const resolveHome = vi.fn(
+      (_pid: number) => new Promise<string>((r) => { release = r; }),
+    );
+    const resolver = new CodexThreadIdResolver({
+      defaultHome: "/home/me",
+      resolveHomeDirByPid: resolveHome as never,
+      readFromLogs: (_pid, home) => (home === "/home/new" ? "new-thread" : undefined),
+      now: () => t,
+    });
+    const first = resolver.resolve(4242, "Sun Aug 23 10:00:00 2026");
+    // The pid is reused within S (same key). The in-flight probe observed
+    // the RETIRED occupant; it completes only after S has closed.
+    t = (START + 5) * 1000;
+    release("/home/old");
+    expect(await first).toBeUndefined(); // fails closed (strict gate)
+    expect(resolveHome).toHaveBeenCalledTimes(1);
+    // Past the short bound the doomed entry must expire and re-probe.
+    t = START * 1000 + 400 + 61_500;
+    resolveHome.mockImplementation(async () => "/home/new");
+    expect(await resolver.resolve(4242, "Sun Aug 23 10:00:00 2026")).toBe("new-thread");
+    expect(resolveHome).toHaveBeenCalledTimes(2);
   });
 
   it("r2-B2: the census's PRODUCTION lister REJECTS on enumeration failure — a failed ps is never cached as an empty success", async () => {
