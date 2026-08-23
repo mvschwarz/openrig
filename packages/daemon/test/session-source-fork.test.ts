@@ -284,7 +284,7 @@ describe("ClaudeCodeAdapter.launchHarness fork branch", () => {
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText).toHaveBeenCalledWith(
       "r01-impl",
-      "claude --permission-mode acceptEdits --resume PARENT-TOKEN-ABC --fork-session --name dev-impl@test-rig",
+      "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude --permission-mode acceptEdits --resume PARENT-TOKEN-ABC --fork-session --name dev-impl@test-rig",
     );
     if (result.ok) {
       // Captured token MUST be the new post-fork token, NOT the parent.

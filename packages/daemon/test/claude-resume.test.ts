@@ -69,7 +69,7 @@ describe("ClaudeResumeAdapter", () => {
       expect(sendText).toHaveBeenCalledOnce();
       expect(sendText.mock.calls[0]![0]).toBe("r99-demo1-lead");
       // OPR.0.4.8.2: restore now carries the launch-posture floor (acceptEdits), same as fresh.
-      expect(sendText.mock.calls[0]![1]).toBe("claude --permission-mode acceptEdits --resume 'my-session'");
+      expect(sendText.mock.calls[0]![1]).toBe("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude --permission-mode acceptEdits --resume 'my-session'");
       expect(sendKeys).toHaveBeenCalledOnce();
       expect(sendKeys.mock.calls[0]![0]).toBe("r99-demo1-lead");
       expect(sendKeys.mock.calls[0]![1]).toEqual(["Enter"]);
@@ -85,7 +85,7 @@ describe("ClaudeResumeAdapter", () => {
       await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo", undefined, "gpt-5.4-cheap");
 
       expect(sendText.mock.calls[0]![1]).toBe(
-        "claude --permission-mode acceptEdits --model 'gpt-5.4-cheap' --resume 'my-session'"
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude --permission-mode acceptEdits --model 'gpt-5.4-cheap' --resume 'my-session'"
       );
     });
 
@@ -124,7 +124,7 @@ describe("ClaudeResumeAdapter", () => {
 
       await adapter.resume("r99-demo1-lead", "claude_name", "tok; rm -rf /", "/repo");
 
-      expect(sendText.mock.calls[0]![1]).toBe("claude --permission-mode acceptEdits --resume 'tok; rm -rf /'");
+      expect(sendText.mock.calls[0]![1]).toBe("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude --permission-mode acceptEdits --resume 'tok; rm -rf /'");
     });
 
     it("sendKeys(Enter) fails after sendText -> C-c sent to clear buffer", async () => {

@@ -70,3 +70,25 @@ export function piTrust(
   // full_bypass policy forces full resource trust exactly as global YOLO does.
   return yoloEnabled(env, resolvedPosture) ? "approve" : configured ?? "no-approve";
 }
+
+/**
+ * OPR.0.5.3.1 — Claude classic-renderer launch env prefix.
+ *
+ * Claude Code's fullscreen renderer draws to the terminal ALTERNATE screen, which
+ * emits no scrollback — so tmux capture-pane stores nothing and `rig transcript`
+ * goes thin. Launching with CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 forces the
+ * classic renderer and restores native scrollback (and same-pane handover
+ * scroll-preservation). Applied on EVERY managed Claude launch path (fresh /
+ * resume / fork / restore) so behaviour is uniform, never path-dependent —
+ * mirroring the claudePostureFlag pattern.
+ *
+ * Default ON. Config override: set OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN=0 (or
+ * "false") to opt back into the fullscreen renderer (knowingly forgoing scrollback).
+ *
+ * Returns a command PREFIX ("VAR=1 ", trailing space) to prepend to the `claude`
+ * launch command, or "" when disabled (then the command is byte-identical to pre-OPR.0.5.3.1).
+ */
+export function claudeClassicRendererEnvPrefix(env: NodeJS.ProcessEnv = process.env): string {
+  const v = env.OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN;
+  return v === "0" || v === "false" ? "" : "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 ";
+}

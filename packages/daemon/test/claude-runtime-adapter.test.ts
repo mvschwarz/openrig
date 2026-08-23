@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
 import type { NodeBinding, ResolvedStartupFile } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-planner.js";
@@ -81,11 +81,12 @@ describe("launchHarness — per-agent --model reaches the claude launch (51-07 A
     expect(lastCmd(tmux)).toContain(`--model '${MODEL}'`);
   });
 
-  // absent → BYTE-IDENTICAL (the deterministic resume builder pins exact bytes — no --model added).
-  it("absent model → the resume command is byte-identical to main (no --model, posture intact)", async () => {
+  // absent → deterministic bytes (no --model added). Baseline now carries the OPR.0.5.3.1
+  // classic-renderer prefix by default (see the scrollback-restore describe below).
+  it("absent model → the resume command is exact bytes (no --model, posture intact)", async () => {
     const tmux = mockTmux();
     await adapterWith(tmux).launchHarness(withModel(undefined), { name: "seat", resumeToken: "tok-123" });
-    expect(lastCmd(tmux)).toBe(`claude ${POSTURE} --resume tok-123 --name seat`);
+    expect(lastCmd(tmux)).toBe(`CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude ${POSTURE} --resume tok-123 --name seat`);
   });
 
   // D1 pin — posture BYTE-UNCHANGED both directions: the ONLY delta with/without model is the
@@ -97,6 +98,49 @@ describe("launchHarness — per-agent --model reaches the claude launch (51-07 A
     expect(noModel).toContain(POSTURE);
     expect(withMdl).toContain(POSTURE);
     expect(withMdl.replace(` --model '${MODEL}'`, "")).toBe(noModel);
+  });
+});
+
+// OPR.0.5.3.1 slice 01 — Claude scrollback restore. Every managed launch path must prepend
+// CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 by default (classic renderer -> native scrollback);
+// an explicit OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN=0 opts back into fullscreen (byte-identical
+// to pre-change). RED-first: the default-prefix pins fail on main (adapter emits no prefix).
+describe("launchHarness — classic-renderer env prefix (OPR.0.5.3.1 scrollback restore)", () => {
+  const POSTURE = claudePostureFlag(process.env, undefined);
+  const adapterWith = (tmux: TmuxAdapter) => new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+  const lastCmd = (tmux: TmuxAdapter): string => {
+    const calls = (tmux.sendText as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    return (calls[calls.length - 1]?.[1] as string) ?? "";
+  };
+  const PREFIX = "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 ";
+
+  afterEach(() => {
+    delete process.env.OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN;
+  });
+
+  it("FRESH launch prepends the classic-renderer prefix by default", async () => {
+    const tmux = mockTmux();
+    await adapterWith(tmux).launchHarness(makeBinding(), { name: "seat" });
+    expect(lastCmd(tmux).startsWith(PREFIX + "claude ")).toBe(true);
+  });
+
+  it("RESUME launch carries the prefix", async () => {
+    const tmux = mockTmux();
+    await adapterWith(tmux).launchHarness(makeBinding(), { name: "seat", resumeToken: "tok-123" });
+    expect(lastCmd(tmux)).toBe(`${PREFIX}claude ${POSTURE} --resume tok-123 --name seat`);
+  });
+
+  it("FORK launch carries the prefix", async () => {
+    const tmux = mockTmux();
+    await adapterWith(tmux).launchHarness(makeBinding(), { name: "seat", forkSource: { kind: "native_id", value: "parent-xyz" } });
+    expect(lastCmd(tmux).startsWith(PREFIX + "claude ")).toBe(true);
+  });
+
+  it("override OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN=0 omits the prefix (byte-identical to pre-change)", async () => {
+    process.env.OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN = "0";
+    const tmux = mockTmux();
+    await adapterWith(tmux).launchHarness(makeBinding(), { name: "seat", resumeToken: "tok-123" });
+    expect(lastCmd(tmux)).toBe(`claude ${POSTURE} --resume tok-123 --name seat`);
   });
 });
 
@@ -411,7 +455,7 @@ describe("Claude Code runtime adapter", () => {
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText).toHaveBeenCalledWith(
       "r01-impl",
-      "claude --permission-mode acceptEdits --session-id 11111111-1111-4111-8111-111111111111 --name dev-impl@test-rig"
+      "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude --permission-mode acceptEdits --session-id 11111111-1111-4111-8111-111111111111 --name dev-impl@test-rig"
     );
     if (result.ok) {
       expect(result.resumeToken).toBe("11111111-1111-4111-8111-111111111111");
@@ -429,7 +473,7 @@ describe("Claude Code runtime adapter", () => {
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText).toHaveBeenCalledWith(
       "r01-impl",
-      "claude --permission-mode acceptEdits --resume abc-123 --name dev-impl@test-rig"
+      "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude --permission-mode acceptEdits --resume abc-123 --name dev-impl@test-rig"
     );
   });
 

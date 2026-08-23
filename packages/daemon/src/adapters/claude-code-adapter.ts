@@ -2,7 +2,7 @@ import nodePath from "node:path";
 import fs from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import type { TmuxAdapter } from "./tmux.js";
-import { claudePostureFlag } from "./yolo-mode.js";
+import { claudePostureFlag, claudeClassicRendererEnvPrefix } from "./yolo-mode.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
   InstalledResource, ProjectionResult, StartupDeliveryResult, ReadinessResult,
@@ -227,6 +227,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // OPR.0.4.8.3 Seam B: a per-seat resolved policy posture (binding.launchPosture) overrides env.
     const permissionMode = claudePostureFlag(process.env, binding.launchPosture);
     const appliedLaunch = observeClaudePermission(permissionMode);
+    // OPR.0.5.3.1: classic-renderer env prefix (default on) → native scrollback for every
+    // managed launch path (fresh/resume/fork). "" when overridden off → byte-identical command.
+    const rendererPrefix = claudeClassicRendererEnvPrefix(process.env);
 
     // 51-07: a per-agent model declared in the spec (member.model ?? profile ?? defaults, resolved
     // onto binding.model at instantiate) is emitted as `--model <x>` on the launch command. Absent →
@@ -251,7 +254,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (!parentId) {
         return { ok: false, error: "claude-code fork: forkSource.value is required (parent native_id)" };
       }
-      const cmd = `claude ${permissionMode}${modelArg} --resume ${parentId} --fork-session --name ${opts.name}`;
+      const cmd = `${rendererPrefix}claude ${permissionMode}${modelArg} --resume ${parentId} --fork-session --name ${opts.name}`;
       const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
@@ -277,8 +280,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     const generatedSessionId = opts.resumeToken ? null : this.sessionIdFactory();
     const cmd = opts.resumeToken
-      ? `claude ${permissionMode}${modelArg} --resume ${opts.resumeToken} --name ${opts.name}`
-      : `claude ${permissionMode}${modelArg} --session-id ${generatedSessionId} --name ${opts.name}`;
+      ? `${rendererPrefix}claude ${permissionMode}${modelArg} --resume ${opts.resumeToken} --name ${opts.name}`
+      : `${rendererPrefix}claude ${permissionMode}${modelArg} --session-id ${generatedSessionId} --name ${opts.name}`;
 
     const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
     if (!textResult.ok) {
