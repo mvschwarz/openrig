@@ -392,6 +392,39 @@ describe("OPR.0.5.3.10 — one census per cycle", () => {
     }
   });
 
+  it("soak finding: an identity-keyed cache entry OUTLIVES the poll cadence — two polls 60s apart make ONE probe total", async () => {
+    // Live soak at 413e2d541: list_processes +6 (census fix works) but
+    // resolve_home +53/5min — the 60s TTL EQUALS the 60s divergence cadence,
+    // so identity-keyed entries expired exactly when next needed and every
+    // pending codex seat re-probed every poll. Identity invalidates pid
+    // reuse STRUCTURALLY (rounds 3-6), so time is not load-bearing for
+    // identity-keyed entries: their TTL defaults long (15 min); the 60s
+    // bound remains for identity-less callers only.
+    let t = 0;
+    const resolveHome = vi.fn(async () => "/other/home");
+    const resolver = new CodexThreadIdResolver({
+      defaultHome: "/home/me",
+      resolveHomeDirByPid: resolveHome as never,
+      readFromLogs: (_pid, home) => (home === "/other/home" ? "thread-x" : undefined),
+      now: () => t,
+    });
+    expect(await resolver.resolve(500, "Sun Aug 23 10:00:00 2026")).toBe("thread-x");
+    t = 61_000; // the next divergence poll
+    expect(await resolver.resolve(500, "Sun Aug 23 10:00:00 2026")).toBe("thread-x");
+    t = 601_000; // ten minutes on, same identity: still cached
+    expect(await resolver.resolve(500, "Sun Aug 23 10:00:00 2026")).toBe("thread-x");
+    expect(resolveHome).toHaveBeenCalledTimes(1);
+    // Identity-less callers keep the SHORT bound: their slot serves within
+    // 60s and re-probes after it.
+    expect(await resolver.resolve(501)).toBe("thread-x"); // probe #2
+    t = 631_000; // +30s: inside the identity-less TTL — cached, no probe
+    expect(await resolver.resolve(501)).toBe("thread-x");
+    expect(resolveHome).toHaveBeenCalledTimes(2);
+    t = 692_000; // +61s past the entry: expired — re-probe
+    expect(await resolver.resolve(501)).toBe("thread-x"); // probe #3
+    expect(resolveHome).toHaveBeenCalledTimes(3);
+  });
+
   it("r2-B2: the census's PRODUCTION lister REJECTS on enumeration failure — a failed ps is never cached as an empty success", async () => {
     // r2's discriminator: defaultListProcesses swallows a spawn failure into []
     // — through the census that empty array became a CACHED SUCCESS for the

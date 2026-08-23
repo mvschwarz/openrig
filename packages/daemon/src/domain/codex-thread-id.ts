@@ -83,10 +83,18 @@ export class CodexThreadIdResolver {
       readFromLogs?: (pid: number, homeDir: string) => string | undefined;
       /** Bounded cache size; oldest-inserted evicts first. Default 256. */
       maxCachedPids?: number;
-      /** Freshness bound per cache entry — past it the pid re-probes. Default
-       *  60s: dedupes the per-poll `ps eww` churn while bounding pid-reuse
-       *  staleness to a minute. */
+      /** Freshness bound for IDENTITY-LESS cache entries — past it the pid
+       *  re-probes. Default 60s. */
       homeTtlMs?: number;
+      /** Freshness bound for IDENTITY-KEYED entries. Default 15 min (soak
+       *  finding: a 60s TTL equal to the 60s poll cadence expired entries
+       *  exactly when next needed — resolve_home +53/5min live). Time is not
+       *  load-bearing here: pid reuse is invalidated STRUCTURALLY by the
+       *  identity key (rounds 3-6), and the cache holds only the pid's HOME —
+       *  never a thread id — so a thread roll inside the window is picked up
+       *  immediately by the per-resolve log read, and a live process's HOME
+       *  cannot change. */
+      identityHomeTtlMs?: number;
       /** Injectable clock (tests). */
       now?: () => number;
     } = {},
@@ -100,7 +108,9 @@ export class CodexThreadIdResolver {
       ?? ((p: number, home: string) => readCodexThreadIdFromLogs(p, home, undefined, minTs));
     const defaultHome = this.opts.defaultHome ?? safeUserHomeDir() ?? os.homedir();
     const now = this.opts.now ?? Date.now;
-    const ttl = this.opts.homeTtlMs ?? 60_000;
+    const ttl = identity !== undefined
+      ? (this.opts.identityHomeTtlMs ?? 900_000)
+      : (this.opts.homeTtlMs ?? 60_000);
 
     // 1. Default home: no subprocess.
     const fromDefault = readFromLogs(pid, defaultHome);
