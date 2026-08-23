@@ -45,6 +45,25 @@ export interface TraceFs {
   read(path: string): string;
 }
 
+/** r2-B3: rig, seat, and name must each be ONE safe path segment. Unvalidated
+ *  values joined into filesystem paths let `--rig ../../outside` resolve every
+ *  level OUTSIDE topology.root (proven by the reviewer's discriminator).
+ *  Rejection happens BEFORE any filesystem contact. Dotted filenames
+ *  (a.b.c.md) and dashed/underscored ids stay valid; separators, dot-segments,
+ *  empties, and NULs do not. */
+function assertSafeSegment(value: string, field: "rig" | "seat" | "name"): void {
+  if (
+    value.length === 0
+    || value === "." || value === ".."
+    || value.includes("/") || value.includes("\\")
+    || value.includes("\0")
+  ) {
+    throw new Error(
+      `invalid ${field} "${value}": must be a single path segment (no separators or dot-segments)`,
+    );
+  }
+}
+
 const realFs: TraceFs = {
   exists: (p) => existsSync(p),
   read: (p) => readFileSync(p, "utf-8"),
@@ -62,6 +81,10 @@ export function traceTopologyChain(input: {
   legacyRigsRoot?: string;
   fs?: TraceFs;
 }): TraceResult {
+  assertSafeSegment(input.rig, "rig");
+  if (input.seat) assertSafeSegment(input.seat, "seat");
+  assertSafeSegment(input.name, "name");
+
   const fs = input.fs ?? realFs;
   const legacyRigsRoot = input.legacyRigsRoot ?? resolveLegacyTopologyRigsRoot();
 

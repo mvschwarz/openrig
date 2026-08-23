@@ -254,12 +254,20 @@ Examples:
       const { traceTopologyChain } = await import("../lib/topology-trace.js");
       const store = new ConfigStore();
       const resolved = store.resolveWithSource("topology.root");
-      const result = traceTopologyChain({
-        topologyRoot: String(resolved.value),
-        name: opts.name,
-        rig: opts.rig,
-        seat: opts.seat ?? null,
-      });
+      let result;
+      try {
+        result = traceTopologyChain({
+          topologyRoot: String(resolved.value),
+          name: opts.name,
+          rig: opts.rig,
+          seat: opts.seat ?? null,
+        });
+      } catch (err) {
+        // r2-B3: traversal-shaped input is a clean refusal, never a stack trace.
+        console.error(err instanceof Error ? err.message : String(err));
+        process.exitCode = 1;
+        return;
+      }
       // Advisories go to stderr on BOTH output modes — a legacy read must
       // never pass silently, and stdout stays clean for piping.
       for (const level of result.levels) {

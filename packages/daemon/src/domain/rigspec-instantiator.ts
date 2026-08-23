@@ -1111,6 +1111,29 @@ export class PodRigInstantiator {
     const nodeIdMap: Record<string, string> = {}; // "pod.member" -> node DB id
     const launchedSessionNames: string[] = []; // Track for orphan cleanup on total failure
     const podInstantiateWarnings = preflight.warnings;
+
+    // OPR.0.5.3.6 (r2-B1) — instantiate() is the REAL rig-up door (/api/up →
+    // bootstrap → here), and like the rig-persist sites above, BOTH
+    // instantiation paths must install or defaults silently drop on one of
+    // them (materializeValidatedSpec carries the same guarded block). Runs
+    // BEFORE node launch so seats can read their defaults from first boot.
+    // Best-effort, doubly guarded: the installer itself never throws, and this
+    // wrapper makes even a broken injected fsOps a named warning, never a
+    // failed rig.
+    if (this.deps.topologyRootResolver) {
+      try {
+        const defaults = installTopologyDefaults({
+          specDir: rigRoot,
+          rigName: rigSpec.name,
+          topologyRoot: this.deps.topologyRootResolver(),
+        });
+        for (const f of defaults.failed) {
+          podInstantiateWarnings.push(`topology-defaults: could not install ${f.path}: ${f.error}`);
+        }
+      } catch (err) {
+        podInstantiateWarnings.push(`topology-defaults: installer failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     // Store per-member context for deferred launch
     const memberContext = new Map<string, { pod: typeof rigSpec.pods[0]; member: typeof rigSpec.pods[0]["members"][0]; podId: string; nodeId: string; resolveResult: any; configResult: any }>();
 

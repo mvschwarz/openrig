@@ -79,31 +79,50 @@ export function installTopologyDefaults(input: {
     }
   };
 
+  // r2-B2: the best-effort contract is TOTAL — enumeration failures (listFiles/
+  // listDirs EACCES/EIO) are NAMED failures on the section directory, never a
+  // throw, and one section's denial never starves the others. The original had
+  // the for-headers outside the catch, so a directory-permission failure
+  // escaped AFTER the persistence tx and turned a committed materialize into
+  // materialize_error.
+  const section = (dir: string, body: () => void): void => {
+    try {
+      body();
+    } catch (err) {
+      result.failed.push({ path: dir, error: err instanceof Error ? err.message : String(err) });
+    }
+  };
+
   const instanceDir = nodePath.join(topologyDir, "instance");
-  if (ops.isDirectory(instanceDir)) {
+  section(instanceDir, () => {
+    if (!ops.isDirectory(instanceDir)) return;
     for (const name of ops.listFiles(instanceDir)) {
       copyIfAbsent(nodePath.join(instanceDir, name), nodePath.join(input.topologyRoot, name));
     }
-  }
+  });
 
   const rigDir = nodePath.join(topologyDir, "rig");
-  if (ops.isDirectory(rigDir)) {
+  section(rigDir, () => {
+    if (!ops.isDirectory(rigDir)) return;
     for (const name of ops.listFiles(rigDir)) {
       copyIfAbsent(nodePath.join(rigDir, name), nodePath.join(input.topologyRoot, "rigs", input.rigName, name));
     }
-  }
+  });
 
   const seatsDir = nodePath.join(topologyDir, "seats");
-  if (ops.isDirectory(seatsDir)) {
+  section(seatsDir, () => {
+    if (!ops.isDirectory(seatsDir)) return;
     for (const seat of ops.listDirs(seatsDir)) {
-      for (const name of ops.listFiles(nodePath.join(seatsDir, seat))) {
-        copyIfAbsent(
-          nodePath.join(seatsDir, seat, name),
-          nodePath.join(input.topologyRoot, "rigs", input.rigName, "seats", seat, name),
-        );
-      }
+      section(nodePath.join(seatsDir, seat), () => {
+        for (const name of ops.listFiles(nodePath.join(seatsDir, seat))) {
+          copyIfAbsent(
+            nodePath.join(seatsDir, seat, name),
+            nodePath.join(input.topologyRoot, "rigs", input.rigName, "seats", seat, name),
+          );
+        }
+      });
     }
-  }
+  });
 
   return result;
 }
