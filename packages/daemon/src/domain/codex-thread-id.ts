@@ -93,7 +93,11 @@ export class CodexThreadIdResolver {
   ) {}
 
   async resolve(pid: number, identity?: string): Promise<string | undefined> {
-    const readFromLogs = this.opts.readFromLogs ?? ((p: number, home: string) => readCodexThreadIdFromLogs(p, home));
+    // r2 round-4: the identity's start time gates EVERY log read — a retired
+    // occupant's rows predate the current occupant's start and never match.
+    const minTs = lstartToMinTs(identity);
+    const readFromLogs = this.opts.readFromLogs
+      ?? ((p: number, home: string) => readCodexThreadIdFromLogs(p, home, undefined, minTs));
     const defaultHome = this.opts.defaultHome ?? safeUserHomeDir() ?? os.homedir();
     const now = this.opts.now ?? Date.now;
     const ttl = this.opts.homeTtlMs ?? 60_000;
@@ -173,8 +177,14 @@ function safeUserHomeDir(): string | undefined {
 function readCodexThreadIdFromLogs(
   pid: number,
   homeDir: string,
-  exists?: (path: string) => boolean
+  exists?: (path: string) => boolean,
+  minTs?: number
 ): string | undefined {
+  // OPR.0.5.3.10 r2 round-4 — the logs key is pid:<pid>:<opaque-uuid>, so a
+  // pid-only read can return a RETIRED occupant's row to a reused pid. When
+  // the caller knows the current occupant's start time (minTs, epoch
+  // seconds), only rows written at/after it are that occupant's. Identity-less
+  // callers keep the legacy unbounded read.
   for (const dbPath of resolveCodexLogDbPaths(homeDir, exists)) {
     try {
       const db = new Database(dbPath, { readonly: true });
@@ -184,9 +194,10 @@ function readCodexThreadIdFromLogs(
            FROM logs
            WHERE process_uuid LIKE ?
              AND thread_id IS NOT NULL
+             AND ts >= ?
            ORDER BY ts DESC, ts_nanos DESC, id DESC
            LIMIT 1`
-        ).get(`pid:${pid}:%`) as { thread_id?: string } | undefined;
+        ).get(`pid:${pid}:%`, minTs ?? 0) as { thread_id?: string } | undefined;
         if (row?.thread_id) {
           return row.thread_id;
         }
@@ -198,6 +209,18 @@ function readCodexThreadIdFromLogs(
     }
   }
   return undefined;
+}
+
+/** Parse `ps lstart` ("Sun Aug 23 19:30:00 2026", local time) to epoch
+ *  SECONDS, with a 2s slack for same-second writes. Unparseable → undefined
+ *  (the caller falls back to the ungated read rather than inventing a gate). */
+export function lstartToMinTs(identity: string | undefined): number | undefined {
+  if (!identity) return undefined;
+  const m = identity.match(/^\w{3}\s+(\w{3})\s+(\d+)\s+(\d{2}:\d{2}:\d{2})\s+(\d{4})$/);
+  if (!m) return undefined;
+  const parsed = Date.parse(`${m[1]} ${m[2]}, ${m[4]} ${m[3]}`);
+  if (Number.isNaN(parsed)) return undefined;
+  return Math.floor(parsed / 1000) - 2;
 }
 
 function resolveCodexLogDbPaths(homeDir: string, exists?: (path: string) => boolean): string[] {

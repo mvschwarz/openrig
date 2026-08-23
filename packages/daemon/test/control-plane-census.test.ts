@@ -260,6 +260,54 @@ describe("OPR.0.5.3.10 — one census per cycle", () => {
     }
   });
 
+  it("r2 round-4: the DEFAULT-HOME fast path never returns a RETIRED occupant's log row to a reused pid (real sqlite, time-gated)", async () => {
+    // r2's effect-level discriminator: logs rows key on pid:<pid>:<opaque-uuid>
+    // and the pid-only LIKE read returned a retired process's thread to the
+    // NEW occupant BEFORE identity participated — on the zero-subprocess fast
+    // path. The honest gate is TIME (measured schema: ts = epoch seconds): a
+    // row belongs to the current occupant only if written at/after the
+    // identity's start time. Zero HOME probes throughout.
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const nodePath = await import("node:path");
+    const BetterSqlite3 = (await import("better-sqlite3")).default;
+    const home = fs.mkdtempSync(nodePath.join(os.tmpdir(), "s10-r4-home-"));
+    try {
+      fs.mkdirSync(nodePath.join(home, ".codex"), { recursive: true });
+      const db = new BetterSqlite3(nodePath.join(home, ".codex", "logs_1.sqlite"));
+      db.exec("CREATE TABLE logs (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, ts_nanos INTEGER NOT NULL, level TEXT, process_uuid TEXT, thread_id TEXT)");
+      // Only the RETIRED occupant's row exists: written 2026-08-23 10:00 local.
+      const retiredTs = Math.floor(new Date("Aug 23, 2026 10:00:00").getTime() / 1000);
+      db.prepare("INSERT INTO logs (ts, ts_nanos, level, process_uuid, thread_id) VALUES (?, 0, 'info', ?, ?)")
+        .run(retiredTs, "pid:4242:retired-process-uuid", "retired-thread");
+      db.close();
+
+      // A genuine default-home MISS may legitimately probe (the process could
+      // live under a non-default home); the zero-subprocess contract is for
+      // the HIT path. The probe honestly answers "default home".
+      const homeProbes = vi.fn(async () => home);
+      const resolver = new CodexThreadIdResolver({ defaultHome: home, resolveHomeDirByPid: homeProbes as never });
+
+      // The NEW occupant (started 19:30) must NOT receive the retired thread.
+      expect(await resolver.resolve(4242, "Sun Aug 23 19:30:00 2026")).toBeUndefined();
+      const probesAfterMiss = homeProbes.mock.calls.length;
+      // Once the NEW occupant's own row exists (written after its start), it resolves.
+      const db2 = new BetterSqlite3(nodePath.join(home, ".codex", "logs_1.sqlite"));
+      const newTs = Math.floor(new Date("Aug 23, 2026 19:31:00").getTime() / 1000);
+      db2.prepare("INSERT INTO logs (ts, ts_nanos, level, process_uuid, thread_id) VALUES (?, 0, 'info', ?, ?)")
+        .run(newTs, "pid:4242:new-process-uuid", "new-thread");
+      db2.close();
+      expect(await resolver.resolve(4242, "Sun Aug 23 19:30:00 2026")).toBe("new-thread");
+      // An identity-less caller keeps the legacy read (TTL-bounded elsewhere).
+      expect(await resolver.resolve(4242)).toBe("new-thread");
+      // The HIT path spawned nothing: no probes beyond the one honest miss.
+      expect(homeProbes.mock.calls.length).toBe(probesAfterMiss);
+      expect(probesAfterMiss).toBeLessThanOrEqual(1);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("r2-B2: the census's PRODUCTION lister REJECTS on enumeration failure — a failed ps is never cached as an empty success", async () => {
     // r2's discriminator: defaultListProcesses swallows a spawn failure into []
     // — through the census that empty array became a CACHED SUCCESS for the
