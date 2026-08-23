@@ -9,6 +9,15 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_ROOT}/hooks/scripts/refocus.cjs\"",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
@@ -20,6 +29,15 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_ROOT}/hooks/scripts/refocus.cjs\"",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "Stop": [
@@ -28,6 +46,15 @@
           {
             "type": "command",
             "command": "node \"${PLUGIN_ROOT}/hooks/scripts/activity-relay.cjs\"",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_ROOT}/hooks/scripts/refocus.cjs\"",
             "timeout": 5
           }
         ]
