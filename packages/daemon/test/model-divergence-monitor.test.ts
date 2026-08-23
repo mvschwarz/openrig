@@ -220,3 +220,43 @@ describe("modelsMatch — EXACT, plus the narrow self-expiring fable migration b
     expect(modelsMatch("gpt-5.1-codex-mini", "gpt-5.4-mini")).toBe(false);
   });
 });
+
+describe("f7dfca0c — alias-pin false positives end AT THE DETECTOR via the one shipped canonical map", () => {
+  // Founder-steered, desk-ruled: an alias-pinned seat running exactly the model its alias names
+  // is NOT divergent — the ruled class re-proclaimed per generation and per daemon restart.
+  // The pin canonicalizes through CANONICAL_MODEL_PINS (spec-validation-advisory.ts, the ONE
+  // mapping home) and then compares EXACT. No token containment; r2's ambiguity discriminators
+  // (one pin blessing multiple models) stay false in the neighbors above.
+  it("RED-1: alias pin canonicalizes — fable matches claude-fable-5, with trim/case retained", () => {
+    expect(modelsMatch("fable", "claude-fable-5")).toBe(true);
+    expect(modelsMatch(" FABLE ", " Claude-Fable-5 ")).toBe(true);
+  });
+
+  it("control: alias pin vs a DIFFERENT canonical model still diverges (unknown aliases too)", () => {
+    expect(modelsMatch("fable", "claude-opus-5")).toBe(false);
+    expect(modelsMatch("fable", "claude-fable-6")).toBe(false);
+    expect(modelsMatch("opus", "claude-opus-5")).toBe(false); // unmapped alias: no blessing
+  });
+
+  it("RED-2 (monitor level): an alias-pinned claude seat running its canonical model makes NO proclamation", async () => {
+    const seat: PinnedSeat = { ...SEAT, runtime: "claude", pinnedModel: "fable" };
+    const { monitor, recorded } = makeMonitor({
+      listPinnedSeats: () => [seat],
+      readEffectiveModel: () => ({ ok: true as const, model: "claude-fable-5" }),
+    });
+    expect(await monitor.checkOnce()).toHaveLength(0);
+    expect(recorded).toHaveLength(0);
+  });
+
+  it("control (monitor level): alias pin on the WRONG model proclaims with RAW strings preserved", async () => {
+    const seat: PinnedSeat = { ...SEAT, runtime: "claude", pinnedModel: "fable" };
+    const { monitor } = makeMonitor({
+      listPinnedSeats: () => [seat],
+      readEffectiveModel: () => ({ ok: true as const, model: "claude-opus-5" }),
+    });
+    const fired = await monitor.checkOnce();
+    expect(fired).toHaveLength(1);
+    expect(fired[0]!.pinnedModel).toBe("fable"); // raw pin, never the canonicalized form
+    expect(fired[0]!.effectiveModel).toBe("claude-opus-5");
+  });
+});
