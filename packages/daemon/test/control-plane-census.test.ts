@@ -308,6 +308,41 @@ describe("OPR.0.5.3.10 — one census per cycle", () => {
     }
   });
 
+  it("r2 round-5: the reuse BOUNDARY is exact — a retired row at startTs-1 never resolves; B's same-second row does (real sqlite)", async () => {
+    // r2's boundary control: the 2s slack readmitted the retired token at the
+    // exact reuse boundary. Both ts and lstart are second-aligned, and a
+    // process cannot emit its own log BEFORE its start second — so the gate
+    // is ts >= startTs exactly, no slack.
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const nodePath = await import("node:path");
+    const BetterSqlite3 = (await import("better-sqlite3")).default;
+    const home = fs.mkdtempSync(nodePath.join(os.tmpdir(), "s10-r5-home-"));
+    try {
+      fs.mkdirSync(nodePath.join(home, ".codex"), { recursive: true });
+      const startTs = Math.floor(new Date("Aug 23, 2026 19:30:00").getTime() / 1000);
+      const db = new BetterSqlite3(nodePath.join(home, ".codex", "logs_1.sqlite"));
+      db.exec("CREATE TABLE logs (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, ts_nanos INTEGER NOT NULL, level TEXT, process_uuid TEXT, thread_id TEXT)");
+      // ONLY the retired occupant's row, ONE second before B's start.
+      db.prepare("INSERT INTO logs (ts, ts_nanos, level, process_uuid, thread_id) VALUES (?, 0, 'info', ?, ?)")
+        .run(startTs - 1, "pid:4242:retired-process-uuid", "retired-thread");
+      db.close();
+
+      const homeProbes = vi.fn(async () => home);
+      const resolver = new CodexThreadIdResolver({ defaultHome: home, resolveHomeDirByPid: homeProbes as never });
+      expect(await resolver.resolve(4242, "Sun Aug 23 19:30:00 2026")).toBeUndefined();
+
+      // B's own SAME-SECOND row (ts == startTs) resolves — no earlier rows admitted.
+      const db2 = new BetterSqlite3(nodePath.join(home, ".codex", "logs_1.sqlite"));
+      db2.prepare("INSERT INTO logs (ts, ts_nanos, level, process_uuid, thread_id) VALUES (?, 0, 'info', ?, ?)")
+        .run(startTs, "pid:4242:new-process-uuid", "new-thread");
+      db2.close();
+      expect(await resolver.resolve(4242, "Sun Aug 23 19:30:00 2026")).toBe("new-thread");
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("r2-B2: the census's PRODUCTION lister REJECTS on enumeration failure — a failed ps is never cached as an empty success", async () => {
     // r2's discriminator: defaultListProcesses swallows a spawn failure into []
     // — through the census that empty array became a CACHED SUCCESS for the

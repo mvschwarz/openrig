@@ -212,15 +212,19 @@ function readCodexThreadIdFromLogs(
 }
 
 /** Parse `ps lstart` ("Sun Aug 23 19:30:00 2026", local time) to epoch
- *  SECONDS, with a 2s slack for same-second writes. Unparseable → undefined
- *  (the caller falls back to the ungated read rather than inventing a gate). */
+ *  SECONDS — EXACT, no slack (r2 round-5): both `ts` and lstart are
+ *  second-aligned and a process cannot emit its own log BEFORE its start
+ *  second, so `ts >= startTs` admits every current-occupant row and no
+ *  retired one; any slack readmits the retired token at the reuse boundary.
+ *  Unparseable → undefined (the caller falls back to the ungated read rather
+ *  than inventing a gate). */
 export function lstartToMinTs(identity: string | undefined): number | undefined {
   if (!identity) return undefined;
   const m = identity.match(/^\w{3}\s+(\w{3})\s+(\d+)\s+(\d{2}:\d{2}:\d{2})\s+(\d{4})$/);
   if (!m) return undefined;
   const parsed = Date.parse(`${m[1]} ${m[2]}, ${m[4]} ${m[3]}`);
   if (Number.isNaN(parsed)) return undefined;
-  return Math.floor(parsed / 1000) - 2;
+  return Math.floor(parsed / 1000);
 }
 
 function resolveCodexLogDbPaths(homeDir: string, exists?: (path: string) => boolean): string[] {
