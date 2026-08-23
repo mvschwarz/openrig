@@ -107,7 +107,7 @@ describe("OPR.0.5.3.10 — one census per cycle", () => {
       resolveHomeDirByPid: resolveHome,
       readFromLogs: (_pid, home) => (home === "/home/me" ? "thread-1" : undefined),
     });
-    expect(await hitDefault.resolve(42)).toBe("thread-1");
+    expect(await hitDefault.resolveUngatedLegacy(42)).toBe("thread-1");
     expect(resolveHome).toHaveBeenCalledTimes(0);
 
     // Non-default home: resolved once, then served from the bounded cache.
@@ -116,8 +116,8 @@ describe("OPR.0.5.3.10 — one census per cycle", () => {
       resolveHomeDirByPid: resolveHome,
       readFromLogs: (_pid, home) => (home === "/other/home" ? "thread-2" : undefined),
     });
-    expect(await resolver.resolve(43)).toBe("thread-2");
-    expect(await resolver.resolve(43)).toBe("thread-2");
+    expect(await resolver.resolveUngatedLegacy(43)).toBe("thread-2");
+    expect(await resolver.resolveUngatedLegacy(43)).toBe("thread-2");
     expect(resolveHome).toHaveBeenCalledTimes(1);
 
     // A FAILED resolution is not cached: the next call retries.
@@ -127,8 +127,8 @@ describe("OPR.0.5.3.10 — one census per cycle", () => {
       resolveHomeDirByPid: failing as never,
       readFromLogs: () => undefined,
     });
-    await expect(failed.resolve(44)).rejects.toThrow("ps died");
-    await expect(failed.resolve(44)).rejects.toThrow("ps died");
+    await expect(failed.resolveUngatedLegacy(44)).rejects.toThrow("ps died");
+    await expect(failed.resolveUngatedLegacy(44)).rejects.toThrow("ps died");
     expect(failing).toHaveBeenCalledTimes(2);
   });
 
@@ -140,8 +140,8 @@ describe("OPR.0.5.3.10 — one census per cycle", () => {
       resolveHomeDirByPid: resolveHome as never,
       readFromLogs: (_pid, home) => (home === "/other/home" ? "thread-9" : undefined),
     });
-    const a = resolver.resolve(77);
-    const b = resolver.resolve(77);
+    const a = resolver.resolveUngatedLegacy(77);
+    const b = resolver.resolveUngatedLegacy(77);
     release("/other/home");
     expect(await a).toBe("thread-9");
     expect(await b).toBe("thread-9");
@@ -160,10 +160,20 @@ describe("OPR.0.5.3.10 — one census per cycle", () => {
       resolveHomeDirByPid: resolveHome as never,
       readFromLogs: () => undefined,
     });
-    expect(await resolver.resolve(88)).toBeUndefined();
-    expect(await resolver.resolve(88)).toBeUndefined();
-    expect(await resolver.resolve(88)).toBeUndefined();
+    expect(await resolver.resolveUngatedLegacy(88)).toBeUndefined();
+    expect(await resolver.resolveUngatedLegacy(88)).toBeUndefined();
+    expect(await resolver.resolveUngatedLegacy(88)).toBeUndefined();
     expect(resolveHome).toHaveBeenCalledTimes(1);
+  });
+
+  it("S10 follow-on: resolveUngatedLegacy is the only identity-less read path (the compile pin lives in src/)", () => {
+    const r = new CodexThreadIdResolver({});
+    // The REVIEW-VISIBLE compile pin — that resolve() must keep identity REQUIRED — lives in
+    // src/domain/codex-thread-id.ts (ResolveRequiresIdentity), NOT here: packages/daemon/tsconfig.json
+    // excludes "test", so a @ts-expect-error in this file would NEVER be evaluated (r1 finding
+    // 2026-08-23). This runtime check just documents that the named escape hatch exists.
+    expect(typeof r.resolveUngatedLegacy).toBe("function");
+    expect(typeof r.resolve).toBe("function");
   });
 
   it("r2-B1: the pid-home cache EXPIRES — a reused PID with a new HOME re-probes after the TTL and returns the NEW thread", async () => {
@@ -180,14 +190,14 @@ describe("OPR.0.5.3.10 — one census per cycle", () => {
       homeTtlMs: 60_000,
       now: () => t,
     });
-    expect(await resolver.resolve(4242)).toBe("old-thread");
+    expect(await resolver.resolveUngatedLegacy(4242)).toBe("old-thread");
     // The pid is reused by a NEW process with a different HOME.
     liveHome = "/home/new";
     t = 30_000; // inside the TTL: cache serves (bounded staleness, accepted)
-    expect(await resolver.resolve(4242)).toBe("old-thread");
+    expect(await resolver.resolveUngatedLegacy(4242)).toBe("old-thread");
     expect(resolveHome).toHaveBeenCalledTimes(1);
     t = 60_001; // past the TTL: re-probe, new answer
-    expect(await resolver.resolve(4242)).toBe("new-thread");
+    expect(await resolver.resolveUngatedLegacy(4242)).toBe("new-thread");
     expect(resolveHome).toHaveBeenCalledTimes(2);
   });
 
@@ -299,7 +309,7 @@ describe("OPR.0.5.3.10 — one census per cycle", () => {
       db2.close();
       expect(await resolver.resolve(4242, "Sun Aug 23 19:30:00 2026")).toBe("new-thread");
       // An identity-less caller keeps the legacy read (TTL-bounded elsewhere).
-      expect(await resolver.resolve(4242)).toBe("new-thread");
+      expect(await resolver.resolveUngatedLegacy(4242)).toBe("new-thread");
       // The HIT path spawned nothing: no probes beyond the one honest miss.
       expect(homeProbes.mock.calls.length).toBe(probesAfterMiss);
       expect(probesAfterMiss).toBeLessThanOrEqual(1);
@@ -416,12 +426,12 @@ describe("OPR.0.5.3.10 — one census per cycle", () => {
     expect(resolveHome).toHaveBeenCalledTimes(1);
     // Identity-less callers keep the SHORT bound: their slot serves within
     // 60s and re-probes after it.
-    expect(await resolver.resolve(501)).toBe("thread-x"); // probe #2
+    expect(await resolver.resolveUngatedLegacy(501)).toBe("thread-x"); // probe #2
     t = 631_000; // +30s: inside the identity-less TTL — cached, no probe
-    expect(await resolver.resolve(501)).toBe("thread-x");
+    expect(await resolver.resolveUngatedLegacy(501)).toBe("thread-x");
     expect(resolveHome).toHaveBeenCalledTimes(2);
     t = 692_000; // +61s past the entry: expired — re-probe
-    expect(await resolver.resolve(501)).toBe("thread-x"); // probe #3
+    expect(await resolver.resolveUngatedLegacy(501)).toBe("thread-x"); // probe #3
     expect(resolveHome).toHaveBeenCalledTimes(3);
   });
 

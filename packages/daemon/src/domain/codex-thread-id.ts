@@ -100,7 +100,30 @@ export class CodexThreadIdResolver {
     } = {},
   ) {}
 
-  async resolve(pid: number, identity?: string): Promise<string | undefined> {
+  /**
+   * Resolve a codex thread id for `pid`. IDENTITY IS REQUIRED (S10 follow-on, r1 owed item 3): the
+   * identity's start time gates every log read, so a retired occupant's rows never resolve for a
+   * reused pid. The ungated read — the pre-round-4 class S10 eliminated, safe today only by
+   * call-graph discipline — is reachable ONLY via resolveUngatedLegacy, so a NEW identity-less
+   * call site is a COMPILE error (the review-visible pin; see the codex-thread-id test).
+   */
+  async resolve(pid: number, identity: string): Promise<string | undefined> {
+    return this.resolveInternal(pid, identity);
+  }
+
+  /**
+   * EXPLICIT ungated escape hatch — reads WITHOUT the identity start-time gate (a reused pid can
+   * match a retired occupant's rows). Use ONLY for genuinely identity-less callers (tests, adoption
+   * paths that carry no census identity). Every new identity-less read must NAME this method; do
+   * not re-open resolve() to an optional identity. By construction it takes the identity-LESS TTL:
+   * it delegates with identity=undefined, and resolveInternal's TTL selector reads homeTtlMs (60s),
+   * never identityHomeTtlMs (15 min) — see the TTL split (fix OPR.0.5.3.10) below.
+   */
+  async resolveUngatedLegacy(pid: number): Promise<string | undefined> {
+    return this.resolveInternal(pid, undefined);
+  }
+
+  private async resolveInternal(pid: number, identity: string | undefined): Promise<string | undefined> {
     // r2 round-4: the identity's start time gates EVERY log read — a retired
     // occupant's rows predate the current occupant's start and never match.
     const minTs = lstartToMinTs(identity);
@@ -168,6 +191,18 @@ export class CodexThreadIdResolver {
     this.homeByKey.set(key, { home, at: (this.opts.now ?? Date.now)() });
   }
 }
+
+// S10 follow-on item 3 — the REVIEW-VISIBLE pin, placed in src/ so the daemon typecheck gate
+// (packages/daemon/tsconfig.json excludes "test") ACTUALLY evaluates it. r1 finding 2026-08-23: the
+// earlier @ts-expect-error lived in an untypechecked test file and never fired. resolve()'s identity
+// must stay REQUIRED: if anyone re-opens it to an optional identity — reintroducing the pre-round-4
+// ungated class — its Parameters gain an optional slot, `ResolveRequiresIdentity` resolves to `never`,
+// `true` is no longer assignable, and `tsc --noEmit` on packages/daemon FAILS. resolveUngatedLegacy is
+// the ONLY identity-less read path. Acceptance (r1): re-open resolve() to optional identity -> tsc fails.
+type ResolveRequiresIdentity =
+  Parameters<CodexThreadIdResolver["resolve"]> extends [pid: number, identity: string] ? true : never;
+const _resolveRequiresIdentityPin: ResolveRequiresIdentity = true;
+void _resolveRequiresIdentityPin;
 
 function uniqueHomes(candidateHomes: Array<string | undefined>): string[] {
   const homes = candidateHomes.filter((home): home is string => Boolean(home));

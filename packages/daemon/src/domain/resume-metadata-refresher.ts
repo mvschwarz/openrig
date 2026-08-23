@@ -70,7 +70,10 @@ export class ResumeMetadataRefresher {
       defaultHome: deps.homeDir ?? os.homedir(),
       resolveHomeDirByPid: this.resolveHomeDirByPid,
     });
-    this.readCodexThreadIdByPid = deps.readCodexThreadIdByPid ?? ((pid, identity) => threadIdResolver.resolve(pid, identity));
+    // S10 follow-on: identity is REQUIRED on resolve(); an identity-less read routes EXPLICITLY
+    // through the named ungated escape hatch — never a silent fallback (r1 owed item 3).
+    this.readCodexThreadIdByPid = deps.readCodexThreadIdByPid
+      ?? ((pid, identity) => identity === undefined ? threadIdResolver.resolveUngatedLegacy(pid) : threadIdResolver.resolve(pid, identity));
     this.probeClaudeResume = deps.probeClaudeResume ?? ((sessionName, resumeToken, cwd) => this.defaultProbeClaudeResume(sessionName, resumeToken, cwd));
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.homeDir = deps.homeDir ?? os.homedir();

@@ -1741,7 +1741,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       const currentGenDeps = {
         getPanePid: async (sessionTarget: string) => tmuxAdapter.getPanePid ? tmuxAdapter.getPanePid(sessionTarget) : null,
         listProcesses: () => divergenceCensus.list(),
-        readThreadIdByPid: (pid: number, identity?: string) => codexThreadIdResolver.resolve(pid, identity),
+        // S10 follow-on: identity REQUIRED on resolve(); the identity-less case routes EXPLICITLY
+        // through the named ungated escape hatch — never a silent fallback (r1 owed item 3).
+        readThreadIdByPid: (pid: number, identity?: string) =>
+          identity === undefined ? codexThreadIdResolver.resolveUngatedLegacy(pid) : codexThreadIdResolver.resolve(pid, identity),
       };
       const OVERSIGHT_SEAT = "watch-lead@oversight";
       const modelDivergenceMonitor = new ModelDivergenceMonitor({
