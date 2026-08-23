@@ -71,6 +71,38 @@ describe("installTopologyDefaults", () => {
     expect(res).toMatchObject({ none: true, installed: [], preserved: [], failed: [] });
   });
 
+  it("r2-B2: an ENUMERATION failure (listFiles throws) is NAMED and never thrown; other sections still install", () => {
+    // r2's discriminator: listFiles/listDirs sat outside the catch, so an
+    // EACCES on one section's directory escaped the best-effort contract and
+    // turned a COMMITTED materialize into materialize_error. The contract is
+    // total: no filesystem failure of any shape may throw out of the installer.
+    const { ops, files } = memFs({
+      [join(SPEC, "topology", "rig", "GOOD.md")]: "good",
+      [join(SPEC, "topology", "seats", "s1", "SEAT.md")]: "seat good",
+    });
+    const failingOps: TopologyDefaultsFsOps = {
+      ...ops,
+      listFiles: (d) => {
+        if (d === join(SPEC, "topology", "rig")) throw new Error("EACCES enumerate");
+        return ops.listFiles(d);
+      },
+    };
+    const res = installTopologyDefaults({ specDir: SPEC, rigName: "product-team", topologyRoot: ROOT, fsOps: failingOps });
+    expect(res.failed).toEqual([{ path: join(SPEC, "topology", "rig"), error: "EACCES enumerate" }]);
+    // The seats section still installed — one section's denial never starves the rest.
+    expect(files[join(ROOT, "rigs", "product-team", "seats", "s1", "SEAT.md")]).toBe("seat good");
+  });
+
+  it("r2-B2: a listDirs failure on seats/ is NAMED, not thrown", () => {
+    const { ops } = memFs({ [join(SPEC, "topology", "seats", "s1", "SEAT.md")]: "x" });
+    const failingOps: TopologyDefaultsFsOps = {
+      ...ops,
+      listDirs: () => { throw new Error("EIO seats"); },
+    };
+    const res = installTopologyDefaults({ specDir: SPEC, rigName: "r", topologyRoot: ROOT, fsOps: failingOps });
+    expect(res.failed).toEqual([{ path: join(SPEC, "topology", "seats"), error: "EIO seats" }]);
+  });
+
   it("a per-file failure is NAMED and never thrown; the remaining files still install", () => {
     const { ops, files } = memFs({
       [join(SPEC, "topology", "rig", "BROKEN.md")]: "x",

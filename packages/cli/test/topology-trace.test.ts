@@ -89,6 +89,37 @@ describe("traceTopologyChain", () => {
     expect(result.levels.map((l) => l.altitude)).toEqual(["instance", "rig"]);
   });
 
+  it("r2-B3: traversal in rig/seat/name is REJECTED before any filesystem read", () => {
+    // r2's discriminator: rig=../../outside, seat=../../../outside-seat,
+    // name=../../secret resolved every level OUTSIDE topology.root. Each of
+    // the three values must be a single safe path segment — no separators,
+    // no dot-segments, non-empty — validated before any read.
+    const reads: string[] = [];
+    const spyFs: TraceFs = { exists: (p) => { reads.push(p); return false; }, read: () => { throw new Error("no"); } };
+    const bad = [
+      { rig: "../../outside", seat: "s", name: "LEARNED.md" },
+      { rig: "r", seat: "../../../outside-seat", name: "LEARNED.md" },
+      { rig: "r", seat: "s", name: "../../secret" },
+      { rig: "r/nested", seat: "s", name: "LEARNED.md" },
+      { rig: "r", seat: "s\\evil", name: "LEARNED.md" },
+      { rig: ".", seat: "s", name: "LEARNED.md" },
+      { rig: "", seat: "s", name: "LEARNED.md" },
+    ];
+    for (const args of bad) {
+      expect(() => traceTopologyChain({ topologyRoot: ROOT, legacyRigsRoot: LEGACY, fs: spyFs, ...args }),
+        JSON.stringify(args)).toThrow(/invalid|segment/i);
+    }
+    expect(reads).toEqual([]); // rejection happens BEFORE any filesystem contact
+  });
+
+  it("r2-B3: ordinary dotted names stay valid (LEARNED.md, a.b.c.md, seat ids with dashes/underscores)", () => {
+    const result = traceTopologyChain({
+      topologyRoot: ROOT, name: "a.b.c.md", rig: "product-team", seat: "orch1_lead-2",
+      legacyRigsRoot: LEGACY, fs: fsOf({}),
+    });
+    expect(result.levels).toHaveLength(3);
+  });
+
   it("the instance altitude has NO legacy fallback (the legacy layout began at rigs/)", () => {
     const files = { [join(LEGACY, "..", "LEARNED.md")]: "should never be consulted" };
     const result = traceTopologyChain({

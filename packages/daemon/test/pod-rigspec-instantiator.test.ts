@@ -60,7 +60,7 @@ function makeRigSpec(overrides?: Partial<RigSpec>): RigSpec {
 }
 
 describe("PodRigInstantiator", () => {
-  function setup(fsFiles?: Record<string, string>, extraAdapters?: Record<string, RuntimeAdapter>) {
+  function setup(fsFiles?: Record<string, string>, extraAdapters?: Record<string, RuntimeAdapter>, topologyRootResolver?: () => string) {
     const db = createFullTestDb();
     const rigRepo = new RigRepository(db);
     const podRepo = new PodRepository(db);
@@ -78,6 +78,7 @@ describe("PodRigInstantiator", () => {
       db, rigRepo, podRepo, sessionRegistry, eventBus, nodeLauncher, startupOrchestrator: startupOrch,
       fsOps, adapters: { "claude-code": adapter, "codex": codexAdapter, "terminal": mockAdapter("terminal"), ...(extraAdapters ?? {}) },
       tmuxAdapter: tmux,
+      ...(topologyRootResolver ? { topologyRootResolver } : {}),
     });
 
     return { db, rigRepo, podRepo, sessionRegistry, eventBus, inst, adapter, codexAdapter, tmux };
@@ -1149,5 +1150,56 @@ state: 2-named
       expect(result.code).toBe("attention_required");
     }
     db.close();
+  });
+
+  // r2-B1 (slice-06 BLOCKING 1): the REAL rig-up door is instantiate(), not
+  // materializeValidatedSpec — the bootstrap apply path calls instantiate()
+  // (bootstrap-orchestrator.ts), so an installer wired only into materialize
+  // ships defaults on import/expand and NOT on `rig up`. This pin drives
+  // instantiate() with a REAL temp spec dir carrying topology/ defaults and
+  // asserts the files land under the resolved topology root on the REAL fs.
+  it("r2-B1: instantiate() — the rig-up door — installs the spec's topology defaults under topology.root", async () => {
+    const realFs = await import("node:fs");
+    const os = await import("node:os");
+    const nodePath = await import("node:path");
+    const specDir = realFs.mkdtempSync(nodePath.join(os.tmpdir(), "s06-spec-"));
+    const topoRoot = realFs.mkdtempSync(nodePath.join(os.tmpdir(), "s06-topo-"));
+    try {
+      realFs.mkdirSync(nodePath.join(specDir, "topology", "rig"), { recursive: true });
+      realFs.mkdirSync(nodePath.join(specDir, "topology", "instance"), { recursive: true });
+      realFs.writeFileSync(nodePath.join(specDir, "topology", "rig", "CRAFT.md"), "rig default", "utf-8");
+      realFs.writeFileSync(nodePath.join(specDir, "topology", "instance", "CRAFT.md"), "instance default", "utf-8");
+
+      const files = { [`${specDir}/agents/impl/agent.yaml`]: agentYaml("impl") };
+      const { db, inst } = setup(files, undefined, () => topoRoot);
+      const yaml = RigSpecCodec.serialize(makeRigSpec());
+      const result = await inst.instantiate(yaml, specDir);
+      expect(result.ok).toBe(true);
+      // The door proof: defaults exist on the REAL filesystem after rig-up.
+      expect(realFs.readFileSync(nodePath.join(topoRoot, "rigs", "test-rig", "CRAFT.md"), "utf-8")).toBe("rig default");
+      expect(realFs.readFileSync(nodePath.join(topoRoot, "CRAFT.md"), "utf-8")).toBe("instance default");
+      db.close();
+    } finally {
+      realFs.rmSync(specDir, { recursive: true, force: true });
+      realFs.rmSync(topoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("r2-B1 control: without a topologyRootResolver, instantiate() installs nothing and still succeeds", async () => {
+    const realFs = await import("node:fs");
+    const os = await import("node:os");
+    const nodePath = await import("node:path");
+    const specDir = realFs.mkdtempSync(nodePath.join(os.tmpdir(), "s06-spec-"));
+    try {
+      realFs.mkdirSync(nodePath.join(specDir, "topology", "rig"), { recursive: true });
+      realFs.writeFileSync(nodePath.join(specDir, "topology", "rig", "CRAFT.md"), "x", "utf-8");
+      const files = { [`${specDir}/agents/impl/agent.yaml`]: agentYaml("impl") };
+      const { db, inst } = setup(files);
+      const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), specDir);
+      expect(result.ok).toBe(true);
+      db.close();
+    } finally {
+      realFs.rmSync(specDir, { recursive: true, force: true });
+    }
   });
 });
