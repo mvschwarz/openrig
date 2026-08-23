@@ -179,6 +179,9 @@ describe("modelsMatch — pin canonicalized through the ONE shipped map, then EX
     const advisory = await import("../src/domain/spec-validation-advisory.js");
     expect(advisory.CANONICAL_MODEL_PINS.fable).toBe("claude-fable-5");
     expect(modelsMatch("fable", advisory.CANONICAL_MODEL_PINS.fable)).toBe(true); // same data drives both
+    // r2 BLOCKING-1 structural half: the map must stay null-prototype so arbitrary string pins
+    // can never read inherited Object members (behavioral pins cover both consumers).
+    expect(Object.getPrototypeOf(advisory.CANONICAL_MODEL_PINS)).toBeNull();
   });
 
   it("OPR.0.5.3.3: model-pin-canonicalization capability stays REGISTERED (spec advisory contract)", () => {
