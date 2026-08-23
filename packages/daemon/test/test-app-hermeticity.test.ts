@@ -52,4 +52,18 @@ describe("test-app hermeticity — no real runtime binaries from the harness its
     expect(app).toBeDefined();
     expect(execFileCalls).toEqual([]);
   });
+
+  it("MECHANISM PIN (r1 Finding 1): constructing the PRODUCTION observer itself execs nothing — a restored eager warm goes RED here", async () => {
+    // r1's three-way discriminator proved the pin above passes with EITHER fix
+    // mechanism alone: reverting the constructor's eager cache-warm (the change
+    // that killed ~92 of the 162 launches/suite) would stay green behind the
+    // createTestApp null-observer belt. This test pins the root-cause change
+    // directly: the observer's only child_process use is
+    // execFile("claude", ["--help"]) in the mode-cache loader, so a zero here
+    // is the mechanism, not a neighbour.
+    const { PermissionDriftObserver } = await import("../src/domain/permission-drift-observer.js");
+    const observer = new PermissionDriftObserver({ db });
+    expect(observer).toBeDefined();
+    expect(execFileCalls).toEqual([]);
+  });
 });
