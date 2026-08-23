@@ -306,28 +306,38 @@ export class ResumeMetadataRefresher {
 // property that the pre-B12 sync implementation violated.
 export async function defaultListProcesses(): Promise<Array<{ pid: number; ppid: number; command: string }>> {
   try {
-    const output = await runAsyncSite("resume_metadata.list_processes", async () => {
-      const { stdout } = await execFileAsync("ps", ["-Ao", "pid,ppid,command"], { encoding: "utf-8", maxBuffer: 8 * 1024 * 1024 });
-      return stdout;
-    });
-    return output
-      .split("\n")
-      .slice(1)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => {
-        const match = line.match(/^(\d+)\s+(\d+)\s+(.*)$/);
-        if (!match) return null;
-        return {
-          pid: Number(match[1]),
-          ppid: Number(match[2]),
-          command: match[3] ?? "",
-        };
-      })
-      .filter((row): row is { pid: number; ppid: number; command: string } => row !== null);
+    return await defaultListProcessesStrict();
   } catch {
     return [];
   }
+}
+
+/** OPR.0.5.3.10 r2-B2 — the STRICT production lister: a failed `ps` spawn
+ *  REJECTS instead of degrading to []. This is the census's default —
+ *  through the lenient variant above, an enumeration failure became a CACHED
+ *  empty SUCCESS for the whole freshness window (r2's discriminator: 0 rows
+ *  cached while 520 were live). The lenient variant keeps its contract for
+ *  the direct per-call consumers that want best-effort. */
+export async function defaultListProcessesStrict(): Promise<Array<{ pid: number; ppid: number; command: string }>> {
+  const output = await runAsyncSite("resume_metadata.list_processes", async () => {
+    const { stdout } = await execFileAsync("ps", ["-Ao", "pid,ppid,command"], { encoding: "utf-8", maxBuffer: 8 * 1024 * 1024 });
+    return stdout;
+  });
+  return output
+    .split("\n")
+    .slice(1)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const match = line.match(/^(\d+)\s+(\d+)\s+(.*)$/);
+      if (!match) return null;
+      return {
+        pid: Number(match[1]),
+        ppid: Number(match[2]),
+        command: match[3] ?? "",
+      };
+    })
+    .filter((row): row is { pid: number; ppid: number; command: string } => row !== null);
 }
 
 function findCodexDescendantPids(

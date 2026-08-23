@@ -71,6 +71,9 @@ export class ProcessCensus {
 }
 
 async function defaultCensusList(): Promise<ProcessRow[]> {
-  const { defaultListProcesses } = await import("./resume-metadata-refresher.js");
-  return defaultListProcesses();
+  // r2-B2: the STRICT lister — a failed `ps` must REJECT here so the census's
+  // honest-failure path is reachable in production (the lenient variant's []
+  // would have been cached as an empty SUCCESS for the freshness window).
+  const { defaultListProcessesStrict } = await import("./resume-metadata-refresher.js");
+  return defaultListProcessesStrict();
 }

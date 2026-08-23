@@ -58,11 +58,13 @@ export function readCodexThreadIdFromCandidateHomes(
  */
 export class CodexThreadIdResolver {
   /** Bounded pid→home cache of SUCCESSFUL resolutions — INCLUDING the default
-   *  home (explicit decision: a pid's HOME cannot change for the life of the
-   *  process, so a stable default-home pid with no thread log must not re-run
-   *  `ps eww` every poll; pid-reuse staleness is bounded by the cache size and
-   *  accepted for both cases alike). */
-  private readonly homeByPid = new Map<number, string>();
+   *  home (a stable default-home pid with no thread log must not re-run
+   *  `ps eww` every poll). Entries carry a timestamp and EXPIRE after
+   *  homeTtlMs (r2-B1 / r1 BLOCKING-1: a pid can be REUSED by a new process
+   *  with a different HOME — an unexpiring cache served the retired
+   *  occupant's thread id indefinitely, which is exactly a wrong resume
+   *  token). Staleness is now bounded by the TTL, not just the entry count. */
+  private readonly homeByPid = new Map<number, { home: string; at: number }>();
   /** Per-pid in-flight home resolution — concurrent resolves for the same pid
    *  coalesce onto ONE subprocess; a failure rejects all waiters and caches
    *  nothing. */
@@ -75,22 +77,34 @@ export class CodexThreadIdResolver {
       readFromLogs?: (pid: number, homeDir: string) => string | undefined;
       /** Bounded cache size; oldest-inserted evicts first. Default 256. */
       maxCachedPids?: number;
+      /** Freshness bound per cache entry — past it the pid re-probes. Default
+       *  60s: dedupes the per-poll `ps eww` churn while bounding pid-reuse
+       *  staleness to a minute. */
+      homeTtlMs?: number;
+      /** Injectable clock (tests). */
+      now?: () => number;
     } = {},
   ) {}
 
   async resolve(pid: number): Promise<string | undefined> {
     const readFromLogs = this.opts.readFromLogs ?? ((p: number, home: string) => readCodexThreadIdFromLogs(p, home));
     const defaultHome = this.opts.defaultHome ?? safeUserHomeDir() ?? os.homedir();
+    const now = this.opts.now ?? Date.now;
+    const ttl = this.opts.homeTtlMs ?? 60_000;
 
     // 1. Default home: no subprocess.
     const fromDefault = readFromLogs(pid, defaultHome);
     if (fromDefault) return fromDefault;
 
-    // 2. Cached home for this pid: no subprocess. A cached DEFAULT means the
-    //    subprocess already answered "default" once — step 1 covered it; done.
+    // 2. FRESH cached home for this pid: no subprocess. A cached DEFAULT means
+    //    the subprocess already answered "default" once — step 1 covered it.
+    //    An EXPIRED entry is dropped and the pid re-probes (r2-B1).
     const cached = this.homeByPid.get(pid);
     if (cached) {
-      return cached === defaultHome ? undefined : readFromLogs(pid, cached);
+      if (now() - cached.at <= ttl) {
+        return cached.home === defaultHome ? undefined : readFromLogs(pid, cached.home);
+      }
+      this.homeByPid.delete(pid);
     }
 
     // 3. Subprocess resolution, pid-coalesced: concurrent callers share one probe.
@@ -123,7 +137,7 @@ export class CodexThreadIdResolver {
       const oldest = this.homeByPid.keys().next().value;
       if (oldest !== undefined) this.homeByPid.delete(oldest);
     }
-    this.homeByPid.set(pid, home);
+    this.homeByPid.set(pid, { home, at: (this.opts.now ?? Date.now)() });
   }
 }
 
