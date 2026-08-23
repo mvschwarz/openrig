@@ -166,6 +166,50 @@ describe("OPR.0.5.3.10 — one census per cycle", () => {
     expect(resolveHome).toHaveBeenCalledTimes(1);
   });
 
+  it("r2-B1: the pid-home cache EXPIRES — a reused PID with a new HOME re-probes after the TTL and returns the NEW thread", async () => {
+    // r2's discriminator: without freshness, a size-bounded cache serves a
+    // RETIRED occupant's thread id for a reused pid indefinitely on a quiet
+    // daemon. TTL bounds that staleness; coalescing and the size bound stay.
+    let t = 0;
+    let liveHome = "/home/old";
+    const resolveHome = vi.fn(async () => liveHome);
+    const resolver = new CodexThreadIdResolver({
+      defaultHome: "/home/me",
+      resolveHomeDirByPid: resolveHome as never,
+      readFromLogs: (_pid, home) => (home === "/home/old" ? "old-thread" : home === "/home/new" ? "new-thread" : undefined),
+      homeTtlMs: 60_000,
+      now: () => t,
+    });
+    expect(await resolver.resolve(4242)).toBe("old-thread");
+    // The pid is reused by a NEW process with a different HOME.
+    liveHome = "/home/new";
+    t = 30_000; // inside the TTL: cache serves (bounded staleness, accepted)
+    expect(await resolver.resolve(4242)).toBe("old-thread");
+    expect(resolveHome).toHaveBeenCalledTimes(1);
+    t = 60_001; // past the TTL: re-probe, new answer
+    expect(await resolver.resolve(4242)).toBe("new-thread");
+    expect(resolveHome).toHaveBeenCalledTimes(2);
+  });
+
+  it("r2-B2: the census's PRODUCTION lister REJECTS on enumeration failure — a failed ps is never cached as an empty success", async () => {
+    // r2's discriminator: defaultListProcesses swallows a spawn failure into []
+    // — through the census that empty array became a CACHED SUCCESS for the
+    // whole freshness window. The census's production seam must reject instead.
+    const { defaultListProcessesStrict } = await import("../src/domain/resume-metadata-refresher.js");
+    const savedPath = process.env.PATH;
+    try {
+      process.env.PATH = "/nonexistent-bin";
+      await expect(defaultListProcessesStrict()).rejects.toThrow();
+    } finally {
+      process.env.PATH = savedPath;
+    }
+    const rows = await defaultListProcessesStrict();
+    expect(rows.length).toBeGreaterThan(0);
+    // And the census default is wired to the STRICT lister, not the lenient one.
+    const censusSrc = await import("node:fs").then((f) => f.readFileSync("src/domain/process-census.ts", "utf-8"));
+    expect(censusSrc).toContain("defaultListProcessesStrict");
+  });
+
   it("mini-req 4 guard: the adoption-boundary capture keeps its retry loop (attempts default is unchanged off the snapshot path)", async () => {
     const db = createFullTestDb();
     const sessionRegistry = new SessionRegistry(db);
