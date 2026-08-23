@@ -20,7 +20,7 @@
 // gateway contract lands — no shadow path. Every channel's delivery OUTCOME is recorded on the
 // proclamation event; an unreachable channel is a named failure/deferral, never a silence.
 
-import { SPEC_VALIDATION_CAPABILITIES } from "../rigspec-schema.js";
+import { CANONICAL_MODEL_PINS } from "../spec-validation-advisory.js";
 
 export interface PinnedSeat {
   nodeId: string;
@@ -234,36 +234,24 @@ export class ModelDivergenceMonitor {
   }
 }
 
-/** Pin comparison: EXACT, case-insensitive, after trimming. This ruling has now traveled the full
- *  arc and lands where it started, with the reasons on record: exact was ruled at build; this seat
- *  reversed it to whole-token alias matching when the live census showed alias pins ("fable") vs
- *  full effective ids ("claude-fable-5"); r2 REVERSED IT BACK — generic token containment lets one
- *  pin bless multiple distinct models ("codex" matched gpt-5.6-codex AND gpt-5.1-codex-mini), and
- *  the ruled remedy is DATA-side: canonicalize the fleet's three alias pins at the spec layer
- *  (orch's lane, in-wave). TRANSITION HAZARD, named loudly: until pins read canonical, an
- *  alias-pinned claude seat compares "fable" vs "claude-fable-5" and PROCLAIMS — the detector's
- *  claude leg must not roll ahead of pin canonicalization. If a transition tolerance is ever
- *  needed, it is an explicit provider-aware mapping with an expiry, never token containment. */
+/** Pin comparison: canonicalize the PIN through the one shipped alias map, then EXACT,
+ *  case-insensitive, after trimming (f7dfca0c, founder-steered). History on record: exact was
+ *  ruled at build; a seat reversed it to whole-token alias matching; r2 reversed THAT back
+ *  because generic token containment lets one pin bless multiple distinct models ("codex"
+ *  matched gpt-5.6-codex AND gpt-5.1-codex-mini). The landed remedy is the explicit
+ *  provider-aware mapping r2's ruling allowed for: CANONICAL_MODEL_PINS
+ *  (spec-validation-advisory.ts) is the SINGLE mapping home — spec validation nudges pins
+ *  toward canonical ids with it, and this detector canonicalizes the pinned string through the
+ *  same data before comparing. Never add a second map here, and never token containment: an
+ *  unknown alias or a fallback model canonicalizes to itself and still diverges. Raw
+ *  pinned/effective strings travel untouched in any proclamation. */
 export function modelsMatch(pinned: string, effective: string): boolean {
   const pin = pinned.trim().toLowerCase();
   const eff = effective.trim().toLowerCase();
-  if (pin === eff) return true;
-  // The bridge is DEAD CODE the moment the 5.3 advisory registers its capability — runtime-gated
-  // on the behavioral sentinel, not on anyone remembering a comment (r2 round-4 HIGH-2).
-  if (SPEC_VALIDATION_CAPABILITIES.has("model-pin-canonicalization")) return false;
-  return CLAUDE_ALIAS_MIGRATION_BRIDGE[pin] === eff;
+  const canonicalPin = (CANONICAL_MODEL_PINS[pin] ?? pin).toLowerCase();
+  return canonicalPin === eff;
 }
-
-/** MIGRATION BRIDGE (r2 addendum, desk-ruled 05:03Z) — provider-specific, ONE measured pair, with
- *  a BEHAVIORAL executable expiry (r2 round-4: a filename tripwire is not a coupling — the
- *  advisory can land inside an existing validator file):
- *  - condition 2 (dormancy): fires only while a nodes.model row still carries the alias pin.
- *  - condition 1 (removal): gated at RUNTIME on rigspec-schema's SPEC_VALIDATION_CAPABILITIES —
- *    when the 5.3 advisory registers "model-pin-canonicalization" there (its registry contract),
- *    modelsMatch stops consulting this map in code, and the pin test goes RED until the constant
- *    is deleted. The registry's own doc-comment carries the 5.3 obligation. */
-// EXPIRED at OPR.0.5.3.3: the spec-validation advisory registered "model-pin-canonicalization" in
-// SPEC_VALIDATION_CAPABILITIES, so modelsMatch's sentinel gate now returns false before consulting
-// this map — pins must be exact/canonical, no alias tolerance. Emptied per the migration-bridge
-// deletion contract (the map is now the completed, no-tolerance state).
-export const CLAUDE_ALIAS_MIGRATION_BRIDGE: Record<string, string> = {};
+// (The self-expiring CLAUDE_ALIAS_MIGRATION_BRIDGE and its SPEC_VALIDATION_CAPABILITIES sentinel
+// gate completed their arc and are DELETED per the bridge's own deletion contract: the 5.3
+// advisory landed, the bridge emptied, and f7dfca0c replaced the no-tolerance state with
+// canonicalization through the advisory's shipped map.)

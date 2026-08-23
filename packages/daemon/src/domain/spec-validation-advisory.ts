@@ -1,16 +1,19 @@
 // OPR.0.5.3.3 — spec-validation advisory: alias-form model pins.
 //
-// The model-divergence detector requires exact/canonical model pins (the alias-tolerance bridge
-// expired at 5.3 — see SPEC_VALIDATION_CAPABILITIES in rigspec-schema + modelsMatch). This advisory
-// warns, at `rig spec validate` time, when a spec pins an ALIAS form and names the canonical id.
+// CANONICAL_MODEL_PINS below is the SINGLE alias mapping home (f7dfca0c): this advisory nudges
+// spec authors toward canonical ids at `rig spec validate` time, and the model-divergence
+// detector canonicalizes the PINNED string through the same map before comparing (modelsMatch),
+// so a known alias pin running exactly its canonical model no longer proclaims a false
+// divergence. Do not grow a second mapping anywhere else.
 //
-// It is an ADVISORY, never an error (FAIL-OPEN): an alias pin a human already wrote still validates,
-// but the operator is nudged toward the canonical id before the detector proclaims a false
-// divergence at runtime. This module's FILENAME is also the behavioral marker the migration-bridge
-// deletion contract keys on (model-divergence-monitor.test.ts): once it exists, the bridge is empty.
+// It is an ADVISORY, never an error (FAIL-OPEN): an alias pin a human already wrote still
+// validates, and the nudge stands — canonical pins keep specs exact at the source. (The
+// migration-bridge deletion contract this module's filename once triggered is completed: the
+// bridge is deleted from model-divergence-monitor.ts.)
 
-/** Measured alias -> canonical model-id map (keys lower-cased). Mirrors the now-expired migration
- *  bridge's one measured pair; extend as further alias forms are measured. */
+/** Measured alias -> canonical model-id map (keys lower-cased, values canonical ids). The ONE
+ *  mapping home for both spec validation and the runtime detector; extend only as further alias
+ *  forms are measured. */
 export const CANONICAL_MODEL_PINS: Record<string, string> = {
   fable: "claude-fable-5",
 };
@@ -24,5 +27,6 @@ export function aliasModelPinAdvisory(pin: unknown, where: string): string | nul
   const canonical = CANONICAL_MODEL_PINS[pin.trim().toLowerCase()];
   if (!canonical) return null;
   return `${where}: model pin "${pin}" is an alias form — pin the canonical id "${canonical}" ` +
-    `(5.3 requires exact/canonical pins; the model-divergence detector no longer tolerates aliases).`;
+    `(5.3 prefers canonical pins at the source; the runtime detector canonicalizes known aliases ` +
+    `through this same map, but an unmeasured alias still proclaims divergence).`;
 }

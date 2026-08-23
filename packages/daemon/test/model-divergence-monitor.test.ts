@@ -8,7 +8,6 @@ import {
   ModelDivergenceMonitor,
   SLACK_DEFERRAL_LINE,
   PENDING_VISIBILITY_POLLS,
-  CLAUDE_ALIAS_MIGRATION_BRIDGE,
   modelsMatch,
   formatProclamation,
   type PinnedSeat,
@@ -164,47 +163,25 @@ describe("ModelDivergenceMonitor — the cause-agnostic comparison", () => {
   });
 });
 
-describe("modelsMatch — EXACT, plus the narrow self-expiring fable migration bridge (r2 addendum)", () => {
+describe("modelsMatch — pin canonicalized through the ONE shipped map, then EXACT (f7dfca0c)", () => {
   it("exact ids match case-insensitively", () => {
     expect(modelsMatch("gpt-5.6-luna", " GPT-5.6-Luna ")).toBe(true);
     expect(modelsMatch("claude-fable-5", "claude-fable-5")).toBe(true);
   });
 
-  it("EXECUTABLE EXPIRY TRIPWIRE: the bridge dies with the 5.3 spec-validation advisory", async () => {
-    // The desk ruled the bridge expires at the 5.3 spec-validation advisory. This test is the
-    // mechanical half: when any *spec-validation-advisory* module exists under src, the bridge
-    // must be EMPTY — landing the advisory turns this suite red until the bridge is deleted.
-    const { readdirSync } = await import("node:fs");
-    const { join } = await import("node:path");
-    const { fileURLToPath } = await import("node:url");
-    const srcRoot = fileURLToPath(new URL("../src", import.meta.url));
-    const hits: string[] = [];
-    const walk = (dir: string) => {
-      for (const e of readdirSync(dir, { withFileTypes: true })) {
-        const p = join(dir, e.name);
-        if (e.isDirectory()) walk(p);
-        else if (e.name.includes("spec-validation-advisory")) hits.push(p);
-      }
-    };
-    walk(srcRoot);
-    if (hits.length > 0) {
-      expect(Object.keys(CLAUDE_ALIAS_MIGRATION_BRIDGE), `5.3 advisory landed (${hits[0]}) — delete the migration bridge`).toHaveLength(0);
-    } else {
-      expect(CLAUDE_ALIAS_MIGRATION_BRIDGE).toEqual({ fable: "claude-fable-5" }); // the one measured pair, pre-advisory
-    }
+  it("SINGLE MAPPING HOME: the deleted migration bridge stays deleted; the monitor consults the advisory's map", async () => {
+    // The bridge's own deletion contract completed at f7dfca0c. The monitor module must export
+    // NO alias map of its own — CANONICAL_MODEL_PINS in spec-validation-advisory.ts is the one
+    // mapping home for spec validation AND the runtime detector. A resurrected local map is the
+    // two-registries failure mode; reviewers key on this pin.
+    const monitorMod = await import("../src/domain/model-divergence/model-divergence-monitor.js");
+    expect("CLAUDE_ALIAS_MIGRATION_BRIDGE" in monitorMod).toBe(false);
+    const advisory = await import("../src/domain/spec-validation-advisory.js");
+    expect(advisory.CANONICAL_MODEL_PINS.fable).toBe("claude-fable-5");
+    expect(modelsMatch("fable", advisory.CANONICAL_MODEL_PINS.fable)).toBe(true); // same data drives both
   });
 
-  it("OPR.0.5.3.3: the alias bridge is EXPIRED — even the one measured pair no longer matches", () => {
-    // Registration of "model-pin-canonicalization" fired the sentinel gate in modelsMatch, so the
-    // fable->claude-fable-5 tolerance is gone. RED-without/GREEN-with: on main (unregistered) the
-    // first assertion was `true`; registering the capability flips it to `false`.
-    expect(modelsMatch("fable", "claude-fable-5")).toBe(false); // bridge expired
-    expect(modelsMatch("fable", "claude-fable-6")).toBe(false);
-    expect(modelsMatch("opus", "claude-opus-5")).toBe(false);
-    expect(modelsMatch("claude-fable-5", "claude-fable-5")).toBe(true); // exact still matches
-  });
-
-  it("OPR.0.5.3.3: model-pin-canonicalization is REGISTERED (the sentinel the bridge observes)", () => {
+  it("OPR.0.5.3.3: model-pin-canonicalization capability stays REGISTERED (spec advisory contract)", () => {
     expect(SPEC_VALIDATION_CAPABILITIES.has("model-pin-canonicalization")).toBe(true);
   });
 
