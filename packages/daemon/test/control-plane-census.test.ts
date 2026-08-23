@@ -191,6 +191,39 @@ describe("OPR.0.5.3.10 — one census per cycle", () => {
     expect(resolveHome).toHaveBeenCalledTimes(2);
   });
 
+  it("r1 remedy: PROCESS IDENTITY invalidates a reused PID immediately — no TTL wait, no extra subprocess", async () => {
+    // orch-lead's freeze-boundary ruling: TTL alone still serves another
+    // occupant's thread inside the window. The census rows already carry the
+    // process's start time; threading it as an identity key makes reuse
+    // invalidate at the very next resolve.
+    let liveHome = "/home/old";
+    const resolveHome = vi.fn(async () => liveHome);
+    const resolver = new CodexThreadIdResolver({
+      defaultHome: "/home/me",
+      resolveHomeDirByPid: resolveHome as never,
+      readFromLogs: (_pid, home) => (home === "/home/old" ? "old-thread" : home === "/home/new" ? "new-thread" : undefined),
+      homeTtlMs: 60_000,
+      now: () => 0, // clock frozen INSIDE the TTL — only identity can invalidate
+    });
+    expect(await resolver.resolve(4242, "Sun Aug 23 10:00:00 2026")).toBe("old-thread");
+    expect(await resolver.resolve(4242, "Sun Aug 23 10:00:00 2026")).toBe("old-thread");
+    expect(resolveHome).toHaveBeenCalledTimes(1); // same identity: cached
+    // The pid is REUSED: same number, different start time, different HOME.
+    liveHome = "/home/new";
+    expect(await resolver.resolve(4242, "Sun Aug 23 18:30:00 2026")).toBe("new-thread");
+    expect(resolveHome).toHaveBeenCalledTimes(2); // identity mismatch: immediate re-probe
+  });
+
+  it("r1 remedy: the strict census rows CARRY the start-time identity the resolver needs", async () => {
+    const { defaultListProcessesStrict } = await import("../src/domain/resume-metadata-refresher.js");
+    const rows = await defaultListProcessesStrict();
+    expect(rows.length).toBeGreaterThan(0);
+    const withStart = rows.filter((r) => typeof (r as { startedAt?: string }).startedAt === "string" && (r as { startedAt?: string }).startedAt!.length > 0);
+    // Every row carries a parseable start time, and commands survive the extra column.
+    expect(withStart.length).toBe(rows.length);
+    expect(rows.some((r) => r.command.length > 0)).toBe(true);
+  });
+
   it("r2-B2: the census's PRODUCTION lister REJECTS on enumeration failure — a failed ps is never cached as an empty success", async () => {
     // r2's discriminator: defaultListProcesses swallows a spawn failure into []
     // — through the census that empty array became a CACHED SUCCESS for the
