@@ -20,6 +20,49 @@ export interface ContextPackManifestFile {
   summary?: string;
 }
 
+// OPR.0.5.3.5 mini-req 1 — the founder taxonomy and world anatomy the atom
+// schema speaks (SPEC.md design context; intake DESIGN-INTAKE-ATOM-SCHEMA).
+export const ATOM_TAXONOMIES = ["world", "lore", "skills", "mission"] as const;
+export const ATOM_REGIONS = ["identity", "ontology", "terrain", "actors", "laws", "history", "state", "affordances"] as const;
+export const ATOM_SITUATIONS = ["fresh", "handover", "post-compaction"] as const;
+export const ATOM_PURPOSES = ["depth", "width"] as const;
+export const ATOM_RUNTIMES = ["claude", "codex", "any"] as const;
+export const ATOM_PRIORITIES = ["core", "recommended", "optional"] as const;
+
+/** An install ATOM (OPR.0.5.3.5 mini-req 1): an ADDRESS plus composition
+ *  metadata, never a new file — fresh/handover/post-compaction all compose
+ *  addresses into the same bytes, so there is no second copy to drift
+ *  (mini-req 5 by construction). Token counts are DERIVED at compose time,
+ *  never stored here (volatility x consequence rule). */
+export interface ContextPackAtom {
+  /** Stable slug — the join key for order/requires/probes. */
+  id: string;
+  /** `file` or `file#H2-slug/H3-slug` (the Atom-1 grammar); the file must be
+   *  one of the manifest's declared files, and a header path requires a
+   *  markdown file. */
+  address: string;
+  taxonomy: (typeof ATOM_TAXONOMIES)[number];
+  /** World-anatomy tags — enables compose-by-region (the measured
+   *  post-compaction need was width: affordances + terrain). */
+  regions?: Array<(typeof ATOM_REGIONS)[number]>;
+  /** The composition algebra's selector; never empty. */
+  situations: Array<(typeof ATOM_SITUATIONS)[number]>;
+  purpose: (typeof ATOM_PURPOSES)[number];
+  /** Mini-req 3: never assume identical compaction loss. Default "any". */
+  runtime: (typeof ATOM_RUNTIMES)[number];
+  /** Position within the base walk — absorption depends on sequence. */
+  order: number;
+  /** Dependency edges; a subset profile must close over them. Declared ids
+   *  only, no self-reference, no cycles. */
+  requires?: string[];
+  /** What drops FIRST when a token budget binds (mini-req 9). */
+  priority: (typeof ATOM_PRIORITIES)[number];
+  /** Mini-req 2: acceptance is CHANGED BEHAVIOR — a natural prompt plus the
+   *  expected observable behavior (the one-harness shape shared with
+   *  slice-07's selection evals). */
+  probe?: { prompt: string; expect: string };
+}
+
 export interface ContextPackManifest {
   name: string;
   version: string;
@@ -29,6 +72,8 @@ export interface ContextPackManifest {
    *  estimate is available); the library service computes a derived
    *  `derivedEstimatedTokens` from actual file sizes for display. */
   estimatedTokens?: number;
+  /** OPR.0.5.3.5 mini-req 1 — install atoms with composition metadata. */
+  atoms?: ContextPackAtom[];
 }
 
 export type ContextPackSourceType = "builtin" | "user_file" | "workspace";
