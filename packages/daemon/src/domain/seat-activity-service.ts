@@ -41,6 +41,10 @@ export class SeatActivityService {
   private readonly eventBus: EventBus | null;
   private readonly now: () => Date;
   private readonly latestByPaneId = new Map<string, SeatActivity>();
+  // Single-flight guard: one whole-fleet window-activity sweep at a time, mirroring
+  // seat-structural-activity-service (MUST-FIX 2). A slowed tmux can never accumulate
+  // overlapping whole-fleet sweeps — at most one sweep's worth is ever in flight.
+  private sweeping = false;
 
   constructor(deps: SeatActivityServiceDeps) {
     this.tmux = deps.tmux;
@@ -116,28 +120,38 @@ export class SeatActivityService {
    * can also invoke directly for tests or one-shot refresh.
    */
   async pollAllRunningTmuxSeats(db: Database.Database): Promise<void> {
-    const rows = db.prepare(`
-      SELECT s.session_name as session_name
-      FROM nodes n
-      JOIN sessions s ON s.node_id = n.id
-        AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
-      LEFT JOIN bindings b ON b.node_id = n.id
-      WHERE s.status = 'running'
-        AND s.session_name IS NOT NULL
-        AND COALESCE(b.attachment_type, 'tmux') = 'tmux'
-    `).all() as Array<{ session_name: string }>;
+    // SINGLE-FLIGHT and HELD until the reads settle: a new sweep never starts while one is in flight,
+    // so a slowed/stuck tmux can never accumulate overlapping whole-fleet window-activity sweeps — at
+    // most one sweep's worth is ever in flight. This suppresses OVERLAP only; a non-overlapping tick
+    // runs unchanged, so cadence and activity-freshness semantics are untouched.
+    if (this.sweeping) return;
+    this.sweeping = true;
+    try {
+      const rows = db.prepare(`
+        SELECT s.session_name as session_name
+        FROM nodes n
+        JOIN sessions s ON s.node_id = n.id
+          AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
+        LEFT JOIN bindings b ON b.node_id = n.id
+        WHERE s.status = 'running'
+          AND s.session_name IS NOT NULL
+          AND COALESCE(b.attachment_type, 'tmux') = 'tmux'
+      `).all() as Array<{ session_name: string }>;
 
-    // Drop observations for seats that are no longer running (release
-    // memory + avoid stale reads from `getSeatActivity`).
-    const live = new Set(rows.map((r) => r.session_name));
-    for (const pane of Array.from(this.latestByPaneId.keys())) {
-      if (!live.has(pane)) this.latestByPaneId.delete(pane);
+      // Drop observations for seats that are no longer running (release
+      // memory + avoid stale reads from `getSeatActivity`).
+      const live = new Set(rows.map((r) => r.session_name));
+      for (const pane of Array.from(this.latestByPaneId.keys())) {
+        if (!live.has(pane)) this.latestByPaneId.delete(pane);
+      }
+
+      // Best-effort: a single seat's failure does not crash the loop.
+      await Promise.all(rows.map(async (r) => {
+        try { await this.pollSeat(r.session_name); } catch { /* swallow */ }
+      }));
+    } finally {
+      this.sweeping = false;
     }
-
-    // Best-effort: a single seat's failure does not crash the loop.
-    await Promise.all(rows.map(async (r) => {
-      try { await this.pollSeat(r.session_name); } catch { /* swallow */ }
-    }));
   }
 
   private timer: ReturnType<typeof setInterval> | null = null;
