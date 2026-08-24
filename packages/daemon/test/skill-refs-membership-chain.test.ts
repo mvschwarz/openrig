@@ -32,7 +32,10 @@ const LAYOUT = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "skill-edge-la
 // next founder mirror closes, NOT the silent 864cea6b category-drop (leg 2 catches that). The guard
 // test below keeps this set MINIMAL and self-policing: every entry MUST be ship-set + digest-tracked
 // + absent from repo disk — so a genuinely-forgotten stranding can never hide behind it.
-const EXTERNAL_CANON_PENDING = new Set(["oversight-team", "retiring-and-inheriting-a-seat"]);
+// Currently empty: oversight-team and retiring-and-inheriting-a-seat landed via the 2026-08-24
+// mirror-apply, so their exemptions self-destructed (the minimality checks below fail any entry
+// that is actually on disk).
+const EXTERNAL_CANON_PENDING = new Set<string>([]);
 
 type Membership = Record<string, unknown>;
 type AgentSkill = { id: string; path: string };

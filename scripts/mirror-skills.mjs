@@ -203,12 +203,15 @@ export async function stagePublicSkills({
 // LOUD (a future accidental deletion is never silently blessed), and a name that reappears on disk is
 // flagged `external-canon-allowlist-stale` so this list self-destructs. Same self-policing shape as the
 // P6(A) chain gate. Layout = authority, disk = reality; the digest regen touches only reality.
-const EXTERNAL_CANON_PENDING = new Set(["oversight-team", "retiring-and-inheriting-a-seat"]);
+// (Currently empty: oversight-team and retiring-and-inheriting-a-seat landed via the 2026-08-24
+// mirror-apply, so their exemptions self-destructed.)
+const EXTERNAL_CANON_PENDING = new Set([]);
 
 export async function checkGeneratedEdges({
   repoRoot = process.cwd(),
   layout,
   digests,
+  externalCanonPending = EXTERNAL_CANON_PENDING,
 }) {
   validateGeneratedControls(layout, digests);
   const changes = [];
@@ -277,7 +280,7 @@ export async function checkGeneratedEdges({
       if (expectedEntry.edges.includes(edge) && !actualSkills.has(skill)) {
         // Tolerate ONLY the named external-canon-pending skills; every other layout-demanded file
         // missing from disk stays loud.
-        if (EXTERNAL_CANON_PENDING.has(skill)) continue;
+        if (externalCanonPending.has(skill)) continue;
         changes.push({
           edge,
           path: skill,
@@ -290,7 +293,7 @@ export async function checkGeneratedEdges({
   // Self-destruct guard: a name reappearing on disk must leave the allowlist. If an external-canon-pending
   // skill is now present, its exemption is stale — flag it LOUD so the list can never silently outlive
   // the gap it covered.
-  for (const skill of EXTERNAL_CANON_PENDING) {
+  for (const skill of externalCanonPending) {
     if (onDiskSkills.has(skill)) {
       changes.push({ edge: "-", path: skill, reason: "external-canon-allowlist-stale" });
     }

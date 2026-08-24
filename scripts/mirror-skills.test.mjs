@@ -741,7 +741,17 @@ test("checkGeneratedEdges — external-canon-pending allowlist: named-missing to
       },
     };
 
-    const res = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests });
+    // The mechanism is pinned via an injected set: the PRODUCTION default is now EMPTY
+    // (oversight-team and retiring-and-inheriting-a-seat landed 2026-08-24; exemptions
+    // self-destructed), so under the default EVERY layout-demanded missing skill is loud.
+    const defaultRes = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests });
+    assert.ok(
+      defaultRes.changes.some((c) => c.path === "oversight-team" && c.reason === "layout-missing"),
+      "production default allowlist is EMPTY — a missing skill is loud, nothing is tolerated",
+    );
+
+    const pending = new Set(["oversight-team"]);
+    const res = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests, externalCanonPending: pending });
     const tag = (c) => `${c.path}:${c.reason}`;
     assert.ok(
       !res.changes.some((c) => c.path === "oversight-team" && c.reason === "layout-missing"),
@@ -758,7 +768,7 @@ test("checkGeneratedEdges — external-canon-pending allowlist: named-missing to
 
     // Self-destruct: when the allowlisted skill REAPPEARS on disk, its exemption is flagged stale.
     write(join(root, specPath, "pods", "oversight-team", "SKILL.md"), "# Oversight\n");
-    const res2 = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests });
+    const res2 = await mirror.checkGeneratedEdges({ repoRoot: root, layout, digests, externalCanonPending: pending });
     assert.ok(
       res2.changes.some(
         (c) => c.path === "oversight-team" && c.reason === "external-canon-allowlist-stale",
