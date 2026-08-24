@@ -228,9 +228,41 @@ export function proofCommand(): Command {
         // contract (unknown refs = a named WARN, never a rejection), and
         // emit the coverage/self_check ADVISORY when a contract exists.
         const prdPath = path.join(slice.absPath, "IMPLEMENTATION-PRD.md");
-        const contractItems = fs.existsSync(prdPath)
+        const prdItems = fs.existsSync(prdPath)
           ? parseProofContract(fs.readFileSync(prdPath, "utf8"))
           : null;
+        let contractItems = prdItems;
+        let contractSource: "prd" | "spec" | null = prdItems ? "prd" : null;
+        // KI-5.3-2 SECOND FACE (row ki532proofssot): a PRISTINE SCAFFOLD
+        // contract — every item still the template's [bracket placeholder] —
+        // must NEVER become the canonical index (the observed failure:
+        // contractItemsDeclared=1 pairing evidence against scaffold text while
+        // the locked SPEC held six items). The truthful rule: derive from the
+        // SPEC's own authored ## Proof contract with a NAMED advisory, else
+        // degrade to no-contract. A genuinely AUTHORED PRD stays canonical
+        // (the first-face ruling, preserved).
+        const isPlaceholder = (it: string) => /^\[.*\]$/.test(it.trim());
+        if (prdItems && prdItems.length > 0 && prdItems.every(isPlaceholder)) {
+          const specPath = path.join(slice.absPath, "SPEC.md");
+          const specItems = fs.existsSync(specPath)
+            ? parseProofContract(fs.readFileSync(specPath, "utf8"))
+            : null;
+          if (specItems && specItems.length > 0 && !specItems.every(isPlaceholder)) {
+            contractItems = specItems;
+            contractSource = "spec";
+            advisories.push(
+              `contract source: IMPLEMENTATION-PRD.md's ## Proof contract is a pristine SCAFFOLD (placeholder items only) — ` +
+                `derived the ${specItems.length}-item contract from SPEC.md instead. Author the PRD contract to make it canonical.`,
+            );
+          } else {
+            contractItems = null;
+            contractSource = null;
+            advisories.push(
+              "contract source: IMPLEMENTATION-PRD.md's ## Proof contract is a pristine SCAFFOLD and SPEC.md declares no authored contract — " +
+                "treated as no declared contract (a placeholder index is never used).",
+            );
+          }
+        }
         let coveredItems: string[] = [];
         if (contractItems && contractItems.length > 0) {
           if (evidences && evidences.length > 0) {
@@ -311,6 +343,7 @@ export function proofCommand(): Command {
           dropped: path.relative(process.cwd(), target),
           header: header as C1Header,
           contractItemsDeclared: contractItems?.length ?? 0,
+          contractSource,
           contractItemsCovered: coveredItems,
           mediaRefs,
           warnings: warns,

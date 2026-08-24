@@ -306,10 +306,10 @@ describe("proof add — pristine-scaffold contract never canonical (KI-5.3-2 sec
     fs.writeFileSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md"), SCAFFOLD_PRD);
     fs.writeFileSync(path.join(sliceDir, "SPEC.md"), SPEC_WITH_SIX);
     await run(["--evidences", "2", "--self-check", "looked"]);
-    const out = JSON.parse(logs.find((l) => l.trim().startsWith("{"))!) as { contractItemsDeclared: number; coveredItems?: string[]; advisories?: string[]; contractSource?: string };
+    const out = JSON.parse(logs.find((l) => l.trim().startsWith("{"))!) as { contractItemsDeclared: number; contractItemsCovered?: string[]; advisories?: string[]; contractSource?: string };
     expect(out.contractItemsDeclared).toBe(6);
     expect(out.contractSource).toBe("spec");
-    expect((out.coveredItems ?? []).join(" ")).toContain("BETA DOOR");
+    expect((out.contractItemsCovered ?? []).join(" ")).toContain("BETA DOOR");
     expect((out.advisories ?? []).join(" ")).toMatch(/scaffold/i);
   });
 
@@ -324,9 +324,9 @@ describe("proof add — pristine-scaffold contract never canonical (KI-5.3-2 sec
     fs.writeFileSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md"), "---\nid: x\n---\n# s\n\n## Proof contract\n\n- [ ] REAL ITEM ONE\n- [ ] REAL ITEM TWO\n");
     fs.writeFileSync(path.join(sliceDir, "SPEC.md"), SPEC_WITH_SIX);
     await run(["--evidences", "1", "--self-check", "looked"]);
-    const out = JSON.parse(logs.find((l) => l.trim().startsWith("{"))!) as { contractItemsDeclared: number; coveredItems?: string[]; contractSource?: string };
+    const out = JSON.parse(logs.find((l) => l.trim().startsWith("{"))!) as { contractItemsDeclared: number; contractItemsCovered?: string[]; contractSource?: string };
     expect(out.contractItemsDeclared).toBe(2);
     expect(out.contractSource).toBe("prd");
-    expect((out.coveredItems ?? []).join(" ")).toContain("REAL ITEM ONE");
+    expect((out.contractItemsCovered ?? []).join(" ")).toContain("REAL ITEM ONE");
   });
 });
