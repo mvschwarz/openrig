@@ -199,6 +199,51 @@ ${over}`);
 `), "m.yaml")).toThrow(/#/);
   });
 
+  it("r1 F1: a DEEP requires chain stays inside the fail-loud channel — no RangeError escape at any depth", () => {
+    // r1's measured discriminator: the recursive visit() blew the call stack at
+    // n=5000 with a RangeError carrying no atoms[i], no id, no path — bypassing
+    // the channel the module's own header promises. Packs install FROM URLS
+    // (slice-07 R4), so depth is attacker-choosable and no threshold is safe.
+    const N = 8000;
+    const entries: string[] = [];
+    for (let i = 0; i < N; i++) {
+      entries.push(
+        `  - id: a${i}\n    address: 04-ontology.md\n    taxonomy: world\n    situations: [fresh]\n    purpose: depth\n    order: ${i}\n    priority: core${i < N - 1 ? `\n    requires: [a${i + 1}]` : ""}`,
+      );
+    }
+    const m = parseManifest(withAtoms(entries.join("\n")), "m.yaml");
+    expect(m.atoms).toHaveLength(N); // parses clean — the chain is legal, just deep
+    // And a cycle at the same depth still rejects through the RIGHT channel.
+    const cyclic = entries.join("\n") + `\n  - id: z\n    address: 04-ontology.md\n    taxonomy: world\n    situations: [fresh]\n    purpose: depth\n    order: ${N}\n    priority: core\n    requires: [z2]\n  - id: z2\n    address: 04-ontology.md\n    taxonomy: world\n    situations: [fresh]\n    purpose: depth\n    order: ${N + 1}\n    priority: core\n    requires: [z]`;
+    expect(() => parseManifest(withAtoms(cyclic), "m.yaml")).toThrow(/cycle/i);
+  });
+
+  it("r1 F2: an UNKNOWN key on an atom entry rejects loud — a typo must never silently drop metadata", () => {
+    // r1's measured discriminator: `require:` (typo for requires) parsed clean
+    // with the dependency edge silently gone — the exact failure the field
+    // exists to prevent, arriving with no error. Ingest knows the legal key set.
+    expect(() => parseManifest(stub(`
+  - id: a2
+    address: what-you-can-do.md
+    taxonomy: world
+    situations: [fresh]
+    purpose: width
+    order: 2
+    priority: core
+    require: [a1]
+`), "m.yaml")).toThrow(/unknown field 'require'/);
+    expect(() => parseManifest(withAtoms(`
+  - id: x
+    address: 04-ontology.md
+    taxonomy: world
+    situations: [fresh]
+    purpose: depth
+    order: 1
+    priority: core
+    probes: { prompt: p, expect: e }
+`), "m.yaml")).toThrow(/unknown field 'probes'/);
+  });
+
   it("rejects bad enums and shapes: taxonomy, empty situations, purpose, runtime, order, priority, half a probe", () => {
     const cases: Array<[string, RegExp]> = [
       ["taxonomy: cosmos", /taxonomy/],
