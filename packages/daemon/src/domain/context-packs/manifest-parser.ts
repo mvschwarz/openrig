@@ -20,6 +20,7 @@ import {
 } from "./context-pack-types.js";
 import { isSafePackVersion } from "./ref-safety.js";
 import { AddressResolutionError, parseAddress } from "../markdown-address.js";
+import { parseSourceRef, SourceResolutionError } from "./profile-source-resolver.js";
 
 // Served as UTF-8 bundle text. `.sh`/`.ts` (OPR.0.5.3.7 R2) carry canonical skill
 // helper assets the served prose references (e.g. find-polluter.sh,
@@ -230,10 +231,23 @@ function parseAtoms(raw: unknown, files: ContextPackManifestFile[], sourcePath: 
       if (err instanceof AddressResolutionError) throw atomError(sourcePath, i, `'address' is malformed — ${err.message}`);
       throw err;
     }
-    if (!declaredFiles.has(parsedAddr.ref)) {
-      throw atomError(sourcePath, i, `'address' references '${parsedAddr.ref}', which is not a declared pack file — an atom addresses INTO the pack's own files`);
+    // Atom 4a — the pre-'#' ref carries its resolver kind (Q2-Amendment 1's
+    // one-grammar-two-resolvers ruling): a bare LIBRARY ref must be a declared
+    // pack file; a seat:/mission: TREE ref lives outside the pack by design
+    // (nothing must be library-homed to be composable), so it validates
+    // structurally here (unknown prefix / traversal reject loud) and resolves
+    // from configured roots at compose.
+    let sourceRef;
+    try {
+      sourceRef = parseSourceRef(parsedAddr.ref);
+    } catch (err) {
+      if (err instanceof SourceResolutionError) throw atomError(sourcePath, i, `'address' — ${err.message}`);
+      throw err;
     }
-    if (parsedAddr.headerPath.length > 0 && !MARKDOWN_SUFFIXES.some((s) => parsedAddr.ref.endsWith(s))) {
+    if (sourceRef.kind === "library" && !declaredFiles.has(parsedAddr.ref)) {
+      throw atomError(sourcePath, i, `'address' references '${parsedAddr.ref}', which is not a declared pack file — a library atom addresses INTO the pack's own files (tree sources use the seat:/mission: prefix)`);
+    }
+    if (parsedAddr.headerPath.length > 0 && !MARKDOWN_SUFFIXES.some((s) => sourceRef.rel.endsWith(s))) {
       throw atomError(sourcePath, i, `'address' uses a header path on '${parsedAddr.ref}' — header addressing only applies to markdown files (${MARKDOWN_SUFFIXES.join(", ")})`);
     }
 

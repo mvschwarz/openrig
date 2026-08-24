@@ -234,7 +234,9 @@ ${over}`);
 `), "m.yaml")).toThrow(/#/);
   });
 
-  it("r1 F1: a DEEP requires chain stays inside the fail-loud channel — no RangeError escape at any depth", () => {
+  // Timeout sized from the MEASURED loaded case (12s at host load 70), not the
+  // default: a ceiling equal to the loaded value is a flake source.
+  it("r1 F1: a DEEP requires chain stays inside the fail-loud channel — no RangeError escape at any depth", { timeout: 120_000 }, () => {
     // r1's measured discriminator: the recursive visit() blew the call stack at
     // n=5000 with a RangeError carrying no atoms[i], no id, no path — bypassing
     // the channel the module's own header promises. Packs install FROM URLS
