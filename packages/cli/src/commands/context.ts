@@ -555,6 +555,65 @@ Examples:
       }
     });
 
+  // OPR.0.5.3.5 Atom 4d — situation-composed delivery (the profile verb).
+  // Serving only: pieces to stdout with their source labels (Q2-Amendment 1),
+  // budget report + provenance warnings to stderr. Delivery-free like every
+  // library verb — nothing here sends to a seat. Naming rig/seat (or mission)
+  // is the caller's explicit grant of read access to that directory subtree.
+  cmd.command("profile")
+    .argument("<name-or-ref>", "Context pack name or path-like ref (its manifest must declare atoms)")
+    .requiredOption("--situation <situation>", "fresh | handover | post-compaction")
+    .option("--runtime <runtime>", "claude | codex", "claude")
+    .option("--budget <tokens>", "Situation token budget — overage is REPORTED, never truncated")
+    .option("--rig <rig>", "With --seat: grant read access to that seat's tree (seat: atoms)")
+    .option("--seat <seat>", "With --rig: the seat whose tree seat: atoms may read")
+    .option("--mission <mission>", "Grant read access to that mission's tree (mission: atoms)")
+    .option("--json", "JSON output (the full composed profile)")
+    .action(async (nameOrRef: string, opts: { situation: string; runtime: string; budget?: string; rig?: string; seat?: string; mission?: string; json?: boolean }) => {
+      try {
+        const client = await getClient();
+        const entry = await resolvePack(client, nameOrRef);
+        const params = new URLSearchParams({ ref: entry.relativePath, situation: opts.situation, runtime: opts.runtime });
+        if (opts.budget !== undefined) params.set("budget", opts.budget);
+        if (opts.rig !== undefined) params.set("rig", opts.rig);
+        if (opts.seat !== undefined) params.set("seat", opts.seat);
+        if (opts.mission !== undefined) params.set("mission", opts.mission);
+        const res = await client.get<{
+          pieces?: Array<{ atomId: string; address: string; sourceKind: string; text: string; estimatedTokens: number }>;
+          totalEstimatedTokens?: number;
+          budget?: { limitTokens: number; overageTokens: number; dropCandidates: Array<{ atomId: string; priority: string; estimatedTokens: number }> };
+          provenanceWarnings?: string[];
+          message?: string;
+          error?: string;
+        }>(`/api/context-packs/library/by-ref/profile?${params.toString()}`);
+        if (res.status !== 200) {
+          throw new Error(res.data?.message ?? res.data?.error ?? `Daemon returned HTTP ${res.status} for by-ref/profile`);
+        }
+        const profile = res.data;
+        if (opts.json) {
+          console.log(JSON.stringify(profile, null, 2));
+          return;
+        }
+        // Warnings and the budget report ride stderr so stdout is exactly the
+        // composed walk an agent consumes.
+        for (const w of profile.provenanceWarnings ?? []) console.error(`PROVENANCE ${w}`);
+        if (profile.budget) {
+          console.error(
+            `BUDGET: over by ~${profile.budget.overageTokens} tokens (limit ${profile.budget.limitTokens}); ` +
+            `drop candidates in order: ${profile.budget.dropCandidates.map((d) => `${d.atomId} (${d.priority}, ~${d.estimatedTokens})`).join(", ")}`,
+          );
+        }
+        for (const p of profile.pieces ?? []) {
+          console.log(`=== ${p.atomId} [${p.sourceKind}] ${p.address} (~${p.estimatedTokens} tokens)`);
+          console.log(p.text);
+          console.log("");
+        }
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    });
+
   cmd.command("sync")
     .description("Re-walk discovery roots and refresh the library index")
     .option("--json", "JSON output")

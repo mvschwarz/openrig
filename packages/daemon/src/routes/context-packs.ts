@@ -246,7 +246,13 @@ export function contextPacksRoutes(): Hono {
     }
 
     // Longest-prefix pack match: pack refs and file paths share '/', so the
-    // library index decides the split — never a guess.
+    // library index decides the split — never a guess. BORROWED INVARIANT,
+    // named here because this loop's correctness rests on it (r1 4c rec): the
+    // scanner does NOT recurse into a pack directory, so no pack ref can be a
+    // segment-boundary prefix of another and this loop matches AT MOST ONE
+    // pack. If sub-pack indexing is ever added, this split becomes ambiguous —
+    // the no-nested-packs pin in context-pack-address-route.test.ts goes red
+    // there so the change cannot land silently.
     const entries = lib.list();
     const segments = parsed.ref.split("/");
     let entry: ContextPackEntry | undefined;
@@ -348,15 +354,28 @@ export function contextPacksRoutes(): Hono {
     // (URL-installed) pack's seat: atoms can neither read a root the caller
     // did not grant nor deliver bytes whose origin is hidden.
     const roots: ProfileSourceRoots = {};
+    const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
     const rig = c.req.query("rig");
     const seat = c.req.query("seat");
     if (rig !== undefined || seat !== undefined) {
-      const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
       if (!rig || !seat || !SEGMENT.test(rig) || !SEGMENT.test(seat)) {
         return c.json({ error: "invalid_seat_params", message: "rig and seat must BOTH be single bounded segments ([A-Za-z0-9][A-Za-z0-9._-]{0,63})" }, 400);
       }
       const topologyRoot = String(new SettingsStore().resolveOne("topology.root").value);
       roots.seat = join(topologyRoot, "rigs", rig, "seats", seat);
+    }
+    // Mission root on the RULED existing key (desk row 2675535d: reuse
+    // workspace.slices_root, never mint a sibling): mission root =
+    // <slices_root>/<mission>, same bounded-segment gate, same grant
+    // semantics — naming the mission grants this compose read access to that
+    // mission directory subtree.
+    const mission = c.req.query("mission");
+    if (mission !== undefined) {
+      if (!SEGMENT.test(mission)) {
+        return c.json({ error: "invalid_mission_param", message: "mission must be a single bounded segment ([A-Za-z0-9][A-Za-z0-9._-]{0,63})" }, 400);
+      }
+      const slicesRoot = String(new SettingsStore().resolveOne("workspace.slices_root").value);
+      roots.mission = join(slicesRoot, mission);
     }
 
     try {
