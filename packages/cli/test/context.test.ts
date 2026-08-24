@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Command } from "commander";
@@ -450,5 +450,98 @@ files:
     expect(absent.exitCode).toBe(1);
     expect(absent.errLogs.join("\n")).toContain("not found");
     expect(deleteLog).toEqual([]);
+  });
+
+  // ── OPR.0.5.3.7 R4 — `rig context add <url>` (external load) ──────────────
+  async function startPackServer(files: Record<string, string>): Promise<{ baseUrl: string; close: () => void }> {
+    const srv = http.createServer((req, res) => {
+      const p = (req.url ?? "/").replace(/^\//, "");
+      if (Object.prototype.hasOwnProperty.call(files, p)) {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end(files[p]);
+      } else {
+        res.writeHead(404);
+        res.end("not found");
+      }
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
+    const port2 = (srv.address() as { port: number }).port;
+    return { baseUrl: `http://127.0.0.1:${port2}/`, close: () => srv.close() };
+  }
+
+  async function withPacksRoot(fn: (root: string) => Promise<void>): Promise<void> {
+    const root = mkdtempSync(join(tmpdir(), "openrig-r4-packsroot-"));
+    const saved = process.env["OPENRIG_CONTEXT_PACKS_ROOT"];
+    process.env["OPENRIG_CONTEXT_PACKS_ROOT"] = root;
+    try {
+      await fn(root);
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_CONTEXT_PACKS_ROOT"];
+      else process.env["OPENRIG_CONTEXT_PACKS_ROOT"] = saved;
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  const R4_MANIFEST = "name: url-pack\nversion: 1.0.0\nfiles:\n  - path: SKILL.md\n    role: instruction\n";
+
+  it("add <url>: installs into the OPENRIG_CONTEXT_PACKS_ROOT landing zone (config-resolved, no hardcoded path)", async () => {
+    const pack = await startPackServer({ "manifest.yaml": R4_MANIFEST, "SKILL.md": "# hello\nbody\n" });
+    try {
+      await withPacksRoot(async (root) => {
+        const { exitCode } = await captureLogs(async () => {
+          await makeCmd().parseAsync(["node", "rig", "context", "add", `${pack.baseUrl}manifest.yaml`]);
+        });
+        expect(exitCode).toBeUndefined();
+        expect(existsSync(join(root, "url-pack", "manifest.yaml"))).toBe(true);
+        expect(readFileSync(join(root, "url-pack", "SKILL.md"), "utf-8")).toContain("body");
+      });
+    } finally {
+      pack.close();
+    }
+  });
+
+  it("add <url>: unreachable URL fails loud with the reason and leaves NO partial pack", async () => {
+    await withPacksRoot(async (root) => {
+      const { errLogs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "context", "add", "http://127.0.0.1:1/manifest.yaml"]);
+      });
+      expect(exitCode).toBe(1);
+      expect(errLogs.join("\n")).toMatch(/could not (reach|fetch) manifest/i);
+      expect(readdirSync(root)).toEqual([]); // no partial pack AND no leaked staging temp
+    });
+  });
+
+  it("add <url>: malformed manifest fails loud with the reason and leaves NO partial pack", async () => {
+    const pack = await startPackServer({ "manifest.yaml": "name: bad\nversion: 1.0.0\nfiles:\n  - path: ../escape.md\n    role: x\n" });
+    try {
+      await withPacksRoot(async (root) => {
+        const { errLogs, exitCode } = await captureLogs(async () => {
+          await makeCmd().parseAsync(["node", "rig", "context", "add", `${pack.baseUrl}manifest.yaml`]);
+        });
+        expect(exitCode).toBe(1);
+        expect(errLogs.join("\n")).toContain("must be a relative path inside the pack");
+        expect(readdirSync(root)).toEqual([]); // no partial pack AND no leaked staging temp
+      });
+    } finally {
+      pack.close();
+    }
+  });
+
+  it("add <url>: a declared file that 404s fails loud and leaves NO partial pack", async () => {
+    // manifest declares SKILL.md but the server does not serve it
+    const pack = await startPackServer({ "manifest.yaml": R4_MANIFEST });
+    try {
+      await withPacksRoot(async (root) => {
+        const { errLogs, exitCode } = await captureLogs(async () => {
+          await makeCmd().parseAsync(["node", "rig", "context", "add", `${pack.baseUrl}manifest.yaml`]);
+        });
+        expect(exitCode).toBe(1);
+        expect(errLogs.join("\n")).toMatch(/could not fetch file 'SKILL\.md'/i);
+        expect(existsSync(join(root, "url-pack"))).toBe(false);
+        expect(readdirSync(root)).toEqual([]); // no partial pack AND no leaked staging temp
+      });
+    } finally {
+      pack.close();
+    }
   });
 });

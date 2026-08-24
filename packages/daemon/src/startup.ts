@@ -728,7 +728,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // routes. Startup context-pack expansion is intentionally unsupported;
   // dedicated send/broadcast/walk/queue verbs own delivery.
   const contextPackLibrary = (() => {
-    const userPacksRoot = getDefaultOpenRigPath("context-packs");
+    // OPR.0.5.3.7 R4 — config-resolved (env > config > $OPENRIG_HOME/context-packs),
+    // the same key `rig context add` writes to, so both agree on the landing zone.
+    const userPacksRoot = new ContextPackSettingsStore().resolveOne("context.packs_root").value as string;
     try { fs.mkdirSync(userPacksRoot, { recursive: true }); } catch { /* best-effort */ }
     const roots: Array<{ path: string; sourceType: "builtin" | "user_file" | "workspace" }> = [
       { path: userPacksRoot, sourceType: "user_file" },

@@ -46,6 +46,12 @@ export interface RiggedConfig {
   topology: {
     root: string;
   };
+  // OPR.0.5.3.7 R4 — the context-pack library landing zone (`rig context add`
+  // installs here). Config-resolved so a shipped verb runs unmodified on a
+  // stranger machine — never a hardcoded ~/.openrig literal. Twin of the daemon.
+  context: {
+    packsRoot: string;
+  };
   // User Settings v0 — UEP env-var graduation.
   // Values are stored as raw named-pair strings ("name:/abs/path,...")
   // matching the OPENRIG_FILES_ALLOWLIST / OPENRIG_PROGRESS_SCAN_ROOTS
@@ -206,6 +212,8 @@ const DEFAULTS = {
   },
   // OPR.0.5.3.6 D1 — derived under the OpenRig home, never a shared-docs literal.
   topology: { root: getDefaultOpenRigPath("topology") },
+  // OPR.0.5.3.7 R4 — derived under the OpenRig home, never a shared-docs literal.
+  context: { packsRoot: getDefaultOpenRigPath("context-packs") },
   files: { allowlist: "" },
   progress: { scanRoots: "" },
   ui: {
@@ -323,6 +331,8 @@ export const VALID_KEYS = [
   // shared-docs/rigs location stays readable via the daemon's
   // resolveLegacyTopologyRigsRoot fallback (advisory-emitting).
   "topology.root",
+  // OPR.0.5.3.7 R4 — context-pack landing zone; lockstep with the daemon twin.
+  "context.packs_root",
   "files.allowlist",
   "progress.scan_roots",
   "ui.preview.refresh_interval_seconds",
@@ -401,6 +411,8 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "workspace.specs_root": { primary: "OPENRIG_WORKSPACE_SPECS_ROOT" },
   "workspace.dogfood_evidence_root": { primary: "OPENRIG_DOGFOOD_EVIDENCE_ROOT" },
   "topology.root": { primary: "OPENRIG_TOPOLOGY_ROOT" },
+  // OPR.0.5.3.7 R4 — new key, OPENRIG_* only (no RIGGED_* legacy).
+  "context.packs_root": { primary: "OPENRIG_CONTEXT_PACKS_ROOT" },
   // UEP env-var graduation: existing OPENRIG_FILES_ALLOWLIST /
   // OPENRIG_PROGRESS_SCAN_ROOTS become the env override for the new
   // typed keys (no breaking change).
@@ -470,6 +482,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "workspace.specs_root": ["workspace", "specsRoot"],
   "workspace.dogfood_evidence_root": ["workspace", "dogfoodEvidenceRoot"],
   "topology.root": ["topology", "root"],
+  "context.packs_root": ["context", "packsRoot"],
   "files.allowlist": ["files", "allowlist"],
   "progress.scan_roots": ["progress", "scanRoots"],
   "ui.preview.refresh_interval_seconds": ["ui", "preview", "refreshIntervalSeconds"],
@@ -842,6 +855,9 @@ export class ConfigStore {
       },
       topology: {
         root: v("topology.root") as string,
+      },
+      context: {
+        packsRoot: v("context.packs_root") as string,
       },
       files: {
         allowlist: v("files.allowlist") as string,

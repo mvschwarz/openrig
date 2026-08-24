@@ -16,12 +16,17 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
 } from "node:fs";
+import { dirname } from "node:path";
 import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { getDefaultOpenRigPath } from "../openrig-compat.js";
+import { ConfigStore } from "../config-store.js";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , statusGuardMessage} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
@@ -127,7 +132,10 @@ function assertDestinationNamespaceContained(targetRoot: string, installName: st
   }
 }
 
-const ALLOWED_CONTEXT_PACK_SUFFIXES = new Set([".md", ".markdown", ".yaml", ".yml", ".txt"]);
+// Kept in lockstep with the daemon parser's ALLOWED_FILE_SUFFIXES (manifest-parser.ts).
+// OPR.0.5.3.7 R2 added .sh/.ts (skill helper assets, served as text); the install
+// validator must accept what the daemon will serve.
+const ALLOWED_CONTEXT_PACK_SUFFIXES = new Set([".md", ".markdown", ".yaml", ".yml", ".txt", ".sh", ".ts"]);
 
 function validateContextPackManifestForInstall(manifestPath: string): void {
   let parsed: unknown;
@@ -176,6 +184,67 @@ function validateContextPackManifestForInstall(manifestPath: string): void {
     if (typeof file["role"] !== "string" || file["role"].length === 0) {
       throw new Error(`manifest at ${manifestPath} files[${i}] missing 'role' (string)`);
     }
+  }
+}
+
+function isHttpUrl(source: string): boolean {
+  return /^https?:\/\//i.test(source);
+}
+
+async function fetchTextOrThrow(url: string, what: string): Promise<string> {
+  let res: Response;
+  try {
+    res = await fetch(url);
+  } catch (err) {
+    throw new Error(`Could not reach ${what} at ${url}: ${(err as Error).message}`);
+  }
+  if (!res.ok) throw new Error(`Could not fetch ${what} at ${url}: HTTP ${res.status} ${res.statusText}`.trim());
+  return await res.text();
+}
+
+// OPR.0.5.3.7 R4 — install a context pack from a URL. <url> points at the pack's
+// manifest.yaml (a trailing '/' is treated as '<url>manifest.yaml'); every
+// files[].path is fetched relative to that manifest. ATOMIC BY CONSTRUCTION:
+// everything stages into a temp SIBLING of the target and is published by one
+// renameSync, so a malformed manifest, an unreachable URL, or a missing declared
+// file leaves NO partial pack behind. Deliberately dumb: no registry, no cache.
+async function installPackFromUrl(
+  url: string,
+  overrideName: string | undefined,
+  targetRoot: string,
+): Promise<{ targetDir: string; installName: string }> {
+  const manifestUrl = url.endsWith("/") ? `${url}manifest.yaml` : url;
+  const baseUrl = manifestUrl.slice(0, manifestUrl.lastIndexOf("/") + 1);
+  mkdirSync(targetRoot, { recursive: true });
+  const staging = mkdtempSync(join(targetRoot, ".tmp-add-"));
+  try {
+    // Fetch + validate the manifest before touching the target namespace.
+    const manifestText = await fetchTextOrThrow(manifestUrl, "manifest");
+    writeFileSync(join(staging, "manifest.yaml"), manifestText);
+    validateContextPackManifestForInstall(join(staging, "manifest.yaml"));
+    const manifest = parseYaml(manifestText) as { name: string; files: Array<{ path: string }> };
+    const installName = overrideName ?? manifest.name;
+    assertSafeInstallRef(installName);
+    assertDestinationNamespaceContained(targetRoot, installName);
+    const targetDir = join(targetRoot, installName);
+    if (existsSync(targetDir)) {
+      throw new Error(`A context pack named '${installName}' already exists at ${targetDir}. Remove it first or use --name to install under a different name.`);
+    }
+    // Fetch every declared file relative to the manifest URL into the staging tree.
+    for (const f of manifest.files) {
+      const fileText = await fetchTextOrThrow(baseUrl + f.path, `file '${f.path}'`);
+      const dest = join(staging, f.path);
+      mkdirSync(dirname(dest), { recursive: true });
+      writeFileSync(dest, fileText);
+    }
+    // Re-validate the on-disk staged pack, then publish atomically.
+    validateContextPackManifestForInstall(join(staging, "manifest.yaml"));
+    assertTreeHasNoSymlinks(staging);
+    renameSync(staging, targetDir);
+    return { targetDir, installName };
+  } catch (err) {
+    rmSync(staging, { recursive: true, force: true });
+    throw err;
   }
 }
 
@@ -478,50 +547,56 @@ Examples:
     });
 
   cmd.command("add")
-    .argument("<source-dir>", "Directory containing manifest.yaml + included files")
-    .description("Install a context pack from a local directory into ~/.openrig/context-packs/")
-    .option("--name <name>", "Override the install name (defaults to source directory basename)")
+    .argument("<source>", "Local directory OR http(s):// URL of a context pack (manifest.yaml + files)")
+    .description("Install a context pack from a local directory or a URL into the context-packs landing zone")
+    .option("--name <name>", "Override the install name (defaults to the manifest name / source basename)")
     .option("--json", "JSON output")
-    .action(async (sourceDir: string, opts: { name?: string; json?: boolean }) => {
+    .action(async (source: string, opts: { name?: string; json?: boolean }) => {
       try {
-        if (!existsSync(sourceDir)) throw new Error(`Source directory not found: ${sourceDir}`);
-        const stat = lstatSync(sourceDir);
-        if (stat.isSymbolicLink()) throw new Error(`Source must not be a symlink: ${sourceDir}`);
-        if (!stat.isDirectory()) throw new Error(`Source must be a directory containing manifest.yaml: ${sourceDir}`);
-        const manifestPath = join(sourceDir, "manifest.yaml");
-        if (!existsSync(manifestPath)) {
-          throw new Error(`Source directory must contain manifest.yaml: ${sourceDir}`);
-        }
-        validateContextPackManifestForInstall(manifestPath);
-        // Read the manifest's name as the canonical install name when
-        // --name not given. Cheap parse: trust the daemon to validate
-        // on next sync; here we just need the name.
-        const installName = opts.name ?? (() => {
-          try {
-            const raw = readFileSync(manifestPath, "utf-8");
-            const m = raw.match(/^name:\s*['"]?([^'"\n]+)['"]?\s*$/m);
-            return m?.[1]?.trim() || basename(sourceDir);
-          } catch {
-            return basename(sourceDir);
+        // OPR.0.5.3.7 R4 — config-resolved landing zone (env > config > $OPENRIG_HOME/context-packs),
+        // never a hardcoded ~/.openrig literal; the daemon resolves the same key.
+        const targetRoot = new ConfigStore().resolve().context.packsRoot;
+        let targetDir: string;
+        if (isHttpUrl(source)) {
+          // R4 — URL install: fetch → validate → atomic stage+rename (no partial pack).
+          ({ targetDir } = await installPackFromUrl(source, opts.name, targetRoot));
+        } else {
+          // Local directory install.
+          if (!existsSync(source)) throw new Error(`Source directory not found: ${source}`);
+          const stat = lstatSync(source);
+          if (stat.isSymbolicLink()) throw new Error(`Source must not be a symlink: ${source}`);
+          if (!stat.isDirectory()) throw new Error(`Source must be a directory containing manifest.yaml: ${source}`);
+          const manifestPath = join(source, "manifest.yaml");
+          if (!existsSync(manifestPath)) {
+            throw new Error(`Source directory must contain manifest.yaml: ${source}`);
           }
-        })();
-        assertSafeInstallRef(installName);
-        assertTreeHasNoSymlinks(sourceDir);
-        const targetRoot = getDefaultOpenRigPath("context-packs");
-        mkdirSync(targetRoot, { recursive: true });
-        assertDestinationNamespaceContained(targetRoot, installName);
-        const targetDir = join(targetRoot, installName);
-        let targetExists = false;
-        try {
-          lstatSync(targetDir);
-          targetExists = true;
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+          validateContextPackManifestForInstall(manifestPath);
+          const installName = opts.name ?? (() => {
+            try {
+              const raw = readFileSync(manifestPath, "utf-8");
+              const m = raw.match(/^name:\s*['"]?([^'"\n]+)['"]?\s*$/m);
+              return m?.[1]?.trim() || basename(source);
+            } catch {
+              return basename(source);
+            }
+          })();
+          assertSafeInstallRef(installName);
+          assertTreeHasNoSymlinks(source);
+          mkdirSync(targetRoot, { recursive: true });
+          assertDestinationNamespaceContained(targetRoot, installName);
+          targetDir = join(targetRoot, installName);
+          let targetExists = false;
+          try {
+            lstatSync(targetDir);
+            targetExists = true;
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+          }
+          if (targetExists) {
+            throw new Error(`A context pack named '${installName}' already exists at ${targetDir}. Remove it first or use --name to install under a different name.`);
+          }
+          cpSync(source, targetDir, { recursive: true });
         }
-        if (targetExists) {
-          throw new Error(`A context pack named '${installName}' already exists at ${targetDir}. Remove it first or use --name to install under a different name.`);
-        }
-        cpSync(sourceDir, targetDir, { recursive: true });
         // Sync the daemon library so the new pack appears immediately.
         const client = await getClient();
         const syncRes = await client.post<{ count: number; errors?: Array<{ source: string; error: string }>; entries: ContextPackEntryWire[] }>("/api/context-packs/library/sync");

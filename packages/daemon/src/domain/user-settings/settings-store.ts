@@ -37,6 +37,13 @@ const DEFAULT_TOPOLOGY_ROOT = path.join(
   "topology",
 );
 
+// OPR.0.5.3.7 R4 — the context-pack library landing zone's derived default,
+// under $OPENRIG_HOME, matching the CLI twin's getDefaultOpenRigPath("context-packs").
+const DEFAULT_CONTEXT_PACKS_ROOT = path.join(
+  process.env["OPENRIG_HOME"] || process.env["RIGGED_HOME"] || path.join(os.homedir(), ".openrig"),
+  "context-packs",
+);
+
 /** OPR.0.5.3.6 — the LEGACY topology location, ruled an arbitrary folder
  *  (founder, 2026-08-14) but kept readable so pre-convention rigs migrate
  *  instead of flag-daying. Resolves where legacy code ACTUALLY wrote —
@@ -90,6 +97,8 @@ export const SETTINGS_VALID_KEYS = [
   // for that literal, so walkers carry none. Lockstep with the CLI
   // config-store twin (each side's parity test pins its own list).
   "topology.root",
+  // OPR.0.5.3.7 R4 — context-pack landing zone; lockstep with the CLI twin.
+  "context.packs_root",
   "files.allowlist",
   "progress.scan_roots",
   "ui.preview.refresh_interval_seconds",
@@ -198,6 +207,8 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "workspace.specs_root": { primary: "OPENRIG_WORKSPACE_SPECS_ROOT" },
   "workspace.dogfood_evidence_root": { primary: "OPENRIG_DOGFOOD_EVIDENCE_ROOT" },
   "topology.root": { primary: "OPENRIG_TOPOLOGY_ROOT" },
+  // OPR.0.5.3.7 R4 — new key, OPENRIG_* only (no RIGGED_* legacy).
+  "context.packs_root": { primary: "OPENRIG_CONTEXT_PACKS_ROOT" },
   "files.allowlist": { primary: "OPENRIG_FILES_ALLOWLIST" },
   "progress.scan_roots": { primary: "OPENRIG_PROGRESS_SCAN_ROOTS" },
   "ui.preview.refresh_interval_seconds": { primary: "OPENRIG_UI_PREVIEW_REFRESH_INTERVAL_SECONDS" },
@@ -264,6 +275,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "workspace.specs_root": ["workspace", "specsRoot"],
   "workspace.dogfood_evidence_root": ["workspace", "dogfoodEvidenceRoot"],
   "topology.root": ["topology", "root"],
+  "context.packs_root": ["context", "packsRoot"],
   "files.allowlist": ["files", "allowlist"],
   "progress.scan_roots": ["progress", "scanRoots"],
   "ui.preview.refresh_interval_seconds": ["ui", "preview", "refreshIntervalSeconds"],
@@ -487,6 +499,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "workspace.root": return DEFAULT_WORKSPACE_ROOT;
     // OPR.0.5.3.6 D1 — derived under $OPENRIG_HOME, never a shared-docs literal.
     case "topology.root": return DEFAULT_TOPOLOGY_ROOT;
+    case "context.packs_root": return DEFAULT_CONTEXT_PACKS_ROOT;
     // Preview Terminal v0 (PL-018) defaults — match cli/src/config-store.ts.
     case "ui.preview.refresh_interval_seconds": return 3;
     case "ui.preview.max_pins": return 4;

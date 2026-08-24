@@ -69,6 +69,7 @@ Keys:
   workspace.*            root, slices_root, steering_path, field_notes_root,
                          specs_root, dogfood_evidence_root, operator_seat_name
   topology.root          the topology tree root (instance altitude at its top; default $OPENRIG_HOME/topology)
+  context.packs_root     context-pack library landing zone for 'rig context add' (default $OPENRIG_HOME/context-packs)
   files.allowlist        name:/abs/path,name:/abs/path
   progress.scan_roots    name:/abs/path,name:/abs/path
   ui.preview.*           refresh_interval_seconds, max_pins, default_lines

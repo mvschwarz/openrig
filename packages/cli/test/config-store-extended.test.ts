@@ -119,6 +119,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "workspace.dogfood_evidence_root",
       // OPR.0.5.3.6 D1 — the topology tree root (instance at its top).
       "topology.root",
+      "context.packs_root",
       "files.allowlist", "progress.scan_roots",
       "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines",
       "recovery.auto_drive_provider_prompts",
