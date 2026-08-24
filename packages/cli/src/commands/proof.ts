@@ -4,7 +4,8 @@ import { Command } from "commander";
 import YAML from "yaml";
 import { findSlice, resolveMissionsRoot } from "../lib/scope/scope-fs.js";
 import { ScopeCliError } from "../lib/scope/types.js";
-import { selectProofContractBody } from "../lib/scope/scaffold-placeholder.js";
+import { selectProofContractBody, isScaffoldPlaceholderText } from "../lib/scope/scaffold-placeholder.js";
+import { parseLogicalCheckboxes } from "../lib/scope/logical-checkbox.js";
 
 /**
  * `rig proof` — the proof-drop write path (OPR.0.4.4.19 FR-8 + FR-11;
@@ -78,14 +79,18 @@ export function parseProofContract(prdContent: string): string[] | null {
   const lines = prdContent.split("\n");
   const start = lines.findIndex((l) => /^##\s+Proof contract\s*$/i.test(l.trim()));
   if (start === -1) return null;
-  const items: string[] = [];
+  let end = lines.length;
   for (let i = start + 1; i < lines.length; i++) {
-    const line = lines[i]!;
-    if (/^##\s/.test(line)) break; // next section
-    const m = line.match(/^\s*-\s*(?:\[[ xX]\]\s*)?(.+\S)\s*$/);
-    if (m) items.push(m[1]!);
+    if (/^##\s/.test(lines[i]!)) { end = i; break; } // next section
   }
-  return items;
+  // KI-5.3-2 — ONE grammar: the review composer's logical-checkbox relation
+  // (CHECKBOX rows only, deeper continuations JOINED). This makes a 1-based
+  // evidence index name the SAME promise here and at render — no phantom bare
+  // bullet, no split sub-bullet shifting the byIndex. Scaffold placeholders are
+  // NOT filtered here: the pristine-scaffold second-face check below needs to
+  // see them; the canonical index filters them per-item after that check,
+  // exactly as the composer's extractProofContract does.
+  return parseLogicalCheckboxes(lines.slice(start + 1, end).join("\n")).map((it) => it.rawText);
 }
 
 function isVideoFile(filePath: string): boolean {
@@ -261,9 +266,15 @@ export function proofCommand(): Command {
           readmeBody: contractBody(readmeDoc),
         });
         const contractSource = selection.source;
-        const contractItems = contractSource === null
+        // KI-5.3-2 item-grammar: parse the SELECTED source with the ONE shared
+        // logical-checkbox grammar, then drop scaffold-placeholder rows PER-ITEM
+        // — the same per-item skip the review composer's extractProofContract
+        // applies — so a MIXED placeholder+authored body does not shift a 1-based
+        // evidence index onto a placeholder row (the silent one-position mispair).
+        let contractItems = contractSource === null
           ? null
           : parseProofContract(contractSource === "prd" ? prdDoc! : contractSource === "spec" ? specDoc! : readmeDoc!);
+        if (contractItems) contractItems = contractItems.filter((it) => !isScaffoldPlaceholderText(it));
         if (contractSource !== null && contractSource !== "prd") {
           advisories.push(
             `contract source: IMPLEMENTATION-PRD.md's ## Proof contract is ${prdDoc === null ? "absent" : "a pristine SCAFFOLD"} — ` +

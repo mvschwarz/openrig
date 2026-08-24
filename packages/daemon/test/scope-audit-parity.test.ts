@@ -16,6 +16,10 @@ const CLASSIFIER_FILES = [
   // release-0.4.7 intent-stage: the shared scaffold-placeholder grammar twin
   // (arch AR-1 ruling — one grammar, twin-pinned; see the module header).
   { cli: "packages/cli/src/lib/scope/scaffold-placeholder.ts", daemon: "packages/daemon/src/domain/scope/scaffold-placeholder.ts" },
+  // KI-5.3-2: the shared logical-checkbox item grammar twin — one grammar for
+  // the review composer, the slice-detail projector, and `rig proof add`, so a
+  // byIndex evidence ref names the same promise everywhere (see module header).
+  { cli: "packages/cli/src/lib/scope/logical-checkbox.ts", daemon: "packages/daemon/src/domain/scope/logical-checkbox.ts" },
 ];
 
 const SHARED_FIXTURES: Array<{ label: string; input: ScopeAuditInput }> = [

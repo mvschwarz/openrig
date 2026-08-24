@@ -56,6 +56,7 @@ import {
   isPristineScaffoldSection,
   selectProofContractBody,
 } from "../scope/scaffold-placeholder.js";
+import { parseLogicalCheckboxes, type LogicalCheckboxItem } from "../scope/logical-checkbox.js";
 
 // --- Fixed, visible v1 thresholds (markdown-steered tuning is a named fast-follow) ---
 export const IDLE_WITH_WORK_THRESHOLD_MIN = 30;
@@ -377,70 +378,14 @@ export interface PromisedItem {
   plannedRef: string | null;
 }
 
-/** qitem-render-driver B — the ONE logical-checkbox record, shared by every
- *  reader of an authored checkbox list (Review's proof contract and the
- *  slice-detail projector's acceptance rows).
- *
- *  `rawText` is the COMPLETE logical item — a checkbox line plus any eligible
- *  indented continuation, joined with exactly one U+0020 — and it IS the
- *  VM-006 join key (textKey = trim + casefold over these bytes). Both readers
- *  MUST consume this record so Review promise, Progress acceptance, dedup and
- *  the QA-verdict lift key off identical bytes by construction; a second
- *  parser would silently desynchronize the join. */
-export interface LogicalCheckboxItem {
-  /** The author's tick state (`- [x]`). */
-  checked: boolean;
-  /** The complete logical item text (continuations joined), trim-only. */
-  rawText: string;
-  /** 1-based line of the CHECKBOX itself — never a continuation line. */
-  sourceLine: number;
-}
-
-const CHECKBOX_LINE = /^(\s*)-?\s*\[(\s|x|X)\]\s+(.+)$/;
-
-/** Parse an authored checkbox block into logical items.
- *
- *  Continuation eligibility (pinned by test): a line is a continuation of the
- *  preceding checkbox when it is NONBLANK, NOT itself a checkbox, and its
- *  indentation is STRICTLY DEEPER than the checkbox line's. A next checkbox, a
- *  blank line, or same/shallower prose terminates the item. */
-export function parseLogicalCheckboxes(block: string | null): LogicalCheckboxItem[] {
-  if (!block) return [];
-  const lines = block.split("\n");
-  const out: LogicalCheckboxItem[] = [];
-  let current: { checked: boolean; parts: string[]; indent: number; sourceLine: number } | null = null;
-
-  const flush = () => {
-    if (!current) return;
-    out.push({ checked: current.checked, rawText: current.parts.join(" ").trim(), sourceLine: current.sourceLine });
-    current = null;
-  };
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-    const m = line.match(CHECKBOX_LINE);
-    if (m) {
-      flush();
-      current = {
-        checked: m[2]!.toLowerCase() === "x",
-        parts: [m[3]!.trim()],
-        indent: m[1]!.length,
-        sourceLine: i + 1,
-      };
-      continue;
-    }
-    if (!current) continue;
-    if (line.trim().length === 0) { flush(); continue; }
-    const indent = line.length - line.trimStart().length;
-    if (indent > current.indent) {
-      current.parts.push(line.trim());
-      continue;
-    }
-    flush();
-  }
-  flush();
-  return out;
-}
+// KI-5.3-2 — the logical-checkbox grammar (LogicalCheckboxItem +
+// parseLogicalCheckboxes) now lives in the twinned module
+// ../scope/logical-checkbox.ts, byte-equal with the CLI so `rig proof add`
+// indexes the SAME items this composer renders. Re-exported here so existing
+// readers (slice-detail-projector) keep importing it from the composer; the
+// ONE parse is unchanged.
+export { parseLogicalCheckboxes };
+export type { LogicalCheckboxItem };
 
 export function extractProofContract(prd: string | null): PromisedItem[] {
   const body = extractSection(prd, "Proof contract");
