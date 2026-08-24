@@ -58,9 +58,11 @@ export interface ContextPackAtom {
   /** What drops FIRST when a token budget binds (mini-req 9). */
   priority: (typeof ATOM_PRIORITIES)[number];
   /** Mini-req 2: acceptance is CHANGED BEHAVIOR — a natural prompt plus the
-   *  expected observable behavior (the one-harness shape shared with
-   *  slice-07's selection evals). */
-  probe?: { prompt: string; expect: string };
+   *  expected observable behavior. Q3 bridge: the shape reconciles with the
+   *  harness's EvalCase — optional compilable expectedPatterns (the
+   *  deterministic door leg) and a 1-5 rubric (the judged leg); `expect`
+   *  stays the required prose contract. Closed key set at ingest. */
+  probe?: { prompt: string; expect: string; expectedPatterns?: string[]; rubric?: string };
 }
 
 export interface ContextPackManifest {

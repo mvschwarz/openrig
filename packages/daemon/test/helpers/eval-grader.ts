@@ -9,7 +9,9 @@
  * (this file mirrors the scenario runner's "judgment is L3, never here" split).
  */
 
-export type EvalCategory = "selection" | "loading";
+// OPR.0.5.3.5 Q3 bridge (mini-req 8): "behavior" is slice-05's case kind —
+// behavior-after-delivery probes graded by the SAME door in the SAME runner.
+export type EvalCategory = "selection" | "loading" | "behavior";
 
 export interface EvalOrder {
   /** The context pull the seat must run (regex source). */

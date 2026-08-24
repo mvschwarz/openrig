@@ -76,14 +76,31 @@ describe("probe key-gate reconciliation (the dispositioned Atom-2 note)", () => 
 describe("compileAtomProbesToEvalCases — atoms feed the ONE harness as data, no second runner", () => {
   it("probed atoms compile to behavior-category case DATA that the harness's own schema validates", () => {
     const m = parseManifest(MANIFEST, "m.yaml");
-    const cases = compileAtomProbesToEvalCases(m, "packs/world");
-    expect(cases).toHaveLength(1); // no-probe atom skipped
+    const { cases, skipped } = compileAtomProbesToEvalCases(m, "packs/world");
+    expect(cases).toHaveLength(1); // no-probe atom absent entirely
+    expect(skipped).toEqual([]);
     const c = cases[0]! as Record<string, unknown>;
     expect(c["category"]).toBe("behavior");
     expect(c["id"]).toBe("packs/world/affordance-width");
     expect(c["prompt"]).toBe("What can I do here?");
     const validated = validateEvalCase(c);
     expect(validated.ok).toBe(true);
+  });
+
+  it("a probe WITHOUT expectedPatterns has no deterministic-door leg: SKIPPED WITH A REPORT, never an invalid case, never silent", () => {
+    // The harness schema requires a non-empty expectedPatterns — compiling an
+    // empty array would emit a case the schema rejects downstream. The bridge
+    // refuses to fabricate a pattern from prose and refuses to lose the atom
+    // silently: the skip is named with its reason.
+    const patternless = MANIFEST
+      .replace("      expectedPatterns: ['rig context (get|profile)']\n", "")
+      .replace(/      rubric: \|\n        1 - names nothing\n        5 - names the verb family and the labels\n/, "");
+    const m = parseManifest(patternless, "m.yaml");
+    const { cases, skipped } = compileAtomProbesToEvalCases(m, "packs/world");
+    expect(cases).toEqual([]);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.atomId).toBe("affordance-width");
+    expect(skipped[0]!.reason).toMatch(/expectedPatterns/);
   });
 });
 

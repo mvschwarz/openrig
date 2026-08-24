@@ -171,6 +171,7 @@ const ALLOWED_ATOM_KEYS = new Set([
 ]);
 // The typos worth a kindness (r1 F2): singular/plural slips on the fields whose
 // silent loss is sharpest.
+const ALLOWED_PROBE_KEYS = new Set(["prompt", "expect", "expectedPatterns", "rubric"]);
 const NEAR_MISS_ATOM_KEYS: Record<string, string> = {
   require: "requires", region: "regions", situation: "situations", probes: "probe",
 };
@@ -287,12 +288,44 @@ function parseAtoms(raw: unknown, files: ContextPackManifestFile[], sourcePath: 
     let probe: ContextPackAtom["probe"];
     if (a["probe"] !== undefined) {
       const p = a["probe"];
-      if (!p || typeof p !== "object" || Array.isArray(p)) throw atomError(sourcePath, i, "'probe' must be an object { prompt, expect }");
+      if (!p || typeof p !== "object" || Array.isArray(p)) throw atomError(sourcePath, i, "'probe' must be an object { prompt, expect, expectedPatterns?, rubric? }");
       const pr = p as Record<string, unknown>;
+      // Q3 bridge: the key gate extends INSIDE probe (the dispositioned Atom-2
+      // note landing at its recorded spot), and the shape reconciles with the
+      // harness's EvalCase — expectedPatterns/rubric are LEGAL here, so the
+      // natural mistake r1 predicted becomes the schema instead of silent loss.
+      for (const key of Object.keys(pr)) {
+        if (!ALLOWED_PROBE_KEYS.has(key)) {
+          throw atomError(sourcePath, i, `'probe' has unknown field '${key}'${key === "rubrics" ? " — did you mean 'rubric'?" : ""} (allowed: ${[...ALLOWED_PROBE_KEYS].join(", ")})`);
+        }
+      }
       if (typeof pr["prompt"] !== "string" || pr["prompt"].length === 0 || typeof pr["expect"] !== "string" || pr["expect"].length === 0) {
         throw atomError(sourcePath, i, "'probe' needs BOTH a natural 'prompt' and the 'expect'ed observable behavior — acceptance is changed behavior, never files delivered");
       }
-      probe = { prompt: pr["prompt"], expect: pr["expect"] };
+      let expectedPatterns: string[] | undefined;
+      if (pr["expectedPatterns"] !== undefined) {
+        const eps = pr["expectedPatterns"];
+        if (!Array.isArray(eps) || eps.some((e) => typeof e !== "string")) {
+          throw atomError(sourcePath, i, "'probe.expectedPatterns' must be an array of regex source strings when present");
+        }
+        for (const src of eps as string[]) {
+          try {
+            new RegExp(src);
+          } catch {
+            throw atomError(sourcePath, i, `'probe.expectedPatterns' entry '${src}' is not a compilable regex source`);
+          }
+        }
+        expectedPatterns = eps as string[];
+      }
+      if (pr["rubric"] !== undefined && typeof pr["rubric"] !== "string") {
+        throw atomError(sourcePath, i, "'probe.rubric' must be a string when present");
+      }
+      probe = {
+        prompt: pr["prompt"],
+        expect: pr["expect"],
+        ...(expectedPatterns !== undefined ? { expectedPatterns } : {}),
+        ...(pr["rubric"] !== undefined ? { rubric: pr["rubric"] as string } : {}),
+      };
     }
 
     atoms.push({

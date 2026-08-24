@@ -7,7 +7,7 @@
 
 import type { EvalCase, EvalCategory } from "./eval-grader.js";
 
-const CATEGORIES: readonly EvalCategory[] = ["selection", "loading"];
+const CATEGORIES: readonly EvalCategory[] = ["selection", "loading", "behavior"];
 
 export type EvalCaseErrorCode =
   | "EVAL_NOT_OBJECT"
@@ -88,8 +88,8 @@ export function validateEvalCase(doc: unknown): ValidateEvalCaseResult {
   if (knownCategory && category === "loading" && !hasOrder) {
     push("ORDER_MISSING_FOR_LOADING", "order: loading cases require {getPattern, actionPattern} (get must precede the action)", "order");
   }
-  if (knownCategory && category === "selection" && hasOrder) {
-    push("ORDER_ON_SELECTION", "order: selection cases must not carry an order block — get-before-action is a loading-only concern", "order");
+  if (knownCategory && category !== "loading" && hasOrder) {
+    push("ORDER_ON_SELECTION", `order: ${category} cases must not carry an order block — get-before-action is a loading-only concern`, "order");
   }
   if (hasOrder) {
     if (!isPlainObject(doc.order)) {
