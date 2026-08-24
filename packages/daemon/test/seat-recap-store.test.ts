@@ -54,6 +54,32 @@ describe("writeSeatRecap — superseded-chain retention (Q2-Amendment 1(b))", ()
     ]);
   });
 
+  it("r1 F1: SAME-MILLISECOND supersessions lose NOTHING — every predecessor stays byte-preserved", () => {
+    // r1's constructed break: renameSync onto an existing path REPLACES it, so
+    // two supersessions in one millisecond overwrote the first chain entry —
+    // the retention contract (byte-preserved, cleaned only by lifecycle)
+    // inverted, silently. now is INJECTABLE, so programmatic callers collide
+    // deterministically, not rarely.
+    let t = 5000;
+    writeSeatRecap({ seatDir, content: "## Decisions\nv1", now: () => t });
+    t = 7777;
+    writeSeatRecap({ seatDir, content: "## Decisions\nv2", now: () => t });
+    writeSeatRecap({ seatDir, content: "## Decisions\nv3", now: () => t }); // same ms
+    const chain = listRecapChain(seatDir);
+    expect(chain).toHaveLength(2);
+    const bodies = chain.map((c) => readFileSync(c.path, "utf-8"));
+    expect(bodies).toContain("## Decisions\nv1");
+    expect(bodies).toContain("## Decisions\nv2");
+    expect(readFileSync(join(seatDir, "RECAP.md"), "utf-8")).toBe("## Decisions\nv3");
+  });
+
+  it("r1 bonus property (pinned at their ask): a write that FAILS the gate leaves the current recap AND the chain untouched", () => {
+    writeSeatRecap({ seatDir, content: "## Decisions\nstanding era", now: () => 1 });
+    expect(() => writeSeatRecap({ seatDir, content: "## Same\na\n## Same\nb", now: () => 2 })).toThrow();
+    expect(readFileSync(join(seatDir, "RECAP.md"), "utf-8")).toBe("## Decisions\nstanding era");
+    expect(listRecapChain(seatDir)).toHaveLength(0);
+  });
+
   it("the current recap stays addressable: an unaddressable write is REJECTED loud (it could never compose)", () => {
     // The recap is composed BY ADDRESS (seat:RECAP.md#...) — a recap that
     // cannot resolve would fail every handover profile downstream, silently

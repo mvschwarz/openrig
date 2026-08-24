@@ -122,6 +122,21 @@ describe("rig context — address fork + profile verb (Atom 4d)", () => {
       hits.length = 0;
       await run(port, ["profile", "packs/smoke", "--situation", "fresh"]);
       expect(hits.find((h) => h.includes("/profile"))!).toContain("runtime=codex");
+      // r1 F2: the product's vocabulary is "claude-code" (the adapters' value,
+      // live on real seats), never "claude" — it must map EXPLICITLY, not fall
+      // through the unknown-value fallback that happens to coincide.
+      process.env["OPENRIG_RUNTIME"] = "claude-code";
+      hits.length = 0;
+      const cc = await run(port, ["profile", "packs/smoke", "--situation", "fresh"]);
+      expect(hits.find((h) => h.includes("/profile"))!).toContain("runtime=claude");
+      expect(cc.errLogs.join("\n")).not.toMatch(/unrecognized/i); // recognized, no warning
+      // A genuinely UNKNOWN value falls back to claude WITH A VOICE — a future
+      // third runtime must not silently get a claude profile.
+      process.env["OPENRIG_RUNTIME"] = "gemini-cli";
+      hits.length = 0;
+      const unknown = await run(port, ["profile", "packs/smoke", "--situation", "fresh"]);
+      expect(hits.find((h) => h.includes("/profile"))!).toContain("runtime=claude");
+      expect(unknown.errLogs.join("\n")).toMatch(/unrecognized.*gemini-cli/i);
       hits.length = 0;
       await run(port, ["profile", "packs/smoke", "--situation", "fresh", "--runtime", "claude"]);
       expect(hits.find((h) => h.includes("/profile"))!).toContain("runtime=claude");
