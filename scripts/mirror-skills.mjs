@@ -195,9 +195,10 @@ export async function stagePublicSkills({
   }
 }
 
-// External-canon-pending skills: authored in the external founder skill canon and listed in the layout
-// ship set, but not yet mirrored into THIS repo (their SKILL.md isn't in git; the founder mirror-apply
-// on the cut checklist lands them). Their layout-missing is tolerated here — but ONLY these named few,
+// External-canon-pending skills: authored in the external skill canon and listed in the layout
+// ship set, but not yet mirrored into THIS repo (their SKILL.md isn't in git; the canon mirror-apply
+// on the cut checklist — run with the explicit canon-root path — lands them). Their layout-missing is
+// tolerated here — but ONLY these named few,
 // and ONLY while genuinely absent from disk. Any OTHER layout-demanded file missing from disk stays
 // LOUD (a future accidental deletion is never silently blessed), and a name that reappears on disk is
 // flagged `external-canon-allowlist-stale` so this list self-destructs. Same self-policing shape as the
@@ -466,7 +467,7 @@ function defaultReadAuthoringInputs() {
   const canonRoot = process.env.OPENRIG_SKILL_CANON_ROOT;
   if (!canonRoot) {
     throw new Error(
-      "Authoring apply requires OPENRIG_SKILL_CANON_ROOT; real apply is founder-gated",
+      "The mirror apply requires OPENRIG_SKILL_CANON_ROOT — set it to the skill-canon root to run the real apply. This is an explicit-path authoring guard (the apply reads the canon from that path), not an authorization gate.",
     );
   }
   return {
