@@ -18,8 +18,8 @@
 // (a profile that copies seat or mission content into the library is a defect —
 // Q2-Amendment 1(c)).
 
-import { readFileSync } from "node:fs";
-import { isAbsolute, join, normalize } from "node:path";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { isAbsolute, join, normalize, relative } from "node:path";
 import type { SourceKind } from "./profile-composer.js";
 import { parseAddress } from "../markdown-address.js";
 
@@ -77,10 +77,34 @@ export interface ProfileSourceRoots {
   mission?: string;
 }
 
+/** Byte-provenance record for one successful read (r1 rider 1 via 4a's review):
+ *  the label must be CHECKABLE, not merely asserted — with a symlink in play a
+ *  source label is accurate about the REF and wrong about the BYTES, and that
+ *  bites on benign symlinks, not just hostile ones. */
+export interface SourceReadRecord {
+  ref: string;
+  kind: SourceKind;
+  /** The root the read was granted against. */
+  base: string;
+  /** base + rel, before symlink resolution. */
+  nominalPath: string;
+  /** Where the BYTES actually came from (realpath after the successful read). */
+  realPath: string;
+  /** True when realPath sits outside base. Computed via path.relative — never a
+   *  bare string prefix (r1: `startsWith` says /seat-evil is inside /seat). */
+  escapesRoot: boolean;
+}
+
 /** Build the composer's fail-loud readFile over the pack dir + configured tree
  *  roots. Every failure names the source kind and what was being resolved —
- *  a missing root is a MISSING CONFIG error, never a silent empty. */
-export function makeProfileReadFile(opts: { packDir: string; roots: ProfileSourceRoots }): (ref: string) => string {
+ *  a missing root is a MISSING CONFIG error, never a silent empty; a DANGLING
+ *  symlink is its own named failure (a realistic corpus state, not a generic
+ *  unreadable). Each successful read reports byte provenance via onRead. */
+export function makeProfileReadFile(opts: {
+  packDir: string;
+  roots: ProfileSourceRoots;
+  onRead?: (record: SourceReadRecord) => void;
+}): (ref: string) => string {
   return (ref: string): string => {
     const { kind, rel } = parseSourceRef(ref);
     let base: string;
@@ -97,13 +121,46 @@ export function makeProfileReadFile(opts: { packDir: string; roots: ProfileSourc
       base = configured;
     }
     const abs = normalize(join(base, rel));
+    let text: string;
     try {
-      return readFileSync(abs, "utf-8");
+      text = readFileSync(abs, "utf-8");
     } catch (err) {
+      // Name the dangling-symlink state precisely: the path EXISTS as a link
+      // but its target does not — a generic "unreadable" would send an author
+      // hunting for a file that is right there in their listing.
+      let dangling = false;
+      try {
+        lstatSync(abs);
+        dangling = true;
+      } catch {
+        /* genuinely absent */
+      }
       throw new SourceResolutionError(
-        `source ref '${ref}' (${kind}) did not resolve: ${abs} is unreadable — ${(err as Error).message}`,
+        dangling
+          ? `source ref '${ref}' (${kind}) is a DANGLING symlink: ${abs} exists but its target does not — ${(err as Error).message}`
+          : `source ref '${ref}' (${kind}) did not resolve: ${abs} is unreadable — ${(err as Error).message}`,
       );
     }
+    // Provenance AFTER the successful read (r1: realpath on a missing file
+    // throws, and that throw must never garble the honest read error above).
+    if (opts.onRead) {
+      let realPath = abs;
+      try {
+        realPath = realpathSync(abs);
+      } catch {
+        /* raced away post-read; nominal stands as the best truth available */
+      }
+      let realBase = base;
+      try {
+        realBase = realpathSync(base);
+      } catch {
+        /* root itself unresolvable; compare against the nominal base */
+      }
+      const relFromBase = relative(realBase, realPath);
+      const escapesRoot = relFromBase.startsWith("..") || isAbsolute(relFromBase);
+      opts.onRead({ ref, kind, base, nominalPath: abs, realPath, escapesRoot });
+    }
+    return text;
   };
 }
 

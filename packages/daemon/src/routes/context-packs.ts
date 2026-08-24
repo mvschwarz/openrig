@@ -20,7 +20,8 @@ import { assembleBundle, assemblePlainFiles } from "../domain/context-packs/bund
 import { ContextPackError, type ContextPackEntry } from "../domain/context-packs/context-pack-types.js";
 import { parseManifest } from "../domain/context-packs/manifest-parser.js";
 import { composeProfile, ProfileComposeError, type ComposeRuntime, type ComposeSituation } from "../domain/context-packs/profile-composer.js";
-import { makeProfileReadFile, sourceKindForAddress, SourceResolutionError, type ProfileSourceRoots } from "../domain/context-packs/profile-source-resolver.js";
+import { makeProfileReadFile, sourceKindForAddress, SourceResolutionError, type ProfileSourceRoots, type SourceReadRecord } from "../domain/context-packs/profile-source-resolver.js";
+import { parseAddress } from "../domain/markdown-address.js";
 import { SettingsStore } from "../domain/user-settings/settings-store.js";
 
 interface ComposeBody {
@@ -265,7 +266,13 @@ export function contextPacksRoutes(): Hono {
 
     // Seat root from CONFIG when the caller names its seat. rig/seat are path
     // SEGMENTS — the bounded token check keeps a query string from walking the
-    // topology tree (same class as the install-ref segment rule).
+    // topology tree (same class as the install-ref segment rule). TRUST
+    // BOUNDARY (r1 rider 2): passing rig+seat is the caller's EXPLICIT GRANT of
+    // read access to that seat DIRECTORY SUBTREE — the pack chooses paths
+    // within the granted root (that is what a root grant means), and every tree
+    // read is visible in the provenance surface below, so an untrusted
+    // (URL-installed) pack's seat: atoms can neither read a root the caller
+    // did not grant nor deliver bytes whose origin is hidden.
     const roots: ProfileSourceRoots = {};
     const rig = c.req.query("rig");
     const seat = c.req.query("seat");
@@ -279,15 +286,37 @@ export function contextPacksRoutes(): Hono {
     }
 
     try {
+      // Byte provenance per read (r1 rider 1): the source label must be
+      // CHECKABLE. Keyed by ref — every piece with that ref shares the read.
+      const readsByRef = new Map<string, SourceReadRecord>();
       const profile = composeProfile({
         atoms: manifest.atoms,
         situation: situation as ComposeSituation,
         runtime: runtime as ComposeRuntime,
         ...(budgetTokens !== undefined ? { budgetTokens } : {}),
-        readFile: makeProfileReadFile({ packDir: entry.sourcePath, roots }),
+        readFile: makeProfileReadFile({
+          packDir: entry.sourcePath,
+          roots,
+          onRead: (record) => readsByRef.set(record.ref, record),
+        }),
         sourceKindFor: (a) => sourceKindForAddress(a.address),
       });
-      return c.json({ ref: entry.relativePath, ...profile });
+      const pieces = profile.pieces.map((p) => {
+        const record = readsByRef.get(parseAddress(p.address).ref);
+        return record
+          ? { ...p, provenance: { nominalPath: record.nominalPath, realPath: record.realPath, escapesRoot: record.escapesRoot } }
+          : p;
+      });
+      // ALWAYS an array (consumer guards one shape): empty = every piece's
+      // bytes came from inside its granted root. Report, never block —
+      // realpath containment would break legitimately-symlinked layouts.
+      const provenanceWarnings = pieces
+        .filter((p) => "provenance" in p && (p as { provenance: { escapesRoot: boolean } }).provenance.escapesRoot)
+        .map((p) => {
+          const prov = (p as { provenance: { realPath: string } }).provenance;
+          return `piece '${p.atomId}' (${p.address}): bytes came from OUTSIDE its ${p.sourceKind} root — real path ${prov.realPath}`;
+        });
+      return c.json({ ref: entry.relativePath, ...profile, pieces, provenanceWarnings });
     } catch (err) {
       if (err instanceof ProfileComposeError || err instanceof SourceResolutionError) {
         return c.json({ error: "profile_compose_failed", message: err.message }, 422);

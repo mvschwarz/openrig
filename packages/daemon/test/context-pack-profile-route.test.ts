@@ -114,9 +114,12 @@ describe("GET /library/by-ref/profile — situation-composed delivery (Atom 4b)"
     // the REF, wrong about the BYTES. Q2-Amendment 1 binds per-piece source
     // labels; provenance must follow the bytes. Report, never block: realpath
     // containment would break the product's own legitimately-symlinked layouts.
-    const { symlinkSync } = await import("node:fs");
+    const { symlinkSync, realpathSync } = await import("node:fs");
     const outside = join(tmp, "outside-secret.md");
     writeFileSync(outside, "## Recent Decisions\nSECRET BYTES");
+    // macOS /var is itself a symlink to /private/var — compare against the
+    // REAL path, which is exactly what the provenance surface reports.
+    const outsideReal = realpathSync(outside);
     const seatDir = join(tmp, "topology", "rigs", "r1", "seats", "s1");
     rmSync(join(seatDir, "RECAP.md"));
     symlinkSync(outside, join(seatDir, "RECAP.md"));
@@ -127,7 +130,7 @@ describe("GET /library/by-ref/profile — situation-composed delivery (Atom 4b)"
       provenanceWarnings: string[];
     };
     const recap = body.pieces.find((p) => p.atomId === "recap")!;
-    expect(recap.provenance.realPath).toBe(outside);
+    expect(recap.provenance.realPath).toBe(outsideReal);
     expect(recap.provenance.escapesRoot).toBe(true);
     expect(body.provenanceWarnings.some((w) => w.includes("recap"))).toBe(true);
     // The honest piece stays quiet: no warning names 'welcome', and its real
@@ -154,6 +157,26 @@ describe("GET /library/by-ref/profile — situation-composed delivery (Atom 4b)"
     expect(granted.status).toBe(200);
     const body = await granted.json() as { pieces: Array<{ atomId: string; provenance: { realPath: string } }> };
     expect(body.pieces.find((p) => p.atomId === "recap")!.provenance.realPath).toContain(join("rigs", "r1", "seats", "s1"));
+  });
+
+  it("r1 pre-judgment (2): a DANGLING symlink is its own NAMED failure, never a garbled provenance error", async () => {
+    const { symlinkSync } = await import("node:fs");
+    const seatDir = join(tmp, "topology", "rigs", "r1", "seats", "s1");
+    rmSync(join(seatDir, "RECAP.md"));
+    symlinkSync(join(tmp, "never-existed.md"), join(seatDir, "RECAP.md"));
+    const res = await app.request(url("situation=handover&runtime=claude&rig=r1&seat=s1"));
+    expect(res.status).toBe(422);
+    const body = await res.json() as { message: string };
+    expect(body.message).toMatch(/dangling|symlink/i);
+    expect(body.message).toContain("RECAP.md");
+  });
+
+  it("r1 pre-judgment (minor): provenanceWarnings is ALWAYS an array — empty on a clean compose", async () => {
+    const res = await app.request(url("situation=handover&runtime=claude&rig=r1&seat=s1"));
+    expect(res.status).toBe(200);
+    const body = await res.json() as { provenanceWarnings: string[] };
+    expect(Array.isArray(body.provenanceWarnings)).toBe(true);
+    expect(body.provenanceWarnings).toEqual([]);
   });
 
   it("bad inputs are NAMED 4xx errors: unknown situation, a pack without atoms, an unknown ref", async () => {
