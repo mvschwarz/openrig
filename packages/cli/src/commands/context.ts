@@ -513,12 +513,28 @@ Examples:
   // bytes), warnings to stderr; `--json` for programmatic use. Naming ruled: `rig context get`
   // (one library, one verb — NOT `rig skills get`; "skills" is an org category in the library).
   cmd.command("get")
-    .argument("<name-or-ref>", "Context library entry name or path-like ref")
+    .argument("<name-or-ref>", "Context library entry name, path-like ref, or address (<pack-ref>/<file>#H2-slug/H3-slug)")
     .description("Serve the assembled bundle for an agent to load on demand (the pull verb)")
     .option("--json", "JSON output")
     .action(async (nameOrRef: string, opts: { json?: boolean }) => {
       try {
         const client = await getClient();
+        // OPR.0.5.3.5 Atom 4c (Q4: one `name#H2/H3` form across the verb
+        // family): an address routes to the daemon's single resolver home;
+        // stdout is exactly the resolved span bytes so an agent consumes the
+        // addressed section and nothing else. Fail-loud passthrough — the
+        // daemon names every failure; this verb adds nothing to it.
+        if (nameOrRef.includes("#")) {
+          const res = await client.get<{ text?: string; message?: string; error?: string }>(
+            `/api/context-packs/library/resolve-address?address=${encodeURIComponent(nameOrRef)}`,
+          );
+          if (res.status !== 200) {
+            throw new Error(res.data?.message ?? res.data?.error ?? `Daemon returned HTTP ${res.status} for resolve-address`);
+          }
+          if (opts.json) console.log(JSON.stringify(res.data, null, 2));
+          else console.log(res.data.text);
+          return;
+        }
         const entry = await resolvePack(client, nameOrRef);
         const res = await client.get<PreviewWire>(`/api/context-packs/library/by-ref/preview?ref=${encodeURIComponent(entry.relativePath)}`);
         if (res.status !== 200) throw new Error(`Daemon returned HTTP ${res.status}`);
