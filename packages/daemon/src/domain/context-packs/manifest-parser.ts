@@ -165,6 +165,15 @@ export function parseManifest(rawYaml: string, sourcePath: string): ContextPackM
 const MARKDOWN_SUFFIXES = [".md", ".markdown"];
 const ATOM_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
+const ALLOWED_ATOM_KEYS = new Set([
+  "id", "address", "taxonomy", "regions", "situations", "purpose", "runtime", "order", "requires", "priority", "probe",
+]);
+// The typos worth a kindness (r1 F2): singular/plural slips on the fields whose
+// silent loss is sharpest.
+const NEAR_MISS_ATOM_KEYS: Record<string, string> = {
+  require: "requires", region: "regions", situation: "situations", probes: "probe",
+};
+
 function atomError(sourcePath: string, index: number, detail: string): ContextPackError {
   return new ContextPackError("manifest_invalid", `manifest at ${sourcePath} atoms[${index}]: ${detail}`, { sourcePath, index });
 }
@@ -191,6 +200,17 @@ function parseAtoms(raw: unknown, files: ContextPackManifestFile[], sourcePath: 
       throw atomError(sourcePath, i, "must be an object");
     }
     const a = entry as Record<string, unknown>;
+
+    // r1 F2: ingest knows the complete legal key set — an unknown key rejects
+    // LOUD. A `require:` typo silently dropping a dependency edge is the exact
+    // failure the field exists to prevent; every REQUIRED field failing loud
+    // while a typo'd OPTIONAL one fails silent would break the module contract.
+    for (const key of Object.keys(a)) {
+      if (!ALLOWED_ATOM_KEYS.has(key)) {
+        const hint = NEAR_MISS_ATOM_KEYS[key];
+        throw atomError(sourcePath, i, `unknown field '${key}'${hint ? ` — did you mean '${hint}'?` : ""} (allowed: ${[...ALLOWED_ATOM_KEYS].join(", ")})`);
+      }
+    }
 
     const id = a["id"];
     if (typeof id !== "string" || !ATOM_ID.test(id)) {
@@ -285,21 +305,38 @@ function parseAtoms(raw: unknown, files: ContextPackManifestFile[], sourcePath: 
     }
   }
   // A requires CYCLE can never be closed over by any subset profile — reject at
-  // ingest with the cycle spelled out.
+  // ingest with the cycle spelled out. The walk is ITERATIVE with an explicit
+  // stack (r1 F1): the recursive form threw a bare RangeError past ~5000 atoms —
+  // outside the ContextPackError channel this module promises — and depth is
+  // attacker-choosable (packs install from URLs, slice-07 R4); no recursion
+  // threshold is safe across Node versions/platforms, so there isn't one.
   const state = new Map<string, "visiting" | "done">();
   const byId = new Map(atoms.map((atom) => [atom.id, atom]));
-  const visit = (atomId: string, trail: string[]): void => {
-    const s = state.get(atomId);
-    if (s === "done") return;
-    if (s === "visiting") {
-      const cycle = [...trail.slice(trail.indexOf(atomId)), atomId].join(" -> ");
-      throw new ContextPackError("manifest_invalid", `manifest at ${sourcePath} atoms: requires cycle ${cycle} — no subset profile could ever close over it`, { sourcePath });
+  for (const root of atoms) {
+    if (state.get(root.id) === "done") continue;
+    // Each frame tracks how far through its requires list it has walked.
+    const stack: Array<{ id: string; next: number }> = [{ id: root.id, next: 0 }];
+    state.set(root.id, "visiting");
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1]!;
+      const reqs = byId.get(frame.id)!.requires ?? [];
+      if (frame.next >= reqs.length) {
+        state.set(frame.id, "done");
+        stack.pop();
+        continue;
+      }
+      const req = reqs[frame.next++]!;
+      const s = state.get(req);
+      if (s === "done") continue;
+      if (s === "visiting") {
+        const trail = stack.map((f) => f.id);
+        const cycle = [...trail.slice(trail.indexOf(req)), req].join(" -> ");
+        throw new ContextPackError("manifest_invalid", `manifest at ${sourcePath} atoms: requires cycle ${cycle} — no subset profile could ever close over it`, { sourcePath });
+      }
+      state.set(req, "visiting");
+      stack.push({ id: req, next: 0 });
     }
-    state.set(atomId, "visiting");
-    for (const req of byId.get(atomId)!.requires ?? []) visit(req, [...trail, atomId]);
-    state.set(atomId, "done");
-  };
-  for (const atom of atoms) visit(atom.id, []);
+  }
 
   return atoms;
 }
