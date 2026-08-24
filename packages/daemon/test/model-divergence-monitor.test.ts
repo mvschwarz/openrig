@@ -41,6 +41,32 @@ function makeMonitor(overrides?: Partial<ConstructorParameters<typeof ModelDiver
   return { monitor, sent, recorded };
 }
 
+describe("ModelDivergenceMonitor — per-seat throw isolation (row 3f66664a, defense-in-depth)", () => {
+  it("a seat whose check THROWS is reported as a detector error and does NOT suppress the remaining seats' checks", async () => {
+    const thrower: PinnedSeat = { ...SEAT, sessionName: "thrower@r", nodeId: "nT" };
+    const diverger: PinnedSeat = { ...SEAT, sessionName: "diverger@r", nodeId: "nD" };
+    const warns: string[] = [];
+    // The throwing seat is FIRST — before the fix its throw aborts the whole
+    // pass, so the diverging seat AFTER it is never checked (silent truncation).
+    const { monitor, recorded } = makeMonitor({
+      listPinnedSeats: () => [thrower, diverger],
+      readEffectiveModel: (seat: PinnedSeat) => {
+        if (seat.sessionName === "thrower@r") throw new Error("boom: this seat's comparison threw");
+        return { ok: true as const, model: "gpt-5.4-mini" }; // diverges from the codex pin
+      },
+      warn: (m: string) => warns.push(m),
+    });
+
+    const fired = await monitor.checkOnce();
+
+    // the diverging seat AFTER the thrower is still checked + proclaimed
+    expect(fired.map((p) => p.sessionName)).toContain("diverger@r");
+    expect((recorded as Array<{ sessionName: string }>).map((p) => p.sessionName)).toContain("diverger@r");
+    // the throwing seat is reported as a detector error, loudly
+    expect(warns.some((w) => w.includes("thrower@r") && /threw/i.test(w))).toBe(true);
+  });
+});
+
 describe("ModelDivergenceMonitor — the cause-agnostic comparison", () => {
   it("DIVERGENCE (the founder RED case): pinned != effective fires ONE proclamation with all four channels accounted for", async () => {
     const { monitor, sent, recorded } = makeMonitor();
