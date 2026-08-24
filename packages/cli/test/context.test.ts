@@ -453,9 +453,17 @@ files:
   });
 
   // ── OPR.0.5.3.7 R4 — `rig context add <url>` (external load) ──────────────
-  async function startPackServer(files: Record<string, string>): Promise<{ baseUrl: string; close: () => void }> {
+  async function startPackServer(
+    files: Record<string, string>,
+    redirects: Record<string, string> = {},
+  ): Promise<{ baseUrl: string; close: () => void }> {
     const srv = http.createServer((req, res) => {
       const p = (req.url ?? "/").replace(/^\//, "");
+      if (Object.prototype.hasOwnProperty.call(redirects, p)) {
+        res.writeHead(302, { location: redirects[p] });
+        res.end();
+        return;
+      }
       if (Object.prototype.hasOwnProperty.call(files, p)) {
         res.writeHead(200, { "content-type": "text/plain" });
         res.end(files[p]);
@@ -494,6 +502,26 @@ files:
         expect(exitCode).toBeUndefined();
         expect(existsSync(join(root, "url-pack", "manifest.yaml"))).toBe(true);
         expect(readFileSync(join(root, "url-pack", "SKILL.md"), "utf-8")).toContain("body");
+      });
+    } finally {
+      pack.close();
+    }
+  });
+
+  it("add <url>: follows a redirected manifest and resolves files from the FINAL url (r2 MEDIUM-1)", async () => {
+    // /redirect-manifest -> 302 -> /pack/manifest.yaml; SKILL.md must resolve
+    // against the FINAL manifest dir (/pack/), not the caller's original root.
+    const pack = await startPackServer(
+      { "pack/manifest.yaml": R4_MANIFEST, "pack/SKILL.md": "# hi\nredirected body\n" },
+      { "redirect-manifest": "/pack/manifest.yaml" },
+    );
+    try {
+      await withPacksRoot(async (root) => {
+        const { exitCode } = await captureLogs(async () => {
+          await makeCmd().parseAsync(["node", "rig", "context", "add", `${pack.baseUrl}redirect-manifest`, "--name", "redirected-pack"]);
+        });
+        expect(exitCode).toBeUndefined();
+        expect(readFileSync(join(root, "redirected-pack", "SKILL.md"), "utf-8")).toContain("redirected body");
       });
     } finally {
       pack.close();

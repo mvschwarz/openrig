@@ -191,7 +191,7 @@ function isHttpUrl(source: string): boolean {
   return /^https?:\/\//i.test(source);
 }
 
-async function fetchTextOrThrow(url: string, what: string): Promise<string> {
+async function fetchTextOrThrow(url: string, what: string): Promise<{ text: string; finalUrl: string }> {
   let res: Response;
   try {
     res = await fetch(url);
@@ -199,7 +199,9 @@ async function fetchTextOrThrow(url: string, what: string): Promise<string> {
     throw new Error(`Could not reach ${what} at ${url}: ${(err as Error).message}`);
   }
   if (!res.ok) throw new Error(`Could not fetch ${what} at ${url}: HTTP ${res.status} ${res.statusText}`.trim());
-  return await res.text();
+  // res.url is the FINAL url after any redirects — declared files must resolve
+  // relative to it, not the caller's original spelling (r2 MEDIUM-1).
+  return { text: await res.text(), finalUrl: res.url || url };
 }
 
 // OPR.0.5.3.7 R4 — install a context pack from a URL. <url> points at the pack's
@@ -214,12 +216,11 @@ async function installPackFromUrl(
   targetRoot: string,
 ): Promise<{ targetDir: string; installName: string }> {
   const manifestUrl = url.endsWith("/") ? `${url}manifest.yaml` : url;
-  const baseUrl = manifestUrl.slice(0, manifestUrl.lastIndexOf("/") + 1);
   mkdirSync(targetRoot, { recursive: true });
   const staging = mkdtempSync(join(targetRoot, ".tmp-add-"));
   try {
     // Fetch + validate the manifest before touching the target namespace.
-    const manifestText = await fetchTextOrThrow(manifestUrl, "manifest");
+    const { text: manifestText, finalUrl: finalManifestUrl } = await fetchTextOrThrow(manifestUrl, "manifest");
     writeFileSync(join(staging, "manifest.yaml"), manifestText);
     validateContextPackManifestForInstall(join(staging, "manifest.yaml"));
     const manifest = parseYaml(manifestText) as { name: string; files: Array<{ path: string }> };
@@ -230,9 +231,13 @@ async function installPackFromUrl(
     if (existsSync(targetDir)) {
       throw new Error(`A context pack named '${installName}' already exists at ${targetDir}. Remove it first or use --name to install under a different name.`);
     }
-    // Fetch every declared file relative to the manifest URL into the staging tree.
+    // Fetch every declared file relative to the manifest's FINAL url (after
+    // redirects), via the platform URL resolver — never the caller's original
+    // spelling (r2 MEDIUM-1: a redirected manifest must not resolve files against
+    // the stale request base).
     for (const f of manifest.files) {
-      const fileText = await fetchTextOrThrow(baseUrl + f.path, `file '${f.path}'`);
+      const fileUrl = new URL(f.path, finalManifestUrl).href;
+      const { text: fileText } = await fetchTextOrThrow(fileUrl, `file '${f.path}'`);
       const dest = join(staging, f.path);
       mkdirSync(dirname(dest), { recursive: true });
       writeFileSync(dest, fileText);
