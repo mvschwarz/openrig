@@ -1,6 +1,7 @@
 ---
 name: openrig-skills
 description: "Use when you're operating OpenRig and don't know which skill or context applies — this is the index of what ships with OpenRig, when to reach for each, and how to load it. Start here from a cold boot when nothing else is projected."
+allowed-tools: Bash(rig:*)
 metadata:
   openrig:
     stage: shipped
@@ -15,6 +16,19 @@ You're running inside OpenRig. OpenRig ships a set of **skills** — small docum
 Skills are **progressive disclosure**: a skill's *name + description* sit in your context ambiently (the "hot tier"); its *body* loads only when you open it. So you don't pre-read everything — you pattern-match a skill's "when" to your moment, then open just that one. This file is the index over the whole shipped set. (For the full model of building/operating agent software, open `software-for-agents`.)
 
 Every row below names **how to reach the skill** — already-hot, or an exact load path. No row is a dead end.
+
+## Loading an entry on demand — `rig context get`
+
+You do not need a file path to load a shipped entry. Pull any of them by name with the `rig` CLI:
+
+```
+rig context get <name>
+```
+
+This serves the entry's content **from the installed CLI**, so what you load always matches your running
+version — no path-guessing, no frozen-fork drift. Reach for it whenever a row's *when* matches your moment
+and its body is not already in your context; add `--json` for programmatic use. (The daemon assembles the
+same bundle `rig context preview` shows an operator — `get` is the agent-facing pull.)
 
 ## The index
 
