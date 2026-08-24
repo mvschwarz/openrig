@@ -47,7 +47,7 @@ describe("parseProofContract (pure)", () => {
     expect(parseProofContract("# PRD\n\n## Acceptance\n- [ ] thing\n")).toBeNull();
   });
 
-  it("parses checkbox items until the next section", () => {
+  it("parses checkbox items until the next section — checkbox-only (KI-5.3-2)", () => {
     const prd = [
       "# PRD",
       "## Proof contract",
@@ -57,11 +57,30 @@ describe("parseProofContract (pure)", () => {
       "## Next section",
       "- [ ] NOT a contract item",
     ].join("\n");
+    // KI-5.3-2 item-grammar unification: the proof-add grammar now matches the
+    // review composer's parseLogicalCheckboxes — CHECKBOX rows only. A bare dash
+    // bullet is no longer a phantom item that shifts every byIndex after it.
     expect(parseProofContract(prd)).toEqual([
       "the live park->resolve walk with the transitions row shown",
       "approve run showing frontmatter + audit row together",
-      "plain item without checkbox",
     ]);
+  });
+
+  // KI-5.3-2 — the proof-add grammar must AGREE with the review composer's
+  // parseLogicalCheckboxes over the same body, or a byIndex evidence ref points
+  // at a different promise on each side (silent mispair, not a visible miscount).
+  it("CONTROL — plain authored checkboxes are one item each (agreement, not a vacuous divergence)", () => {
+    expect(parseProofContract("## Proof contract\n- [ ] alpha\n- [x] beta\n")).toEqual(["alpha", "beta"]);
+  });
+
+  it("CLASS 2 — a deeper sub-bullet is JOINED into its parent item (was a phantom 3rd item)", () => {
+    expect(parseProofContract("## Proof contract\n- [ ] alpha\n  - sub detail\n- [ ] beta\n"))
+      .toEqual(["alpha - sub detail", "beta"]);
+  });
+
+  it("CLASS 3 — a bare (non-checkbox) bullet between items is dropped (checkbox-only)", () => {
+    expect(parseProofContract("## Proof contract\n- [ ] alpha\n- bare bullet\n- [x] beta\n"))
+      .toEqual(["alpha", "beta"]);
   });
 });
 
@@ -189,6 +208,42 @@ describe("rig proof add (fs-level, temp workspace)", () => {
     errs.length = 0;
     await run(baseArgs(["--name", "qa-clear-2.md"]));
     expect(errs.join("\n")).not.toContain("ADVISORY (C8");
+  });
+
+  // KI-5.3-2 — the item grammar the byIndex evidence ref resolves against must
+  // match the review composer's, over the SAME selected body.
+  async function jsonEcho(prd: string, evidences: string, name: string): Promise<{
+    contractItemsDeclared: number; contractSource: string | null; contractItemsCovered: string[];
+  }> {
+    if (prd) fs.writeFileSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md"), prd);
+    logs.length = 0;
+    await run(baseArgs(["--evidences", evidences, "--name", name, "--json"]));
+    return JSON.parse(logs.join("\n"));
+  }
+
+  it("CLASS 1 (mixed placeholder+authored): the placeholder is NOT a contract item and byIndex is not shifted", async () => {
+    const prd = "# PRD\n## Proof contract\n- [ ] [scaffold placeholder]\n- [ ] real deliverable A\n- [ ] real deliverable B\n";
+    const echo = await jsonEcho(prd, "1", "qa-c1.md");
+    // The scaffold placeholder is skipped per-item exactly as the composer does:
+    // TWO contract items, not three.
+    expect(echo.contractItemsDeclared).toBe(2);
+    expect(echo.contractSource).toBe("prd");
+    // THE MISPAIR, by value not count: evidence "1" is the FIRST REAL promise
+    // (real deliverable A). Pre-fix it landed on "[scaffold placeholder]",
+    // shifting every promise by one so evidence rendered against the wrong item.
+    expect(echo.contractItemsCovered).toEqual(["real deliverable A"]);
+  });
+
+  it("source: NO ## Proof contract section => contractSource null (nothing authored anywhere)", async () => {
+    const echo = await jsonEcho("# PRD\n## Acceptance\n- [ ] x\n", "", "qa-null.md");
+    expect(echo.contractSource).toBeNull();
+    expect(echo.contractItemsDeclared).toBe(0);
+  });
+
+  it("source: a present-but-empty ## Proof contract => contractSource 'prd', zero items (authored-empty, distinct from null)", async () => {
+    const echo = await jsonEcho("# PRD\n## Proof contract\n\n## Next\n- [ ] later\n", "", "qa-empty.md");
+    expect(echo.contractSource).toBe("prd");
+    expect(echo.contractItemsDeclared).toBe(0);
   });
 });
 
