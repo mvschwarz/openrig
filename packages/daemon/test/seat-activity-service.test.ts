@@ -190,6 +190,45 @@ describe("SeatActivityService", () => {
       return createFullTestDb();
     }
 
+    it("SINGLE-FLIGHT: a whole sweep started while another is in flight adds NO overlapping reads (mirrors seat-structural-activity-service MUST-FIX 2)", async () => {
+      const db = await makeDb();
+      try {
+        db.prepare("INSERT INTO rigs (id, name) VALUES ('r1', 'rig-a')").run();
+        db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('n1', 'r1', 'dev')").run();
+        db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('n2', 'r1', 'qa')").run();
+        const ts = new Date().toISOString().replace("T", " ").slice(0, 19);
+        db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES (?, ?, ?, ?, ?)").run("s1", "n1", "dev@rig", "running", ts);
+        db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES (?, ?, ?, ?, ?)").run("s2", "n2", "qa@rig", "running", ts);
+
+        // Gate the per-seat read so the FIRST sweep stays in flight while we fire a second.
+        let release!: () => void;
+        const gate = new Promise<void>((r) => { release = r; });
+        let reads = 0;
+        const tmux = {
+          readPaneLastActivity: vi.fn(async () => { reads += 1; await gate; return FIXED_NOW_EPOCH - 1; }),
+        } as unknown as TmuxAdapter;
+        const svc = new SeatActivityService({ tmux, defaultWindowSeconds: 3, now: () => FIXED_NOW });
+
+        const sweep1 = svc.pollAllRunningTmuxSeats(db);       // starts; issues both reads, both hold on the gate
+        await new Promise((r) => setTimeout(r, 0));           // flush so sweep1's reads are issued
+        expect(reads).toBe(2);                                // sweep1 is in flight, holding two reads
+
+        const sweep2 = svc.pollAllRunningTmuxSeats(db);       // must be single-flight while sweep1 holds
+        await new Promise((r) => setTimeout(r, 0));           // give sweep2 a tick to do whatever it will
+        expect(reads).toBe(2);                                // WITHOUT the guard sweep2 would add 2 more reads (overlap)
+
+        release();
+        await Promise.all([sweep1, sweep2]);
+        expect(reads).toBe(2);
+
+        // guard resets in finally: a fresh sweep after settle runs normally
+        await svc.pollAllRunningTmuxSeats(db);
+        expect(reads).toBe(4);
+      } finally {
+        db.close();
+      }
+    });
+
     it("polls every running tmux-bound seat once; stores observations keyed by canonical session name", async () => {
       const db = await makeDb();
       try {
