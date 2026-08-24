@@ -22,8 +22,9 @@ Grading:
 
 Layout:
 - `cases/*.ts` — selection + loading `EvalCase`s (natural prompt, expected patterns, order, rubric).
-- `fixtures/` — the seeded context-library packs to select among (config-resolved path; Track A —
-  resolve from `context.packs_root` / `OPENRIG_CONTEXT_PACKS_ROOT`, never a literal).
+- `fixtures/` — canonical-ref packs backing the structural canonical-ref checks only. The LIVE run
+  does NOT point a seat at these; per Repair 2 the eval resolves refs against the EXACT production
+  package (built by `generate-context-packs.mjs`), so fixture-vs-production drift fails structurally.
 - runner + grader code lives in `packages/daemon/test/helpers/eval-*.ts` (vitest-wired), standalone
   live entry `packages/daemon/scripts/run-evals.mjs` — mirroring the scenario system's split, not
   agent-browser's bun layout (this repo is node/tsx/vitest).

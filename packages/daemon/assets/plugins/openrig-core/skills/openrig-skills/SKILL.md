@@ -21,8 +21,9 @@ Every row below names **how to reach the skill** — already-hot, or an exact lo
 
 Don't guess a file path or a name. Go **ask → ref → load** in three steps:
 
-1. **Discover** — run `rig context list` (add `--json` for programmatic use). It prints every shipped
-   entry: its **ref**, its name, and *when* to reach for it.
+1. **Discover** — run `rig context list` for every shipped entry's **ref** and name. The *when* for
+   each is the index below (or `rig context list --json`, which carries each entry's purpose) — match
+   your moment there.
 2. **Select** — match your moment to a row's *when* and take its **ref**. Refs are canonical full paths
    that mirror the library layout — `skills/<namespace>/<name>` (e.g. `skills/core/rig-lifecycle`,
    `skills/process/systematic-debugging`). A unique bare name (e.g. `watchdog`) also resolves; any

@@ -21,12 +21,15 @@ import { runEvals } from "../test/helpers/eval-runner.ts";
 import { FakeProvider } from "../test/helpers/eval-provider.ts";
 import { RigSeatProvider } from "../test/helpers/eval-rig-provider.ts";
 import { recordedGrade } from "../test/helpers/eval-report.ts";
+import { buildProductionPackage, resolveCaseRefs, unresolvedCases } from "../test/helpers/eval-ref-resolution.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+const REPO = resolve(HERE, "..", "..", "..");
 const CASES_DIR = resolve(HERE, "..", "..", "test-system", "evals", "cases");
-// REPAIR 2: the eval resolves refs against the EXACT production package (the packaged builtin
-// library), NOT a hand-seeded fixture library — so fixture-vs-production drift fails structurally.
-const PRODUCTION_PACKAGE = resolve(HERE, "..", "context-packs");
+// REPAIR (re-review HIGH-1): the eval RUN resolves refs against the EXACT production package, BUILT
+// hermetically into a temp dir (never the gitignored context-packs residue), and validates them in
+// its OWN preflight for EVERY provider — not just rig.
+const PRODUCTION_PACKAGE = buildProductionPackage(REPO);
 
 const argv = process.argv.slice(2);
 const opt = (name, def) => {
@@ -39,6 +42,18 @@ const outPath = opt("--out", null);
 const { cases, errors } = loadEvalCasesFromDir(CASES_DIR);
 if (errors.length > 0) {
   console.error("[REFUSED] invalid eval cases:", JSON.stringify(errors));
+  process.exit(2);
+}
+
+// PREFLIGHT (shared validator — the same one the guard test uses): every case must yield a canonical
+// ref that resolves in the built production package, or the whole run refuses. This makes production
+// resolution part of the run, not a side test.
+const unresolved = unresolvedCases(resolveCaseRefs(cases, PRODUCTION_PACKAGE));
+if (unresolved.length > 0) {
+  console.error(
+    "[REFUSED] eval refs do not resolve in the production package: " +
+      unresolved.map((u) => `${u.caseId}:${u.ref ?? "<none>"}`).join(", "),
+  );
   process.exit(2);
 }
 

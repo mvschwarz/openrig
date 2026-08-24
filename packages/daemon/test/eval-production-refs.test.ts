@@ -1,45 +1,35 @@
 import { describe, it, expect } from "vitest";
-import { existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadEvalCasesFromDir } from "./helpers/eval-cases.js";
+import {
+  resolveCaseRefs,
+  unresolvedCases,
+  buildProductionPackage,
+} from "./helpers/eval-ref-resolution.js";
 
-// slice-07 REPAIR 2 — RED-first: every ref an eval case pulls must be a CANONICAL full-path ref
-// (skills/<ns>/<name>, matching the on-disk library layout) AND must resolve in the EXACT production
-// package. A bare ref (core/x) or a ref absent from production fails STRUCTURALLY, so fixture-vs-
-// production drift can never pass silently. No alias layer; slash-containing refs are exact lookup.
+// slice-07 Repairs 1+2 re-review (HIGH-1) — HERMETIC: build the EXACT production package into a temp
+// dir (never read the gitignored packages/daemon/context-packs residue), and assert PER CASE that
+// every case yields a canonical ref that resolves in the built package. Fixture-vs-production drift —
+// or a case with no canonical ref — fails structurally, by name. (Requires the daemon built: the
+// generator validates through the compiled manifest parser.)
 const HERE = dirname(fileURLToPath(import.meta.url));
+const REPO = resolve(HERE, "..", "..", "..");
 const CASES_DIR = resolve(HERE, "..", "..", "test-system", "evals", "cases");
-// packages/daemon/context-packs — the production package (build-package projects canon into it).
-const PROD_PKG = resolve(HERE, "..", "context-packs");
 
-/** Every ref a case pulls, from its expectedPatterns and (loading) its order.getPattern. */
-function refsOfCase(c: { expectedPatterns: string[]; order?: { getPattern: string } }): string[] {
-  const patterns = [...(c.expectedPatterns ?? [])];
-  if (c.order?.getPattern) patterns.push(c.order.getPattern);
-  const refs: string[] = [];
-  for (const p of patterns) {
-    const m = /rig context get\\s\+(\S+)/.exec(p);
-    if (m) refs.push(m[1]!);
-  }
-  return refs;
-}
-
-describe("REPAIR 2 — eval refs are canonical and resolve against production", () => {
+describe("REPAIR (re-review HIGH-1) — refs resolve in a freshly-built production package", () => {
   const { cases } = loadEvalCasesFromDir(CASES_DIR);
-  const refs = [...new Set(cases.flatMap(refsOfCase))];
+  const productionPackage = buildProductionPackage(REPO);
+  const resolutions = resolveCaseRefs(cases, productionPackage);
 
-  it("extracts a ref for every authored case", () => {
-    expect(refs.length).toBeGreaterThanOrEqual(cases.length ? 1 : 0);
-    expect(refs.length).toBeGreaterThan(0);
+  it("yields a canonical ref for EVERY case (per-case, not a suite-wide count)", () => {
+    expect(resolutions).toHaveLength(cases.length);
+    const bad = resolutions.filter((r) => r.ref === null || !r.canonical).map((r) => r.caseId);
+    expect(bad).toEqual([]);
   });
 
-  it("every ref is a canonical full-path ref (skills/<ns>/<name>)", () => {
-    expect(refs.filter((r) => !r.startsWith("skills/"))).toEqual([]);
-  });
-
-  it("every ref resolves in the exact production package (drift fails structurally)", () => {
-    const missing = refs.filter((r) => !existsSync(join(PROD_PKG, r, "manifest.yaml")));
+  it("every case ref resolves in the built production package", () => {
+    const missing = unresolvedCases(resolutions).map((r) => `${r.caseId}:${r.ref ?? "<none>"}`);
     expect(missing).toEqual([]);
   });
 });

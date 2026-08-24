@@ -2,10 +2,10 @@
 /*
  * slice-07 R6 — seed fixture context-library generator.
  *
- * Writes minimal context packs at the canonical refs the eval cases select among, so a LIVE eval
- * run has a real library to pull from. Derived output (regenerate; never hand-edit under fixtures/).
- * Real production content ships via R2 packaging; this is the dev/eval mirror. The live provider
- * points a spawned seat's config-resolved packs root (OPENRIG_CONTEXT_PACKS_ROOT) at fixtures/.
+ * Writes minimal context packs at the canonical refs (skills/<ns>/<name>) the eval cases select among.
+ * Derived output (regenerate; never hand-edit under fixtures/). Per Repair 2 the LIVE run does NOT
+ * point a seat at these fixtures — it resolves refs against the EXACT production package built by
+ * generate-context-packs.mjs. These fixtures back the structural canonical-ref checks only.
  */
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
