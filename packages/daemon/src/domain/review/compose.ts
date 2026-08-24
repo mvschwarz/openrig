@@ -54,6 +54,7 @@ import {
   hasAuthoredNumberedItem,
   isPlaceholderOnlyBlock,
   isPristineScaffoldSection,
+  selectProofContractBody,
 } from "../scope/scaffold-placeholder.js";
 
 // --- Fixed, visible v1 thresholds (markdown-steered tuning is a named fast-follow) ---
@@ -487,13 +488,26 @@ export function extractMiniReqsSelected(prd: string | null, readme: string | nul
   return { body: prdBody, fromReadme: false };
 }
 
-export function extractProofContractSelected(prd: string | null, readme: string | null): { items: PromisedItem[]; fromReadme: boolean } {
-  const prdBody = extractSection(prd, "Proof contract");
-  if (isPristineScaffoldSection(prdBody)) {
-    const readmeBody = extractSection(readme, "Proof contract");
-    if (readmeBody !== null && !isPristineScaffoldSection(readmeBody)) return { items: extractProofContract(readme), fromReadme: true };
-  }
-  return { items: extractProofContract(prd), fromReadme: false };
+// KI-5.3-2 second face (row e69daaef): source selection is ONE-HOMED in the
+// scaffold-placeholder twin (selectProofContractBody) so this reader, the
+// scope-audit twins, and proof-add can never diverge on the fallback target
+// again (the confirmed split-brain: proof-add derived from SPEC while this
+// reader fell back to README with no SPEC path). The optional `spec` param
+// keeps legacy 2-arg callers compiling; they get the shipped README-only
+// behavior until threaded.
+export function extractProofContractSelected(prd: string | null, readme: string | null, spec: string | null = null): { items: PromisedItem[]; fromReadme: boolean; source: "prd" | "spec" | "readme" | null } {
+  const selection = selectProofContractBody({
+    prdBody: extractSection(prd, "Proof contract"),
+    specBody: extractSection(spec, "Proof contract"),
+    readmeBody: extractSection(readme, "Proof contract"),
+  });
+  if (selection.source === "spec") return { items: extractProofContract(spec), fromReadme: false, source: "spec" };
+  if (selection.source === "readme") return { items: extractProofContract(readme), fromReadme: true, source: "readme" };
+  // source "prd" (authored) or null (nothing authored): the shipped behavior —
+  // parse the PRD; a pristine/absent PRD yields its own (empty/placeholder)
+  // item set, and `source` tells the caller which state it is in.
+  const authoredPrd = !isPristineScaffoldSection(extractSection(prd, "Proof contract"));
+  return { items: extractProofContract(prd), fromReadme: false, source: authoredPrd && prd !== null ? "prd" : null };
 }
 
 // ---------------------------------------------------------------------------

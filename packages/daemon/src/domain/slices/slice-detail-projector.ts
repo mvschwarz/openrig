@@ -491,6 +491,8 @@ export class SliceDetailProjector {
     // contract extraction can apply the per-section selection.
     let prdContent: string | null = null;
     let readmeContent: string | null = null;
+    let specContent: string | null = null;
+    let readmeFileContent: string | null = null;
     for (const fname of candidateFiles) {
       const full = path.join(sliceDir, fname);
       if (!fs.existsSync(full)) continue;
@@ -499,6 +501,11 @@ export class SliceDetailProjector {
       // SPEC.md and the legacy README.md are the same role — whichever is present carries the
       // node body the contract extraction below reads.
       if (isNodeFile(fname) && readmeContent === null) readmeContent = content;
+      // KI-5.3-2 second face: SPEC and README captured DISTINCTLY so the
+      // one-homed source selection labels honestly (spec vs readme) while the
+      // node-file precedence (SPEC first) is preserved by the selection order.
+      if (fname === "SPEC.md") specContent = content;
+      if (fname === "README.md") readmeFileContent = content;
       // qitem-render-driver B — the SHARED logical-checkbox relation (the
       // same parser Review's proof contract consumes). rawText carries any
       // joined continuation and IS the VM-006 join key, so acceptance rows
@@ -574,7 +581,7 @@ export class SliceDetailProjector {
     // (one selection rule, one grammar home): an authored README contract
     // wins over a pristine scaffold-only PRD contract, so the VM-006 lift
     // joins against the contract the author actually wrote.
-    const promised = extractProofContractSelected(prdContent, readmeContent).items;
+    const promised = extractProofContractSelected(prdContent, readmeFileContent, specContent).items;
     if (promised.length > 0) {
       const promisedByKey = new Map<string, number[]>();
       promised.forEach((p, i) => {

@@ -4,6 +4,7 @@ import { Command } from "commander";
 import YAML from "yaml";
 import { findSlice, resolveMissionsRoot } from "../lib/scope/scope-fs.js";
 import { ScopeCliError } from "../lib/scope/types.js";
+import { selectProofContractBody } from "../lib/scope/scaffold-placeholder.js";
 
 /**
  * `rig proof` — the proof-drop write path (OPR.0.4.4.19 FR-8 + FR-11;
@@ -227,41 +228,53 @@ export function proofCommand(): Command {
         // D2 — validate evidences refs against the slice's declared proof
         // contract (unknown refs = a named WARN, never a rejection), and
         // emit the coverage/self_check ADVISORY when a contract exists.
-        const prdPath = path.join(slice.absPath, "IMPLEMENTATION-PRD.md");
-        const prdItems = fs.existsSync(prdPath)
-          ? parseProofContract(fs.readFileSync(prdPath, "utf8"))
-          : null;
-        let contractItems = prdItems;
-        let contractSource: "prd" | "spec" | null = prdItems ? "prd" : null;
-        // KI-5.3-2 SECOND FACE (row ki532proofssot): a PRISTINE SCAFFOLD
-        // contract — every item still the template's [bracket placeholder] —
-        // must NEVER become the canonical index (the observed failure:
-        // contractItemsDeclared=1 pairing evidence against scaffold text while
-        // the locked SPEC held six items). The truthful rule: derive from the
-        // SPEC's own authored ## Proof contract with a NAMED advisory, else
-        // degrade to no-contract. A genuinely AUTHORED PRD stays canonical
-        // (the first-face ruling, preserved).
-        const isPlaceholder = (it: string) => /^\[.*\]$/.test(it.trim());
-        if (prdItems && prdItems.length > 0 && prdItems.every(isPlaceholder)) {
-          const specPath = path.join(slice.absPath, "SPEC.md");
-          const specItems = fs.existsSync(specPath)
-            ? parseProofContract(fs.readFileSync(specPath, "utf8"))
-            : null;
-          if (specItems && specItems.length > 0 && !specItems.every(isPlaceholder)) {
-            contractItems = specItems;
-            contractSource = "spec";
-            advisories.push(
-              `contract source: IMPLEMENTATION-PRD.md's ## Proof contract is a pristine SCAFFOLD (placeholder items only) — ` +
-                `derived the ${specItems.length}-item contract from SPEC.md instead. Author the PRD contract to make it canonical.`,
-            );
-          } else {
-            contractItems = null;
-            contractSource = null;
-            advisories.push(
-              "contract source: IMPLEMENTATION-PRD.md's ## Proof contract is a pristine SCAFFOLD and SPEC.md declares no authored contract — " +
-                "treated as no declared contract (a placeholder index is never used).",
-            );
-          }
+        // KI-5.3-2 follow-up (row e69daaef): contract-source selection is
+        // ONE-HOMED in the scaffold-placeholder twin (selectProofContractBody)
+        // — the same selection compose and the audit consume, so evidence can
+        // never again record against one contract and display against another.
+        // proof-add reads all three documents and the twin decides; the twins
+        // are byte-equal by the arch parity contract (deliberately NOT
+        // deduplicated across packages — the ruling in the twin's own header;
+        // this deviates from the follow-up row's subpath-export wording WITH
+        // that citation: same-package twin import preserves the parity
+        // arrangement a cross-package consumer would break).
+        const readDoc = (name: string): string | null => {
+          const fp = path.join(slice.absPath, name);
+          return fs.existsSync(fp) ? fs.readFileSync(fp, "utf8") : null;
+        };
+        const prdDoc = readDoc("IMPLEMENTATION-PRD.md");
+        const specDoc = readDoc("SPEC.md");
+        const readmeDoc = readDoc("README.md");
+        const contractBody = (doc: string | null): string | null => {
+          if (doc === null) return null;
+          const items = parseProofContract(doc);
+          if (items === null) return null;
+          const lines = doc.split("\n");
+          const start = lines.findIndex((l) => /^##\s+Proof contract\s*$/i.test(l.trim()));
+          const rest = lines.slice(start + 1);
+          const end = rest.findIndex((l) => /^##\s/.test(l));
+          return rest.slice(0, end === -1 ? undefined : end).join("\n");
+        };
+        const selection = selectProofContractBody({
+          prdBody: contractBody(prdDoc),
+          specBody: contractBody(specDoc),
+          readmeBody: contractBody(readmeDoc),
+        });
+        const contractSource = selection.source;
+        const contractItems = contractSource === null
+          ? null
+          : parseProofContract(contractSource === "prd" ? prdDoc! : contractSource === "spec" ? specDoc! : readmeDoc!);
+        if (contractSource !== null && contractSource !== "prd") {
+          advisories.push(
+            `contract source: IMPLEMENTATION-PRD.md's ## Proof contract is ${prdDoc === null ? "absent" : "a pristine SCAFFOLD"} — ` +
+              `the ${contractItems?.length ?? 0}-item contract derives from ${contractSource === "spec" ? "SPEC.md" : "README.md"} ` +
+              `(the one-homed selection all readers share). Author the PRD contract to make it canonical.`,
+          );
+        } else if (contractSource === null && prdDoc !== null && parseProofContract(prdDoc) !== null) {
+          advisories.push(
+            "contract source: IMPLEMENTATION-PRD.md's ## Proof contract is a pristine SCAFFOLD and no other document authors one — " +
+              "treated as no declared contract (a placeholder index is never used).",
+          );
         }
         let coveredItems: string[] = [];
         if (contractItems && contractItems.length > 0) {

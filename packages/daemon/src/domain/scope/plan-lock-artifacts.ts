@@ -22,7 +22,7 @@ import { isScaffoldPlaceholderText } from "./scaffold-placeholder.js";
  * @param readme slice README content (the approve read shell's originalBytes); null if absent.
  * @param prd slice IMPLEMENTATION-PRD content; null when missing/unreadable (fail-open).
  */
-export function derivePlanLockArtifacts(readme: string | null, prd: string | null): LockedArtifact[] {
+export function derivePlanLockArtifacts(readme: string | null, prd: string | null, spec: string | null = null): LockedArtifact[] {
   const out: LockedArtifact[] = [];
   const seen = new Set<string>(); // dedup by NORMALIZED path; first source wins
 
@@ -48,7 +48,7 @@ export function derivePlanLockArtifacts(readme: string | null, prd: string | nul
 
   // 2. Selected proof-contract plannedRefs — an authored README section wins over
   //    a pristine-scaffold PRD section (extractProofContractSelected, README-wins).
-  for (const item of extractProofContractSelected(prd, readme).items) {
+  for (const item of extractProofContractSelected(prd, readme, spec).items) {
     if (!item.plannedRef) continue;
     add(item.text || item.plannedRef, item.plannedRef, "mockup"); // name = item text, path fallback
   }
