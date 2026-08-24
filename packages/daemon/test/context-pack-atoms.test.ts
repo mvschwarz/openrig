@@ -175,6 +175,41 @@ ${over}`);
 `), "m.yaml")).toThrow(/cycle/i);
   });
 
+  it("Atom 4a: a TREE-prefixed address (seat:/mission:) is legal at ingest — declared-file applies to library refs only", () => {
+    // Q2-Amendment 1(c): nothing must be library-homed to be composable. A
+    // seat-homed recap atom declares a seat: address; the file exists on the
+    // SEAT TREE, not in the pack, so the declared-file check must not fire.
+    // Structural rules still hold: traversal rejects, header paths need markdown.
+    const m = parseManifest(withAtoms(`
+  - id: recap
+    address: "seat:RECAP.md#recent-decisions"
+    taxonomy: lore
+    situations: [handover]
+    purpose: width
+    order: 90
+    priority: core
+`), "m.yaml");
+    expect(m.atoms![0]!.address).toBe("seat:RECAP.md#recent-decisions");
+    expect(() => parseManifest(withAtoms(`
+  - id: sneaky
+    address: "seat:../LEARNED.md"
+    taxonomy: lore
+    situations: [handover]
+    purpose: width
+    order: 91
+    priority: core
+`), "m.yaml")).toThrow(/traversal/i);
+    expect(() => parseManifest(withAtoms(`
+  - id: notmd
+    address: "mission:data.yaml#x"
+    taxonomy: mission
+    situations: [fresh]
+    purpose: depth
+    order: 92
+    priority: core
+`), "m.yaml")).toThrow(/markdown/i);
+  });
+
   it("rejects an address whose ref is not a declared pack file", () => {
     expect(() => parseManifest(withAtoms(`
   - id: stray
