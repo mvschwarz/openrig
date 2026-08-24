@@ -199,6 +199,40 @@ describe("GET /library/by-ref/profile — situation-composed delivery (Atom 4b)"
     expect(body.provenanceWarnings).toEqual([]);
   });
 
+  it("Atom 4d: a mission: atom resolves from the RULED workspace.slices_root key when the caller names the mission — absent param stays a loud missing-config", async () => {
+    // Desk ruling (row 2675535d): do NOT mint a new config key — the missions
+    // tree already has workspace.slices_root; mission root = <slices_root>/<mission>.
+    const savedSlices = process.env["OPENRIG_WORKSPACE_SLICES_ROOT"];
+    try {
+      const missionDir = join(tmp, "missions", "release-x");
+      mkdirSync(missionDir, { recursive: true });
+      writeFileSync(join(missionDir, "NOTES.md"), "## Watch Items\nW-99 lives here");
+      process.env["OPENRIG_WORKSPACE_SLICES_ROOT"] = join(tmp, "missions");
+      const withMission = MANIFEST + `  - id: watch
+    address: "mission:NOTES.md#watch-items"
+    taxonomy: mission
+    situations: [handover]
+    purpose: width
+    order: 50
+    priority: recommended
+`;
+      writeFileSync(join(libRoot, "packs", "world", "manifest.yaml"), withMission);
+      const granted = await app.request(url("situation=handover&runtime=claude&rig=r1&seat=s1&mission=release-x"));
+      expect(granted.status).toBe(200);
+      const body = await granted.json() as { pieces: Array<{ atomId: string; sourceKind: string; text: string }> };
+      const watch = body.pieces.find((p) => p.atomId === "watch")!;
+      expect(watch.sourceKind).toBe("mission");
+      expect(watch.text).toContain("W-99 lives here");
+      // No mission param: the mission-homed atom fails loud, never a thinner walk.
+      const denied = await app.request(url("situation=handover&runtime=claude&rig=r1&seat=s1"));
+      expect(denied.status).toBe(422);
+      expect(((await denied.json()) as { message: string }).message).toMatch(/mission/i);
+    } finally {
+      if (savedSlices === undefined) delete process.env["OPENRIG_WORKSPACE_SLICES_ROOT"];
+      else process.env["OPENRIG_WORKSPACE_SLICES_ROOT"] = savedSlices;
+    }
+  });
+
   it("bad inputs are NAMED 4xx errors: unknown situation, a pack without atoms, an unknown ref", async () => {
     const badSituation = await app.request(url("situation=someday&runtime=claude"));
     expect(badSituation.status).toBe(400);

@@ -92,6 +92,23 @@ describe("GET /library/resolve-address — file-level span serving (Atom 4c)", (
     expect(msg).toContain("welcome"); // names the real candidates
   });
 
+  it("r1 4c rec (1): the NO-NESTED-PACKS invariant the longest-prefix split borrows — a pack inside a pack dir is NOT indexed", async () => {
+    // r1's A1 finding: the split is safe ONLY because the scanner never
+    // recurses into a pack directory, so no pack ref can prefix another. That
+    // invariant was enforced 200 lines away and asserted nowhere — this pin
+    // converts the silent future break (sub-pack support) into a red test.
+    const libRoot = join(tmp, "lib");
+    const inner = join(libRoot, "packs", "world", "nested-pack");
+    mkdirSync(inner, { recursive: true });
+    writeFileSync(join(inner, "manifest.yaml"), 'name: nested\nversion: "1"\nfiles:\n  - { path: n.md, role: x }\n');
+    writeFileSync(join(inner, "n.md"), "## N\nnested pack body");
+    const lib2 = new ContextPackLibraryService({ roots: [{ path: libRoot, sourceType: "user_file" }] });
+    lib2.scan();
+    const refs = lib2.list().map((e) => e.relativePath);
+    expect(refs).toContain("packs/world");
+    expect(refs.some((r) => r.includes("nested-pack"))).toBe(false);
+  });
+
   it("an unknown pack prefix and a file outside the pack both FAIL LOUD naming what was tried", async () => {
     const noPack = await resolve("packs/ghost/walk.md#welcome");
     expect(noPack.status).toBe(404);

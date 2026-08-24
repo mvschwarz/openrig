@@ -1,0 +1,121 @@
+// OPR.0.5.3.5 Atom 4d — the CLI pins r1 asked for (4c A3 rec) plus the profile
+// verb. The ROUTING FORK is the one piece of logic that lives ONLY in the CLI:
+// an address carrying '#' goes to the daemon's resolver home, a bare ref stays
+// on the pack path — if it regresses, the failure is quiet. These pins cover
+// the fork without duplicating any resolution behavior (the daemon owns that).
+
+import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import http from "node:http";
+import { Command } from "commander";
+import { contextCommand } from "../src/commands/context.js";
+import { DaemonClient } from "../src/client.js";
+import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
+import type { StatusDeps } from "../src/commands/status.js";
+
+function mockLifecycleDeps(port: number): LifecycleDeps {
+  return {
+    spawn: vi.fn(() => ({ pid: 1, unref: vi.fn() }) as never),
+    fetch: vi.fn(async () => ({ ok: true })),
+    kill: vi.fn(() => true),
+    readFile: vi.fn((p: string) => (p === STATE_FILE
+      ? JSON.stringify({ pid: 123, port, db: "t.sqlite", startedAt: "2026-08-24T00:00:00Z" } as DaemonState)
+      : null)),
+    writeFile: vi.fn(),
+    removeFile: vi.fn(),
+    exists: vi.fn((p: string) => p === STATE_FILE),
+    mkdirp: vi.fn(),
+    openForAppend: vi.fn(() => 3),
+    isProcessAlive: vi.fn(() => true),
+  };
+}
+
+async function run(port: number, argv: string[]): Promise<{ logs: string[]; errLogs: string[] }> {
+  const deps: StatusDeps = {
+    lifecycleDeps: mockLifecycleDeps(port),
+    clientFactory: (baseUrl) => new DaemonClient(baseUrl),
+  };
+  const logs: string[] = [];
+  const errLogs: string[] = [];
+  const origLog = console.log;
+  const origErr = console.error;
+  console.log = (...a: unknown[]) => { logs.push(a.map(String).join(" ")); };
+  console.error = (...a: unknown[]) => { errLogs.push(a.map(String).join(" ")); };
+  try {
+    const program = new Command();
+    program.exitOverride();
+    program.addCommand(contextCommand(deps));
+    await program.parseAsync(["node", "rig", "context", ...argv]);
+  } catch { /* commander exitOverride */ } finally {
+    console.log = origLog;
+    console.error = origErr;
+    process.exitCode = undefined;
+  }
+  return { logs, errLogs };
+}
+
+describe("rig context — address fork + profile verb (Atom 4d)", () => {
+  let server: http.Server;
+  let port: number;
+  let hits: string[];
+
+  beforeAll(async () => {
+    hits = [];
+    server = http.createServer((req, res) => {
+      const url = req.url ?? "";
+      hits.push(url);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      if (url.startsWith("/api/context-packs/library/resolve-address")) {
+        res.end(JSON.stringify({ address: "a", packRef: "packs/smoke", filePath: "notes.md", text: "THE SPAN BYTES" }));
+      } else if (url.startsWith("/api/context-packs/library/by-ref/profile")) {
+        res.end(JSON.stringify({
+          ref: "packs/smoke", situation: "handover", runtime: "claude",
+          pieces: [
+            { atomId: "welcome", address: "notes.md#welcome", sourceKind: "library", order: 1, priority: "core", text: "hello", estimatedTokens: 2 },
+            { atomId: "recap", address: "seat:RECAP.md#d", sourceKind: "seat", order: 9, priority: "core", text: "decisions", estimatedTokens: 3 },
+          ],
+          totalEstimatedTokens: 5,
+          budget: { limitTokens: 4, overageTokens: 1, dropCandidates: [{ atomId: "recap", priority: "core", estimatedTokens: 3 }] },
+          provenanceWarnings: ["piece 'recap' (seat:RECAP.md#d): bytes came from OUTSIDE its seat root — real path /x"],
+        }));
+      } else if (url.startsWith("/api/context-packs/library/by-ref/preview")) {
+        res.end(JSON.stringify({ id: "x", name: "smoke", version: "1", bundleText: "WHOLE PACK BUNDLE", bundleBytes: 17, estimatedTokens: 5, files: [], missingFiles: [] }));
+      } else if (url.startsWith("/api/context-packs/library/by-ref")) {
+        res.end(JSON.stringify({ id: "x", kind: "context-pack", name: "smoke", version: "1", purpose: null, sourceType: "user_file", sourcePath: "/s", relativePath: "packs/smoke", updatedAt: "t", manifestEstimatedTokens: null, derivedEstimatedTokens: 5, files: [] }));
+      } else {
+        res.end(JSON.stringify([]));
+      }
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    port = (server.address() as { port: number }).port;
+  });
+
+  afterAll(async () => { await new Promise<void>((r) => { server.close(() => r()); }); });
+
+  it("FORK PIN: a '#' address routes to resolve-address and stdout is exactly the span; a bare ref never touches resolve-address", async () => {
+    hits.length = 0;
+    const withAddr = await run(port, ["get", "packs/smoke/notes.md#welcome"]);
+    expect(hits.some((h) => h.startsWith("/api/context-packs/library/resolve-address"))).toBe(true);
+    expect(withAddr.logs.join("\n")).toBe("THE SPAN BYTES");
+    hits.length = 0;
+    const bare = await run(port, ["get", "packs/smoke"]);
+    expect(hits.some((h) => h.startsWith("/api/context-packs/library/resolve-address"))).toBe(false);
+    expect(bare.logs.join("\n")).toContain("WHOLE PACK BUNDLE");
+  });
+
+  it("PROFILE VERB: composes by situation with the grant params threaded, pieces labeled on stdout, budget + provenance warnings on stderr", async () => {
+    hits.length = 0;
+    const out = await run(port, ["profile", "packs/smoke", "--situation", "handover", "--runtime", "claude", "--rig", "r1", "--seat", "s1", "--budget", "4"]);
+    const profileHit = hits.find((h) => h.startsWith("/api/context-packs/library/by-ref/profile"))!;
+    expect(profileHit).toBeDefined();
+    for (const frag of ["situation=handover", "runtime=claude", "rig=r1", "seat=s1", "budget=4"]) {
+      expect(profileHit).toContain(frag);
+    }
+    const stdout = out.logs.join("\n");
+    expect(stdout).toContain("welcome");
+    expect(stdout).toContain("[library]");
+    expect(stdout).toContain("[seat]");
+    const stderr = out.errLogs.join("\n");
+    expect(stderr).toMatch(/budget/i);
+    expect(stderr).toContain("OUTSIDE its seat root");
+  });
+});
