@@ -114,6 +114,24 @@ describe("resolveAddress — fail-loud resolution on real text", () => {
   it("an address inside a code fence does NOT resolve", () => {
     expect(() => resolveAddress(CORPUS, ["not-a-header-inside-a-fence"])).toThrow(AddressResolutionError);
   });
+  it("Atom 4c: an AMBIGUOUS address (two sections share the path) FAILS LOUD naming both lines — first-match would serve the wrong span silently", () => {
+    // A duplicate header-path is a VALIDATOR finding, but the serving path
+    // must not depend on the validator having run: a file that ships with
+    // duplicates would otherwise serve the FIRST match — a silent wrong
+    // answer, the one behavior this grammar exists to kill.
+    const dup = ["## Setup", "first setup", "## Other", "x", "## Setup", "second setup"].join("\n");
+    try {
+      resolveAddress(dup, ["setup"]);
+      expect.unreachable("ambiguous resolution must throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(AddressResolutionError);
+      const msg = (err as Error).message;
+      expect(msg).toMatch(/ambiguous/i);
+      expect(msg).toContain("0"); // first match's line
+      expect(msg).toContain("4"); // second match's line
+    }
+  });
+
   it("a non-existent address FAILS LOUD with the reason and the candidates, never empty", () => {
     try {
       resolveAddress(CORPUS, ["getting-started", "does-not-exist"]);
