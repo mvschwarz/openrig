@@ -22,6 +22,9 @@ const CASES: EvalCase[] = [
   { id: "bad-absent", name: "x", category: "selection", prompt: "p", expectedPatterns: ["rig context get\\s+skills/core/absent"] },
   { id: "bad-bare", name: "x", category: "selection", prompt: "p", expectedPatterns: ["rig context get\\s+core/known"] },
   { id: "bad-noref", name: "x", category: "selection", prompt: "p", expectedPatterns: ["do the thing"] },
+  // slice-05 Q3 behavior case — asserts observable behavior, NO context-pull contract, so it must
+  // never be refused by the production-ref preflight (re-review restack HIGH-1).
+  { id: "behavior-observable", name: "x", category: "behavior", prompt: "p", expectedPatterns: ["rig context (get|profile)"] },
 ];
 
 describe("eval-ref-resolution — per-case, by name", () => {
@@ -35,10 +38,22 @@ describe("eval-ref-resolution — per-case, by name", () => {
     expect(res.find((r) => r.caseId === "good")?.resolved).toBe(true);
   });
 
-  it("flags absent / bare (non-canonical) / no-ref cases — each by caseId", () => {
+  it("flags only the SELECTION/LOADING cases (absent / bare / no-ref) — never the behavior case", () => {
+    // The behavior case has no context-pull contract, so it is NOT among the refused cases.
     expect(unresolvedCases(res).map((r) => r.caseId).sort()).toEqual(["bad-absent", "bad-bare", "bad-noref"]);
     expect(res.find((r) => r.caseId === "bad-noref")?.ref).toBeNull();
     expect(res.find((r) => r.caseId === "bad-bare")?.canonical).toBe(false);
+  });
+
+  it("does NOT refuse a behavior case — it has no context-pull contract (re-review restack HIGH-1)", () => {
+    const behavior = res.find((r) => r.caseId === "behavior-observable");
+    expect(behavior?.requiresRef).toBe(false);
+    // run-evals.mjs refuses the whole run iff `unresolvedCases(resolveCaseRefs(...))` is non-empty
+    // (the entry's exit-2 preflight). Pinning that composition on a MIXED selection+behavior set proves
+    // the entry can never refuse a valid behavior case, while genuinely-broken selection cases still do.
+    const refused = unresolvedCases(res);
+    expect(refused.map((r) => r.caseId)).not.toContain("behavior-observable");
+    expect(refused.every((r) => r.requiresRef)).toBe(true);
   });
 });
 

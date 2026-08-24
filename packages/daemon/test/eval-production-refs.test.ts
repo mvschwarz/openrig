@@ -23,9 +23,11 @@ describe("REPAIR (re-review HIGH-1) — refs resolve in a freshly-built producti
   afterAll(built.cleanup);
   const resolutions = resolveCaseRefs(cases, built.dir);
 
-  it("yields a canonical ref for EVERY case (per-case, not a suite-wide count)", () => {
+  it("yields a canonical ref for EVERY ref-bearing case (per-case, not a suite-wide count)", () => {
     expect(resolutions).toHaveLength(cases.length);
-    const bad = resolutions.filter((r) => r.ref === null || !r.canonical).map((r) => r.caseId);
+    // Only selection/loading cases contract to pull context; a behavior case (slice-05 Q3) carries
+    // no ref and is exempt — enforce canonicality exactly where the contract requires it.
+    const bad = resolutions.filter((r) => r.requiresRef && (r.ref === null || !r.canonical)).map((r) => r.caseId);
     expect(bad).toEqual([]);
   });
 

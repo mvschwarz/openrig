@@ -10,10 +10,13 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { EvalCase } from "./eval-grader.js";
+import type { EvalCase, EvalCategory } from "./eval-grader.js";
 
 export interface CaseRefResolution {
   caseId: string;
+  category: EvalCategory;
+  /** Only selection/loading cases have a context-pull contract; behavior cases do not. */
+  requiresRef: boolean;
   /** The canonical ref extracted from the case, or null if none was found. */
   ref: string | null;
   /** ref is a canonical full path (skills/<ns>/<name>). */
@@ -31,18 +34,25 @@ export function extractRef(pattern: string): string | null {
 /** One resolution per case (never fewer), against a built production package directory. */
 export function resolveCaseRefs(cases: EvalCase[], productionPackageDir: string): CaseRefResolution[] {
   return cases.map((c) => {
+    // Only selection/loading cases contract to pull context; behavior cases (slice-05 Q3) assert
+    // observable behavior and carry no context ref, so they are never subject to ref resolution.
+    const requiresRef = c.category === "selection" || c.category === "loading";
     const patterns = [...(c.expectedPatterns ?? [])];
     if (c.order?.getPattern) patterns.push(c.order.getPattern);
     const ref = patterns.map(extractRef).find((r) => r !== null) ?? null;
     const canonical = ref !== null && ref.startsWith("skills/");
     const resolved = canonical && existsSync(join(productionPackageDir, ref, "manifest.yaml"));
-    return { caseId: c.id, ref, canonical, resolved };
+    return { caseId: c.id, category: c.category, requiresRef, ref, canonical, resolved };
   });
 }
 
-/** Cases whose ref is missing, non-canonical, or absent from the production package. */
+/**
+ * Cases that MUST resolve a canonical production ref but do not — i.e. selection/loading cases whose
+ * ref is missing, non-canonical, or absent from the production package. Behavior cases carry no
+ * context-pull contract and are never included, so a valid behavior case never refuses the run.
+ */
 export function unresolvedCases(resolutions: CaseRefResolution[]): CaseRefResolution[] {
-  return resolutions.filter((r) => !r.resolved);
+  return resolutions.filter((r) => r.requiresRef && !r.resolved);
 }
 
 export interface BuiltProductionPackage {
