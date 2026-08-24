@@ -7,13 +7,24 @@ description: >-
   compaction or summarization, deciding single-agent versus subagents, engineering handoffs
   between agents, or picking a tool loadout. NOT for rewording a prompt's tone, choosing which
   model to pin, or debugging business logic — those are adjacent moments this skill does not
-  serve.
+  serve. Historical 2024–2025 snapshot; not normative for present-day frontier models — see the
+  Status section.
 metadata:
   openrig:
     stage: provisional
 ---
 
-# Context Engineering
+# Traditional Context Engineering — 2024–2025 Snapshot
+
+## Status: provisional historical research snapshot
+
+This skill is a provisional historical research snapshot of context-engineering practice as
+published in 2024–2025. It is NOT normative. Do not apply it prescriptively to current frontier
+models without re-verification. On any conflict, OpenRig current skills, explicit user rulings,
+and directly measured OpenRig practice PREVAIL over this document. Treat these areas as
+particularly suspect pending re-verification: compaction/summarization guidance, minimal-upfront
+versus broad orientation, just-in-time lookup assumptions, fixed context ceilings, and
+single-agent versus multi-agent advice.
 
 Curated distillation of the best publicly available expertise on context engineering for coding
 agents, drawn from primary sources at Anthropic, OpenAI, and leading practitioners (Manus,
