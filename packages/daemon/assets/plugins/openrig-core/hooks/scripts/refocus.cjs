@@ -22,20 +22,23 @@
 // be monotonic, not exact). Tune with OPENRIG_REFOCUS_BYTES.
 //
 // CONTENT IS CONFIGURABLE, NEVER PROJECT-SPECIFIC IN SOURCE. Resolution:
-//   1. OPENRIG_REFOCUS_CONTENT_FILE env — an operator-authored file.
-//   2. $OPENRIG_HOME/refocus/REFOCUS.md — the instance's standing content.
-//   3. The generic three-question orientation below (project-neutral).
+//   1. OPENRIG_REFOCUS_CONTENT_REF env — resolved by `rig context get`.
+//   2. OPENRIG_REFOCUS_CONTENT_FILE env — an operator-authored file.
+//   3. $OPENRIG_HOME/refocus/REFOCUS.md — the instance's standing content.
+//   4. The generic three-question orientation below (project-neutral).
 // Project- or mission-specific refocus text belongs in those FILES, on the
 // instance that needs it — it must never be committed here.
 //
 // Fires on: SessionStart (fresh orientation), Stop (catches the long single
 // turn), UserPromptSubmit, and PostCompact on Claude (post-compaction
 // re-orientation; Codex exposes no compact hook — growth+Stop is the coverage
-// there). Silent unless due. Degrades to silence on any error: a refocus hook
-// must never break a seat's turn.
+// there). Silent unless due. A configured REF failure degrades loudly inside
+// the delivered payload; every failure remains non-blocking because a refocus
+// hook must never break a seat's turn.
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const THRESH = Number(process.env.OPENRIG_REFOCUS_BYTES || 2_600_000);
 
 const readStdin = () => new Promise((r) => { let d = ""; process.stdin.setEncoding("utf8");
@@ -62,14 +65,37 @@ const readStdin = () => new Promise((r) => { let d = ""; process.stdin.setEncodi
   st.lastBytes = size; st.firedAt = new Date().toISOString(); st.firedOn = ev;
   try { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(file, JSON.stringify(st)); } catch {}
 
-  // Configurable content: operator file beats instance file beats the generic default.
-  const contentFile = [
-    process.env.OPENRIG_REFOCUS_CONTENT_FILE,
-    path.join(home, "refocus", "REFOCUS.md"),
-  ].filter(Boolean).find((p) => { try { return fs.existsSync(p); } catch { return false; } });
+  // A library ref wins over file configuration and reuses the public assembler instead of
+  // growing a second resolver inside this hook. REF failures stay visible without blocking
+  // the session boundary; REF-unset follows the folded FILE/default path byte-for-byte.
+  const contentRef = process.env.OPENRIG_REFOCUS_CONTENT_REF || "";
   let configured = null;
-  if (contentFile) {
-    try { configured = fs.readFileSync(contentFile, "utf8").trim() || null; } catch {}
+  let refFailure = null;
+  if (contentRef) {
+    const result = spawnSync("rig", ["context", "get", contentRef], {
+      encoding: "utf8",
+      env: process.env,
+      timeout: 4_000,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    if (!result.error && result.status === 0 && result.stdout.trim()) {
+      configured = result.stdout;
+    } else {
+      refFailure = result.error?.message
+        || result.stderr?.trim()
+        || result.stdout?.trim()
+        || `rig context get exited ${result.status ?? "without a status"}`;
+      refFailure = String(refFailure).replace(/\s+/g, " ").trim();
+    }
+  } else {
+    // Configurable content: operator file beats instance file beats the generic default.
+    const contentFile = [
+      process.env.OPENRIG_REFOCUS_CONTENT_FILE,
+      path.join(home, "refocus", "REFOCUS.md"),
+    ].filter(Boolean).find((p) => { try { return fs.existsSync(p); } catch { return false; } });
+    if (contentFile) {
+      try { configured = fs.readFileSync(contentFile, "utf8").trim() || null; } catch {}
+    }
   }
 
   const why = ev === "SessionStart" ? "fresh session"
@@ -89,9 +115,18 @@ const readStdin = () => new Promise((r) => { let d = ""; process.stdin.setEncodi
     `about the SEAT, never your own memory.`,
   ];
 
-  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: ev, additionalContext: [
+  const payload = refFailure ? [
+    `REFOCUS CONTENT REF FAILED: ${contentRef} — ${refFailure}`,
+    ``,
     `REFOCUS (${why}). Answer briefly, out loud, before your next move:`,
     ``,
-    ...(configured ? [configured] : generic),
-  ].join("\n") } }));
+    ...generic,
+  ] : [
+    `REFOCUS (${why}). Answer briefly, out loud, before your next move:`,
+    ``,
+    ...(contentRef
+      ? [`REFOCUS CONTENT SOURCE: OPENRIG_REFOCUS_CONTENT_REF=${contentRef}`, ``, configured]
+      : configured ? [configured] : generic),
+  ];
+  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: ev, additionalContext: payload.join("\n") } }));
 })();

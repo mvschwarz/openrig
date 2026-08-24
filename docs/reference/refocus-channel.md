@@ -22,7 +22,9 @@ tokens across fifty tool calls) and not wall-clock (the failure is sustained
 work, not elapsed time). Default threshold ~2.6MB of JSONL growth (≈300k
 tokens); tune with `OPENRIG_REFOCUS_BYTES`. SessionStart and PostCompact
 always fire. Otherwise the hook is a silent no-op, and it degrades to silence
-on any error — a refocus must never break a seat's turn.
+on unrelated hook errors. A configured REF resolution failure instead degrades
+loudly in the delivered payload while still completing the hook — a refocus
+must never break a seat's turn.
 
 Because the hook runs at the seat's own turn boundaries, delivery to a
 RUNNING seat needs no relaunch, no operator action, and no message traffic:
@@ -34,20 +36,32 @@ could have been acted on anyway.
 
 Resolution order:
 
-1. `OPENRIG_REFOCUS_CONTENT_FILE` — an operator-authored file (per-seat or
+1. `OPENRIG_REFOCUS_CONTENT_REF` — a path-like context-library ref resolved
+   through `rig context get`, so refocus receives the same assembled bytes as
+   on-demand pull. This wins when REF and FILE are both set.
+2. `OPENRIG_REFOCUS_CONTENT_FILE` — an operator-authored file (per-seat or
    per-rig via spec env).
-2. `$OPENRIG_HOME/refocus/REFOCUS.md` — the instance's standing content.
-3. The generic default baked into the hook: three project-neutral orientation
+3. `$OPENRIG_HOME/refocus/REFOCUS.md` — the instance's standing content.
+4. The generic default baked into the hook: three project-neutral orientation
    questions plus the pointer to the seat's topology chain
    (`rig context trace … --name CRAFT.md`) and the LEARNED-ownership warning.
 
-Mission-, project-, or box-specific refocus text belongs in those FILES on
-the instance that needs it. **It must never be committed into product
+The hook names a resolved REF in the delivered payload. If REF resolution
+fails, the payload starts with `REFOCUS CONTENT REF FAILED`, the exact ref, and
+the resolver's reason, then continues with generic orientation. A broken ref
+therefore stays visible without blocking the seat's session boundary. With REF
+unset, the existing FILE and generic paths are unchanged.
+
+Mission-, project-, or box-specific refocus text belongs in a context-library
+entry or one of those FILES on the instance that needs it. **It must never be committed into product
 source** — the shipped default carries no path, seat name, mission, or
 practice that is not generally applicable. (The pre-promotion lab hook had
 exactly this defect: a hardcoded per-box distillation-tool path. The
 promotion removed it; the grep for project residue is part of the slice's
 proof contract.)
+
+This automatic hook path is additive to one-shot manual injection through
+`rig send --context`; neither mode substitutes for the other.
 
 ## Relation to chain files
 
