@@ -19,7 +19,7 @@
 // Q2-Amendment 1(c)).
 
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
-import { isAbsolute, join, normalize, relative } from "node:path";
+import { isAbsolute, join, normalize, relative, sep } from "node:path";
 import type { SourceKind } from "./profile-composer.js";
 import { parseAddress } from "../markdown-address.js";
 
@@ -157,7 +157,11 @@ export function makeProfileReadFile(opts: {
         /* root itself unresolvable; compare against the nominal base */
       }
       const relFromBase = relative(realBase, realPath);
-      const escapesRoot = relFromBase.startsWith("..") || isAbsolute(relFromBase);
+      // SEGMENT comparison, never a prefix test on a path-shaped string (r1
+      // round-3 F1: a file legitimately NAMED '..hidden-notes.md' inside the
+      // root satisfied startsWith('..') — the identical class as
+      // startsWith(base) saying /seat-evil is inside /seat, one level in).
+      const escapesRoot = relFromBase === ".." || relFromBase.startsWith(`..${sep}`) || isAbsolute(relFromBase);
       opts.onRead({ ref, kind, base, nominalPath: abs, realPath, escapesRoot });
     }
     return text;
