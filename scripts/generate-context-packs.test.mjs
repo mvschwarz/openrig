@@ -1,0 +1,136 @@
+// OPR.0.5.3.7 R2 — tests for the package-time context-pack generator.
+import test from "node:test";
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const REPO = resolve(HERE, "..");
+const GEN = join(HERE, "generate-context-packs.mjs");
+const PARSER = pathToFileURL(join(REPO, "packages/daemon/dist/domain/context-packs/manifest-parser.js")).href;
+const { parseManifest } = await import(PARSER);
+
+function skill(root, rel, { name, description, files }) {
+  const dir = join(root, rel);
+  mkdirSync(dir, { recursive: true });
+  const fm = `---\nname: ${name}\ndescription: ${description}\n---\n`;
+  writeFileSync(join(dir, "SKILL.md"), fm + `# ${name}\n\nbody of ${name}\n`);
+  for (const [fname, content] of Object.entries(files || {})) writeFileSync(join(dir, fname), content);
+}
+
+function run(source, out, args = []) {
+  return execFileSync("node", [GEN, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, OPENRIG_SKILLS_SOURCE: source, OPENRIG_PACKS_OUT: out, OPENRIG_PACKAGE_VERSION: "0.5.3" },
+  });
+}
+
+function scratch() {
+  const base = mkdtempSync(join(tmpdir(), "s07-genpacks-"));
+  return { source: join(base, "skills"), out: join(base, "out"), base };
+}
+
+test("generates a valid, daemon-parseable pack per skill; SKILL.md is the instruction", () => {
+  const { source, out, base } = scratch();
+  try {
+    skill(source, "core/attention-queue", { name: "attention-queue", description: "Coordinate work.", files: {} });
+    skill(source, "process/tdd", {
+      name: "test-driven-development",
+      description: "Write the test first.",
+      files: { "anti-patterns.md": "# anti-patterns\n", "helper.sh": "#!/bin/sh\necho no\n" },
+    });
+    run(source, out);
+
+    // both packs exist under skills/<rel>
+    assert.ok(existsSync(join(out, "skills/core/attention-queue/manifest.yaml")));
+    assert.ok(existsSync(join(out, "skills/process/tdd/manifest.yaml")));
+
+    // manifest parses through the DAEMON's parser and SKILL.md leads as instruction
+    const m1 = parseManifest(readFileSync(join(out, "skills/core/attention-queue/manifest.yaml"), "utf8"), "m1");
+    assert.equal(m1.name, "attention-queue");
+    assert.equal(m1.version, "0.5.3");
+    assert.equal(m1.files[0].path, "SKILL.md");
+    assert.equal(m1.files[0].role, "instruction");
+
+    // the .sh helper is EXCLUDED (code, not servable content); the .md sibling is a reference
+    const m2 = parseManifest(readFileSync(join(out, "skills/process/tdd/manifest.yaml"), "utf8"), "m2");
+    const paths = m2.files.map((f) => f.path);
+    assert.ok(paths.includes("SKILL.md"));
+    assert.ok(paths.includes("anti-patterns.md"));
+    assert.ok(!paths.includes("helper.sh"), "helper.sh must not be packed");
+    assert.ok(!existsSync(join(out, "skills/process/tdd/helper.sh")), "helper.sh must not be copied");
+    assert.equal(m2.files.find((f) => f.path === "anti-patterns.md").role, "reference");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("MALFORMED PROJECTION FAILS THE BUILD — a '..' content path is rejected at package time, non-zero exit", () => {
+  const { source, out, base } = scratch();
+  try {
+    skill(source, "core/ok", { name: "ok", description: "fine", files: {} });
+    // a content file whose name forges a traversal segment: the daemon parser
+    // rejects the resulting files[].path, and the generator must fail the build.
+    skill(source, "core/bad", { name: "bad", description: "trap", files: { "notes..md": "x" } });
+    let failed = false;
+    try {
+      run(source, out);
+    } catch (err) {
+      failed = true;
+      assert.equal(err.status, 1, "exit code must be 1 (build failure)");
+      assert.match(String(err.stderr), /FAILING THE BUILD/);
+    }
+    assert.ok(failed, "generator must exit non-zero on a malformed projection");
+    // and it must NOT have written a partial/invalid library
+    assert.ok(!existsSync(join(out, "skills/core/bad")), "no invalid pack should be written");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("--check validates without writing (the build/CI drift gate)", () => {
+  const { source, out, base } = scratch();
+  try {
+    skill(source, "core/x", { name: "x", description: "d", files: {} });
+    const stdout = run(source, out, ["--check"]);
+    assert.match(stdout, /--check OK/);
+    assert.ok(!existsSync(out), "--check must not write the output tree");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("STALENESS BY CONSTRUCTION — editing canon after generation does not change generated bytes", () => {
+  const { source, out, base } = scratch();
+  try {
+    skill(source, "core/x", { name: "x", description: "d", files: {} });
+    run(source, out);
+    const before = readFileSync(join(out, "skills/core/x/SKILL.md"), "utf8");
+    // mutate the CANON after packing
+    writeFileSync(join(source, "core/x/SKILL.md"), "---\nname: x\ndescription: d\n---\n# HACKED\n");
+    const after = readFileSync(join(out, "skills/core/x/SKILL.md"), "utf8");
+    assert.equal(after, before, "packed bytes must be decoupled from canon after generation");
+    assert.doesNotMatch(after, /HACKED/);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("deterministic — two runs produce byte-identical manifests", () => {
+  const a = scratch(), b = scratch();
+  try {
+    for (const s of [a, b]) skill(s.source, "core/x", { name: "x", description: "d", files: { "ref.md": "r" } });
+    run(a.source, a.out);
+    run(b.source, b.out);
+    assert.equal(
+      readFileSync(join(a.out, "skills/core/x/manifest.yaml"), "utf8"),
+      readFileSync(join(b.out, "skills/core/x/manifest.yaml"), "utf8"),
+    );
+  } finally {
+    rmSync(a.base, { recursive: true, force: true });
+    rmSync(b.base, { recursive: true, force: true });
+  }
+});

@@ -72,6 +72,14 @@ EOF
 write_build_info "$DAEMON_DIR/dist/build-info.js"
 write_build_info "$CLI_DIR/dist/build-info.js"
 
+# OPR.0.5.3.7 R2 — generate the context-pack projection of canonical skills at
+# PACKAGE TIME (into $DAEMON_DIR/context-packs; never committed, regenerated every
+# build). Validated through the DAEMON's own manifest parser — a malformed
+# projection FAILS THE BUILD here, never at serve time. Pinned to the build semver
+# so served packs carry the binary's version.
+echo "Generating shipped context-packs..."
+(cd "$REPO_ROOT" && node scripts/generate-context-packs.mjs --version="$STAMP_SEMVER")
+
 # Daemon: dist + assets + specs
 mkdir -p "$CLI_DIR/daemon/dist"
 cp -r "$DAEMON_DIR/dist/"* "$CLI_DIR/daemon/dist/"
@@ -82,6 +90,14 @@ fi
 
 if [ -d "$DAEMON_DIR/specs" ]; then
   cp -r "$DAEMON_DIR/specs" "$CLI_DIR/daemon/specs"
+fi
+
+# OPR.0.5.3.7 R2 — the shipped context-pack projection (generated above). The daemon
+# registers this as a `builtin` discovery root resolved RELATIVE TO THE BINARY
+# (startup.ts: import.meta.dirname/../context-packs -> <cli>/daemon/context-packs),
+# so `rig context get` serves bytes that match `rig --version` by construction.
+if [ -d "$DAEMON_DIR/context-packs" ]; then
+  cp -r "$DAEMON_DIR/context-packs" "$CLI_DIR/daemon/context-packs"
 fi
 
 # Built-in policies (OPR.0.4.8.3): canonical source packages/daemon/policies/builtin/

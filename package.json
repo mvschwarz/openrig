@@ -13,7 +13,7 @@
   "scripts": {
     "build": "npm run build --workspaces",
     "test": "npm run test:repo && npm run test:workspaces",
-    "test:repo": "node --test scripts/*.test.mjs && node scripts/check-docs-guard.mjs && node scripts/mirror-skills.mjs --check",
+    "test:repo": "npm run build -w packages/daemon && node --test scripts/*.test.mjs && node scripts/check-docs-guard.mjs && node scripts/mirror-skills.mjs --check && node scripts/generate-context-packs.mjs --check",
     "test:workspaces": "npm run test -w packages/daemon -w packages/cli -w packages/tui",
     "test:ui": "npm run test -w packages/ui",
     "typecheck:prep": "npm run build -w packages/daemon",
@@ -22,6 +22,8 @@
     "test:tui-package": "node scripts/test-tui-package.mjs",
     "mirror-skills": "node scripts/mirror-skills.mjs",
     "mirror-skills:check": "node scripts/mirror-skills.mjs --check",
+    "generate-context-packs": "node scripts/generate-context-packs.mjs",
+    "generate-context-packs:check": "node scripts/generate-context-packs.mjs --check",
     "gate": "node scripts/gate-lane.mjs"
   },
   "engines": {
