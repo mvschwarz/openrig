@@ -40,6 +40,8 @@ export interface RecapChainEntry {
   path: string;
   /** The supersession timestamp encoded in the filename (ms epoch). */
   supersededAtMs: number;
+  /** Same-millisecond disambiguator (1 for the bare name, 2+ for -N suffixes). */
+  sequence: number;
 }
 
 /** Write the seat's current recap, superseding any existing one into the
@@ -58,7 +60,18 @@ export function writeSeatRecap(opts: { seatDir: string; content: string; now?: (
   if (existsSync(current)) {
     const chainDir = join(opts.seatDir, CHAIN_DIRNAME);
     mkdirSync(chainDir, { recursive: true });
-    renameSync(current, join(chainDir, `RECAP-${String(now()).padStart(15, "0")}.md`));
+    // COLLISION-SAFE naming (r1 F1): renameSync onto an existing path REPLACES
+    // it, so two supersessions in one millisecond silently destroyed a
+    // predecessor — the retention contract inverted. A counter suffix
+    // disambiguates: nothing is lost AND the boundary write still succeeds
+    // (better than throwing on both counts). `now` is injectable, so
+    // programmatic callers collide deterministically, not rarely.
+    const stamp = String(now()).padStart(15, "0");
+    let target = join(chainDir, `RECAP-${stamp}.md`);
+    for (let counter = 2; existsSync(target); counter++) {
+      target = join(chainDir, `RECAP-${stamp}-${counter}.md`);
+    }
+    renameSync(current, target);
   }
   writeFileSync(current, opts.content);
 }
@@ -74,11 +87,13 @@ export function listRecapChain(seatDir: string): RecapChainEntry[] {
   }
   return names
     .map((name) => {
-      const m = name.match(/^RECAP-(\d+)\.md$/);
-      return m ? { path: join(chainDir, name), supersededAtMs: Number(m[1]) } : null;
+      const m = name.match(/^RECAP-(\d+)(?:-(\d+))?\.md$/);
+      return m
+        ? { path: join(chainDir, name), supersededAtMs: Number(m[1]), sequence: m[2] ? Number(m[2]) : 1 }
+        : null;
     })
     .filter((e): e is RecapChainEntry => e !== null)
-    .sort((a, b) => a.supersededAtMs - b.supersededAtMs);
+    .sort((a, b) => a.supersededAtMs - b.supersededAtMs || a.sequence - b.sequence);
 }
 
 export type RecapContractFinding =

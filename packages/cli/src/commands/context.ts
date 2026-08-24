@@ -578,8 +578,21 @@ Examples:
       try {
         const client = await getClient();
         const entry = await resolvePack(client, nameOrRef);
+        // r1 F2: the product's runtime vocabulary is "claude-code" / "codex"
+        // (the adapters' values, live on real seats) — map it EXPLICITLY. A
+        // genuinely unknown value falls back to claude WITH A VOICE: a future
+        // third runtime must not silently get a claude profile (the exact
+        // mini-req 3 hazard this default exists to close).
         const envRuntime = process.env["OPENRIG_RUNTIME"];
-        const runtime = opts.runtime ?? (envRuntime === "codex" || envRuntime === "claude" ? envRuntime : "claude");
+        let runtime = opts.runtime;
+        if (runtime === undefined) {
+          if (envRuntime === "codex") runtime = "codex";
+          else if (envRuntime === "claude-code" || envRuntime === "claude") runtime = "claude";
+          else {
+            if (envRuntime) console.error(`Warning: unrecognized OPENRIG_RUNTIME '${envRuntime}' — composing the claude profile; pass --runtime to override.`);
+            runtime = "claude";
+          }
+        }
         const params = new URLSearchParams({ ref: entry.relativePath, situation: opts.situation, runtime });
         if (opts.budget !== undefined) params.set("budget", opts.budget);
         if (opts.rig !== undefined) params.set("rig", opts.rig);
