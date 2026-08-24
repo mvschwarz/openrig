@@ -5,7 +5,10 @@
  * transcript at the deterministic DOOR, writes recorded grades, and exits nonzero on any
  * fail/error.
  *
- *   run-evals.mjs [--provider fake|rig] [--transcripts <json>] [--out <json>]
+ *   RUN IT (the TS helpers need the tsx loader, so use the package command, which supplies it):
+ *     npm run eval -w packages/daemon -- [--provider fake|rig] [--transcripts <json>] [--out <json>]
+ *   Or directly: node --import tsx packages/daemon/scripts/run-evals.mjs [args]
+ *   (The file ships executable; ./run-evals.mjs works where `env -S` is supported.)
  *
  * --provider fake (default): a deterministic provider whose transcripts come from --transcripts
  *   (a JSON map of prompt -> transcript); absent prompts ERROR (never a silent green). This is the
@@ -29,7 +32,8 @@ const CASES_DIR = resolve(HERE, "..", "..", "test-system", "evals", "cases");
 // REPAIR (re-review HIGH-1): the eval RUN resolves refs against the EXACT production package, BUILT
 // hermetically into a temp dir (never the gitignored context-packs residue), and validates them in
 // its OWN preflight for EVERY provider — not just rig.
-const PRODUCTION_PACKAGE = buildProductionPackage(REPO);
+// The temp package is removed on process exit (fail-safe registered inside buildProductionPackage).
+const PRODUCTION_PACKAGE = buildProductionPackage(REPO).dir;
 
 const argv = process.argv.slice(2);
 const opt = (name, def) => {

@@ -25,9 +25,10 @@ Layout:
 - `fixtures/` — canonical-ref packs backing the structural canonical-ref checks only. The LIVE run
   does NOT point a seat at these; per Repair 2 the eval resolves refs against the EXACT production
   package (built by `generate-context-packs.mjs`), so fixture-vs-production drift fails structurally.
-- runner + grader code lives in `packages/daemon/test/helpers/eval-*.ts` (vitest-wired), standalone
-  live entry `packages/daemon/scripts/run-evals.mjs` — mirroring the scenario system's split, not
-  agent-browser's bun layout (this repo is node/tsx/vitest).
+- runner + grader code lives in `packages/daemon/test/helpers/eval-*.ts` (vitest-wired); the standalone
+  live entry is `packages/daemon/scripts/run-evals.mjs`, run via `npm run eval -w packages/daemon -- [args]`
+  (the TS helpers need the tsx loader, which that command supplies) — mirroring the scenario system's
+  split, node/tsx/vitest.
 
 Status: RED-first build in progress (slice-07 R6). Lock amendments (07 proof-contract + PRD R6; 05 Q3)
 land via dev-planner + r1 re-stamp BEFORE the R6 fold; the build proceeds under the ruling meanwhile.

@@ -7,7 +7,7 @@
  * canonical ref, or a ref absent from the built production package, fails by NAME (never disappears).
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EvalCase } from "./eval-grader.js";
@@ -45,16 +45,32 @@ export function unresolvedCases(resolutions: CaseRefResolution[]): CaseRefResolu
   return resolutions.filter((r) => !r.resolved);
 }
 
+export interface BuiltProductionPackage {
+  /** The built package dir; refs resolve at `<dir>/skills/<ns>/<name>/manifest.yaml`. */
+  dir: string;
+  /** Remove the temp package. Idempotent; also registered as a process-exit fail-safe. */
+  cleanup: () => void;
+}
+
 /**
  * Build the EXACT production package under test into a fresh temp dir (hermetic — never reads the
- * gitignored `packages/daemon/context-packs` residue). Returns the temp dir; refs resolve at
- * `<dir>/skills/<ns>/<name>/manifest.yaml`.
+ * gitignored `packages/daemon/context-packs` residue). The temp dir is removed on process exit as a
+ * fail-safe (success OR error path), and the returned `cleanup` lets a caller reclaim it eagerly —
+ * so a repeatedly-run gate never leaks temp packages.
  */
-export function buildProductionPackage(repoRoot: string): string {
+export function buildProductionPackage(repoRoot: string): BuiltProductionPackage {
   const out = mkdtempSync(join(tmpdir(), "eval-prod-pkg-"));
+  const cleanup = () => {
+    try {
+      rmSync(out, { recursive: true, force: true });
+    } catch {
+      // best-effort — the dir may already be gone
+    }
+  };
+  process.once("exit", cleanup);
   execFileSync("node", [join(repoRoot, "scripts/generate-context-packs.mjs")], {
     env: { ...process.env, OPENRIG_PACKS_OUT: out },
     stdio: "pipe",
   });
-  return out;
+  return { dir: out, cleanup };
 }

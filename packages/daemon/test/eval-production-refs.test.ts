@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterAll } from "vitest";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadEvalCasesFromDir } from "./helpers/eval-cases.js";
@@ -19,8 +19,9 @@ const CASES_DIR = resolve(HERE, "..", "..", "test-system", "evals", "cases");
 
 describe("REPAIR (re-review HIGH-1) — refs resolve in a freshly-built production package", () => {
   const { cases } = loadEvalCasesFromDir(CASES_DIR);
-  const productionPackage = buildProductionPackage(REPO);
-  const resolutions = resolveCaseRefs(cases, productionPackage);
+  const built = buildProductionPackage(REPO);
+  afterAll(built.cleanup);
+  const resolutions = resolveCaseRefs(cases, built.dir);
 
   it("yields a canonical ref for EVERY case (per-case, not a suite-wide count)", () => {
     expect(resolutions).toHaveLength(cases.length);
