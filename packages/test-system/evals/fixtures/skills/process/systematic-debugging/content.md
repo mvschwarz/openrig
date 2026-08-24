@@ -1,4 +1,4 @@
-# process/systematic-debugging
+# skills/process/systematic-debugging
 
 chase a failure methodically
 

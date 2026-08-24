@@ -1,4 +1,4 @@
-# core/watchdog
+# skills/core/watchdog
 
 arm a wake you cannot perform yourself
 

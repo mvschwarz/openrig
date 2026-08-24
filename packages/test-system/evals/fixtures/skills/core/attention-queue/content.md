@@ -1,4 +1,4 @@
-# core/attention-queue
+# skills/core/attention-queue
 
 see who actually holds the baton
 

@@ -1,4 +1,4 @@
-# core/human-in-the-loop
+# skills/core/human-in-the-loop
 
 when and how to reach the human
 

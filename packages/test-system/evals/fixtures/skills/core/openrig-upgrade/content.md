@@ -1,4 +1,4 @@
-# core/openrig-upgrade
+# skills/core/openrig-upgrade
 
 upgrade a running daemon without downtime
 

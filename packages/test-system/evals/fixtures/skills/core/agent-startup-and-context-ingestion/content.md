@@ -1,4 +1,4 @@
-# core/agent-startup-and-context-ingestion
+# skills/core/agent-startup-and-context-ingestion
 
 orient a freshly-woken seat
 

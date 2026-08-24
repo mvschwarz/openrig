@@ -1,4 +1,4 @@
-# core/rig-lifecycle
+# skills/core/rig-lifecycle
 
 bring rigs and the whole fleet up/down/back
 

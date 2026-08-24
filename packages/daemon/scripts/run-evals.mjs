@@ -24,7 +24,9 @@ import { recordedGrade } from "../test/helpers/eval-report.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CASES_DIR = resolve(HERE, "..", "..", "test-system", "evals", "cases");
-const FIXTURES = resolve(HERE, "..", "..", "test-system", "evals", "fixtures");
+// REPAIR 2: the eval resolves refs against the EXACT production package (the packaged builtin
+// library), NOT a hand-seeded fixture library — so fixture-vs-production drift fails structurally.
+const PRODUCTION_PACKAGE = resolve(HERE, "..", "context-packs");
 
 const argv = process.argv.slice(2);
 const opt = (name, def) => {
@@ -42,7 +44,7 @@ if (errors.length > 0) {
 
 let provider;
 if (providerName === "rig") {
-  provider = new RigSeatProvider({ packsRoot: FIXTURES });
+  provider = new RigSeatProvider({ productionPackage: PRODUCTION_PACKAGE });
 } else {
   const tPath = opt("--transcripts", null);
   const transcripts = tPath ? JSON.parse(readFileSync(tPath, "utf-8")) : {};

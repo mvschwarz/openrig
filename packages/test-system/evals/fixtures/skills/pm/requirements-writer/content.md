@@ -1,4 +1,4 @@
-# pm/requirements-writer
+# skills/pm/requirements-writer
 
 turn intent into requirements
 

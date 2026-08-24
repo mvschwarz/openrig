@@ -19,16 +19,23 @@ Every row below names **how to reach the skill** — already-hot, or an exact lo
 
 ## Loading an entry on demand — `rig context get`
 
-You do not need a file path to load a shipped entry. Pull any of them by name with the `rig` CLI:
+Don't guess a file path or a name. Go **ask → ref → load** in three steps:
+
+1. **Discover** — run `rig context list` (add `--json` for programmatic use). It prints every shipped
+   entry: its **ref**, its name, and *when* to reach for it.
+2. **Select** — match your moment to a row's *when* and take its **ref**. Refs are canonical full paths
+   that mirror the library layout — `skills/<namespace>/<name>` (e.g. `skills/core/rig-lifecycle`,
+   `skills/process/systematic-debugging`). A unique bare name (e.g. `watchdog`) also resolves; any
+   slash-bearing ref is an exact lookup and fails loud if it does not exist.
+3. **Load** — `rig context get skills/<namespace>/<name>`:
 
 ```
-rig context get <name>
+rig context get skills/core/rig-lifecycle
 ```
 
-This serves the entry's content **from the installed CLI**, so what you load always matches your running
-version — no path-guessing, no frozen-fork drift. Reach for it whenever a row's *when* matches your moment
-and its body is not already in your context; add `--json` for programmatic use. (The daemon assembles the
-same bundle `rig context preview` shows an operator — `get` is the agent-facing pull.)
+The content is served **from the installed CLI**, so what you load always matches your running version —
+no path-guessing, no frozen-fork drift. (The daemon assembles the same bundle `rig context preview`
+shows an operator — `get` is the agent-facing pull.)
 
 ## The index
 

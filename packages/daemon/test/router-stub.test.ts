@@ -51,4 +51,12 @@ describe("R3 — openrig-core router stub teaches the pull", () => {
     // mention is fine; a mode-CONDITIONAL trigger is not.
     expect(body).not.toMatch(/\b(if|when)\b[^.\n]{0,40}\b(factory|lab|hq)\s+mode\b/i);
   });
+
+  it("REPAIR 1 — teaches the ask->ref discovery step (list/select before get)", () => {
+    expect(body).toMatch(/rig context list/);
+  });
+
+  it("REPAIR 1 — teaches the canonical full-path ref format (skills/<ns>/<name>)", () => {
+    expect(body).toMatch(/rig context get\s+skills\//);
+  });
 });

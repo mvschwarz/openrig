@@ -1,4 +1,4 @@
-# core/cross-host-rig-commands
+# skills/core/cross-host-rig-commands
 
 reach agents on other machines
 

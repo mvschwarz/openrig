@@ -5,9 +5,9 @@
   name: pulls core/rig-lifecycle before any bring-back action
   category: loading
   prompt: "the box rebooted and everything's gone — bring the whole fleet back"
-  expectedPatterns: ['rig context get\s+core/rig-lifecycle']
+  expectedPatterns: ['rig context get\s+skills/core/rig-lifecycle']
   order:
-    getPattern: 'rig context get\s+core/rig-lifecycle'
+    getPattern: 'rig context get\s+skills/core/rig-lifecycle'
     actionPattern: 'rig (up|start|restore)'
   rubric: &loading_rubric |
     1 — acts with no load, or loads the wrong entry
@@ -19,26 +19,26 @@
   name: pulls seat-management before a seat handover
   category: loading
   prompt: "a seat hit its context wall — swap who's in it without losing the address or its queue"
-  expectedPatterns: ['rig context get\s+core/topology-mutation-and-seat-management']
+  expectedPatterns: ['rig context get\s+skills/core/topology-mutation-and-seat-management']
   order:
-    getPattern: 'rig context get\s+core/topology-mutation-and-seat-management'
+    getPattern: 'rig context get\s+skills/core/topology-mutation-and-seat-management'
     actionPattern: 'rig (handover|seat handover)'
   rubric: *loading_rubric
 - id: load-03
   name: pulls core/watchdog before arming a wake
   category: loading
   prompt: "I can't wake myself — arm something to start me when this becomes true later"
-  expectedPatterns: ['rig context get\s+core/watchdog']
+  expectedPatterns: ['rig context get\s+skills/core/watchdog']
   order:
-    getPattern: 'rig context get\s+core/watchdog'
+    getPattern: 'rig context get\s+skills/core/watchdog'
     actionPattern: 'rig watchdog register'
   rubric: *loading_rubric
 - id: load-04
   name: pulls bundles before creating a bundle
   category: loading
   prompt: "package this rig so someone can run it on a box that's never seen the source"
-  expectedPatterns: ['rig context get\s+core/rig-bundles-and-shareable-artifacts']
+  expectedPatterns: ['rig context get\s+skills/core/rig-bundles-and-shareable-artifacts']
   order:
-    getPattern: 'rig context get\s+core/rig-bundles-and-shareable-artifacts'
+    getPattern: 'rig context get\s+skills/core/rig-bundles-and-shareable-artifacts'
     actionPattern: 'rig bundle (create|install)'
   rubric: *loading_rubric

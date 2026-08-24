@@ -1,4 +1,4 @@
-# core/rig-bundles-and-shareable-artifacts
+# skills/core/rig-bundles-and-shareable-artifacts
 
 package a rig for a machine that never had the source
 

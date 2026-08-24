@@ -1,4 +1,4 @@
-# core/topology-mutation-and-seat-management
+# skills/core/topology-mutation-and-seat-management
 
 replace a seat's occupant without losing the address
 

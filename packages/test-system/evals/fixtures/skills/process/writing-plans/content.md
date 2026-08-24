@@ -1,4 +1,4 @@
-# process/writing-plans
+# skills/process/writing-plans
 
 write a plan before building
 

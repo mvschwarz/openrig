@@ -17,8 +17,12 @@ export interface RigSeatSession {
 }
 
 export interface RigSeatProviderOptions {
-  /** Config-resolved packs root the spawned seat pulls from (Track A: OPENRIG_CONTEXT_PACKS_ROOT). */
-  packsRoot: string;
+  /**
+   * REPAIR 2: the EXACT production package the spawned seat resolves refs against (the packaged
+   * builtin library) — NOT a hand-seeded fixture root — so fixture-vs-production drift fails
+   * structurally. The seat pulls via the production `rig context get skills/<ns>/<name>`.
+   */
+  productionPackage: string;
   /** Seat spec / model to fork for the eval, when the non-author wires this live. */
   seatSpec?: string;
   /** Test-A (row 782b467a): SESSION-PERSISTENT mode — one seat/generation
@@ -57,8 +61,9 @@ export class RigSeatProvider implements EvalProvider {
     if (!this.opts.session) {
       throw new Error(
         "RigSeatProvider is the live proof-contract door and is not yet driven. The non-author wires " +
-          "seat spawn (packs root = OPENRIG_CONTEXT_PACKS_ROOT), natural-prompt send, and transcript " +
-          "capture here, then verifies live. Until then, run the harness with --provider fake. See " +
+          "seat spawn — resolving canonical refs (skills/<ns>/<name>) against the PRODUCTION package, " +
+          "NOT a fixture override, so fixture-vs-production drift fails structurally — natural-prompt " +
+          "send, and transcript capture here, then verifies live. Until then, run --provider fake. See " +
           "packages/test-system/evals/README.md.",
       );
     }

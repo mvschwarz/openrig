@@ -1,4 +1,4 @@
-# process/test-driven-development
+# skills/process/test-driven-development
 
 red-first discipline
 

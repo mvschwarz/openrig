@@ -25,7 +25,7 @@ describe("RigSeatProvider — session-persistent mode (Test-A)", () => {
   it("PERSISTENCE: four phases run against ONE spawned seat/generation", async () => {
     const { session, sent } = fakeSession();
     const spawn = vi.fn(async () => session);
-    const provider = new RigSeatProvider({ packsRoot: "/packs", session: { spawn } });
+    const provider = new RigSeatProvider({ productionPackage: "/packs", session: { spawn } });
     for (const phase of ["baseline probe", "WALK ack", "GET pull", "post probe"]) {
       const res = await provider.run(phase);
       expect(res.error).toBeUndefined();
@@ -36,7 +36,7 @@ describe("RigSeatProvider — session-persistent mode (Test-A)", () => {
 
   it("INPUT-ECHO NEGATIVE: the leading prompt echo is stripped — a grader pattern matching only the prompt text cannot pass", async () => {
     const { session } = fakeSession();
-    const provider = new RigSeatProvider({ packsRoot: "/packs", session: { spawn: async () => session } });
+    const provider = new RigSeatProvider({ productionPackage: "/packs", session: { spawn: async () => session } });
     const res = await provider.run("magic-prompt-xyz nobody else says this");
     expect(res.transcript).not.toContain("magic-prompt-xyz nobody else says this\n");
     expect(res.transcript).toContain("seat output for: magic-prompt");
@@ -49,7 +49,7 @@ describe("RigSeatProvider — session-persistent mode (Test-A)", () => {
       captureSince: async (p) => `${p}\nI will now do exactly what "${p}" asked.`,
       retire: async () => {},
     };
-    const provider = new RigSeatProvider({ packsRoot: "/packs", session: { spawn: async () => session } });
+    const provider = new RigSeatProvider({ productionPackage: "/packs", session: { spawn: async () => session } });
     const res = await provider.run("pull the lifecycle entry");
     expect(res.transcript.startsWith("pull the lifecycle entry")).toBe(false);
     expect(res.transcript).toContain('what "pull the lifecycle entry" asked');
@@ -57,7 +57,7 @@ describe("RigSeatProvider — session-persistent mode (Test-A)", () => {
 
   it("RETIREMENT: dispose retires exactly once; run() after dispose refuses loud", async () => {
     const { session, retired } = fakeSession();
-    const provider = new RigSeatProvider({ packsRoot: "/packs", session: { spawn: async () => session } });
+    const provider = new RigSeatProvider({ productionPackage: "/packs", session: { spawn: async () => session } });
     await provider.run("one");
     await provider.dispose();
     await provider.dispose(); // idempotent
@@ -66,7 +66,7 @@ describe("RigSeatProvider — session-persistent mode (Test-A)", () => {
   });
 
   it("LEGACY PATH PRESERVED: without session deps, run() still throws the R6 not-wired refusal (no false green)", async () => {
-    const provider = new RigSeatProvider({ packsRoot: "/packs" });
+    const provider = new RigSeatProvider({ productionPackage: "/packs" });
     await expect(provider.run("anything")).rejects.toThrow(/not yet driven|provider fake/i);
   });
 });
