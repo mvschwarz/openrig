@@ -8,7 +8,7 @@ metadata:
       - queue-handoff
       - workflow-runtime
       - watchdog
-      - alignment-trace
+      - refocus
       - looping-workflows
       - intake-routing
       - attention-queue

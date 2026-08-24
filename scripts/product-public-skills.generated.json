@@ -10,7 +10,8 @@
       "messaging-the-human",
       "software-for-agents",
       "openrig-skills",
-      "delegating-work"
+      "delegating-work",
+      "context-engineering"
     ],
     "ship_after_fix": [
       "openrig-user",
@@ -22,7 +23,8 @@
       "agent-startup-and-context-ingestion",
       "applying-a-permission-policy",
       "retiring-and-inheriting-a-seat",
-      "oversight-team"
+      "oversight-team",
+      "orienting-to-an-inherited-seat"
     ],
     "ship_misses_add": [
       "topology-mutation-and-seat-management",

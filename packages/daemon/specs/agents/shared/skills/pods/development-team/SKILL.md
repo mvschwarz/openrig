@@ -43,6 +43,14 @@ This is the default loop for product work:
 
 Skip no gates. If the task is ambiguous, resolve the ambiguity before editing.
 
+**Chunk size points up — keep TDD's shape, not its ping-pong cadence (2026-08).** Frontier agents handle
+large, long-horizon, goal-oriented chunks — an hour-plus of complex work — without fragmenting. So don't
+default to tiny pieces: **keep TDD's *shape* (two sets of eyes, the guard structure, red before green)
+but treat chunk size and cadence as a configured LEVER, not a habit.** Classic small back-and-forth
+ping-pong is unnecessary overhead when the loop's own gates (QA, review, guards) already bound a larger
+chunk's risk. The sweet spot is task-dependent, much larger than it used to be, and rising. See
+`test-driven-development` for the shape that stays fixed.
+
 ## What the implementer must hand QA
 
 Pre-edit proposal should include:

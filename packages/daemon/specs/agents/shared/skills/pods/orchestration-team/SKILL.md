@@ -28,18 +28,18 @@ The orchestration pod is responsible for:
 
 ## Monitoring & intervention — keep the RIG self-running, not the ORCHESTRATOR busy
 
-**North star:** your goal is a **self-running rig, not a busy orchestrator.** Two anti-patterns keep you busy while the rig fails to learn to run itself — **over-watching** (hyper-monitoring) and **over-doing** (picking up agents' slack). Both are governed by judgment below, not by a rule for every case. (This section supersedes any "check regularly / every monitoring cycle / 2+ monitoring cycles / watch for idle" phrasing elsewhere in this skill — read those as watchdog-clocked, cheap-first sweeps under these principles.)
+**North star:** your goal is a **self-running rig, not a busy orchestrator.** Two anti-patterns keep you busy while the rig fails to learn to run itself — **over-watching** (hyper-monitoring) and **over-doing** (picking up agents' slack). Both are governed by judgment below, not by a rule for every case. (Any cadence-flavored wording elsewhere in this skill is **watchdog-clocked and event-driven** — a cheap scoped check on a watchdog wake or a named trigger, never a steady-state poll loop. There is no literal instruction to poll panes or `rig ps` on a fixed cycle.)
 
 ### A. Monitoring intensity — proportional to stakes, bounded to the window
 **Principle:** monitoring intensity tracks **stakes × how likely you are to need to intervene, bounded to the window where that's true.** Spend tight attention only where it changes what you do, only as long as the risk lasts, then return to default. (Same evidence-not-cadence rule the `watchdog` skill applies to intervention *level*, applied to *intensity*.) **Self-test: "Can I name the stakes AND the condition that ends this close-watch?"** If not, you're hyper-monitoring.
 
 **Default (almost always) — token-efficient.** Steady-state your job is the **idle-without-handoff exception**: the queue handles normal handoff; you catch the agent who finished + went idle without closing/handing off.
-- **Status lives in the queue, not panes** (`status-not-chat-orchestrator`): `rig ps --nodes --json` + `rig queue` are your status source; do NOT reconstruct fleet-state by capturing panes (pane `rig capture` is high-bandwidth *within your own pod* — that's fine; it is not how you track cross-pod/fleet state).
+- **Status lives in the queue, not panes** (`status-not-chat-orchestrator`): `rig ps --nodes --json` + `rig queue` are your status source; do NOT reconstruct fleet-state by capturing panes (pane `rig capture` is high-bandwidth *within your own pod* — that's fine; it is not how you track cross-pod/fleet state). *(`rig ps --nodes` is YOUR rig's seats only — bare `rig ps` lists ALL rigs on the host; don't mistake a narrow node read for the whole world.)*
 - **The watchdog is your clock** (`watchdog`): configure `rig watchdog` to wake you (~3 min); between wakes, idle (zero tokens) — no self-run sleep-loop re-reading panes at steady-state. Prefer one workflow-watchdog + targeted exception handling over many per-seat nag loops.
 - **On each wake — cheap sweep:** `rig queue` + a *filtered* `rig ps` (see "Read cheap" below) first; ONLY for a seat that looks idle/suspicious, `rig capture <session>` last few lines (never a full pane, never huge chunks); **active owner → no-op.**
 - **Read cheap — every status command has a token cost; project to the question.** The queue-first rule is about *where* status lives; this is about *how much you pay to read it*. The token bomb is the broad unfiltered dump, not the pane capture: an unfiltered fleet-wide `rig ps --nodes --json` emits ~77k tokens — for a one-rig or one-qitem question that is almost all waste, and at watchdog cadence it burns the shared account fast.
   - **Scope the read to the question.** Specific item → `rig queue show <qitem> --json`. One rig's frontier → filter + project only the fields you need, e.g. `rig ps --nodes --json | jq '.[] | select(.rigName=="<rig>") | {session:.canonicalSessionName, state:.agentActivity.state, hasAssignedWork, pendingWorkCount}'` (prefer a native rig/session filter if one exists). Never pull whole-fleet JSON to answer a narrow rig/qitem question.
-  - **Pane capture / transcript = last resort for one named stale owner,** not a status-polling loop.
+  - **Pane capture / transcript = last resort for one named stale owner,** not a status-polling loop — **re-capturing an unchanged pane returns no new information and is the measured token-burn failure** (the unit of monitoring is an event — a wake, a queue transition, an activity signal — never elapsed time or a repeat count).
   - **Context reads are task-scoped too:** read the skills the task needs; don't reload broad references or large files for a tiny queue update (compaction / named-skill rules excepted).
   - **Notice-and-stop:** if any command emits unexpectedly huge output, that is a protocol miss — name it and correct the pattern immediately, don't absorb it as normal.
   - **Self-test:** "Does this read return more than the decision in front of me needs?" If yes, narrow it before running.
@@ -92,6 +92,8 @@ When you dispatch work, give the receiving agent enough structure to act without
 - what proof or verification you expect back
 - which peer or pod they must involve before calling the work complete
 
+**(0.5.0) Assign work *with* its context attached.** Rather than make the assignee grep for the as-built, compose a context pack and ride it on the handoff: `rig context compose --out packs/<brief> --from <files>`, then `rig queue create --destination <seat> --body-context packs/<brief> --summary "…"`. The pack's resolved content is snapshotted into the qitem (plus its ref for provenance), so the context survives compaction and is auditable. See `openrig-user` → "Context packs and paced delivery." (`rig context` composes; the queue delivers — the noun never sends.)
+
 If design clarity is missing, route to design first.
 If QA gating is required, say so explicitly in the assignment.
 If reviewers should wait for a milestone, say what milestone triggers them.
@@ -99,7 +101,7 @@ If reviewers should wait for a milestone, say what milestone triggers them.
 After delegating:
 1. Let the assigned agent work.
 2. Check progress with `rig capture <session>` when you need a real status update.
-3. If an agent is stuck for more than one cycle, investigate and redirect or unblock.
+3. If an agent is still stuck on your **next watchdog wake** (no progress signal since the last), investigate and redirect or unblock — the trigger is the wake / queue-transition / activity signal, **not a poll count or elapsed-time cycle.**
 
 ## Monitoring and unblock loop
 
@@ -111,27 +113,49 @@ When an agent looks stuck:
 
 Do not call a blocked agent "in progress" forever.
 
-## Starter topology settlement
+## Capacity — a seat is never the bottleneck (fork to unblock)
 
-For the launch-grade `demo` rig, the expected team is:
-- `orch1.lead`
-- `orch1.peer`
-- `dev1.design`
-- `dev1.impl`
-- `dev1.qa`
-- `rev1.r1`
-- `rev1.r2`
+Seat capacity is **elastic**, so a blocked or overloaded lane is a **policy** problem, not a capacity
+fact — *"the seat is busy"* is never a real constraint. You have **standing authority to fork any
+agent** to unblock a lane; no escalation.
 
-Before you declare the team fully ready or dispatch a real implementation task:
-- confirm those nodes exist in `rig ps --nodes --json`
-- if any are pending or missing, wait and say exactly which nodes are still starting
-- once they appear, refresh your mental model before planning
+- **`rig fork <source-session>`** clones a live seat *with its context window* into a new seat (`--rig`
+  / `--pod` to place it; it composes the shipped agent-image fork path). **Claude is supported today;
+  Codex fork is pending a research spike — don't rely on it until that lands.**
+- **The pattern:** fork → the fork does the task → **salvage its result as markdown** → **retire the
+  fork** → return the rig to its spec's steady state. Short-lived forks are safe because seats carry
+  **distinguished names** (a fork is never mistaken for the seat it came from — see
+  `seat-continuity-and-handover`).
+- **The ladder, and whose call each rung is:** fork an agent *(yours, standing)* → onboard a new seat
+  → clone / stand up a whole rig → stand up a host on a VPS. **Rig- and host-level spin-up belong to
+  the oversight / owner altitude, not the orchestrator's** — fork is your rung.
+- **What's actually scarce:** with seats elastic, the real constraints reduce to **humans** (the
+  owner's attention, the operator slot), **money** (provider limits — account switching is the relief
+  valve), and **compute** (host limits). Protect *those*; never let a lane sit blocked on a "busy seat."
 
-If the settled inventory later contradicts your earlier assumption, correct course immediately and use the actual QA/review nodes.
+See `session-source-fork` for the fork primitive's mechanics and `delegating-work` for choosing fork
+vs. subagent vs. route-to-a-context-holder.
 
-## Milestone routing
+## Topology settlement
 
-For launch-grade product work:
+**Your rig's roster is a fact you READ, never one this skill asserts.** Get the actual team
+from `rig ps --nodes --json` at settlement time — a skill that hardcodes a specific topology
+goes stale exactly like a stale boot overlay, and a cleared or fresh seat has no context to
+doubt it (field case: a seven-node demo roster taught as "the expected team" sent a
+fourteen-seat rig's seats waiting for nodes that did not exist).
+
+- Settle **what the current atom needs**, not the whole declared roster: dispatch when the
+  seats THIS work requires are up. **Never park the rig waiting for absent nodes** — a
+  wait-for-all-nodes instruction is a mechanical cause of premature parking.
+- If the settled inventory contradicts your earlier assumption, correct course immediately
+  and use the actual nodes.
+
+## Milestone routing — gates are CHOSEN, not universal
+
+**The owner-ruled chooser law: default-light; the conveyor EARNS entry.** Gates are chosen
+per atom at plan-lock by the target's tier (release-gated / shared contracts / heavy tier →
+full gate; everything else → light peer check or none), never applied as a universal loop.
+When the heavy tier IS chosen for launch-grade product work:
 - do not let implementation start from pure intuition when product behavior is unclear
 - do not let edits land before QA has approved a pre-edit proposal
 - do not skip reviewer involvement once there is a real diff, a QA-approved working tree, or a meaningful architectural checkpoint
@@ -147,7 +171,15 @@ Ask for review:
 
 ## Keeping the team utilized
 
-Check `rig ps --nodes` regularly. If an agent is ready but idle:
+**Queue depth is your product — keep every worker's queue stocked.** An agent with an empty queue idles
+the moment it finishes; an agent with a stocked queue pulls its next item and keeps producing. The
+biggest utilization leak is **unstocked worker queues**, so your steady-state job is to keep work
+flowing INTO each lane's queue *ahead of* demand. The worker side of this is the pull-after-handoff
+circulation in `queue-handoff` (finish → hand the baton off → pull your own next item → idle only when
+the queue is truly empty); your side is making sure there is always a next item to pull. Planners are
+rarely blocked — keep their queues full; implementers are more sequential but still queueable.
+
+On a watchdog wake, a cheap scoped `rig ps --nodes` surfaces a ready-but-idle agent (this is an event-driven check, not a poll loop). If one is idle:
 - QA with no pending reviews should scan recent work for gaps
 - reviewers with no assignment should review the newest meaningful progress
 - designers with no open task should audit current flows and clarify ambiguous UX
@@ -168,9 +200,18 @@ Use the chatroom when:
 
 Use `rig capture` and `rig transcript` when you need evidence, not guesses.
 
-## Implementation pair — gated workflow
+**Proactively reach the human on the named event classes — WORKS ≠ USED.** As an orchestrator you are
+the **primary channel to the human**, and a channel nobody reaches for is useless. Surface — unprompted
+— model-fallback boots, capacity / authority requests, security flags, acceptance / milestone moments,
+human-addressed work blocked past its settle window, and idle / stall alarms. The named classes and the
+how live in `messaging-the-human` → *the v0 event classes*; your job is to actually **use** the channel
+across the lifecycle, not only when cornered.
 
-When dispatching implementation work, the pair follows this loop:
+## Implementation pair — gated workflow (when the gate is chosen)
+
+**This loop applies when the atom's tier chose the full gate** (see Milestone routing — the
+conveyor earns entry; it is not the default shape of all work). When it applies, the pair
+follows this loop:
 
 1. Impl sends a pre-edit proposal to QA
 2. QA approves or rejects with specifics
@@ -186,7 +227,7 @@ The orchestrator does NOT relay messages between them. They communicate directly
 - Impl skipping the gate (going straight to implementation without QA pre-approval)
 - QA not actually reviewing (rubber-stamping)
 
-Never send impl a "Go" without explicitly stating the FIRST action is to send a pre-edit to QA. Impl will race through an entire task list if given a general "Go."
+On gated atoms, never send impl a "Go" without explicitly stating the FIRST action is to send a pre-edit to QA — impl will race through an entire task list if given a general "Go." On ungated atoms, a general "Go" is correct; do not smuggle the gate back in through dispatch phrasing.
 
 ## Dogfood fix loop
 
@@ -199,7 +240,7 @@ When QA is dogfooding (testing existing features), QA works solo with full auton
 
 ## Permission prompt handling
 
-Permission prompts are the #1 mechanical blocker. Check for them every monitoring cycle.
+Permission prompts are the #1 mechanical blocker — surface them on your watchdog wake (a scoped `rig ps` / queue check), never a steady-state poll loop.
 
 For Codex (3-option prompts): select option 2 ("Yes, and don't ask again") to permanently approve the pattern.
 For Claude (2-option): approve with Enter.
@@ -230,7 +271,7 @@ Rules:
 2. Always say "finish what you're on first." Explicitly. Every time.
 3. Frame as context updates, not directives.
 4. Do not interrupt working agents. If an agent shows ANY sign of activity, do not send a message.
-5. Wait for confirmed idleness (2+ monitoring cycles) before nudging.
+5. Nudge only on confirmed idleness — evidence from your watchdog-clocked checks (no activity signal + settled queue state), never a fixed poll count or a "wait N cycles" loop.
 
 ## Destructive operations — hard rules
 

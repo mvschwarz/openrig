@@ -133,6 +133,14 @@ destabilize topology references on each cycle. Provenance must be
 durable AND queryable so RSI loops can decide whether a seat is fresh
 enough to receive new work or needs re-handover.
 
+## Discovery-registration gap (pilot-observed 2026-08-05)
+
+A renamed / retired occupant (`<seat>-vN`, kept alive as a cold advisor) is intentionally **absent from
+the managed node registry** — `rig ps`, discovery, and the delivery verbs (`walk` / `send`) cannot find
+it. This is by design (only bound occupants are registered), and it makes the **lineage ledger +
+boot-captured session id the wake path** (harness-level `--resume` / `codex exec`, not the rig registry).
+Two live handovers confirmed this. See `retiring-and-inheriting-a-seat`.
+
 ## See also
 
 - `session-source-fork` skill — `fork` occupant-creation primitive (sibling)

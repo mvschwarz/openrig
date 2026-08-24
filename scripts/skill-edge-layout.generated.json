@@ -77,6 +77,13 @@
       ],
       "category": "pm"
     },
+    "context-engineering": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "process"
+    },
     "cross-host-rig-commands": {
       "edges": [
         "canonical",
@@ -203,6 +210,12 @@
         "spec"
       ],
       "category": "pods"
+    },
+    "orienting-to-an-inherited-seat": {
+      "edges": [
+        "plugin"
+      ],
+      "category": null
     },
     "oversight-team": {
       "edges": [

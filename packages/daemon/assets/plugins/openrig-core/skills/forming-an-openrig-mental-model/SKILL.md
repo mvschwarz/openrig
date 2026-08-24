@@ -1,7 +1,11 @@
 ---
 name: forming-an-openrig-mental-model
-description: |
-  Use when an agent is newly oriented to OpenRig and needs to form an accurate mental model of the system fast — what rigs are, how skills load, what the topology shapes mean, what the product loop is. For agents booting into a new seat or returning to OpenRig work after time away. NOT for compaction recovery (use claude-compaction-restore for that) or for specific operational procedures.
+description: >-
+  Use when the system around you does not make sense yet: you just booted into a seat and do not
+  know how the pieces fit; someone said rig, pod, seat, fleet, topology, or slice and you are not
+  certain what they mean here; you are unsure what kind of rig you are in or what it is for; you do
+  not know how skills reach you or where context comes from; or you are about to act on a guess
+  about how OpenRig works. Gives the runtime mental model fast, so you stop guessing.
 metadata:
   cli_surfaces_referenced:
     - ask

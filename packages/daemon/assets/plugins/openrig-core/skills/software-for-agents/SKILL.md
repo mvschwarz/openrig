@@ -7,7 +7,7 @@ description: |
   is a self-improving MARKDOWN CONTROL PLANE: the substrate is markdown + YAML + JSON + folder structure
   (skills, instructions, bootstrap files, schemas, conventions), and most "bugs" are coherence gaps in
   that layer, not broken functions. Read this to form the correct mental model so your fixes land at the
-  precise spot that stops the footgun for every future rig — not just patch a symptom. NOTE: the
+  precise spot that stops the footgun for every future rig — not just patch a symptom. It also covers why STUDIO APPS skip the mockup phase — for an agent-built app the build is as fast as the mockup, so the PRD is the fleshed intent (velocity as method, not a quality waiver). NOTE: the
   bug-tolerance in this model is SCOPED to agent-managed software; the OpenRig core and rigs.to stay
   rock-solid — see the scope block up top before you apply anything here.
 metadata:
@@ -137,6 +137,33 @@ steering owner has locked it. This is exactly *don't start building until the PR
 The lock is the "finished" primitive at the editorial layer. Locking a whole phase's beats before the
 next phase is the discipline that lets 10 agents work in parallel without catastrophic collisions —
 everyone knows the target, their lane, and who judges done (the **producer owns the final product**).
+
+## 4b. Studio apps skip the mockup phase — the build IS the mockup
+
+For a **studio app**, do not run a separate mockup phase. The whole point of the Studio is that a mockup
+buys you almost nothing here: **as fast as it takes to build a mockup, you can build the running app** —
+an unlock made possible by agentic engineering. A mockup is only ever a device to flesh out the PRD; once
+the PRD and its settled answers exist, that phase is **done**. The Studio is a lightweight, rapid-velocity,
+agent-in-the-middle leveraged system: build apps fast, iterate on them fast.
+
+The phase model above collapses accordingly:
+
+1. **The PRD + settled answers ARE the fleshed intent** — no separate mockup gate, no plan-lock-on-mockups step.
+2. **Spec-lock the WHAT** — `rig scope slice approve --scope spec` locks the intent the PRD already fleshed.
+3. **BUILD the app**, then **iterate on the RUNNING app at mockup speed** — the running thing is the
+   iteration surface, not an image.
+4. **LOOK is on the running screens** (any "mockup" proof tag now points at the running app's screens),
+   then **proof-lock** — `rig scope slice approve --scope delivery`. A slice is not done until every
+   proof-contract item has evidence from the **running app**.
+
+**Velocity is the METHOD, not a quality waiver.** The LOOK is still a real LOOK; the proof contract still
+binds at delivery. You are removing a redundant artifact, not lowering the bar.
+
+**Scope — this does NOT generalize** (consistent with the scope block at the top): it applies to the
+studio-app / agent-in-the-middle loop only. Outside that loop, a **locked design mockup that a slice must
+match is still legitimate** — do not strip mockups from traditional or design-locked work. Know which lane
+you're in. For the build mechanics, see the studio's build skill (`building-studio-apps`); this section is
+the *why* and *when*.
 
 ## 5. Where to fix — and don't overfit on markdown
 

@@ -180,16 +180,11 @@ Deferred:
 - `seat-continuity-and-handover` skill — host-aware seat-binding semantics for cross-host handover (deferred to v1 on top of this v0 baseline)
 - `openrig-user` skill — the local CLI surface that cross-host commands wrap
 
-## Sender identity carries the ORIGIN host (51-09, 2026-08-06)
+## Sender identity is ASYMMETRIC (verified vs current main, 2026-07-25)
 
-The `@host` sugar on a TARGET is **addressing** (`member@rig@<host>` routes to that host).
-The **From:** sender now ALWAYS carries the **origin** host: a cross-host (and local) message's
-signature is **`member@rig@<originHost>`** — the sender reflects the host it was sent from, so a
-received signature names the ORIGIN, and the `↩ Reply:` hint round-trips **verbatim** back to that
-origin (never a same-named local lookalike). This is the always-suffix rule — deterministic and
-collision-proof: a signature means one thing to every receiver. (This SUPERSEDES the pre-51-09
-asymmetry — "the sender carries no `@host` suffix" — that pm@your-rig flagged as a core gap on
-2026-07-25; 51-09 closed it.) Per BR-1 the host is NEVER folded into the session string on the
-wire: the CLI edge renders/strips it, the daemon refuses an in-band 3-part destination with a
-teaching hint, and a stale 2-part same-name destination is closed by `--host` + that teaching —
-not by any in-string magic.
+The `@host` sugar is **target-addressing only**, not sender-identity. A cross-host
+message's **From:** is `member@rig` — the sender carries **NO `@host` suffix**. The target
+supports `member@rig@<host>` for addressing; the sender does not reflect its own host in
+`From:`. **Do NOT teach or expect a host-qualified `from`** (in openrig-user / operator send
+docs or anywhere) until that core gap is fixed. (pm@your-rig verified this against
+current main, 2026-07-25 — a known asymmetry, not a doc error to paper over.)

@@ -28,8 +28,10 @@ metadata:
 rig send operator-human@your-rig "your message"
 ```
 
-That goes straight to the human's Slack. That is the entire *how*. Everything
-below is the *when* and the *who* — which is the part that actually matters.
+That goes straight to the human's Slack — that is the *how* for **text**. For **images**
+(screenshots, renders), send through the **image connector** instead; text and images are separate
+live channels today (a release upgrade will unify them). Either way the *how* is trivial; everything
+below is the *when* and the *who* — the part that actually matters.
 
 ## The mental model: the human is a scarce attention resource managing by exception
 
@@ -62,6 +64,30 @@ There is no hard trigger here — it is judgment, and you are trusted with it. T
 test is: **"would he want to know this?"** If yes, send it. Lean toward sending
 genuine signal and real good news; do not manufacture noise or narrate routine
 churn. Discernment is the skill: you are curating his attention, not flooding it.
+
+### The v0 event classes — reach out on these, unprompted
+
+"Use discretion" left the *when* unspecified, so it did not happen — the channel exists and nobody
+reaches for it. Here are the **named event classes** that should trigger a proactive message —
+anchors for the judgment, not an exhaustive gate:
+
+- **Model-fallback boots** — a seat that came up on a fallback model instead of its pinned one. Send
+  on **every occurrence**; a silent downgrade is exactly what the human needs to see.
+- **Capacity / authority requests** — you need a fork/spin-up authorization, a spend-or-limit call, or
+  any authority only the human holds. This is a **guaranteed-answer** path — don't sit blocked on it.
+- **Security-category flags** — anything in the security / consequence-boundary class.
+- **Acceptance / milestone moments** — a slice proven, a release cut, a real "it's done and it works."
+- **Human-addressed work blocked beyond its settle window** — a decision or request routed to the
+  human that has sat past the time it should have moved.
+- **Idle / stall alarms** — the line stopped and isn't resuming (the idle-detector's signal).
+
+These are v0, drawn from real rulings; treat them as the anchors that make the *when* concrete. New
+classes earn their place the same way — from a real event the human wanted to know about.
+
+**Why this is a norm, not a nicety — WORKS ≠ USED.** A channel that *works* is not a channel that is
+*used*. This path is proven only when agents **reach for it unprompted** across the lifecycle — a
+boot, a blocker, a ship, an alarm. If the channel exists and nobody reaches for it, the human is
+blind by default. Reaching out on these classes is the job, not an interruption of it.
 
 ### If you are ANY OTHER agent — blockers only
 

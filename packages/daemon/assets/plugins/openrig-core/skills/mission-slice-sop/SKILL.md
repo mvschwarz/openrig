@@ -1,10 +1,11 @@
 ---
 name: mission-slice-sop
-description: "Use when working a mission or slice: the SDLC flow (intent -> mini-requirements + proof contract -> mockups -> plan-lock -> build -> QA -> `rig proof` drops -> proof-lock), and how to track, prove, and hand off state across agents and compaction via PROGRESS.md / PROOF.md / MISSION_NOTES.md. Covers the two locks, role contracts, hot-potato queue handoff, and the `rig scope audit` backstop."
+description: "Use when working a mission or slice: the canonical files (README / IMPLEMENTATION-PRD / PROGRESS / MISSION_NOTES / MISSION_BRIEF / PROOF), who owns what and when, how planning feeds building + review + QA, how to hand off through the queue, and how to survive compaction. This is the LIGHT default. It does NOT include the intent/plan-lock/proof-lock ceremony — that is a separate assigned overlay, `mission-slice-intent-proof-sop`."
 metadata:
   openrig:
     stage: shipped
     sibling_skills:
+      - mission-slice-intent-proof-sop
       - queue-handoff
       - seat-continuity-and-handover
       - claude-compaction-restore
@@ -12,99 +13,88 @@ metadata:
 
 # Mission/Slice SOP — how you work a mission & slice
 
-Use this skill to actually **do** mission/slice work the way OpenRig expects: author the convention sections, track on the canonical files, prove on them, hand off through them, and survive compaction on them. **Do the work described here; do not merely explain the protocol.** The deterministic backstop is `rig scope audit` — an **advisory, fail-open** check (it records and advises, never blocks a write; see Proportionality below), not an authority you serve. The conventions themselves live in ONE document: **`docs/reference/sdlc-conventions.md`** in the repo, materialized by the daemon at **`$OPENRIG_HOME/reference/sdlc-conventions.md`** (default `~/.openrig/reference/sdlc-conventions.md`) on an installed package — this skill teaches the flow; the SSOT defines the formats.
+Use this skill to actually **do** mission/slice work: track on the canonical files, record what you proved, hand off through them, and survive compaction on them. **Do the work described here; do not merely explain the protocol.**
+
+## THIS IS THE LIGHT DEFAULT — read this before anything else
+
+**The default for any slice is the inner loop:** ground yourself → build → **test with your own eyes** → iterate → **ONE** full-breadth review at the end. That is the whole process. It is not a reduced form of a better process; it IS the process.
+
+**The intent / plan-lock / proof-contract / proof-lock ceremony is NOT part of this skill.** It lives in a separate overlay, **`mission-slice-intent-proof-sop`**, and you **may not select it yourself**. It applies only when the mission owner — or an orchestrator explicitly relaying the mission owner — **assigns it to a named piece of work**. If you believe something earns it, say so in one sentence and **continue on the light path** until told otherwise.
+
+Why the split exists, plainly: this document used to carry both, so every slice loaded the full apparatus and a one-line documentation change could draw a multi-round gate. If you find yourself building a proof contract, requesting a pre-edit gate, or asking a peer to gate something you can verify yourself — you have picked up the overlay without being assigned it. Put it down.
 
 ## Proportionality — this SOP serves shipping; it is not the work itself
-The working product is the deliverable. This bookkeeping exists so the work survives handoff, compaction, and review — nothing more. **Match it to stakes:** OpenRig core = full ceremony; Studio Box / SDK / app slices = pragmatic — the mini-requirements may BE the whole PRD, and a couple of honest, LOOKed proof lines beat an elaborate contract. The `rig scope audit` backstop is **advisory and fail-open** (its own SSOT says so): it never blocks a build and is not a gate you clear before proceeding. If you're spending more time on the convention files or the audit than on the running product, stop and go build. Running the full apparatus on a small change is the letter-worship failure, not diligence.
 
-## The SDLC flow (intent → proof)
-
-```
-intent → mini-requirements + proof contract → (UI slices: mockups)
-      → plan-lock (rig scope slice approve --scope spec)
-      → build the LOCKED set
-      → QA: mockup ↔ delivered VISUAL compare
-      → proof drops (rig proof add <slice> …)
-      → proof-lock (rig scope slice approve --scope delivery)
-```
-
-1. **Record intent** verbatim in the slice's `## Intent` section (`rig scope slice create` scaffolds it — every template kind).
-2. **Author the mini-requirements + proof contract**: `## Mini-requirements` is the concise one-glance tier (approval starts there); `## Proof contract` is a checkbox list of promised deliverables, each written as an observable outcome. UI deliverables name their planned mockup. The IMPLEMENTATION-PRD opens with the mini-requirements; everything between intent and proof is **elastic** — for a small slice the mini-requirements may BE the whole PRD.
-   - **PARSER CONTRACT (README AND IMPLEMENTATION-PRD, from first draft — a parser contract, not stylistic):** each doc carries a verbatim, **undecorated** `## Mini-requirements` heading with a **numbered list**, and a verbatim, **undecorated** `## Proof contract` heading whose checkbox (`- [ ]`) lines are **character-identical** across the two files. `rig scope audit` parses the PRD's `## Proof contract`; a prose rollup (e.g. `## Required proof …`) or any renamed/decorated heading trips **`proof_contract_missing_or_malformed`** and forces a post-lock format patch. Never rename or decorate these two headings, and keep the PRD's checkbox lines byte-for-byte equal to the README's.
-   - **REFERENCE-NOT-RESTATE (public / runnable examples — an honesty rail, from first draft):** any example that shows output or a value the referenced file/command **derives** — repo/runtime counts, current-state totals, hashes, timestamps — must **reference the source/derivation, omit the volatile value, or pin an explicitly stable fixture**; never hardcode the live count/state in a public or shipped doc. "Illustrative" derived output is a lie on a timer: `OK registry (2 manifests)` goes false the instant an entry lands. Write the invariant form (`OK registry (<N> manifests)`, N = entries in `registry.json`) or name the fixture instead of the momentary number. Restated derivable state in a public doc is a defect `rig scope audit` will not catch — the author owns it.
-3. **Plan-lock**: `rig scope slice approve <slice> --scope spec` — "the PRD matches the intent; THIS artifact set is what gets built." One daemon-side write: frontmatter stamp + append-only audit row.
-   - **PRE-PLAN-LOCK SELF-CHECK (advisory, not a gate):** before requesting `--scope spec`, it's worth running `rig scope audit --mission <mission> --json` and clearing any real **format** defect (e.g. `proof_contract_missing_or_malformed`) so the parser can read your proof contract — that's a genuine machine-parsing need, cheap to fix. But the audit is fail-open: findings do NOT block the lock or the build, and you do NOT need a zero-findings score to proceed. Fix what's real, skip what isn't, keep moving.
-4. **Build the locked set** — look at the mockups, not just the spec text.
-5. **QA visual compare**: for each deliverable, load the planned mockup, produce the real artifact in a test/demo environment, visually compare, and record the verdict.
-6. **Drop proof**: `rig proof add <slice> --artifact-type qa --verdict PASS --candidate-sha <tip> --money-evidence "…" --evidences "1,3" --media "walk.webm,panel.png" --self-check "…"` — the C1 header's closed sets validate at drop time; `--evidences` joins the drop to its proof-contract items and `--media` names the curated proof/-relative media the drop stands behind (that pairing + media set is what the UI's DELIVERED section renders).
-7. **Proof-lock**: `rig scope slice approve <slice> --scope delivery` — the terminal sign-off. Approval is freeze/sign-off, **never** proven-green: proven-green requires the recorded C1 verdicts.
+The working product is the deliverable. This bookkeeping exists so the work survives handoff, compaction, and review — nothing more. **Match it to stakes.** The `rig scope audit` backstop is **advisory and fail-open**: it never blocks a build and is not a gate you clear before proceeding. If you're spending more time on the convention files or the audit than on the running product, stop and go build. Running the full apparatus on a small change is the letter-worship failure, not diligence.
 
 ## The three role contracts
 
-- **Planning agent:** authors intent + mini-requirements + the proof contract; produces mockups for UI deliverables and attaches them to the locked set (a UI slice with no mockup is an incomplete plan; non-UI slices have none — not a gate); locks the plan.
-- **Build agent:** builds against the LOCKED set only; looks at the mockups.
-- **QA agent (owns the compare):** visually compares planned vs delivered per deliverable, records verdict + note via proof drops, and **curates** the canonical proof set (bounded, mapped to deliverables; the fix-loop pile stays in `proof/`, one drill-in down). On mismatch: fix-and-re-review or kick back with the reason — never escalate a raw mismatch to the human.
+- **Planning agent:** records what the slice is for and what "done" looks like, in the slice's own words; produces mockups for UI deliverables so the builder has something to look at (a UI slice with no mockup is an incomplete plan; non-UI slices have none — not a gate).
+- **Build agent:** builds it, and **looks at the mockups**. Verifies by running the thing.
+- **QA agent (owns the compare):** compares planned vs delivered per deliverable, records the verdict and the note. On mismatch: fix-and-re-review, or kick back with the reason — never escalate a raw mismatch to the human.
+
+These three are a division of labour, not a chain of gates. One agent may hold all three on a small slice.
 
 ## The canonical files (the operating surface)
 
-> The canonical files below are the **operating surface of the work** — you track on them, prove on them, hand off through them, and survive compaction on them. Keep them current because that is what lets the work survive handoff, compaction, and review — but they **serve** the product, they are not the product. If you're polishing these files while the actual thing isn't shipping, you've inverted it: go build, then update them.
+> These files are the **operating surface of the work** — you track on them, record on them, hand off through them, and survive compaction on them. Keep them current because that is what lets the work survive. But they **serve** the product; they are not the product. If you're polishing files while the actual thing isn't shipping, you've inverted it: go build, then update them.
 
-- **README.md** (mission + slice) — the overview, OPENING with the convention sections (`## Intent` / `## Mini-requirements` / `## Proof contract`). The **mission README carries this SOP at its bottom.**
-- **IMPLEMENTATION-PRD.md** — the full PRD; opens with the mini-requirements; the `## Proof contract` here is what the UI's DELIVERED pairing joins proof against.
+- **README.md** (mission + slice) — the overview. The **mission README carries this SOP at its bottom.**
+- **IMPLEMENTATION-PRD.md** — the plan, at whatever depth the work actually needs. For a small slice this may be a few lines. Elastic by design.
 - **PROGRESS.md** — the live delivery state. One line per outcome; links down for detail.
-- **MISSION_NOTES.md** — the accruing handoff + tribal-knowledge doc. Blank-slate onboarding + **compaction-restore** read it. `§1` top-of-mind + per-seat `§A–§X`.
+- **MISSION_NOTES.md** — the accruing handoff + tribal-knowledge doc. Blank-slate onboarding and **compaction-restore** read it. `§1` top-of-mind + per-seat `§A–§X`.
 - **MISSION_BRIEF.md** — the steering doc (the UI "Steering" tab). The 7-section schema.
-- **PROOF.md** (+ `proof/`) — acceptance evidence. **A slice is not done until every proof-contract item has evidence.**
+- **PROOF.md** (+ `proof/`) — what you actually verified, stated honestly. A couple of honest, LOOKed-at lines beat an elaborate contract.
 
 ## Per-file rules — WHO / WHEN / HOW
 
 ### PROGRESS.md
 - **WHO:** the orchestrator owns `§1` (current state); every agent logs its own outcomes.
-- **WHEN:** after every slice-done **AND every commit**; on any material state change.
-- **HOW:** one line per outcome (checkbox), link down for detail (workstream-continuity format); keep frontmatter `stage`/`verified` honest.
+- **WHEN:** after every slice-done **and every commit**; on any material state change.
+- **HOW:** one line per outcome (checkbox), link down for detail; keep frontmatter `stage`/`verified` honest.
 
 ### PROOF.md + proof/
 - **WHO:** the impl/QA pair that worked the slice.
-- **WHEN:** a slice is **NOT "done"** until every proof-contract item has evidence.
-- **HOW:** proof maps **1:1 to the proof contract's deliverables** — put media under `proof/`, then ATTACH it with `rig proof add <slice> … --evidences <item> --media <files>` (the drop writes the C1 header the DELIVERED pairing joins on) + a line in PROOF.md stating what it proves. **Hand-placing files in `proof/` without a drop is the anti-pattern** — the deliverable stays unpaired and `unverified`. No proof → not done.
+- **WHEN:** before you call a slice done.
+- **HOW:** say what you verified and how you verified it — **by effect**: you ran it and looked at the result. Put supporting media under `proof/`. State plainly what is proven and what is **not**; an honest "this half is untested" is worth more than a checkmark. If a drop verb is in play for this slice, prefer it over hand-placing files so the artifact carries its own provenance.
 
 ### MISSION_NOTES.md
-- **WHO:** any agent updates `§1` (top-of-mind); each seat owns + appends to its own `§A–§X` section.
+- **WHO:** any agent updates `§1` (top-of-mind); each seat owns and appends to its own `§A–§X`.
 - **WHEN:** on any material change; a compacting agent **files its state here BEFORE compaction and reads it on restore.**
 - **HOW:** accruing tribal knowledge — `§1` ≤ 5–15 lines (gates, open decisions, surprises); per-seat continuation entries (latest = truth; other seats read-only). Pointer-first; don't duplicate.
 
 ### MISSION_BRIEF.md
-- **WHO:** product/design (steering owner).
-- **WHEN:** when steering changes.
-- **HOW:** the 7-section steering schema (the UI "Steering" tab reads it).
+- **WHO:** product/design (steering owner). **WHEN:** when steering changes. **HOW:** the 7-section steering schema.
 
 ### README.md
-- **WHO:** the author at creation; refreshed on rescope.
-- **WHEN:** at mission/slice creation + when scope/theme changes.
-- **HOW:** overview + honest frontmatter (`id`/`stage`/`verified`) + the convention sections up top; the mission README carries this SOP at its bottom.
+- **WHO:** the author at creation; refreshed on rescope. **WHEN:** at creation + when scope/theme changes. **HOW:** overview + honest frontmatter (`id`/`stage`/`verified`); the mission README carries this SOP at its bottom.
 
 ## The lifecycle (4 legs)
 
-**SCAFFOLD** (`rig scope` creates the files from templates — every slice kind emits the convention sections + `proof/` + the IMPLEMENTATION-PRD skeleton) → **POPULATE** (agents fill them as work happens, per the rules above) → **PROJECT** (the Living Notes UI reads them into INTENT → PLAN → DELIVERED) → **VERIFY** (`rig scope audit` checks adherence). "Loose freeform write + deterministic verify."
+**SCAFFOLD** (`rig scope` creates the files from templates) → **POPULATE** (agents fill them as work happens) → **PROJECT** (the Living Notes UI reads them into INTENT → PLAN → DELIVERED) → **VERIFY** (`rig scope audit`, advisory). "Loose freeform write + deterministic verify."
 
 ## Hot-potato (handoffs)
 
-End every turn by passing the ball — a `rig queue` handoff to the next agent (close the qitem with a `closure_reason`). The **durable ball-pass is the queue close, not a chat message.** Never go idle without a handoff.
+End every turn by passing the ball — a `rig queue handoff` to the next agent. The handoff verb is **transactional**: it closes the source as handed-off and mints the successor owned by `--to`, so the baton cannot be dropped. A handoff terminates only at the orchestrator seat, which holds the context to judge whether a park is legitimate.
+
+**A plain `rig queue create` row is informational** — a durable message. It is not a baton and does not carry this obligation. Use `handoff` when you are passing real work; use `create` when you are informing.
+
+Never go idle holding a baton.
 
 ## Verify (deterministic backstop)
 
-Run `rig scope audit` at slice-close. It flags: committed-without-touching-PROGRESS; slice-marked-done-without-PROOF; active-mission-without-MISSION_NOTES; MISSION_BRIEF off-schema; proof artifacts violating the C1 header; missing IMPLEMENTATION-PRD on a building slice; missing convention sections (`## Intent`, a well-formed `## Proof contract`, the UI-slice mockup ref). Every convention check is **advisory / fail-open** — it records and advises, never blocks a write. **Fix the flag, don't suppress it.**
+Run `rig scope audit` at slice-close. Every convention check is **advisory / fail-open** — it records and advises, never blocks a write. Fix what's real, skip what isn't, keep moving. **A clean audit score is not required to proceed.**
 
 ## Reading terminal captures — KNOWN GOTCHA: ghost-text autocomplete is NOT real
 
-When you `rig capture` a pane, **greyed / ghost autocomplete suggestions are NOT real content** — they are autocomplete *previews* (shell autosuggestion, the input-box ghost-text completion), not typed, staged, or committed input. **This is known, expected, and has been faking agents out a lot** — reading a ghost suggestion in a peer's input box as "staged text they're about to send," or as a real prompt, and then reasoning/acting on a string that was never actually there.
+When you `rig capture` a pane, **greyed / ghost autocomplete suggestions are NOT real content** — they are autocomplete *previews*, not typed, staged, or committed input. **This has been faking agents out a lot**: reading a ghost suggestion in a peer's input box as "staged text they're about to send," then reasoning on a string that was never there.
 
-**Rule:** ignore ghost/autosuggest text entirely. Only *committed/rendered* pane output is real. If a `❯` input line shows text, treat it as an autocomplete artifact unless you have independent evidence it was actually entered. Do not build decisions (or worry about "colliding with staged text") on ghost text. When it matters, verify at source (git, the queue, the actual event) — never off a capture's ghost line.
+**Rule:** ignore ghost/autosuggest text entirely. Only *committed/rendered* pane output is real. When it matters, verify at source (git, the queue, the actual event) — never off a capture's ghost line.
 
 ## Moment-of-truth checklist
 
-- **Starting a slice?** → intent recorded verbatim? **PRD carries a verbatim numbered `## Mini-requirements` + a verbatim `## Proof contract` whose `- [ ]` lines are character-identical to the README's** (parser contract)? **no example restates derivable state** — counts/hashes/timestamps referenced, omitted, or pinned to a stable fixture, never hardcoded (reference-not-restate)? mockups attached (UI slices)? ran `rig scope audit` and fixed any real **format** defect so the parser reads the proof contract (advisory — a clean score is NOT required to lock)?
-- **Finishing a slice?** → every proof-contract item has curated evidence via `rig proof add … --evidences --media` (C1 drops — never only hand-placed files)? PROGRESS updated? MISSION_NOTES `§1` refreshed? proof locked (`--scope delivery`)? Handed off via queue?
+- **Starting a slice?** → do you know what it's for and what done looks like? mockups attached (UI slices)? **Are you on the light path?** (You are, unless the mission owner assigned the overlay.)
+- **Finishing a slice?** → does PROOF.md say what you actually verified, by effect, including what is NOT covered? PROGRESS updated? MISSION_NOTES `§1` refreshed? handed off via `rig queue handoff`?
 - **Committing?** → PROGRESS updated?
 - **Compacting?** → filed your state in MISSION_NOTES?
-- **Starting on a mission?** → read the mission README (incl. this SOP) + MISSION_NOTES + the conventions SSOT (`docs/reference/sdlc-conventions.md` in the repo, `$OPENRIG_HOME/reference/sdlc-conventions.md` on an installed package)?
+- **Starting on a mission?** → read the mission README (incl. this SOP) + MISSION_NOTES + the conventions SSOT.

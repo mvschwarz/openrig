@@ -3,12 +3,26 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 
 const TEXT_LIMIT = 4000;
-// P6(C) injectable output-root (mirrors precompact-hook.mjs): per-run isolation when
-// OPENRIG_COMPACTION_OUT_ROOT is set, real /tmp default in production. Guards a direct
-// invocation (the hook passes --out explicitly) against the same cross-writer collision.
-const DEFAULT_OUT = process.env.OPENRIG_COMPACTION_OUT_ROOT || "/tmp/claude-compaction-restore";
+const BASE64_RUN = 800; // strip contiguous base64 runs at least this long (screenshots, data URIs)
+
+function sha256(text) {
+  return crypto.createHash("sha256").update(String(text ?? "")).digest("hex").slice(0, 16);
+}
+
+// R3: replace binary / base64 payloads (data: URIs, long base64 runs) with a compact marker,
+// so a single screenshot block does not blow the transcript into un-chunkable size.
+function stripBinary(text) {
+  let s = String(text ?? "");
+  s = s.replace(/data:([\w.+-]+\/[\w.+-]+)?;base64,[A-Za-z0-9+/=\s]{200,}/g,
+    (m, mime) => `[binary omitted: ~${m.length} bytes${mime ? `, ${mime}` : ""}]`);
+  s = s.replace(new RegExp(`[A-Za-z0-9+/]{${BASE64_RUN},}={0,2}`, "g"),
+    (m) => `[base64 omitted: ~${m.length} bytes]`);
+  return s;
+}
+const DEFAULT_OUT = "/tmp/claude-compaction-restore";
 
 function parseArgs(argv) {
   const args = {
@@ -86,8 +100,9 @@ function stringifyContent(content) {
       .map((block) => {
         if (typeof block === "string") return block;
         if (block?.type === "text") return block.text ?? "";
+        if (block?.type === "image") return `[image omitted: ${block.source?.media_type ?? "image"}]`;
         if (block?.type === "tool_use") return `[tool_use:${block.name}] ${JSON.stringify(block.input ?? {})}`;
-        if (block?.type === "tool_result") return `[tool_result] ${truncate(stringifyContent(block.content), TEXT_LIMIT)}`;
+        if (block?.type === "tool_result") return `[tool_result] ${truncate(stripBinary(stringifyContent(block.content)), TEXT_LIMIT)}`;
         return JSON.stringify(block);
       })
       .join("\n");
@@ -239,6 +254,8 @@ function analyze(jsonlPath, cwd) {
   const records = readJsonLines(jsonlPath);
   const registry = createRegistry();
   const transcript = [];
+  const narrative = []; // R4: message-turns only (assistant/user text), no tool bodies
+  const readTargets = new Map(); // R1: tool_use_id -> file_path for Read calls
   const cwdCounts = new Map();
   let sessionId = null;
 
@@ -262,20 +279,26 @@ function analyze(jsonlPath, cwd) {
 
     if (typeof content === "string") {
       transcript.push(`\n## ${role}\n\n${content}`);
+      narrative.push(`\n## ${role}\n\n${content}`);
       for (const file of extractPaths(content, cwd)) registry.add(file, "mentioned", `${role}:text`);
       continue;
     }
 
     if (!Array.isArray(content)) continue;
     const parts = [];
+    const narrativeParts = [];
     for (const block of content) {
       if (block?.type === "text") {
         parts.push(block.text ?? "");
+        narrativeParts.push(block.text ?? "");
         for (const file of extractPaths(block.text ?? "", cwd)) registry.add(file, "mentioned", `${role}:text`);
       } else if (block?.type === "tool_use") {
         const name = block.name ?? "unknown";
         const input = block.input ?? {};
         parts.push(`\n[tool_use:${name}]\n${JSON.stringify(input, null, 2)}`);
+        if (name === "Read" && block.id && (input.file_path || input.path)) {
+          readTargets.set(block.id, input.file_path || input.path);
+        }
         const kind = toolKind(name, input);
         if (input.file_path) registry.add(normalizeFile(input.file_path, cwd), kind, `tool:${name}:file_path`);
         if (input.path) registry.add(normalizeFile(input.path, cwd), kind, `tool:${name}:path`);
@@ -284,12 +307,21 @@ function analyze(jsonlPath, cwd) {
           for (const file of extractPaths(text, cwd)) registry.add(file, kind, `tool:${name}:input`);
         }
       } else if (block?.type === "tool_result") {
-        const resultText = stringifyContent(block.content);
-        parts.push(`\n[tool_result]\n${truncate(resultText, TEXT_LIMIT)}`);
+        const resultText = stripBinary(stringifyContent(block.content));
+        const target = block.tool_use_id && readTargets.get(block.tool_use_id);
+        if (target) {
+          // R1: a Read result reproduces a whole file — emit a pointer, not the body.
+          // The live file is current; this transcript copy is a snapshot that may be stale.
+          const lineCount = resultText.split("\n").length;
+          parts.push(`\n[tool_result: Read ${target} — ${lineCount} lines, sha256 ${sha256(resultText)} — READ THE LIVE FILE; this snapshot may be stale]`);
+        } else {
+          parts.push(`\n[tool_result]\n${truncate(resultText, TEXT_LIMIT)}`);
+        }
         for (const file of extractPaths(resultText, cwd)) registry.add(file, "mentioned", "tool_result");
       }
     }
     if (parts.length) transcript.push(`\n## ${role}\n\n${parts.join("\n")}`);
+    if (narrativeParts.some((p) => String(p).trim())) narrative.push(`\n## ${role}\n\n${narrativeParts.join("\n")}`);
   }
 
   const rankedFiles = registry
@@ -300,12 +332,17 @@ function analyze(jsonlPath, cwd) {
   const cwdRanked = [...cwdCounts.entries()].sort((a, b) => b[1] - a[1]);
   const effectiveCwd = cwdRanked[0]?.[0] ?? cwd;
 
+  const transcriptText = transcript.join("\n");
+  const narrativeText = narrative.join("\n");
   return {
     sessionId,
     jsonlPath,
     cwd: effectiveCwd,
     records: records.length,
-    transcript: transcript.join("\n"),
+    transcript: transcriptText,
+    narrative: narrativeText,
+    transcriptTokens: Math.round(transcriptText.length / 4),
+    narrativeTokens: Math.round(narrativeText.length / 4),
     files: rankedFiles,
     docs: discoverDocs(effectiveCwd),
   };
@@ -346,9 +383,17 @@ function restoreInstructions(summary, outputPaths) {
   lines.push("You have just been compacted or are restoring a compacted Claude Code seat. Your mental model is compressed and unreliable.");
   lines.push("");
   lines.push(`- JSONL transcript: \`${summary.jsonlPath}\``);
-  lines.push(`- Reconstructed transcript: \`${outputPaths.transcript}\``);
+  lines.push(`- Reconstructed transcript: \`${outputPaths.transcript}\` (~${summary.transcriptTokens ?? "?"} tokens — do NOT read front-to-back)`);
+  lines.push(`- Narrative companion (READ THIS FIRST): \`${outputPaths.narrative}\` (~${summary.narrativeTokens ?? "?"} tokens — message turns only, no tool bodies)`);
   lines.push(`- Touched-file triage: \`${outputPaths.touchedFiles}\``);
   lines.push(`- Working directory inferred: \`${summary.cwd}\``);
+  lines.push("");
+  lines.push("## Read budget (the restore must leave room for the work)");
+  lines.push("");
+  lines.push(`- The full transcript is ~${summary.transcriptTokens ?? "?"} tokens. **Reading it front-to-back can consume the window the restore exists to rebuild.**`);
+  lines.push(`- Default order: read the **narrative companion first** (~${summary.narrativeTokens ?? "?"} tokens — message turns + decisions), tail-first (most recent first).`);
+  lines.push("- Drop to the full transcript only for a specific question the narrative can't answer. File bodies inside tool-results are pointers now — **read the live file, not the transcript snapshot.**");
+  lines.push("- Read to a budget with a stopping rule; report depth honestly (an honest PARTIAL beats a false completion). See the skill's *Required Read-Depth Audit*.");
   lines.push("");
   lines.push("## Required Sequence");
   lines.push("");
@@ -378,31 +423,25 @@ function restoreInstructions(summary, outputPaths) {
   return lines.join("\n");
 }
 
-// A3-R3 injectable clock (slice 51-01): the packet output-dir timestamped path
-// defaults to real wall-clock, but becomes deterministic when the shared hermetic
-// env-var OPENRIG_TEST_CLOCK_NOW is set (an ISO instant). Empty/absent = production.
-function nowIso() {
-  const injected = process.env.OPENRIG_TEST_CLOCK_NOW;
-  return typeof injected === "string" && injected.trim().length > 0 ? injected : new Date().toISOString();
-}
-
 function writeOutputs(summary, outRoot) {
-  const stamp = nowIso().replace(/[:.]/g, "-");
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const base = path.join(outRoot, `${summary.sessionId ?? "unknown-session"}-${stamp}`);
   fs.mkdirSync(base, { recursive: true });
 
   const outputPaths = {
     dir: base,
     transcript: path.join(base, "transcript.txt"),
+    narrative: path.join(base, "transcript-narrative.txt"),
     touchedFiles: path.join(base, "touched-files.md"),
     instructions: path.join(base, "restore-instructions.md"),
     summary: path.join(base, "restore-summary.json"),
   };
 
   fs.writeFileSync(outputPaths.transcript, summary.transcript || "(no message transcript reconstructed)\n");
+  fs.writeFileSync(outputPaths.narrative, summary.narrative || "(no narrative reconstructed)\n");
   fs.writeFileSync(outputPaths.touchedFiles, markdownFileList(summary.files));
   fs.writeFileSync(outputPaths.instructions, restoreInstructions(summary, outputPaths));
-  fs.writeFileSync(outputPaths.summary, JSON.stringify({ ...summary, transcript: undefined, outputPaths }, null, 2));
+  fs.writeFileSync(outputPaths.summary, JSON.stringify({ ...summary, transcript: undefined, narrative: undefined, outputPaths }, null, 2));
 
   return outputPaths;
 }
@@ -421,6 +460,9 @@ function main() {
     jsonlPath,
     outputDir: outputPaths.dir,
     transcript: outputPaths.transcript,
+    narrative: outputPaths.narrative,
+    transcriptTokens: summary.transcriptTokens,
+    narrativeTokens: summary.narrativeTokens,
     touchedFiles: outputPaths.touchedFiles,
     instructions: outputPaths.instructions,
     fileCount: summary.files.length,
@@ -432,7 +474,8 @@ function main() {
     console.log(`Restore packet: ${result.outputDir}`);
     console.log(`Instructions: ${result.instructions}`);
     console.log(`Touched files: ${result.touchedFiles}`);
-    console.log(`Transcript: ${result.transcript}`);
+    console.log(`Narrative (read first): ${result.narrative} (~${result.narrativeTokens} tokens)`);
+    console.log(`Transcript (drill-down): ${result.transcript} (~${result.transcriptTokens} tokens)`);
   }
 }
 

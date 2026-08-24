@@ -12,7 +12,7 @@ metadata:
     sibling_skills:
       - workflow-runtime
       - watchdog
-      - alignment-trace
+      - refocus
       - looping-workflows
       - intake-routing
       - human-in-the-loop
@@ -76,6 +76,36 @@ human. The qitem state machine enforces this:
 Three of those (`handed_off_to`, `blocked_on`, `escalation`) additionally
 require `closure_target`. The daemon enforces this at the domain layer;
 every surface (CLI, MCP, future UI) inherits the same guarantee.
+
+**The drafted-park failure (draft ≠ throw).** The rule is about the *actual* pass, not the
+intention to pass. A turn that ends with a self-instruction **typed into your own prompt but left
+unsent** — a drafted go-ahead, a next-atom note you never sent — has **not** handed off; it has
+**parked**, and the seat sits idle for as long as nobody notices. Drafting the handoff feels like
+doing it; it isn't. **Your last act on a turn must be an EDIT or a SEND** — a committed change, a
+`rig send`, a `rig queue` handoff — **never a drafted prompt line left in the buffer.** If your
+final output is an instruction addressed to yourself, you haven't ended the turn, you've stalled it.
+
+**The dispatcher's other half — supersession closes your own outbox.** Ending your turn cleanly is
+only half the rule; the other half fires when *you* move the world. **When a phase transition or a
+fold receipt supersedes work you dispatched, close those dispatches yourself — with a citation to the
+event that superseded them.** Closure-on-supersession belongs to the **dispatcher, never the
+receiver.** Make it a habit: after every fold receipt / phase transition, run an **outbox audit** —
+*which of my open dispatches did this just make moot?* — and close them with the citation.
+
+*Why it must live with you:* stale dispatch-debt is **invisible to the dispatcher** because it lands
+on someone else's queue — the cost is externalized, so no feedback loop ever fires to make you clean
+it up. The receiver inherits debt they did not create and must burn cycles verifying it before they
+can hold cleanly; a queue full of stale-pending makes *check-before-holding* — the discipline you
+most want cheap — expensive, and it degrades the idle-detector's signal (a real owner looks the same
+as a stale dispatch). Close it at the source: the moment your own transition mooted it.
+
+**And after you hand off, PULL — don't idle with a stocked queue.** Handing the baton off ends the
+*sequential* thread; it does not end *your* turn if your own queue still holds work. The circulation
+pattern: finish → (1) hand the baton off so sequential work continues → (2) **check your OWN queue and
+pull the next item** rather than going idle → (3) go truly idle only when your queue is **exhausted**,
+then wait for the baton. An agent idling on top of a stocked queue is the single biggest utilization
+leak (see `orchestration-team` → *queue depth is the orchestrator's product*). This is pull-not-push at
+the seat level and needs no new machinery — the last act *after a handoff* is a **PULL**.
 
 ## Default-nudge semantics (the syntax footgun)
 

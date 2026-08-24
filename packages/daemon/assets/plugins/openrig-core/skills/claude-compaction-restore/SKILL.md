@@ -92,6 +92,32 @@ restored from packet at <path>; resumed at step <X>
 
 Include the main files you read in full when you make that statement.
 
+9. **REFOCUS BEFORE YOU RESUME — the restore returns your TASK, not your BEARINGS.** Everything
+   above rebuilds *what you were doing*. None of it rebuilds *what the work is for* or *how this
+   rig operates* — those live in the chains, and nothing in steps 1–8 walks them. Invoke the
+   `refocus` skill and do its reads before your next substantive move.
+
+   **Measured 2026-08-13, and this step exists because of it:** a seat completed this protocol
+   faithfully — packet built, narrative read tail-first, read-depth audit reported honestly — and
+   resumed with a perfect picture of its atom and *zero* work-tree context. It had never opened
+   the mission or project nodes, and could only paraphrase the release's intent second-hand from
+   a peer's message. It then produced a technically-correct trace concluding *"I hold nothing"*
+   while holding 18 pending rows. **A restore that returns you to your task without your bearings
+   is how a confidently-wrong agent gets back to work.**
+
+**On the marker and the packet's size (measured across restores, 2026-08):** two realities the restore
+must handle honestly —
+
+- **The per-seat marker (`restore-pending/<session>.json`) is frequently absent** — in five observed
+  restores it was never present. Treat the JSONL rebuild via `restore-from-jsonl.mjs` as the **primary**
+  path, not a fallback: run it regardless of whether a marker exists. (When product-infra reliably writes
+  the marker for tmux-launched seats, it becomes a fast-path upgrade — not a prerequisite that keeps failing.)
+- **The generated transcript can be very large** (measured at ~346k tokens in one restore). Do **not**
+  read it front-to-back or claim to. `restore-instructions.md` declares its token cost up front; default
+  to the **most recent ~50k tokens of unique narrative first** (recency is what a restore needs — the
+  thread that produced the current frontier, not the boot handshake), and go earlier only if a specific
+  question requires it. A restore must leave room for the work it was restored to do.
+
 ## Required Read-Depth Audit
 
 After the first restore pass, audit yourself before continuing.
@@ -101,9 +127,15 @@ After the first restore pass, audit yourself before continuing.
 2. Mark each item as `FULL`, `PARTIAL`, or `NOT_READ`.
 3. You will be given a task where all of these files are required reading in
    order to understand the task.
-4. Do not optimize for token conservation.
-5. Read every `PARTIAL` or `NOT_READ` item in full now.
-6. Report the final read-depth table before doing any substantive task work.
+4. Read `PARTIAL`/`NOT_READ` items in full — but **to a declared budget with a stopping rule**, not
+   unbounded. Prioritize by relevance to the active task; for a large transcript read the most recent
+   unique narrative first (see *If You Just Compacted*), not front-to-back.
+5. **Stop** when either every task-relevant item is `FULL`, or you reach the budget — *a restore that
+   cannot leave room for the work it was restored to do is not a successful restore.* "Read everything,
+   never conserve" has no termination condition; that open-endedness is the bug, not the goal.
+6. Report the final read-depth table **honestly** (`FULL`/`PARTIAL`/`NOT_READ`, each with a reason)
+   before task work. **An honest `PARTIAL` with its reason is a correct outcome, not a failure** — do
+   not claim a completion you did not reach.
 
 ## Guardrails
 

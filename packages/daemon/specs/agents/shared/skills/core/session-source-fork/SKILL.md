@@ -100,7 +100,7 @@ Negative-grep over adapter source confirms ZERO `restored` / `resumed` /
 
 ## Hard boundaries (do-not list; verbatim)
 
-- **Do NOT introduce a new top-level command** (e.g., `rig fork`). The primitive flows through existing spec/expansion pathways.
+- **Do NOT introduce a DIVERGENT fork primitive.** The primitive flows through existing spec/expansion pathways. *(Update 2026-08-07: `rig fork <source-session>` has since shipped as a thin convenience verb that COMPOSES the existing agent-image fork path — this honors the boundary; it is not a divergent primitive. The rule now reads: no NEW fork mechanics outside the spec / expansion / agent-image pathways.)*
 - **Do NOT report "restored" / "resumed the original seat" / "snapshot"** in any UX surface.
 - **Do NOT couple `session_source` to AgentSpec.** It's a member-level launch-time input.
 - **Do NOT change `restore` semantics.** `session_source` creates a seat; `restore` continues an existing managed seat.

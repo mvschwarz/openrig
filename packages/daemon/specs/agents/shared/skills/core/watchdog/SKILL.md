@@ -10,7 +10,7 @@ metadata:
       # genuinely adjacent set.
       - queue-handoff
       - workflow-runtime
-      - alignment-trace
+      - refocus
       - looping-workflows
       - intake-routing
       - human-in-the-loop
@@ -22,7 +22,7 @@ metadata:
 
 Continuity checks are timed or evidence-triggered interventions that
 keep an agent workflow from going idle, drifting, or entering needless
-bureaucracy. They operationalize the alignment-trace doctrine.
+bureaucracy. They operationalize the refocus doctrine.
 
 ## Use this when
 
@@ -49,7 +49,7 @@ bureaucracy. They operationalize the alignment-trace doctrine.
 |---|---|---|---|
 | **Wake** | Restart motion | Owner appears idle, stale, blocked, or missing a next handoff | Small liveness nudge — does NOT reframe the work |
 | **Refocus** | Correct drift | Output shows mode drift, approval regression, weak stop-condition reasoning | Medium alignment nudge — re-centers on role, north star, current approved workstream, coordination mode, stop conditions; does NOT interrupt valid work |
-| **Alignment checkpoint** | Rebuild shared map | Phase boundary, lifecycle mutation, product-intent decision, confusing contradiction | Larger deliberate pause — agent runs full alignment-trace before proceeding |
+| **Alignment checkpoint** | Rebuild shared map | Phase boundary, lifecycle mutation, product-intent decision, confusing contradiction | Larger deliberate pause — agent runs full refocus before proceeding |
 
 `cron`, timers, and `rig watchdog` are scheduling substrates. They
 should NOT imply that every tick means the same semantic action. The
@@ -121,6 +121,6 @@ handling over many per-seat nag loops.
 
 ## See also
 
-- `alignment-trace` skill — the doctrine this primitive operationalizes; full and light trace templates
+- `refocus` skill — the doctrine this primitive operationalizes; full and light trace templates
 - `queue-handoff` skill — durable handoff via queue items; watchdog is complementary (watchdog wakes; queue routes)
 - `looping-workflows` skill — operating discipline for self-driving rig-shaped loops; uses watchdog policies for loop edges

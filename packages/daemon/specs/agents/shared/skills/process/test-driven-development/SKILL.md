@@ -33,6 +33,15 @@ Write the test first. Watch it fail. Write minimal code to pass.
 
 Thinking "skip TDD just this once"? Stop. That's rationalization.
 
+**Chunk size is a dial, and it points up (2026-08) — this is NOT "skip TDD".** *How much* you build per
+red-green cycle is configurable, and with frontier agents handling hour-plus goal-oriented work it is
+**much larger than the classic tiny ping-pong**, and rising. Keep everything below — the Iron Law, red
+before green, two sets of eyes, the guard structure — **fully intact**; only the *cadence / granularity*
+loosens. You still write the failing test(s) first for the chunk; the chunk is simply bigger. Tiny
+back-and-forth is overhead, not virtue, once the SDLC's gates (QA, review, guards) bound a larger chunk's
+risk. Match the chunk to the task; treat it as a configured lever — never as license to write code before
+its test (that's the rationalization this skill exists to stop).
+
 ## The Iron Law
 
 ```

@@ -17,7 +17,7 @@ metadata:
       - queue-handoff
       - workflow-runtime
       - watchdog
-      - alignment-trace
+      - refocus
       - looping-workflows
       - intake-routing
       - human-in-the-loop

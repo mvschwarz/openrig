@@ -246,8 +246,6 @@ rig spec validate rig.yaml
 rig agent validate agents/my-agent/agent.yaml
 ```
 
-Then run `rig spec audit rig.yaml` for advisory checks such as stale seat references and other cross-file drift that schema validation cannot detect.
-
 If validation fails, fix the errors. Do not try to launch an invalid spec — it will fail with a less helpful error.
 
 ## Diagnosis: When Things Go Wrong

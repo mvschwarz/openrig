@@ -1,6 +1,11 @@
 ---
 name: openrig-user
-description: Use when operating OpenRig with the `rig` CLI and you need the shipped command surface for identity, inventory, communication, lifecycle, specs, recovery, or agent-facing JSON output.
+description: >-
+  Use when you need a SPECIFIC rig command or flag and want the authoritative surface: the exact
+  syntax for send/queue/ps/scope/context/watchdog, the JSON shape a command returns, what a flag
+  actually does, why a command errored, or a recovery/workspace/permission procedure. This is the
+  ~70KB REFERENCE — reach for it when you know what you want to do and need the details. If instead
+  you are unsure WHICH move to make, or whether to hand off, read coordinating-with-agents first.
 ---
 
 # OpenRig User
@@ -919,7 +924,9 @@ Manage and compose context (any text/markdown) into reusable **packs**. Every pi
 ```bash
 rig context list                     # what's in the library
 rig context show <ref>               # read a piece or pack
-rig context add <ref> --from <file>  # put a piece in the store
+rig context add <source-dir>         # install an existing pack directory into the store
+rig context preview <ref>            # assemble + show a pack WITHOUT delivering it
+rig context sync                     # re-walk discovery roots, refresh the library index
 rig context rm <ref>
 rig context compose --out packs/<ref> --from <fileA> <fileB> ...   # ordered pieces -> a durable pack
 ```
