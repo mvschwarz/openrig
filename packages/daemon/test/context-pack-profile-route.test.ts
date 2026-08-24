@@ -108,6 +108,54 @@ describe("GET /library/by-ref/profile — situation-composed delivery (Atom 4b)"
     expect(body.budget!.overageTokens).toBeGreaterThan(0);
   });
 
+  it("r1 RIDER 1: every piece carries BYTE provenance — a symlinked read is reported, labels never lie about where bytes came from", async () => {
+    // r1's live probe on 4a: a symlink inside the seat root returned an
+    // out-of-root secret while the source label stayed 'seat' — accurate about
+    // the REF, wrong about the BYTES. Q2-Amendment 1 binds per-piece source
+    // labels; provenance must follow the bytes. Report, never block: realpath
+    // containment would break the product's own legitimately-symlinked layouts.
+    const { symlinkSync } = await import("node:fs");
+    const outside = join(tmp, "outside-secret.md");
+    writeFileSync(outside, "## Recent Decisions\nSECRET BYTES");
+    const seatDir = join(tmp, "topology", "rigs", "r1", "seats", "s1");
+    rmSync(join(seatDir, "RECAP.md"));
+    symlinkSync(outside, join(seatDir, "RECAP.md"));
+    const res = await app.request(url("situation=handover&runtime=claude&rig=r1&seat=s1"));
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      pieces: Array<{ atomId: string; provenance: { nominalPath: string; realPath: string; escapesRoot: boolean } }>;
+      provenanceWarnings: string[];
+    };
+    const recap = body.pieces.find((p) => p.atomId === "recap")!;
+    expect(recap.provenance.realPath).toBe(outside);
+    expect(recap.provenance.escapesRoot).toBe(true);
+    expect(body.provenanceWarnings.some((w) => w.includes("recap"))).toBe(true);
+    // The honest piece stays quiet: no warning names 'welcome', and its real
+    // path sits inside the pack.
+    const welcome = body.pieces.find((p) => p.atomId === "welcome")!;
+    expect(welcome.provenance.escapesRoot).toBe(false);
+    expect(body.provenanceWarnings.some((w) => w.includes("welcome"))).toBe(false);
+  });
+
+  it("r1 RIDER 2: without the explicit rig/seat grant, an untrusted pack's seat: atoms read NOTHING — and the grant is scoped to the named seat", async () => {
+    // Slice-07 R4 installs packs from URLs: a hostile manifest may carry
+    // seat:/mission: atoms. Ingest passes them BY DESIGN; the trust boundary is
+    // the compose call — rig/seat params are the caller's explicit grant of
+    // read access to that ONE seat directory. No params, no reads (already
+    // pinned above as the missing-config 422); and the grant never widens
+    // beyond the named seat (the segment gate pins that). This pin nails the
+    // GRANT SEMANTICS end-to-end: the same pack, same atoms — no grant = 422
+    // naming the missing root, grant = the read happens and is visible in the
+    // provenance surface.
+    const denied = await app.request(url("situation=handover&runtime=claude"));
+    expect(denied.status).toBe(422);
+    expect(((await denied.json()) as { message: string }).message).toMatch(/seat/i);
+    const granted = await app.request(url("situation=handover&runtime=claude&rig=r1&seat=s1"));
+    expect(granted.status).toBe(200);
+    const body = await granted.json() as { pieces: Array<{ atomId: string; provenance: { realPath: string } }> };
+    expect(body.pieces.find((p) => p.atomId === "recap")!.provenance.realPath).toContain(join("rigs", "r1", "seats", "s1"));
+  });
+
   it("bad inputs are NAMED 4xx errors: unknown situation, a pack without atoms, an unknown ref", async () => {
     const badSituation = await app.request(url("situation=someday&runtime=claude"));
     expect(badSituation.status).toBe(400);
