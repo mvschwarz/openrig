@@ -24,7 +24,7 @@ const VIEWER_DESCRIPTION_FRAGMENT = "context-usage across running agents";
 // situation-composed delivery verb. Both are delivery-FREE library verbs
 // (get/profile SERVE bytes to the caller's stdout; nothing sends to a seat),
 // so the delivery-seam exclusion below still holds.
-const LIBRARY_SUBCOMMANDS = ["trace", "compose", "list", "show", "preview", "get", "profile", "sync", "add", "rm"];
+const LIBRARY_SUBCOMMANDS = ["trace", "compose", "list", "show", "preview", "get", "profile", "recap-write", "sync", "add", "rm"];
 
 function topLevelNames(program: Command): string[] {
   return program.commands.map((c) => c.name());

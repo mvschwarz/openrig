@@ -74,3 +74,35 @@ describe("buildRestorePacket — recap + receipt (labeled-from-record)", () => {
     expect(packet).not.toContain("Predecessor recap (replayed from record");
   });
 });
+
+// OPR.0.5.3.5 recap-write atom (mini-req 7 / Q2 boundary requirement) — the
+// AUTHORED seat recap joins the packet as a THIRD leg beside the from-record
+// recap: the successor is pointed at the ADDRESS (seat:RECAP.md — no-copy
+// composition, never inlined bytes), with the chain depth named; absence is a
+// labeled line per the B16 doctrine, never a silent omission.
+describe("buildRestorePacket — the AUTHORED recap leg (seat-homed, by address)", () => {
+  it("renders the authored recap's ADDRESS and chain depth — pointer, never inlined bytes", () => {
+    const packet = buildRestorePacket({
+      ...base,
+      authoredRecap: { address: "seat:RECAP.md", chainLength: 2 },
+    });
+    expect(packet).toContain("Authored seat recap");
+    expect(packet).toContain("seat:RECAP.md");
+    expect(packet).toMatch(/2 superseded/);
+    expect(packet).toContain("rig context get"); // tells the successor HOW to pull it
+  });
+
+  it("absence is a LABELED line naming the reason, never silence", () => {
+    const packet = buildRestorePacket({
+      ...base,
+      authoredRecapAbsentReason: "no RECAP.md on the seat tree (predecessor never wrote one)",
+    });
+    expect(packet).toContain("Authored seat recap");
+    expect(packet).toContain("predecessor never wrote one");
+  });
+
+  it("stays backward-compatible when the authored leg is omitted entirely", () => {
+    const packet = buildRestorePacket(base);
+    expect(packet).not.toContain("Authored seat recap");
+  });
+});
