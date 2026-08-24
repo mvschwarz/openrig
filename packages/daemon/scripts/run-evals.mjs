@@ -20,6 +20,7 @@ import { loadEvalCasesFromDir } from "../test/helpers/eval-cases.ts";
 import { runEvals } from "../test/helpers/eval-runner.ts";
 import { FakeProvider } from "../test/helpers/eval-provider.ts";
 import { RigSeatProvider } from "../test/helpers/eval-rig-provider.ts";
+import { recordedGrade } from "../test/helpers/eval-report.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CASES_DIR = resolve(HERE, "..", "..", "test-system", "evals", "cases");
@@ -56,18 +57,16 @@ const recorded = {
   failed: summary.failed,
   errored: summary.errored,
   byCategory: summary.byCategory,
-  grades: summary.outcomes.map((o) => ({
-    id: o.case.id,
-    category: o.case.category,
-    pass: o.grade.pass,
-    error: o.error ?? null,
-  })),
+  // Each recorded grade carries its own evidence (patternResults + order + a FAIL reason), so the
+  // artifact explains its verdict — CE-08 must tell "pulled nothing" from "pulled late" from "wrong".
+  grades: summary.outcomes.map(recordedGrade),
 };
 if (outPath) writeFileSync(outPath, JSON.stringify(recorded, null, 2));
 
 console.log(`evals[${provider.name}] ${summary.passed}/${summary.total} pass, ${summary.failed} fail, ${summary.errored} error`);
 for (const g of recorded.grades) {
   const tag = g.pass ? "PASS" : g.error ? "ERROR" : "FAIL";
-  console.log(`  ${tag} ${g.id}${g.error ? ` — ${g.error}` : ""}`);
+  const detail = g.error ? ` — ${g.error}` : !g.pass && g.reason ? ` — ${g.reason}` : "";
+  console.log(`  ${tag} ${g.id}${detail}`);
 }
 process.exit(summary.failed > 0 || summary.errored > 0 ? 1 : 0);
