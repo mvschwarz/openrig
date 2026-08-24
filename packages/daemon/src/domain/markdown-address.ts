@@ -95,11 +95,19 @@ interface HeaderHit {
   line: number;
 }
 
+interface HeaderScan {
+  hits: HeaderHit[];
+  /** Set when EOF arrives inside an open fence (r1 F1): every header after the
+   *  opener has been swallowed — the validator must name it, or a file that
+   *  loses most of its sections to one stray fence passes the gate clean. */
+  unterminatedFenceLine: number | null;
+}
+
 /** Scan for real headers, skipping fenced code blocks (``` or ~~~, any info string;
  *  a fence closes only on the same marker at the same or greater length). */
-function scanHeaders(lines: string[]): HeaderHit[] {
+function scanHeaders(lines: string[]): HeaderScan {
   const hits: HeaderHit[] = [];
-  let fence: { marker: string; length: number } | null = null;
+  let fence: { marker: string; length: number; line: number } | null = null;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
     const fenceMatch = line.match(/^\s{0,3}(`{3,}|~{3,})/);
@@ -107,7 +115,7 @@ function scanHeaders(lines: string[]): HeaderHit[] {
       const marker = fenceMatch[1]![0]!;
       const length = fenceMatch[1]!.length;
       if (!fence) {
-        fence = { marker, length };
+        fence = { marker, length, line: i };
       } else if (fence.marker === marker && length >= fence.length) {
         fence = null;
       }
@@ -117,13 +125,17 @@ function scanHeaders(lines: string[]): HeaderHit[] {
     const header = line.match(/^(#{1,6})\s+(.*\S)\s*$/);
     if (header) hits.push({ level: header[1]!.length, title: header[2]!, line: i });
   }
-  return hits;
+  return { hits, unterminatedFenceLine: fence?.line ?? null };
 }
 
-/** Parse the addressable H2/H3 section tree of a markdown text. */
+/** Parse the addressable H2/H3 section tree of a markdown text.
+ *  A matched section is NEVER empty by construction: the span includes the header
+ *  line itself, so even a body-less `## alpha` (next line another header, or EOF)
+ *  resolves to at least its own header — a matched-but-empty section can never
+ *  quietly thin a compose (the structural half of the fail-loud contract; r1 A2). */
 export function parseMarkdownSections(text: string): MarkdownSection[] {
   const lines = text.split("\n");
-  const headers = scanHeaders(lines);
+  const { hits: headers } = scanHeaders(lines);
   const sections: MarkdownSection[] = [];
   let currentH2: string | null = null;
   for (let idx = 0; idx < headers.length; idx++) {
@@ -134,7 +146,11 @@ export function parseMarkdownSections(text: string): MarkdownSection[] {
     }
     const slug = slugifyHeader(h.title);
     if (h.level === 2) currentH2 = slug;
-    const headerPath = h.level === 2 ? [slug] : currentH2 ? [currentH2, slug] : [slug];
+    // r1 F2: test the SCOPE against null, never truthiness — an H2 whose title
+    // slugifies to "" still owns its children. They stay under the empty segment
+    // (unreachable by any legal address, and the validator names the family)
+    // instead of being silently promoted to top-level addresses.
+    const headerPath = h.level === 2 ? [slug] : currentH2 !== null ? [currentH2, slug] : [slug];
     // FULL span: to the next header with level <= this one (same-or-higher).
     const fullEnd = headers.slice(idx + 1).find((n) => n.level <= h.level)?.line ?? lines.length;
     // OWN text: to the next header of ANY level.
@@ -175,17 +191,28 @@ export function resolveAddress(text: string, headerPath: string[]): MarkdownSect
 
 export type AddressabilityFinding =
   | { kind: "duplicate-header-path"; headerPath: string; lines: number[] }
-  | { kind: "unaddressable-header"; headerPath: string; line: number; title: string };
+  | { kind: "unaddressable-header"; headerPath: string; line: number; title: string }
+  | { kind: "unterminated-fence"; line: number };
 
 /** The compose-gate validator: every H2/H3 must be uniquely addressable under the one
- *  slug rule. Findings, not throws — the caller decides the gate. */
+ *  slug rule, and the file must not silently lose sections. Findings, not throws —
+ *  the caller decides the gate. */
 export function validateMarkdownAddressability(text: string): AddressabilityFinding[] {
+  const lines = text.split("\n");
+  const { unterminatedFenceLine } = scanHeaders(lines);
   const sections = parseMarkdownSections(text);
   const findings: AddressabilityFinding[] = [];
+  // r1 F1: an unclosed fence swallows every later header; resolution stays honest
+  // (a swallowed address fails loud) but the GATE must name the loss up front —
+  // this is the corpus defect a real file is most likely to actually contain.
+  if (unterminatedFenceLine !== null) {
+    findings.push({ kind: "unterminated-fence", line: unterminatedFenceLine });
+  }
   const seen = new Map<string, number[]>();
   for (const s of sections) {
-    const slug = s.headerPath[s.headerPath.length - 1]!;
-    if (slug.length === 0) {
+    // r1 F2 family rule: ANY empty segment makes a section unreachable by a legal
+    // address (parseAddress rejects empty segments) — flag parent AND children.
+    if (s.headerPath.some((segment) => segment.length === 0)) {
       findings.push({ kind: "unaddressable-header", headerPath: s.headerPath.join("/"), line: s.headerLine, title: s.title });
       continue;
     }
