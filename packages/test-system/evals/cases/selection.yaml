@@ -1,0 +1,70 @@
+# slice-07 R6 — SELECTION eval cases (a live-model gate). A natural prompt with NO verb named;
+# the seat should pull the right library entry via `rig context get <ref>`. Door grade =
+# expectedPatterns match. The 1-5 rubric rides each case (judged optionally/deferred).
+# Refs are canonical skill entries (become library entries under R2); regex sources are
+# single-quoted so YAML does not process the backslashes.
+- id: sel-01
+  name: selects core/rig-lifecycle for a fleet bring-back
+  category: selection
+  prompt: "the box rebooted and everything's gone — bring the whole fleet back"
+  expectedPatterns: ['rig context get\s+core/rig-lifecycle']
+  rubric: &selection_rubric |
+    1 — pulls nothing, or a wrong/unrelated entry
+    2 — pulls the generic router/index when a specific entry exists
+    3 — pulls a related but suboptimal entry
+    4 — pulls the correct entry before acting
+    5 — pulls the correct entry before acting and explains the choice
+- id: sel-02
+  name: selects core/topology-mutation-and-seat-management for a seat swap
+  category: selection
+  prompt: "a seat hit its context wall — swap who's in it without losing the address or its queue"
+  expectedPatterns: ['rig context get\s+core/topology-mutation-and-seat-management']
+  rubric: *selection_rubric
+- id: sel-03
+  name: selects core/agent-startup-and-context-ingestion for birth orientation
+  category: selection
+  prompt: "I just woke up in a new terminal — what am I and what was I doing?"
+  expectedPatterns: ['rig context get\s+core/agent-startup-and-context-ingestion']
+  rubric: *selection_rubric
+- id: sel-04
+  name: selects core/watchdog for a self-wake
+  category: selection
+  prompt: "I can't wake myself — arm something to start me when this becomes true later"
+  expectedPatterns: ['rig context get\s+core/watchdog']
+  rubric: *selection_rubric
+- id: sel-05
+  name: selects core/cross-host-rig-commands for reaching another machine
+  category: selection
+  prompt: "how do I reach an agent running on another machine?"
+  expectedPatterns: ['rig context get\s+core/cross-host-rig-commands']
+  rubric: *selection_rubric
+- id: sel-06
+  name: selects core/rig-bundles-and-shareable-artifacts for packaging a rig
+  category: selection
+  prompt: "package this rig so someone can run it on a box that's never seen the source"
+  expectedPatterns: ['rig context get\s+core/rig-bundles-and-shareable-artifacts']
+  rubric: *selection_rubric
+- id: sel-07
+  name: selects core/openrig-upgrade for a live daemon upgrade
+  category: selection
+  prompt: "upgrade the running daemon without taking the rig down"
+  expectedPatterns: ['rig context get\s+core/openrig-upgrade']
+  rubric: *selection_rubric
+- id: sel-08
+  name: selects process/systematic-debugging for a methodical chase
+  category: selection
+  prompt: "this test keeps failing in a weird way — how do I chase it down methodically?"
+  expectedPatterns: ['rig context get\s+process/systematic-debugging']
+  rubric: *selection_rubric
+- id: sel-09
+  name: selects core/attention-queue for who-is-blocked
+  category: selection
+  prompt: "the queue's a mess — who's actually blocked?"
+  expectedPatterns: ['rig context get\s+core/attention-queue']
+  rubric: *selection_rubric
+- id: sel-10
+  name: selects process/writing-plans before building
+  category: selection
+  prompt: "write me a plan for this feature before I start building"
+  expectedPatterns: ['rig context get\s+process/writing-plans']
+  rubric: *selection_rubric
