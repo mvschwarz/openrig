@@ -1,0 +1,6 @@
+name: requirements-writer
+version: "1"
+purpose: "(eval fixture) turn intent into requirements"
+files:
+  - path: content.md
+    role: source

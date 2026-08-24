@@ -1,0 +1,6 @@
+name: attention-queue
+version: "1"
+purpose: "(eval fixture) see who actually holds the baton"
+files:
+  - path: content.md
+    role: source

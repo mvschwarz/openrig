@@ -1,0 +1,6 @@
+name: watchdog
+version: "1"
+purpose: "(eval fixture) arm a wake you cannot perform yourself"
+files:
+  - path: content.md
+    role: source

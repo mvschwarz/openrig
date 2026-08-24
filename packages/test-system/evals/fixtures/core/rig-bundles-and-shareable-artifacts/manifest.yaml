@@ -1,0 +1,6 @@
+name: rig-bundles-and-shareable-artifacts
+version: "1"
+purpose: "(eval fixture) package a rig for a machine that never had the source"
+files:
+  - path: content.md
+    role: source

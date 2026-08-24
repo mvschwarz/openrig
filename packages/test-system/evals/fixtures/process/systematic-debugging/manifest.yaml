@@ -1,0 +1,6 @@
+name: systematic-debugging
+version: "1"
+purpose: "(eval fixture) chase a failure methodically"
+files:
+  - path: content.md
+    role: source

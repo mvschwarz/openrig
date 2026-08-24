@@ -1,0 +1,6 @@
+name: writing-plans
+version: "1"
+purpose: "(eval fixture) write a plan before building"
+files:
+  - path: content.md
+    role: source

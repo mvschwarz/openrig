@@ -1,0 +1,6 @@
+name: rig-lifecycle
+version: "1"
+purpose: "(eval fixture) bring rigs and the whole fleet up/down/back"
+files:
+  - path: content.md
+    role: source

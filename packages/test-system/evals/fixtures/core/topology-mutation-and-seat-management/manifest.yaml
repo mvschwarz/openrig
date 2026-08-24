@@ -1,0 +1,6 @@
+name: topology-mutation-and-seat-management
+version: "1"
+purpose: "(eval fixture) replace a seat's occupant without losing the address"
+files:
+  - path: content.md
+    role: source

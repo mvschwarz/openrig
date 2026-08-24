@@ -1,0 +1,6 @@
+name: agent-startup-and-context-ingestion
+version: "1"
+purpose: "(eval fixture) orient a freshly-woken seat"
+files:
+  - path: content.md
+    role: source

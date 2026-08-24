@@ -1,0 +1,6 @@
+name: test-driven-development
+version: "1"
+purpose: "(eval fixture) red-first discipline"
+files:
+  - path: content.md
+    role: source

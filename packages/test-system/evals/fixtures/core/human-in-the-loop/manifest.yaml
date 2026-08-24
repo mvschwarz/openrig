@@ -1,0 +1,6 @@
+name: human-in-the-loop
+version: "1"
+purpose: "(eval fixture) when and how to reach the human"
+files:
+  - path: content.md
+    role: source

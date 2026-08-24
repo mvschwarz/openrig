@@ -1,0 +1,6 @@
+name: openrig-upgrade
+version: "1"
+purpose: "(eval fixture) upgrade a running daemon without downtime"
+files:
+  - path: content.md
+    role: source
