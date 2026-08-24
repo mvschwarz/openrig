@@ -14,9 +14,14 @@
 
 import { Hono } from "hono";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { ContextPackLibraryService } from "../domain/context-packs/context-pack-library-service.js";
 import { assembleBundle, assemblePlainFiles } from "../domain/context-packs/bundle-assembler.js";
 import { ContextPackError, type ContextPackEntry } from "../domain/context-packs/context-pack-types.js";
+import { parseManifest } from "../domain/context-packs/manifest-parser.js";
+import { composeProfile, ProfileComposeError, type ComposeRuntime, type ComposeSituation } from "../domain/context-packs/profile-composer.js";
+import { makeProfileReadFile, sourceKindForAddress, SourceResolutionError, type ProfileSourceRoots } from "../domain/context-packs/profile-source-resolver.js";
+import { SettingsStore } from "../domain/user-settings/settings-store.js";
 
 interface ComposeBody {
   outRef?: string;
@@ -216,6 +221,79 @@ export function contextPacksRoutes(): Hono {
     // vs `pieces` which walk paces separately. `bytes` lets a caller size-warn.
     const assembled = assemblePlainFiles({ files: pieces.map((p) => ({ path: p.path, content: p.content })) });
     return c.json({ ref: entry.relativePath, id: entry.id, pieces, missingFiles, text: assembled.text, bytes: assembled.bytes });
+  });
+
+  // OPR.0.5.3.5 Atom 4b — GET /library/by-ref/profile?ref=&situation=&runtime=
+  // [&budget=][&rig=&seat=]: situation-composed delivery over the pack's atom
+  // graph + the seat tree. The manifest flows through the ONE parser chokepoint;
+  // the seat root resolves from topology.root CONFIG (slice-06 D1 layout:
+  // rigs/<rig>/seats/<seat>), never a literal; every compose failure is a NAMED
+  // 4xx — a profile is never quietly thinner than its graph says.
+  router.get("/library/by-ref/profile", (c) => {
+    const lib = c.get("contextPackLibrary" as never) as ContextPackLibraryService | undefined;
+    if (!lib) return c.json({ error: "context_pack_library_unavailable" }, 503);
+    const resolved = resolveByRef(lib, c.req.query("ref"));
+    if ("error" in resolved) return c.json(resolved.error.body, resolved.error.status);
+    const entry = resolved.entry;
+
+    const situation = c.req.query("situation");
+    if (situation !== "fresh" && situation !== "handover" && situation !== "post-compaction") {
+      return c.json({ error: "invalid_situation", message: `situation must be fresh | handover | post-compaction (got: ${situation ?? "(missing)"})` }, 400);
+    }
+    const runtime = c.req.query("runtime");
+    if (runtime !== "claude" && runtime !== "codex") {
+      return c.json({ error: "invalid_runtime", message: `runtime must be claude | codex (got: ${runtime ?? "(missing)"})` }, 400);
+    }
+    const budgetRaw = c.req.query("budget");
+    let budgetTokens: number | undefined;
+    if (budgetRaw !== undefined) {
+      budgetTokens = Number(budgetRaw);
+      if (!Number.isInteger(budgetTokens) || budgetTokens < 0) {
+        return c.json({ error: "invalid_budget", message: `budget must be a non-negative integer (got: ${budgetRaw})` }, 400);
+      }
+    }
+
+    let manifest;
+    try {
+      manifest = parseManifest(readFileSync(join(entry.sourcePath, "manifest.yaml"), "utf-8"), entry.sourcePath);
+    } catch (err) {
+      return c.json({ error: "manifest_unreadable", message: (err as Error).message }, 422);
+    }
+    if (!manifest.atoms || manifest.atoms.length === 0) {
+      return c.json({ error: "no_atoms", message: `pack '${entry.relativePath}' declares no atoms — a profile composes from atom metadata (mini-req 1); add an atoms: section to its manifest` }, 422);
+    }
+
+    // Seat root from CONFIG when the caller names its seat. rig/seat are path
+    // SEGMENTS — the bounded token check keeps a query string from walking the
+    // topology tree (same class as the install-ref segment rule).
+    const roots: ProfileSourceRoots = {};
+    const rig = c.req.query("rig");
+    const seat = c.req.query("seat");
+    if (rig !== undefined || seat !== undefined) {
+      const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+      if (!rig || !seat || !SEGMENT.test(rig) || !SEGMENT.test(seat)) {
+        return c.json({ error: "invalid_seat_params", message: "rig and seat must BOTH be single bounded segments ([A-Za-z0-9][A-Za-z0-9._-]{0,63})" }, 400);
+      }
+      const topologyRoot = String(new SettingsStore().resolveOne("topology.root").value);
+      roots.seat = join(topologyRoot, "rigs", rig, "seats", seat);
+    }
+
+    try {
+      const profile = composeProfile({
+        atoms: manifest.atoms,
+        situation: situation as ComposeSituation,
+        runtime: runtime as ComposeRuntime,
+        ...(budgetTokens !== undefined ? { budgetTokens } : {}),
+        readFile: makeProfileReadFile({ packDir: entry.sourcePath, roots }),
+        sourceKindFor: (a) => sourceKindForAddress(a.address),
+      });
+      return c.json({ ref: entry.relativePath, ...profile });
+    } catch (err) {
+      if (err instanceof ProfileComposeError || err instanceof SourceResolutionError) {
+        return c.json({ error: "profile_compose_failed", message: err.message }, 422);
+      }
+      throw err;
+    }
   });
 
   return router;
