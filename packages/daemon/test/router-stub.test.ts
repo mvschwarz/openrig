@@ -24,6 +24,24 @@ describe("R3 — openrig-core router stub teaches the pull", () => {
     expect(String(fm["allowed-tools"] ?? "")).toMatch(/\brig\b/);
   });
 
+  it("carries the R6 selection trigger net in its description", () => {
+    const description = String(fm.description ?? "");
+    const triggerNet = [
+      /\bfleet (recovery|restore)\b/i,
+      /\bseat handover\b/i,
+      /\bnew-seat orientation\b/i,
+      /\bwatchdog wake\b/i,
+      /\bcross-host\b/i,
+      /\brig packaging\b/i,
+      /\bOpenRig upgrade\b/i,
+      /\bsystematic debugging\b/i,
+      /\bqueue triage\b/i,
+      /\bimplementation planning\b/i,
+    ];
+
+    for (const trigger of triggerNet) expect(description).toMatch(trigger);
+  });
+
   it("teaches loading an entry on demand via `rig context get`", () => {
     expect(body).toMatch(/rig context get/);
   });

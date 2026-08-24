@@ -1,6 +1,6 @@
 ---
 name: openrig-skills
-description: "Use when you're operating OpenRig and don't know which skill or context applies — this is the index of what ships with OpenRig, when to reach for each, and how to load it. Start here from a cold boot when nothing else is projected."
+description: "Use when you're operating OpenRig and need the right skill or context for fleet recovery, seat handover, new-seat orientation, a watchdog wake, cross-host reach, rig packaging, an OpenRig upgrade, systematic debugging, queue triage, or implementation planning; also use when you don't know what applies or nothing is projected on cold boot."
 allowed-tools: Bash(rig:*)
 metadata:
   openrig:
