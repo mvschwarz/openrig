@@ -175,8 +175,18 @@ export function resolveAddress(text: string, headerPath: string[]): MarkdownSect
   }
   const sections = parseMarkdownSections(text);
   const wanted = headerPath.join("/");
-  const hit = sections.find((s) => s.headerPath.join("/") === wanted);
-  if (hit) return hit;
+  const hits = sections.filter((s) => s.headerPath.join("/") === wanted);
+  // AMBIGUITY fails loud at RESOLVE time (Atom 4c): a duplicate header-path is
+  // a validator finding, but serving must not depend on the validator having
+  // run — first-match on a shipped duplicate is a silent wrong answer.
+  if (hits.length > 1) {
+    throw new AddressResolutionError(
+      `address '#${wanted}' is AMBIGUOUS in this file — ${hits.length} sections share the path ` +
+        `(header lines ${hits.map((h) => h.headerLine).join(", ")}). Fix the duplicate headers; ` +
+        `serving any one of them would be a silent wrong answer.`,
+    );
+  }
+  if (hits.length === 1) return hits[0]!;
   const parentPath = headerPath.slice(0, -1).join("/");
   const candidates = sections
     .filter((s) => s.headerPath.slice(0, -1).join("/") === parentPath)

@@ -21,7 +21,7 @@ import { ContextPackError, type ContextPackEntry } from "../domain/context-packs
 import { parseManifest } from "../domain/context-packs/manifest-parser.js";
 import { composeProfile, ProfileComposeError, type ComposeRuntime, type ComposeSituation } from "../domain/context-packs/profile-composer.js";
 import { makeProfileReadFile, sourceKindForAddress, SourceResolutionError, type ProfileSourceRoots, type SourceReadRecord } from "../domain/context-packs/profile-source-resolver.js";
-import { parseAddress } from "../domain/markdown-address.js";
+import { AddressResolutionError, parseAddress, resolveAddress } from "../domain/markdown-address.js";
 import { SettingsStore } from "../domain/user-settings/settings-store.js";
 
 interface ComposeBody {
@@ -222,6 +222,80 @@ export function contextPacksRoutes(): Hono {
     // vs `pieces` which walk paces separately. `bytes` lets a caller size-warn.
     const assembled = assemblePlainFiles({ files: pieces.map((p) => ({ path: p.path, content: p.content })) });
     return c.json({ ref: entry.relativePath, id: entry.id, pieces, missingFiles, text: assembled.text, bytes: assembled.bytes });
+  });
+
+  // OPR.0.5.3.5 Atom 4c — GET /library/resolve-address?address=<name#H2/H3>:
+  // the ONE resolver home for the ref-grammar address form (mini-req 6 / Q4).
+  // The daemon owns the whole resolution — longest-prefix pack match against
+  // the library index, file within the pack (containment-checked by the
+  // library service), span within the file (Atom-1 machinery: Q1 full span,
+  // fence-protected, fail-loud with candidates, ambiguity rejected). The
+  // addressable unit is the FILE per the locked grammar; the assembled bundle
+  // is never an address target (its '## File:' frames are themselves H2s).
+  router.get("/library/resolve-address", (c) => {
+    const lib = c.get("contextPackLibrary" as never) as ContextPackLibraryService | undefined;
+    if (!lib) return c.json({ error: "context_pack_library_unavailable" }, 503);
+    const address = c.req.query("address");
+    if (!address) return c.json({ error: "missing_address", message: "address is required: <pack-ref>/<file>[#H2-slug[/H3-slug]]" }, 400);
+
+    let parsed;
+    try {
+      parsed = parseAddress(address);
+    } catch (err) {
+      return c.json({ error: "invalid_address", message: (err as Error).message }, 400);
+    }
+
+    // Longest-prefix pack match: pack refs and file paths share '/', so the
+    // library index decides the split — never a guess.
+    const entries = lib.list();
+    const segments = parsed.ref.split("/");
+    let entry: ContextPackEntry | undefined;
+    let filePath = "";
+    for (let cut = segments.length - 1; cut >= 1; cut--) {
+      const candidateRef = segments.slice(0, cut).join("/");
+      const found = entries.find((e) => e.relativePath === candidateRef);
+      if (found) {
+        entry = found;
+        filePath = segments.slice(cut).join("/");
+        break;
+      }
+    }
+    if (!entry) {
+      return c.json({ error: "pack_not_found", message: `no library pack matches any prefix of '${parsed.ref}' — run 'rig context list' for the available refs` }, 404);
+    }
+    if (filePath.length === 0) {
+      return c.json({ error: "missing_file_path", message: `'${parsed.ref}' names pack '${entry.relativePath}' but no file within it — the addressable unit is the file: <pack-ref>/<file>[#...]` }, 400);
+    }
+    const declared = entry.files.find((f) => f.path === filePath);
+    if (!declared) {
+      return c.json({ error: "file_not_in_pack", message: `pack '${entry.relativePath}' declares no file '${filePath}' — declared: ${entry.files.map((f) => f.path).join(", ")}` }, 404);
+    }
+    let fileText: string;
+    try {
+      fileText = readFileSync(lib.resolveFileWithinPack(entry, filePath), "utf-8");
+    } catch (err) {
+      return c.json({ error: "file_unreadable", message: `pack '${entry.relativePath}' file '${filePath}': ${(err as Error).message}` }, 422);
+    }
+    if (parsed.headerPath.length === 0) {
+      return c.json({ address, packRef: entry.relativePath, filePath, text: fileText });
+    }
+    try {
+      const section = resolveAddress(fileText, parsed.headerPath);
+      return c.json({
+        address,
+        packRef: entry.relativePath,
+        filePath,
+        headerPath: section.headerPath,
+        headerLine: section.headerLine,
+        text: section.text,
+        ownText: section.ownText,
+      });
+    } catch (err) {
+      if (err instanceof AddressResolutionError) {
+        return c.json({ error: "address_unresolved", message: `${parsed.ref}: ${err.message}` }, 422);
+      }
+      throw err;
+    }
   });
 
   // OPR.0.5.3.5 Atom 4b — GET /library/by-ref/profile?ref=&situation=&runtime=
