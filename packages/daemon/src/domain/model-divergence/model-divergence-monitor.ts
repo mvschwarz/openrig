@@ -143,37 +143,60 @@ export class ModelDivergenceMonitor {
     const cycleList = this.deps.processCensus?.cycleLister();
     const cycle = cycleList ? { listProcesses: cycleList } : undefined;
     for (const seat of this.deps.listPinnedSeats()) {
-      const key = `${seat.nodeId}:${seat.generation ?? seat.sessionName}`;
-      if (this.settled.has(key)) continue;
-      const read = await this.deps.readEffectiveModel(seat, cycle);
-      if (!read.ok) {
-        // PENDING, never assumed — and never invisible: past the threshold this generation is
-        // named ONCE as never-checked (r1 measured real codex rollouts whose signal sat outside
-        // the bounded read; without this line such a seat would be skipped silently forever).
-        const polls = (this.pendingPolls.get(key) ?? 0) + 1;
-        this.pendingPolls.set(key, polls);
-        this.pendingReasons.set(key, read.reason);
-        if (polls >= PENDING_VISIBILITY_POLLS && !this.pendingWarned.has(key)) {
-          this.pendingWarned.add(key);
-          this.warn(
-            `[model-divergence] ${seat.sessionName} (pin ${seat.pinnedModel}) has NO effective-model ` +
-            `read after ${polls} polls — this seat is pinned but UNCHECKED (${read.reason}). ` +
-            `A divergence here would currently be invisible.`,
-          );
-        }
-        continue;
+      try {
+        await this.checkSeat(seat, cycle, fired);
+      } catch (err) {
+        // Defense-in-depth (row 3f66664a): a per-seat throw must NEVER truncate the pass. At the
+        // blocked sha a single comparison throw ended the whole detector silently. Report THIS seat
+        // as a detector error, loudly, and continue — every remaining pinned seat is still checked.
+        // The seat is not settled, so a transient throw self-heals next pass and a persistent one
+        // keeps surfacing instead of silently ending the detector.
+        this.warn(
+          `[model-divergence] check for ${seat.sessionName} (pin ${seat.pinnedModel}) THREW and was ` +
+          `skipped this pass — the remaining pinned seats are still checked: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+        );
       }
-      this.pendingPolls.delete(key);
-      this.pendingReasons.delete(key);
-      if (modelsMatch(seat.pinnedModel, read.model)) {
-        this.settled.add(key);
-        continue;
-      }
-      const proclamation = await this.proclaim(seat, read.model);
-      this.settled.add(key);
-      fired.push(proclamation);
     }
     return fired;
+  }
+
+  /** One seat's check. Extracted so checkOnce can isolate a per-seat throw (defense-in-depth): a
+   *  throw here is caught per seat and never aborts the pass. Pushes any proclamation into `fired`. */
+  private async checkSeat(
+    seat: PinnedSeat,
+    cycle: Parameters<ModelDivergenceMonitorDeps["readEffectiveModel"]>[1],
+    fired: ModelDivergenceProclamation[],
+  ): Promise<void> {
+    const key = `${seat.nodeId}:${seat.generation ?? seat.sessionName}`;
+    if (this.settled.has(key)) return;
+    const read = await this.deps.readEffectiveModel(seat, cycle);
+    if (!read.ok) {
+      // PENDING, never assumed — and never invisible: past the threshold this generation is
+      // named ONCE as never-checked (r1 measured real codex rollouts whose signal sat outside
+      // the bounded read; without this line such a seat would be skipped silently forever).
+      const polls = (this.pendingPolls.get(key) ?? 0) + 1;
+      this.pendingPolls.set(key, polls);
+      this.pendingReasons.set(key, read.reason);
+      if (polls >= PENDING_VISIBILITY_POLLS && !this.pendingWarned.has(key)) {
+        this.pendingWarned.add(key);
+        this.warn(
+          `[model-divergence] ${seat.sessionName} (pin ${seat.pinnedModel}) has NO effective-model ` +
+          `read after ${polls} polls — this seat is pinned but UNCHECKED (${read.reason}). ` +
+          `A divergence here would currently be invisible.`,
+        );
+      }
+      return;
+    }
+    this.pendingPolls.delete(key);
+    this.pendingReasons.delete(key);
+    if (modelsMatch(seat.pinnedModel, read.model)) {
+      this.settled.add(key);
+      return;
+    }
+    const proclamation = await this.proclaim(seat, read.model);
+    this.settled.add(key);
+    fired.push(proclamation);
   }
 
   private async proclaim(seat: PinnedSeat, effectiveModel: string): Promise<ModelDivergenceProclamation> {
