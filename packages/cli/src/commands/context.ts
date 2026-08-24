@@ -563,17 +563,24 @@ Examples:
   cmd.command("profile")
     .argument("<name-or-ref>", "Context pack name or path-like ref (its manifest must declare atoms)")
     .requiredOption("--situation <situation>", "fresh | handover | post-compaction")
-    .option("--runtime <runtime>", "claude | codex", "claude")
+    // r1 4d obs 2: default from the seat's own environment — a codex seat that
+    // forgets the flag must not silently get a claude profile (mini-req 3 is
+    // the rule that the runtimes compose DIFFERENT profiles). Flag beats env;
+    // an unrecognized env value falls back to claude rather than erroring a
+    // surface the env owner may not control.
+    .option("--runtime <runtime>", "claude | codex (default: $OPENRIG_RUNTIME, else claude)")
     .option("--budget <tokens>", "Situation token budget — overage is REPORTED, never truncated")
     .option("--rig <rig>", "With --seat: grant read access to that seat's tree (seat: atoms)")
     .option("--seat <seat>", "With --rig: the seat whose tree seat: atoms may read")
     .option("--mission <mission>", "Grant read access to that mission's tree (mission: atoms)")
     .option("--json", "JSON output (the full composed profile)")
-    .action(async (nameOrRef: string, opts: { situation: string; runtime: string; budget?: string; rig?: string; seat?: string; mission?: string; json?: boolean }) => {
+    .action(async (nameOrRef: string, opts: { situation: string; runtime?: string; budget?: string; rig?: string; seat?: string; mission?: string; json?: boolean }) => {
       try {
         const client = await getClient();
         const entry = await resolvePack(client, nameOrRef);
-        const params = new URLSearchParams({ ref: entry.relativePath, situation: opts.situation, runtime: opts.runtime });
+        const envRuntime = process.env["OPENRIG_RUNTIME"];
+        const runtime = opts.runtime ?? (envRuntime === "codex" || envRuntime === "claude" ? envRuntime : "claude");
+        const params = new URLSearchParams({ ref: entry.relativePath, situation: opts.situation, runtime });
         if (opts.budget !== undefined) params.set("budget", opts.budget);
         if (opts.rig !== undefined) params.set("rig", opts.rig);
         if (opts.seat !== undefined) params.set("seat", opts.seat);
@@ -604,7 +611,12 @@ Examples:
           );
         }
         for (const p of profile.pieces ?? []) {
-          console.log(`=== ${p.atomId} [${p.sourceKind}] ${p.address} (~${p.estimatedTokens} tokens)`);
+          // r1 4d obs 1: the escape marker rides the FRAMING header, so an
+          // agent that discards stderr still learns a piece's bytes came from
+          // outside its root — self-describing payload, zero composed bytes
+          // touched.
+          const escaped = (p as { provenance?: { escapesRoot?: boolean } }).provenance?.escapesRoot ? " !ESCAPED-ROOT" : "";
+          console.log(`=== ${p.atomId} [${p.sourceKind}${escaped}] ${p.address} (~${p.estimatedTokens} tokens)`);
           console.log(p.text);
           console.log("");
         }

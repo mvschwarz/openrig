@@ -142,7 +142,9 @@ describe("rig context — address fork + profile verb (Atom 4d)", () => {
     const stdout = out.logs.join("\n");
     expect(stdout).toContain("welcome");
     expect(stdout).toContain("[library]");
-    expect(stdout).toContain("[seat]");
+    // The mock recap piece escapes its root, so its label carries the marker
+    // (the r1-obs-1 self-describing framing) — updated deliberately with it.
+    expect(stdout).toContain("[seat !ESCAPED-ROOT]");
     const stderr = out.errLogs.join("\n");
     expect(stderr).toMatch(/budget/i);
     expect(stderr).toContain("OUTSIDE its seat root");
