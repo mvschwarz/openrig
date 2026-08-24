@@ -235,8 +235,22 @@ async function installPackFromUrl(
     // redirects), via the platform URL resolver — never the caller's original
     // spelling (r2 MEDIUM-1: a redirected manifest must not resolve files against
     // the stale request base).
+    //
+    // BOUNDARY (r2 HIGH-1): new URL() also honors an ABSOLUTE f.path, and the
+    // manifest validator accepts a URL-shaped value as a filesystem-relative
+    // path. Require every resolved file URL to stay under the manifest's own
+    // directory (same origin + path prefix) so a stranger-supplied manifest can
+    // never make add fetch cross-origin or climb out of its pack. The trailing
+    // slash on the base defeats prefix-sibling ('/pack' vs '/pack-evil') tricks.
+    const manifestDirUrl = new URL("./", finalManifestUrl).href;
     for (const f of manifest.files) {
       const fileUrl = new URL(f.path, finalManifestUrl).href;
+      if (!fileUrl.startsWith(manifestDirUrl)) {
+        throw new Error(
+          `manifest file '${f.path}' resolves to ${fileUrl}, outside the pack directory ${manifestDirUrl}. ` +
+            `Declared files must be relative to the manifest (no absolute URLs, no escaping the pack).`,
+        );
+      }
       const { text: fileText } = await fetchTextOrThrow(fileUrl, `file '${f.path}'`);
       const dest = join(staging, f.path);
       mkdirSync(dirname(dest), { recursive: true });

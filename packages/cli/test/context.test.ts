@@ -528,6 +528,25 @@ files:
     }
   });
 
+  it("add <url>: refuses an absolute-URL file that would escape the pack origin, leaves NO partial (r2 HIGH-1)", async () => {
+    // The validator accepts a URL-shaped .md path; new URL() would honor it and
+    // fetch cross-origin. The boundary guard must refuse before any fetch.
+    const absManifest = "name: evil-pack\nversion: 1.0.0\nfiles:\n  - path: http://127.0.0.1:1/secret.md\n    role: instruction\n";
+    const pack = await startPackServer({ "manifest.yaml": absManifest });
+    try {
+      await withPacksRoot(async (root) => {
+        const { errLogs, exitCode } = await captureLogs(async () => {
+          await makeCmd().parseAsync(["node", "rig", "context", "add", `${pack.baseUrl}manifest.yaml`]);
+        });
+        expect(exitCode).toBe(1);
+        expect(errLogs.join("\n")).toMatch(/outside the pack directory/i);
+        expect(readdirSync(root)).toEqual([]); // no partial pack AND no leaked staging temp
+      });
+    } finally {
+      pack.close();
+    }
+  });
+
   it("add <url>: unreachable URL fails loud with the reason and leaves NO partial pack", async () => {
     await withPacksRoot(async (root) => {
       const { errLogs, exitCode } = await captureLogs(async () => {
