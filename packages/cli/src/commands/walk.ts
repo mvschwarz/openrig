@@ -58,7 +58,18 @@ export function walkCommand(depsOverride?: WalkDeps): Command {
 
   cmd
     .argument("<seat>", "Target session name (e.g. dev-impl@my-rig)")
-    .requiredOption("--through <items...>", "A context ref (a pack) OR a list of files to walk the seat through")
+    .option("--through <items...>", "A context ref (a pack) OR a list of files to walk the seat through")
+    // Test-A (row 782b467a) — the walk/profile join: consume the AUTHORITATIVE
+    // composed profile (never a hand-authored piece list) and report delivered
+    // pieces BY IDENTITY so the profile set and the delivered set are
+    // exact-comparable. NO-COPY: the bytes sent are the bytes the profile served.
+    .option("--through-profile <ref>", "Walk the seat through a pack's COMPOSED PROFILE (requires --situation; the piece set comes from rig context profile, never hand-authored)")
+    .option("--situation <situation>", "With --through-profile: fresh | handover | post-compaction")
+    .option("--runtime <runtime>", "With --through-profile: claude | codex (default claude)")
+    .option("--rig <rig>", "With --through-profile: the seat-tree grant (with --seat)")
+    .option("--seat-grant <seat>", "With --through-profile: the seat whose tree seat: atoms may read (with --rig)")
+    .option("--mission <mission>", "With --through-profile: the mission-tree grant")
+    .option("--budget <tokens>", "With --through-profile: situation budget (reported, never truncated)")
     .option("--pace <duration>", "Delay between pieces (e.g. 10s, 500ms, or a bare number of seconds); default 10s")
     .option("--json", "JSON output")
     .addHelpText("after", `
@@ -69,7 +80,7 @@ Examples:
 Paced push-delivery: each piece is sent into the target pane, then --pace elapses
 before the next. The walker leads; it does not wait for replies — the spacing lets
 the agent process between sends. Small piece → 'rig send'; a real pack → walk.`)
-    .action(async (seat: string, opts: { through: string[]; pace?: string; json?: boolean }) => {
+    .action(async (seat: string, opts: { through?: string[]; throughProfile?: string; situation?: string; runtime?: string; rig?: string; seatGrant?: string; mission?: string; budget?: string; pace?: string; json?: boolean }) => {
       try {
         const deps = getDeps();
         const paceMs = parsePaceMs(opts.pace);
@@ -82,10 +93,33 @@ the agent process between sends. Small piece → 'rig send'; a real pack → wal
         const readFile = deps.readFile ?? ((p: string) => readFileSync(p, "utf-8"));
         const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 
+        // Exactly ONE input form: --through (files or pack ref) or
+        // --through-profile (the composed profile). A mix is rejected loud
+        // before any send.
+        if (opts.through && opts.throughProfile) {
+          console.error("Use either --through OR --through-profile, not both — the profile's piece set is authoritative and never hand-mixed.");
+          process.exitCode = 1;
+          return;
+        }
+        let profileIdentity: Array<{ atomId: string; address: string }> | null = null;
+        let pieces: WalkPiece[];
+        if (opts.throughProfile) {
+          if (!opts.situation) {
+            console.error("--through-profile requires --situation (fresh | handover | post-compaction).");
+            process.exitCode = 1;
+            return;
+          }
+          const resolved = await resolveProfilePieces(deps, opts);
+          pieces = resolved.pieces;
+          profileIdentity = resolved.identity;
+        } else if (!opts.through) {
+          console.error("Provide --through <items...> or --through-profile <ref>.");
+          process.exitCode = 1;
+          return;
+        } else {
         // --through is EITHER a raw file list (every item is an existing file) OR a
         // single context ref (a pack → its ordered member pieces). A mix is rejected.
         const items = opts.through;
-        let pieces: WalkPiece[];
         if (items.length > 0 && items.every((it) => fileExists(it))) {
           pieces = items.map((it) => ({ label: it, content: readFile(it) }));
         } else if (items.length === 1) {
@@ -94,6 +128,7 @@ the agent process between sends. Small piece → 'rig send'; a real pack → wal
           console.error("--through takes either a single context ref OR a list of existing files (not a mix).");
           process.exitCode = 1;
           return;
+        }
         }
         if (pieces.length === 0) {
           console.error("Nothing to walk: --through resolved to zero pieces.");
@@ -111,6 +146,11 @@ the agent process between sends. Small piece → 'rig send'; a real pack → wal
           if (res.status >= 400) {
             const err = (res.data?.["error"] as string | undefined) ?? `HTTP ${res.status}`;
             console.error(`walk aborted at piece ${i + 1}/${pieces.length} (${piece.label}): ${err}`);
+            // Profile mode: the MISMATCH is reported by identity — the
+            // delivered PREFIX vs the expected set, exact-comparable.
+            if (profileIdentity) {
+              console.log(JSON.stringify({ seat, delivered: profileIdentity.slice(0, i), expected: profileIdentity, aborted: profileIdentity[i] }));
+            }
             process.exitCode = 1;
             return;
           }
@@ -118,8 +158,13 @@ the agent process between sends. Small piece → 'rig send'; a real pack → wal
           // Pace BETWEEN pieces only — never a trailing pause after the last.
           if (i < pieces.length - 1) await sleep(paceMs);
         }
-        if (opts.json) console.log(JSON.stringify({ seat, pieces: pieces.length, paceMs }));
-        else console.log(`Walked ${seat} through ${pieces.length} piece(s).`);
+        if (opts.json) {
+          console.log(JSON.stringify(profileIdentity
+            ? { seat, delivered: profileIdentity, paceMs }
+            : { seat, pieces: pieces.length, paceMs }));
+        } else {
+          console.log(`Walked ${seat} through ${pieces.length} piece(s).`);
+        }
       } catch (err) {
         console.error((err as Error).message);
         process.exitCode = 1;
@@ -135,6 +180,32 @@ the agent process between sends. Small piece → 'rig send'; a real pack → wal
       const gm = statusGuardMessage(status); throw new Error(`${gm.fact} ${gm.action}`);
     }
     return deps.clientFactory(getDaemonUrl(status));
+  }
+
+  async function resolveProfilePieces(
+    deps: WalkDeps,
+    opts: { throughProfile?: string; situation?: string; runtime?: string; rig?: string; seatGrant?: string; mission?: string; budget?: string },
+  ): Promise<{ pieces: WalkPiece[]; identity: Array<{ atomId: string; address: string }> }> {
+    const client = await getClient(deps);
+    const params = new URLSearchParams({ ref: opts.throughProfile!, situation: opts.situation!, runtime: opts.runtime ?? "claude" });
+    if (opts.rig !== undefined) params.set("rig", opts.rig);
+    if (opts.seatGrant !== undefined) params.set("seat", opts.seatGrant);
+    if (opts.mission !== undefined) params.set("mission", opts.mission);
+    if (opts.budget !== undefined) params.set("budget", opts.budget);
+    const res = await client.get<{
+      pieces?: Array<{ atomId: string; address: string; text: string }>;
+      message?: string; error?: string;
+    }>(`/api/context-packs/library/by-ref/profile?${params.toString()}`);
+    if (res.status !== 200) {
+      throw new Error(res.data?.message ?? res.data?.error ?? `Daemon returned HTTP ${res.status} composing the profile.`);
+    }
+    const profilePieces = res.data.pieces ?? [];
+    return {
+      // NO-COPY: content is the SERVED text, byte-for-byte; the label carries
+      // the identity so aborts name the atom.
+      pieces: profilePieces.map((p) => ({ label: `${p.atomId} (${p.address})`, content: p.text })),
+      identity: profilePieces.map((p) => ({ atomId: p.atomId, address: p.address })),
+    };
   }
 
   async function resolveRefPieces(deps: WalkDeps, ref: string): Promise<WalkPiece[]> {

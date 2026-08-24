@@ -48,18 +48,21 @@ async function runWalk(port: number, argv: string[], failTransportAt?: number): 
     req.on("data", (c: Buffer) => { body += c.toString(); });
     req.on("end", () => {
       const url = req.url ?? "";
-      res.writeHead(200, { "Content-Type": "application/json" });
       if (url.startsWith("/api/context-packs/library/by-ref/profile")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(PROFILE_RESPONSE));
       } else if (url === "/api/transport/send") {
         sends += 1;
         if (failTransportAt !== undefined && sends === failTransportAt) {
+          res.writeHead(500, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "send failed" }));
           return;
         }
+        res.writeHead(200, { "Content-Type": "application/json" });
         transportPayloads.push((JSON.parse(body) as { text: string }).text);
         res.end(JSON.stringify({ ok: true }));
       } else {
+        res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({}));
       }
     });
@@ -92,7 +95,7 @@ async function runWalk(port: number, argv: string[], failTransportAt?: number): 
 }
 
 describe("rig walk --through-profile — the walk/profile join (Test-A)", () => {
-  const ARGS = ["seat@rig", "--through-profile", "packs/world", "--situation", "handover", "--runtime", "claude", "--rig", "r1", "--seat", "s1", "--pace", "0s", "--json"];
+  const ARGS = ["seat@rig", "--through-profile", "packs/world", "--situation", "handover", "--runtime", "claude", "--rig", "r1", "--seat-grant", "s1", "--pace", "0s", "--json"];
 
   it("IDENTITY EQUALITY: the delivered report equals the profile's piece identity list, in order, never hand-authored", async () => {
     const { logs, exitCode, transportPayloads } = await runWalk(0, ARGS);
