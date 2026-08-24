@@ -256,3 +256,77 @@ describe("rig proof add --name traversal rejection (rev1-r2 fixback)", () => {
     expect(fs.existsSync(path.join(sliceDir, "proof", "qa-clear.md"))).toBe(true);
   });
 });
+
+// KI-5.3-2 SECOND FACE (row ki532proofssot) — a PRISTINE SCAFFOLD contract must
+// never be the canonical item index. Both observed faces pinned: the scaffold's
+// single bracket-placeholder becoming a plausible one-item contract
+// (contractItemsDeclared=1 against a locked SPEC of six), and the zero/unpaired
+// degrade. The truthful rule: an all-placeholder contract is a SCAFFOLD —
+// derive from the locked SPEC's own ## Proof contract with a NAMED advisory,
+// else degrade to no-contract; never silently choose the placeholder index.
+// Genuinely authored PRD contracts keep canonical behavior (the KI-5.3-2
+// first-face ruling preserved).
+describe("proof add — pristine-scaffold contract never canonical (KI-5.3-2 second face)", () => {
+  let workRoot: string;
+  let sliceDir: string;
+  let logs: string[];
+
+  const SCAFFOLD_PRD = "---\nid: OPR.X.19\n---\n# slice\n\n## Proof contract\n\n- [ ] [One promised deliverable, written as an observable outcome — captured. This list is the source the DELIVERED section pairs proof against.]\n";
+  const SPEC_WITH_SIX = "---\nid: OPR.X.19\n---\n# slice\n\n## Proof contract\n\n" +
+    ["alpha door", "beta door", "gamma door", "delta door", "epsilon door", "zeta door"]
+      .map((d) => `- [ ] ${d.toUpperCase()}: the ${d} proves itself`).join("\n") + "\n";
+
+  beforeEach(() => {
+    workRoot = fs.mkdtempSync(path.join(os.tmpdir(), "proof-ssot-"));
+    sliceDir = path.join(workRoot, "missions", "release-x", "slices", "19-signal-layer");
+    fs.mkdirSync(sliceDir, { recursive: true });
+    fs.writeFileSync(path.join(workRoot, "missions", "release-x", "README.md"), "---\nid: OPR.X\n---\n# m\n");
+    fs.writeFileSync(path.join(sliceDir, "README.md"), "---\nid: OPR.X.19\nstatus: building\n---\n# slice\n");
+    logs = [];
+    vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { logs.push(a.join(" ")); });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    process.exitCode = undefined;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(workRoot, { recursive: true, force: true });
+    process.exitCode = undefined;
+  });
+
+  async function run(args: string[]): Promise<void> {
+    const cmd = proofCommand();
+    cmd.exitOverride();
+    await cmd.parseAsync(["node", "proof", "--workspace", workRoot, "add", "19-signal-layer", "--mission", "release-x",
+      "--artifact-type", "qa", "--verdict", "CLEAR", "--candidate-sha", "abc1234",
+      "--money-evidence", "m", "--body", "b", "--name", "qa.md", "--json", ...args]);
+  }
+
+  it("FACE 1: scaffold PRD + locked SPEC contract => derives the SPEC's six items with a NAMED advisory; evidences pair against the SPEC", async () => {
+    fs.writeFileSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md"), SCAFFOLD_PRD);
+    fs.writeFileSync(path.join(sliceDir, "SPEC.md"), SPEC_WITH_SIX);
+    await run(["--evidences", "2", "--self-check", "looked"]);
+    const out = JSON.parse(logs.find((l) => l.trim().startsWith("{"))!) as { contractItemsDeclared: number; coveredItems?: string[]; advisories?: string[]; contractSource?: string };
+    expect(out.contractItemsDeclared).toBe(6);
+    expect(out.contractSource).toBe("spec");
+    expect((out.coveredItems ?? []).join(" ")).toContain("BETA DOOR");
+    expect((out.advisories ?? []).join(" ")).toMatch(/scaffold/i);
+  });
+
+  it("FACE 2: scaffold PRD + no SPEC contract => degrades to NO contract (never the placeholder 1-item index)", async () => {
+    fs.writeFileSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md"), SCAFFOLD_PRD);
+    await run([]);
+    const out = JSON.parse(logs.find((l) => l.trim().startsWith("{"))!) as { contractItemsDeclared: number };
+    expect(out.contractItemsDeclared).toBe(0);
+  });
+
+  it("CONTROL: a genuinely authored PRD contract stays canonical even when a SPEC contract also exists", async () => {
+    fs.writeFileSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md"), "---\nid: x\n---\n# s\n\n## Proof contract\n\n- [ ] REAL ITEM ONE\n- [ ] REAL ITEM TWO\n");
+    fs.writeFileSync(path.join(sliceDir, "SPEC.md"), SPEC_WITH_SIX);
+    await run(["--evidences", "1", "--self-check", "looked"]);
+    const out = JSON.parse(logs.find((l) => l.trim().startsWith("{"))!) as { contractItemsDeclared: number; coveredItems?: string[]; contractSource?: string };
+    expect(out.contractItemsDeclared).toBe(2);
+    expect(out.contractSource).toBe("prd");
+    expect((out.coveredItems ?? []).join(" ")).toContain("REAL ITEM ONE");
+  });
+});
