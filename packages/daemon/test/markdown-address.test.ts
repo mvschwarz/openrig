@@ -140,4 +140,28 @@ describe("validateMarkdownAddressability — the compose gate", () => {
   it("passes the reference corpus clean", () => {
     expect(validateMarkdownAddressability(CORPUS)).toEqual([]);
   });
+
+  it("r1 F1: an UNTERMINATED fence is a finding — a file that loses its sections to a stray fence never validates clean", () => {
+    // r1's measured discriminator: the fence swallows beta and gamma; resolution
+    // stays honest (addressing them fails loud) but the validator — whose job is
+    // to catch unaddressability BEFORE compose — reported a clean file.
+    const swallowed = "## alpha\nok\n```\n## beta\n## gamma\nstill in fence\n";
+    const findings = validateMarkdownAddressability(swallowed);
+    expect(findings.some((f) => f.kind === "unterminated-fence")).toBe(true);
+  });
+
+  it("r1 F2: an empty-slug H2 KEEPS its children (no silent promotion to top level), and the whole family is flagged", () => {
+    // r1's measured discriminator: currentH2 holds a slug and "" is falsy, so an
+    // emoji-only H2's children addressed at TOP level — a nested H3 reachable by
+    // a top-level-looking address, silently.
+    const text = "## 🚀\nparent body\n### kid\nkid body\n## real\nreal body\n";
+    const sections = parseMarkdownSections(text);
+    const kid = sections.find((s) => s.title === "kid")!;
+    expect(kid.headerPath).toEqual(["", "kid"]); // stays under its (unaddressable) parent
+    expect(() => resolveAddress(text, ["kid"])).toThrow(AddressResolutionError); // no top-level reach
+    const findings = validateMarkdownAddressability(text);
+    // Parent AND child are both named: the child's path carries an empty segment,
+    // so no legal address can reach it — silence here would be silent content loss.
+    expect(findings.filter((f) => f.kind === "unaddressable-header").length).toBe(2);
+  });
 });
