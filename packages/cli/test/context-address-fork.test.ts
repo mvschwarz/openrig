@@ -70,8 +70,8 @@ describe("rig context — address fork + profile verb (Atom 4d)", () => {
         res.end(JSON.stringify({
           ref: "packs/smoke", situation: "handover", runtime: "claude",
           pieces: [
-            { atomId: "welcome", address: "notes.md#welcome", sourceKind: "library", order: 1, priority: "core", text: "hello", estimatedTokens: 2 },
-            { atomId: "recap", address: "seat:RECAP.md#d", sourceKind: "seat", order: 9, priority: "core", text: "decisions", estimatedTokens: 3 },
+            { atomId: "welcome", address: "notes.md#welcome", sourceKind: "library", order: 1, priority: "core", text: "hello", estimatedTokens: 2, provenance: { nominalPath: "/p/notes.md", realPath: "/p/notes.md", escapesRoot: false } },
+            { atomId: "recap", address: "seat:RECAP.md#d", sourceKind: "seat", order: 9, priority: "core", text: "decisions", estimatedTokens: 3, provenance: { nominalPath: "/s/RECAP.md", realPath: "/x", escapesRoot: true } },
           ],
           totalEstimatedTokens: 5,
           budget: { limitTokens: 4, overageTokens: 1, dropCandidates: [{ atomId: "recap", priority: "core", estimatedTokens: 3 }] },
@@ -100,6 +100,35 @@ describe("rig context — address fork + profile verb (Atom 4d)", () => {
     const bare = await run(port, ["get", "packs/smoke"]);
     expect(hits.some((h) => h.startsWith("/api/context-packs/library/resolve-address"))).toBe(false);
     expect(bare.logs.join("\n")).toContain("WHOLE PACK BUNDLE");
+  });
+
+  it("r1 4d obs (1): an escaping piece's stdout FRAMING header carries the escape marker — the payload is self-describing without touching composed bytes", async () => {
+    // An agent that consumes stdout and discards stderr must still learn that
+    // a piece's bytes came from outside its root. The header line is framing,
+    // not content, so the marker costs zero composed bytes.
+    hits.length = 0;
+    const out = await run(port, ["profile", "packs/smoke", "--situation", "handover", "--runtime", "claude", "--rig", "r1", "--seat", "s1"]);
+    const stdout = out.logs.join("\n");
+    const recapHeader = stdout.split("\n").find((l) => l.startsWith("=== recap"))!;
+    expect(recapHeader).toMatch(/ESCAPED|escape/i);
+    const welcomeHeader = stdout.split("\n").find((l) => l.startsWith("=== welcome"))!;
+    expect(welcomeHeader).not.toMatch(/ESCAPED|escape/i);
+  });
+
+  it("r1 4d obs (2): --runtime defaults from OPENRIG_RUNTIME (a codex seat that forgets the flag must not silently get a claude profile); the flag beats the env", async () => {
+    const saved = process.env["OPENRIG_RUNTIME"];
+    try {
+      process.env["OPENRIG_RUNTIME"] = "codex";
+      hits.length = 0;
+      await run(port, ["profile", "packs/smoke", "--situation", "fresh"]);
+      expect(hits.find((h) => h.includes("/profile"))!).toContain("runtime=codex");
+      hits.length = 0;
+      await run(port, ["profile", "packs/smoke", "--situation", "fresh", "--runtime", "claude"]);
+      expect(hits.find((h) => h.includes("/profile"))!).toContain("runtime=claude");
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_RUNTIME"];
+      else process.env["OPENRIG_RUNTIME"] = saved;
+    }
   });
 
   it("PROFILE VERB: composes by situation with the grant params threaded, pieces labeled on stdout, budget + provenance warnings on stderr", async () => {
