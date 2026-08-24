@@ -10,8 +10,29 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..");
 const GEN = join(HERE, "generate-context-packs.mjs");
-const PARSER = pathToFileURL(join(REPO, "packages/daemon/dist/domain/context-packs/manifest-parser.js")).href;
-const { parseManifest } = await import(PARSER);
+const distUrl = (p) => pathToFileURL(join(REPO, "packages/daemon/dist/domain/context-packs", p)).href;
+const { parseManifest } = await import(distUrl("manifest-parser.js"));
+const { ContextPackLibraryService } = await import(distUrl("context-pack-library-service.js"));
+const { assembleBundle } = await import(distUrl("bundle-assembler.js"));
+const { EXCLUDES } = await import(pathToFileURL(join(HERE, "mirror-skills.mjs")).href);
+const REAL_SKILLS = join(REPO, "packages/daemon/specs/agents/shared/skills");
+
+// Independent computation of the mirror's exclude-only ship set on a real tree —
+// the discriminator that catches any narrowing of the projection (r2 HIGH-1).
+function mirrorShipSet(dir, rel = "") {
+  const names = new Set(EXCLUDES.filter((p) => !p.includes("/") && !p.includes("*")));
+  const dirs = new Set(EXCLUDES.filter((p) => p.endsWith("/")).map((p) => p.replace(/\/+$/, "")));
+  const globs = EXCLUDES.filter((p) => p.startsWith("*.")).map((p) => p.slice(1));
+  const out = [];
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (e.isDirectory()) {
+      if (!dirs.has(e.name)) out.push(...mirrorShipSet(join(dir, e.name), rel ? `${rel}/${e.name}` : e.name));
+    } else if (e.isFile() && !names.has(e.name) && !globs.some((s) => e.name.endsWith(s))) {
+      out.push(rel ? `${rel}/${e.name}` : e.name);
+    }
+  }
+  return out.sort();
+}
 
 function skill(root, rel, { name, description, files }) {
   const dir = join(root, rel);
@@ -40,7 +61,13 @@ test("generates a valid, daemon-parseable pack per skill; SKILL.md is the instru
     skill(source, "process/tdd", {
       name: "test-driven-development",
       description: "Write the test first.",
-      files: { "anti-patterns.md": "# anti-patterns\n", "helper.sh": "#!/bin/sh\necho no\n" },
+      files: {
+        "anti-patterns.md": "# anti-patterns\n",
+        "helper.sh": "#!/bin/sh\necho no\n",
+        "example.ts": "export const x = 1;\n",
+        "feedback.md": "internal\n",       // mirror EXCLUDE
+        "notes.local.md": "local\n",        // mirror EXCLUDE (*.local.md)
+      },
     });
     run(source, out);
 
@@ -55,14 +82,18 @@ test("generates a valid, daemon-parseable pack per skill; SKILL.md is the instru
     assert.equal(m1.files[0].path, "SKILL.md");
     assert.equal(m1.files[0].role, "instruction");
 
-    // the .sh helper is EXCLUDED (code, not servable content); the .md sibling is a reference
+    // the .sh/.ts helpers ARE packed + copied (mirror ship set — served as text);
+    // the mirror EXCLUDES (feedback.md, *.local.md) are dropped.
     const m2 = parseManifest(readFileSync(join(out, "skills/process/tdd/manifest.yaml"), "utf8"), "m2");
     const paths = m2.files.map((f) => f.path);
     assert.ok(paths.includes("SKILL.md"));
     assert.ok(paths.includes("anti-patterns.md"));
-    assert.ok(!paths.includes("helper.sh"), "helper.sh must not be packed");
-    assert.ok(!existsSync(join(out, "skills/process/tdd/helper.sh")), "helper.sh must not be copied");
-    assert.equal(m2.files.find((f) => f.path === "anti-patterns.md").role, "reference");
+    assert.ok(paths.includes("helper.sh"), "helper.sh must be packed (mirror ship set)");
+    assert.ok(paths.includes("example.ts"), "example.ts must be packed (mirror ship set)");
+    assert.ok(existsSync(join(out, "skills/process/tdd/helper.sh")), "helper.sh must be copied");
+    assert.ok(!paths.includes("feedback.md"), "feedback.md is a mirror EXCLUDE");
+    assert.ok(!paths.includes("notes.local.md"), "*.local.md is a mirror EXCLUDE");
+    assert.equal(m2.files.find((f) => f.path === "helper.sh").role, "reference");
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
@@ -132,5 +163,44 @@ test("deterministic — two runs produce byte-identical manifests", () => {
   } finally {
     rmSync(a.base, { recursive: true, force: true });
     rmSync(b.base, { recursive: true, force: true });
+  }
+});
+
+test("REAL CANON: projected membership == the mirror ship set (no narrowing) — r2 HIGH-1", () => {
+  const out = mkdtempSync(join(tmpdir(), "s07-real-"));
+  try {
+    run(REAL_SKILLS, out); // project the real canon
+    const ref = "process/systematic-debugging";
+    const expected = mirrorShipSet(join(REAL_SKILLS, ref));
+    const m = parseManifest(readFileSync(join(out, "skills", ref, "manifest.yaml"), "utf8"), "m");
+    const got = m.files.map((f) => f.path).sort();
+    assert.deepEqual(got, expected, "pack files[] must equal the mirror ship set for the skill (no dropped assets)");
+    // the exact helpers r2 flagged, referenced by the served prose:
+    assert.ok(got.includes("find-polluter.sh"), "find-polluter.sh must be projected");
+    assert.ok(got.includes("condition-based-waiting-example.ts"), "condition-based-waiting-example.ts must be projected");
+    // and copied to disk
+    assert.ok(existsSync(join(out, "skills", ref, "find-polluter.sh")));
+    assert.ok(existsSync(join(out, "skills", ref, "condition-based-waiting-example.ts")));
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
+});
+
+test("REAL CANON: referenced helpers are DELIVERED in the served bundle (packed-path proof) — r2 HIGH-1", () => {
+  const out = mkdtempSync(join(tmpdir(), "s07-serve-"));
+  try {
+    run(REAL_SKILLS, out);
+    const lib = new ContextPackLibraryService({ roots: [{ path: out, sourceType: "builtin" }] });
+    lib.scan();
+    const entry = lib.getByRef("skills/process/systematic-debugging");
+    assert.ok(entry, "systematic-debugging must be served from the builtin root");
+    const bundle = assembleBundle({ packEntry: entry });
+    assert.equal(bundle.missingFiles.length, 0, "no dangling files — the referenced helpers are present");
+    // the helper the prose points at must be in the served bundle, header AND content:
+    assert.match(bundle.text, /find-polluter\.sh/, "helper .sh path must be in the served bundle");
+    assert.match(bundle.text, /find-polluter\.sh <file_or_dir_to_check>/, "helper .sh CONTENT must be served");
+    assert.match(bundle.text, /condition-based-waiting-example\.ts/, "helper .ts path must be in the served bundle");
+  } finally {
+    rmSync(out, { recursive: true, force: true });
   }
 });

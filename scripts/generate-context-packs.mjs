@@ -27,6 +27,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
+// The projection membership MIRRORS the canonical mirror EXACTLY — imported so the
+// two never drift (r1/r2 HIGH-1: a narrower rule dropped referenced helper assets).
+import { EXCLUDES as MIRROR_EXCLUDES } from "./mirror-skills.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..");
@@ -46,14 +49,19 @@ const PARSER_URL = pathToFileURL(
   path.join(REPO, "packages/daemon/dist/domain/context-packs/manifest-parser.js"),
 ).href;
 
-// Content suffixes the daemon manifest parser accepts. Anything else (a skill's
-// helper .sh/.ts) is code, not servable content, and is excluded from the pack.
-const ALLOWED_SUFFIXES = [".md", ".markdown", ".yaml", ".yml", ".txt"];
-const EXCLUDE_NAMES = new Set(["feedback.md", ".DS_Store"]);
-const EXCLUDE_DIRS = new Set(["evals"]);
-const isLocal = (name) => name.endsWith(".local.md");
-const isAllowed = (name) =>
-  ALLOWED_SUFFIXES.some((s) => name.endsWith(s)) && !EXCLUDE_NAMES.has(name) && !isLocal(name);
+// Membership is the canonical mirror's, derived FROM its EXCLUDES so the two stay
+// in lockstep: include every file EXCEPT the mirror's excludes. We do NOT re-narrow
+// by suffix here — R2 ships "the mirror-skills canonical output", and a skill's
+// referenced helper assets (find-polluter.sh, condition-based-waiting-example.ts)
+// are part of that output. A suffix the daemon parser cannot serve is NOT silently
+// dropped: it reaches the manifest and FAILS THE BUILD in validation (loud), per
+// the ruled "drift between canon and projection is a build failure".
+//   EXCLUDES entries: bare name ("feedback.md", ".DS_Store"), dir ("evals/"), glob ("*.local.md").
+const EXCLUDE_NAMES = new Set(MIRROR_EXCLUDES.filter((p) => !p.includes("/") && !p.includes("*")));
+const EXCLUDE_DIRS = new Set(MIRROR_EXCLUDES.filter((p) => p.endsWith("/")).map((p) => p.replace(/\/+$/, "")));
+const EXCLUDE_GLOB_SUFFIXES = MIRROR_EXCLUDES.filter((p) => p.startsWith("*.")).map((p) => p.slice(1));
+const isExcludedFile = (name) =>
+  EXCLUDE_NAMES.has(name) || EXCLUDE_GLOB_SUFFIXES.some((s) => name.endsWith(s));
 
 function resolveVersion() {
   const arg = process.argv.find((a) => a.startsWith("--version="));
@@ -105,7 +113,7 @@ function collectContentFiles(skillDir, rel = "") {
     if (e.isDirectory()) {
       if (EXCLUDE_DIRS.has(e.name)) continue;
       files.push(...collectContentFiles(path.join(skillDir, e.name), rel ? `${rel}/${e.name}` : e.name));
-    } else if (e.isFile() && isAllowed(e.name)) {
+    } else if (e.isFile() && !isExcludedFile(e.name)) {
       files.push(rel ? `${rel}/${e.name}` : e.name);
     }
   }

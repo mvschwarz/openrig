@@ -9,7 +9,12 @@ import { parse as parseYaml } from "yaml";
 import { ContextPackError, type ContextPackManifest, type ContextPackManifestFile } from "./context-pack-types.js";
 import { isSafePackVersion } from "./ref-safety.js";
 
-const ALLOWED_FILE_SUFFIXES = [".md", ".markdown", ".yaml", ".yml", ".txt"];
+// Served as UTF-8 bundle text. `.sh`/`.ts` (OPR.0.5.3.7 R2) carry canonical skill
+// helper assets the served prose references (e.g. find-polluter.sh,
+// condition-based-waiting-example.ts) — text content, never executed. An unlisted
+// suffix still rejects loud, so a genuinely new pack file type fails at ingest
+// rather than serving a silently-incomplete bundle.
+const ALLOWED_FILE_SUFFIXES = [".md", ".markdown", ".yaml", ".yml", ".txt", ".sh", ".ts"];
 
 export function parseManifest(rawYaml: string, sourcePath: string): ContextPackManifest {
   let parsed: unknown;

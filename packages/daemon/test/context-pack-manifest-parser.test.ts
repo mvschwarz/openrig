@@ -67,7 +67,9 @@ describe("parseManifest", () => {
   });
 
   it("rejects file entry with unsupported suffix", () => {
-    const bad = "name: x\nversion: 1\nfiles:\n  - path: code.ts\n    role: code\n";
+    // .ts/.sh are now servable (OPR.0.5.3.7 R2 helper assets); a genuinely
+    // unsupported suffix (e.g. a binary) still rejects loud.
+    const bad = "name: x\nversion: 1\nfiles:\n  - path: image.png\n    role: code\n";
     expect(() => parseManifest(bad, "/x.yaml")).toThrow(/unsupported suffix/);
   });
 
