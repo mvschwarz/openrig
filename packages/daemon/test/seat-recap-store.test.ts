@@ -109,3 +109,40 @@ describe("validateRecapContract — the CHECKABLE subset, advisory findings (Q2 
     expect(() => validateRecapContract("free prose, no headers at all")).not.toThrow();
   });
 });
+
+// BUILD FOLLOW-UP (r1 verdict bb00e850 obs; orch-lead row 17015088) — the
+// seat-ref parsing unifies on the CANONICAL parseSessionName (first-@ split,
+// the documented greedy-rig ruling) instead of a second lastIndexOf parser.
+// The safety floor is preserved: unresolved/mismatched refs fail with a
+// LABELED path, never a fuzzy match onto another seat.
+describe("resolveAuthoredRecapPointer — one-home seat-ref parsing (canonical parseSessionName)", () => {
+  it("two-part canonical ref resolves the seat dir (local control)", async () => {
+    const { resolveAuthoredRecapPointer } = await import("../src/domain/context-packs/seat-recap-store.js");
+    const { mkdirSync: mkd, writeFileSync: wf } = await import("node:fs");
+    mkd(join(seatDir, "rigs", "r1", "seats", "s1"), { recursive: true });
+    wf(join(seatDir, "rigs", "r1", "seats", "s1", "RECAP.md"), "## Recent Decisions\nx");
+    const res = resolveAuthoredRecapPointer("s1@r1", seatDir);
+    expect(res).toEqual({ address: "seat:RECAP.md", chainLength: 0 });
+  });
+
+  it("HOST-QUALIFIED three-part ref: seat is the FIRST segment (canonical first-@ split), degrading LABELED with the path tried", async () => {
+    // The discriminator: lastIndexOf('@') read seat='s1@r1' rig='host-x'; the
+    // canonical split reads member='s1' rig='r1@host-x' (greedy-rig BY DESIGN).
+    // Either way no directory exists — but the labeled path must reflect the
+    // CANONICAL parse so the absence text points at the true shape.
+    const { resolveAuthoredRecapPointer } = await import("../src/domain/context-packs/seat-recap-store.js");
+    const res = resolveAuthoredRecapPointer("s1@r1@host-x", seatDir);
+    expect("absentReason" in res).toBe(true);
+    const reason = (res as { absentReason: string }).absentReason;
+    expect(reason).toContain(join("rigs", "r1@host-x", "seats", "s1"));
+  });
+
+  it("a malformed ref is a LABELED absence naming the parse verdict — never a throw, never a guess", async () => {
+    const { resolveAuthoredRecapPointer } = await import("../src/domain/context-packs/seat-recap-store.js");
+    for (const bad of ["noatsign", "@r1", "s1@"]) {
+      const res = resolveAuthoredRecapPointer(bad, seatDir);
+      expect("absentReason" in res).toBe(true);
+      expect((res as { absentReason: string }).absentReason).toContain(bad);
+    }
+  });
+});
