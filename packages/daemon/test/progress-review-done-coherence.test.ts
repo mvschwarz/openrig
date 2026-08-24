@@ -326,20 +326,37 @@ describe("VM-006 — Progress↔Review done coherence (union in buildAcceptance)
 
   // --- V8 · degrade-safe: every absence is a no-op, never a throw ---
 
-  it("V8a: no PRD ⇒ no contract ⇒ pure tick-state, no doneVia, no throw", () => {
+  // RE-PINNED 2026-08-24 (desk ruling row 9acb0aae): the old pins asserted the
+  // pre-one-home law (no PRD ⇒ no contract). Since 546ced700 the source
+  // selection is one-homed (authored PRD -> SPEC -> README), so an absent or
+  // section-less PRD YIELDS to this fixture's authored README contract — the
+  // qa-verdict lifts join and doneVia populates. V8's real intent —
+  // absence-never-throws — moves to V8f, the TRUE-absence case.
+  it("V8a: no PRD + authored README ⇒ the README-derived contract joins and lifts (one-home law), no throw", () => {
     rmSync(fileOf("IMPLEMENTATION-PRD.md"));
     const a = acceptanceOf();
     expect(a.totalItems).toBe(13);
-    expect(a.doneItems).toBe(7);
-    expect(a.items.every((i) => i.doneVia === undefined)).toBe(true);
+    expect(a.doneItems).toBe(13);
+    expect(a.items.some((i) => i.doneVia === "qa-verdict")).toBe(true);
   });
 
-  it("V8b: PRD without a Proof contract section ⇒ no-op, no doneVia", () => {
+  it("V8b: PRD without a Proof contract section ⇒ yields to the authored README contract, no throw", () => {
     editFile("IMPLEMENTATION-PRD.md", (c) => c.replace("## Proof contract", "## Notes"));
     const a = acceptanceOf();
     expect(a.totalItems).toBe(13);
-    expect(a.doneItems).toBe(7);
+    expect(a.doneItems).toBe(13);
+    expect(a.items.some((i) => i.doneVia === "qa-verdict")).toBe(true);
+  });
+
+  it("V8f: TRUE absence — no PRD, no SPEC, no authored README contract ⇒ pure tick-state, no doneVia, no throw", () => {
+    // The old V8a's actual intent, inherited at the place it is still true:
+    // when NO source authors a contract, acceptance degrades to tick-state
+    // with nothing lifted and nothing thrown.
+    rmSync(fileOf("IMPLEMENTATION-PRD.md"));
+    editFile("README.md", (c) => c.replace("## Proof contract", "## Notes"));
+    const a = acceptanceOf();
     expect(a.items.every((i) => i.doneVia === undefined)).toBe(true);
+    expect(a.doneItems).toBeLessThan(13); // ticks only, no qa-verdict lifts
   });
 
   it("V8c: authored contract but no proof/ dir ⇒ no lift, no throw; ticked rows stamp checkbox", () => {
@@ -508,8 +525,13 @@ describe("VM-006 — Progress↔Review done coherence (union in buildAcceptance)
     (fs.readdirSync as unknown as { mockClear: () => void }).mockClear();
   }
 
-  it("FS-1a: a no-contract slice performs ZERO readdirs of proof/", () => {
+  it("FS-1a: a slice with NO contract from ANY source performs ZERO readdirs of proof/", () => {
+    // RE-PINNED 2026-08-24 (desk ruling row 9acb0aae): removing only the PRD no
+    // longer removes the contract (the README authors one under the one-home
+    // law) — TRUE absence strips every source, and the zero-readdir guarantee
+    // holds exactly there.
     rmSync(fileOf("IMPLEMENTATION-PRD.md"));
+    editFile("README.md", (c) => c.replace("## Proof contract", "## Notes"));
     indexer.get(SLICE); // index before clearing — only project() is under test
     clearReaddirRecord();
     acceptanceOf();
