@@ -151,6 +151,13 @@ interface SeatHandoverServiceDeps {
    * native scrollback is the money proof. Wired in production to ContextUsageStore + parseJsonlExchanges.
    */
   predecessorRecapResolver?: PredecessorRecapResolver;
+  /**
+   * OPR.0.5.3.5 mini-req 7 — resolves the AUTHORED seat recap (RECAP.md beside LEARNED, written by
+   * the outgoing occupant) for the successor packet's pointer leg. Optional: absent -> the authored
+   * leg is omitted (the feature never ran); a resolver that finds nothing returns the labeled
+   * absence. Wired in production to seat-recap-store + the topology.root seat layout.
+   */
+  authoredRecapResolver?: (seatRef: string) => { address: string; chainLength: number } | { absentReason: string };
 }
 
 export class SeatHandoverService {
@@ -166,6 +173,7 @@ export class SeatHandoverService {
   private captureDeps: ResumeTokenCaptureDeps;
   private occupantInvalidator: OccupantInvalidator | null;
   private predecessorRecapResolver: PredecessorRecapResolver | null;
+  private authoredRecapResolver: SeatHandoverServiceDeps["authoredRecapResolver"] | null;
   /** Injectable sleep (tests): also carries the shared paste-then-submit settle in deliverRestorePacket. */
   private sleep: (ms: number) => Promise<void>;
   private appliedLaunchObservations: AppliedLaunchObservationStore;
@@ -184,6 +192,7 @@ export class SeatHandoverService {
     this.tmuxAdapter = deps.tmuxAdapter;
     this.occupantInvalidator = deps.occupantInvalidator ?? null;
     this.predecessorRecapResolver = deps.predecessorRecapResolver ?? null;
+    this.authoredRecapResolver = deps.authoredRecapResolver ?? null;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.appliedLaunchObservations = new AppliedLaunchObservationStore(deps.db);
     this.now = deps.now ?? (() => new Date());
@@ -381,6 +390,16 @@ export class SeatHandoverService {
     //    continuity verify (a blank occupant is a relaunch, not a handover).
     //    discovered is operator-prepared and needs no delivery.
     let contextDelivered = false;
+    // OPR.0.5.3.5 mini-req 7 — the authored recap pointer leg, resolved through the injected
+    // reader; every outcome labeled (present with chain depth / named absence / omitted when
+    // the resolver itself is absent).
+    let authoredRecapInfo: { authoredRecap?: { address: string; chainLength: number }; authoredRecapAbsentReason?: string } | null = null;
+    if (this.authoredRecapResolver) {
+      const authored = this.authoredRecapResolver(input.seatRef);
+      authoredRecapInfo = "address" in authored
+        ? { authoredRecap: authored }
+        : { authoredRecapAbsentReason: authored.absentReason };
+    }
     if (parsed.source.mode === "fresh") {
       // B16 — the recap was resolved at step 1b (pre-launch); an unavailable verdict rides the
       // packet as a NAMED line, never a silent omission.
@@ -393,6 +412,7 @@ export class SeatHandoverService {
         recap: resolved?.recap,
         recordPath: resolved?.recordPath,
         recapUnavailableReason: resolved ? undefined : (predecessorRecapResolution as { unavailableReason: string }).unavailableReason,
+        ...(authoredRecapInfo ?? {}),
       });
       if (!delivered.ok) {
         // Partial: the successor is live in the preserved pane but the context packet never landed —
@@ -638,6 +658,8 @@ export class SeatHandoverService {
       recordPath?: string;
       /** B16 — when the recap did not resolve, the NAMED reason (rendered, never silent). */
       recapUnavailableReason?: string;
+      authoredRecap?: { address: string; chainLength: number };
+      authoredRecapAbsentReason?: string;
     },
   ): Promise<{ ok: true } | { ok: false; message: string }> {
     const packet = buildRestorePacket({ ...info, handoverAt: this.now().toISOString() });
@@ -934,6 +956,12 @@ export function buildRestorePacket(info: {
   /** B16 — the NAMED reason when no recap resolved; rendered as its own labeled line so the absence
    *  is visible in the pane (honest-degraded means labeled, not silent). */
   recapUnavailableReason?: string;
+  /** OPR.0.5.3.5 mini-req 7 — the AUTHORED seat recap (decisions-with-rationale, written by the
+   *  outgoing occupant): rendered as a POINTER to its address (no-copy composition — the packet
+   *  never inlines the bytes; the successor pulls by address). */
+  authoredRecap?: { address: string; chainLength: number };
+  /** Labeled absence for the authored leg (B16 doctrine — never a silent omission). */
+  authoredRecapAbsentReason?: string;
 }): string {
   const captured = info.capturedContext.trim();
   const lines = [
@@ -963,6 +991,23 @@ export function buildRestorePacket(info: {
     lines.push(
       "",
       `--- Predecessor recap unavailable: ${info.recapUnavailableReason} ---`,
+    );
+  }
+  // The AUTHORED recap leg (mini-req 7): a pointer, never inlined bytes — the
+  // successor pulls by address so there is exactly one copy to trust.
+  if (info.authoredRecap) {
+    const chainNote = info.authoredRecap.chainLength > 0
+      ? ` (${info.authoredRecap.chainLength} superseded predecessor${info.authoredRecap.chainLength === 1 ? "" : "s"} retained on the seat tree)`
+      : "";
+    lines.push(
+      "",
+      `--- Authored seat recap: ${info.authoredRecap.address}${chainNote} ---`,
+      "Composed into handover/post-compaction profiles automatically (rig context profile <pack> --situation handover --rig <rig> --seat <seat>); or read it directly at the seat tree address above.",
+    );
+  } else if (info.authoredRecapAbsentReason) {
+    lines.push(
+      "",
+      `--- Authored seat recap: ${info.authoredRecapAbsentReason} ---`,
     );
   }
   return lines.join("\n");

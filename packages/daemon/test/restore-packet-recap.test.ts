@@ -89,7 +89,10 @@ describe("buildRestorePacket — the AUTHORED recap leg (seat-homed, by address)
     expect(packet).toContain("Authored seat recap");
     expect(packet).toContain("seat:RECAP.md");
     expect(packet).toMatch(/2 superseded/);
-    expect(packet).toContain("rig context get"); // tells the successor HOW to pull it
+    // Tells the successor HOW to pull it — the handover PROFILE compose is the
+    // verb that resolves seat: refs (get is library-only); pin fixed pre-green
+    // (my RED asserted get, which does not accept tree refs — disclosed).
+    expect(packet).toContain("rig context profile");
   });
 
   it("absence is a LABELED line naming the reason, never silence", () => {

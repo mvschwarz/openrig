@@ -9,6 +9,10 @@ import { SeatHandoverService } from "../domain/seat-handover-service.js";
 import { SeatSwitchClientService } from "../domain/seat-switch-client-service.js";
 import { makePredecessorRecapResolver } from "../domain/predecessor-recap-resolver.js";
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { listRecapChain, RECAP_FILENAME } from "../domain/context-packs/seat-recap-store.js";
+import { SettingsStore } from "../domain/user-settings/settings-store.js";
 
 export const seatRoutes = new Hono();
 
@@ -75,6 +79,25 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
         },
       });
     })(),
+    // OPR.0.5.3.5 mini-req 7 — the AUTHORED recap pointer for the successor
+    // packet: seat dir from topology.root CONFIG (slice-06 D1 layout); every
+    // outcome labeled — present with chain depth, or a named absence carrying
+    // the path tried (a seat-id/directory mapping gap surfaces loudly at the
+    // door drive instead of silently).
+    authoredRecapResolver: (seatRef: string) => {
+      const at = seatRef.lastIndexOf("@");
+      const seat = at > 0 ? seatRef.slice(0, at) : "";
+      const rig = at > 0 ? seatRef.slice(at + 1) : "";
+      if (!seat || !rig) {
+        return { absentReason: `seat ref '${seatRef}' does not parse as <seat>@<rig> — authored recap not resolved` };
+      }
+      const topologyRoot = String(new SettingsStore().resolveOne("topology.root").value);
+      const seatDir = join(topologyRoot, "rigs", rig, "seats", seat);
+      if (!existsSync(join(seatDir, RECAP_FILENAME))) {
+        return { absentReason: `no ${RECAP_FILENAME} on the seat tree (${seatDir}) — the predecessor never wrote one` };
+      }
+      return { address: `seat:${RECAP_FILENAME}`, chainLength: listRecapChain(seatDir).length };
+    },
     // OPR.0.4.6.PI1 FR-6 — the Pi adapter in the runtime-adapter map exposes
     // the pi-runner sidecar reader; reuse it structurally (no new context var).
     piRunnerStateStore: (() => {

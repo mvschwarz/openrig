@@ -20,6 +20,10 @@
     "./spec-conformance": {
       "types": "./dist/spec-conformance-surface.d.ts",
       "import": "./dist/spec-conformance-surface.js"
+    },
+    "./seat-recap-store": {
+      "types": "./dist/seat-recap-store-surface.d.ts",
+      "import": "./dist/seat-recap-store-surface.js"
     }
   },
   "scripts": {

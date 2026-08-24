@@ -639,6 +639,41 @@ Examples:
       }
     });
 
+  // OPR.0.5.3.5 mini-req 7 — the outgoing occupant's boundary write (the Q2
+  // requirement the store alone does not satisfy). Daemon-independent like
+  // trace: the seat dir resolves from topology.root CONFIG; the write flows
+  // through the ONE store (supersession + addressability gate); advisory
+  // contract findings ride stderr while the write still lands — the boundary
+  // is never blocked on prose shape.
+  cmd.command("recap-write")
+    .description("Write this seat's authored RECAP (decisions-with-rationale) at the handover boundary; supersedes the previous recap into the seat's chain")
+    .requiredOption("--rig <rig>", "Rig name (the rigs/<rig> altitude)")
+    .requiredOption("--seat <seat>", "Seat id (the seats/<seat> altitude)")
+    .requiredOption("--file <path>", "Markdown file containing the recap content")
+    .action(async (opts: { rig: string; seat: string; file: string }) => {
+      try {
+        const { writeSeatRecap, validateRecapContract, listRecapChain } = await import("@openrig/daemon/seat-recap-store");
+        const content = readFileSync(opts.file, "utf-8");
+        const store = new ConfigStore();
+        const topologyRoot = String(store.resolveWithSource("topology.root").value);
+        const seatDir = join(topologyRoot, "rigs", opts.rig, "seats", opts.seat);
+        if (!existsSync(seatDir)) {
+          throw new Error(`seat directory ${seatDir} does not exist — check --rig/--seat against the topology tree (topology.root=${topologyRoot}).`);
+        }
+        for (const f of validateRecapContract(content)) {
+          console.error(f.kind === "no-decisions-section"
+            ? "ADVISORY no-decisions-section: the authoring contract asks for decisions WITH rationale — conclusions alone are the lossy handoff shape."
+            : `ADVISORY nonstandard-unverified-marker (line ${f.line}): use the canonical 'UNVERIFIED:' form so uncertain facts stay findable.`);
+        }
+        writeSeatRecap({ seatDir, content });
+        const chain = listRecapChain(seatDir);
+        console.log(`Recap written: ${join(seatDir, "RECAP.md")}${chain.length > 0 ? ` (${chain.length} superseded predecessor${chain.length === 1 ? "" : "s"} retained)` : ""}`);
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exitCode = 1;
+      }
+    });
+
   cmd.command("sync")
     .description("Re-walk discovery roots and refresh the library index")
     .option("--json", "JSON output")
