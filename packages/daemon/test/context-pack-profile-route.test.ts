@@ -159,6 +159,26 @@ describe("GET /library/by-ref/profile — situation-composed delivery (Atom 4b)"
     expect(body.pieces.find((p) => p.atomId === "recap")!.provenance.realPath).toContain(join("rigs", "r1", "seats", "s1"));
   });
 
+  it("r1 F1 (round 3): a file NAMED '..hidden-notes.md' inside its root is NOT flagged — segment comparison, never prefix-matching a path string", async () => {
+    // r1's measured shape: relative() returned '..hidden-notes.md' and a bare
+    // startsWith('..') read it as an escape — the identical bug class as
+    // startsWith(base), reproduced one level in. A trust surface that cries
+    // wolf on innocent files trains readers to skim it.
+    const seatDir = join(tmp, "topology", "rigs", "r1", "seats", "s1");
+    writeFileSync(join(seatDir, "..hidden-notes.md"), "## Recent Decisions\ninnocent bytes");
+    const manifest2 = MANIFEST.replace("seat:RECAP.md#recent-decisions", "seat:..hidden-notes.md#recent-decisions");
+    // A '..'-PREFIXED FILENAME is not a '..' SEGMENT — parseSourceRef must agree.
+    writeFileSync(join(libRoot, "packs", "world", "manifest.yaml"), manifest2);
+    const res = await app.request(url("situation=handover&runtime=claude&rig=r1&seat=s1"));
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      pieces: Array<{ atomId: string; provenance: { escapesRoot: boolean } }>;
+      provenanceWarnings: string[];
+    };
+    expect(body.pieces.find((p) => p.atomId === "recap")!.provenance.escapesRoot).toBe(false);
+    expect(body.provenanceWarnings).toEqual([]);
+  });
+
   it("r1 pre-judgment (2): a DANGLING symlink is its own NAMED failure, never a garbled provenance error", async () => {
     const { symlinkSync } = await import("node:fs");
     const seatDir = join(tmp, "topology", "rigs", "r1", "seats", "s1");
