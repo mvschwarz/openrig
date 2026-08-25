@@ -868,20 +868,44 @@ export class SessionTransport {
       let stagedEvidence = false;
       if (currentInputAt >= 0) {
         const inputLine = paneLines[currentInputAt]!.trimStart();
-        // The region is the last ❯-line THROUGH pane end — a multi-line inline paste or a wrapped
-        // input continues below the marker; everything ABOVE the marker is history and never counts.
-        const region = paneLines.slice(currentInputAt).join("\n");
+        // The region is the last ❯-line through the input box's closing separator (a box-drawing
+        // line) or pane end — wrapped input continues below the marker; everything ABOVE the
+        // marker is history and everything below the separator is hint-bar chrome.
+        let regionEnd = paneLines.length;
+        for (let i = currentInputAt + 1; i < paneLines.length; i++) {
+          const t = paneLines[i]!.trim();
+          if (t.length >= 10 && /^[─═-]+$/.test(t)) { regionEnd = i; break; }
+        }
+        const region = paneLines.slice(currentInputAt, regionEnd).join("\n");
         if (!/^❯\s*\d+\./.test(inputLine)) {
-          const placeholders = [...region.matchAll(/\[Pasted text #\d+ \+(\d+) lines\]/g)];
-          if (placeholders.length === 1) {
-            const stagedLines = Number(placeholders[0]![1]);
-            const expectedLines = opts.expectedStagedLineCount;
-            stagedEvidence = typeof expectedLines === "number" && Math.abs(stagedLines - expectedLines) <= 1;
-          } else if (placeholders.length === 0) {
+          // Round-3 (r2 R2 HIGH-1, specimen-pinned): Claude renders ONE staged piece as MANY
+          // placeholders whose displayed counts are SEGMENT sizes (sum ≤ source lines), followed
+          // by the piece's own literal tail wrapped across pane lines — and the placeholder
+          // tokens themselves wrap. So: collapse wrapping, then
+          //   IDENTITY  — the literal residual (region minus tokens minus hint chrome) must be a
+          //               CONTIGUOUS substring of the piece: the visible words are the piece's
+          //               words. Foreign residual (another piece, stale content) refuses.
+          //   SANITY    — the segment-count sum must not exceed the piece's own line count
+          //               (small slack), and with NO residual anchor must reach at least 60% of
+          //               it — a bare unrelated placeholder cannot masquerade as this piece.
+          const placeholderRe = /\[Pasted text #\d+ \+(\d+) lines\]/g;
+          const regionFlat = region.replace(/\s+/g, " ");
+          const counts = [...regionFlat.matchAll(placeholderRe)].map((m) => Number(m[1]));
+          if (counts.length === 0) {
             const head = norm(expected).slice(0, 24);
             stagedEvidence = head.length > 0 && norm(region).includes(head);
+          } else {
+            const expectedLines = opts.expectedStagedLineCount;
+            const chrome = /paste again to expand|ctrl\+g to edit( in Vim)?/gi;
+            const residual = norm(regionFlat.replace(placeholderRe, "").replace(chrome, "")).replace(/^❯/, "");
+            const pieceNorm = norm(expected);
+            const residualOk = residual.length === 0 || pieceNorm.includes(residual);
+            const sum = counts.reduce((a, b) => a + b, 0);
+            const sumSane = typeof expectedLines === "number"
+              && sum <= expectedLines * 1.05 + 2
+              && (residual.length >= 12 || sum >= expectedLines * 0.6);
+            stagedEvidence = residualOk && sumSane;
           }
-          // placeholders.length > 1 → coalesced staging: stagedEvidence stays false.
         }
       }
       if (!stagedEvidence) {

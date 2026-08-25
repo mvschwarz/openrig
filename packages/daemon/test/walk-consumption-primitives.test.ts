@@ -165,7 +165,7 @@ describe("SessionTransport submitOnly — the guarded bare-Enter retry", () => {
   const PANE_SINGLE = () => readFileSync(join(FIXTURES, "pane-single-piece-2.txt"), "utf8");
   const PANE_COALESCED = () => readFileSync(join(FIXTURES, "pane-coalesced-pieces-2-and-3.txt"), "utf8");
 
-  it.fails("R3 SPECIMEN — the preserved single-piece staged rendering (8 placeholders + literal tail) ACCEPTS and submits exactly once [RED until rendering-true identity]", async () => {
+  it("R3 SPECIMEN — the preserved single-piece staged rendering (8 placeholders + literal tail) ACCEPTS and submits exactly once [GREEN — rendering-true identity]", async () => {
     const sendKeys = vi.fn(async () => ({ ok: true as const }));
     const transport = makeTransport(mockTmux({ sendKeys, capturePaneContent: async () => PANE_SINGLE() }));
     const res = await transport.send("dev-impl@my-rig", "", {

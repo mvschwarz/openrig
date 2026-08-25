@@ -277,7 +277,7 @@ the agent process between sends. Small piece → 'rig send'; a real pack → wal
                 const enter = await client.post<Record<string, unknown>>("/api/transport/send", {
                   session: seat,
                   submitOnly: true,
-                  expectedStagedText: piece.content.slice(0, 200),
+                  expectedStagedText: piece.content, // FULL bytes — the transport checks the rendered literal residual for contiguous containment
                   expectedStagedLineCount: piece.content.split("\n").length,
                 }, { headers: terminalAuthHeaders() });
                 if (enter.status >= 400) {
