@@ -332,3 +332,27 @@ what it looks like now" evidence the agent stands behind — bounded, mapped
 1:1 (or few:1) to deliverables. The fix-loop's full artifact history stays in
 `proof/`, one drill-in down, NEVER in the primary view. The anti-pattern:
 an append-only pile where the human can't tell final from superseded.
+
+## Scratch-daemon hermeticity: the DB a scratch daemon opens is the one you named
+
+*(Desk-ruled 2026-08-25, row qitem-20260825005846-7960f4dd; 0.5.3-era doctrine — a harness rule,
+not product behavior.)*
+
+A scratch daemon launch **strips the inherited environment's `OPENRIG_DB` and names an explicit
+scratch DB path under the scratch `OPENRIG_HOME`** — both halves, every launch:
+
+```bash
+env -u OPENRIG_DB \
+  OPENRIG_HOME="$SCRATCH_HOME" \
+  OPENRIG_DB="$SCRATCH_HOME/openrig.sqlite" \
+  node <daemon entry> …
+```
+
+An inherited fleet DB reaching a scratch daemon is a **harness defect regardless of outcome** —
+the scratch context read or wrote state it never owned, and whether anything visibly broke is
+luck, not hermeticity.
+
+**The discriminator that keeps this rule honest:** an explicit `OPENRIG_DB` still WINS by design
+(`daemon-db-path.ts`; prior ruling 00c4ab76) — deliberate split-path configuration is legitimate
+and untouched. This rule governs **inheritance into scratch contexts**, where nobody decided
+anything: strip what you did not choose, then choose.
