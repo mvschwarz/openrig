@@ -396,7 +396,7 @@ describe("rig walk — per-piece consumption verification (RED-first, mechanics-
 
   // FINAL-PIECE CLOSURE (r2 turn-pacing NOT-CLEAR, row b268b89b): the gate must be N-of-N. The
   // last piece's open turn is exactly where rerun 4's seat-issued GET would be queued.
-  it.fails("PACING-C — the FINAL piece consumed but never closed fails loud naming it; no success summary [RED until N-of-N closure]", async () => {
+  it("PACING-C — the FINAL piece consumed but never closed fails loud naming it; no success summary [GREEN — N-of-N closure]", async () => {
     const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
     let firstPiece = true;
     w.sendBehavior = (b) => {

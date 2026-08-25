@@ -314,9 +314,11 @@ the agent process between sends. Small piece → 'rig send'; a real pack → wal
           // next one into a still-OPEN turn gets it QUEUED by the runtime (never a distinct user
           // turn — the rerun's proven defect layer). Wait for the seat's turn to CLOSE — the
           // system/turn_duration record after the piece's user turn (the capture atom's boundary)
-          // — before pacing to the next piece. The wait is the install working as designed: a
-          // walk takes as long as the seat needs to actually read the pieces.
-          if (verifiable && i < pieces.length - 1) {
+          // — before pacing to the next piece. N-of-N (r2 row b268b89b): the FINAL piece waits
+          // too — whatever follows the walk (rerun 4's seat-issued GET) meets the same open-turn
+          // queuing boundary. The wait is the install working as designed: a walk takes as long
+          // as the seat needs to actually read the pieces.
+          if (verifiable) {
             const turnDeadline = Date.now() + turnTimeoutMs;
             for (;;) {
               const rec = await readRecord(preLen);
