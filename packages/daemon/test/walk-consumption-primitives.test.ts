@@ -11,7 +11,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { Hono } from "hono";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -148,6 +148,43 @@ describe("SessionTransport submitOnly — the guarded bare-Enter retry", () => {
       capturePaneContent: async () => "❯ [Pasted text #3 +112 lines] [Pasted text #4 +112 lines]\n  paste again to expand",
     }));
     const res = await transport.send("dev-impl@my-rig", "", { submitOnly: true, expectedStagedText: STAGED_PIECE, expectedStagedLineCount: 112 });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("staged_mismatch");
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  // ROUND-3 (r2 R2 HIGH-1, row d95b2ea7): the identity relation must be true of Claude's ACTUAL
+  // staged rendering, pinned from the PRESERVED Test-A specimen (t1-mechanics run, receipts
+  // 54-direct-tmux-capture.txt + served-profile/02-permission-self-sleep.md), not invented:
+  // one walked piece (8834 bytes, 142 split("\n") entries) renders as EIGHT placeholders
+  // (+16,+15,+19,+15,+17,+15,+17,+16 — segment sizes, NOT source newlines; sum 130) followed by
+  // the piece's own literal tail, wrapped across pane lines; placeholder tokens themselves wrap
+  // across lines ("+19\n  lines]").
+  const FIXTURES = join(import.meta.dirname ?? __dirname, "fixtures", "walk-staged-specimen");
+  const PIECE_2 = () => readFileSync(join(FIXTURES, "piece-02-permission-self-sleep.md"), "utf8");
+  const PANE_SINGLE = () => readFileSync(join(FIXTURES, "pane-single-piece-2.txt"), "utf8");
+  const PANE_COALESCED = () => readFileSync(join(FIXTURES, "pane-coalesced-pieces-2-and-3.txt"), "utf8");
+
+  it.fails("R3 SPECIMEN — the preserved single-piece staged rendering (8 placeholders + literal tail) ACCEPTS and submits exactly once [RED until rendering-true identity]", async () => {
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = makeTransport(mockTmux({ sendKeys, capturePaneContent: async () => PANE_SINGLE() }));
+    const res = await transport.send("dev-impl@my-rig", "", {
+      submitOnly: true,
+      expectedStagedText: PIECE_2(),
+      expectedStagedLineCount: PIECE_2().split("\n").length, // 142 — none of the displayed counts equals this
+    });
+    expect(res.ok).toBe(true);
+    expect(sendKeys).toHaveBeenCalledTimes(1); // the guarded recovery submits THAT exact staged input once
+  });
+
+  it("R3 SPECIMEN GUARD — the preserved COALESCED region (pieces 2 AND 3 staged) refuses for piece 2 with zero Enter calls: submitting would coalesce two pieces into one message", async () => {
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = makeTransport(mockTmux({ sendKeys, capturePaneContent: async () => PANE_COALESCED() }));
+    const res = await transport.send("dev-impl@my-rig", "", {
+      submitOnly: true,
+      expectedStagedText: PIECE_2(),
+      expectedStagedLineCount: PIECE_2().split("\n").length,
+    });
     expect(res.ok).toBe(false);
     expect(res.reason).toBe("staged_mismatch");
     expect(sendKeys).not.toHaveBeenCalled();

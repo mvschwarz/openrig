@@ -1,0 +1,30 @@
+  delivery is best-effort typing into a terminal, and reliability lives one
+  level up in the daemon's queue and database — not in the wire.
+
+✻ Baked for 1m 24s
+
+──────────────────────────────────────────────── blank-seat@eval-testa-t1-096 ──
+❯ [Pasted text #7 +16 lines][Pasted text #8 +15 lines][Pasted text #9 +19
+  lines][Pasted text #10 +15 lines][Pasted text #11 +17 lines][Pasted text #12
+  +15 lines][Pasted text #13 +17 lines][Pasted text #14 +16 lines]with better
+  ergonomics.
+
+  Which means: **you are a user of every other agent here, and every one of
+  them is a user of you.**
+  You can unblock them, reconfigure them, wake them, compact them. They can do
+  it to you. If you are
+  stuck, you are not stuck — you are one message away from someone who can
+  move you.
+
+  > **PREDICT — commit before checking.**
+  > You are blocked at a permission prompt right now and no peer is watching.
+  What are your options?
+  > Answer before reading on, then say whether your answer included *"ask
+  another agent"* — and if
+  > it did not, whether that is because you did not think of it, or because
+  you did not know it
+  > was allowed.
+
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)                            /rc
+
