@@ -227,6 +227,41 @@ describe("SessionTransport submitOnly — the guarded bare-Enter retry", () => {
     expect(sendKeys).not.toHaveBeenCalled();
   });
 
+  // ROUND-5 (r2 R4 HIGH-1, row e039e8d1): the suffix anchor must be JOINED to the opaque
+  // placeholder prefix. The preserved bytes prove the relation: the placeholder sum (130)
+  // IDENTIFIES the hidden source boundary immediately before the visible suffix (the 524-char
+  // residual begins after exactly 130 source newlines of the 142-entry piece). A sum that does
+  // not match the boundary before the matched suffix is a truncated or wrong prefix — refuse.
+  const pieceTail = () => PIECE_2().split("\n").slice(-3).join("\n"); // a TRUE suffix, 85 normalized chars; boundary = 139
+
+  it.fails("R5 — a +1 placeholder with the piece's EXACT literal suffix REFUSES with zero Enter calls: the sum does not match the hidden boundary [RED until the join]", async () => {
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = makeTransport(mockTmux({
+      sendKeys,
+      capturePaneContent: async () => `❯ [Pasted text #5 +1 lines]${pieceTail()}\n\n────────────────────────────────────────\n  ⏵⏵ accept edits on`,
+    }));
+    const res = await transport.send("dev-impl@my-rig", "", {
+      submitOnly: true, expectedStagedText: PIECE_2(), expectedStagedLineCount: PIECE_2().split("\n").length,
+    });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("staged_mismatch");
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it.fails("R5 — a plausible +100 placeholder with the piece's EXACT literal suffix REFUSES with zero Enter calls: 100 is not the boundary either [RED until the join]", async () => {
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = makeTransport(mockTmux({
+      sendKeys,
+      capturePaneContent: async () => `❯ [Pasted text #5 +100 lines]${pieceTail()}\n\n────────────────────────────────────────\n  ⏵⏵ accept edits on`,
+    }));
+    const res = await transport.send("dev-impl@my-rig", "", {
+      submitOnly: true, expectedStagedText: PIECE_2(), expectedStagedLineCount: PIECE_2().split("\n").length,
+    });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("staged_mismatch");
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
   it("REFUSES (invalid_submit_only) without expectedStagedText, and when text is supplied", async () => {
     const transport = makeTransport(mockTmux());
     const noExpected = await transport.send("dev-impl@my-rig", "", { submitOnly: true });
