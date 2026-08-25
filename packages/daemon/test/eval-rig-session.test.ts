@@ -113,6 +113,83 @@ describe("sliceAfterPrompt — the since-the-prompt anchor", () => {
   });
 });
 
+// Harness-correction atom (door disposition qitem-20260825080716-ad2422ab; frozen criteria sha
+// b0a426fc...). dev-qa's real Test-A run was INDETERMINATE: the capture is not Claude-JSONL-schema-aware
+// — it treats the conversation record as an opaque string. These RED-FIRST discriminators pin the three
+// required properties against the CURRENT string-based captureSince; the fix must parse the JSONL
+// (messages: {type,message:{role,model,content:[{type:"text",text}],stop_reason}}) and (1) return only
+// after the current assistant turn COMPLETES (terminal stop_reason), (2) grade assistant/tool output
+// ONLY (exclude the user prompt + envelope), (3) never grade an earlier turn / footer-only fragment.
+describe("captureSince — Claude-JSONL output-only + native-turn completion (RED-first, harness correction)", () => {
+  const userMsg = (text: string) => `{"type":"user","message":{"role":"user","content":[{"type":"text","text":${JSON.stringify(text)}}]}}`;
+  const asstMsg = (text: string, stop: string | null) => `{"type":"assistant","message":{"role":"assistant","model":"claude-x","stop_reason":${JSON.stringify(stop)},"content":[{"type":"text","text":${JSON.stringify(text)}}]}}`;
+
+  async function driveOne(seed: string, promptText: string, appendOnSend: string, growTo?: string) {
+    const state = { generationId: "g1", content: seed };
+    let sent = false;
+    const { exec, calls } = scriptedExec((args) => {
+      if (args[0] === "whoami") return WHOAMI;
+      if (args[0] === "send") { sent = true; state.content = state.content + appendOnSend; return "sent"; }
+      return undefined;
+    });
+    const reader = async () => {
+      const out = { generationId: state.generationId, content: state.content };
+      if (sent && growTo && !state.content.includes(growTo)) state.content = state.content + growTo;
+      return out;
+    };
+    const session = await createRigCliSession({ seat: "s@r", exec, pollMs: 1, stablePolls: 2, timeoutMs: 200, sleep: async () => {}, readGenerationRecord: reader }).spawn();
+    await session.sendPrompt(promptText);
+    return { session, calls };
+  }
+
+  it.fails("OUTPUT-ONLY (input-echo-negative gate): grades assistant text only, EXCLUDES the user prompt + JSON envelope [RED until the JSONL-aware fix]", async () => {
+    const { session } = await driveOne(
+      userMsg("earlier turn") + "\n",
+      "the case prompt",
+      userMsg("the case prompt") + "\n",
+      asstMsg("rig context get skills/core/rig-lifecycle", "end_turn") + "\n",
+    );
+    const since = await session.captureSince("the case prompt");
+    expect(since).toContain("rig context get skills/core/rig-lifecycle"); // assistant output kept
+    expect(since).not.toContain("the case prompt");                       // the user prompt is not graded
+    expect(since).not.toContain('"role":"user"');                          // no user-message envelope
+    expect(since).not.toContain('"role":"assistant"');                     // no assistant-message envelope either — TEXT only
+    expect(since).not.toContain('stop_reason');                            // no transport/reply envelope
+  });
+
+  it.fails("NATIVE-TURN COMPLETION: does NOT return on a footer-only / stop_reason:null fragment while the turn is still open [RED until the JSONL-aware fix]", async () => {
+    // The assistant message is present but INCOMPLETE (stop_reason null) and the content goes stable —
+    // the string-based captureSince returns it; a turn-aware capture must keep waiting (then time out
+    // here, since this fixture never completes). Returning early is the 80-byte-footer-mid-generation bug.
+    const { session } = await driveOne(
+      userMsg("earlier") + "\n",
+      "p",
+      userMsg("p") + "\n" + asstMsg("partial…", null) + "\n",
+      undefined,
+    );
+    await expect(session.captureSince("p")).rejects.toThrow(/did not go stable|did not complete/);
+  });
+
+  it("SUCCESSIVE-TURN SEPARATION: case 2's capture returns case-2 output, never case-1's completed turn", async () => {
+    const state = { generationId: "g1", content: userMsg("older") + "\n" + asstMsg("case ONE output", "end_turn") + "\n" };
+    let n = 0;
+    const { exec } = scriptedExec((args) => {
+      if (args[0] === "whoami") return WHOAMI;
+      if (args[0] === "send") { const which = n++ === 0 ? "prompt-1" : "prompt-2"; state.content = state.content + userMsg(which) + "\n" + asstMsg(`case TWO output ${which}`, "end_turn") + "\n"; return "sent"; }
+      return undefined;
+    });
+    const reader = async () => ({ generationId: state.generationId, content: state.content });
+    const session = await createRigCliSession({ seat: "s@r", exec, pollMs: 1, stablePolls: 2, timeoutMs: 200, sleep: async () => {}, readGenerationRecord: reader }).spawn();
+    await session.sendPrompt("prompt-1");
+    await session.captureSince("prompt-1");
+    await session.sendPrompt("prompt-2");
+    const c2 = await session.captureSince("prompt-2");
+    expect(c2).toContain("case TWO output prompt-2");
+    expect(c2).not.toContain("case ONE output");     // never the earlier completed turn
+    expect(c2).not.toContain("case TWO output prompt-1");
+  });
+});
+
 describe("createRigCliSession — spawn/attach, polling, retirement", () => {
   it("CUSTODY (Test-A no-intervening-input, round 6): sendPrompt submits EXACTLY ONE rig send — the natural prompt, never a marker", async () => {
     const { exec, calls } = scriptedExec((args) => {
