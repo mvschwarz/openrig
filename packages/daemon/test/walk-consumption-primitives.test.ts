@@ -190,6 +190,42 @@ describe("SessionTransport submitOnly — the guarded bare-Enter retry", () => {
     expect(sendKeys).not.toHaveBeenCalled();
   });
 
+  // ROUND-4 (r2 R3 HIGH-1, row 7435d61b): size similarity and short shared phrases are NOT
+  // identity. The rendering's own structure (proven on the preserved bytes: the literal residual
+  // is the piece's normalized SUFFIX, 524 chars in the specimen) is the only acceptance anchor;
+  // anything less fails closed.
+  it.fails("R4 PROBE-A — a bare unrelated placeholder with a plausible size (+100 of 142) REFUSES with zero Enter calls: no residual means no identity [RED until identity-free acceptance removed]", async () => {
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = makeTransport(mockTmux({
+      sendKeys,
+      capturePaneContent: async () => "❯ [Pasted text #9 +100 lines]\n\n────────────────────────────────────────\n  ⏵⏵ accept edits on",
+    }));
+    const res = await transport.send("dev-impl@my-rig", "", {
+      submitOnly: true,
+      expectedStagedText: PIECE_2(),
+      expectedStagedLineCount: PIECE_2().split("\n").length,
+    });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("staged_mismatch");
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it.fails("R4 PROBE-B — an unrelated placeholder plus a short phrase that happens to occur in the piece REFUSES with zero Enter calls: a common substring cannot bless another input [RED until strong residual anchoring]", async () => {
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = makeTransport(mockTmux({
+      sendKeys,
+      capturePaneContent: async () => "❯ [Pasted text #3 +12 lines]What are your options?\n\n────────────────────────────────────────\n  ⏵⏵ accept edits on",
+    }));
+    const res = await transport.send("dev-impl@my-rig", "", {
+      submitOnly: true,
+      expectedStagedText: PIECE_2(),
+      expectedStagedLineCount: PIECE_2().split("\n").length,
+    });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("staged_mismatch");
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
   it("REFUSES (invalid_submit_only) without expectedStagedText, and when text is supplied", async () => {
     const transport = makeTransport(mockTmux());
     const noExpected = await transport.send("dev-impl@my-rig", "", { submitOnly: true });
