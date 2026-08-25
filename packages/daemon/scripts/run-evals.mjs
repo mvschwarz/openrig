@@ -78,10 +78,14 @@ if (providerName === "rig") {
     );
     process.exit(2);
   }
-  const { createRigCliSession } = await import("../test/helpers/eval-rig-session.ts");
+  const { buildRigProviderSession } = await import("../test/helpers/eval-rig-runner.ts");
   provider = new RigSeatProvider({
     productionPackage: PRODUCTION_PACKAGE,
-    session: createRigCliSession(seat !== null ? { seat } : { spec }),
+    // Round-6 Option B (r2 round-6 HIGH-1): the out-of-band boundary binds to the seat's
+    // CURRENT-generation append-only Claude conversation record via the authoritative default reader,
+    // wired HERE in the shipped entry (not only in tests). A Codex/unprimed seat or a rolled generation
+    // refuses loud — never a silent degrade, never the bounded-overwrite pane.
+    session: buildRigProviderSession({ seat, spec }),
   });
 } else {
   const tPath = opt("--transcripts", null);
