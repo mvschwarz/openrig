@@ -22,6 +22,13 @@ function scriptedExec(script: (args: string[]) => string | undefined): { exec: R
   return { exec, calls };
 }
 
+/** A fake round-6 current-generation record reader over a mutable state cell: the injected reader
+ *  returns the CURRENT { generationId, content }, so a test can grow `content` (append-only) or roll
+ *  `generationId` (a re-prime) between reads to exercise the boundary and the generation tripwire. */
+function genReader(state: { generationId: string; content: string }): (seat: string) => Promise<{ generationId: string; content: string }> {
+  return async () => ({ generationId: state.generationId, content: state.content });
+}
+
 describe("sliceAfterPrompt — the since-the-prompt anchor", () => {
   it("wrapped echo: the prompt broken across pane lines still anchors, output follows", () => {
     const prompt = "What can I do here in this world?";
@@ -107,18 +114,19 @@ describe("sliceAfterPrompt — the since-the-prompt anchor", () => {
 });
 
 describe("createRigCliSession — spawn/attach, polling, retirement", () => {
-  it("CUSTODY (Test-A no-intervening-input, round 5): sendPrompt submits EXACTLY ONE rig send — the natural prompt, never a marker", async () => {
+  it("CUSTODY (Test-A no-intervening-input, round 6): sendPrompt submits EXACTLY ONE rig send — the natural prompt, never a marker", async () => {
     const { exec, calls } = scriptedExec((args) => {
       if (args[0] === "whoami") return WHOAMI;
-      if (args[0] === "capture") return "prior pane\n";       // round-4 boundary source
-      if (args[0] === "transcript") return "prior transcript line\n"; // round-5 out-of-band boundary
       if (args[0] === "send") return "sent";
       return undefined;
     });
-    const session = await createRigCliSession({ seat: "ops-eval@evalrig", exec }).spawn();
+    const session = await createRigCliSession({
+      seat: "ops-eval@evalrig", exec,
+      readGenerationRecord: genReader({ generationId: "g1", content: "prior record\n" }),
+    }).spawn();
     await session.sendPrompt("the natural prompt");
-    // The frozen custody contract forbids ANY intervening input between BASELINE and POST.
-    // Exactly one submitted send per case, and it is the natural prompt — no eval-sync marker.
+    // The frozen custody contract forbids ANY intervening input between BASELINE and POST. Exactly one
+    // submitted send per case, the natural prompt — no eval-sync marker; the boundary read is out-of-band.
     const sends = calls.filter((c) => c[0] === "send");
     expect(sends).toEqual([["send", "ops-eval@evalrig", "the natural prompt"]]);
     expect(calls.some((c) => c[0] === "send" && /eval-sync/.test(c[2] ?? ""))).toBe(false);
@@ -175,76 +183,109 @@ describe("createRigCliSession — spawn/attach, polling, retirement", () => {
     expect(() => createRigCliSession({ seat: "a", spec: "b" })).toThrow(/exactly ONE/);
   });
 
-  it("records the pre-send transcript, then captureSince waits for the transcript to stabilize and slices after the echo", async () => {
-    let transcript = "prior transcript line\n";
+  it("records the pre-send generation record, then captureSince waits for it to stabilize and returns the appended suffix", async () => {
+    const state = { generationId: "g1", content: "prior record line\n" };
     let sent = false;
     const { exec } = scriptedExec((args) => {
       if (args[0] === "whoami") return WHOAMI;
-      if (args[0] === "send") {
-        // the seat records the prompt turn into its APPEND-ONLY transcript
-        sent = true;
-        transcript = transcript + "> the natural prompt\n";
-        return "sent";
-      }
-      if (args[0] === "transcript") {
-        const out = transcript;
-        // simulate the seat appending its response across polls, then going quiet
-        if (sent && !transcript.includes("DONE")) transcript = transcript + "working...\nDONE rig context get skills/x\n";
-        return out;
-      }
+      if (args[0] === "send") { sent = true; state.content = state.content + "> the natural prompt\n"; return "sent"; }
       return undefined;
     });
-    const session = await createRigCliSession({ seat: "ops-eval@evalrig", exec, pollMs: 1, stablePolls: 2, sleep: async () => {} }).spawn();
+    // The append-only record grows across reads: the seat appends its response, then goes quiet.
+    const readGenerationRecord = async () => {
+      const out = { generationId: state.generationId, content: state.content };
+      if (sent && !state.content.includes("DONE")) state.content = state.content + "working...\nDONE rig context get skills/x\n";
+      return out;
+    };
+    const session = await createRigCliSession({ seat: "ops-eval@evalrig", exec, pollMs: 1, stablePolls: 2, sleep: async () => {}, readGenerationRecord }).spawn();
     await session.sendPrompt("the natural prompt");
     const since = await session.captureSince("the natural prompt");
     expect(since).toContain("DONE rig context get skills/x");
-    expect(since).not.toContain("prior transcript line"); // pre-send content is the matched prefix, not the turn
+    expect(since).not.toContain("prior record line"); // pre-send content is the sliced-off prefix, not the turn
   });
 
   it("a seat that never goes stable times out as an ERROR, never a silent partial", async () => {
+    const state = { generationId: "g1", content: "x\n" };
     let n = 0;
     const { exec } = scriptedExec((args) => {
       if (args[0] === "whoami") return WHOAMI;
       if (args[0] === "send") return "sent";
-      if (args[0] === "transcript") return `always changing ${n++}\n`;
       return undefined;
     });
-    const session = await createRigCliSession({ seat: "s@r", exec, pollMs: 1, timeoutMs: 30, sleep: async () => {} }).spawn();
+    const readGenerationRecord = async () => { state.content = state.content + `line ${n++}\n`; return { generationId: state.generationId, content: state.content }; }; // always growing, same generation
+    const session = await createRigCliSession({ seat: "s@r", exec, pollMs: 1, timeoutMs: 30, sleep: async () => {}, readGenerationRecord }).spawn();
     await session.sendPrompt("p");
     await expect(session.captureSince("p")).rejects.toThrow(/did not go stable/);
   });
 
-  it("TRANSIENT transcript-read failures are tolerated — a lag-slow daemon's 5s timeout retries, not errors the case", async () => {
-    let transcript = "idle\n";
+  it("TRANSIENT record-read failures are tolerated — a lag-slow daemon's timeout retries, not errors the case", async () => {
+    const state = { generationId: "g1", content: "idle\n" };
     let sent = false;
     let readCall = 0;
     const { exec } = scriptedExec((args) => {
       if (args[0] === "whoami") return WHOAMI;
-      if (args[0] === "send") { sent = true; transcript = transcript + "> the prompt\n"; return "sent"; }
-      if (args[0] === "transcript") {
-        readCall++;
-        // fail a couple of polls transiently (daemon lag), then succeed + go stable
-        if (readCall === 3 || readCall === 4) throw new Error("Daemon did not respond in time");
-        if (sent && !transcript.includes("DONE")) transcript = transcript + "DONE rig context get skills/x\n";
-        return transcript;
-      }
+      if (args[0] === "send") { sent = true; state.content = state.content + "> the prompt\n"; return "sent"; }
       return undefined;
     });
-    const session = await createRigCliSession({ seat: "s@r", exec, pollMs: 1, stablePolls: 2, sleep: async () => {} }).spawn();
+    const readGenerationRecord = async () => {
+      readCall++;
+      // sendPrompt's read is #1; fail a couple of capture polls transiently, then succeed + go stable
+      if (readCall === 2 || readCall === 3) throw new Error("Daemon did not respond in time");
+      if (sent && !state.content.includes("DONE")) state.content = state.content + "DONE rig context get skills/x\n";
+      return { generationId: state.generationId, content: state.content };
+    };
+    const session = await createRigCliSession({ seat: "s@r", exec, pollMs: 1, stablePolls: 2, sleep: async () => {}, readGenerationRecord }).spawn();
     await session.sendPrompt("the prompt");
     const since = await session.captureSince("the prompt");
     expect(since).toContain("DONE rig context get skills/x");
   });
 
-  it("SUSTAINED transcript-read failure IS a dead daemon — surfaces loud after the consecutive bound", async () => {
+  it("SUSTAINED record-read failure IS a dead daemon — surfaces loud after the consecutive bound", async () => {
     const { exec } = scriptedExec((args) => {
       if (args[0] === "whoami") return WHOAMI;
       if (args[0] === "send") return "sent";
-      if (args[0] === "transcript") throw new Error("Daemon did not respond in time");
       return undefined;
     });
-    const session = await createRigCliSession({ seat: "s@r", exec, pollMs: 1, timeoutMs: 60_000, sleep: async () => {} }).spawn();
+    let first = true;
+    const readGenerationRecord = async () => { if (first) { first = false; return { generationId: "g1", content: "seed\n" }; } throw new Error("Daemon did not respond in time"); };
+    const session = await createRigCliSession({ seat: "s@r", exec, pollMs: 1, timeoutMs: 60_000, sleep: async () => {}, readGenerationRecord }).spawn();
     await session.sendPrompt("p");
-    await expect(session.captureSince("p")).rejects.toThrow(/consecutive transcript-read failures|unresponsive/);
+    await expect(session.captureSince("p")).rejects.toThrow(/consecutive generation-record read failures|unresponsive/);
+  });
+
+  it("GENERATION-CHANGE TRIPWIRE (desk ruling constraint 3): a mid-observation re-prime fails loud, never reads across the swap", async () => {
+    const state = { generationId: "g1", content: "gen-1 record\n" };
+    const { exec } = scriptedExec((args) => {
+      if (args[0] === "whoami") return WHOAMI;
+      if (args[0] === "send") { state.content = state.content + "> p\n"; return "sent"; }
+      return undefined;
+    });
+    const session = await createRigCliSession({ seat: "s@r", exec, pollMs: 1, stablePolls: 2, sleep: async () => {}, readGenerationRecord: genReader(state) }).spawn();
+    await session.sendPrompt("p"); // binds generation g1
+    // a re-prime rolls the generation and starts a NEW record mid-observation
+    state.generationId = "g2";
+    state.content = "gen-2 fresh record\n";
+    await expect(session.captureSince("p")).rejects.toThrow(/generation changed mid-observation/);
+  });
+
+  it("LOUD REFUSAL (constraint 2): no generation-record reader wired -> sendPrompt refuses, never falls back to the pane", async () => {
+    const { exec } = scriptedExec((args) => {
+      if (args[0] === "whoami") return WHOAMI;
+      if (args[0] === "send") return "sent";
+      return undefined;
+    });
+    const session = await createRigCliSession({ seat: "s@r", exec, sleep: async () => {} }).spawn(); // no readGenerationRecord
+    await expect(session.sendPrompt("p")).rejects.toThrow(/requires readGenerationRecord/);
+  });
+
+  it("LOUD REFUSAL (constraint 2): an unsupported runtime (reader throws) propagates loud, never a silent degrade", async () => {
+    const { exec } = scriptedExec((args) => {
+      if (args[0] === "whoami") return WHOAMI;
+      if (args[0] === "send") return "sent";
+      return undefined;
+    });
+    const readGenerationRecord = async () => { throw new Error("seat is a codex seat with no Claude generation JSONL — observation refused"); };
+    const session = await createRigCliSession({ seat: "s@r", exec, sleep: async () => {}, readGenerationRecord }).spawn();
+    await expect(session.sendPrompt("p")).rejects.toThrow(/no Claude generation JSONL|observation refused/);
   });
 });

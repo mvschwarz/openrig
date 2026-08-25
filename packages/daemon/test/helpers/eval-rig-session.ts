@@ -13,24 +13,28 @@
  *             pane boundary; on a `claude-code` seat that is an extra user turn,
  *             a forbidden intervening input under Test-A's no-intervening-input
  *             custody contract. Removed.
- *   capture — the boundary is the seat's APPEND-ONLY transcript, read OUT-OF-BAND
- *             via `rig transcript <seat> --tail N` (reading submits nothing to the
- *             seat). Record the pre-send transcript, poll it until STABLE
- *             (unchanged across consecutive polls), then return the SUFFIX since
- *             the pre-send transcript (its non-LCS lines). Because the transcript
- *             only APPENDS — never scrolls or redraws like a pane — an old
- *             identical command line stays in the matched prefix and is never
- *             mistaken for the current turn, so no in-band marker is needed. The
- *             prompt echo is skipped within the suffix so grading starts at the
- *             response; the leading-echo strip itself stays the PROVIDER's
- *             contract (eval-rig-provider.ts) — this module only bounds
- *             "since the prompt".
+ *   capture — the boundary is the seat's CURRENT-GENERATION APPEND-ONLY conversation
+ *             record (the Claude generation JSONL), read OUT-OF-BAND via the injected
+ *             readGenerationRecord (reading submits nothing to the seat). Round 6
+ *             (desk ruling Option B): r2 HIGH-1 falsified round-5's `rig transcript`
+ *             boundary — that CLI reads a bounded-OVERWRITE pane snapshot, not an
+ *             append-only file, so a repeated command could erase current-turn
+ *             evidence. sendPrompt binds the current generation identity explicitly
+ *             (never path-guessing) and records its content; captureSince polls the
+ *             record to stability and returns the SUFFIX since the pre-send content
+ *             (an exact slice — append-only within a generation guarantees a prefix).
+ *             GENERATION-CHANGE TRIPWIRE: if the generation rolls mid-observation (a
+ *             re-prime starts a new JSONL) captureSince FAILS LOUD rather than read
+ *             across the swap. LOUD REFUSAL on an unsupported runtime / no record
+ *             (never a silent degrade, never a fall-back to the bounded pane). The
+ *             leading-echo strip stays the PROVIDER's contract (eval-rig-provider.ts);
+ *             this module only bounds "since the prompt".
  *   retire  — `rig down <rig>` exactly when THIS session spawned the rig;
  *             attaching never destroys someone else's seat.
  *
- * Every rig invocation goes through an injectable exec so the mechanics are
- * unit-pinned without a daemon; the live entry injects nothing and gets the
- * real CLI.
+ * Every rig CLI invocation goes through an injectable exec, and the generation-record
+ * read through an injectable reader, so the mechanics are unit-pinned without a
+ * daemon; the live entry injects the real CLI + the contextUsageStore-backed reader.
  */
 
 import { execFile } from "node:child_process";
@@ -51,12 +55,20 @@ export interface RigCliSessionOptions {
   stablePolls?: number;
   /** Hard per-prompt ceiling; expiring is an ERROR, never a silent partial. */
   timeoutMs?: number;
-  captureLines?: number;
-  /** Round-5 custody boundary: how many trailing transcript lines to read as the out-of-band window
-   *  (default 100000 — large enough that a short eval seat's whole transcript is a stable prefix, so
-   *  the pre-send read is a prefix of the post-send read). The APPEND-ONLY transcript, not the
-   *  scrolling pane, is the boundary — reading it submits nothing to the seat. */
-  transcriptLines?: number;
+  /**
+   * Round-6 boundary (desk ruling qitem-...-1117052f, Option B): read the seat's CURRENT-generation
+   * APPEND-ONLY conversation record — the only monotonic, no-input boundary source. r2 HIGH-1
+   * falsified `rig transcript` (a bounded-OVERWRITE pane snapshot); the Claude generation JSONL is the
+   * measured append-only record. Returns { generationId, content }:
+   *   - generationId: the record's generation identity (the Claude session id / rollout id). A re-prime
+   *     rolls it — that is the generation-change tripwire signal.
+   *   - content: the append-only record content (a prefix of every later read WITHIN a generation).
+   * MUST THROW (loud refusal, never a silent degrade) on an unsupported runtime (e.g. a Codex seat with
+   * no Claude generation JSONL) or a seat with no resolvable generation record. Required for round-6;
+   * the live entry injects the contextUsageStore-backed reader (resolve identity explicitly, never by
+   * path-guessing).
+   */
+  readGenerationRecord?: (seat: string) => Promise<{ generationId: string; content: string }>;
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -171,7 +183,7 @@ export function createRigCliSession(options: RigCliSessionOptions): { spawn: () 
     pollMs = 5_000,
     stablePolls = 2,
     timeoutMs = 300_000,
-    transcriptLines = 100_000,
+    readGenerationRecord,
     sleep = (ms: number) => new Promise((r) => setTimeout(r, ms)),
   } = options;
   if ((seat === undefined) === (spec === undefined)) {
@@ -245,39 +257,47 @@ export function createRigCliSession(options: RigCliSessionOptions): { spawn: () 
         await cleanupOnFailure(err);
       }
 
-      // Round-5 custody: the boundary is the seat's APPEND-ONLY transcript, read out-of-band via
-      // `rig transcript` — reading it submits NOTHING to the seat (unlike round-4's eval-sync marker
-      // send, which was a forbidden intervening input).
-      const readTranscript = () => exec(["transcript", sessionName, "--tail", String(transcriptLines)]);
-      // A single transcript read can time out at the CLI's 5s bound when the daemon is briefly
-      // lag-slow (measured live). A transient poll failure is NOT a dead seat — return null so the
-      // loop waits and retries; the overall deadline still bounds a genuinely stuck seat. Consecutive
-      // failures past a bound ARE a dead daemon and surface loud.
+      // Round-6 boundary (desk ruling Option B): the seat's CURRENT-generation APPEND-ONLY conversation
+      // record, read OUT-OF-BAND (reading submits nothing to the seat). The reader is REQUIRED — a
+      // missing reader is a loud refusal at first observation (never a silent fall-back to the
+      // bounded-overwrite pane, r2 HIGH-1). Checked lazily so a spawn+retire path that never observes
+      // does not need it.
+      const readRecord = (seat: string): Promise<{ generationId: string; content: string }> => {
+        if (!readGenerationRecord) {
+          throw new Error("round-6 requires readGenerationRecord (the current-generation append-only record reader); none was injected — refusing rather than falling back to the bounded-overwrite pane transcript");
+        }
+        return readGenerationRecord(seat);
+      };
+      // A transient read failure (daemon lag) is tolerated up to a bound; sustained is a dead daemon,
+      // surfaced loud. A record read failure is NOT a generation change — do not trip the tripwire on it.
       const maxConsecutiveReadFailures = 8;
-      const tolerantRead = async (failures: { n: number }): Promise<string | null> => {
+      const tolerantRead = async (failures: { n: number }): Promise<{ generationId: string; content: string } | null> => {
         try {
-          const out = await readTranscript();
+          const out = await readRecord(sessionName);
           failures.n = 0;
           return out;
         } catch (err) {
           failures.n += 1;
           if (failures.n >= maxConsecutiveReadFailures) {
-            throw new Error(`captureSince: ${failures.n} consecutive transcript-read failures for '${sessionName}' — daemon unresponsive: ${(err as Error).message}`);
+            throw new Error(`captureSince: ${failures.n} consecutive generation-record read failures for '${sessionName}' — daemon unresponsive: ${(err as Error).message}`);
           }
           return null;
         }
       };
-      let preSendTranscript = "";
+      let boundGenerationId = "";
+      let preSendRecord = "";
 
       return {
         generation,
         async sendPrompt(prompt: string): Promise<void> {
-          // Round-5 custody: record the pre-send APPEND-ONLY transcript as the out-of-band boundary
-          // (reading submits nothing to the seat), then submit EXACTLY ONE input — the natural prompt.
-          // No eval-sync marker: a second `rig send` is an intervening input the frozen Test-A custody
-          // contract forbids (round-4's defect). A failed pre-read is a best-effort empty anchor, never
-          // an aborted case. The SEND is the load-bearing action and IS retried.
-          preSendTranscript = await withRetry(() => readTranscript()).catch(() => "");
+          // Bind the CURRENT generation EXPLICITLY (constraint 1: identity from the record reader, never
+          // path-guessing) and record its append-only content as the pre-send boundary. An unsupported
+          // runtime or a seat with no generation record throws HERE (constraint 2: loud refusal). Then
+          // submit EXACTLY ONE input — the natural prompt (the frozen one-send custody contract; no
+          // marker). The SEND is the load-bearing action and IS retried.
+          const rec = await withRetry(() => readRecord(sessionName));
+          boundGenerationId = rec.generationId;
+          preSendRecord = rec.content;
           await withRetry(() => exec(["send", sessionName, prompt]));
         },
         async captureSince(prompt: string): Promise<string> {
@@ -285,23 +305,35 @@ export function createRigCliSession(options: RigCliSessionOptions): { spawn: () 
           let last = "";
           let stable = 0;
           const failures = { n: 0 };
-          // Poll the APPEND-ONLY transcript: first wait for ANY growth past the pre-send transcript
-          // (the seat consumed the prompt and recorded its turn), then for stability (it stopped
-          // appending). The suffix since the pre-send transcript is the current turn.
+          // Poll the append-only record: wait for growth past the pre-send content (the seat recorded
+          // its turn), then for stability. The suffix since the pre-send content is the current turn.
           for (;;) {
             if (Date.now() > deadline) {
               throw new Error(`captureSince: seat '${sessionName}' did not go stable within ${timeoutMs}ms`);
             }
             await sleep(pollMs);
-            const now = await tolerantRead(failures);
-            if (now === null) continue;
-            if (now === last && now !== preSendTranscript) {
+            const rec = await tolerantRead(failures);
+            if (rec === null) continue;
+            // GENERATION-CHANGE TRIPWIRE (constraint 3): a re-prime rolls the record id and starts a NEW
+            // append-only file whose offsets are unrelated to the pre-send one. A cursor that survives a
+            // generation swap is lying — refuse loud rather than slice the new file.
+            if (rec.generationId !== boundGenerationId) {
+              throw new Error(`captureSince: seat '${sessionName}' generation changed mid-observation (bound '${boundGenerationId}', now '${rec.generationId}') — the observation window is void; refusing to read across the swap`);
+            }
+            const content = rec.content;
+            // Within one generation the record is APPEND-ONLY, so the pre-send content MUST be a prefix;
+            // a non-prefix means the "append-only" contract is violated for this source — refuse loud
+            // rather than emit a mis-bounded slice.
+            if (!content.startsWith(preSendRecord)) {
+              throw new Error(`captureSince: generation '${boundGenerationId}' record is not append-only for '${sessionName}' (pre-send content is not a prefix) — boundary unsound, refusing`);
+            }
+            if (content === last && content !== preSendRecord) {
               stable += 1;
-              if (stable >= stablePolls) return sliceAfterPrompt(now, prompt, preSendTranscript);
+              if (stable >= stablePolls) return sliceAfterPrompt(content.slice(preSendRecord.length), prompt, "");
             } else {
               stable = 0;
             }
-            last = now;
+            last = content;
           }
         },
         async retire(): Promise<void> {
