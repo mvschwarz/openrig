@@ -325,4 +325,34 @@ describe("rig walk — per-piece consumption verification (RED-first, mechanics-
     expect(pieceSends).toHaveLength(2); // legacy delivery preserved
     expect(errLogs.join("\n")).toMatch(/consumption unverified/i); // named, never silent
   });
+
+  // ROUND-2 (r2 R1 HIGH-2, row 66e74676, CLI half): on a token-configured daemon the verified
+  // path must WORK — every walk transport/record call carries the terminal auth headers (the
+  // same chokepoint `rig capture` uses), instead of silently degrading or 401ing.
+  it.fails("R2 HIGH-2 CLI — every generation-record read and transport send/capture carries the terminal auth headers option [RED until walk passes terminalAuthHeaders]", async () => {
+    const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
+    const authedCalls: Array<{ kind: string; hasHeaders: boolean }> = [];
+    const base = consumptionDeps(w);
+    const inner = (base.clientFactory as unknown as () => { get: (p: string) => Promise<unknown>; post: (p: string, b: unknown) => Promise<unknown> })();
+    (base as { clientFactory: unknown }).clientFactory = () => ({
+      get: async (path: string, opts?: { headers?: Record<string, string> }) => {
+        if (path.includes("/generation-record")) authedCalls.push({ kind: "record-get", hasHeaders: opts?.headers !== undefined });
+        return inner.get(path);
+      },
+      post: async (path: string, body: unknown, opts?: { headers?: Record<string, string> }) => {
+        if (path.startsWith("/api/transport/")) authedCalls.push({ kind: path.slice(15), hasHeaders: opts?.headers !== undefined });
+        return inner.post(path, body);
+      },
+    });
+    w.sendBehavior = (b) => {
+      if (b["text"] !== undefined) { w.record.content += userRec(String(b["text"])) + "\n"; return { status: 200, data: { ok: true } }; }
+      return { status: 200, data: { ok: true } };
+    };
+    await captureLogs(async () => {
+      await makeCmd(base).parseAsync(walkArgs);
+    });
+    expect(authedCalls.length).toBeGreaterThan(0);
+    const bare = authedCalls.filter((c) => !c.hasHeaders);
+    expect(bare).toEqual([]); // every transport/record call goes through the auth chokepoint
+  });
 });

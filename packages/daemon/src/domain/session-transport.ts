@@ -388,6 +388,10 @@ export interface SendOpts {
   // caller's `text` argument must be empty in this mode.
   submitOnly?: boolean;
   expectedStagedText?: string;
+  /** Round-2 (r2 HIGH-1): the walked piece's own line count — placeholder identity. A large paste
+   *  renders as "[Pasted text #N +X lines]"; X must match this count for the placeholder to count
+   *  as evidence of THIS piece. */
+  expectedStagedLineCount?: number;
 }
 
 // OPR.0.4.3.30 — options for the fan-out path (`broadcast()`). Superset of SendOpts.

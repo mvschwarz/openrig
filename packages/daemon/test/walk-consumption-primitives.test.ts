@@ -111,6 +111,48 @@ describe("SessionTransport submitOnly — the guarded bare-Enter retry", () => {
     expect(sendKeys).toHaveBeenCalledTimes(1);
   });
 
+  // ROUND-2 (r2 R1 HIGH-1, row 66e74676): stale scrollback must never authorize the Enter. The
+  // evidence must be the CURRENT ACTIVE INPUT and must identify THIS piece — a generic placeholder
+  // anywhere in 50 lines is neither.
+  it.fails("R2 HIGH-1 discriminator — a stale pasted-text placeholder ABOVE a later interactive prompt refuses with ZERO Enter calls [RED until current-input binding]", async () => {
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = makeTransport(mockTmux({
+      sendKeys,
+      // The reviewer's shape: an older placeholder in scrollback, then a LATER interactive
+      // prompt occupying the current input. An Enter here approves the prompt.
+      capturePaneContent: async () => "❯ [Pasted text #2 +112 lines]\nold output scrolled past\n\nAuthorize the next action?\n❯ 1. Continue\n  2. Cancel\n",
+    }));
+    const res = await transport.send("dev-impl@my-rig", "", { submitOnly: true, expectedStagedText: STAGED_PIECE, expectedStagedLineCount: 112 });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("staged_mismatch");
+    expect(sendKeys).not.toHaveBeenCalled(); // zero Enter calls — the forbidden effect never happens
+  });
+
+  it.fails("R2 HIGH-1 — a placeholder whose line count does NOT match the expected piece is not piece identity: refused [RED until line-count qualification]", async () => {
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = makeTransport(mockTmux({
+      sendKeys,
+      capturePaneContent: async () => "❯ [Pasted text #4 +112 lines]\n  paste again to expand",
+    }));
+    // The walked piece is 6 lines; the staged blob is 112 — someone else's paste.
+    const res = await transport.send("dev-impl@my-rig", "", { submitOnly: true, expectedStagedText: STAGED_PIECE, expectedStagedLineCount: 6 });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("staged_mismatch");
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it.fails("R2 HIGH-1 — MULTIPLE placeholders staged at the current input is coalesced staging: refused, never one Enter for several pieces [RED until multi-staging refusal]", async () => {
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = makeTransport(mockTmux({
+      sendKeys,
+      capturePaneContent: async () => "❯ [Pasted text #3 +112 lines] [Pasted text #4 +112 lines]\n  paste again to expand",
+    }));
+    const res = await transport.send("dev-impl@my-rig", "", { submitOnly: true, expectedStagedText: STAGED_PIECE, expectedStagedLineCount: 112 });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("staged_mismatch");
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
   it("REFUSES (invalid_submit_only) without expectedStagedText, and when text is supplied", async () => {
     const transport = makeTransport(mockTmux());
     const noExpected = await transport.send("dev-impl@my-rig", "", { submitOnly: true });
@@ -176,6 +218,46 @@ describe("GET /api/sessions/:sessionName/generation-record — the consumption-b
     const body = await res.json() as { error: string; message: string };
     expect(body.error).toBe("unsupported_runtime");
     expect(body.message).toContain("ghost@r");
+  });
+
+  // ROUND-2 (r2 R1 HIGH-2, row 66e74676): the raw generation-record read is a TERMINAL-CLASS
+  // surface (raw conversation bytes, no transcript redaction) and must sit behind the same
+  // bearer gate as its neighbors. 401 / 401 / 200 for missing / wrong / correct bearer; a
+  // null-token (loopback) daemon passes through.
+  it.fails("R2 HIGH-2 — with a terminal bearer token configured: missing and wrong bearers are 401, the correct bearer is 200 [RED until terminalAuthGuard]", async () => {
+    const stateDir2 = mkdtempSync(join(tmpdir(), "walk-genrec-auth-"));
+    try {
+      const db2 = createFullTestDb();
+      const store2 = new ContextUsageStore(db2, { stateDir: stateDir2 });
+      const authed = new Hono();
+      authed.use("*", async (c, next) => {
+        c.set("contextUsageStore" as never, store2 as never);
+        c.set("terminalBearerToken" as never, "sekrit-token" as never);
+        await next();
+      });
+      authed.route("/api/sessions", sessionAdminRoutes);
+      const jsonl = join(stateDir2, "gen-z.jsonl");
+      writeFileSync(jsonl, '{"x":1}\n');
+      mkdirSync(join(stateDir2, "context"), { recursive: true });
+      writeFileSync(join(stateDir2, "context", "dev-z@r.json"), JSON.stringify({ session_id: "gen-z", transcript_path: jsonl, context_window: { used_percentage: 5 } }));
+
+      const url = `/api/sessions/${encodeURIComponent("dev-z@r")}/generation-record`;
+      const missing = await authed.request(url);
+      expect(missing.status).toBe(401);
+      const wrong = await authed.request(url, { headers: { Authorization: "Bearer wrong" } });
+      expect(wrong.status).toBe(401);
+      const right = await authed.request(url, { headers: { Authorization: "Bearer sekrit-token" } });
+      expect(right.status).toBe(200);
+    } finally {
+      rmSync(stateDir2, { recursive: true, force: true });
+    }
+  });
+
+  it("null-token (loopback) daemon passes the generation-record read through — the existing no-auth tests are this mode", async () => {
+    // The suite's other route tests run with no terminalBearerToken set and expect 200/409 —
+    // that IS the null-token pass-through pin; this case just names the contract.
+    const res = await app.request(`/api/sessions/${encodeURIComponent("nobody@r")}/generation-record`);
+    expect([200, 409]).toContain(res.status);
   });
 
   it("refuses LOUD (409 record_unreadable) when the sidecar names a transcript that does not exist", async () => {
