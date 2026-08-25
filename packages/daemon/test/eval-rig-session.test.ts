@@ -188,6 +188,34 @@ describe("captureSince — Claude-JSONL output-only + native-turn completion (RE
     expect(c2).not.toContain("case ONE output");     // never the earlier completed turn
     expect(c2).not.toContain("case TWO output prompt-1");
   });
+
+  // Desk custody ruling qitem-20260825082034-6fa281f1 — pins 4-5, same RED-first set, criteria
+  // untouched: both mechanically enforce the frozen no-intervening-input custody rule.
+  it.fails("PIN 4 — INTERVENING-INPUT FAIL-CLOSED: an extra user-role TEXT record entering the generation between prompt delivery and native-turn completion voids the CASE, loudly [RED until the JSONL-aware fix]", async () => {
+    // The contamination shape from the voided run: the seat followed an actionable reply hint and a
+    // second user turn landed in its own generation. Detection, not prevention — the harness must
+    // refuse to grade this case (one case lost, not a full run), never return gradable text.
+    const { session } = await driveOne(
+      userMsg("earlier turn") + "\n",
+      "the case prompt",
+      userMsg("the case prompt") + "\n",
+      userMsg("self-sent reply-hint contamination") + "\n" + asstMsg("answer text", "end_turn") + "\n",
+    );
+    await expect(session.captureSince("the case prompt")).rejects.toThrow(/CASE INVALID|intervening user input/i);
+  });
+
+  it.fails("PIN 5 — ENVELOPE NEUTRALIZATION: probe delivery suppresses the message envelope, so no actionable reply hint reaches the blank seat [RED until the raw-send fix]", async () => {
+    // The frozen criteria's probes are answered in place; a From/To envelope with a reply hint is
+    // harness leakage that INVITES the transport act pin 4 then has to catch. Probe sends go raw.
+    const { calls } = await driveOne(
+      userMsg("earlier") + "\n",
+      "the case prompt",
+      userMsg("the case prompt") + "\n",
+      asstMsg("answer", "end_turn") + "\n",
+    );
+    const sends = calls.filter((c) => c[0] === "send");
+    expect(sends).toEqual([["send", "--raw", "s@r", "the case prompt"]]);
+  });
 });
 
 describe("createRigCliSession — spawn/attach, polling, retirement", () => {
