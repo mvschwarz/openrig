@@ -13,8 +13,12 @@
  * --provider fake (default): a deterministic provider whose transcripts come from --transcripts
  *   (a JSON map of prompt -> transcript); absent prompts ERROR (never a silent green). This is the
  *   CI-runnable path.
- * --provider rig: the live-seat provider (the non-author proof-contract door) — see
- *   eval-rig-provider.ts; it throws until the non-author wires seat spawn + capture.
+ * --provider rig: the LIVE-seat provider (the proof-contract door). Requires ONE of:
+ *     --seat <session>      attach to an existing live seat (never torn down), or
+ *     --seat-spec <rig.yaml> `rig up` a scratch rig and drive its single seat
+ *                            (torn down via `rig down` at the end).
+ *   One persistent seat/generation serves every case; capture waits for pane
+ *   stability; the leading input echo is excluded from grading by the provider.
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -63,14 +67,42 @@ if (unresolved.length > 0) {
 
 let provider;
 if (providerName === "rig") {
-  provider = new RigSeatProvider({ productionPackage: PRODUCTION_PACKAGE });
+  const seat = opt("--seat", null);
+  const spec = opt("--seat-spec", null);
+  if ((seat === null) === (spec === null)) {
+    console.error(
+      "[REFUSED] --provider rig drives ONE persistent real seat and needs exactly one of:\n" +
+        "  --seat <session>       attach to an existing live seat (never torn down)\n" +
+        "  --seat-spec <rig.yaml> spawn a scratch rig via `rig up` and drive its seat",
+    );
+    process.exit(2);
+  }
+  const { createRigCliSession } = await import("../test/helpers/eval-rig-session.ts");
+  provider = new RigSeatProvider({
+    productionPackage: PRODUCTION_PACKAGE,
+    session: createRigCliSession(seat !== null ? { seat } : { spec }),
+  });
 } else {
   const tPath = opt("--transcripts", null);
   const transcripts = tPath ? JSON.parse(readFileSync(tPath, "utf-8")) : {};
   provider = new FakeProvider(transcripts);
 }
 
-const summary = await runEvals(cases, provider);
+let summary;
+try {
+  summary = await runEvals(cases, provider);
+} finally {
+  // Retire the persistent seat exactly once (idempotent; no-op for fake/attach).
+  // A teardown failure must NOT destroy the run's results — the grades are the
+  // product; a leftover rig is a named warning for manual `rig down`.
+  if (typeof provider.dispose === "function") {
+    try {
+      await provider.dispose();
+    } catch (e) {
+      console.error(`[WARN] seat retirement failed — tear the scratch rig down manually with 'rig down': ${e.message}`);
+    }
+  }
+}
 const recorded = {
   provider: provider.name,
   total: summary.total,

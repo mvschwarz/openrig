@@ -54,6 +54,7 @@ export class RigSeatProvider implements EvalProvider {
   readonly name = "rig-seat";
   private session: RigSeatSession | null = null;
   private disposed = false;
+  private spawnError: string | null = null;
 
   constructor(private readonly opts: RigSeatProviderOptions) {}
 
@@ -70,8 +71,18 @@ export class RigSeatProvider implements EvalProvider {
     if (this.disposed) {
       throw new Error("RigSeatProvider session is retired/disposed — a new provider (and seat) is required for further runs.");
     }
+    if (this.spawnError !== null) {
+      // A failed spawn poisons the RUN: re-spawning per case would churn one
+      // scratch rig per remaining case (measured live: six leaked rigs).
+      throw new Error(`RigSeatProvider: seat spawn already failed for this run — ${this.spawnError}`);
+    }
     if (!this.session) {
-      this.session = await this.opts.session.spawn();
+      try {
+        this.session = await this.opts.session.spawn();
+      } catch (err) {
+        this.spawnError = err instanceof Error ? err.message : String(err);
+        throw err;
+      }
     }
     const started = Date.now();
     await this.session.sendPrompt(prompt);

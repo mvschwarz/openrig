@@ -1,0 +1,16 @@
+# Example scratch rig for run-evals --provider rig --seat-spec (Test-A blocker 3).
+# A one-seat claude-code rig; the eval spawns it, drives the cases, and tears it
+# down. NOTE (drive-side): on the shared daemon this seat sees the live rig graph
+# and behaves as a full agent — verified-blank Test-A needs it ISOLATED.
+version: "0.2"
+name: eval-scratch
+pods:
+  - id: p
+    label: P
+    members:
+      - id: s
+        agent_ref: "local:agents/blank"
+        profile: default
+        runtime: claude-code
+        cwd: "."
+permission_policy: builtin:yolo

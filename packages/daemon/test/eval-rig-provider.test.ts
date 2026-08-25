@@ -69,4 +69,13 @@ describe("RigSeatProvider — session-persistent mode (Test-A)", () => {
     const provider = new RigSeatProvider({ productionPackage: "/packs" });
     await expect(provider.run("anything")).rejects.toThrow(/not yet driven|provider fake/i);
   });
+
+  it("SPAWN FAIL-FAST: a failed spawn poisons the run — later cases error WITHOUT re-spawning (the six-leaked-rigs class)", async () => {
+    const spawn = vi.fn(async () => { throw new Error("rig up failed: port conflict"); });
+    const provider = new RigSeatProvider({ productionPackage: "/packs", session: { spawn } });
+    await expect(provider.run("case one")).rejects.toThrow(/port conflict/);
+    await expect(provider.run("case two")).rejects.toThrow(/already failed/);
+    await expect(provider.run("case three")).rejects.toThrow(/already failed/);
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
 });
