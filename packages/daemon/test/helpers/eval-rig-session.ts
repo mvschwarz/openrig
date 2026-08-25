@@ -284,19 +284,28 @@ export function createRigCliSession(options: RigCliSessionOptions): { spawn: () 
           return null;
         }
       };
-      let boundGenerationId = "";
+      // Bound ONCE for the session's LIFETIME (r2 round-7 HIGH-1): Test-A observes every case
+      // (baseline -> WALK -> GET -> post) on ONE seat/session/generation. null until the first case binds it.
+      let boundGenerationId: string | null = null;
       let preSendRecord = "";
 
       return {
         generation,
         async sendPrompt(prompt: string): Promise<void> {
-          // Bind the CURRENT generation EXPLICITLY (constraint 1: identity from the record reader, never
-          // path-guessing) and record its append-only content as the pre-send boundary. An unsupported
-          // runtime or a seat with no generation record throws HERE (constraint 2: loud refusal). Then
-          // submit EXACTLY ONE input — the natural prompt (the frozen one-send custody contract; no
-          // marker). The SEND is the load-bearing action and IS retried.
+          // Resolve the CURRENT generation record EXPLICITLY (constraint 1: identity from the reader,
+          // never path-guessing). An unsupported runtime / no record throws HERE (constraint 2: loud
+          // refusal). The FIRST case binds the session generation; every LATER case compares against
+          // that lifetime binding and FAILS LOUD before the send if it changed (a re-prime BETWEEN
+          // cases crosses the single-generation run) — the binding is NEVER overwritten, so a mid-run
+          // generation swap can never be silently accepted (r2 round-7 HIGH-1). Then submit EXACTLY ONE
+          // input — the natural prompt (the frozen one-send custody contract; no marker). The SEND is
+          // the load-bearing action and IS retried.
           const rec = await withRetry(() => readRecord(sessionName));
-          boundGenerationId = rec.generationId;
+          if (boundGenerationId === null) {
+            boundGenerationId = rec.generationId;
+          } else if (rec.generationId !== boundGenerationId) {
+            throw new Error(`sendPrompt: seat '${sessionName}' generation changed BETWEEN cases (session bound to '${boundGenerationId}', now '${rec.generationId}') — a re-prime crossed the single-generation Test-A run; refusing to send another prompt`);
+          }
           preSendRecord = rec.content;
           await withRetry(() => exec(["send", sessionName, prompt]));
         },

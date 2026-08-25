@@ -69,6 +69,40 @@ describe("run-evals --provider rig — the wired runner seam (r2 round-6 HIGH-1)
     }
   });
 
+  it("SESSION-LIFETIME binding through the DEFAULT sidecar reader (r2 round-7 HIGH-1): a re-prime between cases emits ONLY the first send", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "eval-rig-runner-"));
+    try {
+      const ctxDir = path.join(stateDir, "context");
+      fs.mkdirSync(ctxDir, { recursive: true });
+      const sidecar = path.join(ctxDir, "s@r.json");
+      const writeSidecar = (gen: string, jsonl: string) =>
+        fs.writeFileSync(sidecar, JSON.stringify({ session_id: gen, transcript_path: jsonl, context_window: { used_percentage: 10 } }));
+      const j1 = path.join(stateDir, "g1.jsonl");
+      fs.writeFileSync(j1, "gen-1 prior\n");
+      writeSidecar("g1", j1);
+      let currentJsonl = j1;
+      const { exec, calls } = scriptedExec((args) => {
+        if (args[0] === "whoami") return WHOAMI;
+        if (args[0] === "send") { fs.appendFileSync(currentJsonl, `> ${args[2]}\ncompleted\n`); return "sent"; }
+        return undefined;
+      });
+      const session = await buildRigProviderSession({ seat: "s@r", exec, stateDir, session: { pollMs: 1, stablePolls: 2, sleep: async () => {} } }).spawn();
+      // case 1 binds the session generation g1 (via the real ContextUsageStore sidecar reader)
+      await session.sendPrompt("case-1");
+      expect(await session.captureSince("case-1")).toContain("completed");
+      // AUTHORITATIVE re-prime between cases: the seat's sidecar now names g2 + a fresh JSONL
+      const j2 = path.join(stateDir, "g2.jsonl");
+      fs.writeFileSync(j2, "gen-2 fresh\n");
+      currentJsonl = j2;
+      writeSidecar("g2", j2);
+      // case 2 must refuse BEFORE the send — the cross-generation run is void
+      await expect(session.sendPrompt("case-2")).rejects.toThrow(/generation changed BETWEEN cases/);
+      expect(calls.filter((c) => c[0] === "send").map((c) => c[2])).toEqual(["case-1"]);
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
   it("the authoritative default reader resolves the sidecar's session id + JSONL as the generation record", async () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "eval-rig-runner-"));
     try {

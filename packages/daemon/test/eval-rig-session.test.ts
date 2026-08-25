@@ -268,6 +268,26 @@ describe("createRigCliSession — spawn/attach, polling, retirement", () => {
     await expect(session.captureSince("p")).rejects.toThrow(/generation changed mid-observation/);
   });
 
+  it("SESSION-LIFETIME generation binding (r2 round-7 HIGH-1): a re-prime BETWEEN cases refuses before the second send, never re-binds", async () => {
+    const state = { generationId: "g1", content: "gen-1 record\n" };
+    let n = 0;
+    const { exec, calls } = scriptedExec((args) => {
+      if (args[0] === "whoami") return WHOAMI;
+      if (args[0] === "send") { state.content = state.content + `> ${args[2]}\ncompleted ${n++}\n`; return "sent"; }
+      return undefined;
+    });
+    const session = await createRigCliSession({ seat: "s@r", exec, pollMs: 1, stablePolls: 2, sleep: async () => {}, readGenerationRecord: genReader(state) }).spawn();
+    // case 1 binds the session generation g1
+    await session.sendPrompt("case-1");
+    expect(await session.captureSince("case-1")).toContain("completed");
+    // a re-prime rolls the generation BETWEEN cases (a new native session/JSONL)
+    state.generationId = "g2";
+    state.content = "gen-2 fresh record\n";
+    // case 2 must refuse BEFORE the send — the session binding is g1 and is never overwritten
+    await expect(session.sendPrompt("case-2")).rejects.toThrow(/generation changed BETWEEN cases/);
+    expect(calls.filter((c) => c[0] === "send").map((c) => c[2])).toEqual(["case-1"]);
+  });
+
   it("LOUD REFUSAL (constraint 2): no generation-record reader wired -> sendPrompt refuses, never falls back to the pane", async () => {
     const { exec } = scriptedExec((args) => {
       if (args[0] === "whoami") return WHOAMI;
