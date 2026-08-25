@@ -182,3 +182,145 @@ describe("rig walk — paced push-delivery (Atom 6)", () => {
     expect(errLogs.join("\n")).toMatch(/missing|incomplete|partial/i);
   });
 });
+
+// Mechanics-gate fix (desk BLOCKING ruling qitem-20260825153441-d9b3989a): walk gains PER-PIECE
+// CONSUMPTION VERIFICATION BY EFFECT — send success means TYPED, not CONSUMED. The effect source is
+// the seat's current-generation record (GET /api/sessions/:session/generation-record); on
+// staged-text-detected exactly ONE submit retry (a bare Enter via submitOnly), then fail loud naming
+// the piece; a client timeout with server-side completion reconciles BY EFFECT, never a re-send.
+describe("rig walk — per-piece consumption verification (RED-first, mechanics-gate fix)", () => {
+  const userRec = (text: string) =>
+    JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text }] } });
+
+  interface ScriptedWorld {
+    /** mutable: what the generation record currently holds (suffix after piece sends). */
+    record: { generationId: string; content: string };
+    /** mutable: what a pane capture currently renders. */
+    pane: string;
+    sends: RecordedSend[];
+    gets: string[];
+    /** post behavior override per call index for /api/transport/send. */
+    sendBehavior?: (body: Record<string, unknown>, sendIndex: number) => { status: number; data: Record<string, unknown> } | "throw";
+  }
+
+  function consumptionDeps(w: ScriptedWorld): WalkDeps {
+    let sendIndex = 0;
+    return {
+      lifecycleDeps: mockLifecycleDeps(),
+      fileExists: () => false,
+      clientFactory: () => ({
+        get: async (path: string) => {
+          w.gets.push(path);
+          if (path.includes("/generation-record")) {
+            const m = /sinceBytes=(\d+)/.exec(path);
+            const since = m ? Number(m[1]) : undefined;
+            const total = Buffer.byteLength(w.record.content, "utf8");
+            return { status: 200, data: {
+              generationId: w.record.generationId,
+              totalBytes: total,
+              ...(since === undefined ? {} : { suffix: w.record.content.slice(since) }),
+            } };
+          }
+          if (path.includes("/by-ref/pieces")) {
+            return { status: 200, data: { ref: "packs/p", pieces: [
+              { path: "one.md", content: "PIECE ONE body text that is distinctive" },
+              { path: "two.md", content: "PIECE TWO body text equally distinctive" },
+            ] } };
+          }
+          return { status: 404, data: {} };
+        },
+        post: async (path: string, body: unknown) => {
+          const b = body as Record<string, unknown>;
+          w.sends.push({ path, body: b });
+          if (path === "/api/transport/capture") return { status: 200, data: { ok: true, content: w.pane } };
+          if (path === "/api/transport/send") {
+            const behavior = w.sendBehavior?.(b, sendIndex++);
+            if (behavior === "throw") throw new Error("Request to daemon timed out after 5000ms");
+            if (behavior) return behavior;
+            return { status: 200, data: { ok: true } };
+          }
+          return { status: 404, data: {} };
+        },
+      }) as never,
+      sleep: async () => {},
+    };
+  }
+
+  const walkArgs = ["node", "rig", "walk", "dev@rig", "--through", "packs/p", "--pace", "1ms",
+    "--consume-timeout", "60ms", "--consume-poll", "1ms"];
+
+  it.fails("PIN W1 — a typed-but-never-consumed piece FAILS LOUD naming the piece; the next piece is never sent [RED until consumption verification]", async () => {
+    const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
+    // send reports ok but the generation record NEVER shows the piece (the coalesced-staged defect).
+    const { errLogs, exitCode } = await captureLogs(async () => {
+      await makeCmd(consumptionDeps(w)).parseAsync(walkArgs);
+    });
+    expect(exitCode).toBe(1);
+    const pieceSends = w.sends.filter((s) => s.path === "/api/transport/send" && s.body["text"] !== undefined);
+    expect(pieceSends).toHaveLength(1);                       // piece 2 never sent
+    expect(errLogs.join("\n")).toMatch(/piece 1\/2/);         // names the piece
+    expect(errLogs.join("\n")).toMatch(/consum/i);            // names the failure class
+  });
+
+  it.fails("PIN W2 — staged text detected -> exactly ONE submit retry (bare Enter, never a piece re-send), then consumed -> walk proceeds [RED until the retry path]", async () => {
+    const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
+    w.sendBehavior = (b) => {
+      if (b["text"] !== undefined) {
+        // The paste stages but the TUI does not accept the Enter: pane shows the piece, record silent.
+        w.pane = `❯ ${String(b["text"]).slice(0, 40)}\n  paste again to expand`;
+        return { status: 200, data: { ok: true } };
+      }
+      // The bare-Enter retry (submitOnly): the TUI accepts it — the piece lands in the record.
+      const staged = /❯ (.+)\n/.exec(w.pane)?.[1] ?? "";
+      w.record.content += userRec(staged + " …full piece body…") + "\n";
+      w.pane = "❯ \n";
+      return { status: 200, data: { ok: true, submitOnly: true } };
+    };
+    // Both pieces stage-then-consume via one retry each.
+    const { exitCode } = await captureLogs(async () => {
+      await makeCmd(consumptionDeps(w)).parseAsync(walkArgs);
+    });
+    expect(exitCode).toBeUndefined();
+    const pieceSends = w.sends.filter((s) => s.path === "/api/transport/send" && s.body["text"] !== undefined);
+    const enterRetries = w.sends.filter((s) => s.path === "/api/transport/send" && s.body["submitOnly"] === true);
+    expect(pieceSends.map((s) => (s.body["text"] as string).slice(0, 9))).toEqual(["PIECE ONE", "PIECE TWO"]); // each piece sent ONCE
+    expect(enterRetries).toHaveLength(2); // exactly one Enter per staged piece
+  });
+
+  it.fails("PIN W3 — a client timeout with server-side completion reconciles BY EFFECT: no re-send, walk proceeds [RED until reconcile-by-effect]", async () => {
+    const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
+    w.sendBehavior = (b) => {
+      if (b["text"] !== undefined) {
+        // Server completed the send+submit; the client never saw the response.
+        w.record.content += userRec(String(b["text"])) + "\n";
+        return "throw";
+      }
+      return { status: 200, data: { ok: true } };
+    };
+    const { exitCode } = await captureLogs(async () => {
+      await makeCmd(consumptionDeps(w)).parseAsync(walkArgs);
+    });
+    expect(exitCode).toBeUndefined(); // both pieces reconciled by effect
+    const pieceSends = w.sends.filter((s) => s.path === "/api/transport/send" && s.body["text"] !== undefined);
+    expect(pieceSends).toHaveLength(2); // one transport attempt per piece — never a blind re-send
+  });
+
+  it.fails("PIN W4 — no generation record for the seat -> pieces still deliver, with a NAMED per-walk advisory that consumption is unverified [RED until the advisory]", async () => {
+    const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
+    const deps = consumptionDeps(w);
+    const inner = (deps.clientFactory as unknown as () => { get: (p: string) => Promise<unknown>; post: (p: string, b: unknown) => Promise<unknown> })();
+    (deps as { clientFactory: unknown }).clientFactory = () => ({
+      get: async (path: string) => path.includes("/generation-record")
+        ? { status: 409, data: { error: "unsupported_runtime", message: "no generation record for this seat" } }
+        : inner.get(path),
+      post: async (path: string, body: unknown) => inner.post(path, body),
+    });
+    const { errLogs, exitCode } = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(walkArgs);
+    });
+    expect(exitCode).toBeUndefined();
+    const pieceSends = w.sends.filter((s) => s.path === "/api/transport/send" && s.body["text"] !== undefined);
+    expect(pieceSends).toHaveLength(2); // legacy delivery preserved
+    expect(errLogs.join("\n")).toMatch(/consumption unverified/i); // named, never silent
+  });
+});
