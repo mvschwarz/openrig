@@ -234,7 +234,7 @@ describe("SessionTransport submitOnly — the guarded bare-Enter retry", () => {
   // not match the boundary before the matched suffix is a truncated or wrong prefix — refuse.
   const pieceTail = () => PIECE_2().split("\n").slice(-3).join("\n"); // a TRUE suffix, 85 normalized chars; boundary = 139
 
-  it.fails("R5 — a +1 placeholder with the piece's EXACT literal suffix REFUSES with zero Enter calls: the sum does not match the hidden boundary [RED until the join]", async () => {
+  it("R5 — a +1 placeholder with the piece's EXACT literal suffix REFUSES with zero Enter calls: the sum does not match the hidden boundary [GREEN — sum-boundary join]", async () => {
     const sendKeys = vi.fn(async () => ({ ok: true as const }));
     const transport = makeTransport(mockTmux({
       sendKeys,
@@ -248,7 +248,7 @@ describe("SessionTransport submitOnly — the guarded bare-Enter retry", () => {
     expect(sendKeys).not.toHaveBeenCalled();
   });
 
-  it.fails("R5 — a plausible +100 placeholder with the piece's EXACT literal suffix REFUSES with zero Enter calls: 100 is not the boundary either [RED until the join]", async () => {
+  it("R5 — a plausible +100 placeholder with the piece's EXACT literal suffix REFUSES with zero Enter calls: 100 is not the boundary either [GREEN — sum-boundary join]", async () => {
     const sendKeys = vi.fn(async () => ({ ok: true as const }));
     const transport = makeTransport(mockTmux({
       sendKeys,

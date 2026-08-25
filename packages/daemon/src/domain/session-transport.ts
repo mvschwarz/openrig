@@ -901,13 +901,28 @@ export class SessionTransport {
             // shared phrases are NOT identity: with no residual, or one under 48 normalized chars,
             // or one that is not the piece's own suffix, FAIL CLOSED — the TUI did not expose
             // enough content to identify the staged state, and a bare Enter is never guessed.
-            const expectedLines = opts.expectedStagedLineCount;
             const chrome = /paste again to expand|ctrl\+g to edit( in Vim)?/gi;
             const residual = norm(regionFlat.replace(placeholderRe, "").replace(chrome, "")).replace(/^❯/, "");
             const pieceNorm = norm(expected);
             const sum = counts.reduce((a, b) => a + b, 0);
-            const sumSane = typeof expectedLines === "number" && sum <= expectedLines * 1.05 + 2;
-            stagedEvidence = residual.length >= 48 && pieceNorm.endsWith(residual) && sumSane;
+            // Round-5 (r2 R4 HIGH-1): the suffix anchor is JOINED to the opaque prefix. The
+            // placeholder sum identifies the hidden SOURCE BOUNDARY immediately before the
+            // visible suffix (specimen: sum 130 = the residual begins after exactly 130 of the
+            // piece's 142 source newlines). Compute the boundary from the piece bytes — the
+            // number of leading source lines whose normalized text the residual does NOT cover —
+            // and require the sum to equal it (±1 for a mid-line chunk split). A matched suffix
+            // with a non-matching sum is a truncated or wrong prefix: refuse.
+            let boundary = -1;
+            if (residual.length >= 48 && pieceNorm.endsWith(residual)) {
+              const srcLines = expected.split("\n");
+              let acc = 0;
+              boundary = 0;
+              for (let i = srcLines.length - 1; i >= 0; i--) {
+                acc += norm(srcLines[i]!).length;
+                if (acc >= residual.length) { boundary = i; break; }
+              }
+            }
+            stagedEvidence = boundary >= 0 && Math.abs(sum - boundary) <= 1;
           }
         }
       }
