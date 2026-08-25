@@ -142,7 +142,7 @@ describe("captureSince — Claude-JSONL output-only + native-turn completion (RE
     return { session, calls };
   }
 
-  it.fails("OUTPUT-ONLY (input-echo-negative gate): grades assistant text only, EXCLUDES the user prompt + JSON envelope [RED until the JSONL-aware fix]", async () => {
+  it("OUTPUT-ONLY (input-echo-negative gate): grades assistant text only, EXCLUDES the user prompt + JSON envelope [GREEN — JSONL-aware fix]", async () => {
     const { session } = await driveOne(
       userMsg("earlier turn") + "\n",
       "the case prompt",
@@ -157,7 +157,7 @@ describe("captureSince — Claude-JSONL output-only + native-turn completion (RE
     expect(since).not.toContain('stop_reason');                            // no transport/reply envelope
   });
 
-  it.fails("NATIVE-TURN COMPLETION: does NOT return on a footer-only / stop_reason:null fragment while the turn is still open [RED until the JSONL-aware fix]", async () => {
+  it("NATIVE-TURN COMPLETION: does NOT return on a footer-only / stop_reason:null fragment while the turn is still open [GREEN — JSONL-aware fix]", async () => {
     // The assistant message is present but INCOMPLETE (stop_reason null) and the content goes stable —
     // the string-based captureSince returns it; a turn-aware capture must keep waiting (then time out
     // here, since this fixture never completes). Returning early is the 80-byte-footer-mid-generation bug.
@@ -191,7 +191,7 @@ describe("captureSince — Claude-JSONL output-only + native-turn completion (RE
 
   // Desk custody ruling qitem-20260825082034-6fa281f1 — pins 4-5, same RED-first set, criteria
   // untouched: both mechanically enforce the frozen no-intervening-input custody rule.
-  it.fails("PIN 4 — INTERVENING-INPUT FAIL-CLOSED: an extra user-role TEXT record entering the generation between prompt delivery and native-turn completion voids the CASE, loudly [RED until the JSONL-aware fix]", async () => {
+  it("PIN 4 — INTERVENING-INPUT FAIL-CLOSED: an extra user-role TEXT record entering the generation between prompt delivery and native-turn completion voids the CASE, loudly [GREEN — JSONL-aware fix]", async () => {
     // The contamination shape from the voided run: the seat followed an actionable reply hint and a
     // second user turn landed in its own generation. Detection, not prevention — the harness must
     // refuse to grade this case (one case lost, not a full run), never return gradable text.
@@ -204,7 +204,7 @@ describe("captureSince — Claude-JSONL output-only + native-turn completion (RE
     await expect(session.captureSince("the case prompt")).rejects.toThrow(/CASE INVALID|intervening user input/i);
   });
 
-  it.fails("PIN 5 — ENVELOPE NEUTRALIZATION: probe delivery suppresses the message envelope, so no actionable reply hint reaches the blank seat [RED until the raw-send fix]", async () => {
+  it("PIN 5 — ENVELOPE NEUTRALIZATION: probe delivery suppresses the message envelope, so no actionable reply hint reaches the blank seat [GREEN — raw-send fix]", async () => {
     // The frozen criteria's probes are answered in place; a From/To envelope with a reply hint is
     // harness leakage that INVITES the transport act pin 4 then has to catch. Probe sends go raw.
     const { calls } = await driveOne(
@@ -215,6 +215,25 @@ describe("captureSince — Claude-JSONL output-only + native-turn completion (RE
     );
     const sends = calls.filter((c) => c[0] === "send");
     expect(sends).toEqual([["send", "--raw", "s@r", "the case prompt"]]);
+  });
+
+  it("TOOL-CYCLE: a multi-step turn (assistant tool_use -> tool_result -> assistant end_turn) is captured WHOLE, and the tool_result record never trips the intervening-input gate", async () => {
+    // The runtime writes tool_result records with role "user" — they are the assistant's own tool
+    // cycle in progress, not an intervening input; and stop_reason "tool_use" is NOT terminal, so
+    // the capture must keep waiting for the closing assistant message and return the whole turn.
+    const toolUse = `{"type":"assistant","message":{"role":"assistant","model":"claude-x","stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash","input":{"command":"rig context get skills/core/rig-lifecycle"}}]}}`;
+    const toolResult = `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"served 1618 tokens"}]}}`;
+    const { session } = await driveOne(
+      userMsg("earlier turn") + "\n",
+      "the case prompt",
+      userMsg("the case prompt") + "\n" + toolUse + "\n",
+      toolResult + "\n" + asstMsg("done: the lifecycle entry is served", "end_turn") + "\n",
+    );
+    const since = await session.captureSince("the case prompt");
+    expect(since).toContain("rig context get skills/core/rig-lifecycle"); // the tool command the DOOR grader matches
+    expect(since).toContain("done: the lifecycle entry is served");        // the whole turn, not the pre-tool fragment
+    expect(since).not.toContain("tool_result");                            // no envelope
+    expect(since).not.toContain("the case prompt");                        // still output-only
   });
 });
 
@@ -233,8 +252,8 @@ describe("createRigCliSession — spawn/attach, polling, retirement", () => {
     // The frozen custody contract forbids ANY intervening input between BASELINE and POST. Exactly one
     // submitted send per case, the natural prompt — no eval-sync marker; the boundary read is out-of-band.
     const sends = calls.filter((c) => c[0] === "send");
-    expect(sends).toEqual([["send", "ops-eval@evalrig", "the natural prompt"]]);
-    expect(calls.some((c) => c[0] === "send" && /eval-sync/.test(c[2] ?? ""))).toBe(false);
+    expect(sends).toEqual([["send", "--raw", "ops-eval@evalrig", "the natural prompt"]]); // raw per PIN 5 — envelope suppressed, still exactly one send
+    expect(calls.some((c) => c[0] === "send" && c.slice(1).some((a) => /eval-sync/.test(a ?? "")))).toBe(false);
   });
 
   it("SPAWN: rig up -> adopt the attach session, generation from whoami, retire tears the spawned rig down ONCE", async () => {
@@ -288,18 +307,18 @@ describe("createRigCliSession — spawn/attach, polling, retirement", () => {
     expect(() => createRigCliSession({ seat: "a", spec: "b" })).toThrow(/exactly ONE/);
   });
 
-  it("records the pre-send generation record, then captureSince waits for it to stabilize and returns the appended suffix", async () => {
-    const state = { generationId: "g1", content: "prior record line\n" };
+  it("records the pre-send generation record, then captureSince waits for NATIVE-TURN COMPLETION and returns the assistant output of the appended suffix", async () => {
+    const state = { generationId: "g1", content: '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"prior record line"}]}}\n' };
     let sent = false;
     const { exec } = scriptedExec((args) => {
       if (args[0] === "whoami") return WHOAMI;
-      if (args[0] === "send") { sent = true; state.content = state.content + "> the natural prompt\n"; return "sent"; }
+      if (args[0] === "send") { sent = true; state.content = state.content + '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"the natural prompt"}]}}\n'; return "sent"; }
       return undefined;
     });
-    // The append-only record grows across reads: the seat appends its response, then goes quiet.
+    // The append-only record grows across reads: the seat appends its completed turn.
     const readGenerationRecord = async () => {
       const out = { generationId: state.generationId, content: state.content };
-      if (sent && !state.content.includes("DONE")) state.content = state.content + "working...\nDONE rig context get skills/x\n";
+      if (sent && !state.content.includes("DONE")) state.content = state.content + '{"type":"assistant","message":{"role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"DONE rig context get skills/x"}]}}\n';
       return out;
     };
     const session = await createRigCliSession({ seat: "ops-eval@evalrig", exec, pollMs: 1, stablePolls: 2, sleep: async () => {}, readGenerationRecord }).spawn();
@@ -334,9 +353,9 @@ describe("createRigCliSession — spawn/attach, polling, retirement", () => {
     });
     const readGenerationRecord = async () => {
       readCall++;
-      // sendPrompt's read is #1; fail a couple of capture polls transiently, then succeed + go stable
+      // sendPrompt's read is #1; fail a couple of capture polls transiently, then complete the turn
       if (readCall === 2 || readCall === 3) throw new Error("Daemon did not respond in time");
-      if (sent && !state.content.includes("DONE")) state.content = state.content + "DONE rig context get skills/x\n";
+      if (sent && !state.content.includes("DONE")) state.content = state.content + '{"type":"assistant","message":{"role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"DONE rig context get skills/x"}]}}\n';
       return { generationId: state.generationId, content: state.content };
     };
     const session = await createRigCliSession({ seat: "s@r", exec, pollMs: 1, stablePolls: 2, sleep: async () => {}, readGenerationRecord }).spawn();
@@ -378,7 +397,7 @@ describe("createRigCliSession — spawn/attach, polling, retirement", () => {
     let n = 0;
     const { exec, calls } = scriptedExec((args) => {
       if (args[0] === "whoami") return WHOAMI;
-      if (args[0] === "send") { state.content = state.content + `> ${args[2]}\ncompleted ${n++}\n`; return "sent"; }
+      if (args[0] === "send") { state.content = state.content + `{"type":"user","message":{"role":"user","content":[{"type":"text","text":${JSON.stringify(args[3])}}]}}\n{"type":"assistant","message":{"role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"completed ${n++}"}]}}\n`; return "sent"; }
       return undefined;
     });
     const session = await createRigCliSession({ seat: "s@r", exec, pollMs: 1, stablePolls: 2, sleep: async () => {}, readGenerationRecord: genReader(state) }).spawn();
@@ -390,7 +409,7 @@ describe("createRigCliSession — spawn/attach, polling, retirement", () => {
     state.content = "gen-2 fresh record\n";
     // case 2 must refuse BEFORE the send — the session binding is g1 and is never overwritten
     await expect(session.sendPrompt("case-2")).rejects.toThrow(/generation changed BETWEEN cases/);
-    expect(calls.filter((c) => c[0] === "send").map((c) => c[2])).toEqual(["case-1"]);
+    expect(calls.filter((c) => c[0] === "send").map((c) => c[3])).toEqual(["case-1"]); // argv: send --raw <seat> <prompt>
   });
 
   it("LOUD REFUSAL (constraint 2): no generation-record reader wired -> sendPrompt refuses, never falls back to the pane", async () => {

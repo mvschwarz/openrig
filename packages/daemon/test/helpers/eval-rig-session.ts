@@ -167,6 +167,73 @@ export function sliceAfterPrompt(rawCapture: string, prompt: string, preSendCapt
   return region.replace(/^\n/, "");
 }
 
+/** One parsed line of the Claude generation JSONL (the shape
+ *  effective-model-readers.readClaudeEffectiveModel traces): each line is
+ *  {type, message:{role, model, content:[blocks], stop_reason}}. Lines that do
+ *  not parse (a partial trailing write, a non-message record) are skipped —
+ *  the capture grades MESSAGES, and a corrupt line is never silently graded. */
+interface GenerationRecordLine {
+  type?: string;
+  message?: {
+    role?: string;
+    stop_reason?: string | null;
+    content?: Array<{ type?: string; text?: string; input?: unknown; command?: unknown }> | string;
+  };
+}
+
+function parseRecordLines(suffix: string): GenerationRecordLine[] {
+  const out: GenerationRecordLine[] = [];
+  for (const line of suffix.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    try {
+      const parsed = JSON.parse(trimmed) as GenerationRecordLine;
+      if (parsed !== null && typeof parsed === "object") out.push(parsed);
+    } catch {
+      // Partial/corrupt line — not a message; skipped, never graded.
+    }
+  }
+  return out;
+}
+
+function contentBlocks(rec: GenerationRecordLine): Array<{ type?: string; text?: string; input?: unknown }> {
+  const c = rec.message?.content;
+  return Array.isArray(c) ? c : [];
+}
+
+/** A user-role record that is a genuine INPUT (text), as opposed to the
+ *  tool_result continuation records the runtime writes with role "user" as
+ *  part of the assistant's own tool cycle. PIN 4 fails a case closed on the
+ *  former; the latter is the assistant's turn in progress. */
+function isUserTextInput(rec: GenerationRecordLine): boolean {
+  if (rec.message?.role !== "user") return false;
+  const blocks = contentBlocks(rec);
+  if (typeof rec.message?.content === "string") return true;
+  if (blocks.some((b) => b.type === "tool_result")) return false;
+  return blocks.some((b) => b.type === "text");
+}
+
+const TERMINAL_STOP_REASONS = new Set(["end_turn", "stop_sequence", "max_tokens"]);
+
+/** Assistant OUTPUT text only: text blocks verbatim, tool_use blocks as their
+ *  grader-matchable command (the DOOR grader pattern-matches command strings) —
+ *  never the JSON message envelope, never a user record. */
+function assistantText(records: GenerationRecordLine[]): string {
+  const parts: string[] = [];
+  for (const rec of records) {
+    if (rec.message?.role !== "assistant") continue;
+    for (const block of contentBlocks(rec)) {
+      if (block.type === "text" && typeof block.text === "string") parts.push(block.text);
+      else if (block.type === "tool_use") {
+        const input = block.input as Record<string, unknown> | undefined;
+        const command = input?.["command"];
+        parts.push(typeof command === "string" ? command : JSON.stringify(input ?? {}));
+      }
+    }
+  }
+  return parts.join("\n");
+}
+
 interface UpNodeDetail {
   stages?: Array<{ detail?: { nodes?: Array<{ logicalId?: string; status?: string }> } }>;
   attachCommand?: string;
@@ -307,18 +374,24 @@ export function createRigCliSession(options: RigCliSessionOptions): { spawn: () 
             throw new Error(`sendPrompt: seat '${sessionName}' generation changed BETWEEN cases (session bound to '${boundGenerationId}', now '${rec.generationId}') — a re-prime crossed the single-generation Test-A run; refusing to send another prompt`);
           }
           preSendRecord = rec.content;
-          await withRetry(() => exec(["send", sessionName, prompt]));
+          // PIN 5 (envelope neutralization, desk ruling 6fa281f1): the probe goes RAW — exact text,
+          // no From/To envelope, no reply hint. The frozen criteria's probes are answered in place;
+          // a standard-envelope send hands a blank seat an actionable transport invitation, which is
+          // harness leakage (the voided run's contamination arrived exactly that way).
+          await withRetry(() => exec(["send", "--raw", sessionName, prompt]));
         },
-        async captureSince(prompt: string): Promise<string> {
+        async captureSince(_prompt: string): Promise<string> {
           const deadline = Date.now() + timeoutMs;
-          let last = "";
-          let stable = 0;
           const failures = { n: 0 };
-          // Poll the append-only record: wait for growth past the pre-send content (the seat recorded
-          // its turn), then for stability. The suffix since the pre-send content is the current turn.
+          // JSONL-SCHEMA-AWARE capture (harness correction; RED pins b4d8d1797 + desk pins 4-5):
+          // poll the append-only record and PARSE the suffix since the pre-send content as message
+          // lines. The done-signal is NATIVE-TURN COMPLETION — the suffix's LAST assistant message
+          // carries a TERMINAL stop_reason — never content-stability (the 80-byte-footer bug). The
+          // graded value is assistant/tool OUTPUT TEXT ONLY — never the user prompt, never the JSON
+          // envelope. Custody is enforced per-case: an intervening user input fails the case closed.
           for (;;) {
             if (Date.now() > deadline) {
-              throw new Error(`captureSince: seat '${sessionName}' did not go stable within ${timeoutMs}ms`);
+              throw new Error(`captureSince: seat '${sessionName}' did not complete a native turn within ${timeoutMs}ms (no terminal stop_reason observed; did not go stable is retired as a done-signal)`);
             }
             await sleep(pollMs);
             const rec = await tolerantRead(failures);
@@ -336,13 +409,30 @@ export function createRigCliSession(options: RigCliSessionOptions): { spawn: () 
             if (!content.startsWith(preSendRecord)) {
               throw new Error(`captureSince: generation '${boundGenerationId}' record is not append-only for '${sessionName}' (pre-send content is not a prefix) — boundary unsound, refusing`);
             }
-            if (content === last && content !== preSendRecord) {
-              stable += 1;
-              if (stable >= stablePolls) return sliceAfterPrompt(content.slice(preSendRecord.length), prompt, "");
-            } else {
-              stable = 0;
+            const records = parseRecordLines(content.slice(preSendRecord.length));
+            // PIN 4 — INTERVENING-INPUT FAIL-CLOSED (desk ruling 6fa281f1): the FIRST user text record
+            // is the prompt's own delivery; ANY further user-role TEXT record entering the generation
+            // before the turn completes voids the CASE, loudly. Detection, not prevention — a terminal
+            // accepts input by design; the harness refuses to grade a contaminated case so a repeat
+            // costs one case, never a run. tool_result records carry role "user" but are the
+            // assistant's own tool cycle — they are NOT intervening input (see isUserTextInput).
+            const userInputs = records.filter(isUserTextInput);
+            if (userInputs.length > 1) {
+              throw new Error(`captureSince: CASE INVALID — ${userInputs.length - 1} intervening user input record(s) entered generation '${boundGenerationId}' of '${sessionName}' between prompt delivery and native-turn completion; the frozen no-intervening-input custody rule fails this case closed`);
             }
-            last = content;
+            // NATIVE-TURN COMPLETION: return only when the suffix's LAST assistant message is TERMINAL
+            // ("end_turn"/"stop_sequence"/"max_tokens" — NOT "tool_use", NOT null). Otherwise keep
+            // polling to the deadline: a footer-only or stop_reason:null fragment is an OPEN turn.
+            const assistants = records.filter((r) => r.message?.role === "assistant");
+            const lastAssistant = assistants[assistants.length - 1];
+            const stop = lastAssistant?.message?.stop_reason;
+            if (typeof stop === "string" && TERMINAL_STOP_REASONS.has(stop)) {
+              // OUTPUT-ONLY: assistant text + tool_use command blocks — what the DOOR grader
+              // pattern-matches. The user prompt and every JSON envelope byte are excluded by
+              // construction (role filter + block extraction), so no echo-strip slicing is needed here;
+              // the leading-echo strip remains the PROVIDER's contract on its own boundary.
+              return assistantText(records);
+            }
           }
         },
         async retire(): Promise<void> {

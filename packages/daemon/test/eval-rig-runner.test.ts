@@ -26,18 +26,20 @@ function scriptedExec(script: (args: string[]) => string | undefined): { exec: R
 
 describe("run-evals --provider rig — the wired runner seam (r2 round-6 HIGH-1)", () => {
   it("submits EXACTLY ONE natural prompt through the runner and captures the CURRENT-GENERATION suffix", async () => {
-    const state = { generationId: "g1", content: "prior gen-1 record\n" };
+    // JSONL-shaped record (harness correction): the capture is schema-aware and grades assistant
+    // OUTPUT with a terminal stop_reason — a raw pane-ish string is no longer a completable turn.
+    const state = { generationId: "g1", content: '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"prior gen-1 record"}]}}\n' };
     let sent = false;
     const { exec, calls } = scriptedExec((args) => {
       if (args[0] === "whoami") return WHOAMI;
-      if (args[0] === "send") { sent = true; state.content = state.content + "> the case prompt\n"; return "sent"; }
+      if (args[0] === "send") { sent = true; state.content = state.content + '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"the case prompt"}]}}\n'; return "sent"; }
       return undefined;
     });
     // A fake current-generation reader standing in for the contextUsageStore-backed default: the record
     // grows append-only across reads, then goes quiet.
     const readGenerationRecord = async () => {
       const out = { generationId: state.generationId, content: state.content };
-      if (sent && !state.content.includes("DONE")) state.content = state.content + "DONE rig context get skills/core/rig-lifecycle\n";
+      if (sent && !state.content.includes("DONE")) state.content = state.content + '{"type":"assistant","message":{"role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"DONE rig context get skills/core/rig-lifecycle"}]}}\n';
       return out;
     };
     const session = await buildRigProviderSession({
@@ -52,7 +54,7 @@ describe("run-evals --provider rig — the wired runner seam (r2 round-6 HIGH-1)
 
     // ONE submitted send — the natural prompt (the frozen custody contract), through the runner seam.
     const sends = calls.filter((c) => c[0] === "send");
-    expect(sends).toEqual([["send", "ops-eval@evalrig", "the case prompt"]]);
+    expect(sends).toEqual([["send", "--raw", "ops-eval@evalrig", "the case prompt"]]); // raw per PIN 5 — envelope suppressed, still exactly one send
     // The current-generation suffix is captured (grading sees the seat's turn), pre-send content excluded.
     expect(since).toContain("DONE rig context get skills/core/rig-lifecycle");
     expect(since).not.toContain("prior gen-1 record");
@@ -83,7 +85,7 @@ describe("run-evals --provider rig — the wired runner seam (r2 round-6 HIGH-1)
       let currentJsonl = j1;
       const { exec, calls } = scriptedExec((args) => {
         if (args[0] === "whoami") return WHOAMI;
-        if (args[0] === "send") { fs.appendFileSync(currentJsonl, `> ${args[2]}\ncompleted\n`); return "sent"; }
+        if (args[0] === "send") { fs.appendFileSync(currentJsonl, `{"type":"user","message":{"role":"user","content":[{"type":"text","text":${JSON.stringify(args[3])}}]}}\n{"type":"assistant","message":{"role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"completed"}]}}\n`); return "sent"; }
         return undefined;
       });
       const session = await buildRigProviderSession({ seat: "s@r", exec, stateDir, session: { pollMs: 1, stablePolls: 2, sleep: async () => {} } }).spawn();
@@ -97,7 +99,7 @@ describe("run-evals --provider rig — the wired runner seam (r2 round-6 HIGH-1)
       writeSidecar("g2", j2);
       // case 2 must refuse BEFORE the send — the cross-generation run is void
       await expect(session.sendPrompt("case-2")).rejects.toThrow(/generation changed BETWEEN cases/);
-      expect(calls.filter((c) => c[0] === "send").map((c) => c[2])).toEqual(["case-1"]);
+      expect(calls.filter((c) => c[0] === "send").map((c) => c[3])).toEqual(["case-1"]); // argv: send --raw <seat> <prompt>
     } finally {
       fs.rmSync(stateDir, { recursive: true, force: true });
     }
