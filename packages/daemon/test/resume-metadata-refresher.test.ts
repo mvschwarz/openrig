@@ -52,6 +52,35 @@ function createCodexLogsDb(homeDir: string, pid: number, threadId: string, dbNam
 }
 
 describe("ResumeMetadataRefresher", () => {
+  it("PERF FIX 2 — the periodic snapshot refresh is SINGLE-ATTEMPT per codex seat: no x8 retry burst under failing discovery", async () => {
+    const sessionRegistry = {
+      updateResumeToken: vi.fn(),
+      markResumeProbeResult: vi.fn(),
+    } as unknown as SessionRegistry;
+    let panePidCalls = 0;
+    let sleeps = 0;
+    const tmux = mockTmux({ getPanePid: vi.fn(async () => { panePidCalls += 1; return 900; }) });
+    const refresher = new ResumeMetadataRefresher({
+      sessionRegistry,
+      tmuxAdapter: tmux,
+      // pane exists but NO codex descendant → discovery FAILS every attempt (the burst trigger).
+      listProcesses: () => [{ pid: 900, ppid: 1, command: "-zsh" }],
+      readCodexThreadIdByPid: () => undefined,
+      sleep: async () => { sleeps += 1; },
+    });
+
+    await refresher.refresh(
+      [{ sessionId: "s1", sessionName: "codex@r", runtime: "codex", resumeType: null, resumeToken: null }],
+      { fillNullOnly: true },
+    );
+
+    // The 5m periodic snapshot path (fillNullOnly) is SINGLE-ATTEMPT per codex seat: ONE pane probe,
+    // ZERO retry sleeps even when discovery fails — NOT the pre-fix x8 burst (8 probes + 7 sleeps).
+    // OPR.0.5.3.10 mini-req 2. A regression to the 8-attempt loop on the recurring tick flips these.
+    expect(panePidCalls).toBe(1);
+    expect(sleeps).toBe(0);
+  });
+
   it("refreshes missing Codex resume token from the live child process", async () => {
     const sessionRegistry = {
       updateResumeToken: vi.fn(),
