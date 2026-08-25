@@ -214,11 +214,13 @@ describe("rig walk — per-piece consumption verification (RED-first, mechanics-
           if (path.includes("/generation-record")) {
             const m = /sinceBytes=(\d+)/.exec(path);
             const since = m ? Number(m[1]) : undefined;
-            const total = Buffer.byteLength(w.record.content, "utf8");
+            // BYTE-consistent like the real route (stat + readSync are both bytes): a char-sliced
+            // suffix desyncs from totalBytes the moment the record carries multibyte characters.
+            const buf = Buffer.from(w.record.content, "utf8");
             return { status: 200, data: {
               generationId: w.record.generationId,
-              totalBytes: total,
-              ...(since === undefined ? {} : { suffix: w.record.content.slice(since) }),
+              totalBytes: buf.length,
+              ...(since === undefined ? {} : { suffix: buf.subarray(since).toString("utf8") }),
             } };
           }
           if (path.includes("/by-ref/pieces")) {
@@ -249,7 +251,7 @@ describe("rig walk — per-piece consumption verification (RED-first, mechanics-
   const walkArgs = ["node", "rig", "walk", "dev@rig", "--through", "packs/p", "--pace", "1ms",
     "--consume-timeout", "60ms", "--consume-poll", "1ms"];
 
-  it.fails("PIN W1 — a typed-but-never-consumed piece FAILS LOUD naming the piece; the next piece is never sent [RED until consumption verification]", async () => {
+  it("PIN W1 — a typed-but-never-consumed piece FAILS LOUD naming the piece; the next piece is never sent [GREEN — consumption verification]", async () => {
     const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
     // send reports ok but the generation record NEVER shows the piece (the coalesced-staged defect).
     const { errLogs, exitCode } = await captureLogs(async () => {
@@ -262,7 +264,7 @@ describe("rig walk — per-piece consumption verification (RED-first, mechanics-
     expect(errLogs.join("\n")).toMatch(/consum/i);            // names the failure class
   });
 
-  it.fails("PIN W2 — staged text detected -> exactly ONE submit retry (bare Enter, never a piece re-send), then consumed -> walk proceeds [RED until the retry path]", async () => {
+  it("PIN W2 — staged text detected -> exactly ONE submit retry (bare Enter, never a piece re-send), then consumed -> walk proceeds [GREEN — the retry path]", async () => {
     const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
     w.sendBehavior = (b) => {
       if (b["text"] !== undefined) {
@@ -287,7 +289,7 @@ describe("rig walk — per-piece consumption verification (RED-first, mechanics-
     expect(enterRetries).toHaveLength(2); // exactly one Enter per staged piece
   });
 
-  it.fails("PIN W3 — a client timeout with server-side completion reconciles BY EFFECT: no re-send, walk proceeds [RED until reconcile-by-effect]", async () => {
+  it("PIN W3 — a client timeout with server-side completion reconciles BY EFFECT: no re-send, walk proceeds [GREEN — reconcile-by-effect]", async () => {
     const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
     w.sendBehavior = (b) => {
       if (b["text"] !== undefined) {
@@ -305,7 +307,7 @@ describe("rig walk — per-piece consumption verification (RED-first, mechanics-
     expect(pieceSends).toHaveLength(2); // one transport attempt per piece — never a blind re-send
   });
 
-  it.fails("PIN W4 — no generation record for the seat -> pieces still deliver, with a NAMED per-walk advisory that consumption is unverified [RED until the advisory]", async () => {
+  it("PIN W4 — no generation record for the seat -> pieces still deliver, with a NAMED per-walk advisory that consumption is unverified [GREEN — the advisory]", async () => {
     const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
     const deps = consumptionDeps(w);
     const inner = (deps.clientFactory as unknown as () => { get: (p: string) => Promise<unknown>; post: (p: string, b: unknown) => Promise<unknown> })();

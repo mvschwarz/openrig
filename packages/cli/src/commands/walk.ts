@@ -71,6 +71,10 @@ export function walkCommand(depsOverride?: WalkDeps): Command {
     .option("--mission <mission>", "With --through-profile: the mission-tree grant")
     .option("--budget <tokens>", "With --through-profile: situation budget (reported, never truncated)")
     .option("--pace <duration>", "Delay between pieces (e.g. 10s, 500ms, or a bare number of seconds); default 10s")
+    // Mechanics-gate fix (desk ruling d9b3989a): send success means TYPED, not CONSUMED — every
+    // piece is verified BY EFFECT against the seat's generation record before the next is sent.
+    .option("--consume-timeout <ms>", "Per-piece consumption-verification window in ms (default 20000)")
+    .option("--consume-poll <ms>", "Consumption-verification poll interval in ms (default 1500)")
     .option("--json", "JSON output")
     .addHelpText("after", `
 Examples:
@@ -80,7 +84,7 @@ Examples:
 Paced push-delivery: each piece is sent into the target pane, then --pace elapses
 before the next. The walker leads; it does not wait for replies — the spacing lets
 the agent process between sends. Small piece → 'rig send'; a real pack → walk.`)
-    .action(async (seat: string, opts: { through?: string[]; throughProfile?: string; situation?: string; runtime?: string; rig?: string; seatGrant?: string; mission?: string; budget?: string; pace?: string; json?: boolean }) => {
+    .action(async (seat: string, opts: { through?: string[]; throughProfile?: string; situation?: string; runtime?: string; rig?: string; seatGrant?: string; mission?: string; budget?: string; pace?: string; consumeTimeout?: string; consumePoll?: string; json?: boolean }) => {
       try {
         const deps = getDeps();
         const paceMs = parsePaceMs(opts.pace);
@@ -137,33 +141,170 @@ the agent process between sends. Small piece → 'rig send'; a real pack → wal
         }
 
         const client = await getClient(deps);
+
+        // --- Consumption verification BY EFFECT (mechanics-gate fix, desk ruling d9b3989a) ---
+        // Send success means TYPED, not CONSUMED: the paste + Enter can succeed at the tmux layer
+        // while the target TUI leaves the text STAGED at the prompt, and the next pieces coalesce.
+        // The effect source is the seat's current-generation record (the append-only conversation
+        // JSONL): a consumed piece appears as a user-role record containing the piece's head.
+        // Same duration grammar as --pace (10s / 500ms / bare seconds); defaults 20s / 1.5s.
+        const consumeTimeoutMs = opts.consumeTimeout !== undefined ? parsePaceMs(opts.consumeTimeout) : 20_000;
+        const consumePollMs = opts.consumePoll !== undefined ? parsePaceMs(opts.consumePoll) : 1_500;
+        if (consumeTimeoutMs === null || consumePollMs === null) {
+          console.error("Invalid --consume-timeout / --consume-poll: use e.g. 20s, 1500ms, or a bare number of seconds.");
+          process.exitCode = 1;
+          return;
+        }
+        const normalize = (s: string) => s.replace(/\s+/g, "");
+        const pieceHead = (content: string) => normalize(content).slice(0, 64);
+        const recordPath = `/api/sessions/${encodeURIComponent(seat)}/generation-record`;
+
+        interface RecordRead { generationId?: string; totalBytes?: number; suffix?: string; error?: string; message?: string }
+        const readRecord = async (sinceBytes?: number): Promise<{ status: number; data: RecordRead }> =>
+          client.get<RecordRead>(sinceBytes === undefined ? recordPath : `${recordPath}?sinceBytes=${sinceBytes}`);
+
+        /** Does the record suffix show the piece consumed — a user-role record carrying the piece head? */
+        const suffixShowsConsumed = (suffix: string, head: string): boolean => {
+          for (const line of suffix.split("\n")) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            let rec: { message?: { role?: string; content?: Array<{ type?: string; text?: string }> | string } };
+            try { rec = JSON.parse(trimmed); } catch { continue; }
+            if (rec.message?.role !== "user") continue;
+            const c = rec.message.content;
+            const texts = typeof c === "string" ? [c] : Array.isArray(c) ? c.filter((b) => b.type === "text" && typeof b.text === "string").map((b) => b.text!) : [];
+            if (texts.some((t) => normalize(t).includes(head))) return true;
+          }
+          return false;
+        };
+
+        // One pre-walk record probe decides the mode. No record (unsupported runtime / no sidecar /
+        // a daemon without the route) → legacy delivery with a NAMED advisory: unverified is
+        // disclosed, never silent.
+        let preProbe: { status: number; data: RecordRead };
+        try {
+          preProbe = await readRecord();
+        } catch (err) {
+          preProbe = { status: 0, data: { message: `generation-record probe failed: ${(err as Error).message}` } };
+        }
+        const verifiable = preProbe.status === 200 && typeof preProbe.data.generationId === "string";
+        if (!verifiable) {
+          console.error(`walk: consumption unverified for ${seat} — ${preProbe.data.message ?? preProbe.data.error ?? `generation record unavailable (HTTP ${preProbe.status})`}. Pieces are delivered without per-piece effect verification.`);
+        }
+
+        const failPiece = (i: number, label: string, why: string): void => {
+          console.error(`walk aborted at piece ${i + 1}/${pieces.length} (${label}): ${why}`);
+          if (profileIdentity) {
+            console.log(JSON.stringify({ seat, delivered: profileIdentity.slice(0, i), expected: profileIdentity, aborted: profileIdentity[i] }));
+          }
+          process.exitCode = 1;
+        };
+
         for (let i = 0; i < pieces.length; i++) {
           const piece = pieces[i]!;
-          const res = await client.post<Record<string, unknown>>("/api/transport/send", {
-            session: seat,
-            text: piece.content,
-          });
-          if (res.status >= 400) {
-            const err = (res.data?.["error"] as string | undefined) ?? `HTTP ${res.status}`;
-            console.error(`walk aborted at piece ${i + 1}/${pieces.length} (${piece.label}): ${err}`);
-            // Profile mode: the MISMATCH is reported by identity — the
-            // delivered PREFIX vs the expected set, exact-comparable.
-            if (profileIdentity) {
-              console.log(JSON.stringify({ seat, delivered: profileIdentity.slice(0, i), expected: profileIdentity, aborted: profileIdentity[i] }));
+          const head = pieceHead(piece.content);
+
+          let preLen = 0;
+          let preGen: string | undefined;
+          if (verifiable) {
+            const pre = await readRecord();
+            if (pre.status !== 200 || typeof pre.data.generationId !== "string") {
+              failPiece(i, piece.label, `the seat's generation record became unreadable before the send (${pre.data.message ?? pre.data.error ?? `HTTP ${pre.status}`}).`);
+              return;
             }
-            process.exitCode = 1;
-            return;
+            preGen = pre.data.generationId;
+            preLen = pre.data.totalBytes ?? 0;
           }
-          if (!opts.json) console.log(`[${i + 1}/${pieces.length}] sent ${piece.label} → ${seat}`);
+
+          // THE SEND. A thrown client error (a timeout) is NOT a failure yet — the daemon may have
+          // completed server-side; reconcile BY EFFECT below, never re-send (the fleet ledger's
+          // rule, productized). A definitive 4xx/5xx still aborts — EXCEPT submit_failed, which is
+          // exactly the staged-text state and takes the single-Enter retry path.
+          let sendOutcome: "ok" | "staged-suspect" | { hardError: string } ;
+          try {
+            const res = await client.post<Record<string, unknown>>("/api/transport/send", {
+              session: seat,
+              text: piece.content,
+            });
+            if (res.status >= 400) {
+              if (res.data?.["reason"] === "submit_failed") sendOutcome = "staged-suspect";
+              else {
+                failPiece(i, piece.label, (res.data?.["error"] as string | undefined) ?? `HTTP ${res.status}`);
+                return;
+              }
+            } else sendOutcome = "ok";
+          } catch (err) {
+            if (!verifiable) {
+              failPiece(i, piece.label, `transport error with no way to reconcile by effect (no generation record): ${(err as Error).message}`);
+              return;
+            }
+            console.error(`walk: piece ${i + 1}/${pieces.length} transport error (${(err as Error).message}) — reconciling by effect, not re-sending.`);
+            sendOutcome = "staged-suspect";
+          }
+
+          if (verifiable) {
+            const pollConsumed = async (): Promise<"consumed" | "generation-rolled" | "timeout"> => {
+              const deadline = Date.now() + consumeTimeoutMs;
+              for (;;) {
+                const rec = await readRecord(preLen);
+                if (rec.status === 200 && typeof rec.data.generationId === "string") {
+                  if (rec.data.generationId !== preGen) return "generation-rolled";
+                  if (suffixShowsConsumed(rec.data.suffix ?? "", head)) return "consumed";
+                }
+                if (Date.now() >= deadline) return "timeout";
+                await sleep(consumePollMs);
+              }
+            };
+
+            let verdict = await pollConsumed();
+            if (verdict === "generation-rolled") {
+              failPiece(i, piece.label, "the seat's generation rolled mid-walk (a re-prime); the walk cannot continue into a different generation.");
+              return;
+            }
+            if (verdict === "timeout") {
+              // Not consumed in the window. Staged? — one capture decides; staged takes EXACTLY ONE
+              // submit retry (a guarded bare Enter), then one more verification window, then loud.
+              const cap = await client.post<Record<string, unknown>>("/api/transport/capture", { session: seat, lines: 50 });
+              const pane = (cap.data?.["content"] as string | undefined) ?? "";
+              // Staged evidence: the piece's own head (short pastes render inline, truncated) OR
+              // the TUI's pasted-text placeholder (large pastes render as "[Pasted text #N +X
+              // lines]", never their content — the real specimen's shape).
+              const stagedEvidence = cap.status === 200 && (
+                normalize(pane).includes(head.slice(0, 24)) ||
+                /\[Pasted text #\d+ \+\d+ lines\]/.test(pane)
+              );
+              if (stagedEvidence) {
+                const enter = await client.post<Record<string, unknown>>("/api/transport/send", {
+                  session: seat,
+                  submitOnly: true,
+                  expectedStagedText: piece.content.slice(0, 200),
+                });
+                if (enter.status >= 400) {
+                  failPiece(i, piece.label, `typed but not consumed; the single submit retry was refused (${(enter.data?.["error"] as string | undefined) ?? `HTTP ${enter.status}`}).`);
+                  return;
+                }
+                verdict = await pollConsumed();
+                if (verdict !== "consumed") {
+                  failPiece(i, piece.label, `typed and staged, but not consumed even after the single submit retry — the piece never entered the seat's conversation record. Not re-sending (one retry is the contract).`);
+                  return;
+                }
+              } else {
+                failPiece(i, piece.label, `send reported ${sendOutcome === "ok" ? "success" : "a transport error"} but the piece is neither consumed in the generation record nor staged in the pane — delivery lost; consumption verification fails this walk closed.`);
+                return;
+              }
+            }
+          }
+
+          if (!opts.json) console.log(`[${i + 1}/${pieces.length}] ${verifiable ? "consumed" : "sent"} ${piece.label} → ${seat}`);
           // Pace BETWEEN pieces only — never a trailing pause after the last.
           if (i < pieces.length - 1) await sleep(paceMs);
         }
         if (opts.json) {
           console.log(JSON.stringify(profileIdentity
-            ? { seat, delivered: profileIdentity, paceMs }
-            : { seat, pieces: pieces.length, paceMs }));
+            ? { seat, delivered: profileIdentity, paceMs, consumptionVerified: verifiable }
+            : { seat, pieces: pieces.length, paceMs, consumptionVerified: verifiable }));
         } else {
-          console.log(`Walked ${seat} through ${pieces.length} piece(s).`);
+          console.log(`Walked ${seat} through ${pieces.length} piece(s)${verifiable ? ", each consumption-verified by effect" : " (consumption unverified — no generation record)"}.`);
         }
       } catch (err) {
         console.error((err as Error).message);

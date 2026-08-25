@@ -21,9 +21,13 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       dangerouslyInteract?: boolean;
       reason?: string;
       actorSession?: string | null;
+      submitOnly?: boolean;
+      expectedStagedText?: string;
     }>();
 
-    if (!body.session || !body.text) {
+    // submitOnly (mechanics-gate fix d9b3989a) sends NO text — the Enter-only retry for staged
+    // content; every other send still requires text.
+    if (!body.session || (!body.text && !body.submitOnly)) {
       return c.json({ error: "Missing required fields: session, text" }, 400);
     }
     // OPR.0.4.1.10 — the danger override and wait mode are contradictory; reject before transport.
@@ -83,13 +87,17 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       return c.json({ ok: false, error: resolved.error }, status);
     }
 
-    const result = await transport.send(body.session, body.text, {
+    const result = await transport.send(body.session, body.text ?? "", {
       verify: body.verify,
       force: body.force,
       waitForIdleMs: body.waitForIdleMs,
       dangerouslyInteract: body.dangerouslyInteract,
       reason: body.reason,
       actorSession: derivedActor, // transport-derived, never the body claim
+      // Mechanics-gate fix (d9b3989a): the walk retry's bare-Enter mode, guarded in the
+      // transport by the expected-staged-text precheck.
+      submitOnly: body.submitOnly,
+      expectedStagedText: body.expectedStagedText,
     });
 
     if (!result.ok) {
@@ -107,6 +115,8 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
         prompt_override_audit_unavailable: 500,
         submit_failed: 502,
         send_failed: 502,
+        invalid_submit_only: 400,
+        staged_mismatch: 409,
       };
       const status = (statusMap[result.reason ?? ""] ?? 500) as 400 | 404 | 409 | 500 | 502 | 503;
       return c.json(result, status);
@@ -121,7 +131,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     // never the relay). A null-actor send has no derived sender to attribute (no fabricated row). The
     // send is already committed, so a rare audit-write failure is LOGGED, never a false-negative on a
     // delivered send.
-    if (derivedActor) {
+    if (derivedActor && !body.submitOnly) { // submitOnly types no text — nothing to outbox-record
       const outbox = c.get("outboxHandler" as never) as OutboxHandler | undefined;
       if (outbox) {
         try {

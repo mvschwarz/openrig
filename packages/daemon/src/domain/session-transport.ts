@@ -381,6 +381,13 @@ export interface SendOpts {
   // GHOST-STAGE (h): the envelope's compose stamp (ISO), threaded to send() so the WRITE-moment
   // delivered-latency calc can measure how long the message waited. Absent ⇒ no delivered segment.
   stampISO?: string;
+  // Mechanics-gate fix (desk ruling d9b3989a): press Enter WITHOUT typing — the single submit
+  // retry for text that was pasted but never accepted by the target TUI. Safe by construction:
+  // requires `expectedStagedText`, and the pane must actually contain it before the Enter lands —
+  // a bare Enter at anything else (e.g. a permission prompt) is refused as staged_mismatch. The
+  // caller's `text` argument must be empty in this mode.
+  submitOnly?: boolean;
+  expectedStagedText?: string;
 }
 
 // OPR.0.4.3.30 — options for the fan-out path (`broadcast()`). Superset of SendOpts.
@@ -416,6 +423,8 @@ export interface SendResult {
   warning?: string;
   error?: string;
   reason?: string;
+  /** Set on the submit-only (bare Enter) mode's success — no text was typed. */
+  submitOnly?: boolean;
   activity?: AgentActivity;
   waitedMs?: number;
   attempts?: number;
@@ -818,6 +827,50 @@ export class SessionTransport {
         reason: "tmux_unavailable",
         error: "tmux is not available. Ensure tmux is installed and a server is running.",
       };
+    }
+
+    // SUBMIT-ONLY (mechanics-gate fix, desk ruling d9b3989a): the single Enter retry for staged
+    // text. Types NOTHING; verifies the pane actually holds the expected staged text FIRST, so a
+    // bare Enter can never land on anything else (a permission prompt, someone else's input).
+    if (opts?.submitOnly) {
+      if (text.length > 0) {
+        return { ok: false, sessionName, reason: "invalid_submit_only", error: "submitOnly sends no text — the text argument must be empty." };
+      }
+      const expected = opts.expectedStagedText ?? "";
+      if (expected.trim().length === 0) {
+        return { ok: false, sessionName, reason: "invalid_submit_only", error: "submitOnly requires expectedStagedText — the Enter is only pressed onto the exact staged content." };
+      }
+      const norm = (s: string) => s.replace(/\s+/g, "");
+      const pane = await this.runStage(
+        "session_transport.submit_only_precheck",
+        () => this.tmuxAdapter.capturePaneContent(sessionName, 50),
+      );
+      // The staged evidence is EITHER the content's own head (a short paste renders inline,
+      // possibly truncated — 24 normalized chars is distinctive yet survives truncation) OR the
+      // TUI's pasted-text placeholder (a large paste renders as "[Pasted text #N +X lines]", never
+      // its content). A permission prompt shows neither, which is the hazard this gate exists for.
+      const head = norm(expected).slice(0, 24);
+      const paneNorm = norm(pane ?? "");
+      const stagedEvidence =
+        (head.length > 0 && paneNorm.includes(head)) ||
+        /\[Pasted text #\d+ \+\d+ lines\]/.test(pane ?? "");
+      if (!stagedEvidence) {
+        return {
+          ok: false,
+          sessionName,
+          reason: "staged_mismatch",
+          error: `submitOnly refused: the pane of '${sessionName}' does not show the expected staged text — pressing Enter here could drive something else entirely. Nothing was submitted.`,
+        };
+      }
+      const submitResult = await this.runStage(
+        "session_transport.submit",
+        () => this.tmuxAdapter.sendKeys(sessionName, ["C-m"]),
+        (result) => result.ok ? "ok" : "failed",
+      );
+      if (!submitResult.ok) {
+        return { ok: false, sessionName, reason: "submit_failed", outcome: "failed", error: `submitOnly: Enter did not land on '${sessionName}': ${submitResult.message}` };
+      }
+      return { ok: true, sessionName, outcome: "rendered-unconfirmed", submitOnly: true };
     }
 
     if (waitForIdleMs !== undefined) {

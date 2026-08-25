@@ -635,3 +635,55 @@ sessionAdminRoutes.post("/:sessionRef/unclaim", terminalAuthGuard(), async (c) =
 
   return c.json(result, 200);
 });
+
+// GET /api/sessions/:sessionName/generation-record?sinceBytes=N
+// Mechanics-gate fix (desk ruling d9b3989a): the CONSUMPTION-BY-EFFECT source for `rig walk`.
+// Serves the seat's current-generation append-only conversation record identity plus the suffix
+// from sinceBytes, resolved through the ContextUsageStore sidecar (the same authority the Test-A
+// runner's default reader uses) — never a pane snapshot. Refuses LOUD when the seat has no
+// resolvable record (unsupported runtime / no sidecar): a caller must know verification is
+// impossible, never receive an empty success.
+sessionAdminRoutes.get("/:sessionName/generation-record", async (c) => {
+  const sessionName = decodeURIComponent(c.req.param("sessionName")!);
+  const store = c.get("contextUsageStore" as never) as ContextUsageStore | undefined;
+  if (!store) {
+    return c.json({ error: "unsupported_runtime", message: "No context-usage store on this daemon; the seat's generation record cannot be resolved." }, 409);
+  }
+  const usage = store.readAndNormalize(sessionName);
+  const transcriptPath = usage.transcriptPath;
+  const generationId = usage.sessionId;
+  if (!transcriptPath || !generationId) {
+    return c.json({ error: "unsupported_runtime", message: `No current-generation record resolves for '${sessionName}' (no sidecar transcript_path/session_id) — consumption cannot be verified for this seat.` }, 409);
+  }
+  const fs = await import("node:fs");
+  let totalBytes: number;
+  try {
+    totalBytes = fs.statSync(transcriptPath).size;
+  } catch (err) {
+    return c.json({ error: "record_unreadable", message: `Generation record for '${sessionName}' names '${transcriptPath}' but it is unreadable: ${(err as Error).message}` }, 409);
+  }
+  const sinceRaw = c.req.query("sinceBytes");
+  if (sinceRaw === undefined) {
+    return c.json({ generationId, totalBytes });
+  }
+  const since = Number(sinceRaw);
+  if (!Number.isFinite(since) || since < 0) {
+    return c.json({ error: "invalid_since_bytes", message: "sinceBytes must be a non-negative number." }, 400);
+  }
+  // Cap the served suffix — the caller polls; a runaway record must not become a runaway response.
+  const MAX_SUFFIX_BYTES = 8 * 1024 * 1024;
+  const start = Math.min(since, totalBytes);
+  const length = Math.min(totalBytes - start, MAX_SUFFIX_BYTES);
+  let suffix = "";
+  if (length > 0) {
+    const fd = fs.openSync(transcriptPath, "r");
+    try {
+      const buf = Buffer.alloc(length);
+      const read = fs.readSync(fd, buf, 0, length, start);
+      suffix = buf.subarray(0, read).toString("utf8");
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+  return c.json({ generationId, totalBytes, suffix, truncated: totalBytes - start > length });
+});
