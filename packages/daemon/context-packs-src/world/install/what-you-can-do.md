@@ -10,7 +10,7 @@ already does it, or two verbs crossed already answer it. **You cannot look up a 
 not know exists.** So the point of what follows is not skill. It is recognition: that when a task
 lands, something rhymes, and you go check instead of building.
 
-Eighty-one-plus top-level verbs ship (canon last patched for v0.5.2 — delta-v0.5.2). Read this
+Eighty-one-plus top-level verbs ship (canon last patched for v0.5.3 — delta-v0.5.3 at dc57a5d1). Read this
 once for shape, and let it make you suspicious that a thing already exists. Model-divergence
 proclamations are live product (trust them; pins use canonical model IDs).
 
@@ -252,11 +252,33 @@ scheme, and nothing downstream can see it.
 - **`rig scope slice repair` / `mission repair`** — conform missing progress files and malformed
   frontmatter without hand-editing YAML.
 - **`rig proof add`** — put evidence where the slice, the audit and the UI will all find it,
-  instead of pasting it into a message.
+  instead of pasting it into a message. **The contract it pairs to is chosen by source-selection
+  law, and a pristine scaffold PRD can never silently become that contract**: the drop derives
+  from the authored SPEC with a named advisory, and `contractSource` in the echo records which
+  source actually bound. When someone later asks where the contract items came from, the drop's
+  own echo is the answer — not a re-read of the files.
 - **`rig workspace doctor` / `validate`** — does the daemon agree with you about where the work
   tree is, and which files are missing the frontmatter their kind requires.
 - **`rig context show` / `sync` / `rm`** — what is inside a context pack before you prime a seat
   with it, and how to make the library catch up when you edit one.
+- **`rig context get <name-or-ref>`** — pull exact context by address instead of reading files:
+  `<pack-ref>/<file>#<H2-slug>[/<H3-slug>]` serves the exact span bytes of one section, and **the
+  `/<file>` component is required even in a one-file pack**. A bogus slug fails loud and lists the
+  addressable sections. **Compose by ref rather than copying**: library content pasted into a seat
+  or mission file is a second copy that drifts, nothing will catch the copy automatically, and it
+  is a defect by rule.
+- **`rig context list`** — every shipped entry's canonical ref (`skills/<namespace>/<name>`) and
+  name: the ask → ref → load path when you do not know which context applies. Expertise packs
+  serve the same way — but read a pack's own framing before trusting it: the context-engineering
+  pack is a dated snapshot, provisional and non-normative by ruling, and current OpenRig skills,
+  explicit rulings and measured practice outrank it on any conflict.
+- **`rig context profile <ref>`** — compose a situation-shaped profile from a pack's declared
+  atoms. Cross-source access (`seat:` / `mission:` atoms) is an **authoring** affordance: declared
+  in pack manifests and granted via `--rig/--seat/--mission` at composition time — never an
+  ad-hoc argument to `get`.
+- **`rig context recap-write`** — a durable, seat-scoped RECAP beside LEARNED with a
+  collision-safe superseded chain, written at the handover or compaction boundary; restore
+  packets carry the pointer, so a successor reads decisions-with-rationale instead of scrollback.
 - **`rig project classify` / `list` / `show`** — turn a raw observation into a routed, typed,
   deduped record instead of hand-creating a row from a hunch.
 
@@ -317,6 +339,10 @@ your circumstances is configuration, and the ones that are not, another agent ca
   loudly to report, whether to batch permission questions or block on them. **This declares a
   posture; it does not grant or deny permissions** — the harness's own settings are the control
   surface for that.
+- **The owner boundary is exactly: pushes and PRs.** Nothing else needs the owner's word — local
+  commits and ordinary apply work never do. When a script guard mentions being gated, it is
+  demanding an explicit path (e.g. `OPENRIG_SKILL_CANON_ROOT`), not permission; read it as a
+  missing input, never as an authorization wall.
 - **`rig auth list` / `validate` / `seats`** — is this seat's runtime actually logged in, which
   accounts exist, and which account each seat is *supposed* to be on.
 - **`rig provider accounts` / `bindings` / `signals` / `switch`** — which seats are bound to which
