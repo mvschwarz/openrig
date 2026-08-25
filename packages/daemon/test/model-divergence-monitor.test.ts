@@ -13,6 +13,7 @@ import {
   type PinnedSeat,
 } from "../src/domain/model-divergence/model-divergence-monitor.js";
 import { SPEC_VALIDATION_CAPABILITIES } from "../src/domain/rigspec-schema.js";
+import { ProcessCensus } from "../src/domain/process-census.js";
 
 const SEAT: PinnedSeat = {
   nodeId: "n1",
@@ -40,6 +41,57 @@ function makeMonitor(overrides?: Partial<ConstructorParameters<typeof ModelDiver
   });
   return { monitor, sent, recorded };
 }
+
+describe("ModelDivergenceMonitor — ONE process census per pass (perf-process-census, row 20260825035200)", () => {
+  it("N unresolved seats trigger EXACTLY ONE process enumeration for the whole checkOnce pass, not one per seat", async () => {
+    const seats: PinnedSeat[] = Array.from({ length: 5 }, (_, i) => ({
+      ...SEAT, nodeId: `n${i}`, sessionName: `seat${i}@r`, generation: `g${i}`,
+    }));
+    let scans = 0;
+    let reads = 0;
+    let clock = 0;
+    // The production census: one enumeration underneath, cycle-scoped per pass, with a freshness
+    // window (default 2s). Inject the clock so the second pass sits PAST freshness and must re-scan —
+    // otherwise the freshness reuse would (correctly) collapse two nearby passes onto one scan too.
+    const census = new ProcessCensus({ list: async () => { scans += 1; return []; }, now: () => clock });
+    const { monitor } = makeMonitor({
+      listPinnedSeats: () => seats,
+      processCensus: census,
+      // every seat is UNRESOLVED (never settles) and pulls the process table via the
+      // pass-scoped census, exactly as the live claude/codex current-generation readers do.
+      readEffectiveModel: async (_seat, cycle) => {
+        reads += 1;
+        await cycle!.listProcesses();
+        return { ok: false as const, reason: "pending — no live record this pass" };
+      },
+    });
+
+    await monitor.checkOnce();
+    expect(reads).toBe(5);   // all five unresolved seats were read...
+    expect(scans).toBe(1);   // ...but the whole pass did a SINGLE enumeration (not 5)
+
+    // A second pass past the freshness window still does ONE scan for all five seats, never per seat.
+    clock = 10_000;
+    await monitor.checkOnce();
+    expect(reads).toBe(10);
+    expect(scans).toBe(2);
+  });
+
+  it("checkOnce threads a poll-scoped cycle to every seat when a processCensus is present (load-bearing wiring)", async () => {
+    let everySeatGotACycle = true;
+    const census = new ProcessCensus({ list: async () => [] });
+    const { monitor } = makeMonitor({
+      listPinnedSeats: () => [{ ...SEAT }, { ...SEAT, nodeId: "n2", sessionName: "b@r", generation: "g2" }],
+      processCensus: census,
+      readEffectiveModel: async (_seat, cycle) => {
+        if (!cycle) everySeatGotACycle = false;
+        return { ok: false as const, reason: "pending" };
+      },
+    });
+    await monitor.checkOnce();
+    expect(everySeatGotACycle).toBe(true);
+  });
+});
 
 describe("ModelDivergenceMonitor — per-seat throw isolation (row 3f66664a, defense-in-depth)", () => {
   it("a seat whose check THROWS is reported as a detector error and does NOT suppress the remaining seats' checks", async () => {
