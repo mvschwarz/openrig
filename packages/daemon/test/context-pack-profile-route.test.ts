@@ -9,9 +9,10 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { copyFileSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { ContextPackLibraryService } from "../src/domain/context-packs/context-pack-library-service.js";
 import { contextPacksRoutes } from "../src/routes/context-packs.js";
 
@@ -82,6 +83,16 @@ describe("GET /library/by-ref/profile — situation-composed delivery (Atom 4b)"
     expect(recap.sourceKind).toBe("seat");
     expect(recap.text).toContain("we chose X because Y");
     expect(body.pieces.find((p) => p.atomId === "welcome")!.sourceKind).toBe("library");
+  });
+
+  it("every piece carries its sha256 so profile and walk are hash-exact-comparable (Test-A door gate)", async () => {
+    const res = await app.request(url("situation=handover&runtime=claude&rig=r1&seat=s1"));
+    expect(res.status).toBe(200);
+    const body = await res.json() as { pieces: Array<{ text: string; sha256: string }> };
+    const { createHash } = await import("node:crypto");
+    for (const p of body.pieces) {
+      expect(p.sha256).toBe(createHash("sha256").update(p.text, "utf8").digest("hex"));
+    }
   });
 
   it("FRESH composes without the seat tree (no rig/seat params needed when no tree atom selects)", async () => {
@@ -251,5 +262,94 @@ describe("GET /library/by-ref/profile — situation-composed delivery (Atom 4b)"
 
     const missing = await app.request("/api/context-packs/library/by-ref/profile?ref=packs%2Fghost&situation=fresh&runtime=claude");
     expect(missing.status).toBe(404);
+  });
+});
+
+// review50-r2 BLOCKING-1 (verdict a5a63659): the PRODUCTION world/install graph
+// must declare the seat-scoped RECAP atom — the fixture above proves the
+// mechanism, not the production manifest. This block drives the COMMITTED
+// production manifest through the REAL route with a real seat RECAP.
+describe("PRODUCTION world/install graph — the seat RECAP composes through the real route (r2 B1)", () => {
+  let tmp: string;
+  let app: Hono;
+  const savedTopologyRoot = process.env["OPENRIG_TOPOLOGY_ROOT"];
+  const SENTINEL = "sentinel-recap-7fce914a8: we chose the atoms graph because drift";
+  const PROD_PACK_SRC = join(dirname(fileURLToPath(import.meta.url)), "..", "context-packs-src", "world", "install");
+
+  function buildApp(withRecap: boolean): void {
+    tmp = mkdtempSync(join(tmpdir(), "s05-prod-recap-"));
+    const libRoot = join(tmp, "lib");
+    const packDir = join(libRoot, "world", "install");
+    mkdirSync(packDir, { recursive: true });
+    for (const f of readdirSync(PROD_PACK_SRC)) {
+      copyFileSync(join(PROD_PACK_SRC, f), join(packDir, f));
+    }
+    // the committed manifest carries the version placeholder; the parser accepts "0"
+    if (withRecap) {
+      const seatDir = join(tmp, "topology", "rigs", "r1", "seats", "s1");
+      mkdirSync(seatDir, { recursive: true });
+      writeFileSync(join(seatDir, "RECAP.md"), `## Decisions\n${SENTINEL}`);
+    } else {
+      mkdirSync(join(tmp, "topology", "rigs", "r1", "seats", "s1"), { recursive: true });
+    }
+    process.env["OPENRIG_TOPOLOGY_ROOT"] = join(tmp, "topology");
+    const lib = new ContextPackLibraryService({ roots: [{ path: libRoot, sourceType: "builtin" }] });
+    lib.scan();
+    app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("contextPackLibrary" as never, lib);
+      await next();
+    });
+    app.route("/api/context-packs", contextPacksRoutes());
+  }
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+    if (savedTopologyRoot === undefined) delete process.env["OPENRIG_TOPOLOGY_ROOT"];
+    else process.env["OPENRIG_TOPOLOGY_ROOT"] = savedTopologyRoot;
+  });
+
+  const prodUrl = (qs: string) => `/api/context-packs/library/by-ref/profile?ref=${encodeURIComponent("world/install")}&${qs}`;
+
+  it("HANDOVER = the fresh walk + the seat-sourced RECAP, sentinel bytes and sourceKind seat", async () => {
+    buildApp(true);
+    const res = await app.request(prodUrl("situation=handover&runtime=claude&rig=r1&seat=s1"));
+    expect(res.status).toBe(200);
+    const body = await res.json() as { pieces: Array<{ atomId: string; sourceKind: string; text: string }> };
+    expect(body.pieces.map((p) => p.atomId)).toEqual([
+      "world-from-primitives", "permission-self-sleep", "what-this-is-for", "ontology", "harness-power-use", "a-competent-turn", "recap",
+    ]);
+    const recap = body.pieces.find((p) => p.atomId === "recap")!;
+    expect(recap.sourceKind).toBe("seat");
+    expect(recap.text).toContain("sentinel-recap-7fce914a8");
+  });
+
+  it("POST-COMPACTION = the measured re-prime + the seat-sourced RECAP", async () => {
+    buildApp(true);
+    const res = await app.request(prodUrl("situation=post-compaction&runtime=claude&rig=r1&seat=s1"));
+    expect(res.status).toBe(200);
+    const body = await res.json() as { pieces: Array<{ atomId: string; sourceKind: string }> };
+    expect(body.pieces.map((p) => p.atomId)).toEqual([
+      "ontology", "what-you-can-do", "reference-material", "a-competent-turn", "recap",
+    ]);
+    expect(body.pieces.find((p) => p.atomId === "recap")!.sourceKind).toBe("seat");
+  });
+
+  it("a MISSING seat RECAP fails LOUD with a named error — never a silently thinner handover", async () => {
+    buildApp(false);
+    const res = await app.request(prodUrl("situation=handover&runtime=claude&rig=r1&seat=s1"));
+    expect(res.status).toBe(422);
+    const body = await res.json() as { message: string };
+    expect(body.message).toMatch(/recap/i);
+  });
+
+  it("FRESH needs no seat tree and stays the six-piece walk (recap never leaks into fresh)", async () => {
+    buildApp(true);
+    const res = await app.request(prodUrl("situation=fresh&runtime=claude"));
+    expect(res.status).toBe(200);
+    const body = await res.json() as { pieces: Array<{ atomId: string }> };
+    expect(body.pieces.map((p) => p.atomId)).toEqual([
+      "world-from-primitives", "permission-self-sleep", "what-this-is-for", "ontology", "harness-power-use", "a-competent-turn",
+    ]);
   });
 });

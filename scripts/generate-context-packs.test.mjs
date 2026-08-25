@@ -204,3 +204,198 @@ test("REAL CANON: referenced helpers are DELIVERED in the served bundle (packed-
     rmSync(out, { recursive: true, force: true });
   }
 });
+
+// ── Test-A preflight repair (row 0ac358a9): STATIC packs projection ─────────
+// The builtin library previously carried only skill projections; the world
+// install ships as a STATIC committed pack (manifest + parent files) projected
+// through the same script and validated by the same daemon parser.
+
+function runWithStatic(source, staticSource, out, args = []) {
+  return execFileSync("node", [GEN, ...args], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      OPENRIG_SKILLS_SOURCE: source,
+      OPENRIG_STATIC_PACKS_SOURCE: staticSource,
+      OPENRIG_PACKS_OUT: out,
+      OPENRIG_PACKAGE_VERSION: "0.5.3",
+    },
+  });
+}
+
+function staticWorldPack(root, rel, { withCharged = false } = {}) {
+  const dir = join(root, rel);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "a.md"), `# A\n\nalpha body${withCharged ? " for the founder" : ""}\n`);
+  writeFileSync(join(dir, "b.md"), "# B\n\nbeta body\n");
+  writeFileSync(
+    join(dir, "manifest.yaml"),
+    [
+      'name: "mini-world"',
+      'version: "0"',
+      'purpose: "mini world for the projection pin"',
+      "files:",
+      '  - path: "a.md"',
+      '    role: "world"',
+      '  - path: "b.md"',
+      '    role: "world"',
+      "atoms:",
+      '  - id: alpha',
+      '    address: "a.md"',
+      "    taxonomy: world",
+      "    situations: [fresh]",
+      "    purpose: depth",
+      "    order: 10",
+      "    priority: core",
+      '  - id: beta',
+      '    address: "b.md"',
+      "    taxonomy: world",
+      "    situations: [fresh, post-compaction]",
+      "    purpose: width",
+      "    order: 20",
+      "    priority: core",
+      "",
+    ].join("\n"),
+  );
+}
+
+test("STATIC PACK PROJECTED: a committed world pack lands in the builtin root with its atoms graph, version stamped", () => {
+  const { source, out, base } = scratch();
+  try {
+    skill(source, "core/x", { name: "x", description: "d", files: {} });
+    const staticSrc = join(base, "static");
+    staticWorldPack(staticSrc, "world/install");
+    runWithStatic(source, staticSrc, out);
+    assert.ok(existsSync(join(out, "world/install/manifest.yaml")), "world/install must be projected");
+    assert.ok(existsSync(join(out, "world/install/a.md")), "pack content must be copied");
+    const m = parseManifest(readFileSync(join(out, "world/install/manifest.yaml"), "utf8"), "w");
+    assert.equal(m.version, "0.5.3", "the projection must stamp the package version over the placeholder");
+    assert.equal(m.atoms.length, 2, "the atoms graph must survive projection");
+    assert.deepEqual(m.atoms.map((a) => a.id), ["alpha", "beta"]);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+function expectStaticLeakFailure(base, mutate, label) {
+  const { source, out } = { source: join(base, "skills"), out: join(base, "out") };
+  skill(source, "core/x", { name: "x", description: "d", files: {} });
+  const staticSrc = join(base, "static");
+  staticWorldPack(staticSrc, "world/install");
+  mutate(join(staticSrc, "world/install"));
+  let failed = false;
+  try {
+    runWithStatic(source, staticSrc, out);
+  } catch (err) {
+    failed = true;
+    assert.equal(err.status, 1, `${label}: exit code must be 1 (build failure)`);
+  }
+  assert.ok(failed, `${label}: must fail the build`);
+}
+
+test("STATIC PACK LEAK GUARD runs the FULL committed authority: charged term, path prefix, AND seat/rig identity each FAIL THE BUILD", () => {
+  for (const [label, content] of [
+    ["charged term", "# A\n\nalpha body for the founder\n"],
+    ["internal path prefix", "# A\n\nsee openrig-work/skills for the library\n"],
+    ["instance seat/rig identity", "# A\n\nroute it to dev50@v-openrig-build when done\n"],
+  ]) {
+    const base = mkdtempSync(join(tmpdir(), "s05-leak-"));
+    try {
+      expectStaticLeakFailure(base, (dir) => writeFileSync(join(dir, "a.md"), content), label);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  }
+});
+
+test("REF COLLISION across sources FAILS THE BUILD with no output mutation (B3)", () => {
+  const base = mkdtempSync(join(tmpdir(), "s05-collide-"));
+  try {
+    const source = join(base, "skills");
+    const out = join(base, "out");
+    // a skill projecting to ref skills/world/install ...
+    skill(source, "world/install", { name: "world-install-skill", description: "d", files: {} });
+    // ... and a static pack claiming the SAME ref
+    const staticSrc = join(base, "static");
+    staticWorldPack(staticSrc, "skills/world/install");
+    let failed = false;
+    try {
+      runWithStatic(source, staticSrc, out);
+    } catch (err) {
+      failed = true;
+      assert.equal(err.status, 1, "collision must exit 1");
+      assert.match(String(err.stderr), /duplicate|collid/i);
+    }
+    assert.ok(failed, "duplicate pack ref across sources must fail the build");
+    assert.ok(!existsSync(out), "no output may be written on a collision");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("PRODUCTION WORLD PACK: the committed world/install projects with one atoms graph and the FRESH walk composes in the load-bearing order", async () => {
+  const out = mkdtempSync(join(tmpdir(), "s05-world-"));
+  try {
+    run(REAL_SKILLS, out); // no static override: the REAL committed static source projects
+    const manifestPath = join(out, "world/install/manifest.yaml");
+    assert.ok(existsSync(manifestPath), "the production builtin library must contain the world/install pack");
+    const m = parseManifest(readFileSync(manifestPath, "utf8"), "world-install");
+    assert.equal(m.name, "world-install");
+    assert.equal(m.files.length, 8, "eight parent files — the instance-bound handover runbook is NOT library content (Q2-Amendment 1)");
+    assert.equal(m.atoms.length, 9, "the one atoms graph — one atom per parent file + the seat-tree recap JOIN");
+    const recapAtom = m.atoms.find((a) => a.id === "recap");
+    assert.ok(recapAtom, "the recap JOIN atom is declared");
+    assert.equal(recapAtom.address, "seat:RECAP.md", "the recap is an ADDRESS into the seat tree — the library never homes the bytes (Q2-Amendment 1)");
+    assert.ok(
+      m.atoms.filter((a) => a.situations.includes("handover")).every((a) => a.address.startsWith("seat:")),
+      "every handover-situation atom resolves from the SEAT tree, never from library bytes",
+    );
+    assert.ok(!m.files.some((f) => f.path === "HANDOVER-STEPS.md"), "the operator runbook does not ship");
+    const { composeProfile } = await import(distUrl("profile-composer.js"));
+    const compose = (situation) =>
+      composeProfile({
+        atoms: m.atoms,
+        situation,
+        runtime: "claude",
+        readFile: (ref) => readFileSync(join(out, "world/install", ref), "utf8"),
+      });
+    const fresh = compose("fresh");
+    assert.deepEqual(
+      fresh.pieces.map((p) => p.atomId),
+      ["world-from-primitives", "permission-self-sleep", "what-this-is-for", "ontology", "harness-power-use", "a-competent-turn"],
+      "FRESH is the six-piece base walk in the manifest's load-bearing order",
+    );
+    assert.ok(fresh.pieces.every((p) => p.text.length > 0), "every piece resolves to real bytes");
+    const composeWithSeat = (situation) =>
+      composeProfile({
+        atoms: m.atoms,
+        situation,
+        runtime: "claude",
+        readFile: (ref) =>
+          ref === "seat:RECAP.md"
+            ? "## Decisions\nsentinel recap bytes"
+            : readFileSync(join(out, "world/install", ref), "utf8"),
+      });
+    const post = composeWithSeat("post-compaction");
+    assert.deepEqual(
+      post.pieces.map((p) => p.atomId),
+      ["ontology", "what-you-can-do", "reference-material", "a-competent-turn", "recap"],
+      "POST-COMPACTION = the measured re-prime + the seat-joined recap",
+    );
+    const handover = composeWithSeat("handover");
+    assert.deepEqual(
+      handover.pieces.map((p) => p.atomId),
+      [...fresh.pieces.map((p) => p.atomId), "recap"],
+      "HANDOVER = the fresh walk + the seat-joined recap",
+    );
+    // a missing seat recap FAILS LOUD, never a silently thinner walk
+    assert.throws(() => compose("handover"), /recap|unreadable|seat/i);
+    // one graph, three compositions — the same ontology bytes in fresh and post (no fork):
+    assert.equal(
+      fresh.pieces.find((p) => p.atomId === "ontology").text,
+      post.pieces.find((p) => p.atomId === "ontology").text,
+    );
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
+});

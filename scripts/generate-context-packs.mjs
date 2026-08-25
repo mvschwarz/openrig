@@ -30,6 +30,7 @@ import { parse as parseYaml } from "yaml";
 // The projection membership MIRRORS the canonical mirror EXACTLY — imported so the
 // two never drift (r1/r2 HIGH-1: a narrower rule dropped referenced helper assets).
 import { EXCLUDES as MIRROR_EXCLUDES } from "./mirror-skills.mjs";
+import { scanInternalLeaks, buildInternalLeakMessage } from "./internal-leak-scanner.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..");
@@ -40,6 +41,25 @@ const SOURCE = process.env.OPENRIG_SKILLS_SOURCE
 const OUT = process.env.OPENRIG_PACKS_OUT
   ? path.resolve(process.env.OPENRIG_PACKS_OUT)
   : path.join(REPO, "packages/daemon/context-packs");
+
+// STATIC packs (Test-A preflight repair, row 0ac358a9): committed pack sources —
+// manifest.yaml + content files, e.g. the world/install atom graph — projected
+// verbatim into the same builtin root and validated through the same daemon
+// parser. The projection stamps the package version over the committed
+// `version: "0"` placeholder (single-line, comment-preserving).
+const STATIC_SOURCE = process.env.OPENRIG_STATIC_PACKS_SOURCE
+  ? path.resolve(process.env.OPENRIG_STATIC_PACKS_SOURCE)
+  : path.join(REPO, "packages/daemon/context-packs-src");
+
+// Static pack content is scanned with the FULL committed leak authority —
+// scripts/internal-tokens.generated.json, the same generated policy the public
+// mirror flow consumes (charged terms, internal path prefixes, seat/rig and
+// host identities, internal path globs, allow-context exceptions). One
+// authority, never a local subset: a narrowed local list false-greens exactly
+// the internal paths it omits (review50-r2 BLOCKING-2).
+const STATIC_LEAK_RULES = JSON.parse(
+  fs.readFileSync(path.join(REPO, "scripts/internal-tokens.generated.json"), "utf8"),
+);
 
 // Reuse the DAEMON's manifest parser (the single authority; the entry-shape
 // ruling forbids a second parser). It lives in compiled dist, which the package
@@ -157,6 +177,63 @@ function renderManifest({ name, version, purpose, files }) {
   return lines.join("\n") + "\n";
 }
 
+// Discover static packs: any NESTED dir under STATIC_SOURCE containing
+// manifest.yaml (mirrors the library's own discovery; packs are leaves).
+function findStaticPackDirs(dir, rel = "") {
+  const found = [];
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return found;
+  }
+  for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!e.isDirectory()) continue;
+    const abs = path.join(dir, e.name);
+    const childRel = rel ? `${rel}/${e.name}` : e.name;
+    if (fs.existsSync(path.join(abs, "manifest.yaml"))) {
+      found.push({ abs, rel: childRel });
+    } else {
+      found.push(...findStaticPackDirs(abs, childRel));
+    }
+  }
+  return found;
+}
+
+// A static pack projects VERBATIM: the committed manifest is the authority
+// (atoms graph included); only the version placeholder line is stamped. Every
+// markdown byte is charged-term scanned — a leak FAILS THE BUILD.
+function buildStaticPack(pack, version) {
+  const rawManifest = fs.readFileSync(path.join(pack.abs, "manifest.yaml"), "utf8");
+  const stamped = rawManifest.replace(/^version:\s*"0"\s*$/m, `version: ${JSON.stringify(version)}`);
+  if (stamped === rawManifest && !new RegExp(`^version: ${JSON.stringify(version).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "m").test(rawManifest)) {
+    throw new Error(`static pack ${pack.rel}: manifest must carry the 'version: "0"' placeholder for the projection to stamp`);
+  }
+  const contentFiles = [];
+  const walk = (dir, rel = "") => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const childRel = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(path.join(dir, e.name), childRel);
+      else if (e.isFile() && e.name !== "manifest.yaml") contentFiles.push(childRel);
+    }
+  };
+  walk(pack.abs);
+  const leaks = [];
+  for (const rel of contentFiles) {
+    if (!rel.endsWith(".md") && !rel.endsWith(".markdown")) continue;
+    const findings = scanInternalLeaks({
+      path: `${pack.rel}/${rel}`,
+      bytes: fs.readFileSync(path.join(pack.abs, rel)),
+      rules: STATIC_LEAK_RULES,
+    });
+    leaks.push(...findings);
+  }
+  if (leaks.length > 0) {
+    throw new Error(buildInternalLeakMessage(leaks));
+  }
+  return { ref: pack.rel, files: contentFiles, manifestYaml: stamped, srcDir: pack.abs };
+}
+
 function buildPack(skill, version) {
   const files = collectContentFiles(skill.abs);
   if (!files.includes("SKILL.md")) {
@@ -215,6 +292,37 @@ async function main() {
     packs.push(pack);
   }
 
+  // STATIC packs project after skills; same validation authority, same
+  // fail-the-build contract. An empty static source is legal (no packs).
+  for (const staticPack of findStaticPackDirs(STATIC_SOURCE)) {
+    let pack;
+    try {
+      pack = buildStaticPack(staticPack, version);
+    } catch (err) {
+      errors.push(`${staticPack.rel}: ${err.message}`);
+      continue;
+    }
+    try {
+      parseManifest(pack.manifestYaml, `${pack.ref}/manifest.yaml`);
+    } catch (err) {
+      errors.push(`${pack.ref}: manifest invalid — ${err.message}`);
+      continue;
+    }
+    packs.push(pack);
+  }
+
+  // Pack refs must be UNIQUE across BOTH discovery sources: the write loop keys
+  // the output dir by ref, so a collision would silently overwrite one
+  // validated pack with another (review50-r2 BLOCKING-3). Fail loud BEFORE any
+  // check-success or output mutation.
+  const seenRefs = new Map();
+  for (const pack of packs) {
+    if (seenRefs.has(pack.ref)) {
+      errors.push(`duplicate pack ref '${pack.ref}' — a skill projection and a static pack (or two packs) collide; the write would silently overwrite one validated pack with another`);
+    }
+    seenRefs.set(pack.ref, pack);
+  }
+
   if (errors.length > 0) {
     console.error(`[generate-context-packs] ${errors.length} invalid pack(s) — FAILING THE BUILD:`);
     for (const e of errors) console.error(`  - ${e}`);
@@ -233,7 +341,9 @@ async function main() {
     const packDir = path.join(OUT, pack.ref);
     fs.mkdirSync(packDir, { recursive: true });
     for (const rel of pack.files) {
-      const srcAbs = path.join(SOURCE, pack.ref.replace(/^skills\//, ""), rel);
+      const srcAbs = pack.srcDir
+        ? path.join(pack.srcDir, rel)
+        : path.join(SOURCE, pack.ref.replace(/^skills\//, ""), rel);
       const dstAbs = path.join(packDir, rel);
       fs.mkdirSync(path.dirname(dstAbs), { recursive: true });
       fs.copyFileSync(srcAbs, dstAbs);

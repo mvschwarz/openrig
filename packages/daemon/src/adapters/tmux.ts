@@ -31,12 +31,15 @@ function defaultTmuxFileOps(): TmuxFileOps {
 /**
  * Payloads at or below this byte size go through the inline `send-keys -l`
  * path. Larger payloads are written to a temp file and delivered via a tmux
- * paste-buffer: a multi-hundred-KB startup pack embedded in one argv exceeds
- * the OS per-arg limit (Linux MAX_ARG_STRLEN is about 128KB) and the launch
- * silently fails. 100KB stays clear of that ceiling while leaving normal
- * command/control text on the unchanged inline path.
+ * paste-buffer. TWO ceilings bound the inline path, and the binding one is
+ * tmux's own: tmux rejects long command lines with "command too long" at a
+ * measured ceiling of ~9.4KB — far below the OS per-arg limit (Linux
+ * MAX_ARG_STRLEN ~128KB) the prior 100KB threshold was sized against. A
+ * 19.8KB world-install piece failed live on exactly that gap (Test-A
+ * preflight repair, 2026-08-24). 8KB keeps normal command/control text
+ * inline and routes everything above through the proven buffer path.
  */
-const LARGE_PAYLOAD_THRESHOLD_BYTES = 100 * 1024;
+const LARGE_PAYLOAD_THRESHOLD_BYTES = 8 * 1024;
 
 export type TmuxResult =
   | { ok: true }

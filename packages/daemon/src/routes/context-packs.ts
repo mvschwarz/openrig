@@ -13,6 +13,7 @@
 // the entry's opaque `id` is `context-pack:<ref>` (UI routing key only).
 
 import { Hono } from "hono";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ContextPackLibraryService } from "../domain/context-packs/context-pack-library-service.js";
@@ -396,9 +397,12 @@ export function contextPacksRoutes(): Hono {
       });
       const pieces = profile.pieces.map((p) => {
         const record = readsByRef.get(parseAddress(p.address).ref);
+        // Per-piece sha256: the Test-A door compares the profile's selected
+        // pieces to the walk's delivered pieces hash-exactly, not by count.
+        const hashed = { ...p, sha256: createHash("sha256").update(p.text, "utf8").digest("hex") };
         return record
-          ? { ...p, provenance: { nominalPath: record.nominalPath, realPath: record.realPath, escapesRoot: record.escapesRoot } }
-          : p;
+          ? { ...hashed, provenance: { nominalPath: record.nominalPath, realPath: record.realPath, escapesRoot: record.escapesRoot } }
+          : hashed;
       });
       // ALWAYS an array (consumer guards one shape): empty = every piece's
       // bytes came from inside its granted root. Report, never block —

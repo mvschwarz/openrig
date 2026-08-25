@@ -839,6 +839,23 @@ describe("TmuxAdapter", () => {
       expect(unlink).toHaveBeenCalledWith("/tmp/openrig-tmux-send-FIXED.txt");
     });
 
+    it("a payload over tmux's INLINE command ceiling but under the old 100KB bound takes the buffer path (the world-install walk specimen)", async () => {
+      // Test-A preflight repair (row 0ac358a9): a 19.8KB piece failed LIVE with
+      // tmux's own "command too long" — tmux bounds the inline command line far
+      // below the OS per-arg limit (measured ceiling ~9.4KB). Anything above
+      // the inline ceiling must route through load-buffer/paste-buffer.
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const { ops, writeFile } = fixedFileOps();
+      const adapter = new TmuxAdapter(exec, ops);
+      const MID = "y".repeat(20 * 1024);
+
+      const result: TmuxResult = await adapter.sendText("dev@rig", MID);
+
+      expect(result).toEqual({ ok: true });
+      expect(writeFile).toHaveBeenCalledWith("/tmp/openrig-tmux-send-FIXED.txt", MID);
+      for (const cmd of exec.mock.calls.map((c) => c[0] as string)) expect(cmd).not.toContain(MID);
+    });
+
     it("keeps the exact inline send-keys -l command for a small payload (no buffer path, no temp file)", async () => {
       const exec = vi.fn<ExecFn>().mockResolvedValue("");
       const { ops, writeFile } = fixedFileOps();
