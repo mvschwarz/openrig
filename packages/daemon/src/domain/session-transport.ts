@@ -895,16 +895,19 @@ export class SessionTransport {
             const head = norm(expected).slice(0, 24);
             stagedEvidence = head.length > 0 && norm(region).includes(head);
           } else {
+            // Round-4 (r2 R3 HIGH-1): identity is the rendering's own structure, specimen-proven —
+            // the placeholders are the piece's HEAD chunks and the literal residual is the piece's
+            // normalized SUFFIX (524 chars in the preserved capture). Size similarity and short
+            // shared phrases are NOT identity: with no residual, or one under 48 normalized chars,
+            // or one that is not the piece's own suffix, FAIL CLOSED — the TUI did not expose
+            // enough content to identify the staged state, and a bare Enter is never guessed.
             const expectedLines = opts.expectedStagedLineCount;
             const chrome = /paste again to expand|ctrl\+g to edit( in Vim)?/gi;
             const residual = norm(regionFlat.replace(placeholderRe, "").replace(chrome, "")).replace(/^❯/, "");
             const pieceNorm = norm(expected);
-            const residualOk = residual.length === 0 || pieceNorm.includes(residual);
             const sum = counts.reduce((a, b) => a + b, 0);
-            const sumSane = typeof expectedLines === "number"
-              && sum <= expectedLines * 1.05 + 2
-              && (residual.length >= 12 || sum >= expectedLines * 0.6);
-            stagedEvidence = residualOk && sumSane;
+            const sumSane = typeof expectedLines === "number" && sum <= expectedLines * 1.05 + 2;
+            stagedEvidence = residual.length >= 48 && pieceNorm.endsWith(residual) && sumSane;
           }
         }
       }

@@ -100,15 +100,16 @@ describe("SessionTransport submitOnly — the guarded bare-Enter retry", () => {
     expect(sendKeys).not.toHaveBeenCalled();                       // the Enter never lands
   });
 
-  it("accepts the TUI's pasted-text PLACEHOLDER as staged evidence — a large paste renders as [Pasted text #N +X lines], never its content", async () => {
+  it("a bare placeholder with a matching size but NO literal residual REFUSES — size similarity is not identity (round-4 contract; supersedes the R1/R2 acceptance)", async () => {
     const sendKeys = vi.fn(async () => ({ ok: true as const }));
     const transport = makeTransport(mockTmux({
       sendKeys,
       capturePaneContent: async () => "❯ [Pasted text #4 +112 lines]\n  paste again to expand",
     }));
     const res = await transport.send("dev-impl@my-rig", "", { submitOnly: true, expectedStagedText: STAGED_PIECE, expectedStagedLineCount: 112 });
-    expect(res.ok).toBe(true); // round-2: the placeholder counts ONLY with a matching line count
-    expect(sendKeys).toHaveBeenCalledTimes(1);
+    expect(res.ok).toBe(false); // round-4: no residual -> no identity -> fail closed
+    expect(res.reason).toBe("staged_mismatch");
+    expect(sendKeys).not.toHaveBeenCalled();
   });
 
   // ROUND-2 (r2 R1 HIGH-1, row 66e74676): stale scrollback must never authorize the Enter. The
@@ -194,7 +195,7 @@ describe("SessionTransport submitOnly — the guarded bare-Enter retry", () => {
   // identity. The rendering's own structure (proven on the preserved bytes: the literal residual
   // is the piece's normalized SUFFIX, 524 chars in the specimen) is the only acceptance anchor;
   // anything less fails closed.
-  it.fails("R4 PROBE-A — a bare unrelated placeholder with a plausible size (+100 of 142) REFUSES with zero Enter calls: no residual means no identity [RED until identity-free acceptance removed]", async () => {
+  it("R4 PROBE-A — a bare unrelated placeholder with a plausible size (+100 of 142) REFUSES with zero Enter calls: no residual means no identity [GREEN — identity-free acceptance removed]", async () => {
     const sendKeys = vi.fn(async () => ({ ok: true as const }));
     const transport = makeTransport(mockTmux({
       sendKeys,
@@ -210,7 +211,7 @@ describe("SessionTransport submitOnly — the guarded bare-Enter retry", () => {
     expect(sendKeys).not.toHaveBeenCalled();
   });
 
-  it.fails("R4 PROBE-B — an unrelated placeholder plus a short phrase that happens to occur in the piece REFUSES with zero Enter calls: a common substring cannot bless another input [RED until strong residual anchoring]", async () => {
+  it("R4 PROBE-B — an unrelated placeholder plus a short phrase that happens to occur in the piece REFUSES with zero Enter calls: a common substring cannot bless another input [GREEN — strong residual anchoring]", async () => {
     const sendKeys = vi.fn(async () => ({ ok: true as const }));
     const transport = makeTransport(mockTmux({
       sendKeys,
