@@ -10,6 +10,16 @@ import { parse as parseYaml } from "yaml";
 // of the other skills and hidden-from-listing are CE-08, fenced out of R3.
 const HERE = dirname(fileURLToPath(import.meta.url));
 const STUB = resolve(HERE, "..", "assets", "plugins", "openrig-core", "skills", "openrig-skills", "SKILL.md");
+const COMMAND_REFERENCE = resolve(
+  HERE,
+  "..",
+  "assets",
+  "plugins",
+  "openrig-core",
+  "skills",
+  "openrig-user",
+  "SKILL.md",
+);
 
 function frontmatterAndBody(md: string): { fm: Record<string, unknown>; body: string } {
   const m = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(md);
@@ -19,6 +29,9 @@ function frontmatterAndBody(md: string): { fm: Record<string, unknown>; body: st
 
 describe("R3 — openrig-core router stub teaches the pull", () => {
   const { fm, body } = frontmatterAndBody(readFileSync(STUB, "utf-8"));
+  const { fm: commandReferenceFm } = frontmatterAndBody(
+    readFileSync(COMMAND_REFERENCE, "utf-8"),
+  );
 
   it("carries the rig tool grant in allowed-tools", () => {
     expect(String(fm["allowed-tools"] ?? "")).toMatch(/\brig\b/);
@@ -58,5 +71,14 @@ describe("R3 — openrig-core router stub teaches the pull", () => {
 
   it("REPAIR 1 — teaches the canonical full-path ref format (skills/<ns>/<name>)", () => {
     expect(body).toMatch(/rig context get\s+skills\//);
+  });
+
+  it("routes natural capability discovery to the router before the command reference", () => {
+    const routerDescription = String(fm.description ?? "").replace(/\s+/g, " ");
+    const commandReferenceDescription = String(commandReferenceFm.description ?? "").replace(/\s+/g, " ");
+
+    expect.soft(routerDescription).toMatch(/\bcross-host\b.*\banother machine\b/i);
+    expect.soft(commandReferenceDescription).toMatch(/\balready (known|selected)\b/i);
+    expect.soft(commandReferenceDescription).toMatch(/\bNOT for natural capability discovery\b/i);
   });
 });

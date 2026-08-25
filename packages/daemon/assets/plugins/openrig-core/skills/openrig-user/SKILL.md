@@ -1,11 +1,9 @@
 ---
 name: openrig-user
 description: >-
-  Use when you need a SPECIFIC rig command or flag and want the authoritative surface: the exact
-  syntax for send/queue/ps/scope/context/watchdog, the JSON shape a command returns, what a flag
-  actually does, why a command errored, or a recovery/workspace/permission procedure. This is the
-  ~70KB REFERENCE — reach for it when you know what you want to do and need the details. If instead
-  you are unsure WHICH move to make, or whether to hand off, read coordinating-with-agents first.
+  Use when a specific `rig` command, subcommand, or flag is already known and you need its exact
+  syntax, JSON shape, defaults, or error meaning. NOT for natural capability discovery, open-ended
+  how-do-I questions, or choosing which OpenRig move applies.
 ---
 
 # OpenRig User
