@@ -910,8 +910,10 @@ export class SessionTransport {
             // visible suffix (specimen: sum 130 = the residual begins after exactly 130 of the
             // piece's 142 source newlines). Compute the boundary from the piece bytes — the
             // number of leading source lines whose normalized text the residual does NOT cover —
-            // and require the sum to equal it (±1 for a mid-line chunk split). A matched suffix
-            // with a non-matching sum is a truncated or wrong prefix: refuse.
+            // and require the sum to EQUAL it exactly (round-6, r2 R5: both separately staged
+            // preserved pieces are exact — 130=130 and 82=82; a tolerance was unsupported by the
+            // renderer evidence). A matched suffix with a non-matching sum is a truncated or
+            // wrong prefix: refuse.
             let boundary = -1;
             if (residual.length >= 48 && pieceNorm.endsWith(residual)) {
               const srcLines = expected.split("\n");
@@ -922,7 +924,7 @@ export class SessionTransport {
                 if (acc >= residual.length) { boundary = i; break; }
               }
             }
-            stagedEvidence = boundary >= 0 && Math.abs(sum - boundary) <= 1;
+            stagedEvidence = boundary >= 0 && sum === boundary;
           }
         }
       }

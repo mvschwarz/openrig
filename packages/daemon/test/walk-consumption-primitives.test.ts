@@ -283,7 +283,7 @@ describe("SessionTransport submitOnly — the guarded bare-Enter retry", () => {
     expect(sendKeys).toHaveBeenCalledTimes(1);
   });
 
-  it.fails("R6 — one under the boundary (+138) REFUSES with zero Enter calls [RED until exact equality]", async () => {
+  it("R6 — one under the boundary (+138) REFUSES with zero Enter calls [GREEN — exact equality]", async () => {
     const { transport, sendKeys } = submitTail(138);
     const res = await transport.send("dev-impl@my-rig", "", submitOpts());
     expect(res.ok).toBe(false);
@@ -291,7 +291,7 @@ describe("SessionTransport submitOnly — the guarded bare-Enter retry", () => {
     expect(sendKeys).not.toHaveBeenCalled();
   });
 
-  it.fails("R6 — one over the boundary (+140) REFUSES with zero Enter calls [RED until exact equality]", async () => {
+  it("R6 — one over the boundary (+140) REFUSES with zero Enter calls [GREEN — exact equality]", async () => {
     const { transport, sendKeys } = submitTail(140);
     const res = await transport.send("dev-impl@my-rig", "", submitOpts());
     expect(res.ok).toBe(false);
