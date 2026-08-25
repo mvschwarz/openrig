@@ -643,7 +643,9 @@ sessionAdminRoutes.post("/:sessionRef/unclaim", terminalAuthGuard(), async (c) =
 // runner's default reader uses) — never a pane snapshot. Refuses LOUD when the seat has no
 // resolvable record (unsupported runtime / no sidecar): a caller must know verification is
 // impossible, never receive an empty success.
-sessionAdminRoutes.get("/:sessionName/generation-record", async (c) => {
+// Round-2 (r2 HIGH-2): raw conversation bytes with no transcript redaction — a TERMINAL-CLASS
+// surface behind the same bearer gate as its neighbors (401/401/200; null-token loopback passes).
+sessionAdminRoutes.get("/:sessionName/generation-record", terminalAuthGuard(), async (c) => {
   const sessionName = decodeURIComponent(c.req.param("sessionName")!);
   const store = c.get("contextUsageStore" as never) as ContextUsageStore | undefined;
   if (!store) {

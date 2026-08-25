@@ -849,15 +849,41 @@ export class SessionTransport {
         "session_transport.submit_only_precheck",
         () => this.tmuxAdapter.capturePaneContent(sessionName, 50),
       );
-      // The staged evidence is EITHER the content's own head (a short paste renders inline,
-      // possibly truncated — 24 normalized chars is distinctive yet survives truncation) OR the
-      // TUI's pasted-text placeholder (a large paste renders as "[Pasted text #N +X lines]", never
-      // its content). A permission prompt shows neither, which is the hazard this gate exists for.
-      const head = norm(expected).slice(0, 24);
-      const paneNorm = norm(pane ?? "");
-      const stagedEvidence =
-        (head.length > 0 && paneNorm.includes(head)) ||
-        /\[Pasted text #\d+ \+\d+ lines\]/.test(pane ?? "");
+      // Round-2 (r2 HIGH-1): the evidence must be the CURRENT ACTIVE INPUT and must identify
+      // THIS piece — stale scrollback can carry an old placeholder while a LATER interactive
+      // prompt owns the input, and an Enter there approves the prompt. So:
+      //   1. Only the pane's LAST input-marker line counts (the current input; everything above
+      //      is history).
+      //   2. A numbered-option line (`❯ 1. …`) is a PROMPT SELECTION, never staged input: refuse.
+      //   3. A pasted-text placeholder is identity-qualified: "[Pasted text #N +X lines]" counts
+      //      only when X matches the expected piece's own line count (±1 for a trailing newline).
+      //      More than one placeholder is COALESCED staging (several pieces, one Enter): refuse.
+      //   4. Otherwise the line must carry the content's own head (24 normalized chars — a short
+      //      paste renders inline, possibly truncated).
+      const paneLines = (pane ?? "").split("\n");
+      let currentInputAt = -1;
+      for (let i = paneLines.length - 1; i >= 0; i--) {
+        if (paneLines[i]!.trimStart().startsWith("❯")) { currentInputAt = i; break; }
+      }
+      let stagedEvidence = false;
+      if (currentInputAt >= 0) {
+        const inputLine = paneLines[currentInputAt]!.trimStart();
+        // The region is the last ❯-line THROUGH pane end — a multi-line inline paste or a wrapped
+        // input continues below the marker; everything ABOVE the marker is history and never counts.
+        const region = paneLines.slice(currentInputAt).join("\n");
+        if (!/^❯\s*\d+\./.test(inputLine)) {
+          const placeholders = [...region.matchAll(/\[Pasted text #\d+ \+(\d+) lines\]/g)];
+          if (placeholders.length === 1) {
+            const stagedLines = Number(placeholders[0]![1]);
+            const expectedLines = opts.expectedStagedLineCount;
+            stagedEvidence = typeof expectedLines === "number" && Math.abs(stagedLines - expectedLines) <= 1;
+          } else if (placeholders.length === 0) {
+            const head = norm(expected).slice(0, 24);
+            stagedEvidence = head.length > 0 && norm(region).includes(head);
+          }
+          // placeholders.length > 1 → coalesced staging: stagedEvidence stays false.
+        }
+      }
       if (!stagedEvidence) {
         return {
           ok: false,

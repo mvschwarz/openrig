@@ -329,7 +329,7 @@ describe("rig walk — per-piece consumption verification (RED-first, mechanics-
   // ROUND-2 (r2 R1 HIGH-2, row 66e74676, CLI half): on a token-configured daemon the verified
   // path must WORK — every walk transport/record call carries the terminal auth headers (the
   // same chokepoint `rig capture` uses), instead of silently degrading or 401ing.
-  it.fails("R2 HIGH-2 CLI — every generation-record read and transport send/capture carries the terminal auth headers option [RED until walk passes terminalAuthHeaders]", async () => {
+  it("R2 HIGH-2 CLI — every generation-record read and transport send/capture carries the terminal auth headers option [GREEN — walk passes terminalAuthHeaders]", async () => {
     const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
     const authedCalls: Array<{ kind: string; hasHeaders: boolean }> = [];
     const base = consumptionDeps(w);

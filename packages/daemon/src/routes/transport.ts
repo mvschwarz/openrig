@@ -23,6 +23,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       actorSession?: string | null;
       submitOnly?: boolean;
       expectedStagedText?: string;
+      expectedStagedLineCount?: number;
     }>();
 
     // submitOnly (mechanics-gate fix d9b3989a) sends NO text — the Enter-only retry for staged
@@ -98,6 +99,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       // transport by the expected-staged-text precheck.
       submitOnly: body.submitOnly,
       expectedStagedText: body.expectedStagedText,
+      expectedStagedLineCount: body.expectedStagedLineCount,
     });
 
     if (!result.ok) {

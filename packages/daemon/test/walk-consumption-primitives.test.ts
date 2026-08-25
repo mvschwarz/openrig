@@ -106,15 +106,15 @@ describe("SessionTransport submitOnly — the guarded bare-Enter retry", () => {
       sendKeys,
       capturePaneContent: async () => "❯ [Pasted text #4 +112 lines]\n  paste again to expand",
     }));
-    const res = await transport.send("dev-impl@my-rig", "", { submitOnly: true, expectedStagedText: STAGED_PIECE });
-    expect(res.ok).toBe(true);
+    const res = await transport.send("dev-impl@my-rig", "", { submitOnly: true, expectedStagedText: STAGED_PIECE, expectedStagedLineCount: 112 });
+    expect(res.ok).toBe(true); // round-2: the placeholder counts ONLY with a matching line count
     expect(sendKeys).toHaveBeenCalledTimes(1);
   });
 
   // ROUND-2 (r2 R1 HIGH-1, row 66e74676): stale scrollback must never authorize the Enter. The
   // evidence must be the CURRENT ACTIVE INPUT and must identify THIS piece — a generic placeholder
   // anywhere in 50 lines is neither.
-  it.fails("R2 HIGH-1 discriminator — a stale pasted-text placeholder ABOVE a later interactive prompt refuses with ZERO Enter calls [RED until current-input binding]", async () => {
+  it("R2 HIGH-1 discriminator — a stale pasted-text placeholder ABOVE a later interactive prompt refuses with ZERO Enter calls [GREEN — current-input binding]", async () => {
     const sendKeys = vi.fn(async () => ({ ok: true as const }));
     const transport = makeTransport(mockTmux({
       sendKeys,
@@ -128,7 +128,7 @@ describe("SessionTransport submitOnly — the guarded bare-Enter retry", () => {
     expect(sendKeys).not.toHaveBeenCalled(); // zero Enter calls — the forbidden effect never happens
   });
 
-  it.fails("R2 HIGH-1 — a placeholder whose line count does NOT match the expected piece is not piece identity: refused [RED until line-count qualification]", async () => {
+  it("R2 HIGH-1 — a placeholder whose line count does NOT match the expected piece is not piece identity: refused [GREEN — line-count qualification]", async () => {
     const sendKeys = vi.fn(async () => ({ ok: true as const }));
     const transport = makeTransport(mockTmux({
       sendKeys,
@@ -141,7 +141,7 @@ describe("SessionTransport submitOnly — the guarded bare-Enter retry", () => {
     expect(sendKeys).not.toHaveBeenCalled();
   });
 
-  it.fails("R2 HIGH-1 — MULTIPLE placeholders staged at the current input is coalesced staging: refused, never one Enter for several pieces [RED until multi-staging refusal]", async () => {
+  it("R2 HIGH-1 — MULTIPLE placeholders staged at the current input is coalesced staging: refused, never one Enter for several pieces [GREEN — multi-staging refusal]", async () => {
     const sendKeys = vi.fn(async () => ({ ok: true as const }));
     const transport = makeTransport(mockTmux({
       sendKeys,
@@ -224,7 +224,7 @@ describe("GET /api/sessions/:sessionName/generation-record — the consumption-b
   // surface (raw conversation bytes, no transcript redaction) and must sit behind the same
   // bearer gate as its neighbors. 401 / 401 / 200 for missing / wrong / correct bearer; a
   // null-token (loopback) daemon passes through.
-  it.fails("R2 HIGH-2 — with a terminal bearer token configured: missing and wrong bearers are 401, the correct bearer is 200 [RED until terminalAuthGuard]", async () => {
+  it("R2 HIGH-2 — with a terminal bearer token configured: missing and wrong bearers are 401, the correct bearer is 200 [GREEN — terminalAuthGuard]", async () => {
     const stateDir2 = mkdtempSync(join(tmpdir(), "walk-genrec-auth-"));
     try {
       const db2 = createFullTestDb();

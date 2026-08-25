@@ -8,7 +8,7 @@
 
 import { Command } from "commander";
 import { existsSync, readFileSync } from "node:fs";
-import { DaemonClient } from "../client.js";
+import { DaemonClient, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , statusGuardMessage} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -161,7 +161,7 @@ the agent process between sends. Small piece → 'rig send'; a real pack → wal
 
         interface RecordRead { generationId?: string; totalBytes?: number; suffix?: string; error?: string; message?: string }
         const readRecord = async (sinceBytes?: number): Promise<{ status: number; data: RecordRead }> =>
-          client.get<RecordRead>(sinceBytes === undefined ? recordPath : `${recordPath}?sinceBytes=${sinceBytes}`);
+          client.get<RecordRead>(sinceBytes === undefined ? recordPath : `${recordPath}?sinceBytes=${sinceBytes}`, { headers: terminalAuthHeaders() });
 
         /** Does the record suffix show the piece consumed — a user-role record carrying the piece head? */
         const suffixShowsConsumed = (suffix: string, head: string): boolean => {
@@ -225,7 +225,7 @@ the agent process between sends. Small piece → 'rig send'; a real pack → wal
             const res = await client.post<Record<string, unknown>>("/api/transport/send", {
               session: seat,
               text: piece.content,
-            });
+            }, { headers: terminalAuthHeaders() });
             if (res.status >= 400) {
               if (res.data?.["reason"] === "submit_failed") sendOutcome = "staged-suspect";
               else {
@@ -264,7 +264,7 @@ the agent process between sends. Small piece → 'rig send'; a real pack → wal
             if (verdict === "timeout") {
               // Not consumed in the window. Staged? — one capture decides; staged takes EXACTLY ONE
               // submit retry (a guarded bare Enter), then one more verification window, then loud.
-              const cap = await client.post<Record<string, unknown>>("/api/transport/capture", { session: seat, lines: 50 });
+              const cap = await client.post<Record<string, unknown>>("/api/transport/capture", { session: seat, lines: 50 }, { headers: terminalAuthHeaders() });
               const pane = (cap.data?.["content"] as string | undefined) ?? "";
               // Staged evidence: the piece's own head (short pastes render inline, truncated) OR
               // the TUI's pasted-text placeholder (large pastes render as "[Pasted text #N +X
@@ -278,7 +278,8 @@ the agent process between sends. Small piece → 'rig send'; a real pack → wal
                   session: seat,
                   submitOnly: true,
                   expectedStagedText: piece.content.slice(0, 200),
-                });
+                  expectedStagedLineCount: piece.content.split("\n").length,
+                }, { headers: terminalAuthHeaders() });
                 if (enter.status >= 400) {
                   failPiece(i, piece.label, `typed but not consumed; the single submit retry was refused (${(enter.data?.["error"] as string | undefined) ?? `HTTP ${enter.status}`}).`);
                   return;
