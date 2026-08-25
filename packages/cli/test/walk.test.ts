@@ -250,6 +250,8 @@ describe("rig walk — per-piece consumption verification (RED-first, mechanics-
 
   const walkArgs = ["node", "rig", "walk", "dev@rig", "--through", "packs/p", "--pace", "1ms",
     "--consume-timeout", "60ms", "--consume-poll", "1ms"];
+  const pacingArgs = [...walkArgs, "--turn-timeout", "80ms"];
+  const closureRec = '{"type":"system","subtype":"turn_duration","isMeta":false}';
 
   it("PIN W1 — a typed-but-never-consumed piece FAILS LOUD naming the piece; the next piece is never sent [GREEN — consumption verification]", async () => {
     const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
@@ -329,6 +331,69 @@ describe("rig walk — per-piece consumption verification (RED-first, mechanics-
   // ROUND-2 (r2 R1 HIGH-2, row 66e74676, CLI half): on a token-configured daemon the verified
   // path must WORK — every walk transport/record call carries the terminal auth headers (the
   // same chokepoint `rig capture` uses), instead of silently degrading or 401ing.
+  // TURN-PACING (desk BLOCKING row 2ff16fa1): a piece sent while the seat is still PROCESSING the
+  // prior piece's turn gets QUEUED by the runtime (enqueue/attachment) and never becomes a distinct
+  // user turn — consumption verification cannot save it. Walk must WAIT for the prior turn's
+  // CLOSURE (the system/turn_duration record, the capture atom's boundary) before the next send.
+  it.fails("PACING-A — piece 2 is NEVER sent while piece 1's turn is open; closure-wait timeout fails loud naming the piece [RED until the turn gate]", async () => {
+    const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
+    // Piece 1 consumes as a distinct user turn but the turn NEVER closes (no turn_duration).
+    w.sendBehavior = (b) => {
+      if (b["text"] !== undefined) { w.record.content += userRec(String(b["text"])) + "\n"; return { status: 200, data: { ok: true } }; }
+      return { status: 200, data: { ok: true } };
+    };
+    const { errLogs, exitCode } = await captureLogs(async () => {
+      await makeCmd(consumptionDeps(w)).parseAsync(pacingArgs);
+    });
+    expect(exitCode).toBe(1);
+    const pieceSends = w.sends.filter((s) => s.path === "/api/transport/send" && s.body["text"] !== undefined);
+    expect(pieceSends).toHaveLength(1);                    // piece 2 never sent into an open turn
+    expect(errLogs.join("\n")).toMatch(/piece 1\/2/);      // names the piece
+    expect(errLogs.join("\n")).toMatch(/turn/i);           // names the failure class (closure wait)
+  });
+
+  it.fails("PACING-B — piece 2 goes only AFTER piece 1's turn closure is visible in the record [RED until the turn gate]", async () => {
+    const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
+    let closureServedBeforePiece2 = false;
+    let piece1Consumed = false;
+    w.sendBehavior = (b) => {
+      if (b["text"] !== undefined) {
+        if (!piece1Consumed) {
+          piece1Consumed = true;
+          w.record.content += userRec(String(b["text"])) + "\n";
+          // The turn closes THREE reads later (assistant work then turn_duration) — the reader
+          // below appends it lazily; here we only record the send.
+        } else {
+          closureServedBeforePiece2 = w.record.content.includes("turn_duration");
+          w.record.content += userRec(String(b["text"])) + "\n" + closureRec + "\n";
+        }
+        return { status: 200, data: { ok: true } };
+      }
+      return { status: 200, data: { ok: true } };
+    };
+    // Lazy closure: after piece 1's user record exists, the next generation-record read appends
+    // the assistant turn + closure (the seat finished reading the piece).
+    const baseDeps = consumptionDeps(w);
+    const inner = (baseDeps.clientFactory as unknown as () => { get: (p: string) => Promise<unknown>; post: (p: string, b: unknown) => Promise<unknown> })();
+    (baseDeps as { clientFactory: unknown }).clientFactory = () => ({
+      get: async (path: string) => {
+        const out = await inner.get(path);
+        if (piece1Consumed && !w.record.content.includes("turn_duration")) {
+          w.record.content += closureRec + "\n";
+        }
+        return out;
+      },
+      post: async (path: string, body: unknown) => inner.post(path, body),
+    });
+    const { exitCode } = await captureLogs(async () => {
+      await makeCmd(baseDeps).parseAsync(pacingArgs);
+    });
+    expect(exitCode).toBeUndefined();
+    const pieceSends = w.sends.filter((s) => s.path === "/api/transport/send" && s.body["text"] !== undefined);
+    expect(pieceSends).toHaveLength(2);
+    expect(closureServedBeforePiece2).toBe(true); // the gate held: closure BEFORE the second send
+  });
+
   it("R2 HIGH-2 CLI — every generation-record read and transport send/capture carries the terminal auth headers option [GREEN — walk passes terminalAuthHeaders]", async () => {
     const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
     const authedCalls: Array<{ kind: string; hasHeaders: boolean }> = [];
