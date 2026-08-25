@@ -64,6 +64,21 @@ describe("sliceAfterPrompt — the since-the-prompt anchor", () => {
     expect(since).not.toBe("");
   });
 
+  // PERMANENT RED (review-r2 round-5 HIGH-1, required before the round-6 replacement): the shipped
+  // `rig transcript` is a BOUNDED-OVERWRITE pane snapshot (transcript-rotation.ts overwrites the file
+  // each tick, default 1000 trailing lines), NOT append-only. So the pre-send text is not guaranteed
+  // a prefix of the post-send text: when an OLD identical command has rotated toward/out of the tail,
+  // LCS matches the current turn's re-emission to the older occurrence and DELETES current-turn
+  // evidence. This models the real bounded rotation (not an append-only fake) and stays RED until the
+  // boundary binds to a source that is actually monotonic for the exact seat generation.
+  it.fails("BOUNDED-ROTATION repeated command (r2 HIGH-1): the current-turn command survives — RED until a monotonic boundary source", () => {
+    const prompt = "the box rebooted — bring the fleet back";
+    const command = "rig context get skills/core/rig-lifecycle";
+    const preRotation = `${command}\n`;                 // the older occurrence, still in the bounded tail
+    const postRotation = `> ${prompt}\n${command}\n`;   // the current turn re-emits it
+    expect(sliceAfterPrompt(postRotation, prompt, preRotation)).toContain(command);
+  });
+
   it("APPEND-ONLY transcript (round-5 custody): an earlier identical command stays in the prefix; the current turn's re-emission is returned from the suffix — no marker needed", () => {
     const prompt = "the box rebooted — bring the fleet back";
     // The transcript APPENDS — the earlier case's identical command line is RETAINED in the pre-send
