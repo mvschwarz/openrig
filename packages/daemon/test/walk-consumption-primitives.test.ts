@@ -262,6 +262,43 @@ describe("SessionTransport submitOnly — the guarded bare-Enter retry", () => {
     expect(sendKeys).not.toHaveBeenCalled();
   });
 
+  // ROUND-6 (r2 R5, row 98a9a82c / artifact a7ff103e): the ±1 tolerance was unproven — BOTH
+  // separately staged preserved pieces exhibit EXACT equality (piece 2: sum 130 = boundary 130;
+  // piece 3: sum 82 = boundary 82). Exact equality is the contract.
+  const submitTail = (count: number) => transportFor(count);
+  function transportFor(count: number) {
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = makeTransport(mockTmux({
+      sendKeys,
+      capturePaneContent: async () => `❯ [Pasted text #5 +${count} lines]${PIECE_2().split("\n").slice(-3).join("\n")}\n\n────────────────────────────────────────\n  ⏵⏵ accept edits on`,
+    }));
+    return { transport, sendKeys };
+  }
+  const submitOpts = () => ({ submitOnly: true as const, expectedStagedText: PIECE_2(), expectedStagedLineCount: PIECE_2().split("\n").length });
+
+  it("R6 — the exact boundary (+139) accepts once", async () => {
+    const { transport, sendKeys } = submitTail(139);
+    const res = await transport.send("dev-impl@my-rig", "", submitOpts());
+    expect(res.ok).toBe(true);
+    expect(sendKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it.fails("R6 — one under the boundary (+138) REFUSES with zero Enter calls [RED until exact equality]", async () => {
+    const { transport, sendKeys } = submitTail(138);
+    const res = await transport.send("dev-impl@my-rig", "", submitOpts());
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("staged_mismatch");
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it.fails("R6 — one over the boundary (+140) REFUSES with zero Enter calls [RED until exact equality]", async () => {
+    const { transport, sendKeys } = submitTail(140);
+    const res = await transport.send("dev-impl@my-rig", "", submitOpts());
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("staged_mismatch");
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
   it("REFUSES (invalid_submit_only) without expectedStagedText, and when text is supplied", async () => {
     const transport = makeTransport(mockTmux());
     const noExpected = await transport.send("dev-impl@my-rig", "", { submitOnly: true });
