@@ -394,6 +394,41 @@ describe("rig walk — per-piece consumption verification (RED-first, mechanics-
     expect(closureServedBeforePiece2).toBe(true); // the gate held: closure BEFORE the second send
   });
 
+  // FINAL-PIECE CLOSURE (r2 turn-pacing NOT-CLEAR, row b268b89b): the gate must be N-of-N. The
+  // last piece's open turn is exactly where rerun 4's seat-issued GET would be queued.
+  it.fails("PACING-C — the FINAL piece consumed but never closed fails loud naming it; no success summary [RED until N-of-N closure]", async () => {
+    const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
+    let firstPiece = true;
+    w.sendBehavior = (b) => {
+      if (b["text"] !== undefined) {
+        // piece 1: consumed AND closed; piece 2 (final): consumed, turn never closes.
+        w.record.content += userRec(String(b["text"])) + "\n" + (firstPiece ? closureRec + "\n" : "");
+        firstPiece = false;
+        return { status: 200, data: { ok: true } };
+      }
+      return { status: 200, data: { ok: true } };
+    };
+    const { logs, errLogs, exitCode } = await captureLogs(async () => {
+      await makeCmd(consumptionDeps(w)).parseAsync(pacingArgs);
+    });
+    expect(exitCode).toBe(1);
+    expect(errLogs.join("\n")).toMatch(/piece 2\/2/);          // names the FINAL piece
+    expect(errLogs.join("\n")).toMatch(/turn/i);
+    expect(logs.join("\n")).not.toMatch(/Walked dev@rig/);      // no success summary
+  });
+
+  it("PACING-D — the final piece consumed and then closed succeeds (the N-of-N gate's positive)", async () => {
+    const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
+    w.sendBehavior = (b) => {
+      if (b["text"] !== undefined) { w.record.content += userRec(String(b["text"])) + "\n" + closureRec + "\n"; return { status: 200, data: { ok: true } }; }
+      return { status: 200, data: { ok: true } };
+    };
+    const { exitCode } = await captureLogs(async () => {
+      await makeCmd(consumptionDeps(w)).parseAsync(pacingArgs);
+    });
+    expect(exitCode).toBeUndefined();
+  });
+
   it("R2 HIGH-2 CLI — every generation-record read and transport send/capture carries the terminal auth headers option [GREEN — walk passes terminalAuthHeaders]", async () => {
     const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
     const authedCalls: Array<{ kind: string; hasHeaders: boolean }> = [];
