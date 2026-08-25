@@ -7,15 +7,24 @@
  *             (--seat-spec) and adopt its single launched seat; the seat's
  *             GENERATION comes from `rig whoami --session <seat> --json`.
  *   send    — `rig send <seat> <prompt>` (argv array, never a shell string).
- *   capture — poll `rig capture <seat> --lines N` until the pane is STABLE
- *             (unchanged across consecutive polls), then return everything
- *             AFTER the prompt's echo. Panes wrap and TUIs truncate the echo,
- *             so the anchor search is whitespace-NORMALIZED with an index map
- *             back to the raw capture; a truncated echo falls back to the
- *             prompt head; a scrolled-off echo falls back to the pre-send
- *             snapshot diff. The leading-echo strip itself stays the
- *             PROVIDER's contract (eval-rig-provider.ts) — this module only
- *             bounds "since the prompt".
+ *             EXACTLY ONE submitted input per case — the natural prompt. Round 5
+ *             (custody fix): no eval-sync marker send. Round 4 emitted a unique
+ *             nonce as a SECOND `rig send` before the prompt to disambiguate the
+ *             pane boundary; on a `claude-code` seat that is an extra user turn,
+ *             a forbidden intervening input under Test-A's no-intervening-input
+ *             custody contract. Removed.
+ *   capture — the boundary is the seat's APPEND-ONLY transcript, read OUT-OF-BAND
+ *             via `rig transcript <seat> --tail N` (reading submits nothing to the
+ *             seat). Record the pre-send transcript, poll it until STABLE
+ *             (unchanged across consecutive polls), then return the SUFFIX since
+ *             the pre-send transcript (its non-LCS lines). Because the transcript
+ *             only APPENDS — never scrolls or redraws like a pane — an old
+ *             identical command line stays in the matched prefix and is never
+ *             mistaken for the current turn, so no in-band marker is needed. The
+ *             prompt echo is skipped within the suffix so grading starts at the
+ *             response; the leading-echo strip itself stays the PROVIDER's
+ *             contract (eval-rig-provider.ts) — this module only bounds
+ *             "since the prompt".
  *   retire  — `rig down <rig>` exactly when THIS session spawned the rig;
  *             attaching never destroys someone else's seat.
  *
@@ -25,7 +34,6 @@
  */
 
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import type { RigSeatSession } from "./eval-rig-provider.js";
 
 export type RigExec = (args: string[]) => Promise<string>;
@@ -44,9 +52,12 @@ export interface RigCliSessionOptions {
   /** Hard per-prompt ceiling; expiring is an ERROR, never a silent partial. */
   timeoutMs?: number;
   captureLines?: number;
+  /** Round-5 custody boundary: how many trailing transcript lines to read as the out-of-band window
+   *  (default 100000 — large enough that a short eval seat's whole transcript is a stable prefix, so
+   *  the pre-send read is a prefix of the post-send read). The APPEND-ONLY transcript, not the
+   *  scrolling pane, is the boundary — reading it submits nothing to the seat. */
+  transcriptLines?: number;
   sleep?: (ms: number) => Promise<void>;
-  /** Per-send unique boundary marker generator (default crypto.randomUUID). */
-  nonce?: () => string;
 }
 
 function defaultExec(rigBin: string): RigExec {
@@ -111,35 +122,18 @@ function newLinesSince(pre: string, post: string): string[] {
   return out;
 }
 
-/** Raw-capture slice of the seat's output SINCE the current prompt was sent.
+/** Slice of the seat's output SINCE the current prompt was sent, bounded by the APPEND-ONLY
+ *  transcript (round-5 custody fix).
  *
- *  BOUNDARY, in priority order:
- *  1. MARKER (review50-r2 QA finding, bounded-scroll identity): a unique nonce
- *     is emitted into the pane immediately before the prompt. Content-identity
- *     alone cannot tell an OLD identical command line (that has since scrolled
- *     out of the pre-send window) from the NEW one the current response emits —
- *     LCS matches them and deletes the current command. The per-send nonce
- *     cannot collide with history, so the region after its LAST occurrence is
- *     unambiguously the current turn regardless of scroll.
- *  2. LCS-diff against the pre-send snapshot — the fallback when the marker
- *     itself scrolled out (a turn larger than the capture window); robust to
- *     append/scroll/redraw for non-identical content.
- *  Within the chosen region the prompt echo (wrapped or TUI-truncated) is
- *  skipped so grading starts at the response; a later genuine quotation is
- *  kept (it is in the region, after the echo). */
-export function sliceAfterPrompt(rawCapture: string, prompt: string, preSendCapture: string, marker?: string): string {
-  let region: string;
-  if (marker && marker.length > 0) {
-    const mAt = rawCapture.lastIndexOf(marker);
-    if (mAt >= 0) {
-      region = rawCapture.slice(mAt + marker.length);
-    } else {
-      // marker scrolled out (turn > window): fall back to the LCS diff.
-      region = preSendCapture.length > 0 ? newLinesSince(preSendCapture, rawCapture).join("\n") : rawCapture;
-    }
-  } else {
-    region = preSendCapture.length > 0 ? newLinesSince(preSendCapture, rawCapture).join("\n") : rawCapture;
-  }
+ *  BOUNDARY: the transcript SUFFIX — the lines of `post` not in its longest common subsequence with
+ *  the pre-send transcript `preSendCapture`. Because the transcript only APPENDS (it never scrolls or
+ *  redraws like a pane), an OLD identical command line sits in the matched common prefix and can never
+ *  be mistaken for the current turn's re-emission — so no in-band marker need be submitted to the seat
+ *  (round-4's eval-sync marker was a second `rig send`, a forbidden intervening input; round-5 removes
+ *  it entirely). Within the suffix the prompt echo (wrapped or TUI-truncated) is skipped so grading
+ *  starts at the response; a later genuine quotation is kept (it is in the suffix, after the echo). */
+export function sliceAfterPrompt(rawCapture: string, prompt: string, preSendCapture: string): string {
+  const region = preSendCapture.length > 0 ? newLinesSince(preSendCapture, rawCapture).join("\n") : rawCapture;
 
   const hay = normalized(region);
   const fullNeedle = normalized(prompt).text;
@@ -177,9 +171,8 @@ export function createRigCliSession(options: RigCliSessionOptions): { spawn: () 
     pollMs = 5_000,
     stablePolls = 2,
     timeoutMs = 300_000,
-    captureLines = 2_000,
+    transcriptLines = 100_000,
     sleep = (ms: number) => new Promise((r) => setTimeout(r, ms)),
-    nonce = () => randomUUID(),
   } = options;
   if ((seat === undefined) === (spec === undefined)) {
     throw new Error("createRigCliSession: exactly ONE of seat (attach) or spec (spawn) is required");
@@ -252,42 +245,39 @@ export function createRigCliSession(options: RigCliSessionOptions): { spawn: () 
         await cleanupOnFailure(err);
       }
 
-      const capture = () => exec(["capture", sessionName, "--lines", String(captureLines)]);
-      // A single `capture` can time out at the CLI's 5s bound when the daemon is
-      // briefly lag-slow (measured live). A transient poll failure is NOT a dead
-      // seat — return null so the loop waits and retries; the overall deadline
-      // still bounds a genuinely stuck seat. Consecutive failures past a bound
-      // ARE a dead daemon and surface loud.
-      const maxConsecutiveCaptureFailures = 8;
-      const tolerantCapture = async (failures: { n: number }): Promise<string | null> => {
+      // Round-5 custody: the boundary is the seat's APPEND-ONLY transcript, read out-of-band via
+      // `rig transcript` — reading it submits NOTHING to the seat (unlike round-4's eval-sync marker
+      // send, which was a forbidden intervening input).
+      const readTranscript = () => exec(["transcript", sessionName, "--tail", String(transcriptLines)]);
+      // A single transcript read can time out at the CLI's 5s bound when the daemon is briefly
+      // lag-slow (measured live). A transient poll failure is NOT a dead seat — return null so the
+      // loop waits and retries; the overall deadline still bounds a genuinely stuck seat. Consecutive
+      // failures past a bound ARE a dead daemon and surface loud.
+      const maxConsecutiveReadFailures = 8;
+      const tolerantRead = async (failures: { n: number }): Promise<string | null> => {
         try {
-          const out = await capture();
+          const out = await readTranscript();
           failures.n = 0;
           return out;
         } catch (err) {
           failures.n += 1;
-          if (failures.n >= maxConsecutiveCaptureFailures) {
-            throw new Error(`captureSince: ${failures.n} consecutive capture failures for '${sessionName}' — daemon unresponsive: ${(err as Error).message}`);
+          if (failures.n >= maxConsecutiveReadFailures) {
+            throw new Error(`captureSince: ${failures.n} consecutive transcript-read failures for '${sessionName}' — daemon unresponsive: ${(err as Error).message}`);
           }
           return null;
         }
       };
-      let preSendCapture = "";
-      let currentMarker = "";
+      let preSendTranscript = "";
 
       return {
         generation,
         async sendPrompt(prompt: string): Promise<void> {
-          // The pre-send snapshot is a best-effort fallback anchor (used only if
-          // the marker scrolls off); a failed snapshot must NOT abort the case.
-          preSendCapture = await withRetry(() => capture()).catch(() => "");
-          // Emit a UNIQUE per-send marker BEFORE the prompt so the current-send
-          // boundary has scroll-proof identity (a repeated/scrolled command line
-          // cannot be mistaken for it). The marker echoes into the pane; it sits
-          // BEFORE the prompt echo, so the prompt-echo skip excludes it from the
-          // graded transcript. The SEND is the load-bearing action and IS retried.
-          currentMarker = `eval-sync-${nonce()}`;
-          await withRetry(() => exec(["send", sessionName, currentMarker]));
+          // Round-5 custody: record the pre-send APPEND-ONLY transcript as the out-of-band boundary
+          // (reading submits nothing to the seat), then submit EXACTLY ONE input — the natural prompt.
+          // No eval-sync marker: a second `rig send` is an intervening input the frozen Test-A custody
+          // contract forbids (round-4's defect). A failed pre-read is a best-effort empty anchor, never
+          // an aborted case. The SEND is the load-bearing action and IS retried.
+          preSendTranscript = await withRetry(() => readTranscript()).catch(() => "");
           await withRetry(() => exec(["send", sessionName, prompt]));
         },
         async captureSince(prompt: string): Promise<string> {
@@ -295,18 +285,19 @@ export function createRigCliSession(options: RigCliSessionOptions): { spawn: () 
           let last = "";
           let stable = 0;
           const failures = { n: 0 };
-          // First wait for ANY change from the pre-send pane (the seat consumed
-          // the prompt), then for stability (the seat stopped producing).
+          // Poll the APPEND-ONLY transcript: first wait for ANY growth past the pre-send transcript
+          // (the seat consumed the prompt and recorded its turn), then for stability (it stopped
+          // appending). The suffix since the pre-send transcript is the current turn.
           for (;;) {
             if (Date.now() > deadline) {
               throw new Error(`captureSince: seat '${sessionName}' did not go stable within ${timeoutMs}ms`);
             }
             await sleep(pollMs);
-            const now = await tolerantCapture(failures);
+            const now = await tolerantRead(failures);
             if (now === null) continue;
-            if (now === last && now !== preSendCapture) {
+            if (now === last && now !== preSendTranscript) {
               stable += 1;
-              if (stable >= stablePolls) return sliceAfterPrompt(now, prompt, preSendCapture, currentMarker);
+              if (stable >= stablePolls) return sliceAfterPrompt(now, prompt, preSendTranscript);
             } else {
               stable = 0;
             }

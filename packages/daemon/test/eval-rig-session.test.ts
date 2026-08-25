@@ -64,27 +64,16 @@ describe("sliceAfterPrompt — the since-the-prompt anchor", () => {
     expect(since).not.toBe("");
   });
 
-  it("BOUNDED-SCROLL identity (r2 QA finding): an OLD identical command scrolled out, the current turn re-emits it — the MARKER keeps it, LCS-alone would delete it", () => {
+  it("APPEND-ONLY transcript (round-5 custody): an earlier identical command stays in the prefix; the current turn's re-emission is returned from the suffix — no marker needed", () => {
     const prompt = "the box rebooted — bring the fleet back";
-    const marker = "eval-sync-NONCE1";
-    // pre-send still holds the earlier identical command; post-send has scrolled
-    // it off the top and shows only the current turn (after the marker echo).
-    const preSend = "hist\nrig context get skills/core/rig-lifecycle\n> \n";
-    const rawCapture = `${marker}\n> ${prompt}\nrig context get skills/core/rig-lifecycle\n> \n`;
-    // WITHOUT the marker, LCS matches the new command to pre's old one -> "".
-    expect(sliceAfterPrompt(rawCapture, prompt, preSend)).not.toContain("rig context get");
-    // WITH the marker, the current command is retained.
-    const since = sliceAfterPrompt(rawCapture, prompt, preSend, marker);
+    // The transcript APPENDS — the earlier case's identical command line is RETAINED in the pre-send
+    // transcript (it never scrolls off), so LCS matches THAT occurrence and the current turn's
+    // re-emission is the new suffix. This append-only property is exactly why round-5 needs no in-band
+    // marker (round-4's marker was a forbidden second send).
+    const preSend = `> ${prompt}\nrig context get skills/core/rig-lifecycle\n`;
+    const post = `${preSend}> ${prompt}\nrig context get skills/core/rig-lifecycle\n`;
+    const since = sliceAfterPrompt(post, prompt, preSend);
     expect(since).toContain("rig context get skills/core/rig-lifecycle");
-  });
-
-  it("marker scrolled out too (turn > window): falls back to the LCS diff, never returns pre-send history", () => {
-    const prompt = "what can I do";
-    const preSend = "old history line\n";
-    const rawCapture = "old history line\n> what can I do\nfresh response here\n"; // no marker visible
-    const since = sliceAfterPrompt(rawCapture, prompt, preSend, "eval-sync-GONE");
-    expect(since).toContain("fresh response here");
-    expect(since).not.toContain("old history line");
   });
 
   it("scrolled-off echo: falls back to the pre-send snapshot tail", () => {
@@ -103,6 +92,23 @@ describe("sliceAfterPrompt — the since-the-prompt anchor", () => {
 });
 
 describe("createRigCliSession — spawn/attach, polling, retirement", () => {
+  it("CUSTODY (Test-A no-intervening-input, round 5): sendPrompt submits EXACTLY ONE rig send — the natural prompt, never a marker", async () => {
+    const { exec, calls } = scriptedExec((args) => {
+      if (args[0] === "whoami") return WHOAMI;
+      if (args[0] === "capture") return "prior pane\n";       // round-4 boundary source
+      if (args[0] === "transcript") return "prior transcript line\n"; // round-5 out-of-band boundary
+      if (args[0] === "send") return "sent";
+      return undefined;
+    });
+    const session = await createRigCliSession({ seat: "ops-eval@evalrig", exec }).spawn();
+    await session.sendPrompt("the natural prompt");
+    // The frozen custody contract forbids ANY intervening input between BASELINE and POST.
+    // Exactly one submitted send per case, and it is the natural prompt — no eval-sync marker.
+    const sends = calls.filter((c) => c[0] === "send");
+    expect(sends).toEqual([["send", "ops-eval@evalrig", "the natural prompt"]]);
+    expect(calls.some((c) => c[0] === "send" && /eval-sync/.test(c[2] ?? ""))).toBe(false);
+  });
+
   it("SPAWN: rig up -> adopt the attach session, generation from whoami, retire tears the spawned rig down ONCE", async () => {
     const { exec, calls } = scriptedExec((args) => {
       if (args[0] === "up") return UP;
@@ -154,28 +160,30 @@ describe("createRigCliSession — spawn/attach, polling, retirement", () => {
     expect(() => createRigCliSession({ seat: "a", spec: "b" })).toThrow(/exactly ONE/);
   });
 
-  it("send snapshots the pane BEFORE typing; captureSince waits for stability then slices after the echo", async () => {
-    let pane = "idle prompt box\n";
+  it("records the pre-send transcript, then captureSince waits for the transcript to stabilize and slices after the echo", async () => {
+    let transcript = "prior transcript line\n";
+    let sent = false;
     const { exec } = scriptedExec((args) => {
       if (args[0] === "whoami") return WHOAMI;
       if (args[0] === "send") {
-        pane = "idle prompt box\n> the natural prompt\n";
+        // the seat records the prompt turn into its APPEND-ONLY transcript
+        sent = true;
+        transcript = transcript + "> the natural prompt\n";
         return "sent";
       }
-      if (args[0] === "capture") {
-        const out = pane;
-        // simulate the seat producing output across polls, then going stable
-        if (pane.includes("> the natural prompt") && !pane.includes("DONE")) pane = pane + "working...\nDONE rig context get skills/x\n";
+      if (args[0] === "transcript") {
+        const out = transcript;
+        // simulate the seat appending its response across polls, then going quiet
+        if (sent && !transcript.includes("DONE")) transcript = transcript + "working...\nDONE rig context get skills/x\n";
         return out;
       }
       return undefined;
     });
-    const session = await createRigCliSession({ seat: "ops-eval@evalrig", exec, pollMs: 1, stablePolls: 2, sleep: async () => {}, nonce: () => "N1" }).spawn();
+    const session = await createRigCliSession({ seat: "ops-eval@evalrig", exec, pollMs: 1, stablePolls: 2, sleep: async () => {} }).spawn();
     await session.sendPrompt("the natural prompt");
     const since = await session.captureSince("the natural prompt");
     expect(since).toContain("DONE rig context get skills/x");
-    expect(since).not.toContain("idle prompt box");
-    expect(since).not.toContain("eval-sync-N1"); // the marker is excluded from the graded transcript
+    expect(since).not.toContain("prior transcript line"); // pre-send content is the matched prefix, not the turn
   });
 
   it("a seat that never goes stable times out as an ERROR, never a silent partial", async () => {
@@ -183,7 +191,7 @@ describe("createRigCliSession — spawn/attach, polling, retirement", () => {
     const { exec } = scriptedExec((args) => {
       if (args[0] === "whoami") return WHOAMI;
       if (args[0] === "send") return "sent";
-      if (args[0] === "capture") return `always changing ${n++}\n`;
+      if (args[0] === "transcript") return `always changing ${n++}\n`;
       return undefined;
     });
     const session = await createRigCliSession({ seat: "s@r", exec, pollMs: 1, timeoutMs: 30, sleep: async () => {} }).spawn();
@@ -191,18 +199,19 @@ describe("createRigCliSession — spawn/attach, polling, retirement", () => {
     await expect(session.captureSince("p")).rejects.toThrow(/did not go stable/);
   });
 
-  it("TRANSIENT capture failures are tolerated — a lag-slow daemon's 5s timeout retries, not errors the case", async () => {
-    let pane = "idle\n";
-    let captureCall = 0;
+  it("TRANSIENT transcript-read failures are tolerated — a lag-slow daemon's 5s timeout retries, not errors the case", async () => {
+    let transcript = "idle\n";
+    let sent = false;
+    let readCall = 0;
     const { exec } = scriptedExec((args) => {
       if (args[0] === "whoami") return WHOAMI;
-      if (args[0] === "send") { pane = "idle\n> the prompt\n"; return "sent"; }
-      if (args[0] === "capture") {
-        captureCall++;
+      if (args[0] === "send") { sent = true; transcript = transcript + "> the prompt\n"; return "sent"; }
+      if (args[0] === "transcript") {
+        readCall++;
         // fail a couple of polls transiently (daemon lag), then succeed + go stable
-        if (captureCall === 3 || captureCall === 4) throw new Error("Daemon did not respond in time");
-        if (pane.includes("> the prompt") && !pane.includes("DONE")) pane += "DONE rig context get skills/x\n";
-        return pane;
+        if (readCall === 3 || readCall === 4) throw new Error("Daemon did not respond in time");
+        if (sent && !transcript.includes("DONE")) transcript = transcript + "DONE rig context get skills/x\n";
+        return transcript;
       }
       return undefined;
     });
@@ -212,15 +221,15 @@ describe("createRigCliSession — spawn/attach, polling, retirement", () => {
     expect(since).toContain("DONE rig context get skills/x");
   });
 
-  it("SUSTAINED capture failure IS a dead daemon — surfaces loud after the consecutive bound", async () => {
+  it("SUSTAINED transcript-read failure IS a dead daemon — surfaces loud after the consecutive bound", async () => {
     const { exec } = scriptedExec((args) => {
       if (args[0] === "whoami") return WHOAMI;
       if (args[0] === "send") return "sent";
-      if (args[0] === "capture") throw new Error("Daemon did not respond in time");
+      if (args[0] === "transcript") throw new Error("Daemon did not respond in time");
       return undefined;
     });
     const session = await createRigCliSession({ seat: "s@r", exec, pollMs: 1, timeoutMs: 60_000, sleep: async () => {} }).spawn();
     await session.sendPrompt("p");
-    await expect(session.captureSince("p")).rejects.toThrow(/consecutive capture failures|unresponsive/);
+    await expect(session.captureSince("p")).rejects.toThrow(/consecutive transcript-read failures|unresponsive/);
   });
 });

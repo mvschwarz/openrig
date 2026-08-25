@@ -17,8 +17,9 @@
  *     --seat <session>      attach to an existing live seat (never torn down), or
  *     --seat-spec <rig.yaml> `rig up` a scratch rig and drive its single seat
  *                            (torn down via `rig down` at the end).
- *   One persistent seat/generation serves every case; capture waits for pane
- *   stability; the leading input echo is excluded from grading by the provider.
+ *   One persistent seat/generation serves every case; the boundary is the seat's
+ *   append-only transcript (read out-of-band, no marker send — round-5 custody);
+ *   the leading input echo is excluded from grading by the provider.
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
