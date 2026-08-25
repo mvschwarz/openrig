@@ -235,6 +235,63 @@ describe("captureSince — Claude-JSONL output-only + native-turn completion (RE
     expect(since).not.toContain("tool_result");                            // no envelope
     expect(since).not.toContain("the case prompt");                        // still output-only
   });
+
+  // Round-10 repair (r2 R9 NOT-CLEAR, row e9d51ca6; artifact 69dfddb6) — both shapes traced from the
+  // preserved REAL generation .../convergence-test-a-d99e44672-20260825T072921Z-dev-qa/runs/run-01/
+  // transcripts/99-aborted-full-generation.jsonl, not invented.
+  it.fails("HIGH-1 — native Skill continuation (tool_result record + separate isMeta/sourceToolUseID text record) is NOT intervening input [RED until causal-field classification]", async () => {
+    // Specimen lines 43/47/48/49/40/41: prompt (STRING content) -> Skill tool_use -> user tool_result ->
+    // user TEXT record carrying top-level isMeta:true + sourceToolUseID (the loaded skill body) ->
+    // assistant end_turn text -> system turn_duration. A role+content-type classifier counts the skill
+    // body as a second user input and voids a legitimate tool cycle.
+    const promptRec = `{"type":"user","message":{"role":"user","content":"the case prompt"}}`;
+    const skillUse = `{"type":"assistant","message":{"role":"assistant","model":"claude-x","stop_reason":"tool_use","content":[{"type":"tool_use","name":"Skill","input":{"command":"forming-an-openrig-mental-model"}}]}}`;
+    const toolResult = `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"Launching skill"}]}}`;
+    const skillBody = `{"type":"user","isMeta":true,"sourceToolUseID":"toolu_01QpK4","message":{"role":"user","content":[{"type":"text","text":"# Skill body — forming an openrig mental model"}]}}`;
+    const finalText = `{"type":"assistant","message":{"role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"final answer: rig whoami then rig context list"}]}}`;
+    const turnEnd = `{"type":"system","subtype":"turn_duration","isMeta":false}`;
+    const { session } = await driveOne(
+      "",
+      "the case prompt",
+      promptRec + "\n" + skillUse + "\n",
+      toolResult + "\n" + skillBody + "\n" + finalText + "\n" + turnEnd + "\n",
+    );
+    const since = await session.captureSince("the case prompt"); // must NOT throw CASE INVALID
+    expect(since).toContain("final answer: rig whoami then rig context list");
+  });
+
+  it.fails("HIGH-2 — a terminal THINKING record first does not end the turn: capture waits for the turn-closure record and returns the final TEXT [RED until closure-boundary completion]", async () => {
+    // Specimen lines 39/40/41: assistant end_turn (thinking) at T, assistant end_turn (text) 92ms later,
+    // then system/turn_duration. Returning on the first terminal assistant record yields out:"" and the
+    // grader never sees the user-visible answer.
+    const promptRec = `{"type":"user","message":{"role":"user","content":"p"}}`;
+    const terminalThinking = `{"type":"assistant","message":{"role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"thinking","thinking":"deciding what to answer"}]}}`;
+    const terminalText = `{"type":"assistant","message":{"role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"THE FINAL VISIBLE ANSWER"}]}}`;
+    const turnEnd = `{"type":"system","subtype":"turn_duration","isMeta":false}`;
+    const { session } = await driveOne(
+      "",
+      "p",
+      promptRec + "\n" + terminalThinking + "\n",       // first read exposes ONLY the terminal thinking chunk
+      terminalText + "\n" + turnEnd + "\n",             // the text + closure land on the NEXT read
+    );
+    const since = await session.captureSince("p");
+    expect(since).toContain("THE FINAL VISIBLE ANSWER");
+  });
+
+  it("GUARD (r2 required): with the Skill continuation valid, a SECOND actual prompt still fails the case closed", async () => {
+    const promptRec = `{"type":"user","message":{"role":"user","content":"the case prompt"}}`;
+    const skillBody = `{"type":"user","isMeta":true,"sourceToolUseID":"toolu_01QpK4","message":{"role":"user","content":[{"type":"text","text":"skill body"}]}}`;
+    const secondPrompt = `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"a second actual prompt — contamination"}]}}`;
+    const finalText = `{"type":"assistant","message":{"role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"answer"}]}}`;
+    const turnEnd = `{"type":"system","subtype":"turn_duration","isMeta":false}`;
+    const { session } = await driveOne(
+      "",
+      "the case prompt",
+      promptRec + "\n",
+      skillBody + "\n" + secondPrompt + "\n" + finalText + "\n" + turnEnd + "\n",
+    );
+    await expect(session.captureSince("the case prompt")).rejects.toThrow(/CASE INVALID|intervening user input/i);
+  });
 });
 
 describe("createRigCliSession — spawn/attach, polling, retirement", () => {
