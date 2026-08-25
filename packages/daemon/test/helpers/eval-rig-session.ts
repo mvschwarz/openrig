@@ -174,6 +174,9 @@ export function sliceAfterPrompt(rawCapture: string, prompt: string, preSendCapt
  *  the capture grades MESSAGES, and a corrupt line is never silently graded. */
 interface GenerationRecordLine {
   type?: string;
+  subtype?: string;
+  isMeta?: boolean;
+  sourceToolUseID?: string;
   message?: {
     role?: string;
     stop_reason?: string | null;
@@ -201,19 +204,23 @@ function contentBlocks(rec: GenerationRecordLine): Array<{ type?: string; text?:
   return Array.isArray(c) ? c : [];
 }
 
-/** A user-role record that is a genuine INPUT (text), as opposed to the
- *  tool_result continuation records the runtime writes with role "user" as
- *  part of the assistant's own tool cycle. PIN 4 fails a case closed on the
- *  former; the latter is the assistant's turn in progress. */
-function isUserTextInput(rec: GenerationRecordLine): boolean {
+/** A user-role record that is EXTERNALLY-ORIGINATED INPUT, classified by the
+ *  native CAUSAL FIELDS rather than role + content type (r2 R10 HIGH-1,
+ *  specimen-traced): the runtime writes THREE user-role record kinds inside an
+ *  assistant's own tool cycle — the tool_result record, and (for Skill loads) a
+ *  SEPARATE text record carrying top-level isMeta:true + sourceToolUseID with
+ *  the loaded body. All three are the assistant's turn in progress. What PIN 4
+ *  fails closed on is a record with none of those causal markers that carries
+ *  input text — an actual prompt entering the generation. */
+function isExternalUserInput(rec: GenerationRecordLine): boolean {
   if (rec.message?.role !== "user") return false;
+  if (rec.isMeta === true) return false;                                 // runtime-injected content (e.g. a loaded skill body)
+  if (typeof rec.sourceToolUseID === "string" && rec.sourceToolUseID.length > 0) return false; // caused by the assistant's own tool use
   const blocks = contentBlocks(rec);
-  if (typeof rec.message?.content === "string") return true;
-  if (blocks.some((b) => b.type === "tool_result")) return false;
+  if (typeof rec.message?.content === "string") return true;             // the native prompt shape (string content)
+  if (blocks.some((b) => b.type === "tool_result")) return false;        // the tool cycle's result record
   return blocks.some((b) => b.type === "text");
 }
-
-const TERMINAL_STOP_REASONS = new Set(["end_turn", "stop_sequence", "max_tokens"]);
 
 /** Assistant OUTPUT text only: text blocks verbatim, tool_use blocks as their
  *  grader-matchable command (the DOOR grader pattern-matches command strings) —
@@ -410,28 +417,36 @@ export function createRigCliSession(options: RigCliSessionOptions): { spawn: () 
               throw new Error(`captureSince: generation '${boundGenerationId}' record is not append-only for '${sessionName}' (pre-send content is not a prefix) — boundary unsound, refusing`);
             }
             const records = parseRecordLines(content.slice(preSendRecord.length));
-            // PIN 4 — INTERVENING-INPUT FAIL-CLOSED (desk ruling 6fa281f1): the FIRST user text record
-            // is the prompt's own delivery; ANY further user-role TEXT record entering the generation
-            // before the turn completes voids the CASE, loudly. Detection, not prevention — a terminal
-            // accepts input by design; the harness refuses to grade a contaminated case so a repeat
-            // costs one case, never a run. tool_result records carry role "user" but are the
-            // assistant's own tool cycle — they are NOT intervening input (see isUserTextInput).
-            const userInputs = records.filter(isUserTextInput);
+            // PIN 4 — INTERVENING-INPUT FAIL-CLOSED (desk ruling 6fa281f1): the FIRST external user
+            // input is the prompt's own delivery; ANY further externally-originated input entering the
+            // generation before the turn completes voids the CASE, loudly. Detection, not prevention —
+            // a terminal accepts input by design; the harness refuses to grade a contaminated case so
+            // a repeat costs one case, never a run. Classification is by the native CAUSAL FIELDS
+            // (r2 R10 HIGH-1): tool_result records AND isMeta/sourceToolUseID text records (a loaded
+            // skill body) are the assistant's own tool cycle, never intervening input.
+            const userInputs = records.filter(isExternalUserInput);
             if (userInputs.length > 1) {
               throw new Error(`captureSince: CASE INVALID — ${userInputs.length - 1} intervening user input record(s) entered generation '${boundGenerationId}' of '${sessionName}' between prompt delivery and native-turn completion; the frozen no-intervening-input custody rule fails this case closed`);
             }
-            // NATIVE-TURN COMPLETION: return only when the suffix's LAST assistant message is TERMINAL
-            // ("end_turn"/"stop_sequence"/"max_tokens" — NOT "tool_use", NOT null). Otherwise keep
-            // polling to the deadline: a footer-only or stop_reason:null fragment is an OPEN turn.
-            const assistants = records.filter((r) => r.message?.role === "assistant");
-            const lastAssistant = assistants[assistants.length - 1];
-            const stop = lastAssistant?.message?.stop_reason;
-            if (typeof stop === "string" && TERMINAL_STOP_REASONS.has(stop)) {
-              // OUTPUT-ONLY: assistant text + tool_use command blocks — what the DOOR grader
-              // pattern-matches. The user prompt and every JSON envelope byte are excluded by
-              // construction (role filter + block extraction), so no echo-strip slicing is needed here;
-              // the leading-echo strip remains the PROVIDER's contract on its own boundary.
-              return assistantText(records);
+            // NATIVE-TURN COMPLETION (r2 R10 HIGH-2): a terminal stop_reason on the newest assistant
+            // record is NOT the turn boundary — the runtime emits MULTIPLE terminal assistant records
+            // per turn (specimen: thinking end_turn, then the visible text end_turn 92ms later). The
+            // source-proven closure boundary is the system/turn_duration record the runtime writes
+            // AFTER the turn's last assistant record; return only when it is present with at least one
+            // assistant record before it. Anything less keeps polling to the deadline.
+            let closureAt = -1;
+            for (let i = records.length - 1; i >= 0; i--) {
+              if (records[i]!.type === "system" && records[i]!.subtype === "turn_duration") { closureAt = i; break; }
+            }
+            if (closureAt >= 0) {
+              const turn = records.slice(0, closureAt);
+              if (turn.some((r) => r.message?.role === "assistant")) {
+                // OUTPUT-ONLY: assistant text + tool_use command blocks — what the DOOR grader
+                // pattern-matches. Thinking blocks, the user prompt and every JSON envelope byte are
+                // excluded by construction (role filter + block extraction); the leading-echo strip
+                // remains the PROVIDER's contract on its own boundary.
+                return assistantText(turn);
+              }
             }
           }
         },

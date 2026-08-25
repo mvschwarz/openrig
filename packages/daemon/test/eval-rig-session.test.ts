@@ -147,7 +147,7 @@ describe("captureSince — Claude-JSONL output-only + native-turn completion (RE
       userMsg("earlier turn") + "\n",
       "the case prompt",
       userMsg("the case prompt") + "\n",
-      asstMsg("rig context get skills/core/rig-lifecycle", "end_turn") + "\n",
+      asstMsg("rig context get skills/core/rig-lifecycle", "end_turn") + "\n" + '{"type":"system","subtype":"turn_duration","isMeta":false}' + "\n",
     );
     const since = await session.captureSince("the case prompt");
     expect(since).toContain("rig context get skills/core/rig-lifecycle"); // assistant output kept
@@ -175,7 +175,7 @@ describe("captureSince — Claude-JSONL output-only + native-turn completion (RE
     let n = 0;
     const { exec } = scriptedExec((args) => {
       if (args[0] === "whoami") return WHOAMI;
-      if (args[0] === "send") { const which = n++ === 0 ? "prompt-1" : "prompt-2"; state.content = state.content + userMsg(which) + "\n" + asstMsg(`case TWO output ${which}`, "end_turn") + "\n"; return "sent"; }
+      if (args[0] === "send") { const which = n++ === 0 ? "prompt-1" : "prompt-2"; state.content = state.content + userMsg(which) + "\n" + asstMsg(`case TWO output ${which}`, "end_turn") + "\n" + '{"type":"system","subtype":"turn_duration","isMeta":false}' + "\n"; return "sent"; }
       return undefined;
     });
     const reader = async () => ({ generationId: state.generationId, content: state.content });
@@ -199,7 +199,7 @@ describe("captureSince — Claude-JSONL output-only + native-turn completion (RE
       userMsg("earlier turn") + "\n",
       "the case prompt",
       userMsg("the case prompt") + "\n",
-      userMsg("self-sent reply-hint contamination") + "\n" + asstMsg("answer text", "end_turn") + "\n",
+      userMsg("self-sent reply-hint contamination") + "\n" + asstMsg("answer text", "end_turn") + "\n" + '{"type":"system","subtype":"turn_duration","isMeta":false}' + "\n",
     );
     await expect(session.captureSince("the case prompt")).rejects.toThrow(/CASE INVALID|intervening user input/i);
   });
@@ -227,7 +227,7 @@ describe("captureSince — Claude-JSONL output-only + native-turn completion (RE
       userMsg("earlier turn") + "\n",
       "the case prompt",
       userMsg("the case prompt") + "\n" + toolUse + "\n",
-      toolResult + "\n" + asstMsg("done: the lifecycle entry is served", "end_turn") + "\n",
+      toolResult + "\n" + asstMsg("done: the lifecycle entry is served", "end_turn") + "\n" + '{"type":"system","subtype":"turn_duration","isMeta":false}' + "\n",
     );
     const since = await session.captureSince("the case prompt");
     expect(since).toContain("rig context get skills/core/rig-lifecycle"); // the tool command the DOOR grader matches
@@ -239,7 +239,7 @@ describe("captureSince — Claude-JSONL output-only + native-turn completion (RE
   // Round-10 repair (r2 R9 NOT-CLEAR, row e9d51ca6; artifact 69dfddb6) — both shapes traced from the
   // preserved REAL generation .../convergence-test-a-d99e44672-20260825T072921Z-dev-qa/runs/run-01/
   // transcripts/99-aborted-full-generation.jsonl, not invented.
-  it.fails("HIGH-1 — native Skill continuation (tool_result record + separate isMeta/sourceToolUseID text record) is NOT intervening input [RED until causal-field classification]", async () => {
+  it("HIGH-1 — native Skill continuation (tool_result record + separate isMeta/sourceToolUseID text record) is NOT intervening input [GREEN — causal-field classification]", async () => {
     // Specimen lines 43/47/48/49/40/41: prompt (STRING content) -> Skill tool_use -> user tool_result ->
     // user TEXT record carrying top-level isMeta:true + sourceToolUseID (the loaded skill body) ->
     // assistant end_turn text -> system turn_duration. A role+content-type classifier counts the skill
@@ -260,7 +260,7 @@ describe("captureSince — Claude-JSONL output-only + native-turn completion (RE
     expect(since).toContain("final answer: rig whoami then rig context list");
   });
 
-  it.fails("HIGH-2 — a terminal THINKING record first does not end the turn: capture waits for the turn-closure record and returns the final TEXT [RED until closure-boundary completion]", async () => {
+  it("HIGH-2 — a terminal THINKING record first does not end the turn: capture waits for the turn-closure record and returns the final TEXT [GREEN — closure-boundary completion]", async () => {
     // Specimen lines 39/40/41: assistant end_turn (thinking) at T, assistant end_turn (text) 92ms later,
     // then system/turn_duration. Returning on the first terminal assistant record yields out:"" and the
     // grader never sees the user-visible answer.
@@ -375,7 +375,7 @@ describe("createRigCliSession — spawn/attach, polling, retirement", () => {
     // The append-only record grows across reads: the seat appends its completed turn.
     const readGenerationRecord = async () => {
       const out = { generationId: state.generationId, content: state.content };
-      if (sent && !state.content.includes("DONE")) state.content = state.content + '{"type":"assistant","message":{"role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"DONE rig context get skills/x"}]}}\n';
+      if (sent && !state.content.includes("DONE")) state.content = state.content + '{"type":"assistant","message":{"role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"DONE rig context get skills/x"}]}}\n{"type":"system","subtype":"turn_duration","isMeta":false}\n';
       return out;
     };
     const session = await createRigCliSession({ seat: "ops-eval@evalrig", exec, pollMs: 1, stablePolls: 2, sleep: async () => {}, readGenerationRecord }).spawn();
@@ -412,7 +412,7 @@ describe("createRigCliSession — spawn/attach, polling, retirement", () => {
       readCall++;
       // sendPrompt's read is #1; fail a couple of capture polls transiently, then complete the turn
       if (readCall === 2 || readCall === 3) throw new Error("Daemon did not respond in time");
-      if (sent && !state.content.includes("DONE")) state.content = state.content + '{"type":"assistant","message":{"role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"DONE rig context get skills/x"}]}}\n';
+      if (sent && !state.content.includes("DONE")) state.content = state.content + '{"type":"assistant","message":{"role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"DONE rig context get skills/x"}]}}\n{"type":"system","subtype":"turn_duration","isMeta":false}\n';
       return { generationId: state.generationId, content: state.content };
     };
     const session = await createRigCliSession({ seat: "s@r", exec, pollMs: 1, stablePolls: 2, sleep: async () => {}, readGenerationRecord }).spawn();
@@ -454,7 +454,7 @@ describe("createRigCliSession — spawn/attach, polling, retirement", () => {
     let n = 0;
     const { exec, calls } = scriptedExec((args) => {
       if (args[0] === "whoami") return WHOAMI;
-      if (args[0] === "send") { state.content = state.content + `{"type":"user","message":{"role":"user","content":[{"type":"text","text":${JSON.stringify(args[3])}}]}}\n{"type":"assistant","message":{"role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"completed ${n++}"}]}}\n`; return "sent"; }
+      if (args[0] === "send") { state.content = state.content + `{"type":"user","message":{"role":"user","content":[{"type":"text","text":${JSON.stringify(args[3])}}]}}\n{"type":"assistant","message":{"role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"completed ${n++}"}]}}\n{"type":"system","subtype":"turn_duration","isMeta":false}\n`; return "sent"; }
       return undefined;
     });
     const session = await createRigCliSession({ seat: "s@r", exec, pollMs: 1, stablePolls: 2, sleep: async () => {}, readGenerationRecord: genReader(state) }).spawn();

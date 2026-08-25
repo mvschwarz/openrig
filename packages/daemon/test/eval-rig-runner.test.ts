@@ -39,7 +39,7 @@ describe("run-evals --provider rig — the wired runner seam (r2 round-6 HIGH-1)
     // grows append-only across reads, then goes quiet.
     const readGenerationRecord = async () => {
       const out = { generationId: state.generationId, content: state.content };
-      if (sent && !state.content.includes("DONE")) state.content = state.content + '{"type":"assistant","message":{"role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"DONE rig context get skills/core/rig-lifecycle"}]}}\n';
+      if (sent && !state.content.includes("DONE")) state.content = state.content + '{"type":"assistant","message":{"role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"DONE rig context get skills/core/rig-lifecycle"}]}}\n{"type":"system","subtype":"turn_duration","isMeta":false}\n';
       return out;
     };
     const session = await buildRigProviderSession({
@@ -85,7 +85,7 @@ describe("run-evals --provider rig — the wired runner seam (r2 round-6 HIGH-1)
       let currentJsonl = j1;
       const { exec, calls } = scriptedExec((args) => {
         if (args[0] === "whoami") return WHOAMI;
-        if (args[0] === "send") { fs.appendFileSync(currentJsonl, `{"type":"user","message":{"role":"user","content":[{"type":"text","text":${JSON.stringify(args[3])}}]}}\n{"type":"assistant","message":{"role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"completed"}]}}\n`); return "sent"; }
+        if (args[0] === "send") { fs.appendFileSync(currentJsonl, `{"type":"user","message":{"role":"user","content":[{"type":"text","text":${JSON.stringify(args[3])}}]}}\n{"type":"assistant","message":{"role":"assistant","model":"claude-x","stop_reason":"end_turn","content":[{"type":"text","text":"completed"}]}}\n{"type":"system","subtype":"turn_duration","isMeta":false}\n`); return "sent"; }
         return undefined;
       });
       const session = await buildRigProviderSession({ seat: "s@r", exec, stateDir, session: { pollMs: 1, stablePolls: 2, sleep: async () => {} } }).spawn();
