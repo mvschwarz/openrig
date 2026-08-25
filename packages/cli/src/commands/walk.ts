@@ -75,6 +75,9 @@ export function walkCommand(depsOverride?: WalkDeps): Command {
     // piece is verified BY EFFECT against the seat's generation record before the next is sent.
     .option("--consume-timeout <ms>", "Per-piece consumption-verification window in ms (default 20000)")
     .option("--consume-poll <ms>", "Consumption-verification poll interval in ms (default 1500)")
+    // Turn-pacing (desk BLOCKING row 2ff16fa1): a piece sent into an OPEN turn is queued by the
+    // runtime and never becomes a distinct user turn — walk waits for the prior turn's closure.
+    .option("--turn-timeout <duration>", "Max wait for the seat's turn to CLOSE after a piece is consumed, before the next piece (same grammar as --pace; default 300s)")
     .option("--json", "JSON output")
     .addHelpText("after", `
 Examples:
@@ -84,7 +87,7 @@ Examples:
 Paced push-delivery: each piece is sent into the target pane, then --pace elapses
 before the next. The walker leads; it does not wait for replies — the spacing lets
 the agent process between sends. Small piece → 'rig send'; a real pack → walk.`)
-    .action(async (seat: string, opts: { through?: string[]; throughProfile?: string; situation?: string; runtime?: string; rig?: string; seatGrant?: string; mission?: string; budget?: string; pace?: string; consumeTimeout?: string; consumePoll?: string; json?: boolean }) => {
+    .action(async (seat: string, opts: { through?: string[]; throughProfile?: string; situation?: string; runtime?: string; rig?: string; seatGrant?: string; mission?: string; budget?: string; pace?: string; consumeTimeout?: string; consumePoll?: string; turnTimeout?: string; json?: boolean }) => {
       try {
         const deps = getDeps();
         const paceMs = parsePaceMs(opts.pace);
@@ -150,8 +153,9 @@ the agent process between sends. Small piece → 'rig send'; a real pack → wal
         // Same duration grammar as --pace (10s / 500ms / bare seconds); defaults 20s / 1.5s.
         const consumeTimeoutMs = opts.consumeTimeout !== undefined ? parsePaceMs(opts.consumeTimeout) : 20_000;
         const consumePollMs = opts.consumePoll !== undefined ? parsePaceMs(opts.consumePoll) : 1_500;
-        if (consumeTimeoutMs === null || consumePollMs === null) {
-          console.error("Invalid --consume-timeout / --consume-poll: use e.g. 20s, 1500ms, or a bare number of seconds.");
+        const turnTimeoutMs = opts.turnTimeout !== undefined ? parsePaceMs(opts.turnTimeout) : 300_000;
+        if (consumeTimeoutMs === null || consumePollMs === null || turnTimeoutMs === null) {
+          console.error("Invalid --consume-timeout / --consume-poll / --turn-timeout: use e.g. 20s, 1500ms, or a bare number of seconds.");
           process.exitCode = 1;
           return;
         }
@@ -163,20 +167,30 @@ the agent process between sends. Small piece → 'rig send'; a real pack → wal
         const readRecord = async (sinceBytes?: number): Promise<{ status: number; data: RecordRead }> =>
           client.get<RecordRead>(sinceBytes === undefined ? recordPath : `${recordPath}?sinceBytes=${sinceBytes}`, { headers: terminalAuthHeaders() });
 
-        /** Does the record suffix show the piece consumed — a user-role record carrying the piece head? */
-        const suffixShowsConsumed = (suffix: string, head: string): boolean => {
-          for (const line of suffix.split("\n")) {
-            const trimmed = line.trim();
+        /** Parse the record suffix: where (if anywhere) the piece's distinct user turn is, and
+         *  whether a system/turn_duration CLOSURE record follows it (the capture atom's boundary —
+         *  the turn-pacing gate's signal that the seat finished processing the piece). */
+        const analyzeSuffix = (suffix: string, head: string): { consumed: boolean; turnClosed: boolean } => {
+          let consumedAt = -1;
+          const lines = suffix.split("\n");
+          for (let i = 0; i < lines.length; i++) {
+            const trimmed = lines[i]!.trim();
             if (!trimmed) continue;
-            let rec: { message?: { role?: string; content?: Array<{ type?: string; text?: string }> | string } };
+            let rec: { type?: string; subtype?: string; message?: { role?: string; content?: Array<{ type?: string; text?: string }> | string } };
             try { rec = JSON.parse(trimmed); } catch { continue; }
-            if (rec.message?.role !== "user") continue;
-            const c = rec.message.content;
-            const texts = typeof c === "string" ? [c] : Array.isArray(c) ? c.filter((b) => b.type === "text" && typeof b.text === "string").map((b) => b.text!) : [];
-            if (texts.some((t) => normalize(t).includes(head))) return true;
+            if (consumedAt < 0 && rec.message?.role === "user") {
+              const c = rec.message.content;
+              const texts = typeof c === "string" ? [c] : Array.isArray(c) ? c.filter((b) => b.type === "text" && typeof b.text === "string").map((b) => b.text!) : [];
+              if (texts.some((t) => normalize(t).includes(head))) consumedAt = i;
+              continue;
+            }
+            if (consumedAt >= 0 && rec.type === "system" && rec.subtype === "turn_duration") {
+              return { consumed: true, turnClosed: true };
+            }
           }
-          return false;
+          return { consumed: consumedAt >= 0, turnClosed: false };
         };
+        const suffixShowsConsumed = (suffix: string, head: string): boolean => analyzeSuffix(suffix, head).consumed;
 
         // One pre-walk record probe decides the mode. No record (unsupported runtime / no sidecar /
         // a daemon without the route) → legacy delivery with a NAMED advisory: unverified is
@@ -293,6 +307,31 @@ the agent process between sends. Small piece → 'rig send'; a real pack → wal
                 failPiece(i, piece.label, `send reported ${sendOutcome === "ok" ? "success" : "a transport error"} but the piece is neither consumed in the generation record nor staged in the pane — delivery lost; consumption verification fails this walk closed.`);
                 return;
               }
+            }
+          }
+
+          // TURN-PACING GATE (desk BLOCKING row 2ff16fa1): the piece is consumed, but sending the
+          // next one into a still-OPEN turn gets it QUEUED by the runtime (never a distinct user
+          // turn — the rerun's proven defect layer). Wait for the seat's turn to CLOSE — the
+          // system/turn_duration record after the piece's user turn (the capture atom's boundary)
+          // — before pacing to the next piece. The wait is the install working as designed: a
+          // walk takes as long as the seat needs to actually read the pieces.
+          if (verifiable && i < pieces.length - 1) {
+            const turnDeadline = Date.now() + turnTimeoutMs;
+            for (;;) {
+              const rec = await readRecord(preLen);
+              if (rec.status === 200 && typeof rec.data.generationId === "string") {
+                if (rec.data.generationId !== preGen) {
+                  failPiece(i, piece.label, "the seat's generation rolled while waiting for its turn to close.");
+                  return;
+                }
+                if (analyzeSuffix(rec.data.suffix ?? "", head).turnClosed) break;
+              }
+              if (Date.now() >= turnDeadline) {
+                failPiece(i, piece.label, `consumed, but the seat's turn did not CLOSE within ${turnTimeoutMs}ms — refusing to send the next piece into an open turn (it would be queued, never a distinct user turn).`);
+                return;
+              }
+              await sleep(consumePollMs);
             }
           }
 

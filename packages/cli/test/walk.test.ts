@@ -276,7 +276,7 @@ describe("rig walk — per-piece consumption verification (RED-first, mechanics-
       }
       // The bare-Enter retry (submitOnly): the TUI accepts it — the piece lands in the record.
       const staged = /❯ (.+)\n/.exec(w.pane)?.[1] ?? "";
-      w.record.content += userRec(staged + " …full piece body…") + "\n";
+      w.record.content += userRec(staged + " …full piece body…") + "\n" + closureRec + "\n";
       w.pane = "❯ \n";
       return { status: 200, data: { ok: true, submitOnly: true } };
     };
@@ -296,7 +296,7 @@ describe("rig walk — per-piece consumption verification (RED-first, mechanics-
     w.sendBehavior = (b) => {
       if (b["text"] !== undefined) {
         // Server completed the send+submit; the client never saw the response.
-        w.record.content += userRec(String(b["text"])) + "\n";
+        w.record.content += userRec(String(b["text"])) + "\n" + closureRec + "\n";
         return "throw";
       }
       return { status: 200, data: { ok: true } };
@@ -335,7 +335,7 @@ describe("rig walk — per-piece consumption verification (RED-first, mechanics-
   // prior piece's turn gets QUEUED by the runtime (enqueue/attachment) and never becomes a distinct
   // user turn — consumption verification cannot save it. Walk must WAIT for the prior turn's
   // CLOSURE (the system/turn_duration record, the capture atom's boundary) before the next send.
-  it.fails("PACING-A — piece 2 is NEVER sent while piece 1's turn is open; closure-wait timeout fails loud naming the piece [RED until the turn gate]", async () => {
+  it("PACING-A — piece 2 is NEVER sent while piece 1's turn is open; closure-wait timeout fails loud naming the piece [GREEN — the turn gate]", async () => {
     const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
     // Piece 1 consumes as a distinct user turn but the turn NEVER closes (no turn_duration).
     w.sendBehavior = (b) => {
@@ -352,7 +352,7 @@ describe("rig walk — per-piece consumption verification (RED-first, mechanics-
     expect(errLogs.join("\n")).toMatch(/turn/i);           // names the failure class (closure wait)
   });
 
-  it.fails("PACING-B — piece 2 goes only AFTER piece 1's turn closure is visible in the record [RED until the turn gate]", async () => {
+  it("PACING-B — piece 2 goes only AFTER piece 1's turn closure is visible in the record [GREEN — the turn gate]", async () => {
     const w: ScriptedWorld = { record: { generationId: "g1", content: "" }, pane: "", sends: [], gets: [] };
     let closureServedBeforePiece2 = false;
     let piece1Consumed = false;
@@ -410,7 +410,7 @@ describe("rig walk — per-piece consumption verification (RED-first, mechanics-
       },
     });
     w.sendBehavior = (b) => {
-      if (b["text"] !== undefined) { w.record.content += userRec(String(b["text"])) + "\n"; return { status: 200, data: { ok: true } }; }
+      if (b["text"] !== undefined) { w.record.content += userRec(String(b["text"])) + "\n" + closureRec + "\n"; return { status: 200, data: { ok: true } }; }
       return { status: 200, data: { ok: true } };
     };
     await captureLogs(async () => {
