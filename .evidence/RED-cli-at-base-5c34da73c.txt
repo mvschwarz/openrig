@@ -1,0 +1,130 @@
+
+ RUN  v3.2.4 /private/tmp/s2-base-red/packages/cli
+
+ ❯ test/broadcast.test.ts (9 tests | 1 failed) 116ms
+   × Broadcast CLI > broadcast renderer surfaces the unknown-sender notice from the response warning 53ms
+     → expected 'dev-impl@warn-rig: sent\ndev-qa@warn-…' to contain 'Advisory:'
+   ✓ Broadcast CLI > broadcast --rig prints per-target summary 14ms
+   ✓ Broadcast CLI > broadcast without --rig/--pod sends globally 4ms
+   ✓ Broadcast CLI > broadcast --context resolves a ref and fans out the whole content 29ms
+   ✓ Broadcast CLI > broadcast --context ABORTS (no fan-out) when the pack has a missing member 3ms
+   ✓ Broadcast CLI > P21: cross-host broadcast CARRIES the enveloped marker (was dropped → remote rendered raw); value = the seat, but the daemon derives the From: from the auto-stamped X-OpenRig-Session 1ms
+   ✓ Broadcast CLI > P18: an env-less cross-host broadcast DELIVERS with the honest `<unknown sender>` marker on the wire 0ms
+   ✓ Broadcast CLI > broadcast --json prints raw JSON 2ms
+   ✓ Broadcast CLI > broadcast exits nonzero when no targets resolve 6ms
+remote okstderr | test/send.test.ts > Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R3 RED: legacy RIGGED_URL custom port honored when OPENRIG_URL unset (probe-stopped)
+Warning: RIGGED_URL is deprecated; use OPENRIG_URL instead.
+
+ ❯ test/send.test.ts (59 tests | 1 failed) 585ms
+   ✓ Send CLI > send prints success output 25ms
+   ✓ Send CLI > P18: an env-less send DELIVERS with an honest `<unknown sender>` label — dispatched, actorSession null 13ms
+   ✓ Send CLI > P18: a resolvable seat SENDS with its attributed identity — actorSession derived from the seat env, never forged 46ms
+   ✓ Send CLI > P18 canonicity: '<unknown sender>' is DEFINED at EXACTLY the two named twin sites — a third fails BY NAME 296ms
+   ✓ Send CLI > send with 409 mid-work prints error and exits non-zero 3ms
+   ✓ Send CLI > prints the Advisory on an unknown-proceed send (human output) 2ms
+   ✓ Send CLI > carries the advisory as `warning` in --json output 1ms
+   ✓ Send CLI > verify confirmed prints Delivery: delivered AND the legacy Verified: yes 1ms
+   ✓ Send CLI > verify redraw-race prints Delivery: rendered-unconfirmed (landed, with capture guidance) AND legacy Verified: no 1ms
+   ✓ Send CLI > verify genuine transport failure stays an error path, distinct from the middle (discriminator) 9ms
+   ✓ Send CLI > verify --json passes the additive outcome field through 2ms
+   ✓ Send CLI > send --json prints raw JSON 3ms
+   ✓ Send CLI > send --wait-for-idle posts waitForIdleMs and extends request timeout 3ms
+   ✓ Send CLI > send without wait-for-idle uses default client timeout path 0ms
+   ✓ Send CLI > send --context resolves a ref to its whole content and sends it (single-seat local) 1ms
+   ✓ Send CLI > send --context ABORTS (no send) when the pack has a missing/unreadable member 0ms
+   ✓ Send CLI > send rejects invalid wait-for-idle values before contacting daemon 0ms
+   ✓ Send CLI > send rejects wait-for-idle with force before contacting daemon 0ms
+   ✓ Send CLI > send --raw posts the exact text without the From/To envelope 1ms
+   ✓ Send CLI > default send (no --raw) wraps the From/To messaging envelope 1ms
+   ✓ Send CLI > send --from <origin> is IGNORED — From:/actor derive from the ambient transport identity, not --from 1ms
+   ✓ Send CLI > send --dangerously-interact --reason posts the override fields with raw (exact) text 1ms
+   ✓ Send CLI > send --dangerously-interact without --reason is rejected before contacting the daemon 0ms
+   ✓ Send CLI > send --dangerously-interact + --wait-for-idle is rejected before contacting the daemon 0ms
+   ✓ Send CLI > send --host forwards --raw/--dangerously-interact/--reason in the reconstructed remote argv 5ms
+   ✓ Send CLI > send --context rejects the agent@rig@host sugar cross-host form (NO message) — never reaches remote argv 1ms
+   ✓ Send CLI > send --context rejects the sugar cross-host form (WITH message) — context not silently dropped 0ms
+   ✓ Send CLI > send --to a,b fans out to /broadcast with a sessions list and prints per-recipient summary 17ms
+   ✓ Send CLI > send --to accepts repetition (--to a --to b) and sets the daemon-side envelopeSender 16ms
+   ✓ Send CLI > send --pod posts a pod target to /broadcast 1ms
+   ✓ Send CLI > send --rig posts a rig target to /broadcast 1ms
+   ✓ Send CLI > fan-out with one recipient failing prints which failed, the summary, and exits nonzero 1ms
+   × Send CLI > fan-out renderer surfaces the unknown-sender notice from the response warning 8ms
+     → expected 'dev-impl@my-rig: sent\ndev-qa@my-rig:…' to contain 'Advisory:'
+   ✓ Send CLI > fan-out --raw sends bare exact text with NO envelopeSender (no per-recipient wrap) 99ms
+   ✓ Send CLI > fan-out --dangerously-interact --reason plumbs the danger fields (bare text, no envelope) 1ms
+   ✓ Send CLI > rejects combining a bare seat with a fan-out flag 0ms
+   ✓ Send CLI > rejects more than one fan-out mode at once 0ms
+   ✓ Send CLI > rejects --wait-for-idle with a multi/pod/rig target 0ms
+   ✓ Send CLI > single-seat send is UNCHANGED — still posts to /send, byte-identical envelope, no /broadcast 1ms
+   ✓ Send CLI > send --help includes rediscovery examples + the new guard flags 1ms
+   ✓ Send CLI > send --help documents proceed-with-advisory on unknown telemetry, not fail-closed 0ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R1 RED: single-seat + OPENRIG_URL custom port + probe-stopped -> actual POST lands, exact env target passed to clientFactory 4ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R2 RED: fan-out --to + OPENRIG_URL + probe-stopped -> actual /broadcast lands with per-recipient results 1ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R3 RED: legacy RIGGED_URL custom port honored when OPENRIG_URL unset (probe-stopped) 1ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R4 RED: precedence — OPENRIG_URL wins over RIGGED_URL on the transport-authoritative path 1ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R5 RED: RUNNING-but-UNHEALTHY (event-loop-starved healthz body) must still send (single-seat + fan-out) 2ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R6 RED: NO env + live-pid state file (custom port) + healthz probe failing -> POST attempted against the state-derived target 1ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R6b RED: NO env + NO daemon state + probe-stopped -> POST attempted against the configured DEFAULT target (injected client succeeds) 1ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R6c RED: NO env + NO state + probe-stopped + ConfigStore CUSTOM daemon host/port -> POST attempted against the CONFIGURED-FILE target exactly (no hardcoded default) 2ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R7 RED: REAL down fails honestly — actual connection error names the target; the bare preflight restart line never appears 0ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R7b RED: fan-out REAL down fails honestly too — target-specific connection error, exit 1, no restart line, and the same remediation as single-seat 0ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R7c RED: single-seat --json transport failure emits exactly one parseable stdout JSON envelope, empty stderr, exit 1 0ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R7d RED: fan-out --json transport failure emits exactly one parseable stdout JSON envelope, empty stderr, exit 1 0ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R7e: single-seat HUMAN transport failure keeps stdout empty (mirror of R7c) — the 3 remediation lines are stderr-only, exit 1 0ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R7f: fan-out HUMAN transport failure keeps stdout empty (mirror of R7d) — stderr-only remediation, exit 1 0ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R8: explicit OPENRIG_URL (single-seat) -> exact target POSTed + EXACTLY ONE self-id /healthz GET, no status-probe burn 1ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R8b RED: explicit OPENRIG_URL (fan-out) -> exact target broadcast and ZERO lifecycle probe calls 1ms
+   ✓ Send CLI > P21 I4 — fan-out IGNORES --from; identity derives from the transport (reverses ba41fea2) > --from is IGNORED in fan-out — BOTH envelopeSender and actorSession name the ambient transport identity, never the forged --from origin 3ms
+   ✓ Send CLI > P21 I4 — fan-out IGNORES --from; identity derives from the transport (reverses ba41fea2) > F2 GREEN-characterization: with NO --from, fan-out still falls back to ambient identity (the flag is additive, not a behavior change) 1ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/broadcast.test.ts > Broadcast CLI > broadcast renderer surfaces the unknown-sender notice from the response warning
+AssertionError: expected 'dev-impl@warn-rig: sent\ndev-qa@warn-…' to contain 'Advisory:'
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- Advisory:[39m
+[31m+ dev-impl@warn-rig: sent[39m
+[31m+ dev-qa@warn-rig: sent[39m
+[31m+ 2/2 delivered[39m
+
+ ❯ test/broadcast.test.ts:119:20
+    117|     const output = logs.join("\n");
+    118|     expect(output).toContain("dev-impl@warn-rig: sent");
+    119|     expect(output).toContain("Advisory:");
+       |                    ^
+    120|     expect(output).toMatch(/no way of knowing who sent/i);
+    121|     expect(output).toMatch(/sign/i);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  test/send.test.ts > Send CLI > fan-out renderer surfaces the unknown-sender notice from the response warning
+AssertionError: expected 'dev-impl@my-rig: sent\ndev-qa@my-rig:…' to contain 'Advisory:'
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- Advisory:[39m
+[31m+ dev-impl@my-rig: sent[39m
+[31m+ dev-qa@my-rig: sent[39m
+[31m+ 2/2 delivered[39m
+
+ ❯ test/send.test.ts:642:20
+    640|     const output = logs.join("\n");
+    641|     expect(output).toContain("dev-impl@my-rig: sent");
+    642|     expect(output).toContain("Advisory:");
+       |                    ^
+    643|     expect(output).toMatch(/no way of knowing who sent/i);
+    644|     expect(output).toMatch(/sign/i);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+
+ Test Files  2 failed (2)
+      Tests  2 failed | 66 passed (68)
+   Start at  06:39:38
+   Duration  1.48s (transform 412ms, setup 142ms, collect 1.06s, tests 700ms, environment 0ms, prepare 116ms)
+
+vitest exit: 1

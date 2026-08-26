@@ -17,6 +17,8 @@ import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_c
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import { transportRoutes } from "../src/routes/transport.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
@@ -851,28 +853,40 @@ describe("transport routes", () => {
     }
   });
 
-  it("P21 I4: an enveloped send with NO authenticated identity refuses-loud (never renders an unverified From:)", async () => {
+  it("P21 I4 → S2: an enveloped send with NO authenticated identity DELIVERS as unknown (still never renders an unverified From:)", async () => {
     seedRig();
-    const app = createApp({ sessionTransport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux() }) });
+    const delivered: string[] = [];
+    const tmux = mockTmux({
+      sendText: async (_t: string, text: string) => { delivered.push(text); return { ok: true as const }; },
+    });
+    const app = createApp({ sessionTransport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux }) });
     const res = await app.request("/api/transport/broadcast", {
       method: "POST",
       headers: { "Content-Type": "application/json" }, // NO X-OpenRig-Session
       body: JSON.stringify({ sessions: ["dev-impl@my-rig"], text: "hi", force: true, envelopeSender: "anyone@my-rig" }),
     });
-    expect(res.status).toBe(401);
-    expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+    // S2 (OPR.0.5.4.3, founder descope): delivery replaces the refusal; the
+    // specimen-5 invariant is UNCHANGED — the body claim never renders.
+    expect(res.status).toBe(200);
+    expect(delivered.some((t) => t.includes("From: <unknown sender>"))).toBe(true);
+    expect(delivered.every((t) => !t.includes("anyone@my-rig"))).toBe(true);
   });
 
-  it("P21 I4: --dangerously-interact with NO identity refuses-loud (the override audit must be attributable)", async () => {
+  it("P21 I4 → S2: --dangerously-interact with NO identity delivers; a non-needs_input target writes NO override audit row", async () => {
     seedRig();
-    const app = createApp({ sessionTransport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux() }) });
+    const eventBus = new EventBus(db);
+    const app = createApp({ sessionTransport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux(), eventBus, agentActivityStore: new AgentActivityStore({ db, eventBus }) }) });
     const res = await app.request("/api/transport/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" }, // NO X-OpenRig-Session
       body: JSON.stringify({ session: "dev-impl@my-rig", text: "drive it", dangerouslyInteract: true, reason: "why" }),
     });
-    expect(res.status).toBe(401);
-    expect(((await res.json()) as { error: string }).error).toBe("unattributable_sender");
+    // S2 (OPR.0.5.4.3): the 401 is retired. The idle target takes the normal
+    // send path; the override audit exists only on the needs_input branch, so
+    // no row is written here — unchanged posture, now unattributed-tolerant.
+    expect(res.status).toBe(200);
+    const rows = db.prepare("SELECT * FROM events WHERE type = 'transport.prompt_override'").all();
+    expect(rows).toHaveLength(0);
   });
 
   it("P21 I4: a body actorSession that DIFFERS from the header is SUPERSEDED (no identity_mismatch refusal)", async () => {
@@ -886,5 +900,130 @@ describe("transport routes", () => {
     expect(res.status).toBe(200);
     // the refusal is gone from this path entirely — not merely a different status
     expect(JSON.stringify(await res.json())).not.toContain("identity_mismatch");
+  });
+
+  // ── S2 (OPR.0.5.4.3) — unknown-sender honesty: the three attribution refusals
+  // become deliver-with-honesty (enveloped renders From: unknown; the override
+  // audit records a null actor; raw sends stay byte-verbatim), and the sender-
+  // facing response carries the sign-it notice.
+  describe("S2 — unknown-sender honesty (OPR.0.5.4.3)", () => {
+    const HOSTILE_CLAIM = "pm-lead@evil-rig";
+    const PICKER_PROMPT = [
+      "Authorize the 0.4.0 release?",
+      "",
+      "❯ 1. Authorize publish → @latest (Recommended)",
+      "  2. Roll back",
+      "  3. Hold",
+    ].join("\n");
+
+    function spyTransportApp(opts?: { paneContent?: string }) {
+      const sentTexts: Array<{ target: string; text: string }> = [];
+      const eventBus = new EventBus(db);
+      const agentActivityStore = new AgentActivityStore({ db, eventBus });
+      const tmux = mockTmux({
+        sendText: async (target: string, text: string) => {
+          sentTexts.push({ target, text });
+          return { ok: true as const };
+        },
+        capturePaneContent: async () => opts?.paneContent ?? "idle\n❯ ",
+        getPaneCommand: async () => "claude",
+      });
+      const transport = new SessionTransport({
+        db, rigRepo, sessionRegistry, tmuxAdapter: tmux, eventBus, agentActivityStore,
+      });
+      return { app: createApp({ sessionTransport: transport }), sentTexts };
+    }
+
+    const overrideAuditRows = () =>
+      (db.prepare("SELECT payload FROM events WHERE type = 'transport.prompt_override'").all() as Array<{ payload: string }>)
+        .map((r) => JSON.parse(r.payload) as Record<string, unknown>);
+
+    it("PROOF-1: enveloped broadcast with no header DELIVERS, From: is the unknown marker, hostile body claim never renders, notice in payload", async () => {
+      seedRig();
+      const { app, sentTexts } = spyTransportApp();
+      const res = await app.request("/api/transport/broadcast", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessions: ["dev-impl@my-rig", "dev-qa@my-rig"], text: "hello team", envelopeSender: HOSTILE_CLAIM }),
+      });
+      expect(res.status).toBe(200); // RED at pre-fix bytes: 401 unattributable_sender
+      const data = (await res.json()) as Record<string, unknown>;
+      expect(data["sent"]).toBe(2);
+      expect(sentTexts).toHaveLength(2);
+      for (const s of sentTexts) {
+        expect(s.text).toContain("From: <unknown sender>");
+        expect(s.text).not.toContain(HOSTILE_CLAIM); // specimen-5 pin: the body claim never renders
+      }
+      expect(String(data["warning"])).toMatch(/no way of knowing who sent|no idea who sent/i);
+      expect(String(data["warning"])).toMatch(/sign/i);
+    });
+
+    it("PROOF-2: send --dangerously-interact with no header proceeds on a STAGED needs_input prompt; the audit row carries actorSession NULL", async () => {
+      seedRig();
+      const { app } = spyTransportApp({ paneContent: PICKER_PROMPT });
+      // Positive staged-prompt evidence BEFORE the override: the default guard
+      // itself detects the pending picker and refuses.
+      const guard = await app.request("/api/transport/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session: "dev-impl@my-rig", text: "hi" }),
+      });
+      expect(guard.status).toBe(409);
+      expect(((await guard.json()) as Record<string, unknown>)["reason"]).toBe("target_needs_input");
+
+      const res = await app.request("/api/transport/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session: "dev-impl@my-rig", text: "1", dangerouslyInteract: true, reason: "S2 proof: drive the staged test prompt" }),
+      });
+      expect(res.status).toBe(200); // RED at pre-fix bytes: 401 unattributable_sender
+      const rows = overrideAuditRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!["actorSession"]).toBeNull();
+      expect(String(((await res.json()) as Record<string, unknown>)["warning"] ?? "")).toMatch(/sign/i);
+    });
+
+    it("PROOF-2b: broadcast --dangerously-interact with no header proceeds; per-seat audit actorSession NULL", async () => {
+      seedRig();
+      const { app } = spyTransportApp({ paneContent: PICKER_PROMPT });
+      const res = await app.request("/api/transport/broadcast", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessions: ["dev-impl@my-rig"], text: "1", dangerouslyInteract: true, reason: "S2 proof: drive the staged test prompt" }),
+      });
+      expect(res.status).toBe(200); // RED at pre-fix bytes: 401 unattributable_sender
+      const rows = overrideAuditRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!["actorSession"]).toBeNull();
+    });
+
+    it("PROOF-4a: a plain unattributed send delivers BYTE-VERBATIM (no recipient-side marker) plus the response notice", async () => {
+      seedRig();
+      const { app, sentTexts } = spyTransportApp();
+      const res = await app.request("/api/transport/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session: "dev-impl@my-rig", text: "exact bytes ✓ --- é" }),
+      });
+      expect(res.status).toBe(200);
+      expect(sentTexts[0]!.text).toBe("exact bytes ✓ --- é"); // raw sends are keystrokes, never mail
+      const data = (await res.json()) as Record<string, unknown>;
+      expect(String(data["warning"] ?? "")).toMatch(/sign/i); // RED at pre-fix bytes: no notice
+      expect(String(data["warning"] ?? "")).toMatch(/no way of knowing who sent|no idea who sent/i);
+    });
+
+    it("PROOF-4b: an attributed send's response carries no nag and delivers verbatim", async () => {
+      seedRig();
+      const { app, sentTexts } = spyTransportApp();
+      const res = await app.request("/api/transport/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch@my-rig" },
+        body: JSON.stringify({ session: "dev-impl@my-rig", text: "hello" }),
+      });
+      expect(res.status).toBe(200);
+      expect(sentTexts[0]!.text).toBe("hello");
+      const data = (await res.json()) as Record<string, unknown>;
+      expect(data["warning"]).toBeUndefined();
+    });
   });
 });

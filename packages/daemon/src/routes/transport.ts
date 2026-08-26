@@ -3,6 +3,21 @@ import type { SessionTransport, TargetSpec } from "../domain/session-transport.j
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { requireSenderIdentity } from "./require-sender-identity.js";
 import type { OutboxHandler } from "../domain/outbox-handler.js";
+import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
+
+// S2 (OPR.0.5.4.3) — the sender-side half of two-ended honesty: appended to any
+// unattributed delivery's success payload and surfaced by the CLI renderers.
+// Held to the S1 truthfulness bar for a success payload: what happened, what the
+// recipient cannot know, and the concrete fix (sign).
+const UNKNOWN_SENDER_NOTICE =
+  "Delivered without sender identity: this request carried no X-OpenRig-Session header, so your recipient has no way of knowing who sent it. Follow up and sign it — send from a seat shell (the header stamps automatically) or state your identity in the message body.";
+
+// The unknown-sender From: marker, DERIVED from the canonical envelope wrapper
+// (pane-envelope.ts SENDER_FALLBACK is unexported and its literal is
+// canonicity-guarded to exactly two twin sites) — deriving at module load keeps
+// one source of truth with no third definition. wrapPaneEnvelope with an absent
+// sender renders "From: <marker>" as its first line.
+const UNKNOWN_SENDER_MARKER = wrapPaneEnvelope(undefined, "", "").split("\n")[0]!.replace(/^From: /, "");
 
 export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
   const router = new Hono();
@@ -64,22 +79,15 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       }
     }
 
-    // P21 I4: the actor (the --dangerously-interact override AUDIT actor) is DERIVED from the transport
-    // header, never body.actorSession. A drive-the-prompt override MUST be attributable, so an absent
-    // header refuses-loud (the override writes an audit row that names who drove the prompt — it cannot
-    // be a forgeable claim). A body claim that DIFFERS is simply SUPERSEDED, never a refusal: the wire
-    // decides the actor and the body never does, so a disagreeing body value is noise to be discarded
-    // (PM ruling (A), 2026-08-11 — see require-sender-identity.ts:16-22, which both sibling helpers
-    // already implement). The 409 here also broke real cross-host sends: 51-09 host-qualified the
-    // transport identity, so a header TRIPLE and a body PAIR are the SAME actor and a literal string
-    // comparison read that as a mismatch.
+    // P21 I4 + S2 (OPR.0.5.4.3): the actor (the --dangerously-interact override AUDIT actor) is
+    // DERIVED from the transport header, never body.actorSession. A body claim that DIFFERS is
+    // simply SUPERSEDED, never a refusal: the wire decides the actor and the body never does
+    // (PM ruling (A), 2026-08-11 — see require-sender-identity.ts:16-22). An ABSENT header no
+    // longer refuses (founder descope, S2): a spoofer defeats a refusal by adding a header, so
+    // the 401 only ever stopped honest uncounted callers. Instead the send DELIVERS, the
+    // already-nullable audit actor records null (projected "unknown"), and the response carries
+    // the sign-it notice below.
     const derivedActor = c.req.header("x-openrig-session")?.trim() || null;
-    if (body.dangerouslyInteract && !derivedActor) {
-      return c.json({
-        ok: false, error: "unattributable_sender",
-        message: "Refusing --dangerously-interact: no authenticated sender identity (X-OpenRig-Session header absent). The override audit records only a transport-derived actor, never a request-body claim.",
-      }, 401);
-    }
 
     // Check for ambiguity first
     const resolved = await transport.resolveSessions({ session: body.session });
@@ -147,6 +155,13 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
           console.warn(`[transport/send] outbox auto-record failed (send already delivered): ${(err as Error).message}`);
         }
       }
+    }
+
+    // S2 (OPR.0.5.4.3) sender-side honesty: an unattributed delivery tells the sender, on the
+    // success payload the CLI renderers surface, that the recipient cannot know who sent it.
+    // Composes with any existing transport warning; attributed sends see no change and no nag.
+    if (!derivedActor) {
+      result.warning = result.warning ? `${result.warning} ${UNKNOWN_SENDER_NOTICE}` : UNKNOWN_SENDER_NOTICE;
     }
 
     return c.json(result);
@@ -225,35 +240,23 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       return c.json({ error: "Missing required field: text" }, 400);
     }
 
-    // P21 I4: the --dangerously-interact override AUDIT actor is DERIVED from the transport header (see
-    // /send). The envelopeSender (the From: rendered into every recipient's terminal) derives too — orch
-    // ruled (a): the header re-stamp is authoritative and the body value is IGNORED (see below). Ignored
-    // means SUPERSEDED, not refused — the guard that used to sit here contradicted this very comment and
-    // 409'd host-qualified cross-host sends (header TRIPLE vs body PAIR: the same actor, not a
-    // disagreement). PM ruling (A), 2026-08-11.
+    // P21 I4 + S2 (OPR.0.5.4.3): the --dangerously-interact override AUDIT actor is DERIVED from the
+    // transport header (see /send). An absent header no longer refuses — the send proceeds and the
+    // audit's already-nullable actor records null (projected "unknown"); the response carries the
+    // sign-it notice below.
     const derivedActor = c.req.header("x-openrig-session")?.trim() || null;
-    if (body.dangerouslyInteract && !derivedActor) {
-      return c.json({
-        error: "unattributable_sender",
-        message: "Refusing --dangerously-interact: no authenticated sender identity (X-OpenRig-Session header absent). The override audit records only a transport-derived actor.",
-      }, 401);
-    }
 
     // P21 I4 (orch ruling from specimen 5 — the false "From: pm-lead" the incident acted upon): the
     // From: line rendered into every recipient's terminal MUST DERIVE from the transport identity, never
     // the body value. A present body.envelopeSender signals the ENVELOPED fan-out (rig send); its value
     // is IGNORED and the From: is the derived actor. A cross-host relay re-stamps X-OpenRig-Session from
-    // ITS authenticated context (not a caller --from string). Unattributable enveloped send ⇒ refuse-loud
-    // — never render an unverified name (no silent fallback to the body). Raw `rig broadcast` = no envelope.
+    // ITS authenticated context (not a caller --from string). S2 (OPR.0.5.4.3): an unattributable
+    // enveloped send now DELIVERS with the explicit unknown-sender marker as its From: — the specimen-5
+    // rule is preserved unweakened: the body claim is STILL never rendered; the recipient sees honest
+    // "unknown", never an unverified name. Raw `rig broadcast` = no envelope.
     let envelopeSender: string | undefined = undefined;
     if (body.envelopeSender !== undefined && body.envelopeSender !== null) {
-      if (!derivedActor) {
-        return c.json({
-          error: "unattributable_sender",
-          message: "Refusing an enveloped send: no authenticated sender identity (X-OpenRig-Session header absent). The rendered From: derives from the transport, never a request-body claim.",
-        }, 401);
-      }
-      envelopeSender = derivedActor;
+      envelopeSender = derivedActor ?? UNKNOWN_SENDER_MARKER;
     }
 
     const target: TargetSpec =
@@ -303,6 +306,11 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       }
     }
 
+    // S2 (OPR.0.5.4.3) sender-side honesty: an unattributed fan-out's response carries the
+    // sign-it notice for the CLI renderers to surface. Attributed fan-outs are unchanged.
+    if (!derivedActor) {
+      return c.json({ ...result, warning: UNKNOWN_SENDER_NOTICE });
+    }
     return c.json(result);
   });
 

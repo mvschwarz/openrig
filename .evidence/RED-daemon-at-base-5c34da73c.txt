@@ -1,0 +1,177 @@
+
+ RUN  v3.2.4 /private/tmp/s2-base-red/packages/daemon
+
+ ❯ test/transport-routes.test.ts (43 tests | 6 failed) 7529ms
+   ✓ transport routes > POST /send with valid session returns 200 with SendResult 243ms
+   ✓ transport routes > A3 — a DERIVED send auto-records exactly ONE outbox row (sender=derived actor, provenance=transport:v1) 212ms
+   ✓ transport routes > A3 — a cross-host send records the ORIGIN triple (the derived header), never the relay's seat 224ms
+   ✓ transport routes > A3 — a send whose body actor differs is DELIVERED, and the outbox row carries the HEADER identity 211ms
+   ✓ transport routes > L5 A3 — header TRIPLE + body PAIR delivers, and records the WIRE identity (not the body claim) 225ms
+   ✓ transport routes > L5 A3 — a body claim naming a DIFFERENT actor is SUPERSEDED, never trusted, and never refuses 214ms
+   ✓ transport routes > A3 — a header-LESS send (no derived actor) auto-records NO row (nothing to attribute; no fabricated sender) 211ms
+   ✓ transport routes > A3b — a broadcast auto-records N rows, one per RESOLVED recipient (sender=derived, provenance=transport:v1, destination=each session, never the TargetSpec)  418ms
+   ✓ transport routes > A3b — a PARTIAL fan-out records per-row delivery_state (delivered vs failed) — the truth one row could not express 215ms
+   ✓ transport routes > A3b — a broadcast whose body actor differs is DELIVERED, and every row carries the HEADER identity  446ms
+   ✓ transport routes > A3b — a header-LESS broadcast auto-records NO rows (no derived sender to attribute)  461ms
+   ✓ transport routes > POST /send with verify surfaces the outcome field in the JSON response (passthrough)  714ms
+   ✓ transport routes > POST /send verify failure stays HTTP-error-distinct from the middle outcome (discriminator) 220ms
+   ✓ transport routes > POST /send to a mid-work pane returns 200 and DELIVERS with a non-blocking advisory (OPR.0.4.3.28 fast-follow — mid_work downgraded) 210ms
+   ✓ transport routes > POST /send to an interactive prompt returns 409 target_needs_input (default, no override) 8ms
+   ✓ transport routes > POST /send rejects --dangerously-interact + --wait-for-idle with 400 8ms
+   ✓ transport routes > POST /send rejects --dangerously-interact without a reason with 400 8ms
+   ✓ transport routes > POST /send with waitForIdleMs waits for idle and returns activity evidence 10ms
+   ✓ transport routes > POST /send rejects force with waitForIdleMs before sending 8ms
+   ✓ transport routes > POST /send maps wait timeout to 409 without sending text 10ms
+   ✓ transport routes > POST /send with ambiguous session returns 409 8ms
+   ✓ transport routes > POST /send to external_cli target returns 409 with honest transport guidance 8ms
+   ✓ transport routes > POST /capture with rig targeting returns multi-session results 10ms
+   ✓ transport routes > POST /capture with rig targeting includes external_cli targets as explicit failures 9ms
+   ✓ transport routes > POST /capture for external_cli target returns 409 with honest transport guidance 11ms
+   ✓ transport routes > POST /broadcast without rig/pod broadcasts globally to all running sessions  414ms
+   ✓ transport routes > POST /broadcast with partial failure returns honest per-target outcomes 212ms
+   ✓ transport routes > POST /broadcast with a sessions list renders the FULL recipient list on every To (anti-storm, B1)  412ms
+   ✓ transport routes > POST /broadcast WITHOUT envelopeSender delivers raw text to all (rig broadcast unchanged)  414ms
+   ✓ transport routes > POST /broadcast with an unknown seat in the list rejects honestly, naming the seat 8ms
+   ✓ transport routes > POST /broadcast list: one recipient failing does NOT abort the others (independence) 210ms
+   ✓ transport routes > POST /broadcast list keeps per-recipient send guard semantics for unknown telemetry and picker refusal 212ms
+   ✓ transport routes > POST /broadcast plumbs danger/reason/actorSession to EACH recipient send (per-seat, not per-batch)  416ms
+   ✓ transport routes > POST /broadcast includes external_cli targets as explicit transport_unavailable failures 10ms
+   ✓ transport routes > P21 I4: the From: line derives from the transport header, IGNORING a forged body.envelopeSender (specimen-5 kill) 210ms
+   × transport routes > P21 I4 → S2: an enveloped send with NO authenticated identity DELIVERS as unknown (still never renders an unverified From:) 15ms
+     → expected 401 to be 200 // Object.is equality
+   × transport routes > P21 I4 → S2: --dangerously-interact with NO identity delivers; a non-needs_input target writes NO override audit row 9ms
+     → expected 401 to be 200 // Object.is equality
+   ✓ transport routes > P21 I4: a body actorSession that DIFFERS from the header is SUPERSEDED (no identity_mismatch refusal) 210ms
+   × transport routes > S2 — unknown-sender honesty (OPR.0.5.4.3) > PROOF-1: enveloped broadcast with no header DELIVERS, From: is the unknown marker, hostile body claim never renders, notice in payload 8ms
+     → expected 401 to be 200 // Object.is equality
+   × transport routes > S2 — unknown-sender honesty (OPR.0.5.4.3) > PROOF-2: send --dangerously-interact with no header proceeds on a STAGED needs_input prompt; the audit row carries actorSession NULL 8ms
+     → expected 401 to be 200 // Object.is equality
+   × transport routes > S2 — unknown-sender honesty (OPR.0.5.4.3) > PROOF-2b: broadcast --dangerously-interact with no header proceeds; per-seat audit actorSession NULL 8ms
+     → expected 401 to be 200 // Object.is equality
+   × transport routes > S2 — unknown-sender honesty (OPR.0.5.4.3) > PROOF-4a: a plain unattributed send delivers BYTE-VERBATIM (no recipient-side marker) plus the response notice 212ms
+     → expected '' to match /sign/i
+   ✓ transport routes > S2 — unknown-sender honesty (OPR.0.5.4.3) > PROOF-4b: an attributed send's response carries no nag and delivers verbatim 216ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 6 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/transport-routes.test.ts > transport routes > P21 I4 → S2: an enveloped send with NO authenticated identity DELIVERS as unknown (still never renders an unverified From:)
+AssertionError: expected 401 to be 200 // Object.is equality
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 200[39m
+[31m+ 401[39m
+
+ ❯ test/transport-routes.test.ts:870:24
+    868|     // S2 (OPR.0.5.4.3, founder descope): delivery replaces the refusa…
+    869|     // specimen-5 invariant is UNCHANGED — the body claim never render…
+    870|     expect(res.status).toBe(200);
+       |                        ^
+    871|     expect(delivered.some((t) => t.includes("From: <unknown sender>"))…
+    872|     expect(delivered.every((t) => !t.includes("anyone@my-rig"))).toBe(…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/6]⎯
+
+ FAIL  test/transport-routes.test.ts > transport routes > P21 I4 → S2: --dangerously-interact with NO identity delivers; a non-needs_input target writes NO override audit row
+AssertionError: expected 401 to be 200 // Object.is equality
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 200[39m
+[31m+ 401[39m
+
+ ❯ test/transport-routes.test.ts:887:24
+    885|     // send path; the override audit exists only on the needs_input br…
+    886|     // no row is written here — unchanged posture, now unattributed-to…
+    887|     expect(res.status).toBe(200);
+       |                        ^
+    888|     const rows = db.prepare("SELECT * FROM events WHERE type = 'transp…
+    889|     expect(rows).toHaveLength(0);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/6]⎯
+
+ FAIL  test/transport-routes.test.ts > transport routes > S2 — unknown-sender honesty (OPR.0.5.4.3) > PROOF-1: enveloped broadcast with no header DELIVERS, From: is the unknown marker, hostile body claim never renders, notice in payload
+AssertionError: expected 401 to be 200 // Object.is equality
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 200[39m
+[31m+ 401[39m
+
+ ❯ test/transport-routes.test.ts:949:26
+    947|         body: JSON.stringify({ sessions: ["dev-impl@my-rig", "dev-qa@m…
+    948|       });
+    949|       expect(res.status).toBe(200); // RED at pre-fix bytes: 401 unatt…
+       |                          ^
+    950|       const data = (await res.json()) as Record<string, unknown>;
+    951|       expect(data["sent"]).toBe(2);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/6]⎯
+
+ FAIL  test/transport-routes.test.ts > transport routes > S2 — unknown-sender honesty (OPR.0.5.4.3) > PROOF-2: send --dangerously-interact with no header proceeds on a STAGED needs_input prompt; the audit row carries actorSession NULL
+AssertionError: expected 401 to be 200 // Object.is equality
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 200[39m
+[31m+ 401[39m
+
+ ❯ test/transport-routes.test.ts:979:26
+    977|         body: JSON.stringify({ session: "dev-impl@my-rig", text: "1", …
+    978|       });
+    979|       expect(res.status).toBe(200); // RED at pre-fix bytes: 401 unatt…
+       |                          ^
+    980|       const rows = overrideAuditRows();
+    981|       expect(rows).toHaveLength(1);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/6]⎯
+
+ FAIL  test/transport-routes.test.ts > transport routes > S2 — unknown-sender honesty (OPR.0.5.4.3) > PROOF-2b: broadcast --dangerously-interact with no header proceeds; per-seat audit actorSession NULL
+AssertionError: expected 401 to be 200 // Object.is equality
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 200[39m
+[31m+ 401[39m
+
+ ❯ test/transport-routes.test.ts:994:26
+    992|         body: JSON.stringify({ sessions: ["dev-impl@my-rig"], text: "1…
+    993|       });
+    994|       expect(res.status).toBe(200); // RED at pre-fix bytes: 401 unatt…
+       |                          ^
+    995|       const rows = overrideAuditRows();
+    996|       expect(rows).toHaveLength(1);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/6]⎯
+
+ FAIL  test/transport-routes.test.ts > transport routes > S2 — unknown-sender honesty (OPR.0.5.4.3) > PROOF-4a: a plain unattributed send delivers BYTE-VERBATIM (no recipient-side marker) plus the response notice
+AssertionError: expected '' to match /sign/i
+
+[32m- Expected:[39m 
+/sign/i
+
+[31m+ Received:[39m 
+""
+
+ ❯ test/transport-routes.test.ts:1011:45
+    1009|       expect(sentTexts[0]!.text).toBe("exact bytes ✓ --- é"); // raw s…
+    1010|       const data = (await res.json()) as Record<string, unknown>;
+    1011|       expect(String(data["warning"] ?? "")).toMatch(/sign/i); // RED a…
+       |                                             ^
+    1012|       expect(String(data["warning"] ?? "")).toMatch(/no way of knowing…
+    1013|     });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/6]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  6 failed | 37 passed (43)
+   Start at  06:39:27
+   Duration  9.82s (transform 1.22s, setup 0ms, collect 1.91s, tests 7.53s, environment 0ms, prepare 95ms)
+
+vitest exit: 1

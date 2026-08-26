@@ -51,6 +51,18 @@ describe("Broadcast CLI", () => {
                 { ok: false, sessionName: "dev-qa@fail-rig", error: "send failed" },
               ],
             }));
+          } else if (parsed.rig === "warn-rig") {
+            // S2 (OPR.0.5.4.3): an unattributed broadcast's response carries the
+            // sign-it notice as an additive warning; the renderer must surface it.
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+              total: 2, sent: 2, failed: 0,
+              warning: "Delivered without sender identity: your recipients have no way of knowing who sent this. Follow up and sign it.",
+              results: [
+                { ok: true, sessionName: "dev-impl@warn-rig" },
+                { ok: true, sessionName: "dev-qa@warn-rig" },
+              ],
+            }));
           } else {
             // Success (covers both rig-scoped and global)
             res.writeHead(200, { "Content-Type": "application/json" });
@@ -96,6 +108,18 @@ describe("Broadcast CLI", () => {
     prog.addCommand(broadcastCommand(runningDeps(port)));
     return prog;
   }
+
+  // S2 (OPR.0.5.4.3): the broadcast renderer must SURFACE an additive warning.
+  it("broadcast renderer surfaces the unknown-sender notice from the response warning", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "broadcast", "--rig", "warn-rig", "hello"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("dev-impl@warn-rig: sent");
+    expect(output).toContain("Advisory:");
+    expect(output).toMatch(/no way of knowing who sent/i);
+    expect(output).toMatch(/sign/i);
+  });
 
   it("broadcast --rig prints per-target summary", async () => {
     const { logs } = await captureLogs(async () => {

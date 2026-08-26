@@ -1,0 +1,2 @@
+S2 REFUSAL SWEEP — 'unattributable_sender' occurrences in routes/transport.ts: 0 (was 3 sites pre-fix)
+Across all of packages/daemon/src/routes/: 1 — no transport delivery path refuses for attribution.

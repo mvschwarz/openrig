@@ -106,7 +106,13 @@ describe("Send CLI", () => {
           }
           const results = sessions.map((s) => ({ ok: true, sessionName: s }));
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ total: results.length, sent: results.length, failed: 0, results }));
+          // S2 (OPR.0.5.4.3): an unattributed fan-out's response carries the
+          // sign-it notice; the stub returns it when triggered so renderer
+          // tests can assert it is SURFACED, not dropped.
+          const warning = parsed.text === "warn-notice"
+            ? "Delivered without sender identity: your recipient has no way of knowing who sent this. Follow up and sign it."
+            : undefined;
+          res.end(JSON.stringify({ total: results.length, sent: results.length, failed: 0, results, ...(warning ? { warning } : {}) }));
           return;
         }
         if (req.method === "POST" && url === "/api/transport/send") {
@@ -623,6 +629,19 @@ describe("Send CLI", () => {
     expect(output).toContain("seat-b@my-rig: FAILED — target needs input");
     expect(output).toContain("1/2 delivered");
     expect(exitCode).toBe(1);
+  });
+
+  // S2 (OPR.0.5.4.3): the fan-out renderer must SURFACE an additive warning —
+  // an env-less operator sees the notice, never "sent" lines alone.
+  it("fan-out renderer surfaces the unknown-sender notice from the response warning", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "--to", "dev-impl@my-rig,dev-qa@my-rig", "warn-notice"]);
+    });
+    const output = logs.join("\n");
+    expect(output).toContain("dev-impl@my-rig: sent");
+    expect(output).toContain("Advisory:");
+    expect(output).toMatch(/no way of knowing who sent/i);
+    expect(output).toMatch(/sign/i);
   });
 
   it("fan-out --raw sends bare exact text with NO envelopeSender (no per-recipient wrap)", async () => {

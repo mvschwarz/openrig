@@ -772,6 +772,12 @@ async function runFanOutSend(params: {
     }
   }
   console.log(`${data["sent"]}/${data["total"]} delivered`);
+  // S2 (OPR.0.5.4.3): surface additive advisories (e.g. the unknown-sender
+  // sign-it notice) — an env-less operator must see it, not "sent" lines alone.
+  const fanoutAdvisory = data["warning"] as string | undefined;
+  if (fanoutAdvisory) {
+    console.log(`Advisory: ${fanoutAdvisory}`);
+  }
   if ((data["failed"] as number) > 0 || results.some((r) => !r.ok)) {
     process.exitCode = 1;
   }

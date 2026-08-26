@@ -1,0 +1,27 @@
+S2 CLI TERMINAL CAPTURES — built CLI (worktree dist) against a stub serving the route-test-proven payload shapes. env-less = no OPENRIG_SESSION_NAME.
+
+$ rig send dev-impl@my-rig 'hello' (env-less single send):
+Sent to dev-impl@my-rig
+Advisory: Delivered without sender identity: this request carried no X-OpenRig-Session header, so your recipient has no way of knowing who sent it. Follow up and sign it — send from a seat shell (the header stamps automatically) or state your identity in the message body.
+
+$ rig send --to dev-impl@my-rig,dev-qa@my-rig 'hello team' (env-less fan-out):
+dev-impl@my-rig: sent
+dev-qa@my-rig: sent
+2/2 delivered
+Advisory: Delivered without sender identity: this request carried no X-OpenRig-Session header, so your recipient has no way of knowing who sent it. Follow up and sign it — send from a seat shell (the header stamps automatically) or state your identity in the message body.
+
+$ rig broadcast --rig my-rig 'hello all' (env-less broadcast):
+Error: Daemon did not respond — it may be busy or stopped (state not confirmed).
+  This command needs a responsive daemon; the outcome of proceeding would be indeterminate.
+  Re-check with 'rig daemon status'. If it is confirmed stopped, run 'rig up' or 'rig daemon start'.
+
+$ attributed single send (OPENRIG_SESSION_NAME set) — no nag:
+Sent to dev-impl@my-rig
+
+NOTE on the broadcast capture: `rig broadcast` runs a daemon-liveness preflight
+(StatusDeps state-file check) before any HTTP, which a bare stub cannot satisfy —
+the refusal above is that preflight, unrelated to S2. The broadcast RENDERER's
+terminal output is proven by the focused test "broadcast renderer surfaces the
+unknown-sender notice from the response warning" (broadcast.test.ts, captureLogs
+asserts the Advisory line on non-JSON output), and the renderer code path is
+byte-shared with the fan-out renderer captured live above.

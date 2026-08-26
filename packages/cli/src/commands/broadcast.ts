@@ -228,6 +228,12 @@ function renderBroadcastResults(data: Record<string, unknown>): void {
     }
   }
   console.log(`${data["sent"]}/${data["total"]} delivered`);
+  // S2 (OPR.0.5.4.3): surface additive advisories (e.g. the unknown-sender
+  // sign-it notice) — an env-less operator must see it, not "sent" lines alone.
+  const advisory = data["warning"] as string | undefined;
+  if (advisory) {
+    console.log(`Advisory: ${advisory}`);
+  }
 
   if ((data["failed"] as number) > 0 || results.some((r) => !r.ok)) {
     process.exitCode = 1;
