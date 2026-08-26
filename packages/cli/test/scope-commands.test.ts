@@ -1044,6 +1044,36 @@ describe("rig scope repair frontmatter conformance (OPR.0.4.1.6 FR-4)", () => {
 
   const today = () => new Date().toISOString().slice(0, 10);
 
+  it("adds current surfaces while preserving every legacy byte", async () => {
+    const mission = path.join(substrate.missionsRoot, "legacy-tree");
+    const missionReadme = path.join(mission, "README.md");
+    const missionNotes = path.join(mission, "MISSION_NOTES.md");
+    const slice = path.join(mission, "slices", "01-legacy");
+    const sliceReadme = path.join(slice, "README.md");
+    const legacyPrd = path.join(slice, "IMPLEMENTATION-PRD.md");
+    writeFile(missionReadme, "---\nmission: legacy-tree\n---\n# Legacy mission\n");
+    writeFile(missionNotes, "# irreplaceable legacy notes\n");
+    writeFile(sliceReadme, "---\nstatus: active\n---\n# Legacy slice\n");
+    writeFile(legacyPrd, "# irreplaceable legacy plan\n");
+    const before = new Map([
+      [missionReadme, fs.readFileSync(missionReadme)],
+      [missionNotes, fs.readFileSync(missionNotes)],
+      [sliceReadme, fs.readFileSync(sliceReadme)],
+      [legacyPrd, fs.readFileSync(legacyPrd)],
+    ]);
+
+    const r = await run(["mission", "repair", "legacy-tree", "--json"], substrate.missionsRoot);
+    expect(r.exitCode).toBe(0);
+    for (const [file, bytes] of before) expect(fs.readFileSync(file)).toEqual(bytes);
+
+    expect(readFrontmatter(path.join(mission, "SPEC.md"))).toMatchObject({ intent: "Legacy mission", depends_on: [] });
+    expect(fs.readFileSync(path.join(mission, "NOTES.md"))).toEqual(before.get(missionNotes));
+    expect(readFrontmatter(path.join(slice, "SPEC.md"))).toMatchObject({ intent: "Legacy slice", depends_on: [] });
+    expect(fs.existsSync(path.join(slice, "PROGRESS.md"))).toBe(true);
+    expect(fs.existsSync(path.join(slice, "PROOF.md"))).toBe(true);
+    expect(fs.statSync(path.join(slice, "proof")).isDirectory()).toBe(true);
+  });
+
   it("AC-4: backfills a missing id + stage + verified on a ghost slice (idempotent re-run)", async () => {
     const ghost = path.join(substrate.missionsRoot, "release-0.3.2", "slices", "05-ghost");
     writeFile(path.join(ghost, "README.md"), "---\nstatus: placeholder\n---\n# ghost\n");
