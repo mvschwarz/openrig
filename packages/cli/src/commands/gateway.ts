@@ -47,7 +47,25 @@ function parseBinding(spec: string): BindingSpec | { error: string } {
   return handle !== undefined ? { kind, connectorRef, secretsRef, role, handle } : { kind, connectorRef, secretsRef, role };
 }
 
-export function gatewayCommand(): Command {
+// ── S12 (OPR.0.5.5.12): the queue-row half of the remove guard, injectable so verb tests
+// never need a live daemon. ok:false = the source COULD NOT BE CHECKED (unreachable daemon)
+// — an indeterminate, never evidence of an empty board.
+export interface HumanRowRef {
+  id: string;
+  state: string;
+  summary?: string;
+}
+export type HumanRowsLookup = (address: string) => Promise<
+  | { ok: true; rows: HumanRowRef[] }
+  | { ok: false; error: string }
+>;
+
+export interface GatewayCommandDeps {
+  queueRows?: HumanRowsLookup;
+}
+
+export function gatewayCommand(deps: GatewayCommandDeps = {}): Command {
+  void deps; // S12 RED: lifecycle verbs unwired; deps consumed by the GREEN implementation.
   const cmd = new Command("gateway").description("Gateway: the human registry + connector surfaces");
   const human = cmd.command("human").description("Manage human specs (file-per-human fragments under gateway/humans/)");
 

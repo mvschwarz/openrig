@@ -350,6 +350,106 @@ export function addHumanFragment(
   return { ok: true, path: file, fragment: v.fragment };
 }
 
+// ── S12 lifecycle beyond add: list / show / set / remove (OPR.0.5.5.12) ──
+// RED commit: surfaces declared UNWIRED so the pins run and fail at the behavior
+// layer (never module-not-found). GREEN implements them through the same
+// fragment->validate->atomic-write->re-project spine as add.
+
+/** One in-flight item standing between a human and a clean remove. The registry does not
+ *  own the sources (queue rows live behind the daemon; conversations in the dispatch
+ *  buffer) — callers assemble the list; `pendingConversationsFor` covers the buffer half. */
+export interface InflightItem {
+  kind: "open-conversation" | "queue-row";
+  id: string;
+  detail: string;
+}
+
+export interface HumanBindingsSummary {
+  count: number;
+  primary: { kind: string; connectorRef: string };
+  /** true iff any binding carries a handle (outbound-only otherwise). */
+  inboundResolvable: boolean;
+}
+
+export interface HumanSummary {
+  entityId: string;
+  displayName: string;
+  address: string;
+  deliveryClass: HumanPrefs["deliveryClass"];
+  /** EFFECTIVE availability preset (default false when unauthored). */
+  away: boolean;
+  bindings: HumanBindingsSummary;
+  fragmentPath: string;
+}
+
+export type ListHumansResult =
+  | { ok: true; humans: HumanSummary[] }
+  | { ok: false; error: string };
+
+/** A field value with its provenance: authored in the fragment, or filled by a default. */
+export interface ProvenancedValue<T> {
+  value: T;
+  source: "authored" | "default";
+}
+
+export interface EffectiveHumanRecord {
+  entityId: string;
+  address: string;
+  displayName: string;
+  fragmentPath: string;
+  prefs: {
+    deliveryClass: ProvenancedValue<HumanPrefs["deliveryClass"]>;
+    away: ProvenancedValue<boolean>;
+  };
+  connectorBindings: Array<HumanConnectorBinding & { inboundResolvable: boolean }>;
+}
+
+export type ShowHumanResult =
+  | { ok: true; record: EffectiveHumanRecord }
+  | { ok: false; error: string };
+
+export type SetHumanFieldResult =
+  | { ok: true; path: string; fragment: HumanFragment }
+  | { ok: false; error: string };
+
+export type RemoveHumanResult =
+  | { ok: true; removed: string; archivedPath: string; orphanRecordPath?: string }
+  | { ok: false; error: string; inflight?: InflightItem[] };
+
+export function listHumans(home: string = getOpenRigHome()): ListHumansResult {
+  void home;
+  return { ok: false, error: "not implemented (S12 RED)" };
+}
+
+export function showHuman(entityId: string, home: string = getOpenRigHome()): ShowHumanResult {
+  void entityId; void home;
+  return { ok: false, error: "not implemented (S12 RED)" };
+}
+
+export function setHumanField(
+  entityId: string,
+  field: string,
+  value: string,
+  home: string = getOpenRigHome(),
+): SetHumanFieldResult {
+  void entityId; void field; void value; void home;
+  return { ok: false, error: "not implemented (S12 RED)" };
+}
+
+export function removeHumanFragment(
+  entityId: string,
+  opts: { force?: boolean; inflight: InflightItem[] },
+  home: string = getOpenRigHome(),
+): RemoveHumanResult {
+  void entityId; void opts; void home;
+  return { ok: false, error: "not implemented (S12 RED)" };
+}
+
+export function pendingConversationsFor(entityId: string, home: string = getOpenRigHome()): InflightItem[] {
+  void entityId; void home;
+  return [];
+}
+
 export type LoadResult =
   | { ok: true; entities: HumanFragment[] }
   | { ok: false; error: string };
