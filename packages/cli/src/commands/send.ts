@@ -468,9 +468,19 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         throw err;
       }
 
+      // S3 wave-1 fix (r2 F2): effect classification runs BEFORE any output
+      // encoding or routing, so the human and JSON encoders render the same
+      // effect truth — no path may report sent/delivered from the transport
+      // return alone when --verify asked for consumption.
+      let effect: EffectCheck | undefined;
+      if (opts.verify && res.status < 400) {
+        effect = await classifyDeliveryEffect(client, session, payload, outboundText, waitForIdleMs);
+      }
+
       if (opts.json) {
-        console.log(JSON.stringify(res.data));
+        console.log(JSON.stringify(effect ? { ...res.data, effectCheck: effect } : res.data));
         if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
+        if (effectUnresolved(effect)) process.exitCode = 1;
         return;
       }
 
@@ -491,39 +501,15 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       if (advisory) {
         console.log(`Advisory: ${advisory}`);
       }
-      if (opts.verify) {
-        // S3 (OPR.0.5.4.6) — "sent" must mean CONSUMED, never merely typed. The
-        // transport's verify cannot see text sitting AT the prompt (the
-        // send-staging class; its negative signals are measured-unreliable), so
-        // the pane EFFECT decides first — walk's consumption pattern
-        // generalized to plain sends. One capture decides; a positive staged
-        // residual overrides the transport's answer. Absence of a residual
-        // proves nothing by itself (a redrawn pane reads absent), so the
+      if (opts.verify && effect) {
+        // S3 (OPR.0.5.4.6) — "sent" must mean CONSUMED, never merely typed. A
+        // positive staged residual overrides the transport's answer; absence of
+        // a residual proves nothing (a redrawn pane reads absent), so the
         // transport's verdict stands unchanged in that case.
-        const stagedProbe = await detectStagedAtPrompt(client, session, payload);
-        if (stagedProbe.state === "staged") {
+        if (effect.checked && effect.state === "staged") {
           console.log("Verified: no");
-          console.log("Delivery: staged, not consumed (checked: post-send pane capture; observed: the sent text is still at the prompt — typed, never submitted)");
-          // The remedy is the existing guarded submit path — ONE Enter, which
-          // types nothing and cannot double-deliver. One submit is the contract.
-          const enter = await client.post<Record<string, unknown>>("/api/transport/send", {
-            session,
-            submitOnly: true,
-            expectedStagedText: outboundText,
-            expectedStagedLineCount: outboundText.split("\n").length,
-          }, transportRequestOptions(waitForIdleMs));
-          if (enter.status >= 400) {
-            console.log(`Remedy: the single guarded Enter (submit path) was refused (${(enter.data?.["error"] as string | undefined) ?? `HTTP ${enter.status}`}); stopping here — one submit is the contract. Inspect with: rig capture ${session}`);
-            process.exitCode = 1;
-          } else {
-            const recheck = await detectStagedAtPrompt(client, session, payload);
-            if (recheck.state === "staged") {
-              console.log(`Remedy: one guarded Enter submitted, but the text is STILL at the prompt — not consumed; stopping here (one submit is the contract). Inspect with: rig capture ${session}`);
-              process.exitCode = 1;
-            } else {
-              console.log("Remedy: one guarded Enter submitted — the staged text left the prompt.");
-            }
-          }
+          for (const line of effectHumanLines(effect, session)) console.log(line);
+          if (effectUnresolved(effect)) process.exitCode = 1;
         } else {
           // Legacy line preserved verbatim (existing scripts grep `Verified:`);
           // the Delivery line below carries the honest three-outcome vocabulary
@@ -537,14 +523,72 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
           } else if (outcome === "rendered-unconfirmed") {
             console.log(`Delivery: rendered-unconfirmed (landed; pane re-render not confirmed - confirm with: rig capture ${session})`);
           }
-          if (stagedProbe.state === "unchecked") {
-            console.log(`Note: the pane-effect check could not run (${stagedProbe.why}); the verdict above is transport-level only.`);
-          }
+          for (const line of effectHumanLines(effect, session)) console.log(line);
         }
       }
     });
 
   return cmd;
+}
+
+/**
+ * S3 (OPR.0.5.4.6) — the delivery-effect classification, run BEFORE any output
+ * encoding or routing (r2 F2) so every encoder — human, JSON, fan-out — renders
+ * the same effect truth. Runs the staged detector; a positive residual takes
+ * the ONE guarded submit (types nothing, cannot double-deliver) and one
+ * recheck, then stops. Pure classification: no printing here.
+ */
+type EffectCheck =
+  | { checked: true; state: "staged"; remedy: "submitted-cleared" | "submitted-still-staged" | "submit-refused"; detail?: string }
+  | { checked: true; state: "no-staged-residual" }
+  | { checked: false; why: string };
+
+async function classifyDeliveryEffect(
+  client: DaemonClient,
+  session: string,
+  sentPayload: string,
+  expectedStagedText: string,
+  waitForIdleMs?: number,
+): Promise<EffectCheck> {
+  const probe = await detectStagedAtPrompt(client, session, sentPayload);
+  if (probe.state === "unchecked") return { checked: false, why: probe.why };
+  if (probe.state === "not-staged") return { checked: true, state: "no-staged-residual" };
+  const enter = await client.post<Record<string, unknown>>("/api/transport/send", {
+    session,
+    submitOnly: true,
+    expectedStagedText,
+    expectedStagedLineCount: expectedStagedText.split("\n").length,
+  }, transportRequestOptions(waitForIdleMs));
+  if (enter.status >= 400) {
+    return { checked: true, state: "staged", remedy: "submit-refused", detail: (enter.data?.["error"] as string | undefined) ?? `HTTP ${enter.status}` };
+  }
+  const recheck = await detectStagedAtPrompt(client, session, sentPayload);
+  return recheck.state === "staged"
+    ? { checked: true, state: "staged", remedy: "submitted-still-staged" }
+    : { checked: true, state: "staged", remedy: "submitted-cleared" };
+}
+
+/** Renders an EffectCheck on the human surface — shared wording across the
+ *  single-send and fan-out paths so the report is identical everywhere. */
+function effectHumanLines(effect: EffectCheck, session: string): string[] {
+  if (!effect.checked) {
+    return [`Note: the pane-effect check could not run (${effect.why}); the verdict above is transport-level only.`];
+  }
+  if (effect.state === "no-staged-residual") return [];
+  const out = ["Delivery: staged, not consumed (checked: post-send pane capture; observed: the sent text is still at the prompt — typed, never submitted)"];
+  if (effect.remedy === "submitted-cleared") {
+    out.push("Remedy: one guarded Enter submitted — the staged text left the prompt.");
+  } else if (effect.remedy === "submitted-still-staged") {
+    out.push(`Remedy: one guarded Enter submitted, but the text is STILL at the prompt — not consumed; stopping here (one submit is the contract). Inspect with: rig capture ${session}`);
+  } else {
+    out.push(`Remedy: the single guarded Enter (submit path) was refused (${effect.detail}); stopping here — one submit is the contract. Inspect with: rig capture ${session}`);
+  }
+  return out;
+}
+
+/** True when a staged detection did not end consumed — a non-silent failure. */
+function effectUnresolved(effect: EffectCheck | undefined): boolean {
+  return !!effect && effect.checked && effect.state === "staged" && effect.remedy !== "submitted-cleared";
 }
 
 /**
@@ -561,7 +605,6 @@ async function detectStagedAtPrompt(
   session: string,
   sentPayload: string,
 ): Promise<{ state: "staged" | "not-staged" } | { state: "unchecked"; why: string }> {
-  const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
   let cap: { status: number; data: Record<string, unknown> };
   try {
     cap = await client.post<Record<string, unknown>>("/api/transport/capture", { session, lines: 50 }, { headers: terminalAuthHeaders() });
@@ -572,21 +615,27 @@ async function detectStagedAtPrompt(
   if (cap.status !== 200 || typeof pane !== "string") {
     return { state: "unchecked", why: (cap.data?.["error"] as string | undefined) ?? `capture HTTP ${cap.status}` };
   }
-  // Large pastes render as the placeholder, never their content — the real
-  // staging specimens' shape.
-  if (/\[Pasted text #\d+ \+\d+ lines\]/.test(pane)) return { state: "staged" };
-  const head = squash(sentPayload).slice(0, 24);
-  if (head.length === 0) return { state: "not-staged" };
-  // The input-box region: from the LAST prompt-marker line to the end of the
-  // pane. Text there was typed and never submitted.
+  // r2 F3: isolate the CURRENT input region FIRST — from the LAST prompt-marker
+  // line to the end of the pane. Everything above it is history; a stale
+  // pasted-text placeholder in scrollback is never staged evidence, and the
+  // guarded submit must never fire on history.
   const lines = pane.split("\n");
   let lastPrompt = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
     if (/^\s*[❯›]/.test(lines[i]!)) { lastPrompt = i; break; }
   }
   if (lastPrompt === -1) return { state: "not-staged" };
-  const inputRegion = squash(lines.slice(lastPrompt).join("\n").replace(/^\s*[❯›]/, ""));
-  return inputRegion.includes(head) ? { state: "staged" } : { state: "not-staged" };
+  const inputRegionRaw = lines.slice(lastPrompt).join("\n").replace(/^\s*[❯›]/, "");
+  // Large pastes render as the placeholder, never their content — counts only
+  // when it sits in the CURRENT input region.
+  if (/\[Pasted text #\d+ \+\d+ lines\]/.test(inputRegionRaw)) return { state: "staged" };
+  // Identity match reuses the daemon submit-precheck's own normalization
+  // (strip ALL whitespace, contiguous containment) so a detector-positive is
+  // compatible with the guarded submit's precheck by construction.
+  const norm = (s: string): string => s.replace(/\s+/g, "");
+  const head = norm(sentPayload).slice(0, 24);
+  if (head.length === 0) return { state: "not-staged" };
+  return norm(inputRegionRaw).includes(head) ? { state: "staged" } : { state: "not-staged" };
 }
 
 async function runCrossHostSend(
@@ -725,6 +774,9 @@ async function runHttpHostSend(
     console.log(JSON.stringify({
       cross_host: { host: host.id, target: hostDisplayTarget(host), transport: "http" },
       result,
+      // S3 wave-1 fix (r2 F2): the origin host cannot run the pane-effect
+      // check on a remote seat — say so, never imply effect verification.
+      ...(opts.verify ? { effectCheck: { checked: false, why: "cross-host http — the pane-effect check does not run cross-host" } } : {}),
       ...(!result.ok && hint ? { hint } : {}),
     }));
     if (!result.ok) process.exitCode = 1;
@@ -754,6 +806,9 @@ async function runHttpHostSend(
     } else if (outcome === "rendered-unconfirmed") {
       console.log(`Delivery: rendered-unconfirmed (landed; pane re-render not confirmed - confirm with: rig capture ${session})`);
     }
+    // S3 wave-1 fix (r2 F2): honest cross-host limit — the verdict above is
+    // the REMOTE transport's; the pane-effect check does not run cross-host.
+    console.log("Effect: UNCHECKED — the pane-effect check does not run cross-host; the verdict above is transport-level only.");
   }
 }
 
@@ -827,10 +882,24 @@ async function runFanOutSend(params: {
     throw err;
   }
 
+  // S3 wave-1 fix (r2 F2): per-recipient effect classification BEFORE output
+  // encoding — a fan-out with --verify verifies each delivered recipient by
+  // pane effect (the daemon wraps per recipient, so the guarded submit's
+  // expected text is the bare payload, which the wrapped render contains).
+  let effects: Array<{ sessionName: string; effect: EffectCheck }> | undefined;
+  if (opts.verify && res.status < 400) {
+    effects = [];
+    const okRecipients = ((res.data["results"] as Array<{ sessionName: string; ok: boolean }> | undefined) ?? []).filter((r) => r.ok && r.sessionName);
+    for (const r of okRecipients) {
+      effects.push({ sessionName: r.sessionName, effect: await classifyDeliveryEffect(client, r.sessionName, message, message) });
+    }
+  }
+
   if (opts.json) {
-    console.log(JSON.stringify(res.data));
+    console.log(JSON.stringify(effects ? { ...res.data, effectChecks: effects } : res.data));
     const results = (res.data["results"] as Array<{ ok: boolean }> | undefined) ?? [];
     if (res.status >= 400 || results.some((r) => !r.ok)) process.exitCode = 1;
+    if (effects?.some((e) => effectUnresolved(e.effect))) process.exitCode = 1;
     return;
   }
 
@@ -856,6 +925,17 @@ async function runFanOutSend(params: {
   const fanoutAdvisory = data["warning"] as string | undefined;
   if (fanoutAdvisory) {
     console.log(`Advisory: ${fanoutAdvisory}`);
+  }
+  if (effects) {
+    for (const { sessionName, effect } of effects) {
+      if (effect.checked && effect.state === "staged") {
+        console.log(`${sessionName}: staged, not consumed — ${effectHumanLines(effect, sessionName).slice(-1)[0]}`);
+      } else if (!effect.checked) {
+        console.log(`${sessionName}: effect UNCHECKED (${effect.why}) — transport verdict only`);
+      }
+      // no-staged-residual prints nothing per recipient: the transport line stands
+    }
+    if (effects.some((e) => effectUnresolved(e.effect))) process.exitCode = 1;
   }
   if ((data["failed"] as number) > 0 || results.some((r) => !r.ok)) {
     process.exitCode = 1;

@@ -1,0 +1,213 @@
+
+ RUN  v3.2.4 /private/tmp/s3-delivery-honesty/packages/cli
+
+remote okstderr | test/send.test.ts > Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R3 RED: legacy RIGGED_URL custom port honored when OPENRIG_URL unset (probe-stopped)
+Warning: RIGGED_URL is deprecated; use OPENRIG_URL instead.
+
+ ❯ test/send.test.ts (65 tests | 3 failed) 333ms
+   ✓ Send CLI > send prints success output 14ms
+   ✓ Send CLI > P18: an env-less send DELIVERS with an honest `<unknown sender>` label — dispatched, actorSession null 3ms
+   ✓ Send CLI > P18: a resolvable seat SENDS with its attributed identity — actorSession derived from the seat env, never forged 2ms
+   ✓ Send CLI > P18 canonicity: '<unknown sender>' is DEFINED at EXACTLY the two named twin sites — a third fails BY NAME 247ms
+   ✓ Send CLI > send with 409 mid-work prints error and exits non-zero 2ms
+   ✓ Send CLI > prints the Advisory on an unknown-proceed send (human output) 2ms
+   ✓ Send CLI > carries the advisory as `warning` in --json output 1ms
+   ✓ Send CLI > verify confirmed prints Delivery: delivered AND the legacy Verified: yes 2ms
+   ✓ Send CLI > verify redraw-race prints Delivery: rendered-unconfirmed (landed, with capture guidance) AND legacy Verified: no 3ms
+   ✓ Send CLI > verify genuine transport failure stays an error path, distinct from the middle (discriminator) 2ms
+   ✓ Send CLI > verify --json passes the additive outcome field through 1ms
+   ✓ Send CLI > send --json prints raw JSON 1ms
+   ✓ Send CLI > send --wait-for-idle posts waitForIdleMs and extends request timeout 1ms
+   ✓ Send CLI > send without wait-for-idle uses default client timeout path 1ms
+   ✓ Send CLI > send --context resolves a ref to its whole content and sends it (single-seat local) 1ms
+   ✓ Send CLI > send --context ABORTS (no send) when the pack has a missing/unreadable member 0ms
+   ✓ Send CLI > send rejects invalid wait-for-idle values before contacting daemon 0ms
+   ✓ Send CLI > send rejects wait-for-idle with force before contacting daemon 0ms
+   ✓ Send CLI > send --raw posts the exact text without the From/To envelope 1ms
+   ✓ Send CLI > default send (no --raw) wraps the From/To messaging envelope 1ms
+   ✓ Send CLI > send --from <origin> is IGNORED — From:/actor derive from the ambient transport identity, not --from 1ms
+   ✓ Send CLI > send --dangerously-interact --reason posts the override fields with raw (exact) text 1ms
+   ✓ Send CLI > send --dangerously-interact without --reason is rejected before contacting the daemon 0ms
+   ✓ Send CLI > send --dangerously-interact + --wait-for-idle is rejected before contacting the daemon 0ms
+   ✓ Send CLI > send --host forwards --raw/--dangerously-interact/--reason in the reconstructed remote argv 1ms
+   ✓ Send CLI > send --context rejects the agent@rig@host sugar cross-host form (NO message) — never reaches remote argv 0ms
+   ✓ Send CLI > send --context rejects the sugar cross-host form (WITH message) — context not silently dropped 0ms
+   ✓ Send CLI > send --to a,b fans out to /broadcast with a sessions list and prints per-recipient summary 1ms
+   ✓ Send CLI > send --to accepts repetition (--to a --to b) and sets the daemon-side envelopeSender 1ms
+   ✓ Send CLI > send --pod posts a pod target to /broadcast 1ms
+   ✓ Send CLI > send --rig posts a rig target to /broadcast 1ms
+   ✓ Send CLI > fan-out with one recipient failing prints which failed, the summary, and exits nonzero 1ms
+   ✓ Send CLI > S3 — delivery honesty (OPR.0.5.4.6): staged-vs-consumed by pane effect > PROOF-1: a send whose text sits AT the prompt is reported STAGED — by pane effect, not the transport's verified:true 2ms
+   ✓ Send CLI > S3 — delivery honesty (OPR.0.5.4.6): staged-vs-consumed by pane effect > PROOF-2: a genuinely consumed send verifies positively and is NEVER reported staged 1ms
+   ✓ Send CLI > S3 — delivery honesty (OPR.0.5.4.6): staged-vs-consumed by pane effect > PROOF-3: the staged remedy is the single submit path — exactly one plain-text send, no blind re-send suggested or performed 2ms
+   × Send CLI > S3 — delivery honesty (OPR.0.5.4.6): staged-vs-consumed by pane effect > F3: a stale pasted-text placeholder in SCROLLBACK is NOT staged evidence — no staged report, no guarded submit fired 6ms
+     → expected 'Sent to stale-scroll-session\nVerifie…' not to match /staged/i
+   × Send CLI > S3 — delivery honesty (OPR.0.5.4.6): staged-vs-consumed by pane effect > F2: --json with --verify carries the effect classification in the envelope (staged case) 3ms
+     → expected undefined to be defined
+   × Send CLI > S3 — delivery honesty (OPR.0.5.4.6): staged-vs-consumed by pane effect > F2: fan-out with --verify reports per-recipient effect — staged named, consumed never claimed staged 3ms
+     → expected 0 to be greater than 0
+   ✓ Send CLI > fan-out renderer surfaces the unknown-sender notice from the response warning 1ms
+   ✓ Send CLI > fan-out --raw sends bare exact text with NO envelopeSender (no per-recipient wrap) 1ms
+   ✓ Send CLI > fan-out --dangerously-interact --reason plumbs the danger fields (bare text, no envelope) 1ms
+   ✓ Send CLI > rejects combining a bare seat with a fan-out flag 0ms
+   ✓ Send CLI > rejects more than one fan-out mode at once 0ms
+   ✓ Send CLI > rejects --wait-for-idle with a multi/pod/rig target 0ms
+   ✓ Send CLI > single-seat send is UNCHANGED — still posts to /send, byte-identical envelope, no /broadcast 1ms
+   ✓ Send CLI > send --help includes rediscovery examples + the new guard flags 1ms
+   ✓ Send CLI > send --help documents proceed-with-advisory on unknown telemetry, not fail-closed 1ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R1 RED: single-seat + OPENRIG_URL custom port + probe-stopped -> actual POST lands, exact env target passed to clientFactory 1ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R2 RED: fan-out --to + OPENRIG_URL + probe-stopped -> actual /broadcast lands with per-recipient results 1ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R3 RED: legacy RIGGED_URL custom port honored when OPENRIG_URL unset (probe-stopped) 1ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R4 RED: precedence — OPENRIG_URL wins over RIGGED_URL on the transport-authoritative path 1ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R5 RED: RUNNING-but-UNHEALTHY (event-loop-starved healthz body) must still send (single-seat + fan-out) 2ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R6 RED: NO env + live-pid state file (custom port) + healthz probe failing -> POST attempted against the state-derived target 4ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R6b RED: NO env + NO daemon state + probe-stopped -> POST attempted against the configured DEFAULT target (injected client succeeds) 1ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R6c RED: NO env + NO state + probe-stopped + ConfigStore CUSTOM daemon host/port -> POST attempted against the CONFIGURED-FILE target exactly (no hardcoded default) 3ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R7 RED: REAL down fails honestly — actual connection error names the target; the bare preflight restart line never appears 0ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R7b RED: fan-out REAL down fails honestly too — target-specific connection error, exit 1, no restart line, and the same remediation as single-seat 0ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R7c RED: single-seat --json transport failure emits exactly one parseable stdout JSON envelope, empty stderr, exit 1 1ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R7d RED: fan-out --json transport failure emits exactly one parseable stdout JSON envelope, empty stderr, exit 1 0ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R7e: single-seat HUMAN transport failure keeps stdout empty (mirror of R7c) — the 3 remediation lines are stderr-only, exit 1 0ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R7f: fan-out HUMAN transport failure keeps stdout empty (mirror of R7d) — stderr-only remediation, exit 1 0ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R8: explicit OPENRIG_URL (single-seat) -> exact target POSTed + EXACTLY ONE self-id /healthz GET, no status-probe burn 1ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R8b RED: explicit OPENRIG_URL (fan-out) -> exact target broadcast and ZERO lifecycle probe calls 1ms
+   ✓ Send CLI > P21 I4 — fan-out IGNORES --from; identity derives from the transport (reverses ba41fea2) > --from is IGNORED in fan-out — BOTH envelopeSender and actorSession name the ambient transport identity, never the forged --from origin 1ms
+   ✓ Send CLI > P21 I4 — fan-out IGNORES --from; identity derives from the transport (reverses ba41fea2) > F2 GREEN-characterization: with NO --from, fan-out still falls back to ambient identity (the flag is additive, not a behavior change) 1ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/send.test.ts > Send CLI > S3 — delivery honesty (OPR.0.5.4.6): staged-vs-consumed by pane effect > F3: a stale pasted-text placeholder in SCROLLBACK is NOT staged evidence — no staged report, no guarded submit fired
+AssertionError: expected 'Sent to stale-scroll-session\nVerifie…' not to match /staged/i
+
+[32m- Expected:[39m 
+/staged/i
+
+[31m+ Received:[39m 
+"Sent to stale-scroll-session
+Verified: no
+Delivery: staged, not consumed (checked: post-send pane capture; observed: the sent text is still at the prompt — typed, never submitted)
+Remedy: one guarded Enter submitted, but the text is STILL at the prompt — not consumed; stopping here (one submit is the contract). Inspect with: rig capture stale-scroll-session"
+
+ ❯ test/send.test.ts:714:26
+    712|       });
+    713|       const output = logs.join("\n");
+    714|       expect(output).not.toMatch(/staged/i);
+       |                          ^
+    715|       // and the submit path must never fire on history
+    716|       expect(sendBodies.filter((b) => b["submitOnly"])).toHaveLength(0…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯
+
+ FAIL  test/send.test.ts > Send CLI > S3 — delivery honesty (OPR.0.5.4.6): staged-vs-consumed by pane effect > F2: --json with --verify carries the effect classification in the envelope (staged case)
+AssertionError: expected undefined to be defined
+ ❯ test/send.test.ts:726:22
+    724|       const envelope = JSON.parse(logs.find((l) => l.trim().startsWith…
+    725|       const effect = envelope["effectCheck"] as Record<string, unknown…
+    726|       expect(effect).toBeDefined();
+       |                      ^
+    727|       expect(effect!["state"]).toBe("staged");
+    728|       expect(exitCode).toBe(1); // staged-not-cleared is not a silent …
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯
+
+ FAIL  test/send.test.ts > Send CLI > S3 — delivery honesty (OPR.0.5.4.6): staged-vs-consumed by pane effect > F2: fan-out with --verify reports per-recipient effect — staged named, consumed never claimed staged
+AssertionError: expected 0 to be greater than 0
+ ❯ test/send.test.ts:741:40
+    739|       const lines = logs.join("\n").split("\n");
+    740|       const stagedEffectLines = lines.filter((l) => l.includes("staged…
+    741|       expect(stagedEffectLines.length).toBeGreaterThan(0); // RED pre-…
+       |                                        ^
+    742|       const consumedEffectClaims = lines.filter((l) => l.includes("con…
+    743|       expect(consumedEffectClaims).toHaveLength(0);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  3 failed | 62 passed (65)
+   Start at  07:34:31
+   Duration  861ms (transform 172ms, setup 44ms, collect 214ms, tests 333ms, environment 0ms, prepare 88ms)
+
+vitest exit: 1
+
+ RUN  v3.2.4 /private/tmp/s3-delivery-honesty/packages/cli
+
+remote pane
+ ❯ test/cross-host-http.test.ts (44 tests | 1 failed) 37527ms
+   ✓ resolveCrossHostTarget (§4 sugar + precedence) > plain 2-part target: untouched, no sugar, no hint, registry never loaded 1ms
+   ✓ resolveCrossHostTarget (§4 sugar + precedence) > 3-part with REGISTERED suffix: host-qualified — target stripped, host extracted 0ms
+   ✓ resolveCrossHostTarget (§4 sugar + precedence) > 3-part with UNREGISTERED suffix: passes through UNCHANGED with the loud hint 0ms
+   ✓ resolveCrossHostTarget (§4 sugar + precedence) > registry load failure: passthrough + hint (a plain-target failure mode is never added) 0ms
+   ✓ resolveCrossHostTarget (§4 sugar + precedence) > --host X + sugar @Y, X≠Y: structured conflict 0ms
+   ✓ resolveCrossHostTarget (§4 sugar + precedence) > --host X + sugar @X (same host twice): fine 0ms
+   ✓ resolveCrossHostTarget (§4 sugar + precedence) > adopted/raw 4-part-ish names keep working: only the LAST @ segment is a host candidate 0ms
+   ✓ send --host (http branch) > http host: POSTs the LOCAL body shape (wrapped envelope) to /api/transport/send; ssh runner never invoked; BR-1: session stays 2-part  1622ms
+   × send --host (http branch) > http host + --verify: reports the effect check as UNCHECKED (transport-level verdict only), never a silent effect claim 1622ms
+     → expected '[via host=vps-b (http://vps-b:7433)]\…' to match /unchecked/i
+   ✓ send --host (http branch) > --raw skips the envelope: exact text passthrough  1635ms
+   ✓ send --host (http branch) > anonymous (URL-only) http host: POSTs with NO Authorization header; still succeeds  1633ms
+   ✓ send --host (http branch) > sugar target dev-impl@my-rig@vps-b routes http with the STRIPPED session  1623ms
+   ✓ send --host (http branch) > --host conflict with a DIFFERENT sugar host: structured error, zero remote calls  815ms
+   ✓ send --host (http branch) > persisted selection drives the http branch when no --host and no sugar  1618ms
+   ✓ send --host (http branch) > explicit --host beats the persisted selection  1618ms
+   ✓ send --host (http branch) > sugar beats the persisted selection  1620ms
+   ✓ send --host (http branch) > --verify prints the REMOTE verdict verbatim (remote-authoritative, never locally synthesized)  1614ms
+   ✓ send --host (http branch) > --verify with no remote verdict field prints Verified: no (no local invention)  1617ms
+   ✓ send --host (http branch) > remote advisory (unknown actorSession) surfaces as the non-blocking Advisory line  1654ms
+   ✓ send --host (http branch) > G8 auth seam: a 401 surfaces as the structured permission-gate step with the remote's own error text  1612ms
+   ✓ send --host (http branch) > network failure surfaces as remote-daemon-unreachable, host named, never a hang  1616ms
+   ✓ send --host (http branch) > --wait-for-idle sizes the http deadline: waitForIdleMs + overhead  1623ms
+   ✓ send --host (http branch) > fan-out×host guard kept verbatim: --host + --rig rejected before any call 0ms
+   ✓ send --host (http branch) > unknown --host: structured unknown-host with the sugar hint appended when the target was 3-part-shaped  810ms
+   ✓ send --host (http branch) > json envelope: cross_host {host, target, transport:http} + the raw result  1614ms
+   ✓ capture --host (http branch) > http host: POSTs the LOCAL body shape to /api/transport/capture and renders the single result under the banner  806ms
+   ✓ capture --host (http branch) > anonymous (URL-only) http host: capture POSTs with NO Authorization header; still succeeds  817ms
+   ✓ capture --host (http branch) > multi-target (--rig/--pod) rides the http branch with per-target rendering  927ms
+   ✓ capture --host (http branch) > sugar target routes http with the stripped session (BR-1)  845ms
+   ✓ capture --host (http branch) > ssh host still takes the ssh shell-out (branch selection) 2ms
+   ✓ transcript --host (net-new, CLI-direct GET) > tail: GETs the exact local route path against the remote and renders origin shape verbatim  810ms
+   ✓ transcript --host (net-new, CLI-direct GET) > grep: GETs the grep route and renders matches  811ms
+   ✓ transcript --host (net-new, CLI-direct GET) > ssh host: the structured transport-requirement error (http-only verb, never silent) 0ms
+   ✓ transcript --host (net-new, CLI-direct GET) > unknown host: the same unknown-host step class as the other verbs 0ms
+   ✓ transcript --host (net-new, CLI-direct GET) > selection-driven cross-host works for the net-new verb too  829ms
+   ✓ transcript --host (net-new, CLI-direct GET) > arch n2: the transcript read is UNGATED — it SUCCEEDS under the exact wrong-terminal-bearer scenario that permission-gates send  2466ms
+   ✓ broadcast --host (net-new, CLI-direct POST) > http host: POSTs the LOCAL body verbatim; per-target results print verbatim; clean fan-out exits 0  813ms
+   ✓ broadcast --host (net-new, CLI-direct POST) > partial fan-out: per-target honesty verbatim + NON-ZERO exit (never summarized clean)  810ms
+   ✓ broadcast --host (net-new, CLI-direct POST) > names its OWN fan-out budget at the call site (not the read-class default)  811ms
+   ✓ broadcast --host (net-new, CLI-direct POST) > the text positional is NEVER sugar-parsed: a message containing a@b@vps-b broadcasts locally intact when no host is set 0ms
+   ✓ broadcast --host (net-new, CLI-direct POST) > ssh host: structured transport-requirement error (http-only verb) 0ms
+   ✓ broadcast --host (net-new, CLI-direct POST) > selection-driven cross-host broadcast  807ms
+   ✓ broadcast --host (net-new, CLI-direct POST) > PIN 1 (money) — broadcast --host stamps the ORIGIN triple on X-OpenRig-Session (remote renders the origin, not the destination) 3ms
+   ✓ broadcast --host (net-new, CLI-direct POST) > PIN 5 (fail-open) — local selfHostId unavailable ⇒ 2-part header, broadcast still ships 0ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/cross-host-http.test.ts > send --host (http branch) > http host + --verify: reports the effect check as UNCHECKED (transport-level verdict only), never a silent effect claim
+AssertionError: expected '[via host=vps-b (http://vps-b:7433)]\…' to match /unchecked/i
+
+[32m- Expected:[39m 
+/unchecked/i
+
+[31m+ Received:[39m 
+"[via host=vps-b (http://vps-b:7433)]
+Sent to dev-impl@my-rig
+Verified: yes
+Delivery: delivered (message landed; render confirmed)"
+
+ ❯ test/cross-host-http.test.ts:220:17
+    218|     const out = captured.stdoutLines.join("\n");
+    219|     expect(out).toContain("Verified: yes"); // the remote transport ve…
+    220|     expect(out).toMatch(/unchecked/i); // and honestly labeled as effe…
+       |                 ^
+    221|     expect(out).toMatch(/transport-level only|not verifiable from this…
+    222|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 43 passed (44)
+   Start at  07:34:32
+   Duration  37.93s (transform 150ms, setup 28ms, collect 194ms, tests 37.53s, environment 0ms, prepare 43ms)
+
+vitest exit(xhost): 1

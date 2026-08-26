@@ -1,0 +1,2 @@
+14c99a2bae7e79b213191233e19768fb37ae56fd97dbd55cb9ad709989b75077  /Users/admin/.openrig-build-vm-2d5beac5/workspace/missions/release-0.5.4/slices/06-delivery-honesty/SPEC.md
+fca29b492ac7bee26fc02a3a2aa5285ab74f9f8c2b94ace2287b7d6b29501a0a  /Users/admin/.openrig-build-vm-2d5beac5/workspace/missions/release-0.5.4/slices/06-delivery-honesty/IMPLEMENTATION-PRD.md

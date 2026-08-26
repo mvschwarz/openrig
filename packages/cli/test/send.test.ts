@@ -126,6 +126,9 @@ describe("Send CLI", () => {
           const panes: Record<string, string> = {
             "staged-session": "❯ hello there\n  ⏵⏵ accept edits on (shift+tab to cycle)",
             "consumed-session": "· processing: hello there\n❯ \n  ⏵⏵ accept edits on (shift+tab to cycle)",
+            // r2 F3 negative: a STALE pasted-text placeholder in SCROLLBACK with a
+            // blank current prompt — history, never staged evidence.
+            "stale-scroll-session": "[Pasted text #3 +12 lines]\nolder scrollback output\n❯ \n  ⏵⏵ accept edits on (shift+tab to cycle)",
           };
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: true, sessionName: parsed.session, content: panes[parsed.session as string] ?? "❯ " }));
@@ -135,7 +138,7 @@ describe("Send CLI", () => {
           const parsed = JSON.parse(body);
           lastSendBody = parsed;
           sendBodies.push(parsed);
-          if (parsed.session === "staged-session" || parsed.session === "consumed-session") {
+          if (parsed.session === "staged-session" || parsed.session === "consumed-session" || parsed.session === "stale-scroll-session") {
             // S3 RED fixture: the TRANSPORT believes it delivered (its verify
             // is measured-unreliable in exactly this direction) — the staged
             // truth is visible only by pane effect.
@@ -700,6 +703,44 @@ describe("Send CLI", () => {
       // the report points at the submit path, never a re-send
       expect(output).toMatch(/submit|Enter/i);
       expect(output).not.toMatch(/re-?send|send again/i);
+    });
+
+    // ── Wave-1 fix round 1 (r2 BLOCKING row 91b29490) ──
+    it("F3: a stale pasted-text placeholder in SCROLLBACK is NOT staged evidence — no staged report, no guarded submit fired", async () => {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "send", "stale-scroll-session", "hello there", "--verify"]);
+      });
+      const output = logs.join("\n");
+      expect(output).not.toMatch(/staged/i);
+      // and the submit path must never fire on history
+      expect(sendBodies.filter((b) => b["submitOnly"])).toHaveLength(0);
+      expect(output).toContain("Verified: yes"); // the transport verdict stands
+    });
+
+    it("F2: --json with --verify carries the effect classification in the envelope (staged case)", async () => {
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "send", "staged-session", "hello there", "--verify", "--json"]);
+      });
+      const envelope = JSON.parse(logs.find((l) => l.trim().startsWith("{")) ?? "{}") as Record<string, unknown>;
+      const effect = envelope["effectCheck"] as Record<string, unknown> | undefined;
+      expect(effect).toBeDefined();
+      expect(effect!["state"]).toBe("staged");
+      expect(exitCode).toBe(1); // staged-not-cleared is not a silent success in JSON either
+    });
+
+    it("F2: fan-out with --verify reports per-recipient effect — staged named, consumed never claimed staged", async () => {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "send", "--to", "staged-session,consumed-session", "hello there", "--verify"]);
+      });
+      // Strip the seat NAMES before matching, so "staged-session: sent" can
+      // never satisfy the staged-effect assertion by its name alone (the
+      // pre-fix strawman this test's first RED run caught).
+      const scrub = (l: string) => l.replace(/staged-session|consumed-session/g, "SEAT");
+      const lines = logs.join("\n").split("\n");
+      const stagedEffectLines = lines.filter((l) => l.includes("staged-session") && /staged/i.test(scrub(l)));
+      expect(stagedEffectLines.length).toBeGreaterThan(0); // RED pre-fix: no effect line exists
+      const consumedEffectClaims = lines.filter((l) => l.includes("consumed-session") && /staged/i.test(scrub(l)));
+      expect(consumedEffectClaims).toHaveLength(0);
     });
   });
 

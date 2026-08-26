@@ -207,6 +207,20 @@ describe("send --host (http branch)", () => {
     expect(process.exitCode).toBeUndefined();
   });
 
+  // S3 wave-1 fix round 1 (r2 F2): the http cross-host leg cannot run the
+  // pane-effect check from the origin host — with --verify it must say so
+  // honestly instead of echoing the remote transport verdict as if verified.
+  it("http host + --verify: reports the effect check as UNCHECKED (transport-level verdict only), never a silent effect claim", async () => {
+    const h = mockClient(() => ({ status: 200, data: { ok: true, verified: true, outcome: "delivered" } }));
+    const cmd = sendCommand(httpDeps(h));
+    await cmd.parseAsync(["--host", "vps-b", "dev-impl@my-rig", "hello", "--verify"], { from: "user" });
+
+    const out = captured.stdoutLines.join("\n");
+    expect(out).toContain("Verified: yes"); // the remote transport verdict, still rendered
+    expect(out).toMatch(/unchecked/i); // and honestly labeled as effect-unchecked
+    expect(out).toMatch(/transport-level only|not verifiable from this host|does not run cross-host/i);
+  });
+
   it("--raw skips the envelope: exact text passthrough", async () => {
     const h = mockClient(() => ({ status: 200, data: {} }));
     const cmd = sendCommand(httpDeps(h));
