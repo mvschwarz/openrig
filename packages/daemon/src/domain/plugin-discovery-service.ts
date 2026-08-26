@@ -28,7 +28,7 @@
 // (resources.plugins[].id + profile.uses.plugins[]) is exactly what batch 1
 // produces, so post-merge the service continues to work unchanged.
 
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join, basename } from "node:path";
 import { parse as parseYaml } from "yaml";
 
@@ -194,12 +194,14 @@ export interface ListPluginsOpts {
 
 const CLAUDE_MANIFEST_REL = ".claude-plugin/plugin.json";
 const CODEX_MANIFEST_REL = ".codex-plugin/plugin.json";
+const OBSOLETE_LAB_PLUGIN_ID = "openrig-lab";
 
 export class PluginDiscoveryService {
   private readonly opts: PluginDiscoveryServiceOpts;
 
   constructor(opts: PluginDiscoveryServiceOpts) {
     this.opts = opts;
+    this.retireObsoleteLabRefocusHooks();
     this.assertNoDuplicateVendoredHooks();
   }
 
@@ -390,6 +392,38 @@ export class PluginDiscoveryService {
   }
 
   // -- helpers --
+
+  /**
+   * Before openrig-core became the sole refocus provider, openrig-lab shipped
+   * the same registrations. Upgrade installs can retain that old lab plugin,
+   * so remove only its refocus commands before validating unknown conflicts.
+   * The hook registry is written first: an interrupted migration therefore
+   * leaves the obsolete provider disabled even if its manifest still points
+   * at the now-empty registry.
+   */
+  private retireObsoleteLabRefocusHooks(): void {
+    const pluginPath = join(this.opts.openrigPluginsDir, OBSOLETE_LAB_PLUGIN_ID);
+    if (!isDir(pluginPath)) return;
+
+    for (const manifestRel of [CLAUDE_MANIFEST_REL, CODEX_MANIFEST_REL]) {
+      const manifestPath = join(pluginPath, manifestRel);
+      const manifest = readManifest(manifestPath);
+      if (manifest?.name !== OBSOLETE_LAB_PLUGIN_ID) continue;
+
+      const hooksRef = manifest.raw["hooks"];
+      if (typeof hooksRef !== "string" || !hooksRef.trim()) continue;
+
+      const hooksPath = join(pluginPath, hooksRef);
+      const registry = readJsonObject(hooksPath);
+      if (!registry || !removeObsoleteLabRefocusCommands(registry)) continue;
+
+      writeJsonAtomically(hooksPath, registry);
+      if (!hasHookRegistrations(registry)) {
+        delete manifest.raw["hooks"];
+        writeJsonAtomically(manifestPath, manifest.raw);
+      }
+    }
+  }
 
   /**
    * Runtime plugin loaders activate every vendored manifest, so the same hook
@@ -589,6 +623,79 @@ function extractHookEvents(hooksJsonPath: string): string[] {
     // best-effort
   }
   return [];
+}
+
+function readJsonObject(path: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    return isObject(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function removeObsoleteLabRefocusCommands(registry: Record<string, unknown>): boolean {
+  if (!isObject(registry.hooks)) return false;
+
+  let changed = false;
+  for (const [event, rawGroups] of Object.entries(registry.hooks)) {
+    if (!Array.isArray(rawGroups)) {
+      if (isObsoleteLabRefocusHook(rawGroups)) {
+        delete registry.hooks[event];
+        changed = true;
+      }
+      continue;
+    }
+
+    const groups: unknown[] = [];
+    for (const rawGroup of rawGroups) {
+      if (!isObject(rawGroup)) {
+        groups.push(rawGroup);
+        continue;
+      }
+      if (!Array.isArray(rawGroup.hooks)) {
+        if (isObsoleteLabRefocusHook(rawGroup)) {
+          changed = true;
+        } else {
+          groups.push(rawGroup);
+        }
+        continue;
+      }
+
+      const hooks = rawGroup.hooks.filter((hook) => {
+        const obsolete = isObsoleteLabRefocusHook(hook);
+        if (obsolete) changed = true;
+        return !obsolete;
+      });
+      if (hooks.length > 0) {
+        groups.push(hooks.length === rawGroup.hooks.length ? rawGroup : { ...rawGroup, hooks });
+      }
+    }
+
+    if (groups.length > 0) registry.hooks[event] = groups;
+    else delete registry.hooks[event];
+  }
+  return changed;
+}
+
+function isObsoleteLabRefocusHook(value: unknown): boolean {
+  if (!isObject(value) || typeof value.command !== "string") return false;
+  return /(?:^|[\\/])hooks[\\/]scripts[\\/]refocus\.cjs(?:["'\s]|$)/.test(value.command);
+}
+
+function hasHookRegistrations(registry: Record<string, unknown>): boolean {
+  return isObject(registry.hooks) && Object.keys(registry.hooks).length > 0;
+}
+
+function writeJsonAtomically(path: string, value: Record<string, unknown>): void {
+  const tempPath = `${path}.openrig-migration-${process.pid}-${Date.now()}.tmp`;
+  const mode = statSync(path).mode & 0o777;
+  writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, { mode });
+  renameSync(tempPath, path);
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function extractHookIdentities(

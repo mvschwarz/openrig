@@ -45,6 +45,42 @@ function writeClaudePluginManifest(pluginDir: string, manifest: Record<string, u
   writeFileSync(join(pluginDotDir, "plugin.json"), JSON.stringify(manifest, null, 2));
 }
 
+function writeCodexPluginManifest(pluginDir: string, manifest: Record<string, unknown>) {
+  const pluginDotDir = join(pluginDir, ".codex-plugin");
+  mkdirSync(pluginDotDir, { recursive: true });
+  writeFileSync(join(pluginDotDir, "plugin.json"), JSON.stringify(manifest, null, 2));
+}
+
+function writeHookRegistry(
+  pluginDir: string,
+  runtime: "claude" | "codex",
+  events: string[],
+  command: string,
+) {
+  const hooksDir = join(pluginDir, "hooks");
+  mkdirSync(hooksDir, { recursive: true });
+  writeFileSync(join(hooksDir, `${runtime}.json`), JSON.stringify({
+    hooks: Object.fromEntries(events.map((event) => [
+      event,
+      [{ hooks: [{ type: "command", command, timeout: 5 }] }],
+    ])),
+  }, null, 2));
+}
+
+function refocusProviders(runtime: "claude" | "codex"): string[] {
+  const pluginsDir = join(tmpHome, "plugins");
+  return readdirSync(pluginsDir)
+    .filter((plugin) => {
+      try {
+        return readFileSync(join(pluginsDir, plugin, "hooks", `${runtime}.json`), "utf8")
+          .includes("/hooks/scripts/refocus.cjs");
+      } catch {
+        return false;
+      }
+    })
+    .sort();
+}
+
 describe("plugin discovery honors OPENRIG_HOME (HG-1, HG-3, HG-4)", () => {
   it("scans <OPENRIG_HOME>/plugins and finds a plugin placed there", async () => {
     // Vendor a synthetic plugin at <OPENRIG_HOME>/plugins/example/
@@ -62,6 +98,47 @@ describe("plugin discovery honors OPENRIG_HOME (HG-1, HG-3, HG-4)", () => {
       const plugins = await service!.listPlugins({});
       const ids = plugins.map((p) => p.id);
       expect(ids).toContain("example");
+      expect(refocusProviders("claude")).toEqual(["openrig-core"]);
+      expect(refocusProviders("codex")).toEqual(["openrig-core"]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("starts with a historical openrig-lab refocus registration left by an upgrade", async () => {
+    const lab = join(tmpHome, "plugins", "openrig-lab");
+    writeClaudePluginManifest(lab, {
+      name: "openrig-lab",
+      version: "0.1.0",
+      hooks: "./hooks/claude.json",
+    });
+    writeCodexPluginManifest(lab, {
+      name: "openrig-lab",
+      version: "0.1.0",
+      hooks: "./hooks/codex.json",
+    });
+    writeHookRegistry(
+      lab,
+      "claude",
+      ["SessionStart", "UserPromptSubmit", "Stop", "PostCompact"],
+      'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs"',
+    );
+    writeHookRegistry(
+      lab,
+      "codex",
+      ["SessionStart", "UserPromptSubmit", "Stop"],
+      'node "${PLUGIN_ROOT}/hooks/scripts/refocus.cjs"',
+    );
+
+    const { deps, db } = await createDaemon({ dbPath: ":memory:" });
+    try {
+      expect(deps.pluginDiscoveryService!.listPlugins().map((plugin) => plugin.id)).toContain("openrig-lab");
+      expect(JSON.parse(readFileSync(join(lab, ".claude-plugin", "plugin.json"), "utf8"))).not.toHaveProperty("hooks");
+      expect(JSON.parse(readFileSync(join(lab, ".codex-plugin", "plugin.json"), "utf8"))).not.toHaveProperty("hooks");
+      expect(JSON.parse(readFileSync(join(lab, "hooks", "claude.json"), "utf8"))).toEqual({ hooks: {} });
+      expect(JSON.parse(readFileSync(join(lab, "hooks", "codex.json"), "utf8"))).toEqual({ hooks: {} });
+      expect(refocusProviders("claude")).toEqual(["openrig-core"]);
+      expect(refocusProviders("codex")).toEqual(["openrig-core"]);
     } finally {
       db.close();
     }
