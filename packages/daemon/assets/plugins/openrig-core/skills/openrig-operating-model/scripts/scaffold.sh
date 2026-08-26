@@ -14,8 +14,8 @@ case "$MODE" in
   # in the rig's mode plugin (openrig-lab | openrig-factory | openrig-hq) — it is NOT a chain
   # and must not be scaffolded onto the tree. CULTURE.md ships with OpenRig.
   topology) FILES=(LEARNED.md) ; ROOT_FILES=(LEARNED.md) ;;
-  # SPEC.md is the authored node (intent: in frontmatter). NOTES.md is the LIVED file — what
-  # actually happened, in the doer's words, never generated or projected. PROGRESS is derived;
+  # SPEC.md is the authored node (intent: in frontmatter). NOTES.md is the LIVED file — the
+  # scaffold creates its surface only; lived entries are never generated or projected. PROGRESS is derived;
   # PROOF.md is authored by the prover when there is something to prove.
   work)     FILES=(SPEC.md NOTES.md) ; ROOT_FILES=(SPEC.md NOTES.md) ;;
   *) echo "mode must be topology|work" >&2; exit 2 ;;

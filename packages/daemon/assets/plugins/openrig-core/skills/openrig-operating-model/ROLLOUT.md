@@ -109,9 +109,9 @@ the trees — AND the drain does not happen now. During rollout:
 - the drain happens later, deliberately, when the unified skill registry
   lands (see ROADMAP.md) — never as a side effect of the rollout.
 
-## SOP authoring plan (founder-approved 2026-08-10; pm-lead owns)
+## SOP authoring plan (owner-approved 2026-08-10; product team owns)
 
-**Composition (founder-ruled 2026-08-10):** pod SOP = the general layer ·
+**Composition (owner-ruled 2026-08-10):** pod SOP = the general layer ·
 seat SOP = a TYPE fragment, shared/projected across same-type seats (byte-
 identical; occupant edits go to LEARNED, never the fragment; divergence is a
 parity scream) · LEARNED = the lived instance. Fragments are authored per TYPE
@@ -151,10 +151,10 @@ parity scream) · LEARNED = the lived instance. Fragments are authored per TYPE
    skills-architect spends ZERO tokens now (context-constrained + handover in
    process); their batched consistency pass rides the 0.6 registry drain.
 
-**Binding inputs registered for round-1 fragments** (founder-flagged content
+**Binding inputs registered for round-1 fragments** (owner-flagged content
 that MUST land in the named fragment; a draft missing its binding input fails
 review — this list is read at every one-shot dispatch and at every review):
-- **DRIVER type (build VM)** — founder recurrence flag 2026-08-10 (~100th
+- **DRIVER type (build VM)** — owner recurrence flag 2026-08-10 (~100th
   correction, zero uptake while it lived only in chat): on the VM, the DEFAULT
   for a runtime defect is the **inner loop** — ground → fix → upgrade the
   daemon in place → test with your own eyes → iterate; ship-rigor once at the
@@ -164,7 +164,7 @@ review — this list is read at every one-shot dispatch and at every review):
   into the conveyor, ask first whether ONE grounded agent with its own
   feedback loop can fix and verify it in place. Conveyor only for what ships
   beyond the VM or touches locked contracts.
-- **THE CHOOSER (founder root diagnosis, same conversation, addendum 2026-08-11):**
+- **THE CHOOSER (owner root diagnosis, same conversation, addendum 2026-08-11):**
   the incoherence under the recurrence is that every task gets the identical
   SDLC regardless of shape. Carried as ONE principle, not a rubric: **default =
   the lightest thing that could work** (one agent, own judgment, own feedback
@@ -192,9 +192,9 @@ review — this list is read at every one-shot dispatch and at every review):
   scope. Every seat-type fragment carries this; reviewers enforce it like the
   chooser.
 (Companion folds already in flight at the implicated seats' LEARNED files:
-pm-openrig done; operator a947ed35 and advisor 1f89e5d6 founder-directed.)
+product planning done; operator a947ed35 and advisor 1f89e5d6 owner-directed.)
 
-**Round 2 — ontology backfill per seat, pod, and rig (founder-directed
+**Round 2 — ontology backfill per seat, pod, and rig (owner-directed
 2026-08-10):** after a node's SOP/LEARNED pair exists, one deliberate
 audit pass folds the rest of its scattered wisdom into the walkable layer:
 - **Claude memory files** (`~/.claude/projects/*/memory/` per seat) — tribal
@@ -210,7 +210,7 @@ audit pass folds the rest of its scattered wisdom into the walkable layer:
 
 ## Current status (update this section as waves complete)
 
-- Design locked by the founder: 2026-08-09.
+- Design locked by the owner: 2026-08-09.
 - Skill authored (sole-context authorship) and projected on the primary host:
   2026-08-09. VM projection: operator's leg, with wave 2.
 - Wave 1 COMPLETE 2026-08-10: all five coordinator seats seeded + reviewed
@@ -222,7 +222,7 @@ audit pass folds the rest of its scattered wisdom into the walkable layer:
   openrig-work root done 2026-08-10 (pointers at old names) · studio-boxes =
   pm-studiobox's to execute · idea-ledger-gstack pending its owner.
 - The factory is unparked (wave-1 adoption complete).
-- NAMING RULED (founder, 2026-08-11): PLAYBOOK.md -> **SOP.md** fleet-wide
+- NAMING RULED (owner, 2026-08-11): PLAYBOOK.md -> **SOP.md** fleet-wide
   (names are prompts; SOP = the consult-and-follow trigger, factory-native).
   All seven existing files renamed with one-transition pointers at old names;
   LEARNED keeps its name (it is the maturity PIPELINE, and the low-friction

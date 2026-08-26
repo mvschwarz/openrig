@@ -1,7 +1,7 @@
 # Revision guide — for agents improving this skill
 
 Authored in one sitting by the seat that held the full design context
-(pm-lead gen-4, 2026-08-09, founder-ordered sole authorship to avoid dilution).
+(product-team generation 4, 2026-08-09, owner-ordered sole authorship to avoid dilution).
 Revise freely WITHIN these boundaries; the authoring seat (or its successor)
 checks every change.
 

@@ -9,9 +9,7 @@ description: >-
 metadata:
   openrig:
     stage: draft
-    last_verified: "2026-08-09"
-    distribution_scope: product-bound
-    author: pm-lead@openrig-pm gen-4 (sole-context authorship; revisions per REVISION-GUIDE.md)
+    author: OpenRig product team (sole-context authorship; revisions per REVISION-GUIDE.md)
 ---
 
 # The OpenRig Operating Model
@@ -49,7 +47,7 @@ An **instance** is one OpenRig daemon and the rigs it manages; a **fleet** is al
 a daemon runs is a deployment fact, not an altitude — say the instance's name when you mean a
 particular one.
 
-**The one-parent law (founder-ruled 2026-08-10):** the trace follows the
+**The one-parent law (design-ruled 2026-08-10):** the trace follows the
 directory path and NOTHING else — no pointer fields, no link-following, no
 branching, ever. The trace is the instrument confused agents reach for, so it
 must be simpler than anything it corrects: path-only ascent fails only in
@@ -100,10 +98,10 @@ its body. Alongside it sit three files with different jobs and different writers
 | `PROOF.md` | evidence the thing does what was intended | the prover |
 | PROGRESS | **derived** — the checkbox is the only stored mark | nobody, above the mark |
 
-**`NOTES.md` is never generated and never projected.** It is the work tree's lived file, the way
-`LEARNED.md` is the topology tree's — the field-notes rung, where raw observation goes before
-anything has earned a place in the node itself. Keeping lived files out of the render path is what
-makes them safe to write freely in.
+**A scaffold may create `NOTES.md` and its starter instructions; its lived entries are never
+generated or projected.** It is the work tree's lived file, the way `LEARNED.md` is the topology
+tree's — the field-notes rung, where raw observation goes before anything has earned a place in the
+node itself. Keeping lived files out of the render path is what makes them safe to write freely in.
 
 **Legacy name:** the adopted spelling is `MISSION_NOTES.md` (35 at mission root). It stays
 resolvable, but the chain name is `NOTES.md` — `MISSION_` is altitude-specific and a chain uses one
@@ -135,7 +133,7 @@ is how a stored derivation becomes a confident lie.
 Two directions on the same trees: intent/values/practice **compose downward**
 (you trace UP to read them); progress **aggregates upward** (never hand-written
 above the mark level). **And PROGRESS above the mark level is a RENDER, not a
-file** (founder-ruled 2026-08-10): the checkbox is the only stored mark;
+file** (design-ruled 2026-08-10): the checkbox is the only stored mark;
 `scripts/compose.py progress` derives the roll-up tree at render time. The
 old PROGRESS.md files that embedded a hand-rendered tree were the right idea
 in the wrong home — a stored derivation drifts into a confident lie (the same
@@ -385,7 +383,7 @@ and how you discover which seats can't describe their own job (see
   at the next render, silently.
 - "Improving" the trace with pointer-following, serves-resolution, or any
   branching — the trace's entire value is that path-only ascent cannot fail
-  subtly; a smarter trace is a worse trace (founder-ruled 2026-08-10).
+  subtly; a smarter trace is a worse trace (design-ruled 2026-08-10).
 - Summarizing this model for another agent instead of pointing them here —
   secondhand operating models are how operating models die; this skill was
   authored precisely because a chain of summaries destroyed the last one.

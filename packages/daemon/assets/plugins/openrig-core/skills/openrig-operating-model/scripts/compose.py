@@ -358,7 +358,7 @@ def resolve_roots():
         # UNRESOLVED — for every agent reaching the tool the documented way. Measured 2026-08-14:
         # exit 3 via the projection, exit 0 via the realpath, same file.
         here = os.path.realpath(__file__)
-        for _ in range(6):                       # scripts/ skill/ skills/ openrig-work/ -> shared-docs/
+        for _ in range(6):                       # scripts/ skill/ skills/ skill-canon/ -> shared-docs/
             here = os.path.dirname(here)
             cand = os.path.join(here, "rigs")
             if os.path.isdir(cand):
