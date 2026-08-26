@@ -1218,8 +1218,10 @@ describe("SessionTransport", () => {
     expect(sendTextSpy).toHaveBeenCalled();
   });
 
-  // Test 9: send when tmux unavailable → guided error
-  it("send when tmux unavailable returns tmux_unavailable with guidance", async () => {
+  // Test 9: an UNEXPECTED probe throw (the fail-closed class — not the
+  // classified no-server path, which one-honest-resolution-path.test.ts covers
+  // with the real adapter) still surfaces as tmux_unavailable, honestly worded.
+  it("send when the probe throws unexpectedly returns tmux_unavailable with guidance", async () => {
     const tmux = mockTmux({
       hasSession: async () => { throw new Error("no server running"); },
     });

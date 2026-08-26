@@ -9,6 +9,7 @@ import { SessionTransport } from "../src/domain/session-transport.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { Reconciler } from "../src/domain/reconciler.js";
 import { transportRoutes } from "../src/routes/transport.js";
+import { PsProjectionService } from "../src/domain/ps-projection.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 
 // OPR.0.5.4.2 — one honest resolution path. The deterministic injected-exec
@@ -185,24 +186,36 @@ describe("one path at the verbs: send and capture surface the transport outcome"
   });
 
   describe("no fabricated verdicts (mini-req 5)", () => {
-    it("a transport blip against a live registered seat writes NO absence verdict", async () => {
+    it("a transport blip against a live registered seat writes NO absence verdict and ps does not down-rank it", async () => {
       seedSeat();
       await transportOver(NO_SERVER).send(SEAT, "hello");
       expect(verdictRows()).toHaveLength(0);
+      // The EFFECT, not just the indicator (proof item 4): the live seat stays
+      // projected as running after the blip.
+      const entry = new PsProjectionService({ db }).getEntries()[0]!;
+      expect(entry.runningCount).toBe(1);
+      expect(entry.status).toBe("running");
     });
 
-    it("a socket-gone blip likewise writes NO absence verdict", async () => {
+    it("a socket-gone blip likewise writes NO absence verdict and ps does not down-rank it", async () => {
       seedSeat();
       await transportOver(SOCKET_GONE).capture(SEAT);
       expect(verdictRows()).toHaveLength(0);
+      const entry = new PsProjectionService({ db }).getEntries()[0]!;
+      expect(entry.runningCount).toBe(1);
+      expect(entry.status).toBe("running");
     });
 
-    it("genuine session absence still writes the verdict", async () => {
+    it("genuine session absence still writes the verdict and ps down-ranks the seat", async () => {
       seedSeat();
       await transportOver(SESSION_GONE).send(SEAT, "hello");
       const rows = verdictRows();
       expect(rows).toHaveLength(1);
       expect(rows[0]!.reason).toBe("session_missing");
+      // Opposite discriminator: positive absence DOES change the projection.
+      const entry = new PsProjectionService({ db }).getEntries()[0]!;
+      expect(entry.runningCount).toBe(0);
+      expect(entry.status).not.toBe("running");
     });
   });
 });

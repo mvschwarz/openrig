@@ -264,10 +264,11 @@ describe("Reconciler", () => {
     expect(sessions[0]!.status).toBe("running");
   });
 
-  // L1 cold-start tmux truth repair: when the tmux adapter classifies a post-reboot
-  // socket-absence as "no session" (hasSession returns false), reconcile must
-  // detach the row honestly so DB state matches tmux reality.
-  it("socket-absent at adapter layer (hasSession returns false): session detached + event emitted", async () => {
+  // L1 cold-start tmux truth repair: post-reboot socket-absence is classified
+  // transport_unavailable by probeSession; the Reconciler ELECTS to treat that
+  // state as detachable at its own call site (OPR.0.5.4.2 mini-req 2), so DB
+  // state still matches tmux reality after a reboot.
+  it("socket-absent at adapter layer (probe not-present): session detached + event emitted", async () => {
     const { rig } = seedRigWithSessions([
       { logicalId: "dev1-impl", sessionName: "r01-dev1-impl", status: "running" },
     ]);

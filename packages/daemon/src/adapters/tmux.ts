@@ -128,8 +128,10 @@ function isPaneAbsenceError(err: unknown): boolean {
 
 // Post-reboot the tmux socket file at /tmp/tmux-<uid>/<name> is gone, so
 // `tmux has-session` exits non-zero with a transport-absent message rather than
-// a server/session-absent message. Treat that case as "no session" so cold-start
-// reconciliation can detach stale rows. Permission errors must remain rethrown.
+// a server/session-absent message. probeSession() classifies this class as
+// transport_unavailable — session existence NOT determined, never absence;
+// only Reconciler elects to treat that state as detachable, at its own
+// cold-start call site (OPR.0.5.4.2). Permission errors must remain rethrown.
 function isTmuxTransportAbsentError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const msg = err.message;

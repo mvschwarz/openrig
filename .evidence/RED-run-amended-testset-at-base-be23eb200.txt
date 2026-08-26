@@ -1,0 +1,246 @@
+
+ RUN  v3.2.4 /private/tmp/s1-base-red/packages/daemon
+
+ ❯ test/one-honest-resolution-path.test.ts (19 tests | 13 failed) 392ms
+   × adapter gate: probeSession classifies instead of collapsing > no-server → transport answer, not absence 19ms
+     → adapter.probeSession is not a function
+   × adapter gate: probeSession classifies instead of collapsing > socket-gone → transport answer, not absence 0ms
+     → adapter.probeSession is not a function
+   × adapter gate: probeSession classifies instead of collapsing > can't find session → positive absence 0ms
+     → adapter.probeSession is not a function
+   × adapter gate: probeSession classifies instead of collapsing > permission denied → fail-closed throw, distinct from both classes 0ms
+     → adapter.probeSession is not a function
+   × adapter gate: probeSession classifies instead of collapsing > present session → present 0ms
+     → adapter.probeSession is not a function
+   ✓ adapter gate: probeSession classifies instead of collapsing > hasSession keeps the collapsed view for unbound consumers 1ms
+   × one path at the verbs: send and capture surface the transport outcome > send under no-server surfaces tmux_unavailable, never session_missing 46ms
+     → expected 'session_missing' to be 'tmux_unavailable' // Object.is equality
+   × one path at the verbs: send and capture surface the transport outcome > send under socket-gone surfaces tmux_unavailable, never session_missing 7ms
+     → expected 'session_missing' to be 'tmux_unavailable' // Object.is equality
+   × one path at the verbs: send and capture surface the transport outcome > capture under no-server surfaces tmux_unavailable, never session_missing 21ms
+     → expected 'session_missing' to be 'tmux_unavailable' // Object.is equality
+   ✓ one path at the verbs: send and capture surface the transport outcome > send under genuine absence still surfaces session_missing 23ms
+   × one path at the verbs: send and capture surface the transport outcome > error text names what was actually checked (queue-create bar) > transport text states the failed reach AND that existence was not determined 39ms
+     → expected 'Session \'dev-impl@my-rig\' not found…' to match /could not be reached|not reachable/i
+   × one path at the verbs: send and capture surface the transport outcome > error text names what was actually checked (queue-create bar) > session-missing text states its positive tmux evidence 151ms
+     → expected 'Session \'dev-impl@my-rig\' not found…' to match /tmux reports no session/i
+   × one path at the verbs: send and capture surface the transport outcome > walk's route (/api/transport/send) surfaces the transport outcome under no-server 13ms
+     → expected 'session_missing' to be 'tmux_unavailable' // Object.is equality
+   × one path at the verbs: send and capture surface the transport outcome > no fabricated verdicts (mini-req 5) > a transport blip against a live registered seat writes NO absence verdict and ps does not down-rank it 10ms
+     → expected [ { …(10) } ] to have a length of +0 but got 1
+   × one path at the verbs: send and capture surface the transport outcome > no fabricated verdicts (mini-req 5) > a socket-gone blip likewise writes NO absence verdict and ps does not down-rank it 8ms
+     → expected [ { …(10) } ] to have a length of +0 but got 1
+   ✓ one path at the verbs: send and capture surface the transport outcome > no fabricated verdicts (mini-req 5) > genuine session absence still writes the verdict and ps down-ranks the seat 16ms
+   ✓ cold-start preserved: boot reconciliation still detaches under a dead server (mini-req 2) > no-server: stale rows are detached, not errored 11ms
+   ✓ cold-start preserved: boot reconciliation still detaches under a dead server (mini-req 2) > socket-gone: stale rows are detached, not errored 12ms
+   ✓ cold-start preserved: boot reconciliation still detaches under a dead server (mini-req 2) > permission denied stays fail-closed: errored, never detached 11ms
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 13 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/one-honest-resolution-path.test.ts > adapter gate: probeSession classifies instead of collapsing > no-server → transport answer, not absence
+TypeError: adapter.probeSession is not a function
+ ❯ test/one-honest-resolution-path.test.ts:38:33
+     36|   it("no-server → transport answer, not absence", async () => {
+     37|     const adapter = new TmuxAdapter(failingExec(NO_SERVER));
+     38|     const probe = await adapter.probeSession(SEAT);
+       |                                 ^
+     39|     expect(probe.state).toBe("transport_unavailable");
+     40|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/13]⎯
+
+ FAIL  test/one-honest-resolution-path.test.ts > adapter gate: probeSession classifies instead of collapsing > socket-gone → transport answer, not absence
+TypeError: adapter.probeSession is not a function
+ ❯ test/one-honest-resolution-path.test.ts:44:33
+     42|   it("socket-gone → transport answer, not absence", async () => {
+     43|     const adapter = new TmuxAdapter(failingExec(SOCKET_GONE));
+     44|     const probe = await adapter.probeSession(SEAT);
+       |                                 ^
+     45|     expect(probe.state).toBe("transport_unavailable");
+     46|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/13]⎯
+
+ FAIL  test/one-honest-resolution-path.test.ts > adapter gate: probeSession classifies instead of collapsing > can't find session → positive absence
+TypeError: adapter.probeSession is not a function
+ ❯ test/one-honest-resolution-path.test.ts:50:33
+     48|   it("can't find session → positive absence", async () => {
+     49|     const adapter = new TmuxAdapter(failingExec(SESSION_GONE));
+     50|     const probe = await adapter.probeSession(SEAT);
+       |                                 ^
+     51|     expect(probe.state).toBe("absent");
+     52|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/13]⎯
+
+ FAIL  test/one-honest-resolution-path.test.ts > adapter gate: probeSession classifies instead of collapsing > permission denied → fail-closed throw, distinct from both classes
+TypeError: adapter.probeSession is not a function
+ ❯ test/one-honest-resolution-path.test.ts:56:26
+     54|   it("permission denied → fail-closed throw, distinct from both classe…
+     55|     const adapter = new TmuxAdapter(failingExec(PERMISSION));
+     56|     await expect(adapter.probeSession(SEAT)).rejects.toThrow("permissi…
+       |                          ^
+     57|   });
+     58| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/13]⎯
+
+ FAIL  test/one-honest-resolution-path.test.ts > adapter gate: probeSession classifies instead of collapsing > present session → present
+TypeError: adapter.probeSession is not a function
+ ❯ test/one-honest-resolution-path.test.ts:61:33
+     59|   it("present session → present", async () => {
+     60|     const adapter = new TmuxAdapter(async () => "");
+     61|     const probe = await adapter.probeSession(SEAT);
+       |                                 ^
+     62|     expect(probe.state).toBe("present");
+     63|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/13]⎯
+
+ FAIL  test/one-honest-resolution-path.test.ts > one path at the verbs: send and capture surface the transport outcome > send under no-server surfaces tmux_unavailable, never session_missing
+AssertionError: expected 'session_missing' to be 'tmux_unavailable' // Object.is equality
+
+Expected: [32m"tmux_unavailable"[39m
+Received: [31m"session_missing"[39m
+
+ ❯ test/one-honest-resolution-path.test.ts:117:27
+    115|     const result = await transportOver(NO_SERVER).send(SEAT, "hello");
+    116|     expect(result.ok).toBe(false);
+    117|     expect(result.reason).toBe("tmux_unavailable");
+       |                           ^
+    118|   });
+    119| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/13]⎯
+
+ FAIL  test/one-honest-resolution-path.test.ts > one path at the verbs: send and capture surface the transport outcome > send under socket-gone surfaces tmux_unavailable, never session_missing
+AssertionError: expected 'session_missing' to be 'tmux_unavailable' // Object.is equality
+
+Expected: [32m"tmux_unavailable"[39m
+Received: [31m"session_missing"[39m
+
+ ❯ test/one-honest-resolution-path.test.ts:124:27
+    122|     const result = await transportOver(SOCKET_GONE).send(SEAT, "hello"…
+    123|     expect(result.ok).toBe(false);
+    124|     expect(result.reason).toBe("tmux_unavailable");
+       |                           ^
+    125|   });
+    126| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/13]⎯
+
+ FAIL  test/one-honest-resolution-path.test.ts > one path at the verbs: send and capture surface the transport outcome > capture under no-server surfaces tmux_unavailable, never session_missing
+AssertionError: expected 'session_missing' to be 'tmux_unavailable' // Object.is equality
+
+Expected: [32m"tmux_unavailable"[39m
+Received: [31m"session_missing"[39m
+
+ ❯ test/one-honest-resolution-path.test.ts:131:27
+    129|     const result = await transportOver(NO_SERVER).capture(SEAT);
+    130|     expect(result.ok).toBe(false);
+    131|     expect(result.reason).toBe("tmux_unavailable");
+       |                           ^
+    132|   });
+    133| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/13]⎯
+
+ FAIL  test/one-honest-resolution-path.test.ts > one path at the verbs: send and capture surface the transport outcome > error text names what was actually checked (queue-create bar) > transport text states the failed reach AND that existence was not determined
+AssertionError: expected 'Session \'dev-impl@my-rig\' not found…' to match /could not be reached|not reachable/i
+
+[32m- Expected:[39m 
+/could not be reached|not reachable/i
+
+[31m+ Received:[39m 
+"Session 'dev-impl@my-rig' not found. Check available sessions with: rig ps --nodes"
+
+ ❯ test/one-honest-resolution-path.test.ts:147:28
+    145|       expect(result.ok).toBe(false);
+    146|       if (result.ok) return;
+    147|       expect(result.error).toMatch(/could not be reached|not reachable…
+       |                            ^
+    148|       expect(result.error).toMatch(/not determined/i);
+    149|       // No false world-conclusion: the text may not claim the session…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[9/13]⎯
+
+ FAIL  test/one-honest-resolution-path.test.ts > one path at the verbs: send and capture surface the transport outcome > error text names what was actually checked (queue-create bar) > session-missing text states its positive tmux evidence
+AssertionError: expected 'Session \'dev-impl@my-rig\' not found…' to match /tmux reports no session/i
+
+[32m- Expected:[39m 
+/tmux reports no session/i
+
+[31m+ Received:[39m 
+"Session 'dev-impl@my-rig' not found. Check available sessions with: rig ps --nodes"
+
+ ❯ test/one-honest-resolution-path.test.ts:158:28
+    156|       expect(result.ok).toBe(false);
+    157|       if (result.ok) return;
+    158|       expect(result.error).toMatch(/tmux reports no session/i);
+       |                            ^
+    159|     });
+    160|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[10/13]⎯
+
+ FAIL  test/one-honest-resolution-path.test.ts > one path at the verbs: send and capture surface the transport outcome > walk's route (/api/transport/send) surfaces the transport outcome under no-server
+AssertionError: expected 'session_missing' to be 'tmux_unavailable' // Object.is equality
+
+Expected: [32m"tmux_unavailable"[39m
+Received: [31m"session_missing"[39m
+
+ ❯ test/one-honest-resolution-path.test.ts:184:25
+    182|     });
+    183|     const body = (await res.json()) as { reason?: string; error?: stri…
+    184|     expect(body.reason).toBe("tmux_unavailable");
+       |                         ^
+    185|     expect(body.error).toMatch(/not determined/i);
+    186|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[11/13]⎯
+
+ FAIL  test/one-honest-resolution-path.test.ts > one path at the verbs: send and capture surface the transport outcome > no fabricated verdicts (mini-req 5) > a transport blip against a live registered seat writes NO absence verdict and ps does not down-rank it
+AssertionError: expected [ { …(10) } ] to have a length of +0 but got 1
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 0[39m
+[31m+ 1[39m
+
+ ❯ test/one-honest-resolution-path.test.ts:192:29
+    190|       seedSeat();
+    191|       await transportOver(NO_SERVER).send(SEAT, "hello");
+    192|       expect(verdictRows()).toHaveLength(0);
+       |                             ^
+    193|       // The EFFECT, not just the indicator (proof item 4): the live s…
+    194|       // projected as running after the blip.
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[12/13]⎯
+
+ FAIL  test/one-honest-resolution-path.test.ts > one path at the verbs: send and capture surface the transport outcome > no fabricated verdicts (mini-req 5) > a socket-gone blip likewise writes NO absence verdict and ps does not down-rank it
+AssertionError: expected [ { …(10) } ] to have a length of +0 but got 1
+
+[32m- Expected[39m
+[31m+ Received[39m
+
+[32m- 0[39m
+[31m+ 1[39m
+
+ ❯ test/one-honest-resolution-path.test.ts:203:29
+    201|       seedSeat();
+    202|       await transportOver(SOCKET_GONE).capture(SEAT);
+    203|       expect(verdictRows()).toHaveLength(0);
+       |                             ^
+    204|       const entry = new PsProjectionService({ db }).getEntries()[0]!;
+    205|       expect(entry.runningCount).toBe(1);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[13/13]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  13 failed | 6 passed (19)
+   Start at  05:37:22
+   Duration  2.34s (transform 1.15s, setup 0ms, collect 1.67s, tests 392ms, environment 0ms, prepare 59ms)
+
+vitest exit: 1

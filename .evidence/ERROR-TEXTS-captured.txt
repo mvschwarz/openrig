@@ -1,0 +1,27 @@
+ERROR TEXT — ACTUAL EMITTED SPECIMENS (captured by running the real
+SessionTransport over the real TmuxAdapter with injected exec failures;
+harness: test/zz-scratch-capture-specimens.test.ts, run once and deleted)
+
+send / no-server:
+  reason: tmux_unavailable
+  error:  The tmux server could not be reached (no server running on /private/tmp/tmux-501/default). Whether session 'dev-impl@my-rig' exists was not determined. No text was sent.
+
+send / socket-gone:
+  reason: tmux_unavailable
+  error:  The tmux server could not be reached (error connecting to /private/tmp/tmux-501/default (No such file or directory)). Whether session 'dev-impl@my-rig' exists was not determined. No text was sent.
+
+send / genuine absence:
+  reason: session_missing
+  error:  Session 'dev-impl@my-rig' not found: tmux reports no session with this name. No text was sent. Check available sessions with: rig ps --nodes
+
+send / permission-denied (unexpected probe failure):
+  reason: tmux_unavailable
+  error:  The tmux session probe failed unexpectedly (permission denied). Whether session 'dev-impl@my-rig' exists was not determined. No text was sent.
+
+capture / no-server:
+  reason: tmux_unavailable
+  error:  The tmux server could not be reached (no server running on /private/tmp/tmux-501/default). Whether session 'dev-impl@my-rig' exists was not determined. Nothing was captured.
+
+capture / genuine absence:
+  reason: session_missing
+  error:  Session 'dev-impl@my-rig' not found: tmux reports no session with this name. Nothing was captured. Check available sessions with: rig ps --nodes

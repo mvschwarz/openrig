@@ -989,8 +989,8 @@ describe("Lifecycle reboot/recovery scenario matrix (Tier 1)", () => {
 // SLICE-05 items 5+6 — cross-contract invariant RED (the item-6 regression).
 // INVARIANT: a seat whose live tmux session is gone — PROVEN by driving the REAL
 // SessionTransport.send AND .capture (both return { ok:false, reason:"session_missing" }
-// through the tmuxAdapter.hasSession gate) — must NEVER be concurrently reported running
-// by ps. ps.runningCount reads raw persisted sessions.status='running' and never consults
+// through the tmuxAdapter.probeSession gate, on POSITIVE absence evidence only;
+// OPR.0.5.4.2) — must NEVER be concurrently reported running by ps. ps.runningCount reads raw persisted sessions.status='running' and never consults
 // live tmux, so the invariant is violated today. ONE shared db + ONE shared tmux adapter
 // with per-session hasSession truth. Row (b) is LOAD-BEARING: the last/only session, where
 // the reconciler emits tmux_unavailable (not session_missing) on the empty census — so a
