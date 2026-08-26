@@ -227,7 +227,8 @@ describe("S19 A3 — AM-2: symmetric admission (trial → measured promotion)", 
 
     // Production agreement: trial evidence AGREES with the arbitrated state, spread over
     // more than the minimum window, for the stated count.
-    const stepMs = Math.ceil(RUNG_PROMOTION_MIN_WINDOW_MS / RUNG_PROMOTION_AGREEMENT_COUNT) + 1_000;
+    // N agreements span N-1 intervals — size the step so the TOTAL span crosses the window.
+    const stepMs = Math.ceil(RUNG_PROMOTION_MIN_WINDOW_MS / (RUNG_PROMOTION_AGREEMENT_COUNT - 1)) + 1_000;
     for (let i = 0; i < RUNG_PROMOTION_AGREEMENT_COUNT; i++) {
       h.clock.now += stepMs;
       const value: ActivityValue = i % 2 === 0 ? "working" : "idle-at-prompt";

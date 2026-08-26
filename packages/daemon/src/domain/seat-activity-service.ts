@@ -4,10 +4,14 @@ import type { EventBus } from "./event-bus.js";
 import type { SeatActivity } from "./types.js";
 import type {
   ActivityEvidence,
+  ActivityValue,
   AdapterRungInventory,
   ArbitratedSeatState,
+  EvidenceRungId,
   RungHealthEvent,
+  RungTrust,
 } from "./activity-taxonomy.js";
+import { EVIDENCE_RUNG_RANK } from "./activity-taxonomy.js";
 
 /** Default polling cadence: 1Hz. The default silence window is 3s, so
  *  1Hz polling gives at-most ~1s freshness lag on the cached observation. */
@@ -187,47 +191,355 @@ export class SeatActivityService {
   // ── S19 (OPR.0.5.5.19): the ranked evidence ladder above the sampler ──
   // The non-inference contract is UNCHANGED: nothing below reads queue/assignment
   // state; the parked join lives in the parked-query surface, never here.
-  // S19 A3 RED: surfaces declared UNWIRED so the pins fail at the arbitration layer.
+
+  private readonly ladder = new Map<string, SeatLadderState>();
+  private readonly sessionToSeat = new Map<string, string>();
+  private readonly healthListeners: Array<(event: RungHealthEvent) => void> = [];
+  private readonly samplerSeqBySession = new Map<string, number>();
 
   /** An adapter (or an occupant swap) declares which rungs this seat's sources staff.
    *  The binding ties the durable seat nodeId to its current pane/session name so the
    *  internal sampler can feed the window-sampling rung for this seat. */
   declareRungInventory(
-    _binding: { seatNodeId: string; sessionName: string },
-    _inventory: AdapterRungInventory,
+    binding: { seatNodeId: string; sessionName: string },
+    inventory: AdapterRungInventory,
   ): void {
-    throw new Error("not implemented (S19 A3 RED)");
+    const seat = this.seatLadder(binding.seatNodeId, binding.sessionName);
+    seat.sessionName = binding.sessionName;
+    this.sessionToSeat.set(binding.sessionName, binding.seatNodeId);
+    seat.inventory = inventory;
+    seat.trust.clear();
+    for (const decl of inventory.rungs) seat.trust.set(decl.rung, decl.initialTrust);
+    seat.promotion.clear();
+    this.arbitrate(seat);
   }
 
-  /** Adapters push rung evidence (hooks, self-report, chrome, sampling). */
-  reportEvidence(_evidence: ActivityEvidence): void {
-    throw new Error("not implemented (S19 A3 RED)");
+  /** Adapters push rung evidence (hooks, self-report, chrome, sampling). Per-source
+   *  monotonic seq: stale or reordered reports are dropped — a late lower-seq event
+   *  never revives an idle seat (the SubagentStop class at the service layer). */
+  reportEvidence(evidence: ActivityEvidence): void {
+    const seat = this.seatLadder(evidence.seatNodeId, evidence.sessionName);
+    this.sessionToSeat.set(evidence.sessionName, evidence.seatNodeId);
+    const prior = seat.sources.get(evidence.sourceId);
+    if (prior && evidence.seq <= prior.seq) return; // stale/reordered — dropped
+    seat.sources.set(evidence.sourceId, evidence);
+    this.measureTrialAgreement(seat, evidence);
+    this.arbitrate(seat);
   }
 
-  /** A handover/generation swap: its OWN visible event, never an activity transition;
-   *  clears rung trust to the inventory's initial values (AM-1 corollary). */
-  declareOccupantSwap(_seatNodeId: string, _generation: string): void {
-    throw new Error("not implemented (S19 A3 RED)");
+  /** A handover/generation swap: its OWN visible event, never an activity transition.
+   *  Evidence, debounce, contradiction and promotion state are cleared; every known
+   *  rung's trust drops to `absent` until the successor's adapter RE-DECLARES its
+   *  inventory (AM-1 corollary: a successor never inherits rung authority). */
+  declareOccupantSwap(seatNodeId: string, generation: string): void {
+    const seat = this.ladder.get(seatNodeId);
+    if (!seat) return;
+    seat.sources.clear();
+    seat.pendingIdle = null;
+    seat.contradictionSinceMs = null;
+    seat.promotion.clear();
+    for (const rung of seat.trust.keys()) seat.trust.set(rung, "absent");
+    seat.inventory = null;
+    const at = this.now().toISOString();
+    seat.arbitrated = {
+      ...seat.arbitrated,
+      activity: "unknown",
+      needsInput: { count: 0, reason: null },
+      decidedBy: null,
+      seq: seat.arbitrated.seq + 1, // the swap IS a visible event
+      changedAt: at,
+      rungs: this.rungsView(seat),
+      lastSwap: { generation, at },
+    };
+    this.resolveWaiters(seat);
   }
 
   /** The arbitrated, seat-keyed state every surface renders from. */
-  getSeatState(_seatNodeId: string): ArbitratedSeatState | null {
-    throw new Error("not implemented (S19 A3 RED)");
+  getSeatState(seatNodeId: string): ArbitratedSeatState | null {
+    const seat = this.ladder.get(seatNodeId);
+    if (!seat) return null;
+    this.arbitrate(seat); // lazy re-evaluation picks up time-based expiry/caps
+    return seat.arbitrated;
   }
 
   /** Wait-after-seq read primitive (T1 seam, exposed not consumed here): resolves when
-   *  the arbitrated seq passes `afterSeq` (transient transitions still satisfy it). */
+   *  the arbitrated seq passes `afterSeq` (a fast pass-through transition still
+   *  satisfies the wait — the lost-wakeup guard). Timeout resolves null, never throws. */
   waitForSeatState(
-    _seatNodeId: string,
-    _opts: { afterSeq: number; timeoutMs: number },
+    seatNodeId: string,
+    opts: { afterSeq: number; timeoutMs: number },
   ): Promise<ArbitratedSeatState | null> {
-    throw new Error("not implemented (S19 A3 RED)");
+    const seat = this.ladder.get(seatNodeId);
+    if (!seat) return Promise.resolve(null);
+    if (seat.arbitrated.seq > opts.afterSeq) return Promise.resolve(seat.arbitrated);
+    return new Promise((resolve) => {
+      const waiter: SeatWaiter = {
+        afterSeq: opts.afterSeq,
+        resolve,
+        timer: setTimeout(() => {
+          seat.waiters = seat.waiters.filter((w) => w !== waiter);
+          resolve(null);
+        }, opts.timeoutMs),
+      };
+      if (typeof waiter.timer === "object" && "unref" in waiter.timer) waiter.timer.unref();
+      seat.waiters.push(waiter);
+    });
   }
 
-  /** Rung-health transitions (AM-1): degradations are VISIBLE, never silent. */
-  onRungHealth(_listener: (event: RungHealthEvent) => void): void {
-    throw new Error("not implemented (S19 A3 RED)");
+  /** Rung-health transitions (AM-1): degradations and promotions are VISIBLE, never silent. */
+  onRungHealth(listener: (event: RungHealthEvent) => void): void {
+    this.healthListeners.push(listener);
   }
+
+  private seatLadder(seatNodeId: string, sessionName: string): SeatLadderState {
+    let seat = this.ladder.get(seatNodeId);
+    if (!seat) {
+      seat = {
+        sessionName,
+        inventory: null,
+        sources: new Map(),
+        trust: new Map(),
+        promotion: new Map(),
+        contradictionSinceMs: null,
+        pendingIdle: null,
+        waiters: [],
+        arbitrated: {
+          seatNodeId,
+          activity: "unknown",
+          needsInput: { count: 0, reason: null },
+          decidedBy: null,
+          seq: 0,
+          changedAt: this.now().toISOString(),
+          rungs: [],
+          lastSwap: null,
+        },
+      };
+      this.ladder.set(seatNodeId, seat);
+    }
+    return seat;
+  }
+
+  /** Trust for a rung: declared trust when an inventory exists; without a declaration
+   *  the generic tmux floor (window-sampling) is authoritative and everything else is
+   *  identity-only — partial-coverage honesty by default. */
+  private rungTrust(seat: SeatLadderState, rung: EvidenceRungId): RungTrust {
+    const declared = seat.trust.get(rung);
+    if (declared) return declared;
+    if (seat.inventory) return "absent"; // declared inventory, undeclared rung
+    return rung === "window-sampling" ? "authoritative" : "identity-only";
+  }
+
+  private latestByRung(seat: SeatLadderState, rung: EvidenceRungId): ActivityEvidence | null {
+    let best: ActivityEvidence | null = null;
+    for (const evd of seat.sources.values()) {
+      if (evd.rung !== rung) continue;
+      if (!best || evd.seq > best.seq) best = evd;
+    }
+    return best;
+  }
+
+  /** AM-2: a TRIAL rung's evidence is measured against the current authoritative
+   *  CANDIDATE value (raw ladder decision, pre-debounce) — evidence against evidence,
+   *  never against the debounced display. Enough agreements over at least the minimum
+   *  window promote the rung to authoritative, visibly. */
+  private measureTrialAgreement(seat: SeatLadderState, evidence: ActivityEvidence): void {
+    if (evidence.activity === undefined) return;
+    if (this.rungTrust(seat, evidence.rung) !== "trial") return;
+    const authority = this.rawCandidate(seat, { excludeRung: evidence.rung });
+    if (!authority || authority.activity === undefined) return;
+    const entry = seat.promotion.get(evidence.rung) ?? { agreements: 0, firstAgreementAtMs: null };
+    if (authority.activity === evidence.activity) {
+      entry.agreements += 1;
+      if (entry.firstAgreementAtMs === null) entry.firstAgreementAtMs = this.now().getTime();
+      const spanMs = this.now().getTime() - (entry.firstAgreementAtMs ?? 0);
+      if (entry.agreements >= RUNG_PROMOTION_AGREEMENT_COUNT && spanMs >= RUNG_PROMOTION_MIN_WINDOW_MS) {
+        seat.trust.set(evidence.rung, "authoritative");
+        this.emitRungHealth(seat, evidence.rung, evidence.sourceId, "trial", "authoritative",
+          `promoted: ${entry.agreements} agreeing observations over ${Math.round(spanMs / 60000)}min (threshold ${RUNG_PROMOTION_AGREEMENT_COUNT} over ${Math.round(RUNG_PROMOTION_MIN_WINDOW_MS / 60000)}min)`);
+        seat.promotion.delete(evidence.rung);
+        return;
+      }
+    } else {
+      entry.agreements = 0; // agreement must be consecutive within the measured window
+      entry.firstAgreementAtMs = null;
+    }
+    seat.promotion.set(evidence.rung, entry);
+  }
+
+  /** The raw ladder decision for working/idle: highest authoritative rung with usable,
+   *  in-window evidence. Hook evidence is TIME-BOUNDED (the one rung that does not
+   *  self-date its lifecycle) — expired hook evidence falls through, never errors. */
+  private rawCandidate(seat: SeatLadderState, opts: { excludeRung?: EvidenceRungId } = {}): ActivityEvidence | null {
+    const nowMs = this.now().getTime();
+    for (const rung of EVIDENCE_RUNG_RANK) {
+      if (rung === opts.excludeRung) continue;
+      if (this.rungTrust(seat, rung) !== "authoritative") continue;
+      const evd = this.latestByRung(seat, rung);
+      if (!evd || evd.activity === undefined) continue;
+      if (rung === "lifecycle-hooks" && nowMs - Date.parse(evd.observedAt) > HOOK_AUTHORITY_WINDOW_MS) continue;
+      return evd;
+    }
+    return null;
+  }
+
+  private emitRungHealth(
+    seat: SeatLadderState,
+    rung: EvidenceRungId,
+    sourceId: string,
+    from: RungTrust,
+    to: RungTrust,
+    reason: string,
+  ): void {
+    const event: RungHealthEvent = {
+      seatNodeId: seat.arbitrated.seatNodeId,
+      rung,
+      sourceId,
+      from,
+      to,
+      reason,
+      at: this.now().toISOString(),
+    };
+    for (const listener of this.healthListeners) listener(event);
+    this.eventBus?.emit({ type: "seat.rung_health", ...event } as never);
+  }
+
+  /** AM-1: persistent cross-rung contradiction (hook claims working while a lower
+   *  authoritative rung sees idle-at-prompt beyond the stated window) degrades the hook
+   *  rung to identity-only, VISIBLY — arbitration can never make a silently-dead source
+   *  authoritative. */
+  private checkContradiction(seat: SeatLadderState): void {
+    if (this.rungTrust(seat, "lifecycle-hooks") !== "authoritative") return;
+    const hook = this.latestByRung(seat, "lifecycle-hooks");
+    const sampler = this.latestByRung(seat, "window-sampling");
+    const nowMs = this.now().getTime();
+    const hookFresh = hook && hook.activity !== undefined
+      && nowMs - Date.parse(hook.observedAt) <= HOOK_AUTHORITY_WINDOW_MS;
+    const contradicts = hookFresh && hook!.activity === "working"
+      && sampler?.activity === "idle-at-prompt"
+      && this.rungTrust(seat, "window-sampling") === "authoritative";
+    if (!contradicts) {
+      seat.contradictionSinceMs = null;
+      return;
+    }
+    if (seat.contradictionSinceMs === null) {
+      seat.contradictionSinceMs = nowMs;
+      return;
+    }
+    if (nowMs - seat.contradictionSinceMs > CROSS_RUNG_CONTRADICTION_WINDOW_MS) {
+      seat.trust.set("lifecycle-hooks", "identity-only");
+      seat.contradictionSinceMs = null;
+      this.emitRungHealth(seat, "lifecycle-hooks", hook!.sourceId, "authoritative", "identity-only",
+        `cross-rung contradiction: hook claims working while window-sampling sees idle-at-prompt beyond ${CROSS_RUNG_CONTRADICTION_WINDOW_MS / 1000}s — degraded to identity-only (a silently-dropping source can never stay authoritative)`);
+    }
+  }
+
+  private rungsView(seat: SeatLadderState): ArbitratedSeatState["rungs"] {
+    const rungIds = new Set<EvidenceRungId>();
+    if (seat.inventory) for (const d of seat.inventory.rungs) rungIds.add(d.rung);
+    for (const r of seat.trust.keys()) rungIds.add(r);
+    return [...rungIds].map((rung) => {
+      const evd = this.latestByRung(seat, rung);
+      return {
+        rung,
+        sourceId: evd?.sourceId ?? `${seat.inventory?.adapterId ?? "undeclared"}:${rung}`,
+        trust: this.rungTrust(seat, rung),
+        lastEvidenceAt: evd?.observedAt ?? null,
+      };
+    });
+  }
+
+  /** Recompute the arbitrated state. Debounce: a sampling-decided working→idle
+   *  transition holds until the stated consecutive idle observations or the hard cap;
+   *  an authoritative turn boundary (hooks/self-report idle) or idle chrome publishes
+   *  instantly. Chosen against our 1Hz/3s cadence: the 3s silence window already
+   *  absorbs sub-3s lulls; the 2-tick arbitration debounce absorbs the
+   *  window-boundary flap. */
+  private arbitrate(seat: SeatLadderState): void {
+    this.checkContradiction(seat);
+    const candidate = this.rawCandidate(seat);
+    let nextActivity: ActivityValue = candidate?.activity ?? "unknown";
+    let decidedBy: EvidenceRungId | null = candidate?.rung ?? null;
+
+    // Debounce bookkeeping runs on the SAMPLING OBSERVATIONS themselves (regardless of
+    // which rung currently decides): consecutive idle observations while the arbitrated
+    // state is working accumulate; any sampling `working` resets. The hold applies only
+    // when sampling would DECIDE the flip — an authoritative turn boundary (hooks or
+    // self-report idle) or idle chrome bypasses instantly.
+    const nowMs = this.now().getTime();
+    const sampling = this.latestByRung(seat, "window-sampling");
+    if (seat.arbitrated.activity === "working" && sampling?.activity === "idle-at-prompt") {
+      if (!seat.pendingIdle) {
+        seat.pendingIdle = { sinceMs: nowMs, ticks: 1, lastSeq: sampling.seq };
+      } else if (sampling.seq > seat.pendingIdle.lastSeq) {
+        seat.pendingIdle.ticks += 1;
+        seat.pendingIdle.lastSeq = sampling.seq;
+      }
+    } else if (sampling?.activity === "working" || seat.arbitrated.activity !== "working") {
+      seat.pendingIdle = null;
+    }
+    if (candidate?.rung === "window-sampling" && candidate.activity === "idle-at-prompt"
+        && seat.arbitrated.activity === "working" && seat.pendingIdle) {
+      const capped = nowMs - seat.pendingIdle.sinceMs >= SAMPLING_IDLE_DEBOUNCE_CAP_MS;
+      if (seat.pendingIdle.ticks < SAMPLING_IDLE_DEBOUNCE_TICKS && !capped) {
+        nextActivity = "working"; // held — the mid-turn lull must not flip the state
+        decidedBy = seat.arbitrated.decidedBy;
+      } else {
+        seat.pendingIdle = null;
+      }
+    }
+
+    const chrome = this.latestByRung(seat, "needs-input-chrome");
+    const needsInput: NeedsInputShape =
+      chrome?.needsInput && this.rungTrust(seat, "needs-input-chrome") === "authoritative"
+        ? chrome.needsInput
+        : { count: 0, reason: null };
+
+    const changed = nextActivity !== seat.arbitrated.activity
+      || needsInput.count !== seat.arbitrated.needsInput.count
+      || needsInput.reason !== seat.arbitrated.needsInput.reason;
+    seat.arbitrated = {
+      ...seat.arbitrated,
+      activity: nextActivity,
+      needsInput,
+      decidedBy,
+      seq: changed ? seat.arbitrated.seq + 1 : seat.arbitrated.seq,
+      changedAt: changed ? this.now().toISOString() : seat.arbitrated.changedAt,
+      rungs: this.rungsView(seat),
+    };
+    if (changed) this.resolveWaiters(seat);
+  }
+
+  private resolveWaiters(seat: SeatLadderState): void {
+    const ready = seat.waiters.filter((w) => seat.arbitrated.seq > w.afterSeq);
+    seat.waiters = seat.waiters.filter((w) => seat.arbitrated.seq <= w.afterSeq);
+    for (const w of ready) {
+      clearTimeout(w.timer);
+      w.resolve(seat.arbitrated);
+    }
+  }
+}
+
+interface SeatWaiter {
+  afterSeq: number;
+  resolve: (s: ArbitratedSeatState | null) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+interface NeedsInputShape {
+  count: number;
+  reason: string | null;
+}
+
+interface SeatLadderState {
+  sessionName: string;
+  inventory: AdapterRungInventory | null;
+  sources: Map<string, ActivityEvidence>;
+  trust: Map<EvidenceRungId, RungTrust>;
+  promotion: Map<EvidenceRungId, { agreements: number; firstAgreementAtMs: number | null }>;
+  contradictionSinceMs: number | null;
+  pendingIdle: { sinceMs: number; ticks: number; lastSeq: number } | null;
+  waiters: SeatWaiter[];
+  arbitrated: ArbitratedSeatState;
 }
 
 // S19 arbitration constants — chosen against OUR 1Hz poll / 3s silence window (the SPEC
