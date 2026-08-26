@@ -6,6 +6,7 @@ import {
   type ResolvedPolicyAttachment,
 } from "./permission-policy/policy-ref.js";
 import type { RigRepository } from "./rig-repository.js";
+import { checkRunningNameGuard, makeRunningSessionCounter } from "./running-name-guard.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { NodeLauncher } from "./node-launcher.js";
@@ -71,6 +72,16 @@ export class RigInstantiator {
     if (!validation.valid) {
       return { ok: false, code: "validation_failed", errors: validation.errors };
     }
+
+    // 1b. S5b running-name guard (OPR.0.5.4.11) — the ONE guard shared by every
+    // instantiator create path, before any preflight/create/launch spend. A
+    // RUNNING same-name rig gets the teaching refusal (preflight's blunt
+    // name-exists check downstream still owns the all-stopped case on this path).
+    const nameGuard = checkRunningNameGuard({
+      findRigsByName: (n) => this.rigRepo.findRigsByName(n),
+      countRunningSessions: makeRunningSessionCounter(this.db),
+    }, spec.name);
+    if (!nameGuard.ok) return nameGuard;
 
     // 2. Preflight
     const preflightResult = await this.preflight.check(spec);
@@ -351,7 +362,10 @@ export type MaterializeOutcome =
   | { ok: false; code: "preflight_failed"; errors: string[]; warnings: string[] }
   | { ok: false; code: "target_rig_not_found"; message: string }
   | { ok: false; code: "materialize_conflict"; message: string }
-  | { ok: false; code: "materialize_error"; message: string };
+  | { ok: false; code: "materialize_error"; message: string }
+  // S5b (OPR.0.5.4.11) — running-name guard refusal on the CREATE branch only
+  // (expand/add_member pass targetRigId and are never guarded here).
+  | { ok: false; code: "rig_name_running"; message: string; runningRig: { id: string; name: string; runningSessionCount: number } };
 
 export interface LaunchMaterializedNodeResult {
   logicalId: string;
@@ -548,6 +562,17 @@ export class PodRigInstantiator {
   ): Promise<MaterializeOutcome> {
     const persistedEvents: Array<ReturnType<EventBus["persistWithinTransaction"]>> = [];
     const nodeResults: Array<{ logicalId: string; status: "materialized" }> = [];
+
+    // S5b running-name guard (OPR.0.5.4.11) — CREATE branch only: an expansion
+    // (targetRigId) adds to an existing rig and never mints a name, so the
+    // guard must not fire there.
+    if (!opts?.targetRigId) {
+      const nameGuard = checkRunningNameGuard({
+        findRigsByName: (n) => this.deps.rigRepo.findRigsByName(n),
+        countRunningSessions: makeRunningSessionCounter(this.db),
+      }, rigSpec.name);
+      if (!nameGuard.ok) return nameGuard;
+    }
 
     try {
       let materializedRigId = opts?.targetRigId ?? "";
@@ -1056,6 +1081,16 @@ export class PodRigInstantiator {
     } catch (err) {
       return { ok: false, code: "validation_failed", errors: [(err as Error).message] };
     }
+
+    // 1b. S5b running-name guard (OPR.0.5.4.11) — THE rig-up path (the 08-26
+    // duplicate specimen's path). Fires before preflight/create/launch: a
+    // RUNNING same-name rig refuses with the teaching error and spends nothing;
+    // all-stopped generations pass through (name reuse unchanged).
+    const nameGuard = checkRunningNameGuard({
+      findRigsByName: (n) => this.deps.rigRepo.findRigsByName(n),
+      countRunningSessions: makeRunningSessionCounter(this.db),
+    }, rigSpec.name);
+    if (!nameGuard.ok) return nameGuard;
 
     // 2. Preflight
     const preflight = await rigPreflight({ rigSpecYaml, rigRoot, cwdOverride: opts?.cwdOverride, fsOps: this.deps.fsOps, exec: this.deps.exec, claudeActivityAssets: this.deps.claudeActivityAssets });

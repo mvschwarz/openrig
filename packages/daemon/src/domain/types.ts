@@ -1164,6 +1164,11 @@ export type InstantiateOutcome =
   | { ok: false; code: "instantiate_error"; message: string }
   | { ok: false; code: "cycle_error"; message: string }
   | { ok: false; code: "service_boot_failed"; message: string }
+  // S5b (OPR.0.5.4.11) — the running-name guard refusal: a same-name rig is
+  // RUNNING, so instantiation refuses before any create/launch. The message
+  // teaches the running rig's identity and the supported alternatives.
+  // (Additive variant per orch-lead territory ruling on row r054-s5b-build.)
+  | { ok: false; code: "rig_name_running"; message: string; runningRig: { id: string; name: string; runningSessionCount: number } }
   // OPR.0.3.2.CT (conveyor-trust-minimal-fix):
   // When every launched node reaches a recoverable attention_required
   // state (e.g., workspace-trust prompt), do NOT tear the rig down.
