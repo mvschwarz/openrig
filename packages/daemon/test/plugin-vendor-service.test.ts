@@ -2,7 +2,7 @@
 // (vendoring + auto-fetch with 404-tolerant fallback).
 //
 // Per IMPL-PRD §2.5 + DESIGN.md §5.5 + orch-lead 2026-05-10:
-//   - vendored copy is source of truth at v0
+//   - vendored copy seeds an absent install; manifest version decides upgrades
 //   - auto-fetch tolerates 404 + falls back to vendored
 //   - repo (github.com/mvschwarz/openrig-plugins) currently empty (LICENSE only)
 //   - 5s network timeout per IMPL-PRD §2.5
@@ -10,8 +10,7 @@
 //
 // Service responsibilities (HG-2.3, HG-2.4, HG-2.5):
 //   1. ensureVendored(): copy from packages/daemon/assets/plugins/<name>/
-//      to ~/.openrig/plugins/<name>/ on first launch (idempotent: hash-skip
-//      if already vendored at same content)
+//      to ~/.openrig/plugins/<name>/ when absent or strictly newer
 //   2. attemptAutoFetch(): try fetch from github.com/mvschwarz/openrig-plugins;
 //      tolerate 404/network/timeout; log outcome; never throw
 //   3. ensureLatest(): orchestrates ensureVendored + attemptAutoFetch
@@ -92,6 +91,73 @@ describe("PluginVendorService — vendoring (HG-2.3)", () => {
     expect(Object.values(writeCounts).reduce((a, b) => a + b, 0)).toBe(0);
   });
 
+  it("does not let an older bundled plugin overwrite a newer installed plugin", async () => {
+    const installedSkill = "/home/test/.openrig/plugins/openrig-core/skills/openrig-skills/SKILL.md";
+    const fs = mockFs({
+      ...VENDORED_OPENRIG_CORE,
+      "/home/test/.openrig/plugins/openrig-core/.claude-plugin/plugin.json": '{"name":"openrig-core","version":"0.2.0"}',
+      [installedSkill]: "# newer installed canon",
+    });
+    const logger = vi.fn();
+    const svc = new PluginVendorService({
+      vendoredAssetsDir: "/asset-root",
+      userPluginsDir: "/home/test/.openrig/plugins",
+      fs,
+      httpClient: vi.fn().mockResolvedValue({ ok: false, status: 404 }),
+      logger,
+    });
+
+    await svc.ensureVendored("openrig-core");
+
+    expect(fs._store[installedSkill]).toBe("# newer installed canon");
+    expect(fs._store["/home/test/.openrig/plugins/openrig-core/.claude-plugin/plugin.json"]).toContain('"0.2.0"');
+    expect(logger).toHaveBeenCalledWith(expect.stringMatching(/not newer.*unchanged/i));
+  });
+
+  it("does not replace different installed bytes at the same plugin version", async () => {
+    const installedSkill = "/home/test/.openrig/plugins/openrig-core/skills/openrig-skills/SKILL.md";
+    const fs = mockFs({
+      ...VENDORED_OPENRIG_CORE,
+      "/home/test/.openrig/plugins/openrig-core/.claude-plugin/plugin.json": '{"name":"openrig-core","version":"0.1.0"}',
+      [installedSkill]: "# same-version installed authority",
+    });
+    const svc = new PluginVendorService({
+      vendoredAssetsDir: "/asset-root",
+      userPluginsDir: "/home/test/.openrig/plugins",
+      fs,
+      httpClient: vi.fn().mockResolvedValue({ ok: false, status: 404 }),
+      logger: vi.fn(),
+    });
+
+    await svc.ensureVendored("openrig-core");
+
+    expect(fs._store[installedSkill]).toBe("# same-version installed authority");
+  });
+
+  it("upgrades an older installed plugin only when the bundled manifest version is newer", async () => {
+    const source = {
+      ...VENDORED_OPENRIG_CORE,
+      "/asset-root/openrig-core/.claude-plugin/plugin.json": '{"name":"openrig-core","version":"0.2.0"}',
+      "/asset-root/openrig-core/.codex-plugin/plugin.json": '{"name":"openrig-core","version":"0.2.0"}',
+      "/asset-root/openrig-core/skills/openrig-skills/SKILL.md": "# bundled 0.2.0",
+      "/home/test/.openrig/plugins/openrig-core/.claude-plugin/plugin.json": '{"name":"openrig-core","version":"0.1.0"}',
+      "/home/test/.openrig/plugins/openrig-core/skills/openrig-skills/SKILL.md": "# installed 0.1.0",
+    };
+    const fs = mockFs(source);
+    const svc = new PluginVendorService({
+      vendoredAssetsDir: "/asset-root",
+      userPluginsDir: "/home/test/.openrig/plugins",
+      fs,
+      httpClient: vi.fn().mockResolvedValue({ ok: false, status: 404 }),
+      logger: vi.fn(),
+    });
+
+    await svc.ensureVendored("openrig-core");
+
+    expect(fs._store["/home/test/.openrig/plugins/openrig-core/skills/openrig-skills/SKILL.md"]).toBe("# bundled 0.2.0");
+    expect(fs._store["/home/test/.openrig/plugins/openrig-core/.claude-plugin/plugin.json"]).toContain('"0.2.0"');
+  });
+
   it("ensureVendored skips silently when vendored asset doesn't exist (no source to copy)", async () => {
     const fs = mockFs({});
     const svc = new PluginVendorService({
@@ -124,6 +190,76 @@ describe("PluginVendorService — vendoring (HG-2.3)", () => {
 
     expect(fs._store["/home/test/.claude/skills/openrig-skills/SKILL.md"]).toBe("# openrig-skills index");
     expect(fs._store["/home/test/.agents/skills/openrig-skills/SKILL.md"]).toBe("# openrig-skills index");
+  });
+
+  it("does not overwrite a pre-existing unversioned global skill target", async () => {
+    const fs = mockFs({
+      ...VENDORED_OPENRIG_CORE,
+      "/home/test/.openrig/plugins/openrig-core/.claude-plugin/plugin.json": '{"name":"openrig-core","version":"0.1.0"}',
+      "/home/test/.openrig/plugins/openrig-core/skills/openrig-skills/SKILL.md": "# bundled older",
+      "/home/test/.agents/skills/openrig-skills/SKILL.md": "# externally managed newer canon",
+    });
+    const logger = vi.fn();
+    const svc = new PluginVendorService({
+      vendoredAssetsDir: "/asset-root",
+      userPluginsDir: "/home/test/.openrig/plugins",
+      fs,
+      httpClient: vi.fn().mockResolvedValue({ ok: false, status: 404 }),
+      logger,
+    });
+
+    svc.ensureSkillGlobally("openrig-core", "openrig-skills", ["/home/test/.agents/skills"]);
+
+    expect(fs._store["/home/test/.agents/skills/openrig-skills/SKILL.md"]).toBe("# externally managed newer canon");
+    expect(logger).toHaveBeenCalledWith(expect.stringMatching(/unversioned\/external authority.*unchanged/i));
+  });
+
+  it("projects globally only when the bundled plugin version is newer than the target marker", async () => {
+    const marker = "/home/test/.agents/skills/openrig-skills/.openrig-vendor-version";
+    const skill = "/home/test/.agents/skills/openrig-skills/SKILL.md";
+    const fs = mockFs({
+      ...VENDORED_OPENRIG_CORE,
+      "/home/test/.openrig/plugins/openrig-core/.claude-plugin/plugin.json": '{"name":"openrig-core","version":"0.2.0"}',
+      "/home/test/.openrig/plugins/openrig-core/skills/openrig-skills/SKILL.md": "# bundled 0.2.0",
+      [marker]: "0.1.0\n",
+      [skill]: "# projected 0.1.0",
+    });
+    const svc = new PluginVendorService({
+      vendoredAssetsDir: "/asset-root",
+      userPluginsDir: "/home/test/.openrig/plugins",
+      fs,
+      httpClient: vi.fn().mockResolvedValue({ ok: false, status: 404 }),
+      logger: vi.fn(),
+    });
+
+    svc.ensureSkillGlobally("openrig-core", "openrig-skills", ["/home/test/.agents/skills"]);
+
+    expect(fs._store[skill]).toBe("# bundled 0.2.0");
+    expect(fs._store[marker]).toBe("0.2.0\n");
+  });
+
+  it("does not overwrite an equal or newer globally projected skill", async () => {
+    const marker = "/home/test/.agents/skills/openrig-skills/.openrig-vendor-version";
+    const skill = "/home/test/.agents/skills/openrig-skills/SKILL.md";
+    const fs = mockFs({
+      ...VENDORED_OPENRIG_CORE,
+      "/home/test/.openrig/plugins/openrig-core/.claude-plugin/plugin.json": '{"name":"openrig-core","version":"0.1.0"}',
+      "/home/test/.openrig/plugins/openrig-core/skills/openrig-skills/SKILL.md": "# bundled 0.1.0",
+      [marker]: "0.2.0\n",
+      [skill]: "# projected 0.2.0",
+    });
+    const svc = new PluginVendorService({
+      vendoredAssetsDir: "/asset-root",
+      userPluginsDir: "/home/test/.openrig/plugins",
+      fs,
+      httpClient: vi.fn().mockResolvedValue({ ok: false, status: 404 }),
+      logger: vi.fn(),
+    });
+
+    svc.ensureSkillGlobally("openrig-core", "openrig-skills", ["/home/test/.agents/skills"]);
+
+    expect(fs._store[skill]).toBe("# projected 0.2.0");
+    expect(fs._store[marker]).toBe("0.2.0\n");
   });
 
   it("fails loudly when the required global seed is missing from the vendored plugin", async () => {

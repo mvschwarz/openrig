@@ -3,17 +3,15 @@
 // Per plugin-primitive Phase 3a slice 3.2 (IMPL-PRD §2.5 + DESIGN.md §5.5).
 //
 // Responsibilities:
-//   1. ensureVendored(name): copy from packages/daemon/assets/plugins/<name>/
-//      to ~/.openrig/plugins/<name>/ on first launch (similar to how
-//      ~/.openrig/reference/ docs are copied today). Idempotent: hash-skip
-//      when content already matches.
+//   1. ensureVendored(name): seed packages/daemon/assets/plugins/<name>/ into
+//      ~/.openrig/plugins/<name>/ when absent, or advance an older manifest
+//      version. Equal/newer installed bytes retain authority.
 //   2. attemptAutoFetch(name): try to fetch latest from
 //      github.com/mvschwarz/openrig-plugins. Tolerates 404, network errors,
 //      and timeouts silently per orch direction 2026-05-10 (vendored is
 //      always the fallback). Logs outcome for operator observability.
-//   3. ensureLatest(name): orchestrates ensureVendored first, then
-//      attemptAutoFetch. The vendored copy is ALWAYS available even if
-//      the fetch fails for any reason.
+//   3. ensureLatest(name): resolves local vendored/installed authority first,
+//      then attempts auto-fetch. A local copy remains if fetch fails.
 //
 // Design notes:
 //   - All fs ops + httpClient are injectable (testable without real
@@ -59,6 +57,25 @@ export interface PluginVendorServiceDeps {
 
 const DEFAULT_TIMEOUT_MS = 5000;
 const REPO_BASE = "https://github.com/mvschwarz/openrig-plugins";
+const PLUGIN_MANIFESTS = [".claude-plugin/plugin.json", ".codex-plugin/plugin.json"] as const;
+const GLOBAL_VENDOR_VERSION = ".openrig-vendor-version";
+
+function parseNumericVersion(raw: string, source: string): number[] {
+  const value = raw.trim();
+  if (!/^\d+(?:\.\d+){2}$/.test(value)) {
+    throw new Error(`[plugin-vendor] invalid version '${value}' at ${source}; expected numeric x.y.z authority`);
+  }
+  return value.split(".").map(Number);
+}
+
+function compareVersions(a: string, b: string): number {
+  const left = parseNumericVersion(a, "source version");
+  const right = parseNumericVersion(b, "target version");
+  for (let i = 0; i < 3; i++) {
+    if (left[i] !== right[i]) return left[i]! < right[i]! ? -1 : 1;
+  }
+  return 0;
+}
 
 export class PluginVendorService {
   private vendoredAssetsDir: string;
@@ -75,10 +92,39 @@ export class PluginVendorService {
     this.logger = deps.logger ?? (() => {});
   }
 
+  /** One plugin version across both harness manifests. Divergence is an
+   * authority error: choosing either copy would make the other runtime lie. */
+  private pluginVersion(pluginDir: string): string {
+    const versions = PLUGIN_MANIFESTS
+      .map((rel) => nodePath.join(pluginDir, rel))
+      .filter((path) => this.fs.exists(path))
+      .map((path) => {
+        let parsed: { version?: unknown };
+        try {
+          parsed = JSON.parse(this.fs.readFile(path)) as { version?: unknown };
+        } catch {
+          throw new Error(`[plugin-vendor] invalid plugin manifest at ${path}`);
+        }
+        if (typeof parsed.version !== "string") {
+          throw new Error(`[plugin-vendor] plugin manifest at ${path} has no string version`);
+        }
+        parseNumericVersion(parsed.version, path);
+        return parsed.version;
+      });
+    if (versions.length === 0) {
+      throw new Error(`[plugin-vendor] no plugin manifest found under ${pluginDir}`);
+    }
+    if (versions.some((version) => version !== versions[0])) {
+      throw new Error(`[plugin-vendor] plugin manifests disagree under ${pluginDir}: ${versions.join(", ")}`);
+    }
+    return versions[0]!;
+  }
+
   /**
-   * Copy the vendored asset tree at <vendoredAssetsDir>/<pluginName>/ to the
-   * user plugin dir <userPluginsDir>/<pluginName>/ on first launch.
-   * Idempotent: hash-skip when source + dest content matches per file.
+   * Seed the vendored asset tree at <vendoredAssetsDir>/<pluginName>/ into the
+   * user plugin dir <userPluginsDir>/<pluginName> when absent, or advance it
+   * only when the bundled manifest version is strictly newer. Equal versions
+   * reconcile mode only on byte-identical files.
    * No-op when the vendored asset doesn't exist (e.g. plugin not bundled).
    */
   async ensureVendored(pluginName: string): Promise<void> {
@@ -88,6 +134,38 @@ export class PluginVendorService {
     if (!this.fs.exists(sourceDir)) {
       this.logger(`[plugin-vendor] no vendored asset for "${pluginName}" at ${sourceDir}; skipping`);
       return;
+    }
+
+    const sourceVersion = this.pluginVersion(sourceDir);
+    if (this.fs.exists(targetDir)) {
+      const hasTargetManifest = PLUGIN_MANIFESTS.some((rel) => this.fs.exists(nodePath.join(targetDir, rel)));
+      if (!hasTargetManifest) {
+        this.logger(`[plugin-vendor] existing plugin '${pluginName}' has no version authority at ${targetDir}; leaving it unchanged`);
+        return;
+      }
+      const targetVersion = this.pluginVersion(targetDir);
+      const order = compareVersions(sourceVersion, targetVersion);
+      if (order < 0) {
+        this.logger(`[plugin-vendor] bundled '${pluginName}' ${sourceVersion} is not newer than installed ${targetVersion}; leaving installed bytes unchanged`);
+        return;
+      }
+      if (order === 0) {
+        // Equal versions make the installed bytes authoritative. Still repair
+        // mode on byte-identical paths: this is metadata reconciliation, not a
+        // rollback, and preserves the established executable-helper repair.
+        for (const relPath of this.fs.listFiles(sourceDir)) {
+          const srcPath = nodePath.join(sourceDir, relPath);
+          const destPath = nodePath.join(targetDir, relPath);
+          if (
+            this.fs.exists(destPath) &&
+            hashContent(this.fs.readFile(destPath)) === hashContent(this.fs.readFile(srcPath))
+          ) {
+            this.preserveMode(srcPath, destPath);
+          }
+        }
+        this.logger(`[plugin-vendor] bundled '${pluginName}' ${sourceVersion} equals installed ${targetVersion}; leaving installed bytes unchanged`);
+        return;
+      }
     }
 
     this.fs.mkdirp(targetDir);
@@ -142,9 +220,23 @@ export class PluginVendorService {
       );
     }
 
+    const sourceVersion = this.pluginVersion(nodePath.join(this.userPluginsDir, pluginName));
     const files = this.fs.listFiles(sourceDir);
     for (const root of globalSkillRoots) {
       const targetDir = nodePath.join(root, skillName);
+      const versionMarker = nodePath.join(targetDir, GLOBAL_VENDOR_VERSION);
+      if (this.fs.exists(targetDir)) {
+        if (!this.fs.exists(versionMarker)) {
+          this.logger(`[plugin-vendor] global skill '${skillName}' at ${targetDir} is unversioned/external authority; leaving it unchanged`);
+          continue;
+        }
+        const targetVersion = this.fs.readFile(versionMarker).trim();
+        parseNumericVersion(targetVersion, versionMarker);
+        if (compareVersions(sourceVersion, targetVersion) <= 0) {
+          this.logger(`[plugin-vendor] global skill '${skillName}' ${targetVersion} is equal/newer than bundled ${sourceVersion}; leaving it unchanged`);
+          continue;
+        }
+      }
       this.fs.mkdirp(targetDir);
       for (const relPath of files) {
         const srcPath = nodePath.join(sourceDir, relPath);
@@ -161,6 +253,7 @@ export class PluginVendorService {
         this.fs.writeFile(destPath, content);
         this.preserveMode(srcPath, destPath);
       }
+      this.fs.writeFile(versionMarker, `${sourceVersion}\n`);
     }
   }
 
@@ -197,8 +290,8 @@ export class PluginVendorService {
 
   /**
    * Orchestrate vendored-first then fetch-attempt.
-   * The vendored copy lands FIRST so it's always the fallback even if
-   * the fetch path fails for any reason.
+   * Local vendored/installed authority resolves first so a usable local copy
+   * remains even if the fetch path fails for any reason.
    */
   async ensureLatest(pluginName: string): Promise<void> {
     await this.ensureVendored(pluginName);

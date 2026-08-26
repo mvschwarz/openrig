@@ -90,6 +90,12 @@ function assertSafeInstallRef(ref: string): void {
   }
 }
 
+function assertSafeTopologySegment(kind: "rig" | "seat", value: string): void {
+  if (value === "." || value === ".." || !SAFE_REF_SEGMENT.test(value)) {
+    throw new Error(`unsafe ${kind} segment '${value}' — topology addresses require one bounded path segment`);
+  }
+}
+
 function assertTreeHasNoSymlinks(root: string): void {
   const stack = [root];
   while (stack.length > 0) {
@@ -656,10 +662,15 @@ Examples:
         const content = readFileSync(opts.file, "utf-8");
         const store = new ConfigStore();
         const topologyRoot = String(store.resolveWithSource("topology.root").value);
-        const seatDir = join(topologyRoot, "rigs", opts.rig, "seats", opts.seat);
-        if (!existsSync(seatDir)) {
-          throw new Error(`seat directory ${seatDir} does not exist — check --rig/--seat against the topology tree (topology.root=${topologyRoot}).`);
+        assertSafeTopologySegment("rig", opts.rig);
+        assertSafeTopologySegment("seat", opts.seat);
+        const rigDir = join(topologyRoot, "rigs", opts.rig);
+        if (!existsSync(rigDir)) {
+          throw new Error(`rig directory ${rigDir} does not exist — check --rig against the topology tree (topology.root=${topologyRoot}).`);
         }
+        const seatDir = join(topologyRoot, "rigs", opts.rig, "seats", opts.seat);
+        assertDestinationNamespaceContained(join(topologyRoot, "rigs"), `${opts.rig}/seats/${opts.seat}/RECAP.md`);
+        mkdirSync(seatDir, { recursive: true });
         for (const f of validateRecapContract(content)) {
           console.error(f.kind === "no-decisions-section"
             ? "ADVISORY no-decisions-section: the authoring contract asks for decisions WITH rationale — conclusions alone are the lossy handoff shape."

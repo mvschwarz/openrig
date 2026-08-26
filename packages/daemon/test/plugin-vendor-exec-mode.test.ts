@@ -37,10 +37,16 @@ const httpClient = async () => ({ ok: false, status: 404 });
 const perm = (p: string) => fs.statSync(p).mode & 0o777;
 
 function seedAssets(root: string) {
+  const claudeManifest = nodePath.join(root, "openrig-core", ".claude-plugin", "plugin.json");
+  const codexManifest = nodePath.join(root, "openrig-core", ".codex-plugin", "plugin.json");
   const skillDir = nodePath.join(root, "openrig-core", "skills", "compaction-restore", "scripts");
   fs.mkdirSync(skillDir, { recursive: true });
+  fs.mkdirSync(nodePath.dirname(claudeManifest), { recursive: true });
+  fs.mkdirSync(nodePath.dirname(codexManifest), { recursive: true });
   const hook = nodePath.join(skillDir, "precompact-hook.mjs");
   const skillMd = nodePath.join(root, "openrig-core", "skills", "compaction-restore", "SKILL.md");
+  fs.writeFileSync(claudeManifest, '{"name":"openrig-core","version":"0.1.0"}\n');
+  fs.writeFileSync(codexManifest, '{"name":"openrig-core","version":"0.1.0"}\n');
   fs.writeFileSync(hook, "#!/usr/bin/env node\nconsole.log('hook');\n");
   fs.writeFileSync(skillMd, "# compaction-restore\n");
   fs.chmodSync(hook, 0o755);
@@ -72,10 +78,11 @@ describe("PluginVendorService preserves executable mode during vendor staging (Q
     const userPlugins = nodePath.join(base, "home", "plugins");
     const svc = new PluginVendorService({ vendoredAssetsDir: assets, userPluginsDir: userPlugins, fs: realVendorFs(), httpClient });
 
-    // Pre-stage a byte-identical copy with the WRONG (0644) mode — the exact QA state.
+    await svc.ensureVendored("openrig-core");
+
+    // Leave the equal-version installed bytes intact but reproduce the exact
+    // QA state: a byte-identical executable helper carrying the WRONG mode.
     const outHook = nodePath.join(userPlugins, "openrig-core", rel.hookRel);
-    fs.mkdirSync(nodePath.dirname(outHook), { recursive: true });
-    fs.copyFileSync(nodePath.join(assets, "openrig-core", rel.hookRel), outHook);
     fs.chmodSync(outHook, 0o644);
     expect(perm(outHook)).toBe(0o644);
 
@@ -83,5 +90,59 @@ describe("PluginVendorService preserves executable mode during vendor staging (Q
 
     // Content unchanged (write skipped) but mode reconciled to the source 0755.
     expect(perm(outHook)).toBe(0o755);
+  });
+
+  it("leaves a symlinked unversioned global canon byte-for-byte unchanged", async () => {
+    const base = fs.mkdtempSync(nodePath.join(os.tmpdir(), "vendor-global-authority-"));
+    const assets = nodePath.join(base, "assets", "plugins");
+    seedAssets(assets);
+    const userPlugins = nodePath.join(base, "home", "plugins");
+    const logs: string[] = [];
+    const svc = new PluginVendorService({
+      vendoredAssetsDir: assets,
+      userPluginsDir: userPlugins,
+      fs: realVendorFs(),
+      httpClient,
+      logger: (...args) => logs.push(args.map(String).join(" ")),
+    });
+    await svc.ensureVendored("openrig-core");
+
+    const canonDir = nodePath.join(base, "shared-canon", "compaction-restore");
+    const canonSkill = nodePath.join(canonDir, "SKILL.md");
+    const globalRoot = nodePath.join(base, "home", ".agents", "skills");
+    fs.mkdirSync(canonDir, { recursive: true });
+    fs.mkdirSync(globalRoot, { recursive: true });
+    fs.writeFileSync(canonSkill, "# newer shared canon\n");
+    fs.symlinkSync(canonDir, nodePath.join(globalRoot, "compaction-restore"));
+
+    svc.ensureSkillGlobally("openrig-core", "compaction-restore", [globalRoot]);
+
+    expect(fs.readFileSync(canonSkill, "utf-8")).toBe("# newer shared canon\n");
+    expect(fs.existsSync(nodePath.join(canonDir, ".openrig-vendor-version"))).toBe(false);
+    expect(logs.join("\n")).toMatch(/unversioned\/external authority.*unchanged/i);
+  });
+
+  it("updates a real marked global projection only when its source version is newer", async () => {
+    const base = fs.mkdtempSync(nodePath.join(os.tmpdir(), "vendor-global-upgrade-"));
+    const assets = nodePath.join(base, "assets", "plugins");
+    seedAssets(assets);
+    const userPlugins = nodePath.join(base, "home", "plugins");
+    const globalRoot = nodePath.join(base, "home", ".agents", "skills");
+    const targetDir = nodePath.join(globalRoot, "compaction-restore");
+    fs.mkdirSync(targetDir, { recursive: true });
+    fs.writeFileSync(nodePath.join(targetDir, "SKILL.md"), "# projected 0.0.1\n");
+    fs.writeFileSync(nodePath.join(targetDir, ".openrig-vendor-version"), "0.0.1\n");
+    const svc = new PluginVendorService({
+      vendoredAssetsDir: assets,
+      userPluginsDir: userPlugins,
+      fs: realVendorFs(),
+      httpClient,
+    });
+    await svc.ensureVendored("openrig-core");
+
+    svc.ensureSkillGlobally("openrig-core", "compaction-restore", [globalRoot]);
+
+    expect(fs.readFileSync(nodePath.join(targetDir, "SKILL.md"), "utf-8")).toBe("# compaction-restore\n");
+    expect(fs.readFileSync(nodePath.join(targetDir, ".openrig-vendor-version"), "utf-8")).toBe("0.1.0\n");
   });
 });
