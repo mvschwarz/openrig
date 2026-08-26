@@ -14,7 +14,8 @@ import { execFileSync } from "node:child_process";
 import { Command } from "commander";
 
 import { scopeCommand } from "../src/commands/scope.js";
-import { renderImplementationPrdTemplate, renderSliceProofTemplate, renderSliceTemplate } from "../src/lib/scope/templates.js";
+import { readFrontmatter } from "../src/lib/scope/scope-fs.js";
+import { renderSliceProofTemplate, renderSliceTemplate } from "../src/lib/scope/templates.js";
 import { MISSION_TEMPLATE_KINDS, SLICE_TEMPLATE_KINDS } from "../src/lib/scope/types.js";
 import { renderMissionTemplate } from "../src/lib/scope/templates.js";
 
@@ -94,6 +95,12 @@ describe("OPR.0.4.4.23 convention scaffold — exhaustive over SliceTemplateKind
   it("every SliceTemplateKind template emits the three convention sections + the SSOT pointer", () => {
     for (const kind of SLICE_TEMPLATE_KINDS) {
       const rendered = renderSliceTemplate(kind, RENDER_OPTS);
+      const specPath = path.join(mktemp(), "SPEC.md");
+      fs.writeFileSync(specPath, rendered, "utf8");
+      const frontmatter = readFrontmatter(specPath);
+      fs.rmSync(path.dirname(specPath), { recursive: true, force: true });
+      expect(frontmatter.intent, `template kind "${kind}" has no frontmatter intent`).toBe(RENDER_OPTS.title);
+      expect(frontmatter.depends_on, `template kind "${kind}" has no sibling-ordering edge list`).toEqual([]);
       for (const section of CONVENTION_SECTIONS) {
         expect(rendered, `template kind "${kind}" is missing "${section}"`).toContain(section);
       }
@@ -142,56 +149,106 @@ describe("OPR.0.4.4.23 convention scaffold — exhaustive over SliceTemplateKind
     }
   });
 
-  it("the IMPLEMENTATION-PRD skeleton carries the sections + the elastic-middle note", () => {
-    const rendered = renderImplementationPrdTemplate(RENDER_OPTS);
-    for (const section of CONVENTION_SECTIONS) {
-      expect(rendered).toContain(section);
-    }
-    expect(rendered).toContain("ELASTIC MIDDLE");
-    expect(rendered).toContain("may BE the whole PRD");
-    expect(rendered).toContain(SSOT_POINTER);
-  });
-
-  it("mission templates carry the convention pointer + SOP reference (missions are not slice projections)", () => {
+  it("mission templates carry intent + depends_on frontmatter and the convention pointers", () => {
     for (const kind of MISSION_TEMPLATE_KINDS) {
       const rendered = renderMissionTemplate(kind, RENDER_OPTS);
+      const specPath = path.join(mktemp(), "SPEC.md");
+      fs.writeFileSync(specPath, rendered, "utf8");
+      const frontmatter = readFrontmatter(specPath);
+      fs.rmSync(path.dirname(specPath), { recursive: true, force: true });
+      expect(frontmatter.intent, `mission template "${kind}" has no frontmatter intent`).toBe(RENDER_OPTS.title);
+      expect(frontmatter.depends_on, `mission template "${kind}" has no sibling-ordering edge list`).toEqual([]);
       expect(rendered, `mission template "${kind}" is missing the SSOT pointer`).toContain(SSOT_POINTER);
       expect(rendered, `mission template "${kind}" is missing the mission-slice-sop pointer`).toContain("mission-slice-sop");
     }
   });
 });
 
-describe("OPR.0.4.4.23 slice create — every kind lands the full convention artifact set on disk", () => {
+describe("scope create — the mode-neutral SPEC/NOTES convention lands on disk", () => {
   let substrate: { root: string; missionsRoot: string };
 
   beforeEach(() => { substrate = seedSubstrate(); });
   afterEach(() => { fs.rmSync(substrate.root, { recursive: true, force: true }); });
 
-  it("scaffolds README sections + IMPLEMENTATION-PRD.md + proof/ + PROOF.md for each SliceTemplateKind", async () => {
+  it("scaffolds exactly SPEC.md + PROGRESS.md + PROOF.md + proof/ for each SliceTemplateKind", async () => {
     for (const kind of SLICE_TEMPLATE_KINDS) {
       const r = await run(
-        ["slice", "create", "release-0.4.4", `probe-${kind}`, "--template", kind, "--json"],
+        ["slice", "create", "release-0.4.4", `probe-${kind}`, "--template", kind, "--intent", `Intent for ${kind}`, "--json"],
         substrate.missionsRoot,
       );
       expect(r.exitCode, `slice create failed for kind "${kind}"`).toBe(0);
       const slicePath = JSON.parse(r.stdout).slice.path as string;
 
-      const readme = fs.readFileSync(path.join(slicePath, "SPEC.md"), "utf8");
+      expect(fs.readdirSync(slicePath).sort()).toEqual(["PROGRESS.md", "PROOF.md", "SPEC.md", "proof"]);
+
+      const specPath = path.join(slicePath, "SPEC.md");
+      const readme = fs.readFileSync(specPath, "utf8");
+      expect(readFrontmatter(specPath)).toMatchObject({ intent: `Intent for ${kind}`, depends_on: [] });
       for (const section of CONVENTION_SECTIONS) {
         expect(readme, `created README for kind "${kind}" is missing "${section}"`).toContain(section);
       }
 
-      const prdPath = path.join(slicePath, "IMPLEMENTATION-PRD.md");
-      expect(fs.existsSync(prdPath), `kind "${kind}" did not scaffold IMPLEMENTATION-PRD.md`).toBe(true);
-      const prd = fs.readFileSync(prdPath, "utf8");
-      for (const section of CONVENTION_SECTIONS) {
-        expect(prd, `created PRD for kind "${kind}" is missing "${section}"`).toContain(section);
-      }
-      expect(prd, `created PRD for kind "${kind}" is missing the elastic-middle note`).toContain("ELASTIC MIDDLE");
-
       expect(fs.statSync(path.join(slicePath, "proof")).isDirectory(), `kind "${kind}" did not scaffold proof/`).toBe(true);
       expect(fs.existsSync(path.join(slicePath, "PROOF.md")), `kind "${kind}" did not scaffold PROOF.md`).toBe(true);
+      expect(fs.readFileSync(path.join(slicePath, "PROGRESS.md"), "utf8")).toContain("## Acceptance checklist");
+      expect(fs.readFileSync(path.join(slicePath, "PROOF.md"), "utf8")).toContain("SPEC.md");
     }
+  });
+
+  it("scaffolds exactly intent-bearing SPEC.md + NOTES.md + PROGRESS.md + slices/ for each MissionTemplateKind", async () => {
+    for (const kind of MISSION_TEMPLATE_KINDS) {
+      const name = `probe-${kind}`;
+      const r = await run(
+        ["mission", "create", name, "--template", kind, "--intent", `Intent for ${kind}`, "--json"],
+        substrate.missionsRoot,
+      );
+      expect(r.exitCode, `mission create failed for kind "${kind}"`).toBe(0);
+      const missionPath = JSON.parse(r.stdout).mission.path as string;
+      expect(fs.readdirSync(missionPath).sort()).toEqual(["NOTES.md", "PROGRESS.md", "SPEC.md", "slices"]);
+      expect(readFrontmatter(path.join(missionPath, "SPEC.md"))).toMatchObject({
+        intent: `Intent for ${kind}`,
+        depends_on: [],
+      });
+    }
+  });
+});
+
+describe("scope mission graph — depends_on is an advisory sibling-ordering edge", () => {
+  let substrate: { root: string; missionsRoot: string };
+
+  beforeEach(() => {
+    substrate = seedSubstrate();
+    const missionPath = path.join(substrate.missionsRoot, "release-0.4.4");
+    const writeSlice = (bucket: "slices" | "closed", name: string, id: string, dependsOn: string[]) => {
+      const slicePath = path.join(missionPath, bucket, name);
+      fs.mkdirSync(slicePath, { recursive: true });
+      fs.writeFileSync(path.join(slicePath, "SPEC.md"), [
+        "---",
+        `id: ${id}`,
+        `intent: ${name}`,
+        `depends_on: [${dependsOn.join(", ")}]`,
+        "---",
+        `# ${name}`,
+      ].join("\n"), "utf8");
+    };
+    writeSlice("closed", "01-foundation", "OPR.0.4.4.1", []);
+    writeSlice("slices", "02-ready", "OPR.0.4.4.2", ["OPR.0.4.4.1"]);
+    writeSlice("slices", "03-waiting", "OPR.0.4.4.3", ["OPR.0.4.4.4"]);
+    writeSlice("slices", "04-active-dependency", "OPR.0.4.4.4", []);
+    writeSlice("slices", "05-stale-edge", "OPR.0.4.4.5", ["OPR.0.4.4.999", "OPR.0.5.0.1"]);
+  });
+  afterEach(() => { fs.rmSync(substrate.root, { recursive: true, force: true }); });
+
+  it("returns a deterministic ready set, ignores stale/cross-parent edges with advisories, and leaves absent edges compatible", async () => {
+    const r = await run(["mission", "graph", "release-0.4.4", "--json"], substrate.missionsRoot);
+    expect(r.exitCode).toBe(0);
+    const graph = JSON.parse(r.stdout).graph;
+    expect(graph.ready).toEqual(["OPR.0.4.4.2", "OPR.0.4.4.4", "OPR.0.4.4.5"]);
+    expect(graph.waiting).toEqual([{ id: "OPR.0.4.4.3", on: ["OPR.0.4.4.4"] }]);
+    expect(graph.advisories).toEqual([
+      expect.objectContaining({ id: "OPR.0.4.4.5", dependency: "OPR.0.4.4.999", kind: "missing_sibling" }),
+      expect.objectContaining({ id: "OPR.0.4.4.5", dependency: "OPR.0.5.0.1", kind: "outside_parent" }),
+    ]);
   });
 });
 
@@ -209,13 +266,11 @@ describe("OPR.0.4.4.23 teaching surfaces name the drop verb", () => {
     }
   });
 
-  it("the IMPLEMENTATION-PRD skeleton and the PROOF.md template name rig proof add and --media", () => {
-    const prd = renderImplementationPrdTemplate(RENDER_OPTS);
-    expect(prd).toContain("rig proof add");
-    expect(prd).toContain("--media");
+  it("the PROOF.md template names rig proof add and --media and binds to SPEC.md", () => {
     const proof = renderSliceProofTemplate({ id: RENDER_OPTS.id, title: RENDER_OPTS.title });
     expect(proof).toContain("rig proof add");
     expect(proof).toContain("--media");
+    expect(proof).toContain("SPEC.md");
     expect(proof).toContain("Hand-placing files without a drop");
   });
 });

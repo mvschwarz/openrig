@@ -84,8 +84,11 @@ force unless assigned.**
 
 Each slice directory carries:
 
-- **`README.md`** (or the slice body) opening with the three convention
-  sections, in this order and with these exact headings:
+- **`SPEC.md`** — the one authored node file. Its frontmatter carries
+  `intent:` and may carry `depends_on:` as a list of sibling work-node IDs;
+  `depends_on` orders siblings and is never followed by the path-only context
+  trace. The body opens with the three convention sections, in this order and
+  with these exact headings:
   - **`## Intent`** — the recorded intent, verbatim. The UI projects this
     text as the INTENT section.
   - **`## Mini-requirements`** — the concise, one-glance requirement tier
@@ -93,11 +96,17 @@ Each slice directory carries:
     approval starts here.
   - **`## Proof contract`** — a checkbox list of promised deliverables (see
     §3). The UI's DELIVERED section pairs each item with its proof.
-- **`IMPLEMENTATION-PRD.md`** — the full PRD. It OPENS with the
-  mini-requirements; everything between intent and proof is **elastic**
-  (see §7 — for a small slice the mini-requirements may BE the whole PRD).
+- **`PROGRESS.md`** — the slice's acceptance checklist: the durable
+  mission/slice-level to-do checked at acceptance. In-process steps stay in
+  the working agent's own todo tool.
+- **`PROOF.md`** — the retained proof summary, explicitly paired to the
+  `SPEC.md` proof contract.
 - **`proof/`** — the proof-artifact directory. Curated canonical evidence
   lands here via `rig proof` with valid C1 headers (§5).
+
+Legacy `README.md`, `IMPLEMENTATION-PRD.md`, and pre-convention trees remain
+readable indefinitely. New scaffolds do not create or mirror them, and repair
+is additive: it never deletes, renames, or rewrites legacy bytes.
 
 The three sections project into the UI's one review structure: a vertical
 stack of **INTENT → PLAN → DELIVERED**. A slice missing a section still
@@ -188,7 +197,7 @@ Do not over-engineer this. The entire goal is an accurate story for whoever read
 The SDLC has exactly three fixed capture points: **intent** → a
 **proportional structured requirement** → **proof**. Everything between is
 elastic. For a small slice (a bug fix, a research note), the
-mini-requirements may BE the whole PRD — the convention sections must be
+mini-requirements may BE the whole specification — the convention sections must be
 present so the slice projects, but their contents scale to the work. Gates
 are losslessness checks on the decompression from intent to delivery, not
 paperwork. Scaffolding emits the sections; it must never mint ceremony.
@@ -203,9 +212,11 @@ reported as unknown, not failure.
 ## A7. Where the knowledge lives (the four pointers)
 
 - **This document** — the SSOT.
-- **Scaffold**: `rig scope slice create` emits the convention sections +
-  `proof/` + an `IMPLEMENTATION-PRD.md` skeleton for every template kind;
-  `rig scope mission create` emits the convention pointer.
+- **Scaffold**: `rig scope slice create` emits `SPEC.md` + `PROGRESS.md` +
+  `PROOF.md` + `proof/` for every template kind; `rig scope mission create`
+  emits an intent-bearing `SPEC.md` + `NOTES.md`. Core emits only this
+  mode-neutral shape; mode plugins add richer material through the extension
+  seam rather than teaching core a mode.
 - **Skills — TWO, matching this document's two parts**: `mission-slice-sop`
   teaches **Part A**, the light default; `mission-slice-intent-proof-sop`
   teaches **Part B**, the assigned overlay. Assigned-only, never self-selected.
@@ -264,9 +275,9 @@ Two deliberate stamps, both written by the SAME shipped verb
 (`rig scope slice approve`, one daemon-side write path: frontmatter stamp +
 append-only audit row land together):
 
-- **Plan-lock:** `rig scope slice approve <slice> --scope spec` — "the PRD
-  matches my intent; THIS artifact set is what gets built." Pins the locked
-  artifact set (spec/PRD/mockups) out of everything else in the folder.
+- **Plan-lock:** `rig scope slice approve <slice> --scope spec` — "the spec
+  matches my intent; THIS artifact set is what gets built." Pins `SPEC.md`
+  (and planned mockups, when present) out of everything else in the folder.
 - **Proof-lock:** `rig scope slice approve <slice> --scope delivery`
   (the default scope) — the terminal "this is done" sign-off; fires the
   freeze.

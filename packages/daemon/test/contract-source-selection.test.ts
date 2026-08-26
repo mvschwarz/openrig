@@ -25,8 +25,14 @@ describe("selectProofContractBody — the ONE selection home (scaffold-placehold
     expect(sel.body).toBe(SPEC_BODY);
   });
 
-  it("an authored PRD stays canonical over everything (the first-face ruling)", () => {
+  it("SPEC is canonical even when a legacy authored PRD remains beside it", () => {
     const sel = selectProofContractBody({ prdBody: AUTHORED_PRD_BODY, specBody: SPEC_BODY, readmeBody: "- [ ] readme item" });
+    expect(sel.source).toBe("spec");
+    expect(sel.body).toBe(SPEC_BODY);
+  });
+
+  it("an authored PRD remains a readable legacy fallback when SPEC is absent", () => {
+    const sel = selectProofContractBody({ prdBody: AUTHORED_PRD_BODY, specBody: null, readmeBody: "- [ ] readme item" });
     expect(sel.source).toBe("prd");
   });
 

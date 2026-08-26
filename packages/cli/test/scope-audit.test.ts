@@ -405,6 +405,21 @@ describe("OPR.0.4.4.23 convention-section advisories", () => {
     };
   }
 
+  it("accepts the one-SPEC convention without requiring a retired PRD or duplicate body intent", () => {
+    const result = classifyScopeItem(sliceInput({
+      readmeFrontmatterRaw: "id: OPR.0.4.4.5\nstatus: building\nintent: the recorded intent\ndepends_on: []",
+      readmeContent: [
+        "# Slice 05 — Probe",
+        "## Mini-requirements", "1. one",
+        "## Proof contract", "- [ ] a deliverable — captured",
+      ].join("\n"),
+      implementationPrdExists: false,
+      implementationPrdContent: null,
+    }));
+    expect(result.findings.some((f) => f.kind === "missing_implementation_prd")).toBe(false);
+    expect(result.findings.some((f) => f.kind === "missing_intent_section")).toBe(false);
+  });
+
   it("inert when no content context is provided (undefined inputs)", () => {
     const result = classifyScopeItem(sliceInput({}));
     expect(result.findings.some((f) =>
