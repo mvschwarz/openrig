@@ -8,6 +8,62 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.5.4] - 2026-08-26
+
+**Status**: release candidate; **"the honesty release"** - commands distinguish absence, uncertainty, staging, and completed effects instead of collapsing them into reassuring output. **v0.5.4 contains v0.5.3 in full** - one reconciled lineage, no product divergence.
+
+### Summary For Installing Agents
+
+- **Package version**: bumps from `0.5.3`.
+- **Migrations**: none in this release. Migration head stays at 071 (matching 0.5.3).
+- **Node engines**: unchanged.
+- **API surface**: existing commands remain; new seat lifecycle verbs are `rig seat set-model`, `rig seat stop`, and `rig seat clean`.
+
+### Headline
+
+**Trust what the command says, including when the answer is uncertain.** Transport probes now classify found, absent, and indeterminate outcomes through one resolution path. Delivery verification distinguishes text staged in a prompt from text consumed by an agent. Queue, refocus, preview, import, and lifecycle surfaces preserve the state and refusal that actually occurred.
+
+### What you can now do
+
+#### Resolve transport failures without inventing a missing seat
+
+Send, capture, nudge, and walk use one classified session probe. A transport blip is reported as indeterminate rather than `Session not found`, while genuine absence remains explicit. Recovery output names what was checked and what action is available.
+
+#### Tell staged delivery from consumed delivery
+
+`rig send --verify` classifies the pane effect instead of equating typed text with a completed turn. Single-recipient, fan-out, and JSON results derive from the same outcome model, so a staged prompt is not reported as consumed.
+
+#### Deliver unknown-sender messages honestly
+
+An unattributable message is delivered with an unknown-sender notice instead of being refused. Where a reply path exists, the sender is told that attribution was unavailable and should follow up with a signed message.
+
+#### Manage one seat through supported lifecycle verbs
+
+`rig seat set-model`, `rig seat stop`, and `rig seat clean` provide audited, single-seat operations. Stop and clean refuse when any affected session is live or indeterminate; set-model is proven against a real managed successor rather than only stored configuration.
+
+#### Trust state-preserving queue and refocus behavior
+
+Adding a queue note no longer changes terminal state. Envless owned queue listing refuses instead of silently changing scope. Refocus keeps due state until delivery is visible. Bounded previews say they are bounded.
+
+#### Refuse duplicate running rig names at every import path
+
+Create and import routes now share one running-name guard. A duplicate running name returns a teaching `409 rig_name_running` refusal instead of spending resources or degrading into a generic server error.
+
+### Stability and authority fixes
+
+- Startup boundaries are hermetic across scratch/test environments.
+- The bundled `openrig-core` plugin has an explicit advancing authority, so an older runtime cannot silently overwrite newer installed guidance.
+- Stale lab refocus registrations are retired.
+- CLI and daemon refusal codes survive route and import boundaries without fallback noise.
+
+### Known Limitations (0.5.5 backlog)
+
+- **Writer-layer disk cap** - the one-time VM cleanup recovered headroom, but the permanent cap at the layer that writes snapshots is unfinished.
+- **Repair/approve frontmatter rewrite** - the known rewrite defect remains outside this release.
+- **Observation pipeline performance** - shared pane/process observation remains measurement-gated; 0.5.4 does not claim the broader polling/census redesign.
+
+---
+
 ## [0.5.3] - 2026-08-26
 
 **Status**: shipped; **"the context release"** — pull exact context by address instead of reading files. **v0.5.3 contains v0.5.2 in full** — one lineage, no divergence.
