@@ -102,11 +102,10 @@ export const GENERIC_SCAFFOLD_ACCEPTANCE: readonly string[] = [
  *  while compose/audit fell back to README with no SPEC path — evidence
  *  recorded against one contract, displayed against another. Selection order
  *  over SECTION BODIES (each reader keeps its own extractor):
- *    authored PRD  -> "prd"    (canonical, the first-face ruling)
- *    pristine PRD  -> authored SPEC -> "spec"
- *                  -> else authored README -> "readme"
- *                  -> else null (nothing authored; never the placeholder)
- *    absent PRD    -> authored SPEC -> authored README -> null
+ *    authored SPEC -> "spec" (the one current contract)
+ *    absent/pristine SPEC -> authored PRD -> "prd" (legacy fallback)
+ *                         -> authored README -> "readme" (older fallback)
+ *                         -> null
  *  "Authored" = present and NOT isPristineScaffoldSection. Consumers parse
  *  items from the SELECTED source's body with their shipped parsers. */
 export function selectProofContractBody(args: {
@@ -115,8 +114,8 @@ export function selectProofContractBody(args: {
   readmeBody: string | null;
 }): { source: "prd" | "spec" | "readme" | null; body: string | null } {
   const authored = (b: string | null): boolean => b !== null && !isPristineScaffoldSection(b);
-  if (authored(args.prdBody)) return { source: "prd", body: args.prdBody };
   if (authored(args.specBody)) return { source: "spec", body: args.specBody };
+  if (authored(args.prdBody)) return { source: "prd", body: args.prdBody };
   if (authored(args.readmeBody)) return { source: "readme", body: args.readmeBody };
   return { source: null, body: null };
 }

@@ -1,7 +1,7 @@
 // OPR.0.4.4.23 — the scaffold emits the SDLC convention sections for EVERY
 // SliceTemplateKind (the Rev-2 exhaustive contract): a slice that doesn't
 // carry `## Intent` / `## Mini-requirements` / `## Proof contract` doesn't
-// project in the Living Notes UI, whatever its template kind. The tests
+// expose the one scope convention, whatever its template kind. The tests
 // ENUMERATE the exported kind set, so a future kind added to
 // SLICE_TEMPLATE_KINDS fails here until its template carries the sections.
 // Conventions SSOT: docs/reference/sdlc-conventions.md.
@@ -185,12 +185,12 @@ describe("scope create — the mode-neutral SPEC/NOTES convention lands on disk"
       const readme = fs.readFileSync(specPath, "utf8");
       expect(readFrontmatter(specPath)).toMatchObject({ intent: `Intent for ${kind}`, depends_on: [] });
       for (const section of CONVENTION_SECTIONS) {
-        expect(readme, `created README for kind "${kind}" is missing "${section}"`).toContain(section);
+        expect(readme, `created SPEC for kind "${kind}" is missing "${section}"`).toContain(section);
       }
 
       expect(fs.statSync(path.join(slicePath, "proof")).isDirectory(), `kind "${kind}" did not scaffold proof/`).toBe(true);
       expect(fs.existsSync(path.join(slicePath, "PROOF.md")), `kind "${kind}" did not scaffold PROOF.md`).toBe(true);
-      expect(fs.readFileSync(path.join(slicePath, "PROGRESS.md"), "utf8")).toContain("## Acceptance checklist");
+      expect(fs.readFileSync(path.join(slicePath, "PROGRESS.md"), "utf8")).toContain("## Acceptance");
       expect(fs.readFileSync(path.join(slicePath, "PROOF.md"), "utf8")).toContain("SPEC.md");
     }
   });

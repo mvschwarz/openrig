@@ -233,7 +233,12 @@ describe("config routes (User Settings v0)", () => {
     expect(existsSync(join(root, "artifacts", "README.md"))).toBe(true);
     expect(existsSync(join(root, "evidence", "README.md"))).toBe(true);
     expect(existsSync(join(root, "dogfood-evidence", "README.md"))).toBe(true);
-    expect(existsSync(join(root, "missions", "getting-started", "slices", "first-conveyor-run", "README.md"))).toBe(true);
+    expect(existsSync(join(root, "missions", "getting-started", "SPEC.md"))).toBe(true);
+    expect(existsSync(join(root, "missions", "getting-started", "NOTES.md"))).toBe(true);
+    expect(existsSync(join(root, "missions", "getting-started", "slices", "first-conveyor-run", "SPEC.md"))).toBe(true);
+    expect(existsSync(join(root, "missions", "getting-started", "slices", "first-conveyor-run", "PROGRESS.md"))).toBe(true);
+    expect(existsSync(join(root, "missions", "getting-started", "slices", "first-conveyor-run", "PROOF.md"))).toBe(true);
+    expect(existsSync(join(root, "missions", "getting-started", "slices", "first-conveyor-run", "IMPLEMENTATION-PRD.md"))).toBe(false);
     expect(existsSync(join(root, "STEERING.md"))).toBe(true);
   });
 

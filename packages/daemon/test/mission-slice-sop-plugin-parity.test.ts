@@ -56,7 +56,8 @@ const REQUIRED_TRIGGERS = [
   "rig proof",
   "PROGRESS.md",
   "PROOF.md",
-  "MISSION_NOTES.md",
+  "SPEC.md",
+  "NOTES.md",
   "handoff",
   "compaction",
 ];
@@ -88,4 +89,42 @@ describe("aa922842 mission-slice-sop description budget + trigger preservation",
     ).toEqual([]);
   });
 
+  it("retrieval teaches only the current authored filenames", () => {
+    const description = readDescription(PLUGIN_COPY);
+    expect(description).toContain("SPEC.md");
+    expect(description).toContain("NOTES.md");
+    expect(description).not.toContain("IMPLEMENTATION-PRD.md");
+    expect(description).not.toContain("MISSION_NOTES.md");
+    expect(description).not.toContain("MISSION_BRIEF.md");
+  });
+
+});
+
+describe("scope convention teaching-site sweep", () => {
+  const read = (rel: string) => fs.readFileSync(path.join(repoRoot, rel), "utf8");
+
+  it("startup twins point to current work-node surfaces and remain byte-identical", () => {
+    const spec = read("packages/daemon/specs/agents/shared/skills/core/agent-startup-and-context-ingestion/SKILL.md");
+    const canonical = read("skills/_canonical/core/agent-startup-and-context-ingestion/SKILL.md");
+    expect(spec).toBe(canonical);
+    expect(spec).toContain("SPEC.md");
+    expect(spec).toContain("NOTES.md");
+    expect(spec).not.toContain("MISSION_BRIEF.md");
+    expect(spec).not.toContain("MISSION_NOTES.md");
+  });
+
+  it("requirements writer emits a work-node SPEC with advisory sibling dependencies", () => {
+    const skill = read("packages/daemon/specs/agents/shared/skills/pm/requirements-writer/SKILL.md");
+    expect(skill).toContain("intent:");
+    expect(skill).toMatch(/depends_on:[\s\S]*sibling[\s-]*build[\s-]*order/i);
+    expect(skill).toContain("## Mini-requirements");
+    expect(skill).toContain("## Proof contract");
+  });
+
+  it("continuity teachers no longer prescribe altitude-specific mission notes", () => {
+    const retire = read("packages/daemon/assets/plugins/openrig-core/skills/retiring-and-inheriting-a-seat/SKILL.md");
+    const advisor = read("packages/daemon/specs/rigs/launch/kernel/agents/advisor/lead/guidance/role.md");
+    expect(retire).not.toContain("MISSION_NOTES");
+    expect(advisor).not.toContain("MISSION_NOTES");
+  });
 });

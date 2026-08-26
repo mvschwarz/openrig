@@ -157,7 +157,7 @@ describe("scope-audit classifier", () => {
     expect(result.findings.some((f) => f.kind === "missing_progress")).toBe(true);
   });
 
-  it("mission without MISSION_BRIEF.md emits medium missing_mission_brief at the artifact path", () => {
+  it("mission without retired MISSION_BRIEF.md emits no brief finding", () => {
     const result = classifyScopeItem(makeInput({
       level: "mission",
       readmeFrontmatterRaw: "id: OPR.0.4.1",
@@ -166,15 +166,10 @@ describe("scope-audit classifier", () => {
       missionBriefPath: "/workspace/missions/release-0.4.1/MISSION_BRIEF.md",
     }));
     const finding = result.findings.find((f) => f.kind === "missing_mission_brief");
-    expect(finding).toMatchObject({
-      severity: "medium",
-      path: "/workspace/missions/release-0.4.1/MISSION_BRIEF.md",
-    });
-    expect(finding?.message).toMatch(/MISSION_BRIEF\.md/);
-    expect(finding?.remediation).toMatch(/# <Mission name> — Brief/);
+    expect(finding).toBeUndefined();
   });
 
-  it("mission with malformed MISSION_BRIEF.md emits medium malformed_mission_brief", () => {
+  it("mission with malformed legacy MISSION_BRIEF.md still emits no brief finding", () => {
     const result = classifyScopeItem(makeInput({
       level: "mission",
       readmeFrontmatterRaw: "id: OPR.0.4.1",
@@ -184,9 +179,7 @@ describe("scope-audit classifier", () => {
       missionBriefContent: "# release — Brief\n\n## Progress\n## What & why\n",
     }));
     const finding = result.findings.find((f) => f.kind === "malformed_mission_brief");
-    expect(finding?.severity).toBe("medium");
-    expect(finding?.path).toBe("/workspace/missions/release-0.4.1/MISSION_BRIEF.md");
-    expect(finding?.message).toMatch(/canonical MISSION_BRIEF\.md section order/);
+    expect(finding).toBeUndefined();
   });
 
   it("mission with locked slice-16 MISSION_BRIEF.md schema does not emit brief findings", () => {
@@ -213,20 +206,20 @@ describe("scope-audit classifier", () => {
     )).toHaveLength(0);
   });
 
-  it("mission without MISSION_NOTES.md emits low missing_mission_notes", () => {
+  it("mission without NOTES.md emits low missing_mission_notes", () => {
     const result = classifyScopeItem(makeInput({
       level: "mission",
       readmeFrontmatterRaw: "id: OPR.0.4.1",
       progressFileExists: true,
       missionNotesExists: false,
-      missionNotesPath: "/workspace/missions/release-0.4.1/MISSION_NOTES.md",
+      missionNotesPath: "/workspace/missions/release-0.4.1/NOTES.md",
     }));
     const finding = result.findings.find((f) => f.kind === "missing_mission_notes");
     expect(finding).toMatchObject({
       severity: "low",
-      path: "/workspace/missions/release-0.4.1/MISSION_NOTES.md",
+      path: "/workspace/missions/release-0.4.1/NOTES.md",
     });
-    expect(finding?.remediation).toMatch(/MISSION_NOTES\.md/);
+    expect(finding?.remediation).toMatch(/NOTES\.md/);
   });
 
   it("done slice with no PROOF.md and no proof packet emits medium missing_proof", () => {

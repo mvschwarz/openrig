@@ -1,5 +1,5 @@
 // Slice-21 FR-5e A1 — `rig config init-workspace` scaffolds
-// MISSION_NOTES.md for each seeded mission so a fresh baseline passes
+// NOTES.md for each seeded mission so a fresh baseline passes
 // doctor check #7 (mission_notes_presence) without manual scope
 // scaffolding.
 //
@@ -36,11 +36,11 @@ afterEach(() => {
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
-describe("FR-5e A1 — init-workspace scaffolds MISSION_NOTES.md", () => {
-  it("writes missions/getting-started/MISSION_NOTES.md alongside README + PROGRESS", () => {
+describe("init-workspace scaffolds current mission notes", () => {
+  it("writes missions/getting-started/NOTES.md alongside SPEC + PROGRESS", () => {
     const result = runInitWorkspace({ configPath });
     const notesFile = result.files.find((f) =>
-      f.relPath === "missions/getting-started/MISSION_NOTES.md");
+      f.relPath === "missions/getting-started/NOTES.md");
     expect(notesFile).toBeDefined();
     expect(notesFile?.created).toBe(true);
     expect(fs.existsSync(notesFile!.absPath)).toBe(true);
@@ -58,12 +58,12 @@ describe("FR-5e A1 — init-workspace scaffolds MISSION_NOTES.md", () => {
 
   // Discriminator-flip: workspaceScaffoldFiles is the canonical
   // file-list used by both CLI init and daemon's
-  // /api/config/init-workspace. Both surfaces need MISSION_NOTES so
+  // /api/config/init-workspace. Both surfaces need NOTES so
   // the daemon-side init (UI Settings → init workspace) lands the
   // same scaffold.
-  it("workspaceScaffoldFiles() emits a MISSION_NOTES.md entry per default mission", () => {
+  it("workspaceScaffoldFiles() emits a NOTES.md entry per default mission", () => {
     const files = workspaceScaffoldFiles();
-    const notesFiles = files.filter((f) => f.relPath.endsWith("/MISSION_NOTES.md"));
+    const notesFiles = files.filter((f) => f.relPath.endsWith("/NOTES.md"));
     // DEFAULT_MISSIONS has one mission (getting-started). When the
     // seed list grows, this discriminator catches the count drift.
     expect(notesFiles.length).toBeGreaterThanOrEqual(1);
@@ -74,12 +74,12 @@ describe("FR-5e A1 — init-workspace scaffolds MISSION_NOTES.md", () => {
     }
   });
 
-  // Discriminator-flip: dry-run should NOT write the MISSION_NOTES
+  // Discriminator-flip: dry-run should NOT write the NOTES
   // file to disk but should report it as "would create".
-  it("dry-run reports MISSION_NOTES.md without writing", () => {
+  it("dry-run reports NOTES.md without writing", () => {
     const result = runInitWorkspace({ configPath, dryRun: true });
     const notesFile = result.files.find((f) =>
-      f.relPath === "missions/getting-started/MISSION_NOTES.md");
+      f.relPath === "missions/getting-started/NOTES.md");
     expect(notesFile).toBeDefined();
     expect(notesFile?.created).toBe(true);
     expect(fs.existsSync(notesFile!.absPath)).toBe(false);
@@ -87,15 +87,15 @@ describe("FR-5e A1 — init-workspace scaffolds MISSION_NOTES.md", () => {
   });
 
   // Discriminator-flip: idempotent re-run without --force does NOT
-  // overwrite the existing MISSION_NOTES. Operators who hand-edit the
+  // overwrite the existing NOTES. Operators who hand-edit the
   // notes shouldn't lose work on a second init.
-  it("re-run without --force skips existing MISSION_NOTES.md", () => {
+  it("re-run without --force skips existing NOTES.md", () => {
     runInitWorkspace({ configPath });
-    const notesPath = path.join(dir, "workspace", "missions", "getting-started", "MISSION_NOTES.md");
+    const notesPath = path.join(dir, "workspace", "missions", "getting-started", "NOTES.md");
     fs.writeFileSync(notesPath, "operator hand-edited content", "utf-8");
     const result = runInitWorkspace({ configPath });
     const notesFile = result.files.find((f) =>
-      f.relPath === "missions/getting-started/MISSION_NOTES.md");
+      f.relPath === "missions/getting-started/NOTES.md");
     expect(notesFile?.created).toBe(false);
     expect(notesFile?.skipped).toBe("exists");
     expect(fs.readFileSync(notesPath, "utf-8")).toBe("operator hand-edited content");

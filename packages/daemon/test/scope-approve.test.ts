@@ -51,7 +51,7 @@ describe("ScopeApproveService (OPR.0.4.4.19 FR-9)", () => {
     missionsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "scope-approve-"));
     sliceDir = path.join(missionsRoot, "release-x", "slices", "19-signal-layer");
     fs.mkdirSync(sliceDir, { recursive: true });
-    readmePath = path.join(sliceDir, "README.md");
+    readmePath = path.join(sliceDir, "SPEC.md");
     fs.writeFileSync(readmePath, "---\nid: OPR.X.19\nstatus: building\n---\n\n# The slice\nbody prose stays intact\n");
   });
 
@@ -97,7 +97,7 @@ describe("ScopeApproveService (OPR.0.4.4.19 FR-9)", () => {
   });
 
   it("one-query lookup by scope target + approver + approval scope returns exactly the matching row", () => {
-    seedAuthoredPRD();
+    seedAuthoredSpec();
     service().approve({ ...baseInput, approvalScope: "spec" });
     service().approve(baseInput);
     // Unrelated action noise.
@@ -126,7 +126,7 @@ describe("ScopeApproveService (OPR.0.4.4.19 FR-9)", () => {
   });
 
   it("STAGED: --scope spec writes approved-spec-by/-at with approval_scope=spec; delivery afterwards is the normal staged sequence, not a re-stamp", () => {
-    seedAuthoredPRD();
+    seedAuthoredSpec();
     service().approve({ ...baseInput, approvalScope: "spec", actorSession: "pm-lead@openrig-pm" });
     let fm = frontmatterOf(readmePath);
     expect(fm["approved-spec-by"]).toBe("pm-lead@openrig-pm");
@@ -200,40 +200,34 @@ describe("ScopeApproveService (OPR.0.4.4.19 FR-9)", () => {
   // writer lands in a SEPARATE Guard-gated GREEN dispatch. Every assertion runs
   // through the shipped ScopeApproveService + gather/compose — no unbuilt-module
   // import. The companion GREEN pins hold pre- AND post-writer (they lock the gate).
-  // Expected shapes authored per §3 derivation (PRD -> selected proof-contract
+  // Expected shapes authored per §3 derivation (SPEC -> selected proof-contract
   // plannedRefs -> intent visuals; normalized-path dedup; escape/N-A excluded).
   // ===================================================================
 
   const specInput = { ...baseInput, approvalScope: "spec" as const, actorSession: "pm-lead@openrig-pm" };
 
   // B14 — spec approvals refuse a contentless derived set, so tests whose premise is
-  // "a normal spec approve succeeds" seed a minimally AUTHORED PRD first.
-  function seedAuthoredPRD(): void {
-    fs.writeFileSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md"), "---\ntitle: prd\n---\n\n# Spec\n\nauthored requirement prose\n");
+  // "a normal spec approve succeeds" seed a minimally authored current SPEC.
+  function seedAuthoredSpec(): void {
+    fs.writeFileSync(readmePath, "---\nid: OPR.X.19\nstatus: building\n---\n\n# Spec\n\nauthored requirement prose\n");
   }
 
   function approveErrCode(fn: () => unknown): string | null {
     try { fn(); return null; } catch (e) { return e instanceof ScopeApproveError ? e.code : String(e); }
   }
   const lockedOf = (p: string) => frontmatterOf(p)["locked-artifacts"] as Array<Record<string, unknown>> | undefined;
-  // The always-pinned PRD spec entry (§3.1) — the EXPECTED spec path even when the PRD is missing/unreadable.
-  const PRD = { name: "Implementation PRD", path: "IMPLEMENTATION-PRD.md", kind: "spec" };
+  const SPEC = { name: "Specification", path: "SPEC.md", kind: "spec" };
 
-  it("RED-1 slice-spec: locked-artifacts = the exact ordered 4-object array (PRD + 2 proof-contract mockups + 1 intent visual) (fails: key absent)", () => {
+  it("slice-spec locks the current SPEC, proof-contract mockups, and intent visual in order", () => {
     fs.writeFileSync(
       readmePath,
-      "---\nid: OPR.X.19\nstatus: building\n---\n\n# The slice\n\n## Intent visual\n\n![the landing](mockups/landing.png)\n\nbody\n",
+      "---\nid: OPR.X.19\nstatus: building\n---\n\n# The slice\n\n## Intent visual\n\n![the landing](mockups/landing.png)\n\n## Proof contract\n\n- [ ] drawer opens ![drawer](mockups/drawer.png)\n- [ ] row hit target ![row](mockups/row.png)\n",
     );
-    fs.writeFileSync(
-      path.join(sliceDir, "IMPLEMENTATION-PRD.md"),
-      "---\ntitle: prd\n---\n\n# Spec\n\n## Proof contract\n\n- [ ] drawer opens ![drawer](mockups/drawer.png)\n- [ ] row hit target ![row](mockups/row.png)\n",
-    );
-    service().approve(specInput); // slice-spec approve succeeds + stamps
+    service().approve(specInput);
     const locked = lockedOf(readmePath);
-    expect(locked).toBeDefined(); // <-- RED: locked-artifacts absent (writer unbuilt)
-    // Full ordered objects: PRD spec -> selected proof-contract plannedRefs (name=item text) -> intent visual (name=path).
+    expect(locked).toBeDefined();
     expect(locked).toEqual([
-      PRD,
+      SPEC,
       { name: "drawer opens", path: "mockups/drawer.png", kind: "mockup" },
       { name: "row hit target", path: "mockups/row.png", kind: "mockup" },
       { name: "mockups/landing.png", path: "mockups/landing.png", kind: "mockup" },
@@ -250,6 +244,8 @@ describe("ScopeApproveService (OPR.0.4.4.19 FR-9)", () => {
         intent: "founder words",
         prd: { proofContract: ["drawer opens ![drawer](mockups/drawer.png)"] },
       });
+      const fixtureDir = path.join(ws.root, "release-y", "slices", "20-plan");
+      fs.renameSync(path.join(fixtureDir, "README.md"), path.join(fixtureDir, "SPEC.md"));
       new ScopeApproveService({ missionsRoot: () => ws.root, actionLog: new MissionControlActionLog(gdb) })
         .approve({ scopeTier: "slice", scopePath: "release-y/slices/20-plan", approvalScope: "spec", actorSession: "pm-lead@openrig-pm" });
       const indexer = new SliceIndexer({ slicesRoot: ws.root, additionalSliceRoots: [], dogfoodEvidenceRoot: null, db: gdb });
@@ -258,56 +254,46 @@ describe("ScopeApproveService (OPR.0.4.4.19 FR-9)", () => {
       expect(composed).not.toBeNull();
       const locked = composed!.plan.lockedArtifacts;
       expect(locked.length).toBeGreaterThan(0); // <-- RED: empty (approve wrote no locked-artifacts)
-      // The intent lives under `## Intent` (not `## Intent visual`), so only PRD + the proof-contract mockup.
-      expect(locked).toEqual([PRD, { name: "drawer opens", path: "mockups/drawer.png", kind: "mockup" }]);
+      // The intent lives under `## Intent` (not `## Intent visual`), so only SPEC + the proof-contract mockup.
+      expect(locked).toEqual([SPEC, { name: "drawer opens", path: "mockups/drawer.png", kind: "mockup" }]);
     } finally {
       gdb.close();
       fs.rmSync(ws.root, { recursive: true, force: true });
     }
   });
 
-  it("RED-3a PRD-only: a slice-spec approve with a PRD but no mockups pins the exact singleton [Implementation PRD] (fails: absent)", () => {
-    fs.writeFileSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md"), "---\ntitle: prd\n---\n\n# Spec\n\nno mockups here\n");
+  it("a current SPEC with no mockups pins the exact singleton SPEC", () => {
+    seedAuthoredSpec();
     service().approve(specInput);
     const locked = lockedOf(readmePath);
-    expect(locked).toBeDefined(); // <-- RED: absent
-    expect(locked).toEqual([PRD]);
+    expect(locked).toEqual([SPEC]);
   });
 
   // B14 — the old Guard #4 "fail-open singleton" behavior is RETIRED for the no-content case:
   // two live locks froze placeholder sets nobody chose. A plan-lock whose derived set is only the
-  // PRD pin, with that file missing/unreadable/scaffold, now refuses with teaching — the stamper
-  // authors the PRD or names the real set via lockedArtifacts.
-  it("B14: missing-PRD singleton REFUSES (plan_lock_contentless) — no stamp, no default set nobody chose", () => {
+  // current SPEC pin, with that file contentless/scaffold, now refuses with teaching.
+  it("B14: contentless SPEC singleton REFUSES (plan_lock_contentless)", () => {
+    fs.writeFileSync(readmePath, "---\nid: OPR.X.19\n---\n\n# Spec\n");
     expect(approveErrCode(() => service().approve(specInput))).toBe("plan_lock_contentless");
-    expect(frontmatterOf(readmePath)["approved-spec-by"]).toBeUndefined(); // nothing was written
+    expect(frontmatterOf(readmePath)["approved-spec-by"]).toBeUndefined();
     expect(lockedOf(readmePath)).toBeUndefined();
   });
 
-  it("B14: unreadable PRD (EISDIR) singleton REFUSES the same way", () => {
-    fs.mkdirSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md")); // deterministic unreadable-as-file (EISDIR)
-    expect(approveErrCode(() => service().approve(specInput))).toBe("plan_lock_contentless");
-    expect(frontmatterOf(readmePath)["approved-spec-by"]).toBeUndefined();
-  });
-
-  it("B14: untouched-scaffold PRD singleton REFUSES (headings, comments, bracket placeholders are not authored content)", () => {
+  it("B14: untouched-scaffold SPEC singleton REFUSES (headings, comments, bracket placeholders are not authored content)", () => {
     fs.writeFileSync(
-      path.join(sliceDir, "IMPLEMENTATION-PRD.md"),
+      readmePath,
       "---\nid: OPR.X.19\nstatus: intent\n---\n\n<!-- ELASTIC MIDDLE guidance -->\n\n# Slice 19\n\n## Intent\n\n[The recorded intent, verbatim.]\n\n## Mini-requirements\n\n1. [The concise one-glance requirement tier.]\n\n## Proof contract\n\n- [ ] [One promised deliverable.]\n",
     );
     expect(approveErrCode(() => service().approve(specInput))).toBe("plan_lock_contentless");
     expect(frontmatterOf(readmePath)["approved-spec-by"]).toBeUndefined();
   });
 
-  it("B14: an EXPLICIT lockedArtifacts set replaces derivation entirely — the slice-14 scenario replayed green (scaffold PRD, desk-ruled PLAN+SPEC set)", () => {
+  it("B14: an explicit lockedArtifacts set replaces derivation entirely", () => {
     fs.writeFileSync(
-      path.join(sliceDir, "IMPLEMENTATION-PRD.md"),
-      "---\nstatus: intent\n---\n\n## Intent\n\n[placeholder]\n",
+      readmePath,
+      "---\nid: OPR.X.19\nstatus: intent\n---\n\n## Intent\n\n[placeholder]\n",
     );
-    // SPEC.md outranks README.md as the stamp target (NODE_FILE_PRECEDENCE), so the
-    // fixture spec carries the id and the stamp lands there — as on the live slice.
     const specPath = path.join(sliceDir, "SPEC.md");
-    fs.writeFileSync(specPath, "---\nid: OPR.X.19\n---\n\nthe real contract\n");
     fs.writeFileSync(path.join(sliceDir, "PLAN-x.md"), "the grounded plan\n");
     service().approve({ ...specInput, lockedArtifacts: ["PLAN-x.md", "SPEC.md"] });
     expect(frontmatterOf(specPath)["approved-spec-by"]).toBe("pm-lead@openrig-pm");
@@ -318,7 +304,7 @@ describe("ScopeApproveService (OPR.0.4.4.19 FR-9)", () => {
   });
 
   it("B14: an explicit set naming a MISSING file refuses (locked_artifact_missing) — a chosen set must name real files", () => {
-    expect(approveErrCode(() => service().approve({ ...specInput, lockedArtifacts: ["SPEC.md"] })))
+    expect(approveErrCode(() => service().approve({ ...specInput, lockedArtifacts: ["PLAN-missing.md"] })))
       .toBe("locked_artifact_missing");
     expect(frontmatterOf(readmePath)["approved-spec-by"]).toBeUndefined();
   });
@@ -331,9 +317,11 @@ describe("ScopeApproveService (OPR.0.4.4.19 FR-9)", () => {
     }
   });
 
-  it("RED-4 README-wins selected-source parity: an authored README proof-contract over a PRISTINE-scaffold PRD yields the exact [PRD, authored README mockup] (fails: absent)", () => {
+  it("legacy README remains approvable and wins over a pristine legacy PRD proof contract", () => {
+    fs.rmSync(readmePath);
+    const legacyReadme = path.join(sliceDir, "README.md");
     fs.writeFileSync(
-      readmePath,
+      legacyReadme,
       "---\nid: OPR.X.19\nstatus: building\n---\n\n# The slice\n\n## Proof contract\n\n- [ ] authored ![authored](mockups/authored.png)\n",
     );
     // PRISTINE-scaffold PRD proof-contract (bracket-wrapped placeholder) -> README wins; the PRD scaffold contributes NOTHING.
@@ -342,9 +330,11 @@ describe("ScopeApproveService (OPR.0.4.4.19 FR-9)", () => {
       "---\ntitle: prd\n---\n\n# Spec\n\n## Proof contract\n\n- [ ] [what will you show]\n",
     );
     service().approve(specInput);
-    const locked = lockedOf(readmePath);
-    expect(locked).toBeDefined(); // <-- RED: absent
-    expect(locked).toEqual([PRD, { name: "authored", path: "mockups/authored.png", kind: "mockup" }]);
+    const locked = lockedOf(legacyReadme);
+    expect(locked).toEqual([
+      { name: "Legacy specification", path: "README.md", kind: "spec" },
+      { name: "authored", path: "mockups/authored.png", kind: "mockup" },
+    ]);
   });
 
   it("RED-5 URL-scheme + escape + absolute reject, N/A-with-image suppress, normalized first-wins dedup, exact order + determinism (fails: absent)", () => {
@@ -352,25 +342,21 @@ describe("ScopeApproveService (OPR.0.4.4.19 FR-9)", () => {
     // Proof contract: normalization-distinct dup (mockups/./d.png then mockups/d.png) -> first-wins name; plus a URL
     // scheme plannedRef, /absolute, and ../escape — all three must be rejected (every locked path is slice-relative).
     const body =
-      "---\nid: OPR.X.19\nstatus: building\n---\n\n# The slice\n\n## Intent visual\n\nN/A ![shouldnotappear](mockups/skip.png)\n";
-    const prd =
-      "---\ntitle: prd\n---\n\n# Spec\n\n## Proof contract\n\n- [ ] alpha ![a](mockups/./d.png)\n- [ ] beta ![b](mockups/d.png)\n- [ ] abs ![c](/absolute.png)\n- [ ] esc ![e](../secret.png)\n- [ ] external ![ext](https://example.invalid/external.png)\n";
+      "---\nid: OPR.X.19\nstatus: building\n---\n\n# The slice\n\n## Intent visual\n\nN/A ![shouldnotappear](mockups/skip.png)\n\n## Proof contract\n\n- [ ] alpha ![a](mockups/./d.png)\n- [ ] beta ![b](mockups/d.png)\n- [ ] abs ![c](/absolute.png)\n- [ ] esc ![e](../secret.png)\n- [ ] external ![ext](https://example.invalid/external.png)\n";
     fs.writeFileSync(readmePath, body);
-    fs.writeFileSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md"), prd);
     service().approve(specInput);
     // A second, INDEPENDENTLY created slice with IDENTICAL derivation input (determinism).
     const dirB = path.join(missionsRoot, "release-x", "slices", "19d-plan");
     fs.mkdirSync(dirB, { recursive: true });
-    const readmeB = path.join(dirB, "README.md");
+    const readmeB = path.join(dirB, "SPEC.md");
     fs.writeFileSync(readmeB, body);
-    fs.writeFileSync(path.join(dirB, "IMPLEMENTATION-PRD.md"), prd);
     service().approve({ ...specInput, scopePath: "release-x/slices/19d-plan" });
 
     const locked = lockedOf(readmePath);
     expect(locked).toBeDefined(); // <-- RED: absent
     // /absolute.png + ../secret.png rejected; N/A section (skip.png) suppressed; mockups/./d.png normalized to
-    // mockups/d.png and first-wins (name "alpha", NOT the deduped "beta"); PRD first.
-    expect(locked).toEqual([PRD, { name: "alpha", path: "mockups/d.png", kind: "mockup" }]);
+    // mockups/d.png and first-wins (name "alpha", NOT the deduped "beta"); SPEC first.
+    expect(locked).toEqual([SPEC, { name: "alpha", path: "mockups/d.png", kind: "mockup" }]);
     expect(lockedOf(readmeB)).toEqual(locked); // determinism: identical input -> identical ordered array
   });
 
@@ -396,21 +382,21 @@ describe("ScopeApproveService (OPR.0.4.4.19 FR-9)", () => {
       readmePath,
       "---\nid: OPR.X.19\nstatus: building\n" +
         "locked-artifacts:\n" +
-        "  - name: Implementation PRD\n    path: IMPLEMENTATION-PRD.md\n    kind: spec\n" +
+        "  - name: Specification\n    path: SPEC.md\n    kind: spec\n" +
         "  - name: drawer opens right\n    path: mockups/drawer.png\n    kind: mockup\n" +
         "  - name: intent shot\n    path: proof/intent.png\n    kind: intent\n" +
         "---\n# s\n",
     );
     service().approve(baseInput); // delivery approve merges the stamp, keeps locked-artifacts untouched
     expect(lockedOf(readmePath)).toEqual([
-      { name: "Implementation PRD", path: "IMPLEMENTATION-PRD.md", kind: "spec" },
+      SPEC,
       { name: "drawer opens right", path: "mockups/drawer.png", kind: "mockup" },
       { name: "intent shot", path: "proof/intent.png", kind: "intent" },
     ]);
   });
 
   it("GREEN gate — a slice-spec audit failure restores the VERBATIM original README and writes zero action rows", () => {
-    seedAuthoredPRD();
+    seedAuthoredSpec();
     const failingLog = { record: () => { throw new Error("disk full"); } } as unknown as MissionControlActionLog;
     const before = fs.readFileSync(readmePath, "utf8");
     expect(() => service({ actionLog: failingLog }).approve(specInput)).toThrow(/no half-stamp/);

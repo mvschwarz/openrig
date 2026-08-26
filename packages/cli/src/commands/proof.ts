@@ -71,7 +71,8 @@ export function validateC1Header(header: Partial<C1Header>): C1ValidationResult 
 
 /**
  * Parse the pinned `## Proof contract` section out of a slice's
- * IMPLEMENTATION-PRD.md (the C7 pinned name; PM-lane authored). Returns the
+ * authored work-node contract (SPEC.md for current work; legacy filenames
+ * remain readable). Returns the
  * promised items (checkbox-item form, one promised item per line), or null
  * when the slice declares no contract (tier-1 degrade — zero noise).
  */
@@ -275,16 +276,15 @@ export function proofCommand(): Command {
           ? null
           : parseProofContract(contractSource === "prd" ? prdDoc! : contractSource === "spec" ? specDoc! : readmeDoc!);
         if (contractItems) contractItems = contractItems.filter((it) => !isScaffoldPlaceholderText(it));
-        if (contractSource !== null && contractSource !== "prd") {
+        if (contractSource !== null && contractSource !== "spec") {
           advisories.push(
-            `contract source: IMPLEMENTATION-PRD.md's ## Proof contract is ${prdDoc === null ? "absent" : "a pristine SCAFFOLD"} — ` +
-              `the ${contractItems?.length ?? 0}-item contract derives from ${contractSource === "spec" ? "SPEC.md" : "README.md"} ` +
-              `(the one-homed selection all readers share). Author the PRD contract to make it canonical.`,
+            `contract source: SPEC.md has no authored ## Proof contract — ` +
+              `the ${contractItems?.length ?? 0}-item contract derives from legacy ${contractSource === "prd" ? "IMPLEMENTATION-PRD.md" : "README.md"}. ` +
+              "Move future contract edits into SPEC.md; the legacy file remains readable.",
           );
-        } else if (contractSource === null && prdDoc !== null && parseProofContract(prdDoc) !== null) {
+        } else if (contractSource === null) {
           advisories.push(
-            "contract source: IMPLEMENTATION-PRD.md's ## Proof contract is a pristine SCAFFOLD and no other document authors one — " +
-              "treated as no declared contract (a placeholder index is never used).",
+            "contract source: no authored SPEC.md proof contract or readable legacy fallback — treated as no declared contract.",
           );
         }
         let coveredItems: string[] = [];

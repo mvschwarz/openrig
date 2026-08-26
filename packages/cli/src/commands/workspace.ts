@@ -148,7 +148,7 @@ export function workspaceCommand(depsOverride?: WorkspaceDeps): Command {
   cmd
     .command("doctor")
     .description(
-      "Run the 8-check workspace-readiness diagnostic against the daemon's resolved workspace. Reports state of workspace root, missions folder, file allowlist, daemon alignment, daemon reload, slice docs, MISSION_NOTES, and SDLC convention sections. Read-only.",
+      "Run the 8-check workspace-readiness diagnostic against the daemon's resolved workspace. Reports state of workspace root, missions folder, file allowlist, daemon alignment, daemon reload, slice docs, mission NOTES, and SDLC convention sections. Read-only.",
     )
     .option(
       "--workspace <path>",

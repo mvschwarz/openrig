@@ -106,7 +106,7 @@ describe("Daemon Lifecycle", () => {
     expect(created.has(path.join("/tmp/openrig-workspace", "artifacts"))).toBe(true);
     expect(created.has(path.join("/tmp/openrig-workspace", "evidence"))).toBe(true);
     expect(written.get(path.join("/tmp/openrig-workspace", "STEERING.md"))).toContain("Run the `conveyor` starter rig.");
-    expect(written.get(path.join("/tmp/openrig-workspace", "missions", "getting-started", "slices", "first-conveyor-run", "README.md")))
+    expect(written.get(path.join("/tmp/openrig-workspace", "missions", "getting-started", "slices", "first-conveyor-run", "SPEC.md")))
       .toContain("First Conveyor Run");
   });
 
@@ -1377,7 +1377,7 @@ describe("ensureWorkspaceScaffold", () => {
     const existing = new Set<string>([
       "/tmp/ws",
       path.join("/tmp/ws", "STEERING.md"),
-      path.join("/tmp/ws", "missions", "getting-started", "slices", "first-conveyor-run", "README.md"),
+      path.join("/tmp/ws", "missions", "getting-started", "slices", "first-conveyor-run", "SPEC.md"),
     ]);
     const deps = mockDeps({
       exists: vi.fn((p: string) => existing.has(p)),
@@ -1389,7 +1389,7 @@ describe("ensureWorkspaceScaffold", () => {
 
     expect(result.rootCreated).toBe(false);
     expect(result.files.find((f) => f.relPath === "STEERING.md")?.skipped).toBe("exists");
-    expect(result.files.find((f) => f.relPath === "missions/getting-started/slices/first-conveyor-run/README.md")?.skipped)
+    expect(result.files.find((f) => f.relPath === "missions/getting-started/slices/first-conveyor-run/SPEC.md")?.skipped)
       .toBe("exists");
     expect(deps.writeFile).not.toHaveBeenCalledWith(
       path.join("/tmp/ws", "STEERING.md"),

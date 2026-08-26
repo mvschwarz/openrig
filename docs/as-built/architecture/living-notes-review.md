@@ -128,8 +128,9 @@ artifacts in `<slice>/proof/`:
   the muted outside-slice branch, never inlined), video by link + poster.
   Exclusive-create through the allowlist-governed atomic write service;
   re-invocation is an idempotent no-op; a failed render never un-approves.
-  The freeze moment also folds the mission brief spine (`brief-spine.ts`)
-  into `MISSION_BRIEF.md`, section-scoped, schema-order-preserving.
+  Legacy missions carrying `MISSION_BRIEF.md` may still receive the
+  section-scoped brief-spine fold; new scaffolds do not create that retired
+  web-UI-era file.
 - **Media serving** for review evidence is ranged on BOTH asset route
   families (iOS-Safari-class players require `206`): `GET /api/files/asset`
   (`routes/files.ts` — single-range parse, `206`/`416`, `Accept-Ranges:

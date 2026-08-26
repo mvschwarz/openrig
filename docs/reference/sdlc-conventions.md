@@ -12,7 +12,7 @@
 
 OpenRig is a software factory the human steers from a high altitude. The human
 records intent; agents turn intent into a plan, the plan into a build, the
-build into proof. The Living Notes UI is a **plain projection of well-formed
+build into proof. The TUI is a **plain projection of well-formed
 markdown on disk** — agents change the files, the UI re-projects. These
 conventions define "well-formed." Everything here is **advisory / fail-open
 for agents**: nothing below blocks a write; the audit records and advises.

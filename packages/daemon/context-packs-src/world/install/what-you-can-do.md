@@ -355,9 +355,9 @@ your circumstances is configuration, and the ones that are not, another agent ca
 - **`rig usage series`** — what a seat's token curve has looked like over time: climbing steadily,
   reset, or stopped reporting entirely. The last one is a signal, not a gap.
 - **`rig tui`** — the interactive view over rigs, pods, seats and specs. **`rig tui commands`**
-  lists everything it can do without launching it. **`rig ui open`** is a browser view of the same
-  territory — experimental and in maintenance mode, so do not diagnose product behaviour from it;
-  check the CLI.
+  lists everything it can do without launching it. **`rig ui open`** is unmaintained, best-effort,
+  and replaced by the TUI, so never diagnose product behaviour from the web UI. The TUI plus Slack
+  are the human surface; the CLI plus terminal are the agent surface.
 - **`rig mcp serve`** — how an agent that speaks MCP rather than shell drives OpenRig, and which
   operations are exposed that way. Relevant the moment a tool you are integrating cannot run a
   shell command.

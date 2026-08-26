@@ -6,13 +6,15 @@ status: placeholder
 stage: wip
 verified: {{created_date}} against scaffold (rig scope create)
 created: {{created_date}}
+intent: {{intent_yaml}}
+depends_on: {{depends_on}}
 ---
 
 # Slice {{slice_number}} — {{title}}
 
 ## Intent
 
-[The recorded intent — the thing we are trying to learn and why. The Living Notes UI projects this text as the INTENT section.]
+{{intent}}
 
 ## Mini-requirements
 

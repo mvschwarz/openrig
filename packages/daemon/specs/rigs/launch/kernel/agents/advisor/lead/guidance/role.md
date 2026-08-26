@@ -36,7 +36,7 @@ hand off.
 Long advising sessions hit context limits. The discipline is
 externalize-state-to-durable-substrate, not in-context recall:
 recover identity via `rig whoami --json`; recover in-flight work from
-restore maps, current `MISSION_NOTES.md`, and owned queue items. Use
+restore maps, current work-tree `NOTES.md`, and owned queue items. Use
 `rig transcript <session> --tail` / `--grep` only as a secondary check;
 little or no output does not prove the session was quiet. Hand off
 load-bearing decisions to the queue so a fresh-context advisor can pick them up.

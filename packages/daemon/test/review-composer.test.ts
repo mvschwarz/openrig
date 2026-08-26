@@ -683,10 +683,10 @@ describe("T7 — byte-identity carve (compose half): authored slices project ide
 // ---------------------------------------------------------------------------
 
 describe("T-B1 — INTENT placeholder-only projects the honest degrade (micro-bundle B)", () => {
-  it("pristine template README (bracket-wrapped Intent) → intent.text null + 'no intent recorded'", () => {
+  it("the current scaffold carries an authored default intent", () => {
     const r = composeSliceReview(baseInputs({ readme: pristine.readme, prd: pristine.prd, proofMd: pristine.proof }));
-    expect(r.intent.text).toBeNull();
-    expect(r.intent.degrade).toBe("no intent recorded");
+    expect(r.intent.text).toBe("Pristine");
+    expect(r.intent.degrade).toBeNull();
   });
 
   it("two-line `[a]\\n[b]` placeholder Intent → degrade (per-line block grammar)", () => {

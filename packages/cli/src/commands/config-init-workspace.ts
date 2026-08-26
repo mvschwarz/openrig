@@ -2,7 +2,7 @@
 //
 // Creates the mission-aware default workspace at ~/.openrig/workspace/ (or a
 // caller-supplied --root). The same scaffold is also used idempotently by
-// daemon startup so a fresh install has a browsable Project workspace before
+// daemon startup so a fresh install has a browsable work tree before
 // the user discovers the explicit command.
 //
 // Behavior:
@@ -19,7 +19,7 @@ import { Command } from "commander";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ConfigStore } from "../config-store.js";
-import { renderMissionBriefTemplate, renderMissionNotesTemplate, renderSliceProofTemplate } from "../lib/scope/templates.js";
+import { renderNotesTemplate, renderSliceProofTemplate } from "../lib/scope/templates.js";
 
 export interface InitWorkspaceOpts {
   root?: string;
@@ -111,7 +111,7 @@ const WORKSPACE_DIRS = [
 function subdirReadmeContent(subdir: string): string {
   switch (subdir) {
     case "missions":
-      return "# missions\n\nProject missions live here. Each mission folder maps to one Project mission in the UI and owns a `slices/` child folder.\n\nExpected shape:\n\n```text\nmissions/<mission-name>/README.md\nmissions/<mission-name>/PROGRESS.md\nmissions/<mission-name>/slices/<slice-name>/README.md\n```\n\nEvery mission and slice README carries a stable dot-ID in its frontmatter (`id: OPR.<ver>[.<n>]`) per the scope-and-versioning convention. Use `rig scope mission create <name>` and `rig scope slice create <mission> <slug>` to mint conformant artifacts; the CLI handles the dot-ID + auto-numbering for you. The folder name is the operator-facing slug; the `id:` is the stable handle that survives renames.\n";
+      return "# missions\n\nMissions live here. Each mission owns a `slices/` child folder and appears in the OpenRig TUI.\n\nExpected shape:\n\n```text\nmissions/<mission-name>/SPEC.md\nmissions/<mission-name>/NOTES.md\nmissions/<mission-name>/PROGRESS.md\nmissions/<mission-name>/slices/<slice-name>/SPEC.md\nmissions/<mission-name>/slices/<slice-name>/PROGRESS.md\nmissions/<mission-name>/slices/<slice-name>/PROOF.md\n```\n\nEvery mission and slice SPEC carries an authored `intent:`, advisory sibling build-order `depends_on:` dot-IDs, and a stable dot-ID (`id: OPR.<ver>[.<n>]`). Use `rig scope mission create <name>` and `rig scope slice create <mission> <slug>` to mint conformant artifacts. Folder names are operator-facing slugs; `id:` is the stable handle that survives renames.\n";
     case "artifacts":
       return "# artifacts\n\nWork products live here: plans, drafts, generated outputs, and other files that a slice may reference before closure.\n";
     case "evidence":
@@ -123,7 +123,7 @@ function subdirReadmeContent(subdir: string): string {
     case "specs":
       return "# specs\n\nWorkspace specs (rig specs / agent specs / workflow specs / context packs / skills). OpenRig's Library browses this directory alongside bundled specs.\n";
     case "dogfood-evidence":
-      return "# dogfood-evidence\n\nProof packets live here. Each proof packet folder is matched to a Project slice by folder-name tokens and may contain markdown, screenshots, videos, traces, and other verification artifacts.\n";
+      return "# dogfood-evidence\n\nProof packets live here. Each proof packet folder is matched to a slice by folder-name tokens and may contain markdown, screenshots, videos, traces, and other verification artifacts.\n";
     default:
       return `# ${subdir}\n`;
   }
@@ -131,16 +131,16 @@ function subdirReadmeContent(subdir: string): string {
 
 const WORKSPACE_README = `# OpenRig Workspace
 
-This workspace is file-backed. The Project UI mirrors this structure:
+This workspace is file-backed. The OpenRig TUI mirrors this structure:
 
-- \`missions/<mission-id>\` becomes a Project mission.
-- \`missions/<mission-id>/slices/<slice-id>\` becomes a Project slice.
-- Queue items should mention or tag the mission id and slice id so Project can attach live work to the right slice.
+- \`missions/<mission-id>\` becomes a TUI mission.
+- \`missions/<mission-id>/slices/<slice-id>\` becomes a TUI slice.
+- Queue items should mention or tag the mission id and slice id so the TUI can attach live work to the right slice.
 - \`artifacts/\` is for work products that a slice needs to keep.
 - \`evidence/\` is for proof notes and verification summaries.
-- \`dogfood-evidence/<proof-packet-id>\` becomes Tests proof when the packet id contains the slice id tokens.
+- \`dogfood-evidence/<proof-packet-id>\` supplies test evidence when the packet id contains the slice id tokens.
 
-Use stable kebab-case names for mission and slice folders. Every mission/slice README also carries a stable dot-ID in its frontmatter (\`id: OPR.<ver>[.<n>]\`) per the \`scope-and-versioning\` convention; mint conformant artifacts via \`rig scope mission create <name>\` and \`rig scope slice create <mission> <slug>\`. Folder names are operator-facing slugs; the \`id:\` is the rename-proof handle.
+Use stable kebab-case names for mission and slice folders. Every mission/slice \`SPEC.md\` carries authored \`intent:\`, advisory sibling build-order \`depends_on:\`, and a stable dot-ID (\`id: OPR.<ver>[.<n>]\`). Mint conformant artifacts via \`rig scope mission create <name>\` and \`rig scope slice create <mission> <slug>\`. Folder names are operator-facing slugs; \`id:\` is the rename-proof handle.
 `;
 
 const STEERING_PLACEHOLDER = `---
@@ -151,14 +151,14 @@ status: placeholder
 # OpenRig Priority Stack
 
 This file is a placeholder created by \`rig config init-workspace\`. Edit it
-to record your top priorities. OpenRig's Steering surface reads this file
-alongside your Project workspace.
+to record your top priorities. The OpenRig TUI reads this file alongside the
+work tree.
 
 ## Top 3
 
 1. Run the \`conveyor\` starter rig.
 2. Move one packet through \`basic-loop\` or \`conveyor\`.
-3. Inspect the Project, Queue, Story, and Tests surfaces.
+3. Inspect the mission, queue, story, and proof surfaces in the TUI.
 
 ## In Motion
 
@@ -175,6 +175,8 @@ id: ${mission.dotId}
 title: ${mission.title}
 status: ${mission.status}
 mission: ${mission.id}
+intent: ${JSON.stringify(mission.objective)}
+depends_on: []
 ---
 
 # ${mission.title}
@@ -183,7 +185,7 @@ ${mission.objective}
 
 ## Slices
 
-${mission.slices.map((slice) => `- [${slice.title}](slices/${slice.id}/README.md)`).join("\n")}
+${mission.slices.map((slice) => `- [${slice.title}](slices/${slice.id}/SPEC.md)`).join("\n")}
 `;
 }
 
@@ -196,7 +198,9 @@ mission: ${mission.id}
 
 # ${mission.title} Progress
 
-- [ ] Keep mission README current.
+## Acceptance
+
+- [ ] Keep mission SPEC current.
 - [ ] Keep active slices queue-backed with mission and slice ids.
 `;
 }
@@ -448,6 +452,8 @@ status: ${slice.status}
 mission: ${mission.id}
 rail-item: ${mission.id}
 slice: ${slice.id}
+intent: ${JSON.stringify(slice.objective)}
+depends_on: []
 ---
 
 ${narrative.readme}`;
@@ -459,6 +465,8 @@ status: ${slice.status}
 mission: ${mission.id}
 rail-item: ${mission.id}
 slice: ${slice.id}
+intent: ${JSON.stringify(slice.objective)}
+depends_on: []
 ---
 
 # ${slice.title}
@@ -473,7 +481,7 @@ ${slice.objective}
 
 ## Proof contract
 
-- [ ] The work is visible in the Project slice — captured (see IMPLEMENTATION-PRD.md).
+- [ ] The work is visible in the Project slice — captured from this SPEC.md.
 
 ## Queue Mapping
 
@@ -504,38 +512,11 @@ slice: ${slice.id}
 
 # ${slice.title} Progress
 
+## Acceptance
+
 - [ ] Define the next concrete packet.
 - [ ] Attach queue work to this slice id.
 - [ ] Capture proof or notes before closing.
-`;
-}
-
-function slicePrd(mission: DefaultMission, slice: DefaultSlice): string {
-  return `---
-title: ${slice.title} Implementation Notes
-status: ${slice.status}
-mission: ${mission.id}
-rail-item: ${mission.id}
-slice: ${slice.id}
----
-
-# ${slice.title} Implementation Notes
-
-## Intent
-
-${slice.objective}
-
-## Mini-requirements
-
-1. The work is visible in the Project slice and its queue items link back to \`${slice.id}\`.
-
-## Proof contract
-
-- [ ] The work is visible in the Project slice — captured.
-- [ ] Queue items include enough body or tag context to link back to \`${slice.id}\`.
-- [ ] Proof artifacts are referenced from the slice before closure (drop via \`rig proof add\`).
-
-> Conventions SSOT: \`docs/reference/sdlc-conventions.md (installed: $OPENRIG_HOME/reference/sdlc-conventions.md)\` — section names, proof-contract format, the two locks, C1 headers. For a small slice the mini-requirements may BE the whole PRD.
 `;
 }
 
@@ -557,18 +538,11 @@ export function workspaceScaffoldFiles(): Array<{ relPath: string; content: stri
   ];
   for (const mission of DEFAULT_MISSIONS) {
     files.push(
-      { relPath: `missions/${mission.id}/README.md`, content: missionReadme(mission) },
+      { relPath: `missions/${mission.id}/SPEC.md`, content: missionReadme(mission) },
       { relPath: `missions/${mission.id}/PROGRESS.md`, content: missionProgress(mission) },
-      { relPath: `missions/${mission.id}/MISSION_BRIEF.md`, content: renderMissionBriefTemplate(mission.title) },
-      // FR-5e A1 — reuse the FR-3 MISSION_NOTES scaffold helper so a
-      // fresh `rig config init-workspace` produces a getting-started
-      // mission that doctor check #7 (mission_notes_presence) marks
-      // ok. Same env-var-pivot (OPENRIG_MISSION_NOTES_TEMPLATE_PATH >
-      // built-in bundled template) FR-3's `rig scope mission create`
-      // honors.
       {
-        relPath: `missions/${mission.id}/MISSION_NOTES.md`,
-        content: renderMissionNotesTemplate({
+        relPath: `missions/${mission.id}/NOTES.md`,
+        content: renderNotesTemplate({
           mission_id: mission.dotId,
           mission_name: mission.title,
           created_date: new Date().toISOString().slice(0, 10),
@@ -577,10 +551,9 @@ export function workspaceScaffoldFiles(): Array<{ relPath: string; content: stri
     );
     for (const slice of mission.slices) {
       files.push(
-        { relPath: `missions/${mission.id}/slices/${slice.id}/README.md`, content: sliceReadme(mission, slice) },
+        { relPath: `missions/${mission.id}/slices/${slice.id}/SPEC.md`, content: sliceReadme(mission, slice) },
         { relPath: `missions/${mission.id}/slices/${slice.id}/PROGRESS.md`, content: sliceProgress(mission, slice) },
         { relPath: `missions/${mission.id}/slices/${slice.id}/PROOF.md`, content: renderSliceProofTemplate({ id: slice.dotId, title: slice.title }) },
-        { relPath: `missions/${mission.id}/slices/${slice.id}/IMPLEMENTATION-PRD.md`, content: slicePrd(mission, slice) },
       );
       // V0.3.1 slice 21: getting-started slices ship timeline.md.
       const timeline = sliceTimeline(mission, slice);
@@ -635,8 +608,8 @@ export function runInitWorkspace(opts: InitWorkspaceOpts & { configPath?: string
 
   // FR-5e BLOCKER-1 — precompute the full scaffold file list BEFORE
   // any filesystem mutation. workspaceScaffoldFiles() now invokes
-  // renderMissionNotesTemplate(), which throws on invalid
-  // OPENRIG_MISSION_NOTES_TEMPLATE_PATH. If we mkdir first then
+  // renderNotesTemplate(), which throws on an invalid current or legacy
+  // notes-template override. If we mkdir first then
   // throw on render, the operator is left with a half-created
   // workspace that the next `rig workspace doctor` will misread as
   // partially-initialized. Verify-first-then-write (banked from

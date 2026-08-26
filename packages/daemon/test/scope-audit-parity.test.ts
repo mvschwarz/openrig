@@ -152,11 +152,9 @@ describeFr10("FR-10 backstops (OPR.0.4.4.19)", () => {
     expectFr10(good.findings.some((f) => f.kind === "proof_artifact_c1_invalid")).toBe(false);
   });
 
-  itFr10("C7: building-or-later status with no IMPLEMENTATION-PRD.md yields the missing-spec finding naming the pinned filename", () => {
+  itFr10("C7 retired: a current authored node never requires IMPLEMENTATION-PRD.md", () => {
     const result = classifyScopeItem({ ...base, implementationPrdExists: false });
-    const finding = result.findings.find((f) => f.kind === "missing_impl_prd");
-    expectFr10(finding).toBeDefined();
-    expectFr10(finding!.path).toContain("IMPLEMENTATION-PRD.md");
+    expectFr10(result.findings.some((f) => f.kind === "missing_impl_prd")).toBe(false);
   });
 
   itFr10("C7 NEGATIVE: shaping (pre-spec) status with no PRD yields NO missing-spec finding (status-gated)", () => {

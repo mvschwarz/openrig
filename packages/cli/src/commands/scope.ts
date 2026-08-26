@@ -32,10 +32,12 @@ import {
   DEFAULT_PROJECT_PREFIX,
   inferMissionDotId,
   isMissionDotId,
+  isSliceDotId,
   nextEscapeBandOrdinal,
   sliceIdFromMission,
 } from "../lib/scope/dot-id.js";
 import {
+  buildMissionDependencyGraph,
   ensureMissionId,
   ensureMissionIdPersisted,
   findMission,
@@ -54,9 +56,7 @@ import {
   updateFrontmatter,
 } from "../lib/scope/scope-fs.js";
 import {
-  renderImplementationPrdTemplate,
-  renderMissionBriefTemplate,
-  renderMissionNotesTemplate,
+  renderNotesTemplate,
   renderMissionProgressTemplate,
   renderMissionTemplate,
   renderSliceProofTemplate,
@@ -261,11 +261,13 @@ function buildSliceShowCommand(): Command {
 
 function buildSliceCreateCommand(): Command {
   return new Command("create")
-    .description("Create a new slice in a mission. Scaffolds the SDLC convention sections (## Intent / ## Mini-requirements / ## Proof contract) + proof/ + PROOF.md + IMPLEMENTATION-PRD.md for EVERY template kind — the shapes the Living Notes UI projects. Conventions SSOT: docs/reference/sdlc-conventions.md (installed: $OPENRIG_HOME/reference/sdlc-conventions.md).")
+    .description("Create a new slice with SPEC.md, PROGRESS.md, PROOF.md, and proof/. Conventions SSOT: docs/reference/sdlc-conventions.md (installed: $OPENRIG_HOME/reference/sdlc-conventions.md).")
     .argument("<mission>", "Mission name")
     .argument("<slug>", "Short slug (becomes the folder name's suffix)")
     .option("--template <kind>", `Template: ${SLICE_TEMPLATE_KINDS.join(" | ")}`, "placeholder")
     .option("--title <text>", "Display title (defaults to titlecased slug)")
+    .option("--intent <text>", "Authored intent stored in SPEC.md frontmatter (defaults to title)")
+    .option("--depends-on <dot-id...>", "Advisory build-order dependencies on sibling slice dot-IDs")
     .option("--readme-only", "Write progress_rail: readme-only in README frontmatter instead of scaffolding PROGRESS.md")
     .option("--json", "Machine-readable output")
     .action(async (missionName: string, rawSlug: string, opts, command) => {
@@ -307,6 +309,17 @@ function buildSliceCreateCommand(): Command {
         }
         const id = sliceIdFromMission(missionId, nn);
         const title = opts.title ?? titleFromSlug(slug);
+        const intent = opts.intent ?? title;
+        const dependsOn = Array.isArray(opts.dependsOn) ? [...new Set(opts.dependsOn as string[])] : [];
+        for (const dependency of dependsOn) {
+          if (!isSliceDotId(dependency) || !dependency.startsWith(`${missionId}.`)) {
+            throw new ScopeCliError({
+              fact: `Dependency "${dependency}" is not a sibling slice dot-ID under ${missionId}.`,
+              consequence: "Slice not created.",
+              action: `Use a sibling ID shaped like ${missionId}.<n>, or omit --depends-on.`,
+            });
+          }
+        }
         const createdDate = todayDateISO();
         const body = renderSliceTemplate(kind, {
           id,
@@ -315,20 +328,10 @@ function buildSliceCreateCommand(): Command {
           mission: mission.name,
           title,
           created_date: createdDate,
+          intent,
+          depends_on: dependsOn,
         });
         const proofBody = renderSliceProofTemplate({ id, title });
-        // OPR.0.4.4.23 — every template kind also scaffolds the
-        // IMPLEMENTATION-PRD skeleton (convention sections + elastic-middle
-        // note): the PRD is what the Living Notes UI's proof-contract join
-        // reads, so a slice without one doesn't project its DELIVERED pairing.
-        const prdBody = renderImplementationPrdTemplate({
-          id,
-          slice_number: pad2(nn),
-          slug,
-          mission: mission.name,
-          title,
-          created_date: createdDate,
-        });
         fs.mkdirSync(sliceAbs, { recursive: true });
         fs.mkdirSync(path.join(sliceAbs, "proof"), { recursive: true });
         // New scaffolds author SPEC.md; existing README-backed nodes are never rewritten.
@@ -346,7 +349,6 @@ function buildSliceCreateCommand(): Command {
           fs.writeFileSync(progressPath, renderSliceProgressTemplate(title), "utf8");
         }
         fs.writeFileSync(path.join(sliceAbs, "PROOF.md"), proofBody, "utf8");
-        fs.writeFileSync(path.join(sliceAbs, "IMPLEMENTATION-PRD.md"), prdBody, "utf8");
         const payload = {
           ok: true,
           slice: {
@@ -548,7 +550,7 @@ function buildSliceMoveCommand(): Command {
 
 function buildMissionLsCommand(): Command {
   return new Command("ls")
-    .description("List missions (top-level folders with README.md)")
+    .description("List missions (top-level folders with SPEC.md or a legacy README.md)")
     .option("--json", "Machine-readable output")
     .action(async (opts, command) => {
       const out = makeStdout();
@@ -615,7 +617,7 @@ function buildMissionShowCommand(): Command {
           out.write(`  closed slices: ${mission.closedSliceCount}\n`);
           out.write(`  path: ${mission.absPath}\n`);
           if (readme) {
-            out.write("\n--- README ---\n");
+            out.write(`\n--- ${path.basename(mission.readmePath!)} ---\n`);
             out.write(readme);
             if (!readme.endsWith("\n")) out.write("\n");
           }
@@ -633,7 +635,10 @@ function buildMissionCreateCommand(): Command {
     .option("--template <kind>", `Template: ${MISSION_TEMPLATE_KINDS.join(" | ")} (auto when name matches release-X.Y.Z)`, "")
     .option("--id <dot-id>", "Explicit dot-ID. Overrides name-pattern inference.")
     .option("--title <text>", "Display title (defaults to titlecased name)")
-    .option("--no-mission-notes", "Skip the auto-scaffold of MISSION_NOTES.md (rare; default is to scaffold from conventions/mission-notes/TEMPLATE.md)")
+    .option("--intent <text>", "Authored intent stored in SPEC.md frontmatter (defaults to title)")
+    .option("--depends-on <dot-id...>", "Advisory build-order dependencies on sibling mission dot-IDs")
+    .option("--no-notes", "Skip NOTES.md scaffolding")
+    .option("--no-mission-notes", "Deprecated alias for --no-notes")
     .option("--json", "Machine-readable output")
     .action(async (rawName: string, opts, command) => {
       const out = makeStdout();
@@ -690,15 +695,22 @@ function buildMissionCreateCommand(): Command {
           const ordinal = nextEscapeBandOrdinal(peers.map((p) => p.id));
           id = inferMissionDotId(name, ordinal);
         }
-        // Resolve titles + render templates BEFORE any filesystem side
-        // effects (banked verify-first-then-write — guard catch on
-        // OPR.0.3.2.21.FR-3 qitem-20260601121058: a stale
-        // OPENRIG_MISSION_NOTES_TEMPLATE_PATH used to throw AFTER
-        // mkdirSync + README write, leaking a half-created mission dir
-        // that future `mission create <same-name>` would reject as
-        // already-existing). Rendering MISSION_NOTES first means a
-        // stale env-var fails before any disk mutation.
+        // Resolve titles + render templates before any filesystem side
+        // effects. A stale current or legacy notes-template override must
+        // fail before mkdir, or it leaks a half-created mission directory.
         const title = opts.title ?? titleFromSlug(name.replace(/^release-/, ""));
+        const intent = opts.intent ?? title;
+        const dependsOn = Array.isArray(opts.dependsOn) ? [...new Set(opts.dependsOn as string[])] : [];
+        const project = id.split(".")[0];
+        for (const dependency of dependsOn) {
+          if (!isMissionDotId(dependency) || dependency.split(".")[0] !== project) {
+            throw new ScopeCliError({
+              fact: `Dependency "${dependency}" is not a sibling mission dot-ID in project ${project}.`,
+              consequence: "Mission not created.",
+              action: `Use a mission ID shaped like ${project}.<version>, or omit --depends-on.`,
+            });
+          }
+        }
         const releaseVersion = isReleaseName ? name.replace(/^release-/, "") : "";
         const readmeBody = renderMissionTemplate(templateKind, {
           id,
@@ -707,18 +719,18 @@ function buildMissionCreateCommand(): Command {
           title,
           created_date: todayDateISO(),
           release_version: releaseVersion,
+          intent,
+          depends_on: dependsOn,
         });
-        let missionNotesRendered: { rendered: string; resolvedFrom: "env" | "built-in" } | null = null;
-        if (opts.missionNotes !== false) {
-          const r = renderMissionNotesTemplate({
+        let notesRendered: ReturnType<typeof renderNotesTemplate> | null = null;
+        if (opts.notes !== false && opts.missionNotes !== false) {
+          notesRendered = renderNotesTemplate({
             mission_id: id,
             mission_name: title,
             created_date: todayDateISO(),
           });
-          missionNotesRendered = { rendered: r.rendered, resolvedFrom: r.resolvedFrom };
         }
         const progressBody = renderMissionProgressTemplate(title);
-        const missionBriefBody = renderMissionBriefTemplate(title);
         // All renders succeeded — safe to touch the filesystem.
         fs.mkdirSync(absPath, { recursive: true });
         fs.mkdirSync(path.join(absPath, "slices"), { recursive: true });
@@ -727,14 +739,10 @@ function buildMissionCreateCommand(): Command {
         fs.writeFileSync(readmePath, readmeBody, "utf8");
         const progressPath = path.join(absPath, "PROGRESS.md");
         fs.writeFileSync(progressPath, progressBody, "utf8");
-        const missionBriefPath = path.join(absPath, "MISSION_BRIEF.md");
-        fs.writeFileSync(missionBriefPath, missionBriefBody, "utf8");
-        let missionNotesPath: string | null = null;
-        let missionNotesResolvedFrom: "env" | "built-in" | null = null;
-        if (missionNotesRendered) {
-          missionNotesPath = path.join(absPath, "MISSION_NOTES.md");
-          fs.writeFileSync(missionNotesPath, missionNotesRendered.rendered, "utf8");
-          missionNotesResolvedFrom = missionNotesRendered.resolvedFrom;
+        let notesPath: string | null = null;
+        if (notesRendered) {
+          notesPath = path.join(absPath, "NOTES.md");
+          fs.writeFileSync(notesPath, notesRendered.rendered, "utf8");
         }
         const humanLines = [
           `Created mission ${name}`,
@@ -742,8 +750,11 @@ function buildMissionCreateCommand(): Command {
           `  template: ${templateKind}`,
           `  path: ${absPath}`,
         ];
-        if (missionNotesPath) {
-          humanLines.push(`  mission-notes: ${missionNotesPath} (template: ${missionNotesResolvedFrom})`);
+        if (notesPath) {
+          humanLines.push(`  notes: ${notesPath} (template: ${notesRendered?.resolvedFrom})`);
+        }
+        if (notesRendered?.resolvedFrom === "legacy-env") {
+          humanLines.push("  advisory: OPENRIG_MISSION_NOTES_TEMPLATE_PATH is deprecated; use OPENRIG_NOTES_TEMPLATE_PATH");
         }
         emit(out, {
           ok: true,
@@ -753,11 +764,35 @@ function buildMissionCreateCommand(): Command {
             template: templateKind,
             path: absPath,
             readmePath,
-            missionBriefPath,
-            missionNotesPath,
-            missionNotesResolvedFrom,
+            notesPath,
+            notesResolvedFrom: notesRendered?.resolvedFrom ?? null,
+            advisories: notesRendered?.resolvedFrom === "legacy-env"
+              ? ["OPENRIG_MISSION_NOTES_TEMPLATE_PATH is deprecated; use OPENRIG_NOTES_TEMPLATE_PATH"]
+              : [],
           },
         }, json, humanLines);
+      } catch (err) {
+        fail(err, json, out);
+      }
+    });
+}
+
+function buildMissionGraphCommand(): Command {
+  return new Command("graph")
+    .description("Show advisory sibling build-order edges and the current ready set")
+    .argument("<mission>", "Mission name")
+    .option("--json", "Machine-readable output")
+    .action(async (missionName: string, opts, command) => {
+      const out = makeStdout();
+      const json = Boolean(opts.json);
+      try {
+        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        const graph = buildMissionDependencyGraph(findMission(missionsRoot, missionName));
+        emit(out, { ok: true, graph }, json, [
+          `Ready: ${graph.ready.join(", ") || "(none)"}`,
+          ...graph.waiting.map((row) => `Waiting: ${row.id} on ${row.on.join(", ")}`),
+          ...graph.advisories.map((row) => `Advisory: ${row.id}${row.dependency ? ` -> ${row.dependency}` : ""}: ${row.message}`),
+        ]);
       } catch (err) {
         fail(err, json, out);
       }
@@ -817,11 +852,11 @@ function buildAuditCommand(): Command {
 
         const missionReadme = resolveNodeFile(missionDir) ?? path.join(missionDir, "SPEC.md");
         const missionProgress = path.join(missionDir, "PROGRESS.md");
-        const missionBrief = path.join(missionDir, "MISSION_BRIEF.md");
-        const missionNotes = path.join(missionDir, "MISSION_NOTES.md");
+        const missionNotesCurrent = path.join(missionDir, "NOTES.md");
+        const missionNotesLegacy = path.join(missionDir, "MISSION_NOTES.md");
+        const missionNotesExists = fs.existsSync(missionNotesCurrent) || fs.existsSync(missionNotesLegacy);
         const missionReadmeExists = fs.existsSync(missionReadme);
         const missionProgressExists = fs.existsSync(missionProgress);
-        const missionBriefExists = fs.existsSync(missionBrief);
 
         let missionResult: ReturnType<typeof classifyScopeItem>;
         if (!missionReadmeExists && missionProgressExists) {
@@ -831,8 +866,8 @@ function buildAuditCommand(): Command {
               kind: "orphan_progress",
               severity: "high",
               path: missionDir,
-              message: `PROGRESS.md exists but no README.md (orphan progress rail, no backing scope item)`,
-              remediation: `Add a README.md with frontmatter id, or remove the orphan PROGRESS.md`,
+              message: `PROGRESS.md exists but no SPEC.md or legacy README.md (orphan progress rail, no backing scope item)`,
+              remediation: `Add SPEC.md with frontmatter id, or remove the orphan PROGRESS.md`,
             }],
             frontmatterError: null,
           };
@@ -848,11 +883,8 @@ function buildAuditCommand(): Command {
             readmeOnlyMarker: false,
             isActiveRelease: true,
             level: "mission",
-            missionBriefExists,
-            missionBriefPath: missionBrief,
-            missionBriefContent: missionBriefExists ? fs.readFileSync(missionBrief, "utf-8") : null,
-            missionNotesExists: fs.existsSync(missionNotes),
-            missionNotesPath: missionNotes,
+            missionNotesExists,
+            missionNotesPath: missionNotesCurrent,
           });
         }
 
@@ -890,8 +922,8 @@ function buildAuditCommand(): Command {
                       kind: "orphan_progress" as const,
                       severity: "high" as const,
                       path: sliceDir,
-                      message: `PROGRESS.md exists but no README.md (orphan progress rail, no backing scope item)`,
-                      remediation: `Add a README.md with frontmatter id, or remove the orphan PROGRESS.md`,
+                      message: `PROGRESS.md exists but no SPEC.md or legacy README.md (orphan progress rail, no backing scope item)`,
+                      remediation: `Add SPEC.md with frontmatter id, or remove the orphan PROGRESS.md`,
                     }],
                     frontmatterError: null,
                   },
@@ -952,6 +984,7 @@ function buildAuditCommand(): Command {
               proofArtifacts: listProofArtifactsForAudit(proofDir),
               implementationPrdExists: fs.existsSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md")),
               // OPR.0.4.4.23 convention-section advisory inputs.
+              nodeFileName: path.basename(sliceReadme) as "SPEC.md" | "README.md",
               readmeContent: sliceReadmeContent,
               implementationPrdContent: fs.existsSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md"))
                 ? fs.readFileSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md"), "utf-8")
@@ -1346,9 +1379,9 @@ function buildSliceStageCommand(): Command {
         const slice = findSlice(missionsRoot, slicePath, opts.mission ?? null);
         if (!slice.readmePath) {
           throw new ScopeCliError({
-            fact: `Slice ${slice.name} has no README.md.`,
-            consequence: "Stage is a frontmatter field on the README; nothing to write.",
-            action: "Create the slice README (rig scope slice create) before setting its stage.",
+            fact: `Slice ${slice.name} has no SPEC.md or legacy README.md.`,
+            consequence: "Stage is a work-node frontmatter field; nothing to write.",
+            action: "Create the slice with `rig scope slice create` before setting its stage.",
           });
         }
         applyStage(slice.readmePath, stage, opts.successor);
@@ -1380,9 +1413,9 @@ function buildMissionStageCommand(): Command {
         const mission = findMission(missionsRoot, missionName);
         if (!mission.readmePath) {
           throw new ScopeCliError({
-            fact: `Mission ${mission.name} has no README.md.`,
-            consequence: "Stage is a frontmatter field on the README; nothing to write.",
-            action: "Create the mission README before setting its stage.",
+            fact: `Mission ${mission.name} has no SPEC.md or legacy README.md.`,
+            consequence: "Stage is a work-node frontmatter field; nothing to write.",
+            action: "Create the mission with `rig scope mission create` before setting its stage.",
           });
         }
         applyStage(mission.readmePath, stage, opts.successor);
@@ -1414,9 +1447,9 @@ function buildSliceVerifiedCommand(): Command {
         const slice = findSlice(missionsRoot, slicePath, opts.mission ?? null);
         if (!slice.readmePath) {
           throw new ScopeCliError({
-            fact: `Slice ${slice.name} has no README.md.`,
-            consequence: "verified is a frontmatter field on the README; nothing to write.",
-            action: "Create the slice README before stamping verified.",
+            fact: `Slice ${slice.name} has no SPEC.md or legacy README.md.`,
+            consequence: "verified is a work-node frontmatter field; nothing to write.",
+            action: "Create the slice with `rig scope slice create` before stamping verified.",
           });
         }
         const verified = `${todayDateISO()} against ${source}`;
@@ -1445,9 +1478,9 @@ function buildMissionVerifiedCommand(): Command {
         const mission = findMission(missionsRoot, missionName);
         if (!mission.readmePath) {
           throw new ScopeCliError({
-            fact: `Mission ${mission.name} has no README.md.`,
-            consequence: "verified is a frontmatter field on the README; nothing to write.",
-            action: "Create the mission README before stamping verified.",
+            fact: `Mission ${mission.name} has no SPEC.md or legacy README.md.`,
+            consequence: "verified is a work-node frontmatter field; nothing to write.",
+            action: "Create the mission with `rig scope mission create` before stamping verified.",
           });
         }
         const verified = `${todayDateISO()} against ${source}`;
@@ -1552,11 +1585,15 @@ function buildSliceRepairCommand(): Command {
       const json = Boolean(opts.json);
       try {
         const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
-        const slice = findSlice(missionsRoot, slicePath, opts.mission ?? null);
+        const legacySlice = findSlice(missionsRoot, slicePath, opts.mission ?? null);
+        const specPath = ensureCurrentSpec(legacySlice.absPath, legacySlice.readmePath, legacySlice.name);
+        const slice = findSlice(missionsRoot, legacySlice.absPath, opts.mission ?? null);
         const result = backfillScopeProgress(slice.absPath, "slice");
-        const frontmatter = slice.readmePath
-          ? conformReadmeFrontmatter(slice.readmePath, mintSliceIdClosure(slice, missionsRoot))
+        const frontmatter = specPath
+          ? conformReadmeFrontmatter(specPath, mintSliceIdClosure(slice, missionsRoot))
           : { idAdded: null, stageAdded: null, verifiedAdded: null, changed: false };
+        if (specPath) ensureConventionFrontmatter(specPath, slice.name);
+        ensureSliceProofSurface(slice.absPath, readFrontmatter(specPath ?? "").id, slice.name);
         emit(out, { ok: true, result, frontmatter }, json, [
           `${result.created ? "Backfilled" : "Skipped"} ${slice.name}: ${result.reason}`,
           ...(result.path ? [`  path: ${result.path}`] : []),
@@ -1578,6 +1615,8 @@ function buildMissionRepairCommand(): Command {
       const json = Boolean(opts.json);
       try {
         const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        const legacyMission = findMission(missionsRoot, missionName);
+        const missionSpec = ensureCurrentSpec(legacyMission.absPath, legacyMission.readmePath, legacyMission.name);
         const mission = findMission(missionsRoot, missionName);
         const results: BackfillResult[] = [];
         results.push(backfillScopeProgress(mission.absPath, "mission"));
@@ -1593,14 +1632,20 @@ function buildMissionRepairCommand(): Command {
         // the mission id), then each slice (child ids derive from the now-
         // persisted parent id).
         const conformed: Array<{ scope: "mission" | "slice"; name: string; frontmatter: FrontmatterConformResult }> = [];
-        if (mission.readmePath) {
-          const fm = conformReadmeFrontmatter(mission.readmePath, () => ensureMissionId(mission, missionsRoot));
+        if (missionSpec) {
+          const fm = conformReadmeFrontmatter(missionSpec, () => ensureMissionId(mission, missionsRoot));
+          ensureConventionFrontmatter(missionSpec, mission.name);
           conformed.push({ scope: "mission", name: mission.name, frontmatter: fm });
         }
         const freshMission = findMission(missionsRoot, mission.name);
+        ensureMissionNotesSurface(freshMission.absPath, freshMission);
         for (const slice of listSlices(freshMission, "all")) {
-          if (!slice.readmePath) continue;
-          const fm = conformReadmeFrontmatter(slice.readmePath, mintSliceIdClosure(slice, missionsRoot));
+          const specPath = ensureCurrentSpec(slice.absPath, slice.readmePath, slice.name);
+          if (!specPath) continue;
+          const fm = conformReadmeFrontmatter(specPath, mintSliceIdClosure(slice, missionsRoot));
+          ensureConventionFrontmatter(specPath, slice.name);
+          backfillScopeProgress(slice.absPath, "slice");
+          ensureSliceProofSurface(slice.absPath, readFrontmatter(specPath).id, slice.name);
           conformed.push({ scope: "slice", name: slice.name, frontmatter: fm });
         }
 
@@ -1615,6 +1660,59 @@ function buildMissionRepairCommand(): Command {
         fail(err, json, out);
       }
     });
+}
+
+/** Add the current authored node beside a legacy README without touching the
+ * legacy file. Existing SPEC bytes stay in place. */
+function ensureCurrentSpec(dir: string, nodePath: string | null, fallbackName: string): string | null {
+  const specPath = path.join(dir, "SPEC.md");
+  if (fs.existsSync(specPath)) return specPath;
+  if (!nodePath || !fs.existsSync(nodePath)) return null;
+  fs.copyFileSync(nodePath, specPath);
+  ensureConventionFrontmatter(specPath, fallbackName);
+  return specPath;
+}
+
+function ensureConventionFrontmatter(specPath: string, fallbackName: string): void {
+  const content = fs.readFileSync(specPath, "utf8");
+  const { frontmatter, body } = splitFrontmatter(content);
+  const h2Intent = /^## Intent\s*\n+([\s\S]*?)(?=\n## |$)/m.exec(body)?.[1]?.trim();
+  const h1 = /^#\s+(.+)$/m.exec(body)?.[1]?.trim();
+  const intent = typeof frontmatter.intent === "string" && frontmatter.intent.trim()
+    ? frontmatter.intent.trim()
+    : h2Intent && !/^\[.*\]$/.test(h2Intent)
+      ? h2Intent
+      : h1 ?? titleFromSlug(fallbackName.replace(/^\d+-/, ""));
+  updateFrontmatter(specPath, {
+    intent,
+    depends_on: Array.isArray(frontmatter.depends_on) ? frontmatter.depends_on : [],
+  });
+}
+
+function ensureMissionNotesSurface(dir: string, mission: ReturnType<typeof findMission>): void {
+  const notesPath = path.join(dir, "NOTES.md");
+  if (fs.existsSync(notesPath)) return;
+  const legacyPath = path.join(dir, "MISSION_NOTES.md");
+  if (fs.existsSync(legacyPath)) {
+    fs.copyFileSync(legacyPath, notesPath);
+    return;
+  }
+  const rendered = renderNotesTemplate({
+    mission_id: mission.id ?? mission.name,
+    mission_name: typeof mission.frontmatter.intent === "string" ? mission.frontmatter.intent : mission.name,
+    created_date: todayDateISO(),
+  });
+  fs.writeFileSync(notesPath, rendered.rendered, "utf8");
+}
+
+function ensureSliceProofSurface(dir: string, rawId: unknown, fallbackName: string): void {
+  fs.mkdirSync(path.join(dir, "proof"), { recursive: true });
+  const proofPath = path.join(dir, "PROOF.md");
+  if (fs.existsSync(proofPath)) return;
+  fs.writeFileSync(proofPath, renderSliceProofTemplate({
+    id: typeof rawId === "string" ? rawId : fallbackName,
+    title: titleFromSlug(fallbackName.replace(/^\d+-/, "")),
+  }), "utf8");
 }
 
 // ---------------------------------------------------------------------
@@ -1808,6 +1906,7 @@ export function scopeCommand(): Command {
   mission.addCommand(buildMissionLsCommand());
   mission.addCommand(buildMissionShowCommand());
   mission.addCommand(buildMissionCreateCommand());
+  mission.addCommand(buildMissionGraphCommand());
   mission.addCommand(buildMissionProgressCommand());
   mission.addCommand(buildMissionRepairCommand());
   mission.addCommand(buildMissionStageCommand());

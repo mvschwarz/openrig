@@ -24,7 +24,7 @@ function indexerFor(): ProgressIndexer {
 }
 
 describe("FR-4 — scaffold output parses into the expected UI tree", () => {
-  it("mission scaffold: non-null title + Milestones heading + all-active checkbox rows", () => {
+  it("mission scaffold: non-null title + Acceptance heading + all-active checkbox rows", () => {
     const dir = path.join(root, "mission-a");
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, "PROGRESS.md"), renderMissionProgressTemplate("Mission A"), "utf8");
@@ -32,7 +32,7 @@ describe("FR-4 — scaffold output parses into the expected UI tree", () => {
     const file = indexerFor().scan().files.find((f) => f.relPath.includes("mission-a"))!;
     expect(file).toBeDefined();
     expect(file.title).toBe("Progress — Mission A"); // from the FIRST H1, not frontmatter
-    expect(file.rows.some((r) => r.kind === "heading" && r.text === "Milestones")).toBe(true);
+    expect(file.rows.some((r) => r.kind === "heading" && r.text === "Acceptance")).toBe(true);
     expect(file.counts.total).toBe(4);
     expect(file.counts.active).toBe(4);
     expect(file.counts.done).toBe(0);

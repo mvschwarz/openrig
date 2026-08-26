@@ -53,8 +53,8 @@ export function configRoutes(): Hono {
 
     // FR-5e BLOCKER-1 — precompute the full scaffold file list BEFORE
     // any filesystem mutation. workspaceScaffoldFiles() invokes
-    // renderMissionNotesTemplate() which can throw on invalid
-    // OPENRIG_MISSION_NOTES_TEMPLATE_PATH. Failing the route with a
+    // renderDaemonNotes() which can throw on an invalid current or legacy
+    // notes-template override. Failing the route with a
     // structured 400 BEFORE mkdir keeps the daemon's init surface
     // symmetric with the CLI runner's verify-first-then-write
     // posture (banked from FR-3 self-lesson).

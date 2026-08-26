@@ -72,7 +72,16 @@ describe("resolveMissionsRoot", () => {
 
   it("throws ScopeCliError when no missions/ root is found", () => {
     const empty = mktemp();
-    expect(() => resolveMissionsRoot({ override: empty, cwd: empty })).toThrow();
+    expect(() => resolveMissionsRoot({ override: empty, cwd: empty, configPath: path.join(empty, "config.json") })).toThrow();
+  });
+
+  it("uses the typed workspace.slices_root setting instead of walking cwd", () => {
+    const root = mktemp();
+    const missions = path.join(root, "declared-missions");
+    fs.mkdirSync(missions);
+    const configPath = path.join(root, "config.json");
+    fs.writeFileSync(configPath, JSON.stringify({ workspace: { slicesRoot: missions } }));
+    expect(resolveMissionsRoot({ cwd: root, configPath })).toBe(missions);
   });
 });
 

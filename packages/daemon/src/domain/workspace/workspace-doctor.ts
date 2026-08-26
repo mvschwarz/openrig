@@ -8,7 +8,7 @@
 //   4. Daemon points at this workspace
 //   5. Daemon reload needed
 //   6. Optional slice docs (warn-only)
-//   7. MISSION_NOTES presence
+//   7. NOTES.md presence (with readable legacy MISSION_NOTES.md fallback)
 //
 // Per-check return shape is `{check, status: "ok"|"warn"|"fail",
 // message, fixHint?, evidence?}` per FR-5 IMPL-PRD §76-78. The shape
@@ -374,7 +374,7 @@ export function checkDaemonReload(opts: CheckDaemonReloadInput): DoctorCheck {
 export interface CheckSliceDocsInput {
   /** Resolved missions folder root. The check walks each
    *  `<missionsRoot>/<mission>/slices/<slice>/` and verifies it has
-   *  README.md OR IMPLEMENTATION-PRD.md OR IMPL-PRD.md. */
+   *  SPEC.md or a readable legacy node file. */
   missionsRoot: string;
 }
 
@@ -390,7 +390,7 @@ interface BareSlice {
  * Check #6 — optional slice docs.
  *
  * Walks each mission's slices subdirectory and reports slices that
- * have NEITHER a README.md, IMPLEMENTATION-PRD.md, nor IMPL-PRD.md.
+ * have neither SPEC.md nor a readable legacy node file.
  * Warn-only (empty slices are sometimes intentional staging per
  * IMPL-PRD §57-59). The walk is bounded to one mission + one slice
  * level; we don't recurse into slice subdirs.
@@ -438,22 +438,22 @@ export function checkOptionalSliceDocs(opts: CheckSliceDocsInput): DoctorCheck {
     return {
       check: "optional_slice_docs",
       status: "ok",
-      message: `every slice under '${missionsRoot}' has a README, IMPLEMENTATION-PRD, or IMPL-PRD`,
+      message: `every slice under '${missionsRoot}' has SPEC.md or a readable legacy node file`,
       evidence: { missionsRoot, bareSlices: [] },
     };
   }
   return {
     check: "optional_slice_docs",
     status: "warn",
-    message: `${bareSlices.length} slice${bareSlices.length === 1 ? " has" : "s have"} no README / IMPLEMENTATION-PRD / IMPL-PRD`,
+    message: `${bareSlices.length} slice${bareSlices.length === 1 ? " has" : "s have"} no SPEC.md or readable legacy node file`,
     fixHint:
-      "author a README.md, IMPLEMENTATION-PRD.md, or IMPL-PRD.md in each bare slice directory; warn-only because empty slices are sometimes intentional staging",
+      "author SPEC.md in each bare slice directory; legacy README.md, IMPLEMENTATION-PRD.md, and IMPL-PRD.md remain readable; warn-only because empty slices are sometimes intentional staging",
     evidence: { missionsRoot, bareSlices },
   };
 }
 
-// OPR.0.4.4.23 — the SDLC convention sections a slice README must carry to
-// project in the Living Notes UI. SSOT: docs/reference/sdlc-conventions.md.
+// The SDLC convention sections a slice SPEC (or legacy node file) must carry.
+// SSOT: docs/reference/sdlc-conventions.md.
 const SDLC_CONVENTION_SECTIONS = ["## Intent", "## Mini-requirements", "## Proof contract"] as const;
 
 interface SliceMissingSections {
@@ -466,11 +466,11 @@ interface SliceMissingSections {
 /**
  * Check #8 — SDLC convention sections (OPR.0.4.4.23).
  *
- * Walks each mission's slices and reports slice READMEs missing any of the
+ * Walks each mission's slices and reports work-node files missing any of the
  * convention sections (`## Intent` / `## Mini-requirements` /
- * `## Proof contract`) the Living Notes UI projects. Warn-only (advisory /
+ * `## Proof contract`). Warn-only (advisory /
  * fail-open — the deep per-slice audit is `rig scope audit`; this row is
- * the workspace-level pointer). Slices with no README at all are check #6's
+ * the workspace-level pointer). Slices with no work-node file are check #6's
  * concern, not double-reported here.
  */
 export function checkSdlcConventionSections(opts: CheckSliceDocsInput): DoctorCheck {
@@ -511,7 +511,7 @@ export function checkSdlcConventionSections(opts: CheckSliceDocsInput): DoctorCh
       try {
         readme = fs.readFileSync(readmePath ?? path.join(slicePath, "SPEC.md"), "utf-8");
       } catch {
-        continue; // no README = check #6's finding, not a section finding
+        continue; // no work-node file = check #6's finding, not a section finding
       }
       slicesChecked++;
       const missing = SDLC_CONVENTION_SECTIONS.filter(
@@ -527,14 +527,14 @@ export function checkSdlcConventionSections(opts: CheckSliceDocsInput): DoctorCh
     return {
       check: "sdlc_convention_sections",
       status: "ok",
-      message: `every slice README under '${missionsRoot}' carries the SDLC convention sections (${slicesChecked} checked)`,
+      message: `every slice work-node file under '${missionsRoot}' carries the SDLC convention sections (${slicesChecked} checked)`,
       evidence: { missionsRoot, slicesChecked, offenders: [] },
     };
   }
   return {
     check: "sdlc_convention_sections",
     status: "warn",
-    message: `${offenders.length} slice README${offenders.length === 1 ? " is" : "s are"} missing SDLC convention sections (Intent / Mini-requirements / Proof contract) and will not fully project in the Living Notes UI`,
+    message: `${offenders.length} slice work-node file${offenders.length === 1 ? " is" : "s are"} missing SDLC convention sections (Intent / Mini-requirements / Proof contract)`,
     fixHint:
       "add the missing sections per docs/reference/sdlc-conventions.md (installed: $OPENRIG_HOME/reference/sdlc-conventions.md) (rig scope slice create scaffolds them); run rig scope audit <mission> for per-slice findings — advisory only, nothing is blocked",
     evidence: { missionsRoot, slicesChecked, offenders },
@@ -551,13 +551,10 @@ interface MissionWithoutNotes {
 }
 
 /**
- * Check #7 — MISSION_NOTES presence.
+ * Check #7 — mission NOTES presence.
  *
- * Verifies each mission directory has a `MISSION_NOTES.md` (per the
- * FR-3 convention that just merged at LOCAL main e154a5ce). Warn-
- * only because legacy missions predate the convention; the
- * operator can run `rig scope mission create` (which now auto-
- * scaffolds the file per FR-3) for new missions.
+ * Verifies each mission directory has current `NOTES.md` or readable legacy
+ * `MISSION_NOTES.md`. Warn-only because legacy missions can predate both.
  */
 export function checkMissionNotesPresence(opts: CheckMissionNotesInput): DoctorCheck {
   const { missionsRoot } = opts;
@@ -572,7 +569,7 @@ export function checkMissionNotesPresence(opts: CheckMissionNotesInput): DoctorC
       check: "mission_notes_presence",
       status: "warn",
       message: code === "ENOENT"
-        ? `missions root '${missionsRoot}' does not exist; no MISSION_NOTES to check`
+        ? `missions root '${missionsRoot}' does not exist; no mission notes to check`
         : `cannot read missions root '${missionsRoot}': ${(err as Error).message}`,
       evidence: { missionsRoot, errorCode: code ?? "unknown" },
     };
@@ -581,8 +578,9 @@ export function checkMissionNotesPresence(opts: CheckMissionNotesInput): DoctorC
   const missing: MissionWithoutNotes[] = [];
   for (const mission of missions) {
     const missionDir = path.join(missionsRoot, mission);
-    const notesPath = path.join(missionDir, "MISSION_NOTES.md");
-    if (!fs.existsSync(notesPath)) {
+    const currentNotesPath = path.join(missionDir, "NOTES.md");
+    const legacyNotesPath = path.join(missionDir, "MISSION_NOTES.md");
+    if (!fs.existsSync(currentNotesPath) && !fs.existsSync(legacyNotesPath)) {
       missing.push({ mission, path: missionDir });
     }
   }
@@ -591,16 +589,16 @@ export function checkMissionNotesPresence(opts: CheckMissionNotesInput): DoctorC
     return {
       check: "mission_notes_presence",
       status: "ok",
-      message: `every mission under '${missionsRoot}' has MISSION_NOTES.md`,
+      message: `every mission under '${missionsRoot}' has NOTES.md or readable legacy MISSION_NOTES.md`,
       evidence: { missionsRoot, missing: [] },
     };
   }
   return {
     check: "mission_notes_presence",
     status: "warn",
-    message: `${missing.length} mission${missing.length === 1 ? " has" : "s have"} no MISSION_NOTES.md`,
+    message: `${missing.length} mission${missing.length === 1 ? " has" : "s have"} no NOTES.md or readable legacy MISSION_NOTES.md`,
     fixHint:
-      "scaffold via `rig scope mission create <id>` (FR-3 auto-scaffold) for new missions, or copy from `<substrate>/openrig-work/conventions/mission-notes/TEMPLATE.md` for existing ones",
+      "run `rig scope mission repair <id>` for an existing mission, or `rig scope mission create <id>` for a new one",
     evidence: { missionsRoot, missing },
   };
 }

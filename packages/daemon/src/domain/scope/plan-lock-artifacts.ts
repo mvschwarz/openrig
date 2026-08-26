@@ -1,11 +1,10 @@
 // OPR.0.4.7 slice-04 Stage-3 Lever A — plan-lock snapshot derivation.
 //
-// PURE derivation of a slice's `locked-artifacts` plan set from its README +
-// IMPLEMENTATION-PRD content strings — NO fs here; the scope-approve read shell
-// supplies both (readme = the approve originalBytes, prd = tryReadPRD or null).
+// PURE derivation of a slice's `locked-artifacts` plan set from its current
+// authored node plus legacy fallback content — NO fs here.
 // Reuses the EXPORTED Review helpers directly (D1 — no shared extraction) so the
 // derived plan has source-selection/extraction parity with Review (no byte-equality
-// claim). Determinism: stable order (PRD -> selected proof-contract plannedRefs ->
+// claim). Determinism: stable order (authored node -> selected proof-contract plannedRefs ->
 // intent visuals), normalized-path dedup, first source wins.
 
 import type { LockedArtifact } from "../review/types.js";
@@ -19,10 +18,15 @@ import { isScaffoldPlaceholderText } from "./scaffold-placeholder.js";
 
 /**
  * Derive the ordered, deduped `locked-artifacts` set for a slice plan-lock.
- * @param readme slice README content (the approve read shell's originalBytes); null if absent.
- * @param prd slice IMPLEMENTATION-PRD content; null when missing/unreadable (fail-open).
+ * @param nodeContent current authored node content (SPEC.md, or legacy README.md).
+ * @param prd legacy IMPLEMENTATION-PRD content; null when absent.
+ * @param nodeFileName current node filename; SPEC.md for new work.
  */
-export function derivePlanLockArtifacts(readme: string | null, prd: string | null, spec: string | null = null): LockedArtifact[] {
+export function derivePlanLockArtifacts(
+  nodeContent: string | null,
+  prd: string | null,
+  nodeFileName: "SPEC.md" | "README.md" = "SPEC.md",
+): LockedArtifact[] {
   const out: LockedArtifact[] = [];
   const seen = new Set<string>(); // dedup by NORMALIZED path; first source wins
 
@@ -42,20 +46,23 @@ export function derivePlanLockArtifacts(readme: string | null, prd: string | nul
     out.push({ name: nameFromPath ? norm : name, path: norm, kind });
   };
 
-  // 1. PRD — always pinned first: the EXPECTED spec path, even when the PRD file
-  //    is missing/unreadable (Guard #4). A missing PRD simply adds no plannedRefs.
-  add("Implementation PRD", "IMPLEMENTATION-PRD.md", "spec");
+  // 1. The one authored node is always the first pin. New work is SPEC.md;
+  // legacy README-backed nodes remain approvable without a forced migration.
+  add(nodeFileName === "SPEC.md" ? "Specification" : "Legacy specification", nodeFileName, "spec");
 
-  // 2. Selected proof-contract plannedRefs — an authored README section wins over
-  //    a pristine-scaffold PRD section (extractProofContractSelected, README-wins).
-  for (const item of extractProofContractSelected(prd, readme, spec).items) {
+  // 2. Selected proof-contract plannedRefs — for a legacy node, an authored README
+  //    section wins over a pristine-scaffold PRD section.
+  const selected = nodeFileName === "SPEC.md"
+    ? extractProofContractSelected(prd, null, nodeContent)
+    : extractProofContractSelected(prd, nodeContent, null);
+  for (const item of selected.items) {
     if (!item.plannedRef) continue;
     add(item.text || item.plannedRef, item.plannedRef, "mockup"); // name = item text, path fallback
   }
 
-  // 3. Intent visuals — README `## Intent visual` media refs, UNLESS the section
+  // 3. Intent visuals — authored-node `## Intent visual` media refs, UNLESS the section
   //    is N/A (the section-suppression semantics the scope audit uses).
-  const visual = extractSection(readme, "Intent visual");
+  const visual = extractSection(nodeContent, "Intent visual");
   if (visual !== null && !/\bN\/A\b/i.test(visual)) {
     for (const ref of extractMediaRefs(visual)) {
       add(ref, ref, "mockup", true); // deterministic name = the emitted (normalized) path (D4)
@@ -67,7 +74,7 @@ export function derivePlanLockArtifacts(readme: string | null, prd: string | nul
 
 /**
  * True when a DERIVED plan-lock set would freeze nothing anybody authored: the set is only the
- * unconditional PRD pin, and the PRD file is missing or still shipped-template scaffold (no authored
+ * unconditional node pin, and the node file is missing or still shipped-template scaffold (no authored
  * intent prose, no authored mini-req, no authored proof-contract row — the ONE scaffold grammar).
  *
  * A plan-lock's entire meaning is "THIS artifact set is what gets built"; letting the default pin a
@@ -75,10 +82,10 @@ export function derivePlanLockArtifacts(readme: string | null, prd: string | nul
  * locks did exactly that before this check existed. Approve refuses on this predicate unless the
  * stamper names the set explicitly.
  */
-export function isContentlessPlanLockSet(prd: string | null, artifacts: LockedArtifact[]): boolean {
+export function isContentlessPlanLockSet(nodeContent: string | null, artifacts: LockedArtifact[]): boolean {
   if (artifacts.length > 1) return false; // plannedRefs / intent visuals = chosen content beyond the pin
-  if (prd === null) return true; // the pin names a file that does not exist / cannot be read
-  return !prdHasAuthoredContent(prd);
+  if (nodeContent === null) return true;
+  return !prdHasAuthoredContent(nodeContent);
 }
 
 /** Any line that survives stripping frontmatter, HTML comments, headings, and list/checkbox markers,

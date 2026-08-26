@@ -7,7 +7,7 @@
 //
 // This test reads the daemon canonical AND extracts the CLI mirror
 // content via the scaffold's emitted file list, then asserts the two
-// produce byte-identical README / timeline / PROGRESS content for the
+// produce byte-identical SPEC / timeline / PROGRESS content for the
 // two getting-started slices. If either drifts, this test fails.
 
 import { describe, it, expect } from "vitest";
@@ -31,9 +31,9 @@ function findContent(
 describe("getting-started narrative parity — slice 21", () => {
   for (const sliceId of ["first-conveyor-run", "inspect-project-evidence"] as const) {
     describe(`slice ${sliceId}`, () => {
-      it("daemon scaffold emits README.md with the canonical narrative body", () => {
+      it("daemon scaffold emits SPEC.md with the canonical narrative body", () => {
         const files = daemonScaffold();
-        const readme = findContent(files, `missions/getting-started/slices/${sliceId}/README.md`);
+        const readme = findContent(files, `missions/getting-started/slices/${sliceId}/SPEC.md`);
         expect(readme).toBeDefined();
         expect(readme).toContain(GETTING_STARTED_NARRATIVE[sliceId]!.readme);
       });
@@ -52,10 +52,10 @@ describe("getting-started narrative parity — slice 21", () => {
         expect(progress).toBe(GETTING_STARTED_NARRATIVE[sliceId]!.progress);
       });
 
-      it("CLI scaffold emits IDENTICAL README.md / timeline.md / PROGRESS.md (parity)", () => {
+      it("CLI scaffold emits IDENTICAL SPEC.md / timeline.md / PROGRESS.md (parity)", () => {
         const cliFiles = cliScaffold();
         const daemonFiles = daemonScaffold();
-        for (const file of ["README.md", "timeline.md", "PROGRESS.md"]) {
+        for (const file of ["SPEC.md", "timeline.md", "PROGRESS.md"]) {
           const rel = `missions/getting-started/slices/${sliceId}/${file}`;
           const cliContent = findContent(cliFiles, rel);
           const daemonContent = findContent(daemonFiles, rel);
@@ -96,17 +96,13 @@ describe("getting-started narrative parity — slice 21", () => {
     ]);
   });
 
-  // FR-5e A1 (parity) — CLI and daemon both now emit MISSION_NOTES.md
-  // for each getting-started mission. Body content must be byte-
-  // identical so UI-driven init lands the same scaffold as CLI-
-  // driven init. The CLI reads from
-  // packages/cli/src/lib/scope-templates/mission-notes.md; the
-  // daemon embeds the same template content as MISSION_NOTES_BUILT_IN
-  // in default-workspace-scaffold.ts. This test catches drift.
-  it("CLI and daemon emit byte-identical missions/getting-started/MISSION_NOTES.md", () => {
+  // CLI and daemon both emit current NOTES.md for each getting-started
+  // mission. Body content must stay byte-identical across the CLI and
+  // daemon-owned scaffold implementations.
+  it("CLI and daemon emit byte-identical missions/getting-started/NOTES.md", () => {
     const cliFiles = cliScaffold();
     const daemonFiles = daemonScaffold();
-    const rel = "missions/getting-started/MISSION_NOTES.md";
+    const rel = "missions/getting-started/NOTES.md";
     const cliContent = findContent(cliFiles, rel);
     const daemonContent = findContent(daemonFiles, rel);
     expect(cliContent, `CLI scaffold missing ${rel}`).toBeDefined();
@@ -114,25 +110,13 @@ describe("getting-started narrative parity — slice 21", () => {
     expect(cliContent).toBe(daemonContent);
   });
 
-  it("CLI and daemon emit byte-identical missions/getting-started/MISSION_BRIEF.md", () => {
+  it("CLI and daemon omit retired MISSION_BRIEF.md", () => {
     const cliFiles = cliScaffold();
     const daemonFiles = daemonScaffold();
     const rel = "missions/getting-started/MISSION_BRIEF.md";
     const cliContent = findContent(cliFiles, rel);
     const daemonContent = findContent(daemonFiles, rel);
-    expect(cliContent, `CLI scaffold missing ${rel}`).toBeDefined();
-    expect(daemonContent, `daemon scaffold missing ${rel}`).toBeDefined();
-    expect(cliContent).toBe(daemonContent);
-
-    const headers = Array.from(cliContent!.matchAll(/^#{1,2} .+$/gm)).map((m) => m[0]);
-    expect(headers).toEqual([
-      "# Getting Started — Brief",
-      "## What & why",
-      "## Building",
-      "## Progress",
-      "## Proven",
-      "## Needs you",
-      "## Pointers",
-    ]);
+    expect(cliContent).toBeUndefined();
+    expect(daemonContent).toBeUndefined();
   });
 });

@@ -202,7 +202,7 @@ function specShaFromLockedArtifacts(fs: ScopeFsDeps, sliceDir: string, fm: strin
   }
   closeEntry();
   if (!candidate) candidate = firstPath;
-  if (!candidate) candidate = "IMPLEMENTATION-PRD.md";
+  if (!candidate) candidate = "SPEC.md";
   const p = path.join(sliceDir, candidate);
   const bytes = fs.exists(p) ? fs.readFile(p) : null;
   if (bytes === null) return null;
@@ -251,7 +251,13 @@ export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string): SliceScope
     // locked artifact PATH — the hash is computed from the CURRENT bytes at projection
     // time (store-DERIVED, live; never a transcribed value). First spec-kind artifact.
     specShaShort: specShaFromLockedArtifacts(fs, sliceDir, fm),
-    prdExists: fs.exists(path.join(sliceDir, "IMPLEMENTATION-PRD.md")) || fm.includes("IMPLEMENTATION-PRD"),
+    // Compatibility field name retained for the TUI payload. Current SPEC
+    // and readable legacy PRD locks both satisfy the old availability bit.
+    prdExists:
+      fs.exists(path.join(sliceDir, "SPEC.md")) ||
+      fs.exists(path.join(sliceDir, "IMPLEMENTATION-PRD.md")) ||
+      fm.includes("SPEC.md") ||
+      fm.includes("IMPLEMENTATION-PRD"),
   };
 }
 

@@ -280,7 +280,8 @@ FACT | There is no external CI at this tip: the root `package.json` script chain
 FACT | Bundles are byte-deterministic (sorted entries, fixed mtime, normalised uid/gid, gzip 9) — identical inputs yield an identical hash.
 FACT | Bundle integrity proves self-consistency, not authenticity: anyone rewriting both the archive and its `.sha256` passes every check.
 FACT | Declared `docs:` files must exist or bundle assembly FAILS, while a missing culture or startup file is silently skipped as best-effort.
-FACT | `rig scope slice create` emits the factory scaffold (`## Intent`/`## Mini-requirements`/`## Proof contract` + `proof/` + `PROOF.md` + `IMPLEMENTATION-PRD.md`) for **every** template kind.
+FACT | `rig scope slice create` emits the mode-neutral one-spec scaffold (`SPEC.md` with `intent:` + advisory sibling build-order `depends_on:`, `PROGRESS.md`, `PROOF.md`, and `proof/`) for **every** template kind; factory richness composes through the template seam rather than a second authored spec.
+FACT | `rig ui open` is **unmaintained, best-effort, and replaced by the TUI** — never diagnose product behaviour from the web UI. The TUI plus Slack are the human surface; the CLI plus terminal are the agent surface.
 FACT | `RigSpec` has no `operating_mode` field and no rig-level plugin selection — **a running rig cannot declare or be asked its mode today.**
 
 ### Permissions

@@ -86,11 +86,11 @@ export function scopeAuditRoutes(): Hono {
     return indexer.withMembershipBatch(() => {
       const missionReadme = resolveNodeFile(missionDir) ?? path.join(missionDir, "SPEC.md");
       const missionProgress = path.join(missionDir, "PROGRESS.md");
-      const missionBrief = path.join(missionDir, "MISSION_BRIEF.md");
-      const missionNotes = path.join(missionDir, "MISSION_NOTES.md");
+      const missionNotesCurrent = path.join(missionDir, "NOTES.md");
+      const missionNotesLegacy = path.join(missionDir, "MISSION_NOTES.md");
+      const missionNotesExists = fs.existsSync(missionNotesCurrent) || fs.existsSync(missionNotesLegacy);
       const missionReadmeExists = fs.existsSync(missionReadme);
       const missionProgressExists = fs.existsSync(missionProgress);
-      const missionBriefExists = fs.existsSync(missionBrief);
 
       let missionResult: ScopeAuditResult;
       if (!missionReadmeExists && missionProgressExists) {
@@ -100,8 +100,8 @@ export function scopeAuditRoutes(): Hono {
             kind: "orphan_progress",
             severity: "high",
             path: missionDir,
-            message: "PROGRESS.md exists but no README.md (orphan progress rail, no backing scope item)",
-            remediation: "Add a README.md with frontmatter id, or remove the orphan PROGRESS.md",
+            message: "PROGRESS.md exists but no SPEC.md or legacy README.md (orphan progress rail, no backing scope item)",
+            remediation: "Add SPEC.md with frontmatter id, or remove the orphan PROGRESS.md",
           }],
           frontmatterError: null,
         };
@@ -117,11 +117,8 @@ export function scopeAuditRoutes(): Hono {
             readmeOnlyMarker: false,
             isActiveRelease: true,
             level: "mission",
-            missionBriefExists,
-            missionBriefPath: missionBrief,
-            missionBriefContent: missionBriefExists ? fs.readFileSync(missionBrief, "utf-8") : null,
-            missionNotesExists: fs.existsSync(missionNotes),
-            missionNotesPath: missionNotes,
+            missionNotesExists,
+            missionNotesPath: missionNotesCurrent,
           });
       }
 
@@ -150,8 +147,8 @@ export function scopeAuditRoutes(): Hono {
                     kind: "orphan_progress",
                     severity: "high",
                     path: sliceDir,
-                    message: "PROGRESS.md exists but no README.md (orphan progress rail, no backing scope item)",
-                    remediation: "Add a README.md with frontmatter id, or remove the orphan PROGRESS.md",
+                    message: "PROGRESS.md exists but no SPEC.md or legacy README.md (orphan progress rail, no backing scope item)",
+                    remediation: "Add SPEC.md with frontmatter id, or remove the orphan PROGRESS.md",
                   }],
                   frontmatterError: null,
                 },
@@ -195,6 +192,7 @@ export function scopeAuditRoutes(): Hono {
             proofArtifacts: listProofArtifactsForAudit(proofDir),
             implementationPrdExists: fs.existsSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md")),
             // OPR.0.4.4.23 convention-section advisory inputs (parity with the CLI builder).
+            nodeFileName: path.basename(sliceReadme) as "SPEC.md" | "README.md",
             readmeContent: sliceReadmeContent,
             implementationPrdContent: fs.existsSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md"))
               ? fs.readFileSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md"), "utf-8")

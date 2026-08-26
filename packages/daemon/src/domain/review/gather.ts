@@ -218,7 +218,8 @@ export class ReviewGatherer {
     const slice = this.indexer.get(name);
     if (!slice) return null;
 
-    const readme = resolveNodeFileVia(slice.slicePath, (p) => this.readFile(p))?.content ?? null;
+    const nodeFile = resolveNodeFileVia(slice.slicePath, (p) => this.readFile(p));
+    const readme = nodeFile?.content ?? null;
     const prd = this.readFile(path.join(slice.slicePath, "IMPLEMENTATION-PRD.md"));
     const proofMd = this.readFile(path.join(slice.slicePath, "PROOF.md"));
 
@@ -237,6 +238,7 @@ export class ReviewGatherer {
         missionId: slice.missionId,
       },
       readme,
+      nodeFileName: nodeFile ? path.basename(nodeFile.path) as "SPEC.md" | "README.md" : undefined,
       prd,
       proofMd,
       artifacts,

@@ -438,14 +438,13 @@ describe("rig scope mission create (HG-14 + HG-15)", () => {
     expect(JSON.parse(r.stdout).ok).toBe(false);
   });
 
-  // OPR.0.3.2.21.FR-3 — auto-scaffold MISSION_NOTES.md alongside README.
-  it("FR-3: mission create auto-scaffolds MISSION_NOTES.md with placeholders substituted (default ON; built-in template)", async () => {
+  it("mission create auto-scaffolds NOTES.md with placeholders substituted", async () => {
     const r = await run(["mission", "create", "release-0.6.0", "--json"], env.missionsRoot);
     expect(r.exitCode).toBe(0);
     const parsed = JSON.parse(r.stdout);
-    expect(parsed.mission.missionNotesPath).toBeTruthy();
-    expect(parsed.mission.missionNotesResolvedFrom).toBe("built-in");
-    const mnPath = parsed.mission.missionNotesPath as string;
+    expect(parsed.mission.notesPath).toBeTruthy();
+    expect(parsed.mission.notesResolvedFrom).toBe("built-in");
+    const mnPath = parsed.mission.notesPath as string;
     expect(fs.existsSync(mnPath)).toBe(true);
     const content = fs.readFileSync(mnPath, "utf8");
     // Placeholders must be substituted.
@@ -457,20 +456,11 @@ describe("rig scope mission create (HG-14 + HG-15)", () => {
     // titleFromSlug("0.6.0") → "0.6.0" (no separators to titlecase); the
     // bare version string is what lands in mission_name.
     expect(content).toMatch(/name: 0\.6\.0/);
-    expect(content).toMatch(/cont\.0 — mission scaffolded/);
-    // Canonical structure markers.
-    expect(content).toMatch(/## §1\. Top-of-mind context/);
-    expect(content).toMatch(/## §10\. What NOT to reconstruct/);
-    expect(content).toMatch(/## §A\. <first-seat>@<rig> notes/);
-    // Recovery must use durable full-body artifacts first. Compact queue rows
-    // and transcript output are insufficient evidence after compaction.
-    expect(content).toContain("rig queue list --mine --full --json");
-    expect(content).toContain("rig queue show <id> --full --json");
-    expect(content).toMatch(/little or\s+no output does not prove the session was quiet/);
-    expect(content).not.toContain("rig queue list --destination <your-session>");
+    expect(content).toMatch(/# Notes — 0\.6\.0/);
+    expect(content).toContain("`SPEC.md` contract");
   });
 
-  it("FR-3: --no-mission-notes opts out — README created, MISSION_NOTES.md is NOT", async () => {
+  it("legacy --no-mission-notes alias opts out — SPEC created, NOTES.md is not", async () => {
     const r = await run([
       "mission", "create", "release-0.7.0",
       "--no-mission-notes", "--json",
@@ -478,15 +468,15 @@ describe("rig scope mission create (HG-14 + HG-15)", () => {
     expect(r.exitCode).toBe(0);
     const parsed = JSON.parse(r.stdout);
     expect(parsed.ok).toBe(true);
-    // README still produced.
+    // SPEC still produced.
     expect(fs.existsSync(parsed.mission.readmePath)).toBe(true);
-    // MISSION_NOTES suppressed.
-    expect(parsed.mission.missionNotesPath).toBeNull();
-    expect(parsed.mission.missionNotesResolvedFrom).toBeNull();
-    expect(fs.existsSync(path.join(parsed.mission.path, "MISSION_NOTES.md"))).toBe(false);
+    expect(path.basename(parsed.mission.readmePath)).toBe("SPEC.md");
+    expect(parsed.mission.notesPath).toBeNull();
+    expect(parsed.mission.notesResolvedFrom).toBeNull();
+    expect(fs.existsSync(path.join(parsed.mission.path, "NOTES.md"))).toBe(false);
   });
 
-  it("FR-3: OPENRIG_MISSION_NOTES_TEMPLATE_PATH env var overrides the built-in template", async () => {
+  it("OPENRIG_NOTES_TEMPLATE_PATH overrides the built-in template", async () => {
     // Write a custom template at a temp path containing a distinctive marker.
     const customTemplatePath = path.join(env.root, "custom-mission-notes-template.md");
     fs.writeFileSync(
@@ -494,21 +484,21 @@ describe("rig scope mission create (HG-14 + HG-15)", () => {
       "---\nmission: {{mission_id}}\n---\n\n# CUSTOM TEMPLATE — {{mission_name}}\n\nCREATED ON {{created_date}}\n",
       "utf8",
     );
-    const prior = process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH;
-    process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH = customTemplatePath;
+    const prior = process.env.OPENRIG_NOTES_TEMPLATE_PATH;
+    process.env.OPENRIG_NOTES_TEMPLATE_PATH = customTemplatePath;
     try {
       const r = await run(["mission", "create", "release-0.8.0", "--json"], env.missionsRoot);
       expect(r.exitCode).toBe(0);
       const parsed = JSON.parse(r.stdout);
-      expect(parsed.mission.missionNotesResolvedFrom).toBe("env");
-      const content = fs.readFileSync(parsed.mission.missionNotesPath as string, "utf8");
+      expect(parsed.mission.notesResolvedFrom).toBe("env");
+      const content = fs.readFileSync(parsed.mission.notesPath as string, "utf8");
       expect(content).toMatch(/CUSTOM TEMPLATE — 0\.8\.0/);
       expect(content).toMatch(/mission: OPR\.0\.8\.0/);
       // Built-in canonical sections must NOT appear (proves we used the custom one).
       expect(content).not.toMatch(/## §1\. Top-of-mind context/);
     } finally {
-      if (prior === undefined) delete process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH;
-      else process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH = prior;
+      if (prior === undefined) delete process.env.OPENRIG_NOTES_TEMPLATE_PATH;
+      else process.env.OPENRIG_NOTES_TEMPLATE_PATH = prior;
     }
   });
 
@@ -546,29 +536,15 @@ describe("rig scope mission create (HG-14 + HG-15)", () => {
     expect(content).toContain("Scope complete");
   });
 
-  it("OPR.0.4.1.16: mission create scaffolds root MISSION_BRIEF.md with the locked 7-section schema", async () => {
+  it("mission create emits only the current mission surfaces", async () => {
     const r = await run(["mission", "create", "release-0.6.2", "--json"], env.missionsRoot);
     expect(r.exitCode).toBe(0);
     const parsed = JSON.parse(r.stdout);
-    const briefPath = path.join(parsed.mission.path, "MISSION_BRIEF.md");
-
-    expect(fs.existsSync(briefPath)).toBe(true);
-    expect(fs.statSync(briefPath).isFile()).toBe(true);
-    expect(fs.existsSync(path.join(parsed.mission.path, "brief", "MISSION_BRIEF.md"))).toBe(false);
-
-    const content = fs.readFileSync(briefPath, "utf8");
-    const headers = Array.from(content.matchAll(/^#{1,2} .+$/gm)).map((m) => m[0]);
-    expect(headers).toEqual([
-      "# 0.6.2 — Brief",
-      "## What & why",
-      "## Building",
-      "## Progress",
-      "## Proven",
-      "## Needs you",
-      "## Pointers",
-    ]);
-    expect(content).toContain("<optional one-line italic TL;DR>");
-    expect(content).toContain("→ MISSION_NOTES.md (continuity / restore) · → PROGRESS.md (active / next) · other key links");
+    expect(fs.existsSync(path.join(parsed.mission.path, "SPEC.md"))).toBe(true);
+    expect(fs.existsSync(path.join(parsed.mission.path, "PROGRESS.md"))).toBe(true);
+    expect(fs.existsSync(path.join(parsed.mission.path, "NOTES.md"))).toBe(true);
+    expect(fs.existsSync(path.join(parsed.mission.path, "MISSION_BRIEF.md"))).toBe(false);
+    expect(fs.existsSync(path.join(parsed.mission.path, "MISSION_NOTES.md"))).toBe(false);
   });
 });
 
@@ -1081,14 +1057,15 @@ describe("rig scope repair frontmatter conformance (OPR.0.4.1.6 FR-4)", () => {
 
     const r1 = await run(["slice", "repair", "05-ghost", "--mission", "release-0.3.2", "--json"], substrate.missionsRoot);
     expect(r1.exitCode).toBe(0);
-    const fm1 = readFrontmatter(ghostReadme);
+    const ghostSpec = path.join(ghost, "SPEC.md");
+    const fm1 = readFrontmatter(ghostSpec);
     expect(fm1.id).toBe("OPR.0.3.2.5");                 // minted from parent + NN, registered
     expect(fm1.stage).toBe("wip");                      // placeholder -> wip (migration map)
     expect(fm1.verified).toBe(`${today()} against backfill (rig scope repair)`);
 
     // Idempotent: a second run changes nothing.
     await run(["slice", "repair", "05-ghost", "--mission", "release-0.3.2", "--json"], substrate.missionsRoot);
-    const fm2 = readFrontmatter(ghostReadme);
+    const fm2 = readFrontmatter(ghostSpec);
     expect(fm2.id).toBe("OPR.0.3.2.5");
     expect(fm2.stage).toBe("wip");
     expect(fm2.verified).toBe(`${today()} against backfill (rig scope repair)`);
@@ -1098,23 +1075,23 @@ describe("rig scope repair frontmatter conformance (OPR.0.4.1.6 FR-4)", () => {
     const slice = path.join(substrate.missionsRoot, "release-0.3.2", "slices", "06-has-verified");
     writeFile(path.join(slice, "README.md"), "---\nid: OPR.0.3.2.6\nstage: established\nverified: 2026-01-02 against runtime (npm+tag)\n---\n# v\n");
     await run(["slice", "repair", "06-has-verified", "--mission", "release-0.3.2", "--json"], substrate.missionsRoot);
-    const fm = readFrontmatter(path.join(slice, "README.md"));
+    const fm = readFrontmatter(path.join(slice, "SPEC.md"));
     expect(fm.verified).toBe("2026-01-02 against runtime (npm+tag)"); // untouched
     expect(fm.stage).toBe("established");                              // untouched
   });
 
-  it("AC-4: mission repair conforms the mission README frontmatter too (lazy parent-id)", async () => {
+  it("AC-4: mission repair conforms the additive mission SPEC frontmatter too (lazy parent-id)", async () => {
     // A mission whose README has no id/stage/verified, plus a ghost slice.
     const m = path.join(substrate.missionsRoot, "backlog-new");
     writeFile(path.join(m, "README.md"), "---\nmission: backlog-new\n---\n# new\n");
     writeFile(path.join(m, "slices", "01-foo", "README.md"), "---\nstatus: active\n---\n# foo\n");
     const r = await run(["mission", "repair", "backlog-new", "--json"], substrate.missionsRoot);
     expect(r.exitCode).toBe(0);
-    const mfm = readFrontmatter(path.join(m, "README.md"));
+    const mfm = readFrontmatter(path.join(m, "SPEC.md"));
     expect(typeof mfm.id).toBe("string");          // escape-band id minted
     expect(mfm.stage).toBe("wip");
     expect(mfm.verified).toBe(`${today()} against backfill (rig scope repair)`);
-    const sfm = readFrontmatter(path.join(m, "slices", "01-foo", "README.md"));
+    const sfm = readFrontmatter(path.join(m, "slices", "01-foo", "SPEC.md"));
     expect(typeof sfm.id).toBe("string");          // child id = parentId.1
     expect(sfm.id).toBe(`${mfm.id}.1`);
     expect(sfm.stage).toBe("established");          // active -> established (migration map)

@@ -32,7 +32,7 @@ export interface ScopeApproveInput {
   /** Canonical missions-root-relative path (e.g.
    *  "release-0.4.4/slices/19-living-notes-signal-layer" or "release-0.4.4"). */
   scopePath: string;
-  /** STAGED APPROVAL (founder un-deferred): `spec` = "the PRD matches my
+  /** STAGED APPROVAL (founder un-deferred): `spec` = "the SPEC matches my
    *  intent" (the first accept-point); `delivery` = the terminal sign-off
    *  (the freeze trigger). Omitted upstream ⇒ delivery (back-compat). */
   approvalScope: ApprovalScope;
@@ -227,14 +227,15 @@ export class ScopeApproveService {
         lockedArtifacts = resolveExplicitPlanLockArtifacts(explicit, resolved, input.scopePath);
       } else {
         const prd = tryReadPRD(resolved);
-        lockedArtifacts = derivePlanLockArtifacts(originalBytes, prd);
-        if (isContentlessPlanLockSet(prd, lockedArtifacts)) {
+        const nodeFileName = path.basename(readmePath) === "SPEC.md" ? "SPEC.md" : "README.md";
+        lockedArtifacts = derivePlanLockArtifacts(originalBytes, prd, nodeFileName);
+        if (isContentlessPlanLockSet(originalBytes, lockedArtifacts)) {
           throw new ScopeApproveError(
             "plan_lock_contentless",
-            `${input.scopePath}: the derived locked-artifacts set is only the default IMPLEMENTATION-PRD.md pin, and that file is ${prd === null ? "missing" : "still unfilled scaffold"} — the lock would freeze content nobody chose.`,
+            `${input.scopePath}: the derived locked-artifacts set contains only a contentless ${nodeFileName} — the lock would freeze content nobody chose.`,
             {
               scopePath: input.scopePath,
-              action: "Author the PRD (or its README sections) so the plan carries real content, or name the real set explicitly: rig scope slice approve <slice> --scope spec --locked-artifacts \"SPEC.md,PLAN-….md\".",
+              action: "Author SPEC.md so the plan carries real content, or name the real set explicitly: rig scope slice approve <slice> --scope spec --locked-artifacts \"SPEC.md,PLAN-….md\".",
             },
           );
         }

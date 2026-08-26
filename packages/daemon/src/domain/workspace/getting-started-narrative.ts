@@ -1,7 +1,7 @@
 // V0.3.1 slice 21 onboarding-conveyor.
 //
 // Narrative tab content for the getting-started mission's two slices.
-// The scaffold writes these as README.md / timeline.md / PROGRESS.md
+// The scaffold writes these as SPEC.md / timeline.md / PROGRESS.md
 // inside each slice folder so a new operator's fresh install ships
 // with a click-through-to-learn experience: opening each tab teaches
 // both (a) what a conveyor run is and (b) what each Project tab does.

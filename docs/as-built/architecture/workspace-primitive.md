@@ -225,10 +225,10 @@ same scaffold is used **idempotently by daemon startup** so a fresh install
 has a browsable Project workspace before the operator discovers
 `rig config init-workspace`. Canonical subdirs: `missions/`, `artifacts/`,
 `evidence/`, `progress/`, `field-notes/`, `specs/`, `dogfood-evidence/`,
-plus per-mission `missions/<id>/slices/<slice-id>` folders. Drops
-`README.md` + `STEERING.md` (placeholder) + per-mission `README.md` /
-`PROGRESS.md` + per-slice `README.md` / `PROGRESS.md` /
-`IMPLEMENTATION-PRD.md`.
+plus per-mission `missions/<id>/slices/<slice-id>` folders. Drops the workspace
+`README.md` + `STEERING.md` placeholder; each mission gets `SPEC.md`, `NOTES.md`,
+and `PROGRESS.md`; each slice gets `SPEC.md`, `PROGRESS.md`, `PROOF.md`, and
+`proof/`. CLI and daemon scaffolds are byte-parity pinned.
 
 > Source: `domain/workspace/default-workspace-scaffold.ts:44-59`
 > (`workspaceScaffoldDirs`), `:247-283` (`workspaceScaffoldFiles`),

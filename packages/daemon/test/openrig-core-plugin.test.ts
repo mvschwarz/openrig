@@ -36,6 +36,7 @@ const EXPECTED_SKILLS = [
   "forming-an-openrig-mental-model",
   "messaging-the-human",
   "mission-slice-sop",
+  "openrig-operating-model",
   "openrig-skills",
   "openrig-user",
   "orienting-to-an-inherited-seat",

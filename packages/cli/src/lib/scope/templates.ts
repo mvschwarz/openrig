@@ -46,6 +46,10 @@ export interface RenderOpts {
   mission: string;
   title: string;
   created_date: string;
+  /** Authored purpose. Defaults to title for backwards-compatible callers. */
+  intent?: string;
+  /** Advisory build-order edges to sibling work-node dot-IDs. */
+  depends_on?: string[];
   release_version?: string;
   intent_visual_image_path?: string;
   intent_visual_diff_path?: string;
@@ -60,6 +64,9 @@ function applyPlaceholders(content: string, opts: RenderOpts): string {
     .replace(/\{\{mission\}\}/g, opts.mission)
     .replace(/\{\{title\}\}/g, opts.title)
     .replace(/\{\{created_date\}\}/g, opts.created_date)
+    .replace(/\{\{intent_yaml\}\}/g, JSON.stringify(opts.intent ?? opts.title))
+    .replace(/\{\{intent\}\}/g, opts.intent ?? opts.title)
+    .replace(/\{\{depends_on\}\}/g, JSON.stringify(opts.depends_on ?? []))
     .replace(/\{\{release_version\}\}/g, opts.release_version ?? "")
     .replace(/\{\{intent_visual_image_path\}\}/g, opts.intent_visual_image_path ?? "./intent.png")
     .replace(/\{\{intent_visual_diff_path\}\}/g, opts.intent_visual_diff_path ?? "./change.diff")
@@ -72,11 +79,8 @@ export function renderSliceTemplate(kind: SliceTemplateKind, opts: RenderOpts): 
   return applyPlaceholders(raw, opts);
 }
 
-// OPR.0.4.4.23 — every scaffolded slice also gets an IMPLEMENTATION-PRD.md
-// skeleton (the convention sections + the elastic-middle header note), so a
-// fresh install authors what the Living Notes UI projects. One skeleton for
-// all SliceTemplateKind values; proportionality lives in the note, not in
-// kind-specific PRD shapes. Conventions SSOT: docs/reference/sdlc-conventions.md.
+/** Legacy renderer retained for callers reading or repairing pre-convention
+ * trees. New scope scaffolds never call it. */
 export function renderImplementationPrdTemplate(opts: RenderOpts): string {
   const raw = fs.readFileSync(resolveTemplate("implementation-prd.md"), "utf8");
   return applyPlaceholders(raw, opts);
@@ -88,78 +92,63 @@ export function renderMissionTemplate(kind: MissionTemplateKind, opts: RenderOpt
   return applyPlaceholders(raw, opts);
 }
 
-// OPR.0.3.2.21.FR-3 — MISSION_NOTES.md scaffold support.
-//
-// `rig scope mission create` auto-copies a MISSION_NOTES.md alongside
-// the README. The template lives at scope-templates/mission-notes.md
-// by default; the operator can override via the
-// OPENRIG_MISSION_NOTES_TEMPLATE_PATH env var (banked env-var-pivot
-// pattern: env > built-in fallback).
-
-export interface MissionNotesRenderOpts {
+export interface NotesRenderOpts {
   mission_id: string;
   mission_name: string;
   created_date: string;
 }
 
-function applyMissionNotesPlaceholders(content: string, opts: MissionNotesRenderOpts): string {
+function applyNotesPlaceholders(content: string, opts: NotesRenderOpts): string {
   return content
     .replace(/\{\{mission_id\}\}/g, opts.mission_id)
     .replace(/\{\{mission_name\}\}/g, opts.mission_name)
     .replace(/\{\{created_date\}\}/g, opts.created_date);
 }
 
-/**
- * Resolve the MISSION_NOTES.md template absolute path.
- * Env-var override > built-in bundled fallback (scope-templates/mission-notes.md).
- * Returns the absolute path; the caller reads the file content.
- */
-export function resolveMissionNotesTemplatePath(envValue?: string): string {
-  const fromEnv = envValue ?? process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH;
-  if (fromEnv && fromEnv.trim().length > 0) {
-    const absPath = path.resolve(fromEnv.trim());
+export type NotesTemplateSource = "env" | "legacy-env" | "built-in";
+
+/** Resolve the current NOTES.md template. The retired environment name stays
+ * readable as a fallback and is surfaced to callers as `legacy-env`. */
+export function resolveNotesTemplatePath(envValue?: string): { absPath: string; resolvedFrom: NotesTemplateSource } {
+  const current = envValue ?? process.env.OPENRIG_NOTES_TEMPLATE_PATH;
+  const legacy = envValue === undefined ? process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH : undefined;
+  const selected = current?.trim() ? current : legacy?.trim() ? legacy : null;
+  const resolvedFrom: NotesTemplateSource = current?.trim()
+    ? "env"
+    : legacy?.trim()
+      ? "legacy-env"
+      : "built-in";
+  if (selected) {
+    const absPath = path.resolve(selected);
     if (!fs.existsSync(absPath)) {
+      const variable = resolvedFrom === "legacy-env"
+        ? "OPENRIG_MISSION_NOTES_TEMPLATE_PATH"
+        : "OPENRIG_NOTES_TEMPLATE_PATH";
       throw new ScopeCliError({
-        fact: `OPENRIG_MISSION_NOTES_TEMPLATE_PATH points at "${fromEnv}", which does not exist.`,
-        consequence: "MISSION_NOTES.md not scaffolded.",
-        action: "Set OPENRIG_MISSION_NOTES_TEMPLATE_PATH to an absolute path to a readable template file, or unset it to use the built-in bundled fallback.",
+        fact: `${variable} points at "${selected}", which does not exist.`,
+        consequence: "NOTES.md not scaffolded.",
+        action: `Set OPENRIG_NOTES_TEMPLATE_PATH to an absolute readable template, or unset ${variable} to use the built-in fallback.`,
       });
     }
-    return absPath;
+    return { absPath, resolvedFrom };
   }
-  return resolveTemplate("mission-notes.md");
+  return { absPath: resolveTemplate("notes.md"), resolvedFrom };
 }
 
-/**
- * Render a MISSION_NOTES.md by reading the resolved template + substituting
- * the three placeholders (mission_id / mission_name / created_date).
- *
- * Surfaces the resolution decision (env-override vs built-in) for callers
- * that want to log or test the path.
- */
-export function renderMissionNotesTemplate(
-  opts: MissionNotesRenderOpts,
+export function renderNotesTemplate(
+  opts: NotesRenderOpts,
   envValue?: string,
-): { rendered: string; resolvedFrom: "env" | "built-in"; absPath: string } {
-  const envVal = envValue ?? process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH;
-  const usedEnv = Boolean(envVal && envVal.trim().length > 0);
-  const absPath = resolveMissionNotesTemplatePath(envValue);
-  const raw = fs.readFileSync(absPath, "utf8");
+): { rendered: string; resolvedFrom: NotesTemplateSource; absPath: string } {
+  const resolved = resolveNotesTemplatePath(envValue);
   return {
-    rendered: applyMissionNotesPlaceholders(raw, opts),
-    resolvedFrom: usedEnv ? "env" : "built-in",
-    absPath,
+    rendered: applyNotesPlaceholders(fs.readFileSync(resolved.absPath, "utf8"), opts),
+    ...resolved,
   };
 }
 
 export function renderMissionProgressTemplate(missionName: string): string {
   const raw = fs.readFileSync(resolveTemplate("mission-progress.md"), "utf8");
   return raw.replace(/\{\{missionName\}\}/g, missionName);
-}
-
-export function renderMissionBriefTemplate(missionName: string): string {
-  const raw = fs.readFileSync(resolveTemplate("mission-brief.md"), "utf8");
-  return raw.replace(/\{\{mission_name\}\}/g, missionName);
 }
 
 export function renderSliceProgressTemplate(sliceName: string): string {

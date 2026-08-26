@@ -102,7 +102,7 @@ culture / pod / member / operator) handles the layering.
 
 ## See also
 
-- `mission-slice-sop` skill — the universal operating procedure for working a mission/slice (the canonical PROGRESS/PROOF/MISSION_NOTES/MISSION_BRIEF files); every agent should reach for it at startup, so this general reading contract points at it here (do NOT duplicate the SOP into seat-specific startup files).
+- `mission-slice-sop` skill — the universal operating procedure for working a mission/slice (the canonical SPEC.md, NOTES.md, PROGRESS.md, PROOF.md, and proof/ surfaces); every agent should reach for it at startup, so this general reading contract points at it here (do NOT duplicate the SOP into seat-specific startup files).
 - `writing-skills-for-openrig` skill — authoring discipline for skill content (what doesn't belong in startup)
 - `forming-an-openrig-mental-model` skill — orientation for new agents
 - `session-compaction-and-restore` skill — restore-time startup ingestion

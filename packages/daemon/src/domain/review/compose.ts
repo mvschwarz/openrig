@@ -424,7 +424,12 @@ export function extractProofContract(prd: string | null): PromisedItem[] {
 // existing extractors are unchanged; these wrap them.
 // ---------------------------------------------------------------------------
 
-export function extractMiniReqsSelected(prd: string | null, readme: string | null): { body: string | null; fromReadme: boolean } {
+export function extractMiniReqsSelected(
+  prd: string | null,
+  readme: string | null,
+  spec: string | null = null,
+): { body: string | null; fromReadme: boolean } {
+  if (spec !== null) return { body: extractMiniReqs(spec), fromReadme: false };
   const prdBody = extractMiniReqs(prd);
   if (isPristineScaffoldSection(prdBody)) {
     const readmeBody = extractMiniReqs(readme);
@@ -1049,6 +1054,8 @@ export interface SliceComposeInputs {
   slice: { name: string; id: string | null; title: string; missionId: string | null };
   /** Raw file contents (null = absent). */
   readme: string | null;
+  /** Which node filename supplied `readme`; absent preserves legacy caller behavior. */
+  nodeFileName?: "SPEC.md" | "README.md";
   prd: string | null;
   proofMd: string | null;
   artifacts: ProofArtifact[];
@@ -1103,6 +1110,8 @@ export function composeSliceReview(inputs: SliceComposeInputs): ComposedSliceRev
   // treated as ABSENT at the source, so the EXISTING "no intent recorded"
   // degrade fires — no new string, UI/freeze inherit (R7). Any authored line
   // in the block keeps the section verbatim (byte-identity carve).
+  const currentSpec = inputs.nodeFileName === "SPEC.md" ? inputs.readme : null;
+  const legacyReadme = inputs.nodeFileName === "SPEC.md" ? null : inputs.readme;
   const intentTextRaw = extractSection(inputs.readme, "Intent");
   const intentText = intentTextRaw !== null && !isPlaceholderOnlyBlock(intentTextRaw) ? intentTextRaw : null;
   const intentMedia = sectionMedia(intentText, escaping);
@@ -1110,7 +1119,7 @@ export function composeSliceReview(inputs: SliceComposeInputs): ComposedSliceRev
   // a pristine scaffold-only PRD section yields to an authored README
   // section). ONE selected parse per section drives BOTH the render and the
   // phase signal below (the single-parse pin, AR-2/S5, preserved).
-  const miniSel = extractMiniReqsSelected(inputs.prd, inputs.readme);
+  const miniSel = extractMiniReqsSelected(inputs.prd, legacyReadme, currentSpec);
   const miniReqs = miniSel.body;
   const planMedia = dedupMedia([
     ...sectionMedia(miniReqs, escaping),
@@ -1119,7 +1128,7 @@ export function composeSliceReview(inputs: SliceComposeInputs): ComposedSliceRev
       .filter((m): m is ReviewMedia => m !== null),
   ]);
 
-  const promised = extractProofContractSelected(inputs.prd, inputs.readme).items;
+  const promised = extractProofContractSelected(inputs.prd, legacyReadme, currentSpec).items;
   const delivered = composeDelivered(promised, inputs.artifacts);
   delivered.escapingRefs.forEach((r) => escaping.add(r));
 
@@ -1136,7 +1145,7 @@ export function composeSliceReview(inputs: SliceComposeInputs): ComposedSliceRev
   // move together, never apart.
   const miniReqsIsAuthored = hasAuthoredMiniReqs(miniReqs);
   const phase = derivePhase({
-    prdAuthored: inputs.prd !== null && (promised.length > 0 || miniReqsIsAuthored),
+    prdAuthored: (currentSpec !== null || inputs.prd !== null) && (promised.length > 0 || miniReqsIsAuthored),
     realProofArtifactsPresent: inputs.artifacts.length > 0,
     activeQitemPresent: inputs.activeQitemPresent,
     verdictOrEvidenceSetPresent: anyRecordedVerdict || claimedPass,
@@ -1212,7 +1221,7 @@ export function composeSliceReview(inputs: SliceComposeInputs): ComposedSliceRev
     intent: {
       text: intentText,
       media: intentMedia,
-      ssotPath: inputs.readme !== null ? `${sliceRef}/README.md` : null,
+      ssotPath: inputs.readme !== null ? `${sliceRef}/${inputs.nodeFileName ?? "README.md"}` : null,
       degrade: intentText === null ? "no intent recorded" : null,
     },
     plan: {
@@ -1226,8 +1235,10 @@ export function composeSliceReview(inputs: SliceComposeInputs): ComposedSliceRev
       // PM dogfood #1 — the ssot pointer follows the SELECTED mini-reqs
       // source (README when its authored section won over a pristine PRD
       // section); absent-source behavior unchanged.
-      ssotPath: miniSel.fromReadme
-        ? `${sliceRef}/README.md`
+      ssotPath: currentSpec !== null
+        ? `${sliceRef}/SPEC.md`
+        : miniSel.fromReadme
+          ? `${sliceRef}/README.md`
         : inputs.prd !== null ? `${sliceRef}/IMPLEMENTATION-PRD.md` : null,
     },
     delivered: {

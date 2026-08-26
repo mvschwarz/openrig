@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
+import { ConfigStore } from "../../config-store.js";
 
 import type {
   MissionInfo,
@@ -19,6 +20,7 @@ import {
   inferMissionDotId,
   nextEscapeBandOrdinal,
 } from "./dot-id.js";
+import { isSliceDotId } from "./dot-id.js";
 
 const FRONTMATTER_DELIM = "---\n";
 const SLICE_DIRNAME_RE = /^(\d+)-(.+)$/;
@@ -99,15 +101,13 @@ export function updateFrontmatter(
 // Mission discovery
 // ---------------------------------------------------------------------
 
-/** Locate the missions root for the working substrate. Resolution
- *  order:
- *    1. Explicit override (env or arg)
- *    2. $OPENRIG_WORK_ROOT/missions
- *    3. Search up from cwd for a `missions/` folder
- */
+/** Locate the missions root from an explicit workspace override or the typed
+ * `workspace.slices_root` setting. No cwd walk: discovery may enumerate
+ * candidates, but selection comes from configuration. */
 export function resolveMissionsRoot(opts: {
   override?: string | null;
   cwd?: string;
+  configPath?: string;
 } = {}): string {
   const cwd = opts.cwd ?? process.cwd();
   const fromOverride = opts.override ?? process.env.OPENRIG_WORK_ROOT;
@@ -117,18 +117,12 @@ export function resolveMissionsRoot(opts: {
     if (fs.existsSync(missions) && fs.statSync(missions).isDirectory()) return missions;
     if (path.basename(candidate) === "missions" && fs.existsSync(candidate)) return candidate;
   }
-  let dir = cwd;
-  for (let i = 0; i < 8; i++) {
-    const candidate = path.join(dir, "missions");
-    if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) return candidate;
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
+  const configured = new ConfigStore(opts.configPath).get("workspace.slices_root") as string;
+  if (configured && fs.existsSync(configured) && fs.statSync(configured).isDirectory()) return configured;
   throw new ScopeCliError({
-    fact: `Could not locate a missions/ root from cwd ${cwd}.`,
+    fact: `Configured workspace.slices_root is not a readable directory: ${configured || "(unset)"}.`,
     consequence: "No mission tree to operate on.",
-    action: "cd into the substrate workspace, or set OPENRIG_WORK_ROOT=/path/to/your/workspace.",
+    action: "Set workspace.slices_root with `rig config set`, or pass --workspace /path/to/your/workspace.",
   });
 }
 
@@ -158,7 +152,7 @@ export function resolveNodeFile(absPath: string): string | null {
 
 /** List mission folders under the missions root. A mission is any
  *  top-level folder containing an authored node file (SPEC.md, or legacy
- *  README.md — per IMPLEMENTATION-PRD §2.1 / HG-8). Directories with
+ *  README.md). Directories with
  *  neither are skipped — they represent scratch/junk, not declared missions. */
 export function listMissions(missionsRoot: string): MissionInfo[] {
   if (!fs.existsSync(missionsRoot)) return [];
@@ -204,10 +198,9 @@ function pickIdFromFrontmatter(fm: Record<string, unknown>): string | null {
 }
 
 /** Resolve a mission by name OR path relative to the missions root.
- *  Throws ScopeCliError on miss OR when the directory exists but
- *  lacks a README.md (consistent with listMissions' README gate per
- *  PRD §2.1 / HG-8 — README-less dirs are scratch/junk, not declared
- *  missions, so mutation commands must not silently target them). */
+ *  Throws ScopeCliError on miss OR when the directory exists but lacks an
+ *  authored node file. Node-less dirs are scratch/junk, not declared missions,
+ *  so mutation commands must not silently target them. */
 export function findMission(missionsRoot: string, identifier: string): MissionInfo {
   const candidates = [
     path.join(missionsRoot, identifier),
@@ -272,6 +265,7 @@ export function listSlices(
       out.push(sliceInfo);
     }
   }
+  out.sort((a, b) => (a.nn ?? Number.MAX_SAFE_INTEGER) - (b.nn ?? Number.MAX_SAFE_INTEGER) || a.name.localeCompare(b.name));
   if (state === "active") {
     // active = not in closed/, but also not shipped status.
     return out.filter((s) => {
@@ -283,6 +277,75 @@ export function listSlices(
     return out.filter((s) => (s.status ?? "").toLowerCase().startsWith("shipped"));
   }
   return out;
+}
+
+export interface MissionDependencyGraph {
+  mission: { id: string | null; name: string; dependsOn: string[] };
+  nodes: Array<{ id: string; name: string; dependsOn: string[] }>;
+  ready: string[];
+  waiting: Array<{ id: string; on: string[] }>;
+  advisories: Array<{
+    id: string;
+    dependency?: string;
+    kind: "invalid_field" | "invalid_dependency" | "outside_parent" | "missing_sibling" | "missing_id";
+    message: string;
+  }>;
+}
+
+/** Read the advisory sibling-ordering graph for one mission. Unknown, stale,
+ * malformed, or cross-parent edges are reported and ignored: the graph is a
+ * sequencing hint, never a gate or a traversal pointer. */
+export function buildMissionDependencyGraph(mission: MissionInfo): MissionDependencyGraph {
+  const all = listSlices(mission, "all");
+  const active = listSlices(mission, "active");
+  const byId = new Map(all.flatMap((slice) => slice.id ? [[slice.id, slice] as const] : []));
+  const activeIds = new Set(active.flatMap((slice) => slice.id ? [slice.id] : []));
+  const advisories: MissionDependencyGraph["advisories"] = [];
+  const nodes: MissionDependencyGraph["nodes"] = [];
+  const ready: string[] = [];
+  const waiting: MissionDependencyGraph["waiting"] = [];
+
+  for (const slice of active) {
+    if (!slice.id) {
+      advisories.push({ id: slice.name, kind: "missing_id", message: "Slice has no dot-ID; it cannot participate in the dependency graph." });
+      continue;
+    }
+    const raw = slice.frontmatter.depends_on;
+    const dependencies: string[] = [];
+    if (raw !== undefined && !Array.isArray(raw)) {
+      advisories.push({ id: slice.id, kind: "invalid_field", message: "depends_on must be a list of sibling dot-IDs; the value was ignored." });
+    }
+    for (const value of Array.isArray(raw) ? raw : []) {
+      if (typeof value !== "string" || !isSliceDotId(value)) {
+        advisories.push({ id: slice.id, dependency: String(value), kind: "invalid_dependency", message: "Dependency is not a slice dot-ID and was ignored." });
+        continue;
+      }
+      if (mission.id && !value.startsWith(`${mission.id}.`)) {
+        advisories.push({ id: slice.id, dependency: value, kind: "outside_parent", message: "Dependency is outside this mission and was ignored." });
+        continue;
+      }
+      if (!byId.has(value)) {
+        advisories.push({ id: slice.id, dependency: value, kind: "missing_sibling", message: "Dependency does not resolve to a sibling and was ignored." });
+        continue;
+      }
+      dependencies.push(value);
+    }
+    nodes.push({ id: slice.id, name: slice.name, dependsOn: dependencies });
+    const unmet = dependencies.filter((dependency) => activeIds.has(dependency));
+    if (unmet.length === 0) ready.push(slice.id);
+    else waiting.push({ id: slice.id, on: unmet });
+  }
+
+  const missionDependsOn = Array.isArray(mission.frontmatter.depends_on)
+    ? mission.frontmatter.depends_on.filter((value): value is string => typeof value === "string")
+    : [];
+  return {
+    mission: { id: mission.id, name: mission.name, dependsOn: missionDependsOn },
+    nodes,
+    ready,
+    waiting,
+    advisories,
+  };
 }
 
 function buildSliceInfo(mission: MissionInfo, sliceRoot: string, dirName: string): SliceInfo {

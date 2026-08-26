@@ -44,6 +44,7 @@ shows an operator — `get` is the agent-facing pull.)
 These are auto-delivered to every rig; their name+description are already in your context. Open the body when the "when" matches.
 
 - **forming-an-openrig-mental-model** — first boot, or you're unsure how the pieces fit. The runtime mental model.
+- **openrig-operating-model** — you do not know where context or work belongs, or you are about to duplicate knowledge. The two-tree placement and trace-to-root model.
 - **openrig-user** — you need a `rig` CLI command (send / queue / ps / whoami / scope / broadcast). The daily CLI surface.
 - **claude-compaction-restore** — you just compacted (Claude). Restore from durable evidence before resuming real work.
 - **session-compaction-and-restore** — preparing for, or recovering from, compaction (any runtime). The write- and read-side protocol.

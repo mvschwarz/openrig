@@ -81,6 +81,7 @@ export interface ScopeAuditInput {
   // caller-read. Undefined = the caller has no content context and every
   // section check is inert (no false findings). null = the file does not
   // exist (the proof-contract check falls back to the README on a null PRD).
+  nodeFileName?: "SPEC.md" | "README.md";
   readmeContent?: string | null;
   implementationPrdContent?: string | null;
 }
@@ -99,21 +100,6 @@ export const MISSION_BRIEF_HEADERS = ["What & why", "Building", "Progress", "Pro
 
 function childPath(parent: string, child: string): string {
   return parent.endsWith("/") ? `${parent}${child}` : `${parent}/${child}`;
-}
-
-function missionBriefFix(): string {
-  return "Create/populate MISSION_BRIEF.md using the slice-16 schema: # <Mission name> — Brief, then ## What & why, ## Building, ## Progress, ## Proven, ## Needs you, ## Pointers.";
-}
-
-function missionBriefConforms(content: string): boolean {
-  const lines = content.split(/\r?\n/);
-  const title = lines.find((line) => /^#\s+/.test(line) && !/^##\s+/.test(line))?.trim() ?? "";
-  if (!/^#\s+.+\s+—\s+Brief\s*$/.test(title)) return false;
-  const h2s = lines
-    .map((line) => /^##\s+(.+?)\s*$/.exec(line)?.[1]?.trim() ?? null)
-    .filter((header): header is string => header !== null);
-  if (h2s.length < MISSION_BRIEF_HEADERS.length) return false;
-  return MISSION_BRIEF_HEADERS.every((header, idx) => h2s[idx] === header);
 }
 
 function parseStatusFromFrontmatter(raw: string | null): string | null {
@@ -138,21 +124,6 @@ function statusRequiresProof(status: string | null | undefined): boolean {
     || normalized.includes("close")
     || normalized.includes("proven")
     || normalized.includes("promoted");
-}
-
-// OPR.0.4.4.19 FR-10 (C7) — the statusRequiresProof pattern applied one
-// phase earlier: a slice whose status implies SPECCED/BUILDING (or later)
-// must carry IMPLEMENTATION-PRD.md at its root ("no build without a
-// specifying doc"). Shaping / pre-spec statuses are NOT violations.
-function statusRequiresSpec(status: string | null | undefined): boolean {
-  if (!status) return false;
-  const normalized = status.toLowerCase().trim();
-  return normalized.includes("build")
-    || normalized.includes("implement")
-    || normalized.includes("in-progress")
-    || normalized.includes("review")
-    || normalized.includes("qa")
-    || statusRequiresProof(normalized);
 }
 
 // OPR.0.4.4.19 FR-10 (C1) — the ratified closed sets (BR-4; source of truth
@@ -221,6 +192,7 @@ function missionIsActive(status: string | null | undefined): boolean {
 export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
   const findings: AuditFinding[] = [];
   let frontmatterError: string | null = null;
+  let parsedFrontmatter: Record<string, unknown> = {};
   let railStatus: RailStatus;
 
   // Rail status
@@ -283,6 +255,7 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
       const fm = parsed && typeof parsed === "object" && !Array.isArray(parsed)
         ? parsed as Record<string, unknown>
         : {};
+      parsedFrontmatter = fm;
       const id = typeof fm.id === "string" ? fm.id : null;
 
       if (!id) {
@@ -309,40 +282,17 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
   }
 
   if (input.level === "mission") {
-    const briefPath = input.missionBriefPath ?? childPath(input.path, "MISSION_BRIEF.md");
-    if (input.missionBriefExists === false) {
-      findings.push({
-        kind: "missing_mission_brief",
-        severity: "medium",
-        path: briefPath,
-        message: "Mission has no root MISSION_BRIEF.md, so the Steering tab human-facing brief degrades.",
-        remediation: missionBriefFix(),
-      });
-    } else if (
-      input.missionBriefExists === true
-      && typeof input.missionBriefContent === "string"
-      && !missionBriefConforms(input.missionBriefContent)
-    ) {
-      findings.push({
-        kind: "malformed_mission_brief",
-        severity: "medium",
-        path: briefPath,
-        message: "MISSION_BRIEF.md does not match the canonical MISSION_BRIEF.md section order.",
-        remediation: missionBriefFix(),
-      });
-    }
-
     if (
       input.missionNotesExists === false
       && missionIsActive(parseStatusFromFrontmatter(input.readmeFrontmatterRaw))
     ) {
-      const notesPath = input.missionNotesPath ?? childPath(input.path, "MISSION_NOTES.md");
+      const notesPath = input.missionNotesPath ?? childPath(input.path, "NOTES.md");
       findings.push({
         kind: "missing_mission_notes",
         severity: "low",
         path: notesPath,
-        message: "Mission has no MISSION_NOTES.md continuity file.",
-        remediation: "Add MISSION_NOTES.md at the mission root and populate it per the mission-notes convention.",
+        message: "Mission has no NOTES.md context file.",
+        remediation: "Add NOTES.md at the mission root. Existing MISSION_NOTES.md remains a readable legacy fallback.",
       });
     }
   }
@@ -382,32 +332,25 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
       }
     }
 
-    // OPR.0.4.4.19 FR-10 (C7 backstop) — a specced/building-or-later slice
-    // must carry IMPLEMENTATION-PRD.md (the pinned expected filename) at its
-    // root. Status-gated: shaping is not a violation. Inert when the caller
-    // provided no fs context (implementationPrdExists undefined).
-    if (input.implementationPrdExists === false && statusRequiresSpec(status)) {
-      findings.push({
-        kind: "missing_impl_prd",
-        severity: "medium",
-        path: childPath(input.path, "IMPLEMENTATION-PRD.md"),
-        message: `Slice status "${status}" implies specced/building but there is no IMPLEMENTATION-PRD.md at the slice root (C7: no build without a specifying doc).`,
-        remediation: "Author (or relocate) the slice's IMPLEMENTATION-PRD.md at the slice root — the pinned C7 filename — before building continues.",
-      });
-    }
-
     // OPR.0.4.4.23 — SDLC convention-section advisories (SSOT:
     // docs/reference/sdlc-conventions.md). Structurally fail-open: the
     // audit command flips its exit code on HIGH findings only, and these
     // are low/info by construction — they record and advise, never gate.
     // Inert when the caller provided no content context (undefined inputs).
-    if (typeof input.readmeContent === "string" && !hasH2(input.readmeContent, "Intent")) {
+    const frontmatterIntent = typeof parsedFrontmatter.intent === "string"
+      && parsedFrontmatter.intent.trim().length > 0;
+    const currentSpec = input.nodeFileName === "SPEC.md"
+      || (input.nodeFileName === undefined && frontmatterIntent);
+    const nodeFileName = currentSpec ? "SPEC.md" : "README.md";
+    if (typeof input.readmeContent === "string" && !frontmatterIntent && !hasH2(input.readmeContent, "Intent")) {
       findings.push({
         kind: "missing_intent_section",
         severity: "low",
-        path: childPath(input.path, "README.md"),
-        message: "Slice README has no `## Intent` section, so the Living Notes UI cannot project its INTENT section.",
-        remediation: "Add `## Intent` carrying the recorded intent verbatim (conventions SSOT: docs/reference/sdlc-conventions.md (installed: $OPENRIG_HOME/reference/sdlc-conventions.md); `rig scope slice create` scaffolds it).",
+        path: childPath(input.path, nodeFileName),
+        message: `${nodeFileName} has no frontmatter \`intent:\` or legacy \`## Intent\` section.`,
+        remediation: currentSpec
+          ? "Add a non-empty `intent:` to SPEC.md frontmatter."
+          : "Add a non-empty `intent:` or retain a legacy `## Intent` section in README.md.",
       });
     }
 
@@ -422,6 +365,9 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
     const prdContentStr = typeof input.implementationPrdContent === "string" ? input.implementationPrdContent : null;
     const readmeContentStr = typeof input.readmeContent === "string" ? input.readmeContent : null;
     const pickSectionSource = (heading: string): { body: string | null; path: string } | null => {
+      if (currentSpec && readmeContentStr !== null) {
+        return { body: h2Body(readmeContentStr, heading), path: childPath(input.path, nodeFileName) };
+      }
       if (prdContentStr !== null) {
         const prdBody = h2Body(prdContentStr, heading);
         if (isPristineScaffoldSection(prdBody) && readmeContentStr !== null) {
@@ -458,9 +404,9 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
           severity: "low",
           path: miniSource.path,
           message: miniBody === null
-            ? "No `## Mini-requirements` section — the Living Notes PLAN section has no concise requirements tier to project."
+            ? "No `## Mini-requirements` section — the scope plan has no concise requirements tier."
             : "`## Mini-requirements` carries no numbered items (`1. …`) — the one-glance requirement tier is where approval starts.",
-          remediation: "Add `## Mini-requirements` with a numbered list of observable outcomes (conventions SSOT: docs/reference/sdlc-conventions.md (installed: $OPENRIG_HOME/reference/sdlc-conventions.md); for a small slice this may BE the whole PRD).",
+          remediation: `Add \`## Mini-requirements\` to ${nodeFileName} with a numbered list of observable outcomes (for a small slice this may be the whole specification).`,
         });
       }
     }
@@ -484,9 +430,9 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
           severity: "low",
           path: contractSource.path,
           message: contractBody === null
-            ? "No `## Proof contract` section — the DELIVERED pairing has no promised-deliverables source to join proof against."
-            : "`## Proof contract` carries no checkbox deliverables (`- [ ] …`) — the DELIVERED pairing joins proof against those items.",
-          remediation: "Add `## Proof contract` with one checkbox line per promised deliverable, written as an observable outcome (conventions SSOT: docs/reference/sdlc-conventions.md (installed: $OPENRIG_HOME/reference/sdlc-conventions.md)).",
+            ? "No `## Proof contract` section — proof has no promised-deliverables source to pair against."
+            : "`## Proof contract` carries no checkbox deliverables (`- [ ] …`) for proof to pair against.",
+          remediation: `Add \`## Proof contract\` to ${nodeFileName} with one checkbox line per promised deliverable, written as an observable outcome (conventions SSOT: docs/reference/sdlc-conventions.md (installed: $OPENRIG_HOME/reference/sdlc-conventions.md)).`,
         });
       }
 
@@ -505,7 +451,7 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
           findings.push({
             kind: "ui_slice_missing_mockup",
             severity: "info",
-            path: childPath(input.path, "README.md"),
+            path: childPath(input.path, nodeFileName),
             message: "Slice declares an Intent visual (UI slice) but no mockup reference is present — a UI slice with no mockup in its locked set is an incomplete plan.",
             remediation: "Attach the planned mockup: an image ref in `## Intent visual` or a plannedRef on the proof-contract deliverable (conventions SSOT: docs/reference/sdlc-conventions.md §3 (installed: $OPENRIG_HOME/reference/sdlc-conventions.md §3)).",
           });

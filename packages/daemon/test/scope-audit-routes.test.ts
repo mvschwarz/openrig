@@ -181,7 +181,7 @@ describe("GET /api/scope/audit", () => {
     expect(body.totalFindings).toBe(0);
   });
 
-  it("mission missing brief and notes returns advisory findings without hard-failing", async () => {
+  it("mission missing NOTES returns one advisory without reviving the retired brief gate", async () => {
     const missionDir = path.join(missionsRoot, "briefless-mission");
     fs.mkdirSync(missionDir, { recursive: true });
     fs.writeFileSync(path.join(missionDir, "README.md"), "---\nid: OPR.99.0.3\n---\n# briefless\n", "utf8");
@@ -195,14 +195,11 @@ describe("GET /api/scope/audit", () => {
       totalFindings: number;
     };
     expect(body.ok).toBe(true);
-    expect(body.totalFindings).toBe(2);
-    expect(body.mission.findings.find((f) => f.kind === "missing_mission_brief")).toMatchObject({
-      severity: "medium",
-      path: path.join(missionDir, "MISSION_BRIEF.md"),
-    });
+    expect(body.totalFindings).toBe(1);
+    expect(body.mission.findings.some((f) => f.kind === "missing_mission_brief")).toBe(false);
     expect(body.mission.findings.find((f) => f.kind === "missing_mission_notes")).toMatchObject({
       severity: "low",
-      path: path.join(missionDir, "MISSION_NOTES.md"),
+      path: path.join(missionDir, "NOTES.md"),
     });
   });
 
@@ -237,9 +234,9 @@ describe("GET /api/scope/audit", () => {
       path: path.join(doneSlice, "PROOF.md"),
     });
     expect(done?.findings.find((f) => f.kind === "missing_proof")?.remediation).toMatch(/proof\//);
-    expect(done?.findings.some((f) => f.kind === "missing_impl_prd")).toBe(true);
+    expect(done?.findings.some((f) => f.kind === "missing_impl_prd")).toBe(false);
     expect(wip?.findings.some((f) => f.kind === "missing_proof")).toBe(false);
-    expect(body.totalFindings).toBe(2);
+    expect(body.totalFindings).toBe(1);
   });
 
   it("proof-packet-backed proven slice without root proof returns missing_proof", async () => {

@@ -1,6 +1,6 @@
 # Project Workspace Contract
 
-OpenRig's Project UI is a file-backed view over a workspace root. The folder
+OpenRig's Project TUI is a file-backed view over a workspace root. The folder
 shape is intentionally simple so humans and agents can create or repair it
 without daemon-internal knowledge.
 
@@ -16,29 +16,35 @@ workspace/
   missions/
     README.md
     idea-ledger/
-      README.md
+      SPEC.md
+      NOTES.md
       PROGRESS.md
       slices/
         capture-product-ideas/
-          README.md
+          SPEC.md
           PROGRESS.md
-          IMPLEMENTATION-PRD.md
+          PROOF.md
+          proof/
         triage-product-ideas/
-          README.md
+          SPEC.md
           PROGRESS.md
-          IMPLEMENTATION-PRD.md
+          PROOF.md
+          proof/
     handoff-loop/
-      README.md
+      SPEC.md
+      NOTES.md
       PROGRESS.md
       slices/
         route-work-packets/
-          README.md
+          SPEC.md
           PROGRESS.md
-          IMPLEMENTATION-PRD.md
+          PROOF.md
+          proof/
         verify-loop-evidence/
-          README.md
+          SPEC.md
           PROGRESS.md
-          IMPLEMENTATION-PRD.md
+          PROOF.md
+          proof/
   progress/
   field-notes/
   specs/
@@ -51,8 +57,10 @@ workspace/
 - `workspace.root/missions/<mission-id>/slices/<slice-id>` maps to a Project slice.
 - Mission `PROGRESS.md` frontmatter supplies the mission status badge when the
   file root is allowlisted.
-- Slice `README.md`, `PROGRESS.md`, and `IMPLEMENTATION-PRD.md` frontmatter
-  supply display name, lifecycle status, mission id, and queue linkage hints.
+- Mission and slice `SPEC.md` frontmatter supplies intent, advisory sibling
+  build-order `depends_on`, lifecycle status, and queue linkage hints.
+- Slice `PROGRESS.md` is the durable acceptance checklist; `PROOF.md` and
+  `proof/` retain evidence paired to the SPEC proof contract.
 
 Mission and slice ids should be stable kebab-case strings. Keep slice ids
 unique inside the workspace so `/project/slice/<slice-id>` resolves without
@@ -93,7 +101,7 @@ If Project shows a mission discovery warning:
 2. Run `rig config get workspace.slices_root --show-source`.
 3. Confirm `workspace.slices_root` points at a folder containing mission
    directories with `slices/` children.
-4. Confirm `files.allowlist` includes `workspace:<workspace.root>` so the UI
+4. Confirm `files.allowlist` includes `workspace:<workspace.root>` so the TUI
    can read mission `PROGRESS.md`.
 5. If the workspace is missing, run `rig config init-workspace` after operator
    approval.
