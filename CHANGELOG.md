@@ -8,6 +8,73 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.5.3] - 2026-08-26
+
+**Status**: shipped; **"the context release"** — pull exact context by address instead of reading files. **v0.5.3 contains v0.5.2 in full** — one lineage, no divergence.
+
+### Summary For Installing Agents
+
+- **Package version**: bumps from `0.5.2`.
+- **Migrations**: none in this release. Migration head stays at 071 (matching 0.5.2). Nothing to apply on a v0.5.2→v0.5.3 upgrade.
+- **Node engines**: unchanged.
+- **API surface**: preserved from v0.5.2; no CLI-command or flag removals or renames.
+- **New CLI verbs**: `rig context get`, `rig context list`, `rig context profile`, `rig context recap-write`.
+
+### Headline
+
+**Pull exact context by address instead of reading files.** `rig context get <pack-ref>/<file>#<H2-slug>[/<H3-slug>]` returns the exact span bytes of one section. The `openrig-skills` router teaches the three-step: ask → ref → load. Refocus resolves refs automatically. Handovers write a durable, superseded-chain seat recap. Composition is by reference, so there is no second copy to drift.
+
+### What you can now do
+
+#### Pull exact context by address, not by reading files
+
+`rig context get <pack-ref>/<file>#<H2-slug>[/<H3-slug>]` returns the exact span bytes of one section. The `/<file>` component is required even in a one-file pack. A bogus slug fails loud and lists the addressable sections. `rig context list` shows every shipped entry's ref and name; `rig context show` inspects one. Refs are canonical full paths (e.g. `skills/<namespace>/<name>`). Cross-source access (`seat:` / `mission:` atoms) is an authoring affordance: declared in pack manifests and granted via `rig context profile --rig/--seat/--mission` during composition — not an ad-hoc argument to `get`.
+
+**Reach for it when:** you need one section of a shipped skill or library entry and would previously have read or copied the whole file.
+
+#### Discover context by asking, not by guessing paths
+
+The `openrig-skills` router teaches the three-step: ask → ref → load. Run `rig context list` for refs, match your moment to an entry's `when`, load by ref.
+
+**Reach for it when:** you don't know which skill or context applies, or nothing is projected after a cold boot.
+
+#### Write a durable seat recap
+
+`rig context recap-write` maintains a seat-scoped `RECAP.md` beside `LEARNED` with a collision-safe superseded chain; restore packets carry an authored-recap pointer.
+
+**Reach for it when:** handover, compaction boundary, or any moment your successor would otherwise re-derive your state from scrollback.
+
+#### Trust refocus to resolve refs
+
+The refocus hook resolves library refs automatically (ref beats file), fails loud but non-blocking, and delivers pointers — the shipped channel for pointing running seats at new content.
+
+#### Fetch bounded domain expertise on demand
+
+`rig context get` serves expertise packs by path-like ref, e.g. `skills/process/context-engineering`. The old `context-pack:` colon form was removed and the CLI says so.
+
+**Caveat that pack:** it is titled "Traditional Context Engineering — 2024-2025 Snapshot" for a reason — provisional, historical, non-normative by founder ruling. Current OpenRig skills, explicit user rulings, and measured practice outrank it on any conflict.
+
+### What to STOP doing (each was correct under 0.5.2 and is wrong now)
+
+1. **STOP copying library content into seat or mission files to compose context.** Compose by ref — addressing means there is no second copy to drift. Nothing catches the copy automatically; it is still a defect by rule.
+2. **STOP treating a `MODEL DIVERGENCE` proclamation as alias noise.** The canonicalize-then-compare fix ended the pinned=fable / effective=claude-fable-5 false-positive class, and the monitor now isolates per-seat throws. A proclamation on this runtime is a real escalation — act on it.
+3. **STOP reading "founder-gated" in tool errors as an authorization wall.** The overstated wording is retired from the scripts; those guards demand explicit paths (e.g. `OPENRIG_SKILL_CANON_ROOT`), not permission. The real founder boundary is exactly: pushes and PRs. Local commits and ordinary apply work never need founder word.
+4. **STOP hand-placing evidence or trusting a placeholder PRD as the proof contract.** `rig proof add` pairs evidence to the contract, and a pristine scaffold PRD can never silently become that contract: the authored SPEC serves with a named advisory (`contractSource` in the echo tells you which source bound).
+
+### Landed but not yet drivable (recorded so nobody reaches for it)
+
+Eval CASES ship (14 selection/loading cases), but no runnable grading pass exists today. `--provider rig` is the live proof-contract door and is NOT YET DRIVEN — it says so itself and redirects to fake (the wiring is exactly the convergence-test driver work in flight). `--provider fake` replays only transcripts supplied via `--transcripts <map.json>` and errors every case without one. When the live door is driven, the next release promotes this to a capability.
+
+### Known Limitations (5.4 backlog)
+
+- **Reply-hint self-qualify** — still open from 5.2; reply-hints on some cross-host messages address themselves via machine-ID rather than registered host name; substitute the registered host name from `rig host list`. Fix in 5.4.
+- **Eval grading pass** — CASES ship; no runnable grading pass yet. Driven `--provider rig` lands in 5.4.
+- **`rig send --verify` does not detect staged-unsent** for multi-line sends toward Claude seats — carried from 5.2 backlog.
+- **Claude transcripts thin under fullscreen upsell** — carried from 5.2 backlog.
+- Plus internal debt items ledgered for maintenance.
+
+---
+
 ## [0.5.2] - 2026-08-22
 
 **Status**: shipped; test system exercises for real, crash-cart fleet-restore conductor, reliability fixes shipped through the test system. **v0.5.2 contains v0.5.1 in full** — one lineage, no divergence.
