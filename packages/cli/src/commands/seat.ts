@@ -373,6 +373,105 @@ Examples:
       console.log(`Cleared ${session}: ${from} -> ready (${clearedBy})`);
     });
 
+  // S5 (OPR.0.5.4.7) — the seat-lifecycle verb surface: set-model / stop / clean.
+  // Thin CLI over the daemon's SeatLifecycleService; refusals print message +
+  // guidance + match list exactly as the daemon named them.
+  const runLifecycleVerb = async (
+    path: "set-model" | "stop" | "clean",
+    seat: string,
+    body: Record<string, unknown>,
+    opts: { json?: boolean },
+    printOk: (data: Record<string, unknown>) => void,
+  ): Promise<void> => {
+    const deps = getDeps();
+    const daemon = await getDaemonStatus(deps.lifecycleDeps);
+    if (!daemonStatusGuard(daemon)) return;
+    const client = deps.clientFactory(getDaemonUrl(daemon));
+    const res = await client.post<Record<string, unknown>>(
+      `/api/seat/${path}/${encodeURIComponent(seat)}`,
+      body,
+    );
+    if (opts.json) {
+      console.log(JSON.stringify(res.data, null, 2));
+      if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
+      return;
+    }
+    if (res.status >= 400) {
+      printSeatError(res.data as unknown as SeatStatusError, `Seat ${path} failed (HTTP ${res.status})`);
+      process.exitCode = res.status >= 500 ? 2 : 1;
+      return;
+    }
+    printOk(res.data);
+  };
+
+  cmd
+    .command("set-model")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .requiredOption("--model <id>", "Target model id (e.g. the canonical id an alias pin migrates to)")
+    .requiredOption("--reason <text>", "Audit reason recorded on the node.model_changed event")
+    .option("--operator <address>", "Operator recorded on the audit event")
+    .option("--json", "JSON output for agents")
+    .description("Persist a seat's model id (audited); subsequent managed resumes use the new model")
+    .addHelpText("after", `
+Session lineage is untouched — only nodes.model changes, and every managed
+resume/successor launch reads it at call time. Examples:
+  rig seat set-model dev-impl@my-rig --model claude-fable-5 --reason "alias fable -> canonical"
+  rig seat set-model dev.impl --model claude-fable-5 --reason "canonical migration" --json`)
+    .action(async (seat: string, opts: { model: string; reason: string; operator?: string; json?: boolean }) => {
+      await runLifecycleVerb("set-model", seat, { model: opts.model, reason: opts.reason, operator: opts.operator }, opts, (data) => {
+        const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
+        if (data["changed"] === false) {
+          console.log(`Model for ${s?.logicalId}@${s?.rigName} already ${String(data["to"])} — no change recorded.`);
+          return;
+        }
+        console.log(`Model for ${s?.logicalId}@${s?.rigName}: ${String(data["from"] ?? "none")} -> ${String(data["to"])} (audited).`);
+        console.log("The next managed resume/successor launch composes the new model.");
+      });
+    });
+
+  cmd
+    .command("stop")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .requiredOption("--reason <text>", "Audit reason recorded on the session.stopped event")
+    .option("--operator <address>", "Operator recorded on the audit event")
+    .option("--json", "JSON output for agents")
+    .description("Stop exactly one LIVE managed seat (kills only that seat's tmux session; audited)")
+    .addHelpText("after", `
+Siblings are untouched. A dead seat is refused (use rig seat clean); an adopted
+session is refused (use rig unclaim). Examples:
+  rig seat stop dev-impl@my-rig --reason "wave boundary retirement"
+  rig seat stop dev.impl --reason "stuck occupant" --json`)
+    .action(async (seat: string, opts: { reason: string; operator?: string; json?: boolean }) => {
+      await runLifecycleVerb("stop", seat, { reason: opts.reason, operator: opts.operator }, opts, (data) => {
+        const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
+        console.log(`Stopped ${String(data["sessionName"])} (seat ${s?.logicalId}@${s?.rigName}).`);
+        console.log("Session marked exited, binding cleared; siblings untouched. Relaunch via the normal launch surface.");
+      });
+    });
+
+  cmd
+    .command("clean")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .requiredOption("--reason <text>", "Audit reason recorded on the session.cleaned event")
+    .option("--operator <address>", "Operator recorded on the audit event")
+    .option("--json", "JSON output for agents")
+    .description("Return a DEAD seat to launchable (clears stale binding + session records; audited)")
+    .addHelpText("after", `
+Live owner state is preserved: the node row, session history (incl. resume
+tokens), and the occupant-tenure ledger are untouched. A live seat is refused
+(use rig seat stop). Examples:
+  rig seat clean dev-impl@my-rig --reason "clean exit observed, relaunch wanted"
+  rig seat clean dev.impl --reason "post-crash tidy" --json`)
+    .action(async (seat: string, opts: { reason: string; operator?: string; json?: boolean }) => {
+      await runLifecycleVerb("clean", seat, { reason: opts.reason, operator: opts.operator }, opts, (data) => {
+        const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
+        const actions = data["actions"] as { sessionsExited?: string[]; bindingCleared?: boolean } | undefined;
+        console.log(`Cleaned seat ${s?.logicalId}@${s?.rigName}.`);
+        console.log(`Sessions marked exited: ${actions?.sessionsExited?.length ? actions.sessionsExited.join(", ") : "none (already terminal)"}; binding cleared: ${actions?.bindingCleared ? "yes" : "no"}.`);
+        console.log("Owner state preserved (node, session history, tenure ledger). The seat is launchable again.");
+      });
+    });
+
   // OPR.0.4.0.22 — set a managed seat's durable resume token (attested + audited).
   // The token is read from STDIN ONLY (never a positional argv, which would leak
   // via shell history + argv/ps) and is NEVER echoed back.

@@ -7,6 +7,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import { SeatStatusService } from "../domain/seat-status-service.js";
 import { SeatHandoverService } from "../domain/seat-handover-service.js";
 import { SeatSwitchClientService } from "../domain/seat-switch-client-service.js";
+import { SeatLifecycleService, type SeatRefusal } from "../domain/seat-lifecycle-service.js";
 import { makePredecessorRecapResolver } from "../domain/predecessor-recap-resolver.js";
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
 import { existsSync } from "node:fs";
@@ -143,6 +144,62 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
     return c.json(result, 500);
   }
   return c.json(result, 404);
+});
+
+// S5 (OPR.0.5.4.7) — the seat-lifecycle verb surface: set-model / stop / clean.
+// One service, one resolution path, one status mapping shared by all three verbs.
+function seatLifecycleService(c: { get(key: never): unknown }): SeatLifecycleService {
+  const rigRepo = c.get("rigRepo" as never) as RigRepository;
+  return new SeatLifecycleService({
+    db: rigRepo.db,
+    rigRepo,
+    sessionRegistry: c.get("sessionRegistry" as never) as SessionRegistry,
+    eventBus: c.get("eventBus" as never) as EventBus,
+    tmuxAdapter: c.get("tmuxAdapter" as never) as TmuxAdapter,
+  });
+}
+
+function seatLifecycleStatus(code: SeatRefusal["code"]): 400 | 404 | 409 | 502 {
+  if (code === "seat_ref_required" || code === "missing_model" || code === "missing_reason") return 400;
+  if (code === "seat_not_found") return 404;
+  if (code === "tmux_probe_failed") return 502;
+  // seat_ambiguous / session_live / session_not_live / no_session / claimed_session /
+  // nothing_to_clean — state conflicts, not client syntax errors.
+  return 409;
+}
+
+seatRoutes.post("/set-model/:seatRef", async (c) => {
+  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const result = await seatLifecycleService(c).setModel({
+    seatRef: decodeURIComponent(c.req.param("seatRef")!),
+    model: typeof body["model"] === "string" ? body["model"] : "",
+    reason: typeof body["reason"] === "string" ? body["reason"] : "",
+    operator: typeof body["operator"] === "string" ? body["operator"] : null,
+  });
+  if (result.ok) return c.json(result);
+  return c.json(result, seatLifecycleStatus(result.code));
+});
+
+seatRoutes.post("/stop/:seatRef", async (c) => {
+  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const result = await seatLifecycleService(c).stopSeat({
+    seatRef: decodeURIComponent(c.req.param("seatRef")!),
+    reason: typeof body["reason"] === "string" ? body["reason"] : "",
+    operator: typeof body["operator"] === "string" ? body["operator"] : null,
+  });
+  if (result.ok) return c.json(result);
+  return c.json(result, seatLifecycleStatus(result.code));
+});
+
+seatRoutes.post("/clean/:seatRef", async (c) => {
+  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const result = await seatLifecycleService(c).cleanSeat({
+    seatRef: decodeURIComponent(c.req.param("seatRef")!),
+    reason: typeof body["reason"] === "string" ? body["reason"] : "",
+    operator: typeof body["operator"] === "string" ? body["operator"] : null,
+  });
+  if (result.ok) return c.json(result);
+  return c.json(result, seatLifecycleStatus(result.code));
 });
 
 // OPR.0.4.3.26 — seat-recovery VIEW retarget. Points an attached tmux client at
