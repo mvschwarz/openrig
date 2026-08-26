@@ -91,8 +91,10 @@ describe("config routes (User Settings v0)", () => {
     //   active_wake_interval_seconds)
     // + 2 B6 founder ruling (policies.idle_gate_qitem.auto_register /
     //   opt_in_sessions — the not-default-on gate)
-    // + 1 OPR.0.5.3.6 D1 (topology.root — the topology tree root) → 55 total.
-    expect(Object.keys(body.settings).length).toBe(55);
+    // + 1 OPR.0.5.3.6 D1 (topology.root — the topology tree root)
+    // + 1 OPR.0.5.3.7 R4 (context.packs_root)
+    // + 1 S15 (onboarding.default_pack.enabled) → 57 total.
+    expect(Object.keys(body.settings).length).toBe(57);
     expect(body.settings["daemon.port"]?.source).toBe("default");
     expect(body.settings["ui.preview.refresh_interval_seconds"]?.value).toBe(3);
     expect(body.settings["ui.preview.max_pins"]?.value).toBe(4);
@@ -101,6 +103,7 @@ describe("config routes (User Settings v0)", () => {
     expect(body.settings["recovery.provider_auth_env_allowlist"]?.value).toBe("");
     expect(body.settings["host.selected"]).toMatchObject({ value: "local", source: "default" });
     expect(body.settings["host.name"]).toMatchObject({ value: "localhost", source: "default" });
+    expect(body.settings["onboarding.default_pack.enabled"]).toMatchObject({ value: true, source: "default" });
     expect(String(body.settings["workspace.dogfood_evidence_root"]?.value)).toMatch(/dogfood-evidence$/);
   });
 
