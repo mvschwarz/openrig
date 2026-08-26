@@ -53,5 +53,15 @@ export function healthSummaryRoutes(): Hono {
     return c.json({ version: getDaemonVersion() });
   });
 
+  // S10 — the in-daemon gateway subsystem's health (amended M1 §3 shape). An absent handle is
+  // reported honestly (a daemon built without the subsystem must not read as a healthy gateway).
+  app.get("/gateway", (c) => {
+    const subsystem = c.get("gatewaySubsystem" as never) as
+      | { status: () => Record<string, unknown> }
+      | undefined;
+    if (!subsystem) return c.json({ error: "gateway_subsystem_unavailable" }, 503);
+    return c.json(subsystem.status());
+  });
+
   return app;
 }

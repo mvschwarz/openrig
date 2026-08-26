@@ -202,6 +202,10 @@ export interface AppDeps {
   watchdogScheduler?: WatchdogScheduler;
   /** B8 / slice-07 A3 — the model-divergence monitor (effective-vs-pinned, four-channel proclaim). */
   modelDivergenceMonitor?: import("./domain/model-divergence/model-divergence-monitor.js").ModelDivergenceMonitor;
+  /** S10 — the in-daemon gateway subsystem (amended M1 §3: in-process, no second deployable).
+   *  Optional so test harnesses constructing AppDeps directly need not provide one; the health
+   *  route reports honestly when absent. */
+  gatewaySubsystem?: import("./domain/gateway/gateway-subsystem.js").GatewaySubsystem;
   periodicSnapshotScheduler?: import("./domain/periodic-snapshot-scheduler.js").PeriodicSnapshotScheduler;
   workflowRuntime?: WorkflowRuntime;
   /**
@@ -457,6 +461,8 @@ export function createApp(deps: AppDeps): Hono {
     c.set("tmuxOptionDefaults" as never, deps.tmuxOptionDefaults);
     c.set("sessionEnv" as never, deps.sessionEnv);
     c.set("cmuxAdapter" as never, deps.cmuxAdapter);
+    // S10 — the in-daemon gateway subsystem handle (health surface + dispatch seam).
+    c.set("gatewaySubsystem" as never, deps.gatewaySubsystem);
     // Slice 24 — per-rig CMUX workspace launcher wiring.
     c.set(
       "cmuxLayoutService" as never,

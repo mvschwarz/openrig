@@ -249,6 +249,13 @@ export async function startServer(port?: number) {
     } catch (err) {
       console.error("[periodic-snapshot] shutdown error", err);
     }
+    // S10 — stop the in-daemon gateway subsystem (durable buffer keeps un-Acked
+    // decisions; they replay on the next boot's activation).
+    try {
+      deps.gatewaySubsystem?.stop();
+    } catch (err) {
+      console.error("[gateway] shutdown error", err);
+    }
     try {
       if (retentionTimer) clearInterval(retentionTimer);
     } catch (err) {

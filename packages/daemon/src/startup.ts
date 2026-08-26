@@ -1992,6 +1992,25 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   permissionModes.warm();
   deps.permissionDriftObserver = new PermissionDriftObserver({ db, permissionModes });
 
+  // S10 (OPR.0.5.5.10) — activate the gateway as an IN-DAEMON SUBSYSTEM at boot (M1 §3 as
+  // amended: no child process, no connector wire — the shipped dispatcher + durable buffer
+  // composed in-process). start() never throws: a wiring failure surfaces as state=failed on
+  // the health surface and boot proceeds. Slack delivery wires at the relay cutover; until
+  // then the delivery seam refuses honestly and dispatches are retained durably.
+  const { GatewaySubsystem, buildInProcessWire } = await import("./domain/gateway/gateway-subsystem.js");
+  const gatewaySubsystem = new GatewaySubsystem({
+    home: OPENRIG_HOME,
+    wire: () => buildInProcessWire({
+      home: OPENRIG_HOME,
+      deliver: async () => ({ ok: false, class: "slack-delivery-unwired", detail: "relay cutover pending (S10 atom D)" }),
+      ops: [],
+      log: (m) => console.log(`[gateway] ${m}`),
+    }),
+    log: (m) => console.log(`[gateway] ${m}`),
+  });
+  gatewaySubsystem.start();
+  deps.gatewaySubsystem = gatewaySubsystem;
+
   const { app, injectWebSocket } = createAppWithWebSocket(deps);
 
   return { app, db, deps, contextMonitor, eventLoopMonitor, injectWebSocket };
