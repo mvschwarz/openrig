@@ -225,7 +225,9 @@ export interface QueueCreateInput {
 export interface QueueUpdateInput {
   qitemId: string;
   actorSession: string;
-  state: QueueState;
+  state?: QueueState;
+  /** Explicit acknowledgment for a deliberate terminal → active repair. */
+  reopen?: boolean;
   /**
    * OPR.0.4.6.WF3 FR-6 — set ONLY by the workflow domain's own write
    * paths (projector close, route close): they hold the frontier
@@ -1798,10 +1800,85 @@ export class QueueRepository {
         `qitem ${input.qitemId} not found`
       );
     }
+    const hasNote = typeof input.transitionNote === "string" && input.transitionNote.trim().length > 0;
+    const isGuardedTerminal = (["done", "canceled", "handed-off"] as const).includes(
+      qitem.state as "done" | "canceled" | "handed-off",
+    );
+    const isStatePreservingAppend = input.state === undefined || (isGuardedTerminal && input.state === qitem.state);
+
+    if (isStatePreservingAppend) {
+      if (input.state === undefined && !hasNote) {
+        throw new QueueRepositoryError(
+          "state_or_note_required",
+          "queue update requires --state or a non-empty --note; nothing was written",
+        );
+      }
+      const disallowed = input.reopen === true
+        || input.closureReason != null
+        || input.closureTarget != null
+        || input.handedOffTo != null
+        || input.blockedOn != null
+        || input.summary != null
+        || input.evidenceRef != null;
+      if (disallowed) {
+        throw new QueueRepositoryError(
+          "note_append_fields_not_admitted",
+          "a state-preserving note append accepts only --note (and an optional same --state); state-write fields were supplied, so nothing was written",
+        );
+      }
+
+      this.transitionLog.append({
+        qitemId: input.qitemId,
+        state: qitem.state,
+        actorSession: input.actorSession,
+        transitionNote: input.transitionNote,
+        identityProvenance: input.identityProvenance ?? null,
+      });
+      return this.eventBus.persistWithinTransaction({
+        type: "queue.updated",
+        qitemId: input.qitemId,
+        fromState: qitem.state,
+        toState: qitem.state,
+        closureReason: null,
+        closureTarget: null,
+        actorSession: input.actorSession,
+        summary: qitem.summary ?? null,
+      });
+    }
     if (!isQueueState(input.state)) {
       throw new QueueRepositoryError(
         "invalid_state",
         `state=${input.state} not valid; valid: ${QUEUE_STATES.join(", ")}`
+      );
+    }
+
+    const isReopen = isGuardedTerminal && input.state !== qitem.state;
+    if (isReopen && !input.reopen) {
+      throw new QueueRepositoryError(
+        "terminal_reopen_requires_ack",
+        `qitem ${input.qitemId} is currently '${qitem.state}'; state='${input.state}' would reopen a terminal row. Re-run deliberately with --reopen --note <reason>.`,
+        { currentState: qitem.state, requestedState: input.state },
+      );
+    }
+    if (isReopen && !isBlockerLive(input.state)) {
+      throw new QueueRepositoryError(
+        "terminal_reopen_target_invalid",
+        `qitem ${input.qitemId} is currently '${qitem.state}'; --reopen requires an active target state (pending, in-progress, or blocked), not '${input.state}'.`,
+        { currentState: qitem.state, requestedState: input.state },
+      );
+    }
+    if (isReopen && !hasNote) {
+      throw new QueueRepositoryError(
+        "reopen_note_required",
+        `qitem ${input.qitemId} is currently '${qitem.state}'; deliberate reopen requires --note <reason> so the repair is auditable.`,
+        { currentState: qitem.state, requestedState: input.state },
+      );
+    }
+    if (input.reopen && !isReopen) {
+      throw new QueueRepositoryError(
+        "reopen_not_applicable",
+        `--reopen applies only when moving a terminal row to an active state; qitem ${input.qitemId} is currently '${qitem.state}'.`,
+        { currentState: qitem.state, requestedState: input.state },
       );
     }
 
@@ -2001,7 +2078,7 @@ export class QueueRepository {
       qitemId: input.qitemId,
       state: input.state,
       actorSession: input.actorSession,
-      transitionNote: input.transitionNote,
+      transitionNote: isReopen ? `reopen acknowledged: ${input.transitionNote}` : input.transitionNote,
       closureReason: validation.closureReason ?? undefined,
       closureTarget: validation.closureTarget ?? undefined,
       identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
@@ -2448,6 +2525,6 @@ export class QueueRepository {
   }
 }
 
-function isQueueState(value: string): value is QueueState {
-  return (QUEUE_STATES as readonly string[]).includes(value);
+function isQueueState(value: unknown): value is QueueState {
+  return typeof value === "string" && (QUEUE_STATES as readonly string[]).includes(value);
 }

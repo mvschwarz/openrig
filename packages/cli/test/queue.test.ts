@@ -571,6 +571,49 @@ describe("rig queue CLI", () => {
     expect(out).toContain("validReasons");
   });
 
+  it("update accepts a note without state", async () => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+
+    await program.parseAsync([
+      "node", "rig", "queue", "update", "qitem-note",
+      "--note", "audit bytes",
+      "--json",
+    ]);
+
+    expect(calls.find((c) => c.path === "/api/queue/qitem-note/update")?.body).toEqual({
+      state: undefined,
+      reopen: undefined,
+      closureReason: undefined,
+      closureTarget: undefined,
+      blockedOn: undefined,
+      summary: undefined,
+      evidenceRef: undefined,
+      transitionNote: "audit bytes",
+    });
+  });
+
+  it("update forwards explicit reopen acknowledgment", async () => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+
+    await program.parseAsync([
+      "node", "rig", "queue", "update", "qitem-reopen",
+      "--state", "pending",
+      "--note", "repair",
+      "--reopen",
+      "--json",
+    ]);
+
+    expect(calls.find((c) => c.path === "/api/queue/qitem-reopen/update")?.body).toMatchObject({
+      state: "pending",
+      reopen: true,
+      transitionNote: "repair",
+    });
+  });
+
   it("handoff-and-complete sends NO body fromSession — the handing-off seat derives from the transport header (X-OpenRig-Session); --from is dropped, --to stays the target", async () => {
     const saved = process.env["OPENRIG_SESSION_NAME"];
     process.env["OPENRIG_SESSION_NAME"] = "bob@rig"; // the seat env == the X-OpenRig-Session the DaemonClient stamps

@@ -139,6 +139,12 @@ export function queueRoutes(): Hono {
         : err.code === "invalid_closure_reason" ? 400
         : err.code === "missing_closure_target" ? 400
         : err.code === "invalid_state" ? 400
+        : err.code === "state_or_note_required" ? 400
+        : err.code === "note_append_fields_not_admitted" ? 400
+        : err.code === "terminal_reopen_requires_ack" ? 409
+        : err.code === "terminal_reopen_target_invalid" ? 400
+        : err.code === "reopen_note_required" ? 400
+        : err.code === "reopen_not_applicable" ? 400
         : err.code === "claim_destination_mismatch" ? 403
         : err.code === "qitem_not_claimable" ? 409
         : err.code === "qitem_not_in_progress" ? 409
@@ -536,6 +542,7 @@ export function queueRoutes(): Hono {
     const body = await c.req.json<{
       actorSession?: string;
       state?: QueueState;
+      reopen?: boolean;
       transitionNote?: string;
       closureReason?: string;
       closureTarget?: string;
@@ -550,13 +557,13 @@ export function queueRoutes(): Hono {
     const identity = requireSenderIdentity(c, { verb: "queue update", bodyClaim: body.actorSession });
     if (!identity.ok) return identity.response;
     const actorSession = identity.session;
-    if (!body.state) return c.json({ error: "state is required" }, 400);
 
     try {
       const item = getRepo(c).update({
         qitemId,
         actorSession,
         state: body.state,
+        reopen: body.reopen,
         transitionNote: body.transitionNote,
         closureReason: body.closureReason,
         closureTarget: body.closureTarget,

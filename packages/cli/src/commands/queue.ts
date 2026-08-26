@@ -477,9 +477,10 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
 
   cmd
     .command("update <qitemId>")
-    .description("Mutate qitem state. state=done REQUIRES --closure-reason (one of: handed_off_to, blocked_on, denied, canceled, no-follow-on, escalation). Closure ≠ acceptance: handed_off_to records delivery to the next stage; acceptance is the next stage's verdict on its own qitem, not this closure.")
+    .description("Append a note and/or mutate qitem state. A note without --state never changes row state. state=done REQUIRES --closure-reason (one of: handed_off_to, blocked_on, denied, canceled, no-follow-on, escalation). Closure ≠ acceptance: handed_off_to records delivery to the next stage; acceptance is the next stage's verdict on its own qitem, not this closure.")
     .option("--actor <session>", "(deprecated, ignored) the actor is derived from the seat env (X-OpenRig-Session); P21 I3 made the update route derive it from the transport header")
-    .requiredOption("--state <state>", "New state: pending | in-progress | done | blocked | failed | denied | canceled | handed-off")
+    .option("--state <state>", "New state: pending | in-progress | done | blocked | failed | denied | canceled | handed-off")
+    .option("--reopen", "Explicitly acknowledge a deliberate terminal-to-active repair; requires --state and --note")
     .option("--closure-reason <reason>", "Required for state=done; also 'superseded' on state=canceled (with --closure-target = the successor) records a supersession, distinct from an abandoned cancel")
     .option("--closure-target <target>", "Required for handed_off_to, blocked_on, escalation, and superseded")
     .option("--blocked-on <blocker>", "For state=blocked: the blocker — a qitem id (must exist and be live), a human seat (FR-6 park; requires summary + evidence_ref), or a typed non-qitem gate 'fold:<what>' / 'auth:<what>' / 'external:<what>'")
@@ -489,7 +490,8 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: {
       actor?: string;
-      state: string;
+      state?: string;
+      reopen?: boolean;
       closureReason?: string;
       closureTarget?: string;
       blockedOn?: string;
@@ -506,6 +508,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
           state: opts.state,
+          reopen: opts.reopen,
           closureReason: opts.closureReason,
           closureTarget: opts.closureTarget,
           blockedOn: opts.blockedOn,
