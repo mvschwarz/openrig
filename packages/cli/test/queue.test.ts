@@ -1065,7 +1065,8 @@ describe("rig queue CLI", () => {
       expect(printed.bodyBytes).toBe(1000);
       expect(Array.from(printed.body).length).toBe(512);
       // marker line on its OWN line, with the honest total byte size
-      expect(logs.join("\n")).toContain("truncated — 1000 bytes total; --full for complete body");
+      expect(logs.join("\n")).toContain("bounded preview — complete body is 1000 bytes; --full to display it");
+      expect(logs.join("\n")).not.toMatch(/\btruncated\b/i);
     });
 
     it("show default: small body → full body, NO marker, bodyTruncated=false", async () => {
@@ -1471,6 +1472,8 @@ describe("P3 — authored-summary teaching layer (advisory + --summary hint)", (
     const hc = await warnFor("handoff-and-complete");
     expect(h).toMatch(TEACHES_WHERE);
     expect(h).toMatch(TEACHES_WHY);
+    expect(h).toMatch(/pass --summary <text>/i);
+    expect(h).not.toMatch(/body truncation/i);
     expect(hc).toBe(h); // parity rail: the two handoff advisories are byte-identical
   });
 

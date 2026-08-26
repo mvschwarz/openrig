@@ -112,7 +112,7 @@ export function renderDaemonTransportError(
       fact: e.message,
       consequence: "The command's outcome is UNKNOWN — the daemon did not answer in time.",
       action:
-        "The daemon is slow or unresponsive (check load); retry once conditions ease. This is a slow response, not a stopped daemon.",
+        "Check the command's effect before any retry, then inspect daemon load with 'rig status' and the daemon logs if it remains slow. This is a slow response, not a stopped daemon.",
     };
   } else if (e instanceof DaemonConnectionError) {
     parts = {

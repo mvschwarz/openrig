@@ -161,5 +161,7 @@ describe("render response integrity — 3-part error + honest exit, never daemon
     expect(exitCode).toBe(1);
     for (const p of DAEMON_DOWN_PHRASES) expect(stderr).not.toMatch(p);
     expect(stderr).toMatch(/timed out|slow|unresponsive/i);
+    expect(stderr).toMatch(/check the command's effect before any retry/i);
+    expect(stderr).not.toMatch(/retry once conditions ease/i);
   });
 });

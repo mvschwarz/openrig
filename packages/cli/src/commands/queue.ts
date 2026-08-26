@@ -662,7 +662,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       // it should carry its own summary. Warn to stderr; do not hard-break.
       if (!opts.summary) {
         process.stderr.write(
-          "warning: rig queue handoff called without --summary. The new qitem should carry a short human-readable summary; the Story node degrades to a body truncation without it. A good summary is 1-2 plain sentences a human skims in the needs-you view — what the work is and why it needs this seat, not the agent-speak --body. Proceeding.\n"
+          "warning: rig queue handoff called without --summary. Pass --summary <text> to set the new qitem's short human-readable summary; without it, the Story node falls back to a bounded body preview. A good summary is 1-2 plain sentences a human skims in the needs-you view — what the work is and why it needs this seat, not the agent-speak --body. Proceeding.\n"
         );
       }
       const deps = getDeps();
@@ -755,7 +755,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       // it should carry its own summary. Warn to stderr; do not hard-break.
       if (!opts.summary) {
         process.stderr.write(
-          "warning: rig queue handoff called without --summary. The new qitem should carry a short human-readable summary; the Story node degrades to a body truncation without it. A good summary is 1-2 plain sentences a human skims in the needs-you view — what the work is and why it needs this seat, not the agent-speak --body. Proceeding.\n"
+          "warning: rig queue handoff called without --summary. Pass --summary <text> to set the new qitem's short human-readable summary; without it, the Story node falls back to a bounded body preview. A good summary is 1-2 plain sentences a human skims in the needs-you view — what the work is and why it needs this seat, not the agent-speak --body. Proceeding.\n"
         );
       }
       const deps = getDeps();
@@ -848,7 +848,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         const transformed = { ...item, body: preview, bodyBytes, bodyTruncated };
         printResult(json, transformed, res.status);
         if (!json && bodyTruncated) {
-          console.log(`… (truncated — ${bodyBytes} bytes total; --full for complete body)`);
+          console.log(`… (bounded preview — complete body is ${bodyBytes} bytes; --full to display it)`);
         }
       });
     });
