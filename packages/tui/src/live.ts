@@ -69,7 +69,7 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
       snapshot = next;
     } catch {
       // rejection-release: the prior snapshot stays (nothing fabricated),
-      // in-flight clears below, and the next scheduled refresh retries
+      // in-flight clears below, and the next requested refresh retries
     } finally {
       load.inFlight = false;
       load.settled = true;

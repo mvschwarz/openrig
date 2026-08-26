@@ -27,8 +27,6 @@ import { evaluateOneClickGate, restoreConfirmMessage } from "./crash-cart/one-cl
 import type { Action, FleetSnapshot, Screen } from "./types.js";
 import type { SpecReviewCache } from "./hydrate.js";
 
-const REFRESH_MS = 5000;
-
 function argOf(args: string[], flag: string): string | undefined {
   const i = args.indexOf(flag);
   return i >= 0 ? args[i + 1] : undefined;
@@ -195,10 +193,20 @@ async function run(): Promise<void> {
     // inspect / onboarding: entry-point seams (no cockpit notice channel this wave).
   }
 
-  const socketPath = argOf(args, "--socket") ?? defaultSocketPath(instanceId);
-  const socket = await createControlSocket({ socketPath, view, onMutation: draw, currentContext: () => currentCommandContext(crashCartOpts.daemonState ?? null) });
+  function refreshFromActivity(): void {
+    if (live) void live.refresh();
+  }
 
-  let refreshTimer: NodeJS.Timeout | null = null;
+  const socketPath = argOf(args, "--socket") ?? defaultSocketPath(instanceId);
+  const socket = await createControlSocket({
+    socketPath,
+    view,
+    onMutation: () => {
+      draw();
+      refreshFromActivity();
+    },
+    currentContext: () => currentCommandContext(crashCartOpts.daemonState ?? null),
+  });
 
   // Acts are drive-structure daemon WRITES (BR-8/BR-9) — executed here against
   // the two existing contracts; the view-state is only told the outcome.
@@ -223,6 +231,7 @@ async function run(): Promise<void> {
       view.dispatch({ type: "notice", message: err instanceof Error ? err.message : String(err) });
     }
     draw();
+    refreshFromActivity();
   }
 
   function perform(action: Action): void {
@@ -232,10 +241,10 @@ async function run(): Promise<void> {
       return;
     }
     view.dispatch(action);
+    refreshFromActivity();
   }
 
   async function shutdown(): Promise<void> {
-    if (refreshTimer) clearInterval(refreshTimer);
     if (motionTimer) clearTimeout(motionTimer);
     process.stdout.write(MOUSE_DISABLE + ALT_SCREEN_OFF);
     await socket.close();
@@ -412,10 +421,10 @@ async function run(): Promise<void> {
   // Probe the daemon-down verdict once on launch: bare `rig` with the daemon down renders the cockpit.
   // (Key-triggered re-probe after `s start daemon` / `r retry` is the follow-on increment.)
   void refreshCrashCart();
-  if (live) {
-    void live.refresh();
-    refreshTimer = setInterval(() => void live.refresh(), REFRESH_MS);
-  }
+  // A merely-open TUI must impose no steady-state fleet load. The initial
+  // hydrate establishes honest state; navigation, commands, and socket-driven
+  // mutations request later truth through the same single-flight owner.
+  if (live) void live.refresh();
 }
 
 run().catch((err: unknown) => {

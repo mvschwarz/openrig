@@ -1,4 +1,4 @@
-/** Coalesce overlapping timer ticks onto the active refresh. */
+/** Coalesce overlapping refresh requests onto the active refresh. */
 export function singleFlight(task: () => Promise<void>): () => Promise<void> {
   let active: Promise<void> | null = null;
   return () => {
