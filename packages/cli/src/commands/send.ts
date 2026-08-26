@@ -474,11 +474,18 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       // return alone when --verify asked for consumption.
       let effect: EffectCheck | undefined;
       if (opts.verify && res.status < 400) {
-        effect = await classifyDeliveryEffect(client, session, payload, outboundText, waitForIdleMs);
+        effect = await classifyDeliveryEffect(client, session, stagedIdentityFor(payload, outboundText), waitForIdleMs);
       }
 
       if (opts.json) {
-        console.log(JSON.stringify(effect ? { ...res.data, effectCheck: effect } : res.data));
+        // Round-2 F1: ONE verdict — a staged-unresolved envelope carries no
+        // delivered claim beside the staged effect.
+        const envelope = !effect
+          ? res.data
+          : effectUnresolved(effect)
+            ? { ...res.data, verified: false, outcome: "staged-not-consumed", effectCheck: effect }
+            : { ...res.data, effectCheck: effect };
+        console.log(JSON.stringify(envelope));
         if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
         if (effectUnresolved(effect)) process.exitCode = 1;
         return;
@@ -543,26 +550,48 @@ type EffectCheck =
   | { checked: true; state: "no-staged-residual" }
   | { checked: false; why: string };
 
+/**
+ * Round-2 F2 — ONE identity source for staged evidence AND submit safety: the
+ * same bytes the guarded submit's precheck verifies decide what may count as
+ * THIS send's staged evidence. The identity check runs BEFORE any placeholder
+ * attribution (desk-binding refinement).
+ */
+interface StagedIdentity {
+  /** the bytes the guarded submit verifies against the pane residual */
+  expectedStagedText: string;
+  /** their line count — the binding for a pasted-text placeholder */
+  expectedLines: number;
+  /** recognizable head of the user's payload (contained in any wrap), daemon-precheck normalization */
+  payloadHead: string;
+}
+
+function stagedIdentityFor(payload: string, expectedStagedText: string): StagedIdentity {
+  return {
+    expectedStagedText,
+    expectedLines: expectedStagedText.split("\n").length,
+    payloadHead: payload.replace(/\s+/g, "").slice(0, 24),
+  };
+}
+
 async function classifyDeliveryEffect(
   client: DaemonClient,
   session: string,
-  sentPayload: string,
-  expectedStagedText: string,
+  identity: StagedIdentity,
   waitForIdleMs?: number,
 ): Promise<EffectCheck> {
-  const probe = await detectStagedAtPrompt(client, session, sentPayload);
+  const probe = await detectStagedAtPrompt(client, session, identity);
   if (probe.state === "unchecked") return { checked: false, why: probe.why };
   if (probe.state === "not-staged") return { checked: true, state: "no-staged-residual" };
   const enter = await client.post<Record<string, unknown>>("/api/transport/send", {
     session,
     submitOnly: true,
-    expectedStagedText,
-    expectedStagedLineCount: expectedStagedText.split("\n").length,
+    expectedStagedText: identity.expectedStagedText,
+    expectedStagedLineCount: identity.expectedLines,
   }, transportRequestOptions(waitForIdleMs));
   if (enter.status >= 400) {
     return { checked: true, state: "staged", remedy: "submit-refused", detail: (enter.data?.["error"] as string | undefined) ?? `HTTP ${enter.status}` };
   }
-  const recheck = await detectStagedAtPrompt(client, session, sentPayload);
+  const recheck = await detectStagedAtPrompt(client, session, identity);
   return recheck.state === "staged"
     ? { checked: true, state: "staged", remedy: "submitted-still-staged" }
     : { checked: true, state: "staged", remedy: "submitted-cleared" };
@@ -603,7 +632,7 @@ function effectUnresolved(effect: EffectCheck | undefined): boolean {
 async function detectStagedAtPrompt(
   client: DaemonClient,
   session: string,
-  sentPayload: string,
+  identity: StagedIdentity,
 ): Promise<{ state: "staged" | "not-staged" } | { state: "unchecked"; why: string }> {
   let cap: { status: number; data: Record<string, unknown> };
   try {
@@ -626,16 +655,30 @@ async function detectStagedAtPrompt(
   }
   if (lastPrompt === -1) return { state: "not-staged" };
   const inputRegionRaw = lines.slice(lastPrompt).join("\n").replace(/^\s*[❯›]/, "");
-  // Large pastes render as the placeholder, never their content — counts only
-  // when it sits in the CURRENT input region.
-  if (/\[Pasted text #\d+ \+\d+ lines\]/.test(inputRegionRaw)) return { state: "staged" };
-  // Identity match reuses the daemon submit-precheck's own normalization
-  // (strip ALL whitespace, contiguous containment) so a detector-positive is
-  // compatible with the guarded submit's precheck by construction.
+  // IDENTITY FIRST (round-2 F2, desk-binding): the literal-residual match uses
+  // the daemon submit-precheck's own normalization (strip ALL whitespace,
+  // contiguous containment) so a detector-positive is compatible with the
+  // guarded submit's precheck by construction.
   const norm = (s: string): string => s.replace(/\s+/g, "");
-  const head = norm(sentPayload).slice(0, 24);
-  if (head.length === 0) return { state: "not-staged" };
-  return norm(inputRegionRaw).includes(head) ? { state: "staged" } : { state: "not-staged" };
+  if (identity.payloadHead.length > 0 && norm(inputRegionRaw).includes(identity.payloadHead)) {
+    return { state: "staged" };
+  }
+  // Placeholder attribution ONLY AFTER identity: a pasted-text placeholder in
+  // the current input region is staged-as-THIS-send only when its line count
+  // binds to the same bytes the submit guard would verify. An unrelated
+  // placeholder (someone else's staged content) is UNVERIFIABLE — never
+  // staged-as-this-send, and the guarded submit must never fire on it.
+  const placeholder = inputRegionRaw.match(/\[Pasted text #\d+ \+(\d+) lines\]/);
+  if (placeholder) {
+    const extra = Number(placeholder[1]);
+    const binds = identity.expectedLines > 1 && Math.abs(extra - identity.expectedLines) <= 2;
+    if (binds) return { state: "staged" };
+    return {
+      state: "unchecked",
+      why: `a pasted-text placeholder is present in the input region (+${extra} lines) but does not match this send (${identity.expectedLines} line(s)) — unverifiable, not treated as this send; no submit issued`,
+    };
+  }
+  return { state: "not-staged" };
 }
 
 async function runCrossHostSend(
@@ -891,15 +934,24 @@ async function runFanOutSend(params: {
     effects = [];
     const okRecipients = ((res.data["results"] as Array<{ sessionName: string; ok: boolean }> | undefined) ?? []).filter((r) => r.ok && r.sessionName);
     for (const r of okRecipients) {
-      effects.push({ sessionName: r.sessionName, effect: await classifyDeliveryEffect(client, r.sessionName, message, message) });
+      effects.push({ sessionName: r.sessionName, effect: await classifyDeliveryEffect(client, r.sessionName, stagedIdentityFor(message, message)) });
     }
   }
+  const effectBySeat = new Map((effects ?? []).map((e) => [e.sessionName, e.effect]));
+  const unresolvedCount = (effects ?? []).filter((e) => effectUnresolved(e.effect)).length;
 
   if (opts.json) {
-    console.log(JSON.stringify(effects ? { ...res.data, effectChecks: effects } : res.data));
-    const results = (res.data["results"] as Array<{ ok: boolean }> | undefined) ?? [];
-    if (res.status >= 400 || results.some((r) => !r.ok)) process.exitCode = 1;
-    if (effects?.some((e) => effectUnresolved(e.effect))) process.exitCode = 1;
+    // Round-2 F1: ONE verdict per recipient — a staged-unresolved recipient's
+    // row is not a delivery claim in any encoding.
+    const rawResults = (res.data["results"] as Array<{ sessionName: string; ok: boolean }> | undefined) ?? [];
+    const encodedResults = rawResults.map((r) =>
+      effectUnresolved(effectBySeat.get(r.sessionName))
+        ? { ...r, ok: false, verified: false, outcome: "staged-not-consumed", error: "staged, not consumed (pane effect); the one guarded submit did not clear it" }
+        : r
+    );
+    console.log(JSON.stringify(effects ? { ...res.data, results: encodedResults, effectChecks: effects } : res.data));
+    if (res.status >= 400 || rawResults.some((r) => !r.ok)) process.exitCode = 1;
+    if (unresolvedCount > 0) process.exitCode = 1;
     return;
   }
 
@@ -912,31 +964,37 @@ async function runFanOutSend(params: {
 
   const data = res.data;
   const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string }>) ?? [];
+  // Round-2 F1 (desk-binding): ONE verdict line per recipient. A
+  // staged-unresolved recipient gets its staged verdict INSTEAD of "sent" —
+  // the false delivery claim is suppressed entirely, not qualified.
   for (const r of results) {
-    if (r.ok) {
-      console.log(`${r.sessionName}: sent`);
-    } else {
+    if (!r.ok) {
       console.log(`${r.sessionName}: FAILED — ${r.error ?? "unknown error"}`);
+      continue;
+    }
+    const ec = effectBySeat.get(r.sessionName);
+    if (ec && ec.checked && ec.state === "staged") {
+      if (ec.remedy === "submitted-cleared") {
+        console.log(`${r.sessionName}: sent — staged at the prompt, cleared by one guarded Enter (consumed)`);
+      } else {
+        console.log(`${r.sessionName}: staged, not consumed — ${effectHumanLines(ec, r.sessionName).slice(-1)[0]}`);
+      }
+    } else if (ec && !ec.checked) {
+      console.log(`${r.sessionName}: sent (effect UNCHECKED: ${ec.why} — transport verdict only)`);
+    } else {
+      console.log(`${r.sessionName}: sent`);
     }
   }
-  console.log(`${data["sent"]}/${data["total"]} delivered`);
+  // The delivered count never includes a staged-unresolved recipient.
+  const deliveredCount = Math.max(0, ((data["sent"] as number) ?? 0) - unresolvedCount);
+  console.log(`${deliveredCount}/${data["total"]} delivered${unresolvedCount > 0 ? `, ${unresolvedCount} staged-not-consumed` : ""}`);
   // S2 (OPR.0.5.4.3): surface additive advisories (e.g. the unknown-sender
   // sign-it notice) — an env-less operator must see it, not "sent" lines alone.
   const fanoutAdvisory = data["warning"] as string | undefined;
   if (fanoutAdvisory) {
     console.log(`Advisory: ${fanoutAdvisory}`);
   }
-  if (effects) {
-    for (const { sessionName, effect } of effects) {
-      if (effect.checked && effect.state === "staged") {
-        console.log(`${sessionName}: staged, not consumed — ${effectHumanLines(effect, sessionName).slice(-1)[0]}`);
-      } else if (!effect.checked) {
-        console.log(`${sessionName}: effect UNCHECKED (${effect.why}) — transport verdict only`);
-      }
-      // no-staged-residual prints nothing per recipient: the transport line stands
-    }
-    if (effects.some((e) => effectUnresolved(e.effect))) process.exitCode = 1;
-  }
+  if (unresolvedCount > 0) process.exitCode = 1;
   if ((data["failed"] as number) > 0 || results.some((r) => !r.ok)) {
     process.exitCode = 1;
   }

@@ -129,6 +129,10 @@ describe("Send CLI", () => {
             // r2 F3 negative: a STALE pasted-text placeholder in SCROLLBACK with a
             // blank current prompt — history, never staged evidence.
             "stale-scroll-session": "[Pasted text #3 +12 lines]\nolder scrollback output\n❯ \n  ⏵⏵ accept edits on (shift+tab to cycle)",
+            // round-2 F2 negative: a placeholder IN the current input region that
+            // does NOT match this send's identity (+100 lines vs a 1-line payload)
+            // — someone else's staged content; unverifiable, never this send.
+            "unrelated-paste-session": "❯ [Pasted text #7 +100 lines]\n  ⏵⏵ accept edits on (shift+tab to cycle)",
           };
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: true, sessionName: parsed.session, content: panes[parsed.session as string] ?? "❯ " }));
@@ -138,7 +142,7 @@ describe("Send CLI", () => {
           const parsed = JSON.parse(body);
           lastSendBody = parsed;
           sendBodies.push(parsed);
-          if (parsed.session === "staged-session" || parsed.session === "consumed-session" || parsed.session === "stale-scroll-session") {
+          if (parsed.session === "staged-session" || parsed.session === "consumed-session" || parsed.session === "stale-scroll-session" || parsed.session === "unrelated-paste-session") {
             // S3 RED fixture: the TRANSPORT believes it delivered (its verify
             // is measured-unreliable in exactly this direction) — the staged
             // truth is visible only by pane effect.
@@ -741,6 +745,57 @@ describe("Send CLI", () => {
       expect(stagedEffectLines.length).toBeGreaterThan(0); // RED pre-fix: no effect line exists
       const consumedEffectClaims = lines.filter((l) => l.includes("consumed-session") && /staged/i.test(scrub(l)));
       expect(consumedEffectClaims).toHaveLength(0);
+    });
+
+    // ── Wave-1 fix round 2 (r2 BLOCKING row b5ad5131; desk refinement: ONE
+    // verdict per recipient, identity BEFORE placeholder attribution) ──
+    it("R2-F1 human: a staged-unresolved recipient gets NO sent line and is NOT counted delivered — one verdict only", async () => {
+      const { logs, exitCode } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "send", "--to", "staged-session,consumed-session", "hello there", "--verify"]);
+      });
+      const lines = logs.join("\n").split("\n");
+      // the false lines must be ABSENT (desk-binding): no unqualified sent, no delivered count including it
+      expect(lines.some((l) => /^staged-session: sent\b/.test(l))).toBe(false);
+      expect(lines.join("\n")).toContain("1/2 delivered");
+      expect(lines.join("\n")).not.toContain("2/2 delivered");
+      // and exactly one verdict line for the staged recipient
+      expect(lines.filter((l) => l.startsWith("staged-session:"))).toHaveLength(1);
+      expect(exitCode).toBe(1);
+    });
+
+    it("R2-F1 json: the same recipient can never be simultaneously delivered and staged-not-consumed in the envelope", async () => {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "send", "--to", "staged-session,consumed-session", "hello there", "--verify", "--json"]);
+      });
+      const envelope = JSON.parse(logs.find((l) => l.trim().startsWith("{")) ?? "{}") as Record<string, unknown>;
+      const results = (envelope["results"] as Array<Record<string, unknown>>) ?? [];
+      const stagedRow = results.find((r) => r["sessionName"] === "staged-session");
+      expect(stagedRow).toBeDefined();
+      // ONE verdict: the staged-unresolved row is not a delivery claim
+      expect(stagedRow!["ok"]).toBe(false);
+      expect(stagedRow!["outcome"]).toBe("staged-not-consumed");
+      expect(stagedRow!["verified"]).not.toBe(true);
+    });
+
+    it("R2-F1 json single-send: a staged-unresolved envelope carries no delivered claim beside the staged effect", async () => {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "send", "staged-session", "hello there", "--verify", "--json"]);
+      });
+      const envelope = JSON.parse(logs.find((l) => l.trim().startsWith("{")) ?? "{}") as Record<string, unknown>;
+      expect((envelope["effectCheck"] as Record<string, unknown>)["state"]).toBe("staged");
+      expect(envelope["verified"]).not.toBe(true);
+      expect(envelope["outcome"]).toBe("staged-not-consumed");
+    });
+
+    it("R2-F2: an unrelated size-mismatched placeholder is UNVERIFIABLE — never staged-as-this-send, never a guarded submit", async () => {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "send", "unrelated-paste-session", "hello there", "--verify"]);
+      });
+      const output = logs.join("\n");
+      expect(output).not.toMatch(/staged, not consumed/i); // no staged-as-this-send claim
+      expect(sendBodies.filter((b) => b["submitOnly"])).toHaveLength(0); // the submit path never fires on foreign content
+      expect(output).toMatch(/unverifiable|not .{0,20}this send|does not match this send/i);
+      expect(output).toContain("Verified: yes"); // the transport verdict stands, honestly qualified
     });
   });
 
