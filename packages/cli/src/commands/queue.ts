@@ -175,11 +175,11 @@ export async function resolveQueueBody(
     throw err;
   }
   if (hasInline) {
-    if (opts.body === "-") return stdinReader();
+    if (opts.body === "-") return requireNonEmptyResolvedBody(await stdinReader(), "stdin (--body -)");
     return opts.body!;
   }
   // hasFile path
-  if (opts.bodyFile === "-") return stdinReader();
+  if (opts.bodyFile === "-") return requireNonEmptyResolvedBody(await stdinReader(), "stdin (--body-file -)");
   const absPath = opts.bodyFile!;
   if (!fs.existsSync(absPath)) {
     const err = new Error(`--body-file path does not exist: ${absPath}`) as Error & { fact?: string; consequence?: string; action?: string };
@@ -196,7 +196,18 @@ export async function resolveQueueBody(
     err.action = "Pass a path to a readable file (not a directory, symlink-to-directory, or block device). Use --body-file - to read from stdin.";
     throw err;
   }
-  return fs.readFileSync(absPath, "utf8");
+  return requireNonEmptyResolvedBody(fs.readFileSync(absPath, "utf8"), `--body-file ${absPath}`);
+}
+
+function requireNonEmptyResolvedBody(body: string, source: string): string {
+  if (Buffer.byteLength(body, "utf8") > 0) return body;
+  const err = new Error(`${source} resolved to 0 bytes.`) as Error & { fact?: string; consequence?: string; action?: string };
+  err.fact = `${source} resolved to 0 bytes; an empty body is not a valid implicit queue payload.`;
+  err.consequence = "The coordination command did not run, the daemon was not contacted, and nothing was persisted.";
+  err.action = source.startsWith("stdin")
+    ? "Pipe non-empty content to stdin, or pass a non-empty file with --body-file <path>."
+    : "Add content to the file, or pass a different non-empty body source.";
+  throw err;
 }
 
 function emitBodyResolveError(err: Error & { fact?: string; consequence?: string; action?: string }, json: boolean): void {
@@ -874,7 +885,8 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("-a, --all", "Include closed/done history (like 'docker ps -a')")
     .option("-A, --all-rigs", "Cross-rig breadth (like 'kubectl get --all-namespaces')")
     .option("--full", "Show complete per-item fields (body, chain-of-record)")
-    .option("--mine", "Scope to items where you are destination or source")
+    .option("--owned", "Scope to obligations assigned to you (destination only)")
+    .option("--mine", "Scope to items where you are source or destination, including rows you authored but do not own")
     .option("-o <format>", "Output format: json", enumArg(["json"]))
     .option("--destination <session>", "Filter by destination session")
     .option("--source <session>", "Filter by source session")
@@ -907,13 +919,15 @@ Examples:
   rig queue list --full                   Active items with body/chain
   rig queue list -o json                  Compact JSON (same as --json)
   rig queue list --full -o json           Complete JSON (with body/chain)
-  rig queue list --mine                   Items where you are source or destination
+  rig queue list --owned                  Obligations assigned to you (destination only)
+  rig queue list --mine                   Items you own or authored (source-or-destination union)
   rig queue list --state pending          Only pending items in your rig
   rig queue list --full --all --all-rigs  Full firehose (pre-0.4.0 default)`)
     .action(async (opts: {
       all?: boolean;
       allRigs?: boolean;
       full?: boolean;
+      owned?: boolean;
       mine?: boolean;
       o?: string;
       destination?: string;
@@ -926,9 +940,11 @@ Examples:
       const deps = getDeps();
       const params = new URLSearchParams();
       const sessionName = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
-      const hasExplicitScope = !!(opts.destination || opts.source);
+      const hasExplicitScope = !!(opts.destination || opts.source || opts.owned);
 
-      if (opts.mine && sessionName) {
+      if (opts.owned && sessionName) {
+        params.set("destinationSession", sessionName);
+      } else if (opts.mine && sessionName) {
         params.set("as", sessionName);
       } else if (!opts.allRigs && !hasExplicitScope) {
         const rigName = sessionName ? extractRigName(sessionName) : undefined;

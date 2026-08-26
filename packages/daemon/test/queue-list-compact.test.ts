@@ -138,7 +138,7 @@ describe("OPR.0.4.0.28 — queue list compact + scope-default", () => {
     expect(scopedIds).toContain("q-caller-old");
   });
 
-  it("AC-3: asSession surfaces both destination AND source items", () => {
+  it("AC-3 / S4b: destination-only counts obligations while asSession keeps the authored union", () => {
     const callerSession = "dev1-driver@openrig-delivery";
 
     seedItem(db, "q-to-me", {
@@ -164,6 +164,9 @@ describe("OPR.0.4.0.28 — queue list compact + scope-default", () => {
     expect(ids).toContain("q-to-me");
     expect(ids).toContain("q-from-me");
     expect(ids).not.toContain("q-unrelated");
+
+    const owned = repo.list({ destinationSession: callerSession });
+    expect(owned.map((item) => item.qitemId)).toEqual(["q-to-me"]);
   });
 
   it("AC-4: compact marks content fields as elided instead of posing as empty content", () => {

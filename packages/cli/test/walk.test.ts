@@ -73,17 +73,35 @@ function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; errLogs
 }
 
 describe("parsePaceMs", () => {
-  it("parses s / ms / bare-seconds and the default", () => {
+  it("parses explicit s / ms and the default, but refuses unitless durations", () => {
     expect(parsePaceMs(undefined)).toBe(10_000);
     expect(parsePaceMs("10s")).toBe(10_000);
     expect(parsePaceMs("500ms")).toBe(500);
-    expect(parsePaceMs("2")).toBe(2_000);
+    expect(parsePaceMs("2")).toBeNull();
     expect(parsePaceMs("bogus")).toBeNull();
     expect(parsePaceMs("-1")).toBeNull();
   });
 });
 
 describe("rig walk — paced push-delivery (Atom 6)", () => {
+  for (const flag of ["--pace", "--consume-timeout", "--consume-poll", "--turn-timeout"] as const) {
+    it(`S4b RED: ${flag} refuses a bare number and names the required unit suffix`, async () => {
+      const sends: RecordedSend[] = [];
+      const sleeps: number[] = [];
+      const piece = tmpFile("duration.md", "duration check");
+      const args = ["node", "rig", "walk", "dev@rig", "--through", piece, "--pace", "0s"];
+      if (flag === "--pace") args.splice(-2, 2);
+      args.push(flag, "1500");
+      const { errLogs, exitCode } = await captureLogs(async () => {
+        await makeCmd(testDeps(sends, sleeps)).parseAsync(args);
+      });
+      expect(exitCode).toBe(1);
+      expect(errLogs.join("\n")).toContain(flag);
+      expect(errLogs.join("\n")).toMatch(/ms|seconds|unit suffix/i);
+      expect(sends).toHaveLength(0);
+    });
+  }
+
   it("walks a seat through a local file list in order, one send per piece", async () => {
     const sends: RecordedSend[] = []; const sleeps: number[] = [];
     const a = tmpFile("a.md", "AAA"); const b = tmpFile("b.md", "BBB"); const c = tmpFile("c.md", "CCC");

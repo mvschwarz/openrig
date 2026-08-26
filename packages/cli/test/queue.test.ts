@@ -295,6 +295,50 @@ describe("rig queue CLI", () => {
       expect(stdinReader).toHaveBeenCalledTimes(1);
     });
 
+    it("S4b RED: refuses an empty --body-file with source-aware 3-part guidance", async () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "queue-body-empty-"));
+      const bodyPath = path.join(tmp, "empty.md");
+      fs.writeFileSync(bodyPath, "", "utf8");
+      try {
+        await expect(resolveQueueBody({ bodyFile: bodyPath })).rejects.toMatchObject({
+          fact: expect.stringMatching(new RegExp(`0 bytes|empty.*${path.basename(bodyPath)}`, "i")),
+          consequence: expect.stringMatching(/nothing was persisted|daemon was not contacted/i),
+          action: expect.stringMatching(/add.*content|non-empty/i),
+        });
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it("S4b RED: refuses empty stdin and names stdin before any queue persistence", async () => {
+      await expect(resolveQueueBody({ bodyFile: "-" }, async () => "")).rejects.toMatchObject({
+        fact: expect.stringMatching(/0 bytes|empty.*stdin/i),
+        consequence: expect.stringMatching(/nothing was persisted|daemon was not contacted/i),
+        action: expect.stringMatching(/provide|pipe.*content|non-empty/i),
+      });
+    });
+
+    it("S4b RED: empty file aborts queue create before the daemon can persist a row", async () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "queue-create-empty-"));
+      const bodyPath = path.join(tmp, "empty.md");
+      fs.writeFileSync(bodyPath, "", "utf8");
+      try {
+        const { deps, calls } = makeDeps();
+        const program = createProgram({ queueDeps: deps });
+        program.exitOverride();
+        await program.parseAsync([
+          "node", "rig", "queue", "create",
+          "--destination", "bob@rig",
+          "--body-file", bodyPath,
+          "--json",
+        ]);
+        expect(process.exitCode).toBe(1);
+        expect(calls.some((call) => call.method === "POST" && call.path === "/api/queue/create")).toBe(false);
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
     it("create --body-file <file-with-backticks> POSTs the file content as body (operator-copy-paste-safe)", async () => {
       const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "queue-create-body-file-"));
       const bodyPath = path.join(tmp, "body.txt");
@@ -1015,6 +1059,36 @@ describe("rig queue CLI", () => {
       if (saved === undefined) delete process.env.OPENRIG_SESSION_NAME;
       else process.env.OPENRIG_SESSION_NAME = saved;
     }
+  });
+
+  it("S4b RED: list --owned scopes only to rows whose destination is the caller", async () => {
+    const saved = process.env.OPENRIG_SESSION_NAME;
+    process.env.OPENRIG_SESSION_NAME = "dev1-driver@openrig-delivery";
+    try {
+      const { deps, calls } = makeDeps();
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "list", "--owned", "--json"]);
+      const call = calls.find((c) => c.method === "GET" && c.path.startsWith("/api/queue/list"));
+      expect(call).toBeDefined();
+      expect(call!.path).toContain("destinationSession=dev1-driver%40openrig-delivery");
+      expect(call!.path).not.toContain("as=");
+      expect(call!.path).not.toContain("sourceSession=");
+      expect(call!.path).not.toContain("rig=");
+    } finally {
+      if (saved === undefined) delete process.env.OPENRIG_SESSION_NAME;
+      else process.env.OPENRIG_SESSION_NAME = saved;
+    }
+  });
+
+  it("S4b RED: list help distinguishes destination-owned obligations from --mine's authored union", () => {
+    const { deps } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    const queue = program.commands.find((command) => command.name() === "queue")!;
+    const list = queue.commands.find((command) => command.name() === "list")!;
+    const help = list.helpInformation();
+    expect(help).toMatch(/--owned[^\n]*(destination|assigned|owe)/i);
+    expect(help).toMatch(/--mine[^\n]*(source or destination|authored.*do not own)/i);
   });
 
   it("list default injects rig=<rigName> + activeOnly=1 + compact=1", async () => {

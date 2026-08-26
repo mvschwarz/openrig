@@ -477,6 +477,122 @@ describe("Daemon Lifecycle", () => {
     process.exitCode = savedExitCode;
   });
 
+  it("S4b RED: daemon stop refuses success when the addressed OPENRIG_URL listener is still up", async () => {
+    const { daemonCommand } = await import("../src/commands/daemon.js");
+    const { Command } = await import("commander");
+    const savedUrl = process.env.OPENRIG_URL;
+    const savedExitCode = process.exitCode;
+    process.env.OPENRIG_URL = "http://127.0.0.1:7555";
+    process.exitCode = undefined;
+    const state: DaemonState = { pid: 555, port: 7433, db: "openrig.sqlite", startedAt: "2026-01-01T00:00:00Z" };
+    const deps = mockDeps({
+      exists: vi.fn((p: string) => p === STATE_FILE),
+      readFile: vi.fn((p: string) => p === STATE_FILE ? JSON.stringify(state) : null),
+      isProcessAlive: vi.fn().mockReturnValueOnce(true).mockReturnValueOnce(false),
+      fetch: vi.fn(async () => ({ ok: true })),
+    });
+    const program = new Command();
+    program.addCommand(daemonCommand(deps));
+    const out: string[] = [];
+    const err: string[] = [];
+    const origLog = console.log;
+    const origErr = console.error;
+    console.log = (...args: unknown[]) => out.push(args.join(" "));
+    console.error = (...args: unknown[]) => err.push(args.join(" "));
+    try {
+      await program.parseAsync(["node", "rig", "daemon", "stop"]);
+      expect(process.exitCode).toBe(1);
+      expect(out.join("\n")).not.toContain("Daemon stopped");
+      expect(err.join("\n")).toContain("http://127.0.0.1:7555");
+      expect(err.join("\n")).toMatch(/healthz|health check/i);
+      expect(err.join("\n")).toMatch(/still listening|still running/i);
+    } finally {
+      console.log = origLog;
+      console.error = origErr;
+      process.exitCode = savedExitCode;
+      if (savedUrl === undefined) delete process.env.OPENRIG_URL;
+      else process.env.OPENRIG_URL = savedUrl;
+    }
+  });
+
+  it("S4b RED: a daemon that ignores SIGTERM reports the target, health check, and still-listening effect", async () => {
+    vi.useFakeTimers();
+    const { daemonCommand } = await import("../src/commands/daemon.js");
+    const { Command } = await import("commander");
+    const savedUrl = process.env.OPENRIG_URL;
+    const savedExitCode = process.exitCode;
+    process.env.OPENRIG_URL = "http://127.0.0.1:7555";
+    process.exitCode = undefined;
+    const state: DaemonState = { pid: 555, port: 7555, db: "openrig.sqlite", startedAt: "2026-01-01T00:00:00Z" };
+    const deps = mockDeps({
+      exists: vi.fn((p: string) => p === STATE_FILE),
+      readFile: vi.fn((p: string) => p === STATE_FILE ? JSON.stringify(state) : null),
+      isProcessAlive: vi.fn(() => true),
+      fetch: vi.fn(async () => ({ ok: true })),
+    });
+    const program = new Command();
+    program.addCommand(daemonCommand(deps));
+    const out: string[] = [];
+    const err: string[] = [];
+    const origLog = console.log;
+    const origErr = console.error;
+    console.log = (...args: unknown[]) => out.push(args.join(" "));
+    console.error = (...args: unknown[]) => err.push(args.join(" "));
+    try {
+      const stop = program.parseAsync(["node", "rig", "daemon", "stop"]);
+      await vi.runAllTimersAsync();
+      await stop;
+      expect(process.exitCode).toBe(1);
+      expect(out.join("\n")).not.toContain("Daemon stopped");
+      expect(err.join("\n")).toContain("http://127.0.0.1:7555");
+      expect(err.join("\n")).toMatch(/healthz|health check/i);
+      expect(err.join("\n")).toMatch(/still listening/i);
+    } finally {
+      console.log = origLog;
+      console.error = origErr;
+      vi.useRealTimers();
+      process.exitCode = savedExitCode;
+      if (savedUrl === undefined) delete process.env.OPENRIG_URL;
+      else process.env.OPENRIG_URL = savedUrl;
+    }
+  });
+
+  it("S4b RED: daemon stop prints success only after the addressed target verifies down", async () => {
+    const { daemonCommand } = await import("../src/commands/daemon.js");
+    const { Command } = await import("commander");
+    const savedUrl = process.env.OPENRIG_URL;
+    const savedExitCode = process.exitCode;
+    process.env.OPENRIG_URL = "http://127.0.0.1:7555";
+    process.exitCode = undefined;
+    const state: DaemonState = { pid: 555, port: 7433, db: "openrig.sqlite", startedAt: "2026-01-01T00:00:00Z" };
+    const fetch = vi.fn()
+      .mockResolvedValueOnce({ ok: true })
+      .mockRejectedValue(Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }));
+    const deps = mockDeps({
+      exists: vi.fn((p: string) => p === STATE_FILE),
+      readFile: vi.fn((p: string) => p === STATE_FILE ? JSON.stringify(state) : null),
+      isProcessAlive: vi.fn().mockReturnValueOnce(true).mockReturnValueOnce(false),
+      fetch,
+    });
+    const program = new Command();
+    program.addCommand(daemonCommand(deps));
+    const out: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: unknown[]) => out.push(args.join(" "));
+    try {
+      await program.parseAsync(["node", "rig", "daemon", "stop"]);
+      expect(process.exitCode).toBeUndefined();
+      expect(out.join("\n")).toContain("Daemon stopped");
+      expect(fetch.mock.calls.length).toBeGreaterThan(1);
+      expect(fetch).toHaveBeenLastCalledWith("http://127.0.0.1:7555/healthz");
+    } finally {
+      console.log = origLog;
+      process.exitCode = savedExitCode;
+      if (savedUrl === undefined) delete process.env.OPENRIG_URL;
+      else process.env.OPENRIG_URL = savedUrl;
+    }
+  });
+
   // Test 15: start creates ~/.openrig directory if missing
   it("start: creates OPENRIG_DIR if missing", async () => {
     const deps = startableDeps();

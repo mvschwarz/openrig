@@ -164,4 +164,15 @@ describe("render response integrity — 3-part error + honest exit, never daemon
     expect(stderr).toMatch(/check the command's effect before any retry/i);
     expect(stderr).not.toMatch(/retry once conditions ease/i);
   });
+
+  it("S4b preserve: a timed-out queue read is loud on stderr and exits nonzero", async () => {
+    const timeout = new DaemonTimeoutError("Request to http://localhost:7433/api/queue/list timed out after 25ms");
+    const { err: stderr, exitCode } = await runCli(
+      ["queue", "list"],
+      depsThrowing(timeout),
+    );
+    expect(exitCode).toBe(1);
+    expect(stderr).toMatch(/timed out|slow|unresponsive/i);
+    expect(stderr.trim().length).toBeGreaterThan(0);
+  });
 });

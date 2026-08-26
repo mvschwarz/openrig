@@ -31,11 +31,11 @@ export interface WalkDeps extends StatusDeps {
 
 const DEFAULT_PACE_MS = 10_000;
 
-/** Parse a pace duration: `10s`, `500ms`, or a bare number (seconds). Returns
+/** Parse a walk duration with an explicit unit: `10s` or `500ms`. Returns
  *  null on a malformed value; the default when undefined. */
 export function parsePaceMs(value: string | undefined): number | null {
   if (value === undefined) return DEFAULT_PACE_MS;
-  const m = /^(\d+(?:\.\d+)?)(ms|s)?$/.exec(value.trim());
+  const m = /^(\d+(?:\.\d+)?)(ms|s)$/.exec(value.trim());
   if (!m) return null;
   const n = Number(m[1]);
   if (!Number.isFinite(n) || n < 0) return null;
@@ -70,14 +70,14 @@ export function walkCommand(depsOverride?: WalkDeps): Command {
     .option("--seat-grant <seat>", "With --through-profile: the seat whose tree seat: atoms may read (with --rig)")
     .option("--mission <mission>", "With --through-profile: the mission-tree grant")
     .option("--budget <tokens>", "With --through-profile: situation budget (reported, never truncated)")
-    .option("--pace <duration>", "Delay between pieces (e.g. 10s, 500ms, or a bare number of seconds); default 10s")
+    .option("--pace <duration>", "Delay between pieces (e.g. 10s or 500ms; unit suffix required); default 10s")
     // Mechanics-gate fix (desk ruling d9b3989a): send success means TYPED, not CONSUMED — every
     // piece is verified BY EFFECT against the seat's generation record before the next is sent.
-    .option("--consume-timeout <ms>", "Per-piece consumption-verification window in ms (default 20000)")
-    .option("--consume-poll <ms>", "Consumption-verification poll interval in ms (default 1500)")
+    .option("--consume-timeout <duration>", "Per-piece consumption-verification window (e.g. 20s or 500ms; unit suffix required); default 20s")
+    .option("--consume-poll <duration>", "Consumption-verification poll interval (e.g. 1500ms or 2s; unit suffix required); default 1500ms")
     // Turn-pacing (desk BLOCKING row 2ff16fa1): a piece sent into an OPEN turn is queued by the
     // runtime and never becomes a distinct user turn — walk waits for the prior turn's closure.
-    .option("--turn-timeout <duration>", "Max wait for the seat's turn to CLOSE after a piece is consumed, before the next piece (same grammar as --pace; default 300s)")
+    .option("--turn-timeout <duration>", "Max wait for the seat's turn to CLOSE after a piece is consumed (e.g. 300s; unit suffix required); default 300s")
     .option("--json", "JSON output")
     .addHelpText("after", `
 Examples:
@@ -92,7 +92,7 @@ the agent process between sends. Small piece → 'rig send'; a real pack → wal
         const deps = getDeps();
         const paceMs = parsePaceMs(opts.pace);
         if (paceMs === null) {
-          console.error(`Invalid --pace '${opts.pace}'. Use e.g. 10s, 500ms, or a bare number of seconds.`);
+          console.error(`Invalid --pace '${opts.pace}': use an explicit unit suffix, e.g. 10s or 500ms.`);
           process.exitCode = 1;
           return;
         }
@@ -150,12 +150,22 @@ the agent process between sends. Small piece → 'rig send'; a real pack → wal
         // while the target TUI leaves the text STAGED at the prompt, and the next pieces coalesce.
         // The effect source is the seat's current-generation record (the append-only conversation
         // JSONL): a consumed piece appears as a user-role record containing the piece's head.
-        // Same duration grammar as --pace (10s / 500ms / bare seconds); defaults 20s / 1.5s.
+        // Same explicit-unit duration grammar as --pace (10s / 500ms); defaults 20s / 1.5s.
         const consumeTimeoutMs = opts.consumeTimeout !== undefined ? parsePaceMs(opts.consumeTimeout) : 20_000;
         const consumePollMs = opts.consumePoll !== undefined ? parsePaceMs(opts.consumePoll) : 1_500;
         const turnTimeoutMs = opts.turnTimeout !== undefined ? parsePaceMs(opts.turnTimeout) : 300_000;
-        if (consumeTimeoutMs === null || consumePollMs === null || turnTimeoutMs === null) {
-          console.error("Invalid --consume-timeout / --consume-poll / --turn-timeout: use e.g. 20s, 1500ms, or a bare number of seconds.");
+        if (consumeTimeoutMs === null) {
+          console.error(`Invalid --consume-timeout '${opts.consumeTimeout}': use an explicit unit suffix, e.g. 20s or 500ms.`);
+          process.exitCode = 1;
+          return;
+        }
+        if (consumePollMs === null) {
+          console.error(`Invalid --consume-poll '${opts.consumePoll}': use an explicit unit suffix, e.g. 1500ms or 2s.`);
+          process.exitCode = 1;
+          return;
+        }
+        if (turnTimeoutMs === null) {
+          console.error(`Invalid --turn-timeout '${opts.turnTimeout}': use an explicit unit suffix, e.g. 300s or 500ms.`);
           process.exitCode = 1;
           return;
         }

@@ -806,7 +806,7 @@ Usage: `rig walk <seat> --through <ref | files...> [--pace <duration>] [--json]`
 
 Notes:
 - `--through` accepts either one path-like context ref or an ordered list of existing local files; mixing the two forms is rejected.
-- Sends one piece at a time through the normal transport and waits `--pace` between pieces (default `10s`; `500ms`, `10s`, and bare seconds are accepted). There is no trailing delay.
+- Sends one piece at a time through the normal transport and waits `--pace` between pieces (default `10s`; duration overrides require an explicit `ms` or `s` suffix). The same explicit-unit grammar applies to `--consume-timeout`, `--consume-poll`, and `--turn-timeout`; bare numbers are refused. There is no trailing delay.
 - A missing local file or missing/unreadable ref member aborts before the first send, so a walk delivers every piece or none.
 
 ### Cross-host execution (`--host <id>`)
@@ -1051,13 +1051,15 @@ Subcommands:
 - `fallback <qitemId> --destination <session> [--reason <text>] [--json]` — reroute to fallback seat
 - `show <qitemId> [--json]`
 - `transitions <qitemId> [--json]` — append-only transition log
-- `list [--destination <session>] [--source <session>] [--mine] [--state <csv>] [-a | --all] [-A | --all-rigs] [--full] [-o <json|wide>] [--limit <n>] [--json]` — **v0.4.0 grammar (slices 28 + 32, docker / kubectl-aligned)**:
+- `list [--destination <session>] [--source <session>] [--owned] [--mine] [--state <csv>] [-a | --all] [-A | --all-rigs] [--full] [-o <json|wide>] [--limit <n>] [--json]` — **v0.4.0 grammar (slices 28 + 32, docker / kubectl-aligned)**:
   - **`rig queue list`** (no flags) → active states only (`pending` / `in-progress` / `claimed` / `blocked` / `handed-off`; NOT `done` / `canceled`), **current-rig** breadth, compact rows: `qitemId`, `state`, `source→destination` (or `current-owner`), `closure_reason` / `closure_target` (when handed-off / blocked), `mission`, `slice`, `tier` / `priority`, `age` / `updated_at`, short title, capped tags. Excludes: full body, chain_of_record, transition history, proof / artifact blobs.
   - **`-a` / `--all`** → include closed / done history within the current breadth (docker `-a` axis: history).
-  - **`-A` / `--all-rigs`** → cross-rig breadth (kubectl `-A` axis: breadth). Composable with `-a`, `--mine`, `--full`.
+  - **`-A` / `--all-rigs`** → cross-rig breadth (kubectl `-A` axis: breadth). Composable with `-a`, `--owned`, `--mine`, `--full`.
   - **`--full`** → add body + chain-of-record + full tags + transition history to whichever scope is selected (field-breadth axis).
   - **`-o json|wide`** → encoding, compact-by-default. `-o json` does NOT imply full body (compact JSON is token-safe + machine-parseable); `--full -o json` returns the full JSON.
-  - **`--mine`** → just the caller's items.
+  - **`--owned`** → obligations assigned to the caller (`destination_session` only).
+  - **`--mine`** → the caller's source-or-destination union, including rows the caller authored but does not own.
+  - Pipeline use must enable `set -o pipefail`; otherwise the shell reports only the downstream formatter's status and can mask a nonzero `rig` read such as a timeout.
   - `--destination <s>` / `--source <s>` / `--state <csv>` keep working and compose with the new flags.
   - The four axes (scope × history × field-breadth × encoding) are orthogonal and composable. The bare unscoped firehose that aggregated cross-rig + full-history (~64,000 tokens on the live host) is retired as a default — opt-in via `-A -a --full`.
   - Use `rig queue show <qitemId>` for the full single-item view (kubectl `describe` / docker `inspect` pattern).
