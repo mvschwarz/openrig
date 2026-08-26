@@ -99,6 +99,7 @@ export const SETTINGS_VALID_KEYS = [
   "topology.root",
   // OPR.0.5.3.7 R4 — context-pack landing zone; lockstep with the CLI twin.
   "context.packs_root",
+  "onboarding.default_pack.enabled",
   "files.allowlist",
   "progress.scan_roots",
   "ui.preview.refresh_interval_seconds",
@@ -209,6 +210,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "topology.root": { primary: "OPENRIG_TOPOLOGY_ROOT" },
   // OPR.0.5.3.7 R4 — new key, OPENRIG_* only (no RIGGED_* legacy).
   "context.packs_root": { primary: "OPENRIG_CONTEXT_PACKS_ROOT" },
+  "onboarding.default_pack.enabled": { primary: "OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED" },
   "files.allowlist": { primary: "OPENRIG_FILES_ALLOWLIST" },
   "progress.scan_roots": { primary: "OPENRIG_PROGRESS_SCAN_ROOTS" },
   "ui.preview.refresh_interval_seconds": { primary: "OPENRIG_UI_PREVIEW_REFRESH_INTERVAL_SECONDS" },
@@ -276,6 +278,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "workspace.dogfood_evidence_root": ["workspace", "dogfoodEvidenceRoot"],
   "topology.root": ["topology", "root"],
   "context.packs_root": ["context", "packsRoot"],
+  "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
   "files.allowlist": ["files", "allowlist"],
   "progress.scan_roots": ["progress", "scanRoots"],
   "ui.preview.refresh_interval_seconds": ["ui", "preview", "refreshIntervalSeconds"],
@@ -500,6 +503,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // OPR.0.5.3.6 D1 — derived under $OPENRIG_HOME, never a shared-docs literal.
     case "topology.root": return DEFAULT_TOPOLOGY_ROOT;
     case "context.packs_root": return DEFAULT_CONTEXT_PACKS_ROOT;
+    case "onboarding.default_pack.enabled": return true;
     // Preview Terminal v0 (PL-018) defaults — match cli/src/config-store.ts.
     case "ui.preview.refresh_interval_seconds": return 3;
     case "ui.preview.max_pins": return 4;

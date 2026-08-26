@@ -797,6 +797,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // OPR.0.5.3.6 — shipped topology chain-file defaults install under the
     // typed topology.root at materialization (copy-if-absent).
     topologyRootResolver: () => String(new ContextPackSettingsStore().resolveOne("topology.root").value),
+    onboardingEnabledResolver: () =>
+      new ContextPackSettingsStore().resolveOne("onboarding.default_pack.enabled").value === true,
   });
 
   const podBundleSourceResolver = new PodBundleSourceResolver();

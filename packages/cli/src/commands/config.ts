@@ -70,6 +70,7 @@ Keys:
                          specs_root, dogfood_evidence_root, operator_seat_name
   topology.root          the topology tree root (instance altitude at its top; default $OPENRIG_HOME/topology)
   context.packs_root     context-pack library landing zone for 'rig context add' (default $OPENRIG_HOME/context-packs)
+  onboarding.default_pack.enabled  deliver the two-part fresh-seat mental-model pack (default on)
   files.allowlist        name:/abs/path,name:/abs/path
   progress.scan_roots    name:/abs/path,name:/abs/path
   ui.preview.*           refresh_interval_seconds, max_pins, default_lines

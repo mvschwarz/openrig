@@ -29,6 +29,13 @@ rig capture <session>            # reads what is on their screen
 
 The session name is the address. `rig --help` lists the rest of the surface.
 
+## Fresh-seat orientation
+
+Fresh seats normally also receive `openrig-onboarding-01.md` and
+`openrig-onboarding-02.md`. They give a compact mental model before role-specific work begins.
+Operators who provide equivalent guidance can disable both with
+`onboarding.default_pack.enabled`; this identity pointer remains available.
+
 ## What this file is not
 
 It is not the manual, and these commands are a fraction of what is available.

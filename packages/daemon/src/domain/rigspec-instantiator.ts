@@ -346,6 +346,9 @@ interface PodInstantiatorDeps {
    *  `topology/` chain-file defaults install at materialization (copy-if-absent,
    *  best-effort). Absent → no defaults install (tests, legacy composition). */
   topologyRootResolver?: () => string;
+  /** S15 — whether new seats receive the compact default mental-model pack.
+   *  Resolved at materialization so config changes affect future launches. */
+  onboardingEnabledResolver?: () => boolean;
 }
 
 export interface MaterializeResult {
@@ -2202,6 +2205,28 @@ export class PodRigInstantiator {
       required: false,
       appliesOn: ["fresh_start", "restore"],
     });
+
+    if (this.deps.onboardingEnabledResolver?.() ?? true) {
+      const assetsRoot = nodePath.resolve(import.meta.dirname, "../../assets");
+      files.push(
+        {
+          path: "openrig-onboarding-01.md",
+          absolutePath: nodePath.resolve(import.meta.dirname, "../../assets/onboarding/01-world-and-purpose.md"),
+          ownerRoot: assetsRoot,
+          deliveryHint: "guidance_merge",
+          required: true,
+          appliesOn: ["fresh_start"],
+        },
+        {
+          path: "openrig-onboarding-02.md",
+          absolutePath: nodePath.resolve(import.meta.dirname, "../../assets/onboarding/02-self-and-competent-action.md"),
+          ownerRoot: assetsRoot,
+          deliveryHint: "guidance_merge",
+          required: true,
+          appliesOn: ["fresh_start"],
+        },
+      );
+    }
 
     return this.resolveAutoHints(files);
   }

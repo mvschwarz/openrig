@@ -52,6 +52,11 @@ export interface RiggedConfig {
   context: {
     packsRoot: string;
   };
+  onboarding: {
+    defaultPack: {
+      enabled: boolean;
+    };
+  };
   // User Settings v0 — UEP env-var graduation.
   // Values are stored as raw named-pair strings ("name:/abs/path,...")
   // matching the OPENRIG_FILES_ALLOWLIST / OPENRIG_PROGRESS_SCAN_ROOTS
@@ -214,6 +219,7 @@ const DEFAULTS = {
   topology: { root: getDefaultOpenRigPath("topology") },
   // OPR.0.5.3.7 R4 — derived under the OpenRig home, never a shared-docs literal.
   context: { packsRoot: getDefaultOpenRigPath("context-packs") },
+  onboarding: { defaultPack: { enabled: true } },
   files: { allowlist: "" },
   progress: { scanRoots: "" },
   ui: {
@@ -333,6 +339,7 @@ export const VALID_KEYS = [
   "topology.root",
   // OPR.0.5.3.7 R4 — context-pack landing zone; lockstep with the daemon twin.
   "context.packs_root",
+  "onboarding.default_pack.enabled",
   "files.allowlist",
   "progress.scan_roots",
   "ui.preview.refresh_interval_seconds",
@@ -413,6 +420,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "topology.root": { primary: "OPENRIG_TOPOLOGY_ROOT" },
   // OPR.0.5.3.7 R4 — new key, OPENRIG_* only (no RIGGED_* legacy).
   "context.packs_root": { primary: "OPENRIG_CONTEXT_PACKS_ROOT" },
+  "onboarding.default_pack.enabled": { primary: "OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED" },
   // UEP env-var graduation: existing OPENRIG_FILES_ALLOWLIST /
   // OPENRIG_PROGRESS_SCAN_ROOTS become the env override for the new
   // typed keys (no breaking change).
@@ -483,6 +491,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "workspace.dogfood_evidence_root": ["workspace", "dogfoodEvidenceRoot"],
   "topology.root": ["topology", "root"],
   "context.packs_root": ["context", "packsRoot"],
+  "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
   "files.allowlist": ["files", "allowlist"],
   "progress.scan_roots": ["progress", "scanRoots"],
   "ui.preview.refresh_interval_seconds": ["ui", "preview", "refreshIntervalSeconds"],
@@ -858,6 +867,11 @@ export class ConfigStore {
       },
       context: {
         packsRoot: v("context.packs_root") as string,
+      },
+      onboarding: {
+        defaultPack: {
+          enabled: v("onboarding.default_pack.enabled") as boolean,
+        },
       },
       files: {
         allowlist: v("files.allowlist") as string,
