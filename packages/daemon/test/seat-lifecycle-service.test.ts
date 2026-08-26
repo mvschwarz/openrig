@@ -10,7 +10,7 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
-import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
+import { TmuxAdapter, type TmuxResult } from "../src/adapters/tmux.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 
 interface FakeTmux {
@@ -347,5 +347,64 @@ describe("SeatLifecycleService", () => {
     expect(nothing.code).toBe("nothing_to_clean");
     expect(nothing.message).toMatch(/binding/i);
     expect(nothing.message).toMatch(/session/i);
+  });
+
+  // ---- Wave-2 fix round 1 (r1 BLOCKING, row 9baac99f) — transport blip vs the REAL adapter ----
+  //
+  // The r1 evidence (inverted here as the RED): the real TmuxAdapter under a
+  // no-server blip classifies probeSession() = transport_unavailable, while its
+  // COLLAPSED hasSession() view returns false. Verbs that consume the collapsed
+  // view read the blip as absence — the KI-5.3-8 fabricated-absence class, in
+  // the destructive direction: clean would clear a LIVE seat's state.
+  describe("transport blip (real TmuxAdapter, injected no-server exec)", () => {
+    function blipWorld() {
+      const realTmux = new TmuxAdapter(async () => {
+        throw new Error("no server running on /private/tmp/tmux-501/default");
+      });
+      const svc = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: realTmux });
+      const seat = seatFixture("s5-rig", "dev.impl");
+      return { realTmux, svc, seat };
+    }
+
+    it("the adapter itself distinguishes the blip (control: probe says transport_unavailable)", async () => {
+      const { realTmux, seat } = blipWorld();
+      const probe = await realTmux.probeSession(seat.sessionName);
+      expect(probe.state).toBe("transport_unavailable");
+    });
+
+    it("clean under a blip REFUSES indeterminate and leaves the live seat's state byte-identical", async () => {
+      const { svc, seat } = blipWorld();
+      const before = lineageSnapshot(db, seat.node.id);
+
+      const res = await svc.cleanSeat({ seatRef: seat.sessionName, reason: "blip pin" });
+
+      expect(res.ok).toBe(false);
+      if (res.ok) throw new Error("DEFECT: cleanSeat proceeded under a transport blip against a live seat");
+      expect(res.code).toBe("tmux_probe_failed");
+      expect(res.message).toMatch(/not determined|indeterminate/i);
+
+      // Nothing was destroyed: binding intact, session still running, no event.
+      expect(sessionRegistry.getBindingForNode(seat.node.id)).not.toBeNull();
+      expect((db.prepare("SELECT status FROM sessions WHERE id = ?").get(seat.session.id) as { status: string }).status).toBe("running");
+      expect(eventsOfType(db, "session.cleaned")).toHaveLength(0);
+      expect(lineageSnapshot(db, seat.node.id)).toEqual(before);
+    });
+
+    it("stop under a blip REFUSES indeterminate — and does NOT route the operator to clean", async () => {
+      const { svc, seat } = blipWorld();
+
+      const res = await svc.stopSeat({ seatRef: seat.sessionName, reason: "blip pin" });
+
+      expect(res.ok).toBe(false);
+      if (res.ok) throw new Error("DEFECT: stopSeat acted under a transport blip");
+      // The blip must be the INDETERMINATE refusal, never the positive-absence one.
+      expect(res.code).toBe("tmux_probe_failed");
+      // The unsafe routing r1 flagged: under a blip the refusal must not point
+      // at the destructive verb.
+      expect(res.guidance ?? "").not.toContain("clean");
+      expect(res.message ?? "").not.toContain("rig seat clean");
+      // Session untouched.
+      expect((db.prepare("SELECT status FROM sessions WHERE id = ?").get(seat.session.id) as { status: string }).status).toBe("running");
+    });
   });
 });
