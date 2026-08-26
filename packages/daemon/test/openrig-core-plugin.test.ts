@@ -26,6 +26,8 @@ const EXPECTED_SKILLS = [
   // delegating-work joined in the 0.4.8 whole-set mirror (commit 864cea6b), which declares both
   // TIER-A explicitly ("applying-a-permission-policy (Tier-A: the agent-driven translation invoked
   // by the shipped rig setup --policy verb)" + "delegating-work (Tier-A: every-agent distribution)")
+  // orienting-to-an-inherited-seat + retiring-and-inheriting-a-seat joined in the 2026-08-24
+  // canon-drift regeneration (commit 4281729e3); every seat may be inherited or retired.
   // — so by the spine-only design's own rule they belong in the plugin. Kept in lockstep with the
   // shipped skills dir + the openrig-skills index + the README count.
   "applying-a-permission-policy",
@@ -36,7 +38,9 @@ const EXPECTED_SKILLS = [
   "mission-slice-sop",
   "openrig-skills",
   "openrig-user",
+  "orienting-to-an-inherited-seat",
   "queue-handoff",
+  "retiring-and-inheriting-a-seat",
   "seat-continuity-and-handover",
   "session-compaction-and-restore",
   "software-for-agents",

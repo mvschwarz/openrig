@@ -4,7 +4,7 @@ Canonical OpenRig skills and hooks for cross-runtime agent topology coordination
 
 ## What this plugin ships
 
-**Skills (12):** the canonical OpenRig operating knowledge — how to use the `rig` CLI, how to design rig topologies, how to recover from compaction, how to hand work off durably between agents, how to maintain seat continuity across handovers and restarts, how to apply a permission policy to a seat's live harness, and how to decide who does a task.
+**Skills (14):** the canonical OpenRig operating knowledge — how to use the `rig` CLI, how to design rig topologies, how to recover from compaction, how to hand work off durably between agents, how to maintain seat continuity and inherit or retire a seat across handovers and restarts, how to apply a permission policy to a seat's live harness, and how to decide who does a task.
 
 **Hooks:** activity-tracking hooks (Claude Code: 4 events; Codex: 3 events) that POST agent state to the OpenRig daemon for real-time UI seat-status updates.
 
