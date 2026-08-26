@@ -1,0 +1,38 @@
+S3 round-3 live JSON inspection — built CLI, one consumed + one staged-unresolved recipient (raw transport sent:2):
+
+{
+    "total": 2,
+    "sent": 1,
+    "failed": 1,
+    "results": [
+        {
+            "ok": false,
+            "sessionName": "staged-session",
+            "verified": false,
+            "outcome": "staged-not-consumed",
+            "error": "staged, not consumed (pane effect); the one guarded submit did not clear it"
+        },
+        {
+            "ok": true,
+            "sessionName": "consumed-session"
+        }
+    ],
+    "effectChecks": [
+        {
+            "sessionName": "staged-session",
+            "effect": {
+                "checked": true,
+                "state": "staged",
+                "remedy": "submitted-still-staged"
+            }
+        },
+        {
+            "sessionName": "consumed-session",
+            "effect": {
+                "checked": true,
+                "state": "no-staged-residual"
+            }
+        }
+    ]
+}
+exit: 0

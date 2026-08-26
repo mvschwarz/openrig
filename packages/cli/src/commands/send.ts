@@ -949,7 +949,13 @@ async function runFanOutSend(params: {
         ? { ...r, ok: false, verified: false, outcome: "staged-not-consumed", error: "staged, not consumed (pane effect); the one guarded submit did not clear it" }
         : r
     );
-    console.log(JSON.stringify(effects ? { ...res.data, results: encodedResults, effectChecks: effects } : res.data));
+    // Round-3 (r2 row 00fb3a68): the machine-readable AGGREGATE derives from
+    // the classified encoded outcomes, never the raw transport counts — a
+    // staged-unresolved recipient is not sent/delivered in any field.
+    const encodedSent = encodedResults.filter((r) => r.ok).length;
+    console.log(JSON.stringify(effects
+      ? { ...res.data, results: encodedResults, sent: encodedSent, failed: encodedResults.length - encodedSent, effectChecks: effects }
+      : res.data));
     if (res.status >= 400 || rawResults.some((r) => !r.ok)) process.exitCode = 1;
     if (unresolvedCount > 0) process.exitCode = 1;
     return;

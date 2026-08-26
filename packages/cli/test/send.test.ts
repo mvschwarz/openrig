@@ -775,6 +775,10 @@ describe("Send CLI", () => {
       expect(stagedRow!["ok"]).toBe(false);
       expect(stagedRow!["outcome"]).toBe("staged-not-consumed");
       expect(stagedRow!["verified"]).not.toBe(true);
+      // Round-3 (r2 row 00fb3a68): the AGGREGATE is derived from the classified
+      // encoded outcomes — a staged-unresolved recipient is never counted sent.
+      expect(envelope["sent"]).toBe(1); // RED at 57b69e405: raw transport sent:2
+      expect(envelope["failed"]).toBe(1);
     });
 
     it("R2-F1 json single-send: a staged-unresolved envelope carries no delivered claim beside the staged effect", async () => {
