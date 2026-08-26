@@ -97,9 +97,14 @@ export function importCommand(depsOverride?: ImportDeps): Command {
           ...extraHeaders,
           ...(opts.targetRig ? { "X-Target-Rig-Id": opts.targetRig } : {}),
         };
-        const res = await client.postText<{ rigId: string; specName: string; specVersion: string; nodes: Array<{ logicalId: string; status: string }> } | { ok: false; code: string; errors?: string[]; message?: string }>("/api/rigs/import/materialize", yaml, "text/yaml", headers);
+        const res = await client.postText<{ rigId: string; specName: string; specVersion: string; nodes: Array<{ logicalId: string; status: string }> } | { ok: false; code: string; errors?: string[]; message?: string; error?: string }>("/api/rigs/import/materialize", yaml, "text/yaml", headers);
         if (res.status === 409 || res.status === 400 || res.status === 404) {
           const data = res.data as { ok?: false; code?: string; errors?: string[]; message?: string; error?: string };
+          if (data.code === "rig_name_running") {
+            console.error(data.error ?? data.message ?? "A rig with this name is already running.");
+            process.exitCode = 1;
+            return;
+          }
           const detail = data.errors?.join("\n  ") ?? data.message ?? data.error ?? `status ${res.status}`;
           console.error(`Materialize failed:\n  ${detail}\nFix: update your spec or target rig and retry.`);
           process.exitCode = 1;
@@ -119,7 +124,7 @@ export function importCommand(depsOverride?: ImportDeps): Command {
       }
 
       if (opts.instantiate) {
-        const res = await client.postText<{ rigId: string; specName: string; specVersion: string; nodes: Array<{ logicalId: string; status: string }> } | { ok: false; code: string; errors?: string[]; message?: string }>(
+        const res = await client.postText<{ rigId: string; specName: string; specVersion: string; nodes: Array<{ logicalId: string; status: string }> } | { ok: false; code: string; errors?: string[]; message?: string; error?: string }>(
           "/api/rigs/import",
           yaml,
           "text/yaml",
@@ -127,7 +132,12 @@ export function importCommand(depsOverride?: ImportDeps): Command {
           { timeoutMs: LONG_RUNNING_IMPORT_TIMEOUT_MS },
         );
         if (res.status === 409 || res.status === 400) {
-          const data = res.data as { ok: false; code: string; errors?: string[]; message?: string };
+          const data = res.data as { ok: false; code: string; errors?: string[]; message?: string; error?: string };
+          if (data.code === "rig_name_running") {
+            console.error(data.error ?? data.message ?? "A rig with this name is already running.");
+            process.exitCode = 1;
+            return;
+          }
           const detail = data.errors?.join("\n  ") ?? data.message ?? `status ${res.status}`;
           console.error(`Import failed:\n  ${detail}\nFix: check your rig spec and retry. Validate first with: rig spec validate <path>`);
           process.exitCode = 1;

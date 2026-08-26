@@ -92,7 +92,10 @@ rigspecImportRoutes.post("/", async (c) => {
         // direct instantiation route too — never a 500 (map consistency).
         : outcome.code === "rig_name_running" ? 409
         : 500;
-      return c.json(outcome, status);
+      const body = outcome.code === "rig_name_running"
+        ? { ...outcome, error: outcome.message }
+        : outcome;
+      return c.json(body, status);
     }
     return c.json(outcome.result, 201);
   }
@@ -110,8 +113,12 @@ rigspecImportRoutes.post("/", async (c) => {
   if (!outcome.ok) {
     const status = outcome.code === "validation_failed" ? 400
       : outcome.code === "preflight_failed" ? 409
+      : outcome.code === "rig_name_running" ? 409
       : 500;
-    return c.json(outcome, status);
+    const body = outcome.code === "rig_name_running"
+      ? { ...outcome, error: outcome.message }
+      : outcome;
+    return c.json(body, status);
   }
   return c.json(outcome.result, 201);
 });
@@ -145,8 +152,12 @@ rigspecImportRoutes.post("/materialize", async (c) => {
       : outcome.code === "preflight_failed" ? 409
       : outcome.code === "target_rig_not_found" ? 404
       : outcome.code === "materialize_conflict" ? 409
+      : outcome.code === "rig_name_running" ? 409
       : 500;
-    return c.json(outcome, status);
+    const body = outcome.code === "rig_name_running"
+      ? { ...outcome, error: outcome.message }
+      : outcome;
+    return c.json(body, status);
   }
   return c.json(outcome.result, 201);
 });
