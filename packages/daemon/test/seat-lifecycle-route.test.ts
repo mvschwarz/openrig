@@ -27,7 +27,16 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
   }
 
   function tmux() {
-    return setup.tmuxAdapter as unknown as Record<string, ReturnType<typeof vi.fn>>;
+    const t = setup.tmuxAdapter as unknown as Record<string, ReturnType<typeof vi.fn>>;
+    // Fix r1 (row 9baac99f): the service consumes the CLASSIFIED probeSession.
+    // The shared test-app mock predates it; derive a positive-evidence probe
+    // from the test's hasSession mock (present/absent — the blip class is
+    // pinned against the REAL adapter in the service suite, not here).
+    if (!t.probeSession) {
+      t.probeSession = vi.fn(async (name: string) =>
+        (await t.hasSession(name)) ? { state: "present" } : { state: "absent" });
+    }
+    return t;
   }
 
   function post(path: string, seatRef: string, body: Record<string, unknown> = {}) {

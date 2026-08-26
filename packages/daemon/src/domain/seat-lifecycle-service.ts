@@ -2,7 +2,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
-import type { TmuxAdapter } from "../adapters/tmux.js";
+import type { TmuxAdapter, SessionProbe } from "../adapters/tmux.js";
 import type { NodeInventoryEntry, PersistedEvent } from "./types.js";
 import { getNodeInventory } from "./node-inventory.js";
 import { parseSessionName } from "./session-name.js";
@@ -160,21 +160,16 @@ export class SeatLifecycleService {
       };
     }
 
-    let alive: boolean;
-    try {
-      alive = await this.tmuxAdapter.hasSession(session.session_name);
-    } catch (err) {
-      return {
-        ok: false,
-        code: "tmux_probe_failed",
-        message: `tmux liveness probe for "${session.session_name}" failed (${err instanceof Error ? err.message : String(err)}) — liveness is INDETERMINATE, so stop refuses rather than kill blind.`,
-      };
-    }
-    if (!alive) {
+    // Wave-2 fix round 1 (r1 row 9baac99f): consume the CLASSIFIED probe, never the
+    // collapsed hasSession view — a transport blip is INDETERMINATE, not absence
+    // (KI-5.3-8 fabricated-absence class, destructive direction).
+    const probed = await this.probeLiveness(session.session_name, "stop refuses rather than kill blind");
+    if ("code" in probed) return probed;
+    if (probed.state === "absent") {
       return {
         ok: false,
         code: "session_not_live",
-        message: `Session "${session.session_name}" is not alive in tmux (checked: tmux has-session) — there is nothing to stop.`,
+        message: `Session "${session.session_name}" is absent in tmux (checked: tmux has-session, POSITIVE absence evidence) — there is nothing to stop.`,
         guidance: "A dead seat with stale records is returned to launchable with: rig seat clean",
       };
     }
@@ -226,17 +221,14 @@ export class SeatLifecycleService {
     }
 
     if (session) {
-      let alive: boolean;
-      try {
-        alive = await this.tmuxAdapter.hasSession(session.session_name);
-      } catch (err) {
-        return {
-          ok: false,
-          code: "tmux_probe_failed",
-          message: `tmux liveness probe for "${session.session_name}" failed (${err instanceof Error ? err.message : String(err)}) — liveness is INDETERMINATE, so clean refuses rather than clear state under a possibly-live seat.`,
-        };
-      }
-      if (alive) {
+      // Wave-2 fix round 1 (r1 row 9baac99f): clean is the DESTRUCTIVE verb, so it
+      // acts only on POSITIVE absence evidence. A transport blip (probeSession =
+      // transport_unavailable) is indeterminate and refuses — under the old
+      // collapsed hasSession view that blip read as absence and clean cleared a
+      // live seat's state.
+      const probed = await this.probeLiveness(session.session_name, "clean refuses rather than clear state under a possibly-live seat");
+      if ("code" in probed) return probed;
+      if (probed.state === "present") {
         return {
           ok: false,
           code: "session_live",
@@ -285,6 +277,41 @@ export class SeatLifecycleService {
   }
 
   // -- shared internals --
+
+  /**
+   * The ONE liveness read both mutating verbs share (fix r1, row 9baac99f):
+   * the CLASSIFIED probeSession, never the collapsed hasSession view.
+   *   present / absent        → returned for the verb to act on (absent is
+   *                             POSITIVE tmux evidence, per OPR.0.5.4.2).
+   *   transport_unavailable   → an INDETERMINATE refusal: session existence was
+   *                             NOT determined, so neither verb may act — and the
+   *                             refusal never routes the operator to a
+   *                             destructive verb.
+   *   unexpected probe throw  → the same indeterminate refusal (fail closed).
+   */
+  private async probeLiveness(
+    sessionName: string,
+    refusalConsequence: string,
+  ): Promise<{ state: "present" | "absent" } | SeatRefusal> {
+    let probe: SessionProbe;
+    try {
+      probe = await this.tmuxAdapter.probeSession(sessionName);
+    } catch (err) {
+      return {
+        ok: false,
+        code: "tmux_probe_failed",
+        message: `tmux liveness probe for "${sessionName}" failed (${err instanceof Error ? err.message : String(err)}) — liveness is INDETERMINATE, so ${refusalConsequence}.`,
+      };
+    }
+    if (probe.state === "transport_unavailable") {
+      return {
+        ok: false,
+        code: "tmux_probe_failed",
+        message: `tmux transport unavailable probing "${sessionName}" (${probe.cause}) — session existence was NOT determined (checked: classified tmux probe), so ${refusalConsequence}. Retry when the tmux transport is back.`,
+      };
+    }
+    return { state: probe.state };
+  }
 
   private requireReason(reason: string): SeatRefusal | null {
     if (!reason?.trim()) {

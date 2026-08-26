@@ -35,6 +35,15 @@ function fakeTmux(): FakeTmux {
       if (failing.has(name)) throw new Error("tmux probe failed (injected)");
       return alive.get(name) ?? false;
     },
+    // Classified probe (OPR.0.5.4.2): this fake models POSITIVE evidence only —
+    // present/absent from the liveness map, and an UNEXPECTED throw for the
+    // injected-failure set (the service must fail closed on it). The
+    // transport_unavailable class is deliberately NOT expressible here; blip
+    // behavior is pinned against the REAL adapter below (fix r1, row 9baac99f).
+    probeSession: async (name: string): Promise<{ state: "present" } | { state: "absent" }> => {
+      if (failing.has(name)) throw new Error("tmux probe failed (injected)");
+      return (alive.get(name) ?? false) ? { state: "present" } : { state: "absent" };
+    },
     listSessions: async () => [],
     listWindows: async () => [],
     listPanes: async () => [],
