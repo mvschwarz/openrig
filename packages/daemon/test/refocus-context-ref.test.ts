@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -108,5 +108,52 @@ describe("openrig-core refocus hook — context library refs", () => {
     expect(result.payload?.hookSpecificOutput.additionalContext).toBe(
       "REFOCUS (fresh session). Answer briefly, out loud, before your next move:\n\nconfigured file bytes",
     );
+  });
+});
+
+describe("openrig-core refocus hook — delivery state", () => {
+  it("retains due state at Stop, then consumes one context-visible delivery", () => {
+    root = mkdtempSync(join(tmpdir(), "refocus-delivery-state-"));
+    const home = join(root, "home");
+    const transcript = join(root, "transcript.jsonl");
+    const state = join(home, "refocus", "seat@test.json");
+    mkdirSync(home, { recursive: true });
+    writeFileSync(transcript, "due transcript bytes", "utf8");
+
+    const invoke = (event: string) => spawnSync(process.execPath, [HOOK], {
+      input: JSON.stringify({ hook_event_name: event, transcript_path: transcript }),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        OPENRIG_HOME: home,
+        OPENRIG_SESSION_NAME: "seat@test",
+        OPENRIG_REFOCUS_BYTES: "1",
+        OPENRIG_REFOCUS_CONTENT_REF: undefined,
+        OPENRIG_REFOCUS_CONTENT_FILE: undefined,
+      },
+    });
+
+    const stop = invoke("Stop");
+    expect(stop.status).toBe(0);
+    expect(stop.stdout).toBe("");
+    expect(existsSync(state)).toBe(true);
+    expect(JSON.parse(readFileSync(state, "utf8"))).toMatchObject({
+      lastBytes: 0,
+      pendingOn: "Stop",
+    });
+
+    const delivered = invoke("UserPromptSubmit");
+    expect(delivered.status).toBe(0);
+    expect(JSON.parse(delivered.stdout).hookSpecificOutput.additionalContext).toContain("REFOCUS (");
+    const deliveredState = JSON.parse(readFileSync(state, "utf8"));
+    expect(deliveredState).toMatchObject({
+      lastBytes: Buffer.byteLength("due transcript bytes"),
+      firedOn: "UserPromptSubmit",
+    });
+    expect(deliveredState).not.toHaveProperty("pendingOn");
+
+    const repeat = invoke("UserPromptSubmit");
+    expect(repeat.status).toBe(0);
+    expect(repeat.stdout).toBe("");
   });
 });

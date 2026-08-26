@@ -10,9 +10,10 @@
 // THIS IS ALSO HOW TOPOLOGY CHAIN FILES REACH A RUNNING SEAT. Editing a file
 // under topology.root is not delivery — a running seat reads its config at
 // session start and its context never re-reads disk on its own. This hook is
-// the delivery channel: it injects orientation content at the seat's next
-// hook boundary (SessionStart / UserPromptSubmit / Stop / PostCompact), so a
-// shipped or updated chain file becomes live doctrine without a relaunch.
+// the delivery channel: Stop / PostCompact observations retain due-state,
+// then inject orientation content at the seat's next context-visible boundary
+// (SessionStart / UserPromptSubmit), so a shipped or updated chain file becomes
+// live doctrine without a relaunch.
 //
 // SIGNAL = TRANSCRIPT GROWTH, not turns and not wall-clock. A "turn" is one
 // prompt submission; an agent can burn 200k tokens across fifty tool calls
@@ -29,12 +30,12 @@
 // Project- or mission-specific refocus text belongs in those FILES, on the
 // instance that needs it — it must never be committed here.
 //
-// Fires on: SessionStart (fresh orientation), Stop (catches the long single
+// Observes: SessionStart (fresh orientation), Stop (catches the long single
 // turn), UserPromptSubmit, and PostCompact on Claude (post-compaction
 // re-orientation; Codex exposes no compact hook — growth+Stop is the coverage
-// there). Silent unless due. A configured REF failure degrades loudly inside
-// the delivered payload; every failure remains non-blocking because a refocus
-// hook must never break a seat's turn.
+// there). Emits only at context-visible boundaries and stays silent unless due.
+// A configured REF failure degrades loudly inside the delivered payload; every
+// failure remains non-blocking because a refocus hook must never break a turn.
 
 const fs = require("node:fs");
 const path = require("node:path");
@@ -57,13 +58,24 @@ const readStdin = () => new Promise((r) => { let d = ""; process.stdin.setEncodi
   const file = path.join(dir, `${seat.replace(/[^A-Za-z0-9@._-]/g, "_")}.json`);
   let st = { lastBytes: 0 };
   try { st = JSON.parse(fs.readFileSync(file, "utf8")) || st; } catch {}
+  const writeState = () => {
+    try { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(file, JSON.stringify(st)); } catch {}
+  };
 
   const grown = size > 0 ? size - (st.lastBytes || 0) : 0;
-  const due = ev === "SessionStart" || ev === "PostCompact" || grown >= THRESH;
+  const due = ev === "SessionStart" || ev === "PostCompact" || Boolean(st.pendingOn) || grown >= THRESH;
   if (!due) { process.exit(0); } // silent no-op — the common path
 
-  st.lastBytes = size; st.firedAt = new Date().toISOString(); st.firedOn = ev;
-  try { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(file, JSON.stringify(st)); } catch {}
+  // Stop and PostCompact do not expose hook output to the agent's next context.
+  // Remember that delivery is due, but do not consume transcript growth until a
+  // context-visible boundary actually accepts the payload.
+  const contextVisible = ev === "SessionStart" || ev === "UserPromptSubmit";
+  if (!contextVisible) {
+    st.pendingOn ||= ev;
+    st.pendingAt ||= new Date().toISOString();
+    writeState();
+    process.exit(0);
+  }
 
   // A library ref wins over file configuration and reuses the public assembler instead of
   // growing a second resolver inside this hook. REF failures stay visible without blocking
@@ -99,7 +111,7 @@ const readStdin = () => new Promise((r) => { let d = ""; process.stdin.setEncodi
   }
 
   const why = ev === "SessionStart" ? "fresh session"
-            : ev === "PostCompact" ? "just compacted — your picture is lossy"
+            : st.pendingOn === "PostCompact" ? "just compacted — your picture is lossy"
             : `${Math.round(grown / 1e6 * 10) / 10}MB of work since your last refocus`;
 
   const generic = [
@@ -128,5 +140,13 @@ const readStdin = () => new Promise((r) => { let d = ""; process.stdin.setEncodi
       ? [`REFOCUS CONTENT SOURCE: OPENRIG_REFOCUS_CONTENT_REF=${contentRef}`, ``, configured]
       : configured ? [configured] : generic),
   ];
-  process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: ev, additionalContext: payload.join("\n") } }));
+  const output = JSON.stringify({ hookSpecificOutput: { hookEventName: ev, additionalContext: payload.join("\n") } });
+  process.stdout.write(output, () => {
+    st.lastBytes = size;
+    st.firedAt = new Date().toISOString();
+    st.firedOn = ev;
+    delete st.pendingOn;
+    delete st.pendingAt;
+    writeState();
+  });
 })();

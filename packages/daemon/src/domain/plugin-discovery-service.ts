@@ -200,6 +200,7 @@ export class PluginDiscoveryService {
 
   constructor(opts: PluginDiscoveryServiceOpts) {
     this.opts = opts;
+    this.assertNoDuplicateVendoredHooks();
   }
 
   listPlugins(filterOpts: ListPluginsOpts = {}): PluginEntry[] {
@@ -390,6 +391,43 @@ export class PluginDiscoveryService {
 
   // -- helpers --
 
+  /**
+   * Runtime plugin loaders activate every vendored manifest, so the same hook
+   * registered by two plugins fires twice. Reject that load shape before the
+   * discovery service can describe it as healthy. Cache entries are excluded:
+   * multiple cached versions are inventory, not simultaneous providers.
+   */
+  private assertNoDuplicateVendoredHooks(): void {
+    if (!existsSync(this.opts.openrigPluginsDir)) return;
+
+    const seen = new Map<string, { pluginPath: string; hooksPath: string }>();
+    for (const entry of safeReaddir(this.opts.openrigPluginsDir).sort()) {
+      const pluginPath = join(this.opts.openrigPluginsDir, entry);
+      if (!isDir(pluginPath)) continue;
+
+      for (const [runtime, manifestRel] of [
+        ["claude", CLAUDE_MANIFEST_REL],
+        ["codex", CODEX_MANIFEST_REL],
+      ] as const) {
+        const manifest = readManifest(join(pluginPath, manifestRel));
+        const hooksRef = manifest?.raw["hooks"];
+        if (typeof hooksRef !== "string" || !hooksRef.trim()) continue;
+
+        const hooksPath = join(pluginPath, hooksRef);
+        for (const identity of extractHookIdentities(hooksPath, runtime, pluginPath)) {
+          const prior = seen.get(identity);
+          if (prior && prior.pluginPath !== pluginPath) {
+            throw new Error(
+              `Duplicate hook registration "${identity}" found in both ${prior.hooksPath} and ${hooksPath}. `
+              + "Archive or disable one provider before loading plugins.",
+            );
+          }
+          seen.set(identity, { pluginPath, hooksPath });
+        }
+      }
+    }
+  }
+
   private detectPlugin(
     pluginPath: string,
     source: PluginSourceKind,
@@ -551,6 +589,43 @@ function extractHookEvents(hooksJsonPath: string): string[] {
     // best-effort
   }
   return [];
+}
+
+function extractHookIdentities(
+  hooksJsonPath: string,
+  runtime: PluginRuntime,
+  pluginPath: string,
+): string[] {
+  try {
+    const data = JSON.parse(readFileSync(hooksJsonPath, "utf8")) as { hooks?: Record<string, unknown> };
+    if (!data.hooks || typeof data.hooks !== "object") return [];
+
+    const identities: string[] = [];
+    for (const [event, rawGroups] of Object.entries(data.hooks)) {
+      const groups = Array.isArray(rawGroups) ? rawGroups : [rawGroups];
+      for (const rawGroup of groups) {
+        if (!rawGroup || typeof rawGroup !== "object") continue;
+        const group = rawGroup as Record<string, unknown>;
+        const matcher = typeof group.matcher === "string" ? group.matcher : "";
+        const rawHooks = Array.isArray(group.hooks) ? group.hooks : [group];
+        for (const rawHook of rawHooks) {
+          if (!rawHook || typeof rawHook !== "object") continue;
+          const hook = rawHook as Record<string, unknown>;
+          if (typeof hook.command !== "string") continue;
+          const type = typeof hook.type === "string" ? hook.type : "command";
+          const command = hook.command
+            .split(pluginPath).join("<plugin-root>")
+            .replace(/\$\{(?:CLAUDE_)?PLUGIN_ROOT\}/g, "<plugin-root>")
+            .replace(/\s+/g, " ")
+            .trim();
+          identities.push(JSON.stringify([runtime, event, matcher, type, command]));
+        }
+      }
+    }
+    return identities;
+  } catch {
+    return [];
+  }
 }
 
 interface AgentYamlCandidate {

@@ -62,6 +62,14 @@ function writeCodexPluginManifest(pluginDir: string, manifest: Record<string, un
   writeFileSync(join(manifestDir, "plugin.json"), JSON.stringify(manifest, null, 2));
 }
 
+function writeHookManifest(pluginDir: string, runtime: "claude" | "codex", event: string, command: string): void {
+  const hooksDir = join(pluginDir, "hooks");
+  mkdirSync(hooksDir, { recursive: true });
+  writeFileSync(join(hooksDir, `${runtime}.json`), JSON.stringify({
+    hooks: { [event]: [{ hooks: [{ type: "command", command }] }] },
+  }));
+}
+
 describe("PluginDiscoveryService", () => {
   let dirs: TempDirs;
 
@@ -82,6 +90,38 @@ describe("PluginDiscoveryService", () => {
         specLibraryDir: dirs.specLibraryDir,
       });
       expect(service.listPlugins()).toEqual([]);
+    });
+
+    it("fails loud with both Claude manifest paths when vendored plugins duplicate a hook identity", () => {
+      const core = join(dirs.openrigPluginsDir, "openrig-core");
+      const lab = join(dirs.openrigPluginsDir, "openrig-lab");
+      writeClaudePluginManifest(core, { name: "openrig-core", version: "0.1.0", hooks: "./hooks/claude.json" });
+      writeClaudePluginManifest(lab, { name: "openrig-lab", version: "0.1.0", hooks: "./hooks/claude.json" });
+      writeHookManifest(core, "claude", "Stop", 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs"');
+      writeHookManifest(lab, "claude", "Stop", 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs"');
+
+      expect(() => new PluginDiscoveryService({
+        openrigPluginsDir: dirs.openrigPluginsDir,
+        claudeCacheDir: dirs.claudeCacheDir,
+        codexCacheDir: dirs.codexCacheDir,
+        specLibraryDir: dirs.specLibraryDir,
+      })).toThrow(new RegExp(`${core}/hooks/claude\\.json.*${lab}/hooks/claude\\.json`));
+    });
+
+    it("fails loud with both Codex manifest paths when vendored plugins duplicate a hook identity", () => {
+      const core = join(dirs.openrigPluginsDir, "openrig-core");
+      const lab = join(dirs.openrigPluginsDir, "openrig-lab");
+      writeCodexPluginManifest(core, { name: "openrig-core", version: "0.1.0", hooks: "./hooks/codex.json" });
+      writeCodexPluginManifest(lab, { name: "openrig-lab", version: "0.1.0", hooks: "./hooks/codex.json" });
+      writeHookManifest(core, "codex", "Stop", 'node "${PLUGIN_ROOT}/hooks/scripts/refocus.cjs"');
+      writeHookManifest(lab, "codex", "Stop", 'node "${PLUGIN_ROOT}/hooks/scripts/refocus.cjs"');
+
+      expect(() => new PluginDiscoveryService({
+        openrigPluginsDir: dirs.openrigPluginsDir,
+        claudeCacheDir: dirs.claudeCacheDir,
+        codexCacheDir: dirs.codexCacheDir,
+        specLibraryDir: dirs.specLibraryDir,
+      })).toThrow(new RegExp(`${core}/hooks/codex\\.json.*${lab}/hooks/codex\\.json`));
     });
 
     it("discovers a vendored OpenRig plugin (dual-manifest)", () => {
