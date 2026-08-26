@@ -120,6 +120,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       // OPR.0.5.3.6 D1 — the topology tree root (instance at its top).
       "topology.root",
       "context.packs_root",
+      "onboarding.default_pack.enabled",
       "files.allowlist", "progress.scan_roots",
       "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines",
       "recovery.auto_drive_provider_prompts",
@@ -442,6 +443,18 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       expect(all[key]).toBeDefined();
       expect(all[key].source).toBeDefined();
     }
+  });
+
+  it("default onboarding pack is on and can be disabled", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.resolveWithSource("onboarding.default_pack.enabled"))
+      .toMatchObject({ value: true, source: "default", defaultValue: true });
+    expect(store.resolve().onboarding.defaultPack.enabled).toBe(true);
+
+    store.set("onboarding.default_pack.enabled", "false");
+    expect(store.resolveWithSource("onboarding.default_pack.enabled"))
+      .toMatchObject({ value: false, source: "file", defaultValue: true });
+    expect(store.resolve().onboarding.defaultPack.enabled).toBe(false);
   });
 
   it("malformed config.json throws with reset hint (preserves legacy behavior)", () => {

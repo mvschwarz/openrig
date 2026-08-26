@@ -100,6 +100,7 @@ describe("SettingsStore (User Settings v0)", () => {
       // OPR.0.5.3.6 D1 — the topology tree root (instance at its top).
       "topology.root",
       "context.packs_root",
+      "onboarding.default_pack.enabled",
       "files.allowlist", "progress.scan_roots",
       "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines",
       // OPR.0.4.0.1 — global live-terminal cap.
@@ -198,6 +199,20 @@ describe("SettingsStore (User Settings v0)", () => {
       expect(all[key]).toBeDefined();
       expect(["env", "file", "default"]).toContain(all[key].source);
     }
+  });
+
+  it("default onboarding pack is on and resolves env over file", () => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveOne("onboarding.default_pack.enabled"))
+      .toMatchObject({ value: true, source: "default", defaultValue: true });
+
+    store.set("onboarding.default_pack.enabled", "false");
+    expect(store.resolveOne("onboarding.default_pack.enabled"))
+      .toMatchObject({ value: false, source: "file", defaultValue: true });
+
+    process.env.OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED = "true";
+    expect(store.resolveOne("onboarding.default_pack.enabled"))
+      .toMatchObject({ value: true, source: "env", defaultValue: true });
   });
 
   it("env > file > default for daemon.port", () => {

@@ -60,7 +60,12 @@ function makeRigSpec(overrides?: Partial<RigSpec>): RigSpec {
 }
 
 describe("PodRigInstantiator", () => {
-  function setup(fsFiles?: Record<string, string>, extraAdapters?: Record<string, RuntimeAdapter>, topologyRootResolver?: () => string) {
+  function setup(
+    fsFiles?: Record<string, string>,
+    extraAdapters?: Record<string, RuntimeAdapter>,
+    topologyRootResolver?: () => string,
+    onboardingEnabledResolver?: () => boolean,
+  ) {
     const db = createFullTestDb();
     const rigRepo = new RigRepository(db);
     const podRepo = new PodRepository(db);
@@ -74,12 +79,14 @@ describe("PodRigInstantiator", () => {
     const files = fsFiles ?? { [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl") };
     const fsOps = mockFs(files);
 
-    const inst = new PodRigInstantiator({
+    const instDeps: any = {
       db, rigRepo, podRepo, sessionRegistry, eventBus, nodeLauncher, startupOrchestrator: startupOrch,
       fsOps, adapters: { "claude-code": adapter, "codex": codexAdapter, "terminal": mockAdapter("terminal"), ...(extraAdapters ?? {}) },
       tmuxAdapter: tmux,
       ...(topologyRootResolver ? { topologyRootResolver } : {}),
-    });
+      ...(onboardingEnabledResolver ? { onboardingEnabledResolver } : {}),
+    };
+    const inst = new PodRigInstantiator(instDeps);
 
     return { db, rigRepo, podRepo, sessionRegistry, eventBus, inst, adapter, codexAdapter, tmux };
   }
@@ -284,6 +291,48 @@ profiles:
     db.close();
   });
 
+  it("delivers the two-part default onboarding pack on fresh starts", async () => {
+    const { db, inst } = setup();
+    const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+    expect(result.ok).toBe(true);
+
+    const rows = db.prepare("SELECT resolved_files_json FROM node_startup_context").all() as Array<{ resolved_files_json: string }>;
+    const files = rows.flatMap((row) => JSON.parse(row.resolved_files_json) as Array<{
+      path: string;
+      required: boolean;
+      appliesOn: string[];
+    }>);
+    expect(files.filter((file) => file.path.startsWith("openrig-onboarding-"))).toEqual([
+      expect.objectContaining({
+        path: "openrig-onboarding-01.md",
+        required: true,
+        appliesOn: ["fresh_start"],
+      }),
+      expect.objectContaining({
+        path: "openrig-onboarding-02.md",
+        required: true,
+        appliesOn: ["fresh_start"],
+      }),
+    ]);
+
+    db.close();
+  });
+
+  it("omits the default onboarding pack when the typed setting is off", async () => {
+    const { db, inst } = setup(undefined, undefined, undefined, () => false);
+    const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+    expect(result.ok).toBe(true);
+
+    const rows = db.prepare("SELECT resolved_files_json FROM node_startup_context").all() as Array<{ resolved_files_json: string }>;
+    const paths = rows.flatMap((row) =>
+      (JSON.parse(row.resolved_files_json) as Array<{ path: string }>).map((file) => file.path),
+    );
+    expect(paths).toContain("openrig-start.md");
+    expect(paths.some((path) => path.startsWith("openrig-onboarding-"))).toBe(false);
+
+    db.close();
+  });
+
   it("always includes the default culture when the rig has no culture_file", async () => {
     const { db, inst } = setup();
     const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
@@ -357,6 +406,8 @@ profiles:
     expect(content).not.toContain("plan-lock");
     expect(content).not.toContain("openrig-user");
     expect(content).not.toContain("openrig-skills");
+    expect(content).toContain("openrig-onboarding-01.md");
+    expect(content).toContain("onboarding.default_pack.enabled");
     // Thin means thin: a hard ceiling so accretion back toward the 3.6KB pre-trim
     // overlay fails loudly instead of silently.
     expect(content.length).toBeLessThan(2500);

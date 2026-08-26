@@ -360,6 +360,20 @@ describe("Config CLI", () => {
     expect(coreHelp).toContain("config");
   });
 
+  it("rig config --help names the default onboarding-pack switch", () => {
+    const cmd = configCommand(join(tmpDir, "config.json"));
+    let combined = "";
+    cmd.configureOutput({
+      writeOut: (text) => {
+        combined += text;
+      },
+      writeErr: () => {},
+    });
+    cmd.outputHelp();
+    expect(combined).toContain("onboarding.default_pack.enabled");
+    expect(combined).toContain("default on");
+  });
+
   // V0.3.1 slice 08 — HG-6: rig config --help text must enumerate every
   // top-level dotted-prefix used in VALID_KEYS. The slice 08 verification
   // pass caught a drift where ui.preview.* / agents.* / feed.subscriptions.* /
