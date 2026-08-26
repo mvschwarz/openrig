@@ -492,22 +492,101 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         console.log(`Advisory: ${advisory}`);
       }
       if (opts.verify) {
-        // Legacy line preserved verbatim (existing scripts grep `Verified:`);
-        // the Delivery line below carries the honest three-outcome vocabulary
-        // (OPR.99.0.6.3): `Verified: no` alone collapsed a landed-but-redraw-
-        // raced send into the same line as a miss.
-        const verified = res.data["verified"] as boolean | undefined;
-        console.log(`Verified: ${verified ? "yes" : "no"}`);
-        const outcome = res.data["outcome"] as string | undefined;
-        if (outcome === "delivered") {
-          console.log("Delivery: delivered (message landed; render confirmed)");
-        } else if (outcome === "rendered-unconfirmed") {
-          console.log(`Delivery: rendered-unconfirmed (landed; pane re-render not confirmed - confirm with: rig capture ${session})`);
+        // S3 (OPR.0.5.4.6) — "sent" must mean CONSUMED, never merely typed. The
+        // transport's verify cannot see text sitting AT the prompt (the
+        // send-staging class; its negative signals are measured-unreliable), so
+        // the pane EFFECT decides first — walk's consumption pattern
+        // generalized to plain sends. One capture decides; a positive staged
+        // residual overrides the transport's answer. Absence of a residual
+        // proves nothing by itself (a redrawn pane reads absent), so the
+        // transport's verdict stands unchanged in that case.
+        const stagedProbe = await detectStagedAtPrompt(client, session, payload);
+        if (stagedProbe.state === "staged") {
+          console.log("Verified: no");
+          console.log("Delivery: staged, not consumed (checked: post-send pane capture; observed: the sent text is still at the prompt — typed, never submitted)");
+          // The remedy is the existing guarded submit path — ONE Enter, which
+          // types nothing and cannot double-deliver. One submit is the contract.
+          const enter = await client.post<Record<string, unknown>>("/api/transport/send", {
+            session,
+            submitOnly: true,
+            expectedStagedText: outboundText,
+            expectedStagedLineCount: outboundText.split("\n").length,
+          }, transportRequestOptions(waitForIdleMs));
+          if (enter.status >= 400) {
+            console.log(`Remedy: the single guarded Enter (submit path) was refused (${(enter.data?.["error"] as string | undefined) ?? `HTTP ${enter.status}`}); stopping here — one submit is the contract. Inspect with: rig capture ${session}`);
+            process.exitCode = 1;
+          } else {
+            const recheck = await detectStagedAtPrompt(client, session, payload);
+            if (recheck.state === "staged") {
+              console.log(`Remedy: one guarded Enter submitted, but the text is STILL at the prompt — not consumed; stopping here (one submit is the contract). Inspect with: rig capture ${session}`);
+              process.exitCode = 1;
+            } else {
+              console.log("Remedy: one guarded Enter submitted — the staged text left the prompt.");
+            }
+          }
+        } else {
+          // Legacy line preserved verbatim (existing scripts grep `Verified:`);
+          // the Delivery line below carries the honest three-outcome vocabulary
+          // (OPR.99.0.6.3): `Verified: no` alone collapsed a landed-but-redraw-
+          // raced send into the same line as a miss.
+          const verified = res.data["verified"] as boolean | undefined;
+          console.log(`Verified: ${verified ? "yes" : "no"}`);
+          const outcome = res.data["outcome"] as string | undefined;
+          if (outcome === "delivered") {
+            console.log("Delivery: delivered (message landed; render confirmed)");
+          } else if (outcome === "rendered-unconfirmed") {
+            console.log(`Delivery: rendered-unconfirmed (landed; pane re-render not confirmed - confirm with: rig capture ${session})`);
+          }
+          if (stagedProbe.state === "unchecked") {
+            console.log(`Note: the pane-effect check could not run (${stagedProbe.why}); the verdict above is transport-level only.`);
+          }
         }
       }
     });
 
   return cmd;
+}
+
+/**
+ * S3 (OPR.0.5.4.6) — the staged-at-prompt detector, walk's staged-evidence
+ * primitive generalized to plain sends. POSITIVE evidence only: text rendered
+ * in the input-box region (on or after the LAST prompt line — scrollback above
+ * it never counts) or the TUI's pasted-text placeholder. It proves STAGED; it
+ * can never prove consumed (a redrawn pane reads absent — capture absence is
+ * not evidence), so callers treat a non-staged answer as "no override", not as
+ * a consumption proof.
+ */
+async function detectStagedAtPrompt(
+  client: DaemonClient,
+  session: string,
+  sentPayload: string,
+): Promise<{ state: "staged" | "not-staged" } | { state: "unchecked"; why: string }> {
+  const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
+  let cap: { status: number; data: Record<string, unknown> };
+  try {
+    cap = await client.post<Record<string, unknown>>("/api/transport/capture", { session, lines: 50 }, { headers: terminalAuthHeaders() });
+  } catch (err) {
+    return { state: "unchecked", why: (err as Error).message };
+  }
+  const pane = cap.data?.["content"] as string | undefined;
+  if (cap.status !== 200 || typeof pane !== "string") {
+    return { state: "unchecked", why: (cap.data?.["error"] as string | undefined) ?? `capture HTTP ${cap.status}` };
+  }
+  // Large pastes render as the placeholder, never their content — the real
+  // staging specimens' shape.
+  if (/\[Pasted text #\d+ \+\d+ lines\]/.test(pane)) return { state: "staged" };
+  const head = squash(sentPayload).slice(0, 24);
+  if (head.length === 0) return { state: "not-staged" };
+  // The input-box region: from the LAST prompt-marker line to the end of the
+  // pane. Text there was typed and never submitted.
+  const lines = pane.split("\n");
+  let lastPrompt = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/^\s*[❯›]/.test(lines[i]!)) { lastPrompt = i; break; }
+  }
+  if (lastPrompt === -1) return { state: "not-staged" };
+  const inputRegion = squash(lines.slice(lastPrompt).join("\n").replace(/^\s*[❯›]/, ""));
+  return inputRegion.includes(head) ? { state: "staged" } : { state: "not-staged" };
 }
 
 async function runCrossHostSend(

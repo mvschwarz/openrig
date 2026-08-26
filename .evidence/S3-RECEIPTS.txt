@@ -1,0 +1,9 @@
+S3 GREEN + PROOF RECEIPTS (candidate at base 366642f43)
+
+GREEN (direct exits): cli send+broadcast+send-header 88/88 exit 0; cli tsc exit 0 (daemon dist built); daemon untouched by S3 (send.ts + send.test.ts only).
+Base-RED (final test bytes, pristine 366642f43 worktree): PROOF-1 + PROOF-3 failed, PROOF-2 pin passed, 60 prior green, vitest exit 1 — RED-s3-final-testset-at-base-366642f43.txt
+Disjointness receipt: git diff --name-only 886c3f1d5 366642f43 → S6 files only (context.ts, daemon-db-path, plugin-vendor, their tests) — no S3-territory overlap.
+
+PROOF ITEM 4 (interim lore retired): recorded CUTOVER-GATED in the guidance that taught it:
+  ~/.claude/projects/-Users-admin-code-openrig-build-source/memory/negative-delivery-signals.md (the 2026-08-18 staged-at-prompt lore + retirement note)
+  (dev-planner LEARNED also carries the discipline — its owner's to update, named as follow-on since S1.)

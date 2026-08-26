@@ -690,8 +690,13 @@ describe("Send CLI", () => {
       });
       const output = logs.join("\n");
       // exactly ONE plain-text delivery of these bytes ever hits the wire
-      const plainSends = sendBodies.filter((b) => !b["submitOnly"] && b["text"] === "hello there");
+      // (the non-raw send envelopes the payload, so match by containment; the
+      // submit-path request carries NO text at all)
+      const plainSends = sendBodies.filter((b) => !b["submitOnly"] && String(b["text"] ?? "").includes("hello there"));
       expect(plainSends).toHaveLength(1);
+      const submits = sendBodies.filter((b) => b["submitOnly"]);
+      expect(submits.length).toBeLessThanOrEqual(1); // one guarded Enter, never more
+      for (const s of submits) expect(s["text"] ?? "").toBeFalsy(); // the submit path types nothing
       // the report points at the submit path, never a re-send
       expect(output).toMatch(/submit|Enter/i);
       expect(output).not.toMatch(/re-?send|send again/i);

@@ -1,74 +1,74 @@
 
- RUN  v3.2.4 /private/tmp/s3-delivery-honesty/packages/cli
+ RUN  v3.2.4 /private/tmp/s3-base-red/packages/cli
 
 remote okstderr | test/send.test.ts > Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R3 RED: legacy RIGGED_URL custom port honored when OPENRIG_URL unset (probe-stopped)
 Warning: RIGGED_URL is deprecated; use OPENRIG_URL instead.
 
- ❯ test/send.test.ts (62 tests | 2 failed) 1888ms
-   ✓ Send CLI > send prints success output 38ms
+ ❯ test/send.test.ts (62 tests | 2 failed) 377ms
+   ✓ Send CLI > send prints success output 16ms
    ✓ Send CLI > P18: an env-less send DELIVERS with an honest `<unknown sender>` label — dispatched, actorSession null 3ms
    ✓ Send CLI > P18: a resolvable seat SENDS with its attributed identity — actorSession derived from the seat env, never forged 2ms
-   ✓ Send CLI > P18 canonicity: '<unknown sender>' is DEFINED at EXACTLY the two named twin sites — a third fails BY NAME  1048ms
-   ✓ Send CLI > send with 409 mid-work prints error and exits non-zero 14ms
-   ✓ Send CLI > prints the Advisory on an unknown-proceed send (human output) 7ms
-   ✓ Send CLI > carries the advisory as `warning` in --json output 68ms
-   ✓ Send CLI > verify confirmed prints Delivery: delivered AND the legacy Verified: yes 3ms
-   ✓ Send CLI > verify redraw-race prints Delivery: rendered-unconfirmed (landed, with capture guidance) AND legacy Verified: no 7ms
-   ✓ Send CLI > verify genuine transport failure stays an error path, distinct from the middle (discriminator) 7ms
-   ✓ Send CLI > verify --json passes the additive outcome field through 2ms
+   ✓ Send CLI > P18 canonicity: '<unknown sender>' is DEFINED at EXACTLY the two named twin sites — a third fails BY NAME 279ms
+   ✓ Send CLI > send with 409 mid-work prints error and exits non-zero 7ms
+   ✓ Send CLI > prints the Advisory on an unknown-proceed send (human output) 2ms
+   ✓ Send CLI > carries the advisory as `warning` in --json output 2ms
+   ✓ Send CLI > verify confirmed prints Delivery: delivered AND the legacy Verified: yes 1ms
+   ✓ Send CLI > verify redraw-race prints Delivery: rendered-unconfirmed (landed, with capture guidance) AND legacy Verified: no 1ms
+   ✓ Send CLI > verify genuine transport failure stays an error path, distinct from the middle (discriminator) 3ms
+   ✓ Send CLI > verify --json passes the additive outcome field through 1ms
    ✓ Send CLI > send --json prints raw JSON 1ms
    ✓ Send CLI > send --wait-for-idle posts waitForIdleMs and extends request timeout 2ms
    ✓ Send CLI > send without wait-for-idle uses default client timeout path 0ms
    ✓ Send CLI > send --context resolves a ref to its whole content and sends it (single-seat local) 1ms
    ✓ Send CLI > send --context ABORTS (no send) when the pack has a missing/unreadable member 0ms
-   ✓ Send CLI > send rejects invalid wait-for-idle values before contacting daemon 1ms
+   ✓ Send CLI > send rejects invalid wait-for-idle values before contacting daemon 0ms
    ✓ Send CLI > send rejects wait-for-idle with force before contacting daemon 0ms
-   ✓ Send CLI > send --raw posts the exact text without the From/To envelope 2ms
+   ✓ Send CLI > send --raw posts the exact text without the From/To envelope 1ms
    ✓ Send CLI > default send (no --raw) wraps the From/To messaging envelope 1ms
    ✓ Send CLI > send --from <origin> is IGNORED — From:/actor derive from the ambient transport identity, not --from 1ms
    ✓ Send CLI > send --dangerously-interact --reason posts the override fields with raw (exact) text 1ms
    ✓ Send CLI > send --dangerously-interact without --reason is rejected before contacting the daemon 0ms
    ✓ Send CLI > send --dangerously-interact + --wait-for-idle is rejected before contacting the daemon 0ms
-   ✓ Send CLI > send --host forwards --raw/--dangerously-interact/--reason in the reconstructed remote argv 1ms
-   ✓ Send CLI > send --context rejects the agent@rig@host sugar cross-host form (NO message) — never reaches remote argv 0ms
+   ✓ Send CLI > send --host forwards --raw/--dangerously-interact/--reason in the reconstructed remote argv 2ms
+   ✓ Send CLI > send --context rejects the agent@rig@host sugar cross-host form (NO message) — never reaches remote argv 1ms
    ✓ Send CLI > send --context rejects the sugar cross-host form (WITH message) — context not silently dropped 0ms
-   ✓ Send CLI > send --to a,b fans out to /broadcast with a sessions list and prints per-recipient summary 4ms
+   ✓ Send CLI > send --to a,b fans out to /broadcast with a sessions list and prints per-recipient summary 3ms
    ✓ Send CLI > send --to accepts repetition (--to a --to b) and sets the daemon-side envelopeSender 1ms
    ✓ Send CLI > send --pod posts a pod target to /broadcast 1ms
-   ✓ Send CLI > send --rig posts a rig target to /broadcast 2ms
+   ✓ Send CLI > send --rig posts a rig target to /broadcast 1ms
    ✓ Send CLI > fan-out with one recipient failing prints which failed, the summary, and exits nonzero 1ms
-   × Send CLI > S3 — delivery honesty (OPR.0.5.4.6): staged-vs-consumed by pane effect > PROOF-1: a send whose text sits AT the prompt is reported STAGED — by pane effect, not the transport's verified:true 8ms
+   × Send CLI > S3 — delivery honesty (OPR.0.5.4.6): staged-vs-consumed by pane effect > PROOF-1: a send whose text sits AT the prompt is reported STAGED — by pane effect, not the transport's verified:true 6ms
      → expected 'Sent to staged-session\nVerified: yes…' to match /not (yet )?consumed|not submitted|st…/i
    ✓ Send CLI > S3 — delivery honesty (OPR.0.5.4.6): staged-vs-consumed by pane effect > PROOF-2: a genuinely consumed send verifies positively and is NEVER reported staged 1ms
-   × Send CLI > S3 — delivery honesty (OPR.0.5.4.6): staged-vs-consumed by pane effect > PROOF-3: the staged remedy is the single submit path — exactly one plain-text send, no blind re-send suggested or performed 2ms
+   × Send CLI > S3 — delivery honesty (OPR.0.5.4.6): staged-vs-consumed by pane effect > PROOF-3: the staged remedy is the single submit path — exactly one plain-text send, no blind re-send suggested or performed 3ms
      → expected [] to have a length of 1 but got +0
    ✓ Send CLI > fan-out renderer surfaces the unknown-sender notice from the response warning 1ms
    ✓ Send CLI > fan-out --raw sends bare exact text with NO envelopeSender (no per-recipient wrap) 1ms
-   ✓ Send CLI > fan-out --dangerously-interact --reason plumbs the danger fields (bare text, no envelope) 1ms
+   ✓ Send CLI > fan-out --dangerously-interact --reason plumbs the danger fields (bare text, no envelope) 3ms
    ✓ Send CLI > rejects combining a bare seat with a fan-out flag 0ms
    ✓ Send CLI > rejects more than one fan-out mode at once 0ms
-   ✓ Send CLI > rejects --wait-for-idle with a multi/pod/rig target 3ms
-   ✓ Send CLI > single-seat send is UNCHANGED — still posts to /send, byte-identical envelope, no /broadcast 11ms
-   ✓ Send CLI > send --help includes rediscovery examples + the new guard flags 264ms
-   ✓ Send CLI > send --help documents proceed-with-advisory on unknown telemetry, not fail-closed 22ms
-   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R1 RED: single-seat + OPENRIG_URL custom port + probe-stopped -> actual POST lands, exact env target passed to clientFactory 3ms
+   ✓ Send CLI > rejects --wait-for-idle with a multi/pod/rig target 0ms
+   ✓ Send CLI > single-seat send is UNCHANGED — still posts to /send, byte-identical envelope, no /broadcast 3ms
+   ✓ Send CLI > send --help includes rediscovery examples + the new guard flags 1ms
+   ✓ Send CLI > send --help documents proceed-with-advisory on unknown telemetry, not fail-closed 1ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R1 RED: single-seat + OPENRIG_URL custom port + probe-stopped -> actual POST lands, exact env target passed to clientFactory 1ms
    ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R2 RED: fan-out --to + OPENRIG_URL + probe-stopped -> actual /broadcast lands with per-recipient results 1ms
-   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R3 RED: legacy RIGGED_URL custom port honored when OPENRIG_URL unset (probe-stopped) 3ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R3 RED: legacy RIGGED_URL custom port honored when OPENRIG_URL unset (probe-stopped) 1ms
    ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R4 RED: precedence — OPENRIG_URL wins over RIGGED_URL on the transport-authoritative path 1ms
-   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R5 RED: RUNNING-but-UNHEALTHY (event-loop-starved healthz body) must still send (single-seat + fan-out) 1ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R5 RED: RUNNING-but-UNHEALTHY (event-loop-starved healthz body) must still send (single-seat + fan-out) 2ms
    ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R6 RED: NO env + live-pid state file (custom port) + healthz probe failing -> POST attempted against the state-derived target 1ms
    ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R6b RED: NO env + NO daemon state + probe-stopped -> POST attempted against the configured DEFAULT target (injected client succeeds) 1ms
-   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R6c RED: NO env + NO state + probe-stopped + ConfigStore CUSTOM daemon host/port -> POST attempted against the CONFIGURED-FILE target exactly (no hardcoded default) 10ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R6c RED: NO env + NO state + probe-stopped + ConfigStore CUSTOM daemon host/port -> POST attempted against the CONFIGURED-FILE target exactly (no hardcoded default) 3ms
    ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R7 RED: REAL down fails honestly — actual connection error names the target; the bare preflight restart line never appears 1ms
-   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R7b RED: fan-out REAL down fails honestly too — target-specific connection error, exit 1, no restart line, and the same remediation as single-seat 1ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R7b RED: fan-out REAL down fails honestly too — target-specific connection error, exit 1, no restart line, and the same remediation as single-seat 0ms
    ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R7c RED: single-seat --json transport failure emits exactly one parseable stdout JSON envelope, empty stderr, exit 1 1ms
    ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R7d RED: fan-out --json transport failure emits exactly one parseable stdout JSON envelope, empty stderr, exit 1 0ms
    ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R7e: single-seat HUMAN transport failure keeps stdout empty (mirror of R7c) — the 3 remediation lines are stderr-only, exit 1 0ms
    ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R7f: fan-out HUMAN transport failure keeps stdout empty (mirror of R7d) — stderr-only remediation, exit 1 0ms
-   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R8: explicit OPENRIG_URL (single-seat) -> exact target POSTed + EXACTLY ONE self-id /healthz GET, no status-probe burn 44ms
+   ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R8: explicit OPENRIG_URL (single-seat) -> exact target POSTed + EXACTLY ONE self-id /healthz GET, no status-probe burn 3ms
    ✓ Send CLI > qitem-c113bd41 — transport-authoritative local send (RED vs preflight refusal) > R8b RED: explicit OPENRIG_URL (fan-out) -> exact target broadcast and ZERO lifecycle probe calls 1ms
    ✓ Send CLI > P21 I4 — fan-out IGNORES --from; identity derives from the transport (reverses ba41fea2) > --from is IGNORED in fan-out — BOTH envelopeSender and actorSession name the ambient transport identity, never the forged --from origin 1ms
-   ✓ Send CLI > P21 I4 — fan-out IGNORES --from; identity derives from the transport (reverses ba41fea2) > F2 GREEN-characterization: with NO --from, fan-out still falls back to ambient identity (the flag is additive, not a behavior change) 279ms
+   ✓ Send CLI > P21 I4 — fan-out IGNORES --from; identity derives from the transport (reverses ba41fea2) > F2 GREEN-characterization: with NO --from, fan-out still falls back to ambient identity (the flag is additive, not a behavior change) 1ms
 
 ⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
 
@@ -115,7 +115,7 @@ AssertionError: expected [] to have a length of 1 but got +0
 
  Test Files  1 failed (1)
       Tests  2 failed | 60 passed (62)
-   Start at  06:48:54
-   Duration  3.41s (transform 674ms, setup 35ms, collect 904ms, tests 1.89s, environment 0ms, prepare 51ms)
+   Start at  06:56:06
+   Duration  808ms (transform 152ms, setup 30ms, collect 214ms, tests 377ms, environment 0ms, prepare 39ms)
 
 vitest exit: 1
