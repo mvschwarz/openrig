@@ -49,7 +49,7 @@ function vendoredAssembled() {
   return fs.existsSync(path.join(VEND_DAEMON_DIST, "index.js"));
 }
 
-test("baseline-fix-packaging guard: vendored daemon dist carries slice-09 rig-policy routes when assembled (qitem-20260518054224)", () => {
+test("baseline-fix-packaging guard: vendored daemon dist carries slice-09 rig-mode routes when assembled (qitem-20260518054224)", () => {
   if (!vendoredAssembled()) {
     // No vendored assembly present (fresh clone, or clean) — guard not
     // applicable. The runtime resolver fix means the CLI uses source
@@ -57,13 +57,13 @@ test("baseline-fix-packaging guard: vendored daemon dist carries slice-09 rig-po
     return;
   }
   assert.ok(
-    fs.existsSync(path.join(VEND_DAEMON_DIST, "routes/rig-policy.js")),
-    "Vendored daemon at packages/cli/daemon/dist/routes/rig-policy.js is missing. Slice 09 (OPR.0.3.2.9) shipped this route module; if vendored bundle exists it MUST carry it. Re-run scripts/build-package.sh to refresh."
+    fs.existsSync(path.join(VEND_DAEMON_DIST, "routes/rig-mode.js")),
+    "Vendored daemon at packages/cli/daemon/dist/routes/rig-mode.js is missing. Slice 09 (OPR.0.3.2.9) shipped this route module (renamed from rig-policy in 0.5.3); if vendored bundle exists it MUST carry it. Re-run scripts/build-package.sh to refresh."
   );
   const serverJs = fs.readFileSync(path.join(VEND_DAEMON_DIST, "server.js"), "utf-8");
   assert.ok(
-    serverJs.includes("rigPolicyRoutes") && serverJs.includes("/api/rig-policy"),
-    "Vendored daemon server.js does not register /api/rig-policy routes. This is the exact baseline-dogfood failure that masked slice 09. Re-run scripts/build-package.sh."
+    serverJs.includes("rigModeRoutes") && serverJs.includes("/api/rig-mode"),
+    "Vendored daemon server.js does not register /api/rig-mode routes. This is the exact baseline-dogfood failure that masked slice 09. Re-run scripts/build-package.sh."
   );
 });
 
