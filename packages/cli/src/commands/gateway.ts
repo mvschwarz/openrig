@@ -37,15 +37,29 @@ export async function daemonQueueRows(address: string): ReturnType<HumanRowsLook
   try {
     const { DaemonClient } = await import("../client.js");
     const client = new DaemonClient();
-    const res = await client.get<Array<{ qitemId?: string; state?: string; summary?: string | null }>>(
-      `/api/queue/list?destinationSession=${encodeURIComponent(address)}&state=pending,in-progress,blocked&limit=500&compact=1`,
-    );
-    const rows = (Array.isArray(res.data) ? res.data : []).map((r) => ({
-      id: String(r.qitemId ?? "(unknown-id)"),
-      state: String(r.state ?? "(unknown-state)"),
-      ...(r.summary ? { summary: String(r.summary) } : {}),
-    }));
-    return { ok: true, rows };
+    // Fix-r1 F2 (R2 blocking): enumerate to EXHAUSTION. A bounded read that comes back
+    // FULL is truncation-suspect — completeness is proven only by a window strictly larger
+    // than the result. Grow the window until that holds; a board that outgrows every
+    // window is an honest completeness refusal, never a silently-shortened orphan list.
+    let limit = 1000;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const res = await client.get<Array<{ qitemId?: string; state?: string; summary?: string | null }>>(
+        `/api/queue/list?destinationSession=${encodeURIComponent(address)}&state=pending,in-progress,blocked&limit=${limit}&compact=1`,
+      );
+      const data = Array.isArray(res.data) ? res.data : [];
+      if (data.length < limit) {
+        return {
+          ok: true,
+          rows: data.map((r) => ({
+            id: String(r.qitemId ?? "(unknown-id)"),
+            state: String(r.state ?? "(unknown-state)"),
+            ...(r.summary ? { summary: String(r.summary) } : {}),
+          })),
+        };
+      }
+      limit *= 4;
+    }
+    return { ok: false, error: `queue enumeration for ${address} saturated every window up to ${limit / 4} rows — completeness unproven` };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
@@ -70,10 +84,30 @@ export function gatewayCommand(deps: GatewayCommandDeps = {}): Command {
     .option("--replace", "Explicitly replace an existing human (no silent overwrite)")
     .action(async (entityId: string, opts: { displayName: string; binding: string[]; deliveryClass: string; away?: boolean; replace?: boolean }) => {
       // LAZY import the narrow daemon surface at invocation (dep rail 2).
-      const { addHumanFragment, parseBindingSpec } = (await import("@openrig/daemon/gateway-human-registry")) as {
+      const registry = await import("@openrig/daemon/gateway-human-registry");
+      const { addHumanFragment, parseBindingSpec } = registry as unknown as {
         addHumanFragment: typeof AddHumanFragment;
         parseBindingSpec: (spec: string) => { ok: true; binding: Record<string, unknown> } | { ok: false; error: string };
       };
+      // Fix-r1 F1 (R2 blocking, A1/R5): the add VERB is the single-human boundary. A second
+      // DISTINCT human is refused BEFORE any parse or write — the several-fragment state A1
+      // describes as hand-authored must never be produced by the product's own surface.
+      // Fail closed: an unverifiable registry refuses too (never add into an unknown state).
+      const existing = registry.listHumans();
+      if (!existing.ok) {
+        console.error(`refused: cannot verify the single-human boundary — ${existing.error}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (existing.humans.length > 0 && !existing.humans.some((h) => h.entityId === entityId)) {
+        const ids = existing.humans.map((h) => h.entityId).join(", ");
+        console.error(
+          `refused: a human is already configured (${ids}) — 0.5.5 ships the SIMPLE SINGLE-HUMAN surface (amendment A1, founder R5), so \`rig gateway human add\` manages one human. ` +
+          `If you truly need several, hand-author a fragment YAML under ${registry.humansDir()} (several fragments are displayed honestly, with an advisory); multi-human MANAGEMENT arrives in 0.5.7.`,
+        );
+        process.exitCode = 1;
+        return;
+      }
       const bindings: Record<string, unknown>[] = [];
       for (const spec of opts.binding) {
         const b = parseBindingSpec(spec);
