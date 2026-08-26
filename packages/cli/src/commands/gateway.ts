@@ -33,7 +33,7 @@ export interface GatewayCommandDeps {
 
 /** Default queue-row half of the remove guard: non-terminal rows addressed to the human,
  *  via the daemon. ok:false carries the reason the board COULD NOT BE CHECKED. */
-async function daemonQueueRows(address: string): ReturnType<HumanRowsLookup> {
+export async function daemonQueueRows(address: string): ReturnType<HumanRowsLookup> {
   try {
     const { DaemonClient } = await import("../client.js");
     const client = new DaemonClient();

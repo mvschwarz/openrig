@@ -282,6 +282,20 @@ describe("gateway human lifecycle (S12, amended A1: single-human surface): list 
     if (loaded.ok) expect(loaded.entities.some((e) => e.entityId === "mike")).toBe(false);
   });
 
+  it("fix-r1 F2 fs-half receipt: 501 in-flight items force-remove to 501 recorded orphans — the registry layer never truncates", () => {
+    const inflight: InflightItem[] = Array.from({ length: 501 }, (_, i) => ({
+      kind: "queue-row" as const,
+      id: `qitem-load-${i}`,
+      detail: `pending row qitem-load-${i}`,
+    }));
+    const res = removeHumanFragment("mike", { force: true, inflight }, home);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const orphans = JSON.parse(readFileSync(res.orphanRecordPath!, "utf8")) as { orphaned: InflightItem[] };
+    expect(orphans.orphaned).toHaveLength(501);
+    expect(orphans.orphaned.some((i) => i.id === "qitem-load-500")).toBe(true);
+  });
+
   it("remove on an unknown human teaches; the registry is untouched", () => {
     const projBefore = sha(projectionPath(home));
     const res = removeHumanFragment("ghost", { inflight: [] }, home);
