@@ -3,6 +3,26 @@ import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import type { EventBus } from "../domain/event-bus.js";
 import { verifyStartupProof } from "../domain/startup-proof.js";
+import type { ActivityEvidence } from "../domain/activity-taxonomy.js";
+import type { AgentActivity } from "../domain/types.js";
+
+// ── S19 A4 — the ingest half of the adapter seam: hook events reach the ONE oracle ──
+// (SeatActivityService) through this translation, so AgentActivityStore is reduced to a
+// raw-event consumer/recorder and arbitration happens in exactly one place. The store's
+// ALREADY-NORMALIZED state is the input (one event-name parser, no twin).
+// S19 A4 RED: unwired.
+
+/** Translate a recorded hook activity into oracle evidence. Returns null for states the
+ *  oracle should not consume (unknown = noise, never evidence). */
+export function evidenceFromHookActivity(_input: {
+  seatNodeId: string;
+  sessionName: string;
+  runtime: string | null;
+  activity: AgentActivity;
+  seq: number;
+}): ActivityEvidence | null {
+  throw new Error("not implemented (S19 A4 RED)");
+}
 
 export const activityRoutes = new Hono();
 
