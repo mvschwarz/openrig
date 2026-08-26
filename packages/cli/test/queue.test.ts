@@ -1456,8 +1456,8 @@ describe("rig queue CLI", () => {
 });
 
 // P3 — authored-summary TEACHING LAYER. The shipped warn-then-require rail (OPR.0.4.1.18
-// FR-7) told callers a missing --summary COSTS a Story-node truncation; the teaching layer
-// additionally TEACHES the convention (what a good summary is + where a human reads it), so
+// FR-7) tells callers a missing --summary falls back to a bounded body preview; the teaching
+// layer additionally TEACHES the convention (what a good summary is + where a human reads it), so
 // the needs-you rows a human skims are actually authored, not just hoped for. Rails held:
 // warn → stderr (json stdout clean), warn-not-hard-break, the two handoff advisories stay
 // byte-identical, facts-not-fabricated (teaches, never invents).
@@ -1475,7 +1475,7 @@ describe("P3 — authored-summary teaching layer (advisory + --summary hint)", (
     process.exitCode = undefined;
   });
 
-  it("create without --summary TEACHES the convention on the stderr advisory (not just the truncation cost) and does NOT hard-break", async () => {
+  it("create without --summary teaches the same truthful bounded-preview fallback and does NOT hard-break", async () => {
     const { deps, calls } = makeDeps({
       routes: { "POST /api/queue/create": { status: 201, data: { qitemId: "q1", state: "pending" } } },
     });
@@ -1488,6 +1488,9 @@ describe("P3 — authored-summary teaching layer (advisory + --summary hint)", (
     const warn = stderrOut.join("");
     expect(warn).toMatch(TEACHES_WHERE);
     expect(warn).toMatch(TEACHES_WHY);
+    expect(warn).toMatch(/pass --summary <text>/i);
+    expect(warn).toMatch(/bounded body preview/i);
+    expect(warn).not.toMatch(/body truncation/i);
     // warn-not-require rail: the qitem is still created (no hard-break on omission).
     expect(calls.find((c) => c.path === "/api/queue/create")).toBeDefined();
   });
@@ -1516,6 +1519,7 @@ describe("P3 — authored-summary teaching layer (advisory + --summary hint)", (
     expect(h).toMatch(TEACHES_WHERE);
     expect(h).toMatch(TEACHES_WHY);
     expect(h).toMatch(/pass --summary <text>/i);
+    expect(h).toMatch(/bounded body preview/i);
     expect(h).not.toMatch(/body truncation/i);
     expect(hc).toBe(h); // parity rail: the two handoff advisories are byte-identical
   });
