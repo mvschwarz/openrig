@@ -185,6 +185,12 @@
       ],
       "category": "core"
     },
+    "openrig-operating-model": {
+      "edges": [
+        "plugin"
+      ],
+      "category": null
+    },
     "openrig-skills": {
       "edges": [
         "plugin"
