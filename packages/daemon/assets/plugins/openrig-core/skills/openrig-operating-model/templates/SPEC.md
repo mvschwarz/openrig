@@ -11,8 +11,9 @@ status: UNSEEDED
 ---
 
 <!-- ONE authored file per work node. README.md and IMPLEMENTATION-PRD.md fold into this.
-     PROOF.md stays separate and is good. PROGRESS is DERIVED — never author it above the
-     checkbox. Legacy README.md nodes stay valid indefinitely; nothing is forced to migrate.
+     PROOF.md stays separate and is good. PROGRESS.md is the authored acceptance checklist:
+     checkbox items are stored marks; every roll-up above them is derived, never hand-authored.
+     Legacy README.md nodes stay valid indefinitely; nothing is forced to migrate.
 
      PROJECT and MISSION nodes: the frontmatter `intent:` IS the whole job. A mission
      ORGANISES slices and carries the context they need; it specifies nothing. Keep the

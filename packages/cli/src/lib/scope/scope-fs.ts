@@ -20,7 +20,7 @@ import {
   inferMissionDotId,
   nextEscapeBandOrdinal,
 } from "./dot-id.js";
-import { isSliceDotId } from "./dot-id.js";
+import { deriveMissionDependencyGraph, type MissionDependencyGraph } from "./scope-audit.js";
 
 const FRONTMATTER_DELIM = "---\n";
 const SLICE_DIRNAME_RE = /^(\d+)-(.+)$/;
@@ -279,73 +279,21 @@ export function listSlices(
   return out;
 }
 
-export interface MissionDependencyGraph {
-  mission: { id: string | null; name: string; dependsOn: string[] };
-  nodes: Array<{ id: string; name: string; dependsOn: string[] }>;
-  ready: string[];
-  waiting: Array<{ id: string; on: string[] }>;
-  advisories: Array<{
-    id: string;
-    dependency?: string;
-    kind: "invalid_field" | "invalid_dependency" | "outside_parent" | "missing_sibling" | "missing_id";
-    message: string;
-  }>;
-}
-
 /** Read the advisory sibling-ordering graph for one mission. Unknown, stale,
  * malformed, or cross-parent edges are reported and ignored: the graph is a
  * sequencing hint, never a gate or a traversal pointer. */
 export function buildMissionDependencyGraph(mission: MissionInfo): MissionDependencyGraph {
   const all = listSlices(mission, "all");
-  const active = listSlices(mission, "active");
-  const byId = new Map(all.flatMap((slice) => slice.id ? [[slice.id, slice] as const] : []));
-  const activeIds = new Set(active.flatMap((slice) => slice.id ? [slice.id] : []));
-  const advisories: MissionDependencyGraph["advisories"] = [];
-  const nodes: MissionDependencyGraph["nodes"] = [];
-  const ready: string[] = [];
-  const waiting: MissionDependencyGraph["waiting"] = [];
-
-  for (const slice of active) {
-    if (!slice.id) {
-      advisories.push({ id: slice.name, kind: "missing_id", message: "Slice has no dot-ID; it cannot participate in the dependency graph." });
-      continue;
-    }
-    const raw = slice.frontmatter.depends_on;
-    const dependencies: string[] = [];
-    if (raw !== undefined && !Array.isArray(raw)) {
-      advisories.push({ id: slice.id, kind: "invalid_field", message: "depends_on must be a list of sibling dot-IDs; the value was ignored." });
-    }
-    for (const value of Array.isArray(raw) ? raw : []) {
-      if (typeof value !== "string" || !isSliceDotId(value)) {
-        advisories.push({ id: slice.id, dependency: String(value), kind: "invalid_dependency", message: "Dependency is not a slice dot-ID and was ignored." });
-        continue;
-      }
-      if (mission.id && !value.startsWith(`${mission.id}.`)) {
-        advisories.push({ id: slice.id, dependency: value, kind: "outside_parent", message: "Dependency is outside this mission and was ignored." });
-        continue;
-      }
-      if (!byId.has(value)) {
-        advisories.push({ id: slice.id, dependency: value, kind: "missing_sibling", message: "Dependency does not resolve to a sibling and was ignored." });
-        continue;
-      }
-      dependencies.push(value);
-    }
-    nodes.push({ id: slice.id, name: slice.name, dependsOn: dependencies });
-    const unmet = dependencies.filter((dependency) => activeIds.has(dependency));
-    if (unmet.length === 0) ready.push(slice.id);
-    else waiting.push({ id: slice.id, on: unmet });
-  }
-
-  const missionDependsOn = Array.isArray(mission.frontmatter.depends_on)
-    ? mission.frontmatter.depends_on.filter((value): value is string => typeof value === "string")
-    : [];
-  return {
-    mission: { id: mission.id, name: mission.name, dependsOn: missionDependsOn },
-    nodes,
-    ready,
-    waiting,
-    advisories,
-  };
+  const activePaths = new Set(listSlices(mission, "active").map((slice) => slice.absPath));
+  return deriveMissionDependencyGraph({
+    mission: { id: mission.id, name: mission.name, dependsOn: mission.frontmatter.depends_on },
+    slices: all.map((slice) => ({
+      id: slice.id,
+      name: slice.name,
+      dependsOn: slice.frontmatter.depends_on,
+      active: activePaths.has(slice.absPath),
+    })),
+  });
 }
 
 function buildSliceInfo(mission: MissionInfo, sliceRoot: string, dirName: string): SliceInfo {

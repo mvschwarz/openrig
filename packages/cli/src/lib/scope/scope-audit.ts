@@ -14,7 +14,6 @@ export type FindingKind =
   | "malformed_mission_brief"
   | "missing_mission_notes"
   | "missing_proof"
-  | "progress_not_updated_on_commit"
   // OPR.0.4.4.19 FR-10 — the belt-and-suspenders BACKSTOPS (never the
   // primary enforcement; the primary is the drop path / write path):
   | "proof_artifact_c1_invalid"
@@ -59,15 +58,6 @@ export interface ScopeAuditInput {
   proofDirHasEntries?: boolean;
   hasProofPacket?: boolean;
   sliceStatus?: string | null;
-  // Git-derived, CLI-ONLY inputs for the committed-without-PROGRESS check.
-  // Revision basis: the most recent commit (HEAD). The daemon input-builder has
-  // no git context and leaves these UNDEFINED, so the check is inert daemon-side
-  // and the classifier stays byte-identical (only the input differs). The check
-  // fires only when BOTH are defined AND slice=true / progress=false — i.e. on
-  // POSITIVE evidence that HEAD touched the slice but not its PROGRESS.md. If git
-  // is unavailable the CLI leaves them undefined: no false-green, no false-positive.
-  sliceTouchedByRecentCommit?: boolean;
-  progressTouchedByRecentCommit?: boolean;
   // OPR.0.4.4.19 FR-10 (C1 backstop) — the slice's proof/ dir markdown
   // artifacts with their raw frontmatter, caller-listed. Undefined = the
   // caller has no proof-dir context; the check is inert (no false findings).
@@ -90,6 +80,78 @@ export interface ScopeAuditResult {
   railStatus: RailStatus;
   findings: AuditFinding[];
   frontmatterError: string | null;
+}
+
+export interface MissionDependencyGraph {
+  mission: { id: string | null; name: string; dependsOn: string[] };
+  nodes: Array<{ id: string; name: string; dependsOn: string[] }>;
+  ready: string[];
+  waiting: Array<{ id: string; on: string[] }>;
+  advisories: Array<{
+    id: string;
+    dependency?: string;
+    kind: "invalid_field" | "invalid_dependency" | "outside_parent" | "missing_sibling" | "missing_id";
+    message: string;
+  }>;
+}
+
+export interface MissionDependencyGraphInput {
+  mission: { id: string | null; name: string; dependsOn: unknown };
+  slices: Array<{ id: string | null; name: string; dependsOn: unknown; active: boolean }>;
+}
+
+/** Pure advisory graph derivation shared by mission graph and both audit surfaces.
+ * Unknown, stale, malformed, and cross-parent edges are reported and ignored:
+ * dependency data can steer build order but never gate execution. */
+export function deriveMissionDependencyGraph(input: MissionDependencyGraphInput): MissionDependencyGraph {
+  const active = input.slices.filter((slice) => slice.active);
+  const allIds = new Set(input.slices.flatMap((slice) => slice.id ? [slice.id] : []));
+  const activeIds = new Set(active.flatMap((slice) => slice.id ? [slice.id] : []));
+  const advisories: MissionDependencyGraph["advisories"] = [];
+  const nodes: MissionDependencyGraph["nodes"] = [];
+  const ready: string[] = [];
+  const waiting: MissionDependencyGraph["waiting"] = [];
+
+  for (const slice of active) {
+    if (!slice.id) {
+      advisories.push({ id: slice.name, kind: "missing_id", message: "Slice has no dot-ID; it cannot participate in the dependency graph." });
+      continue;
+    }
+    const dependencies: string[] = [];
+    if (slice.dependsOn !== undefined && !Array.isArray(slice.dependsOn)) {
+      advisories.push({ id: slice.id, kind: "invalid_field", message: "depends_on must be a list of sibling dot-IDs; the value was ignored." });
+    }
+    for (const value of Array.isArray(slice.dependsOn) ? slice.dependsOn : []) {
+      if (typeof value !== "string" || !isSliceDotId(value)) {
+        advisories.push({ id: slice.id, dependency: String(value), kind: "invalid_dependency", message: "Dependency is not a slice dot-ID and was ignored." });
+        continue;
+      }
+      if (input.mission.id && !value.startsWith(`${input.mission.id}.`)) {
+        advisories.push({ id: slice.id, dependency: value, kind: "outside_parent", message: "Dependency is outside this mission and was ignored." });
+        continue;
+      }
+      if (!allIds.has(value)) {
+        advisories.push({ id: slice.id, dependency: value, kind: "missing_sibling", message: "Dependency does not resolve to a sibling and was ignored." });
+        continue;
+      }
+      dependencies.push(value);
+    }
+    nodes.push({ id: slice.id, name: slice.name, dependsOn: dependencies });
+    const unmet = dependencies.filter((dependency) => activeIds.has(dependency));
+    if (unmet.length === 0) ready.push(slice.id);
+    else waiting.push({ id: slice.id, on: unmet });
+  }
+
+  const missionDependsOn = Array.isArray(input.mission.dependsOn)
+    ? input.mission.dependsOn.filter((value): value is string => typeof value === "string")
+    : [];
+  return {
+    mission: { id: input.mission.id, name: input.mission.name, dependsOn: missionDependsOn },
+    nodes,
+    ready,
+    waiting,
+    advisories,
+  };
 }
 
 // OPR.0.4.4.20 FR-8: exported so the review brief-spine writer conforms to
@@ -459,24 +521,6 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
       }
     }
 
-    // committed-without-PROGRESS. Fires only on POSITIVE evidence: the most
-    // recent commit (HEAD) touched this slice AND definitively did NOT touch its
-    // PROGRESS.md. Inputs are git-derived and CLI-only; when git context is
-    // unavailable they are left undefined and this branch is inert (no
-    // false-green, no false-positive). See ScopeAuditInput.
-    if (
-      input.sliceTouchedByRecentCommit === true
-      && input.progressTouchedByRecentCommit === false
-    ) {
-      const progressPath = childPath(input.path, "PROGRESS.md");
-      findings.push({
-        kind: "progress_not_updated_on_commit",
-        severity: "medium",
-        path: progressPath,
-        message: "The most recent commit (HEAD) touched this slice but did not update PROGRESS.md.",
-        remediation: "Update PROGRESS.md to reflect the committed change (one line per outcome) and amend or add a follow-up commit. Per the mission-slice-sop, PROGRESS.md is updated on every commit — fix the flag, do not suppress it.",
-      });
-    }
   }
 
   return { railStatus, findings, frontmatterError };

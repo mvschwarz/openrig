@@ -2,7 +2,14 @@ import { Hono } from "hono";
 import { attestationLineage, type AttestationLineage } from "../domain/scope/attestation-lineage.generated.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { type AuditFinding, classifyScopeItem, type ScopeAuditResult } from "../domain/scope/scope-audit.js";
+import * as YAML from "yaml";
+import {
+  type AuditFinding,
+  classifyScopeItem,
+  deriveMissionDependencyGraph,
+  type MissionDependencyGraph,
+  type ScopeAuditResult,
+} from "../domain/scope/scope-audit.js";
 import type { SliceIndexer } from "../domain/slices/slice-indexer.js";
 import { resolveNodeFile } from "../domain/scope/node-file.js";
 
@@ -18,6 +25,69 @@ function directoryHasEntries(dir: string): boolean {
   } catch {
     return false;
   }
+}
+
+function readNodeFrontmatter(dir: string): Record<string, unknown> {
+  const nodeFile = resolveNodeFile(dir);
+  if (!nodeFile) return {};
+  try {
+    const raw = extractFrontmatterRaw(fs.readFileSync(nodeFile, "utf-8"));
+    if (raw === null) return {};
+    const parsed = YAML.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function nodeId(frontmatter: Record<string, unknown>): string | null {
+  const value = frontmatter.id ?? frontmatter.dotId;
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/** Daemon-side filesystem reader for the shared pure graph derivation. The
+ * graph is advisory: malformed or stale data becomes an advisory and never
+ * changes the audit status or prevents a response. */
+function buildAuditDependencyGraph(missionName: string, missionDir: string): MissionDependencyGraph {
+  const missionFrontmatter = readNodeFrontmatter(missionDir);
+  const slices: Array<{
+    id: string | null;
+    name: string;
+    dependsOn: unknown;
+    active: boolean;
+    ordinal: number;
+  }> = [];
+
+  for (const bucket of ["slices", "closed"] as const) {
+    const root = path.join(missionDir, bucket);
+    if (!fs.existsSync(root)) continue;
+    for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const match = /^(\d+)-(.+)$/.exec(entry.name);
+      if (!match) continue;
+      const frontmatter = readNodeFrontmatter(path.join(root, entry.name));
+      const status = typeof frontmatter.status === "string" ? frontmatter.status.toLowerCase() : "";
+      slices.push({
+        id: nodeId(frontmatter),
+        name: entry.name,
+        dependsOn: frontmatter.depends_on,
+        active: bucket === "slices" && !status.startsWith("closed") && !status.startsWith("shipped"),
+        ordinal: Number(match[1]),
+      });
+    }
+  }
+  slices.sort((a, b) => a.ordinal - b.ordinal || a.name.localeCompare(b.name));
+
+  return deriveMissionDependencyGraph({
+    mission: {
+      id: nodeId(missionFrontmatter),
+      name: missionName,
+      dependsOn: missionFrontmatter.depends_on,
+    },
+    slices,
+  });
 }
 
 // OPR.0.4.4.19 FR-10 (C1 backstop input) — list the slice's proof/ markdown
@@ -91,6 +161,7 @@ export function scopeAuditRoutes(): Hono {
       const missionNotesExists = fs.existsSync(missionNotesCurrent) || fs.existsSync(missionNotesLegacy);
       const missionReadmeExists = fs.existsSync(missionReadme);
       const missionProgressExists = fs.existsSync(missionProgress);
+      const graph = buildAuditDependencyGraph(missionName, missionDir);
 
       let missionResult: ScopeAuditResult;
       if (!missionReadmeExists && missionProgressExists) {
@@ -240,6 +311,7 @@ export function scopeAuditRoutes(): Hono {
           // OPR.0.5.0.18 — amendment lineage (present only when re-stamped).
           ...(s.attestations ? { attestations: s.attestations } : {}),
         })),
+        graph,
         totalFindings: allFindings.length,
       });
     });

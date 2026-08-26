@@ -8,7 +8,6 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { attestationLineage, type AttestationLineage } from "../lib/scope/attestation-lineage.js";
@@ -22,6 +21,7 @@ import {
   STAGE_VALUES,
   ScopeCliError,
   type CloseReason,
+  type MissionInfo,
   type MissionTemplateKind,
   type SliceInfo,
   type SliceTemplateKind,
@@ -43,7 +43,6 @@ import {
   findMission,
   resolveNodeFile,
   findSlice,
-  gitTopLevel,
   listMissions,
   listSlices,
   moveSlice,
@@ -803,38 +802,9 @@ function buildMissionGraphCommand(): Command {
 // Audit (B2 — read-only scope audit)
 // ---------------------------------------------------------------------
 
-/**
- * Files changed by the most recent commit (revision basis: HEAD), returned as
- * ABSOLUTE resolved paths. Returns null when there is NO git context — the dir
- * is not inside a repo, HEAD does not resolve (e.g. a fresh repo with no
- * commits), or the git command fails. Callers then leave the
- * committed-without-PROGRESS classifier inputs UNDEFINED, so the check stays
- * inert: no false-green (we never assume "PROGRESS untouched" without evidence)
- * and no false-positive (we never fire when we cannot see the commit).
- */
-function gitHeadTouchedAbsPaths(dir: string): Set<string> | null {
-  const topLevel = gitTopLevel(dir);
-  if (!topLevel) return null;
-  try {
-    const out = execFileSync(
-      "git",
-      ["-C", topLevel, "show", "--name-only", "--pretty=format:", "HEAD"],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    );
-    const abs = out
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0)
-      .map((rel) => path.resolve(topLevel, rel));
-    return new Set(abs);
-  } catch {
-    return null;
-  }
-}
-
 function buildAuditCommand(): Command {
   return new Command("audit")
-    .description("Read-only scope audit: flag missing/malformed progress rails and registration ghosts")
+    .description("Read-only scope audit: flag scope findings and show the advisory dependency graph")
     .requiredOption("--mission <name>", "Mission to audit")
     .option("--json", "Machine-readable JSON output")
     .action(async (opts, command) => {
@@ -857,6 +827,18 @@ function buildAuditCommand(): Command {
         const missionNotesExists = fs.existsSync(missionNotesCurrent) || fs.existsSync(missionNotesLegacy);
         const missionReadmeExists = fs.existsSync(missionReadme);
         const missionProgressExists = fs.existsSync(missionProgress);
+        const auditMission: MissionInfo = missionReadmeExists
+          ? findMission(missionsRoot, missionName)
+          : {
+              name: missionName,
+              absPath: missionDir,
+              readmePath: null,
+              frontmatter: {},
+              id: null,
+              activeSliceCount: 0,
+              closedSliceCount: 0,
+            };
+        const graph = buildMissionDependencyGraph(auditMission);
 
         let missionResult: ReturnType<typeof classifyScopeItem>;
         if (!missionReadmeExists && missionProgressExists) {
@@ -893,10 +875,6 @@ function buildAuditCommand(): Command {
 
         const slicesDir = path.join(missionDir, "slices");
         const dogfoodEvidenceRoot = defaultDogfoodEvidenceRoot(missionsRoot);
-        // Git-derived input for the committed-without-PROGRESS check (CLI-only).
-        // Revision basis = the most recent commit (HEAD). null when git context
-        // is unavailable → the check is left inert per-slice below.
-        const headTouched = gitHeadTouchedAbsPaths(missionDir);
         const sliceResults: Array<{
           name: string;
           result: ReturnType<typeof classifyScopeItem>;
@@ -947,23 +925,6 @@ function buildAuditCommand(): Command {
             const sliceFm = extractFrontmatterRaw(sliceReadmeContent);
             const readmeOnlyMarker = sliceFm !== null && /^progress_rail\s*:\s*readme-only/m.test(sliceFm);
 
-            // committed-without-PROGRESS inputs (CLI-only; inert when git is
-            // unavailable — leave both undefined so the check does not fire).
-            // Normalize to realpath so a symlinked workspace (e.g. macOS
-            // /var → /private/var) still matches git's realpath'd output.
-            let sliceTouchedByRecentCommit: boolean | undefined;
-            let progressTouchedByRecentCommit: boolean | undefined;
-            if (headTouched) {
-              let realSliceDir = sliceDir;
-              try { realSliceDir = fs.realpathSync(sliceDir); } catch { /* keep sliceDir */ }
-              const slicePrefix = realSliceDir.endsWith(path.sep) ? realSliceDir : realSliceDir + path.sep;
-              const realSliceProgress = path.join(realSliceDir, "PROGRESS.md");
-              sliceTouchedByRecentCommit = [...headTouched].some(
-                (p) => p === realSliceDir || p.startsWith(slicePrefix),
-              );
-              progressTouchedByRecentCommit = headTouched.has(realSliceProgress);
-            }
-
             const sliceResult = classifyScopeItem({
               id: null,
               path: sliceDir,
@@ -978,8 +939,6 @@ function buildAuditCommand(): Command {
               proofDirPath: proofDir,
               proofDirHasEntries: directoryHasEntries(proofDir),
               hasProofPacket: hasProofPacketForSlice(dogfoodEvidenceRoot, entry),
-              sliceTouchedByRecentCommit,
-              progressTouchedByRecentCommit,
               // OPR.0.4.4.19 FR-10 backstop inputs.
               proofArtifacts: listProofArtifactsForAudit(proofDir),
               implementationPrdExists: fs.existsSync(path.join(sliceDir, "IMPLEMENTATION-PRD.md")),
@@ -1028,6 +987,7 @@ function buildAuditCommand(): Command {
               // OPR.0.5.0.18 — amendment lineage (present only when re-stamped).
               ...(s.attestations ? { attestations: s.attestations } : {}),
             })),
+            graph,
             totalFindings: allFindings.length,
           }, null, 2));
           out.write("\n");
@@ -1037,7 +997,13 @@ function buildAuditCommand(): Command {
 
         out.write(`Scope audit: ${missionName}\n`);
         out.write(`Mission rail: ${missionResult.railStatus}\n`);
-        out.write(`Slices: ${sliceResults.length} total\n\n`);
+        out.write(`Slices: ${sliceResults.length} total\n`);
+        out.write(`Ready: ${graph.ready.join(", ") || "(none)"}\n`);
+        for (const row of graph.waiting) out.write(`Waiting: ${row.id} on ${row.on.join(", ")}\n`);
+        for (const row of graph.advisories) {
+          out.write(`Advisory: ${row.id}${row.dependency ? ` -> ${row.dependency}` : ""}: ${row.message}\n`);
+        }
+        out.write("\n");
 
         // OPR.0.5.0.18 — amendment lineage: a re-stamped slice shows the
         // CURRENT attestation + prior-count (the append-only audit rows

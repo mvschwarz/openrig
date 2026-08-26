@@ -72,8 +72,8 @@ This table is the model. If you internalize one thing, internalize this.
 ### Topology tree
 
 The chains carry what is true of a **position**. How a *kind* of thing works — the operating
-model — ships as a skill in the rig's mode plugin (`openrig-lab`, `openrig-factory`,
-`openrig-hq`).
+model — ships in the mode-neutral `openrig-core` plugin; an operating-mode plugin
+(`openrig-lab`, `openrig-factory`, or `openrig-hq`) may refine it.
 
 | Level | `CULTURE.md` — values | `LEARNED.md` — what THIS ONE has learned | kept true by |
 |---|---|---|---|
@@ -96,7 +96,7 @@ its body. Alongside it sit three files with different jobs and different writers
 | `SPEC.md` | the node — `intent:` composes, body specifies | the node's owner |
 | `NOTES.md` | **LIVED** — what actually happened doing it, in the doer's own words | whoever is doing it |
 | `PROOF.md` | evidence the thing does what was intended | the prover |
-| PROGRESS | **derived** — the checkbox is the only stored mark | nobody, above the mark |
+| `PROGRESS.md` | authored acceptance checklist — each checkbox is a stored mark; roll-ups above those marks are derived | the scope's owner and provers |
 
 **A scaffold may create `NOTES.md` and its starter instructions; its lived entries are never
 generated or projected.** It is the work tree's lived file, the way `LEARNED.md` is the topology
@@ -109,10 +109,15 @@ name at every altitude.
 
 | Level | `SPEC.md` — frontmatter `intent:` (why) + body (what must be built) | progress | kept true by |
 |---|---|---|---|
-| project | `intent:` only — stable, changes at real pivots | derived | the project's PM |
-| mission | `intent:` only — a mission ORGANISES slices; it specifies nothing | derived | the mission's PM |
-| slice | `intent:` **and** a body — the only altitude that specifies | ✓ the mark level | the slice's owner |
-| proof item | *(inherits)* | **the checkbox — the ONE level agents mark** | the prover |
+| project | `intent:` only — stable, changes at real pivots | derived roll-up | the project's PM |
+| mission | `intent:` only — a mission ORGANISES slices; it specifies nothing | authored checklist marks; roll-up derived | the mission's PM |
+| slice | `intent:` **and** a body — the only altitude that specifies | authored checklist marks; roll-up derived | the slice's owner |
+| proof item | *(inherits)* | **the checkbox — the stored acceptance mark** | the prover |
+
+**PROGRESS reconciliation (2026-08-26):** Checkbox items stored in a mission or slice
+`PROGRESS.md` are authored acceptance marks. In-process task tracking stays in the agent's own todo
+tool. Everything that rolls those marks up above the managed checklist is derived at render time,
+so authored checklists and the never-author-a-derived-roll-up rule are the same model.
 
 **Intent composes; the body does not.** The trace reads the `intent:` FIELD at every altitude, so
 four levels unfurl as four sentences rather than four documents. The body is read only when you
@@ -126,19 +131,20 @@ real information, never silently skipped.
 **Legacy `README.md` nodes stay valid indefinitely** — the resolver prefers `SPEC.md` and falls
 back, so nothing is forced to migrate and dormant missions need no attention.
 
-**PROGRESS stays separate and stays as it is.** It is the only DERIVED thing here — the checkbox is
-the sole stored mark and everything above renders from it. Folding a derivation into an authored file
-is how a stored derivation becomes a confident lie.
+**PROGRESS stays separate.** Its checklist items are authored stored marks; everything above those
+marks renders from them. Folding a derived roll-up into an authored file is how a stored derivation
+becomes a confident lie.
 
 Two directions on the same trees: intent/values/practice **compose downward**
 (you trace UP to read them); progress **aggregates upward** (never hand-written
-above the mark level). **And PROGRESS above the mark level is a RENDER, not a
-file** (design-ruled 2026-08-10): the checkbox is the only stored mark;
+above the stored marks). **And PROGRESS above the managed checklist is a RENDER, not a
+file** (design-ruled 2026-08-10): the checkbox is the stored acceptance mark;
 `scripts/compose.py progress` derives the roll-up tree at render time. The
 old PROGRESS.md files that embedded a hand-rendered tree were the right idea
 in the wrong home — a stored derivation drifts into a confident lie (the same
-law that retired `serves:`). Existing PROGRESS.md files stay per rule zero,
-read as testimony; nobody authors a progress tree by hand again.
+law that retired `serves:`). Existing legacy PROGRESS.md files with embedded
+trees stay per rule zero and are read as testimony; nobody authors a progress
+tree by hand again.
 
 **The axis behind the columns:** every context kind has a *template* half
 (what ships — SOP, the default culture) and a *learned* half (what living
@@ -156,7 +162,7 @@ and every successor), in handover documents (where day-to-day duties drown
 under urgent state), and in skills nobody opened at the right moment. Measured
 result: several consecutive generations of critical seats each started with a
 fraction of their predecessor's ability, without knowing it. The structural fix
-is the pair: the mode plugin's operating-model skill (the job, by type — shared,
+is the pair: `openrig-core`'s operating-model skill (the job, by type — shared,
 versioned, shipped) + `LEARNED.md` on the chain (the job, as lived — per-instance,
 occupant-written) — **read at every boot before any handover document**, written
 by every generation. A bad handover now costs recent state, not the job itself.
@@ -265,7 +271,7 @@ decided to live with.
    when an instance is empty or broken, whoever is responsible for it writes
    what's needed, marks those lines as written-for-the-instance, and the next
    occupant rewrites them in its own words.
-2. **Shipped things belong to their authors.** The mode plugin's operating-model
+2. **Shipped things belong to their authors.** `openrig-core`'s operating-model
    skill and the shipped culture change through their owners, never by an instance
    editing in place. If it is wrong for everyone, propose the change to its owner;
    if it is wrong for *you*, that's what LEARNED.md is for.
