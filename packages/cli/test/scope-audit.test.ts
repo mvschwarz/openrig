@@ -416,7 +416,7 @@ describe("OPR.0.4.4.23 convention-section advisories", () => {
       implementationPrdExists: false,
       implementationPrdContent: null,
     }));
-    expect(result.findings.some((f) => f.kind === "missing_implementation_prd")).toBe(false);
+    expect(result.findings.some((f) => f.kind === "missing_impl_prd")).toBe(false);
     expect(result.findings.some((f) => f.kind === "missing_intent_section")).toBe(false);
   });
 
