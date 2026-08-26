@@ -221,8 +221,11 @@ export class SeatActivityService {
     const seat = this.seatLadder(evidence.seatNodeId, evidence.sessionName);
     this.sessionToSeat.set(evidence.sessionName, evidence.seatNodeId);
     const prior = seat.sources.get(evidence.sourceId);
-    if (prior && evidence.seq <= prior.seq) return; // stale/reordered — dropped
-    seat.sources.set(evidence.sourceId, evidence);
+    if (prior && evidence.seq <= prior.latest.seq) return; // stale/reordered — dropped
+    seat.sources.set(evidence.sourceId, {
+      latest: evidence,
+      latestActivity: evidence.activity !== undefined ? evidence : prior?.latestActivity ?? null,
+    });
     this.measureTrialAgreement(seat, evidence);
     this.arbitrate(seat);
   }
@@ -329,10 +332,18 @@ export class SeatActivityService {
     return rung === "window-sampling" ? "authoritative" : "identity-only";
   }
 
-  private latestByRung(seat: SeatLadderState, rung: EvidenceRungId): ActivityEvidence | null {
+  /** Latest evidence for a rung. kind "activity" returns the newest ACTIVITY-BEARING
+   *  evidence — a needs-input-only event from the same source (e.g. PermissionRequest
+   *  mid-turn) must not erase what the source last said about working/idle. */
+  private latestByRung(
+    seat: SeatLadderState,
+    rung: EvidenceRungId,
+    kind: "any" | "activity" = "any",
+  ): ActivityEvidence | null {
     let best: ActivityEvidence | null = null;
-    for (const evd of seat.sources.values()) {
-      if (evd.rung !== rung) continue;
+    for (const entry of seat.sources.values()) {
+      const evd = kind === "activity" ? entry.latestActivity : entry.latest;
+      if (!evd || evd.rung !== rung) continue;
       if (!best || evd.seq > best.seq) best = evd;
     }
     return best;
@@ -374,7 +385,7 @@ export class SeatActivityService {
     for (const rung of EVIDENCE_RUNG_RANK) {
       if (rung === opts.excludeRung) continue;
       if (this.rungTrust(seat, rung) !== "authoritative") continue;
-      const evd = this.latestByRung(seat, rung);
+      const evd = this.latestByRung(seat, rung, "activity");
       if (!evd || evd.activity === undefined) continue;
       if (rung === "lifecycle-hooks" && nowMs - Date.parse(evd.observedAt) > HOOK_AUTHORITY_WINDOW_MS) continue;
       return evd;
@@ -409,8 +420,8 @@ export class SeatActivityService {
    *  authoritative. */
   private checkContradiction(seat: SeatLadderState): void {
     if (this.rungTrust(seat, "lifecycle-hooks") !== "authoritative") return;
-    const hook = this.latestByRung(seat, "lifecycle-hooks");
-    const sampler = this.latestByRung(seat, "window-sampling");
+    const hook = this.latestByRung(seat, "lifecycle-hooks", "activity");
+    const sampler = this.latestByRung(seat, "window-sampling", "activity");
     const nowMs = this.now().getTime();
     const hookFresh = hook && hook.activity !== undefined
       && nowMs - Date.parse(hook.observedAt) <= HOOK_AUTHORITY_WINDOW_MS;
@@ -488,11 +499,18 @@ export class SeatActivityService {
       }
     }
 
+    // needs-input: visible chrome outranks hook-carried evidence; hooks carry it when a
+    // PermissionRequest-class event fired and the next turn boundary clears it. NOT
+    // time-bounded like working/idle hook authority — an unanswered block persisting is
+    // exactly the founder-observed park cause and must stay visible.
     const chrome = this.latestByRung(seat, "needs-input-chrome");
+    const hooksEv = this.latestByRung(seat, "lifecycle-hooks");
     const needsInput: NeedsInputShape =
       chrome?.needsInput && this.rungTrust(seat, "needs-input-chrome") === "authoritative"
         ? chrome.needsInput
-        : { count: 0, reason: null };
+        : hooksEv?.needsInput && this.rungTrust(seat, "lifecycle-hooks") === "authoritative"
+          ? hooksEv.needsInput
+          : { count: 0, reason: null };
 
     const changed = nextActivity !== seat.arbitrated.activity
       || needsInput.count !== seat.arbitrated.needsInput.count
@@ -533,7 +551,7 @@ interface NeedsInputShape {
 interface SeatLadderState {
   sessionName: string;
   inventory: AdapterRungInventory | null;
-  sources: Map<string, ActivityEvidence>;
+  sources: Map<string, { latest: ActivityEvidence; latestActivity: ActivityEvidence | null }>;
   trust: Map<EvidenceRungId, RungTrust>;
   promotion: Map<EvidenceRungId, { agreements: number; firstAgreementAtMs: number | null }>;
   contradictionSinceMs: number | null;

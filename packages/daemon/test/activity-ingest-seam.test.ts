@@ -23,12 +23,12 @@ const CLAUDE_INVENTORY: AdapterRungInventory = {
   ],
 };
 
-function activity(state: AgentActivity["state"], reason = "turn boundary"): AgentActivity {
+function activity(state: AgentActivity["state"], atMs: number, reason = "turn boundary"): AgentActivity {
   return {
     state,
     reason,
     evidenceSource: "hook" as AgentActivity["evidenceSource"],
-    sampledAt: new Date().toISOString(),
+    sampledAt: new Date(atMs).toISOString(),
     evidence: null,
     runtime: "claude-code",
   };
@@ -45,7 +45,7 @@ function makeApp(clock: { now: number }) {
   const fakeStore = {
     recordHookEvent: () => ({
       ok: true as const,
-      activity: activity(cannedState),
+      activity: activity(cannedState, clock.now),
       event: { nodeId: SEAT, sessionName: SESSION, runtime: "claude-code" },
     }),
   };
@@ -70,26 +70,27 @@ function makeApp(clock: { now: number }) {
 
 describe("S19 A4 — the mapping: store-normalized state → oracle evidence (one parser, no twin)", () => {
   const base = { seatNodeId: SEAT, sessionName: SESSION, runtime: "claude-code", seq: 1 };
+  const AT = 2_000_000;
 
   it("running → working on the lifecycle-hooks rung", () => {
-    const ev = evidenceFromHookActivity({ ...base, activity: activity("running") })!;
+    const ev = evidenceFromHookActivity({ ...base, activity: activity("running", AT) })!;
     expect(ev.rung).toBe("lifecycle-hooks");
     expect(ev.activity).toBe("working");
     expect(ev.sourceId).toBe("claude-code:hooks");
   });
 
   it("idle → idle-at-prompt (a turn boundary, exactly-once semantics live at the source)", () => {
-    expect(evidenceFromHookActivity({ ...base, activity: activity("idle") })!.activity).toBe("idle-at-prompt");
+    expect(evidenceFromHookActivity({ ...base, activity: activity("idle", AT) })!.activity).toBe("idle-at-prompt");
   });
 
   it("needs_input → needs-input COUNT+reason on the hooks rung, never an activity value", () => {
-    const ev = evidenceFromHookActivity({ ...base, activity: activity("needs_input", "permission prompt") })!;
+    const ev = evidenceFromHookActivity({ ...base, activity: activity("needs_input", AT, "permission prompt") })!;
     expect(ev.activity).toBeUndefined();
     expect(ev.needsInput).toEqual({ count: 1, reason: "permission prompt" });
   });
 
   it("unknown → null: noise is never fed to the oracle as evidence", () => {
-    expect(evidenceFromHookActivity({ ...base, activity: activity("unknown") })).toBeNull();
+    expect(evidenceFromHookActivity({ ...base, activity: activity("unknown", AT) })).toBeNull();
   });
 });
 

@@ -10,18 +10,44 @@ import type { AgentActivity } from "../domain/types.js";
 // (SeatActivityService) through this translation, so AgentActivityStore is reduced to a
 // raw-event consumer/recorder and arbitration happens in exactly one place. The store's
 // ALREADY-NORMALIZED state is the input (one event-name parser, no twin).
-// S19 A4 RED: unwired.
 
 /** Translate a recorded hook activity into oracle evidence. Returns null for states the
- *  oracle should not consume (unknown = noise, never evidence). */
-export function evidenceFromHookActivity(_input: {
+ *  oracle should not consume (unknown = noise, never evidence). needs_input becomes
+ *  COUNT+reason on the hooks rung — never an activity value (the taxonomy's binding
+ *  exclusion); the turn's working/idle stays whatever other evidence says. */
+export function evidenceFromHookActivity(input: {
   seatNodeId: string;
   sessionName: string;
   runtime: string | null;
   activity: AgentActivity;
   seq: number;
 }): ActivityEvidence | null {
-  throw new Error("not implemented (S19 A4 RED)");
+  const base = {
+    seatNodeId: input.seatNodeId,
+    sessionName: input.sessionName,
+    rung: "lifecycle-hooks" as const,
+    sourceId: `${input.runtime ?? "unknown-runtime"}:hooks`,
+    seq: input.seq,
+    observedAt: input.activity.eventAt ?? input.activity.sampledAt,
+  };
+  switch (input.activity.state) {
+    case "running":
+      return { ...base, activity: "working", needsInput: { count: 0, reason: null } };
+    case "idle":
+      return { ...base, activity: "idle-at-prompt", needsInput: { count: 0, reason: null } };
+    case "needs_input":
+      return { ...base, needsInput: { count: 1, reason: input.activity.reason || "needs input" } };
+    default:
+      return null; // unknown = noise, never evidence
+  }
+}
+
+// Per-source monotonic seq for ingested hook evidence (the relay does not mint one).
+const hookEvidenceSeq = new Map<string, number>();
+function nextHookSeq(key: string): number {
+  const next = (hookEvidenceSeq.get(key) ?? 0) + 1;
+  hookEvidenceSeq.set(key, next);
+  return next;
 }
 
 export const activityRoutes = new Hono();
@@ -164,6 +190,26 @@ activityRoutes.post("/hooks", async (c) => {
   if (!result.ok) {
     const status = result.code === "missing_session_identity" ? 400 : 404;
     return c.json({ ok: false, code: result.code, error: result.error }, status);
+  }
+
+  // S19 A4 — feed the ONE oracle through the adapter seam: the recorded (store-
+  // normalized) event becomes ladder evidence on the lifecycle-hooks rung. The store
+  // remains the raw-event recorder (startup-proof, delivery verification); arbitration
+  // happens only in SeatActivityService.
+  const oracle = c.get("seatActivityService" as never) as
+    | import("../domain/seat-activity-service.js").SeatActivityService
+    | undefined;
+  const emitted = result.event as { nodeId?: string; sessionName?: string; runtime?: string } | undefined;
+  if (oracle && emitted?.nodeId && emitted.sessionName) {
+    const runtime = emitted.runtime ?? stringOrNull(body.runtime);
+    const evidence = evidenceFromHookActivity({
+      seatNodeId: emitted.nodeId,
+      sessionName: emitted.sessionName,
+      runtime,
+      activity: result.activity,
+      seq: nextHookSeq(`${emitted.nodeId}:${runtime ?? "unknown-runtime"}:hooks`),
+    });
+    if (evidence) oracle.reportEvidence(evidence);
   }
 
   return c.json({ ok: true, activity: result.activity });
