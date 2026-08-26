@@ -502,11 +502,14 @@ export class SessionTransport {
 
   /**
    * Slice-05 D5/D6 — when a live transport op (send/capture) observes that the
-   * seat's tmux session is genuinely gone (`hasSession(sessionName) === false`),
-   * durably record the SAME `session_missing` identity verdict the reconciler
-   * would write, so `rig ps` stops reporting the dead seat as running WITHOUT
-   * waiting for the next reconciler poll. This is the transport-side writer of
-   * the shared verdict bridge; the reconciler is the poll-side writer.
+   * seat's tmux session is genuinely gone (a `probeSession` result of `absent`
+   * — POSITIVE tmux evidence, never a transport failure; OPR.0.5.4.2 mini-req
+   * 5), durably record the SAME `session_missing` identity verdict the
+   * reconciler would write, so `rig ps` stops reporting the dead seat as
+   * running WITHOUT waiting for the next reconciler poll. This is the
+   * transport-side writer of the shared verdict bridge; the reconciler is the
+   * poll-side writer. Transport-absence must never reach this method: a blip
+   * against a live seat would otherwise fabricate a durable absence verdict.
    *
    * Only writes an APPLICABLE verdict: the join is narrowed to the node whose
    * LATEST running session_name equals the probed session (so
@@ -812,24 +815,34 @@ export class SessionTransport {
       }
     }
 
-    // 1. Check session exists / tmux available
+    // 1. Resolve the session through the classified probe (OPR.0.5.4.2): a
+    // transport blip must never read as a dead seat, and absence is only ever
+    // asserted on positive tmux evidence.
     try {
-      const exists = await this.tmuxAdapter.hasSession(sessionName);
-      if (!exists) {
+      const probe = await this.tmuxAdapter.probeSession(sessionName);
+      if (probe.state === "absent") {
         this.recordSessionMissingVerdict(sessionName);
         return {
           ok: false,
           sessionName,
           reason: "session_missing",
-          error: `Session '${sessionName}' not found. Check available sessions with: rig ps --nodes`,
+          error: `Session '${sessionName}' not found: tmux reports no session with this name. No text was sent. Check available sessions with: rig ps --nodes`,
         };
       }
-    } catch {
+      if (probe.state === "transport_unavailable") {
+        return {
+          ok: false,
+          sessionName,
+          reason: "tmux_unavailable",
+          error: `The tmux server could not be reached (${probe.cause}). Whether session '${sessionName}' exists was not determined. No text was sent.`,
+        };
+      }
+    } catch (err) {
       return {
         ok: false,
         sessionName,
         reason: "tmux_unavailable",
-        error: "tmux is not available. Ensure tmux is installed and a server is running.",
+        error: `The tmux session probe failed unexpectedly (${err instanceof Error ? err.message : String(err)}). Whether session '${sessionName}' exists was not determined. No text was sent.`,
       };
     }
 
@@ -1369,23 +1382,33 @@ export class SessionTransport {
       };
     }
 
+    // Classified probe (OPR.0.5.4.2) — same discipline as the send gate: a
+    // transport blip is a transport answer, never a dead-seat answer.
     try {
-      const exists = await this.tmuxAdapter.hasSession(sessionName);
-      if (!exists) {
+      const probe = await this.tmuxAdapter.probeSession(sessionName);
+      if (probe.state === "absent") {
         this.recordSessionMissingVerdict(sessionName);
         return {
           ok: false,
           sessionName,
           reason: "session_missing",
-          error: `Session '${sessionName}' not found. Check available sessions with: rig ps --nodes`,
+          error: `Session '${sessionName}' not found: tmux reports no session with this name. Nothing was captured. Check available sessions with: rig ps --nodes`,
         };
       }
-    } catch {
+      if (probe.state === "transport_unavailable") {
+        return {
+          ok: false,
+          sessionName,
+          reason: "tmux_unavailable",
+          error: `The tmux server could not be reached (${probe.cause}). Whether session '${sessionName}' exists was not determined. Nothing was captured.`,
+        };
+      }
+    } catch (err) {
       return {
         ok: false,
         sessionName,
         reason: "tmux_unavailable",
-        error: "tmux is not available. Ensure tmux is installed and a server is running.",
+        error: `The tmux session probe failed unexpectedly (${err instanceof Error ? err.message : String(err)}). Whether session '${sessionName}' exists was not determined. Nothing was captured.`,
       };
     }
 

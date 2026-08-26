@@ -170,8 +170,13 @@ function mockTmux(overrides?: Partial<{
   capturePaneContent: (paneId: string, lines?: number) => Promise<string | null>;
   getPaneCommand: (paneId: string) => Promise<string | null>;
 }>): TmuxAdapter {
+  const hasSession = overrides?.hasSession ?? (async () => true);
   return {
-    hasSession: overrides?.hasSession ?? (async () => true),
+    hasSession,
+    // Derived classified probe (OPR.0.5.4.2): present/absent from the mock's
+    // hasSession; a throwing hasSession propagates (the fail-closed class).
+    probeSession: async (name: string) =>
+      (await hasSession(name)) ? { state: "present" as const } : { state: "absent" as const },
     sendText: overrides?.sendText ?? (async () => ({ ok: true as const })),
     sendKeys: overrides?.sendKeys ?? (async () => ({ ok: true as const })),
     capturePaneContent: overrides?.capturePaneContent ?? (async () => "idle prompt\n❯ "),

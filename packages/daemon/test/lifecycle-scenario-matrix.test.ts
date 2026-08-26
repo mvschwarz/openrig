@@ -102,6 +102,9 @@ function mockTmuxForRestore(overrides?: Partial<{
     getPaneCommand: vi.fn(async () => overrides?.paneCommand ?? "claude"),
     capturePaneContent: vi.fn(async () => overrides?.paneContent ?? ""),
     hasSession: vi.fn(hasSessionFn),
+    probeSession: vi.fn(async () =>
+      (await hasSessionFn()) ? { state: "present" as const } : { state: "absent" as const }
+    ),
     listSessions: async () => [],
     listWindows: async () => [],
     listPanes: async () => [],
@@ -1006,6 +1009,8 @@ describe("Slice-05 items 5+6 — real send/capture vs ps running (cross-contract
   function tmuxWithLive(live: Set<string>): TmuxAdapter {
     return {
       hasSession: async (name: string) => live.has(name),
+      probeSession: async (name: string) =>
+        live.has(name) ? { state: "present" as const } : { state: "absent" as const },
       sendText: async () => ({ ok: true as const }),
       sendKeys: async () => ({ ok: true as const }),
       capturePaneContent: async () => "idle\n> ",

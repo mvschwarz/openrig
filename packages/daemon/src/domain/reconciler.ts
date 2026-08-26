@@ -52,7 +52,12 @@ export class Reconciler {
 
       let alive: boolean;
       try {
-        alive = await this.tmuxAdapter.hasSession(session.sessionName);
+        // Boot-time reconciliation against a dead tmux server must still
+        // detach stale rows: transport-absence is treated as detachable HERE,
+        // by explicit choice at this call site (OPR.0.5.4.2 mini-req 2 — the
+        // adapter no longer collapses that decision for its callers).
+        const probe = await this.tmuxAdapter.probeSession(session.sessionName);
+        alive = probe.state === "present";
         checked++;
       } catch (err) {
         errors.push({

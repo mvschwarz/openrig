@@ -92,6 +92,17 @@ export interface TmuxClient {
   session: string;
 }
 
+/**
+ * Result of a classified session probe (OPR.0.5.4.2). `absent` carries
+ * positive tmux evidence; `transport_unavailable` means the tmux server could
+ * not be reached and session existence was NOT determined — the two are never
+ * interchangeable.
+ */
+export type SessionProbe =
+  | { state: "present" }
+  | { state: "absent" }
+  | { state: "transport_unavailable"; cause: string };
+
 const SESSION_FORMAT = "#{session_name}\t#{session_windows}\t#{session_created}\t#{session_attached}";
 const WINDOW_FORMAT = "#{window_index}\t#{window_name}\t#{window_panes}\t#{window_active}";
 const PANE_FORMAT = "#{pane_id}\t#{pane_index}\t#{pane_current_path}\t#{pane_width}\t#{pane_height}\t#{pane_active}";
@@ -254,24 +265,43 @@ export class TmuxAdapter {
     }
   }
 
-  async hasSession(name: string): Promise<boolean> {
+  /**
+   * Classified session probe (OPR.0.5.4.2): the three error classes tmux
+   * produces are distinct answers, and the adapter must not decide for its
+   * callers that a transport failure means absence.
+   * - `absent` requires POSITIVE tmux evidence (the can't-find-session class).
+   * - `transport_unavailable` is the no-server / socket-gone class: whether
+   *   the session exists was NOT determined.
+   * - Unexpected probe failures (permission denied, etc.) rethrow so callers
+   *   fail closed rather than treating a probe failure as an answer.
+   */
+  async probeSession(name: string): Promise<SessionProbe> {
     try {
       // Use `tmux has-session` directly for reliable existence check — avoids
       // parsing format-string output from `list-sessions` which can fail when
       // tab delimiters are malformed across tmux versions.
       await this.exec(`tmux has-session -t ${shellQuote(name)}`);
-      return true; // exit 0 = session exists
+      return { state: "present" }; // exit 0 = session exists
     } catch (err) {
-      // Known-absence patterns: session genuinely doesn't exist, tmux not running,
-      // or the tmux socket file is gone post-reboot.
-      // Return false so cold-start reconciliation can detach stale rows.
-      if (isNoServerError(err) || isSessionAbsenceError(err) || isTmuxTransportAbsentError(err)) {
-        return false;
+      if (isSessionAbsenceError(err)) {
+        return { state: "absent" };
       }
-      // Unexpected probe failure (permission denied, etc.) — rethrow so callers
-      // can fail closed rather than treating a probe failure as absence.
+      if (isNoServerError(err) || isTmuxTransportAbsentError(err)) {
+        return { state: "transport_unavailable", cause: (err as Error).message };
+      }
       throw err;
     }
+  }
+
+  /**
+   * Collapsed presence view. Kept for the consumers outside the bound
+   * send/capture/nudge/walk resolution path (OPR.0.5.4.2 mini-req 6 — their
+   * adoption of the classification is a named follow-on). Callers that must
+   * distinguish a transport blip from absence use probeSession().
+   */
+  async hasSession(name: string): Promise<boolean> {
+    const probe = await this.probeSession(name);
+    return probe.state === "present";
   }
 
   async createSession(name: string, cwd?: string, env?: Record<string, string>): Promise<TmuxResult> {

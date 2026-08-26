@@ -1,0 +1,4 @@
+A/B DISCRIMINATOR — full-suite failures are PRE-EXISTING at base
+candidate (be23eb200 + S1): 18 files / 29 tests failed, 7825 passed
+pristine base be23eb200:    18 files / 29 tests failed (identical set, run 05:26Z)
+delta: 0 regressions

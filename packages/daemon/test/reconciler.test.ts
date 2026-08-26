@@ -24,13 +24,16 @@ function mockTmuxAdapter(
   sessionExists: Record<string, boolean>,
   errors?: Record<string, Error>
 ): TmuxAdapter {
+  const hasSession = async (name: string) => {
+    if (errors?.[name]) {
+      throw errors[name];
+    }
+    return sessionExists[name] ?? false;
+  };
   return {
-    hasSession: async (name: string) => {
-      if (errors?.[name]) {
-        throw errors[name];
-      }
-      return sessionExists[name] ?? false;
-    },
+    hasSession,
+    probeSession: async (name: string) =>
+      (await hasSession(name)) ? { state: "present" as const } : { state: "absent" as const },
     listSessions: async () => [],
     listWindows: async () => [],
     listPanes: async () => [],

@@ -36,6 +36,10 @@ function mockTmux(overrides?: Partial<{
 }>): TmuxAdapter {
   return {
     hasSession: overrides?.hasSession ?? (async () => true),
+    probeSession: async (name: string) =>
+      (await (overrides?.hasSession ?? (async () => true))(name))
+        ? { state: "present" as const }
+        : { state: "absent" as const },
     sendText: overrides?.sendText ?? (async () => ({ ok: true as const })),
     sendKeys: overrides?.sendKeys ?? (async () => ({ ok: true as const })),
     capturePaneContent: overrides?.capturePaneContent ?? (async () => "idle\n❯ "),

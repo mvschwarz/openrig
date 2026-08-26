@@ -41,6 +41,7 @@ function makeSettings(): SettingsStore {
 function idleTmux(sendText?: (target: string, text: string) => Promise<{ ok: true }>): TmuxAdapter {
   return {
     hasSession: async () => true,
+    probeSession: async () => ({ state: "present" as const }),
     sendText: sendText ?? (async () => ({ ok: true as const })),
     sendKeys: async () => ({ ok: true as const }),
     capturePaneContent: async () => "idle\n❯ ",
