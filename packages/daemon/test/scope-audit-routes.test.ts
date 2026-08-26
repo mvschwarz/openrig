@@ -181,6 +181,54 @@ describe("GET /api/scope/audit", () => {
     expect(body.totalFindings).toBe(0);
   });
 
+  it("surfaces the advisory dependency graph with ready, waiting, and malformed-edge honesty", async () => {
+    const missionName = "graph-mission";
+    const missionDir = path.join(missionsRoot, missionName);
+    fs.mkdirSync(missionDir, { recursive: true });
+    fs.writeFileSync(path.join(missionDir, "SPEC.md"), "---\nid: OPR.9.8.6\nintent: graph\ndepends_on: []\n---\n# graph\n", "utf8");
+    fs.writeFileSync(path.join(missionDir, "PROGRESS.md"), "# Progress\n", "utf8");
+    fs.writeFileSync(path.join(missionDir, "NOTES.md"), "# Notes\n", "utf8");
+
+    const writeSlice = (bucket: "slices" | "closed", name: string, id: string, dependsOn: string): void => {
+      const sliceDir = path.join(missionDir, bucket, name);
+      fs.mkdirSync(sliceDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(sliceDir, "SPEC.md"),
+        validSliceReadme(`---\nid: ${id}\nstatus: active\ndepends_on: ${dependsOn}\n---`, name),
+        "utf8",
+      );
+      if (bucket === "slices") fs.writeFileSync(path.join(sliceDir, "PROGRESS.md"), "# Progress\n", "utf8");
+    };
+    writeSlice("closed", "01-foundation", "OPR.9.8.6.1", "[]");
+    writeSlice("slices", "02-ready", "OPR.9.8.6.2", "[OPR.9.8.6.1]");
+    writeSlice("slices", "03-waiting", "OPR.9.8.6.3", "[OPR.9.8.6.4]");
+    writeSlice("slices", "04-active-dependency", "OPR.9.8.6.4", "[]");
+    writeSlice("slices", "05-stale-edge", "OPR.9.8.6.5", "[OPR.9.8.6.999, OPR.9.9.1.1]");
+    writeSlice("slices", "06-malformed-edge", "OPR.9.8.6.6", "not-a-list");
+
+    const res = await app.request(`/api/scope/audit?mission=${missionName}`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { ok: boolean; graph?: Record<string, unknown> };
+    expect(body.ok).toBe(true);
+    expect(body.graph).toEqual({
+      mission: { id: "OPR.9.8.6", name: missionName, dependsOn: [] },
+      nodes: [
+        { id: "OPR.9.8.6.2", name: "02-ready", dependsOn: ["OPR.9.8.6.1"] },
+        { id: "OPR.9.8.6.3", name: "03-waiting", dependsOn: ["OPR.9.8.6.4"] },
+        { id: "OPR.9.8.6.4", name: "04-active-dependency", dependsOn: [] },
+        { id: "OPR.9.8.6.5", name: "05-stale-edge", dependsOn: [] },
+        { id: "OPR.9.8.6.6", name: "06-malformed-edge", dependsOn: [] },
+      ],
+      ready: ["OPR.9.8.6.2", "OPR.9.8.6.4", "OPR.9.8.6.5", "OPR.9.8.6.6"],
+      waiting: [{ id: "OPR.9.8.6.3", on: ["OPR.9.8.6.4"] }],
+      advisories: [
+        { id: "OPR.9.8.6.5", dependency: "OPR.9.8.6.999", kind: "missing_sibling", message: "Dependency does not resolve to a sibling and was ignored." },
+        { id: "OPR.9.8.6.5", dependency: "OPR.9.9.1.1", kind: "outside_parent", message: "Dependency is outside this mission and was ignored." },
+        { id: "OPR.9.8.6.6", kind: "invalid_field", message: "depends_on must be a list of sibling dot-IDs; the value was ignored." },
+      ],
+    });
+  });
+
   it("mission missing NOTES returns one advisory without reviving the retired brief gate", async () => {
     const missionDir = path.join(missionsRoot, "briefless-mission");
     fs.mkdirSync(missionDir, { recursive: true });

@@ -74,6 +74,21 @@ describe("scope-audit CLI/daemon parity (CI-FAILING)", () => {
         expect(daemonContent).toBe(cliContent);
       });
     }
+
+    it("retires the per-commit PROGRESS classifier and its CLI-only inputs everywhere", () => {
+      const files = [
+        "packages/cli/src/lib/scope/scope-audit.ts",
+        "packages/daemon/src/domain/scope/scope-audit.ts",
+        "packages/cli/src/commands/scope.ts",
+        "packages/daemon/src/routes/scope-audit.ts",
+      ];
+      for (const file of files) {
+        const content = fs.readFileSync(path.join(REPO_ROOT, file), "utf-8");
+        expect(content, file).not.toContain("progress_not_updated_on_commit");
+        expect(content, file).not.toContain("sliceTouchedByRecentCommit");
+        expect(content, file).not.toContain("progressTouchedByRecentCommit");
+      }
+    });
   });
 
   describe("shared-fixture output parity", () => {

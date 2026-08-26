@@ -150,6 +150,19 @@ describe("openrig-core plugin — skills (HG-2.1 skill content per agentskills.i
     expect(index).toContain("openrig-user");
   });
 
+  it("the operating model teaches its core home and authored checklist marks without reversing the scaffold", () => {
+    const skillRoot = nodePath.join(PLUGIN_ROOT, "skills", "openrig-operating-model");
+    const skill = fs.readFileSync(nodePath.join(skillRoot, "SKILL.md"), "utf-8");
+    const specTemplate = fs.readFileSync(nodePath.join(skillRoot, "templates", "SPEC.md"), "utf-8");
+
+    expect(skill).toContain("ships in the mode-neutral `openrig-core` plugin");
+    expect(skill).toContain("PROGRESS reconciliation (2026-08-26)");
+    expect(skill).toContain("authored acceptance marks");
+    expect(skill).not.toContain("mode plugin's operating-model skill");
+    expect(specTemplate).toContain("PROGRESS.md is the authored acceptance checklist");
+    expect(specTemplate).not.toContain("PROGRESS is DERIVED");
+  });
+
   it("the index gives a reachable repo load-path form for spec-shipped skills (0.5.0 mirror cabd2b2f: repo paths, superseding the old ${OPENRIG_CLI_ROOT} path table)", () => {
     const index = fs.readFileSync(
       nodePath.join(PLUGIN_ROOT, "skills", "openrig-skills", "SKILL.md"),

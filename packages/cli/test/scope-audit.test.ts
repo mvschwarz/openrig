@@ -322,54 +322,14 @@ describe("scope-audit classifier", () => {
     }
   });
 
-  // NEW: committed-without-PROGRESS (git-derived, CLI-only input)
-  it("slice touched by HEAD without a PROGRESS.md change emits progress_not_updated_on_commit", () => {
+  it("PROGRESS.md is an acceptance checklist, never a per-commit audit obligation", () => {
     const result = classifyScopeItem(makeInput({
       level: "slice",
       path: "/workspace/missions/release-0.4.1/slices/32-x",
       readmeFrontmatterRaw: "id: OPR.0.4.1.32\nstatus: wip",
       progressFileExists: true,
-      sliceTouchedByRecentCommit: true,
-      progressTouchedByRecentCommit: false,
     }));
-    const finding = result.findings.find((f) => f.kind === "progress_not_updated_on_commit");
-    expect(finding).toMatchObject({
-      severity: "medium",
-      path: "/workspace/missions/release-0.4.1/slices/32-x/PROGRESS.md",
-    });
-    expect(finding?.remediation).toMatch(/PROGRESS\.md/);
-  });
-
-  it("slice touched by HEAD WITH a PROGRESS.md change does not emit progress_not_updated_on_commit", () => {
-    const result = classifyScopeItem(makeInput({
-      level: "slice",
-      readmeFrontmatterRaw: "id: OPR.0.4.1.32\nstatus: wip",
-      progressFileExists: true,
-      sliceTouchedByRecentCommit: true,
-      progressTouchedByRecentCommit: true,
-    }));
-    expect(result.findings.some((f) => f.kind === "progress_not_updated_on_commit")).toBe(false);
-  });
-
-  it("committed-without-PROGRESS is inert when git context is unavailable (both inputs undefined)", () => {
-    const result = classifyScopeItem(makeInput({
-      level: "slice",
-      readmeFrontmatterRaw: "id: OPR.0.4.1.32\nstatus: wip",
-      progressFileExists: true,
-      // sliceTouchedByRecentCommit / progressTouchedByRecentCommit left undefined
-    }));
-    expect(result.findings.some((f) => f.kind === "progress_not_updated_on_commit")).toBe(false);
-  });
-
-  it("committed-without-PROGRESS does not fire when HEAD did not touch the slice", () => {
-    const result = classifyScopeItem(makeInput({
-      level: "slice",
-      readmeFrontmatterRaw: "id: OPR.0.4.1.32\nstatus: wip",
-      progressFileExists: true,
-      sliceTouchedByRecentCommit: false,
-      progressTouchedByRecentCommit: false,
-    }));
-    expect(result.findings.some((f) => f.kind === "progress_not_updated_on_commit")).toBe(false);
+    expect(result.findings.map((f) => f.kind)).not.toContain("progress_not_updated_on_commit");
   });
 });
 
