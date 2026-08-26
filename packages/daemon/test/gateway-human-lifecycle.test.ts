@@ -63,33 +63,56 @@ function seedAna(home: string): void {
   if (!res.ok) throw new Error(`seed ana failed: ${res.error}`);
 }
 
-describe("gateway human lifecycle (S12): list / show / set / remove", () => {
+describe("gateway human lifecycle (S12, amended A1: single-human surface): list / show / set / remove", () => {
   let home: string;
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "s12-lifecycle-"));
-    seedMike(home);
-    seedAna(home);
+    seedMike(home); // A1: receipts run against ONE seeded human
   });
   afterEach(() => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  // ── list ──
-  it("list returns every registered human with loudness, availability and binding state, sorted", () => {
+  // ── list (A1: singular surface) ──
+  it("list renders THE configured human with loudness, availability and binding state — no advisory", () => {
     const res = listHumans(home);
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    expect(res.humans.map((h) => h.entityId)).toEqual(["ana", "mike"]);
+    expect(res.humans.map((h) => h.entityId)).toEqual(["mike"]);
+    expect(res.advisory).toBeUndefined();
+    const mike = res.humans[0]!;
+    expect(mike.deliveryClass).toBe("B");
+    expect(mike.away).toBe(false); // default applied, surfaced as the effective value
+    expect(mike.bindings.count).toBe(1);
+    expect(mike.bindings.primary).toEqual({ kind: "slack", connectorRef: "main" });
+    expect(mike.bindings.inboundResolvable).toBe(false); // handle-less = outbound-only
+    expect(mike.fragmentPath).toBe(join(humansDir(home), "mike.yaml"));
+  });
+
+  it("list at zero humans is an ok empty result (the teaching empty-state is the CLI's)", () => {
+    const empty = mkdtempSync(join(tmpdir(), "s12-empty-"));
+    try {
+      const res = listHumans(empty);
+      expect(res.ok).toBe(true);
+      if (res.ok) { expect(res.humans).toEqual([]); expect(res.advisory).toBeUndefined(); }
+    } finally {
+      rmSync(empty, { recursive: true, force: true });
+    }
+  });
+
+  it("A1 advisory receipt: several fragments render HONESTLY plus the 0.5.7 advisory (display, never management)", () => {
+    seedAna(home); // hand-authored second human — the amendment's multi-fragment case
+    const res = listHumans(home);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.humans.map((h) => h.entityId)).toEqual(["ana", "mike"]); // honest, sorted display
     const ana = res.humans[0]!;
     expect(ana.deliveryClass).toBe("A");
     expect(ana.away).toBe(true);
     expect(ana.bindings.count).toBe(2);
-    expect(ana.bindings.primary).toEqual({ kind: "slack", connectorRef: "main" });
     expect(ana.bindings.inboundResolvable).toBe(true);
-    const mike = res.humans[1]!;
-    expect(mike.away).toBe(false); // default applied, surfaced as the effective value
-    expect(mike.bindings.inboundResolvable).toBe(false); // handle-less = outbound-only
-    expect(mike.fragmentPath).toBe(join(humansDir(home), "mike.yaml"));
+    expect(res.advisory).toContain("0.5.7");
+    expect(res.advisory).toContain("single-human");
   });
 
   it("list is a READ: it does not touch the projection file (byte receipt)", () => {
@@ -111,6 +134,7 @@ describe("gateway human lifecycle (S12): list / show / set / remove", () => {
     expect(res.record.prefs.deliveryClass).toEqual({ value: "B", source: "authored" });
     expect(res.record.prefs.away).toEqual({ value: false, source: "default" });
     // Ana authored away herself:
+    seedAna(home);
     const ana = showHuman("ana", home);
     expect(ana.ok).toBe(true);
     if (ana.ok) expect(ana.record.prefs.away).toEqual({ value: true, source: "authored" });
@@ -121,7 +145,7 @@ describe("gateway human lifecycle (S12): list / show / set / remove", () => {
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.error).toContain("ghost");
-    expect(res.error).toContain("ana"); // the known humans are named — teaching, not a bare 404
+    expect(res.error).toContain("mike"); // the known human is named — teaching, not a bare 404
   });
 
   // ── set ──
@@ -198,7 +222,8 @@ describe("gateway human lifecycle (S12): list / show / set / remove", () => {
 
   it("set runs the FULL add-time validator: an edit that breaks exactly-one-primary is refused whole", () => {
     // ana: binding.1 is secondary; promoting it to a second primary must be refused by the
-    // same cross-field invariant add enforces.
+    // same cross-field invariant add enforces. (Two-binding mechanics are retained under A1.)
+    seedAna(home);
     const res = setHumanField("ana", "binding.1", "slack:alt:vault://slack/ana-alt:primary", home);
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.error).toContain("primary");
@@ -208,16 +233,16 @@ describe("gateway human lifecycle (S12): list / show / set / remove", () => {
 
   // ── remove ──
   it("remove with NO in-flight items archives the fragment (never deletes bytes) and re-projects", () => {
-    const fragBytes = readFileSync(join(humansDir(home), "ana.yaml"), "utf8");
-    const res = removeHumanFragment("ana", { inflight: [] }, home);
+    const fragBytes = readFileSync(join(humansDir(home), "mike.yaml"), "utf8");
+    const res = removeHumanFragment("mike", { inflight: [] }, home);
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    expect(existsSync(join(humansDir(home), "ana.yaml"))).toBe(false);
+    expect(existsSync(join(humansDir(home), "mike.yaml"))).toBe(false);
     expect(existsSync(res.archivedPath)).toBe(true);
     expect(readFileSync(res.archivedPath, "utf8")).toBe(fragBytes); // bytes preserved verbatim
     const loaded = loadHumanRegistry(home);
     expect(loaded.ok).toBe(true);
-    if (loaded.ok) expect(loaded.entities.map((e) => e.entityId)).toEqual(["mike"]);
+    if (loaded.ok) expect(loaded.entities).toEqual([]);
   });
 
   it("remove REFUSES while in-flight items exist, enumerating each with kind+id and teaching --force", () => {
@@ -225,7 +250,7 @@ describe("gateway human lifecycle (S12): list / show / set / remove", () => {
       { kind: "open-conversation", id: "dec-123", detail: "undelivered outbound decision dec-123" },
       { kind: "queue-row", id: "qitem-777", detail: "pending row qitem-777" },
     ];
-    const res = removeHumanFragment("ana", { inflight }, home);
+    const res = removeHumanFragment("mike", { inflight }, home);
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(res.error).toContain("dec-123");
@@ -234,7 +259,7 @@ describe("gateway human lifecycle (S12): list / show / set / remove", () => {
     expect(res.error).toContain("queue-row");
     expect(res.error).toContain("--force");
     // Nothing moved:
-    expect(existsSync(join(humansDir(home), "ana.yaml"))).toBe(true);
+    expect(existsSync(join(humansDir(home), "mike.yaml"))).toBe(true);
   });
 
   it("remove --force archives AND writes an orphan record naming EVERY stranded item (silent-orphan ABSENCE)", () => {
@@ -243,18 +268,18 @@ describe("gateway human lifecycle (S12): list / show / set / remove", () => {
       { kind: "queue-row", id: "qitem-777", detail: "pending row qitem-777" },
     ];
     const before = inflight.map((i) => i.id).sort();
-    const res = removeHumanFragment("ana", { force: true, inflight }, home);
+    const res = removeHumanFragment("mike", { force: true, inflight }, home);
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect(existsSync(res.archivedPath)).toBe(true);
     expect(res.orphanRecordPath).toBeDefined();
     const orphans = JSON.parse(readFileSync(res.orphanRecordPath!, "utf8")) as { entityId: string; orphaned: InflightItem[] };
-    expect(orphans.entityId).toBe("ana");
+    expect(orphans.entityId).toBe("mike");
     // Reconciliation: the recorded set IS the before set — no open item simply vanished.
     expect(orphans.orphaned.map((i) => i.id).sort()).toEqual(before);
-    // Registry no longer projects ana:
+    // Registry no longer projects mike:
     const loaded = loadHumanRegistry(home);
-    if (loaded.ok) expect(loaded.entities.some((e) => e.entityId === "ana")).toBe(false);
+    if (loaded.ok) expect(loaded.entities.some((e) => e.entityId === "mike")).toBe(false);
   });
 
   it("remove on an unknown human teaches; the registry is untouched", () => {
@@ -275,7 +300,7 @@ describe("gateway human lifecycle (S12): list / show / set / remove", () => {
     expect(listHumans(home).ok).toBe(true); regeneratorShaped();
     expect(showHuman("mike", home).ok).toBe(true); regeneratorShaped();
     expect(setHumanField("mike", "delivery-class", "C", home).ok).toBe(true); regeneratorShaped();
-    expect(removeHumanFragment("ana", { inflight: [] }, home).ok).toBe(true); regeneratorShaped();
+    expect(removeHumanFragment("mike", { inflight: [] }, home).ok).toBe(true); regeneratorShaped();
   });
 
   it("the hand-edit path still refuses after lifecycle writes (drift pin unchanged)", () => {
@@ -298,11 +323,11 @@ describe("gateway human lifecycle (S12): list / show / set / remove", () => {
   });
 
   it("archive filenames are collision-safe: removing then re-adding then removing again preserves BOTH archives", () => {
-    removeHumanFragment("ana", { inflight: [] }, home);
-    seedAna(home);
-    removeHumanFragment("ana", { inflight: [] }, home);
+    expect(removeHumanFragment("mike", { inflight: [] }, home).ok).toBe(true);
+    seedMike(home);
+    expect(removeHumanFragment("mike", { inflight: [] }, home).ok).toBe(true);
     const archiveDir = join(humansDir(home), ".archive");
-    const archived = readdirSync(archiveDir).filter((f) => f.includes("ana") && f.endsWith(".yaml"));
+    const archived = readdirSync(archiveDir).filter((f) => f.includes("mike") && f.endsWith(".yaml"));
     expect(archived.length).toBe(2);
   });
 });

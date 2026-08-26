@@ -18,6 +18,7 @@ import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, readdir
 import { join, dirname } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { getOpenRigHome } from "../../openrig-compat.js";
+import { DispatchBuffer } from "./dispatch-buffer.js";
 
 // ── Schema (closed enums; extend only additively behind the contract) ──
 export const HUMAN_ENTITY_CLASSES = new Set(["human"]);          // M1's only class
@@ -383,8 +384,13 @@ export interface HumanSummary {
 }
 
 export type ListHumansResult =
-  | { ok: true; humans: HumanSummary[] }
+  | { ok: true; humans: HumanSummary[]; advisory?: string }
   | { ok: false; error: string };
+
+/** Amendment A1 (founder R5): the 0.5.5 surface is SINGLE-HUMAN. Several fragments render
+ *  honestly, but enumeration is display, never management — the advisory names the boundary. */
+export const MULTI_HUMAN_ADVISORY =
+  "several human fragments exist; this release's surface is single-human — multi-human management is 0.5.7 scope (fragments are displayed honestly; no plural management verbs exist)";
 
 /** A field value with its provenance: authored in the fragment, or filled by a default. */
 export interface ProvenancedValue<T> {
@@ -416,14 +422,131 @@ export type RemoveHumanResult =
   | { ok: true; removed: string; archivedPath: string; orphanRecordPath?: string }
   | { ok: false; error: string; inflight?: InflightItem[] };
 
+/** --binding / set-binding spec: kind:connectorRef:secretsRef:role[:handle=<id>]. secretsRef is
+ *  a vault POINTER and may itself contain ':', so kind/connectorRef are the first two fields,
+ *  role is the LAST positional, secretsRef is everything between. An optional handle= token may
+ *  appear anywhere. ONE source for add (CLI) and set (here) — the same parse both paths. */
+export function parseBindingSpec(spec: string):
+  | { ok: true; binding: { kind: string; connectorRef: string; secretsRef: string; role: string; handle?: string } }
+  | { ok: false; error: string } {
+  const all = spec.split(":");
+  const handleTokens = all.filter((p) => p.startsWith("handle="));
+  if (handleTokens.length > 1) return { ok: false, error: `binding spec must carry at most one handle= token (got "${spec}")` };
+  const handle = handleTokens.length === 1 ? handleTokens[0]!.slice("handle=".length) : undefined;
+  if (handle !== undefined && handle.length === 0) return { ok: false, error: `binding handle= must be non-empty (got "${spec}")` };
+  const parts = all.filter((p) => !p.startsWith("handle="));
+  if (parts.length < 4) return { ok: false, error: `binding spec must be kind:connectorRef:secretsRef:role[:handle=<id>] (got "${spec}")` };
+  const kind = parts[0]!;
+  const connectorRef = parts[1]!;
+  const role = parts[parts.length - 1]!;
+  const secretsRef = parts.slice(2, -1).join(":");
+  if (!kind || !connectorRef || !secretsRef || !role) {
+    return { ok: false, error: `binding spec fields must be non-empty: kind:connectorRef:secretsRef:role[:handle=<id>] (got "${spec}")` };
+  }
+  return { ok: true, binding: handle !== undefined ? { kind, connectorRef, secretsRef, role, handle } : { kind, connectorRef, secretsRef, role } };
+}
+
+function fragmentPathFor(entityId: string, home: string): string {
+  return join(humansDir(home), `${entityId}.yaml`);
+}
+
+function knownEntityIds(home: string): string[] {
+  const dir = humansDir(home);
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((f) => f.endsWith(".yaml") && !f.startsWith("."))
+    .map((f) => f.slice(0, -".yaml".length))
+    .sort();
+}
+
+function unknownHumanError(entityId: string, home: string): string {
+  const known = knownEntityIds(home);
+  return `no human "${entityId}" is registered — known humans: ${known.length ? known.join(", ") : "(none)"}`;
+}
+
 export function listHumans(home: string = getOpenRigHome()): ListHumansResult {
-  void home;
-  return { ok: false, error: "not implemented (S12 RED)" };
+  const proj = projectHumans(home);
+  if (!proj.ok) return { ok: false, error: proj.error };
+  const humans: HumanSummary[] = proj.entities.map((e) => {
+    const primary = e.connectorBindings.find((b) => b.role === "primary")!;
+    return {
+      entityId: e.entityId,
+      displayName: e.displayName,
+      address: e.address,
+      deliveryClass: e.prefs.deliveryClass,
+      away: e.prefs.away === true,
+      bindings: {
+        count: e.connectorBindings.length,
+        primary: { kind: primary.kind, connectorRef: primary.connectorRef },
+        inboundResolvable: e.connectorBindings.some((b) => b.handle !== undefined),
+      },
+      fragmentPath: fragmentPathFor(e.entityId, home),
+    };
+  });
+  return humans.length > 1 ? { ok: true, humans, advisory: MULTI_HUMAN_ADVISORY } : { ok: true, humans };
+}
+
+/** Read one fragment RAW (for authored-vs-default provenance) + validated. */
+function readFragment(entityId: string, home: string):
+  | { ok: true; raw: Record<string, unknown>; fragment: HumanFragment; path: string }
+  | { ok: false; error: string } {
+  const path = fragmentPathFor(entityId, home);
+  if (!existsSync(path)) return { ok: false, error: unknownHumanError(entityId, home) };
+  let raw: unknown;
+  try {
+    raw = parseYaml(readFileSync(path, "utf8"));
+  } catch (err) {
+    return { ok: false, error: `failed to parse human fragment ${entityId}.yaml: ${(err as Error).message}` };
+  }
+  const v = validateHumanFragment(raw);
+  if (!v.ok) return { ok: false, error: `invalid human fragment ${entityId}.yaml: ${v.error}` };
+  return { ok: true, raw: raw as Record<string, unknown>, fragment: v.fragment, path };
 }
 
 export function showHuman(entityId: string, home: string = getOpenRigHome()): ShowHumanResult {
-  void entityId; void home;
-  return { ok: false, error: "not implemented (S12 RED)" };
+  const f = readFragment(entityId, home);
+  if (!f.ok) return f;
+  const rawPrefs = isObj(f.raw.prefs) ? (f.raw.prefs as Record<string, unknown>) : {};
+  return {
+    ok: true,
+    record: {
+      entityId: f.fragment.entityId,
+      address: f.fragment.address,
+      displayName: f.fragment.displayName,
+      fragmentPath: f.path,
+      prefs: {
+        deliveryClass: { value: f.fragment.prefs.deliveryClass, source: "authored" },
+        away: {
+          value: f.fragment.prefs.away === true,
+          source: rawPrefs.away !== undefined ? "authored" : "default",
+        },
+      },
+      connectorBindings: f.fragment.connectorBindings.map((b) => ({ ...b, inboundResolvable: b.handle !== undefined })),
+    },
+  };
+}
+
+const SETTABLE_FIELDS_TEACHING =
+  "settable fields: display-name, delivery-class, away, binding.<n> (binding.<n> takes a full kind:connectorRef:secretsRef:role[:handle=<id>] spec)";
+
+/** Cross-fragment handle-uniqueness: the same pre-write check add runs (one platform id =
+ *  one human), extracted so set enforces it identically. */
+function handleConflict(fragment: HumanFragment, home: string): string | undefined {
+  const existing = projectHumans(home);
+  if (!existing.ok) return `cannot validate handle uniqueness — existing registry is invalid: ${existing.error}`;
+  const claimed = new Map<string, string>();
+  for (const e of existing.entities) {
+    if (e.entityId === fragment.entityId) continue;
+    for (const b of e.connectorBindings) if (b.handle !== undefined) claimed.set(`${b.kind}:${b.handle}`, e.entityId);
+  }
+  for (const b of fragment.connectorBindings) {
+    if (b.handle === undefined) continue;
+    const owner = claimed.get(`${b.kind}:${b.handle}`);
+    if (owner !== undefined) {
+      return `${b.kind} handle "${b.handle}" is already registered to human "${owner}" — a handle maps to exactly one human (registration conflict)`;
+    }
+  }
+  return undefined;
 }
 
 export function setHumanField(
@@ -432,8 +555,56 @@ export function setHumanField(
   value: string,
   home: string = getOpenRigHome(),
 ): SetHumanFieldResult {
-  void entityId; void field; void value; void home;
-  return { ok: false, error: "not implemented (S12 RED)" };
+  const f = readFragment(entityId, home);
+  if (!f.ok) return f;
+  // Edit the RAW mapping (not the normalized fragment) so an unauthored optional field
+  // stays unauthored — show's provenance depends on the authored shape surviving edits.
+  const raw = f.raw;
+  const rawPrefs = isObj(raw.prefs) ? (raw.prefs as Record<string, unknown>) : {};
+
+  if (field === "display-name") {
+    if (value.length === 0) return { ok: false, error: "display-name must be a non-empty string" };
+    raw.displayName = value;
+  } else if (field === "delivery-class") {
+    rawPrefs.deliveryClass = value; // enum validated below by the SAME add-time validator
+    raw.prefs = rawPrefs;
+  } else if (field === "away") {
+    if (value !== "true" && value !== "false") {
+      return { ok: false, error: `away must be true|false (got "${value}")` };
+    }
+    rawPrefs.away = value === "true";
+    raw.prefs = rawPrefs;
+  } else if (field.startsWith("binding.")) {
+    const idxRaw = field.slice("binding.".length);
+    const idx = /^\d+$/.test(idxRaw) ? Number.parseInt(idxRaw, 10) : NaN;
+    const bindings = Array.isArray(raw.connectorBindings) ? (raw.connectorBindings as unknown[]) : [];
+    if (!Number.isInteger(idx) || idx < 0 || idx >= bindings.length) {
+      const valid = bindings.map((_, i) => `binding.${i}`).join(", ");
+      return { ok: false, error: `"${field}" is out of range — this human has ${bindings.length} binding(s): ${valid || "(none)"}` };
+    }
+    const parsed = parseBindingSpec(value);
+    if (!parsed.ok) return parsed;
+    bindings[idx] = parsed.binding;
+    raw.connectorBindings = bindings;
+  } else {
+    return { ok: false, error: `unknown field "${field}" — ${SETTABLE_FIELDS_TEACHING}` };
+  }
+
+  // Full add-time parity: structural + closed enums + cross-field invariants...
+  const v = validateHumanFragment(raw);
+  if (!v.ok) return { ok: false, error: v.error };
+  if (v.fragment.entityId !== entityId) {
+    return { ok: false, error: `set must not change entityId (fragment key)` };
+  }
+  // ...plus the cross-fragment handle-uniqueness pre-write check add runs.
+  const conflict = handleConflict(v.fragment, home);
+  if (conflict) return { ok: false, error: conflict };
+
+  const w = atomicWrite(f.path, stringifyYaml(raw));
+  if (!w.ok) return { ok: false, error: w.error };
+  const proj = writeProjection(home);
+  if (!proj.ok) return { ok: false, error: `fragment written but re-projection failed: ${proj.error}` };
+  return { ok: true, path: f.path, fragment: v.fragment };
 }
 
 export function removeHumanFragment(
@@ -441,13 +612,63 @@ export function removeHumanFragment(
   opts: { force?: boolean; inflight: InflightItem[] },
   home: string = getOpenRigHome(),
 ): RemoveHumanResult {
-  void entityId; void opts; void home;
-  return { ok: false, error: "not implemented (S12 RED)" };
+  const path = fragmentPathFor(entityId, home);
+  if (!existsSync(path)) return { ok: false, error: unknownHumanError(entityId, home) };
+
+  if (!opts.force && opts.inflight.length > 0) {
+    const lines = opts.inflight.map((i) => `  - ${i.kind} ${i.id} — ${i.detail}`).join("\n");
+    return {
+      ok: false,
+      inflight: opts.inflight,
+      error:
+        `refusing to remove "${entityId}" — ${opts.inflight.length} in-flight item(s) would be orphaned:\n${lines}\n` +
+        `Resolve them first, or pass --force to archive anyway (every in-flight item above will be recorded as orphaned, never silently dropped).`,
+    };
+  }
+
+  // Archive, never delete bytes. Collision-safe name (ms timestamp + counter fallback).
+  const archiveDir = join(humansDir(home), ".archive");
+  try {
+    mkdirSync(archiveDir, { recursive: true });
+  } catch (err) {
+    return { ok: false, error: `failed to create archive dir ${archiveDir}: ${(err as Error).message}` };
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  let archivedPath = join(archiveDir, `${entityId}.${stamp}.yaml`);
+  for (let n = 1; existsSync(archivedPath); n++) archivedPath = join(archiveDir, `${entityId}.${stamp}-${n}.yaml`);
+  try {
+    renameSync(path, archivedPath);
+  } catch (err) {
+    return { ok: false, error: `failed to archive ${path}: ${(err as Error).message}` };
+  }
+
+  let orphanRecordPath: string | undefined;
+  if (opts.inflight.length > 0) {
+    orphanRecordPath = archivedPath.replace(/\.yaml$/, ".orphans.json");
+    const record = { entityId, archivedFragment: archivedPath, orphaned: opts.inflight };
+    const w = atomicWrite(orphanRecordPath, JSON.stringify(record, null, 2));
+    if (!w.ok) return { ok: false, error: `fragment archived to ${archivedPath} but the orphan record failed: ${w.error}` };
+  }
+
+  const proj = writeProjection(home);
+  if (!proj.ok) return { ok: false, error: `fragment archived to ${archivedPath} but re-projection failed: ${proj.error}` };
+  const base = { ok: true as const, removed: entityId, archivedPath };
+  return orphanRecordPath !== undefined ? { ...base, orphanRecordPath } : base;
 }
 
+/** The dispatch-buffer half of the remove guard: un-Acked outbound decisions bound to this
+ *  entity are open conversations. Match rule (documented, not guessed): entityBindingRef equal
+ *  to the entityId, equal to its registered address, or prefixed "<entityId>:". */
 export function pendingConversationsFor(entityId: string, home: string = getOpenRigHome()): InflightItem[] {
-  void entityId; void home;
-  return [];
+  const address = `${entityId}@${ADDRESS_DOMAIN}`;
+  return new DispatchBuffer(home)
+    .pending()
+    .filter((d) => d.entityBindingRef === entityId || d.entityBindingRef === address || d.entityBindingRef.startsWith(`${entityId}:`))
+    .map((d) => ({
+      kind: "open-conversation" as const,
+      id: d.decisionId,
+      detail: `undelivered outbound decision ${d.decisionId} (op ${d.op}, binding ${d.entityBindingRef})`,
+    }));
 }
 
 export type LoadResult =

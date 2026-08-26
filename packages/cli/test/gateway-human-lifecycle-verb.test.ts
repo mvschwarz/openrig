@@ -66,6 +66,18 @@ describe("rig gateway human lifecycle verbs (S12)", () => {
     expect(out.humans[0]!.deliveryClass).toBe("B");
   });
 
+  it("A1 advisory receipt: with several hand-authored fragments list --json renders all + the 0.5.7 advisory", async () => {
+    await runAdd("ana");
+    logSpy.mockClear();
+    const p = createProgram();
+    p.exitOverride();
+    await p.parseAsync(["node", "rig", "gateway", "human", "list", "--json"]);
+    const out = JSON.parse(logSpy.mock.calls.at(-1)![0] as string) as { ok: boolean; humans: unknown[]; advisory?: string };
+    expect(out.ok).toBe(true);
+    expect(out.humans).toHaveLength(2); // honest display
+    expect(out.advisory).toContain("0.5.7"); // never a management surface
+  });
+
   it("show --json carries authored-vs-default provenance and the fragment path", async () => {
     const p = createProgram();
     p.exitOverride();
