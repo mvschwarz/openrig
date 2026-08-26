@@ -940,6 +940,11 @@ Examples:
       const deps = getDeps();
       const params = new URLSearchParams();
       const sessionName = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+      if (opts.owned && !sessionName) {
+        console.error("Cannot use --owned: checked OPENRIG_SESSION_NAME and RIGGED_SESSION_NAME, but neither caller seat identity is set. Set one to a canonical seat@rig address, or use --destination <session>.");
+        process.exitCode = 1;
+        return;
+      }
       const hasExplicitScope = !!(opts.destination || opts.source || opts.owned);
 
       if (opts.owned && sessionName) {

@@ -1081,6 +1081,20 @@ describe("rig queue CLI", () => {
     }
   });
 
+  it("S4b final RED: list --owned without either seat identity refuses before any GET", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "");
+    vi.stubEnv("RIGGED_SESSION_NAME", "");
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+
+    await program.parseAsync(["node", "rig", "queue", "list", "--owned", "--json"]);
+
+    expect(process.exitCode).toBe(1);
+    expect(errors.join("\n")).toMatch(/--owned.*OPENRIG_SESSION_NAME.*RIGGED_SESSION_NAME/i);
+    expect(calls.some((call) => call.method === "GET" && call.path.startsWith("/api/queue/list"))).toBe(false);
+  });
+
   it("S4b RED: list help distinguishes destination-owned obligations from --mine's authored union", () => {
     const { deps } = makeDeps();
     const program = createProgram({ queueDeps: deps });
