@@ -2,6 +2,12 @@ import type Database from "better-sqlite3";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { EventBus } from "./event-bus.js";
 import type { SeatActivity } from "./types.js";
+import type {
+  ActivityEvidence,
+  AdapterRungInventory,
+  ArbitratedSeatState,
+  RungHealthEvent,
+} from "./activity-taxonomy.js";
 
 /** Default polling cadence: 1Hz. The default silence window is 3s, so
  *  1Hz polling gives at-most ~1s freshness lag on the cached observation. */
@@ -177,4 +183,64 @@ export class SeatActivityService {
       this.timer = null;
     }
   }
+
+  // ── S19 (OPR.0.5.5.19): the ranked evidence ladder above the sampler ──
+  // The non-inference contract is UNCHANGED: nothing below reads queue/assignment
+  // state; the parked join lives in the parked-query surface, never here.
+  // S19 A3 RED: surfaces declared UNWIRED so the pins fail at the arbitration layer.
+
+  /** An adapter (or an occupant swap) declares which rungs this seat's sources staff.
+   *  The binding ties the durable seat nodeId to its current pane/session name so the
+   *  internal sampler can feed the window-sampling rung for this seat. */
+  declareRungInventory(
+    _binding: { seatNodeId: string; sessionName: string },
+    _inventory: AdapterRungInventory,
+  ): void {
+    throw new Error("not implemented (S19 A3 RED)");
+  }
+
+  /** Adapters push rung evidence (hooks, self-report, chrome, sampling). */
+  reportEvidence(_evidence: ActivityEvidence): void {
+    throw new Error("not implemented (S19 A3 RED)");
+  }
+
+  /** A handover/generation swap: its OWN visible event, never an activity transition;
+   *  clears rung trust to the inventory's initial values (AM-1 corollary). */
+  declareOccupantSwap(_seatNodeId: string, _generation: string): void {
+    throw new Error("not implemented (S19 A3 RED)");
+  }
+
+  /** The arbitrated, seat-keyed state every surface renders from. */
+  getSeatState(_seatNodeId: string): ArbitratedSeatState | null {
+    throw new Error("not implemented (S19 A3 RED)");
+  }
+
+  /** Wait-after-seq read primitive (T1 seam, exposed not consumed here): resolves when
+   *  the arbitrated seq passes `afterSeq` (transient transitions still satisfy it). */
+  waitForSeatState(
+    _seatNodeId: string,
+    _opts: { afterSeq: number; timeoutMs: number },
+  ): Promise<ArbitratedSeatState | null> {
+    throw new Error("not implemented (S19 A3 RED)");
+  }
+
+  /** Rung-health transitions (AM-1): degradations are VISIBLE, never silent. */
+  onRungHealth(_listener: (event: RungHealthEvent) => void): void {
+    throw new Error("not implemented (S19 A3 RED)");
+  }
 }
+
+// S19 arbitration constants — chosen against OUR 1Hz poll / 3s silence window (the SPEC
+// requires the numbers recorded; rationale in the GREEN commit + reference doc):
+/** Hook evidence older than this no longer decides working/idle (time-bounded authority). */
+export const HOOK_AUTHORITY_WINDOW_MS = 15_000;
+/** Persistent hook-vs-sampler contradiction beyond this window degrades the hook rung. */
+export const CROSS_RUNG_CONTRADICTION_WINDOW_MS = 10_000;
+/** Sampling-decided working→idle needs this many consecutive idle evaluations… */
+export const SAMPLING_IDLE_DEBOUNCE_TICKS = 2;
+/** …bounded by this hard cap; authoritative turn boundaries and idle chrome bypass instantly. */
+export const SAMPLING_IDLE_DEBOUNCE_CAP_MS = 2_500;
+/** AM-2 promotion: a trial rung earns authority after this many agreeing observations… */
+export const RUNG_PROMOTION_AGREEMENT_COUNT = 50;
+/** …spread over at least this window of production time. */
+export const RUNG_PROMOTION_MIN_WINDOW_MS = 60 * 60 * 1000;
