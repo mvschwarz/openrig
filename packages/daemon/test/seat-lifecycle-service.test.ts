@@ -399,6 +399,35 @@ describe("SeatLifecycleService", () => {
       expect(lineageSnapshot(db, seat.node.id)).toEqual(before);
     });
 
+    it("F3 pin (r2 row 30045f39): older-LIVE / newer-dead sessions — clean must refuse, not terminalize the live older session", async () => {
+      // Canonical-name churn can leave one node with several non-terminal session
+      // rows under DIFFERENT names (staged/legacy renames). clean mutates ALL
+      // non-terminal rows, so its safety probe must cover every row it will
+      // touch — probing only the newest fabricates safety for the others.
+      const tmuxLocal = fakeTmux();
+      const svcLocal = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmuxLocal.adapter });
+      // The fixture session is the OLDER row and stays LIVE in tmux.
+      const seat = seatFixture("s5-rig", "dev.impl");
+      // A NEWER session row under a successor name, dead in tmux.
+      const newerName = "dev-impl-v2@s5-rig";
+      const newer = sessionRegistry.registerSession(seat.node.id, newerName);
+      sessionRegistry.updateStatus(newer.id, "running");
+      tmuxLocal.setAlive(newerName, false);
+      // Ordering guard from the DB itself: the dead row IS the newest.
+      const newest = db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(seat.node.id) as { id: string };
+      expect(newest.id).toBe(newer.id);
+
+      const res = await svcLocal.cleanSeat({ seatRef: seat.sessionName, reason: "F3 pin" });
+
+      expect(res.ok).toBe(false);
+      if (res.ok) throw new Error(`DEFECT (F3): clean proceeded and terminalized sessions ${JSON.stringify(res.actions)} while "${seat.sessionName}" is LIVE`);
+      expect(res.code).toBe("session_live");
+      expect(res.message).toContain(seat.sessionName);
+      // The live older session row is untouched.
+      expect((db.prepare("SELECT status FROM sessions WHERE id = ?").get(seat.session.id) as { status: string }).status).toBe("running");
+      expect(sessionRegistry.getBindingForNode(seat.node.id)).not.toBeNull();
+    });
+
     it("stop under a blip REFUSES indeterminate — and does NOT route the operator to clean", async () => {
       const { svc, seat } = blipWorld();
 
