@@ -1,6 +1,6 @@
 {
   "name": "openrig-core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "OpenRig canonical skills and hooks for cross-runtime agent topology coordination, continuity, and operating discipline.",
   "author": {
     "name": "Mike Schwarz",

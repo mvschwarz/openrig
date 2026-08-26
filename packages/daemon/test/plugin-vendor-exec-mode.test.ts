@@ -6,6 +6,7 @@
 // path AND the content-identical hash-skip path (a previously-staged 644 must repair on re-vendor).
 
 import { describe, it, expect } from "vitest";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
@@ -35,6 +36,31 @@ function realVendorFs(): PluginVendorFs {
 
 const httpClient = async () => ({ ok: false, status: 404 });
 const perm = (p: string) => fs.statSync(p).mode & 0o777;
+const sha256 = (content: Buffer | string) =>
+  createHash("sha256").update(content).digest("hex");
+
+function materializePreviousRelease(target: string) {
+  const fixtureRoot = nodePath.join(
+    import.meta.dirname,
+    "fixtures",
+    "plugin-vendor",
+    "openrig-core-835b700fc",
+  );
+  const paths = [
+    ".claude-plugin/plugin.json",
+    ".codex-plugin/plugin.json",
+    "hooks/scripts/refocus.cjs",
+  ];
+  for (const rel of paths) {
+    const encoded = fs.readFileSync(
+      nodePath.join(fixtureRoot, rel + ".base64"),
+      "utf-8",
+    );
+    const dest = nodePath.join(target, rel);
+    fs.mkdirSync(nodePath.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, Buffer.from(encoded.trim(), "base64"));
+  }
+}
 
 function seedAssets(root: string) {
   const claudeManifest = nodePath.join(root, "openrig-core", ".claude-plugin", "plugin.json");
@@ -144,5 +170,54 @@ describe("PluginVendorService preserves executable mode during vendor staging (Q
 
     expect(fs.readFileSync(nodePath.join(targetDir, "SKILL.md"), "utf-8")).toBe("# compaction-restore\n");
     expect(fs.readFileSync(nodePath.join(targetDir, ".openrig-vendor-version"), "utf-8")).toBe("0.1.0\n");
+  });
+});
+
+describe("PluginVendorService release-version authority", () => {
+  it("replaces the actual 835b700fc refocus hook when the bundled release is newer", async () => {
+    const base = fs.mkdtempSync(
+      nodePath.join(os.tmpdir(), "vendor-release-upgrade-"),
+    );
+    const assets = nodePath.resolve(import.meta.dirname, "../assets/plugins");
+    const userPlugins = nodePath.join(base, "home", "plugins");
+    const installedPlugin = nodePath.join(userPlugins, "openrig-core");
+    const hookRel = "hooks/scripts/refocus.cjs";
+    materializePreviousRelease(installedPlugin);
+
+    const installedHook = nodePath.join(installedPlugin, hookRel);
+    const bundledHook = nodePath.join(assets, "openrig-core", hookRel);
+    expect(sha256(fs.readFileSync(installedHook))).toBe(
+      "09601be0c704da9bf49eb2c8b174f9caa2983fd11fc5df9333b49ab28d4d3bfc",
+    );
+    expect(sha256(fs.readFileSync(bundledHook))).toBe(
+      "2d9d9bddff43cd77d9b918a4b3fdbb02da829fdaa7700ea7abf0b5e58d7240a8",
+    );
+
+    const svc = new PluginVendorService({
+      vendoredAssetsDir: assets,
+      userPluginsDir: userPlugins,
+      fs: realVendorFs(),
+      httpClient,
+    });
+    await svc.ensureVendored("openrig-core");
+
+    expect(sha256(fs.readFileSync(installedHook))).toBe(
+      sha256(fs.readFileSync(bundledHook)),
+    );
+    for (const manifestDir of [".claude-plugin", ".codex-plugin"]) {
+      const installed = JSON.parse(
+        fs.readFileSync(
+          nodePath.join(installedPlugin, manifestDir, "plugin.json"),
+          "utf-8",
+        ),
+      ) as { version: string };
+      const bundled = JSON.parse(
+        fs.readFileSync(
+          nodePath.join(assets, "openrig-core", manifestDir, "plugin.json"),
+          "utf-8",
+        ),
+      ) as { version: string };
+      expect(installed.version).toBe(bundled.version);
+    }
   });
 });

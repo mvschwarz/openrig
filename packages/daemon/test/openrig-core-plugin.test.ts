@@ -70,7 +70,7 @@ describe("openrig-core plugin — manifest shape (HG-2.2)", () => {
     const manifest = JSON.parse(content) as Record<string, unknown>;
     // Required fields per Claude plugin spec
     expect(manifest["name"]).toBe("openrig-core");
-    expect(manifest["version"]).toBe("0.1.0");
+    expect(manifest["version"]).toBe("0.1.1");
     expect(typeof manifest["description"]).toBe("string");
     expect((manifest["description"] as string).length).toBeLessThanOrEqual(1024);
     // Hook + skills wiring
@@ -85,7 +85,7 @@ describe("openrig-core plugin — manifest shape (HG-2.2)", () => {
     const manifest = JSON.parse(content) as Record<string, unknown>;
     // Codex requires name + version + description (per IMPL-PRD §2.3)
     expect(manifest["name"]).toBe("openrig-core");
-    expect(manifest["version"]).toBe("0.1.0");
+    expect(manifest["version"]).toBe("0.1.1");
     expect(typeof manifest["description"]).toBe("string");
     expect(manifest["hooks"]).toBe("./hooks/codex.json");
     expect(manifest["skills"]).toBe("./skills");
