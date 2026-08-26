@@ -66,7 +66,7 @@
       "forming-an-openrig-mental-model/SKILL.md": "d869baf119253059eeb30749d51ba2a8352f3acd5c2869b3c7c3510ea638b832",
       "messaging-the-human/SKILL.md": "dd98cc503141b125355637291106479efde5401241c7b9707205edcee9c43301",
       "mission-slice-sop/SKILL.md": "81d80f7413527a23eabdde9b3597d79c4884bdb6da1343105c16461fa48273f8",
-      "openrig-skills/SKILL.md": "ae3cdbc180cc65fddcd513cbba9d4f8bdf60ed337678a86faca5d06ce5fbd12b",
+      "openrig-skills/SKILL.md": "1a61fddd55eff41797160ef9222cb3117e9b510c36e930b20ccf233859fb75ae",
       "openrig-user/SKILL.md": "a90184a64317bb13b8f28cc2abf8b0d295b93f75bdc587007590268eb1f5fd17",
       "orienting-to-an-inherited-seat/CHANGELOG.md": "9845c7027eaf7a063740e460e46b0b81d75b21969487c8b830ed1639800e5750",
       "orienting-to-an-inherited-seat/SKILL.md": "6f7f95914dda6ab6bc829d0d8ced8833d9aa59282196e4a7f69ecc2ffc0a1e30",
@@ -75,7 +75,7 @@
       "retiring-and-inheriting-a-seat/SKILL.md": "b6a2f5b45389418dccb28c217655f67a1a12f0985f842befdf839132bc164225",
       "seat-continuity-and-handover/SKILL.md": "7bb210c125800ebacea87e9b1efdcae8e6c554aecdb6086ace5299c7f61ed818",
       "session-compaction-and-restore/SKILL.md": "2e785328d6e847e931d0d4a1152b075bab4501be17336b3730fea6c14bd4b6e0",
-      "software-for-agents/SKILL.md": "285c376d857a2a21b112fe7c4d895389b51cdf133dbdeacce63a219926740644"
+      "software-for-agents/SKILL.md": "7363256b005839ea067caac633ea908b39df2b58ec2ac7d324e646a0576eed51"
     },
     "spec": {
       "core/agent-starters/SKILL.md": "dd11173ea046dd7d30e23c4fdb3f5188b003ca56ea434ebcc21e14f5e8f29b15",
