@@ -83,6 +83,9 @@ describe("Send CLI", () => {
   let port: number;
   let lastSendBody: Record<string, unknown> | null = null;
   let lastBroadcastBody: Record<string, unknown> | null = null;
+  // S3 (OPR.0.5.4.6): every /send body in order, so the no-double-delivery
+  // proof can count plain-text sends vs submit-path requests.
+  let sendBodies: Array<Record<string, unknown>> = [];
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
@@ -115,9 +118,31 @@ describe("Send CLI", () => {
           res.end(JSON.stringify({ total: results.length, sent: results.length, failed: 0, results, ...(warning ? { warning } : {}) }));
           return;
         }
+        if (req.method === "POST" && url === "/api/transport/capture") {
+          // S3 (OPR.0.5.4.6) fixtures: the pane EFFECT is the only truth about
+          // consumption. staged-session leaves the sent text AT the prompt;
+          // consumed-session shows it left the input box.
+          const parsed = JSON.parse(body);
+          const panes: Record<string, string> = {
+            "staged-session": "❯ hello there\n  ⏵⏵ accept edits on (shift+tab to cycle)",
+            "consumed-session": "· processing: hello there\n❯ \n  ⏵⏵ accept edits on (shift+tab to cycle)",
+          };
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, sessionName: parsed.session, content: panes[parsed.session as string] ?? "❯ " }));
+          return;
+        }
         if (req.method === "POST" && url === "/api/transport/send") {
           const parsed = JSON.parse(body);
           lastSendBody = parsed;
+          sendBodies.push(parsed);
+          if (parsed.session === "staged-session" || parsed.session === "consumed-session") {
+            // S3 RED fixture: the TRANSPORT believes it delivered (its verify
+            // is measured-unreliable in exactly this direction) — the staged
+            // truth is visible only by pane effect.
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, sessionName: parsed.session, verified: true, outcome: "delivered" }));
+            return;
+          }
           if (parsed.session === "dev-impl@my-rig") {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: true, sessionName: "dev-impl@my-rig" }));
@@ -162,6 +187,7 @@ describe("Send CLI", () => {
   beforeEach(() => {
     lastSendBody = null;
     lastBroadcastBody = null;
+    sendBodies = [];
     // P18: establish a RESOLVED seat for every test so dispatch renders the real sender; the
     // deliver-and-label test overrides it to empty to exercise the `<unknown sender>` fall-open.
     // (Hermetic-gate default is env-UNSET, so without this env-less delivery would render the unknown
@@ -629,6 +655,47 @@ describe("Send CLI", () => {
     expect(output).toContain("seat-b@my-rig: FAILED — target needs input");
     expect(output).toContain("1/2 delivered");
     expect(exitCode).toBe(1);
+  });
+
+  // ── S3 (OPR.0.5.4.6) — delivery honesty: "sent" must mean CONSUMED, never
+  // merely typed. RED-first proof assets at proof-item altitude (the lock may
+  // refine wording; the OUTCOMES asserted here are the locked contract):
+  // staged-vs-consumed is discriminated by PANE EFFECT (the walk pattern
+  // generalized), the staged report names its evidence, and the remedy is the
+  // single submit path — never a blind re-send.
+  describe("S3 — delivery honesty (OPR.0.5.4.6): staged-vs-consumed by pane effect", () => {
+    it("PROOF-1: a send whose text sits AT the prompt is reported STAGED — by pane effect, not the transport's verified:true", async () => {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "send", "staged-session", "hello there", "--verify"]);
+      });
+      const output = logs.join("\n");
+      // RED at current bytes: the transport's false "delivered" is echoed as
+      // "Verified: yes" and no staged report exists.
+      expect(output).toMatch(/staged/i);
+      expect(output).toMatch(/not (yet )?consumed|not submitted|still at the prompt/i);
+    });
+
+    it("PROOF-2: a genuinely consumed send verifies positively and is NEVER reported staged", async () => {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "send", "consumed-session", "hello there", "--verify"]);
+      });
+      const output = logs.join("\n");
+      expect(output).not.toMatch(/staged/i);
+      expect(output).toContain("Verified: yes");
+    });
+
+    it("PROOF-3: the staged remedy is the single submit path — exactly one plain-text send, no blind re-send suggested or performed", async () => {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "send", "staged-session", "hello there", "--verify"]);
+      });
+      const output = logs.join("\n");
+      // exactly ONE plain-text delivery of these bytes ever hits the wire
+      const plainSends = sendBodies.filter((b) => !b["submitOnly"] && b["text"] === "hello there");
+      expect(plainSends).toHaveLength(1);
+      // the report points at the submit path, never a re-send
+      expect(output).toMatch(/submit|Enter/i);
+      expect(output).not.toMatch(/re-?send|send again/i);
+    });
   });
 
   // S2 (OPR.0.5.4.3): the fan-out renderer must SURFACE an additive warning —
