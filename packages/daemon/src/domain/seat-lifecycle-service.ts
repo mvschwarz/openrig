@@ -210,39 +210,46 @@ export class SeatLifecycleService {
     if ("code" in resolved) return resolved;
     const seat = this.describe(resolved);
 
-    const session = this.latestSession(resolved.nodeId);
-    if (session?.origin === "claimed") {
-      return {
-        ok: false,
-        code: "claimed_session",
-        message: `Session "${session.session_name}" was adopted (origin=claimed) — clean refuses to touch adopted state.`,
-        guidance: "Release an adopted session with: rig unclaim",
-      };
-    }
-
-    if (session) {
-      // Wave-2 fix round 1 (r1 row 9baac99f): clean is the DESTRUCTIVE verb, so it
-      // acts only on POSITIVE absence evidence. A transport blip (probeSession =
-      // transport_unavailable) is indeterminate and refuses — under the old
-      // collapsed hasSession view that blip read as absence and clean cleared a
-      // live seat's state.
-      const probed = await this.probeLiveness(session.session_name, "clean refuses rather than clear state under a possibly-live seat");
-      if ("code" in probed) return probed;
-      if (probed.state === "present") {
-        return {
-          ok: false,
-          code: "session_live",
-          message: `Session "${session.session_name}" is alive in tmux (checked: tmux has-session) — clean only operates on dead seats.`,
-          guidance: "Stop a live seat first with: rig seat stop",
-        };
-      }
-    }
-
     const binding = this.sessionRegistry.getBindingForNode(resolved.nodeId);
     const nonTerminal = (this.db.prepare(
       "SELECT id, session_name, status, origin FROM sessions WHERE node_id = ? ORDER BY id",
     ).all(resolved.nodeId) as LatestSessionRow[])
       .filter((s) => !TERMINAL_SESSION_STATUSES.has(s.status));
+
+    // Fix r2-F3 (row 30045f39): clean MUTATES every non-terminal session row, so
+    // its safety checks must cover exactly that set — probing only the newest row
+    // fabricates safety for the others (older-live/newer-dead under canonical-name
+    // churn). Every row that would be touched is checked for adopted origin and
+    // probed for POSITIVE absence (r1 discipline); the binding's own tmux session
+    // is probed too when it names a session no row carries.
+    const mutationTargets = nonTerminal;
+    for (const row of mutationTargets) {
+      if (row.origin === "claimed") {
+        return {
+          ok: false,
+          code: "claimed_session",
+          message: `Session "${row.session_name}" was adopted (origin=claimed) — clean refuses to touch adopted state.`,
+          guidance: "Release an adopted session with: rig unclaim",
+        };
+      }
+    }
+    const probeNames = [...new Set([
+      ...mutationTargets.map((s) => s.session_name),
+      ...(binding?.tmuxSession ? [binding.tmuxSession] : []),
+    ])];
+    for (const name of probeNames) {
+      const probed = await this.probeLiveness(name, "clean refuses rather than clear state under a possibly-live seat");
+      if ("code" in probed) return probed;
+      if (probed.state === "present") {
+        return {
+          ok: false,
+          code: "session_live",
+          message: `Session "${name}" is alive in tmux (checked: tmux has-session, against EVERY session row clean would mutate) — clean only operates on dead seats.`,
+          guidance: "Stop a live seat first with: rig seat stop",
+        };
+      }
+    }
+    const session = this.latestSession(resolved.nodeId);
 
     if (!binding && nonTerminal.length === 0) {
       return {

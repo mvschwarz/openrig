@@ -407,7 +407,9 @@ describe("SeatLifecycleService", () => {
       const tmuxLocal = fakeTmux();
       const svcLocal = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmuxLocal.adapter });
       // The fixture session is the OLDER row and stays LIVE in tmux.
+      // (seatFixture marks liveness on the OUTER fake; mirror it on this test's own.)
       const seat = seatFixture("s5-rig", "dev.impl");
+      tmuxLocal.setAlive(seat.sessionName, true);
       // A NEWER session row under a successor name, dead in tmux.
       const newerName = "dev-impl-v2@s5-rig";
       const newer = sessionRegistry.registerSession(seat.node.id, newerName);
@@ -417,7 +419,9 @@ describe("SeatLifecycleService", () => {
       const newest = db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(seat.node.id) as { id: string };
       expect(newest.id).toBe(newer.id);
 
-      const res = await svcLocal.cleanSeat({ seatRef: seat.sessionName, reason: "F3 pin" });
+      // Addressed by the CURRENT canonical name (the newest session's) — the
+      // realistic operator ref; the older live session hides behind it.
+      const res = await svcLocal.cleanSeat({ seatRef: newerName, reason: "F3 pin" });
 
       expect(res.ok).toBe(false);
       if (res.ok) throw new Error(`DEFECT (F3): clean proceeded and terminalized sessions ${JSON.stringify(res.actions)} while "${seat.sessionName}" is LIVE`);
