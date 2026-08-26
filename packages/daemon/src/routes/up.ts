@@ -415,6 +415,21 @@ upRoutes.post("/", async (c) => {
       // returned a bare 500, which is exactly what the openrig-comms
       // hero-flow dogfood hit on a fresh 0.3.1 install.
       let topLevelCode: string | undefined;
+      // S5b final-fix F1 (OPR.0.5.4.11): the running-name guard refusal is a
+      // CONFLICT, not a server error — promote its code AND its teaching
+      // message to the top level so the CLI can render the locked refusal.
+      // The flat import path packs the full outcome into stage detail
+      // (message present); the pod path lifts the message into
+      // result.errors[0] and packs only the code — read both.
+      let conflictError: string | undefined;
+      const hasConflict = result.stages.some((s) => {
+        if (s.status !== "failed" || s.stage !== "import_rig") return false;
+        const detail = s.detail as { code?: string; message?: string } | undefined;
+        if (detail?.code !== "rig_name_running") return false;
+        topLevelCode ??= "rig_name_running";
+        conflictError ??= detail.message ?? result.errors[0];
+        return true;
+      });
       const hasBadRequest = result.stages.some((s) => {
         if (s.status !== "failed") return false;
         const detail = s.detail as { code?: string } | undefined;
@@ -428,8 +443,10 @@ upRoutes.post("/", async (c) => {
         }
         return false;
       });
-      const failedBody = topLevelCode ? { ...result, code: topLevelCode } : result;
-      return c.json(failedBody, hasBlocked ? 409 : hasBadRequest ? 400 : 500);
+      const failedBody = topLevelCode
+        ? { ...result, code: topLevelCode, ...(conflictError ? { error: conflictError } : {}) }
+        : result;
+      return c.json(failedBody, hasBlocked || hasConflict ? 409 : hasBadRequest ? 400 : 500);
     } catch (err) {
       bootstrapRepo.updateRunStatus(run.id, "failed");
       eventBus.emit({ type: "bootstrap.failed", runId: run.id, sourceRef, error: (err as Error).message });

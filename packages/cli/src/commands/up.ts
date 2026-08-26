@@ -449,6 +449,13 @@ Examples:
         } else if (code === "invalid_topology_manifest") {
           const errors = (res.data["errors"] as string[]) ?? [];
           console.error(`Topology manifest invalid:\n${errors.map((e) => `  ${e}`).join("\n")}\nFix: the manifest key set is CLOSED — rigs[]{source, host?} plus optional concurrency.`);
+        } else if (code === "rig_name_running") {
+          // S5b final-fix F1 (OPR.0.5.4.11): the guard's teaching refusal is
+          // self-describing (running rig identity, what was checked,
+          // nothing-created, alternatives) — render it verbatim, never the
+          // generic unknown-error/validate-your-spec fallback.
+          const teaching = String(res.data["error"] ?? ((res.data["errors"] as string[]) ?? [])[0] ?? "A rig with this name is already running.");
+          console.error(teaching);
         } else {
           const errorText = String(res.data["error"] ?? "unknown error");
           console.error(`Up failed: ${errorText} (HTTP ${res.status}). Check daemon logs or validate your spec with: rig spec validate <path>`);
