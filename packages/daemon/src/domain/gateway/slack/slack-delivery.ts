@@ -16,7 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { postChatMessage, getUploadURLExternal, uploadBytesExternal, completeUploadExternal, fetchRecentMessageTexts, type FetchImpl } from "./slack-api.js";
-import { buildOutboundMessage, attributionFromSession, escapeSlackText, type SlackMediaRef } from "./message.js";
+import { buildOutboundMessage, attributionFromSession, reconcileToken, type SlackMediaRef } from "./message.js";
 import type { SeenStore } from "./state-store.js";
 import type { OutboundDecision } from "../protocol.js";
 import type { SubsystemDeliverFn, SubsystemDeliveryOutcome } from "../gateway-subsystem.js";
@@ -102,20 +102,26 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
         // structurally cannot carry username/icon overrides — the customize-absence rail).
         attribution: attributionFromSession(q.sourceSession),
         mentionUserId: opts.resolveMentionUserId?.(q),
+        // fix-r3 — the reconcile identity, reserved outside the clamp budget (same function
+        // the scan below matches: one identity, same bytes, both sides).
+        reconcileMarker: reconcileToken(decision.decisionId),
       },
     );
     const threadTs = opts.resolveThreadTs?.(q);
 
     // H — RECONCILE-BY-MARKER before any RESEND: if this decision was attempted before, the
     // prior outcome is ambiguous (a timeout may have posted). Search where the message would
-    // live (the thread, else channel history) for the row-id marker the footer embeds
-    // (`qitem <id>`); FOUND → already delivered, record + ack, never repost. Search failure =
-    // stay ambiguous = retain for the next replay (never a blind repost on an unreadable
-    // channel — a duplicate human notification is the red; a delay is not).
-    // fix-r2 (R1 F-B1r): the footer posts the id ESCAPED (uniform boundary rule), so the scan
-    // searches the SAME escaped bytes — producer and scanner can never disagree. For minted
-    // ids escaped == raw and nothing changes.
-    const marker = escapeSlackText(String(q.qitemId ?? decision.decisionId));
+    // live (the thread, else channel history) for the message's STRUCTURAL identity; FOUND →
+    // already delivered, record + ack, never repost. Search failure = stay ambiguous = retain
+    // for the next replay (never a blind repost on an unreadable channel — a duplicate human
+    // notification is the red; a delay is not).
+    // fix-r3 (R2 exactly-once): the identity is reconcileToken(decisionId) — a bounded,
+    // decision-scoped token the renderer reserves OUTSIDE the clamp budget, so it is
+    // GUARANTEED present in the scanned top-level text at any ordinary length, and ordinary
+    // prose quoting a qitem id can never reproduce it (it embeds the daemon-minted
+    // decisionId in a delimited form). Producer and scanner call the same function: one
+    // identity, same bytes, both sides.
+    const marker = reconcileToken(decision.decisionId);
     if (opts.attempted.load().has(decision.decisionId)) {
       const scan = await fetchRecentMessageTexts(opts.botToken, opts.channel, threadTs, opts.fetchImpl);
       if (!scan.ok) {

@@ -44,6 +44,11 @@ export interface OutboundMessageOpts {
    *  stays quiet-threaded. The value is the Slack USER ID (mention semantics require the id,
    *  never a display name). */
   mentionUserId?: string;
+  /** S10 fix-r3 — the reconciliation token (reconcileToken(decisionId)), reserved OUTSIDE the
+   *  truncatable content budget: content clamps to CAP minus the token's exact reserve, then
+   *  the token appends, so it survives in top-level fallback text at ANY ordinary message
+   *  length — the exact surface the history scan reads. */
+  reconcileMarker?: string;
 }
 
 /** A1.2 — the four attribution fields. */
@@ -130,6 +135,18 @@ function inert(text: string): string {
   return escapeSlackText(redactSecrets(text));
 }
 
+/** S10 fix-r3 (R2 exactly-once) — the STRUCTURAL reconciliation identity: a bounded,
+ *  decision-scoped token. decisionId is daemon-minted per decision (never settable through
+ *  queue rows) and stable across retries of the same decision, so ONLY the target posted
+ *  message carries this exact delimited token — ordinary prose quoting a qitem id (or even a
+ *  lookalike built from the qitem id) cannot reproduce it. ONE producer function; the
+ *  reconcile scanner matches exactly this function's output — producer and scanner share
+ *  identity bytes by construction. Parentheses/colon only: no &,<,> so the token is
+ *  escape-stable and never parses as Slack control syntax. */
+export function reconcileToken(decisionId: string): string {
+  return `(or-mark:${escapeSlackText(String(decisionId))})`;
+}
+
 export interface SlackMessagePayload {
   text: string; // notification fallback (always set)
   blocks: unknown[]; // Block Kit (T1076-extensible)
@@ -174,7 +191,14 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
       ].filter(Boolean).join(" · ")
     : null;
 
-  const text = clamp(`${mention}:rotating_light: *${summary}*${attr ? `\n_${attr}_` : ""}\n${body}\n_${footer}_`, SLACK_TEXT_CAP);
+  // fix-r3: the reconcile token is reserved OUTSIDE the clamp budget — ordinary content of any
+  // length clamps first, the token appends after, so the scanned surface ALWAYS carries it.
+  const tokenReserve = opts.reconcileMarker ? opts.reconcileMarker.length + 1 : 0;
+  const assemble = (content: string): string => {
+    const clamped = clamp(content, SLACK_TEXT_CAP - tokenReserve);
+    return opts.reconcileMarker ? `${clamped}\n${opts.reconcileMarker}` : clamped;
+  };
+  const text = assemble(`${mention}:rotating_light: *${summary}*${attr ? `\n_${attr}_` : ""}\n${body}\n_${footer}_`);
 
   const blocks: unknown[] = [];
   if (attr) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: clamp(attr, 2000) }] });
@@ -186,9 +210,11 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
   blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: footer }] });
   if (opts.extraBlocks?.length) blocks.push(...opts.extraBlocks);
 
-  // Note the attachment count in the notification fallback so a text-only client still signals it.
+  // Note the attachment count in the notification fallback so a text-only client still signals
+  // it. Re-assembled through the same token-reserving path so the media note never evicts the
+  // reconcile identity from the scanned surface.
   const textWithMedia = imageBlocks.length > 0
-    ? clamp(`${text}\n_(${imageBlocks.length} image attachment${imageBlocks.length === 1 ? "" : "s"})_`, SLACK_TEXT_CAP)
+    ? assemble(`${mention}:rotating_light: *${summary}*${attr ? `\n_${attr}_` : ""}\n${body}\n_${footer}_\n_(${imageBlocks.length} image attachment${imageBlocks.length === 1 ? "" : "s"})_`)
     : text;
   return { text: textWithMedia, blocks };
 }
