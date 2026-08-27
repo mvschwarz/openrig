@@ -1123,6 +1123,40 @@ depends_on: OPR.0.3.2.7
     ]));
   });
 
+  it("S08 fix-round RED: lossless normalization spans an internal blank line and is idempotent", async () => {
+    const slice = path.join(substrate.missionsRoot, "release-0.3.2", "slices", "09-multiline-repair");
+    const spec = path.join(slice, "SPEC.md");
+    const body = `# Multiline repair
+
+Body bytes stay exact.
+`;
+    writeFile(spec, `---
+id: OPR.0.3.2.9
+stage: established
+verified: 2026-08-27 against authored fixture
+intent: "Multiline repair"
+depends_on: |-
+  OPR.9.8.7.1
+
+  OPR.9.8.7.2
+custom-key: 'keep: exact'
+---
+
+${body}`);
+
+    const first = await run(["slice", "repair", "09-multiline-repair", "--mission", "release-0.3.2", "--json"], substrate.missionsRoot);
+    expect(first.exitCode).toBe(0);
+    const afterFirst = fs.readFileSync(spec, "utf8");
+    const fm = readFrontmatter(spec);
+    expect(fm.depends_on).toEqual([]);
+    expect(fm["repair-original-depends-on"]).toBe("OPR.9.8.7.1\n\nOPR.9.8.7.2");
+    expect(afterFirst).toContain("custom-key: 'keep: exact'\n---\n\n" + body);
+
+    const second = await run(["slice", "repair", "09-multiline-repair", "--mission", "release-0.3.2", "--json"], substrate.missionsRoot);
+    expect(second.exitCode).toBe(0);
+    expect(fs.readFileSync(spec, "utf8")).toBe(afterFirst);
+  });
+
   it("AC-4: mission repair conforms the additive mission SPEC frontmatter too (lazy parent-id)", async () => {
     // A mission whose README has no id/stage/verified, plus a ghost slice.
     const m = path.join(substrate.missionsRoot, "backlog-new");
