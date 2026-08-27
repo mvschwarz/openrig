@@ -57,7 +57,9 @@ export function capabilityDeltaExpiryFindings(missionDir: string): AuditFinding[
 
     let canonNamesDelta = false;
     try {
-      canonNamesDelta = documentHeader(fs.readFileSync(canonPath, "utf8")).includes(identity);
+      canonNamesDelta = documentHeader(fs.readFileSync(canonPath, "utf8"))
+        .split(/[^A-Za-z0-9._-]+/)
+        .includes(identity);
     } catch {
       continue;
     }

@@ -271,7 +271,7 @@ describe("release capability-delta scaffold and expiry advisory", () => {
     expect(fs.readFileSync(deltaPath, "utf8")).toContain("capability-delta-v0.5.4");
   });
 
-  it("flags only the completed expiry event and remains advisory", async () => {
+  it("flags only an exact completed expiry event and remains advisory", async () => {
     const created = await run(
       ["mission", "create", "release-0.5.4", "--json"],
       substrate.missionsRoot,
@@ -284,7 +284,7 @@ describe("release capability-delta scaffold and expiry advisory", () => {
     fs.writeFileSync(deltaPath, configured, "utf8");
     fs.writeFileSync(
       path.join(missionPath, "capability-canon.md"),
-      "# Capability canon\n\nAbsorbed: capability-delta-v0.5.4\n\n## Capabilities\n",
+      "# Capability canon\n\nAbsorbed: capability-delta-v0.5.40\n\n## Capabilities\n",
       "utf8",
     );
 
@@ -294,11 +294,36 @@ describe("release capability-delta scaffold and expiry advisory", () => {
       .not.toContain("expired_capability_delta");
 
     fs.writeFileSync(path.join(missionPath, "CAPABILITY-DELTA-v0.5.5.md"), "successor\n", "utf8");
+    const nearMatch = await run(["audit", "--mission", "release-0.5.4", "--json"], substrate.missionsRoot);
+    expect(nearMatch.exitCode).toBe(0);
+    expect(JSON.parse(nearMatch.stdout).mission.findings.filter(
+      (finding: { kind: string }) => finding.kind === "expired_capability_delta",
+    )).toHaveLength(0);
+
+    const canonPath = path.join(missionPath, "capability-canon.md");
+    fs.rmSync(canonPath);
+    fs.mkdirSync(canonPath);
+    const unreadable = await run(["audit", "--mission", "release-0.5.4", "--json"], substrate.missionsRoot);
+    expect(unreadable.exitCode).toBe(0);
+    expect(JSON.parse(unreadable.stdout).mission.findings.filter(
+      (finding: { kind: string }) => finding.kind === "expired_capability_delta",
+    )).toHaveLength(0);
+
+    fs.rmSync(canonPath, { recursive: true });
+    fs.writeFileSync(
+      canonPath,
+      "# Capability canon\n\nAbsorbed: capability-delta-v0.5.4\n\n## Capabilities\n",
+      "utf8",
+    );
     const expired = await run(["audit", "--mission", "release-0.5.4", "--json"], substrate.missionsRoot);
     const parsed = JSON.parse(expired.stdout);
     expect(expired.exitCode).toBe(0);
     expect(parsed.ok).toBe(true);
-    expect(parsed.mission.findings).toContainEqual(expect.objectContaining({
+    const expiryFindings = parsed.mission.findings.filter(
+      (finding: { kind: string }) => finding.kind === "expired_capability_delta",
+    );
+    expect(expiryFindings).toHaveLength(1);
+    expect(expiryFindings[0]).toEqual(expect.objectContaining({
       kind: "expired_capability_delta",
       severity: "medium",
       message: expect.stringMatching(/canon header.*successor.*citable no more/i),
