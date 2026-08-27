@@ -75,6 +75,13 @@ export interface WebApiResult {
   error?: string;
 }
 
+/** S10 shape-fix — the per-method REQUEST SHAPE. Slack's read methods (conversations.info /
+ *  history / replies) reject a JSON POST with `invalid_arguments` (operator-measured live);
+ *  their supported shape is GET with URL-query args. Write/JSON methods (auth.test,
+ *  apps.connections.open, chat.postMessage, files.completeUploadExternal) keep JSON POST
+ *  byte-identically — the default, so no existing caller changes shape implicitly. */
+export type WebApiRequestShape = "json-post" | "get-query";
+
 /** Call a Slack Web API method (Bearer token) and surface the granted-scope header. */
 export async function callWebApi(
   method: string,
@@ -82,15 +89,31 @@ export async function callWebApi(
   body: Record<string, unknown>,
   fetchImpl: FetchImpl = defaultFetch,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  shape: WebApiRequestShape = "json-post",
 ): Promise<WebApiResult> {
   try {
     return await withTimeout(timeoutMs, async (signal) => {
-      const res = await fetchImpl(`https://slack.com/api/${method}`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${token}`, "content-type": "application/json; charset=utf-8" },
-        body: JSON.stringify(body),
-        signal,
-      });
+      let res: Response;
+      if (shape === "get-query") {
+        // The read shape: args in the query string, Authorization only — no body, no
+        // content-type (a body or JSON content-type is exactly what the endpoint rejects).
+        const url = new URL(`https://slack.com/api/${method}`);
+        for (const [k, v] of Object.entries(body)) {
+          if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
+        }
+        res = await fetchImpl(url.toString(), {
+          method: "GET",
+          headers: { authorization: `Bearer ${token}` },
+          signal,
+        });
+      } else {
+        res = await fetchImpl(`https://slack.com/api/${method}`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json; charset=utf-8" },
+          body: JSON.stringify(body),
+          signal,
+        });
+      }
       const scopeHeader = res.headers.get("x-oauth-scopes") ?? "";
       const grantedScopes = scopeHeader
         .split(",")
@@ -148,7 +171,7 @@ export async function verifyChannelMembership(
   fetchImpl: FetchImpl = defaultFetch,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 ): Promise<{ ok: boolean; isMember: boolean; name?: string; error?: string }> {
-  const r = await callWebApi("conversations.info", token, { channel }, fetchImpl, timeoutMs);
+  const r = await callWebApi("conversations.info", token, { channel }, fetchImpl, timeoutMs, "get-query");
   if (!r.ok) return { ok: false, isMember: false, error: r.error };
   const ch = (r.json.channel ?? {}) as { is_member?: boolean; name?: string };
   return { ok: true, isMember: ch.is_member === true, name: ch.name };
@@ -234,7 +257,7 @@ export async function fetchRecentMessageTexts(
 ): Promise<{ ok: boolean; texts: string[]; error?: string }> {
   const method = threadTs ? "conversations.replies" : "conversations.history";
   const body: Record<string, unknown> = threadTs ? { channel, ts: threadTs, limit } : { channel, limit };
-  const r = await callWebApi(method, token, body, fetchImpl, timeoutMs);
+  const r = await callWebApi(method, token, body, fetchImpl, timeoutMs, "get-query");
   if (!r.ok) return { ok: false, texts: [], error: r.error };
   const messages = (r.json.messages ?? []) as { text?: string }[];
   return { ok: true, texts: messages.map((m) => String(m.text ?? "")) };

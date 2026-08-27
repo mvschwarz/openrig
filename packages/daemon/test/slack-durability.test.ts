@@ -47,7 +47,7 @@ function slackDouble(opts: { timeoutFirstPost: boolean; timeoutLanded: boolean; 
       posted.push(text);
       return new Response(JSON.stringify({ ok: true, ts: `${1000 + postCalls}.1` }), { status: 200, headers: { "content-type": "application/json" } });
     }
-    if (url.endsWith("conversations.history")) {
+    if (url.includes("conversations.history")) { // S10 shape-fix: the read scan is GET + query now
       if (opts.historyReadable === false) {
         return new Response(JSON.stringify({ ok: false, error: "channel_unreadable" }), { status: 200, headers: { "content-type": "application/json" } });
       }

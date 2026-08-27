@@ -21,7 +21,7 @@ function fakeSlack(spec: {
       const st = spec.webhookStatus ?? 200;
       return new Response(st === 200 ? "ok" : `err ${st}`, { status: st });
     }
-    const method = url.split("/api/")[1]!;
+    const method = url.split("/api/")[1]!.split("?")[0]!; // S10 shape-fix: read methods carry query args
     const m = spec.methods?.[method] ?? { status: 200, json: { ok: true } };
     const headers = new Headers({ "content-type": "application/json" });
     if (spec.scopesHeader !== undefined) headers.set("x-oauth-scopes", spec.scopesHeader);
