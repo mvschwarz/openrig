@@ -54,6 +54,22 @@ export class DaemonClient {
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
+  /** S19 AM-R18 — open the oracle's SSE event stream (FR-8: HTTP stays in THIS module).
+   *  FEATURE-DETECTED: a non-OK or non-event-stream answer (an older daemon, a foreign
+   *  server) returns null — the caller disables the leg permanently and the TUI behaves
+   *  exactly as S16 shipped it (click-to-refresh). Never retried on null. */
+  async openActivityEvents(): Promise<Response | null> {
+    try {
+      const res = await this.fetchImpl(`${this.baseUrl}/api/activity/events`, {
+        headers: { accept: "text/event-stream" },
+      });
+      if (!res.ok || !(res.headers.get("content-type") ?? "").includes("text/event-stream")) return null;
+      return res;
+    } catch {
+      return null; // unreachable daemon at open — the leg stays off; refresh still works
+    }
+  }
+
   private async get(route: string): Promise<unknown> {
     const res = await this.fetchImpl(`${this.baseUrl}${route}`);
     if (!res.ok) throw new Error(`daemon read failed: GET ${route} → ${res.status}`);

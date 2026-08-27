@@ -1,42 +1,55 @@
-// OPR.0.5.5.19 AM-R18 — the TUI's oracle SUBSCRIPTION path: an SSE connection to the
-// daemon's GET /api/activity/events. Pushes are CHANGE NOTIFICATIONS ONLY (seat + seq) —
-// the open view re-renders by rehydrating the same /api/ps projection, so no second
-// activity derivation exists anywhere on this path (desk-accepted shape, ruling row
-// qitem-20260827001530). NO IDLE POLLING: onEvent fires only on pushed changes; the
-// only timer here is connection-maintenance backoff after a DROP, never a data poll.
+// OPR.0.5.5.19 AM-R18 — the TUI's oracle SUBSCRIPTION path. HTTP lives in
+// daemon-client (FR-8 one-module rule): this module consumes an OPENER and parses SSE
+// frames. Pushes are CHANGE NOTIFICATIONS ONLY (seat + seq) — the open view re-renders
+// by rehydrating the same /api/ps projection, so no second activity derivation exists
+// anywhere on this path (desk-accepted shape, ruling row qitem-20260827001530).
+// NO IDLE POLLING: a null open (endpoint absent / daemon unreachable / non-SSE answer)
+// DISABLES the leg permanently — zero retries, the S16 cadence contract holds
+// (one feature-detect request at startup, then silence). Reconnect happens ONLY after a
+// genuinely-established stream drops, with doubling backoff (connection maintenance,
+// never a data poll; timers unref'd).
 
 export interface ActivityEventsSubscription {
   close: () => void;
 }
 
 export interface SubscribeActivityEventsOpts {
-  baseUrl: string;
+  /** Opens the SSE stream (daemon-client.openActivityEvents). null = leg unavailable —
+   *  disable permanently, never retry. */
+  open: () => Promise<Response | null>;
   /** One pushed oracle change (parsed SSE data line). The consumer refreshes; it never
    *  reads activity fields from the push. */
   onEvent: (event: { type: string; seatNodeId?: string; seq?: number }) => void;
-  /** Connection lifecycle notes (drop/reconnect) — surfaced, never fatal. */
-  onStatus?: (status: "connected" | "dropped" | "reconnecting") => void;
-  /** Reconnect backoff (ms) after a drop. Connection maintenance, not data polling. */
+  /** Connection lifecycle notes (drop/reconnect/unavailable) — surfaced, never fatal. */
+  onStatus?: (status: "connected" | "dropped" | "reconnecting" | "unavailable") => void;
+  /** Initial reconnect backoff (ms) after a REAL stream drops; doubles to 30s cap. */
   reconnectDelayMs?: number;
 }
 
+const RECONNECT_CAP_MS = 30_000;
+
 export function subscribeActivityEvents(opts: SubscribeActivityEventsOpts): ActivityEventsSubscription {
-  const reconnectDelayMs = opts.reconnectDelayMs ?? 1_000;
+  const baseDelayMs = opts.reconnectDelayMs ?? 1_000;
+  let delayMs = baseDelayMs;
   let closed = false;
-  let controller: AbortController | null = null;
   let reconnectTimer: NodeJS.Timeout | null = null;
+  let activeReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 
   const connect = async (): Promise<void> => {
     if (closed) return;
-    controller = new AbortController();
+    let established = false;
     try {
-      const res = await fetch(`${opts.baseUrl}/api/activity/events`, {
-        signal: controller.signal,
-        headers: { accept: "text/event-stream" },
-      });
-      if (!res.ok || !res.body) throw new Error(`events stream: HTTP ${res.status}`);
+      const res = await opts.open();
+      if (closed) return;
+      if (!res?.body) {
+        opts.onStatus?.("unavailable");
+        return; // feature-detect said no — the leg stays off, S16 behavior intact
+      }
+      established = true;
+      delayMs = baseDelayMs; // a real connection resets the backoff
       opts.onStatus?.("connected");
       const reader = res.body.getReader();
+      activeReader = reader;
       const decoder = new TextDecoder();
       let buffer = "";
       for (;;) {
@@ -60,14 +73,17 @@ export function subscribeActivityEvents(opts: SubscribeActivityEventsOpts): Acti
         }
       }
     } catch {
-      // drop — handled below; a failed connect and a mid-stream drop reconnect the same way
+      // read error on an established stream — handled as a drop below
+    } finally {
+      activeReader = null;
     }
-    if (!closed) {
+    if (!closed && established) {
       opts.onStatus?.("dropped");
       reconnectTimer = setTimeout(() => {
         opts.onStatus?.("reconnecting");
         void connect();
-      }, reconnectDelayMs);
+      }, delayMs);
+      delayMs = Math.min(delayMs * 2, RECONNECT_CAP_MS);
       reconnectTimer.unref?.();
     }
   };
@@ -77,7 +93,7 @@ export function subscribeActivityEvents(opts: SubscribeActivityEventsOpts): Acti
     close: () => {
       closed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
-      controller?.abort();
+      void activeReader?.cancel().catch(() => {});
     },
   };
 }

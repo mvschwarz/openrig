@@ -50,7 +50,7 @@ describe("S19 AM-R18 — the subscription path", () => {
   it("each pushed oracle change fires onEvent with the notification payload (no activity fields consumed)", async () => {
     const { server, url, push, connections } = await sseServer();
     const events: Array<{ type: string; seq?: number }> = [];
-    const sub = subscribeActivityEvents({ baseUrl: url, onEvent: (e) => events.push(e) });
+    const sub = subscribeActivityEvents({ open: () => fetch(`${url}/api/activity/events`), onEvent: (e) => events.push(e) });
     try {
       await until(() => connections() === 1);
       push({ type: "seat.activity_changed", seatNodeId: "node-1", seq: 7 });
@@ -69,7 +69,7 @@ describe("S19 AM-R18 — the subscription path", () => {
     const hydrate = vi.fn(async (): Promise<FleetSnapshot> => ({ ...emptySnapshot(), generatedAt: `snap-${served++}` } as unknown as FleetSnapshot));
     const frames: string[] = [];
     const live = createLiveRefresh({ hydrate, onFrame: () => frames.push("frame"), now: () => Date.now() });
-    const sub = subscribeActivityEvents({ baseUrl: url, onEvent: () => { void live.refresh(); } });
+    const sub = subscribeActivityEvents({ open: () => fetch(`${url}/api/activity/events`), onEvent: () => { void live.refresh(); } });
     try {
       await until(() => connections() === 1);
       expect(hydrate).not.toHaveBeenCalled(); // ZERO idle polling: nothing fires without a push
@@ -88,7 +88,7 @@ describe("S19 AM-R18 — the subscription path", () => {
   it("ZERO IDLE-POLLING REGRESSION: with the subscription open and NO pushes, no hydrate ever fires", async () => {
     const { server, url, connections } = await sseServer();
     const hydrate = vi.fn(async () => emptySnapshot());
-    const sub = subscribeActivityEvents({ baseUrl: url, onEvent: () => { void hydrate(); } });
+    const sub = subscribeActivityEvents({ open: () => fetch(`${url}/api/activity/events`), onEvent: () => { void hydrate(); } });
     try {
       await until(() => connections() === 1);
       await new Promise((r) => setTimeout(r, 300)); // a quiet window
@@ -102,7 +102,7 @@ describe("S19 AM-R18 — the subscription path", () => {
   it("a dropped connection reconnects (connection maintenance, not data polling) and pushes resume", async () => {
     const first = await sseServer();
     const events: unknown[] = [];
-    const sub = subscribeActivityEvents({ baseUrl: first.url, onEvent: (e) => events.push(e), reconnectDelayMs: 30 });
+    const sub = subscribeActivityEvents({ open: () => fetch(`${first.url}/api/activity/events`), onEvent: (e) => events.push(e), reconnectDelayMs: 30 });
     try {
       await until(() => first.connections() === 1);
       // Drop every socket (server closes connections) — the subscription must come back.
@@ -118,6 +118,31 @@ describe("S19 AM-R18 — the subscription path", () => {
     } finally {
       sub.close();
       first.server.close();
+    }
+  });
+
+  it("S16 CADENCE HOLDS AGAINST A NON-SSE SERVER: a JSON answer disables the leg permanently — one probe, zero retries", async () => {
+    let hits = 0;
+    const server = createServer((_req, res) => {
+      hits++;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end("{}");
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const statuses: string[] = [];
+    const open = async () => {
+      const res = await fetch(`${url}/api/activity/events`, { headers: { accept: "text/event-stream" } });
+      return (res.headers.get("content-type") ?? "").includes("text/event-stream") ? res : null;
+    };
+    const sub = subscribeActivityEvents({ open, onEvent: () => {}, onStatus: (s) => statuses.push(s), reconnectDelayMs: 20 });
+    try {
+      await until(() => statuses.includes("unavailable"));
+      await new Promise((r) => setTimeout(r, 200)); // plenty of reconnect windows
+      expect(hits).toBe(1); // exactly the feature-detect probe — never polled
+    } finally {
+      sub.close();
+      server.close();
     }
   });
 
