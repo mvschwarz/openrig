@@ -10,6 +10,10 @@ import { SEAT_HANDOVER_SOURCE_CAPABILITIES } from "../src/domain/seat-handover-p
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { observeCodexSandbox } from "../src/domain/permission-drift.js";
+import { buildRebuildPrimingChain } from "../src/domain/rebuild-priming-chain.js";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 // OPR.0.5.5.5 (05-handover-sources-real) — fork/rebuild handover sources EXECUTE
 // the plan they print. The v0 B3 refusal (`source_not_supported`) is replaced by
@@ -308,6 +312,52 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     }
   });
 
+
+  // ── Fix round B2: the durable event IS the audit trail ───────────────────
+
+  function lastHandoverEventPayload(): Record<string, unknown> {
+    const row = db.prepare("SELECT payload FROM events WHERE type = 'seat.handover_completed' ORDER BY seq DESC LIMIT 1").get() as { payload: string } | undefined;
+    if (!row) throw new Error("no persisted seat.handover_completed event");
+    return JSON.parse(row.payload);
+  }
+
+  it("B2: a rebuild's exact primed set and gaps persist on the seat.handover_completed EVENT, not just the transient response", async () => {
+    seedSeat();
+    artifactExists.mockImplementation((path: string) => !String(path).includes("LEARNED"));
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "degraded-incumbent", source: "rebuild" });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(lastHandoverEventPayload().sourceOutcome).toMatchObject({
+      mode: "rebuild",
+      primedArtifacts: [expect.objectContaining({ address: "/seats/dev-impl/RECAP.md" })],
+      gaps: ["/seats/dev-impl/LEARNED.md"],
+    });
+  });
+
+  it("B2: an empty rebuild chain's named reason persists on the durable event", async () => {
+    seedSeat();
+    rebuildChain.mockImplementation(() => ({ emptyReason: "no recap chain, no LEARNED, no restore packet for this seat" }));
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "degraded-incumbent", source: "rebuild" });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(lastHandoverEventPayload().sourceOutcome).toMatchObject({
+      mode: "rebuild",
+      primedArtifacts: [],
+      emptyChainReason: "no recap chain, no LEARNED, no restore packet for this seat",
+    });
+  });
+
+  it("B2: fork provenance persists on the durable event in the same shape", async () => {
+    seedSeat({ resumeToken: "native-abc" });
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fork:dev-impl@seat-rig" });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(lastHandoverEventPayload().sourceOutcome).toMatchObject({ mode: "fork", forkedFrom: "dev-impl@seat-rig" });
+  });
+
   // ── Mini-req 4: MID-SWAP FAILURE IS HONEST ───────────────────────────────
 
   it("fork: an induced launch failure mid-swap reports the failing step, leaves the binding unchanged and the seat recoverable — never a false complete", async () => {
@@ -343,5 +393,90 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     expect(result).toMatchObject({ ok: false, code: "context_delivery_failed" });
     expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-impl@seat-rig");
     expect(nodeRow(node.id).handover_result).not.toBe("complete");
+  });
+});
+
+
+// ── Fix round B3: the production chain includes the latest restore packet ──
+
+describe("buildRebuildPrimingChain (production resolver, OPR.0.5.5.5 fix B3)", () => {
+  let topologyRoot: string;
+  let openrigHome: string;
+  let seatDir: string;
+  const SEAT = "dev-impl@seat-rig";
+
+  function markerPath(): string {
+    return join(openrigHome, "compaction", "restore-pending", "dev-impl@seat-rig.json");
+  }
+
+  function chain(): Array<{ address: string; label: string }> {
+    const result = buildRebuildPrimingChain(SEAT, { topologyRoot, openrigHome });
+    if (!("artifacts" in result)) throw new Error(`expected artifacts, got: ${JSON.stringify(result)}`);
+    return result.artifacts;
+  }
+
+  beforeEach(() => {
+    topologyRoot = mkdtempSync(join(tmpdir(), "s05b3-topo-"));
+    openrigHome = mkdtempSync(join(tmpdir(), "s05b3-home-"));
+    seatDir = join(topologyRoot, "rigs", "seat-rig", "seats", "dev-impl");
+    mkdirSync(seatDir, { recursive: true });
+    mkdirSync(join(openrigHome, "compaction", "restore-pending"), { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(topologyRoot, { recursive: true, force: true });
+    rmSync(openrigHome, { recursive: true, force: true });
+  });
+
+  it("a valid restore-pending marker's packet is NAMED in the chain — after LEARNED, before the superseded recaps", () => {
+    const packetDir = join(openrigHome, "packet-x");
+    mkdirSync(packetDir, { recursive: true });
+    writeFileSync(markerPath(), JSON.stringify({ version: 1, createdAt: "2026-08-27T00:00:00Z", outputDir: packetDir }));
+    mkdirSync(join(seatDir, "recap-superseded"), { recursive: true });
+    writeFileSync(join(seatDir, "recap-superseded", "RECAP-1000.md"), "old recap");
+
+    const addresses = chain().map((artifact) => artifact.address);
+    expect(addresses).toEqual([
+      join(seatDir, "RECAP.md"),
+      join(seatDir, "LEARNED.md"),
+      packetDir,
+      join(seatDir, "recap-superseded", "RECAP-1000.md"),
+    ]);
+    const packet = chain().find((artifact) => artifact.address === packetDir);
+    expect(packet?.label).toContain("restore packet");
+  });
+
+  it("a marker whose packet dir is GONE still declares the address (the service records it as a named gap, never silently dropped)", () => {
+    const goneDir = join(openrigHome, "packet-deleted");
+    writeFileSync(markerPath(), JSON.stringify({ version: 1, outputDir: goneDir }));
+
+    const addresses = chain().map((artifact) => artifact.address);
+    expect(addresses).toContain(goneDir);
+  });
+
+  it("an unparseable marker is named HONESTLY: the marker file itself is declared with an invalid label — never fabricated continuity", () => {
+    writeFileSync(markerPath(), "{not json");
+
+    const marker = chain().find((artifact) => artifact.address === markerPath());
+    expect(marker, "invalid marker named, not silently skipped").toBeDefined();
+    expect(marker?.label.toLowerCase()).toContain("invalid");
+  });
+
+  it("REGRESSION: absent marker leaves the existing precedence exactly as shipped (RECAP, LEARNED, superseded newest-first)", () => {
+    mkdirSync(join(seatDir, "recap-superseded"), { recursive: true });
+    writeFileSync(join(seatDir, "recap-superseded", "RECAP-1000.md"), "older");
+    writeFileSync(join(seatDir, "recap-superseded", "RECAP-2000.md"), "newer");
+
+    expect(chain().map((artifact) => artifact.address)).toEqual([
+      join(seatDir, "RECAP.md"),
+      join(seatDir, "LEARNED.md"),
+      join(seatDir, "recap-superseded", "RECAP-2000.md"),
+      join(seatDir, "recap-superseded", "RECAP-1000.md"),
+    ]);
+  });
+
+  it("an unparseable seat ref is a NAMED empty chain, never a guess", () => {
+    const result = buildRebuildPrimingChain("not a canonical ref", { topologyRoot, openrigHome });
+    expect(result).toMatchObject({ emptyReason: expect.stringContaining("did not parse as canonical") });
   });
 });
