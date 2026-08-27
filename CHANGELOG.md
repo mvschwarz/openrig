@@ -8,6 +8,94 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.5.5] - 2026-08-27
+
+**Status**: shipped; **"the ambient-attention release"** — the fleet notices, retries, escalates, diagnoses, and onboards on its own so you can stop hand-babysitting the work in flight. **v0.5.5 contains v0.5.4 in full** — one reconciled lineage.
+
+### Summary For Installing Agents
+
+- **Package version**: bumps from `0.5.4`.
+- **Migrations**: TWO new. Head advances `071` → `073`:
+  - `072_thread_seat_map.ts`
+  - `073_queue_transition_wakes.ts`
+- **Node engines**: unchanged.
+- **API surface**: existing commands remain. New verbs: `rig parked [seat]`, `rig seat handover --source fork:|rebuild` (execute path, was dry-run), `queue block --on <blocker>` (park-with-wake), `rig gateway human` fragment-lifecycle verbs, `rig view show escalations`. `rig ps` gains a typed `ACTIVITY` column.
+
+### Headline
+
+**Stop babysitting the work.** `rig parked <seat>` diagnoses "is anyone silently stuck" with confidence and teaching inline; the standing stuck-sweep runs without you and routes findings. Baton wakes retry, aggregate, and escalate on their own — hand off the row and stop chasing nudges. Parks carry their own wake and read HEALTHY. `rig ps` gains a typed ACTIVITY column from one oracle. The Slack human layer is live end-to-end, and fresh installs onboard themselves.
+
+### What you can now do
+
+#### Diagnose silent-stuck without capture arithmetic
+
+`rig parked [seat]` answers "is anyone silently stuck" as a derived diagnosis — activity × open obligations, with per-input confidence and remedy taught inline. **Reach for it when:** a seat looks idle and you suspect dropped work; before any `claimedAt` arithmetic or pane capture.
+
+#### Hand off work; stop babysitting nudges
+
+Failed baton wakes retry, aggregate, and escalate on their own (transitions ARE the ladder state, restart-safe; per-destination aggregation; rungs deliver-and-advance; unconfirmed-with-no-pickup escalates without re-send). **Reach for it when:** you hand off work — the row is enough. Watch `rig view show escalations` for the aggregates.
+
+#### Consume the standing stuck sweep instead of running it
+
+Overdue + undelivered become routed findings with derived evidence inline. **Reach for it when:** you used to hand-run `queue overdue` / `undelivered` on a timer — stop; consume its findings instead.
+
+**Caveat (5.6 backlog):** cross-host successor visibility is a proven false-positive class; treat cross-host-lineage findings as unverified until the 5.6 detector fix. Contained fleet-wide one-per-condition; delta teaches the caveat.
+
+#### Park a row on a real blocker without waking the attention machinery
+
+`queue block --on <blocker>` records the wake; held-with-live-wake is not flagged; auto-unparked owners get an honest wake. **Reach for it when:** imminent-but-blocked work; for not-imminent work use the workspace instead (the queue is a conveyor).
+
+#### Read seat activity from one oracle
+
+`rig ps` carries a true `ACTIVITY` column — typed taxonomy (working / idle-at-prompt / needs-input-as-count+reason / unknown) with evidence ladder + visible rung degradation, seat-keyed across swaps. **Reach for it when:** any "is it thinking or stuck" question — the oracle beats capture; the TUI reads the same truth.
+
+#### Execute seat handover, not just plan it
+
+`rig seat handover --source fork:` (carries live context) or `rebuild` (primes from the durable chain and names its priming artifacts). Mid-swap failures record honestly. **Reach for it when:** replacing an occupant — no more dry-run-only planning surface.
+
+#### Reach humans (and the founder) directly through Slack
+
+Gateway running, thread-per-seat, exactly-once inbound reconciliation, escalation loudness (mention) distinct from routine. Humans are addressable members; `rig gateway human` has full fragment-lifecycle verbs. **Reach for it when:** anything must reach the founder — an escalation-class send arrives loud on their phone.
+
+#### Onboard fresh installs without hand-walking
+
+Fresh installs get focused onboarding packs by default (config off; existing rigs untouched). **Reach for it when:** standing up a new rig or seat — stop hand-walking the eight pieces.
+
+#### Trust refocus to fire only when it should
+
+Refocus fires at a context threshold or on demand — NEVER at session start (post-compaction both runtimes; usage threshold Claude-only). **Reach for it when:** a long session loses the plot — trigger it. A fresh seat getting a refocus is now a bug to file, not noise to ignore.
+
+#### Author scopes with the one-file convention
+
+`scope mission create` → `NOTES.md` + intent-bearing `SPEC`; `slice create` → `SPEC`-only (no IMPLEMENTATION-PRD) + acceptance `PROGRESS`; release missions get a capability-delta scaffold. `repair` is ADDITIVE — stamps append, never rewrite author frontmatter. **Reach for it when:** creating any scope node — stamp verification is a mechanical strip again.
+
+#### Bind daemons safely from any managed environment
+
+Daemon bind intent has provenance: an inherited `OPENRIG_HOST` never selects single-bind; adoption gates test ALL required listeners. **Reach for it when:** daemon maintenance from any managed environment — no more `env -u` ceremony.
+
+### What to STOP doing (each was correct under 0.5.4 and is wrong now)
+
+1. **STOP the per-lock author-reconstruction protocol.** `scope repair/approve` used to rewrite author frontmatter; now stamps APPEND — strip-reconstruction is mechanical; the protocol is retired.
+2. **STOP diagnosing parks by `claimedAt` arithmetic + capture.** `rig parked` derives the diagnosis with confidence and teaching; capture is a fallback glance, not the method.
+3. **STOP storing deferred work as queue rows.** The queue is a conveyor for imminent sequential work; deferred work lives in the mission workspace and re-mints when due.
+4. **STOP authoring `IMPLEMENTATION-PRD.md` and `MISSION_NOTES.md` on new work.** `SPEC.md` is the one spec file; `NOTES.md` is the chain name; locks bind SPEC-only.
+5. **STOP routing contact through an orchestrator by default.** Any agent escalates directly; orchestrators/PMs also send judgment-worthy updates.
+
+### Landed, not yet drivable (recorded so nobody reaches for it)
+
+- Delivery preferences + availability (stored, validated) — no rules engine consumes them yet (0.5.6 slice 01).
+- S01 operator rung — human-layer connector delivery leg lands in 0.5.6 (S11 territory). Escalation view + daemon health carry the floor now.
+- `@external` addresses on the direct send path fall through to tmux (routing fix in 0.5.6 wave-2). Reach humans via the gateway path (queue/escalation), not raw `rig send` to `@external`.
+- Multi-human topology — single-human ships as an honesty marker; multi-human is 0.5.7.
+
+### Known Limitations (0.5.6 backlog)
+
+- **Cross-host successor visibility false positives** in the stuck-sweep detector — 39 active findings at census (20 proven FP, 19 unverified); contained fleet-wide; fix lands in 0.5.6 wave 1.
+- **`@external` direct-send routing** — 0.5.6 wave-2 routing fix.
+- **Delivery preferences → rules engine** — 0.5.6 slice 01.
+
+---
+
 ## [0.5.4] - 2026-08-26
 
 **Status**: release candidate; **"the honesty release"** - commands distinguish absence, uncertainty, staging, and completed effects instead of collapsing them into reassuring output. **v0.5.4 contains v0.5.3 in full** - one reconciled lineage, no product divergence.
