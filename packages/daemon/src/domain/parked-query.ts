@@ -75,15 +75,95 @@ export interface RigParkedDiagnosis {
 export const PARKED_OBLIGATION_LIMIT = 500;
 
 export function diagnoseSeatParked(
-  _deps: ParkedQueryDeps,
-  _seat: { seatNodeId: string; sessionName: string },
+  deps: ParkedQueryDeps,
+  seat: { seatNodeId: string; sessionName: string },
 ): SeatParkedDiagnosis {
-  throw new Error("not implemented (S19 A7 RED)");
+  const state = deps.getSeatState(seat.seatNodeId);
+  const scope = `destination=${seat.sessionName} state=pending,in-progress,blocked limit=${PARKED_OBLIGATION_LIMIT}`;
+  const read = deps.listOpenObligations(seat.sessionName, PARKED_OBLIGATION_LIMIT);
+  const held = read.rows.filter((r) => r.state === "blocked");
+  const open = read.rows.filter((r) => r.state !== "blocked");
+  const complete = read.rows.length < read.limit;
+
+  const obligations: SeatParkedDiagnosis["obligations"] = {
+    scope,
+    openCount: open.length,
+    heldCount: held.length,
+    complete,
+    limit: read.limit,
+    items: open,
+  };
+
+  const activityKnown = state !== null && state.activity !== "unknown";
+  const activity: SeatParkedDiagnosis["activity"] = {
+    value: state?.activity ?? "unknown",
+    needsInput: state?.needsInput ?? { count: 0, reason: null },
+    decidedBy: state?.decidedBy ?? null,
+    confidence: activityKnown ? "oracle" : "unknown",
+  };
+  const confidence: SeatParkedDiagnosis["confidence"] = {
+    activity: activityKnown ? "high" : "none",
+    obligations: complete ? "complete" : "truncation-possible",
+  };
+
+  // The diagnosis: (idle-at-prompt OR needs-input pending) × open obligations.
+  // Activity-unknown can never support a verdict — INDETERMINATE, never a guessed
+  // NOT-PARKED (the founder's undetected-park class rebuilt one level up).
+  // Truncation only UNDERCOUNTS obligations, so a positive verdict stands under it.
+  if (!activityKnown) {
+    return {
+      seatNodeId: seat.seatNodeId,
+      sessionName: seat.sessionName,
+      parked: "indeterminate",
+      reason: `activity is unknown for ${seat.sessionName} — the oracle cannot support a parked verdict (obligation face read anyway: ${open.length} open, ${held.length} held)`,
+      activity,
+      obligations,
+      confidence,
+    };
+  }
+
+  const stopped = state.activity === "idle-at-prompt" || state.needsInput.count > 0;
+  const parked = stopped && open.length > 0;
+  const reason = parked
+    ? state.needsInput.count > 0
+      ? `needs-input (${state.needsInput.reason ?? "unanswered block"}) with ${open.length} open obligation(s) — an unanswered block nobody is watching`
+      : `idle-at-prompt with ${open.length} open obligation(s) — a turn ended without a handoff`
+    : stopped
+      ? `stopped but the board is clean (${held.length} held row(s) are deliberate, not parked)`
+      : `working — not parked`;
+
+  return {
+    seatNodeId: seat.seatNodeId,
+    sessionName: seat.sessionName,
+    parked,
+    reason,
+    activity,
+    obligations,
+    confidence,
+  };
 }
 
 export function diagnoseRigParked(
-  _deps: ParkedQueryDeps,
-  _seats: Array<{ seatNodeId: string; sessionName: string }>,
+  deps: ParkedQueryDeps,
+  seats: Array<{ seatNodeId: string; sessionName: string }>,
 ): RigParkedDiagnosis {
-  throw new Error("not implemented (S19 A7 RED)");
+  const diagnoses = seats.map((s) => diagnoseSeatParked(deps, s));
+  const parkedSeats = diagnoses.filter((d) => d.parked === true);
+  const indeterminate = diagnoses.filter((d) => d.parked === "indeterminate");
+  if (parkedSeats.length > 0) {
+    return {
+      parked: true,
+      reason: `${parkedSeats.length} seat(s) parked: ${parkedSeats.map((d) => d.sessionName).join(", ")}`,
+      seats: diagnoses,
+    };
+  }
+  if (indeterminate.length > 0) {
+    // An unreadable seat can hide a park — the rig verdict must not claim all-clear.
+    return {
+      parked: "indeterminate",
+      reason: `no seat is provably parked, but ${indeterminate.length} seat(s) are indeterminate (${indeterminate.map((d) => d.seatNodeId).join(", ")}) — not an all-clear`,
+      seats: diagnoses,
+    };
+  }
+  return { parked: false, reason: "no seat is parked", seats: diagnoses };
 }

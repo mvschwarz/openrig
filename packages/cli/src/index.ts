@@ -28,6 +28,7 @@ import { unarchiveCommand } from "./commands/unarchive.js";
 import { psCommand } from "./commands/ps.js";
 import { hostCommand } from "./commands/host.js";
 import { gatewayCommand } from "./commands/gateway.js";
+import { parkedCommand } from "./commands/parked.js";
 import { mcpCommand } from "./commands/mcp.js";
 import { agentCommand, type AgentDeps } from "./commands/agent.js";
 import { rigCommand, type RigDeps } from "./commands/rig.js";
@@ -168,6 +169,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(restoreCommand(depsOverride?.restoreDeps));
   program.addCommand(crashCartCommand());
   program.addCommand(gatewayCommand());
+  program.addCommand(parkedCommand());
   program.addCommand(exportCommand(depsOverride?.exportDeps));
   program.addCommand(importCommand(depsOverride?.importDeps));
   program.addCommand(uiCommand(depsOverride?.uiDeps));

@@ -5,6 +5,7 @@ import type { EventBus } from "../domain/event-bus.js";
 import { verifyStartupProof } from "../domain/startup-proof.js";
 import type { ActivityEvidence } from "../domain/activity-taxonomy.js";
 import type { AgentActivity } from "../domain/types.js";
+import * as parkedQuery from "../domain/parked-query.js";
 
 // ── S19 A4 — the ingest half of the adapter seam: hook events reach the ONE oracle ──
 // (SeatActivityService) through this translation, so AgentActivityStore is reduced to a
@@ -213,6 +214,61 @@ activityRoutes.post("/hooks", async (c) => {
   }
 
   return c.json({ ok: true, activity: result.activity });
+});
+
+// ── S19 A7 — the parked query surface: GET /api/activity/parked[?seat=] ──
+// Mounted under the existing activity route group (no new top-level mount): the parked
+// diagnosis is activity-domain — the JOIN of the oracle with the queue's obligation
+// face, derived at read time, never stored. Read-only: this route performs NO queue
+// writes and the oracle keeps its non-inference contract.
+activityRoutes.get("/parked", (c) => {
+  const oracle = c.get("seatActivityService" as never) as
+    | import("../domain/seat-activity-service.js").SeatActivityService
+    | undefined;
+  const queueRepo = c.get("queueRepo" as never) as
+    | { list: (opts: { destinationSession?: string; state?: string[]; limit?: number }) => Array<{ qitemId: string; state: string; summary?: string | null }> }
+    | undefined;
+  const rigRepo = c.get("rigRepo" as never) as { db: import("better-sqlite3").Database } | undefined;
+  if (!oracle || !queueRepo || !rigRepo) {
+    return c.json({
+      ok: false,
+      code: "parked_query_unconfigured",
+      error: "The parked query needs the activity oracle, queue repository and rig repository — one is not configured on this daemon.",
+    }, 503);
+  }
+
+  const { diagnoseSeatParked, diagnoseRigParked, PARKED_OBLIGATION_LIMIT } = parkedQuery;
+  const deps = {
+    getSeatState: (id: string) => oracle.getSeatState(id),
+    listOpenObligations: (destination: string, limit: number) => ({
+      rows: queueRepo
+        .list({ destinationSession: destination, state: ["pending", "in-progress", "blocked"], limit })
+        .map((r) => ({ qitemId: r.qitemId, state: r.state as "pending" | "in-progress" | "blocked", summary: r.summary ?? null })),
+      limit,
+    }),
+  };
+
+  const seats = rigRepo.db.prepare(`
+    SELECT n.id AS node_id, s.session_name AS session_name
+    FROM nodes n
+    JOIN sessions s ON s.node_id = n.id
+      AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
+    WHERE s.status = 'running' AND s.session_name IS NOT NULL
+  `).all() as Array<{ node_id: string; session_name: string }>;
+
+  const seatParam = c.req.query("seat") || undefined;
+  if (seatParam) {
+    const match = seats.find((s) => s.node_id === seatParam || s.session_name === seatParam);
+    if (!match) {
+      return c.json({
+        ok: false,
+        code: "seat_not_found",
+        error: `No running seat matches "${seatParam}" — pass a node id or canonical session name (known: ${seats.map((s) => s.session_name).join(", ") || "(none running)"}).`,
+      }, 404);
+    }
+    return c.json({ ok: true, seat: diagnoseSeatParked(deps, { seatNodeId: match.node_id, sessionName: match.session_name }), limit: PARKED_OBLIGATION_LIMIT });
+  }
+  return c.json({ ok: true, rig: diagnoseRigParked(deps, seats.map((s) => ({ seatNodeId: s.node_id, sessionName: s.session_name }))) });
 });
 
 function stringOrNull(value: unknown): string | null {

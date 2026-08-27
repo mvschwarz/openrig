@@ -1,0 +1,68 @@
+import { Command } from "commander";
+
+// OPR.0.5.5.19 A7 — `rig parked [seat]`: the founder's one-command ask. The diagnosis is
+// DERIVED at read time by the daemon (activity oracle × the queue's obligation face) and
+// returns confidence for BOTH inputs — this command renders it, it never computes it.
+
+interface SeatDiagnosis {
+  seatNodeId: string;
+  sessionName: string;
+  parked: boolean | "indeterminate";
+  reason: string;
+  activity: { value: string; needsInput: { count: number; reason: string | null }; decidedBy: string | null; confidence: string };
+  obligations: { scope: string; openCount: number; heldCount: number; complete: boolean; limit: number; items: Array<{ qitemId: string; state: string; summary?: string | null }> };
+  confidence: { activity: string; obligations: string };
+}
+
+function verdictWord(parked: boolean | "indeterminate"): string {
+  return parked === true ? "PARKED" : parked === false ? "not parked" : "INDETERMINATE";
+}
+
+function renderSeat(d: SeatDiagnosis): void {
+  console.log(`${d.sessionName}: ${verdictWord(d.parked)} — ${d.reason}`);
+  console.log(`  activity: ${d.activity.value}${d.activity.needsInput.count > 0 ? ` (needs-input x${d.activity.needsInput.count}: ${d.activity.needsInput.reason})` : ""} [decided by ${d.activity.decidedBy ?? "nothing — unknown"}; confidence ${d.confidence.activity}]`);
+  console.log(`  obligations: ${d.obligations.openCount} open, ${d.obligations.heldCount} held [${d.obligations.scope}; ${d.obligations.complete ? "complete" : `MAY BE TRUNCATED at ${d.obligations.limit}`}]`);
+  for (const item of d.obligations.items.slice(0, 10)) {
+    console.log(`    - ${item.state} ${item.qitemId}${item.summary ? ` — ${item.summary}` : ""}`);
+  }
+  if (d.obligations.items.length > 10) console.log(`    … and ${d.obligations.items.length - 10} more`);
+}
+
+export function parkedCommand(): Command {
+  return new Command("parked")
+    .description("Are we parked? Derived diagnosis: idle or input-blocked seats holding open obligations (HELD rows are deliberate, never parked)")
+    .argument("[seat]", "Seat node id or canonical session name; omit to diagnose the whole rig")
+    .option("--json", "Full diagnosis as JSON")
+    .action(async (seat: string | undefined, opts: { json?: boolean }) => {
+      const { DaemonClient } = await import("../client.js");
+      const client = new DaemonClient();
+      let data: { ok: boolean; error?: string; seat?: SeatDiagnosis; rig?: { parked: boolean | "indeterminate"; reason: string; seats: SeatDiagnosis[] } };
+      try {
+        const res = await client.get<typeof data>(`/api/activity/parked${seat ? `?seat=${encodeURIComponent(seat)}` : ""}`);
+        data = res.data;
+      } catch (err) {
+        console.error(`refused: the parked diagnosis is derived LIVE from the oracle and the queue — it needs a reachable daemon (${(err as Error).message}).`);
+        process.exitCode = 1;
+        return;
+      }
+      if (!data.ok) {
+        console.error(`refused: ${data.error}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.json) {
+        console.log(JSON.stringify(data));
+        return;
+      }
+      if (data.seat) {
+        renderSeat(data.seat);
+        return;
+      }
+      const rig = data.rig!;
+      console.log(`rig: ${verdictWord(rig.parked)} — ${rig.reason}`);
+      for (const d of rig.seats) {
+        if (d.parked === false) continue; // the interesting cells are parked + indeterminate
+        renderSeat(d);
+      }
+    });
+}
