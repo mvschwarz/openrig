@@ -8,6 +8,7 @@ import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { streamItemsSchema } from "../src/db/migrations/023_stream_items.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
+import { watchdogJobsSchema } from "../src/db/migrations/031_watchdog_jobs.js";
 import { inboxEntriesSchema } from "../src/db/migrations/026_inbox_entries.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { queueTargetRepoSchema } from "../src/db/migrations/039_queue_target_repo.js";
@@ -53,11 +54,13 @@ describe("queue routes", () => {
       streamItemsSchema, // 067's stream_items ALTER needs its base table present
       queueItemsSchema,
       queueTransitionsSchema,
+      watchdogJobsSchema,
       inboxEntriesSchema,
       outboxEntriesSchema,
       queueTargetRepoSchema, // OPR.0.3.2.20: required for attention=1&targetRepo=X composition tests
       i3IdentityProvenanceSchema, // P21 §4 era-stamp column on the queue-spine stores (last: needs all 4 tables)
     ]);
+    createWakeContractTable(db);
     bus = new EventBus(db);
     queueRepo = new QueueRepository(db, bus);
     inbox = new InboxHandler(db, bus, queueRepo);
@@ -67,6 +70,43 @@ describe("queue routes", () => {
   });
 
   afterEach(() => db.close());
+
+  function createWakeContractTable(database: Database.Database): void {
+    database.exec(`
+      CREATE TABLE queue_transition_wakes (
+        transition_id INTEGER PRIMARY KEY,
+        qitem_id TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        wake_kind TEXT NOT NULL,
+        wake_ref TEXT NOT NULL,
+        delivery_status TEXT
+      );
+      CREATE INDEX idx_queue_transition_wakes_qitem ON queue_transition_wakes(qitem_id, transition_id);
+      CREATE INDEX idx_queue_transition_wakes_ref ON queue_transition_wakes(wake_ref, phase);
+    `);
+  }
+
+  it("S03: update route passes wakeAfterSeconds through and atomically records the timer", async () => {
+    const row = await queueRepo.create({ sourceSession: "a@r", destinationSession: "b@r", body: "x", nudge: false });
+    const res = await app.request(`/api/queue/${row.qitemId}/update`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "b@r" },
+      body: JSON.stringify({
+        state: "blocked",
+        blockedOn: "external:cooldown",
+        transitionNote: "continuation: retry after cooldown",
+        wakeAfterSeconds: 45,
+      }),
+    });
+    expect(res.status).toBe(200);
+    const wake = db.prepare("SELECT wake_kind, wake_ref FROM queue_transition_wakes WHERE qitem_id = ?")
+      .get(row.qitemId) as { wake_kind: string; wake_ref: string } | undefined;
+    expect(wake?.wake_kind).toBe("timer");
+    const job = wake
+      ? db.prepare("SELECT target_session, interval_seconds, state FROM watchdog_jobs WHERE job_id = ?").get(wake.wake_ref)
+      : undefined;
+    expect(job).toMatchObject({ target_session: "b@r", interval_seconds: 45, state: "active" });
+  });
 
   // 0.5.1-54 DR-1 — the create-path failed-nudge surface (the NAMED, human/agent-visible read path).
   it("DR-1: GET /undelivered surfaces the failed-nudge pending strand, V1-only", async () => {

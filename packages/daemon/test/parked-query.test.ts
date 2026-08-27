@@ -28,11 +28,17 @@ function oracleState(overrides: Partial<ArbitratedSeatState>): ArbitratedSeatSta
   };
 }
 
-function deps(state: ArbitratedSeatState | null, rows: ObligationRow[], limit = PARKED_OBLIGATION_LIMIT): ParkedQueryDeps & { scopes: string[] } {
+function deps(
+  state: ArbitratedSeatState | null,
+  rows: ObligationRow[],
+  limit = PARKED_OBLIGATION_LIMIT,
+  wakes: Record<string, unknown> = {},
+): ParkedQueryDeps & { scopes: string[]; getParkWake: (qitemId: string) => unknown } {
   const scopes: string[] = [];
   return {
     scopes,
     getSeatState: () => state,
+    getParkWake: (qitemId) => wakes[qitemId] ?? null,
     listOpenObligations: (destination, lim) => {
       scopes.push(`${destination}:${lim}`);
       return { rows: rows.slice(0, lim), limit: lim };
@@ -71,11 +77,31 @@ describe("S19 A7 — the derived diagnosis, both park causes", () => {
     expect(d.parked).toBe(false);
   });
 
-  it("NEGATIVE CONTROL: a HELD row is NOT parked — the deliberate hold never drives the diagnosis", () => {
+  it("R25: a wakeless HELD row drives the diagnosis and teaches every repair path inline", () => {
     const d = diagnoseSeatParked(deps(oracleState({}), [heldRow]), SEAT);
-    expect(d.parked).toBe(false);
+    expect(d.parked).toBe(true);
     expect(d.obligations.heldCount).toBe(1);
-    expect(d.obligations.openCount).toBe(0); // held is surfaced, never counted as park-driving
+    expect(d.obligations.openCount).toBe(0);
+    expect(d.reason).toMatch(/watchdog id/i);
+    expect(d.reason).toMatch(/timer/i);
+    expect(d.reason).toMatch(/live blocker/i);
+    expect(d.reason).toMatch(/workspace.*not.imminent/i);
+  });
+
+  it("R25 negative control: HELD with a live armed wake remains healthy", () => {
+    const d = diagnoseSeatParked(deps(oracleState({}), [heldRow], PARKED_OBLIGATION_LIMIT, {
+      "qitem-2": { kind: "watchdog", ref: "job-1", live: true, unconsumed: false },
+    }), SEAT);
+    expect(d.parked).toBe(false);
+    expect(d.reason).toMatch(/healthy|live wake/i);
+  });
+
+  it("R25: a fired wake left blocked is visible as unconsumed", () => {
+    const d = diagnoseSeatParked(deps(oracleState({}), [heldRow], PARKED_OBLIGATION_LIMIT, {
+      "qitem-2": { kind: "timer", ref: "job-timer", live: true, unconsumed: true, deliveryStatus: "ok" },
+    }), SEAT);
+    expect(d.parked).toBe(true);
+    expect(d.reason).toMatch(/unconsumed/i);
   });
 
   it("held AND pending together: parked on the pending row, held surfaced beside it", () => {
@@ -83,6 +109,7 @@ describe("S19 A7 — the derived diagnosis, both park causes", () => {
     expect(d.parked).toBe(true);
     expect(d.obligations.openCount).toBe(1);
     expect(d.obligations.heldCount).toBe(1);
+    expect(d.reason).toMatch(/watchdog id|timer|live blocker/i);
   });
 });
 

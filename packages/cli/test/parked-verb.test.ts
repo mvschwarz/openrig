@@ -28,7 +28,16 @@ const SEAT_DIAG = {
   parked: true,
   reason: "idle-at-prompt with 1 open obligation(s) — a turn ended without a handoff",
   activity: { value: "idle-at-prompt", needsInput: { count: 0, reason: null }, decidedBy: "window-sampling", confidence: "oracle" },
-  obligations: { scope: "destination=dev50-qa@v-openrig-build state=pending,in-progress,blocked limit=500", openCount: 1, heldCount: 0, complete: true, limit: 500, items: [{ qitemId: "qitem-1", state: "pending", summary: "review" }] },
+  obligations: {
+    scope: "destination=dev50-qa@v-openrig-build state=pending,in-progress,blocked limit=500",
+    openCount: 1,
+    heldCount: 1,
+    unhealthyHeldCount: 1,
+    complete: true,
+    limit: 500,
+    items: [{ qitemId: "qitem-1", state: "pending", summary: "review" }],
+    held: [{ qitemId: "qitem-held", state: "blocked", summary: "waiting", wake: null }],
+  },
   confidence: { activity: "high", obligations: "complete" },
 };
 
@@ -68,6 +77,8 @@ describe("rig parked (S19 A7)", () => {
       expect(out).toContain("rig: PARKED");
       expect(out).toContain("dev50-qa@v-openrig-build: PARKED");
       expect(out).toContain("qitem-1");
+      expect(out).toContain("qitem-held");
+      expect(out).toMatch(/watchdog id|timer|live blocker/i);
       expect(out).not.toContain("busy@rig:"); // not-parked seats stay quiet
     } finally {
       server.close();

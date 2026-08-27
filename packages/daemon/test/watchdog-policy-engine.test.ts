@@ -30,14 +30,19 @@ describe("WatchdogPolicyEngine (PL-004 Phase C R1)", () => {
   let deliveryCalls: Array<{ targetSession: string; message: string }>;
   let deliver: DeliveryFn;
 
-  function makeEngine(opts?: { deliver?: DeliveryFn; now?: () => Date }): WatchdogPolicyEngine {
+  function makeEngine(opts?: {
+    deliver?: DeliveryFn;
+    now?: () => Date;
+    onWakeAttempt?: (input: { jobId: string; deliveryStatus: string }) => void;
+  }): WatchdogPolicyEngine {
     return new WatchdogPolicyEngine({
       jobsRepo,
       historyLog: log,
       eventBus: bus,
       deliver: opts?.deliver ?? deliver,
       now: opts?.now,
-    });
+      onWakeAttempt: opts?.onWakeAttempt,
+    } as never);
   }
 
   beforeEach(() => {
@@ -129,6 +134,20 @@ describe("WatchdogPolicyEngine (PL-004 Phase C R1)", () => {
     const list = log.listForJob(job.jobId);
     expect(list[0]?.outcome).toBe("sent");
     expect(list[0]?.deliveryStatus).toBe("failed");
+  });
+
+  it("S03: a fired watchdog reports the resume attempt to its attached parked row", async () => {
+    const attempts: Array<{ jobId: string; deliveryStatus: string }> = [];
+    const engine = makeEngine({ onWakeAttempt: (attempt) => attempts.push(attempt) });
+    const job = jobsRepo.register({
+      policy: "periodic-reminder",
+      specYaml: "policy: periodic-reminder\ntarget:\n  session: alice@rig\nmessage: resume\n",
+      targetSession: "alice@rig",
+      intervalSeconds: 60,
+      registeredBySession: "ops@kernel",
+    });
+    await engine.evaluate(job);
+    expect(attempts).toEqual([{ jobId: job.jobId, deliveryStatus: "ok" }]);
   });
 
   it("unknown policy at evaluate-time marks job terminal + records + emits evaluation_terminal", async () => {

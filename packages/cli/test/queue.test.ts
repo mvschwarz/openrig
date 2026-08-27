@@ -658,6 +658,36 @@ describe("rig queue CLI", () => {
     });
   });
 
+  it("S03: block forwards the continuation and an atomic timer wake", async () => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "queue", "block", "qitem-park",
+      "--on", "external:cooldown",
+      "--continuation", "resume after the cooldown",
+      "--wake-after", "90s",
+      "--json",
+    ]);
+    expect(calls.find((c) => c.path === "/api/queue/qitem-park/update")?.body).toMatchObject({
+      state: "blocked",
+      blockedOn: "external:cooldown",
+      transitionNote: "continuation: resume after the cooldown",
+      wakeAfterSeconds: 90,
+    });
+  });
+
+  it("S03: block help teaches all wake paths and the workspace rule", () => {
+    const { deps } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    const block = program.commands.find((c) => c.name() === "queue")?.commands.find((c) => c.name() === "block");
+    const help = block?.helpInformation() ?? "";
+    expect(help).toMatch(/watchdog id/i);
+    expect(help).toMatch(/timer/i);
+    expect(help).toMatch(/live blocker/i);
+    expect(help).toMatch(/workspace.*not.imminent/i);
+  });
+
   it("handoff-and-complete sends NO body fromSession — the handing-off seat derives from the transport header (X-OpenRig-Session); --from is dropped, --to stays the target", async () => {
     const saved = process.env["OPENRIG_SESSION_NAME"];
     process.env["OPENRIG_SESSION_NAME"] = "bob@rig"; // the seat env == the X-OpenRig-Session the DaemonClient stamps

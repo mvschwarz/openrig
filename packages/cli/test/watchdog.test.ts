@@ -187,6 +187,7 @@ describe("rig watchdog CLI (PL-004 Phase C)", () => {
     const register = watchdog?.commands.find((c) => c.name() === "register");
     expect(register).toBeDefined();
     expect(register!.helpInformation()).toContain("workflow-keepalive");
+    expect(register!.helpInformation()).toMatch(/queue block.*wake-watchdog/i);
   });
 
   it("list GETs /api/watchdog/list", async () => {
