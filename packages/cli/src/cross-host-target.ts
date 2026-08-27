@@ -81,10 +81,11 @@ export function resolveCrossHostTarget(
 
   // 51-09 increment 3 (arch ruling 2e1b737f): a suffix EQUAL to the daemon's
   // LITERAL boot-reconciled self-host id routes HOME — the CLI-edge twin of the
-  // daemon's resolvesToLocalHost. Increment 3 always-suffixes the reply hint with
-  // the origin's self-id; a LOCAL reply copies `member@rig@selfId`, and without
-  // this strip the 3-part string dead-letters as unknown_destination_rig (the
-  // reverse dead-letter). C2: LITERAL, case-SENSITIVE self-id match ONLY — no
+  // daemon's resolvesToLocalHost. Local reply hints are bare since the 2026-08-27
+  // root invariant, but a CROSS-HOST arrival's reply hint still carries the origin
+  // triple — a reply to it from the origin's own host copies `member@rig@selfId`,
+  // and without this strip that 3-part string would dead-letter as
+  // unknown_destination_rig (the reverse dead-letter). C2: LITERAL, case-SENSITIVE self-id match ONLY — no
   // alias/prefix/registry fallback, never 'local' aliasing (matches
   // resolvesToLocalHost's self-id branch). Rider (a): a NON-self suffix is NOT
   // matched here and falls through to the registry lookup + loud unregistered

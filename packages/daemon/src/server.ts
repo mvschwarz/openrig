@@ -598,9 +598,11 @@ export function createApp(deps: AppDeps): Hono {
     // {semver, commit, dirty, builtAt}; dev runs add NOTHING (stampFields is
     // {} without a stamp — no invented identity, legacy bodies preserved).
     const stamp = stampFields();
-    // 51-09 increment 3 (arch ruling 2e1b737f) — expose the daemon's
-    // boot-reconciled self-host id so the CLI edge can render the always-suffix
-    // sender triple + self-resolve the reply hint (ONE identity source). ADDITIVE
+    // 51-09 increment 3 (arch ruling 2e1b737f; local always-suffix rendering since
+    // superseded by the 2026-08-27 root invariant) — expose the daemon's boot-reconciled
+    // self-host id so the CLI edge can detect cross-host targets, self-resolve a
+    // self-suffixed reply hint, and construct the origin triple at the FORWARDING
+    // boundary (ONE identity source). ADDITIVE
     // on the FR-7 stamp precedent: ABSENT before the boot reconcile (getSelfHostId
     // is null → {} → no invented identity, legacy bodies byte-preserved). NEVER
     // ownName/host.name (display-only, DP4 — the conflation this slice kills).

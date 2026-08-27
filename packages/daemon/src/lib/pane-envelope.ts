@@ -96,23 +96,15 @@ export function wrapPaneEnvelope(
   sender: string | undefined,
   recipient: string,
   body: string,
-  selfHostId?: string | null,
   meta?: EnvelopeMeta,
 ): string {
+  // FOUNDER ROOT INVARIANT (2026-08-27, supersedes 51-09 incr 3 / ruling cb19867f Q2
+  // always-suffix): the sender renders EXACTLY AS RECEIVED. A local sender is the bare
+  // member@rig (the reply hint is copy-paste-usable locally); a cross-host arrival already
+  // carries its origin triple from the forwarding boundary and rides verbatim — the wrapper
+  // never appends this host's id to anything.
   const senderLabel = sender && sender.trim().length > 0 ? sender : SENDER_FALLBACK;
-  // 51-09 increment 3 (ruling cb19867f Q2 always-suffix + 2e1b737f C1 fail-open):
-  // when the origin's boot-reconciled self-host id is known, the sender renders
-  // as the <member>@<rig>@<selfHostId> triple ALWAYS (local included) so the
-  // signature is self-describing and the reply hint is verbatim-usable. When it
-  // is absent (daemon pre-reconcile / unknown sender), fall open to today's exact
-  // two-part form — no new failure mode. A sender that ALREADY carries a host (a
-  // --from relay passing the ORIGIN's full triple) is preserved verbatim, never
-  // re-stamped with THIS host's id (which would forge the origin).
-  const senderTriple =
-    selfHostId && selfHostId.length > 0 && senderLabel !== SENDER_FALLBACK && senderLabel.split("@").length < 3
-      ? `${senderLabel}@${selfHostId}`
-      : senderLabel;
-  const header = [`From: ${senderTriple}`, renderToLine(recipient, meta?.scope)];
+  const header = [`From: ${senderLabel}`, renderToLine(recipient, meta?.scope)];
   if (meta?.stampISO) {
     // GHOST-STAGE (g): the sender's occupant generation rides the Sent: line as a short suffix
     // (first8 of the uuid — discriminates at per-node scale; the ledger keeps the full uuid for
@@ -122,5 +114,5 @@ export function wrapPaneEnvelope(
     const genSuffix = meta.genUuid && meta.genUuid.length > 0 ? ` · gen ${meta.genUuid.slice(0, 8)}` : "";
     header.push(`Sent: ${renderShortStamp(meta.stampISO)}${genSuffix}`);
   }
-  return [...header, "---", body, "---", `↩ Reply: rig send ${senderTriple} "..."`].join("\n");
+  return [...header, "---", body, "---", `↩ Reply: rig send ${senderLabel} "..."`].join("\n");
 }

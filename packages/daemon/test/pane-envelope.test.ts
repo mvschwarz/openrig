@@ -57,7 +57,9 @@ describe("wrapPaneEnvelope — slice 23 envelope renderer (daemon-side)", () => 
   // selfHostId, which would forge the origin as the destination (the receipt's exact bug). Previously
   // this branch never fired (nothing 3-part arrived); A4 relies on it, so it is covered explicitly.
   it("A4 pin 2 — an arriving 3-part origin sender is rendered VERBATIM, never re-stamped with this host", () => {
-    const out = wrapPaneEnvelope("dev50@v-rig@origin-host", "guard@my-rig", "hi", "destination-host");
+    // Root invariant 2026-08-27: the wrapper no longer takes (or appends) a self-host id at
+    // all — verbatim rendering of an arriving origin triple is now guaranteed by deletion.
+    const out = wrapPaneEnvelope("dev50@v-rig@origin-host", "guard@my-rig", "hi");
     expect(out).toContain("From: dev50@v-rig@origin-host"); // the ORIGIN host, preserved
     expect(out).not.toContain("@destination-host"); // NOT re-stamped with the destination's id (no forgery)
     expect(out).toContain('↩ Reply: rig send dev50@v-rig@origin-host "..."'); // reply hint round-trips the origin
@@ -89,31 +91,31 @@ describe("wrapPaneEnvelope — slice 23 envelope renderer (daemon-side)", () => 
   });
 
   it("multi-send renders the FULL recipient list on the To line (WHO got it)", () => {
-    const out = wrapPaneEnvelope("a@r", "b@r", "hi", null, { scope: { kind: "multi", recipients: ["b@r", "c@r", "d@r"] } });
+    const out = wrapPaneEnvelope("a@r", "b@r", "hi", { scope: { kind: "multi", recipients: ["b@r", "c@r", "d@r"] } });
     expect(out).toContain("To: b@r, c@r, d@r");
   });
 
   it("rig-broadcast renders 'broadcast to <rig> (N seats)' — the anti-storm scale", () => {
-    const out = wrapPaneEnvelope("a@r", "openrig-pm", "hi", null, { scope: { kind: "rig-broadcast", rig: "openrig-pm", seats: 11 } });
+    const out = wrapPaneEnvelope("a@r", "openrig-pm", "hi", { scope: { kind: "rig-broadcast", rig: "openrig-pm", seats: 11 } });
     expect(out).toContain("To: broadcast to openrig-pm (11 seats)");
   });
 
   it("topology-broadcast renders 'broadcast to topology'", () => {
-    const out = wrapPaneEnvelope("a@r", "*", "hi", null, { scope: { kind: "topology" } });
+    const out = wrapPaneEnvelope("a@r", "*", "hi", { scope: { kind: "topology" } });
     expect(out).toContain("To: broadcast to topology");
   });
 
   it("stamps the short MM-DD HH:MMZ timestamp from the transport ISO (read, never re-derived)", () => {
-    const out = wrapPaneEnvelope("a@r", "b@r", "hi", null, { stampISO: "2026-08-06T17:42:09Z" });
+    const out = wrapPaneEnvelope("a@r", "b@r", "hi", { stampISO: "2026-08-06T17:42:09Z" });
     expect(out).toContain("Sent: 08-06 17:42Z");
   });
 
   it("header-alone distinguishability (storm test): DM / multi / rig-bcast / topology each render distinct To lines", () => {
     const to = (out: string) => out.split("\n").find((l) => l.startsWith("To:"));
     const dm = to(wrapPaneEnvelope("a@r", "b@r", "x"));
-    const multi = to(wrapPaneEnvelope("a@r", "b@r", "x", null, { scope: { kind: "multi", recipients: ["b@r", "c@r"] } }));
-    const rig = to(wrapPaneEnvelope("a@r", "r", "x", null, { scope: { kind: "rig-broadcast", rig: "r", seats: 4 } }));
-    const topo = to(wrapPaneEnvelope("a@r", "*", "x", null, { scope: { kind: "topology" } }));
+    const multi = to(wrapPaneEnvelope("a@r", "b@r", "x", { scope: { kind: "multi", recipients: ["b@r", "c@r"] } }));
+    const rig = to(wrapPaneEnvelope("a@r", "r", "x", { scope: { kind: "rig-broadcast", rig: "r", seats: 4 } }));
+    const topo = to(wrapPaneEnvelope("a@r", "*", "x", { scope: { kind: "topology" } }));
     expect(new Set([dm, multi, rig, topo]).size).toBe(4); // all four visually distinct, zero context
   });
 
@@ -123,18 +125,18 @@ describe("wrapPaneEnvelope — slice 23 envelope renderer (daemon-side)", () => 
   const GEN = "a1b2c3d4-e5f6-7890-abcd-ef0123456789";
 
   it("(g) stamps the sender's short generation (first8) as a Sent:-line suffix", () => {
-    const out = wrapPaneEnvelope("a@r", "b@r", "hi", null, { stampISO: "2026-08-06T17:42:09Z", genUuid: GEN });
+    const out = wrapPaneEnvelope("a@r", "b@r", "hi", { stampISO: "2026-08-06T17:42:09Z", genUuid: GEN });
     expect(out).toContain("Sent: 08-06 17:42Z · gen a1b2c3d4");
   });
 
   it("(g) byte-exact full envelope with gen (cross-package parity anchor)", () => {
-    const out = wrapPaneEnvelope("a@r", "b@r", "hi", null, { stampISO: "2026-08-06T17:42:09Z", genUuid: GEN });
+    const out = wrapPaneEnvelope("a@r", "b@r", "hi", { stampISO: "2026-08-06T17:42:09Z", genUuid: GEN });
     expect(out).toBe('From: a@r\nTo: b@r\nSent: 08-06 17:42Z · gen a1b2c3d4\n---\nhi\n---\n↩ Reply: rig send a@r "..."');
   });
 
   it("(g) pin-a: OMITS the suffix entirely when the generation is UNKNOWN (never 'gen unknown', never forged)", () => {
-    const absent = wrapPaneEnvelope("a@r", "b@r", "hi", null, { stampISO: "2026-08-06T17:42:09Z" });
-    const empty = wrapPaneEnvelope("a@r", "b@r", "hi", null, { stampISO: "2026-08-06T17:42:09Z", genUuid: "" });
+    const absent = wrapPaneEnvelope("a@r", "b@r", "hi", { stampISO: "2026-08-06T17:42:09Z" });
+    const empty = wrapPaneEnvelope("a@r", "b@r", "hi", { stampISO: "2026-08-06T17:42:09Z", genUuid: "" });
     for (const out of [absent, empty]) {
       expect(out.split("\n").find((l) => l.startsWith("Sent:"))).toBe("Sent: 08-06 17:42Z");
       expect(out).not.toContain(" · gen ");
@@ -142,14 +144,14 @@ describe("wrapPaneEnvelope — slice 23 envelope renderer (daemon-side)", () => 
   });
 
   it("(g) pin-a: no Sent line ⇒ no gen suffix (the gen rides the Sent stamp, absent without it)", () => {
-    const out = wrapPaneEnvelope("a@r", "b@r", "hi", null, { genUuid: GEN });
+    const out = wrapPaneEnvelope("a@r", "b@r", "hi", { genUuid: GEN });
     expect(out).not.toContain("Sent:");
     expect(out).not.toContain(" · gen ");
   });
 
   it("(g) pin-b: a body containing ' · gen …' cannot forge the Sent: line's generation (containment)", () => {
     const body = "totally · gen ffffffff not the real gen";
-    const out = wrapPaneEnvelope("a@r", "b@r", body, null, { stampISO: "2026-08-06T17:42:09Z", genUuid: GEN });
+    const out = wrapPaneEnvelope("a@r", "b@r", body, { stampISO: "2026-08-06T17:42:09Z", genUuid: GEN });
     // The Sent: line lives in the header block (before the first "\n---\n"); the body is after it.
     const [headerBlock, ...bodyRegion] = out.split("\n---\n");
     expect(headerBlock.split("\n").find((l) => l.startsWith("Sent:"))).toBe("Sent: 08-06 17:42Z · gen a1b2c3d4");
@@ -173,7 +175,7 @@ describe("wrapPaneEnvelope — slice 23 envelope renderer (daemon-side)", () => 
   // ' · delivered ' containment discipline mirrors g's ' · gen '. THRESHOLD is a RULED value → the
   // boundary twins (just-inside shows nothing / just-outside shows the flag) + a value pin are required.
   const ENV = (extra?: { genUuid?: string }) =>
-    wrapPaneEnvelope("a@r", "b@r", "hi", null, { stampISO: "2026-08-06T17:42:09Z", ...extra });
+    wrapPaneEnvelope("a@r", "b@r", "hi", { stampISO: "2026-08-06T17:42:09Z", ...extra });
 
   it("(h) value pin: the delayed-delivery threshold is 10 seconds", () => {
     expect(DELIVERED_LATENCY_FLAG_MS).toBe(10_000);
@@ -201,7 +203,7 @@ describe("wrapPaneEnvelope — slice 23 envelope renderer (daemon-side)", () => 
   });
 
   it("(h) containment: a body carrying ' · delivered …' cannot forge the Sent: line's segment", () => {
-    const out0 = wrapPaneEnvelope("a@r", "b@r", "sneaky · delivered +999s tail", null, { stampISO: "2026-08-06T17:42:09Z" });
+    const out0 = wrapPaneEnvelope("a@r", "b@r", "sneaky · delivered +999s tail", { stampISO: "2026-08-06T17:42:09Z" });
     const out = appendDeliveredSegment(out0, 15_000);
     const [headerBlock, ...bodyRegion] = out.split("\n---\n");
     expect(headerBlock.split("\n").find((l) => l.startsWith("Sent:"))).toBe("Sent: 08-06 17:42Z · delivered +15s");

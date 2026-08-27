@@ -51,31 +51,31 @@ describe("wrapSendBody — pre-release CLI/daemon Item 2 (email-style envelope)"
   });
 
   it("multi-send renders the FULL recipient list on the To line", () => {
-    const out = wrapSendBody("a@r", "b@r", "hi", null, { scope: { kind: "multi", recipients: ["b@r", "c@r", "d@r"] } });
+    const out = wrapSendBody("a@r", "b@r", "hi", { scope: { kind: "multi", recipients: ["b@r", "c@r", "d@r"] } });
     expect(out).toContain("To: b@r, c@r, d@r");
   });
 
   it("rig-broadcast renders 'broadcast to <rig> (N seats)' — the anti-storm scale", () => {
-    const out = wrapSendBody("a@r", "openrig-pm", "hi", null, { scope: { kind: "rig-broadcast", rig: "openrig-pm", seats: 11 } });
+    const out = wrapSendBody("a@r", "openrig-pm", "hi", { scope: { kind: "rig-broadcast", rig: "openrig-pm", seats: 11 } });
     expect(out).toContain("To: broadcast to openrig-pm (11 seats)");
   });
 
   it("topology-broadcast renders 'broadcast to topology'", () => {
-    const out = wrapSendBody("a@r", "*", "hi", null, { scope: { kind: "topology" } });
+    const out = wrapSendBody("a@r", "*", "hi", { scope: { kind: "topology" } });
     expect(out).toContain("To: broadcast to topology");
   });
 
   it("stamps the short MM-DD HH:MMZ timestamp from the transport ISO", () => {
-    const out = wrapSendBody("a@r", "b@r", "hi", null, { stampISO: "2026-08-06T17:42:09Z" });
+    const out = wrapSendBody("a@r", "b@r", "hi", { stampISO: "2026-08-06T17:42:09Z" });
     expect(out).toContain("Sent: 08-06 17:42Z");
   });
 
   it("storm test: DM / multi / rig-bcast / topology each render distinct To lines (header-alone)", () => {
     const to = (out: string) => out.split("\n").find((l) => l.startsWith("To:"));
     const dm = to(wrapSendBody("a@r", "b@r", "x"));
-    const multi = to(wrapSendBody("a@r", "b@r", "x", null, { scope: { kind: "multi", recipients: ["b@r", "c@r"] } }));
-    const rig = to(wrapSendBody("a@r", "r", "x", null, { scope: { kind: "rig-broadcast", rig: "r", seats: 4 } }));
-    const topo = to(wrapSendBody("a@r", "*", "x", null, { scope: { kind: "topology" } }));
+    const multi = to(wrapSendBody("a@r", "b@r", "x", { scope: { kind: "multi", recipients: ["b@r", "c@r"] } }));
+    const rig = to(wrapSendBody("a@r", "r", "x", { scope: { kind: "rig-broadcast", rig: "r", seats: 4 } }));
+    const topo = to(wrapSendBody("a@r", "*", "x", { scope: { kind: "topology" } }));
     expect(new Set([dm, multi, rig, topo]).size).toBe(4);
   });
 
@@ -85,18 +85,18 @@ describe("wrapSendBody — pre-release CLI/daemon Item 2 (email-style envelope)"
   const GEN = "a1b2c3d4-e5f6-7890-abcd-ef0123456789";
 
   it("(g) stamps the sender's short generation (first8) as a Sent:-line suffix", () => {
-    const out = wrapSendBody("a@r", "b@r", "hi", null, { stampISO: "2026-08-06T17:42:09Z", genUuid: GEN });
+    const out = wrapSendBody("a@r", "b@r", "hi", { stampISO: "2026-08-06T17:42:09Z", genUuid: GEN });
     expect(out).toContain("Sent: 08-06 17:42Z · gen a1b2c3d4");
   });
 
   it("(g) byte-exact full envelope with gen (cross-package parity anchor)", () => {
-    const out = wrapSendBody("a@r", "b@r", "hi", null, { stampISO: "2026-08-06T17:42:09Z", genUuid: GEN });
+    const out = wrapSendBody("a@r", "b@r", "hi", { stampISO: "2026-08-06T17:42:09Z", genUuid: GEN });
     expect(out).toBe('From: a@r\nTo: b@r\nSent: 08-06 17:42Z · gen a1b2c3d4\n---\nhi\n---\n↩ Reply: rig send a@r "..."');
   });
 
   it("(g) pin-a: OMITS the suffix entirely when the generation is UNKNOWN (never 'gen unknown', never forged)", () => {
-    const absent = wrapSendBody("a@r", "b@r", "hi", null, { stampISO: "2026-08-06T17:42:09Z" });
-    const empty = wrapSendBody("a@r", "b@r", "hi", null, { stampISO: "2026-08-06T17:42:09Z", genUuid: "" });
+    const absent = wrapSendBody("a@r", "b@r", "hi", { stampISO: "2026-08-06T17:42:09Z" });
+    const empty = wrapSendBody("a@r", "b@r", "hi", { stampISO: "2026-08-06T17:42:09Z", genUuid: "" });
     for (const out of [absent, empty]) {
       expect(out.split("\n").find((l) => l.startsWith("Sent:"))).toBe("Sent: 08-06 17:42Z");
       expect(out).not.toContain(" · gen ");
@@ -104,14 +104,14 @@ describe("wrapSendBody — pre-release CLI/daemon Item 2 (email-style envelope)"
   });
 
   it("(g) pin-a: no Sent line ⇒ no gen suffix (the gen rides the Sent stamp, absent without it)", () => {
-    const out = wrapSendBody("a@r", "b@r", "hi", null, { genUuid: GEN });
+    const out = wrapSendBody("a@r", "b@r", "hi", { genUuid: GEN });
     expect(out).not.toContain("Sent:");
     expect(out).not.toContain(" · gen ");
   });
 
   it("(g) pin-b: a body containing ' · gen …' cannot forge the Sent: line's generation (containment)", () => {
     const body = "totally · gen ffffffff not the real gen";
-    const out = wrapSendBody("a@r", "b@r", body, null, { stampISO: "2026-08-06T17:42:09Z", genUuid: GEN });
+    const out = wrapSendBody("a@r", "b@r", body, { stampISO: "2026-08-06T17:42:09Z", genUuid: GEN });
     const [headerBlock, ...bodyRegion] = out.split("\n---\n");
     expect(headerBlock.split("\n").find((l) => l.startsWith("Sent:"))).toBe("Sent: 08-06 17:42Z · gen a1b2c3d4");
     expect(headerBlock).not.toContain("ffffffff");

@@ -1463,7 +1463,7 @@ export class SessionTransport {
       // Sent stamp, so a recipient tells DM from broadcast header-alone (anti-storm). Raw paths
       // (--raw / --dangerously-interact, absent envelopeSender) still deliver unwrapped.
       const perRecipientText = opts?.envelopeSender
-        ? wrapPaneEnvelope(opts.envelopeSender, session.sessionName, text, getSelfHostId(), { scope, stampISO, genUuid })
+        ? wrapPaneEnvelope(opts.envelopeSender, session.sessionName, text, { scope, stampISO, genUuid })
         : text;
       // (h) thread the resolved stampISO so send()'s delivered-latency calc measures from the SAME
       // compose stamp the envelope carries (opts may not have carried one; the local stampISO is truth).

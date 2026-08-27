@@ -422,16 +422,13 @@ const COMPACT_QUEUE_COLUMNS =
   "qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, blocked_on, handed_off_to, handed_off_from, expires_at, closure_reason, closure_target, closure_required_at, claimed_at, last_nudge_attempt, last_nudge_result, last_heartbeat, resolution, target_repo";
 
 /**
- * 51-09 increment 4 — stamp-at-write: the STORED `source_session` IS the origin
- * triple `<member>@<rig>@<selfHostId>`, matching the envelope's always-suffix
- * rule (the daemon receiving a create is the sender's host, so getSelfHostId()
- * is the sender's host — captured at write, correct even for a row later read
- * cross-host). FAIL-OPEN: when the self-id is not yet reconciled (getSelfHostId()
- * null) OR the value is not a bare `member@rig` (legacy / malformed / already
- * carries a host suffix), the value is left UNCHANGED (today's 2-part) — no new
- * failure mode, existing 2-part behavior preserved wherever no self-id exists.
- * One convention (stamp-at-write), so every read surface sees the triple with no
- * render-time logic.
+ * Stamp-at-FORWARD only (founder root invariant 2026-08-27, superseding 51-09 incr 4
+ * stamp-at-write): a LOCAL write never calls this — local rows store the bare
+ * member@rig. The cross-host forwarding routes (routes/queue.ts) call it so the
+ * forwarding daemon stamps ITS OWN id as the origin before the remote create; the
+ * remote's not-bare guard then stores the received triple verbatim (origin never
+ * forged). FAIL-OPEN: no reconciled self-id, or a value that is not a bare
+ * member@rig (already a triple / malformed), passes through unchanged.
  */
 export function stampSelfHostSuffix(session: string): string;
 export function stampSelfHostSuffix(session: undefined): undefined;
@@ -679,7 +676,7 @@ export class QueueRepository {
     const bareBody = `Queue handoff: ${successorQitemId} - check your queue.`;
     const stampISO = new Date().toISOString();
     const genUuid = this.resolveOccupantGeneration?.(fromSession) ?? undefined;
-    const frozenEnvelope = wrapPaneEnvelope(fromSession, toSession, bareBody, getSelfHostId(), { stampISO, genUuid });
+    const frozenEnvelope = wrapPaneEnvelope(fromSession, toSession, bareBody, { stampISO, genUuid });
     this.outbox.record({
       outboxId: `${WAKE_INTENT_PREFIX}${successorQitemId}`,
       senderSession: fromSession,
@@ -942,7 +939,7 @@ export class QueueRepository {
       const genUuid = sourceSession
         ? (this.resolveOccupantGeneration?.(sourceSession) ?? undefined)
         : undefined;
-      text = wrapPaneEnvelope(sourceSession, destinationSession, bareBody, getSelfHostId(), { stampISO, genUuid });
+      text = wrapPaneEnvelope(sourceSession, destinationSession, bareBody, { stampISO, genUuid });
     }
     try {
       const res = await this.transport!.send(destinationSession, text, { verify: true, stampISO });
@@ -978,10 +975,11 @@ export class QueueRepository {
   }
 
   async create(input: QueueCreateInput): Promise<QueueItem> {
-    // 51-09 incr 4 — stamp the origin host onto the STORED sender identity once,
-    // before validation/insert/idempotency, so the row's source_session IS the
-    // triple (fail-open to 2-part when no self-id / not a bare member@rig).
-    input = { ...input, sourceSession: stampSelfHostSuffix(input.sourceSession) };
+    // FOUNDER ROOT INVARIANT (2026-08-27, supersedes 51-09 incr 4 / ruling cb19867f Q2):
+    // a LOCAL write stores the bare transport identity — no self-host suffix inside one
+    // instance. Host identity is added only at the cross-host forwarding boundary
+    // (routes/queue.ts stamp-at-FORWARD), and a genuine origin triple arriving from a
+    // forward is stored verbatim (never re-stamped, never stripped).
     if (!this.validateRig(input.destinationSession)) {
       throw new QueueRepositoryError(
         "unknown_destination_rig",

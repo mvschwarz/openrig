@@ -66,7 +66,6 @@ export function wrapSendBody(
   sender: string | undefined,
   recipient: string,
   body: string,
-  selfHostId?: string | null,
   meta?: EnvelopeMeta,
 ): string {
   // P18 DELIVER-AND-LABEL: an env-less dispatch no longer refuses; the CLI RE-GAINS the honest
@@ -74,18 +73,11 @@ export function wrapSendBody(
   // half delivers-and-labels the header-absent write — no laundering, no downstream 401). Byte-identical
   // with the daemon twin wrapPaneEnvelope across the full input domain.
   //
-  // 51-09 increment 3 (ruling cb19867f Q2 always-suffix): when the origin's boot-reconciled self-host
-  // id is known, a RESOLVED sender renders as the <member>@<rig>@<selfHostId> triple ALWAYS (local
-  // included) so the signature is self-describing and the reply hint is verbatim-usable. The
-  // `<unknown sender>` fallback is NEVER host-suffixed (there is no origin host to name). A sender that
-  // ALREADY carries a host (a relay passing the ORIGIN's full triple) is preserved verbatim, never
-  // re-stamped with THIS host's id (which would forge the origin).
+  // FOUNDER ROOT INVARIANT (2026-08-27, supersedes 51-09 incr 3 always-suffix): the sender
+  // renders EXACTLY AS RECEIVED — bare member@rig locally (copy-paste reply hint), and a
+  // cross-host caller constructs the origin triple at the forwarding boundary before wrapping.
   const senderLabel = sender && sender.trim().length > 0 ? sender : SENDER_FALLBACK;
-  const senderTriple =
-    selfHostId && selfHostId.length > 0 && senderLabel !== SENDER_FALLBACK && senderLabel.split("@").length < 3
-      ? `${senderLabel}@${selfHostId}`
-      : senderLabel;
-  const header = [`From: ${senderTriple}`, renderToLine(recipient, meta?.scope)];
+  const header = [`From: ${senderLabel}`, renderToLine(recipient, meta?.scope)];
   if (meta?.stampISO) {
     // GHOST-STAGE (g): the sender's occupant generation rides the Sent: line as a short suffix
     // (first8 of the uuid — discriminates at per-node scale; the ledger keeps the full uuid for
@@ -95,7 +87,7 @@ export function wrapSendBody(
     const genSuffix = meta.genUuid && meta.genUuid.length > 0 ? ` · gen ${meta.genUuid.slice(0, 8)}` : "";
     header.push(`Sent: ${renderShortStamp(meta.stampISO)}${genSuffix}`);
   }
-  return [...header, "---", body, "---", `↩ Reply: rig send ${senderTriple} "..."`].join("\n");
+  return [...header, "---", body, "---", `↩ Reply: rig send ${senderLabel} "..."`].join("\n");
 }
 
 /**
@@ -448,7 +440,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       }
       // Send/broadcast header (ruling 03c35295): a directed `rig send` is a DM — stamp it at send-time
       // (Sent: MM-DD HH:MMZ) so transcripts are timestamped; the To line stays the single recipient.
-      const outboundText = raw ? payload : wrapSendBody(senderSession, session, payload, selfHostId, { stampISO: new Date().toISOString() });
+      const outboundText = raw ? payload : wrapSendBody(senderSession, session, payload, { stampISO: new Date().toISOString() });
       let res: { status: number; data: Record<string, unknown> };
       try {
         res = await client.post<Record<string, unknown>>("/api/transport/send", {
@@ -805,8 +797,14 @@ async function runHttpHostSend(
   // P21 I4: cross-host send — the origin is the LOCAL seat env (this daemon's authenticated context per
   // rail 2), never a caller --from string. The remote renders From: = env; --from is deprecated + ignored.
   const senderSession = seatSender; // P18: seat env identity, or undefined → delivers-and-labels (unknown marker, null actor).
+  // ROOT INVARIANT: host identity is added HERE, at the cross-host forwarding boundary — the
+  // origin triple is constructed once for the remote render; local sends never carry it.
+  const originSender =
+    senderSession && selfHostId && senderSession.split("@").length === 2
+      ? `${senderSession}@${selfHostId}`
+      : senderSession;
   const raw = Boolean(opts.raw || opts.dangerouslyInteract);
-  const outboundText = raw ? text : wrapSendBody(senderSession, session, text, selfHostId, { stampISO: new Date().toISOString() });
+  const outboundText = raw ? text : wrapSendBody(originSender, session, text, { stampISO: new Date().toISOString() });
 
   const result = await runRemoteHttpOp(host.id, "POST", "/api/transport/send", {
     session, text: outboundText, verify: opts.verify, force: opts.force, waitForIdleMs,
