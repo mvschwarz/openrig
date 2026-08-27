@@ -48,7 +48,7 @@ export function watchdogCommand(depsOverride?: WatchdogDeps): Command {
 
   cmd
     .command("register")
-    .description("Register a new watchdog job from a YAML spec file")
+    .description("Register a watchdog; queue block --wake-watchdog attaches its job id")
     .requiredOption("--spec <path>", "Path to YAML spec file (policy + target + interval + context)")
     .requiredOption("--policy <policy>", "Policy name (one of: periodic-reminder, artifact-pool-ready, edge-artifact-required, workflow-keepalive, idle-gate-qitem)")
     .requiredOption("--target-session <session>", "Canonical <member>@<rig> target")
@@ -57,6 +57,7 @@ export function watchdogCommand(depsOverride?: WatchdogDeps): Command {
     .option("--active-wake-interval-seconds <n>", "(pool-ready-specific) wake-up cadence when actionable artifacts exist")
     .option("--scan-interval-seconds <n>", "(pool-ready-specific) artifact pool scan cadence")
     .option("--json", "JSON output for agents")
+    .addHelpText("after", "\nThe returned job id can be attached to a deliberate park with: rig queue block <qitemId> --on <blocker> --continuation <what-resumes> --wake-watchdog <jobId>")
     .action(async (opts: {
       spec: string;
       policy: string;

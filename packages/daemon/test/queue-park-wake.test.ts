@@ -107,6 +107,27 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     expect(job).toMatchObject({ state: "active", targetSession: "worker@rig", intervalSeconds: 90 });
   });
 
+  it("rolls the generated timer back when the park transaction aborts", async () => {
+    const row = await item();
+    db.exec(`
+      CREATE TRIGGER reject_test_park BEFORE UPDATE OF state ON queue_items
+      WHEN NEW.qitem_id = '${row.qitemId}'
+      BEGIN SELECT RAISE(ABORT, 'forced park failure'); END;
+    `);
+    const before = (db.prepare("SELECT COUNT(*) AS n FROM watchdog_jobs").get() as { n: number }).n;
+    expect(() => repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@rig",
+      state: "blocked",
+      blockedOn: "external:cooldown",
+      transitionNote: "continuation: retry after cooldown",
+      wakeAfterSeconds: 90,
+    } as never)).toThrow(/forced park failure/);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM watchdog_jobs").get() as { n: number }).n).toBe(before);
+    expect(repo.getById(row.qitemId)?.state).toBe("pending");
+    expect(wakes(row.qitemId)).toEqual([]);
+  });
+
   it("records a live blocker whose terminal resolution is the wake", async () => {
     const blocker = await item("gate@rig");
     const row = await item();

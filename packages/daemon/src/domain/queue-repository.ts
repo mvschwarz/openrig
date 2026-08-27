@@ -16,6 +16,8 @@ import {
   type ClosureReason,
 } from "./hot-potato-enforcer.js";
 import { isHumanSeatSession, validateHumanPark, validateHumanRoute } from "./human-route-enforcer.js";
+import { QueueWakeRepository, type ParkWakeStatus } from "./queue-wake-repository.js";
+import { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 
 export const QUEUE_STATES = [
   "pending",
@@ -255,6 +257,10 @@ export interface QueueUpdateInput {
    * blocker reference (qitem id, gate name) is recoverable from queue state.
    */
   blockedOn?: string;
+  /** OPR.0.5.5.03 — park continuation. Exactly one explicit wake form may
+   *  accompany a blocked transition; a live qitem blocker is inferred. */
+  wakeWatchdogId?: string;
+  wakeAfterSeconds?: number;
   /**
    * OPR.0.4.4.19 FR-6 — park-time inputs. summary + evidence_ref are
    * updatable AT THE PARK MOMENT (state=blocked with a human-seat blocker),
@@ -531,6 +537,8 @@ export class QueueRepository {
    *     fallback real code rather than a promise in a comment). */
   private outbox: OutboxHandler | undefined;
   private resolveOccupantGeneration?: (sessionName: string) => string | null;
+  private readonly wakeRepo: QueueWakeRepository;
+  private watchdogJobsRepo: WatchdogJobsRepository | undefined;
   /** PL-007 Workspace Primitive — true when migration 038 has applied the
    *  queue_items.target_repo column. Older test fixtures that bypass the
    *  canonical migration list don't have the column; INSERTs degrade to
@@ -583,6 +591,7 @@ export class QueueRepository {
     this.db = db;
     this.eventBus = eventBus;
     this.transitionLog = new QueueTransitionLog(db);
+    this.wakeRepo = new QueueWakeRepository(db);
     this.validateRig = opts?.validateRig ?? (() => true);
     this.transport = opts?.transport;
     this.workflowFrontierPredicate = opts?.workflowFrontierPredicate;
@@ -609,6 +618,12 @@ export class QueueRepository {
     db.function("is_human_seat_session", { deterministic: true }, (value: unknown) =>
       isHumanSeatSession(value) ? 1 : 0
     );
+  }
+
+  /** Startup attaches the generation-aware shared repository. Isolated domain
+   *  fixtures fall back to a repository on this same SQLite connection. */
+  attachWatchdogJobsRepository(repo: WatchdogJobsRepository): void {
+    this.watchdogJobsRepo = repo;
   }
 
   /**
@@ -1838,6 +1853,8 @@ export class QueueRepository {
         || input.closureTarget != null
         || input.handedOffTo != null
         || input.blockedOn != null
+        || input.wakeWatchdogId != null
+        || input.wakeAfterSeconds != null
         || input.summary != null
         || input.evidenceRef != null;
       if (disallowed) {
@@ -1869,6 +1886,24 @@ export class QueueRepository {
       throw new QueueRepositoryError(
         "invalid_state",
         `state=${input.state} not valid; valid: ${QUEUE_STATES.join(", ")}`
+      );
+    }
+    if ((input.wakeWatchdogId != null || input.wakeAfterSeconds != null) && input.state !== "blocked") {
+      throw new QueueRepositoryError(
+        "wake_not_admitted",
+        "a park wake persists only with state=blocked; park the row or drop the wake option",
+      );
+    }
+    if (input.wakeWatchdogId != null && input.wakeAfterSeconds != null) {
+      throw new QueueRepositoryError(
+        "wake_ambiguous",
+        "choose one explicit park wake: an existing watchdog id or an atomic timer",
+      );
+    }
+    if (input.wakeAfterSeconds != null && (!Number.isInteger(input.wakeAfterSeconds) || input.wakeAfterSeconds <= 0)) {
+      throw new QueueRepositoryError(
+        "wake_after_invalid",
+        `wakeAfterSeconds must be a positive integer (got ${input.wakeAfterSeconds})`,
       );
     }
 
@@ -2057,6 +2092,44 @@ export class QueueRepository {
       }
     }
 
+    let parkWake: { kind: "watchdog" | "timer" | "blocker"; ref: string } | null = null;
+    const jobsRepo = this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db);
+    if (input.wakeWatchdogId != null) {
+      const job = jobsRepo.getById(input.wakeWatchdogId);
+      if (!job || job.state !== "active") {
+        throw new QueueRepositoryError(
+          "wake_watchdog_not_live",
+          `watchdog ${input.wakeWatchdogId} is not an active job; attach a live watchdog or arm an atomic timer`,
+          { wakeWatchdogId: input.wakeWatchdogId },
+        );
+      }
+      if (job.targetSession !== qitem.destinationSession) {
+        throw new QueueRepositoryError(
+          "wake_watchdog_target_mismatch",
+          `watchdog ${job.jobId} targets ${job.targetSession}, not parked owner ${qitem.destinationSession}`,
+          { wakeWatchdogId: job.jobId, targetSession: job.targetSession, destinationSession: qitem.destinationSession },
+        );
+      }
+      parkWake = { kind: "watchdog", ref: job.jobId };
+    } else if (input.wakeAfterSeconds != null) {
+      const job = jobsRepo.register({
+        policy: "periodic-reminder",
+        specYaml: [
+          "policy: periodic-reminder",
+          "target:",
+          `  session: ${JSON.stringify(qitem.destinationSession)}`,
+          `message: ${JSON.stringify(`Wake timer fired for parked qitem ${qitem.qitemId}. Resume the recorded continuation and update the row.`)}`,
+          "",
+        ].join("\n"),
+        targetSession: qitem.destinationSession,
+        intervalSeconds: input.wakeAfterSeconds,
+        registeredBySession: input.actorSession,
+      });
+      parkWake = { kind: "timer", ref: job.jobId };
+    } else if (input.state === "blocked" && effectiveBlockedOn?.startsWith("qitem-")) {
+      parkWake = { kind: "blocker", ref: effectiveBlockedOn };
+    }
+
     const ts = new Date().toISOString();
     const fromState = qitem.state;
 
@@ -2096,7 +2169,7 @@ export class QueueRepository {
       this.persistEvidenceRef(input.qitemId, input.evidenceRef ?? null);
     }
 
-    this.transitionLog.append({
+    const transition = this.transitionLog.append({
       qitemId: input.qitemId,
       state: input.state,
       actorSession: input.actorSession,
@@ -2105,6 +2178,16 @@ export class QueueRepository {
       closureTarget: validation.closureTarget ?? undefined,
       identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
     });
+    if (parkWake) {
+      this.wakeRepo.record({
+        transitionId: transition.transitionId,
+        qitemId: input.qitemId,
+        phase: "armed",
+        kind: parkWake.kind,
+        ref: parkWake.ref,
+        deliveryStatus: null,
+      });
+    }
 
     // 0.5.1-53 Atom 1b(iii) — propagate-completion. blocked_on PROMISES "A waits until B completes";
     // that promise never fired on this runtime (rows sat blocked on done/canceled blockers for days).
@@ -2119,11 +2202,19 @@ export class QueueRepository {
         this.db
           .prepare("UPDATE queue_items SET state = 'pending', blocked_on = NULL, ts_updated = ? WHERE qitem_id = ?")
           .run(ts, r.qitem_id);
-        this.transitionLog.append({
+        const resumeTransition = this.transitionLog.append({
           qitemId: r.qitem_id,
           state: "pending",
           actorSession: input.actorSession,
           transitionNote: `auto-unparked: blocker ${input.qitemId} reached terminal state '${input.state}'`,
+        });
+        this.wakeRepo.record({
+          transitionId: resumeTransition.transitionId,
+          qitemId: r.qitem_id,
+          phase: "fired",
+          kind: "blocker",
+          ref: input.qitemId,
+          deliveryStatus: "resumed",
         });
         this.eventBus.persistWithinTransaction({
           type: "queue.updated",
@@ -2150,6 +2241,52 @@ export class QueueRepository {
       // (park-time summary included) so surfaces refresh without a fetch.
       summary: effectiveSummary ?? null,
     });
+  }
+
+  getParkWakeStatus(qitemId: string): ParkWakeStatus | null {
+    return this.wakeRepo.getStatus(qitemId);
+  }
+
+  listTransitions(qitemId: string): Array<ReturnType<QueueTransitionLog["listForQitem"]>[number] & { wake?: ReturnType<QueueWakeRepository["getForTransition"]> }> {
+    return this.transitionLog.listForQitem(qitemId).map((transition) => {
+      const wake = this.wakeRepo.getForTransition(transition.transitionId);
+      return wake ? { ...transition, wake } : transition;
+    });
+  }
+
+  /** Called by the watchdog engine after the delivery attempt is durably
+   *  audited. The queue transition records that attempt independently of
+   *  whether the HELD row's owner consumed it. */
+  recordWatchdogWakeAttempt(jobId: string, deliveryStatus: string): void {
+    const targets = this.wakeRepo.findBlockedQitemsByWatchdog(jobId);
+    if (targets.length === 0) return;
+    const events = this.db.transaction(() => targets.map(({ qitemId, kind }) => {
+      const transition = this.transitionLog.append({
+        qitemId,
+        state: "blocked",
+        actorSession: "watchdog@system",
+        transitionNote: `park wake fired: watchdog ${jobId}; delivery=${deliveryStatus}; awaiting owner consumption`,
+      });
+      this.wakeRepo.record({
+        transitionId: transition.transitionId,
+        qitemId,
+        phase: "fired",
+        kind,
+        ref: jobId,
+        deliveryStatus,
+      });
+      return this.eventBus.persistWithinTransaction({
+        type: "queue.updated",
+        qitemId,
+        fromState: "blocked",
+        toState: "blocked",
+        closureReason: null,
+        closureTarget: null,
+        actorSession: "watchdog@system",
+        summary: this.getById(qitemId)?.summary ?? null,
+      });
+    }))();
+    for (const event of events) this.eventBus.notifySubscribers(event);
   }
 
   getById(qitemId: string): QueueItem | null {

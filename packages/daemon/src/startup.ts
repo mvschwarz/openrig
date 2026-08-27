@@ -350,6 +350,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // GHOST-STAGE (e/Class-B): stamp the arming occupant's generation so a swap can drop its armed jobs.
     (sessionName) => sessionRegistry.currentOccupantGenerationForSession(sessionName),
   );
+  queueRepoInstance.attachWatchdogJobsRepository(watchdogJobsRepoInstance);
   const watchdogAutoRegistration = new WatchdogAutoRegistration({
     db,
     jobsRepo: watchdogJobsRepoInstance,
@@ -1703,6 +1704,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // UNKNOWN (null) fails open → deliver. A drop of this line disables the gate silently (gen-bound
       // wakes would fire at the successor) — pinned in watchdog-target-gen-wiring.test.ts.
       resolveTargetGeneration: (s) => sessionRegistry.currentOccupantGenerationForSession(s),
+      onWakeAttempt: ({ jobId, deliveryStatus }) => {
+        queueRepoInstance.recordWatchdogWakeAttempt(jobId, deliveryStatus);
+      },
       // PL-004 Phase D: register workflow-keepalive policy alongside
       // Phase C's three built-in policies. workflow-keepalive reads
       // SQLite workflow_instances directly via the new Phase D tables

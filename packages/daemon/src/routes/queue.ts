@@ -547,6 +547,8 @@ export function queueRoutes(): Hono {
       closureReason?: string;
       closureTarget?: string;
       blockedOn?: string;
+      wakeWatchdogId?: string;
+      wakeAfterSeconds?: number;
       summary?: string | null;
       evidenceRef?: string | null;
     }>().catch(() => ({} as never));
@@ -570,6 +572,8 @@ export function queueRoutes(): Hono {
         // OPR.0.4.4.19 FR-6 — the leg-1 park surface: blockedOn plus the
         // park-time summary/evidence_ref persist inputs.
         blockedOn: body.blockedOn,
+        wakeWatchdogId: body.wakeWatchdogId,
+        wakeAfterSeconds: body.wakeAfterSeconds,
         summary: body.summary,
         evidenceRef: body.evidenceRef,
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
@@ -922,7 +926,7 @@ export function queueRoutes(): Hono {
     const qitemId = c.req.param("qitemId");
     const repo = getRepo(c);
     if (!repo.getById(qitemId)) return c.json({ error: "qitem_not_found" }, 404);
-    return c.json(repo.transitionLog.listForQitem(qitemId));
+    return c.json(repo.listTransitions(qitemId));
   });
 
   // GET /:qitemId — show one

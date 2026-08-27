@@ -102,6 +102,10 @@ describe("queue routes", () => {
     const wake = db.prepare("SELECT wake_kind, wake_ref FROM queue_transition_wakes WHERE qitem_id = ?")
       .get(row.qitemId) as { wake_kind: string; wake_ref: string } | undefined;
     expect(wake?.wake_kind).toBe("timer");
+    const transitions = await app.request(`/api/queue/${row.qitemId}/transitions`);
+    expect(transitions.status).toBe(200);
+    expect((await transitions.json() as Array<{ wake?: { kind: string; ref: string } }>).at(-1)?.wake)
+      .toMatchObject({ kind: "timer", ref: wake?.wake_ref });
     const job = wake
       ? db.prepare("SELECT target_session, interval_seconds, state FROM watchdog_jobs WHERE job_id = ?").get(wake.wake_ref)
       : undefined;

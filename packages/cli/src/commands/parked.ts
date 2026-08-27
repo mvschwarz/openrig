@@ -10,7 +10,22 @@ interface SeatDiagnosis {
   parked: boolean | "indeterminate";
   reason: string;
   activity: { value: string; needsInput: { count: number; reason: string | null }; decidedBy: string | null; confidence: string };
-  obligations: { scope: string; openCount: number; heldCount: number; complete: boolean; limit: number; items: Array<{ qitemId: string; state: string; summary?: string | null }> };
+  obligations: {
+    scope: string;
+    openCount: number;
+    heldCount: number;
+    unhealthyHeldCount?: number;
+    complete: boolean;
+    limit: number;
+    items: Array<{ qitemId: string; state: string; summary?: string | null }>;
+    held?: Array<{
+      qitemId: string;
+      state: string;
+      summary?: string | null;
+      healthy?: boolean;
+      wake: { kind: string; ref: string; live: boolean; unconsumed?: boolean; deliveryStatus?: string | null } | null;
+    }>;
+  };
   confidence: { activity: string; obligations: string };
 }
 
@@ -26,11 +41,21 @@ function renderSeat(d: SeatDiagnosis): void {
     console.log(`    - ${item.state} ${item.qitemId}${item.summary ? ` — ${item.summary}` : ""}`);
   }
   if (d.obligations.items.length > 10) console.log(`    … and ${d.obligations.items.length - 10} more`);
+  for (const item of d.obligations.held ?? []) {
+    const wake = item.wake;
+    const wakeText = wake
+      ? `${wake.kind} ${wake.ref}: ${wake.unconsumed ? `FIRED but unconsumed${wake.deliveryStatus ? ` (${wake.deliveryStatus})` : ""}` : wake.live ? "live" : "not live"}`
+      : "no recorded wake";
+    console.log(`    - HELD ${item.qitemId}${item.summary ? ` — ${item.summary}` : ""} [${wakeText}]`);
+    if (!item.healthy && !(wake?.live && !wake.unconsumed)) {
+      console.log("      Remedy: attach a live watchdog id, arm an atomic timer, or name a live blocker qitem; deferred/not-imminent work with a workspace home belongs in its mission/slice.");
+    }
+  }
 }
 
 export function parkedCommand(): Command {
   return new Command("parked")
-    .description("Are we parked? Derived diagnosis: idle or input-blocked seats holding open obligations (HELD rows are deliberate, never parked)")
+    .description("Are we parked? Derived diagnosis: stopped seats owing work; HELD is healthy only while its recorded wake is live")
     .argument("[seat]", "Seat node id or canonical session name; omit to diagnose the whole rig")
     .option("--rig <rig>", "Rig scope (defaults to your seat's rig from OPENRIG_SESSION_NAME; a seat argument carrying @rig self-scopes)")
     .option("--json", "Full diagnosis as JSON")

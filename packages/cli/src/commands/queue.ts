@@ -83,6 +83,16 @@ function printResult(json: boolean, body: unknown, status: number): void {
 // IMPL-SPEC §2.3-2.4.
 const SHOW_BODY_PREVIEW_MAX_CODEPOINTS = 512;
 
+function wakeDurationSeconds(value: string): number {
+  const match = /^(\d+)(s|m|h)?$/i.exec(value.trim());
+  if (!match) throw new Error("wake duration must be a positive integer with optional s, m, or h suffix");
+  const amount = Number.parseInt(match[1]!, 10);
+  const factor = match[2]?.toLowerCase() === "h" ? 3600 : match[2]?.toLowerCase() === "m" ? 60 : 1;
+  const seconds = amount * factor;
+  if (!Number.isSafeInteger(seconds) || seconds <= 0) throw new Error("wake duration must be positive");
+  return seconds;
+}
+
 export interface BodyPreview {
   preview: string;
   bodyBytes: number;
@@ -495,6 +505,8 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--closure-reason <reason>", "Required for state=done; also 'superseded' on state=canceled (with --closure-target = the successor) records a supersession, distinct from an abandoned cancel")
     .option("--closure-target <target>", "Required for handed_off_to, blocked_on, escalation, and superseded")
     .option("--blocked-on <blocker>", "For state=blocked: the blocker — a qitem id (must exist and be live), a human seat (FR-6 park; requires summary + evidence_ref), or a typed non-qitem gate 'fold:<what>' / 'auth:<what>' / 'external:<what>'")
+    .option("--wake-watchdog <jobId>", "For state=blocked: attach an existing live watchdog id targeting the row owner")
+    .option("--wake-after <duration>", "For state=blocked: atomically arm a timer (for example 90s, 15m, 2h)", wakeDurationSeconds)
     .option("--summary <text>", "OPR.0.4.4.19 FR-6: park-time summary persisted onto the item (human-seat parks only)")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-6: park-time durable-artifact pointer persisted onto the item (human-seat parks only)")
     .option("--note <text>", "Transition note for the audit log")
@@ -506,6 +518,8 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       closureReason?: string;
       closureTarget?: string;
       blockedOn?: string;
+      wakeWatchdog?: string;
+      wakeAfter?: number;
       summary?: string;
       evidenceRef?: string;
       note?: string;
@@ -523,6 +537,8 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           closureReason: opts.closureReason,
           closureTarget: opts.closureTarget,
           blockedOn: opts.blockedOn,
+          wakeWatchdogId: opts.wakeWatchdog,
+          wakeAfterSeconds: opts.wakeAfter,
           summary: opts.summary,
           evidenceRef: opts.evidenceRef,
           transitionNote: opts.note,
@@ -540,19 +556,33 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
   // potato and no closure_reason is involved.
   cmd
     .command("block <qitemId>")
-    .description("Park a qitem as state=blocked on a blocker (qitem id, or a human seat for a needs-human park). Non-terminal: the owner keeps the item; resolution returns to it (rig queue resolve).")
-    .requiredOption("--on <blocker>", "The blocker: a qitem id, or a human-seat session (e.g. human-review@kernel) for the needs-human park")
+    .description("Park a qitem as HELD with a continuation and wake. Choose a watchdog id, timer, or live blocker.")
+    .requiredOption("--on <blocker>", "The blocker: a live blocker qitem, typed gate, or human-seat session")
     .option("--actor <session>", "(deprecated, ignored) the actor is derived from the seat env (X-OpenRig-Session); the park writes via the same P21 I3 header-deriving update route")
     .option("--summary <text>", "Plain-language summary of the decision owed (required for human-seat parks unless already on the item)")
     .option("--evidence-ref <path>", "Durable artifact the human judges (required for human-seat parks unless already on the item)")
     .option("--note <text>", "Transition note for the audit log")
+    .option("--continuation <text>", "What resumes. Workspace deferred/not-imminent work belongs in a mission/slice")
+    .option("--wake-watchdog <jobId>", "Attach an existing live watchdog id targeting the parked owner")
+    .option("--wake-after <duration>", "Atomically arm a timer with the park (for example 90s, 15m, 2h)", wakeDurationSeconds)
     .option("--json", "JSON output for agents")
+    .addHelpText("after", `
+Every deliberate HELD row should name its continuation and one live wake:
+  --wake-watchdog <jobId>  attach a live watchdog id
+  --wake-after <duration>  arm a timer atomically with the park
+  --on qitem-…             a live blocker resolution is the wake
+
+HELD is only for a row that must stay on the queue while waiting. Work with a
+workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .action(async (qitemId: string, opts: {
       on: string;
       actor?: string;
       summary?: string;
       evidenceRef?: string;
       note?: string;
+      continuation?: string;
+      wakeWatchdog?: string;
+      wakeAfter?: number;
       json?: boolean;
     }) => {
       // P21 I3 reconcile: actor DERIVED from the seat env (X-OpenRig-Session) — --actor deprecated +
@@ -565,7 +595,9 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           blockedOn: opts.on,
           summary: opts.summary,
           evidenceRef: opts.evidenceRef,
-          transitionNote: opts.note ?? `parked on ${opts.on}`,
+          wakeWatchdogId: opts.wakeWatchdog,
+          wakeAfterSeconds: opts.wakeAfter,
+          transitionNote: opts.continuation ? `continuation: ${opts.continuation}` : (opts.note ?? `parked on ${opts.on}`),
         });
         printResult(opts.json ?? false, res.data, res.status);
       });

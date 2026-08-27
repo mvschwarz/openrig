@@ -27,6 +27,21 @@ export interface ObligationRow {
   summary?: string | null;
 }
 
+export interface ParkWakeDiagnosis {
+  kind: "watchdog" | "timer" | "blocker";
+  ref: string;
+  live: boolean;
+  phase?: "armed" | "fired";
+  deliveryStatus?: string | null;
+  unconsumed: boolean;
+}
+
+export interface HeldObligation extends ObligationRow {
+  state: "blocked";
+  wake: ParkWakeDiagnosis | null;
+  healthy: boolean;
+}
+
 export interface ObligationRead {
   /** The rows the reader returned (bounded by `limit`). */
   rows: ObligationRow[];
@@ -39,6 +54,8 @@ export interface ParkedQueryDeps {
   /** The obligation face, scoped destination + open-state; the query never widens or
    *  narrows this silently — the scope string in the result names exactly what ran. */
   listOpenObligations: (destinationSession: string, limit: number) => ObligationRead;
+  /** Optional only for pre-073 fixtures. Missing is honestly wakeless. */
+  getParkWake?: (qitemId: string) => unknown;
 }
 
 export interface SeatParkedDiagnosis {
@@ -58,10 +75,12 @@ export interface SeatParkedDiagnosis {
     scope: string;
     openCount: number;
     heldCount: number;
+    unhealthyHeldCount: number;
     /** false when returned == limit: the count may be truncated (never silently). */
     complete: boolean;
     limit: number;
     items: ObligationRow[];
+    held: HeldObligation[];
   };
   confidence: { activity: "high" | "none"; obligations: "complete" | "truncation-possible" | "unavailable" };
 }
@@ -74,6 +93,23 @@ export interface RigParkedDiagnosis {
 
 export const PARKED_OBLIGATION_LIMIT = 500;
 
+const HELD_REMEDY = "Remedy: attach a live watchdog id, arm an atomic timer, or name a live blocker qitem. The queue is a conveyor: work with a workspace home that is deferred/not-imminent belongs in its workspace mission/slice, not in HELD.";
+
+function parseWake(value: unknown): ParkWakeDiagnosis | null {
+  if (!value || typeof value !== "object") return null;
+  const wake = value as Record<string, unknown>;
+  if (!(["watchdog", "timer", "blocker"] as unknown[]).includes(wake.kind)) return null;
+  if (typeof wake.ref !== "string" || typeof wake.live !== "boolean") return null;
+  return {
+    kind: wake.kind as ParkWakeDiagnosis["kind"],
+    ref: wake.ref,
+    live: wake.live,
+    phase: wake.phase === "armed" || wake.phase === "fired" ? wake.phase : undefined,
+    deliveryStatus: typeof wake.deliveryStatus === "string" ? wake.deliveryStatus : null,
+    unconsumed: wake.unconsumed === true,
+  };
+}
+
 export function diagnoseSeatParked(
   deps: ParkedQueryDeps,
   seat: { seatNodeId: string; sessionName: string },
@@ -81,7 +117,11 @@ export function diagnoseSeatParked(
   const state = deps.getSeatState(seat.seatNodeId);
   const scope = `destination=${seat.sessionName} state=pending,in-progress,blocked limit=${PARKED_OBLIGATION_LIMIT}`;
   const read = deps.listOpenObligations(seat.sessionName, PARKED_OBLIGATION_LIMIT);
-  const held = read.rows.filter((r) => r.state === "blocked");
+  const held: HeldObligation[] = read.rows.filter((r) => r.state === "blocked").map((row) => {
+    const wake = parseWake(deps.getParkWake?.(row.qitemId));
+    return { ...row, state: "blocked", wake, healthy: wake?.live === true && !wake.unconsumed };
+  });
+  const unhealthyHeld = held.filter((row) => !row.healthy);
   const open = read.rows.filter((r) => r.state !== "blocked");
   const complete = read.rows.length < read.limit;
 
@@ -89,9 +129,11 @@ export function diagnoseSeatParked(
     scope,
     openCount: open.length,
     heldCount: held.length,
+    unhealthyHeldCount: unhealthyHeld.length,
     complete,
     limit: read.limit,
     items: open,
+    held,
   };
 
   const activityKnown = state !== null && state.activity !== "unknown";
@@ -123,13 +165,16 @@ export function diagnoseSeatParked(
   }
 
   const stopped = state.activity === "idle-at-prompt" || state.needsInput.count > 0;
-  const parked = stopped && open.length > 0;
+  const parked = stopped && (open.length > 0 || unhealthyHeld.length > 0);
+  const unconsumed = unhealthyHeld.filter((row) => row.wake?.unconsumed);
   const reason = parked
     ? state.needsInput.count > 0
-      ? `needs-input (${state.needsInput.reason ?? "unanswered block"}) with ${open.length} open obligation(s) — an unanswered block nobody is watching`
-      : `idle-at-prompt with ${open.length} open obligation(s) — a turn ended without a handoff`
+      ? `needs-input (${state.needsInput.reason ?? "unanswered block"}) with ${open.length} open obligation(s) and ${unhealthyHeld.length} unhealthy HELD row(s) — ${unconsumed.length > 0 ? `${unconsumed.length} wake(s) fired but remain unconsumed. ` : ""}${HELD_REMEDY}`
+      : `idle-at-prompt with ${open.length} open obligation(s) and ${unhealthyHeld.length} unhealthy HELD row(s) — ${unconsumed.length > 0 ? `${unconsumed.length} wake(s) fired but remain unconsumed. ` : ""}${HELD_REMEDY}`
     : stopped
-      ? `stopped but the board is clean (${held.length} held row(s) are deliberate, not parked)`
+      ? held.length > 0
+        ? `stopped with ${held.length} HELD row(s), all healthy with a live wake — not parked`
+        : "stopped but the board is clean"
       : `working — not parked`;
 
   return {

@@ -82,6 +82,9 @@ interface WatchdogPolicyEngineDeps {
    * SKIPPING, so an unknown target-generation must never skip a legitimate wake (note-2 inversion).
    */
   resolveTargetGeneration?: (sessionName: string) => string | null;
+  /** Queue-side observer for a wake attempt. It appends resume evidence to
+   *  every HELD row armed to this job; delivery outcome is preserved. */
+  onWakeAttempt?: (attempt: { jobId: string; deliveryStatus: string }) => void;
 }
 
 const PHASE_C_BUILTIN_POLICIES: ReadonlyArray<Policy> = [
@@ -140,6 +143,7 @@ export class WatchdogPolicyEngine {
   private readonly now: () => Date;
   private readonly policies: Map<string, Policy>;
   private readonly resolveTargetGeneration?: (sessionName: string) => string | null;
+  private readonly onWakeAttempt?: (attempt: { jobId: string; deliveryStatus: string }) => void;
 
   constructor(deps: WatchdogPolicyEngineDeps) {
     this.jobsRepo = deps.jobsRepo;
@@ -147,6 +151,7 @@ export class WatchdogPolicyEngine {
     this.eventBus = deps.eventBus;
     this.deliver = deps.deliver;
     this.resolveTargetGeneration = deps.resolveTargetGeneration;
+    this.onWakeAttempt = deps.onWakeAttempt;
     this.parseSpec = deps.parseSpec ?? defaultParseSpec;
     this.now = deps.now ?? (() => new Date());
     this.policies = new Map();
@@ -360,6 +365,7 @@ export class WatchdogPolicyEngine {
       targetSession: outcome.target.session,
       deliveryStatus: delivery.status,
     });
+    this.onWakeAttempt?.({ jobId: job.jobId, deliveryStatus: delivery.status });
     return {
       job: this.jobsRepo.getByIdOrThrow(job.jobId),
       outcome,
