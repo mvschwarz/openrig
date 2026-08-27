@@ -80,11 +80,20 @@ describe("default onboarding pack", () => {
   });
 
   it("keeps operator contact open without teaching a router hop", () => {
-    const text = packText();
-    expect(text).toContain("Any agent may contact them directly for");
-    expect(text).toContain("orchestrators and PMs may also send updates");
-    expect(text).toContain("use a durable surface");
-    expect(text).not.toMatch(/other seats route through them|role-gated/i);
+    const pack = packText();
+    const ontology = readFileSync(
+      resolve(DAEMON_ROOT, "context-packs-src/world/install/04-ontology.md"),
+      "utf8",
+    );
+
+    expect(pack).toContain("Any agent may contact them directly for");
+    expect(pack).toContain("use a durable surface");
+    expect(ontology).toContain("ANY seat may contact the operator directly");
+    expect(ontology).toContain("prefer the durable escalation surfaces");
+    for (const text of [pack, ontology]) {
+      expect(text).toContain("orchestrators and PMs may also send updates");
+      expect(text).not.toMatch(/other seats route through them|role-gated/i);
+    }
   });
 
   it("ships a no-shared-vocabulary selection probe that is red on blank and green on packed context", () => {
