@@ -40,6 +40,7 @@ describe("SeatHandoverService", () => {
   let readSidecar: ReturnType<typeof vi.fn>;
   let captureCodexThreadId: ReturnType<typeof vi.fn>;
   let invalidateRetiringOccupant: ReturnType<typeof vi.fn>;
+  let declareOccupantSwap: ReturnType<typeof vi.fn>;
   let resolvePredecessorRecap: ReturnType<typeof vi.fn>;
   let getDefaultShell: ReturnType<typeof vi.fn>;
   let getPaneCommand: ReturnType<typeof vi.fn>;
@@ -75,6 +76,7 @@ describe("SeatHandoverService", () => {
     readSidecar = vi.fn(() => ({ ok: true, data: { session_id: "claude-sid-123" } }));
     captureCodexThreadId = vi.fn(async () => "codex-discovered-tok");
     invalidateRetiringOccupant = vi.fn();
+    declareOccupantSwap = vi.fn();
     resolvePredecessorRecap = vi.fn(() => ({ unavailableReason: "test default: no record" }));
     // KI-14: healthy default — the respawned pane comes up as a blank shell.
     getDefaultShell = vi.fn(async () => "/bin/zsh");
@@ -108,6 +110,7 @@ describe("SeatHandoverService", () => {
       contextUsageStore: { readSidecar } as never,
       resumeTokenCapturer: { captureCodexThreadId } as never,
       occupantInvalidator: { invalidateRetiringOccupant },
+      activityOracle: { declareOccupantSwap },
       predecessorRecapResolver: resolvePredecessorRecap as never,
       readinessTimeoutMs: 50,
       sleep: async () => {},
@@ -673,6 +676,32 @@ describe("SeatHandoverService", () => {
     expect(invalidateRetiringOccupant).not.toHaveBeenCalled();
   });
 
+  it("S19 (territory ruling 01530): the commit declares the occupant swap to the activity oracle — seat-keyed rungs re-declare, no bleed", async () => {
+    seedSeat({ runtime: "codex" });
+    const retiringGen = sessionRegistry.currentOccupantGenerationForSession("dev-impl@seat-rig");
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
+
+    expect(result.ok).toBe(true);
+    expect(declareOccupantSwap).toHaveBeenCalledTimes(1);
+    const [seatNodeId, generation] = declareOccupantSwap.mock.calls[0]! as [string, string];
+    const node = rigRepo.listNodes(rigRepo.listRigs()[0]!.id)[0]!;
+    expect(seatNodeId).toBe(node.id); // seat-keyed: the durable node id, never the session name
+    expect(typeof generation).toBe("string");
+    expect(generation.length).toBeGreaterThan(0);
+    expect(generation).not.toBe(retiringGen); // the SWAP identity is the successor tenure, not the retiree
+  });
+
+  it("S19: a handover that fails before commit never declares a swap (no phantom swap events)", async () => {
+    seedSeat({ runtime: "codex" });
+    respawnPane.mockResolvedValue({ ok: false, code: "no_server", message: "no server running" });
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
+
+    expect(result.ok).toBe(false);
+    expect(declareOccupantSwap).not.toHaveBeenCalled();
+  });
+
   it("recap leg: threads the predecessor recap + record path into the delivered restore packet when a record resolves", async () => {
     // The recap leg fires: resolve the predecessor's provider record → a bounded labeled-from-record recap
     // → threaded into the packet delivered to the successor (honest-degraded, never called "scrollback").
@@ -727,6 +756,7 @@ describe("SeatHandoverService", () => {
       contextUsageStore: { readSidecar } as never,
       resumeTokenCapturer: { captureCodexThreadId } as never,
       occupantInvalidator: { invalidateRetiringOccupant },
+      activityOracle: { declareOccupantSwap },
       predecessorRecapResolver: resolvePredecessorRecap as never,
       readinessTimeoutMs: 50,
       sleep: sleepSpy,
