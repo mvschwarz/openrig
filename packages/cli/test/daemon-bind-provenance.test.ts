@@ -61,7 +61,12 @@ describe("S20 — resolveBindIntent (route A): the config resolver's env source 
 });
 
 describe("S20 — the restored listener gate: adoption fails loudly on a dropped listener", () => {
-  const probeUp = (up: Set<string>) => async (url: string) => [...up].some((h) => url.includes(h));
+  // r2 re-review repair: the probe is TRI-STATE — "healthy" | "unhealthy" |
+  // "indeterminate". Positive bad-bind evidence (refused connection / explicit
+  // unhealthy answer) may kill; a transient probe exception (timeout etc.) is
+  // INDETERMINATE and must never be promoted to missing-listener evidence.
+  const probeUp = (up: Set<string>) => async (url: string) =>
+    [...up].some((h) => url.includes(h)) ? ("healthy" as const) : ("unhealthy" as const);
 
   it("0.5.3 REGRESSION SHAPE: default mode with tailscale detected but only loopback bound → LOUD failure naming the missing listener", async () => {
     const r = await verifyRequiredListeners({
@@ -95,6 +100,24 @@ describe("S20 — the restored listener gate: adoption fails loudly on a dropped
     expect(r.missing).toContain("100.95.124.60");
   });
 
+  it("r2 REPAIR: a one-shot probe EXCEPTION is INDETERMINATE — never promoted to missing-listener evidence", async () => {
+    let tailAttempts = 0;
+    const r = await verifyRequiredListeners({
+      bind: { mode: "default", hosts: ["127.0.0.1", "100.64.0.9"], tailscaleDetected: true },
+      port: 7433,
+      probe: async (url) => {
+        if (url.includes("100.64.0.9")) {
+          tailAttempts++;
+          return "indeterminate"; // the wiring maps a thrown timeout here — provenance preserved
+        }
+        return "healthy";
+      },
+    });
+    expect(tailAttempts).toBe(1);
+    expect(r.ok).toBe("indeterminate"); // NOT false — no SIGTERM evidence exists
+    if (r.ok === "indeterminate") expect(r.reason).toMatch(/indeterminate|could not be checked/i);
+  });
+
   it("explicit mode requires exactly the declared host", async () => {
     const ok = await verifyRequiredListeners({
       bind: { mode: "explicit", hosts: ["100.95.124.51"], tailscaleDetected: true },
@@ -108,5 +131,57 @@ describe("S20 — the restored listener gate: adoption fails loudly on a dropped
       probe: probeUp(new Set()),
     });
     expect(bad.ok).toBe(false);
+  });
+});
+
+// ── r2 re-review repair: the gate at the START level — probe error PROVENANCE ──
+// A transient probe exception on a newly started daemon must never SIGTERM it;
+// only positive bad-bind evidence (refused connection / explicit unhealthy) kills.
+import { startDaemon, type LifecycleDeps } from "../src/daemon-lifecycle.js";
+import { vi } from "vitest";
+
+function gateDeps(tailBehavior: (attempt: number) => "ok" | "throw-timeout" | "throw-refused") {
+  let tailAttempts = 0;
+  const kill = vi.fn(() => true);
+  const bindBody = { bind: { mode: "default", hosts: ["127.0.0.1", "100.64.0.9"], tailscaleDetected: true } };
+  const deps: LifecycleDeps = {
+    spawn: vi.fn(() => ({ pid: 4242, unref: vi.fn() }) as never),
+    fetch: vi.fn(async (url: string) => {
+      if (url.includes("100.64.0.9")) {
+        tailAttempts++;
+        const behavior = tailBehavior(tailAttempts);
+        if (behavior === "throw-timeout") throw new Error("fetch timeout while probing");
+        if (behavior === "throw-refused") {
+          const err = new Error("fetch failed") as Error & { cause?: { code: string } };
+          err.cause = { code: "ECONNREFUSED" };
+          throw err;
+        }
+      }
+      return { ok: true, json: async () => bindBody } as never;
+    }) as never,
+    kill,
+    readFile: vi.fn(() => null),
+    writeFile: vi.fn(),
+    removeFile: vi.fn(),
+    exists: vi.fn(() => false),
+    mkdirp: vi.fn(),
+    openForAppend: vi.fn(() => 3),
+    isProcessAlive: vi.fn(() => true),
+  };
+  return { deps, kill, tailAttempts: () => tailAttempts };
+}
+
+describe("S20 r2 repair — startDaemon gate: transient probe failure never kills a healthy daemon", () => {
+  it("CONTROL: a one-shot probe TIMEOUT resolves the start WITHOUT SIGTERM (indeterminate, not evidence)", async () => {
+    const { deps, kill } = gateDeps((attempt) => (attempt === 1 ? "throw-timeout" : "ok"));
+    const state = await startDaemon({ port: 7433, db: "/tmp/t.db" }, deps);
+    expect(state.pid).toBe(4242);
+    expect(kill).not.toHaveBeenCalled(); // the reviewer's reproduction: candidate killed here
+  });
+
+  it("positive evidence still kills: a REFUSED tailscale listener SIGTERMs and fails loudly", async () => {
+    const { deps, kill } = gateDeps(() => "throw-refused");
+    await expect(startDaemon({ port: 7433, db: "/tmp/t.db" }, deps)).rejects.toThrow(/listener adoption gate/);
+    expect(kill).toHaveBeenCalled();
   });
 });
