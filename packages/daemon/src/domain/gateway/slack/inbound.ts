@@ -22,6 +22,10 @@ export interface SlackEvent {
   bot_id?: string;
   text?: string;
   ts?: string;
+  /** S10 thread routing: present on a threaded reply (= the PARENT root's ts). Absent on a
+   *  top-level channel message. The affordance discriminator: thread_ts==ts parent,
+   *  thread_ts!=ts reply, absent plain. */
+  thread_ts?: string;
   channel?: string;
   files?: unknown[];
 }
@@ -70,6 +74,10 @@ export interface InboundDeps {
   /** A6 v3 registration gate. Resolves ev.user -> a registered human (or refuses). Injected so
    *  this core stays pure/testable; the subsystem wires it via the daemon human-registry resolver. */
   resolveSender: (slackUserId: string) => InboundSenderResolution;
+  /** S10 thread routing (deterministic, zero inference): resolve the destination + tags for an
+   *  admitted event. Absent → every event lands on the static `destination` (the pre-routing
+   *  shape, and the fallback the tests pin). */
+  resolveRoute?: (ev: SlackEvent) => { destination: string; tags?: string[] };
   sourceLabel?: string;
   log?: (msg: string) => void;
 }
@@ -107,13 +115,15 @@ export class InboundRouter {
     this.inflight.add(ts);
     try {
       const { summary, body } = this.summaryOf(ev);
+      // S10 — deterministic route (thread map) when wired; static destination otherwise.
+      const route = this.deps.resolveRoute?.(ev) ?? { destination: this.deps.destination };
       let qitemId: string;
       try {
         qitemId = await this.deps.queue.createQitem({
           source: who.source, // the REGISTERED human's canonical ref (human-class), never a raw platform id
-          destination: this.deps.destination,
+          destination: route.destination,
           priority: "routine",
-          tags: ["founder-slack", "inbound"],
+          tags: route.tags ?? ["founder-slack", "inbound"],
           summary,
           body,
         });
@@ -122,7 +132,7 @@ export class InboundRouter {
         return { landed: false, reason: "create_failed" };
       }
       this.deps.seen.mark(ts, "landed"); // durable qitem exists → safe to mark
-      this.deps.log?.(`qitem ${qitemId} -> ${this.deps.destination} (ts=${ts})`);
+      this.deps.log?.(`qitem ${qitemId} -> ${route.destination} (ts=${ts})`);
       return { landed: true, qitemId };
     } finally {
       this.inflight.delete(ts);

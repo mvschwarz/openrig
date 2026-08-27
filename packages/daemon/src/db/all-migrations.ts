@@ -74,6 +74,7 @@ import { enforcerDecisionsSchema } from "./migrations/068_enforcer_decisions.js"
 import { appliedLaunchObservationsSchema } from "./migrations/069_applied_launch_observations.js";
 import { appliedLaunchObservationInvalidationsSchema } from "./migrations/070_applied_launch_observation_invalidations.js";
 import { dropEnforcerDecisionsSchema } from "./migrations/071_drop_enforcer_decisions.js";
+import { threadSeatMapSchema } from "./migrations/072_thread_seat_map.js";
 import type { Migration } from "./migrate.js";
 
 /** Ordered 001→071 (068 enforcer decisions, dropped forward by 071; 069/070 W3 launch truth). */
@@ -149,4 +150,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   appliedLaunchObservationsSchema,
   appliedLaunchObservationInvalidationsSchema,
   dropEnforcerDecisionsSchema,
+  threadSeatMapSchema,
 ];

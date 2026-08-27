@@ -22,6 +22,8 @@ import { SlackOutboundDriver, OUTBOUND_OP } from "./outbound-driver.js";
 import { subsystemSlackDeliver } from "./slack-delivery.js";
 import { InboundRouter, type SlackEvent } from "./inbound.js";
 import { makeInboundSenderResolver, type RegistrySurface } from "./inbound-admission.js";
+import { ThreadSeatMap, formatPostedStamp } from "./thread-seat-map.js";
+import { makeThreadRouteResolver } from "./thread-routing.js";
 import { startSocketInbound, type SocketInboundHandle, type WsLike } from "./socket-inbound.js";
 import { loadHumanRegistry, resolveSlackHandle } from "../human-registry.js";
 import type { QueueRepository } from "../../queue-repository.js";
@@ -74,6 +76,9 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   const outboundSeen = new SeenStore(path.join(stateDir(opts.home), "slack-outbound-seen.jsonl"));
   const delivered = new SeenStore(path.join(stateDir(opts.home), "slack-delivered-decisions.jsonl"));
 
+  // S10 thread routing — the map shares the daemon DB (queue rows carry the rebuild stamps).
+  const threadMap = new ThreadSeatMap(opts.queueRepo.db);
+
   // Late-bound so deliver can release the driver's in-flight guard (built after the wire).
   let releaseRef: (qitemId: string) => void = () => {};
 
@@ -86,6 +91,26 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         delivered,
         outboundSeen,
         release: (q) => releaseRef(q),
+        // Thread reuse: an open (human, seat) conversation threads; otherwise a new root.
+        // For an outbound alert, human = the destination seat-ref, seat = the source seat.
+        resolveThreadTs: (p) =>
+          threadMap.resolveOpenForPair(p.destinationSession ?? "", p.sourceSession ?? "")?.threadTs,
+        onPostedRoot: (p, ts) => {
+          const human = p.destinationSession ?? "";
+          const seat = p.sourceSession ?? "";
+          threadMap.open({ threadTs: ts, channel: cfg.channel!, human, seat, conversationId: p.qitemId });
+          // The REBUILD stamp: the queue row is the durable source the map re-derives from.
+          try {
+            opts.queueRepo.update({
+              qitemId: p.qitemId,
+              actorSession: "daemon@kernel",
+              transitionNote: formatPostedStamp({ threadTs: ts, messageTs: ts, channel: cfg.channel!, human, seat, conversationId: p.qitemId }),
+            });
+          } catch (e) {
+            // Stamp failure degrades REBUILDABILITY, not routing — loud, never fatal to delivery.
+            log(`thread stamp failed for ${p.qitemId}: ${(e as Error).message}`);
+          }
+        },
         log,
       })
     : async () => ({ ok: false as const, class: "slack-outbound-not-configured", detail: "bot token or channel missing" });
@@ -131,6 +156,9 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       deadLetter: dead,
       destination: cfg.inboundDestination,
       resolveSender: makeInboundSenderResolver(registry, opts.home),
+      // S10 — deterministic thread routing: mapped thread → exactly the mapped seat; unmapped
+      // or human-initiated → the configured orchestrator slot as an unrouted-signal row.
+      resolveRoute: makeThreadRouteResolver({ map: threadMap, unroutedDestination: cfg.inboundDestination, log }),
       log,
     });
     let handle: SocketInboundHandle | undefined;
