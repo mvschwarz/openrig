@@ -1,4 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -6,11 +8,14 @@ import { coreSchema } from "../src/db/migrations/001_core_schema.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { watchdogJobsSchema } from "../src/db/migrations/031_watchdog_jobs.js";
 import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summary.js";
 import { queueItemEvidenceRefSchema } from "../src/db/migrations/048_queue_item_evidence_ref.js";
 import { EventBus } from "../src/domain/event-bus.js";
-import { QueueRepository } from "../src/domain/queue-repository.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { QueueRepository, type QueueNudgeTransport } from "../src/domain/queue-repository.js";
+import type { PersistedEvent } from "../src/domain/types.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 
 // S03 R25 RED-FIRST fixture: this is the contract shape migration 073 will ship.
@@ -35,8 +40,11 @@ function createWakeContractTable(db: Database.Database): void {
 
 describe("S03 R25 — a park records its wake on the append-only transition", () => {
   let db: Database.Database;
+  let bus: EventBus;
   let repo: QueueRepository;
   let jobs: WatchdogJobsRepository;
+  let sent: Array<{ session: string; text: string }>;
+  let transportResult: Awaited<ReturnType<QueueNudgeTransport["send"]>>;
 
   beforeEach(() => {
     db = createDb();
@@ -45,12 +53,23 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
       eventsSchema,
       queueItemsSchema,
       queueTransitionsSchema,
+      outboxEntriesSchema,
       watchdogJobsSchema,
       queueItemSummarySchema,
       queueItemEvidenceRefSchema,
     ]);
     createWakeContractTable(db);
-    repo = new QueueRepository(db, new EventBus(db));
+    bus = new EventBus(db);
+    repo = new QueueRepository(db, bus);
+    repo.attachOutbox(new OutboxHandler(db));
+    sent = [];
+    transportResult = { ok: true, verified: true };
+    repo.attachTransport({
+      async send(session, text) {
+        sent.push({ session, text });
+        return transportResult;
+      },
+    });
     jobs = new WatchdogJobsRepository(db);
   });
 
@@ -128,7 +147,7 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     expect(wakes(row.qitemId)).toEqual([]);
   });
 
-  it("records a live blocker whose terminal resolution is the wake", async () => {
+  it("auto-unpark publishes the dependent event and records the real post-commit delivery outcome", async () => {
     const blocker = await item("gate@rig");
     const row = await item();
     repo.update({
@@ -143,6 +162,9 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
       expect.objectContaining({ phase: "armed", wake_kind: "blocker", wake_ref: blocker.qitemId }),
     ]);
 
+    const received: PersistedEvent[] = [];
+    bus.subscribe((event) => received.push(event));
+    transportResult = { ok: false, error: "owner unreachable" };
     repo.update({
       qitemId: blocker.qitemId,
       actorSession: "gate@rig",
@@ -150,13 +172,57 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
       closureReason: "no-follow-on",
       transitionNote: "gate cleared",
     });
+
     expect(repo.getById(row.qitemId)?.state).toBe("pending");
+    expect(received.filter((event) => event.type === "queue.updated").map((event) => event.qitemId)).toEqual([
+      row.qitemId,
+      blocker.qitemId,
+    ]);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toMatchObject({ session: "worker@rig" });
+    expect(sent[0]?.text).toContain(row.qitemId);
+    expect(repo.getById(row.qitemId)?.lastNudgeResult).toBe("failed:owner unreachable");
     expect(wakes(row.qitemId).at(-1)).toMatchObject({
       phase: "fired",
       wake_kind: "blocker",
       wake_ref: blocker.qitemId,
-      delivery_status: "resumed",
+      delivery_status: "failed:owner unreachable",
     });
+    const intent = db.prepare(
+      "SELECT delivery_state FROM outbox_entries WHERE audit_pointer = ?",
+    ).get(row.qitemId) as { delivery_state: string } | undefined;
+    expect(intent?.delivery_state).toBe("failed");
+  });
+
+  it("outer transactions publish every auto-unpark event through the exact notify envelope", async () => {
+    const blocker = await item("gate@rig");
+    const row = await item();
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@rig",
+      state: "blocked",
+      blockedOn: blocker.qitemId,
+      transitionNote: "continuation: resume after gate closes",
+    });
+    const received: PersistedEvent[] = [];
+    bus.subscribe((event) => received.push(event));
+
+    bus.withNotifyEnvelope((register) => {
+      const result = repo.updateWithinTransaction({
+        qitemId: blocker.qitemId,
+        actorSession: "gate@rig",
+        state: "done",
+        closureReason: "no-follow-on",
+        transitionNote: "gate cleared transactionally",
+      });
+      register(result.persistedEvent);
+    });
+
+    expect(received.filter((event) => event.type === "queue.updated").map((event) => event.qitemId)).toEqual([
+      row.qitemId,
+      blocker.qitemId,
+    ]);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
   });
 
   it("negative control: a wakeless park still succeeds and records no invented wake", async () => {
@@ -170,6 +236,15 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     });
     expect(parked.state).toBe("blocked");
     expect(wakes(row.qitemId)).toEqual([]);
+    expect(repo.getParkWakeStatus(row.qitemId)).toBeNull();
+
+    const teaching = readFileSync(
+      resolve(import.meta.dirname, "../context-packs-src/world/install/what-you-can-do.md"),
+      "utf8",
+    );
+    expect(teaching).toContain("`parked` means the row is blocked");
+    expect(teaching).toContain("`rig parked`");
+    expect(teaching).not.toContain("it carries its wake and legitimately waits");
   });
 
   it("a fired timer appends a resume attempt; remaining blocked makes it observably unconsumed", async () => {
