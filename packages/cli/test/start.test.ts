@@ -612,3 +612,52 @@ describe("rig start (OPR.0.3.4.1)", () => {
     expect(parsed.restoredRigs[0].rigName).toBe("json-rig");
   });
 });
+
+// S20 (r2 NOT-CLEAR at 95150982d, blocker repair): `rig start`'s daemon auto-start ran
+// the pre-S20 predicate, converting env-sourced daemon.host (ENV_MAP ← OPENRIG_HOST —
+// exactly the injected routing state a managed environment carries) into explicit bind
+// intent. Equivalent coverage to the up-side pin: routing env creates NO intent and
+// never crosses into the spawned daemon env.
+describe("S20 — start auto-start: routing env never becomes bind intent", () => {
+  it("env-sourced OPENRIG_HOST through rig start creates NO bind intent (no OPENRIG_BIND_HOST, routing scrubbed)", async () => {
+    const savedHost = process.env["OPENRIG_HOST"];
+    process.env["OPENRIG_HOST"] = "100.64.55.66"; // the distinct-value discriminator
+    let spawnedEnv: Record<string, string> = {};
+    let daemonStarted = false;
+    const lifecycleDeps: LifecycleDeps = {
+      ...mockLifecycleDeps(),
+      exists: vi.fn(() => false),
+      spawn: vi.fn((_cmd, _args, opts) => {
+        daemonStarted = true;
+        spawnedEnv = (opts as { env: Record<string, string> }).env;
+        return { pid: 999, unref: vi.fn() } as never;
+      }),
+      fetch: vi.fn(async (url: string) => {
+        if (!daemonStarted) throw new Error(`refused:${url}`);
+        return { ok: url.includes("/healthz") };
+      }),
+    };
+    const prog = new Command();
+    prog.exitOverride();
+    prog.addCommand(startCommand({
+      lifecycleDeps,
+      clientFactory: () => ({
+        post: vi.fn(async () => ({ status: 200, data: { rigs: [] } })),
+        get: vi.fn(async () => ({ status: 200, data: { rigs: [], kernel: { state: "ready" } } })),
+      }) as never,
+      preflightExec: async () => "ok",
+      promptYesNo: async () => false,
+    }));
+    try {
+      await captureLogs(async () => {
+        try { await prog.parseAsync(["node", "rig", "start", "--last"]); } catch { /* restore-path errors are not this pin */ }
+      });
+      expect(daemonStarted).toBe(true); // the auto-start branch actually ran
+      expect(spawnedEnv["OPENRIG_BIND_HOST"]).toBeUndefined(); // no intent minted from routing env
+      expect(spawnedEnv["OPENRIG_HOST"]).toBeUndefined();      // and the routing var never crosses
+    } finally {
+      if (savedHost === undefined) delete process.env["OPENRIG_HOST"];
+      else process.env["OPENRIG_HOST"] = savedHost;
+    }
+  });
+});

@@ -727,9 +727,10 @@ describe("Up CLI", () => {
 
   // bug-fix slice auth-bearer-tailscale-trust forward-fix #2: `rig up`
   // auto-start path was the second product launch path materializing
-  // the default daemon.host into OPENRIG_HOST. The discriminator below
-  // proves source=default → omit (so daemon multi-binds); source=env
-  // → preserve (operator opt-in).
+  // the default daemon.host into OPENRIG_HOST. S20 re-grounded the env half:
+  // source=default → omit (daemon multi-binds); source=env is the overloaded
+  // ROUTING channel and NEVER creates bind intent (r2 NOT-CLEAR at 95150982d:
+  // this very suite carried a positive pin REQUIRING the incident behavior).
   describe("auth-bearer-tailscale-trust: up auto-start respects daemon.host source", () => {
     function makeAutoStartDeps(captureSpawn: (env: Record<string, string>) => void): StatusDeps {
       let daemonState: DaemonState | null = null;
@@ -789,7 +790,7 @@ describe("Up CLI", () => {
       expect(spawnedEnv["OPENRIG_PORT"]).toBe("7471");
     });
 
-    it("env-explicit OPENRIG_HOST is preserved into spawn env (distinct value discriminator)", async () => {
+    it("S20: env-sourced OPENRIG_HOST creates NO bind intent through up auto-start (routing never crosses)", async () => {
       const savedHost = process.env["OPENRIG_HOST"];
       const savedPort = process.env["OPENRIG_PORT"];
       // Use a distinct value so the discriminator can't pass vacuously:
@@ -814,7 +815,12 @@ describe("Up CLI", () => {
       if (savedPort === undefined) delete process.env["OPENRIG_PORT"];
       else process.env["OPENRIG_PORT"] = savedPort;
 
-      expect(spawnedEnv["OPENRIG_HOST"]).toBe("100.64.55.66");
+      // S20 (r2 blocker repair): env-sourced OPENRIG_HOST is ROUTING state — the
+      // auto-start must create NO bind intent from it and the routing var must not
+      // cross into the daemon env (the incident: injected 127.0.0.1 took single-bind
+      // and dropped the Tailscale listener).
+      expect(spawnedEnv["OPENRIG_BIND_HOST"]).toBeUndefined();
+      expect(spawnedEnv["OPENRIG_HOST"]).toBeUndefined();
       expect(spawnedEnv["OPENRIG_PORT"]).toBe("7472");
     });
   });

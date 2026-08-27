@@ -142,6 +142,9 @@ async function multiSelectPicker(items: Array<{ label: string; value: string; ch
 
 export interface StartDeps extends StatusDeps {
   promptYesNo?: (question: string) => Promise<boolean>;
+  /** Test seam (mirrors upCommand's): inject the preflight exec so auto-start tests
+   *  never run real system commands. */
+  preflightExec?: (cmd: string) => Promise<string>;
 }
 
 export function startCommand(depsOverride?: StartDeps): Command {
@@ -181,8 +184,8 @@ Examples:
           const { execSync } = await import("node:child_process");
           const { OPENRIG_DIR } = await import("../daemon-lifecycle.js");
           const preflight = new SystemPreflight({
-            exec: async (cmd: string) =>
-              execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }),
+            exec: depsOverride?.preflightExec ?? (async (cmd: string) =>
+              execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] })),
             configStore,
             getDaemonStatus: () => getDaemonStatus(deps.lifecycleDeps),
             openrigHome: OPENRIG_DIR,
