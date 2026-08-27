@@ -6,6 +6,7 @@ import { verifyStartupProof } from "../domain/startup-proof.js";
 import type { ActivityEvidence } from "../domain/activity-taxonomy.js";
 import type { AgentActivity } from "../domain/types.js";
 import * as parkedQuery from "../domain/parked-query.js";
+import { runtimeRungInventory } from "../domain/activity-taxonomy.js";
 
 // ── S19 A4 — the ingest half of the adapter seam: hook events reach the ONE oracle ──
 // (SeatActivityService) through this translation, so AgentActivityStore is reduced to a
@@ -203,6 +204,15 @@ activityRoutes.post("/hooks", async (c) => {
   const emitted = result.event as { nodeId?: string; sessionName?: string; runtime?: string } | undefined;
   if (oracle && emitted?.nodeId && emitted.sessionName) {
     const runtime = emitted.runtime ?? stringOrNull(body.runtime);
+    // Auto-declare on first hook evidence (and after a swap cleared the inventory):
+    // the runtime's inventory sets each rung's INITIAL trust (claude standing, codex
+    // hooks-at-trial per AM-2) — a successor's rungs always start unpromoted.
+    if (!oracle.hasRungInventory(emitted.nodeId)) {
+      oracle.declareRungInventory(
+        { seatNodeId: emitted.nodeId, sessionName: emitted.sessionName },
+        runtimeRungInventory(runtime),
+      );
+    }
     const evidence = evidenceFromHookActivity({
       seatNodeId: emitted.nodeId,
       sessionName: emitted.sessionName,

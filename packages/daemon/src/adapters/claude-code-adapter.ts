@@ -915,3 +915,75 @@ function stableJsonKey(value: unknown): string {
   }
   return JSON.stringify(sorted);
 }
+
+// ── OPR.0.5.5.19 A5 — the Claude self-report rung (r3): sessions/<pid>.json ──
+// Claude Code's OWN status registry (since v2.1.139): one JSON file per live process
+// under <configDir>/sessions/, carrying {name: <canonical tmux session name>, status:
+// busy|idle|shell|waiting, statusUpdatedAt, ...}. Self-reported truth, SELF-DATED
+// (statusUpdatedAt) — the research doc's top rung, resolved here by the `name` field
+// (OpenRig's canonical session name; no pane-pid plumbing needed on this path).
+// UNDOCUMENTED INTERNAL: any read/parse/shape failure returns null — the ladder falls
+// to the next rung, NEVER errors (SPEC mini-req 2a).
+
+export interface ClaudeSelfReportRead {
+  listFiles(dir: string): string[];
+  readFile(path: string): string;
+}
+
+const defaultSelfReportRead: ClaudeSelfReportRead = {
+  listFiles: (dir) => fs.readdirSync(dir),
+  readFile: (p) => fs.readFileSync(p, "utf8"),
+};
+
+/** Read the freshest self-report for `sessionName` as ladder evidence, or null.
+ *  Mapping: busy→working; idle→idle-at-prompt; shell→idle-at-prompt (turn over, a
+ *  background shell lives — the omnigent-proven mapping); waiting→needs-input (a dialog
+ *  owns input; Claude's internal `waiting` ≠ omnigent's — the collision both codebases
+ *  warn about, kept OUT of the activity enum). */
+export function readClaudeSelfReportEvidence(input: {
+  sessionsDir: string;
+  sessionName: string;
+  seatNodeId: string;
+  read?: ClaudeSelfReportRead;
+}): import("../domain/activity-taxonomy.js").ActivityEvidence | null {
+  const read = input.read ?? defaultSelfReportRead;
+  try {
+    let best: { status: string; statusUpdatedAt: number } | null = null;
+    for (const file of read.listFiles(input.sessionsDir)) {
+      if (!file.endsWith(".json")) continue;
+      let record: { name?: unknown; status?: unknown; statusUpdatedAt?: unknown };
+      try {
+        record = JSON.parse(read.readFile(nodePath.join(input.sessionsDir, file))) as typeof record;
+      } catch {
+        continue; // one malformed file never breaks the rung
+      }
+      if (record.name !== input.sessionName) continue;
+      if (typeof record.status !== "string" || typeof record.statusUpdatedAt !== "number") continue;
+      if (!best || record.statusUpdatedAt > best.statusUpdatedAt) {
+        best = { status: record.status, statusUpdatedAt: record.statusUpdatedAt };
+      }
+    }
+    if (!best) return null;
+    const base = {
+      seatNodeId: input.seatNodeId,
+      sessionName: input.sessionName,
+      rung: "self-report" as const,
+      sourceId: "claude:pid-json",
+      seq: best.statusUpdatedAt, // self-dated monotonic
+      observedAt: new Date(best.statusUpdatedAt).toISOString(),
+    };
+    switch (best.status) {
+      case "busy":
+        return { ...base, activity: "working" };
+      case "idle":
+      case "shell":
+        return { ...base, activity: "idle-at-prompt" };
+      case "waiting":
+        return { ...base, needsInput: { count: 1, reason: "dialog owns input" } };
+      default:
+        return null; // unknown vocabulary — undocumented internal, never guess
+    }
+  } catch {
+    return null; // unreadable dir ⇒ fall down the ladder
+  }
+}

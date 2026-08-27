@@ -150,3 +150,47 @@ export interface ArbitratedSeatState {
   /** The occupant swap is its OWN visible event, never an activity transition. */
   lastSwap: { generation: string; at: string } | null;
 }
+
+// ── Per-runtime rung inventories (SPEC mini-reqs 4, 5, 7) — ONE data source; the
+// adapters and the ingest auto-declaration both read these, never redefine them. ──
+
+/** Claude Code: pid.json self-report ABOVE hooks for working/idle (r3 standing), the
+ *  Stop/StopFailure hook pair (r2 standing), visible chrome (r4 standing), sampling
+ *  floor (r1). All full-lifecycle → authoritative (the named CURRENT rungs). */
+export const CLAUDE_ACTIVITY_RUNG_INVENTORY: AdapterRungInventory = {
+  adapterId: "claude-code-adapter",
+  runtime: "claude-code",
+  rungs: [
+    { rung: "self-report", lifecycleCoverage: "full", initialTrust: "authoritative" },
+    { rung: "lifecycle-hooks", lifecycleCoverage: "full", initialTrust: "authoritative" },
+    { rung: "needs-input-chrome", lifecycleCoverage: "full", initialTrust: "authoritative" },
+    { rung: "window-sampling", lifecycleCoverage: "full", initialTrust: "authoritative" },
+  ],
+};
+
+/** Codex 0.147: the four-event hook rung covers the turn lifecycle — a REAL authority
+ *  CANDIDATE (AM-2: enters at TRIAL; production agreement promotes). NO pid.json analog
+ *  (verified on-box) — its ladder tops out at hooks; sampling stays the floor. */
+export const CODEX_ACTIVITY_RUNG_INVENTORY: AdapterRungInventory = {
+  adapterId: "codex-runtime-adapter",
+  runtime: "codex",
+  rungs: [
+    { rung: "lifecycle-hooks", lifecycleCoverage: "full", initialTrust: "trial" },
+    { rung: "window-sampling", lifecycleCoverage: "full", initialTrust: "authoritative" },
+  ],
+};
+
+/** The generic tmux floor: sampling only — exactly what an undeclared seat gets. */
+export const TMUX_GENERIC_RUNG_INVENTORY: AdapterRungInventory = {
+  adapterId: "tmux-generic",
+  runtime: "tmux-generic",
+  rungs: [{ rung: "window-sampling", lifecycleCoverage: "full", initialTrust: "authoritative" }],
+};
+
+/** Resolve a runtime string to its rung inventory (the ingest auto-declaration path).
+ *  Unknown runtimes get the generic floor — partial-coverage honesty by default. */
+export function runtimeRungInventory(runtime: string | null): AdapterRungInventory {
+  if (runtime === "claude-code") return CLAUDE_ACTIVITY_RUNG_INVENTORY;
+  if (runtime === "codex") return CODEX_ACTIVITY_RUNG_INVENTORY;
+  return TMUX_GENERIC_RUNG_INVENTORY;
+}

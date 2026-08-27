@@ -56,6 +56,7 @@ import { LegacyBundleSourceResolver as BundleSourceResolver } from "./domain/bun
 import { PodBundleSourceResolver } from "./domain/bundle-source-resolver.js";
 import { PsProjectionService } from "./domain/ps-projection.js";
 import { SeatActivityService } from "./domain/seat-activity-service.js";
+import { readClaudeSelfReportEvidence } from "./adapters/claude-code-adapter.js";
 import { SeatStructuralActivityService } from "./domain/seat-structural-activity-service.js";
 import { deriveSelfHostIdSource, SeatIdentityReconciler, reconcileSelfHostIdentity } from "./domain/seat-identity-reconciler.js";
 import { SelfHostIdentityStore } from "./domain/seat-identity-store.js";
@@ -369,6 +370,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     tmux: tmuxAdapter,
     defaultWindowSeconds: 3,
     eventBus,
+    // S19 — the Claude self-report rung (pid.json), consulted per sweep for seats whose
+    // declared inventory staffs it; unreadable = null = the ladder falls, never errors.
+    selfReportReader: (sessionName, seatNodeId) => {
+      const sessionsDir = nodePath.join(process.env.CLAUDE_CONFIG_DIR ?? nodePath.join(os.homedir(), ".claude"), "sessions");
+      return readClaudeSelfReportEvidence({ sessionsDir, sessionName, seatNodeId });
+    },
   });
   // 5b82324b — the STRUCTURAL activity cache (sibling of SeatActivityService). Captures pane TEXT once
   // per running seat per tick + classifies motion STRUCTURALLY, so the `rig ps` ACTIVITY column reflects

@@ -11,7 +11,7 @@ import type {
   RungHealthEvent,
   RungTrust,
 } from "./activity-taxonomy.js";
-import { EVIDENCE_RUNG_RANK } from "./activity-taxonomy.js";
+import { EVIDENCE_RUNG_RANK, runtimeRungInventory } from "./activity-taxonomy.js";
 
 /** Default polling cadence: 1Hz. The default silence window is 3s, so
  *  1Hz polling gives at-most ~1s freshness lag on the cached observation. */
@@ -39,6 +39,9 @@ export interface SeatActivityServiceDeps {
   defaultWindowSeconds: number;
   eventBus?: EventBus;
   now?: () => Date;
+  /** S19: the self-report rung producer (Claude pid.json). Consulted per sweep for seats
+   *  whose declared inventory staffs self-report; absent = the rung is absent. */
+  selfReportReader?: (sessionName: string, seatNodeId: string) => ActivityEvidence | null;
 }
 
 export interface PollSeatOptions {
@@ -56,11 +59,14 @@ export class SeatActivityService {
   // overlapping whole-fleet sweeps — at most one sweep's worth is ever in flight.
   private sweeping = false;
 
+  private readonly selfReportReader: ((sessionName: string, seatNodeId: string) => ActivityEvidence | null) | null;
+
   constructor(deps: SeatActivityServiceDeps) {
     this.tmux = deps.tmux;
     this.defaultWindowSeconds = deps.defaultWindowSeconds;
     this.eventBus = deps.eventBus ?? null;
     this.now = deps.now ?? (() => new Date());
+    this.selfReportReader = deps.selfReportReader ?? null;
   }
 
   /**
@@ -107,6 +113,28 @@ export class SeatActivityService {
       lastActivityAt: new Date(lastActivityEpochSeconds * 1000).toISOString(),
     };
     this.latestByPaneId.set(paneId, record);
+
+    // S19: the sampler IS the window-sampling rung — feed the ladder for bound seats,
+    // and consult the self-report rung (when declared) in the same pass.
+    const seatNodeId = this.sessionToSeat.get(paneId);
+    if (seatNodeId) {
+      const seq = (this.samplerSeqBySession.get(paneId) ?? 0) + 1;
+      this.samplerSeqBySession.set(paneId, seq);
+      this.reportEvidence({
+        seatNodeId,
+        sessionName: paneId,
+        rung: "window-sampling",
+        sourceId: "tmux:window-activity",
+        seq,
+        observedAt: record.lastObservedAt,
+        activity: isActiveWithinWindow ? "working" : "idle-at-prompt",
+      });
+      const seat = this.ladder.get(seatNodeId);
+      if (this.selfReportReader && seat?.inventory?.rungs.some((r) => r.rung === "self-report")) {
+        const evd = this.selfReportReader(paneId, seatNodeId);
+        if (evd) this.reportEvidence(evd); // null = unreadable ⇒ the rung simply stales
+      }
+    }
     return record;
   }
 
@@ -138,7 +166,7 @@ export class SeatActivityService {
     this.sweeping = true;
     try {
       const rows = db.prepare(`
-        SELECT s.session_name as session_name
+        SELECT s.session_name as session_name, n.id as node_id, n.runtime as runtime
         FROM nodes n
         JOIN sessions s ON s.node_id = n.id
           AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
@@ -146,7 +174,21 @@ export class SeatActivityService {
         WHERE s.status = 'running'
           AND s.session_name IS NOT NULL
           AND COALESCE(b.attachment_type, 'tmux') = 'tmux'
-      `).all() as Array<{ session_name: string }>;
+      `).all() as Array<{ session_name: string; node_id: string; runtime: string | null }>;
+
+      // S19: every running tmux seat gets a ladder binding; undeclared seats are
+      // auto-declared from their runtime's inventory (claude authoritative standing,
+      // codex hooks-at-trial, generic sampling floor) — production-complete without
+      // touching the launch machinery.
+      for (const r of rows) {
+        const known = this.ladder.get(r.node_id);
+        if (!known || known.inventory === null) {
+          this.declareRungInventory(
+            { seatNodeId: r.node_id, sessionName: r.session_name },
+            runtimeRungInventory(r.runtime),
+          );
+        }
+      }
 
       // Drop observations for seats that are no longer running (release
       // memory + avoid stale reads from `getSeatActivity`).
@@ -255,6 +297,12 @@ export class SeatActivityService {
       lastSwap: { generation, at },
     };
     this.resolveWaiters(seat);
+  }
+
+  /** Whether this seat currently has a DECLARED rung inventory (a swap clears it —
+   *  the successor must re-declare before its rungs regain any trust). */
+  hasRungInventory(seatNodeId: string): boolean {
+    return this.ladder.get(seatNodeId)?.inventory != null;
   }
 
   /** The arbitrated, seat-keyed state every surface renders from. */
@@ -505,12 +553,15 @@ export class SeatActivityService {
     // exactly the founder-observed park cause and must stay visible.
     const chrome = this.latestByRung(seat, "needs-input-chrome");
     const hooksEv = this.latestByRung(seat, "lifecycle-hooks");
+    const selfEv = this.latestByRung(seat, "self-report");
     const needsInput: NeedsInputShape =
       chrome?.needsInput && this.rungTrust(seat, "needs-input-chrome") === "authoritative"
         ? chrome.needsInput
         : hooksEv?.needsInput && this.rungTrust(seat, "lifecycle-hooks") === "authoritative"
           ? hooksEv.needsInput
-          : { count: 0, reason: null };
+          : selfEv?.needsInput && this.rungTrust(seat, "self-report") === "authoritative"
+            ? selfEv.needsInput
+            : { count: 0, reason: null };
 
     const changed = nextActivity !== seat.arbitrated.activity
       || needsInput.count !== seat.arbitrated.needsInput.count
