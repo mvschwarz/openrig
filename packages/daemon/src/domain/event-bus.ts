@@ -25,6 +25,7 @@ export class NotifyEnvelopeError extends Error {
 
 interface ActiveEnvelope {
   persisted: Set<PersistedEvent>;
+  registered: Set<PersistedEvent>;
 }
 
 export class EventBus {
@@ -91,6 +92,17 @@ export class EventBus {
   }
 
   /**
+   * Register an exact token from a nested transactional writer with the
+   * caller's active notify envelope. Returns false outside an envelope so the
+   * same writer can collect the token for legacy post-commit notification.
+   */
+  registerPersistedWithinActiveEnvelope(token: PersistedEvent): boolean {
+    if (!this.activeEnvelope) return false;
+    this.activeEnvelope.registered.add(token);
+    return true;
+  }
+
+  /**
    * Run one caller-owned synchronous transaction under the W2b notification
    * envelope. Every token persisted through EventBus during the callback must
    * be registered before it returns. The exact object-identity sets are
@@ -104,10 +116,9 @@ export class EventBus {
       );
     }
 
-    const envelope: ActiveEnvelope = { persisted: new Set() };
-    const registered = new Set<PersistedEvent>();
+    const envelope: ActiveEnvelope = { persisted: new Set(), registered: new Set() };
     const register: NotifyRegister = (token) => {
-      registered.add(token);
+      envelope.registered.add(token);
     };
     this.notifyEnvelopeRuns += 1;
 
@@ -115,10 +126,10 @@ export class EventBus {
       this.activeEnvelope = envelope;
       try {
         const result = callback(register);
-        if (!setsEqual(envelope.persisted, registered)) {
+        if (!setsEqual(envelope.persisted, envelope.registered)) {
           throw new NotifyEnvelopeError(
             "notify_registration_mismatch",
-            `notify envelope persisted ${envelope.persisted.size} token(s) but registered ${registered.size} exact token(s)`,
+            `notify envelope persisted ${envelope.persisted.size} token(s) but registered ${envelope.registered.size} exact token(s)`,
           );
         }
         return result;

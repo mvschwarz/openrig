@@ -12,8 +12,8 @@
 //   stalled-after-claim — claimed, past threshold, zero substantive motion; the evidence is
 //                         NAMED ("claimed N min ago, zero substantive transitions since") so
 //                         the old by-hand claimedAt/capture/transitions join retires;
-//   parked              — state=blocked: a park carries its wake and legitimately waits
-//                         (the spec's deliberate fourth state — parks are NEVER stalled).
+//   parked              — state=blocked only. This projection knows nothing about wake
+//                         health; `rig parked` carries the separate park-wake diagnosis.
 //
 // Substantive motion = any transition strictly after the claim other than the claim's own
 // 'claimed' transition, or a heartbeat after the claim.

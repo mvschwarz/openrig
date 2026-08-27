@@ -150,12 +150,20 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
   it("auto-unpark publishes the dependent event and records the real post-commit delivery outcome", async () => {
     const blocker = await item("gate@rig");
     const row = await item();
+    const sibling = await item("worker-2@rig");
     repo.update({
       qitemId: row.qitemId,
       actorSession: "worker@rig",
       state: "blocked",
       blockedOn: blocker.qitemId,
       transitionNote: "continuation: resume after gate closes",
+    });
+    repo.update({
+      qitemId: sibling.qitemId,
+      actorSession: "worker-2@rig",
+      state: "blocked",
+      blockedOn: blocker.qitemId,
+      transitionNote: "continuation: sibling resumes after gate closes",
     });
 
     expect(wakes(row.qitemId)).toEqual([
@@ -174,24 +182,34 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     });
 
     expect(repo.getById(row.qitemId)?.state).toBe("pending");
-    expect(received.filter((event) => event.type === "queue.updated").map((event) => event.qitemId)).toEqual([
-      row.qitemId,
-      blocker.qitemId,
-    ]);
-    await vi.waitFor(() => expect(sent).toHaveLength(1));
-    expect(sent[0]).toMatchObject({ session: "worker@rig" });
-    expect(sent[0]?.text).toContain(row.qitemId);
+    expect(repo.getById(sibling.qitemId)?.state).toBe("pending");
+    const updatedIds = received
+      .filter((event) => event.type === "queue.updated")
+      .map((event) => event.qitemId);
+    expect(updatedIds).toHaveLength(3);
+    expect(new Set(updatedIds)).toEqual(new Set([row.qitemId, sibling.qitemId, blocker.qitemId]));
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+    expect(new Set(sent.map((call) => call.session))).toEqual(new Set(["worker@rig", "worker-2@rig"]));
+    expect(sent.some((call) => call.text.includes(row.qitemId))).toBe(true);
+    expect(sent.some((call) => call.text.includes(sibling.qitemId))).toBe(true);
     expect(repo.getById(row.qitemId)?.lastNudgeResult).toBe("failed:owner unreachable");
+    expect(repo.getById(sibling.qitemId)?.lastNudgeResult).toBe("failed:owner unreachable");
     expect(wakes(row.qitemId).at(-1)).toMatchObject({
       phase: "fired",
       wake_kind: "blocker",
       wake_ref: blocker.qitemId,
       delivery_status: "failed:owner unreachable",
     });
+    expect(wakes(sibling.qitemId).at(-1)).toMatchObject({
+      phase: "fired",
+      wake_kind: "blocker",
+      wake_ref: blocker.qitemId,
+      delivery_status: "failed:owner unreachable",
+    });
     const intent = db.prepare(
-      "SELECT delivery_state FROM outbox_entries WHERE audit_pointer = ?",
-    ).get(row.qitemId) as { delivery_state: string } | undefined;
-    expect(intent?.delivery_state).toBe("failed");
+      "SELECT COUNT(*) AS n FROM outbox_entries WHERE audit_pointer IN (?, ?) AND delivery_state = 'failed'",
+    ).get(row.qitemId, sibling.qitemId) as { n: number };
+    expect(intent.n).toBe(2);
   });
 
   it("outer transactions publish every auto-unpark event through the exact notify envelope", async () => {
@@ -223,6 +241,83 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
       blocker.qitemId,
     ]);
     await vi.waitFor(() => expect(sent).toHaveLength(1));
+  });
+
+  it("a rolled-back blocker completion leaves no intent and performs no wake effect", async () => {
+    const blocker = await item("gate@rig");
+    const row = await item();
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@rig",
+      state: "blocked",
+      blockedOn: blocker.qitemId,
+      transitionNote: "continuation: resume after gate closes",
+    });
+
+    expect(() => bus.withNotifyEnvelope((register) => {
+      const result = repo.updateWithinTransaction({
+        qitemId: blocker.qitemId,
+        actorSession: "gate@rig",
+        state: "done",
+        closureReason: "no-follow-on",
+        transitionNote: "this whole transaction will abort",
+      });
+      register(result.persistedEvent);
+      throw new Error("forced outer rollback");
+    })).toThrow(/forced outer rollback/);
+
+    await new Promise<void>((resolveDone) => setImmediate(resolveDone));
+    expect(sent).toEqual([]);
+    expect(repo.getById(blocker.qitemId)?.state).toBe("pending");
+    expect(repo.getById(row.qitemId)?.state).toBe("blocked");
+    expect((db.prepare("SELECT COUNT(*) AS n FROM outbox_entries").get() as { n: number }).n).toBe(0);
+  });
+
+  it("a committed auto-unpark intent survives a missing transport and the recovery drain records its delivery", async () => {
+    const blocker = await item("gate@rig");
+    const row = await item();
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@rig",
+      state: "blocked",
+      blockedOn: blocker.qitemId,
+      transitionNote: "continuation: resume after gate closes",
+    });
+
+    const recovering = new QueueRepository(db, bus);
+    recovering.attachOutbox(new OutboxHandler(db));
+    recovering.update({
+      qitemId: blocker.qitemId,
+      actorSession: "gate@rig",
+      state: "done",
+      closureReason: "no-follow-on",
+      transitionNote: "gate cleared while transport is absent",
+    });
+    await new Promise<void>((resolveDone) => setImmediate(resolveDone));
+    expect(sent).toEqual([]);
+    expect(db.prepare(
+      "SELECT delivery_state FROM outbox_entries WHERE audit_pointer = ?",
+    ).get(row.qitemId)).toMatchObject({ delivery_state: "pending" });
+    expect(wakes(row.qitemId).at(-1)).toMatchObject({ phase: "armed", delivery_status: null });
+
+    recovering.attachTransport({
+      async send(session, text) {
+        sent.push({ session, text });
+        return { ok: true, verified: true };
+      },
+    });
+    await expect(recovering.drainPendingWakeIntents()).resolves.toEqual({
+      delivered: 1,
+      indeterminate: 0,
+      failed: 0,
+    });
+    expect(sent).toHaveLength(1);
+    expect(wakes(row.qitemId).at(-1)).toMatchObject({
+      phase: "fired",
+      wake_kind: "blocker",
+      wake_ref: blocker.qitemId,
+      delivery_status: "verified",
+    });
   });
 
   it("negative control: a wakeless park still succeeds and records no invented wake", async () => {

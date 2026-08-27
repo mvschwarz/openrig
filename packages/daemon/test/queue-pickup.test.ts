@@ -6,8 +6,8 @@
 //   working              — claimed AND (substantive motion since the claim OR still inside
 //                          the threshold — the anti-noise direction);
 //   stalled-after-claim  — claimed, past threshold, zero substantive motion; evidence named;
-//   parked               — state=blocked (the deliberate fourth honest state: a park carries
-//                          its wake and legitimately waits — never stalled).
+//   parked               — state=blocked only. Wake health is a separate `rig parked`
+//                          diagnosis; a wakeless blocked row still projects as parked.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import { migrate } from "../src/db/migrate.js";

@@ -52,6 +52,9 @@ export function isBlockerLive(state: string): boolean {
   return (ACTIVE_QUEUE_STATES as readonly string[]).includes(state);
 }
 
+const AUTO_UNPARK_WAKE_TAG = "queue:auto-unpark:blocker";
+const AUTO_UNPARK_BLOCKER_TAG_PREFIX = "queue:auto-unpark:blocker-ref:";
+
 /** 0.5.1-53 Atom 1a — typed non-qitem gate blocker prefixes. A park may be gated on a fold / auth /
  *  external condition that is NOT a qitem and NOT a human seat; these prefixes make such a gate a
  *  first-class, compact-visible, downstream-classifiable blocker (the ruling detail rides a transition). */
@@ -686,23 +689,72 @@ export class QueueRepository {
     // W1-c guard is nudge-aware for the same reason: absence of an intent is a
     // defect only when a wake WAS intended.
     if (nudge === false) return;
-    if (!this.outbox) return;
-    // MF4: FREEZE the emitting envelope at stage time. Resolve the source occupant
-    // generation and build the full pane envelope NOW, and store it verbatim as the
-    // intent body. Delivery (immediate or crash-recovery) replays this exact text,
-    // so a recovery after a tenure swap can never relabel the wake with the CURRENT
-    // occupant's generation — it carries the generation that actually emitted it.
-    const bareBody = `Queue handoff: ${successorQitemId} - check your queue.`;
-    const stampISO = new Date().toISOString();
-    const genUuid = this.resolveOccupantGeneration?.(fromSession) ?? undefined;
-    const frozenEnvelope = wrapPaneEnvelope(fromSession, toSession, bareBody, { stampISO, genUuid });
-    this.outbox.record({
+    this.recordWakeIntent({
       outboxId: `${WAKE_INTENT_PREFIX}${successorQitemId}`,
-      senderSession: fromSession,
-      destinationSession: toSession,
-      body: frozenEnvelope,
       auditPointer: successorQitemId,
-      identityProvenance: identityProvenance ?? null,
+      fromSession,
+      toSession,
+      identityProvenance,
+      bareBody: `Queue handoff: ${successorQitemId} - check your queue.`,
+    });
+  }
+
+  private recordWakeIntent(input: {
+    outboxId: string;
+    auditPointer: string;
+    fromSession: string;
+    toSession: string;
+    identityProvenance: string | null;
+    bareBody: string;
+    tags?: string[];
+  }): string | null {
+    if (!this.outbox) return null;
+    // MF4: freeze the emitting envelope at stage time. Delivery and crash
+    // recovery replay these exact bytes without re-resolving the occupant.
+    const stampISO = new Date().toISOString();
+    const genUuid = this.resolveOccupantGeneration?.(input.fromSession) ?? undefined;
+    const frozenEnvelope = wrapPaneEnvelope(
+      input.fromSession,
+      input.toSession,
+      input.bareBody,
+      { stampISO, genUuid },
+    );
+    this.outbox.record({
+      outboxId: input.outboxId,
+      senderSession: input.fromSession,
+      destinationSession: input.toSession,
+      body: frozenEnvelope,
+      tags: input.tags,
+      auditPointer: input.auditPointer,
+      identityProvenance: input.identityProvenance,
+    });
+    return input.outboxId;
+  }
+
+  private stageAutoUnparkWakeIntent(input: {
+    qitemId: string;
+    destinationSession: string;
+    fromSession: string;
+    identityProvenance: string | null;
+    blockerQitemId: string;
+    resumeTransitionId: number;
+  }): string | null {
+    return this.recordWakeIntent({
+      outboxId: `${WAKE_INTENT_PREFIX}blocker-${input.resumeTransitionId}`,
+      auditPointer: input.qitemId,
+      fromSession: input.fromSession,
+      toSession: input.destinationSession,
+      identityProvenance: input.identityProvenance,
+      bareBody: `Blocker ${input.blockerQitemId} resolved; parked qitem ${input.qitemId} is pending. Resume the recorded continuation and update the row.`,
+      tags: [AUTO_UNPARK_WAKE_TAG, `${AUTO_UNPARK_BLOCKER_TAG_PREFIX}${input.blockerQitemId}`],
+    });
+  }
+
+  private deliverWakeIntentAfterCommit(outboxId: string): void {
+    queueMicrotask(() => {
+      void this.deliverWakeIntent(outboxId).catch((err) => {
+        console.error(`Auto-unpark wake delivery failed for ${outboxId}:`, err);
+      });
     });
   }
 
@@ -785,9 +837,44 @@ export class QueueRepository {
     const outcome = await this.performWakeSend(
       qitemId, intent.destinationSession, intent.senderSession, undefined, intent.body,
     );
-    this.recordNudgeAttempt(qitemId, outcome.nudgeResult);
     const finalState = outcome.classified === "verified" ? "delivered" : outcome.classified;
-    this.outbox.finalizeDelivery(outboxId, finalState);
+    const blockerRef = intent.tags?.includes(AUTO_UNPARK_WAKE_TAG)
+      ? intent.tags
+          .find((tag) => tag.startsWith(AUTO_UNPARK_BLOCKER_TAG_PREFIX))
+          ?.slice(AUTO_UNPARK_BLOCKER_TAG_PREFIX.length)
+      : undefined;
+    const wakeEvent = this.db.transaction(() => {
+      this.recordNudgeAttempt(qitemId, outcome.nudgeResult);
+      this.outbox!.finalizeDelivery(outboxId, finalState);
+      if (!blockerRef) return null;
+
+      const item = this.getByIdOrThrow(qitemId);
+      const transition = this.transitionLog.append({
+        qitemId,
+        state: item.state,
+        actorSession: "queue@system",
+        transitionNote: `blocker ${blockerRef} wake attempted; delivery=${outcome.nudgeResult}`,
+      });
+      this.wakeRepo.record({
+        transitionId: transition.transitionId,
+        qitemId,
+        phase: "fired",
+        kind: "blocker",
+        ref: blockerRef,
+        deliveryStatus: outcome.nudgeResult,
+      });
+      return this.eventBus.persistWithinTransaction({
+        type: "queue.updated",
+        qitemId,
+        fromState: item.state,
+        toState: item.state,
+        closureReason: null,
+        closureTarget: null,
+        actorSession: "queue@system",
+        summary: item.summary ?? null,
+      });
+    })();
+    if (wakeEvent) this.eventBus.notifySubscribers(wakeEvent);
     return finalState;
   }
 
@@ -1788,8 +1875,8 @@ export class QueueRepository {
    */
   update(input: QueueUpdateInput): QueueItem {
     const txn = this.db.transaction(() => this.updateInTransactionalContext(input));
-    const persistedEvent = txn();
-    this.eventBus.notifySubscribers(persistedEvent);
+    const result = txn();
+    for (const event of result.persistedEvents) this.eventBus.notifySubscribers(event);
     return this.getByIdOrThrow(input.qitemId);
   }
 
@@ -1816,9 +1903,10 @@ export class QueueRepository {
   updateWithinTransaction(input: QueueUpdateInput): {
     qitemId: string;
     persistedEvent: PersistedEvent;
+    persistedEvents: PersistedEvent[];
   } {
-    const persistedEvent = this.updateInTransactionalContext(input);
-    return { qitemId: input.qitemId, persistedEvent };
+    const result = this.updateInTransactionalContext(input);
+    return { qitemId: input.qitemId, ...result };
   }
 
   /**
@@ -1827,7 +1915,10 @@ export class QueueRepository {
    * (the public update() wraps; the public updateWithinTransaction()
    * composes inside the caller's outer transaction).
    */
-  private updateInTransactionalContext(input: QueueUpdateInput): PersistedEvent {
+  private updateInTransactionalContext(input: QueueUpdateInput): {
+    persistedEvent: PersistedEvent;
+    persistedEvents: PersistedEvent[];
+  } {
     const qitem = this.getById(input.qitemId);
     if (!qitem) {
       throw new QueueRepositoryError(
@@ -1871,7 +1962,7 @@ export class QueueRepository {
         transitionNote: input.transitionNote,
         identityProvenance: input.identityProvenance ?? null,
       });
-      return this.eventBus.persistWithinTransaction({
+      const persistedEvent = this.eventBus.persistWithinTransaction({
         type: "queue.updated",
         qitemId: input.qitemId,
         fromState: qitem.state,
@@ -1881,6 +1972,7 @@ export class QueueRepository {
         actorSession: input.actorSession,
         summary: qitem.summary ?? null,
       });
+      return { persistedEvent, persistedEvents: [persistedEvent] };
     }
     if (!isQueueState(input.state)) {
       throw new QueueRepositoryError(
@@ -2194,10 +2286,11 @@ export class QueueRepository {
     // When THIS qitem reaches a terminal state, auto-unpark every row parked on it (blocked_on = this,
     // state='blocked') to pending, clear its (now-resolved) blocker, log the transition, and emit an
     // event so watchers/sweeps see the unblock without a fetch.
+    const dependentEvents: PersistedEvent[] = [];
     if (!isBlockerLive(input.state)) {
       const blockedRows = this.db
-        .prepare("SELECT qitem_id FROM queue_items WHERE blocked_on = ? AND state = 'blocked'")
-        .all(input.qitemId) as Array<{ qitem_id: string }>;
+        .prepare("SELECT qitem_id, destination_session FROM queue_items WHERE blocked_on = ? AND state = 'blocked'")
+        .all(input.qitemId) as Array<{ qitem_id: string; destination_session: string }>;
       for (const r of blockedRows) {
         this.db
           .prepare("UPDATE queue_items SET state = 'pending', blocked_on = NULL, ts_updated = ? WHERE qitem_id = ?")
@@ -2208,15 +2301,16 @@ export class QueueRepository {
           actorSession: input.actorSession,
           transitionNote: `auto-unparked: blocker ${input.qitemId} reached terminal state '${input.state}'`,
         });
-        this.wakeRepo.record({
-          transitionId: resumeTransition.transitionId,
+        const wakeIntentId = this.stageAutoUnparkWakeIntent({
           qitemId: r.qitem_id,
-          phase: "fired",
-          kind: "blocker",
-          ref: input.qitemId,
-          deliveryStatus: "resumed",
+          destinationSession: r.destination_session,
+          fromSession: input.actorSession,
+          identityProvenance: input.identityProvenance ?? null,
+          blockerQitemId: input.qitemId,
+          resumeTransitionId: resumeTransition.transitionId,
         });
-        this.eventBus.persistWithinTransaction({
+        if (wakeIntentId) this.deliverWakeIntentAfterCommit(wakeIntentId);
+        const dependentEvent = this.eventBus.persistWithinTransaction({
           type: "queue.updated",
           qitemId: r.qitem_id,
           fromState: "blocked",
@@ -2224,12 +2318,14 @@ export class QueueRepository {
           closureReason: null,
           closureTarget: null,
           actorSession: input.actorSession,
-          summary: null,
+          summary: this.getById(r.qitem_id)?.summary ?? null,
         });
+        this.eventBus.registerPersistedWithinActiveEnvelope(dependentEvent);
+        dependentEvents.push(dependentEvent);
       }
     }
 
-    return this.eventBus.persistWithinTransaction({
+    const persistedEvent = this.eventBus.persistWithinTransaction({
       type: "queue.updated",
       qitemId: input.qitemId,
       fromState,
@@ -2241,6 +2337,7 @@ export class QueueRepository {
       // (park-time summary included) so surfaces refresh without a fetch.
       summary: effectiveSummary ?? null,
     });
+    return { persistedEvent, persistedEvents: [...dependentEvents, persistedEvent] };
   }
 
   getParkWakeStatus(qitemId: string): ParkWakeStatus | null {
