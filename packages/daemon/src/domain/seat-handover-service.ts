@@ -158,6 +158,14 @@ interface SeatHandoverServiceDeps {
    * absence. Wired in production to seat-recap-store + the topology.root seat layout.
    */
   authoredRecapResolver?: (seatRef: string) => { address: string; chainLength: number } | { absentReason: string };
+  /**
+   * S19 (territory ruling qitem-20260827001530, EXACT bounds): ONE narrow call into the
+   * activity oracle at the completion/rebind commit point so seat-keyed activity state
+   * treats the cutover as its own visible event and the successor's rung inventory
+   * starts unpromoted (never inheriting the retiree's rung authority). Optional: absent
+   * → skipped, never blocks a handover.
+   */
+  activityOracle?: { declareOccupantSwap: (seatNodeId: string, generation: string) => void };
 }
 
 export class SeatHandoverService {
@@ -174,6 +182,7 @@ export class SeatHandoverService {
   private occupantInvalidator: OccupantInvalidator | null;
   private predecessorRecapResolver: PredecessorRecapResolver | null;
   private authoredRecapResolver: SeatHandoverServiceDeps["authoredRecapResolver"] | null;
+  private activityOracle: SeatHandoverServiceDeps["activityOracle"] | null;
   /** Injectable sleep (tests): also carries the shared paste-then-submit settle in deliverRestorePacket. */
   private sleep: (ms: number) => Promise<void>;
   private appliedLaunchObservations: AppliedLaunchObservationStore;
@@ -191,6 +200,7 @@ export class SeatHandoverService {
     this.eventBus = deps.eventBus;
     this.tmuxAdapter = deps.tmuxAdapter;
     this.occupantInvalidator = deps.occupantInvalidator ?? null;
+    this.activityOracle = deps.activityOracle ?? null;
     this.predecessorRecapResolver = deps.predecessorRecapResolver ?? null;
     this.authoredRecapResolver = deps.authoredRecapResolver ?? null;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -837,6 +847,10 @@ export class SeatHandoverService {
     let committed: { newSessionId: string; previousSessionIdsSuperseded: string[]; event: PersistedEvent };
     try {
       committed = tx();
+      // S19 ruling 01530 — the SOLE narrow call: after the commit lands, the activity
+      // oracle sees the swap as its own event, keyed by the durable node id, identified
+      // by the successor tenure (never the retiree's). In-memory, post-commit, optional.
+      this.activityOracle?.declareOccupantSwap(input.node.id, committed.newSessionId);
     } catch (err) {
       return {
         ok: false,

@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
 import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import type { EventBus } from "../domain/event-bus.js";
@@ -224,6 +225,38 @@ activityRoutes.post("/hooks", async (c) => {
   }
 
   return c.json({ ok: true, activity: result.activity });
+});
+
+// ── S19 AM-R18 — the push substrate: GET /api/activity/events (SSE) ──
+// Desk-accepted shape (ruling row qitem-20260827001530): CHANGE NOTIFICATIONS ONLY —
+// seat.activity_changed (identity + seq) and seat.rung_health stream to the open view;
+// the view REHYDRATES from /api/ps. The push never carries derived vocabulary, so "no
+// second activity mechanism" holds by construction. No timers: pure bus relay;
+// disconnect unsubscribes.
+activityRoutes.get("/events", (c) => {
+  const eventBus = c.get("eventBus" as never) as
+    | { subscribe: (cb: (event: unknown) => void) => () => void }
+    | undefined;
+  if (!eventBus?.subscribe) {
+    return c.json({
+      ok: false,
+      code: "activity_events_unconfigured",
+      error: "The activity event stream needs the event bus — not configured on this daemon.",
+    }, 503);
+  }
+  return streamSSE(c, async (stream) => {
+    const unsubscribe = eventBus.subscribe((event) => {
+      const type = (event as { type?: string }).type;
+      if (type !== "seat.activity_changed" && type !== "seat.rung_health") return;
+      void stream.writeSSE({ event: type, data: JSON.stringify(event) });
+    });
+    await new Promise<void>((resolve) => {
+      stream.onAbort(() => {
+        unsubscribe();
+        resolve();
+      });
+    });
+  });
 });
 
 // ── S19 A7 — the parked query surface: GET /api/activity/parked[?seat=] ──

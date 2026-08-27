@@ -677,7 +677,7 @@ describe("SeatHandoverService", () => {
   });
 
   it("S19 (territory ruling 01530): the commit declares the occupant swap to the activity oracle — seat-keyed rungs re-declare, no bleed", async () => {
-    seedSeat({ runtime: "codex" });
+    const { node } = seedSeat({ runtime: "codex" });
     const retiringGen = sessionRegistry.currentOccupantGenerationForSession("dev-impl@seat-rig");
 
     const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
@@ -685,7 +685,6 @@ describe("SeatHandoverService", () => {
     expect(result.ok).toBe(true);
     expect(declareOccupantSwap).toHaveBeenCalledTimes(1);
     const [seatNodeId, generation] = declareOccupantSwap.mock.calls[0]! as [string, string];
-    const node = rigRepo.listNodes(rigRepo.listRigs()[0]!.id)[0]!;
     expect(seatNodeId).toBe(node.id); // seat-keyed: the durable node id, never the session name
     expect(typeof generation).toBe("string");
     expect(generation.length).toBeGreaterThan(0);

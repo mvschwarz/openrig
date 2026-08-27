@@ -297,6 +297,7 @@ export class SeatActivityService {
       lastSwap: { generation, at },
     };
     this.resolveWaiters(seat);
+    this.emitActivityChanged(seat); // the swap is a visible push too
   }
 
   /** Whether this seat currently has a DECLARED rung inventory (a swap clears it —
@@ -582,7 +583,23 @@ export class SeatActivityService {
       changedAt: changed ? this.now().toISOString() : seat.arbitrated.changedAt,
       rungs: this.rungsView(seat),
     };
-    if (changed) this.resolveWaiters(seat);
+    if (changed) {
+      this.resolveWaiters(seat);
+      this.emitActivityChanged(seat);
+    }
+  }
+
+  /** AM-R18 push substrate: a change notification (identity + seq) onto the bus — the
+   *  SSE stream relays it; consumers REHYDRATE from the projection, so the push itself
+   *  never carries derived vocabulary (no second activity mechanism by construction). */
+  private emitActivityChanged(seat: SeatLadderState): void {
+    this.eventBus?.emit({
+      type: "seat.activity_changed",
+      seatNodeId: seat.arbitrated.seatNodeId,
+      sessionName: seat.sessionName,
+      seq: seat.arbitrated.seq,
+      at: seat.arbitrated.changedAt,
+    } as never);
   }
 
   private resolveWaiters(seat: SeatLadderState): void {

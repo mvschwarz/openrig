@@ -18,6 +18,7 @@ import { demoSnapshot } from "./demo-data.js";
 import { DaemonClient, launchNodeNotice } from "./daemon-client.js";
 import { hydrateSnapshot } from "./hydrate.js";
 import { createLiveRefresh } from "./live.js";
+import { subscribeActivityEvents } from "./live-events.js";
 import { execFile } from "node:child_process";
 import { probeCrashCart, type CrashCartRenderOpts } from "./crash-cart/from-emit.js";
 import { resolveCrashCartKey, type CrashCartKeyAction } from "./crash-cart/keys.js";
@@ -70,6 +71,11 @@ async function run(): Promise<void> {
     ? createLiveRefresh({ hydrate: () => hydrateSnapshot(client, reviewCache), onFrame: () => draw(), now: () => Date.now() })
     : null;
   let motionTimer: NodeJS.Timeout | null = null;
+  // S19 AM-R18 — the open view updates ITSELF: oracle pushes drive the refresh owner.
+  // Notification-only; the refresh rehydrates /api/ps (one oracle, no idle polling).
+  const activityEvents = live && client
+    ? subscribeActivityEvents({ baseUrl: client.baseUrl, onEvent: () => { void live.refresh(); } })
+    : null;
 
   function draw(): void {
     const cols = process.stdout.columns ?? 120;
@@ -248,6 +254,7 @@ async function run(): Promise<void> {
     if (motionTimer) clearTimeout(motionTimer);
     process.stdout.write(MOUSE_DISABLE + ALT_SCREEN_OFF);
     await socket.close();
+    activityEvents?.close();
     process.exit(0);
   }
   process.on("SIGINT", () => void shutdown());
