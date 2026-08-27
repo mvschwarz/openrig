@@ -9,8 +9,8 @@ const PACK_PATHS = [
   resolve(DAEMON_ROOT, "assets/onboarding/02-self-and-competent-action.md"),
 ];
 const PUBLIC_REFERENCE_PATHS = [
-  resolve(DAEMON_ROOT, "assets/onboarding/public-what-you-can-do.md"),
-  resolve(DAEMON_ROOT, "assets/onboarding/public-reference-material.md"),
+  resolve(DAEMON_ROOT, "context-packs-src/onboarding-width/public-what-you-can-do.md"),
+  resolve(DAEMON_ROOT, "context-packs-src/onboarding-width/public-reference-material.md"),
 ];
 const MESSAGE_CEILING_BYTES = 9_400;
 
@@ -69,9 +69,11 @@ describe("default onboarding pack", () => {
     expect(text).toContain("rig context profile <world-pack-ref> --situation fresh");
     expect(text).toContain("complete default mental model");
     expect(text).not.toContain("world/install");
+    expect(stepTwo).toContain("rig context get onboarding-width");
+    expect(stepTwo).toContain("rig context get world-example");
     expect(stepTwo).toContain("public-what-you-can-do.md");
     expect(stepTwo).toContain("public-reference-material.md");
-    expect(stepTwo).toContain("file reads within this second onboarding step");
+    expect(stepTwo).not.toContain("Read the sibling files");
     expect(text).toContain("forming-an-openrig-mental-model");
     expect(text).toContain("openrig-operating-model");
 

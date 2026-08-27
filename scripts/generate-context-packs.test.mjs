@@ -16,6 +16,7 @@ const { ContextPackLibraryService } = await import(distUrl("context-pack-library
 const { assembleBundle } = await import(distUrl("bundle-assembler.js"));
 const { EXCLUDES } = await import(pathToFileURL(join(HERE, "mirror-skills.mjs")).href);
 const REAL_SKILLS = join(REPO, "packages/daemon/specs/agents/shared/skills");
+const REAL_STATIC_PACKS = join(REPO, "packages/daemon/context-packs-src");
 
 // Independent computation of the mirror's exclude-only ship set on a real tree —
 // the discriminator that catches any narrowing of the projection (r2 HIGH-1).
@@ -333,14 +334,32 @@ test("REF COLLISION across sources FAILS THE BUILD with no output mutation (B3)"
   }
 });
 
-test("PRODUCTION LIBRARY: world/install is absent from the public projection", () => {
+test("PRODUCTION LIBRARY: only the public onboarding-width and world-example static packs ship", () => {
   const out = mkdtempSync(join(tmpdir(), "s05-world-"));
   try {
     run(REAL_SKILLS, out);
+    assert.deepEqual(readdirSync(REAL_STATIC_PACKS).sort(), ["onboarding-width", "world-example"]);
     assert.ok(
       !existsSync(join(out, "world/install")),
       "the production builtin library must not publish the internal world/install pack",
     );
+    const widthDir = join(out, "onboarding-width");
+    assert.deepEqual(readdirSync(widthDir).sort(), [
+      "manifest.yaml",
+      "public-reference-material.md",
+      "public-what-you-can-do.md",
+    ]);
+    const manifest = parseManifest(readFileSync(join(widthDir, "manifest.yaml"), "utf8"), "onboarding-width");
+    assert.equal(manifest.name, "onboarding-width");
+    assert.deepEqual(manifest.files.map((file) => file.path), [
+      "public-what-you-can-do.md",
+      "public-reference-material.md",
+    ]);
+    const exampleDir = join(out, "world-example");
+    assert.deepEqual(readdirSync(exampleDir).sort(), ["manifest.yaml", "your-world.md"]);
+    const exampleManifest = parseManifest(readFileSync(join(exampleDir, "manifest.yaml"), "utf8"), "world-example");
+    assert.equal(exampleManifest.name, "world-example");
+    assert.deepEqual(exampleManifest.files.map((file) => file.path), ["your-world.md"]);
   } finally {
     rmSync(out, { recursive: true, force: true });
   }

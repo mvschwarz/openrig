@@ -1,0 +1,11 @@
+# Public capability and source-map width for the default onboarding walk.
+name: onboarding-width
+version: "0"
+purpose: "The public capability map and source map referenced by the default onboarding walk."
+files:
+  - path: public-what-you-can-do.md
+    role: reference
+    summary: "The public OpenRig capability map."
+  - path: public-reference-material.md
+    role: reference
+    summary: "The public source map and trust guidance."

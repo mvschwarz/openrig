@@ -1,0 +1,8 @@
+# Minimal public example of a user-authored world pack.
+name: world-example
+version: "0"
+purpose: "A fill-in template showing the anatomy of an OpenRig world pack."
+files:
+  - path: your-world.md
+    role: world
+    summary: "A minimal fill-in template for describing an agent's world."
