@@ -144,16 +144,18 @@ function clamp(s: string, max: number): string {
  * (no clock, no io) so it is trivially testable and safe to snapshot.
  */
 export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): SlackMessagePayload {
-  // R2 B1 boundary rule: EVERY queue-controlled field goes through inert() (redact + the
-  // three-character structural neutralization) BEFORE placement in text or mrkdwn — control
-  // syntax arriving through a row cannot survive, and the content stays honestly readable in
-  // escaped form. qitemId stays raw: it is daemon-minted ([a-z0-9-], no specials by
-  // construction) and is the H reconcile marker searched in posted text byte-for-byte.
+  // R2 B1 boundary rule, UNIFORM (fix-r2 / R1 F-B1r): EVERY queue-controlled field — the
+  // qitemId included — goes through the structural neutralization BEFORE placement in text or
+  // mrkdwn. No exemption, no minted-only premise: the create route accepts caller-supplied
+  // ids without charset validation, so "no specials by construction" is not enforced anywhere.
+  // Control syntax arriving through a row cannot survive, and content stays honestly readable
+  // escaped. The H reconcile marker compares the SAME escaped bytes on both sides (the scan in
+  // slack-delivery searches escapeSlackText(qitemId)); for minted ids escaped == raw.
   const summary = inert(String(q.summary || "(no summary)"));
   const bodyRaw = inert(String(q.body || ""));
   const body = clamp(bodyRaw, opts.bodyExcerpt ?? DEFAULT_BODY_EXCERPT);
   const dest = escapeSlackText(q.destinationSession || "(unknown destination)");
-  const footer = `qitem ${q.qitemId} → ${dest} on ${opts.sourceLabel}`;
+  const footer = `qitem ${escapeSlackText(String(q.qitemId))} → ${dest} on ${opts.sourceLabel}`;
 
   // S10 interim loudness rule: only an escalation carries a mention (the sole force-notify
   // lever Slack offers); everything else stays quiet-threaded. Composed HERE, AFTER the

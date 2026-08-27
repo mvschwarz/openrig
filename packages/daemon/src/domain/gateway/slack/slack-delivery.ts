@@ -16,7 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { postChatMessage, getUploadURLExternal, uploadBytesExternal, completeUploadExternal, fetchRecentMessageTexts, type FetchImpl } from "./slack-api.js";
-import { buildOutboundMessage, attributionFromSession, type SlackMediaRef } from "./message.js";
+import { buildOutboundMessage, attributionFromSession, escapeSlackText, type SlackMediaRef } from "./message.js";
 import type { SeenStore } from "./state-store.js";
 import type { OutboundDecision } from "../protocol.js";
 import type { SubsystemDeliverFn, SubsystemDeliveryOutcome } from "../gateway-subsystem.js";
@@ -112,7 +112,10 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
     // (`qitem <id>`); FOUND → already delivered, record + ack, never repost. Search failure =
     // stay ambiguous = retain for the next replay (never a blind repost on an unreadable
     // channel — a duplicate human notification is the red; a delay is not).
-    const marker = q.qitemId ?? decision.decisionId;
+    // fix-r2 (R1 F-B1r): the footer posts the id ESCAPED (uniform boundary rule), so the scan
+    // searches the SAME escaped bytes — producer and scanner can never disagree. For minted
+    // ids escaped == raw and nothing changes.
+    const marker = escapeSlackText(String(q.qitemId ?? decision.decisionId));
     if (opts.attempted.load().has(decision.decisionId)) {
       const scan = await fetchRecentMessageTexts(opts.botToken, opts.channel, threadTs, opts.fetchImpl);
       if (!scan.ok) {
