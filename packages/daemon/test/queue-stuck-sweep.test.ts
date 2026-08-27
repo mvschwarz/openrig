@@ -47,6 +47,13 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     const past = new Date(Date.now() - minutes * 60_000).toISOString();
     db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run(past, qitemId);
   }
+  function ageClaim(qitemId: string, minutes: number): void {
+    const past = new Date(Date.now() - minutes * 60_000).toISOString();
+    const beforePast = new Date(Date.now() - (minutes + 1) * 60_000).toISOString();
+    db.prepare("UPDATE queue_items SET claimed_at = ?, ts_created = ? WHERE qitem_id = ?").run(past, beforePast, qitemId);
+    db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ? AND transition_note = 'claimed'").run(past, qitemId);
+    db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ? AND transition_note = 'created'").run(beforePast, qitemId);
+  }
   function makeOverdue(qitemId: string): void {
     const past = new Date(Date.now() - 60 * 60_000).toISOString();
     db.prepare("UPDATE queue_items SET closure_required_at = ? WHERE qitem_id = ?").run(past, qitemId);
@@ -95,6 +102,40 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(f.body).toContain(row.qitemId); // row id
     expect(f.body).toMatch(/overdue|claimed/i);
     expect(f.body).toMatch(/\d+\s*min/i); // age
+  });
+
+  it("S04 PICKUP SEAM: stalled-after-claim routes one finding to the claimant and later motion auto-closes it", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId, 60);
+    expect(repo.getById(row.qitemId)!.pickup?.state).toBe("stalled-after-claim");
+
+    const first = await runSweep();
+    expect(first.result.findings).toContainEqual(expect.objectContaining({
+      kind: "stalled-after-claim",
+      qitemId: row.qitemId,
+      action: "created",
+    }));
+    const findings = await findingsFor(row.qitemId);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.destinationSession).toBe("worker@r");
+
+    await repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      transitionNote: "resumed work",
+    });
+    expect(repo.getById(row.qitemId)!.pickup?.state).toBe("working");
+    const second = await runSweep();
+    expect(second.result.findings).toContainEqual(expect.objectContaining({
+      kind: "stalled-after-claim",
+      qitemId: row.qitemId,
+      action: "closed",
+    }));
+    expect((await findingsFor(row.qitemId))[0]).toMatchObject({
+      state: "done",
+      closureReason: "no-follow-on",
+    });
   });
 
   it("UNDELIVERED HALF: a pending row whose nudge failed yields exactly one finding routed to the destination's orchestrator", async () => {

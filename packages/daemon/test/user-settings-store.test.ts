@@ -166,6 +166,20 @@ describe("SettingsStore (User Settings v0)", () => {
       .toMatchObject({ value: 900, source: "default", defaultValue: 900 });
   });
 
+  it("queue integer settings reject partial and fractional strings", () => {
+    const store = new SettingsStore(configPath);
+    for (const key of [
+      "queue.pickup_stall_threshold_minutes",
+      "queue.stuck_sweep_interval_seconds",
+      "queue.stuck_sweep_unclaimed_age_minutes",
+    ]) {
+      for (const raw of ["3junk", "60.5"]) {
+        expect(() => store.set(key, raw), `${key} must reject ${raw}`)
+          .toThrow(/positive integer/i);
+      }
+    }
+  });
+
   it("W2c idle-gate-qitem cadence resolves env over file", () => {
     const store = new SettingsStore(configPath);
     expect(() => store.set("policies.idle_gate_qitem.scan_interval_seconds", "120")).not.toThrow();
