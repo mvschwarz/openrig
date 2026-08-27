@@ -28,6 +28,11 @@ Start from live identity rather than startup prose: run `rig whoami --json`. Ask
 surface for current state and syntax. Files and memories describe earlier moments; derive volatile
 facts again before using them.
 
+Contact with the human operator is open by default. Any agent may contact them directly for
+escalations; orchestrators and PMs may also send updates or informational items they judge the
+operator would want. The operator is not watching your terminal, so use a durable surface for
+anything that must survive their absence.
+
 ## Purpose before machinery
 
 A request can be vague in several directions: diagnose or change, contents or presentation,

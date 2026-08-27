@@ -79,6 +79,14 @@ describe("default onboarding pack", () => {
     expect(copied).toEqual([]);
   });
 
+  it("keeps operator contact open without teaching a router hop", () => {
+    const text = packText();
+    expect(text).toContain("Any agent may contact them directly for");
+    expect(text).toContain("orchestrators and PMs may also send updates");
+    expect(text).toContain("use a durable surface");
+    expect(text).not.toMatch(/other seats route through them|role-gated/i);
+  });
+
   it("ships a no-shared-vocabulary selection probe that is red on blank and green on packed context", () => {
     const prompt = "An open-ended cleanup request arrives. Name the physical-world question that prevents a chain of locally defensible improvements from solving the wrong problem.";
     const expected = /how big is the dog\??/i;
