@@ -43,6 +43,7 @@ import {
   LADDER_RUNG_PREFIX,
   LADDER_EXHAUSTED_PREFIX,
   defaultResolveOrchestrator,
+  resolveSessionNodeId,
 } from "./queue-stuck-sweep.js";
 
 export const WAKE_RETRY_INTERVAL_KEY = "queue.wake_retry_interval_seconds";
@@ -110,6 +111,17 @@ export function createWakeLadderStatus(): WakeLadderStatus {
       return { ...state };
     },
   };
+}
+
+/** The operator seat for the self-skip floor (workspace.operator_seat_name — the
+ *  conventional `operator-${USER}@kernel`); null when settings resolution fails. */
+function resolveOperatorSeat(): string | null {
+  try {
+    const v = new SettingsStore().resolveOne("workspace.operator_seat_name" as never).value;
+    return typeof v === "string" && v.length > 0 ? v : null;
+  } catch {
+    return null;
+  }
 }
 
 function resolveNumber(key: string, fallback: number): number {
@@ -278,16 +290,13 @@ function suspensionReason(
       }
     }
   }
-  const at = destination.lastIndexOf("@");
-  if (at <= 0) return null;
-  const logicalId = destination.slice(0, at);
-  const rigName = destination.slice(at + 1);
+  // The durable session→node binding — never a string transform of the session name
+  // (canonical dash-form sessions and dotted logical ids are independent identities).
+  const nodeId = resolveSessionNodeId(db, destination);
+  if (!nodeId) return null;
   const row = db
-    .prepare(
-      `SELECT n.handover_at AS handoverAt FROM nodes n JOIN rigs r ON r.id = n.rig_id
-        WHERE n.logical_id = ? AND r.name = ? LIMIT 1`,
-    )
-    .get(logicalId, rigName) as { handoverAt: string | null } | undefined;
+    .prepare("SELECT handover_at AS handoverAt FROM nodes WHERE id = ? LIMIT 1")
+    .get(nodeId) as { handoverAt: string | null } | undefined;
   if (!row?.handoverAt) return null;
   const swapAt = Date.parse(row.handoverAt);
   if (Number.isNaN(swapAt)) return null;
@@ -460,6 +469,12 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
         if (orch === null || orch === dest) {
           // F4: rung 1 self-skips when it resolves to the destination itself (or nowhere)
           // — never escalate INTO the dead seat; fall through to the operator rung now.
+          // The operator floor must be a VISIBLE OBJECT, not markers alone: ensure the
+          // per-destination escalation row exists (addressed to the operator seat, else
+          // the obligation's own creator) so the escalations view and the health count
+          // expose it — it stays open past the batons' exhaustion.
+          const floorDest = resolveOperatorSeat() ?? needsOrchRung[0]!.row.sourceSession;
+          await ensureEscalationRow(deps, dest, floorDest, needsOrchRung, reason);
           for (const m of needsOrchRung) {
             appendMarker(
               deps.queueRepo,
