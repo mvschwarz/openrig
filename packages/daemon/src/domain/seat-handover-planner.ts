@@ -115,6 +115,27 @@ export class SeatHandoverPlanner {
   }
 }
 
+
+/**
+ * OPR.0.5.5.5 — the ONE source-capability table shared by the dry-run plan and
+ * the mutation executor. The plan renders what a source DOES from this table
+ * and the executor dispatches on the same rows, so the plan can never promise
+ * a source the executor refuses (and vice versa). Adding a mode to
+ * `SeatHandoverSourceMode` forces a row here (exhaustive Record).
+ */
+export const SEAT_HANDOVER_SOURCE_CAPABILITIES: Record<SeatHandoverSourceMode, {
+  /** True when the mutation path executes this source end-to-end. A false row
+   *  is the ONLY thing that may produce `source_not_supported`. */
+  executes: boolean;
+  /** How the successor receives its context under this source. */
+  contextCarrier: string;
+}> = {
+  fresh: { executes: true, contextCarrier: "captured restore packet pasted to the fresh successor before commit" },
+  discovered: { executes: true, contextCarrier: "operator-prepared successor; nothing is delivered" },
+  fork: { executes: true, contextCarrier: "native fork of the resolved source conversation (the successor carries the incumbent context from its first byte; commit persists the NEW post-fork token)" },
+  rebuild: { executes: true, contextCarrier: "durable artifact chain (authored recap / LEARNED / restore record) delivered as a priming packet; the executed set and its gaps are recorded" },
+};
+
 export function parseHandoverSource(source?: string | null): { ok: true; source: SeatHandoverSource } | { ok: false; code: "invalid_source"; message: string; guidance: string } {
   const raw = source?.trim();
   if (!raw || raw === "default" || raw === "fresh") {
@@ -215,7 +236,7 @@ function buildPlan(input: {
           {
             id: "create-successor",
             title: "Create successor occupant",
-            description: `Would create a successor using ${describeSource(input.source)} while leaving the current seat binding unchanged.`,
+            description: `Would create a successor using ${describeSource(input.source)} while leaving the current seat binding unchanged. Context carrier: ${SEAT_HANDOVER_SOURCE_CAPABILITIES[input.source.mode].contextCarrier}.`,
             willMutate: false,
           },
           {

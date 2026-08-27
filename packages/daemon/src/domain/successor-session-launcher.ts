@@ -2,7 +2,7 @@ import { ulid } from "ulid";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { RuntimeHint } from "./discovery-types.js";
-import type { RuntimeAdapter, NodeBinding, ReadinessResult } from "./runtime-adapter.js";
+import type { RuntimeAdapter, NodeBinding, ReadinessResult, ForkSource } from "./runtime-adapter.js";
 import { isAttentionRequiredReadinessCode } from "./runtime-adapter.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
@@ -144,6 +144,11 @@ export class SuccessorSessionLauncher {
     occupantGeneration?: string | null;
     /** Synchronous physical-cutover observer; runs after the retiree is proven gone and before respawn. */
     onReplacementStarted?: () => void;
+    /** OPR.0.5.5.5 fork source: the successor launches as a NATIVE FORK of this
+     *  resolved id (adapter forkSource seam) — it carries the incumbent's
+     *  conversation from its first byte; the returned resume token is the NEW
+     *  post-fork token, never the parent's. Absent → a plain fresh launch. */
+    forkSource?: ForkSource;
   }): Promise<SuccessorLaunchResult> {
     // CUTOVER MODEL (plan 411c43de): a SEAT = one durable tmux session; the successor takes over the
     // retiree's EXACT pane via respawn-pane, so the canonical session name is PRESERVED (no -h shuffle)
@@ -241,7 +246,7 @@ export class SuccessorSessionLauncher {
     //    on ANY launch/readiness failure we do NOT killSession the preserved seat — that would destroy
     //    the retiree's recoverable state. We return the structured failure and leave the re-wakeable
     //    shell in the pane; commit never runs, so the binding is not repointed.
-    const started = await this.startAgent(input.node, departingSession, pane.id, cwd);
+    const started = await this.startAgent(input.node, departingSession, pane.id, cwd, input.forkSource);
     if (!started.ok) {
       return { ok: false, code: started.code, step: "start_agent", message: started.message, replacementStarted: true };
     }
@@ -279,6 +284,7 @@ export class SuccessorSessionLauncher {
     tmuxSession: string,
     tmuxPane: string,
     cwd: string | undefined,
+    forkSource?: ForkSource,
   ): Promise<{ ok: true; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation } | { ok: false; code: string; message: string }> {
     const adapter = node.runtime ? this.runtimeAdapters[node.runtime] : undefined;
     if (!adapter) {
@@ -317,7 +323,7 @@ export class SuccessorSessionLauncher {
 
     let launch: Awaited<ReturnType<RuntimeAdapter["launchHarness"]>>;
     try {
-      launch = await adapter.launchHarness(binding, { name: tmuxSession });
+      launch = await adapter.launchHarness(binding, { name: tmuxSession, ...(forkSource ? { forkSource } : {}) });
     } catch (err) {
       return { ok: false, code: "successor_launch_failed", message: `Successor harness launch threw: ${err instanceof Error ? err.message : String(err)}` };
     }

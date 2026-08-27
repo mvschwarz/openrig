@@ -110,6 +110,10 @@ interface SeatHandoverMutationResult {
   currentStatus: SeatHandoverPlan["currentStatus"];
   handoverAt: string;
   eventSeq: number;
+  /** OPR.0.5.5.5 — per-source execution record (wire mirror of the daemon shape). */
+  sourceOutcome?:
+    | { mode: "fork"; forkedFrom: string }
+    | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string };
   sideEffects: {
     departingSessionKilled: false;
     startupContextDelivered: boolean;
@@ -174,14 +178,34 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
   console.log(`Current occupant: ${result.currentOccupant}`);
   console.log(`Handover result: ${display(result.currentStatus.handoverResult)}`);
   console.log("Seat binding and inventory provenance were updated.");
+  // OPR.0.5.5.5 — the per-source execution record: what actually carried context.
+  if (result.sourceOutcome?.mode === "fork") {
+    console.log(`Native fork of ${result.sourceOutcome.forkedFrom}: the successor carries the incumbent conversation from its first byte.`);
+  } else if (result.sourceOutcome?.mode === "rebuild") {
+    const outcome = result.sourceOutcome;
+    if (outcome.primedArtifacts.length > 0) {
+      console.log(`Rebuild primed from ${outcome.primedArtifacts.length} durable artifact${outcome.primedArtifacts.length === 1 ? "" : "s"}:`);
+      for (const artifact of outcome.primedArtifacts) console.log(`  - ${artifact.address} — ${artifact.label}`);
+    }
+    for (const gap of outcome.gaps) console.log(`  ! declared but missing on disk: ${gap}`);
+    if (outcome.emptyChainReason) {
+      console.log(`Rebuild chain was EMPTY: ${outcome.emptyChainReason}`);
+    }
+  }
   if (result.sideEffects.startupContextDelivered) {
-    // fresh handover: the captured restore packet was delivered to the launched
-    // live successor agent.
-    console.log("The captured startup context (restore packet) was delivered to the successor.");
+    if (result.source.mode === "rebuild") {
+      console.log("The rebuild priming packet was delivered to the successor.");
+    } else {
+      // fresh handover: the captured restore packet was delivered to the launched
+      // live successor agent.
+      console.log("The captured startup context (restore packet) was delivered to the successor.");
+    }
     console.log("No conversation continuity, provenance markdown, or session stop was performed.");
+  } else if (result.source.mode === "fork") {
+    console.log("No packet delivery: fork context rides the native conversation itself.");
   } else {
     // discovered handover: the operator-prepared successor is already live, so no
-    // separate context delivery is performed (v0 live modes are fresh + discovered).
+    // separate context delivery is performed.
     console.log("No conversation continuity, startup context delivery, provenance markdown, or session stop was performed.");
   }
 }
@@ -255,7 +279,7 @@ Examples:
   cmd
     .command("handover")
     .argument("<seat>", "Canonical session name or logical seat ref")
-    .option("--source <source>", "Source. Live: fresh (launches a new agent) or discovered:<id> (operator-prepared). fork:<id> and rebuild are dry-run-plan only in v0.")
+    .option("--source <source>", "Source: fresh (default; launches a new agent), discovered:<id> (operator-prepared), fork:<id> (native fork of the source conversation), or rebuild (fresh agent primed from the seat's durable artifacts).")
     .option("--reason <reason>", "Why the handover is happening")
     .option("--operator <address>", "Operator initiating the handover")
     .option("--dry-run", "Plan the handover without changing topology")
@@ -596,21 +620,26 @@ export function handoverCommand(depsOverride?: SeatDeps): Command {
   };
   return new Command("handover")
     .argument("<seat>", "Canonical session name or logical seat ref")
-    .option("--source <source>", "Successor source. Live: fresh (default, launches a new agent) or discovered:<id> (operator-prepared). fork:<id> and rebuild are dry-run-plan only in v0.")
+    .option("--source <source>", "Successor source: fresh (default; launches a new agent), discovered:<id> (operator-prepared), fork:<id> (native fork of the source conversation), or rebuild (fresh agent primed from the seat's durable artifacts).")
     .option("--reason <reason>", "Why the handover is happening")
     .option("--operator <address>", "Operator initiating the handover")
     .option("--dry-run", "Plan the handover without changing topology")
     .option("--json", "JSON output for agents")
     .description("Hand a seat to a successor: create -> deliver context -> verify continuity -> rebind")
     .addHelpText("after", `
-v0 live handover supports --source fresh and --source discovered:<id>.
-fork and rebuild are rejected for a live handover (planning only) until their
-follow-ons ship; a fork/rebuild handover is never silently completed.
+All four sources execute (OPR.0.5.5.5): fresh delivers a captured restore
+packet; discovered adopts an operator-prepared live session; fork:<id> launches
+a NATIVE FORK of the source conversation (the successor carries the incumbent
+context from its first byte); rebuild launches fresh and primes from the seat's
+durable artifact chain, recording exactly what it found. A source that cannot
+proceed (e.g. fork with no discoverable native id) refuses honestly before any
+mutation — a handover is never silently completed.
 
 Examples:
   rig handover spec-writer@openrig-pm --reason context-wall --dry-run
   rig handover spec-writer@openrig-pm --source fresh --reason context-wall
-  rig handover spec-writer@openrig-pm --source fork:0b0165d7 --reason plan-only --dry-run
+  rig handover spec-writer@openrig-pm --source fork:spec-writer@openrig-pm --reason context-wall
+  rig handover spec-writer@openrig-pm --source rebuild --reason degraded-incumbent
   rig handover spec-writer@openrig-pm --source discovered:01H... --reason mvp-proof --json`)
     .action((seat: string, opts: HandoverActionOpts) => runSeatHandover(seat, opts, getDeps()));
 }

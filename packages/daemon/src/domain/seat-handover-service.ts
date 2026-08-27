@@ -7,7 +7,10 @@ import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
 import { SeatStatusService, type SeatStatus, type SeatStatusResult } from "./seat-status-service.js";
-import { SeatHandoverPlanner, parseHandoverSource, type SeatHandoverPlan, type SeatHandoverSource } from "./seat-handover-planner.js";
+import { SeatHandoverPlanner, parseHandoverSource, SEAT_HANDOVER_SOURCE_CAPABILITIES, type SeatHandoverPlan, type SeatHandoverSource } from "./seat-handover-planner.js";
+import { discoverResumeToken } from "./agent-images/resume-token-discovery.js";
+import { resolveRebuildArtifacts } from "./session-source-rebuild-resolver.js";
+import { existsSync } from "node:fs";
 import { SuccessorSessionLauncher } from "./successor-session-launcher.js";
 import { deriveResumeToken, type ResumeTokenCaptureDeps } from "./resume-token-capture.js";
 import { validateResumeToken } from "./resume-token-validation.js";
@@ -80,7 +83,7 @@ export interface SeatHandoverMutationResult {
 export type SeatHandoverResult =
   | { ok: true; plan: SeatHandoverPlan }
   | { ok: true; result: SeatHandoverMutationResult }
-  | { ok: false; code: "missing_reason" | "invalid_source" | "successor_creation_not_implemented" | "source_not_supported"; message: string; guidance: string }
+  | { ok: false; code: "missing_reason" | "invalid_source" | "successor_creation_not_implemented" | "source_not_supported" | "resume_token_unavailable" | "fork_source_not_found"; message: string; guidance: string }
   | { ok: false; code: "current_occupant_required" | "discovered_not_active" | "successor_tmux_absent" | "successor_already_managed" | "successor_is_current" | "runtime_mismatch"; message: string; guidance: string }
   | { ok: false; code: "discovered_not_found"; message: string; guidance: string }
   | { ok: false; code: "tmux_probe_failed" | "handover_commit_failed" | "successor_create_failed" | "context_delivery_failed"; message: string; guidance: string }
@@ -202,6 +205,8 @@ export class SeatHandoverService {
   private predecessorRecapResolver: PredecessorRecapResolver | null;
   private authoredRecapResolver: SeatHandoverServiceDeps["authoredRecapResolver"] | null;
   private activityOracle: SeatHandoverServiceDeps["activityOracle"] | null;
+  private rebuildPrimingResolver: SeatHandoverServiceDeps["rebuildPrimingResolver"] | null;
+  private rebuildArtifactExists: (path: string) => boolean;
   /** Injectable sleep (tests): also carries the shared paste-then-submit settle in deliverRestorePacket. */
   private sleep: (ms: number) => Promise<void>;
   private appliedLaunchObservations: AppliedLaunchObservationStore;
@@ -222,6 +227,8 @@ export class SeatHandoverService {
     this.activityOracle = deps.activityOracle ?? null;
     this.predecessorRecapResolver = deps.predecessorRecapResolver ?? null;
     this.authoredRecapResolver = deps.authoredRecapResolver ?? null;
+    this.rebuildPrimingResolver = deps.rebuildPrimingResolver ?? null;
+    this.rebuildArtifactExists = deps.rebuildArtifactExists ?? existsSync;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.appliedLaunchObservations = new AppliedLaunchObservationStore(deps.db);
     this.now = deps.now ?? (() => new Date());
@@ -291,21 +298,16 @@ export class SeatHandoverService {
     if (!parsed.ok) {
       return parsed;
     }
-    // B3 — v0 supports `fresh` (launch a live successor) and `discovered`
-    // (operator-prepared live session) ONLY. `fork` and `rebuild` are LOUDLY
-    // REJECTED here — before any successor is created — so a blank successor is
-    // never bound and never reported `complete`. Their population is a tracked
-    // follow-on (fork → slice-05 native-fork primitive; rebuild → apply
-    // session-source artifacts at create). Dry-run planning for all four modes
-    // still returns a plan above (mutates nothing).
-    if (parsed.source.mode === "fork" || parsed.source.mode === "rebuild") {
+    // OPR.0.5.5.5 — execution dispatches on the SAME capability table the
+    // dry-run plan renders from, so the plan can never promise a source the
+    // executor refuses. Every current mode executes; a future non-executing
+    // mode must declare `executes: false` in its table row to be refused here.
+    if (!SEAT_HANDOVER_SOURCE_CAPABILITIES[parsed.source.mode].executes) {
       return {
         ok: false,
         code: "source_not_supported",
-        message: `${parsed.source.mode} handover is not supported in v0; use --source fresh or --source discovered:<id>.`,
-        guidance: parsed.source.mode === "fork"
-          ? "fork handover depends on the native-fork primitive (not yet shipped). Use a fresh or discovered successor."
-          : "rebuild handover artifact population is deferred to a follow-on. Use a fresh or discovered successor.",
+        message: `${parsed.source.mode} handover does not execute on this daemon.`,
+        guidance: "Use a source the dry-run plan marks executable.",
       };
     }
 
@@ -334,6 +336,41 @@ export class SeatHandoverService {
     }
 
     const operator = input.operator?.trim() || null;
+
+    // OPR.0.5.5.5 fork: resolve the native conversation id BEFORE any mutation
+    // (the respawn), so a missing/undiscoverable token is an honest pre-mutation
+    // refusal — never a blank successor silently reported as a fork, and never a
+    // mid-swap abort for a condition knowable up front.
+    let forkSource: { kind: "native_id"; value: string } | null = null;
+    if (parsed.source.mode === "fork") {
+      const forkRef = parsed.source.ref ?? latestSession.session_name;
+      const discovery = discoverResumeToken(this.db, forkRef);
+      if (!discovery.ok) {
+        return {
+          ok: false,
+          code: discovery.failure.code === "session_not_found" ? "fork_source_not_found" : "resume_token_unavailable",
+          message: discovery.failure.message,
+          guidance: "Fork needs a resolvable native conversation id. Inspect the source session with: rig ps --nodes",
+        };
+      }
+      if (!discovery.result.nativeId) {
+        return {
+          ok: false,
+          code: "resume_token_unavailable",
+          message: `No native resume id is discoverable for fork source "${forkRef}" — the conversation may not have produced output yet. No successor was created and the seat is untouched.`,
+          guidance: "Retry after the source session has a native conversation id, or use --source fresh.",
+        };
+      }
+      if (node.runtime && discovery.result.runtime && node.runtime !== discovery.result.runtime) {
+        return {
+          ok: false,
+          code: "runtime_mismatch",
+          message: `Seat expects runtime "${node.runtime}", but fork source "${forkRef}" is "${discovery.result.runtime}".`,
+          guidance: "Fork from a source session that runs the seat's runtime.",
+        };
+      }
+      forkSource = { kind: "native_id", value: discovery.result.nativeId };
+    }
 
     // Already-created successor: route straight through the discovered->commit
     // path with nothing to unwind (byte-identical to the shipped behavior).
@@ -399,6 +436,9 @@ export class SeatHandoverService {
       node: { id: node.id, runtime: node.runtime, cwd: node.cwd, launchPosture: successorPosture, model: node.model, codexConfigProfile: node.codex_config_profile ?? undefined },
       departingSessionName: latestSession.session_name,
       occupantGeneration,
+      // OPR.0.5.5.5: a fork-sourced successor launches as a NATIVE FORK of the
+      // resolved id — it carries the incumbent context from its first byte.
+      ...(forkSource ? { forkSource } : {}),
       ...(predecessorGeneration
         ? { onReplacementStarted: () => { this.appliedLaunchObservations.invalidateGeneration(predecessorGeneration); } }
         : {}),
@@ -458,6 +498,60 @@ export class SeatHandoverService {
       contextDelivered = true;
     }
 
+    // OPR.0.5.5.5 — per-source execution outcome, recorded on the result so the
+    // operator sees exactly what carried context (fork origin / primed set).
+    let sourceOutcome: SeatHandoverMutationResult["sourceOutcome"];
+    if (parsed.source.mode === "fork" && forkSource) {
+      sourceOutcome = { mode: "fork", forkedFrom: parsed.source.ref ?? latestSession.session_name };
+    }
+    if (parsed.source.mode === "rebuild") {
+      // rebuild: the successor is a FRESH conversation primed from the seat's
+      // durable chain — the live incumbent's context is deliberately not
+      // trusted. The executed set, its gaps, and an empty chain are all named.
+      const chain = this.rebuildPrimingResolver
+        ? this.rebuildPrimingResolver(input.seatRef)
+        : { emptyReason: "no rebuild priming resolver wired on this daemon" };
+      let primedArtifacts: Array<{ address: string; label: string }> = [];
+      let gaps: string[] = [];
+      let emptyChainReason: string | undefined;
+      if ("artifacts" in chain && chain.artifacts.length > 0) {
+        const resolved = resolveRebuildArtifacts(
+          { mode: "rebuild", ref: { kind: "artifact_set", value: chain.artifacts.map((artifact) => artifact.address) } },
+          { exists: this.rebuildArtifactExists },
+        );
+        gaps = resolved.gaps;
+        if (resolved.ok) {
+          const present = new Set(resolved.files.map((file) => file.absolutePath));
+          primedArtifacts = chain.artifacts.filter((artifact) => present.has(artifact.address));
+        } else {
+          emptyChainReason = resolved.error;
+        }
+      } else {
+        emptyChainReason = "artifacts" in chain ? "the durable chain resolved to zero artifacts" : chain.emptyReason;
+      }
+      sourceOutcome = { mode: "rebuild", primedArtifacts, gaps, ...(emptyChainReason ? { emptyChainReason } : {}) };
+      const delivered = await this.deliverRebuildPrimingPacket(launch.tmuxSession, {
+        seatRef: input.seatRef,
+        reason,
+        departingSession: latestSession.session_name,
+        primedArtifacts,
+        gaps,
+        emptyChainReason,
+      });
+      if (!delivered.ok) {
+        // Same partial-state contract as the fresh packet: unwind the candidate,
+        // binding unchanged, seat re-wakeable — never a false complete.
+        await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId);
+        return {
+          ok: false,
+          code: "context_delivery_failed",
+          message: `Handover failed at step "deliver-rebuild-priming": ${delivered.message}`,
+          guidance: "The successor candidate was unwound and the seat's binding is unchanged; the seat is re-wakeable from its provider session file. Retry after tmux delivery is healthy.",
+        };
+      }
+      contextDelivered = true;
+    }
+
     // 4. Verify continuity + rebind via the EXISTING discovered->commit path.
     //    On any failure, unwind the created successor (no binding to unwind).
     return this.finalizeWithDiscovered({
@@ -475,6 +569,7 @@ export class SeatHandoverService {
       launchToken: launch.resumeToken ? { token: launch.resumeToken, resumeType: launch.resumeType } : null,
       occupantGeneration,
       appliedLaunch: launch.appliedLaunch ?? null,
+      sourceOutcome,
       cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId),
     });
   }
@@ -502,6 +597,8 @@ export class SeatHandoverService {
     occupantGeneration: string | null;
     /** Exact enforcing value returned by the launch adapter; absent for adopted/discovered successors. */
     appliedLaunch: AppliedLaunchObservation | null;
+    /** OPR.0.5.5.5 — per-source execution outcome, threaded onto the result. */
+    sourceOutcome?: SeatHandoverMutationResult["sourceOutcome"];
     cleanup: (() => Promise<void>) | null;
   }): Promise<SeatHandoverResult> {
     const fail = async (result: SeatHandoverResult): Promise<SeatHandoverResult> => {
@@ -526,11 +623,13 @@ export class SeatHandoverService {
         guidance: "Use an active, unclaimed discovered successor session.",
       });
     }
-    // The CUTOVER (fresh) successor INTENTIONALLY reuses the departing session's canonical name — it
-    // respawns into the retiree's pane in place, preserving the seat name (that is the whole point). Only
-    // a DISCOVERED-source successor must be a DISTINCT session; handing a seat to its own current session
-    // is a no-op there, so the guard applies to non-fresh sources only.
-    if (input.reportedSource.mode !== "fresh" && discovered.tmuxSession === input.latestSession.session_name) {
+    // A COMPOSER-LAUNCHED successor (fresh/fork/rebuild — OPR.0.5.5.5 executes all
+    // three through the same cutover) INTENTIONALLY reuses the departing session's
+    // canonical name — it respawns into the retiree's pane in place, preserving the
+    // seat name (that is the whole point). Only a DISCOVERED-source successor must
+    // be a DISTINCT session; handing a seat to its own current session is a no-op
+    // there, so the guard applies to discovered only.
+    if (input.reportedSource.mode === "discovered" && discovered.tmuxSession === input.latestSession.session_name) {
       return fail({
         ok: false,
         code: "successor_is_current",
@@ -585,6 +684,7 @@ export class SeatHandoverService {
       launchToken: input.launchToken,
       occupantGeneration: input.occupantGeneration,
       appliedLaunch: input.appliedLaunch,
+      sourceOutcome: input.sourceOutcome,
     });
     if (!committed.ok) return fail(committed);
 
@@ -670,6 +770,49 @@ export class SeatHandoverService {
     } catch {
       return "";
     }
+  }
+
+  /** OPR.0.5.5.5 — deliver the rebuild priming packet through the same shipped
+   *  interactive-text transport as the restore packet. The packet points the
+   *  successor at the durable artifacts (it reads them itself) and names every
+   *  gap and an empty chain out loud — never a silent partial priming. */
+  private async deliverRebuildPrimingPacket(
+    successorSession: string,
+    info: {
+      seatRef: string;
+      reason: string;
+      departingSession: string;
+      primedArtifacts: Array<{ address: string; label: string }>;
+      gaps: string[];
+      emptyChainReason?: string;
+    },
+  ): Promise<{ ok: true } | { ok: false; message: string }> {
+    const lines = [
+      `# Seat rebuild handover — ${info.seatRef}`,
+      `You are a REBUILT successor for this seat (reason: ${info.reason}, at ${this.now().toISOString()}). Your predecessor session was ${info.departingSession}; its live context was deliberately NOT carried. Prime yourself from the durable artifacts below, highest trust first.`,
+    ];
+    if (info.primedArtifacts.length > 0) {
+      lines.push("", "Priming artifacts (read each, in order):");
+      for (const artifact of info.primedArtifacts) lines.push(`- ${artifact.address} — ${artifact.label}`);
+    }
+    if (info.gaps.length > 0) {
+      lines.push("", "Declared but MISSING on disk (known gaps, named so nothing is silently dropped):");
+      for (const gap of info.gaps) lines.push(`- ${gap}`);
+    }
+    if (info.emptyChainReason) {
+      lines.push("", `The durable chain is EMPTY: ${info.emptyChainReason}. You start from seat identity alone — say so in your first status report.`);
+    }
+    const sent = await this.tmuxAdapter.sendText(successorSession, lines.join("\n"));
+    if (!sent.ok) {
+      return { ok: false, message: (sent as { message?: string }).message ?? "send_text failed" };
+    }
+    // Same spike-proven 200ms settle as the restore packet (staged-not-consumed class).
+    await this.sleep(200);
+    const submit = await this.tmuxAdapter.sendKeys(successorSession, ["C-m"]);
+    if (!submit.ok) {
+      return { ok: false, message: (submit as { message?: string }).message ?? "submit failed" };
+    }
+    return { ok: true };
   }
 
   /** Deliver the captured restore packet to a fresh successor via the shipped
@@ -767,6 +910,7 @@ export class SeatHandoverService {
     launchToken: { token: string; resumeType?: string } | null;
     occupantGeneration: string | null;
     appliedLaunch: AppliedLaunchObservation | null;
+      sourceOutcome?: SeatHandoverMutationResult["sourceOutcome"];
   }): SeatHandoverResult {
     const handoverAt = this.now().toISOString();
     const tx = this.db.transaction(() => {
@@ -825,7 +969,13 @@ export class SeatHandoverService {
       // 2026-08-22 wave's seats reported fresh/fresh-primed while their panes ran resumed contexts.
       // fresh mode is now verified-blank at launch (successor_pane_not_blank guards it), so 'fresh'
       // is earned; a discovered successor's continuity is genuinely unknown and stays NULL.
-      const continuityOutcome = input.reportedSource.mode === "fresh" ? "fresh" : null;
+      // OPR.0.5.5.5 — the executed source records its own continuity vocabulary
+      // (the startup-orchestrator set): fresh->fresh, fork->forked,
+      // rebuild->rebuilt; discovered stays null (continuity unknown to us).
+      const continuityOutcome = input.reportedSource.mode === "fresh" ? "fresh"
+        : input.reportedSource.mode === "fork" ? "forked"
+        : input.reportedSource.mode === "rebuild" ? "rebuilt"
+        : null;
       this.db.prepare(`
         UPDATE nodes SET
           occupant_lifecycle = 'active',
@@ -935,6 +1085,7 @@ export class SeatHandoverService {
         currentStatus,
         handoverAt,
         eventSeq: committed.event.seq,
+        ...(input.sourceOutcome ? { sourceOutcome: input.sourceOutcome } : {}),
         sideEffects: {
           departingSessionKilled: false,
           startupContextDelivered: input.contextDelivered,

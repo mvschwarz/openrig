@@ -12,7 +12,8 @@ import { makePredecessorRecapResolver } from "../domain/predecessor-recap-resolv
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { resolveAuthoredRecapPointer } from "../domain/context-packs/seat-recap-store.js";
+import { resolveAuthoredRecapPointer, listRecapChain, RECAP_FILENAME } from "../domain/context-packs/seat-recap-store.js";
+import { parseSessionName } from "../domain/session-name.js";
 import { SettingsStore } from "../domain/user-settings/settings-store.js";
 
 export const seatRoutes = new Hono();
@@ -88,6 +89,28 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
     authoredRecapResolver: (seatRef: string) => {
       const topologyRoot = String(new SettingsStore().resolveOne("topology.root").value);
       return resolveAuthoredRecapPointer(seatRef, topologyRoot);
+    },
+    // OPR.0.5.5.5 — the rebuild priming chain, trust-precedence order: current
+    // authored RECAP.md first, then LEARNED.md (seat lineage lessons), then the
+    // superseded recap chain newest-first. Only DECLARES addresses; the service
+    // existence-filters them (gaps recorded, never silently dropped) and an
+    // unparseable seat ref is a NAMED empty chain, never a guess.
+    rebuildPrimingResolver: (seatRef: string) => {
+      const topologyRoot = String(new SettingsStore().resolveOne("topology.root").value);
+      const parsed = parseSessionName(seatRef);
+      if (parsed.kind !== "canonical") {
+        return { emptyReason: `seat ref '${seatRef}' did not parse as canonical <seat>@<rig> — no durable chain resolved, never guessed` };
+      }
+      const seatDir = join(topologyRoot, "rigs", parsed.rig, "seats", parsed.member);
+      const artifacts = [
+        { address: join(seatDir, RECAP_FILENAME), label: "authored seat recap (highest trust)" },
+        { address: join(seatDir, "LEARNED.md"), label: "seat lineage lessons" },
+        ...listRecapChain(seatDir).reverse().map((entry, index) => ({
+          address: entry.path,
+          label: `superseded recap (${index + 1} generation${index === 0 ? "" : "s"} back)`,
+        })),
+      ];
+      return { artifacts };
     },
     // OPR.0.4.6.PI1 FR-6 — the Pi adapter in the runtime-adapter map exposes
     // the pi-runner sidecar reader; reuse it structurally (no new context var).

@@ -786,21 +786,20 @@ describe("SeatHandoverService", () => {
     expect(resolveOrder).toBeLessThan(launchOrder);
   });
 
-  it.each([
-    ["rebuild", "rebuild"],
-    ["fork", "fork:0b0165d7"],
-  ])("B3: loudly REJECTS a live %s handover (never a blank successor reported complete)", async (_label, source) => {
+  // OPR.0.5.5.5 (05-handover-sources-real) INVERTED the former B3 pin: fork and
+  // rebuild now EXECUTE (full coverage in seat-handover-sources.test.ts). What
+  // survives of B3 is its safety core: a source that cannot proceed refuses
+  // HONESTLY and pre-mutation — never a blank successor reported complete.
+  it("OPR.0.5.5.5: fork without a discoverable native id refuses honestly pre-mutation — source_not_supported is gone, the seat is untouched", async () => {
     const { node } = seedSeat({ runtime: "codex" });
     const before = durableRows();
 
-    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source });
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fork:0b0165d7" });
 
-    // Loud rejection BEFORE any successor is created; nothing committed.
-    expect(result).toMatchObject({ ok: false, code: "source_not_supported" });
+    expect(result).toMatchObject({ ok: false, code: "fork_source_not_found" });
     expect(createSession).not.toHaveBeenCalled();
     expect(launchHarness).not.toHaveBeenCalled();
     expect(sendText).not.toHaveBeenCalled();
-    expect(hasSession).not.toHaveBeenCalled();
     // Original seat/binding untouched; no node marked handover complete.
     expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-impl@seat-rig");
     const nodeRow = db.prepare("SELECT handover_result FROM nodes WHERE id = ?").get(node.id) as Record<string, string | null>;

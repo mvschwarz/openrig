@@ -6,6 +6,7 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { SeatHandoverService } from "../src/domain/seat-handover-service.js";
+import { SEAT_HANDOVER_SOURCE_CAPABILITIES } from "../src/domain/seat-handover-planner.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { observeCodexSandbox } from "../src/domain/permission-drift.js";
@@ -272,6 +273,31 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
       if (!executed.ok) {
         expect(executed.code, `execution of --source ${source} refused a source its own plan promised`).not.toBe("source_not_supported");
       }
+      db.close();
+      db = createFullTestDb();
+      rigRepo = new RigRepository(db);
+      sessionRegistry = new SessionRegistry(db);
+      discoveryRepo = new DiscoveryRepository(db);
+      eventBus = new EventBus(db);
+      service = newService();
+    }
+  });
+
+  it("the ONE shared source-capability table: every source mode has a row, and the dry-run plan renders its create-successor step FROM the table", async () => {
+    // Exhaustive Record over SeatHandoverSourceMode — a new mode cannot compile
+    // without declaring a row; this pin makes the row's truth reach the plan.
+    expect(Object.keys(SEAT_HANDOVER_SOURCE_CAPABILITIES).sort()).toEqual(["discovered", "fork", "fresh", "rebuild"]);
+    for (const row of Object.values(SEAT_HANDOVER_SOURCE_CAPABILITIES)) {
+      expect(row.executes).toBe(true);
+    }
+    for (const source of ["fresh", "rebuild", "fork:dev-impl@seat-rig"]) {
+      seedSeat();
+      const planned = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source, dryRun: true });
+      expect(planned.ok).toBe(true);
+      if (!planned.ok || !("plan" in planned)) throw new Error("expected plan");
+      const step = planned.plan.phases.flatMap((phase) => phase.steps).find((candidate) => candidate.id === "create-successor");
+      const mode = source.startsWith("fork") ? "fork" : source;
+      expect(step?.description).toContain(SEAT_HANDOVER_SOURCE_CAPABILITIES[mode as keyof typeof SEAT_HANDOVER_SOURCE_CAPABILITIES].contextCarrier);
       db.close();
       db = createFullTestDb();
       rigRepo = new RigRepository(db);
