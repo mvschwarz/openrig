@@ -165,6 +165,61 @@ export async function openSocketConnection(
   return { ok: true, url: r.json.url as string };
 }
 
+// ── S10 outbound images — the EXTERNAL-UPLOAD flow (the only living upload path) ────────────
+// `files.upload` was sunset 2025-11-12 and no longer functions (affordance-verified). The flow:
+//   1. files.getUploadURLExternal (filename, length)  → { upload_url, file_id }
+//   2. POST the raw bytes to upload_url (octet-stream)
+//   3. files.completeUploadExternal ({ files, channel_id, thread_ts?, initial_comment? })
+// Scope: files:write. thread_ts attaches the file INTO the conversation thread.
+
+export async function getUploadURLExternal(
+  token: string,
+  filename: string,
+  length: number,
+  fetchImpl: FetchImpl = defaultFetch,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<{ ok: boolean; uploadUrl?: string; fileId?: string; error?: string }> {
+  const r = await callWebApi("files.getUploadURLExternal", token, { filename, length }, fetchImpl, timeoutMs);
+  if (!r.ok) return { ok: false, error: r.error };
+  return { ok: true, uploadUrl: r.json.upload_url as string, fileId: r.json.file_id as string };
+}
+
+/** Leg 2: POST the raw bytes to the pre-signed upload URL (octet-stream, no auth header). */
+export async function uploadBytesExternal(
+  uploadUrl: string,
+  bytes: Uint8Array,
+  fetchImpl: FetchImpl = defaultFetch,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<HttpResult> {
+  try {
+    return await withTimeout(timeoutMs, async (signal) => {
+      const res = await fetchImpl(uploadUrl, {
+        method: "POST",
+        headers: { "content-type": "application/octet-stream" },
+        body: bytes as unknown as RequestInit["body"],
+        signal,
+      });
+      if (!res.ok) return { ok: false, status: res.status, error: `upload ${res.status}` };
+      return { ok: true, status: res.status };
+    });
+  } catch (e) {
+    return { ok: false, status: 0, error: `upload transport: ${(e as Error).message}` };
+  }
+}
+
+export async function completeUploadExternal(
+  token: string,
+  input: { files: { id: string; title?: string }[]; channelId: string; threadTs?: string; initialComment?: string },
+  fetchImpl: FetchImpl = defaultFetch,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<{ ok: boolean; error?: string }> {
+  const body: Record<string, unknown> = { files: input.files, channel_id: input.channelId };
+  if (input.threadTs) body.thread_ts = input.threadTs;
+  if (input.initialComment) body.initial_comment = input.initialComment;
+  const r = await callWebApi("files.completeUploadExternal", token, body, fetchImpl, timeoutMs);
+  return { ok: r.ok, error: r.error };
+}
+
 export interface PostChatMessageInput {
   channel: string;
   text: string; // notification fallback — always set (affordance-verified: keep a text arg on all posts)

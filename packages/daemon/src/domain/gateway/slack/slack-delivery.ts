@@ -13,7 +13,9 @@
 //   - delivered-ok additionally marks the qitemId seen (slice-11: seen ONLY after success) and
 //     releases the driver's in-flight guard.
 
-import { postChatMessage, type FetchImpl } from "./slack-api.js";
+import fs from "node:fs";
+import path from "node:path";
+import { postChatMessage, getUploadURLExternal, uploadBytesExternal, completeUploadExternal, type FetchImpl } from "./slack-api.js";
 import { buildOutboundMessage, attributionFromSession, type SlackMediaRef } from "./message.js";
 import type { SeenStore } from "./state-store.js";
 import type { OutboundDecision } from "../protocol.js";
@@ -41,7 +43,26 @@ export interface SubsystemSlackDeliveryOpts {
    *  undefined for everything else (quiet-threaded). The composition wires the registry lookup
    *  + the escalation predicate; delivery just renders what it is told. */
   resolveMentionUserId?: (payload: OutboundPostPayload) => string | undefined;
+  /** G — read a LOCAL image the evidenceRef points at (the founder screenshot class: a seat's
+   *  file has no public URL, so it rides the EXTERNAL-UPLOAD flow into the thread). Injectable
+   *  for hermetic tests; default reads the filesystem, image extensions only. Return null =
+   *  not an uploadable local image. */
+  readLocalImage?: (refPath: string) => { bytes: Uint8Array; filename: string } | null;
   log?: (msg: string) => void;
+}
+
+const LOCAL_IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
+
+/** Default local-image reader: absolute path, image extension, readable — else null. */
+export function defaultReadLocalImage(refPath: string): { bytes: Uint8Array; filename: string } | null {
+  try {
+    if (!path.isAbsolute(refPath)) return null;
+    if (!LOCAL_IMAGE_EXT.has(path.extname(refPath).toLowerCase())) return null;
+    const bytes = fs.readFileSync(refPath);
+    return { bytes: new Uint8Array(bytes), filename: path.basename(refPath) };
+  } catch {
+    return null;
+  }
 }
 
 /** Build the subsystem DeliverFn. Contract mirrors the retired connector handleDecision. */
@@ -96,6 +117,36 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
       opts.release?.(q.qitemId);
     }
     if (res.ts && threadTs === undefined) opts.onPostedRoot?.(q, res.ts);
+
+    // G — a LOCAL image evidenceRef (the founder screenshot) rides the EXTERNAL-UPLOAD flow
+    // into the conversation thread (files.upload is sunset). Upload failure is fail-VISIBLE
+    // but does NOT fail the decision: the text delivered; failing here would replay the whole
+    // post and duplicate the human notification (the H red). https refs already rode as Block
+    // Kit image blocks above; non-image/non-existent refs are a clean skip.
+    const local = q.evidenceRef && !/^https:\/\//.test(String(q.evidenceRef))
+      ? (opts.readLocalImage ?? defaultReadLocalImage)(String(q.evidenceRef))
+      : null;
+    if (local) {
+      const intoThread = threadTs ?? res.ts;
+      const up = await getUploadURLExternal(opts.botToken, local.filename, local.bytes.length, opts.fetchImpl);
+      if (up.ok && up.uploadUrl && up.fileId) {
+        const put = await uploadBytesExternal(up.uploadUrl, local.bytes, opts.fetchImpl);
+        if (put.ok) {
+          const done = await completeUploadExternal(
+            opts.botToken,
+            { files: [{ id: up.fileId, title: q.summary ?? local.filename }], channelId: opts.channel, threadTs: intoThread },
+            opts.fetchImpl,
+          );
+          if (done.ok) log(`uploaded ${local.filename} into thread ${intoThread ?? "(root)"} for ${q.qitemId ?? decision.decisionId}`);
+          else log(`ATTACHMENT upload complete FAILED for ${q.qitemId ?? decision.decisionId}: ${done.error} (text delivered; attachment missing)`);
+        } else {
+          log(`ATTACHMENT byte upload FAILED for ${q.qitemId ?? decision.decisionId}: ${put.error} (text delivered; attachment missing)`);
+        }
+      } else {
+        log(`ATTACHMENT upload-url FAILED for ${q.qitemId ?? decision.decisionId}: ${up.error} (text delivered; attachment missing)`);
+      }
+    }
+
     log(`delivered ${decision.decisionId}${q.qitemId ? ` (qitem ${q.qitemId})` : ""}`);
     return { ok: true };
   };
