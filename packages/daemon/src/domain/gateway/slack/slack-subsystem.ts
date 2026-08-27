@@ -95,6 +95,25 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         // For an outbound alert, human = the destination seat-ref, seat = the source seat.
         resolveThreadTs: (p) =>
           threadMap.resolveOpenForPair(p.destinationSession ?? "", p.sourceSession ?? "")?.threadTs,
+        // F — interim loudness rule: ONLY an escalation mentions its human (tier human-gate or
+        // an escalation tag); the mention id is the registered human's slack HANDLE from the
+        // registry. No handle / not registered → quiet (a mention that cannot resolve is
+        // silence, never a guessed id).
+        resolveMentionUserId: (p) => {
+          const escalation = p.tier === "human-gate" || (p.tags ?? []).includes("escalation");
+          if (!escalation) return undefined;
+          const local = (p.destinationSession ?? "").split("@")[0] ?? "";
+          if (!local) return undefined;
+          const reg = (opts.registry ?? { loadHumanRegistry, resolveSlackHandle }).loadHumanRegistry(opts.home);
+          if (!reg.ok) return undefined;
+          for (const e of reg.entities) {
+            if (e.entityId !== local) continue;
+            for (const b of e.connectorBindings) {
+              if (b.kind === "slack" && b.handle) return b.handle;
+            }
+          }
+          return undefined;
+        },
         onPostedRoot: (p, ts) => {
           const human = p.destinationSession ?? "";
           const seat = p.sourceSession ?? "";

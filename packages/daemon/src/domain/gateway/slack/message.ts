@@ -36,6 +36,35 @@ export interface OutboundMessageOpts {
   extraBlocks?: unknown[];
   /** M1 A5b: outbound image attachments, rendered as Block Kit `image` blocks (the wired seam). */
   mediaRefs?: SlackMediaRef[];
+  /** S10 / A1.2 — the structured seat-attribution header (rig/host/seat/session), rendered as
+   *  the LEADING context block in ONE honest bot identity. Authorship lives in OUR record;
+   *  Slack's transport actor stays the app. NEVER a per-message username/icon override. */
+  attribution?: SeatAttribution;
+  /** S10 interim loudness rule: an escalation MENTIONS its human (`<@Uxxx>`); everything else
+   *  stays quiet-threaded. The value is the Slack USER ID (mention semantics require the id,
+   *  never a display name). */
+  mentionUserId?: string;
+}
+
+/** A1.2 — the four attribution fields. */
+export interface SeatAttribution {
+  seat: string;
+  rig?: string;
+  host?: string;
+  session: string;
+}
+
+/** Parse the stamped session triple (`member@rig[@host]`, the 51-09 stored form) into the
+ *  attribution fields. A bare/unparseable ref degrades to seat=session (never a throw). */
+export function attributionFromSession(sourceSession: string | null | undefined): SeatAttribution | undefined {
+  if (!sourceSession) return undefined;
+  const parts = sourceSession.split("@");
+  if (parts.length >= 2) {
+    const a: SeatAttribution = { seat: `${parts[0]}@${parts[1]}`, rig: parts[1], session: sourceSession };
+    if (parts.length >= 3) a.host = parts.slice(2).join("@");
+    return a;
+  }
+  return { seat: sourceSession, session: sourceSession };
 }
 
 const SLACK_ALT_TEXT_CAP = 2000; // Slack image alt_text hard limit.
@@ -103,11 +132,24 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
   const dest = q.destinationSession || "(unknown destination)";
   const footer = `qitem ${q.qitemId} → ${dest} on ${opts.sourceLabel}`;
 
-  const text = clamp(`:rotating_light: *${summary}*\n${body}\n_${footer}_`, SLACK_TEXT_CAP);
+  // S10 interim loudness rule: only an escalation carries a mention (the sole force-notify
+  // lever Slack offers); everything else stays quiet-threaded.
+  const mention = opts.mentionUserId ? `<@${opts.mentionUserId}> ` : "";
+  // A1.2 — the attribution header line (rig/host/seat/session), one honest bot identity.
+  const attr = opts.attribution
+    ? [
+        `from *${redactSecrets(opts.attribution.seat)}*`,
+        opts.attribution.rig ? `rig ${redactSecrets(opts.attribution.rig)}` : null,
+        opts.attribution.host ? `host ${redactSecrets(opts.attribution.host)}` : null,
+        `session ${redactSecrets(opts.attribution.session)}`,
+      ].filter(Boolean).join(" · ")
+    : null;
 
-  const blocks: unknown[] = [
-    { type: "section", text: { type: "mrkdwn", text: clamp(`:rotating_light: *${summary}*`, 3000) } },
-  ];
+  const text = clamp(`${mention}:rotating_light: *${summary}*${attr ? `\n_${attr}_` : ""}\n${body}\n_${footer}_`, SLACK_TEXT_CAP);
+
+  const blocks: unknown[] = [];
+  if (attr) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: clamp(attr, 2000) }] });
+  blocks.push({ type: "section", text: { type: "mrkdwn", text: clamp(`${mention}:rotating_light: *${summary}*`, 3000) } });
   if (body.trim()) blocks.push({ type: "section", text: { type: "mrkdwn", text: clamp(body, 3000) } });
   // M1 A5b — outbound image attachments (the wired T1076 seam). Secret-bearing URLs are dropped.
   const imageBlocks = buildImageBlocks(opts.mediaRefs);

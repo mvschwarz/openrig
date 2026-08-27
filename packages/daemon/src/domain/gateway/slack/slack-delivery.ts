@@ -14,7 +14,7 @@
 //     releases the driver's in-flight guard.
 
 import { postChatMessage, type FetchImpl } from "./slack-api.js";
-import { buildOutboundMessage, type SlackMediaRef } from "./message.js";
+import { buildOutboundMessage, attributionFromSession, type SlackMediaRef } from "./message.js";
 import type { SeenStore } from "./state-store.js";
 import type { OutboundDecision } from "../protocol.js";
 import type { SubsystemDeliverFn, SubsystemDeliveryOutcome } from "../gateway-subsystem.js";
@@ -37,6 +37,10 @@ export interface SubsystemSlackDeliveryOpts {
   resolveThreadTs?: (payload: OutboundPostPayload) => string | undefined;
   /** E: record a NEW root's ts so the conversation threads from here on. */
   onPostedRoot?: (payload: OutboundPostPayload, ts: string) => void;
+  /** F (interim loudness rule): return the Slack USER ID to mention for an ESCALATION payload,
+   *  undefined for everything else (quiet-threaded). The composition wires the registry lookup
+   *  + the escalation predicate; delivery just renders what it is told. */
+  resolveMentionUserId?: (payload: OutboundPostPayload) => string | undefined;
   log?: (msg: string) => void;
 }
 
@@ -65,7 +69,15 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
         body: q.body,
         destinationSession: q.destinationSession ?? decision.entityBindingRef,
       },
-      { sourceLabel: opts.sourceLabel, bodyExcerpt: opts.bodyExcerpt, mediaRefs },
+      {
+        sourceLabel: opts.sourceLabel,
+        bodyExcerpt: opts.bodyExcerpt,
+        mediaRefs,
+        // A1.2 — attribution rides every post; identity stays the app's own (postChatMessage
+        // structurally cannot carry username/icon overrides — the customize-absence rail).
+        attribution: attributionFromSession(q.sourceSession),
+        mentionUserId: opts.resolveMentionUserId?.(q),
+      },
     );
     const threadTs = opts.resolveThreadTs?.(q);
     const res = await postChatMessage(

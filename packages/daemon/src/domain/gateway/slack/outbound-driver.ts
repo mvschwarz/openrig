@@ -30,6 +30,9 @@ export interface OutboundPostPayload {
   destinationSession?: string | null;
   sourceSession?: string | null;
   evidenceRef?: string | null;
+  /** F: the loudness discriminators (interim rule: escalations mention, all else quiet). */
+  tier?: string | null;
+  tags?: string[] | null;
 }
 
 export interface OutboundDriverDeps {
@@ -124,5 +127,7 @@ function toPayload(q: QueueItem): OutboundPostPayload {
     destinationSession: q.destinationSession,
     sourceSession: q.sourceSession,
     evidenceRef: q.evidenceRef,
+    tier: q.tier,
+    tags: q.tags,
   };
 }
