@@ -6,16 +6,18 @@ import { createProgram } from "../src/index.js";
 // "are we parked?" at all. The diagnosis itself is pinned daemon-side; these pins cover
 // the verb, its JSON passthrough, and the unreachable-daemon honesty.
 
-function stubParkedDaemon(payload: unknown): Promise<{ server: Server; url: string }> {
+function stubParkedDaemon(payload: unknown): Promise<{ server: Server; url: string; urls: string[] }> {
+  const urls: string[] = [];
   return new Promise((resolve) => {
     const server = createServer((req, res) => {
       const u = new URL(req.url!, "http://x");
+      urls.push(req.url!);
       if (!u.pathname.endsWith("/api/activity/parked")) { res.writeHead(404); res.end("{}"); return; }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(payload));
     });
     server.listen(0, "127.0.0.1", () => {
-      resolve({ server, url: `http://127.0.0.1:${(server.address() as { port: number }).port}` });
+      resolve({ server, url: `http://127.0.0.1:${(server.address() as { port: number }).port}`, urls });
     });
   });
 }
@@ -83,6 +85,28 @@ describe("rig parked (S19 A7)", () => {
       expect(out.seat.confidence).toEqual({ activity: "high", obligations: "complete" });
       expect(out.seat.obligations.scope).toContain("destination=");
     } finally {
+      server.close();
+    }
+  });
+
+  it("Wave-O B2: the CLI carries the rig coordinate — --rig wins, else the shell's own seat identity", async () => {
+    const { server, url, urls } = await stubParkedDaemon({ ok: true, rig: { parked: false, reason: "no seat is parked", seats: [], scope: { rig: "other-rig", resolvedFrom: "query-param" } } });
+    process.env.OPENRIG_URL = url;
+    const prevSession = process.env.OPENRIG_SESSION_NAME;
+    process.env.OPENRIG_SESSION_NAME = "dev50-driver@v-openrig-build";
+    try {
+      const p1 = createProgram();
+      p1.exitOverride();
+      await p1.parseAsync(["node", "rig", "parked"]);
+      expect(urls.at(-1)).toContain("rig=v-openrig-build"); // derived from the seat identity
+      const p2 = createProgram();
+      p2.exitOverride();
+      await p2.parseAsync(["node", "rig", "parked", "--rig", "other-rig"]);
+      expect(urls.at(-1)).toContain("rig=other-rig"); // explicit flag wins
+      const out = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(out).toContain("scope: rig other-rig (from query-param)"); // AM-3 scope rendered
+    } finally {
+      if (prevSession === undefined) delete process.env.OPENRIG_SESSION_NAME; else process.env.OPENRIG_SESSION_NAME = prevSession;
       server.close();
     }
   });

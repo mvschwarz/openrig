@@ -101,6 +101,11 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
     // GHOST-STAGE (e/Class-B) — the canonical OccupantInvalidator so commit()'s re-key call fires
     // (invalidate the retiring occupant's seat-name-keyed stores before the successor accumulates any).
     occupantInvalidator: (c.get("occupantInvalidator" as never) as import("../domain/occupant-invalidator.js").OccupantInvalidator | undefined) ?? undefined,
+    // WAVE-O B1 (R2 508e383d) — the daemon's ONE SeatActivityService rides every
+    // production handover construction, so a real committed swap reaches
+    // declareOccupantSwap and the successor never inherits the retiree's evidence or
+    // promoted rung authority. Optional in the deps contract; ALWAYS wired here.
+    activityOracle: (c.get("seatActivityService" as never) as import("../domain/seat-activity-service.js").SeatActivityService | undefined) ?? undefined,
   });
   const result = await service.handover({
     seatRef: decodeURIComponent(c.req.param("seatRef")!),

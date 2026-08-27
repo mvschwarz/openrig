@@ -31,7 +31,10 @@ function makeApp(opts: { withDeps: boolean; rows?: Array<{ qitemId: string; stat
     if (opts.withDeps) {
       c.set("seatActivityService" as never, svc as never);
       c.set("queueRepo" as never, { list: () => opts.rows ?? [] } as never);
-      c.set("rigRepo" as never, { db: { prepare: () => ({ all: () => [{ node_id: SEAT, session_name: SESSION }] }) } } as never);
+      c.set("rigRepo" as never, { db: { prepare: (sql: string) => ({
+        get: () => ({ id: "rig-1", name: "v-openrig-build" }),
+        all: () => (sql.includes("SELECT name FROM rigs") ? [] : [{ node_id: SEAT, session_name: SESSION }]),
+      }) } } as never);
     }
     await next();
   });
@@ -42,7 +45,7 @@ function makeApp(opts: { withDeps: boolean; rows?: Array<{ qitemId: string; stat
 describe("S19 A7 — GET /api/activity/parked", () => {
   it("rig-level: joins the oracle with the obligation face and returns the derived diagnosis", async () => {
     const app = makeApp({ withDeps: true, rows: [{ qitemId: "qitem-9", state: "pending", summary: "owed" }] });
-    const res = await app.request("/api/activity/parked");
+    const res = await app.request("/api/activity/parked", { headers: { "x-openrig-session": SESSION } });
     expect(res.status).toBe(200);
     const body = await res.json() as { ok: boolean; rig: { parked: boolean; seats: Array<{ parked: boolean }> } };
     expect(body.ok).toBe(true);
@@ -54,7 +57,7 @@ describe("S19 A7 — GET /api/activity/parked", () => {
     const app = makeApp({ withDeps: true, rows: [] });
     const byName = await app.request(`/api/activity/parked?seat=${encodeURIComponent(SESSION)}`);
     expect(byName.status).toBe(200);
-    const ghost = await app.request("/api/activity/parked?seat=ghost");
+    const ghost = await app.request("/api/activity/parked?seat=ghost", { headers: { "x-openrig-session": SESSION } });
     expect(ghost.status).toBe(404);
     const body = await ghost.json() as { error: string };
     expect(body.error).toContain(SESSION); // teaching names the known seats

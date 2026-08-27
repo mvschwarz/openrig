@@ -291,27 +291,72 @@ activityRoutes.get("/parked", (c) => {
     }),
   };
 
+  // WAVE-O B2 (R2 508e383d): the diagnosis is RIG-SCOPED, never fleet-wide. Resolve ONE
+  // declared scope — an explicit seat coordinate carrying its @rig, the explicit ?rig=
+  // parameter, or the caller's own session identity — and NAME it in the response
+  // (AM-3: the scope that ran is part of the answer). No resolvable scope is an honest
+  // refusal, never a silent fold of every rig on the daemon.
+  const seatParam = c.req.query("seat") || undefined;
+  const rigParam = c.req.query("rig") || undefined;
+  const callerSession = c.req.header("x-openrig-session") || undefined;
+  let scope: { rig: string; resolvedFrom: "seat-coordinate" | "query-param" | "caller-session" } | null = null;
+  if (seatParam?.includes("@")) {
+    scope = { rig: seatParam.split("@")[1]!, resolvedFrom: "seat-coordinate" };
+  } else if (rigParam) {
+    scope = { rig: rigParam, resolvedFrom: "query-param" };
+  } else if (callerSession?.includes("@")) {
+    // Canonical local form name@rig; a cross-host stamp name@rig@host parses the same.
+    scope = { rig: callerSession.split("@")[1]!, resolvedFrom: "caller-session" };
+  }
+  if (!scope) {
+    return c.json({
+      ok: false,
+      code: "rig_scope_unresolvable",
+      error: "The parked diagnosis is rig-scoped and no rig coordinate could be resolved — pass ?rig=<name> (CLI: --rig), target a seat by its canonical session name (?seat=name@rig), or call from a seat shell so the session identity carries the rig.",
+    }, 400);
+  }
+  const rigRow = rigRepo.db.prepare("SELECT id, name FROM rigs WHERE name = ?").get(scope.rig) as { id: string; name: string } | undefined;
+  if (!rigRow) {
+    const known = (rigRepo.db.prepare("SELECT name FROM rigs ORDER BY name").all() as Array<{ name: string }>).map((r) => r.name);
+    return c.json({
+      ok: false,
+      code: "rig_not_found",
+      error: `No rig named "${scope.rig}" on this daemon — known rigs: ${known.join(", ") || "(none)"}.`,
+    }, 404);
+  }
+
   const seats = rigRepo.db.prepare(`
     SELECT n.id AS node_id, s.session_name AS session_name
     FROM nodes n
+    JOIN rigs r ON r.id = n.rig_id
     JOIN sessions s ON s.node_id = n.id
       AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
-    WHERE s.status = 'running' AND s.session_name IS NOT NULL
-  `).all() as Array<{ node_id: string; session_name: string }>;
+    WHERE s.status = 'running' AND s.session_name IS NOT NULL AND r.name = ?
+  `).all(scope.rig) as Array<{ node_id: string; session_name: string }>;
 
-  const seatParam = c.req.query("seat") || undefined;
   if (seatParam) {
     const match = seats.find((s) => s.node_id === seatParam || s.session_name === seatParam);
     if (!match) {
       return c.json({
         ok: false,
         code: "seat_not_found",
-        error: `No running seat matches "${seatParam}" — pass a node id or canonical session name (known: ${seats.map((s) => s.session_name).join(", ") || "(none running)"}).`,
+        error: `No running seat in rig "${scope.rig}" matches "${seatParam}" — pass a node id or canonical session name (known in scope: ${seats.map((s) => s.session_name).join(", ") || "(none running)"}).`,
       }, 404);
     }
-    return c.json({ ok: true, seat: diagnoseSeatParked(deps, { seatNodeId: match.node_id, sessionName: match.session_name }), limit: PARKED_OBLIGATION_LIMIT });
+    return c.json({
+      ok: true,
+      seat: diagnoseSeatParked(deps, { seatNodeId: match.node_id, sessionName: match.session_name }),
+      scope,
+      limit: PARKED_OBLIGATION_LIMIT,
+    });
   }
-  return c.json({ ok: true, rig: diagnoseRigParked(deps, seats.map((s) => ({ seatNodeId: s.node_id, sessionName: s.session_name }))) });
+  return c.json({
+    ok: true,
+    rig: {
+      ...diagnoseRigParked(deps, seats.map((s) => ({ seatNodeId: s.node_id, sessionName: s.session_name }))),
+      scope,
+    },
+  });
 });
 
 function stringOrNull(value: unknown): string | null {
