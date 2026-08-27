@@ -920,6 +920,24 @@ export class QueueRepository {
     bodyOverride?: string,
     prebuiltText?: string,
   ): Promise<{ classified: "verified" | "indeterminate" | "failed"; nudgeResult: string }> {
+    // DEFECT FIX qitem-20260827065907-b9ae334c (S1-class, 3 live specimens): a virtual
+    // @external destination has NO pane — the queue row ITSELF is the gateway
+    // subsystem's input (the Slack connector polls human-destined rows and its own
+    // ledger is the delivery record). Falling through to tmux here recorded
+    // "failed: … tmux reports no session" while the founder verifiably received the
+    // message, and that failed: literal poisoned the undelivered surface. So: the
+    // wake for this class is GATEWAY-OWNED — tmux is never consulted, and the
+    // recorded wording claims exactly what was (and was not) checked. Classified
+    // indeterminate (landed with the owning subsystem; render unconfirmable here) —
+    // never verified, never failed. Human-CLASS seats with real panes
+    // (human-*@kernel) are NOT this class and keep tmux transport.
+    if (parseSessionName(destinationSession).kind === "external") {
+      return {
+        classified: "indeterminate",
+        nudgeResult:
+          `gateway-owned: '${destinationSession}' is a virtual @external destination — delivery rides the gateway subsystem (Slack connector), whose own ledger is the delivery record; tmux was not consulted (it can never hold this address class)`,
+      };
+    }
     const stampISO = new Date().toISOString();
     let text: string;
     if (prebuiltText !== undefined) {
