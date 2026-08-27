@@ -2012,14 +2012,16 @@ export class QueueRepository {
           throw new QueueRepositoryError(
             "blocker_not_found",
             `blocked_on names a qitem that does not exist: ${effectiveBlockedOn}. A park must name a real, live blocker — a nonexistent blocker can never complete, so the row could never unpark.`,
-            { blockedOn: effectiveBlockedOn },
+            // F1 (error-honesty): the rejected value is named rejectedBlocker — an error payload
+            // never carries the success-shaped blockedOn field (the field-filtered-misread class).
+            { rejectedBlocker: effectiveBlockedOn },
           );
         }
         if (!isBlockerLive(blocker.state)) {
           throw new QueueRepositoryError(
             "blocker_not_live",
             `blocked_on names a resolved qitem: ${effectiveBlockedOn} is '${blocker.state}'. A park must name a LIVE blocker — parking on a completed/closed row is a dead-blocker park that never self-clears.`,
-            { blockedOn: effectiveBlockedOn, blockerState: blocker.state },
+            { rejectedBlocker: effectiveBlockedOn, blockerState: blocker.state },
           );
         }
       } else {
@@ -2028,7 +2030,7 @@ export class QueueRepository {
           throw new QueueRepositoryError(
             "blocker_malformed",
             `blocked_on '${effectiveBlockedOn}' is a bare '${typedPrefix}' prefix with no gate body. A typed gate blocker must name its gate (e.g. fold:one-home+attestation).`,
-            { blockedOn: effectiveBlockedOn },
+            { rejectedBlocker: effectiveBlockedOn },
           );
         }
       }
