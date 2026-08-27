@@ -181,6 +181,13 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     });
   });
 
+  it("S04 founder default exposes a 3-minute pickup stall threshold", () => {
+    const setting = new ConfigStore(configPath).resolveWithSource(
+      "queue.pickup_stall_threshold_minutes" as never,
+    );
+    expect(setting).toMatchObject({ value: 3, source: "default", defaultValue: 3 });
+  });
+
   it("W2c idle-gate-qitem cadence resolves env over file", () => {
     const store = new ConfigStore(configPath);
     expect(() => store.set("policies.idle_gate_qitem.scan_interval_seconds", "120")).not.toThrow();
