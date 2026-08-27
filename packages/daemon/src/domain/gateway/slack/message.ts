@@ -82,7 +82,8 @@ export function buildImageBlocks(mediaRefs: readonly SlackMediaRef[] | undefined
     blocks.push({
       type: "image",
       image_url: url,
-      alt_text: clamp(redactSecrets(String(m.altText || "attachment")), SLACK_ALT_TEXT_CAP),
+      // R2 B1: alt text is row-carried → the same inert pipeline (redact + neutralize).
+      alt_text: clamp(inert(String(m.altText || "attachment")), SLACK_ALT_TEXT_CAP),
     });
   }
   return blocks;
@@ -112,6 +113,23 @@ export function redactSecrets(text: string): string {
   return out;
 }
 
+/** S10 fix-r1 (R2 B1) — STRUCTURAL neutralization of queue-controlled content. Slack's
+ *  formatting contract parses control sequences (<@U…>, <!here>, <!channel>, <!subteam^…>,
+ *  <url|label>) only from a literal "<"; its documented rule for displaying user-generated
+ *  text is to escape exactly &, <, > (docs.slack.dev/messaging/formatting-message-text).
+ *  Escaping these three makes EVERY control form inert BY CONSTRUCTION — present and past
+ *  forms alike — never a blocklist of known spellings. Ordinary mrkdwn styling (*bold*,
+ *  _italic_, bare URLs) uses none of the three and survives untouched. Order matters: "&"
+ *  first, or the escapes themselves would be re-escaped. */
+export function escapeSlackText(text: string): string {
+  return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+/** The untrusted-field pipeline: secrets redacted, then Slack control syntax neutralized. */
+function inert(text: string): string {
+  return escapeSlackText(redactSecrets(text));
+}
+
 export interface SlackMessagePayload {
   text: string; // notification fallback (always set)
   blocks: unknown[]; // Block Kit (T1076-extensible)
@@ -126,22 +144,31 @@ function clamp(s: string, max: number): string {
  * (no clock, no io) so it is trivially testable and safe to snapshot.
  */
 export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): SlackMessagePayload {
-  const summary = redactSecrets(String(q.summary || "(no summary)"));
-  const bodyRaw = redactSecrets(String(q.body || ""));
+  // R2 B1 boundary rule: EVERY queue-controlled field goes through inert() (redact + the
+  // three-character structural neutralization) BEFORE placement in text or mrkdwn — control
+  // syntax arriving through a row cannot survive, and the content stays honestly readable in
+  // escaped form. qitemId stays raw: it is daemon-minted ([a-z0-9-], no specials by
+  // construction) and is the H reconcile marker searched in posted text byte-for-byte.
+  const summary = inert(String(q.summary || "(no summary)"));
+  const bodyRaw = inert(String(q.body || ""));
   const body = clamp(bodyRaw, opts.bodyExcerpt ?? DEFAULT_BODY_EXCERPT);
-  const dest = q.destinationSession || "(unknown destination)";
+  const dest = escapeSlackText(q.destinationSession || "(unknown destination)");
   const footer = `qitem ${q.qitemId} → ${dest} on ${opts.sourceLabel}`;
 
   // S10 interim loudness rule: only an escalation carries a mention (the sole force-notify
-  // lever Slack offers); everything else stays quiet-threaded.
+  // lever Slack offers); everything else stays quiet-threaded. Composed HERE, AFTER the
+  // untrusted fields were neutralized above — the renderer's mention is the only path to an
+  // active control sequence, and its id comes from the registry's HANDLE_PATTERN-validated
+  // binding, never from row content.
   const mention = opts.mentionUserId ? `<@${opts.mentionUserId}> ` : "";
   // A1.2 — the attribution header line (rig/host/seat/session), one honest bot identity.
+  // Session strings are row-carried → same inert pipeline.
   const attr = opts.attribution
     ? [
-        `from *${redactSecrets(opts.attribution.seat)}*`,
-        opts.attribution.rig ? `rig ${redactSecrets(opts.attribution.rig)}` : null,
-        opts.attribution.host ? `host ${redactSecrets(opts.attribution.host)}` : null,
-        `session ${redactSecrets(opts.attribution.session)}`,
+        `from *${inert(opts.attribution.seat)}*`,
+        opts.attribution.rig ? `rig ${inert(opts.attribution.rig)}` : null,
+        opts.attribution.host ? `host ${inert(opts.attribution.host)}` : null,
+        `session ${inert(opts.attribution.session)}`,
       ].filter(Boolean).join(" · ")
     : null;
 
