@@ -116,6 +116,25 @@ describe("R2 B1 — queue-controlled content must be structurally INERT in poste
     expect(surfaces).toContain("&lt;@U012AB3CD&gt;");
   });
 
+  it("F-B1r NEGATIVE: a HOSTILE caller-supplied qitemId (<!channel>) emits zero active control syntax on any posted surface — the id stays honestly visible escaped (no exemption, no minted-only premise)", async () => {
+    // R1 fix-round-1 measured: the create route accepts a caller-supplied qitemId with no
+    // charset validation, so "daemon-minted, no specials" is a premise, not a construction.
+    // The uniform rule: the footer id passes the SAME escape as every other row field.
+    const { fetchImpl, bodies } = capture();
+    const out = await makeDeliver(fetchImpl)(decision({
+      qitemId: "<!channel>",
+      summary: "routine summary",
+      body: "routine body",
+      destinationSession: "human-founder@kernel",
+      sourceSession: "dev-driver@v-openrig-build",
+      tier: "routine",
+    }, "d-inj-hostile-id"));
+    expect(out.ok).toBe(true);
+    const surfaces = allSurfaces(bodies[0]!);
+    expect(activeCount(surfaces, "<!channel>"), "a hostile id must not survive as active syntax").toBe(0);
+    expect(surfaces).toContain("qitem &lt;!channel&gt;"); // honestly visible in the footer, escaped
+  });
+
   it("SANITY: ordinary formatting in queue content survives (no over-neutralization of plain text)", async () => {
     const { fetchImpl, bodies } = capture();
     await makeDeliver(fetchImpl)(decision({

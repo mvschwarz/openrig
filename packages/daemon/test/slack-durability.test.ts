@@ -29,6 +29,7 @@ function memFs(): StateFsOps {
 }
 const clock = () => new Date("2026-08-27T00:00:00.000Z");
 const flush = () => new Promise((r) => setTimeout(r, 5));
+const activeCount = (s: string, form: string): number => s.split(form).length - 1;
 
 /** A Slack double that can: TIMEOUT the first post (while actually landing it or not), serve
  *  conversations.history with the landed texts, and count real posts. */
@@ -96,6 +97,27 @@ describe("H1 — induced timeout → reconcile-by-marker, never a blind repost",
     const retry = await deliver(decision);
     expect(retry.ok).toBe(true);
     expect(slack.posted).toHaveLength(1); // delivered exactly once
+  });
+
+  it("F-B1r MARKER EFFECT: a HOSTILE qitemId timeout-that-landed reconciles by the ESCAPED marker — producer and scanner compare the SAME bytes, no repost, and no active syntax ever posts", async () => {
+    // The round-2 byte-fidelity requirement, pinned by EFFECT: the footer now posts the id
+    // escaped, so the reconcile scan must search the escaped form or a landed hostile-id post
+    // would be missed and REPOSTED (a duplicate human notification — the H red). For minted
+    // ids escaped == raw, so behavior is unchanged.
+    const slack = slackDouble({ timeoutFirstPost: true, timeoutLanded: true });
+    const { deliver, outboundSeen } = harness(slack.fetchImpl);
+    const hostile: OutboundDecision = {
+      kind: "outbound_decision", decisionId: "d-hostile-marker", op: OUTBOUND_OP, entityBindingRef: "mike#slack",
+      payload: { ...payload, qitemId: "<!channel>" },
+    };
+    const first = await deliver(hostile);
+    expect(first.ok).toBe(false); // ambiguous timeout → retained
+    expect(slack.posted).toHaveLength(1); // …but it LANDED
+    expect(activeCount(slack.posted[0]!, "<!channel>"), "the landed post itself must carry no active syntax").toBe(0);
+    const retry = await deliver(hostile);
+    expect(retry.ok).toBe(true); // reconciled: the ESCAPED marker matched the landed bytes
+    expect(slack.posted).toHaveLength(1); // duplicate ABSENCE: exactly one message, ever
+    expect(outboundSeen.load().has("<!channel>")).toBe(true); // qitem seen via reconcile
   });
 
   it("reconcile scan UNREADABLE: retained (a delay), NEVER a blind repost", async () => {
