@@ -192,6 +192,30 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     expect(setting).toMatchObject({ value: 3, source: "default", defaultValue: 3 });
   });
 
+  it("S01 wake ladder exposes retry cadence, cap, unconfirmed window, and swap grace defaults", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.resolveWithSource("queue.wake_retry_interval_seconds" as never)).toMatchObject({
+      value: 300,
+      source: "default",
+      defaultValue: 300,
+    });
+    expect(store.resolveWithSource("queue.wake_retry_cap" as never)).toMatchObject({
+      value: 3,
+      source: "default",
+      defaultValue: 3,
+    });
+    expect(store.resolveWithSource("queue.wake_unconfirmed_window_minutes" as never)).toMatchObject({
+      value: 30,
+      source: "default",
+      defaultValue: 30,
+    });
+    expect(store.resolveWithSource("queue.wake_swap_grace_seconds" as never)).toMatchObject({
+      value: 180,
+      source: "default",
+      defaultValue: 180,
+    });
+  });
+
   it("S02 standing stuck sweep exposes its cadence and unclaimed-age defaults", () => {
     const store = new ConfigStore(configPath);
     expect(store.resolveWithSource("queue.stuck_sweep_interval_seconds" as never)).toMatchObject({
