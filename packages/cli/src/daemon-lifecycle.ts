@@ -474,6 +474,34 @@ export function buildDaemonEnv(
   return env;
 }
 
+// ── OPR.0.5.5.20 — bind-intent provenance + the listener adoption gate (S20 RED: unwired) ──
+
+/** Resolve OPERATOR BIND INTENT from the dedicated surfaces ONLY: the --host flag, the
+ *  daemon.host config key read from the FILE, or the dedicated OPENRIG_BIND_HOST env.
+ *  A daemon.host value resolved from ENV is the overloaded routing channel
+ *  (ENV_MAP maps daemon.host ← OPENRIG_HOST) and NEVER creates intent. */
+export function resolveBindIntent(_input: {
+  flagHost: string | undefined;
+  envBindHost: string | undefined;
+  configSource: string;
+  configHost: string;
+}): { explicit: boolean; host: string | undefined } {
+  throw new Error("not implemented (S20 RED)");
+}
+
+/** The restored adoption/upgrade gate: derive the REQUIRED listener set from the
+ *  daemon's reported effective bind mode (default ⇒ loopback AND
+ *  tailscale-when-detected; explicit ⇒ exactly the declared host) and prove each by
+ *  probing its own /healthz — binding evidence, never config echo. A silently dropped
+ *  listener (the 0.5.3-receipt regression shape) fails LOUDLY. */
+export async function verifyRequiredListeners(_input: {
+  bind: { mode: "explicit" | "default"; hosts: string[]; tailscaleDetected: boolean };
+  port: number;
+  probe: (url: string) => Promise<boolean>;
+}): Promise<{ ok: true; verified: string[] } | { ok: false; missing: string[]; reason: string }> {
+  throw new Error("not implemented (S20 RED)");
+}
+
 export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Promise<DaemonState> {
   const port = opts.port ?? DEFAULT_PORT;
   const db = opts.db ?? DEFAULT_DB;
