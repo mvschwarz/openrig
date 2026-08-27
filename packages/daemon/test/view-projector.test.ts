@@ -70,7 +70,7 @@ describe("ViewProjector (PL-004 Phase B; L5 read-only projections)", () => {
     delete process.env.OPENRIG_VIEW_INCLUDE_FIXTURES;
   });
 
-  it("BUILT_IN_VIEW_NAMES includes all 6 expected names", () => {
+  it("BUILT_IN_VIEW_NAMES includes all 7 expected names", () => {
     expect([...BUILT_IN_VIEW_NAMES]).toEqual([
       "recently-active",
       "founder",
@@ -78,6 +78,7 @@ describe("ViewProjector (PL-004 Phase B; L5 read-only projections)", () => {
       "escalations",
       "held",
       "activity",
+      "pickup",
     ]);
   });
 
@@ -192,6 +193,7 @@ describe("ViewProjector (PL-004 Phase B; L5 read-only projections)", () => {
       "escalations",
       "held",
       "activity",
+      "pickup",
     ]);
     expect(result.custom).toHaveLength(1);
     expect(result.custom[0]!.viewName).toBe("my-view");

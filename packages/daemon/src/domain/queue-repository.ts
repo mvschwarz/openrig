@@ -6,6 +6,7 @@ import { resolveExternal } from "./gateway/external-admission.js";
 import type { PersistedEvent } from "./types.js";
 import { QueueTransitionLog } from "./queue-transition-log.js";
 import { WAKE_INTENT_PREFIX, type OutboxHandler } from "./outbox-handler.js";
+import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName } from "./session-name.js";
@@ -106,6 +107,9 @@ export interface QueueItem {
   tier: string | null;
   tags: string[] | null;
   blockedOn: string | null;
+  /** S04 — the DERIVED pickup receipt (unclaimed/working/stalled-after-claim/parked). Never
+   *  stored: computed at projection time from claimed_at + the transition log + heartbeat. */
+  pickup?: PickupReceipt;
   handedOffTo: string | null;
   handedOffFrom: string | null;
   expiresAt: string | null;
@@ -2505,8 +2509,33 @@ export class QueueRepository {
     return rows.length;
   }
 
+  /** S04 — substantive post-claim motion: transitions strictly after the claim, excluding the
+   *  claim's own 'claimed' transition. Lazily prepared; indexed on qitem_id. */
+  private postClaimMotionStmt: import("better-sqlite3").Statement | undefined;
+  private postClaimMotionCount(qitemId: string, claimedAt: string): number {
+    this.postClaimMotionStmt ??= this.db.prepare(
+      "SELECT COUNT(*) AS n FROM queue_transitions WHERE qitem_id = ? AND ts > ? AND transition_note IS NOT 'claimed'",
+    );
+    try {
+      return (this.postClaimMotionStmt.get(qitemId, claimedAt) as { n: number }).n;
+    } catch {
+      return 0; // minimal fixture DBs without the transitions table: degrade, never throw
+    }
+  }
+
   private rowToItem(row: QueueItemRow): QueueItem {
+    // S04 — derive the pickup receipt at the ONE shared projection point (list/show/overdue
+    // all flow through here), so the park-vs-strand question is answered by the row face.
+    const pickup = derivePickup({
+      state: row.state,
+      claimedAt: row.claimed_at,
+      lastHeartbeat: row.last_heartbeat,
+      postClaimMotionCount: row.claimed_at && row.state !== "blocked"
+        ? this.postClaimMotionCount(row.qitem_id, row.claimed_at)
+        : 0,
+    });
     return {
+      pickup,
       qitemId: row.qitem_id,
       tsCreated: row.ts_created,
       tsUpdated: row.ts_updated,

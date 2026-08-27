@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { derivePickup } from "./queue-pickup.js";
 import { ulid } from "ulid";
 import type { EventBus } from "./event-bus.js";
 
@@ -28,6 +29,8 @@ export const BUILT_IN_VIEW_NAMES = [
   "escalations",
   "held",
   "activity",
+  // S04 (OPR.0.5.5.4) — the pickup lens: claimed rows with the DERIVED receipt.
+  "pickup",
 ] as const;
 
 export type BuiltInViewName = (typeof BUILT_IN_VIEW_NAMES)[number];
@@ -121,6 +124,42 @@ export class ViewProjector {
     const fixtureClause = fixtureExclusionClause();
     const rigClause = rig ? `AND (destination_session LIKE ? OR source_session LIKE ?)` : "";
     const rigParams: unknown[] = rig ? [`%@${rig}`, `%@${rig}`] : [];
+
+    // S04 — the pickup lens post-processes through the ONE shared derivation rule
+    // (derivePickup), never a second SQL copy of it: claimed live rows, oldest claim first,
+    // each carrying pickup_state and (when stalled) the named pickup_evidence.
+    if (name === "pickup") {
+      const rows = this.db
+        .prepare(
+          `SELECT qitem_id, source_session, destination_session, state, claimed_at, last_heartbeat, ts_updated,
+                  (SELECT COUNT(*) FROM queue_transitions t
+                     WHERE t.qitem_id = queue_items.qitem_id
+                       AND t.ts > queue_items.claimed_at
+                       AND t.transition_note IS NOT 'claimed') AS post_claim_motion
+             FROM queue_items
+            WHERE claimed_at IS NOT NULL
+              AND state IN ('in-progress', 'blocked')
+              AND ${fixtureClause}
+              ${rigClause}
+            ORDER BY claimed_at ASC
+            LIMIT ?`,
+        )
+        .all(...rigParams, limit) as Record<string, unknown>[];
+      const projected = rows.map((r) => {
+        const receipt = derivePickup({
+          state: String(r.state),
+          claimedAt: (r.claimed_at as string | null) ?? null,
+          lastHeartbeat: (r.last_heartbeat as string | null) ?? null,
+          postClaimMotionCount: Number(r.post_claim_motion ?? 0),
+        });
+        return {
+          ...r,
+          pickup_state: receipt.state,
+          ...(receipt.evidence ? { pickup_evidence: receipt.evidence } : {}),
+        };
+      });
+      return { viewName: name, generatedAt: this.now().toISOString(), rows: projected, rowCount: projected.length };
+    }
 
     let sql: string;
     let params: unknown[] = [];

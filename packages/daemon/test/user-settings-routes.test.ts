@@ -93,8 +93,9 @@ describe("config routes (User Settings v0)", () => {
     //   opt_in_sessions — the not-default-on gate)
     // + 1 OPR.0.5.3.6 D1 (topology.root — the topology tree root)
     // + 1 OPR.0.5.3.7 R4 (context.packs_root)
-    // + 1 S15 (onboarding.default_pack.enabled) → 57 total.
-    expect(Object.keys(body.settings).length).toBe(57);
+    // + 1 S15 (onboarding.default_pack.enabled)
+    // + 1 S04 (queue.pickup_stall_threshold_minutes) → 58 total.
+    expect(Object.keys(body.settings).length).toBe(58);
     expect(body.settings["daemon.port"]?.source).toBe("default");
     expect(body.settings["ui.preview.refresh_interval_seconds"]?.value).toBe(3);
     expect(body.settings["ui.preview.max_pins"]?.value).toBe(4);

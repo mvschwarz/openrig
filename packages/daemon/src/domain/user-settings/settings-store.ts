@@ -187,6 +187,10 @@ export const SETTINGS_VALID_KEYS = [
   "retention.usage_samples_days",
   "retention.watchdog_keep_per_job",
   "retention.batch_size",
+  // S04 (OPR.0.5.5.4) — pickup-receipt stall threshold; net-new key, OPENRIG_* only,
+  // CLI-settable twin lockstep with cli/src/config-store.ts VALID_KEYS. Fresh-read per
+  // derivation (a flip applies to the next projection read; never retroactive).
+  "queue.pickup_stall_threshold_minutes",
 ] as const;
 
 export type SettingsValidKey = typeof SETTINGS_VALID_KEYS[number];
@@ -260,6 +264,8 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "retention.usage_samples_days": { primary: "OPENRIG_RETENTION_USAGE_SAMPLES_DAYS" },
   "retention.watchdog_keep_per_job": { primary: "OPENRIG_RETENTION_WATCHDOG_KEEP_PER_JOB" },
   "retention.batch_size": { primary: "OPENRIG_RETENTION_BATCH_SIZE" },
+  // S04 — net-new key; OPENRIG_* primary only.
+  "queue.pickup_stall_threshold_minutes": { primary: "OPENRIG_QUEUE_PICKUP_STALL_THRESHOLD_MINUTES" },
 };
 
 const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
@@ -320,6 +326,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "retention.usage_samples_days": ["retention", "usageSamplesDays"],
   "retention.watchdog_keep_per_job": ["retention", "watchdogKeepPerJob"],
   "retention.batch_size": ["retention", "batchSize"],
+  "queue.pickup_stall_threshold_minutes": ["queue", "pickupStallThresholdMinutes"],
 };
 
 export type SettingSource = "env" | "file" | "default";
@@ -561,6 +568,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "retention.usage_samples_days": return 14;
     case "retention.watchdog_keep_per_job": return 50;
     case "retention.batch_size": return 500;
+    case "queue.pickup_stall_threshold_minutes": return 3;
     default: return "";
   }
 }
@@ -675,6 +683,11 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
   "retention.batch_size": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
       throw new Error(`Invalid value for retention.batch_size: must be an integer >= 1, got "${raw}"`);
+    }
+  },
+  "queue.pickup_stall_threshold_minutes": (raw, coerced) => {
+    if (typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(`Invalid value for queue.pickup_stall_threshold_minutes: must be an integer >= 1, got "${raw}"`);
     }
   },
 };

@@ -48,8 +48,12 @@ describe("S04 pickup receipts — derived, visible, threshold-honest", () => {
    *  aging of an EXISTING fact — the product code never sees an injected clock. */
   function ageClaim(qitemId: string, minutes: number): void {
     const past = new Date(Date.now() - minutes * 60_000).toISOString();
-    db.prepare("UPDATE queue_items SET claimed_at = ? WHERE qitem_id = ?").run(past, qitemId);
+    const beforePast = new Date(Date.now() - (minutes + 1) * 60_000).toISOString();
+    db.prepare("UPDATE queue_items SET claimed_at = ?, ts_created = ? WHERE qitem_id = ?").run(past, beforePast, qitemId);
     db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ? AND transition_note = 'claimed'").run(past, qitemId);
+    // Coherent history: everything that happened BEFORE the claim (creation) ages with it —
+    // otherwise the created transition lands after the aged claim and reads as motion.
+    db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ? AND transition_note = 'created'").run(beforePast, qitemId);
   }
 
   async function mkRow(): Promise<QueueItem> {
@@ -168,7 +172,7 @@ describe("S04 pickup receipts — derived, visible, threshold-honest", () => {
     repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
     ageClaim(row.qitemId, 60);
     const projector = new ViewProjector(db, new EventBus(db));
-    const result = projector.query("pickup" as never, {});
+    const result = projector.show("pickup");
     const mine = result.rows.find((r) => r.qitem_id === row.qitemId) as Record<string, unknown> | undefined;
     expect(mine, "the pickup lens must list the claimed row").toBeDefined();
     expect(String(mine!.pickup_state)).toBe("stalled-after-claim");

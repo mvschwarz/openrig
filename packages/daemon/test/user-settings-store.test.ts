@@ -147,6 +147,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "retention.usage_samples_days", // 51-08 A2 (plan-lock rev-1): the PM-ruled 14d telemetry window
       "retention.watchdog_keep_per_job",
       "retention.batch_size",
+      "queue.pickup_stall_threshold_minutes",
     ]);
   });
 

@@ -380,12 +380,16 @@ database. It is one more set of primitives on a machine full of them.
 - **"Who should be working and isn't?"** — `rig ps --nodes` knows who is alive; the queue knows who
   owes. **Neither knows the interesting cell.** Cross them and *alive, holding work, and not
   moving* falls out — which is the actual question behind every "is the rig stuck."
-- **"Is that seat stuck or thinking?"** — `rig capture` for the screen, `claimedAt` for how long,
-  `queue transitions` for what it recorded. **Liveness is not health:** a pane can render while
-  nothing progresses, and no single surface reports intent.
-- **"Is this a park or a strand?"** — the row cannot tell you; a deliberate park and a dropped
-  baton are byte-identical on it. `queue transitions` is where the disposition lives. **When a
-  conclusion rests on one field's current value, go find the thing that records change.**
+- **"Is that seat stuck or thinking?"** — the row face answers this now (S04 pickup receipts):
+  every list/show projection carries a derived `pickup` state — `working`, `stalled-after-claim`
+  (with its evidence named: claimed N min ago, zero substantive transitions since), `parked`, or
+  `unclaimed` — and `rig view show pickup` lists every claimed row with it. The old by-hand join
+  (capture + `claimedAt` arithmetic + `queue transitions`) is RETIRED as a first move; `rig
+  capture` remains the second question (is the pane alive), never the state derivation.
+- **"Is this a park or a strand?"** — the row face answers this too: a park reads `parked` (it
+  carries its wake and legitimately waits) and a strand reads `stalled-after-claim` with named
+  evidence — one projection read, no transitions spelunking. `queue transitions` remains the
+  audit trail for WHAT happened, not the tool for deriving whether pickup occurred.
 - **"Did that actually land?"** — `queue show` truncates the body and `queue list` can report
   `bodyBytes=0`; neither means empty. **`sqlite3 "$OPENRIG_DB" "select length(body) …"` is the
   only answer.** The CLI is a projection; the database is the thing.

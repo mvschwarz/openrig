@@ -163,6 +163,10 @@ export interface RiggedConfig {
     watchdogKeepPerJob: number;
     batchSize: number;
   };
+  // S04 (OPR.0.5.5.4) — pickup-receipt stall threshold (twin of the daemon settings-store).
+  queue: {
+    pickupStallThresholdMinutes: number;
+  };
 }
 
 const DEFAULT_WORKSPACE_ROOT = getDefaultOpenRigPath("workspace");
@@ -296,6 +300,10 @@ const DEFAULTS = {
     watchdogKeepPerJob: 50,
     batchSize: 500,
   },
+  // S04 — pickup-receipt stall threshold default (twin of daemon getDefaultValue).
+  queue: {
+    pickupStallThresholdMinutes: 3,
+  },
 } as const;
 
 export const VALID_KEYS = [
@@ -392,6 +400,8 @@ export const VALID_KEYS = [
   "retention.watchdog_days",
   "retention.watchdog_keep_per_job",
   "retention.batch_size",
+  // S04 — pickup-receipt stall threshold; lockstep with the daemon settings-store twin.
+  "queue.pickup_stall_threshold_minutes",
 ] as const;
 
 export type ValidKey = typeof VALID_KEYS[number];
@@ -466,6 +476,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "retention.watchdog_days": { primary: "OPENRIG_RETENTION_WATCHDOG_DAYS" },
   "retention.watchdog_keep_per_job": { primary: "OPENRIG_RETENTION_WATCHDOG_KEEP_PER_JOB" },
   "retention.batch_size": { primary: "OPENRIG_RETENTION_BATCH_SIZE" },
+  "queue.pickup_stall_threshold_minutes": { primary: "OPENRIG_QUEUE_PICKUP_STALL_THRESHOLD_MINUTES" },
 };
 
 // Maps dotted-string config keys to the camelCase RiggedConfig path.
@@ -528,6 +539,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "retention.watchdog_days": ["retention", "watchdogDays"],
   "retention.watchdog_keep_per_job": ["retention", "watchdogKeepPerJob"],
   "retention.batch_size": ["retention", "batchSize"],
+  "queue.pickup_stall_threshold_minutes": ["queue", "pickupStallThresholdMinutes"],
 };
 
 function isValidKey(key: string): key is ValidKey {
@@ -749,6 +761,11 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
       throw new Error(`Invalid value for retention.batch_size: must be an integer >= 1, got "${raw}"`);
     }
   },
+  "queue.pickup_stall_threshold_minutes": (raw, coerced) => {
+    if (typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(`Invalid value for queue.pickup_stall_threshold_minutes: must be an integer >= 1, got "${raw}"`);
+    }
+  },
 };
 
 function validateKeyConstraints(key: ValidKey, raw: string, coerced: string | number | boolean): void {
@@ -941,6 +958,9 @@ export class ConfigStore {
         watchdogDays: v("retention.watchdog_days") as number,
         watchdogKeepPerJob: v("retention.watchdog_keep_per_job") as number,
         batchSize: v("retention.batch_size") as number,
+      },
+      queue: {
+        pickupStallThresholdMinutes: v("queue.pickup_stall_threshold_minutes") as number,
       },
     };
   }

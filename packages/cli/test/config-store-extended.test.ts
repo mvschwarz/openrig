@@ -164,6 +164,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "retention.watchdog_days",
       "retention.watchdog_keep_per_job",
       "retention.batch_size",
+      "queue.pickup_stall_threshold_minutes",
     ];
     expect([...VALID_KEYS]).toEqual(expected);
   });
