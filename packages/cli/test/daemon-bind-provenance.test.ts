@@ -142,11 +142,13 @@ import { vi } from "vitest";
 
 function gateDeps(tailBehavior: (attempt: number) => "ok" | "throw-timeout" | "throw-refused") {
   let tailAttempts = 0;
+  let spawned = false;
   const kill = vi.fn(() => true);
   const bindBody = { bind: { mode: "default", hosts: ["127.0.0.1", "100.64.0.9"], tailscaleDetected: true } };
   const deps: LifecycleDeps = {
-    spawn: vi.fn(() => ({ pid: 4242, unref: vi.fn() }) as never),
+    spawn: vi.fn(() => { spawned = true; return { pid: 4242, unref: vi.fn() } as never; }),
     fetch: vi.fn(async (url: string) => {
+      if (!spawned) throw new Error("connect ECONNREFUSED (nothing on the port yet)");
       if (url.includes("100.64.0.9")) {
         tailAttempts++;
         const behavior = tailBehavior(tailAttempts);

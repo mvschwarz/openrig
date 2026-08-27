@@ -518,8 +518,15 @@ export function resolveBindIntent(input: {
 export async function verifyRequiredListeners(input: {
   bind: { mode: "explicit" | "default"; hosts: string[]; tailscaleDetected: boolean };
   port: number;
-  probe: (url: string) => Promise<boolean>;
-}): Promise<{ ok: true; verified: string[] } | { ok: false; missing: string[]; reason: string }> {
+  /** TRI-STATE probe (r2 repair): "healthy" | "unhealthy" | "indeterminate".
+   *  Refused/explicitly-unhealthy is POSITIVE bad-bind evidence; a transient probe
+   *  exception is INDETERMINATE and never becomes missing-listener evidence. */
+  probe: (url: string) => Promise<"healthy" | "unhealthy" | "indeterminate">;
+}): Promise<
+  | { ok: true; verified: string[] }
+  | { ok: false; missing: string[]; reason: string }
+  | { ok: "indeterminate"; reason: string }
+> {
   const required = new Set(input.bind.hosts);
   required.add("127.0.0.1"); // loopback is required in EVERY mode's floor... except explicit
   if (input.bind.mode === "explicit") {
@@ -537,10 +544,22 @@ export async function verifyRequiredListeners(input: {
   }
   const missing: string[] = [];
   const verified: string[] = [];
+  const indeterminate: string[] = [];
   for (const host of required) {
-    const reachable = await input.probe(`http://${host}:${input.port}/healthz`).catch(() => false);
-    if (reachable) verified.push(host);
-    else missing.push(host);
+    // NO catch-collapse here (r2 finding): the probe classifies its own errors; an
+    // exception reaching this point is a wiring bug and should surface, not convert.
+    const outcome = await input.probe(`http://${host}:${input.port}/healthz`);
+    if (outcome === "healthy") verified.push(host);
+    else if (outcome === "unhealthy") missing.push(host);
+    else indeterminate.push(host);
+  }
+  if (indeterminate.length > 0) {
+    // Indeterminate beats missing in precedence: with ANY listener unverifiable, the
+    // gate has no complete evidence set and must not authorize a kill.
+    return {
+      ok: "indeterminate",
+      reason: `listener state could not be checked for ${indeterminate.join(", ")} (transient probe failure) — the gate acts only on positive evidence and takes no action.`,
+    };
   }
   if (missing.length > 0) {
     return {
@@ -655,19 +674,25 @@ export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Prom
       const gate = await verifyRequiredListeners({
         bind: healthBody.bind,
         port,
+        // r2 repair — error PROVENANCE preserved: an explicit non-OK answer or a
+        // connection refusal is positive evidence ("unhealthy"); a timeout or any
+        // other transient probe exception is "indeterminate" and can never kill.
         probe: async (url) => {
           try {
             const r = await fetchDaemonProbe(deps, url, HEALTHZ_PROBE_TIMEOUT_MS);
-            return r.ok;
-          } catch {
-            return false;
+            return r.ok ? "healthy" : "unhealthy";
+          } catch (err) {
+            const code = (err as { code?: string; cause?: { code?: string } }).code
+              ?? (err as { cause?: { code?: string } }).cause?.code;
+            return code === "ECONNREFUSED" ? "unhealthy" : "indeterminate";
           }
         },
       });
-      if (!gate.ok) {
+      if (gate.ok === false) {
         try { deps.kill(pid, "SIGTERM"); } catch { /* best effort */ }
         throw new Error(`daemon started but FAILED the listener adoption gate: ${gate.reason}`);
       }
+      // gate.ok === "indeterminate" falls through healthy: no evidence, no action.
     }
   } catch (err) {
     if (err instanceof Error && err.message.includes("listener adoption gate")) throw err;
