@@ -26,6 +26,7 @@ import { ThreadSeatMap, formatPostedStamp } from "./thread-seat-map.js";
 import { makeThreadRouteResolver } from "./thread-routing.js";
 import { startSocketInbound, type SocketInboundHandle, type WsLike } from "./socket-inbound.js";
 import { loadHumanRegistry, resolveSlackHandle } from "../human-registry.js";
+import { getSelfHostId } from "../../hosts/fanout-contract.js";
 import type { QueueRepository } from "../../queue-repository.js";
 import type { FetchImpl } from "./slack-api.js";
 
@@ -179,7 +180,9 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       resolveSender: makeInboundSenderResolver(registry, opts.home),
       // S10 — deterministic thread routing: mapped thread → exactly the mapped seat; unmapped
       // or human-initiated → the configured orchestrator slot as an unrouted-signal row.
-      resolveRoute: makeThreadRouteResolver({ map: threadMap, unroutedDestination: cfg.inboundDestination, log }),
+      // L2: the daemon's own self-host id discriminates stamped-local from genuinely-remote
+      // mapped seats at the route-address seam.
+      resolveRoute: makeThreadRouteResolver({ map: threadMap, unroutedDestination: cfg.inboundDestination, selfHostId: getSelfHostId(), log }),
       log,
     });
     let handle: SocketInboundHandle | undefined;
