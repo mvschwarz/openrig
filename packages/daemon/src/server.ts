@@ -194,6 +194,9 @@ export interface AppDeps {
   streamStore?: StreamStore;
   slowOpRecorder?: SlowOperationInstrumentation;
   queueRepo?: QueueRepository;
+  /** S02 — the standing stuck sweep's observable heartbeat (ADDITIVE on healthz;
+   *  absent = legacy body). Set by the index.ts scheduler when the loop starts. */
+  stuckSweepStatus?: import("./domain/queue-stuck-sweep.js").StuckSweepStatus;
   inboxHandler?: InboxHandler;
   outboxHandler?: OutboxHandler;
   projectClassifier?: ProjectClassifier;
@@ -626,8 +629,12 @@ export function createApp(deps: AppDeps): Hono {
     // adoption gates derive the REQUIRED listener set from this and then prove each
     // host by probing it — binding evidence, never config echo.
     const bind = deps.bindPlan ? { bind: deps.bindPlan } : {};
+    // S02 — quiet is cheap but observable: the standing stuck sweep's heartbeat rides
+    // healthz (ADDITIVE; absent = legacy body), so a clean sweep needs no row and a
+    // failing sweep is loud without one.
+    const stuckSweep = deps.stuckSweepStatus ? { stuckSweep: deps.stuckSweepStatus.snapshot() } : {};
     if (!monitor) {
-      return c.json({ status: "ok", ...stamp, ...selfHost, ...slowOperations, ...bind });
+      return c.json({ status: "ok", ...stamp, ...selfHost, ...slowOperations, ...bind, ...stuckSweep });
     }
     const eventLoop = monitor.snapshot();
     return c.json({
@@ -638,6 +645,7 @@ export function createApp(deps: AppDeps): Hono {
       routeTimings: deps.routeTimingRecorder?.snapshot() ?? {},
       ...slowOperations,
       ...bind,
+      ...stuckSweep,
     });
   });
 

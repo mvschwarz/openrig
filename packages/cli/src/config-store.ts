@@ -164,8 +164,11 @@ export interface RiggedConfig {
     batchSize: number;
   };
   // S04 (OPR.0.5.5.4) — pickup-receipt stall threshold (twin of the daemon settings-store).
+  // S02 (OPR.0.5.5.2) — standing-stuck-sweep cadence + unclaimed-obligation age (same twin).
   queue: {
     pickupStallThresholdMinutes: number;
+    stuckSweepIntervalSeconds: number;
+    stuckSweepUnclaimedAgeMinutes: number;
   };
 }
 
@@ -303,6 +306,8 @@ const DEFAULTS = {
   // S04 — pickup-receipt stall threshold default (twin of daemon getDefaultValue).
   queue: {
     pickupStallThresholdMinutes: 3,
+    stuckSweepIntervalSeconds: 300,
+    stuckSweepUnclaimedAgeMinutes: 60,
   },
 } as const;
 
@@ -402,6 +407,9 @@ export const VALID_KEYS = [
   "retention.batch_size",
   // S04 — pickup-receipt stall threshold; lockstep with the daemon settings-store twin.
   "queue.pickup_stall_threshold_minutes",
+  // S02 — standing-stuck-sweep cadence + unclaimed-obligation age; same lockstep.
+  "queue.stuck_sweep_interval_seconds",
+  "queue.stuck_sweep_unclaimed_age_minutes",
 ] as const;
 
 export type ValidKey = typeof VALID_KEYS[number];
@@ -477,6 +485,8 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "retention.watchdog_keep_per_job": { primary: "OPENRIG_RETENTION_WATCHDOG_KEEP_PER_JOB" },
   "retention.batch_size": { primary: "OPENRIG_RETENTION_BATCH_SIZE" },
   "queue.pickup_stall_threshold_minutes": { primary: "OPENRIG_QUEUE_PICKUP_STALL_THRESHOLD_MINUTES" },
+  "queue.stuck_sweep_interval_seconds": { primary: "OPENRIG_QUEUE_STUCK_SWEEP_INTERVAL_SECONDS" },
+  "queue.stuck_sweep_unclaimed_age_minutes": { primary: "OPENRIG_QUEUE_STUCK_SWEEP_UNCLAIMED_AGE_MINUTES" },
 };
 
 // Maps dotted-string config keys to the camelCase RiggedConfig path.
@@ -540,6 +550,8 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "retention.watchdog_keep_per_job": ["retention", "watchdogKeepPerJob"],
   "retention.batch_size": ["retention", "batchSize"],
   "queue.pickup_stall_threshold_minutes": ["queue", "pickupStallThresholdMinutes"],
+  "queue.stuck_sweep_interval_seconds": ["queue", "stuckSweepIntervalSeconds"],
+  "queue.stuck_sweep_unclaimed_age_minutes": ["queue", "stuckSweepUnclaimedAgeMinutes"],
 };
 
 function isValidKey(key: string): key is ValidKey {
@@ -766,6 +778,16 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
       throw new Error(`Invalid value for queue.pickup_stall_threshold_minutes: must be an integer >= 1, got "${raw}"`);
     }
   },
+  "queue.stuck_sweep_interval_seconds": (raw, coerced) => {
+    if (typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(`Invalid value for queue.stuck_sweep_interval_seconds: must be an integer >= 1, got "${raw}"`);
+    }
+  },
+  "queue.stuck_sweep_unclaimed_age_minutes": (raw, coerced) => {
+    if (typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
+      throw new Error(`Invalid value for queue.stuck_sweep_unclaimed_age_minutes: must be an integer >= 1, got "${raw}"`);
+    }
+  },
 };
 
 function validateKeyConstraints(key: ValidKey, raw: string, coerced: string | number | boolean): void {
@@ -961,6 +983,8 @@ export class ConfigStore {
       },
       queue: {
         pickupStallThresholdMinutes: v("queue.pickup_stall_threshold_minutes") as number,
+        stuckSweepIntervalSeconds: v("queue.stuck_sweep_interval_seconds") as number,
+        stuckSweepUnclaimedAgeMinutes: v("queue.stuck_sweep_unclaimed_age_minutes") as number,
       },
     };
   }

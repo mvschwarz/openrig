@@ -148,6 +148,9 @@ describe("SettingsStore (User Settings v0)", () => {
       "retention.watchdog_keep_per_job",
       "retention.batch_size",
       "queue.pickup_stall_threshold_minutes",
+      // S02 — standing-stuck-sweep cadence + unclaimed-obligation age.
+      "queue.stuck_sweep_interval_seconds",
+      "queue.stuck_sweep_unclaimed_age_minutes",
     ]);
   });
 

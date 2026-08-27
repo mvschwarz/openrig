@@ -5,6 +5,11 @@ import { createDaemon } from "./startup.js";
 import { resolveBindPlan } from "./domain/bind-plan.js";
 import { runQueueRetentionSweep, RETENTION_DEFAULTS } from "./domain/queue-retention.js";
 import {
+  createStuckSweepStatus,
+  resolveStuckSweepIntervalSeconds,
+  runStuckSweep,
+} from "./domain/queue-stuck-sweep.js";
+import {
   assertBindAuthInvariant,
   detectTailscaleInterface,
   isLoopbackBind,
@@ -124,6 +129,35 @@ export function startQueueRetentionScheduler(deps: {
   return setInterval(runOnce, DAILY_MS);
 }
 
+/** S02 (OPR.0.5.5.2) — start the STANDING STUCK SWEEP: both halves of "is anything
+ *  silently stuck" (claimed-never-closed; sender-believed-delivered-never-woken) plus the
+ *  unclaimed-obligation net and the dangling-closure custody class, on the config-keyed
+ *  cadence (`queue.stuck_sweep_interval_seconds`). Findings route as durable rows to the
+ *  owning seats; a clean sweep records only the healthz heartbeat; a failing sweep is loud
+ *  on that surface and the log, never a silent skip. Boot sweep + interval, retention
+ *  pattern. Returns the interval handle (cleared on shutdown), or null when the queue
+ *  repository is absent (direct-construction harnesses). */
+export function startStuckSweepScheduler(deps: {
+  rigRepo: { db: import("better-sqlite3").Database };
+  queueRepo?: import("./domain/queue-repository.js").QueueRepository;
+  stuckSweepStatus?: import("./domain/queue-stuck-sweep.js").StuckSweepStatus;
+}): ReturnType<typeof setInterval> | null {
+  const queueRepo = deps.queueRepo;
+  if (!queueRepo) return null;
+  const status = createStuckSweepStatus();
+  deps.stuckSweepStatus = status; // healthz reads this snapshot
+  const db = deps.rigRepo.db;
+  const runOnce = (): void => {
+    // runStuckSweep never throws (failure is recorded loudly on the status surface);
+    // the catch is the never-crash-the-daemon belt for the promise chain itself.
+    void runStuckSweep({ db, queueRepo, status }).catch((err: unknown) => {
+      console.error(`[stuck-sweep] scheduler error: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  };
+  runOnce(); // boot sweep (fire-and-forget)
+  return setInterval(runOnce, resolveStuckSweepIntervalSeconds() * 1000);
+}
+
 async function isTrustedLocalOrTailnetBind(host: string): Promise<boolean> {
   if (isLoopbackBind(host)) return true;
   if (isTailscaleBind(host)) return true;
@@ -200,6 +234,7 @@ export async function startServer(port?: number) {
   // once after the first successful bind callback fires.
   let monitorsStarted = false;
   let retentionTimer: ReturnType<typeof setInterval> | null = null;
+  let stuckSweepTimer: ReturnType<typeof setInterval> | null = null;
   // P7 — lifecycle heartbeat: advance last-seen every tick while running.
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   const servers: ServerType[] = [];
@@ -232,6 +267,8 @@ export async function startServer(port?: number) {
         // OPR.0.4.6.FS-1 W2 — boot sweep + daily retention tick (bounded,
         // yields between batches; a sweep failure is logged, never fatal).
         retentionTimer = startQueueRetentionScheduler(deps);
+        // S02 — the standing stuck sweep: nobody has to remember to run the verbs.
+        stuckSweepTimer = startStuckSweepScheduler(deps);
         // P7 — lifecycle heartbeat (advances last-seen). A write failure logs and
         // continues (the render degrades to an older last-seen honestly); the
         // store guards not-stopped so a tick can never pass stopped_at.
@@ -283,6 +320,7 @@ export async function startServer(port?: number) {
     }
     try {
       if (retentionTimer) clearInterval(retentionTimer);
+      if (stuckSweepTimer) clearInterval(stuckSweepTimer);
     } catch (err) {
       console.error("[queue-retention] shutdown error", err);
     }

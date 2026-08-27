@@ -76,7 +76,9 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     const mod = await sweepMod();
     const all = repo.list({ limit: 500 });
     return all.filter(
-      (i) => i.tags.includes(mod.STUCK_SWEEP_FINDING_TAG) && i.tags.some((t) => t.endsWith(`:${qitemId}`)),
+      (i) =>
+        (i.tags ?? []).includes(mod.STUCK_SWEEP_FINDING_TAG) &&
+        (i.tags ?? []).some((t) => t.endsWith(`:${qitemId}`)),
     );
   }
 
@@ -188,13 +190,13 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
   });
 
   it("FAILURE IS LOUD: a sweep that cannot run records a named error on the status surface, never a silent skip", async () => {
-    const brokenDb = new Database(":memory:"); // no migrations — every query fails
+    const brokenDb = new Database(":memory:"); // no migrations — the sweep's own queries fail
     const mod = await sweepMod();
     const status = mod.createStuckSweepStatus();
     const loud: string[] = [];
     const result = await mod.runStuckSweep({
       db: brokenDb,
-      queueRepo: new QueueRepository(brokenDb, new EventBus(brokenDb), { validateRig: () => true }),
+      queueRepo: repo, // the repo works; the sweep's db leg is what breaks
       status,
       resolveOrchestrator: () => null,
       unclaimedAgeMinutes: 60,
