@@ -101,19 +101,33 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     return rows.map((r) => r.transition_note ?? "").filter((n) => n.startsWith(prefix));
   }
 
-  function setHandoverAt(dest: string, secondsAgo: number): void {
-    const at = dest.indexOf("@");
-    const logicalId = dest.slice(0, at);
-    const rigName = dest.slice(at + 1);
+  /** Real managed-seat shape: the canonical session (dash form) and the node's
+   *  logical_id (dotted form) are DEFINED INDEPENDENTLY — live topology has zero cases
+   *  where they match, so any fixture deriving one from the other is fixture-blind.
+   *  The durable link is the sessions-table binding, never a string transform. */
+  let nodeSeq = 0;
+  function bindSeat(sessionName: string, dottedLogicalId: string, rigName = "r"): string {
+    const nodeId = `node-${++nodeSeq}`;
     db.prepare("INSERT OR IGNORE INTO rigs (id, name) VALUES (?, ?)").run(`rig-${rigName}`, rigName);
-    db.prepare("INSERT OR IGNORE INTO nodes (id, rig_id, logical_id) VALUES (?, ?, ?)").run(
-      `n-${logicalId}`,
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES (?, ?, ?)").run(
+      nodeId,
       `rig-${rigName}`,
-      logicalId,
+      dottedLogicalId,
     );
+    db.prepare(
+      "INSERT INTO sessions (id, node_id, session_name, status) VALUES (?, ?, ?, 'running')",
+    ).run(`sess-${nodeId}`, nodeId, sessionName);
+    return nodeId;
+  }
+
+  function setHandoverAt(dest: string, secondsAgo: number): void {
+    const existing = db
+      .prepare("SELECT node_id FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1")
+      .get(dest) as { node_id: string } | undefined;
+    const nodeId = existing?.node_id ?? bindSeat(dest, `fixture.swap-${nodeSeq}`);
     db.prepare("UPDATE nodes SET handover_at = ? WHERE id = ?").run(
       new Date(Date.now() - secondsAgo * 1000).toISOString(),
-      `n-${logicalId}`,
+      nodeId,
     );
   }
 
@@ -492,6 +506,65 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     const rungs = markersOf(baton.qitemId, LADDER_RUNG_PREFIX);
     expect(rungs).toHaveLength(2);
     expect(rungs[1]).toMatch(/operator/);
+  });
+
+  // ── Production identity resolution (fix round: review-r2 NOT-CLEAR) ─────────
+
+  it("DEFAULT ORCHESTRATOR RESOLUTION: production identity shapes resolve through the session binding — dotted logical ids, dash-form canonical sessions, no string derivation", async () => {
+    // The live-fleet shape: `orch-lead@r` binds a node whose logical_id is `orch.lead`.
+    const orchNode = bindSeat("orch-lead@r", "orch.lead");
+    const workerNode = bindSeat("worker-b2@r", "worker.b2");
+    db.prepare(
+      "INSERT INTO edges (id, rig_id, source_id, target_id, kind) VALUES ('e1', 'rig-r', ?, ?, 'delegates_to')",
+    ).run(orchNode, workerNode);
+    const row = await mkBaton("worker-b2@r");
+    setNudgeResult(row.qitemId, "failed:tmux session not found", 120);
+    // Past the cap so the escalation resolves the orchestrator via the default resolver.
+    for (let a = 1; a <= 3; a++) {
+      repo.transitionLog.append({
+        qitemId: row.qitemId,
+        state: "pending",
+        actorSession: "wake-ladder@system",
+        transitionNote: `${LADDER_ATTEMPT_PREFIX} ${a}/3 outcome=failed:tmux session not found`,
+      });
+    }
+    ageMarkers(row.qitemId, 30);
+    await tick({ resolveOrchestrator: undefined }); // exercise the default
+    const escRows = await escalationRowsFor("worker-b2@r");
+    expect(escRows).toHaveLength(1);
+    // The parent's CURRENT canonical session binding — never a synthesized logical_id@rig.
+    expect(escRows[0]!.destinationSession).toBe("orch-lead@r");
+    const rungs = markersOf(row.qitemId, LADDER_RUNG_PREFIX);
+    expect(rungs.some((r) => /orchestrator -> orch-lead@r/.test(r))).toBe(true);
+  });
+
+  it("SELF-SKIP IS VISIBLE (operator floor end-to-end): with no orchestrator, the operator rung produces an OPEN escalation row exposed by the escalations view and the health status", async () => {
+    const baton = await mkBaton("worker-c3@r");
+    bindSeat("worker-c3@r", "worker.c3"); // bound seat, but no delegates_to parent
+    setNudgeResult(baton.qitemId, "failed:tmux session not found", 120);
+    for (let a = 1; a <= 3; a++) {
+      repo.transitionLog.append({
+        qitemId: baton.qitemId,
+        state: "pending",
+        actorSession: "wake-ladder@system",
+        transitionNote: `${LADDER_ATTEMPT_PREFIX} ${a}/3 outcome=failed:tmux session not found`,
+      });
+    }
+    ageMarkers(baton.qitemId, 30);
+    const mod = await ladderMod();
+    const status = mod.createWakeLadderStatus();
+    await tick({ resolveOrchestrator: undefined, status });
+    // The rungs recorded and the ladder ended...
+    expect(markersOf(baton.qitemId, LADDER_RUNG_PREFIX).some((r) => /operator/.test(r))).toBe(true);
+    expect(markersOf(baton.qitemId, LADDER_EXHAUSTED_PREFIX)).toHaveLength(1);
+    // ...and the escalation OBJECT exists: an open row, visible on both floor surfaces.
+    const escRows = await escalationRowsFor("worker-c3@r");
+    expect(escRows).toHaveLength(1);
+    expect(escRows[0]!.state).toBe("pending");
+    expect(escRows[0]!.destinationSession).not.toBe("worker-c3@r"); // never INTO the dead seat
+    const view = new ViewProjector(db).show("escalations");
+    expect(view.rows.map((r) => r.qitem_id)).toContain(escRows[0]!.qitemId);
+    expect(status.snapshot().escalationsOpen).toBeGreaterThanOrEqual(1);
   });
 
   // ── Config surface ───────────────────────────────────────────────────────────

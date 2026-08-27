@@ -322,19 +322,29 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(afterSecond).toBe(afterFirst);
   });
 
-  it("DEFAULT ORCHESTRATOR RESOLUTION: the topology delegates_to parentage routes an ownerless finding without injection", async () => {
+  it("DEFAULT ORCHESTRATOR RESOLUTION: production identity shapes resolve through the durable session binding — dotted logical ids, dash-form canonical sessions, no string derivation", async () => {
+    // The live-fleet shape (review-r2 fix round): `orch-lead@r` binds a node whose
+    // logical_id is `orch.lead` — the two forms are defined independently; the durable
+    // link is the sessions-table binding, never a string transform.
     db.prepare("INSERT INTO rigs (id, name) VALUES ('rig1', 'r')").run();
-    db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('n-orch', 'rig1', 'orch')").run();
-    db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('n-worker', 'rig1', 'worker')").run();
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('n-orch', 'rig1', 'orch.lead')").run();
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('n-worker', 'rig1', 'worker.b2')").run();
+    db.prepare(
+      "INSERT INTO sessions (id, node_id, session_name, status) VALUES ('s-orch', 'n-orch', 'orch-lead@r', 'running')",
+    ).run();
+    db.prepare(
+      "INSERT INTO sessions (id, node_id, session_name, status) VALUES ('s-worker', 'n-worker', 'worker-b2@r', 'running')",
+    ).run();
     db.prepare(
       "INSERT INTO edges (id, rig_id, source_id, target_id, kind) VALUES ('e1', 'rig1', 'n-orch', 'n-worker', 'delegates_to')",
     ).run();
-    const row = await mkRow("worker@r");
+    const row = await mkRow("worker-b2@r");
     failNudge(row.qitemId);
     await runSweep({ resolveOrchestrator: undefined }); // exercise the default
     const findings = await findingsFor(row.qitemId);
     expect(findings).toHaveLength(1);
-    expect(findings[0]!.destinationSession).toBe("orch@r");
+    // The parent's CURRENT canonical session binding — never a synthesized logical_id@rig.
+    expect(findings[0]!.destinationSession).toBe("orch-lead@r");
   });
 
   it("FOUNDER DEFAULTS: cadence 300s and unclaimed age 60min on the daemon config surface, twinned in the module constants", async () => {
