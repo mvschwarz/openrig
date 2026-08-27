@@ -49,6 +49,7 @@ These are auto-delivered to every rig; their name+description are already in you
 - **claude-compaction-restore** — you just compacted (Claude). Restore from durable evidence before resuming real work.
 - **session-compaction-and-restore** — preparing for, or recovering from, compaction (any runtime). The write- and read-side protocol.
 - **queue-handoff** — you're passing durable work to another seat or ending your turn. The queue is the work ledger, not chat.
+- **refocusing** — a long-running seat may have lost the product outcome, crossed a major boundary, or compacted and needs a fresh path-based trace.
 - **seat-continuity-and-handover** — handing your seat's work across a restart or to another owner.
 <!-- Territory amended 2026-08-26 by desk ruling qitem-20260826080800-r054-s9a-scope-ruling. -->
 - **orienting-to-an-inherited-seat** — you just inherited an existing seat through a planned handover and need to verify its identity, state, and testimony.

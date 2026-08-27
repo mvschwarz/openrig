@@ -9,15 +9,6 @@
             "timeout": 5
           }
         ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/hooks/scripts/refocus.cjs\"",
-            "timeout": 5
-          }
-        ]
       }
     ],
     "UserPromptSubmit": [
@@ -34,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/hooks/scripts/refocus.cjs\"",
+            "command": "node \"${PLUGIN_ROOT}/hooks/scripts/refocus.cjs\" --runtime codex",
             "timeout": 5
           }
         ]
@@ -49,12 +40,14 @@
             "timeout": 5
           }
         ]
-      },
+      }
+    ],
+    "PostCompact": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${PLUGIN_ROOT}/hooks/scripts/refocus.cjs\"",
+            "command": "node \"${PLUGIN_ROOT}/hooks/scripts/refocus.cjs\" --runtime codex",
             "timeout": 5
           }
         ]

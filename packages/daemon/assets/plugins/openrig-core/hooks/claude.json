@@ -19,15 +19,6 @@
             "timeout": 5
           }
         ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs\"",
-            "timeout": 5
-          }
-        ]
       }
     ],
     "UserPromptSubmit": [
@@ -53,7 +44,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs\"",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs\" --runtime claude",
             "timeout": 5
           }
         ]
@@ -84,7 +75,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs\"",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs\" --runtime claude",
             "timeout": 5
           }
         ]
@@ -104,7 +95,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs\"",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs\" --runtime claude",
             "timeout": 5
           }
         ]

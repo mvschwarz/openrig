@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """compose.py — leaf-to-root chain composition and subtree renders.
 
+SUPERSEDED FOR REFOCUS: the public core reorientation trace lives at
+../../refocusing/scripts/trace-to-root.py. This general composer remains the
+compatibility surface for down/progress and historical up invocations.
+
   up   <start-dir> --name FILE [--name FILE ...] [--root DIR]
        Walk from start-dir up to root (default: filesystem stops at a dir
        containing .compose-root, or at --root). Emit the chain ROOT-FIRST

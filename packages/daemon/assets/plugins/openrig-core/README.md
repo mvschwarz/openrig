@@ -4,9 +4,12 @@ Canonical OpenRig skills and hooks for cross-runtime agent topology coordination
 
 ## What this plugin ships
 
-**Skills (15):** the canonical OpenRig operating knowledge — how to use the `rig` CLI, how to place context and work in the two trees, how to design rig topologies, how to recover from compaction, how to hand work off durably between agents, how to maintain seat continuity and inherit or retire a seat across handovers and restarts, how to apply a permission policy to a seat's live harness, and how to decide who does a task.
+**Skills (16):** canonical OpenRig operating knowledge, including the public `refocusing` skill and
+its path-only topology/work trace.
 
-**Hooks:** activity-tracking hooks (Claude Code: 4 events; Codex: 3 events) that POST agent state to the OpenRig daemon for real-time UI seat-status updates.
+**Hooks:** activity tracking, compaction continuity, and the default-on refocus channel. Refocus is
+post-compaction on both runtimes, threshold-triggered on Claude, on-demand on both, configurable
+off, and never runs at fresh session start.
 
 ## Runtimes
 

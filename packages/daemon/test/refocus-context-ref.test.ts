@@ -30,13 +30,20 @@ function runHook(options: {
   event?: string;
   transcriptContent?: string;
   extraEnv?: NodeJS.ProcessEnv;
+  instanceContent?: string;
+  runtime?: "claude" | "codex";
 }) {
+  if (root) rmSync(root, { recursive: true, force: true });
   root = mkdtempSync(join(tmpdir(), "refocus-context-ref-"));
   const home = join(root, "home");
   const bin = join(root, "bin");
   const argvCapture = join(root, "rig-argv.json");
   mkdirSync(home, { recursive: true });
   mkdirSync(bin, { recursive: true });
+  if (options.instanceContent !== undefined) {
+    mkdirSync(join(home, "refocus"), { recursive: true });
+    writeFileSync(join(home, "refocus", "REFOCUS.md"), options.instanceContent, "utf8");
+  }
 
   let transcript: string | undefined;
   if (options.transcriptContent !== undefined) {
@@ -45,12 +52,11 @@ function runHook(options: {
   }
 
   const rig = join(bin, "rig");
-  writeFileSync(rig, `#!/usr/bin/env node
-const fs = require("node:fs");
-fs.writeFileSync(process.env.RIG_ARGV_CAPTURE, JSON.stringify(process.argv.slice(2)));
-process.stdout.write(process.env.RIG_STDOUT || "");
-process.stderr.write(process.env.RIG_STDERR || "");
-process.exit(Number(process.env.RIG_STATUS || 0));
+  writeFileSync(rig, `#!/bin/sh
+printf '["%s","%s","%s"]' "$1" "$2" "$3" > "$RIG_ARGV_CAPTURE"
+printf '%s' "$RIG_STDOUT"
+printf '%s' "$RIG_STDERR" >&2
+exit "\${RIG_STATUS:-0}"
 `, "utf8");
   chmodSync(rig, 0o755);
 
@@ -72,10 +78,13 @@ process.exit(Number(process.env.RIG_STATUS || 0));
     RIG_STDERR: options.rigStderr,
     RIG_STATUS: options.rigStatus === undefined ? undefined : String(options.rigStatus),
     OPENRIG_REFOCUS_NOW: "1",
+    OPENRIG_REFOCUS_TREES: "work",
+    OPENRIG_WORKSPACE_ROOT: home,
+    OPENRIG_REFOCUS_WORK_NODE: home,
     ...options.extraEnv,
   } as NodeJS.ProcessEnv;
 
-  const result = spawnSync(process.execPath, [HOOK], {
+  const result = spawnSync(process.execPath, [HOOK, "--runtime", options.runtime || "claude"], {
     input: JSON.stringify({
       hook_event_name: options.event || "UserPromptSubmit",
       transcript_path: transcript || "",
@@ -127,6 +136,16 @@ describe("openrig-core refocus hook — context library refs", () => {
     expect(result.status).toBe(0);
     expect(result.payload?.hookSpecificOutput.additionalContext.endsWith("configured file bytes")).toBe(true);
   });
+
+  it("keeps FILE above instance content and instance content above the shipped default", () => {
+    const instance = runHook({ instanceContent: "INSTANCE CONTENT" });
+    expect(instance.payload?.hookSpecificOutput.additionalContext.endsWith("INSTANCE CONTENT")).toBe(true);
+    expect(instance.payload?.hookSpecificOutput.additionalContext).not.toContain("Discomfort on any of these");
+
+    const file = runHook({ fileContent: "FILE CONTENT", instanceContent: "INSTANCE MUST NOT WIN" });
+    expect(file.payload?.hookSpecificOutput.additionalContext.endsWith("FILE CONTENT")).toBe(true);
+    expect(file.payload?.hookSpecificOutput.additionalContext).not.toContain("INSTANCE MUST NOT WIN");
+  });
 });
 
 describe("openrig-core refocus hook — S18 trigger and event contract", () => {
@@ -153,6 +172,7 @@ describe("openrig-core refocus hook — S18 trigger and event contract", () => {
     for (const [runtime, configPath] of [["claude", CLAUDE_HOOKS], ["codex", CODEX_HOOKS]] as const) {
       for (const event of refocusEvents(configPath)) {
         const result = runHook({
+          runtime,
           event,
           transcriptContent: "threshold crossed",
           extraEnv: { OPENRIG_REFOCUS_BYTES: "1", OPENRIG_REFOCUS_NOW: undefined },
@@ -176,6 +196,9 @@ describe("openrig-core refocus hook — S18 trigger and event contract", () => {
     expect(onDemand.stdout).not.toBe("");
     expect(onDemand.payload?.hookSpecificOutput.additionalContext).toContain("REFOCUS (on demand)");
 
+    const codexOnDemand = runHook({ runtime: "codex" });
+    expect(codexOnDemand.payload?.hookSpecificOutput.additionalContext).toContain("REFOCUS (on demand)");
+
     const off = runHook({
       transcriptContent: "threshold crossed",
       extraEnv: {
@@ -187,28 +210,16 @@ describe("openrig-core refocus hook — S18 trigger and event contract", () => {
     expect(off.stdout).toBe("");
   });
 
-  it("detects a transcript reset as the Codex compaction trigger", () => {
-    root = mkdtempSync(join(tmpdir(), "refocus-codex-compact-"));
-    const home = join(root, "home");
-    const transcript = join(root, "transcript.jsonl");
-    const stateDir = join(home, "refocus");
-    mkdirSync(stateDir, { recursive: true });
-    writeFileSync(transcript, "new compacted transcript", "utf8");
-    writeFileSync(join(stateDir, "seat@test.json"), JSON.stringify({ lastBytes: 50_000 }), "utf8");
+  it("uses Codex PostCompact exactly and never substitutes a byte/reset threshold", () => {
+    expect(refocusEvents(CODEX_HOOKS)).toContain("PostCompact");
 
-    const result = spawnSync(process.execPath, [HOOK], {
-      input: JSON.stringify({ hook_event_name: "UserPromptSubmit", transcript_path: transcript }),
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        OPENRIG_HOME: home,
-        OPENRIG_SESSION_NAME: "seat@test",
-        OPENRIG_RUNTIME: "codex",
-        OPENRIG_REFOCUS_NOW: undefined,
-      },
+    const thresholdOnly = runHook({
+      runtime: "codex",
+      transcriptContent: "threshold crossed",
+      extraEnv: { OPENRIG_REFOCUS_BYTES: "1", OPENRIG_REFOCUS_NOW: undefined },
     });
-    expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout).hookSpecificOutput.additionalContext).toContain("compacted");
+    expect(thresholdOnly.status).toBe(0);
+    expect(thresholdOnly.stdout).toBe("");
   });
 
   it("ships self-teaching defaults that cite, rather than copy, the S15 onboarding pack", () => {
@@ -324,7 +335,7 @@ describe("openrig-core refocus hook — delivery state", () => {
     mkdirSync(home, { recursive: true });
     writeFileSync(transcript, "due transcript bytes", "utf8");
 
-    const invoke = (event: string) => spawnSync(process.execPath, [HOOK], {
+    const invoke = (event: string) => spawnSync(process.execPath, [HOOK, "--runtime", "claude"], {
       input: JSON.stringify({ hook_event_name: event, transcript_path: transcript }),
       encoding: "utf8",
       env: {
@@ -334,6 +345,9 @@ describe("openrig-core refocus hook — delivery state", () => {
         OPENRIG_REFOCUS_BYTES: "1",
         OPENRIG_REFOCUS_CONTENT_REF: undefined,
         OPENRIG_REFOCUS_CONTENT_FILE: undefined,
+        OPENRIG_REFOCUS_TREES: "work",
+        OPENRIG_WORKSPACE_ROOT: home,
+        OPENRIG_REFOCUS_WORK_NODE: home,
       },
     });
 
@@ -359,5 +373,35 @@ describe("openrig-core refocus hook — delivery state", () => {
     const repeat = invoke("UserPromptSubmit");
     expect(repeat.status).toBe(0);
     expect(repeat.stdout).toBe("");
+  });
+
+  it("retains PostCompact due-state without invalid output, then delivers it at the next prompt", () => {
+    root = mkdtempSync(join(tmpdir(), "refocus-postcompact-state-"));
+    const home = join(root, "home");
+    const state = join(home, "refocus", "seat@test.json");
+    mkdirSync(home, { recursive: true });
+    const invoke = (event: string) => spawnSync(process.execPath, [HOOK, "--runtime", "codex"], {
+      input: JSON.stringify({ hook_event_name: event, transcript_path: "" }),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        OPENRIG_HOME: home,
+        OPENRIG_SESSION_NAME: "seat@test",
+        OPENRIG_REFOCUS_NOW: undefined,
+        OPENRIG_REFOCUS_TREES: "work",
+        OPENRIG_WORKSPACE_ROOT: home,
+        OPENRIG_REFOCUS_WORK_NODE: home,
+      },
+    });
+
+    const observed = invoke("PostCompact");
+    expect(observed.status).toBe(0);
+    expect(observed.stdout).toBe("");
+    expect(JSON.parse(readFileSync(state, "utf8"))).toMatchObject({ pendingOn: "PostCompact" });
+
+    const delivered = invoke("UserPromptSubmit");
+    expect(delivered.status).toBe(0);
+    expect(JSON.parse(delivered.stdout).hookSpecificOutput.additionalContext).toContain("just compacted");
+    expect(JSON.parse(readFileSync(state, "utf8"))).not.toHaveProperty("pendingOn");
   });
 });

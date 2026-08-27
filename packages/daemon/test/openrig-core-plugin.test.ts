@@ -41,6 +41,7 @@ const EXPECTED_SKILLS = [
   "openrig-user",
   "orienting-to-an-inherited-seat",
   "queue-handoff",
+  "refocusing",
   "retiring-and-inheriting-a-seat",
   "seat-continuity-and-handover",
   "session-compaction-and-restore",
@@ -221,15 +222,32 @@ describe("openrig-core plugin — hooks (HG-2.6 + HG-2.7)", () => {
     expect(fs.existsSync(nodePath.join(PLUGIN_ROOT, "skills", "claude-compaction-restore", "scripts", "precompact-hook.mjs"))).toBe(true);
   });
 
-  it("hooks/codex.json declares 4 events incl. PermissionRequest (Codex hook-primary approval guard, OPR.0.4.1.10)", () => {
+  it("hooks/codex.json declares lifecycle events including PermissionRequest and PostCompact", () => {
     const content = fs.readFileSync(nodePath.join(PLUGIN_ROOT, "hooks", "codex.json"), "utf-8");
     const config = JSON.parse(content) as { hooks: Record<string, unknown> };
     expect(config.hooks).toBeDefined();
     // PermissionRequest (openai/codex PR #17563) is wired so a Codex approval prompt produces a
     // needs_input runtime hook = the hook-primary rig-send guard for Codex (no Claude-style Notification).
     expect(Object.keys(config.hooks).sort()).toEqual([
-      "PermissionRequest", "SessionStart", "Stop", "UserPromptSubmit",
+      "PermissionRequest", "PostCompact", "SessionStart", "Stop", "UserPromptSubmit",
     ]);
+  });
+
+  it("ships refocus as one core feature without a SessionStart refocus registration", () => {
+    for (const [runtime, variable] of [["claude", "CLAUDE_PLUGIN_ROOT"], ["codex", "PLUGIN_ROOT"]]) {
+      const content = fs.readFileSync(nodePath.join(PLUGIN_ROOT, "hooks", `${runtime}.json`), "utf-8");
+      const config = JSON.parse(content) as { hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>> };
+      const refocusEvents = Object.entries(config.hooks)
+        .filter(([, entries]) => entries.some((entry) => entry.hooks.some((hook) => hook.command.includes("refocus.cjs"))))
+        .map(([event]) => event);
+      expect(refocusEvents).not.toContain("SessionStart");
+      expect(refocusEvents).toContain("UserPromptSubmit");
+      expect(refocusEvents).toContain("PostCompact");
+      expect(content).toContain(`\${${variable}}`);
+    }
+    expect(fs.existsSync(nodePath.join(PLUGIN_ROOT, "skills", "refocusing", "SKILL.md"))).toBe(true);
+    expect(fs.existsSync(nodePath.join(PLUGIN_ROOT, "skills", "refocusing", "scripts", "trace-to-root.py"))).toBe(true);
+    expect(fs.existsSync(nodePath.join(PLUGIN_ROOT, "skills", "refocusing", "references", "refocus.md"))).toBe(true);
   });
 
   it("hooks/scripts/activity-relay.cjs exists (the canonical relay script that POSTs to /api/activity/hooks)", () => {

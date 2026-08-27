@@ -12,17 +12,22 @@ it is the mechanism that makes shipped chain files (see
 
 | event | Claude Code | Codex | why |
 |---|---|---|---|
-| SessionStart | ✓ | ✓ | fresh orientation |
-| UserPromptSubmit | ✓ | ✓ | growth check at each turn boundary |
-| Stop | ✓ | ✓ | catches the long single turn |
-| PostCompact | ✓ | — (no compact hook) | a compacted seat's picture is lossy |
+| UserPromptSubmit | ✓ | ✓ | deliver due or on-demand context at a model-visible boundary |
+| Stop | ✓ | — | catch a long Claude turn crossing the growth threshold |
+| PostCompact | ✓ | ✓ | retain exact compaction due-state; deliver on the next prompt |
 
-The firing signal is **transcript growth** — not turns (one turn can burn 200k
-tokens across fifty tool calls) and not wall-clock (the failure is sustained
-work, not elapsed time). Default threshold ~2.6MB of JSONL growth (≈300k
-tokens); tune with `OPENRIG_REFOCUS_BYTES`. SessionStart and PostCompact
-always fire. Otherwise the hook is a silent no-op, and it degrades to silence
-on unrelated hook errors. A configured REF resolution failure instead degrades
+Claude's additional firing signal is **transcript growth** — not turns (one turn
+can burn 200k tokens across fifty tool calls) and not wall-clock (the failure is
+sustained work, not elapsed time). Its default threshold is ~2.6MB of JSONL
+growth (≈300k tokens); tune with `OPENRIG_REFOCUS_BYTES`. Codex never uses that
+threshold: its exact `PostCompact` lifecycle hook is the trigger, avoiding a
+redundant double-fire around Codex's own compaction cadence. Set
+`OPENRIG_REFOCUS_NOW=1` for an on-demand refocus and
+`OPENRIG_REFOCUS_ENABLED=0` to disable the feature. Fresh `SessionStart` is
+always a no-op: the default onboarding pack owns fresh orientation. Both
+runtimes retain `PostCompact` due-state for the next prompt. Otherwise the hook
+is a silent no-op, and it degrades to silence on unrelated hook errors. A
+configured REF resolution failure instead degrades
 loudly in the delivered payload while still completing the hook — a refocus
 must never break a seat's turn.
 
@@ -42,9 +47,10 @@ Resolution order:
 2. `OPENRIG_REFOCUS_CONTENT_FILE` — an operator-authored file (per-seat or
    per-rig via spec env).
 3. `$OPENRIG_HOME/refocus/REFOCUS.md` — the instance's standing content.
-4. The generic default baked into the hook: three project-neutral orientation
-   questions plus the pointer to the seat's topology chain
-   (`rig context trace … --name CRAFT.md`) and the LEARNED-ownership warning.
+4. The generic default at
+   `skills/refocusing/references/refocus.md`: three project-neutral orientation
+   questions, the ladder itself, and a pointer to the separately shipped
+   onboarding assets.
 
 The hook names a resolved REF in the delivered payload. If REF resolution
 fails, the payload starts with `REFOCUS CONTENT REF FAILED`, the exact ref, and
@@ -59,6 +65,13 @@ practice that is not generally applicable. (The pre-promotion lab hook had
 exactly this defect: a hardcoded per-box distillation-tool path. The
 promotion removed it; the grep for project residue is part of the slice's
 proof contract.)
+
+Every delivered refocus pairs its content with the public `refocusing` skill's
+path-only trace. Configure `OPENRIG_REFOCUS_TREES=topology|work|both` and
+`OPENRIG_REFOCUS_DEPTH=light|full`; optional `OPENRIG_REFOCUS_TOPOLOGY_NODE`
+and `OPENRIG_REFOCUS_WORK_NODE` select starts that cannot be derived. The
+script resolves `topology.root` and `workspace.root` through live config and
+reports broken links as gaps rather than following pointers.
 
 This automatic hook path is additive to one-shot manual injection through
 `rig send --context`; neither mode substitutes for the other.

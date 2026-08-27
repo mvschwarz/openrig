@@ -243,6 +243,12 @@
       ],
       "category": null
     },
+    "refocusing": {
+      "edges": [
+        "plugin"
+      ],
+      "category": null
+    },
     "requirements-writer": {
       "edges": [
         "canonical",
