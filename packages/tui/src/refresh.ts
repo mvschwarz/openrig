@@ -14,11 +14,7 @@ export function singleFlight(task: () => Promise<void>): () => Promise<void> {
   const run = async (): Promise<void> => {
     do {
       dirty = false;
-      try {
-        await task();
-      } catch {
-        // the task owns its errors (live.ts never rejects); never break the coalescer
-      }
+      await task(); // rejection propagates to every awaiting caller; finally releases the guard
     } while (dirty);
   };
   return () => {
