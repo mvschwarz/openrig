@@ -68,6 +68,13 @@ export interface SeatHandoverMutationResult {
     startupContextDelivered: boolean;
     provenanceRecordWritten: false;
   };
+  /** OPR.0.5.5.5 — per-source execution outcome. fork: the resolved fork origin;
+   *  rebuild: EXACTLY which durable artifacts primed the successor, which
+   *  declared addresses were gaps, and (when the chain is empty) the named
+   *  reason — recorded, never silently dropped. Absent for fresh/discovered. */
+  sourceOutcome?:
+    | { mode: "fork"; forkedFrom: string }
+    | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string };
 }
 
 export type SeatHandoverResult =
@@ -166,6 +173,18 @@ interface SeatHandoverServiceDeps {
    * → skipped, never blocks a handover.
    */
   activityOracle?: { declareOccupantSwap: (seatNodeId: string, generation: string) => void };
+  /**
+   * OPR.0.5.5.5 — resolves the seat's durable rebuild-priming chain (authored
+   * recap chain, LEARNED, restore-packet record) in trust-precedence order for
+   * `--source rebuild`. Optional: absent → rebuild executes with a named empty
+   * chain. Wired in production to seat-recap-store (listRecapChain) + the
+   * topology.root seat layout.
+   */
+  rebuildPrimingResolver?: (seatRef: string) => { artifacts: Array<{ address: string; label: string }> } | { emptyReason: string };
+  /** OPR.0.5.5.5 — filesystem existence check for declared rebuild artifacts
+   *  (the session-source-rebuild-resolver seam). Default: node:fs existsSync;
+   *  tests inject. */
+  rebuildArtifactExists?: (path: string) => boolean;
 }
 
 export class SeatHandoverService {
