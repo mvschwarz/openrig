@@ -220,6 +220,26 @@ export async function completeUploadExternal(
   return { ok: r.ok, error: r.error };
 }
 
+/** S10 (H) — read recent message TEXTS for reconcile-by-marker: a timeout is an AMBIGUOUS
+ *  outcome (the post may have landed), so before any resend the sender searches for the
+ *  embedded row-id marker. threadTs set → conversations.replies (a threaded reply lives in its
+ *  thread, not channel history); absent → conversations.history. Read-only; bounded. */
+export async function fetchRecentMessageTexts(
+  token: string,
+  channel: string,
+  threadTs: string | undefined,
+  fetchImpl: FetchImpl = defaultFetch,
+  limit = 100,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<{ ok: boolean; texts: string[]; error?: string }> {
+  const method = threadTs ? "conversations.replies" : "conversations.history";
+  const body: Record<string, unknown> = threadTs ? { channel, ts: threadTs, limit } : { channel, limit };
+  const r = await callWebApi(method, token, body, fetchImpl, timeoutMs);
+  if (!r.ok) return { ok: false, texts: [], error: r.error };
+  const messages = (r.json.messages ?? []) as { text?: string }[];
+  return { ok: true, texts: messages.map((m) => String(m.text ?? "")) };
+}
+
 export interface PostChatMessageInput {
   channel: string;
   text: string; // notification fallback — always set (affordance-verified: keep a text arg on all posts)

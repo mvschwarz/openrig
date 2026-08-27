@@ -54,6 +54,7 @@ function makeDeliver(fetchImpl: FetchImpl, logs: string[] = []) {
     sourceLabel: "vm",
     fetchImpl,
     delivered: new SeenStore("/del.jsonl", fsx, clock),
+      attempted: new SeenStore("/att.jsonl", fsx, clock),
     outboundSeen: new SeenStore("/seen.jsonl", fsx, clock),
     readLocalImage: (p) => (p === "/tmp/founder-shot.png" ? { bytes: new Uint8Array(2048), filename: "founder-shot.png" } : null),
     log: (m) => logs.push(m),

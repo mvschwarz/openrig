@@ -74,6 +74,7 @@ function capturingFetch(status = 200): { fetchImpl: FetchImpl; calls: { url: str
 function composeOutbound(home: string, port: OutboundQueuePort, fetchImpl: FetchImpl, fsx = memFs()) {
   const outboundSeen = new SeenStore("/s/outbound-seen.jsonl", fsx, clock);
   const delivered = new SeenStore("/s/delivered.jsonl", fsx, clock);
+  const attempted = new SeenStore("/s/attempted.jsonl", fsx, clock);
   let release: (q: string) => void = () => {};
   const deliver = subsystemSlackDeliver({
     botToken: "xoxb-EXAMPLE-fake",
@@ -81,6 +82,7 @@ function composeOutbound(home: string, port: OutboundQueuePort, fetchImpl: Fetch
     sourceLabel: "vm",
     fetchImpl,
     delivered,
+    attempted,
     outboundSeen,
     release: (q) => release(q),
   });

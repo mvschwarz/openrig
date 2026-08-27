@@ -89,6 +89,7 @@ describe("customize ABSENCE — posted bytes carry the app identity ONLY", () =>
       sourceLabel: "vm",
       fetchImpl,
       delivered: new SeenStore("/del.jsonl", fsx, clock),
+      attempted: new SeenStore("/att.jsonl", fsx, clock),
       outboundSeen: new SeenStore("/seen.jsonl", fsx, clock),
       resolveMentionUserId: () => "U012AB3CD", // even at maximum loudness…
     });

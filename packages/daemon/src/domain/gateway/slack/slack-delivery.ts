@@ -15,7 +15,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { postChatMessage, getUploadURLExternal, uploadBytesExternal, completeUploadExternal, type FetchImpl } from "./slack-api.js";
+import { postChatMessage, getUploadURLExternal, uploadBytesExternal, completeUploadExternal, fetchRecentMessageTexts, type FetchImpl } from "./slack-api.js";
 import { buildOutboundMessage, attributionFromSession, type SlackMediaRef } from "./message.js";
 import type { SeenStore } from "./state-store.js";
 import type { OutboundDecision } from "../protocol.js";
@@ -30,6 +30,10 @@ export interface SubsystemSlackDeliveryOpts {
   fetchImpl?: FetchImpl;
   /** decisionId-keyed delivered-store (idempotent redelivery: replay re-acks, never re-posts). */
   delivered: SeenStore;
+  /** H — decisionId-keyed ATTEMPTED-store, marked BEFORE the HTTP post. A retry of an attempted
+   *  decision has an AMBIGUOUS prior outcome (a timeout may have landed), so it RECONCILES by
+   *  marker before any resend — never a blind repost. Distinct from `delivered` (proven 2xx). */
+  attempted: SeenStore;
   /** qitemId-keyed outbound seen-state (slice-11: marked ONLY after a successful post). */
   outboundSeen: SeenStore;
   /** Release the outbound driver's in-flight guard once a qitem is durably seen. */
@@ -101,6 +105,34 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
       },
     );
     const threadTs = opts.resolveThreadTs?.(q);
+
+    // H — RECONCILE-BY-MARKER before any RESEND: if this decision was attempted before, the
+    // prior outcome is ambiguous (a timeout may have posted). Search where the message would
+    // live (the thread, else channel history) for the row-id marker the footer embeds
+    // (`qitem <id>`); FOUND → already delivered, record + ack, never repost. Search failure =
+    // stay ambiguous = retain for the next replay (never a blind repost on an unreadable
+    // channel — a duplicate human notification is the red; a delay is not).
+    const marker = q.qitemId ?? decision.decisionId;
+    if (opts.attempted.load().has(decision.decisionId)) {
+      const scan = await fetchRecentMessageTexts(opts.botToken, opts.channel, threadTs, opts.fetchImpl);
+      if (!scan.ok) {
+        log(`reconcile scan failed for ${decision.decisionId} (${scan.error}) — retained, no blind repost`);
+        return { ok: false, class: "reconcile-unreadable", detail: scan.error };
+      }
+      if (scan.texts.some((t) => t.includes(marker))) {
+        log(`reconcile: marker "${marker}" FOUND — prior ambiguous post landed; ack without repost`);
+        opts.delivered.mark(decision.decisionId, "reconciled-delivered");
+        if (q.qitemId) {
+          opts.outboundSeen.mark(q.qitemId, "posted");
+          opts.release?.(q.qitemId);
+        }
+        return { ok: true };
+      }
+      log(`reconcile: marker "${marker}" absent — safe to send`);
+    }
+
+    // Marked ATTEMPTED durably BEFORE the post: from here any outcome is ambiguous until 2xx.
+    opts.attempted.mark(decision.decisionId, "attempted");
     const res = await postChatMessage(
       opts.botToken,
       { channel: opts.channel, text: payload.text, blocks: payload.blocks, thread_ts: threadTs },

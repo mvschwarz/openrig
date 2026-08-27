@@ -160,6 +160,7 @@ describe("outbound threading through the REAL delivery path (new conversation â†
       sourceLabel: "vm",
       fetchImpl,
       delivered: new SeenStore("/del.jsonl", fsx, clock),
+      attempted: new SeenStore("/att.jsonl", fsx, clock),
       outboundSeen: new SeenStore("/seen.jsonl", fsx, clock),
       resolveThreadTs: (p) => map.resolveOpenForPair(p.destinationSession ?? "", p.sourceSession ?? "")?.threadTs,
       onPostedRoot: (p, ts) => {

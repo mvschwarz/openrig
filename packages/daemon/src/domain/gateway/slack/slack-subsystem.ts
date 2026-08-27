@@ -75,6 +75,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   const ports = makeQueuePorts(opts.queueRepo);
   const outboundSeen = new SeenStore(path.join(stateDir(opts.home), "slack-outbound-seen.jsonl"));
   const delivered = new SeenStore(path.join(stateDir(opts.home), "slack-delivered-decisions.jsonl"));
+  const attempted = new SeenStore(path.join(stateDir(opts.home), "slack-attempted-decisions.jsonl"));
 
   // S10 thread routing — the map shares the daemon DB (queue rows carry the rebuild stamps).
   const threadMap = new ThreadSeatMap(opts.queueRepo.db);
@@ -89,6 +90,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         sourceLabel: cfg.sourceLabel,
         fetchImpl: opts.fetchImpl,
         delivered,
+        attempted,
         outboundSeen,
         release: (q) => releaseRef(q),
         // Thread reuse: an open (human, seat) conversation threads; otherwise a new root.
