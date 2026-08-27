@@ -41,6 +41,8 @@ interface NodeInventoryRead {
    * renderer). Absent/null when the seat has no observation. */
   lastActivityAt?: string | null;
   agentActivity?: { state?: string } | null;
+  /** S19 — the served taxonomy state; display comes from the daemon's one bridge. */
+  activityState?: { display?: string } | null;
   identityVerdict?: { verdict?: string } | null;
   canonicalSessionName: string | null;
   tmuxAttachCommand?: string | null;
@@ -180,11 +182,19 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
       ? "failed"
       : node.lifecycleState === "attention_required" || identityDownranked || node.startupStatus === "attention_required"
         ? "attention_required"
-        : node.agentActivity?.state === "needs_input"
+        // S19: the SERVED taxonomy display decides first (the daemon's one bridge);
+        // the inline mixing below survives only as the pre-taxonomy fallback.
+        : node.activityState?.display === "needs-input"
           ? "needs_input"
-          : node.sessionStatus === "running" || node.sessionStatus === "ready"
-            ? (node.terminalActive === true || (node.terminalActive == null && node.agentActivity?.state === "running") ? "active" : "idle")
-            : (node.sessionStatus ?? "unknown"),
+          : node.agentActivity?.state === "needs_input"
+            ? "needs_input"
+            : node.sessionStatus === "running" || node.sessionStatus === "ready"
+              ? (node.activityState?.display === "working"
+                  ? "active"
+                  : node.activityState?.display === "idle"
+                    ? "idle"
+                    : (node.terminalActive === true || (node.terminalActive == null && node.agentActivity?.state === "running") ? "active" : "idle"))
+              : (node.sessionStatus ?? "unknown"),
     live: node.lifecycleState === "running",
     canRun: node.lifecycleState !== "running"
       && node.sessionStatus !== "running"

@@ -305,6 +305,13 @@ export class SeatActivityService {
     return this.ladder.get(seatNodeId)?.inventory != null;
   }
 
+  /** Resolve by CURRENT session name (projection convenience) — state itself stays
+   *  keyed by the durable seat nodeId. */
+  getSeatStateBySession(sessionName: string): ArbitratedSeatState | null {
+    const seatNodeId = this.sessionToSeat.get(sessionName);
+    return seatNodeId ? this.getSeatState(seatNodeId) : null;
+  }
+
   /** The arbitrated, seat-keyed state every surface renders from. */
   getSeatState(seatNodeId: string): ArbitratedSeatState | null {
     const seat = this.ladder.get(seatNodeId);

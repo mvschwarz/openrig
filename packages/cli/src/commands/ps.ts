@@ -67,6 +67,13 @@ interface NodeEntry {
    *  false=silent past threshold, null=no signal. NEVER derived from
    *  hasAssignedWork (non-inference contract). */
   terminalActive?: boolean | null;
+  /** S19 — the served taxonomy state (display pre-derived by the daemon's one bridge). */
+  activityState?: {
+    activity: string;
+    display: string;
+    needsInput: { count: number; reason: string | null };
+    decidedBy: string | null;
+  } | null;
   /** Slice 15 — `has-work-to-do` primitive. Derived from queue_items;
    *  NEVER derived from terminalActive. */
   hasAssignedWork?: boolean;
@@ -1172,7 +1179,7 @@ async function handleNodes(
         n.rigName,
         n.canonicalSessionName ?? "—",
         abbrevNodeLifecycle(n.lifecycleState),
-        formatActivity(n.agentActivity),
+        formatActivity(n),
         formatHasWork(n.hasAssignedWork, n.pendingWorkCount),
         reason,
       ));
@@ -1198,7 +1205,7 @@ async function handleNodes(
         abbrevNodeLifecycle(n.lifecycleState),
         formatTerminalActive(n.terminalActive),
         formatHasWork(n.hasAssignedWork, n.pendingWorkCount),
-        formatActivity(n.agentActivity),
+        formatActivity(n),
         formatContextUsage(n.contextUsage),
         n.restoreOutcome,
         n.latestError ? truncate(n.latestError, 30) : n.heldReason ? `held: ${truncate(n.heldReason, 25)}` : "—",
@@ -1215,7 +1222,17 @@ async function handleNodes(
   }
 }
 
-function formatActivity(activity: NodeEntry["agentActivity"]): string {
+function formatActivity(n: Pick<NodeEntry, "agentActivity" | "activityState">): string {
+  // S19 — render from the served taxonomy state when present: needs-input as
+  // count(+reason), otherwise the bridge's display value. No local arbitration.
+  const tax = n.activityState;
+  if (tax) {
+    if (tax.needsInput.count > 0) return `needs-input x${tax.needsInput.count}`;
+    return tax.display;
+  }
+  // Legacy fallback (a daemon without the S19 enrichment) — retires with the
+  // pre-taxonomy surfaces per the ladder-as-migration rule.
+  const activity = n.agentActivity;
   if (!activity) return "unknown";
   if (activity.state === "running") return "running";
   if (activity.state === "needs_input") return "needs_input";

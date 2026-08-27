@@ -619,6 +619,18 @@ export interface NodeInventoryEntry {
    * `hasAssignedWork`.
    */
   terminalActive?: boolean | null;
+  /** S19 — the arbitrated three-axis taxonomy state served from the ONE oracle
+   *  (SeatActivityService ladder). `display` is computed server-side via the single
+   *  deriveDisplayActivity bridge so no consumer re-derives vocabulary. Absent = old
+   *  enrichment path; null = oracle has no state for this seat (honest). */
+  activityState?: {
+    activity: string;
+    display: string;
+    needsInput: { count: number; reason: string | null };
+    decidedBy: string | null;
+    seq: number;
+    lastSwap: { generation: string; at: string } | null;
+  } | null;
   /**
    * ARCH RULING 3a947fb1 (FR-7 additive) — the seat's RAW `lastActivityAt`
    * fact (SeatActivity.lastActivityAt), projected per-seat alongside

@@ -8,6 +8,7 @@ import type { ContextUsageStore } from "./context-usage-store.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
 import type { SeatActivityService } from "./seat-activity-service.js";
+import { deriveDisplayActivity } from "./activity-taxonomy.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { probeSessionActivity, mapPaneState } from "./session-transport.js";
 import type { StructuralObservation } from "./seat-structural-activity-service.js";
@@ -975,11 +976,30 @@ export function attachTerminalActivityAndWork(
       terminalActive = obs ? obs.isActiveWithinWindow : null;
       lastActivityAt = obs ? obs.lastActivityAt : null;
     }
+    // S19 — the arbitrated taxonomy state from the ONE oracle, display pre-derived
+    // through the single bridge (consumers render, never re-arbitrate).
+    let activityState: NodeInventoryEntry["activityState"] = undefined;
+    // Capability-checked: a partial injected double without the S19 surface keeps the
+    // pre-taxonomy shape (undefined) rather than faking a null oracle answer.
+    if (seatActivity && entry.canonicalSessionName && typeof seatActivity.getSeatStateBySession === "function") {
+      const arb = seatActivity.getSeatStateBySession(entry.canonicalSessionName);
+      activityState = arb
+        ? {
+            activity: arb.activity,
+            display: deriveDisplayActivity(arb.activity, arb.needsInput),
+            needsInput: arb.needsInput,
+            decidedBy: arb.decidedBy,
+            seq: arb.seq,
+            lastSwap: arb.lastSwap,
+          }
+        : null;
+    }
     const pendingCount = countPendingForEntry(entry, pendingByDest);
     return {
       ...entry,
       terminalActive,
       lastActivityAt,
+      activityState,
       hasAssignedWork: pendingCount > 0,
       pendingWorkCount: pendingCount,
     };
