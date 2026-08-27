@@ -107,7 +107,10 @@ export function updateFrontmatter(
     if (value === undefined) continue;
     const rendered = YAML.stringify({ [key]: value }, { lineWidth: 0 }).trimEnd();
     const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const keyRe = new RegExp(`^${escaped}:[^\\n]*(?:\\n[ \\t]+[^\\n]*)*`, "m");
+    const keyRe = new RegExp(
+      `^${escaped}:[^\\n]*(?:\\n[ \\t]+[^\\n]*|\\n(?=(?:\\n)*[ \\t]+))*`,
+      "m",
+    );
     const existing = keyRe.exec(block);
     if (existing) {
       block = block.slice(0, existing.index) + rendered + block.slice(existing.index + existing[0].length);

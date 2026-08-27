@@ -1150,7 +1150,8 @@ ${body}`);
     const fm = readFrontmatter(spec);
     expect(fm.depends_on).toEqual([]);
     expect(fm["repair-original-depends-on"]).toBe("OPR.9.8.7.1\n\nOPR.9.8.7.2");
-    expect(afterFirst).toContain("custom-key: 'keep: exact'\n---\n\n" + body);
+    expect(afterFirst).toContain("custom-key: 'keep: exact'\n");
+    expect(afterFirst.endsWith(`---\n\n${body}`)).toBe(true);
 
     const second = await run(["slice", "repair", "09-multiline-repair", "--mission", "release-0.3.2", "--json"], substrate.missionsRoot);
     expect(second.exitCode).toBe(0);
