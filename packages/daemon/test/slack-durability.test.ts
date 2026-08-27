@@ -33,7 +33,7 @@ const activeCount = (s: string, form: string): number => s.split(form).length - 
 
 /** A Slack double that can: TIMEOUT the first post (while actually landing it or not), serve
  *  conversations.history with the landed texts, and count real posts. */
-function slackDouble(opts: { timeoutFirstPost: boolean; timeoutLanded: boolean; historyReadable?: boolean }) {
+function slackDouble(opts: { timeoutFirstPost: boolean; timeoutLanded: boolean; historyReadable?: boolean; extraHistory?: string[] }) {
   const posted: string[] = []; // texts that actually LANDED on "Slack"
   let postCalls = 0;
   const fetchImpl: FetchImpl = async (url, init) => {
@@ -51,7 +51,9 @@ function slackDouble(opts: { timeoutFirstPost: boolean; timeoutLanded: boolean; 
       if (opts.historyReadable === false) {
         return new Response(JSON.stringify({ ok: false, error: "channel_unreadable" }), { status: 200, headers: { "content-type": "application/json" } });
       }
-      return new Response(JSON.stringify({ ok: true, messages: posted.map((t) => ({ text: t })) }), { status: 200, headers: { "content-type": "application/json" } });
+      // History = whatever else is in the channel (ordinary coordination prose) + the landed posts.
+      const texts = [...(opts.extraHistory ?? []), ...posted];
+      return new Response(JSON.stringify({ ok: true, messages: texts.map((t) => ({ text: t })) }), { status: 200, headers: { "content-type": "application/json" } });
     }
     return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
   };
@@ -128,6 +130,66 @@ describe("H1 — induced timeout → reconcile-by-marker, never a blind repost",
     expect(retry.ok).toBe(false);
     expect((retry as { class: string }).class).toBe("reconcile-unreadable");
     expect(slack.posted).toHaveLength(1); // the landed copy stays the only copy
+  });
+});
+
+describe("R2 round-3 — reconciliation identity is STRUCTURAL: guaranteed in the scanned surface, scoped to the target message (ordinary data only)", () => {
+  it("EFFECT A: a valid LONG routine summary (5000 chars) + timeout-that-landed → exactly ONE landed copy, zero repost (the identity survives the clamp)", async () => {
+    const slack = slackDouble({ timeoutFirstPost: true, timeoutLanded: true });
+    const { deliver } = harness(slack.fetchImpl);
+    const longRow: OutboundDecision = {
+      kind: "outbound_decision", decisionId: "d-long-summary", op: OUTBOUND_OP, entityBindingRef: "mike#slack",
+      payload: { ...payload, qitemId: "qitem-routine-long-summary", summary: "s".repeat(5000), body: "ordinary body" },
+    };
+    const first = await deliver(longRow);
+    expect(first.ok).toBe(false); // ambiguous timeout → retained
+    expect(slack.posted).toHaveLength(1); // …but it LANDED, with the fallback text at the cap
+    const retry = await deliver(longRow);
+    expect(retry.ok).toBe(true);
+    expect(slack.posted, "duplicate ABSENCE: the landed long-summary post must be recognized, never reposted").toHaveLength(1);
+  });
+
+  it("EFFECT B: unrelated routine prose QUOTING the id + timeout-that-did-NOT-land → never false-acks; the target posts exactly once on retry", async () => {
+    const slack = slackDouble({
+      timeoutFirstPost: true,
+      timeoutLanded: false,
+      extraHistory: ["status: qitem-routine-target is waiting on another lane"], // ordinary coordination prose
+    });
+    const { deliver } = harness(slack.fetchImpl);
+    const target: OutboundDecision = {
+      kind: "outbound_decision", decisionId: "d-target", op: OUTBOUND_OP, entityBindingRef: "mike#slack",
+      payload: { ...payload, qitemId: "qitem-routine-target", summary: "short summary", body: "b" },
+    };
+    const first = await deliver(target);
+    expect(first.ok).toBe(false);
+    expect(slack.posted).toHaveLength(0); // genuinely lost — only the unrelated quote exists
+    const retry = await deliver(target);
+    expect(retry.ok).toBe(true);
+    expect(slack.posted, "the quote must not satisfy reconciliation — the target itself must post").toHaveLength(1);
+    expect(slack.posted[0]).toContain("short summary"); // the landed copy is the TARGET, not a phantom
+  });
+
+  it("SCOPING: prose containing the qitem id AND a lookalike token shape cannot match — only the exact decision-scoped token does; and the token survives a max-length message", async () => {
+    const slack = slackDouble({
+      timeoutFirstPost: true,
+      timeoutLanded: false,
+      extraHistory: [
+        "quoting qitem-routine-scope in prose",
+        "even a lookalike (or-mark:qitem-routine-scope) built from the QITEM id must not match",
+      ],
+    });
+    const { deliver } = harness(slack.fetchImpl);
+    const scoped: OutboundDecision = {
+      kind: "outbound_decision", decisionId: "d-scope-check", op: OUTBOUND_OP, entityBindingRef: "mike#slack",
+      payload: { ...payload, qitemId: "qitem-routine-scope", summary: "x".repeat(6000), body: "y".repeat(2000) },
+    };
+    await deliver(scoped);
+    const retry = await deliver(scoped);
+    expect(retry.ok).toBe(true);
+    expect(slack.posted).toHaveLength(1); // posted despite both decoys (no false-ack)
+    // and the posted max-length text still carries the reconcile identity within the cap:
+    expect(slack.posted[0]!.length).toBeLessThanOrEqual(3900);
+    expect(slack.posted[0]).toContain("d-scope-check"); // the decision-scoped token survived the clamp
   });
 });
 
