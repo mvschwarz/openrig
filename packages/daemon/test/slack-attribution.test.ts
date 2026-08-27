@@ -59,9 +59,12 @@ describe("buildOutboundMessage — attribution header + loudness rule", () => {
 
   it("ESCALATION mentions the human by USER ID; routine stays quiet", () => {
     const loud = buildOutboundMessage(q, { sourceLabel: "vm", mentionUserId: "U012AB3CD" });
-    expect(loud.text.startsWith("<@U012AB3CD> ")).toBe(true);
+    expect(loud.text.startsWith("<@U012AB3CD> :rotating_light: ")).toBe(true);
+    expect(JSON.stringify(loud.blocks)).toContain("<@U012AB3CD> :rotating_light:");
     const quiet = buildOutboundMessage(q, { sourceLabel: "vm" });
     expect(quiet.text).not.toContain("<@");
+    expect(quiet.text).not.toContain(":rotating_light:");
+    expect(JSON.stringify(quiet.blocks)).not.toContain(":rotating_light:");
   });
 });
 

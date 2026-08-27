@@ -180,6 +180,8 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
   // active control sequence, and its id comes from the registry's HANDLE_PATTERN-validated
   // binding, never from row content.
   const mention = opts.mentionUserId ? `<@${opts.mentionUserId}> ` : "";
+  const loudness = opts.mentionUserId ? ":rotating_light: " : "";
+  const headline = `${mention}${loudness}*${summary}*`;
   // A1.2 — the attribution header line (rig/host/seat/session), one honest bot identity.
   // Session strings are row-carried → same inert pipeline.
   const attr = opts.attribution
@@ -198,11 +200,11 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
     const clamped = clamp(content, SLACK_TEXT_CAP - tokenReserve);
     return opts.reconcileMarker ? `${clamped}\n${opts.reconcileMarker}` : clamped;
   };
-  const text = assemble(`${mention}:rotating_light: *${summary}*${attr ? `\n_${attr}_` : ""}\n${body}\n_${footer}_`);
+  const text = assemble(`${headline}${attr ? `\n_${attr}_` : ""}\n${body}\n_${footer}_`);
 
   const blocks: unknown[] = [];
   if (attr) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: clamp(attr, 2000) }] });
-  blocks.push({ type: "section", text: { type: "mrkdwn", text: clamp(`${mention}:rotating_light: *${summary}*`, 3000) } });
+  blocks.push({ type: "section", text: { type: "mrkdwn", text: clamp(headline, 3000) } });
   if (body.trim()) blocks.push({ type: "section", text: { type: "mrkdwn", text: clamp(body, 3000) } });
   // M1 A5b — outbound image attachments (the wired T1076 seam). Secret-bearing URLs are dropped.
   const imageBlocks = buildImageBlocks(opts.mediaRefs);
@@ -214,7 +216,7 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
   // it. Re-assembled through the same token-reserving path so the media note never evicts the
   // reconcile identity from the scanned surface.
   const textWithMedia = imageBlocks.length > 0
-    ? assemble(`${mention}:rotating_light: *${summary}*${attr ? `\n_${attr}_` : ""}\n${body}\n_${footer}_\n_(${imageBlocks.length} image attachment${imageBlocks.length === 1 ? "" : "s"})_`)
+    ? assemble(`${headline}${attr ? `\n_${attr}_` : ""}\n${body}\n_${footer}_\n_(${imageBlocks.length} image attachment${imageBlocks.length === 1 ? "" : "s"})_`)
     : text;
   return { text: textWithMedia, blocks };
 }
