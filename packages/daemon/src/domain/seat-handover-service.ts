@@ -1009,6 +1009,7 @@ export class SeatHandoverService {
         source: input.reportedSource.raw,
         reason: input.reason,
         operator: input.operator,
+        ...(input.sourceOutcome ? { sourceOutcome: input.sourceOutcome } : {}),
       });
       return { newSessionId: newSession.id, previousSessionIdsSuperseded, event };
     });

@@ -187,7 +187,13 @@ export type RigEvent =
   // persisted node WITHOUT launch/relaunch/input. Distinct from node.claimed so
   // the operator is never misled about which op happened.
   | { type: "node.reconciled"; rigId: string; nodeId: string; logicalId: string; sessionName: string }
-  | { type: "seat.handover_completed"; rigId: string; nodeId: string; logicalId: string; previousOccupant: string; currentOccupant: string; source: string; reason: string; operator: string | null }
+  | { type: "seat.handover_completed"; rigId: string; nodeId: string; logicalId: string; previousOccupant: string; currentOccupant: string; source: string; reason: string; operator: string | null;
+      /** OPR.0.5.5.5 (fix B2) — the executed source outcome, persisted so the DURABLE
+       *  record (not just the command response) carries what primed the successor:
+       *  fork provenance, or rebuild's exact primed set / gaps / empty-chain reason. */
+      sourceOutcome?:
+        | { mode: "fork"; forkedFrom: string }
+        | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string } }
   // Bundle events (cross-rig)
   | { type: "bundle.created"; bundleName: string; bundleVersion: string; archiveHash: string }
   // Teardown events
