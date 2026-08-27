@@ -773,21 +773,9 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
       throw new Error(`Invalid value for retention.batch_size: must be an integer >= 1, got "${raw}"`);
     }
   },
-  "queue.pickup_stall_threshold_minutes": (raw, coerced) => {
-    if (typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
-      throw new Error(`Invalid value for queue.pickup_stall_threshold_minutes: must be an integer >= 1, got "${raw}"`);
-    }
-  },
-  "queue.stuck_sweep_interval_seconds": (raw, coerced) => {
-    if (typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
-      throw new Error(`Invalid value for queue.stuck_sweep_interval_seconds: must be an integer >= 1, got "${raw}"`);
-    }
-  },
-  "queue.stuck_sweep_unclaimed_age_minutes": (raw, coerced) => {
-    if (typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
-      throw new Error(`Invalid value for queue.stuck_sweep_unclaimed_age_minutes: must be an integer >= 1, got "${raw}"`);
-    }
-  },
+  "queue.pickup_stall_threshold_minutes": positiveIntegerConstraint("queue.pickup_stall_threshold_minutes"),
+  "queue.stuck_sweep_interval_seconds": positiveIntegerConstraint("queue.stuck_sweep_interval_seconds"),
+  "queue.stuck_sweep_unclaimed_age_minutes": positiveIntegerConstraint("queue.stuck_sweep_unclaimed_age_minutes"),
 };
 
 function validateKeyConstraints(key: ValidKey, raw: string, coerced: string | number | boolean): void {

@@ -21,6 +21,7 @@
 
 import type Database from "better-sqlite3";
 import type { QueueItem, QueueRepository } from "./queue-repository.js";
+import { stalledPickupFinding } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 
 export const STUCK_SWEEP_INTERVAL_KEY = "queue.stuck_sweep_interval_seconds";
@@ -41,6 +42,7 @@ export const LADDER_EXHAUSTED_PREFIX = "ladder-exhausted:";
 
 export type StuckFindingKind =
   | "overdue-claim"
+  | "stalled-after-claim"
   | "undelivered-wake"
   | "unclaimed-obligation"
   | "dangling-closure";
@@ -238,6 +240,25 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         route: row.destinationSession,
         ageMinutes: minutesSince(row.closureRequiredAt ?? row.claimedAt, now),
         why: "claimed and past closure_required_at with no closure",
+      });
+    }
+
+    // S04 seam — a claimed row with no later motion past the pickup threshold. The
+    // pickup module remains the ONE derivation rule; this loop only enumerates and routes.
+    const claimedRows = deps.db
+      .prepare("SELECT qitem_id FROM queue_items WHERE state = 'in-progress' AND claimed_at IS NOT NULL")
+      .all() as Array<{ qitem_id: string }>;
+    for (const { qitem_id } of claimedRows) {
+      const row = deps.queueRepo.getById(qitem_id);
+      if (!row || isFindingRow(row)) continue;
+      const stalled = stalledPickupFinding(row);
+      if (!stalled) continue;
+      candidates.push({
+        kind: stalled.kind,
+        row,
+        route: stalled.target,
+        ageMinutes: minutesSince(row.claimedAt, now),
+        why: stalled.evidence,
       });
     }
 
