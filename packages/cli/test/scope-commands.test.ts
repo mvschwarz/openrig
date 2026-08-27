@@ -1038,6 +1038,77 @@ describe("rig scope repair frontmatter conformance (OPR.0.4.1.6 FR-4)", () => {
     expect(fm.stage).toBe("established");                              // untouched
   });
 
+  // OPR.0.5.5.8 writer census: repair reaches frontmatter through the CLI's
+  // updateFrontmatter helper; approve reaches it through the daemon's
+  // writeFrontmatterFields helper. The remaining scope frontmatter consumers
+  // are readers. This fixture pins the repair half of the class at its real
+  // command surface rather than accepting semantic YAML equality: author bytes
+  // are the asset, including quoting, folding, ordering, and provenance.
+  it("S08 RED: repair appends conformance fields without rewriting any authored frontmatter byte", async () => {
+    const slice = path.join(substrate.missionsRoot, "release-0.3.2", "slices", "07-additive-repair");
+    const spec = path.join(slice, "SPEC.md");
+    const before = `---
+id: OPR.0.3.2.7
+slice: 07-additive-repair
+mission: release-0.3.2
+status: intent
+stage: established
+verified: >-
+  2026-08-26 against authored sha 012345
+created: '2026-08-26'
+tags: ["a b", 'c,d']
+---
+
+# Additive repair
+
+## Intent
+
+Preserve the author's bytes.
+`;
+    writeFile(spec, before);
+
+    const r = await run(["slice", "repair", "07-additive-repair", "--mission", "release-0.3.2", "--json"], substrate.missionsRoot);
+    expect(r.exitCode).toBe(0);
+    const after = fs.readFileSync(spec, "utf8");
+    const stripped = after
+      .replace(/^intent:[^\n]*\n/m, "")
+      .replace(/^depends_on:[^\n]*\n(?:[ \t]+[^\n]*\n)*/m, "");
+
+    expect(stripped).toBe(before);
+    expect(after).toContain("verified: >-\n  2026-08-26 against authored sha 012345");
+    expect(after).toContain('tags: ["a b", \'c,d\']');
+  });
+
+  it("S08 RED: malformed repair-owned data is conformed losslessly under a named preserved field", async () => {
+    const slice = path.join(substrate.missionsRoot, "release-0.3.2", "slices", "08-lossless-repair");
+    const spec = path.join(slice, "SPEC.md");
+    writeFile(spec, `---
+id: OPR.0.3.2.8
+stage: established
+verified: 2026-08-26 against authored sha abcdef
+intent: "Author intent"
+depends_on: OPR.0.3.2.7
+---
+
+# Lossless repair
+`);
+
+    const r = await run(["slice", "repair", "08-lossless-repair", "--mission", "release-0.3.2", "--json"], substrate.missionsRoot);
+    expect(r.exitCode).toBe(0);
+    const fm = readFrontmatter(spec);
+
+    expect(fm.depends_on).toEqual([]);
+    expect(fm["repair-original-depends-on"]).toBe("OPR.0.3.2.7");
+    expect(Object.keys(fm)).toEqual(expect.arrayContaining([
+      "id",
+      "stage",
+      "verified",
+      "intent",
+      "depends_on",
+      "repair-original-depends-on",
+    ]));
+  });
+
   it("AC-4: mission repair conforms the additive mission SPEC frontmatter too (lazy parent-id)", async () => {
     // A mission whose README has no id/stage/verified, plus a ghost slice.
     const m = path.join(substrate.missionsRoot, "backlog-new");

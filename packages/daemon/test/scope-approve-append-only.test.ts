@@ -106,6 +106,33 @@ describe("P15 — append-only approve stamping (writer-exceeds-its-ownership fix
       .replace(/^locked-artifacts:[^\n]*\n(?:[ \t]+[^\n]*\n)*/m, "");
   }
 
+  /** Replace the CURRENT writer-owned generation with the PRIOR one. A restamp
+   *  does not mean "strip to author-pure": an amendment made after generation
+   *  N has generation N in its pre-restamp bytes. The prior artifact is the
+   *  source of those exact blocks; this helper merely performs the mechanical
+   *  current -> prior substitution. */
+  function restoreOwnedGeneration(current: string, prior: string): string {
+    const keys = [
+      "approved-spec-by",
+      "approved-spec-at",
+      "approved-spec-priors",
+      "locked-artifacts",
+      "provenance",
+    ];
+    const block = (content: string, key: string): string | null => {
+      const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`^${escaped}:[^\\n]*(?:\\n[ \\t]+[^\\n]*)*`, "m").exec(content)?.[0] ?? null;
+    };
+    let restored = current;
+    for (const key of keys) {
+      const now = block(restored, key);
+      const before = block(prior, key);
+      if (now && before) restored = restored.slice(0, restored.indexOf(now)) + before + restored.slice(restored.indexOf(now) + now.length);
+      else if (now) restored = restored.slice(0, restored.indexOf(now)) + restored.slice(restored.indexOf(now) + now.length + (restored[restored.indexOf(now) + now.length] === "\n" ? 1 : 0));
+    }
+    return restored;
+  }
+
   it("MONEY (the 51-08 instance): stamp -> strip-owned-lines -> BYTE-IDENTICAL to the pre-stamp file", () => {
     const before = fs.readFileSync(readmePath, "utf8");
     service().approve(specInput);
@@ -135,6 +162,31 @@ describe("P15 — append-only approve stamping (writer-exceeds-its-ownership fix
     expect(fm["approved-spec-priors"]).toBe(1);
     const stripped = stripOwned(after).replace(/^approved-spec-priors:[^\n]*\n/m, "");
     expect(stripped).toBe(before);
+  });
+
+  it("S08 amendment cycle: current stamp generation mechanically restores the prior generation, including locked-artifacts.name", () => {
+    service().approve({ ...specInput, lockedArtifacts: ["README.md"] });
+    const firstGeneration = fs.readFileSync(readmePath, "utf8");
+    expect(firstGeneration).toContain("locked-artifacts:\n  - name: README.md");
+
+    // The amendment happens AFTER the first stamp, so its pre-restamp bytes
+    // intentionally include generation 0. Re-approval re-derives the lock and
+    // changes the nested name from the explicit path to the reader-facing label.
+    const amendedBeforeRestamp = firstGeneration.replace(
+      "Body text with --- inside prose stays untouched.",
+      "Body text amended after generation zero stays untouched.",
+    );
+    fs.writeFileSync(readmePath, amendedBeforeRestamp);
+    service().approve({
+      ...specInput,
+      actorSession: "orch-advisor@v-openrig-build",
+      reApprove: true,
+      reason: "amended after generation zero",
+    });
+    const secondGeneration = fs.readFileSync(readmePath, "utf8");
+    expect(secondGeneration).toContain("locked-artifacts:\n  - name: Legacy specification");
+
+    expect(restoreOwnedGeneration(secondGeneration, amendedBeforeRestamp)).toBe(amendedBeforeRestamp);
   });
 
   it("delivery approve on the already-spec-stamped file stays append-only too (two writers, zero drift)", () => {
