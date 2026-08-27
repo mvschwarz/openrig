@@ -189,6 +189,20 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     expect(setting).toMatchObject({ value: 3, source: "default", defaultValue: 3 });
   });
 
+  it("S02 standing stuck sweep exposes its cadence and unclaimed-age defaults", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.resolveWithSource("queue.stuck_sweep_interval_seconds" as never)).toMatchObject({
+      value: 300,
+      source: "default",
+      defaultValue: 300,
+    });
+    expect(store.resolveWithSource("queue.stuck_sweep_unclaimed_age_minutes" as never)).toMatchObject({
+      value: 60,
+      source: "default",
+      defaultValue: 60,
+    });
+  });
+
   it("W2c idle-gate-qitem cadence resolves env over file", () => {
     const store = new ConfigStore(configPath);
     expect(() => store.set("policies.idle_gate_qitem.scan_interval_seconds", "120")).not.toThrow();
