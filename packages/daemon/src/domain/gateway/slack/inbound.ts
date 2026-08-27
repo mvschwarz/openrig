@@ -6,12 +6,14 @@
 // qitem exists, in-flight per-event-ts dedup), plus loop-safety (never ingest
 // bot/own posts) and T1076 (file/image events ignored CLEANLY in v1).
 //
-// The WebSocket/ack transport lives in the CLI runner; this module is the pure,
-// fully-testable core: shouldIngest (filter), route (land + dedup + dead-letter),
-// retryDeadLetters, and handleEnvelope (fast-ack + dispatch).
+// The WebSocket/ack transport lives in the daemon's socket-inbound service (S10: in-daemon
+// subsystem — the CLI runner retired); this module is the pure, fully-testable core:
+// shouldIngest (filter), route (land + dedup + dead-letter), retryDeadLetters, and
+// handleEnvelope (fast-ack + dispatch). S10 re-home: the queue seam is an in-process PORT
+// (queue-access.ts adapts QueueRepository) — the rig-CLI shell-out bridge retired with the
+// relay runners; the durability semantics around it are unchanged.
 import type { SeenStore, DeadLetterStore, DeadLetterEntry } from "./state-store.js";
-import type { QueueRunner } from "./queue-bridge.js";
-import { createQitem } from "./queue-bridge.js";
+import type { InboundQueuePort } from "./queue-access.js";
 
 export interface SlackEvent {
   type?: string;
@@ -61,12 +63,12 @@ export type InboundSenderResolution =
   | { admitted: false; teaching: string };
 
 export interface InboundDeps {
-  runner: QueueRunner;
+  queue: InboundQueuePort;
   seen: SeenStore;
   deadLetter: DeadLetterStore<SlackEvent>;
   destination: string; // first-class config; default operator-agent@kernel
   /** A6 v3 registration gate. Resolves ev.user -> a registered human (or refuses). Injected so
-   *  this core stays pure/testable; the runner wires it via the daemon human-registry resolver. */
+   *  this core stays pure/testable; the subsystem wires it via the daemon human-registry resolver. */
   resolveSender: (slackUserId: string) => InboundSenderResolution;
   sourceLabel?: string;
   log?: (msg: string) => void;
@@ -107,7 +109,7 @@ export class InboundRouter {
       const { summary, body } = this.summaryOf(ev);
       let qitemId: string;
       try {
-        qitemId = await createQitem(this.deps.runner, {
+        qitemId = await this.deps.queue.createQitem({
           source: who.source, // the REGISTERED human's canonical ref (human-class), never a raw platform id
           destination: this.deps.destination,
           priority: "routine",

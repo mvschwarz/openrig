@@ -23,10 +23,14 @@ import type { OutboundDecision } from "./protocol.js";
 export type SubsystemDeliveryOutcome = { ok: true } | { ok: false; class: string; detail?: string };
 export type SubsystemDeliverFn = (decision: OutboundDecision) => Promise<SubsystemDeliveryOutcome>;
 
-/** What a wiring step yields: the live dispatcher plus its teardown. */
+/** What a wiring step yields: the live dispatcher, its teardown, and (optionally) the
+ *  NETWORK-TOUCHING services (replay, outbound poll, socket inbound). Services start only via
+ *  startServices() — invoked POST-BIND from index.ts (the contextMonitor pattern), so a
+ *  test-built daemon (createDaemon without serve) composes the wire but never dials out. */
 export interface GatewayWire {
   dispatcher: GatewayDispatcher;
   stop(): void;
+  startServices?(): void;
 }
 
 export interface InProcessWireOpts {
@@ -73,8 +77,13 @@ export function buildInProcessWire(opts: InProcessWireOpts): GatewayWire {
     protocolVersion: 1,
     ops: opts.ops ?? [],
   });
-  dispatcher.replayPending();
-  return { dispatcher, stop: () => { /* no socket, no timer — nothing to tear down yet */ } };
+  return {
+    dispatcher,
+    stop: () => { /* no socket, no timer — nothing to tear down yet */ },
+    // Restart no-loss: un-Acked decisions re-enter delivery — a NETWORK action, so it rides
+    // startServices() (post-bind), never wire composition.
+    startServices: () => dispatcher.replayPending(),
+  };
 }
 
 export type GatewaySubsystemState = "inactive" | "active" | "failed" | "stopped";
@@ -102,6 +111,7 @@ export class GatewaySubsystem {
   private reason: string | undefined;
   private activatedAt: string | undefined;
   private wireHandle: GatewayWire | undefined;
+  private servicesStarted = false;
 
   constructor(private readonly deps: GatewaySubsystemDeps) {}
 
@@ -120,6 +130,22 @@ export class GatewaySubsystem {
       this.reason = (e as Error).message;
       this.wireHandle = undefined;
       this.deps.log?.(`gateway subsystem FAILED to activate: ${this.reason}`);
+    }
+  }
+
+  /** Start the wire's network services (replay, pollers, sockets). Post-bind only — the
+   *  index.ts supervision tree calls this beside contextMonitor.start(); test-built daemons
+   *  never do, so composing a daemon never dials out. Idempotence is the wire's concern. */
+  startServices(): void {
+    if (this.state !== "active") return;
+    try {
+      this.wireHandle?.startServices?.();
+      this.servicesStarted = true;
+    } catch (e) {
+      // Service startup failure is honest but NOT fatal to the composed wire: dispatches
+      // still persist durably; the health surface names the degradation.
+      this.reason = `services failed to start: ${(e as Error).message}`;
+      this.deps.log?.(`gateway subsystem services FAILED to start: ${(e as Error).message}`);
     }
   }
 
@@ -143,16 +169,21 @@ export class GatewaySubsystem {
     return s;
   }
 
-  /** Recovery half of recovers-or-reports: tear down and re-run the wiring. */
+  /** Recovery half of recovers-or-reports: tear down and re-run the wiring. If services were
+   *  live (post-bind), the rebuilt wire's services start too — a config flip (enable/disable)
+   *  lands without a daemon restart. */
   restart(): void {
+    const resumeServices = this.servicesStarted;
     this.stop();
     this.state = "inactive";
     this.start();
+    if (resumeServices) this.startServices();
   }
 
   stop(): void {
     try { this.wireHandle?.stop(); } catch { /* best-effort */ }
     this.wireHandle = undefined;
+    this.servicesStarted = false;
     if (this.state !== "failed") this.state = "stopped";
     this.deps.log?.("gateway subsystem stopped");
   }

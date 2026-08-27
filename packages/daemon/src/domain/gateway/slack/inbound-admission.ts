@@ -9,7 +9,9 @@
 //   - sender UNREGISTERED   -> REFUSE with the resolver's LOUD teaching.
 
 import type { InboundSenderResolution } from "./inbound.js";
-import type { loadHumanRegistry as LoadFn, resolveSlackHandle as ResolveFn } from "@openrig/daemon/gateway-human-registry";
+// S10 re-home: this module now lives IN the daemon, so the registry surface types resolve
+// relatively (the lazy-import dep rail was a CLI concern; the injectable surface stays for tests).
+import type { loadHumanRegistry as LoadFn, resolveSlackHandle as ResolveFn } from "../human-registry.js";
 
 export interface RegistrySurface {
   loadHumanRegistry: typeof LoadFn;

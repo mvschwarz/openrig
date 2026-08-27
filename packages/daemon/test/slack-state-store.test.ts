@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { SeenStore, DeadLetterStore, type StateFsOps } from "../src/slack/state-store.js";
+import { SeenStore, DeadLetterStore, type StateFsOps } from "../src/domain/gateway/slack/state-store.js";
 
 // In-memory FS fake — models append/write/read + a fixed clock, no real disk.
 function memFs(): StateFsOps & { files: Map<string, string> } {

@@ -1,3 +1,12 @@
+// ── RETIRED IN PLACE (S10, OPR.0.5.5.10) ────────────────────────────────────────────────
+// The process-split gateway shape retired under the amended M1 §3 (desk head-amendment,
+// founder R2): the gateway runs as an IN-DAEMON SUBSYSTEM (gateway-subsystem.ts) — no spawned
+// gateway process, no gateway↔connector socket wire. This module keeps compiling and its
+// tests keep passing as a historical component, but it MUST NOT gain a production caller:
+// the second-deployable ABSENCE proof pins that (any spawned gateway process or open
+// connector wire is the red). Kept in place rather than deleted per the spec-level ruling
+// (delete-or-mark is builder discretion).
+// ─────────────────────────────────────────────────────────────────────────────────────────
 // M1 A4a — the gateway OS PROCESS runner: the long-lived brain the daemon spawns. It out-dials
 // the connector socket (transport.ts), and — critically — STAYS ALIVE across a connector outage.
 //

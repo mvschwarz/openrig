@@ -1,82 +1,74 @@
-// `rig slack` — Slice-11 slack-connector-human-queue (OPR.0.4.7.11).
+// `rig slack` — Slack connector configuration + subsystem admin.
 //
-// Agent-assisted setup/config + the two trusted-host connector runners. The
-// connector accesses the fleet ONLY through `rig queue` (transport-agnostic;
-// connector-host may differ from the queue/alert host — item 10). Secrets load
-// from a 0600 env file / OPENRIG_SLACK_* env at call time, never from config,
-// never from the repo. WebUI setup is OUT of v1.
+// S10 (OPR.0.5.5.10) CUTOVER: the slice-11 relay runners (`rig slack outbound` sweep +
+// `rig slack inbound` Socket Mode loop) are RETIRED — the gateway runs as an in-daemon
+// subsystem (amended M1 §3) that owns Slack delivery and inbound directly. The retired verbs
+// refuse with teaching (never silently do nothing); the config surfaces (setup/status/verify)
+// stay, backed by the daemon-homed modules via the narrow @openrig/daemon/gateway-slack
+// surface (dep rail: lazy import at invocation). enable/disable are daemon admin calls now —
+// the daemon owns the queue and the durable seen-state, and the enable-time backlog-seeding
+// rule (slice-11 item 9) executes daemon-side before the wire goes live.
+//
+// Secrets posture unchanged: 0600 env file / SLACK_* env at call time, never in config,
+// never in the repo.
 import { Command } from "commander";
-import path from "node:path";
-import { getOpenRigHome } from "../openrig-compat.js";
-import {
-  loadConfig,
-  saveConfig,
-  staticReadiness,
-  type SlackConnectorConfig,
-} from "../slack/config.js";
-import { resolveSecret, checkEnvFilePermissions } from "../slack/secrets.js";
-import { SeenStore, DeadLetterStore } from "../slack/state-store.js";
-import { makeExecRunner, type QueueRunner } from "../slack/queue-bridge.js";
-import { runOutboundOnce, seedBacklogOnEnable } from "../slack/outbound.js";
-import { InboundRouter, handleEnvelope, type SlackEvent, type SocketEnvelope } from "../slack/inbound.js";
-import { makeInboundSenderResolver, type RegistrySurface } from "../slack/inbound-admission.js";
-import { verifyScopes, verifyChannelMembership, openSocketConnection, type FetchImpl } from "../slack/slack-api.js";
+import { DaemonClient } from "../client.js";
+import type {
+  loadConfig as LoadConfigFn,
+  saveConfig as SaveConfigFn,
+  staticReadiness as StaticReadinessFn,
+  resolveSecret as ResolveSecretFn,
+  checkEnvFilePermissions as CheckEnvFn,
+  verifyScopes as VerifyScopesFn,
+  verifyChannelMembership as VerifyMembershipFn,
+  SlackConnectorConfig,
+  FetchImpl,
+} from "@openrig/daemon/gateway-slack";
 
-const SECRET_WEBHOOK = "SLACK_WEBHOOK_URL";
+// S10: the incoming-webhook secret retired with the relay — outbound posts via the Web API
+// (bot token) on the in-daemon subsystem.
 const SECRET_BOT = "SLACK_BOT_TOKEN";
 const SECRET_APP = "SLACK_APP_TOKEN";
 
-export interface WsLike {
-  send(data: string): void;
-  close(): void;
-  onopen: ((this: unknown, ev?: unknown) => void) | null;
-  onmessage: ((this: unknown, ev: { data: unknown }) => void) | null;
-  onclose: ((this: unknown, ev?: unknown) => void) | null;
-  onerror: ((this: unknown, ev?: unknown) => void) | null;
+interface SlackSurface {
+  loadConfig: typeof LoadConfigFn;
+  saveConfig: typeof SaveConfigFn;
+  staticReadiness: typeof StaticReadinessFn;
+  resolveSecret: typeof ResolveSecretFn;
+  checkEnvFilePermissions: typeof CheckEnvFn;
+  verifyScopes: typeof VerifyScopesFn;
+  verifyChannelMembership: typeof VerifyMembershipFn;
 }
 
 export interface SlackDeps {
   home?: string;
   fetchImpl?: FetchImpl;
-  /** Build the rig-queue runner from config (injectable for tests). */
-  makeRunner?: (cfg: SlackConnectorConfig) => QueueRunner;
-  now?: () => Date;
   log?: (msg: string) => void;
-  /** Open a Socket Mode WebSocket (default: global WebSocket). Injectable for tests. */
-  wsFactory?: (url: string) => WsLike;
-  /** Test seam: run inbound N reconnect cycles then stop (default: forever). */
-  inboundMaxConnects?: number;
-  /** Dead-letter retry cadence WHILE the socket stays connected (default 5min). */
-  retryIntervalMs?: number;
+  /** Injectable daemon-surface loader (tests). Default: lazy import of the narrow subpath. */
+  surface?: () => Promise<SlackSurface>;
+  clientFactory?: () => Pick<DaemonClient, "post">;
 }
 
-function stateDir(home: string): string {
-  return path.join(home, "state");
-}
-function defaultRunner(cfg: SlackConnectorConfig): QueueRunner {
-  // Remote queue targeting (item 10, connector-host != queue-host) via OPENRIG_URL
-  // — supported by ALL queue verbs, unlike `--host` which `queue list`/`show`
-  // reject. queueUrl (when set) overrides the ambient OPENRIG_URL for rig calls.
-  const env = cfg.queueUrl ? { ...process.env, OPENRIG_URL: cfg.queueUrl } : process.env;
-  return makeExecRunner({ rigBin: process.env.OPENRIG_RIG_BIN || "rig", baseArgs: [], env });
-}
+const RETIRED_TEACHING =
+  "retired (S10 cutover): the gateway runs IN-DAEMON now — the subsystem polls the queue, posts to Slack, " +
+  "and consumes Socket Mode inbound itself; there is no relay runner to invoke. " +
+  "Check `rig slack status` for configuration, `curl /api/health-summary/gateway` for subsystem health, " +
+  "and `rig slack enable` to activate delivery.";
 
-function resolveSecrets(cfg: SlackConnectorConfig): { webhook: string | null; bot: string | null; app: string | null } {
+function resolveSecrets(surface: SlackSurface, cfg: SlackConnectorConfig): { bot: string | null; app: string | null } {
   const envFile = cfg.secretsEnvFile ?? undefined;
   return {
-    webhook: resolveSecret(SECRET_WEBHOOK, { envFile }),
-    bot: resolveSecret(SECRET_BOT, { envFile }),
-    app: resolveSecret(SECRET_APP, { envFile }),
+    bot: surface.resolveSecret(SECRET_BOT, { envFile }),
+    app: surface.resolveSecret(SECRET_APP, { envFile }),
   };
 }
 
 export function slackCommand(deps: SlackDeps = {}): Command {
-  const home = deps.home ?? getOpenRigHome();
   const log = deps.log ?? ((m: string) => console.log(m));
-  const makeRunner = deps.makeRunner ?? defaultRunner;
-  const now = deps.now ?? (() => new Date());
+  const loadSurface = deps.surface ?? (async () => (await import("@openrig/daemon/gateway-slack")) as SlackSurface);
+  const clientFactory = deps.clientFactory ?? (() => new DaemonClient());
 
-  const cmd = new Command("slack").description("Slice-11 — Slack human-queue connector (outbound alerts + inbound messages)");
+  const cmd = new Command("slack").description("Slack connector: configuration + in-daemon subsystem admin (S10)");
 
   // ---- setup ----
   cmd
@@ -86,11 +78,11 @@ export function slackCommand(deps: SlackDeps = {}): Command {
     .option("--inbound-destination <session>", "where inbound human messages land (default operator-agent@kernel)")
     .option("--alert-tag <tag>", "outbound: qitem tag that alerts a human (default founder-alert)")
     .option("--source-label <label>", "label shown in the posted message footer (where the queue lives)")
-    .option("--secrets-env-file <path>", "path to the 0600 env file with SLACK_WEBHOOK_URL / SLACK_BOT_TOKEN / SLACK_APP_TOKEN")
-    .option("--queue-url <url>", "OPENRIG_URL of a REMOTE queue daemon (connector-host != queue-host); targets all queue verbs")
+    .option("--secrets-env-file <path>", "path to the 0600 env file with SLACK_BOT_TOKEN / SLACK_APP_TOKEN")
     .option("--required-scopes <csv>", "comma-separated bot scopes to require at verify time")
-    .action((opts) => {
-      const cur = loadConfig(home);
+    .action(async (opts) => {
+      const surface = await loadSurface();
+      const cur = surface.loadConfig(deps.home);
       const next: SlackConnectorConfig = {
         ...cur,
         channel: opts.channel ?? cur.channel,
@@ -98,12 +90,11 @@ export function slackCommand(deps: SlackDeps = {}): Command {
         alertTag: opts.alertTag ?? cur.alertTag,
         sourceLabel: opts.sourceLabel ?? cur.sourceLabel,
         secretsEnvFile: opts.secretsEnvFile ?? cur.secretsEnvFile,
-        queueUrl: opts.queueUrl ?? cur.queueUrl,
         requiredScopes: opts.requiredScopes ? String(opts.requiredScopes).split(",").map((s: string) => s.trim()).filter(Boolean) : cur.requiredScopes,
       };
-      const p = saveConfig(next, home);
+      const p = surface.saveConfig(next, deps.home);
       log(`wrote ${p}`);
-      log(`Next: put SLACK_WEBHOOK_URL / SLACK_BOT_TOKEN / SLACK_APP_TOKEN in ${next.secretsEnvFile ?? "<--secrets-env-file> (0600)"}, then \`rig slack verify\`, then \`rig slack enable\`.`);
+      log(`Next: put SLACK_BOT_TOKEN / SLACK_APP_TOKEN in ${next.secretsEnvFile ?? "<--secrets-env-file> (0600)"}, then \`rig slack verify\`, then \`rig slack enable\`.`);
     });
 
   // ---- status (honest unconfigured, no network) ----
@@ -111,15 +102,16 @@ export function slackCommand(deps: SlackDeps = {}): Command {
     .command("status")
     .description("Show the connector's configured + resolvable state (honest; no network)")
     .option("--json", "JSON output")
-    .action((opts) => {
-      const cfg = loadConfig(home);
-      const s = resolveSecrets(cfg);
-      const readiness = staticReadiness(cfg, s.webhook !== null, s.bot !== null, s.app !== null);
-      const permWarn = cfg.secretsEnvFile ? checkEnvFilePermissions(cfg.secretsEnvFile) : null;
+    .action(async (opts) => {
+      const surface = await loadSurface();
+      const cfg = surface.loadConfig(deps.home);
+      const s = resolveSecrets(surface, cfg);
+      const readiness = surface.staticReadiness(cfg, s.bot !== null, s.app !== null);
+      const permWarn = cfg.secretsEnvFile ? surface.checkEnvFilePermissions(cfg.secretsEnvFile) : null;
       if (opts.json) {
         log(JSON.stringify({ config: { ...cfg }, readiness, permWarning: permWarn }));
       } else {
-        log(`slack-connector (config: ${cfg.enabled ? "enabled" : "disabled"})`);
+        log(`slack-connector (config: ${cfg.enabled ? "enabled" : "disabled"}; delivery runs IN-DAEMON — S10 subsystem)`);
         for (const r of readiness) log(`  ${r.ok ? "✓" : "✗"} ${r.label}: ${r.detail}`);
         if (permWarn) log(`  ⚠ ${permWarn}`);
       }
@@ -128,19 +120,20 @@ export function slackCommand(deps: SlackDeps = {}): Command {
   // ---- verify (live: GRANTED scopes from headers + channel membership) ----
   cmd
     .command("verify")
-    .description("Live-verify GRANTED Slack scopes (from response headers) + channel membership (item 5)")
+    .description("Live-verify GRANTED Slack scopes (from response headers) + channel membership")
     .option("--json", "JSON output")
     .action(async (opts) => {
-      const cfg = loadConfig(home);
-      const s = resolveSecrets(cfg);
+      const surface = await loadSurface();
+      const cfg = surface.loadConfig(deps.home);
+      const s = resolveSecrets(surface, cfg);
       if (!s.bot) {
         log("✗ bot token unresolved — set SLACK_BOT_TOKEN (env or secrets env file). Cannot verify.");
         process.exitCode = 1;
         return;
       }
-      const scope = await verifyScopes(s.bot, cfg.requiredScopes, deps.fetchImpl);
+      const scope = await surface.verifyScopes(s.bot, cfg.requiredScopes, deps.fetchImpl);
       let member: { ok: boolean; isMember: boolean; name?: string; error?: string } | null = null;
-      if (cfg.channel) member = await verifyChannelMembership(s.bot, cfg.channel, deps.fetchImpl);
+      if (cfg.channel) member = await surface.verifyChannelMembership(s.bot, cfg.channel, deps.fetchImpl);
       const ready = scope.ok && (member ? member.isMember : false);
       if (opts.json) {
         log(JSON.stringify({ scope, member, ready }));
@@ -150,157 +143,55 @@ export function slackCommand(deps: SlackDeps = {}): Command {
         else log("✓ all required scopes granted");
         if (member) log(member.isMember ? `✓ channel member (${member.name ?? cfg.channel})` : `✗ NOT a member of channel ${cfg.channel} — invite the app`);
         else log("… channel not configured — set --channel to verify membership");
-        log(ready ? "READY for inbound" : "NOT ready");
+        log(ready ? "READY" : "NOT ready");
       }
       if (!ready) process.exitCode = 1;
     });
 
-  // ---- enable (seeds backlog as history, item 9) ----
+  // ---- enable / disable (daemon admin: seeding + subsystem restart happen daemon-side) ----
   cmd
     .command("enable")
-    .description("Enable the connector; seeds the current alert backlog as history (no replay storm)")
+    .description("Enable the connector (daemon seeds the current backlog as history — no replay storm — then rewires)")
     .action(async () => {
-      const cfg = loadConfig(home);
-      const s = resolveSecrets(cfg);
-      if (!s.webhook) {
-        log("✗ refusing to enable: SLACK_WEBHOOK_URL unresolved (outbound could not post). Configure secrets first.");
+      try {
+        const res = await clientFactory().post<{ ok: boolean; seeded: number; onlineStatus: string }>("/api/gateway/slack/enable", {});
+        log(res.data.onlineStatus);
+      } catch (e) {
+        log(`✗ enable failed: ${(e as Error).message}`);
         process.exitCode = 1;
-        return;
       }
-      const runner = makeRunner(cfg);
-      const seen = new SeenStore(path.join(stateDir(home), "slack-outbound-seen.jsonl"), undefined, now);
-      const res = await seedBacklogOnEnable({ runner, seen, filter: { alertTag: cfg.alertTag, destinations: cfg.outboundDestinations }, log });
-      saveConfig({ ...cfg, enabled: true }, home);
-      log(res.onlineStatus);
     });
 
   cmd
     .command("disable")
-    .description("Disable the connector")
-    .action(() => {
-      saveConfig({ ...loadConfig(home), enabled: false }, home);
-      log("slack connector disabled");
+    .description("Disable the connector (the daemon rewires to an inert delivery path)")
+    .action(async () => {
+      try {
+        await clientFactory().post<{ ok: boolean }>("/api/gateway/slack/disable", {});
+        log("slack connector disabled");
+      } catch (e) {
+        log(`✗ disable failed: ${(e as Error).message}`);
+        process.exitCode = 1;
+      }
     });
 
-  // ---- outbound (one-shot sweep; for cron/launchd) ----
+  // ---- RETIRED relay runners (S10 cutover): refuse with teaching, never silently no-op ----
   cmd
     .command("outbound")
-    .description("One outbound sweep: post fresh human alerts to Slack (fail-visible)")
-    .option("--json", "JSON output")
-    .action(async (opts) => {
-      const cfg = loadConfig(home);
-      if (!cfg.enabled) {
-        log("slack connector disabled — `rig slack enable` first");
-        process.exitCode = 1;
-        return;
-      }
-      const s = resolveSecrets(cfg);
-      if (!s.webhook) {
-        log("✗ SLACK_WEBHOOK_URL unresolved — cannot post");
-        process.exitCode = 1;
-        return;
-      }
-      const runner = makeRunner(cfg);
-      const seen = new SeenStore(path.join(stateDir(home), "slack-outbound-seen.jsonl"), undefined, now);
-      const res = await runOutboundOnce({
-        runner,
-        seen,
-        webhookUrl: s.webhook,
-        fetchImpl: deps.fetchImpl,
-        sourceLabel: cfg.sourceLabel,
-        filter: { alertTag: cfg.alertTag, destinations: cfg.outboundDestinations },
-        log,
-      });
-      if (opts.json) log(JSON.stringify(res));
-      if (res.failed.length > 0) process.exitCode = 1; // fail-visible
+    .description("[RETIRED — S10] the in-daemon subsystem owns outbound delivery")
+    .option("--json", "(ignored)")
+    .action(() => {
+      log(RETIRED_TEACHING);
+      process.exitCode = 1;
     });
 
-  // ---- inbound (persistent Socket Mode) ----
   cmd
     .command("inbound")
-    .description("Run the inbound Socket Mode consumer (persistent; human messages → queue)")
-    .action(async () => {
-      const cfg = loadConfig(home);
-      const s = resolveSecrets(cfg);
-      if (!s.app) {
-        log("✗ SLACK_APP_TOKEN unresolved — inbound cannot connect");
-        process.exitCode = 1;
-        return;
-      }
-      const runner = makeRunner(cfg);
-      const seen = new SeenStore(path.join(stateDir(home), "slack-inbound-seen.jsonl"), undefined, now);
-      const dead = new DeadLetterStore<SlackEvent>(path.join(stateDir(home), "slack-inbound-deadletter.jsonl"), undefined, now);
-      // A6 v3 registration gate: resolve every inbound sender against the human registry (lazy
-      // daemon import per dep rail). loadHumanRegistry runs per-message so a newly-registered human
-      // is admitted without a restart. An unregistered sender is REFUSED — never a fabricated seat.
-      const registrySurface = (await import("@openrig/daemon/gateway-human-registry")) as unknown as RegistrySurface;
-      const resolveSender = makeInboundSenderResolver(registrySurface, home);
-      const router = new InboundRouter({ runner, seen, deadLetter: dead, destination: cfg.inboundDestination, resolveSender, log });
-      await runInboundLoop(s.app, router, deps, log);
+    .description("[RETIRED — S10] the in-daemon subsystem owns Socket Mode inbound")
+    .action(() => {
+      log(RETIRED_TEACHING);
+      process.exitCode = 1;
     });
 
   return cmd;
-}
-
-/**
- * Socket Mode loop: open the ws, FAST-ACK every envelope, route human messages,
- * drain the dead-letter on connect + periodically, reconnect with backoff.
- * `deps.inboundMaxConnects` bounds it for tests; unset = forever.
- */
-export async function runInboundLoop(appToken: string, router: InboundRouter, deps: SlackDeps, log: (m: string) => void): Promise<void> {
-  const wsFactory = deps.wsFactory ?? ((url: string) => new (globalThis as unknown as { WebSocket: new (u: string) => WsLike }).WebSocket(url));
-  const retryIntervalMs = deps.retryIntervalMs ?? 5 * 60 * 1000;
-  let connects = 0;
-  let backoff = 1000;
-
-  await new Promise<void>((resolve) => {
-    const connect = async () => {
-      connects++;
-      const open = await openSocketConnection(appToken, deps.fetchImpl);
-      if (!open.ok || !open.url) {
-        log(`connect failed: ${open.error}`);
-        if (deps.inboundMaxConnects && connects >= deps.inboundMaxConnects) return resolve();
-        setTimeout(connect, backoff);
-        backoff = Math.min(backoff * 2, 60000);
-        return;
-      }
-      const ws = wsFactory(open.url);
-      let retryTimer: ReturnType<typeof setInterval> | undefined;
-      ws.onopen = () => {
-        backoff = 1000;
-        log("socket connected");
-        void router.retryDeadLetters(); // drain on connect…
-        // …AND periodically WHILE connected (B1: recovery after a queue outage
-        // must not wait for the next Slack reconnect). Cleared on close.
-        retryTimer = setInterval(() => void router.retryDeadLetters(), retryIntervalMs);
-        if (typeof (retryTimer as unknown as { unref?: () => void }).unref === "function") {
-          (retryTimer as unknown as { unref: () => void }).unref();
-        }
-      };
-      ws.onmessage = (m) => {
-        let env: SocketEnvelope;
-        try {
-          env = JSON.parse(String(m.data)) as SocketEnvelope;
-        } catch {
-          return;
-        }
-        void handleEnvelope(env, () => env.envelope_id && ws.send(JSON.stringify({ envelope_id: env.envelope_id })), router, log);
-      };
-      ws.onclose = () => {
-        if (retryTimer) clearInterval(retryTimer);
-        log(`socket closed; reconnect in ${backoff}ms`);
-        if (deps.inboundMaxConnects && connects >= deps.inboundMaxConnects) return resolve();
-        setTimeout(connect, backoff);
-        backoff = Math.min(backoff * 2, 60000);
-      };
-      ws.onerror = () => {
-        try {
-          ws.close();
-        } catch {
-          /* ignore */
-        }
-      };
-    };
-    void connect();
-  });
 }

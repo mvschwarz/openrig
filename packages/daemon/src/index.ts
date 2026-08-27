@@ -192,6 +192,10 @@ export async function startServer(port?: number) {
         // tree post-bind so the HTTP surface is ready before the first
         // tick (matches contextMonitor pattern).
         deps.watchdogScheduler?.start();
+        // S10 — start the gateway subsystem's NETWORK services (replay, outbound poll,
+        // Socket Mode inbound) post-bind, contextMonitor pattern: the composed wire is
+        // already active; only its dial-out half waits for the supervision tree.
+        deps.gatewaySubsystem?.startServices();
         // Slice 15 — start the seat-activity scheduler (1Hz default).
         // Polls every running tmux-bound seat's window_activity timestamp so
         // PsProjectionService + node-inventory enrichment serve

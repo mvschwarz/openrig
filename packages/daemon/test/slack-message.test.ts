@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildOutboundMessage, buildImageBlocks, containsSecret, redactSecrets, SLACK_TEXT_CAP } from "../src/slack/message.js";
+import { buildOutboundMessage, buildImageBlocks, containsSecret, redactSecrets, SLACK_TEXT_CAP } from "../src/domain/gateway/slack/message.js";
 
 describe("Slice-11 outbound message — content hygiene (item 7)", () => {
   const opts = { sourceLabel: "vm-openrig-build" };

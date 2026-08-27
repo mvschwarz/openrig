@@ -7,7 +7,7 @@
 // silent nothing) so `rig slack status` can tell the operator exactly what's left.
 import fs from "node:fs";
 import path from "node:path";
-import { getOpenRigHome } from "../openrig-compat.js";
+import { getOpenRigHome } from "../../../openrig-compat.js";
 
 export interface SlackConnectorConfig {
   enabled: boolean;
@@ -26,10 +26,10 @@ export interface SlackConnectorConfig {
   /** Path to the 0600 env file holding secrets (webhook URL, bot/app tokens). */
   secretsEnvFile: string | null;
   /**
-   * Optional explicit queue-daemon URL (OPENRIG_URL) for a REMOTE queue when the
-   * connector host differs from the queue/alert host (item 10). Unlike `--host`
-   * (which `queue list`/`show` reject), OPENRIG_URL targets ALL queue verbs.
-   * Null = use the connector's ambient OPENRIG_URL / local daemon.
+   * S10: VESTIGIAL — the relay's remote-queue targeting (OPENRIG_URL for a connector host
+   * that differed from the queue host). The in-daemon subsystem reads its own QueueRepository
+   * directly, so this is never consulted; the field stays so existing config files load
+   * unchanged. Remove at the next config-schema rev.
    */
   queueUrl: string | null;
 }
@@ -81,14 +81,16 @@ export interface ReadinessItem {
  * HONEST unconfigured state (item 5): a static (no-network) readiness checklist
  * from config + secret RESOLVABILITY (not values). Live scope/membership checks
  * are `rig slack verify`. Never throws; reports what's missing.
+ *
+ * S10: outbound posts via the Web API (`chat.postMessage`) on the in-daemon subsystem — the
+ * bot token + channel are the outbound gate now; the incoming webhook retired with the relay.
  */
-export function staticReadiness(cfg: SlackConnectorConfig, hasWebhook: boolean, hasBotToken: boolean, hasAppToken: boolean): ReadinessItem[] {
+export function staticReadiness(cfg: SlackConnectorConfig, hasBotToken: boolean, hasAppToken: boolean): ReadinessItem[] {
   return [
-    { ok: cfg.secretsEnvFile !== null || hasWebhook || hasBotToken, label: "secrets-source", detail: cfg.secretsEnvFile ? `env file ${cfg.secretsEnvFile}` : "env vars only" },
-    { ok: hasWebhook, label: "outbound-webhook", detail: hasWebhook ? "resolved" : "unset (outbound alerts cannot post)" },
-    { ok: hasBotToken, label: "bot-token", detail: hasBotToken ? "resolved" : "unset (scope/membership verify unavailable)" },
+    { ok: cfg.secretsEnvFile !== null || hasBotToken, label: "secrets-source", detail: cfg.secretsEnvFile ? `env file ${cfg.secretsEnvFile}` : "env vars only" },
+    { ok: hasBotToken, label: "bot-token", detail: hasBotToken ? "resolved" : "unset (outbound cannot post; scope/membership verify unavailable)" },
     { ok: hasAppToken, label: "app-token (Socket Mode)", detail: hasAppToken ? "resolved" : "unset (inbound cannot connect)" },
-    { ok: cfg.channel !== null, label: "channel", detail: cfg.channel ?? "unset" },
+    { ok: cfg.channel !== null, label: "channel", detail: cfg.channel ?? "unset (outbound cannot post)" },
     { ok: Boolean(cfg.inboundDestination), label: "inbound-destination", detail: cfg.inboundDestination },
     { ok: cfg.enabled, label: "enabled", detail: cfg.enabled ? "yes" : "no (run `rig slack enable`)" },
   ];

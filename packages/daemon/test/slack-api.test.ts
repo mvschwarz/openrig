@@ -6,7 +6,7 @@ import {
   verifyChannelMembership,
   openSocketConnection,
   type FetchImpl,
-} from "../src/slack/slack-api.js";
+} from "../src/domain/gateway/slack/slack-api.js";
 
 // Fake Slack: routes by URL, returns real Response objects (headers + json).
 function fakeSlack(spec: {

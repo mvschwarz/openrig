@@ -1,9 +1,11 @@
+// S10 port: the slice-11 transport receipts, re-homed onto the daemon's socket-inbound
+// service (runInboundLoop moved verbatim from the retired CLI runner; the queue seam is the
+// in-process port). The receipts themselves are unchanged — B1 periodic drain included.
 import { describe, it, expect } from "vitest";
-import { runInboundLoop, type WsLike, type SlackDeps } from "../src/commands/slack.js";
-import { InboundRouter, type SlackEvent } from "../src/slack/inbound.js";
-import { SeenStore, DeadLetterStore, type StateFsOps } from "../src/slack/state-store.js";
-import type { RunResult } from "../src/slack/queue-bridge.js";
-import type { FetchImpl } from "../src/slack/slack-api.js";
+import { startSocketInbound, type WsLike, type SocketInboundDeps } from "../src/domain/gateway/slack/socket-inbound.js";
+import { InboundRouter, type SlackEvent } from "../src/domain/gateway/slack/inbound.js";
+import { SeenStore, DeadLetterStore, type StateFsOps } from "../src/domain/gateway/slack/state-store.js";
+import type { FetchImpl } from "../src/domain/gateway/slack/slack-api.js";
 
 function memFs(): StateFsOps {
   const files = new Map<string, string>();
@@ -41,9 +43,8 @@ describe("Slice-11 INBOUND transport — real runInboundLoop / open / message / 
     const fsx = memFs();
     const seen = new SeenStore("/s/seen.jsonl", fsx, clock);
     const dead = new DeadLetterStore<SlackEvent>("/s/dead.jsonl", fsx, clock);
-    const runner = async (args: string[]): Promise<RunResult> =>
-      args[0] === "queue" && args[1] === "create" ? { ok: true, stdout: "created qitem-xyz", stderr: "", code: 0 } : { ok: false, stdout: "", stderr: "no", code: 1 };
-    const router = new InboundRouter({ runner, seen, deadLetter: dead, destination: "operator-agent@kernel", resolveSender: (u) => ({ admitted: true, source: `human-${u}@kernel` }), log: () => {} });
+    const queue = { createQitem: async () => "qitem-xyz" };
+    const router = new InboundRouter({ queue, seen, deadLetter: dead, destination: "operator-agent@kernel", resolveSender: (u) => ({ admitted: true, source: `human-${u}@kernel` }), log: () => {} });
 
     // pre-seed a dead-letter that will land on the ON-CONNECT retry
     dead.append({ type: "message", user: "U0", text: "queued during outage", ts: "D1", channel: "C0" }, 1);
@@ -51,7 +52,7 @@ describe("Slice-11 INBOUND transport — real runInboundLoop / open / message / 
     const fake = makeFakeWs();
     let resolveWsCreated: () => void;
     const wsCreated = new Promise<void>((r) => (resolveWsCreated = r));
-    const deps: SlackDeps = {
+    const deps: SocketInboundDeps = {
       fetchImpl: openFetch,
       wsFactory: () => {
         resolveWsCreated();
@@ -59,9 +60,10 @@ describe("Slice-11 INBOUND transport — real runInboundLoop / open / message / 
       },
       inboundMaxConnects: 1, // stop after this connection closes
       retryIntervalMs: 20, // short so the periodic retry fires in-test
+      log: () => {},
     };
 
-    const loop = runInboundLoop("xapp-EXAMPLE-fake", router, deps, () => {});
+    const handle = startSocketInbound("xapp-EXAMPLE-fake", router, deps);
     await wsCreated;
 
     // open → on-connect dead-letter drain (D1 lands) + periodic interval starts
@@ -91,6 +93,6 @@ describe("Slice-11 INBOUND transport — real runInboundLoop / open / message / 
 
     // close → loop resolves (inboundMaxConnects reached)
     fake.ws.onclose!();
-    await loop;
+    await handle.done;
   });
 });

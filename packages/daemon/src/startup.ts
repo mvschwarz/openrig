@@ -1994,16 +1994,17 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
   // S10 (OPR.0.5.5.10) — activate the gateway as an IN-DAEMON SUBSYSTEM at boot (M1 §3 as
   // amended: no child process, no connector wire — the shipped dispatcher + durable buffer
-  // composed in-process). start() never throws: a wiring failure surfaces as state=failed on
-  // the health surface and boot proceeds. Slack delivery wires at the relay cutover; until
-  // then the delivery seam refuses honestly and dispatches are retained durably.
-  const { GatewaySubsystem, buildInProcessWire } = await import("./domain/gateway/gateway-subsystem.js");
+  // composed in-process, the Slack delivery/inbound services wired from config + secrets).
+  // start() never throws: a wiring failure surfaces as state=failed on the health surface and
+  // boot proceeds. An unconfigured connector is an INERT wire (honest refusal class, no ops,
+  // no drivers) — `rig slack status` names what is missing.
+  const { GatewaySubsystem } = await import("./domain/gateway/gateway-subsystem.js");
+  const { buildSlackGatewayWire } = await import("./domain/gateway/slack/slack-subsystem.js");
   const gatewaySubsystem = new GatewaySubsystem({
     home: OPENRIG_HOME,
-    wire: () => buildInProcessWire({
+    wire: () => buildSlackGatewayWire({
       home: OPENRIG_HOME,
-      deliver: async () => ({ ok: false, class: "slack-delivery-unwired", detail: "relay cutover pending (S10 atom D)" }),
-      ops: [],
+      queueRepo: queueRepoInstance,
       log: (m) => console.log(`[gateway] ${m}`),
     }),
     log: (m) => console.log(`[gateway] ${m}`),

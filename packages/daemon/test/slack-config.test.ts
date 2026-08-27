@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { loadConfig, saveConfig, configFileExists, staticReadiness, DEFAULT_CONFIG } from "../src/slack/config.js";
-import { parseEnvFile, resolveSecret, checkEnvFilePermissions, type SecretFsOps } from "../src/slack/secrets.js";
+import { loadConfig, saveConfig, configFileExists, staticReadiness, DEFAULT_CONFIG } from "../src/domain/gateway/slack/config.js";
+import { parseEnvFile, resolveSecret, checkEnvFilePermissions, type SecretFsOps } from "../src/domain/gateway/slack/secrets.js";
 
 describe("Slice-11 config — first-class + honest unconfigured (item 5)", () => {
   let home: string;
@@ -34,17 +34,18 @@ describe("Slice-11 config — first-class + honest unconfigured (item 5)", () =>
     expect(raw).not.toMatch(/xox[bp]-|xapp-|hooks\.slack\.com/);
   });
 
-  it("staticReadiness honestly reports what's missing without throwing", () => {
+  it("staticReadiness honestly reports what's missing without throwing (S10: bot+channel gate outbound; webhook retired)", () => {
     const cfg = loadConfig(home);
-    const r = staticReadiness(cfg, /*webhook*/ false, /*bot*/ false, /*app*/ false);
+    const r = staticReadiness(cfg, /*bot*/ false, /*app*/ false);
     const byLabel = Object.fromEntries(r.map((x) => [x.label, x.ok]));
-    expect(byLabel["outbound-webhook"]).toBe(false);
+    expect(byLabel["bot-token"]).toBe(false);
     expect(byLabel["app-token (Socket Mode)"]).toBe(false);
     expect(byLabel["enabled"]).toBe(false);
+    expect(byLabel["outbound-webhook"]).toBeUndefined(); // the webhook row retired with the relay
     // when secrets resolve, those flip
-    const r2 = staticReadiness({ ...cfg, channel: "C1", enabled: true }, true, true, true);
+    const r2 = staticReadiness({ ...cfg, channel: "C1", enabled: true }, true, true);
     const by2 = Object.fromEntries(r2.map((x) => [x.label, x.ok]));
-    expect(by2["outbound-webhook"] && by2["bot-token"] && by2["app-token (Socket Mode)"] && by2["channel"] && by2["enabled"]).toBe(true);
+    expect(by2["bot-token"] && by2["app-token (Socket Mode)"] && by2["channel"] && by2["enabled"]).toBe(true);
   });
 });
 

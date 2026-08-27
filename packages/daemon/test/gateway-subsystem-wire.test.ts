@@ -69,12 +69,14 @@ describe("S10 in-process gateway wire — durability contract receipts", () => {
     const r1 = w1.dispatcher.dispatch("post_message", "mike#slack", { t: 5 });
     await tick();
     expect(new DispatchBuffer(home).pending()).toHaveLength(1);
-    // Run 2 (same home = same durable buffer): delivery back — replay drains it.
+    // Run 2 (same home = same durable buffer): delivery back — replay (a network action)
+    // fires on startServices(), the post-bind half of activation.
     const redelivered: OutboundDecision[] = [];
-    buildInProcessWire({
+    const w2 = buildInProcessWire({
       home, ops: ["post_message"],
       deliver: async (d) => { redelivered.push(d); return { ok: true }; },
     });
+    w2.startServices?.();
     await tick();
     expect(redelivered.map((d) => d.decisionId)).toContain((r1 as { decisionId: string }).decisionId);
     expect(new DispatchBuffer(home).pending()).toHaveLength(0);

@@ -1,0 +1,90 @@
+// S10 — the subsystem's Slack DELIVERY path (successor to the retired connector-server's
+// slackDeliverFn; the proof-1 semantics carry over unchanged): render the OutboundDecision to a
+// hygienic payload (slice-11 item 7 redaction + Block Kit via message.ts) and post it. A 2xx →
+// ok (the in-process ack drains the durable buffer); any failure → a bounded failure class (the
+// wire retains + replays — fail-visible, never a silent drop).
+//
+// Changes from the retired path, each contract-driven:
+//   - postWebhook → postChatMessage: the R2 thread shape needs thread_ts, which a webhook
+//     cannot carry. The webhook retires with the relay.
+//   - decisionId idempotent redelivery moved HERE from the connector: an already-delivered
+//     decisionId is re-acked WITHOUT re-posting (the delivered-store is the same SeenStore
+//     pattern, keyed by decisionId — distinct from the qitemId outbound seen-state).
+//   - delivered-ok additionally marks the qitemId seen (slice-11: seen ONLY after success) and
+//     releases the driver's in-flight guard.
+
+import { postChatMessage, type FetchImpl } from "./slack-api.js";
+import { buildOutboundMessage, type SlackMediaRef } from "./message.js";
+import type { SeenStore } from "./state-store.js";
+import type { OutboundDecision } from "../protocol.js";
+import type { SubsystemDeliverFn, SubsystemDeliveryOutcome } from "../gateway-subsystem.js";
+import type { OutboundPostPayload } from "./outbound-driver.js";
+
+export interface SubsystemSlackDeliveryOpts {
+  botToken: string;
+  channel: string;
+  sourceLabel: string; // host/box/rig — from config, never hardcoded (item 7)
+  bodyExcerpt?: number;
+  fetchImpl?: FetchImpl;
+  /** decisionId-keyed delivered-store (idempotent redelivery: replay re-acks, never re-posts). */
+  delivered: SeenStore;
+  /** qitemId-keyed outbound seen-state (slice-11: marked ONLY after a successful post). */
+  outboundSeen: SeenStore;
+  /** Release the outbound driver's in-flight guard once a qitem is durably seen. */
+  release?: (qitemId: string) => void;
+  /** E (thread routing): resolve the thread anchor for this payload; undefined = new root.
+   *  Wired by the thread-seat map; absent in the pre-routing composition. */
+  resolveThreadTs?: (payload: OutboundPostPayload) => string | undefined;
+  /** E: record a NEW root's ts so the conversation threads from here on. */
+  onPostedRoot?: (payload: OutboundPostPayload, ts: string) => void;
+  log?: (msg: string) => void;
+}
+
+/** Build the subsystem DeliverFn. Contract mirrors the retired connector handleDecision. */
+export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): SubsystemDeliverFn {
+  const log = opts.log ?? (() => {});
+  return async (decision: OutboundDecision): Promise<SubsystemDeliveryOutcome> => {
+    // Idempotent redelivery: an already-delivered decisionId is re-acked without re-posting.
+    if (opts.delivered.load().has(decision.decisionId)) {
+      log(`delivery: decision ${decision.decisionId} already delivered — re-ack, no re-post`);
+      return { ok: true };
+    }
+    const q = (decision.payload ?? {}) as OutboundPostPayload & { media?: SlackMediaRef[] };
+    // M1 A5b (carried over from the retired sweep): an alert's evidenceRef IS the artifact the
+    // human judges — an https image URL rides as a Block Kit image. buildImageBlocks stays the
+    // single hygiene gate (drops non-https / secret-bearing), so the predicate lives in ONE place.
+    const mediaRefs: SlackMediaRef[] | undefined = Array.isArray(q.media)
+      ? q.media
+      : q.evidenceRef
+        ? [{ imageUrl: String(q.evidenceRef), altText: q.summary ?? "attachment" }]
+        : undefined;
+    const payload = buildOutboundMessage(
+      {
+        qitemId: q.qitemId ?? decision.decisionId,
+        summary: q.summary,
+        body: q.body,
+        destinationSession: q.destinationSession ?? decision.entityBindingRef,
+      },
+      { sourceLabel: opts.sourceLabel, bodyExcerpt: opts.bodyExcerpt, mediaRefs },
+    );
+    const threadTs = opts.resolveThreadTs?.(q);
+    const res = await postChatMessage(
+      opts.botToken,
+      { channel: opts.channel, text: payload.text, blocks: payload.blocks, thread_ts: threadTs },
+      opts.fetchImpl,
+    );
+    if (!res.ok) {
+      return { ok: false, class: res.status === 0 ? "transport" : `http-${res.status}`, detail: res.error };
+    }
+    // Delivered: record decisionId BEFORE returning ok (a crash after this point re-acks via
+    // dedup — no double-post; before it, the wire retains + replays — at-least-once, never a drop).
+    opts.delivered.mark(decision.decisionId, "delivered");
+    if (q.qitemId) {
+      opts.outboundSeen.mark(q.qitemId, "posted"); // slice-11: seen ONLY after success
+      opts.release?.(q.qitemId);
+    }
+    if (res.ts && threadTs === undefined) opts.onPostedRoot?.(q, res.ts);
+    log(`delivered ${decision.decisionId}${q.qitemId ? ` (qitem ${q.qitemId})` : ""}`);
+    return { ok: true };
+  };
+}

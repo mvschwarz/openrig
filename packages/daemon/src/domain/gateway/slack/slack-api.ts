@@ -37,6 +37,10 @@ async function withTimeout<T>(timeoutMs: number, run: (signal: AbortSignal) => P
  * Post to a Slack incoming webhook. Fail-VISIBLE (item 3): any non-2xx or
  * transport error returns ok:false with a bounded error string — the caller
  * logs loudly and does NOT mark the alert seen (so it retries, never a silent drop).
+ *
+ * S10: RETIRED from the production path — outbound posts via postChatMessage on the in-daemon
+ * subsystem (a webhook cannot carry thread_ts). Kept as a tested generic client; no production
+ * caller remains.
  */
 export async function postWebhook(
   url: string,
@@ -159,4 +163,30 @@ export async function openSocketConnection(
   const r = await callWebApi("apps.connections.open", appToken, {}, fetchImpl, timeoutMs);
   if (!r.ok) return { ok: false, error: r.error };
   return { ok: true, url: r.json.url as string };
+}
+
+export interface PostChatMessageInput {
+  channel: string;
+  text: string; // notification fallback — always set (affordance-verified: keep a text arg on all posts)
+  blocks?: unknown[];
+  /** Thread reply: the PARENT message's ts (never a reply's ts — the affordance discriminator). */
+  thread_ts?: string;
+}
+
+/** S10 — outbound posting via the Web API (`chat.postMessage`). The R2 native shape needs
+ *  thread_ts, which an incoming webhook cannot carry — the webhook path retires with the relay.
+ *  A1.2 identity rail: this function NEVER accepts per-message `username`/`icon_*` overrides —
+ *  the app's own identity is the only outbound identity (the customize-absence proof leg).
+ *  Returns the posted message's ts (the thread anchor for a NEW conversation root). */
+export async function postChatMessage(
+  token: string,
+  input: PostChatMessageInput,
+  fetchImpl: FetchImpl = defaultFetch,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<{ ok: boolean; status: number; ts?: string; error?: string }> {
+  const body: Record<string, unknown> = { channel: input.channel, text: input.text };
+  if (input.blocks?.length) body.blocks = input.blocks;
+  if (input.thread_ts) body.thread_ts = input.thread_ts;
+  const r = await callWebApi("chat.postMessage", token, body, fetchImpl, timeoutMs);
+  return { ok: r.ok, status: r.status, ts: typeof r.json.ts === "string" ? r.json.ts : undefined, error: r.error };
 }

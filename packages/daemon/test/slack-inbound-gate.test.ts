@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { InboundRouter, type SlackEvent } from "../src/slack/inbound.js";
-import { makeInboundSenderResolver, type RegistrySurface } from "../src/slack/inbound-admission.js";
-import { SeenStore, DeadLetterStore, type StateFsOps } from "../src/slack/state-store.js";
+import { InboundRouter, type SlackEvent } from "../src/domain/gateway/slack/inbound.js";
+import { makeInboundSenderResolver, type RegistrySurface } from "../src/domain/gateway/slack/inbound-admission.js";
+import { SeenStore, DeadLetterStore, type StateFsOps } from "../src/domain/gateway/slack/state-store.js";
 import { resolveSlackHandle } from "@openrig/daemon/gateway-human-registry";
 import type { HumanFragment } from "@openrig/daemon/gateway-human-registry";
 
@@ -25,32 +25,35 @@ const ev = (user: string, ts = "200.1"): SlackEvent => ({ type: "message", user,
 
 function makeRouter(resolveSender: (u: string) => { admitted: true; source: string } | { admitted: false; teaching: string }) {
   const fs = memFs();
-  const calls: string[][] = [];
+  const creates: { source: string; destination: string }[] = [];
   const logs: string[] = [];
-  const runner = async (args: string[]) => { calls.push(args); return { ok: true, stdout: "created qitem-in-9", stderr: "", code: 0 }; };
+  // S10 port: the queue seam is the in-process port now (the rig-CLI runner retired).
+  const queue = {
+    createQitem: async (input: { source: string; destination: string }) => {
+      creates.push({ source: input.source, destination: input.destination });
+      return "qitem-in-9";
+    },
+  };
   const dead = new DeadLetterStore<SlackEvent>("/d.jsonl", fs, clock);
-  const router = new InboundRouter({ runner, seen: new SeenStore("/s.jsonl", fs, clock), deadLetter: dead, destination: "operator-agent@kernel", resolveSender, log: (m) => logs.push(m) });
-  return { router, calls, logs, dead };
+  const router = new InboundRouter({ queue, seen: new SeenStore("/s.jsonl", fs, clock), deadLetter: dead, destination: "operator-agent@kernel", resolveSender, log: (m) => logs.push(m) });
+  return { router, creates, logs, dead };
 }
-const srcOf = (calls: string[][]): string | undefined => {
-  const c = calls.find((a) => a[1] === "create");
-  return c ? c[c.indexOf("--source") + 1] : undefined;
-};
+const srcOf = (creates: { source: string }[]): string | undefined => creates[0]?.source;
 
 describe("A6 v3 inbound registration gate (InboundRouter)", () => {
   it("REGISTERED sender lands with the entity @external address as source (never the raw Slack id)", async () => {
-    const { router, calls } = makeRouter((u) => (u === "U012" ? { admitted: true, source: "mike@external" } : { admitted: false, teaching: "no" }));
+    const { router, creates } = makeRouter((u) => (u === "U012" ? { admitted: true, source: "mike@external" } : { admitted: false, teaching: "no" }));
     const r = await router.route(ev("U012"));
     expect(r.landed).toBe(true);
-    expect(srcOf(calls)).toBe("mike@external");
-    expect(srcOf(calls)).not.toContain("U012"); // provenance is the registered ref, not the platform id
+    expect(srcOf(creates)).toBe("mike@external");
+    expect(srcOf(creates)).not.toContain("U012"); // provenance is the registered ref, not the platform id
   });
 
   it("UNREGISTERED sender is REFUSED — no qitem created, no dead-letter, LOUD teaching logged", async () => {
-    const { router, calls, logs, dead } = makeRouter((u) => ({ admitted: false, teaching: `'${u}' is not a registered human — rig gateway human add …` }));
+    const { router, creates, logs, dead } = makeRouter((u) => ({ admitted: false, teaching: `'${u}' is not a registered human — rig gateway human add …` }));
     const r = await router.route(ev("USTRANGER"));
     expect(r.landed).toBe(false);
-    expect(calls.find((a) => a[1] === "create")).toBeUndefined(); // never attempted a create
+    expect(creates).toHaveLength(0); // never attempted a create
     expect(dead.readAll()).toHaveLength(0); // a policy refusal is NOT dead-lettered (retry can't help)
     expect(logs.some((l) => /REFUSED.*unregistered.*USTRANGER/.test(l))).toBe(true);
   });
