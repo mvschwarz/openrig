@@ -333,6 +333,37 @@ profiles:
     db.close();
   });
 
+  it("does not rewrite an existing rig when onboarding is enabled for future launches", async () => {
+    let onboardingEnabled = false;
+    const { db, inst } = setup(undefined, undefined, undefined, () => onboardingEnabled);
+    const existing = await inst.instantiate(
+      RigSpecCodec.serialize(makeRigSpec({ name: "existing-rig" })),
+      RIG_ROOT,
+    );
+    expect(existing.ok).toBe(true);
+    if (!existing.ok) throw new Error(existing.error);
+
+    const existingNodeId = existing.result.nodes[0]!.id;
+    const readStartup = (nodeId: string) => db.prepare(`
+      SELECT projection_entries_json, resolved_files_json, startup_actions_json, runtime
+        FROM node_startup_context
+       WHERE node_id = ?
+    `).get(nodeId) as Record<string, unknown>;
+    const before = readStartup(existingNodeId);
+
+    onboardingEnabled = true;
+    const future = await inst.instantiate(
+      RigSpecCodec.serialize(makeRigSpec({ name: "future-rig" })),
+      RIG_ROOT,
+    );
+    expect(future.ok).toBe(true);
+    if (!future.ok) throw new Error(future.error);
+
+    expect(readStartup(existingNodeId)).toEqual(before);
+
+    db.close();
+  });
+
   it("always includes the default culture when the rig has no culture_file", async () => {
     const { db, inst } = setup();
     const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
