@@ -1083,10 +1083,12 @@ Preserve the author's bytes.
     const slice = path.join(substrate.missionsRoot, "release-0.3.2", "slices", "08-lossless-repair");
     const spec = path.join(slice, "SPEC.md");
     writeFile(spec, `---
-id: OPR.0.3.2.8
-stage: established
-verified: 2026-08-26 against authored sha abcdef
-intent: "Author intent"
+id: 8
+status: active
+stage: tomorrow
+verified: [not, provenance]
+intent:
+  authored: as-an-object
 depends_on: OPR.0.3.2.7
 ---
 
@@ -1097,7 +1099,15 @@ depends_on: OPR.0.3.2.7
     expect(r.exitCode).toBe(0);
     const fm = readFrontmatter(spec);
 
+    expect(fm.id).toBe("OPR.0.3.2.8");
+    expect(fm.stage).toBe("established");
+    expect(fm.verified).toMatch(/against backfill \(rig scope repair\)$/);
+    expect(fm.intent).toBe("Lossless repair");
     expect(fm.depends_on).toEqual([]);
+    expect(fm["repair-original-id"]).toBe(8);
+    expect(fm["repair-original-stage"]).toBe("tomorrow");
+    expect(fm["repair-original-verified"]).toEqual(["not", "provenance"]);
+    expect(fm["repair-original-intent"]).toEqual({ authored: "as-an-object" });
     expect(fm["repair-original-depends-on"]).toBe("OPR.0.3.2.7");
     expect(Object.keys(fm)).toEqual(expect.arrayContaining([
       "id",
@@ -1105,6 +1115,10 @@ depends_on: OPR.0.3.2.7
       "verified",
       "intent",
       "depends_on",
+      "repair-original-id",
+      "repair-original-stage",
+      "repair-original-verified",
+      "repair-original-intent",
       "repair-original-depends-on",
     ]));
   });

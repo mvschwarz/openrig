@@ -84,17 +84,39 @@ export function readFrontmatter(absPath: string): Record<string, unknown> {
   }
 }
 
-/** Update specific keys in a markdown file's frontmatter. Existing
- *  unknown keys are preserved. Generates minimal frontmatter when
- *  absent. */
+/** Update specific keys in a markdown file's frontmatter. The writer owns only
+ *  those keys: every other byte in an existing block stays untouched. This is
+ *  deliberately the CLI twin of the daemon approval splicer; parsing and
+ *  re-serializing the whole block destroys author quoting, folded scalars,
+ *  ordering, and therefore any hash derived before a repair. */
 export function updateFrontmatter(
   absPath: string,
   updates: Record<string, unknown>,
 ): void {
   const original = fs.existsSync(absPath) ? fs.readFileSync(absPath, "utf8") : "";
-  const { frontmatter, body } = splitFrontmatter(original);
-  const merged = { ...frontmatter, ...updates };
-  fs.writeFileSync(absPath, joinFrontmatter(merged, body), "utf8");
+  const match = /^---\s*\n([\s\S]*?)\n---/.exec(original);
+  if (!match) {
+    const yaml = YAML.stringify(updates, { lineWidth: 0 }).trimEnd();
+    const separator = original.startsWith("\n") ? "" : "\n";
+    fs.writeFileSync(absPath, `---\n${yaml}\n---\n${separator}${original}`, "utf8");
+    return;
+  }
+
+  let block = match[1]!;
+  for (const [key, value] of Object.entries(updates)) {
+    if (value === undefined) continue;
+    const rendered = YAML.stringify({ [key]: value }, { lineWidth: 0 }).trimEnd();
+    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const keyRe = new RegExp(`^${escaped}:[^\\n]*(?:\\n[ \\t]+[^\\n]*)*`, "m");
+    const existing = keyRe.exec(block);
+    if (existing) {
+      block = block.slice(0, existing.index) + rendered + block.slice(existing.index + existing[0].length);
+    } else {
+      block = block.length > 0 ? `${block}\n${rendered}` : rendered;
+    }
+  }
+  const updated = original.slice(0, match.index) + `---\n${block}\n---` + original.slice(match.index + match[0].length);
+  fs.writeFileSync(absPath, updated, "utf8");
 }
 
 // ---------------------------------------------------------------------

@@ -1488,29 +1488,55 @@ function mapLegacyStatusToStage(status: unknown): string {
   return "wip";
 }
 
-/** Idempotently conform a scope README's mandatory frontmatter. Only ADDS
- *  absent fields — never clobbers an existing id/stage/verified. `mintId` is
- *  called only when `id` is absent (it may persist a parent id per §1 lazy
- *  adoption). */
+/** Preserve a malformed value before repair replaces it with the conformant
+ *  representation. A pre-existing preservation key means a prior repair has
+ *  already recorded a different original; refusing is the only lossless move. */
+function preserveMalformedFrontmatterValue(
+  frontmatter: Record<string, unknown>,
+  updates: Record<string, unknown>,
+  key: string,
+): void {
+  if (!Object.prototype.hasOwnProperty.call(frontmatter, key)) return;
+  const preservedKey = `repair-original-${key.replaceAll("_", "-")}`;
+  if (Object.prototype.hasOwnProperty.call(frontmatter, preservedKey)) {
+    throw new ScopeCliError({
+      fact: `${key} is malformed and ${preservedKey} already exists.`,
+      consequence: "Repair refused rather than overwrite either authored value.",
+      action: `Resolve ${key} manually and retain ${preservedKey} as the prior-value record, then re-run repair.`,
+    });
+  }
+  updates[preservedKey] = frontmatter[key];
+}
+
+/** Idempotently conform a scope README's mandatory frontmatter. Adds absent
+ *  fields and replaces malformed ones only after preserving their values under
+ *  repair-original-* keys. A valid id/stage/verified is never touched.
+ *  `mintId` is called only when `id` is absent or malformed (it may persist a
+ *  parent id per §1 lazy adoption). */
 function conformReadmeFrontmatter(readmePath: string, mintId: () => string | null): FrontmatterConformResult {
   const fm = readFrontmatter(readmePath);
   const updates: Record<string, unknown> = {};
 
   let idAdded: string | null = null;
-  const hasId = typeof fm.id === "string" && fm.id.length > 0;
+  const hasId = typeof fm.id === "string" && fm.id.trim().length > 0;
   if (!hasId) {
+    preserveMalformedFrontmatterValue(fm, updates, "id");
     const minted = mintId();
     if (minted) { idAdded = minted; updates.id = minted; }
   }
 
   let stageAdded: string | null = null;
-  if (!fm.stage) {
+  const hasStage = typeof fm.stage === "string" && STAGE_VALUES.includes(fm.stage as Stage);
+  if (!hasStage) {
+    preserveMalformedFrontmatterValue(fm, updates, "stage");
     stageAdded = mapLegacyStatusToStage(fm.status);
     updates.stage = stageAdded;
   }
 
   let verifiedAdded: string | null = null;
-  if (!fm.verified) {
+  const hasVerified = typeof fm.verified === "string" && fm.verified.trim().length > 0;
+  if (!hasVerified) {
+    preserveMalformedFrontmatterValue(fm, updates, "verified");
     verifiedAdded = `${todayDateISO()} against backfill (rig scope repair)`;
     updates.verified = verifiedAdded;
   }
@@ -1644,15 +1670,18 @@ function ensureConventionFrontmatter(specPath: string, fallbackName: string): vo
   const { frontmatter, body } = splitFrontmatter(content);
   const h2Intent = /^## Intent\s*\n+([\s\S]*?)(?=\n## |$)/m.exec(body)?.[1]?.trim();
   const h1 = /^#\s+(.+)$/m.exec(body)?.[1]?.trim();
-  const intent = typeof frontmatter.intent === "string" && frontmatter.intent.trim()
-    ? frontmatter.intent.trim()
-    : h2Intent && !/^\[.*\]$/.test(h2Intent)
+  const updates: Record<string, unknown> = {};
+  if (!(typeof frontmatter.intent === "string" && frontmatter.intent.trim().length > 0)) {
+    preserveMalformedFrontmatterValue(frontmatter, updates, "intent");
+    updates.intent = h2Intent && !/^\[.*\]$/.test(h2Intent)
       ? h2Intent
       : h1 ?? titleFromSlug(fallbackName.replace(/^\d+-/, ""));
-  updateFrontmatter(specPath, {
-    intent,
-    depends_on: Array.isArray(frontmatter.depends_on) ? frontmatter.depends_on : [],
-  });
+  }
+  if (!Array.isArray(frontmatter.depends_on)) {
+    preserveMalformedFrontmatterValue(frontmatter, updates, "depends_on");
+    updates.depends_on = [];
+  }
+  if (Object.keys(updates).length > 0) updateFrontmatter(specPath, updates);
 }
 
 function ensureMissionNotesSurface(dir: string, mission: ReturnType<typeof findMission>): void {
