@@ -630,7 +630,9 @@ describe("S20 — start auto-start: routing env never becomes bind intent", () =
       spawn: vi.fn((_cmd, _args, opts) => {
         daemonStarted = true;
         spawnedEnv = (opts as { env: Record<string, string> }).env;
-        return { pid: 999, unref: vi.fn() } as never;
+        // The pin's subject IS this env — abort the command here so the later
+        // kernel/restore phases (real-URL polls, other pins' turf) never run.
+        throw new Error("SENTINEL-CAPTURED");
       }),
       fetch: vi.fn(async (url: string) => {
         if (!daemonStarted) throw new Error(`refused:${url}`);
@@ -641,11 +643,13 @@ describe("S20 — start auto-start: routing env never becomes bind intent", () =
     prog.exitOverride();
     prog.addCommand(startCommand({
       lifecycleDeps,
+      // The pin ends at the SPAWN ENV — abort the post-start flow immediately with a
+      // sentinel so kernel/restore polling never runs (their loops are other pins' turf).
       clientFactory: () => ({
-        post: vi.fn(async () => ({ status: 200, data: { rigs: [] } })),
-        get: vi.fn(async () => ({ status: 200, data: { rigs: [], kernel: { state: "ready" } } })),
+        post: vi.fn(async () => { throw new Error("SENTINEL-STOP"); }),
+        get: vi.fn(async () => { throw new Error("SENTINEL-STOP"); }),
       }) as never,
-      preflightExec: async () => "ok",
+      preflightExec: async (cmd: string) => (cmd === "tmux -V" ? "tmux 3.6a" : ""),
       promptYesNo: async () => false,
     }));
     try {
@@ -659,5 +663,5 @@ describe("S20 — start auto-start: routing env never becomes bind intent", () =
       if (savedHost === undefined) delete process.env["OPENRIG_HOST"];
       else process.env["OPENRIG_HOST"] = savedHost;
     }
-  });
+  }, 30_000);
 });

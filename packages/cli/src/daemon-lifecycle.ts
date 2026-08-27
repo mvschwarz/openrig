@@ -430,9 +430,11 @@ export function buildDaemonEnv(
      * the default loopback+tailscale-auto multi-bind path (bug-fix slice
      * auth-bearer-tailscale-trust). When defined, the daemon takes the
      * explicit-host branch and applies the bearer invariant to it.
-     * If undefined here AND the operator shell already has OPENRIG_HOST
-     * set in baseEnv, the env-passthrough loop preserves that value
-     * (their shell-level opt-in still wins).
+     * S20: when undefined, NO env fallback exists — inherited
+     * OPENRIG_HOST/RIGGED_HOST are ROUTING state and are scrubbed by
+     * ROUTING_ENV_SCRUB (the shell-level-opt-in premise died: injected
+     * routing env is byte-indistinguishable from opt-in). The dedicated
+     * OPENRIG_BIND_HOST is the only env opt-in and passes through.
      */
     host?: string;
     db: string;

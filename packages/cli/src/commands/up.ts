@@ -151,13 +151,20 @@ Examples:
           const { ConfigStore } = await import("../config-store.js");
           const { SystemPreflight } = await import("../system-preflight.js");
           const { execSync } = await import("node:child_process");
-          const { OPENRIG_DIR } = await import("../daemon-lifecycle.js");
+          const { OPENRIG_DIR, resolveBindIntent } = await import("../daemon-lifecycle.js");
           const configStore = new ConfigStore();
           resolvedConfig = configStore.resolve();
           const hostResolution = configStore.resolveWithSource("daemon.host");
-          hostForDaemon = hostResolution.source === "default"
-            ? undefined
-            : resolvedConfig.daemon.host;
+          // S20 (r2 repair): the SHARED dedicated-intent seam — an env-sourced
+          // daemon.host (ENV_MAP ← OPENRIG_HOST, the injected routing channel) never
+          // creates bind intent through auto-start; flag-less auto-start honors only a
+          // FILE-sourced daemon.host or OPENRIG_BIND_HOST.
+          hostForDaemon = resolveBindIntent({
+            flagHost: undefined,
+            envBindHost: process.env["OPENRIG_BIND_HOST"],
+            configSource: hostResolution.source,
+            configHost: resolvedConfig.daemon.host,
+          }).host;
           const preflightExec = depsOverride?.preflightExec ?? (async (cmd: string) =>
             execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }));
           const preflight = new SystemPreflight({
