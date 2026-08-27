@@ -62,6 +62,12 @@ function mockClaudeFs(seed: Record<string, string>): ClaudeAdapterFsOps & { _sto
 const RIG_ROOT = "/project/rigs/test-rig";
 const DEFAULT_CULTURE_PATH = path.resolve(import.meta.dirname, "../assets/guidance/CULTURE-default.md");
 const DEFAULT_CULTURE = fs.readFileSync(DEFAULT_CULTURE_PATH, "utf8");
+const DEFAULT_ONBOARDING = Object.fromEntries(
+  ["01-world-and-purpose.md", "02-self-and-competent-action.md"].map((file) => {
+    const assetPath = path.resolve(import.meta.dirname, "../assets/onboarding", file);
+    return [assetPath, fs.readFileSync(assetPath, "utf8")];
+  }),
+);
 
 const CLAUDE_STARTER = `draft: false
 starter_id: claude-fixture-starter
@@ -106,6 +112,7 @@ describe("Agent Starter v1 vertical — real Claude adapter delivery (M2 R2)", (
       const claudeFs = mockClaudeFs({
         [registryEntryPath]: CLAUDE_STARTER,
         [DEFAULT_CULTURE_PATH]: DEFAULT_CULTURE,
+        ...DEFAULT_ONBOARDING,
       });
       const claudeAdapter = new ClaudeCodeAdapter({ tmux, fsOps: claudeFs });
 
@@ -179,6 +186,8 @@ describe("Agent Starter v1 vertical — real Claude adapter delivery (M2 R2)", (
       expect(claudeMd).toContain("starter_id: claude-fixture-starter");
       expect(claudeMd).toContain("BEGIN OpenRig MANAGED BLOCK: CULTURE-default.md");
       expect(claudeMd).toContain("Ship good, working product");
+      expect(claudeMd).toContain("How big is the dog?");
+      expect(claudeMd).toContain("When a turn ends, you sleep.");
 
       db.close();
     } finally {
