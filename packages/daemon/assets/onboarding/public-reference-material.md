@@ -19,7 +19,7 @@ points and were written to be entered from:
   into the code and do not know which module owns the thing.
 - **`cli-reference.md` — the full `rig` command surface, ~106 KB.** Every group, subcommand, flag,
   JSON shape. **This is the authority on how a command works**, and the capabilities piece
-  (`what-you-can-do.md`) is only the map to it.
+  (`public-what-you-can-do.md`) is only the map to it.
 
 **These are maintained, not archaeology.** `cli-reference.md` alone has forty-nine commits against
 it. Treat them as current.
@@ -40,28 +40,6 @@ Each of these carries frontmatter, and three fields are worth knowing by name:
 field is how you calibrate rather than guess. Where a doc and the live binary disagree, **the
 binary wins** — and the disagreement is worth reporting, not just working around.
 
-## The corpus — under `shared-docs/` in the OpenRig home
-
-Twenty-one directories of accumulated writing. The ones you are most likely to want:
-
-| where | roughly | what it holds |
-|---|---|---|
-| `product/` | 103 files | what OpenRig is, who it is for, why it exists in this shape |
-| `conventions/` | 76 files | how things are done here — naming, scope, cadence, formats |
-| `field-notes/` | 141 files | what actually happened, written by whoever it happened to |
-| `primitives/` | 38 files | the load-bearing concepts, examined one at a time |
-| `doctrine/` | 10 files | the rulings that settled a recurring argument |
-| `corpus/` | 14 files | canon and insights, distilled |
-
-**A warning you will need, because it is not obvious from the directory names:** almost all of this
-was written to explain OpenRig **to a human**. It says *you stop being the router, the bookkeeping
-leaves your head, your job shrinks to judgment.* Read as-is, it is about somebody else.
-
-**The agent version is the same content with the subject swapped: you are the router now.** The
-bookkeeping moved to you. The judgment that was supposed to stay human is sitting in your seat.
-When you read the corpus, do that substitution as you go — otherwise you will absorb it as
-background about a user rather than as a description of your own job.
-
 ## The living answer — `--help`
 
 **The binary is always more current than anything written about it.** `rig <verb> --help` and
@@ -74,9 +52,9 @@ building a parallel solution out of primitives that already compose into the ans
 
 ## Outside the forest — when nothing on this machine can answer it
 
-**Everything above is this box.** The corpus, the as-built docs, `--help`, the disk. There is a
-whole class of question none of it reaches: what an external library actually does today, anything
-that changed after your training cutoff, what is true in the world rather than in this repo.
+There is a whole class of question the source repo and live `--help` do not reach: what an external
+library actually does today, anything that changed after your training cutoff, what is true in the
+world rather than in this repo.
 
 **And the failure is the same one this page already warns about, pointed outward.** An agent that
 does not know the corpus exists invents instead of looking. An agent that does not know these exist

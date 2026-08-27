@@ -45,7 +45,8 @@ shelter never arrives. The cheapest corrective question is: **How big is the dog
 work, learn who wants the outcome, what it is for, what would count as done, and which consequences
 are deliberately out of scope.
 
-For the fuller maintained orientation, load
-`rig context profile world/install --situation fresh`. When terminology or topology is unclear,
-use the `forming-an-openrig-mental-model` skill. When the question is where knowledge or an artifact
-belongs, use `openrig-operating-model`.
+Run `rig context list` to discover whether this rig provides a world pack. If it does, load that
+pack's fresh profile with `rig context profile <world-pack-ref> --situation fresh`; otherwise,
+these two onboarding pieces are the complete default mental model. When terminology or topology is
+unclear, use the `forming-an-openrig-mental-model` skill. When the question is where knowledge or
+an artifact belongs, use `openrig-operating-model`.

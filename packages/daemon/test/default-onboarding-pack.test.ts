@@ -8,6 +8,10 @@ const PACK_PATHS = [
   resolve(DAEMON_ROOT, "assets/onboarding/01-world-and-purpose.md"),
   resolve(DAEMON_ROOT, "assets/onboarding/02-self-and-competent-action.md"),
 ];
+const PUBLIC_REFERENCE_PATHS = [
+  resolve(DAEMON_ROOT, "assets/onboarding/public-what-you-can-do.md"),
+  resolve(DAEMON_ROOT, "assets/onboarding/public-reference-material.md"),
+];
 const MESSAGE_CEILING_BYTES = 9_400;
 
 function packText(): string {
@@ -52,25 +56,36 @@ describe("default onboarding pack", () => {
       /\b(?:localhost|127\.0\.0\.1):\d+\b/,
       /\b20\d{2}[-/]\d{1,2}[-/]\d{1,2}\b/,
       /\b\d+\s+(?:files?|directories|seats?|rigs?|pods?|lines?|bytes?|kib|kb|tokens?)\b/i,
-      /\bthis (?:box|instance|rig|vm|machine|host)\b/i,
+      /\bthis (?:box|instance|vm|machine|host)\b/i,
       /(?:shared-docs\/|missions\/|<corpus>)/i,
     ];
     for (const pattern of mechanicalCandidates) expect(text).not.toMatch(pattern);
   });
 
-  it("cites shipped canon without copying a substantive canonical paragraph", () => {
+  it("discovers an optional world pack without naming a dead default", () => {
     const text = packText();
-    expect(text).toContain("rig context profile world/install --situation fresh");
+    const stepTwo = readFileSync(PACK_PATHS[1]!, "utf8");
+    expect(text).toContain("rig context list");
+    expect(text).toContain("rig context profile <world-pack-ref> --situation fresh");
+    expect(text).toContain("complete default mental model");
+    expect(text).not.toContain("world/install");
+    expect(stepTwo).toContain("public-what-you-can-do.md");
+    expect(stepTwo).toContain("public-reference-material.md");
+    expect(stepTwo).toContain("file reads within this second onboarding step");
     expect(text).toContain("forming-an-openrig-mental-model");
     expect(text).toContain("openrig-operating-model");
 
+    const [capabilities, sources] = PUBLIC_REFERENCE_PATHS.map((path) => readFileSync(path, "utf8"));
+    expect(capabilities).toContain("# What you can do here");
+    expect(sources).toContain("## The command surface");
+    expect(sources).toContain("## The living answer");
+    expect(sources).toContain("## Outside the forest");
+    expect(sources).toContain("## The one you read rather than consult");
+    expect(sources).not.toContain("## The corpus");
+    expect(sources).not.toContain("shared-docs/");
+    expect(sources).not.toContain("Everything above is this box. The corpus");
+
     const canonPaths = [
-      resolve(DAEMON_ROOT, "context-packs-src/world/install/01-world-from-primitives.md"),
-      resolve(DAEMON_ROOT, "context-packs-src/world/install/02-permission-self-sleep.md"),
-      resolve(DAEMON_ROOT, "context-packs-src/world/install/03-what-this-is-for.md"),
-      resolve(DAEMON_ROOT, "context-packs-src/world/install/04-ontology.md"),
-      resolve(DAEMON_ROOT, "context-packs-src/world/install/05-harness-power-use.md"),
-      resolve(DAEMON_ROOT, "context-packs-src/world/install/06-a-competent-turn.md"),
       resolve(DAEMON_ROOT, "assets/plugins/openrig-core/skills/forming-an-openrig-mental-model/SKILL.md"),
       resolve(DAEMON_ROOT, "assets/plugins/openrig-core/skills/openrig-operating-model/SKILL.md"),
     ];
@@ -81,19 +96,11 @@ describe("default onboarding pack", () => {
 
   it("keeps operator contact open without teaching a router hop", () => {
     const pack = packText();
-    const ontology = readFileSync(
-      resolve(DAEMON_ROOT, "context-packs-src/world/install/04-ontology.md"),
-      "utf8",
-    );
 
     expect(pack).toContain("Any agent may contact them directly for");
     expect(pack).toContain("use a durable surface");
-    expect(ontology).toContain("ANY seat may contact the operator directly");
-    expect(ontology).toContain("prefer the durable escalation surfaces");
-    for (const text of [pack, ontology]) {
-      expect(text).toContain("orchestrators and PMs may also send updates");
-      expect(text).not.toMatch(/other seats route through them|role-gated/i);
-    }
+    expect(pack).toContain("orchestrators and PMs may also send updates");
+    expect(pack).not.toMatch(/other seats route through them|role-gated/i);
   });
 
   it("ships a no-shared-vocabulary selection probe that is red on blank and green on packed context", () => {

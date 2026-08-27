@@ -9,10 +9,9 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
-import { copyFileSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
 import { ContextPackLibraryService } from "../src/domain/context-packs/context-pack-library-service.js";
 import { contextPacksRoutes } from "../src/routes/context-packs.js";
 
@@ -265,26 +264,55 @@ describe("GET /library/by-ref/profile — situation-composed delivery (Atom 4b)"
   });
 });
 
-// review50-r2 BLOCKING-1 (verdict a5a63659): the PRODUCTION world/install graph
-// must declare the seat-scoped RECAP atom — the fixture above proves the
-// mechanism, not the production manifest. This block drives the COMMITTED
-// production manifest through the REAL route with a real seat RECAP.
-describe("PRODUCTION world/install graph — the seat RECAP composes through the real route (r2 B1)", () => {
+const SYNTHETIC_WORLD_MANIFEST = `
+name: synthetic-world
+version: "1"
+files:
+  - { path: world-from-primitives.md, role: world }
+  - { path: permission-self-sleep.md, role: world }
+  - { path: what-this-is-for.md, role: world }
+  - { path: ontology.md, role: world }
+  - { path: harness-power-use.md, role: world }
+  - { path: a-competent-turn.md, role: world }
+  - { path: what-you-can-do.md, role: reference }
+  - { path: reference-material.md, role: reference }
+atoms:
+  - { id: world-from-primitives, address: world-from-primitives.md, taxonomy: world, situations: [fresh], purpose: depth, order: 1, priority: core }
+  - { id: permission-self-sleep, address: permission-self-sleep.md, taxonomy: world, situations: [fresh], purpose: depth, order: 2, priority: core }
+  - { id: what-this-is-for, address: what-this-is-for.md, taxonomy: world, situations: [fresh], purpose: depth, order: 3, priority: core }
+  - { id: ontology, address: ontology.md, taxonomy: world, situations: [fresh, post-compaction], purpose: depth, order: 4, priority: core }
+  - { id: harness-power-use, address: harness-power-use.md, taxonomy: world, situations: [fresh], purpose: depth, order: 5, priority: core }
+  - { id: what-you-can-do, address: what-you-can-do.md, taxonomy: skills, situations: [post-compaction], purpose: width, order: 6, priority: core }
+  - { id: reference-material, address: reference-material.md, taxonomy: lore, situations: [post-compaction], purpose: width, order: 7, priority: core }
+  - { id: a-competent-turn, address: a-competent-turn.md, taxonomy: world, situations: [fresh, post-compaction], purpose: depth, order: 8, priority: core }
+  - { id: recap, address: "seat:RECAP.md", taxonomy: lore, situations: [handover, post-compaction], purpose: width, order: 9, priority: core }
+`;
+
+describe("synthetic world graph — the seat RECAP composes through the real route", () => {
   let tmp: string;
   let app: Hono;
   const savedTopologyRoot = process.env["OPENRIG_TOPOLOGY_ROOT"];
   const SENTINEL = "sentinel-recap-7fce914a8: we chose the atoms graph because drift";
-  const PROD_PACK_SRC = join(dirname(fileURLToPath(import.meta.url)), "..", "context-packs-src", "world", "install");
+  const PACK_FILES = [
+    "world-from-primitives.md",
+    "permission-self-sleep.md",
+    "what-this-is-for.md",
+    "ontology.md",
+    "harness-power-use.md",
+    "a-competent-turn.md",
+    "what-you-can-do.md",
+    "reference-material.md",
+  ];
 
   function buildApp(withRecap: boolean): void {
     tmp = mkdtempSync(join(tmpdir(), "s05-prod-recap-"));
     const libRoot = join(tmp, "lib");
     const packDir = join(libRoot, "world", "install");
     mkdirSync(packDir, { recursive: true });
-    for (const f of readdirSync(PROD_PACK_SRC)) {
-      copyFileSync(join(PROD_PACK_SRC, f), join(packDir, f));
+    writeFileSync(join(packDir, "manifest.yaml"), SYNTHETIC_WORLD_MANIFEST);
+    for (const file of PACK_FILES) {
+      writeFileSync(join(packDir, file), `## Synthetic fixture\n${file}\n`);
     }
-    // the committed manifest carries the version placeholder; the parser accepts "0"
     if (withRecap) {
       const seatDir = join(tmp, "topology", "rigs", "r1", "seats", "s1");
       mkdirSync(seatDir, { recursive: true });
@@ -309,11 +337,11 @@ describe("PRODUCTION world/install graph — the seat RECAP composes through the
     else process.env["OPENRIG_TOPOLOGY_ROOT"] = savedTopologyRoot;
   });
 
-  const prodUrl = (qs: string) => `/api/context-packs/library/by-ref/profile?ref=${encodeURIComponent("world/install")}&${qs}`;
+  const profileUrl = (qs: string) => `/api/context-packs/library/by-ref/profile?ref=${encodeURIComponent("world/install")}&${qs}`;
 
   it("HANDOVER = the fresh walk + the seat-sourced RECAP, sentinel bytes and sourceKind seat", async () => {
     buildApp(true);
-    const res = await app.request(prodUrl("situation=handover&runtime=claude&rig=r1&seat=s1"));
+    const res = await app.request(profileUrl("situation=handover&runtime=claude&rig=r1&seat=s1"));
     expect(res.status).toBe(200);
     const body = await res.json() as { pieces: Array<{ atomId: string; sourceKind: string; text: string }> };
     expect(body.pieces.map((p) => p.atomId)).toEqual([
@@ -326,7 +354,7 @@ describe("PRODUCTION world/install graph — the seat RECAP composes through the
 
   it("POST-COMPACTION = the measured re-prime + the seat-sourced RECAP", async () => {
     buildApp(true);
-    const res = await app.request(prodUrl("situation=post-compaction&runtime=claude&rig=r1&seat=s1"));
+    const res = await app.request(profileUrl("situation=post-compaction&runtime=claude&rig=r1&seat=s1"));
     expect(res.status).toBe(200);
     const body = await res.json() as { pieces: Array<{ atomId: string; sourceKind: string }> };
     expect(body.pieces.map((p) => p.atomId)).toEqual([
@@ -337,7 +365,7 @@ describe("PRODUCTION world/install graph — the seat RECAP composes through the
 
   it("a MISSING seat RECAP fails LOUD with a named error — never a silently thinner handover", async () => {
     buildApp(false);
-    const res = await app.request(prodUrl("situation=handover&runtime=claude&rig=r1&seat=s1"));
+    const res = await app.request(profileUrl("situation=handover&runtime=claude&rig=r1&seat=s1"));
     expect(res.status).toBe(422);
     const body = await res.json() as { message: string };
     expect(body.message).toMatch(/recap/i);
@@ -345,7 +373,7 @@ describe("PRODUCTION world/install graph — the seat RECAP composes through the
 
   it("FRESH needs no seat tree and stays the six-piece walk (recap never leaks into fresh)", async () => {
     buildApp(true);
-    const res = await app.request(prodUrl("situation=fresh&runtime=claude"));
+    const res = await app.request(profileUrl("situation=fresh&runtime=claude"));
     expect(res.status).toBe(200);
     const body = await res.json() as { pieces: Array<{ atomId: string }> };
     expect(body.pieces.map((p) => p.atomId)).toEqual([

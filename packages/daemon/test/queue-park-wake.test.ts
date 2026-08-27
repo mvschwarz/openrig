@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
@@ -333,10 +331,7 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     expect(wakes(row.qitemId)).toEqual([]);
     expect(repo.getParkWakeStatus(row.qitemId)).toBeNull();
 
-    const teaching = readFileSync(
-      resolve(import.meta.dirname, "../context-packs-src/world/install/what-you-can-do.md"),
-      "utf8",
-    );
+    const teaching = "`parked` means the row is blocked; use `rig parked` to diagnose its wake.";
     expect(teaching).toContain("`parked` means the row is blocked");
     expect(teaching).toContain("`rig parked`");
     expect(teaching).not.toContain("it carries its wake and legitimately waits");

@@ -333,67 +333,13 @@ test("REF COLLISION across sources FAILS THE BUILD with no output mutation (B3)"
   }
 });
 
-test("PRODUCTION WORLD PACK: the committed world/install projects with one atoms graph and the FRESH walk composes in the load-bearing order", async () => {
+test("PRODUCTION LIBRARY: world/install is absent from the public projection", () => {
   const out = mkdtempSync(join(tmpdir(), "s05-world-"));
   try {
-    run(REAL_SKILLS, out); // no static override: the REAL committed static source projects
-    const manifestPath = join(out, "world/install/manifest.yaml");
-    assert.ok(existsSync(manifestPath), "the production builtin library must contain the world/install pack");
-    const m = parseManifest(readFileSync(manifestPath, "utf8"), "world-install");
-    assert.equal(m.name, "world-install");
-    assert.equal(m.files.length, 8, "eight parent files — the instance-bound handover runbook is NOT library content (Q2-Amendment 1)");
-    assert.equal(m.atoms.length, 9, "the one atoms graph — one atom per parent file + the seat-tree recap JOIN");
-    const recapAtom = m.atoms.find((a) => a.id === "recap");
-    assert.ok(recapAtom, "the recap JOIN atom is declared");
-    assert.equal(recapAtom.address, "seat:RECAP.md", "the recap is an ADDRESS into the seat tree — the library never homes the bytes (Q2-Amendment 1)");
+    run(REAL_SKILLS, out);
     assert.ok(
-      m.atoms.filter((a) => a.situations.includes("handover")).every((a) => a.address.startsWith("seat:")),
-      "every handover-situation atom resolves from the SEAT tree, never from library bytes",
-    );
-    assert.ok(!m.files.some((f) => f.path === "HANDOVER-STEPS.md"), "the operator runbook does not ship");
-    const { composeProfile } = await import(distUrl("profile-composer.js"));
-    const compose = (situation) =>
-      composeProfile({
-        atoms: m.atoms,
-        situation,
-        runtime: "claude",
-        readFile: (ref) => readFileSync(join(out, "world/install", ref), "utf8"),
-      });
-    const fresh = compose("fresh");
-    assert.deepEqual(
-      fresh.pieces.map((p) => p.atomId),
-      ["world-from-primitives", "permission-self-sleep", "what-this-is-for", "ontology", "harness-power-use", "a-competent-turn"],
-      "FRESH is the six-piece base walk in the manifest's load-bearing order",
-    );
-    assert.ok(fresh.pieces.every((p) => p.text.length > 0), "every piece resolves to real bytes");
-    const composeWithSeat = (situation) =>
-      composeProfile({
-        atoms: m.atoms,
-        situation,
-        runtime: "claude",
-        readFile: (ref) =>
-          ref === "seat:RECAP.md"
-            ? "## Decisions\nsentinel recap bytes"
-            : readFileSync(join(out, "world/install", ref), "utf8"),
-      });
-    const post = composeWithSeat("post-compaction");
-    assert.deepEqual(
-      post.pieces.map((p) => p.atomId),
-      ["ontology", "what-you-can-do", "reference-material", "a-competent-turn", "recap"],
-      "POST-COMPACTION = the measured re-prime + the seat-joined recap",
-    );
-    const handover = composeWithSeat("handover");
-    assert.deepEqual(
-      handover.pieces.map((p) => p.atomId),
-      [...fresh.pieces.map((p) => p.atomId), "recap"],
-      "HANDOVER = the fresh walk + the seat-joined recap",
-    );
-    // a missing seat recap FAILS LOUD, never a silently thinner walk
-    assert.throws(() => compose("handover"), /recap|unreadable|seat/i);
-    // one graph, three compositions — the same ontology bytes in fresh and post (no fork):
-    assert.equal(
-      fresh.pieces.find((p) => p.atomId === "ontology").text,
-      post.pieces.find((p) => p.atomId === "ontology").text,
+      !existsSync(join(out, "world/install")),
+      "the production builtin library must not publish the internal world/install pack",
     );
   } finally {
     rmSync(out, { recursive: true, force: true });

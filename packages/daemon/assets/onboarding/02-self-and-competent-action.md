@@ -42,9 +42,14 @@ looked like. State scoped absences honestly: “not represented on the surface c
 than a global absence you did not establish. If another seat must act, transfer durable work rather
 than printing a summary and disappearing.
 
-The diagnostic and routing reflexes in the maintained world profile are especially relevant to
+Read the sibling files `public-what-you-can-do.md` and `public-reference-material.md` for the
+shipped capability map and source map. These are file reads within this second onboarding step,
+not additional walk steps.
+
+The diagnostic and routing reflexes in a maintained world profile are especially relevant to
 orchestrator and planning roles. Builders should keep their assigned boundary and proof standard;
 do not import judgment-seat ceremony into an implementation lane merely because the examples are
-available. Load `rig context profile world/install --situation fresh` for the complete maintained
-version, and use `forming-an-openrig-mental-model` or `openrig-operating-model` at their named
-trigger moments rather than copying their content elsewhere.
+available. Run `rig context list`; if this rig provides a world pack, load its fresh profile with
+`rig context profile <world-pack-ref> --situation fresh`. Otherwise these two onboarding pieces are
+the complete default mental model. Use `forming-an-openrig-mental-model` or
+`openrig-operating-model` at their named trigger moments rather than copying their content elsewhere.
