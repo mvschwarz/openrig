@@ -92,6 +92,11 @@ export function renderMissionTemplate(kind: MissionTemplateKind, opts: RenderOpt
   return applyPlaceholders(raw, opts);
 }
 
+export function renderCapabilityDeltaTemplate(opts: RenderOpts): string {
+  const raw = fs.readFileSync(resolveTemplate("capability-delta.md"), "utf8");
+  return applyPlaceholders(raw, opts);
+}
+
 export interface NotesRenderOpts {
   mission_id: string;
   mission_name: string;

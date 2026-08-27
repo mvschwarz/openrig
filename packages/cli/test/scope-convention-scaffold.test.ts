@@ -15,7 +15,11 @@ import { Command } from "commander";
 
 import { scopeCommand } from "../src/commands/scope.js";
 import { readFrontmatter } from "../src/lib/scope/scope-fs.js";
-import { renderSliceProofTemplate, renderSliceTemplate } from "../src/lib/scope/templates.js";
+import {
+  renderCapabilityDeltaTemplate,
+  renderSliceProofTemplate,
+  renderSliceTemplate,
+} from "../src/lib/scope/templates.js";
 import { MISSION_TEMPLATE_KINDS, SLICE_TEMPLATE_KINDS } from "../src/lib/scope/types.js";
 import { renderMissionTemplate } from "../src/lib/scope/templates.js";
 
@@ -210,6 +214,95 @@ describe("scope create — the mode-neutral SPEC/NOTES convention lands on disk"
         depends_on: [],
       });
     }
+  });
+});
+
+describe("release capability-delta scaffold and expiry advisory", () => {
+  let substrate: { root: string; missionsRoot: string };
+
+  beforeEach(() => { substrate = seedSubstrate(); });
+  afterEach(() => { fs.rmSync(substrate.root, { recursive: true, force: true }); });
+
+  const releaseOpts = {
+    ...RENDER_OPTS,
+    slug: "release-0.5.4",
+    mission: "release-0.5.4",
+    title: "0.5.4",
+    release_version: "0.5.4",
+  };
+
+  it("renders the reviewed delta shape from the shipped template", () => {
+    const rendered = renderCapabilityDeltaTemplate(releaseOpts);
+    for (const required of [
+      "capability_delta: capability-delta-v0.5.4",
+      "binding_target:",
+      "sha:",
+      "dirty:",
+      "audience:",
+      "review_status:",
+      "expiry:",
+      "## What you can now do (situation-keyed)",
+      "REACH FOR IT WHEN",
+      "## Landed, not yet drivable",
+      "## What to STOP doing",
+      "Correct before:",
+      "Wrong now:",
+      "## Selection probes",
+      "DELTA-ONLY QUALIFICATION",
+      "## Canon patch",
+      "Already present — do not duplicate",
+      SSOT_POINTER,
+      INSTALLED_POINTER_ENV,
+    ]) {
+      expect(rendered, `capability-delta template is missing ${required}`).toContain(required);
+    }
+  });
+
+  it("dry-runs the real 0.5.4 consumer through mission creation", async () => {
+    const result = await run(
+      ["mission", "create", "release-0.5.4", "--intent", "Honest 0.5.4 boundary", "--json"],
+      substrate.missionsRoot,
+    );
+    expect(result.exitCode).toBe(0);
+    const mission = JSON.parse(result.stdout).mission;
+    const deltaPath = path.join(mission.path, "CAPABILITY-DELTA-v0.5.4.md");
+    expect(mission.capabilityDeltaPath).toBe(deltaPath);
+    expect(fs.existsSync(deltaPath)).toBe(true);
+    expect(fs.readFileSync(deltaPath, "utf8")).toContain("capability-delta-v0.5.4");
+  });
+
+  it("flags only the completed expiry event and remains advisory", async () => {
+    const created = await run(
+      ["mission", "create", "release-0.5.4", "--json"],
+      substrate.missionsRoot,
+    );
+    const missionPath = JSON.parse(created.stdout).mission.path as string;
+    const deltaPath = path.join(missionPath, "CAPABILITY-DELTA-v0.5.4.md");
+    const configured = fs.readFileSync(deltaPath, "utf8")
+      .replace('canon_path: "<path to capability canon>"', "canon_path: capability-canon.md")
+      .replace('successor_path: "<path to successor delta>"', "successor_path: CAPABILITY-DELTA-v0.5.5.md");
+    fs.writeFileSync(deltaPath, configured, "utf8");
+    fs.writeFileSync(
+      path.join(missionPath, "capability-canon.md"),
+      "# Capability canon\n\nAbsorbed: capability-delta-v0.5.4\n\n## Capabilities\n",
+      "utf8",
+    );
+
+    const live = await run(["audit", "--mission", "release-0.5.4", "--json"], substrate.missionsRoot);
+    expect(live.exitCode).toBe(0);
+    expect(JSON.parse(live.stdout).mission.findings.map((finding: { kind: string }) => finding.kind))
+      .not.toContain("expired_capability_delta");
+
+    fs.writeFileSync(path.join(missionPath, "CAPABILITY-DELTA-v0.5.5.md"), "successor\n", "utf8");
+    const expired = await run(["audit", "--mission", "release-0.5.4", "--json"], substrate.missionsRoot);
+    const parsed = JSON.parse(expired.stdout);
+    expect(expired.exitCode).toBe(0);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.mission.findings).toContainEqual(expect.objectContaining({
+      kind: "expired_capability_delta",
+      severity: "medium",
+      message: expect.stringMatching(/canon header.*successor.*citable no more/i),
+    }));
   });
 });
 

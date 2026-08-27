@@ -55,6 +55,7 @@ import {
   updateFrontmatter,
 } from "../lib/scope/scope-fs.js";
 import {
+  renderCapabilityDeltaTemplate,
   renderNotesTemplate,
   renderMissionProgressTemplate,
   renderMissionTemplate,
@@ -71,6 +72,7 @@ import {
   setProgressRow,
 } from "../lib/scope/progress-edit.js";
 import { deriveScopeTrust } from "../lib/scope/trust.js";
+import { capabilityDeltaExpiryFindings } from "../lib/scope/capability-delta.js";
 
 // ---------------------------------------------------------------------
 // Shared helpers
@@ -730,6 +732,18 @@ function buildMissionCreateCommand(): Command {
           });
         }
         const progressBody = renderMissionProgressTemplate(title);
+        const capabilityDeltaBody = isReleaseName
+          ? renderCapabilityDeltaTemplate({
+              id,
+              slug: name,
+              mission: name,
+              title,
+              created_date: todayDateISO(),
+              release_version: releaseVersion,
+              intent,
+              depends_on: dependsOn,
+            })
+          : null;
         // All renders succeeded — safe to touch the filesystem.
         fs.mkdirSync(absPath, { recursive: true });
         fs.mkdirSync(path.join(absPath, "slices"), { recursive: true });
@@ -738,6 +752,12 @@ function buildMissionCreateCommand(): Command {
         fs.writeFileSync(readmePath, readmeBody, "utf8");
         const progressPath = path.join(absPath, "PROGRESS.md");
         fs.writeFileSync(progressPath, progressBody, "utf8");
+        const capabilityDeltaPath = capabilityDeltaBody
+          ? path.join(absPath, `CAPABILITY-DELTA-v${releaseVersion}.md`)
+          : null;
+        if (capabilityDeltaPath && capabilityDeltaBody) {
+          fs.writeFileSync(capabilityDeltaPath, capabilityDeltaBody, "utf8");
+        }
         let notesPath: string | null = null;
         if (notesRendered) {
           notesPath = path.join(absPath, "NOTES.md");
@@ -752,6 +772,7 @@ function buildMissionCreateCommand(): Command {
         if (notesPath) {
           humanLines.push(`  notes: ${notesPath} (template: ${notesRendered?.resolvedFrom})`);
         }
+        if (capabilityDeltaPath) humanLines.push(`  capability delta: ${capabilityDeltaPath}`);
         if (notesRendered?.resolvedFrom === "legacy-env") {
           humanLines.push("  advisory: OPENRIG_MISSION_NOTES_TEMPLATE_PATH is deprecated; use OPENRIG_NOTES_TEMPLATE_PATH");
         }
@@ -764,6 +785,7 @@ function buildMissionCreateCommand(): Command {
             path: absPath,
             readmePath,
             notesPath,
+            capabilityDeltaPath,
             notesResolvedFrom: notesRendered?.resolvedFrom ?? null,
             advisories: notesRendered?.resolvedFrom === "legacy-env"
               ? ["OPENRIG_MISSION_NOTES_TEMPLATE_PATH is deprecated; use OPENRIG_NOTES_TEMPLATE_PATH"]
@@ -872,6 +894,7 @@ function buildAuditCommand(): Command {
 
         const missionShadow = shadowedNodeFileFinding(missionDir, "mission");
         if (missionShadow) missionResult.findings.push(missionShadow);
+        missionResult.findings.push(...capabilityDeltaExpiryFindings(missionDir));
 
         const slicesDir = path.join(missionDir, "slices");
         const dogfoodEvidenceRoot = defaultDogfoodEvidenceRoot(missionsRoot);
