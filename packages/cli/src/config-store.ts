@@ -169,6 +169,10 @@ export interface RiggedConfig {
     pickupStallThresholdMinutes: number;
     stuckSweepIntervalSeconds: number;
     stuckSweepUnclaimedAgeMinutes: number;
+    wakeRetryIntervalSeconds: number;
+    wakeRetryCap: number;
+    wakeUnconfirmedWindowMinutes: number;
+    wakeSwapGraceSeconds: number;
   };
 }
 
@@ -308,6 +312,10 @@ const DEFAULTS = {
     pickupStallThresholdMinutes: 3,
     stuckSweepIntervalSeconds: 300,
     stuckSweepUnclaimedAgeMinutes: 60,
+    wakeRetryIntervalSeconds: 300,
+    wakeRetryCap: 3,
+    wakeUnconfirmedWindowMinutes: 30,
+    wakeSwapGraceSeconds: 180,
   },
 } as const;
 
@@ -410,6 +418,11 @@ export const VALID_KEYS = [
   // S02 — standing-stuck-sweep cadence + unclaimed-obligation age; same lockstep.
   "queue.stuck_sweep_interval_seconds",
   "queue.stuck_sweep_unclaimed_age_minutes",
+  // S01 — wake-or-escalate ladder: retry cadence + cap, F1 window, F2 swap grace.
+  "queue.wake_retry_interval_seconds",
+  "queue.wake_retry_cap",
+  "queue.wake_unconfirmed_window_minutes",
+  "queue.wake_swap_grace_seconds",
 ] as const;
 
 export type ValidKey = typeof VALID_KEYS[number];
@@ -487,6 +500,10 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "queue.pickup_stall_threshold_minutes": { primary: "OPENRIG_QUEUE_PICKUP_STALL_THRESHOLD_MINUTES" },
   "queue.stuck_sweep_interval_seconds": { primary: "OPENRIG_QUEUE_STUCK_SWEEP_INTERVAL_SECONDS" },
   "queue.stuck_sweep_unclaimed_age_minutes": { primary: "OPENRIG_QUEUE_STUCK_SWEEP_UNCLAIMED_AGE_MINUTES" },
+  "queue.wake_retry_interval_seconds": { primary: "OPENRIG_QUEUE_WAKE_RETRY_INTERVAL_SECONDS" },
+  "queue.wake_retry_cap": { primary: "OPENRIG_QUEUE_WAKE_RETRY_CAP" },
+  "queue.wake_unconfirmed_window_minutes": { primary: "OPENRIG_QUEUE_WAKE_UNCONFIRMED_WINDOW_MINUTES" },
+  "queue.wake_swap_grace_seconds": { primary: "OPENRIG_QUEUE_WAKE_SWAP_GRACE_SECONDS" },
 };
 
 // Maps dotted-string config keys to the camelCase RiggedConfig path.
@@ -552,6 +569,10 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "queue.pickup_stall_threshold_minutes": ["queue", "pickupStallThresholdMinutes"],
   "queue.stuck_sweep_interval_seconds": ["queue", "stuckSweepIntervalSeconds"],
   "queue.stuck_sweep_unclaimed_age_minutes": ["queue", "stuckSweepUnclaimedAgeMinutes"],
+  "queue.wake_retry_interval_seconds": ["queue", "wakeRetryIntervalSeconds"],
+  "queue.wake_retry_cap": ["queue", "wakeRetryCap"],
+  "queue.wake_unconfirmed_window_minutes": ["queue", "wakeUnconfirmedWindowMinutes"],
+  "queue.wake_swap_grace_seconds": ["queue", "wakeSwapGraceSeconds"],
 };
 
 function isValidKey(key: string): key is ValidKey {
@@ -776,6 +797,11 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   "queue.pickup_stall_threshold_minutes": positiveIntegerConstraint("queue.pickup_stall_threshold_minutes"),
   "queue.stuck_sweep_interval_seconds": positiveIntegerConstraint("queue.stuck_sweep_interval_seconds"),
   "queue.stuck_sweep_unclaimed_age_minutes": positiveIntegerConstraint("queue.stuck_sweep_unclaimed_age_minutes"),
+  // S01 — wake-or-escalate ladder knobs (same positive-integer contract).
+  "queue.wake_retry_interval_seconds": positiveIntegerConstraint("queue.wake_retry_interval_seconds"),
+  "queue.wake_retry_cap": positiveIntegerConstraint("queue.wake_retry_cap"),
+  "queue.wake_unconfirmed_window_minutes": positiveIntegerConstraint("queue.wake_unconfirmed_window_minutes"),
+  "queue.wake_swap_grace_seconds": positiveIntegerConstraint("queue.wake_swap_grace_seconds"),
 };
 
 function validateKeyConstraints(key: ValidKey, raw: string, coerced: string | number | boolean): void {
@@ -973,6 +999,10 @@ export class ConfigStore {
         pickupStallThresholdMinutes: v("queue.pickup_stall_threshold_minutes") as number,
         stuckSweepIntervalSeconds: v("queue.stuck_sweep_interval_seconds") as number,
         stuckSweepUnclaimedAgeMinutes: v("queue.stuck_sweep_unclaimed_age_minutes") as number,
+        wakeRetryIntervalSeconds: v("queue.wake_retry_interval_seconds") as number,
+        wakeRetryCap: v("queue.wake_retry_cap") as number,
+        wakeUnconfirmedWindowMinutes: v("queue.wake_unconfirmed_window_minutes") as number,
+        wakeSwapGraceSeconds: v("queue.wake_swap_grace_seconds") as number,
       },
     };
   }

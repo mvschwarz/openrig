@@ -214,11 +214,14 @@ export class ViewProjector {
         params = [...rigParams, limit];
         break;
       case "escalations":
-        // closure_reason = 'escalation' OR transition note matches.
+        // closure_reason = 'escalation' OR an OPEN S01 wake-escalation aggregate — the
+        // operator rung's delivery floor (AM-R25): the ladder's aggregated escalation
+        // rows surface here so a dead-seat storm is visible without any human sweep.
         sql = `
           SELECT qitem_id, source_session, destination_session, state, closure_reason, closure_target, ts_updated
           FROM queue_items
-          WHERE closure_reason = 'escalation'
+          WHERE (closure_reason = 'escalation'
+                 OR (state IN ('pending', 'in-progress', 'blocked') AND tags LIKE '%"wake-escalation"%'))
             AND ${fixtureClause}
             ${rigClause}
           ORDER BY ts_updated DESC

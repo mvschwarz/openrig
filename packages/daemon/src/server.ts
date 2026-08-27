@@ -197,6 +197,9 @@ export interface AppDeps {
   /** S02 — the standing stuck sweep's observable heartbeat (ADDITIVE on healthz;
    *  absent = legacy body). Set by the index.ts scheduler when the loop starts. */
   stuckSweepStatus?: import("./domain/queue-stuck-sweep.js").StuckSweepStatus;
+  /** S01 — the wake-or-escalate ladder's heartbeat + open-escalations count (ADDITIVE on
+   *  healthz; absent = legacy body). Part of the operator rung's stated delivery floor. */
+  wakeLadderStatus?: import("./domain/queue-wake-ladder.js").WakeLadderStatus;
   inboxHandler?: InboxHandler;
   outboxHandler?: OutboxHandler;
   projectClassifier?: ProjectClassifier;
@@ -633,8 +636,11 @@ export function createApp(deps: AppDeps): Hono {
     // healthz (ADDITIVE; absent = legacy body), so a clean sweep needs no row and a
     // failing sweep is loud without one.
     const stuckSweep = deps.stuckSweepStatus ? { stuckSweep: deps.stuckSweepStatus.snapshot() } : {};
+    // S01 — the wake ladder's heartbeat is half of the operator rung's honest delivery
+    // floor (escalation view + daemon-health); same additive contract.
+    const wakeLadder = deps.wakeLadderStatus ? { wakeLadder: deps.wakeLadderStatus.snapshot() } : {};
     if (!monitor) {
-      return c.json({ status: "ok", ...stamp, ...selfHost, ...slowOperations, ...bind, ...stuckSweep });
+      return c.json({ status: "ok", ...stamp, ...selfHost, ...slowOperations, ...bind, ...stuckSweep, ...wakeLadder });
     }
     const eventLoop = monitor.snapshot();
     return c.json({
@@ -646,6 +652,7 @@ export function createApp(deps: AppDeps): Hono {
       ...slowOperations,
       ...bind,
       ...stuckSweep,
+      ...wakeLadder,
     });
   });
 

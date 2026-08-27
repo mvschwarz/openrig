@@ -86,7 +86,9 @@ Keys:
   policies.idle_gate_qitem.active_wake_interval_seconds
   snapshots.periodic.*   enabled, interval_seconds, retention_keep
   queue.*                pickup_stall_threshold_minutes (S04 pickup-receipt stall threshold),
-                         stuck_sweep_interval_seconds, stuck_sweep_unclaimed_age_minutes (S02 standing stuck sweep)
+                         stuck_sweep_interval_seconds, stuck_sweep_unclaimed_age_minutes (S02 standing stuck sweep),
+                         wake_retry_interval_seconds, wake_retry_cap, wake_unconfirmed_window_minutes,
+                         wake_swap_grace_seconds (S01 wake-or-escalate ladder)
   retention.*            enabled, transitions_days, watchdog_days,
                          watchdog_keep_per_job, batch_size
   terminal.status_bar    show the inner tmux status bar on launch (default off)

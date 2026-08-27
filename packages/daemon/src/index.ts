@@ -10,6 +10,12 @@ import {
   runStuckSweep,
 } from "./domain/queue-stuck-sweep.js";
 import {
+  createWakeLadderStatus,
+  resolveWakeRetryIntervalSeconds,
+  runWakeLadderTick,
+  WakeLadderScheduler,
+} from "./domain/queue-wake-ladder.js";
+import {
   assertBindAuthInvariant,
   detectTailscaleInterface,
   isLoopbackBind,
@@ -158,6 +164,30 @@ export function startStuckSweepScheduler(deps: {
   return setInterval(runOnce, resolveStuckSweepIntervalSeconds() * 1000);
 }
 
+/** S01 (OPR.0.5.5.1) — start the WAKE-OR-ESCALATE ladder: batons whose wake failed retry
+ *  on the config-keyed cadence up to the cap, then escalate through recorded rungs
+ *  (destination's orchestrator — aggregated per destination — then the operator surface).
+ *  Ladder state derives entirely from the row's transitions, so a daemon restart resumes
+ *  every ladder at its exact position with no recovery step. Returns the scheduler
+ *  (stopped on shutdown), or null when the queue repository is absent. */
+export function startWakeLadderScheduler(deps: {
+  rigRepo: { db: import("better-sqlite3").Database };
+  queueRepo?: import("./domain/queue-repository.js").QueueRepository;
+  wakeLadderStatus?: import("./domain/queue-wake-ladder.js").WakeLadderStatus;
+}): WakeLadderScheduler | null {
+  const queueRepo = deps.queueRepo;
+  if (!queueRepo) return null;
+  const status = createWakeLadderStatus();
+  deps.wakeLadderStatus = status; // healthz reads this snapshot
+  const db = deps.rigRepo.db;
+  const scheduler = new WakeLadderScheduler({
+    runTick: () => runWakeLadderTick({ db, queueRepo, status }),
+    tickIntervalMs: resolveWakeRetryIntervalSeconds() * 1000,
+  });
+  scheduler.start();
+  return scheduler;
+}
+
 async function isTrustedLocalOrTailnetBind(host: string): Promise<boolean> {
   if (isLoopbackBind(host)) return true;
   if (isTailscaleBind(host)) return true;
@@ -235,6 +265,7 @@ export async function startServer(port?: number) {
   let monitorsStarted = false;
   let retentionTimer: ReturnType<typeof setInterval> | null = null;
   let stuckSweepTimer: ReturnType<typeof setInterval> | null = null;
+  let wakeLadderScheduler: WakeLadderScheduler | null = null;
   // P7 — lifecycle heartbeat: advance last-seen every tick while running.
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   const servers: ServerType[] = [];
@@ -269,6 +300,9 @@ export async function startServer(port?: number) {
         retentionTimer = startQueueRetentionScheduler(deps);
         // S02 — the standing stuck sweep: nobody has to remember to run the verbs.
         stuckSweepTimer = startStuckSweepScheduler(deps);
+        // S01 — wake-or-escalate on batons: a failed baton wake retries on schedule,
+        // then escalates through recorded rungs; never a silent park.
+        wakeLadderScheduler = startWakeLadderScheduler(deps);
         // P7 — lifecycle heartbeat (advances last-seen). A write failure logs and
         // continues (the render degrades to an older last-seen honestly); the
         // store guards not-stopped so a tick can never pass stopped_at.
@@ -321,6 +355,13 @@ export async function startServer(port?: number) {
     try {
       if (retentionTimer) clearInterval(retentionTimer);
       if (stuckSweepTimer) clearInterval(stuckSweepTimer);
+      if (wakeLadderScheduler) {
+        try {
+          await wakeLadderScheduler.stop();
+        } catch (err) {
+          console.error("[wake-ladder] shutdown error", err);
+        }
+      }
     } catch (err) {
       console.error("[queue-retention] shutdown error", err);
     }

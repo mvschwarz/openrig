@@ -151,6 +151,11 @@ describe("SettingsStore (User Settings v0)", () => {
       // S02 — standing-stuck-sweep cadence + unclaimed-obligation age.
       "queue.stuck_sweep_interval_seconds",
       "queue.stuck_sweep_unclaimed_age_minutes",
+      // S01 — wake-or-escalate ladder knobs.
+      "queue.wake_retry_interval_seconds",
+      "queue.wake_retry_cap",
+      "queue.wake_unconfirmed_window_minutes",
+      "queue.wake_swap_grace_seconds",
     ]);
   });
 

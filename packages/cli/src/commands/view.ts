@@ -7,8 +7,10 @@ import type { StatusDeps } from "./status.js";
 /**
  * `rig view` — coordination primitive L5 (view) commands (PL-004 Phase B).
  *
- * Backed by `/api/views`. 6 built-in views (recently-active, founder,
- * pod-load, escalations, held, activity) + custom view registration.
+ * Backed by `/api/views`. 7 built-in views (recently-active, founder,
+ * pod-load, escalations, held, activity, pickup) + custom view registration.
+ * `escalations` carries both escalation-closed rows and the S01 wake-ladder's
+ * open aggregated escalations (the operator rung's delivery floor).
  */
 
 export interface ViewDeps extends StatusDeps {}
@@ -56,7 +58,7 @@ export function viewCommand(depsOverride?: ViewDeps): Command {
   cmd
     .command("show <viewName>")
     .description(
-      "Run a view (built-in or custom). Built-in views: recently-active, founder, pod-load, escalations, held, activity",
+      "Run a view (built-in or custom). Built-in views: recently-active, founder, pod-load, escalations, held, activity, pickup",
     )
     .option("--rig <rig>", "Filter by rig name (matches destination_session OR source_session @<rig>)")
     .option("--limit <n>", "Result row limit", "100")

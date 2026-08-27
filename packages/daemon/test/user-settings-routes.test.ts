@@ -96,8 +96,10 @@ describe("config routes (User Settings v0)", () => {
     // + 1 S15 (onboarding.default_pack.enabled)
     // + 1 S04 (queue.pickup_stall_threshold_minutes)
     // + 2 S02 (queue.stuck_sweep_interval_seconds /
-    //   stuck_sweep_unclaimed_age_minutes) → 60 total.
-    expect(Object.keys(body.settings).length).toBe(60);
+    //   stuck_sweep_unclaimed_age_minutes)
+    // + 4 S01 (queue.wake_retry_interval_seconds / wake_retry_cap /
+    //   wake_unconfirmed_window_minutes / wake_swap_grace_seconds) → 64 total.
+    expect(Object.keys(body.settings).length).toBe(64);
     expect(body.settings["daemon.port"]?.source).toBe("default");
     expect(body.settings["ui.preview.refresh_interval_seconds"]?.value).toBe(3);
     expect(body.settings["ui.preview.max_pins"]?.value).toBe(4);
