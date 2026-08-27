@@ -400,6 +400,15 @@ function resolveConfiguredDaemonTarget(): { host: string; port: number } {
  * adapter initialization when the daemon runs detached.
  */
 const ENV_SCRUB_PREFIXES = ["CODEX_", "GHOSTTY_", "XPC_", "__CF"];
+// S20 (OPR.0.5.5.20) — the ROUTING-OVERLOADED vars: client/endpoint state a managed
+// environment may inject, byte-indistinguishable from operator opt-in. They are ALWAYS
+// scrubbed from the daemon env; bind intent crosses ONLY via the dedicated
+// OPENRIG_BIND_HOST (exported below when opts.host declares it). THE RULE FOR FUTURE
+// PASSTHROUGH EDITS: any env var that doubles as client routing state must join this
+// set — routing state silently becoming bind policy is the incident class
+// (operator baton qitem-20260827070400: parent lost its Tailscale listener).
+const ROUTING_ENV_SCRUB = new Set(["OPENRIG_HOST", "RIGGED_HOST"]);
+
 const ENV_SCRUB_EXACT = new Set([
   "CMUX_SOCKET_PATH",
   "CMUX_SURFACE_ID",
@@ -443,6 +452,7 @@ export function buildDaemonEnv(
 
   for (const [key, value] of Object.entries(baseEnv)) {
     if (ENV_SCRUB_EXACT.has(key)) continue;
+    if (ROUTING_ENV_SCRUB.has(key)) continue; // S20: routing env never crosses (see the set's contract)
     // CODEX_HOME is daemon topology/config-root state. Every other CODEX_*
     // value remains transient runtime/auth/session state and stays scrubbed.
     if (key !== "CODEX_HOME" && ENV_SCRUB_PREFIXES.some((prefix) => key.startsWith(prefix))) continue;
@@ -452,6 +462,9 @@ export function buildDaemonEnv(
   // Explicit OPENRIG_* overrides — always win over inherited values
   env["OPENRIG_PORT"] = String(opts.port);
   if (opts.host !== undefined) {
+    // S20 — DECLARED intent exports the dedicated bind surface plus a COHERENT routing
+    // value (seats/consumers route where the daemon actually binds).
+    env["OPENRIG_BIND_HOST"] = opts.host;
     env["OPENRIG_HOST"] = opts.host;
   }
   env["OPENRIG_DB"] = opts.db;
@@ -480,13 +493,19 @@ export function buildDaemonEnv(
  *  daemon.host config key read from the FILE, or the dedicated OPENRIG_BIND_HOST env.
  *  A daemon.host value resolved from ENV is the overloaded routing channel
  *  (ENV_MAP maps daemon.host ← OPENRIG_HOST) and NEVER creates intent. */
-export function resolveBindIntent(_input: {
+export function resolveBindIntent(input: {
   flagHost: string | undefined;
   envBindHost: string | undefined;
   configSource: string;
   configHost: string;
 }): { explicit: boolean; host: string | undefined } {
-  throw new Error("not implemented (S20 RED)");
+  if (input.flagHost !== undefined) return { explicit: true, host: input.flagHost };
+  const envBind = input.envBindHost?.trim() || undefined;
+  if (envBind) return { explicit: true, host: envBind };
+  if (input.configSource === "file") return { explicit: true, host: input.configHost };
+  // "env"-sourced daemon.host is the overloaded routing channel — never intent;
+  // "default" is no declaration at all.
+  return { explicit: false, host: undefined };
 }
 
 /** The restored adoption/upgrade gate: derive the REQUIRED listener set from the
@@ -494,12 +513,41 @@ export function resolveBindIntent(_input: {
  *  tailscale-when-detected; explicit ⇒ exactly the declared host) and prove each by
  *  probing its own /healthz — binding evidence, never config echo. A silently dropped
  *  listener (the 0.5.3-receipt regression shape) fails LOUDLY. */
-export async function verifyRequiredListeners(_input: {
+export async function verifyRequiredListeners(input: {
   bind: { mode: "explicit" | "default"; hosts: string[]; tailscaleDetected: boolean };
   port: number;
   probe: (url: string) => Promise<boolean>;
 }): Promise<{ ok: true; verified: string[] } | { ok: false; missing: string[]; reason: string }> {
-  throw new Error("not implemented (S20 RED)");
+  const required = new Set(input.bind.hosts);
+  required.add("127.0.0.1"); // loopback is required in EVERY mode's floor... except explicit
+  if (input.bind.mode === "explicit") {
+    required.clear();
+    for (const h of input.bind.hosts) required.add(h);
+  } else if (input.bind.tailscaleDetected && input.bind.hosts.length < 2) {
+    // The 0.5.3-receipt regression shape: default mode, tailscale present, but the
+    // daemon reports only one listener — the tailscale listener was silently dropped.
+    return {
+      ok: false,
+      missing: ["<tailscale interface>"],
+      reason:
+        `required listener missing: default bind mode with a tailscale interface detected must bind loopback AND tailscale, but the daemon reports only [${input.bind.hosts.join(", ")}] — a silently dropped listener (the 0.5.3 receipt regression shape).`,
+    };
+  }
+  const missing: string[] = [];
+  const verified: string[] = [];
+  for (const host of required) {
+    const reachable = await input.probe(`http://${host}:${input.port}/healthz`).catch(() => false);
+    if (reachable) verified.push(host);
+    else missing.push(host);
+  }
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      missing,
+      reason: `required listener(s) not answering /healthz: ${missing.join(", ")} — binding evidence beats config echo; a reported host must prove itself.`,
+    };
+  }
+  return { ok: true, verified };
 }
 
 export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Promise<DaemonState> {
@@ -589,6 +637,40 @@ export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Prom
     try { deps.kill(pid, "SIGTERM"); } catch { /* best effort */ }
     const logContent = deps.readFile(resolveLifecycleFile(deps, "daemon.log"));
     throw new Error(summarizeDaemonStartFailure(healthzUrl, logContent));
+  }
+
+  // S20 — the restored adoption/upgrade gate: when the daemon reports its bind plan,
+  // derive the required listener set from the EFFECTIVE mode and prove every listener
+  // by probing its own /healthz. A silently dropped listener fails the start LOUDLY
+  // (the 0.5.3-receipt regression accepted loopback health alone and missed exactly
+  // this). Older daemons without the payload skip the gate unchanged (additive).
+  try {
+    const healthRes = await fetchDaemonProbe(deps, healthzUrl, HEALTHZ_PROBE_TIMEOUT_MS);
+    const healthBody = (await (healthRes.json?.() ?? Promise.resolve(null)).catch(() => null)) as
+      | { bind?: { mode: "explicit" | "default"; hosts: string[]; tailscaleDetected: boolean } }
+      | null;
+    if (healthBody?.bind) {
+      const gate = await verifyRequiredListeners({
+        bind: healthBody.bind,
+        port,
+        probe: async (url) => {
+          try {
+            const r = await fetchDaemonProbe(deps, url, HEALTHZ_PROBE_TIMEOUT_MS);
+            return r.ok;
+          } catch {
+            return false;
+          }
+        },
+      });
+      if (!gate.ok) {
+        try { deps.kill(pid, "SIGTERM"); } catch { /* best effort */ }
+        throw new Error(`daemon started but FAILED the listener adoption gate: ${gate.reason}`);
+      }
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("listener adoption gate")) throw err;
+    // A parse/probe hiccup on the gate read must not kill an otherwise healthy start;
+    // the gate acts only on POSITIVE evidence of a bad bind (never on its own failure).
   }
 
   const state: DaemonState = {

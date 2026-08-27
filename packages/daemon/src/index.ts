@@ -2,6 +2,7 @@ import { serve, type ServerType } from "@hono/node-server";
 import { readOpenRigEnv, OPENRIG_HOME } from "./openrig-compat.js";
 import { resolveDaemonDbPath } from "./daemon-db-path.js";
 import { createDaemon } from "./startup.js";
+import { resolveBindPlan } from "./domain/bind-plan.js";
 import { runQueueRetentionSweep, RETENTION_DEFAULTS } from "./domain/queue-retention.js";
 import {
   assertBindAuthInvariant,
@@ -145,7 +146,25 @@ export async function startServer(port?: number) {
   // bearer invariant applies to their chosen host). When default, the
   // daemon always binds loopback and ALSO binds the active tailscale
   // interface (if present) — both accepted paths in the invariant.
-  const explicitHost = readOpenRigEnv("OPENRIG_HOST", "RIGGED_HOST");
+  // OPR.0.5.5.20 — bind intent rides ONLY the dedicated OPENRIG_BIND_HOST surface.
+  // The overloaded routing env (OPENRIG_HOST/RIGGED_HOST) is observed for the
+  // provenance line below and NEVER selects the bind branch: a managed environment's
+  // injected endpoint is byte-indistinguishable from opt-in, and the parent daemon
+  // silently lost its Tailscale listener to exactly that (operator baton
+  // qitem-20260827070400). The auth-bearer-tailscale-trust ruling rides the new
+  // surface unchanged.
+  const bindPlan = resolveBindPlan({
+    bindHostEnv: process.env.OPENRIG_BIND_HOST,
+    routingHostEnv: readOpenRigEnv("OPENRIG_HOST", "RIGGED_HOST"),
+    tailscaleIp: detectTailscaleInterface(),
+  });
+  if (bindPlan.ignoredRoutingHost) {
+    console.error(
+      `[bind-provenance] OPENRIG_HOST=${bindPlan.ignoredRoutingHost} is ROUTING env and was ignored for bind policy — ` +
+      `binding default ${bindPlan.hosts.join(" + ")}. Declare bind intent via --host, the daemon.host config key (file), or OPENRIG_BIND_HOST.`,
+    );
+  }
+  const explicitHost = bindPlan.mode === "explicit" ? bindPlan.hosts[0] : undefined;
   // PL-005 Phase B: bearer token for Mission Control write verbs.
   // No legacy alias (this env var is new in Phase B).
   const bearerToken = process.env.OPENRIG_AUTH_BEARER_TOKEN ?? null;
@@ -162,15 +181,17 @@ export async function startServer(port?: number) {
     }
     bindHosts = [explicitHost];
   } else {
-    // Default path — loopback always, plus tailscale auto-add when active.
-    const tailscaleIp = detectTailscaleInterface();
-    bindHosts = tailscaleIp ? ["127.0.0.1", tailscaleIp] : ["127.0.0.1"];
+    // Default path — the plan already computed loopback + tailscale-when-active.
+    bindHosts = bindPlan.hosts;
   }
 
   const { app, contextMonitor, deps, eventLoopMonitor, injectWebSocket } = await createDaemon({
     dbPath,
     bearerToken,
     terminalBearerToken,
+    // S20 — the effective bind plan rides the health surface so adoption gates verify
+    // listeners from BINDING EVIDENCE (probe each host) instead of config echo.
+    bindPlan,
   });
 
   // Multi-bind via N serve() instances sharing the same Hono app.

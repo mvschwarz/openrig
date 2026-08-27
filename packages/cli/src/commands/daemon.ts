@@ -11,6 +11,7 @@ import {
   tailLogs,
   type LifecycleDeps,
   OPENRIG_DIR,
+  resolveBindIntent,
 } from "../daemon-lifecycle.js";
 
 interface ProcessAliveDeps {
@@ -109,9 +110,19 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
         // multi-bind (loopback + tailscale auto-detect) when the operator
         // never opted in to a specific host.
         const hostResolution = configStore.resolveWithSource("daemon.host");
-        const hostUserExplicit = opts.host !== undefined || hostResolution.source !== "default";
-        const effectiveHost = opts.host ?? config.daemon.host;
-        const hostForDaemon = hostUserExplicit ? effectiveHost : undefined;
+        // S20 — bind intent comes ONLY from the dedicated surfaces: the --host flag,
+        // a FILE-sourced daemon.host, or OPENRIG_BIND_HOST. An env-sourced daemon.host
+        // is the overloaded routing channel (ENV_MAP maps it from OPENRIG_HOST — the
+        // exact injected state a managed environment carries) and never creates intent.
+        const intent = resolveBindIntent({
+          flagHost: opts.host,
+          envBindHost: process.env["OPENRIG_BIND_HOST"],
+          configSource: hostResolution.source,
+          configHost: config.daemon.host,
+        });
+        const hostUserExplicit = intent.explicit;
+        const effectiveHost = intent.host ?? "127.0.0.1";
+        const hostForDaemon = intent.host;
 
         // Run preflight before starting
           const preflight = new SystemPreflight({

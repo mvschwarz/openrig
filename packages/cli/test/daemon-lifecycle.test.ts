@@ -1190,19 +1190,21 @@ describe("buildDaemonEnv", () => {
       expect(result["OPENRIG_HOST"]).toBe("0.0.0.0");
     });
 
-    it("does NOT scrub OPENRIG_HOST from baseEnv when opts.host is undefined (operator shell env wins)", () => {
-      // If the operator has OPENRIG_HOST set in their shell, that's an
-      // explicit signal — preserve it through the env-passthrough loop.
+    it("S20: inherited OPENRIG_HOST is SCRUBBED — the shell-env-wins premise died (routing env is byte-indistinguishable from opt-in; operator baton qitem-20260827070400). Opt-in rides OPENRIG_BIND_HOST", () => {
+      // The old pin encoded the dead-premise design this slice re-grounds: an
+      // inherited OPENRIG_HOST was treated as operator opt-in, and a managed
+      // environment's injected routing value silently became single-bind policy
+      // (the parent lost its Tailscale listener). The dedicated surface carries
+      // the same opt-in unambiguously:
       const baseEnv: Record<string, string> = {
         HOME: "/Users/tester",
         PATH: "/usr/bin",
         OPENRIG_HOST: "0.0.0.0",
       };
-      const result = buildDaemonEnv(baseEnv, {
-        port: 7433,
-        db: "/tmp/test.db",
-      });
-      expect(result["OPENRIG_HOST"]).toBe("0.0.0.0");
+      const scrubbed = buildDaemonEnv(baseEnv, { port: 7433, db: "/tmp/test.db" });
+      expect(scrubbed["OPENRIG_HOST"]).toBeUndefined();
+      const optedIn = buildDaemonEnv({ ...baseEnv, OPENRIG_BIND_HOST: "0.0.0.0" }, { port: 7433, db: "/tmp/test.db" });
+      expect(optedIn["OPENRIG_BIND_HOST"]).toBe("0.0.0.0"); // the dedicated channel still wins
     });
   });
 

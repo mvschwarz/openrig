@@ -133,6 +133,8 @@ import { seatRoutes } from "./routes/seat.js";
 import { createRouteTimingMiddleware } from "./domain/route-timing-recorder.js";
 
 export interface AppDeps {
+  /** S20 — effective bind plan for the health surface (absent = legacy body). */
+  bindPlan?: { mode: "explicit" | "default"; hosts: string[]; tailscaleDetected: boolean; ignoredRoutingHost?: string };
   rigRepo: RigRepository;
   sessionRegistry: SessionRegistry;
   /** P7 — daemon lifecycle record store + this boot's epoch (heartbeat + clean-shutdown). */
@@ -620,8 +622,12 @@ export function createApp(deps: AppDeps): Hono {
     const slowOperations = deps.slowOpRecorder?.snapshot
       ? { slowOperations: deps.slowOpRecorder.snapshot() }
       : {};
+    // S20 — bind provenance on the health surface (ADDITIVE; absent = legacy body):
+    // adoption gates derive the REQUIRED listener set from this and then prove each
+    // host by probing it — binding evidence, never config echo.
+    const bind = deps.bindPlan ? { bind: deps.bindPlan } : {};
     if (!monitor) {
-      return c.json({ status: "ok", ...stamp, ...selfHost, ...slowOperations });
+      return c.json({ status: "ok", ...stamp, ...selfHost, ...slowOperations, ...bind });
     }
     const eventLoop = monitor.snapshot();
     return c.json({
@@ -631,6 +637,7 @@ export function createApp(deps: AppDeps): Hono {
       eventLoop,
       routeTimings: deps.routeTimingRecorder?.snapshot() ?? {},
       ...slowOperations,
+      ...bind,
     });
   });
 

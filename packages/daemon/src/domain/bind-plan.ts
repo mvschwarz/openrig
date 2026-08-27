@@ -7,7 +7,6 @@
 // listener (operator baton qitem-20260827070400). This re-grounds the
 // auth-bearer-tailscale-trust ruling — explicit opt-in vs default — on a channel that
 // managed environments never inject; it does not overturn it.
-// S20 RED: unwired.
 
 export interface BindPlanInput {
   /** The DEDICATED bind-intent env (OPENRIG_BIND_HOST). Whitespace-only = absent. */
@@ -28,6 +27,18 @@ export interface BindPlan {
   ignoredRoutingHost?: string;
 }
 
-export function resolveBindPlan(_input: BindPlanInput): BindPlan {
-  throw new Error("not implemented (S20 RED)");
+export function resolveBindPlan(input: BindPlanInput): BindPlan {
+  const bindHost = input.bindHostEnv?.trim() || undefined;
+  const routingHost = input.routingHostEnv?.trim() || undefined;
+  const tailscaleDetected = input.tailscaleIp !== null;
+  if (bindHost) {
+    return { mode: "explicit", hosts: [bindHost], tailscaleDetected };
+  }
+  const hosts = input.tailscaleIp ? ["127.0.0.1", input.tailscaleIp] : ["127.0.0.1"];
+  return {
+    mode: "default",
+    hosts,
+    tailscaleDetected,
+    ...(routingHost ? { ignoredRoutingHost: routingHost } : {}),
+  };
 }
