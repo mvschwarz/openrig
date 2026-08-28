@@ -60,6 +60,26 @@ completely functional and works. Not a proof pack. **Effect-verified functionali
 sentence and continue on Part A until told otherwise. Part A corresponds to the `mission-slice-sop`
 skill; Part B to `mission-slice-intent-proof-sop`.
 
+
+## THE COMPONENT MENU — this document is a menu, not a pipeline
+
+The SDLC is assembled from **components chosen per mission**, not a single mandated flow.
+This document describes the components and carries recommendations; a mission (or the team
+running it) picks per phase. Multiple valid options can exist for the same phase — choosing
+one does not deprecate the others. Nothing below deletes or overrides an existing component.
+
+| phase | components available today |
+|---|---|
+| **PLAN** | **The planning dial** — planning rigor is a spectrum chosen per piece: P0 mini-requirements and pointers (simple, reversible work) · P1 an authored spec with a proof contract (the default) · P2 plus a research round before the spec freezes, run BEFORE build dispatch · P3 plus an adversarial pass by a non-author, judged against product goals, landing amendments with proof-contract teeth · P4 plus a blind from-scratch design diffed against priors before proceeding. Dial up by what the piece is, exactly as build care is priced below. |
+| **BUILD** | **Part A, the simple flow** (below — the default) · **the wave model** — slices build in parallel in disjoint file territories, an integrator merges serially, and independent review fires once per wave (two reviewers with different vantages, never the writers; fix rounds re-earn verdicts at one final revision; per-slice discipline stays failing-test-first and verify-by-effect). The wave IS the care dial: what shares a wave decides how much review each piece gets · **Part B, the rigorous overlay** (below — only when assigned). These combine: a wave can carry one Part-B piece. |
+| **RELEASE** | The release ceremony conventions (publication identity, honest release notes, the capability-delta lifecycle: each delta expires when canon absorbs it). |
+| **BOUNDARY** | **The release boundary** — housekeeping run once per fence so the next release starts clean: seats reset or re-primed per their continuity needs, memory distilled (keep what changed a decision recently), every queue swept by destination and dispositioned, substrate torn down, boards frozen as records, a clean-box baseline captured. A checklist of judgment guides, not gates. |
+
+> Fuller reference documents for the planning dial, the wave model, and the release
+> boundary are being graduated into `docs/reference/`; until they land, the summaries
+> above are the shipped description and this document remains the SSOT pointer for all
+> of them.
+
 # PART A — THE SIMPLE SDLC (applies always)
 
 ## A1. The flow in one pass
