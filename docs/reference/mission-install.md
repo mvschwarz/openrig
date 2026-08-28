@@ -162,8 +162,12 @@ One install, one tree.
 The layers compose from surfaces that already exist; no new mechanism is required:
 
 - Pieces and contract: one `--mission` grant spans the mission and its slices —
-  `rig context profile <pack-ref> --mission <mission>` composes addressed sections
-  with per-piece provenance and content hashes.
+  `rig context profile <pack-ref> --situation <fresh|handover|post-compaction> --mission <mission>`
+  composes addressed sections with per-piece provenance and content hashes. The
+  `--situation` flag is required and is a SEPARATE input from the depth profile:
+  situation says which composition menu applies (fresh boot, occupant handover,
+  post-compaction restore); FULL vs HIGH-ALTITUDE says how much of each layer the
+  seat class receives. Choose both, independently.
 - Position: the `--rig`/`--seat` grant serves the seat's lessons and recap.
 - Delivery: `rig walk <seat> --through <files> --pace <interval>` for byte-walks;
   paced sends naming addressed reads for pointer-walks.
