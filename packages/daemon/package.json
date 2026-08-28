@@ -28,6 +28,10 @@
     "./gateway-slack": {
       "types": "./dist/gateway-slack-surface.d.ts",
       "import": "./dist/gateway-slack-surface.js"
+    },
+    "./context-pack-taxonomy": {
+      "types": "./dist/context-pack-taxonomy-surface.d.ts",
+      "import": "./dist/context-pack-taxonomy-surface.js"
     }
   },
   "scripts": {

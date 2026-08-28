@@ -1,6 +1,9 @@
 # Public capability and source-map width for the default onboarding walk.
 name: onboarding-width
 version: "0"
+# OPR.0.5.6.10 — affordances knowledge (what this system can do) is world
+# content under the coining-session definitions.
+taxonomy: world
 purpose: "The public capability map and source map referenced by the default onboarding walk."
 files:
   - path: public-what-you-can-do.md

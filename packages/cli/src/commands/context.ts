@@ -26,6 +26,7 @@ import {
 import { dirname } from "node:path";
 import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { ATOM_TAXONOMIES, TAXONOMY_TEACHING } from "@openrig/daemon/context-pack-taxonomy";
 import { ConfigStore } from "../config-store.js";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , statusGuardMessage} from "../daemon-lifecycle.js";
@@ -38,6 +39,8 @@ interface ContextPackEntryWire {
   name: string;
   version: string;
   purpose: string | null;
+  /** OPR.0.5.6.10 — pack-level classification (world | lore | skills | mission). */
+  taxonomy: string;
   sourceType: "builtin" | "user_file" | "workspace";
   sourcePath: string;
   relativePath: string;
@@ -166,6 +169,16 @@ function validateContextPackManifestForInstall(manifestPath: string): void {
       `manifest at ${manifestPath} has an invalid version '${versionStr}' — a version must be a single bounded ` +
         `token [A-Za-z0-9][A-Za-z0-9._+-]{0,31} (no ':' or separator, no whitespace, ≤32 chars).`,
     );
+  }
+  // OPR.0.5.6.10 — teach the classification refusal at ADD time, not first
+  // daemon scan (desk ruling T2). Enum + teaching text imported from the
+  // daemon's one definition site; never a second value list here.
+  const taxonomy = obj["taxonomy"];
+  if (taxonomy === undefined || taxonomy === null) {
+    throw new Error(`manifest at ${manifestPath} is missing required field 'taxonomy' — every context pack declares what kind of context it is. ${TAXONOMY_TEACHING}`);
+  }
+  if (typeof taxonomy !== "string" || !(ATOM_TAXONOMIES as readonly string[]).includes(taxonomy)) {
+    throw new Error(`manifest at ${manifestPath} has invalid taxonomy ${JSON.stringify(taxonomy)}. ${TAXONOMY_TEACHING}`);
   }
   const files = obj["files"];
   if (!Array.isArray(files)) {
@@ -438,7 +451,7 @@ Examples:
           return;
         }
         for (const e of entries) {
-          console.log(`${e.relativePath.padEnd(36)} ${e.name.padEnd(24)} v${String(e.version).padEnd(6)} ${String(e.files.length).padStart(2)} files  ~${String(e.derivedEstimatedTokens).padStart(6)} tokens  ${e.sourceType}  ${e.sourcePath}`);
+          console.log(`${e.relativePath.padEnd(36)} ${e.name.padEnd(24)} v${String(e.version).padEnd(6)} ${(e.taxonomy ?? "—").padEnd(8)} ${String(e.files.length).padStart(2)} files  ~${String(e.derivedEstimatedTokens).padStart(6)} tokens  ${e.sourceType}  ${e.sourcePath}`);
         }
       } catch (err) {
         console.error((err as Error).message);

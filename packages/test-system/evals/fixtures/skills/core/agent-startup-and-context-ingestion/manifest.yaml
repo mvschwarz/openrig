@@ -1,5 +1,6 @@
 name: agent-startup-and-context-ingestion
 version: "1"
+taxonomy: skills
 purpose: "(eval fixture) orient a freshly-woken seat"
 files:
   - path: content.md

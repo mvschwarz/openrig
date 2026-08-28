@@ -35,7 +35,7 @@ describe("GET /library/resolve-address — file-level span serving (Atom 4c)", (
     const libRoot = join(tmp, "lib");
     const packDir = join(libRoot, "packs", "world");
     mkdirSync(packDir, { recursive: true });
-    writeFileSync(join(packDir, "manifest.yaml"), 'name: world-install\nversion: "1"\nfiles:\n  - { path: walk.md, role: world }\n  - { path: sub/notes.md, role: world }\n');
+    writeFileSync(join(packDir, "manifest.yaml"), 'name: world-install\nversion: "1"\ntaxonomy: world\nfiles:\n  - { path: walk.md, role: world }\n  - { path: sub/notes.md, role: world }\n');
     writeFileSync(join(packDir, "walk.md"), WALK);
     mkdirSync(join(packDir, "sub"), { recursive: true });
     writeFileSync(join(packDir, "sub", "notes.md"), "## Notes\nnote body");
@@ -100,7 +100,7 @@ describe("GET /library/resolve-address — file-level span serving (Atom 4c)", (
     const libRoot = join(tmp, "lib");
     const inner = join(libRoot, "packs", "world", "nested-pack");
     mkdirSync(inner, { recursive: true });
-    writeFileSync(join(inner, "manifest.yaml"), 'name: nested\nversion: "1"\nfiles:\n  - { path: n.md, role: x }\n');
+    writeFileSync(join(inner, "manifest.yaml"), 'name: nested\nversion: "1"\ntaxonomy: world\nfiles:\n  - { path: n.md, role: x }\n');
     writeFileSync(join(inner, "n.md"), "## N\nnested pack body");
     const lib2 = new ContextPackLibraryService({ roots: [{ path: libRoot, sourceType: "user_file" }] });
     lib2.scan();

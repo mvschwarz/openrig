@@ -1,5 +1,6 @@
 name: human-in-the-loop
 version: "1"
+taxonomy: skills
 purpose: "(eval fixture) when and how to reach the human"
 files:
   - path: content.md

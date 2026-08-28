@@ -1,5 +1,6 @@
 name: watchdog
 version: "1"
+taxonomy: skills
 purpose: "(eval fixture) arm a wake you cannot perform yourself"
 files:
   - path: content.md

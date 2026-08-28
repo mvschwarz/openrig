@@ -1,5 +1,6 @@
 name: openrig-upgrade
 version: "1"
+taxonomy: skills
 purpose: "(eval fixture) upgrade a running daemon without downtime"
 files:
   - path: content.md

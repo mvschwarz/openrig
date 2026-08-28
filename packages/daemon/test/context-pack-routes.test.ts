@@ -74,6 +74,7 @@ describe("context-packs routes (PL-014)", () => {
     writePack(libRoot, "smoke", `
 name: smoke
 version: 1
+taxonomy: world
 purpose: Smoke
 files:
   - path: notes.md
@@ -92,6 +93,7 @@ files:
     writePack(libRoot, "p1", `
 name: p1
 version: 1
+taxonomy: world
 files:
   - path: a.md
     role: r
@@ -209,6 +211,7 @@ files:
     writePack(libRoot, "p1", `
 name: p1
 version: 1
+taxonomy: world
 files:
   - path: a.md
     role: r
@@ -232,6 +235,7 @@ files:
     writePack(libRoot, "preview-pack", `
 name: preview-pack
 version: 1
+taxonomy: world
 purpose: Preview test
 files:
   - path: a.md
@@ -277,6 +281,7 @@ files:
     writePack(libRoot, join("packs", "smoke"), `
 name: smoke
 version: 1
+taxonomy: world
 purpose: Ref pack
 files:
   - path: notes.md
@@ -318,6 +323,7 @@ files:
     writePack(libRoot, join("packs", "smoke"), `
 name: smoke
 version: 1
+taxonomy: world
 files:
   - path: notes.md
     role: notes
@@ -338,6 +344,7 @@ files:
     writePack(libRoot, join("packs", "keep"), `
 name: keep
 version: 1
+taxonomy: world
 files:
   - path: notes.md
     role: notes
@@ -365,6 +372,7 @@ files:
     writePack(builtinRoot, join("packs", "shipped"), `
 name: shipped
 version: 1
+taxonomy: world
 files:
   - path: notes.md
     role: notes
@@ -386,6 +394,7 @@ files:
     writePack(libRoot, join("packs", "walkme"), `
 name: walkme
 version: 1
+taxonomy: world
 files:
   - path: intro.md
     role: intro

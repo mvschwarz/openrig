@@ -17,7 +17,7 @@ import { ContextPackError } from "../src/domain/context-packs/context-pack-types
 function writePack(root: string, ref: string, name = ref.split("/").at(-1)!): void {
   const dir = join(root, ref);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "manifest.yaml"), `name: ${name}\nversion: 1\nfiles:\n  - path: notes.md\n    role: source\n`);
+  writeFileSync(join(dir, "manifest.yaml"), `name: ${name}\nversion: 1\ntaxonomy: mission\nfiles:\n  - path: notes.md\n    role: source\n`);
   writeFileSync(join(dir, "notes.md"), "existing bytes");
 }
 

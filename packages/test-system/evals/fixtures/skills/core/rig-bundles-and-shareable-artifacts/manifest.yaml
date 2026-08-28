@@ -1,5 +1,6 @@
 name: rig-bundles-and-shareable-artifacts
 version: "1"
+taxonomy: skills
 purpose: "(eval fixture) package a rig for a machine that never had the source"
 files:
   - path: content.md

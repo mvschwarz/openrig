@@ -44,6 +44,7 @@ function validSourcePack(): string {
   writeFileSync(join(dir, "manifest.yaml"), `
 name: goodpack
 version: 1
+taxonomy: world
 purpose: test
 files:
   - path: notes.md

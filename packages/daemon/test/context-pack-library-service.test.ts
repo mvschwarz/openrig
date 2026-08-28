@@ -40,6 +40,7 @@ describe("ContextPackLibraryService", () => {
     writePack(userRoot, "smoke", `
 name: smoke
 version: 1
+taxonomy: world
 purpose: Smoke pack
 files:
   - path: notes.md
@@ -70,6 +71,7 @@ files:
     writePack(userRoot, "missing", `
 name: missing
 version: 1
+taxonomy: world
 files:
   - path: present.md
     role: r
@@ -93,6 +95,7 @@ files:
     const sameManifest = `
 name: collision
 version: 1
+taxonomy: world
 files:
   - path: notes.md
     role: r
@@ -120,6 +123,7 @@ files:
     const sameManifest = `
 name: dup
 version: 1
+taxonomy: world
 files:
   - path: notes.md
     role: r
@@ -163,6 +167,7 @@ files:
     writePack(userRoot, "evolve", `
 name: evolve
 version: 1
+taxonomy: world
 files:
   - path: a.md
     role: r
@@ -176,6 +181,7 @@ files:
     writeFileSync(join(userRoot, "evolve", "manifest.yaml"), `
 name: evolve
 version: 2
+taxonomy: world
 files:
   - path: a.md
     role: r
@@ -190,6 +196,7 @@ files:
     writePack(userRoot, "guard", `
 name: guard
 version: 1
+taxonomy: world
 files:
   - path: notes.md
     role: r

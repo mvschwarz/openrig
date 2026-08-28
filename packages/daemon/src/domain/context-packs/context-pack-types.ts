@@ -22,7 +22,20 @@ export interface ContextPackManifestFile {
 
 // OPR.0.5.3.5 mini-req 1 — the founder taxonomy and world anatomy the atom
 // schema speaks (SPEC.md design context; intake DESIGN-INTAKE-ATOM-SCHEMA).
+// OPR.0.5.6.10 makes the same enum first-class at PACK level: every manifest
+// answers "what kind of context am I" through this one definition site.
 export const ATOM_TAXONOMIES = ["world", "lore", "skills", "mission"] as const;
+
+/** OPR.0.5.6.10 mini-req 2 — the classification teaching shared by every
+ *  refusal surface (daemon parser, CLI install validator): the legal values
+ *  and one sentence of meaning each (the coining-session definitions). */
+export const TAXONOMY_TEACHING =
+  `Legal values: ${ATOM_TAXONOMIES.join(" | ")}. ` +
+  "world = where you are (the environment: entities, rules, affordances); " +
+  "lore = what has been learned here (position knowledge earned in place); " +
+  "skills = what you know how to do (procedural capability); " +
+  "mission = what you are doing now (the current work and its intent). " +
+  "Add one line to manifest.yaml, e.g. `taxonomy: skills`.";
 export const ATOM_REGIONS = ["identity", "ontology", "terrain", "actors", "laws", "history", "state", "affordances"] as const;
 export const ATOM_SITUATIONS = ["fresh", "handover", "post-compaction"] as const;
 export const ATOM_PURPOSES = ["depth", "width"] as const;
@@ -69,6 +82,10 @@ export interface ContextPackManifest {
   name: string;
   version: string;
   purpose?: string;
+  /** OPR.0.5.6.10 mini-req 1 — REQUIRED pack-level classification from the one
+   *  shared enum. Classifies the pack as a whole; atom-level taxonomy remains
+   *  authoritative for atoms and may differ per atom (mini-req 5). */
+  taxonomy: (typeof ATOM_TAXONOMIES)[number];
   files: ContextPackManifestFile[];
   /** Operator-supplied estimate (used as a hint when no per-file
    *  estimate is available); the library service computes a derived
@@ -89,6 +106,9 @@ export interface ContextPackEntry {
   name: string;
   version: string;
   purpose: string | null;
+  /** OPR.0.5.6.10 mini-req 4 — the pack classification, projected so the
+   *  list surfaces it (human column + `--json` field). */
+  taxonomy: (typeof ATOM_TAXONOMIES)[number];
   sourceType: ContextPackSourceType;
   /** Absolute path to the pack directory. */
   sourcePath: string;

@@ -1,5 +1,6 @@
 name: cross-host-rig-commands
 version: "1"
+taxonomy: skills
 purpose: "(eval fixture) reach agents on other machines"
 files:
   - path: content.md

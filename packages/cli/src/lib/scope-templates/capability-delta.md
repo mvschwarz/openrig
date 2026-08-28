@@ -1,6 +1,7 @@
 ---
 capability_delta: capability-delta-v{{release_version}}
 release: {{release_version}}
+taxonomy: world
 binding_target:
   sha: "<exact cut commit>"
   dirty: "<true|false>"

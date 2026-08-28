@@ -1,5 +1,6 @@
 name: requirements-writer
 version: "1"
+taxonomy: skills
 purpose: "(eval fixture) turn intent into requirements"
 files:
   - path: content.md

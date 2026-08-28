@@ -8,6 +8,7 @@ import { ContextPackError } from "../src/domain/context-packs/context-pack-types
 const validManifest = `
 name: pl-005-priming
 version: 1
+taxonomy: mission
 purpose: Priming for PL-005 Phase A
 files:
   - path: prd.md
@@ -31,7 +32,7 @@ describe("parseManifest", () => {
   });
 
   it("normalizes numeric versions to strings", () => {
-    const m = parseManifest("name: x\nversion: 2\nfiles: []", "/x.yaml");
+    const m = parseManifest("name: x\nversion: 2\ntaxonomy: world\nfiles: []", "/x.yaml");
     expect(m.version).toBe("2");
   });
 
@@ -53,34 +54,35 @@ describe("parseManifest", () => {
   });
 
   it("rejects malformed files array", () => {
-    expect(() => parseManifest("name: x\nversion: 1\nfiles: not-an-array", "/x.yaml")).toThrow(/files/);
+    expect(() => parseManifest("name: x\nversion: 1\ntaxonomy: world\nfiles: not-an-array", "/x.yaml")).toThrow(/files/);
   });
 
   it("rejects file entry with .. in path (escape attempt)", () => {
-    const bad = "name: x\nversion: 1\nfiles:\n  - path: ../escape.md\n    role: notes\n";
+    const bad = "name: x\nversion: 1\ntaxonomy: world\nfiles:\n  - path: ../escape.md\n    role: notes\n";
     expect(() => parseManifest(bad, "/x.yaml")).toThrow(/relative path inside the pack/);
   });
 
   it("rejects file entry with absolute path", () => {
-    const bad = "name: x\nversion: 1\nfiles:\n  - path: /etc/passwd\n    role: notes\n";
+    const bad = "name: x\nversion: 1\ntaxonomy: world\nfiles:\n  - path: /etc/passwd\n    role: notes\n";
     expect(() => parseManifest(bad, "/x.yaml")).toThrow(/relative path inside the pack/);
   });
 
   it("rejects file entry with unsupported suffix", () => {
     // .ts/.sh are now servable (OPR.0.5.3.7 R2 helper assets); a genuinely
     // unsupported suffix (e.g. a binary) still rejects loud.
-    const bad = "name: x\nversion: 1\nfiles:\n  - path: image.png\n    role: code\n";
+    const bad = "name: x\nversion: 1\ntaxonomy: world\nfiles:\n  - path: image.png\n    role: code\n";
     expect(() => parseManifest(bad, "/x.yaml")).toThrow(/unsupported suffix/);
   });
 
   it("rejects file entry missing role", () => {
-    const bad = "name: x\nversion: 1\nfiles:\n  - path: notes.md\n";
+    const bad = "name: x\nversion: 1\ntaxonomy: world\nfiles:\n  - path: notes.md\n";
     expect(() => parseManifest(bad, "/x.yaml")).toThrow(/missing 'role'/);
   });
 
   it("accepts allowed suffixes md/markdown/yaml/yml/txt", () => {
     const ok = `name: x
 version: 1
+taxonomy: world
 files:
   - { path: a.md, role: r }
   - { path: b.markdown, role: r }
@@ -93,7 +95,7 @@ files:
   });
 
   it("ignores estimated_tokens when not a finite number", () => {
-    const m = parseManifest("name: x\nversion: 1\nfiles: []\nestimated_tokens: 'not-a-number'", "/x.yaml");
+    const m = parseManifest("name: x\nversion: 1\ntaxonomy: world\nfiles: []\nestimated_tokens: 'not-a-number'", "/x.yaml");
     expect(m.estimatedTokens).toBeUndefined();
   });
 });
@@ -121,7 +123,7 @@ describe("parseManifest — bounded version predicate enforcement (R2 HIGH-2)", 
   });
 
   it("still accepts a bounded delimiter-free version (dots/underscore/plus/hyphen allowed)", () => {
-    const m = parseManifest("name: x\nversion: '1.2.0-rc.1+build_7'\nfiles: []", "/x.yaml");
+    const m = parseManifest("name: x\nversion: '1.2.0-rc.1+build_7'\ntaxonomy: world\nfiles: []", "/x.yaml");
     expect(m.version).toBe("1.2.0-rc.1+build_7");
   });
 });

@@ -18,6 +18,7 @@ function writePackAt(root: string, refPath: string, name: string, version = "1")
   writeFileSync(join(dir, "manifest.yaml"), `
 name: ${name}
 version: ${version}
+taxonomy: world
 purpose: test pack
 files:
   - path: notes.md

@@ -165,6 +165,9 @@ function renderManifest({ name, version, purpose, files }) {
     "# Package-time projection of a canonical skill; regenerated every build.",
     `name: ${JSON.stringify(name)}`,
     `version: ${JSON.stringify(version)}`,
+    // OPR.0.5.6.10 mini-req 3 — the projection stamps its packs "skills":
+    // a skill pack is procedural capability by construction.
+    'taxonomy: "skills"',
   ];
   if (purpose) lines.push(`purpose: ${JSON.stringify(purpose)}`);
   lines.push("files:");

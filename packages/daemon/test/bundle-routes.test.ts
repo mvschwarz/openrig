@@ -1560,7 +1560,7 @@ describe("Bundle API routes", () => {
       fs.writeFileSync(path.join(sourceRoot, "workflows/author-flow.yaml"), "workflow:\n  id: author-flow\n  version: '1'\n  roles: { producer: {} }\n  steps:\n    - id: produce\n      actor_role: producer\n");
       // context_packs: manifest.yaml inside a dir (vendor copies parent dir)
       fs.mkdirSync(path.join(sourceRoot, "context-packs/author-pack"), { recursive: true });
-      fs.writeFileSync(path.join(sourceRoot, "context-packs/author-pack/manifest.yaml"), "name: author-pack\nversion: '1'\nfiles:\n  - path: brief.md\n    role: brief\n");
+      fs.writeFileSync(path.join(sourceRoot, "context-packs/author-pack/manifest.yaml"), "name: author-pack\nversion: '1'\ntaxonomy: mission\nfiles:\n  - path: brief.md\n    role: brief\n");
       fs.writeFileSync(path.join(sourceRoot, "context-packs/author-pack/brief.md"), "# brief");
       // agent_images: dir
       fs.mkdirSync(path.join(sourceRoot, "agent-images/author-image"), { recursive: true });
@@ -2181,6 +2181,7 @@ describe("Bundle API routes", () => {
         fs.mkdirSync(packDir, { recursive: true });
         const validManifest = `name: bundle-routed-intent
 version: '1'
+taxonomy: mission
 purpose: A bundle-routed context-pack fixture
 files:
   - path: brief.md

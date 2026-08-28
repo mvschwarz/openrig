@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 const MANIFEST = `
 name: world-install
 version: "1"
+taxonomy: world
 files:
   - { path: walk.md, role: world }
 atoms:

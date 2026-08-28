@@ -18,7 +18,7 @@ import { ContextPackError } from "../src/domain/context-packs/context-pack-types
 function writePack(root: string, ref: string, name = "existing"): void {
   const dir = join(root, ref);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "manifest.yaml"), `name: ${name}\nversion: 1\nfiles:\n  - path: notes.md\n    role: source\n`);
+  writeFileSync(join(dir, "manifest.yaml"), `name: ${name}\nversion: 1\ntaxonomy: mission\nfiles:\n  - path: notes.md\n    role: source\n`);
   writeFileSync(join(dir, "notes.md"), "existing bytes");
 }
 
@@ -116,6 +116,7 @@ describe("ATOM 3 — durable compose into the Atom-2 ref store", () => {
       name: "qitem-brief",
       version: "1",
       purpose: "Composed from 3 ordered files",
+      taxonomy: "mission",
       files: [
         { path: "source-0001.md", role: "source", summary: injectionShapedLabel },
         { path: "source-0002.yaml", role: "source", summary: "c.yaml" },

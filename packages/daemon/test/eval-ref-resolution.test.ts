@@ -15,7 +15,7 @@ const REPO = resolve(HERE, "..", "..", "..");
 const prod = mkdtempSync(join(tmpdir(), "eval-ref-res-"));
 afterAll(() => rmSync(prod, { recursive: true, force: true }));
 mkdirSync(join(prod, "skills/core/known"), { recursive: true });
-writeFileSync(join(prod, "skills/core/known/manifest.yaml"), 'name: known\nversion: "1"\nfiles: []\n');
+writeFileSync(join(prod, "skills/core/known/manifest.yaml"), 'name: known\nversion: "1"\ntaxonomy: skills\nfiles: []\n');
 
 const CASES: EvalCase[] = [
   { id: "good", name: "x", category: "selection", prompt: "p", expectedPatterns: ["rig context get\\s+skills/core/known"] },

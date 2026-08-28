@@ -70,6 +70,7 @@ const FIXTURE_PACK = {
   name: "smoke",
   version: "1",
   purpose: "Smoke test pack",
+  taxonomy: "mission",
   sourceType: "user_file" as const,
   sourcePath: "/home/op/.openrig/context-packs/smoke",
   relativePath: "packs/smoke",
@@ -226,6 +227,7 @@ describe("rig context CLI (PL-014)", () => {
       "path traversal",
       `name: invalid-pack
 version: 1.0.0
+taxonomy: world
 files:
   - path: ../secret.md
     role: notes
@@ -236,6 +238,7 @@ files:
       "absolute path",
       `name: invalid-pack
 version: 1.0.0
+taxonomy: world
 files:
   - path: /etc/passwd
     role: notes
@@ -246,6 +249,7 @@ files:
       "leading backslash",
       `name: invalid-pack
 version: 1.0.0
+taxonomy: world
 files:
   - path: '\\evil.md'
     role: notes
@@ -256,6 +260,7 @@ files:
       "unknown suffix",
       `name: invalid-pack
 version: 1.0.0
+taxonomy: world
 files:
   - path: secret.bin
     role: notes
@@ -284,6 +289,7 @@ files:
       "missing files",
       `name: invalid-pack
 version: 1.0.0
+taxonomy: world
 `,
       "must declare 'files: [...]'",
     ],
@@ -291,6 +297,7 @@ version: 1.0.0
       "missing path",
       `name: invalid-pack
 version: 1.0.0
+taxonomy: world
 files:
   - role: notes
 `,
@@ -300,10 +307,32 @@ files:
       "missing role",
       `name: invalid-pack
 version: 1.0.0
+taxonomy: world
 files:
   - path: notes.md
 `,
       "missing 'role'",
+    ],
+    [
+      "missing taxonomy (OPR.0.5.6.10 — teach at add time)",
+      `name: invalid-pack
+version: 1.0.0
+files:
+  - path: notes.md
+    role: notes
+`,
+      "missing required field 'taxonomy'",
+    ],
+    [
+      "non-enum taxonomy (OPR.0.5.6.10)",
+      `name: invalid-pack
+version: 1.0.0
+taxonomy: doctrine
+files:
+  - path: notes.md
+    role: notes
+`,
+      "invalid taxonomy",
     ],
   ])("rejects invalid context add manifest: %s", async (_name, manifest, expectedError) => {
     const dir = writePack(manifest);
@@ -490,7 +519,7 @@ files:
     }
   }
 
-  const R4_MANIFEST = "name: url-pack\nversion: 1.0.0\nfiles:\n  - path: SKILL.md\n    role: instruction\n";
+  const R4_MANIFEST = "name: url-pack\nversion: 1.0.0\ntaxonomy: world\nfiles:\n  - path: SKILL.md\n    role: instruction\n";
 
   it("add <url>: installs into the OPENRIG_CONTEXT_PACKS_ROOT landing zone (config-resolved, no hardcoded path)", async () => {
     const pack = await startPackServer({ "manifest.yaml": R4_MANIFEST, "SKILL.md": "# hello\nbody\n" });
@@ -531,7 +560,7 @@ files:
   it("add <url>: refuses an absolute-URL file that would escape the pack origin, leaves NO partial (r2 HIGH-1)", async () => {
     // The validator accepts a URL-shaped .md path; new URL() would honor it and
     // fetch cross-origin. The boundary guard must refuse before any fetch.
-    const absManifest = "name: evil-pack\nversion: 1.0.0\nfiles:\n  - path: http://127.0.0.1:1/secret.md\n    role: instruction\n";
+    const absManifest = "name: evil-pack\nversion: 1.0.0\ntaxonomy: world\nfiles:\n  - path: http://127.0.0.1:1/secret.md\n    role: instruction\n";
     const pack = await startPackServer({ "manifest.yaml": absManifest });
     try {
       await withPacksRoot(async (root) => {
@@ -559,7 +588,7 @@ files:
   });
 
   it("add <url>: malformed manifest fails loud with the reason and leaves NO partial pack", async () => {
-    const pack = await startPackServer({ "manifest.yaml": "name: bad\nversion: 1.0.0\nfiles:\n  - path: ../escape.md\n    role: x\n" });
+    const pack = await startPackServer({ "manifest.yaml": "name: bad\nversion: 1.0.0\ntaxonomy: world\nfiles:\n  - path: ../escape.md\n    role: x\n" });
     try {
       await withPacksRoot(async (root) => {
         const { errLogs, exitCode } = await captureLogs(async () => {

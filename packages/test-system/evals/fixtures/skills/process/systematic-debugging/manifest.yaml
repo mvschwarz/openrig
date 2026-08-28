@@ -1,5 +1,6 @@
 name: systematic-debugging
 version: "1"
+taxonomy: skills
 purpose: "(eval fixture) chase a failure methodically"
 files:
   - path: content.md

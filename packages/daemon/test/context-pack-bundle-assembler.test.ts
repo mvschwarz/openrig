@@ -12,6 +12,7 @@ function makeEntry(opts: Partial<ContextPackEntry> & { files: ContextPackEntry["
     name: opts.name ?? "test",
     version: opts.version ?? "1",
     purpose: opts.purpose ?? null,
+    taxonomy: opts.taxonomy ?? "world",
     sourceType: opts.sourceType ?? "user_file",
     sourcePath: opts.sourcePath ?? "/tmp/test",
     relativePath: opts.relativePath ?? "test",

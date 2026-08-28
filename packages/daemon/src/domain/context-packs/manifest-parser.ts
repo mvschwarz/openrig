@@ -13,6 +13,7 @@ import {
   ATOM_RUNTIMES,
   ATOM_SITUATIONS,
   ATOM_TAXONOMIES,
+  TAXONOMY_TEACHING,
   ContextPackError,
   type ContextPackAtom,
   type ContextPackManifest,
@@ -86,6 +87,26 @@ export function parseManifest(rawYaml: string, sourcePath: string): ContextPackM
 
   const purpose = typeof obj["purpose"] === "string" ? (obj["purpose"] as string) : undefined;
 
+  // OPR.0.5.6.10 mini-req 2 — the pack-level classification is REQUIRED and
+  // fails LOUD with the migration instruction in the error. No grandfather
+  // clause: an unstamped pack cannot ship, and the refusal teaches the fix.
+  const taxonomyRaw = obj["taxonomy"];
+  if (taxonomyRaw === undefined || taxonomyRaw === null) {
+    throw new ContextPackError(
+      "manifest_invalid",
+      `manifest at ${sourcePath} is missing required field 'taxonomy' — every context pack declares what kind of context it is. ${TAXONOMY_TEACHING}`,
+      { sourcePath },
+    );
+  }
+  if (typeof taxonomyRaw !== "string" || !(ATOM_TAXONOMIES as readonly string[]).includes(taxonomyRaw)) {
+    throw new ContextPackError(
+      "manifest_invalid",
+      `manifest at ${sourcePath} has invalid taxonomy ${JSON.stringify(taxonomyRaw)}. ${TAXONOMY_TEACHING}`,
+      { sourcePath },
+    );
+  }
+  const taxonomy = taxonomyRaw as (typeof ATOM_TAXONOMIES)[number];
+
   const filesRaw = obj["files"];
   if (!Array.isArray(filesRaw)) {
     throw new ContextPackError(
@@ -150,6 +171,7 @@ export function parseManifest(rawYaml: string, sourcePath: string): ContextPackM
     name,
     version,
     ...(purpose !== undefined ? { purpose } : {}),
+    taxonomy,
     files,
     ...(estimatedTokens !== undefined ? { estimatedTokens } : {}),
     ...(atoms !== undefined ? { atoms } : {}),

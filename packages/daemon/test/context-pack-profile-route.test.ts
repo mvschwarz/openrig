@@ -18,6 +18,7 @@ import { contextPacksRoutes } from "../src/routes/context-packs.js";
 const MANIFEST = `
 name: world-install
 version: "1"
+taxonomy: world
 files:
   - { path: walk.md, role: world }
 atoms:
@@ -250,7 +251,7 @@ describe("GET /library/by-ref/profile — situation-composed delivery (Atom 4b)"
 
     const noAtomsDir = join(libRoot, "packs", "bare");
     mkdirSync(noAtomsDir, { recursive: true });
-    writeFileSync(join(noAtomsDir, "manifest.yaml"), 'name: bare\nversion: "1"\nfiles:\n  - { path: a.md, role: x }\n');
+    writeFileSync(join(noAtomsDir, "manifest.yaml"), 'name: bare\nversion: "1"\ntaxonomy: world\nfiles:\n  - { path: a.md, role: x }\n');
     writeFileSync(join(noAtomsDir, "a.md"), "## A\nbody");
     const lib2res = await app.request("/api/context-packs/library/by-ref/profile?ref=packs%2Fbare&situation=fresh&runtime=claude");
     // Library must be re-synced to see it; the route itself reads the manifest fresh.
@@ -267,6 +268,7 @@ describe("GET /library/by-ref/profile — situation-composed delivery (Atom 4b)"
 const SYNTHETIC_WORLD_MANIFEST = `
 name: synthetic-world
 version: "1"
+taxonomy: world
 files:
   - { path: world-from-primitives.md, role: world }
   - { path: permission-self-sleep.md, role: world }

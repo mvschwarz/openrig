@@ -16,6 +16,7 @@ import { parseManifest } from "../src/domain/context-packs/manifest-parser.js";
 const BASE = `
 name: world-install
 version: "1"
+taxonomy: world
 files:
   - { path: 04-ontology.md, role: world }
   - { path: what-you-can-do.md, role: world }
