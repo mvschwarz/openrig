@@ -8,6 +8,7 @@ import {
 } from "../src/domain/scope/scope-audit.js";
 import {
   NODE_FILE_PRECEDENCE,
+  NOTES_FILE_PRECEDENCE,
   resolveNotesFile as resolveDaemonNotesFile,
 } from "../src/domain/scope/node-file.js";
 
@@ -105,7 +106,7 @@ describe("scope-audit CLI/daemon parity (CI-FAILING)", () => {
       for (const file of readers) {
         const privateChecks = fs.readFileSync(path.join(REPO_ROOT, file), "utf8")
           .split("\n")
-          .filter((line) => /(?:path\.join|childPath|existsSync|accessSync|statSync).*\b(?:NOTES|MISSION_NOTES)\.md\b/.test(line));
+          .filter((line) => /missionNotes(?:Current|Legacy|Exists)|(?:childPath|existsSync|accessSync|statSync).*\b(?:NOTES|MISSION_NOTES)\.md\b/.test(line));
         expect(privateChecks, file).toEqual([]);
       }
     });
@@ -139,6 +140,9 @@ describe("mission notes resolver parity", () => {
     const cli = await import(path.join(REPO_ROOT, "packages/cli/src/lib/scope/scope-fs.ts"));
     try {
       expect(NODE_FILE_PRECEDENCE).toEqual(["SPEC.md", "README.md"]);
+      expect(cli.NODE_FILE_PRECEDENCE).toEqual(NODE_FILE_PRECEDENCE);
+      expect(NOTES_FILE_PRECEDENCE).toEqual(["NOTES.md", "MISSION_NOTES.md"]);
+      expect(cli.NOTES_FILE_PRECEDENCE).toEqual(NOTES_FILE_PRECEDENCE);
       const fixtures = [
         { name: "current", files: ["NOTES.md"], bound: "NOTES.md" },
         { name: "legacy", files: ["MISSION_NOTES.md"], bound: "MISSION_NOTES.md" },

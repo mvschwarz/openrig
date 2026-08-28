@@ -47,8 +47,10 @@ import {
   listSlices,
   moveSlice,
   nextSliceNN,
+  NOTES_FILE_PRECEDENCE,
   pad2,
   readFrontmatter,
+  resolveNotesFile,
   resolveMissionsRoot,
   splitFrontmatter,
   todayDateISO,
@@ -844,9 +846,9 @@ function buildAuditCommand(): Command {
 
         const missionReadme = resolveNodeFile(missionDir) ?? path.join(missionDir, "SPEC.md");
         const missionProgress = path.join(missionDir, "PROGRESS.md");
-        const missionNotesCurrent = path.join(missionDir, "NOTES.md");
-        const missionNotesLegacy = path.join(missionDir, "MISSION_NOTES.md");
-        const missionNotesExists = fs.existsSync(missionNotesCurrent) || fs.existsSync(missionNotesLegacy);
+        const missionNotesResolution = resolveNotesFile(missionDir);
+        const missionNotesPath = missionNotesResolution?.path
+          ?? path.join(missionDir, NOTES_FILE_PRECEDENCE[0]);
         const missionReadmeExists = fs.existsSync(missionReadme);
         const missionProgressExists = fs.existsSync(missionProgress);
         const auditMission: MissionInfo = missionReadmeExists
@@ -887,8 +889,8 @@ function buildAuditCommand(): Command {
             readmeOnlyMarker: false,
             isActiveRelease: true,
             level: "mission",
-            missionNotesExists,
-            missionNotesPath: missionNotesCurrent,
+            missionNotesResolution,
+            missionNotesPath,
           });
         }
 
@@ -1708,11 +1710,11 @@ function ensureConventionFrontmatter(specPath: string, fallbackName: string): vo
 }
 
 function ensureMissionNotesSurface(dir: string, mission: ReturnType<typeof findMission>): void {
-  const notesPath = path.join(dir, "NOTES.md");
-  if (fs.existsSync(notesPath)) return;
-  const legacyPath = path.join(dir, "MISSION_NOTES.md");
-  if (fs.existsSync(legacyPath)) {
-    fs.copyFileSync(legacyPath, notesPath);
+  const notesPath = path.join(dir, NOTES_FILE_PRECEDENCE[0]);
+  const resolved = resolveNotesFile(dir);
+  if (resolved?.name === NOTES_FILE_PRECEDENCE[0]) return;
+  if (resolved) {
+    fs.copyFileSync(resolved.path, notesPath);
     return;
   }
   const rendered = renderNotesTemplate({

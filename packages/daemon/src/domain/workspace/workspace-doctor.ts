@@ -20,7 +20,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { decodeAllowlist } from "../files/path-safety.js";
-import { resolveNodeFile, withSpecFirst } from "../scope/node-file.js";
+import { resolveNodeFile, resolveNotesFile, withSpecFirst } from "../scope/node-file.js";
 
 export type CheckStatus = "ok" | "warn" | "fail";
 
@@ -578,9 +578,7 @@ export function checkMissionNotesPresence(opts: CheckMissionNotesInput): DoctorC
   const missing: MissionWithoutNotes[] = [];
   for (const mission of missions) {
     const missionDir = path.join(missionsRoot, mission);
-    const currentNotesPath = path.join(missionDir, "NOTES.md");
-    const legacyNotesPath = path.join(missionDir, "MISSION_NOTES.md");
-    if (!fs.existsSync(currentNotesPath) && !fs.existsSync(legacyNotesPath)) {
+    if (resolveNotesFile(missionDir) === null) {
       missing.push({ mission, path: missionDir });
     }
   }

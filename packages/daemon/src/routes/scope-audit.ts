@@ -11,7 +11,7 @@ import {
   type ScopeAuditResult,
 } from "../domain/scope/scope-audit.js";
 import type { SliceIndexer } from "../domain/slices/slice-indexer.js";
-import { resolveNodeFile } from "../domain/scope/node-file.js";
+import { NOTES_FILE_PRECEDENCE, resolveNodeFile, resolveNotesFile } from "../domain/scope/node-file.js";
 
 function extractFrontmatterRaw(content: string): string | null {
   if (!content.startsWith("---")) return null;
@@ -156,9 +156,9 @@ export function scopeAuditRoutes(): Hono {
     return indexer.withMembershipBatch(() => {
       const missionReadme = resolveNodeFile(missionDir) ?? path.join(missionDir, "SPEC.md");
       const missionProgress = path.join(missionDir, "PROGRESS.md");
-      const missionNotesCurrent = path.join(missionDir, "NOTES.md");
-      const missionNotesLegacy = path.join(missionDir, "MISSION_NOTES.md");
-      const missionNotesExists = fs.existsSync(missionNotesCurrent) || fs.existsSync(missionNotesLegacy);
+      const missionNotesResolution = resolveNotesFile(missionDir);
+      const missionNotesPath = missionNotesResolution?.path
+        ?? path.join(missionDir, NOTES_FILE_PRECEDENCE[0]);
       const missionReadmeExists = fs.existsSync(missionReadme);
       const missionProgressExists = fs.existsSync(missionProgress);
       const graph = buildAuditDependencyGraph(missionName, missionDir);
@@ -188,8 +188,8 @@ export function scopeAuditRoutes(): Hono {
             readmeOnlyMarker: false,
             isActiveRelease: true,
             level: "mission",
-            missionNotesExists,
-            missionNotesPath: missionNotesCurrent,
+            missionNotesResolution,
+            missionNotesPath,
           });
       }
 

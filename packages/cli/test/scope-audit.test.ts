@@ -301,33 +301,33 @@ describe("scope-audit classifier", () => {
   });
 
   // TIGHTENED: missing_mission_notes gates on ACTIVE mission status
-  it("active mission (no status) without MISSION_NOTES emits missing_mission_notes", () => {
+  it("active mission (no status) without notes emits missing_mission_notes", () => {
     const result = classifyScopeItem(makeInput({
       level: "mission",
       readmeFrontmatterRaw: "id: OPR.0.4.1",
       progressFileExists: true,
-      missionNotesExists: false,
+      missionNotesResolution: null,
     }));
     expect(result.findings.some((f) => f.kind === "missing_mission_notes")).toBe(true);
   });
 
-  it("active mission (explicit active status) without MISSION_NOTES emits missing_mission_notes", () => {
+  it("active mission (explicit active status) without notes emits missing_mission_notes", () => {
     const result = classifyScopeItem(makeInput({
       level: "mission",
       readmeFrontmatterRaw: "id: OPR.0.4.1\nstatus: active",
       progressFileExists: true,
-      missionNotesExists: false,
+      missionNotesResolution: null,
     }));
     expect(result.findings.some((f) => f.kind === "missing_mission_notes")).toBe(true);
   });
 
-  it("terminal mission (shipped/archived/complete) without MISSION_NOTES does NOT emit missing_mission_notes", () => {
+  it("terminal mission (shipped/archived/complete) without notes does NOT emit missing_mission_notes", () => {
     for (const status of ["shipped", "archived", "complete", "closed", "historical", "superseded"]) {
       const result = classifyScopeItem(makeInput({
         level: "mission",
         readmeFrontmatterRaw: `id: OPR.0.4.1\nstatus: ${status}`,
         progressFileExists: true,
-        missionNotesExists: false,
+        missionNotesResolution: null,
       }));
       expect(
         result.findings.some((f) => f.kind === "missing_mission_notes"),

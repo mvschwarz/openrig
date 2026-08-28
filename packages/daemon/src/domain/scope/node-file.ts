@@ -16,6 +16,29 @@ import path from "node:path";
  */
 export const NODE_FILE_PRECEDENCE = ["SPEC.md", "README.md"] as const;
 
+/** Current mission notes name followed by the indefinitely-readable legacy name. */
+export const NOTES_FILE_PRECEDENCE = ["NOTES.md", "MISSION_NOTES.md"] as const;
+
+export interface NotesFileResolution {
+  path: string;
+  name: (typeof NOTES_FILE_PRECEDENCE)[number];
+}
+
+/** Resolve the first readable mission notes file, preferring the current name. */
+export function resolveNotesFile(absPath: string): NotesFileResolution | null {
+  for (const name of NOTES_FILE_PRECEDENCE) {
+    const candidate = path.join(absPath, name);
+    try {
+      if (!fs.statSync(candidate).isFile()) continue;
+      fs.accessSync(candidate, fs.constants.R_OK);
+      return { path: candidate, name };
+    } catch {
+      // Missing, unreadable, and non-file candidates all fall through to the next name.
+    }
+  }
+  return null;
+}
+
 /**
  * Prepend the current node filename to a precedence list that already exists.
  *

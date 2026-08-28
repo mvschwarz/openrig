@@ -49,7 +49,10 @@ export interface ScopeAuditInput {
   missionBriefExists?: boolean;
   missionBriefPath?: string;
   missionBriefContent?: string | null;
-  missionNotesExists?: boolean;
+  missionNotesResolution?: {
+    path: string;
+    name: "NOTES.md" | "MISSION_NOTES.md";
+  } | null;
   missionNotesPath?: string;
   proofFileExists?: boolean;
   proofFilePath?: string;
@@ -345,15 +348,15 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
 
   if (input.level === "mission") {
     if (
-      input.missionNotesExists === false
+      input.missionNotesResolution === null
       && missionIsActive(parseStatusFromFrontmatter(input.readmeFrontmatterRaw))
     ) {
-      const notesPath = input.missionNotesPath ?? childPath(input.path, "NOTES.md");
+      const notesPath = input.missionNotesPath ?? input.path;
       findings.push({
         kind: "missing_mission_notes",
         severity: "low",
         path: notesPath,
-        message: "Mission has no NOTES.md context file.",
+        message: "Mission has no NOTES.md or readable legacy MISSION_NOTES.md context file.",
         remediation: "Add NOTES.md at the mission root. Existing MISSION_NOTES.md remains a readable legacy fallback.",
       });
     }
