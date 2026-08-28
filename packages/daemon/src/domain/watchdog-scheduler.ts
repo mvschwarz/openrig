@@ -124,13 +124,14 @@ export class WatchdogScheduler {
 
   private async tick(): Promise<void> {
     if (this.shuttingDown) return;
-    const nowMs = this.now().getTime();
+    const passStartedAt = this.now();
+    const nowMs = passStartedAt.getTime();
     const active = this.jobsRepo.listActive();
     for (const job of active) {
       if (this.shuttingDown) return;
       if (!isDue(job, nowMs)) continue;
       try {
-        await this.policyEngine.evaluate(job);
+        await this.policyEngine.evaluate(job, passStartedAt.toISOString());
       } catch (err) {
         this.onTickError(err);
       }

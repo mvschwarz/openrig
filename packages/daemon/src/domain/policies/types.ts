@@ -26,6 +26,13 @@ export interface PolicyJob {
   lastFireAt: string | null;
   registeredBySession: string;
   registeredAt: string;
+  watchedFilePath: string | null;
+  thresholdBytes: number | null;
+  requiresJobId: string | null;
+  lastFiredGeneration: string | null;
+  occupantGeneration: string | null;
+  requiredReceiptSatisfied: boolean;
+  requiredReceiptDeferred: boolean;
 }
 
 export type PolicyEvaluation =

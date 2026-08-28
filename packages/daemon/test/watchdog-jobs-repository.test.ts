@@ -9,6 +9,7 @@ import { watchdogHistorySchema } from "../src/db/migrations/032_watchdog_history
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { occupantGenerationStampsSchema } from "../src/db/migrations/063_occupant_generation_stamps.js";
 import { watchdogTargetGenerationSchema } from "../src/db/migrations/066_watchdog_target_generation.js";
+import { contextUsageWatchdogSchema } from "../src/db/migrations/074_context_usage_watchdog.js";
 import {
   PHASE_C_POLICIES,
   WatchdogJobsError,
@@ -22,7 +23,13 @@ describe("WatchdogJobsRepository (PL-004 Phase C)", () => {
 
   beforeEach(() => {
     db = createDb();
-    migrate(db, [coreSchema, eventsSchema, watchdogJobsSchema, watchdogHistorySchema]);
+    migrate(db, [
+      coreSchema,
+      eventsSchema,
+      watchdogJobsSchema,
+      watchdogHistorySchema,
+      contextUsageWatchdogSchema,
+    ]);
     repo = new WatchdogJobsRepository(db);
   });
 
@@ -39,9 +46,14 @@ describe("WatchdogJobsRepository (PL-004 Phase C)", () => {
     };
   }
 
-  it("register stores all three v1 policies + actionable defaults to false", () => {
+  it("register stores every accepted policy + actionable defaults to false", () => {
     for (const p of PHASE_C_POLICIES) {
-      const job = repo.register(validInput({ policy: p }));
+      const job = repo.register(validInput({
+        policy: p,
+        ...(p === "context-usage-threshold"
+          ? { watchedFilePath: "/tmp/transcript.jsonl", thresholdBytes: 1 }
+          : {}),
+      }));
       expect(job.policy).toBe(p);
       expect(job.state).toBe("active");
       expect(job.actionable).toBe(false);

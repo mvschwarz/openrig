@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { EventBus } from "../domain/event-bus.js";
@@ -6,6 +7,7 @@ import {
   type WatchdogJobsRepository,
   WatchdogJobsError,
 } from "../domain/watchdog-jobs-repository.js";
+import { parseWatchdogSpec } from "../domain/watchdog-policy-engine.js";
 
 /**
  * Watchdog HTTP routes (PL-004 Phase C). Backs `rig watchdog` CLI verb.
@@ -46,6 +48,10 @@ export function watchdogRoutes(): Hono {
         : err.code === "policy_deferred_to_phase_d" ? 400
         : err.code === "interval_invalid" ? 400
         : err.code === "target_session_invalid" ? 400
+        : err.code === "context_usage_schema_missing" ? 400
+        : err.code === "threshold_invalid" ? 400
+        : err.code === "watched_file_unresolved" ? 400
+        : err.code === "requires_job_not_found" ? 400
         : err.code === "job_terminal" ? 409
         : 500;
       return c.json(
@@ -67,6 +73,9 @@ export function watchdogRoutes(): Hono {
         activeWakeIntervalSeconds?: number;
         scanIntervalSeconds?: number;
         registeredBySession?: string;
+        watchedFilePath?: string;
+        thresholdBytes?: number;
+        requiresJobId?: string;
       }>()
       .catch(() => ({} as never));
     if (!body.policy) return c.json({ error: "policy is required" }, 400);
@@ -77,7 +86,33 @@ export function watchdogRoutes(): Hono {
     }
     if (!body.registeredBySession) return c.json({ error: "registeredBySession is required" }, 400);
     try {
-      const job = getJobsRepo(c).register({
+      const jobsRepo = getJobsRepo(c);
+      const context = parseWatchdogSpec(body.specYaml).context;
+      const isContextUsageThreshold = body.policy === "context-usage-threshold";
+      const specWatchedFile = typeof context.watched_file === "string"
+        ? context.watched_file
+        : null;
+      const specThresholdBytes = typeof context.threshold_bytes === "number"
+        ? context.threshold_bytes
+        : null;
+      const specRequiresJobId = typeof context.requires === "string"
+        ? context.requires
+        : null;
+      const watchedFilePath = isContextUsageThreshold
+        ? (body.watchedFilePath ?? specWatchedFile ?? jobsRepo.findTranscriptPath(body.targetSession))
+        : null;
+      if (isContextUsageThreshold) {
+        try {
+          if (!watchedFilePath || !statSync(watchedFilePath).isFile()) throw new Error("not a file");
+        } catch {
+          throw new WatchdogJobsError(
+            "watched_file_unresolved",
+            `no readable transcript file could be resolved for ${body.targetSession}`,
+            { targetSession: body.targetSession, watchedFilePath },
+          );
+        }
+      }
+      const job = jobsRepo.register({
         policy: body.policy,
         specYaml: body.specYaml,
         targetSession: body.targetSession,
@@ -85,6 +120,13 @@ export function watchdogRoutes(): Hono {
         activeWakeIntervalSeconds: body.activeWakeIntervalSeconds,
         scanIntervalSeconds: body.scanIntervalSeconds,
         registeredBySession: body.registeredBySession,
+        watchedFilePath,
+        thresholdBytes: isContextUsageThreshold
+          ? (body.thresholdBytes ?? specThresholdBytes)
+          : null,
+        requiresJobId: isContextUsageThreshold
+          ? (body.requiresJobId ?? specRequiresJobId)
+          : null,
       });
       getEventBus(c).emit({
         type: "watchdog.job_registered",

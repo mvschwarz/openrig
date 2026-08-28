@@ -8,14 +8,14 @@ import { ulid } from "ulid";
  * event-bus, no scheduler, no policy dispatch. Composed by the
  * scheduler and policy engine.
  *
- * Phase D v1 accepts FOUR policy values (the orch-ratified Phase C
- * `workflow-keepalive` deferral has been lifted; the policy module
- * now exists at `policies/workflow-keepalive.ts` and reads from the
- * SQLite `workflow_instances` table introduced in Phase D):
+ * Accepted policy values include the orch-ratified Phase C set plus
+ * daemon-native workflow, idle-gate, and context-usage conditions:
  *   - periodic-reminder (Phase C)
  *   - artifact-pool-ready (Phase C)
  *   - edge-artifact-required (Phase C)
  *   - workflow-keepalive (Phase D)
+ *   - idle-gate-qitem
+ *   - context-usage-threshold
  *
  * PHASE_C_POLICIES retained as a deprecated alias for callers that
  * still reference it; new code uses PHASE_D_POLICIES.
@@ -30,6 +30,7 @@ export const PHASE_D_POLICIES = [
   // AgentActivityStore-backed; factory-constructed at startup and injected
   // via WatchdogPolicyEngine additionalPolicies (like workflow-keepalive).
   "idle-gate-qitem",
+  "context-usage-threshold",
 ] as const;
 
 /** @deprecated since Phase D — use PHASE_D_POLICIES. */
@@ -60,6 +61,12 @@ export interface WatchdogJob {
   /** (i-c) opt-in target occupant-generation this wake is bound to; null = ROLE-bound (fire at whoever
    *  occupies the seat name). Only a non-null value opts the job into the fire-time gen-gate. */
   targetGeneration: string | null;
+  /** Transcript-byte condition state. Null on every other policy. */
+  watchedFilePath: string | null;
+  thresholdBytes: number | null;
+  requiresJobId: string | null;
+  /** The latest occupant generation for which this threshold fired. */
+  lastFiredGeneration: string | null;
 }
 
 export interface RegisterWatchdogJobInput {
@@ -73,6 +80,9 @@ export interface RegisterWatchdogJobInput {
   /** (i-c) opt-in: the occupant-generation this wake is bound to. Omit/null = ROLE-bound (the common
    *  case — fires at whoever occupies the seat, unchanged). Non-null opts into the fire-time gen-gate. */
   targetGenerationUuid?: string | null;
+  watchedFilePath?: string | null;
+  thresholdBytes?: number | null;
+  requiresJobId?: string | null;
 }
 
 export type EnsureAutoRegistrationInput = RegisterWatchdogJobInput;
@@ -95,6 +105,10 @@ interface JobRow {
   terminal_reason: string | null;
   registered_by_generation_uuid?: string | null;
   target_generation_uuid?: string | null;
+  watched_file_path?: string | null;
+  threshold_bytes?: number | null;
+  requires_job_id?: string | null;
+  last_fired_generation_uuid?: string | null;
 }
 
 export class WatchdogJobsError extends Error {
@@ -122,6 +136,7 @@ function detectWatchdogColumn(db: Database.Database, columnName: string): boolea
 export class WatchdogJobsRepository {
   private readonly hasGenColumn: boolean;
   private readonly hasTargetGenColumn: boolean;
+  private readonly hasContextUsageColumns: boolean;
   constructor(
     private readonly db: Database.Database,
     private readonly now: () => Date = () => new Date(),
@@ -132,6 +147,7 @@ export class WatchdogJobsRepository {
   ) {
     this.hasGenColumn = detectWatchdogColumn(db, "registered_by_generation_uuid");
     this.hasTargetGenColumn = detectWatchdogColumn(db, "target_generation_uuid");
+    this.hasContextUsageColumns = detectWatchdogColumn(db, "last_fired_generation_uuid");
   }
 
   register(input: RegisterWatchdogJobInput): WatchdogJob {
@@ -156,6 +172,36 @@ export class WatchdogJobsRepository {
         { targetSession: input.targetSession },
       );
     }
+    const isContextUsageThreshold = input.policy === "context-usage-threshold";
+    if (isContextUsageThreshold && !this.hasContextUsageColumns) {
+      throw new WatchdogJobsError(
+        "context_usage_schema_missing",
+        "context-usage-threshold requires migration 074_context_usage_watchdog",
+      );
+    }
+    if (
+      isContextUsageThreshold &&
+      (!Number.isInteger(input.thresholdBytes) || (input.thresholdBytes ?? 0) <= 0)
+    ) {
+      throw new WatchdogJobsError(
+        "threshold_invalid",
+        `threshold_bytes must be a positive integer (got ${String(input.thresholdBytes)})`,
+      );
+    }
+    if (isContextUsageThreshold && !input.watchedFilePath) {
+      throw new WatchdogJobsError(
+        "watched_file_unresolved",
+        `no transcript file could be resolved for ${input.targetSession}`,
+        { targetSession: input.targetSession },
+      );
+    }
+    if (isContextUsageThreshold && input.requiresJobId && !this.getById(input.requiresJobId)) {
+      throw new WatchdogJobsError(
+        "requires_job_not_found",
+        `required watchdog job ${input.requiresJobId} does not exist`,
+        { requiresJobId: input.requiresJobId },
+      );
+    }
     const jobId = ulid();
     const registeredAt = this.now().toISOString();
     // (e/Class-B): stamp the ARMING occupant's generation so a swap can drop THIS gen's armed jobs
@@ -166,55 +212,72 @@ export class WatchdogJobsRepository {
     // (i-c) opt-in TARGET generation: caller-supplied (NULL = role-bound). Stored only when the 066
     // column exists; pre-066 dbs silently degrade the opt-in to role-bound. 066 ⟹ 063 (additive order).
     const targetGenerationUuid = this.hasTargetGenColumn ? (input.targetGenerationUuid ?? null) : null;
-    if (this.hasTargetGenColumn) {
-      this.db
-        .prepare(
-          `INSERT INTO watchdog_jobs (
-            job_id, policy, spec_yaml, target_session,
-            interval_seconds, active_wake_interval_seconds, scan_interval_seconds,
-            last_evaluation_at, last_fire_at, state,
-            registered_by_session, registered_at, terminal_reason,
-            registered_by_generation_uuid, target_generation_uuid
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'active', ?, ?, NULL, ?, ?)`,
-        )
-        .run(
-          jobId, input.policy, input.specYaml, input.targetSession,
-          input.intervalSeconds, input.activeWakeIntervalSeconds ?? null, input.scanIntervalSeconds ?? null,
-          input.registeredBySession, registeredAt, registeredByGeneration, targetGenerationUuid,
-        );
-    } else if (this.hasGenColumn) {
-      this.db
-        .prepare(
-          `INSERT INTO watchdog_jobs (
-            job_id, policy, spec_yaml, target_session,
-            interval_seconds, active_wake_interval_seconds, scan_interval_seconds,
-            last_evaluation_at, last_fire_at, state,
-            registered_by_session, registered_at, terminal_reason,
-            registered_by_generation_uuid
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'active', ?, ?, NULL, ?)`,
-        )
-        .run(
-          jobId, input.policy, input.specYaml, input.targetSession,
-          input.intervalSeconds, input.activeWakeIntervalSeconds ?? null, input.scanIntervalSeconds ?? null,
-          input.registeredBySession, registeredAt, registeredByGeneration,
-        );
-    } else {
-      this.db
-        .prepare(
-          `INSERT INTO watchdog_jobs (
-            job_id, policy, spec_yaml, target_session,
-            interval_seconds, active_wake_interval_seconds, scan_interval_seconds,
-            last_evaluation_at, last_fire_at, state,
-            registered_by_session, registered_at, terminal_reason
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'active', ?, ?, NULL)`,
-        )
-        .run(
-          jobId, input.policy, input.specYaml, input.targetSession,
-          input.intervalSeconds, input.activeWakeIntervalSeconds ?? null, input.scanIntervalSeconds ?? null,
-          input.registeredBySession, registeredAt,
-        );
+    const columns = [
+      "job_id", "policy", "spec_yaml", "target_session", "interval_seconds",
+      "active_wake_interval_seconds", "scan_interval_seconds", "state",
+      "registered_by_session", "registered_at",
+    ];
+    const values: unknown[] = [
+      jobId, input.policy, input.specYaml, input.targetSession, input.intervalSeconds,
+      input.activeWakeIntervalSeconds ?? null, input.scanIntervalSeconds ?? null, "active",
+      input.registeredBySession, registeredAt,
+    ];
+    if (this.hasGenColumn) {
+      columns.push("registered_by_generation_uuid");
+      values.push(registeredByGeneration);
     }
+    if (this.hasTargetGenColumn) {
+      columns.push("target_generation_uuid");
+      values.push(targetGenerationUuid);
+    }
+    if (this.hasContextUsageColumns) {
+      columns.push(
+        "watched_file_path",
+        "threshold_bytes",
+        "requires_job_id",
+        "last_fired_generation_uuid",
+      );
+      values.push(
+        isContextUsageThreshold ? input.watchedFilePath : null,
+        isContextUsageThreshold ? input.thresholdBytes : null,
+        isContextUsageThreshold ? (input.requiresJobId ?? null) : null,
+        null,
+      );
+    }
+    this.db
+      .prepare(
+        `INSERT INTO watchdog_jobs (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
+      )
+      .run(...values);
     return this.getByIdOrThrow(jobId);
+  }
+
+  /** Latest recorded transcript path for the exact current seat name. */
+  findTranscriptPath(targetSession: string): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT transcript_path FROM context_usage
+         WHERE session_name = ? AND transcript_path IS NOT NULL AND transcript_path != ''
+         ORDER BY updated_at DESC LIMIT 1`,
+      )
+      .get(targetSession) as { transcript_path: string } | undefined;
+    return row?.transcript_path ?? null;
+  }
+
+  recordThresholdFire(jobId: string, occupantGeneration: string, firedAt: string): void {
+    if (!this.hasContextUsageColumns) {
+      throw new WatchdogJobsError(
+        "context_usage_schema_missing",
+        "context-usage-threshold requires migration 074_context_usage_watchdog",
+      );
+    }
+    this.db
+      .prepare(
+        `UPDATE watchdog_jobs
+         SET last_fired_generation_uuid = ?, last_evaluation_at = ?, last_fire_at = ?
+         WHERE job_id = ?`,
+      )
+      .run(occupantGeneration, firedAt, firedAt, jobId);
   }
 
   /**
@@ -483,5 +546,9 @@ function rowToJob(row: JobRow): WatchdogJob {
     terminalReason: row.terminal_reason,
     registeredByGeneration: row.registered_by_generation_uuid ?? null,
     targetGeneration: row.target_generation_uuid ?? null,
+    watchedFilePath: row.watched_file_path ?? null,
+    thresholdBytes: row.threshold_bytes ?? null,
+    requiresJobId: row.requires_job_id ?? null,
+    lastFiredGeneration: row.last_fired_generation_uuid ?? null,
   };
 }

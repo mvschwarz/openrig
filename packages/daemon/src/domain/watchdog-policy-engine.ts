@@ -3,6 +3,7 @@ import type { Policy, PolicyEvaluation, PolicyJob } from "./policies/types.js";
 import { artifactPoolReadyPolicy } from "./policies/artifact-pool-ready.js";
 import { edgeArtifactRequiredPolicy } from "./policies/edge-artifact-required.js";
 import { periodicReminderPolicy } from "./policies/periodic-reminder.js";
+import { contextUsageThresholdPolicy } from "./policies/context-usage-threshold.js";
 import {
   type WatchdogJob,
   type WatchdogJobsRepository,
@@ -91,6 +92,7 @@ const PHASE_C_BUILTIN_POLICIES: ReadonlyArray<Policy> = [
   periodicReminderPolicy,
   artifactPoolReadyPolicy,
   edgeArtifactRequiredPolicy,
+  contextUsageThresholdPolicy,
 ];
 
 /**
@@ -104,6 +106,8 @@ const QUIET_SKIP_REASONS = new Set<string>([
   "no_actionable_artifacts",
   "no_missing_edge_artifacts",
   "active_wake_not_due",
+  "context_usage_below_threshold",
+  "threshold_receipt_stable",
   // OPR.0.4.3.16 idle-gate-qitem routine no-ops — analogues of
   // no_actionable_artifacts. Suppressed from history/SSE so a per-second
   // scan does not spam when there is simply nothing to wake about. The
@@ -152,7 +156,7 @@ export class WatchdogPolicyEngine {
     this.deliver = deps.deliver;
     this.resolveTargetGeneration = deps.resolveTargetGeneration;
     this.onWakeAttempt = deps.onWakeAttempt;
-    this.parseSpec = deps.parseSpec ?? defaultParseSpec;
+    this.parseSpec = deps.parseSpec ?? parseWatchdogSpec;
     this.now = deps.now ?? (() => new Date());
     this.policies = new Map();
     for (const p of PHASE_C_BUILTIN_POLICIES) this.policies.set(p.name, p);
@@ -165,9 +169,10 @@ export class WatchdogPolicyEngine {
     return this.policies.get(name);
   }
 
-  async evaluate(job: WatchdogJob): Promise<EvaluationResult> {
+  async evaluate(job: WatchdogJob, evaluationPassStartedAt?: string): Promise<EvaluationResult> {
     const policy = this.resolvePolicy(job.policy);
     const evaluatedAt = this.now().toISOString();
+    const receiptCutoffAt = evaluationPassStartedAt ?? evaluatedAt;
 
     if (!policy) {
       const reason = `unknown_policy:${job.policy}`;
@@ -194,7 +199,34 @@ export class WatchdogPolicyEngine {
     }
 
     const parsed = this.parseSpec(job.specYaml);
-    const target = parsed.target ?? { session: job.targetSession };
+    const isContextUsageThreshold = job.policy === "context-usage-threshold";
+    const target = isContextUsageThreshold
+      ? { session: job.targetSession }
+      : (parsed.target ?? { session: job.targetSession });
+    const occupantGeneration = isContextUsageThreshold
+      ? (this.resolveTargetGeneration?.(job.targetSession) ?? null)
+      : null;
+    const requiredJob = job.requiresJobId ? this.jobsRepo.getById(job.requiresJobId) : null;
+    const requiredReceiptGenerationMatched = occupantGeneration !== null &&
+      requiredJob?.lastFiredGeneration === occupantGeneration;
+    const requiredFireMs = Date.parse(requiredJob?.lastFireAt ?? "");
+    const receiptCutoffMs = Date.parse(receiptCutoffAt);
+    const receiptPredatesBoundary = evaluationPassStartedAt === undefined
+      ? requiredFireMs <= receiptCutoffMs
+      : requiredFireMs < receiptCutoffMs;
+    const requiredReceiptSatisfied = !job.requiresJobId || (
+      requiredReceiptGenerationMatched &&
+      Number.isFinite(requiredFireMs) &&
+      Number.isFinite(receiptCutoffMs) &&
+      receiptPredatesBoundary
+    );
+    const requiredReceiptDeferred = Boolean(
+      job.requiresJobId &&
+      requiredReceiptGenerationMatched &&
+      Number.isFinite(requiredFireMs) &&
+      Number.isFinite(receiptCutoffMs) &&
+      !receiptPredatesBoundary,
+    );
     const policyJob: PolicyJob = {
       jobId: job.jobId,
       policy: job.policy,
@@ -208,6 +240,13 @@ export class WatchdogPolicyEngine {
       lastFireAt: job.lastFireAt,
       registeredBySession: job.registeredBySession,
       registeredAt: job.registeredAt,
+      watchedFilePath: job.watchedFilePath,
+      thresholdBytes: job.thresholdBytes,
+      requiresJobId: job.requiresJobId,
+      lastFiredGeneration: job.lastFiredGeneration,
+      occupantGeneration,
+      requiredReceiptSatisfied,
+      requiredReceiptDeferred,
     };
 
     const outcome = await policy.evaluate(policyJob);
@@ -343,6 +382,12 @@ export class WatchdogPolicyEngine {
       }
     }
 
+    // Match the proven hook's at-most-once ordering: persist the durable
+    // generation receipt before crossing the external delivery boundary.
+    // A daemon restart after delivery must never repeat the threshold action.
+    if (isContextUsageThreshold && occupantGeneration) {
+      this.jobsRepo.recordThresholdFire(job.jobId, occupantGeneration, evaluatedAt);
+    }
     const delivery = await this.deliver({
       targetSession: outcome.target.session,
       message: outcome.message,
@@ -356,7 +401,9 @@ export class WatchdogPolicyEngine {
       deliveryMessage: outcome.message,
       evaluationNotes: outcome.notes ?? null,
     });
-    this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, true);
+    if (!isContextUsageThreshold) {
+      this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, true);
+    }
     this.jobsRepo.setActionable(job.jobId, true, evaluatedAt, job.lastActionableAt);
     this.eventBus.emit({
       type: "watchdog.evaluation_fired",
@@ -398,7 +445,7 @@ export class WatchdogPolicyEngine {
  * `js-yaml`; the POC schemas are simple enough that this parser
  * handles them in-tree without an extra dependency.
  */
-function defaultParseSpec(specYaml: string): {
+export function parseWatchdogSpec(specYaml: string): {
   target: { session: string } | null;
   message: string | null;
   context: Record<string, unknown>;

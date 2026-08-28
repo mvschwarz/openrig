@@ -150,6 +150,7 @@ export const migrationsForFullTestDbExclusions: Record<string, string> = {
   "067_i3_identity_provenance.sql": "P21 additive era-stamp columns; it ALTERs inbox_entries + outbox_entries (both excluded from the core edge) alongside queue_transitions/stream_items, so it cannot ride the core-edge list — queue / inbox / outbox / stream suites asserting provenance migrate it inline.",
   "068_enforcer_decisions.sql": "W4 compaction-enforcement decision table — the suite was unbuilt and 071 drops the table forward; 068 stays as applied history. No consumer reads it, and 071 is IF EXISTS so it is a no-op on this fixture.",
   "071_drop_enforcer_decisions.sql": "The forward drop of 068, excluded above — this fixture never creates enforcer_decisions, so applying its drop would be a no-op (the DROP is IF EXISTS). Re-check together with 068: if 068 is ever added to the core edge, add this one too or the fixture keeps a table the shipped schema has dropped.",
+  "074_context_usage_watchdog.sql": "watchdog extension migrated inline by context-usage watchdog suites.",
 };
 
 export function createFullTestDb(): Database.Database {
