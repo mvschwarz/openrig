@@ -14,6 +14,7 @@ import { watchdogJobsSchema } from "../src/db/migrations/031_watchdog_jobs.js";
 import { watchdogHistorySchema } from "../src/db/migrations/032_watchdog_history.js";
 import { occupantTenuresSchema } from "../src/db/migrations/060_occupant_tenures.js";
 import { contextUsageWatchdogSchema } from "../src/db/migrations/074_context_usage_watchdog.js";
+import { contextUsageWatchdogGenerationSchema } from "../src/db/migrations/075_context_usage_watchdog_generation.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
@@ -42,6 +43,7 @@ describe("context-usage-threshold watchdog", () => {
       watchdogHistorySchema,
       occupantTenuresSchema,
       contextUsageWatchdogSchema,
+      contextUsageWatchdogGenerationSchema,
     ]);
     db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-1', 'rig')").run();
     db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('node-1', 'rig-1', 'target')").run();
@@ -51,7 +53,7 @@ describe("context-usage-threshold watchdog", () => {
         (id, node_id, generation_ordinal, generation_uuid, kind, boot_at)
        VALUES ('tenure-1', 'node-1', 1, 'gen-1', 'initial', '2026-08-28T09:00:00.000Z')`,
     ).run();
-    repo = new WatchdogJobsRepository(db);
+    repo = new WatchdogJobsRepository(db, undefined, () => generation);
     history = new WatchdogHistoryLog(db);
     bus = new EventBus(db);
     tmp = join(tmpdir(), `context-watchdog-${Date.now()}-${Math.random()}`);
@@ -153,20 +155,25 @@ describe("context-usage-threshold watchdog", () => {
 
     // Daemon restart: the durable job must resolve the CURRENT generation's
     // small transcript B, never reuse predecessor transcript A (still large).
-    repo = new WatchdogJobsRepository(db);
+    repo = new WatchdogJobsRepository(db, undefined, () => generation);
     const below = await engine().evaluate(repo.getByIdOrThrow(job.jobId));
     expect(below.outcome).toMatchObject({
       action: "skip",
       reason: "context_usage_below_threshold",
     });
     expect(deliveries).toHaveLength(1);
+    expect(repo.getByIdOrThrow(job.jobId)).toMatchObject({
+      watchedFilePath: successorTranscript,
+      watchedFileGeneration: "gen-2",
+    });
 
     writeFileSync(successorTranscript, "1234567890");
+    repo = new WatchdogJobsRepository(db, undefined, () => generation);
     await engine().evaluate(repo.getByIdOrThrow(job.jobId));
     expect(deliveries).toHaveLength(2);
     expect(repo.getByIdOrThrow(job.jobId).lastFiredGeneration).toBe("gen-2");
 
-    repo = new WatchdogJobsRepository(db);
+    repo = new WatchdogJobsRepository(db, undefined, () => generation);
     const repeat = await engine().evaluate(repo.getByIdOrThrow(job.jobId));
     expect(repeat.outcome).toMatchObject({ action: "skip", reason: "threshold_already_fired" });
     expect(deliveries).toHaveLength(2);
@@ -197,7 +204,7 @@ describe("context-usage-threshold watchdog", () => {
     writeFileSync(transcript, "1234567890");
     let clockMs = Date.parse("2026-08-28T09:50:00.000Z");
     const now = () => new Date(clockMs++);
-    repo = new WatchdogJobsRepository(db, now);
+    repo = new WatchdogJobsRepository(db, now, () => generation);
     const prepare = register();
     const cutover = register({ requiresJobId: prepare.jobId });
     const passEngine = new WatchdogPolicyEngine({
@@ -266,11 +273,14 @@ describe("context-usage-threshold registration", () => {
     db = createDb();
     migrate(db, [
       coreSchema,
+      bindingsSessionsSchema,
       eventsSchema,
       contextUsageSchema,
       watchdogJobsSchema,
       watchdogHistorySchema,
+      occupantTenuresSchema,
       contextUsageWatchdogSchema,
+      contextUsageWatchdogGenerationSchema,
     ]);
     tmp = join(tmpdir(), `context-watchdog-route-${Date.now()}-${Math.random()}`);
     mkdirSync(tmp, { recursive: true });
@@ -282,7 +292,7 @@ describe("context-usage-threshold registration", () => {
   });
 
   function app() {
-    const jobsRepo = new WatchdogJobsRepository(db);
+    const jobsRepo = new WatchdogJobsRepository(db, undefined, () => "gen-1");
     const eventBus = new EventBus(db);
     const historyLog = new WatchdogHistoryLog(db);
     const app = new Hono();
@@ -313,8 +323,16 @@ describe("context-usage-threshold registration", () => {
     writeFileSync(derived, "1234");
     db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-1', 'rig')").run();
     db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('node-1', 'rig-1', 'target')").run();
+    db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('session-1', 'node-1', 'target@rig')").run();
     db.prepare(
-      "INSERT INTO context_usage (node_id, session_name, availability, transcript_path) VALUES ('node-1', 'target@rig', 'known', ?)",
+      `INSERT INTO occupant_tenures
+        (id, node_id, generation_ordinal, generation_uuid, kind, boot_at)
+       VALUES ('tenure-1', 'node-1', 1, 'gen-1', 'initial', '2026-08-28T09:00:00.000Z')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO context_usage
+        (node_id, session_name, availability, transcript_path, sampled_at)
+       VALUES ('node-1', 'target@rig', 'known', ?, '2026-08-28T09:00:01.000Z')`,
     ).run(derived);
 
     const response = await app().request("/api/watchdog/register", {
@@ -333,8 +351,16 @@ describe("context-usage-threshold registration", () => {
     writeFileSync(explicit, "1234");
     db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-1', 'rig')").run();
     db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('node-1', 'rig-1', 'target')").run();
+    db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('session-1', 'node-1', 'target@rig')").run();
     db.prepare(
-      "INSERT INTO context_usage (node_id, session_name, availability, transcript_path) VALUES ('node-1', 'target@rig', 'known', ?)",
+      `INSERT INTO occupant_tenures
+        (id, node_id, generation_ordinal, generation_uuid, kind, boot_at)
+       VALUES ('tenure-1', 'node-1', 1, 'gen-1', 'initial', '2026-08-28T09:00:00.000Z')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO context_usage
+        (node_id, session_name, availability, transcript_path, sampled_at)
+       VALUES ('node-1', 'target@rig', 'known', ?, '2026-08-28T09:00:01.000Z')`,
     ).run(derived);
 
     const response = await app().request("/api/watchdog/register", {

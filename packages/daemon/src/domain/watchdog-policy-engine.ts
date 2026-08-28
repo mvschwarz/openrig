@@ -206,6 +206,17 @@ export class WatchdogPolicyEngine {
     const occupantGeneration = isContextUsageThreshold
       ? (this.resolveTargetGeneration?.(job.targetSession) ?? null)
       : null;
+    let watchedFilePath = job.watchedFilePath;
+    if (
+      isContextUsageThreshold &&
+      occupantGeneration &&
+      job.watchedFileGeneration !== occupantGeneration
+    ) {
+      watchedFilePath = this.jobsRepo.findTranscriptPath(job.targetSession, occupantGeneration);
+      if (watchedFilePath) {
+        this.jobsRepo.recordWatchedFileBinding(job.jobId, watchedFilePath, occupantGeneration);
+      }
+    }
     const requiredJob = job.requiresJobId ? this.jobsRepo.getById(job.requiresJobId) : null;
     const requiredReceiptGenerationMatched = occupantGeneration !== null &&
       requiredJob?.lastFiredGeneration === occupantGeneration;
@@ -240,7 +251,7 @@ export class WatchdogPolicyEngine {
       lastFireAt: job.lastFireAt,
       registeredBySession: job.registeredBySession,
       registeredAt: job.registeredAt,
-      watchedFilePath: job.watchedFilePath,
+      watchedFilePath,
       thresholdBytes: job.thresholdBytes,
       requiresJobId: job.requiresJobId,
       lastFiredGeneration: job.lastFiredGeneration,

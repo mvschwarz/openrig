@@ -63,6 +63,8 @@ export interface WatchdogJob {
   targetGeneration: string | null;
   /** Transcript-byte condition state. Null on every other policy. */
   watchedFilePath: string | null;
+  /** Occupant generation that qualified watchedFilePath. */
+  watchedFileGeneration: string | null;
   thresholdBytes: number | null;
   requiresJobId: string | null;
   /** The latest occupant generation for which this threshold fired. */
@@ -106,6 +108,7 @@ interface JobRow {
   registered_by_generation_uuid?: string | null;
   target_generation_uuid?: string | null;
   watched_file_path?: string | null;
+  watched_file_generation_uuid?: string | null;
   threshold_bytes?: number | null;
   requires_job_id?: string | null;
   last_fired_generation_uuid?: string | null;
@@ -137,6 +140,7 @@ export class WatchdogJobsRepository {
   private readonly hasGenColumn: boolean;
   private readonly hasTargetGenColumn: boolean;
   private readonly hasContextUsageColumns: boolean;
+  private readonly hasWatchedFileGenerationColumn: boolean;
   constructor(
     private readonly db: Database.Database,
     private readonly now: () => Date = () => new Date(),
@@ -148,6 +152,7 @@ export class WatchdogJobsRepository {
     this.hasGenColumn = detectWatchdogColumn(db, "registered_by_generation_uuid");
     this.hasTargetGenColumn = detectWatchdogColumn(db, "target_generation_uuid");
     this.hasContextUsageColumns = detectWatchdogColumn(db, "last_fired_generation_uuid");
+    this.hasWatchedFileGenerationColumn = detectWatchdogColumn(db, "watched_file_generation_uuid");
   }
 
   register(input: RegisterWatchdogJobInput): WatchdogJob {
@@ -212,6 +217,9 @@ export class WatchdogJobsRepository {
     // (i-c) opt-in TARGET generation: caller-supplied (NULL = role-bound). Stored only when the 066
     // column exists; pre-066 dbs silently degrade the opt-in to role-bound. 066 ⟹ 063 (additive order).
     const targetGenerationUuid = this.hasTargetGenColumn ? (input.targetGenerationUuid ?? null) : null;
+    const watchedFileGeneration = isContextUsageThreshold
+      ? (this.resolveOccupantGeneration?.(input.targetSession) ?? null)
+      : null;
     const columns = [
       "job_id", "policy", "spec_yaml", "target_session", "interval_seconds",
       "active_wake_interval_seconds", "scan_interval_seconds", "state",
@@ -244,6 +252,10 @@ export class WatchdogJobsRepository {
         null,
       );
     }
+    if (this.hasWatchedFileGenerationColumn) {
+      columns.push("watched_file_generation_uuid");
+      values.push(watchedFileGeneration);
+    }
     this.db
       .prepare(
         `INSERT INTO watchdog_jobs (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
@@ -252,16 +264,48 @@ export class WatchdogJobsRepository {
     return this.getByIdOrThrow(jobId);
   }
 
-  /** Latest recorded transcript path for the exact current seat name. */
-  findTranscriptPath(targetSession: string): string | null {
+  /** Transcript path sampled during the requested seat occupant generation. */
+  findTranscriptPath(
+    targetSession: string,
+    occupantGeneration = this.resolveOccupantGeneration?.(targetSession) ?? null,
+  ): string | null {
+    if (!occupantGeneration) return null;
     const row = this.db
       .prepare(
-        `SELECT transcript_path FROM context_usage
-         WHERE session_name = ? AND transcript_path IS NOT NULL AND transcript_path != ''
-         ORDER BY updated_at DESC LIMIT 1`,
+        `SELECT usage.transcript_path
+           FROM sessions AS session
+           JOIN occupant_tenures AS tenure
+             ON tenure.node_id = session.node_id
+            AND tenure.generation_uuid = ?
+           JOIN context_usage AS usage
+             ON usage.node_id = session.node_id
+          WHERE session.session_name = ?
+            AND usage.session_name = ?
+            AND usage.transcript_path IS NOT NULL
+            AND usage.transcript_path != ''
+            AND usage.sampled_at IS NOT NULL
+            AND julianday(usage.sampled_at) >= julianday(tenure.boot_at)
+          ORDER BY session.id DESC
+          LIMIT 1`,
       )
-      .get(targetSession) as { transcript_path: string } | undefined;
+      .get(occupantGeneration, targetSession, targetSession) as { transcript_path: string } | undefined;
     return row?.transcript_path ?? null;
+  }
+
+  recordWatchedFileBinding(jobId: string, watchedFilePath: string, occupantGeneration: string): void {
+    if (!this.hasWatchedFileGenerationColumn) {
+      throw new WatchdogJobsError(
+        "context_usage_generation_schema_missing",
+        "context-usage-threshold generation binding requires migration 075_context_usage_watchdog_generation",
+      );
+    }
+    this.db
+      .prepare(
+        `UPDATE watchdog_jobs
+            SET watched_file_path = ?, watched_file_generation_uuid = ?
+          WHERE job_id = ?`,
+      )
+      .run(watchedFilePath, occupantGeneration, jobId);
   }
 
   recordThresholdFire(jobId: string, occupantGeneration: string, firedAt: string): void {
@@ -547,6 +591,7 @@ function rowToJob(row: JobRow): WatchdogJob {
     registeredByGeneration: row.registered_by_generation_uuid ?? null,
     targetGeneration: row.target_generation_uuid ?? null,
     watchedFilePath: row.watched_file_path ?? null,
+    watchedFileGeneration: row.watched_file_generation_uuid ?? null,
     thresholdBytes: row.threshold_bytes ?? null,
     requiresJobId: row.requires_job_id ?? null,
     lastFiredGeneration: row.last_fired_generation_uuid ?? null,

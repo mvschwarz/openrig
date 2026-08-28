@@ -10,6 +10,7 @@ import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { occupantGenerationStampsSchema } from "../src/db/migrations/063_occupant_generation_stamps.js";
 import { watchdogTargetGenerationSchema } from "../src/db/migrations/066_watchdog_target_generation.js";
 import { contextUsageWatchdogSchema } from "../src/db/migrations/074_context_usage_watchdog.js";
+import { contextUsageWatchdogGenerationSchema } from "../src/db/migrations/075_context_usage_watchdog_generation.js";
 import {
   PHASE_C_POLICIES,
   WatchdogJobsError,
@@ -29,6 +30,7 @@ describe("WatchdogJobsRepository (PL-004 Phase C)", () => {
       watchdogJobsSchema,
       watchdogHistorySchema,
       contextUsageWatchdogSchema,
+      contextUsageWatchdogGenerationSchema,
     ]);
     repo = new WatchdogJobsRepository(db);
   });
