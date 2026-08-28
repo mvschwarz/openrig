@@ -1600,9 +1600,9 @@ export class QueueRepository {
    *     `cross_host_close_conflict` (someone else closed it meanwhile —
    *     surface, never overwrite).
    *   - otherwise → close exactly like the local handoff's close leg:
-   *     `closure_reason=handed_off_to`; `closure_target` carries the OPAQUE
-   *     three-part `<member@rig>@<host>` form (arch R1 — presence-checked
-   *     display/audit metadata, NEVER parsed for routing); `handed_off_to`
+   *     `closure_reason=handed_off_to`; `closure_target` carries the
+   *     host-qualified successor key `<qitem-id>@<host>` (custody metadata,
+   *     never a local lookup key); `handed_off_to`
    *     stays the two-part `member@rig` (BR-1 — session-string carriers
    *     never gain `@host`).
    */
@@ -1611,7 +1611,7 @@ export class QueueRepository {
     fromSession: string;
     /** Two-part `member@rig` destination — the session-string carrier (BR-1). */
     toSession: string;
-    /** Opaque three-part `<member@rig>@<host>` closure target (arch R1). */
+    /** Host-qualified successor `<qitem-id>@<host>` closure target. */
     closureTarget: string;
     /** `handed-off` for /handoff; `done` for /handoff-and-complete. */
     terminalState: "handed-off" | "done";
@@ -1660,7 +1660,7 @@ export class QueueRepository {
         state: input.terminalState,
         actorSession: input.fromSession,
         // BR-1: the minted note carries the TWO-PART toSession only — the
-        // host-qualified 3-part form is allowed in closure_target and nowhere
+        // host-qualified successor key is allowed in closure_target and nowhere
         // else, and transition_note is a durable carrier.
         transitionNote: input.transitionNote ?? `cross-host handoff to ${input.toSession}`,
         closureReason: "handed_off_to",

@@ -12,9 +12,11 @@
 //   unclaimed-obligation — the A1 net: created-with-destination rows carrying real
 //                          obligations, unclaimed past a config-keyed age (parks excluded —
 //                          state=blocked is S03 territory and legitimately waits);
-//   dangling-closure     — the custody class: a terminal row whose closure_target names a
-//                          successor qitem that does not exist. Selection is by DESTINATION +
-//                          obligation shape across ALL states, never by tag.
+//   dangling-closure     — internal compatibility key for the custody class: a terminal
+//                          row whose successor cannot be verified in the local store. Its
+//                          user-facing finding is verification-required/indeterminate, never
+//                          a declaration of absence. Selection is by DESTINATION + obligation
+//                          shape across ALL states, never by tag.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import { migrate } from "../src/db/migrate.js";
@@ -59,9 +61,12 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     db.prepare("UPDATE queue_items SET closure_required_at = ? WHERE qitem_id = ?").run(past, qitemId);
   }
   function failNudge(qitemId: string): void {
+    setNudgeResult(qitemId, "failed:tmux session not found", new Date());
+  }
+  function setNudgeResult(qitemId: string, result: string, at: Date): void {
     db.prepare(
       "UPDATE queue_items SET last_nudge_attempt = ?, last_nudge_result = ? WHERE qitem_id = ?",
-    ).run(new Date().toISOString(), "failed:tmux session not found", qitemId);
+    ).run(at.toISOString(), result, qitemId);
   }
 
   async function runSweep(overrides: Record<string, unknown> = {}) {
@@ -159,29 +164,92 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(await findingsFor(row.qitemId)).toHaveLength(1);
   });
 
-  it("ALL STATES / CUSTODY CLASS: a done row whose closure_target names a nonexistent successor qitem is found; an honestly-closed done row is not", async () => {
-    const dangling = await mkRow();
-    repo.claim({ qitemId: dangling.qitemId, destinationSession: "worker@r" });
+  it("LOCAL-MISS HONEST: an unresolved local successor is verification-required, never declared dead or paired with a history-mutation instruction", async () => {
+    const unresolved = await mkRow();
+    repo.claim({ qitemId: unresolved.qitemId, destinationSession: "worker@r" });
+    const missing = "qitem-20990101000000-deadbeef";
     repo.update({
-      qitemId: dangling.qitemId,
+      qitemId: unresolved.qitemId,
       actorSession: "worker@r",
       state: "done",
       closureReason: "handed_off_to",
-      closureTarget: "qitem-20990101000000-deadbeef",
-      transitionNote: "handed off (successor never created — the custody defect)",
+      closureTarget: missing,
+      transitionNote: "handed off to a successor not visible in this local store",
     });
-    const honest = await mkRow();
-    repo.claim({ qitemId: honest.qitemId, destinationSession: "worker@r" });
+
+    await runSweep();
+    const findings = await findingsFor(unresolved.qitemId);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.body).toContain(missing);
+    expect(findings[0]!.body).toMatch(/verification.required|indeterminate/i);
+    expect(findings[0]!.body).toContain("OPENRIG_URL=<registered-host> rig queue show");
+    expect(findings[0]!.body).not.toMatch(/does not exist|dangling/i);
+    expect(findings[0]!.body).not.toMatch(/Resolve the underlying row|rewrite the historical row/i);
+
+    const successor = await repo.create({
+      qitemId: "qitem-20990101000000-livefeed",
+      sourceSession: "worker@r",
+      destinationSession: "next@r",
+      body: "successor",
+    });
+    const resolved = await mkRow();
+    repo.claim({ qitemId: resolved.qitemId, destinationSession: "worker@r" });
     repo.update({
-      qitemId: honest.qitemId,
+      qitemId: resolved.qitemId,
       actorSession: "worker@r",
       state: "done",
-      closureReason: "no-follow-on",
-      transitionNote: "done honestly",
+      closureReason: "handed_off_to",
+      closureTarget: successor.qitemId,
+      transitionNote: "handed off to a locally visible successor",
     });
     await runSweep();
-    expect(await findingsFor(dangling.qitemId)).toHaveLength(1);
-    expect(await findingsFor(honest.qitemId)).toHaveLength(0);
+    expect(await findingsFor(resolved.qitemId)).toHaveLength(0);
+  });
+
+  it("COMMA SPLIT: fully local fan-out is clean; a partial local miss names only the member requiring verification", async () => {
+    const a = await repo.create({ qitemId: "qitem-local-a", sourceSession: "worker@r", destinationSession: "a@r", body: "a" });
+    const b = await repo.create({ qitemId: "qitem-local-b", sourceSession: "worker@r", destinationSession: "b@r", body: "b" });
+    const complete = await mkRow();
+    repo.update({
+      qitemId: complete.qitemId,
+      actorSession: "worker@r",
+      state: "done",
+      closureReason: "handed_off_to",
+      closureTarget: `${a.qitemId},${b.qitemId}`,
+    });
+    const partial = await mkRow();
+    const missing = "qitem-local-missing";
+    repo.update({
+      qitemId: partial.qitemId,
+      actorSession: "worker@r",
+      state: "done",
+      closureReason: "handed_off_to",
+      closureTarget: `${a.qitemId},${missing}`,
+    });
+
+    await runSweep();
+    expect(await findingsFor(complete.qitemId)).toHaveLength(0);
+    const findings = await findingsFor(partial.qitemId);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.body).toContain(missing);
+    expect(findings[0]!.body).not.toContain(a.qitemId);
+  });
+
+  it("HOST-QUALIFIED KEY: a foreign successor is classified without a local lookup, including handed-off source rows", async () => {
+    const row = await mkRow();
+    const foreign = "qitem-xh-0123456789abcdef@vps-b";
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      state: "handed-off",
+      closureReason: "handed_off_to",
+      closureTarget: foreign,
+    });
+    await runSweep();
+    const findings = await findingsFor(row.qitemId);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.body).toContain(foreign);
+    expect(findings[0]!.body).toMatch(/verification.required|indeterminate/i);
   });
 
   it("IDEMPOTENT REFRESH: three consecutive sweeps over an unresolved finding keep ONE open finding row and refresh its age", async () => {
@@ -198,6 +266,98 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
       .prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = ? ORDER BY ts")
       .all(findings[0]!.qitemId) as Array<{ transition_note: string | null }>;
     expect(transitions.some((t) => /refresh/i.test(t.transition_note ?? ""))).toBe(true);
+  });
+
+  it("REMINT PINNED: closing a finding while its evidence is unchanged suppresses the next sweep", async () => {
+    const row = await mkRow();
+    failNudge(row.qitemId);
+    await runSweep();
+    const first = (await findingsFor(row.qitemId))[0]!;
+    repo.update({
+      qitemId: first.qitemId,
+      actorSession: first.destinationSession,
+      state: "done",
+      closureReason: "no-follow-on",
+      transitionNote: "verified and closed",
+    });
+
+    const next = await runSweep();
+    expect(next.result.findings).not.toContainEqual(expect.objectContaining({ qitemId: row.qitemId, action: "created" }));
+    expect(await findingsFor(row.qitemId)).toHaveLength(1);
+  });
+
+  it("NEW EVIDENCE + RECUR AFTER AUTO-CLOSE: a newer nudge row-field timestamp mints exactly one successor finding without any underlying transition", async () => {
+    const row = await mkRow();
+    const initial = new Date(Date.now() - 60_000);
+    setNudgeResult(row.qitemId, "failed:first", initial);
+    await runSweep();
+
+    setNudgeResult(row.qitemId, "verified", new Date());
+    await runSweep();
+    expect((await findingsFor(row.qitemId))[0]!.state).toBe("done");
+
+    const futureEvidence = new Date(Date.now() + 60_000);
+    setNudgeResult(row.qitemId, "failed:recurred", futureEvidence);
+    const beforeTransitions = repo.transitionLog.listForQitem(row.qitemId).length;
+    const recur = await runSweep();
+    expect(recur.result.findings).toContainEqual(expect.objectContaining({
+      kind: "undelivered-wake",
+      qitemId: row.qitemId,
+      action: "created",
+    }));
+    expect(await findingsFor(row.qitemId)).toHaveLength(2);
+    expect(repo.transitionLog.listForQitem(row.qitemId)).toHaveLength(beforeTransitions);
+  });
+
+  it("OPEN FINDING WINS: an open finding is refreshed even when an older closed watermark exists for the same row and kind", async () => {
+    const row = await mkRow();
+    setNudgeResult(row.qitemId, "failed:first", new Date(Date.now() - 120_000));
+    await runSweep();
+    const closed = (await findingsFor(row.qitemId))[0]!;
+    repo.update({
+      qitemId: closed.qitemId,
+      actorSession: closed.destinationSession,
+      state: "done",
+      closureReason: "no-follow-on",
+    });
+    setNudgeResult(row.qitemId, "failed:new", new Date(Date.now() + 60_000));
+    await runSweep();
+    const open = (await findingsFor(row.qitemId)).find((f) => f.state === "pending")!;
+
+    const again = await runSweep();
+    expect(again.result.findings).toContainEqual(expect.objectContaining({
+      findingQitemId: open.qitemId,
+      action: "refreshed",
+    }));
+    expect((await findingsFor(row.qitemId)).filter((f) => f.state === "pending")).toHaveLength(1);
+  });
+
+  it("EXACTLY-ONCE UNDER CONCURRENCY: two overlapping sweeps mint one finding row", async () => {
+    const row = await mkRow();
+    failNudge(row.qitemId);
+    let arrivals = 0;
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => { release = resolve; });
+    const gatedRepo = new Proxy(repo, {
+      get(target, prop, receiver) {
+        if (prop === "create") {
+          return async (...args: Parameters<QueueRepository["create"]>) => {
+            arrivals += 1;
+            if (arrivals === 2) release();
+            await barrier;
+            return target.create(...args);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    await Promise.all([
+      runSweep({ queueRepo: gatedRepo }),
+      runSweep({ queueRepo: gatedRepo }),
+    ]);
+    expect(await findingsFor(row.qitemId)).toHaveLength(1);
   });
 
   it("RESOLUTION CLOSES: when the underlying row resolves, the next sweep closes the finding with its reason", async () => {
@@ -284,6 +444,21 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     await runSweep();
     await runSweep(); // handback still dedups: never double-reported
     expect(await findingsFor(row.qitemId)).toHaveLength(1);
+  });
+
+  it("S01 SEAM — LATEST MARKER WINS: attempt → exhausted → attempt is live again and skipped", async () => {
+    const mod = await sweepMod();
+    const row = await mkRow();
+    failNudge(row.qitemId);
+    for (const transitionNote of [
+      `${mod.LADDER_ATTEMPT_PREFIX} 1`,
+      `${mod.LADDER_EXHAUSTED_PREFIX} old cycle exhausted`,
+      `${mod.LADDER_ATTEMPT_PREFIX} 1 new cycle`,
+    ]) {
+      repo.update({ qitemId: row.qitemId, actorSession: "sender@r", transitionNote });
+    }
+    await runSweep();
+    expect(await findingsFor(row.qitemId)).toHaveLength(0);
   });
 
   it("A1 NET — UNCLAIMED OBLIGATION: a created-with-destination row unclaimed past the age threshold is found; a fresh one and a parked one are not", async () => {

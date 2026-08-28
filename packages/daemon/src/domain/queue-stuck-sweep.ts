@@ -19,6 +19,7 @@
 // share one contract instead of two guesses. S03 owns park/wake honesty: state=blocked rows
 // legitimately wait and are never findings.
 
+import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { QueueItem, QueueRepository } from "./queue-repository.js";
 import { stalledPickupFinding } from "./queue-pickup.js";
@@ -33,9 +34,9 @@ export const DEFAULT_STUCK_SWEEP_UNCLAIMED_AGE_MINUTES = 60;
 export const STUCK_SWEEP_FINDING_TAG = "stuck-sweep-finding";
 
 // S01 ladder marker vocabulary (the seam contract). S01 writes these transition-note
-// prefixes; the sweep derives "live ladder" from their presence. A ladder is LIVE when
-// attempt/rung markers exist without an exhausted marker; an exhausted ladder is the
-// sweep's net again.
+// prefixes; the sweep derives "live ladder" from the latest marker. An attempt/rung is
+// LIVE, an exhausted marker hands the row back, and a later attempt starts a live cycle
+// again.
 export const LADDER_ATTEMPT_PREFIX = "wake-attempt:";
 export const LADDER_RUNG_PREFIX = "escalation-rung:";
 export const LADDER_EXHAUSTED_PREFIX = "ladder-exhausted:";
@@ -172,18 +173,18 @@ interface TransitionNoteRow {
   transition_note: string | null;
 }
 
-/** A live ladder = attempt/rung markers present without an exhausted marker. */
+/** The latest ladder marker is authoritative: a retry after exhaustion makes the
+ *  ladder live again. Unrelated transitions do not change the latest marker. */
 function hasLiveLadder(db: Database.Database, qitemId: string): boolean {
   const notes = db
-    .prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = ?")
+    .prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = ? ORDER BY transition_id DESC")
     .all(qitemId) as TransitionNoteRow[];
-  let laddered = false;
   for (const { transition_note: note } of notes) {
     if (!note) continue;
     if (note.startsWith(LADDER_EXHAUSTED_PREFIX)) return false;
-    if (note.startsWith(LADDER_ATTEMPT_PREFIX) || note.startsWith(LADDER_RUNG_PREFIX)) laddered = true;
+    if (note.startsWith(LADDER_ATTEMPT_PREFIX) || note.startsWith(LADDER_RUNG_PREFIX)) return true;
   }
-  return laddered;
+  return false;
 }
 
 function minutesSince(iso: string | null | undefined, now: Date): number {
@@ -205,14 +206,65 @@ interface Candidate {
   row: QueueItem;
   route: string;
   ageMinutes: number;
+  /** Per-kind evidence watermark. A closed finding suppresses only evidence at
+   *  or below this timestamp; newer evidence earns one new finding. */
+  evidenceAt: string;
   why: string;
+  verificationTargets?: string[];
 }
 
 function isFindingRow(item: QueueItem): boolean {
   return (item.tags ?? []).includes(STUCK_SWEEP_FINDING_TAG);
 }
 
+function latestIso(...values: Array<string | null | undefined>): string {
+  let latest: { iso: string; time: number } | undefined;
+  for (const iso of values) {
+    if (!iso) continue;
+    const time = Date.parse(iso);
+    if (!Number.isNaN(time) && (!latest || time > latest.time)) latest = { iso, time };
+  }
+  return latest?.iso ?? new Date(0).toISOString();
+}
+
+function evidenceIsNewer(evidenceAt: string, closedAt: string): boolean {
+  const evidence = Date.parse(evidenceAt);
+  const closed = Date.parse(closedAt);
+  return !Number.isNaN(evidence) && !Number.isNaN(closed) && evidence > closed;
+}
+
+/** QueueRepository.create already provides structural PK idempotence. Naming the
+ *  row from the dedup key plus evidence watermark turns two overlapping sweeps
+ *  into the same create instead of two random identities. */
+function findingQitemId(dedupTag: string, evidenceAt: string): string {
+  const digest = createHash("sha256")
+    .update(JSON.stringify([dedupTag, evidenceAt]))
+    .digest("hex")
+    .slice(0, 16);
+  return `qitem-stuck-${digest}`;
+}
+
+function verificationCommand(target: string): string {
+  const successorId = target.split("@", 1)[0] ?? target;
+  return `OPENRIG_URL=<registered-host> rig queue show ${successorId}`;
+}
+
 function evidenceBody(db: Database.Database, c: Candidate): string {
+  if (c.verificationTargets?.length) {
+    const checks = c.verificationTargets
+      .map((target) => `- ${target}\n  ${verificationCommand(target)}`)
+      .join("\n");
+    return (
+      `STUCK SWEEP FINDING (successor-verification-required)\n` +
+      `row: ${c.row.qitemId}\n` +
+      `destination: ${c.row.destinationSession} (source ${c.row.sourceSession}, state ${c.row.state})\n` +
+      `age: ${c.ageMinutes} min\n` +
+      `last transition: ${lastTransitionLine(db, c.row.qitemId)}\n` +
+      `why: ${c.why}\n` +
+      `verification targets (indeterminate until checked on the registered host):\n${checks}\n` +
+      `Do not rewrite historical custody from this local observation; record the verification result separately.`
+    );
+  }
   return (
     `STUCK SWEEP FINDING (${c.kind})\n` +
     `row: ${c.row.qitemId}\n` +
@@ -249,6 +301,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         row,
         route: row.destinationSession,
         ageMinutes: minutesSince(row.closureRequiredAt ?? row.claimedAt, now),
+        evidenceAt: latestIso(row.tsUpdated, row.closureRequiredAt, row.claimedAt),
         why: "claimed and past closure_required_at with no closure",
       });
     }
@@ -268,6 +321,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         row,
         route: stalled.target,
         ageMinutes: minutesSince(row.claimedAt, now),
+        evidenceAt: latestIso(row.tsUpdated, row.lastHeartbeat, row.claimedAt),
         why: stalled.evidence,
       });
     }
@@ -284,6 +338,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         row,
         route: resolveOrch(row.destinationSession) ?? row.destinationSession,
         ageMinutes: minutesSince(row.tsCreated, now),
+        evidenceAt: latestIso(row.tsUpdated, row.lastNudgeAttempt),
         why: `wake failed (${row.lastNudgeResult ?? "failed"}) and nothing retried it`,
       });
     }
@@ -311,31 +366,40 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         row,
         route: resolveOrch(row.destinationSession) ?? row.destinationSession,
         ageMinutes: minutesSince(row.tsCreated, now),
+        evidenceAt: latestIso(row.tsUpdated, row.tsCreated),
         why: `created with a destination and unclaimed for ${minutesSince(row.tsCreated, now)} min (threshold ${ageMinutes})`,
       });
     }
 
-    // The custody class — a terminal row whose closure names a successor qitem that does
-    // not exist. Terminal states are read, not skipped. Shape-discriminated: only
-    // closure targets that name a qitem id are successor claims (handoff closures also
-    // record plain session names there; those are not successor claims).
-    const danglingRows = deps.db
+    // The custody class — a terminal row whose closure names one or more successor
+    // qitems. A local miss is never proof of absence: the successor may live in another
+    // registered host's database. Host-qualified keys are therefore verification inputs,
+    // not local lookup keys. Comma fan-out is checked member-by-member and only unresolved
+    // members are reported. Historical source rows are never mutated by this detector.
+    const custodyRows = deps.db
       .prepare(
         `SELECT q.qitem_id FROM queue_items q
-          WHERE q.state IN ('done', 'canceled')
-            AND q.closure_target LIKE 'qitem-%'
-            AND NOT EXISTS (SELECT 1 FROM queue_items s WHERE s.qitem_id = q.closure_target)`,
+          WHERE q.state IN ('done', 'canceled', 'handed-off')
+            AND q.closure_target LIKE 'qitem-%'`,
       )
       .all() as Array<{ qitem_id: string }>;
-    for (const { qitem_id } of danglingRows) {
+    for (const { qitem_id } of custodyRows) {
       const row = deps.queueRepo.getById(qitem_id);
       if (!row || isFindingRow(row)) continue;
+      const targets = (row.closureTarget ?? "").split(",").map((target) => target.trim()).filter(Boolean);
+      const verificationTargets = targets.filter((target) => {
+        if (target.includes("@")) return true;
+        return !deps.queueRepo.getById(target);
+      });
+      if (verificationTargets.length === 0) continue;
       candidates.push({
         kind: "dangling-closure",
         row,
         route: row.destinationSession,
         ageMinutes: minutesSince(row.tsUpdated, now),
-        why: `closed (${row.closureReason ?? "?"}) naming successor ${row.closureTarget}, which does not exist`,
+        evidenceAt: latestIso(row.tsUpdated),
+        why: `closed (${row.closureReason ?? "?"}) with successor custody that this local store cannot fully verify`,
+        verificationTargets,
       });
     }
 
@@ -348,27 +412,32 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       liveDedupTags.add(dedupTag);
       const existing = deps.db
         .prepare(
-          `SELECT qitem_id, source_session FROM queue_items
-            WHERE state IN ('pending', 'in-progress', 'blocked')
-              AND tags LIKE ?
+          `SELECT qitem_id, source_session, state, ts_updated FROM queue_items
+            WHERE tags LIKE ?
+            ORDER BY CASE WHEN state IN ('pending', 'in-progress', 'blocked') THEN 0 ELSE 1 END,
+                     ts_updated DESC, ts_created DESC, qitem_id DESC
             LIMIT 1`,
         )
-        .get(`%"${dedupTag}"%`) as { qitem_id: string; source_session: string } | undefined;
-      if (existing) {
+        .get(`%"${dedupTag}"%`) as
+        | { qitem_id: string; source_session: string; state: string; ts_updated: string }
+        | undefined;
+      const existingIsOpen = existing && ["pending", "in-progress", "blocked"].includes(existing.state);
+      if (existing && existingIsOpen) {
         await deps.queueRepo.update({
           qitemId: existing.qitem_id,
           actorSession: existing.source_session,
           transitionNote: `stuck-sweep refresh: age now ${c.ageMinutes} min (${c.kind} on ${c.row.qitemId})`,
         });
         findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: existing.qitem_id, action: "refreshed" });
-      } else {
+      } else if (!existing || evidenceIsNewer(c.evidenceAt, existing.ts_updated)) {
         const created = await deps.queueRepo.create({
+          qitemId: findingQitemId(dedupTag, c.evidenceAt),
           // The detector is machinery, not a seat: the obligation's own creator is the
           // finding's source (the workflow-exception precedent).
           sourceSession: c.row.sourceSession,
           destinationSession: c.route,
           body: evidenceBody(deps.db, c),
-          summary: `Stuck sweep: ${c.kind} on ${c.row.qitemId} (${c.ageMinutes} min)`,
+          summary: `Stuck sweep: ${c.verificationTargets ? "successor-verification-required" : c.kind} on ${c.row.qitemId} (${c.ageMinutes} min)`,
           tags: [STUCK_SWEEP_FINDING_TAG, dedupTag],
         });
         findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: created.qitemId, action: "created" });

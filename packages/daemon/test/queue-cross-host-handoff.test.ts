@@ -4,7 +4,7 @@
 //     byte-identical (FR-6);
 //   - cross-host: successor-create is forwarded FIRST (D-1 derived id, chain
 //     continued, provenance tags, nudge forwarded, hostId stripped), the
-//     LOCAL source closes SECOND (closure_target = the opaque 3-part form,
+//     LOCAL source closes SECOND (closure_target = host-qualified successor id,
 //     handed_off_to stays 2-part — BR-1/R1);
 //   - NEVER-DROP: a failed forward (unreachable/unknown/ssh) leaves the
 //     source UNTOUCHED — the potato stays live;
@@ -125,7 +125,7 @@ describe("MH-3 C2 — cross-host handoff (route choreography)", () => {
     expect(forwarded).toBe(false);
   });
 
-  it("cross-host handoff: successor forwarded FIRST (derived id, continued chain, provenance, nudge, hostId stripped); source closed SECOND (3-part closure_target, 2-part handed_off_to); ONE local row", async () => {
+  it("cross-host handoff: successor forwarded FIRST; source closes SECOND with a host-qualified successor key and 2-part handed_off_to", async () => {
     const capture: { url?: string; body?: Record<string, unknown> } = {};
     h = makeHarness({
       fetchImpl: (async (url: string | URL | Request, init?: RequestInit) => {
@@ -167,8 +167,8 @@ describe("MH-3 C2 — cross-host handoff (route choreography)", () => {
     expect(out.closed.qitemId).toBe("qitem-source-1");
     expect(out.closed.state).toBe("handed-off");
     expect(out.closed.closureReason).toBe("handed_off_to");
-    // R1: closure_target carries the OPAQUE 3-part form...
-    expect(out.closed.closureTarget).toBe("dev@rig-b@vps-b");
+    // Closure target carries the host-qualified successor identity.
+    expect(out.closed.closureTarget).toBe(`${expectedId}@vps-b`);
     // ...while the session-string carrier stays 2-part (BR-1).
     expect(out.closed.handedOffTo).toBe("dev@rig-b");
 
@@ -195,7 +195,7 @@ describe("MH-3 C2 — cross-host handoff (route choreography)", () => {
     expect(res.status).toBe(201);
     const out = (await res.json()) as { closed: { state: string; closureTarget: string } };
     expect(out.closed.state).toBe("done");
-    expect(out.closed.closureTarget).toBe("dev@rig-b@vps-b");
+    expect(out.closed.closureTarget).toBe(`${deriveCrossHostSuccessorId("qitem-source-1", "dev@rig-b", "vps-b")}@vps-b`);
     expect(rowCount(h.db)).toBe(1);
   });
 
@@ -252,6 +252,27 @@ describe("MH-3 C2 — cross-host handoff (route choreography)", () => {
     expect(closeTransitions).toHaveLength(1);
   });
 
+  it("prospective key grandfather: a pre-convention terminal source re-drives against its stored member@rig@host target without rewriting history", async () => {
+    h = makeHarness({
+      fetchImpl: (async (_u: unknown, init?: RequestInit) => {
+        const b = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return jsonResponse({ qitemId: b["qitemId"] }, 201);
+      }) as unknown as typeof fetch,
+    });
+    await seedSource(h.repo);
+    h.repo.closeCrossHostHandoffSource({
+      qitemId: "qitem-source-1",
+      fromSession: "worker@rig-a",
+      toSession: "dev@rig-b",
+      closureTarget: "dev@rig-b@vps-b",
+      terminalState: "handed-off",
+    });
+
+    const redrive = await post(h.app, "/api/queue/qitem-source-1/handoff", { ...HANDOFF, hostId: "vps-b" });
+    expect(redrive.status).toBe(201);
+    expect(h.repo.getById("qitem-source-1")!.closureTarget).toBe("dev@rig-b@vps-b");
+  });
+
   it("re-drive naming a DIFFERENT destination: 409 cross_host_close_conflict BEFORE any forward (no target-side orphan minted)", async () => {
     let forwardCount = 0;
     h = makeHarness({
@@ -272,7 +293,9 @@ describe("MH-3 C2 — cross-host handoff (route choreography)", () => {
     // The pre-flight fired BEFORE the forward — no orphan successor minted.
     expect(forwardCount).toBe(1);
     // The recorded closure is untouched.
-    expect(h.repo.getById("qitem-source-1")!.closureTarget).toBe("dev@rig-b@vps-b");
+    expect(h.repo.getById("qitem-source-1")!.closureTarget).toBe(
+      `${deriveCrossHostSuccessorId("qitem-source-1", "dev@rig-b", "vps-b")}@vps-b`,
+    );
   });
 
   it("unknown source qitem: 404, nothing forwarded", async () => {
@@ -300,32 +323,34 @@ describe("MH-3 C2 — closeCrossHostHandoffSource (repo, re-drive semantics)", (
   beforeEach(() => { h = makeHarness(); });
   afterEach(() => h.db.close());
 
-  it("non-terminal source: closes with handed_off_to=2-part, closure_target=3-part, closure_reason=handed_off_to", async () => {
+  it("non-terminal source: closes with handed_off_to=2-part, closure_target=host-qualified successor, closure_reason=handed_off_to", async () => {
     await seedSource(h.repo);
+    const closureTarget = `${deriveCrossHostSuccessorId("qitem-source-1", "dev@rig-b", "vps-b")}@vps-b`;
     const out = h.repo.closeCrossHostHandoffSource({
       qitemId: "qitem-source-1",
       fromSession: "worker@rig-a",
       toSession: "dev@rig-b",
-      closureTarget: "dev@rig-b@vps-b",
+      closureTarget,
       terminalState: "handed-off",
     });
     expect(out.absorbed).toBe(false);
     expect(out.item.state).toBe("handed-off");
     expect(out.item.closureReason).toBe("handed_off_to");
-    expect(out.item.closureTarget).toBe("dev@rig-b@vps-b");
+    expect(out.item.closureTarget).toBe(closureTarget);
     expect(out.item.handedOffTo).toBe("dev@rig-b");
   });
 
   it("already-terminal + MATCHING closure_target: idempotent absorb — stored row returned, no mutation", async () => {
     await seedSource(h.repo);
+    const closureTarget = `${deriveCrossHostSuccessorId("qitem-source-1", "dev@rig-b", "vps-b")}@vps-b`;
     h.repo.closeCrossHostHandoffSource({
       qitemId: "qitem-source-1", fromSession: "worker@rig-a", toSession: "dev@rig-b",
-      closureTarget: "dev@rig-b@vps-b", terminalState: "done",
+      closureTarget, terminalState: "done",
     });
     const ts = h.repo.getById("qitem-source-1")!.tsUpdated;
     const out = h.repo.closeCrossHostHandoffSource({
       qitemId: "qitem-source-1", fromSession: "worker@rig-a", toSession: "dev@rig-b",
-      closureTarget: "dev@rig-b@vps-b", terminalState: "done",
+      closureTarget, terminalState: "done",
     });
     expect(out.absorbed).toBe(true);
     expect(out.item.tsUpdated).toBe(ts);
@@ -333,16 +358,17 @@ describe("MH-3 C2 — closeCrossHostHandoffSource (repo, re-drive semantics)", (
 
   it("already-terminal + MISMATCHED closure_target: structured cross_host_close_conflict, never overwritten", async () => {
     await seedSource(h.repo);
+    const closureTarget = `${deriveCrossHostSuccessorId("qitem-source-1", "dev@rig-b", "vps-b")}@vps-b`;
     h.repo.closeCrossHostHandoffSource({
       qitemId: "qitem-source-1", fromSession: "worker@rig-a", toSession: "dev@rig-b",
-      closureTarget: "dev@rig-b@vps-b", terminalState: "handed-off",
+      closureTarget, terminalState: "handed-off",
     });
     expect(() =>
       h.repo.closeCrossHostHandoffSource({
         qitemId: "qitem-source-1", fromSession: "worker@rig-a", toSession: "other@rig-c",
-        closureTarget: "other@rig-c@vps-b", terminalState: "handed-off",
+        closureTarget: `${deriveCrossHostSuccessorId("qitem-source-1", "other@rig-c", "vps-b")}@vps-b`, terminalState: "handed-off",
       }),
     ).toThrowError(expect.objectContaining({ code: "cross_host_close_conflict" }));
-    expect(h.repo.getById("qitem-source-1")!.closureTarget).toBe("dev@rig-b@vps-b");
+    expect(h.repo.getById("qitem-source-1")!.closureTarget).toBe(closureTarget);
   });
 });

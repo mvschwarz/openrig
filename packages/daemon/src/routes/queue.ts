@@ -289,7 +289,7 @@ export function queueRoutes(): Hono {
    *       with the source UNTOUCHED (never-drop: the potato stays live);
    *       a re-driven forward absorbs on the target's PK (Q-a + D-1);
    *   (4) close the LOCAL source SECOND via the bounded repo method —
-   *       `closure_target` = the opaque 3-part `<member@rig>@<host>` (R1),
+   *       `closure_target` = the host-qualified successor `<qitem-id>@<host>`,
    *       `handed_off_to` = the 2-part session (BR-1); an already-closed
    *       source with the MATCHING target absorbs idempotently.
    *
@@ -324,13 +324,21 @@ export function queueRoutes(): Hono {
     const source = repo.getById(qitemId);
     if (!source) return c.json({ error: "qitem_not_found", message: `qitem ${qitemId} not found` }, 404);
 
-    // The opaque 3-part closure target (R1 — display/audit metadata, never
-    // parsed). Session-string carriers keep the 2-part form (BR-1).
-    const closureTarget = `${body.toSession}@${hostId}`;
+    // The deterministic successor identity is also the local custody key.
+    // It must be derived before the re-drive preflight so the comparator and
+    // the eventual close use the same host-qualified target. Already-terminal
+    // pre-convention rows retain their stored member@rig@host key on re-drive;
+    // the new key is prospective and historical custody is never rewritten.
+    const successorId = deriveCrossHostSuccessorId(source.qitemId, body.toSession, hostId);
+    const closureTarget = `${successorId}@${hostId}`;
+    const legacyClosureTarget = `${body.toSession}@${hostId}`;
+    const sourceTerminal = source.state === "done" || source.state === "handed-off";
+    const closeTarget = sourceTerminal && source.closureTarget === legacyClosureTarget
+      ? legacyClosureTarget
+      : closureTarget;
 
     // (1) Pre-flight the re-drive state BEFORE any forward.
-    const sourceTerminal = source.state === "done" || source.state === "handed-off";
-    if (sourceTerminal && source.closureTarget !== closureTarget) {
+    if (sourceTerminal && source.closureTarget !== closeTarget) {
       return c.json(
         {
           error: "cross_host_close_conflict",
@@ -343,7 +351,6 @@ export function queueRoutes(): Hono {
     }
 
     // (2) The deterministic successor identity + forwarded body.
-    const successorId = deriveCrossHostSuccessorId(source.qitemId, body.toSession, hostId);
     const effectiveTags = body.tags ?? source.tags ?? undefined;
     const forwardBody: Record<string, unknown> = {
       qitemId: successorId,
@@ -379,7 +386,7 @@ export function queueRoutes(): Hono {
         qitemId: source.qitemId,
         fromSession: body.fromSession,
         toSession: body.toSession,
-        closureTarget,
+        closureTarget: closeTarget,
         terminalState,
         transitionNote: body.transitionNote,
       });
