@@ -77,7 +77,7 @@ defaults:
   model: claude-opus-4-6
   lifecycle:
     execution_mode: interactive_resident
-    compaction_strategy: harness_native
+    compaction_strategy: default-compaction
     restore_policy: resume_if_possible
 
 imports:
@@ -165,7 +165,7 @@ defaults:
   model: claude-opus-4-6
   lifecycle:
     execution_mode: interactive_resident
-    compaction_strategy: harness_native
+    compaction_strategy: default-compaction
     restore_policy: resume_if_possible
 ```
 
@@ -180,7 +180,7 @@ defaults:
 | Field | Type | Default | Allowed Values |
 |-------|------|---------|----------------|
 | `execution_mode` | string | `interactive_resident` | `interactive_resident` (only value in v1; `wake_on_demand` is explicitly rejected) |
-| `compaction_strategy` | string | `harness_native` | `harness_native`, `pod_continuity` (`custom_prompt` is explicitly rejected in v1) |
+| `compaction_strategy` | string | `default-compaction` | `default-compaction`, `managed-compaction`, `handover`, `apprentice-handover`; deprecated aliases accepted with a validation advisory: `harness_native` → `default-compaction`, `pod_continuity` → `handover` (`custom_prompt` is explicitly rejected in v1) |
 | `restore_policy` | string | `resume_if_possible` | `resume_if_possible`, `relaunch_fresh`, `checkpoint_only` |
 
 ---
@@ -375,7 +375,7 @@ Agent-level startup is applied to all profiles. Profile-level startup is applied
 10. Resource IDs must be unique within their category.
 11. `runtime_resources` entries require `runtime` field.
 12. Lifecycle `execution_mode` must be `interactive_resident`.
-13. Lifecycle `compaction_strategy` must be `harness_native` or `pod_continuity`.
+13. Lifecycle `compaction_strategy` must be one of `default-compaction`, `managed-compaction`, `handover`, `apprentice-handover` — or a deprecated alias (`harness_native`, `pod_continuity`), which validates with a deprecation advisory and normalizes to its canonical value (OPR.0.5.6.20).
 14. Lifecycle `restore_policy` must be `resume_if_possible`, `relaunch_fresh`, or `checkpoint_only`.
 15. Startup files and actions follow the same validation rules as in RigSpec.
 

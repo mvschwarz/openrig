@@ -13,7 +13,22 @@ import {
 
 // -- Constants --
 const VALID_EXECUTION_MODES = new Set(["interactive_resident"]);
-const VALID_COMPACTION_STRATEGIES = new Set(["harness_native", "pod_continuity"]);
+const VALID_COMPACTION_STRATEGIES = new Set(["default-compaction", "managed-compaction", "handover", "apprentice-handover"]);
+/** OPR.0.5.6.20 A1 — the reserved-era spellings stay accepted through the deprecation
+ *  window and normalize with an advisory, never silently. pod_continuity's disposition
+ *  derives from the 0.5.2 source map: "the handover practice is pod_continuity's
+ *  implementation, not a new concept". */
+const DEPRECATED_COMPACTION_ALIASES: Record<string, string> = {
+  harness_native: "default-compaction",
+  pod_continuity: "handover",
+};
+/** Canonical form of a compaction strategy: new values pass through, deprecated aliases
+ *  map, anything else is null. The ONE vocabulary site — resolvers import this rather
+ *  than re-encoding the set (one-shared-resolution-path). */
+export function canonicalCompactionStrategy(value: string): string | null {
+  if (VALID_COMPACTION_STRATEGIES.has(value)) return value;
+  return DEPRECATED_COMPACTION_ALIASES[value] ?? null;
+}
 const VALID_RESTORE_POLICIES = new Set(["resume_if_possible", "relaunch_fresh", "checkpoint_only"]);
 const VALID_IMPORT_PREFIXES = ["local:", "path:"];
 
@@ -50,11 +65,12 @@ const validateStartupBlock = sharedValidateStartupBlock;
 
 // -- Lifecycle validation --
 
-function validateLifecycle(raw: unknown, prefix: string): string[] {
+function validateLifecycle(raw: unknown, prefix: string): { errors: string[]; advisories: string[] } {
   if (raw === undefined || raw === null) return [];
-  if (typeof raw !== "object") return [`${prefix}: must be an object`];
+  if (typeof raw !== "object") return { errors: [`${prefix}: must be an object`], advisories: [] };
   const obj = raw as Record<string, unknown>;
   const errors: string[] = [];
+  const advisories: string[] = [];
   if (obj["execution_mode"] !== undefined) {
     if (obj["execution_mode"] === "wake_on_demand") {
       errors.push(`${prefix}.execution_mode: "wake_on_demand" is not supported in v1; use "interactive_resident"`);
@@ -63,16 +79,20 @@ function validateLifecycle(raw: unknown, prefix: string): string[] {
     }
   }
   if (obj["compaction_strategy"] !== undefined) {
-    if (obj["compaction_strategy"] === "custom_prompt") {
+    const strategyValue = obj["compaction_strategy"] as string;
+    if (strategyValue === "custom_prompt") {
+      // OPR.0.5.6.20 A1: this rejection is byte-preserved from the reserved era.
       errors.push(`${prefix}.compaction_strategy: "custom_prompt" is not supported in v1; use "harness_native" or "pod_continuity"`);
-    } else if (!VALID_COMPACTION_STRATEGIES.has(obj["compaction_strategy"] as string)) {
-      errors.push(`${prefix}.compaction_strategy: must be one of ${[...VALID_COMPACTION_STRATEGIES].join(", ")} (got "${obj["compaction_strategy"]}")`);
+    } else if (DEPRECATED_COMPACTION_ALIASES[strategyValue] !== undefined) {
+      advisories.push(`${prefix}.compaction_strategy: "${strategyValue}" is deprecated and now normalizes to "${DEPRECATED_COMPACTION_ALIASES[strategyValue]}" — update to the current vocabulary (${[...VALID_COMPACTION_STRATEGIES].join(", ")})`);
+    } else if (!VALID_COMPACTION_STRATEGIES.has(strategyValue)) {
+      errors.push(`${prefix}.compaction_strategy: must be one of ${[...VALID_COMPACTION_STRATEGIES].join(", ")} (got "${strategyValue}")`);
     }
   }
   if (obj["restore_policy"] !== undefined && !VALID_RESTORE_POLICIES.has(obj["restore_policy"] as string)) {
     errors.push(`${prefix}.restore_policy: must be one of ${[...VALID_RESTORE_POLICIES].join(", ")} (got "${obj["restore_policy"]}")`);
   }
-  return errors;
+  return { errors, advisories };
 }
 
 // -- Resource validation --
@@ -113,6 +133,8 @@ export function parseAgentSpec(yamlText: string): Record<string, unknown> {
  */
 export function validateAgentSpec(raw: unknown): ValidationResult {
   const errors: string[] = [];
+  // OPR.0.5.6.20 — non-blocking deprecation advisories ride the shipped fail-open channel.
+  const advisories: string[] = [];
 
   if (!raw || typeof raw !== "object") {
     return { valid: false, errors: ["agent spec must be an object"] };
@@ -144,7 +166,11 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
   if (obj["defaults"] && typeof obj["defaults"] === "object") {
     const defaults = obj["defaults"] as Record<string, unknown>;
     if (defaults["lifecycle"]) {
-      errors.push(...validateLifecycle(defaults["lifecycle"], "defaults.lifecycle"));
+      {
+        const lifecycleResult = validateLifecycle(defaults["lifecycle"], "defaults.lifecycle");
+        errors.push(...lifecycleResult.errors);
+        advisories.push(...lifecycleResult.advisories);
+      }
     }
   }
 
@@ -163,7 +189,11 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
         const p = profileRaw as Record<string, unknown>;
         errors.push(...validateStartupBlock(p["startup"], `profiles.${profileName}.startup`));
         if (p["lifecycle"]) {
-          errors.push(...validateLifecycle(p["lifecycle"], `profiles.${profileName}.lifecycle`));
+          {
+            const lifecycleResult = validateLifecycle(p["lifecycle"], `profiles.${profileName}.lifecycle`);
+            errors.push(...lifecycleResult.errors);
+            advisories.push(...lifecycleResult.advisories);
+          }
         }
       }
     }
@@ -266,7 +296,7 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
     }
   }
 
-  return { valid: errors.length === 0, errors };
+  return { valid: errors.length === 0, errors, ...(advisories.length > 0 ? { advisories } : {}) };
 }
 
 /**
@@ -326,7 +356,8 @@ const normalizeStartupBlock = sharedNormalizeStartupBlock;
 function normalizeLifecycle(raw: Record<string, unknown>): LifecycleDefaults {
   return {
     executionMode: (raw["execution_mode"] as LifecycleDefaults["executionMode"]) ?? "interactive_resident",
-    compactionStrategy: (raw["compaction_strategy"] as LifecycleDefaults["compactionStrategy"]) ?? "harness_native",
+    compactionStrategy: (canonicalCompactionStrategy((raw["compaction_strategy"] as string) ?? "") ??
+      "default-compaction") as LifecycleDefaults["compactionStrategy"],
     restorePolicy: (raw["restore_policy"] as LifecycleDefaults["restorePolicy"]) ?? "resume_if_possible",
   };
 }

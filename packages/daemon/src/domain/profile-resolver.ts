@@ -1,4 +1,5 @@
 import nodePath from "node:path";
+import { canonicalCompactionStrategy } from "./agent-manifest.js";
 import { homedir as osHomedir } from "node:os";
 import type {
   AgentSpec, AgentResources, ProfileSpec, LifecycleDefaults,
@@ -31,6 +32,8 @@ export interface ResolvedNodeConfig {
   model: string | undefined;
   cwd: string;
   restorePolicy: string;
+  /** OPR.0.5.6.20 — resolved continuity mode (canonical vocabulary; most-specific-wins). */
+  compactionStrategy: string;
   lifecycle: LifecycleDefaults | undefined;
   selectedResources: ResolvedResources;
   startup: StartupBlock;
@@ -188,6 +191,12 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
     return { ok: false, errors: [restorePolicyResult.error] };
   }
 
+  // 7b. Resolve compactionStrategy (OPR.0.5.6.20 — override-wins, aliases normalized)
+  const compactionResult = resolveCompactionStrategy(spec, profile, member);
+  if (!compactionResult.ok) {
+    return { ok: false, errors: [compactionResult.error] };
+  }
+
   // 8. Resolve lifecycle
   const lifecycle = profile.lifecycle ?? spec.defaults?.lifecycle;
 
@@ -209,6 +218,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
       model,
       cwd,
       restorePolicy: restorePolicyResult.policy,
+      compactionStrategy: compactionResult.strategy,
       lifecycle,
       selectedResources: selectedResult!,
       startup,
@@ -337,6 +347,36 @@ function resolveProfileUses(
 }
 
 // -- Restore policy narrowing --
+
+/** OPR.0.5.6.20 — most-specific-WINS (spec default < profile < member), the
+ * restore-policy PATTERN without its narrowing lattice: the four continuity modes are
+ * unordered, so each more-specific level simply overrides. Aliases normalize through
+ * the manifest's one vocabulary site; an invalid value at any level errors naming it. */
+function resolveCompactionStrategy(
+  spec: AgentSpec,
+  profile: ProfileSpec,
+  member: RigSpecPodMember,
+): { ok: true; strategy: string } | { ok: false; error: string } {
+  let current = "default-compaction";
+  const specValue = spec.defaults?.lifecycle?.compactionStrategy;
+  if (specValue) {
+    const canonical = canonicalCompactionStrategy(specValue);
+    if (canonical === null) return { ok: false, error: `Invalid compactionStrategy in spec defaults: "${specValue}"` };
+    current = canonical;
+  }
+  const profileValue = (profile.lifecycle as { compactionStrategy?: string } | undefined)?.compactionStrategy;
+  if (profileValue) {
+    const canonical = canonicalCompactionStrategy(profileValue);
+    if (canonical === null) return { ok: false, error: `Invalid compactionStrategy in profile: "${profileValue}"` };
+    current = canonical;
+  }
+  if (member.compactionStrategy) {
+    const canonical = canonicalCompactionStrategy(member.compactionStrategy);
+    if (canonical === null) return { ok: false, error: `Invalid compactionStrategy in member: "${member.compactionStrategy}"` };
+    current = canonical;
+  }
+  return { ok: true, strategy: current };
+}
 
 function resolveRestorePolicy(
   spec: AgentSpec,

@@ -802,7 +802,7 @@ export interface StartupBlock {
 
 export interface LifecycleDefaults {
   executionMode: "interactive_resident";
-  compactionStrategy: "harness_native" | "pod_continuity";
+  compactionStrategy: "default-compaction" | "managed-compaction" | "handover" | "apprentice-handover";
   restorePolicy: "resume_if_possible" | "relaunch_fresh" | "checkpoint_only";
 }
 
@@ -1002,6 +1002,9 @@ export interface RigSpecPodMember {
   permissionPolicy?: string;
   cwd: string;
   restorePolicy?: string;
+  /** OPR.0.5.6.20 — per-member continuity override (most-specific-wins; canonical or
+   *  deprecated-alias spelling, normalized at resolution). Absent = inherit. */
+  compactionStrategy?: string;
   startup?: StartupBlock;
   /**
    * Optional fork source declaration. v1 MVP: mode="fork" with
