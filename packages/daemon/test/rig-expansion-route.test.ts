@@ -276,4 +276,115 @@ describe("POST /api/rigs/:rigId/expand", () => {
     expect(stored?.agent_ref).toBe("builtin:terminal");
     expect(stored?.restore_policy).toBe("checkpoint_only");
   });
+
+  // OPR.0.5.6.3 repair (wave-1 R2 HOLD): the route normalizer recognized only
+  // fork/rebuild and silently dropped the entire agent_image session source
+  // BEFORE the service mapper could preserve ref.version — the landed S03
+  // service test exercised RigExpansionService directly and bypassed this
+  // ingress. These pins ride the REAL HTTP route and observe the
+  // service/materialized-spec boundary (the materializeStructured argument).
+  it("agent_image session_source with a version pin survives the real expand ingress to the materialized spec", async () => {
+    const rig = seedRig("image-pin-rig");
+    const materializeSpy = vi.spyOn(setup.podInstantiator, "materializeStructured");
+    await setup.app.request(`/api/rigs/${rig.id}/expand`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pod: {
+          id: "img",
+          label: "Imaged",
+          members: [
+            {
+              id: "worker",
+              runtime: "claude-code",
+              agent_ref: "local:agents/impl",
+              profile: "default",
+              cwd: "/tmp",
+              session_source: { mode: "agent_image", ref: { kind: "image_name", value: "builder-base", version: "3" } },
+            },
+          ],
+          edges: [],
+        },
+      }),
+    });
+
+    expect(materializeSpy).toHaveBeenCalled();
+    const specObject = materializeSpy.mock.calls[0]![0] as { pods: Array<{ members: Array<Record<string, unknown>> }> };
+    const member = specObject.pods[0]!.members[0]!;
+    expect(member["session_source"]).toEqual({
+      mode: "agent_image",
+      ref: { kind: "image_name", value: "builder-base", version: "3" },
+    });
+    materializeSpy.mockRestore();
+  });
+
+  it("unversioned agent_image session_source survives the ingress with NO version key invented", async () => {
+    const rig = seedRig("image-unpinned-rig");
+    const materializeSpy = vi.spyOn(setup.podInstantiator, "materializeStructured");
+    await setup.app.request(`/api/rigs/${rig.id}/expand`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pod: {
+          id: "img2",
+          label: "Imaged2",
+          members: [
+            {
+              id: "worker",
+              runtime: "claude-code",
+              agent_ref: "local:agents/impl",
+              profile: "default",
+              cwd: "/tmp",
+              session_source: { mode: "agent_image", ref: { kind: "image_name", value: "builder-base" } },
+            },
+          ],
+          edges: [],
+        },
+      }),
+    });
+
+    expect(materializeSpy).toHaveBeenCalled();
+    const specObject = materializeSpy.mock.calls[0]![0] as { pods: Array<{ members: Array<Record<string, unknown>> }> };
+    const member = specObject.pods[0]!.members[0]!;
+    expect(member["session_source"]).toEqual({
+      mode: "agent_image",
+      ref: { kind: "image_name", value: "builder-base" },
+    });
+    materializeSpy.mockRestore();
+  });
+
+  it("invalid agent_image shapes are not widened by the ingress (empty value, wrong kind, non-string version)", async () => {
+    const rig = seedRig("image-invalid-rig");
+    const materializeSpy = vi.spyOn(setup.podInstantiator, "materializeStructured");
+    const post = (sessionSource: unknown, podId: string) =>
+      setup.app.request(`/api/rigs/${rig.id}/expand`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          pod: {
+            id: podId,
+            label: "X",
+            members: [
+              { id: "w", runtime: "claude-code", agent_ref: "local:agents/impl", profile: "default", cwd: "/tmp", session_source: sessionSource },
+            ],
+            edges: [],
+          },
+        }),
+      });
+
+    await post({ mode: "agent_image", ref: { kind: "image_name", value: "" } }, "inv1");
+    await post({ mode: "agent_image", ref: { kind: "image_id", value: "x" } }, "inv2");
+    await post({ mode: "agent_image", ref: { kind: "image_name", value: "ok", version: 3 } }, "inv3");
+
+    const captured = materializeSpy.mock.calls.map((call) => {
+      const spec = call[0] as { pods: Array<{ members: Array<Record<string, unknown>> }> };
+      return spec.pods[0]!.members[0]!["session_source"];
+    });
+    // empty value and wrong kind: no session_source constructed
+    expect(captured[0]).toBeUndefined();
+    expect(captured[1]).toBeUndefined();
+    // non-string version: the source passes with the pin OMITTED, never coerced
+    expect(captured[2]).toEqual({ mode: "agent_image", ref: { kind: "image_name", value: "ok" } });
+    materializeSpy.mockRestore();
+  });
 });
