@@ -57,7 +57,7 @@ library actually does today, anything that changed after your training cutoff, w
 world rather than in this repo.
 
 **And the failure is the same one this page already warns about, pointed outward.** An agent that
-does not know the corpus exists invents instead of looking. An agent that does not know these exist
+does not know the external sources below exist invents instead of looking. An agent that does not know these exist
 **answers from its training snapshot and states it as current** — and an invented answer and a
 known one look identical once you have stated one.
 
