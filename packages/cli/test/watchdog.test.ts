@@ -190,6 +190,55 @@ describe("rig watchdog CLI (PL-004 Phase C)", () => {
     expect(register!.helpInformation()).toMatch(/queue block.*wake-watchdog/i);
   });
 
+  it("registers a context threshold without a spec file", async () => {
+    const { deps, calls } = makeDeps();
+    const tmp = mkdtempSync(join(tmpdir(), "wd-cli-context-"));
+    const transcript = join(tmp, "session.jsonl");
+    writeFileSync(transcript, "1234");
+    const program = createProgram({ watchdogDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node",
+      "rig",
+      "watchdog",
+      "register",
+      "--policy",
+      "context-usage-threshold",
+      "--target-session",
+      "alice@rig",
+      "--threshold-mb",
+      "1.5",
+      "--watched-file",
+      transcript,
+      "--interval-seconds",
+      "60",
+      "--registered-by",
+      "ops@kernel",
+      "--message",
+      "Prepare continuity now",
+      "--json",
+    ]);
+    const request = calls.find((call) => call.path === "/api/watchdog/register");
+    expect(request?.body).toMatchObject({
+      policy: "context-usage-threshold",
+      targetSession: "alice@rig",
+      thresholdBytes: 1_500_000,
+      watchedFilePath: transcript,
+    });
+    expect((request?.body as { specYaml: string }).specYaml).toContain("Prepare continuity now");
+  });
+
+  it("teaches conservative calibration and the margin rationale in register help", () => {
+    const { deps } = makeDeps();
+    const program = createProgram({ watchdogDeps: deps });
+    const watchdog = program.commands.find((command) => command.name() === "watchdog");
+    const register = watchdog?.commands.find((command) => command.name() === "register");
+    const help = register?.helpInformation() ?? "";
+    expect(help).toContain("context-usage-threshold");
+    expect(help).toMatch(/113K.*153K.*tokens.*MB/i);
+    expect(help).toMatch(/margin.*protection/i);
+  });
+
   it("list GETs /api/watchdog/list", async () => {
     const { deps, calls } = makeDeps({
       routes: { "GET /api/watchdog/list": { status: 200, data: [] } },
