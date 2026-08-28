@@ -234,6 +234,7 @@ function staticWorldPack(root, rel, { withCharged = false } = {}) {
     [
       'name: "mini-world"',
       'version: "0"',
+      "taxonomy: world",
       'purpose: "mini world for the projection pin"',
       "files:",
       '  - path: "a.md"',

@@ -39,7 +39,7 @@ interface ContextPackEntryWire {
   name: string;
   version: string;
   purpose: string | null;
-  /** OPR.0.5.6.10 — pack-level classification (world | lore | skills | mission). */
+  /** OPR.0.5.6.10 — pack-level classification from the daemon's ATOM_TAXONOMIES enum. */
   taxonomy: string;
   sourceType: "builtin" | "user_file" | "workspace";
   sourcePath: string;
