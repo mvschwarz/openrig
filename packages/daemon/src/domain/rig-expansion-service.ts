@@ -164,6 +164,12 @@ export class RigExpansionService {
                 ref: {
                   kind: member.sessionSource.ref.kind,
                   ...(member.sessionSource.ref.value !== undefined ? { value: member.sessionSource.ref.value } : {}),
+                  // OPR.0.5.6.3: the agent_image version selector rides the
+                  // map like role (FAC1) — dropping it silently expands a
+                  // version-pinned member at the default image version.
+                  ...("version" in member.sessionSource.ref && member.sessionSource.ref.version !== undefined
+                    ? { version: member.sessionSource.ref.version }
+                    : {}),
                 },
               },
             } : {}),
