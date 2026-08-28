@@ -364,3 +364,18 @@ test("PRODUCTION LIBRARY: only the public onboarding-width and world-example sta
     rmSync(out, { recursive: true, force: true });
   }
 });
+
+// OPR.0.5.6.10 mini-req 3 — the projection stamps its packs "skills": every
+// skill-projected manifest carries the pack-level taxonomy, emitted by the
+// generator (never hand-edited), and still parses through the daemon parser.
+test("OPR.0.5.6.10 GENERATOR STAMPS — skill-projected packs carry pack-level taxonomy: skills", () => {
+  const { source, out, base } = scratch();
+  try {
+    skill(source, "core/attention-queue", { name: "attention-queue", description: "Coordinate work.", files: {} });
+    run(source, out);
+    const m = parseManifest(readFileSync(join(out, "skills/core/attention-queue/manifest.yaml"), "utf8"), "stamp");
+    assert.equal(m.taxonomy, "skills", "generator must stamp pack-level taxonomy: skills (OPR.0.5.6.10)");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
