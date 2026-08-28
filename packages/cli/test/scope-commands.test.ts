@@ -90,6 +90,40 @@ async function run(args: string[], workspace: string): Promise<CaptureResult> {
   };
 }
 
+describe("rig scope resolve-notes", () => {
+  let root: string;
+  beforeEach(() => { root = mktemp(); });
+  afterEach(() => { fs.rmSync(root, { recursive: true, force: true }); });
+
+  it.each([
+    { label: "current readable", current: true, legacy: false, unreadableCurrent: false, expected: "NOTES.md" },
+    { label: "legacy readable", current: false, legacy: true, unreadableCurrent: false, expected: "MISSION_NOTES.md" },
+    { label: "both readable prefer current", current: true, legacy: true, unreadableCurrent: false, expected: "NOTES.md" },
+    { label: "current unreadable falls through", current: true, legacy: true, unreadableCurrent: true, expected: "MISSION_NOTES.md" },
+    { label: "no readable notes", current: false, legacy: false, unreadableCurrent: false, expected: null },
+  ])("returns the locked JSON shape: $label", async ({ current, legacy, unreadableCurrent, expected }) => {
+    const node = path.join(root, "mission");
+    const currentPath = path.join(node, "NOTES.md");
+    const legacyPath = path.join(node, "MISSION_NOTES.md");
+    fs.mkdirSync(node, { recursive: true });
+    if (current) fs.writeFileSync(currentPath, "current\n", "utf8");
+    if (legacy) fs.writeFileSync(legacyPath, "legacy\n", "utf8");
+    if (unreadableCurrent) fs.chmodSync(currentPath, 0o000);
+
+    try {
+      const result = await run(["resolve-notes", node, "--json"], root);
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(JSON.parse(result.stdout)).toEqual({
+        ok: true,
+        resolution: expected ? { path: path.join(node, expected), name: expected } : null,
+      });
+    } finally {
+      if (unreadableCurrent) fs.chmodSync(currentPath, 0o600);
+    }
+  });
+});
+
 // ---------------------------------------------------------------------
 // HG-1 + HG-9: rig scope slice ls --json + state filter
 // ---------------------------------------------------------------------
@@ -709,7 +743,7 @@ describe("--help is present on every command (HG-12)", () => {
     const cmd = scopeCommand();
     expect(cmd.description()).toBeTruthy();
     const tiers = cmd.commands;
-    expect(tiers.map((c) => c.name()).sort()).toEqual(["audit", "mission", "slice"]);
+    expect(tiers.map((c) => c.name()).sort()).toEqual(["audit", "mission", "resolve-notes", "slice"]);
     for (const tier of tiers) {
       expect(tier.description()).toBeTruthy();
       for (const verb of tier.commands) {

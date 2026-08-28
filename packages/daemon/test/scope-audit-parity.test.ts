@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -13,6 +14,41 @@ import {
 } from "../src/domain/scope/node-file.js";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..", "..");
+const TRACE_TO_ROOT = path.join(
+  REPO_ROOT,
+  "packages/daemon/assets/plugins/openrig-core/skills/refocusing/scripts/trace-to-root.py",
+);
+
+const PRODUCTION_CODE_ROOTS = [
+  "packages/cli/src",
+  "packages/daemon/src",
+  "packages/daemon/assets/plugins",
+] as const;
+const NOTES_RESOLVER_FILES = new Set([
+  "packages/cli/src/lib/scope/scope-fs.ts",
+  "packages/daemon/src/domain/scope/node-file.ts",
+]);
+const CODE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".cjs", ".mjs", ".py"]);
+
+function enumerateCodeFiles(root: string): string[] {
+  const files: string[] = [];
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    const candidate = path.join(root, entry.name);
+    if (entry.isDirectory()) files.push(...enumerateCodeFiles(candidate));
+    else if (entry.isFile() && CODE_EXTENSIONS.has(path.extname(entry.name))) files.push(candidate);
+  }
+  return files;
+}
+
+function privateNotesReaderLines(content: string): string[] {
+  return content.split("\n").filter((line) =>
+    /missionNotes(?:Current|Legacy|Exists)/.test(line)
+    || (
+      /\b(?:NOTES|MISSION_NOTES)\.md\b/.test(line)
+      && /(?:existsSync|accessSync|statSync|readFileSync|createReadStream|\.is_file\(|\.exists\(|\.stat\(|\.read_text\(|\bopen\()/.test(line)
+    ),
+  );
+}
 
 const CLASSIFIER_FILES = [
   { cli: "packages/cli/src/lib/scope/scope-audit.ts", daemon: "packages/daemon/src/domain/scope/scope-audit.ts" },
@@ -95,20 +131,20 @@ describe("scope-audit CLI/daemon parity (CI-FAILING)", () => {
       }
     });
 
-    it("keeps private notes filename checks inside the two shared resolvers", () => {
-      const readers = [
-        "packages/cli/src/lib/scope/scope-audit.ts",
-        "packages/daemon/src/domain/scope/scope-audit.ts",
-        "packages/cli/src/commands/scope.ts",
-        "packages/daemon/src/domain/workspace/workspace-doctor.ts",
-        "packages/daemon/src/routes/scope-audit.ts",
-      ];
-      for (const file of readers) {
-        const privateChecks = fs.readFileSync(path.join(REPO_ROOT, file), "utf8")
-          .split("\n")
-          .filter((line) => /missionNotes(?:Current|Legacy|Exists)|(?:childPath|existsSync|accessSync|statSync).*\b(?:NOTES|MISSION_NOTES)\.md\b/.test(line));
-        expect(privateChecks, file).toEqual([]);
-      }
+    it("keeps private notes readers out of recursively enumerated production code", () => {
+      const files = PRODUCTION_CODE_ROOTS.flatMap((root) =>
+        enumerateCodeFiles(path.join(REPO_ROOT, root)),
+      );
+      const relativeFiles = new Set(files.map((file) => path.relative(REPO_ROOT, file)));
+      for (const resolver of NOTES_RESOLVER_FILES) expect(relativeFiles.has(resolver), resolver).toBe(true);
+
+      const violations = files.flatMap((file) => {
+        const relative = path.relative(REPO_ROOT, file);
+        if (NOTES_RESOLVER_FILES.has(relative)) return [];
+        return privateNotesReaderLines(fs.readFileSync(file, "utf8"))
+          .map((line) => `${relative}: ${line.trim()}`);
+      });
+      expect(violations).toEqual([]);
     });
   });
 
@@ -159,6 +195,97 @@ describe("mission notes resolver parity", () => {
         expect(cliResolution?.name ?? null, fixture.name).toBe(fixture.bound);
       }
     } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("shipped refocus notes resolution", () => {
+  it("uses the real CLI resolver for every locked outcome and reports command failure honestly", () => {
+    const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "scope-notes-refocus-"));
+    const workNode = path.join(root, "work-node");
+    const bin = path.join(root, "bin");
+    const rig = path.join(bin, "rig");
+    const currentPath = path.join(workNode, "NOTES.md");
+    const legacyPath = path.join(workNode, "MISSION_NOTES.md");
+    fs.mkdirSync(workNode, { recursive: true });
+    const resolvedWorkNode = fs.realpathSync(workNode);
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(path.join(workNode, "SPEC.md"), "---\nintent: Exercise resolution\n---\n", "utf8");
+    const launcher = path.join(root, "scope-launcher.mjs");
+    fs.writeFileSync(launcher, `import { pathToFileURL } from "node:url";
+const { scopeCommand } = await import(pathToFileURL(process.env.OPENRIG_TEST_SCOPE_COMMAND));
+await scopeCommand().parseAsync(process.argv);
+`, "utf8");
+    fs.writeFileSync(rig, `#!/bin/sh
+if [ "\${OPENRIG_TEST_SCOPE_RESOLVE_FAIL:-}" = "1" ] && [ "$1" = "scope" ] && [ "$2" = "resolve-notes" ]; then
+  printf '%s\n' 'forced resolver failure' >&2
+  exit 23
+fi
+if [ "$1" = "scope" ]; then shift; fi
+exec "$OPENRIG_TEST_NODE" --import tsx "$OPENRIG_TEST_SCOPE_LAUNCHER" "$@"
+`, "utf8");
+    fs.chmodSync(rig, 0o755);
+    const baseEnv = {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH || ""}`,
+      OPENRIG_TEST_NODE: process.execPath,
+      OPENRIG_TEST_SCOPE_COMMAND: path.join(REPO_ROOT, "packages/cli/src/commands/scope.ts"),
+      OPENRIG_TEST_SCOPE_LAUNCHER: launcher,
+      OPENRIG_WORKSPACE_ROOT: workNode,
+    } as NodeJS.ProcessEnv;
+
+    try {
+      const fixtures = [
+        { label: "resolved current", current: true, legacy: false, unreadableCurrent: false, expected: "current notes", absent: "legacy notes" },
+        { label: "resolved legacy", current: false, legacy: true, unreadableCurrent: false, expected: "legacy notes", absent: "current notes" },
+        { label: "both prefer current", current: true, legacy: true, unreadableCurrent: false, expected: "current notes", absent: "legacy notes" },
+        { label: "unreadable current falls through", current: true, legacy: true, unreadableCurrent: true, expected: "legacy notes", absent: "current notes" },
+      ];
+      for (const fixture of fixtures) {
+        fs.rmSync(currentPath, { force: true });
+        fs.rmSync(legacyPath, { force: true });
+        if (fixture.current) fs.writeFileSync(currentPath, "current notes\n", "utf8");
+        if (fixture.legacy) fs.writeFileSync(legacyPath, "legacy notes\n", "utf8");
+        if (fixture.unreadableCurrent) fs.chmodSync(currentPath, 0o000);
+        const result = spawnSync("python3", [
+          TRACE_TO_ROOT,
+          "--trees", "work",
+          "--depth", "full",
+          "--work-start", workNode,
+        ], { cwd: REPO_ROOT, encoding: "utf8", env: baseEnv });
+        if (fixture.unreadableCurrent) fs.chmodSync(currentPath, 0o600);
+        expect(result.status, fixture.label).toBe(0);
+        expect(result.stdout, fixture.label).toContain(fixture.expected);
+        expect(result.stdout, fixture.label).not.toContain(fixture.absent);
+      }
+
+      fs.rmSync(currentPath, { force: true });
+      fs.rmSync(legacyPath, { force: true });
+      const missing = spawnSync("python3", [
+        TRACE_TO_ROOT,
+        "--trees", "work",
+        "--depth", "full",
+        "--work-start", workNode,
+      ], { cwd: REPO_ROOT, encoding: "utf8", env: baseEnv });
+      expect(missing.status).toBe(0);
+      expect(missing.stdout).toContain(`NOTES GAP — no readable mission notes at ${resolvedWorkNode}`);
+
+      const failed = spawnSync("python3", [
+        TRACE_TO_ROOT,
+        "--trees", "work",
+        "--depth", "full",
+        "--work-start", workNode,
+      ], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+        env: { ...baseEnv, OPENRIG_TEST_SCOPE_RESOLVE_FAIL: "1" },
+      });
+      expect(failed.status).toBe(0);
+      expect(failed.stdout).toContain("NOTES RESOLUTION GAP — resolver command exited 23");
+      expect(failed.stdout).not.toContain("NOTES GAP — no readable mission notes");
+    } finally {
+      if (fs.existsSync(currentPath)) fs.chmodSync(currentPath, 0o600);
       fs.rmSync(root, { recursive: true, force: true });
     }
   });

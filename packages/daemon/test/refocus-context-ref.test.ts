@@ -257,6 +257,11 @@ describe("openrig-core refocusing skill — real dual-tree trace", () => {
     writeFileSync(rig, `#!/bin/sh
 if [ "$1 $2 $3" = "config get topology.root" ]; then printf '%s\\n' "$OPENRIG_TEST_TOPOLOGY_ROOT"; exit 0; fi
 if [ "$1 $2 $3" = "config get workspace.root" ]; then printf '%s\\n' "$OPENRIG_TEST_WORKSPACE_ROOT"; exit 0; fi
+if [ "$1 $2" = "scope resolve-notes" ]; then
+  if [ -r "$3/NOTES.md" ]; then printf '{"ok":true,"resolution":{"path":"%s","name":"NOTES.md"}}\\n' "$3/NOTES.md"; exit 0; fi
+  if [ -r "$3/MISSION_NOTES.md" ]; then printf '{"ok":true,"resolution":{"path":"%s","name":"MISSION_NOTES.md"}}\\n' "$3/MISSION_NOTES.md"; exit 0; fi
+  printf '{"ok":true,"resolution":null}\\n'; exit 0
+fi
 exit 1
 `, "utf8");
     chmodSync(rig, 0o755);

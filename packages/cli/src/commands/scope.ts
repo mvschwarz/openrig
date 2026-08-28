@@ -822,6 +822,34 @@ function buildMissionGraphCommand(): Command {
     });
 }
 
+function buildResolveNotesCommand(): Command {
+  return new Command("resolve-notes")
+    .description("Resolve the readable mission notes file for an absolute work-node directory")
+    .argument("<absolute-work-node-dir>", "Absolute mission or slice directory")
+    .option("--json", "Machine-readable JSON output")
+    .action((workNodeDir: string, opts) => {
+      const out = makeStdout();
+      const json = Boolean(opts.json);
+      try {
+        if (!path.isAbsolute(workNodeDir)) {
+          throw new ScopeCliError({
+            fact: `Work-node directory must be absolute: ${workNodeDir}`,
+            consequence: "Mission notes cannot be resolved from an ambiguous location.",
+            action: "Pass the absolute mission or slice directory.",
+          });
+        }
+        const resolution = resolveNotesFile(workNodeDir);
+        emit(out, { ok: true, resolution }, json, [
+          resolution
+            ? `${resolution.name}: ${resolution.path}`
+            : `No readable mission notes at ${workNodeDir}`,
+        ]);
+      } catch (err) {
+        fail(err, json, out);
+      }
+    });
+}
+
 // ---------------------------------------------------------------------
 // Audit (B2 — read-only scope audit)
 // ---------------------------------------------------------------------
@@ -1933,6 +1961,7 @@ export function scopeCommand(): Command {
   mission.addCommand(buildMissionVerifiedCommand());
   mission.addCommand(buildApproveCommand("mission"));
   cmd.addCommand(mission);
+  cmd.addCommand(buildResolveNotesCommand());
   cmd.addCommand(buildAuditCommand());
 
   return cmd;

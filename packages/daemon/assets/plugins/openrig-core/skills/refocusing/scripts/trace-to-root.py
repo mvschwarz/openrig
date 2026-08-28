@@ -60,6 +60,41 @@ def read(path):
         return None
 
 
+def resolve_notes(node):
+    try:
+        result = subprocess.run(
+            ["rig", "scope", "resolve-notes", str(node), "--json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "resolver command timed out"
+    except OSError as error:
+        return None, f"resolver command could not start: {error}"
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        suffix = f": {detail[0]}" if detail else ""
+        return None, f"resolver command exited {result.returncode}{suffix}"
+    try:
+        payload = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError):
+        return None, "resolver command returned malformed JSON"
+    if not isinstance(payload, dict) or payload.get("ok") is not True or "resolution" not in payload:
+        return None, "resolver command returned an invalid success shape"
+    resolution = payload["resolution"]
+    if resolution is None:
+        return None, None
+    if not isinstance(resolution, dict):
+        return None, "resolver command returned an invalid resolution shape"
+    resolved_path = resolution.get("path")
+    resolved_name = resolution.get("name")
+    if not isinstance(resolved_path, str) or not isinstance(resolved_name, str):
+        return None, "resolver command returned an invalid resolution shape"
+    return (Path(resolved_path), resolved_name), None
+
+
 def intent(text):
     if not text or not text.startswith("---"):
         return None
@@ -136,18 +171,26 @@ def render_work(start, root, depth):
                 body = f"intent: {value}" if value else "MISSING INTENT — no readable intent: field"
             output.append(f"\n### {label} · {spec.name}\n{body}")
 
-        notes = next((candidate for candidate in (node / "NOTES.md", node / "MISSION_NOTES.md") if candidate.is_file()), None)
-        if notes:
+        notes, resolution_error = resolve_notes(node)
+        if resolution_error:
+            output.append(f"NOTES RESOLUTION GAP — {resolution_error} at {node}")
+        elif notes:
+            notes_path, notes_name = notes
             if depth == "full":
-                output.append(f"\nNOTES · {notes.name}\n{(read(notes) or '').strip()}")
+                notes_text = read(notes_path)
+                if notes_text is None:
+                    output.append(f"NOTES RESOLUTION GAP — resolved {notes_name} became unreadable at {notes_path}")
+                else:
+                    output.append(f"\nNOTES · {notes_name}\n{notes_text.strip()}")
             else:
                 try:
-                    size = notes.stat().st_size
+                    size = notes_path.stat().st_size
                 except OSError:
-                    size = 0
-                output.append(f"NOTES · {notes.name} · {size} bytes · {notes}")
+                    output.append(f"NOTES RESOLUTION GAP — resolved {notes_name} became unreadable at {notes_path}")
+                else:
+                    output.append(f"NOTES · {notes_name} · {size} bytes · {notes_path}")
         else:
-            output.append(f"NOTES GAP — no NOTES.md or MISSION_NOTES.md at {node}")
+            output.append(f"NOTES GAP — no readable mission notes at {node}")
     return "\n".join(output)
 
 
