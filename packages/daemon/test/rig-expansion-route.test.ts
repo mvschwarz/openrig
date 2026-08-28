@@ -353,7 +353,7 @@ describe("POST /api/rigs/:rigId/expand", () => {
     materializeSpy.mockRestore();
   });
 
-  it("invalid agent_image shapes are not widened by the ingress (empty value, wrong kind, non-string version)", async () => {
+  it("invalid agent_image shapes are not widened by the ingress (empty value, wrong kind); numeric version coerces per schema parity", async () => {
     const rig = seedRig("image-invalid-rig");
     const materializeSpy = vi.spyOn(setup.podInstantiator, "materializeStructured");
     const post = (sessionSource: unknown, podId: string) =>
@@ -383,8 +383,11 @@ describe("POST /api/rigs/:rigId/expand", () => {
     // empty value and wrong kind: no session_source constructed
     expect(captured[0]).toBeUndefined();
     expect(captured[1]).toBeUndefined();
-    // non-string version: the source passes with the pin OMITTED, never coerced
-    expect(captured[2]).toEqual({ mode: "agent_image", ref: { kind: "image_name", value: "ok" } });
+    // numeric version COERCES to string at the ingress — schema parity
+    // (rigspec-schema.ts validates string|number and normalizes with
+    // String(versionRaw); orch-lead ruling 2026-08-28 12:06Z: string-only
+    // omission would recreate the silent-default defect for YAML `version: 3`)
+    expect(captured[2]).toEqual({ mode: "agent_image", ref: { kind: "image_name", value: "ok", version: "3" } });
     materializeSpy.mockRestore();
   });
 });
