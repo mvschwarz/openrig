@@ -7,10 +7,12 @@ import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { coreSchema } from "../src/db/migrations/001_core_schema.js";
+import { bindingsSessionsSchema } from "../src/db/migrations/002_bindings_sessions.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { contextUsageSchema } from "../src/db/migrations/018_context_usage.js";
 import { watchdogJobsSchema } from "../src/db/migrations/031_watchdog_jobs.js";
 import { watchdogHistorySchema } from "../src/db/migrations/032_watchdog_history.js";
+import { occupantTenuresSchema } from "../src/db/migrations/060_occupant_tenures.js";
 import { contextUsageWatchdogSchema } from "../src/db/migrations/074_context_usage_watchdog.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
@@ -33,11 +35,22 @@ describe("context-usage-threshold watchdog", () => {
     db = createDb();
     migrate(db, [
       coreSchema,
+      bindingsSessionsSchema,
       eventsSchema,
+      contextUsageSchema,
       watchdogJobsSchema,
       watchdogHistorySchema,
+      occupantTenuresSchema,
       contextUsageWatchdogSchema,
     ]);
+    db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-1', 'rig')").run();
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('node-1', 'rig-1', 'target')").run();
+    db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('session-1', 'node-1', 'target@rig')").run();
+    db.prepare(
+      `INSERT INTO occupant_tenures
+        (id, node_id, generation_ordinal, generation_uuid, kind, boot_at)
+       VALUES ('tenure-1', 'node-1', 1, 'gen-1', 'initial', '2026-08-28T09:00:00.000Z')`,
+    ).run();
     repo = new WatchdogJobsRepository(db);
     history = new WatchdogHistoryLog(db);
     bus = new EventBus(db);
@@ -118,15 +131,45 @@ describe("context-usage-threshold watchdog", () => {
     expect(repo.getByIdOrThrow(job.jobId).lastFiredGeneration).toBe("gen-1");
   });
 
-  it("a new occupant generation resets eligibility exactly once", async () => {
+  it("rebinds a new occupant to its own transcript and preserves that receipt through restart", async () => {
     writeFileSync(transcript, "1234567890");
+    const successorTranscript = join(tmp, "successor.jsonl");
+    writeFileSync(successorTranscript, "1");
     const job = register();
     await engine().evaluate(job);
+
+    db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('session-2', 'node-1', 'target@rig')").run();
+    db.prepare(
+      `INSERT INTO occupant_tenures
+        (id, node_id, generation_ordinal, generation_uuid, kind, boot_at)
+       VALUES ('tenure-2', 'node-1', 2, 'gen-2', 'handover', '2026-08-28T10:00:00.000Z')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO context_usage
+        (node_id, session_id, session_name, availability, transcript_path, sampled_at)
+       VALUES ('node-1', 'successor-native-session', 'target@rig', 'known', ?, '2026-08-28T10:00:01.000Z')`,
+    ).run(successorTranscript);
     generation = "gen-2";
-    await engine().evaluate(repo.getByIdOrThrow(job.jobId));
+
+    // Daemon restart: the durable job must resolve the CURRENT generation's
+    // small transcript B, never reuse predecessor transcript A (still large).
+    repo = new WatchdogJobsRepository(db);
+    const below = await engine().evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(below.outcome).toMatchObject({
+      action: "skip",
+      reason: "context_usage_below_threshold",
+    });
+    expect(deliveries).toHaveLength(1);
+
+    writeFileSync(successorTranscript, "1234567890");
     await engine().evaluate(repo.getByIdOrThrow(job.jobId));
     expect(deliveries).toHaveLength(2);
     expect(repo.getByIdOrThrow(job.jobId).lastFiredGeneration).toBe("gen-2");
+
+    repo = new WatchdogJobsRepository(db);
+    const repeat = await engine().evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(repeat.outcome).toMatchObject({ action: "skip", reason: "threshold_already_fired" });
+    expect(deliveries).toHaveLength(2);
   });
 
   it("requires an earlier job receipt for the same occupant generation", async () => {
