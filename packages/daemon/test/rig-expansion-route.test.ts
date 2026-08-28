@@ -353,9 +353,39 @@ describe("POST /api/rigs/:rigId/expand", () => {
     materializeSpy.mockRestore();
   });
 
-  it("invalid agent_image shapes are not widened by the ingress (empty value, wrong kind); numeric version coerces per schema parity", async () => {
-    const rig = seedRig("image-invalid-rig");
+  it("valid numeric version coerces to string per schema parity", async () => {
+    const rig = seedRig("image-numeric-rig");
     const materializeSpy = vi.spyOn(setup.podInstantiator, "materializeStructured");
+    await setup.app.request(`/api/rigs/${rig.id}/expand`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pod: {
+          id: "imgnum",
+          label: "X",
+          members: [
+            { id: "w", runtime: "claude-code", agent_ref: "local:agents/impl", profile: "default", cwd: "/tmp", session_source: { mode: "agent_image", ref: { kind: "image_name", value: "ok", version: 3 } } },
+          ],
+          edges: [],
+        },
+      }),
+    });
+    // numeric version COERCES to string — schema parity (rigspec-schema.ts
+    // validates string|number and normalizes with String(versionRaw);
+    // orch-lead ruling 2026-08-28 12:06Z: string-only omission would
+    // recreate the silent-default defect for YAML `version: 3`)
+    const spec = materializeSpy.mock.calls[0]![0] as { pods: Array<{ members: Array<Record<string, unknown>> }> };
+    expect(spec.pods[0]!.members[0]!["session_source"]).toEqual({ mode: "agent_image", ref: { kind: "image_name", value: "ok", version: "3" } });
+    materializeSpy.mockRestore();
+  });
+
+  // S03 repair amendment (R2 governing HOLD): present-INVALID agent_image
+  // shapes must reach the ONE canonical validator and fail structured —
+  // never be erased into session_source-absence, which silently widens an
+  // invalid request into an unpinned/no-source expansion (the SEAM-B
+  // presence-preservation law applied to session_source).
+  it("present-invalid agent_image shapes reach the canonical validator: structured 400, zero persistence, never erased into absence", async () => {
+    const rig = seedRig("image-invalid-rig");
     const post = (sessionSource: unknown, podId: string) =>
       setup.app.request(`/api/rigs/${rig.id}/expand`, {
         method: "POST",
@@ -372,22 +402,21 @@ describe("POST /api/rigs/:rigId/expand", () => {
         }),
       });
 
-    await post({ mode: "agent_image", ref: { kind: "image_name", value: "" } }, "inv1");
-    await post({ mode: "agent_image", ref: { kind: "image_id", value: "x" } }, "inv2");
-    await post({ mode: "agent_image", ref: { kind: "image_name", value: "ok", version: 3 } }, "inv3");
-
-    const captured = materializeSpy.mock.calls.map((call) => {
-      const spec = call[0] as { pods: Array<{ members: Array<Record<string, unknown>> }> };
-      return spec.pods[0]!.members[0]!["session_source"];
-    });
-    // empty value and wrong kind: no session_source constructed
-    expect(captured[0]).toBeUndefined();
-    expect(captured[1]).toBeUndefined();
-    // numeric version COERCES to string at the ingress — schema parity
-    // (rigspec-schema.ts validates string|number and normalizes with
-    // String(versionRaw); orch-lead ruling 2026-08-28 12:06Z: string-only
-    // omission would recreate the silent-default defect for YAML `version: 3`)
-    expect(captured[2]).toEqual({ mode: "agent_image", ref: { kind: "image_name", value: "ok", version: "3" } });
-    materializeSpy.mockRestore();
+    const cases: Array<[unknown, string]> = [
+      [{ mode: "agent_image", ref: { kind: "image_name", value: "" } }, "inv1"],
+      [{ mode: "agent_image", ref: { kind: "image_id", value: "x" } }, "inv2"],
+      [{ mode: "agent_image", ref: { kind: "image_name", value: "ok", version: { pin: 3 } } }, "inv3"],
+      [{ mode: "agent_image", ref: { kind: "image_name", value: "ok", version: true } }, "inv4"],
+    ];
+    for (const [sessionSource, podId] of cases) {
+      const res = await post(sessionSource, podId);
+      expect(res.status, `${podId} must fail structured validation, not expand`).toBe(400);
+      const body = await res.json();
+      expect(JSON.stringify(body), `${podId} error must name session_source`).toMatch(/session_source/);
+      expect(
+        db.prepare("SELECT COUNT(*) AS c FROM nodes WHERE logical_id LIKE ?").get(`${podId}.%`),
+        `${podId} must persist nothing`,
+      ).toMatchObject({ c: 0 });
+    }
   });
 });
