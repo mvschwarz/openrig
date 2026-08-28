@@ -209,7 +209,11 @@ describe("context-usage-threshold watchdog", () => {
       watchedFileGeneration: "gen-1",
       lastFiredGeneration: "gen-1",
     });
-    expect(history.listForJob(job.jobId)[0]).toMatchObject({
+    const pendingReceipts = history.listForJob(job.jobId).filter(
+      (entry) => entry.skipReason === "current_generation_transcript_pending",
+    );
+    expect(pendingReceipts).toHaveLength(1);
+    expect(pendingReceipts[0]).toMatchObject({
       outcome: "skipped",
       skipReason: "current_generation_transcript_pending",
       evaluationNotes: expect.objectContaining({
