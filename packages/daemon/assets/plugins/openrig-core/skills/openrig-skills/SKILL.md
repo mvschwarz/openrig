@@ -74,7 +74,6 @@ These ship in the OpenRig repo and reach a seat when its profile selects them. T
 - **openrig-upgrade** — upgrading OpenRig or the daemon.
 - **agent-starters** — composing an agent's starter context / priming packs.
 - **specification-system** — authoring or reading AgentSpecs and rig specs.
-- **attention-queue** — managing the attention / needs-attention surface.
 - **human-in-the-loop** — deciding when to involve the human vs. proceed on your own authority.
 - **delegating-work** — deciding WHO does a task: yourself, a spawned subagent, or another agent that already holds the context (the when/whether decision, not the fan-out mechanics).
 - **watchdog** — monitoring or recovering a seat (health, restore, stuck state).

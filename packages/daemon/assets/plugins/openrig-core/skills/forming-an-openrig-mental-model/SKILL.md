@@ -263,17 +263,12 @@ For real depth, these are the load-bearing canonical docs:
 | `openrig/docs/reference/agent-spec.md` | The AgentSpec YAML format — resources, profiles, imports |
 | `openrig/docs/reference/agent-startup-guide.md` | The 7-layer startup layering model; delivery hints |
 | the product taxonomy | Canonical vocabulary (read literally) |
-| `substrate/shared-docs/HOST-TOPOLOGY.md` | Host-level doctrine — rig classes, context patterns, lifecycle, authoring SOP |
-| `substrate/shared-docs/SUBSTRATE-CONVENTIONS.md` | Filesystem layout doctrine for substrate |
+| `openrig-operating-model` skill | Placement and operating-model guidance — topology and work trees, context altitude |
+| `openrig-architect` skill | Rig and topology authoring |
 | `https://agentskills.io/specification` | The cross-runtime skill standard |
 
-If you're going to be authoring rigs, read `HOST-TOPOLOGY.md` §7 (the
-authoring SOP) before touching YAML.
-
-If you're going to be doing skill work, read
-the factory-design reference and the
-`operating-the-skill-library` skill that lives in
-`substrate/shared-docs/rigs/skill-library/agents/shared/skills/`.
+If you're going to be authoring rigs, use the `openrig-architect` skill before
+touching YAML.
 
 ---
 

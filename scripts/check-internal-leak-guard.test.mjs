@@ -153,6 +153,7 @@ test("each explicit mode refuses a missing generated rules file", () => {
       ["--mode", "full"],
       ["--mode", "staged"],
       ["--mode", "range", "--from", head, "--to", head],
+      ["--mode", "tree", "--tree", repo],
     ]) {
       const result = runGuard(repo, missing, ...args);
       assert.notEqual(result.status, 0);
@@ -175,12 +176,71 @@ test("each explicit mode refuses an empty generated rules object", () => {
       ["--mode", "full"],
       ["--mode", "staged"],
       ["--mode", "range", "--from", head, "--to", head],
+      ["--mode", "tree", "--tree", repo],
     ]) {
       const result = runGuard(repo, empty, ...args);
       assert.notEqual(result.status, 0);
       assert.match(result.stderr, /rules|path_prefixes|invalid/i);
     }
   });
+});
+
+test("tree mode scans the actual packaging subtree, including an untracked seeded fixture", () => {
+  requireGuard();
+  const root = mkdtempSync(join(tmpdir(), "openrig-guard-tree-"));
+  const tree = join(root, "specs");
+  const rules = join(root, "rules.json");
+  try {
+    writeFileSync(rules, JSON.stringify(fixtureRules()));
+    write(join(tree, "agents/private/notes.md"), "operator-agent@kernel\n");
+
+    const refused = runGuard(root, rules, "--mode", "tree", "--tree", tree);
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /agents\/private\/notes\.md/);
+    assert.match(refused.stderr, /operator-agent@/);
+
+    rmSync(join(tree, "agents/private/notes.md"));
+    write(join(tree, "agents/private/notes.md"), "public fixture\n");
+    const admitted = runGuard(root, rules, "--mode", "tree", "--tree", tree);
+    assert.equal(admitted.status, 0, admitted.stderr);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("full artifact mode scans exactly the packager manifest and reports its file set", () => {
+  requireGuard();
+  const root = mkdtempSync(join(tmpdir(), "openrig-guard-artifact-"));
+  const tree = join(root, "package");
+  const rules = join(root, "rules.json");
+  const filesManifest = join(root, "artifact-files.json");
+  const report = join(root, "scan-report.json");
+  try {
+    writeFileSync(rules, JSON.stringify(fixtureRules()));
+    write(join(tree, "daemon/assets/guide.md"), "public guide\n");
+    write(join(tree, "package.json"), "{}\n");
+    write(join(tree, "not-packed.md"), "founder-only ignored staging residue\n");
+    writeFileSync(filesManifest, JSON.stringify({
+      files: ["package.json", "daemon/assets/guide.md"],
+    }));
+
+    const result = runGuard(
+      root,
+      rules,
+      "--mode", "full",
+      "--tree", tree,
+      "--files-manifest", filesManifest,
+      "--report", report,
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(report, "utf8")), {
+      mode: "full",
+      scannedFiles: ["daemon/assets/guide.md", "package.json"],
+      findingCount: 0,
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("Plain B keeps guard enforcement out of root test:repo while fixture tests remain discovered", () => {

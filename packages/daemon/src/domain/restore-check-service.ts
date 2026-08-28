@@ -944,7 +944,7 @@ export class RestoreCheckService {
     return {
       check, status: "yellow",
       evidence: `Queue file missing: ${queuePath}`,
-      remediation: "Create queue file per attention-queue convention",
+      remediation: "Create the missing durable queue file before relying on restored queue continuity",
       remediationSafe: false,
     };
   }

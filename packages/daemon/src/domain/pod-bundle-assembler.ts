@@ -2,7 +2,7 @@ import nodePath from "node:path";
 import { createHash } from "node:crypto";
 import { RigSpecCodec } from "./rigspec-codec.js";
 import { RigSpecSchema } from "./rigspec-schema.js";
-import { resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
+import { assertShippableSubstance, resolveAgentRef, type AgentResolverFsOps } from "./agent-resolver.js";
 import { serializePodBundleManifest, type PodBundleManifest, type PodBundleAgentEntry, type PodBundleAgentImportEntry, type BundleProvenance, type BundleCompatibility } from "./bundle-types.js";
 import type { RigSpec, StartupBlock } from "./types.js";
 
@@ -215,6 +215,7 @@ export class PodBundleAssembler {
     }
     if (!this.fs.exists(absPath)) return; // optional files may not exist
     const content = this.fs.readFile(absPath);
+    assertShippableSubstance([{ path: relPath, bytes: content }]);
     this.fs.mkdirp(nodePath.dirname(nodePath.join(outputDir, relPath)));
     this.fs.writeFile(nodePath.join(outputDir, relPath), content);
     collected.push(relPath);
@@ -228,13 +229,19 @@ export class PodBundleAssembler {
   }
 
   private vendorDirectory(srcDir: string, destDir: string, collected: string[], relPrefix: string): void {
-    this.fs.mkdirp(destDir);
     const files = this.fs.listFiles(srcDir);
-    for (const file of files) {
-      const srcPath = nodePath.join(srcDir, file);
+    const sources = files.map((file) => ({
+      file,
+      content: this.fs.readFile(nodePath.join(srcDir, file)),
+    }));
+    assertShippableSubstance(sources.map(({ file, content }) => ({
+      path: nodePath.join(relPrefix, file),
+      bytes: content,
+    })));
+    this.fs.mkdirp(destDir);
+    for (const { file, content } of sources) {
       const destPath = nodePath.join(destDir, file);
       this.fs.mkdirp(nodePath.dirname(destPath));
-      const content = this.fs.readFile(srcPath);
       this.fs.writeFile(destPath, content);
       collected.push(nodePath.join(relPrefix, file).replace(/\\/g, "/"));
     }

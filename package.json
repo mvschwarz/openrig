@@ -24,6 +24,7 @@
     "mirror-skills:check": "node scripts/mirror-skills.mjs --check",
     "generate-context-packs": "node scripts/generate-context-packs.mjs",
     "generate-context-packs:check": "node scripts/generate-context-packs.mjs --check",
+    "gate:substance": "node scripts/check-substance-gate.mjs",
     "gate": "node scripts/gate-lane.mjs"
   },
   "engines": {

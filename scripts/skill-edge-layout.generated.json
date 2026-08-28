@@ -43,13 +43,6 @@
       ],
       "category": null
     },
-    "attention-queue": {
-      "edges": [
-        "canonical",
-        "spec"
-      ],
-      "category": "core"
-    },
     "backlog-capture": {
       "edges": [
         "canonical",

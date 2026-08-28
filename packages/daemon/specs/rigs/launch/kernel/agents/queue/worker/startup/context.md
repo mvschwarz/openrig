@@ -22,7 +22,7 @@ stream-item-arrived events, not on a poll loop.
 
 ## Coordination
 
-- New ambiguous stream items → escalate to `advisor.lead@kernel`.
+- New ambiguous stream items → escalate to `advisor.lead`.
 - Routing decisions where the destination clearly fits a documented
   pattern → execute and emit the qitem.
 - All qitem closures + handoffs follow the closure-reason discipline

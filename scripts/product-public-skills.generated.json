@@ -39,7 +39,6 @@
       "openrig-upgrade",
       "agent-starters",
       "specification-system",
-      "attention-queue",
       "human-in-the-loop",
       "watchdog",
       "session-source-fork"
@@ -72,6 +71,9 @@
   "not_public": {
     "reclass_host_only": [
       "openrig-operator"
+    ],
+    "obsolete_internal": [
+      "attention-queue"
     ],
     "private_with_public_sibling_pending": [
       "security-and-consequence-boundary-policy"

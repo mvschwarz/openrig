@@ -47,6 +47,26 @@ test("product-team topology defaults have a clean-checkout source and package pa
   );
 });
 
+test("build-package scans the complete daemon specs tree before LP-7 copies it", () => {
+  const buildScript = readFileSync("scripts/build-package.sh", "utf8");
+  const scan = buildScript.indexOf("check-internal-leak-guard.mjs");
+  const specsTree = buildScript.indexOf('"$DAEMON_DIR/specs"', scan);
+  const copy = buildScript.indexOf('cp -r "$DAEMON_DIR/specs" "$CLI_DIR/daemon/specs"');
+
+  assert.ok(scan >= 0, "build-package must run the internal leak guard at the tarball trust boundary");
+  assert.ok(specsTree > scan, "the package-boundary guard must explicitly scan the complete daemon specs tree");
+  assert.ok(copy > specsTree, "the specs scan must finish before the wholesale LP-7 copy");
+});
+
+test("build-package emits the substance roots from the staging branches that actually ran", () => {
+  const buildScript = readFileSync("scripts/build-package.sh", "utf8");
+  assert.match(buildScript, /SUBSTANCE_SURFACE_ROOTS=\(\)/);
+  assert.match(buildScript, /cp -r "\$DAEMON_DIR\/assets"[\s\S]*SUBSTANCE_SURFACE_ROOTS\+=\("daemon\/assets"\)/);
+  assert.match(buildScript, /cp -r "\$DAEMON_DIR\/specs"[\s\S]*SUBSTANCE_SURFACE_ROOTS\+=\("daemon\/specs"\)/);
+  assert.match(buildScript, /cp -r "\$DAEMON_DIR\/context-packs"[\s\S]*SUBSTANCE_SURFACE_ROOTS\+=\("daemon\/context-packs"\)/);
+  assert.match(buildScript, /substance-surfaces\.json/);
+});
+
 test("the private product-factory VPS runbook and its pointers do not ship", () => {
   const privateRunbook = "docs/reference/product-factory-vps-runbook.md";
   assert.equal(

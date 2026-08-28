@@ -24,7 +24,6 @@ const ENTRIES = [
   { ref: "skills/core/rig-bundles-and-shareable-artifacts", purpose: "package a rig for a machine that never had the source", teaches: "Build a portable rig with `rig bundle create`; install with `rig bundle install`." },
   { ref: "skills/core/openrig-upgrade", purpose: "upgrade a running daemon without downtime", teaches: "Use the sidecar-operator upgrade path so the rig stays up while the daemon upgrades." },
   { ref: "skills/process/systematic-debugging", purpose: "chase a failure methodically", teaches: "Instrument every boundary once and read where it actually breaks — one run beats five hypotheses." },
-  { ref: "skills/core/attention-queue", purpose: "see who actually holds the baton", teaches: "Triage by baton, not by count; `rig queue transitions <id>` shows a park vs a strand." },
   { ref: "skills/process/writing-plans", purpose: "write a plan before building", teaches: "State the problem and intent, not the steps; separate DECIDED from OPEN." },
   // distractors — present so selection is a real choice, not a singleton
   { ref: "skills/core/human-in-the-loop", purpose: "when and how to reach the human", teaches: "Reach the human by exception; orchestrators use discretion, others route through them." },

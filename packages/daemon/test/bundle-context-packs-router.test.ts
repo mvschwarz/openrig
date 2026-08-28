@@ -7,11 +7,13 @@ import { routeContextPacks, type ContextPacksRouterFsOps, type RouteContextPacks
 // contract (context-pack-library-service.scan walks pack dirs whose
 // immediate child is manifest.yaml).
 
-function mockFs(initial: { dirs?: string[]; files?: string[] } = {}): ContextPacksRouterFsOps & {
+function mockFs(initial: { dirs?: string[]; files?: string[]; contents?: Record<string, string> } = {}): ContextPacksRouterFsOps & {
   _copyCalls: Array<{ src: string; dest: string }>;
   _mkdirpCalls: string[];
   _dirs: Set<string>;
   _files: Set<string>;
+  readFile(path: string): string;
+  listFiles(path: string): string[];
 } {
   const dirs = new Set<string>(initial.dirs ?? []);
   const files = new Set<string>(initial.files ?? []);
@@ -27,6 +29,11 @@ function mockFs(initial: { dirs?: string[]; files?: string[] } = {}): ContextPac
     isDirectory: (p: string) => dirs.has(p),
     mkdirp: (p: string) => { mkdirpCalls.push(p); dirs.add(p); },
     copyDir: (src: string, dest: string) => { copyCalls.push({ src, dest }); dirs.add(dest); },
+    readFile: (p: string) => initial.contents?.[p] ?? "",
+    listFiles: (p: string) => [...files]
+      .filter((file) => file.startsWith(`${p}/`))
+      .map((file) => file.slice(p.length + 1))
+      .sort(),
   };
 }
 
@@ -73,6 +80,57 @@ describe("routeContextPacks", () => {
       src: `${BUNDLE_ROOT}/context-packs/intent`,
       dest: `${TARGET}/intent`,
     });
+  });
+
+  it("refuses a lore-classed pack before copy and teaches the public re-home", () => {
+    const parent = `${BUNDLE_ROOT}/context-packs/lore`;
+    const manifest = `${parent}/manifest.yaml`;
+    const fs = mockFs({
+      ...packFixture(parent),
+      contents: {
+        [manifest]: [
+          "name: private-lore",
+          'version: "1"',
+          "taxonomy: lore",
+          "files: []",
+        ].join("\n"),
+      },
+    });
+    const result = routeContextPacks(
+      makeInput({ declaredContextPacks: ["context-packs/lore/manifest.yaml"] }),
+      fs,
+    );
+
+    expect(result.routedCount).toBe(0);
+    expect(result.rejectedCount).toBe(1);
+    expect(result.records[0]!.status).toBe("lore_refused");
+    expect(result.records[0]!.detail).toMatch(/lore-class|taxonomy:\s*lore/i);
+    expect(result.records[0]!.detail).toMatch(/genericize|public home|re-home/i);
+    expect(fs._copyCalls).toHaveLength(0);
+  });
+
+  it("refuses internal substance anywhere in a pack before install-side copy", () => {
+    const parent = `${BUNDLE_ROOT}/context-packs/private`;
+    const manifest = `${parent}/manifest.yaml`;
+    const notes = `${parent}/notes.md`;
+    const fs = mockFs({
+      dirs: [parent],
+      files: [manifest, notes],
+      contents: {
+        [manifest]: "name: private\nversion: '1'\ntaxonomy: world\nfiles: []\n",
+        [notes]: "Continue at substrate/shared-docs/rigs/private.\n",
+      },
+    });
+    const result = routeContextPacks(
+      makeInput({ declaredContextPacks: ["context-packs/private/manifest.yaml"] }),
+      fs,
+    );
+
+    expect(result.routedCount).toBe(0);
+    expect(result.records[0]!.status).toBe("substance_refused");
+    expect(result.records[0]!.detail).toMatch(/internal-path/i);
+    expect(result.records[0]!.detail).toMatch(/genericize|public home|re-home/i);
+    expect(fs._copyCalls).toHaveLength(0);
   });
 
   // C3: multiple distinct packs route correctly

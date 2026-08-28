@@ -16,7 +16,6 @@ metadata:
       - looping-workflows
       - intake-routing
       - human-in-the-loop
-      - attention-queue
       - dispatching-parallel-agents
       - subagent-driven-development
       - structured-ack-dispatch

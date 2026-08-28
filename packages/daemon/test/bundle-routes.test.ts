@@ -146,6 +146,29 @@ describe("Bundle API routes", () => {
     expect(inspectBody.manifest.provenance).toBeUndefined();
   });
 
+  it("POST /api/bundles/create refuses unsafe generated provenance in the legacy final staging tree", async () => {
+    const { specPath } = seedPackage();
+    const bundlePath = path.join(tmpDir, "legacy-unsafe-generated.rigbundle");
+
+    const res = await app.request("/api/bundles/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        specPath,
+        bundleName: "legacy-unsafe-generated",
+        bundleVersion: "0.1.0",
+        outputPath: bundlePath,
+        provenance: { notes: "See substrate/shared-docs/rigs/private for details." },
+      }),
+    });
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toMatch(/internal-path/);
+    expect(body.error).toMatch(/bundle\.yaml/);
+    expect(fs.existsSync(bundlePath)).toBe(false);
+  });
+
   // T2: Inspect returns manifest
   it("POST /api/bundles/inspect returns manifest + integrity", async () => {
     const { specPath } = seedPackage();
@@ -635,6 +658,57 @@ describe("Bundle API routes", () => {
     // Negative — snake_case keys must NOT be present (camelCase contract)
     expect(inspectBody.manifest.provenance.source_host).toBeUndefined();
     expect(inspectBody.manifest.provenance.author_session).toBeUndefined();
+  });
+
+  it("POST /api/bundles/create refuses unsafe generated provenance in the pod-aware final staging tree", async () => {
+    const agentsDir = path.join(tmpDir, "agents", "impl");
+    fs.mkdirSync(agentsDir, { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, "agent.yaml"), [
+      "name: impl-agent",
+      'version: "1.0.0"',
+      "resources:",
+      "  skills: []",
+      "profiles:",
+      "  default:",
+      "    uses:",
+      "      skills: []",
+    ].join("\n"));
+
+    const specPath = path.join(tmpDir, "rig.yaml");
+    fs.writeFileSync(specPath, [
+      'version: "0.2"',
+      "name: v2-unsafe-generated",
+      "pods:",
+      "  - id: dev",
+      "    label: Dev",
+      "    members:",
+      "      - id: impl",
+      '        agent_ref: "local:agents/impl"',
+      "        profile: default",
+      "        runtime: claude-code",
+      "        cwd: .",
+      "    edges: []",
+      "edges: []",
+    ].join("\n"));
+    const bundlePath = path.join(tmpDir, "v2-unsafe-generated.rigbundle");
+
+    const res = await app.request("/api/bundles/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        specPath,
+        bundleName: "v2-unsafe-generated",
+        bundleVersion: "0.1.0",
+        outputPath: bundlePath,
+        provenance: { notes: "See substrate/shared-docs/rigs/private for details." },
+      }),
+    });
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toMatch(/internal-path/);
+    expect(body.error).toMatch(/bundle\.yaml/);
+    expect(fs.existsSync(bundlePath)).toBe(false);
   });
 
   // Item 2 / slice-05 Checkpoint 3.3: install-time version check
@@ -1626,6 +1700,85 @@ describe("Bundle API routes", () => {
       } finally {
         fs.rmSync(unpackDir, { recursive: true, force: true });
       }
+    } finally {
+      fs.rmSync(sourceRoot, { recursive: true, force: true });
+      if (fs.existsSync(outputPath)) fs.rmSync(outputPath);
+    }
+  });
+
+  it("LP-3 refuses internal substance in an author-declared directory before archive creation", async () => {
+    const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "s12-lp3-internal-src-"));
+    const outputPath = path.join(tmpDir, "s12-lp3-internal.rigbundle");
+    try {
+      fs.mkdirSync(path.join(sourceRoot, "agents/impl"), { recursive: true });
+      fs.writeFileSync(path.join(sourceRoot, "agents/impl/agent.yaml"), [
+        'name: impl-agent', 'version: "1.0.0"', 'resources:', '  skills: []',
+        'profiles:', '  default:', '    uses:', '      skills: []',
+      ].join("\n"));
+      const specPath = path.join(sourceRoot, "rig.yaml");
+      fs.writeFileSync(specPath, [
+        'version: "0.2"', 'name: s12-lp3-internal', 'pods:',
+        '  - id: dev', '    label: Dev', '    members:',
+        '      - id: impl', '        agent_ref: "local:agents/impl"',
+        '        profile: default', '        runtime: claude-code', '        cwd: .',
+        '    edges: []', 'edges: []',
+      ].join("\n"));
+      fs.mkdirSync(path.join(sourceRoot, "plugins/private"), { recursive: true });
+      fs.writeFileSync(path.join(sourceRoot, "plugins/private/README.md"), "See substrate/shared-docs/rigs/private.\n");
+      fs.writeFileSync(path.join(sourceRoot, "bundle.yaml"), [
+        "plugins:", "  - id: private", "    source:", "      kind: local", "      path: plugins/private",
+      ].join("\n"));
+
+      const response = await app.request("/api/bundles/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ specPath, rigRoot: sourceRoot, bundleName: "s12-lp3", bundleVersion: "1", outputPath }),
+      });
+      expect(response.status).toBe(500);
+      const body = await response.json();
+      expect(body.error).toMatch(/internal-path[\s\S]*(genericize|public home|re-home)/i);
+      expect(fs.existsSync(outputPath)).toBe(false);
+    } finally {
+      fs.rmSync(sourceRoot, { recursive: true, force: true });
+      if (fs.existsSync(outputPath)) fs.rmSync(outputPath);
+    }
+  });
+
+  it("LP-3 refuses an author-declared lore pack before archive creation", async () => {
+    const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "s12-lp3-lore-src-"));
+    const outputPath = path.join(tmpDir, "s12-lp3-lore.rigbundle");
+    try {
+      fs.mkdirSync(path.join(sourceRoot, "agents/impl"), { recursive: true });
+      fs.writeFileSync(path.join(sourceRoot, "agents/impl/agent.yaml"), [
+        'name: impl-agent', 'version: "1.0.0"', 'resources:', '  skills: []',
+        'profiles:', '  default:', '    uses:', '      skills: []',
+      ].join("\n"));
+      const specPath = path.join(sourceRoot, "rig.yaml");
+      fs.writeFileSync(specPath, [
+        'version: "0.2"', 'name: s12-lp3-lore', 'pods:',
+        '  - id: dev', '    label: Dev', '    members:',
+        '      - id: impl', '        agent_ref: "local:agents/impl"',
+        '        profile: default', '        runtime: claude-code', '        cwd: .',
+        '    edges: []', 'edges: []',
+      ].join("\n"));
+      fs.mkdirSync(path.join(sourceRoot, "context-packs/private-lore"), { recursive: true });
+      fs.writeFileSync(path.join(sourceRoot, "context-packs/private-lore/manifest.yaml"), [
+        "name: private-lore", 'version: "1"', "taxonomy: lore", "files: []",
+      ].join("\n"));
+      fs.writeFileSync(path.join(sourceRoot, "bundle.yaml"), [
+        "context_packs:", "  - context-packs/private-lore/manifest.yaml",
+      ].join("\n"));
+
+      const response = await app.request("/api/bundles/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ specPath, rigRoot: sourceRoot, bundleName: "s12-lp3", bundleVersion: "1", outputPath }),
+      });
+      expect(response.status).toBe(500);
+      const body = await response.json();
+      expect(body.error).toMatch(/lore-class|taxonomy:\s*lore/i);
+      expect(body.error).toMatch(/genericize|public home|re-home/i);
+      expect(fs.existsSync(outputPath)).toBe(false);
     } finally {
       fs.rmSync(sourceRoot, { recursive: true, force: true });
       if (fs.existsSync(outputPath)) fs.rmSync(outputPath);

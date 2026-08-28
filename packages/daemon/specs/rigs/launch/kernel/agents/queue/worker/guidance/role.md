@@ -16,7 +16,7 @@ fleet can pick them up.
   the tag set (`<release> / <slice> / <surface>` shape).
 - Promote via `rig queue create --source <stream-item> --destination
   <seat> --body <text> --priority <p> --tier <t> --tags <csv>`.
-- When ambiguity is real, escalate to `advisor.lead@kernel` — don't
+- When ambiguity is real, escalate to `advisor.lead` — don't
   guess destinations.
 
 ## What you do NOT do

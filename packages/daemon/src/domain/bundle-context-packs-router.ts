@@ -27,6 +27,8 @@
  *     would silently overwrite the first; status=conflict; first wins.
  *   - Source pack dir not present in bundle → status=missing (honest skip).
  *   - Source path escapes bundleRoot → status=unsafe.
+ *   - Lore-classed or structurally internal content → status=lore_refused
+ *     or substance_refused, before copy.
  *
  * Both-sides containment (banked
  * feedback_pre_existing_trust_boundary_reuse_canonical_helper addendum):
@@ -39,11 +41,14 @@
  */
 
 import nodePath from "node:path";
+import { assertShippableSubstance } from "./agent-resolver.js";
 
 /** Filesystem injection point — real impl wraps node:fs. Tests substitute in-memory. */
 export interface ContextPacksRouterFsOps {
   exists: (path: string) => boolean;
   isDirectory: (path: string) => boolean;
+  readFile: (path: string) => string;
+  listFiles: (dirPath: string) => string[];
   mkdirp: (path: string) => void;
   copyDir: (src: string, dest: string) => void;
 }
@@ -78,8 +83,11 @@ export interface RoutedContextPackRecord {
    * directory in the bundle tree.
    * "conflict" = parent-dir basename collides with an earlier routed
    * pack; first wins, second flagged so routedCount stays truthful at
-   * the consumer-visible boundary (banked 16ebb8af lesson). */
-  status: "routed" | "missing" | "unsafe" | "not_manifest" | "not_directory" | "conflict";
+   * the consumer-visible boundary (banked 16ebb8af lesson).
+   * "lore_refused" = the pack declares taxonomy: lore.
+   * "substance_refused" = the pack contains structurally internal
+   * content. Both refusal states happen before any copy. */
+  status: "routed" | "missing" | "unsafe" | "not_manifest" | "not_directory" | "conflict" | "lore_refused" | "substance_refused";
   /** Where the pack landed in the target library (absolute pack dir
    *  path), if routed. */
   installedAt?: string;
@@ -177,6 +185,20 @@ export function routeContextPacks(
         declaredPath: declared,
         status: "not_directory",
         detail: `context_pack parent of '${declared}' is not a directory; skipped`,
+      });
+      continue;
+    }
+    try {
+      assertShippableSubstance(fs.listFiles(sourcePackDir).map((relativePath) => ({
+        path: nodePath.join(nodePath.dirname(declared), relativePath),
+        bytes: fs.readFile(nodePath.join(sourcePackDir, relativePath)),
+      })));
+    } catch (error) {
+      const detail = (error as Error).message;
+      records.push({
+        declaredPath: declared,
+        status: /lore-class/.test(detail) ? "lore_refused" : "substance_refused",
+        detail,
       });
       continue;
     }

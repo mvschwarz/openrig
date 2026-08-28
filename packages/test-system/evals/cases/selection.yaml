@@ -56,12 +56,6 @@
   prompt: "this test keeps failing in a weird way — how do I chase it down methodically?"
   expectedPatterns: ['rig context get\s+skills/process/systematic-debugging']
   rubric: *selection_rubric
-- id: sel-09
-  name: selects core/attention-queue for who-is-blocked
-  category: selection
-  prompt: "the queue's a mess — who's actually blocked?"
-  expectedPatterns: ['rig context get\s+skills/core/attention-queue']
-  rubric: *selection_rubric
 - id: sel-10
   name: selects process/writing-plans before building
   category: selection

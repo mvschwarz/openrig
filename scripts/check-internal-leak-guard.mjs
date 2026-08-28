@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import {
   buildInternalLeakMessage,
   scanInternalLeaks,
@@ -15,6 +15,15 @@ export function main(argv = process.argv.slice(2)) {
   const findings = files.flatMap(({ path, bytes }) =>
     scanInternalLeaks({ path, bytes, rules }),
   );
+
+  if (options.report) {
+    mkdirSync(dirname(options.report), { recursive: true });
+    writeFileSync(options.report, `${JSON.stringify({
+      mode: options.mode,
+      scannedFiles: files.map(({ path }) => path),
+      findingCount: findings.length,
+    }, null, 2)}\n`);
+  }
 
   if (findings.length > 0) {
     process.stderr.write(`${buildInternalLeakMessage(findings)}\n`);
@@ -36,16 +45,25 @@ function parseArguments(argv) {
   if (!values.repo || !values.rules || !values.mode) {
     throw new Error("--repo, --rules, and --mode are required");
   }
-  if (!["full", "staged", "range"].includes(values.mode)) {
+  if (!["full", "staged", "range", "tree"].includes(values.mode)) {
     throw new Error(`Unknown mode: ${values.mode}`);
   }
   if (values.mode === "range" && (!values.from || !values.to)) {
     throw new Error("--from and --to are required for range mode");
   }
+  if (values.mode === "tree" && !values.tree) {
+    throw new Error("--tree is required for tree mode");
+  }
+  if (values["files-manifest"] && (values.mode !== "full" || !values.tree)) {
+    throw new Error("--files-manifest requires --mode full and --tree");
+  }
   return {
     ...values,
     repo: resolve(values.repo),
     rules: resolve(values.rules),
+    ...(values.tree ? { tree: resolve(values.tree) } : {}),
+    ...(values["files-manifest"] ? { filesManifest: resolve(values["files-manifest"]) } : {}),
+    ...(values.report ? { report: resolve(values.report) } : {}),
   };
 }
 
@@ -62,7 +80,27 @@ function readRules(path) {
 }
 
 function selectFiles(options) {
+  if (options.mode === "tree") {
+    if (!existsSync(options.tree)) {
+      throw new Error(`Tree not found: ${options.tree}`);
+    }
+    return walkTree(options.tree).map((path) => ({
+      path: relative(options.repo, path).replaceAll("\\", "/"),
+      bytes: readFileSync(path),
+    }));
+  }
+
   if (options.mode === "full") {
+    if (options.filesManifest) {
+      return readFilesManifest(options.filesManifest).map((path) => {
+        const absolutePath = resolve(options.tree, path);
+        if (absolutePath !== options.tree && !absolutePath.startsWith(`${options.tree}/`)) {
+          throw new Error(`Artifact path escapes scan tree: ${path}`);
+        }
+        if (!existsSync(absolutePath)) throw new Error(`Artifact file not found under scan tree: ${path}`);
+        return { path, bytes: readFileSync(absolutePath) };
+      });
+    }
     return splitNul(git(options.repo, ["ls-files", "-z"]))
       .filter((path) => existsSync(resolve(options.repo, path)))
       .map((path) => ({
@@ -101,6 +139,34 @@ function selectFiles(options) {
       bytes: git(options.repo, ["show", `${commit}:${path}`]),
     })),
   );
+}
+
+function readFilesManifest(path) {
+  if (!existsSync(path)) throw new Error(`Files manifest not found: ${path}`);
+  const parsed = JSON.parse(readFileSync(path, "utf8"));
+  const files = Array.isArray(parsed) ? parsed : parsed?.files;
+  if (!Array.isArray(files) || files.some((file) => typeof file !== "string" || file === "")) {
+    throw new Error(`Files manifest ${path} must be a JSON array or an object with a string files array`);
+  }
+  return [...new Set(files.map((file) => file.replaceAll("\\", "/")))].sort().map((file) => {
+    if (isAbsolute(file) || file.split("/").includes("..")) {
+      throw new Error(`Files manifest ${path} contains unsafe path: ${file}`);
+    }
+    return file;
+  });
+}
+
+function walkTree(root) {
+  const files = [];
+  const visit = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const path = resolve(dir, entry.name);
+      if (entry.isDirectory()) visit(path);
+      else if (entry.isFile() || entry.isSymbolicLink()) files.push(path);
+    }
+  };
+  visit(root);
+  return files;
 }
 
 function changedPathsAtCommit(repo, commit) {

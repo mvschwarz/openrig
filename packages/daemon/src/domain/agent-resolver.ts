@@ -1,5 +1,6 @@
 import nodePath from "node:path";
 import { createHash } from "node:crypto";
+import { parse as parseYaml } from "yaml";
 import { parseAgentSpec, validateAgentSpec, normalizeAgentSpec } from "./agent-manifest.js";
 import type { AgentSpec, AgentResources } from "./types.js";
 
@@ -20,6 +21,11 @@ export interface ResourceCollision {
   category: string;
   resourceId: string;
   sources: Array<{ specName: string; qualifiedId: string }>;
+}
+
+export interface ShippableSubstanceSource {
+  path: string;
+  bytes: string | Uint8Array;
 }
 
 export type ResolveResult =
@@ -75,6 +81,59 @@ export function resolveImports(
   fsOps: AgentResolverFsOps,
 ): ResolveResult {
   return resolveWithImports(resolved, resolved.sourcePath, fsOps, new Set([resolved.sourcePath]));
+}
+
+/**
+ * Deterministic refusal floor for content crossing a public artifact boundary.
+ * The broader generic-vs-instance call remains a human judgment recorded by
+ * the substance-gate receipt; this helper only enforces the two classes whose
+ * answer is structural: private shared-docs paths and taxonomy: lore.
+ */
+export function assertShippableSubstance(sources: readonly ShippableSubstanceSource[]): void {
+  const findings: Array<{ path: string; kind: "internal-path" | "lore-class"; detail: string }> = [];
+  for (const source of sources) {
+    const normalizedPath = source.path.replaceAll("\\", "/");
+    const text = Buffer.from(source.bytes).toString("utf8");
+    if (text.toLowerCase().includes("substrate/shared-docs/")) {
+      findings.push({
+        path: normalizedPath,
+        kind: "internal-path",
+        detail: "contains substrate/shared-docs/",
+      });
+    }
+    if (declaresLoreTaxonomy(normalizedPath, text)) {
+      findings.push({
+        path: normalizedPath,
+        kind: "lore-class",
+        detail: "declares taxonomy: lore",
+      });
+    }
+  }
+  if (findings.length === 0) return;
+
+  throw new Error([
+    "Public artifact substance refusal:",
+    ...findings.map(({ path, kind, detail }) => `  ${kind}: ${path} ${detail}`),
+    "Fix: genericize the content, cite its public home, or re-home it to the internal pack root.",
+  ].join("\n"));
+}
+
+function declaresLoreTaxonomy(path: string, text: string): boolean {
+  let yamlText: string | undefined;
+  if (/\.ya?ml$/i.test(path)) {
+    yamlText = text;
+  } else if (/\.(?:md|markdown)$/i.test(path)) {
+    const frontmatter = text.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+    yamlText = frontmatter?.[1];
+  }
+  if (yamlText === undefined) return false;
+  try {
+    const parsed = parseYaml(yamlText);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      && (parsed as Record<string, unknown>)["taxonomy"] === "lore";
+  } catch {
+    return false;
+  }
 }
 
 /**

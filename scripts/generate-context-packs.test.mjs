@@ -310,6 +310,76 @@ test("STATIC PACK LEAK GUARD runs the FULL committed authority: charged term, pa
   }
 });
 
+test("STATIC PACK SIDECARS are part of the leak boundary regardless of suffix", () => {
+  const base = mkdtempSync(join(tmpdir(), "s12-sidecar-leak-"));
+  try {
+    expectStaticLeakFailure(
+      base,
+      (dir) => writeFileSync(join(dir, "PROVENANCE.yaml"), "source: openrig-work/rigs/private\n"),
+      "renamed provenance sidecar",
+    );
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("STATIC SOURCE provenance sidecars cannot hide beside, rather than inside, a pack", () => {
+  const base = mkdtempSync(join(tmpdir(), "s12-root-provenance-leak-"));
+  try {
+    const source = join(base, "skills");
+    const out = join(base, "out");
+    const staticSrc = join(base, "static");
+    skill(source, "core/x", { name: "x", description: "d", files: {} });
+    staticWorldPack(staticSrc, "world/install");
+    writeFileSync(
+      join(staticSrc, "PROVENANCE-world-install.yaml"),
+      "source: openrig-work/rigs/private\n",
+    );
+
+    let failure;
+    try {
+      runWithStatic(source, staticSrc, out);
+    } catch (error) {
+      failure = error;
+    }
+    assert.ok(failure, "a root-level provenance sidecar must be inside the scanned boundary");
+    assert.equal(failure.status, 1);
+    assert.match(String(failure.stderr), /PROVENANCE-world-install\.yaml/);
+    assert.match(String(failure.stderr), /openrig-work\//i);
+    assert.ok(!existsSync(out), "no projection may be written after provenance refusal");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("LORE PACK REFUSAL is structural even when its content has no leak-rule token", () => {
+  const base = mkdtempSync(join(tmpdir(), "s12-lore-pack-"));
+  try {
+    const source = join(base, "skills");
+    const out = join(base, "out");
+    skill(source, "core/x", { name: "x", description: "d", files: {} });
+    const staticSrc = join(base, "static");
+    staticWorldPack(staticSrc, "lore/private");
+    const manifestPath = join(staticSrc, "lore/private/manifest.yaml");
+    const manifest = readFileSync(manifestPath, "utf8").replace("taxonomy: world", "taxonomy: lore");
+    writeFileSync(manifestPath, manifest);
+
+    let failure;
+    try {
+      runWithStatic(source, staticSrc, out);
+    } catch (error) {
+      failure = error;
+    }
+    assert.ok(failure, "a lore-classed pack must fail before projection");
+    assert.equal(failure.status, 1);
+    assert.match(String(failure.stderr), /lore-class|taxonomy:\s*lore/i);
+    assert.match(String(failure.stderr), /genericize|public home|re-home/i);
+    assert.ok(!existsSync(out), "no projection may be written after lore refusal");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test("REF COLLISION across sources FAILS THE BUILD with no output mutation (B3)", () => {
   const base = mkdtempSync(join(tmpdir(), "s05-collide-"));
   try {

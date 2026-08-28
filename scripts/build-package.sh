@@ -6,6 +6,7 @@ CLI_DIR="$REPO_ROOT/packages/cli"
 DAEMON_DIR="$REPO_ROOT/packages/daemon"
 UI_DIR="$REPO_ROOT/packages/ui"
 TUI_DIR="$REPO_ROOT/packages/tui"
+SUBSTANCE_SURFACE_ROOTS=()
 
 echo "=== OpenRig Package Build ==="
 echo "Repo root: $REPO_ROOT"
@@ -86,10 +87,21 @@ cp -r "$DAEMON_DIR/dist/"* "$CLI_DIR/daemon/dist/"
 
 if [ -d "$DAEMON_DIR/assets" ]; then
   cp -r "$DAEMON_DIR/assets" "$CLI_DIR/daemon/assets"
+  SUBSTANCE_SURFACE_ROOTS+=("daemon/assets")
 fi
 
 if [ -d "$DAEMON_DIR/specs" ]; then
+  # OPR.0.5.6.12 LP-7 — the specs tree is copied wholesale into the npm
+  # artifact, so scan the actual filesystem input (including untracked build
+  # inputs) before the copy. Path-safety and manifest validation solve other
+  # problems; this is the public-substance refusal floor.
+  node "$REPO_ROOT/scripts/check-internal-leak-guard.mjs" \
+    --repo "$REPO_ROOT" \
+    --rules "$REPO_ROOT/scripts/internal-tokens.generated.json" \
+    --mode tree \
+    --tree "$DAEMON_DIR/specs"
   cp -r "$DAEMON_DIR/specs" "$CLI_DIR/daemon/specs"
+  SUBSTANCE_SURFACE_ROOTS+=("daemon/specs")
 fi
 
 # OPR.0.5.3.7 R2 — the shipped context-pack projection (generated above). The daemon
@@ -98,7 +110,18 @@ fi
 # so `rig context get` serves bytes that match `rig --version` by construction.
 if [ -d "$DAEMON_DIR/context-packs" ]; then
   cp -r "$DAEMON_DIR/context-packs" "$CLI_DIR/daemon/context-packs"
+  SUBSTANCE_SURFACE_ROOTS+=("daemon/context-packs")
 fi
+
+# The named substance gate reviews the roots the packager ACTUALLY staged. Keep
+# that inventory beside the artifact instead of duplicating a source-root list
+# in the gate; npm's own dry-run file list supplies the complete scan surface.
+node -e '
+  const fs = require("fs");
+  const [out, ...roots] = process.argv.slice(1);
+  if (roots.length === 0) throw new Error("no shippable substance roots were staged");
+  fs.writeFileSync(out, JSON.stringify({ schemaVersion: 1, roots: [...new Set(roots)].sort() }, null, 2) + "\n");
+' "$CLI_DIR/daemon/substance-surfaces.json" "${SUBSTANCE_SURFACE_ROOTS[@]}"
 
 # Built-in policies (OPR.0.4.8.3): canonical source packages/daemon/policies/builtin/
 # ships with the daemon; startup materializes read-only inspection copies at

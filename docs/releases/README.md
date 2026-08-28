@@ -33,14 +33,53 @@ For each release:
 
 1. Copy `_template.md` to `vX.Y.Z.md`.
 2. Fill in the release summary, included changes, operator notes, known limitations, and verification performed.
-3. Create a git tag for the release:
+3. Run the **substance gate** at the exact release cut. The gate derives every
+   file under the shipped pack sources, verifies a hash-bound human judgment
+   and an individual disposition for each mechanical candidate, scans the
+   complete npm artifact set derived by the packager, and writes the durable
+   receipt. The receipt records both artifact and scanned file lists; their
+   artifact-minus-scanned diff must be empty. The review JSON carries one
+   entry per file:
+
+   ```json
+   {
+     "surfaces": [{
+       "path": "packages/daemon/context-packs-src/example/guide.md",
+       "sha256": "<sha256 of the reviewed bytes>",
+       "verdict": "ship",
+       "reason": "Generic product guidance.",
+       "candidateDispositions": []
+     }]
+   }
+   ```
+
+   Assemble the package first, then run the named gate from the same clean
+   worktree with the judge and cut SHA explicit. The assembly emits the
+   substance roots it actually staged; the gate never carries its own root
+   list. A non-shipping human verdict is one of `instance-fact`,
+   `internal-path`, `position-knowledge`, or `lore-class` and carries its
+   reason in the same per-file entry:
+
+   ```bash
+   bash scripts/build-package.sh
+   npm run gate:substance -- \
+     --review /path/to/substance-review.json \
+     --receipt /path/to/substance-receipt.json \
+     --judge <seat-or-person> \
+     --cut-sha "$(git rev-parse HEAD)"
+   ```
+
+   A missing/stale judgment, an undispositioned candidate, internal substance,
+   a lore-classed pack, a failed full artifact scan, or any artifact absent
+   from the scanned set refuses the cut.
+4. Create a git tag for the release:
 
    ```bash
    git tag vX.Y.Z
    git push origin vX.Y.Z
    ```
 
-4. Create a GitHub Release using the same file:
+5. Create a GitHub Release using the same file:
 
    ```bash
    gh release create vX.Y.Z \
@@ -49,7 +88,7 @@ For each release:
      --notes-file docs/releases/vX.Y.Z.md
    ```
 
-5. Publish the npm package if that is part of the release flow.
+6. Publish the npm package if that is part of the release flow.
 
 ## Guidance
 

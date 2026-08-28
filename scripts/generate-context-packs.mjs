@@ -204,10 +204,18 @@ function findStaticPackDirs(dir, rel = "") {
 }
 
 // A static pack projects VERBATIM: the committed manifest is the authority
-// (atoms graph included); only the version placeholder line is stamped. Every
-// markdown byte is charged-term scanned — a leak FAILS THE BUILD.
+// (atoms graph included); only the version placeholder line is stamped. The
+// complete static source tree is scanned below, regardless of suffix or pack
+// membership, before any projection is written.
 function buildStaticPack(pack, version) {
   const rawManifest = fs.readFileSync(path.join(pack.abs, "manifest.yaml"), "utf8");
+  const parsedManifest = parseYaml(rawManifest);
+  if (parsedManifest?.taxonomy === "lore") {
+    throw new Error(
+      "lore-class refusal: taxonomy: lore is structurally unshippable. " +
+      "Genericize the content, cite its public home, or re-home it to the internal pack root.",
+    );
+  }
   const stamped = rawManifest.replace(/^version:\s*"0"\s*$/m, `version: ${JSON.stringify(version)}`);
   if (stamped === rawManifest && !new RegExp(`^version: ${JSON.stringify(version).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "m").test(rawManifest)) {
     throw new Error(`static pack ${pack.rel}: manifest must carry the 'version: "0"' placeholder for the projection to stamp`);
@@ -221,20 +229,31 @@ function buildStaticPack(pack, version) {
     }
   };
   walk(pack.abs);
-  const leaks = [];
-  for (const rel of contentFiles) {
-    if (!rel.endsWith(".md") && !rel.endsWith(".markdown")) continue;
-    const findings = scanInternalLeaks({
-      path: `${pack.rel}/${rel}`,
-      bytes: fs.readFileSync(path.join(pack.abs, rel)),
-      rules: STATIC_LEAK_RULES,
-    });
-    leaks.push(...findings);
-  }
-  if (leaks.length > 0) {
-    throw new Error(buildInternalLeakMessage(leaks));
-  }
   return { ref: pack.rel, files: contentFiles, manifestYaml: stamped, srcDir: pack.abs };
+}
+
+// The source boundary is wider than the set of projected pack files: a renamed
+// provenance sidecar can sit beside a pack and otherwise evade both discovery
+// and copy. Scan every source file, regardless of suffix or pack membership,
+// before validating or writing any projection.
+function scanStaticSource() {
+  const files = [];
+  const walk = (dir, rel = "") => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      const child = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(child, childRel);
+      else if (entry.isFile()) files.push({ path: childRel, bytes: fs.readFileSync(child) });
+    }
+  };
+  walk(STATIC_SOURCE);
+  return files.flatMap((file) => scanInternalLeaks({ ...file, rules: STATIC_LEAK_RULES }));
 }
 
 function buildPack(skill, version) {
@@ -294,6 +313,9 @@ async function main() {
     }
     packs.push(pack);
   }
+
+  const staticLeaks = scanStaticSource();
+  if (staticLeaks.length > 0) errors.push(buildInternalLeakMessage(staticLeaks));
 
   // STATIC packs project after skills; same validation authority, same
   // fail-the-build contract. An empty static source is legal (no packs).

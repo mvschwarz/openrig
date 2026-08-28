@@ -341,6 +341,78 @@ describe("PodBundleAssembler", () => {
     expect(rewrittenRig).not.toContain("path:/external/agents/impl");
   });
 
+  it("LP-1 refuses internal-substance files from a path: agent before vendoring", () => {
+    const spec = makeRigSpec({
+      pods: [{
+        id: "dev", label: "Dev", edges: [],
+        members: [{ id: "impl", agentRef: "path:/external/agents/impl", profile: "default", runtime: "claude-code", cwd: "." }],
+      }],
+    });
+    const fs = mockFs({
+      [`${RIG_ROOT}/rig.yaml`]: rigSpecYaml(spec),
+      ["/external/agents/impl/agent.yaml"]: validAgentYaml("impl"),
+      ["/external/agents/impl/notes.md"]: "Source: substrate/shared-docs/rigs/private\n",
+    });
+    const assembler = new PodBundleAssembler({ fsOps: fs });
+
+    expect(() => assembler.assemble({
+      rigRoot: RIG_ROOT, rigSpecPath: `${RIG_ROOT}/rig.yaml`,
+      outputDir: "/tmp/staging", bundleName: "test", bundleVersion: "1.0",
+    })).toThrow(/internal-path[\s\S]*(genericize|public home|re-home)/i);
+  });
+
+  it("LP-1 refuses a lore-classed pack nested in a path: agent with otherwise clean bytes", () => {
+    const spec = makeRigSpec({
+      pods: [{
+        id: "dev", label: "Dev", edges: [],
+        members: [{ id: "impl", agentRef: "path:/external/agents/impl", profile: "default", runtime: "claude-code", cwd: "." }],
+      }],
+    });
+    const fs = mockFs({
+      [`${RIG_ROOT}/rig.yaml`]: rigSpecYaml(spec),
+      ["/external/agents/impl/agent.yaml"]: validAgentYaml("impl"),
+      ["/external/agents/impl/lore/manifest.yaml"]: [
+        "name: private-lore", 'version: "1"', "taxonomy: lore", "files: []",
+      ].join("\n"),
+    });
+    const assembler = new PodBundleAssembler({ fsOps: fs });
+
+    expect(() => assembler.assemble({
+      rigRoot: RIG_ROOT, rigSpecPath: `${RIG_ROOT}/rig.yaml`,
+      outputDir: "/tmp/staging", bundleName: "test", bundleVersion: "1.0",
+    })).toThrow(/lore-class|taxonomy:\s*lore/i);
+  });
+
+  it("LP-2 refuses internal substance from operator-rooted docs before copying", () => {
+    const spec = makeRigSpec({ docs: [{ path: "SETUP.md" }] });
+    const fs = mockFs({
+      [`${RIG_ROOT}/rig.yaml`]: rigSpecYaml(spec),
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
+      [`${RIG_ROOT}/SETUP.md`]: "Use substrate/shared-docs/rigs/private to continue.\n",
+    });
+    const assembler = new PodBundleAssembler({ fsOps: fs });
+
+    expect(() => assembler.assemble({
+      rigRoot: RIG_ROOT, rigSpecPath: `${RIG_ROOT}/rig.yaml`,
+      outputDir: "/tmp/staging", bundleName: "test", bundleVersion: "1.0",
+    })).toThrow(/internal-path[\s\S]*(genericize|public home|re-home)/i);
+  });
+
+  it("LP-2 refuses a lore-classed operator-rooted document before copying", () => {
+    const spec = makeRigSpec({ docs: [{ path: "LORE.md" }] });
+    const fs = mockFs({
+      [`${RIG_ROOT}/rig.yaml`]: rigSpecYaml(spec),
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
+      [`${RIG_ROOT}/LORE.md`]: "---\ntaxonomy: lore\n---\n# A local situation\n",
+    });
+    const assembler = new PodBundleAssembler({ fsOps: fs });
+
+    expect(() => assembler.assemble({
+      rigRoot: RIG_ROOT, rigSpecPath: `${RIG_ROOT}/rig.yaml`,
+      outputDir: "/tmp/staging", bundleName: "test", bundleVersion: "1.0",
+    })).toThrow(/lore-class|taxonomy:\s*lore/i);
+  });
+
   // T9: remote import source rejected
   it("rejects remote import source during assembly", () => {
     const spec = makeRigSpec();

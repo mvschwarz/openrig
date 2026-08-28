@@ -448,6 +448,12 @@ function readGenerated(output: string): Record<string, any> {
   };
 }
 
+it("the committed internal-token mirror covers the whole substrate shared-docs class", () => {
+  const generated = readJson(join(REPO_ROOT, "scripts/internal-tokens.generated.json"));
+  expect(generated.path_prefixes).toContain("substrate/shared-docs/");
+  expect(generated.path_prefixes).not.toContain("code/substrate/shared-docs/");
+});
+
 function readJson(path: string): any {
   return JSON.parse(readFileSync(path, "utf8"));
 }

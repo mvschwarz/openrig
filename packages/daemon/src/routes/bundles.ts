@@ -31,6 +31,7 @@ import { routeContextPacks, type ContextPacksRouterFsOps, type RouteContextPacks
 import { routeAgentImages, type AgentImagesRouterFsOps, type RouteAgentImagesResult } from "../domain/bundle-agent-images-router.js";
 import { SettingsStore as ContextPackSettingsStore } from "../domain/user-settings/settings-store.js";
 import { getDaemonVersion } from "../domain/daemon-version.js";
+import { assertShippableSubstance } from "../domain/agent-resolver.js";
 
 /**
  * Compare two dotted numeric version strings (semver-ish). Returns -1 if
@@ -375,6 +376,20 @@ function contextPacksRouterFsOps(): ContextPacksRouterFsOps {
   return {
     exists: (p) => fs.existsSync(p),
     isDirectory: (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } },
+    readFile: (p) => fs.readFileSync(p, "utf8"),
+    listFiles: (dir) => {
+      const files: string[] = [];
+      const walk = (current: string, prefix: string): void => {
+        for (const entry of fs.readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+          const child = nodePath.join(current, entry.name);
+          const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+          if (entry.isDirectory()) walk(child, relativePath);
+          else if (entry.isFile()) files.push(relativePath);
+        }
+      };
+      walk(dir, "");
+      return files;
+    },
     mkdirp: (p) => fs.mkdirSync(p, { recursive: true }),
     copyDir: (s, d) => fs.cpSync(s, d, { recursive: true }),
   };
@@ -820,10 +835,11 @@ function consumeAuthorBundleYaml(sourceRoot: string, staging: string): AuthorBun
     if (!targetAbs.startsWith(stagingResolved + nodePath.sep)) {
       throw new Error(`author bundle ${kindLabel} target '${declared}' escapes staging`);
     }
-    fs.mkdirSync(nodePath.dirname(targetAbs), { recursive: true });
     // readFileSync follows the symlink; we already validated its realpath
     // stays in sourceRootReal. Write as regular file (tar safety).
     const content = fs.readFileSync(sourceAbs);
+    assertShippableSubstance([{ path: declared, bytes: content }]);
+    fs.mkdirSync(nodePath.dirname(targetAbs), { recursive: true });
     fs.writeFileSync(targetAbs, content);
   };
   const vendorDir = (declared: string, kindLabel: string): void => {
@@ -838,6 +854,21 @@ function consumeAuthorBundleYaml(sourceRoot: string, staging: string): AuthorBun
     // Pre-walk the realpath-resolved dir to catch nested symlink escapes
     // before cpSync dereferences anything
     assertNoSymlinkEscapeInTree(sourceReal, kindLabel, declared);
+    const sources: Array<{ path: string; bytes: Buffer }> = [];
+    const collectSources = (current: string, prefix: string): void => {
+      for (const entry of fs.readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+        const child = nodePath.join(current, entry.name);
+        const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) collectSources(child, relativePath);
+        else if (entry.isSymbolicLink() && fs.statSync(child).isDirectory()) {
+          collectSources(fs.realpathSync(child), relativePath);
+        } else if (entry.isFile() || entry.isSymbolicLink()) {
+          sources.push({ path: nodePath.join(declared, relativePath), bytes: fs.readFileSync(child) });
+        }
+      }
+    };
+    collectSources(sourceReal, "");
+    assertShippableSubstance(sources);
     const targetAbs = nodePath.resolve(staging, declared);
     if (!targetAbs.startsWith(stagingResolved + nodePath.sep)) {
       throw new Error(`author bundle ${kindLabel} target '${declared}' escapes staging`);
@@ -903,6 +934,28 @@ function consumeAuthorBundleYaml(sourceRoot: string, staging: string): AuthorBun
   }
 
   return result;
+}
+
+/** Scan the exact finalized tree that will be packed, including generated files. */
+function assertShippableStagingTree(staging: string): void {
+  const sources: Array<{ path: string; bytes: Buffer }> = [];
+  const walk = (current: string): void => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const absolute = nodePath.join(current, entry.name);
+      if (entry.isDirectory()) {
+        walk(absolute);
+      } else if (entry.isFile()) {
+        sources.push({
+          path: nodePath.relative(staging, absolute).split(nodePath.sep).join("/"),
+          bytes: fs.readFileSync(absolute),
+        });
+      } else {
+        throw new Error(`Public artifact substance refusal: unsupported staged entry '${nodePath.relative(staging, absolute)}'`);
+      }
+    }
+  };
+  walk(staging);
+  assertShippableSubstance(sources);
 }
 
 // POST /api/bundles/create
@@ -1001,6 +1054,7 @@ bundleRoutes.post("/create", async (c) => {
         result.manifest.integrity = integrity;
         fs.writeFileSync(nodePath.join(tmpStaging, "bundle.yaml"), serializePodBundleManifest(result.manifest), "utf-8");
 
+        assertShippableStagingTree(tmpStaging);
         const archiveHash = await pack(tmpStaging, nodePath.resolve(outputPath));
         eventBus.emit({ type: "bundle.created", bundleName, bundleVersion, archiveHash });
         return c.json({ bundleName, bundleVersion, archiveHash, schemaVersion: 2, agents: result.manifest.agents.length, ...(driftWarning ? { warning: driftWarning } : {}) }, 201);
@@ -1074,6 +1128,7 @@ bundleRoutes.post("/create", async (c) => {
       const integrity = computeIntegrity(tmpStaging, integrityFsOps());
       writeIntegrity(tmpStaging, integrity, integrityFsOps());
 
+      assertShippableStagingTree(tmpStaging);
       const archiveHash = await pack(tmpStaging, nodePath.resolve(outputPath));
       eventBus.emit({ type: "bundle.created", bundleName, bundleVersion, archiveHash });
       return c.json({ bundleName, bundleVersion, archiveHash, packages: manifest.packages.length, ...(driftWarning ? { warning: driftWarning } : {}) }, 201);
