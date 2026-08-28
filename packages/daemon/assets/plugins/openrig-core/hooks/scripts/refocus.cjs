@@ -9,6 +9,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const { spawnSync } = require("node:child_process");
 
 const DEFAULT_THRESHOLD = 2_600_000;
@@ -133,15 +134,91 @@ function renderTrace() {
   try { size = fs.statSync(transcriptPath).size; } catch {}
 
   const stateDir = path.join(home, "refocus");
-  const stateFile = path.join(stateDir, `${seat.replace(/[^A-Za-z0-9@._-]/g, "_")}.json`);
-  let state = { lastBytes: 0 };
-  try { state = JSON.parse(fs.readFileSync(stateFile, "utf8")) || state; } catch {}
+
+  // OPR.0.5.6.25 — state keys to the OCCUPANT, not the seat. A seat-keyed file made
+  // a fresh occupant inherit its predecessor's lastBytes (permanently zero growth on
+  // exactly the seats that swap) and its pending delivery. Identity derives from the
+  // hook family's own fields; the guarded expression never evaluates basename on an
+  // absent value. The legacy `${seat}.json` is NEVER read, imported, or rewritten —
+  // it stays on disk as diagnosis/migration material only.
+  const sanitize = (raw) => String(raw).replace(/[^A-Za-z0-9@._-]/g, "_");
+  const seatKey = sanitize(seat);
+  const firstString = (...vals) => {
+    for (const v of vals) if (typeof v === "string" && v.trim()) return v.trim();
+    return null;
+  };
+  const transcriptIdentity = input.transcript_path
+    ? path.basename(input.transcript_path, ".jsonl")
+    : input.transcriptPath
+      ? path.basename(input.transcriptPath, ".jsonl")
+      : null;
+  const identity = firstString(input.session_id, input.sessionId, transcriptIdentity);
+
+  // Bounded, deterministic, collision-stable key: lossy sanitization or truncation
+  // appends a stable short hash of the full pre-sanitization identity, so distinct
+  // identities stay distinct and every path stays inside the state directory.
+  const KEY_MAX = 64;
+  const keyFor = (raw) => {
+    const bounded = sanitize(raw).slice(0, KEY_MAX);
+    if (bounded === String(raw)) return bounded;
+    const suffix = crypto.createHash("sha256").update(String(raw)).digest("hex").slice(0, 8);
+    return `${bounded}__${suffix}`;
+  };
+
+  // No-identity diagnostic sentinel: an ACTIVE-EPISODE marker only — never a
+  // baseline, growth claim, pending, or fire. "#" is outside the key character
+  // class, so no derived identity path can ever collide with it. First missing
+  // event records and surfaces once; repeats stay silent; a valid-identity event
+  // clears the marker so a later distinct episode surfaces once again.
+  const sentinelFile = path.join(stateDir, `${seatKey}#no-identity-sentinel.json`);
+  if (identity === null) {
+    let sentinel = null;
+    try { sentinel = JSON.parse(fs.readFileSync(sentinelFile, "utf8")); } catch {}
+    if (!sentinel || sentinel.activeEpisode !== true) {
+      try {
+        fs.mkdirSync(stateDir, { recursive: true });
+        fs.writeFileSync(sentinelFile, JSON.stringify({ activeEpisode: true, recordedAt: new Date().toISOString() }));
+      } catch {}
+      process.stderr.write(`refocus: no session identity and no transcript path for ${seat} — measurement unavailable this episode\n`);
+    }
+    process.exit(0);
+  }
+  try {
+    const sentinel = JSON.parse(fs.readFileSync(sentinelFile, "utf8"));
+    if (sentinel && sentinel.activeEpisode === true) {
+      fs.writeFileSync(sentinelFile, JSON.stringify({ activeEpisode: false, clearedAt: new Date().toISOString() }));
+    }
+  } catch {}
+
+  const stateFile = path.join(stateDir, `${seatKey}__${keyFor(identity)}.json`);
+  let state = null;
+  try { state = JSON.parse(fs.readFileSync(stateFile, "utf8")) || null; } catch {}
   const persist = () => {
     try {
       fs.mkdirSync(stateDir, { recursive: true });
       fs.writeFileSync(stateFile, JSON.stringify(state));
     } catch {}
   };
+
+  if (state === null) {
+    // First observation for this occupant: the baseline is its OWN current size —
+    // growth accumulates from here; nothing is inherited. A zero-size read means
+    // the transcript is absent/unreadable, which is instrument absence, not a
+    // baseline: record zero only when that is what was genuinely measured.
+    state = { lastBytes: size, baselineAt: new Date().toISOString() };
+    persist();
+  } else if (size > 0 && size < Number(state.lastBytes || 0)) {
+    // Shrink clears pending and resets the baseline BEFORE due computation. The
+    // reset itself emits no refocus, and a stale pending can never ride through a
+    // reset into a delivery. Advisory once per reset episode: the reset moment is
+    // the dedupe (afterwards lastBytes === size), and the marker records in state.
+    delete state.pendingOn;
+    delete state.pendingAt;
+    state.lastReset = { at: new Date().toISOString(), fromBytes: Number(state.lastBytes || 0), toBytes: size };
+    state.lastBytes = size;
+    persist();
+    process.stderr.write(`refocus: transcript shrank for ${seat} — baseline reset, pending cleared\n`);
+  }
 
   const lastBytes = Number(state.lastBytes || 0);
   const grown = size > lastBytes ? size - lastBytes : 0;
@@ -212,7 +289,7 @@ function renderTrace() {
     },
   });
   process.stdout.write(output, () => {
-    state.lastBytes = size;
+    if (size > 0) state.lastBytes = size;
     state.firedAt = new Date().toISOString();
     state.firedOn = event;
     delete state.pendingOn;
