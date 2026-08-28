@@ -132,6 +132,7 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
       }
       if (scan.texts.some((t) => t.includes(marker))) {
         log(`reconcile: marker "${marker}" FOUND — prior ambiguous post landed; ack without repost`);
+        opts.onPosted?.(q, "reconciled", threadTs);
         opts.delivered.mark(decision.decisionId, "reconciled-delivered");
         if (q.qitemId) {
           const key = q.notificationKey ?? q.qitemId;
@@ -153,16 +154,16 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
     if (!res.ok) {
       return { ok: false, class: res.status === 0 ? "transport" : `http-${res.status}`, detail: res.error };
     }
-    // Delivered: record decisionId BEFORE returning ok (a crash after this point re-acks via
-    // dedup — no double-post; before it, the wire retains + replays — at-least-once, never a drop).
+    if (res.ts && threadTs === undefined) opts.onPostedRoot?.(q, res.ts);
+    if (res.ts) opts.onPosted?.(q, res.ts, threadTs);
+    // Delivered is complete only after the authoritative row receipt succeeds. A receipt
+    // failure retains the decision; replay reconciles by marker and retries the idempotent receipt.
     opts.delivered.mark(decision.decisionId, "delivered");
     if (q.qitemId) {
       const key = q.notificationKey ?? q.qitemId;
       opts.outboundSeen.mark(key, "posted");
       opts.release?.(key);
     }
-    if (res.ts && threadTs === undefined) opts.onPostedRoot?.(q, res.ts);
-    if (res.ts) opts.onPosted?.(q, res.ts, threadTs);
 
     // G — a LOCAL image evidenceRef (the founder screenshot) rides the EXTERNAL-UPLOAD flow
     // into the conversation thread (files.upload is sunset). Upload failure is fail-VISIBLE

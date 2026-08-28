@@ -143,6 +143,16 @@ export class QueueTransitionLog {
     return row ? this.rowToTransition(row) : null;
   }
 
+  hasOwnerNotificationReceipt(qitemId: string, notificationKey: string): boolean {
+    const rows = this.db
+      .prepare(
+        `SELECT transition_note FROM queue_transitions
+          WHERE qitem_id = ? AND transition_note LIKE 'slack-owner-notification-posted %'`,
+      )
+      .all(qitemId) as Array<{ transition_note: string }>;
+    return rows.some((row) => row.transition_note.split(/\s+/).includes(`notification_key=${notificationKey}`));
+  }
+
   private rowToTransition(row: QueueTransitionRow): QueueTransition {
     return {
       transitionId: row.transition_id,

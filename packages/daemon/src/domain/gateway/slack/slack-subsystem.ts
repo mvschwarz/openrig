@@ -133,22 +133,20 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
           }
         },
         onPosted: (p, messageTs, threadTs) => {
-          try {
-            opts.queueRepo.update({
-              qitemId: p.qitemId,
-              actorSession: "daemon@kernel",
-              transitionNote: [
-                "slack-owner-notification-posted",
-                `notification_key=${p.notificationKey ?? p.qitemId}`,
-                `level=${p.ownerNotificationLevel ?? "RECORD"}`,
-                `kind=${p.ownerNotificationKind ?? "unclassified"}`,
-                `message_ts=${messageTs}`,
-                `thread_ts=${threadTs ?? messageTs}`,
-              ].join(" "),
-            });
-          } catch (e) {
-            log(`owner notification receipt failed for ${p.qitemId}: ${(e as Error).message}`);
-          }
+          const key = p.notificationKey ?? p.qitemId;
+          if (opts.queueRepo.transitionLog.hasOwnerNotificationReceipt(p.qitemId, key)) return;
+          opts.queueRepo.update({
+            qitemId: p.qitemId,
+            actorSession: "daemon@kernel",
+            transitionNote: [
+              "slack-owner-notification-posted",
+              `notification_key=${key}`,
+              `level=${p.ownerNotificationLevel ?? "RECORD"}`,
+              `kind=${p.ownerNotificationKind ?? "unclassified"}`,
+              `message_ts=${messageTs}`,
+              `thread_ts=${threadTs ?? messageTs}`,
+            ].join(" "),
+          });
         },
         log,
       })

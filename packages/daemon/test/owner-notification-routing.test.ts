@@ -94,6 +94,19 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
     expect(db.prepare(
       "SELECT owner_notification_kind, owner_notification_level FROM queue_transitions WHERE qitem_id=? ORDER BY transition_id DESC LIMIT 1",
     ).get(direct.qitemId)).toEqual({ owner_notification_kind: "human-required", owner_notification_level: "ALERT" });
+
+    const handed = await repo.handoff({
+      qitemId: ordinary.qitemId,
+      fromSession: "b@rig",
+      toSession: "human-founder@kernel",
+      body: "handoff decision",
+      summary: "Handoff founder decision",
+      evidenceRef: "/proof/handoff.md",
+      nudge: false,
+    });
+    expect(db.prepare(
+      "SELECT owner_notification_kind, owner_notification_level FROM queue_transitions WHERE qitem_id=? ORDER BY transition_id DESC LIMIT 1",
+    ).get(handed.created.qitemId)).toEqual({ owner_notification_kind: "human-required", owner_notification_level: "ALERT" });
   });
 
   it("defaults to posting NOTICE and interrupting ALERT, and refuses an unknown level", () => {
@@ -262,6 +275,7 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
       expect(wire.dispatcher.dispatch(OUTBOUND_OP, alert!.destinationSession!, alert)).toMatchObject({ ok: true });
       await new Promise((resolve) => setTimeout(resolve, 30));
       expect(JSON.stringify(posts[0])).toContain("<@UFOUNDER>");
+      expect(await ports.listHumanAlerts({ alertTag: "unused", minimumLevel: "NOTICE" } as never)).toEqual([]);
 
       const contract = new MissionControlWriteContract({
         db,
@@ -281,6 +295,7 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
       expect(wire.dispatcher.dispatch(OUTBOUND_OP, notice!.destinationSession!, notice)).toMatchObject({ ok: true });
       await new Promise((resolve) => setTimeout(resolve, 30));
       expect(JSON.stringify(posts[1])).not.toContain("<@UFOUNDER>");
+      expect(await ports.listHumanAlerts({ alertTag: "unused", minimumLevel: "NOTICE" } as never)).toEqual([]);
 
       const receipts = repo.listTransitions(row.qitemId).filter((transition) =>
         transition.transitionNote?.startsWith("slack-owner-notification-posted "),

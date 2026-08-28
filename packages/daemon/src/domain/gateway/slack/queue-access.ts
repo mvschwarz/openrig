@@ -145,6 +145,8 @@ export function makeQueuePorts(
       const projected = rows.flatMap((row) => {
         const transition = queueRepo.transitionLog.latestOwnerNotificationForQitem(row.qitemId);
         if (!transition) return [];
+        const notificationKey = `${row.qitemId}:${transition.transitionId}`;
+        if (queueRepo.transitionLog.hasOwnerNotificationReceipt(row.qitemId, notificationKey)) return [];
         const item = project(row, transition, registry.entities);
         return item ? [item] : [];
       });

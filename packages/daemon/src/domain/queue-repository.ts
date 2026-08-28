@@ -1418,12 +1418,19 @@ export class QueueRepository {
       this.persistEvidenceRef(newId, input.evidenceRef ?? null);
       this.persistMintingGeneration(newId, input.fromSession);
 
+      const successorNotification = this.classifyOwnerNotification({
+        action: "create",
+        destinationSession: input.toSession,
+        nextState: "pending",
+      });
       this.transitionLog.append({
         qitemId: newId,
         state: "pending",
         actorSession: input.fromSession,
         transitionNote: `handoff from ${source.qitemId}`,
         identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
+        ownerNotificationKind: successorNotification?.kind,
+        ownerNotificationLevel: successorNotification?.level,
       });
 
       // W1-a: the durable wake intent joins the SAME transaction as the close +
@@ -1573,11 +1580,18 @@ export class QueueRepository {
       this.persistEvidenceRef(newId, input.evidenceRef ?? null);
       this.persistMintingGeneration(newId, input.fromSession);
 
+      const successorNotification = this.classifyOwnerNotification({
+        action: "create",
+        destinationSession: input.toSession,
+        nextState: "pending",
+      });
       this.transitionLog.append({
         qitemId: newId,
         state: "pending",
         actorSession: input.fromSession,
         transitionNote: `handoff-and-complete from ${source.qitemId}`,
+        ownerNotificationKind: successorNotification?.kind,
+        ownerNotificationLevel: successorNotification?.level,
       });
 
       // W1-a: the durable wake intent joins the SAME transaction as the close +
