@@ -9,6 +9,7 @@ import { emitCrossHostError, emitRemoteHttpFailure } from "../cross-host-cli-hel
 import { runRemoteHttpOp } from "../remote-host-ops.js";
 import { resolveContextRef, walkSizedWarning } from "../context-resolve.js";
 import { resolveSenderSession, SENDER_FALLBACK } from "../sender-identity.js";
+import { refuseEmptyMessage } from "./send.js";
 
 /**
  * OPR.0.4.6.MH4 C3 — the cross-host broadcast deadline, named at the call
@@ -71,11 +72,12 @@ selection, not the agent@rig@host sugar.`)
         process.exitCode = 1;
         return;
       }
-      if ((text === undefined || text.length === 0) && !opts.context) {
+      if (text === undefined && !opts.context) {
         console.error("Provide a message to broadcast (or --context <ref>).");
         process.exitCode = 1;
         return;
       }
+      if (!opts.context && refuseEmptyMessage(text!, "broadcast", Boolean(opts.json))) return;
 
       // P18 DELIVER-AND-LABEL — the seat boundary no longer refuses. Resolve the broadcasting seat from the
       // seat env; when it is unresolvable the broadcast STILL proceeds carrying the honest `<unknown sender>`
@@ -117,6 +119,7 @@ selection, not the agent@rig@host sugar.`)
         const warn = walkSizedWarning(resolved);
         if (warn && !opts.json) console.log(`Advisory: ${warn}`);
       }
+      if (refuseEmptyMessage(payload, "broadcast", Boolean(opts.json))) return;
       const body: Record<string, unknown> = { text: payload, force: opts.force };
       if (opts.rig) body.rig = opts.rig;
       if (opts.pod) body.pod = opts.pod;

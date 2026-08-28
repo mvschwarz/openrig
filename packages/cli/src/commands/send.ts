@@ -140,6 +140,21 @@ function printTransportFailure(err: DaemonConnectionError, opts?: { json?: boole
   console.error(`  ${action}`);
 }
 
+/** Reject content that cannot communicate anything, before a transport call. */
+export function refuseEmptyMessage(body: string, verb: "send" | "broadcast", json = false): boolean {
+  if (body.trim().length > 0) return false;
+  const fact = `rig ${verb}: message is empty or whitespace-only.`;
+  const consequence = "The message transport did not run and nothing was delivered.";
+  const action = "Check whether shell backtick or $() substitution collapsed the argument, or whether a --body-file/stdin source resolved to 0 bytes; provide non-empty content.";
+  if (json) {
+    console.log(JSON.stringify({ ok: false, error: { fact, consequence, action } }));
+  } else {
+    console.error(`Error: ${fact}\n${consequence}\n${action}`);
+  }
+  process.exitCode = 1;
+  return true;
+}
+
 /** qitem-c113bd41 — the LOCAL send target. The status probe is advisory,
  *  never authoritative: a busy/wedged daemon fails the probe while the
  *  transport would succeed (the false-daemon-down incident). Resolution:
@@ -332,11 +347,12 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
           return;
         }
         const message = session;
-        if (message === undefined || message.length === 0) {
+        if (message === undefined) {
           console.error("Provide a message to send.");
           process.exitCode = 1;
           return;
         }
+        if (refuseEmptyMessage(message, "send", Boolean(opts.json))) return;
         if (opts.host) {
           console.error("--host (cross-host) supports single-seat sends only; --to/--pod/--rig are local.");
           process.exitCode = 1;
@@ -358,6 +374,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         process.exitCode = 1;
         return;
       }
+      if (!opts.context && refuseEmptyMessage(text!, "send", Boolean(opts.json))) return;
 
       // 51-09 increment 3: resolve the local daemon URL ONCE (reused for the
       // client below) and best-effort read THIS host's boot-reconciled self-id
@@ -438,6 +455,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         const warn = walkSizedWarning(resolved, session);
         if (warn && !opts.json) console.log(`Advisory: ${warn}`);
       }
+      if (refuseEmptyMessage(payload, "send", Boolean(opts.json))) return;
       // Send/broadcast header (ruling 03c35295): a directed `rig send` is a DM — stamp it at send-time
       // (Sent: MM-DD HH:MMZ) so transcripts are timestamped; the To line stays the single recipient.
       const outboundText = raw ? payload : wrapSendBody(senderSession, session, payload, { stampISO: new Date().toISOString() });

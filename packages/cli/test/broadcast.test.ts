@@ -24,6 +24,7 @@ function runningDeps(port: number): StatusDeps {
 describe("Broadcast CLI", () => {
   let server: http.Server;
   let port: number;
+  let broadcastPosts = 0;
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
@@ -31,6 +32,7 @@ describe("Broadcast CLI", () => {
       req.on("data", (chunk: Buffer) => { body += chunk; });
       req.on("end", () => {
         if (req.method === "POST" && req.url === "/api/transport/broadcast") {
+          broadcastPosts += 1;
           const parsed = JSON.parse(body);
           if (parsed.rig === "empty-rig") {
             res.writeHead(200, { "Content-Type": "application/json" });
@@ -88,6 +90,7 @@ describe("Broadcast CLI", () => {
   // `<unknown sender>` fall-open. (Hermetic-gate default is env-UNSET, so without this every broadcast
   // would render the unknown marker.) Restored by afterEach so no stub leaks across tests.
   beforeEach(() => {
+    broadcastPosts = 0;
     vi.stubEnv("OPENRIG_SESSION_NAME", "broadcaster@my-rig");
     vi.stubEnv("RIGGED_SESSION_NAME", "");
     // Broadcast-leak containment: EXPLICITLY bind every broadcast in this file to the
@@ -129,6 +132,34 @@ describe("Broadcast CLI", () => {
     expect(output).toContain("dev-impl@my-rig: sent");
     expect(output).toContain("dev-qa@my-rig: sent");
     expect(output).toContain("2/2 delivered");
+  });
+
+  it.each(["", " \t\n"])("broadcast refuses empty or whitespace-only content before transport", async (message) => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "broadcast", "--rig", "my-rig", message]);
+    });
+    const output = logs.join("\n");
+    expect(exitCode).toBe(1);
+    expect(broadcastPosts).toBe(0);
+    expect(output).toMatch(/empty or whitespace-only/i);
+    expect(output).toMatch(/backtick|\$\(\)/i);
+    expect(output).toMatch(/--body-file|stdin/i);
+  });
+
+  it("broadcast refuses an empty resolved context before fan-out transport", async () => {
+    const posts: unknown[] = [];
+    const client = {
+      get: async () => ({ status: 200, data: { ref: "packs/empty", text: " \n", bytes: 2, missingFiles: [] } }),
+      post: async (_path: string, body: unknown) => { posts.push(body); return { status: 200, data: {} }; },
+    } as unknown as DaemonClient;
+    const prog = new Command(); prog.exitOverride();
+    prog.addCommand(broadcastCommand({ ...runningDeps(port), clientFactory: () => client }));
+    const { logs, exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "broadcast", "--rig", "my-rig", "--context", "packs/empty"]);
+    });
+    expect(exitCode).toBe(1);
+    expect(posts).toEqual([]);
+    expect(logs.join("\n")).toMatch(/empty or whitespace-only/i);
   });
 
   it("broadcast without --rig/--pod sends globally", async () => {

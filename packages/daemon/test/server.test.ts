@@ -28,6 +28,8 @@ import fs from "node:fs";
 import os from "node:os";
 import nodePath from "node:path";
 
+const UI_INDEX_HTML = "<!doctype html><html><body><div id=\"root\">OpenRig UI</div></body></html>";
+
 function buildFullDeps(db: ReturnType<typeof createFullTestDb>, overrides?: { snapshotRepo?: SnapshotRepository; snapshotCapture?: SnapshotCapture; restoreOrchestrator?: RestoreOrchestrator }) {
   const rigRepo = new RigRepository(db);
   const sessionRegistry = new SessionRegistry(db);
@@ -90,7 +92,7 @@ function buildFullDeps(db: ReturnType<typeof createFullTestDb>, overrides?: { sn
 function createTempUiDist() {
   const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "rigged-ui-dist-"));
   fs.mkdirSync(nodePath.join(dir, "assets"), { recursive: true });
-  fs.writeFileSync(nodePath.join(dir, "index.html"), "<!doctype html><html><body><div id=\"root\">OpenRig UI</div></body></html>", "utf-8");
+  fs.writeFileSync(nodePath.join(dir, "index.html"), UI_INDEX_HTML, "utf-8");
   fs.writeFileSync(nodePath.join(dir, "assets", "app.js"), "console.log('rig');", "utf-8");
   return dir;
 }
@@ -139,11 +141,25 @@ describe("Hono server (production app)", () => {
     db.close();
   });
 
-  it("GET /api/unknown still returns 404", async () => {
+  it("unknown API routes return the JSON 404 contract for every method", async () => {
     const db = createFullTestDb();
-    const { app } = createTestApp(db);
-    const res = await app.request("/api/unknown");
-    expect(res.status).toBe(404);
+    const uiDistDir = createTempUiDist();
+    const app = createAppWithUiDist(db, uiDistDir);
+    for (const method of ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]) {
+      for (const requestPath of ["/api/unknown", "/api/unknown/deep"]) {
+        const res = await app.request(requestPath, { method });
+        expect(res.status, `${method} ${requestPath}`).toBe(404);
+        expect(res.headers.get("content-type"), `${method} ${requestPath}`).toContain("application/json");
+        const text = await res.text();
+        expect(text, `${method} ${requestPath}`).not.toContain("OpenRig UI");
+        if (method === "HEAD") {
+          expect(text, `${method} ${requestPath}`).toBe("");
+        } else {
+          expect(JSON.parse(text), `${method} ${requestPath}`).toEqual({ error: "not_found", path: requestPath });
+        }
+      }
+    }
+    fs.rmSync(uiDistDir, { recursive: true, force: true });
     db.close();
   });
 
@@ -155,17 +171,24 @@ describe("Hono server (production app)", () => {
     const rootRes = await app.request("/");
     expect(rootRes.status).toBe(200);
     expect(rootRes.headers.get("content-type")).toContain("text/html");
-    expect(await rootRes.text()).toContain("OpenRig UI");
+    expect(await rootRes.text()).toBe(UI_INDEX_HTML);
 
     const deepLinkRes = await app.request("/specs");
     expect(deepLinkRes.status).toBe(200);
     expect(deepLinkRes.headers.get("content-type")).toContain("text/html");
-    expect(await deepLinkRes.text()).toContain("OpenRig UI");
+    expect(await deepLinkRes.text()).toBe(UI_INDEX_HTML);
 
     const dottedLogicalIdRes = await app.request("/rigs/rig-1/nodes/dev.impl");
     expect(dottedLogicalIdRes.status).toBe(200);
     expect(dottedLogicalIdRes.headers.get("content-type")).toContain("text/html");
-    expect(await dottedLogicalIdRes.text()).toContain("OpenRig UI");
+    expect(await dottedLogicalIdRes.text()).toBe(UI_INDEX_HTML);
+
+    for (const lookalikePath of ["/api", "/apiX", "/healthz-adjacent"]) {
+      const lookalikeRes = await app.request(lookalikePath);
+      expect(lookalikeRes.status, lookalikePath).toBe(200);
+      expect(lookalikeRes.headers.get("content-type"), lookalikePath).toContain("text/html");
+      expect(await lookalikeRes.text(), lookalikePath).toBe(UI_INDEX_HTML);
+    }
 
     fs.rmSync(uiDistDir, { recursive: true, force: true });
     db.close();

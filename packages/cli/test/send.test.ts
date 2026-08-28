@@ -211,6 +211,34 @@ describe("Send CLI", () => {
     expect(logs.join("\n")).toContain("Sent to dev-impl@my-rig");
   });
 
+  it.each(["", "  \t\n"])("refuses an empty or whitespace-only direct message before transport", async (message) => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "dev-impl@my-rig", message]);
+    });
+    const output = logs.join("\n");
+    expect(exitCode).toBe(1);
+    expect(lastSendBody).toBeNull();
+    expect(output).toMatch(/empty or whitespace-only/i);
+    expect(output).toMatch(/backtick|\$\(\)/i);
+    expect(output).toMatch(/--body-file|stdin/i);
+  });
+
+  it("refuses an empty resolved context before send transport", async () => {
+    const posts: unknown[] = [];
+    const client = {
+      get: async () => ({ status: 200, data: { ref: "packs/empty", text: " \n\t", bytes: 3, missingFiles: [] } }),
+      post: async (_path: string, body: unknown) => { posts.push(body); return { status: 200, data: {} }; },
+    } as unknown as DaemonClient;
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd({ ...runningDeps(port), clientFactory: () => client }).parseAsync([
+        "node", "rig", "send", "dev-impl@my-rig", "--context", "packs/empty",
+      ]);
+    });
+    expect(exitCode).toBe(1);
+    expect(posts).toEqual([]);
+    expect(logs.join("\n")).toMatch(/empty or whitespace-only/i);
+  });
+
   // P18 DELIVER-AND-LABEL (deletion atom): an env-less send — no --from (deprecated + ignored) AND no
   // resolvable OPENRIG_SESSION_NAME/RIGGED_SESSION_NAME — now DELIVERS, carrying an HONEST `<unknown sender>`
   // label rather than refusing. The reset's north star: deleting a refusal must not manufacture a laundering
@@ -624,6 +652,15 @@ describe("Send CLI", () => {
     expect(output).toContain("dev-qa@my-rig: sent");
     expect(output).toContain("2/2 delivered");
     expect(exitCode).toBeUndefined();
+  });
+
+  it("send fan-out refuses whitespace-only content before broadcast transport", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "--to", "dev-impl@my-rig", " \t"]);
+    });
+    expect(exitCode).toBe(1);
+    expect(lastBroadcastBody).toBeNull();
+    expect(logs.join("\n")).toMatch(/empty or whitespace-only/i);
   });
 
   it("send --to accepts repetition (--to a --to b) and sets the daemon-side envelopeSender", async () => {

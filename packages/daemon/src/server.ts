@@ -768,6 +768,11 @@ export function createApp(deps: AppDeps): Hono {
     rigModeRoutes({ bearerToken: deps.missionControlBearerToken ?? null }),
   );
 
+  app.all("/api/*", async (c, next) => {
+    if (c.req.path === "/api") return next();
+    return c.json({ error: "not_found", path: c.req.path }, 404);
+  });
+
   const uiDistDir = deps.uiDistDir ?? resolveDefaultUiDistDir();
   const uiIndexPath = nodePath.join(uiDistDir, "index.html");
   const hasUiBundle = !!uiDistDir && fs.existsSync(uiIndexPath);
