@@ -70,16 +70,19 @@ one does not deprecate the others. Nothing below deletes or overrides an existin
 
 | phase | components available today |
 |---|---|
-| **PRODUCT / MISSION PREPARATION** | **The product-management pass** — the layer above planning, run by the advisor/PM seat before planners touch a mission. The build is a lossy compression pipeline (PM intent → planner spec → builder code); nothing leaks downward by proximity, so this pass grounds in the raw sources, synthesizes ONE scope of record, presents owner decisions decision-ready, mints slices at plan time, deposits the full design contract INLINE in each design-bearing spec (owner words verbatim, settled decisions, evidence, shape of done, anti-goals), routes the complete reading list and internet-research assignments from the spec itself, frames each slice's planning-dial rung with its reason, and rereads every spec as the narrow downstream reader. The measuring stick: SPEC.md alone, plus what it explicitly routes to, reproduces the intent in a reader with none of the author's context. |
-| **PLAN** | **The planning dial** — planning rigor is a spectrum chosen per piece: P0 mini-requirements and pointers (simple, reversible work) · P1 an authored spec with a proof contract (the default) · P2 plus a research round before the spec freezes, run BEFORE build dispatch · P3 plus an adversarial pass by a non-author, judged against product goals, landing amendments with proof-contract teeth · P4 plus a blind from-scratch design diffed against priors before proceeding. Dial up by what the piece is, exactly as build care is priced below. |
-| **BUILD** | **Part A, the simple flow** (below — the default) · **the wave model** — slices build in parallel in disjoint file territories, an integrator merges serially, and independent review fires once per wave (two reviewers with different vantages, never the writers; fix rounds re-earn verdicts at one final revision; per-slice discipline stays failing-test-first and verify-by-effect). The wave IS the care dial: what shares a wave decides how much review each piece gets · **Part B, the rigorous overlay** (below — only when assigned). These combine: a wave can carry one Part-B piece. |
-| **RELEASE** | The release ceremony conventions (publication identity, honest release notes, the capability-delta lifecycle: each delta expires when canon absorbs it). |
-| **BOUNDARY** | **The release boundary** — housekeeping run once per fence so the next release starts clean: seats reset or re-primed per their continuity needs, memory distilled (keep what changed a decision recently), every queue swept by destination and dispositioned, substrate torn down, boards frozen as records, a clean-box baseline captured. A checklist of judgment guides, not gates. |
+| **PRODUCT / MISSION PREPARATION** | **The product-management pass** — the layer above planning, run by the advisor/PM seat before planners touch a mission. The build is a lossy compression pipeline (PM intent → planner spec → builder code); nothing leaks downward by proximity, so this pass grounds in the raw sources, synthesizes ONE scope of record, presents owner decisions decision-ready, mints slices at plan time, deposits the full design contract INLINE in each design-bearing spec (owner words verbatim, settled decisions, evidence, shape of done, anti-goals), routes the complete reading list and internet-research assignments from the spec itself, frames each slice's planning-dial rung with its reason, and rereads every spec as the narrow downstream reader. The measuring stick: SPEC.md alone, plus what it explicitly routes to, reproduces the intent in a reader with none of the author's context. Full reference: `product-management-pass.md`. |
+| **PLAN** | **The planning dial** — planning rigor is a spectrum chosen per piece: P0 mini-requirements and pointers (simple, reversible work) · P1 an authored spec with a proof contract (the default) · P2 plus a research round before the spec freezes, run BEFORE build dispatch · P3 plus an adversarial pass by a non-author, judged against product goals, landing amendments with proof-contract teeth · P4 plus a blind from-scratch design diffed against priors before proceeding. Dial up by what the piece is, exactly as build care is priced below. Full reference: `planning-dial.md`. |
+| **BUILD** | **Part A, the simple flow** (below — the default) · **the wave model** — slices build in parallel in disjoint file territories, an integrator merges serially, and independent review fires once per wave (two reviewers with different vantages, never the writers; fix rounds re-earn verdicts at one final revision; per-slice discipline stays failing-test-first and verify-by-effect). The wave IS the care dial: what shares a wave decides how much review each piece gets · **Part B, the rigorous overlay** (below — only when assigned). These combine: a wave can carry one Part-B piece. Full wave reference: `wave-sdlc.md`. |
+| **RELEASE** | The release ceremony conventions (publication identity, honest release notes) and the CAPABILITY-DELTA LIFECYCLE LAW: each release's delta is authored at the fence, bound to the exact published cut; canon absorbs its named items; the canon header then names the delta, which expires it — verify the expiry fired, and never cite an expired delta. Full statement: `release-boundary.md` §6. |
+| **BOUNDARY** | **The release boundary** — housekeeping run once per fence so the next release starts clean: seats reset or re-primed per their continuity needs, memory distilled (keep what changed a decision recently), every queue swept by destination and dispositioned, substrate torn down, boards frozen as records, a clean-box baseline captured. A checklist of judgment guides, not gates. Full reference: `release-boundary.md`. |
 
-> Fuller reference documents for the planning dial, the wave model, and the release
-> boundary are being graduated into `docs/reference/`; until they land, the summaries
-> above are the shipped description and this document remains the SSOT pointer for all
-> of them.
+> Full reference documents for each component (graduated 2026-08-28, slice
+> OPR.0.5.6.4): the product-management pass — `product-management-pass.md` · the
+> planning dial — `planning-dial.md` · the wave model — `wave-sdlc.md` · the release
+> boundary (including the capability-delta lifecycle law) — `release-boundary.md` ·
+> the mission install — `mission-install.md` (lands with its own slice). The
+> summaries above remain the one-glance description; this document remains the SSOT
+> pointer for the whole menu.
 
 # PART A — THE SIMPLE SDLC (applies always)
 
@@ -388,3 +391,22 @@ luck, not hermeticity.
 (`daemon-db-path.ts`; prior ruling 00c4ab76) — deliberate split-path configuration is legitimate
 and untouched. This rule governs **inheritance into scratch contexts**, where nobody decided
 anything: strip what you did not choose, then choose.
+
+
+## Known gaps toward an end-to-end SDLC — dated 2026-08-28 (named with a route each, not built here)
+
+- **QA loop as a menu component:** the QA-owns-the-test-fix-feedback-loop practice is
+  lived but has no graduated reference document. Route: graduate it in a future
+  canonization pass once its SOP stabilizes.
+- **The mission install's boundary integration is one release old:** the re-prime
+  step now cites `mission-install.md`; its first full-fence exercise is the next
+  boundary. Route: the next boundary's dated observations file.
+- **Selection evals for skill/context surfaces:** referenced by audits as the gate
+  for tier moves; the runner is not built. Route: named in the scope of record as
+  gated work — sequence nothing on it.
+- **Derived progress surfaces:** progress derived from proof rather than authored is
+  ruled direction pending an owner decision on the doctrine. Route: the owner
+  decision, then a slice.
+- **Release-ceremony reference:** the RELEASE row's ceremony conventions (publication
+  identity, honest release notes) are practiced but not yet a graduated document.
+  Route: graduate with a lived specimen at a future fence.
