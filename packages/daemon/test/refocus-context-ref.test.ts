@@ -336,8 +336,9 @@ describe("openrig-core refocus hook — delivery state", () => {
     root = mkdtempSync(join(tmpdir(), "refocus-delivery-state-"));
     const home = join(root, "home");
     const transcript = join(root, "transcript.jsonl");
-    const state = join(home, "refocus", "seat@test.json");
-    mkdirSync(home, { recursive: true });
+    const state = join(home, "refocus", "seat@test__transcript.json");
+    mkdirSync(join(home, "refocus"), { recursive: true });
+    writeFileSync(state, JSON.stringify({ lastBytes: 0 }), "utf8");
     writeFileSync(transcript, "due transcript bytes", "utf8");
 
     const invoke = (event: string) => spawnSync(process.execPath, [HOOK, "--runtime", "claude"], {
@@ -383,10 +384,10 @@ describe("openrig-core refocus hook — delivery state", () => {
   it("retains PostCompact due-state without invalid output, then delivers it at the next prompt", () => {
     root = mkdtempSync(join(tmpdir(), "refocus-postcompact-state-"));
     const home = join(root, "home");
-    const state = join(home, "refocus", "seat@test.json");
+    const state = join(home, "refocus", "seat@test__postcompact-occupant.json");
     mkdirSync(home, { recursive: true });
     const invoke = (event: string) => spawnSync(process.execPath, [HOOK, "--runtime", "codex"], {
-      input: JSON.stringify({ hook_event_name: event, transcript_path: "" }),
+      input: JSON.stringify({ hook_event_name: event, session_id: "postcompact-occupant", transcript_path: "" }),
       encoding: "utf8",
       env: {
         ...process.env,
