@@ -25,6 +25,9 @@ export const OUTBOUND_OP = "post_message";
  *  qitemId rides along as the idempotency anchor (seen-state key + the H reconcile marker). */
 export interface OutboundPostPayload {
   qitemId: string;
+  notificationKey?: string | null;
+  ownerNotificationKind?: string | null;
+  ownerNotificationLevel?: import("../../queue-transition-log.js").OwnerNotificationLevel | null;
   summary?: string | null;
   body?: string | null;
   destinationSession?: string | null;
@@ -67,8 +70,9 @@ export class SlackOutboundDriver {
   start(): void {
     try {
       for (const d of new DispatchBuffer(this.deps.home).pending()) {
-        const q = (d.payload as OutboundPostPayload | undefined)?.qitemId;
-        if (q) this.inflight.add(q);
+        const payload = d.payload as OutboundPostPayload | undefined;
+        const key = payload?.notificationKey ?? payload?.qitemId;
+        if (key) this.inflight.add(key);
       }
     } catch { /* unreadable buffer: replay still dedups by decisionId at delivery */ }
     const interval = this.deps.intervalMs ?? 30000;
@@ -85,13 +89,13 @@ export class SlackOutboundDriver {
     try {
       const alerts = await this.deps.queue.listHumanAlerts(this.deps.filter);
       const seen = this.deps.seen.load();
-      const fresh = alerts.filter((q) => !seen.has(q.qitemId) && !this.inflight.has(q.qitemId));
+      const fresh = alerts.filter((q) => !seen.has(notificationKey(q)) && !this.inflight.has(notificationKey(q)));
       const dispatched: string[] = [];
       const refused: { qitemId: string; error: string }[] = [];
       for (const alert of fresh) {
         const res = this.deps.dispatch(OUTBOUND_OP, alert.destinationSession ?? "(unknown)", toPayload(alert));
         if (res.ok) {
-          this.inflight.add(alert.qitemId);
+          this.inflight.add(notificationKey(alert));
           dispatched.push(alert.qitemId);
         } else {
           // Refused (e.g. delivery layer unconfigured → op unadvertised): honest, retried next
@@ -122,6 +126,9 @@ export class SlackOutboundDriver {
 function toPayload(q: QueueItem): OutboundPostPayload {
   return {
     qitemId: q.qitemId,
+    notificationKey: q.notificationKey,
+    ownerNotificationKind: q.ownerNotificationKind,
+    ownerNotificationLevel: q.ownerNotificationLevel,
     summary: q.summary,
     body: q.body,
     destinationSession: q.destinationSession,
@@ -130,4 +137,8 @@ function toPayload(q: QueueItem): OutboundPostPayload {
     tier: q.tier,
     tags: q.tags,
   };
+}
+
+function notificationKey(q: QueueItem): string {
+  return q.notificationKey ?? q.qitemId;
 }

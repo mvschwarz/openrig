@@ -8,6 +8,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { getOpenRigHome } from "../../../openrig-compat.js";
+import { OWNER_NOTIFICATION_LEVELS, type OwnerNotificationLevel } from "../../queue-transition-log.js";
 
 export interface SlackConnectorConfig {
   enabled: boolean;
@@ -32,6 +33,8 @@ export interface SlackConnectorConfig {
    * unchanged. Remove at the next config-schema rev.
    */
   queueUrl: string | null;
+  minimumLevelThatPosts: OwnerNotificationLevel;
+  minimumLevelThatInterrupts: OwnerNotificationLevel;
 }
 
 export const DEFAULT_CONFIG: SlackConnectorConfig = {
@@ -44,7 +47,20 @@ export const DEFAULT_CONFIG: SlackConnectorConfig = {
   requiredScopes: ["chat:write", "channels:history", "channels:read"],
   secretsEnvFile: null,
   queueUrl: null,
+  minimumLevelThatPosts: "NOTICE",
+  minimumLevelThatInterrupts: "ALERT",
 };
+
+function validateLevel(field: string, value: unknown): asserts value is OwnerNotificationLevel {
+  if (!OWNER_NOTIFICATION_LEVELS.includes(value as OwnerNotificationLevel)) {
+    throw new Error(`${field} must be one of ${OWNER_NOTIFICATION_LEVELS.join(", ")} (got ${String(value)})`);
+  }
+}
+
+function validateConfig(cfg: SlackConnectorConfig): void {
+  validateLevel("minimumLevelThatPosts", cfg.minimumLevelThatPosts);
+  validateLevel("minimumLevelThatInterrupts", cfg.minimumLevelThatInterrupts);
+}
 
 export function configPathFor(home?: string): string {
   return path.join(home ?? getOpenRigHome(), "slack-connector.json");
@@ -52,15 +68,19 @@ export function configPathFor(home?: string): string {
 
 export function loadConfig(home?: string): SlackConnectorConfig {
   const p = configPathFor(home);
+  let raw: Partial<SlackConnectorConfig>;
   try {
-    const raw = JSON.parse(fs.readFileSync(p, "utf8")) as Partial<SlackConnectorConfig>;
-    return { ...DEFAULT_CONFIG, ...raw };
+    raw = JSON.parse(fs.readFileSync(p, "utf8")) as Partial<SlackConnectorConfig>;
   } catch {
     return { ...DEFAULT_CONFIG };
   }
+  const cfg = { ...DEFAULT_CONFIG, ...raw };
+  validateConfig(cfg);
+  return cfg;
 }
 
 export function saveConfig(cfg: SlackConnectorConfig, home?: string): string {
+  validateConfig(cfg);
   const p = configPathFor(home);
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");

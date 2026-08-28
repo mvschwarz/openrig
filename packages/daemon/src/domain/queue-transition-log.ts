@@ -1,6 +1,16 @@
 import type Database from "better-sqlite3";
 import type { ClosureReason } from "./hot-potato-enforcer.js";
 
+export const OWNER_NOTIFICATION_LEVELS = ["RECORD", "NOTICE", "ALERT"] as const;
+export type OwnerNotificationLevel = (typeof OWNER_NOTIFICATION_LEVELS)[number];
+
+export function ownerNotificationLevelAtLeast(
+  level: OwnerNotificationLevel,
+  minimum: OwnerNotificationLevel,
+): boolean {
+  return OWNER_NOTIFICATION_LEVELS.indexOf(level) >= OWNER_NOTIFICATION_LEVELS.indexOf(minimum);
+}
+
 export interface QueueTransition {
   transitionId: number;
   qitemId: string;
@@ -13,6 +23,8 @@ export interface QueueTransition {
   /** P21 §4 era-stamp: how actorSession was established. `transport:v1` = derived from the
    *  transport chokepoint; null/absent = claimed-era (pre-verification), never re-labeled. */
   identityProvenance: string | null;
+  ownerNotificationKind: string | null;
+  ownerNotificationLevel: OwnerNotificationLevel;
 }
 
 export interface QueueTransitionInput {
@@ -25,6 +37,8 @@ export interface QueueTransitionInput {
   /** P21 §4 era-stamp: the route passes `transport:v1` when actorSession came from the transport
    *  header chokepoint; omit (null) for system/claimed-era transitions — absence is the marker. */
   identityProvenance?: string | null;
+  ownerNotificationKind?: string | null;
+  ownerNotificationLevel?: OwnerNotificationLevel | null;
 }
 
 interface QueueTransitionRow {
@@ -37,6 +51,8 @@ interface QueueTransitionRow {
   closure_reason: string | null;
   closure_target: string | null;
   identity_provenance?: string | null;
+  owner_notification_kind?: string | null;
+  owner_notification_level?: string | null;
 }
 
 /**
@@ -48,12 +64,17 @@ export class QueueTransitionLog {
   /** P21 §4: detected once — a curated-migration test DB (or a pre-067 daemon) may lack the
    *  era-stamp column, so the writer degrades (omits it) instead of throwing. */
   private readonly hasIdentityProvenanceColumn: boolean;
+  private readonly hasOwnerNotificationColumns: boolean;
 
   constructor(db: Database.Database) {
     this.db = db;
     this.hasIdentityProvenanceColumn = (
       this.db.prepare("PRAGMA table_info(queue_transitions)").all() as Array<{ name: string }>
     ).some((c) => c.name === "identity_provenance");
+    const columns = new Set(
+      (this.db.prepare("PRAGMA table_info(queue_transitions)").all() as Array<{ name: string }>).map((c) => c.name),
+    );
+    this.hasOwnerNotificationColumns = columns.has("owner_notification_kind") && columns.has("owner_notification_level");
   }
 
   /**
@@ -63,38 +84,27 @@ export class QueueTransitionLog {
    */
   append(input: QueueTransitionInput): QueueTransition {
     const ts = new Date().toISOString();
-    const result = this.hasIdentityProvenanceColumn
-      ? this.db
-          .prepare(
-            `INSERT INTO queue_transitions (
-              qitem_id, ts, state, transition_note, actor_session, closure_reason, closure_target, identity_provenance
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-          )
-          .run(
-            input.qitemId,
-            ts,
-            input.state,
-            input.transitionNote ?? null,
-            input.actorSession,
-            input.closureReason ?? null,
-            input.closureTarget ?? null,
-            input.identityProvenance ?? null
-          )
-      : this.db
-          .prepare(
-            `INSERT INTO queue_transitions (
-              qitem_id, ts, state, transition_note, actor_session, closure_reason, closure_target
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)`
-          )
-          .run(
-            input.qitemId,
-            ts,
-            input.state,
-            input.transitionNote ?? null,
-            input.actorSession,
-            input.closureReason ?? null,
-            input.closureTarget ?? null
-          );
+    const columns = ["qitem_id", "ts", "state", "transition_note", "actor_session", "closure_reason", "closure_target"];
+    const values: unknown[] = [
+      input.qitemId,
+      ts,
+      input.state,
+      input.transitionNote ?? null,
+      input.actorSession,
+      input.closureReason ?? null,
+      input.closureTarget ?? null,
+    ];
+    if (this.hasIdentityProvenanceColumn) {
+      columns.push("identity_provenance");
+      values.push(input.identityProvenance ?? null);
+    }
+    if (this.hasOwnerNotificationColumns) {
+      columns.push("owner_notification_kind", "owner_notification_level");
+      values.push(input.ownerNotificationKind ?? null, input.ownerNotificationLevel ?? null);
+    }
+    const result = this.db
+      .prepare(`INSERT INTO queue_transitions (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`)
+      .run(...values);
 
     const row = this.db
       .prepare("SELECT * FROM queue_transitions WHERE transition_id = ?")
@@ -121,6 +131,18 @@ export class QueueTransitionLog {
     return rows.map((r) => this.rowToTransition(r));
   }
 
+  latestOwnerNotificationForQitem(qitemId: string): QueueTransition | null {
+    if (!this.hasOwnerNotificationColumns) return null;
+    const row = this.db
+      .prepare(
+        `SELECT * FROM queue_transitions
+          WHERE qitem_id = ? AND owner_notification_level IS NOT NULL
+          ORDER BY transition_id DESC LIMIT 1`,
+      )
+      .get(qitemId) as QueueTransitionRow | undefined;
+    return row ? this.rowToTransition(row) : null;
+  }
+
   private rowToTransition(row: QueueTransitionRow): QueueTransition {
     return {
       transitionId: row.transition_id,
@@ -132,6 +154,10 @@ export class QueueTransitionLog {
       closureReason: row.closure_reason as ClosureReason | null,
       closureTarget: row.closure_target,
       identityProvenance: row.identity_provenance ?? null,
+      ownerNotificationKind: row.owner_notification_kind ?? null,
+      ownerNotificationLevel: OWNER_NOTIFICATION_LEVELS.includes(row.owner_notification_level as OwnerNotificationLevel)
+        ? row.owner_notification_level as OwnerNotificationLevel
+        : "RECORD",
     };
   }
 }

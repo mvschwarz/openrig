@@ -409,6 +409,7 @@ export class MissionControlWriteContract {
           actorSession: input.actorSession,
           state: "in-progress",
           transitionNote: decision,
+          ownerNotificationKind: "human-decision-resolved",
         });
         register(updateResult.persistedEvent);
 

@@ -1,4 +1,4 @@
-// The canonical ordered migration list (001 → 059). SINGLE SOURCE: the daemon boot path
+// The canonical ordered migration list (001 → 076). SINGLE SOURCE: the daemon boot path
 // (startup.ts) and any test/tool that needs a schema-faithful DB both migrate from THIS array,
 // so a reader DB is never seeded from a stale hand-copied subset (the perf-fixture-migration-parity
 // trap). Append new migrations to the END, in order.
@@ -78,9 +78,10 @@ import { threadSeatMapSchema } from "./migrations/072_thread_seat_map.js";
 import { queueTransitionWakesSchema } from "./migrations/073_queue_transition_wakes.js";
 import { contextUsageWatchdogSchema } from "./migrations/074_context_usage_watchdog.js";
 import { contextUsageWatchdogGenerationSchema } from "./migrations/075_context_usage_watchdog_generation.js";
+import { ownerNotificationLevelsSchema } from "./migrations/076_owner_notification_levels.js";
 import type { Migration } from "./migrate.js";
 
-/** Ordered 001→071 (068 enforcer decisions, dropped forward by 071; 069/070 W3 launch truth). */
+/** Ordered 001→076 (068 enforcer decisions, dropped forward by 071; 069/070 W3 launch truth). */
 export const ALL_MIGRATIONS: Migration[] = [
   coreSchema,
   bindingsSessionsSchema,
@@ -157,4 +158,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueTransitionWakesSchema,
   contextUsageWatchdogSchema,
   contextUsageWatchdogGenerationSchema,
+  ownerNotificationLevelsSchema,
 ];

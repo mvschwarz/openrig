@@ -28,6 +28,7 @@ import { startSocketInbound, type SocketInboundHandle, type WsLike } from "./soc
 import { loadHumanRegistry, resolveSlackHandle } from "../human-registry.js";
 import type { QueueRepository } from "../../queue-repository.js";
 import type { FetchImpl } from "./slack-api.js";
+import { ownerNotificationLevelAtLeast } from "../../queue-transition-log.js";
 
 const SECRET_BOT = "SLACK_BOT_TOKEN";
 const SECRET_APP = "SLACK_APP_TOKEN";
@@ -72,7 +73,10 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     });
   }
 
-  const ports = makeQueuePorts(opts.queueRepo);
+  const registrySurface: RegistrySurface = opts.registry ?? { loadHumanRegistry, resolveSlackHandle };
+  const ports = makeQueuePorts(opts.queueRepo, {
+    loadHumanRegistry: () => registrySurface.loadHumanRegistry(opts.home),
+  });
   const outboundSeen = new SeenStore(path.join(stateDir(opts.home), "slack-outbound-seen.jsonl"));
   const delivered = new SeenStore(path.join(stateDir(opts.home), "slack-delivered-decisions.jsonl"));
   const attempted = new SeenStore(path.join(stateDir(opts.home), "slack-attempted-decisions.jsonl"));
@@ -97,16 +101,12 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         // For an outbound alert, human = the destination seat-ref, seat = the source seat.
         resolveThreadTs: (p) =>
           threadMap.resolveOpenForPair(p.destinationSession ?? "", p.sourceSession ?? "")?.threadTs,
-        // F — interim loudness rule: ONLY an escalation mentions its human (tier human-gate or
-        // an escalation tag); the mention id is the registered human's slack HANDLE from the
-        // registry. No handle / not registered → quiet (a mention that cannot resolve is
-        // silence, never a guessed id).
+        // S14: posting and interruption are separate threshold dials over one vocabulary.
         resolveMentionUserId: (p) => {
-          const escalation = p.tier === "human-gate" || (p.tags ?? []).includes("escalation");
-          if (!escalation) return undefined;
+          if (!p.ownerNotificationLevel || !ownerNotificationLevelAtLeast(p.ownerNotificationLevel, cfg.minimumLevelThatInterrupts)) return undefined;
           const local = (p.destinationSession ?? "").split("@")[0] ?? "";
           if (!local) return undefined;
-          const reg = (opts.registry ?? { loadHumanRegistry, resolveSlackHandle }).loadHumanRegistry(opts.home);
+          const reg = registrySurface.loadHumanRegistry(opts.home);
           if (!reg.ok) return undefined;
           for (const e of reg.entities) {
             if (e.entityId !== local) continue;
@@ -132,6 +132,24 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
             log(`thread stamp failed for ${p.qitemId}: ${(e as Error).message}`);
           }
         },
+        onPosted: (p, messageTs, threadTs) => {
+          try {
+            opts.queueRepo.update({
+              qitemId: p.qitemId,
+              actorSession: "daemon@kernel",
+              transitionNote: [
+                "slack-owner-notification-posted",
+                `notification_key=${p.notificationKey ?? p.qitemId}`,
+                `level=${p.ownerNotificationLevel ?? "RECORD"}`,
+                `kind=${p.ownerNotificationKind ?? "unclassified"}`,
+                `message_ts=${messageTs}`,
+                `thread_ts=${threadTs ?? messageTs}`,
+              ].join(" "),
+            });
+          } catch (e) {
+            log(`owner notification receipt failed for ${p.qitemId}: ${(e as Error).message}`);
+          }
+        },
         log,
       })
     : async () => ({ ok: false as const, class: "slack-outbound-not-configured", detail: "bot token or channel missing" });
@@ -154,7 +172,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       home: opts.home,
       queue: ports,
       seen: outboundSeen,
-      filter: { alertTag: cfg.alertTag, destinations: cfg.outboundDestinations },
+      filter: { alertTag: cfg.alertTag, destinations: cfg.outboundDestinations, minimumLevel: cfg.minimumLevelThatPosts },
       dispatch: (op, ref, payload) => wire.dispatcher.dispatch(op, ref, payload),
       intervalMs: opts.outboundIntervalMs,
       log,
@@ -170,7 +188,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   if (inboundReady) {
     const inboundSeen = new SeenStore(path.join(stateDir(opts.home), "slack-inbound-seen.jsonl"));
     const dead = new DeadLetterStore<SlackEvent>(path.join(stateDir(opts.home), "slack-inbound-deadletter.jsonl"));
-    const registry: RegistrySurface = opts.registry ?? { loadHumanRegistry, resolveSlackHandle };
+    const registry: RegistrySurface = registrySurface;
     const router = new InboundRouter({
       queue: ports,
       seen: inboundSeen,

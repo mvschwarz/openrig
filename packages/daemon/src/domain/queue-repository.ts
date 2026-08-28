@@ -1,10 +1,10 @@
 import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import type { EventBus } from "./event-bus.js";
-import { loadHumanRegistry } from "./gateway/human-registry.js";
+import { loadHumanRegistry, resolveRegisteredHumanAddress, type LoadResult } from "./gateway/human-registry.js";
 import { resolveExternal } from "./gateway/external-admission.js";
 import type { PersistedEvent } from "./types.js";
-import { QueueTransitionLog } from "./queue-transition-log.js";
+import { QueueTransitionLog, type OwnerNotificationLevel } from "./queue-transition-log.js";
 import { WAKE_INTENT_PREFIX, type OutboxHandler } from "./outbox-handler.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
@@ -283,6 +283,8 @@ export interface QueueUpdateInput {
   /** P21 §4 era-stamp: the route passes `transport:v1` (actorSession derived from the transport
    *  header chokepoint). Threaded onto the transition; absence = claimed-era. */
   identityProvenance?: string | null;
+  /** System-owned ceremony kind. Never exposed as a free-form route field. */
+  ownerNotificationKind?: "human-decision-resolved";
 }
 
 export interface QueueHandoffInput {
@@ -556,6 +558,7 @@ export class QueueRepository {
   private readonly hasEvidenceRefColumn: boolean;
   private readonly hasMintingGenColumn: boolean;
   private readonly hasClaimedGenColumn: boolean;
+  private readonly loadHumanRegistryFn: () => LoadResult;
   /** OPR.0.4.6.WF3 FR-6 — injected by startup (never imported): the
    *  workflow domain's is-live-frontier-packet predicate. */
   private readonly workflowFrontierPredicate:
@@ -593,6 +596,7 @@ export class QueueRepository {
        * is omitted (never forged).
        */
       resolveOccupantGeneration?: (sessionName: string) => string | null;
+      loadHumanRegistry?: () => LoadResult;
     }
   ) {
     this.db = db;
@@ -603,6 +607,7 @@ export class QueueRepository {
     this.transport = opts?.transport;
     this.workflowFrontierPredicate = opts?.workflowFrontierPredicate;
     this.resolveOccupantGeneration = opts?.resolveOccupantGeneration;
+    this.loadHumanRegistryFn = opts?.loadHumanRegistry ?? (() => loadHumanRegistry());
     this.hasTargetRepoColumn = detectQueueColumn(db, "target_repo");
     this.hasSummaryColumn = detectQueueColumn(db, "summary");
     this.hasEvidenceRefColumn = detectQueueColumn(db, "evidence_ref");
@@ -662,6 +667,34 @@ export class QueueRepository {
       );
     }
     this.outbox = outbox;
+  }
+
+  /** The one transition-write classifier. It consumes structured state/action facts only. */
+  private classifyOwnerNotification(input: {
+    action: "create" | "update";
+    destinationSession: string;
+    previousState?: QueueState;
+    previousBlockedOn?: string | null;
+    nextState: QueueState;
+    nextBlockedOn?: string | null;
+    explicitKind?: QueueUpdateInput["ownerNotificationKind"];
+  }): { kind: string; level: OwnerNotificationLevel } | null {
+    if (input.explicitKind === "human-decision-resolved") {
+      return { kind: input.explicitKind, level: "NOTICE" };
+    }
+    const registry = this.loadHumanRegistryFn();
+    if (!registry.ok) return null;
+    const blockedHuman = resolveRegisteredHumanAddress(input.nextBlockedOn, registry.entities);
+    const previousBlockedHuman = resolveRegisteredHumanAddress(input.previousBlockedOn, registry.entities);
+    const enteredHumanPark = input.nextState === "blocked" && blockedHuman !== null &&
+      (input.previousState !== "blocked" || previousBlockedHuman !== blockedHuman);
+    if (enteredHumanPark) return { kind: "human-required", level: "ALERT" };
+
+    const destinationHuman = resolveRegisteredHumanAddress(input.destinationSession, registry.entities);
+    if (input.action === "create" && destinationHuman !== null) {
+      return { kind: "human-required", level: "ALERT" };
+    }
+    return null;
   }
 
   /**
@@ -1259,12 +1292,19 @@ export class QueueRepository {
     this.persistSummary(id, input.summary ?? null);
     this.persistEvidenceRef(id, input.evidenceRef ?? null);
     this.persistMintingGeneration(id, input.sourceSession);
+    const notification = this.classifyOwnerNotification({
+      action: "create",
+      destinationSession: input.destinationSession,
+      nextState: "pending",
+    });
     this.transitionLog.append({
       qitemId: id,
       state: "pending",
       actorSession: input.sourceSession,
       transitionNote: "created",
       identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
+      ownerNotificationKind: notification?.kind,
+      ownerNotificationLevel: notification?.level,
     });
     const persistedEvent = this.eventBus.persistWithinTransaction({
       type: "queue.created",
@@ -2241,6 +2281,15 @@ export class QueueRepository {
     // NULL. The prior `COALESCE(?, blocked_on)` preserved the blocker on every non-blocked
     // transition, leaving dead blockers that nothing audits (the root-cause strand).
     const nextBlockedOn = input.state === "blocked" ? effectiveBlockedOn : null;
+    const notification = this.classifyOwnerNotification({
+      action: "update",
+      destinationSession: qitem.destinationSession,
+      previousState: qitem.state,
+      previousBlockedOn: qitem.blockedOn,
+      nextState: input.state,
+      nextBlockedOn,
+      explicitKind: input.ownerNotificationKind,
+    });
 
     this.db
       .prepare(
@@ -2279,6 +2328,8 @@ export class QueueRepository {
       closureReason: validation.closureReason ?? undefined,
       closureTarget: validation.closureTarget ?? undefined,
       identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
+      ownerNotificationKind: notification?.kind,
+      ownerNotificationLevel: notification?.level,
     });
     if (parkWake) {
       this.wakeRepo.record({

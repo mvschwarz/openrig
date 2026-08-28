@@ -152,6 +152,7 @@ export const migrationsForFullTestDbExclusions: Record<string, string> = {
   "071_drop_enforcer_decisions.sql": "The forward drop of 068, excluded above — this fixture never creates enforcer_decisions, so applying its drop would be a no-op (the DROP is IF EXISTS). Re-check together with 068: if 068 is ever added to the core edge, add this one too or the fixture keeps a table the shipped schema has dropped.",
   "074_context_usage_watchdog.sql": "watchdog extension migrated inline by context-usage watchdog suites.",
   "075_context_usage_watchdog_generation.sql": "context watchdog generation-binding extension migrated inline by context-usage watchdog suites.",
+  "076_owner_notification_levels.sql": "owner-notification columns extend queue transitions plus the archive table (054 is excluded); focused S14 suites use the canonical full migration list.",
 };
 
 export function createFullTestDb(): Database.Database {

@@ -19,6 +19,7 @@ import { join, dirname } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { getOpenRigHome } from "../../openrig-compat.js";
 import { DispatchBuffer } from "./dispatch-buffer.js";
+import { parseSessionName } from "../session-name.js";
 
 // ── Schema (closed enums; extend only additively behind the contract) ──
 export const HUMAN_ENTITY_CLASSES = new Set(["human"]);          // M1's only class
@@ -689,4 +690,21 @@ export function loadHumanRegistry(home: string = getOpenRigHome()): LoadResult {
     return { ok: false, error: `registry projection at ${path} is HAND-EDITED or DRIFTED from the fragments — the fragment is truth; re-project, never hand-edit` };
   }
   return { ok: true, entities: proj.entities };
+}
+
+/** Resolve every registered spelling of a human to its canonical external address.
+ * Identity comes from the registry entity, never from a domain/suffix allow-list. */
+export function resolveRegisteredHumanAddress(
+  sessionRef: string | null | undefined,
+  entities: readonly HumanFragment[],
+): string | null {
+  if (!sessionRef) return null;
+  const parsed = parseSessionName(sessionRef);
+  const identity = parsed.kind === "external"
+    ? parsed.local
+    : parsed.kind === "canonical"
+      ? parsed.member
+      : null;
+  if (!identity) return null;
+  return entities.find((entity) => entity.entityId === identity)?.address ?? null;
 }

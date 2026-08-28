@@ -179,13 +179,23 @@ export function archiveAgedTerminalTransitions(
     return { archivedQitems: 0, archivedRows: 0 };
   }
 
+  const activeColumns = new Set(
+    (db.prepare("PRAGMA table_info(queue_transitions)").all() as Array<{ name: string }>).map((row) => row.name),
+  );
+  const archiveColumns = new Set(
+    (db.prepare("PRAGMA table_info(queue_transitions_archive)").all() as Array<{ name: string }>).map((row) => row.name),
+  );
+  const carriesOwnerNotification = ["owner_notification_kind", "owner_notification_level"]
+    .every((column) => activeColumns.has(column) && archiveColumns.has(column));
+  const ownerInsert = carriesOwnerNotification ? ", owner_notification_kind, owner_notification_level" : "";
+  const ownerSelect = carriesOwnerNotification ? ", owner_notification_kind, owner_notification_level" : "";
   const selectRows = db.prepare(
     `INSERT INTO queue_transitions_archive (
        transition_id, qitem_id, ts, state, transition_note,
-       actor_session, closure_reason, closure_target, archived_at
+       actor_session, closure_reason, closure_target${ownerInsert}, archived_at
      )
      SELECT transition_id, qitem_id, ts, state, transition_note,
-            actor_session, closure_reason, closure_target, ?
+            actor_session, closure_reason, closure_target${ownerSelect}, ?
        FROM queue_transitions
       WHERE qitem_id = ?`,
   );

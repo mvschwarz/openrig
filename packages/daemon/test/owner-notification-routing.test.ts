@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type Database from "better-sqlite3";
@@ -15,6 +15,9 @@ import { makeQueuePorts, type QueueItem } from "../src/domain/gateway/slack/queu
 import { SlackOutboundDriver } from "../src/domain/gateway/slack/outbound-driver.js";
 import { DEFAULT_CONFIG, loadConfig, saveConfig } from "../src/domain/gateway/slack/config.js";
 import { SeenStore } from "../src/domain/gateway/slack/state-store.js";
+import { buildSlackGatewayWire } from "../src/domain/gateway/slack/slack-subsystem.js";
+import { OUTBOUND_OP } from "../src/domain/gateway/slack/outbound-driver.js";
+import { resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
 
 const registry = {
   ok: true as const,
@@ -66,7 +69,7 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
     rmSync(home, { recursive: true, force: true });
   });
 
-  it("defines one ordered OWNER vocabulary and registers additive migration 076 with archive parity", () => {
+  it("defines one ordered OWNER vocabulary, archive parity, and the ordinary/direct-human matrix", async () => {
     expect(levels()).toEqual(["RECORD", "NOTICE", "ALERT"]);
     expect(ALL_MIGRATIONS.at(-1)?.name).toBe("076_owner_notification_levels.sql");
     for (const table of ["queue_transitions", "queue_transitions_archive"]) {
@@ -74,6 +77,23 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
       expect(columns).toContain("owner_notification_kind");
       expect(columns).toContain("owner_notification_level");
     }
+
+    const ordinary = await repo.create({ sourceSession: "a@rig", destinationSession: "b@rig", body: "ordinary", nudge: false });
+    expect(db.prepare(
+      "SELECT owner_notification_kind, owner_notification_level FROM queue_transitions WHERE qitem_id=? ORDER BY transition_id DESC LIMIT 1",
+    ).get(ordinary.qitemId)).toEqual({ owner_notification_kind: null, owner_notification_level: null });
+
+    const direct = await repo.create({
+      sourceSession: "orch-lead@v-openrig-build",
+      destinationSession: "human-founder@kernel",
+      body: "direct decision",
+      summary: "Direct founder decision",
+      evidenceRef: "/proof/direct.md",
+      nudge: false,
+    });
+    expect(db.prepare(
+      "SELECT owner_notification_kind, owner_notification_level FROM queue_transitions WHERE qitem_id=? ORDER BY transition_id DESC LIMIT 1",
+    ).get(direct.qitemId)).toEqual({ owner_notification_kind: "human-required", owner_notification_level: "ALERT" });
   });
 
   it("defaults to posting NOTICE and interrupting ALERT, and refuses an unknown level", () => {
@@ -198,5 +218,78 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
         ownerNotificationLevel: "NOTICE",
       }),
     ] satisfies QueueItem[]);
+  });
+
+  it("writes a same-row receipt for root and threaded posts; ALERT interrupts while NOTICE stays quiet", async () => {
+    const row = await repo.create({
+      sourceSession: "dev-qa@v-openrig-build",
+      destinationSession: "orch-lead@v-openrig-build",
+      body: "await decision",
+      nudge: false,
+    });
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "orch-lead@v-openrig-build",
+      state: "blocked",
+      blockedOn: "human-founder@kernel",
+      summary: "Choose A or B",
+      evidenceRef: "/proof/decision.md",
+      transitionNote: "parked",
+    });
+    const ports = makeQueuePorts(repo, { loadHumanRegistry: () => registry } as never);
+    const [alert] = await ports.listHumanAlerts({ alertTag: "unused", minimumLevel: "NOTICE" } as never);
+    expect(alert).toBeDefined();
+
+    const secrets = join(home, "slack.env");
+    writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n", { mode: 0o600 });
+    saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-OWNER", secretsEnvFile: secrets }, home);
+    const posts: Array<Record<string, unknown>> = [];
+    const wire = buildSlackGatewayWire({
+      home,
+      queueRepo: repo,
+      registry: { loadHumanRegistry: () => registry, resolveSlackHandle },
+      outboundIntervalMs: 60_000,
+      fetchImpl: async (_url, init) => {
+        posts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        return new Response(JSON.stringify({ ok: true, ts: `1724.000${posts.length}` }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    try {
+      wire.startServices?.();
+      expect(wire.dispatcher.dispatch(OUTBOUND_OP, alert!.destinationSession!, alert)).toMatchObject({ ok: true });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(JSON.stringify(posts[0])).toContain("<@UFOUNDER>");
+
+      const contract = new MissionControlWriteContract({
+        db,
+        eventBus: bus,
+        queueRepo: repo,
+        actionLog: new MissionControlActionLog(db),
+      });
+      await contract.act({
+        verb: "resolve",
+        qitemId: row.qitemId,
+        actorSession: "human-founder@kernel",
+        decision: "Choose A",
+        notify: false,
+      });
+      const [notice] = await ports.listHumanAlerts({ alertTag: "unused", minimumLevel: "NOTICE" } as never);
+      expect(notice?.ownerNotificationLevel).toBe("NOTICE");
+      expect(wire.dispatcher.dispatch(OUTBOUND_OP, notice!.destinationSession!, notice)).toMatchObject({ ok: true });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(JSON.stringify(posts[1])).not.toContain("<@UFOUNDER>");
+
+      const receipts = repo.listTransitions(row.qitemId).filter((transition) =>
+        transition.transitionNote?.startsWith("slack-owner-notification-posted "),
+      );
+      expect(receipts).toHaveLength(2);
+      expect(receipts[0]!.transitionNote).toContain(`notification_key=${alert!.notificationKey}`);
+      expect(receipts[1]!.transitionNote).toContain(`notification_key=${notice!.notificationKey}`);
+    } finally {
+      wire.stop();
+    }
   });
 });

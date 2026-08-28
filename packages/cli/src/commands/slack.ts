@@ -77,6 +77,8 @@ export function slackCommand(deps: SlackDeps = {}): Command {
     .option("--channel <id>", "Slack channel id the connector app must be a member of")
     .option("--inbound-destination <session>", "where inbound human messages land (default operator-agent@kernel)")
     .option("--alert-tag <tag>", "outbound: qitem tag that alerts a human (default founder-alert)")
+    .option("--minimum-level-that-posts <level>", "minimum OWNER level posted to Slack: RECORD|NOTICE|ALERT")
+    .option("--minimum-level-that-interrupts <level>", "minimum OWNER level that mentions/interrupts: RECORD|NOTICE|ALERT")
     .option("--source-label <label>", "label shown in the posted message footer (where the queue lives)")
     .option("--secrets-env-file <path>", "path to the 0600 env file with SLACK_BOT_TOKEN / SLACK_APP_TOKEN")
     .option("--required-scopes <csv>", "comma-separated bot scopes to require at verify time")
@@ -88,6 +90,8 @@ export function slackCommand(deps: SlackDeps = {}): Command {
         channel: opts.channel ?? cur.channel,
         inboundDestination: opts.inboundDestination ?? cur.inboundDestination,
         alertTag: opts.alertTag ?? cur.alertTag,
+        minimumLevelThatPosts: opts.minimumLevelThatPosts ?? cur.minimumLevelThatPosts,
+        minimumLevelThatInterrupts: opts.minimumLevelThatInterrupts ?? cur.minimumLevelThatInterrupts,
         sourceLabel: opts.sourceLabel ?? cur.sourceLabel,
         secretsEnvFile: opts.secretsEnvFile ?? cur.secretsEnvFile,
         requiredScopes: opts.requiredScopes ? String(opts.requiredScopes).split(",").map((s: string) => s.trim()).filter(Boolean) : cur.requiredScopes,

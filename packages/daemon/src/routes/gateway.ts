@@ -34,7 +34,7 @@ export function gatewayRoutes(): Hono {
     const { seeded, onlineStatus } = await seedBacklogAsHistory({
       queue: makeQueuePorts(queueRepo),
       seen,
-      filter: { alertTag: cfg.alertTag, destinations: cfg.outboundDestinations },
+      filter: { alertTag: cfg.alertTag, destinations: cfg.outboundDestinations, minimumLevel: cfg.minimumLevelThatPosts },
     });
     saveConfig({ ...cfg, enabled: true }, home);
     subsystem.restart();

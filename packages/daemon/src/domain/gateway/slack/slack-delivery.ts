@@ -34,15 +34,17 @@ export interface SubsystemSlackDeliveryOpts {
    *  decision has an AMBIGUOUS prior outcome (a timeout may have landed), so it RECONCILES by
    *  marker before any resend — never a blind repost. Distinct from `delivered` (proven 2xx). */
   attempted: SeenStore;
-  /** qitemId-keyed outbound seen-state (slice-11: marked ONLY after a successful post). */
+  /** Episode-keyed outbound seen-state (marked ONLY after a successful post). */
   outboundSeen: SeenStore;
-  /** Release the outbound driver's in-flight guard once a qitem is durably seen. */
-  release?: (qitemId: string) => void;
+  /** Release the outbound driver's in-flight guard once an episode is durably seen. */
+  release?: (notificationKey: string) => void;
   /** E (thread routing): resolve the thread anchor for this payload; undefined = new root.
    *  Wired by the thread-seat map; absent in the pre-routing composition. */
   resolveThreadTs?: (payload: OutboundPostPayload) => string | undefined;
   /** E: record a NEW root's ts so the conversation threads from here on. */
   onPostedRoot?: (payload: OutboundPostPayload, ts: string) => void;
+  /** Receipt hook for every successful post, root or threaded. */
+  onPosted?: (payload: OutboundPostPayload, messageTs: string, threadTs?: string) => void;
   /** F (interim loudness rule): return the Slack USER ID to mention for an ESCALATION payload,
    *  undefined for everything else (quiet-threaded). The composition wires the registry lookup
    *  + the escalation predicate; delivery just renders what it is told. */
@@ -132,8 +134,9 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
         log(`reconcile: marker "${marker}" FOUND — prior ambiguous post landed; ack without repost`);
         opts.delivered.mark(decision.decisionId, "reconciled-delivered");
         if (q.qitemId) {
-          opts.outboundSeen.mark(q.qitemId, "posted");
-          opts.release?.(q.qitemId);
+          const key = q.notificationKey ?? q.qitemId;
+          opts.outboundSeen.mark(key, "posted");
+          opts.release?.(key);
         }
         return { ok: true };
       }
@@ -154,10 +157,12 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
     // dedup — no double-post; before it, the wire retains + replays — at-least-once, never a drop).
     opts.delivered.mark(decision.decisionId, "delivered");
     if (q.qitemId) {
-      opts.outboundSeen.mark(q.qitemId, "posted"); // slice-11: seen ONLY after success
-      opts.release?.(q.qitemId);
+      const key = q.notificationKey ?? q.qitemId;
+      opts.outboundSeen.mark(key, "posted");
+      opts.release?.(key);
     }
     if (res.ts && threadTs === undefined) opts.onPostedRoot?.(q, res.ts);
+    if (res.ts) opts.onPosted?.(q, res.ts, threadTs);
 
     // G — a LOCAL image evidenceRef (the founder screenshot) rides the EXTERNAL-UPLOAD flow
     // into the conversation thread (files.upload is sunset). Upload failure is fail-VISIBLE
