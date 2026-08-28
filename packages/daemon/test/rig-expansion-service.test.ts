@@ -360,4 +360,69 @@ describe("RigExpansionService", () => {
     expect(specObject.pods[0]!.members[0]!["starter_ref"]).toBeUndefined();
     materializeSpy.mockRestore();
   });
+
+  // OPR.0.5.6.3 — session_source.ref.version rides the fragment→spec map.
+  // SessionSourceAgentImageSpec.ref carries `version?: string` (optional
+  // version selector, defaults to "1" at consumption), and the schema
+  // validates + normalizes it. Dropping it here silently expands a
+  // version-pinned member at the DEFAULT image version — the FAC1
+  // never-silently-drop rule applied to the whole session_source block.
+  it("preserves session_source ref.version across expansion into the structured materialize spec", async () => {
+    const rig = seedRig();
+    const materializeSpy = vi.spyOn(setup.podInstantiator, "materializeStructured");
+    const podWithPinnedImage: ExpansionRequest["pod"] = {
+      id: "infra",
+      label: "Infrastructure",
+      members: [
+        {
+          id: "server",
+          runtime: "claude-code",
+          agentRef: "local:agents/server",
+          profile: "default",
+          cwd: "/tmp",
+          sessionSource: { mode: "agent_image", ref: { kind: "image_name", value: "builder-base", version: "3" } },
+        },
+      ],
+      edges: [],
+    };
+    await service.expand({ rigId: rig.id, pod: podWithPinnedImage });
+
+    expect(materializeSpy).toHaveBeenCalled();
+    const specObject = materializeSpy.mock.calls[0]![0] as { pods: Array<{ members: Array<Record<string, unknown>> }> };
+    const sessionSource = specObject.pods[0]!.members[0]!["session_source"] as { mode: string; ref: Record<string, unknown> };
+    expect(sessionSource).toBeDefined();
+    expect(sessionSource.ref["value"]).toBe("builder-base");
+    // The pin itself: the version selector survives the mapping.
+    expect(sessionSource.ref["version"]).toBe("3");
+    materializeSpy.mockRestore();
+  });
+
+  // OPR.0.5.6.3 no-behavior-widening pin: an UNPINNED session_source maps to
+  // exactly { mode, ref: { kind, value } } — no version key materializes from
+  // nowhere, and the carried fields are unchanged.
+  it("unpinned session_source maps to the exact prior shape (no version key, no widening)", async () => {
+    const rig = seedRig();
+    const materializeSpy = vi.spyOn(setup.podInstantiator, "materializeStructured");
+    const podWithFork: ExpansionRequest["pod"] = {
+      id: "infra",
+      label: "Infrastructure",
+      members: [
+        {
+          id: "server",
+          runtime: "claude-code",
+          agentRef: "local:agents/server",
+          profile: "default",
+          cwd: "/tmp",
+          sessionSource: { mode: "fork", ref: { kind: "native_id", value: "sess-abc" } },
+        },
+      ],
+      edges: [],
+    };
+    await service.expand({ rigId: rig.id, pod: podWithFork });
+
+    const specObject = materializeSpy.mock.calls[0]![0] as { pods: Array<{ members: Array<Record<string, unknown>> }> };
+    const sessionSource = specObject.pods[0]!.members[0]!["session_source"];
+    expect(sessionSource).toEqual({ mode: "fork", ref: { kind: "native_id", value: "sess-abc" } });
+    materializeSpy.mockRestore();
+  });
 });
