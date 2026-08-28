@@ -555,3 +555,72 @@ ${activityBlock}
     });
   });
 });
+
+// ─── OPR.0.5.6.20 P3 — compaction_strategy wiring (locked A1 compat rule) ───────
+// RED-FIRST: committed at pristine base f7301d6ba before the implementation commit.
+// At base: the four new values REJECT (closed old set), the alias cases carry no
+// advisory, and normalize emits the old spelling — each labeled per-case below.
+
+describe("compaction_strategy — S20 four-mode wiring + A1 compat (OPR.0.5.6.20)", () => {
+  const specWithStrategy = (v: string) => `
+version: "0.2"
+name: s20-fixture
+defaults:
+  runtime: claude-code
+  lifecycle:
+    compaction_strategy: ${v}
+profiles:
+  default: {}
+`;
+
+  it("accepts all four new canonical values (RED at base: closed-set rejection)", () => {
+    for (const v of ["default-compaction", "managed-compaction", "handover", "apprentice-handover"]) {
+      const result = validateAgentSpec(parseAgentSpec(specWithStrategy(v)));
+      expect(result.errors).toEqual([]);
+      expect(result.valid).toBe(true);
+    }
+  });
+
+  it("harness_native: deprecated alias — validates WITH advisory, normalizes to default-compaction (RED at base: no advisory, old spelling normalized)", () => {
+    const raw = parseAgentSpec(specWithStrategy("harness_native"));
+    const result = validateAgentSpec(raw);
+    expect(result.valid).toBe(true);
+    expect((result.advisories ?? []).join(" ")).toMatch(/harness_native.*deprecated.*default-compaction/);
+    const spec = normalizeAgentSpec(raw);
+    expect(spec.defaults.lifecycle.compactionStrategy).toBe("default-compaction");
+  });
+
+  it("pod_continuity: deprecated alias — validates WITH advisory, normalizes to handover (RED at base: no advisory, old spelling normalized)", () => {
+    const raw = parseAgentSpec(specWithStrategy("pod_continuity"));
+    const result = validateAgentSpec(raw);
+    expect(result.valid).toBe(true);
+    expect((result.advisories ?? []).join(" ")).toMatch(/pod_continuity.*deprecated.*handover/);
+    const spec = normalizeAgentSpec(raw);
+    expect(spec.defaults.lifecycle.compactionStrategy).toBe("handover");
+  });
+
+  it("custom_prompt rejection is byte-identical to the shipped teaching error (regression floor — green at base)", () => {
+    const result = validateAgentSpec(parseAgentSpec(specWithStrategy("custom_prompt")));
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes('"custom_prompt" is not supported in v1'))).toBe(true);
+  });
+
+  it("unknown values reject with a teaching error naming the CURRENT vocabulary (RED at base: error names only the old set)", () => {
+    const result = validateAgentSpec(parseAgentSpec(specWithStrategy("yolo-mode")));
+    expect(result.valid).toBe(false);
+    expect(result.errors.join(" ")).toMatch(/default-compaction/);
+  });
+
+  it("unspecified normalizes to default-compaction — today's behavior under the new name, F-6 authority (RED at base: harness_native)", () => {
+    const raw = parseAgentSpec(`
+version: "0.2"
+name: s20-fixture
+defaults:
+  runtime: claude-code
+profiles:
+  default: {}
+`);
+    const spec = normalizeAgentSpec(raw);
+    expect(spec.defaults.lifecycle.compactionStrategy).toBe("default-compaction");
+  });
+});

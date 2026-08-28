@@ -541,3 +541,53 @@ describe("V0.3.0 daemon-skill-discovery — filesystem-discovered skills join th
     });
   });
 });
+
+// ─── OPR.0.5.6.20 P3 — compactionStrategy resolution, most-specific-WINS ────────
+// RED-FIRST at base: no compactionStrategy resolution exists; ResolvedNodeConfig
+// carries no such field. Layering is override-wins (spec default < profile <
+// member) — deliberately NOT restore_policy's narrowing lattice: the four modes
+// are unordered (desk-concurred planner call, disclosed on baton bd7eef84).
+
+describe("compactionStrategy resolution — most-specific-wins (OPR.0.5.6.20)", () => {
+  const specLifecycle = (compactionStrategy: string) => makeSpec({
+    defaults: {
+      runtime: "claude-code",
+      lifecycle: { executionMode: "interactive_resident", compactionStrategy, restorePolicy: "resume_if_possible" },
+    },
+  } as Partial<AgentSpec>);
+
+  it("member overrides profile overrides spec default (two-level fixture; RED: field absent from config)", () => {
+    const spec = specLifecycle("default-compaction");
+    spec.profiles["default"].lifecycle = { compactionStrategy: "managed-compaction" } as never;
+    const bare = resolveNodeConfig(makeCtx({ resolved: makeResolved(spec) }));
+    expect(bare.ok).toBe(true);
+    if (bare.ok) expect(bare.config.compactionStrategy).toBe("managed-compaction");
+    const overridden = resolveNodeConfig(makeCtx({
+      resolved: makeResolved(spec),
+      member: makeMember({ compactionStrategy: "apprentice-handover" } as never),
+    }));
+    expect(overridden.ok).toBe(true);
+    if (overridden.ok) expect(overridden.config.compactionStrategy).toBe("apprentice-handover");
+  });
+
+  it("absent everywhere resolves to default-compaction (RED: field absent)", () => {
+    const result = resolveNodeConfig(makeCtx());
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.config.compactionStrategy).toBe("default-compaction");
+  });
+
+  it("an invalid value at any level errors naming the level (restore-policy error style; RED: silently ignored)", () => {
+    const result = resolveNodeConfig(makeCtx({
+      member: makeMember({ compactionStrategy: "bogus" } as never),
+    }));
+    expect(result.ok).toBe(false);
+  });
+
+  it("a deprecated alias at the member level resolves to its canonical value (harness_native → default-compaction; RED: unrecognized)", () => {
+    const result = resolveNodeConfig(makeCtx({
+      member: makeMember({ compactionStrategy: "harness_native" } as never),
+    }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.config.compactionStrategy).toBe("default-compaction");
+  });
+});
