@@ -25,6 +25,9 @@ export type FindingKind =
   | "mini_requirements_missing_or_malformed"
   | "proof_contract_missing_or_malformed"
   | "ui_slice_missing_mockup"
+  // Release-boundary capability deltas stay citable only until canon names the
+  // exact delta and a successor exists. Medium severity keeps this advisory.
+  | "expired_capability_delta"
   // SPEC.md compatibility — a node carrying BOTH authored files. Advisory by
   // construction (low severity never flips the exit code): SPEC.md wins, and the
   // shadowed README.md is a state to notice, never a failure to gate on.
