@@ -106,3 +106,26 @@ wide across the board, narrow in the act) with a PRODUCT-SHAPING seat (taste:
 coherence, contracts, temporal judgment — wide across the product), each with its
 aperture stated in its role. The context-not-instructions rule is the wire protocol
 between them.
+
+## Price one layer lower — the right-layer check
+
+Before accepting the fix your hands reached for, price ONE LAYER LOWER. The tendency
+is to fix high — high fixes are easy to write and test — and narrow is sometimes
+exactly right: sometimes all you need is a band-aid. But sometimes you are setting a
+bone, and the tells are learnable:
+
+- **The bone tell:** the lower fix collapses several open problems at once, and is
+  often SMALLER than the patch — it deletes or reuses instead of adding.
+- **The band-aid tell:** the lower layer is stable, correct, and merely
+  inconvenient; the defect is genuinely local; nothing else downstream shares it.
+- **The floor:** there is a sweet spot. A fix below the primitives you own is
+  someone else's lane, and a new engine where composition suffices fails the
+  simplicity bar.
+- **The move, mechanically:** name the layer you instinctively chose; name the
+  layer below it; state what each fixes and what each leaves broken; choose with
+  the price visible.
+
+This is the vertical twin of the wide-angle lens above: where
+context-not-instructions protects synthesis across seats, ARE-YOU-AT-THE-RIGHT-LAYER
+protects it across layers — a question to ask of every fix, and one layer lower
+deserves a look every time.
