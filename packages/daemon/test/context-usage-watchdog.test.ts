@@ -16,6 +16,7 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { WatchdogPolicyEngine } from "../src/domain/watchdog-policy-engine.js";
+import { WatchdogScheduler } from "../src/domain/watchdog-scheduler.js";
 import { watchdogRoutes } from "../src/routes/watchdog.js";
 
 describe("context-usage-threshold watchdog", () => {
@@ -147,6 +148,43 @@ describe("context-usage-threshold watchdog", () => {
     await engine().evaluate(prepare);
     await engine().evaluate(repo.getByIdOrThrow(cutover.jobId));
     expect(deliveries.map((delivery) => delivery.targetSession)).toEqual(["target@rig", "target@rig"]);
+  });
+
+  it("advances only one requires rung per scheduler evaluation pass", async () => {
+    writeFileSync(transcript, "1234567890");
+    let clockMs = Date.parse("2026-08-28T09:50:00.000Z");
+    const now = () => new Date(clockMs++);
+    repo = new WatchdogJobsRepository(db, now);
+    const prepare = register();
+    const cutover = register({ requiresJobId: prepare.jobId });
+    const passEngine = new WatchdogPolicyEngine({
+      jobsRepo: repo,
+      historyLog: history,
+      eventBus: bus,
+      deliver: async (request) => {
+        deliveries.push(request);
+        return { status: "ok" as const };
+      },
+      resolveTargetGeneration: () => generation,
+      now,
+    });
+    const scheduler = new WatchdogScheduler({
+      jobsRepo: repo,
+      policyEngine: passEngine,
+      now,
+    });
+
+    await scheduler.runTickNow();
+    expect(deliveries).toHaveLength(1);
+    expect(history.listForJob(cutover.jobId)[0]).toMatchObject({
+      outcome: "skipped",
+      skipReason: "required_watchdog_receipt_not_yet_eligible",
+    });
+
+    clockMs += 60_000;
+    await scheduler.runTickNow();
+    expect(deliveries).toHaveLength(2);
+    expect(repo.getByIdOrThrow(cutover.jobId).lastFiredGeneration).toBe("gen-1");
   });
 
   it("a missing watched file is terminal and loud in status history", async () => {
