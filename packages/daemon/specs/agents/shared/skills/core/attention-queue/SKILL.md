@@ -262,3 +262,14 @@ Rollout date: 2026-04-13 host-wide adoption. 48h observation cycle active; RSI w
 - Config-wrapper-code loop doctrine: `config-wrapper-code-loop` skill
 - HOST-TOPOLOGY §4 context-sharing patterns — attention queue is a new pattern here
 - SUBSTRATE-CONVENTIONS §7 HA session logs — queue lives in same per-pod directory
+
+
+---
+
+> **Maturity-model reference note (appended 2026-08-28, slice OPR.0.5.6.9):**
+> `skill-maturity-convention.md` cited above is not shipped and is absent from development
+> machines (verified by enumeration, 2026-08-28). The maturity model's canonical home is
+> `docs/reference/knowledge-maturity.md` (installed:
+> `$OPENRIG_HOME/reference/knowledge-maturity.md`). The L1-L5 tier labels cited above were
+> not recovered; the ladder CONCEPT is normative and tier counts are not (founder ruling
+> 2026-08-28). This note annotates; the text above is preserved as written.
