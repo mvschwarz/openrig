@@ -11,11 +11,12 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import * as transitionModule from "../src/domain/queue-transition-log.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
-import { makeQueuePorts, type QueueItem } from "../src/domain/gateway/slack/queue-access.js";
+import { filterHumanAlerts, makeQueuePorts, type QueueItem } from "../src/domain/gateway/slack/queue-access.js";
 import { SlackOutboundDriver } from "../src/domain/gateway/slack/outbound-driver.js";
 import { DEFAULT_CONFIG, loadConfig, saveConfig } from "../src/domain/gateway/slack/config.js";
 import { SeenStore } from "../src/domain/gateway/slack/state-store.js";
 import { buildSlackGatewayWire } from "../src/domain/gateway/slack/slack-subsystem.js";
+import { DispatchBuffer } from "../src/domain/gateway/dispatch-buffer.js";
 import { OUTBOUND_OP } from "../src/domain/gateway/slack/outbound-driver.js";
 import { resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
 
@@ -109,10 +110,19 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
     ).get(handed.created.qitemId)).toEqual({ owner_notification_kind: "human-required", owner_notification_level: "ALERT" });
   });
 
-  it("defaults to posting NOTICE and interrupting ALERT, and refuses an unknown level", () => {
+  it("defaults to posting NOTICE and interrupting ALERT, refuses an unknown level, and has no tag classifier", () => {
     const cfg = loadConfig(home) as Record<string, unknown>;
     expect(cfg.minimumLevelThatPosts).toBe("NOTICE");
     expect(cfg.minimumLevelThatInterrupts).toBe("ALERT");
+    expect(DEFAULT_CONFIG).not.toHaveProperty("alertTag");
+    writeFileSync(join(home, "slack-connector.json"), JSON.stringify({ ...DEFAULT_CONFIG, alertTag: "founder-alert" }));
+    expect(loadConfig(home)).not.toHaveProperty("alertTag");
+    expect(filterHumanAlerts([{
+      qitemId: "qitem-legacy-tag",
+      destinationSession: "human-founder@external",
+      tags: ["founder-alert"],
+      state: "pending",
+    }], { alertTag: "founder-alert", minimumLevel: "NOTICE" } as never)).toEqual([]);
     expect(() => saveConfig({ ...DEFAULT_CONFIG, minimumLevelThatPosts: "LOUD" } as never, home)).toThrow(/minimumLevelThatPosts.*RECORD.*NOTICE.*ALERT/i);
   });
 
@@ -142,7 +152,7 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
     expect(parked).toMatchObject({ owner_notification_kind: "human-required", owner_notification_level: "ALERT" });
 
     const ports = makeQueuePorts(repo, { loadHumanRegistry: () => registry } as never);
-    const first = await ports.listHumanAlerts({ alertTag: "founder-alert", minimumLevel: "NOTICE" } as never);
+    const first = await ports.listHumanAlerts({ minimumLevel: "NOTICE" });
     expect(first).toHaveLength(1);
     expect(first[0]).toMatchObject({
       qitemId: row.qitemId,
@@ -155,13 +165,13 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
     const seen = new SeenStore(join(home, "seen.jsonl"));
     seen.mark(first[0]!.notificationKey!, "posted");
     repo.update({ qitemId: row.qitemId, actorSession: "watchdog@system", transitionNote: "unchanged 15m park wake" });
-    const unchanged = await ports.listHumanAlerts({ alertTag: "founder-alert", minimumLevel: "NOTICE" } as never);
+    const unchanged = await ports.listHumanAlerts({ minimumLevel: "NOTICE" });
     expect(unchanged[0]!.notificationKey).toBe(first[0]!.notificationKey);
     const quiet = new SlackOutboundDriver({
       home,
       queue: { async listHumanAlerts() { return unchanged; } },
       seen,
-      filter: { alertTag: "founder-alert", minimumLevel: "NOTICE" } as never,
+      filter: { minimumLevel: "NOTICE" },
       dispatch: () => ({ ok: true, decision: {} as never }),
     });
     expect((await quiet.sweepOnce()).fresh).toBe(0);
@@ -174,13 +184,13 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
       blockedOn: "human-founder@kernel",
       transitionNote: "a distinct later founder decision",
     });
-    const reparks = await ports.listHumanAlerts({ alertTag: "founder-alert", minimumLevel: "NOTICE" } as never);
+    const reparks = await ports.listHumanAlerts({ minimumLevel: "NOTICE" });
     expect(reparks[0]!.notificationKey).not.toBe(first[0]!.notificationKey);
     const next = new SlackOutboundDriver({
       home,
       queue: { async listHumanAlerts() { return reparks; } },
       seen,
-      filter: { alertTag: "founder-alert", minimumLevel: "NOTICE" } as never,
+      filter: { minimumLevel: "NOTICE" },
       dispatch: () => ({ ok: true, decision: {} as never }),
     });
     expect((await next.sweepOnce()).fresh).toBe(1);
@@ -222,7 +232,7 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
     expect(resolved).toEqual({ owner_notification_kind: "human-decision-resolved", owner_notification_level: "NOTICE" });
 
     const ports = makeQueuePorts(repo, { loadHumanRegistry: () => registry } as never);
-    const notices = await ports.listHumanAlerts({ alertTag: "founder-alert", minimumLevel: "NOTICE" } as never);
+    const notices = await ports.listHumanAlerts({ minimumLevel: "NOTICE" });
     expect(notices).toEqual([
       expect.objectContaining({
         qitemId: row.qitemId,
@@ -250,7 +260,7 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
       transitionNote: "parked",
     });
     const ports = makeQueuePorts(repo, { loadHumanRegistry: () => registry } as never);
-    const [alert] = await ports.listHumanAlerts({ alertTag: "unused", minimumLevel: "NOTICE" } as never);
+    const [alert] = await ports.listHumanAlerts({ minimumLevel: "NOTICE" });
     expect(alert).toBeDefined();
 
     const secrets = join(home, "slack.env");
@@ -275,7 +285,7 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
       expect(wire.dispatcher.dispatch(OUTBOUND_OP, alert!.destinationSession!, alert)).toMatchObject({ ok: true });
       await new Promise((resolve) => setTimeout(resolve, 30));
       expect(JSON.stringify(posts[0])).toContain("<@UFOUNDER>");
-      expect(await ports.listHumanAlerts({ alertTag: "unused", minimumLevel: "NOTICE" } as never)).toEqual([]);
+      expect(await ports.listHumanAlerts({ minimumLevel: "NOTICE" })).toEqual([]);
 
       const contract = new MissionControlWriteContract({
         db,
@@ -290,12 +300,12 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
         decision: "Choose A",
         notify: false,
       });
-      const [notice] = await ports.listHumanAlerts({ alertTag: "unused", minimumLevel: "NOTICE" } as never);
+      const [notice] = await ports.listHumanAlerts({ minimumLevel: "NOTICE" });
       expect(notice?.ownerNotificationLevel).toBe("NOTICE");
       expect(wire.dispatcher.dispatch(OUTBOUND_OP, notice!.destinationSession!, notice)).toMatchObject({ ok: true });
       await new Promise((resolve) => setTimeout(resolve, 30));
       expect(JSON.stringify(posts[1])).not.toContain("<@UFOUNDER>");
-      expect(await ports.listHumanAlerts({ alertTag: "unused", minimumLevel: "NOTICE" } as never)).toEqual([]);
+      expect(await ports.listHumanAlerts({ minimumLevel: "NOTICE" })).toEqual([]);
 
       const receipts = repo.listTransitions(row.qitemId).filter((transition) =>
         transition.transitionNote?.startsWith("slack-owner-notification-posted "),
@@ -305,6 +315,83 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
       expect(receipts[1]!.transitionNote).toContain(`notification_key=${notice!.notificationKey}`);
     } finally {
       wire.stop();
+    }
+  });
+
+  it("retains and replays an ok response without a message timestamp before writing the row receipt", async () => {
+    const row = await repo.create({
+      sourceSession: "dev-qa@v-openrig-build",
+      destinationSession: "orch-lead@v-openrig-build",
+      body: "await decision",
+      nudge: false,
+    });
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "orch-lead@v-openrig-build",
+      state: "blocked",
+      blockedOn: "human-founder@kernel",
+      summary: "Choose A or B",
+      evidenceRef: "/proof/decision.md",
+      transitionNote: "parked",
+    });
+    const ports = makeQueuePorts(repo, { loadHumanRegistry: () => registry } as never);
+    const [alert] = await ports.listHumanAlerts({ minimumLevel: "NOTICE" });
+    expect(alert).toBeDefined();
+
+    const secrets = join(home, "slack.env");
+    writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n", { mode: 0o600 });
+    saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-OWNER", secretsEnvFile: secrets }, home);
+    let postCalls = 0;
+    const fetchImpl = async (url: string | URL) => {
+      if (String(url).includes("conversations.history")) {
+        return new Response(JSON.stringify({ ok: true, messages: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      postCalls++;
+      return new Response(JSON.stringify(postCalls === 1 ? { ok: true } : { ok: true, ts: "1724.9002" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+
+    const firstWire = buildSlackGatewayWire({
+      home,
+      queueRepo: repo,
+      registry: { loadHumanRegistry: () => registry, resolveSlackHandle },
+      outboundIntervalMs: 60_000,
+      fetchImpl,
+    });
+    try {
+      expect(firstWire.dispatcher.dispatch(OUTBOUND_OP, alert!.destinationSession!, alert)).toMatchObject({ ok: true });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(postCalls).toBe(1);
+      expect(new DispatchBuffer(home).pending()).toHaveLength(1);
+      expect(repo.listTransitions(row.qitemId).filter((transition) =>
+        transition.transitionNote?.startsWith("slack-owner-notification-posted "),
+      )).toEqual([]);
+    } finally {
+      firstWire.stop();
+    }
+
+    const replayWire = buildSlackGatewayWire({
+      home,
+      queueRepo: repo,
+      registry: { loadHumanRegistry: () => registry, resolveSlackHandle },
+      outboundIntervalMs: 60_000,
+      fetchImpl,
+    });
+    try {
+      replayWire.startServices?.();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(postCalls).toBe(2);
+      expect(new DispatchBuffer(home).pending()).toEqual([]);
+      expect(repo.listTransitions(row.qitemId).filter((transition) =>
+        transition.transitionNote?.startsWith("slack-owner-notification-posted "),
+      )).toHaveLength(1);
+    } finally {
+      replayWire.stop();
     }
   });
 });

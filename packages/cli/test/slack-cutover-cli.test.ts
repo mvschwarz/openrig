@@ -13,9 +13,9 @@ function makeDeps(overrides: Partial<SlackDeps> = {}): { deps: SlackDeps; logs: 
   const logs: string[] = [];
   const posts: { path: string }[] = [];
   const cfg = {
-    enabled: false, inboundDestination: "operator-agent@kernel", alertTag: "founder-alert",
+    enabled: false, inboundDestination: "operator-agent@kernel",
     outboundDestinations: [], sourceLabel: "vm", channel: "C1", requiredScopes: ["chat:write"],
-    secretsEnvFile: null, queueUrl: null,
+    secretsEnvFile: null, queueUrl: null, minimumLevelThatPosts: "NOTICE", minimumLevelThatInterrupts: "ALERT",
   };
   const deps: SlackDeps = {
     log: (m) => logs.push(m),
@@ -89,6 +89,12 @@ describe("S10 CLI cutover — admin verbs route to the daemon", () => {
 });
 
 describe("S10 CLI cutover — config surfaces survive on the daemon-homed modules", () => {
+  it("retires the legacy alert-tag setup knob", () => {
+    const { deps } = makeDeps();
+    const setup = slackCommand(deps).commands.find((command) => command.name() === "setup");
+    expect(setup?.options.map((option) => option.long)).not.toContain("--alert-tag");
+  });
+
   it("`rig slack status` renders readiness from the surface (and names the in-daemon path)", async () => {
     const { deps, logs } = makeDeps();
     await run(slackCommand(deps), ["status"]);
