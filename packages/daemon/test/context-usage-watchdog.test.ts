@@ -179,6 +179,67 @@ describe("context-usage-threshold watchdog", () => {
     expect(deliveries).toHaveLength(2);
   });
 
+  it("waits visibly for a successor transcript sample before rebinding and firing", async () => {
+    writeFileSync(transcript, "1234567890");
+    const successorTranscript = join(tmp, "successor.jsonl");
+    writeFileSync(successorTranscript, "1234567890");
+    const job = register();
+    await engine().evaluate(job);
+
+    db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('session-2', 'node-1', 'target@rig')").run();
+    db.prepare(
+      `INSERT INTO occupant_tenures
+        (id, node_id, generation_ordinal, generation_uuid, kind, boot_at)
+       VALUES ('tenure-2', 'node-1', 2, 'gen-2', 'handover', '2026-08-28T10:00:00.000Z')`,
+    ).run();
+    generation = "gen-2";
+
+    // A restart before the successor's first sample must wait, not measure
+    // the predecessor transcript or permanently terminalize the active job.
+    repo = new WatchdogJobsRepository(db, undefined, () => generation);
+    const pending = await engine().evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(pending.outcome).toMatchObject({
+      action: "skip",
+      reason: "current_generation_transcript_pending",
+    });
+    expect(deliveries).toHaveLength(1);
+    expect(repo.getByIdOrThrow(job.jobId)).toMatchObject({
+      state: "active",
+      watchedFilePath: transcript,
+      watchedFileGeneration: "gen-1",
+      lastFiredGeneration: "gen-1",
+    });
+    expect(history.listForJob(job.jobId)[0]).toMatchObject({
+      outcome: "skipped",
+      skipReason: "current_generation_transcript_pending",
+      evaluationNotes: expect.objectContaining({
+        targetSession: "target@rig",
+        occupantGeneration: "gen-2",
+      }),
+    });
+
+    db.prepare(
+      `INSERT INTO context_usage
+        (node_id, session_id, session_name, availability, transcript_path, sampled_at)
+       VALUES ('node-1', 'successor-native-session', 'target@rig', 'known', ?, '2026-08-28T10:00:01.000Z')`,
+    ).run(successorTranscript);
+
+    repo = new WatchdogJobsRepository(db, undefined, () => generation);
+    const fired = await engine().evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(fired.outcome.action).toBe("send");
+    expect(deliveries).toHaveLength(2);
+    expect(repo.getByIdOrThrow(job.jobId)).toMatchObject({
+      watchedFilePath: successorTranscript,
+      watchedFileGeneration: "gen-2",
+      lastFiredGeneration: "gen-2",
+    });
+
+    repo = new WatchdogJobsRepository(db, undefined, () => generation);
+    const repeat = await engine().evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(repeat.outcome).toMatchObject({ action: "skip", reason: "threshold_already_fired" });
+    expect(deliveries).toHaveLength(2);
+  });
+
   it("requires an earlier job receipt for the same occupant generation", async () => {
     writeFileSync(transcript, "1234567890");
     const prepare = register();
