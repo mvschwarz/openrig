@@ -107,23 +107,32 @@ function normalizeExpansionPodFragment(raw: Record<string, unknown>): ExpansionP
             if (paths.length > 0) {
               sessionSource = { mode: "rebuild", ref: { kind: "artifact_set", value: paths } };
             }
-          } else if (mode === "agent_image" && kind === "image_name"
-            && typeof refRec["value"] === "string" && refRec["value"].trim() !== "") {
+          } else if (mode === "agent_image") {
             // OPR.0.5.6.3 repair: agent_image rides the ingress like fork/rebuild —
             // dropping it here silently erased the source (and its version pin)
-            // before the service mapper could preserve it. v0 shape only:
-            // image_name kind, non-empty string value. Version is SCHEMA-PARITY:
-            // string or number, coerced with String() exactly like
-            // rigspec-schema.ts normalize (YAML `version: 3` arrives as a JSON
-            // number; omitting it would recreate the silent-default defect).
+            // before the service mapper could preserve it. Valid v0 shape
+            // (image_name kind, non-empty string value, string|number version)
+            // constructs typed with SCHEMA-PARITY String() coercion, exactly
+            // like rigspec-schema.ts normalize (YAML `version: 3` arrives as a
+            // JSON number; omitting it would recreate the silent-default defect).
             const versionRaw = refRec["version"];
-            const version = typeof versionRaw === "string" || typeof versionRaw === "number"
-              ? String(versionRaw)
-              : undefined;
-            sessionSource = {
-              mode: "agent_image",
-              ref: { kind: "image_name", value: refRec["value"] as string, ...(version !== undefined ? { version } : {}) },
-            };
+            const validValue = kind === "image_name"
+              && typeof refRec["value"] === "string" && refRec["value"].trim() !== "";
+            const validVersion = versionRaw === undefined
+              || typeof versionRaw === "string" || typeof versionRaw === "number";
+            if (validValue && validVersion) {
+              const version = versionRaw === undefined ? undefined : String(versionRaw);
+              sessionSource = {
+                mode: "agent_image",
+                ref: { kind: "image_name", value: refRec["value"] as string, ...(version !== undefined ? { version } : {}) },
+              };
+            } else {
+              // Present-INVALID shape: PRESERVE RAW PRESENCE (the permission_policy
+              // R2 precedent above) so the ONE canonical RigSpec validator rejects
+              // with a structured error — erasing into absence silently widens an
+              // invalid request into an unpinned/no-source expansion.
+              sessionSource = rawSessionSource as import("../domain/types.js").SessionSourceSpec;
+            }
           }
         }
       }

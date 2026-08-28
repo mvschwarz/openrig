@@ -158,21 +158,14 @@ export class RigExpansionService {
             ...(member.role ? { role: member.role } : {}),
             ...(member.restorePolicy ? { restore_policy: member.restorePolicy } : {}),
             ...(member.label ? { label: member.label } : {}),
-            ...(member.sessionSource ? {
-              session_source: {
-                mode: member.sessionSource.mode,
-                ref: {
-                  kind: member.sessionSource.ref.kind,
-                  ...(member.sessionSource.ref.value !== undefined ? { value: member.sessionSource.ref.value } : {}),
-                  // OPR.0.5.6.3: the agent_image version selector rides the
-                  // map like role (FAC1) — dropping it silently expands a
-                  // version-pinned member at the default image version.
-                  ...("version" in member.sessionSource.ref && member.sessionSource.ref.version !== undefined
-                    ? { version: member.sessionSource.ref.version }
-                    : {}),
-                },
-              },
-            } : {}),
+            // OPR.0.5.6.3 repair amendment: session_source is carried FAITHFULLY —
+            // the route already normalizes valid shapes to the typed spec (whose
+            // field names are identical in snake_case form), and a present-INVALID
+            // agent_image shape rides through RAW so the ONE canonical RigSpec
+            // validator rejects it structurally. A field-by-field re-map here was
+            // the original drop site (ref.version, wave-1 R2) and would crash on
+            // preserved-raw input; a faithful carry has no field list to forget.
+            ...(member.sessionSource ? { session_source: member.sessionSource } : {}),
             ...(member.starterRef ? {
               starter_ref: { name: member.starterRef.name },
             } : {}),
