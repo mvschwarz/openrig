@@ -87,6 +87,7 @@ exit "\${RIG_STATUS:-0}"
   const result = spawnSync(process.execPath, [HOOK, "--runtime", options.runtime || "claude"], {
     input: JSON.stringify({
       hook_event_name: options.event || "UserPromptSubmit",
+      session_id: "refocus-context-ref-fixture",
       transcript_path: transcript || "",
     }),
     encoding: "utf8",
