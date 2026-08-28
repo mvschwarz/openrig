@@ -340,10 +340,10 @@ export function normalizeAgentSpec(raw: Record<string, unknown>): AgentSpec {
     result.defaults = {
       runtime: defaults["runtime"] as string | undefined,
       model: defaults["model"] as string | undefined,
+      // OPR.0.5.6.20: lifecycle always materializes so the F-6 defaults
+      // (default-compaction et al.) are visible, not implied by absence.
+      lifecycle: normalizeLifecycle((defaults["lifecycle"] as Record<string, unknown>) ?? {}),
     };
-    if (defaults["lifecycle"]) {
-      result.defaults.lifecycle = normalizeLifecycle(defaults["lifecycle"] as Record<string, unknown>);
-    }
   }
 
   return result;
