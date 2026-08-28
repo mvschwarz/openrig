@@ -96,6 +96,24 @@ describe("S19 A7 — the derived diagnosis, both park causes", () => {
     expect(d.reason).toMatch(/healthy|live wake/i);
   });
 
+  it("S16 preserves the optional absolute expiry on a named provider-limit wake", () => {
+    const expiresAt = "2026-08-28T13:00:00.000Z";
+    const d = diagnoseSeatParked(deps(oracleState({}), [heldRow], PARKED_OBLIGATION_LIMIT, {
+      "qitem-2": {
+        kind: "blocker",
+        ref: "qitem-provider-limit",
+        live: true,
+        phase: "armed",
+        deliveryStatus: null,
+        unconsumed: false,
+        expiresAt,
+      },
+    }), SEAT);
+
+    expect(d.parked).toBe(false);
+    expect(d.obligations.held[0]?.wake).toMatchObject({ expiresAt });
+  });
+
   it("R25: a fired wake left blocked is visible as unconsumed", () => {
     const d = diagnoseSeatParked(deps(oracleState({}), [heldRow], PARKED_OBLIGATION_LIMIT, {
       "qitem-2": { kind: "timer", ref: "job-timer", live: true, unconsumed: true, deliveryStatus: "ok" },

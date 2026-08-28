@@ -34,6 +34,7 @@ export interface ParkWakeDiagnosis {
   phase?: "armed" | "fired";
   deliveryStatus?: string | null;
   unconsumed: boolean;
+  expiresAt?: string;
 }
 
 export interface HeldObligation extends ObligationRow {
@@ -107,6 +108,7 @@ function parseWake(value: unknown): ParkWakeDiagnosis | null {
     phase: wake.phase === "armed" || wake.phase === "fired" ? wake.phase : undefined,
     deliveryStatus: typeof wake.deliveryStatus === "string" ? wake.deliveryStatus : null,
     unconsumed: wake.unconsumed === true,
+    ...(typeof wake.expiresAt === "string" ? { expiresAt: wake.expiresAt } : {}),
   };
 }
 

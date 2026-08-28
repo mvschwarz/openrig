@@ -3,6 +3,20 @@ import type Database from "better-sqlite3";
 export type ParkWakeKind = "watchdog" | "timer" | "blocker";
 export type ParkWakePhase = "armed" | "fired";
 
+/** S16: identifies the one shared provider/account blocker whose own timer expiry
+ *  is inherited by its dependent HELD rows. Ordinary blockers remain expiry-less. */
+export const USAGE_LIMIT_BLOCKER_TAG = "usage-limit-blocker";
+export const USAGE_LIMIT_POOL_TAG_PREFIX = "usage-limit-pool:";
+
+/** One arithmetic for the S16 timer's projected due boundary. The scheduler
+ *  enforces the same boundary after the attach leg seeds lastEvaluationAt to
+ *  registeredAt. */
+export function timerExpiresAt(registeredAt: string, intervalSeconds: number): string | undefined {
+  const registeredAtMs = Date.parse(registeredAt);
+  if (!Number.isFinite(registeredAtMs) || !Number.isFinite(intervalSeconds)) return undefined;
+  return new Date(registeredAtMs + intervalSeconds * 1000).toISOString();
+}
+
 export interface QueueWakeRecord {
   transitionId: number;
   qitemId: string;
@@ -10,6 +24,7 @@ export interface QueueWakeRecord {
   kind: ParkWakeKind;
   ref: string;
   deliveryStatus: string | null;
+  expiresAt?: string;
 }
 
 export interface ParkWakeStatus {
@@ -21,6 +36,9 @@ export interface ParkWakeStatus {
   /** A wake fired, but the row is still HELD. The resume attempt is visible
    *  and cannot be mistaken for a healthy armed continuation. */
   unconsumed: boolean;
+  /** Absolute due time derived from canonical watchdog metadata. Present only
+   *  for a timer or a dependent of the sanctioned usage-limit timer blocker. */
+  expiresAt?: string;
 }
 
 interface WakeRow {
@@ -83,13 +101,16 @@ export class QueueWakeRepository {
     const state = (this.db.prepare(
       "SELECT state FROM queue_items WHERE qitem_id = ?",
     ).get(qitemId) as { state: string } | undefined)?.state;
+    const kind = armed.wake_kind as ParkWakeKind;
+    const expiresAt = this.wakeExpiry(qitemId, kind, armed.wake_ref);
     return {
-      kind: armed.wake_kind as ParkWakeKind,
+      kind,
       ref: armed.wake_ref,
       phase: fired ? "fired" : "armed",
-      live: fired ? false : this.isLive(armed.wake_kind as ParkWakeKind, armed.wake_ref),
+      live: fired ? false : this.isLive(kind, armed.wake_ref),
       deliveryStatus: fired?.delivery_status ?? null,
       unconsumed: fired !== undefined && state === "blocked",
+      ...(expiresAt ? { expiresAt } : {}),
     };
   }
 
@@ -125,14 +146,52 @@ export class QueueWakeRepository {
     return row?.state === "active";
   }
 
+  private isUsageLimitBlocker(qitemId: string): boolean {
+    const row = this.db.prepare("SELECT tags FROM queue_items WHERE qitem_id = ?").get(qitemId) as
+      | { tags: string | null }
+      | undefined;
+    if (!row?.tags) return false;
+    try {
+      return (JSON.parse(row.tags) as unknown[]).includes(USAGE_LIMIT_BLOCKER_TAG);
+    } catch {
+      return false;
+    }
+  }
+
+  private wakeExpiry(qitemId: string, kind: ParkWakeKind, ref: string): string | undefined {
+    if (kind === "timer" && this.isUsageLimitBlocker(qitemId)) return this.timerExpiry(ref);
+    if (kind === "blocker" && this.isUsageLimitBlocker(ref)) return this.usageLimitBlockerExpiry(ref);
+    return undefined;
+  }
+
+  private usageLimitBlockerExpiry(qitemId: string): string | undefined {
+    const row = this.db.prepare(
+      `SELECT wake_ref FROM queue_transition_wakes
+        WHERE qitem_id = ? AND phase = 'armed' AND wake_kind = 'timer'
+        ORDER BY transition_id DESC LIMIT 1`,
+    ).get(qitemId) as { wake_ref: string } | undefined;
+    return row ? this.timerExpiry(row.wake_ref) : undefined;
+  }
+
+  private timerExpiry(jobId: string): string | undefined {
+    const row = this.db.prepare(
+      "SELECT registered_at, interval_seconds FROM watchdog_jobs WHERE job_id = ?",
+    ).get(jobId) as { registered_at: string; interval_seconds: number } | undefined;
+    if (!row) return undefined;
+    return timerExpiresAt(row.registered_at, row.interval_seconds);
+  }
+
   private row(row: WakeRow): QueueWakeRecord {
+    const kind = row.wake_kind as ParkWakeKind;
+    const expiresAt = this.wakeExpiry(row.qitem_id, kind, row.wake_ref);
     return {
       transitionId: row.transition_id,
       qitemId: row.qitem_id,
       phase: row.phase as ParkWakePhase,
-      kind: row.wake_kind as ParkWakeKind,
+      kind,
       ref: row.wake_ref,
       deliveryStatus: row.delivery_status,
+      ...(expiresAt ? { expiresAt } : {}),
     };
   }
 }

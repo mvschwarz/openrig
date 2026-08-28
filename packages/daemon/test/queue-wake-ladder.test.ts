@@ -18,6 +18,9 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { QueueRepository, type QueueItem } from "../src/domain/queue-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
+import { USAGE_LIMIT_BLOCKER_TAG } from "../src/domain/queue-wake-repository.js";
 import { ViewProjector } from "../src/domain/view-projector.js";
 import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import {
@@ -508,6 +511,148 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     expect(rungs[1]).toMatch(/operator/);
   });
 
+  // ── S16 — PROVIDER LIMITS PARK ON ONE SHARED TIMER ─────────────────────────
+
+  it("USAGE LIMIT SUPPRESSES WRONG RUNGS: three Claude seats share one blocker timer and zero retry/escalation attempts", async () => {
+    const now = new Date();
+    const reset = new Date(now.getTime() + 15 * 60_000).toISOString();
+    const staleAfter = new Date(now.getTime() + 30 * 60_000).toISOString();
+    const jobs = new WatchdogJobsRepository(db, () => now);
+    repo.attachWatchdogJobsRepository(jobs);
+    const batons = await Promise.all([
+      mkBaton("dev-a@r"),
+      mkBaton("dev-b@r"),
+      mkBaton("dev-c@r"),
+    ]);
+    for (const baton of batons) setNudgeResult(baton.qitemId, "failed:provider usage limit", 10);
+
+    const result = await tick({
+      now,
+      usageLimitJitterSeconds: 0,
+      getProviderReadModel: async () => ({
+        bindings: [],
+        signals: ["dev-a@r", "dev-b@r", "dev-c@r"].map((seatSession, index) => ({
+          provider: "claude" as const,
+          seatSession,
+          sourceClass: "provider_statusline" as const,
+          authority: "account_cross_device" as const,
+          window: "five_hour",
+          usedPercent: index === 0 ? 100 : 75,
+          resetsAt: reset,
+          asOf: now.toISOString(),
+          staleAfter,
+          supportsNotification: false,
+          automationUse: "allow_switch_decision" as const,
+        })),
+      }),
+    });
+
+    expect(calls).toEqual([]);
+    expect(result.actions).toHaveLength(3);
+    expect(result.actions.every((action) => action.action === "park-usage-limit")).toBe(true);
+    const blockers = repo.list({ limit: 500 }).filter((row) => row.tags?.includes(USAGE_LIMIT_BLOCKER_TAG));
+    expect(blockers).toHaveLength(1);
+    expect(batons.map((row) => repo.getById(row.qitemId)?.state)).toEqual(["blocked", "blocked", "blocked"]);
+    expect(new Set(batons.map((row) => repo.getById(row.qitemId)?.blockedOn))).toEqual(new Set([blockers[0]!.qitemId]));
+    expect((db.prepare("SELECT COUNT(*) AS n FROM watchdog_jobs WHERE state = 'active'").get() as { n: number }).n).toBe(1);
+    for (const baton of batons) {
+      expect(repo.getParkWakeStatus(baton.qitemId)).toMatchObject({
+        kind: "blocker",
+        ref: blockers[0]!.qitemId,
+        live: true,
+        expiresAt: reset,
+      });
+    }
+
+    await tick({
+      now,
+      usageLimitJitterSeconds: 0,
+      getProviderReadModel: async () => ({ bindings: [], signals: [] }),
+    });
+    expect(repo.list({ limit: 500 }).filter((row) => row.tags?.includes(USAGE_LIMIT_BLOCKER_TAG))).toHaveLength(1);
+    expect(calls).toEqual([]);
+  });
+
+  it("A FAILED EXPIRY WAKE RESUMES the shipped ladder after the provider reset", async () => {
+    const now = new Date();
+    const resetDate = new Date(now.getTime() + 60_000);
+    const reset = resetDate.toISOString();
+    const staleAfter = new Date(now.getTime() + 5 * 60_000).toISOString();
+    const jobs = new WatchdogJobsRepository(db, () => now);
+    repo.attachWatchdogJobsRepository(jobs);
+    repo.attachOutbox(new OutboxHandler(db));
+    repo.attachTransport({
+      async send() {
+        return { ok: false, error: "still usage-limited" };
+      },
+    });
+    const baton = await mkBaton("dev-a@r");
+    setNudgeResult(baton.qitemId, "failed:provider usage limit", 10);
+    const model = {
+      bindings: [],
+      signals: [{
+        provider: "claude" as const,
+        seatSession: "dev-a@r",
+        sourceClass: "provider_statusline" as const,
+        authority: "account_cross_device" as const,
+        window: "five_hour",
+        usedPercent: 100,
+        resetsAt: reset,
+        asOf: now.toISOString(),
+        staleAfter,
+        supportsNotification: false,
+        automationUse: "allow_switch_decision" as const,
+      }],
+    };
+
+    await tick({
+      now,
+      usageLimitJitterSeconds: 0,
+      getProviderReadModel: async () => model,
+    });
+    const blockerId = repo.getById(baton.qitemId)?.blockedOn;
+    const timerId = blockerId ? repo.getParkWakeStatus(blockerId)?.ref : undefined;
+    expect(timerId).toBeTruthy();
+
+    repo.recordWatchdogWakeAttempt(timerId!, "failed:synthetic timer target");
+    await repo.drainPendingWakeIntents();
+    expect(repo.getById(baton.qitemId)).toMatchObject({
+      state: "pending",
+      lastNudgeResult: "failed:still usage-limited",
+    });
+
+    const afterReset = new Date(resetDate.getTime() + 6 * 60_000);
+    await tick({
+      now: afterReset,
+      usageLimitJitterSeconds: 0,
+      getProviderReadModel: async () => model,
+    });
+    expect(calls).toEqual([{ qitemId: baton.qitemId, target: "dev-a@r" }]);
+    expect(markersOf(baton.qitemId, LADDER_ATTEMPT_PREFIX)).toHaveLength(1);
+  });
+
+  it("UNKNOWN STAYS UNKNOWN: unparseable provider evidence takes the shipped retry path unchanged", async () => {
+    const baton = await mkBaton("dev-unknown@r");
+    setNudgeResult(baton.qitemId, "failed:tmux session not found", 10);
+    await tick({
+      getProviderReadModel: async () => ({
+        bindings: [],
+        signals: [{
+          provider: "claude" as const,
+          seatSession: "dev-unknown@r",
+          sourceClass: "unknown" as const,
+          authority: "unknown" as const,
+          asOf: new Date().toISOString(),
+          unknownReason: "no reset fidelity",
+          automationUse: "do_not_automate" as const,
+        }],
+      }),
+    });
+
+    expect(calls).toEqual([{ qitemId: baton.qitemId, target: "dev-unknown@r" }]);
+    expect(repo.getById(baton.qitemId)?.state).toBe("pending");
+  });
+
   // ── Production identity resolution (fix round: review-r2 NOT-CLEAR) ─────────
 
   it("DEFAULT ORCHESTRATOR RESOLUTION: production identity shapes resolve through the session binding — dotted logical ids, dash-form canonical sessions, no string derivation", async () => {
@@ -575,6 +720,8 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     expect(mod.DEFAULT_WAKE_RETRY_CAP).toBe(3);
     expect(mod.DEFAULT_WAKE_UNCONFIRMED_WINDOW_MINUTES).toBe(30);
     expect(mod.DEFAULT_WAKE_SWAP_GRACE_SECONDS).toBe(180);
+    expect(mod.drawUsageLimitJitterSeconds(() => 0)).toBe(30);
+    expect(mod.drawUsageLimitJitterSeconds(() => 0.999_999)).toBe(90);
     const missingConfig = `/tmp/openrig-s01-missing-${process.pid}-${Date.now()}.json`;
     const store = new SettingsStore(missingConfig);
     expect(store.resolveOne("queue.wake_retry_interval_seconds" as never)).toMatchObject({ value: 300, source: "default" });

@@ -37,6 +37,12 @@
 
 import type Database from "better-sqlite3";
 import type { QueueItem, QueueRepository } from "./queue-repository.js";
+import { deriveUsageLimitPools, type UsageLimitPool } from "./provider/provider-signals.js";
+import type { FourBlockReadModel } from "./provider/provider-types.js";
+import {
+  USAGE_LIMIT_BLOCKER_TAG,
+  USAGE_LIMIT_POOL_TAG_PREFIX,
+} from "./queue-wake-repository.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import {
   LADDER_ATTEMPT_PREFIX,
@@ -54,6 +60,17 @@ export const WAKE_UNCONFIRMED_WINDOW_KEY = "queue.wake_unconfirmed_window_minute
 export const DEFAULT_WAKE_UNCONFIRMED_WINDOW_MINUTES = 30;
 export const WAKE_SWAP_GRACE_KEY = "queue.wake_swap_grace_seconds";
 export const DEFAULT_WAKE_SWAP_GRACE_SECONDS = 180;
+
+// S16: this margin absorbs provider reset granularity and host/provider clock
+// skew. Fleet dedup already prevents a thundering herd; narrowing it toward zero
+// would recreate a wake delivered while the seat is still usage-limited.
+export const USAGE_LIMIT_JITTER_FLOOR_SECONDS = 30;
+export const USAGE_LIMIT_JITTER_CEILING_SECONDS = 90;
+export function drawUsageLimitJitterSeconds(random: () => number = Math.random): number {
+  return USAGE_LIMIT_JITTER_FLOOR_SECONDS + Math.floor(
+    random() * (USAGE_LIMIT_JITTER_CEILING_SECONDS - USAGE_LIMIT_JITTER_FLOOR_SECONDS + 1),
+  );
+}
 
 /** The operator-declared suspension override (F2: override, never the mechanism).
  *  Format: comma-separated `<session>:<untilIso>` pairs; fresh-read every tick. */
@@ -155,13 +172,17 @@ export interface WakeLadderDeps {
   retryCap?: number;
   unconfirmedWindowMinutes?: number;
   swapGraceSeconds?: number;
+  /** Shipped provider telemetry, injected by the daemon. Absent/read failure keeps
+   *  every pre-S16 ladder path byte-identical. */
+  getProviderReadModel?: () => Promise<Pick<FourBlockReadModel, "signals" | "bindings">>;
+  usageLimitJitterSeconds?: number;
   now?: Date;
   log?: (line: string) => void;
 }
 
 export interface WakeLadderAction {
   qitemId: string;
-  action: "retry" | "escalate-orchestrator" | "escalate-operator" | "suspend" | "resume" | "exhaust";
+  action: "retry" | "escalate-orchestrator" | "escalate-operator" | "suspend" | "resume" | "exhaust" | "park-usage-limit";
   target?: string;
 }
 
@@ -323,6 +344,59 @@ function minutesSince(ts: number | string | null | undefined, now: Date): number
   return Math.max(0, Math.round((now.getTime() - t) / 60_000));
 }
 
+function usageLimitPoolTag(poolKey: string): string {
+  return `${USAGE_LIMIT_POOL_TAG_PREFIX}${poolKey}`;
+}
+
+function rigOf(session: string): string {
+  return session.slice(session.lastIndexOf("@") + 1);
+}
+
+async function ensureUsageLimitBlocker(
+  deps: Pick<WakeLadderDeps, "db" | "queueRepo">,
+  pool: UsageLimitPool,
+  now: Date,
+  jitterSeconds: number,
+): Promise<QueueItem> {
+  const poolTag = usageLimitPoolTag(pool.poolKey);
+  const existing = deps.db.prepare(
+    `SELECT qitem_id FROM queue_items
+      WHERE state IN ('pending', 'in-progress', 'blocked')
+        AND EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = ?)
+        AND EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = ?)
+      LIMIT 1`,
+  ).get(USAGE_LIMIT_BLOCKER_TAG, poolTag) as { qitem_id: string } | undefined;
+
+  let blocker = existing ? deps.queueRepo.getById(existing.qitem_id) : null;
+  if (blocker) {
+    const wake = deps.queueRepo.getParkWakeStatus(blocker.qitemId);
+    if (wake?.kind === "timer" && wake.live) return blocker;
+    if (wake) throw new Error(`usage-limit blocker ${blocker.qitemId} has a non-live timer`);
+  } else {
+    const rig = rigOf(pool.seatSessions[0]!);
+    blocker = await deps.queueRepo.create({
+      sourceSession: LADDER_ACTOR,
+      destinationSession: `wake-ladder@${rig}`,
+      body: `Provider usage limit for ${pool.poolKey}; release every dependent once at ${pool.expiresAt}.`,
+      tags: [USAGE_LIMIT_BLOCKER_TAG, poolTag],
+      expiresAt: new Date(Date.parse(pool.expiresAt) + jitterSeconds * 1000).toISOString(),
+      nudge: false,
+    });
+  }
+
+  const wakeAtMs = Date.parse(pool.expiresAt) + jitterSeconds * 1000;
+  const wakeAfterSeconds = Math.max(1, Math.ceil((wakeAtMs - now.getTime()) / 1000));
+  deps.queueRepo.update({
+    qitemId: blocker.qitemId,
+    actorSession: LADDER_ACTOR,
+    state: "blocked",
+    blockedOn: `external:provider-limit:${pool.poolKey}`,
+    transitionNote: `usage-limit cause=${pool.source} pool=${pool.poolKey} reset=${pool.expiresAt} wake=${new Date(wakeAtMs).toISOString()}`,
+    wakeAfterSeconds,
+  });
+  return deps.queueRepo.getById(blocker.qitemId)!;
+}
+
 /**
  * One ladder tick. Everything is derived from the row + transition log — the tick holds
  * no memory (F6). Never throws: a tick that cannot run is loud on the status surface
@@ -348,6 +422,23 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
 
     const actions: WakeLadderAction[] = [];
     let exhaustedThisTick = 0;
+    const usagePoolBySeat = new Map<string, UsageLimitPool>();
+    if (deps.getProviderReadModel) {
+      try {
+        const model = await deps.getProviderReadModel();
+        const pools = deriveUsageLimitPools({
+          ...model,
+          now,
+          fallbackSeconds: intervalS,
+        });
+        for (const pool of pools) {
+          for (const seat of pool.seatSessions) usagePoolBySeat.set(seat, pool);
+        }
+      } catch (err) {
+        log(`[wake-ladder] provider signal read unavailable; preserving shipped ladder: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    const blockerByPool = new Map<string, QueueItem>();
 
     // Batons: handed-off rows still pending and unclaimed. Created-with-destination rows
     // are explicitly NOT here — that hole is S02's net (F5).
@@ -392,6 +483,28 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
     for (const { qitem_id } of batonRows) {
       const row = deps.queueRepo.getById(qitem_id);
       if (!row) continue;
+      const usagePool = usagePoolBySeat.get(row.destinationSession);
+      if (usagePool) {
+        let blocker = blockerByPool.get(usagePool.poolKey);
+        if (!blocker) {
+          blocker = await ensureUsageLimitBlocker(
+            deps,
+            usagePool,
+            now,
+            deps.usageLimitJitterSeconds ?? drawUsageLimitJitterSeconds(),
+          );
+          blockerByPool.set(usagePool.poolKey, blocker);
+        }
+        deps.queueRepo.update({
+          qitemId: row.qitemId,
+          actorSession: LADDER_ACTOR,
+          state: "blocked",
+          blockedOn: blocker.qitemId,
+          transitionNote: `usage-limit suppressed: pool=${usagePool.poolKey} reset=${usagePool.expiresAt}; waiting on shared blocker ${blocker.qitemId}`,
+        });
+        actions.push({ qitemId: row.qitemId, action: "park-usage-limit" });
+        continue;
+      }
       const mode = classifyWakeResult(row.lastNudgeResult);
       if (!mode) continue;
       const view = readLadder(deps.db, row.qitemId);

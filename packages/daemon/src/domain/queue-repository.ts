@@ -16,7 +16,11 @@ import {
   type ClosureReason,
 } from "./hot-potato-enforcer.js";
 import { isHumanSeatSession, validateHumanPark, validateHumanRoute } from "./human-route-enforcer.js";
-import { QueueWakeRepository, type ParkWakeStatus } from "./queue-wake-repository.js";
+import {
+  QueueWakeRepository,
+  USAGE_LIMIT_BLOCKER_TAG,
+  type ParkWakeStatus,
+} from "./queue-wake-repository.js";
 import { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 
 export const QUEUE_STATES = [
@@ -2217,6 +2221,12 @@ export class QueueRepository {
         intervalSeconds: input.wakeAfterSeconds,
         registeredBySession: input.actorSession,
       });
+      // S16 only: ordinary periodic reminders intentionally evaluate immediately.
+      // A provider-limit timer instead starts its interval at registration so the
+      // existing scheduler's due boundary is registeredAt + intervalSeconds.
+      if (qitem.tags?.includes(USAGE_LIMIT_BLOCKER_TAG)) {
+        jobsRepo.recordEvaluation(job.jobId, job.registeredAt, false);
+      }
       parkWake = { kind: "timer", ref: job.jobId };
     } else if (input.state === "blocked" && effectiveBlockedOn?.startsWith("qitem-")) {
       parkWake = { kind: "blocker", ref: effectiveBlockedOn };
@@ -2357,7 +2367,7 @@ export class QueueRepository {
   recordWatchdogWakeAttempt(jobId: string, deliveryStatus: string): void {
     const targets = this.wakeRepo.findBlockedQitemsByWatchdog(jobId);
     if (targets.length === 0) return;
-    const events = this.db.transaction(() => targets.map(({ qitemId, kind }) => {
+    const recordFired = ({ qitemId, kind }: (typeof targets)[number]): PersistedEvent => {
       const transition = this.transitionLog.append({
         qitemId,
         state: "blocked",
@@ -2382,7 +2392,29 @@ export class QueueRepository {
         actorSession: "watchdog@system",
         summary: this.getById(qitemId)?.summary ?? null,
       });
-    }))();
+    };
+    const usageLimitBlockers = targets.filter(({ qitemId }) =>
+      this.getById(qitemId)?.tags?.includes(USAGE_LIMIT_BLOCKER_TAG),
+    );
+    const events = this.db.transaction(() => {
+      const firedEvents = targets.map(recordFired);
+      if (usageLimitBlockers.length === 0) return firedEvents;
+
+      (this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db)).markTerminal(
+        jobId,
+        "usage_limit_expiry_fired",
+      );
+      const resolutionEvents = usageLimitBlockers.flatMap(({ qitemId }) =>
+        this.updateInTransactionalContext({
+          qitemId,
+          actorSession: "watchdog@system",
+          state: "done",
+          closureReason: "no-follow-on",
+          transitionNote: `provider-limit timer ${jobId} reached its expiry; resolving the shared blocker once`,
+        }).persistedEvents,
+      );
+      return [...firedEvents, ...resolutionEvents];
+    })();
     for (const event of events) this.eventBus.notifySubscribers(event);
   }
 

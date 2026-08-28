@@ -13,6 +13,8 @@ import { queueItemEvidenceRefSchema } from "../src/db/migrations/048_queue_item_
 import { EventBus } from "../src/domain/event-bus.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository, type QueueNudgeTransport } from "../src/domain/queue-repository.js";
+import { USAGE_LIMIT_BLOCKER_TAG } from "../src/domain/queue-wake-repository.js";
+import { isDue } from "../src/domain/watchdog-scheduler.js";
 import type { PersistedEvent } from "../src/domain/types.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 
@@ -122,6 +124,9 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     expect(wake?.wake_kind).toBe("timer");
     const job = wake ? jobs.getById(wake.wake_ref) : null;
     expect(job).toMatchObject({ state: "active", targetSession: "worker@rig", intervalSeconds: 90 });
+    expect(job?.lastEvaluationAt).toBeNull();
+    expect(isDue(job!, Date.parse(job!.registeredAt))).toBe(true);
+    expect(repo.getParkWakeStatus(row.qitemId)).not.toHaveProperty("expiresAt");
   });
 
   it("rolls the generated timer back when the park transaction aborts", async () => {
@@ -316,6 +321,112 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
       wake_ref: blocker.qitemId,
       delivery_status: "verified",
     });
+  });
+
+  it("S16 resolves one provider-limit timer into exactly one durable wake per dependent", async () => {
+    const blocker = await repo.create({
+      sourceSession: "wake-ladder@system",
+      destinationSession: "wake-ladder@rig",
+      body: "provider limit for one account pool",
+      tags: [USAGE_LIMIT_BLOCKER_TAG, "usage-limit-pool:claude%3Alocal"],
+      nudge: false,
+    });
+    repo.update({
+      qitemId: blocker.qitemId,
+      actorSession: "wake-ladder@system",
+      state: "blocked",
+      blockedOn: "external:provider-limit:claude:local",
+      transitionNote: "usage-limit park until stated reset",
+      wakeAfterSeconds: 60,
+    } as never);
+    const timer = repo.getParkWakeStatus(blocker.qitemId)!;
+
+    const dependents = await Promise.all([
+      item("worker-1@rig"),
+      item("worker-2@rig"),
+      item("worker-3@rig"),
+    ]);
+    for (const dependent of dependents) {
+      repo.update({
+        qitemId: dependent.qitemId,
+        actorSession: "wake-ladder@system",
+        state: "blocked",
+        blockedOn: blocker.qitemId,
+        transitionNote: "usage-limit park on the shared provider/account timer",
+      });
+      expect(repo.getParkWakeStatus(dependent.qitemId)).toMatchObject({
+        kind: "blocker",
+        ref: blocker.qitemId,
+        live: true,
+        expiresAt: timer.expiresAt,
+      });
+    }
+
+    repo.recordWatchdogWakeAttempt(timer.ref, "failed:synthetic timer target");
+    await repo.drainPendingWakeIntents();
+
+    expect(jobs.getById(timer.ref)?.state).toBe("terminal");
+    expect(repo.getById(blocker.qitemId)?.state).toBe("done");
+    expect(dependents.map((row) => repo.getById(row.qitemId)?.state)).toEqual([
+      "pending",
+      "pending",
+      "pending",
+    ]);
+    expect(sent.map((call) => call.session).sort()).toEqual([
+      "worker-1@rig",
+      "worker-2@rig",
+      "worker-3@rig",
+    ]);
+
+    repo.recordWatchdogWakeAttempt(timer.ref, "failed:duplicate watchdog callback");
+    await repo.drainPendingWakeIntents();
+    expect(sent).toHaveLength(3);
+  });
+
+  it("S16 initializes its timer baseline so it becomes due at the projected expiry, never immediately", async () => {
+    const blocker = await repo.create({
+      sourceSession: "wake-ladder@system",
+      destinationSession: "wake-ladder@rig",
+      body: "provider limit for one account pool",
+      tags: [USAGE_LIMIT_BLOCKER_TAG, "usage-limit-pool:claude%3Alocal"],
+      nudge: false,
+    });
+    repo.update({
+      qitemId: blocker.qitemId,
+      actorSession: "wake-ladder@system",
+      state: "blocked",
+      blockedOn: "external:provider-limit:claude:local",
+      transitionNote: "usage-limit park until stated reset",
+      wakeAfterSeconds: 60,
+    } as never);
+
+    const timer = repo.getParkWakeStatus(blocker.qitemId)!;
+    const job = jobs.getById(timer.ref)!;
+    const registeredAt = Date.parse(job.registeredAt);
+    expect(job.lastEvaluationAt).toBe(job.registeredAt);
+    expect(timer.expiresAt).toBe(new Date(registeredAt + 60_000).toISOString());
+    expect(repo.listTransitions(blocker.qitemId).find((transition) => transition.wake)?.wake)
+      .toMatchObject({ expiresAt: timer.expiresAt });
+    expect(isDue(job, registeredAt + 59_999)).toBe(false);
+    expect(isDue(job, registeredAt + 60_000)).toBe(true);
+  });
+
+  it("an ordinary blocker wake remains expiry-less", async () => {
+    const blocker = await item("gate@rig");
+    const row = await item();
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@rig",
+      state: "blocked",
+      blockedOn: blocker.qitemId,
+      transitionNote: "ordinary blocker",
+    });
+
+    expect(repo.getParkWakeStatus(row.qitemId)).toEqual(expect.objectContaining({
+      kind: "blocker",
+      ref: blocker.qitemId,
+    }));
+    expect(repo.getParkWakeStatus(row.qitemId)).not.toHaveProperty("expiresAt");
   });
 
   it("negative control: a wakeless park still succeeds and records no invented wake", async () => {

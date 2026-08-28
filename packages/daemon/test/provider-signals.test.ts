@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { codexRateLimitSignals } from "../src/domain/provider/provider-signals.js";
+import {
+  codexRateLimitSignals,
+  deriveUsageLimitPools,
+  reactiveEventSignal,
+} from "../src/domain/provider/provider-signals.js";
 
 // Slice-04 (OPR.0.5.0.4) — signals[] normalization, the §1 contract's honesty rules
 // (packet 3ffa3c22 IMPLEMENTATION-PRD §1/§2 + the 2026-07-31 RESEARCH verdict).
@@ -76,5 +80,122 @@ describe("codexRateLimitSignals — normalization honesty", () => {
     // The app-server IS present, so account/rateLimits/updated capability is KNOWN true —
     // unknown data must not erase known transport capability.
     expect(sigs[0].supportsNotification).toBe(true);
+  });
+});
+
+describe("S16 usage-limit pool derivation", () => {
+  const NOW = new Date("2026-08-28T12:00:00.000Z");
+
+  it("groups every Claude seat under one local limit and keeps the latest stated reset", () => {
+    const pools = deriveUsageLimitPools({
+      now: NOW,
+      fallbackSeconds: 300,
+      bindings: [],
+      signals: [
+        {
+          provider: "claude",
+          seatSession: "dev-a@rig",
+          sourceClass: "provider_statusline",
+          authority: "account_cross_device",
+          window: "five_hour",
+          usedPercent: 100,
+          resetsAt: "2026-08-28T13:00:00.000Z",
+          asOf: "2026-08-28T11:59:00.000Z",
+          staleAfter: "2026-08-28T12:10:00.000Z",
+          supportsNotification: false,
+          automationUse: "allow_switch_decision",
+        },
+        {
+          provider: "claude",
+          seatSession: "dev-b@rig",
+          sourceClass: "provider_statusline",
+          authority: "account_cross_device",
+          window: "five_hour",
+          usedPercent: 72,
+          resetsAt: "2026-08-28T13:00:00.000Z",
+          asOf: "2026-08-28T11:59:00.000Z",
+          staleAfter: "2026-08-28T12:10:00.000Z",
+          supportsNotification: false,
+          automationUse: "allow_switch_decision",
+        },
+      ],
+    });
+
+    expect(pools).toEqual([
+      {
+        poolKey: "claude:local",
+        provider: "claude",
+        seatSessions: ["dev-a@rig", "dev-b@rig"],
+        expiresAt: "2026-08-28T13:00:00.000Z",
+        source: "provider-reset",
+      },
+    ]);
+  });
+
+  it("uses the signal as-of plus the config fallback for a fresh Codex at-limit event with no reset", () => {
+    const pools = deriveUsageLimitPools({
+      now: NOW,
+      fallbackSeconds: 300,
+      bindings: [
+        {
+          accountId: "acct-codex-1",
+          seatSession: "dev-c@rig",
+          rigName: "rig",
+          boundAt: "2026-08-28T08:00:00.000Z",
+          bindingSource: "fixture",
+          anomalies: [],
+        },
+      ],
+      signals: [reactiveEventSignal({
+        provider: "codex",
+        accountRef: "acct-codex-1",
+        kind: "at_limit",
+        asOf: "2026-08-28T11:59:00.000Z",
+        staleAfter: "2026-08-28T12:10:00.000Z",
+      })],
+    });
+
+    expect(pools).toEqual([
+      {
+        poolKey: "codex:acct-codex-1",
+        provider: "codex",
+        seatSessions: ["dev-c@rig"],
+        expiresAt: "2026-08-28T12:04:00.000Z",
+        source: "config-fallback",
+      },
+    ]);
+  });
+
+  it("never guesses usage-limit from unknown, advisory, stale, or already-expired evidence", () => {
+    const pools = deriveUsageLimitPools({
+      now: NOW,
+      fallbackSeconds: 300,
+      bindings: [],
+      signals: [
+        {
+          provider: "claude",
+          seatSession: "unknown@rig",
+          sourceClass: "unknown",
+          authority: "unknown",
+          asOf: "2026-08-28T11:59:00.000Z",
+          staleAfter: "2026-08-28T12:10:00.000Z",
+          unknownReason: "no_reading",
+          automationUse: "do_not_automate",
+        },
+        {
+          provider: "claude",
+          seatSession: "stale@rig",
+          sourceClass: "provider_statusline",
+          authority: "account_cross_device",
+          usedPercent: 100,
+          resetsAt: "2026-08-28T13:00:00.000Z",
+          asOf: "2026-08-28T11:00:00.000Z",
+          staleAfter: "2026-08-28T11:30:00.000Z",
+          automationUse: "allow_switch_decision",
+        },
+      ],
+    });
+
+    expect(pools).toEqual([]);
   });
 });

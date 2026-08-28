@@ -4,7 +4,8 @@
 // `unknown` rows (never silent zeros, never missing rows); only a real structured read is
 // `allow_switch_decision` (BR-2).
 
-import type { ProviderKind, ProviderSignal } from "./provider-types.js";
+import { signalEligibleForAutomation } from "./provider-policy.js";
+import type { ProviderBinding, ProviderKind, ProviderSignal } from "./provider-types.js";
 
 /** One provider-native usage window from the Codex app-server `account/rateLimits/read`. */
 export interface CodexWindowReading {
@@ -236,4 +237,88 @@ export function reactiveEventSignal(input: ReactiveEventInput): ProviderSignal {
     automationUse: input.kind === "at_limit" ? "allow_switch_decision" : "advisory_only",
     // No usedPercent — a reactive event is exhaustion evidence, not a remaining meter.
   };
+}
+
+// ── Usage-limit pool projection ────────────────────────────────────────────────────────
+
+export interface UsageLimitPool {
+  poolKey: string;
+  provider: ProviderKind;
+  seatSessions: string[];
+  expiresAt: string;
+  source: "provider-reset" | "config-fallback";
+}
+
+/**
+ * Derive the provider/account pools whose fresh structured evidence says they are
+ * exhausted. Claude statusline has no account ref, so its shipped one-account-per-host
+ * invariant is one local pool. Codex uses the existing account binding. Nothing unknown,
+ * stale, advisory, unbound, or already expired can create a park.
+ */
+export function deriveUsageLimitPools(input: {
+  signals: ProviderSignal[];
+  bindings: ProviderBinding[];
+  now: Date;
+  fallbackSeconds: number;
+}): UsageLimitPool[] {
+  const nowMs = input.now.getTime();
+  if (!Number.isFinite(nowMs)) return [];
+
+  const eligible = input.signals.filter(
+    (signal) => signalEligibleForAutomation(signal, input.now.toISOString()).eligible,
+  );
+  const exhausted = eligible.filter(
+    (signal) =>
+      (typeof signal.usedPercent === "number" && signal.usedPercent >= 100) ||
+      (signal.sourceClass === "provider_event" && signal.authority === "reactive_error"),
+  );
+
+  const pools = new Map<string, { provider: ProviderKind; signals: ProviderSignal[] }>();
+  for (const signal of exhausted) {
+    const poolKey = signal.provider === "claude"
+      ? "claude:local"
+      : signal.accountRef
+        ? `codex:${signal.accountRef}`
+        : null;
+    if (!poolKey) continue;
+    const pool = pools.get(poolKey) ?? { provider: signal.provider, signals: [] };
+    pool.signals.push(signal);
+    pools.set(poolKey, pool);
+  }
+
+  const result: UsageLimitPool[] = [];
+  for (const [poolKey, pool] of pools) {
+    const statedResets = pool.signals
+      .map((signal) => Date.parse(signal.resetsAt ?? ""))
+      .filter((value) => Number.isFinite(value) && value > nowMs);
+    const fallbackResets = pool.provider === "codex"
+      ? pool.signals
+          .map((signal) => Date.parse(signal.asOf) + input.fallbackSeconds * 1000)
+          .filter((value) => Number.isFinite(value) && value > nowMs)
+      : [];
+    const expiryMs = statedResets.length > 0
+      ? Math.max(...statedResets)
+      : fallbackResets.length > 0
+        ? Math.max(...fallbackResets)
+        : null;
+    if (expiryMs === null) continue;
+
+    const seatSessions = pool.provider === "claude"
+      ? input.signals
+          .filter((signal) => signal.provider === "claude" && typeof signal.seatSession === "string")
+          .map((signal) => signal.seatSession!)
+      : input.bindings
+          .filter((binding) => binding.accountId === pool.signals[0]!.accountRef)
+          .map((binding) => binding.seatSession);
+    const uniqueSeats = [...new Set(seatSessions)].sort();
+    if (uniqueSeats.length === 0) continue;
+    result.push({
+      poolKey,
+      provider: pool.provider,
+      seatSessions: uniqueSeats,
+      expiresAt: new Date(expiryMs).toISOString(),
+      source: statedResets.length > 0 ? "provider-reset" : "config-fallback",
+    });
+  }
+  return result.sort((a, b) => a.poolKey.localeCompare(b.poolKey));
 }

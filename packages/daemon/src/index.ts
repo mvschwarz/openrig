@@ -23,6 +23,7 @@ import {
   resolveToIpOrNull,
 } from "./middleware/auth-bearer-token.js";
 import type { SlowOperationInstrumentation } from "./domain/slow-op-recorder.js";
+import type { ProviderService } from "./domain/provider/provider-service.js";
 
 /** OPR.0.4.3.21 (51elv2) — bound the graceful-shutdown recorder drain. */
 export const SLOW_OP_SHUTDOWN_DRAIN_TIMEOUT_MS = 5_000;
@@ -174,6 +175,8 @@ export function startWakeLadderScheduler(deps: {
   rigRepo: { db: import("better-sqlite3").Database };
   queueRepo?: import("./domain/queue-repository.js").QueueRepository;
   wakeLadderStatus?: import("./domain/queue-wake-ladder.js").WakeLadderStatus;
+  providerService?: Pick<ProviderService, "getReadModel">;
+  usageLimitJitterSeconds?: number;
 }): WakeLadderScheduler | null {
   const queueRepo = deps.queueRepo;
   if (!queueRepo) return null;
@@ -181,7 +184,17 @@ export function startWakeLadderScheduler(deps: {
   deps.wakeLadderStatus = status; // healthz reads this snapshot
   const db = deps.rigRepo.db;
   const scheduler = new WakeLadderScheduler({
-    runTick: () => runWakeLadderTick({ db, queueRepo, status }),
+    runTick: () => runWakeLadderTick({
+      db,
+      queueRepo,
+      status,
+      ...(deps.providerService
+        ? { getProviderReadModel: () => deps.providerService!.getReadModel() }
+        : {}),
+      ...(deps.usageLimitJitterSeconds !== undefined
+        ? { usageLimitJitterSeconds: deps.usageLimitJitterSeconds }
+        : {}),
+    }),
     tickIntervalMs: resolveWakeRetryIntervalSeconds() * 1000,
   });
   scheduler.start();
