@@ -154,8 +154,8 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
     if (!res.ok) {
       return { ok: false, class: res.status === 0 ? "transport" : `http-${res.status}`, detail: res.error };
     }
-    if (res.ts && threadTs === undefined) opts.onPostedRoot?.(q, res.ts);
-    if (res.ts) opts.onPosted?.(q, res.ts, threadTs);
+    if (threadTs === undefined) opts.onPostedRoot?.(q, res.ts);
+    opts.onPosted?.(q, res.ts, threadTs);
     // Delivered is complete only after the authoritative row receipt succeeds. A receipt
     // failure retains the decision; replay reconciles by marker and retries the idempotent receipt.
     opts.delivered.mark(decision.decisionId, "delivered");

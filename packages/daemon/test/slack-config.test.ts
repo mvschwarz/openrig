@@ -19,7 +19,7 @@ describe("Slice-11 config — first-class + honest unconfigured (item 5)", () =>
     const cfg = loadConfig(home);
     expect(cfg.enabled).toBe(false);
     expect(cfg.inboundDestination).toBe("operator-agent@kernel");
-    expect(cfg.alertTag).toBe("founder-alert");
+    expect(cfg).not.toHaveProperty("alertTag");
   });
 
   it("save + reload round-trips; inbound destination is overridable (T1075)", () => {

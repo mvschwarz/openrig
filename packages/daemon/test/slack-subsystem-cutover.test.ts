@@ -91,7 +91,7 @@ function composeOutbound(home: string, port: OutboundQueuePort, fetchImpl: Fetch
     home,
     queue: port,
     seen: outboundSeen,
-    filter: { alertTag: "founder-alert" },
+    filter: { minimumLevel: "NOTICE" },
     dispatch: (op, ref, payload) => wire.dispatcher.dispatch(op, ref, payload),
   });
   release = (q) => driver.release(q);
@@ -175,7 +175,7 @@ describe("S10 cutover — outbound classes ride the SUBSYSTEM path (slice-11 ite
   it("item 9: enable seeds the backlog as history — the next sweep posts NOTHING (no replay storm)", async () => {
     const fsx = memFs();
     const seen = new SeenStore("/s/outbound-seen.jsonl", fsx, clock);
-    const seed = await seedBacklogAsHistory({ queue: fakePort([ALERT]), seen, filter: { alertTag: "founder-alert" } });
+    const seed = await seedBacklogAsHistory({ queue: fakePort([ALERT]), seen, filter: { minimumLevel: "NOTICE" } });
     expect(seed.seeded).toBe(1);
     expect(seed.onlineStatus).toMatch(/ENABLED/);
     const { fetchImpl, calls } = capturingFetch(200);
@@ -190,7 +190,7 @@ describe("S10 cutover — outbound classes ride the SUBSYSTEM path (slice-11 ite
       qitemId: `q-${i}`, destinationSession: "human-founder@kernel", tags: ["founder-alert"], state: "pending", summary: `s${i}`,
     }));
     const seen = new SeenStore("/s/seen.jsonl", memFs(), clock);
-    const seed = await seedBacklogAsHistory({ queue: fakePort(many), seen, filter: { alertTag: "founder-alert" } });
+    const seed = await seedBacklogAsHistory({ queue: fakePort(many), seen, filter: { minimumLevel: "NOTICE" } });
     expect(seed.seeded).toBe(150);
     expect(seen.load().size).toBe(150);
   });

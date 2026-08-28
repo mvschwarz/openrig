@@ -1,14 +1,11 @@
 // S10 — the IN-PROCESS queue port for the gateway subsystem. Successor to the retired CLI
 // queue-bridge (which shelled out to `rig queue` from the relay's separate process): in-daemon
 // there is no process boundary, so fleet access is a direct QueueRepository read/write. The
-// SELECTION SEMANTICS are the shipped slice-11 rules carried over unchanged (filterHumanAlerts
-// moved verbatim from queue-bridge.ts, which was DELETED with the relay runners at the cutover):
-//   - a qitem alerts iff ACTIVE (pending/in-progress/blocked), tagged with the alert tag, AND
-//     human-destined (explicit allow-list, a human-seat session ref, or tier human-gate);
+// SELECTION SEMANTICS consume the single structured OWNER classification written with the
+// queue transition. Tags and destination spellings are not a second alert classifier.
 //   - reads are unbounded (the B5 lesson: a default limit silently truncates a large backlog).
 
 import type { QueueRepository, QueueItem as RepoQueueItem } from "../../queue-repository.js";
-import { isHumanSeatSessionRef } from "../../session-name.js";
 import { loadHumanRegistry, resolveRegisteredHumanAddress, type LoadResult, type HumanFragment } from "../human-registry.js";
 import { ownerNotificationLevelAtLeast, type OwnerNotificationLevel, type QueueTransition } from "../../queue-transition-log.js";
 
@@ -30,25 +27,17 @@ export interface QueueItem {
 }
 
 export interface AlertFilterOpts {
-  alertTag: string; // e.g. "founder-alert"
-  /** Optional explicit human-seat allow-list; when empty, any human-seat destination or human-gate tier matches. */
-  destinations?: string[];
   minimumLevel?: OwnerNotificationLevel;
 }
 
-/** PURE (verbatim from the retired queue-bridge): select the qitems that should alert a human. */
+/** PURE: select active qitems whose transition carries a sufficient OWNER classification. */
 export function filterHumanAlerts(items: QueueItem[], opts: AlertFilterOpts): QueueItem[] {
   const active = new Set(["pending", "in-progress", "blocked"]);
-  const allow = new Set(opts.destinations ?? []);
   return items.filter((q) => {
     if (q.state && !active.has(q.state)) return false;
-    if (q.ownerNotificationLevel) {
-      return ownerNotificationLevelAtLeast(q.ownerNotificationLevel, opts.minimumLevel ?? "NOTICE");
-    }
-    if (!(q.tags ?? []).includes(opts.alertTag)) return false;
-    const dest = q.destinationSession ?? "";
-    const isHuman = allow.size > 0 ? allow.has(dest) : isHumanSeatSessionRef(dest) || q.tier === "human-gate";
-    return isHuman;
+    return q.ownerNotificationLevel
+      ? ownerNotificationLevelAtLeast(q.ownerNotificationLevel, opts.minimumLevel ?? "NOTICE")
+      : false;
   });
 }
 

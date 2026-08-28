@@ -76,7 +76,6 @@ export function slackCommand(deps: SlackDeps = {}): Command {
     .description("Configure the connector (first-class config; secrets stay in the env file, never here)")
     .option("--channel <id>", "Slack channel id the connector app must be a member of")
     .option("--inbound-destination <session>", "where inbound human messages land (default operator-agent@kernel)")
-    .option("--alert-tag <tag>", "outbound: qitem tag that alerts a human (default founder-alert)")
     .option("--minimum-level-that-posts <level>", "minimum OWNER level posted to Slack: RECORD|NOTICE|ALERT")
     .option("--minimum-level-that-interrupts <level>", "minimum OWNER level that mentions/interrupts: RECORD|NOTICE|ALERT")
     .option("--source-label <label>", "label shown in the posted message footer (where the queue lives)")
@@ -89,7 +88,6 @@ export function slackCommand(deps: SlackDeps = {}): Command {
         ...cur,
         channel: opts.channel ?? cur.channel,
         inboundDestination: opts.inboundDestination ?? cur.inboundDestination,
-        alertTag: opts.alertTag ?? cur.alertTag,
         minimumLevelThatPosts: opts.minimumLevelThatPosts ?? cur.minimumLevelThatPosts,
         minimumLevelThatInterrupts: opts.minimumLevelThatInterrupts ?? cur.minimumLevelThatInterrupts,
         sourceLabel: opts.sourceLabel ?? cur.sourceLabel,

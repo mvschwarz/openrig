@@ -271,6 +271,10 @@ export interface PostChatMessageInput {
   thread_ts?: string;
 }
 
+export type PostChatMessageResult =
+  | { ok: true; status: number; ts: string }
+  | { ok: false; status: number; error?: string };
+
 /** S10 — outbound posting via the Web API (`chat.postMessage`). The R2 native shape needs
  *  thread_ts, which an incoming webhook cannot carry — the webhook path retires with the relay.
  *  A1.2 identity rail: this function NEVER accepts per-message `username`/`icon_*` overrides —
@@ -281,10 +285,15 @@ export async function postChatMessage(
   input: PostChatMessageInput,
   fetchImpl: FetchImpl = defaultFetch,
   timeoutMs = DEFAULT_TIMEOUT_MS,
-): Promise<{ ok: boolean; status: number; ts?: string; error?: string }> {
+): Promise<PostChatMessageResult> {
   const body: Record<string, unknown> = { channel: input.channel, text: input.text };
   if (input.blocks?.length) body.blocks = input.blocks;
   if (input.thread_ts) body.thread_ts = input.thread_ts;
   const r = await callWebApi("chat.postMessage", token, body, fetchImpl, timeoutMs);
-  return { ok: r.ok, status: r.status, ts: typeof r.json.ts === "string" ? r.json.ts : undefined, error: r.error };
+  if (!r.ok) return { ok: false, status: r.status, error: r.error };
+  const ts = typeof r.json.ts === "string" ? r.json.ts.trim() : "";
+  if (!ts) {
+    return { ok: false, status: r.status, error: "chat.postMessage returned ok without a message ts" };
+  }
+  return { ok: true, status: r.status, ts };
 }

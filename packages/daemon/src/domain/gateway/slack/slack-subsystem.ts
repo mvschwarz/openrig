@@ -170,7 +170,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       home: opts.home,
       queue: ports,
       seen: outboundSeen,
-      filter: { alertTag: cfg.alertTag, destinations: cfg.outboundDestinations, minimumLevel: cfg.minimumLevelThatPosts },
+      filter: { minimumLevel: cfg.minimumLevelThatPosts },
       dispatch: (op, ref, payload) => wire.dispatcher.dispatch(op, ref, payload),
       intervalMs: opts.outboundIntervalMs,
       log,

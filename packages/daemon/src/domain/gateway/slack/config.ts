@@ -1,7 +1,7 @@
 // Slice-11 slack-connector — first-class connector config (item 5 + T1075).
 //
 // Config is a first-class JSON file (NOT env-only): inbound destination,
-// watched channel, alert tag, source label, required scopes, and POINTERS to
+// watched channel, OWNER thresholds, source label, required scopes, and POINTERS to
 // secrets (never secret VALUES — those live in the 0600 env file / env vars).
 // An unset/partial config yields an HONEST unconfigured state (no throw, no
 // silent nothing) so `rig slack status` can tell the operator exactly what's left.
@@ -14,8 +14,6 @@ export interface SlackConnectorConfig {
   enabled: boolean;
   /** Inbound: human Slack messages land here. First-class + overridable (T1075). */
   inboundDestination: string;
-  /** Outbound: qitems with this tag destined to a human seat alert to Slack. */
-  alertTag: string;
   /** Optional explicit human-seat allow-list for outbound (empty = any human-seat/human-gate). */
   outboundDestinations: string[];
   /** Where the queue lives, shown in the posted message footer (never hardcoded). */
@@ -40,7 +38,6 @@ export interface SlackConnectorConfig {
 export const DEFAULT_CONFIG: SlackConnectorConfig = {
   enabled: false,
   inboundDestination: "operator-agent@kernel",
-  alertTag: "founder-alert",
   outboundDestinations: [],
   sourceLabel: "openrig",
   channel: null,
@@ -68,13 +65,14 @@ export function configPathFor(home?: string): string {
 
 export function loadConfig(home?: string): SlackConnectorConfig {
   const p = configPathFor(home);
-  let raw: Partial<SlackConnectorConfig>;
+  let raw: Partial<SlackConnectorConfig> & { alertTag?: unknown };
   try {
-    raw = JSON.parse(fs.readFileSync(p, "utf8")) as Partial<SlackConnectorConfig>;
+    raw = JSON.parse(fs.readFileSync(p, "utf8")) as Partial<SlackConnectorConfig> & { alertTag?: unknown };
   } catch {
     return { ...DEFAULT_CONFIG };
   }
-  const cfg = { ...DEFAULT_CONFIG, ...raw };
+  const { alertTag: _retiredAlertTag, ...supported } = raw;
+  const cfg = { ...DEFAULT_CONFIG, ...supported };
   validateConfig(cfg);
   return cfg;
 }
