@@ -206,12 +206,12 @@ describe("scope-audit classifier", () => {
     )).toHaveLength(0);
   });
 
-  it("mission without NOTES.md emits low missing_mission_notes", () => {
+  it("mission without current or legacy notes emits an honest low finding", () => {
     const result = classifyScopeItem(makeInput({
       level: "mission",
       readmeFrontmatterRaw: "id: OPR.0.4.1",
       progressFileExists: true,
-      missionNotesExists: false,
+      missionNotesResolution: null,
       missionNotesPath: "/workspace/missions/release-0.4.1/NOTES.md",
     }));
     const finding = result.findings.find((f) => f.kind === "missing_mission_notes");
@@ -219,7 +219,21 @@ describe("scope-audit classifier", () => {
       severity: "low",
       path: "/workspace/missions/release-0.4.1/NOTES.md",
     });
+    expect(finding?.message).toMatch(/NOTES\.md.*MISSION_NOTES\.md/);
     expect(finding?.remediation).toMatch(/NOTES\.md/);
+  });
+
+  it("legacy notes resolution suppresses the missing-notes finding", () => {
+    const result = classifyScopeItem(makeInput({
+      level: "mission",
+      readmeFrontmatterRaw: "id: OPR.0.4.1",
+      progressFileExists: true,
+      missionNotesResolution: {
+        path: "/workspace/missions/release-0.4.1/MISSION_NOTES.md",
+        name: "MISSION_NOTES.md",
+      },
+    }));
+    expect(result.findings.some((f) => f.kind === "missing_mission_notes")).toBe(false);
   });
 
   it("done slice with no PROOF.md and no proof packet emits medium missing_proof", () => {

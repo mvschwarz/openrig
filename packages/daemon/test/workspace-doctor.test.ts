@@ -395,13 +395,16 @@ describe("FR-5 check #6 — optional slice docs", () => {
   });
 });
 
-describe("FR-5 check #7 — MISSION_NOTES presence", () => {
-  it("returns ok when every mission directory has MISSION_NOTES.md", () => {
+describe("FR-5 check #7 — mission notes presence", () => {
+  it("uses current-first legacy-fallback resolution for every mission", () => {
     const missions = path.join(dir, "missions");
     fs.mkdirSync(path.join(missions, "m1"), { recursive: true });
     fs.mkdirSync(path.join(missions, "m2"), { recursive: true });
-    fs.writeFileSync(path.join(missions, "m1", "MISSION_NOTES.md"), "");
+    fs.mkdirSync(path.join(missions, "m3"), { recursive: true });
+    fs.writeFileSync(path.join(missions, "m1", "NOTES.md"), "");
     fs.writeFileSync(path.join(missions, "m2", "MISSION_NOTES.md"), "");
+    fs.writeFileSync(path.join(missions, "m3", "NOTES.md"), "current");
+    fs.writeFileSync(path.join(missions, "m3", "MISSION_NOTES.md"), "legacy");
     const result = checkMissionNotesPresence({ missionsRoot: missions });
     expect(result.check).toBe("mission_notes_presence");
     expect(result.status).toBe("ok");

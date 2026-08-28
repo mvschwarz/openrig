@@ -84,6 +84,28 @@ describe("GET /api/scope/audit", () => {
     expect(res.status).toBe(404);
   });
 
+  it("uses one notes precedence across current-only, legacy-only, both, and neither", async () => {
+    for (const [name, files, missing] of [
+      ["current", ["NOTES.md"], false],
+      ["legacy", ["MISSION_NOTES.md"], false],
+      ["both", ["NOTES.md", "MISSION_NOTES.md"], false],
+      ["neither", [], true],
+    ] as const) {
+      const missionName = `notes-${name}`;
+      const missionDir = path.join(missionsRoot, missionName);
+      fs.mkdirSync(missionDir, { recursive: true });
+      fs.writeFileSync(path.join(missionDir, "SPEC.md"), `---\nid: OPR.8.9.${name.length}\nintent: notes\n---\n# notes\n`, "utf8");
+      fs.writeFileSync(path.join(missionDir, "PROGRESS.md"), "# Progress\n", "utf8");
+      for (const file of files) fs.writeFileSync(path.join(missionDir, file), file, "utf8");
+
+      const response = await app.request(`/api/scope/audit?mission=${missionName}`);
+      const body = await response.json() as { mission: { findings: Array<{ kind: string; message: string }> } };
+      const finding = body.mission.findings.find((item) => item.kind === "missing_mission_notes");
+      expect(Boolean(finding), name).toBe(missing);
+      if (finding) expect(finding.message).toMatch(/NOTES\.md.*MISSION_NOTES\.md/);
+    }
+  });
+
   // SPEC.md compatibility — a node carrying BOTH authored files is invisible without this. Advisory
   // by construction: low severity, and `ok` must stay true so it can never gate a build.
   it("advises (never blocks) when a mission AND a slice each carry both SPEC.md and README.md", async () => {

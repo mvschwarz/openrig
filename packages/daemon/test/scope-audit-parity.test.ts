@@ -6,6 +6,10 @@ import {
   classifyScopeItem as daemonClassifier,
   type ScopeAuditInput,
 } from "../src/domain/scope/scope-audit.js";
+import {
+  NODE_FILE_PRECEDENCE,
+  resolveNotesFile as resolveDaemonNotesFile,
+} from "../src/domain/scope/node-file.js";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..", "..");
 
@@ -89,6 +93,22 @@ describe("scope-audit CLI/daemon parity (CI-FAILING)", () => {
         expect(content, file).not.toContain("progressTouchedByRecentCommit");
       }
     });
+
+    it("keeps private notes filename checks inside the two shared resolvers", () => {
+      const readers = [
+        "packages/cli/src/lib/scope/scope-audit.ts",
+        "packages/daemon/src/domain/scope/scope-audit.ts",
+        "packages/cli/src/commands/scope.ts",
+        "packages/daemon/src/domain/workspace/workspace-doctor.ts",
+        "packages/daemon/src/routes/scope-audit.ts",
+      ];
+      for (const file of readers) {
+        const privateChecks = fs.readFileSync(path.join(REPO_ROOT, file), "utf8")
+          .split("\n")
+          .filter((line) => /(?:path\.join|childPath|existsSync|accessSync|statSync).*\b(?:NOTES|MISSION_NOTES)\.md\b/.test(line));
+        expect(privateChecks, file).toEqual([]);
+      }
+    });
   });
 
   describe("shared-fixture output parity", () => {
@@ -109,6 +129,33 @@ describe("scope-audit CLI/daemon parity (CI-FAILING)", () => {
         const daemonResult = daemonClassifier(fixture.input);
         expect(daemonResult).toEqual(cliResult);
       });
+    }
+  });
+});
+
+describe("mission notes resolver parity", () => {
+  it("runs the same current/legacy precedence matrix through both twins", async () => {
+    const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "scope-notes-parity-"));
+    const cli = await import(path.join(REPO_ROOT, "packages/cli/src/lib/scope/scope-fs.ts"));
+    try {
+      expect(NODE_FILE_PRECEDENCE).toEqual(["SPEC.md", "README.md"]);
+      const fixtures = [
+        { name: "current", files: ["NOTES.md"], bound: "NOTES.md" },
+        { name: "legacy", files: ["MISSION_NOTES.md"], bound: "MISSION_NOTES.md" },
+        { name: "both", files: ["NOTES.md", "MISSION_NOTES.md"], bound: "NOTES.md" },
+        { name: "neither", files: [], bound: null },
+      ] as const;
+      for (const fixture of fixtures) {
+        const dir = path.join(root, fixture.name);
+        fs.mkdirSync(dir, { recursive: true });
+        for (const file of fixture.files) fs.writeFileSync(path.join(dir, file), file, "utf8");
+        const cliResolution = cli.resolveNotesFile(dir);
+        const daemonResolution = resolveDaemonNotesFile(dir);
+        expect(cliResolution, fixture.name).toEqual(daemonResolution);
+        expect(cliResolution?.name ?? null, fixture.name).toBe(fixture.bound);
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
     }
   });
 });

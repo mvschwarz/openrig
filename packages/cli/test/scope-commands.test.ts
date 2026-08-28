@@ -732,6 +732,26 @@ describe("rig scope audit edge cases (guard BLOCKING fixes)", () => {
     fs.rmSync(substrate.root, { recursive: true, force: true });
   });
 
+  it("uses one notes precedence across current-only, legacy-only, both, and neither", async () => {
+    for (const [name, files, missing] of [
+      ["current", ["NOTES.md"], false],
+      ["legacy", ["MISSION_NOTES.md"], false],
+      ["both", ["NOTES.md", "MISSION_NOTES.md"], false],
+      ["neither", [], true],
+    ] as const) {
+      const missionName = `notes-${name}`;
+      const missionDir = path.join(substrate.missionsRoot, missionName);
+      writeFile(path.join(missionDir, "SPEC.md"), `---\nid: OPR.8.8.${name.length}\nintent: notes\n---\n# notes\n`);
+      writeFile(path.join(missionDir, "PROGRESS.md"), "# Progress\n");
+      for (const file of files) writeFile(path.join(missionDir, file), file);
+      const result = await run(["audit", "--mission", missionName, "--json"], substrate.missionsRoot);
+      const parsed = JSON.parse(result.stdout);
+      const finding = parsed.mission.findings.find((item: { kind: string }) => item.kind === "missing_mission_notes");
+      expect(Boolean(finding), name).toBe(missing);
+      if (finding) expect(finding.message).toMatch(/NOTES\.md.*MISSION_NOTES\.md/);
+    }
+  });
+
   it("README-less mission with PROGRESS.md emits orphan_progress (not a false clear)", async () => {
     const missionDir = path.join(substrate.missionsRoot, "no-readme-mission");
     fs.mkdirSync(missionDir, { recursive: true });
@@ -1006,6 +1026,18 @@ describe("rig scope repair frontmatter conformance (OPR.0.4.1.6 FR-4)", () => {
     expect(fs.existsSync(path.join(slice, "PROGRESS.md"))).toBe(true);
     expect(fs.existsSync(path.join(slice, "PROOF.md"))).toBe(true);
     expect(fs.statSync(path.join(slice, "proof")).isDirectory()).toBe(true);
+  });
+
+  it("keeps current NOTES.md authoritative when both names exist", async () => {
+    const mission = path.join(substrate.missionsRoot, "both-notes");
+    writeFile(path.join(mission, "README.md"), "---\nid: OPR.8.7.6\n---\n# Both notes\n");
+    writeFile(path.join(mission, "NOTES.md"), "current\n");
+    writeFile(path.join(mission, "MISSION_NOTES.md"), "legacy\n");
+
+    const result = await run(["mission", "repair", "both-notes", "--json"], substrate.missionsRoot);
+    expect(result.exitCode).toBe(0);
+    expect(fs.readFileSync(path.join(mission, "NOTES.md"), "utf8")).toBe("current\n");
+    expect(fs.readFileSync(path.join(mission, "MISSION_NOTES.md"), "utf8")).toBe("legacy\n");
   });
 
   it("AC-4: backfills a missing id + stage + verified on a ghost slice (idempotent re-run)", async () => {
