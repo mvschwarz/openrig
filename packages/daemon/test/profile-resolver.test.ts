@@ -559,11 +559,11 @@ describe("compactionStrategy resolution — most-specific-wins (OPR.0.5.6.20)", 
   it("member overrides profile overrides spec default (two-level fixture; RED: field absent from config)", () => {
     const spec = specLifecycle("default-compaction");
     spec.profiles["default"].lifecycle = { compactionStrategy: "managed-compaction" } as never;
-    const bare = resolveNodeConfig(makeCtx({ resolved: makeResolved(spec) }));
+    const bare = resolveNodeConfig(makeCtx({ baseSpec: makeResolved(spec) }));
     expect(bare.ok).toBe(true);
     if (bare.ok) expect(bare.config.compactionStrategy).toBe("managed-compaction");
     const overridden = resolveNodeConfig(makeCtx({
-      resolved: makeResolved(spec),
+      baseSpec: makeResolved(spec),
       member: makeMember({ compactionStrategy: "apprentice-handover" } as never),
     }));
     expect(overridden.ok).toBe(true);
