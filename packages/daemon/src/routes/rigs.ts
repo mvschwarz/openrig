@@ -107,6 +107,23 @@ function normalizeExpansionPodFragment(raw: Record<string, unknown>): ExpansionP
             if (paths.length > 0) {
               sessionSource = { mode: "rebuild", ref: { kind: "artifact_set", value: paths } };
             }
+          } else if (mode === "agent_image" && kind === "image_name"
+            && typeof refRec["value"] === "string" && refRec["value"].trim() !== "") {
+            // OPR.0.5.6.3 repair: agent_image rides the ingress like fork/rebuild —
+            // dropping it here silently erased the source (and its version pin)
+            // before the service mapper could preserve it. v0 shape only:
+            // image_name kind, non-empty string value. Version is SCHEMA-PARITY:
+            // string or number, coerced with String() exactly like
+            // rigspec-schema.ts normalize (YAML `version: 3` arrives as a JSON
+            // number; omitting it would recreate the silent-default defect).
+            const versionRaw = refRec["version"];
+            const version = typeof versionRaw === "string" || typeof versionRaw === "number"
+              ? String(versionRaw)
+              : undefined;
+            sessionSource = {
+              mode: "agent_image",
+              ref: { kind: "image_name", value: refRec["value"] as string, ...(version !== undefined ? { version } : {}) },
+            };
           }
         }
       }
