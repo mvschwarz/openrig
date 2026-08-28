@@ -4,7 +4,7 @@
     "canonical": {
       "core/agent-starters/SKILL.md": "dd11173ea046dd7d30e23c4fdb3f5188b003ca56ea434ebcc21e14f5e8f29b15",
       "core/agent-startup-and-context-ingestion/SKILL.md": "eb1011d4ac5ff68c51e1a5b6eadcd1af2932456e9c62cfd521e92f3e2ef3530e",
-      "core/attention-queue/SKILL.md": "2a93d35b23931b114b9833554d8227cb4578b4208b0962d938de2e608efe1f76",
+      "core/attention-queue/SKILL.md": "d09f6d80304a3a8fc604bc80beb3d7e4408905f21ee722a62744bcfd06dfccfd",
       "core/cross-host-rig-commands/SKILL.md": "7e8f28dac239126249b24c0e197864bfea9b99b5f95bdb4992b3759492563df5",
       "core/human-in-the-loop/SKILL.md": "14cf0c4a0dc89179121465d4b8d81d40406427351adcdc34f875097d1e6e9ab2",
       "core/openrig-architect/SKILL.md": "b53e63d22989bb6cc2da30a79e69902ce57a109145027a4007a900fdd66ee747",
@@ -88,7 +88,7 @@
       "queue-handoff/SKILL.md": "a7dede0c7063205303cc0b9858ee4916724fdfd3d91920aa88e68ac64cafb681",
       "refocusing/SKILL.md": "506fe68da3f127f51aeffdaec1b8859080563395585343e4a211b61328f1fab5",
       "refocusing/references/refocus.md": "6e71513e82bd815e1506b0be4f9a972eecd3053a8deb06340c10b1d1792489bc",
-      "refocusing/scripts/trace-to-root.py": "8016ba9acf590c4872d88e4240f16b1d189508ef77900fe752eb13d1187fe6db",
+      "refocusing/scripts/trace-to-root.py": "248044535e51c5e9cc8b067813955a9ccfa58bc68bd1122d07adc359a890d309",
       "retiring-and-inheriting-a-seat/CHANGELOG.md": "342b004639dfaf5a68607410d8387d035eba3e1ecd2202c08c77c5be92a89420",
       "retiring-and-inheriting-a-seat/SKILL.md": "1f9007b8ee17a115c96d4b652b78e605a5a523b301f278224900c26928e08ea2",
       "seat-continuity-and-handover/SKILL.md": "7bb210c125800ebacea87e9b1efdcae8e6c554aecdb6086ace5299c7f61ed818",
@@ -98,7 +98,7 @@
     "spec": {
       "core/agent-starters/SKILL.md": "dd11173ea046dd7d30e23c4fdb3f5188b003ca56ea434ebcc21e14f5e8f29b15",
       "core/agent-startup-and-context-ingestion/SKILL.md": "eb1011d4ac5ff68c51e1a5b6eadcd1af2932456e9c62cfd521e92f3e2ef3530e",
-      "core/attention-queue/SKILL.md": "2a93d35b23931b114b9833554d8227cb4578b4208b0962d938de2e608efe1f76",
+      "core/attention-queue/SKILL.md": "d09f6d80304a3a8fc604bc80beb3d7e4408905f21ee722a62744bcfd06dfccfd",
       "core/cross-host-rig-commands/SKILL.md": "7e8f28dac239126249b24c0e197864bfea9b99b5f95bdb4992b3759492563df5",
       "core/human-in-the-loop/SKILL.md": "14cf0c4a0dc89179121465d4b8d81d40406427351adcdc34f875097d1e6e9ab2",
       "core/openrig-architect/SKILL.md": "b53e63d22989bb6cc2da30a79e69902ce57a109145027a4007a900fdd66ee747",

@@ -267,9 +267,10 @@ Rollout date: 2026-04-13 host-wide adoption. 48h observation cycle active; RSI w
 ---
 
 > **Maturity-model reference note (appended 2026-08-28, slice OPR.0.5.6.9):**
-> `skill-maturity-convention.md` cited above is not shipped and is absent from development
-> machines (verified by enumeration, 2026-08-28). The maturity model's canonical home is
-> `docs/reference/knowledge-maturity.md` (installed:
-> `$OPENRIG_HOME/reference/knowledge-maturity.md`). The L1-L5 tier labels cited above were
-> not recovered; the ladder CONCEPT is normative and tier counts are not (founder ruling
-> 2026-08-28). This note annotates; the text above is preserved as written.
+> `skill-maturity-convention.md` and the EMM knowledge schema cited above are ABSENT from
+> this machine (verified by enumeration, 2026-08-28). The maturity model's recovered
+> canonical home is `docs/reference/knowledge-maturity.md` in the openrig repo
+> (installed: `$OPENRIG_HOME/reference/knowledge-maturity.md`). The L1-L5 tier labels
+> cited above were not recovered. The ladder concept is normative; tier counts are not.
+> This note annotates; the text above is preserved
+> as written. Restore: copy this file back from SNAPSHOT-s09-dangling-cites-20260828T0956Z.
