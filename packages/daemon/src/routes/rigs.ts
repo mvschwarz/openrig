@@ -403,7 +403,10 @@ rigsRoutes.get("/:id/graph", async (c) => {
       : [],
     terminalActive: n.terminalActive,
     hasAssignedWork: n.hasAssignedWork ?? false,
+    assignedWorkCount: n.assignedWorkCount ?? 0,
     pendingWorkCount: n.pendingWorkCount ?? 0,
+    inProgressWorkCount: n.inProgressWorkCount ?? 0,
+    blockedWorkCount: n.blockedWorkCount ?? 0,
     identityVerdict: n.identityVerdict ?? null,
   }));
   const projectedPods: Pod[] = pods.map((pod) => ({

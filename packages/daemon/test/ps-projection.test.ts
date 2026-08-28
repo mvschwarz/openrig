@@ -332,13 +332,17 @@ describe("PsProjectionService", () => {
       };
     }
 
-    function seedPendingQitem(destinationSession: string): void {
+    function seedQitem(destinationSession: string, state: string): void {
       const id = `qitem-${Date.now()}-${Math.random()}`;
       const ts = new Date().toISOString().replace("T", " ").slice(0, 19);
       db.prepare(`
         INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, body)
-        VALUES (?, ?, ?, ?, ?, 'pending', 'routine', 'routine', ?)
-      `).run(id, ts, ts, "operator@test", destinationSession, "test-body");
+        VALUES (?, ?, ?, ?, ?, ?, 'routine', 'routine', ?)
+      `).run(id, ts, ts, "operator@test", destinationSession, state, "test-body");
+    }
+
+    function seedPendingQitem(destinationSession: string): void {
+      seedQitem(destinationSession, "pending");
     }
 
     it("runningCount stays process-alive semantics; activeCount + hasWorkCount default to 0 when no signals wired", () => {
@@ -433,22 +437,26 @@ describe("PsProjectionService", () => {
       expect(entries[0]!.hasWorkCount).toBe(1);
     });
 
-    it("done/closed qitems do NOT count toward hasWorkCount (only 'pending' state)", () => {
+    it("active qitems count toward hasWorkCount while terminal qitems do not", () => {
       const rigId = seedRig("only-pending");
       const n1 = seedNode(rigId, "dev");
       seedSession(n1, "running");
       const paneId = `tmux-${n1}`;
-      // Insert one pending + one done qitem for the same seat.
-      seedPendingQitem(paneId);
-      const id = `qitem-done-${Date.now()}`;
-      const ts = new Date().toISOString().replace("T", " ").slice(0, 19);
-      db.prepare(`
-        INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, body)
-        VALUES (?, ?, ?, ?, ?, 'done', 'routine', 'routine', ?)
-      `).run(id, ts, ts, "operator@test", paneId, "test-body");
+      for (const state of ["pending", "in-progress", "blocked", "done", "canceled", "handed-off"]) {
+        seedQitem(paneId, state);
+      }
 
       const entries = ps.getEntries();
-      expect(entries[0]!.hasWorkCount).toBe(1); // only the pending one counts
+      expect(entries[0]!.hasWorkCount).toBe(1); // one seat, regardless of its three active rows
+    });
+
+    it.each(["in-progress", "blocked"])("slice 17 — a seat with only %s work counts as assigned", (state) => {
+      const rigId = seedRig(`assigned-${state}`);
+      const n1 = seedNode(rigId, "dev");
+      seedSession(n1, "running");
+      seedQitem(`tmux-${n1}`, state);
+
+      expect(ps.getEntries()[0]!.hasWorkCount).toBe(1);
     });
   });
 

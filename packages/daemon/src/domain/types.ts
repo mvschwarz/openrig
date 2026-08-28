@@ -649,15 +649,21 @@ export interface NodeInventoryEntry {
   lastActivityAt?: string | null;
   /**
    * Slice 15 — `has-work-to-do` primitive. Derived from queue/assignment
-   * projection (pending qitems whose `destination_session` matches this
-   * seat's `canonicalSessionName`).
+   * projection (pending, in-progress, or blocked qitems whose
+   * `destination_session` matches this seat's canonical coordinate).
    *
    * MUST NOT be derived from `terminalActive` or tmux output. Two
    * orthogonal primitives, never one inferred from the other.
    */
   hasAssignedWork?: boolean;
+  /** Total active qitems assigned to this seat (pending + in-progress + blocked). */
+  assignedWorkCount?: number;
   /** Optional count of pending qitems assigned to this seat (cheap aggregate). */
   pendingWorkCount?: number;
+  /** Optional count of claimed in-progress qitems assigned to this seat. */
+  inProgressWorkCount?: number;
+  /** Optional count of blocked qitems still assigned to this seat. */
+  blockedWorkCount?: number;
   /**
    * OPR.0.4.3.19 — liveness identity verdict (the THIRD axis). Present when
    * the SeatIdentityReconciler has recorded a verdict for this node; absent

@@ -310,6 +310,31 @@ describe("Rig CRUD routes", () => {
     expect(nodeData.data.status).toBe("running");
   });
 
+  it("GET /api/rigs/:id/graph -> node.data carries the honest assigned-work breakdown", async () => {
+    const rig = repo.createRig("r01");
+    const node = repo.addNode(rig.id, "dev.impl", { role: "worker" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@r01");
+    sessionRegistry.updateStatus(session.id, "running");
+    const ts = "2026-08-28 10:00:00";
+    for (const [index, state] of ["pending", "in-progress", "blocked", "done"].entries()) {
+      db.prepare(`
+        INSERT INTO queue_items
+          (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, body)
+        VALUES (?, ?, ?, 'op@test', 'dev-impl@r01', ?, 'routine', 'routine', 'body')
+      `).run(`q-graph-${index}`, ts, ts, state);
+    }
+
+    const res = await app.request(`/api/rigs/${rig.id}/graph`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const data = body.nodes.find((n: { data: { logicalId: string } }) => n.data.logicalId === "dev.impl").data;
+    expect(data.hasAssignedWork).toBe(true);
+    expect(data.assignedWorkCount).toBe(3);
+    expect(data.pendingWorkCount).toBe(1);
+    expect(data.inProgressWorkCount).toBe(1);
+    expect(data.blockedWorkCount).toBe(1);
+  });
+
   it("GET /api/rigs/:id/graph -> unbound node has binding: null in data", async () => {
     const rig = repo.createRig("r01");
     repo.addNode(rig.id, "worker");

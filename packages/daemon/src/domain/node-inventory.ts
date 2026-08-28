@@ -951,8 +951,8 @@ export function getNodeDetailWithContext(
  * Two orthogonal enrichments computed independently (non-inference
  * contract per IMPL-PRD §2.3):
  *   - `terminalActive`: read from SeatActivityService (tmux signal)
- *   - `hasAssignedWork` + `pendingWorkCount`: derived from queue_items
- *     where destination_session matches the seat's canonical session name
+ *   - assigned-work counts: pending, in-progress, and blocked queue_items
+ *     where destination_session matches either canonical coordinate for the seat
  *
  * Pure / synchronous — keeps the projection cheap for both `rig ps` and
  * the UI which both fetch this per-request. The two enrichments do not
@@ -963,7 +963,7 @@ export function attachTerminalActivityAndWork(
   deps: { db: Database.Database; seatActivity?: SeatActivityService },
 ): NodeInventoryEntry[] {
   const seatActivity = deps.seatActivity ?? null;
-  const pendingByDest = readPendingWorkBySession(deps.db);
+  const assignedByDest = readAssignedWorkBySession(deps.db);
   return entries.map((entry) => {
     let terminalActive: boolean | null | undefined = undefined;
     // ARCH RULING 3a947fb1 (FR-7 additive): project the RAW lastActivityAt fact
@@ -994,14 +994,14 @@ export function attachTerminalActivityAndWork(
           }
         : null;
     }
-    const pendingCount = countPendingForEntry(entry, pendingByDest);
+    const work = countAssignedWorkForEntry(entry, assignedByDest);
     return {
       ...entry,
       terminalActive,
       lastActivityAt,
       activityState,
-      hasAssignedWork: pendingCount > 0,
-      pendingWorkCount: pendingCount,
+      hasAssignedWork: work.assignedWorkCount > 0,
+      ...work,
     };
   });
 }
@@ -1037,19 +1037,36 @@ export function attachTerminalActivityAndWork(
  * when both forms are identical (managed seats whose
  * canonicalSessionName already equals the derived canonical form).
  */
-function countPendingForEntry(
+export interface AssignedWorkCounts {
+  assignedWorkCount: number;
+  pendingWorkCount: number;
+  inProgressWorkCount: number;
+  blockedWorkCount: number;
+}
+
+export function countAssignedWorkForEntry(
   entry: NodeInventoryEntry,
-  pendingByDest: Map<string, number>,
-): number {
+  assignedByDest: Map<string, AssignedWorkCounts>,
+): AssignedWorkCounts {
   const keys = new Set<string>();
   if (entry.canonicalSessionName) keys.add(entry.canonicalSessionName);
   const derived = deriveCanonicalFromEntry(entry);
   if (derived) keys.add(derived);
-  let count = 0;
+  const total: AssignedWorkCounts = {
+    assignedWorkCount: 0,
+    pendingWorkCount: 0,
+    inProgressWorkCount: 0,
+    blockedWorkCount: 0,
+  };
   for (const key of keys) {
-    count += pendingByDest.get(key) ?? 0;
+    const counts = assignedByDest.get(key);
+    if (!counts) continue;
+    total.assignedWorkCount += counts.assignedWorkCount;
+    total.pendingWorkCount += counts.pendingWorkCount;
+    total.inProgressWorkCount += counts.inProgressWorkCount;
+    total.blockedWorkCount += counts.blockedWorkCount;
   }
-  return count;
+  return total;
 }
 
 /** EXPORTED (OPR.0.4.6.FAC1): the derived canonical coordinate
@@ -1065,15 +1082,32 @@ export function deriveCanonicalFromEntry(entry: NodeInventoryEntry): string | nu
   return deriveCanonicalSessionName(pod, member, entry.rigName);
 }
 
-export function readPendingWorkBySession(db: Database.Database): Map<string, number> {
+export function readAssignedWorkBySession(db: Database.Database): Map<string, AssignedWorkCounts> {
   const rows = db.prepare(`
-    SELECT destination_session, COUNT(*) as c
+    SELECT destination_session,
+      COUNT(*) as assigned_count,
+      SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END) as pending_count,
+      SUM(CASE WHEN state = 'in-progress' THEN 1 ELSE 0 END) as in_progress_count,
+      SUM(CASE WHEN state = 'blocked' THEN 1 ELSE 0 END) as blocked_count
     FROM queue_items
-    WHERE state = 'pending'
+    WHERE state IN ('pending', 'in-progress', 'blocked')
     GROUP BY destination_session
-  `).all() as Array<{ destination_session: string; c: number }>;
-  const out = new Map<string, number>();
-  for (const r of rows) out.set(r.destination_session, r.c);
+  `).all() as Array<{
+    destination_session: string;
+    assigned_count: number;
+    pending_count: number;
+    in_progress_count: number;
+    blocked_count: number;
+  }>;
+  const out = new Map<string, AssignedWorkCounts>();
+  for (const r of rows) {
+    out.set(r.destination_session, {
+      assignedWorkCount: r.assigned_count,
+      pendingWorkCount: r.pending_count,
+      inProgressWorkCount: r.in_progress_count,
+      blockedWorkCount: r.blocked_count,
+    });
+  }
   return out;
 }
 

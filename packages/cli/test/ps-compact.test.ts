@@ -70,7 +70,10 @@ function makeFatNode(rigId: string, rigName: string, logicalId: string, opts?: {
   activityState?: string;
   activityReason?: string;
   hasAssignedWork?: boolean;
+  assignedWorkCount?: number;
   pendingWorkCount?: number;
+  inProgressWorkCount?: number;
+  blockedWorkCount?: number;
   latestError?: string | null;
   contextPercent?: number | null;
 }) {
@@ -96,7 +99,10 @@ function makeFatNode(rigId: string, rigName: string, logicalId: string, opts?: {
     latestError: opts?.latestError ?? null,
     terminalActive: true,
     hasAssignedWork: opts?.hasAssignedWork ?? false,
+    assignedWorkCount: opts?.assignedWorkCount ?? opts?.pendingWorkCount ?? 0,
     pendingWorkCount: opts?.pendingWorkCount ?? 0,
+    inProgressWorkCount: opts?.inProgressWorkCount ?? 0,
+    blockedWorkCount: opts?.blockedWorkCount ?? 0,
     agentActivity: {
       state: opts?.activityState ?? "running",
       reason: opts?.activityReason ?? "mid_work_pattern",
@@ -134,7 +140,10 @@ const RIG_A_NODES = [
     activityReason: "approval_pending",
     latestError: "Compaction imminent",
     hasAssignedWork: true,
+    assignedWorkCount: 6,
     pendingWorkCount: 3,
+    inProgressWorkCount: 2,
+    blockedWorkCount: 1,
     contextPercent: 92,
   }),
 ];
@@ -150,7 +159,10 @@ const RIG_B_NODES = [
 const RIG_C_NODES = [
   makeFatNode("rig-c", "openrig-velocity", "orch1.lead", {
     hasAssignedWork: true,
+    assignedWorkCount: 7,
     pendingWorkCount: 5,
+    inProgressWorkCount: 1,
+    blockedWorkCount: 1,
   }),
   makeFatNode("rig-c", "openrig-velocity", "dev1.driver"),
   makeFatNode("rig-c", "openrig-velocity", "dev1.qa"),
@@ -298,7 +310,12 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
       expect(node.agentActivity).toBeDefined();
       expect(node.agentActivity).toHaveProperty("state");
       expect(node).toHaveProperty("hasAssignedWork");
+      expect(node).toHaveProperty("assignedWorkCount");
       expect(node).toHaveProperty("pendingWorkCount");
+      // Detailed state siblings stay available through --full/--fields; compact
+      // keeps every base key plus the total needed to render claimed work honestly.
+      expect(node.inProgressWorkCount).toBeUndefined();
+      expect(node.blockedWorkCount).toBeUndefined();
 
       // Excluded heavy fields absent
       expect(node.contextUsage).toBeUndefined();
@@ -420,6 +437,8 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     // Full preserves all fields; compact omits heavy ones
     expect(full[0].contextUsage).toBeDefined();
     expect(compact[0].contextUsage).toBeUndefined();
+    expect(full[0]).toHaveProperty("inProgressWorkCount");
+    expect(full[0]).toHaveProperty("blockedWorkCount");
   });
 
   // -- Composition: --fields overrides compact (existing behavior preserved) --
@@ -432,6 +451,25 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     const entries = parsed.entries;
     expect(entries.length).toBe(TOTAL_NODE_COUNT);
     expect(Object.keys(entries[0])).toEqual(["rigName", "canonicalSessionName"]);
+  });
+
+  it("--fields exposes the exact assigned-work state breakdown omitted from compact rows", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync([
+        "node", "rig", "ps", "--nodes", "-A", "--json", "--fields",
+        "canonicalSessionName,assignedWorkCount,pendingWorkCount,inProgressWorkCount,blockedWorkCount",
+      ]);
+    });
+    const entries = JSON.parse(logs.join("")).entries;
+    const assigned = entries.find((entry: Record<string, unknown>) =>
+      entry.canonicalSessionName === "dev1-design@openrig-build");
+    expect(assigned).toEqual({
+      canonicalSessionName: "dev1-design@openrig-build",
+      assignedWorkCount: 6,
+      pendingWorkCount: 3,
+      inProgressWorkCount: 2,
+      blockedWorkCount: 1,
+    });
   });
 
   // -- --verbose alias --
@@ -479,6 +517,11 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     // All nodes rendered (same breadth)
     expect(output).toContain("orch1-lead@openrig-build");
     expect(output).toContain("dev1-driver@openrig-velocity");
+    const assignedLine = output.split("\n").find((line) => line.includes("dev1-design@openrig-build"));
+    expect(assignedLine).toBeDefined();
+    // WORK begins after the fixed RIG/SESSION/LIFECYCLE/ACTIVITY columns.
+    // It renders the total active assignment count (6), never the pending-only count (3).
+    expect(assignedLine!.slice(22 + 38 + 11 + 14, 22 + 38 + 11 + 14 + 6).trim()).toBe("6");
   });
 
   it("--full human table uses full-detail columns", async () => {
@@ -494,5 +537,10 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
     expect(output).toContain("TERMINAL");
     expect(output).toContain("POD");
     expect(output).toContain("MEMBER");
+    const assignedLine = output.split("\n").find((line) => line.includes("dev1-design@openrig-build"));
+    expect(assignedLine).toBeDefined();
+    // WORK begins after the fixed columns through TERMINAL in the full table.
+    expect(assignedLine!.slice(30 + 10 + 14 + 34 + 12 + 17 + 10 + 10 + 9 + 11 + 9,
+      30 + 10 + 14 + 34 + 12 + 17 + 10 + 10 + 9 + 11 + 9 + 6).trim()).toBe("6");
   });
 });

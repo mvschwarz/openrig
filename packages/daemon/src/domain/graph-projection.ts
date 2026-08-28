@@ -42,7 +42,10 @@ interface RFNodeData {
   currentQitems?: CurrentQitemSummary[];
   terminalActive?: boolean | null;
   hasAssignedWork?: boolean;
+  assignedWorkCount?: number;
   pendingWorkCount?: number;
+  inProgressWorkCount?: number;
+  blockedWorkCount?: number;
   /** OPR.0.4.3.19 — liveness identity verdict threaded through so the graph
    *  surfaces the same non-green mismatch/missing evidence as node inventory. */
   identityVerdict?: SeatIdentityVerdict | null;
@@ -86,7 +89,10 @@ export interface InventoryOverlay {
   currentQitems?: CurrentQitemSummary[];
   terminalActive?: boolean | null;
   hasAssignedWork?: boolean;
+  assignedWorkCount?: number;
   pendingWorkCount?: number;
+  inProgressWorkCount?: number;
+  blockedWorkCount?: number;
   identityVerdict?: SeatIdentityVerdict | null;
   heldReason?: string | null;
 }
@@ -165,7 +171,10 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         currentQitems: overlay?.currentQitems ?? [],
         terminalActive: overlay?.terminalActive,
         hasAssignedWork: overlay?.hasAssignedWork ?? false,
+        assignedWorkCount: overlay?.assignedWorkCount ?? 0,
         pendingWorkCount: overlay?.pendingWorkCount ?? 0,
+        inProgressWorkCount: overlay?.inProgressWorkCount ?? 0,
+        blockedWorkCount: overlay?.blockedWorkCount ?? 0,
         identityVerdict: overlay?.identityVerdict ?? null,
         heldReason: overlay?.heldReason ?? null,
       },
@@ -208,7 +217,10 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         currentQitems: [],
         terminalActive: null,
         hasAssignedWork: false,
+        assignedWorkCount: 0,
         pendingWorkCount: 0,
+        inProgressWorkCount: 0,
+        blockedWorkCount: 0,
         identityVerdict: null,
         heldReason: null,
       },

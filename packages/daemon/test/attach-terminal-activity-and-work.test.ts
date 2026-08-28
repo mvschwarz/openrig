@@ -17,7 +17,12 @@ import { createFullTestDb } from "./helpers/test-app.js";
 import {
   attachTerminalActivityAndWork,
   getNodeInventory,
+  readAssignedWorkBySession,
 } from "../src/domain/node-inventory.js";
+import {
+  countAssignedWorkForSession,
+  countPendingWorkForSession,
+} from "../src/domain/ps-projection.js";
 
 function seedRig(db: Database.Database, name: string): string {
   const id = `rig-${name}`;
@@ -34,13 +39,23 @@ function seedSession(db: Database.Database, nodeId: string, sessionName: string,
   db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES (?, ?, ?, ?, ?)")
     .run(id, nodeId, sessionName, status, new Date().toISOString().replace("T", " ").slice(0, 19));
 }
-function seedPendingQitem(db: Database.Database, destinationSession: string, body = "test-body"): void {
+function seedQitem(
+  db: Database.Database,
+  destinationSession: string,
+  state: string,
+  body = "test-body",
+): string {
   const id = `q-${Date.now()}-${Math.random()}`;
   const ts = new Date().toISOString().replace("T", " ").slice(0, 19);
   db.prepare(`
     INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, body)
-    VALUES (?, ?, ?, ?, ?, 'pending', 'routine', 'routine', ?)
-  `).run(id, ts, ts, "op@test", destinationSession, body);
+    VALUES (?, ?, ?, ?, ?, ?, 'routine', 'routine', ?)
+  `).run(id, ts, ts, "op@test", destinationSession, state, body);
+  return id;
+}
+
+function seedPendingQitem(db: Database.Database, destinationSession: string, body = "test-body"): void {
+  seedQitem(db, destinationSession, "pending", body);
 }
 
 function makeSeatActivityFor(activeBySession: Record<string, boolean | null>) {
@@ -325,5 +340,72 @@ describe("attachTerminalActivityAndWork — slice 15 per-node enrichment", () =>
     const [entry] = attachTerminalActivityAndWork(getNodeInventory(db, rig), { db });
     expect(entry!.pendingWorkCount).toBe(1);
     expect(entry!.hasAssignedWork).toBe(true);
+  });
+
+  it("slice 17 RED specimen — a claimed in-progress row remains assigned without changing pendingWorkCount", () => {
+    const rig = seedRig(db, "claimed");
+    const n = seedNode(db, rig, "dev");
+    seedSession(db, n, "dev@rig", "running");
+    const qitemId = seedQitem(db, "dev@rig", "in-progress");
+    db.prepare("UPDATE queue_items SET claimed_at = ? WHERE qitem_id = ?")
+      .run("2026-08-28 09:24:44", qitemId);
+
+    const [entry] = attachTerminalActivityAndWork(getNodeInventory(db, rig), { db });
+    expect(entry!.hasAssignedWork).toBe(true);
+    expect(entry!.assignedWorkCount).toBe(1);
+    expect(entry!.pendingWorkCount).toBe(0);
+    expect(entry!.inProgressWorkCount).toBe(1);
+    expect(entry!.blockedWorkCount).toBe(0);
+  });
+
+  it.each([
+    ["pending", true, 1, 1, 0, 0],
+    ["in-progress", true, 1, 0, 1, 0],
+    ["blocked", true, 1, 0, 0, 1],
+    ["done", false, 0, 0, 0, 0],
+    ["canceled", false, 0, 0, 0, 0],
+    ["handed-off", false, 0, 0, 0, 0],
+  ] as const)(
+    "slice 17 state matrix — %s projects assigned=%s with exact per-state counts",
+    (state, hasAssignedWork, assigned, pending, inProgress, blocked) => {
+      const rig = seedRig(db, `matrix-${state}`);
+      const n = seedNode(db, rig, "dev");
+      seedSession(db, n, "dev@rig", "running");
+      seedQitem(db, "dev@rig", state);
+
+      const [entry] = attachTerminalActivityAndWork(getNodeInventory(db, rig), { db });
+      expect(entry!.hasAssignedWork).toBe(hasAssignedWork);
+      expect(entry!.assignedWorkCount).toBe(assigned);
+      expect(entry!.pendingWorkCount).toBe(pending);
+      expect(entry!.inProgressWorkCount).toBe(inProgress);
+      expect(entry!.blockedWorkCount).toBe(blocked);
+    },
+  );
+
+  it("slice 17 mixed-state breakdown keeps pendingWorkCount pending-only and ignores terminal rows", () => {
+    const rig = seedRig(db, "mixed");
+    const n = seedNode(db, rig, "dev");
+    seedSession(db, n, "dev@rig", "running");
+    for (const state of ["pending", "pending", "in-progress", "blocked", "done", "canceled", "handed-off"]) {
+      seedQitem(db, "dev@rig", state);
+    }
+
+    const [entry] = attachTerminalActivityAndWork(getNodeInventory(db, rig), { db });
+    expect(entry!.hasAssignedWork).toBe(true);
+    expect(entry!.assignedWorkCount).toBe(4);
+    expect(entry!.pendingWorkCount).toBe(2);
+    expect(entry!.inProgressWorkCount).toBe(1);
+    expect(entry!.blockedWorkCount).toBe(1);
+    expect(countPendingWorkForSession(db, "dev@rig")).toBe(2);
+  });
+
+  it("slice 17 batch and per-session computation sites return identical state counts", () => {
+    for (const state of ["pending", "pending", "in-progress", "blocked", "done"]) {
+      seedQitem(db, "dev@rig", state);
+    }
+
+    expect(readAssignedWorkBySession(db).get("dev@rig")).toEqual(
+      countAssignedWorkForSession(db, "dev@rig"),
+    );
   });
 });

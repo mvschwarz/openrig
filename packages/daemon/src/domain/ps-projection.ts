@@ -1,6 +1,11 @@
 import type Database from "better-sqlite3";
 import type { AgentActivity, NodeInventoryEntry, NodeLifecycleState, RigLifecycleState } from "./types.js";
-import { getNodeInventoryForAllRigs, readPendingWorkBySession } from "./node-inventory.js";
+import {
+  countAssignedWorkForEntry,
+  getNodeInventoryForAllRigs,
+  readAssignedWorkBySession,
+  type AssignedWorkCounts,
+} from "./node-inventory.js";
 import { archiveWhereClause, type RigArchiveFilter } from "./rig-repository.js";
 import type { SeatActivityService } from "./seat-activity-service.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
@@ -29,9 +34,9 @@ export interface PsEntry {
   activeCount: number;
   /**
    * Slice 15 — count of nodes whose `has-work-to-do` primitive reports
-   * `hasAssignedWork === true`. Derived from the pending queue items
-   * with `destination_session` matching the node's canonical session
-   * name. Independent from `activeCount` (non-inference contract).
+   * `hasAssignedWork === true`. Derived from active queue items
+   * with `destination_session` matching either of the node's canonical
+   * coordinates. Independent from `activeCount` (non-inference contract).
    */
   hasWorkCount: number;
   status: "running" | "partial" | "stopped";
@@ -198,11 +203,11 @@ export class PsProjectionService {
 
     const now = Date.now();
 
-    // FS-1 W1.2 (rig-level N+1 collapse): the pending-work map is host-global and
+    // FS-1 W1.2 (rig-level N+1 collapse): the assigned-work map is host-global and
     // bounded by distinct destination sessions (seat count), so read it ONCE here
     // instead of one countNodesWithPendingWork query per rig. Per-rig hasWorkCount
     // is then a pure JS derivation over the already-fetched inventory below.
-    const pendingByDest = readPendingWorkBySession(this.db);
+    const assignedByDest = readAssignedWorkBySession(this.db);
     // FS-1 W1.2: node inventory for ALL rigs built in ONE batched pass (was one
     // getNodeInventory query-set PER RIG — the rig-level N+1); indexed per rig below.
     const inventoryByRig = getNodeInventoryForAllRigs(this.db);
@@ -254,31 +259,14 @@ export class PsProjectionService {
       }
 
       // Slice 15 — `has-work-to-do` count. Subset of nodes with at
-      // least one pending qitem whose `destination_session` matches the
-      // node's `canonicalSessionName`. Sourced ONLY from the queue
+      // least one pending, in-progress, or blocked qitem whose destination
+      // matches either canonical coordinate for the node. Sourced ONLY from the queue
       // projection; never from tmux output.
-      // FS-1 W1.2: derived in JS from the single global `pendingByDest` map,
-      // byte-identical to the deleted per-rig `countNodesWithPendingWork` query.
-      // That query matched `q.destination_session = s.session_name` (SINGLE-KEY)
-      // where `s` is the node's latest session; `canonicalSessionName` IS that
-      // latest `session_name` (node-inventory.ts return), and the map is
-      // `destination_session -> pending count`, so `> 0` reproduces its `EXISTS`.
-      // NAMED DIVERGENCE (arch pin, FS-1): this derivation DELIBERATELY keeps the
-      // legacy rollup's SINGLE-KEY match (canonicalSessionName == the latest
-      // session_name) and does NOT use the per-node DUAL-KEY sibling
-      // `countPendingForEntry` (node-inventory.ts) — the canonical + derived
-      // `{pod}-{member}@{rig}` match that is the BLOCKING-A2 adopted-seat fix.
-      // The rollup and the per-node enrichment already diverged here BEFORE FS-1;
-      // FS-1 is a perf slice whose proof spine is byte-identity, so it preserves
-      // the rollup's exact prior semantics on purpose — this is preserved, not a
-      // bug. KNOWN CONSEQUENCE: the rollup undercounts pending work for adopted
-      // seats. The future correctness fix now sits ONE LINE away — swap this loop
-      // for the shared dual-key `countPendingForEntry` derivation + update the
-      // byte-identity harness. Arch-routed to pm as a named small correctness
-      // candidate (a glance-layer undercount).
+      // Slice 17: this is the SAME dual-key resolver and active-state map used by
+      // per-node inventory. The former single-key/pending-only divergence is gone.
       let hasWorkCount = 0;
       for (const node of inventory) {
-        if (node.canonicalSessionName && (pendingByDest.get(node.canonicalSessionName) ?? 0) > 0) hasWorkCount++;
+        if (countAssignedWorkForEntry(node, assignedByDest).assignedWorkCount > 0) hasWorkCount++;
       }
 
       // OPR.0.4.4.21 — attention fold, same inventory pass. Hook activity
@@ -318,15 +306,23 @@ export class PsProjectionService {
 }
 
 /**
- * Slice 15 — count of pending qitems assigned to a specific canonical
- * session name. Exposed for per-node enrichment in node-inventory.
+ * Compatibility helper: count pending-only qitems for one canonical session.
+ * The wider assigned-work projection uses countAssignedWorkForSession below.
  */
 export function countPendingWorkForSession(db: Database.Database, canonicalSessionName: string): number {
-  const row = db.prepare(`
-    SELECT COUNT(*) as c FROM queue_items
-    WHERE destination_session = ? AND state = 'pending'
-  `).get(canonicalSessionName) as { c: number } | undefined;
-  return row?.c ?? 0;
+  return countAssignedWorkForSession(db, canonicalSessionName).pendingWorkCount;
+}
+
+export function countAssignedWorkForSession(
+  db: Database.Database,
+  canonicalSessionName: string,
+): AssignedWorkCounts {
+  return readAssignedWorkBySession(db).get(canonicalSessionName) ?? {
+    assignedWorkCount: 0,
+    pendingWorkCount: 0,
+    inProgressWorkCount: 0,
+    blockedWorkCount: 0,
+  };
 }
 
 function formatDuration(ms: number): string {

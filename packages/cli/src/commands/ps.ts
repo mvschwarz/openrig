@@ -22,9 +22,9 @@ interface PsEntry {
    *  window. Sourced from the daemon's SeatActivityService; NEVER derived
    *  from queue/assignment state. */
   activeCount?: number;
-  /** Slice 15 — subset of nodes with at least one pending qitem assigned
-   *  to their canonical session name. Sourced from queue_items; NEVER
-   *  derived from tmux output. */
+  /** Slice 17 — subset of nodes with at least one pending, in-progress,
+   *  or blocked qitem assigned. Sourced from queue_items; NEVER derived
+   *  from tmux output. */
   hasWorkCount?: number;
   status: "running" | "partial" | "stopped";
   /** OPR.0.4.4.21 — additive: seats needing attention (lifecycle/startup
@@ -77,8 +77,12 @@ interface NodeEntry {
   /** Slice 15 — `has-work-to-do` primitive. Derived from queue_items;
    *  NEVER derived from terminalActive. */
   hasAssignedWork?: boolean;
+  /** Total active assignments (pending + in-progress + blocked). */
+  assignedWorkCount?: number;
   /** Slice 15 — pending qitem count for this seat (cheap aggregate). */
   pendingWorkCount?: number;
+  inProgressWorkCount?: number;
+  blockedWorkCount?: number;
   /** OPR.0.3.4.11 — held reason from node.held event. */
   heldReason?: string | null;
   agentActivity?: {
@@ -203,7 +207,10 @@ const ALLOWED_NODE_FIELDS = new Set([
   "latestError",
   "terminalActive",
   "hasAssignedWork",
+  "assignedWorkCount",
   "pendingWorkCount",
+  "inProgressWorkCount",
+  "blockedWorkCount",
   "agentActivity",
   "contextUsage",
   "heldReason",
@@ -630,8 +637,11 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       agentActivity: attention
         ? { state: n.agentActivity?.state ?? "unknown", reason: n.agentActivity?.reason }
         : { state: n.agentActivity?.state ?? "unknown" },
-      // work counts.
+      // Work counts. Compact keeps the base pending-only key plus the active
+      // total needed for honest rendering; exact state siblings remain on
+      // --full and explicit --fields.
       hasAssignedWork: n.hasAssignedWork,
+      assignedWorkCount: n.assignedWorkCount,
       pendingWorkCount: n.pendingWorkCount,
       // resume summary — type + PRESENT boolean only (never the token value).
       resumeType: n.resumeType ?? null,
@@ -799,7 +809,8 @@ latestSnapshot.
 podNamespace, canonicalSessionName, nodeKind, runtime, sessionStatus,
 startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
 resumeCommand, latestError, terminalActive, hasAssignedWork,
-pendingWorkCount, agentActivity, contextUsage, heldReason.
+assignedWorkCount, pendingWorkCount, inProgressWorkCount, blockedWorkCount,
+agentActivity, contextUsage, heldReason.
 
 --host runs on a remote host declared in ~/.openrig/hosts.yaml (no current-rig
 default applied; the remote host's rigs are shown).
@@ -1180,7 +1191,7 @@ async function handleNodes(
         n.canonicalSessionName ?? "—",
         abbrevNodeLifecycle(n.lifecycleState),
         formatActivity(n),
-        formatHasWork(n.hasAssignedWork, n.pendingWorkCount),
+        formatHasWork(n.hasAssignedWork, n.assignedWorkCount ?? n.pendingWorkCount),
         reason,
       ));
     }
@@ -1204,7 +1215,7 @@ async function handleNodes(
         n.oriented ?? "—",
         abbrevNodeLifecycle(n.lifecycleState),
         formatTerminalActive(n.terminalActive),
-        formatHasWork(n.hasAssignedWork, n.pendingWorkCount),
+        formatHasWork(n.hasAssignedWork, n.assignedWorkCount ?? n.pendingWorkCount),
         formatActivity(n),
         formatContextUsage(n.contextUsage),
         n.restoreOutcome,
@@ -1312,9 +1323,10 @@ function formatTerminalActive(t: boolean | null | undefined): string {
   return "—"; // null / undefined → no signal
 }
 
-// Slice 15 — render has-work with a hint of how much.
-// Pending count appended in parens when known and > 1 keeps the column
-// compact while remaining honest.
+// Slice 17 — render the total active assignment count. pendingWorkCount remains
+// pending-only and is never substituted here because claimed/blocked work must
+// stay visible after it leaves pending. pendingWorkCount is only a compatibility
+// fallback for an older daemon that predates assignedWorkCount.
 function formatHasWork(has: boolean | undefined, count: number | undefined): string {
   if (has === undefined) return "—";
   if (!has) return "no";

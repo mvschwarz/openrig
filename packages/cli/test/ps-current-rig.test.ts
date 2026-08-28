@@ -82,7 +82,10 @@ function makeNode(rigId: string, rigName: string, logicalId: string, opts?: {
     resumeCommand: opts?.resumeCommand ?? null,
     latestError: null,
     hasAssignedWork: false,
+    assignedWorkCount: 0,
     pendingWorkCount: 0,
+    inProgressWorkCount: 0,
+    blockedWorkCount: 0,
     resumeType: opts?.resumeType ?? null,
     resumeToken: opts?.resumeToken ?? null,
     heldReason: opts?.heldReason ?? null,
@@ -361,7 +364,7 @@ describe("OPR.0.4.0.34 — rig ps current-rig default", () => {
     for (const key of [
       "rigId", "rigName", "logicalId", "canonicalSessionName",
       "sessionStatus", "startupStatus", "lifecycleState",
-      "agentActivity", "hasAssignedWork", "pendingWorkCount",
+      "agentActivity", "hasAssignedWork", "assignedWorkCount", "pendingWorkCount",
       "resumeType", "resumeTokenPresent", "lastActivity",
     ]) {
       expect(driver, `compact row missing FR-4 key: ${key}`).toHaveProperty(key);

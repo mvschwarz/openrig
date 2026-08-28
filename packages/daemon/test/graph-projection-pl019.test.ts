@@ -151,15 +151,21 @@ describe("PL-019 projectRigToGraph: agentActivity + currentQitems", () => {
         canonicalSessionName: "r01-alpha",
         restoreOutcome: "n-a",
         terminalActive: true,
-        hasAssignedWork: false,
-        pendingWorkCount: 0,
+        hasAssignedWork: true,
+        assignedWorkCount: 4,
+        pendingWorkCount: 1,
+        inProgressWorkCount: 2,
+        blockedWorkCount: 1,
       },
     ];
     const result = projectRigToGraph(input, overlay);
     const data = result.nodes[0].data;
     expect(data.terminalActive).toBe(true);
-    expect(data.hasAssignedWork).toBe(false);
-    expect(data.pendingWorkCount).toBe(0);
+    expect(data.hasAssignedWork).toBe(true);
+    expect(data.assignedWorkCount).toBe(4);
+    expect(data.pendingWorkCount).toBe(1);
+    expect(data.inProgressWorkCount).toBe(2);
+    expect(data.blockedWorkCount).toBe(1);
   });
 
   it("defaults currentQitems to [] when overlay omits them", () => {
