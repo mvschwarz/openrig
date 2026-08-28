@@ -19,6 +19,8 @@ import { buildSlackGatewayWire } from "../src/domain/gateway/slack/slack-subsyst
 import { DispatchBuffer } from "../src/domain/gateway/dispatch-buffer.js";
 import { OUTBOUND_OP } from "../src/domain/gateway/slack/outbound-driver.js";
 import { resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
+import { ThreadSeatMap } from "../src/domain/gateway/slack/thread-seat-map.js";
+import { makeThreadRouteResolver } from "../src/domain/gateway/slack/thread-routing.js";
 
 const registry = {
   ok: true as const,
@@ -390,6 +392,105 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
       expect(repo.listTransitions(row.qitemId).filter((transition) =>
         transition.transitionNote?.startsWith("slack-owner-notification-posted "),
       )).toHaveLength(1);
+    } finally {
+      replayWire.stop();
+    }
+  });
+
+  it("reconciles an already-landed root with its real Slack timestamp before routing the reply", async () => {
+    const row = await repo.create({
+      sourceSession: "dev-qa@v-openrig-build",
+      destinationSession: "orch-lead@v-openrig-build",
+      body: "await decision",
+      nudge: false,
+    });
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "orch-lead@v-openrig-build",
+      state: "blocked",
+      blockedOn: "human-founder@kernel",
+      summary: "Choose A or B",
+      evidenceRef: "/proof/decision.md",
+      transitionNote: "parked",
+    });
+    const ports = makeQueuePorts(repo, { loadHumanRegistry: () => registry } as never);
+    const [alert] = await ports.listHumanAlerts({ minimumLevel: "NOTICE" });
+    expect(alert).toBeDefined();
+
+    const secrets = join(home, "slack.env");
+    writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n", { mode: 0o600 });
+    saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-OWNER", secretsEnvFile: secrets }, home);
+    let postCalls = 0;
+    let landedText = "";
+    const fetchImpl = async (url: string | URL, init?: RequestInit) => {
+      if (String(url).includes("conversations.history")) {
+        return new Response(JSON.stringify({
+          ok: true,
+          messages: [{ text: landedText, ts: "1724.9100" }],
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      postCalls++;
+      landedText = String((JSON.parse(String(init?.body ?? "{}")) as { text?: string }).text ?? "");
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+
+    const firstWire = buildSlackGatewayWire({
+      home,
+      queueRepo: repo,
+      registry: { loadHumanRegistry: () => registry, resolveSlackHandle },
+      outboundIntervalMs: 60_000,
+      fetchImpl,
+    });
+    try {
+      expect(firstWire.dispatcher.dispatch(OUTBOUND_OP, alert!.destinationSession!, alert)).toMatchObject({ ok: true });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(postCalls).toBe(1);
+      expect(new DispatchBuffer(home).pending()).toHaveLength(1);
+    } finally {
+      firstWire.stop();
+    }
+
+    const replayWire = buildSlackGatewayWire({
+      home,
+      queueRepo: repo,
+      registry: { loadHumanRegistry: () => registry, resolveSlackHandle },
+      outboundIntervalMs: 60_000,
+      fetchImpl,
+    });
+    try {
+      replayWire.startServices?.();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(postCalls).toBe(1);
+      expect(new DispatchBuffer(home).pending()).toEqual([]);
+
+      const receipts = repo.listTransitions(row.qitemId).filter((transition) =>
+        transition.transitionNote?.startsWith("slack-owner-notification-posted "),
+      );
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0]!.transitionNote).toContain("message_ts=1724.9100");
+      expect(receipts[0]!.transitionNote).toContain("thread_ts=1724.9100");
+
+      const resolveRoute = makeThreadRouteResolver({
+        map: new ThreadSeatMap(db),
+        unroutedDestination: "operator-agent@kernel",
+      });
+      expect(resolveRoute({
+        type: "message",
+        user: "UFOUNDER",
+        text: "Choose A",
+        ts: "1724.9101",
+        thread_ts: "1724.9100",
+        channel: "C-OWNER",
+      })).toMatchObject({
+        destination: "orch-lead@v-openrig-build",
+        routeClass: "existing-thread",
+      });
     } finally {
       replayWire.stop();
     }
