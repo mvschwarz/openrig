@@ -130,9 +130,23 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
         log(`reconcile scan failed for ${decision.decisionId} (${scan.error}) — retained, no blind repost`);
         return { ok: false, class: "reconcile-unreadable", detail: scan.error };
       }
-      if (scan.texts.some((t) => t.includes(marker))) {
-        log(`reconcile: marker "${marker}" FOUND — prior ambiguous post landed; ack without repost`);
-        opts.onPosted?.(q, "reconciled", threadTs);
+      const matched = scan.messages.find((m) => m.text.includes(marker));
+      if (matched) {
+        log(`reconcile: marker "${marker}" FOUND at ts=${matched.ts || "(missing)"} — prior ambiguous post landed; ack without repost`);
+        // S14 repair (R2 HOLD): the matched message's REAL Slack ts is the thread
+        // anchor. Mirror the normal-post order exactly — root-open (ThreadSeatMap +
+        // rebuild stamp) first, then the same-row receipt, only then durable
+        // delivered/seen/release — so a reply to the REAL root routes to the row
+        // owner instead of generically. A synthetic ts here was the defect.
+        if (matched.ts) {
+          if (threadTs === undefined) opts.onPostedRoot?.(q, matched.ts);
+          opts.onPosted?.(q, matched.ts, threadTs);
+        } else {
+          // Degraded, stated: a matched message without ts cannot anchor a thread;
+          // keep the ack (never repost) but say loudly that routing stays generic.
+          log(`reconcile: matched message carries NO ts — receipt degraded to synthetic; thread routing unavailable for ${q.qitemId ?? decision.decisionId}`);
+          opts.onPosted?.(q, "reconciled", threadTs);
+        }
         opts.delivered.mark(decision.decisionId, "reconciled-delivered");
         if (q.qitemId) {
           const key = q.notificationKey ?? q.qitemId;

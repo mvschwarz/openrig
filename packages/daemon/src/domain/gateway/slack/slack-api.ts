@@ -254,13 +254,17 @@ export async function fetchRecentMessageTexts(
   fetchImpl: FetchImpl = defaultFetch,
   limit = 100,
   timeoutMs = DEFAULT_TIMEOUT_MS,
-): Promise<{ ok: boolean; texts: string[]; error?: string }> {
+): Promise<{ ok: boolean; texts: string[]; messages: { text: string; ts: string }[]; error?: string }> {
   const method = threadTs ? "conversations.replies" : "conversations.history";
   const body: Record<string, unknown> = threadTs ? { channel, ts: threadTs, limit } : { channel, limit };
   const r = await callWebApi(method, token, body, fetchImpl, timeoutMs, "get-query");
-  if (!r.ok) return { ok: false, texts: [], error: r.error };
-  const messages = (r.json.messages ?? []) as { text?: string }[];
-  return { ok: true, texts: messages.map((m) => String(m.text ?? "")) };
+  if (!r.ok) return { ok: false, texts: [], messages: [], error: r.error };
+  const messages = (r.json.messages ?? []) as { text?: string; ts?: string }[];
+  // S14 repair: retain each message's REAL Slack ts alongside its text — the
+  // reconcile-by-marker path needs the matched message's ts to open the thread
+  // map and stamp receipts with the real anchor, not a synthetic value.
+  const shaped = messages.map((m) => ({ text: String(m.text ?? ""), ts: String(m.ts ?? "") }));
+  return { ok: true, texts: shaped.map((m) => m.text), messages: shaped };
 }
 
 export interface PostChatMessageInput {
