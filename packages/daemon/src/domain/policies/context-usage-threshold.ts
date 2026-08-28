@@ -40,6 +40,16 @@ export function makeContextUsageThresholdPolicy(
           },
         };
       }
+      if (job.currentGenerationTranscriptPending) {
+        return {
+          action: "skip",
+          reason: "current_generation_transcript_pending",
+          notes: {
+            targetSession: job.target.session,
+            occupantGeneration: job.occupantGeneration,
+          },
+        };
+      }
 
       let observedBytes: number;
       try {

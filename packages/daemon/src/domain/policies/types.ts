@@ -31,6 +31,7 @@ export interface PolicyJob {
   requiresJobId: string | null;
   lastFiredGeneration: string | null;
   occupantGeneration: string | null;
+  currentGenerationTranscriptPending: boolean;
   requiredReceiptSatisfied: boolean;
   requiredReceiptDeferred: boolean;
 }

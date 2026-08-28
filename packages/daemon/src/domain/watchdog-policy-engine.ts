@@ -207,6 +207,7 @@ export class WatchdogPolicyEngine {
       ? (this.resolveTargetGeneration?.(job.targetSession) ?? null)
       : null;
     let watchedFilePath = job.watchedFilePath;
+    let currentGenerationTranscriptPending = false;
     if (
       isContextUsageThreshold &&
       occupantGeneration &&
@@ -215,6 +216,8 @@ export class WatchdogPolicyEngine {
       watchedFilePath = this.jobsRepo.findTranscriptPath(job.targetSession, occupantGeneration);
       if (watchedFilePath) {
         this.jobsRepo.recordWatchedFileBinding(job.jobId, watchedFilePath, occupantGeneration);
+      } else {
+        currentGenerationTranscriptPending = true;
       }
     }
     const requiredJob = job.requiresJobId ? this.jobsRepo.getById(job.requiresJobId) : null;
@@ -256,6 +259,7 @@ export class WatchdogPolicyEngine {
       requiresJobId: job.requiresJobId,
       lastFiredGeneration: job.lastFiredGeneration,
       occupantGeneration,
+      currentGenerationTranscriptPending,
       requiredReceiptSatisfied,
       requiredReceiptDeferred,
     };
