@@ -76,8 +76,8 @@ one does not deprecate the others. Nothing below deletes or overrides an existin
 | **RELEASE** | The release ceremony conventions (publication identity, honest release notes) and the CAPABILITY-DELTA LIFECYCLE LAW: each release's delta is authored at the fence, bound to the exact published cut; canon absorbs its named items; the canon header then names the delta, which expires it — verify the expiry fired, and never cite an expired delta. Full statement: `release-boundary.md` §6. |
 | **BOUNDARY** | **The release boundary** — housekeeping run once per fence so the next release starts clean: seats reset or re-primed per their continuity needs, memory distilled (keep what changed a decision recently), every queue swept by destination and dispositioned, substrate torn down, boards frozen as records, a clean-box baseline captured. A checklist of judgment guides, not gates. Full reference: `release-boundary.md`. |
 
-> Full reference documents for each component (graduated 2026-08-28, slice
-> OPR.0.5.6.4): the product-management pass — `product-management-pass.md` · the
+> Full reference documents for each component (graduated 2026-08-28): the
+> product-management pass — `product-management-pass.md` · the
 > planning dial — `planning-dial.md` · the wave model — `wave-sdlc.md` · the release
 > boundary (including the capability-delta lifecycle law) — `release-boundary.md` ·
 > the mission install — `mission-install.md` (lands with its own slice). The
@@ -404,9 +404,10 @@ anything: strip what you did not choose, then choose.
 - **Selection evals for skill/context surfaces:** referenced by audits as the gate
   for tier moves; the runner is not built. Route: named in the scope of record as
   gated work — sequence nothing on it.
-- **Derived progress surfaces:** progress derived from proof rather than authored is
-  ruled direction pending an owner decision on the doctrine. Route: the owner
-  decision, then a slice.
+- **Derived progress surfaces:** the direction is settled — `PROGRESS.md` reflects
+  proof items, checked off through the proof protocol, rather than hand-authored
+  status. Implementation and scheduling remain unbuilt. Route: a scoped follow-on
+  slice when scheduled.
 - **Release-ceremony reference:** the RELEASE row's ceremony conventions (publication
   identity, honest release notes) are practiced but not yet a graduated document.
   Route: graduate with a lived specimen at a future fence.
