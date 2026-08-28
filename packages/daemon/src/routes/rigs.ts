@@ -87,7 +87,13 @@ function normalizeExpansionPodFragment(raw: Record<string, unknown>): ExpansionP
     summary: typeof raw["summary"] === "string" ? raw["summary"] : undefined,
     members: members.map((member) => {
       const m = (member ?? {}) as Record<string, unknown>;
-      const rawSessionSource = (m["sessionSource"] ?? m["session_source"]) as unknown;
+      // OPR.0.5.6.3 presence invariant: track KEY PRESENCE, not value shape —
+      // any present sessionSource/session_source (null, primitive, mode-only,
+      // ref:null, unknown mode, malformed ref fields) must reach the ONE
+      // canonical validator; only a truly absent key stays absent (the
+      // permission_policy R2 precedent, applied to session_source).
+      const hasSessionSource = "sessionSource" in m || "session_source" in m;
+      const rawSessionSource: unknown = "sessionSource" in m ? m["sessionSource"] : m["session_source"];
       let sessionSource: import("../domain/types.js").SessionSourceSpec | undefined;
       if (rawSessionSource !== undefined && rawSessionSource !== null && typeof rawSessionSource === "object") {
         const ss = rawSessionSource as Record<string, unknown>;
@@ -108,13 +114,11 @@ function normalizeExpansionPodFragment(raw: Record<string, unknown>): ExpansionP
               sessionSource = { mode: "rebuild", ref: { kind: "artifact_set", value: paths } };
             }
           } else if (mode === "agent_image") {
-            // OPR.0.5.6.3 repair: agent_image rides the ingress like fork/rebuild —
-            // dropping it here silently erased the source (and its version pin)
-            // before the service mapper could preserve it. Valid v0 shape
-            // (image_name kind, non-empty string value, string|number version)
-            // constructs typed with SCHEMA-PARITY String() coercion, exactly
-            // like rigspec-schema.ts normalize (YAML `version: 3` arrives as a
-            // JSON number; omitting it would recreate the silent-default defect).
+            // OPR.0.5.6.3 repair: agent_image rides the ingress like fork/rebuild.
+            // Valid v0 shape (image_name kind, non-empty string value, string|number
+            // version) constructs typed with SCHEMA-PARITY String() coercion, exactly
+            // like rigspec-schema.ts normalize (YAML `version: 3` arrives as a JSON
+            // number; omitting it would recreate the silent-default defect).
             const versionRaw = refRec["version"];
             const validValue = kind === "image_name"
               && typeof refRec["value"] === "string" && refRec["value"].trim() !== "";
@@ -126,15 +130,15 @@ function normalizeExpansionPodFragment(raw: Record<string, unknown>): ExpansionP
                 mode: "agent_image",
                 ref: { kind: "image_name", value: refRec["value"] as string, ...(version !== undefined ? { version } : {}) },
               };
-            } else {
-              // Present-INVALID shape: PRESERVE RAW PRESENCE (the permission_policy
-              // R2 precedent above) so the ONE canonical RigSpec validator rejects
-              // with a structured error — erasing into absence silently widens an
-              // invalid request into an unpinned/no-source expansion.
-              sessionSource = rawSessionSource as import("../domain/types.js").SessionSourceSpec;
             }
           }
         }
+      }
+      // Presence fallthrough: a present value that did not normalize to a valid
+      // typed shape carries RAW so the canonical validator rejects it structurally
+      // — never converted to absence.
+      if (hasSessionSource && sessionSource === undefined) {
+        sessionSource = rawSessionSource as import("../domain/types.js").SessionSourceSpec;
       }
       return {
         id: typeof m["id"] === "string" ? m["id"] : "",
@@ -169,7 +173,9 @@ function normalizeExpansionPodFragment(raw: Record<string, unknown>): ExpansionP
               ? m["restore_policy"]
               : undefined,
         label: typeof m["label"] === "string" ? m["label"] : undefined,
-        ...(sessionSource ? { sessionSource } : {}),
+        // Presence-governed, never truthiness: null/false/primitive raw values
+        // must survive to canonical validation, not vanish at a truthy check.
+        ...(hasSessionSource ? { sessionSource } : {}),
       };
     }),
     edges: Array.isArray(raw["edges"])

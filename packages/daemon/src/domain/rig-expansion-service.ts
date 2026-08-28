@@ -161,11 +161,13 @@ export class RigExpansionService {
             // OPR.0.5.6.3 repair amendment: session_source is carried FAITHFULLY —
             // the route already normalizes valid shapes to the typed spec (whose
             // field names are identical in snake_case form), and a present-INVALID
-            // agent_image shape rides through RAW so the ONE canonical RigSpec
-            // validator rejects it structurally. A field-by-field re-map here was
-            // the original drop site (ref.version, wave-1 R2) and would crash on
+            // value rides through RAW so the ONE canonical RigSpec validator
+            // rejects it structurally. A field-by-field re-map here was the
+            // original drop site (ref.version, wave-1 R2) and would crash on
             // preserved-raw input; a faithful carry has no field list to forget.
-            ...(member.sessionSource ? { session_source: member.sessionSource } : {}),
+            // KEY PRESENCE, never truthiness, governs emission: null/false/
+            // primitive raw values must not vanish before canonical validation.
+            ...("sessionSource" in member ? { session_source: member.sessionSource } : {}),
             ...(member.starterRef ? {
               starter_ref: { name: member.starterRef.name },
             } : {}),
