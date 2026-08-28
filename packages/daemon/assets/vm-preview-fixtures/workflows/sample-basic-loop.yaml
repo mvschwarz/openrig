@@ -1,8 +1,7 @@
-# VM-preview fixture for slice 22 founder-walk-vm-populated-env.
-# Derived from the 0.3.0 basic-loop starter; renamed to avoid colliding
-# with the built-in spec when this fixture file is dropped into a
-# populated daemon's workspace.specs_root/workflows/ directory.
-# Slice 11's folder-discovery scanner auto-discovers it on next list.
+# Example workflow for the populated VM preview.
+# Its distinct ID avoids colliding with the built-in basic-loop specification
+# when copied into the populated daemon's configured workflows directory.
+# The daemon discovers it on the next workflow-library listing.
 workflow:
   id: vm-preview-basic-loop
   version: 1
