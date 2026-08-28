@@ -76,7 +76,11 @@ script — depth profiles (below) select how much of each layer a given seat rec
   routed work item, whose own spec opens with its full design contract.
 
 The situation (fresh, handover, boundary, switch) selects subsets over the layers;
-the seat class selects depth. Do not send everyone everything.
+the seat class selects depth. Do not send everyone everything. Two invariants hold at
+every depth: **the arrangement layer is never skipped** (it is what tells the reader
+whom to trust), and **a profile slot with no matching artifact is never authored at
+install time** — fill it with a derived listing (add it to the derive list) or leave
+it empty and say so.
 
 ## Delivery rules
 
@@ -90,6 +94,10 @@ the seat class selects depth. Do not send everyone everything.
   delivery): then the walk carries the bytes, in pieces, never as one block.
 - **Ask for a reaction per piece** where consumption matters: one line stating what
   the piece changes for the reader. A silent walk is unverified delivery.
+- **A pointer may be section-scoped.** When one file mixes install content with
+  reference material, the pointer names the sections to read and the sections that
+  are reference; the reader's reaction names the sections actually read. Splitting
+  the file is better when two consumers keep needing different subsets.
 
 ## Composition, not generation
 
@@ -113,13 +121,23 @@ candidate piece: install content, or reference. If unsure, it is reference.
 Layer 5 is a sequence, not a suggestion. Run all of it:
 
 1. The dispatcher's final walked piece assigns the derive list — each volatile fact
-   paired with the command that derives it.
-2. The installee runs every command and writes the dated delta beside its recap.
+   paired with the command that derives it — **and names the exact destination path
+   for the delta** (a fresh seat has no recap yet to sit beside; the dispatcher
+   decides the home, the installee does not guess).
+2. The installee runs every command and writes the dated delta at the named path.
 3. The dispatcher verifies the artifact **exists** (not that it is claimed).
-4. A second reader — anyone but the installee — checks the delta's **facts**.
+4. A second reader — anyone but the installee — checks the delta's **facts**. When
+   the project has only a dispatcher and an installee, the dispatcher performs the
+   fact check and the delta records that the check was self-performed — an honest
+   degradation, stated, never silent.
 5. A factual error triggers a re-derive round: the installee re-runs the commands,
    corrects, and reseals the delta. The correction round is value, not overhead:
    it verifies consumption and calibrates the instrument in one act.
+
+A volatile fact with **no deriving command** — one only a human or external party can
+settle — goes on the list anyway, marked `UNVERIFIED` with an explicit
+ask-instruction; the delta carries it forward unresolved rather than silently
+adopting a value.
 
 An install without a landed, checked delta is not complete. It is a broadcast.
 
