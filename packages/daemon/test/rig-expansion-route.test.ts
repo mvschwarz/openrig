@@ -419,4 +419,46 @@ describe("POST /api/rigs/:rigId/expand", () => {
       ).toMatchObject({ c: 0 });
     }
   });
+
+  // S03 final presence amendment: the invariant is KEY PRESENCE, not a list of
+  // malformed shapes. ANY present session_source value — a mode-only object, a
+  // null/non-object ref, a primitive, or null itself — must reach the canonical
+  // validator and fail structured; only a truly absent key stays absent.
+  it("presence invariant: mode-only, ref:null, primitive, and null session_source all reach the canonical validator (400 naming session_source, zero persistence)", async () => {
+    const rig = seedRig("presence-invariant-rig");
+    const post = (sessionSource: unknown, podId: string) =>
+      setup.app.request(`/api/rigs/${rig.id}/expand`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          pod: {
+            id: podId,
+            label: "P",
+            members: [
+              { id: "w", runtime: "claude-code", agent_ref: "local:agents/impl", profile: "default", cwd: "/tmp", session_source: sessionSource },
+            ],
+            edges: [],
+          },
+        }),
+      });
+
+    const cases: Array<[unknown, string]> = [
+      [{ mode: "agent_image" }, "pres1"],
+      [{ mode: "agent_image", ref: null }, "pres2"],
+      [{ mode: "agent_image", ref: "builder-base" }, "pres3"],
+      ["builder-base", "pres4"],
+      [null, "pres5"],
+      [{ mode: "snapshot", ref: { kind: "image_name", value: "x" } }, "pres6"],
+    ];
+    for (const [sessionSource, podId] of cases) {
+      const res = await post(sessionSource, podId);
+      expect(res.status, `${podId} must fail structured validation, never erase into absence`).toBe(400);
+      const body = await res.json();
+      expect(JSON.stringify(body), `${podId} error must name session_source`).toMatch(/session_source/);
+      expect(
+        db.prepare("SELECT COUNT(*) AS c FROM nodes WHERE logical_id LIKE ?").get(`${podId}.%`),
+        `${podId} must persist nothing`,
+      ).toMatchObject({ c: 0 });
+    }
+  });
 });
