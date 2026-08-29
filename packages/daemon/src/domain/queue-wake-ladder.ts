@@ -449,6 +449,18 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       )
       .all() as Array<{ qitem_id: string }>;
 
+    // OPR.0.5.6.24 B2 (advisor-ruled one-engine arm): claimed in-progress rows
+    // whose last nudge is the parked-owner consumer's FAILED wake join the SAME
+    // ladder flow through their native lastNudgeResult vocabulary. The consumer
+    // makes one attempt and never retries — this ladder owns everything after.
+    const parkedOwnerFailureRows = deps.db
+      .prepare(
+        `SELECT qitem_id FROM queue_items
+          WHERE state = 'in-progress' AND claimed_at IS NOT NULL
+            AND last_nudge_result LIKE 'failed: parked-owner wake delivery%'`,
+      )
+      .all() as Array<{ qitem_id: string }>;
+
     interface Member {
       row: QueueItem;
       view: LadderView;
@@ -480,11 +492,14 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       return windowBudget.get(dest)!;
     };
 
-    for (const { qitem_id } of batonRows) {
+    for (const { qitem_id } of [...batonRows, ...parkedOwnerFailureRows]) {
       const row = deps.queueRepo.getById(qitem_id);
       if (!row) continue;
       const usagePool = usagePoolBySeat.get(row.destinationSession);
-      if (usagePool) {
+      // OPR.0.5.6.24: the usage-limit PARK mutation applies only to pending
+      // batons — a claimed in-progress row is someone's live work and is never
+      // state-mutated here; it falls through to ordinary mode classification.
+      if (usagePool && row.state === "pending") {
         let blocker = blockerByPool.get(usagePool.poolKey);
         if (!blocker) {
           blocker = await ensureUsageLimitBlocker(

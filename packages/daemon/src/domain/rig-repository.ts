@@ -138,6 +138,10 @@ interface NodeOptions {
 
 export class RigRepository {
   readonly db: Database.Database;
+  /** OPR.0.5.6.24 — born-armed (advisor-ruled birth-property principle):
+   *  protection arms in the same act that creates the rig. Wired at startup;
+   *  optional so repo construction stays dependency-free. */
+  onRigCreated?: (rig: Rig) => void;
   constructor(db: Database.Database) {
     this.db = db;
   }
@@ -148,9 +152,11 @@ export class RigRepository {
       .prepare("INSERT INTO rigs (id, name) VALUES (?, ?)")
       .run(id, name);
 
-    return this.rowToRig(
+    const rig = this.rowToRig(
       this.db.prepare("SELECT * FROM rigs WHERE id = ?").get(id) as RigRow
     );
+    this.onRigCreated?.(rig);
+    return rig;
   }
 
   /**

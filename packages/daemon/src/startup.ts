@@ -78,7 +78,7 @@ import { ChatRepository } from "./domain/chat-repository.js";
 import { StreamStore } from "./domain/stream-store.js";
 import { SlowOpRecorder, type SlowOperationInstrumentation } from "./domain/slow-op-recorder.js";
 import { configureSyncSiteRecorder } from "./domain/sync-site-wrap.js";
-import { QueueRepository } from "./domain/queue-repository.js";
+import { QueueRepository, isBlockerLive } from "./domain/queue-repository.js";
 import { createWorkflowFrontierPredicate } from "./domain/workflow-frontier-guard.js";
 import { InboxHandler } from "./domain/inbox-handler.js";
 import { OutboxHandler } from "./domain/outbox-handler.js";
@@ -1767,6 +1767,31 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
             listForJob: (jobId, limit) => watchdogHistoryLogInstance.listForJob(jobId, limit),
             countForJob: (jobId) => watchdogHistoryLogInstance.countForJob(jobId),
           },
+          // R2 repair: the durable row-side surfaces. Receipts are transitions on
+          // the obligation row (reserve-before-deliver); failures land in the
+          // ladder's native last_nudge_result vocabulary.
+          rows: {
+            listTransitions: (qitemId: string) =>
+              queueRepoInstance
+                .listTransitions(qitemId)
+                .map((t) => ({ ts: t.ts, transitionNote: t.transitionNote ?? null })),
+            appendNote: (qitemId: string, note: string) => {
+              const row = queueRepoInstance.getById(qitemId);
+              if (!row || !isBlockerLive(row.state)) return { ok: false };
+              queueRepoInstance.update({
+                qitemId,
+                actorSession: "watchdog@system",
+                transitionNote: note,
+              });
+              return { ok: true };
+            },
+            recordNudgeResult: (qitemId: string, result: string) =>
+              queueRepoInstance.recordNudgeAttempt(qitemId, result),
+            listOpenIds: (destinationSession: string) =>
+              queueRepoInstance
+                .list({ destinationSession, state: ["pending", "in-progress", "blocked"], limit: 500 })
+                .map((r) => r.qitemId),
+          },
         }),
       ],
     });
@@ -1785,9 +1810,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // the durable episode receipts. Rigs created after startup gain their job
     // at the next daemon start (named limitation, no watcher machinery).
     {
-      const rigRows = db.prepare("SELECT name FROM rigs ORDER BY name").all() as Array<{ name: string }>;
-      for (const r of rigRows) {
-        const anchor = makeRigAnchor(r.name);
+      const ensureParkedOwnerJob = (rigName: string) => {
+        const anchor = makeRigAnchor(rigName);
         watchdogJobsRepoInstance.ensureAutoRegistration({
           policy: PARKED_OWNER_POLICY_NAME,
           targetSession: anchor,
@@ -1795,9 +1819,15 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           intervalSeconds: 120,
           activeWakeIntervalSeconds: null,
           scanIntervalSeconds: null,
-          specYaml: `policy: ${PARKED_OWNER_POLICY_NAME}\ntarget:\n  session: ${anchor}\ncontext:\n  rig: ${r.name}\n`,
+          specYaml: `policy: ${PARKED_OWNER_POLICY_NAME}\ntarget:\n  session: ${anchor}\ncontext:\n  rig: ${rigName}\n`,
         });
-      }
+      };
+      const rigRows = db.prepare("SELECT name FROM rigs ORDER BY name").all() as Array<{ name: string }>;
+      for (const r of rigRows) ensureParkedOwnerJob(r.name);
+      // R2 repair — born-armed (advisor-ruled): a rig created after startup gets
+      // its supervisor job in the same act that creates it, never at the next
+      // daemon restart.
+      rigRepo.onRigCreated = (rig) => ensureParkedOwnerJob(rig.name);
     }
 
     // B8 / slice-07 A3 — the MODEL-DIVERGENCE MONITOR: cause-agnostic effective-vs-pinned
