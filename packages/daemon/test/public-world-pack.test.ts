@@ -328,12 +328,13 @@ describe("public world pack", () => {
     temporaryRoots.push(redRoot);
     const redPack = join(redRoot, basename(sourcePack));
     cpSync(sourcePack, redPack, { recursive: true });
+    cpSync(join(STATIC_ROOT, "world-example"), join(redRoot, "world-example"), { recursive: true });
     const filePath = join(redPack, file);
     const source = readFileSync(filePath, "utf8");
     expect(source).toContain(before);
     writeFileSync(filePath, source.replace(before, after));
 
-    const rigPath = writeRigFixture();
+    const rigPath = writeRigFixture({ showSourcePath: redPack });
     const result = runVerifier(redPack, {
       ...process.env,
       PATH: `${rigPath}:${process.env.PATH ?? ""}`,
