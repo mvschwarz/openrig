@@ -139,3 +139,67 @@ claims:
     statement: "For every checkable authored claim, add a named check that can fail; flag taste or genuinely unverifiable claims instead of dressing judgment up as a test; and derive paths, counts, inventories, and live state from commands rather than copying current answers into this file."
     kind: structural
     check: world-example-consistency
+  - id: public-manifest-purpose
+    statement: "A portable operating-world primer that derives volatile facts and teaches agents to author their own world."
+    kind: structural
+    check: public-manifest-authored-claims
+  - id: public-manifest-summary-start-here
+    statement: "Derive where you are, what to trust, and which context belongs in a world."
+    kind: structural
+    check: public-manifest-authored-claims
+  - id: public-manifest-summary-build-your-world
+    statement: "The minimal authoring convention and a book-world exercise."
+    kind: structural
+    check: public-manifest-authored-claims
+  - id: public-manifest-summary-boundaries
+    statement: "What this public world covers, excludes, and cannot decide."
+    kind: structural
+    check: public-manifest-authored-claims
+  - id: public-manifest-summary-claims
+    statement: "Every authored claim mapped to a failing check or an explicit honesty flag."
+    kind: structural
+    check: public-manifest-authored-claims
+  - id: public-manifest-summary-verify-world
+    statement: "Portable named checks with loud failures and skips."
+    kind: structural
+    check: public-manifest-authored-claims
+  - id: public-manifest-probe-enter-the-world-prompt
+    statement: "You just arrived in an unfamiliar OpenRig environment. What do you derive before acting?"
+    kind: structural
+    check: public-manifest-authored-claims
+  - id: public-manifest-probe-enter-the-world-expect
+    statement: "The agent derives its identity, live topology, available context, and command surface instead of guessing."
+    kind: structural
+    check: public-manifest-authored-claims
+  - id: public-manifest-probe-author-a-world-prompt
+    statement: "Create a world for a book-writing project without turning the eight regions into folders."
+    kind: structural
+    check: public-manifest-authored-claims
+  - id: public-manifest-probe-author-a-world-expect
+    statement: "The agent starts with a small manifest and authored files, tags atoms by region, and keeps other context kinds separate."
+    kind: structural
+    check: public-manifest-authored-claims
+  - id: public-manifest-probe-know-the-edges-prompt
+    statement: "Which gaps can this public world answer, and which still require local sources or human judgment?"
+    kind: structural
+    check: public-manifest-authored-claims
+  - id: public-manifest-probe-know-the-edges-expect
+    statement: "The agent distinguishes public structure from rig-local facts, current state, mission context, and irreversible judgment."
+    kind: structural
+    check: public-manifest-authored-claims
+  - id: example-manifest-purpose
+    statement: "A fill-in template showing the anatomy of an OpenRig world pack."
+    kind: structural
+    check: example-manifest-authored-claims
+  - id: example-manifest-summary-your-world
+    statement: "A minimal fill-in template for describing an agent's world."
+    kind: structural
+    check: example-manifest-authored-claims
+  - id: example-manifest-probe-your-world-prompt
+    statement: "Describe the operating world for a book-writing project."
+    kind: structural
+    check: example-manifest-authored-claims
+  - id: example-manifest-probe-your-world-expect
+    statement: "The agent fills one coherent world file and derives volatile state instead of creating a folder per region."
+    kind: structural
+    check: example-manifest-authored-claims

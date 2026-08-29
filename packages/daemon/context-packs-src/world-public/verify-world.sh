@@ -59,8 +59,9 @@ else
 fi
 
 prose=$(cat "$root/start-here.md" "$root/build-your-world.md" "$root/boundaries.md" "$example/your-world.md")
+manifest_prose=$(cat "$root/manifest.yaml" "$example/manifest.yaml")
 claim_ids=$(sed -n 's/^[[:space:]]*- id:[[:space:]]*//p' "$root/claims.yaml")
-expected_claim_ids='world-purpose
+expected_markdown_claim_ids='world-purpose
 author-derive-rule
 derive-identity
 derive-topology
@@ -95,29 +96,49 @@ world-example-authoring
 world-example-book-exercise
 world-example-regions
 world-example-checks'
+expected_manifest_claim_ids='public-manifest-purpose
+public-manifest-summary-start-here
+public-manifest-summary-build-your-world
+public-manifest-summary-boundaries
+public-manifest-summary-claims
+public-manifest-summary-verify-world
+public-manifest-probe-enter-the-world-prompt
+public-manifest-probe-enter-the-world-expect
+public-manifest-probe-author-a-world-prompt
+public-manifest-probe-author-a-world-expect
+public-manifest-probe-know-the-edges-prompt
+public-manifest-probe-know-the-edges-expect
+example-manifest-purpose
+example-manifest-summary-your-world
+example-manifest-probe-your-world-prompt
+example-manifest-probe-your-world-expect'
+expected_claim_ids=$(printf '%s\n%s\n' "$expected_markdown_claim_ids" "$expected_manifest_claim_ids")
 claim_count=$(printf '%s\n' "$claim_ids" | sed '/^$/d' | wc -l | tr -d ' ')
+markdown_claim_count=$(printf '%s\n' "$expected_markdown_claim_ids" | sed '/^$/d' | wc -l | tr -d ' ')
 marker_count=$(printf '%s\n' "$prose" | grep -Ec '<!--[[:space:]]*world-claim:[[:space:]]*[a-z0-9-]+[[:space:]]*-->')
 disposition_count=$(grep -Ec '^[[:space:]]+(check|flagged):' "$root/claims.yaml")
 kind_count=$(grep -Ec '^[[:space:]]+kind:[[:space:]]+(judgment|operational|structural)[[:space:]]*$' "$root/claims.yaml")
 claims_ok=1
 [ "$claim_ids" = "$expected_claim_ids" ] || claims_ok=0
-[ "$claim_count" -eq "$marker_count" ] || claims_ok=0
+[ "$markdown_claim_count" -eq "$marker_count" ] || claims_ok=0
 [ "$claim_count" -eq "$disposition_count" ] || claims_ok=0
 [ "$claim_count" -eq "$kind_count" ] || claims_ok=0
 seen=' '
 for id in $claim_ids; do
   case "$seen" in *" $id "*) claims_ok=0 ;; esac
   seen="$seen$id "
+done
+for id in $expected_markdown_claim_ids; do
   printf '%s\n' "$prose" | grep -Fq "<!-- world-claim: $id -->" || claims_ok=0
 done
-known_checks=' author-derive-rule derive-identity derive-topology rig-command-surface trust-source-table agents-md-complement authoring-convention taxonomy-layout atom-regions retrieve-public-pack compose-fresh-profile no-region-selector derived-reading-cost retrieve-world-example derive-pack-path run-public-verifier boundary-coverage boundary-exclusions private-ref-boundary world-example-install world-example-consistency '
+known_checks=' author-derive-rule derive-identity derive-topology rig-command-surface trust-source-table agents-md-complement authoring-convention taxonomy-layout atom-regions retrieve-public-pack compose-fresh-profile no-region-selector derived-reading-cost retrieve-world-example derive-pack-path run-public-verifier boundary-coverage boundary-exclusions private-ref-boundary world-example-install world-example-consistency public-manifest-authored-claims example-manifest-authored-claims '
 check_ids=$(sed -n 's/^[[:space:]]*check:[[:space:]]*//p' "$root/claims.yaml")
 for check_id in $check_ids; do
   case "$known_checks" in *" $check_id "*) ;; *) claims_ok=0 ;; esac
 done
 statements=$(sed -n 's/^[[:space:]]*statement: "\(.*\)"$/\1/p' "$root/claims.yaml")
 while IFS= read -r statement; do
-  [ -z "$statement" ] || printf '%s\n' "$prose" | grep -Fq "$statement" || claims_ok=0
+  [ -z "$statement" ] || printf '%s\n%s\n' "$prose" "$manifest_prose" | grep -Fq "$statement" || claims_ok=0
 done <<EOF
 $statements
 EOF
@@ -125,6 +146,45 @@ if [ "$claims_ok" -eq 1 ]; then
   pass claim-coverage 'the pinned authored-claim inventory is marked, stated, and dispositioned once'
 else
   fail claim-coverage 'the pinned claim inventory, markers, statements, checks, or dispositions drifted'
+fi
+
+has_manifest_block_line() {
+  awk -v block="$2" -v wanted="$3" '
+    $0 == block { in_block = 1; next }
+    in_block && /^  - (path|id):/ { in_block = 0 }
+    in_block && $0 == wanted { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$1"
+}
+
+public_manifest_ok=1
+grep -Fqx 'purpose: "A portable operating-world primer that derives volatile facts and teaches agents to author their own world."' "$root/manifest.yaml" || public_manifest_ok=0
+has_manifest_block_line "$root/manifest.yaml" '  - path: start-here.md' '    summary: "Derive where you are, what to trust, and which context belongs in a world."' || public_manifest_ok=0
+has_manifest_block_line "$root/manifest.yaml" '  - path: build-your-world.md' '    summary: "The minimal authoring convention and a book-world exercise."' || public_manifest_ok=0
+has_manifest_block_line "$root/manifest.yaml" '  - path: boundaries.md' '    summary: "What this public world covers, excludes, and cannot decide."' || public_manifest_ok=0
+has_manifest_block_line "$root/manifest.yaml" '  - path: claims.yaml' '    summary: "Every authored claim mapped to a failing check or an explicit honesty flag."' || public_manifest_ok=0
+has_manifest_block_line "$root/manifest.yaml" '  - path: verify-world.sh' '    summary: "Portable named checks with loud failures and skips."' || public_manifest_ok=0
+has_manifest_block_line "$root/manifest.yaml" '  - id: enter-the-world' '      prompt: "You just arrived in an unfamiliar OpenRig environment. What do you derive before acting?"' || public_manifest_ok=0
+has_manifest_block_line "$root/manifest.yaml" '  - id: enter-the-world' '      expect: "The agent derives its identity, live topology, available context, and command surface instead of guessing."' || public_manifest_ok=0
+has_manifest_block_line "$root/manifest.yaml" '  - id: author-a-world' '      prompt: "Create a world for a book-writing project without turning the eight regions into folders."' || public_manifest_ok=0
+has_manifest_block_line "$root/manifest.yaml" '  - id: author-a-world' '      expect: "The agent starts with a small manifest and authored files, tags atoms by region, and keeps other context kinds separate."' || public_manifest_ok=0
+has_manifest_block_line "$root/manifest.yaml" '  - id: know-the-edges' '      prompt: "Which gaps can this public world answer, and which still require local sources or human judgment?"' || public_manifest_ok=0
+has_manifest_block_line "$root/manifest.yaml" '  - id: know-the-edges' '      expect: "The agent distinguishes public structure from rig-local facts, current state, mission context, and irreversible judgment."' || public_manifest_ok=0
+if [ "$public_manifest_ok" -eq 1 ]; then
+  pass public-manifest-authored-claims 'the public purpose, file summaries, and probe semantics match the frozen authored census'
+else
+  fail public-manifest-authored-claims 'a public manifest purpose, file summary, or probe semantic drifted'
+fi
+
+example_manifest_ok=1
+grep -Fqx 'purpose: "A fill-in template showing the anatomy of an OpenRig world pack."' "$example/manifest.yaml" || example_manifest_ok=0
+has_manifest_block_line "$example/manifest.yaml" '  - path: your-world.md' '    summary: "A minimal fill-in template for describing an agent'"'"'s world."' || example_manifest_ok=0
+has_manifest_block_line "$example/manifest.yaml" '  - id: your-world' '      prompt: "Describe the operating world for a book-writing project."' || example_manifest_ok=0
+has_manifest_block_line "$example/manifest.yaml" '  - id: your-world' '      expect: "The agent fills one coherent world file and derives volatile state instead of creating a folder per region."' || example_manifest_ok=0
+if [ "$example_manifest_ok" -eq 1 ]; then
+  pass example-manifest-authored-claims 'the example purpose, file summary, and probe semantics match the frozen authored census'
+else
+  fail example-manifest-authored-claims 'an example manifest purpose, file summary, or probe semantic drifted'
 fi
 
 if grep -Fq 'Supply the authored relationships no inventory can discover, point at commands for facts that change, and do not memorize a roster, path, count, status, or command list when the live system can answer.' "$root/start-here.md"; then
