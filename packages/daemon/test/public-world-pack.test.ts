@@ -251,6 +251,7 @@ describe("public world pack", () => {
     const flaggedIds = new Set(claims.claims.filter((claim) => claim.flagged).map((claim) => claim.id));
     expect(flaggedIds.has("book-example-purpose")).toBe(true);
     expect(flaggedIds.has("book-to-software")).toBe(true);
+    expect(flaggedIds.has("software-shaped-bridge")).toBe(true);
     expect(claims.claims.some((claim) => claim.flagged), "taste or unverifiable claims must be visibly flagged").toBe(true);
     for (const claim of claims.claims) {
       expect(claim.statement.length, `${claim.id} must state the claim being classified`).toBeGreaterThan(10);
@@ -501,6 +502,12 @@ describe("public world pack", () => {
     expect(convention).toContain("WORLD + LORE + SKILLS + MISSION");
     expect(convention).toContain("book");
     expect(convention).toContain("world-example");
+    expect(convention).toContain("specifications, verification loops, tooling, and the programming substrate");
+    expect(convention).toContain("named files and a manifest as the spec shape");
+    expect(convention).toContain("per-claim checks and a verifier that can fail as the test suite");
+    expect(convention).toContain("derive-at-source commands as the feedback loop");
+    expect(convention).toContain("A blank-slate reader therefore already knows how to build this kind of artifact");
+    expect(convention).toContain("world-building supplies the information architecture while software-shaping supplies buildability");
   });
 
   it("stays portable and teaches only commands present on the live CLI surface", () => {
