@@ -1674,9 +1674,14 @@ describe("RestoreOrchestrator", () => {
       expect(result.result.rigResult).toBe("partially_restored");
       expect(mockAdapter.launchHarness).toHaveBeenCalledTimes(1);
     }
+    // OPR.0.5.7.1 repair child: the restored session is selected by IDENTITY
+    // (the row the launch left running), never by newest-ULID inference — the
+    // exact defect pattern this slice retires must not survive as a test-side
+    // expectation either.
     const nodeSessions = sessionRegistry.getSessionsForRig(rig.id).filter((s) => s.nodeId === node.id);
-    const restoredSession = nodeSessions.reduce((latest, s) => s.id > latest.id ? s : latest);
-    expect(restoredSession?.startupStatus).toBe("attention_required");
+    const runningSessions = nodeSessions.filter((s) => s.status === "running");
+    expect(runningSessions).toHaveLength(1);
+    expect(runningSessions[0]?.startupStatus).toBe("attention_required");
   });
 
   it("fallback fresh launch during restore replays fresh_start startup actions", async () => {

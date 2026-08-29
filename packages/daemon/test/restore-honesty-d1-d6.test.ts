@@ -1,21 +1,21 @@
-// OPR.0.5.7.1 — RESTORE HONESTY, phase D1+D6 (locked SPEC, post-stamp sha256
-// 0d41bf374efea4fdb24e36b5c891135a3ff5ffa9ac7f6b8fefb08c1c7e55ace9).
+// OPR.0.5.7.1 — RESTORE HONESTY, narrowed repair child D1+D6a (amended SPEC
+// post-stamp sha256 a2fbcd795fa9bb215917027fc09d76628fd0308da480fd7ba803a0120b14ed61,
+// A1 independently re-stamped; desk ruling qitem-20260829080039-c47a571e).
 //
-// D1 SELECTION: restore must consume the ACTIVE-OCCUPANT relation, never
-// max-row-ID. A historical/superseded row with a newer ULID must never defeat
-// the actual occupant token (three live specimens in incident 1e4d9837).
-// Order of authority: explicit activeSessionIdByNode relation > uniquely-
-// running legacy fallback > ambiguity fails LOUDLY (unrecoverable-until-
-// resolved, zero replacement occupant). The max-ULID reduce disappears from
-// BOTH cite sites — pinned behaviorally (R1-R4) AND structurally (R5), so the
-// false mechanism's absence holds in every encoding.
+// D1 FOUR-WAY OCCUPANT TRUTH: the ONLY case where legacy inference may run is
+// the WHOLE activeSessionIdByNode field being absent (a pre-convention
+// snapshot). A PRESENT map with a null value, a MISSING node key, or a
+// DANGLING id each fails LOUDLY with zero resume and zero replacement
+// occupant — never newest-row-wins, never silently legacy. The fixture
+// premise is EXPLICIT: every snapshot rewrite states its relation mode;
+// nothing is cloned accidentally from capture.
 //
-// D6 REPLAY CONTAINMENT: an exact resume delivers ZERO startup/onboarding
-// content into the resumed history by default (the ghost-prompt source; the
-// live specimen: managed CLAUDE.md blocks rewritten at 22:57Z during a
-// "resume"). Any replay into an existing history requires an explicit,
-// versioned, idempotent opt-in recorded on the restore result. Deliberate
-// fresh-primed launches keep their replay — containment is resume-scoped.
+// D6a UNCONDITIONAL ZERO REPLAY: an exact resume cannot replay startup or
+// onboarding content, and replay-ONLY validation cannot block the resume
+// (the incident's own discriminator: continuity never needed the replay
+// container). A deliberate fresh launch still validates its replay inputs in
+// full. The former replay opt-in surface is REMOVED WHOLE — the absence pin
+// below proves no encoding of it survives in this child's source or tests.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
@@ -37,10 +37,11 @@ import type { Snapshot } from "../src/domain/types.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 
 // Hand-authored ULIDs where lexical order is the trap: OLD sorts before NEW,
-// so "latest = max id" (the defect) picks NEW.
+// so "latest = max id" (the retired defect) would pick NEW.
 const ULID_OLD = "01ARZ3NDEKTSV4RRFFQ69G5AAA";
 const ULID_MID = "01ARZ3NDEKTSV4RRFFQ69G5MMM";
 const ULID_NEW = "01ARZ3NDEKTSV4RRFFQ69G5ZZZ";
+const ULID_GONE = "01ARZ3NDEKTSV4RRFFQ69G5XXX"; // named by a dangling relation
 
 function mockTmux(): TmuxAdapter {
   return {
@@ -71,9 +72,8 @@ function mockCodexResume(): CodexResumeAdapter {
   } as unknown as CodexResumeAdapter;
 }
 
-/** Content-channel spy adapter: `project` carries projection entries (managed
- *  blocks), `deliverStartup` carries startup files/actions. D6's whole claim
- *  is about what reaches these two on a resumed history. */
+/** Content-channel spy adapter: `project` carries projection entries,
+ *  `deliverStartup` carries startup files/actions. */
 function spyRuntimeAdapter() {
   return {
     runtime: "claude-code",
@@ -85,7 +85,16 @@ function spyRuntimeAdapter() {
   };
 }
 
-describe("OPR.0.5.7.1 — restore honesty D1 + D6", () => {
+/** The relation mode a fixture DECLARES — no state is ever cloned by accident
+ *  from capture (the hidden-premise defect the repair ruling named). */
+type RelationMode =
+  | { mode: "field-absent" }
+  | { mode: "explicit-null" }
+  | { mode: "missing-node-key" }
+  | { mode: "explicit-id"; id: string }
+  | { mode: "dangling-id"; id: string };
+
+describe("OPR.0.5.7.1 repair child — D1 four-way occupant truth + D6a unconditional zero replay", () => {
   let db: Database.Database;
   let rigRepo: RigRepository;
   let sessionRegistry: SessionRegistry;
@@ -119,8 +128,6 @@ describe("OPR.0.5.7.1 — restore honesty D1 + D6", () => {
     });
   }
 
-  /** One-node rig + captured snapshot; caller then rewrites data.sessions to
-   *  the exact multi-row shape under test. */
   function seedSnapshot(opts?: { startupContext?: { entries: unknown[]; files: unknown[]; actions: unknown[] } }): { snap: Snapshot; nodeId: string } {
     const rig = rigRepo.createRig("r77");
     const node = rigRepo.addNode(rig.id, "seat", { role: "worker", runtime: "claude-code" });
@@ -132,13 +139,19 @@ describe("OPR.0.5.7.1 — restore honesty D1 + D6", () => {
         .run(node.id, JSON.stringify(opts.startupContext.entries), JSON.stringify(opts.startupContext.files), JSON.stringify(opts.startupContext.actions), "claude-code");
     }
     const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
-    // Stop the rig so restore admits (post-crash shape: rows exist, tmux dead).
     sessionRegistry.updateStatus(sess.id, "exited");
     db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
     return { snap, nodeId: node.id };
   }
 
-  function rewriteSessions(snap: Snapshot, nodeId: string, rows: Array<{ id: string; status: string; token: string }>, activeSessionId?: string): Snapshot {
+  /** Rewrite the snapshot's session rows AND its relation state, both stated
+   *  explicitly by the caller. */
+  function rewriteSnapshot(
+    snap: Snapshot,
+    nodeId: string,
+    rows: Array<{ id: string; status: string; token: string }>,
+    relation: RelationMode,
+  ): Snapshot {
     const data = JSON.parse(JSON.stringify(snap.data));
     const template = data.sessions.find((s: { nodeId: string }) => s.nodeId === nodeId);
     data.sessions = rows.map((r) => ({
@@ -149,8 +162,20 @@ describe("OPR.0.5.7.1 — restore honesty D1 + D6", () => {
       resumeToken: r.token,
       restorePolicy: "resume_if_possible",
     }));
-    if (activeSessionId !== undefined) {
-      data.activeSessionIdByNode = { [nodeId]: activeSessionId };
+    switch (relation.mode) {
+      case "field-absent":
+        delete data.activeSessionIdByNode;
+        break;
+      case "explicit-null":
+        data.activeSessionIdByNode = { [nodeId]: null };
+        break;
+      case "missing-node-key":
+        data.activeSessionIdByNode = { "some-other-node": null };
+        break;
+      case "explicit-id":
+      case "dangling-id":
+        data.activeSessionIdByNode = { [nodeId]: relation.id };
+        break;
     }
     db.prepare("UPDATE snapshots SET data = ? WHERE id = ?").run(JSON.stringify(data), snap.id);
     const updated = snapshotRepo.getSnapshot(snap.id);
@@ -161,152 +186,239 @@ describe("OPR.0.5.7.1 — restore honesty D1 + D6", () => {
   const resumeTokenArg = (claude: ClaudeResumeAdapter, call = 0): unknown =>
     (claude.resume as ReturnType<typeof vi.fn>).mock.calls[call]?.[2];
 
-  // ------------------------------------------------------------------ D1 ---
-
-  it("R1: a superseded row with a newer ULID never defeats the active occupant (incident shape)", async () => {
-    const { snap, nodeId } = seedSnapshot();
-    const fixed = rewriteSessions(snap, nodeId, [
-      { id: ULID_OLD, status: "running", token: "tok-active" },
-      { id: ULID_NEW, status: "superseded", token: "tok-stale" },
-    ]);
-    const claude = mockClaudeResume();
-    const result = await createOrchestrator({ claude }).restore(fixed.id);
-    expect(result.ok).toBe(true);
-    expect(claude.resume).toHaveBeenCalledTimes(1);
-    expect(resumeTokenArg(claude)).toBe("tok-active"); // base: "tok-stale" (max-ULID wins)
-  });
-
-  it("R2: an explicit activeSessionIdByNode relation is consumed directly, no status inference", async () => {
-    const { snap, nodeId } = seedSnapshot();
-    // No uniquely-running fallback available — both rows detached; only the
-    // explicit relation can name the occupant.
-    const fixed = rewriteSessions(snap, nodeId, [
-      { id: ULID_OLD, status: "detached", token: "tok-active" },
-      { id: ULID_NEW, status: "detached", token: "tok-stale" },
-    ], ULID_OLD);
-    const claude = mockClaudeResume();
-    const result = await createOrchestrator({ claude }).restore(fixed.id);
-    expect(result.ok).toBe(true);
-    expect(resumeTokenArg(claude)).toBe("tok-active"); // base: relation ignored, "tok-stale"
-  });
-
-  it("R3: ambiguity fails LOUDLY — two running rows, no relation => unrecoverable, zero replacement occupant", async () => {
-    const { snap, nodeId } = seedSnapshot();
-    const fixed = rewriteSessions(snap, nodeId, [
-      { id: ULID_OLD, status: "running", token: "tok-a" },
-      { id: ULID_NEW, status: "running", token: "tok-b" },
-    ]);
-    const claude = mockClaudeResume();
-    const result = await createOrchestrator({ claude }).restore(fixed.id);
+  function expectLoudUnrecoverable(
+    result: Awaited<ReturnType<RestoreOrchestrator["restore"]>>,
+    claude: ClaudeResumeAdapter,
+    naming?: string[],
+  ) {
     expect(result.ok).toBe(true);
     if (result.ok) {
       const seat = result.result.nodes.find((n) => n.logicalId === "seat");
-      expect(seat?.status).toBe("failed"); // base: silently resumes newest
+      expect(seat?.status).toBe("failed");
       const err = seat && "error" in seat ? String(seat.error) : "";
-      expect(err).toMatch(/ambigu/i); // names the condition…
-      expect(err).toContain(ULID_OLD); // …and BOTH candidate rows
-      expect(err).toContain(ULID_NEW);
+      expect(err.length).toBeGreaterThan(0);
+      for (const term of naming ?? []) expect(err).toContain(term);
     }
-    expect(claude.resume).not.toHaveBeenCalled(); // never newest-row-wins
-  });
+    // Zero resume, zero replacement occupant: the seat's sessions are exactly
+    // as the (stopped) prior state left them — nothing launched.
+    expect(claude.resume).not.toHaveBeenCalled();
+  }
 
-  it("R4: legacy snapshot with no relation — the UNIQUELY-running row is the interim invariant", async () => {
+  // ------------------------------------------------------------------ D1 ---
+
+  it("D1-legacy-single: WHOLE field absent + a single row — legacy inference resolves it", async () => {
     const { snap, nodeId } = seedSnapshot();
-    const fixed = rewriteSessions(snap, nodeId, [
-      { id: ULID_OLD, status: "exited", token: "tok-oldest" },
-      { id: ULID_MID, status: "running", token: "tok-active" },
-      { id: ULID_NEW, status: "superseded", token: "tok-stale" },
-    ]);
+    const fixed = rewriteSnapshot(snap, nodeId, [
+      { id: ULID_OLD, status: "unknown", token: "tok-active" },
+    ], { mode: "field-absent" });
     const claude = mockClaudeResume();
     const result = await createOrchestrator({ claude }).restore(fixed.id);
     expect(result.ok).toBe(true);
-    expect(resumeTokenArg(claude)).toBe("tok-active"); // base: "tok-stale" (newest ULID)
+    expect(resumeTokenArg(claude)).toBe("tok-active");
   });
 
-  it("R5: ABSENCE PIN — the max-ULID reduce is gone from BOTH cite sites (second encoding)", () => {
+  it("D1-legacy-uniquely-running: field absent + several rows — the uniquely-running row wins, never the newest ULID", async () => {
+    const { snap, nodeId } = seedSnapshot();
+    const fixed = rewriteSnapshot(snap, nodeId, [
+      { id: ULID_OLD, status: "exited", token: "tok-oldest" },
+      { id: ULID_MID, status: "running", token: "tok-active" },
+      { id: ULID_NEW, status: "superseded", token: "tok-stale" },
+    ], { mode: "field-absent" });
+    const claude = mockClaudeResume();
+    const result = await createOrchestrator({ claude }).restore(fixed.id);
+    expect(result.ok).toBe(true);
+    expect(resumeTokenArg(claude)).toBe("tok-active");
+  });
+
+  it("D1-legacy-ambiguous: field absent + two running rows — loud unrecoverable, zero resume, zero replacement", async () => {
+    const { snap, nodeId } = seedSnapshot();
+    const fixed = rewriteSnapshot(snap, nodeId, [
+      { id: ULID_OLD, status: "running", token: "tok-a" },
+      { id: ULID_NEW, status: "running", token: "tok-b" },
+    ], { mode: "field-absent" });
+    const claude = mockClaudeResume();
+    const result = await createOrchestrator({ claude }).restore(fixed.id);
+    expectLoudUnrecoverable(result, claude, [ULID_OLD, ULID_NEW]);
+  });
+
+  it("D1-explicit-hit: a valid explicit relation is consumed directly, no status inference", async () => {
+    const { snap, nodeId } = seedSnapshot();
+    const fixed = rewriteSnapshot(snap, nodeId, [
+      { id: ULID_OLD, status: "detached", token: "tok-active" },
+      { id: ULID_NEW, status: "detached", token: "tok-stale" },
+    ], { mode: "explicit-id", id: ULID_OLD });
+    const claude = mockClaudeResume();
+    const result = await createOrchestrator({ claude }).restore(fixed.id);
+    expect(result.ok).toBe(true);
+    expect(resumeTokenArg(claude)).toBe("tok-active");
+  });
+
+  it("D1-present-null: PRESENT map + explicit null with historical rows — loud unrecoverable, never silently legacy", async () => {
+    const { snap, nodeId } = seedSnapshot();
+    const fixed = rewriteSnapshot(snap, nodeId, [
+      { id: ULID_OLD, status: "running", token: "tok-a" },
+      { id: ULID_NEW, status: "superseded", token: "tok-b" },
+    ], { mode: "explicit-null" });
+    const claude = mockClaudeResume();
+    const result = await createOrchestrator({ claude }).restore(fixed.id);
+    expectLoudUnrecoverable(result, claude);
+  });
+
+  it("D1-missing-key: PRESENT map missing this node's key — loud unrecoverable, never silently legacy", async () => {
+    const { snap, nodeId } = seedSnapshot();
+    const fixed = rewriteSnapshot(snap, nodeId, [
+      { id: ULID_OLD, status: "running", token: "tok-a" },
+    ], { mode: "missing-node-key" });
+    const claude = mockClaudeResume();
+    const result = await createOrchestrator({ claude }).restore(fixed.id);
+    expectLoudUnrecoverable(result, claude);
+  });
+
+  it("D1-dangling: a non-null relation naming no snapshot row — loud unrecoverable NAMING the offending relation", async () => {
+    const { snap, nodeId } = seedSnapshot();
+    const fixed = rewriteSnapshot(snap, nodeId, [
+      { id: ULID_OLD, status: "running", token: "tok-a" },
+    ], { mode: "dangling-id", id: ULID_GONE });
+    const claude = mockClaudeResume();
+    const result = await createOrchestrator({ claude }).restore(fixed.id);
+    expectLoudUnrecoverable(result, claude, [ULID_GONE]);
+  });
+
+  it("D1-absence-pin: the max-ULID reduce stays gone from the production source (second encoding)", () => {
     const here = path.dirname(fileURLToPath(import.meta.url));
     const source = fs.readFileSync(path.join(here, "../src/domain/restore-orchestrator.ts"), "utf8");
     const hits = source.match(/s\.id > latest\.id \? s : latest/g) ?? [];
-    expect(hits).toHaveLength(0); // base: exactly 2 occurrences
+    expect(hits).toHaveLength(0);
   });
 
-  // ------------------------------------------------------------------ D6 ---
+  it("D1-roundtrip: capture + JSON persistence preserves a valid explicit relation AND an explicit null", async () => {
+    // (a) exactly one session row: capture records it as the occupant.
+    const rigA = rigRepo.createRig("rt-a");
+    const nodeA = rigRepo.addNode(rigA.id, "seat", { role: "worker", runtime: "claude-code" });
+    const sessA = sessionRegistry.registerSession(nodeA.id, "rt-a-seat");
+    const snapA = snapshotCapture.captureSnapshot(rigA.id, "manual");
+    const rawA = db.prepare("SELECT data FROM snapshots WHERE id = ?").get(snapA.id) as { data: string };
+    expect(JSON.parse(rawA.data).activeSessionIdByNode[nodeA.id]).toBe(sessA.id);
+
+    // (b) several rows, none uniquely running: capture records an EXPLICIT
+    // null (ambiguous at source, recorded honestly) and JSON keeps it.
+    const rigB = rigRepo.createRig("rt-b");
+    const nodeB = rigRepo.addNode(rigB.id, "seat", { role: "worker", runtime: "claude-code" });
+    const s1 = sessionRegistry.registerSession(nodeB.id, "rt-b-seat");
+    const s2 = sessionRegistry.registerSession(nodeB.id, "rt-b-seat-v2");
+    sessionRegistry.updateStatus(s1.id, "running");
+    sessionRegistry.updateStatus(s2.id, "running");
+    const snapB = snapshotCapture.captureSnapshot(rigB.id, "manual");
+    const rawB = db.prepare("SELECT data FROM snapshots WHERE id = ?").get(snapB.id) as { data: string };
+    const mapB = JSON.parse(rawB.data).activeSessionIdByNode;
+    expect(Object.prototype.hasOwnProperty.call(mapB, nodeB.id)).toBe(true);
+    expect(mapB[nodeB.id]).toBeNull();
+  });
+
+  // ----------------------------------------------------------------- D6a ---
 
   const GHOST_CONTEXT = {
     entries: [{
-      absolutePath: "/tmp/never-read-existsFn-defaults-true/CLAUDE.md",
+      absolutePath: "/tmp/never-read/CLAUDE.md",
       relativePath: "CLAUDE.md",
       category: "memory",
       mergeStrategy: "managed_block",
       content: "STARTUP-GHOST-BLOCK",
     }],
-    files: [{ path: "onboarding.md", absolutePath: "/tmp/never-read/onboarding.md", required: false }],
+    files: [{ path: "required-onboarding.md", absolutePath: "/tmp/never-read/required-onboarding.md", required: true, appliesOn: ["restore"] }],
     actions: [{ type: "send_text", text: "STARTUP-GHOST-PROMPT", idempotent: true }],
   };
 
-  it("R6: exact resume with saved startup context delivers ZERO replay by default (launch leg intact)", async () => {
+  it("D6a-resume-unblocked: exact resume + MISSING required replay-only file SUCCEEDS and delivers zero content", async () => {
     const { snap, nodeId } = seedSnapshot({ startupContext: GHOST_CONTEXT });
-    const fixed = rewriteSessions(snap, nodeId, [
+    const fixed = rewriteSnapshot(snap, nodeId, [
       { id: ULID_OLD, status: "running", token: "tok-active" },
-    ]);
+    ], { mode: "explicit-id", id: ULID_OLD });
     const claude = mockClaudeResume();
     const adapter = spyRuntimeAdapter();
-    const result = await createOrchestrator({ claude }).restore(fixed.id, { adapters: { "claude-code": adapter } });
+    const result = await createOrchestrator({ claude }).restore(fixed.id, {
+      adapters: { "claude-code": adapter },
+      // The required replay file does not exist. Replay-only validation must
+      // not block the resume: continuity never needed the replay container.
+      fsOps: { exists: (p) => !p.includes("never-read") },
+    });
     expect(result.ok).toBe(true);
-    // The resume itself still happens — containment removes CONTENT, not the launch.
     expect(claude.resume).toHaveBeenCalledTimes(1);
     expect(resumeTokenArg(claude)).toBe("tok-active");
-    // Zero content into the resumed history: no projection entries, no
-    // startup files/actions reach the adapter without the recorded opt-in.
     const projectedEntries = (adapter.project.mock.calls[0]?.[0]?.entries ?? []) as unknown[];
-    expect(projectedEntries).toHaveLength(0); // base: the ghost block is in the plan
-    const delivered = adapter.deliverStartup.mock.calls
-      .flatMap((c) => JSON.stringify(c[0] ?? ""));
-    expect(delivered.join("")).not.toContain("STARTUP-GHOST"); // base: delivered
+    expect(projectedEntries).toHaveLength(0);
+    const delivered = adapter.deliverStartup.mock.calls.flatMap((c) => JSON.stringify(c[0] ?? ""));
+    expect(delivered.join("")).not.toContain("STARTUP-GHOST");
   });
 
-  it("R7: replay needs the explicit VERSIONED opt-in, recorded on the result, delivered exactly once", async () => {
+  it("D6a-fresh-still-validates: a deliberate fresh launch with the same missing required file still fails validation", async () => {
     const { snap, nodeId } = seedSnapshot({ startupContext: GHOST_CONTEXT });
-    const fixed = rewriteSessions(snap, nodeId, [
+    const fixed = rewriteSnapshot(snap, nodeId, [
       { id: ULID_OLD, status: "running", token: "tok-active" },
-    ]);
+    ], { mode: "explicit-id", id: ULID_OLD });
     const adapter = spyRuntimeAdapter();
-    const orch = createOrchestrator({ claude: mockClaudeResume() });
-    const result = await orch.restore(fixed.id, {
+    const result = await createOrchestrator().restore(fixed.id, {
       adapters: { "claude-code": adapter },
-      // The opt-in contract: explicit, versioned, recorded. Base RED: the
-      // option does not exist and replay happens unconditionally.
-      startupReplayOptIn: { version: 1 },
-    } as never);
-    expect(result.ok).toBe(true);
-    // Content delivered EXACTLY once under the opt-in…
-    const contentCalls = adapter.project.mock.calls
-      .filter((c) => ((c[0]?.entries ?? []) as unknown[]).length > 0);
-    expect(contentCalls).toHaveLength(1);
-    // …and the versioned opt-in is RECORDED on the durable result (auditable).
-    expect(JSON.stringify(result)).toContain('"startupReplayOptIn"');
-    expect(JSON.stringify(result)).toContain('"version":1');
+      fsOps: { exists: (p) => !p.includes("never-read") },
+      freshLogicalIds: ["seat"],
+    });
+    // Deliberate fresh CONSUMES the replay inputs, so their validation stands.
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("pre_restore_validation_failed");
   });
 
-  it("R8: fresh-primed (non-resume) launches keep their startup replay — containment is resume-scoped", async () => {
-    // CORRECTION (post-RED-run, orch-lead-granted): the first authoring nulled
-    // resumeType/resumeToken under restorePolicy resume_if_possible, which
-    // enters the INTENTIONAL awaiting-decision stop (no launch, no replay by
-    // design) — it modeled the wrong path. The deliberate blank-slate launch
-    // is the existing operation-B option: freshLogicalIds. Metadata stays
-    // intact; only the fresh trigger changed. Assertions and name unchanged.
+  it("D6a-zero-content-pin: exact resume with intact startup context still delivers ZERO content (launch leg intact)", async () => {
     const { snap, nodeId } = seedSnapshot({ startupContext: GHOST_CONTEXT });
-    const fixed = rewriteSessions(snap, nodeId, [
+    const fixed = rewriteSnapshot(snap, nodeId, [
       { id: ULID_OLD, status: "running", token: "tok-active" },
-    ]);
+    ], { mode: "explicit-id", id: ULID_OLD });
+    const claude = mockClaudeResume();
+    const adapter = spyRuntimeAdapter();
+    const result = await createOrchestrator({ claude }).restore(fixed.id, {
+      adapters: { "claude-code": adapter },
+    });
+    expect(result.ok).toBe(true);
+    expect(claude.resume).toHaveBeenCalledTimes(1);
+    const projectedEntries = (adapter.project.mock.calls[0]?.[0]?.entries ?? []) as unknown[];
+    expect(projectedEntries).toHaveLength(0);
+  });
+
+  it("D6a-fresh-replay-floor: a deliberate fresh launch keeps its startup replay when inputs exist", async () => {
+    const { snap, nodeId } = seedSnapshot({ startupContext: GHOST_CONTEXT });
+    const fixed = rewriteSnapshot(snap, nodeId, [
+      { id: ULID_OLD, status: "running", token: "tok-active" },
+    ], { mode: "explicit-id", id: ULID_OLD });
     const adapter = spyRuntimeAdapter();
     const result = await createOrchestrator().restore(fixed.id, {
       adapters: { "claude-code": adapter },
       freshLogicalIds: ["seat"],
+      // every replay input exists on this path
     });
     expect(result.ok).toBe(true);
-    // Replay is PRESERVED on the deliberate fresh path (no over-containment):
     const projectedEntries = (adapter.project.mock.calls[0]?.[0]?.entries ?? []) as unknown[];
     expect(projectedEntries.length).toBeGreaterThan(0);
+  });
+
+  // -------------------------------------------------- opt-in surface gone ---
+
+  it("D6a-optin-absence-pin: no encoding of the removed replay opt-in survives in this child's source or tests", () => {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    // The identifier is constructed, never spelled contiguously here.
+    const camel = ["startup", "Replay", "Opt", "In"].join("");
+    const snake = ["startup", "replay", "opt", "in"].join("_");
+    const kebab = ["startup", "replay", "opt", "in"].join("-");
+    const needle = new RegExp(`${camel}|${snake}|${kebab}`, "i");
+    const surfaces = [
+      "../src/domain/restore-orchestrator.ts",
+      "../src/domain/snapshot-capture.ts",
+      "../src/domain/types.ts",
+      "./restore-honesty-d1-d6.test.ts",
+      "./restore-orchestrator.test.ts",
+    ];
+    for (const rel of surfaces) {
+      const bytes = fs.readFileSync(path.join(here, rel), "utf8");
+      const hit = bytes.match(needle);
+      expect(hit, `${rel} must carry no encoding of the removed opt-in surface (found: ${hit?.[0] ?? "none"})`).toBeNull();
+    }
   });
 });
