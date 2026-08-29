@@ -60,6 +60,18 @@ export class SnapshotCapture {
     // 2. Get sessions with resume metadata
     const sessions = this.sessionRegistry.getSessionsForRig(rigId);
 
+    // 2b. OPR.0.5.7.1 D1 — capture the ACTIVE-OCCUPANT relation explicitly.
+    // The live registry knows the occupant NOW; a restore months later must
+    // never re-derive it from row ordering (a superseded row with a newer
+    // ULID defeated three real occupants in incident 1e4d9837). Exactly one
+    // running row -> that row is the occupant; zero or several -> null,
+    // recorded honestly so restore resolves it loudly instead of guessing.
+    const activeSessionIdByNode: Record<string, string | null> = {};
+    for (const node of rig.nodes) {
+      const running = sessions.filter((s) => s.nodeId === node.id && s.status === "running");
+      activeSessionIdByNode[node.id] = running.length === 1 ? running[0]!.id : null;
+    }
+
     // 3. Get checkpoints as map (latest per node)
     const checkpoints = this.checkpointStore.getCheckpointsForRig(rigId);
 
@@ -99,6 +111,7 @@ export class SnapshotCapture {
       nodes: rig.nodes,
       edges: rig.edges,
       sessions,
+      activeSessionIdByNode,
       checkpoints,
       pods: podRows.map((p) => ({ id: p.id, rigId: p.rig_id, namespace: p.namespace, label: p.label, summary: p.summary, continuityPolicyJson: p.continuity_policy_json, createdAt: p.created_at })),
       continuityStates: continuityRows.map((r) => ({ podId: r.pod_id, nodeId: r.node_id, status: r.status as "healthy" | "degraded" | "restoring", artifactsJson: r.artifacts_json, lastSyncAt: r.last_sync_at, updatedAt: r.updated_at })),

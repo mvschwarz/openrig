@@ -344,6 +344,14 @@ export interface SnapshotData {
   nodes: NodeWithBinding[];
   edges: Edge[];
   sessions: Session[];
+  /** OPR.0.5.7.1 D1 — the ACTIVE-OCCUPANT relation, captured explicitly at
+   *  snapshot time: nodeId -> the session row id that was the node's live
+   *  occupant, or null when no single occupant existed at capture (zero or
+   *  several running rows). Restore consumes this directly; it never infers
+   *  the occupant from row ordering. Absent on legacy snapshots — restore
+   *  then falls back to the uniquely-running invariant, and ambiguity makes
+   *  the seat unrecoverable-until-resolved, never newest-row-wins. */
+  activeSessionIdByNode?: Record<string, string | null>;
   checkpoints: Record<string, Checkpoint | null>;
   pods?: Pod[];
   continuityStates?: ContinuityState[];
@@ -419,6 +427,12 @@ export interface RestoreNodeResult {
   error?: string;
   /** Pane evidence captured when status is `attention_required` (L3, optional). */
   attentionEvidence?: string | null;
+  /** OPR.0.5.7.1 D6 — recorded ONLY when startup content was replayed into a
+   *  resumed history under the caller's explicit versioned opt-in. Absent on
+   *  every default exact resume (zero replay) and on fresh-primed launches
+   *  (whose replay is deliberate, not opt-in-gated). The record is the audit
+   *  trail: any replay into an existing history names its authorization. */
+  startupReplayOptIn?: { version: number };
 }
 
 export type RestoreOutcome =
