@@ -2,7 +2,17 @@
 // real atoms, a claim-to-check ledger, a verifier that can fail or skip loudly,
 // and a worked stranger exercise rather than a private-world copy.
 import { spawnSync } from "node:child_process";
-import { chmodSync, cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -33,6 +43,10 @@ function runVerifier(packDir: string, env: NodeJS.ProcessEnv = process.env) {
   });
 }
 
+function runRig(rigPath: string, args: string[], env: NodeJS.ProcessEnv) {
+  return spawnSync(join(rigPath, "rig"), args, { env, encoding: "utf8" });
+}
+
 function writeRigFixture(options: {
   identityJson?: string;
   topology?: string;
@@ -46,10 +60,20 @@ function writeRigFixture(options: {
   temporaryRoots.push(fixturePath);
   const installState = join(fixturePath, "installed-ref");
   const sourcePath = publicWorldDir();
+  const examplePath = join(STATIC_ROOT, "world-example");
+  const manifest = manifestAt(sourcePath);
+  const profile = composeProfile({
+    atoms: manifest.atoms ?? [],
+    situation: "fresh",
+    runtime: "codex",
+    budgetTokens: 0,
+    readFile: (ref) => readFileSync(join(sourcePath, ref), "utf8"),
+  });
   const showJson = JSON.stringify({
     relativePath: "world-public",
     sourceType: "builtin",
     sourcePath,
+    derivedEstimatedTokens: profile.totalEstimatedTokens,
   });
   const listJson = options.listJson ?? JSON.stringify([
     { relativePath: "world-public", sourceType: "builtin", sourcePath },
@@ -58,18 +82,40 @@ function writeRigFixture(options: {
   const configRoot = options.configRoot === undefined
     ? '"${OPENRIG_CONTEXT_PACKS_ROOT:-/fixture/context-packs}"'
     : `'${options.configRoot}'`;
+  writeFileSync(
+    join(fixturePath, "world-public-get.txt"),
+    manifest.files.map((file) => readFileSync(join(sourcePath, file.path), "utf8")).join("\n"),
+  );
+  writeFileSync(join(fixturePath, "world-public-profile.json"), JSON.stringify(profile));
+  writeFileSync(
+    join(fixturePath, "world-public-profile.txt"),
+    profile.pieces.map((piece) => piece.text).join("\n"),
+  );
+  writeFileSync(join(fixturePath, "world-example-get.txt"), readFileSync(join(examplePath, "your-world.md"), "utf8"));
+  writeFileSync(join(fixturePath, "world-public-show.json"), showJson);
+  writeFileSync(join(fixturePath, "context-list.json"), listJson);
   writeFileSync(join(fixturePath, "rig"), [
     "#!/bin/sh",
+    `fixture_dir=${JSON.stringify(fixturePath)}`,
     `install_state=${JSON.stringify(installState)}`,
     'if [ "$#" -eq 1 ] && [ "$1" = "--help" ]; then',
     "  exit 0",
     'elif [ "$1" = "context" ] && [ "$3" = "--help" ]; then',
     "  exit 0",
     'elif [ "$1" = "context" ] && [ "$2" = "show" ] && [ "$3" = "world-public" ]; then',
-    `  printf '%s\\n' '${showJson}'`,
+    '  cat "$fixture_dir/world-public-show.json"',
     `  exit ${options.showStatus ?? 0}`,
     'elif [ "$1" = "context" ] && [ "$2" = "show" ] && [ "$3" = "world/install" ]; then',
     `  printf '%s\\n' '{"relativePath":"world/install","sourceType":"user_file","sourcePath":"/fixture/private-world"}'`,
+    'elif [ "$1" = "context" ] && [ "$2" = "get" ] && [ "$3" = "world-public" ]; then',
+    '  cat "$fixture_dir/world-public-get.txt"',
+    'elif [ "$1" = "context" ] && [ "$2" = "get" ] && [ "$3" = "world-example" ]; then',
+    '  cat "$fixture_dir/world-example-get.txt"',
+    'elif [ "$1" = "context" ] && [ "$2" = "profile" ] && [ "$3" = "world-public" ]; then',
+    '  case " $* " in',
+    '    *" --json "*) cat "$fixture_dir/world-public-profile.json" ;;',
+    '    *) cat "$fixture_dir/world-public-profile.txt" ;;',
+    '  esac',
     'elif [ "$1" = "context" ] && [ "$2" = "add" ]; then',
     `  if [ ${options.addStatus ?? 0} -ne 0 ]; then`,
     "    printf '%s\\n' 'context add is broken' >&2",
@@ -83,28 +129,34 @@ function writeRigFixture(options: {
     '    printf \'{"installedAt":"%s","syncError":"HTTP 503"}\\n\' "$target"',
     "    exit 0",
     "  fi",
+    '  target="$OPENRIG_CONTEXT_PACKS_ROOT/$5"',
+    '  mkdir -p "$target"',
+    '  cp -R "$3"/. "$target"/',
     '  printf \'%s\\n\' "$5" > "$install_state"',
-    '  printf \'{"installedAt":"/fixture/context-packs/%s"}\\n\' "$5"',
+    '  printf \'{"installedAt":"%s"}\\n\' "$target"',
     'elif [ "$1" = "context" ] && [ "$2" = "list" ]; then',
     '  if [ -f "$install_state" ]; then',
     '    installed_ref=$(sed -n \'1p\' "$install_state")',
-    `    printf '%s\\n' '${listJson}' | sed 's/]$//'`,
-    "    printf ',{\"relativePath\":\"%s\",\"sourceType\":\"user_file\",\"sourcePath\":\"/fixture/context-packs/%s\"}]\\n' \"$installed_ref\" \"$installed_ref\"",
+    '    cat "$fixture_dir/context-list.json" | sed \'s/]$//\'',
+    "    printf ',{\"relativePath\":\"%s\",\"sourceType\":\"user_file\",\"sourcePath\":\"%s/%s\"}]\\n' \"$installed_ref\" \"$OPENRIG_CONTEXT_PACKS_ROOT\" \"$installed_ref\"",
     "  else",
-    `    printf '%s\\n' '${listJson}'`,
+    '    cat "$fixture_dir/context-list.json"',
     "  fi",
     'elif [ "$1" = "context" ] && [ "$2" = "rm" ]; then',
     `  [ ${options.partialSync ? 1 : 0} -eq 0 ] || exit 72`,
     '  [ -f "$install_state" ] || exit 1',
     '  [ "$(sed -n \'1p\' "$install_state")" = "$3" ] || exit 1',
+    '  rm -rf -- "$OPENRIG_CONTEXT_PACKS_ROOT/$3"',
     '  rm -f "$install_state"',
     '  printf \'{"removed":true,"ref":"%s"}\\n\' "$3"',
     'elif [ "$1" = "config" ] && [ "$2" = "get" ] && [ "$3" = "context.packs_root" ]; then',
     `  printf '%s\\n' ${configRoot}`,
     'elif [ "$1" = "whoami" ]; then',
     `  printf '%s\\n' '${options.identityJson ?? '{"identity":{"rigName":"fixture","memberId":"qa","sessionName":"qa@fixture"}}'}'`,
+    'elif [ "$1" = "ps" ] && [ "$2" = "--nodes" ]; then',
+    `  printf '%s\\n' '${options.topology ?? '[{"canonicalSessionName":"qa@fixture","rigName":"fixture","sessionStatus":"running"}]'}'`,
     'elif [ "$1" = "ps" ]; then',
-    `  printf '%s\\n' '${options.topology ?? "1 rig · 1 seat · 0 need attention"}'`,
+    "  printf '%s\\n' '1 rig · 1 seat · 0 need attention'",
     "else",
     "  exit 2",
     "fi",
@@ -161,7 +213,7 @@ describe("public world pack", () => {
   it("keeps every marked authored claim checked or explicitly flagged", () => {
     const packDir = publicWorldDir();
     const claims = parseYaml(readFileSync(join(packDir, "claims.yaml"), "utf8")) as {
-      claims: Array<{ id: string; statement: string; check?: string; flagged?: string }>;
+      claims: Array<{ id: string; statement: string; kind: string; check?: string; flagged?: string }>;
     };
     const byId = new Map(claims.claims.map((claim) => [claim.id, claim]));
     const prose = ["start-here.md", "build-your-world.md", "boundaries.md"]
@@ -173,9 +225,22 @@ describe("public world pack", () => {
     expect(marked.length).toBeGreaterThanOrEqual(8);
     expect(new Set(marked).size).toBe(marked.length);
     expect(new Set(marked)).toEqual(new Set(byId.keys()));
+    expect(new Set(claims.claims.filter((claim) => claim.kind === "operational").map((claim) => claim.id))).toEqual(new Set([
+      "compose-fresh-profile",
+      "derive-identity",
+      "derive-pack-path",
+      "derive-topology",
+      "discover-commands",
+      "discover-context",
+      "retrieve-public-pack",
+      "retrieve-world-example",
+      "world-example-install",
+    ]));
+    expect(new Set(claims.claims.map((claim) => claim.kind))).toEqual(new Set(["judgment", "operational", "structural"]));
     expect(claims.claims.some((claim) => claim.flagged), "taste or unverifiable claims must be visibly flagged").toBe(true);
     for (const claim of claims.claims) {
       expect(claim.statement.length, `${claim.id} must state the claim being classified`).toBeGreaterThan(10);
+      expect(["judgment", "operational", "structural"], `${claim.id} needs a known claim kind`).toContain(claim.kind);
       expect(prose, `${claim.id} ledger statement must appear verbatim in the public prose`).toContain(claim.statement);
       expect(Boolean(claim.check) !== Boolean(claim.flagged), `${claim.id} needs exactly one disposition`).toBe(true);
     }
@@ -221,7 +286,7 @@ describe("public world pack", () => {
     expect(wrongIdentity.stdout).toMatch(/FAIL.*derive-identity/i);
     expect(wrongIdentity.stdout).toMatch(/ok.*derive-topology/i);
 
-    const wrongTopologyPath = writeRigFixture({ topology: "0 rigs · 0 seats · 0 need attention" });
+    const wrongTopologyPath = writeRigFixture({ topology: "[]" });
     const wrongTopology = runVerifier(packDir, {
       ...process.env,
       PATH: `${wrongTopologyPath}:${process.env.PATH ?? ""}`,
@@ -306,6 +371,59 @@ describe("public world pack", () => {
     expect(readdirSync(contextRoot)).toEqual([]);
   });
 
+  it("lets a stranger in an empty OPENRIG_HOME follow the taught world journey and observe real content", () => {
+    const strangerRoot = mkdtempSync(join(tmpdir(), "public-world-stranger-"));
+    temporaryRoots.push(strangerRoot);
+    const openrigHome = join(strangerRoot, "openrig-home");
+    const contextRoot = join(openrigHome, "context-packs");
+    mkdirSync(openrigHome);
+    expect(readdirSync(openrigHome)).toEqual([]);
+
+    const rigPath = writeRigFixture({ configRoot: contextRoot });
+    const env = {
+      ...process.env,
+      PATH: `${rigPath}:${process.env.PATH ?? ""}`,
+      OPENRIG_HOME: openrigHome,
+      OPENRIG_CONTEXT_PACKS_ROOT: contextRoot,
+      OPENRIG_SESSION_NAME: "qa@fixture",
+      RIGGED_SESSION_NAME: "",
+    };
+
+    const publicGet = runRig(rigPath, ["context", "get", "world-public"], env);
+    expect(publicGet.status, publicGet.stderr).toBe(0);
+    expect(publicGet.stdout).toContain("# Enter the world");
+    expect(publicGet.stdout).toContain("# Build your world");
+
+    const profile = runRig(rigPath, ["context", "profile", "world-public", "--situation", "fresh"], env);
+    expect(profile.status, profile.stderr).toBe(0);
+    expect(profile.stdout).toContain("# Enter the world");
+    expect(profile.stdout).toContain("# Boundaries");
+
+    const show = runRig(rigPath, ["context", "show", "world-public", "--json"], env);
+    expect(show.status, show.stderr).toBe(0);
+    expect(JSON.parse(show.stdout)).toMatchObject({ relativePath: "world-public", sourceType: "builtin" });
+
+    const verification = runVerifier(publicWorldDir(), env);
+    expect(verification.status, verification.stdout + verification.stderr).toBe(0);
+    expect(verification.stdout).toMatch(/ok.*retrieve-public-pack/i);
+    expect(verification.stdout).toMatch(/ok.*compose-fresh-profile/i);
+    expect(verification.stdout).toMatch(/ok.*retrieve-world-example/i);
+
+    const exampleGet = runRig(rigPath, ["context", "get", "world-example"], env);
+    expect(exampleGet.status, exampleGet.stderr).toBe(0);
+    expect(exampleGet.stdout).toContain("## Exercise: Book world");
+
+    const add = runRig(rigPath, ["context", "add", join(STATIC_ROOT, "world-example"), "--name", "stranger-example", "--json"], env);
+    expect(add.status, add.stderr).toBe(0);
+    expect(existsSync(join(contextRoot, "stranger-example", "manifest.yaml"))).toBe(true);
+    const list = runRig(rigPath, ["context", "list", "--json"], env);
+    expect(list.status, list.stderr).toBe(0);
+    expect(JSON.parse(list.stdout).some((entry: { relativePath: string }) => entry.relativePath === "stranger-example")).toBe(true);
+    const cleanup = runRig(rigPath, ["context", "rm", "stranger-example", "--json"], env);
+    expect(cleanup.status, cleanup.stderr).toBe(0);
+    expect(existsSync(join(contextRoot, "stranger-example"))).toBe(false);
+  });
+
   it("graduates world-example into the same convention and a book-writer exercise", () => {
     const exampleDir = join(STATIC_ROOT, "world-example");
     const example = manifestAt(exampleDir);
@@ -341,7 +459,7 @@ describe("public world pack", () => {
     expect(text).toMatch(/private world installs remain rig-local under their own refs and are never shadowed by this builtin/i);
     expect(text).toMatch(/AGENTS\.md.*repo instructions/i);
     expect(text).toContain("rig whoami --json");
-    expect(text).toContain("rig ps");
+    expect(text).toContain("rig ps --nodes --json");
     expect(text).toContain("rig context list");
     expect(text).toContain("rig context get world-public");
     expect(text).toContain("rig context add <pack-directory>");
