@@ -94,6 +94,7 @@ import { WatchdogScheduler } from "./domain/watchdog-scheduler.js";
 import { WorkflowRuntime } from "./domain/workflow-runtime.js";
 import { makeWorkflowKeepalivePolicy } from "./domain/policies/workflow-keepalive.js";
 import { makeIdleGateQitemPolicy } from "./domain/policies/idle-gate-qitem.js";
+import { makeParkedOwnerConsumerPolicy } from "./domain/policies/parked-owner-consumer.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
 import { SpecLibraryService } from "./domain/spec-library-service.js";
 // Phase 3a slice 3.3 — plugin discovery service.
@@ -1724,6 +1725,42 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           ensureStuckExceptionItem: workflowExceptionEnsurer,
         }),
         makeIdleGateQitemPolicy({ db, agentActivityStore }),
+        // OPR.0.5.6.24 F-14: the parked-owner consumer — claimed open
+        // obligations joined with the ARBITRATED seat verdict (the same
+        // surface `rig parked` renders from; never raw per-runtime evidence),
+        // one wake per park episode. In-process episode receipts; the engine's
+        // activeWakeInterval throttle bounds the restart edge (skip-not-double).
+        // The usage-limit cause cell engages when the arbitrated surface
+        // exposes a cause; until then S16's own timed wake owns that shape.
+        makeParkedOwnerConsumerPolicy({
+          getSeatState: (sessionName) => {
+            const s = seatActivityService.getSeatStateBySession(sessionName);
+            if (!s) return null;
+            return {
+              value: s.activity,
+              needsInput: s.needsInput,
+              decidedBy: s.decidedBy,
+              atPrompt: s.activity === "idle",
+            };
+          },
+          listOpenObligations: (destinationSession, limit) => ({
+            rows: queueRepoInstance
+              .list({ destinationSession, state: ["pending", "in-progress", "blocked"], limit })
+              .map((r) => ({
+                qitemId: r.qitemId,
+                state: r.state as "pending" | "in-progress" | "blocked",
+                summary: r.summary ?? null,
+              })),
+            limit,
+          }),
+          receipts: (() => {
+            const store = new Map<string, { episodeKey: string; deliveredAt: string }>();
+            return {
+              findForEpisode: (episodeKey: string) => store.get(episodeKey) ?? null,
+              record: (r: { episodeKey: string; deliveredAt: string }) => void store.set(r.episodeKey, r),
+            };
+          })(),
+        }),
       ],
     });
     const watchdogScheduler = new WatchdogScheduler({

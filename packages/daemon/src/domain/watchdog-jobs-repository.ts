@@ -31,6 +31,10 @@ export const PHASE_D_POLICIES = [
   // via WatchdogPolicyEngine additionalPolicies (like workflow-keepalive).
   "idle-gate-qitem",
   "context-usage-threshold",
+  // OPR.0.5.6.24 F-14 — one rig-level parked-owner consumer: joins claimed
+  // open obligations with the ARBITRATED idle verdict into one wake per park
+  // episode. Injected via additionalPolicies like idle-gate-qitem.
+  "parked-owner-consumer",
 ] as const;
 
 /** @deprecated since Phase D — use PHASE_D_POLICIES. */
