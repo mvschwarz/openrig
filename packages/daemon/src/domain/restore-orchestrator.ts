@@ -804,6 +804,24 @@ export class RestoreOrchestrator {
     const node = entry.node;
     const nodeId = node.id;
 
+    // OPR.0.5.7.1 (bought ordering blocker, baton 0efd154d): D1 present-map
+    // ambiguity must be DETECTED before any continuity_state short-circuit —
+    // a pod node in 'restoring' otherwise returns a silent status "fresh"
+    // (classified running downstream) while the occupant truth is ambiguous,
+    // bypassing A1's loud-failure semantics. Resolved/none/legacy states
+    // fall through and keep the restoring/degraded behavior unchanged.
+    {
+      const preResolution = resolveActiveSnapshotSession(data, nodeId);
+      if (preResolution.kind === "ambiguous") {
+        return {
+          nodeId,
+          logicalId: node.logicalId,
+          status: "failed",
+          error: activeOccupantAmbiguityError(preResolution.candidateIds, preResolution.detail),
+        };
+      }
+    }
+
     // Consult live continuity state BEFORE clearing stale state
     if (node.podId) {
       const continuityRow = this.db.prepare(
