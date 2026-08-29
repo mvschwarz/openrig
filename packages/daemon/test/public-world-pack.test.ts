@@ -39,9 +39,11 @@ function writeRigFixture(options: {
   showStatus?: number;
   listJson?: string;
   configRoot?: string;
+  addStatus?: number;
 } = {}): string {
   const fixturePath = mkdtempSync(join(tmpdir(), "public-world-rig-"));
   temporaryRoots.push(fixturePath);
+  const installState = join(fixturePath, "installed-ref");
   const sourcePath = publicWorldDir();
   const showJson = JSON.stringify({
     relativePath: "world-public",
@@ -57,6 +59,7 @@ function writeRigFixture(options: {
     : `'${options.configRoot}'`;
   writeFileSync(join(fixturePath, "rig"), [
     "#!/bin/sh",
+    `install_state=${JSON.stringify(installState)}`,
     'if [ "$#" -eq 1 ] && [ "$1" = "--help" ]; then',
     "  exit 0",
     'elif [ "$1" = "context" ] && [ "$3" = "--help" ]; then',
@@ -66,8 +69,27 @@ function writeRigFixture(options: {
     `  exit ${options.showStatus ?? 0}`,
     'elif [ "$1" = "context" ] && [ "$2" = "show" ] && [ "$3" = "world/install" ]; then',
     `  printf '%s\\n' '{"relativePath":"world/install","sourceType":"user_file","sourcePath":"/fixture/private-world"}'`,
-    "elif [ \"$1\" = \"context\" ] && [ \"$2\" = \"list\" ]; then",
-    `  printf '%s\\n' '${listJson}'`,
+    'elif [ "$1" = "context" ] && [ "$2" = "add" ]; then',
+    `  if [ ${options.addStatus ?? 0} -ne 0 ]; then`,
+    "    printf '%s\\n' 'context add is broken' >&2",
+    `    exit ${options.addStatus ?? 0}`,
+    "  fi",
+    '  [ "$4" = "--name" ] || exit 64',
+    '  printf \'%s\\n\' "$5" > "$install_state"',
+    '  printf \'{"installedAt":"/fixture/context-packs/%s"}\\n\' "$5"',
+    'elif [ "$1" = "context" ] && [ "$2" = "list" ]; then',
+    '  if [ -f "$install_state" ]; then',
+    '    installed_ref=$(sed -n \'1p\' "$install_state")',
+    `    printf '%s\\n' '${listJson}' | sed 's/]$//'`,
+    "    printf ',{\"relativePath\":\"%s\",\"sourceType\":\"user_file\",\"sourcePath\":\"/fixture/context-packs/%s\"}]\\n' \"$installed_ref\" \"$installed_ref\"",
+    "  else",
+    `    printf '%s\\n' '${listJson}'`,
+    "  fi",
+    'elif [ "$1" = "context" ] && [ "$2" = "rm" ]; then',
+    '  [ -f "$install_state" ] || exit 1',
+    '  [ "$(sed -n \'1p\' "$install_state")" = "$3" ] || exit 1',
+    '  rm -f "$install_state"',
+    '  printf \'{"removed":true,"ref":"%s"}\\n\' "$3"',
     'elif [ "$1" = "config" ] && [ "$2" = "get" ] && [ "$3" = "context.packs_root" ]; then',
     `  printf '%s\\n' ${configRoot}`,
     'elif [ "$1" = "whoami" ]; then',
@@ -236,6 +258,20 @@ describe("public world pack", () => {
       ...process.env,
       PATH: `${rigPath}:${process.env.PATH ?? ""}`,
       OPENRIG_CONTEXT_PACKS_ROOT: "/fixture/expected-context-packs",
+      OPENRIG_SESSION_NAME: "qa@fixture",
+      RIGGED_SESSION_NAME: "",
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toMatch(/FAIL.*world-example-install/i);
+  });
+
+  it("fails when context add is broken despite healthy help and config projections", () => {
+    const rigPath = writeRigFixture({ addStatus: 71 });
+    const result = runVerifier(publicWorldDir(), {
+      ...process.env,
+      PATH: `${rigPath}:${process.env.PATH ?? ""}`,
+      OPENRIG_CONTEXT_PACKS_ROOT: "/fixture/context-packs",
       OPENRIG_SESSION_NAME: "qa@fixture",
       RIGGED_SESSION_NAME: "",
     });
