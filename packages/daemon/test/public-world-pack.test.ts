@@ -6,6 +6,7 @@ import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { parse as parseYaml } from "yaml";
 import { parseManifest } from "../src/domain/context-packs/manifest-parser.js";
 import { composeProfile } from "../src/domain/context-packs/profile-composer.js";
 
@@ -25,7 +26,7 @@ function manifestAt(packDir = publicWorldDir()) {
 }
 
 function runVerifier(packDir: string, env: NodeJS.ProcessEnv = process.env) {
-  return spawnSync(process.execPath, [join(packDir, "verify-world.mjs")], {
+  return spawnSync("/bin/sh", [join(packDir, "verify-world.sh")], {
     cwd: packDir,
     env,
     encoding: "utf8",
@@ -50,9 +51,9 @@ describe("public world pack", () => {
     expect(files).toEqual([
       "boundaries.md",
       "build-your-world.md",
-      "claims.json",
+      "claims.yaml",
       "start-here.md",
-      "verify-world.mjs",
+      "verify-world.sh",
     ]);
 
     for (const atom of manifest.atoms ?? []) {
@@ -79,7 +80,7 @@ describe("public world pack", () => {
 
   it("keeps every marked authored claim checked or explicitly flagged", () => {
     const packDir = publicWorldDir();
-    const claims = JSON.parse(readFileSync(join(packDir, "claims.json"), "utf8")) as {
+    const claims = parseYaml(readFileSync(join(packDir, "claims.yaml"), "utf8")) as {
       claims: Array<{ id: string; statement: string; check?: string; flagged?: string }>;
     };
     const byId = new Map(claims.claims.map((claim) => [claim.id, claim]));
