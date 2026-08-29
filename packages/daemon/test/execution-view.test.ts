@@ -27,6 +27,8 @@ import { queueTransitionWakesSchema } from "../src/db/migrations/073_queue_trans
 import { viewsCustomSchema } from "../src/db/migrations/030_views_custom.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { ViewProjector, ViewProjectorError } from "../src/domain/view-projector.js";
+import { Hono } from "hono";
+import { viewsRoutes } from "../src/routes/views.js";
 
 const MISSION = "release-9.9";
 const SEAT_A = "builder-a@exec-fixture";
@@ -55,6 +57,10 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
   let candidateSha: string;
   let branchName: string;
   let fixedNow: Date;
+  // The REAL activity oracle (agent-activity-store shape), faked per seat.
+  // Q1/Q6 must consume THIS — never sessions.status (the HOLD's live specimen:
+  // three working lanes labeled `superseded` by the sessions approximation).
+  let oracleBySession: Map<string, { state: string; reason: string; stale?: boolean; sampledAt: string }>;
 
   beforeEach(() => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), "exec-view-"));
@@ -129,6 +135,10 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     ]);
     const bus = new EventBus(db);
     projector = new ViewProjector(db, bus);
+    oracleBySession = new Map([
+      [SEAT_A, { state: "running", reason: "runtime hook fresh", sampledAt: "2026-08-29T21:59:00.000Z" }],
+      [SEAT_B, { state: "running", reason: "runtime hook fresh", sampledAt: "2026-08-29T21:59:00.000Z" }],
+    ]);
     // Optional-call: at base the method does not exist — the RED then lands on
     // show("execution") with the pinned view_not_found, not on wiring.
     (projector as unknown as { setExecutionDeps?: (d: unknown) => void }).setExecutionDeps?.({
@@ -137,6 +147,10 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
       rigsRoot: () => rigsRoot,
       buildInfo: { semver: null, commit: null, dirty: null, builtAt: null },
       now: () => fixedNow,
+      activity: {
+        getLatestForNode: (input: { sessionName?: string | null }) =>
+          (input.sessionName && oracleBySession.get(input.sessionName)) || null,
+      },
     });
 
     const insertRow = db.prepare(
@@ -279,14 +293,124 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     }
   });
 
-  it("liveness flip: killing a seat flips Q1 on the next read with no authored update", () => {
+  it("Q1 consumes the ACTIVITY ORACLE, not sessions.status: the superseded-label specimen cannot recur, and an oracle flip lands on the next read", () => {
+    // The HOLD's live specimen: sessions.status says superseded while the seat works.
+    db.prepare(`UPDATE sessions SET status = 'superseded' WHERE session_name = ?`).run(SEAT_A);
     const before = show();
     const laneBefore = (before.q1_lanes as Record<string, unknown>[]).find((l) => l.slice === "OPR.9.9.31")!;
-    expect((laneBefore.activity as Record<string, unknown>).session_status).toBe("running");
-    db.prepare(`UPDATE sessions SET status = 'exited' WHERE session_name = ?`).run(SEAT_A);
+    const actBefore = laneBefore.activity as Record<string, unknown>;
+    expect(actBefore.state).toBe("running");
+    expect(String(actBefore.source)).toContain("activity oracle");
+    // Liveness flip via the oracle — zero authored updates, derived next read.
+    oracleBySession.set(SEAT_A, { state: "needs_input", reason: "permission prompt open", sampledAt: "2026-08-29T21:59:30.000Z" });
     const after = show();
     const laneAfter = (after.q1_lanes as Record<string, unknown>[]).find((l) => l.slice === "OPR.9.9.31")!;
-    expect((laneAfter.activity as Record<string, unknown>).session_status).toBe("exited");
+    expect((laneAfter.activity as Record<string, unknown>).state).toBe("needs_input");
+    // A seat the oracle has never seen floors INDETERMINATE, never idle/dead.
+    oracleBySession.delete(SEAT_A);
+    const gone = show();
+    const laneGone = (gone.q1_lanes as Record<string, unknown>[]).find((l) => l.slice === "OPR.9.9.31")!;
+    expect((laneGone.activity as Record<string, unknown>).state).toBe("INDETERMINATE");
+  });
+
+  it("Q6 idle capacity derives from the oracle, not sessions.status", () => {
+    // Seat C: oracle says idle, no rows held — sessions.status deliberately
+    // 'superseded' so the old approximation counts 0 and the oracle counts 1.
+    const t0 = "2026-08-29T21:00:00.000Z";
+    db.prepare(`INSERT INTO nodes (id, rig_id, logical_id) VALUES ('n-c', 'rig-x', 'builder-c')`).run();
+    db.prepare(
+      `INSERT INTO sessions (id, node_id, session_name, status, last_seen_at, created_at) VALUES ('s-c', 'n-c', 'builder-c@exec-fixture', 'superseded', ?, ?)`,
+    ).run(t0, t0);
+    oracleBySession.set("builder-c@exec-fixture", { state: "idle", reason: "prompt empty", sampledAt: "2026-08-29T21:59:00.000Z" });
+    const doc = show();
+    const idle = (doc.q6_parallelism as Record<string, unknown>).idle_seats_with_capacity as Record<string, unknown>;
+    expect(idle.value).toBe(1);
+    expect(String(idle.basis)).toContain("activity oracle");
+  });
+
+  it("Q4 reviewed is scoped to the BUILT candidate sha: off-sha verdicts are excluded and no-candidate floors INDETERMINATE", () => {
+    // An old BLOCKING artifact at a different candidate must not poison the at-sha verdict.
+    const reviewDir = path.join(rigsRoot, "exec-fixture", "state", "review-fixture");
+    fs.writeFileSync(
+      path.join(reviewDir, "S31-old-hold.md"),
+      `---\nslice: 31-alpha\nartifact_type: rev1-r1\nverdict: BLOCKING\ncandidate_sha: 0000000000000000000000000000000000000000\n---\nHOLD at a dead candidate.\n`,
+    );
+    const doc = show();
+    const q4 = doc.q4_ladder as Record<string, unknown>[];
+    const s31 = q4.find((s) => s.slice_id === "OPR.9.9.31")!;
+    const reviewed = s31.reviewed as Record<string, unknown>;
+    expect(reviewed.value).toBe(true);
+    expect((reviewed.legs as Record<string, unknown>[]).length).toBe(1);
+    // No built candidate => no sha to scope to => INDETERMINATE, never a verdict.
+    const s33 = q4.find((s) => s.slice_id === "OPR.9.9.33")!;
+    expect((s33.reviewed as Record<string, unknown>).value).toBe("INDETERMINATE");
+    expect(String((s33.reviewed as Record<string, unknown>).basis)).toContain("candidate");
+  });
+
+  it("Q2 honesty: own-completion INDETERMINATE never yields next_up=true, and terminal-row blockedOn does not govern dispatchability", () => {
+    // 34-delta: locked, unclaimed, EC-1 present, but NO candidate tag anywhere —
+    // own folded is underivable, so dispatchability is INDETERMINATE, not true.
+    writeSpec(
+      missionsRoot,
+      "34-delta",
+      ["id: OPR.9.9.34", "slice: 34-delta", `mission: ${MISSION}`, "approved-spec-at: 2026-08-29T00:00:00.000Z", "depends_on: []"].join("\n"),
+      "## Intent\ndelta\n",
+    );
+    // A DONE row with stale blockedOn naming slice 32 must not suppress 32's next_up.
+    db.prepare(
+      `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, body, blocked_on)
+       VALUES ('qitem-stale-done', '2026-08-29T20:00:00.000Z', '2026-08-29T20:00:00.000Z', 'lead@exec-fixture', 'builder-b@exec-fixture', 'done', 'normal', 'light', ?, 'closed long ago', 'qitem-ancient-blocker')`,
+    ).run(JSON.stringify([`mission:${MISSION}`, "slice:OPR.9.9.32"]));
+    // Free slice 32 of its live lane so only deps govern it.
+    db.prepare(`UPDATE queue_items SET state = 'done', claimed_at = NULL WHERE qitem_id = 'qitem-lane-32'`).run();
+    const doc = show();
+    const q2 = doc.q2_sequencing as Record<string, unknown>[];
+    const s34 = q2.find((s) => s.slice_id === "OPR.9.9.34")!;
+    expect(s34.next_up).toBe("INDETERMINATE");
+    expect(String(s34.next_up_basis)).toContain("completion");
+    const s32 = q2.find((s) => s.slice_id === "OPR.9.9.32")!;
+    // The stale terminal-row blocker is record, not state: it must not appear.
+    expect(s32.blocked_on_rows).toEqual([]);
+    // 32 also carries no candidate: own completion is underivable, so
+    // dispatchability is INDETERMINATE — never false FROM the stale blocker,
+    // never true from ignorance.
+    expect(s32.next_up).toBe("INDETERMINATE");
+    expect(String(s32.next_up_basis)).toContain("completion");
+  });
+
+  it("Q5 park_kind is the closed enum only: deliberate-with-wake | stalled | indeterminate", () => {
+    // Give lane-31 real post-claim motion so its pickup derives 'working' —
+    // the arm that leaked 'working' into park_kind on the live artifact.
+    db.prepare(
+      `INSERT INTO queue_transitions (transition_id, qitem_id, ts, state, transition_note, actor_session)
+       VALUES (31002, 'qitem-lane-31', '2026-08-29T21:30:00.000Z', 'in-progress', 'progress note', '${SEAT_A}')`,
+    ).run();
+    const doc = show();
+    const rows = doc.q5_park as Record<string, unknown>[];
+    expect(rows.length).toBeGreaterThan(0);
+    const lane31 = rows.find((p) => p.qitem_id === "qitem-lane-31")!;
+    expect(lane31.pickup_state).toBe("working");
+    for (const p of rows) {
+      expect(["deliberate-with-wake", "stalled", "indeterminate"]).toContain(p.park_kind);
+    }
+  });
+
+  it("RECEIVER: GET /api/views/execution?mission=… derives the full document through the HTTP route (not module-direct)", async () => {
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("viewProjector" as never, projector);
+      c.set("eventBus" as never, new EventBus(db));
+      await next();
+    });
+    app.route("/api/views", viewsRoutes());
+    const res = await app.request(`/api/views/execution?mission=${MISSION}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.rowCount).toBe(1);
+    const doc = (body.rows as Record<string, unknown>[])[0]!;
+    expect(doc.view).toBe("execution");
+    expect(doc.mission).toBe(MISSION);
+    expect((doc.q1_lanes as unknown[]).length).toBe(2);
   });
 
   it("park honesty: armed wake => deliberate-with-wake; removing the wake flips park_kind to INDETERMINATE, never idle/dead", () => {
@@ -298,7 +422,8 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     db.prepare(`DELETE FROM queue_transition_wakes WHERE qitem_id = 'qitem-parked-33'`).run();
     const after = show();
     const parkedAfter = (after.q5_park as Record<string, unknown>[]).find((p) => p.qitem_id === "qitem-parked-33")!;
-    expect(parkedAfter.park_kind).toBe("INDETERMINATE");
+    // The DESIGN's park_kind enum is lowercase; the value floor stays honest.
+    expect(parkedAfter.park_kind).toBe("indeterminate");
     expect(String(parkedAfter.park_kind_basis)).toContain("no armed wake");
   });
 
