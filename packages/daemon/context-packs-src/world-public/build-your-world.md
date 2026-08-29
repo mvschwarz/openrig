@@ -75,6 +75,9 @@ filing system rather than a place, simplify it.
 <!-- world-claim: book-to-software -->
 The book exercise maps its manuscript to a codebase, editorial rules to engineering laws and conventions, draft state to derived build and deploy state, and its writer to the team. Software worlds use the same moves.
 
+<!-- world-claim: software-shaped-bridge -->
+Agents already know software-shaped building through specifications, verification loops, tooling, and the programming substrate. A world pack built this way uses named files and a manifest as the spec shape, per-claim checks and a verifier that can fail as the test suite, and derive-at-source commands as the feedback loop. A blank-slate reader therefore already knows how to build this kind of artifact: world-building supplies the information architecture while software-shaping supplies buildability.
+
 The full public pack demonstrates the optional claim-checking climb.
 
 <!-- world-claim: derive-pack-path -->

@@ -59,6 +59,10 @@ claims:
     statement: "The book exercise maps its manuscript to a codebase, editorial rules to engineering laws and conventions, draft state to derived build and deploy state, and its writer to the team. Software worlds use the same moves."
     kind: judgment
     flagged: "Authored purpose and taste; no live scan can prove it."
+  - id: software-shaped-bridge
+    statement: "Agents already know software-shaped building through specifications, verification loops, tooling, and the programming substrate. A world pack built this way uses named files and a manifest as the spec shape, per-claim checks and a verifier that can fail as the test suite, and derive-at-source commands as the feedback loop. A blank-slate reader therefore already knows how to build this kind of artifact: world-building supplies the information architecture while software-shaping supplies buildability."
+    kind: judgment
+    flagged: "Authored analogy and purpose; no live scan can prove it."
   - id: derive-pack-path
     statement: "Use rig context show world-public --json to derive the installed pack directory."
     kind: operational
