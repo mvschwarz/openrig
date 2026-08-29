@@ -2,7 +2,7 @@
 // real atoms, a claim-to-check ledger, a verifier that can fail or skip loudly,
 // and a worked stranger exercise rather than a private-world copy.
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -118,6 +118,48 @@ describe("public world pack", () => {
     expect(red.status).toBe(1);
     expect(red.stdout).toMatch(/FAIL.*pack-taxonomy/i);
 
+    const wrongIdentityPath = mkdtempSync(join(tmpdir(), "public-world-wrong-identity-"));
+    temporaryRoots.push(wrongIdentityPath);
+    writeFileSync(join(wrongIdentityPath, "rig"), [
+      "#!/bin/sh",
+      'if [ "$1" = "whoami" ]; then',
+      `  printf '%s\\n' '{"identity":{"rigName":"fixture","memberId":"qa","sessionName":"wrong@fixture"}}'`,
+      'elif [ "$1" = "ps" ]; then',
+      `  printf '%s\\n' '1 rig · 1 seat · 0 need attention'`,
+      "fi",
+    ].join("\n"));
+    chmodSync(join(wrongIdentityPath, "rig"), 0o755);
+    const wrongIdentity = runVerifier(packDir, {
+      ...process.env,
+      PATH: `${wrongIdentityPath}:${process.env.PATH ?? ""}`,
+      OPENRIG_SESSION_NAME: "qa@fixture",
+      RIGGED_SESSION_NAME: "",
+    });
+    expect(wrongIdentity.status).toBe(1);
+    expect(wrongIdentity.stdout).toMatch(/FAIL.*derive-identity/i);
+    expect(wrongIdentity.stdout).toMatch(/ok.*derive-topology/i);
+
+    const wrongTopologyPath = mkdtempSync(join(tmpdir(), "public-world-wrong-topology-"));
+    temporaryRoots.push(wrongTopologyPath);
+    writeFileSync(join(wrongTopologyPath, "rig"), [
+      "#!/bin/sh",
+      'if [ "$1" = "whoami" ]; then',
+      `  printf '%s\\n' '{"identity":{"rigName":"fixture","memberId":"qa","sessionName":"qa@fixture"}}'`,
+      'elif [ "$1" = "ps" ]; then',
+      `  printf '%s\\n' '0 rigs · 0 seats · 0 need attention'`,
+      "fi",
+    ].join("\n"));
+    chmodSync(join(wrongTopologyPath, "rig"), 0o755);
+    const wrongTopology = runVerifier(packDir, {
+      ...process.env,
+      PATH: `${wrongTopologyPath}:${process.env.PATH ?? ""}`,
+      OPENRIG_SESSION_NAME: "qa@fixture",
+      RIGGED_SESSION_NAME: "",
+    });
+    expect(wrongTopology.status).toBe(1);
+    expect(wrongTopology.stdout).toMatch(/ok.*derive-identity/i);
+    expect(wrongTopology.stdout).toMatch(/FAIL.*derive-topology/i);
+
     const missingPath = mkdtempSync(join(tmpdir(), "public-world-path-"));
     temporaryRoots.push(missingPath);
     const skip = runVerifier(packDir, { ...process.env, PATH: missingPath });
@@ -162,7 +204,7 @@ describe("public world pack", () => {
     expect(text).toContain("rig context list");
     expect(text).toContain("rig context get world-public");
     expect(text).toContain("rig context profile world-public --situation fresh");
-    expect(text).toMatch(/subset by region/i);
+    expect(text).toMatch(/consumers may filter that metadata as data/i);
     expect(text).toContain("rig --help");
     const cliSource = readFileSync(resolve(DAEMON_ROOT, "../cli/src/commands/context.ts"), "utf8");
     expect(cliSource).toContain('cmd.command("get")');

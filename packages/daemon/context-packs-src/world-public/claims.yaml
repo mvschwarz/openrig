@@ -4,10 +4,10 @@ claims:
     flagged: "Authored purpose and taste; no live scan can prove it."
   - id: derive-identity
     statement: "Use rig whoami --json to derive the identity of the seat you actually occupy."
-    check: taught-commands
+    check: derive-identity
   - id: derive-topology
     statement: "Use rig ps to derive which rigs and seats exist now."
-    check: taught-commands
+    check: derive-topology
   - id: discover-context
     statement: "Use rig context list to discover the context packs available on this installation."
     check: rig-command-surface
@@ -23,9 +23,9 @@ claims:
   - id: regions-are-tags
     statement: "The eight regions are metadata on atoms, not a required folder tree."
     check: atom-regions
-  - id: subset-regions
-    statement: "Compose a subset by region when a full world is more context than the situation needs."
-    check: subset-by-region
+  - id: region-metadata
+    statement: "The regions field says which dimensions an atom covers; atoms carry it as manifest metadata, and consumers may filter that metadata as data."
+    check: atom-regions
   - id: derived-reading-cost
     statement: "The reading cost is derived when a profile is composed, not copied into this pack."
     check: derived-reading-cost

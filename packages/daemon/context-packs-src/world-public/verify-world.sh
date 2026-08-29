@@ -91,6 +91,44 @@ else
   fail rig-command-surface 'a taught rig command is absent from the live CLI'
 fi
 
+expected_session=${OPENRIG_SESSION_NAME:-${RIGGED_SESSION_NAME:-}}
+identity_output=$(rig whoami --json 2>/dev/null)
+identity_status=$?
+identity_ok=1
+[ "$identity_status" -eq 0 ] || identity_ok=0
+printf '%s\n' "$identity_output" | grep -Eq '"rigName"[[:space:]]*:[[:space:]]*"[^"]+"' || identity_ok=0
+printf '%s\n' "$identity_output" | grep -Eq '"memberId"[[:space:]]*:[[:space:]]*"[^"]+"' || identity_ok=0
+printf '%s\n' "$identity_output" | grep -Eq '"sessionName"[[:space:]]*:[[:space:]]*"[^"]+@[^"]+"' || identity_ok=0
+if [ -n "$expected_session" ]; then
+  printf '%s\n' "$identity_output" | grep -Fq "\"sessionName\":\"$expected_session\"" || identity_ok=0
+fi
+if [ "$identity_ok" -eq 1 ]; then
+  pass derive-identity 'rig whoami returned a complete managed-seat identity'
+else
+  fail derive-identity 'rig whoami did not return a complete managed-seat identity'
+fi
+
+topology_output=$(rig ps 2>/dev/null)
+topology_status=$?
+topology_ok=0
+if [ "$topology_status" -eq 0 ]; then
+  case "$topology_output" in
+    'No rigs'*|'No active rigs'*) [ -z "$expected_session" ] && topology_ok=1 ;;
+    *)
+      if [ -n "$expected_session" ]; then
+        printf '%s\n' "$topology_output" | grep -Eq '^[1-9][0-9]* rigs? .* [1-9][0-9]* seats? .* [0-9]+ needs? attention$' && topology_ok=1
+      else
+        printf '%s\n' "$topology_output" | grep -Eq '^[0-9]+ rigs? .* [0-9]+ seats? .* [0-9]+ needs? attention$' && topology_ok=1
+      fi
+      ;;
+  esac
+fi
+if [ "$topology_ok" -eq 1 ]; then
+  pass derive-topology 'rig ps returned its stated topology view'
+else
+  fail derive-topology 'rig ps did not return its stated topology view'
+fi
+
 if grep -Fq 'rig whoami --json' "$root/start-here.md" &&
    grep -Fq 'rig ps' "$root/start-here.md" &&
    grep -Fq 'rig context list' "$root/start-here.md" &&
@@ -104,12 +142,6 @@ if grep -Fq 'WORLD + LORE + SKILLS + MISSION' "$root/build-your-world.md"; then
   pass taxonomy-layout 'the authoring convention separates the four context kinds'
 else
   fail taxonomy-layout 'the four-kind separation is absent'
-fi
-
-if grep -Fqi 'subset by region' "$root/build-your-world.md"; then
-  pass subset-by-region 'large worlds teach region subsetting instead of meaning loss'
-else
-  fail subset-by-region 'region subsetting is not taught'
 fi
 
 if grep -Fq 'The reading cost is derived when a profile is composed, not copied into this pack.' "$root/build-your-world.md"; then

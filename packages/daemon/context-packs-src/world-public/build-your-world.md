@@ -32,7 +32,7 @@ Tag existing authored files with identity, ontology, terrain, actors, laws, hist
 affordances. One coherent file may cover several regions; do not fork the same idea into eight
 copies.
 
-## Load only the useful width
+## Carry an honest coverage map
 
 Inspect the public pack and compose it for a fresh session:
 
@@ -41,12 +41,16 @@ rig context get world-public
 rig context profile world-public --situation fresh
 ```
 
-<!-- world-claim: subset-regions -->
-Compose a subset by region when a full world is more context than the situation needs.
+<!-- world-claim: region-metadata -->
+The regions field says which dimensions an atom covers; atoms carry it as manifest metadata, and consumers may filter that metadata as data.
+This pack promises no region selector or
+subset-composition operation. If a real consumer needs region-subset composition, route that
+capability as separate profile-composer work.
 
 <!-- world-claim: derived-reading-cost -->
 The reading cost is derived when a profile is composed, not copied into this pack.
-Cut coverage deliberately by situation or region; do not cut sentences until their meaning breaks.
+Use the coverage map to decide what a future consumer should request; do not cut sentences until
+their meaning breaks.
 
 ## Exercise: Book world
 
