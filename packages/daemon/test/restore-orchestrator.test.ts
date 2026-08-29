@@ -670,7 +670,7 @@ describe("RestoreOrchestrator", () => {
     });
 
     const orch = createOrchestrator({ tmux });
-    // A1 premise: this launch is a DELIBERATE fresh (no-session nodes fresh-prime only when fresh-listed).
+    // A1 premise: the captured running occupant is deliberately replaced by fresh-listed operation B.
     const result = await orch.restore(snap.id, { freshLogicalIds: ["worker"] });
 
     // The restore itself may error due to events table sabotage.
@@ -890,7 +890,7 @@ describe("RestoreOrchestrator", () => {
       withCheckpoint: "worker",
     });
     const orch = createOrchestrator();
-    // A1 premise: this launch is a DELIBERATE fresh (no-session nodes fresh-prime only when fresh-listed).
+    // A1 premise: the captured running occupant is deliberately replaced by fresh-listed operation B.
     const result = await orch.restore(snap.id, { freshLogicalIds: ["worker"] });
 
     expect(result.ok).toBe(true);
@@ -933,7 +933,7 @@ describe("RestoreOrchestrator", () => {
       edges: [],
     });
     const orch = createOrchestrator();
-    // A1 premise: this launch is a DELIBERATE fresh (no-session nodes fresh-prime only when fresh-listed).
+    // A1 premise: the captured running occupant is deliberately replaced by fresh-listed operation B.
     const result = await orch.restore(snap.id, { freshLogicalIds: ["worker"] });
 
     expect(result.ok).toBe(true);
@@ -950,7 +950,7 @@ describe("RestoreOrchestrator", () => {
       return { ok: true as const };
     });
     const orch = createOrchestrator({ tmux });
-    // A1 premise: DELIBERATE fresh for every sessionless node in the default seed.
+    // A1 premise: each default-seed node's captured running occupant is deliberately replaced by fresh-listed operation B.
     const result = await orch.restore(snap.id, { freshLogicalIds: ["orchestrator", "worker-a", "worker-b"] });
 
     expect(result.ok).toBe(true);
@@ -1774,7 +1774,7 @@ describe("RestoreOrchestrator", () => {
       transcriptStore,
     });
 
-    // A1 premise: DELIBERATE fresh for every sessionless node in the default seed.
+    // A1 premise: each default-seed node's captured running occupant is deliberately replaced by fresh-listed operation B.
     const result = await orch.restore(snap.id, { freshLogicalIds: ["orchestrator", "worker-a", "worker-b"] });
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -1808,7 +1808,7 @@ describe("RestoreOrchestrator", () => {
       codexResume: mockCodexResume(),
     });
 
-    // A1 premise: DELIBERATE fresh for every sessionless node in the default seed.
+    // A1 premise: each default-seed node's captured running occupant is deliberately replaced by fresh-listed operation B.
     const result = await orch.restore(snap.id, { freshLogicalIds: ["orchestrator", "worker-a", "worker-b"] });
     expect(result.ok).toBe(true);
 
@@ -1978,7 +1978,7 @@ describe("RestoreOrchestrator", () => {
       ],
       resumeType: "none",
       edges: [],
-      // No resumeType → node will launch fresh
+      // resumeType "none" records an occupant without a usable native resume source.
     });
 
     const orchestrator = createOrchestrator();
