@@ -1485,6 +1485,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     viewProjectorInstance.setExecutionDeps({
       db,
       slicesRoot: () => slicesRoot || null,
+      // The DESIGN's Q1/Q6 join leg — the real activity oracle, never
+      // sessions.status approximations.
+      activity: agentActivityStore,
     });
     const { SliceIndexer } = await import("./domain/slices/slice-indexer.js");
     const { SliceDetailProjector } = await import("./domain/slices/slice-detail-projector.js");

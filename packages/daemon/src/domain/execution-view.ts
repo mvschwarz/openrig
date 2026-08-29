@@ -40,6 +40,17 @@ export interface ExecutionViewDeps {
   /** The missions root (workspace.slices_root). Null => fs-derived sections floor
    *  to INDETERMINATE; the queue-derived sections still answer. */
   slicesRoot: () => string | null;
+  /** THE activity oracle (agent-activity-store shape) — the DESIGN's Q1/Q6 join
+   *  leg. sessions.status is NOT an acceptable stand-in (live specimen: working
+   *  lanes labeled `superseded`). Absent => activity cells floor INDETERMINATE. */
+  activity?: {
+    getLatestForNode(input: { sessionName?: string | null; now?: Date }): {
+      state: string;
+      reason: string;
+      stale?: boolean;
+      sampledAt: string;
+    } | null;
+  };
   now?: () => Date;
   buildInfo?: BuildInfo;
   /** Injectable for tests. Same signature subset as node's execFileSync. */
@@ -368,9 +379,7 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
       fragileJoin = true;
       joinBasis = "row/branch naming only (EC-3 field absent — legacy baton)";
     }
-    const session = deps.db
-      .prepare(`SELECT status, last_seen_at FROM sessions WHERE session_name = ? ORDER BY last_seen_at DESC LIMIT 1`)
-      .get(r.destination_session) as { status: string; last_seen_at: string | null } | undefined;
+    const oracle = deps.activity?.getLatestForNode({ sessionName: r.destination_session, now: now() }) ?? null;
     const pickup = derivePickup({
       state: r.state,
       claimedAt: r.claimed_at,
@@ -387,9 +396,13 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
       head_sha: headSha,
       fragile_join: fragileJoin,
       join_basis: joinBasis,
-      activity: session
-        ? { session_status: session.status, last_seen_at: session.last_seen_at, source: "sessions.last_seen_at — liveness is not health" }
-        : { session_status: INDETERMINATE, last_seen_at: INDETERMINATE, source: "no sessions row for this seat" },
+      activity: oracle
+        ? { state: oracle.state, reason: oracle.reason, stale: oracle.stale ?? false, sampled_at: oracle.sampledAt, source: "agent-activity oracle (events agent.activity)" }
+        : {
+            state: INDETERMINATE,
+            reason: deps.activity ? "no activity evidence recorded for this seat" : "activity oracle not wired on this deps set",
+            source: "agent-activity oracle (absent evidence floors INDETERMINATE, never idle/dead)",
+          },
       pickup,
       source: { qitem_id: r.qitem_id },
     });
@@ -437,18 +450,25 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
     const built = candidateSha
       ? { candidate_sha: candidateSha, basis: `candidate:* tag on row ${candidateRow}` }
       : { candidate_sha: INDETERMINATE, basis: "no candidate:* tag on any row bound to this slice (unbuilt and unrecorded are indistinguishable here)" };
-    // reviewed: registry artifacts naming this slice.
+    // reviewed: registry artifacts naming this slice, SCOPED TO THE BUILT SHA —
+    // the contract is {legs+verdicts at sha}; historical verdicts at other
+    // candidates are neither clearance nor poison here.
     const artifacts = scanReviewArtifacts(rigsRoot, [facts.dir, ...(typeof facts.id === "string" ? [facts.id] : [])]);
-    const reviewed =
-      artifacts === INDETERMINATE
-        ? { value: INDETERMINATE, basis: `review-artifact root unreadable (${rigsRoot})`, legs: [] }
-        : artifacts.length === 0
-          ? { value: INDETERMINATE, basis: "no review artifact names this slice on the registry surface checked", legs: [] }
-          : {
-              value: artifacts.every((a) => ["CLEAR", "PASS"].includes(a.verdict)),
-              basis: `frontmatter verdicts at ${artifacts.length} artifact(s)`,
-              legs: artifacts.map((a) => ({ path: a.path, verdict: a.verdict, candidate_sha: a.candidateSha, artifact_type: a.artifactType })),
-            };
+    let reviewed: Record<string, unknown>;
+    if (artifacts === INDETERMINATE) {
+      reviewed = { value: INDETERMINATE, basis: `review-artifact root unreadable (${rigsRoot})`, legs: [] };
+    } else if (!candidateSha) {
+      reviewed = { value: INDETERMINATE, basis: "no built candidate sha to scope review legs to", legs: [] };
+    } else {
+      const atSha = artifacts.filter((a) => a.candidateSha === candidateSha);
+      reviewed = atSha.length === 0
+        ? { value: INDETERMINATE, basis: `no review artifact at the built candidate ${candidateSha.slice(0, 9)} on the registry surface checked`, legs: [] }
+        : {
+            value: atSha.every((a) => ["CLEAR", "PASS"].includes(a.verdict)),
+            basis: `frontmatter verdicts at ${atSha.length} artifact(s) scoped to candidate ${candidateSha.slice(0, 9)}`,
+            legs: atSha.map((a) => ({ path: a.path, verdict: a.verdict, candidate_sha: a.candidateSha, artifact_type: a.artifactType })),
+          };
+    }
     // folded / adopted need a repo context — any reachable EC-3 worktree shares refs.
     let folded: Rung;
     let adopted: Rung;
@@ -482,8 +502,11 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
     const dependsOn = parseArrayField(fm["depends_on"]);
     const softMatch = s.body.match(SOFT_AFTER_LINE);
     const softAfter = softMatch?.[1] ? softMatch[1].split(",").map((x) => x.trim()).filter(Boolean) : [];
+    // Only LIVE rows can hold work blocked: stale blockedOn on a terminal row is
+    // record, not state, and must not govern dispatchability.
     const blockedRows = rows
-      .filter((r) => (sliceOfRow(r) === s.id || sliceOfRow(r) === s.dir) && r.blocked_on)
+      .filter((r) => (sliceOfRow(r) === s.id || sliceOfRow(r) === s.dir) && r.blocked_on
+        && ["pending", "in-progress", "blocked"].includes(r.state))
       .map((r) => ({ qitem_id: r.qitem_id, blocked_on: r.blocked_on }));
     const claimedLane = lanes.some((l) => l.slice === s.id || l.slice === s.dir);
     let nextUp: boolean | Indeterminate;
@@ -500,6 +523,11 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
     } else if ((ladderFor(s)["folded"] as Rung).value === true) {
       nextUp = false;
       nextUpBasis = "own candidate already folded to main — nothing left to dispatch";
+    } else if ((ladderFor(s)["folded"] as Rung).value === INDETERMINATE) {
+      // Unknown own-completion must never read as dispatchable — INDETERMINATE
+      // is the honest verdict, not true (the S24/S25 live false-green class).
+      nextUp = INDETERMINATE;
+      nextUpBasis = `own completion rung INDETERMINATE (${(ladderFor(s)["folded"] as Rung).basis})`;
     } else {
       nextUp = true;
       nextUpBasis = "unblocked, unclaimed";
@@ -570,13 +598,16 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
       const wake = deps.db
         .prepare(`SELECT wake_ref, phase FROM queue_transition_wakes WHERE qitem_id = ? AND phase = 'armed' LIMIT 1`)
         .get(r.qitem_id) as { wake_ref: string; phase: string } | undefined;
-      let parkKind: string;
-      if (pickup.state === "parked") {
-        parkKind = wake ? "deliberate-with-wake" : INDETERMINATE;
+      // park_kind is a CLOSED enum from the DESIGN: deliberate-with-wake |
+      // stalled | indeterminate. Nothing else may leak in (the live artifact
+      // once emitted 'working' here), and the enum member is lowercase.
+      let parkKind: "deliberate-with-wake" | "stalled" | "indeterminate";
+      if (pickup.state === "parked" && wake) {
+        parkKind = "deliberate-with-wake";
       } else if (pickup.state === "stalled-after-claim") {
         parkKind = "stalled";
       } else {
-        parkKind = pickup.state;
+        parkKind = "indeterminate";
       }
       const ageMinutes = r.claimed_at ? Math.floor((now().getTime() - Date.parse(r.claimed_at)) / 60_000) : null;
       return {
@@ -595,16 +626,26 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
 
   // ---- Q6 parallelism health ----
   const inProgressSeats = new Set(rows.filter((r) => r.state === "in-progress").map((r) => r.destination_session));
+  // Idle capacity: the ROSTER comes from sessions (names only); idleness comes
+  // from the ACTIVITY ORACLE — sessions.status is not consulted (it labeled
+  // live working lanes `superseded` on the real board).
   let idleSeats: number | Indeterminate = INDETERMINATE;
-  let idleBasis = "sessions table unreadable";
-  try {
-    const running = deps.db
-      .prepare(`SELECT session_name FROM sessions WHERE status = 'running'`)
-      .all() as { session_name: string }[];
-    idleSeats = running.filter((s) => !inProgressSeats.has(s.session_name)).length;
-    idleBasis = "sessions.status='running' minus seats holding in-progress rows — liveness is not health";
-  } catch {
-    /* stays INDETERMINATE */
+  let idleBasis = "activity oracle not wired on this deps set";
+  if (deps.activity) {
+    try {
+      const roster = deps.db
+        .prepare(`SELECT DISTINCT session_name FROM sessions`)
+        .all() as { session_name: string }[];
+      idleSeats = roster.filter((s) => {
+        if (inProgressSeats.has(s.session_name)) return false;
+        const a = deps.activity!.getLatestForNode({ sessionName: s.session_name, now: now() });
+        return !!a && a.state === "idle" && !a.stale;
+      }).length;
+      idleBasis = "activity oracle state='idle' (fresh) over the sessions roster, minus seats holding in-progress rows";
+    } catch {
+      idleSeats = INDETERMINATE;
+      idleBasis = "sessions roster unreadable";
+    }
   }
   const heavyRow = rows.find((r) => r.state === "in-progress" && parseTags(r.tags).includes("heavy-slot"));
   let dfMargin: Record<string, unknown> = { available_kib: INDETERMINATE, basis: "no readable path for statfs" };
