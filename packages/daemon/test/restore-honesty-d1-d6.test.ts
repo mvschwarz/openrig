@@ -298,7 +298,7 @@ describe("OPR.0.5.7.1 repair child — D1 four-way occupant truth + D6a uncondit
     // exactly-one-running, so the fixture states the occupancy explicitly.)
     const rigA = rigRepo.createRig("rt-a");
     const nodeA = rigRepo.addNode(rigA.id, "seat", { role: "worker", runtime: "claude-code" });
-    const sessA = sessionRegistry.registerSession(nodeA.id, "rt-a-seat");
+    const sessA = sessionRegistry.registerSession(nodeA.id, "r78-seat");
     sessionRegistry.updateStatus(sessA.id, "running");
     const snapA = snapshotCapture.captureSnapshot(rigA.id, "manual");
     const rawA = db.prepare("SELECT data FROM snapshots WHERE id = ?").get(snapA.id) as { data: string };
@@ -308,8 +308,8 @@ describe("OPR.0.5.7.1 repair child — D1 four-way occupant truth + D6a uncondit
     // null (ambiguous at source, recorded honestly) and JSON keeps it.
     const rigB = rigRepo.createRig("rt-b");
     const nodeB = rigRepo.addNode(rigB.id, "seat", { role: "worker", runtime: "claude-code" });
-    const s1 = sessionRegistry.registerSession(nodeB.id, "rt-b-seat");
-    const s2 = sessionRegistry.registerSession(nodeB.id, "rt-b-seat-v2");
+    const s1 = sessionRegistry.registerSession(nodeB.id, "r79-seat");
+    const s2 = sessionRegistry.registerSession(nodeB.id, "r79-seat-v2");
     sessionRegistry.updateStatus(s1.id, "running");
     sessionRegistry.updateStatus(s2.id, "running");
     const snapB = snapshotCapture.captureSnapshot(rigB.id, "manual");
