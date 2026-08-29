@@ -1,0 +1,59 @@
+name: world-public
+version: "0"
+taxonomy: world
+purpose: "A portable operating-world primer that derives volatile facts and teaches agents to author their own world."
+files:
+  - path: start-here.md
+    role: orientation
+    summary: "Derive where you are, what to trust, and which context belongs in a world."
+  - path: build-your-world.md
+    role: convention
+    summary: "The minimal authoring convention and a book-world exercise."
+  - path: boundaries.md
+    role: boundaries
+    summary: "What this public world covers, excludes, and cannot decide."
+  - path: claims.yaml
+    role: claims
+    summary: "Every authored claim mapped to a failing check or an explicit honesty flag."
+  - path: verify-world.sh
+    role: verifier
+    summary: "Portable named checks with loud failures and skips."
+atoms:
+  - id: enter-the-world
+    address: start-here.md
+    taxonomy: world
+    regions: [identity, ontology, terrain, actors, state]
+    situations: [fresh, handover, post-compaction]
+    purpose: width
+    runtime: any
+    order: 10
+    priority: core
+    probe:
+      prompt: "You just arrived in an unfamiliar OpenRig environment. What do you derive before acting?"
+      expect: "The agent derives its identity, live topology, available context, and command surface instead of guessing."
+  - id: author-a-world
+    address: build-your-world.md
+    taxonomy: world
+    regions: [ontology, laws, history, affordances]
+    situations: [fresh, handover, post-compaction]
+    purpose: depth
+    runtime: any
+    order: 20
+    requires: [enter-the-world]
+    priority: recommended
+    probe:
+      prompt: "Create a world for a book-writing project without turning the eight regions into folders."
+      expect: "The agent starts with a small manifest and authored files, tags atoms by region, and keeps other context kinds separate."
+  - id: know-the-edges
+    address: boundaries.md
+    taxonomy: world
+    regions: [terrain, laws, state]
+    situations: [fresh, handover, post-compaction]
+    purpose: depth
+    runtime: any
+    order: 30
+    requires: [enter-the-world]
+    priority: core
+    probe:
+      prompt: "Which gaps can this public world answer, and which still require local sources or human judgment?"
+      expect: "The agent distinguishes public structure from rig-local facts, current state, mission context, and irreversible judgment."

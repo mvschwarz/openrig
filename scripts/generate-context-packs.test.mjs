@@ -405,11 +405,11 @@ test("REF COLLISION across sources FAILS THE BUILD with no output mutation (B3)"
   }
 });
 
-test("PRODUCTION LIBRARY: only the public onboarding-width and world-example static packs ship", () => {
+test("PRODUCTION LIBRARY: only the public onboarding-width, world, and example static packs ship", () => {
   const out = mkdtempSync(join(tmpdir(), "s05-world-"));
   try {
     run(REAL_SKILLS, out);
-    assert.deepEqual(readdirSync(REAL_STATIC_PACKS).sort(), ["onboarding-width", "world-example"]);
+    assert.deepEqual(readdirSync(REAL_STATIC_PACKS).sort(), ["onboarding-width", "world-example", "world-public"]);
     assert.ok(
       !existsSync(join(out, "world/install")),
       "the production builtin library must not publish the internal world/install pack",
@@ -431,6 +431,20 @@ test("PRODUCTION LIBRARY: only the public onboarding-width and world-example sta
     const exampleManifest = parseManifest(readFileSync(join(exampleDir, "manifest.yaml"), "utf8"), "world-example");
     assert.equal(exampleManifest.name, "world-example");
     assert.deepEqual(exampleManifest.files.map((file) => file.path), ["your-world.md"]);
+    assert.ok(exampleManifest.atoms?.length > 0, "world-example must demonstrate the atom convention");
+    const publicDir = join(out, "world-public");
+    assert.deepEqual(readdirSync(publicDir).sort(), [
+      "boundaries.md",
+      "build-your-world.md",
+      "claims.yaml",
+      "manifest.yaml",
+      "start-here.md",
+      "verify-world.sh",
+    ]);
+    const publicManifest = parseManifest(readFileSync(join(publicDir, "manifest.yaml"), "utf8"), "world-public");
+    assert.equal(publicManifest.name, "world-public");
+    assert.equal(publicManifest.taxonomy, "world");
+    assert.ok(publicManifest.atoms?.length >= 3, "world-public must ship as real atoms");
   } finally {
     rmSync(out, { recursive: true, force: true });
   }

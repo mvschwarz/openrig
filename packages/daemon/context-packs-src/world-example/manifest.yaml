@@ -7,3 +7,16 @@ files:
   - path: your-world.md
     role: world
     summary: "A minimal fill-in template for describing an agent's world."
+atoms:
+  - id: your-world
+    address: your-world.md
+    taxonomy: world
+    regions: [identity, ontology, terrain, actors, laws, history, state, affordances]
+    situations: [fresh, handover, post-compaction]
+    purpose: depth
+    runtime: any
+    order: 10
+    priority: core
+    probe:
+      prompt: "Describe the operating world for a book-writing project."
+      expect: "The agent fills one coherent world file and derives volatile state instead of creating a folder per region."

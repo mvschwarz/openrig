@@ -1,0 +1,37 @@
+claims:
+  - id: world-purpose
+    statement: "A world states the durable operating reality an agent needs before it can act well."
+    flagged: "Authored purpose and taste; no live scan can prove it."
+  - id: derive-identity
+    statement: "Use rig whoami --json to derive the identity of the seat you actually occupy."
+    check: taught-commands
+  - id: derive-topology
+    statement: "Use rig ps to derive which rigs and seats exist now."
+    check: taught-commands
+  - id: discover-context
+    statement: "Use rig context list to discover the context packs available on this installation."
+    check: rig-command-surface
+  - id: discover-commands
+    statement: "Use rig --help before inventing a command or wrapper."
+    check: rig-command-surface
+  - id: agents-complement
+    statement: "If a repository uses AGENTS.md, keep repo instructions there; a world complements those instructions."
+    check: agents-md-complement
+  - id: context-kinds
+    statement: "WORLD + LORE + SKILLS + MISSION is the top-level separation of context kinds."
+    check: taxonomy-layout
+  - id: regions-are-tags
+    statement: "The eight regions are metadata on atoms, not a required folder tree."
+    check: atom-regions
+  - id: subset-regions
+    statement: "Compose a subset by region when a full world is more context than the situation needs."
+    check: subset-by-region
+  - id: derived-reading-cost
+    statement: "The reading cost is derived when a profile is composed, not copied into this pack."
+    check: derived-reading-cost
+  - id: derive-pack-path
+    statement: "Use rig context show world-public --json to derive the installed pack directory."
+    check: rig-command-surface
+  - id: private-ref-boundary
+    statement: "Private world installs remain rig-local under their own refs and are never shadowed by this builtin."
+    check: private-ref-boundary
