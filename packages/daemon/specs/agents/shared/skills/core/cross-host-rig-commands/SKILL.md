@@ -30,11 +30,8 @@ operator pattern (`ssh <host> rig <cmd>`) with declared host identity,
 explicit cross-host invocation path, preserved `--verify` semantics, and
 4 named failure modes.
 
-**Current-host note (2026-07-14):** this skill still preserves the original
-SSH-v0 doctrine below, but the live host registry may also contain HTTP
-read-through/tunnel entries such as `your-vm` and `your-other-vm`. Use the
-host registry entry as ground truth for transport shape, and use
-`conventions/multi-host-naming/README.md` for host-id naming. HTTP entries
+The live host registry may contain SSH or HTTP read-through/tunnel entries.
+Use each registry entry as ground truth for transport shape. HTTP entries
 require `url` plus exactly one of `bearer_file` or `bearer_env`.
 
 **v0 is CLI-side shell-out only — `packages/daemon/` is NOT touched.**
@@ -73,12 +70,8 @@ differs from the interactive verbs (`send`/`capture`/`ps`/`whoami`):
 
 ## Host registry shape (`~/.openrig/hosts.yaml`)
 
-Host ids should follow the OpenRig-work multi-host naming convention:
-`conventions/multi-host-naming/README.md`. In this environment that means
-physical hosts such as `your-vm`, local OpenRig development VMs such as
-`your-vm`, persistent product VMs such as `your-other-vm`, and VPS hosts such
-as `your-vps`. Keep old aliases during migration until no live routing
-depends on them.
+Host ids must be non-empty and unique. Choose stable, operator-meaningful ids
+that describe the destination without depending on transient network details.
 
 ```yaml
 hosts:

@@ -272,10 +272,6 @@ This is a product/dogfood caveat, not an upgrade failure.
 
 ## Brittle Edges Observed On 2026-04-27
 
-Detailed field note:
-
-(internal upgrade-brittleness field note, 2026-04-27)
-
 Operator lessons from the daemon upgrade:
 
 - `rig down` kills OpenRig-launched tmux sessions. Do not use it as a snapshot
@@ -292,14 +288,10 @@ Operator lessons from the daemon upgrade:
   verify the port is gone before starting the target daemon.
 - CLI and daemon provenance can drift. Repointing or verifying the default
   `rig` wrapper is part of the upgrade, not an afterthought.
-- Raw `rig ps` is too noisy on this host. Use filtered JSON until the product
+- Raw `rig ps` output can be noisy. Use filtered JSON until the product
   has compact first-class inventory views.
 - Snapshot and backup verification is too manual. The SOP currently depends on
   checking snapshot rows, resume tokens, SQLite backups, and integrity by hand.
-
-Separate follow-on note, not part of the daemon-upgrade SOP:
-
-(internal add-node-brittleness field note, 2026-04-27)
 
 ## Disruptive Restore Path
 

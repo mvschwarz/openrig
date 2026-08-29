@@ -85,10 +85,9 @@ explicit:
 - **Consumer-pool wake**: if a ready artifact exists, wake the consumer loop head.
 - **Producer-edge repair**: if upstream completion exists but the downstream artifact is missing, wake the producer loop head.
 
-**Scan cadence and wake cadence are separate.** Worked example (from the
-RSI v2 mission, now archived — the numbers are era-specific, the
-scan-vs-wake separation is the durable rule): scan every 30 seconds, wake
-at most every 600 seconds while work remains actionable.
+**Scan cadence and wake cadence are separate.** Worked example (the numbers
+are illustrative; the scan-vs-wake separation is the durable rule): scan every
+30 seconds, wake at most every 600 seconds while work remains actionable.
 
 This is not a generic workflow engine. It's a guardrail against cold
 pools and missing edge artifacts.
