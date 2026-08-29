@@ -165,7 +165,7 @@ describe("S22 OpenRig skill router coverage", () => {
     expect(taught).toContain("rig gateway human list --json");
     expect(taught).toContain("Use `humans[].entityId` to derive the durable blocker as `<entityId>@host`");
     expect(taught).toContain("The entity id must use the human-seat prefix (`human` or `human-...`)");
-    expect(taught).toContain("The returned `humans[].address` is the gateway delivery address, not the `--on` value");
+    expect(taught).toMatch(/The returned\s+`humans\[\]\.address` is the gateway delivery address, not the `--on` value/);
     expect(taught).toContain("rig queue block <qitem-id> --on <entityId>@host");
     expect(taught).toMatch(/gateway.*Slack.*same row/is);
     expect(taught).toMatch(/any seat.*escalat/is);

@@ -38,15 +38,18 @@ address:
 rig gateway human list --json
 ```
 
-Use the returned `humans[].address`. If no unambiguous registered human is
-returned, stop: registration is lifecycle work (`rig gateway human add
---help`), not an address to guess.
+Use `humans[].entityId` to derive the durable blocker as `<entityId>@host`.
+The entity id must use the human-seat prefix (`human` or `human-...`); if it
+does not, stop and repair the registration rather than guessing. The returned
+`humans[].address` is the gateway delivery address, not the `--on` value. If no
+unambiguous registered human is returned, stop: registration is lifecycle work
+(`rig gateway human add --help`), not an address to guess.
 
 Keep the work row owned by the agent who must resume it, then park that row on
 the registered human:
 
 ```bash
-rig queue block <qitem-id> --on <registered-human-address> \
+rig queue block <qitem-id> --on <entityId>@host \
   --summary "<decision owed>" \
   --evidence-ref "<durable artifact the human should judge>" \
   --continuation "<what resumes after the answer>"
