@@ -17,7 +17,7 @@ import type { PolicyJob } from "../src/domain/policies/types.js";
 
 const RIG = "test-rig";
 const SEAT = `dev-planner@${RIG}`;
-const SEAT2 = `dev-driver@${RIG}`;
+const SEAT2 = `review-r9@${RIG}`;
 const MODULE_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
   "../src/domain/policies/parked-owner-consumer.ts",
@@ -144,7 +144,7 @@ describe("parked-owner-consumer policy (OPR.0.5.6.24 F-14)", () => {
     const policy = makeParkedOwnerConsumerPolicy(makeDeps([churned], history));
     const result = await policy.evaluate(makeJob());
     expect(result.action).toBe("skip");
-    expect(String((result as { reason?: unknown }).reason)).toMatch(/already[-_]woken/);
+    expect(JSON.stringify(result.notes?.["skippedSeats"] ?? [])).toMatch(/already[-_]woken/);
   });
 
   // P2 — NOTHING IN MEMORY: a FRESH policy instance over the same history
