@@ -1188,4 +1188,69 @@ describe("QueueRepository — S26 blocker-actuation unification (OPR.0.5.6.26)",
       "the blocked->pending event is emitted",
     ).toBe(true);
   });
+
+  // R2 B-1 (HOLD 5496b628) — the third handoff-family path: the LIVE cross-host
+  // terminal close (routes/queue.ts invokes closeCrossHostHandoffSource) commits
+  // handed-off/done via direct SQL and must actuate through the one propagation
+  // site like its two local siblings. Same fixture also pins the ABSORBED-REDRIVE
+  // floor: an idempotent repeat (same closureTarget -> absorbed:true) must NOT
+  // actuate twice — exactly one auto-unpark transition, ever.
+  it("S26 RED 3: a blocker closed via the cross-host terminal close actuates its attached rows, and an absorbed redrive never double-actuates", async () => {
+    const blocker = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "blocker A3" });
+    const parked = await repo.create({ sourceSession: "alice@rig", destinationSession: "carol@rig", body: "work B3" });
+    repo.update({ qitemId: parked.qitemId, actorSession: "carol@rig", state: "blocked", blockedOn: blocker.qitemId });
+    expect(repo.getById(parked.qitemId)!.state).toBe("blocked");
+
+    // Close the blocker through the cross-host terminal close (terminal state
+    // 'handed-off'; host-qualified successor key rides closure_target per BR-1).
+    const first = repo.closeCrossHostHandoffSource({
+      qitemId: blocker.qitemId,
+      fromSession: "bob@rig",
+      toSession: "dave@rig",
+      closureTarget: "qitem-19990101000000-cafef00d@other-host",
+      terminalState: "handed-off",
+    });
+    expect(first.absorbed).toBe(false);
+    expect(repo.getById(blocker.qitemId)!.state).toBe("handed-off");
+
+    // PINNED RED REASON (the B-1 class): at base the parked row stays blocked —
+    // this path never consults propagate-completion.
+    const after = repo.getById(parked.qitemId)!;
+    expect(after.state, "a row blocked on a cross-host-closed blocker must auto-unpark").toBe("pending");
+    expect(after.blockedOn, "auto-unpark clears the resolved blocker").toBeNull();
+
+    // Effect-set parity with the other entry paths:
+    const unparkNotes = () =>
+      repo.transitionLog
+        .listForQitem(parked.qitemId)
+        .filter((tr) => (tr.transitionNote ?? "").includes("auto-unparked") && (tr.transitionNote ?? "").includes(blocker.qitemId));
+    expect(unparkNotes().length, "the resume transition names the blocker, once").toBe(1);
+    const wake = db
+      .prepare("SELECT COUNT(*) AS c FROM outbox_entries WHERE tags LIKE ?")
+      .get(`%queue:auto-unpark:blocker%`) as { c: number };
+    expect(wake.c, "a wake intent is staged for the unparked row").toBeGreaterThan(0);
+    expect(
+      captured.some(
+        (e) =>
+          e.type === "queue.updated" &&
+          (e as { qitemId?: string }).qitemId === parked.qitemId &&
+          (e as { fromState?: string }).fromState === "blocked" &&
+          (e as { toState?: string }).toState === "pending",
+      ),
+      "the blocked->pending event is emitted",
+    ).toBe(true);
+
+    // ABSORBED-REDRIVE FLOOR: an idempotent repeat with the SAME closure target
+    // absorbs and must not actuate again — one auto-unpark transition, ever.
+    const redrive = repo.closeCrossHostHandoffSource({
+      qitemId: blocker.qitemId,
+      fromSession: "bob@rig",
+      toSession: "dave@rig",
+      closureTarget: "qitem-19990101000000-cafef00d@other-host",
+      terminalState: "handed-off",
+    });
+    expect(redrive.absorbed, "the repeat is absorbed, never re-closed").toBe(true);
+    expect(unparkNotes().length, "an absorbed redrive never double-actuates").toBe(1);
+    expect(repo.getById(parked.qitemId)!.state, "the unparked row is untouched by the redrive").toBe("pending");
+  });
 });
