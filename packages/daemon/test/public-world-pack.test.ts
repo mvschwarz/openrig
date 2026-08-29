@@ -65,6 +65,25 @@ const EXPECTED_PUBLIC_CLAIM_IDS = [
   "world-example-checks",
 ] as const;
 
+const EXPECTED_MANIFEST_CLAIMS = [
+  { id: "public-manifest-purpose", value: "A portable operating-world primer that derives volatile facts and teaches agents to author their own world." },
+  { id: "public-manifest-summary-start-here", value: "Derive where you are, what to trust, and which context belongs in a world." },
+  { id: "public-manifest-summary-build-your-world", value: "The minimal authoring convention and a book-world exercise." },
+  { id: "public-manifest-summary-boundaries", value: "What this public world covers, excludes, and cannot decide." },
+  { id: "public-manifest-summary-claims", value: "Every authored claim mapped to a failing check or an explicit honesty flag." },
+  { id: "public-manifest-summary-verify-world", value: "Portable named checks with loud failures and skips." },
+  { id: "public-manifest-probe-enter-the-world-prompt", value: "You just arrived in an unfamiliar OpenRig environment. What do you derive before acting?" },
+  { id: "public-manifest-probe-enter-the-world-expect", value: "The agent derives its identity, live topology, available context, and command surface instead of guessing." },
+  { id: "public-manifest-probe-author-a-world-prompt", value: "Create a world for a book-writing project without turning the eight regions into folders." },
+  { id: "public-manifest-probe-author-a-world-expect", value: "The agent starts with a small manifest and authored files, tags atoms by region, and keeps other context kinds separate." },
+  { id: "public-manifest-probe-know-the-edges-prompt", value: "Which gaps can this public world answer, and which still require local sources or human judgment?" },
+  { id: "public-manifest-probe-know-the-edges-expect", value: "The agent distinguishes public structure from rig-local facts, current state, mission context, and irreversible judgment." },
+  { id: "example-manifest-purpose", value: "A fill-in template showing the anatomy of an OpenRig world pack." },
+  { id: "example-manifest-summary-your-world", value: "A minimal fill-in template for describing an agent's world." },
+  { id: "example-manifest-probe-your-world-prompt", value: "Describe the operating world for a book-writing project." },
+  { id: "example-manifest-probe-your-world-expect", value: "The agent fills one coherent world file and derives volatile state instead of creating a folder per region." },
+] as const;
+
 function publicWorldDir(): string {
   readFileSync(join(PUBLIC_WORLD_ROOT, "manifest.yaml"));
   return PUBLIC_WORLD_ROOT;
@@ -73,6 +92,25 @@ function publicWorldDir(): string {
 function manifestAt(packDir = publicWorldDir()) {
   const path = join(packDir, "manifest.yaml");
   return parseManifest(readFileSync(path, "utf8"), path);
+}
+
+function authoredManifestClaims(packDir: string, prefix: "public" | "example") {
+  const manifest = parseYaml(readFileSync(join(packDir, "manifest.yaml"), "utf8")) as {
+    purpose: string;
+    files: Array<{ path: string; summary: string }>;
+    atoms: Array<{ id: string; probe: { prompt: string; expect: string } }>;
+  };
+  return [
+    { id: `${prefix}-manifest-purpose`, value: manifest.purpose },
+    ...manifest.files.map((file) => ({
+      id: `${prefix}-manifest-summary-${file.path.replace(/\.[^.]+$/, "")}`,
+      value: file.summary,
+    })),
+    ...manifest.atoms.flatMap((atom) => [
+      { id: `${prefix}-manifest-probe-${atom.id}-prompt`, value: atom.probe.prompt },
+      { id: `${prefix}-manifest-probe-${atom.id}-expect`, value: atom.probe.expect },
+    ]),
+  ];
 }
 
 function runVerifier(packDir: string, env: NodeJS.ProcessEnv = process.env) {
@@ -268,15 +306,31 @@ describe("public world pack", () => {
       .map((file) => readFileSync(join(packDir, file), "utf8"))
       .concat(readFileSync(join(STATIC_ROOT, "world-example", "your-world.md"), "utf8"))
       .join("\n");
+    const manifests = [
+      readFileSync(join(packDir, "manifest.yaml"), "utf8"),
+      readFileSync(join(STATIC_ROOT, "world-example", "manifest.yaml"), "utf8"),
+    ].join("\n");
     const marked = [...prose.matchAll(/<!--\s*world-claim:\s*([a-z0-9-]+)\s*-->/g)].map((match) => match[1]!);
     const verifier = readFileSync(join(packDir, "verify-world.sh"), "utf8");
     const passIds = new Set([...verifier.matchAll(/^\s*pass ([a-z0-9-]+) /gm)].map((match) => match[1]!));
     const failIds = new Set([...verifier.matchAll(/^\s*fail ([a-z0-9-]+) /gm)].map((match) => match[1]!));
+    const manifestClaims = [
+      ...authoredManifestClaims(packDir, "public"),
+      ...authoredManifestClaims(join(STATIC_ROOT, "world-example"), "example"),
+    ];
+    const verifierManifestClaimIds = verifier.match(/expected_manifest_claim_ids='([\s\S]*?)'/)?.[1]
+      .split("\n")
+      .filter(Boolean);
 
     expect(marked).toEqual(EXPECTED_PUBLIC_CLAIM_IDS);
     expect(new Set(marked).size).toBe(marked.length);
-    expect(claims.claims.map((claim) => claim.id)).toEqual(EXPECTED_PUBLIC_CLAIM_IDS);
-    expect(new Set(marked)).toEqual(new Set(byId.keys()));
+    expect(manifestClaims).toEqual(EXPECTED_MANIFEST_CLAIMS);
+    expect(verifierManifestClaimIds).toEqual(EXPECTED_MANIFEST_CLAIMS.map((claim) => claim.id));
+    expect(claims.claims.map((claim) => claim.id)).toEqual([
+      ...EXPECTED_PUBLIC_CLAIM_IDS,
+      ...EXPECTED_MANIFEST_CLAIMS.map((claim) => claim.id),
+    ]);
+    expect(new Set([...marked, ...manifestClaims.map((claim) => claim.id)])).toEqual(new Set(byId.keys()));
     expect(new Set(claims.claims.filter((claim) => claim.kind === "operational").map((claim) => claim.id))).toEqual(new Set([
       "compose-fresh-profile",
       "derive-identity",
@@ -298,13 +352,45 @@ describe("public world pack", () => {
     for (const claim of claims.claims) {
       expect(claim.statement.length, `${claim.id} must state the claim being classified`).toBeGreaterThan(10);
       expect(["judgment", "operational", "structural"], `${claim.id} needs a known claim kind`).toContain(claim.kind);
-      expect(prose, `${claim.id} ledger statement must appear verbatim in the public prose`).toContain(claim.statement);
+      expect(`${prose}\n${manifests}`, `${claim.id} ledger statement must appear verbatim in the shipped authored content`).toContain(claim.statement);
       expect(Boolean(claim.check) !== Boolean(claim.flagged), `${claim.id} needs exactly one disposition`).toBe(true);
       if (claim.check) {
         expect(passIds, `${claim.id} check must have a real pass branch`).toContain(claim.check);
         expect(failIds, `${claim.id} check must have a real fail branch`).toContain(claim.check);
       }
     }
+  });
+
+  it("fails when authored manifest purpose or probe semantics materially drift", () => {
+    const sourcePack = publicWorldDir();
+    const redRoot = mkdtempSync(join(tmpdir(), "public-world-manifest-claims-red-"));
+    temporaryRoots.push(redRoot);
+    const redPack = join(redRoot, basename(sourcePack));
+    cpSync(sourcePack, redPack, { recursive: true });
+    cpSync(join(STATIC_ROOT, "world-example"), join(redRoot, "world-example"), { recursive: true });
+    const manifestPath = join(redPack, "manifest.yaml");
+    const manifest = readFileSync(manifestPath, "utf8")
+      .replace(
+        "A portable operating-world primer that derives volatile facts and teaches agents to author their own world.",
+        "A generic pack whose purpose is unrelated to operating worlds.",
+      )
+      .replace(
+        "The agent derives its identity, live topology, available context, and command surface instead of guessing.",
+        "The agent guesses a convenient roster from memory.",
+      );
+    writeFileSync(manifestPath, manifest);
+
+    const rigPath = writeRigFixture({ showSourcePath: redPack });
+    const result = runVerifier(redPack, {
+      ...process.env,
+      PATH: `${rigPath}:${process.env.PATH ?? ""}`,
+      OPENRIG_CONTEXT_PACKS_ROOT: "/fixture/context-packs",
+      OPENRIG_SESSION_NAME: "qa@fixture",
+      RIGGED_SESSION_NAME: "",
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toMatch(/FAIL.*public-manifest-authored-claims/i);
   });
 
   it.each([
