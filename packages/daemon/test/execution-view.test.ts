@@ -57,10 +57,13 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
   let candidateSha: string;
   let branchName: string;
   let fixedNow: Date;
-  // The REAL activity oracle (agent-activity-store shape), faked per seat.
-  // Q1/Q6 must consume THIS — never sessions.status (the HOLD's live specimen:
-  // three working lanes labeled `superseded` by the sessions approximation).
-  let oracleBySession: Map<string, { state: string; reason: string; stale?: boolean; sampledAt: string }>;
+  // THE one activity oracle (S19's locked contract): SeatActivityService's
+  // arbitrated seat-keyed read, faked per session. Q1/Q6 consume THIS — never
+  // sessions.status and never the parallel AgentActivityStore ingest.
+  let arbitratedBySession: Map<
+    string,
+    { activity: "working" | "idle-at-prompt" | "unknown"; needsInput: { count: number; reason: string | null }; decidedBy: string | null; changedAt: string }
+  >;
 
   beforeEach(() => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), "exec-view-"));
@@ -135,9 +138,9 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     ]);
     const bus = new EventBus(db);
     projector = new ViewProjector(db, bus);
-    oracleBySession = new Map([
-      [SEAT_A, { state: "running", reason: "runtime hook fresh", sampledAt: "2026-08-29T21:59:00.000Z" }],
-      [SEAT_B, { state: "running", reason: "runtime hook fresh", sampledAt: "2026-08-29T21:59:00.000Z" }],
+    arbitratedBySession = new Map([
+      [SEAT_A, { activity: "working", needsInput: { count: 0, reason: null }, decidedBy: "self-report", changedAt: "2026-08-29T21:59:00.000Z" }],
+      [SEAT_B, { activity: "working", needsInput: { count: 0, reason: null }, decidedBy: "lifecycle-hooks", changedAt: "2026-08-29T21:59:00.000Z" }],
     ]);
     // Optional-call: at base the method does not exist — the RED then lands on
     // show("execution") with the pinned view_not_found, not on wiring.
@@ -147,9 +150,8 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
       rigsRoot: () => rigsRoot,
       buildInfo: { semver: null, commit: null, dirty: null, builtAt: null },
       now: () => fixedNow,
-      activity: {
-        getLatestForNode: (input: { sessionName?: string | null }) =>
-          (input.sessionName && oracleBySession.get(input.sessionName)) || null,
+      seatActivity: {
+        getSeatStateBySession: (sessionName: string) => arbitratedBySession.get(sessionName) ?? null,
       },
     });
 
@@ -162,7 +164,8 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     // Lane 1 — EC-3 baton: worktree_path field on the body.
     insertRow.run(
       "qitem-lane-31", t0, t0, "lead@exec-fixture", SEAT_A, "in-progress",
-      JSON.stringify([`mission:${MISSION}`, "slice:OPR.9.9.31", `candidate:${candidateSha}`]),
+      // Production shape: queue candidate tags are commonly ABBREVIATED.
+      JSON.stringify([`mission:${MISSION}`, "slice:OPR.9.9.31", `candidate:${candidateSha.slice(0, 9)}`]),
       `Build 31.\nworktree_path=${laneWorktree}\n`, t0, null,
     );
     // Lane 2 — legacy baton: no worktree_path (fragile join).
@@ -277,7 +280,10 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     const q4 = doc.q4_ladder as Record<string, unknown>[];
     const s31 = q4.find((s) => s.slice_id === "OPR.9.9.31")!;
     expect((s31.locked as Record<string, unknown>).value).toBe(true);
-    expect((s31.built as Record<string, unknown>).candidate_sha).toBe(candidateSha);
+    // The built rung carries the tag's own (abbreviated) token plus the
+    // commit-resolved identity.
+    expect((s31.built as Record<string, unknown>).candidate_sha).toBe(candidateSha.slice(0, 9));
+    expect((s31.built as Record<string, unknown>).resolved_commit).toBe(candidateSha);
     const folded = s31.folded as Record<string, unknown>;
     expect(folded.value).toBe(true);
     expect(String(folded.basis)).toContain("merge-base --is-ancestor");
@@ -293,55 +299,96 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     }
   });
 
-  it("Q1 consumes the ACTIVITY ORACLE, not sessions.status: the superseded-label specimen cannot recur, and an oracle flip lands on the next read", () => {
-    // The HOLD's live specimen: sessions.status says superseded while the seat works.
+  it("Q1 consumes the ARBITRATED seat state (working): the superseded/stale-hook specimen cannot recur", () => {
+    // The HOLD's live specimen: sessions.status superseded + a stale hook in the
+    // parallel ingest store, while arbitration says working. Q1 must say working.
     db.prepare(`UPDATE sessions SET status = 'superseded' WHERE session_name = ?`).run(SEAT_A);
-    const before = show();
-    const laneBefore = (before.q1_lanes as Record<string, unknown>[]).find((l) => l.slice === "OPR.9.9.31")!;
-    const actBefore = laneBefore.activity as Record<string, unknown>;
-    expect(actBefore.state).toBe("running");
-    expect(String(actBefore.source)).toContain("activity oracle");
-    // Liveness flip via the oracle — zero authored updates, derived next read.
-    oracleBySession.set(SEAT_A, { state: "needs_input", reason: "permission prompt open", sampledAt: "2026-08-29T21:59:30.000Z" });
-    const after = show();
-    const laneAfter = (after.q1_lanes as Record<string, unknown>[]).find((l) => l.slice === "OPR.9.9.31")!;
-    expect((laneAfter.activity as Record<string, unknown>).state).toBe("needs_input");
-    // A seat the oracle has never seen floors INDETERMINATE, never idle/dead.
-    oracleBySession.delete(SEAT_A);
-    const gone = show();
-    const laneGone = (gone.q1_lanes as Record<string, unknown>[]).find((l) => l.slice === "OPR.9.9.31")!;
-    expect((laneGone.activity as Record<string, unknown>).state).toBe("INDETERMINATE");
+    const doc = show();
+    const lane = (doc.q1_lanes as Record<string, unknown>[]).find((l) => l.slice === "OPR.9.9.31")!;
+    const act = lane.activity as Record<string, unknown>;
+    expect(act.activity).toBe("working");
+    expect(String(act.source)).toContain("arbitrated");
+    expect(act.decided_by).toBe("self-report");
   });
 
-  it("Q6 idle capacity derives from the oracle, not sessions.status", () => {
-    // Seat C: oracle says idle, no rows held — sessions.status deliberately
-    // 'superseded' so the old approximation counts 0 and the oracle counts 1.
+  it("Q1 passes through idle-at-prompt and unknown as canonical vocabulary, and floors INDETERMINATE only for a never-seen seat", () => {
+    arbitratedBySession.set(SEAT_A, { activity: "idle-at-prompt", needsInput: { count: 0, reason: null }, decidedBy: "window-sampling", changedAt: "2026-08-29T21:59:10.000Z" });
+    const idle = show();
+    expect(((idle.q1_lanes as Record<string, unknown>[]).find((l) => l.slice === "OPR.9.9.31")!.activity as Record<string, unknown>).activity).toBe("idle-at-prompt");
+    // 'unknown' is a CANONICAL member of the arbitrated vocabulary — passed
+    // through as itself, never rewritten to INDETERMINATE.
+    arbitratedBySession.set(SEAT_A, { activity: "unknown", needsInput: { count: 0, reason: null }, decidedBy: null, changedAt: "2026-08-29T21:59:20.000Z" });
+    const unk = show();
+    expect(((unk.q1_lanes as Record<string, unknown>[]).find((l) => l.slice === "OPR.9.9.31")!.activity as Record<string, unknown>).activity).toBe("unknown");
+    // INDETERMINATE is reserved for NO arbitrated answer at all.
+    arbitratedBySession.delete(SEAT_A);
+    const gone = show();
+    expect(((gone.q1_lanes as Record<string, unknown>[]).find((l) => l.slice === "OPR.9.9.31")!.activity as Record<string, unknown>).activity).toBe("INDETERMINATE");
+  });
+
+  it("Q1 carries needsInput separately — count and reason ride beside activity, never folded into it", () => {
+    arbitratedBySession.set(SEAT_A, {
+      activity: "working",
+      needsInput: { count: 1, reason: "permission prompt" },
+      decidedBy: "needs-input-chrome",
+      changedAt: "2026-08-29T21:59:30.000Z",
+    });
+    const doc = show();
+    const act = (doc.q1_lanes as Record<string, unknown>[]).find((l) => l.slice === "OPR.9.9.31")!.activity as Record<string, unknown>;
+    expect(act.activity).toBe("working");
+    expect((act.needs_input as Record<string, unknown>).count).toBe(1);
+    expect((act.needs_input as Record<string, unknown>).reason).toBe("permission prompt");
+  });
+
+  it("Q6 idle capacity counts arbitrated idle-at-prompt seats with no needsInput, not sessions.status", () => {
+    // Seat C: arbitration says idle-at-prompt, no rows held — sessions.status
+    // deliberately 'superseded' so any status approximation would count 0.
     const t0 = "2026-08-29T21:00:00.000Z";
     db.prepare(`INSERT INTO nodes (id, rig_id, logical_id) VALUES ('n-c', 'rig-x', 'builder-c')`).run();
     db.prepare(
       `INSERT INTO sessions (id, node_id, session_name, status, last_seen_at, created_at) VALUES ('s-c', 'n-c', 'builder-c@exec-fixture', 'superseded', ?, ?)`,
     ).run(t0, t0);
-    oracleBySession.set("builder-c@exec-fixture", { state: "idle", reason: "prompt empty", sampledAt: "2026-08-29T21:59:00.000Z" });
+    arbitratedBySession.set("builder-c@exec-fixture", { activity: "idle-at-prompt", needsInput: { count: 0, reason: null }, decidedBy: "window-sampling", changedAt: "2026-08-29T21:59:00.000Z" });
+    // A needs-input seat is NOT capacity even when idle at the prompt.
+    db.prepare(`INSERT INTO nodes (id, rig_id, logical_id) VALUES ('n-d', 'rig-x', 'builder-d')`).run();
+    db.prepare(
+      `INSERT INTO sessions (id, node_id, session_name, status, last_seen_at, created_at) VALUES ('s-d', 'n-d', 'builder-d@exec-fixture', 'running', ?, ?)`,
+    ).run(t0, t0);
+    arbitratedBySession.set("builder-d@exec-fixture", { activity: "idle-at-prompt", needsInput: { count: 1, reason: "usage limit" }, decidedBy: "needs-input-chrome", changedAt: "2026-08-29T21:59:00.000Z" });
     const doc = show();
     const idle = (doc.q6_parallelism as Record<string, unknown>).idle_seats_with_capacity as Record<string, unknown>;
     expect(idle.value).toBe(1);
-    expect(String(idle.basis)).toContain("activity oracle");
+    expect(String(idle.basis)).toContain("arbitrated");
   });
 
-  it("Q4 reviewed is scoped to the BUILT candidate sha: off-sha verdicts are excluded and no-candidate floors INDETERMINATE", () => {
-    // An old BLOCKING artifact at a different candidate must not poison the at-sha verdict.
+  it("Q4 joins candidate FORMS by commit identity: abbreviated built tag matches full and annotated artifacts; off-sha, malformed, and non-resolving inputs floor honestly", () => {
     const reviewDir = path.join(rigsRoot, "exec-fixture", "state", "review-fixture");
+    // The S20 production specimen: an ANNOTATED artifact form at the same commit.
+    fs.writeFileSync(
+      path.join(reviewDir, "S31-annotated.md"),
+      `---\nslice: 31-alpha\nartifact_type: rev1-r1\nverdict: CLEAR\ncandidate_sha: ${candidateSha.slice(0, 9)} (exact tip over base 0f0f0f0f0 == refs/heads/main)\n---\nCLEAR, annotated form.\n`,
+    );
+    // An old BLOCKING artifact at a DIFFERENT (non-resolving here) candidate must
+    // neither clear nor poison the at-commit verdict.
     fs.writeFileSync(
       path.join(reviewDir, "S31-old-hold.md"),
       `---\nslice: 31-alpha\nartifact_type: rev1-r1\nverdict: BLOCKING\ncandidate_sha: 0000000000000000000000000000000000000000\n---\nHOLD at a dead candidate.\n`,
+    );
+    // Malformed input floors honestly (excluded with a basis, never matched).
+    fs.writeFileSync(
+      path.join(reviewDir, "S31-malformed.md"),
+      `---\nslice: 31-alpha\nartifact_type: rev1-r2\nverdict: BLOCKING\ncandidate_sha: not-a-sha\n---\nMalformed candidate field.\n`,
     );
     const doc = show();
     const q4 = doc.q4_ladder as Record<string, unknown>[];
     const s31 = q4.find((s) => s.slice_id === "OPR.9.9.31")!;
     const reviewed = s31.reviewed as Record<string, unknown>;
+    // The built tag is abbreviated; the fixture's original artifact is FULL-sha;
+    // the annotated one resolves to the same commit — both join, nothing else.
     expect(reviewed.value).toBe(true);
-    expect((reviewed.legs as Record<string, unknown>[]).length).toBe(1);
-    // No built candidate => no sha to scope to => INDETERMINATE, never a verdict.
+    expect((reviewed.legs as Record<string, unknown>[]).length).toBe(2);
+    expect(String(reviewed.basis)).toContain("commit");
+    // No built candidate => no commit to scope to => INDETERMINATE, never a verdict.
     const s33 = q4.find((s) => s.slice_id === "OPR.9.9.33")!;
     expect((s33.reviewed as Record<string, unknown>).value).toBe("INDETERMINATE");
     expect(String((s33.reviewed as Record<string, unknown>).basis)).toContain("candidate");
