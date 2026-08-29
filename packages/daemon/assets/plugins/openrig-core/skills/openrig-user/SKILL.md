@@ -112,10 +112,6 @@ process does not require.
   that the process does not require → pass the ball via `rig queue handoff` and
   proceed to the next slice or stand by for the inbound verdict. See the §1b
   doctrine above.
-- Hand-coding `rigx queue` for new work → `rig queue` is the daemon-backed
-  canonical surface since the 2026-05-11 host-CLI fix. `rigx queue` is a
-  recovery-only fallback; qitems written via `rigx queue` are invisible to
-  daemon-backed reads and break fleet-wide routing discipline.
 - Inlining a multi-line / backtick-heavy body into `rig queue create --body`
   → use `--body-file /tmp/<descriptive-name>.txt` (or `-` for stdin), the
   corruption-safe surface. The body parser does not tolerate raw backticks or
