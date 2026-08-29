@@ -87,9 +87,9 @@ tenure:
 - **tombstone** — one line: what this tenure did, written by the retiring agent itself
 
 **Why it works (zero search infrastructure):** any timestamped record — a git commit, a
-qitem, a NOTES.md line, a stream item — joins to the seat's ledger by interval match →
-generation + session token → wake that tenure. One row per handover, append-only. The
-ledger is the tenure record; work-tree notes remain lived context, not identity state.
+qitem, a MISSION_NOTES line, a stream item — joins to the seat's ledger by interval match →
+generation + session token → wake that tenure. One row per handover, append-only. (Per-seat
+MISSION_NOTES continuation entries already *are* this record — the ledger formalizes them.)
 
 **Crash-ended tenures** get their row appended **post-hoc** by the crash-cart / restore path,
 flagged **honest-approximate** (the boot-captured session id is what makes this recoverable).

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -30,8 +31,12 @@ test("parseChanges extracts file-change and deletion lines from itemize-changes 
     "sending incremental file list",
     ">f+++++++++ core/openrig-user/SKILL.md",
     ">f.st...... pm/plan-review/SKILL.md",
+    ".f...p..... process/systematic-debugging/find-polluter.sh",
+    ".f..t...... core/openrig-user/SKILL.md",
     "cd+++++++++ pods/",
     "*deleting old/skill-that-was-removed/SKILL.md",
+    "*deleting old/skill-that-was-removed/SKILL.md",
+    "*deleting old/another-removed-skill/SKILL.md",
     "",
     "sent 1234 bytes  received 56 bytes  2580.00 bytes/sec",
     "total size is 100  speedup is 0.08",
@@ -41,8 +46,10 @@ test("parseChanges extracts file-change and deletion lines from itemize-changes 
   assert.deepEqual(changes, [
     ">f+++++++++ core/openrig-user/SKILL.md",
     ">f.st...... pm/plan-review/SKILL.md",
+    ".f...p..... process/systematic-debugging/find-polluter.sh",
     "cd+++++++++ pods/",
     "*deleting old/skill-that-was-removed/SKILL.md",
+    "*deleting old/another-removed-skill/SKILL.md",
   ]);
 });
 
@@ -213,6 +220,39 @@ test("stagePublicSkills applies membership, path, frontmatter, and fence transfo
     assert.equal(existsSync(join(staging, "public-skill", "internal")), false);
     assert.equal(existsSync(join(staging, "private-skill")), false);
     assert.equal(existsSync(join(staging, "operator-internal")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("stagePublicSkills preserves prose and executable source modes", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  const root = mkdtempSync(join(tmpdir(), "openrig-mirror-modes-"));
+  try {
+    const canon = join(root, "canon");
+    const staging = join(root, "staging");
+    const skill = join(canon, "alpha", "SKILL.md");
+    const script = join(canon, "alpha", "scripts", "run.sh");
+    write(skill, "# Alpha\n");
+    write(script, "#!/bin/sh\nexit 0\n");
+    chmodSync(skill, 0o644);
+    chmodSync(script, 0o755);
+
+    await mirror.stagePublicSkills({
+      canonRoot: canon,
+      stagingRoot: staging,
+      membership: membershipFixture({ clean: ["alpha"] }),
+      rules: fixtureRules(),
+    });
+
+    assert.equal(
+      statSync(join(staging, "alpha", "SKILL.md")).mode & 0o777,
+      0o644,
+    );
+    assert.equal(
+      statSync(join(staging, "alpha", "scripts", "run.sh")).mode & 0o777,
+      0o755,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -918,6 +958,81 @@ test("authoring regeneration stages canon and projects exact manifest layouts to
   }
 });
 
+test("authoring regeneration reports and repairs permission-only drift on all three edges", async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  const root = mkdtempSync(join(tmpdir(), "openrig-authoring-modes-"));
+  try {
+    const canonRoot = join(root, "canon");
+    const repoRoot = join(root, "repo");
+    const expected = join(root, "expected-alpha");
+    const prose = "# Alpha\n";
+    const script = "#!/bin/sh\nexit 0\n";
+
+    for (const base of [join(canonRoot, "alpha"), expected]) {
+      write(join(base, "SKILL.md"), prose);
+      write(join(base, "scripts", "run.sh"), script);
+      chmodSync(join(base, "SKILL.md"), 0o644);
+      chmodSync(join(base, "scripts", "run.sh"), 0o755);
+    }
+
+    const targets = [
+      join(repoRoot, "canonical", "core", "alpha"),
+      join(repoRoot, "plugin", "alpha"),
+      join(repoRoot, "spec", "core", "alpha"),
+    ];
+    for (const target of targets) {
+      write(join(target, "SKILL.md"), prose);
+      write(join(target, "scripts", "run.sh"), script);
+      chmodSync(join(target, "SKILL.md"), 0o644);
+      chmodSync(join(target, "scripts", "run.sh"), 0o644);
+      const before = checkModeAbsolute(expected, target);
+      assert.equal(before.stale, true);
+      assert.equal(before.changes.length, 1);
+      assert.match(before.changes[0], /^\.f...p..... scripts\/run\.sh$/);
+    }
+
+    const result = await mirror.regeneratePublicSkills({
+      canonRoot,
+      repoRoot,
+      membership: membershipFixture({ clean: ["alpha"] }),
+      rules: fixtureRules(),
+      layout: {
+        version: 0,
+        edges: {
+          spec: { path: "spec", layout: "categorized" },
+          canonical: { path: "canonical", layout: "mirror-of-spec" },
+          plugin: { path: "plugin", layout: "flat" },
+        },
+        skills: {
+          alpha: {
+            edges: ["canonical", "plugin", "spec"],
+            category: "core",
+          },
+        },
+      },
+    });
+
+    assert.deepEqual(result.changes, [
+      { edge: "canonical", path: "core/alpha/scripts/run.sh", reason: "mode" },
+      { edge: "plugin", path: "alpha/scripts/run.sh", reason: "mode" },
+      { edge: "spec", path: "core/alpha/scripts/run.sh", reason: "mode" },
+    ]);
+    for (const target of targets) {
+      assert.equal(
+        statSync(join(target, "SKILL.md")).mode & 0o777,
+        0o644,
+      );
+      assert.equal(
+        statSync(join(target, "scripts", "run.sh")).mode & 0o777,
+        0o755,
+      );
+      assert.deepEqual(checkModeAbsolute(expected, target).changes, []);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("default apply refreshes controls after regeneration and enumerates every diff", async () => {
   const mirror = await import("./mirror-skills.mjs");
   assert.equal(
@@ -1004,6 +1119,7 @@ test("checkModeAbsolute retains its one-source/one-target checksum contract", ()
   assert.equal(result.stale, false);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].command, "rsync");
+  assert.ok(calls[0].args.includes("-n"));
   assert.ok(calls[0].args.includes("--checksum"));
   assert.equal(calls[0].args.at(-2), "/source/");
   assert.equal(calls[0].args.at(-1), "/target/");

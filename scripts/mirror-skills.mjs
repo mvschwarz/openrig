@@ -53,25 +53,30 @@ function rsyncArgs({ dryRun }) {
   ];
 }
 
-// Parse rsync --itemize-changes output for content-meaningful changes.
+// Parse rsync --itemize-changes output for content or regular-file mode changes.
 // First-column codes per rsync(1):
 //   `<` / `>` — file transferred (content change)
 //   `c`        — created entry (file/dir/symlink/device)
 //   `h`        — hardlink redirected
-//   `.`        — item exists with NO update OR metadata-only update
-//                (we want to ignore these — content is stable)
+//   `.`        — item exists with NO update OR metadata-only update; retain
+//                only `.f...p.....` permission changes
 //   `*`        — message line; we only care about `*deleting `
 // In --check mode the script invokes rsync with `--checksum`, so a `.`
 // leading line means the bytes match even if mtime drifts (e.g., after
-// `git checkout` or `cp`); we deliberately skip those to keep the
-// drift-detect content-stable.
+// `git checkout` or `cp`); permission is the one metadata field the public
+// mirror must preserve, while mtime-only drift stays ignored.
 export function parseChanges(output) {
   const lines = output.split("\n").filter(Boolean);
-  return lines.filter(
-    (line) =>
-      /^[<>ch][fdLDS]/.test(line.slice(0, 2)) ||
-      line.startsWith("*deleting "),
-  );
+  return [
+    ...new Set(
+      lines.filter(
+        (line) =>
+          /^[<>ch][fdLDS]/.test(line.slice(0, 2)) ||
+          (line.startsWith(".f") && line[5] === "p") ||
+          line.startsWith("*deleting "),
+      ),
+    ),
+  ];
 }
 
 export function buildStaleMessage(changes) {
@@ -103,17 +108,14 @@ export function checkMode(exec = execFileSync) {
 }
 
 export function checkModeAbsolute(sourceDir, targetDir, exec = execFileSync) {
-  const args = [
-    "-a", "--delete", "--delete-excluded", "--itemize-changes",
-    "-n", "--checksum",
-    ...EXCLUDES.map((p) => `--exclude=${p}`),
-    sourceDir.endsWith("/") ? sourceDir : sourceDir + "/",
-    targetDir.endsWith("/") ? targetDir : targetDir + "/",
-  ];
-  const output = exec("rsync", args, {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "inherit"],
-  });
+  const output = exec(
+    "rsync",
+    rsyncAbsoluteArgs({ sourceDir, targetDir, dryRun: true }),
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "inherit"],
+    },
+  );
   const changes = parseChanges(output);
   return { stale: changes.length > 0, changes, output };
 }
@@ -190,7 +192,9 @@ export async function stagePublicSkills({
 
       const targetPath = join(stagingRoot, skillRelative === "." ? skill : publicPath);
       mkdirSync(dirname(targetPath), { recursive: true });
-      writeFileSync(targetPath, bytes);
+      writeFileSync(targetPath, bytes, {
+        mode: lstatSync(sourcePath).mode & 0o777,
+      });
     }
   }
 }
@@ -357,7 +361,11 @@ export async function regeneratePublicSkills({
         changes.push({
           edge,
           path: rsyncChangePath(line),
-          reason: line.startsWith("*deleting ") ? "delete" : "write",
+          reason: line.startsWith("*deleting ")
+            ? "delete"
+            : line.startsWith(".f") && line[5] === "p"
+              ? "mode"
+              : "write",
         });
       }
     }
@@ -659,20 +667,30 @@ function copyTree(sourceRoot, targetRoot) {
 function runRsyncAbsolute(sourceRoot, targetRoot, exec) {
   return exec(
     "rsync",
-    [
-      "-a",
-      "--delete",
-      "--delete-excluded",
-      "--itemize-changes",
-      ...EXCLUDES.map((pattern) => `--exclude=${pattern}`),
-      `${sourceRoot}/`,
-      `${targetRoot}/`,
-    ],
+    rsyncAbsoluteArgs({
+      sourceDir: sourceRoot,
+      targetDir: targetRoot,
+      dryRun: false,
+    }),
     {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "inherit"],
     },
   );
+}
+
+function rsyncAbsoluteArgs({ sourceDir, targetDir, dryRun }) {
+  return [
+    "-a",
+    "--delete",
+    "--delete-excluded",
+    "--itemize-changes",
+    ...(dryRun ? ["-n"] : []),
+    "--checksum",
+    ...EXCLUDES.map((pattern) => `--exclude=${pattern}`),
+    sourceDir.endsWith("/") ? sourceDir : sourceDir + "/",
+    targetDir.endsWith("/") ? targetDir : targetDir + "/",
+  ];
 }
 
 function rsyncChangePath(line) {

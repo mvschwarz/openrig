@@ -92,17 +92,10 @@ def field_of(payload, field):
     return (" ".join(str(v).split()) if v is not None else None), None
 
 def _cut_at_boundary(s, n):
-    """Cut to AT MOST n chars, NEVER inside a token.
+    """Cut to at most n characters without splitting a token.
 
-    Measured 2026-08-14: a cold subject read `see PROOF.m…` and `see P…` in the walk's own
-    output. A path cut mid-token still READS as a path — the reader cannot tell `PROOF.m` from
-    a file that is actually called that, so a truncation artifact is silently promoted to a
-    fact about the tree. Filenames, paths and identifiers are exactly the tokens a reader is
-    most likely to act on, which makes them the worst place to lose characters.
-
-    So the cut lands on whitespace or it does not land: paragraph, then line, then word. A
-    single unbroken token longer than the budget is DROPPED WHOLE rather than shortened —
-    half an identifier is worse than no identifier."""
+    Prefer paragraph, line, then word boundaries. Drop a single unbroken token
+    that exceeds the budget; a partial path or identifier looks valid but is not."""
     if len(s) <= n:
         return s
     head = s[:n]
@@ -146,27 +139,11 @@ def dep_artifacts(dep_dir, names, dep_fm):
 
 
 def blocking_state(payload, lvl, names):
-    """THE LEAF'S NEXT-ACTION FACTS, composed BESIDE its intent. Returns a line or None.
+    """Return leaf status and dependency facts beside its intent, or None.
 
-    Measured 2026-08-14: a cold seat walked `--field intent`, reconstructed the mission's
-    thesis from ~90 words, and finished green and ready to start work its own slice says is
-    blocked — because the walk opened the file holding `status: not-started`, extracted
-    exactly one key, and threw the rest away. It answers *what is this for* completely and
-    *what should I do now* not at all, and ships as though the first answered the second.
-
-    So the blocking facts ride along: `status`, and `depends:` — a sibling slice id (or a
-    list of them) RESOLVED ON DISK so the dependency's current state is reported rather than
-    remembered. Leaf only — the ancestors say what the work is for, and only the leaf says
-    whether to start it.
-
-    Measured 2026-08-14: a cold subject working slice 13 needed slice 11's OUTPUT. The walk
-    gave it 11's STATE and nothing else; the subject called the missing location "the single
-    largest unknown in my Phase 1 answer and it was the load-bearing input", and resolved it
-    with `ls` a phase later. A status answers *may I start*; it does not answer *where is the
-    thing I start from*. So each dependency now renders its ABSOLUTE PATH and its output
-    ARTIFACTS beside its state — and an id that resolves to nothing renders UNRESOLVED, said
-    out loud, because an unresolvable dependency dropped in silence is the same false
-    confidence in a smaller box."""
+    Intent alone does not say whether work may start or where dependency outputs
+    live. Resolve dependencies on disk and report state, absolute path, and
+    artifacts; leave ancestors to carry purpose."""
     fm, _ = frontmatter(payload)
     if not fm:
         return None
@@ -208,18 +185,10 @@ def blocking_state(payload, lvl, names):
 
 
 def operates_on(payload):
-    """The roots this WORK touches — which are NOT the root the trace ascended.
+    """Return the roots a work node declares it operates on.
 
-    Measured 2026-08-14, 4 cold subjects out of 4: the walk orients to PURPOSE excellently
-    and misleads on LOCATION every time. Naming the walked root did not help, because the
-    failure is not "which tree am I looking at" — it is "which tree does this work act on."
-    A slice about the skill library renders inside a map rooted at the workspace, and the
-    reader plans into the tree it was shown. One subject planned to CREATE a second corpus,
-    duplicating the very thing whose duplication was that slice's subject.
-
-    The walk cannot infer this: a work node is not bound to a root. So the node DECLARES it
-    and the leaf renders it verbatim. Mechanical, like `depends:`, and absent when unstated
-    rather than guessed."""
+    The tree being walked need not be the tree the work changes. This cannot be
+    inferred safely, so render `operates_on` verbatim and omit it when unstated."""
     fm, _ = frontmatter(payload)
     if not fm:
         return None
@@ -229,17 +198,9 @@ def operates_on(payload):
     return [" ".join(str(r).split()) for r in (roots if isinstance(roots, list) else [roots])]
 
 
-# WHAT SURVIVES TRUNCATION. Both lists are read off the 15 real SPEC.md files of
-# context-engineering-v2 — every pattern below matches a heading that actually exists there;
-# no category is invented for symmetry. CONTRACT is the completion-and-scope family (`Done
-# when`, `What done looks like`, `Scope fences`, `Output`, `Inputs`, `Depends on`, `What must
-# be built`, `How we will know it works`, `PAYLOAD`). DISCUSSION is the rationale-and-history
-# family (`Why …`, `The problem …`, `The evidence …`, `The finding …`, `RESULT …`, `Also
-# found`, `Triage`, `What is already done`, `New evidence`, `Where this spec was wrong`) —
-# valuable, and the first thing a reader can go get from the file itself.
-# Anything unmatched sits in the MIDDLE on purpose: an unfamiliar heading is neither
-# privileged nor sacrificed, so a new section shape degrades gracefully instead of silently
-# becoming the first casualty.
+# Preserve contract and scope sections ahead of rationale and history when the
+# leaf body exceeds its cap. Unknown headings remain middle priority so new shapes
+# degrade without being silently privileged or discarded.
 _PRI_CONTRACT = re.compile(
     r"(done when|what done looks like|scope fence|outputs?\b|inputs?\b|depends on|"
     r"what must be built|how we will know|acceptance|payload|deliverable)", re.I)
@@ -278,24 +239,11 @@ def _sections(body):
 
 
 def leaf_body(payload, cap):
-    """Ancestors compose by FIELD; the leaf composes by BODY.
+    """Render the leaf body, truncating by semantic priority rather than position.
 
-    Measured 2026-08-14 (slice 01 A/B): a cold agent given three intent sentences
-    reconstructed the mission's thesis correctly, then assumed the work tree it had been
-    shown was the tree its slice was about. The slice was about the TOPOLOGY tree. It built
-    a coherent four-step plan aimed at the wrong one — and the three altitudes it planned
-    over need three different verbs, which it had no way to know.
-
-    That is misdirection, not a gap. Ancestors compress beautifully because they are stable
-    and abstract. **The leaf is where the nouns live, and a field-only walk throws them
-    away** — every word that would have disambiguated it sat in the body that was not shown.
-
-    Truncation is BY PRIORITY, never by position. Measured 2026-08-14: positional cutting on
-    slice 13 dropped `Output`, `Done when` and `Scope fences` — the three sections that say
-    what to produce, when it is finished and what it may not touch — and kept four screens of
-    rationale, because the rationale happened to be written first. The subject rated its own
-    grasp of purpose 85% and its next action 70% and named that omission as the reason. A
-    render that keeps the argument and drops the contract has the priorities backwards."""
+    Ancestors can compose by stable intent fields, but the leaf carries the nouns,
+    boundaries, outputs, and completion conditions. When over budget, retain
+    contract and scope sections before explanatory history."""
     if not payload:
         return None
     m = re.match(r"^---\n.*?\n---\n", payload, re.S)
@@ -309,13 +257,8 @@ def leaf_body(payload, cap):
         kept = _cut_at_boundary(body, cap)
         return (kept + "\n\n[… " + str(len(body) - len(kept)) + " more chars, no further "
                 "headings — prose tail]" + "\n(read the node file for these)")
-    # Drop LOWEST priority first and, within a tier, the LARGEST section first. Size beats
-    # position here and it was measured: slice 13's contract sections total more than any
-    # sane cap, and dropping the tier tail-first killed `Done when` (12 lines) and `Scope
-    # fences` (9) to save `Output` and `Inputs` (~2k chars each) — the two long prose
-    # sections eating the two short decisive ones. Largest-first keeps the most sections
-    # standing, and in these specs the short section is the one carrying the ruling. The
-    # preamble (title + lede, index 0) is never a candidate: it is what names the thing.
+    # Drop the lowest-priority, largest sections first to preserve more short,
+    # decisive sections. The title and lede preamble are never candidates.
     keep, size = set(range(len(secs))), len(body)
     for i in sorted(range(1, len(secs)), key=lambda i: (-_priority(secs[i][0]), -len(secs[i][1]))):
         if size <= cap:
@@ -326,11 +269,7 @@ def leaf_body(payload, cap):
     if len(kept) > cap:                    # preamble alone overflows; cut it safely, never mid-token
         kept = _cut_at_boundary(kept, cap)
     dropped = [secs[i][0] for i in range(1, len(secs)) if i not in keep]
-    # NAME what was cut. A byte count reads as trivia; two subjects in a row lost the
-    # acceptance criteria to it and neither could tell, because a truncated head can end on
-    # a clean rhetorical close and look like a finished document. Listing the dropped
-    # headings turns invisible truncation into a decision the reader can actually make —
-    # one subject lowered its own confidence honestly on the strength of this line alone.
+    # Name omitted headings so truncation is visible to the reader.
     tail = ("\n\nOMITTED FROM THIS RENDER — " + str(len(body) - len(kept)) + " chars, sections: "
             + " · ".join(dropped) if dropped else
             "\n\n[… " + str(len(body) - len(kept)) + " more chars, no further headings — prose tail]")
@@ -338,29 +277,18 @@ def leaf_body(payload, cap):
 
 
 def resolve_roots():
-    """WHERE THE TWO TREES LIVE — resolved, never hardcoded, never guessed.
+    """Resolve work and topology roots from configuration or explicit environment.
 
-    A skill ships inside a plugin and its scripts must run unmodified on a stranger's machine.
-    The WORK tree has been addressable for a while (`workspace.root`). The TOPOLOGY tree was not:
-    every consumer hardcoded `~/.openrig/shared-docs`, so half the walk was portable and half was
-    not. Precedence matches every other typed key: env > config > derived > fail-with-the-key.
-
-    The derived step is honest rather than clever: this script physically lives inside the
-    shared-docs tree, so it can find its own `rigs/` sibling by walking up from __file__. That
-    works for the library copy and its symlinked projections (resolved with realpath) and NOT for
-    a real plugin copy — which is correct. A plugin copy on
-    someone else's machine has no business inferring a path; it must be told, and it fails saying
-    exactly which key to set rather than picking a directory and being confidently wrong."""
+    A library copy may derive topology from its own real path; a projected plugin
+    copy must be configured rather than guessing. Resolution follows environment,
+    configuration, then derived location."""
     out = {}
     out["work_root"] = os.environ.get("OPENRIG_WORKSPACE_ROOT") or rig_config("workspace.root")
 
     t = os.environ.get("OPENRIG_TOPOLOGY_ROOT") or rig_config("workspace.topology_root")
     if not t:
-        # realpath, NOT abspath: the runtime tiers project this script as a SYMLINK
-        # (~/.claude/skills/... -> the library copy). abspath keeps the symlink's own path, so
-        # the ascent runs up a tree with no `rigs/` sibling and topology_root comes back
-        # UNRESOLVED — for every agent reaching the tool the documented way. Measured 2026-08-14:
-        # exit 3 via the projection, exit 0 via the realpath, same file.
+        # Resolve symlinks before walking upward; otherwise a projection ascends
+        # its own tree rather than the shared-docs source.
         here = os.path.realpath(__file__)
         for _ in range(6):                       # scripts/ skill/ skills/ skill-canon/ -> shared-docs/
             here = os.path.dirname(here)
@@ -406,11 +334,8 @@ def compose_up(start, names, root, field=None, prefer=False, shelves=None, leaf_
     # (first match wins) instead of N independent chains. A tree mid-rename is the normal
     # case, not an exception: SPEC.md is the current node filename and README.md the legacy
     # one, and a trace that cannot span both reports a chain as broken when it is merely mixed.
-    # Test the START NODE against the TREES, not the root against the workspace. Being
-    # somewhere under workspace.root is not the property that matters: the measured hazard
-    # is a fixture tree at workspace/artifacts/<qitem>/fixture-workspace/missions/, which is
-    # inside workspace.root and is not a work tree. Only slices_root and topology_root name
-    # actual trees, so those are the discriminator.
+    # Validate the start node against configured tree roots. Merely sitting below
+    # workspace.root is insufficient because fixtures may look structurally valid.
     _cfg = [c for c in (rig_config("workspace.slices_root"),
                         resolve_roots().get("topology_root")) if c]
     _here = os.path.abspath(start)
@@ -465,17 +390,11 @@ def compose_up(start, names, root, field=None, prefer=False, shelves=None, leaf_
             rungs.append((label, row)); pending = []
         leads = [("" if i == 0 else "   " * (i - 1) + "└─ ") + rungs[i][0] + "/" for i in range(len(rungs))]
         width = max(len(l) for l in leads) + 2
-        # NAME THE REFERENT. Three cold subjects in a row assumed the tree they were
-        # SHOWN was the tree their slice was ABOUT, and planned into the wrong one. The map
-        # cannot know "work" vs "topology" semantically, but it knows what it walked — and
-        # root + chain filename is enough to tell them apart (workspace/SPEC.md vs rigs/LEARNED.md).
+        # Name the walked root and chain so readers do not confuse the tree being
+        # shown with the tree the work will change.
         out.append(f"\nTRACE · root {levels[0]} · chain {' → '.join(group)}")
-        # VALIDATE THE ROOT. Measured 2026-08-14: this box has four directories named
-        # `missions`, one of them a TEST FIXTURE under artifacts/. Handed the fixture as
-        # --root, the trace renders an equally clean, equally confident chain — because
-        # `✓ seeded` means "a file was found here", never "you are in the right tree".
-        # Confidence that is independent of correctness is the failure this whole mission
-        # is against, so the trace now says when it cannot vouch for where it is standing.
+        # Warn on an unconfigured root: an arbitrary lookalike tree can render a
+        # clean chain.
         if _root_warning:
             out.append(_root_warning)
         for i, (_label, (lvl, where, state, payload, fval, fnote)) in enumerate(rungs):

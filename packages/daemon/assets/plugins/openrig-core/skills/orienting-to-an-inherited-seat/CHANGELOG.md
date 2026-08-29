@@ -10,7 +10,7 @@ instructional.
 
 ### The incident
 
-A successor (orch-advisor tenure 4, v-openrig-build) concluded mid-conversation that its reach-back
+A successor seat concluded mid-conversation that its reach-back
 window had closed at cutover, and reasoned from that for several turns before being challenged.
 
 It was wrong. `rig ask --wake` ships in CLI 0.5.1, the predecessor's session record was intact and

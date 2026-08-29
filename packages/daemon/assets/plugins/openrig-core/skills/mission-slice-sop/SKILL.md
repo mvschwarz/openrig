@@ -1,6 +1,6 @@
 ---
 name: mission-slice-sop
-description: "Use when working on a mission or slice; editing SPEC.md, NOTES.md, PROGRESS.md, or PROOF.md; defining a proof contract or plan-lock/proof-lock; running rig proof; making a handoff; or preparing for compaction."
+description: "Use when working a mission or slice: the canonical files (README / IMPLEMENTATION-PRD / PROGRESS / MISSION_NOTES / MISSION_BRIEF / PROOF), who owns what and when, how planning feeds building + review + QA, how to hand off through the queue, and how to survive compaction. This is the LIGHT default. It does NOT include the intent/plan-lock/proof-lock ceremony — that is a separate assigned overlay, `mission-slice-intent-proof-sop`."
 metadata:
   openrig:
     stage: shipped
@@ -39,34 +39,39 @@ These three are a division of labour, not a chain of gates. One agent may hold a
 
 > These files are the **operating surface of the work** — you track on them, record on them, hand off through them, and survive compaction on them. Keep them current because that is what lets the work survive. But they **serve** the product; they are not the product. If you're polishing files while the actual thing isn't shipping, you've inverted it: go build, then update them.
 
-- **SPEC.md** (mission + slice) — the one authored node file. `intent:` lives in frontmatter; the slice body specifies through `## Intent`, `## Mini-requirements`, and `## Proof contract`. Advisory sibling build-order edges live in `depends_on:`.
-- **PROGRESS.md** — the durable mission/slice acceptance checklist. In-process steps stay in the working agent's todo tool.
-- **NOTES.md** — lived context and observations that help the mission without changing its contract.
+- **README.md** (mission + slice) — the overview. The **mission README carries this SOP at its bottom.**
+- **IMPLEMENTATION-PRD.md** — the plan, at whatever depth the work actually needs. For a small slice this may be a few lines. Elastic by design.
+- **PROGRESS.md** — the live delivery state. One line per outcome; links down for detail.
+- **MISSION_NOTES.md** — the accruing handoff + tribal-knowledge doc. Blank-slate onboarding and **compaction-restore** read it. `§1` top-of-mind + per-seat `§A–§X`.
+- **MISSION_BRIEF.md** — the steering doc (the UI "Steering" tab). The 7-section schema.
 - **PROOF.md** (+ `proof/`) — what you actually verified, stated honestly. A couple of honest, LOOKed-at lines beat an elaborate contract.
 
 ## Per-file rules — WHO / WHEN / HOW
 
 ### PROGRESS.md
-- **WHO:** the mission/slice owner keeps acceptance honest.
-- **WHEN:** when an acceptance outcome changes, especially at handoff and close.
-- **HOW:** one checkbox per durable outcome. Do not copy in-process todo steps into it.
+- **WHO:** the orchestrator owns `§1` (current state); every agent logs its own outcomes.
+- **WHEN:** after every slice-done **and every commit**; on any material state change.
+- **HOW:** one line per outcome (checkbox), link down for detail; keep frontmatter `stage`/`verified` honest.
 
 ### PROOF.md + proof/
 - **WHO:** the impl/QA pair that worked the slice.
 - **WHEN:** before you call a slice done.
 - **HOW:** say what you verified and how you verified it — **by effect**: you ran it and looked at the result. Put supporting media under `proof/`. State plainly what is proven and what is **not**; an honest "this half is untested" is worth more than a checkmark. If a drop verb is in play for this slice, prefer it over hand-placing files so the artifact carries its own provenance.
 
-### NOTES.md
-- **WHO:** whoever did or observed the work.
-- **WHEN:** when lived context will help the next worker but does not belong in the contract.
-- **HOW:** write raw observations freely; point to durable artifacts instead of copying them.
+### MISSION_NOTES.md
+- **WHO:** any agent updates `§1` (top-of-mind); each seat owns and appends to its own `§A–§X`.
+- **WHEN:** on any material change; a compacting agent **files its state here BEFORE compaction and reads it on restore.**
+- **HOW:** accruing tribal knowledge — `§1` ≤ 5–15 lines (gates, open decisions, surprises); per-seat continuation entries (latest = truth; other seats read-only). Pointer-first; don't duplicate.
 
-### SPEC.md
-- **WHO:** the node owner. **WHEN:** at creation and on a real rescope. **HOW:** keep `intent:` and advisory `depends_on:` in frontmatter; only slice bodies specify buildable work.
+### MISSION_BRIEF.md
+- **WHO:** product/design (steering owner). **WHEN:** when steering changes. **HOW:** the 7-section steering schema.
+
+### README.md
+- **WHO:** the author at creation; refreshed on rescope. **WHEN:** at creation + when scope/theme changes. **HOW:** overview + honest frontmatter (`id`/`stage`/`verified`); the mission README carries this SOP at its bottom.
 
 ## The lifecycle (4 legs)
 
-**SCAFFOLD** (`rig scope` creates the files from templates) → **POPULATE** (agents fill them as work happens) → **PROJECT** (scope readers and the TUI derive the current view) → **VERIFY** (`rig scope audit`, advisory). "Loose freeform write + deterministic verify."
+**SCAFFOLD** (`rig scope` creates the files from templates) → **POPULATE** (agents fill them as work happens) → **PROJECT** (the Living Notes UI reads them into INTENT → PLAN → DELIVERED) → **VERIFY** (`rig scope audit`, advisory). "Loose freeform write + deterministic verify."
 
 ## Hot-potato (handoffs)
 
@@ -89,7 +94,7 @@ When you `rig capture` a pane, **greyed / ghost autocomplete suggestions are NOT
 ## Moment-of-truth checklist
 
 - **Starting a slice?** → do you know what it's for and what done looks like? mockups attached (UI slices)? **Are you on the light path?** (You are, unless the mission owner assigned the overlay.)
-- **Finishing a slice?** → does PROOF.md say what you actually verified, by effect, including what is NOT covered? Acceptance updated in PROGRESS? handed off via `rig queue handoff`?
-- **Rescoping?** → update SPEC.md; ordinary implementation steps do not belong there.
-- **Compacting?** → deposit seat continuity in the seat's restore surface; NOTES.md holds only work-tree lived context.
-- **Starting on a mission?** → read the mission SPEC.md + NOTES.md + the conventions SSOT.
+- **Finishing a slice?** → does PROOF.md say what you actually verified, by effect, including what is NOT covered? PROGRESS updated? MISSION_NOTES `§1` refreshed? handed off via `rig queue handoff`?
+- **Committing?** → PROGRESS updated?
+- **Compacting?** → filed your state in MISSION_NOTES?
+- **Starting on a mission?** → read the mission README (incl. this SOP) + MISSION_NOTES + the conventions SSOT.

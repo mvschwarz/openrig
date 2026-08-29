@@ -51,7 +51,6 @@ These are auto-delivered to every rig; their name+description are already in you
 - **queue-handoff** — you're passing durable work to another seat or ending your turn. The queue is the work ledger, not chat.
 - **refocusing** — a long-running seat may have lost the product outcome, crossed a major boundary, or compacted and needs a fresh path-based trace.
 - **seat-continuity-and-handover** — handing your seat's work across a restart or to another owner.
-<!-- Territory amended 2026-08-26 by desk ruling qitem-20260826080800-r054-s9a-scope-ruling. -->
 - **orienting-to-an-inherited-seat** — you just inherited an existing seat through a planned handover and need to verify its identity, state, and testimony.
 - **retiring-and-inheriting-a-seat** — you're planning a seat transition and need to retire the current occupant into a fresh successor without losing continuity.
 - **mission-slice-sop** — you're working a mission/slice (the SDLC: intent → mini-requirements + proof contract → build → QA → proof). The operating manual.

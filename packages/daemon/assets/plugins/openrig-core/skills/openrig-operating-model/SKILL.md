@@ -9,7 +9,7 @@ description: >-
 metadata:
   openrig:
     stage: draft
-    author: OpenRig product team (sole-context authorship; revisions per REVISION-GUIDE.md)
+    author: OpenRig product team (sole-context authorship)
 ---
 
 # The OpenRig Operating Model
@@ -25,11 +25,7 @@ write protocol). The SUPPLY layer — how canon content flows into the chains:
 addresses, maps, renders, EMM maturity, census — is `openrig-corpus-canon`,
 the deliberate drain mechanism the dual-home interim anticipated.
 
-Companion files in this skill's folder — routed, not inlined:
-- `ROLLOUT.md` — how the model is being adopted on a live fleet (waves, interim
-  practices, what happens to existing files).
-- `ROADMAP.md` — what later gets formalized in product code, and when.
-- `REVISION-GUIDE.md` — for agents revising this skill.
+Companion implementation assets in this skill's folder:
 - `templates/` and `scripts/` — starters and working tools, described in §8.
 
 ## 1. The model in one breath
@@ -380,8 +376,7 @@ living system are the same command with different starting states. Created
 files are marked UNSEEDED until their real owner writes the first true
 version. **Never mass-produce LEARNED.md content for other instances** — each
 instance writing its own first version is both how the knowledge becomes real
-and how you discover which seats can't describe their own job (see
-`ROLLOUT.md` on why that discovery is the point).
+and how you discover which seats cannot yet describe their own job.
 
 ## 10. Pitfalls (only what isn't taught above)
 
@@ -393,12 +388,10 @@ and how you discover which seats can't describe their own job (see
 - Summarizing this model for another agent instead of pointing them here —
   secondhand operating models are how operating models die; this skill was
   authored precisely because a chain of summaries destroyed the last one.
-- Scripts in `scripts/` are macOS-flavored in places (`stat -f`); on Linux,
-  check `REVISION-GUIDE.md` for the portability notes before trusting them.
+- Scripts in `scripts/` are macOS-flavored in places (`stat -f`); verify
+  platform compatibility before trusting them on another OS.
 
 ## Files in this skill
 
-`ROLLOUT.md` · `ROADMAP.md` · `REVISION-GUIDE.md` ·
-`CHANGELOG.md` — why the model is shaped this way, and what it replaced ·
 `templates/{SPEC,LEARNED,SOP}.md` ·
 `scripts/{compose.py, trace-due.sh, trace-stamp.sh, trunk-diff.sh, scaffold.sh}`
