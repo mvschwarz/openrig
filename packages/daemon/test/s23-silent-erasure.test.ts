@@ -146,7 +146,7 @@ describe("OPR.0.5.6.23 member (b) — fork-ingress memberFragment forwards every
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sourceSession: "dev-impl@src-rig", rigId: "dst-rig", pod: "dev", member: "forked" }),
     });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(201);
     expect(addMember).toHaveBeenCalledTimes(1);
     const fragment = addMember.mock.calls[0]![2] as Record<string, unknown>;
     // base RED: the fragment forwards only runtime/agent_ref/profile/cwd/
