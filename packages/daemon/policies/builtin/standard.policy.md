@@ -22,4 +22,4 @@ The everyday software-factory posture for INTERACTIVE dev. Routine work runs wit
 
 **INTERACTIVE-dev posture:** an `ask` freezes an autonomous seat by design — autonomous fleets use Open or YOLO, not Standard.
 
-**FLOOR (always on, flag surface):** Claude `acceptEdits` + Codex `workspace-write` (the edit/sandbox floor); Pi `--no-approve` is a resource-TRUST posture, not a permission floor (Pi has no permission surface). **Translation is the skill's job** (harness-neutral intent → per-harness format, caveated). Grounded in schema `a8dba0d9`; the ask-set is pinned per cold-transfer `627abbb6`.
+**FLOOR (always on, flag surface):** Claude `acceptEdits` + Codex `workspace-write` (the edit/sandbox floor); Pi `--no-approve` is a resource-TRUST posture, not a permission floor (Pi has no permission surface). **Translation is the skill's job** (harness-neutral intent → per-harness format, caveated).

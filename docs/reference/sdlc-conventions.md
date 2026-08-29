@@ -1,14 +1,9 @@
 # SDLC conventions — the markdown control plane
 
-> **Succession rule (source of truth):** this document was derived from the
-> corrective review-surface redesign spec
-> (`CORRECTIVE-REDESIGN-review-surface-2026-07-05`, DRAFT v0.2, §2–§6,
-> grounded against openrig main `c27f2aff`, 2026-07-05/06). **Once shipped,
-> THIS repo document is the living SSOT for the SDLC conventions going
-> forward**; the corrective spec is the historical design record. Scaffold
-> templates, the advisory scope audit, the `mission-slice-sop` skill, and the
-> shipped bootstrap overlay all point HERE — they must not restate this
-> document in full (restatement is how drift is born).
+> **Source of truth:** this repo document is the living SSOT for the SDLC
+> conventions. Scaffold templates, the advisory scope audit, the
+> `mission-slice-sop` skill, and the shipped bootstrap overlay all point HERE —
+> they must not restate this document in full (restatement is how drift is born).
 
 OpenRig is a software factory the human steers from a high altitude. The human
 records intent; agents turn intent into a plan, the plan into a build, the
@@ -16,37 +11,6 @@ build into proof. The TUI is a **plain projection of well-formed
 markdown on disk** — agents change the files, the UI re-projects. These
 conventions define "well-formed." Everything here is **advisory / fail-open
 for agents**: nothing below blocks a write; the audit records and advises.
-
-
-## WHERE YOU ARE DECIDES WHICH LOOP YOU RUN — the VM inner loop vs the host outer loop
-
-The parent host's SDLC was being applied wholesale to the VM. **They are different worlds with
-different responsibilities**, and conflating them is what turned this document into friction.
-
-| | **INNER LOOP — the VM** | **OUTER LOOP — the parent host** |
-|---|---|---|
-| **question it answers** | *does it actually work?* | *does what was delivered match what was intended?* |
-| **method** | ground → fix → upgrade in place → **run it and look** → iterate | intent-vs-delivered comparison, commit-message review, privacy/leak scrub, release management, publish |
-| **definition of done** | to the best of our knowledge the code is **completely functional and works**, and needs **no heavy refactoring** to be release-ready | the release is shippable and honest |
-| **ceremony** | **Part A only.** Part B is not the default here. | **Part B applies.** The release itself earns it. |
-
-**WHY the ceremony belongs there and not here — the rule that makes this self-enforcing:** the
-proof ceremony is a **protocol for transmitting confidence to someone who was not there.**
-Plan-lock, proof contracts, C1 drops and intent-vs-delivered all exist so a reader who did NOT
-watch the work happen can verify that it did. On the host that is exactly the situation, so the
-artifacts must carry the confidence. **On the VM the builder IS there** — they ran it and looked at
-it. Running the ceremony there re-encodes, at high cost, something already known, for an audience
-standing in the room.
-
-**WHERE A FIX GOES — go where the validation is POSSIBLE, not where the ceremony lives:**
-
-- **Needs a live daemon to verify → the VM.** That is the only place it CAN be verified. (Worked
-  example: proving the ACTIVITY telemetry was really fixed required cutting the runtime over and
-  reading real values; no amount of host-side review could establish it.)
-- **Verifiable by reading — docs, comment scrubs, message hygiene → the host.**
-
-**The VM's north star for a release:** hand the host code that, to the best of our knowledge, is
-completely functional and works. Not a proof pack. **Effect-verified functionality.**
 
 
 ## HOW TO READ THIS DOCUMENT — two parts, and only one of them is the default
@@ -173,21 +137,9 @@ either being wrong (for example, one over the frontmatter block and one over
 the whole file). Coverage is what makes a cited hash verifiable rather than
 merely impressive.
 
-**Canonical convention (the ONE origin — cite it, do not restate it here),
-cited in the form that convention itself prescribes — path + section anchor +
-dated whole-file hash:**
+**Use path + anchor as the authority and a whole-file hash only to date the
+citation.** The address survives legitimate content changes; the digest does not.
 
-- **path:** `artifact-cross-citation-path-plus-lineage.md` (internal authoring convention — not shipped in this public repo)
-- **anchor:** *A cited hash STATES ITS COVERAGE — span is part of the definition*
-  (2026-08-08)
-- **hash:** `sha256 14d9a273d542648ab1e0a82c7fd98e8a8c59cb02a83be76b8af9abfb717b34d2`
-  — **coverage: WHOLE FILE, bytes as stored, INCLUDING the trailing newline**
-  (0x0a terminal byte verified), 229 lines, as-of 2026-08-08.
-
-The **path + anchor is the AUTHORITY**; the whole-file hash **DATES** the
-citation. That artifact is a living doc: the hash goes stale at the next
-legitimate append, the anchor does not — the CURRENT-line convention applied to
-a citation.
 ## A4. When implementation finds the intent rested on something that does not exist
 
 A slice's intent can only be honoured to the extent its assumptions hold. Sometimes implementation
@@ -370,9 +322,6 @@ an append-only pile where the human can't tell final from superseded.
 
 ## Scratch-daemon hermeticity: the DB a scratch daemon opens is the one you named
 
-*(Desk-ruled 2026-08-25, row qitem-20260825005846-7960f4dd; 0.5.3-era doctrine — a harness rule,
-not product behavior.)*
-
 A scratch daemon launch **strips the inherited environment's `OPENRIG_DB` and names an explicit
 scratch DB path under the scratch `OPENRIG_HOME`** — both halves, every launch:
 
@@ -388,26 +337,6 @@ the scratch context read or wrote state it never owned, and whether anything vis
 luck, not hermeticity.
 
 **The discriminator that keeps this rule honest:** an explicit `OPENRIG_DB` still WINS by design
-(`daemon-db-path.ts`; prior ruling 00c4ab76) — deliberate split-path configuration is legitimate
-and untouched. This rule governs **inheritance into scratch contexts**, where nobody decided
-anything: strip what you did not choose, then choose.
-
-
-## Known gaps toward an end-to-end SDLC — dated 2026-08-28 (named with a route each, not built here)
-
-- **QA loop as a menu component:** the QA-owns-the-test-fix-feedback-loop practice is
-  lived but has no graduated reference document. Route: graduate it in a future
-  canonization pass once its SOP stabilizes.
-- **The mission install's boundary integration is one release old:** the re-prime
-  step now cites `mission-install.md`; its first full-fence exercise is the next
-  boundary. Route: the next boundary's dated observations file.
-- **Selection evals for skill/context surfaces:** referenced by audits as the gate
-  for tier moves; the runner is not built. Route: named in the scope of record as
-  gated work — sequence nothing on it.
-- **Derived progress surfaces:** the direction is settled — `PROGRESS.md` reflects
-  proof items, checked off through the proof protocol, rather than hand-authored
-  status. Implementation and scheduling remain unbuilt. Route: a scoped follow-on
-  slice when scheduled.
-- **Release-ceremony reference:** the RELEASE row's ceremony conventions (publication
-  identity, honest release notes) are practiced but not yet a graduated document.
-  Route: graduate with a lived specimen at a future fence.
+(`daemon-db-path.ts`) — deliberate split-path configuration remains legitimate and
+untouched. This rule governs **inheritance into scratch contexts**, where nobody
+decided anything: strip what you did not choose, then choose.

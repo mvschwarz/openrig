@@ -3,29 +3,16 @@ doc: reference
 title: Knowledge maturity — the epistemic ladder
 stage: established
 warrant: >-
-  RECOVERED 2026-08-28 (slice OPR.0.5.6.9). The ladder's prior defining documents
-  (skill-maturity-convention.md; the EMM knowledge schema) were verified absent from
-  this machine by enumeration (2026-08-28 survey). This document re-authors the model
-  faithfully from the primary design-session capture
-  product/DESIGN-context-distribution-2026-08-10.html §1–2 (near-verbatim ground) and
-  §5, bound by recorded design decisions 2026-08-28 (maturity is multi-dimensional; the ladder
-  CONCEPT is the product ingredient, tier counts non-normative; machinery waits for
-  ~6.2/6.3, labeling starts now).
-sources:
-  - product/DESIGN-context-distribution-2026-08-10.html §1–2, §3b, §5 (corpus; the recoverable source of record)
-  - release-0.5.6 slice 09 design contract (recorded design decisions 2026-08-28, desk-locked)
-  - corpus/canon/chooser/the-chooser.md and corpus/canon/laws/scoped-read.md (lived warrant practice, two grades)
-  - context-engineering-v2 operating-model.md §4 (audience vs maturity)
-  - conventions/feature-lifecycle-convention.md (the orthogonal lifecycle axis)
+  The maturity ladder makes trust explicit by tying claims to visible stages,
+  promotion rules, and durable evidence.
 ---
 
 # Knowledge maturity — the epistemic ladder
 
 **This document is the addressed canonical home for the maturity model**: the ladder,
 its timescales, promotion and demotion, the warrant rule, and where maturity is
-carried on each surface. Documents that previously defined this model are absent from
-this machine; citations to them should point here. A corpus that cannot state its own
-trust model cannot tell you it is rotting — that is why this document exists.
+carried on each surface. A corpus that cannot state its own trust model cannot
+tell you it is rotting — that is why this document exists.
 
 ## The ladder
 
@@ -61,25 +48,23 @@ Promotion is an explicit act at each rung: **harvest / notice → fold, in own w
 curate (explicit, dated).** Content enters the lived layer (`LEARNED.md`) at whatever
 maturity it has, proves itself stable over time, and graduates.
 
-Discovery flows up; canon almost never flows back down — and "when canon flows back
-down, that's a demotion event worth noticing." **Demotion is legal but LOUD**: the
-2026-08-10 levelset demoted three generations of assumed-canon in one ruling, which is
-the principle lived, not violated.
+Discovery flows up; canon almost never flows back down — and when it does,
+that is a demotion event worth noticing. **Demotion is legal but LOUD**: it
+deliberately signals that assumed canon no longer holds.
 
 ## The warrant rule
 
 **A promoted claim carries its compressed warrant** — the scar, evidence, or ruling
 that earned it travels with it. "Canon without warrants is cargo cult with good
-formatting." The populated canon tree is the lived specimen: `canon/chooser/the-chooser.md`
-carries a DECISION-RECORDED warrant, `canon/laws/scoped-read.md` a TRIPLE-CONFIRMED one —
-two different grades, and the difference is legible precisely because the warrant
-states it. This document's own frontmatter practices the rule.
+formatting." Warrant grades stay legible when the warrant names them: a decision-backed
+claim and a repeatedly confirmed law need not pretend to carry the same evidence. This
+document's own frontmatter practices the rule.
 
 ## Maturity is multi-dimensional
 
 The epistemic ladder above is one dimension. A second is the
-**context-architecture ladder** (recorded design decision 2026-08-28): how context itself is
-produced, with prose-in-a-world-shape at the bottom rung — comprehensible, effective,
+**context-architecture ladder**: how context is produced, with
+prose-in-a-world-shape at the bottom rung — comprehensible, effective,
 and prone to drift — and derived-from-source at the top, where content cannot rot
 because a command re-derives it.
 
@@ -101,8 +86,7 @@ that breaks references loudly is a feature — changing trust should be ceremoni
 per-section level tags are needed; the address is the tag.
 
 **Pack, lore, and scope items carry maturity as a stage FIELD from birth**, using the
-shipped vocabulary (verified against the live `rig scope slice stage` surface and the
-`Stage` type at the source, 2026-08-28 — four rungs plus two exits):
+shipped vocabulary (four rungs plus two exits):
 
 `wip | provisional | established | canonical | superseded | retired`
 
@@ -111,8 +95,8 @@ valid values — invented stages (shape, shaped, draft) are rejected. Items mint
 new conventions carry a stage from birth: labeling from day one is free, retrofitting
 is archaeology.
 
-This section is the stage-vocabulary source for lore and pack work (slice 08 cites
-it). The taxonomy axis (WORLD / LORE / SKILLS / MISSION) is orthogonal to stage:
+This section is the stage-vocabulary source for lore and pack work. The taxonomy
+axis (WORLD / LORE / SKILLS / MISSION) is orthogonal to stage:
 **taxonomy says what kind, stage says how trusted.**
 
 ## What maturity is not
@@ -124,17 +108,16 @@ Two axes are habitually conflated with maturity and are not it:
   observation, a seat-level one can be canon. Promotion to canon is a maturity event,
   not a move up the tree. Facts about mechanisms can skip rungs (a one-command
   verification settles them); inferences about practice must accrue evidence.
-  (operating-model §4.)
 - **Feature lifecycle.** "Feature lifecycle is separate from epistemic maturity" —
   lifecycle (`active | deprecated | retired`) answers whether agents should still
   build on a behavior; maturity answers how trustworthy a piece of knowledge is.
-  (feature-lifecycle convention.)
 
 ## Direction, not construction
 
-The recovered source sketches an end-state — a level-first corpus tree where one
-address string carries trust, domain, claim, and freshness at once — and marks it
-"may not survive contact with reality." It is cited here as direction only. **Nothing
-in this document is mechanized**: no enforcement tooling, no mass relabeling, no new
-tier scheme. Ladder machinery (readers, parity checks, promotion tooling) is expected
-around 6.2/6.3; what starts now is the vocabulary above and labeling from birth.
+A possible end-state is a level-first corpus tree where one address string carries
+trust, domain, claim, and freshness at once. It is direction only.
+
+**Nothing in this document is mechanized**: no enforcement tooling, no mass
+relabeling, and no new tier scheme. This document establishes the vocabulary above
+and labeling from birth; readers, parity checks, and promotion tooling remain outside
+its scope.

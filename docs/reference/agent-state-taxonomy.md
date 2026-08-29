@@ -4,11 +4,9 @@ The formal state language every OpenRig surface renders from — TUI, `rig ps`, 
 inventory, and any future consumer. One oracle computes it; surfaces render it; no
 surface keeps a private vocabulary.
 
-**The canonical text is the ratified addendum**
-`product/from-openrig.dev/taxonomy-agent-state-ADDENDUM-2026-08-26.md` (ratified
-2026-08-26). This reference section cites it and adds the engineering reconciliation;
-it never forks it. The typed source of truth is
-`packages/daemon/src/domain/activity-taxonomy.ts`.
+**This document is the canonical text for the shipped taxonomy** and adds the
+engineering reconciliation; it never forks a second vocabulary. Its typed source of
+truth is `packages/daemon/src/domain/activity-taxonomy.ts`.
 
 ## The three orthogonal axes
 
@@ -28,7 +26,7 @@ Blocked-on-input rides as `{ count, reason }` — the number of outstanding prom
 short phrase naming why nothing is moving ("permission prompt", "usage limit",
 "classifier hold" — provider chrome and usage limits are explicitly in-axis: they are
 the second cause of production-observed parks). Human surfaces may *display* "needs-input"
-(the addendum's four-value human list) via the one bridge `deriveDisplayActivity`, which
+(the four-value human list) via the one bridge `deriveDisplayActivity`, which
 renders needs-input whenever `count > 0`; no store or transition ever holds it as a
 state. Attention/alarm values likewise stay in their own machinery (`attentionCount`).
 Both herdr and omnigent converged on this exclusion, with warning comments on the
@@ -58,9 +56,6 @@ collision in both codebases.
 | derived DONE-UNSEEN | derived `Done` = idle ∧ unseen (`src/ui/sidebar.rs:186`) | — |
 | session axis | server owns the PTY (presence direct) | `runner_online` × `host_online` × `host_resumable` |
 | — (rejected) | — | `waiting` (turn parked on async drain — collides with Claude's dialog `waiting`; both codebases carry warning comments) |
-
-Full evidence: `RESEARCH-state-oracle-herdr-omnigent-2026-08-26.md` and
-`RESEARCH-SUPPLEMENT-codex-activity-truth-2026-08-26.md` (mission root, release-0.5.5).
 
 ## The evidence ladder (rung inventory and retirement conditions)
 
