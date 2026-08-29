@@ -342,23 +342,33 @@ describe("parked-owner-consumer — R2 integration hard checks (OPR.0.5.6.24)", 
     const qitemId = await mkClaimedRow();
     const seat = parkedSeat({ obligations: { items: [{ qitemId, state: "in-progress", summary: null }], held: [] } });
     const log = new WatchdogHistoryLog(db);
+    // A REAL registered job — watchdog_history rows are FK-bound to watchdog_jobs.
+    const jobsRepo = new WatchdogJobsRepository(db);
+    const job = jobsRepo.register({
+      policy: PARKED_OWNER_POLICY_NAME,
+      specYaml: `policy: ${PARKED_OWNER_POLICY_NAME}\ntarget:\n  session: ${makeRigAnchor(RIG)}\ninterval_seconds: 120\n`,
+      targetSession: makeRigAnchor(RIG),
+      intervalSeconds: 120,
+      activeWakeIntervalSeconds: null,
+      registeredBySession: "daemon@kernel",
+    });
     const deps: ParkedOwnerConsumerDeps = {
       diagnoseRig: () => ({ seats: [seat] }),
       history: { listForJob: (j, l) => log.listForJob(j, l), countForJob: (j) => log.countForJob(j) },
       rows: realRows(),
     };
-    const sent = await makeParkedOwnerConsumerPolicy(deps).evaluate(makeJob());
+    const sent = await makeParkedOwnerConsumerPolicy(deps).evaluate(makeJob({ jobId: job.jobId }));
     expect(sent.action).toBe("send");
     // The telemetry sent-row the OLD design depended on, aged 15 days…
     const old = new Date(Date.now() - 15 * 86_400_000).toISOString();
-    log.record({ jobId: "job-poc-1", evaluatedAt: old, outcome: "sent", evaluationNotes: { episodeKey: sent.notes?.["episodeKey"] } });
+    log.record({ jobId: job.jobId, evaluatedAt: old, outcome: "sent", evaluationNotes: { episodeKey: sent.notes?.["episodeKey"] } });
     // …buried under 60 newer telemetry rows, then ORDINARY retention runs.
-    for (let i = 0; i < 60; i++) log.record({ jobId: "job-poc-1", evaluatedAt: new Date().toISOString(), outcome: "skipped", skipReason: "episode-ended" });
+    for (let i = 0; i < 60; i++) log.record({ jobId: job.jobId, evaluatedAt: new Date().toISOString(), outcome: "skipped", skipReason: "episode-ended" });
     pruneWatchdogHistory(db, { nowIso: new Date().toISOString() });
-    const remaining = log.listForJob("job-poc-1", log.countForJob("job-poc-1"));
+    const remaining = log.listForJob(job.jobId, log.countForJob(job.jobId));
     expect(remaining.some((e) => e.evaluatedAt === old)).toBe(false); // telemetry receipt GONE
     // The row receipt survives (active-frontier invariant) and still dedups:
-    const again = await makeParkedOwnerConsumerPolicy(deps).evaluate(makeJob());
+    const again = await makeParkedOwnerConsumerPolicy(deps).evaluate(makeJob({ jobId: job.jobId }));
     expect(again.action).toBe("skip");
     expect(JSON.stringify(again.notes)).toMatch(/already[-_]woken/);
   });
@@ -366,6 +376,12 @@ describe("parked-owner-consumer — R2 integration hard checks (OPR.0.5.6.24)", 
   it("B2 hard check: a failed consumer wake enters the REAL S01 ladder via last_nudge_result — the ladder attempts the wake", async () => {
     const qitemId = await mkClaimedRow();
     repo.recordNudgeAttempt(qitemId, `${NUDGE_FAIL_PREFIX} — transport timeout after 5000ms`);
+    // Back-date the attempt past the retry interval so the ladder's due-gate opens
+    // (the real gate working as designed — a just-failed wake is honestly not due).
+    db.prepare("UPDATE queue_items SET last_nudge_attempt = ? WHERE qitem_id = ?").run(
+      new Date(Date.now() - 10 * 60_000).toISOString(),
+      qitemId,
+    );
     const mod = await import("../src/domain/queue-wake-ladder.js");
     const calls: Array<{ qitemId: string; target: string }> = [];
     await mod.runWakeLadderTick({

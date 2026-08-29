@@ -99,9 +99,16 @@ function idsHashOf(sortedIds: string[]): string {
   return createHash("sha256").update(sortedIds.join(",")).digest("hex").slice(0, 16);
 }
 
+/** The key sits immediately after the prefix, delimited by ';', ' (' or EOL —
+ *  anchored on the prefix so body words can never masquerade as the key. */
 function keyOfNote(note: string): string | null {
-  const m = note.match(/episode ([^;()]+?)(?:;|\s*\(|$)/);
-  return m ? m[1]!.trim() : null;
+  for (const prefix of [RESERVE_PREFIX, CLOSE_PREFIX, REFUSED_PREFIX, FAILED_PREFIX]) {
+    if (!note.startsWith(prefix)) continue;
+    const rest = note.slice(prefix.length).trim();
+    const m = rest.match(/^([^;()]+?)(?:;|\s*\(|$)/);
+    return m ? m[1]!.trim() : null;
+  }
+  return null;
 }
 
 interface RowEpisodeState {
@@ -178,9 +185,9 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
         if (alreadyRecorded) continue;
         const reason = String(n["deliveryReason"] ?? e.deliveryStatus);
         if (isRefusedInteractive(reason)) {
-          deps.rows.appendNote(primary, `${REFUSED_PREFIX} episode ${key}; ${reason}`);
+          deps.rows.appendNote(primary, `${REFUSED_PREFIX} ${key}; ${reason}`);
         } else {
-          deps.rows.appendNote(primary, `${FAILED_PREFIX} episode ${key}; ${reason}`);
+          deps.rows.appendNote(primary, `${FAILED_PREFIX} ${key}; ${reason}`);
           deps.rows.recordNudgeResult(primary, `${NUDGE_FAIL_PREFIX} — ${reason}`);
         }
       }
@@ -205,7 +212,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           // one close note per open key, never a write per clean scan).
           for (const qitemId of knownRows) {
             for (const key of openKeysOnRow(deps.rows.listTransitions(qitemId))) {
-              deps.rows.appendNote(qitemId, `${CLOSE_PREFIX} episode ${key} (seat resumed)`);
+              deps.rows.appendNote(qitemId, `${CLOSE_PREFIX} ${key} (seat resumed)`);
               if (!closures.includes(key)) closures.push(key);
             }
           }
@@ -256,7 +263,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
         const episodeKey = `${seat.sessionName}|${idsHash}#${ep.nextOrdinal}`;
         const reserved = deps.rows.appendNote(
           primaryRow,
-          `${RESERVE_PREFIX} episode ${episodeKey}; obligations ${namedIds.join(",")}`,
+          `${RESERVE_PREFIX} ${episodeKey}; obligations ${namedIds.join(",")}`,
         );
         if (!reserved.ok) {
           skipped.push({ seat: seat.sessionName, why: "obligation-closed-between-derive-and-wake" });
