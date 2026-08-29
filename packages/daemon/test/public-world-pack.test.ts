@@ -27,6 +27,44 @@ const STATIC_ROOT = resolve(DAEMON_ROOT, "context-packs-src");
 const PUBLIC_WORLD_ROOT = resolve(STATIC_ROOT, "world-public");
 const temporaryRoots: string[] = [];
 
+const EXPECTED_PUBLIC_CLAIM_IDS = [
+  "world-purpose",
+  "author-derive-rule",
+  "derive-identity",
+  "derive-topology",
+  "discover-context",
+  "discover-commands",
+  "trust-source-table",
+  "agents-complement",
+  "boundary-coverage",
+  "boundary-exclusions",
+  "boundary-guidance",
+  "private-ref-boundary",
+  "minimal-world-layout",
+  "authoring-convention",
+  "context-kinds",
+  "regions-are-tags",
+  "retrieve-public-pack",
+  "compose-fresh-profile",
+  "region-metadata",
+  "no-region-selector",
+  "derived-reading-cost",
+  "book-example-purpose",
+  "retrieve-world-example",
+  "book-exercise-guidance",
+  "book-to-software",
+  "software-shaped-bridge",
+  "optional-claim-checking-climb",
+  "derive-pack-path",
+  "run-public-verifier",
+  "world-example-purpose",
+  "world-example-install",
+  "world-example-authoring",
+  "world-example-book-exercise",
+  "world-example-regions",
+  "world-example-checks",
+] as const;
+
 function publicWorldDir(): string {
   readFileSync(join(PUBLIC_WORLD_ROOT, "manifest.yaml"));
   return PUBLIC_WORLD_ROOT;
@@ -220,7 +258,7 @@ describe("public world pack", () => {
     expect(profile.pieces).toHaveLength(manifest.atoms?.length ?? 0);
   });
 
-  it("keeps every marked authored claim checked or explicitly flagged", () => {
+  it("keeps the complete judgment-owned authored claim census checked or explicitly flagged", () => {
     const packDir = publicWorldDir();
     const claims = parseYaml(readFileSync(join(packDir, "claims.yaml"), "utf8")) as {
       claims: Array<{ id: string; statement: string; kind: string; check?: string; flagged?: string }>;
@@ -232,8 +270,9 @@ describe("public world pack", () => {
       .join("\n");
     const marked = [...prose.matchAll(/<!--\s*world-claim:\s*([a-z0-9-]+)\s*-->/g)].map((match) => match[1]!);
 
-    expect(marked.length).toBeGreaterThanOrEqual(8);
+    expect(marked).toEqual(EXPECTED_PUBLIC_CLAIM_IDS);
     expect(new Set(marked).size).toBe(marked.length);
+    expect(claims.claims.map((claim) => claim.id)).toEqual(EXPECTED_PUBLIC_CLAIM_IDS);
     expect(new Set(marked)).toEqual(new Set(byId.keys()));
     expect(new Set(claims.claims.filter((claim) => claim.kind === "operational").map((claim) => claim.id))).toEqual(new Set([
       "compose-fresh-profile",
@@ -259,6 +298,52 @@ describe("public world pack", () => {
       expect(prose, `${claim.id} ledger statement must appear verbatim in the public prose`).toContain(claim.statement);
       expect(Boolean(claim.check) !== Boolean(claim.flagged), `${claim.id} needs exactly one disposition`).toBe(true);
     }
+  });
+
+  it.each([
+    [
+      "trust-source relationship",
+      "start-here.md",
+      "| What exists right now? | The command that lists the live system |",
+      "| What exists right now? | Whichever source is convenient |",
+      /FAIL.*trust-source-table/i,
+    ],
+    [
+      "boundary coverage",
+      "boundaries.md",
+      "- the eight world regions as atom metadata;",
+      "- a convenient subset of world regions;",
+      /FAIL.*boundary-coverage/i,
+    ],
+    [
+      "authoring convention",
+      "build-your-world.md",
+      "The manifest names the files. The prose states durable purpose, relationships, and what to trust.",
+      "The manifest may name files. The prose can say whatever is convenient.",
+      /FAIL.*authoring-convention/i,
+    ],
+  ] as const)("fails when an authored %s claim materially drifts", (_label, file, before, after, failure) => {
+    const sourcePack = publicWorldDir();
+    const redRoot = mkdtempSync(join(tmpdir(), "public-world-claim-census-red-"));
+    temporaryRoots.push(redRoot);
+    const redPack = join(redRoot, basename(sourcePack));
+    cpSync(sourcePack, redPack, { recursive: true });
+    const filePath = join(redPack, file);
+    const source = readFileSync(filePath, "utf8");
+    expect(source).toContain(before);
+    writeFileSync(filePath, source.replace(before, after));
+
+    const rigPath = writeRigFixture();
+    const result = runVerifier(redPack, {
+      ...process.env,
+      PATH: `${rigPath}:${process.env.PATH ?? ""}`,
+      OPENRIG_CONTEXT_PACKS_ROOT: "/fixture/context-packs",
+      OPENRIG_SESSION_NAME: "qa@fixture",
+      RIGGED_SESSION_NAME: "",
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toMatch(failure);
   });
 
   it("passes on the shipped bytes, fails on a falsified claim, and skips loudly when rig is absent", () => {
