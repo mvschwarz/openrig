@@ -636,3 +636,34 @@ profiles:
     if (result.ok) expect(result.config.compactionStrategy).toBe("default-compaction");
   });
 });
+
+// ─── OPR.0.5.6.20 B-4 — omitted restore_policy must not participate either ─────
+// RED-FIRST over f35214f55 (R2 HOLD finding, same class as B-3 on the sibling
+// field): normalizeLifecycle materializes restorePolicy resume_if_possible into a
+// profile lifecycle block that omits restore_policy, and the narrowing resolver
+// rejects the synthesized value as an invented broadening — a user cannot select
+// the profile-level continuity mode without redundantly repeating an unrelated
+// restore policy. Pre-dates S20 but lies on the candidate's central product path.
+describe("restorePolicy precedence — non-specifying level does not participate (OPR.0.5.6.20 B-4)", () => {
+  it("profile specifying only compaction_strategy neither breaks nor broadens the spec restore policy (real ingress; both outputs proven together)", () => {
+    const raw = parseAgentSpec(`
+version: "0.2"
+name: b4-fixture
+defaults:
+  runtime: claude-code
+  lifecycle:
+    restore_policy: checkpoint_only
+profiles:
+  default:
+    lifecycle:
+      compaction_strategy: apprentice-handover
+`);
+    const spec = normalizeAgentSpec(raw);
+    const result = resolveNodeConfig(makeCtx({ baseSpec: makeResolved(spec) }));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.config.compactionStrategy).toBe("apprentice-handover");
+      expect(result.config.restorePolicy).toBe("checkpoint_only");
+    }
+  });
+});
