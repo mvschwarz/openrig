@@ -88,6 +88,14 @@ synthesis (wide, cross-cutting, temporal). This is the inbound half of the fidel
 law: outbound, the shaper deposits design so compression cannot eat it; inbound,
 senders frame as context so aperture cannot bypass synthesis.
 
+THE PROTOCOL IS BIDIRECTIONAL. Downward — orchestrator to builder — the same wire
+discipline applies in mirror: put the goal, the acceptance criteria, and the
+complete context ON THE TABLE, and leave the implementation steering to the
+receiver. An orchestrator that converts context into step-by-step orders bypasses
+the builder's synthesis exactly the way a narrow seat's imperative speech bypasses
+a wide seat's. Empowerment is delivered as context, never as instructions — in
+both directions.
+
 ## Aperture narrows by default — and that is the point
 
 Do not read the above as "assign every seat an aperture." Agents inevitably narrow:

@@ -19,9 +19,20 @@ proof, verify-by-effect, honest receipts); rounds happen per-wave.
 
 1. **PLAN:** wave entries in the plan of record; the planner shapes specs; the plan
    authority locks them. Every slice gets a real workspace or proof has no home.
-2. **DISPATCH:** batons fan out with EXCLUSIVE file territories. Territory overlap =
-   serialize. Territory conflict discovered mid-build = STOP AND RULE, never a silent
-   expansion.
+2. **DISPATCH:** batons fan out with EXCLUSIVE file territories. THE BRIEF IS THE
+   UNIT: every assignment carries the goal, the acceptance criteria, the complete
+   context routes (exact paths), the territory — and this standing grant: "Navigate
+   the implementation yourself: derive what you need, research, spawn readers,
+   decide your own build order. Ask when stuck; the orchestrator is here to help."
+   DEFAULT SCOPE IS THE WHOLE SPEC, built in one sustained run to ONE frozen
+   candidate. Handing out anything smaller requires naming the reason on the brief
+   itself (an unresolved decision, a live territory conflict, a genuine
+   fork-in-the-road risk) — an unexplained small chunk is a dispatch defect.
+   Territory overlap = serialize. Conflict discovered mid-build = STOP AND RULE.
+   Why: the builder holds the spec and the code; decisions about how to build
+   belong where the building context lives. Detailed sequencing instructions were
+   scaffolding when models were weak; today they are a cage, and per-command
+   routing is the failure mode, not diligence.
 3. **BUILD:** failing-test-first against a pristine base with committed final test
    bytes; freeze a single candidate revision; receipts cite the FINAL revision
    (re-earned after any rebase).
@@ -32,6 +43,10 @@ proof, verify-by-effect, honest receipts); rounds happen per-wave.
    base-scoped at the tip, writers excluded from reviewing their own work. The two
    gates ask DIFFERENT questions — does the structure hold, versus does each claim
    survive contact with source. That is the design, not redundancy.
+   Reviewers also review for DRIFT, not only defects: does the built thing still
+   match the acceptance criteria the brief stated — is this still the doghouse the
+   owner asked for, or did locally-defensible steps accrete toward a moon base?
+   Plot-loss is a first-class finding with the same standing as a logic defect.
 6. **FIX ROUNDS:** findings become forward-fix candidates (merges stand; merged is
    not running). One re-review pass per round re-earns both legs at the final
    revision. Narrow rechecks for narrow corrections.
