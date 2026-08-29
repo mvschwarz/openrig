@@ -36,10 +36,6 @@ const EXPECTED_PUBLIC_CLAIM_IDS = [
   "discover-commands",
   "trust-source-table",
   "agents-complement",
-  "boundary-coverage",
-  "boundary-exclusions",
-  "boundary-guidance",
-  "private-ref-boundary",
   "minimal-world-layout",
   "authoring-convention",
   "context-kinds",
@@ -57,6 +53,10 @@ const EXPECTED_PUBLIC_CLAIM_IDS = [
   "optional-claim-checking-climb",
   "derive-pack-path",
   "run-public-verifier",
+  "boundary-coverage",
+  "boundary-exclusions",
+  "boundary-guidance",
+  "private-ref-boundary",
   "world-example-purpose",
   "world-example-install",
   "world-example-authoring",
@@ -269,6 +269,9 @@ describe("public world pack", () => {
       .concat(readFileSync(join(STATIC_ROOT, "world-example", "your-world.md"), "utf8"))
       .join("\n");
     const marked = [...prose.matchAll(/<!--\s*world-claim:\s*([a-z0-9-]+)\s*-->/g)].map((match) => match[1]!);
+    const verifier = readFileSync(join(packDir, "verify-world.sh"), "utf8");
+    const passIds = new Set([...verifier.matchAll(/^\s*pass ([a-z0-9-]+) /gm)].map((match) => match[1]!));
+    const failIds = new Set([...verifier.matchAll(/^\s*fail ([a-z0-9-]+) /gm)].map((match) => match[1]!));
 
     expect(marked).toEqual(EXPECTED_PUBLIC_CLAIM_IDS);
     expect(new Set(marked).size).toBe(marked.length);
@@ -297,6 +300,10 @@ describe("public world pack", () => {
       expect(["judgment", "operational", "structural"], `${claim.id} needs a known claim kind`).toContain(claim.kind);
       expect(prose, `${claim.id} ledger statement must appear verbatim in the public prose`).toContain(claim.statement);
       expect(Boolean(claim.check) !== Boolean(claim.flagged), `${claim.id} needs exactly one disposition`).toBe(true);
+      if (claim.check) {
+        expect(passIds, `${claim.id} check must have a real pass branch`).toContain(claim.check);
+        expect(failIds, `${claim.id} check must have a real fail branch`).toContain(claim.check);
+      }
     }
   });
 

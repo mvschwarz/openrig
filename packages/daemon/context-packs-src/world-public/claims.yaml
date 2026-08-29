@@ -3,6 +3,10 @@ claims:
     statement: "A world states the durable operating reality an agent needs before it can act well."
     kind: judgment
     flagged: "Authored purpose and taste; no live scan can prove it."
+  - id: author-derive-rule
+    statement: "Supply the authored relationships no inventory can discover, point at commands for facts that change, and do not memorize a roster, path, count, status, or command list when the live system can answer."
+    kind: structural
+    check: author-derive-rule
   - id: derive-identity
     statement: "Use rig whoami --json to derive the identity of the seat you actually occupy."
     kind: operational
@@ -19,20 +23,28 @@ claims:
     statement: "Use rig --help before inventing a command or wrapper."
     kind: operational
     check: rig-command-surface
+  - id: trust-source-table
+    statement: "Each trust question below names its authoritative source, and a disagreement between authored intent and live state must be investigated rather than silently resolved for convenience."
+    kind: structural
+    check: trust-source-table
   - id: agents-complement
     statement: "If a repository uses AGENTS.md, keep repo instructions there; a world complements those instructions."
     kind: structural
     check: agents-md-complement
+  - id: minimal-world-layout
+    statement: "Start with a directory whose name says what world it serves:"
+    kind: judgment
+    flagged: "Authored starting-point guidance; no live scan can prove it is the best first shape."
+  - id: authoring-convention
+    statement: "The manifest names the files. The prose states durable purpose, relationships, and what to trust. Add atoms when the same bytes need situation, runtime, order, or region metadata. Add a claim ledger and verifier when authored statements can drift into consequential lies. Do not add ceremony that has no reader yet."
+    kind: structural
+    check: authoring-convention
   - id: context-kinds
     statement: "WORLD + LORE + SKILLS + MISSION is the top-level separation of context kinds."
     kind: structural
     check: taxonomy-layout
   - id: regions-are-tags
     statement: "The eight regions are metadata on atoms, not a required folder tree."
-    kind: structural
-    check: atom-regions
-  - id: region-metadata
-    statement: "The regions field says which dimensions an atom covers; atoms carry it as manifest metadata, and consumers may filter that metadata as data."
     kind: structural
     check: atom-regions
   - id: retrieve-public-pack
@@ -43,18 +55,30 @@ claims:
     statement: "Use `rig context profile world-public --situation fresh` to compose its fresh-session atom graph."
     kind: operational
     check: compose-fresh-profile
+  - id: region-metadata
+    statement: "The regions field says which dimensions an atom covers; atoms carry it as manifest metadata, and consumers may filter that metadata as data."
+    kind: structural
+    check: atom-regions
+  - id: no-region-selector
+    statement: "This pack promises no region selector or subset-composition operation."
+    kind: structural
+    check: no-region-selector
   - id: derived-reading-cost
     statement: "The reading cost is derived when a profile is composed, not copied into this pack."
     kind: structural
     check: derived-reading-cost
-  - id: retrieve-world-example
-    statement: "Use `rig context get world-example` to retrieve the worked book-world template."
-    kind: operational
-    check: retrieve-world-example
   - id: book-example-purpose
     statement: "The exercise uses a book because the model's existing world-building fluency needs the least translation there, and a reader with no software context is the hardest stranger case."
     kind: judgment
     flagged: "Authored purpose and taste; no live scan can prove it."
+  - id: retrieve-world-example
+    statement: "Use `rig context get world-example` to retrieve the worked book-world template."
+    kind: operational
+    check: retrieve-world-example
+  - id: book-exercise-guidance
+    statement: "Use the example to describe who the writer is, what manuscripts and sources exist, where they live, which editorial rules apply, what decisions shaped the draft, how current state is derived, and what the agent can do next; keep it pleasant to read, and simplify it if the arrangement feels like a filing system rather than a place."
+    kind: judgment
+    flagged: "Authored exercise and taste guidance; no live scan can prove it."
   - id: book-to-software
     statement: "The book exercise maps its manuscript to a codebase, editorial rules to engineering laws and conventions, draft state to derived build and deploy state, and its writer to the team. Software worlds use the same moves."
     kind: judgment
@@ -63,6 +87,10 @@ claims:
     statement: "Agents already know software-shaped building through specifications, verification loops, tooling, and the programming substrate. A world pack built this way uses named files and a manifest as the spec shape, per-claim checks and a verifier that can fail as the test suite, and derive-at-source commands as the feedback loop. A blank-slate reader therefore already knows how to build this kind of artifact: world-building supplies the information architecture while software-shaping supplies buildability."
     kind: judgment
     flagged: "Authored analogy and purpose; no live scan can prove it."
+  - id: optional-claim-checking-climb
+    statement: "The full public pack demonstrates the optional claim-checking climb."
+    kind: structural
+    check: authoring-convention
   - id: derive-pack-path
     statement: "Use rig context show world-public --json to derive the installed pack directory."
     kind: operational
@@ -71,14 +99,22 @@ claims:
     statement: "Run `sh verify-world.sh` in that derived directory instead of teaching a machine-specific path."
     kind: operational
     check: run-public-verifier
+  - id: boundary-coverage
+    statement: "This public pack covers only the shared world structure and discovery surfaces listed below."
+    kind: structural
+    check: boundary-coverage
+  - id: boundary-exclusions
+    statement: "This public pack does not supply rig-specific reality, current work, local lore, repository instructions, or irreversible judgment."
+    kind: structural
+    check: boundary-exclusions
+  - id: boundary-guidance
+    statement: "These gaps are not omissions to fill with plausible prose: read the local world, mission, lore, repository instructions, and live command surfaces, then ask the decision owner when no source can answer."
+    kind: judgment
+    flagged: "Authored boundary guidance; no live scan can decide when a gap requires owner judgment."
   - id: private-ref-boundary
     statement: "Private world installs remain rig-local under their own refs and are never shadowed by this builtin."
     kind: structural
     check: private-ref-boundary
-  - id: no-region-selector
-    statement: "This pack promises no region selector or subset-composition operation."
-    kind: structural
-    check: no-region-selector
   - id: world-example-purpose
     statement: "A world pack situates an agent: it describes where the agent is, what exists there, and how to act."
     kind: judgment
@@ -87,7 +123,19 @@ claims:
     statement: "Use `rig context add <pack-directory>` to install a world pack, confirm its ref with `rig context list`, and derive the configured store with `rig config get context.packs_root` only when a path is needed."
     kind: operational
     check: world-example-install
+  - id: world-example-authoring
+    statement: "Copy this pack, update its manifest, and replace each prompt below with your world's facts."
+    kind: structural
+    check: world-example-consistency
+  - id: world-example-book-exercise
+    statement: "Run `rig context get world-example`, copy this pack, and make the project a book world by describing the writer, manuscript, sources, editorial rules, decisions, current draft state, and next useful actions in a few coherent files."
+    kind: structural
+    check: world-example-consistency
   - id: world-example-regions
     statement: "The region names below are atom metadata, not a required directory layout."
+    kind: structural
+    check: world-example-consistency
+  - id: world-example-checks
+    statement: "For every checkable authored claim, add a named check that can fail; flag taste or genuinely unverifiable claims instead of dressing judgment up as a test; and derive paths, counts, inventories, and live state from commands rather than copying current answers into this file."
     kind: structural
     check: world-example-consistency

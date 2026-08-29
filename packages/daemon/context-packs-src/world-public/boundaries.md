@@ -2,6 +2,9 @@
 
 ## This pack covers
 
+<!-- world-claim: boundary-coverage -->
+This public pack covers only the shared world structure and discovery surfaces listed below.
+
 - the stable separation between world, lore, skills, and mission context;
 - the eight world regions as atom metadata;
 - the author-versus-derive rule;
@@ -10,14 +13,17 @@
 
 ## This pack does not cover
 
+<!-- world-claim: boundary-exclusions -->
+This public pack does not supply rig-specific reality, current work, local lore, repository instructions, or irreversible judgment.
+
 - the purpose, actors, topology, paths, or current state of a particular rig;
 - the mission you currently own;
 - local lore earned by a seat or team;
 - harness-specific repository instructions;
 - irreversible product or operator judgment.
 
-Those gaps are not omissions to fill with plausible prose. Read the local world, mission, lore,
-repository instructions, and live command surfaces. Ask the decision owner when no source can answer.
+<!-- world-claim: boundary-guidance -->
+These gaps are not omissions to fill with plausible prose: read the local world, mission, lore, repository instructions, and live command surfaces, then ask the decision owner when no source can answer.
 
 ## Namespace edge
 

@@ -2,6 +2,7 @@
 
 ## Keep the first version small
 
+<!-- world-claim: minimal-world-layout -->
 Start with a directory whose name says what world it serves:
 
 ```text
@@ -11,10 +12,8 @@ book-world/
   boundaries.md
 ```
 
-The manifest names the files. The prose states durable purpose, relationships, and what to trust.
-Add atoms when the same bytes need situation, runtime, order, or region metadata. Add a claim ledger
-and verifier when authored statements can drift into consequential lies. Do not add ceremony that
-has no reader yet.
+<!-- world-claim: authoring-convention -->
+The manifest names the files. The prose states durable purpose, relationships, and what to trust. Add atoms when the same bytes need situation, runtime, order, or region metadata. Add a claim ledger and verifier when authored statements can drift into consequential lies. Do not add ceremony that has no reader yet.
 
 ## Separate kinds, tag regions
 
@@ -67,10 +66,8 @@ The exercise uses a book because the model's existing world-building fluency nee
 <!-- world-claim: retrieve-world-example -->
 Use `rig context get world-example` to retrieve the worked book-world template.
 
-Use it to describe a book-writing project: who the writer is, what manuscripts and sources exist,
-where they live, which editorial rules apply, what decisions shaped the draft, how current state is
-derived, and what the agent can do next. Keep it pleasant to read. If the arrangement feels like a
-filing system rather than a place, simplify it.
+<!-- world-claim: book-exercise-guidance -->
+Use the example to describe who the writer is, what manuscripts and sources exist, where they live, which editorial rules apply, what decisions shaped the draft, how current state is derived, and what the agent can do next; keep it pleasant to read, and simplify it if the arrangement feels like a filing system rather than a place.
 
 <!-- world-claim: book-to-software -->
 The book exercise maps its manuscript to a codebase, editorial rules to engineering laws and conventions, draft state to derived build and deploy state, and its writer to the team. Software worlds use the same moves.
@@ -78,6 +75,7 @@ The book exercise maps its manuscript to a codebase, editorial rules to engineer
 <!-- world-claim: software-shaped-bridge -->
 Agents already know software-shaped building through specifications, verification loops, tooling, and the programming substrate. A world pack built this way uses named files and a manifest as the spec shape, per-claim checks and a verifier that can fail as the test suite, and derive-at-source commands as the feedback loop. A blank-slate reader therefore already knows how to build this kind of artifact: world-building supplies the information architecture while software-shaping supplies buildability.
 
+<!-- world-claim: optional-claim-checking-climb -->
 The full public pack demonstrates the optional claim-checking climb.
 
 <!-- world-claim: derive-pack-path -->

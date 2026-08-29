@@ -49,6 +49,9 @@ regions_ok=1
 for region in identity ontology terrain actors laws history state affordances; do
   grep -Eq "regions:.*(^|[^a-z])$region([^a-z]|$)" "$root/manifest.yaml" || regions_ok=0
 done
+grep -Fq 'The eight regions are metadata on atoms, not a required folder tree.' "$root/build-your-world.md" || regions_ok=0
+grep -Fq 'Tag existing authored files with identity, ontology, terrain, actors, laws, history, state, and' "$root/build-your-world.md" || regions_ok=0
+grep -Fq 'affordances. One coherent file may cover several regions; do not fork the same idea into eight' "$root/build-your-world.md" || regions_ok=0
 if [ "$regions_ok" -eq 1 ]; then
   pass atom-regions 'atom metadata covers all eight regions'
 else
@@ -57,12 +60,47 @@ fi
 
 prose=$(cat "$root/start-here.md" "$root/build-your-world.md" "$root/boundaries.md" "$example/your-world.md")
 claim_ids=$(sed -n 's/^[[:space:]]*- id:[[:space:]]*//p' "$root/claims.yaml")
+expected_claim_ids='world-purpose
+author-derive-rule
+derive-identity
+derive-topology
+discover-context
+discover-commands
+trust-source-table
+agents-complement
+minimal-world-layout
+authoring-convention
+context-kinds
+regions-are-tags
+retrieve-public-pack
+compose-fresh-profile
+region-metadata
+no-region-selector
+derived-reading-cost
+book-example-purpose
+retrieve-world-example
+book-exercise-guidance
+book-to-software
+software-shaped-bridge
+optional-claim-checking-climb
+derive-pack-path
+run-public-verifier
+boundary-coverage
+boundary-exclusions
+boundary-guidance
+private-ref-boundary
+world-example-purpose
+world-example-install
+world-example-authoring
+world-example-book-exercise
+world-example-regions
+world-example-checks'
 claim_count=$(printf '%s\n' "$claim_ids" | sed '/^$/d' | wc -l | tr -d ' ')
 marker_count=$(printf '%s\n' "$prose" | grep -Ec '<!--[[:space:]]*world-claim:[[:space:]]*[a-z0-9-]+[[:space:]]*-->')
 disposition_count=$(grep -Ec '^[[:space:]]+(check|flagged):' "$root/claims.yaml")
 kind_count=$(grep -Ec '^[[:space:]]+kind:[[:space:]]+(judgment|operational|structural)[[:space:]]*$' "$root/claims.yaml")
 claims_ok=1
-[ "$claim_count" -ge 8 ] || claims_ok=0
+[ "$claim_ids" = "$expected_claim_ids" ] || claims_ok=0
 [ "$claim_count" -eq "$marker_count" ] || claims_ok=0
 [ "$claim_count" -eq "$disposition_count" ] || claims_ok=0
 [ "$claim_count" -eq "$kind_count" ] || claims_ok=0
@@ -72,6 +110,11 @@ for id in $claim_ids; do
   seen="$seen$id "
   printf '%s\n' "$prose" | grep -Fq "<!-- world-claim: $id -->" || claims_ok=0
 done
+known_checks=' author-derive-rule derive-identity derive-topology rig-command-surface trust-source-table agents-md-complement authoring-convention taxonomy-layout atom-regions retrieve-public-pack compose-fresh-profile no-region-selector derived-reading-cost retrieve-world-example derive-pack-path run-public-verifier boundary-coverage boundary-exclusions private-ref-boundary world-example-install world-example-consistency '
+check_ids=$(sed -n 's/^[[:space:]]*check:[[:space:]]*//p' "$root/claims.yaml")
+for check_id in $check_ids; do
+  case "$known_checks" in *" $check_id "*) ;; *) claims_ok=0 ;; esac
+done
 statements=$(sed -n 's/^[[:space:]]*statement: "\(.*\)"$/\1/p' "$root/claims.yaml")
 while IFS= read -r statement; do
   [ -z "$statement" ] || printf '%s\n' "$prose" | grep -Fq "$statement" || claims_ok=0
@@ -79,9 +122,67 @@ done <<EOF
 $statements
 EOF
 if [ "$claims_ok" -eq 1 ]; then
-  pass claim-coverage 'every ledger claim is marked, stated, and dispositioned once'
+  pass claim-coverage 'the pinned authored-claim inventory is marked, stated, and dispositioned once'
 else
-  fail claim-coverage 'claim ids, markers, statements, or dispositions drifted'
+  fail claim-coverage 'the pinned claim inventory, markers, statements, checks, or dispositions drifted'
+fi
+
+if grep -Fq 'Supply the authored relationships no inventory can discover, point at commands for facts that change, and do not memorize a roster, path, count, status, or command list when the live system can answer.' "$root/start-here.md"; then
+  pass author-derive-rule 'authored relationships stay written while volatile facts point to live commands'
+else
+  fail author-derive-rule 'the author-versus-derive rule drifted'
+fi
+
+trust_ok=1
+grep -Fq 'Each trust question below names its authoritative source, and a disagreement between authored intent and live state must be investigated rather than silently resolved for convenience.' "$root/start-here.md" || trust_ok=0
+grep -Fq '| What is this environment for? | Its authored world and governing intent |' "$root/start-here.md" || trust_ok=0
+grep -Fq '| What exists right now? | The command that lists the live system |' "$root/start-here.md" || trust_ok=0
+grep -Fq '| What am I doing now? | The current mission and owned work |' "$root/start-here.md" || trust_ok=0
+grep -Fq '| How do I perform a repeatable task? | The applicable skill or command help |' "$root/start-here.md" || trust_ok=0
+grep -Fq '| Why does a local exception exist? | Local lore and its cited evidence |' "$root/start-here.md" || trust_ok=0
+if [ "$trust_ok" -eq 1 ]; then
+  pass trust-source-table 'every authored trust relation and the disagreement rule remain present'
+else
+  fail trust-source-table 'an authored trust relation or the disagreement rule drifted'
+fi
+
+boundary_coverage_ok=1
+grep -Fq 'This public pack covers only the shared world structure and discovery surfaces listed below.' "$root/boundaries.md" || boundary_coverage_ok=0
+grep -Fq -- '- the stable separation between world, lore, skills, and mission context;' "$root/boundaries.md" || boundary_coverage_ok=0
+grep -Fq -- '- the eight world regions as atom metadata;' "$root/boundaries.md" || boundary_coverage_ok=0
+grep -Fq -- '- the author-versus-derive rule;' "$root/boundaries.md" || boundary_coverage_ok=0
+grep -Fq -- '- a small convention for authoring and checking a world;' "$root/boundaries.md" || boundary_coverage_ok=0
+grep -Fq -- '- the live commands needed to discover identity, topology, packs, and command help.' "$root/boundaries.md" || boundary_coverage_ok=0
+if [ "$boundary_coverage_ok" -eq 1 ]; then
+  pass boundary-coverage 'the complete public coverage boundary remains present'
+else
+  fail boundary-coverage 'the public coverage boundary drifted'
+fi
+
+boundary_exclusions_ok=1
+grep -Fq 'This public pack does not supply rig-specific reality, current work, local lore, repository instructions, or irreversible judgment.' "$root/boundaries.md" || boundary_exclusions_ok=0
+grep -Fq -- '- the purpose, actors, topology, paths, or current state of a particular rig;' "$root/boundaries.md" || boundary_exclusions_ok=0
+grep -Fq -- '- the mission you currently own;' "$root/boundaries.md" || boundary_exclusions_ok=0
+grep -Fq -- '- local lore earned by a seat or team;' "$root/boundaries.md" || boundary_exclusions_ok=0
+grep -Fq -- '- harness-specific repository instructions;' "$root/boundaries.md" || boundary_exclusions_ok=0
+grep -Fq -- '- irreversible product or operator judgment.' "$root/boundaries.md" || boundary_exclusions_ok=0
+if [ "$boundary_exclusions_ok" -eq 1 ]; then
+  pass boundary-exclusions 'the complete public exclusion boundary remains present'
+else
+  fail boundary-exclusions 'the public exclusion boundary drifted'
+fi
+
+authoring_ok=1
+grep -Fq 'book-world/' "$root/build-your-world.md" || authoring_ok=0
+grep -Fq '  manifest.yaml' "$root/build-your-world.md" || authoring_ok=0
+grep -Fq '  world.md' "$root/build-your-world.md" || authoring_ok=0
+grep -Fq '  boundaries.md' "$root/build-your-world.md" || authoring_ok=0
+grep -Fq 'The manifest names the files. The prose states durable purpose, relationships, and what to trust. Add atoms when the same bytes need situation, runtime, order, or region metadata. Add a claim ledger and verifier when authored statements can drift into consequential lies. Do not add ceremony that has no reader yet.' "$root/build-your-world.md" || authoring_ok=0
+grep -Fq 'The full public pack demonstrates the optional claim-checking climb.' "$root/build-your-world.md" || authoring_ok=0
+if [ "$authoring_ok" -eq 1 ]; then
+  pass authoring-convention 'the minimal file, atom, claim, verifier, and optional-climb convention remains present'
+else
+  fail authoring-convention 'the public authoring convention drifted'
 fi
 
 if rig --help >/dev/null 2>&1 &&
@@ -164,6 +265,10 @@ namespace_ok=1
 [ "$list_status" -eq 0 ] || namespace_ok=0
 printf '%s\n' "$list_output" | grep -Eq '"relativePath"[[:space:]]*:[[:space:]]*"world-public"' || namespace_ok=0
 printf '%s\n' "$pack_output" | grep -Eq '"sourceType"[[:space:]]*:[[:space:]]*"builtin"' || namespace_ok=0
+grep -Fq 'Private world installs remain rig-local under their own refs and are never shadowed by this builtin.' "$root/boundaries.md" || namespace_ok=0
+grep -Fq 'This pack is `world-public`.' "$root/boundaries.md" || namespace_ok=0
+grep -Fq 'A local world may use a different ref and carry instance-specific' "$root/boundaries.md" || namespace_ok=0
+grep -Fq 'substance without inheriting or being replaced by these public bytes.' "$root/boundaries.md" || namespace_ok=0
 if printf '%s\n' "$list_output" | grep -Eq '"relativePath"[[:space:]]*:[[:space:]]*"world/install"'; then
   private_output=$(rig context show world/install --json 2>/dev/null)
   private_status=$?
@@ -279,13 +384,19 @@ else
   fail taught-commands 'one or more deriving commands are not taught'
 fi
 
-if grep -Fq 'WORLD + LORE + SKILLS + MISSION' "$root/build-your-world.md"; then
+if grep -Fq 'WORLD + LORE + SKILLS + MISSION' "$root/build-your-world.md" &&
+   grep -Fq -- '- WORLD: where the agent is — entities, relationships, rules, history, state sources, affordances.' "$root/build-your-world.md" &&
+   grep -Fq -- '- LORE: what a position learned by living there.' "$root/build-your-world.md" &&
+   grep -Fq -- '- SKILLS: repeatable procedural capability.' "$root/build-your-world.md" &&
+   grep -Fq -- '- MISSION: the current work and why it matters.' "$root/build-your-world.md"; then
   pass taxonomy-layout 'the authoring convention separates the four context kinds'
 else
   fail taxonomy-layout 'the four-kind separation is absent'
 fi
 
-if [ "$profile_ok" -eq 1 ] && [ -n "$profile_tokens" ] && [ "$profile_tokens" -gt 0 ]; then
+if [ "$profile_ok" -eq 1 ] && [ -n "$profile_tokens" ] && [ "$profile_tokens" -gt 0 ] &&
+   grep -Fq "Use the composed profile's reported token total to decide what a future consumer should request; do not cut sentences until" "$root/build-your-world.md" &&
+   grep -Fq 'their meaning breaks.' "$root/build-your-world.md"; then
   pass derived-reading-cost "the live composer reported a positive reading cost ($profile_tokens tokens)"
 else
   fail derived-reading-cost 'the live composer did not report a positive reading cost'
@@ -293,13 +404,19 @@ fi
 
 profile_help=$(rig context profile --help 2>/dev/null)
 profile_help_status=$?
-if [ "$profile_help_status" -eq 0 ] && ! printf '%s\n' "$profile_help" | grep -Eq -- '--region([[:space:]=]|$)'; then
+if [ "$profile_help_status" -eq 0 ] &&
+   ! printf '%s\n' "$profile_help" | grep -Eq -- '--region([[:space:]=]|$)' &&
+   grep -Fq 'If a real consumer needs region-subset composition, route that' "$root/build-your-world.md" &&
+   grep -Fq 'capability as separate profile-composer work.' "$root/build-your-world.md"; then
   pass no-region-selector 'the live profile surface has no region selector'
 else
   fail no-region-selector 'the stated no-selector boundary disagrees with the live profile surface'
 fi
 
-if grep -Fq 'If a repository uses AGENTS.md, keep repo instructions there; a world complements those instructions.' "$root/start-here.md"; then
+if grep -Fq 'If a repository uses AGENTS.md, keep repo instructions there; a world complements those instructions.' "$root/start-here.md" &&
+   grep -Fq 'Repository instructions explain how to work in that tree. A world explains the larger operating' "$root/start-here.md" &&
+   grep -Fq 'reality: the entities, relationships, rules, history, state sources, and affordances surrounding it.' "$root/start-here.md" &&
+   grep -Fq 'Neither replaces the other.' "$root/start-here.md"; then
   pass agents-md-complement 'the world complements repository instructions'
 else
   fail agents-md-complement 'the repository-instruction boundary is absent'
@@ -314,7 +431,18 @@ if [ "$example_regions_ok" -eq 1 ] &&
    grep -Fq 'rig context get world-example' "$example/your-world.md" &&
    grep -Fq 'rig context add <pack-directory>' "$example/your-world.md" &&
    grep -Fq 'rig context list' "$example/your-world.md" &&
-   grep -Fq 'rig config get context.packs_root' "$example/your-world.md"; then
+   grep -Fq 'rig config get context.packs_root' "$example/your-world.md" &&
+   grep -Fq "Copy this pack, update its manifest, and replace each prompt below with your world's facts." "$example/your-world.md" &&
+   grep -Fq 'Run `rig context get world-example`, copy this pack, and make the project a book world by describing the writer, manuscript, sources, editorial rules, decisions, current draft state, and next useful actions in a few coherent files.' "$example/your-world.md" &&
+   grep -Fq "Name the world and the agent's place in it." "$example/your-world.md" &&
+   grep -Fq 'Define the important kinds of things and what each is for.' "$example/your-world.md" &&
+   grep -Fq 'Name who else is present, what they own, and how to reach them.' "$example/your-world.md" &&
+   grep -Fq 'Map where code, records, documentation, and operational surfaces live.' "$example/your-world.md" &&
+   grep -Fq 'State the durable rules and precedence that govern action here.' "$example/your-world.md" &&
+   grep -Fq "Record prior decisions and events that explain the world's current shape." "$example/your-world.md" &&
+   grep -Fq 'Point to commands or sources that derive what is true right now.' "$example/your-world.md" &&
+   grep -Fq 'List what the agent can do and the trigger for reaching each capability.' "$example/your-world.md" &&
+   grep -Fq 'For every checkable authored claim, add a named check that can fail; flag taste or genuinely unverifiable claims instead of dressing judgment up as a test; and derive paths, counts, inventories, and live state from commands rather than copying current answers into this file.' "$example/your-world.md"; then
   pass world-example-consistency 'the worked exercise uses the same atom convention'
 else
   fail world-example-consistency 'the worked exercise is absent or ungraduated'

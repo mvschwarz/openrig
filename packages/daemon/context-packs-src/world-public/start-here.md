@@ -4,9 +4,9 @@
 
 <!-- world-claim: world-purpose -->
 A world states the durable operating reality an agent needs before it can act well.
-It should supply the authored relationships no inventory can discover, then point at commands for
-facts that change. Do not memorize a roster, path, count, status, or command list when the live
-system can answer.
+
+<!-- world-claim: author-derive-rule -->
+Supply the authored relationships no inventory can discover, point at commands for facts that change, and do not memorize a roster, path, count, status, or command list when the live system can answer.
 
 Derive the volatile edges first:
 
@@ -31,6 +31,9 @@ Use rig --help before inventing a command or wrapper.
 
 ## What to trust
 
+<!-- world-claim: trust-source-table -->
+Each trust question below names its authoritative source, and a disagreement between authored intent and live state must be investigated rather than silently resolved for convenience.
+
 | Question | Source |
 |---|---|
 | What is this environment for? | Its authored world and governing intent |
@@ -38,9 +41,6 @@ Use rig --help before inventing a command or wrapper.
 | What am I doing now? | The current mission and owned work |
 | How do I perform a repeatable task? | The applicable skill or command help |
 | Why does a local exception exist? | Local lore and its cited evidence |
-
-A disagreement between authored intent and live state is a finding to investigate, not a reason to
-silently choose whichever answer is more convenient.
 
 ## Relation to repository instructions
 
