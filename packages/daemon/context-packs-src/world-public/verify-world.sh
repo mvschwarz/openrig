@@ -45,6 +45,16 @@ else
   fail declared-files 'a shipped file is missing or undeclared'
 fi
 
+manifest_comments_ok=1
+for manifest in "$root/manifest.yaml" "$example/manifest.yaml"; do
+  grep -Eq '^[[:space:]]*#' "$manifest" && manifest_comments_ok=0
+done
+if [ "$manifest_comments_ok" -eq 1 ]; then
+  pass manifest-authored-comments 'both shipped manifests contain no uncensused authored prose comments'
+else
+  fail manifest-authored-comments 'a shipped manifest contains an uncensused authored prose comment'
+fi
+
 regions_ok=1
 for region in identity ontology terrain actors laws history state affordances; do
   grep -Eq "regions:.*(^|[^a-z])$region([^a-z]|$)" "$root/manifest.yaml" || regions_ok=0
