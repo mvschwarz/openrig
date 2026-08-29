@@ -163,7 +163,9 @@ describe("S22 OpenRig skill router coverage", () => {
     expect(teaching).not.toBeNull();
     const taught = readFileSync(join(teaching!.sourcePath, "SKILL.md"), "utf8");
     expect(taught).toContain("rig gateway human list --json");
-    expect(taught).toContain("rig queue block <qitem-id> --on <registered-human-address>");
+    expect(taught).toContain("Use `humans[].entityId` to derive the durable blocker as `<entityId>@kernel`");
+    expect(taught).toContain("The returned `humans[].address` is the gateway delivery address, not the `--on` value");
+    expect(taught).toContain("rig queue block <qitem-id> --on <entityId>@kernel");
     expect(taught).toMatch(/gateway.*Slack.*same row/is);
     expect(taught).toMatch(/any seat.*escalat/is);
     expect(taught).toMatch(/rig send.*agent.*terminal.*not.*Slack/is);
@@ -180,11 +182,13 @@ describe("S22 OpenRig skill router coverage", () => {
         body: "a founder decision is required",
         nudge: false,
       });
+      const registeredHuman = registry.entities[0]!;
+      const taughtBlocker = `${registeredHuman.entityId}@kernel`;
       repo.update({
         qitemId: row.qitemId,
         actorSession: "dev-qa@v-openrig-build",
         state: "blocked",
-        blockedOn: "human-founder@kernel",
+        blockedOn: taughtBlocker,
         summary: "Choose the release boundary",
         evidenceRef: "/proof/SPEC.md",
         transitionNote: "parked with exact continuation",
