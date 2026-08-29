@@ -112,8 +112,11 @@ export function viewsRoutes(): Hono {
     const viewName = c.req.param("viewName");
     const rig = c.req.query("rig") || undefined;
     const limit = c.req.query("limit") ? Number.parseInt(c.req.query("limit")!, 10) : undefined;
+    // S27 — the execution view scopes by mission (release-scoped default derived
+    // in the module; --mission widens/narrows).
+    const mission = c.req.query("mission") || undefined;
     try {
-      const result = getProjector(c).show(viewName, { rig, limit });
+      const result = getProjector(c).show(viewName, { rig, limit, mission });
       return c.json(result);
     } catch (err) {
       return errorResponse(c, err);

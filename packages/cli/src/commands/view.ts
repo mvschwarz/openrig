@@ -62,12 +62,14 @@ export function viewCommand(depsOverride?: ViewDeps): Command {
     )
     .option("--rig <rig>", "Filter by rig name (matches destination_session OR source_session @<rig>)")
     .option("--limit <n>", "Result row limit", "100")
+    .option("--mission <id>", "Mission scope for the execution view (defaults to the newest release-* mission)")
     .option("--json", "JSON output for agents")
-    .action(async (viewName: string, opts: { rig?: string; limit: string; json?: boolean }) => {
+    .action(async (viewName: string, opts: { rig?: string; limit: string; mission?: string; json?: boolean }) => {
       const deps = getDeps();
       const params = new URLSearchParams();
       if (opts.rig) params.set("rig", opts.rig);
       if (opts.limit) params.set("limit", opts.limit);
+      if (opts.mission) params.set("mission", opts.mission);
       const query = params.toString();
       await withClient(deps, async (client) => {
         const path = `/api/views/${encodeURIComponent(viewName)}${query ? `?${query}` : ""}`;

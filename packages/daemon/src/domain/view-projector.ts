@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import { derivePickup } from "./queue-pickup.js";
 import { ulid } from "ulid";
 import type { EventBus } from "./event-bus.js";
+import { buildExecutionView, type ExecutionViewDeps } from "./execution-view.js";
 
 /**
  * View projector (PL-004 Phase B; L5 View — read-only projections).
@@ -31,6 +32,9 @@ export const BUILT_IN_VIEW_NAMES = [
   "activity",
   // S04 (OPR.0.5.5.4) — the pickup lens: claimed rows with the DERIVED receipt.
   "pickup",
+  // S27 (OPR.0.5.6.27) — the execution view: one derived JSON document
+  // answering the six execution questions; needs setExecutionDeps wiring.
+  "execution",
 ] as const;
 
 export type BuiltInViewName = (typeof BUILT_IN_VIEW_NAMES)[number];
@@ -100,12 +104,32 @@ export class ViewProjector {
     this.now = opts?.now ?? (() => new Date());
   }
 
+  // S27 — execution-view wiring (startup calls this once the slices root
+  // resolves; tests inject fixture roots and a pinned clock).
+  private executionDeps: ExecutionViewDeps | null = null;
+  setExecutionDeps(deps: ExecutionViewDeps): void {
+    this.executionDeps = deps;
+  }
+
   /**
    * Run a view by name. Built-in names (BUILT_IN_VIEW_NAMES) dispatch to
    * hardcoded SQL; other names dispatch to custom-view lookup.
    */
-  show(viewName: string, opts?: { rig?: string; limit?: number }): ViewQueryResult {
+  show(viewName: string, opts?: { rig?: string; limit?: number; mission?: string }): ViewQueryResult {
     const limit = Math.max(1, Math.min(opts?.limit ?? 100, 1000));
+    // S27 — the execution view is document-shaped (rows = [one JSON document])
+    // and derives from fs/git/build-info legs beyond this class's SQL, so it
+    // dispatches to its own module through the wired deps.
+    if (viewName === "execution") {
+      if (!this.executionDeps) {
+        throw new ViewProjectorError(
+          "view_query_failed",
+          "execution view deps are not wired on this daemon (setExecutionDeps was never called)",
+        );
+      }
+      const doc = buildExecutionView(this.executionDeps, { mission: opts?.mission, rig: opts?.rig });
+      return { viewName: "execution", generatedAt: this.now().toISOString(), rows: [doc], rowCount: 1 };
+    }
     if ((BUILT_IN_VIEW_NAMES as readonly string[]).includes(viewName)) {
       return this.runBuiltIn(viewName as BuiltInViewName, opts?.rig, limit);
     }
@@ -269,6 +293,10 @@ export class ViewProjector {
         params = [...rigParams, limit];
         break;
       }
+      default:
+        // "execution" is intercepted in show() before this dispatch; reaching
+        // here means a name was added to BUILT_IN_VIEW_NAMES without a case.
+        throw new ViewProjectorError("view_query_failed", `built-in view '${name}' has no SQL dispatch case`);
     }
 
     const rows = this.db.prepare(sql).all(...params) as Record<string, unknown>[];

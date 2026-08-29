@@ -1,0 +1,654 @@
+// S27 (OPR.0.5.6.27) — the execution view: one JSON document answering the six
+// execution questions (who-where, sequencing, care-dial, done-ness-by-rung, park
+// honesty, parallelism health), EVERY field derived at read time.
+//
+// The laws this module obeys (design contract, DESIGN-execution-view-data-contract):
+// - DERIVED, NEVER AUTHORED: no field is copied from a label a human wrote about
+//   state; volatile facts come from the DB, slice frontmatter, git, statfs, and
+//   the daemon's own build stamp — at read time, per call. No cache, no scheduler.
+// - INDETERMINATE FLOOR: an unreachable or unconfigured source renders the string
+//   "INDETERMINATE" (with a named basis), never idle/dead/done/false.
+// - THE LADDER IS THE SCHEMA: done-ness is five named rungs
+//   (locked/built/reviewed/folded/adopted); a single "done" boolean does not exist.
+// - PROJECTION, NOT AUTHORITY: every cell carries the row/artifact/command that
+//   makes it one command from source.
+//
+// Data conventions consumed (landed with this slice):
+// - EC-1: slice frontmatter `depends_on:` + `SOFT-AFTER: [ids] — reason` line in
+//   the Territory section (exact regex below — a designated machine line, not
+//   prose scraping).
+// - EC-2: the latest queue row tagged `format:wave-map-v1` carries a fenced
+//   ```json block with {waves:[{id,slices,serialized_order?,review_model?}]}.
+//   Dial: frontmatter `approved-spec-dial`.
+// - EC-3: dispatch batons carry a body line `worktree_path=<path>`; rows without
+//   it join by naming only and are marked fragile_join.
+
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { execFileSync } from "node:child_process";
+import type Database from "better-sqlite3";
+import { parseFrontmatter } from "./slices/slice-indexer.js";
+import { derivePickup } from "./queue-pickup.js";
+import { resolveLegacyTopologyRigsRoot } from "./user-settings/settings-store.js";
+import { BUILD_INFO, type BuildInfo } from "../build-info.js";
+
+export const INDETERMINATE = "INDETERMINATE" as const;
+export type Indeterminate = typeof INDETERMINATE;
+
+export interface ExecutionViewDeps {
+  db: Database.Database;
+  /** The missions root (workspace.slices_root). Null => fs-derived sections floor
+   *  to INDETERMINATE; the queue-derived sections still answer. */
+  slicesRoot: () => string | null;
+  now?: () => Date;
+  buildInfo?: BuildInfo;
+  /** Injectable for tests. Same signature subset as node's execFileSync. */
+  exec?: (cmd: string, args: string[]) => string;
+  /** Injectable rigs root for review-artifact scanning (tests). */
+  rigsRoot?: () => string;
+}
+
+interface QueueRowLite {
+  qitem_id: string;
+  source_session: string;
+  destination_session: string;
+  state: string;
+  tags: string | null;
+  body: string | null;
+  claimed_at: string | null;
+  last_heartbeat: string | null;
+  blocked_on: string | null;
+  ts_created: string;
+  ts_updated: string;
+  post_claim_motion?: number;
+}
+
+function defaultExec(cmd: string, args: string[]): string {
+  return execFileSync(cmd, args, { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "pipe"] }).trim();
+}
+
+function parseTags(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.map(String) : [];
+  } catch {
+    return raw.split(",").map((s) => s.trim()).filter(Boolean);
+  }
+}
+
+/** EC-3 — the designated machine line, exact. */
+const WORKTREE_LINE = /^worktree_path=(\S+)$/m;
+/** EC-1 — the designated soft-edge machine line, exact. */
+const SOFT_AFTER_LINE = /^SOFT-AFTER:\s*\[([^\]]*)\]/m;
+/** EC-2 — the fenced JSON block in a wave-map row body. */
+const WAVE_MAP_BLOCK = /```json\s*\n([\s\S]*?)\n```/;
+
+/** Frontmatter values arrive as raw strings from parseFrontmatter; EC-1 writes
+ *  inline JSON arrays (`depends_on: ["OPR..."]`), so parse that shape here. */
+function parseArrayField(v: unknown): string[] | Indeterminate {
+  if (Array.isArray(v)) return v.map(String);
+  if (typeof v === "string" && v.trim().startsWith("[")) {
+    try {
+      const parsed = JSON.parse(v.trim());
+      return Array.isArray(parsed) ? parsed.map(String) : INDETERMINATE;
+    } catch {
+      return INDETERMINATE;
+    }
+  }
+  return INDETERMINATE;
+}
+
+const SLICE_TAG = /^slice:(.+)$/;
+const CANDIDATE_TAG = /^candidate:(.+)$/;
+
+/** Numeric-aware compare of release-mission dir names (release-0.5.10 > release-0.5.6). */
+function compareReleaseDirs(a: string, b: string): number {
+  const nums = (s: string) => (s.match(/\d+/g) ?? []).map(Number);
+  const na = nums(a);
+  const nb = nums(b);
+  for (let i = 0; i < Math.max(na.length, nb.length); i++) {
+    const d = (na[i] ?? -1) - (nb[i] ?? -1);
+    if (d !== 0) return d;
+  }
+  return a.localeCompare(b);
+}
+
+interface SliceFacts {
+  dir: string;
+  specPath: string;
+  id: string | Indeterminate;
+  frontmatter: Record<string, unknown>;
+  body: string;
+}
+
+function readMissionSlices(missionsRoot: string, mission: string): SliceFacts[] {
+  const slicesDir = path.join(missionsRoot, mission, "slices");
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(slicesDir);
+  } catch {
+    return [];
+  }
+  const out: SliceFacts[] = [];
+  for (const dir of entries.sort()) {
+    const specPath = path.join(slicesDir, dir, "SPEC.md");
+    let raw: string;
+    try {
+      raw = fs.readFileSync(specPath, "utf8");
+    } catch {
+      continue;
+    }
+    const fm = parseFrontmatter(raw);
+    out.push({
+      dir,
+      specPath,
+      id: typeof fm["id"] === "string" ? (fm["id"] as string) : INDETERMINATE,
+      frontmatter: fm,
+      body: raw.replace(/^---\n[\s\S]*?\n---\n?/, ""),
+    });
+  }
+  return out;
+}
+
+/** Locate the slice facts for a dep id, resolving out-of-mission deps to their
+ *  own release dir by id prefix (OPR.0.5.5.x -> release-0.5.5). */
+function resolveDep(
+  depId: string,
+  current: SliceFacts[],
+  missionsRoot: string | null,
+  cache: Map<string, SliceFacts | null>,
+): SliceFacts | null {
+  const inMission = current.find((s) => s.id === depId);
+  if (inMission) return inMission;
+  if (cache.has(depId)) return cache.get(depId) ?? null;
+  let found: SliceFacts | null = null;
+  const m = depId.match(/^OPR\.(\d+\.\d+\.\d+)\.\d+$/);
+  if (m && missionsRoot) {
+    const releaseDir = `release-${m[1]}`;
+    for (const s of readMissionSlices(missionsRoot, releaseDir)) {
+      if (s.id === depId) {
+        found = s;
+        break;
+      }
+    }
+  }
+  cache.set(depId, found);
+  return found;
+}
+
+interface WaveMapData {
+  rowId: string | Indeterminate;
+  waves: { id: string; slices: string[]; serialized_order?: string[]; review_model?: string }[];
+}
+
+function readWaveMap(db: Database.Database, mission: string): WaveMapData {
+  const row = db
+    .prepare(
+      `SELECT qitem_id, body FROM queue_items
+        WHERE tags LIKE '%format:wave-map-v1%' AND tags LIKE ?
+        ORDER BY ts_created DESC LIMIT 1`,
+    )
+    .get(`%mission:${mission}%`) as { qitem_id: string; body: string | null } | undefined;
+  if (!row?.body) return { rowId: INDETERMINATE, waves: [] };
+  const block = row.body.match(WAVE_MAP_BLOCK);
+  if (!block) return { rowId: INDETERMINATE, waves: [] };
+  try {
+    const parsed = JSON.parse(block[1] ?? "");
+    if (parsed?.format !== "wave-map-v1" || !Array.isArray(parsed.waves)) {
+      return { rowId: INDETERMINATE, waves: [] };
+    }
+    return { rowId: row.qitem_id, waves: parsed.waves };
+  } catch {
+    return { rowId: INDETERMINATE, waves: [] };
+  }
+}
+
+interface ReviewArtifactFact {
+  path: string;
+  verdict: string;
+  candidateSha: string | null;
+  artifactType: string | null;
+}
+
+/** Scan rigs/<rig>/state/review… dirs for review artifacts naming this slice.
+ *  Root resolution follows the shipped shared-docs precedent. */
+function scanReviewArtifacts(rigsRoot: string, sliceDirOrId: string[]): ReviewArtifactFact[] | Indeterminate {
+  let rigs: string[];
+  try {
+    rigs = fs.readdirSync(rigsRoot);
+  } catch {
+    return INDETERMINATE;
+  }
+  const out: ReviewArtifactFact[] = [];
+  for (const rig of rigs) {
+    const stateDir = path.join(rigsRoot, rig, "state");
+    let stateEntries: string[];
+    try {
+      stateEntries = fs.readdirSync(stateDir);
+    } catch {
+      continue;
+    }
+    for (const entry of stateEntries.filter((e) => e.startsWith("review"))) {
+      const dir = path.join(stateDir, entry);
+      let files: string[];
+      try {
+        files = fs.readdirSync(dir).filter((f) => f.endsWith(".md"));
+      } catch {
+        continue;
+      }
+      for (const f of files) {
+        let raw: string;
+        try {
+          raw = fs.readFileSync(path.join(dir, f), "utf8");
+        } catch {
+          continue;
+        }
+        const fm = parseFrontmatter(raw);
+        const sliceVal = typeof fm["slice"] === "string" ? (fm["slice"] as string) : null;
+        if (!sliceVal || !sliceDirOrId.includes(sliceVal)) continue;
+        out.push({
+          path: path.join(dir, f),
+          verdict: typeof fm["verdict"] === "string" ? (fm["verdict"] as string) : INDETERMINATE,
+          candidateSha: typeof fm["candidate_sha"] === "string" ? (fm["candidate_sha"] as string) : null,
+          artifactType: typeof fm["artifact_type"] === "string" ? (fm["artifact_type"] as string) : null,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+type Rung =
+  | { value: boolean; basis: string }
+  | { value: Indeterminate; basis: string };
+
+function gitAncestor(exec: ExecutionViewDeps["exec"], repoCtx: string, sha: string, ref: string): Rung {
+  const run = exec ?? defaultExec;
+  try {
+    run("git", ["-C", repoCtx, "merge-base", "--is-ancestor", sha, ref]);
+    return { value: true, basis: `git -C ${repoCtx} merge-base --is-ancestor ${sha} ${ref} (exit 0)` };
+  } catch (err) {
+    const status = (err as { status?: number }).status;
+    if (status === 1) {
+      return { value: false, basis: `git -C ${repoCtx} merge-base --is-ancestor ${sha} ${ref} (exit 1)` };
+    }
+    return { value: INDETERMINATE, basis: `merge-base failed in ${repoCtx}: ${(err as Error).message?.slice(0, 120)}` };
+  }
+}
+
+export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: string; rig?: string }): Record<string, unknown> {
+  const now = deps.now ?? (() => new Date());
+  const exec = deps.exec ?? defaultExec;
+  const buildInfo = deps.buildInfo ?? BUILD_INFO;
+  const derivedAt = now().toISOString();
+  const asof = () => now().toISOString();
+
+  const missionsRoot = deps.slicesRoot();
+
+  // Default mission: newest release-* dir under the missions root, derived.
+  let mission: string | Indeterminate = opts?.mission ?? INDETERMINATE;
+  if (mission === INDETERMINATE && missionsRoot) {
+    try {
+      const releases = fs.readdirSync(missionsRoot).filter((d) => /^release-\d/.test(d));
+      const newest = releases.sort(compareReleaseDirs)[releases.length - 1];
+      if (newest) mission = newest;
+    } catch {
+      /* stays INDETERMINATE */
+    }
+  }
+
+  const slices = missionsRoot && mission !== INDETERMINATE ? readMissionSlices(missionsRoot, mission) : [];
+  const sliceIds = slices.map((s) => s.id).filter((x): x is string => x !== INDETERMINATE);
+  const depCache = new Map<string, SliceFacts | null>();
+
+  // ---- queue rows bound to this mission (tag or body mention, per the binding law) ----
+  const missionLike = mission === INDETERMINATE ? "%" : `%${mission}%`;
+  const rows = deps.db
+    .prepare(
+      `SELECT qitem_id, source_session, destination_session, state, tags, body, claimed_at,
+              last_heartbeat, blocked_on, ts_created, ts_updated,
+              (SELECT COUNT(*) FROM queue_transitions t
+                 WHERE t.qitem_id = queue_items.qitem_id
+                   AND t.ts > queue_items.claimed_at
+                   AND t.transition_note IS NOT 'claimed') AS post_claim_motion
+         FROM queue_items
+        WHERE (tags LIKE ? OR body LIKE ?)`,
+    )
+    .all(missionLike, missionLike) as QueueRowLite[];
+
+  const sliceOfRow = (r: QueueRowLite): string | null => {
+    for (const t of parseTags(r.tags)) {
+      const m = t.match(SLICE_TAG);
+      if (m?.[1]) return m[1];
+    }
+    return null;
+  };
+
+  // ---- Q1: who is on what, where ----
+  const lanes: Record<string, unknown>[] = [];
+  // Repo context for the ladder's git legs: the first REACHABLE worktree_path
+  // carried by ANY row bound to this mission (worktrees share the repo's refs).
+  // In-progress lanes are preferred by trying them first below; this fallback
+  // scan means one historical EC-3 row is enough to make folded derivable.
+  let repoCtx: string | null = null;
+  for (const r of rows) {
+    const m = r.body?.match(WORKTREE_LINE);
+    if (!m?.[1]) continue;
+    try {
+      exec("git", ["-C", m[1], "rev-parse", "--git-dir"]);
+      repoCtx = m[1];
+      break;
+    } catch {
+      /* unreachable candidate — keep scanning */
+    }
+  }
+  for (const r of rows.filter((r) => r.state === "in-progress")) {
+    const slice = sliceOfRow(r);
+    if (!slice) continue;
+    const wtMatch = r.body?.match(WORKTREE_LINE);
+    let worktreePath: string | Indeterminate = INDETERMINATE;
+    let branch: string | Indeterminate = INDETERMINATE;
+    let headSha: string | Indeterminate = INDETERMINATE;
+    let fragileJoin = false;
+    let joinBasis: string;
+    if (wtMatch?.[1]) {
+      worktreePath = wtMatch[1];
+      joinBasis = "EC-3 worktree_path field on the row body";
+      try {
+        branch = exec("git", ["-C", worktreePath, "rev-parse", "--abbrev-ref", "HEAD"]);
+        headSha = exec("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
+        if (!repoCtx) repoCtx = worktreePath;
+      } catch {
+        branch = INDETERMINATE;
+        headSha = INDETERMINATE;
+        joinBasis += " (path unreachable at read time)";
+      }
+    } else {
+      fragileJoin = true;
+      joinBasis = "row/branch naming only (EC-3 field absent — legacy baton)";
+    }
+    const session = deps.db
+      .prepare(`SELECT status, last_seen_at FROM sessions WHERE session_name = ? ORDER BY last_seen_at DESC LIMIT 1`)
+      .get(r.destination_session) as { status: string; last_seen_at: string | null } | undefined;
+    const pickup = derivePickup({
+      state: r.state,
+      claimedAt: r.claimed_at,
+      lastHeartbeat: r.last_heartbeat,
+      postClaimMotionCount: Number(r.post_claim_motion ?? 0),
+      now: now(),
+    });
+    lanes.push({
+      qitem_id: r.qitem_id,
+      slice,
+      seat: r.destination_session,
+      worktree_path: worktreePath,
+      branch,
+      head_sha: headSha,
+      fragile_join: fragileJoin,
+      join_basis: joinBasis,
+      activity: session
+        ? { session_status: session.status, last_seen_at: session.last_seen_at, source: "sessions.last_seen_at — liveness is not health" }
+        : { session_status: INDETERMINATE, last_seen_at: INDETERMINATE, source: "no sessions row for this seat" },
+      pickup,
+      source: { qitem_id: r.qitem_id },
+    });
+  }
+
+  // ---- wave map (EC-2) ----
+  const waveMap = mission === INDETERMINATE ? { rowId: INDETERMINATE as Indeterminate, waves: [] } : readWaveMap(deps.db, mission);
+  const waveOfSlice = (id: string): { wave: string; rank: number; review_model?: string } | null => {
+    for (let wi = 0; wi < waveMap.waves.length; wi++) {
+      const w = waveMap.waves[wi];
+      if (!w) continue;
+      const order = w.serialized_order ?? w.slices;
+      const si = order.indexOf(id);
+      if (si >= 0 || w.slices.includes(id)) {
+        return { wave: w.id, rank: wi * 100 + (si >= 0 ? si : 50), review_model: w.review_model };
+      }
+    }
+    return null;
+  };
+
+  // ---- Q4 ladder (also feeds Q2's deps-folded) ----
+  const rigsRoot = (deps.rigsRoot ?? resolveLegacyTopologyRigsRoot)();
+  const ladderOf = (facts: SliceFacts): Record<string, unknown> => {
+    const fm = facts.frontmatter;
+    const locked: Rung = typeof fm["approved-spec-at"] === "string"
+      ? { value: true, basis: `frontmatter approved-spec-at=${fm["approved-spec-at"]}` }
+      : { value: false, basis: "no approved-spec-at in frontmatter" };
+    // built: latest candidate:<sha> tag on a row bound to this slice.
+    const candRows = rows
+      .filter((r) => sliceOfRow(r) === facts.id || sliceOfRow(r) === facts.dir)
+      .sort((a, b) => (a.ts_created < b.ts_created ? 1 : -1));
+    let candidateSha: string | null = null;
+    let candidateRow: string | null = null;
+    for (const r of candRows) {
+      for (const t of parseTags(r.tags)) {
+        const m = t.match(CANDIDATE_TAG);
+        if (m?.[1]) {
+          candidateSha = m[1];
+          candidateRow = r.qitem_id;
+          break;
+        }
+      }
+      if (candidateSha) break;
+    }
+    const built = candidateSha
+      ? { candidate_sha: candidateSha, basis: `candidate:* tag on row ${candidateRow}` }
+      : { candidate_sha: INDETERMINATE, basis: "no candidate:* tag on any row bound to this slice (unbuilt and unrecorded are indistinguishable here)" };
+    // reviewed: registry artifacts naming this slice.
+    const artifacts = scanReviewArtifacts(rigsRoot, [facts.dir, ...(typeof facts.id === "string" ? [facts.id] : [])]);
+    const reviewed =
+      artifacts === INDETERMINATE
+        ? { value: INDETERMINATE, basis: `review-artifact root unreadable (${rigsRoot})`, legs: [] }
+        : artifacts.length === 0
+          ? { value: INDETERMINATE, basis: "no review artifact names this slice on the registry surface checked", legs: [] }
+          : {
+              value: artifacts.every((a) => ["CLEAR", "PASS"].includes(a.verdict)),
+              basis: `frontmatter verdicts at ${artifacts.length} artifact(s)`,
+              legs: artifacts.map((a) => ({ path: a.path, verdict: a.verdict, candidate_sha: a.candidateSha, artifact_type: a.artifactType })),
+            };
+    // folded / adopted need a repo context — any reachable EC-3 worktree shares refs.
+    let folded: Rung;
+    let adopted: Rung;
+    if (!candidateSha) {
+      folded = { value: INDETERMINATE, basis: "no candidate sha to test" };
+      adopted = { value: INDETERMINATE, basis: "no candidate sha to test" };
+    } else if (!repoCtx) {
+      folded = { value: INDETERMINATE, basis: "no reachable repo context (no EC-3 worktree on the board)" };
+      adopted = { value: INDETERMINATE, basis: "no reachable repo context (no EC-3 worktree on the board)" };
+    } else {
+      folded = gitAncestor(exec, repoCtx, candidateSha, "main");
+      adopted = buildInfo.commit
+        ? gitAncestor(exec, repoCtx, candidateSha, buildInfo.commit)
+        : { value: INDETERMINATE, basis: "daemon build stamp absent (dev run) — adopted rung underivable" };
+    }
+    return { slice_id: facts.id, dir: facts.dir, locked, built, reviewed, folded, adopted };
+  };
+
+  const ladderCache = new Map<string, Record<string, unknown>>();
+  const ladderFor = (facts: SliceFacts): Record<string, unknown> => {
+    const key = facts.specPath;
+    if (!ladderCache.has(key)) ladderCache.set(key, ladderOf(facts));
+    return ladderCache.get(key)!;
+  };
+
+  const q4 = slices.map((s) => ladderFor(s));
+
+  // ---- Q2 sequencing ----
+  const q2 = slices.map((s) => {
+    const fm = s.frontmatter;
+    const dependsOn = parseArrayField(fm["depends_on"]);
+    const softMatch = s.body.match(SOFT_AFTER_LINE);
+    const softAfter = softMatch?.[1] ? softMatch[1].split(",").map((x) => x.trim()).filter(Boolean) : [];
+    const blockedRows = rows
+      .filter((r) => (sliceOfRow(r) === s.id || sliceOfRow(r) === s.dir) && r.blocked_on)
+      .map((r) => ({ qitem_id: r.qitem_id, blocked_on: r.blocked_on }));
+    const claimedLane = lanes.some((l) => l.slice === s.id || l.slice === s.dir);
+    let nextUp: boolean | Indeterminate;
+    let nextUpBasis: string;
+    if (dependsOn === INDETERMINATE) {
+      nextUp = INDETERMINATE;
+      nextUpBasis = "depends_on absent from frontmatter (EC-1 not applied here)";
+    } else if (blockedRows.length > 0) {
+      nextUp = false;
+      nextUpBasis = `blocked rows present (${blockedRows.map((b) => b.qitem_id).join(", ")})`;
+    } else if (claimedLane) {
+      nextUp = false;
+      nextUpBasis = "already claimed in-progress";
+    } else if ((ladderFor(s)["folded"] as Rung).value === true) {
+      nextUp = false;
+      nextUpBasis = "own candidate already folded to main — nothing left to dispatch";
+    } else {
+      nextUp = true;
+      nextUpBasis = "unblocked, unclaimed";
+      for (const dep of dependsOn) {
+        const depFacts = resolveDep(dep, slices, missionsRoot, depCache);
+        if (!depFacts) {
+          nextUp = INDETERMINATE;
+          nextUpBasis = `dep ${dep} unresolvable on this missions root`;
+          break;
+        }
+        const depLadder = ladderFor(depFacts);
+        const foldedRung = depLadder["folded"] as Rung;
+        if (foldedRung.value === INDETERMINATE) {
+          nextUp = INDETERMINATE;
+          nextUpBasis = `dep ${dep} folded-rung INDETERMINATE (${foldedRung.basis})`;
+          break;
+        }
+        if (foldedRung.value === false) {
+          nextUp = false;
+          nextUpBasis = `dep ${dep} not folded`;
+          break;
+        }
+      }
+    }
+    const wave = typeof s.id === "string" ? waveOfSlice(s.id) : null;
+    return {
+      slice_id: s.id,
+      dir: s.dir,
+      depends_on: dependsOn,
+      soft_after: softAfter,
+      blocked_on_rows: blockedRows,
+      next_up: nextUp,
+      next_up_basis: nextUpBasis,
+      next_up_rank: nextUp === true && wave ? wave.rank : null,
+      source: { spec_path: s.specPath, wave_map_row: waveMap.rowId },
+    };
+  });
+
+  // ---- Q3 care dial ----
+  const q3 = slices.map((s) => {
+    const wave = typeof s.id === "string" ? waveOfSlice(s.id) : null;
+    const dial = typeof s.frontmatter["approved-spec-dial"] === "string"
+      ? (s.frontmatter["approved-spec-dial"] as string)
+      : INDETERMINATE;
+    return {
+      slice_id: s.id,
+      build_wave: wave?.wave ?? INDETERMINATE,
+      review_model: wave?.review_model ?? INDETERMINATE,
+      planning_dial: dial,
+      source: {
+        wave_map_row: waveMap.rowId,
+        dial: dial === INDETERMINATE ? "no approved-spec-dial frontmatter field" : `frontmatter approved-spec-dial at ${s.specPath}`,
+      },
+    };
+  });
+
+  // ---- Q5 park honesty ----
+  const q5 = rows
+    .filter((r) => r.state === "blocked" || (r.claimed_at && ["in-progress", "pending"].includes(r.state)))
+    .map((r) => {
+      const pickup = derivePickup({
+        state: r.state,
+        claimedAt: r.claimed_at,
+        lastHeartbeat: r.last_heartbeat,
+        postClaimMotionCount: Number(r.post_claim_motion ?? 0),
+        now: now(),
+      });
+      const wake = deps.db
+        .prepare(`SELECT wake_ref, phase FROM queue_transition_wakes WHERE qitem_id = ? AND phase = 'armed' LIMIT 1`)
+        .get(r.qitem_id) as { wake_ref: string; phase: string } | undefined;
+      let parkKind: string;
+      if (pickup.state === "parked") {
+        parkKind = wake ? "deliberate-with-wake" : INDETERMINATE;
+      } else if (pickup.state === "stalled-after-claim") {
+        parkKind = "stalled";
+      } else {
+        parkKind = pickup.state;
+      }
+      const ageMinutes = r.claimed_at ? Math.floor((now().getTime() - Date.parse(r.claimed_at)) / 60_000) : null;
+      return {
+        qitem_id: r.qitem_id,
+        pickup_state: pickup.state,
+        ...(pickup.evidence ? { pickup_evidence: pickup.evidence } : {}),
+        park_kind: parkKind,
+        park_kind_basis: wake
+          ? `armed wake ${wake.wake_ref} on queue_transition_wakes`
+          : "no armed wake row (deliberate-park-without-wake vs strand is underivable here — rig parked owns wake diagnosis)",
+        wake_target: wake?.wake_ref ?? null,
+        age_minutes: ageMinutes,
+        source: { qitem_id: r.qitem_id },
+      };
+    });
+
+  // ---- Q6 parallelism health ----
+  const inProgressSeats = new Set(rows.filter((r) => r.state === "in-progress").map((r) => r.destination_session));
+  let idleSeats: number | Indeterminate = INDETERMINATE;
+  let idleBasis = "sessions table unreadable";
+  try {
+    const running = deps.db
+      .prepare(`SELECT session_name FROM sessions WHERE status = 'running'`)
+      .all() as { session_name: string }[];
+    idleSeats = running.filter((s) => !inProgressSeats.has(s.session_name)).length;
+    idleBasis = "sessions.status='running' minus seats holding in-progress rows — liveness is not health";
+  } catch {
+    /* stays INDETERMINATE */
+  }
+  const heavyRow = rows.find((r) => r.state === "in-progress" && parseTags(r.tags).includes("heavy-slot"));
+  let dfMargin: Record<string, unknown> = { available_kib: INDETERMINATE, basis: "no readable path for statfs" };
+  const dfPath = repoCtx ?? missionsRoot;
+  if (dfPath) {
+    try {
+      const st = fs.statfsSync(dfPath);
+      dfMargin = {
+        available_kib: Math.floor((st.bavail * st.bsize) / 1024),
+        path: dfPath,
+        basis: "fs.statfsSync at read time",
+      };
+    } catch {
+      dfMargin = { available_kib: INDETERMINATE, path: dfPath, basis: "statfs failed" };
+    }
+  }
+  const q6 = {
+    lanes_live: lanes.length,
+    lanes_possible: q2.filter((s) => s.next_up === true).length,
+    idle_seats_with_capacity: { value: idleSeats, basis: idleBasis },
+    heavy_slot_holder: heavyRow
+      ? { value: heavyRow.qitem_id, basis: "in-progress row tagged heavy-slot" }
+      : { value: null, basis: "no in-progress row tagged heavy-slot — absence of the tag, not proof of an idle lane" },
+    df_margin: dfMargin,
+  };
+
+  return {
+    view: "execution",
+    mission,
+    derived_at: derivedAt,
+    sources: {
+      queue_db: { asof: asof(), basis: "queue_items/queue_transitions/queue_transition_wakes/sessions at read time" },
+      slice_frontmatter: { root: missionsRoot ?? INDETERMINATE, asof: asof() },
+      wave_map: { row: waveMap.rowId, asof: asof() },
+      git: { basis: repoCtx ? `per-lane git -C; repo context ${repoCtx}` : "no reachable repo context", asof: asof() },
+      build_info: { commit: buildInfo.commit ?? INDETERMINATE, asof: asof() },
+      review_artifacts: { root: rigsRoot, asof: asof() },
+      disk: { asof: asof() },
+    },
+    q1_lanes: lanes,
+    q2_sequencing: q2,
+    q3_care: q3,
+    q4_ladder: q4,
+    q5_park: q5,
+    q6_parallelism: q6,
+  };
+}

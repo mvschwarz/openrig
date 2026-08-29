@@ -1480,6 +1480,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           nodePath.join(resolvedWorkspaceRoot, "slices"),
         ].filter((root) => root !== slicesRoot)
       : [];
+    // S27 (OPR.0.5.6.27) — wire the execution view once the slices root is
+    // resolved; the thunk re-reads nothing (path resolution stays startup's).
+    viewProjectorInstance.setExecutionDeps({
+      db,
+      slicesRoot: () => slicesRoot || null,
+    });
     const { SliceIndexer } = await import("./domain/slices/slice-indexer.js");
     const { SliceDetailProjector } = await import("./domain/slices/slice-detail-projector.js");
     const sliceIndexer = new SliceIndexer({
