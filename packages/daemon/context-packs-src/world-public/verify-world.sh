@@ -87,7 +87,8 @@ if rig --help >/dev/null 2>&1 &&
    rig context show --help >/dev/null 2>&1 &&
    rig context get --help >/dev/null 2>&1 &&
    rig context profile --help >/dev/null 2>&1 &&
-   rig context add --help >/dev/null 2>&1; then
+   rig context add --help >/dev/null 2>&1 &&
+   rig context rm --help >/dev/null 2>&1; then
   pass rig-command-surface 'every taught rig command exists on the live CLI'
 else
   fail rig-command-surface 'a taught rig command is absent from the live CLI'
@@ -137,10 +138,55 @@ if [ -n "${OPENRIG_CONTEXT_PACKS_ROOT:-}" ] && [ "$configured_packs_root" != "$O
 fi
 rig context add --help >/dev/null 2>&1 || example_install_ok=0
 rig context list --help >/dev/null 2>&1 || example_install_ok=0
-if [ "$example_install_ok" -eq 1 ]; then
-  pass world-example-install 'context add/list use the typed context store projection'
+
+probe_ref="world-public-verify-$$"
+probe_target="$configured_packs_root/$probe_ref"
+probe_installed=0
+cleanup_probe() {
+  [ "$probe_installed" -eq 1 ] || return 0
+  if rig context rm "$probe_ref" --json >/dev/null 2>&1; then
+    probe_installed=0
+    return 0
+  fi
+  return 1
+}
+
+if [ "$example_install_ok" -ne 1 ]; then
+  :
+elif [ -d "$probe_target" ] || printf '%s\n' "$list_output" | grep -Eq "\"relativePath\"[[:space:]]*:[[:space:]]*\"$probe_ref\""; then
+  example_install_ok=0
 else
-  fail world-example-install 'the typed context store or taught add/list surface is false'
+  trap 'cleanup_probe >/dev/null 2>&1 || :' 0
+  trap 'cleanup_probe >/dev/null 2>&1 || :; exit 130' 1 2 15
+
+  probe_add_output=$(rig context add "$example" --name "$probe_ref" --json 2>/dev/null)
+  probe_add_status=$?
+  probe_installed_at=$(printf '%s\n' "$probe_add_output" | sed -n 's/.*"installedAt"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')
+  [ "$probe_add_status" -eq 0 ] || example_install_ok=0
+  [ "$probe_installed_at" = "$probe_target" ] || example_install_ok=0
+
+  probe_list_output=$(rig context list --json 2>/dev/null)
+  probe_list_status=$?
+  if [ -d "$probe_target" ] || printf '%s\n' "$probe_list_output" | grep -Eq "\"relativePath\"[[:space:]]*:[[:space:]]*\"$probe_ref\""; then
+    probe_installed=1
+  fi
+  [ "$probe_list_status" -eq 0 ] || example_install_ok=0
+  printf '%s\n' "$probe_list_output" | grep -Eq "\"relativePath\"[[:space:]]*:[[:space:]]*\"$probe_ref\"" || example_install_ok=0
+
+  if [ "$probe_installed" -eq 1 ]; then
+    cleanup_probe || example_install_ok=0
+  fi
+  probe_cleanup_output=$(rig context list --json 2>/dev/null)
+  probe_cleanup_status=$?
+  [ "$probe_cleanup_status" -eq 0 ] || example_install_ok=0
+  if [ -d "$probe_target" ] || printf '%s\n' "$probe_cleanup_output" | grep -Eq "\"relativePath\"[[:space:]]*:[[:space:]]*\"$probe_ref\""; then
+    example_install_ok=0
+  fi
+fi
+if [ "$example_install_ok" -eq 1 ]; then
+  pass world-example-install 'context add installs the example, list exposes its ref, and cleanup removes it'
+else
+  fail world-example-install 'the typed context store or taught add/list effect is false'
 fi
 
 expected_session=${OPENRIG_SESSION_NAME:-${RIGGED_SESSION_NAME:-}}
