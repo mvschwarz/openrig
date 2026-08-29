@@ -80,16 +80,19 @@ export type ActiveSnapshotSessionResolution =
 // map is never collapsed by truthiness into the legacy ladder.
 export function resolveActiveSnapshotSession(data: SnapshotData, nodeId: string): ActiveSnapshotSessionResolution {
   const rows = data.sessions.filter((s) => s.nodeId === nodeId);
-  if (rows.length === 0) return { kind: "none" };
   const map = data.activeSessionIdByNode;
   if (map === undefined) {
-    // Pre-convention snapshot: legacy inference — a single row, else the
-    // uniquely-running row, else ambiguity.
+    // Pre-convention snapshot: this is the ONLY branch where zero rows means
+    // "never ran" (none) and legacy inference may run — a single row, else
+    // the uniquely-running row, else ambiguity.
+    if (rows.length === 0) return { kind: "none" };
     if (rows.length === 1) return { kind: "resolved", session: rows[0]! };
     const running = rows.filter((s) => s.status === "running");
     if (running.length === 1) return { kind: "resolved", session: running[0]! };
     return { kind: "ambiguous", candidateIds: rows.map((r) => r.id), detail: "no explicit active relation (pre-convention snapshot) and no uniquely-running row" };
   }
+  // Map PRESENT: it is the authority even with zero session rows — a null,
+  // missing-key, or dangling relation state is loud regardless of history.
   if (!Object.prototype.hasOwnProperty.call(map, nodeId)) {
     return { kind: "ambiguous", candidateIds: rows.map((r) => r.id), detail: "the snapshot's activeSessionIdByNode map carries no entry for this node" };
   }
@@ -565,22 +568,31 @@ export class RestoreOrchestrator {
       const startupCtx = data.nodeStartupContext?.[node.id] ?? null;
       if (!startupCtx) continue;
 
-      // OPR.0.5.7.1 D6a — replay-ONLY validation cannot block an exact
-      // resume: a resumed history consumes none of the replay inputs (the
-      // incident's own discriminator: continuity never needed the replay
-      // container), so their absence is not a blocker on this path. A
-      // deliberate fresh launch (fresh-listed or non-resume policy) DOES
-      // consume them and keeps full validation.
+      // OPR.0.5.7.1 D6a — validate replay files IFF the node will CONSUME
+      // replay (desk static ruling on e42420990): none => fresh path,
+      // validate; ambiguity => the node stops loudly and consumes nothing,
+      // skip; explicit fresh or a non-resume policy => deliberate fresh,
+      // validate; resume_if_possible with no token => stop-and-ask, consumes
+      // nothing, skip; usable type + token => exact resume, skip; a token
+      // WITHOUT a usable resume type follows the current fresh path,
+      // validate.
       const resolution = resolveActiveSnapshotSession(data, node.id);
-      const resumeSession = resolution.kind === "resolved" ? resolution.session : null;
       const freshListed = opts.freshLogicalIds?.includes(node.logicalId) ?? false;
-      const exactResumePath = !!resumeSession
-        && (resumeSession.restorePolicy ?? "resume_if_possible") === "resume_if_possible"
-        && !!resumeSession.resumeType && resumeSession.resumeType !== "none"
-        && !!resumeSession.resumeToken
-        && !freshListed;
+      let consumesReplay: boolean;
+      if (resolution.kind === "ambiguous") {
+        consumesReplay = false;
+      } else if (resolution.kind === "none") {
+        consumesReplay = true;
+      } else {
+        const sess = resolution.session;
+        const policy = sess.restorePolicy ?? "resume_if_possible";
+        if (freshListed || policy !== "resume_if_possible") consumesReplay = true;
+        else if (!sess.resumeToken) consumesReplay = false;
+        else if (!!sess.resumeType && sess.resumeType !== "none") consumesReplay = false;
+        else consumesReplay = true;
+      }
 
-      for (const file of exactResumePath ? [] : startupCtx.resolvedStartupFiles ?? []) {
+      for (const file of consumesReplay ? startupCtx.resolvedStartupFiles ?? [] : []) {
         if (!file.required) {
           if (this.pathLike(file.absolutePath) && !exists(file.absolutePath)) {
             warnings.push(`Restore pre-validation: optional startup file missing for ${node.logicalId}: ${file.absolutePath}`);
