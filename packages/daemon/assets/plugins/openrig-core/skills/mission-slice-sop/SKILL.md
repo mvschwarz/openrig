@@ -1,27 +1,27 @@
 ---
 name: mission-slice-sop
-description: "Use when working a mission or slice: the canonical files (README / IMPLEMENTATION-PRD / PROGRESS / MISSION_NOTES / MISSION_BRIEF / PROOF), who owns what and when, how planning feeds building + review + QA, how to hand off through the queue, and how to survive compaction. This is the LIGHT default. It does NOT include the intent/plan-lock/proof-lock ceremony — that is a separate assigned overlay, `mission-slice-intent-proof-sop`."
+description: >-
+  Use when starting, building, handing off, restoring, or closing a mission or slice under the default lightweight SDLC.
 metadata:
   openrig:
     stage: shipped
     sibling_skills:
-      - mission-slice-intent-proof-sop
       - queue-handoff
       - seat-continuity-and-handover
       - claude-compaction-restore
 ---
 
-# Mission/Slice SOP — how you work a mission & slice
+# Mission/Slice SOP — Part A
 
 Use this skill to actually **do** mission/slice work: track on the canonical files, record what you proved, hand off through them, and survive compaction on them. **Do the work described here; do not merely explain the protocol.**
+
+**Full convention SSOT:** repo `docs/reference/sdlc-conventions.md`; installed `$OPENRIG_HOME/reference/sdlc-conventions.md`. This skill is the concise Part-A teaching surface and does not replace the full convention.
 
 ## THIS IS THE LIGHT DEFAULT — read this before anything else
 
 **The default for any slice is the inner loop:** ground yourself → build → **test with your own eyes** → iterate → **ONE** full-breadth review at the end. That is the whole process. It is not a reduced form of a better process; it IS the process.
 
-**The intent / plan-lock / proof-contract / proof-lock ceremony is NOT part of this skill.** It lives in a separate overlay, **`mission-slice-intent-proof-sop`**, and you **may not select it yourself**. It applies only when the mission owner — or an orchestrator explicitly relaying the mission owner — **assigns it to a named piece of work**. If you believe something earns it, say so in one sentence and **continue on the light path** until told otherwise.
-
-Why the split exists, plainly: this document used to carry both, so every slice loaded the full apparatus and a one-line documentation change could draw a multi-round gate. If you find yourself building a proof contract, requesting a pre-edit gate, or asking a peer to gate something you can verify yourself — you have picked up the overlay without being assigned it. Put it down.
+**Part B is defined in the SSOT above and applies only when the human operator — or an orchestrator explicitly relaying that decision — assigns it to a named piece of work.** You may not select it yourself. If you believe something earns it, say so in one sentence and **continue on Part A** until told otherwise.
 
 ## Proportionality — this SOP serves shipping; it is not the work itself
 
@@ -35,22 +35,23 @@ The working product is the deliverable. This bookkeeping exists so the work surv
 
 These three are a division of labour, not a chain of gates. One agent may hold all three on a small slice.
 
-## The canonical files (the operating surface)
+## The current file contract
 
 > These files are the **operating surface of the work** — you track on them, record on them, hand off through them, and survive compaction on them. Keep them current because that is what lets the work survive. But they **serve** the product; they are not the product. If you're polishing files while the actual thing isn't shipping, you've inverted it: go build, then update them.
 
-- **README.md** (mission + slice) — the overview. The **mission README carries this SOP at its bottom.**
-- **IMPLEMENTATION-PRD.md** — the plan, at whatever depth the work actually needs. For a small slice this may be a few lines. Elastic by design.
-- **PROGRESS.md** — the live delivery state. One line per outcome; links down for detail.
-- **MISSION_NOTES.md** — the accruing handoff + tribal-knowledge doc. Blank-slate onboarding and **compaction-restore** read it. `§1` top-of-mind + per-seat `§A–§X`.
-- **MISSION_BRIEF.md** — the steering doc (the UI "Steering" tab). The 7-section schema.
-- **PROOF.md** (+ `proof/`) — what you actually verified, stated honestly. A couple of honest, LOOKed-at lines beat an elaborate contract.
+- **Slice:** `SPEC.md`, `PROGRESS.md`, `PROOF.md`, and `proof/`.
+- **Mission:** `SPEC.md` and `NOTES.md`.
 
 ## Per-file rules — WHO / WHEN / HOW
 
+### SPEC.md
+- **WHO:** the planning owner authors it; builders and reviewers read it as the scope and intent source.
+- **WHEN:** at creation and whenever scope changes.
+- **HOW:** a slice carries `intent:` in frontmatter and opens with `## Intent`, `## Mini-requirements`, and `## Proof contract`. A mission carries its intent and mission-level specification in the same authored node file. Keep depth proportional to the work.
+
 ### PROGRESS.md
 - **WHO:** the orchestrator owns `§1` (current state); every agent logs its own outcomes.
-- **WHEN:** after every slice-done **and every commit**; on any material state change.
+- **WHEN:** on material delivery-state changes and at acceptance.
 - **HOW:** one line per outcome (checkbox), link down for detail; keep frontmatter `stage`/`verified` honest.
 
 ### PROOF.md + proof/
@@ -58,16 +59,10 @@ These three are a division of labour, not a chain of gates. One agent may hold a
 - **WHEN:** before you call a slice done.
 - **HOW:** say what you verified and how you verified it — **by effect**: you ran it and looked at the result. Put supporting media under `proof/`. State plainly what is proven and what is **not**; an honest "this half is untested" is worth more than a checkmark. If a drop verb is in play for this slice, prefer it over hand-placing files so the artifact carries its own provenance.
 
-### MISSION_NOTES.md
+### NOTES.md
 - **WHO:** any agent updates `§1` (top-of-mind); each seat owns and appends to its own `§A–§X`.
-- **WHEN:** on any material change; a compacting agent **files its state here BEFORE compaction and reads it on restore.**
+- **WHEN:** on material mission-context changes; a compacting agent **files its state here BEFORE compaction and reads it on restore.**
 - **HOW:** accruing tribal knowledge — `§1` ≤ 5–15 lines (gates, open decisions, surprises); per-seat continuation entries (latest = truth; other seats read-only). Pointer-first; don't duplicate.
-
-### MISSION_BRIEF.md
-- **WHO:** product/design (steering owner). **WHEN:** when steering changes. **HOW:** the 7-section steering schema.
-
-### README.md
-- **WHO:** the author at creation; refreshed on rescope. **WHEN:** at creation + when scope/theme changes. **HOW:** overview + honest frontmatter (`id`/`stage`/`verified`); the mission README carries this SOP at its bottom.
 
 ## The lifecycle (4 legs)
 
@@ -94,7 +89,6 @@ When you `rig capture` a pane, **greyed / ghost autocomplete suggestions are NOT
 ## Moment-of-truth checklist
 
 - **Starting a slice?** → do you know what it's for and what done looks like? mockups attached (UI slices)? **Are you on the light path?** (You are, unless the mission owner assigned the overlay.)
-- **Finishing a slice?** → does PROOF.md say what you actually verified, by effect, including what is NOT covered? PROGRESS updated? MISSION_NOTES `§1` refreshed? handed off via `rig queue handoff`?
-- **Committing?** → PROGRESS updated?
-- **Compacting?** → filed your state in MISSION_NOTES?
-- **Starting on a mission?** → read the mission README (incl. this SOP) + MISSION_NOTES + the conventions SSOT.
+- **Finishing a slice?** → does `PROOF.md` say what you actually verified, by effect, including what is NOT covered? `PROGRESS.md` updated? mission `NOTES.md` refreshed? handed off via `rig queue handoff`?
+- **Compacting?** → file your state in mission `NOTES.md`; on restore, read it plus the active slice's `SPEC.md`, `PROGRESS.md`, and `PROOF.md`.
+- **Starting on a mission?** → read mission `SPEC.md`, `NOTES.md`, and the conventions SSOT.

@@ -85,12 +85,12 @@ hosts:
   - id: a-test-vm
     transport: ssh                       # v0 supports "ssh" only
     target: a-test-vm.local         # DNS name, SSH config alias, or IP
-    user: wrandom                        # optional
+    user: example-user                   # optional
     notes: "Tart VM"                     # optional
   - id: laptop-b
     transport: ssh
     target: laptop-b.tail-scale-net
-    user: wrandom
+    user: example-user
 ```
 
 Validation rules:

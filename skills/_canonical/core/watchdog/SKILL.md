@@ -93,12 +93,7 @@ at most every 600 seconds while work remains actionable.
 This is not a generic workflow engine. It's a guardrail against cold
 pools and missing edge artifacts.
 
-## Two surfaces: rigx watchdog (config-layer) and rig watchdog (daemon-shipped)
-
-| Surface | Status | Policies |
-|---|---|---|
-| `rigx watchdog` (config-layer dogfood) | Tmux-backed loops; coexists with daemon | Static periodic-reminder + artifact-pool-ready + edge-artifact-required (per-RSI-loop) |
-| `rig watchdog` (daemon-shipped, v0.2.0 Phase C) | SQLite-backed scheduler; survives daemon restart | `periodic-reminder` / `artifact-pool-ready` / `edge-artifact-required` / `workflow-keepalive` (Phase D — reads workflow_instances directly) |
+## Active surface
 
 Daemon `rig watchdog` is the active host coordination surface for new
 work. History records only loud evaluations (`sent` / `terminal`);
