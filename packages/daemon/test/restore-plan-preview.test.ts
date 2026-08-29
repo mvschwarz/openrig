@@ -24,6 +24,7 @@ function row(nodeId: string, over: Partial<PreviewSessionRow> = {}): PreviewSess
     resumeProvenance: "adoption",
     resumeLastVerified: null,
     resumeLastProbeStatus: null,
+    status: "running",
     ...over,
   };
 }
@@ -96,7 +97,7 @@ describe("FR-6 restore-plan token state", () => {
   it("degrades: a snapshot session serialized pre-45 (no freshness fields) → unverified, no crash", () => {
     const rig = rigWith([{ id: "n1", logicalId: "a", runtime: "claude-code" }]);
     // Simulate an old snapshot row lacking the FR-6 fields entirely.
-    const legacy = { nodeId: "n1", id: "s-n1", restorePolicy: "resume_if_possible", resumeType: "claude_id", resumeToken: "tok" } as unknown as PreviewSessionRow;
+    const legacy = { nodeId: "n1", id: "s-n1", restorePolicy: "resume_if_possible", resumeType: "claude_id", resumeToken: "tok", status: "running" } as unknown as PreviewSessionRow;
     const p = buildRestorePlanPreview(rig, null, [legacy], undefined, NOW);
     expect(p.nodes[0]!.tokenState).toBe("unverified");
   });
@@ -111,6 +112,7 @@ describe("FR-6 live path — DB → collectPreviewSessionRows → plan state", (
     db.prepare("INSERT INTO nodes (id, rig_id, logical_id, role, runtime) VALUES (?,?,?,?,?)").run("n1", "rig-1", "a", "worker", "claude-code");
     const reg = new SessionRegistry(db);
     const s = reg.registerSession("n1", "r01-a");
+    reg.updateStatus(s.id, "running");
     reg.updateResumeToken(s.id, "claude_id", "tok-1", "adoption"); // stamps verified + resumable
     reg.markResumeProbeResult(s.id, "not_resumable");              // mark stale, keep the token
     const rig = { rig: { id: "rig-1", name: "t" }, nodes: [{ id: "n1", logicalId: "a", runtime: "claude-code" }], edges: [] } as unknown as RigWithRelations;
