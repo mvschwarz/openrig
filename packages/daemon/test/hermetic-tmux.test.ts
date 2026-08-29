@@ -1,5 +1,5 @@
-import { describe, it, expect, afterEach } from "vitest";
-import { existsSync, readdirSync, mkdtempSync, rmSync } from "node:fs";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { existsSync, readdirSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { stageTopologyRoot } from "./helpers/scenario-stage.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,11 +14,10 @@ import {
 
 // 51-02 delta D5 (advisor-ruled, guard precision pins) — TMUX ISOLATION.
 //
-// A scenario `up` stands up REAL tmux seats. Without an owned TMUX_TMPDIR the
-// scenario shares the operator's tmux server: a live fleet-safety hazard (a
-// kill-server from a seat reaps the whole fleet). The helper therefore OWNS the
-// tmux server dir the same way it owns HOME and the daemon target — and refuses
-// an ambient attachment rather than documenting "set it manually".
+// A scenario `up` stands up REAL tmux seats. TMUX_TMPDIR alone is not an
+// identity: once its directory disappears a later command can resolve elsewhere.
+// The helper therefore wraps every child invocation with one explicit private
+// socket and refuses an ambient attachment before creating anything.
 
 const scaffolds: HermeticScaffold[] = [];
 const dirs: string[] = [];
@@ -101,8 +100,68 @@ describe("D5 p2 — an inherited TMUX_TMPDIR is ABSENT from the child and REPLAC
   it("keeps the socket path SHORT enough for sun_path (~104 bytes)", () => {
     const s = prepareHermeticEnv({ baseEnv: cleanBase() });
     scaffolds.push(s);
-    // tmux appends `/tmux-<uid>/default` under TMUX_TMPDIR; budget for it.
-    expect(Buffer.byteLength(join(s.tmuxTmpDir, "tmux-501", "default"))).toBeLessThan(104);
+    expect(Buffer.byteLength(s.tmuxSocketPath)).toBeLessThan(104);
+  });
+
+  it("cleanup terminates repeated scaffold-owned tmux servers without touching an unrelated server", async () => {
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const run = promisify(execFile);
+    const sentinelDir = mkdtempSync(join(tmpdir(), "sent-cleanup-"));
+    const sentinelSocketPath = join(sentinelDir, "sentinel.sock");
+    dirs.push(sentinelDir);
+
+    const directEnv = () => {
+      const env = { ...process.env } as NodeJS.ProcessEnv;
+      delete env.TMUX;
+      delete env.TMUX_TMPDIR;
+      return env;
+    };
+    const at = (socketPath: string, args: string[]) =>
+      run("tmux", ["-S", socketPath, ...args], { env: directEnv() });
+    const alive = (pid: number) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    await at(sentinelSocketPath, ["new-session", "-d", "-s", "unrelated", "sleep 600"]);
+    const sentinelPid = Number(
+      (await at(sentinelSocketPath, ["display-message", "-p", "-t", "unrelated", "#{pid}"])).stdout.trim(),
+    );
+    try {
+      for (const runNumber of [1, 2]) {
+        const s = prepareHermeticEnv({
+          baseEnv: { ...cleanBase(), TMUX_TMPDIR: sentinelDir },
+        });
+        scaffolds.push(s);
+        const session = `scenario-${runNumber}`;
+        await run("tmux", ["new-session", "-d", "-s", session, "sleep 600"], {
+          env: s.env as NodeJS.ProcessEnv,
+        });
+        const server = await run("tmux", ["display-message", "-p", "-t", session, "#{pid}"], {
+          env: s.env as NodeJS.ProcessEnv,
+        });
+        const serverPid = Number(server.stdout.trim());
+
+        s.cleanup();
+        s.cleanup();
+        expect(existsSync(s.root)).toBe(false);
+        await vi.waitFor(() => {
+          expect(alive(serverPid)).toBe(false);
+        }, { timeout: 2_000, interval: 25 });
+        const sentinel = await at(sentinelSocketPath, ["list-sessions", "-F", "#{session_name}"]);
+        expect(sentinel.stdout.trim()).toBe("unrelated");
+        const sentinelServer = await at(sentinelSocketPath, [
+          "display-message", "-p", "-t", "unrelated", "#{pid}",
+        ]);
+        expect(Number(sentinelServer.stdout.trim())).toBe(sentinelPid);
+      }
+    } finally {
+      await at(sentinelSocketPath, ["kill-session", "-t", "unrelated"]).catch(() => {});
+    }
   });
 });
 
@@ -114,8 +173,9 @@ describe("D5 p2 — an inherited TMUX_TMPDIR is ABSENT from the child and REPLAC
 // it still passed.
 //
 // This version observes WHILE SEATS ARE ALIVE and asserts BOTH directions:
-// the inherited sentinel server gains nothing, and the scaffold-owned server is
-// where the seats actually are. Disable the replacement and both legs flip.
+// the inherited sentinel server gains nothing, and the explicit scaffold socket
+// is where the seats actually are. The focused p2 cleanup proof separately
+// detects removal of the socket shim by observing the owned server PID survive.
 describe("D5 p3 (integration) — an INHERITED tmux server is replaced, proven while seats live", () => {
   it("seats land on the scaffold-owned server; the inherited sentinel server gains nothing", async () => {
     const { spawnScenarioDaemon, runRig } = await import("./helpers/scenario-daemon.js");
@@ -131,21 +191,27 @@ describe("D5 p3 (integration) — an INHERITED tmux server is replaced, proven w
     const pkgRoot = resolve(HERE, "..");
 
     const sentinelDir = mkdtempSync(join(tmpdir(), "sent-"));
+    const sentinelDefaultDir = join(sentinelDir, `tmux-${process.getuid()}`);
+    mkdirSync(sentinelDefaultDir, { recursive: true, mode: 0o700 });
+    const sentinelSocketPath = join(sentinelDefaultDir, "default");
     dirs.push(sentinelDir);
-    const envFor = (tmpd: string) => {
-      const e = { ...process.env, TMUX_TMPDIR: tmpd } as Record<string, string | undefined>;
+    const directEnv = () => {
+      const e = { ...process.env } as Record<string, string | undefined>;
       delete e.TMUX;
+      delete e.TMUX_TMPDIR;
       return e as NodeJS.ProcessEnv;
     };
-    const sessionsIn = async (tmpd: string): Promise<string> => {
+    const at = (socketPath: string, args: string[]) =>
+      run("tmux", ["-S", socketPath, ...args], { env: directEnv() });
+    const sessionsAt = async (socketPath: string): Promise<string> => {
       try {
-        const { stdout } = await run("tmux", ["list-sessions", "-F", "#{session_name}"], { env: envFor(tmpd) });
+        const { stdout } = await at(socketPath, ["list-sessions", "-F", "#{session_name}"]);
         return stdout.trim().split("\n").filter(Boolean).sort().join(",");
       } catch { return ""; } // no server = no sessions
     };
 
-    await run("tmux", ["new-session", "-d", "-s", "sentinel-only", "sleep 600"], { env: envFor(sentinelDir) });
-    const before = await sessionsIn(sentinelDir);
+    await at(sentinelSocketPath, ["new-session", "-d", "-s", "sentinel-only", "sleep 600"]);
+    const before = await sessionsAt(sentinelSocketPath);
     expect(before).toBe("sentinel-only"); // the sentinel is real and reachable
 
     // INHERIT the sentinel dir through the real helper.
@@ -175,8 +241,8 @@ describe("D5 p3 (integration) — an INHERITED tmux server is replaced, proven w
       expect(up.code).toBe(0);
 
       // WHILE THE SEATS ARE ALIVE (no `down` yet) — both directions:
-      const ownedNow = await sessionsIn(scaffold.tmuxTmpDir);
-      const sentinelNow = await sessionsIn(sentinelDir);
+      const ownedNow = await sessionsAt(scaffold.tmuxSocketPath);
+      const sentinelNow = await sessionsAt(sentinelSocketPath);
       expect(ownedNow).toContain("scn-baton");   // the seats are HERE...
       expect(sentinelNow).toBe(before);          // ...and the inherited server gained nothing
       expect(sentinelNow).not.toContain("scn-baton");
@@ -188,9 +254,8 @@ describe("D5 p3 (integration) — an INHERITED tmux server is replaced, proven w
       expect(existsSync(join(seatCwd, ".openrig", "stub", "state.json"))).toBe(true);
     } finally {
       await runRig(["down", "scn-baton", "--json", "--force"], daemon.readEnv, rigBin, 60_000).catch(() => {});
-      await run("tmux", ["kill-server"], { env: envFor(scaffold.tmuxTmpDir) }).catch(() => {});
       await daemon.stop().catch(() => {});
-      await run("tmux", ["kill-server"], { env: envFor(sentinelDir) }).catch(() => {});
+      await at(sentinelSocketPath, ["kill-session", "-t", "sentinel-only"]).catch(() => {});
     }
   }, 300_000);
 });

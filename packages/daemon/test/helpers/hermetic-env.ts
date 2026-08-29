@@ -16,9 +16,16 @@
  * a hard error NAMING the target. Never a degrade, never a fabrication.
  */
 
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 
 /**
  * Inherited environment variables that redirect the CLI/daemon client at a
@@ -179,9 +186,9 @@ export function assertNoAmbientClock(env: EnvLike = process.env): void {
  * edition of the silent-retarget class. Its own hazard category so the refusal
  * message is accurate — distinct from a daemon target and from a clock leak.
  *
- * TMUX_TMPDIR is deliberately NOT a refusal trigger: it names a server DIRECTORY
- * rather than an active attachment, and the scaffold simply overrides it with an
- * owned one (proven absent-and-replaced by the D5 pins).
+ * TMUX_TMPDIR is deliberately NOT a refusal trigger: it names a compatibility
+ * directory rather than an active attachment. The scaffold replaces it and uses
+ * an explicit private socket as the server identity.
  */
 export const TMUX_ATTACHMENT_ENV_VARS = ["TMUX"] as const;
 
@@ -200,8 +207,8 @@ export class AmbientTmuxHazardError extends Error {
     super(
       `hermetic env refused: ambient tmux attachment ${hazard.name}=${hazard.value} is present — ` +
         `scenario seats would land on a tmux SERVER the helper did not create (the operator's/fleet ` +
-        `server), where a stray kill-server reaps live seats. The scaffold owns its own server dir ` +
-        `via TMUX_TMPDIR; an inherited attachment is a leak. Fail-closed; zero traffic sent, no ` +
+        `server), where a stray kill-server reaps live seats. The scaffold uses its own explicit ` +
+        `private socket; an inherited attachment is a leak. Fail-closed; zero traffic sent, no ` +
         `scaffold created. Unset ${hazard.name} (run outside tmux, or via env -u ${hazard.name}).`,
     );
     this.name = "AmbientTmuxHazardError";
@@ -254,11 +261,12 @@ export interface HermeticScaffold {
   /** Scratch state dir (the scenario-local daemon's db lives here). */
   stateDir: string;
   /**
-   * The scaffold-OWNED tmux server dir (D5). Exported as TMUX_TMPDIR in the child
-   * env so `up`'s real seats land on a server this scaffold created and cleanup
-   * removes — never the operator's/fleet server.
+   * A scaffold-owned compatibility directory exported as TMUX_TMPDIR. The
+   * explicit tmuxSocketPath below is the server identity; this directory is not.
    */
   tmuxTmpDir: string;
+  /** Explicit private tmux socket used by every scaffold child invocation. */
+  tmuxSocketPath: string;
   /**
    * A CLEAN environment for child processes (the scenario-local daemon + `rig`
    * CLI invocations): the caller's env with daemon-target + credential vars
@@ -313,12 +321,34 @@ export function prepareHermeticEnv(opts: PrepareHermeticEnvOptions = {}): Hermet
   const home = join(root, "home");
   const openrigHome = join(root, "openrig-home");
   const stateDir = join(root, "state");
-  // Short segment on purpose: tmux appends `/tmux-<uid>/default` and the unix
-  // socket path is capped near 104 bytes (sun_path).
+  // Keep both compatibility and explicit socket paths below sun_path's cap.
   const tmuxTmpDir = join(root, "tx");
-  for (const dir of [home, openrigHome, stateDir, tmuxTmpDir]) {
+  const tmuxSocketPath = join(root, "tmux.sock");
+  const tmuxWrapperDir = join(root, "bin");
+  const tmuxWrapperPath = join(tmuxWrapperDir, "tmux");
+  for (const dir of [home, openrigHome, stateDir, tmuxTmpDir, tmuxWrapperDir]) {
     mkdirSync(dir, { recursive: true });
   }
+
+  // Test-only command seam: every child `tmux` call gets one explicit private
+  // socket. TMUX_TMPDIR remains for compatibility, but is never the selector.
+  const originalPath = baseEnv.PATH ?? process.env.PATH ?? "";
+  writeFileSync(
+    tmuxWrapperPath,
+    `#!/usr/bin/env node
+const { spawnSync } = require("node:child_process");
+const socketPath = ${JSON.stringify(tmuxSocketPath)};
+const originalPath = ${JSON.stringify(originalPath)};
+const env = { ...process.env, PATH: originalPath };
+const result = spawnSync("tmux", ["-S", socketPath, ...process.argv.slice(2)], { env, stdio: "inherit" });
+if (result.error) {
+  console.error(result.error.message);
+  process.exit(127);
+}
+process.exit(result.status ?? 1);
+`,
+    { mode: 0o755 },
+  );
 
   // Clean child env: copy, scrub every redirect/credential var, then set scratch paths.
   const env: Record<string, string | undefined> = { ...baseEnv };
@@ -333,10 +363,11 @@ export function prepareHermeticEnv(opts: PrepareHermeticEnvOptions = {}): Hermet
   env.XDG_DATA_HOME = join(home, ".local", "share");
   env.XDG_CACHE_HOME = join(home, ".cache");
   env.OPENRIG_HOME = openrigHome;
-  // D5: OWN the tmux server dir. Any inherited TMUX_TMPDIR is overwritten here
-  // (absent-and-replaced), so `up`'s seats can only reach a scaffold-owned server
-  // that cleanup() removes. The refusal above covers the attachment half.
+  // D5 compatibility half: replace inherited TMUX_TMPDIR. The wrapper's explicit
+  // -S socket is the identity-bearing half, so a missing directory cannot make a
+  // later invocation fall back to the operator's default server.
   env.TMUX_TMPDIR = tmuxTmpDir;
+  env.PATH = `${tmuxWrapperDir}${delimiter}${originalPath}`;
   // Forced-local: never resolve/attach the shared fleet kernel.
   env.OPENRIG_NO_KERNEL = "1";
   // A3-R3 injected clock: the ONLY sanctioned way OPENRIG_TEST_CLOCK_NOW is set —
@@ -346,13 +377,37 @@ export function prepareHermeticEnv(opts: PrepareHermeticEnvOptions = {}): Hermet
     env.OPENRIG_TEST_CLOCK_NOW = opts.injectClockNow;
   }
 
+  const cleanup = () => {
+    if (!existsSync(root)) return;
+    if (existsSync(tmuxSocketPath)) {
+      let privateServerRunning = true;
+      try {
+        execFileSync("tmux", ["-S", tmuxSocketPath, "list-sessions"], {
+          env: { ...env, PATH: originalPath } as NodeJS.ProcessEnv,
+          stdio: "ignore",
+        });
+      } catch (error) {
+        if (typeof (error as { status?: unknown }).status !== "number") throw error;
+        privateServerRunning = false;
+      }
+      if (privateServerRunning) {
+        execFileSync("tmux", ["-S", tmuxSocketPath, "kill-server"], {
+          env: { ...env, PATH: originalPath } as NodeJS.ProcessEnv,
+          stdio: "ignore",
+        });
+      }
+    }
+    rmSync(root, { recursive: true, force: true });
+  };
+
   return {
     root,
     home,
     openrigHome,
     stateDir,
     tmuxTmpDir,
+    tmuxSocketPath,
     env,
-    cleanup: () => rmSync(root, { recursive: true, force: true }),
+    cleanup,
   };
 }
