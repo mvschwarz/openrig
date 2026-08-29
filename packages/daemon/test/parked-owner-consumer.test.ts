@@ -76,7 +76,7 @@ describe("parked-owner-consumer policy (OPR.0.5.6.24 F-14)", () => {
   it("R1: claimed-rows x arbitrated-idle fires ONE wake naming every held obligation row", async () => {
     const policy = makeParkedOwnerConsumerPolicy(makeDeps());
     const result = await policy.evaluate(makeJob());
-    expect(result.action).toBe("fire");
+    expect(result.action).toBe("send");
     const named = JSON.stringify(result.notes ?? {});
     expect(named).toContain("qitem-20260828190838-bd7eef84");
     expect(named).toContain("qitem-20260828235231-f115c617");
@@ -88,7 +88,7 @@ describe("parked-owner-consumer policy (OPR.0.5.6.24 F-14)", () => {
     const deps = makeDeps();
     const policy = makeParkedOwnerConsumerPolicy(deps);
     const first = await policy.evaluate(makeJob());
-    expect(first.action).toBe("fire");
+    expect(first.action).toBe("send");
     const second = await policy.evaluate(makeJob());
     expect(second.action).toBe("skip");
     expect(String(second.reason)).toMatch(/already[-_]woken/);
@@ -105,11 +105,11 @@ describe("parked-owner-consumer policy (OPR.0.5.6.24 F-14)", () => {
       }) as never,
     });
     const policy = makeParkedOwnerConsumerPolicy(deps);
-    expect((await policy.evaluate(makeJob())).action).toBe("fire");
+    expect((await policy.evaluate(makeJob())).action).toBe("send");
     idle = false; // the seat resumes — the episode ends
     expect((await policy.evaluate(makeJob())).action).toBe("skip");
     idle = true; // re-parks — a NEW episode
-    expect((await policy.evaluate(makeJob())).action).toBe("fire");
+    expect((await policy.evaluate(makeJob())).action).toBe("send");
   });
 
   // R3 — HONEST SKIP CELLS.
