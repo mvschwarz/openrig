@@ -31,7 +31,7 @@ export function demoSnapshot(): FleetSnapshot {
           },
         ],
       },
-      { name: "mm2-host", reachable: false, rigs: [] },
+      { name: "remote-host", reachable: false, rigs: [] },
     ],
     specs: [
       { name: "openrig-build-rig", kind: "rig", agentRefs: ["driver-agent", "guard-agent", "qa-agent", "lead-agent"] },
@@ -149,7 +149,7 @@ export function demoSnapshot(): FleetSnapshot {
     // PULSE footer renders "updated 2s ago" deterministically.
     hydratedAt: "2026-08-06T11:59:58.000Z",
     // host-down is composed BESIDE the items (never projected into the item shape)
-    hostsDown: [{ hostId: "mm2-host", status: "unreachable", error: "read timed out" }],
+    hostsDown: [{ hostId: "remote-host", status: "unreachable", error: "read timed out" }],
     stream: [
       { tsEmitted: "2026-08-02T10:00:00.000Z", sourceSession: "dev50-guard@v-openrig-build", body: "gate cleared: slice-11 spike verdict PASS" },
       { tsEmitted: "2026-08-02T10:05:00.000Z", sourceSession: "orch-lead@v-openrig-build", body: "provider re-auth completed on mm2" },

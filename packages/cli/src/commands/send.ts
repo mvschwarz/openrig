@@ -243,7 +243,7 @@ Examples:
   rig send dev-impl@my-rig "safe proof prompt" --wait-for-idle 30 --verify
   rig send dev-impl@my-rig "Stop and read the spec." --force
   rig send dev-impl@my-rig "message" --json
-  rig send --host vm-claude-test dev-impl@my-rig "remote message" --verify
+  rig send --host remote-dev dev-impl@my-rig "remote message" --verify
   rig send dev-impl@my-rig@vps-b "host-qualified target sugar (suffix must be a registered host id)"
 
 Targeting: a bare seat (single send), OR one of --to / --pod / --rig (fan-out).

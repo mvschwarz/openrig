@@ -78,7 +78,7 @@ describe("treatment (mockup palette semantics)", () => {
   it("alert lines are amber with the open-link kept accent; hosts-down red", () => {
     const styled = stylizeLines(screenFor(":needs"), style).join("\n");
     expect(styled).toMatch(/\x1b\[38;2;230;181;110m\s*⚑/);
-    expect(styled).toContain("\x1b[38;2;224;108;117m  ✖ mm2-host");
+    expect(styled).toContain("\x1b[38;2;224;108;117m  ✖ remote-host");
   });
 
   it("chrome rules carry pane titles; hint bar and status line are styled", () => {

@@ -40,7 +40,7 @@ Examples:
   rig capture --rig my-rig
   rig capture --pod dev --rig my-rig
   rig capture --rig my-rig --json
-  rig capture --host vm-claude-test dev-impl@my-rig --lines 50
+  rig capture --host remote-dev dev-impl@my-rig --lines 50
 
 Supported notes:
   - Multi-target capture reports unsupported external_cli nodes as explicit per-target failures.

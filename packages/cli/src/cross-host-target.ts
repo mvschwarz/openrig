@@ -119,7 +119,7 @@ export function resolveCrossHostTarget(
     return { ok: true, target: rawTarget, sugarHost: undefined, hint: unregisteredHint };
   }
 
-  // TWO SPELLINGS OF ONE HOST ARE NOT A CONFLICT. `--host mm2-host` beside a target suffix of
+  // TWO SPELLINGS OF ONE HOST ARE NOT A CONFLICT. `--host remote-host` beside a target suffix of
   // `@host-84c37990` names the SAME machine once the suffix can match a join key — rejecting it
   // would punish an operator for pasting back the reply hint we printed them, which is the exact
   // workflow this slice exists to make work. Compare the RESOLVED entries, not the raw strings.

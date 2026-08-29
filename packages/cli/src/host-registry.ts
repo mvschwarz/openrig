@@ -127,9 +127,9 @@ export function defaultHostRegistryPath(): string {
  * Load and validate the host registry from disk. v0 file shape:
  *
  *     hosts:
- *       - id: vm-claude-test
+ *       - id: remote-dev
  *         transport: ssh
- *         target: vm-claude-test.local
+ *         target: remote-dev.local
  *         user: your-username  # optional
  *         notes: "Tart VM"     # optional
  *
