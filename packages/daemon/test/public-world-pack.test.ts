@@ -368,7 +368,7 @@ describe("public world pack", () => {
     ].flatMap(([pack, manifestPath]) =>
       readFileSync(manifestPath, "utf8")
         .split("\n")
-        .filter((line) => /^\s*#/.test(line))
+        .filter((line) => line.includes("#"))
         .map((line) => ({ pack, line })),
     );
 
@@ -387,7 +387,10 @@ describe("public world pack", () => {
       const manifestPath = join(pack === "world-public" ? redPack : join(redRoot, "world-example"), "manifest.yaml");
       writeFileSync(
         manifestPath,
-        `# Private rig-specific instructions for one internal operator.\n${readFileSync(manifestPath, "utf8")}`,
+        readFileSync(manifestPath, "utf8").replace(
+          `name: ${pack}`,
+          `name: ${pack} # Private rig-specific instructions for one internal operator.`,
+        ),
       );
 
       const rigPath = writeRigFixture({ showSourcePath: redPack });
