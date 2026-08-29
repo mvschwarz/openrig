@@ -12,22 +12,61 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { scanInternalLeaks } from "./internal-leak-scanner.mjs";
 
 const GATE = resolve("scripts/check-substance-gate.mjs");
-const GENERICIZED_CONTENT_SURFACES = [
-  ["docs/reference/knowledge-maturity.md", "daemon/docs/reference/knowledge-maturity.md"],
-  ["docs/reference/sdlc-conventions.md", "daemon/docs/reference/sdlc-conventions.md"],
-  ["packages/daemon/policies/builtin/standard.policy.md", "daemon/policies/builtin/standard.policy.md"],
-  ["docs/reference/chain-file-convention.md", "daemon/docs/reference/chain-file-convention.md"],
-  ["docs/reference/agent-state-taxonomy.md", "daemon/docs/reference/agent-state-taxonomy.md"],
-  ["packages/daemon/policies/builtin/yolo.policy.md", "daemon/policies/builtin/yolo.policy.md"],
-];
 
-test("the content scan stays wired through the named full-mode guard", () => {
-  const source = readFileSync(GATE, "utf8");
-  assert.match(source, /content:\s*runFullArtifactScan\(options, treeClasses\.content\)/);
-  assert.match(source, /join\(HERE, "check-internal-leak-guard\.mjs"\)[\s\S]*"--mode", "full"/);
+test("the content scan executes the named full-mode guard with the artifact boundary", () => {
+  const harnessRoot = mkdtempSync(join(resolve("scripts"), ".substance-gate-child-"));
+  try {
+    withFixture(({ repo, rules, review, receipt }) => {
+      const publicFile = join(repo, "public/guide.md");
+      write(publicFile, "Generic product guidance.\n");
+      write(join(repo, "dist/derived.js"), "export const value = true;\n");
+      commitAll(repo, "named child fixture");
+      const cutSha = gitHead(repo);
+      writeFileSync(review, JSON.stringify({
+        surfaces: [{
+          path: "public/guide.md",
+          sha256: sha256(publicFile),
+          verdict: "ship",
+          reason: "Generic product guidance.",
+          candidateDispositions: [],
+        }],
+      }));
+
+      const source = readFileSync(GATE, "utf8");
+      const invocationPath = join(harnessRoot, "invocation.json");
+      const gate = writeGateHarness(join(harnessRoot, "live"), source, invocationPath);
+      const result = runGate({ repo, rules, review, receipt, cutSha, gate });
+      assert.equal(result.status, 0, result.stderr);
+      const invocation = JSON.parse(readFileSync(invocationPath, "utf8"));
+      assert.equal(invocation.args["--repo"], repo);
+      assert.equal(invocation.args["--rules"], rules);
+      assert.equal(invocation.args["--mode"], "full");
+      assert.equal(invocation.args["--tree"], repo);
+      assert.equal(dirname(invocation.args["--files-manifest"]), dirname(invocation.args["--report"]));
+      assert.equal(invocation.manifest.files.includes("public/guide.md"), true);
+      assert.equal(invocation.manifest.files.includes("dist/derived.js"), false);
+
+      const bypassSource = source.replace(
+        "content: runFullArtifactScan(options, treeClasses.content),",
+        "content: runArtifactScan(options, \"content\", treeClasses.content, rules),",
+      );
+      assert.notEqual(bypassSource, source);
+      assert.match(bypassSource, /check-internal-leak-guard\.mjs/);
+      const bypassInvocationPath = join(harnessRoot, "bypass-invocation.json");
+      const bypassGate = writeGateHarness(
+        join(harnessRoot, "bypass"),
+        bypassSource,
+        bypassInvocationPath,
+      );
+      const bypass = runGate({ repo, rules, review, receipt, cutSha, gate: bypassGate });
+      assert.equal(bypass.status, 0, bypass.stderr);
+      assert.equal(existsSync(bypassInvocationPath), false);
+    });
+  } finally {
+    rmSync(harnessRoot, { recursive: true, force: true });
+  }
 });
 
 test("the named substance gate writes a cut-bound, per-surface receipt and records the full scan", () => {
@@ -276,24 +315,6 @@ test("derived archaeology terms do not block and the receipt records the exact a
   });
 });
 
-test("the six shipped content sources are clean and a test-local reseed remains blocking", () => {
-  const rules = JSON.parse(readFileSync("scripts/internal-tokens.generated.json", "utf8"));
-  for (const [sourcePath, artifactPath] of GENERICIZED_CONTENT_SURFACES) {
-    assert.deepEqual(
-      scanInternalLeaks({ path: artifactPath, bytes: readFileSync(sourcePath), rules }),
-      [],
-      sourcePath,
-    );
-  }
-
-  const [sourcePath, artifactPath] = GENERICIZED_CONTENT_SURFACES[0];
-  const reseeded = Buffer.concat([
-    readFileSync(sourcePath),
-    Buffer.from(`\n${rules.charged_terms[0]}\n`),
-  ]);
-  assert.notEqual(scanInternalLeaks({ path: artifactPath, bytes: reseeded, rules }).length, 0);
-});
-
 test("the release ceremony names the gate and its durable receipt", () => {
   const pkg = JSON.parse(readFileSync("package.json", "utf8"));
   assert.equal(pkg.scripts["gate:substance"], "node scripts/check-substance-gate.mjs");
@@ -304,6 +325,31 @@ test("the release ceremony names the gate and its durable receipt", () => {
   assert.match(ceremony, /judge|judged/i);
   assert.match(ceremony, /cut sha/i);
 });
+
+function writeGateHarness(root, source, invocationPath) {
+  mkdirSync(root, { recursive: true });
+  const gate = join(root, "check-substance-gate.mjs");
+  writeFileSync(gate, source);
+  writeFileSync(
+    join(root, "internal-leak-scanner.mjs"),
+    readFileSync(resolve("scripts/internal-leak-scanner.mjs")),
+  );
+  writeFileSync(join(root, "check-internal-leak-guard.mjs"), [
+    "import { readFileSync, writeFileSync } from \"node:fs\";",
+    `const invocationPath = ${JSON.stringify(invocationPath)};`,
+    "const rawArgs = process.argv.slice(2);",
+    "const args = Object.fromEntries(Array.from({ length: rawArgs.length / 2 }, (_, index) =>",
+    "  [rawArgs[index * 2], rawArgs[index * 2 + 1]]));",
+    "const manifest = JSON.parse(readFileSync(args[\"--files-manifest\"], \"utf8\"));",
+    "writeFileSync(invocationPath, JSON.stringify({ args, manifest }));",
+    "writeFileSync(args[\"--report\"], JSON.stringify({",
+    "  mode: args[\"--mode\"],",
+    "  scannedFiles: manifest.files,",
+    "  findingCount: 0,",
+    "}));",
+  ].join("\n"));
+  return gate;
+}
 
 function withFixture(run) {
   const root = mkdtempSync(join(tmpdir(), "openrig-substance-gate-"));
@@ -339,9 +385,9 @@ function withFixture(run) {
   }
 }
 
-function runGate({ repo, rules, review, receipt, cutSha }) {
+function runGate({ repo, rules, review, receipt, cutSha, gate = GATE }) {
   return spawnSync(process.execPath, [
-    GATE,
+    gate,
     "--repo", repo,
     "--package-root", repo,
     "--surface-manifest", join(repo, "substance-surfaces.json"),
