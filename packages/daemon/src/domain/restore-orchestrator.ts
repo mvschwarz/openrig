@@ -71,30 +71,42 @@ const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
 export type ActiveSnapshotSessionResolution =
   | { kind: "resolved"; session: Session }
   | { kind: "none" }
-  | { kind: "ambiguous"; candidateIds: string[] };
+  | { kind: "ambiguous"; candidateIds: string[]; detail: string };
 
+// FOUR-WAY OCCUPANT TRUTH (repair ruling qitem-20260829080039-c47a571e):
+// the ONLY case where legacy inference may run is the WHOLE field being
+// absent (a pre-convention snapshot). A PRESENT map is the authority — a
+// null value, a missing node key, or a dangling id each fails LOUDLY; the
+// map is never collapsed by truthiness into the legacy ladder.
 export function resolveActiveSnapshotSession(data: SnapshotData, nodeId: string): ActiveSnapshotSessionResolution {
   const rows = data.sessions.filter((s) => s.nodeId === nodeId);
   if (rows.length === 0) return { kind: "none" };
-  const explicit = data.activeSessionIdByNode?.[nodeId];
-  if (explicit) {
-    const hit = rows.find((s) => s.id === explicit);
-    if (hit) return { kind: "resolved", session: hit };
-    // A relation naming a row the snapshot does not carry is stale by
-    // definition (capture derives relation and rows atomically from the same
-    // array, so a dangling pointer means post-capture mutation). It carries
-    // no usable information — fall through to the legacy ladder, whose own
-    // ambiguity guard below still refuses to guess between real candidates.
+  const map = data.activeSessionIdByNode;
+  if (map === undefined) {
+    // Pre-convention snapshot: legacy inference — a single row, else the
+    // uniquely-running row, else ambiguity.
+    if (rows.length === 1) return { kind: "resolved", session: rows[0]! };
+    const running = rows.filter((s) => s.status === "running");
+    if (running.length === 1) return { kind: "resolved", session: running[0]! };
+    return { kind: "ambiguous", candidateIds: rows.map((r) => r.id), detail: "no explicit active relation (pre-convention snapshot) and no uniquely-running row" };
   }
-  if (rows.length === 1) return { kind: "resolved", session: rows[0]! };
-  const running = rows.filter((s) => s.status === "running");
-  if (running.length === 1) return { kind: "resolved", session: running[0]! };
-  return { kind: "ambiguous", candidateIds: rows.map((r) => r.id) };
+  if (!Object.prototype.hasOwnProperty.call(map, nodeId)) {
+    return { kind: "ambiguous", candidateIds: rows.map((r) => r.id), detail: "the snapshot's activeSessionIdByNode map carries no entry for this node" };
+  }
+  const rel = map[nodeId];
+  if (rel === null) {
+    return { kind: "ambiguous", candidateIds: rows.map((r) => r.id), detail: "the snapshot recorded no single live occupant at capture (explicit null)" };
+  }
+  const hit = rows.find((s) => s.id === rel);
+  if (!hit) {
+    return { kind: "ambiguous", candidateIds: rows.map((r) => r.id), detail: `the recorded active relation ${rel} names no session row in this snapshot (dangling)` };
+  }
+  return { kind: "resolved", session: hit };
 }
 
-function activeOccupantAmbiguityError(candidateIds: string[]): string {
-  return `Active-occupant ambiguity: ${candidateIds.length} candidate session rows (${candidateIds.join(", ")}) ` +
-    `and no explicit active relation — seat unrecoverable until resolved. ` +
+function activeOccupantAmbiguityError(candidateIds: string[], detail?: string): string {
+  return `Active-occupant ambiguity: ${candidateIds.length} candidate session rows (${candidateIds.join(", ")})` +
+    `${detail ? ` — ${detail}` : ""}. Seat unrecoverable until resolved. ` +
     `Refusing newest-row-wins and refusing a replacement occupant.`;
 }
 
@@ -213,15 +225,6 @@ export class RestoreOrchestrator {
      */
     freshLogicalIds?: string[];
     /**
-     * OPR.0.5.7.1 D6 — explicit, versioned opt-in to replay startup content
-     * into RESUMED histories. Absent (the default), an exact resume delivers
-     * ZERO startup/onboarding content — the launch leg only. When present,
-     * the replay is delivered and the opt-in is recorded on each node result
-     * (the audit trail). Fresh-primed launches ignore this field: their
-     * replay is deliberate by construction.
-     */
-    startupReplayOptIn?: { version: number };
-    /**
      * L3: fired with the persisted `restore.started` event seq as soon as the
      * orchestrator commits to running per-node restore. Routes use this to
      * return `attemptId` to the client immediately while per-node work
@@ -260,6 +263,7 @@ export class RestoreOrchestrator {
       const validation = this.validatePreRestore(snapshot.data, {
         fsOps: opts?.fsOps,
         servicesRecord: this.rigRepo.getServicesRecord(rigId),
+        freshLogicalIds: opts?.freshLogicalIds,
       });
       if (validation.blockers.length > 0) {
         const result: RestoreResult = {
@@ -349,9 +353,6 @@ export class RestoreOrchestrator {
     adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>;
     fsOps?: { exists(path: string): boolean };
     holdReason?: string;
-    /** OPR.0.5.7.1 D6 — same contract as restore(): resumed histories replay
-     *  nothing without this explicit versioned opt-in. */
-    startupReplayOptIn?: { version: number };
   }): Promise<{
     ok: boolean;
     code?: string;
@@ -424,7 +425,7 @@ export class RestoreOrchestrator {
       // API result (FR-5 fallback observability must not be discarded here).
       const planEntry = { node };
       const result = await this.restoreNodeWithCompensation(
-        planEntry, rigId, snapshot.id, snapshot.data, { adapters: opts?.adapters, fsOps: opts?.fsOps, startupReplayOptIn: opts?.startupReplayOptIn }, subsetWarnings,
+        planEntry, rigId, snapshot.id, snapshot.data, { adapters: opts?.adapters, fsOps: opts?.fsOps }, subsetWarnings,
       );
       launched.push(result);
     }
@@ -484,6 +485,7 @@ export class RestoreOrchestrator {
     opts: {
       fsOps?: { exists(path: string): boolean };
       servicesRecord?: RigServicesRecord | null;
+      freshLogicalIds?: string[];
     },
   ): { blockers: RestoreValidationBlocker[]; warnings: string[] } {
     const blockers: RestoreValidationBlocker[] = [];
@@ -563,7 +565,22 @@ export class RestoreOrchestrator {
       const startupCtx = data.nodeStartupContext?.[node.id] ?? null;
       if (!startupCtx) continue;
 
-      for (const file of startupCtx.resolvedStartupFiles ?? []) {
+      // OPR.0.5.7.1 D6a — replay-ONLY validation cannot block an exact
+      // resume: a resumed history consumes none of the replay inputs (the
+      // incident's own discriminator: continuity never needed the replay
+      // container), so their absence is not a blocker on this path. A
+      // deliberate fresh launch (fresh-listed or non-resume policy) DOES
+      // consume them and keeps full validation.
+      const resolution = resolveActiveSnapshotSession(data, node.id);
+      const resumeSession = resolution.kind === "resolved" ? resolution.session : null;
+      const freshListed = opts.freshLogicalIds?.includes(node.logicalId) ?? false;
+      const exactResumePath = !!resumeSession
+        && (resumeSession.restorePolicy ?? "resume_if_possible") === "resume_if_possible"
+        && !!resumeSession.resumeType && resumeSession.resumeType !== "none"
+        && !!resumeSession.resumeToken
+        && !freshListed;
+
+      for (const file of exactResumePath ? [] : startupCtx.resolvedStartupFiles ?? []) {
         if (!file.required) {
           if (this.pathLike(file.absolutePath) && !exists(file.absolutePath)) {
             warnings.push(`Restore pre-validation: optional startup file missing for ${node.logicalId}: ${file.absolutePath}`);
@@ -816,7 +833,7 @@ export class RestoreOrchestrator {
     rigId: string,
     snapshotId: string,
     data: SnapshotData,
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; startupReplayOptIn?: { version: number } },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[] },
     warnings?: string[],
   ): Promise<RestoreNodeResult> {
     const node = entry.node;
@@ -859,7 +876,7 @@ export class RestoreOrchestrator {
           nodeId,
           logicalId: node.logicalId,
           status: "failed",
-          error: activeOccupantAmbiguityError(resolution.candidateIds),
+          error: activeOccupantAmbiguityError(resolution.candidateIds, resolution.detail),
         };
       }
       const snapSession = resolution.kind === "resolved" ? resolution.session : null;
@@ -1008,7 +1025,7 @@ export class RestoreOrchestrator {
     data: SnapshotData,
     sessionName: string,
     launchResult?: { ok: true; sessionName: string; session: import("./types.js").Session; binding: import("./types.js").Binding },
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; startupReplayOptIn?: { version: number } },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[] },
     warnings?: string[],
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
   ): Promise<RestoreNodeResult> {
@@ -1022,7 +1039,7 @@ export class RestoreOrchestrator {
         nodeId: node.id,
         logicalId: node.logicalId,
         status: "failed",
-        error: activeOccupantAmbiguityError(sessionResolution.candidateIds),
+        error: activeOccupantAmbiguityError(sessionResolution.candidateIds, sessionResolution.detail),
       };
     }
     const session = sessionResolution.kind === "resolved" ? sessionResolution.session : null;
@@ -1123,17 +1140,17 @@ export class RestoreOrchestrator {
       }
     }
 
-    // OPR.0.5.7.1 D6 — REPLAY CONTAINMENT. An exact resume returns to an
-    // EXISTING history: replaying startup/onboarding content into it is the
-    // ghost-prompt source (the incident's live specimen: managed CLAUDE.md
-    // blocks rewritten mid-"resume"). Default for resumed histories is ZERO
-    // replay — the launch leg survives untouched (the D2 discriminator proved
-    // an empty runtime-correct plan resumes fine); only an explicit,
-    // versioned opt-in recorded on the result may deliver content. Deliberate
-    // fresh-primed launches are new histories and keep their replay.
-    const exactResume = resumeRequested && !!resumeToken;
-    const startupReplayOptIn = exactResume ? (opts?.startupReplayOptIn ?? null) : null;
-    const replayContained = exactResume && !startupReplayOptIn;
+    // OPR.0.5.7.1 D6a — REPLAY CONTAINMENT, UNCONDITIONAL. An exact resume
+    // returns to an EXISTING history: replaying startup/onboarding content
+    // into it is the ghost-prompt source (the incident's live specimen:
+    // managed CLAUDE.md blocks rewritten mid-"resume"). A resumed history
+    // replays NOTHING — the launch leg survives untouched (the D2
+    // discriminator proved an empty runtime-correct plan resumes fine).
+    // There is deliberately NO replay opt-in surface here: D6b restores the
+    // explicit+versioned+durable+idempotent contract in the D4 operation-id
+    // phase, where its durability primitives live. Deliberate fresh-primed
+    // launches are new histories and keep their replay.
+    const replayContained = resumeRequested && !!resumeToken;
 
     // Attempt restore-safe startup replay if context available
     if (data.nodeStartupContext && opts?.adapters && launchResult) {
@@ -1246,7 +1263,7 @@ export class RestoreOrchestrator {
               const finalStatus = (isPodAware && resumeRequested)
                 ? ((startupResult.continuityOutcome === "resumed" || nativeContinuityProved) ? "resumed" : baseStatus)
                 : baseStatus;
-              return { nodeId: node.id, logicalId: node.logicalId, status: finalStatus, ...(startupReplayOptIn ? { startupReplayOptIn } : {}) };
+              return { nodeId: node.id, logicalId: node.logicalId, status: finalStatus };
             }
             // Pod-aware attention_required: hoisted above both the
             // resume-requested and non-resume-requested failed branches so
@@ -1309,7 +1326,7 @@ export class RestoreOrchestrator {
       }
     }
 
-    return { nodeId: node.id, logicalId: node.logicalId, status: baseStatus, ...(startupReplayOptIn ? { startupReplayOptIn } : {}) };
+    return { nodeId: node.id, logicalId: node.logicalId, status: baseStatus };
   }
 
   private launchedSessionMatchesSnapshotResume(
