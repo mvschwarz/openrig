@@ -292,10 +292,14 @@ describe("OPR.0.5.7.1 repair child — D1 four-way occupant truth + D6a uncondit
   });
 
   it("D1-roundtrip: capture + JSON persistence preserves a valid explicit relation AND an explicit null", async () => {
-    // (a) exactly one session row: capture records it as the occupant.
+    // (a) exactly one RUNNING session row: capture records it as the occupant.
+    // (Desk ruling on 0ecd79a3: registerSession's default 'unknown' is a
+    // fixture premise, not an occupant — capture semantics stay
+    // exactly-one-running, so the fixture states the occupancy explicitly.)
     const rigA = rigRepo.createRig("rt-a");
     const nodeA = rigRepo.addNode(rigA.id, "seat", { role: "worker", runtime: "claude-code" });
     const sessA = sessionRegistry.registerSession(nodeA.id, "rt-a-seat");
+    sessionRegistry.updateStatus(sessA.id, "running");
     const snapA = snapshotCapture.captureSnapshot(rigA.id, "manual");
     const rawA = db.prepare("SELECT data FROM snapshots WHERE id = ?").get(snapA.id) as { data: string };
     expect(JSON.parse(rawA.data).activeSessionIdByNode[nodeA.id]).toBe(sessA.id);

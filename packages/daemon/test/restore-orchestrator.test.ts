@@ -141,6 +141,10 @@ describe("RestoreOrchestrator", () => {
         const sess = sessionRegistry.registerSession(nodeMap[n.logicalId]!, `r99-${n.logicalId}`);
         db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
           .run(opts.resumeType, opts.resumeToken ?? null, opts.restorePolicy ?? "resume_if_possible", sess.id);
+        // OPR.0.5.7.1 repair child (desk ruling on 0ecd79a3): occupancy is a
+        // premise the fixture STATES — registerSession's default 'unknown' is
+        // not an occupant, and capture records the exactly-one-RUNNING row.
+        sessionRegistry.updateStatus(sess.id, "running");
       }
     }
 
