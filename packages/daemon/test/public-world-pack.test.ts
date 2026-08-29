@@ -60,6 +60,7 @@ function writeRigFixture(options: {
   publicGet?: string;
   profileJson?: string;
   exampleGet?: string;
+  showSourcePath?: string;
 } = {}): string {
   const fixturePath = mkdtempSync(join(tmpdir(), "public-world-rig-"));
   temporaryRoots.push(fixturePath);
@@ -77,7 +78,10 @@ function writeRigFixture(options: {
     budgetTokens: 0,
     readFile: (ref) => readFileSync(join(sourcePath, ref), "utf8"),
   });
-  const showJson = JSON.stringify(publicEntry);
+  const showJson = JSON.stringify({
+    ...publicEntry,
+    sourcePath: options.showSourcePath ?? publicEntry.sourcePath,
+  });
   const listJson = options.listJson ?? JSON.stringify([
     ...library.list(),
     { relativePath: "world/install", sourceType: "user_file", sourcePath: "/fixture/private-world" },
@@ -240,9 +244,13 @@ describe("public world pack", () => {
       "discover-context",
       "retrieve-public-pack",
       "retrieve-world-example",
+      "run-public-verifier",
       "world-example-install",
     ]));
     expect(new Set(claims.claims.map((claim) => claim.kind))).toEqual(new Set(["judgment", "operational", "structural"]));
+    const flaggedIds = new Set(claims.claims.filter((claim) => claim.flagged).map((claim) => claim.id));
+    expect(flaggedIds.has("book-example-purpose")).toBe(true);
+    expect(flaggedIds.has("book-to-software")).toBe(true);
     expect(claims.claims.some((claim) => claim.flagged), "taste or unverifiable claims must be visibly flagged").toBe(true);
     for (const claim of claims.claims) {
       expect(claim.statement.length, `${claim.id} must state the claim being classified`).toBeGreaterThan(10);
@@ -265,6 +273,7 @@ describe("public world pack", () => {
     const green = runVerifier(packDir, fixtureEnv);
     expect(green.status, green.stdout + green.stderr).toBe(0);
     expect(green.stdout).toMatch(/passed · 0 failed · 0 skipped/i);
+    expect(green.stdout).toMatch(/ok.*run-public-verifier/i);
 
     const redRoot = mkdtempSync(join(tmpdir(), "public-world-red-"));
     temporaryRoots.push(redRoot);
@@ -425,9 +434,10 @@ describe("public world pack", () => {
 
     const show = runRig(rigPath, ["context", "show", "world-public", "--json"], env);
     expect(show.status, show.stderr).toBe(0);
-    expect(JSON.parse(show.stdout)).toMatchObject({ relativePath: "world-public", sourceType: "builtin" });
+    const shownPack = JSON.parse(show.stdout) as { relativePath: string; sourceType: string; sourcePath: string };
+    expect(shownPack).toMatchObject({ relativePath: "world-public", sourceType: "builtin" });
 
-    const verification = runVerifier(publicWorldDir(), env);
+    const verification = runVerifier(shownPack.sourcePath, env);
     expect(verification.status, verification.stdout + verification.stderr).toBe(0);
     expect(verification.stdout).toMatch(/ok.*retrieve-public-pack/i);
     expect(verification.stdout).toMatch(/ok.*compose-fresh-profile/i);
@@ -446,6 +456,30 @@ describe("public world pack", () => {
     const cleanup = runRig(rigPath, ["context", "rm", "stranger-example", "--json"], env);
     expect(cleanup.status, cleanup.stderr).toBe(0);
     expect(existsSync(join(contextRoot, "stranger-example"))).toBe(false);
+  });
+
+  it("fails loudly when the pack path returned by context show has no verifier", () => {
+    const strangerRoot = mkdtempSync(join(tmpdir(), "public-world-missing-verifier-"));
+    temporaryRoots.push(strangerRoot);
+    const missingVerifierRoot = join(strangerRoot, "world-public");
+    mkdirSync(missingVerifierRoot);
+    const rigPath = writeRigFixture({ showSourcePath: missingVerifierRoot });
+    const env = {
+      ...process.env,
+      PATH: `${rigPath}:${process.env.PATH ?? ""}`,
+      OPENRIG_CONTEXT_PACKS_ROOT: join(strangerRoot, "context-packs"),
+      OPENRIG_SESSION_NAME: "qa@fixture",
+      RIGGED_SESSION_NAME: "",
+    };
+
+    const show = runRig(rigPath, ["context", "show", "world-public", "--json"], env);
+    expect(show.status, show.stderr).toBe(0);
+    const shownPack = JSON.parse(show.stdout) as { sourcePath: string };
+    expect(shownPack.sourcePath).toBe(missingVerifierRoot);
+
+    const verification = runVerifier(shownPack.sourcePath, env);
+    expect(verification.status).not.toBe(0);
+    expect(verification.stderr).toMatch(/verify-world\.sh.*(?:cannot open|no such file)/i);
   });
 
   it("graduates world-example into the same convention and a book-writer exercise", () => {
