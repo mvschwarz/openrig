@@ -40,6 +40,7 @@ function writeRigFixture(options: {
   listJson?: string;
   configRoot?: string;
   addStatus?: number;
+  partialSync?: boolean;
 } = {}): string {
   const fixturePath = mkdtempSync(join(tmpdir(), "public-world-rig-"));
   temporaryRoots.push(fixturePath);
@@ -75,6 +76,13 @@ function writeRigFixture(options: {
     `    exit ${options.addStatus ?? 0}`,
     "  fi",
     '  [ "$4" = "--name" ] || exit 64',
+    `  if [ ${options.partialSync ? 1 : 0} -eq 1 ]; then`,
+    '    target="$OPENRIG_CONTEXT_PACKS_ROOT/$5"',
+    '    mkdir -p "$target"',
+    '    printf \'%s\\n\' \'name: partial-sync-fixture\' > "$target/manifest.yaml"',
+    '    printf \'{"installedAt":"%s","syncError":"HTTP 503"}\\n\' "$target"',
+    "    exit 0",
+    "  fi",
     '  printf \'%s\\n\' "$5" > "$install_state"',
     '  printf \'{"installedAt":"/fixture/context-packs/%s"}\\n\' "$5"',
     'elif [ "$1" = "context" ] && [ "$2" = "list" ]; then',
@@ -86,6 +94,7 @@ function writeRigFixture(options: {
     `    printf '%s\\n' '${listJson}'`,
     "  fi",
     'elif [ "$1" = "context" ] && [ "$2" = "rm" ]; then',
+    `  [ ${options.partialSync ? 1 : 0} -eq 0 ] || exit 72`,
     '  [ -f "$install_state" ] || exit 1',
     '  [ "$(sed -n \'1p\' "$install_state")" = "$3" ] || exit 1',
     '  rm -f "$install_state"',
@@ -278,6 +287,23 @@ describe("public world pack", () => {
 
     expect(result.status).toBe(1);
     expect(result.stdout).toMatch(/FAIL.*world-example-install/i);
+  });
+
+  it("removes a copied pack when daemon sync never indexes it", () => {
+    const contextRoot = mkdtempSync(join(tmpdir(), "public-world-context-root-"));
+    temporaryRoots.push(contextRoot);
+    const rigPath = writeRigFixture({ configRoot: contextRoot, partialSync: true });
+    const result = runVerifier(publicWorldDir(), {
+      ...process.env,
+      PATH: `${rigPath}:${process.env.PATH ?? ""}`,
+      OPENRIG_CONTEXT_PACKS_ROOT: contextRoot,
+      OPENRIG_SESSION_NAME: "qa@fixture",
+      RIGGED_SESSION_NAME: "",
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toMatch(/FAIL.*world-example-install/i);
+    expect(readdirSync(contextRoot)).toEqual([]);
   });
 
   it("graduates world-example into the same convention and a book-writer exercise", () => {
