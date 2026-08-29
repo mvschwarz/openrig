@@ -211,7 +211,7 @@ describe("OPR.0.5.7.1 — D1 consumer alignment (preview / usability / lifecycle
     expect(node.tokenState).toBe("unverified");
   });
 
-  it("R-E2: live preview with zero-or-several RUNNING rows is explicit-null ambiguity — awaiting-decision, freshRequired=false (capture parity)", () => {
+  it("R-E2: live preview with SEVERAL running rows is explicit-null ambiguity — awaiting-decision, freshRequired=false (capture parity)", () => {
     const { rigW, nodeId } = seedRig();
     const s1 = sessionRegistry.registerSession(nodeId, "r77-seat");
     const s2 = sessionRegistry.registerSession(nodeId, "r77-seat-v2");
@@ -222,6 +222,22 @@ describe("OPR.0.5.7.1 — D1 consumer alignment (preview / usability / lifecycle
     expect(node.intendedAction).toBe("awaiting-decision");
     expect(node.freshRequired).toBe(false);
     expect(node.tokenState).toBe("missing");
+  });
+
+  it("R-E2b: live preview with ZERO running rows is explicit-null ambiguity — a historical token is never borrowed, and --fresh cannot override", () => {
+    const { rigW, nodeId } = seedRig();
+    const s1 = sessionRegistry.registerSession(nodeId, "r77-seat");
+    const s2 = sessionRegistry.registerSession(nodeId, "r77-seat-v2");
+    // none running; the older historical row carries a token so the assertion
+    // below proves token truth is NOT borrowed from a non-occupant row.
+    db.prepare("UPDATE sessions SET resume_type = 'claude_name', resume_token = 'tok-historical' WHERE id = ?").run(s1.id);
+    for (const fresh of [undefined, ["seat"]]) {
+      const node = previewNode(rigW, null, fresh);
+      expect(node.intendedAction).toBe("awaiting-decision");
+      expect(node.freshRequired).toBe(false);
+      expect(node.tokenState).toBe("missing");
+      expect(node.reason ?? "").toMatch(/relation|occupant/i);
+    }
   });
 
   it("R-E3 parity floor: preview over the CAPTURED snapshot and preview over the same live state agree per node", () => {
