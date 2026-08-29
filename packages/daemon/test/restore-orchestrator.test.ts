@@ -669,7 +669,8 @@ describe("RestoreOrchestrator", () => {
     });
 
     const orch = createOrchestrator({ tmux });
-    const result = await orch.restore(snap.id);
+    // A1 premise: this launch is a DELIBERATE fresh (no-session nodes fresh-prime only when fresh-listed).
+    const result = await orch.restore(snap.id, { freshLogicalIds: ["worker"] });
 
     // The restore itself may error due to events table sabotage.
     // But if it returns ok, the failed node should have prior state restored.
@@ -887,7 +888,8 @@ describe("RestoreOrchestrator", () => {
       withCheckpoint: "worker",
     });
     const orch = createOrchestrator();
-    const result = await orch.restore(snap.id);
+    // A1 premise: this launch is a DELIBERATE fresh (no-session nodes fresh-prime only when fresh-listed).
+    const result = await orch.restore(snap.id, { freshLogicalIds: ["worker"] });
 
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -928,7 +930,8 @@ describe("RestoreOrchestrator", () => {
       edges: [],
     });
     const orch = createOrchestrator();
-    const result = await orch.restore(snap.id);
+    // A1 premise: this launch is a DELIBERATE fresh (no-session nodes fresh-prime only when fresh-listed).
+    const result = await orch.restore(snap.id, { freshLogicalIds: ["worker"] });
 
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.result.nodes[0]!.status).toBe("fresh-primed");
@@ -944,7 +947,8 @@ describe("RestoreOrchestrator", () => {
       return { ok: true as const };
     });
     const orch = createOrchestrator({ tmux });
-    const result = await orch.restore(snap.id);
+    // A1 premise: DELIBERATE fresh for every sessionless node in the default seed.
+    const result = await orch.restore(snap.id, { freshLogicalIds: ["orchestrator", "worker-a", "worker-b"] });
 
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -1767,7 +1771,8 @@ describe("RestoreOrchestrator", () => {
       transcriptStore,
     });
 
-    const result = await orch.restore(snap.id);
+    // A1 premise: DELIBERATE fresh for every sessionless node in the default seed.
+    const result = await orch.restore(snap.id, { freshLogicalIds: ["orchestrator", "worker-a", "worker-b"] });
     expect(result.ok).toBe(true);
     if (result.ok) {
       // Boundary markers were actually written to transcript files
@@ -1800,7 +1805,8 @@ describe("RestoreOrchestrator", () => {
       codexResume: mockCodexResume(),
     });
 
-    const result = await orch.restore(snap.id);
+    // A1 premise: DELIBERATE fresh for every sessionless node in the default seed.
+    const result = await orch.restore(snap.id, { freshLogicalIds: ["orchestrator", "worker-a", "worker-b"] });
     expect(result.ok).toBe(true);
 
     // Every createSession call should have received env vars
@@ -1833,7 +1839,8 @@ describe("RestoreOrchestrator", () => {
         codexResume: mockCodexResume(),
       });
 
-      const result = await orch.restore(snap.id);
+      // A1 premise: DELIBERATE fresh (fresh-listed).
+      const result = await orch.restore(snap.id, { freshLogicalIds: ["worker"] });
       expect(result.ok).toBe(true);
       expect(createSessionSpy).toHaveBeenCalledWith(expect.any(String), tmpDir, expect.any(Object));
     } finally {
@@ -1970,7 +1977,8 @@ describe("RestoreOrchestrator", () => {
     });
 
     const orchestrator = createOrchestrator();
-    const result = await orchestrator.restore(snapshot.id);
+    // A1 premise: the fresh node is DELIBERATE (fresh-listed) — the D3 aggregation claim is unchanged.
+    const result = await orchestrator.restore(snapshot.id, { freshLogicalIds: ["agent-a"] });
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -2006,6 +2014,8 @@ describe("RestoreOrchestrator", () => {
 
     const result = await createOrchestrator().restore(snapshot.id, {
       fsOps: { exists: (p) => p !== missingPath },
+      // A1 premise: a replay-CONSUMING deliberate fresh — validation must block.
+      freshLogicalIds: ["agent-a"],
     });
 
     expect(result.ok).toBe(false);
@@ -2131,6 +2141,8 @@ describe("RestoreOrchestrator", () => {
 
     const result = await createOrchestrator().restore(snapshot.id, {
       fsOps: { exists: (p) => p !== missingPath },
+      // A1 premise: replay-CONSUMING deliberate fresh — the genuinely-fatal blocker must stand.
+      freshLogicalIds: ["agent-a"],
     });
 
     // Still blocked (required startup file is genuinely fatal).
@@ -2194,6 +2206,8 @@ describe("RestoreOrchestrator", () => {
     const result = await createOrchestrator().restore(snapshot.id, {
       adapters: { "claude-code": adapter },
       fsOps: { exists: (p) => p !== missingPath },
+      // A1 premise: replay-CONSUMING deliberate fresh — the optional-file warning path.
+      freshLogicalIds: ["agent-a"],
     });
 
     expect(result.ok).toBe(true);
@@ -2225,6 +2239,9 @@ describe("RestoreOrchestrator", () => {
     const orch = createOrchestrator({ tmux, claude });
     const result = await orch.restore(snap.id, {
       fsOps: { exists: (p) => !p.includes("openrig-missing-required-startup") },
+      // A1 premise: fresh-listed so the node CONSUMES replay — its resumable
+      // session would otherwise (correctly) skip replay-only validation.
+      freshLogicalIds: ["agent-a"],
     });
 
     expect(result.ok).toBe(false);
@@ -2933,6 +2950,8 @@ describe("RestoreOrchestrator", () => {
       const sess = sessionRegistry.registerSession(node.id, "seed@r99-init");
       db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
         .run("claude_id", "tok-abc", "resume_if_possible", sess.id);
+      // A1 premise: occupancy is STATED — capture records the exactly-one-running row.
+      sessionRegistry.updateStatus(sess.id, "running");
       if (typeof opts.boundName === "string") {
         sessionRegistry.updateBinding(node.id, { tmuxSession: opts.boundName });
       } else if (opts.bindEmpty) {
