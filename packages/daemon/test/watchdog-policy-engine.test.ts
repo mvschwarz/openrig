@@ -20,6 +20,7 @@ import {
   WatchdogPolicyEngine,
 } from "../src/domain/watchdog-policy-engine.js";
 import type { PersistedEvent } from "../src/domain/types.js";
+import type { PolicyEvaluation } from "../src/domain/policies/types.js";
 
 describe("WatchdogPolicyEngine (PL-004 Phase C R1)", () => {
   let db: Database.Database;
@@ -391,5 +392,69 @@ describe("WatchdogPolicyEngine — fire-time target-generation gate (i-c)", () =
     // no entry for alice@rig → resolveTargetGeneration returns null
     await makeEngine().evaluate(armReminder("gen-A"));
     expect(deliveryCalls.length).toBe(1);
+  });
+});
+
+// ─── OPR.0.5.6.24 F-14 — the two ruled shared-engine effects, pinned ──────────
+describe("engine effects for the parked-owner consumer (OPR.0.5.6.24)", () => {
+  function makeHarness(opts: { deliver?: DeliveryFn; policyResult: () => Promise<PolicyEvaluation> }) {
+    const db = createDb();
+    migrate(db, [coreSchema, eventsSchema, watchdogJobsSchema, watchdogHistorySchema]);
+    const bus = new EventBus(db);
+    const jobsRepo = new WatchdogJobsRepository(db);
+    const log = new WatchdogHistoryLog(db);
+    const captured: PersistedEvent[] = [];
+    bus.subscribe((e) => captured.push(e));
+    const engine = new WatchdogPolicyEngine({
+      jobsRepo,
+      historyLog: log,
+      eventBus: bus,
+      deliver: opts.deliver ?? (async () => ({ status: "ok" as const })),
+      additionalPolicies: [
+        { name: "parked-owner-consumer", evaluate: () => opts.policyResult() },
+      ],
+    } as never);
+    const job = jobsRepo.register({
+      policy: "parked-owner-consumer",
+      specYaml:
+        "policy: parked-owner-consumer\ntarget:\n  session: parked-owner-consumer@test-rig\ninterval_seconds: 120\n",
+      targetSession: "parked-owner-consumer@test-rig",
+      intervalSeconds: 120,
+      activeWakeIntervalSeconds: null,
+      registeredBySession: "daemon@kernel",
+    });
+    return { db, engine, job, log, captured };
+  }
+
+  it("quiet pin: a no-parked-owner skip writes ZERO history rows and emits no watchdog.* event", async () => {
+    const h = makeHarness({
+      policyResult: async () => ({ action: "skip", reason: "no-parked-owner", notes: { rig: "test-rig" } }),
+    });
+    await h.engine.evaluate(h.job);
+    expect(h.log.countForJob(h.job.jobId)).toBe(0);
+    expect(h.captured.filter((e) => String(e.type).startsWith("watchdog."))).toHaveLength(0);
+    h.db.close();
+  });
+
+  it("delivery-reason pin: the delivery error string is persisted EXACTLY into the sent row's evaluationNotes.deliveryReason", async () => {
+    const refusal = "Refused: 'dev-planner@test-rig' is at an interactive prompt (target_needs_input). No text was sent.";
+    const h = makeHarness({
+      deliver: async () => ({ status: "failed" as const, error: refusal }),
+      policyResult: async () => ({
+        action: "send",
+        target: { session: "dev-planner@test-rig" },
+        message: "wake",
+        notes: { episodeSeat: "dev-planner@test-rig", idsHash: "abc", episodeKey: "k#1" },
+      }),
+    });
+    await h.engine.evaluate(h.job);
+    const entries = h.log.listForJob(h.job.jobId, 10);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.outcome).toBe("sent");
+    expect(entries[0]?.deliveryStatus).toBe("failed");
+    expect(entries[0]?.evaluationNotes?.["deliveryReason"]).toBe(refusal);
+    // The policy's own notes survive the merge untouched.
+    expect(entries[0]?.evaluationNotes?.["episodeKey"]).toBe("k#1");
+    h.db.close();
   });
 });

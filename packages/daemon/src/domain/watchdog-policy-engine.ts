@@ -114,6 +114,11 @@ const QUIET_SKIP_REASONS = new Set<string>([
   // audited signal is the WAKE (fired) path.
   "no_pending_gate",
   "seat_active",
+  // OPR.0.5.6.24 — the parked-owner consumer's clean-scan no-op: nothing
+  // parked, nothing closed, nothing deferred. Suppressed so a routine rig
+  // scan writes no history (the loud, audited signals are the SENT wake,
+  // episode-ended, and all-parked-owners-deferred).
+  "no-parked-owner",
   // OPR.0.4.3.16 rev1-r1 fixback (advisor ruling 2026-07-03): seat_needs_input
   // and activity_stale_unknown are the COMMON recurring states for this
   // policy's own target scenario — a gate qitem pending on a seat that has
@@ -414,7 +419,13 @@ export class WatchdogPolicyEngine {
       deliveryTargetSession: outcome.target.session,
       deliveryStatus: delivery.status,
       deliveryMessage: outcome.message,
-      evaluationNotes: outcome.notes ?? null,
+      // OPR.0.5.6.24 — the delivery error/reason string survives into the
+      // durable record so a policy can distinguish an interactive-prompt
+      // refusal from a generic failure (status alone discards that identity).
+      evaluationNotes:
+        delivery.error !== undefined
+          ? { ...(outcome.notes ?? {}), deliveryReason: delivery.error }
+          : outcome.notes ?? null,
     });
     if (!isContextUsageThreshold) {
       this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, true);
