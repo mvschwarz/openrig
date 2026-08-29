@@ -222,6 +222,35 @@ test("every mechanical S15 candidate needs its own disposition", () => {
   });
 });
 
+test("duplicate same-line mechanical candidates consume dispositions by occurrence", () => {
+  withFixture(({ repo, rules, review, receipt }) => {
+    const publicFile = join(repo, "public/guide.md");
+    write(publicFile, "Connect to :4545, then retry :4545.\n");
+    commitAll(repo, "duplicate mechanical candidates");
+    const cutSha = gitHead(repo);
+    writeFileSync(review, JSON.stringify({
+      surfaces: [{
+        path: "public/guide.md",
+        sha256: sha256(publicFile),
+        verdict: "ship",
+        reason: "Generic repeated example ports.",
+        candidateDispositions: [
+          { kind: "port", line: 1, value: ":4545", disposition: "Generic example." },
+          { kind: "port", line: 1, value: ":4545", disposition: "Generic example." },
+        ],
+      }],
+    }));
+
+    const result = runGate({ repo, rules, review, receipt, cutSha, surfaceRoot: "public" });
+    assert.equal(result.status, 0, result.stderr);
+    const output = JSON.parse(readFileSync(receipt, "utf8"));
+    assert.deepEqual(output.surfaces[0].candidates, [
+      { kind: "port", line: 1, value: ":4545", disposition: "Generic example." },
+      { kind: "port", line: 1, value: ":4545", disposition: "Generic example." },
+    ]);
+  });
+});
+
 test("the gate runs the full scanner over packager files outside the human-review roots", () => {
   withFixture(({ repo, rules, review, receipt }) => {
     const publicFile = join(repo, "public/guide.md");
