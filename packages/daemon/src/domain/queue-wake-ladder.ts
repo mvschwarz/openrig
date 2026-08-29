@@ -450,14 +450,22 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       .all() as Array<{ qitem_id: string }>;
 
     // OPR.0.5.6.24 B2 (advisor-ruled one-engine arm): claimed in-progress rows
-    // whose last nudge is the parked-owner consumer's FAILED wake join the SAME
-    // ladder flow through their native lastNudgeResult vocabulary. The consumer
-    // makes one attempt and never retries — this ladder owns everything after.
+    // that a parked-owner consumer wake FAILED into join the SAME ladder flow.
+    // Consumer ORIGIN is the row's durable FAILED transition note (the ladder's
+    // own retries overwrite last_nudge_result with generic transport detail, so
+    // the column carries only failed-CLASS eligibility, never origin — R2's
+    // one-shot-entry finding). Retry cap and exhaustion stay bounded by the
+    // ladder's own derived markers; the consumer never retries.
     const parkedOwnerFailureRows = deps.db
       .prepare(
-        `SELECT qitem_id FROM queue_items
-          WHERE state = 'in-progress' AND claimed_at IS NOT NULL
-            AND last_nudge_result LIKE 'failed: parked-owner wake delivery%'`,
+        `SELECT q.qitem_id FROM queue_items q
+          WHERE q.state = 'in-progress' AND q.claimed_at IS NOT NULL
+            AND q.last_nudge_result LIKE 'failed:%'
+            AND EXISTS (
+              SELECT 1 FROM queue_transitions t
+               WHERE t.qitem_id = q.qitem_id
+                 AND t.transition_note LIKE 'parked-owner wake delivery failed:%'
+            )`,
       )
       .all() as Array<{ qitem_id: string }>;
 

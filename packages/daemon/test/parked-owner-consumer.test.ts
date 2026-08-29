@@ -373,32 +373,64 @@ describe("parked-owner-consumer — R2 integration hard checks (OPR.0.5.6.24)", 
     expect(JSON.stringify(again.notes)).toMatch(/already[-_]woken/);
   });
 
-  it("B2 hard check: a failed consumer wake enters the REAL S01 ladder via last_nudge_result — the ladder attempts the wake", async () => {
+  it("B2 hard check (real-persistence discriminator): consumer failure enters the ladder, SURVIVES the ladder's own generic overwrite, retries to cap, and reaches escalation", async () => {
     const qitemId = await mkClaimedRow();
-    repo.recordNudgeAttempt(qitemId, `${NUDGE_FAIL_PREFIX} — transport timeout after 5000ms`);
-    // Back-date the attempt past the retry interval so the ladder's due-gate opens
-    // (the real gate working as designed — a just-failed wake is honestly not due).
-    db.prepare("UPDATE queue_items SET last_nudge_attempt = ? WHERE qitem_id = ?").run(
-      new Date(Date.now() - 10 * 60_000).toISOString(),
+    // Consumer origin, durably: the FAILED transition note (what the consumer's
+    // reconciliation appends) + the initial consumer-prefixed nudge result.
+    repo.update({
       qitemId,
-    );
+      actorSession: "watchdog@system",
+      transitionNote: `${FAILED_PREFIX} ${SEAT}|deadbeef00000000#1; transport timeout after 5000ms`,
+    });
+    repo.recordNudgeAttempt(qitemId, `${NUDGE_FAIL_PREFIX} — transport timeout after 5000ms`);
+    const backdate = () => {
+      db.prepare("UPDATE queue_items SET last_nudge_attempt = ? WHERE qitem_id = ?").run(
+        new Date(Date.now() - 10 * 60_000).toISOString(),
+        qitemId,
+      );
+      db.prepare(
+        "UPDATE queue_transitions SET ts = ? WHERE qitem_id = ? AND (transition_note LIKE 'wake-attempt:%' OR transition_note LIKE 'escalation-rung:%')",
+      ).run(new Date(Date.now() - 10 * 60_000).toISOString(), qitemId);
+    };
     const mod = await import("../src/domain/queue-wake-ladder.js");
-    const calls: Array<{ qitemId: string; target: string }> = [];
-    await mod.runWakeLadderTick({
-      db,
-      queueRepo: repo,
-      attemptWake: async (q: string, target: string) => {
-        calls.push({ qitemId: q, target });
-        return "delivered";
-      },
-      resolveOrchestrator: () => "orch@r",
-      retryIntervalSeconds: 300,
-      retryCap: 3,
-      unconfirmedWindowMinutes: 30,
-      swapGraceSeconds: 180,
-      log: () => {},
-    } as never);
-    expect(calls.some((c) => c.qitemId === qitemId)).toBe(true); // the real ladder saw and acted
+    const calls: string[] = [];
+    // The PRODUCTION persistence emulated at the seam: every attempt lands a
+    // GENERIC transport failure in last_nudge_result (what the default
+    // attemptWake's maybeNudge path writes) — R2's overwrite, exercised live.
+    const tick = () =>
+      mod.runWakeLadderTick({
+        db,
+        queueRepo: repo,
+        attemptWake: async (q: string, target: string) => {
+          calls.push(q);
+          const generic = "failed:tmux session not found";
+          repo.recordNudgeAttempt(q, generic);
+          return generic;
+        },
+        resolveOrchestrator: () => "orch@r",
+        retryIntervalSeconds: 300,
+        retryCap: 3,
+        unconfirmedWindowMinutes: 30,
+        swapGraceSeconds: 180,
+        log: () => {},
+      } as never);
+    backdate();
+    await tick(); // entry: consumer prefix selects the row; retry persists GENERIC
+    expect(calls.filter((q) => q === qitemId).length).toBe(1);
+    expect(repo.getById(qitemId)?.lastNudgeResult).toBe("failed:tmux session not found"); // the overwrite is real
+    backdate();
+    await tick(); // RE-ENTRY after the overwrite — the durable note keeps eligibility
+    expect(calls.filter((q) => q === qitemId).length).toBe(2);
+    backdate();
+    await tick(); // third attempt reaches the cap
+    expect(calls.filter((q) => q === qitemId).length).toBeGreaterThanOrEqual(3);
+    backdate();
+    await tick(); // past cap: escalation phase must be REACHABLE (rung/exhausted marker)
+    const markers = db
+      .prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = ? ORDER BY ts, rowid")
+      .all(qitemId) as Array<{ transition_note: string | null }>;
+    const joined = markers.map((m) => m.transition_note ?? "").join("\n");
+    expect(joined).toMatch(/escalation-rung:|ladder-exhausted:/);
   });
 
   it("late-rig hard check (born-armed): createRig arms the supervisor job in the same act, no restart", () => {

@@ -1730,8 +1730,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         // parked diagnosis (diagnoseRigParked over the arbitrated oracle +
         // destination-scoped obligations + wake status; the same derivation
         // `rig parked` serves) consumed by one rig-level supervisor job.
-        // Episode receipts are the job's own durable history rows; nothing
-        // lives in memory.
+        // Episode receipts are TRANSITIONS on the obligation row, written
+        // reserve-before-deliver (the retention active-frontier invariant is
+        // the durability proof); watchdog history is telemetry only.
         makeParkedOwnerConsumerPolicy({
           diagnoseRig: (rigName) => {
             const seats = db
@@ -1807,8 +1808,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // `parked-owner-consumer@<rigName>` (member@rig shape, policy name as the
     // member slug). activeWakeIntervalSeconds stays NULL so the engine never
     // throttles one seat's wake because another fired — per-seat dedup lives in
-    // the durable episode receipts. Rigs created after startup gain their job
-    // at the next daemon start (named limitation, no watcher machinery).
+    // the durable episode receipts. Rigs created after startup are BORN ARMED:
+    // rigRepo.onRigCreated (wired below) runs the same ensure in the creation
+    // act itself (the birth-property ruling) — no restart wait, no watcher.
     {
       const ensureParkedOwnerJob = (rigName: string) => {
         const anchor = makeRigAnchor(rigName);
