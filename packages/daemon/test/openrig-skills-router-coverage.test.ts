@@ -163,9 +163,10 @@ describe("S22 OpenRig skill router coverage", () => {
     expect(teaching).not.toBeNull();
     const taught = readFileSync(join(teaching!.sourcePath, "SKILL.md"), "utf8");
     expect(taught).toContain("rig gateway human list --json");
-    expect(taught).toContain("Use `humans[].entityId` to derive the durable blocker as `<entityId>@kernel`");
+    expect(taught).toContain("Use `humans[].entityId` to derive the durable blocker as `<entityId>@host`");
+    expect(taught).toContain("The entity id must use the human-seat prefix (`human` or `human-...`)");
     expect(taught).toContain("The returned `humans[].address` is the gateway delivery address, not the `--on` value");
-    expect(taught).toContain("rig queue block <qitem-id> --on <entityId>@kernel");
+    expect(taught).toContain("rig queue block <qitem-id> --on <entityId>@host");
     expect(taught).toMatch(/gateway.*Slack.*same row/is);
     expect(taught).toMatch(/any seat.*escalat/is);
     expect(taught).toMatch(/rig send.*agent.*terminal.*not.*Slack/is);
@@ -183,7 +184,7 @@ describe("S22 OpenRig skill router coverage", () => {
         nudge: false,
       });
       const registeredHuman = registry.entities[0]!;
-      const taughtBlocker = `${registeredHuman.entityId}@kernel`;
+      const taughtBlocker = `${registeredHuman.entityId}@host`;
       repo.update({
         qitemId: row.qitemId,
         actorSession: "dev-qa@v-openrig-build",
