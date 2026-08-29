@@ -370,19 +370,23 @@ function bindReview(surfaces, review) {
       }
       continue;
     }
-    const dispositions = Array.isArray(judgment.candidateDispositions)
-      ? judgment.candidateDispositions
+    const remainingDispositions = Array.isArray(judgment.candidateDispositions)
+      ? [...judgment.candidateDispositions]
       : [];
-    const dispositionMap = new Map(dispositions.map((entry) => [candidateKey(entry), entry]));
+    const matchedDispositions = [];
     for (const candidate of surface.candidates) {
-      const disposition = dispositionMap.get(candidateKey(candidate));
+      const dispositionIndex = remainingDispositions.findIndex(
+        (entry) => candidateKey(entry) === candidateKey(candidate),
+      );
+      const disposition = dispositionIndex === -1
+        ? undefined
+        : remainingDispositions.splice(dispositionIndex, 1)[0];
+      matchedDispositions.push(disposition);
       if (!disposition || typeof disposition.disposition !== "string" || disposition.disposition.trim() === "") {
         errors.push(`${surface.path}: undispositioned ${candidate.kind} candidate line ${candidate.line}: ${candidate.value}`);
-      } else {
-        dispositionMap.delete(candidateKey(candidate));
       }
     }
-    for (const stale of dispositionMap.values()) {
+    for (const stale of remainingDispositions) {
       errors.push(`${surface.path}: stale candidate disposition ${candidateKey(stale)}`);
     }
     result.push({
@@ -390,9 +394,9 @@ function bindReview(surfaces, review) {
       sha256: surface.sha256,
       verdict: judgment.verdict,
       reason: judgment.reason,
-      candidates: surface.candidates.map((candidate) => ({
+      candidates: surface.candidates.map((candidate, index) => ({
         ...candidate,
-        disposition: dispositions.find((entry) => candidateKey(entry) === candidateKey(candidate))?.disposition,
+        disposition: matchedDispositions[index]?.disposition,
       })),
     });
   }
