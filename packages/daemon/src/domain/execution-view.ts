@@ -40,15 +40,19 @@ export interface ExecutionViewDeps {
   /** The missions root (workspace.slices_root). Null => fs-derived sections floor
    *  to INDETERMINATE; the queue-derived sections still answer. */
   slicesRoot: () => string | null;
-  /** THE activity oracle (agent-activity-store shape) — the DESIGN's Q1/Q6 join
-   *  leg. sessions.status is NOT an acceptable stand-in (live specimen: working
-   *  lanes labeled `superseded`). Absent => activity cells floor INDETERMINATE. */
-  activity?: {
-    getLatestForNode(input: { sessionName?: string | null; now?: Date }): {
-      state: string;
-      reason: string;
-      stale?: boolean;
-      sampledAt: string;
+  /** THE one activity oracle (S19 locked contract): SeatActivityService's
+   *  ARBITRATED seat-keyed read — the same source rig ps, node inventory, and
+   *  parked-query consume. The vocabulary (working | idle-at-prompt | unknown)
+   *  and the separate needsInput {count, reason} pass through UNTRANSLATED —
+   *  this module never re-arbitrates. sessions.status and the parallel
+   *  AgentActivityStore ingest are NOT acceptable stand-ins (live specimen:
+   *  working lanes labeled `superseded`). Absent => INDETERMINATE floors. */
+  seatActivity?: {
+    getSeatStateBySession(sessionName: string): {
+      activity: "working" | "idle-at-prompt" | "unknown";
+      needsInput: { count: number; reason: string | null };
+      decidedBy: string | null;
+      changedAt: string;
     } | null;
   };
   now?: () => Date;
@@ -112,6 +116,37 @@ function parseArrayField(v: unknown): string[] | Indeterminate {
 
 const SLICE_TAG = /^slice:(.+)$/;
 const CANDIDATE_TAG = /^candidate:(.+)$/;
+
+/** Candidate identity is a COMMIT, not a string. Production carries mixed forms —
+ *  abbreviated tags (`dced9edb0`), full 40-hex artifact fields, and annotated
+ *  fields (`dced9edb0 (exact tip over base …)`). Extract the leading hex token;
+ *  anything without one is malformed and floors excluded, never matched. */
+const SHA_TOKEN = /^([0-9a-fA-F]{7,40})(?:\b|$)/;
+function extractShaToken(raw: string | null): string | null {
+  if (!raw) return null;
+  const m = raw.trim().match(SHA_TOKEN);
+  return m?.[1] ? m[1].toLowerCase() : null;
+}
+
+/** Resolve a (possibly abbreviated) sha token to its full commit id via the repo
+ *  context. Ambiguous or non-resolving tokens return null — raw prefix string
+ *  equality is never accepted as commit identity. */
+function resolveCommit(
+  exec: (cmd: string, args: string[]) => string,
+  repoCtx: string,
+  token: string,
+  cache: Map<string, string | null>,
+): string | null {
+  if (cache.has(token)) return cache.get(token) ?? null;
+  let full: string | null = null;
+  try {
+    full = exec("git", ["-C", repoCtx, "rev-parse", "--verify", `${token}^{commit}`]).toLowerCase();
+  } catch {
+    full = null; // ambiguous, unknown, or malformed at the object store — floors honestly
+  }
+  cache.set(token, full);
+  return full;
+}
 
 /** Numeric-aware compare of release-mission dir names (release-0.5.10 > release-0.5.6). */
 function compareReleaseDirs(a: string, b: string): number {
@@ -379,7 +414,7 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
       fragileJoin = true;
       joinBasis = "row/branch naming only (EC-3 field absent — legacy baton)";
     }
-    const oracle = deps.activity?.getLatestForNode({ sessionName: r.destination_session, now: now() }) ?? null;
+    const arbitrated = deps.seatActivity?.getSeatStateBySession(r.destination_session) ?? null;
     const pickup = derivePickup({
       state: r.state,
       claimedAt: r.claimed_at,
@@ -396,12 +431,18 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
       head_sha: headSha,
       fragile_join: fragileJoin,
       join_basis: joinBasis,
-      activity: oracle
-        ? { state: oracle.state, reason: oracle.reason, stale: oracle.stale ?? false, sampled_at: oracle.sampledAt, source: "agent-activity oracle (events agent.activity)" }
+      activity: arbitrated
+        ? {
+            activity: arbitrated.activity,
+            needs_input: arbitrated.needsInput,
+            decided_by: arbitrated.decidedBy,
+            changed_at: arbitrated.changedAt,
+            source: "SeatActivityService arbitrated seat state (the one oracle; vocabulary passed through untranslated)",
+          }
         : {
-            state: INDETERMINATE,
-            reason: deps.activity ? "no activity evidence recorded for this seat" : "activity oracle not wired on this deps set",
-            source: "agent-activity oracle (absent evidence floors INDETERMINATE, never idle/dead)",
+            activity: INDETERMINATE,
+            basis: deps.seatActivity ? "no arbitrated state for this seat" : "seat-activity oracle not wired on this deps set",
+            source: "SeatActivityService arbitrated seat state (no answer floors INDETERMINATE, never idle/dead)",
           },
       pickup,
       source: { qitem_id: r.qitem_id },
@@ -425,6 +466,7 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
 
   // ---- Q4 ladder (also feeds Q2's deps-folded) ----
   const rigsRoot = (deps.rigsRoot ?? resolveLegacyTopologyRigsRoot)();
+  const commitCache = new Map<string, string | null>();
   const ladderOf = (facts: SliceFacts): Record<string, unknown> => {
     const fm = facts.frontmatter;
     const locked: Rung = typeof fm["approved-spec-at"] === "string"
@@ -447,26 +489,59 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
       }
       if (candidateSha) break;
     }
+    // Candidate identity is COMMIT-AWARE: the tag token resolves to a full
+    // commit id through the repo context; raw prefix string equality is never
+    // commit identity.
+    const builtToken = extractShaToken(candidateSha);
+    const builtResolved = builtToken && repoCtx ? resolveCommit(exec, repoCtx, builtToken, commitCache) : null;
     const built = candidateSha
-      ? { candidate_sha: candidateSha, basis: `candidate:* tag on row ${candidateRow}` }
+      ? {
+          candidate_sha: builtToken ?? candidateSha,
+          resolved_commit: builtResolved ?? INDETERMINATE,
+          basis: `candidate:* tag on row ${candidateRow}${builtResolved ? " (resolved to full commit via repo context)" : repoCtx ? " (token did not resolve to a commit)" : " (no repo context to resolve through)"}`,
+        }
       : { candidate_sha: INDETERMINATE, basis: "no candidate:* tag on any row bound to this slice (unbuilt and unrecorded are indistinguishable here)" };
-    // reviewed: registry artifacts naming this slice, SCOPED TO THE BUILT SHA —
-    // the contract is {legs+verdicts at sha}; historical verdicts at other
-    // candidates are neither clearance nor poison here.
+    // reviewed: registry artifacts naming this slice, SCOPED TO THE BUILT COMMIT —
+    // the contract is {legs+verdicts at sha}. Mixed production forms (abbreviated
+    // tags, full shas, annotated fields) join by RESOLVED commit; malformed,
+    // ambiguous, or non-resolving inputs are excluded with the reason carried —
+    // they neither clear nor poison.
     const artifacts = scanReviewArtifacts(rigsRoot, [facts.dir, ...(typeof facts.id === "string" ? [facts.id] : [])]);
     let reviewed: Record<string, unknown>;
     if (artifacts === INDETERMINATE) {
       reviewed = { value: INDETERMINATE, basis: `review-artifact root unreadable (${rigsRoot})`, legs: [] };
-    } else if (!candidateSha) {
-      reviewed = { value: INDETERMINATE, basis: "no built candidate sha to scope review legs to", legs: [] };
+    } else if (!candidateSha || !builtToken) {
+      reviewed = { value: INDETERMINATE, basis: "no built candidate token to scope review legs to", legs: [] };
+    } else if (!builtResolved) {
+      reviewed = {
+        value: INDETERMINATE,
+        basis: repoCtx
+          ? `built token ${builtToken} did not resolve to a commit — identity join impossible`
+          : "no repo context to resolve candidate identity through",
+        legs: [],
+      };
     } else {
-      const atSha = artifacts.filter((a) => a.candidateSha === candidateSha);
-      reviewed = atSha.length === 0
-        ? { value: INDETERMINATE, basis: `no review artifact at the built candidate ${candidateSha.slice(0, 9)} on the registry surface checked`, legs: [] }
+      const excluded: { path: string; reason: string }[] = [];
+      const atCommit = artifacts.filter((a) => {
+        const token = extractShaToken(a.candidateSha);
+        if (!token) {
+          excluded.push({ path: a.path, reason: "malformed candidate_sha (no sha token)" });
+          return false;
+        }
+        const resolved = resolveCommit(exec, repoCtx!, token, commitCache);
+        if (!resolved) {
+          excluded.push({ path: a.path, reason: `token ${token} did not resolve to a commit` });
+          return false;
+        }
+        return resolved === builtResolved;
+      });
+      reviewed = atCommit.length === 0
+        ? { value: INDETERMINATE, basis: `no review artifact resolves to the built commit ${builtResolved.slice(0, 9)} on the registry surface checked`, legs: [], excluded }
         : {
-            value: atSha.every((a) => ["CLEAR", "PASS"].includes(a.verdict)),
-            basis: `frontmatter verdicts at ${atSha.length} artifact(s) scoped to candidate ${candidateSha.slice(0, 9)}`,
-            legs: atSha.map((a) => ({ path: a.path, verdict: a.verdict, candidate_sha: a.candidateSha, artifact_type: a.artifactType })),
+            value: atCommit.every((a) => ["CLEAR", "PASS"].includes(a.verdict)),
+            basis: `frontmatter verdicts at ${atCommit.length} artifact(s) joined by resolved commit ${builtResolved.slice(0, 9)}`,
+            legs: atCommit.map((a) => ({ path: a.path, verdict: a.verdict, candidate_sha: a.candidateSha, artifact_type: a.artifactType })),
+            excluded,
           };
     }
     // folded / adopted need a repo context — any reachable EC-3 worktree shares refs.
@@ -479,9 +554,9 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
       folded = { value: INDETERMINATE, basis: "no reachable repo context (no EC-3 worktree on the board)" };
       adopted = { value: INDETERMINATE, basis: "no reachable repo context (no EC-3 worktree on the board)" };
     } else {
-      folded = gitAncestor(exec, repoCtx, candidateSha, "main");
+      folded = gitAncestor(exec, repoCtx, builtResolved ?? candidateSha, "main");
       adopted = buildInfo.commit
-        ? gitAncestor(exec, repoCtx, candidateSha, buildInfo.commit)
+        ? gitAncestor(exec, repoCtx, builtResolved ?? candidateSha, buildInfo.commit)
         : { value: INDETERMINATE, basis: "daemon build stamp absent (dev run) — adopted rung underivable" };
     }
     return { slice_id: facts.id, dir: facts.dir, locked, built, reviewed, folded, adopted };
@@ -630,18 +705,20 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
   // from the ACTIVITY ORACLE — sessions.status is not consulted (it labeled
   // live working lanes `superseded` on the real board).
   let idleSeats: number | Indeterminate = INDETERMINATE;
-  let idleBasis = "activity oracle not wired on this deps set";
-  if (deps.activity) {
+  let idleBasis = "seat-activity oracle not wired on this deps set";
+  if (deps.seatActivity) {
     try {
       const roster = deps.db
         .prepare(`SELECT DISTINCT session_name FROM sessions`)
         .all() as { session_name: string }[];
       idleSeats = roster.filter((s) => {
         if (inProgressSeats.has(s.session_name)) return false;
-        const a = deps.activity!.getLatestForNode({ sessionName: s.session_name, now: now() });
-        return !!a && a.state === "idle" && !a.stale;
+        const a = deps.seatActivity!.getSeatStateBySession(s.session_name);
+        // Capacity = arbitrated idle-at-prompt with NOTHING demanding input —
+        // a needs-input seat is waiting on someone, not available.
+        return !!a && a.activity === "idle-at-prompt" && a.needsInput.count === 0;
       }).length;
-      idleBasis = "activity oracle state='idle' (fresh) over the sessions roster, minus seats holding in-progress rows";
+      idleBasis = "arbitrated seat state idle-at-prompt with needsInput.count=0 over the sessions roster (names only), minus seats holding in-progress rows";
     } catch {
       idleSeats = INDETERMINATE;
       idleBasis = "sessions roster unreadable";
