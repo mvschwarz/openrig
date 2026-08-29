@@ -38,8 +38,8 @@ proof, verify-by-effect, honest receipts); rounds happen per-wave.
    receiver's ONLY context: the builder's first act is self-onboarding from the
    routed reading list (the mission-install pattern at slice scale), then checking
    the map against the ground it actually stands on. Nobody knows the ground floor
-   better than the builder; the wide angle lives a layer up. When the terrain
-   diverges from the sketch, that is a finding to raise — not a reason to follow
+   better than the builder; the wide angle lives a layer up. When the ground
+   disagrees with the map, that is a finding to raise — not a reason to follow
    the map off a cliff.
 3. **BUILD:** failing-test-first against a pristine base with committed final test
    bytes; freeze a single candidate revision; receipts cite the FINAL revision
