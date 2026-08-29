@@ -33,6 +33,14 @@ proof, verify-by-effect, honest receipts); rounds happen per-wave.
    belong where the building context lives. Detailed sequencing instructions were
    scaffolding when models were weak; today they are a cage, and per-command
    routing is the failure mode, not diligence.
+   THE BRIEF IS A MAP, NOT THE TERRITORY. Distillation is welcome — for a minimal
+   slice the brief may honestly be richer than the spec — but it is never the
+   receiver's ONLY context: the builder's first act is self-onboarding from the
+   routed reading list (the mission-install pattern at slice scale), then checking
+   the map against the ground it actually stands on. Nobody knows the ground floor
+   better than the builder; the wide angle lives a layer up. When the terrain
+   diverges from the sketch, that is a finding to raise — not a reason to follow
+   the map off a cliff.
 3. **BUILD:** failing-test-first against a pristine base with committed final test
    bytes; freeze a single candidate revision; receipts cite the FINAL revision
    (re-earned after any rebase).
@@ -47,6 +55,11 @@ proof, verify-by-effect, honest receipts); rounds happen per-wave.
    match the acceptance criteria the brief stated — is this still the doghouse the
    owner asked for, or did locally-defensible steps accrete toward a moon base?
    Plot-loss is a first-class finding with the same standing as a logic defect.
+   Reviews also DISPOSE each miss by cause: CONTEXT-GAP — the spec or its routes
+   lacked what the moment needed (a planning finding; the fix lands in the spec) —
+   versus JUDGMENT-GAP — the context was there and the call was wrong (a builder
+   finding; the fix is a check). One word in the verdict artifact. The rate this
+   produces is the calibration the dispatch shape tunes on.
 6. **FIX ROUNDS:** findings become forward-fix candidates (merges stand; merged is
    not running). One re-review pass per round re-earns both legs at the final
    revision. Narrow rechecks for narrow corrections.
