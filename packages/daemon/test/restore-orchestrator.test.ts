@@ -642,6 +642,7 @@ describe("RestoreOrchestrator", () => {
   it("launch db_error (tmux succeeds, DB fails) -> prior state restored", async () => {
     const snap = seedRigAndSnapshot({
       nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+      resumeType: "none",
       edges: [],
       withBinding: "worker",
     });
@@ -884,6 +885,7 @@ describe("RestoreOrchestrator", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-test-"));
     const snap = seedRigAndSnapshot({
       nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code", cwd: tmpDir }],
+      resumeType: "none",
       edges: [],
       withCheckpoint: "worker",
     });
@@ -927,6 +929,7 @@ describe("RestoreOrchestrator", () => {
   it("no checkpoint -> status 'fresh'", async () => {
     const snap = seedRigAndSnapshot({
       nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+      resumeType: "none",
       edges: [],
     });
     const orch = createOrchestrator();
@@ -938,7 +941,7 @@ describe("RestoreOrchestrator", () => {
   });
 
   it("node launch fails -> status 'failed', remaining nodes processed", async () => {
-    const snap = seedRigAndSnapshot();
+    const snap = seedRigAndSnapshot({ resumeType: "none" });
     const tmux = mockTmux();
     let callCount = 0;
     (tmux.createSession as ReturnType<typeof vi.fn>).mockImplementation(async () => {
@@ -1747,7 +1750,7 @@ describe("RestoreOrchestrator", () => {
   });
 
   it("restore propagates launch warnings and writes transcript boundary marker with snapshot ID", async () => {
-    const snap = seedRigAndSnapshot();
+    const snap = seedRigAndSnapshot({ resumeType: "none" });
 
     const { TranscriptStore } = await import("../src/domain/transcript-store.js");
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-transcript-"));
@@ -1791,7 +1794,7 @@ describe("RestoreOrchestrator", () => {
   });
 
   it("restored sessions inherit OPENRIG_NODE_ID and OPENRIG_SESSION_NAME env vars", async () => {
-    const snap = seedRigAndSnapshot();
+    const snap = seedRigAndSnapshot({ resumeType: "none" });
     const createSessionSpy = vi.fn<(name: string, cwd?: string, env?: Record<string, string>) => Promise<{ ok: true }>>()
       .mockResolvedValue({ ok: true });
     const tmux = mockTmux();
@@ -1824,6 +1827,7 @@ describe("RestoreOrchestrator", () => {
     try {
       const snap = seedRigAndSnapshot({
         nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code", cwd: tmpDir }],
+        resumeType: "none",
         edges: [],
       });
       const createSessionSpy = vi.fn<(name: string, cwd?: string, env?: Record<string, string>) => Promise<{ ok: true }>>()
@@ -1972,6 +1976,7 @@ describe("RestoreOrchestrator", () => {
       nodes: [
         { logicalId: "agent-a", role: "worker", runtime: "claude-code" },
       ],
+      resumeType: "none",
       edges: [],
       // No resumeType → node will launch fresh
     });
@@ -1992,6 +1997,7 @@ describe("RestoreOrchestrator", () => {
   it("D1/D4: missing required startup file blocks restore before mutation", async () => {
     const snap = seedRigAndSnapshot({
       nodes: [{ logicalId: "agent-a", role: "worker", runtime: "claude-code" }],
+      resumeType: "none",
       edges: [],
     });
     const node = snap.data.nodes[0]!;
@@ -2175,6 +2181,7 @@ describe("RestoreOrchestrator", () => {
   it("D1/D4: missing optional startup file is a warning, not a blocker", async () => {
     const snap = seedRigAndSnapshot({
       nodes: [{ logicalId: "agent-a", role: "worker", runtime: "claude-code" }],
+      resumeType: "none",
       edges: [],
     });
     const node = snap.data.nodes[0]!;
