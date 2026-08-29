@@ -988,7 +988,7 @@ test("authoring regeneration reports and repairs permission-only drift on all th
       const before = checkModeAbsolute(expected, target);
       assert.equal(before.stale, true);
       assert.equal(before.changes.length, 1);
-      assert.match(before.changes[0], /^\.f...p..... scripts\/run\.sh$/);
+      assert.match(before.changes[0], /^\.f...p(?:...|.....) scripts\/run\.sh$/);
     }
 
     const result = await mirror.regeneratePublicSkills({
@@ -1107,6 +1107,30 @@ test("mirror main --check uses layout/digests and never activates the provisiona
 
   assert.equal(checkCalls, 1, "main --check must call the layout/digest verifier");
   assert.equal(scannerCalls, 0, "main --check must not call the provisional scanner");
+});
+
+test("permission-drift detection is itemization-width portable: rsync 3.x and openrsync forms both detect, non-permission forms never do", () => {
+  // rsync 3.x emits an 11-char itemization field, openrsync a 9-char one; the
+  // parser keys on `.f` + `p` at index 5 and must be indifferent to the width.
+  const drive = (lines) =>
+    checkModeAbsolute("/source", "/target", () => lines.join("\n") + "\n");
+
+  const long = drive([".f...p..... scripts/run.sh"]);
+  assert.equal(long.stale, true);
+  assert.deepEqual(long.changes, [".f...p..... scripts/run.sh"]);
+
+  const short = drive([".f...p... scripts/run.sh"]);
+  assert.equal(short.stale, true);
+  assert.deepEqual(short.changes, [".f...p... scripts/run.sh"]);
+
+  const negative = drive([
+    "sending incremental file list",
+    ".f..t...... scripts/run.sh",
+    ".f..t.... scripts/run.sh",
+    "total size is 100  speedup is 0.08",
+  ]);
+  assert.equal(negative.stale, false);
+  assert.deepEqual(negative.changes, []);
 });
 
 test("checkModeAbsolute retains its one-source/one-target checksum contract", () => {
