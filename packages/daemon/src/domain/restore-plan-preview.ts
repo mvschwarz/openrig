@@ -11,6 +11,7 @@
 // only reported as would-happen), no projection writes.
 
 import type Database from "better-sqlite3";
+import { resolveActiveOccupantRow, deriveActiveSessionIdByNode, activeOccupantAmbiguityError, type ActiveOccupantResolution } from "./active-occupant.js";
 import type { RigWithRelations, Snapshot } from "./types.js";
 
 /** OPR.0.4.3.20 FR-6 — a present token whose last verification is older than this
@@ -70,9 +71,13 @@ export interface PreviewSessionRow {
   resumeProvenance: string | null;
   resumeLastVerified: string | null;
   resumeLastProbeStatus: string | null;
-  /** ULID-ordered id so the newest session per node wins (matches the
-   *  orchestrator's latest-session selection). */
+  /** Row id (ULID). Selection is by the shared ACTIVE-OCCUPANT resolution
+   *  (active-occupant.ts) — the same truth the restore execution consumes —
+   *  never by newest-id inference. */
   id: string;
+  /** Session status — the occupant ladder's legacy/uniquely-running input and
+   *  the live would-capture derivation's input. */
+  status: string | null;
 }
 
 /** OPR.0.4.3.20 FR-6 — compute a seat's token state (read-only). A present token
@@ -124,23 +129,32 @@ function runtimePromptFor(runtime: string | null, tokenState: ResumeTokenState):
  *  classification (OPR.0.3.4.2) without touching anything. A fresh-listed
  *  seat (operation B, `--fresh <seat>`) forecasts `fresh-primed` BEFORE any
  *  resume-token logic, exactly as apply mode deliberately skips the resume. */
-function intendedActionFor(rows: PreviewSessionRow[], freshRequested: boolean): { intendedAction: RestorePlanPreviewNode["intendedAction"]; reason?: string } {
+function intendedActionFor(resolution: ActiveOccupantResolution<PreviewSessionRow>, freshRequested: boolean): { intendedAction: RestorePlanPreviewNode["intendedAction"]; reason?: string } {
+  // OPR.0.5.7.1 — a broken authoritative relation beats --fresh, exactly as
+  // execution fails loudly before its fresh check: --fresh cannot override
+  // A1 ambiguity.
+  if (resolution.kind === "ambiguous") {
+    return {
+      intendedAction: "awaiting-decision",
+      reason: activeOccupantAmbiguityError(resolution.candidateIds, resolution.detail),
+    };
+  }
   if (freshRequested) {
     return {
       intendedAction: "fresh-primed",
       reason: "listed in --fresh — apply would deliberately skip the resume (operation B)",
     };
   }
-  const latest = rows.length > 0 ? rows.reduce((a, b) => (b.id > a.id ? b : a)) : null;
-  const policy = latest?.restorePolicy ?? "resume_if_possible";
-  const sourceRecorded = !!latest?.resumeType && latest.resumeType !== "none";
-  if (policy === "resume_if_possible" && sourceRecorded && latest?.resumeToken) {
+  const occupant = resolution.kind === "resolved" ? resolution.session : null;
+  const policy = occupant?.restorePolicy ?? "resume_if_possible";
+  const sourceRecorded = !!occupant?.resumeType && occupant.resumeType !== "none";
+  if (policy === "resume_if_possible" && sourceRecorded && occupant?.resumeToken) {
     return { intendedAction: "resume-original" };
   }
-  if (policy === "resume_if_possible" && sourceRecorded && !latest?.resumeToken) {
+  if (policy === "resume_if_possible" && sourceRecorded && !occupant?.resumeToken) {
     return {
       intendedAction: "awaiting-decision",
-      reason: `resume source '${latest?.resumeType}' recorded but no token available — apply would stop and ask (zero session)`,
+      reason: `resume source '${occupant?.resumeType}' recorded but no token available — apply would stop and ask (zero session)`,
     };
   }
   return { intendedAction: "fresh-primed" };
@@ -166,14 +180,15 @@ export function collectPreviewSessionRows(
       resumeLastVerified: s.resumeLastVerified ?? null,
       resumeLastProbeStatus: s.resumeLastProbeStatus ?? null,
       id: s.id,
+      status: s.status ?? null,
     }));
   }
   const nodeIds = rig.nodes.map((n) => n.id);
   if (nodeIds.length === 0) return [];
   const placeholders = nodeIds.map(() => "?").join(",");
   const rows = db.prepare(
-    `SELECT id, node_id, restore_policy, resume_type, resume_token, resume_provenance, resume_last_verified, resume_last_probe_status FROM sessions WHERE node_id IN (${placeholders})`
-  ).all(...nodeIds) as Array<{ id: string; node_id: string; restore_policy: string | null; resume_type: string | null; resume_token: string | null; resume_provenance: string | null; resume_last_verified: string | null; resume_last_probe_status: string | null }>;
+    `SELECT id, node_id, restore_policy, resume_type, resume_token, resume_provenance, resume_last_verified, resume_last_probe_status, status FROM sessions WHERE node_id IN (${placeholders})`
+  ).all(...nodeIds) as Array<{ id: string; node_id: string; restore_policy: string | null; resume_type: string | null; resume_token: string | null; resume_provenance: string | null; resume_last_verified: string | null; resume_last_probe_status: string | null; status: string | null }>;
   return rows.map((r) => ({
     nodeId: r.node_id,
     restorePolicy: r.restore_policy,
@@ -183,6 +198,7 @@ export function collectPreviewSessionRows(
     resumeLastVerified: r.resume_last_verified,
     resumeLastProbeStatus: r.resume_last_probe_status,
     id: r.id,
+    status: r.status,
   }));
 }
 
@@ -193,17 +209,21 @@ export function buildRestorePlanPreview(
   freshLogicalIds?: string[],
   nowMs: number = Date.now(),
 ): RestorePlanPreview {
-  const byNode = new Map<string, PreviewSessionRow[]>();
-  for (const row of sessionRows) {
-    (byNode.get(row.nodeId) ?? byNode.set(row.nodeId, []).get(row.nodeId)!).push(row);
-  }
+  // OPR.0.5.7.1 — the relation the resolution consumes: the snapshot's own
+  // when previewing a snapshot; for the live no-snapshot case, the SAME
+  // would-capture derivation SnapshotCapture uses (shared helper — the
+  // sibling paths cannot drift).
+  const relationMap = snapshot
+    ? snapshot.data.activeSessionIdByNode
+    : deriveActiveSessionIdByNode(sessionRows, rig.nodes.map((n) => n.id));
   const nodes: RestorePlanPreviewNode[] = rig.nodes.map((node) => {
-    const rows = byNode.get(node.id) ?? [];
     const freshRequested = freshLogicalIds?.includes(node.logicalId) ?? false;
-    const { intendedAction, reason } = intendedActionFor(rows, freshRequested);
-    // OPR.0.4.3.20 FR-6 — per-seat token state (read-only; latest session per node).
-    const latest = rows.length > 0 ? rows.reduce((a, b) => (b.id > a.id ? b : a)) : null;
-    const { tokenState, provenance, lastVerified } = tokenStateFor(latest, nowMs);
+    const resolution = resolveActiveOccupantRow(sessionRows, relationMap, node.id);
+    const { intendedAction, reason } = intendedActionFor(resolution, freshRequested);
+    // OPR.0.4.3.20 FR-6 — per-seat token state (read-only), derived from the
+    // RESOLVED occupant only — never from a historical row.
+    const occupant = resolution.kind === "resolved" ? resolution.session : null;
+    const { tokenState, provenance, lastVerified } = tokenStateFor(occupant, nowMs);
     const runtimePrompt = runtimePromptFor(node.runtime, tokenState);
     return {
       logicalId: node.logicalId,
@@ -212,8 +232,10 @@ export function buildRestorePlanPreview(
       tokenState,
       ...(provenance ? { provenance } : {}),
       ...(lastVerified ? { lastVerified } : {}),
-      // no resumable token → restore needs an explicit --fresh (never silent).
-      freshRequired: tokenState === "missing",
+      // no resumable token → restore needs an explicit --fresh (never
+      // silent); a broken relation is NOT fresh-able — A1 ambiguity is
+      // unrecoverable-until-resolved, so --fresh cannot be the remedy.
+      freshRequired: resolution.kind === "ambiguous" ? false : tokenState === "missing",
       ...(runtimePrompt ? { runtimePrompt } : {}),
     };
   });

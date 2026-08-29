@@ -1,0 +1,100 @@
+// OPR.0.5.7.1 — the ONE active-occupant truth, as a pure leaf module.
+//
+// Execution (restore-orchestrator), preview (restore-plan-preview), snapshot
+// usability (rig-repository), and lifecycle projection (node-inventory) all
+// consume the SAME four-way ladder below; capture (snapshot-capture) and the
+// live no-snapshot preview both derive the relation through the SAME helper.
+// R2's HOLD was exactly the drift this module removes: reporting surfaces
+// selecting historical rows the execution path would never resume.
+//
+// FOUR-WAY OCCUPANT TRUTH (repair ruling qitem-20260829080039-c47a571e):
+// the ONLY case where legacy inference may run is the WHOLE relation map
+// being absent (a pre-convention snapshot). A PRESENT map is the authority —
+// a null value, a missing node key, or a dangling id each fails LOUDLY; the
+// map is never collapsed by truthiness into the legacy ladder.
+
+import type { SnapshotData, Session } from "./types.js";
+
+/** The minimal row shape the ladder needs — satisfied by Session and by the
+ *  preview's narrower session rows alike, so ONE ladder serves every consumer
+ *  without a copied variant. */
+export interface OccupantCandidateRow {
+  id: string;
+  nodeId: string;
+  status: string | null;
+}
+
+export type ActiveOccupantResolution<T extends OccupantCandidateRow> =
+  | { kind: "resolved"; session: T }
+  | { kind: "none" }
+  | { kind: "ambiguous"; candidateIds: string[]; detail: string };
+
+export type ActiveSnapshotSessionResolution =
+  | { kind: "resolved"; session: Session }
+  | { kind: "none" }
+  | { kind: "ambiguous"; candidateIds: string[]; detail: string };
+
+/** The four-way ladder (moved from restore-orchestrator.ts, behavior
+ *  byte-faithful; generic over the row shape so no consumer copies it). */
+export function resolveActiveOccupantRow<T extends OccupantCandidateRow>(
+  sessions: T[],
+  relationMap: Record<string, string | null> | undefined,
+  nodeId: string,
+): ActiveOccupantResolution<T> {
+  const rows = sessions.filter((s) => s.nodeId === nodeId);
+  const map = relationMap;
+  if (map === undefined) {
+    // Pre-convention snapshot: this is the ONLY branch where zero rows means
+    // "never ran" (none) and legacy inference may run — a single row, else
+    // the uniquely-running row, else ambiguity.
+    if (rows.length === 0) return { kind: "none" };
+    if (rows.length === 1) return { kind: "resolved", session: rows[0]! };
+    const running = rows.filter((s) => s.status === "running");
+    if (running.length === 1) return { kind: "resolved", session: running[0]! };
+    return { kind: "ambiguous", candidateIds: rows.map((r) => r.id), detail: "no explicit active relation (pre-convention snapshot) and no uniquely-running row" };
+  }
+  // Map PRESENT: it is the authority even with zero session rows — a null,
+  // missing-key, or dangling relation state is loud regardless of history.
+  if (!Object.prototype.hasOwnProperty.call(map, nodeId)) {
+    return { kind: "ambiguous", candidateIds: rows.map((r) => r.id), detail: "the snapshot's activeSessionIdByNode map carries no entry for this node" };
+  }
+  const rel = map[nodeId];
+  if (rel === null) {
+    return { kind: "ambiguous", candidateIds: rows.map((r) => r.id), detail: "the snapshot recorded no single live occupant at capture (explicit null)" };
+  }
+  const hit = rows.find((s) => s.id === rel);
+  if (!hit) {
+    return { kind: "ambiguous", candidateIds: rows.map((r) => r.id), detail: `the recorded active relation ${rel} names no session row in this snapshot (dangling)` };
+  }
+  return { kind: "resolved", session: hit };
+}
+
+/** The snapshot-shaped entry point (the original public signature; a thin
+ *  wrapper so execution call sites are unchanged). */
+export function resolveActiveSnapshotSession(data: SnapshotData, nodeId: string): ActiveSnapshotSessionResolution {
+  return resolveActiveOccupantRow(data.sessions, data.activeSessionIdByNode, nodeId);
+}
+
+/** One wording for the loud failure everywhere — divergent phrasings would be
+ *  a second copy of the truth. */
+export function activeOccupantAmbiguityError(candidateIds: string[], detail?: string): string {
+  return `Active-occupant ambiguity: ${candidateIds.length} candidate session rows (${candidateIds.join(", ")})` +
+    `${detail ? ` — ${detail}` : ""}. Seat unrecoverable until resolved. ` +
+    `Refusing newest-row-wins and refusing a replacement occupant.`;
+}
+
+/** The CAPTURE rule, shared verbatim by SnapshotCapture and the live
+ *  no-snapshot preview so the two sibling derivations cannot drift:
+ *  exactly one RUNNING row for a node -> its id; otherwise -> explicit null
+ *  (recorded honestly; restore resolves it loudly instead of guessing). */
+export function deriveActiveSessionIdByNode(
+  sessions: OccupantCandidateRow[],
+  nodeIds: string[],
+): Record<string, string | null> {
+  const relation: Record<string, string | null> = {};
+  for (const nodeId of nodeIds) {
+    const running = sessions.filter((s) => s.nodeId === nodeId && s.status === "running");
+    relation[nodeId] = running.length === 1 ? running[0]!.id : null;
+  }
+  return relation;
+}

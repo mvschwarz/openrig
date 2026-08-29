@@ -58,60 +58,13 @@ export type ReconcileNodeResult =
 // Only these edge kinds constrain launch order
 const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
 
-// OPR.0.5.7.1 D1 — the ACTIVE-OCCUPANT resolution ladder. Restore must
-// consume who was actually sitting in the seat, never infer it from row
-// ordering: a superseded session row with a newer ULID defeated three real
-// occupant tokens in incident 1e4d9837 (the old `latest = max id` comment
-// was the defect). Authority order:
-//   1. the snapshot's explicit activeSessionIdByNode relation (captured live)
-//   2. a single row, or the UNIQUELY-running row (legacy-snapshot invariant)
-//   3. otherwise AMBIGUOUS: the seat is unrecoverable-until-resolved — the
-//      caller fails LOUDLY with every candidate named, and never selects a
-//      newest row or starts a replacement occupant.
-export type ActiveSnapshotSessionResolution =
-  | { kind: "resolved"; session: Session }
-  | { kind: "none" }
-  | { kind: "ambiguous"; candidateIds: string[]; detail: string };
-
-// FOUR-WAY OCCUPANT TRUTH (repair ruling qitem-20260829080039-c47a571e):
-// the ONLY case where legacy inference may run is the WHOLE field being
-// absent (a pre-convention snapshot). A PRESENT map is the authority — a
-// null value, a missing node key, or a dangling id each fails LOUDLY; the
-// map is never collapsed by truthiness into the legacy ladder.
-export function resolveActiveSnapshotSession(data: SnapshotData, nodeId: string): ActiveSnapshotSessionResolution {
-  const rows = data.sessions.filter((s) => s.nodeId === nodeId);
-  const map = data.activeSessionIdByNode;
-  if (map === undefined) {
-    // Pre-convention snapshot: this is the ONLY branch where zero rows means
-    // "never ran" (none) and legacy inference may run — a single row, else
-    // the uniquely-running row, else ambiguity.
-    if (rows.length === 0) return { kind: "none" };
-    if (rows.length === 1) return { kind: "resolved", session: rows[0]! };
-    const running = rows.filter((s) => s.status === "running");
-    if (running.length === 1) return { kind: "resolved", session: running[0]! };
-    return { kind: "ambiguous", candidateIds: rows.map((r) => r.id), detail: "no explicit active relation (pre-convention snapshot) and no uniquely-running row" };
-  }
-  // Map PRESENT: it is the authority even with zero session rows — a null,
-  // missing-key, or dangling relation state is loud regardless of history.
-  if (!Object.prototype.hasOwnProperty.call(map, nodeId)) {
-    return { kind: "ambiguous", candidateIds: rows.map((r) => r.id), detail: "the snapshot's activeSessionIdByNode map carries no entry for this node" };
-  }
-  const rel = map[nodeId];
-  if (rel === null) {
-    return { kind: "ambiguous", candidateIds: rows.map((r) => r.id), detail: "the snapshot recorded no single live occupant at capture (explicit null)" };
-  }
-  const hit = rows.find((s) => s.id === rel);
-  if (!hit) {
-    return { kind: "ambiguous", candidateIds: rows.map((r) => r.id), detail: `the recorded active relation ${rel} names no session row in this snapshot (dangling)` };
-  }
-  return { kind: "resolved", session: hit };
-}
-
-function activeOccupantAmbiguityError(candidateIds: string[], detail?: string): string {
-  return `Active-occupant ambiguity: ${candidateIds.length} candidate session rows (${candidateIds.join(", ")})` +
-    `${detail ? ` — ${detail}` : ""}. Seat unrecoverable until resolved. ` +
-    `Refusing newest-row-wins and refusing a replacement occupant.`;
-}
+// OPR.0.5.7.1 consumer alignment: the four-way active-occupant ladder lives
+// in the pure leaf module active-occupant.ts, shared with preview, snapshot
+// usability, and lifecycle projection. Imported and re-exported here so the
+// existing export surface and the execution call sites below are unchanged.
+import { resolveActiveSnapshotSession, activeOccupantAmbiguityError } from "./active-occupant.js";
+export { resolveActiveSnapshotSession } from "./active-occupant.js";
+export type { ActiveSnapshotSessionResolution } from "./active-occupant.js";
 
 export function rollupRestoreRigResult(nodes: RestoreNodeResult[]): RestoreRigResult {
   if (nodes.length === 0) return "failed";

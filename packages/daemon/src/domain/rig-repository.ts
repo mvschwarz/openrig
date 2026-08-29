@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { resolveActiveOccupantRow } from "./active-occupant.js";
 import { resolve } from "node:path";
 import { ulid } from "ulid";
 import { deriveComposeProjectName } from "./compose-project-name.js";
@@ -35,11 +36,20 @@ function snapshotFromRowIfUsable(row: SnapshotRow): Snapshot | null {
     return null;
   }
 
+  // OPR.0.5.7.1 — usability is OCCUPANT truth, not any-historical-row truth:
+  // a snapshot is usable iff at least one node RESOLVES to an active occupant
+  // carrying a token (the same four-way ladder execution consumes). A
+  // present-null/missing-key/dangling relation never counts — a historical
+  // token on a non-occupant row must not read as recoverable.
   const sessions = data.sessions ?? [];
-  const hasAnyResumeToken = sessions.some(
-    (s) => typeof s.resumeToken === "string" && s.resumeToken.length > 0,
-  );
-  if (!hasAnyResumeToken) return null;
+  const nodeIds = [...new Set(sessions.map((s) => s.nodeId))];
+  const hasResolvedOccupantToken = nodeIds.some((nodeId) => {
+    const resolution = resolveActiveOccupantRow(sessions, data.activeSessionIdByNode, nodeId);
+    return resolution.kind === "resolved"
+      && typeof resolution.session.resumeToken === "string"
+      && resolution.session.resumeToken.length > 0;
+  });
+  if (!hasResolvedOccupantToken) return null;
 
   return {
     id: row.id,

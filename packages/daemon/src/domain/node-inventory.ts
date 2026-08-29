@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { resolveActiveOccupantRow } from "./active-occupant.js";
 import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeOriented, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot, WorkspaceSpec, SeatIdentityVerdict, SeatIdentityVerdictKind, AgentActivity, SeatActivity } from "./types.js";
 import { identityVerdictDownranksRunning } from "./types.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
@@ -207,10 +208,20 @@ export function deriveNodeLifecycleState(input: {
     return "running";
   }
   if (input.usableSnapshot) {
-    const nodeSession = (input.usableSnapshot.data.sessions ?? []).find(
-      (s) => s.nodeId === input.nodeId,
+    // OPR.0.5.7.1 — recoverability follows the RESOLVED occupant (the same
+    // four-way ladder execution consumes), never the first matching row: a
+    // token on a historical row the restore would refuse must not render
+    // recoverable.
+    const resolution = resolveActiveOccupantRow(
+      input.usableSnapshot.data.sessions ?? [],
+      input.usableSnapshot.data.activeSessionIdByNode,
+      input.nodeId,
     );
-    if (typeof nodeSession?.resumeToken === "string" && nodeSession.resumeToken.length > 0) {
+    if (
+      resolution.kind === "resolved"
+      && typeof resolution.session.resumeToken === "string"
+      && resolution.session.resumeToken.length > 0
+    ) {
       return "recoverable";
     }
   }

@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { deriveActiveSessionIdByNode } from "./active-occupant.js";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
@@ -60,17 +61,10 @@ export class SnapshotCapture {
     // 2. Get sessions with resume metadata
     const sessions = this.sessionRegistry.getSessionsForRig(rigId);
 
-    // 2b. OPR.0.5.7.1 D1 — capture the ACTIVE-OCCUPANT relation explicitly.
-    // The live registry knows the occupant NOW; a restore months later must
-    // never re-derive it from row ordering (a superseded row with a newer
-    // ULID defeated three real occupants in incident 1e4d9837). Exactly one
-    // running row -> that row is the occupant; zero or several -> null,
-    // recorded honestly so restore resolves it loudly instead of guessing.
-    const activeSessionIdByNode: Record<string, string | null> = {};
-    for (const node of rig.nodes) {
-      const running = sessions.filter((s) => s.nodeId === node.id && s.status === "running");
-      activeSessionIdByNode[node.id] = running.length === 1 ? running[0]!.id : null;
-    }
+    // 2b. OPR.0.5.7.1 D1 — capture the ACTIVE-OCCUPANT relation explicitly,
+    // through the ONE shared derivation (active-occupant.ts) that the live
+    // no-snapshot preview also uses, so the sibling paths cannot drift.
+    const activeSessionIdByNode = deriveActiveSessionIdByNode(sessions, rig.nodes.map((n) => n.id));
 
     // 3. Get checkpoints as map (latest per node)
     const checkpoints = this.checkpointStore.getCheckpointsForRig(rigId);
