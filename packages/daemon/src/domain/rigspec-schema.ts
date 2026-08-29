@@ -14,6 +14,7 @@ import type {
 } from "./types.js";
 import { WORKSPACE_KINDS } from "./types.js";
 import { validateSafePath } from "./path-safety.js";
+import { canonicalCompactionStrategy } from "./agent-manifest.js";
 import { aliasModelPinAdvisory } from "./spec-validation-advisory.js";
 import { validatePermissionPolicyRef } from "./permission-policy/policy-ref.js";
 import { validateStartupBlock, normalizeStartupBlock } from "./startup-validation.js";
@@ -134,7 +135,7 @@ export class RigSpecSchema {
       const podIds = new Set<string>();
       for (let pi = 0; pi < pods.length; pi++) {
         const pod = pods[pi]!;
-        errors.push(...validatePod(pod, pi, podIds));
+        errors.push(...validatePod(pod, pi, podIds, advisories));
       }
 
       // Cross-pod edge validation
@@ -301,7 +302,7 @@ function normalizeWorkspaceBlock(raw: unknown): WorkspaceSpec | undefined {
 
 // -- Pod validation --
 
-function validatePod(pod: Record<string, unknown>, index: number, podIds: Set<string>): string[] {
+function validatePod(pod: Record<string, unknown>, index: number, podIds: Set<string>, advisories: string[]): string[] {
   const errors: string[] = [];
   const prefix = `pods[${index}]`;
 
@@ -337,7 +338,7 @@ function validatePod(pod: Record<string, unknown>, index: number, podIds: Set<st
     const members = pod["members"] as Record<string, unknown>[];
     const memberIds = new Set<string>();
     for (let mi = 0; mi < members.length; mi++) {
-      errors.push(...validateMember(members[mi]!, mi, `${prefix}`, memberIds));
+      errors.push(...validateMember(members[mi]!, mi, `${prefix}`, memberIds, advisories));
     }
 
     // Pod-local edges
@@ -356,9 +357,23 @@ function validatePod(pod: Record<string, unknown>, index: number, podIds: Set<st
   return errors;
 }
 
-function validateMember(member: Record<string, unknown>, index: number, podPrefix: string, memberIds: Set<string>): string[] {
+function validateMember(member: Record<string, unknown>, index: number, podPrefix: string, memberIds: Set<string>, advisories: string[]): string[] {
   const errors: string[] = [];
   const prefix = `${podPrefix}.members[${index}]`;
+
+  // OPR.0.5.6.20 A5 — member-level compaction_strategy: all vocabulary decisions go
+  // through the manifest's one canonical site; this leg only classifies the answer.
+  if (member["compaction_strategy"] !== undefined) {
+    const strategyValue = member["compaction_strategy"] as string;
+    const canonical = typeof strategyValue === "string" ? canonicalCompactionStrategy(strategyValue) : null;
+    if (strategyValue === "custom_prompt") {
+      errors.push(`${prefix}.compaction_strategy: "custom_prompt" is not supported in v1; use "harness_native" or "pod_continuity"`);
+    } else if (canonical === null) {
+      errors.push(`${prefix}.compaction_strategy: not a valid compaction strategy (got "${strategyValue}") — see the agent-spec compaction_strategy vocabulary`);
+    } else if (canonical !== strategyValue) {
+      advisories.push(`${prefix}.compaction_strategy: "${strategyValue}" is deprecated and now normalizes to "${canonical}" — update to the current vocabulary`);
+    }
+  }
 
   if (!member["id"] || typeof member["id"] !== "string") {
     errors.push(`${prefix}.id: required non-empty string`);
@@ -1038,6 +1053,11 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     permissionPolicy: m["permission_policy"] as string | undefined,
     cwd: m["cwd"] as string,
     restorePolicy: m["restore_policy"] as string | undefined,
+    // OPR.0.5.6.20 A5 — aliases normalize at ingestion; absent stays undefined so the
+    // resolver's F-6 default remains the one authority for absence.
+    compactionStrategy: m["compaction_strategy"] !== undefined
+      ? (canonicalCompactionStrategy(m["compaction_strategy"] as string) ?? undefined)
+      : undefined,
     startup: m["startup"] ? normalizeStartupBlock(m["startup"]) : undefined,
     sessionSource: normalizeSessionSource(m["session_source"]),
     starterRef: normalizeStarterRef(m["starter_ref"]),

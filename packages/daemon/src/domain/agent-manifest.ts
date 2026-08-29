@@ -66,7 +66,7 @@ const validateStartupBlock = sharedValidateStartupBlock;
 // -- Lifecycle validation --
 
 function validateLifecycle(raw: unknown, prefix: string): { errors: string[]; advisories: string[] } {
-  if (raw === undefined || raw === null) return [];
+  if (raw === undefined || raw === null) return { errors: [], advisories: [] };
   if (typeof raw !== "object") return { errors: [`${prefix}: must be an object`], advisories: [] };
   const obj = raw as Record<string, unknown>;
   const errors: string[] = [];
