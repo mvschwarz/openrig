@@ -47,7 +47,7 @@ fi
 
 manifest_comments_ok=1
 for manifest in "$root/manifest.yaml" "$example/manifest.yaml"; do
-  grep -Eq '^[[:space:]]*#' "$manifest" && manifest_comments_ok=0
+  grep -Fq '#' "$manifest" && manifest_comments_ok=0
 done
 if [ "$manifest_comments_ok" -eq 1 ]; then
   pass manifest-authored-comments 'both shipped manifests contain no uncensused authored prose comments'
