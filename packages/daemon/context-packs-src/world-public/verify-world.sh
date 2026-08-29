@@ -152,6 +152,12 @@ else
   fail derive-pack-path 'context show did not resolve world-public to this builtin directory'
 fi
 
+if [ "$pack_path_ok" -eq 1 ] && [ -f "$pack_source_root/verify-world.sh" ]; then
+  pass run-public-verifier 'this verifier is running from the directory returned by context show'
+else
+  fail run-public-verifier 'the directory returned by context show does not contain this verifier'
+fi
+
 list_output=$(rig context list --json 2>/dev/null)
 list_status=$?
 namespace_ok=1

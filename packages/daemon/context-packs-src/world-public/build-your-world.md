@@ -61,6 +61,9 @@ their meaning breaks.
 
 ## Exercise: Book world
 
+<!-- world-claim: book-example-purpose -->
+The exercise uses a book because the model's existing world-building fluency needs the least translation there, and a reader with no software context is the hardest stranger case.
+
 <!-- world-claim: retrieve-world-example -->
 Use `rig context get world-example` to retrieve the worked book-world template.
 
@@ -69,8 +72,12 @@ where they live, which editorial rules apply, what decisions shaped the draft, h
 derived, and what the agent can do next. Keep it pleasant to read. If the arrangement feels like a
 filing system rather than a place, simplify it.
 
+<!-- world-claim: book-to-software -->
+The book exercise maps its manuscript to a codebase, editorial rules to engineering laws and conventions, draft state to derived build and deploy state, and its writer to the team. Software worlds use the same moves.
+
 The full public pack demonstrates the optional claim-checking climb.
 
 <!-- world-claim: derive-pack-path -->
 Use rig context show world-public --json to derive the installed pack directory.
-Run `sh verify-world.sh` there instead of teaching a machine-specific path.
+<!-- world-claim: run-public-verifier -->
+Run `sh verify-world.sh` in that derived directory instead of teaching a machine-specific path.

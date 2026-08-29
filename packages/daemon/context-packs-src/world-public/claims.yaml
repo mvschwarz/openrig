@@ -51,10 +51,22 @@ claims:
     statement: "Use `rig context get world-example` to retrieve the worked book-world template."
     kind: operational
     check: retrieve-world-example
+  - id: book-example-purpose
+    statement: "The exercise uses a book because the model's existing world-building fluency needs the least translation there, and a reader with no software context is the hardest stranger case."
+    kind: judgment
+    flagged: "Authored purpose and taste; no live scan can prove it."
+  - id: book-to-software
+    statement: "The book exercise maps its manuscript to a codebase, editorial rules to engineering laws and conventions, draft state to derived build and deploy state, and its writer to the team. Software worlds use the same moves."
+    kind: judgment
+    flagged: "Authored purpose and taste; no live scan can prove it."
   - id: derive-pack-path
     statement: "Use rig context show world-public --json to derive the installed pack directory."
     kind: operational
     check: derive-pack-path
+  - id: run-public-verifier
+    statement: "Run `sh verify-world.sh` in that derived directory instead of teaching a machine-specific path."
+    kind: operational
+    check: run-public-verifier
   - id: private-ref-boundary
     statement: "Private world installs remain rig-local under their own refs and are never shadowed by this builtin."
     kind: structural
