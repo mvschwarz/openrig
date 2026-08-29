@@ -802,7 +802,10 @@ export interface StartupBlock {
 
 export interface LifecycleDefaults {
   executionMode: "interactive_resident";
-  compactionStrategy: "default-compaction" | "managed-compaction" | "handover" | "apprentice-handover";
+  // OPR.0.5.6.20 B-3: optional so a lifecycle block that omits the field preserves
+  // ABSENCE through normalization — a level that does not specify does not
+  // participate in precedence. The defaults level materializes the F-6 default.
+  compactionStrategy?: "default-compaction" | "managed-compaction" | "handover" | "apprentice-handover";
   restorePolicy: "resume_if_possible" | "relaunch_fresh" | "checkpoint_only";
 }
 

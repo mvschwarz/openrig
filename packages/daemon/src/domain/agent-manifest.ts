@@ -337,12 +337,15 @@ export function normalizeAgentSpec(raw: Record<string, unknown>): AgentSpec {
   };
 
   if (defaults) {
+    // OPR.0.5.6.20: lifecycle always materializes at the DEFAULTS level so the F-6
+    // default (default-compaction) is visible, not implied by absence. B-3: only
+    // this level materializes — profile blocks preserve absence so a non-specifying
+    // level never participates in precedence.
+    const lifecycle = normalizeLifecycle((defaults["lifecycle"] as Record<string, unknown>) ?? {});
     result.defaults = {
       runtime: defaults["runtime"] as string | undefined,
       model: defaults["model"] as string | undefined,
-      // OPR.0.5.6.20: lifecycle always materializes so the F-6 defaults
-      // (default-compaction et al.) are visible, not implied by absence.
-      lifecycle: normalizeLifecycle((defaults["lifecycle"] as Record<string, unknown>) ?? {}),
+      lifecycle: { ...lifecycle, compactionStrategy: lifecycle.compactionStrategy ?? "default-compaction" },
     };
   }
 
@@ -354,10 +357,15 @@ export function normalizeAgentSpec(raw: Record<string, unknown>): AgentSpec {
 const normalizeStartupBlock = sharedNormalizeStartupBlock;
 
 function normalizeLifecycle(raw: Record<string, unknown>): LifecycleDefaults {
+  // OPR.0.5.6.20 B-3: absence is preserved, never materialized — a lifecycle block
+  // that omits compaction_strategy must not acquire a value that later participates
+  // in precedence. The defaults-level call site owns the F-6 materialization.
+  const rawStrategy = raw["compaction_strategy"] as string | undefined;
   return {
     executionMode: (raw["execution_mode"] as LifecycleDefaults["executionMode"]) ?? "interactive_resident",
-    compactionStrategy: (canonicalCompactionStrategy((raw["compaction_strategy"] as string) ?? "") ??
-      "default-compaction") as LifecycleDefaults["compactionStrategy"],
+    compactionStrategy: rawStrategy !== undefined
+      ? ((canonicalCompactionStrategy(rawStrategy) ?? "default-compaction") as LifecycleDefaults["compactionStrategy"])
+      : undefined,
     restorePolicy: (raw["restore_policy"] as LifecycleDefaults["restorePolicy"]) ?? "resume_if_possible",
   };
 }
