@@ -17,6 +17,8 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
+import { assembleBundle } from "../src/domain/context-packs/bundle-assembler.js";
+import { ContextPackLibraryService } from "../src/domain/context-packs/context-pack-library-service.js";
 import { parseManifest } from "../src/domain/context-packs/manifest-parser.js";
 import { composeProfile } from "../src/domain/context-packs/profile-composer.js";
 
@@ -55,12 +57,18 @@ function writeRigFixture(options: {
   configRoot?: string;
   addStatus?: number;
   partialSync?: boolean;
+  publicGet?: string;
+  profileJson?: string;
+  exampleGet?: string;
 } = {}): string {
   const fixturePath = mkdtempSync(join(tmpdir(), "public-world-rig-"));
   temporaryRoots.push(fixturePath);
   const installState = join(fixturePath, "installed-ref");
-  const sourcePath = publicWorldDir();
-  const examplePath = join(STATIC_ROOT, "world-example");
+  const library = new ContextPackLibraryService({ roots: [{ path: STATIC_ROOT, sourceType: "builtin" }] });
+  library.scan();
+  const publicEntry = library.getByRef("world-public")!;
+  const exampleEntry = library.getByRef("world-example")!;
+  const sourcePath = publicEntry.sourcePath;
   const manifest = manifestAt(sourcePath);
   const profile = composeProfile({
     atoms: manifest.atoms ?? [],
@@ -69,14 +77,9 @@ function writeRigFixture(options: {
     budgetTokens: 0,
     readFile: (ref) => readFileSync(join(sourcePath, ref), "utf8"),
   });
-  const showJson = JSON.stringify({
-    relativePath: "world-public",
-    sourceType: "builtin",
-    sourcePath,
-    derivedEstimatedTokens: profile.totalEstimatedTokens,
-  });
+  const showJson = JSON.stringify(publicEntry);
   const listJson = options.listJson ?? JSON.stringify([
-    { relativePath: "world-public", sourceType: "builtin", sourcePath },
+    ...library.list(),
     { relativePath: "world/install", sourceType: "user_file", sourcePath: "/fixture/private-world" },
   ]);
   const configRoot = options.configRoot === undefined
@@ -84,14 +87,17 @@ function writeRigFixture(options: {
     : `'${options.configRoot}'`;
   writeFileSync(
     join(fixturePath, "world-public-get.txt"),
-    manifest.files.map((file) => readFileSync(join(sourcePath, file.path), "utf8")).join("\n"),
+    options.publicGet ?? assembleBundle({ packEntry: publicEntry }).text,
   );
-  writeFileSync(join(fixturePath, "world-public-profile.json"), JSON.stringify(profile));
+  writeFileSync(join(fixturePath, "world-public-profile.json"), options.profileJson ?? JSON.stringify(profile));
   writeFileSync(
     join(fixturePath, "world-public-profile.txt"),
     profile.pieces.map((piece) => piece.text).join("\n"),
   );
-  writeFileSync(join(fixturePath, "world-example-get.txt"), readFileSync(join(examplePath, "your-world.md"), "utf8"));
+  writeFileSync(
+    join(fixturePath, "world-example-get.txt"),
+    options.exampleGet ?? assembleBundle({ packEntry: exampleEntry }).text,
+  );
   writeFileSync(join(fixturePath, "world-public-show.json"), showJson);
   writeFileSync(join(fixturePath, "context-list.json"), listJson);
   writeFileSync(join(fixturePath, "rig"), [
@@ -352,6 +358,24 @@ describe("public world pack", () => {
 
     expect(result.status).toBe(1);
     expect(result.stdout).toMatch(/FAIL.*world-example-install/i);
+  });
+
+  it.each([
+    ["public pack retrieval", { publicGet: "# unrelated content" }, /FAIL.*retrieve-public-pack/i],
+    ["fresh profile composition", { profileJson: '{"pieces":[],"totalEstimatedTokens":0}' }, /FAIL.*compose-fresh-profile/i],
+    ["worked example retrieval", { exampleGet: "# unrelated content" }, /FAIL.*retrieve-world-example/i],
+  ] as const)("fails when %s returns the wrong bytes", (_label, fixtureOptions, expectedFailure) => {
+    const rigPath = writeRigFixture(fixtureOptions);
+    const result = runVerifier(publicWorldDir(), {
+      ...process.env,
+      PATH: `${rigPath}:${process.env.PATH ?? ""}`,
+      OPENRIG_CONTEXT_PACKS_ROOT: "/fixture/context-packs",
+      OPENRIG_SESSION_NAME: "qa@fixture",
+      RIGGED_SESSION_NAME: "",
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toMatch(expectedFailure);
   });
 
   it("removes a copied pack when daemon sync never indexes it", () => {

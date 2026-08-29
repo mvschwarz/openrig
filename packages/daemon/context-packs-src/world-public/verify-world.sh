@@ -60,10 +60,12 @@ claim_ids=$(sed -n 's/^[[:space:]]*- id:[[:space:]]*//p' "$root/claims.yaml")
 claim_count=$(printf '%s\n' "$claim_ids" | sed '/^$/d' | wc -l | tr -d ' ')
 marker_count=$(printf '%s\n' "$prose" | grep -Ec '<!--[[:space:]]*world-claim:[[:space:]]*[a-z0-9-]+[[:space:]]*-->')
 disposition_count=$(grep -Ec '^[[:space:]]+(check|flagged):' "$root/claims.yaml")
+kind_count=$(grep -Ec '^[[:space:]]+kind:[[:space:]]+(judgment|operational|structural)[[:space:]]*$' "$root/claims.yaml")
 claims_ok=1
 [ "$claim_count" -ge 8 ] || claims_ok=0
 [ "$claim_count" -eq "$marker_count" ] || claims_ok=0
 [ "$claim_count" -eq "$disposition_count" ] || claims_ok=0
+[ "$claim_count" -eq "$kind_count" ] || claims_ok=0
 seen=' '
 for id in $claim_ids; do
   case "$seen" in *" $id "*) claims_ok=0 ;; esac
@@ -92,6 +94,47 @@ if rig --help >/dev/null 2>&1 &&
   pass rig-command-surface 'every taught rig command exists on the live CLI'
 else
   fail rig-command-surface 'a taught rig command is absent from the live CLI'
+fi
+
+public_get_output=$(rig context get world-public 2>/dev/null)
+public_get_status=$?
+public_get_ok=1
+[ "$public_get_status" -eq 0 ] || public_get_ok=0
+printf '%s\n' "$public_get_output" | grep -Fq '# Enter the world' || public_get_ok=0
+printf '%s\n' "$public_get_output" | grep -Fq '# Build your world' || public_get_ok=0
+printf '%s\n' "$public_get_output" | grep -Fq '# Boundaries' || public_get_ok=0
+if [ "$public_get_ok" -eq 1 ]; then
+  pass retrieve-public-pack 'context get returned the assembled public world content'
+else
+  fail retrieve-public-pack 'context get did not return the assembled public world content'
+fi
+
+profile_output=$(rig context profile world-public --situation fresh --json 2>/dev/null)
+profile_status=$?
+profile_tokens=$(printf '%s\n' "$profile_output" | sed -n 's/.*"totalEstimatedTokens"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | sed -n '1p')
+profile_ok=1
+[ "$profile_status" -eq 0 ] || profile_ok=0
+[ -n "$profile_tokens" ] && [ "$profile_tokens" -gt 0 ] || profile_ok=0
+for atom in enter-the-world author-a-world know-the-edges; do
+  printf '%s\n' "$profile_output" | grep -Eq "\"atomId\"[[:space:]]*:[[:space:]]*\"$atom\"" || profile_ok=0
+done
+if [ "$profile_ok" -eq 1 ]; then
+  pass compose-fresh-profile 'context profile returned the fresh atom graph with a derived token total'
+else
+  fail compose-fresh-profile 'context profile did not return the fresh atom graph and derived token total'
+fi
+
+example_get_output=$(rig context get world-example 2>/dev/null)
+example_get_status=$?
+example_get_ok=1
+[ "$example_get_status" -eq 0 ] || example_get_ok=0
+printf '%s\n' "$example_get_output" | grep -Fq '# Your world' || example_get_ok=0
+printf '%s\n' "$example_get_output" | grep -Fq '## Exercise: Book world' || example_get_ok=0
+printf '%s\n' "$example_get_output" | grep -Fq '## Checks' || example_get_ok=0
+if [ "$example_get_ok" -eq 1 ]; then
+  pass retrieve-world-example 'context get returned the worked book-world template'
+else
+  fail retrieve-world-example 'context get did not return the worked book-world template'
 fi
 
 pack_output=$(rig context show world-public --json 2>/dev/null)
@@ -208,29 +251,21 @@ else
   fail derive-identity 'rig whoami did not return a complete managed-seat identity'
 fi
 
-topology_output=$(rig ps 2>/dev/null)
+topology_output=$(rig ps --nodes --json 2>/dev/null)
 topology_status=$?
-topology_ok=0
-if [ "$topology_status" -eq 0 ]; then
-  case "$topology_output" in
-    'No rigs'*|'No active rigs'*) [ -z "$expected_session" ] && topology_ok=1 ;;
-    *)
-      if [ -n "$expected_session" ]; then
-        printf '%s\n' "$topology_output" | grep -Eq '^[1-9][0-9]* rigs? .* [1-9][0-9]* seats? .* [0-9]+ needs? attention$' && topology_ok=1
-      else
-        printf '%s\n' "$topology_output" | grep -Eq '^[0-9]+ rigs? .* [0-9]+ seats? .* [0-9]+ needs? attention$' && topology_ok=1
-      fi
-      ;;
-  esac
-fi
+topology_ok=1
+[ "$topology_status" -eq 0 ] || topology_ok=0
+[ -n "$expected_session" ] || topology_ok=0
+printf '%s\n' "$topology_output" | grep -Eq "\"canonicalSessionName\"[[:space:]]*:[[:space:]]*\"$expected_session\"" || topology_ok=0
+printf '%s\n' "$topology_output" | grep -Eq '"rigName"[[:space:]]*:[[:space:]]*"[^\"]+"' || topology_ok=0
 if [ "$topology_ok" -eq 1 ]; then
-  pass derive-topology 'rig ps returned its stated topology view'
+  pass derive-topology 'rig ps node detail returned this seat under its canonical session identity'
 else
-  fail derive-topology 'rig ps did not return its stated topology view'
+  fail derive-topology 'rig ps node detail did not include this seat under its canonical session identity'
 fi
 
 if grep -Fq 'rig whoami --json' "$root/start-here.md" &&
-   grep -Fq 'rig ps' "$root/start-here.md" &&
+   grep -Fq 'rig ps --nodes --json' "$root/start-here.md" &&
    grep -Fq 'rig context list' "$root/start-here.md" &&
    grep -Fq 'rig --help' "$root/start-here.md"; then
   pass taught-commands 'volatile facts point at their deriving commands'
@@ -244,10 +279,10 @@ else
   fail taxonomy-layout 'the four-kind separation is absent'
 fi
 
-if grep -Fq 'The reading cost is derived when a profile is composed, not copied into this pack.' "$root/build-your-world.md"; then
-  pass derived-reading-cost 'reading cost remains derived at compose time'
+if [ "$profile_ok" -eq 1 ] && [ -n "$profile_tokens" ] && [ "$profile_tokens" -gt 0 ]; then
+  pass derived-reading-cost "the live composer reported a positive reading cost ($profile_tokens tokens)"
 else
-  fail derived-reading-cost 'reading-cost derivation claim is absent'
+  fail derived-reading-cost 'the live composer did not report a positive reading cost'
 fi
 
 profile_help=$(rig context profile --help 2>/dev/null)

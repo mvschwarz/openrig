@@ -41,6 +41,12 @@ rig context get world-public
 rig context profile world-public --situation fresh
 ```
 
+<!-- world-claim: retrieve-public-pack -->
+Use `rig context get world-public` to retrieve the assembled public pack bytes.
+
+<!-- world-claim: compose-fresh-profile -->
+Use `rig context profile world-public --situation fresh` to compose its fresh-session atom graph.
+
 <!-- world-claim: region-metadata -->
 The regions field says which dimensions an atom covers; atoms carry it as manifest metadata, and consumers may filter that metadata as data.
 <!-- world-claim: no-region-selector -->
@@ -50,16 +56,13 @@ capability as separate profile-composer work.
 
 <!-- world-claim: derived-reading-cost -->
 The reading cost is derived when a profile is composed, not copied into this pack.
-Use the coverage map to decide what a future consumer should request; do not cut sentences until
+Use the composed profile's reported token total to decide what a future consumer should request; do not cut sentences until
 their meaning breaks.
 
 ## Exercise: Book world
 
-Retrieve the worked template:
-
-```bash
-rig context get world-example
-```
+<!-- world-claim: retrieve-world-example -->
+Use `rig context get world-example` to retrieve the worked book-world template.
 
 Use it to describe a book-writing project: who the writer is, what manuscripts and sources exist,
 where they live, which editorial rules apply, what decisions shaped the draft, how current state is

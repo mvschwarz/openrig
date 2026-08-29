@@ -12,7 +12,7 @@ Derive the volatile edges first:
 
 ```bash
 rig whoami --json
-rig ps
+rig ps --nodes --json
 rig context list
 rig --help
 ```
@@ -21,7 +21,7 @@ rig --help
 Use rig whoami --json to derive the identity of the seat you actually occupy.
 
 <!-- world-claim: derive-topology -->
-Use rig ps to derive which rigs and seats exist now.
+Use rig ps --nodes --json to derive which seats exist in the rig you occupy now.
 
 <!-- world-claim: discover-context -->
 Use rig context list to discover the context packs available on this installation.

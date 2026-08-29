@@ -1,49 +1,77 @@
 claims:
   - id: world-purpose
     statement: "A world states the durable operating reality an agent needs before it can act well."
+    kind: judgment
     flagged: "Authored purpose and taste; no live scan can prove it."
   - id: derive-identity
     statement: "Use rig whoami --json to derive the identity of the seat you actually occupy."
+    kind: operational
     check: derive-identity
   - id: derive-topology
-    statement: "Use rig ps to derive which rigs and seats exist now."
+    statement: "Use rig ps --nodes --json to derive which seats exist in the rig you occupy now."
+    kind: operational
     check: derive-topology
   - id: discover-context
     statement: "Use rig context list to discover the context packs available on this installation."
+    kind: operational
     check: rig-command-surface
   - id: discover-commands
     statement: "Use rig --help before inventing a command or wrapper."
+    kind: operational
     check: rig-command-surface
   - id: agents-complement
     statement: "If a repository uses AGENTS.md, keep repo instructions there; a world complements those instructions."
+    kind: structural
     check: agents-md-complement
   - id: context-kinds
     statement: "WORLD + LORE + SKILLS + MISSION is the top-level separation of context kinds."
+    kind: structural
     check: taxonomy-layout
   - id: regions-are-tags
     statement: "The eight regions are metadata on atoms, not a required folder tree."
+    kind: structural
     check: atom-regions
   - id: region-metadata
     statement: "The regions field says which dimensions an atom covers; atoms carry it as manifest metadata, and consumers may filter that metadata as data."
+    kind: structural
     check: atom-regions
+  - id: retrieve-public-pack
+    statement: "Use `rig context get world-public` to retrieve the assembled public pack bytes."
+    kind: operational
+    check: retrieve-public-pack
+  - id: compose-fresh-profile
+    statement: "Use `rig context profile world-public --situation fresh` to compose its fresh-session atom graph."
+    kind: operational
+    check: compose-fresh-profile
   - id: derived-reading-cost
     statement: "The reading cost is derived when a profile is composed, not copied into this pack."
+    kind: structural
     check: derived-reading-cost
+  - id: retrieve-world-example
+    statement: "Use `rig context get world-example` to retrieve the worked book-world template."
+    kind: operational
+    check: retrieve-world-example
   - id: derive-pack-path
     statement: "Use rig context show world-public --json to derive the installed pack directory."
+    kind: operational
     check: derive-pack-path
   - id: private-ref-boundary
     statement: "Private world installs remain rig-local under their own refs and are never shadowed by this builtin."
+    kind: structural
     check: private-ref-boundary
   - id: no-region-selector
     statement: "This pack promises no region selector or subset-composition operation."
+    kind: structural
     check: no-region-selector
   - id: world-example-purpose
     statement: "A world pack situates an agent: it describes where the agent is, what exists there, and how to act."
+    kind: judgment
     flagged: "Authored purpose and taste; no live scan can prove it."
   - id: world-example-install
     statement: "Use `rig context add <pack-directory>` to install a world pack, confirm its ref with `rig context list`, and derive the configured store with `rig config get context.packs_root` only when a path is needed."
+    kind: operational
     check: world-example-install
   - id: world-example-regions
     statement: "The region names below are atom metadata, not a required directory layout."
+    kind: structural
     check: world-example-consistency
