@@ -42,8 +42,8 @@ collision in both codebases.
   armed wake (`rig view show held`). Stopping on purpose is HELD; stopping by accident is
   PARKED. A HELD row is **not** parked.
 - **DONE-UNSEEN** — finished work whose completion nobody consumed (herdr derives it as
-  idle ∧ unseen). Declared here; slice 04 owns its computation from claims/transitions
-  (seam, cross-cited both ways — neither slice builds the other's half).
+  idle ∧ unseen). Declared here and computed at read time from claims/transitions,
+  outside the activity oracle, preserving its non-inference boundary.
 
 ## Reconciliation with prior art
 
@@ -94,7 +94,7 @@ authority (hooks live in occupant config while the pane is seat-persistent).
   oscillated on mid-turn lulls and idempotently locked out real completions; its
   surviving 5-second variant is annotated a stopgap awaiting a hook replacement.
   Distinction held: transcript growth remains FINE as the refocus hook's cadence
-  trigger — a different purpose (S18 territory), and the one permitted consumer.
+  trigger — a different purpose, and the one permitted consumer.
 - **pane-scraping as primary truth: REJECTED.** herdr — whose TOML screen manifests are
   the state of that art — subordinates them to hooks wherever hooks cover the lifecycle,
   and marks viewer screens `skip_state_update` because scrollback lies. Pane reading

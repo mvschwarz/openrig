@@ -22,7 +22,7 @@ for agents**: nothing below blocks a write; the audit records and advises.
 
 **You may not select Part B for yourself.** If you believe something earns it, say so in ONE
 sentence and continue on Part A until told otherwise. Part A corresponds to the `mission-slice-sop`
-skill; Part B to `mission-slice-intent-proof-sop`.
+skill; Part B is defined below and applies only when assigned.
 
 
 ## THE COMPONENT MENU — this document is a menu, not a pipeline
@@ -193,9 +193,8 @@ reported as unknown, not failure.
   emits an intent-bearing `SPEC.md` + `NOTES.md`. Core emits only this
   mode-neutral shape; mode plugins add richer material through the extension
   seam rather than teaching core a mode.
-- **Skills — TWO, matching this document's two parts**: `mission-slice-sop`
-  teaches **Part A**, the light default; `mission-slice-intent-proof-sop`
-  teaches **Part B**, the assigned overlay. Assigned-only, never self-selected.
+- **Skill**: `mission-slice-sop` teaches **Part A**, the light default. **Part B**
+  is defined below and applies only when assigned — never self-selected.
 - **Bootstrap**: the shipped agent overlay points fresh seats at the skill
   and this document at boot.
 
