@@ -24,6 +24,12 @@ const GENERICIZED_CONTENT_SURFACES = [
   ["packages/daemon/policies/builtin/yolo.policy.md", "daemon/policies/builtin/yolo.policy.md"],
 ];
 
+test("the content scan stays wired through the named full-mode guard", () => {
+  const source = readFileSync(GATE, "utf8");
+  assert.match(source, /content:\s*runFullArtifactScan\(options, treeClasses\.content\)/);
+  assert.match(source, /join\(HERE, "check-internal-leak-guard\.mjs"\)[\s\S]*"--mode", "full"/);
+});
+
 test("the named substance gate writes a cut-bound, per-surface receipt and records the full scan", () => {
   withFixture(({ repo, rules, review, receipt }) => {
     const publicFile = join(repo, "public/guide.md");

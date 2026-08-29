@@ -4,17 +4,22 @@ import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   existsSync,
+  mkdtempSync,
   mkdirSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import {
   buildInternalLeakMessage,
   scanInternalLeaks,
 } from "./internal-leak-scanner.mjs";
 
+const HERE = dirname(fileURLToPath(import.meta.url));
 const FIX = "Genericize the content, cite its public home, or re-home it to the internal pack root.";
 const REFUSAL_VERDICTS = new Set(["instance-fact", "internal-path", "position-knowledge", "lore-class"]);
 const RULE_FIELDS = [
@@ -40,7 +45,7 @@ function main(argv = process.argv.slice(2)) {
 
   const derivedRules = selectDerivedRules(rules);
   const blockingScans = {
-    content: runArtifactScan(options, "content", treeClasses.content, rules),
+    content: runFullArtifactScan(options, treeClasses.content),
     derived: runArtifactScan(options, "derived", treeClasses.derived, derivedRules),
   };
   const scannedFiles = [
@@ -258,6 +263,41 @@ function runArtifactScan(options, treeClass, artifactFiles, rules) {
     findingCount: 0,
     scannedFiles,
   };
+}
+
+function runFullArtifactScan(options, artifactFiles) {
+  const temp = mkdtempSync(join(tmpdir(), "openrig-substance-scan-"));
+  const filesManifest = join(temp, "artifact-files.json");
+  const reportPath = join(temp, "scan-report.json");
+  try {
+    writeFileSync(filesManifest, `${JSON.stringify({ files: artifactFiles }, null, 2)}\n`);
+    const fullScan = spawnSync(process.execPath, [
+      join(HERE, "check-internal-leak-guard.mjs"),
+      "--repo", options.repo,
+      "--rules", options.rules,
+      "--mode", "full",
+      "--tree", options.packageRoot,
+      "--files-manifest", filesManifest,
+      "--report", reportPath,
+    ], { encoding: "utf8" });
+    if (fullScan.status !== 0) {
+      throw new Error(`substance gate full scan failed:\n${fullScan.stderr || fullScan.stdout || `exit ${fullScan.status}`}`);
+    }
+    const report = readJson(reportPath, "full scan report");
+    if (report.mode !== "full" || !Array.isArray(report.scannedFiles) || report.findingCount !== 0) {
+      throw new Error("full scan report is missing mode=full, scannedFiles, or a zero findingCount");
+    }
+    const scannedFiles = report.scannedFiles.map(normalizeSafeRelativePath);
+    return {
+      status: "pass",
+      artifactFileCount: artifactFiles.length,
+      scannedFileCount: scannedFiles.length,
+      findingCount: report.findingCount,
+      scannedFiles,
+    };
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
 }
 
 function summarizeBlockingScan(scan) {
