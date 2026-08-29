@@ -12,8 +12,17 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { scanInternalLeaks } from "./internal-leak-scanner.mjs";
 
 const GATE = resolve("scripts/check-substance-gate.mjs");
+const GENERICIZED_CONTENT_SURFACES = [
+  ["docs/reference/knowledge-maturity.md", "daemon/docs/reference/knowledge-maturity.md"],
+  ["docs/reference/sdlc-conventions.md", "daemon/docs/reference/sdlc-conventions.md"],
+  ["packages/daemon/policies/builtin/standard.policy.md", "daemon/policies/builtin/standard.policy.md"],
+  ["docs/reference/chain-file-convention.md", "daemon/docs/reference/chain-file-convention.md"],
+  ["docs/reference/agent-state-taxonomy.md", "daemon/docs/reference/agent-state-taxonomy.md"],
+  ["packages/daemon/policies/builtin/yolo.policy.md", "daemon/policies/builtin/yolo.policy.md"],
+];
 
 test("the named substance gate writes a cut-bound, per-surface receipt and records the full scan", () => {
   withFixture(({ repo, rules, review, receipt }) => {
@@ -42,6 +51,30 @@ test("the named substance gate writes a cut-bound, per-surface receipt and recor
     assert.deepEqual(output.fullScan.missingFromScan, []);
     assert.deepEqual(output.fullScan.extraInScan, []);
     assert.deepEqual(output.fullScan.scannedFiles, output.fullScan.artifactFiles);
+    assert.deepEqual(output.treeClassPartition, {
+      contentPathCount: output.fullScan.artifactFileCount,
+      derivedPathCount: 0,
+    });
+    assert.deepEqual(output.activeRulesByClass, {
+      content: {
+        path_prefixes: 2,
+        seat_and_rig_patterns: 1,
+        host_patterns: 1,
+        charged_terms: 1,
+        internal_path_globs: 3,
+        allowed_context_substrings: 1,
+      },
+      derived: {
+        path_prefixes: 1,
+        host_patterns: 1,
+        internal_path_globs: 3,
+        allowed_context_substrings: 1,
+      },
+    });
+    assert.equal(output.blockingScans.content.status, "pass");
+    assert.equal(output.blockingScans.content.findingCount, 0);
+    assert.equal(output.blockingScans.derived.status, "pass");
+    assert.equal(output.blockingScans.derived.findingCount, 0);
     assert.deepEqual(output.surfaces.map((surface) => surface.path), ["public/guide.md"]);
     assert.equal(output.surfaces[0].verdict, "ship");
   });
@@ -169,6 +202,92 @@ test("the gate runs the full scanner over packager files outside the human-revie
   });
 });
 
+test("derived artifacts retain injection checks", () => {
+  for (const specimen of [
+    { path: "dist/absolute.js", content: "const root = '/Users/example/build';\n" },
+    { path: "dist/host.js", content: "const host = 'mm2-build';\n" },
+    { path: "dist/fixture.internal.js", content: "export const value = true;\n" },
+  ]) {
+    withFixture(({ repo, rules, review, receipt }) => {
+      const publicFile = join(repo, "public/guide.md");
+      write(publicFile, "Generic product guidance.\n");
+      write(join(repo, specimen.path), specimen.content);
+      commitAll(repo, `derived injection specimen ${specimen.path}`);
+      const cutSha = gitHead(repo);
+      writeFileSync(review, JSON.stringify({
+        surfaces: [{
+          path: "public/guide.md",
+          sha256: sha256(publicFile),
+          verdict: "ship",
+          reason: "Generic product guidance.",
+          candidateDispositions: [],
+        }],
+      }));
+
+      const result = runGate({ repo, rules, review, receipt, cutSha });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, new RegExp(specimen.path.replaceAll(".", "\\.")));
+      assert.equal(existsSync(receipt), false);
+    });
+  }
+});
+
+test("derived archaeology terms do not block and the receipt records the exact active rules", () => {
+  withFixture(({ repo, rules, review, receipt }) => {
+    const publicFile = join(repo, "public/guide.md");
+    write(publicFile, "Generic product guidance.\n");
+    write(join(repo, "dist/derived.js"), "founder operator-agent@ substrate/shared-docs/\n");
+    commitAll(repo, "derived archaeology specimen");
+    const cutSha = gitHead(repo);
+    writeFileSync(review, JSON.stringify({
+      surfaces: [{
+        path: "public/guide.md",
+        sha256: sha256(publicFile),
+        verdict: "ship",
+        reason: "Generic product guidance.",
+        candidateDispositions: [],
+      }],
+    }));
+
+    const result = runGate({ repo, rules, review, receipt, cutSha });
+    assert.equal(result.status, 0, result.stderr);
+    const output = JSON.parse(readFileSync(receipt, "utf8"));
+    assert.equal(output.treeClassPartition.derivedPathCount, 1);
+    assert.equal(output.treeClassPartition.contentPathCount + 1, output.fullScan.artifactFileCount);
+    assert.deepEqual(output.activeRulesByClass.derived, {
+      path_prefixes: 1,
+      host_patterns: 1,
+      internal_path_globs: 3,
+      allowed_context_substrings: 1,
+    });
+    assert.deepEqual(output.blockingScans.derived, {
+      status: "pass",
+      artifactFileCount: 1,
+      scannedFileCount: 1,
+      findingCount: 0,
+    });
+    assert.equal("derivedFindings" in output, false);
+  });
+});
+
+test("the six shipped content sources are clean and a test-local reseed remains blocking", () => {
+  const rules = JSON.parse(readFileSync("scripts/internal-tokens.generated.json", "utf8"));
+  for (const [sourcePath, artifactPath] of GENERICIZED_CONTENT_SURFACES) {
+    assert.deepEqual(
+      scanInternalLeaks({ path: artifactPath, bytes: readFileSync(sourcePath), rules }),
+      [],
+      sourcePath,
+    );
+  }
+
+  const [sourcePath, artifactPath] = GENERICIZED_CONTENT_SURFACES[0];
+  const reseeded = Buffer.concat([
+    readFileSync(sourcePath),
+    Buffer.from(`\n${rules.charged_terms[0]}\n`),
+  ]);
+  assert.notEqual(scanInternalLeaks({ path: artifactPath, bytes: reseeded, rules }).length, 0);
+});
+
 test("the release ceremony names the gate and its durable receipt", () => {
   const pkg = JSON.parse(readFileSync("package.json", "utf8"));
   assert.equal(pkg.scripts["gate:substance"], "node scripts/check-substance-gate.mjs");
@@ -193,14 +312,14 @@ function withFixture(run) {
   writeFileSync(join(repo, "package.json"), JSON.stringify({
     name: "openrig-substance-gate-fixture",
     version: "1.0.0",
-    files: ["public", "outside.md", "substance-surfaces.json"],
+    files: ["public", "dist", "outside.md", "substance-surfaces.json"],
   }));
   writeFileSync(join(repo, "substance-surfaces.json"), JSON.stringify({
     schemaVersion: 1,
     roots: ["public"],
   }));
   writeFileSync(rules, JSON.stringify({
-    path_prefixes: ["substrate/shared-docs/"],
+    path_prefixes: ["substrate/shared-docs/", "/Users/example/"],
     seat_and_rig_patterns: ["operator-agent@"],
     host_patterns: ["mm2-"],
     charged_terms: ["founder"],
