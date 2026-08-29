@@ -402,3 +402,55 @@ describe("RigSpec schema (pod-aware)", () => {
     expect(result.errors.some((e) => e.includes("builtin:terminal") && e.includes("terminal"))).toBe(true);
   });
 });
+
+// ─── OPR.0.5.6.20 A5 — member-level compaction_strategy live ingestion ─────────
+// RED-FIRST over d9e01f2e3: validateMember has no compaction_strategy leg and
+// normalizePod drops the field, so a member override never survives the real
+// YAML -> validate -> normalize path (the exact bypass the delivery review caught;
+// the P3 resolver test constructed members directly and could not see it).
+describe("member compaction_strategy — live ingestion (OPR.0.5.6.20 A5)", () => {
+  const rigWithMemberStrategy = (value: string) => {
+    const rig = structuredClone(VALID_RIG);
+    (rig.pods[0]!.members[0] as Record<string, unknown>)["compaction_strategy"] = value;
+    return rig;
+  };
+
+  it("canonical member value validates and survives normalization to the resolved member", () => {
+    const rig = rigWithMemberStrategy("managed-compaction");
+    const result = RigSpecSchema.validate(rig);
+    expect(result.valid).toBe(true);
+    const normalized = RigSpecSchema.normalize(rig);
+    expect(normalized.pods[0]!.members[0]!.compactionStrategy).toBe("managed-compaction");
+  });
+
+  it("deprecated alias at member level validates WITH advisory and normalizes to canonical (A1 at member level)", () => {
+    const rig = rigWithMemberStrategy("harness_native");
+    const result = RigSpecSchema.validate(rig);
+    expect(result.valid).toBe(true);
+    expect((result.advisories ?? []).join(" ")).toMatch(/harness_native.*deprecated.*default-compaction/);
+    const normalized = RigSpecSchema.normalize(rig);
+    expect(normalized.pods[0]!.members[0]!.compactionStrategy).toBe("default-compaction");
+  });
+
+  it("invalid member value fails validation with an error naming the member", () => {
+    const rig = rigWithMemberStrategy("yolo-mode");
+    const result = RigSpecSchema.validate(rig);
+    expect(result.valid).toBe(false);
+    expect(result.errors.join(" ")).toMatch(/members\[0\].*compaction_strategy.*yolo-mode/);
+  });
+
+  it("custom_prompt keeps the byte-preserved teaching rejection at member level", () => {
+    const rig = rigWithMemberStrategy("custom_prompt");
+    const result = RigSpecSchema.validate(rig);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes('"custom_prompt" is not supported in v1'))).toBe(true);
+  });
+
+  it("absent member field stays undefined after normalization (resolver F-6 default owns absence — green at base, floor pin)", () => {
+    const rig = structuredClone(VALID_RIG);
+    const result = RigSpecSchema.validate(rig);
+    expect(result.valid).toBe(true);
+    const normalized = RigSpecSchema.normalize(rig);
+    expect(normalized.pods[0]!.members[0]!.compactionStrategy).toBeUndefined();
+  });
+});
