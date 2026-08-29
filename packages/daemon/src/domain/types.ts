@@ -802,11 +802,12 @@ export interface StartupBlock {
 
 export interface LifecycleDefaults {
   executionMode: "interactive_resident";
-  // OPR.0.5.6.20 B-3: optional so a lifecycle block that omits the field preserves
+  // OPR.0.5.6.20 B-3/B-4: optional so a lifecycle block that omits a field preserves
   // ABSENCE through normalization — a level that does not specify does not
-  // participate in precedence. The defaults level materializes the F-6 default.
+  // participate in precedence. The defaults level materializes the defaults
+  // (default-compaction per F-6; resume_if_possible for restore).
   compactionStrategy?: "default-compaction" | "managed-compaction" | "handover" | "apprentice-handover";
-  restorePolicy: "resume_if_possible" | "relaunch_fresh" | "checkpoint_only";
+  restorePolicy?: "resume_if_possible" | "relaunch_fresh" | "checkpoint_only";
 }
 
 export interface SkillResource { id: string; path: string; }

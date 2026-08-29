@@ -337,15 +337,20 @@ export function normalizeAgentSpec(raw: Record<string, unknown>): AgentSpec {
   };
 
   if (defaults) {
-    // OPR.0.5.6.20: lifecycle always materializes at the DEFAULTS level so the F-6
-    // default (default-compaction) is visible, not implied by absence. B-3: only
-    // this level materializes — profile blocks preserve absence so a non-specifying
-    // level never participates in precedence.
+    // OPR.0.5.6.20: lifecycle always materializes at the DEFAULTS level so the
+    // defaults (default-compaction per F-6; resume_if_possible for restore) are
+    // visible, not implied by absence. B-3/B-4: ONLY this level materializes —
+    // profile blocks preserve absence so a non-specifying level never
+    // participates in precedence.
     const lifecycle = normalizeLifecycle((defaults["lifecycle"] as Record<string, unknown>) ?? {});
     result.defaults = {
       runtime: defaults["runtime"] as string | undefined,
       model: defaults["model"] as string | undefined,
-      lifecycle: { ...lifecycle, compactionStrategy: lifecycle.compactionStrategy ?? "default-compaction" },
+      lifecycle: {
+        ...lifecycle,
+        compactionStrategy: lifecycle.compactionStrategy ?? "default-compaction",
+        restorePolicy: lifecycle.restorePolicy ?? "resume_if_possible",
+      },
     };
   }
 
@@ -357,16 +362,18 @@ export function normalizeAgentSpec(raw: Record<string, unknown>): AgentSpec {
 const normalizeStartupBlock = sharedNormalizeStartupBlock;
 
 function normalizeLifecycle(raw: Record<string, unknown>): LifecycleDefaults {
-  // OPR.0.5.6.20 B-3: absence is preserved, never materialized — a lifecycle block
-  // that omits compaction_strategy must not acquire a value that later participates
-  // in precedence. The defaults-level call site owns the F-6 materialization.
+  // OPR.0.5.6.20 B-3/B-4: absence is preserved, never materialized — a lifecycle
+  // block that omits a field must not acquire a value that later participates in
+  // precedence. The defaults-level call site owns materializing the defaults.
   const rawStrategy = raw["compaction_strategy"] as string | undefined;
   return {
     executionMode: (raw["execution_mode"] as LifecycleDefaults["executionMode"]) ?? "interactive_resident",
     compactionStrategy: rawStrategy !== undefined
       ? ((canonicalCompactionStrategy(rawStrategy) ?? "default-compaction") as LifecycleDefaults["compactionStrategy"])
       : undefined,
-    restorePolicy: (raw["restore_policy"] as LifecycleDefaults["restorePolicy"]) ?? "resume_if_possible",
+    restorePolicy: raw["restore_policy"] !== undefined
+      ? (raw["restore_policy"] as LifecycleDefaults["restorePolicy"])
+      : undefined,
   };
 }
 
