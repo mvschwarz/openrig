@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { resolveNodeConfig, type ResolutionContext } from "../src/domain/profile-resolver.js";
+import { parseAgentSpec, normalizeAgentSpec } from "../src/domain/agent-manifest.js";
 import type { AgentSpec, RigSpec, RigSpecPod, RigSpecPodMember, StartupBlock } from "../src/domain/types.js";
 import type { ResolvedAgentSpec, ResourceCollision } from "../src/domain/agent-resolver.js";
 
@@ -587,6 +588,50 @@ describe("compactionStrategy resolution — most-specific-wins (OPR.0.5.6.20)", 
     const result = resolveNodeConfig(makeCtx({
       member: makeMember({ compactionStrategy: "harness_native" } as never),
     }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.config.compactionStrategy).toBe("default-compaction");
+  });
+});
+
+// ─── OPR.0.5.6.20 B-3 — a non-specifying level must not participate ────────────
+// RED-FIRST over fad5e26c0 (R1 HOLD finding, real-ingress mixed fixture): the
+// normalization hop materializes default-compaction into a profile lifecycle
+// block that omits compaction_strategy, and the resolver's truthy check then
+// lets that non-specifying profile defeat an explicit spec-level strategy —
+// the flagship advisor shape silently loses its continuity policy.
+describe("compactionStrategy precedence — non-specifying level does not participate (OPR.0.5.6.20 B-3)", () => {
+  it("spec-level strategy survives a profile lifecycle block that omits compaction_strategy (real ingress: yaml -> normalize -> resolve)", () => {
+    const raw = parseAgentSpec(`
+version: "0.2"
+name: b3-fixture
+defaults:
+  runtime: claude-code
+  lifecycle:
+    compaction_strategy: apprentice-handover
+profiles:
+  default:
+    lifecycle:
+      execution_mode: interactive_resident
+`);
+    const spec = normalizeAgentSpec(raw);
+    const result = resolveNodeConfig(makeCtx({ baseSpec: makeResolved(spec) }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.config.compactionStrategy).toBe("apprentice-handover");
+  });
+
+  it("F-6 floor unchanged: absent at every level still resolves to default-compaction through the same real ingress (green at base, floor pin)", () => {
+    const raw = parseAgentSpec(`
+version: "0.2"
+name: b3-floor-fixture
+defaults:
+  runtime: claude-code
+profiles:
+  default:
+    lifecycle:
+      execution_mode: interactive_resident
+`);
+    const spec = normalizeAgentSpec(raw);
+    const result = resolveNodeConfig(makeCtx({ baseSpec: makeResolved(spec) }));
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.config.compactionStrategy).toBe("default-compaction");
   });
