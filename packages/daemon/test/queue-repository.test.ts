@@ -1085,4 +1085,90 @@ describe("QueueRepository — generation stamps (Class-B)", () => {
     expect(repo.releaseClaimsByGeneration("gen-retired")).toBe(0);
     expect(repo.getById(pending.qitemId)!.state).toBe("pending");
   });
+
+  // ── OPR.0.5.6.26 — blocker-actuation unification. blocked_on promises "A waits until B
+  // completes"; the propagate-completion block exists in EXACTLY ONE place (the update path),
+  // and the handoff family writes its terminal states via direct SQL inside its own
+  // transactions — so the promise never fires for ANY closure through that family
+  // (per-code-path class, not per-closure-state). Three live specimens on the spec; these two
+  // fixtures are the locked REDs. Each asserts STATE FIRST so the base failure is the pinned
+  // reason (the blocked row stays blocked), then the full effect-set parity the update path
+  // already produces (transition, wake intent, event).
+
+  it("S26 RED 1: a blocker closed handed-off VIA THE HANDOFF VERB auto-unparks its attached rows", async () => {
+    const blocker = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "blocker A" });
+    const parked = await repo.create({ sourceSession: "alice@rig", destinationSession: "carol@rig", body: "work B" });
+    repo.update({ qitemId: parked.qitemId, actorSession: "carol@rig", state: "blocked", blockedOn: blocker.qitemId });
+    expect(repo.getById(parked.qitemId)!.state).toBe("blocked");
+
+    // Close the blocker through the handoff verb (terminal state 'handed-off', clear successor).
+    await repo.handoff({ qitemId: blocker.qitemId, fromSession: "bob@rig", toSession: "dave@rig", nudge: false });
+    expect(repo.getById(blocker.qitemId)!.state).toBe("handed-off");
+
+    // PINNED RED REASON (specimen-1 shape): at base the parked row stays blocked — the
+    // handoff family never consults propagate-completion.
+    const after = repo.getById(parked.qitemId)!;
+    expect(after.state, "a row blocked on a handed-off blocker must auto-unpark").toBe("pending");
+    expect(after.blockedOn, "auto-unpark clears the resolved blocker").toBeNull();
+
+    // Effect-set parity with the update path (identical across entry paths):
+    const notes = repo.transitionLog.listForQitem(parked.qitemId).map((t) => t.transitionNote ?? "");
+    expect(
+      notes.some((n) => n.includes("auto-unparked") && n.includes(blocker.qitemId)),
+      "the resume transition names the blocker",
+    ).toBe(true);
+    const wake = db
+      .prepare("SELECT COUNT(*) AS c FROM outbox_entries WHERE tags LIKE ?")
+      .get(`%queue:auto-unpark:blocker%`) as { c: number };
+    expect(wake.c, "a wake intent is staged for the unparked row").toBeGreaterThan(0);
+    expect(
+      captured.some(
+        (e) =>
+          e.type === "queue.updated" &&
+          (e as { qitemId?: string }).qitemId === parked.qitemId &&
+          (e as { fromState?: string }).fromState === "blocked" &&
+          (e as { toState?: string }).toState === "pending",
+      ),
+      "the blocked->pending event is emitted",
+    ).toBe(true);
+  });
+
+  // R-2 CONFIRM-OR-REFUTE: this fixture encodes a DERIVED PREDICTION with no live specimen —
+  // a 'done' closure via handoffAndComplete rides the same direct-SQL bypass. If this test
+  // UNEXPECTEDLY PASSES at base, the prediction is REFUTED: correct the spec's defect
+  // statement in place (dated, wrong version kept visible) and keep this test as the
+  // regression floor. A base pass is a finding, never something to paper over.
+  it("S26 RED 2 (confirm-or-refute): a blocker closed done VIA HANDOFF-AND-COMPLETE auto-unparks its attached rows", async () => {
+    const blocker = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "blocker A2" });
+    const parked = await repo.create({ sourceSession: "alice@rig", destinationSession: "carol@rig", body: "work B2" });
+    repo.update({ qitemId: parked.qitemId, actorSession: "carol@rig", state: "blocked", blockedOn: blocker.qitemId });
+    expect(repo.getById(parked.qitemId)!.state).toBe("blocked");
+
+    // Close the blocker through handoff-and-complete (terminal state 'done', same bypass family).
+    await repo.handoffAndComplete({ qitemId: blocker.qitemId, fromSession: "bob@rig", toSession: "dave@rig", nudge: false });
+    expect(repo.getById(blocker.qitemId)!.state).toBe("done");
+
+    // PINNED RED REASON (the derived prediction): at base the parked row stays blocked.
+    const after = repo.getById(parked.qitemId)!;
+    expect(after.state, "a row blocked on a done-via-handoff-and-complete blocker must auto-unpark").toBe("pending");
+    expect(after.blockedOn, "auto-unpark clears the resolved blocker").toBeNull();
+
+    // Effect-set parity, same assertions as RED 1:
+    const notes = repo.transitionLog.listForQitem(parked.qitemId).map((t) => t.transitionNote ?? "");
+    expect(
+      notes.some((n) => n.includes("auto-unparked") && n.includes(blocker.qitemId)),
+      "the resume transition names the blocker",
+    ).toBe(true);
+    expect(
+      captured.some(
+        (e) =>
+          e.type === "queue.updated" &&
+          (e as { qitemId?: string }).qitemId === parked.qitemId &&
+          (e as { fromState?: string }).fromState === "blocked" &&
+          (e as { toState?: string }).toState === "pending",
+      ),
+      "the blocked->pending event is emitted",
+    ).toBe(true);
+  });
 });
+
