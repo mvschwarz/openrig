@@ -810,16 +810,14 @@ export class RestoreOrchestrator {
     // (classified running downstream) while the occupant truth is ambiguous,
     // bypassing A1's loud-failure semantics. Resolved/none/legacy states
     // fall through and keep the restoring/degraded behavior unchanged.
-    {
-      const preResolution = resolveActiveSnapshotSession(data, nodeId);
-      if (preResolution.kind === "ambiguous") {
-        return {
-          nodeId,
-          logicalId: node.logicalId,
-          status: "failed",
-          error: activeOccupantAmbiguityError(preResolution.candidateIds, preResolution.detail),
-        };
-      }
+    const occupantResolution = resolveActiveSnapshotSession(data, nodeId);
+    if (occupantResolution.kind === "ambiguous") {
+      return {
+        nodeId,
+        logicalId: node.logicalId,
+        status: "failed",
+        error: activeOccupantAmbiguityError(occupantResolution.candidateIds, occupantResolution.detail),
+      };
     }
 
     // Consult live continuity state BEFORE clearing stale state
@@ -851,18 +849,10 @@ export class RestoreOrchestrator {
     // through). The ONLY default fresh-prime is now: no prior session, a genuinely
     // non-resume policy (relaunch_fresh / checkpoint_only), or explicit `--fresh`.
     {
-      // OPR.0.5.7.1 D1 — the active occupant is RESOLVED, never inferred
-      // from row ordering (cite site 1 of 2; the max-ULID reduce is retired).
-      const resolution = resolveActiveSnapshotSession(data, nodeId);
-      if (resolution.kind === "ambiguous") {
-        return {
-          nodeId,
-          logicalId: node.logicalId,
-          status: "failed",
-          error: activeOccupantAmbiguityError(resolution.candidateIds, resolution.detail),
-        };
-      }
-      const snapSession = resolution.kind === "resolved" ? resolution.session : null;
+      // OPR.0.5.7.1 D1 — the active occupant was RESOLVED once at the top of
+      // this function (before the continuity consult); ambiguity already
+      // returned there, so only resolved/none reach here.
+      const snapSession = occupantResolution.kind === "resolved" ? occupantResolution.session : null;
       const policy = snapSession?.restorePolicy ?? "resume_if_possible";
       const freshRequested = opts?.freshLogicalIds?.includes(node.logicalId) ?? false;
       const resumeSourceRecorded = !!snapSession?.resumeType && snapSession.resumeType !== "none";
