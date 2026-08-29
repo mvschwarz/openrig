@@ -349,6 +349,9 @@ export class RestoreOrchestrator {
     adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>;
     fsOps?: { exists(path: string): boolean };
     holdReason?: string;
+    /** OPR.0.5.7.1 D6 — same contract as restore(): resumed histories replay
+     *  nothing without this explicit versioned opt-in. */
+    startupReplayOptIn?: { version: number };
   }): Promise<{
     ok: boolean;
     code?: string;
