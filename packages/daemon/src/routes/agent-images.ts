@@ -71,6 +71,12 @@ interface ForkSourceShape {
   /** OPR.0.4.8.3 Seam B: the source seat's raw permission_policy ref — a forked/imaged
    *  successor preserves the source's policy attachment (preflight surface 2). */
   permissionPolicy: string | null;
+  /** OPR.0.5.6.23 member (b): node-carried optionals a fork must not erase —
+   *  the model pin especially (the 0.4.6.PI1 relaunch-on-default class). */
+  model: string | null;
+  role: string | null;
+  restorePolicy: string | null;
+  label: string | null;
 }
 
 function resolveForkSourceNode(db: Database.Database, sourceSession: string): ForkSourceShape | null {
@@ -90,6 +96,10 @@ function resolveForkSourceNode(db: Database.Database, sourceSession: string): Fo
     cwd: (row["cwd"] as string | null) ?? null,
     codexConfigProfile: (row["codex_config_profile"] as string | null) ?? null,
     permissionPolicy: (row["permission_policy"] as string | null) ?? null,
+    model: (row["model"] as string | null) ?? null,
+    role: (row["role"] as string | null) ?? null,
+    restorePolicy: (row["restore_policy"] as string | null) ?? null,
+    label: (row["label"] as string | null) ?? null,
   };
 }
 
@@ -259,6 +269,11 @@ export function agentImagesRoutes(deps: AgentImageRoutesDeps): Hono {
       ...(source.cwd ? { cwd: source.cwd } : {}),
       ...(source.codexConfigProfile ? { codex_config_profile: source.codexConfigProfile } : {}),
       ...(source.permissionPolicy ? { permission_policy: source.permissionPolicy } : {}),
+      // OPR.0.5.6.23 member (b): every node-carried optional rides the fork.
+      ...(source.model ? { model: source.model } : {}),
+      ...(source.role ? { role: source.role } : {}),
+      ...(source.restorePolicy ? { restore_policy: source.restorePolicy } : {}),
+      ...(source.label ? { label: source.label } : {}),
       session_source: sessionSource,
     };
 

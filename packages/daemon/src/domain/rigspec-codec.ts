@@ -1,5 +1,28 @@
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import type { RigSpec, LegacyRigSpec } from "./types.js";
+import type { RigSpec, LegacyRigSpec, SessionSourceSpec } from "./types.js";
+
+// OPR.0.5.6.23 — the presence-invariant serialization seam for the
+// sessionSource union: ONE enumeration of the union's optional ref fields
+// drives emission, and the compile-time completeness check below makes a new
+// optional field on any union arm a BUILD ERROR here rather than a silent
+// round-trip to undefined (the silent-erasure class this slice closes).
+type SessionSourceRefKeys<T> = T extends { ref: infer R } ? (R extends unknown ? keyof R : never) : never;
+type SessionSourceOptionalRefKey = Exclude<SessionSourceRefKeys<SessionSourceSpec>, "kind">;
+const SESSION_SOURCE_OPTIONAL_REF_FIELDS = ["value", "version"] as const satisfies readonly SessionSourceOptionalRefKey[];
+type UnenumeratedRefField = Exclude<SessionSourceOptionalRefKey, (typeof SESSION_SOURCE_OPTIONAL_REF_FIELDS)[number]>;
+// If a union arm gains an optional ref field that is not enumerated above,
+// this line fails to compile and NAMES the missing field in its type.
+const _sessionSourceEnumerationComplete: UnenumeratedRefField extends never ? true : ["unserialized sessionSource ref field:", UnenumeratedRefField] = true;
+void _sessionSourceEnumerationComplete;
+
+function serializeSessionSource(ss: SessionSourceSpec): Record<string, unknown> {
+  const srcRef = ss.ref as Record<string, unknown>;
+  const ref: Record<string, unknown> = { kind: ss.ref.kind };
+  for (const field of SESSION_SOURCE_OPTIONAL_REF_FIELDS) {
+    if (srcRef[field] !== undefined) ref[field] = srcRef[field];
+  }
+  return { mode: ss.mode, ref };
+}
 
 /**
  * Pod-aware RigSpec codec. Canonical contract for the AgentSpec reboot.
@@ -77,10 +100,11 @@ export class RigSpecCodec {
         if (m.permissionPolicy) member["permission_policy"] = m.permissionPolicy;
         if (m.restorePolicy) member["restore_policy"] = m.restorePolicy;
         if (m.startup) member["startup"] = serializeStartupBlock(m.startup);
+        // OPR.0.5.6.20 field, OPR.0.5.6.23 fix: parse carries it (schema
+        // normalize), so serialize must too — same silent-erasure class.
+        if (m.compactionStrategy) member["compaction_strategy"] = m.compactionStrategy;
         if (m.sessionSource) {
-          const ref: Record<string, unknown> = { kind: m.sessionSource.ref.kind };
-          if (m.sessionSource.ref.value !== undefined) ref["value"] = m.sessionSource.ref.value;
-          member["session_source"] = { mode: m.sessionSource.mode, ref };
+          member["session_source"] = serializeSessionSource(m.sessionSource);
         }
         // (rebuild ref.value is an array; the codec re-emits it as-is via the
         //  same `ref.value` slot — the YAML serializer handles array emission.)
