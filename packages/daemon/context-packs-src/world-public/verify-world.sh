@@ -148,7 +148,9 @@ cleanup_probe() {
     probe_installed=0
     return 0
   fi
-  return 1
+  rm -rf -- "$probe_target" || return 1
+  [ ! -e "$probe_target" ] || return 1
+  probe_installed=0
 }
 
 if [ "$example_install_ok" -ne 1 ]; then
