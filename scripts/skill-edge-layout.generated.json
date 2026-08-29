@@ -140,9 +140,11 @@
     },
     "messaging-the-human": {
       "edges": [
-        "plugin"
+        "canonical",
+        "plugin",
+        "spec"
       ],
-      "category": null
+      "category": "core"
     },
     "mission-slice-sop": {
       "edges": [
@@ -186,9 +188,11 @@
     },
     "openrig-skills": {
       "edges": [
-        "plugin"
+        "canonical",
+        "plugin",
+        "spec"
       ],
-      "category": null
+      "category": "core"
     },
     "openrig-upgrade": {
       "edges": [
