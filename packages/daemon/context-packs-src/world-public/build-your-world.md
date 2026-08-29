@@ -43,8 +43,9 @@ rig context profile world-public --situation fresh
 
 <!-- world-claim: region-metadata -->
 The regions field says which dimensions an atom covers; atoms carry it as manifest metadata, and consumers may filter that metadata as data.
-This pack promises no region selector or
-subset-composition operation. If a real consumer needs region-subset composition, route that
+<!-- world-claim: no-region-selector -->
+This pack promises no region selector or subset-composition operation.
+If a real consumer needs region-subset composition, route that
 capability as separate profile-composer work.
 
 <!-- world-claim: derived-reading-cost -->

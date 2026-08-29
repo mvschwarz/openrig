@@ -16,6 +16,7 @@ case "$0" in
   *) root=. ;;
 esac
 root=$(CDPATH= cd "$root" && pwd)
+example="$root/../world-example"
 
 pass() {
   passed=$((passed + 1))
@@ -54,7 +55,7 @@ else
   fail atom-regions 'one or more world regions are absent from atom metadata'
 fi
 
-prose=$(cat "$root/start-here.md" "$root/build-your-world.md" "$root/boundaries.md")
+prose=$(cat "$root/start-here.md" "$root/build-your-world.md" "$root/boundaries.md" "$example/your-world.md")
 claim_ids=$(sed -n 's/^[[:space:]]*- id:[[:space:]]*//p' "$root/claims.yaml")
 claim_count=$(printf '%s\n' "$claim_ids" | sed '/^$/d' | wc -l | tr -d ' ')
 marker_count=$(printf '%s\n' "$prose" | grep -Ec '<!--[[:space:]]*world-claim:[[:space:]]*[a-z0-9-]+[[:space:]]*-->')
@@ -85,10 +86,61 @@ if rig --help >/dev/null 2>&1 &&
    rig context list --help >/dev/null 2>&1 &&
    rig context show --help >/dev/null 2>&1 &&
    rig context get --help >/dev/null 2>&1 &&
-   rig context profile --help >/dev/null 2>&1; then
+   rig context profile --help >/dev/null 2>&1 &&
+   rig context add --help >/dev/null 2>&1; then
   pass rig-command-surface 'every taught rig command exists on the live CLI'
 else
   fail rig-command-surface 'a taught rig command is absent from the live CLI'
+fi
+
+pack_output=$(rig context show world-public --json 2>/dev/null)
+pack_status=$?
+pack_source_path=$(printf '%s\n' "$pack_output" | sed -n 's/.*"sourcePath"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')
+pack_source_root=$(CDPATH= cd "$pack_source_path" 2>/dev/null && pwd)
+pack_path_ok=1
+[ "$pack_status" -eq 0 ] || pack_path_ok=0
+printf '%s\n' "$pack_output" | grep -Eq '"relativePath"[[:space:]]*:[[:space:]]*"world-public"' || pack_path_ok=0
+printf '%s\n' "$pack_output" | grep -Eq '"sourceType"[[:space:]]*:[[:space:]]*"builtin"' || pack_path_ok=0
+[ "$pack_source_root" = "$root" ] || pack_path_ok=0
+if [ "$pack_path_ok" -eq 1 ]; then
+  pass derive-pack-path 'context show resolves this builtin at its usable source path'
+else
+  fail derive-pack-path 'context show did not resolve world-public to this builtin directory'
+fi
+
+list_output=$(rig context list --json 2>/dev/null)
+list_status=$?
+namespace_ok=1
+[ "$list_status" -eq 0 ] || namespace_ok=0
+printf '%s\n' "$list_output" | grep -Eq '"relativePath"[[:space:]]*:[[:space:]]*"world-public"' || namespace_ok=0
+printf '%s\n' "$pack_output" | grep -Eq '"sourceType"[[:space:]]*:[[:space:]]*"builtin"' || namespace_ok=0
+if printf '%s\n' "$list_output" | grep -Eq '"relativePath"[[:space:]]*:[[:space:]]*"world/install"'; then
+  private_output=$(rig context show world/install --json 2>/dev/null)
+  private_status=$?
+  [ "$private_status" -eq 0 ] || namespace_ok=0
+  printf '%s\n' "$private_output" | grep -Eq '"relativePath"[[:space:]]*:[[:space:]]*"world/install"' || namespace_ok=0
+  printf '%s\n' "$private_output" | grep -Eq '"sourceType"[[:space:]]*:[[:space:]]*"(user_file|workspace)"' || namespace_ok=0
+fi
+if [ "$namespace_ok" -eq 1 ]; then
+  pass private-ref-boundary 'the builtin is listed at world-public while a local world namespace remains local'
+else
+  fail private-ref-boundary 'the world-public or local-world namespace projection is false'
+fi
+
+configured_packs_root=$(rig config get context.packs_root 2>/dev/null)
+configured_packs_status=$?
+example_install_ok=1
+[ "$configured_packs_status" -eq 0 ] || example_install_ok=0
+[ -n "$configured_packs_root" ] || example_install_ok=0
+if [ -n "${OPENRIG_CONTEXT_PACKS_ROOT:-}" ] && [ "$configured_packs_root" != "$OPENRIG_CONTEXT_PACKS_ROOT" ]; then
+  example_install_ok=0
+fi
+rig context add --help >/dev/null 2>&1 || example_install_ok=0
+rig context list --help >/dev/null 2>&1 || example_install_ok=0
+if [ "$example_install_ok" -eq 1 ]; then
+  pass world-example-install 'context add/list use the typed context store projection'
+else
+  fail world-example-install 'the typed context store or taught add/list surface is false'
 fi
 
 expected_session=${OPENRIG_SESSION_NAME:-${RIGGED_SESSION_NAME:-}}
@@ -150,22 +202,30 @@ else
   fail derived-reading-cost 'reading-cost derivation claim is absent'
 fi
 
+profile_help=$(rig context profile --help 2>/dev/null)
+profile_help_status=$?
+if [ "$profile_help_status" -eq 0 ] && ! printf '%s\n' "$profile_help" | grep -Eq -- '--region([[:space:]=]|$)'; then
+  pass no-region-selector 'the live profile surface has no region selector'
+else
+  fail no-region-selector 'the stated no-selector boundary disagrees with the live profile surface'
+fi
+
 if grep -Fq 'If a repository uses AGENTS.md, keep repo instructions there; a world complements those instructions.' "$root/start-here.md"; then
   pass agents-md-complement 'the world complements repository instructions'
 else
   fail agents-md-complement 'the repository-instruction boundary is absent'
 fi
 
-if grep -Fq 'Private world installs remain rig-local under their own refs and are never shadowed by this builtin.' "$root/boundaries.md"; then
-  pass private-ref-boundary 'the builtin cannot shadow a rig-local world ref'
-else
-  fail private-ref-boundary 'the rig-local namespace rider is absent'
-fi
-
-example="$root/../world-example"
-if grep -Fq 'atoms:' "$example/manifest.yaml" &&
+example_regions_ok=1
+for region in identity ontology terrain actors laws history state affordances; do
+  grep -Eq "regions:.*(^|[^a-z])$region([^a-z]|$)" "$example/manifest.yaml" || example_regions_ok=0
+done
+if [ "$example_regions_ok" -eq 1 ] &&
    grep -Fq 'Book world' "$example/your-world.md" &&
-   grep -Fq 'rig context get world-example' "$example/your-world.md"; then
+   grep -Fq 'rig context get world-example' "$example/your-world.md" &&
+   grep -Fq 'rig context add <pack-directory>' "$example/your-world.md" &&
+   grep -Fq 'rig context list' "$example/your-world.md" &&
+   grep -Fq 'rig config get context.packs_root' "$example/your-world.md"; then
   pass world-example-consistency 'the worked exercise uses the same atom convention'
 else
   fail world-example-consistency 'the worked exercise is absent or ungraduated'

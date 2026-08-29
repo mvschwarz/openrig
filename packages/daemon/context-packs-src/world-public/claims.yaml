@@ -31,7 +31,19 @@ claims:
     check: derived-reading-cost
   - id: derive-pack-path
     statement: "Use rig context show world-public --json to derive the installed pack directory."
-    check: rig-command-surface
+    check: derive-pack-path
   - id: private-ref-boundary
     statement: "Private world installs remain rig-local under their own refs and are never shadowed by this builtin."
     check: private-ref-boundary
+  - id: no-region-selector
+    statement: "This pack promises no region selector or subset-composition operation."
+    check: no-region-selector
+  - id: world-example-purpose
+    statement: "A world pack situates an agent: it describes where the agent is, what exists there, and how to act."
+    flagged: "Authored purpose and taste; no live scan can prove it."
+  - id: world-example-install
+    statement: "Use `rig context add <pack-directory>` to install a world pack, confirm its ref with `rig context list`, and derive the configured store with `rig config get context.packs_root` only when a path is needed."
+    check: world-example-install
+  - id: world-example-regions
+    statement: "The region names below are atom metadata, not a required directory layout."
+    check: world-example-consistency

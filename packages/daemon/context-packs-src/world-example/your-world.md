@@ -1,15 +1,19 @@
 # Your world
 
-A world pack situates an agent: it describes where the agent is, what exists there, and how to
-act. The OpenRig daemon serves any valid pack placed in the OpenRig home `context-packs/` root.
+<!-- world-claim: world-example-purpose -->
+A world pack situates an agent: it describes where the agent is, what exists there, and how to act.
+<!-- world-claim: world-example-install -->
+Use `rig context add <pack-directory>` to install a world pack, confirm its ref with `rig context list`, and derive the configured store with `rig config get context.packs_root` only when a path is needed.
 Copy this pack, update its manifest, and replace each prompt below with your world's facts.
 
 ## Exercise: Book world
 
 Run `rig context get world-example`, copy this pack, and make the project a book world. Describe
 the writer, manuscript, sources, editorial rules, decisions, current draft state, and next useful
-actions. Keep these as sections in coherent files; the region names below are atom metadata, not a
-required directory layout.
+actions in a few coherent files.
+
+<!-- world-claim: world-example-regions -->
+The region names below are atom metadata, not a required directory layout.
 
 ## Identity
 
