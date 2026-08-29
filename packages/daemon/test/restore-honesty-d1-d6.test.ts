@@ -289,15 +289,21 @@ describe("OPR.0.5.7.1 — restore honesty D1 + D6", () => {
   });
 
   it("R8: fresh-primed (non-resume) launches keep their startup replay — containment is resume-scoped", async () => {
+    // CORRECTION (post-RED-run, orch-lead-granted): the first authoring nulled
+    // resumeType/resumeToken under restorePolicy resume_if_possible, which
+    // enters the INTENTIONAL awaiting-decision stop (no launch, no replay by
+    // design) — it modeled the wrong path. The deliberate blank-slate launch
+    // is the existing operation-B option: freshLogicalIds. Metadata stays
+    // intact; only the fresh trigger changed. Assertions and name unchanged.
     const { snap, nodeId } = seedSnapshot({ startupContext: GHOST_CONTEXT });
-    // Single row with NO resume metadata: deliberate blank-slate launch.
-    const data = JSON.parse(JSON.stringify(snap.data));
-    data.sessions = data.sessions.map((s: Record<string, unknown>) =>
-      s.nodeId === nodeId ? { ...s, resumeType: null, resumeToken: null } : s);
-    db.prepare("UPDATE snapshots SET data = ? WHERE id = ?").run(JSON.stringify(data), snap.id);
-    const fixed = snapshotRepo.getSnapshot(snap.id)!;
+    const fixed = rewriteSessions(snap, nodeId, [
+      { id: ULID_OLD, status: "running", token: "tok-active" },
+    ]);
     const adapter = spyRuntimeAdapter();
-    const result = await createOrchestrator().restore(fixed.id, { adapters: { "claude-code": adapter } });
+    const result = await createOrchestrator().restore(fixed.id, {
+      adapters: { "claude-code": adapter },
+      freshLogicalIds: ["seat"],
+    });
     expect(result.ok).toBe(true);
     // Replay is PRESERVED on the deliberate fresh path (no over-containment):
     const projectedEntries = (adapter.project.mock.calls[0]?.[0]?.entries ?? []) as unknown[];
