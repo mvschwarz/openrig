@@ -1085,7 +1085,25 @@ describe("QueueRepository — generation stamps (Class-B)", () => {
     expect(repo.releaseClaimsByGeneration("gen-retired")).toBe(0);
     expect(repo.getById(pending.qitemId)!.state).toBe("pending");
   });
+});
 
+describe("QueueRepository — S26 blocker-actuation unification (OPR.0.5.6.26)", () => {
+  let db: Database.Database;
+  let bus: EventBus;
+  let repo: QueueRepository;
+  let captured: PersistedEvent[];
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, outboxEntriesSchema]);
+    bus = new EventBus(db);
+    repo = new QueueRepository(db, bus);
+    repo.attachOutbox(new OutboxHandler(db));
+    captured = [];
+    bus.subscribe((e) => captured.push(e));
+  });
+
+  afterEach(() => db.close());
   // ── OPR.0.5.6.26 — blocker-actuation unification. blocked_on promises "A waits until B
   // completes"; the propagate-completion block exists in EXACTLY ONE place (the update path),
   // and the handoff family writes its terminal states via direct SQL inside its own
@@ -1171,4 +1189,3 @@ describe("QueueRepository — generation stamps (Class-B)", () => {
     ).toBe(true);
   });
 });
-

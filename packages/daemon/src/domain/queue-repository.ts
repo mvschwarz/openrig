@@ -1448,6 +1448,18 @@ export class QueueRepository {
       });
       events.push({ name: "queue.handed_off", payload: handoffEvent });
 
+      // OPR.0.5.6.26 — a handed-off blocker actuates its attached rows through the one
+      // propagation site, with the update path's exact effect set.
+      for (const dependentEvent of this.propagateBlockerCompletion({
+        qitemId: source.qitemId,
+        terminalState: "handed-off",
+        actorSession: input.fromSession,
+        identityProvenance: input.identityProvenance ?? null,
+        ts,
+      })) {
+        events.push({ name: "queue.updated", payload: dependentEvent });
+      }
+
       const createdEvent = this.eventBus.persistWithinTransaction({
         type: "queue.created",
         qitemId: newId,
@@ -1607,6 +1619,18 @@ export class QueueRepository {
         summary: source.summary ?? null,
       });
       events.push({ name: "queue.handed_off", payload: handoffEvent });
+
+      // OPR.0.5.6.26 — a done-via-handoff-and-complete blocker actuates its attached rows through the one
+      // propagation site, with the update path's exact effect set (the confirmed R-2 prediction).
+      for (const dependentEvent of this.propagateBlockerCompletion({
+        qitemId: source.qitemId,
+        terminalState: "done",
+        actorSession: input.fromSession,
+        identityProvenance: input.identityProvenance ?? null,
+        ts,
+      })) {
+        events.push({ name: "queue.updated", payload: dependentEvent });
+      }
 
       const createdEvent = this.eventBus.persistWithinTransaction({
         type: "queue.created",
@@ -2361,44 +2385,15 @@ export class QueueRepository {
     // When THIS qitem reaches a terminal state, auto-unpark every row parked on it (blocked_on = this,
     // state='blocked') to pending, clear its (now-resolved) blocker, log the transition, and emit an
     // event so watchers/sweeps see the unblock without a fetch.
-    const dependentEvents: PersistedEvent[] = [];
-    if (!isBlockerLive(input.state)) {
-      const blockedRows = this.db
-        .prepare("SELECT qitem_id, destination_session FROM queue_items WHERE blocked_on = ? AND state = 'blocked'")
-        .all(input.qitemId) as Array<{ qitem_id: string; destination_session: string }>;
-      for (const r of blockedRows) {
-        this.db
-          .prepare("UPDATE queue_items SET state = 'pending', blocked_on = NULL, ts_updated = ? WHERE qitem_id = ?")
-          .run(ts, r.qitem_id);
-        const resumeTransition = this.transitionLog.append({
-          qitemId: r.qitem_id,
-          state: "pending",
+    const dependentEvents: PersistedEvent[] = !isBlockerLive(input.state)
+      ? this.propagateBlockerCompletion({
+          qitemId: input.qitemId,
+          terminalState: input.state,
           actorSession: input.actorSession,
-          transitionNote: `auto-unparked: blocker ${input.qitemId} reached terminal state '${input.state}'`,
-        });
-        const wakeIntentId = this.stageAutoUnparkWakeIntent({
-          qitemId: r.qitem_id,
-          destinationSession: r.destination_session,
-          fromSession: input.actorSession,
           identityProvenance: input.identityProvenance ?? null,
-          blockerQitemId: input.qitemId,
-          resumeTransitionId: resumeTransition.transitionId,
-        });
-        if (wakeIntentId) this.deliverWakeIntentAfterCommit(wakeIntentId);
-        const dependentEvent = this.eventBus.persistWithinTransaction({
-          type: "queue.updated",
-          qitemId: r.qitem_id,
-          fromState: "blocked",
-          toState: "pending",
-          closureReason: null,
-          closureTarget: null,
-          actorSession: input.actorSession,
-          summary: this.getById(r.qitem_id)?.summary ?? null,
-        });
-        this.eventBus.registerPersistedWithinActiveEnvelope(dependentEvent);
-        dependentEvents.push(dependentEvent);
-      }
-    }
+          ts,
+        })
+      : [];
 
     const persistedEvent = this.eventBus.persistWithinTransaction({
       type: "queue.updated",
@@ -2413,6 +2408,58 @@ export class QueueRepository {
       summary: effectiveSummary ?? null,
     });
     return { persistedEvent, persistedEvents: [...dependentEvents, persistedEvent] };
+  }
+
+  /** OPR.0.5.6.26 — THE ONE PROPAGATION SITE. blocked_on promises "A waits until B
+   *  completes"; every terminal closure of a blocker actuates the attached rows'
+   *  auto-unpark through THIS helper — the update path and the handoff family both
+   *  call it inside their own transactions. The class this unifies away was
+   *  per-code-path: the handoff verbs wrote terminal states via direct SQL and the
+   *  promise never fired for them. Never a second copy of this logic. */
+  private propagateBlockerCompletion(input: {
+    qitemId: string;
+    terminalState: string;
+    actorSession: string;
+    identityProvenance: string | null;
+    ts: string;
+  }): PersistedEvent[] {
+    const dependentEvents: PersistedEvent[] = [];
+    const blockedRows = this.db
+      .prepare("SELECT qitem_id, destination_session FROM queue_items WHERE blocked_on = ? AND state = 'blocked'")
+      .all(input.qitemId) as Array<{ qitem_id: string; destination_session: string }>;
+    for (const r of blockedRows) {
+      this.db
+        .prepare("UPDATE queue_items SET state = 'pending', blocked_on = NULL, ts_updated = ? WHERE qitem_id = ?")
+        .run(input.ts, r.qitem_id);
+      const resumeTransition = this.transitionLog.append({
+        qitemId: r.qitem_id,
+        state: "pending",
+        actorSession: input.actorSession,
+        transitionNote: `auto-unparked: blocker ${input.qitemId} reached terminal state '${input.terminalState}'`,
+      });
+      const wakeIntentId = this.stageAutoUnparkWakeIntent({
+        qitemId: r.qitem_id,
+        destinationSession: r.destination_session,
+        fromSession: input.actorSession,
+        identityProvenance: input.identityProvenance,
+        blockerQitemId: input.qitemId,
+        resumeTransitionId: resumeTransition.transitionId,
+      });
+      if (wakeIntentId) this.deliverWakeIntentAfterCommit(wakeIntentId);
+      const dependentEvent = this.eventBus.persistWithinTransaction({
+        type: "queue.updated",
+        qitemId: r.qitem_id,
+        fromState: "blocked",
+        toState: "pending",
+        closureReason: null,
+        closureTarget: null,
+        actorSession: input.actorSession,
+        summary: this.getById(r.qitem_id)?.summary ?? null,
+      });
+      this.eventBus.registerPersistedWithinActiveEnvelope(dependentEvent);
+      dependentEvents.push(dependentEvent);
+    }
+    return dependentEvents;
   }
 
   getParkWakeStatus(qitemId: string): ParkWakeStatus | null {
