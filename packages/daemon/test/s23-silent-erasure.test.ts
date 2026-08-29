@@ -83,10 +83,12 @@ describe("OPR.0.5.6.23 member (a) — codec round-trip preserves every optional 
   });
 
   it("RT-COMPACTION (disclosed third member, same seam): member compaction_strategy survives the round-trip", () => {
-    const { yaml, member } = roundTripMember({ id: "impl", compactionStrategy: "harness_native" });
+    // canonical vocabulary (agent-manifest.ts VALID_COMPACTION_STRATEGIES);
+    // a deprecated alias would be normalized on parse and mask the pin.
+    const { yaml, member } = roundTripMember({ id: "impl", compactionStrategy: "managed-compaction" });
     // base RED: schema parse carries it (:1058), the serialize leg never emits it
-    expect(member.compactionStrategy).toBe("harness_native");
-    expect(yaml).toContain("compaction_strategy: harness_native");
+    expect(member.compactionStrategy).toBe("managed-compaction");
+    expect(yaml).toContain("compaction_strategy: managed-compaction");
   });
 });
 
