@@ -17,4 +17,4 @@ The maximum-permissive built-in. The seat runs the harness with its full-bypass 
 
 **Guardrails come from skills + starter markdown, not permission-blocking** — a YOLO seat is bounded by what its skills and operating context tell it to do, since the permission layer imposes nothing.
 
-**Naming lineage:** the founder's FINAL DESIGN named the fourth built-in **Operator**. The two-surface refinement (2026-08-03) subsumed Operator into this flag-surface full-bypass built-in and renamed it **YOLO** to name the posture plainly; the picker presents all four named postures (Locked / Standard / Open / YOLO) uniformly. Grounded in schema `a8dba0d9`.
+**Naming lineage:** the original final design named the fourth built-in **Operator**. The two-surface refinement (2026-08-03) subsumed Operator into this flag-surface full-bypass built-in and renamed it **YOLO** to name the posture plainly; the picker presents all four named postures (Locked / Standard / Open / YOLO) uniformly. Grounded in schema `a8dba0d9`.

@@ -38,7 +38,7 @@ instance):
 <topology.root>/rigs/<rig>/seats/<seat>/<NAME>.md # seat altitude
 ```
 
-**The pod level is deliberately skipped** (founder ruling, March 2026: agent
+**The pod level is deliberately skipped** (design decision, March 2026: agent
 specs stay flat under the rig so any agent composes into any rig; pods felt
 too restrictive — revisit someday, not now). Pod-class tactical content ships
 as a rig-altitude file named for its audience (see "craft defaults" below).
@@ -67,7 +67,7 @@ defaults.)
 ## Legacy location and the advisory
 
 Before this convention the topology tree lived at `~/.openrig/shared-docs/rigs/`
-(founder ruling 2026-08-14: an arbitrary folder on one machine, not a product
+(design decision 2026-08-14: an arbitrary folder on one machine, not a product
 path). That location **stays readable** as a per-level fallback so existing
 rigs migrate instead of breaking — but every read that resolves there emits a
 named advisory (`legacy-topology-read: …`) stating the legacy source, the

@@ -6,14 +6,14 @@ warrant: >-
   RECOVERED 2026-08-28 (slice OPR.0.5.6.9). The ladder's prior defining documents
   (skill-maturity-convention.md; the EMM knowledge schema) were verified absent from
   this machine by enumeration (2026-08-28 survey). This document re-authors the model
-  faithfully from the founder-direct design session capture
+  faithfully from the primary design-session capture
   product/DESIGN-context-distribution-2026-08-10.html §1–2 (near-verbatim ground) and
-  §5, bound by founder rulings 2026-08-28 (maturity is multi-dimensional; the ladder
+  §5, bound by recorded design decisions 2026-08-28 (maturity is multi-dimensional; the ladder
   CONCEPT is the product ingredient, tier counts non-normative; machinery waits for
   ~6.2/6.3, labeling starts now).
 sources:
   - product/DESIGN-context-distribution-2026-08-10.html §1–2, §3b, §5 (corpus; the recoverable source of record)
-  - release-0.5.6 slice 09 design contract (founder rulings 2026-08-28, desk-locked)
+  - release-0.5.6 slice 09 design contract (recorded design decisions 2026-08-28, desk-locked)
   - corpus/canon/chooser/the-chooser.md and corpus/canon/laws/scoped-read.md (lived warrant practice, two grades)
   - context-engineering-v2 operating-model.md §4 (audience vs maturity)
   - conventions/feature-lifecycle-convention.md (the orthogonal lifecycle axis)
@@ -71,14 +71,14 @@ the principle lived, not violated.
 **A promoted claim carries its compressed warrant** — the scar, evidence, or ruling
 that earned it travels with it. "Canon without warrants is cargo cult with good
 formatting." The populated canon tree is the lived specimen: `canon/chooser/the-chooser.md`
-carries a FOUNDER-RULED warrant, `canon/laws/scoped-read.md` a TRIPLE-CONFIRMED one —
+carries a DECISION-RECORDED warrant, `canon/laws/scoped-read.md` a TRIPLE-CONFIRMED one —
 two different grades, and the difference is legible precisely because the warrant
 states it. This document's own frontmatter practices the rule.
 
 ## Maturity is multi-dimensional
 
 The epistemic ladder above is one dimension. A second is the
-**context-architecture ladder** (founder ruling 2026-08-28): how context itself is
+**context-architecture ladder** (recorded design decision 2026-08-28): how context itself is
 produced, with prose-in-a-world-shape at the bottom rung — comprehensible, effective,
 and prone to drift — and derived-from-source at the top, where content cannot rot
 because a command re-derives it.

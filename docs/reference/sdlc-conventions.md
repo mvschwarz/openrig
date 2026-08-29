@@ -54,7 +54,7 @@ completely functional and works. Not a proof pack. **Effect-verified functionali
 | | applies | contents |
 |---|---|---|
 | **PART A — THE SIMPLE SDLC** | **ALWAYS. This is the default.** | artifact conventions, proportionality, the advisory audit, the honesty rails |
-| **PART B — THE RIGOROUS OVERLAY** | **ONLY when the founder, or an orchestrator relaying the founder, ASSIGNS the heavy path to a NAMED piece of work** | the proof-contract format, the two locks, C1 proof drops, the locked role contracts |
+| **PART B — THE RIGOROUS OVERLAY** | **ONLY when the human operator, or an orchestrator relaying that decision, ASSIGNS the heavy path to a NAMED piece of work** | the proof-contract format, the two locks, C1 proof drops, the locked role contracts |
 
 **You may not select Part B for yourself.** If you believe something earns it, say so in ONE
 sentence and continue on Part A until told otherwise. Part A corresponds to the `mission-slice-sop`
@@ -116,7 +116,7 @@ Each slice directory carries:
   - **`## Intent`** — the recorded intent, verbatim. The UI projects this
     text as the INTENT section.
   - **`## Mini-requirements`** — the concise, one-glance requirement tier
-    (numbered list). This is the founder's first structured catchpoint;
+    (numbered list). This is the human operator's first structured catchpoint;
     approval starts here.
   - **`## Proof contract`** — a checkbox list of promised deliverables (see
     §3). The UI's DELIVERED section pairs each item with its proof.
@@ -249,8 +249,8 @@ reported as unknown, not failure.
 
 # PART B — THE RIGOROUS OVERLAY (assigned only)
 
-> **ENTRY CONDITION:** everything below applies **only** when the founder — or an orchestrator
-> explicitly relaying the founder — has assigned the heavy path to a **named** piece of work.
+> **ENTRY CONDITION:** everything below applies **only** when the human operator — or an orchestrator
+> explicitly relaying that decision — has assigned the heavy path to a **named** piece of work.
 > If you arrived here without an assignment, stop and use Part A.
 >
 > **Rails:** the locks are **two, and only two**. Nothing here authorizes a second gate round on

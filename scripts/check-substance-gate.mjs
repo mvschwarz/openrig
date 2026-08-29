@@ -4,21 +4,27 @@ import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   existsSync,
-  mkdtempSync,
   mkdirSync,
   readFileSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { scanInternalLeaks } from "./internal-leak-scanner.mjs";
+import {
+  buildInternalLeakMessage,
+  scanInternalLeaks,
+} from "./internal-leak-scanner.mjs";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
 const FIX = "Genericize the content, cite its public home, or re-home it to the internal pack root.";
 const REFUSAL_VERDICTS = new Set(["instance-fact", "internal-path", "position-knowledge", "lore-class"]);
+const RULE_FIELDS = [
+  "path_prefixes",
+  "seat_and_rig_patterns",
+  "host_patterns",
+  "charged_terms",
+  "internal_path_globs",
+  "allowed_context_substrings",
+];
 
 function main(argv = process.argv.slice(2)) {
   const options = parseArguments(argv);
@@ -27,11 +33,20 @@ function main(argv = process.argv.slice(2)) {
   assertCleanCut(options.repo, options.cutSha);
 
   const artifactFiles = derivePackageArtifacts(options.packageRoot);
+  const treeClasses = partitionPackageArtifacts(artifactFiles);
   const surfaceRoots = readSurfaceRoots(options.surfaceManifest);
   const surfaces = enumerateSurfaces(options.packageRoot, surfaceRoots, artifactFiles, rules);
   refuseStructuralFindings(surfaces);
 
-  const scannedFiles = runArtifactScan(options, artifactFiles);
+  const derivedRules = selectDerivedRules(rules);
+  const blockingScans = {
+    content: runArtifactScan(options, "content", treeClasses.content, rules),
+    derived: runArtifactScan(options, "derived", treeClasses.derived, derivedRules),
+  };
+  const scannedFiles = [
+    ...blockingScans.content.scannedFiles,
+    ...blockingScans.derived.scannedFiles,
+  ].sort();
   const scannedSet = new Set(scannedFiles);
   const artifactSet = new Set(artifactFiles);
   const missingFromScan = artifactFiles.filter((path) => !scannedSet.has(path));
@@ -52,6 +67,18 @@ function main(argv = process.argv.slice(2)) {
     createdAt: new Date().toISOString(),
     surfaceRoots,
     surfaceCount: reviewed.length,
+    treeClassPartition: {
+      contentPathCount: treeClasses.content.length,
+      derivedPathCount: treeClasses.derived.length,
+    },
+    activeRulesByClass: {
+      content: countActiveRules(rules),
+      derived: countActiveRules(derivedRules),
+    },
+    blockingScans: {
+      content: summarizeBlockingScan(blockingScans.content),
+      derived: summarizeBlockingScan(blockingScans.derived),
+    },
     fullScan: {
       status: "pass",
       mode: "full",
@@ -136,6 +163,41 @@ function derivePackageArtifacts(packageRoot) {
   return [...new Set(files.map(normalizeSafeRelativePath))].sort();
 }
 
+function partitionPackageArtifacts(artifactFiles) {
+  const derived = [];
+  const content = [];
+  for (const path of artifactFiles) {
+    const target = path.startsWith("dist/")
+      || path.includes("/dist/")
+      || path.startsWith("node_modules/")
+      ? derived
+      : content;
+    target.push(path);
+  }
+  return { content, derived };
+}
+
+function selectDerivedRules(rules) {
+  return {
+    path_prefixes: (rules.path_prefixes ?? []).filter((entry) =>
+      entry.startsWith("/") || entry.startsWith("~")),
+    seat_and_rig_patterns: [],
+    host_patterns: [...(rules.host_patterns ?? [])],
+    charged_terms: [],
+    internal_path_globs: [...(rules.internal_path_globs ?? [])],
+    allowed_context_substrings: [...(rules.allowed_context_substrings ?? [])],
+  };
+}
+
+function countActiveRules(rules) {
+  return Object.fromEntries(
+    RULE_FIELDS.flatMap((field) => {
+      const count = Array.isArray(rules[field]) ? rules[field].length : 0;
+      return count === 0 ? [] : [[field, count]];
+    }),
+  );
+}
+
 function readSurfaceRoots(path) {
   const manifest = readJson(path, "surface manifest");
   if (manifest?.schemaVersion !== 1 || !Array.isArray(manifest.roots) || manifest.roots.length === 0) {
@@ -174,32 +236,37 @@ function enumerateSurfaces(packageRoot, roots, artifactFiles, rules) {
   });
 }
 
-function runArtifactScan(options, artifactFiles) {
-  const temp = mkdtempSync(join(tmpdir(), "openrig-substance-scan-"));
-  const filesManifest = join(temp, "artifact-files.json");
-  const reportPath = join(temp, "scan-report.json");
-  try {
-    writeFileSync(filesManifest, `${JSON.stringify({ files: artifactFiles }, null, 2)}\n`);
-    const fullScan = spawnSync(process.execPath, [
-      join(HERE, "check-internal-leak-guard.mjs"),
-      "--repo", options.repo,
-      "--rules", options.rules,
-      "--mode", "full",
-      "--tree", options.packageRoot,
-      "--files-manifest", filesManifest,
-      "--report", reportPath,
-    ], { encoding: "utf8" });
-    if (fullScan.status !== 0) {
-      throw new Error(`substance gate full scan failed:\n${fullScan.stderr || fullScan.stdout || `exit ${fullScan.status}`}`);
-    }
-    const report = readJson(reportPath, "full scan report");
-    if (report.mode !== "full" || !Array.isArray(report.scannedFiles)) {
-      throw new Error("full scan report is missing mode=full or scannedFiles");
-    }
-    return report.scannedFiles.map(normalizeSafeRelativePath);
-  } finally {
-    rmSync(temp, { recursive: true, force: true });
+function runArtifactScan(options, treeClass, artifactFiles, rules) {
+  const findings = [];
+  const scannedFiles = [];
+  for (const path of artifactFiles) {
+    const normalized = normalizeSafeRelativePath(path);
+    findings.push(...scanInternalLeaks({
+      path: normalized,
+      bytes: readFileSync(resolve(options.packageRoot, normalized)),
+      rules,
+    }));
+    scannedFiles.push(normalized);
   }
+  if (findings.length > 0) {
+    throw new Error(`substance gate ${treeClass} scan failed:\n${buildInternalLeakMessage(findings)}`);
+  }
+  return {
+    status: "pass",
+    artifactFileCount: artifactFiles.length,
+    scannedFileCount: scannedFiles.length,
+    findingCount: 0,
+    scannedFiles,
+  };
+}
+
+function summarizeBlockingScan(scan) {
+  return {
+    status: scan.status,
+    artifactFileCount: scan.artifactFileCount,
+    scannedFileCount: scan.scannedFileCount,
+    findingCount: scan.findingCount,
+  };
 }
 
 function normalizeSafeRelativePath(path) {
