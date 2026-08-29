@@ -361,6 +361,49 @@ describe("public world pack", () => {
     }
   });
 
+  it("keeps both shipped manifests free of uncensused authored prose comments", () => {
+    const comments = [
+      ["world-public", join(publicWorldDir(), "manifest.yaml")],
+      ["world-example", join(STATIC_ROOT, "world-example", "manifest.yaml")],
+    ].flatMap(([pack, manifestPath]) =>
+      readFileSync(manifestPath, "utf8")
+        .split("\n")
+        .filter((line) => /^\s*#/.test(line))
+        .map((line) => ({ pack, line })),
+    );
+
+    expect(comments).toEqual([]);
+  });
+
+  it.each(["world-public", "world-example"] as const)(
+    "fails when an uncensused authored prose comment appears in %s",
+    (pack) => {
+      const sourcePack = publicWorldDir();
+      const redRoot = mkdtempSync(join(tmpdir(), "public-world-manifest-comment-red-"));
+      temporaryRoots.push(redRoot);
+      const redPack = join(redRoot, basename(sourcePack));
+      cpSync(sourcePack, redPack, { recursive: true });
+      cpSync(join(STATIC_ROOT, "world-example"), join(redRoot, "world-example"), { recursive: true });
+      const manifestPath = join(pack === "world-public" ? redPack : join(redRoot, "world-example"), "manifest.yaml");
+      writeFileSync(
+        manifestPath,
+        `# Private rig-specific instructions for one internal operator.\n${readFileSync(manifestPath, "utf8")}`,
+      );
+
+      const rigPath = writeRigFixture({ showSourcePath: redPack });
+      const result = runVerifier(redPack, {
+        ...process.env,
+        PATH: `${rigPath}:${process.env.PATH ?? ""}`,
+        OPENRIG_CONTEXT_PACKS_ROOT: "/fixture/context-packs",
+        OPENRIG_SESSION_NAME: "qa@fixture",
+        RIGGED_SESSION_NAME: "",
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stdout).toMatch(/FAIL.*manifest-authored-comments/i);
+    },
+  );
+
   it("fails when authored manifest purpose or probe semantics materially drift", () => {
     const sourcePack = publicWorldDir();
     const redRoot = mkdtempSync(join(tmpdir(), "public-world-manifest-claims-red-"));
