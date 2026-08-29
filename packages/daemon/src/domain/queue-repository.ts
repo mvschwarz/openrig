@@ -1759,6 +1759,20 @@ export class QueueRepository {
         summary: source.summary ?? null,
       });
       events.push(handoffEvent);
+
+      // OPR.0.5.6.26 (R2 B-1) — the cross-host terminal close is the third
+      // handoff-family caller of the one propagation site: attached rows actuate
+      // with the update path's exact effect set, at this close's actual terminal
+      // state. Absorbed redrives return above this transaction and never re-run it.
+      for (const dependentEvent of this.propagateBlockerCompletion({
+        qitemId: input.qitemId,
+        terminalState: input.terminalState,
+        actorSession: input.fromSession,
+        identityProvenance: null,
+        ts,
+      })) {
+        events.push(dependentEvent);
+      }
     });
 
     txn();
