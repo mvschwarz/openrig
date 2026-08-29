@@ -113,7 +113,6 @@ the seat level and needs no new machinery — the last act *after a handoff* is 
 | `rig queue create` | yes | New qitem created from scratch |
 | `rig queue handoff` | yes | Transactional close-as-handed-off + create-new |
 | `rig queue handoff-and-complete` | yes | Atomic close + create-new; default nudge wakes the new owner |
-| `rigx queue handoff` (filesystem v0 prototype; **recovery-only fallback since 2026-05-11**) | yes | Legacy artifact; qitems invisible to daemon-backed reads; deprecation warning + removal queued at `missions/bug-fix/slices/rigx-queue-deprecation-message/`. Use `rig queue handoff` (daemon-backed) for all new substantive work. |
 
 **Footgun**: `--no-nudge` accidentally added to a live-loop handoff.
 The shipped 0.3.1 CLI nudges by default on every queue write surface
@@ -142,8 +141,7 @@ recipient.
   at the file for the detail. A pasted dump makes `rig queue show <id>
   --json` huge — a second-order token bloat: bloated DATA living in the
   queue, distinct from the command-default output bombs the token-burn
-  emergency pack covers. (Sensor: guard token-burn-flag 8ea201e4,
-  2026-06; operator-directed cure.)
+  emergency pack covers.
 - **Substantive bodies go through `--body-file`, not inline `--body`.**
   For anything beyond a short line, write the body to a file and pass
   `--body-file <path>` (or `-` for stdin). Inline `--body` with shell
@@ -182,19 +180,10 @@ Every qitem carries:
 
 **(0.5.0) `--body-context <ref>` — context riding the handoff.** `rig queue create … --body-context <ref>` attaches a composed context pack to the qitem. The snapshot rule: the qitem stores the **resolved content** in its body **plus the ref for provenance** — the handoff carries what was actually sent, and a later edit to the library never silently rewrites a past handoff's history. (The `rig context` noun composes the ref; the queue delivers it — the noun has no send.) See `openrig-user` → "Context packs and paced delivery."
 
-The fields are auditable across both `rigx queue` (config-layer) and
-`rig queue` (daemon-shipped) surfaces. Watchdog policies and workflow
-runtime project new owners off these fields.
+The fields are auditable on the daemon-backed `rig queue` surface. Watchdog
+policies and workflow runtime project new owners off these fields.
 
-## Two surfaces (same shape)
-
-| Surface | Status | When to use |
-|---|---|---|
-| `rig queue ...` (daemon-shipped, v0.2.0) | Active host coordination surface | Daemon-backed PL-004 work; SQLite-canonical |
-| `rigx queue ...` (config-layer dogfood) | Coexists with daemon | Workflows still operating on the temporary substrate coordination layer; legacy artifacts |
-
-Default posture: prefer daemon `rig queue` for new work. If a
-daemon-backed coordination command fails, debug the command/runtime/schema
+If a daemon-backed coordination command fails, debug the command/runtime/schema
 edge directly — don't fall back to stale pre-upgrade assumptions.
 
 ## See also

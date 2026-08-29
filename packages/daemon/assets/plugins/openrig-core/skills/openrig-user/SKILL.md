@@ -11,9 +11,7 @@ description: >-
 This is an as-built guide to the shipped `rig` CLI.
 Use current code and `rig ... --help` as ground truth if anything here ever conflicts with older planning docs.
 
-This is not the config-layer or builder guide. Use the substrate control-plane guidance for `rigx`
-and experimental overlays. Use the OpenRig builder guidance when changing OpenRig behavior,
-doctrine, or release posture.
+Use the OpenRig builder guidance when changing OpenRig behavior, doctrine, or release posture.
 
 
 ## Coordination trust boundary
@@ -147,11 +145,6 @@ Default posture:
   queue-handoff usage model and the §1b doctrine. Auxiliary queue verbs:
   `rig queue update / show / list` complement `rig queue create / handoff`
   for in-flight inspection and state mutation.
-- Use temporary substrate overlays such as `rigx queue`, `rigx stream`, `rigx project`, and
-  `rigx view-proto` only where the current OpenRig workstream explicitly says that legacy/control
-  layer is still in use. For queue specifically, `rigx queue` is recovery-only fallback;
-  qitems written via `rigx queue` are invisible to daemon-backed reads and break fleet-wide
-  routing discipline.
 - If a daemon-backed coordination command fails, debug the command/runtime/schema edge directly;
   do not assume the right workaround is to drop back to a config-layer primitive.
 - Do not perform daemon stop/start, production DB copy/mutation, release, publish, or other

@@ -133,7 +133,7 @@ Observed result:
 - The old daemon was stopped without running `rig down`.
 - The new source-pinned daemon started against the same production DB.
 - `rig ps --nodes --json`, `rig capture`, and `rig restore-check` could inspect the
-  still-running Velocity seats after restart.
+  still-running continuity seats after restart.
 
 The simpler model is now preferred for tmux-backed continuity rigs: snapshot and
 back up state, stop only the daemon, start the new daemon, then verify that live
@@ -235,9 +235,7 @@ are tmux-backed and the operator wants non-disruptive daemon upgrade.
    blockers.
 
 10. **Align the default CLI with the new daemon.**
-    If `rig` is a wrapper, make sure it delegates to the new CLI. On the
-    2026-04-27 host this meant repointing the rigx real CLI via
-    `~/.openrig/bin/rig-real-17812d5`.
+    If `rig` is a wrapper, make sure it delegates to the new CLI.
 
 11. **Write evidence and hand back.**
     The sidecar writes a cutover evidence packet with daemon provenance,
@@ -245,73 +243,27 @@ are tmux-backed and the operator wants non-disruptive daemon upgrade.
     results, caveats, and rollback state. Then it notifies the original in-rig
     lifecycle/runtime-upgrade owner. Do not rely on chat as the only proof.
 
-## 2026-04-27 Proof Point
+## Proof Point: Daemon-Only Hot Cutover
 
-Continuity target:
+A clean source runtime on an LTS Node version replaced the old daemon while one
+tmux-backed continuity rig stayed live. The operator took a post-snapshot online
+database backup, verified its integrity, stopped only the daemon, started the
+new runtime against the same database, and confirmed that every protected seat
+remained running and ready with no red restore blockers.
 
-- `example-seat`
-
-Pinned daemon:
-
-- commit `17812d5d3bfe53dfdc5e202b1da3e8c91e2f4e54`
-- subject `feat(agents): make runtime config spec-driven`
-- committed `2026-04-26T18:30:08-07:00`
-- runtime worktree `~/code/projects/openrig-runtime-17812d5`
-
-Evidence:
-
-- Velocity snapshot `01KQ84D3AF9YW6FQCM9SVSM5EG`
-- post-snapshot DB backup
-  `db-backup/openrig-post-velocity-snapshot-20260427T185003Z.sqlite`
-- backup integrity `ok`
-- old daemon PID `62828`, Node 25 global npm install
-- new daemon PID `39708`, Node 22 source runtime
-- post-cutover `example-seat`: 4/4 seats `running` / `ready`
-- `rig restore-check --rig example-seat`: `RESTORABLE WITH CAVEATS`,
-  `20 green | 9 yellow | 0 red`, `RECOVERY: NOT NEEDED`
-
-Important caveat: this proves hot daemon cutover for tmux-backed Claude seats on
-this host and commit range. It does not prove that arbitrary migrations,
+Important caveat: this proves hot daemon cutover for the tested tmux-backed
+Claude runtime shape. It does not prove that arbitrary migrations,
 non-tmux runtimes, service-backed rigs, or dead sessions can be recovered without
 separate testing.
 
-## 2026-05-02 Proof Point
+## Proof Point: Out-of-Band Sidecar Cutover
 
-Continuity targets:
-
-- `kernel`
-- `openrig-discovery`
-- `openrig-dogfood`
-- `openrig-lifecycle`
-- `openrig-maintenance`
-- `openrig-product-lab`
-- `example-rig`
-- `example-seat`
-
-Pinned daemon:
-
-- commit `6af2754824a07291562622ac019b68615fc41abe`
-- runtime worktree `~/code/projects/openrig-runtime-6af2754`
-- wrapper `~/.openrig/bin/rig-real-6af2754`
-
-Pattern proven:
-
-- lifecycle/runtime-upgrade prepared the decision and preflight artifacts;
-- a host-local tmux sidecar (`host-upgrade-operator-6af2754`) was spawned
-  outside the managed topology with the current operator context;
-- the sidecar stopped only the daemon, using verified PID fallback after
-  `rig daemon stop` refused due to missing daemon state;
-- the sidecar started the target daemon on port `7433`, repointed the
-  config-layer wrapper default, verified protected topology, ran targeted
-  Agent Starter smoke/tests, wrote evidence, and unblocked Dogfood;
-- Velocity delivery continued working throughout the cutover.
-
-Evidence:
-
-- preflight:
-  (internal upgrade-preflight evidence, 2026-05-01)
-- live cutover:
-  (internal live-cutover evidence, 2026-05-02)
+A lifecycle owner prepared the decision and preflight artifacts, then spawned a
+host-local tmux sidecar outside the managed topology. The sidecar stopped only
+the daemon, used a verified graceful PID fallback when daemon state was stale,
+started the pinned runtime, aligned the default wrapper, verified the protected
+topology, ran targeted smoke checks, retained cutover evidence, and handed the
+result back while delivery continued.
 
 Important caveat: live `rig up --plan --json` accepted valid `starter_ref`
 specs and rejected forbidden compositions, but plan-mode output did not emit the
@@ -433,7 +385,7 @@ Needed product surfaces:
   `rig version --json` should report CLI path, daemon path, commit/package
   version, Node version, DB path, and started-at.
 - Wrapper alignment:
-  rigx/default `rig` should clearly show which real CLI it delegates to.
+  the default `rig` wrapper should clearly show which real CLI it delegates to.
 - Compact inventory:
   first-class `rig ps --rig <name> --nodes --compact` or equivalent, so
   operators do not need ad hoc `jq` for routine safety checks.
