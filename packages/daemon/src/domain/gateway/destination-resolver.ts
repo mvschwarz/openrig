@@ -18,13 +18,13 @@
 //      are gateway-routable — the folded gateway-owned wake contract.
 //      Registration/admission refusals stay at their existing admission layer;
 //      classification here is about WHO OWNS TRANSPORT, not who is admitted.
-//   2. Any address the human registry resolves to a registered human
+//   2. A known topology seat (a sessions row, or a nodes-composed canonical
+//      name) is pane-bound — terminal transport, including a registered human
+//      seat with a real pane and its honest not-found outcomes when down.
+//   3. Any remaining address the human registry resolves to a registered human
 //      (canonical-form aliases like human-founder@kernel — the live 4-row
-//      specimen class) is gateway-routable: a paneless virtual identity whose
+//      specimen class) is gateway-routable: a PANELLESS virtual identity whose
 //      delivery rides the gateway, exactly like its @external address.
-//   3. A known topology seat (a sessions row, or a nodes-composed canonical
-//      name) is pane-bound — terminal transport, including its honest
-//      not-found outcomes when the pane is down.
 //   4. Anything else is unroutable, with teaching that names BOTH checks.
 import { parseSessionName } from "../session-name.js";
 import { resolveRegisteredHumanAddress, type HumanFragment } from "./human-registry.js";
@@ -48,12 +48,12 @@ export function classifyDestination(destination: string, deps: ClassifyDeps): De
     const resolved = deps.entities ? resolveRegisteredHumanAddress(destination, deps.entities) : null;
     return { class: "gateway-routable", resolvedHuman: resolved, via: "external-address" };
   }
+  if (deps.isKnownSeat(destination)) {
+    return { class: "pane-bound" };
+  }
   const aliasResolved = deps.entities ? resolveRegisteredHumanAddress(destination, deps.entities) : null;
   if (aliasResolved) {
     return { class: "gateway-routable", resolvedHuman: aliasResolved, via: "registry-alias" };
-  }
-  if (deps.isKnownSeat(destination)) {
-    return { class: "pane-bound" };
   }
   return {
     class: "unroutable",

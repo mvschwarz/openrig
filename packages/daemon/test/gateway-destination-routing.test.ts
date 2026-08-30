@@ -136,6 +136,18 @@ describe("OPR.0.5.6.14 — one destination resolver, no fall-through", () => {
     expect(fresh.lastNudgeAttempt).not.toBeNull();
   });
 
+  it("FLOOR: a registered human with a real pane stays pane-bound; only its paneless alias is gateway-routable", async () => {
+    h.db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES ('node-human', 'rig-1', 'human.founder', 'terminal')").run();
+    h.db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('sess-human', 'node-human', 'human-founder@rig1')").run();
+    const item = await h.repo.create({
+      sourceSession: "orch-lead@v-openrig-build",
+      destinationSession: "human-founder@rig1",
+      body: "pane-backed founder seat",
+    });
+    expect(h.sends.map((send) => send.session)).toEqual(["human-founder@rig1"]);
+    expect(h.repo.getById(item.qitemId)!.lastNudgeResult).toMatch(/^failed:/);
+  });
+
   it("D3 SEAM, STRUCTURAL: one named classification site; the inline external branch is gone from the wake path", () => {
     const repoSource = readFileSync(join(HERE, "../src/domain/queue-repository.ts"), "utf8");
     const resolverPath = join(HERE, "../src/domain/gateway/destination-resolver.ts");
@@ -270,10 +282,22 @@ describe("OPR.0.5.6.14 — the delivery ledger is universal and consulted", () =
     h.repo.update({ qitemId: posted.qitemId, actorSession: "daemon@kernel", transitionNote: "slack-owner-notification-posted notification_key=" + posted.qitemId + " level=ALERT kind=unclassified message_ts=222.33 thread_ts=222.33" });
     const face = h.repo.getById(posted.qitemId) as unknown as { deliveryOutcome?: string | null };
     expect(face.deliveryOutcome, "a posted gateway row answers 'did it reach them' in one read").toMatch(/posted/);
+    const listFace = h.repo.list({ limit: 100 }).find((item) => item.qitemId === posted.qitemId) as
+      | { deliveryOutcome?: string | null }
+      | undefined;
+    expect(listFace?.deliveryOutcome, "list and show project the same row-ledger verdict").toBe("posted");
 
     const pane = await h.repo.create({ sourceSession: "s@r", destinationSession: "dev-a@rig1", body: "n", nudge: true });
     const paneFace = h.repo.getById(pane.qitemId) as unknown as { deliveryOutcome?: string | null };
     expect(paneFace.deliveryOutcome ?? null, "pane-bound rows carry no gateway delivery outcome (no key lies)").toBeNull();
+  });
+
+  it("UNDELIVERED LIMIT IS HONEST: posted rows cannot consume the window and hide a later gateway failure", async () => {
+    const posted = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", body: "p", summary: "p", evidenceRef: EVIDENCE, nudge: false });
+    h.repo.update({ qitemId: posted.qitemId, actorSession: "daemon@kernel", transitionNote: "slack-owner-notification-posted notification_key=" + posted.qitemId + " level=ALERT kind=unclassified message_ts=444.55 thread_ts=444.55" });
+    const failed = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", body: "f", summary: "f", evidenceRef: EVIDENCE, nudge: false });
+    h.repo.update({ qitemId: failed.qitemId, actorSession: "daemon@kernel", transitionNote: "slack-owner-notification-transport-failed notification_key=" + failed.qitemId + " class=http-500 error=failed" });
+    expect(h.repo.findUndelivered({ limit: 1 }).map((item) => item.qitemId)).toEqual([failed.qitemId]);
   });
 
   it("FLOOR: the receipt-bound episode dedupe stands — a second identical receipt write is a no-op", async () => {

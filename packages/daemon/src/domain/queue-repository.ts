@@ -2632,7 +2632,11 @@ export class QueueRepository {
         `SELECT ${columns} FROM queue_items ${where} ORDER BY ${orderBy} LIMIT ?`
       )
       .all(...params) as QueueItemRow[];
-    const items = rows.map((r) => this.rowToItem(r));
+    const items = rows.map((r) => {
+      const item = this.rowToItem(r);
+      const ledger = this.deliveryOutcomeFor(item.qitemId);
+      return { ...item, deliveryOutcome: ledger?.outcome ?? null };
+    });
     return opts?.compact
       ? items.map((item) => ({
           ...item,
@@ -2783,10 +2787,16 @@ export class QueueRepository {
     // transport-failed and never-posted are undelivered with their own classes.
     const conditions = [
       "state = 'pending'",
+      // A posted receipt wins before LIMIT is applied. Without this SQL-side
+      // exclusion, posted rows consume the result window and can hide genuine
+      // failures that follow them.
+      `NOT EXISTS (SELECT 1 FROM queue_transitions posted WHERE posted.qitem_id = queue_items.qitem_id
+                    AND posted.transition_note LIKE 'slack-owner-notification-posted %')`,
       // Candidates: failed/unroutable/gateway nudge literals, PLUS any row whose
       // ledger already recorded a transport failure (a driver-path row may have
       // no nudge literal at all — the ledger is the source, not the leg).
-      `(last_nudge_result LIKE 'failed:%' OR last_nudge_result LIKE 'unroutable:%' OR last_nudge_result LIKE 'gateway-owned%'
+      `(last_nudge_result LIKE 'failed:%' OR last_nudge_result LIKE 'unroutable:%'
+        OR (last_nudge_result LIKE 'gateway-owned%' AND julianday(ts_created) < julianday('now', '-120 seconds'))
         OR EXISTS (SELECT 1 FROM queue_transitions t WHERE t.qitem_id = queue_items.qitem_id
                     AND t.transition_note LIKE 'slack-owner-notification-transport-failed %'))`,
     ];
