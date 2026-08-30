@@ -1849,23 +1849,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         (await import("./domain/policies/delivery-deferral.js")).makeDeliveryDeferralPolicy({
           jobsRepo: watchdogJobsRepoInstance,
           queueRepo: queueRepoInstance,
-          deliverInterrupt: async (qitemId: string) => {
+          deliverInterrupt: async (qitemId: string, notificationKey: string) => {
             const dispatch = lateGatewayDispatch.fn;
             const row = queueRepoInstance.getById(qitemId);
             if (!dispatch || !row) return { ok: false };
-            const res = dispatch("outbound_post", row.destinationSession ?? "", {
-              qitemId: row.qitemId,
-              summary: row.summary ?? null,
-              body: row.body ?? null,
-              destinationSession: row.destinationSession ?? null,
-              sourceSession: row.sourceSession ?? null,
-              ownerNotificationLevel: "ALERT",
-              ownerNotificationKind: "human-required",
-              tags: row.tags ?? null,
-              // The already-made decision executing at T+30 — the consult is bypassed
-              // so the fire can never re-defer (AM-F3).
-              deliveryDeferralFire: true,
-            });
+            // R2/R1 B-1+B-3: the ADVERTISED op, the shared payload builder, and
+            // the EPISODE key riding through to the Slice 14 receipt.
+            const { buildDeferralFirePayload } = await import("./domain/gateway/operator-delivery-engine.js");
+            const { OUTBOUND_OP } = await import("./domain/gateway/slack/outbound-driver.js");
+            const payload = buildDeferralFirePayload(row, notificationKey);
+            const res = dispatch(OUTBOUND_OP, String(payload["destinationSession"] ?? ""), payload);
             return { ok: res.ok };
           },
         }),

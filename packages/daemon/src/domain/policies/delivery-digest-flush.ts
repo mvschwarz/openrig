@@ -12,11 +12,8 @@
 import type { QueueRepository } from "../queue-repository.js";
 import { makeQueuePorts } from "../gateway/slack/queue-access.js";
 import type { OwnerNotificationLevel } from "../queue-transition-log.js";
-import {
-  decideDelivery,
-  resolveAvailability,
-  isEscalationClass,
-} from "../gateway/delivery-rules-engine.js";
+// R1 B-4: the flush consumes RECORDED message-time decisions — it never
+// re-decides from later registry state, so no engine import belongs here.
 import type { Policy, PolicyJob, PolicyEvaluation } from "./types.js";
 
 export const DELIVERY_DIGEST_FLUSH_POLICY = "delivery-digest-flush";
@@ -45,46 +42,30 @@ export interface RunDeliveryDigestFlushInput {
 export async function runDeliveryDigestFlush(input: RunDeliveryDigestFlushInput): Promise<{ posted: number; members: number }> {
   const reg = input.registry.loadHumanRegistry(input.home);
   if (!reg.ok || !reg.entities) return { posted: 0, members: 0 };
-  const dials = input.dials ?? { minimumLevelThatPosts: "NOTICE" as const, minimumLevelThatInterrupts: "ALERT" as const };
-
   const ports = makeQueuePorts(input.queueRepo, {
     loadHumanRegistry: () => reg,
   } as never);
   // The selection already drops receipted episodes — the exactly-once floor.
   const alerts = await ports.listHumanAlerts({ minimumLevel: input.minimumLevel ?? "NOTICE" });
 
+  // R1 B-4: membership = the RECORDED message-time decision for the CURRENT
+  // episode (containment wrote `delivery-decision: digest ...` with the episode
+  // key and live dials at decision time). Later prefs/dial drift neither drops
+  // nor reclassifies an already-made decision.
   const members = alerts.filter((alert) => {
-    const local = (alert.destinationSession ?? "").split("@")[0] ?? "";
-    const human = reg.entities!.find((e) => e.entityId === local);
-    if (!human) return false;
-    const decision = decideDelivery({
-      level: alert.ownerNotificationLevel ?? null,
-      escalation: isEscalationClass(alert.tags),
-      human: {
-        entityId: human.entityId,
-        deliveryClass: human.prefs.deliveryClass,
-        availability: resolveAvailability(human.prefs),
-      },
-      dials,
-    });
-    return decision.outcome === "digest" && decision.digestWindow === input.window;
+    const key = alert.notificationKey ?? alert.qitemId;
+    return input.queueRepo.listTransitions(alert.qitemId).some((t) =>
+      t.transitionNote?.startsWith("delivery-decision: digest")
+        && t.transitionNote.includes(`notification_key=${key}`)
+        && t.transitionNote.includes(`window=${input.window}`));
   });
   if (members.length === 0) return { posted: 0, members: 0 };
 
-  const outcome = await input.post({
-    kind: "delivery-digest",
-    window: input.window,
-    count: members.length,
-    items: members.map((m) => ({
-      qitemId: m.qitemId,
-      summary: m.summary ?? null,
-      destinationSession: m.destinationSession ?? null,
-      sourceSession: m.sourceSession ?? null,
-    })),
-  });
-  if (!outcome.ok) return { posted: 0, members: 0 }; // nothing stamped — the next flush retries whole
-
-  const digestId = outcome.ts ?? (input.now ?? new Date()).toISOString();
+  // RESERVE BEFORE DELIVER (R1 B-4, same doctrine as the deferral): member
+  // receipts land BEFORE the post, so no crash boundary can re-post members.
+  // At-most-once: a crash (or post failure) after the reserve loses the digest
+  // recoverably and LOUDLY — never a silent double.
+  const digestId = (input.now ?? new Date()).toISOString();
   for (const m of members) {
     const key = m.notificationKey ?? m.qitemId;
     if (input.queueRepo.transitionLog.hasOwnerNotificationReceipt(m.qitemId, key)) continue;
@@ -101,6 +82,29 @@ export async function runDeliveryDigestFlush(input: RunDeliveryDigestFlushInput)
         `digest=${digestId}`,
       ].join(" "),
     });
+  }
+
+  const outcome = await input.post({
+    kind: "delivery-digest",
+    window: input.window,
+    count: members.length,
+    items: members.map((m) => ({
+      qitemId: m.qitemId,
+      summary: m.summary ?? null,
+      destinationSession: m.destinationSession ?? null,
+      sourceSession: m.sourceSession ?? null,
+    })),
+  });
+  if (!outcome.ok) {
+    for (const m of members) {
+      const key = m.notificationKey ?? m.qitemId;
+      input.queueRepo.update({
+        qitemId: m.qitemId,
+        actorSession: "daemon@kernel",
+        transitionNote: `delivery-digest-post-failed digest=${digestId} notification_key=${key}`,
+      });
+    }
+    return { posted: 0, members: members.length };
   }
   return { posted: 1, members: members.length };
 }

@@ -79,7 +79,9 @@ export interface FireDeliveryDeferralInput {
   jobsRepo: WatchdogJobsRepository;
   queueRepo: QueueRepository;
   jobId: string;
-  deliverInterrupt: (qitemId: string) => Promise<{ ok: boolean }>;
+  /** R1 B-3: the EPISODE key rides the fire so the Slice 14 receipt lands
+   *  current-episode-exact — never the bare-qitemId fallback. */
+  deliverInterrupt: (qitemId: string, notificationKey: string) => Promise<{ ok: boolean }>;
   now?: Date;
 }
 
@@ -110,9 +112,13 @@ export async function fireDeliveryDeferralIfDue(input: FireDeliveryDeferralInput
   const now = input.now ?? new Date();
   const fireAt = Date.parse(ctx.armedAt) + ctx.minutes * 60_000;
   if (now.getTime() < fireAt) return { fired: false };
-  const delivery = await input.deliverInterrupt(ctx.qitemId);
-  if (!delivery.ok) return { fired: false }; // retained active; the next tick retries the fire
-  input.jobsRepo.markTerminal(input.jobId, "delivery-deferral fired (one-shot complete)");
+  // RESERVE BEFORE DELIVER (R2 B-3 / R1 B-4, the S24 precedent): the job goes
+  // TERMINAL and the fired transition lands BEFORE the delivery enqueue, so a
+  // still-active job can never coexist with an enqueued decision — no restart
+  // boundary can mint two decisions for one episode. The trade is at-most-once:
+  // a crash between reserve and enqueue loses the fire RECOVERABLY (the row
+  // shows fired-without-receipt and surfaces as never-posted), never doubly.
+  input.jobsRepo.markTerminal(input.jobId, "delivery-deferral fired (reserve-before-deliver)");
   input.queueRepo.update({
     qitemId: ctx.qitemId,
     actorSession: "daemon@kernel",
@@ -123,6 +129,15 @@ export async function fireDeliveryDeferralIfDue(input: FireDeliveryDeferralInput
       `who=${ctx.entityId}`,
     ].join(" "),
   });
+  const delivery = await input.deliverInterrupt(ctx.qitemId, ctx.notificationKey);
+  if (!delivery.ok) {
+    // Loud, row-side, at-most-once honored: the fire is spent; the loss is visible.
+    input.queueRepo.update({
+      qitemId: ctx.qitemId,
+      actorSession: "daemon@kernel",
+      transitionNote: `delivery-deferral-fire delivery-failed job_id=${input.jobId} notification_key=${ctx.notificationKey}`,
+    });
+  }
   return { fired: true };
 }
 
@@ -132,7 +147,7 @@ export async function fireDeliveryDeferralIfDue(input: FireDeliveryDeferralInput
 export function makeDeliveryDeferralPolicy(deps: {
   jobsRepo: WatchdogJobsRepository;
   queueRepo: QueueRepository;
-  deliverInterrupt: (qitemId: string) => Promise<{ ok: boolean }>;
+  deliverInterrupt: (qitemId: string, notificationKey: string) => Promise<{ ok: boolean }>;
 }): Policy {
   return {
     name: DELIVERY_DEFERRAL_POLICY,

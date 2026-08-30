@@ -1,5 +1,6 @@
 import { serve, type ServerType } from "@hono/node-server";
 import { readOpenRigEnv, OPENRIG_HOME } from "./openrig-compat.js";
+import { makeOperatorDeliveryEngine } from "./domain/gateway/operator-delivery-engine.js";
 import { resolveDaemonDbPath } from "./daemon-db-path.js";
 import { createDaemon } from "./startup.js";
 import { resolveBindPlan } from "./domain/bind-plan.js";
@@ -177,17 +178,30 @@ export function startWakeLadderScheduler(deps: {
   wakeLadderStatus?: import("./domain/queue-wake-ladder.js").WakeLadderStatus;
   providerService?: Pick<ProviderService, "getReadModel">;
   usageLimitJitterSeconds?: number;
+  gatewaySubsystem?: { dispatch: (op: string, entityBindingRef: string, payload: unknown) => { ok: boolean; error?: string } };
 }): WakeLadderScheduler | null {
   const queueRepo = deps.queueRepo;
   if (!queueRepo) return null;
   const status = createWakeLadderStatus();
   deps.wakeLadderStatus = status; // healthz reads this snapshot
   const db = deps.rigRepo.db;
+  // OPR.0.5.6.1 (R2/R1 B-2): the PRODUCTION operator rung dispatches through the
+  // engine — the port is built from the live gateway subsystem, which exists by
+  // the time the scheduler starts (post-bind). Absence (a gateway-less daemon
+  // variant) keeps the honest unwired floor, never a silent green.
+  const deliveryEngine = deps.gatewaySubsystem
+    ? makeOperatorDeliveryEngine({
+        home: OPENRIG_HOME,
+        queueRepo,
+        dispatch: (op, ref, payload) => deps.gatewaySubsystem!.dispatch(op, ref, payload),
+      })
+    : undefined;
   const scheduler = new WakeLadderScheduler({
     runTick: () => runWakeLadderTick({
       db,
       queueRepo,
       status,
+      ...(deliveryEngine ? { deliveryEngine } : {}),
       ...(deps.providerService
         ? { getProviderReadModel: () => deps.providerService!.getReadModel() }
         : {}),

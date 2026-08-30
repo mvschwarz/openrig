@@ -321,7 +321,16 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     const p = ((decision as { payload?: unknown }).payload ?? {}) as OutboundPostPayload & { deliveryDeferralFire?: boolean };
     // The T+30 deferral FIRE executes an already-made decision — never re-consult
     // (a re-consult would re-defer: the immediate-plus-deferred shape AM-F3 forbids).
-    if (p.deliveryDeferralFire) return deliver(decision);
+    // R2 B-3 belt: an episode that already carries its posted receipt (a replayed
+    // decision, or any second mint) posts NOTHING — exactly-once by the receipt.
+    if (p.deliveryDeferralFire) {
+      const fireKey = p.notificationKey ?? p.qitemId;
+      if (p.qitemId && opts.queueRepo.transitionLog.hasOwnerNotificationReceipt(p.qitemId, fireKey)) {
+        releaseRef(p.qitemId);
+        return { ok: true as const };
+      }
+      return deliver(decision);
+    }
     const ruled = p.qitemId ? decideForPayload(p) : null;
     if (ruled) {
       recordTerminationOnce(p, ruled);
@@ -332,7 +341,19 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         return { ok: true as const };
       }
       if (ruled.outcome === "digest") {
-        // Accumulates on the row record; the flush policy posts ONE digest.
+        // R1 B-4: the MESSAGE-TIME decision is recorded on the row (with the
+        // live dials already applied by the consult above); the flush consumes
+        // this record and never re-decides from later registry state.
+        const already = opts.queueRepo.listTransitions(p.qitemId).some((t) =>
+          t.transitionNote?.startsWith("delivery-decision: digest")
+            && t.transitionNote.includes(`notification_key=${episodeKey}`));
+        if (!already) {
+          opts.queueRepo.update({
+            qitemId: p.qitemId,
+            actorSession: "daemon@kernel",
+            transitionNote: `delivery-decision: digest window=${ruled.digestWindow ?? "4h"} notification_key=${episodeKey}`,
+          });
+        }
         outboundSeen.mark(episodeKey, `digest-deferred-${ruled.digestWindow ?? "4h"}`);
         releaseRef(p.qitemId);
         return { ok: true as const };

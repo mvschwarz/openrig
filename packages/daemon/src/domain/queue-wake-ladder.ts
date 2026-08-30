@@ -186,7 +186,7 @@ export interface WakeLadderDeps {
    *  (or defers) through the rules engine and reports whether the outcome
    *  resolved synchronously; absent = pre-engine floor behavior. */
   deliveryEngine?: {
-    dispatchEscalation: (row: QueueItem, reason: string) => Promise<{ decision: string; resolved: boolean }>;
+    dispatchEscalation: (row: QueueItem, reason: string) => Promise<{ decision: string; resolved: boolean; notificationKey?: string }>;
   };
 }
 
@@ -214,6 +214,7 @@ interface LadderView {
   orchRungFailed: boolean;
   opRung: boolean;
   opEngineDispatched: boolean;
+  opEngineKey: string | null;
   opOutcomeResolved: boolean;
   exhausted: boolean;
   suspendEpisodeOpen: boolean;
@@ -231,6 +232,7 @@ function readLadder(db: Database.Database, qitemId: string): LadderView {
     orchRungFailed: false,
     opRung: false,
     opEngineDispatched: false,
+    opEngineKey: null,
     opOutcomeResolved: false,
     exhausted: false,
     suspendEpisodeOpen: false,
@@ -248,11 +250,20 @@ function readLadder(db: Database.Database, qitemId: string): LadderView {
       view.orchRungFailed = /outcome=failed:/.test(note);
     }
     if (isRung && /^escalation-rung:\s*operator/.test(note)) view.opRung = true;
-    if (isRung && /^escalation-rung:\s*operator dispatched-to-engine/.test(note)) view.opEngineDispatched = true;
-    // Outcome resolution (AM-F3): the S14 posted receipt or the engine's
-    // termination record closes the episode the rung is waiting on.
+    if (isRung && /^escalation-rung:\s*operator dispatched-to-engine/.test(note)) {
+      view.opEngineDispatched = true;
+      const keyMatch = note.match(/notification_key=(\S+)/);
+      if (keyMatch) view.opEngineKey = keyMatch[1]!;
+    }
+    // Outcome resolution (AM-F3, R1 B-3): the S14 posted receipt or the
+    // termination record closes the episode the rung is waiting on — BOUND to
+    // the dispatched episode's key when the marker carries one, so a stale
+    // receipt from an older episode can never close a new rung. An unkeyed
+    // dispatch (injected legacy ports) keeps the any-note shape.
     if (note.startsWith("slack-owner-notification-posted ") || note.startsWith("delivery-termination:")) {
-      view.opOutcomeResolved = true;
+      if (view.opEngineKey === null || note.split(/\s+/).includes(`notification_key=${view.opEngineKey}`)) {
+        view.opOutcomeResolved = true;
+      }
     }
     if (note.startsWith(LADDER_EXHAUSTED_PREFIX)) view.exhausted = true;
     if (note.startsWith(LADDER_SUSPEND_PREFIX)) suspends += 1;
@@ -746,7 +757,7 @@ async function operatorRung(
   appendMarker(
     repo,
     row,
-    `${LADDER_RUNG_PREFIX} operator dispatched-to-engine decision=${outcome.decision} resolved=${outcome.resolved} reason=${reason}`,
+    `${LADDER_RUNG_PREFIX} operator dispatched-to-engine decision=${outcome.decision} resolved=${outcome.resolved}${outcome.notificationKey ? ` notification_key=${outcome.notificationKey}` : ""} reason=${reason}`,
   );
   actions.push({ qitemId: row.qitemId, action: "escalate-operator" });
   return outcome.resolved;
