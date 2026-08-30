@@ -270,7 +270,11 @@ describe("context-usage-threshold watchdog", () => {
             await createContinuityCutoverBaton(request.continuityAction, queue);
             continuityActionCompleted = true;
           }
-          return { status: "ok" as const, continuityActionCompleted };
+          return {
+            status: "failed" as const,
+            error: "terminal send failed after durable baton creation",
+            continuityActionCompleted,
+          };
         } catch (error) {
           return {
             status: "failed" as const,
@@ -292,7 +296,11 @@ describe("context-usage-threshold watchdog", () => {
 
     destinationExists = true;
     const second = await retryEngine.evaluate(repo.getByIdOrThrow(job.jobId));
-    expect(second.delivery).toMatchObject({ status: "ok", continuityActionCompleted: true });
+    expect(second.delivery).toMatchObject({
+      status: "failed",
+      error: "terminal send failed after durable baton creation",
+      continuityActionCompleted: true,
+    });
     expect(repo.getByIdOrThrow(job.jobId).lastFiredGeneration).toBe("gen-1");
     expect((db.prepare("SELECT COUNT(*) AS n FROM queue_items").get() as { n: number }).n).toBe(1);
 
