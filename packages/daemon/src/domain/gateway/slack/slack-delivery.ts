@@ -235,16 +235,34 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
       // authoritative transition lands.
       if (opts.onTransportFailed) {
         const receiptKey = transportFailureReceiptKey(decision.decisionId, failureClass, res.error ?? "");
+        let receiptRetained = false;
+        let retentionError: string | undefined;
         try {
           opts.attempted.mark(receiptKey, "transport-failure-receipt-pending");
-          opts.onTransportFailed(q, failureClass, res.error ?? "");
-          opts.attempted.mark(
-            `${receiptKey}${TRANSPORT_FAILURE_RECEIPT_REPAIRED}`,
-            "transport-failure-receipt-repaired",
-          );
+          receiptRetained = true;
         } catch (e) {
-          log(`transport-failed receipt write FAILED for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — retained for repair before resend`);
+          retentionError = (e as Error).message;
+          log(`transport-failed receipt backup FAILED for ${q.qitemId ?? decision.decisionId}: ${retentionError} — authoritative row write still attempted`);
+        }
+        try {
+          opts.onTransportFailed(q, failureClass, res.error ?? "");
+        } catch (e) {
+          const disposition = receiptRetained
+            ? "retained for repair before resend"
+            : `NOT retained; backup failed first: ${retentionError}`;
+          log(`transport-failed receipt write FAILED for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — ${disposition}`);
           return { ok: false, class: "receipt-failed", detail: (e as Error).message };
+        }
+        if (receiptRetained) {
+          try {
+            opts.attempted.mark(
+              `${receiptKey}${TRANSPORT_FAILURE_RECEIPT_REPAIRED}`,
+              "transport-failure-receipt-repaired",
+            );
+          } catch (e) {
+            log(`transport-failed receipt repair marker FAILED for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — authoritative receipt landed; pending marker retained for idempotent repair`);
+            return { ok: false, class: "receipt-failed", detail: (e as Error).message };
+          }
         }
       }
       return { ok: false, class: failureClass, detail: res.error };
