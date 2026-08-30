@@ -20,7 +20,7 @@ import { loadConfig } from "./config.js";
 import { resolveSecret } from "./secrets.js";
 import { SeenStore, DeadLetterStore } from "./state-store.js";
 import { makeQueuePorts } from "./queue-access.js";
-import { SlackOutboundDriver, OUTBOUND_OP } from "./outbound-driver.js";
+import { SlackOutboundDriver, OUTBOUND_OP, type OutboundPostPayload } from "./outbound-driver.js";
 import { subsystemSlackDeliver } from "./slack-delivery.js";
 import { InboundRouter, type SlackEvent, type InboundFilePort, type InboundFileResult, type StoredInboundFile, type FailedInboundFile } from "./inbound.js";
 import { makeInboundSenderResolver, type RegistrySurface } from "./inbound-admission.js";

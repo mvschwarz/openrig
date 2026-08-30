@@ -1717,13 +1717,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     });
   }
 
+  // OPR.0.5.6.1 — late-bound gateway dispatch for the delivery policies (the
+  // gateway subsystem is constructed after the watchdog engine; the ref fills
+  // at activation below, which is OUTSIDE the sessionTransport block — hence
+  // function scope). Registry loads through the shipped loader.
+  const lateGatewayDispatch: { fn?: (op: string, ref: string, payload: unknown) => { ok: boolean; error?: string } } = {};
+  const { loadHumanRegistry: loadHumanRegistryForDelivery } = await import("./domain/gateway/human-registry.js");
+  void loadHumanRegistryForDelivery; // consumed inside the sessionTransport block below
+
   const sessionTransport = deps.sessionTransport;
   if (sessionTransport) {
-    // OPR.0.5.6.1 — late-bound gateway dispatch for the delivery policies (the
-    // gateway subsystem is constructed after the watchdog engine; the ref fills
-    // at activation below). Registry loads through the shipped loader.
-    const lateGatewayDispatch: { fn?: (op: string, ref: string, payload: unknown) => { ok: boolean; error?: string } } = {};
-    const { loadHumanRegistry: loadHumanRegistryForDelivery } = await import("./domain/gateway/human-registry.js");
     const watchdogPolicyEngine = new WatchdogPolicyEngine({
       jobsRepo: watchdogJobsRepoInstance,
       historyLog: watchdogHistoryLogInstance,
