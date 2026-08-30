@@ -10,6 +10,8 @@
 //                          diagnosis; a wakeless blocked row still projects as parked.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { QueueRepository, type QueueItem } from "../src/domain/queue-repository.js";
@@ -25,6 +27,8 @@ interface PickupShape {
 }
 const pickupOf = (item: QueueItem): PickupShape | undefined =>
   (item as unknown as { pickup?: PickupShape }).pickup;
+
+const DOMAIN_ROOT = resolve(import.meta.dirname, "../src/domain");
 
 describe("S04 pickup receipts — derived, visible, threshold-honest", () => {
   let db: Database.Database;
@@ -146,6 +150,24 @@ describe("S04 pickup receipts — derived, visible, threshold-honest", () => {
     for (const table of ["queue_items", "queue_transitions"]) {
       const cols = (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
       expect(cols.some((c) => /pickup|receipt/i.test(c)), `${table} must carry no derived-state column`).toBe(false);
+    }
+  });
+
+  it("SUPERSESSION: the dead queue-row writer stays absent while the live daemon heartbeat and null-tolerant readers remain", () => {
+    const queueRepository = readFileSync(resolve(DOMAIN_ROOT, "queue-repository.ts"), "utf8");
+    const daemonLifecycle = readFileSync(resolve(DOMAIN_ROOT, "daemon-lifecycle-store.ts"), "utf8");
+    const daemonEntry = readFileSync(resolve(DOMAIN_ROOT, "../index.ts"), "utf8");
+    const rowWriter = ["record", "Heartbeat(qitemId"].join("");
+    const daemonWriter = ["record", "Heartbeat(nowIso"].join("");
+    const daemonCall = ["daemonLifecycleStore.record", "Heartbeat"].join("");
+
+    expect(queueRepository).not.toContain(rowWriter);
+    expect(daemonLifecycle).toContain(daemonWriter);
+    expect(daemonEntry).toContain(daemonCall);
+    for (const reader of ["queue-pickup.ts", "queue-stuck-sweep.ts", "queue-wake-ladder.ts"]) {
+      expect(readFileSync(resolve(DOMAIN_ROOT, reader), "utf8")).toContain(
+        "0.5.7 mechanized-pull turn-end hook that knows the in-flight row",
+      );
     }
   });
 

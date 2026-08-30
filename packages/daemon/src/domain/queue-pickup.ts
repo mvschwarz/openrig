@@ -17,6 +17,9 @@
 //
 // Substantive motion = any transition strictly after the claim other than the claim's own
 // 'claimed' transition, or a heartbeat after the claim.
+// Queue-row last_heartbeat is formally superseded (2026-08-30, S24 F-14); readers remain
+// null-tolerant. Wiring reopens only for the 0.5.7 mechanized-pull turn-end hook that knows the in-flight row,
+// the first honest row-scoped writer. daemon-lifecycle-store.recordHeartbeat remains live and distinct.
 
 import { SettingsStore } from "./user-settings/settings-store.js";
 
@@ -58,6 +61,8 @@ export function derivePickup(facts: PickupFacts): PickupReceipt {
   if (!facts.claimedAt) return { state: "unclaimed" };
   const now = facts.now ?? new Date();
   const claimedMs = Date.parse(facts.claimedAt);
+  // Keep this null arm for the 0.5.7 mechanized-pull turn-end hook that knows the in-flight row;
+  // it is the first honest row-scoped writer, and wiring reopens only in that slice.
   const heartbeatAfterClaim =
     !!facts.lastHeartbeat && Date.parse(facts.lastHeartbeat) > claimedMs;
   if (facts.postClaimMotionCount > 0 || heartbeatAfterClaim) return { state: "working" };

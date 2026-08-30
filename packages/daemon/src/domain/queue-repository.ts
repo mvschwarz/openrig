@@ -2772,15 +2772,6 @@ export class QueueRepository {
       .run(ts, result, qitemId);
   }
 
-  recordHeartbeat(qitemId: string): void {
-    const ts = new Date().toISOString();
-    this.db
-      .prepare(
-        `UPDATE queue_items SET last_heartbeat = ? WHERE qitem_id = ?`
-      )
-      .run(ts, qitemId);
-  }
-
   /**
    * Pod-fallback: redirect qitem to a fallback destination (e.g., when a seat
    * is unreachable). Emits qitem.fallback_routed; preserves chain_of_record.

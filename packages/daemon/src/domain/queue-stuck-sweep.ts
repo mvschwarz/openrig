@@ -321,6 +321,8 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         row,
         route: stalled.target,
         ageMinutes: minutesSince(row.claimedAt, now),
+        // Keep this null arm for the 0.5.7 mechanized-pull turn-end hook that knows the in-flight row;
+        // it is the first honest row-scoped writer, and wiring reopens only in that slice.
         evidenceAt: latestIso(row.tsUpdated, row.lastHeartbeat, row.claimedAt),
         why: stalled.evidence,
       });

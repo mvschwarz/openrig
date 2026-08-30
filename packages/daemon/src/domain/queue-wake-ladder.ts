@@ -253,6 +253,8 @@ function readLadder(db: Database.Database, qitemId: string): LadderView {
  *  that is neither a founding record nor ladder machinery — someone real moved. */
 function hasPickupEvidence(db: Database.Database, row: QueueItem): boolean {
   if (row.claimedAt) return true;
+  // Keep this null arm for the 0.5.7 mechanized-pull turn-end hook that knows the in-flight row;
+  // it is the first honest row-scoped writer, and wiring reopens only in that slice.
   if (row.lastHeartbeat) return true;
   const rows = db
     .prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = ?")
