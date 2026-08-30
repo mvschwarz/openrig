@@ -15,6 +15,7 @@ import type { QueueRepository } from "../queue-repository.js";
 import { makeQueuePorts } from "../gateway/slack/queue-access.js";
 import type { OwnerNotificationLevel } from "../queue-transition-log.js";
 import { OUTBOUND_OP } from "../gateway/slack/outbound-driver.js";
+import { DispatchBuffer } from "../gateway/dispatch-buffer.js";
 import type { Policy, PolicyJob, PolicyEvaluation } from "./types.js";
 
 export const DELIVERY_DIGEST_FLUSH_POLICY = "delivery-digest-flush";
@@ -47,8 +48,25 @@ export async function runDeliveryDigestFlush(input: RunDeliveryDigestFlushInput)
   // a REAL post, so members remain flushable until transport truth.
   const alerts = await ports.listHumanAlerts({ minimumLevel: input.minimumLevel ?? "NOTICE" });
 
+  // MEMBERSHIP EXCLUSIVITY (R1 HOLD c7818ceb): a member already riding a
+  // PENDING digest decision is IN FLIGHT — the durable buffer is the
+  // recovery-safe source of truth (no new state, no ordering window: a mint
+  // lost before enqueue leaves no pending entry, so its members stay
+  // mintable; an enqueued mint redrives to transport truth). Excluding
+  // in-flight members makes overlap structurally impossible, so a growing
+  // member set can never double-deliver the pending ones.
+  const inFlight = new Set<string>();
+  try {
+    for (const d of new DispatchBuffer(input.home).pending()) {
+      if (!d.decisionId.startsWith("digest:")) continue;
+      const mrs = (d.payload as { memberReceipts?: Array<{ notificationKey?: string }> } | null)?.memberReceipts ?? [];
+      for (const m of mrs) if (m.notificationKey) inFlight.add(m.notificationKey);
+    }
+  } catch { /* unreadable buffer: fail open to selection; the dispatcher's stable-id idempotence still guards the same-set case */ }
+
   const members = alerts.filter((alert) => {
     const key = alert.notificationKey ?? alert.qitemId;
+    if (inFlight.has(key)) return false;
     return input.queueRepo.listTransitions(alert.qitemId).some((t) =>
       t.transitionNote?.startsWith("delivery-decision: digest")
         && t.transitionNote.includes(`notification_key=${key}`)
