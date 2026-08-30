@@ -21,7 +21,7 @@
 
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
-import type { QueueItem, QueueRepository } from "./queue-repository.js";
+import { deriveCrossHostSuccessorId, type QueueItem, type QueueRepository } from "./queue-repository.js";
 import { stalledPickupFinding } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { loadHostRegistry } from "./hosts/hosts-registry-reader.js";
@@ -126,12 +126,14 @@ export interface StuckSweepDeps {
   now?: Date;
   log?: (line: string) => void;
   /** Is this host id (or observed self-id) present in the operator's hosts registry?
-   *  A host-qualified custody target naming a REGISTERED host is proof-at-write — the
-   *  cross-host close (routes/queue.ts) creates the successor on that host FIRST and
-   *  records `<id>@<host>` only after that create succeeded — so it needs no
-   *  verification. Injectable for tests; default reads the local hosts.yaml once per
-   *  sweep pass, and an unavailable registry degrades honestly to verification-required
-   *  (more indeterminate findings, never a false verdict). */
+   *  One of TWO conjunct conditions for the proof-at-write disposition — the other is
+   *  that the successor id recomputes through `deriveCrossHostSuccessorId` from the
+   *  row's own fields, because the cross-host close (routes/queue.ts) creates the
+   *  successor on that host FIRST and records the derived `<id>@<host>` only after that
+   *  create succeeded, while the generic update path can store any string. Registry
+   *  membership alone never suppresses. Injectable for tests; default reads the local
+   *  hosts.yaml once per sweep pass, and an unavailable registry degrades honestly to
+   *  verification-required (more indeterminate findings, never a false verdict). */
   isRegisteredHost?: (hostId: string) => boolean;
 }
 
@@ -187,13 +189,23 @@ interface TransitionNoteRow {
 /** Durable custody-verification disposition: a transition note on the CLOSED source row,
  *  written by whoever performed the registered-host read (never by this detector),
  *  `custody-verified: <exact-target> <free-form how/where>`. Prefix-anchored parse; the
- *  target is the first whitespace-delimited token after the prefix, matched exactly. */
+ *  target is the first whitespace-delimited token after the prefix, matched exactly.
+ *  Read from the ACTIVE table AND the retention archive: the daily archiver MOVES every
+ *  transition of an aged terminal qitem into `queue_transitions_archive` (the exact class
+ *  custody rows belong to) while the row itself keeps participating in this sweep, so an
+ *  active-only read would forget the disposition after the retention window and re-mint
+ *  the very finding the verifier already answered. The archive is never deleted, so the
+ *  union is the complete audit history. */
 export const CUSTODY_VERIFIED_PREFIX = "custody-verified:";
 
 function custodyVerifiedTargets(db: Database.Database, qitemId: string): Set<string> {
   const notes = db
-    .prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = ? AND transition_note LIKE ?")
-    .all(qitemId, `${CUSTODY_VERIFIED_PREFIX}%`) as TransitionNoteRow[];
+    .prepare(
+      `SELECT transition_note FROM queue_transitions WHERE qitem_id = ? AND transition_note LIKE ?
+       UNION ALL
+       SELECT transition_note FROM queue_transitions_archive WHERE qitem_id = ? AND transition_note LIKE ?`,
+    )
+    .all(qitemId, `${CUSTODY_VERIFIED_PREFIX}%`, qitemId, `${CUSTODY_VERIFIED_PREFIX}%`) as TransitionNoteRow[];
   const verified = new Set<string>();
   for (const { transition_note: note } of notes) {
     if (!note) continue;
@@ -431,11 +443,16 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // qitems. A local miss is never proof of absence: the successor may live in another
     // registered host's database. Comma fan-out is checked member-by-member and only
     // unresolved members are reported. Two dispositions satisfy a member without a local
-    // hit: (1) proof-at-write — a host qualifier naming a REGISTERED host, because the
-    // cross-host close created the successor on that host before recording the key; and
-    // (2) a durable `custody-verified:` transition note written on the source row by
-    // whoever performed the registered-host read. Historical source rows are never
-    // mutated by this detector — the disposition note is the verifier's act, not ours.
+    // hit: (1) proof-at-write — a REGISTERED host qualifier whose successor id RECOMPUTES
+    // from this row's own (qitem_id, handed_off_to, host) through the same deterministic
+    // derivation the cross-host close uses. The close path records that key only AFTER
+    // its forwarded successor-create succeeded, and the generic update path (which
+    // accepts arbitrary closure targets) cannot accidentally synthesize the sha256-derived
+    // id — registered-host SYNTAX alone is never trusted; and (2) a durable
+    // `custody-verified:` transition note written on the source row by whoever performed
+    // the registered-host read (read from active + archived transitions). Historical
+    // source rows are never mutated by this detector — the disposition note is the
+    // verifier's act, not ours.
     const custodyRows = deps.db
       .prepare(
         `SELECT q.qitem_id FROM queue_items q
@@ -451,7 +468,15 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       const verificationTargets = targets.filter((target) => {
         if (verified.has(target)) return false;
         const at = target.indexOf("@");
-        if (at !== -1) return !isRegisteredHost(target.slice(at + 1));
+        if (at !== -1) {
+          const hostId = target.slice(at + 1);
+          const successorId = target.slice(0, at);
+          return !(
+            isRegisteredHost(hostId) &&
+            row.handedOffTo !== null &&
+            successorId === deriveCrossHostSuccessorId(row.qitemId, row.handedOffTo, hostId)
+          );
+        }
         return !deps.queueRepo.getById(target);
       });
       if (verificationTargets.length === 0) continue;
