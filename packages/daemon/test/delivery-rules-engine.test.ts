@@ -614,7 +614,7 @@ describe("OPR.0.5.6.1 §5 — the 30-minute away deferral on the watchdog substr
   });
   afterEach(() => db.close());
 
-  it("DEFERRAL ARMS DURABLY AND FIRES EXACTLY ONCE AT T+30, surviving a daemon restart mid-window (RED at base: no deferral policy exists)", async () => {
+  it("DEFERRAL ARMS DURABLY AND FIRES EXACTLY ONCE AT T+30, surviving a daemon restart mid-window (v3: dispatch at T+30, terminal only on the observed receipt — never zero, never two)", async () => {
     const mod = await deferralPolicyModule();
     expect(mod, "policies/delivery-deferral must exist (RED at base: absent)").not.toBeNull();
     const row = await repo.create({
@@ -624,9 +624,8 @@ describe("OPR.0.5.6.1 §5 — the 30-minute away deferral on the watchdog substr
       nudge: false,
     });
     const arm = (mod as { armDeliveryDeferral: (deps: unknown) => { jobId: string } }).armDeliveryDeferral;
-    const armed = arm({ jobsRepo: jobs, queueRepo: repo, qitemId: row.qitemId, entityId: "human-founder", minutes: 30 });
+    const armed = arm({ jobsRepo: jobs, queueRepo: repo, qitemId: row.qitemId, entityId: "human-founder", minutes: 30, notificationKey: `${row.qitemId}:ep1` });
     expect(armed.jobId).toBeTruthy();
-    // durable: visible on watchdog_jobs (SQLite is the schedule)
     const jobRow = db.prepare("SELECT policy, state FROM watchdog_jobs WHERE job_id = ?").get(armed.jobId) as { policy: string; state: string };
     expect(jobRow).toMatchObject({ policy: "delivery-deferral", state: "active" });
 
@@ -638,17 +637,23 @@ describe("OPR.0.5.6.1 §5 — the 30-minute away deferral on the watchdog substr
       jobsRepo: jobsAfterRestart,
       queueRepo: repo,
       jobId: armed.jobId,
-      deliverInterrupt: async (qitemId: string) => {
+      deliverInterrupt: async (qitemId: string, key: string) => {
         interrupts.push(qitemId);
+        // the delivery seam's act: the receipt lands after transport truth
+        repo.update({ qitemId, actorSession: "daemon@kernel",
+          transitionNote: `slack-owner-notification-posted notification_key=${key} level=ALERT kind=human-required message_ts=1 thread_ts=1` });
         return { ok: true as const };
       },
     };
     // before T+30: not due
     expect((await fire({ ...deps, now: new Date(Date.now() + 10 * 60_000) })).fired).toBe(false);
-    // at T+30: fires exactly once
-    expect((await fire({ ...deps, now: new Date(Date.now() + 31 * 60_000) })).fired).toBe(true);
+    expect(interrupts.length).toBe(0);
+    // at T+30: dispatches exactly once (job stays active pending the receipt observation)
+    expect((await fire({ ...deps, now: new Date(Date.now() + 31 * 60_000) })).fired).toBe(false);
     expect(interrupts).toEqual([row.qitemId]);
-    // after firing: terminal, never a second interrupt (one-shot, not periodic-reminder)
+    // the next evaluation observes the receipt: fired + terminal, no re-delivery
+    expect((await fire({ ...deps, now: new Date(Date.now() + 32 * 60_000) })).fired).toBe(true);
+    expect(interrupts.length).toBe(1);
     expect((await fire({ ...deps, now: new Date(Date.now() + 62 * 60_000) })).fired).toBe(false);
     expect(interrupts.length).toBe(1);
     const terminal = db.prepare("SELECT state FROM watchdog_jobs WHERE job_id = ?").get(armed.jobId) as { state: string };
