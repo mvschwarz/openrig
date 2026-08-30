@@ -434,6 +434,14 @@ function detectQueueColumn(db: Database.Database, columnName: string): boolean {
   }
 }
 
+function detectTable(db: Database.Database, tableName: string): boolean {
+  try {
+    return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(tableName);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * L3 — Queue repository. Owns CRUD over `queue_items` plus the wired-in
  * append-only transition log and hot-potato strict-rejection contract.
@@ -567,6 +575,7 @@ export class QueueRepository {
   private readonly hasEvidenceRefColumn: boolean;
   private readonly hasMintingGenColumn: boolean;
   private readonly hasClaimedGenColumn: boolean;
+  private readonly hasQueueTransitionsTable: boolean;
   private readonly loadHumanRegistryFn: () => LoadResult;
   /** OPR.0.4.6.WF3 FR-6 — injected by startup (never imported): the
    *  workflow domain's is-live-frontier-packet predicate. */
@@ -620,6 +629,7 @@ export class QueueRepository {
     this.hasTargetRepoColumn = detectQueueColumn(db, "target_repo");
     this.hasSummaryColumn = detectQueueColumn(db, "summary");
     this.hasEvidenceRefColumn = detectQueueColumn(db, "evidence_ref");
+    this.hasQueueTransitionsTable = detectTable(db, "queue_transitions");
     // GHOST-STAGE (e/Class-B): generation stamps (migration 063). Defensive detect so a pre-063
     // harness degrades (writers skip the columns; the release predicate never matches unstamped rows).
     this.hasMintingGenColumn = detectQueueColumn(db, "minting_generation_uuid");
@@ -2869,6 +2879,10 @@ export class QueueRepository {
    *  meaningful because posting always stamps — MR2). Pane-bound rows return
    *  null: no key lies. */
   deliveryOutcomeFor(qitemId: string): { outcome: "posted" | "transport-failed" | "never-posted"; detail: string } | null {
+    // Some repository-only fixtures intentionally model the pre-transition
+    // schema. Delivery projection is additive there: absence means no verdict,
+    // never a list failure.
+    if (!this.hasQueueTransitionsTable) return null;
     const row = this.db.prepare("SELECT last_nudge_result, ts_created FROM queue_items WHERE qitem_id = ?")
       .get(qitemId) as { last_nudge_result: string | null; ts_created: string } | undefined;
     if (!row) return null;
