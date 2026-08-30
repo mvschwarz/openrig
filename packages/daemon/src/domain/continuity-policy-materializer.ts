@@ -152,13 +152,17 @@ function watchdogSpec(input: {
   ].join("\n");
 }
 
+function materializesContinuityJobs(
+  input: Pick<ContinuityPolicyMaterializationInput, "runtime" | "compactionStrategy">,
+): boolean {
+  return input.runtime === "claude-code" &&
+    (input.compactionStrategy === "apprentice-handover" || input.compactionStrategy === "managed-compaction");
+}
+
 export function materializeContinuityPolicy(
   input: ContinuityPolicyMaterializationInput,
 ): ContinuityPolicyPlan {
-  if (
-    input.runtime !== "claude-code" ||
-    (input.compactionStrategy !== "apprentice-handover" && input.compactionStrategy !== "managed-compaction")
-  ) {
+  if (!materializesContinuityJobs(input)) {
     return { jobs: [], docText: CONTINUITY_POLICY_DOC };
   }
   if (input.compactionStrategy === "apprentice-handover" && !input.mechanic) {
@@ -440,11 +444,9 @@ export class ContinuityPolicyMaterializer {
   ) {}
 
   arm(input: Omit<ContinuityPolicyMaterializationInput, "watchedFilePath"> & { sessionId: string }): Array<Pick<WatchdogJob, "jobId">> {
-    if (
-      input.runtime !== "claude-code" ||
-      (input.compactionStrategy !== "apprentice-handover" && input.compactionStrategy !== "managed-compaction")
-    ) return [];
-    const watchedFilePath = this.resolveWatchedFilePath(input);
+    const watchedFilePath = materializesContinuityJobs(input)
+      ? this.resolveWatchedFilePath(input)
+      : null;
     return armContinuityPolicy({ ...input, watchedFilePath }, this.jobsRepository);
   }
 }
