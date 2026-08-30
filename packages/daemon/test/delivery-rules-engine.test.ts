@@ -391,7 +391,7 @@ describe("OPR.0.5.6.1 §3 — the gateway consults the engine before dispatch", 
 // §4 DIGEST — lossless, exactly-once, restart-durable window (AM-F1 tooth)
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("OPR.0.5.6.1 §4 — the C/D digest flush", () => {
+describe("OPR.0.5.6.1 §4 — the C/D digest flush (v3: transport truth first, redrive until success)", () => {
   let db: Database.Database;
   let repo: QueueRepository;
   let home: string;
@@ -431,9 +431,6 @@ describe("OPR.0.5.6.1 §4 — the C/D digest flush", () => {
     return rows;
   }
 
-  /** R1 B-4: containment RECORDS the message-time decision as a row transition;
-   *  the flush consumes those records (never re-deciding from later registry
-   *  state). This helper stands in for the containment leg's recording. */
   function recordDigestDecision(qitemId: string, key: string, window: "4h" | "daily"): void {
     repo.update({
       qitemId, actorSession: "daemon@kernel",
@@ -441,53 +438,78 @@ describe("OPR.0.5.6.1 §4 — the C/D digest flush", () => {
     });
   }
 
-  it("LOSSLESS + EXACTLY-ONCE: N digest-class rows flush as ONE notify-class digest containing all N; no member is ALSO posted individually; a second flush posts nothing (RED at base: no flush machinery exists)", async () => {
+  function digestWire(posts: Array<Record<string, unknown>>, opts?: { failFetch?: boolean }) {
+    const registry = registryWith({ deliveryClass: "C", availability: "available" });
+    const secrets = join(home, "slack.env");
+    writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n", { mode: 0o600 });
+    saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-OWNER", secretsEnvFile: secrets }, home);
+    return buildSlackGatewayWire({
+      home,
+      queueRepo: repo,
+      registry: { loadHumanRegistry: () => registry, resolveSlackHandle },
+      outboundIntervalMs: 60_000,
+      fetchImpl: async (_url, init) => {
+        if (opts?.failFetch) {
+          return new Response(JSON.stringify({ ok: false, error: "fatal_error" }), { status: 500, headers: { "content-type": "application/json" } });
+        }
+        posts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        return new Response(JSON.stringify({ ok: true, ts: `1724.9${posts.length}` }), { status: 200, headers: { "content-type": "application/json" } });
+      },
+    });
+  }
+
+  async function flushViaWire(mod: Record<string, unknown>, wire: ReturnType<typeof buildSlackGatewayWire>) {
+    const registry = registryWith({ deliveryClass: "C", availability: "available" });
+    const flush = (mod as { runDeliveryDigestFlush: (deps: unknown) => Promise<{ dispatched: number; members: number }> }).runDeliveryDigestFlush;
+    return flush({
+      queueRepo: repo,
+      registry: { loadHumanRegistry: () => registry, resolveSlackHandle },
+      home,
+      dispatch: (op: string, ref: string, payload: unknown, opts?: unknown) => wire.dispatcher.dispatch(op, ref, payload, opts as never),
+      window: "4h" as const,
+    });
+  }
+
+  it("LOSSLESS + EXACTLY-ONCE (v3): N recorded digest decisions flush as ONE post through the REAL wire; receipts land only AFTER transport truth; a second flush dispatches nothing new (RED at base: no flush machinery exists)", async () => {
     const mod = await digestFlushModule();
     expect(mod, "policies/delivery-digest-flush must exist (RED at base: absent)").not.toBeNull();
     const rows = await nParks(3);
     const registry = registryWith({ deliveryClass: "C", availability: "available" });
-    const posts: Array<Record<string, unknown>> = [];
-    const flush = (mod as { runDeliveryDigestFlush: (deps: unknown) => Promise<{ posted: number; members: number }> }).runDeliveryDigestFlush;
-    const deps = {
-      queueRepo: repo,
-      registry: { loadHumanRegistry: () => registry, resolveSlackHandle },
-      home,
-      post: async (payload: Record<string, unknown>) => {
-        posts.push(payload);
-        return { ok: true as const, ts: `1724.9${posts.length}` };
-      },
-      window: "4h" as const,
-    };
-    // R1 B-4: record each row's message-time decision (the containment leg's act)
     const ports = makeQueuePorts(repo, { loadHumanRegistry: () => registry } as never);
+    const keys: Array<{ qid: string; key: string }> = [];
     for (const alert of await ports.listHumanAlerts({ minimumLevel: "NOTICE" })) {
-      recordDigestDecision(alert.qitemId, alert.notificationKey ?? alert.qitemId, "4h");
+      const key = alert.notificationKey ?? alert.qitemId;
+      keys.push({ qid: alert.qitemId, key });
+      recordDigestDecision(alert.qitemId, key, "4h");
     }
-    const first = await flush(deps);
-    expect(first.posted).toBe(1);
-    expect(first.members).toBe(3);
-    expect(posts.length).toBe(1);
-    const body = JSON.stringify(posts[0]);
-    for (const row of rows) expect(body).toContain(row.qitemId);
-    expect(body, "the digest itself is notify-class: no mention").not.toContain("<@UFOUNDER>");
-    // every member row carries its posted receipt (the S14 literal, digest-tokened)
-    for (const row of rows) {
-      const receipts = repo.listTransitions(row.qitemId).filter((t) => t.transitionNote?.startsWith("slack-owner-notification-posted "));
-      expect(receipts.length, `row ${row.qitemId} digest receipt`).toBe(1);
-      expect(receipts[0]!.transitionNote).toContain("digest=");
+    const posts: Array<Record<string, unknown>> = [];
+    const wire = digestWire(posts);
+    try {
+      wire.startServices?.();
+      const first = await flushViaWire(mod!, wire);
+      expect(first.members).toBe(3);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(posts.length, "ONE digest post through the real transport").toBe(1);
+      const body = JSON.stringify(posts[0]);
+      for (const row of rows) expect(body).toContain(row.qitemId);
+      expect(body, "the digest is notify-class: no mention").not.toContain("<@UFOUNDER>");
+      // receipts landed AFTER the post (transport truth), digest-tokened, per member
+      for (const { qid, key } of keys) {
+        const receipts = repo.listTransitions(qid).filter((t) => t.transitionNote?.startsWith("slack-owner-notification-posted "));
+        expect(receipts.length, `receipt on ${qid}`).toBe(1);
+        expect(receipts[0]!.transitionNote).toContain(`notification_key=${key}`);
+        expect(receipts[0]!.transitionNote).toContain("digest=");
+      }
+      const second = await flushViaWire(mod!, wire);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(second.members, "exactly-once: nothing left to flush").toBe(0);
+      expect(posts.length).toBe(1);
+    } finally {
+      wire.stop();
     }
-    // exactly-once: a second flush finds nothing undigested
-    const second = await flush(deps);
-    expect(second.posted).toBe(0);
-    expect(posts.length).toBe(1);
   });
 
-  it("REGISTERED SUBSTRATE: the digest flush and the away deferral are PHASE_D policies — no third timer engine (AM-F1 anti-sprawl)", async () => {
-    expect(PHASE_D_POLICIES).toContain("delivery-digest-flush");
-    expect(PHASE_D_POLICIES).toContain("delivery-deferral");
-  });
-
-  it("MESSAGE-TIME DECISION (R1 B-4): the flush consumes the RECORDED decision — a prefs change between containment and flush neither drops nor reclassifies the member (RED at candidate: flush re-decides from current registry)", async () => {
+  it("MESSAGE-TIME DECISION (R1 B-4): a prefs change between containment and flush neither drops nor reclassifies the recorded member", async () => {
     const mod = await digestFlushModule();
     expect(mod).not.toBeNull();
     const rows = await nParks(2);
@@ -496,59 +518,81 @@ describe("OPR.0.5.6.1 §4 — the C/D digest flush", () => {
     for (const alert of await ports.listHumanAlerts({ minimumLevel: "NOTICE" })) {
       recordDigestDecision(alert.qitemId, alert.notificationKey ?? alert.qitemId, "4h");
     }
-    // the human flips to A (interrupt) AFTER containment recorded digest —
-    // the already-made decisions still flush; nothing is lost or re-decided
-    const aRegistry = registryWith({ deliveryClass: "A", availability: "available" });
+    // the human flips to A AFTER containment recorded the digest decisions
     const posts: Array<Record<string, unknown>> = [];
-    const flush = (mod as { runDeliveryDigestFlush: (deps: unknown) => Promise<{ posted: number; members: number }> }).runDeliveryDigestFlush;
-    const result = await flush({
-      queueRepo: repo,
-      registry: { loadHumanRegistry: () => aRegistry, resolveSlackHandle },
-      home,
-      post: async (payload: Record<string, unknown>) => { posts.push(payload); return { ok: true as const, ts: "1724.77" }; },
-      window: "4h" as const,
-    });
-    expect(result.members, "recorded decisions survive later prefs drift").toBe(2);
-    expect(posts.length).toBe(1);
-    for (const row of rows) expect(JSON.stringify(posts[0])).toContain(row.qitemId);
+    const wire = digestWire(posts);
+    try {
+      wire.startServices?.();
+      const aRegistry = registryWith({ deliveryClass: "A", availability: "available" });
+      const flush = (mod as { runDeliveryDigestFlush: (deps: unknown) => Promise<{ dispatched: number; members: number }> }).runDeliveryDigestFlush;
+      const result = await flush({
+        queueRepo: repo,
+        registry: { loadHumanRegistry: () => aRegistry, resolveSlackHandle },
+        home,
+        dispatch: (op: string, ref: string, payload: unknown, opts?: unknown) => wire.dispatcher.dispatch(op, ref, payload, opts as never),
+        window: "4h" as const,
+      });
+      expect(result.members, "recorded decisions survive later prefs drift").toBe(2);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(posts.length).toBe(1);
+      for (const row of rows) expect(JSON.stringify(posts[0])).toContain(row.qitemId);
+    } finally {
+      wire.stop();
+    }
   });
 
-  it("RESERVE-BEFORE-DELIVER (R1 B-4): member receipts land BEFORE the digest post; a post failure is loud per member and never re-posts silently (RED at candidate: post-then-stamp)", async () => {
+  it("TRANSPORT-FAILURE REDRIVE (R1/R2 required discriminator): a failed post leaves members FLUSHABLE with zero false receipts; reconstruction replays the SAME durable decision to one eventual post and correctly keyed receipts (RED at candidate: pre-post receipts suppress recovery)", async () => {
     const mod = await digestFlushModule();
     expect(mod).not.toBeNull();
     await nParks(2);
     const registry = registryWith({ deliveryClass: "C", availability: "available" });
     const ports = makeQueuePorts(repo, { loadHumanRegistry: () => registry } as never);
-    const keys: string[] = [];
+    const keys: Array<{ qid: string; key: string }> = [];
     for (const alert of await ports.listHumanAlerts({ minimumLevel: "NOTICE" })) {
       const key = alert.notificationKey ?? alert.qitemId;
-      keys.push(`${alert.qitemId}|${key}`);
+      keys.push({ qid: alert.qitemId, key });
       recordDigestDecision(alert.qitemId, key, "4h");
     }
-    const flush = (mod as { runDeliveryDigestFlush: (deps: unknown) => Promise<{ posted: number; members: number }> }).runDeliveryDigestFlush;
-    const receiptsAtPostTime: number[] = [];
-    const result = await flush({
-      queueRepo: repo,
-      registry: { loadHumanRegistry: () => registry, resolveSlackHandle },
-      home,
-      post: async () => {
-        // observed AT post time: the reserve already stamped every member
-        receiptsAtPostTime.push(keys.filter((k) => {
-          const [qid, key] = k.split("|");
-          return repo.transitionLog.hasOwnerNotificationReceipt(qid!, key!);
-        }).length);
-        return { ok: false };
-      },
-      window: "4h" as const,
-    });
-    expect(receiptsAtPostTime, "reserve stamps all members BEFORE the post").toEqual([2]);
-    expect(result.posted).toBe(0);
-    // the failure is loud on each member row
-    for (const k of keys) {
-      const [qid] = k.split("|");
-      const notes = repo.listTransitions(qid!).map((t) => t.transitionNote ?? "");
-      expect(notes.some((n) => n.includes("digest-post-failed")), `loud failure on ${qid}`).toBe(true);
+    const posts: Array<Record<string, unknown>> = [];
+    const failing = digestWire(posts, { failFetch: true });
+    try {
+      failing.startServices?.();
+      const first = await flushViaWire(mod!, failing);
+      expect(first.members).toBe(2);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(posts.length, "transport failed: nothing posted").toBe(0);
+      for (const { qid } of keys) {
+        const receipts = repo.listTransitions(qid).filter((t) => t.transitionNote?.startsWith("slack-owner-notification-posted "));
+        expect(receipts.length, "NO false posted receipt on transport failure").toBe(0);
+      }
+    } finally {
+      failing.stop();
     }
+    // reconstruction: a fresh wire over the SAME home replays the retained
+    // durable decision — one eventual post, receipts after transport truth
+    const healthy = digestWire(posts);
+    try {
+      healthy.startServices?.();
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(posts.length, "one eventual post after reconstruction").toBe(1);
+      for (const { qid, key } of keys) {
+        const receipts = repo.listTransitions(qid).filter((t) => t.transitionNote?.startsWith("slack-owner-notification-posted "));
+        expect(receipts.length, `receipt on ${qid} after redrive`).toBe(1);
+        expect(receipts[0]!.transitionNote).toContain(`notification_key=${key}`);
+      }
+      // and the flush now finds nothing — exactly once end to end
+      const after = await flushViaWire(mod!, healthy);
+      expect(after.members).toBe(0);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(posts.length).toBe(1);
+    } finally {
+      healthy.stop();
+    }
+  });
+
+  it("REGISTERED SUBSTRATE: the digest flush and the away deferral are PHASE_D policies — no third timer engine (AM-F1 anti-sprawl)", async () => {
+    expect(PHASE_D_POLICIES).toContain("delivery-digest-flush");
+    expect(PHASE_D_POLICIES).toContain("delivery-deferral");
   });
 });
 
@@ -859,6 +903,36 @@ describe("OPR.0.5.6.1 §8 — the production composition is live (R2 B-1/B-2/B-3
     expect(exhausted.length).toBe(1);
   });
 
+  it("B-3 ladder binding PRE-MARKER (R2 003f4786 required discriminator): an OLDER keyed receipt already on the row before a new dispatch marker never closes the new rung — the key derives BEFORE any resolution note is evaluated", async () => {
+    const src = await repo.create({ sourceSession: "sender@r", destinationSession: "relay@r", body: "obligation" });
+    const { created } = await repo.handoff({ qitemId: src.qitemId, fromSession: "relay@r", toSession: "worker@r", nudge: false });
+    // the OLD episode's receipt lands FIRST (before any ladder activity)
+    repo.update({ qitemId: created.qitemId, actorSession: "daemon@kernel",
+      transitionNote: `slack-owner-notification-posted notification_key=${created.qitemId}:older-episode level=ALERT kind=human-required message_ts=1 thread_ts=1` });
+    db.prepare("UPDATE queue_items SET last_nudge_attempt = ?, last_nudge_result = ? WHERE qitem_id = ?")
+      .run(new Date(Date.now() - 10 * 60_000).toISOString(), "failed:tmux session not found", created.qitemId);
+    const KEY = `${created.qitemId}:new-episode`;
+    const tickDeps = {
+      db, queueRepo: repo,
+      attemptWake: async () => "failed:tmux session not found",
+      resolveOrchestrator: () => null,
+      retryIntervalSeconds: 1, retryCap: 0,
+      log: () => {},
+      deliveryEngine: { dispatchEscalation: async () => ({ decision: "interrupt", resolved: false, notificationKey: KEY }) },
+    };
+    await runWakeLadderTick(tickDeps as never); // dispatches, marker keyed
+    await runWakeLadderTick(tickDeps as never); // must NOT exhaust on the pre-marker receipt
+    const exhausted = (db.prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = ?").all(created.qitemId) as Array<{ transition_note: string | null }>)
+      .map((r) => r.transition_note ?? "").filter((n) => n.startsWith("ladder-exhausted:"));
+    expect(exhausted.length, "the pre-existing old-episode receipt must not close the NEW keyed rung").toBe(0);
+    repo.update({ qitemId: created.qitemId, actorSession: "daemon@kernel",
+      transitionNote: `slack-owner-notification-posted notification_key=${KEY} level=ALERT kind=human-required message_ts=2 thread_ts=2` });
+    await runWakeLadderTick(tickDeps as never);
+    const after = (db.prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = ?").all(created.qitemId) as Array<{ transition_note: string | null }>)
+      .map((r) => r.transition_note ?? "").filter((n) => n.startsWith("ladder-exhausted:"));
+    expect(after.length).toBe(1);
+  });
+
   it("B-1 structural: startup.ts carries no unadvertised outbound_post literal (RED at candidate: it does)", () => {
     const source = readFileSync(join(SRC_ROOT, "startup.ts"), "utf8");
     expect(source).not.toContain('"outbound_post"');
@@ -908,16 +982,16 @@ describe("OPR.0.5.6.1 §8 — the production composition is live (R2 B-1/B-2/B-3
     }
   });
 
-  it("B-3 order: the deferral reserves (fired transition + terminal job) BEFORE the delivery enqueue — a still-active job can never coexist with an enqueued decision (RED at candidate: terminal happens after)", async () => {
+  it("B-3 v3 REDRIVE POSTURE (R1 26eee9b85 + R2 003f4786: exactly-once, never zero): at delivery time the job is ACTIVE with a distinct pending dispatching marker — terminal comes only from the observed receipt", async () => {
     const mod = await deferralPolicyModule();
     expect(mod).not.toBeNull();
     const jobs = new WatchdogJobsRepository(db);
     const row = await repo.create({ sourceSession: "a@r", destinationSession: "human-founder@external", body: "x", nudge: false });
     const arm = (mod as { armDeliveryDeferral: (deps: unknown) => { jobId: string } }).armDeliveryDeferral;
-    const armed = arm({ jobsRepo: jobs, queueRepo: repo, qitemId: row.qitemId, entityId: "human-founder", minutes: 30 });
+    const armed = arm({ jobsRepo: jobs, queueRepo: repo, qitemId: row.qitemId, entityId: "human-founder", minutes: 30, notificationKey: `${row.qitemId}:ep1` });
     const fire = (mod as { fireDeliveryDeferralIfDue: (deps: unknown) => Promise<{ fired: boolean }> }).fireDeliveryDeferralIfDue;
     const statesAtDelivery: string[] = [];
-    const outcome = await fire({
+    const first = await fire({
       jobsRepo: jobs, queueRepo: repo, jobId: armed.jobId,
       deliverInterrupt: async () => {
         statesAtDelivery.push((db.prepare("SELECT state FROM watchdog_jobs WHERE job_id = ?").get(armed.jobId) as { state: string }).state);
@@ -925,31 +999,61 @@ describe("OPR.0.5.6.1 §8 — the production composition is live (R2 B-1/B-2/B-3
       },
       now: new Date(Date.now() + 31 * 60_000),
     });
-    expect(outcome.fired).toBe(true);
-    expect(statesAtDelivery, "the job is TERMINAL before the delivery enqueue (reserve-before-deliver)").toEqual(["terminal"]);
+    // the job stays ACTIVE through delivery (redrive-until-receipt), fired only on receipt
+    expect(statesAtDelivery).toEqual(["active"]);
+    expect(first.fired).toBe(false);
+    const notes = repo.listTransitions(row.qitemId).map((t) => t.transitionNote ?? "");
+    expect(notes.some((n) => n.startsWith("delivery-deferral-dispatching")), "the pending state is distinct from fired/terminal").toBe(true);
+    expect(notes.some((n) => n.startsWith("delivery-deferral-fired"))).toBe(false);
+    // the receipt lands (the delivery seam's act) -> the next evaluation completes the episode
+    repo.update({ qitemId: row.qitemId, actorSession: "daemon@kernel",
+      transitionNote: `slack-owner-notification-posted notification_key=${row.qitemId}:ep1 level=ALERT kind=human-required message_ts=1 thread_ts=1` });
+    const second = await fire({
+      jobsRepo: jobs, queueRepo: repo, jobId: armed.jobId,
+      deliverInterrupt: async () => { throw new Error("must not re-deliver a receipted episode"); },
+      now: new Date(Date.now() + 32 * 60_000),
+    });
+    expect(second.fired).toBe(true);
+    expect((db.prepare("SELECT state FROM watchdog_jobs WHERE job_id = ?").get(armed.jobId) as { state: string }).state).toBe("terminal");
+    expect(repo.listTransitions(row.qitemId).some((t) => t.transitionNote?.startsWith("delivery-deferral-fired"))).toBe(true);
   });
 
-  it("B-3 crash-window: a delivery failure after the reserve stays at-most-once — job terminal, fired transition present, loud failure recorded, zero re-fires (RED at candidate: failure retains the job active and re-mints)", async () => {
+  it("B-3 v3 NEVER ZERO (R2 required discriminator): a death mid-delivery leaves the job ACTIVE; reconstructed repositories REDRIVE to exactly one delivery, one receipt, then terminal", async () => {
     const mod = await deferralPolicyModule();
     expect(mod).not.toBeNull();
     const jobs = new WatchdogJobsRepository(db);
     const row = await repo.create({ sourceSession: "a@r", destinationSession: "human-founder@external", body: "x", nudge: false });
     const arm = (mod as { armDeliveryDeferral: (deps: unknown) => { jobId: string } }).armDeliveryDeferral;
-    const armed = arm({ jobsRepo: jobs, queueRepo: repo, qitemId: row.qitemId, entityId: "human-founder", minutes: 30 });
+    const armed = arm({ jobsRepo: jobs, queueRepo: repo, qitemId: row.qitemId, entityId: "human-founder", minutes: 30, notificationKey: `${row.qitemId}:ep1` });
     const fire = (mod as { fireDeliveryDeferralIfDue: (deps: unknown) => Promise<{ fired: boolean }> }).fireDeliveryDeferralIfDue;
-    let calls = 0;
-    const deps = {
+    // death mid-call: the adapter throws before any enqueue
+    await fire({
       jobsRepo: jobs, queueRepo: repo, jobId: armed.jobId,
-      deliverInterrupt: async () => { calls += 1; return { ok: false }; },
+      deliverInterrupt: async () => { throw new Error("process death"); },
       now: new Date(Date.now() + 31 * 60_000),
-    };
-    await fire(deps);
+    });
+    expect((db.prepare("SELECT state FROM watchdog_jobs WHERE job_id = ?").get(armed.jobId) as { state: string }).state, "no lost fire: the job survives the crash ACTIVE").toBe("active");
+    // reconstruction: fresh repositories over the same DB — the redrive delivers exactly once
+    const jobs2 = new WatchdogJobsRepository(db);
+    let deliveries = 0;
+    await fire({
+      jobsRepo: jobs2, queueRepo: repo, jobId: armed.jobId,
+      deliverInterrupt: async (_q: string, key: string) => {
+        deliveries += 1;
+        repo.update({ qitemId: row.qitemId, actorSession: "daemon@kernel",
+          transitionNote: `slack-owner-notification-posted notification_key=${key} level=ALERT kind=human-required message_ts=9 thread_ts=9` });
+        return { ok: true };
+      },
+      now: new Date(Date.now() + 33 * 60_000),
+    });
+    const done = await fire({
+      jobsRepo: jobs2, queueRepo: repo, jobId: armed.jobId,
+      deliverInterrupt: async () => { deliveries += 1; return { ok: true }; },
+      now: new Date(Date.now() + 34 * 60_000),
+    });
+    expect(deliveries, "exactly one delivery across death + reconstruction").toBe(1);
+    expect(done.fired).toBe(true);
     expect((db.prepare("SELECT state FROM watchdog_jobs WHERE job_id = ?").get(armed.jobId) as { state: string }).state).toBe("terminal");
-    const notes = (db.prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = ?").all(row.qitemId) as Array<{ transition_note: string | null }>).map((r) => r.transition_note ?? "");
-    expect(notes.some((n) => n.startsWith("delivery-deferral-fired")), "the reserve transition is on the row").toBe(true);
-    expect(notes.some((n) => n.includes("delivery-failed")), "the delivery failure is loud on the row").toBe(true);
-    await fire(deps);
-    expect(calls, "at-most-once: no re-fire after the reserve, ever").toBe(1);
   });
 
   it("B-3 delivery-seam guard: a deferral-fire payload for an already-receipted episode posts NOTHING (replay/second-decision belt — RED at candidate: it posts)", async () => {
