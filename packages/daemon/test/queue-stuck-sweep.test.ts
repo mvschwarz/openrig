@@ -21,9 +21,10 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
-import { QueueRepository, type QueueItem } from "../src/domain/queue-repository.js";
+import { QueueRepository, deriveCrossHostSuccessorId, type QueueItem } from "../src/domain/queue-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
+import { archiveAgedTerminalTransitions } from "../src/domain/queue-retention.js";
 
 const sweepMod = () => import("../src/domain/queue-stuck-sweep.js");
 
@@ -532,7 +533,27 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
   // refresh; unregistered hosts and unverified local misses stay the honest indeterminate
   // class, and true local dangling detection plus auto-close are preserved.
 
-  it("TRUSTED HOST-QUALIFIED: a successor key naming a REGISTERED host is custody evidence at write time — no finding", async () => {
+  it("TRUSTED HOST-QUALIFIED: the real cross-host close's derived key on a REGISTERED host is custody evidence at write time — no finding", async () => {
+    // The exact write the forwarding route performs AFTER its successor-create
+    // succeeded (routes/queue.ts: forwardQueueWrite first, close second): the
+    // deterministic derived successor id + the host qualifier + handed_off_to.
+    const row = await mkRow();
+    const derived = deriveCrossHostSuccessorId(row.qitemId, "next@r2", "mm2-parent");
+    repo.closeCrossHostHandoffSource({
+      qitemId: row.qitemId,
+      fromSession: "worker@r",
+      toSession: "next@r2",
+      closureTarget: `${derived}@mm2-parent`,
+      terminalState: "handed-off",
+    });
+    await runSweep({ isRegisteredHost: (h: string) => h === "mm2-parent" });
+    expect(await findingsFor(row.qitemId)).toHaveLength(0);
+  });
+
+  it("FORGED HOST-QUALIFIED IS NOT TRUSTED: a generic close writing a registered-host-shaped target without the derived key stays verification-required", async () => {
+    // The generic update route accepts arbitrary closureTarget — a registered
+    // host SUFFIX alone is syntax, not forward provenance. Only the id the
+    // cross-host close derives from (source row, handed_off_to, host) counts.
     const row = await mkRow();
     repo.update({
       qitemId: row.qitemId,
@@ -542,6 +563,39 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
       closureTarget: "qitem-xh-0123456789abcdef@mm2-parent",
     });
     await runSweep({ isRegisteredHost: (h: string) => h === "mm2-parent" });
+    const findings = await findingsFor(row.qitemId);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.body).toContain("qitem-xh-0123456789abcdef@mm2-parent");
+    expect(findings[0]!.body).toMatch(/verification.required|indeterminate/i);
+  });
+
+  it("DISPOSITION SURVIVES RETENTION: the custody-verified note still silences after the real archiver moves the terminal row's transitions", async () => {
+    const row = await mkRow();
+    const missing = "qitem-20990101000000-precon04";
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      state: "done",
+      closureReason: "handed_off_to",
+      closureTarget: missing,
+    });
+    await repo.update({
+      qitemId: row.qitemId,
+      actorSession: "verifier@r",
+      transitionNote: `custody-verified: ${missing} confirmed on the parent host`,
+    });
+    // Age every transition past the 30-day window and run the SHIPPED archiver —
+    // the actual retention mechanism, not a simulation of it.
+    const aged = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ?").run(aged, row.qitemId);
+    const archived = archiveAgedTerminalTransitions(db, { nowIso: new Date().toISOString() });
+    expect(archived.archivedRows).toBeGreaterThan(0);
+    const activeLeft = db
+      .prepare("SELECT COUNT(*) AS n FROM queue_transitions WHERE qitem_id = ?")
+      .get(row.qitemId) as { n: number };
+    expect(activeLeft.n).toBe(0); // the disposition is GONE from the active table
+
+    await runSweep();
     expect(await findingsFor(row.qitemId)).toHaveLength(0);
   });
 
@@ -615,22 +669,30 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     });
   });
 
-  it("MIXED COMMA MEMBER TRUST: a fan-out with one trusted host-qualified member and one local miss names only the unresolved member", async () => {
+  it("MIXED COMMA MEMBER TRUST: a fan-out with one disposition-verified member and one local miss names only the unresolved member", async () => {
+    // The realistic legacy shape: a comma fan-out whose verified member earned a
+    // durable disposition (comma lists come from legacy/generic closes; the
+    // cross-host close path writes exactly one derived target, never a list).
     const row = await mkRow();
     const missing = "qitem-local-missing2";
-    const trusted = "qitem-xh-aaaa000011112222@mm2-parent";
+    const verified = "qitem-local-verified1";
     repo.update({
       qitemId: row.qitemId,
       actorSession: "worker@r",
       state: "done",
       closureReason: "handed_off_to",
-      closureTarget: `${missing},${trusted}`,
+      closureTarget: `${missing},${verified}`,
     });
-    await runSweep({ isRegisteredHost: (h: string) => h === "mm2-parent" });
+    await repo.update({
+      qitemId: row.qitemId,
+      actorSession: "verifier@r",
+      transitionNote: `custody-verified: ${verified} confirmed on the parent host`,
+    });
+    await runSweep();
     const findings = await findingsFor(row.qitemId);
     expect(findings).toHaveLength(1);
     expect(findings[0]!.body).toContain(missing);
-    expect(findings[0]!.body).not.toContain(trusted);
+    expect(findings[0]!.body).not.toContain(verified);
   });
 
   it("DISPOSITION IS EXACT: a custody-verified note naming a DIFFERENT target silences nothing", async () => {
