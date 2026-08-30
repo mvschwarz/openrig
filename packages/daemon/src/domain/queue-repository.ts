@@ -123,6 +123,8 @@ export interface QueueItem {
   /** The undelivered surface's class for ledger-derived entries (the route
    *  prefers this over the nudge-literal regex when present). */
   deliveryFailureClass?: string;
+  /** Exact gateway receipt/error evidence for an undelivered ledger verdict. */
+  deliveryFailureDetail?: string;
   tags: string[] | null;
   blockedOn: string | null;
   /** S04 — the DERIVED pickup receipt (unclaimed/working/stalled-after-claim/parked). Never
@@ -576,6 +578,7 @@ export class QueueRepository {
   private readonly hasMintingGenColumn: boolean;
   private readonly hasClaimedGenColumn: boolean;
   private readonly hasQueueTransitionsTable: boolean;
+  private readonly hasOwnerNotificationColumns: boolean;
   private readonly loadHumanRegistryFn: () => LoadResult;
   /** OPR.0.4.6.WF3 FR-6 — injected by startup (never imported): the
    *  workflow domain's is-live-frontier-packet predicate. */
@@ -630,6 +633,11 @@ export class QueueRepository {
     this.hasSummaryColumn = detectQueueColumn(db, "summary");
     this.hasEvidenceRefColumn = detectQueueColumn(db, "evidence_ref");
     this.hasQueueTransitionsTable = detectTable(db, "queue_transitions");
+    const transitionColumns = this.hasQueueTransitionsTable
+      ? new Set((db.prepare("PRAGMA table_info(queue_transitions)").all() as Array<{ name: string }>).map((column) => column.name))
+      : new Set<string>();
+    this.hasOwnerNotificationColumns = transitionColumns.has("owner_notification_kind")
+      && transitionColumns.has("owner_notification_level");
     // GHOST-STAGE (e/Class-B): generation stamps (migration 063). Defensive detect so a pre-063
     // harness degrades (writers skip the columns; the release predicate never matches unstamped rows).
     this.hasMintingGenColumn = detectQueueColumn(db, "minting_generation_uuid");
@@ -1103,7 +1111,7 @@ export class QueueRepository {
         const loaded = this.loadHumanRegistryFn();
         return loaded.ok ? loaded.entities : null;
       })(),
-      isKnownSeat: (dest) => this.isKnownTopologySeat(dest),
+      hasTerminalTransport: (dest) => this.hasTerminalTransport(dest),
     });
     if (destClass.class === "gateway-routable") {
       const resolvedNote = destClass.via === "registry-alias" && destClass.resolvedHuman
@@ -2775,40 +2783,33 @@ export class QueueRepository {
   }
 
   /**
-   * 0.5.1-54 DR-1 — surface the create-path failed-nudge strands. `last_nudge_result` is written by
-   * `recordNudgeAttempt` (from `maybeNudge`) but nothing ever queries it, so a create whose nudge FAILED
-   * (`failed:<msg>`) is invisible: the sender records a successful create while the destination was never
-   * woken. This is the `/overdue` analogue for pending-undelivered create-path work — a READ only (no
-   * retry, no unwind; DR-2 retry is PM-gated on DR-1's live measurement).
-   *
-   * V1-ONLY predicate, NO false-positive mode: `state='pending' AND last_nudge_result LIKE 'failed:%'`.
-   *   - A delivered row (`verified` / `delivered-ack-pending`) is excluded — it was woken.
-   *   - A NEVER-ATTEMPTED row (`last_nudge_result IS NULL` — a deliberate cold-park or a no-transport create)
-   *     is excluded. That class is FP-dominated (a legitimate cold-park is indistinguishable from a real
-   *     never-reached strand at the row) and stays DEFERRED behind a forward create-time intent bit; surfacing
-   *     it here would train the reader to ignore the signal. The reason it is excluded lives in this comment
-   *     AND the PRD, not in chat — it must outlive the excluder.
+   * Surface two evidence-backed undelivered classes: the original pending
+   * create-path nudge failures, and active human-notification episodes whose
+   * gateway ledger says transport-failed or receiptless past the post window.
+   * A generic null nudge is still excluded; only a structured OWNER episode
+   * makes that absence meaningful. READ only — no retry or unwind.
    */
   findUndelivered(opts?: { rig?: string; limit?: number; compact?: boolean }): QueueItem[] {
-    // OPR.0.5.6.14 — the LEDGER is consulted before the nudge literal:
-    // candidates are failed-nudge rows PLUS gateway-routed rows (whose nudge
-    // leg is not the delivery verdict); then per row the delivery transitions
-    // decide — posted is NEVER undelivered whatever last_nudge_result says;
-    // transport-failed and never-posted are undelivered with their own classes.
+    // OPR.0.5.6.14 — delivery truth belongs to the CURRENT human-notification
+    // episode, not to the row's whole history. Pull every active row that can
+    // carry a current episode or a legacy nudge/receipt, then derive/filter in
+    // JS. LIMIT is applied after that filtering so historical POSTED episodes
+    // cannot consume the window and hide a later failure.
+    const ownerEpisodeCandidate = this.hasOwnerNotificationColumns
+      ? `EXISTS (SELECT 1 FROM queue_transitions owner_episode
+                   WHERE owner_episode.qitem_id = queue_items.qitem_id
+                     AND owner_episode.owner_notification_level IS NOT NULL)`
+      : "0";
     const conditions = [
-      "state = 'pending'",
-      // A posted receipt wins before LIMIT is applied. Without this SQL-side
-      // exclusion, posted rows consume the result window and can hide genuine
-      // failures that follow them.
-      `NOT EXISTS (SELECT 1 FROM queue_transitions posted WHERE posted.qitem_id = queue_items.qitem_id
-                    AND posted.transition_note LIKE 'slack-owner-notification-posted %')`,
-      // Candidates: failed/unroutable/gateway nudge literals, PLUS any row whose
-      // ledger already recorded a transport failure (a driver-path row may have
-      // no nudge literal at all — the ledger is the source, not the leg).
-      `(last_nudge_result LIKE 'failed:%' OR last_nudge_result LIKE 'unroutable:%'
-        OR (last_nudge_result LIKE 'gateway-owned%' AND julianday(ts_created) < julianday('now', '-120 seconds'))
-        OR EXISTS (SELECT 1 FROM queue_transitions t WHERE t.qitem_id = queue_items.qitem_id
-                    AND t.transition_note LIKE 'slack-owner-notification-transport-failed %'))`,
+      "state IN ('pending', 'in-progress', 'blocked')",
+      `((state = 'pending' AND (last_nudge_result LIKE 'failed:%'
+                             OR last_nudge_result LIKE 'unroutable:%'
+                             OR last_nudge_result LIKE 'gateway-owned%'))
+         OR ${ownerEpisodeCandidate}
+         OR EXISTS (SELECT 1 FROM queue_transitions receipt
+                      WHERE receipt.qitem_id = queue_items.qitem_id
+                        AND (receipt.transition_note LIKE 'slack-owner-notification-posted %'
+                          OR receipt.transition_note LIKE 'slack-owner-notification-transport-failed %')))`,
     ];
     const params: unknown[] = [];
     if (opts?.rig) {
@@ -2817,11 +2818,7 @@ export class QueueRepository {
       params.push(`%@${escaped}`, `%@${escaped}`);
     }
     const columns = opts?.compact ? COMPACT_QUEUE_COLUMNS : "*";
-    let sql = `SELECT ${columns} FROM queue_items WHERE ${conditions.join(" AND ")} ORDER BY ts_created ASC`;
-    if (opts?.limit !== undefined) {
-      sql += " LIMIT ?";
-      params.push(opts.limit);
-    }
+    const sql = `SELECT ${columns} FROM queue_items WHERE ${conditions.join(" AND ")} ORDER BY ts_created ASC`;
     const rows = this.db.prepare(sql).all(...params) as QueueItemRow[];
     const out: QueueItem[] = [];
     for (const r of rows) {
@@ -2829,42 +2826,60 @@ export class QueueRepository {
       const ledger = this.deliveryOutcomeFor(item.qitemId);
       if (ledger?.outcome === "posted") continue; // the receipt wins, always
       if (ledger?.outcome === "transport-failed") {
-        out.push({ ...item, deliveryOutcome: "transport-failed", deliveryFailureClass: "transport-failed" });
-        continue;
+        out.push({
+          ...item,
+          deliveryOutcome: "transport-failed",
+          deliveryFailureClass: "transport-failed",
+          deliveryFailureDetail: ledger.detail,
+        });
+      } else if (ledger?.outcome === "never-posted") {
+        out.push({
+          ...item,
+          deliveryOutcome: "never-posted",
+          deliveryFailureClass: "never-posted",
+          deliveryFailureDetail: ledger.detail,
+        });
+      } else {
+        // No ledger verdict: only the legacy pending failed/unroutable class is
+        // undelivered. An active non-human row can still have an old OWNER
+        // transition; that historical episode is not a current obligation.
+        const lastNudge = item.lastNudgeResult ?? "";
+        if (item.state === "pending" && (lastNudge.startsWith("failed:") || lastNudge.startsWith("unroutable:"))) {
+          out.push(item);
+        }
       }
-      if (ledger?.outcome === "never-posted") {
-        out.push({ ...item, deliveryOutcome: "never-posted", deliveryFailureClass: "never-posted" });
-        continue;
-      }
-      // No ledger verdict: a gateway-routed row inside the post window is not
-      // undelivered (posting is in flight); failed-nudge pane-bound rows keep
-      // the legacy surface exactly.
-      const lastNudge = item.lastNudgeResult ?? "";
-      if (lastNudge.startsWith("gateway-owned")) continue;
-      out.push(item);
+      if (opts?.limit !== undefined && out.length >= opts.limit) break;
     }
     return out;
   }
 
-  /** OPR.0.5.6.14 — the resolver's topology predicate: a destination is a known
-   *  seat when a sessions row carries its exact name, or a nodes-composed
-   *  canonical name ({logical_id with . -> -}@{rig name}) matches. FAIL-OPEN on
-   *  an EMPTY topology (fixture/bootstrap DBs cannot discriminate; production
-   *  always has seats) so legacy pane-bound behavior is preserved exactly where
-   *  no classification evidence exists. */
-  private isKnownTopologySeat(dest: string): boolean {
+  /** OPR.0.5.6.14 — terminal transport is a CAPABILITY, not topology presence.
+   *  An exact session or composed canonical seat is pane-bound only when its
+   *  node carries an explicit tmux binding. external_cli is paneless and must
+   *  continue to the human-registry/gateway leg. FAIL-OPEN only where the DB
+   *  cannot carry classification evidence (empty/partial bootstrap schemas). */
+  private hasTerminalTransport(dest: string): boolean {
     try {
       const anyTopology = this.db.prepare("SELECT 1 FROM sessions LIMIT 1").get()
         ?? this.db.prepare("SELECT 1 FROM nodes LIMIT 1").get();
       if (!anyTopology) return true;
-      if (this.db.prepare("SELECT 1 FROM sessions WHERE session_name = ? LIMIT 1").get(dest)) return true;
+      if (this.db.prepare(
+        `SELECT 1 FROM sessions s JOIN bindings b ON b.node_id = s.node_id
+          WHERE s.session_name = ?
+            AND COALESCE(b.attachment_type, 'tmux') = 'tmux'
+            AND b.tmux_session IS NOT NULL LIMIT 1`,
+      ).get(dest)) return true;
       const at = dest.lastIndexOf("@");
       if (at <= 0) return true; // non-canonical shapes stay on the legacy path
       const seat = dest.slice(0, at);
       const rig = dest.slice(at + 1);
       const composed = this.db.prepare(
-        `SELECT 1 FROM nodes n JOIN rigs r ON r.id = n.rig_id
-          WHERE r.name = ? AND REPLACE(n.logical_id, '.', '-') = ? LIMIT 1`,
+        `SELECT 1 FROM nodes n
+          JOIN rigs r ON r.id = n.rig_id
+          JOIN bindings b ON b.node_id = n.id
+          WHERE r.name = ? AND REPLACE(n.logical_id, '.', '-') = ?
+            AND COALESCE(b.attachment_type, 'tmux') = 'tmux'
+            AND b.tmux_session IS NOT NULL LIMIT 1`,
       ).get(rig, seat);
       return !!composed;
     } catch {
@@ -2872,35 +2887,55 @@ export class QueueRepository {
     }
   }
 
-  /** OPR.0.5.6.14 — the delivery LEDGER derivation: the row's transitions are the
-   *  one authoritative source. posted → the receipt transition exists;
-   *  transport-failed → the gateway recorded the API error; never-posted →
-   *  a gateway-routed row with NO receipt past the post window (absence is only
-   *  meaningful because posting always stamps — MR2). Pane-bound rows return
-   *  null: no key lies. */
+  private currentDeliveryEpisode(item: QueueItem): { notificationKey: string; startedAt: string } | null {
+    const transition = this.transitionLog.latestOwnerNotificationForQitem(item.qitemId);
+    if (!transition) return null;
+    const registry = this.loadHumanRegistryFn();
+    if (!registry.ok) return null;
+    const humanAddress = transition.ownerNotificationKind === "human-decision-resolved"
+      ? resolveRegisteredHumanAddress(transition.actorSession, registry.entities)
+      : item.state === "blocked"
+        ? resolveRegisteredHumanAddress(item.blockedOn, registry.entities)
+        : resolveRegisteredHumanAddress(item.destinationSession, registry.entities);
+    return humanAddress
+      ? { notificationKey: `${item.qitemId}:${transition.transitionId}`, startedAt: transition.ts }
+      : null;
+  }
+
+  /** OPR.0.5.6.14 — derive the current episode's delivery ledger. Receipt
+   *  transitions are same-row but keyed by qitemId:OWNER-transitionId; an old
+   *  posted receipt cannot mask a later human park. Legacy pre-OWNER or literal
+   *  external rows retain their row-scoped fallback. */
   deliveryOutcomeFor(qitemId: string): { outcome: "posted" | "transport-failed" | "never-posted"; detail: string } | null {
     // Some repository-only fixtures intentionally model the pre-transition
     // schema. Delivery projection is additive there: absence means no verdict,
     // never a list failure.
     if (!this.hasQueueTransitionsTable) return null;
-    const row = this.db.prepare("SELECT last_nudge_result, ts_created FROM queue_items WHERE qitem_id = ?")
-      .get(qitemId) as { last_nudge_result: string | null; ts_created: string } | undefined;
+    const row = this.db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?")
+      .get(qitemId) as QueueItemRow | undefined;
     if (!row) return null;
+    const item = this.rowToItem(row);
+    const episode = this.currentDeliveryEpisode(item);
     const notes = this.db.prepare(
       `SELECT transition_note FROM queue_transitions
         WHERE qitem_id = ? AND (transition_note LIKE 'slack-owner-notification-posted %'
                              OR transition_note LIKE 'slack-owner-notification-transport-failed %')
         ORDER BY transition_id DESC`,
     ).all(qitemId) as Array<{ transition_note: string }>;
-    const posted = notes.find((n) => n.transition_note.startsWith("slack-owner-notification-posted "));
+    const currentNotes = episode
+      ? notes.filter((note) => note.transition_note.split(/\s+/).includes(`notification_key=${episode.notificationKey}`))
+      : notes;
+    const posted = currentNotes.find((note) => note.transition_note.startsWith("slack-owner-notification-posted "));
     if (posted) return { outcome: "posted", detail: posted.transition_note };
-    const failed = notes.find((n) => n.transition_note.startsWith("slack-owner-notification-transport-failed "));
+    const failed = currentNotes.find((note) => note.transition_note.startsWith("slack-owner-notification-transport-failed "));
     if (failed) return { outcome: "transport-failed", detail: failed.transition_note };
-    const gatewayRouted = !!row.last_nudge_result && row.last_nudge_result.startsWith("gateway-owned");
+    const startedAt = episode?.startedAt ?? item.tsCreated;
+    const gatewayRouted = episode !== null || item.lastNudgeResult?.startsWith("gateway-owned") === true;
     if (gatewayRouted) {
-      const ageMs = Date.now() - new Date(row.ts_created.includes("T") ? row.ts_created : row.ts_created + "Z").getTime();
+      const ageMs = Date.now() - new Date(startedAt.includes("T") ? startedAt : startedAt + "Z").getTime();
       if (ageMs > QueueRepository.NEVER_POSTED_WINDOW_MS) {
-        return { outcome: "never-posted", detail: "gateway-routed row with no delivery receipt past the post window" };
+        const key = episode ? ` for notification_key=${episode.notificationKey}` : "";
+        return { outcome: "never-posted", detail: `gateway-routed row with no delivery receipt${key} past the post window` };
       }
     }
     return null;

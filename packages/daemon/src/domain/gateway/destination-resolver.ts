@@ -18,9 +18,10 @@
 //      are gateway-routable — the folded gateway-owned wake contract.
 //      Registration/admission refusals stay at their existing admission layer;
 //      classification here is about WHO OWNS TRANSPORT, not who is admitted.
-//   2. A known topology seat (a sessions row, or a nodes-composed canonical
-//      name) is pane-bound — terminal transport, including a registered human
-//      seat with a real pane and its honest not-found outcomes when down.
+//   2. A topology seat with an explicit tmux binding is pane-bound — terminal
+//      transport, including a registered human seat with a real pane and its
+//      honest not-found outcomes when down. A paneless/external_cli binding is
+//      NOT terminal evidence merely because the seat exists in topology.
 //   3. Any remaining address the human registry resolves to a registered human
 //      (canonical-form aliases like human-founder@kernel — the live 4-row
 //      specimen class) is gateway-routable: a PANELLESS virtual identity whose
@@ -38,8 +39,8 @@ export interface ClassifyDeps {
   /** Registered human entities (null/empty when the registry is absent/unreadable —
    *  classification degrades to external-address + topology checks only). */
   entities: readonly HumanFragment[] | null;
-  /** Does this daemon's topology know the destination as a seat (live or past)? */
-  isKnownSeat: (destination: string) => boolean;
+  /** Does this daemon have an explicit terminal transport for the destination? */
+  hasTerminalTransport: (destination: string) => boolean;
 }
 
 export function classifyDestination(destination: string, deps: ClassifyDeps): DestinationClass {
@@ -48,7 +49,7 @@ export function classifyDestination(destination: string, deps: ClassifyDeps): De
     const resolved = deps.entities ? resolveRegisteredHumanAddress(destination, deps.entities) : null;
     return { class: "gateway-routable", resolvedHuman: resolved, via: "external-address" };
   }
-  if (deps.isKnownSeat(destination)) {
+  if (deps.hasTerminalTransport(destination)) {
     return { class: "pane-bound" };
   }
   const aliasResolved = deps.entities ? resolveRegisteredHumanAddress(destination, deps.entities) : null;
@@ -58,8 +59,8 @@ export function classifyDestination(destination: string, deps: ClassifyDeps): De
   return {
     class: "unroutable",
     teaching:
-      `unroutable: '${destination}' is not a known seat on this daemon and names no registered human — ` +
-      `no transport can hold this address (checked: topology sessions/nodes + the human registry). ` +
+      `unroutable: '${destination}' has no terminal transport on this daemon and names no registered human — ` +
+      `no transport can hold this address (checked: tmux bindings + the human registry). ` +
       `Fix the address, or register the human with \`rig gateway human add\`.`,
   };
 }

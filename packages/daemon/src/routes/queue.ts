@@ -873,8 +873,9 @@ export function queueRoutes(): Hono {
     return c.json(items);
   });
 
-  // GET /undelivered — 0.5.1-54 DR-1: surfaces PENDING qitems whose create-path nudge FAILED
-  // (last_nudge_result LIKE 'failed:%'). Rig-scoped + bounded + compact-by-default, mirroring /overdue.
+  // GET /undelivered — surfaces pending create-path nudge failures plus active
+  // human-notification episodes whose gateway delivery ledger failed or never posted.
+  // Rig-scoped + bounded + compact-by-default, mirroring /overdue.
   // MUST precede /:qitemId. READ-only (no retry — DR-2 is PM-gated on this surface's measurement).
   app.get("/undelivered", (c) => {
     const q = c.req.query();
