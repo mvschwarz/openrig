@@ -48,6 +48,30 @@ describe("continuity policy materializer (S20 P4)", () => {
     });
   });
 
+  it("reuses one complete nonterminal materialized pair instead of duplicating it on relaunch", () => {
+    const register = vi.fn();
+    const existing = [
+      {
+        jobId: "prepare-job",
+        state: "active" as const,
+        specYaml: "generated_by: continuity-policy-materializer",
+        requiresJobId: null,
+      },
+      {
+        jobId: "cutover-job",
+        state: "stopped" as const,
+        specYaml: "generated_by: continuity-policy-materializer",
+        requiresJobId: "prepare-job",
+      },
+    ];
+
+    expect(armContinuityPolicy(CLAUDE_SEAT, {
+      register,
+      listExactTuple: () => existing,
+    }).map((job) => job.jobId)).toEqual(["prepare-job", "cutover-job"]);
+    expect(register).not.toHaveBeenCalled();
+  });
+
   it("serializes both fire notices through the watchdog engine's actual spec parser", () => {
     const messages = materializeContinuityPolicy(CLAUDE_SEAT).jobs.map(
       (job) => parseWatchdogSpec(job.specYaml).message,
