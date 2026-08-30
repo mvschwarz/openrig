@@ -448,12 +448,18 @@ describe("OPR.0.5.6.1 §4 — the C/D digest flush (v3: transport truth first, r
       queueRepo: repo,
       registry: { loadHumanRegistry: () => registry, resolveSlackHandle },
       outboundIntervalMs: 60_000,
-      fetchImpl: async (_url, init) => {
+      fetchImpl: async (url, init) => {
         if (opts?.failFetch) {
           return new Response(JSON.stringify({ ok: false, error: "fatal_error" }), { status: 500, headers: { "content-type": "application/json" } });
         }
-        posts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
-        return new Response(JSON.stringify({ ok: true, ts: `1724.9${posts.length}` }), { status: 200, headers: { "content-type": "application/json" } });
+        // Instrument fix (visible, W9 HOLD): count only REAL chat.postMessage
+        // posts — the replay path's reconcile-by-marker channel SEARCH also
+        // rides this fetch and must never inflate the post count.
+        if (String(url).includes("chat.postMessage")) {
+          posts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          return new Response(JSON.stringify({ ok: true, ts: `1724.9${posts.length}` }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        return new Response(JSON.stringify({ ok: true, messages: [] }), { status: 200, headers: { "content-type": "application/json" } });
       },
     });
   }
