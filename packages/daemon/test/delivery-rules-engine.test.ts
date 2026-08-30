@@ -431,6 +431,16 @@ describe("OPR.0.5.6.1 §4 — the C/D digest flush", () => {
     return rows;
   }
 
+  /** R1 B-4: containment RECORDS the message-time decision as a row transition;
+   *  the flush consumes those records (never re-deciding from later registry
+   *  state). This helper stands in for the containment leg's recording. */
+  function recordDigestDecision(qitemId: string, key: string, window: "4h" | "daily"): void {
+    repo.update({
+      qitemId, actorSession: "daemon@kernel",
+      transitionNote: `delivery-decision: digest window=${window} notification_key=${key}`,
+    });
+  }
+
   it("LOSSLESS + EXACTLY-ONCE: N digest-class rows flush as ONE notify-class digest containing all N; no member is ALSO posted individually; a second flush posts nothing (RED at base: no flush machinery exists)", async () => {
     const mod = await digestFlushModule();
     expect(mod, "policies/delivery-digest-flush must exist (RED at base: absent)").not.toBeNull();
@@ -448,6 +458,11 @@ describe("OPR.0.5.6.1 §4 — the C/D digest flush", () => {
       },
       window: "4h" as const,
     };
+    // R1 B-4: record each row's message-time decision (the containment leg's act)
+    const ports = makeQueuePorts(repo, { loadHumanRegistry: () => registry } as never);
+    for (const alert of await ports.listHumanAlerts({ minimumLevel: "NOTICE" })) {
+      recordDigestDecision(alert.qitemId, alert.notificationKey ?? alert.qitemId, "4h");
+    }
     const first = await flush(deps);
     expect(first.posted).toBe(1);
     expect(first.members).toBe(3);
@@ -470,6 +485,70 @@ describe("OPR.0.5.6.1 §4 — the C/D digest flush", () => {
   it("REGISTERED SUBSTRATE: the digest flush and the away deferral are PHASE_D policies — no third timer engine (AM-F1 anti-sprawl)", async () => {
     expect(PHASE_D_POLICIES).toContain("delivery-digest-flush");
     expect(PHASE_D_POLICIES).toContain("delivery-deferral");
+  });
+
+  it("MESSAGE-TIME DECISION (R1 B-4): the flush consumes the RECORDED decision — a prefs change between containment and flush neither drops nor reclassifies the member (RED at candidate: flush re-decides from current registry)", async () => {
+    const mod = await digestFlushModule();
+    expect(mod).not.toBeNull();
+    const rows = await nParks(2);
+    const cRegistry = registryWith({ deliveryClass: "C", availability: "available" });
+    const ports = makeQueuePorts(repo, { loadHumanRegistry: () => cRegistry } as never);
+    for (const alert of await ports.listHumanAlerts({ minimumLevel: "NOTICE" })) {
+      recordDigestDecision(alert.qitemId, alert.notificationKey ?? alert.qitemId, "4h");
+    }
+    // the human flips to A (interrupt) AFTER containment recorded digest —
+    // the already-made decisions still flush; nothing is lost or re-decided
+    const aRegistry = registryWith({ deliveryClass: "A", availability: "available" });
+    const posts: Array<Record<string, unknown>> = [];
+    const flush = (mod as { runDeliveryDigestFlush: (deps: unknown) => Promise<{ posted: number; members: number }> }).runDeliveryDigestFlush;
+    const result = await flush({
+      queueRepo: repo,
+      registry: { loadHumanRegistry: () => aRegistry, resolveSlackHandle },
+      home,
+      post: async (payload: Record<string, unknown>) => { posts.push(payload); return { ok: true as const, ts: "1724.77" }; },
+      window: "4h" as const,
+    });
+    expect(result.members, "recorded decisions survive later prefs drift").toBe(2);
+    expect(posts.length).toBe(1);
+    for (const row of rows) expect(JSON.stringify(posts[0])).toContain(row.qitemId);
+  });
+
+  it("RESERVE-BEFORE-DELIVER (R1 B-4): member receipts land BEFORE the digest post; a post failure is loud per member and never re-posts silently (RED at candidate: post-then-stamp)", async () => {
+    const mod = await digestFlushModule();
+    expect(mod).not.toBeNull();
+    await nParks(2);
+    const registry = registryWith({ deliveryClass: "C", availability: "available" });
+    const ports = makeQueuePorts(repo, { loadHumanRegistry: () => registry } as never);
+    const keys: string[] = [];
+    for (const alert of await ports.listHumanAlerts({ minimumLevel: "NOTICE" })) {
+      const key = alert.notificationKey ?? alert.qitemId;
+      keys.push(`${alert.qitemId}|${key}`);
+      recordDigestDecision(alert.qitemId, key, "4h");
+    }
+    const flush = (mod as { runDeliveryDigestFlush: (deps: unknown) => Promise<{ posted: number; members: number }> }).runDeliveryDigestFlush;
+    const receiptsAtPostTime: number[] = [];
+    const result = await flush({
+      queueRepo: repo,
+      registry: { loadHumanRegistry: () => registry, resolveSlackHandle },
+      home,
+      post: async () => {
+        // observed AT post time: the reserve already stamped every member
+        receiptsAtPostTime.push(keys.filter((k) => {
+          const [qid, key] = k.split("|");
+          return repo.transitionLog.hasOwnerNotificationReceipt(qid!, key!);
+        }).length);
+        return { ok: false };
+      },
+      window: "4h" as const,
+    });
+    expect(receiptsAtPostTime, "reserve stamps all members BEFORE the post").toEqual([2]);
+    expect(result.posted).toBe(0);
+    // the failure is loud on each member row
+    for (const k of keys) {
+      const [qid] = k.split("|");
+      const notes = repo.listTransitions(qid!).map((t) => t.transitionNote ?? "");
+      expect(notes.some((n) => n.includes("digest-post-failed")), `loud failure on ${qid}`).toBe(true);
+    }
   });
 });
 
@@ -738,9 +817,46 @@ describe("OPR.0.5.6.1 §8 — the production composition is live (R2 B-1/B-2/B-3
       expect(res).toMatchObject({ ok: true });
       await new Promise((resolve) => setTimeout(resolve, 30));
       expect(posts.length, "the fire must reach the delivery seam, not die at capability refusal").toBe(1);
+      // R1 B-3: the receipt carries the EPISODE key, never the bare qitemId fallback
+      const receipts = repo.listTransitions(row.qitemId).filter((t) => t.transitionNote?.startsWith("slack-owner-notification-posted "));
+      expect(receipts.length).toBe(1);
+      expect(receipts[0]!.transitionNote).toContain(`notification_key=${row.qitemId}:test-episode`);
     } finally {
       wire.stop();
     }
+  });
+
+  it("B-3 ladder binding: a keyed dispatched-to-engine episode resolves ONLY on its own key — a stale receipt with another key never closes the rung (RED at candidate: any historical note resolves)", async () => {
+    const src = await repo.create({ sourceSession: "sender@r", destinationSession: "relay@r", body: "obligation" });
+    const { created } = await repo.handoff({ qitemId: src.qitemId, fromSession: "relay@r", toSession: "worker@r", nudge: false });
+    db.prepare("UPDATE queue_items SET last_nudge_attempt = ?, last_nudge_result = ? WHERE qitem_id = ?")
+      .run(new Date(Date.now() - 10 * 60_000).toISOString(), "failed:tmux session not found", created.qitemId);
+    const KEY = `${created.qitemId}:episode-7`;
+    const tickDeps = {
+      db, queueRepo: repo,
+      attemptWake: async () => "failed:tmux session not found",
+      resolveOrchestrator: () => null,
+      retryIntervalSeconds: 1, retryCap: 0,
+      log: () => {},
+      deliveryEngine: {
+        dispatchEscalation: async () => ({ decision: "interrupt", resolved: false, notificationKey: KEY }),
+      },
+    };
+    await runWakeLadderTick(tickDeps as never);
+    // a receipt under a DIFFERENT episode key must NOT resolve
+    repo.update({ qitemId: created.qitemId, actorSession: "daemon@kernel",
+      transitionNote: `slack-owner-notification-posted notification_key=${created.qitemId}:older-episode level=ALERT kind=human-required message_ts=1 thread_ts=1` });
+    await runWakeLadderTick(tickDeps as never);
+    const exhaustedEarly = (db.prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = ?").all(created.qitemId) as Array<{ transition_note: string | null }>)
+      .map((r) => r.transition_note ?? "").filter((n) => n.startsWith("ladder-exhausted:"));
+    expect(exhaustedEarly.length, "a stale-episode receipt never closes the rung").toBe(0);
+    // the DISPATCHED episode's receipt resolves
+    repo.update({ qitemId: created.qitemId, actorSession: "daemon@kernel",
+      transitionNote: `slack-owner-notification-posted notification_key=${KEY} level=ALERT kind=human-required message_ts=2 thread_ts=2` });
+    await runWakeLadderTick(tickDeps as never);
+    const exhausted = (db.prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = ?").all(created.qitemId) as Array<{ transition_note: string | null }>)
+      .map((r) => r.transition_note ?? "").filter((n) => n.startsWith("ladder-exhausted:"));
+    expect(exhausted.length).toBe(1);
   });
 
   it("B-1 structural: startup.ts carries no unadvertised outbound_post literal (RED at candidate: it does)", () => {
