@@ -1,6 +1,6 @@
 ---
 name: retiring-and-inheriting-a-seat
-description: Use when you are a sitting agent near your context threshold (~85%) and a PLANNED seat transition is due — retire deliberately and hand your seat to a fresh successor primed from a packet, rather than let compaction degrade you. Covers the handover packet, the append-only lineage ledger (one row per tenure), rename-at-retire, the do-not-over-inherit framing, the optional warm-handoff window, and wake-v0 (consulting a retired predecessor). NOT for unplanned compaction/crash recovery (session-compaction-and-restore / claude-compaction-restore) and NOT the seat-binding primitive mechanics (seat-continuity-and-handover).
+description: Use when you are a sitting agent near your context threshold (~85%) and a PLANNED seat transition is due — retire deliberately and hand your seat to a fresh successor primed from a packet, rather than let compaction degrade you. Covers the handover packet, the append-only lineage ledger (one row per tenure), physical-seat continuity, the do-not-over-inherit framing, the optional warm-handoff window, and wake-v0 (consulting a retired predecessor). NOT for unplanned compaction/crash recovery (session-compaction-and-restore / claude-compaction-restore) and NOT the seat-binding primitive mechanics (seat-continuity-and-handover).
 metadata:
   openrig:
     stage: provisional
@@ -56,6 +56,10 @@ threshold you can see coming; fall back to compaction only when a transition was
    in the `session-compaction-and-restore` 16-field contract — **reuse that contract, don't
    reinvent it.** Compose it with `rig context compose` (see openrig-user → "Context packs and
    paced delivery").
+   **Enumerate the seat's standing duties as first-class packet content:** what recurs, at what
+   cadence, on which surface, and who will hold it after cutover. Carry each duty both in this
+   packet and in durable seat state, because recurring duties are the content most often lost at
+   a generation boundary while urgent one-off work carries cleanly.
 3. **Prime the fresh successor** — `rig walk` the packet into the seat (paced delivery lets the
    successor absorb it in order), or launch-with-packet. The successor reads it as
    *inheritance*, not *identity*. **The packet's first-read line MUST point the successor at
@@ -64,15 +68,31 @@ threshold you can see coming; fall back to compaction only when a transition was
    to the seat name (that runtime mechanism is the **ghost-prompt** class the orientation skill
    teaches successors to refuse — and it has misfired on real successors). Artifact-carried
    survives the swap for free and needs no enabled gate.
-4. **Rename-at-retire** — the **live seat address stays clean** (the seat name = whoever sits
-   now). The **retiring** agent is renamed to a versioned identity (`<seat>-vN`) or unseated to
-   a bare session token, and becomes a **cold advisor / wake target**. (This is exactly the
-   stable-seat-identity architecture in `seat-continuity-and-handover`: the version marks the
-   *retired tenure*, never the live seat.)
+4. **Preserve the physical seat at cutover** — the live seat address and its canonical tmux
+   session, window, and pane stay stable. Assess the apprentice in a staged session; at the
+   owner-worded cutover, resume the accepted successor history in the original canonical pane
+   and remove the empty staging session. The retiring tenure becomes a cold advisor through its
+   lineage token. Renaming tmux sessions is a repair fallback, because attached clients follow
+   the physical pane rather than the logical seat name.
 5. **Write your lineage-ledger row + a one-line tombstone** (below).
 6. **Optional warm handoff** — a bounded apprenticeship window: the successor asks questions,
    the predecessor judges fitness, *then* the swap completes. Use it when the seat holds a lot
    of live judgment; skip it for a clean cut.
+
+## Apprentice mode — incumbent
+
+An `apprentice-handover` policy gives you an early preparation boundary, not permission to
+automate the succession decision. Create a fresh, staged, unbound successor; prove the pinned
+model before installing context; then open a **conversation, not a gauntlet**. Give coached
+errands, answer questions, and judge work in the real domain. The experiment's scored probes are
+optional tools whose rigor must match the stakes, not mandatory ceremony.
+
+Stay the authority-bearing incumbent until the named owner words the gate and the mechanic records
+the effect receipt. Before that word, the apprentice may observe, ask, and produce evidence but may
+not act as the seat. Enumerate deposits and transfer every standing duty explicitly, **because
+recurring duties** are otherwise easy to lose while visible one-off work appears complete. Put the
+mechanical cutover in the portable SOP linked from `seat-continuity-and-handover`; do not duplicate
+or improvise it here.
 
 ## The lineage ledger (append-only, one row per tenure)
 

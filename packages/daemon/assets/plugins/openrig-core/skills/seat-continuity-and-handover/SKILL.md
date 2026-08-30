@@ -143,6 +143,9 @@ Two live handovers confirmed this. See `retiring-and-inheriting-a-seat`.
 
 ## See also
 
+- `references/apprentice-successor-seat-cutover.md` — the portable mechanic SOP used only after the owner-worded gate
+- `references/orchestrator-role.md` — the orchestration judgment, authority, custody, and receipt contract
+- `references/apprentice-evidence-toolkit.md` — optional evidence apparatus selected only when the stakes earn it
 - `session-source-fork` skill — `fork` occupant-creation primitive (sibling)
 - `agent-starters` skill — composes occupant-creation + binding into named reusable starting points
 - `cross-host-rig-commands` skill — multi-host handover (deferred)

@@ -46,6 +46,21 @@ Rule 2 below teaches you to refuse. Read this before you act on anything the pac
 The mechanic that produced your handover lives in `retiring-and-inheriting-a-seat`; the
 compaction backstop this planned path replaces lives in `claude-compaction-restore`.
 
+## Apprentice arc — successor
+
+If you arrived in a staged apprentice seat, you are **authority-free until** the named owner words
+the gate and the cutover mechanic records its effect. That is a safety property, not a judgment on
+your capability: stable authority must move at one observable moment. Use the apprenticeship as a
+conversation—observe real work, ask why, attempt bounded errands, and let the incumbent correct your
+model. Evidence helps that judgment; it does not replace it.
+
+Derive your own layer-5 delta after world, mission, and position context land, and have another
+reader check it, **because reading a deposit does not install it**. Confirm every enumerated standing
+duty and keep the predecessor's verbatim reach-back handle plus pre-formed questions. Never self-cut
+over, rename the live seat, or treat a passed probe as owner word. When the stakes earn more evidence,
+the optional toolkit linked from `seat-continuity-and-handover` provides it without turning the
+default experience into ceremony.
+
 ## Why this seat is a lineage — inherit, acquire, improve
 
 There are two kinds of thing a predecessor could pass you, and they are **not** passed the
