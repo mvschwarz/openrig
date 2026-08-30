@@ -35,7 +35,7 @@ export function renderRung1Packet(seat: ContinuitySeatIdentity): string {
 export function renderRung1IncumbentNotice(seat: ContinuitySeatIdentity): string {
   return [
     `Continuity prepare threshold crossed for ${seat.sessionName}.`,
-    "Open `retiring-and-inheriting-a-seat` at its apprentice-mode section, then execute the documented rung-1 stack.",
+    "Open `retiring-and-inheriting-a-seat` at its apprentice-mode section, then execute the shipped `continuity/apprentice-prepare.md` stack.",
     "Preserve advisory work while preparing the successor: the incumbent's accrued context is most valuable near the boundary.",
   ].join(" ");
 }
@@ -50,7 +50,7 @@ export function renderRung2Baton(seat: ContinuitySeatIdentity): Rung2Baton {
   return {
     destination: seat.mechanicDestination,
     template: [
-      "Owned cutover baton — execute the portable cutover SOP; awareness-only is not custody.",
+      "Owned cutover baton — execute the shipped `continuity/apprentice-cutover.md` stack and its portable cutover SOP; awareness-only is not custody.",
       "Delivery receipt: staged/submitted/consumed.",
       "Walker lease: one-active-walker.",
       "Authority: authority-effective-at-effect-receipt; intent-time claims do not count.",
