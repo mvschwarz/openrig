@@ -18,7 +18,7 @@ import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
 import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
-import type { RigSpec, RigSpecPodMember, SessionSourceSpec } from "../src/domain/types.js";
+import type { RigSpec, RigSpecPodMember, RigServicesSpec, SessionSourceSpec } from "../src/domain/types.js";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
@@ -89,6 +89,50 @@ describe("OPR.0.5.6.23 member (a) — codec round-trip preserves every optional 
     // base RED: schema parse carries it (:1058), the serialize leg never emits it
     expect(member.compactionStrategy).toBe("managed-compaction");
     expect(yaml).toContain("compaction_strategy: managed-compaction");
+  });
+});
+
+describe("OPR.0.5.6.23 member (c) — the codec emits the optional top-level services family (desk ruling, transition 45061)", () => {
+  // Same class as member (a): parse accepts+normalizes services
+  // (rigspec-schema :109/:197), serialize omits it — export-YAML -> re-import
+  // silently drops the whole block. Fixture populates EVERY optional services
+  // field; the pin is explicit key/value preservation, never mere presence.
+  const servicesInput: RigServicesSpec = {
+    kind: "compose",
+    composeFile: "services/compose.yaml",
+    projectName: "s23svc",
+    profiles: ["dev", "ci"],
+    downPolicy: "down_and_volumes",
+    waitFor: [
+      { service: "db", condition: "healthy" },
+      { url: "http://localhost:8080/healthz" },
+      { tcp: "localhost:5432" },
+    ],
+    surfaces: {
+      urls: [{ name: "app", url: "http://localhost:3000" }],
+      commands: [{ name: "psql", command: "psql -h localhost -p 5432" }],
+    },
+    checkpoints: [
+      { id: "db-dump", exportCommand: "pg_dump app > dump.sql", importCommand: "psql app < dump.sql" },
+      { id: "export-only", exportCommand: "tar cf state.tar state/" },
+    ],
+  };
+
+  it("RT-SERVICES: a nontrivial services family survives serialize -> YAML -> parse -> normalize with every key and value intact", () => {
+    const spec: RigSpec = { ...rigWith({ id: "impl" }), services: servicesInput };
+    const yaml = RigSpecCodec.serialize(spec);
+    const parsed = RigSpecCodec.parse(yaml) as Record<string, unknown>;
+    const validation = RigSpecSchema.validate(parsed);
+    expect(validation.errors, `round-trip must stay schema-valid: ${validation.errors?.join("; ")}`).toEqual([]);
+    // base RED: serialize reads no spec.services — the YAML has no services key
+    const rawServices = parsed["services"] as Record<string, unknown> | undefined;
+    expect(rawServices, "the serialized YAML must carry the services block").toBeDefined();
+    expect(Object.keys(rawServices ?? {}).sort(), "no services key may silently vanish").toEqual(
+      ["checkpoints", "compose_file", "down_policy", "kind", "profiles", "project_name", "surfaces", "wait_for"]
+    );
+    const normalized = RigSpecSchema.normalize(parsed);
+    // value-level pin: deep-equal, not presence — the whole family round-trips
+    expect(normalized.services).toEqual(servicesInput);
   });
 });
 
