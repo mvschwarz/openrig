@@ -39,14 +39,21 @@ export class GatewayDispatcher {
 
   /** Dispatch an outbound decision. proof-9: pre-handshake OR an unadvertised op is REFUSED,
    *  never attempted. Durable-first: persisted to the buffer BEFORE the transport send. */
-  dispatch(op: string, entityBindingRef: string, payload: unknown): DispatchResult {
+  dispatch(op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }): DispatchResult {
     if (!this.descriptor) {
       return { ok: false, error: "dispatch refused: no capability descriptor yet (handshake incomplete)" };
     }
     if (!isAdvertisedOp(this.descriptor, op)) {
       return { ok: false, error: `dispatch refused: op "${op}" is not advertised by connector ${this.descriptor.connectorId} (unadvertised ops are refused, not attempted)` };
     }
-    const decisionId = (this.deps.newDecisionId ?? randomUUID)();
+    // OPR.0.5.6.1 (dual-rebind repair): a caller-supplied DURABLE EPISODE-STABLE
+    // decision id makes redrive idempotent end to end — a replayed pending
+    // decision and a re-dispatch converge on ONE identity (the buffer accepts
+    // it once; the delivery layer's delivered-store re-acks without re-post).
+    const decisionId = opts?.decisionId ?? (this.deps.newDecisionId ?? randomUUID)();
+    if (opts?.decisionId && this.deps.buffer.pending().some((d) => d.decisionId === decisionId)) {
+      return { ok: true, decisionId }; // idempotent accept: already durably enqueued; replay owns the redrive
+    }
     const decision: OutboundDecision = { kind: "outbound_decision", decisionId, op, entityBindingRef, payload };
     this.deps.buffer.enqueue(decision); // durable BEFORE dispatch
     this.deps.send(decision);

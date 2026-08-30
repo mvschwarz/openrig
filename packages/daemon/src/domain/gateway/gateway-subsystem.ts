@@ -149,12 +149,14 @@ export class GatewaySubsystem {
     }
   }
 
-  /** Dispatch through the live wire (refused honestly when not active). */
-  dispatch(op: string, entityBindingRef: string, payload: unknown): DispatchResult {
+  /** Dispatch through the live wire (refused honestly when not active).
+   *  opts.decisionId: a caller-supplied durable episode-stable identity
+   *  (OPR.0.5.6.1 — redrive idempotence for deferral fires and digest posts). */
+  dispatch(op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }): DispatchResult {
     if (this.state !== "active" || !this.wireHandle) {
       return { ok: false, error: `dispatch refused: gateway subsystem is ${this.state}${this.reason ? ` (${this.reason})` : ""}` };
     }
-    return this.wireHandle.dispatcher.dispatch(op, entityBindingRef, payload);
+    return this.wireHandle.dispatcher.dispatch(op, entityBindingRef, payload, opts);
   }
 
   status(): GatewaySubsystemStatus {

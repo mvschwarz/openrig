@@ -1,19 +1,20 @@
-// OPR.0.5.6.1 mini-req 3 + AM-F1 — the C/D digest flush on the watchdog
-// substrate. LOSSLESS against the row record: the flush re-derives its member
-// set from the live selection (rows whose engine outcome is digest and whose
-// episode carries no posted receipt) — nothing is held in memory, so a daemon
-// down ACROSS a window flushes on the next evaluation with nothing lost
-// (AM-F1 timing-losslessness). EXACTLY-ONCE by the receipt: each member row is
-// stamped with the S14 posted literal (digest-tokened), and both the sweep's
-// selection and this flush drop receipted episodes — no digested item is ever
-// ALSO posted individually, and a second flush finds nothing. The digest post
-// itself is notify-class (no mention, ever).
+// OPR.0.5.6.1 mini-req 3 + AM-F1 — the C/D digest flush, v3 (dual-rebind
+// repair, R1 76a8cfd1 + R2 003f4786): LOSSLESS and EXACTLY-ONCE by transport
+// truth. Membership = the RECORDED message-time decision for the CURRENT
+// episode (containment wrote it with live dials at decision time). The digest
+// posts THROUGH THE GATEWAY on a durable episode-stable decision id
+// (`digest:<stable-hash>`): the dispatch buffer redrives it until the real
+// post succeeds, the delivered-store makes any replay/re-dispatch converge on
+// one post, and the S14 retain-and-repair path owns the post/stamp crash
+// boundary. Member receipts are stamped by the delivery seam ONLY AFTER the
+// post — a transport failure leaves zero false receipts and every member
+// flushable (the redrive is the recovery, never a silent loss).
 
+import { createHash } from "node:crypto";
 import type { QueueRepository } from "../queue-repository.js";
 import { makeQueuePorts } from "../gateway/slack/queue-access.js";
 import type { OwnerNotificationLevel } from "../queue-transition-log.js";
-// R1 B-4: the flush consumes RECORDED message-time decisions — it never
-// re-decides from later registry state, so no engine import belongs here.
+import { OUTBOUND_OP } from "../gateway/slack/outbound-driver.js";
 import type { Policy, PolicyJob, PolicyEvaluation } from "./types.js";
 
 export const DELIVERY_DIGEST_FLUSH_POLICY = "delivery-digest-flush";
@@ -21,10 +22,7 @@ export const DELIVERY_DIGEST_FLUSH_POLICY = "delivery-digest-flush";
 interface RegistrySurfaceLike {
   loadHumanRegistry: (home: string) => {
     ok: boolean;
-    entities?: Array<{
-      entityId: string;
-      prefs: { deliveryClass: "A" | "B" | "C" | "D"; away?: boolean; availability?: string };
-    }>;
+    entities?: Array<{ entityId: string; address: string }>;
   };
 }
 
@@ -32,26 +30,23 @@ export interface RunDeliveryDigestFlushInput {
   queueRepo: QueueRepository;
   registry: RegistrySurfaceLike;
   home: string;
-  post: (payload: Record<string, unknown>) => Promise<{ ok: boolean; ts?: string }>;
+  dispatch: (op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }) => { ok: boolean; error?: string };
   window: "4h" | "daily";
   minimumLevel?: OwnerNotificationLevel;
-  dials?: { minimumLevelThatPosts: OwnerNotificationLevel; minimumLevelThatInterrupts: OwnerNotificationLevel };
-  now?: Date;
 }
 
-export async function runDeliveryDigestFlush(input: RunDeliveryDigestFlushInput): Promise<{ posted: number; members: number }> {
+export async function runDeliveryDigestFlush(input: RunDeliveryDigestFlushInput): Promise<{ dispatched: number; members: number }> {
   const reg = input.registry.loadHumanRegistry(input.home);
-  if (!reg.ok || !reg.entities) return { posted: 0, members: 0 };
+  if (!reg.ok || !reg.entities || reg.entities.length === 0) return { dispatched: 0, members: 0 };
+  const human = reg.entities[0]!;
+
   const ports = makeQueuePorts(input.queueRepo, {
     loadHumanRegistry: () => reg,
   } as never);
-  // The selection already drops receipted episodes — the exactly-once floor.
+  // The selection already drops receipted episodes — receipts exist only after
+  // a REAL post, so members remain flushable until transport truth.
   const alerts = await ports.listHumanAlerts({ minimumLevel: input.minimumLevel ?? "NOTICE" });
 
-  // R1 B-4: membership = the RECORDED message-time decision for the CURRENT
-  // episode (containment wrote `delivery-decision: digest ...` with the episode
-  // key and live dials at decision time). Later prefs/dial drift neither drops
-  // nor reclassifies an already-made decision.
   const members = alerts.filter((alert) => {
     const key = alert.notificationKey ?? alert.qitemId;
     return input.queueRepo.listTransitions(alert.qitemId).some((t) =>
@@ -59,54 +54,31 @@ export async function runDeliveryDigestFlush(input: RunDeliveryDigestFlushInput)
         && t.transitionNote.includes(`notification_key=${key}`)
         && t.transitionNote.includes(`window=${input.window}`));
   });
-  if (members.length === 0) return { posted: 0, members: 0 };
+  if (members.length === 0) return { dispatched: 0, members: 0 };
 
-  // RESERVE BEFORE DELIVER (R1 B-4, same doctrine as the deferral): member
-  // receipts land BEFORE the post, so no crash boundary can re-post members.
-  // At-most-once: a crash (or post failure) after the reserve loses the digest
-  // recoverably and LOUDLY — never a silent double.
-  const digestId = (input.now ?? new Date()).toISOString();
-  for (const m of members) {
-    const key = m.notificationKey ?? m.qitemId;
-    if (input.queueRepo.transitionLog.hasOwnerNotificationReceipt(m.qitemId, key)) continue;
-    input.queueRepo.update({
-      qitemId: m.qitemId,
-      actorSession: "daemon@kernel",
-      transitionNote: [
-        "slack-owner-notification-posted",
-        `notification_key=${key}`,
-        `level=${m.ownerNotificationLevel ?? "RECORD"}`,
-        `kind=${m.ownerNotificationKind ?? "unclassified"}`,
-        `message_ts=${digestId}`,
-        `thread_ts=${digestId}`,
-        `digest=${digestId}`,
-      ].join(" "),
-    });
-  }
+  const memberReceipts = members.map((m) => ({
+    qitemId: m.qitemId,
+    notificationKey: m.notificationKey ?? m.qitemId,
+    level: m.ownerNotificationLevel ?? "RECORD",
+    kind: m.ownerNotificationKind ?? "unclassified",
+  }));
+  // Durable episode-stable identity: same member set + window -> same decision id.
+  const digestId = createHash("sha256")
+    .update(input.window + "|" + memberReceipts.map((m) => m.notificationKey).sort().join(","))
+    .digest("hex")
+    .slice(0, 16);
 
-  const outcome = await input.post({
-    kind: "delivery-digest",
-    window: input.window,
-    count: members.length,
-    items: members.map((m) => ({
-      qitemId: m.qitemId,
-      summary: m.summary ?? null,
-      destinationSession: m.destinationSession ?? null,
-      sourceSession: m.sourceSession ?? null,
-    })),
-  });
-  if (!outcome.ok) {
-    for (const m of members) {
-      const key = m.notificationKey ?? m.qitemId;
-      input.queueRepo.update({
-        qitemId: m.qitemId,
-        actorSession: "daemon@kernel",
-        transitionNote: `delivery-digest-post-failed digest=${digestId} notification_key=${key}`,
-      });
-    }
-    return { posted: 0, members: members.length };
-  }
-  return { posted: 1, members: members.length };
+  const payload = {
+    deliveryDigestPost: true,
+    digestId,
+    qitemId: memberReceipts[0]!.qitemId, // anchor row for transport-failure ledger writes
+    destinationSession: human.address,
+    summary: `Delivery digest (${input.window}) — ${members.length} item(s)`,
+    body: members.map((m) => `• ${m.summary ?? m.qitemId} [${m.qitemId}]`).join("\n"),
+    memberReceipts,
+  };
+  const res = input.dispatch(OUTBOUND_OP, human.address, payload, { decisionId: `digest:${digestId}` });
+  return { dispatched: res.ok ? 1 : 0, members: members.length };
 }
 
 /** Watchdog-engine policy wrapper — the repeating window flush (digests recur;
@@ -115,14 +87,14 @@ export function makeDeliveryDigestFlushPolicy(deps: {
   queueRepo: QueueRepository;
   registry: RegistrySurfaceLike;
   home: string;
-  post: (payload: Record<string, unknown>) => Promise<{ ok: boolean; ts?: string }>;
+  dispatch: (op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }) => { ok: boolean; error?: string };
 }): Policy {
   return {
     name: DELIVERY_DIGEST_FLUSH_POLICY,
     async evaluate(job: PolicyJob): Promise<PolicyEvaluation> {
       const window = ((job.context as { window?: string }).window === "daily" ? "daily" : "4h") as "4h" | "daily";
       const r = await runDeliveryDigestFlush({ ...deps, window });
-      if (r.posted > 0) return { action: "skip", reason: `digest flushed (${r.members} items)` };
+      if (r.dispatched > 0) return { action: "skip", reason: `digest dispatched (${r.members} items)` };
       return { action: "skip", reason: "nothing to flush" };
     },
   } as Policy;

@@ -99,8 +99,14 @@ function parseContext(specYaml: string): DeferralContext | null {
   return { qitemId, entityId, minutes: Number(minutes), armedAt, notificationKey };
 }
 
-/** Fire the deferral iff due. Terminal after the single successful delivery —
- *  a later call can never fire again (the one-shot contract). */
+/** Fire the deferral iff due — v3 (dual-rebind repair, R1 76a8cfd1 + R2
+ *  003f4786): the LOCKED contract is exactly-once at T+30, never zero, never
+ *  two. The job stays ACTIVE (the redrive) until the episode's own posted
+ *  receipt is OBSERVED on the row; only that observation writes the fired
+ *  transition and the terminal state. Delivery rides a durable episode-stable
+ *  decision id (`deferral:<key>`), so a replayed pending decision and a
+ *  re-dispatch converge on one post; a death anywhere before the receipt
+ *  leaves the ACTIVE job to redrive after reconstruction. */
 export async function fireDeliveryDeferralIfDue(input: FireDeliveryDeferralInput): Promise<{ fired: boolean }> {
   const job = input.jobsRepo.getById(input.jobId);
   if (!job || job.state !== "active") return { fired: false };
@@ -112,33 +118,55 @@ export async function fireDeliveryDeferralIfDue(input: FireDeliveryDeferralInput
   const now = input.now ?? new Date();
   const fireAt = Date.parse(ctx.armedAt) + ctx.minutes * 60_000;
   if (now.getTime() < fireAt) return { fired: false };
-  // RESERVE BEFORE DELIVER (R2 B-3 / R1 B-4, the S24 precedent): the job goes
-  // TERMINAL and the fired transition lands BEFORE the delivery enqueue, so a
-  // still-active job can never coexist with an enqueued decision — no restart
-  // boundary can mint two decisions for one episode. The trade is at-most-once:
-  // a crash between reserve and enqueue loses the fire RECOVERABLY (the row
-  // shows fired-without-receipt and surfaces as never-posted), never doubly.
-  input.jobsRepo.markTerminal(input.jobId, "delivery-deferral fired (reserve-before-deliver)");
-  input.queueRepo.update({
-    qitemId: ctx.qitemId,
-    actorSession: "daemon@kernel",
-    transitionNote: [
-      DELIVERY_DEFERRAL_FIRED_PREFIX,
-      `job_id=${input.jobId}`,
-      `notification_key=${ctx.notificationKey}`,
-      `who=${ctx.entityId}`,
-    ].join(" "),
-  });
-  const delivery = await input.deliverInterrupt(ctx.qitemId, ctx.notificationKey);
-  if (!delivery.ok) {
-    // Loud, row-side, at-most-once honored: the fire is spent; the loss is visible.
+
+  const notes = input.queueRepo.listTransitions(ctx.qitemId).map((t) => t.transitionNote ?? "");
+  // The episode's receipt is the ONLY completion evidence: observe -> fired -> terminal.
+  const receipted = notes.some((n) =>
+    n.startsWith("slack-owner-notification-posted ") && n.split(/\s+/).includes(`notification_key=${ctx.notificationKey}`));
+  if (receipted) {
+    if (!notes.some((n) => n.startsWith(DELIVERY_DEFERRAL_FIRED_PREFIX))) {
+      input.queueRepo.update({
+        qitemId: ctx.qitemId,
+        actorSession: "daemon@kernel",
+        transitionNote: [
+          DELIVERY_DEFERRAL_FIRED_PREFIX,
+          `job_id=${input.jobId}`,
+          `notification_key=${ctx.notificationKey}`,
+          `who=${ctx.entityId}`,
+        ].join(" "),
+      });
+    }
+    input.jobsRepo.markTerminal(input.jobId, "delivery-deferral fired (receipt observed)");
+    return { fired: true };
+  }
+
+  // Distinct PENDING state (never terminal, never posted): the dispatch attempt
+  // is on the record while the job redrives.
+  if (!notes.some((n) => n.startsWith("delivery-deferral-dispatching"))) {
     input.queueRepo.update({
       qitemId: ctx.qitemId,
       actorSession: "daemon@kernel",
-      transitionNote: `delivery-deferral-fire delivery-failed job_id=${input.jobId} notification_key=${ctx.notificationKey}`,
+      transitionNote: `delivery-deferral-dispatching job_id=${input.jobId} notification_key=${ctx.notificationKey}`,
     });
   }
-  return { fired: true };
+  try {
+    const delivery = await input.deliverInterrupt(ctx.qitemId, ctx.notificationKey);
+    if (!delivery.ok) {
+      input.queueRepo.update({
+        qitemId: ctx.qitemId,
+        actorSession: "daemon@kernel",
+        transitionNote: `delivery-deferral-attempt-failed job_id=${input.jobId} notification_key=${ctx.notificationKey}`,
+      });
+    }
+  } catch (e) {
+    // A death/throw mid-delivery: the job stays ACTIVE — reconstruction redrives.
+    input.queueRepo.update({
+      qitemId: ctx.qitemId,
+      actorSession: "daemon@kernel",
+      transitionNote: `delivery-deferral-attempt-failed job_id=${input.jobId} notification_key=${ctx.notificationKey} error=${(e as Error).message.slice(0, 120)}`,
+    });
+  }
+  return { fired: false };
 }
 
 /** Watchdog-engine policy wrapper (additionalPolicies injection, the

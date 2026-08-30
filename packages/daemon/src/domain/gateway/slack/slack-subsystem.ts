@@ -221,6 +221,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         resolveMentionUserId: (p) => {
           // OPR.0.5.6.1: the engine's decided loudness is the mention rule for
           // registered humans; the dial pair remains only for the null degrade.
+          if ((p as { deliveryDigestPost?: boolean }).deliveryDigestPost) return undefined; // notify-class aggregate, never a mention
           const fire = (p as { deliveryDeferralFire?: boolean }).deliveryDeferralFire === true;
           const decision = fire ? null : decideForPayload(p);
           const eligible = fire
@@ -279,6 +280,28 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
           });
         },
         onPosted: (p, messageTs, threadTs) => {
+          // v3 digest branch: transport truth first — every member receipt is
+          // stamped HERE, after the real post, digest-tokened and episode-keyed.
+          const digest = (p as unknown as { deliveryDigestPost?: boolean; digestId?: string; memberReceipts?: Array<{ qitemId: string; notificationKey: string; level: string; kind: string }> });
+          if (digest.deliveryDigestPost && Array.isArray(digest.memberReceipts)) {
+            for (const m of digest.memberReceipts) {
+              if (opts.queueRepo.transitionLog.hasOwnerNotificationReceipt(m.qitemId, m.notificationKey)) continue;
+              opts.queueRepo.update({
+                qitemId: m.qitemId,
+                actorSession: "daemon@kernel",
+                transitionNote: [
+                  "slack-owner-notification-posted",
+                  `notification_key=${m.notificationKey}`,
+                  `level=${m.level}`,
+                  `kind=${m.kind}`,
+                  `message_ts=${messageTs}`,
+                  `thread_ts=${threadTs ?? messageTs}`,
+                  `digest=${digest.digestId ?? "unknown"}`,
+                ].join(" "),
+              });
+            }
+            return;
+          }
           const key = p.notificationKey ?? p.qitemId;
           if (opts.queueRepo.transitionLog.hasOwnerNotificationReceipt(p.qitemId, key)) return;
           opts.queueRepo.update({
@@ -323,6 +346,9 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
     // (a re-consult would re-defer: the immediate-plus-deferred shape AM-F3 forbids).
     // R2 B-3 belt: an episode that already carries its posted receipt (a replayed
     // decision, or any second mint) posts NOTHING — exactly-once by the receipt.
+    // A digest post is an already-decided aggregate — never re-consulted
+    // (member decisions were recorded at containment; receipts land in onPosted).
+    if ((p as { deliveryDigestPost?: boolean }).deliveryDigestPost) return deliver(decision);
     if (p.deliveryDeferralFire) {
       const fireKey = p.notificationKey ?? p.qitemId;
       if (p.qitemId && opts.queueRepo.transitionLog.hasOwnerNotificationReceipt(p.qitemId, fireKey)) {

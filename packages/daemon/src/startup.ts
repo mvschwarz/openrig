@@ -1721,7 +1721,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // gateway subsystem is constructed after the watchdog engine; the ref fills
   // at activation below, which is OUTSIDE the sessionTransport block — hence
   // function scope). Registry loads through the shipped loader.
-  const lateGatewayDispatch: { fn?: (op: string, ref: string, payload: unknown) => { ok: boolean; error?: string } } = {};
+  const lateGatewayDispatch: { fn?: (op: string, ref: string, payload: unknown, opts?: { decisionId?: string }) => { ok: boolean; error?: string } } = {};
   const { loadHumanRegistry: loadHumanRegistryForDelivery } = await import("./domain/gateway/human-registry.js");
   void loadHumanRegistryForDelivery; // consumed inside the sessionTransport block below
 
@@ -1858,7 +1858,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
             const { buildDeferralFirePayload } = await import("./domain/gateway/operator-delivery-engine.js");
             const { OUTBOUND_OP } = await import("./domain/gateway/slack/outbound-driver.js");
             const payload = buildDeferralFirePayload(row, notificationKey);
-            const res = dispatch(OUTBOUND_OP, String(payload["destinationSession"] ?? ""), payload);
+            // v3: durable episode-stable identity — replay and re-dispatch converge.
+            const res = dispatch(OUTBOUND_OP, String(payload["destinationSession"] ?? ""), payload, { decisionId: `deferral:${notificationKey}` });
             return { ok: res.ok };
           },
         }),
@@ -1866,22 +1867,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           queueRepo: queueRepoInstance,
           registry: { loadHumanRegistry: (home: string) => loadHumanRegistryForDelivery(home) },
           home: OPENRIG_HOME,
-          post: async (payload: Record<string, unknown>) => {
-            const { loadConfig } = await import("./domain/gateway/slack/config.js");
-            const { resolveSecret } = await import("./domain/gateway/slack/secrets.js");
-            const { callWebApi } = await import("./domain/gateway/slack/slack-api.js");
-            const cfg = loadConfig(OPENRIG_HOME);
-            const token = resolveSecret("SLACK_BOT_TOKEN", { envFile: cfg.secretsEnvFile ?? undefined });
-            if (!cfg.enabled || !token || !cfg.channel) return { ok: false };
-            const items = (payload.items as Array<{ qitemId: string; summary: string | null }>) ?? [];
-            const text = [
-              `Delivery digest (${String(payload.window)}) — ${items.length} item(s):`,
-              ...items.map((i) => `• ${i.summary ?? i.qitemId} [${i.qitemId}]`),
-            ].join("\n");
-            const res = await callWebApi("chat.postMessage", token, { channel: cfg.channel, text });
-            const body = (res as { ok?: boolean; body?: { ok?: boolean; ts?: string } });
-            const ok = body.ok === true && body.body?.ok === true;
-            return { ok, ts: body.body?.ts };
+          // v3: the digest posts THROUGH THE GATEWAY on its stable decision id —
+          // one transport, one redrive/reconcile machinery, receipts after truth.
+          dispatch: (op: string, ref: string, payload: unknown, opts?: { decisionId?: string }) => {
+            const fn = lateGatewayDispatch.fn;
+            if (!fn) return { ok: false, error: "gateway not yet active" };
+            return fn(op, ref, payload, opts);
           },
         }),
       ],
@@ -2240,7 +2231,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   gatewaySubsystem.start();
   deps.gatewaySubsystem = gatewaySubsystem;
   // OPR.0.5.6.1 — bind the delivery policies' late gateway ref.
-  lateGatewayDispatch.fn = (op, ref, payload) => gatewaySubsystem.dispatch(op, ref, payload);
+  lateGatewayDispatch.fn = (op, ref, payload, opts) => gatewaySubsystem.dispatch(op, ref, payload, opts);
 
   const { app, injectWebSocket } = createAppWithWebSocket(deps);
 

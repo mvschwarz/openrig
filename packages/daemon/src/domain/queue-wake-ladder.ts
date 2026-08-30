@@ -254,12 +254,17 @@ function readLadder(db: Database.Database, qitemId: string): LadderView {
       view.opEngineDispatched = true;
       const keyMatch = note.match(/notification_key=(\S+)/);
       if (keyMatch) view.opEngineKey = keyMatch[1]!;
+      // R2 003f4786: the key derives BEFORE any resolution note counts — a
+      // receipt that PRECEDES this dispatch belongs to an older episode, so
+      // any provisional resolution seen so far is discarded here.
+      view.opOutcomeResolved = false;
     }
-    // Outcome resolution (AM-F3, R1 B-3): the S14 posted receipt or the
-    // termination record closes the episode the rung is waiting on — BOUND to
-    // the dispatched episode's key when the marker carries one, so a stale
-    // receipt from an older episode can never close a new rung. An unkeyed
-    // dispatch (injected legacy ports) keeps the any-note shape.
+    // Outcome resolution (AM-F3, R1 B-3, R2 pre-marker discriminator): the S14
+    // posted receipt or the termination record closes the episode ONLY when it
+    // (a) follows the dispatch marker chronologically (this loop resets the
+    // flag at each dispatch, so pre-marker notes never survive) and (b) carries
+    // the dispatched key when the marker is keyed. An unkeyed dispatch
+    // (injected legacy ports) keeps the any-following-note shape.
     if (note.startsWith("slack-owner-notification-posted ") || note.startsWith("delivery-termination:")) {
       if (view.opEngineKey === null || note.split(/\s+/).includes(`notification_key=${view.opEngineKey}`)) {
         view.opOutcomeResolved = true;
