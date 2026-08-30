@@ -62,6 +62,34 @@ export interface SubsystemSlackDeliveryOpts {
 }
 
 const LOCAL_IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
+const TRANSPORT_FAILURE_RECEIPT_PREFIX = "::transport-failure-receipt::";
+const TRANSPORT_FAILURE_RECEIPT_REPAIRED = "::repaired";
+
+function transportFailureReceiptKey(decisionId: string, failureClass: string, detail: string): string {
+  const encoded = Buffer.from(JSON.stringify([failureClass, detail]), "utf8").toString("base64url");
+  return `${decisionId}${TRANSPORT_FAILURE_RECEIPT_PREFIX}${encoded}`;
+}
+
+function pendingTransportFailureReceipt(
+  attempted: Set<string>,
+  decisionId: string,
+): { key: string; failureClass: string; detail: string } | { key: string; error: string } | null {
+  const prefix = `${decisionId}${TRANSPORT_FAILURE_RECEIPT_PREFIX}`;
+  const key = [...attempted.keys()].find((candidate) =>
+    candidate.startsWith(prefix)
+      && !candidate.endsWith(TRANSPORT_FAILURE_RECEIPT_REPAIRED)
+      && !attempted.has(`${candidate}${TRANSPORT_FAILURE_RECEIPT_REPAIRED}`));
+  if (!key) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(key.slice(prefix.length), "base64url").toString("utf8")) as unknown;
+    if (!Array.isArray(parsed) || typeof parsed[0] !== "string" || typeof parsed[1] !== "string") {
+      return { key, error: "pending transport-failure receipt is malformed" };
+    }
+    return { key, failureClass: parsed[0], detail: parsed[1] };
+  } catch (e) {
+    return { key, error: `pending transport-failure receipt is unreadable: ${(e as Error).message}` };
+  }
+}
 
 /** Default local-image reader: absolute path, image extension, readable — else null. */
 export function defaultReadLocalImage(refPath: string): { bytes: Uint8Array; filename: string } | null {
@@ -115,6 +143,29 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
     );
     const threadTs = opts.resolveThreadTs?.(q);
 
+    // A failed HTTP outcome whose row-receipt write failed is held in the
+    // existing restart-surviving attempted store. Repair that authoritative
+    // transition before reconciliation can progress to a later post.
+    const attempted = opts.attempted.load();
+    const pendingFailure = pendingTransportFailureReceipt(attempted, decision.decisionId);
+    if (pendingFailure) {
+      if ("error" in pendingFailure) {
+        log(`${pendingFailure.error} for ${decision.decisionId} — retained, no resend`);
+        return { ok: false, class: "receipt-failed", detail: pendingFailure.error };
+      }
+      try {
+        if (!opts.onTransportFailed) throw new Error("transport-failure receipt hook is unavailable");
+        opts.onTransportFailed(q, pendingFailure.failureClass, pendingFailure.detail);
+        opts.attempted.mark(
+          `${pendingFailure.key}${TRANSPORT_FAILURE_RECEIPT_REPAIRED}`,
+          "transport-failure-receipt-repaired",
+        );
+      } catch (e) {
+        log(`transport-failed receipt repair FAILED for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — retained, no resend`);
+        return { ok: false, class: "receipt-failed", detail: (e as Error).message };
+      }
+    }
+
     // H — RECONCILE-BY-MARKER before any RESEND: if this decision was attempted before, the
     // prior outcome is ambiguous (a timeout may have posted). Search where the message would
     // live (the thread, else channel history) for the message's STRUCTURAL identity; FOUND →
@@ -128,7 +179,7 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
     // decisionId in a delimited form). Producer and scanner call the same function: one
     // identity, same bytes, both sides.
     const marker = reconcileToken(decision.decisionId);
-    if (opts.attempted.load().has(decision.decisionId)) {
+    if (attempted.has(decision.decisionId)) {
       const scan = await fetchRecentMessageTexts(opts.botToken, opts.channel, threadTs, opts.fetchImpl);
       if (!scan.ok) {
         log(`reconcile scan failed for ${decision.decisionId} (${scan.error}) — retained, no blind repost`);
@@ -179,12 +230,22 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
     );
     if (!res.ok) {
       const failureClass = res.status === 0 ? "transport" : `http-${res.status}`;
-      // OPR.0.5.6.14 — the row ledger learns about the failure (best-effort:
-      // a throwing ledger write must not mask the transport verdict).
-      try {
-        opts.onTransportFailed?.(q, failureClass, res.error ?? "");
-      } catch (e) {
-        log(`transport-failed receipt write FAILED for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message}`);
+      // Persist the receipt input before the row write. A throwing row write
+      // stays repairable across restart and blocks any later resend until the
+      // authoritative transition lands.
+      if (opts.onTransportFailed) {
+        const receiptKey = transportFailureReceiptKey(decision.decisionId, failureClass, res.error ?? "");
+        try {
+          opts.attempted.mark(receiptKey, "transport-failure-receipt-pending");
+          opts.onTransportFailed(q, failureClass, res.error ?? "");
+          opts.attempted.mark(
+            `${receiptKey}${TRANSPORT_FAILURE_RECEIPT_REPAIRED}`,
+            "transport-failure-receipt-repaired",
+          );
+        } catch (e) {
+          log(`transport-failed receipt write FAILED for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — retained for repair before resend`);
+          return { ok: false, class: "receipt-failed", detail: (e as Error).message };
+        }
       }
       return { ok: false, class: failureClass, detail: res.error };
     }

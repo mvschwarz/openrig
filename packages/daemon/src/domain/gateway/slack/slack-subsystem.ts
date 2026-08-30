@@ -215,12 +215,17 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         // instead of guessing from nudge telemetry.
         onTransportFailed: (p, failureClass, detail) => {
           if (!p.qitemId) return;
+          const key = p.notificationKey ?? p.qitemId;
+          const alreadyRecorded = opts.queueRepo.transitionLog.listForQitem(p.qitemId).some((transition) =>
+            transition.transitionNote?.startsWith("slack-owner-notification-transport-failed ")
+              && transition.transitionNote.split(/\s+/).includes(`notification_key=${key}`));
+          if (alreadyRecorded) return;
           opts.queueRepo.update({
             qitemId: p.qitemId,
             actorSession: "daemon@kernel",
             transitionNote: [
               "slack-owner-notification-transport-failed",
-              `notification_key=${p.notificationKey ?? p.qitemId}`,
+              `notification_key=${key}`,
               `class=${failureClass}`,
               `error=${detail}`,
             ].join(" "),
