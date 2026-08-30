@@ -45,6 +45,10 @@ export interface SubsystemSlackDeliveryOpts {
   onPostedRoot?: (payload: OutboundPostPayload, ts: string) => void;
   /** Receipt hook for every successful post, root or threaded. */
   onPosted?: (payload: OutboundPostPayload, messageTs: string, threadTs?: string) => void;
+  /** OPR.0.5.6.14 — the transport-failure receipt hook: a failed post writes
+   *  the row's transport-failed ledger transition (class + API error), so a
+   *  delivery failure is as legible on the row as a success. */
+  onTransportFailed?: (payload: OutboundPostPayload, failureClass: string, detail: string) => void;
   /** F (interim loudness rule): return the Slack USER ID to mention for an ESCALATION payload,
    *  undefined for everything else (quiet-threaded). The composition wires the registry lookup
    *  + the escalation predicate; delivery just renders what it is told. */
@@ -139,8 +143,16 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
         // delivered/seen/release — so a reply to the REAL root routes to the row
         // owner instead of generically. A synthetic ts here was the defect.
         if (matched.ts) {
-          if (threadTs === undefined) opts.onPostedRoot?.(q, matched.ts);
-          opts.onPosted?.(q, matched.ts, threadTs);
+          // OPR.0.5.6.14 — same retain-and-repair contract as the normal-post
+          // receipt: a throwing receipt write retains the decision for the next
+          // replay (the marker stays findable; no repost can occur).
+          try {
+            if (threadTs === undefined) opts.onPostedRoot?.(q, matched.ts);
+            opts.onPosted?.(q, matched.ts, threadTs);
+          } catch (e) {
+            log(`receipt write FAILED on reconcile for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — retained for the next replay`);
+            return { ok: false, class: "receipt-failed", detail: (e as Error).message };
+          }
         } else {
           // Degraded, stated: a matched message without ts cannot anchor a thread;
           // keep the ack (never repost) but say loudly that routing stays generic.
@@ -166,10 +178,27 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
       opts.fetchImpl,
     );
     if (!res.ok) {
-      return { ok: false, class: res.status === 0 ? "transport" : `http-${res.status}`, detail: res.error };
+      const failureClass = res.status === 0 ? "transport" : `http-${res.status}`;
+      // OPR.0.5.6.14 — the row ledger learns about the failure (best-effort:
+      // a throwing ledger write must not mask the transport verdict).
+      try {
+        opts.onTransportFailed?.(q, failureClass, res.error ?? "");
+      } catch (e) {
+        log(`transport-failed receipt write FAILED for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message}`);
+      }
+      return { ok: false, class: failureClass, detail: res.error };
     }
-    if (threadTs === undefined) opts.onPostedRoot?.(q, res.ts);
-    opts.onPosted?.(q, res.ts, threadTs);
+    // OPR.0.5.6.14 — the 8f291c37 shape dies by RETAIN-AND-REPAIR: a receipt
+    // write that throws after a successful post is a clean retained outcome
+    // (never an escaped throw); the replay reconciles by marker — the message
+    // IS in the channel — and retries the idempotent receipt without reposting.
+    try {
+      if (threadTs === undefined) opts.onPostedRoot?.(q, res.ts);
+      opts.onPosted?.(q, res.ts, threadTs);
+    } catch (e) {
+      log(`receipt write FAILED after successful post for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — retained; replay reconciles by marker and retries the idempotent receipt`);
+      return { ok: false, class: "receipt-failed", detail: (e as Error).message };
+    }
     // Delivered is complete only after the authoritative row receipt succeeds. A receipt
     // failure retains the decision; replay reconciles by marker and retries the idempotent receipt.
     opts.delivered.mark(decision.decisionId, "delivered");

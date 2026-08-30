@@ -10,6 +10,7 @@ import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName } from "./session-name.js";
+import { classifyDestination } from "./gateway/destination-resolver.js";
 import {
   computeClosureRequiredAt,
   validateClosure,
@@ -114,6 +115,14 @@ export interface QueueItem {
   state: QueueState;
   priority: QueuePriority;
   tier: string | null;
+  /** OPR.0.5.6.14 — the delivery LEDGER verdict for gateway-routed rows
+   *  (posted / transport-failed / never-posted), derived from the row's own
+   *  transitions. Pane-bound rows carry null — the field never lies about a
+   *  class it does not govern. Populated on getById and findUndelivered. */
+  deliveryOutcome?: "posted" | "transport-failed" | "never-posted" | null;
+  /** The undelivered surface's class for ledger-derived entries (the route
+   *  prefers this over the nudge-literal regex when present). */
+  deliveryFailureClass?: string;
   tags: string[] | null;
   blockedOn: string | null;
   /** S04 — the DERIVED pickup receipt (unclaimed/working/stalled-after-claim/parked). Never
@@ -1068,18 +1077,36 @@ export class QueueRepository {
     // subsystem's input (the Slack connector polls human-destined rows and its own
     // ledger is the delivery record). Falling through to tmux here recorded
     // "failed: … tmux reports no session" while the founder verifiably received the
-    // message, and that failed: literal poisoned the undelivered surface. So: the
-    // wake for this class is GATEWAY-OWNED — tmux is never consulted, and the
-    // recorded wording claims exactly what was (and was not) checked. Classified
-    // indeterminate (landed with the owning subsystem; render unconfirmable here) —
-    // never verified, never failed. Human-CLASS seats with real panes
-    // (human-*@kernel) are NOT this class and keep tmux transport.
-    if (parseSessionName(destinationSession).kind === "external") {
+    // message, and that failed: literal poisoned the undelivered surface.
+    // OPR.0.5.6.14 — the inline @external branch became THE ONE RESOLVER SEAM
+    // (gateway/destination-resolver.ts): pane-bound keeps terminal transport;
+    // gateway-routable (@external AND registry-resolved aliases like the
+    // paneless human-*@kernel virtual identities — the live 4-row specimen
+    // class) is GATEWAY-OWNED (tmux never consulted; the connector's row-poll
+    // is the dispatch and its ledger the delivery record); neither is an
+    // honest structured teaching refusal (tmux is not consulted for an
+    // address it can never hold). Classified indeterminate for gateway
+    // (landed with the owning subsystem; render unconfirmable here) — never
+    // verified, never failed.
+    const destClass = classifyDestination(destinationSession, {
+      entities: (() => {
+        const loaded = this.loadHumanRegistryFn();
+        return loaded.ok ? loaded.entities : null;
+      })(),
+      isKnownSeat: (dest) => this.isKnownTopologySeat(dest),
+    });
+    if (destClass.class === "gateway-routable") {
+      const resolvedNote = destClass.via === "registry-alias" && destClass.resolvedHuman
+        ? ` — the human registry resolves it to registered human '${destClass.resolvedHuman}'`
+        : "";
       return {
         classified: "indeterminate",
         nudgeResult:
-          `gateway-owned: '${destinationSession}' is a virtual @external destination — delivery rides the gateway subsystem (Slack connector), whose own ledger is the delivery record; tmux was not consulted (it can never hold this address class)`,
+          `gateway-owned: '${destinationSession}' is a virtual ${destClass.via === "registry-alias" ? "paneless human" : "@external"} destination${resolvedNote} — delivery rides the gateway subsystem (Slack connector), whose own ledger is the delivery record; tmux was not consulted (it can never hold this address class)`,
       };
+    }
+    if (destClass.class === "unroutable") {
+      return { classified: "failed", nudgeResult: destClass.teaching };
     }
     const stampISO = new Date().toISOString();
     let text: string;
@@ -2548,7 +2575,12 @@ export class QueueRepository {
     const row = this.db
       .prepare("SELECT * FROM queue_items WHERE qitem_id = ?")
       .get(qitemId) as QueueItemRow | undefined;
-    return row ? this.rowToItem(row) : null;
+    if (!row) return null;
+    const item = this.rowToItem(row);
+    // OPR.0.5.6.14 — the row FACE answers "did it reach them" in one read for
+    // gateway-routed rows; null for pane-bound (absence-governed, no key lies).
+    const ledger = this.deliveryOutcomeFor(item.qitemId);
+    return { ...item, deliveryOutcome: ledger?.outcome ?? null };
   }
 
   list(opts?: QueueListOptions): QueueItem[] {
@@ -2744,7 +2776,20 @@ export class QueueRepository {
    *     AND the PRD, not in chat — it must outlive the excluder.
    */
   findUndelivered(opts?: { rig?: string; limit?: number; compact?: boolean }): QueueItem[] {
-    const conditions = ["state = 'pending'", "last_nudge_result LIKE 'failed:%'"];
+    // OPR.0.5.6.14 — the LEDGER is consulted before the nudge literal:
+    // candidates are failed-nudge rows PLUS gateway-routed rows (whose nudge
+    // leg is not the delivery verdict); then per row the delivery transitions
+    // decide — posted is NEVER undelivered whatever last_nudge_result says;
+    // transport-failed and never-posted are undelivered with their own classes.
+    const conditions = [
+      "state = 'pending'",
+      // Candidates: failed/unroutable/gateway nudge literals, PLUS any row whose
+      // ledger already recorded a transport failure (a driver-path row may have
+      // no nudge literal at all — the ledger is the source, not the leg).
+      `(last_nudge_result LIKE 'failed:%' OR last_nudge_result LIKE 'unroutable:%' OR last_nudge_result LIKE 'gateway-owned%'
+        OR EXISTS (SELECT 1 FROM queue_transitions t WHERE t.qitem_id = queue_items.qitem_id
+                    AND t.transition_note LIKE 'slack-owner-notification-transport-failed %'))`,
+    ];
     const params: unknown[] = [];
     if (opts?.rig) {
       const escaped = opts.rig.replace(/%/g, "\\%").replace(/_/g, "\\_");
@@ -2758,8 +2803,88 @@ export class QueueRepository {
       params.push(opts.limit);
     }
     const rows = this.db.prepare(sql).all(...params) as QueueItemRow[];
-    return rows.map((r) => this.rowToItem(r));
+    const out: QueueItem[] = [];
+    for (const r of rows) {
+      const item = this.rowToItem(r);
+      const ledger = this.deliveryOutcomeFor(item.qitemId);
+      if (ledger?.outcome === "posted") continue; // the receipt wins, always
+      if (ledger?.outcome === "transport-failed") {
+        out.push({ ...item, deliveryOutcome: "transport-failed", deliveryFailureClass: "transport-failed" });
+        continue;
+      }
+      if (ledger?.outcome === "never-posted") {
+        out.push({ ...item, deliveryOutcome: "never-posted", deliveryFailureClass: "never-posted" });
+        continue;
+      }
+      // No ledger verdict: a gateway-routed row inside the post window is not
+      // undelivered (posting is in flight); failed-nudge pane-bound rows keep
+      // the legacy surface exactly.
+      const lastNudge = item.lastNudgeResult ?? "";
+      if (lastNudge.startsWith("gateway-owned")) continue;
+      out.push(item);
+    }
+    return out;
   }
+
+  /** OPR.0.5.6.14 — the resolver's topology predicate: a destination is a known
+   *  seat when a sessions row carries its exact name, or a nodes-composed
+   *  canonical name ({logical_id with . -> -}@{rig name}) matches. FAIL-OPEN on
+   *  an EMPTY topology (fixture/bootstrap DBs cannot discriminate; production
+   *  always has seats) so legacy pane-bound behavior is preserved exactly where
+   *  no classification evidence exists. */
+  private isKnownTopologySeat(dest: string): boolean {
+    try {
+      const anyTopology = this.db.prepare("SELECT 1 FROM sessions LIMIT 1").get()
+        ?? this.db.prepare("SELECT 1 FROM nodes LIMIT 1").get();
+      if (!anyTopology) return true;
+      if (this.db.prepare("SELECT 1 FROM sessions WHERE session_name = ? LIMIT 1").get(dest)) return true;
+      const at = dest.lastIndexOf("@");
+      if (at <= 0) return true; // non-canonical shapes stay on the legacy path
+      const seat = dest.slice(0, at);
+      const rig = dest.slice(at + 1);
+      const composed = this.db.prepare(
+        `SELECT 1 FROM nodes n JOIN rigs r ON r.id = n.rig_id
+          WHERE r.name = ? AND REPLACE(n.logical_id, '.', '-') = ? LIMIT 1`,
+      ).get(rig, seat);
+      return !!composed;
+    } catch {
+      return true; // schema-partial fixture DB: never discriminate without evidence
+    }
+  }
+
+  /** OPR.0.5.6.14 — the delivery LEDGER derivation: the row's transitions are the
+   *  one authoritative source. posted → the receipt transition exists;
+   *  transport-failed → the gateway recorded the API error; never-posted →
+   *  a gateway-routed row with NO receipt past the post window (absence is only
+   *  meaningful because posting always stamps — MR2). Pane-bound rows return
+   *  null: no key lies. */
+  deliveryOutcomeFor(qitemId: string): { outcome: "posted" | "transport-failed" | "never-posted"; detail: string } | null {
+    const row = this.db.prepare("SELECT last_nudge_result, ts_created FROM queue_items WHERE qitem_id = ?")
+      .get(qitemId) as { last_nudge_result: string | null; ts_created: string } | undefined;
+    if (!row) return null;
+    const notes = this.db.prepare(
+      `SELECT transition_note FROM queue_transitions
+        WHERE qitem_id = ? AND (transition_note LIKE 'slack-owner-notification-posted %'
+                             OR transition_note LIKE 'slack-owner-notification-transport-failed %')
+        ORDER BY transition_id DESC`,
+    ).all(qitemId) as Array<{ transition_note: string }>;
+    const posted = notes.find((n) => n.transition_note.startsWith("slack-owner-notification-posted "));
+    if (posted) return { outcome: "posted", detail: posted.transition_note };
+    const failed = notes.find((n) => n.transition_note.startsWith("slack-owner-notification-transport-failed "));
+    if (failed) return { outcome: "transport-failed", detail: failed.transition_note };
+    const gatewayRouted = !!row.last_nudge_result && row.last_nudge_result.startsWith("gateway-owned");
+    if (gatewayRouted) {
+      const ageMs = Date.now() - new Date(row.ts_created.includes("T") ? row.ts_created : row.ts_created + "Z").getTime();
+      if (ageMs > QueueRepository.NEVER_POSTED_WINDOW_MS) {
+        return { outcome: "never-posted", detail: "gateway-routed row with no delivery receipt past the post window" };
+      }
+    }
+    return null;
+  }
+
+  /** The grace window before a receiptless gateway-routed row honestly reads
+   *  never-posted (the connector sweep cadence bounds normal posting latency). */
+  static readonly NEVER_POSTED_WINDOW_MS = 120_000;
 
   recordNudgeAttempt(qitemId: string, result: string): void {
     const ts = new Date().toISOString();

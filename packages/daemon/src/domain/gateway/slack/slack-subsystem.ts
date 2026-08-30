@@ -210,6 +210,22 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
             log(`thread stamp failed for ${p.qitemId}: ${(e as Error).message}`);
           }
         },
+        // OPR.0.5.6.14 — a failed post writes the transport-failed ledger
+        // transition so the undelivered surface can name the gateway's error
+        // instead of guessing from nudge telemetry.
+        onTransportFailed: (p, failureClass, detail) => {
+          if (!p.qitemId) return;
+          opts.queueRepo.update({
+            qitemId: p.qitemId,
+            actorSession: "daemon@kernel",
+            transitionNote: [
+              "slack-owner-notification-transport-failed",
+              `notification_key=${p.notificationKey ?? p.qitemId}`,
+              `class=${failureClass}`,
+              `error=${detail}`,
+            ].join(" "),
+          });
+        },
         onPosted: (p, messageTs, threadTs) => {
           const key = p.notificationKey ?? p.qitemId;
           if (opts.queueRepo.transitionLog.hasOwnerNotificationReceipt(p.qitemId, key)) return;

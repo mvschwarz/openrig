@@ -886,7 +886,10 @@ export function queueRoutes(): Hono {
     // 0.5.1-54 classifier fold (PM ruling): LABEL each strand transient vs permanent-topology so the
     // count is actionable — permanent-topology (destination unresolvable on this daemon) routes to the
     // addressing family, not retry; transient is the only class a future DR-2 (held n=1) would touch.
-    const classified = items.map((it) => ({ ...it, deliveryFailureClass: classifyNudgeFailure(it.lastNudgeResult) }));
+    // OPR.0.5.6.14 — the LEDGER class wins when the repo derived one
+    // (transport-failed / never-posted); the nudge-literal regex classifies
+    // only the legacy pane-bound strands.
+    const classified = items.map((it) => ({ ...it, deliveryFailureClass: it.deliveryFailureClass ?? classifyNudgeFailure(it.lastNudgeResult) }));
     return c.json(classified);
   });
 

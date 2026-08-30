@@ -36,7 +36,10 @@ import type { HumanFragment } from "../src/domain/gateway/human-registry.js";
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 const FOUNDER_FRAGMENT = {
-  entityId: "founder",
+  // Fragment convention: address = <entityId>@external, so the entityId is the
+  // full local part — which is exactly what makes the kernel ALIAS resolvable
+  // (parseSessionName("human-founder@kernel").member === "human-founder").
+  entityId: "human-founder",
   class: "human",
   displayName: "The Founder",
   address: "human-founder@external",
@@ -161,14 +164,21 @@ describe("OPR.0.5.6.14 — the delivery ledger is universal and consulted", () =
     onTransportFailed?: (p: unknown, cls: string, detail: string) => void;
   }) {
     const posts: string[] = [];
-    const fetchImpl = async (url: string): Promise<Response> => {
+    const postedTexts: Array<{ text: string; ts: string }> = [];
+    const fetchImpl = async (url: string, init?: RequestInit): Promise<Response> => {
       if (url.includes("chat.postMessage")) {
         posts.push(url);
         if (opts?.postStatus && opts.postStatus !== 200) return new Response("err", { status: opts.postStatus });
+        // Slack truthfulness: a 200-posted message EXISTS in the channel and
+        // must appear in later reconcile scans (that is the whole repair story).
+        try {
+          const body = JSON.parse(String(init?.body ?? "{}")) as { text?: string };
+          postedTexts.push({ text: String(body.text ?? ""), ts: "1234.5678" });
+        } catch { /* non-JSON body: scan stays empty */ }
         return new Response(JSON.stringify({ ok: true, ts: "1234.5678", channel: "C1" }), { status: 200, headers: { "content-type": "application/json" } });
       }
-      // reconcile scans etc.
-      return new Response(JSON.stringify({ ok: true, messages: [] }), { status: 200, headers: { "content-type": "application/json" } });
+      // reconcile scans see what was actually posted
+      return new Response(JSON.stringify({ ok: true, messages: postedTexts }), { status: 200, headers: { "content-type": "application/json" } });
     };
     const attempted = memStore();
     const delivered = memStore();
