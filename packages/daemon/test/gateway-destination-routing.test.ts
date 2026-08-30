@@ -355,7 +355,7 @@ describe("OPR.0.5.6.14 — the delivery ledger is universal and consulted", () =
     receipt(parked.qitemId, "posted", "message_ts=200.1 thread_ts=200.1");
     h.repo.update({ qitemId: parked.qitemId, actorSession: "orch-lead@v-openrig-build", state: "in-progress", transitionNote: "episode A consumed" });
     const secondKey = await humanPark(parked.qitemId, "episode B");
-    h.repo.update({ qitemId: parked.qitemId, actorSession: "watchdog@system", state: "blocked", blockedOn: "human-founder@kernel", transitionNote: "unchanged wake" });
+    h.repo.update({ qitemId: parked.qitemId, actorSession: "watchdog@system", transitionNote: "unchanged wake" });
     expect(currentEpisodeKey(parked.qitemId), "an unchanged wake stays inside episode B").toBe(secondKey);
     ageCurrentEpisode(parked.qitemId);
 
