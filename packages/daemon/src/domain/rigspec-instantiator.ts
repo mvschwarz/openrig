@@ -308,6 +308,10 @@ import type { RuntimeAdapter, NodeBinding, ResolvedStartupFile } from "./runtime
 import { resolveConcreteHint } from "./runtime-adapter.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { installTopologyDefaults } from "./topology-defaults-installer.js";
+import type {
+  CompactionStrategy,
+  ContinuityPolicyMaterializer,
+} from "./continuity-policy-materializer.js";
 
 function defaultCultureStartupFile(): ResolvedStartupFile {
   const assetsRoot = nodePath.resolve(import.meta.dirname, "../../assets");
@@ -349,6 +353,9 @@ interface PodInstantiatorDeps {
   /** S15 — whether new seats receive the compact default mental-model pack.
    *  Resolved at materialization so config changes affect future launches. */
   onboardingEnabledResolver?: () => boolean;
+  /** S20 P4 — materializes the selected Claude continuity policy by
+   *  registering jobs in the existing watchdog engine after startup succeeds. */
+  continuityPolicyMaterializer?: Pick<ContinuityPolicyMaterializer, "arm">;
 }
 
 export interface MaterializeResult {
@@ -1950,6 +1957,21 @@ export class PodRigInstantiator {
         consumedAgentImageLibrary.recordConsumption(consumedAgentImageId, { incrementForkCount: true });
       } catch (err) {
         console.warn(`[openrig] agent-image fork_count bump failed for ${consumedAgentImageId}: ${(err as Error).message}`);
+      }
+    }
+
+    if (startupResult.ok && this.deps.continuityPolicyMaterializer) {
+      try {
+        this.deps.continuityPolicyMaterializer.arm({
+          compactionStrategy: configResult.config.compactionStrategy as CompactionStrategy,
+          runtime: input.member.runtime,
+          targetSession: canonicalSessionName,
+          sessionId: launchResult.session.id,
+        });
+      } catch (err) {
+        (launchResult.warnings ??= []).push(
+          `continuity policy was not armed for ${canonicalSessionName}: ${(err as Error).message}`,
+        );
       }
     }
 

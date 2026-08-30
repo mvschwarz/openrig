@@ -91,6 +91,10 @@ import { WatchdogAutoRegistration } from "./domain/watchdog-auto-registration.js
 import { WatchdogHistoryLog } from "./domain/watchdog-history-log.js";
 import { WatchdogPolicyEngine } from "./domain/watchdog-policy-engine.js";
 import { WatchdogScheduler } from "./domain/watchdog-scheduler.js";
+import {
+  ContinuityPolicyMaterializer,
+  findClaudeTranscriptByToken,
+} from "./domain/continuity-policy-materializer.js";
 import { WorkflowRuntime } from "./domain/workflow-runtime.js";
 import { makeWorkflowKeepalivePolicy } from "./domain/policies/workflow-keepalive.js";
 import { makeIdleGateQitemPolicy } from "./domain/policies/idle-gate-qitem.js";
@@ -800,6 +804,19 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     targetRoot: getDefaultOpenRigPath("agent-images"),
   });
 
+  const continuityPolicyMaterializer = new ContinuityPolicyMaterializer(
+    watchdogJobsRepoInstance,
+    ({ sessionId }) => {
+      const row = db.prepare("SELECT resume_token FROM sessions WHERE id = ?").get(sessionId) as
+        | { resume_token: string | null }
+        | undefined;
+      const token = row?.resume_token;
+      if (!token) return null;
+      const claudeRoot = process.env.CLAUDE_CONFIG_DIR ?? nodePath.join(os.homedir(), ".claude");
+      return findClaudeTranscriptByToken(nodePath.join(claudeRoot, "projects"), token);
+    },
+  );
+
   const podInstantiator = new PodRigInstantiator({
     db, rigRepo, podRepo,
     sessionRegistry, eventBus, nodeLauncher, startupOrchestrator,
@@ -807,6 +824,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     adapters: { "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() },
     tmuxAdapter,
     agentImageLibrary,
+    continuityPolicyMaterializer,
     exec,
     // OPR.0.5.3.6 — shipped topology chain-file defaults install under the
     // typed topology.root at materialization (copy-if-absent).
