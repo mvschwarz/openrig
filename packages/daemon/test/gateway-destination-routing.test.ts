@@ -27,6 +27,7 @@ import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitio
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { queueTransitionsArchiveSchema } from "../src/db/migrations/054_queue_transitions_archive.js";
 import { ownerNotificationLevelsSchema } from "../src/db/migrations/076_owner_notification_levels.js";
+import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_cli_attachment.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
@@ -52,7 +53,7 @@ const EVIDENCE = "shared-docs/rigs/v-openrig-build/state/evidence-s14.md";
 function makeHarness() {
   const db = createDb();
   migrate(db, [
-    coreSchema, bindingsSessionsSchema, eventsSchema, queueItemsSchema,
+    coreSchema, bindingsSessionsSchema, externalCliAttachmentSchema, eventsSchema, queueItemsSchema,
     queueTransitionsSchema, outboxEntriesSchema, queueTransitionsArchiveSchema,
     ownerNotificationLevelsSchema,
   ]);
@@ -75,6 +76,7 @@ function makeHarness() {
   db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-1', 'rig1')").run();
   db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES ('node-a', 'rig-1', 'dev.a', 'claude-code')").run();
   db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('sess-a', 'node-a', 'dev-a@rig1')").run();
+  db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session) VALUES ('binding-a', 'node-a', 'tmux', 'dev-a@rig1')").run();
   return { db, repo, sends };
 }
 
@@ -139,6 +141,7 @@ describe("OPR.0.5.6.14 — one destination resolver, no fall-through", () => {
   it("FLOOR: a registered human with a real pane stays pane-bound; only its paneless alias is gateway-routable", async () => {
     h.db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES ('node-human', 'rig-1', 'human.founder', 'terminal')").run();
     h.db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('sess-human', 'node-human', 'human-founder@rig1')").run();
+    h.db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session) VALUES ('binding-human', 'node-human', 'tmux', 'human-founder@rig1')").run();
     const item = await h.repo.create({
       sourceSession: "orch-lead@v-openrig-build",
       destinationSession: "human-founder@rig1",
@@ -146,6 +149,23 @@ describe("OPR.0.5.6.14 — one destination resolver, no fall-through", () => {
     });
     expect(h.sends.map((send) => send.session)).toEqual(["human-founder@rig1"]);
     expect(h.repo.getById(item.qitemId)!.lastNudgeResult).toMatch(/^failed:/);
+  });
+
+  it("PANELLESS TOPOLOGY IS NOT A TERMINAL: an external_cli-bound registered human stays gateway-routable", async () => {
+    h.db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES ('node-external', 'rig-1', 'human.founder', 'external')").run();
+    h.db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('sess-external', 'node-external', 'human-founder@kernel')").run();
+    h.db.prepare("INSERT INTO bindings (id, node_id, attachment_type, external_session_name) VALUES ('binding-external', 'node-external', 'external_cli', 'human-founder@kernel')").run();
+
+    const item = await h.repo.create({
+      sourceSession: "orch-lead@v-openrig-build",
+      destinationSession: "human-founder@kernel",
+      body: "founder decision through a known paneless node",
+      summary: "Founder decision",
+      evidenceRef: EVIDENCE,
+    });
+
+    expect(h.sends, "a paneless external_cli binding has no terminal transport").toHaveLength(0);
+    expect(h.repo.getById(item.qitemId)!.lastNudgeResult).toMatch(/^gateway-owned/);
   });
 
   it("D3 SEAM, STRUCTURAL: one named classification site; the inline external branch is gone from the wake path", () => {
@@ -164,6 +184,42 @@ describe("OPR.0.5.6.14 — one destination resolver, no fall-through", () => {
 describe("OPR.0.5.6.14 — the delivery ledger is universal and consulted", () => {
   let h: ReturnType<typeof makeHarness>;
   beforeEach(() => { h = makeHarness(); });
+
+  function currentEpisode(qitemId: string) {
+    const transition = h.repo.transitionLog.latestOwnerNotificationForQitem(qitemId);
+    expect(transition, "fixture must carry a current OWNER notification episode").not.toBeNull();
+    return transition!;
+  }
+
+  function currentEpisodeKey(qitemId: string): string {
+    return `${qitemId}:${currentEpisode(qitemId).transitionId}`;
+  }
+
+  function ageCurrentEpisode(qitemId: string): void {
+    const transition = currentEpisode(qitemId);
+    h.db.prepare("UPDATE queue_transitions SET ts = datetime('now', '-1 hour') WHERE transition_id = ?").run(transition.transitionId);
+  }
+
+  function receipt(qitemId: string, outcome: "posted" | "transport-failed", detail: string): void {
+    h.repo.update({
+      qitemId,
+      actorSession: "daemon@kernel",
+      transitionNote: `slack-owner-notification-${outcome} notification_key=${currentEpisodeKey(qitemId)} ${detail}`,
+    });
+  }
+
+  async function humanPark(qitemId: string, note: string): Promise<string> {
+    h.repo.update({
+      qitemId,
+      actorSession: "orch-lead@v-openrig-build",
+      state: "blocked",
+      blockedOn: "human-founder@kernel",
+      summary: "Founder decision required",
+      evidenceRef: EVIDENCE,
+      transitionNote: note,
+    });
+    return currentEpisodeKey(qitemId);
+  }
 
   function memStore() {
     const m = new Map<string, string>();
@@ -259,13 +315,13 @@ describe("OPR.0.5.6.14 — the delivery ledger is universal and consulted", () =
     // Row A: gateway-routed, POSTED (receipt transition present) but nudge literal failed.
     const a = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", body: "a", summary: "a", evidenceRef: EVIDENCE, nudge: false });
     h.db.prepare("UPDATE queue_items SET last_nudge_result = 'failed: stale poison literal', last_nudge_attempt = datetime('now') WHERE qitem_id = ?").run(a.qitemId);
-    h.repo.update({ qitemId: a.qitemId, actorSession: "daemon@kernel", transitionNote: "slack-owner-notification-posted notification_key=" + a.qitemId + " level=ALERT kind=unclassified message_ts=111.22 thread_ts=111.22" });
+    receipt(a.qitemId, "posted", "level=ALERT kind=unclassified message_ts=111.22 thread_ts=111.22");
     // Row B: gateway-routed, TRANSPORT-FAILED transition.
     const b = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", body: "b", summary: "b", evidenceRef: EVIDENCE, nudge: false });
-    h.repo.update({ qitemId: b.qitemId, actorSession: "daemon@kernel", transitionNote: "slack-owner-notification-transport-failed notification_key=" + b.qitemId + " class=http-500 error=internal server error" });
+    receipt(b.qitemId, "transport-failed", "class=http-500 error=internal-server-error");
     // Row C: gateway-routed, NO receipt, older than the post window.
     const c = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", body: "c", summary: "c", evidenceRef: EVIDENCE, nudge: false });
-    h.db.prepare("UPDATE queue_items SET last_nudge_result = 'gateway-owned: delivery rides the gateway subsystem', ts_created = datetime('now', '-1 hour') WHERE qitem_id = ?").run(c.qitemId);
+    ageCurrentEpisode(c.qitemId);
 
     const und = h.repo.findUndelivered({});
     const ids = und.map((u) => u.qitemId);
@@ -277,9 +333,51 @@ describe("OPR.0.5.6.14 — the delivery ledger is universal and consulted", () =
     expect(byId.get(c.qitemId)?.deliveryFailureClass ?? (byId.get(c.qitemId) as { deliveryClass?: string })?.deliveryClass).toMatch(/never-posted/);
   });
 
+  it("CURRENT EPISODE WINS: an old posted receipt cannot mask a later failed human-park episode", async () => {
+    const row = await h.repo.create({ sourceSession: "s@r", destinationSession: "orch-lead@v-openrig-build", body: "ask", nudge: false });
+    const firstKey = await humanPark(row.qitemId, "episode A");
+    receipt(row.qitemId, "posted", "message_ts=100.1 thread_ts=100.1");
+    h.repo.update({ qitemId: row.qitemId, actorSession: "orch-lead@v-openrig-build", state: "in-progress", transitionNote: "episode A consumed" });
+    const secondKey = await humanPark(row.qitemId, "episode B");
+    expect(secondKey).not.toBe(firstKey);
+    receipt(row.qitemId, "transport-failed", "class=http-500 error=episode-b-needle");
+
+    expect(h.repo.deliveryOutcomeFor(row.qitemId)).toMatchObject({ outcome: "transport-failed" });
+    const failed = h.repo.findUndelivered({}).find((item) => item.qitemId === row.qitemId) as
+      | { deliveryFailureDetail?: string }
+      | undefined;
+    expect(failed?.deliveryFailureDetail, "the consumer preserves the gateway's actual error evidence").toContain("episode-b-needle");
+  });
+
+  it("CURRENT EPISODE WINDOW: receiptless re-parks and direct no-nudge humans become never-posted from episode time", async () => {
+    const parked = await h.repo.create({ sourceSession: "s@r", destinationSession: "orch-lead@v-openrig-build", body: "ask", nudge: false });
+    await humanPark(parked.qitemId, "episode A");
+    receipt(parked.qitemId, "posted", "message_ts=200.1 thread_ts=200.1");
+    h.repo.update({ qitemId: parked.qitemId, actorSession: "orch-lead@v-openrig-build", state: "in-progress", transitionNote: "episode A consumed" });
+    const secondKey = await humanPark(parked.qitemId, "episode B");
+    h.repo.update({ qitemId: parked.qitemId, actorSession: "watchdog@system", state: "blocked", blockedOn: "human-founder@kernel", transitionNote: "unchanged wake" });
+    expect(currentEpisodeKey(parked.qitemId), "an unchanged wake stays inside episode B").toBe(secondKey);
+    ageCurrentEpisode(parked.qitemId);
+
+    const direct = await h.repo.create({
+      sourceSession: "s@r",
+      destinationSession: "human-founder@external",
+      body: "direct no-nudge human",
+      summary: "direct",
+      evidenceRef: EVIDENCE,
+      nudge: false,
+    });
+    ageCurrentEpisode(direct.qitemId);
+
+    expect(h.repo.deliveryOutcomeFor(parked.qitemId)).toMatchObject({ outcome: "never-posted" });
+    const undelivered = h.repo.findUndelivered({});
+    expect(undelivered.find((item) => item.qitemId === parked.qitemId)?.deliveryOutcome).toBe("never-posted");
+    expect(undelivered.find((item) => item.qitemId === direct.qitemId)?.deliveryOutcome).toBe("never-posted");
+  });
+
   it("THE ROW FACE READS DELIVERY: gateway-routed rows surface posted/transport-failed/never-posted; pane-bound rows keep their exact keys", async () => {
     const posted = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", body: "p", summary: "p", evidenceRef: EVIDENCE, nudge: false });
-    h.repo.update({ qitemId: posted.qitemId, actorSession: "daemon@kernel", transitionNote: "slack-owner-notification-posted notification_key=" + posted.qitemId + " level=ALERT kind=unclassified message_ts=222.33 thread_ts=222.33" });
+    receipt(posted.qitemId, "posted", "level=ALERT kind=unclassified message_ts=222.33 thread_ts=222.33");
     const face = h.repo.getById(posted.qitemId) as unknown as { deliveryOutcome?: string | null };
     expect(face.deliveryOutcome, "a posted gateway row answers 'did it reach them' in one read").toMatch(/posted/);
     const listFace = h.repo.list({ limit: 100 }).find((item) => item.qitemId === posted.qitemId) as
@@ -294,16 +392,17 @@ describe("OPR.0.5.6.14 — the delivery ledger is universal and consulted", () =
 
   it("UNDELIVERED LIMIT IS HONEST: posted rows cannot consume the window and hide a later gateway failure", async () => {
     const posted = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", body: "p", summary: "p", evidenceRef: EVIDENCE, nudge: false });
-    h.repo.update({ qitemId: posted.qitemId, actorSession: "daemon@kernel", transitionNote: "slack-owner-notification-posted notification_key=" + posted.qitemId + " level=ALERT kind=unclassified message_ts=444.55 thread_ts=444.55" });
+    receipt(posted.qitemId, "posted", "level=ALERT kind=unclassified message_ts=444.55 thread_ts=444.55");
     const failed = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", body: "f", summary: "f", evidenceRef: EVIDENCE, nudge: false });
-    h.repo.update({ qitemId: failed.qitemId, actorSession: "daemon@kernel", transitionNote: "slack-owner-notification-transport-failed notification_key=" + failed.qitemId + " class=http-500 error=failed" });
+    receipt(failed.qitemId, "transport-failed", "class=http-500 error=failed");
     expect(h.repo.findUndelivered({ limit: 1 }).map((item) => item.qitemId)).toEqual([failed.qitemId]);
   });
 
   it("FLOOR: the receipt-bound episode dedupe stands — a second identical receipt write is a no-op", async () => {
     const row = await h.repo.create({ sourceSession: "s@r", destinationSession: "human-founder@external", body: "d", summary: "d", evidenceRef: EVIDENCE, nudge: false });
-    const note = "slack-owner-notification-posted notification_key=" + row.qitemId + " level=ALERT kind=unclassified message_ts=333.44 thread_ts=333.44";
+    const key = currentEpisodeKey(row.qitemId);
+    const note = "slack-owner-notification-posted notification_key=" + key + " level=ALERT kind=unclassified message_ts=333.44 thread_ts=333.44";
     h.repo.update({ qitemId: row.qitemId, actorSession: "daemon@kernel", transitionNote: note });
-    expect(h.repo.transitionLog.hasOwnerNotificationReceipt(row.qitemId, row.qitemId), "the receipt suppresses the repeat").toBe(true);
+    expect(h.repo.transitionLog.hasOwnerNotificationReceipt(row.qitemId, key), "the receipt suppresses the repeat").toBe(true);
   });
 });
