@@ -60,6 +60,17 @@ export interface SlackWireOpts {
  * prefixed with the event ts + index (unique per event), and the resolved path
  * is verified to stay inside `mediaDir` before any write.
  */
+/** R1 F1 — the anchored Slack-host verdict: https + URL-parsed hostname that is
+ *  exactly `slack.com` or ends with `.slack.com`. Never a substring match. */
+function isSlackHost(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" && (u.hostname === "slack.com" || u.hostname.endsWith(".slack.com"));
+  } catch {
+    return false;
+  }
+}
+
 export function makeInboundFilePort(opts: {
   token: string;
   mediaDir: string;
@@ -81,7 +92,10 @@ export function makeInboundFilePort(opts: {
         const meta = (files[i] ?? {}) as { id?: string; name?: string; mimetype?: string; url_private?: string };
         const name = String(meta.name ?? meta.id ?? `file-${i + 1}`);
         const url = meta.url_private;
-        if (!url || !/^https:\/\/[^/]*slack\.com\//.test(url)) {
+        // R1 F1: ANCHORED host check — URL-parsed hostname, exact `slack.com`
+        // or a dot-suffix subdomain. A substring/regex match admits lookalike
+        // domains (evilslack.com) and would send the Bearer token to them.
+        if (!url || !isSlackHost(url)) {
           failed.push({ name, error: "missing or non-Slack url_private" });
           continue;
         }

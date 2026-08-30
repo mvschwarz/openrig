@@ -205,6 +205,32 @@ describe("inbound files: failure honesty (never a silent drop)", () => {
     expect(body).not.toMatch(/url_private|files\.slack\.com/);
   });
 
+  it("R1 F1: a lookalike domain is REJECTED before any request — the token never travels to evilslack.com", async () => {
+    const EVIL = "https://evilslack.com/files-pri/T1-FX/steal.png";
+    const h = harness({ routes: { [EVIL]: PNG_BYTES }, mapped: { "400.0": "x@y" } });
+    await deliver(h, fileEvent({ files: [{ id: "FX", name: "steal.png", mimetype: "image/png", url_private: EVIL }] }));
+    expect(h.rows, "the message still lands").toHaveLength(1);
+    expect(h.rows[0]!.body).toMatch(/file transfer failed/i);
+    expect(h.rows[0]!.body).toContain("non-Slack");
+    expect(h.seenAuth, "NO request left the boundary — the Bearer token never traveled").toHaveLength(0);
+    expect([...h.media.keys()]).toHaveLength(0);
+  });
+
+  it("R1 F2: a THROWING file port never costs the ACKed message — the row lands with every file a named failure", async () => {
+    const h = harness({ mapped: { "400.0": "x@y" } });
+    (h.router as unknown as { deps: { files: { transfer: () => Promise<never> } } }).deps.files = {
+      transfer: async () => { throw new Error("ENOSPC: no space left on device"); },
+    };
+    await deliver(h, fileEvent({ text: "must survive a crashing port", files: [F_IMG, F_PDF] }));
+    expect(h.rows, "the row lands despite the port crash").toHaveLength(1);
+    const body = h.rows[0]!.body;
+    expect(body).toContain("must survive a crashing port");
+    expect(body).toMatch(/file transfer crashed/i);
+    expect(body).toContain("whiteboard sketch.png");
+    expect(body).toContain("notes.pdf");
+    expect(body).toContain("ENOSPC");
+  });
+
   it("an auth failure disguised as HTML is detected and named, not stored as garbage", async () => {
     const h = harness({ routes: { [F_IMG.url_private]: { html: true } }, mapped: { "400.0": "x@y" } });
     await deliver(h, fileEvent());

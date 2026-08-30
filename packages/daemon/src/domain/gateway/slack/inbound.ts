@@ -158,15 +158,27 @@ export class InboundRouter {
       const fileMetas = Array.isArray(ev.files) ? ev.files : [];
       let transfer: InboundFileResult | null = null;
       if (fileMetas.length > 0) {
-        transfer = this.deps.files
-          ? await this.deps.files.transfer(fileMetas, ts)
-          : {
-              stored: [],
-              failed: fileMetas.map((f, i) => {
-                const m = (f ?? {}) as { name?: string; id?: string };
-                return { name: String(m.name ?? m.id ?? `file-${i + 1}`), error: "file transfer unavailable (no file port wired)" };
-              }),
-            };
+        const namedAll = (error: string): InboundFileResult => ({
+          stored: [],
+          failed: fileMetas.map((f, i) => {
+            const m = (f ?? {}) as { name?: string; id?: string };
+            return { name: String(m.name ?? m.id ?? `file-${i + 1}`), error };
+          }),
+        });
+        if (!this.deps.files) {
+          transfer = namedAll("file transfer unavailable (no file port wired)");
+        } else {
+          // R1 F2: a THROWING port (disk-full mkdirp, any crash) must never cost
+          // the already-ACKed message — the row still lands and every file
+          // becomes a NAMED failure. Failure honesty is a property of this seam,
+          // not a promise the port is trusted to keep.
+          try {
+            transfer = await this.deps.files.transfer(fileMetas, ts);
+          } catch (e) {
+            this.deps.log?.(`inbound file port CRASHED ts=${ts}: ${(e as Error).message}`);
+            transfer = namedAll(`file transfer crashed: ${(e as Error).message || "unknown error"}`);
+          }
+        }
       }
       const { summary, body } = this.summaryOf(ev, transfer);
       // S10 — deterministic route (thread map) when wired; static destination otherwise.
