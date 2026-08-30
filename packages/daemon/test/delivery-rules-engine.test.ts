@@ -561,6 +561,7 @@ describe("OPR.0.5.6.1 §4 — the C/D digest flush (v3: transport truth first, r
       recordDigestDecision(alert.qitemId, key, "4h");
     }
     const posts: Array<Record<string, unknown>> = [];
+    let trackedC!: QueueItem;
     const failing = digestWire(posts, { failFetch: true });
     try {
       failing.startServices?.();
@@ -608,6 +609,7 @@ describe("OPR.0.5.6.1 §4 — the C/D digest flush (v3: transport truth first, r
       recordDigestDecision(alert.qitemId, alert.notificationKey ?? alert.qitemId, "4h");
     }
     const posts: Array<Record<string, unknown>> = [];
+    let trackedC!: QueueItem;
     const failing = digestWire(posts, { failFetch: true });
     try {
       failing.startServices?.();
@@ -615,9 +617,10 @@ describe("OPR.0.5.6.1 §4 — the C/D digest flush (v3: transport truth first, r
       expect(first.members).toBe(2);
       await new Promise((resolve) => setTimeout(resolve, 40));
       // C arrives while A+B are pending receiptless
-      const [cRow] = await nParks(1);
+      const [cRowCreated] = await nParks(1);
+      trackedC = cRowCreated!;
       for (const alert of await ports.listHumanAlerts({ minimumLevel: "NOTICE" })) {
-        if (alert.qitemId === cRow!.qitemId) {
+        if (alert.qitemId === trackedC.qitemId) {
           recordDigestDecision(alert.qitemId, alert.notificationKey ?? alert.qitemId, "4h");
         }
       }
@@ -644,20 +647,22 @@ describe("OPR.0.5.6.1 §4 — the C/D digest flush (v3: transport truth first, r
     try {
       healthy.startServices?.();
       await new Promise((resolve) => setTimeout(resolve, 80));
+      // R1 e22e804f correction: EVERY tracked member — A, B, AND C — must
+      // appear in exactly ONE posted digest and carry exactly ONE receipt.
+      // (The prior firstRows-only count with a <=1 receipt bound could not
+      // refuse a zero-C outcome — the exact proof gap the HOLD named.)
+      const tracked = [...firstRows, trackedC];
       const memberAppearances = new Map<string, number>();
       for (const post of posts) {
         const text = JSON.stringify(post);
-        for (const row of [...firstRows]) {
+        for (const row of tracked) {
           if (text.includes(row.qitemId)) memberAppearances.set(row.qitemId, (memberAppearances.get(row.qitemId) ?? 0) + 1);
         }
       }
-      for (const row of firstRows) {
+      for (const row of tracked) {
         expect(memberAppearances.get(row.qitemId) ?? 0, `${row.qitemId} appears in exactly one posted digest`).toBe(1);
-      }
-      const allRows = await (async () => repo.list({ limit: 100 }))();
-      for (const row of allRows.filter((r) => r.destinationSession === "orch-lead@v-openrig-build")) {
         const receipts = repo.listTransitions(row.qitemId).filter((t) => t.transitionNote?.startsWith("slack-owner-notification-posted "));
-        expect(receipts.length, `one receipt per member episode on ${row.qitemId}`).toBeLessThanOrEqual(1);
+        expect(receipts.length, `exactly one posted receipt on ${row.qitemId}`).toBe(1);
       }
     } finally {
       healthy.stop();
