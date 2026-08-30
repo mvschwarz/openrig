@@ -27,7 +27,7 @@
 //               Delivery is never suppressed (F-8): the post lands unmentioned,
 //               and the single-human termination is recorded loud.
 //
-// THE DELIVERY-STATE TABLE (AM-F4 — one definition site, defined AGAINST the
+// The delivery-state table (AM-F4 — one definition site, defined AGAINST the
 // S14 receipt stamps; the engine never re-spells a transport verdict):
 //   queued    = the row exists, no delivery transition yet
 //   posted    = the S14 posted receipt transition is on the row
@@ -134,7 +134,9 @@ export function decideDelivery(input: DeliveryDecisionInput): DeliveryDecision {
       break;
     case "focus":
       // focus mutes NORMAL interrupts; escalation still interrupts (design §3).
-      if (outcome === "interrupt" && !input.escalation) outcome = "notify";
+      // Register A is the exception in BOTH quiet modes (focus here, away
+      // below): interrupt-ALWAYS is the human's own stronger word.
+      if (outcome === "interrupt" && !input.escalation && deliveryClass !== "A") outcome = "notify";
       break;
     case "away":
       if (input.escalation) {
