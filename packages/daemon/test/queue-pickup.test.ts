@@ -157,11 +157,11 @@ describe("S04 pickup receipts — derived, visible, threshold-honest", () => {
     const queueRepository = readFileSync(resolve(DOMAIN_ROOT, "queue-repository.ts"), "utf8");
     const daemonLifecycle = readFileSync(resolve(DOMAIN_ROOT, "daemon-lifecycle-store.ts"), "utf8");
     const daemonEntry = readFileSync(resolve(DOMAIN_ROOT, "../index.ts"), "utf8");
-    const rowWriter = ["record", "Heartbeat(qitemId"].join("");
+    const rowWriter = /\brecordHeartbeat\s*\(/;
     const daemonWriter = ["record", "Heartbeat(nowIso"].join("");
     const daemonCall = ["daemonLifecycleStore.record", "Heartbeat"].join("");
 
-    expect(queueRepository).not.toContain(rowWriter);
+    expect(queueRepository).not.toMatch(rowWriter);
     expect(daemonLifecycle).toContain(daemonWriter);
     expect(daemonEntry).toContain(daemonCall);
     for (const reader of ["queue-pickup.ts", "queue-stuck-sweep.ts", "queue-wake-ladder.ts"]) {
