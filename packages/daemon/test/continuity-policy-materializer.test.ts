@@ -5,6 +5,7 @@ import {
   armContinuityPolicy,
   materializeContinuityPolicy,
 } from "../src/domain/continuity-policy-materializer.js";
+import { parseWatchdogSpec } from "../src/domain/watchdog-policy-engine.js";
 
 const CLAUDE_SEAT = {
   compactionStrategy: "apprentice-handover" as const,
@@ -45,6 +46,16 @@ describe("continuity policy materializer (S20 P4)", () => {
       policy: "context-usage-threshold",
       requiresJobId: "prepare-job",
     });
+  });
+
+  it("serializes both fire notices through the watchdog engine's actual spec parser", () => {
+    const messages = materializeContinuityPolicy(CLAUDE_SEAT).jobs.map(
+      (job) => parseWatchdogSpec(job.specYaml).message,
+    );
+
+    expect(messages[0]).toContain("continuity/apprentice-prepare.md");
+    expect(messages[1]).toContain("continuity/apprentice-cutover.md");
+    expect(messages.every((message) => message !== "|")).toBe(true);
   });
 
   it("positive-matches Claude only and leaves native/default modes unarmed", () => {
