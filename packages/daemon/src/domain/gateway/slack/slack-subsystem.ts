@@ -13,7 +13,9 @@
 // relay already delivered (the enable-time backlog rule survives the cutover by construction).
 
 import path from "node:path";
+import fs from "node:fs";
 import { buildInProcessWire, type GatewayWire } from "../gateway-subsystem.js";
+import { downloadPrivateFile } from "./slack-api.js";
 import { loadConfig } from "./config.js";
 import { resolveSecret } from "./secrets.js";
 import { SeenStore, DeadLetterStore } from "./state-store.js";
@@ -44,6 +46,73 @@ export interface SlackWireOpts {
   inboundRetryIntervalMs?: number;
   inboundMaxConnects?: number;
   registry?: RegistrySurface;
+}
+
+/**
+ * OPR.0.5.6.2 — the inbound file port: Slack `url_private` → authenticated
+ * download → workspace-local media file → LOCAL path for the reply row.
+ * Slack owns nothing (design §2): the stored file is OUR copy of the human's
+ * contribution to OUR work record; no Slack URL and no token ever leaves this
+ * function toward a row. Failure is per-file and NAMED — a failed transfer
+ * yields `{ name, error }`, never an exception that could cost the message.
+ *
+ * Safe-path discipline: filenames sanitize to a bounded [A-Za-z0-9._-] basename
+ * prefixed with the event ts + index (unique per event), and the resolved path
+ * is verified to stay inside `mediaDir` before any write.
+ */
+export interface StoredInboundFile { name: string; localPath: string; mimetype?: string; bytes: number }
+export interface FailedInboundFile { name: string; error: string }
+export interface InboundFileResult { stored: StoredInboundFile[]; failed: FailedInboundFile[] }
+export interface InboundFilePort { transfer(files: unknown[], eventTs: string): Promise<InboundFileResult> }
+
+export function makeInboundFilePort(opts: {
+  token: string;
+  mediaDir: string;
+  fetchImpl?: FetchImpl;
+  mkdirp?: (dir: string) => void;
+  writeFile?: (p: string, bytes: Uint8Array) => void;
+  log?: (msg: string) => void;
+  maxBytes?: number;
+}): InboundFilePort {
+  const log = opts.log ?? (() => {});
+  const mkdirp = opts.mkdirp ?? ((dir: string) => { fs.mkdirSync(dir, { recursive: true }); });
+  const writeFile = opts.writeFile ?? ((p: string, bytes: Uint8Array) => { fs.writeFileSync(p, bytes); });
+  return {
+    async transfer(files: unknown[], eventTs: string): Promise<InboundFileResult> {
+      const stored: StoredInboundFile[] = [];
+      const failed: FailedInboundFile[] = [];
+      mkdirp(opts.mediaDir);
+      for (let i = 0; i < files.length; i++) {
+        const meta = (files[i] ?? {}) as { id?: string; name?: string; mimetype?: string; url_private?: string };
+        const name = String(meta.name ?? meta.id ?? `file-${i + 1}`);
+        const url = meta.url_private;
+        if (!url || !/^https:\/\/[^/]*slack\.com\//.test(url)) {
+          failed.push({ name, error: "missing or non-Slack url_private" });
+          continue;
+        }
+        const dl = await downloadPrivateFile(url, opts.token, opts.fetchImpl ?? fetch, 30_000, opts.maxBytes);
+        if (!dl.ok) {
+          log(`inbound file transfer FAILED name=${name} ts=${eventTs}: ${dl.error}`);
+          failed.push({ name, error: dl.error });
+          continue;
+        }
+        const safeBase = path.basename(name).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 80) || `file-${i + 1}`;
+        const localPath = path.join(opts.mediaDir, `${eventTs.replace(/[^0-9.]/g, "")}-${i + 1}-${safeBase}`);
+        if (!path.resolve(localPath).startsWith(path.resolve(opts.mediaDir) + path.sep)) {
+          failed.push({ name, error: "unsafe path refused" });
+          continue;
+        }
+        try {
+          writeFile(localPath, dl.bytes);
+        } catch (e) {
+          failed.push({ name, error: `local write failed: ${(e as Error).message}` });
+          continue;
+        }
+        stored.push({ name, localPath, mimetype: meta.mimetype, bytes: dl.bytes.byteLength });
+      }
+      return { stored, failed };
+    },
+  };
 }
 
 function stateDir(home: string): string {

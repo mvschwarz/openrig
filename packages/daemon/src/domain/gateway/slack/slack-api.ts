@@ -143,6 +143,39 @@ export async function getGrantedScopes(
   return { ok: r.ok, granted: r.grantedScopes, error: r.error };
 }
 
+/** OPR.0.5.6.2 — authenticated private-file download (`url_private` + Bearer,
+ *  the verified inbound mechanic from the human-layer design §4.1). Bounded:
+ *  a body over `maxBytes` is refused, never truncated-and-stored. Slack's
+ *  classic auth-failure mode returns an HTML login page with status 200 —
+ *  detected by content-type and named, so garbage is never stored as the file.
+ *  Errors are MESSAGES, not exceptions: the caller's failure-honesty contract
+ *  needs a name per file, never a thrown loss of the whole event. */
+export const INBOUND_FILE_MAX_BYTES = 26_214_400; // 25 MiB — bounded write per product limits
+
+export async function downloadPrivateFile(
+  url: string,
+  token: string,
+  fetchImpl: FetchImpl = fetch,
+  timeoutMs = 30_000,
+  maxBytes = INBOUND_FILE_MAX_BYTES,
+): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; error: string }> {
+  try {
+    return await withTimeout(timeoutMs, async (signal) => {
+      const res = await fetchImpl(url, { headers: { authorization: `Bearer ${token}` }, signal } as RequestInit);
+      if (!res.ok) return { ok: false as const, error: `http ${res.status}` };
+      const contentType = res.headers.get("content-type") ?? "";
+      if (contentType.includes("text/html")) {
+        return { ok: false as const, error: "auth failure (Slack served an HTML page instead of the file)" };
+      }
+      const buf = new Uint8Array(await res.arrayBuffer());
+      if (buf.byteLength > maxBytes) return { ok: false as const, error: `exceeds size bound (${buf.byteLength} > ${maxBytes})` };
+      return { ok: true as const, bytes: buf };
+    });
+  } catch (e) {
+    return { ok: false, error: (e as Error).message || "download failed" };
+  }
+}
+
 export interface ScopeVerdict {
   ok: boolean;
   granted: string[];
