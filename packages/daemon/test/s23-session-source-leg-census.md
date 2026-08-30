@@ -1,6 +1,12 @@
-# OPR.0.5.6.23 — sessionSource transform-leg census (base 1f6675b09cb3f8a96c36db252b758c862ba47160)
+# OPR.0.5.6.23 — silent-erasure leg census (base f1737b9100150298b488e329a5d50ad6b444d20f)
 
-Re-derive with one command (code lines only; types/comments excluded by inspection):
+Minted against 1f6675b09; REBOUND to current base f1737b910 after two restacks —
+the frontier deltas (43e4c8f49..f1737b910) carry ZERO sessionSource code lines
+(re-derive: `git diff 1f6675b09..f1737b910 -- packages/daemon/src | grep -c
+"sessionSource\|session_source"`), so rows 1-13 hold unchanged at this base.
+
+Re-derive the sessionSource legs with one command (code lines only; types/comments
+excluded by inspection):
 
     grep -rn "sessionSource\|session_source" packages/daemon/src --include='*.ts'
 
@@ -8,6 +14,17 @@ The class closes by THIS census, not by fixing named instances. Union optional f
 at base: `ref.value` (fork arm), `ref.version` (agent_image arm); rebuild's `ref.value`
 is required. Member-level optional fields ride the same serialize seam and are in the
 same silent-erasure class where a parse leg carries them and a sibling leg drops them.
+
+SECOND RULED CLASS MEMBER (desk transition 45061 on row qitem-20260829221752-0f8e2d7d,
+2026-08-30T00:40Z; R2 HOLD B-1): the class also covers optional top-level SPEC FAMILIES
+at the codec seam. Re-derive family coverage with one command:
+
+    grep -n "spec\.\(summary\|cultureFile\|permissionPolicy\|docs\|startup\|services\|workspace\)" packages/daemon/src/domain/rigspec-codec.ts
+
+| # | Family leg | Kind | Disposition |
+|---|---|---|---|
+| 14 | domain/rigspec-codec.ts serialize `spec.services` | transform | **FIXED-HERE (member c)**: parse validates+normalizes services (rigspec-schema :109/:197) but serialize read no `spec.services` — the whole family died on export-YAML -> re-import. Now emitted via a completeness-pinned emitter record (`{[K in keyof Required<RigServicesSpec>]}`): a new services field fails compilation naming the missing key |
+| 15 | domain/rigspec-codec.ts serialize, remaining optional families (summary, culture_file, permission_policy, docs, startup, workspace) | transform | AFFIRMATIVELY-CLEARED at this base: each has an emission line at the seam (the one-command grep above returns a serialize hit per family); services was the sole family with a parse leg and no serialize leg |
 
 | # | Leg (file:line) | Kind | Disposition |
 |---|---|---|---|
