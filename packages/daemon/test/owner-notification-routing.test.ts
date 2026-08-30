@@ -36,7 +36,11 @@ const registry = {
       role: "primary" as const,
       handle: "UFOUNDER",
     }],
-    prefs: { deliveryClass: "B" as const },
+    // OPR.0.5.6.1 enumerated fixture change (orch-lead disposition 04:59Z):
+    // prefs now DECIDE (AM-F5 replaced the S14 default stub) — this floor's
+    // intent is "an interrupt-class human's ALERT mentions; NOTICE stays
+    // quiet", which requires register A (B rules notify, no mention).
+    prefs: { deliveryClass: "A" as const },
   }],
 };
 
