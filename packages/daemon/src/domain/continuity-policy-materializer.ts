@@ -50,6 +50,11 @@ export interface ContinuityPolicyPlan {
 
 export interface ContinuityJobsRegistrar {
   register(input: RegisterWatchdogJobInput): Pick<WatchdogJob, "jobId">;
+  listExactTuple?(
+    policy: string,
+    targetSession: string,
+    targetGenerationUuid: string | null,
+  ): Array<Pick<WatchdogJob, "jobId" | "state" | "specYaml" | "requiresJobId">>;
 }
 
 function thresholdBytes(targetTokens: number, tokensPerMegabyte: number): number {
@@ -136,6 +141,28 @@ export function armContinuityPolicy(
   registrar: ContinuityJobsRegistrar,
 ): Array<Pick<WatchdogJob, "jobId">> {
   const plan = materializeContinuityPolicy(input);
+  if (plan.jobs.length === 0) return [];
+  const existing = (registrar.listExactTuple?.(
+    "context-usage-threshold",
+    input.targetSession,
+    null,
+  ) ?? []).filter(
+    (job) =>
+      job.state !== "terminal" &&
+      job.specYaml.includes("generated_by: continuity-policy-materializer"),
+  );
+  if (existing.length > 0) {
+    const prepare = existing.find((job) => job.requiresJobId === null);
+    const cutover = prepare
+      ? existing.find((job) => job.requiresJobId === prepare.jobId)
+      : undefined;
+    if (existing.length !== 2 || !prepare || !cutover) {
+      throw new Error(
+        `continuity_policy_registration_ambiguous: expected one prepare/cutover pair for ${input.targetSession}`,
+      );
+    }
+    return [prepare, cutover];
+  }
   const registered = new Map<string, Pick<WatchdogJob, "jobId">>();
   for (const job of plan.jobs) {
     const requiresJobId = job.requiresKey
