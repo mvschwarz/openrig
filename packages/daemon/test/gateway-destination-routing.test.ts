@@ -231,10 +231,12 @@ describe("OPR.0.5.6.14 — the delivery ledger is universal and consulted", () =
   function deliverHarness(opts?: {
     postStatus?: number;
     postStatuses?: number[];
+    attemptedStore?: ReturnType<typeof memStore>;
     onPostedImpl?: (p: unknown, ts: string) => void;
     onTransportFailed?: (p: unknown, cls: string, detail: string) => void;
   }) {
     const posts: string[] = [];
+    const logs: string[] = [];
     const postedTexts: Array<{ text: string; ts: string }> = [];
     const postStatuses = [...(opts?.postStatuses ?? [])];
     const fetchImpl = async (url: string, init?: RequestInit): Promise<Response> => {
@@ -253,7 +255,7 @@ describe("OPR.0.5.6.14 — the delivery ledger is universal and consulted", () =
       // reconcile scans see what was actually posted
       return new Response(JSON.stringify({ ok: true, messages: postedTexts }), { status: 200, headers: { "content-type": "application/json" } });
     };
-    const attempted = memStore();
+    const attempted = opts?.attemptedStore ?? memStore();
     const delivered = memStore();
     const outboundSeen = memStore();
     const deliver = subsystemSlackDeliver({
@@ -264,11 +266,12 @@ describe("OPR.0.5.6.14 — the delivery ledger is universal and consulted", () =
       delivered,
       outboundSeen,
       fetchImpl,
+      log: (message) => logs.push(message),
       onPosted: opts?.onPostedImpl ?? (() => {}),
       // OPR.0.5.6.14: the transport-failure receipt callback (RED: does not exist).
       onTransportFailed: opts?.onTransportFailed,
     } as never);
-    return { deliver, posts, attempted, delivered };
+    return { deliver, posts, attempted, delivered, logs };
   }
 
   const DECISION = (qitemId: string) => ({
@@ -314,6 +317,42 @@ describe("OPR.0.5.6.14 — the delivery ledger is universal and consulted", () =
     expect(ledger, "the failed outcome is durable before the later successful outcome").toEqual(["failed:http-500", "posted"]);
     expect(posts).toHaveLength(2);
     expect(failureReceiptCalls).toBe(2);
+  });
+
+  it("PENDING RECEIPT STORE FAILURE CANNOT SUPPRESS A HEALTHY AUTHORITATIVE LEDGER WRITE", async () => {
+    const attemptedIds = new Map<string, string>();
+    const attemptedStore = {
+      load: () => attemptedIds,
+      mark: (key: string, status: string) => {
+        if (key.includes("::transport-failure-receipt::")) {
+          throw new Error("ENOSPC: pending receipt append failed");
+        }
+        return attemptedIds.set(key, status);
+      },
+    };
+    const ledger: string[] = [];
+    const { deliver, posts, logs } = deliverHarness({
+      postStatuses: [500, 200],
+      attemptedStore,
+      onTransportFailed: (_p, cls) => ledger.push(`failed:${cls}`),
+      onPostedImpl: () => ledger.push("posted"),
+    });
+
+    const first = await deliver(DECISION("q-tf-pending-store") as never);
+    const second = await deliver(DECISION("q-tf-pending-store") as never);
+    expect({
+      firstClass: first.ok ? null : first.class,
+      secondOk: second.ok,
+      ledger,
+      posts: posts.length,
+      claimedRetained: logs.some((message) => message.includes("retained")),
+    }).toEqual({
+      firstClass: "http-500",
+      secondOk: true,
+      ledger: ["failed:http-500", "posted"],
+      posts: 2,
+      claimedRetained: false,
+    });
   });
 
   it("THE 8f291c37 SHAPE DIES BY REPAIR: a receipt write that throws after a successful post is retained cleanly, then repaired on the next tick with exactly one post", async () => {
