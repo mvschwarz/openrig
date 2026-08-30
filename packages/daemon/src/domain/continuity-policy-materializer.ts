@@ -69,15 +69,14 @@ function seatIdentity(input: ContinuityPolicyMaterializationInput): ContinuitySe
 }
 
 function watchdogSpec(message: string, targetSession: string, threshold: number): string {
-  const indented = message.split("\n").map((line) => `  ${line}`).join("\n");
+  const inlineMessage = message.replace(/\s+/g, " ").trim();
   return [
     "policy: context-usage-threshold",
     "generated_by: continuity-policy-materializer",
     "target:",
     `  session: ${targetSession}`,
     `threshold_bytes: ${threshold}`,
-    "message: |",
-    indented,
+    `message: ${JSON.stringify(inlineMessage)}`,
     "",
   ].join("\n");
 }
