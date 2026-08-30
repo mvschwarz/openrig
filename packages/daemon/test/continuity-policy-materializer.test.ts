@@ -12,6 +12,7 @@ const CLAUDE_SEAT = {
   runtime: "claude-code",
   targetSession: "advice-lead@rig",
   watchedFilePath: "/tmp/advice-lead.jsonl",
+  mechanic: "operator-agent@kernel",
 };
 
 describe("continuity policy materializer (S20 P4)", () => {
@@ -73,20 +74,72 @@ describe("continuity policy materializer (S20 P4)", () => {
   });
 
   it("serializes both fire notices through the watchdog engine's actual spec parser", () => {
-    const messages = materializeContinuityPolicy(CLAUDE_SEAT).jobs.map(
-      (job) => parseWatchdogSpec(job.specYaml).message,
+    const parsed = materializeContinuityPolicy(CLAUDE_SEAT).jobs.map(
+      (job) => parseWatchdogSpec(job.specYaml),
     );
+    const messages = parsed.map((spec) => spec.message);
 
     expect(messages[0]).toContain("continuity/apprentice-prepare.md");
     expect(messages[1]).toContain("continuity/apprentice-cutover.md");
     expect(messages.every((message) => message !== "|")).toBe(true);
+    expect(parsed[1]?.context).toMatchObject({
+      continuity_action: {
+        type: "create-cutover-baton",
+        destination: "operator-agent@kernel",
+        body: expect.stringContaining("authority-effective-at-effect-receipt"),
+      },
+    });
+  });
+
+  it("arms managed compaction as exactly one real prep-nudge registration", () => {
+    const plan = materializeContinuityPolicy({
+      ...CLAUDE_SEAT,
+      compactionStrategy: "managed-compaction",
+      mechanic: undefined,
+    });
+
+    expect(plan.jobs).toHaveLength(1);
+    expect(plan.jobs[0]).toMatchObject({
+      key: "prepare",
+      requiresKey: null,
+      policy: "context-usage-threshold",
+    });
+    const parsed = parseWatchdogSpec(plan.jobs[0]!.specYaml);
+    expect(parsed.message).toMatch(/deposit-before-compaction|recap-write/i);
+    expect(parsed.context).not.toHaveProperty("continuity_action");
+    expect(plan.docText).toMatch(/113K–153K tokens\/MB/);
+    expect(plan.docText).toMatch(/retun/i);
+  });
+
+  it("registers generated jobs as pending when the first transcript sample has not arrived", () => {
+    const apprentice = materializeContinuityPolicy({
+      ...CLAUDE_SEAT,
+      watchedFilePath: null,
+    });
+    const managed = materializeContinuityPolicy({
+      ...CLAUDE_SEAT,
+      compactionStrategy: "managed-compaction",
+      mechanic: undefined,
+      watchedFilePath: null,
+    });
+
+    expect(apprentice.jobs).toHaveLength(2);
+    expect(managed.jobs).toHaveLength(1);
+    expect([...apprentice.jobs, ...managed.jobs].every((job) => job.watchedFilePath === null)).toBe(true);
+  });
+
+  it("refuses apprentice arming without a declared mechanic and teaches the exact repair", () => {
+    expect(() => materializeContinuityPolicy({
+      ...CLAUDE_SEAT,
+      mechanic: undefined,
+    })).toThrow(/mechanic.*spec-default.*profile.*member.*continuity\/apprentice-cutover\.md/i);
   });
 
   it("positive-matches Claude only and leaves native/default modes unarmed", () => {
     expect(materializeContinuityPolicy({ ...CLAUDE_SEAT, runtime: "codex" }).jobs).toEqual([]);
     expect(materializeContinuityPolicy({ ...CLAUDE_SEAT, compactionStrategy: "default-compaction" }).jobs).toEqual([]);
     expect(materializeContinuityPolicy({ ...CLAUDE_SEAT, compactionStrategy: "handover" }).jobs).toEqual([]);
-    expect(materializeContinuityPolicy({ ...CLAUDE_SEAT, compactionStrategy: "managed-compaction" }).jobs.length).toBeLessThanOrEqual(1);
+    expect(materializeContinuityPolicy({ ...CLAUDE_SEAT, compactionStrategy: "managed-compaction" }).jobs).toHaveLength(1);
   });
 
   it("adds registration glue only, never a second timer, scheduler, or engine", () => {

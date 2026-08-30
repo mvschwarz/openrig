@@ -106,6 +106,65 @@ describe("context-usage-threshold watchdog", () => {
     });
   }
 
+  it("registers a generated birth-race as pending, then binds visibly with a durable receipt", async () => {
+    const job = repo.register({
+      policy: "context-usage-threshold",
+      specYaml:
+        "policy: context-usage-threshold\n" +
+        "generated_by: continuity-policy-materializer\n" +
+        "continuity_mode: managed-compaction\n" +
+        "target:\n  session: target@rig\n" +
+        "message: Deposit continuity context before managed compaction.\n",
+      targetSession: "target@rig",
+      intervalSeconds: 60,
+      registeredBySession: "daemon@kernel",
+      watchedFilePath: null,
+      thresholdBytes: 8,
+    });
+
+    expect(job).toMatchObject({
+      state: "active",
+      watchedFilePath: null,
+      watchedFileGeneration: null,
+      bindingState: "pending-binding",
+    });
+
+    const pending = await engine().evaluate(job);
+    expect(pending.outcome).toMatchObject({
+      action: "skip",
+      reason: "current_generation_transcript_pending",
+    });
+
+    db.prepare(
+      `INSERT INTO context_usage
+        (node_id, session_id, session_name, availability, transcript_path, sampled_at)
+       VALUES ('node-1', 'native-session-1', 'target@rig', 'known', ?, '2026-08-28T09:00:01.000Z')`,
+    ).run(transcript);
+
+    repo = new WatchdogJobsRepository(db, undefined, () => generation);
+    const bound = await engine().evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(bound.outcome).toMatchObject({
+      action: "skip",
+      reason: "context_usage_below_threshold",
+    });
+    expect(repo.getByIdOrThrow(job.jobId)).toMatchObject({
+      watchedFilePath: transcript,
+      watchedFileGeneration: "gen-1",
+      bindingState: "bound",
+    });
+    expect(history.listForJob(job.jobId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        outcome: "skipped",
+        skipReason: "watched_file_bound",
+        evaluationNotes: expect.objectContaining({
+          boundAt: expect.any(String),
+          occupantGeneration: "gen-1",
+          watchedFilePath: transcript,
+        }),
+      }),
+    ]));
+  });
+
   it("keeps the wrong seat silent, fires once with reason, and survives an engine restart", async () => {
     const job = register({ specTarget: "wrong-seat@rig" });
 
@@ -131,6 +190,44 @@ describe("context-usage-threshold watchdog", () => {
     expect(repeat.outcome).toMatchObject({ action: "skip", reason: "threshold_already_fired" });
     expect(deliveries).toHaveLength(1);
     expect(repo.getByIdOrThrow(job.jobId).lastFiredGeneration).toBe("gen-1");
+  });
+
+  it("threads a cutover action through the real threshold fire with the target occupant generation", async () => {
+    writeFileSync(transcript, "1234567890");
+    const job = repo.register({
+      policy: "context-usage-threshold",
+      specYaml:
+        "policy: context-usage-threshold\n" +
+        "generated_by: continuity-policy-materializer\n" +
+        "continuity_mode: apprentice-handover\n" +
+        "target:\n  session: target@rig\n" +
+        "message: Cut over now.\n" +
+        "context:\n" +
+        "  continuity_action:\n" +
+        "    type: create-cutover-baton\n" +
+        "    destination: mechanic@kernel\n" +
+        "    body: Owned cutover baton with one-active-walker and authority-effective-at-effect-receipt.\n",
+      targetSession: "target@rig",
+      intervalSeconds: 60,
+      registeredBySession: "daemon@kernel",
+      watchedFilePath: transcript,
+      thresholdBytes: 8,
+    });
+
+    await engine().evaluate(job);
+
+    expect(deliveries).toEqual([expect.objectContaining({
+      targetSession: "target@rig",
+      message: "Cut over now.",
+      continuityAction: {
+        type: "create-cutover-baton",
+        jobId: job.jobId,
+        occupantGeneration: "gen-1",
+        sourceSession: "target@rig",
+        destination: "mechanic@kernel",
+        body: expect.stringContaining("one-active-walker"),
+      },
+    })]);
   });
 
   it("rebinds a new occupant to its own transcript and preserves that receipt through restart", async () => {

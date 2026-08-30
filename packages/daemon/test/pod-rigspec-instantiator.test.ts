@@ -7,6 +7,8 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { StartupOrchestrator } from "../src/domain/startup-orchestrator.js";
 import { PodRigInstantiator } from "../src/domain/rigspec-instantiator.js";
+import { ContinuityPolicyMaterializer } from "../src/domain/continuity-policy-materializer.js";
+import { parseWatchdogSpec } from "../src/domain/watchdog-policy-engine.js";
 import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
 import type { AgentResolverFsOps } from "../src/domain/agent-resolver.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
@@ -65,6 +67,7 @@ describe("PodRigInstantiator", () => {
     extraAdapters?: Record<string, RuntimeAdapter>,
     topologyRootResolver?: () => string,
     onboardingEnabledResolver?: () => boolean,
+    continuityPolicyMaterializer?: Pick<ContinuityPolicyMaterializer, "arm">,
   ) {
     const db = createFullTestDb();
     const rigRepo = new RigRepository(db);
@@ -85,6 +88,7 @@ describe("PodRigInstantiator", () => {
       tmuxAdapter: tmux,
       ...(topologyRootResolver ? { topologyRootResolver } : {}),
       ...(onboardingEnabledResolver ? { onboardingEnabledResolver } : {}),
+      ...(continuityPolicyMaterializer ? { continuityPolicyMaterializer } : {}),
     };
     const inst = new PodRigInstantiator(instDeps);
 
@@ -588,6 +592,90 @@ profiles:
       const sessions = sessionRegistry.getSessionsForRig(result.result.rigId);
       expect(sessions[0]!.restorePolicy).toBe("relaunch_fresh");
     }
+    db.close();
+  });
+
+  it("threads the three-level resolved mechanic through the real launch path into the cutover registration", async () => {
+    const files = {
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: `
+version: "0.2"
+name: impl
+defaults:
+  runtime: claude-code
+  lifecycle:
+    compaction_strategy: apprentice-handover
+    mechanic: default-mechanic@default-rig
+resources:
+  skills: []
+profiles:
+  default:
+    lifecycle:
+      mechanic: profile-mechanic@profile-rig
+    uses:
+      skills: []
+`.trim(),
+    };
+    const register = vi.fn()
+      .mockReturnValueOnce({ jobId: "prepare-job" })
+      .mockReturnValueOnce({ jobId: "cutover-job" });
+    const materializer = new ContinuityPolicyMaterializer({ register }, () => null);
+    const { db, inst } = setup(files, undefined, undefined, undefined, materializer);
+    const yaml = `
+version: "0.2"
+name: test-rig
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: impl
+        agent_ref: local:agents/impl
+        profile: default
+        runtime: claude-code
+        cwd: .
+        mechanic: member-mechanic@member-rig
+    edges: []
+edges: []
+`;
+
+    const result = await inst.instantiate(yaml, RIG_ROOT);
+
+    expect(result.ok).toBe(true);
+    expect(register).toHaveBeenCalledTimes(2);
+    const cutover = parseWatchdogSpec(register.mock.calls[1]![0].specYaml);
+    expect(cutover.context).toMatchObject({
+      continuity_action: { destination: "member-mechanic@member-rig" },
+    });
+    db.close();
+  });
+
+  it("refuses apprentice arming without a mechanic using field, layering, and SOP teaching", async () => {
+    const files = {
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: `
+version: "0.2"
+name: impl
+defaults:
+  runtime: claude-code
+  lifecycle:
+    compaction_strategy: apprentice-handover
+resources:
+  skills: []
+profiles:
+  default:
+    uses:
+      skills: []
+`.trim(),
+    };
+    const register = vi.fn().mockReturnValue({ jobId: "must-not-arm" });
+    const materializer = new ContinuityPolicyMaterializer({ register }, () => "/tmp/transcript.jsonl");
+    const { db, inst } = setup(files, undefined, undefined, undefined, materializer);
+
+    const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+
+    expect(result.ok).toBe(true);
+    expect(register).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).toMatch(
+      /mechanic.*spec-default.*profile.*member.*continuity\/apprentice-cutover\.md/i,
+    );
     db.close();
   });
 

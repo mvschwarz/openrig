@@ -667,3 +667,42 @@ profiles:
     }
   });
 });
+
+describe("continuity mechanic precedence — shipped three-level path (S20 A8)", () => {
+  it("resolves spec-default < profile < member through real AgentSpec ingress", () => {
+    const raw = parseAgentSpec(`
+version: "0.2"
+name: mechanic-precedence
+defaults:
+  runtime: claude-code
+  lifecycle:
+    compaction_strategy: apprentice-handover
+    mechanic: default-mechanic@default-rig
+profiles:
+  default:
+    lifecycle:
+      mechanic: profile-mechanic@profile-rig
+`);
+    const spec = normalizeAgentSpec(raw);
+    const result = resolveNodeConfig(makeCtx({
+      baseSpec: makeResolved(spec),
+      member: makeMember({ mechanic: "member-mechanic@member-rig" } as never),
+    }));
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect((result.config as unknown as { mechanic?: string }).mechanic).toBe(
+        "member-mechanic@member-rig",
+      );
+      expect(result.config.compactionStrategy).toBe("apprentice-handover");
+    }
+  });
+
+  it("preserves absence instead of inventing a default mechanic", () => {
+    const result = resolveNodeConfig(makeCtx());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect((result.config as unknown as { mechanic?: string }).mechanic).toBeUndefined();
+    }
+  });
+});

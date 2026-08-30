@@ -252,6 +252,41 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send).toHaveBeenCalledTimes(6);
   });
 
+  it("publishes one target-generation-keyed width receipt callback after restore compliance", async () => {
+    const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
+    const { transport } = makeSessionTransport();
+    const onPostRestoreComplete = vi.fn(async () => {});
+    const enforcer = new ClaudeCompactionEnforcer(settings, transport, {
+      postCompactRestoreCooldownMs: 0,
+      openrigHome: "/tmp/openrig-test-home",
+      resolveOccupantGeneration: () => "target-generation-7",
+      onPostRestoreComplete,
+    } as never);
+
+    await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage: 90,
+    });
+    await enforcer.maybeAutoCompact({
+      sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage: 91,
+    });
+    for (let i = 0; i < 3; i++) {
+      await enforcer.maybeAutoCompact({
+        sessionName: "claude-seat@rig",
+        runtime: "claude-code",
+        usedPercentage: 20,
+        transcriptPath: "/tmp/claude.jsonl",
+      });
+    }
+
+    expect(onPostRestoreComplete).toHaveBeenCalledTimes(1);
+    expect(onPostRestoreComplete).toHaveBeenCalledWith({
+      sessionName: "claude-seat@rig",
+      occupantGeneration: "target-generation-7",
+      postRestoreUsedPercentage: 20,
+      saturationBoundPercentage: 80,
+    });
+  });
+
   it("GHOST-STAGE (a): a DISABLED policy drains NOTHING — a stage queued while enabled never fires after disable (proof seed 1)", async () => {
     // Legacy compaction stage defect (ruling 05c174e0): a queued restore stage that drains while
     // the policy is disabled fires a ghost prompt (a handed-over successor inherits the

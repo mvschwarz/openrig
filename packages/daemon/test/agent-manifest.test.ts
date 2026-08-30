@@ -624,3 +624,29 @@ profiles:
     expect(spec.defaults.lifecycle.compactionStrategy).toBe("default-compaction");
   });
 });
+
+describe("continuity mechanic — AgentSpec lifecycle ingress (S20 A7/A8)", () => {
+  const specWithMechanic = (value: string) => `
+version: "0.2"
+name: mechanic-fixture
+defaults:
+  runtime: claude-code
+  lifecycle:
+    compaction_strategy: apprentice-handover
+    mechanic: ${value}
+profiles:
+  default: {}
+`;
+
+  it("accepts a canonical cross-rig seat address and preserves it", () => {
+    const raw = parseAgentSpec(specWithMechanic("operator-agent@kernel"));
+    expect(validateAgentSpec(raw).valid).toBe(true);
+    expect(normalizeAgentSpec(raw).defaults?.lifecycle?.mechanic).toBe("operator-agent@kernel");
+  });
+
+  it("rejects a non-canonical mechanic address with a field-shaped error", () => {
+    const result = validateAgentSpec(parseAgentSpec(specWithMechanic("operator-agent")));
+    expect(result.valid).toBe(false);
+    expect(result.errors.join(" ")).toMatch(/lifecycle\.mechanic.*canonical.*seat@rig/i);
+  });
+});

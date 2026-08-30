@@ -454,3 +454,23 @@ describe("member compaction_strategy — live ingestion (OPR.0.5.6.20 A5)", () =
     expect(normalized.pods[0]!.members[0]!.compactionStrategy).toBeUndefined();
   });
 });
+
+describe("member mechanic — live ingestion (S20 A7/A8)", () => {
+  it("accepts and preserves a canonical member override", () => {
+    const rig = structuredClone(VALID_RIG);
+    (rig.pods[0]!.members[0] as Record<string, unknown>)["mechanic"] = "member-mechanic@kernel";
+    const result = RigSpecSchema.validate(rig);
+    expect(result.valid).toBe(true);
+    expect(RigSpecSchema.normalize(rig).pods[0]!.members[0]!.mechanic).toBe(
+      "member-mechanic@kernel",
+    );
+  });
+
+  it("rejects a non-canonical member mechanic instead of dropping it", () => {
+    const rig = structuredClone(VALID_RIG);
+    (rig.pods[0]!.members[0] as Record<string, unknown>)["mechanic"] = "member-mechanic";
+    const result = RigSpecSchema.validate(rig);
+    expect(result.valid).toBe(false);
+    expect(result.errors.join(" ")).toMatch(/members\[0\].*mechanic.*canonical.*seat@rig/i);
+  });
+});
