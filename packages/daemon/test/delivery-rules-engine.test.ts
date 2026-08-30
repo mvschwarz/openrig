@@ -54,6 +54,13 @@ async function digestFlushModule(): Promise<Record<string, unknown> | null> {
 
 const SRC_ROOT = join(__dirname, "..", "src");
 
+/** Instrument fix (visible, W2 findings 5-7): the structural pins grep CODE,
+ *  not documentation — the module docs legitimately NAME the banned literals
+ *  ("post-failed does not exist", "no setInterval anywhere here"). */
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+}
+
 function registryWith(prefs: Record<string, unknown>) {
   return {
     ok: true as const,
@@ -154,7 +161,11 @@ describe("OPR.0.5.6.1 §1 — the full class matrix, one receipt per cell (AM-F2
       const mod = await engine();
       expect(mod, "the delivery rules engine module must exist (RED at base: absent)").not.toBeNull();
       const decision = mod!.decideDelivery({
-        level: cell.mode === "escalation" ? "ALERT" : "NOTICE",
+        // Fixture correction (visible, W2 finding 1-3): LEVEL IS NOT A MATRIX
+        // AXIS — the ruled matrix is pref x availability x mode. Cells run at
+        // ALERT (the human-required traffic the engine actually routes); the
+        // dial-demotion semantic has its own dedicated test below at NOTICE.
+        level: "ALERT",
         escalation: cell.mode === "escalation",
         human: { entityId: "human-founder", deliveryClass: cell.pref, availability: cell.availability },
         dials: { minimumLevelThatPosts: "NOTICE", minimumLevelThatInterrupts: "ALERT" },
@@ -311,7 +322,9 @@ describe("OPR.0.5.6.1 §3 — the gateway consults the engine before dispatch", 
   }
 
   it("F-7 CELL, END TO END: an off human's ALERT park POSTS (delivery never suppressed) with NO mention, and the termination is recorded on the row (RED at base: ALERT mentions)", async () => {
-    const row = await parkOnFounder();
+    // Fixture correction (visible, W2 finding 4): the termination is the
+    // ESCALATION record (A1.1/F-7) — the park carries the escalation tag.
+    const row = await parkOnFounder(["escalation"]);
     const registry = registryWith({ deliveryClass: "B", availability: "off" });
     const ports = makeQueuePorts(repo, { loadHumanRegistry: () => registry } as never);
     const [alert] = await ports.listHumanAlerts({ minimumLevel: "NOTICE" });
@@ -623,13 +636,14 @@ describe("OPR.0.5.6.1 §7 — one vocabulary, no seen, no third timer engine", (
     const mod = await engine();
     expect(mod).not.toBeNull();
     expect(mod!.DELIVERY_OUTCOMES).toEqual(["interrupt", "notify", "digest", "log"]);
-    const source = readFileSync(join(SRC_ROOT, "domain", "gateway", "delivery-rules-engine.ts"), "utf8");
+    const raw = readFileSync(join(SRC_ROOT, "domain", "gateway", "delivery-rules-engine.ts"), "utf8");
+    const source = stripComments(raw);
     // consumes, never mints: the S14 receipt literals may be REFERENCED via the
     // transition-log helpers but never re-spelled as template writes here
     expect(source).not.toMatch(/slack-owner-notification-posted\s/);
     expect(source).not.toMatch(/["'`]post-failed["'`]/);
     // the delivery-state table is documented at the seam (AM-F4's one definition site)
-    expect(source).toContain("delivery-state");
+    expect(raw).toContain("delivery-state");
   });
 
   it("NO FABRICATED STATE: no engine artifact can represent `seen` (schema + writes receipt)", async () => {
@@ -638,7 +652,7 @@ describe("OPR.0.5.6.1 §7 — one vocabulary, no seen, no third timer engine", (
       ["domain", "policies", "delivery-deferral.ts"],
       ["domain", "policies", "delivery-digest-flush.ts"],
     ]) {
-      const source = readFileSync(join(SRC_ROOT, ...rel), "utf8");
+      const source = stripComments(readFileSync(join(SRC_ROOT, ...rel), "utf8"));
       expect(source, rel.join("/")).not.toMatch(/["'`]seen["'`]/);
     }
   });
@@ -649,7 +663,7 @@ describe("OPR.0.5.6.1 §7 — one vocabulary, no seen, no third timer engine", (
       ["domain", "policies", "delivery-deferral.ts"],
       ["domain", "policies", "delivery-digest-flush.ts"],
     ]) {
-      const source = readFileSync(join(SRC_ROOT, ...rel), "utf8");
+      const source = stripComments(readFileSync(join(SRC_ROOT, ...rel), "utf8"));
       expect(source, rel.join("/")).not.toMatch(/setInterval|setTimeout/);
     }
   });
