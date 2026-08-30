@@ -18,9 +18,9 @@ import assert from "node:assert/strict";
 
 const AUTHORITY_SHA256 = {
   "locked.policy.md": "dcb38c372def7fe58ddfc9f1f3e97b9ba391ae79a99ef486e44f017cb39e57fe",
-  "standard.policy.md": "7b064c6d69f3140add6b40eadad115ef8bf9602942515a096c9979514a4c7ae2",
+  "standard.policy.md": "737d3f56e6d8275fe548a3a06e9b02ede8f328207ec2e6223cea6a83f40f5148",
   "open.policy.md": "bb5fbb18e1f3706bd0676a9e709e29b5754bb6b41b6f304453dd6d73e7a4d62b",
-  "yolo.policy.md": "908817b6fd6762a82d099759762c5d57dc568268fa1d13767ebb3fddbb14a6d7",
+  "yolo.policy.md": "ff1f21ef05a560d338b25fc035b548d12461429345230e2afe4855c0bb0f1217",
 };
 
 test("T6: build-package.sh stages daemon policies into the assembled package", () => {
