@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   buildWidthRecoveryReceipt,
@@ -20,6 +22,17 @@ const seat = {
 };
 
 describe("continuity fire-command stacks (S20 P4/P5)", () => {
+  it("ships the two fire-command stacks at the locked continuity asset home", () => {
+    const root = resolve(import.meta.dirname, "../assets/continuity");
+    const prepare = resolve(root, "apprentice-prepare.md");
+    const cutover = resolve(root, "apprentice-cutover.md");
+
+    expect(existsSync(prepare)).toBe(true);
+    expect(existsSync(cutover)).toBe(true);
+    expect(readFileSync(prepare, "utf8")).toMatch(/fresh.*model.*world.*mission.*position.*introduce/is);
+    expect(readFileSync(cutover, "utf8")).toMatch(/owned baton.*never auto-rebind/is);
+  });
+
   it("carries role guidance in the rung-1 artifact and gates divergence before install", () => {
     expect(renderRung1Packet(seat)).toContain("orienting-to-an-inherited-seat");
     expect(renderRung1IncumbentNotice(seat)).toContain("retiring-and-inheriting-a-seat");
