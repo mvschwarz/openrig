@@ -668,3 +668,195 @@ describe("OPR.0.5.6.1 §7 — one vocabulary, no seen, no third timer engine", (
     }
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §8 PRODUCTION COMPOSITION (R2 BLOCKING repair, artifact 57abf60f...): the
+// live paths must be REACHABLE — an injected-port green does not buy them.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function operatorEngineModule(): Promise<Record<string, unknown> | null> {
+  try {
+    return (await import("../src/domain/gateway/operator-delivery-engine.js")) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+describe("OPR.0.5.6.1 §8 — the production composition is live (R2 B-1/B-2/B-3)", () => {
+  let db: Database.Database;
+  let repo: QueueRepository;
+  let home: string;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, ALL_MIGRATIONS);
+    ensureFinalColumns(db);
+    repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    home = mkdtempSync(join(tmpdir(), "s01-prod-"));
+  });
+  afterEach(() => {
+    db.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  function realWire(prefs: Record<string, unknown>, posts: Array<Record<string, unknown>>) {
+    const registry = registryWith(prefs);
+    const secrets = join(home, "slack.env");
+    writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n", { mode: 0o600 });
+    saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-OWNER", secretsEnvFile: secrets }, home);
+    return buildSlackGatewayWire({
+      home,
+      queueRepo: repo,
+      registry: { loadHumanRegistry: () => registry, resolveSlackHandle },
+      outboundIntervalMs: 60_000,
+      fetchImpl: async (_url, init) => {
+        posts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        return new Response(JSON.stringify({ ok: true, ts: `1724.100${posts.length}` }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+  }
+
+  it("B-1: the deferred-fire payload dispatches the ADVERTISED op through the REAL dispatcher and reaches the delivery seam (RED at candidate: startup hardcodes outbound_post, which the capability refuses)", async () => {
+    const mod = await operatorEngineModule();
+    expect(mod, "operator-delivery-engine module must exist").not.toBeNull();
+    const posts: Array<Record<string, unknown>> = [];
+    const wire = realWire({ deliveryClass: "A", availability: "available" }, posts);
+    try {
+      wire.startServices?.();
+      const row = await repo.create({
+        sourceSession: "orch-lead@v-openrig-build",
+        destinationSession: "human-founder@external",
+        body: "deferred escalation",
+        nudge: false,
+      });
+      const buildFire = (mod as { buildDeferralFirePayload: (row: QueueItem, notificationKey: string) => Record<string, unknown> }).buildDeferralFirePayload;
+      const payload = buildFire(row, `${row.qitemId}:test-episode`);
+      const res = wire.dispatcher.dispatch(OUTBOUND_OP, String(payload["destinationSession"] ?? ""), payload);
+      expect(res).toMatchObject({ ok: true });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(posts.length, "the fire must reach the delivery seam, not die at capability refusal").toBe(1);
+    } finally {
+      wire.stop();
+    }
+  });
+
+  it("B-1 structural: startup.ts carries no unadvertised outbound_post literal (RED at candidate: it does)", () => {
+    const source = readFileSync(join(SRC_ROOT, "startup.ts"), "utf8");
+    expect(source).not.toContain('"outbound_post"');
+  });
+
+  it("B-2 structural: the production index composition supplies deliveryEngine to the real tick (RED at candidate: only the test double exists)", () => {
+    const source = readFileSync(join(SRC_ROOT, "index.ts"), "utf8");
+    expect(source).toContain("deliveryEngine");
+    expect(source).toContain("makeOperatorDeliveryEngine");
+  });
+
+  it("B-2 behavioral: the REAL tick with the PRODUCTION port drives an operator-rung escalation to dispatched-to-engine, the post lands, and the receipt resolves the ladder (RED at candidate: no production port exists)", async () => {
+    const mod = await operatorEngineModule();
+    expect(mod).not.toBeNull();
+    const posts: Array<Record<string, unknown>> = [];
+    const wire = realWire({ deliveryClass: "B", availability: "available" }, posts);
+    try {
+      wire.startServices?.();
+      const make = (mod as { makeOperatorDeliveryEngine: (deps: unknown) => { dispatchEscalation: (row: QueueItem, reason: string) => Promise<{ decision: string; resolved: boolean }> } }).makeOperatorDeliveryEngine;
+      const port = make({ home, queueRepo: repo, dispatch: (op: string, ref: string, payload: unknown) => wire.dispatcher.dispatch(op, ref, payload), registry: { loadHumanRegistry: () => registryWith({ deliveryClass: "B", availability: "available" }) } });
+
+      const src = await repo.create({ sourceSession: "sender@r", destinationSession: "relay@r", body: "obligation" });
+      const { created } = await repo.handoff({ qitemId: src.qitemId, fromSession: "relay@r", toSession: "worker@r", nudge: false });
+      db.prepare("UPDATE queue_items SET last_nudge_attempt = ?, last_nudge_result = ? WHERE qitem_id = ?")
+        .run(new Date(Date.now() - 10 * 60_000).toISOString(), "failed:tmux session not found", created.qitemId);
+
+      const tickDeps = {
+        db, queueRepo: repo,
+        attemptWake: async () => "failed:tmux session not found",
+        resolveOrchestrator: () => null,
+        retryIntervalSeconds: 1, retryCap: 0,
+        log: () => {},
+        deliveryEngine: port,
+      };
+      await runWakeLadderTick(tickDeps as never);
+      const notes = (db.prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = ?").all(created.qitemId) as Array<{ transition_note: string | null }>).map((r) => r.transition_note ?? "");
+      expect(notes.join("\n")).toContain("dispatched-to-engine");
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(posts.length, "the escalation post reaches the delivery seam through the real wire").toBe(1);
+      // the S14 receipt now on the row resolves the episode on the next tick
+      await runWakeLadderTick(tickDeps as never);
+      const exhausted = (db.prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = ?").all(created.qitemId) as Array<{ transition_note: string | null }>)
+        .map((r) => r.transition_note ?? "").filter((n) => n.startsWith("ladder-exhausted:"));
+      expect(exhausted.length, "receipt resolution exhausts — never silent, never premature").toBe(1);
+    } finally {
+      wire.stop();
+    }
+  });
+
+  it("B-3 order: the deferral reserves (fired transition + terminal job) BEFORE the delivery enqueue — a still-active job can never coexist with an enqueued decision (RED at candidate: terminal happens after)", async () => {
+    const mod = await deferralPolicyModule();
+    expect(mod).not.toBeNull();
+    const jobs = new WatchdogJobsRepository(db);
+    const row = await repo.create({ sourceSession: "a@r", destinationSession: "human-founder@external", body: "x", nudge: false });
+    const arm = (mod as { armDeliveryDeferral: (deps: unknown) => { jobId: string } }).armDeliveryDeferral;
+    const armed = arm({ jobsRepo: jobs, queueRepo: repo, qitemId: row.qitemId, entityId: "human-founder", minutes: 30 });
+    const fire = (mod as { fireDeliveryDeferralIfDue: (deps: unknown) => Promise<{ fired: boolean }> }).fireDeliveryDeferralIfDue;
+    const statesAtDelivery: string[] = [];
+    const outcome = await fire({
+      jobsRepo: jobs, queueRepo: repo, jobId: armed.jobId,
+      deliverInterrupt: async () => {
+        statesAtDelivery.push((db.prepare("SELECT state FROM watchdog_jobs WHERE job_id = ?").get(armed.jobId) as { state: string }).state);
+        return { ok: true };
+      },
+      now: new Date(Date.now() + 31 * 60_000),
+    });
+    expect(outcome.fired).toBe(true);
+    expect(statesAtDelivery, "the job is TERMINAL before the delivery enqueue (reserve-before-deliver)").toEqual(["terminal"]);
+  });
+
+  it("B-3 crash-window: a delivery failure after the reserve stays at-most-once — job terminal, fired transition present, loud failure recorded, zero re-fires (RED at candidate: failure retains the job active and re-mints)", async () => {
+    const mod = await deferralPolicyModule();
+    expect(mod).not.toBeNull();
+    const jobs = new WatchdogJobsRepository(db);
+    const row = await repo.create({ sourceSession: "a@r", destinationSession: "human-founder@external", body: "x", nudge: false });
+    const arm = (mod as { armDeliveryDeferral: (deps: unknown) => { jobId: string } }).armDeliveryDeferral;
+    const armed = arm({ jobsRepo: jobs, queueRepo: repo, qitemId: row.qitemId, entityId: "human-founder", minutes: 30 });
+    const fire = (mod as { fireDeliveryDeferralIfDue: (deps: unknown) => Promise<{ fired: boolean }> }).fireDeliveryDeferralIfDue;
+    let calls = 0;
+    const deps = {
+      jobsRepo: jobs, queueRepo: repo, jobId: armed.jobId,
+      deliverInterrupt: async () => { calls += 1; return { ok: false }; },
+      now: new Date(Date.now() + 31 * 60_000),
+    };
+    await fire(deps);
+    expect((db.prepare("SELECT state FROM watchdog_jobs WHERE job_id = ?").get(armed.jobId) as { state: string }).state).toBe("terminal");
+    const notes = (db.prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = ?").all(row.qitemId) as Array<{ transition_note: string | null }>).map((r) => r.transition_note ?? "");
+    expect(notes.some((n) => n.startsWith("delivery-deferral-fired")), "the reserve transition is on the row").toBe(true);
+    expect(notes.some((n) => n.includes("delivery-failed")), "the delivery failure is loud on the row").toBe(true);
+    await fire(deps);
+    expect(calls, "at-most-once: no re-fire after the reserve, ever").toBe(1);
+  });
+
+  it("B-3 delivery-seam guard: a deferral-fire payload for an already-receipted episode posts NOTHING (replay/second-decision belt — RED at candidate: it posts)", async () => {
+    const mod = await operatorEngineModule();
+    expect(mod).not.toBeNull();
+    const posts: Array<Record<string, unknown>> = [];
+    const wire = realWire({ deliveryClass: "A", availability: "available" }, posts);
+    try {
+      wire.startServices?.();
+      const row = await repo.create({ sourceSession: "a@r", destinationSession: "human-founder@external", body: "x", nudge: false });
+      const key = `${row.qitemId}:episode-1`;
+      repo.update({
+        qitemId: row.qitemId, actorSession: "daemon@kernel",
+        transitionNote: `slack-owner-notification-posted notification_key=${key} level=ALERT kind=human-required message_ts=1 thread_ts=1`,
+      });
+      const buildFire = (mod as { buildDeferralFirePayload: (row: QueueItem, notificationKey: string) => Record<string, unknown> }).buildDeferralFirePayload;
+      const payload = buildFire(row, key);
+      const res = wire.dispatcher.dispatch(OUTBOUND_OP, String(payload["destinationSession"] ?? ""), payload);
+      expect(res).toMatchObject({ ok: true });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(posts.length, "an episode with a posted receipt never posts again").toBe(0);
+    } finally {
+      wire.stop();
+    }
+  });
+});
