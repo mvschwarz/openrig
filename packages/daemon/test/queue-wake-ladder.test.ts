@@ -368,7 +368,10 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     expect(rungs[0]).toMatch(/orchestrator/);
     expect(rungs[1]).toMatch(/operator/);
     expect(rungs[1]).toMatch(/escalation view/i); // the floor, honestly stated
-    expect(rungs[1]).toMatch(/S11/); // the human-layer connector cited as the named future leg
+    // OPR.0.5.6.1 fixture update (enumerated): the S11 cited-not-built pointer
+    // RETIRED — with no engine port wired (this fixture), the marker states the
+    // unwired floor honestly instead of citing a future slice.
+    expect(rungs[1]).toMatch(/delivery engine not wired/);
     expect(markersOf(baton.qitemId, LADDER_EXHAUSTED_PREFIX)).toHaveLength(1); // finite — the ladder ends
     const before = calls.length;
     ageMarkers(baton.qitemId, 30);
