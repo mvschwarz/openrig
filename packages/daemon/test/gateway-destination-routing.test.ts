@@ -349,6 +349,19 @@ describe("OPR.0.5.6.14 — the delivery ledger is universal and consulted", () =
     expect(failed?.deliveryFailureDetail, "the consumer preserves the gateway's actual error evidence").toContain("episode-b-needle");
   });
 
+  it("CONSUMED EPISODE CLEARS: a resumed nonhuman row cannot inherit its old failed human-park receipt", async () => {
+    const row = await h.repo.create({ sourceSession: "s@r", destinationSession: "orch-lead@v-openrig-build", body: "ask", nudge: false });
+    await humanPark(row.qitemId, "episode A");
+    receipt(row.qitemId, "transport-failed", "class=http-500 error=episode-a-consumed");
+    h.repo.update({ qitemId: row.qitemId, actorSession: "orch-lead@v-openrig-build", state: "in-progress", transitionNote: "episode A consumed" });
+
+    const surfaced = h.repo.findUndelivered({}).some((item) => item.qitemId === row.qitemId);
+    expect({ outcome: h.repo.deliveryOutcomeFor(row.qitemId)?.outcome ?? null, surfaced }).toEqual({
+      outcome: null,
+      surfaced: false,
+    });
+  });
+
   it("CURRENT EPISODE WINDOW: receiptless re-parks and direct no-nudge humans become never-posted from episode time", async () => {
     const parked = await h.repo.create({ sourceSession: "s@r", destinationSession: "orch-lead@v-openrig-build", body: "ask", nudge: false });
     await humanPark(parked.qitemId, "episode A");
