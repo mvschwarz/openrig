@@ -24,6 +24,7 @@ import type Database from "better-sqlite3";
 import type { QueueItem, QueueRepository } from "./queue-repository.js";
 import { stalledPickupFinding } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
+import { loadHostRegistry } from "./hosts/hosts-registry-reader.js";
 
 export const STUCK_SWEEP_INTERVAL_KEY = "queue.stuck_sweep_interval_seconds";
 export const DEFAULT_STUCK_SWEEP_INTERVAL_SECONDS = 300;
@@ -124,6 +125,14 @@ export interface StuckSweepDeps {
   unclaimedAgeMinutes?: number;
   now?: Date;
   log?: (line: string) => void;
+  /** Is this host id (or observed self-id) present in the operator's hosts registry?
+   *  A host-qualified custody target naming a REGISTERED host is proof-at-write — the
+   *  cross-host close (routes/queue.ts) creates the successor on that host FIRST and
+   *  records `<id>@<host>` only after that create succeeded — so it needs no
+   *  verification. Injectable for tests; default reads the local hosts.yaml once per
+   *  sweep pass, and an unavailable registry degrades honestly to verification-required
+   *  (more indeterminate findings, never a false verdict). */
+  isRegisteredHost?: (hostId: string) => boolean;
 }
 
 export interface StuckSweepFindingAction {
@@ -175,6 +184,48 @@ interface TransitionNoteRow {
 
 /** The latest ladder marker is authoritative: a retry after exhaustion makes the
  *  ladder live again. Unrelated transitions do not change the latest marker. */
+/** Durable custody-verification disposition: a transition note on the CLOSED source row,
+ *  written by whoever performed the registered-host read (never by this detector),
+ *  `custody-verified: <exact-target> <free-form how/where>`. Prefix-anchored parse; the
+ *  target is the first whitespace-delimited token after the prefix, matched exactly. */
+export const CUSTODY_VERIFIED_PREFIX = "custody-verified:";
+
+function custodyVerifiedTargets(db: Database.Database, qitemId: string): Set<string> {
+  const notes = db
+    .prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = ? AND transition_note LIKE ?")
+    .all(qitemId, `${CUSTODY_VERIFIED_PREFIX}%`) as TransitionNoteRow[];
+  const verified = new Set<string>();
+  for (const { transition_note: note } of notes) {
+    if (!note) continue;
+    const token = note.slice(CUSTODY_VERIFIED_PREFIX.length).trim().split(/\s+/)[0];
+    if (token) verified.add(token);
+  }
+  return verified;
+}
+
+/** Default registry view for the proof-at-write arm: the operator's hosts.yaml, read
+ *  lazily once per sweep pass. Registry unavailable → NO host is registered → every
+ *  host-qualified target stays verification-required (honest degradation, logged once). */
+function defaultIsRegisteredHost(log: (line: string) => void): (hostId: string) => boolean {
+  let known: Set<string> | null | undefined;
+  return (hostId: string) => {
+    if (known === undefined) {
+      const loaded = loadHostRegistry();
+      if (loaded.ok) {
+        known = new Set<string>();
+        for (const host of loaded.registry.hosts) {
+          known.add(host.id);
+          if (host.hostId) known.add(host.hostId);
+        }
+      } else {
+        known = null;
+        log(`[stuck-sweep] host registry unavailable — host-qualified custody targets stay verification-required (${loaded.error})`);
+      }
+    }
+    return known !== null && known.has(hostId);
+  };
+}
+
 function hasLiveLadder(db: Database.Database, qitemId: string): boolean {
   const notes = db
     .prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = ? ORDER BY transition_id DESC")
@@ -262,6 +313,8 @@ function evidenceBody(db: Database.Database, c: Candidate): string {
       `last transition: ${lastTransitionLine(db, c.row.qitemId)}\n` +
       `why: ${c.why}\n` +
       `verification targets (indeterminate until checked on the registered host):\n${checks}\n` +
+      `After a registered-host read confirms a target, record it durably on the closed row so the sweep stops asking:\n` +
+      `  rig queue update ${c.row.qitemId} --note "custody-verified: <target> <how verified>"\n` +
       `Do not rewrite historical custody from this local observation; record the verification result separately.`
     );
   }
@@ -290,6 +343,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     const ageMinutes = deps.unclaimedAgeMinutes ?? resolveStuckSweepUnclaimedAgeMinutes();
     const resolveOrch =
       deps.resolveOrchestrator ?? ((session: string) => defaultResolveOrchestrator(deps.db, session));
+    const isRegisteredHost = deps.isRegisteredHost ?? defaultIsRegisteredHost(log);
     const candidates: Candidate[] = [];
 
     // Half 1 — claimed-never-closed. The claimant holds the obligation; the finding
@@ -375,9 +429,13 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
 
     // The custody class — a terminal row whose closure names one or more successor
     // qitems. A local miss is never proof of absence: the successor may live in another
-    // registered host's database. Host-qualified keys are therefore verification inputs,
-    // not local lookup keys. Comma fan-out is checked member-by-member and only unresolved
-    // members are reported. Historical source rows are never mutated by this detector.
+    // registered host's database. Comma fan-out is checked member-by-member and only
+    // unresolved members are reported. Two dispositions satisfy a member without a local
+    // hit: (1) proof-at-write — a host qualifier naming a REGISTERED host, because the
+    // cross-host close created the successor on that host before recording the key; and
+    // (2) a durable `custody-verified:` transition note written on the source row by
+    // whoever performed the registered-host read. Historical source rows are never
+    // mutated by this detector — the disposition note is the verifier's act, not ours.
     const custodyRows = deps.db
       .prepare(
         `SELECT q.qitem_id FROM queue_items q
@@ -389,8 +447,11 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       const row = deps.queueRepo.getById(qitem_id);
       if (!row || isFindingRow(row)) continue;
       const targets = (row.closureTarget ?? "").split(",").map((target) => target.trim()).filter(Boolean);
+      const verified = custodyVerifiedTargets(deps.db, row.qitemId);
       const verificationTargets = targets.filter((target) => {
-        if (target.includes("@")) return true;
+        if (verified.has(target)) return false;
+        const at = target.indexOf("@");
+        if (at !== -1) return !isRegisteredHost(target.slice(at + 1));
         return !deps.queueRepo.getById(target);
       });
       if (verificationTargets.length === 0) continue;
