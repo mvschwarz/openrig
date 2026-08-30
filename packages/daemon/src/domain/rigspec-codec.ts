@@ -1,5 +1,13 @@
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import type { RigSpec, LegacyRigSpec, SessionSourceSpec } from "./types.js";
+import type {
+  RigSpec,
+  LegacyRigSpec,
+  SessionSourceSpec,
+  RigServicesSpec,
+  RigServicesWaitTarget,
+  RigServicesSurface,
+  RigServicesCheckpointHook,
+} from "./types.js";
 
 // OPR.0.5.6.23 — the presence-invariant serialization seam for the
 // sessionSource union: ONE enumeration of the union's optional ref fields
@@ -24,6 +32,59 @@ function serializeSessionSource(ss: SessionSourceSpec): Record<string, unknown> 
   return { mode: ss.mode, ref };
 }
 
+// OPR.0.5.6.23 (desk ruling, transition 45061 on the slice's whole-goal row):
+// the services family rides the same presence-invariant seam. The mapped
+// record below must name EVERY RigServicesSpec key — a new field on the type
+// fails compilation here naming the missing key, never a silent round-trip
+// to absence.
+const SERVICES_FIELD_EMITTERS: {
+  [K in keyof Required<RigServicesSpec>]: (v: NonNullable<RigServicesSpec[K]>) => [string, unknown];
+} = {
+  kind: (v) => ["kind", v],
+  composeFile: (v) => ["compose_file", v],
+  projectName: (v) => ["project_name", v],
+  profiles: (v) => ["profiles", v],
+  downPolicy: (v) => ["down_policy", v],
+  waitFor: (v) => ["wait_for", v.map(serializeWaitTarget)],
+  surfaces: (v) => ["surfaces", serializeServicesSurfaces(v)],
+  checkpoints: (v) => ["checkpoints", v.map(serializeCheckpointHook)],
+};
+
+function serializeServices(services: RigServicesSpec): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(SERVICES_FIELD_EMITTERS) as (keyof RigServicesSpec)[]) {
+    const value = services[key];
+    if (value === undefined) continue;
+    const [yamlKey, yamlValue] = SERVICES_FIELD_EMITTERS[key](value as never);
+    out[yamlKey] = yamlValue;
+  }
+  return out;
+}
+
+function serializeWaitTarget(target: RigServicesWaitTarget): Record<string, unknown> {
+  const t: Record<string, unknown> = {};
+  if (target.service !== undefined) t["service"] = target.service;
+  if (target.condition !== undefined) t["condition"] = target.condition;
+  if (target.url !== undefined) t["url"] = target.url;
+  if (target.tcp !== undefined) t["tcp"] = target.tcp;
+  return t;
+}
+
+function serializeServicesSurfaces(surfaces: RigServicesSurface): Record<string, unknown> {
+  const s: Record<string, unknown> = {};
+  if (surfaces.urls !== undefined) s["urls"] = surfaces.urls.map((u) => ({ name: u.name, url: u.url }));
+  if (surfaces.commands !== undefined) {
+    s["commands"] = surfaces.commands.map((c) => ({ name: c.name, command: c.command }));
+  }
+  return s;
+}
+
+function serializeCheckpointHook(hook: RigServicesCheckpointHook): Record<string, unknown> {
+  const h: Record<string, unknown> = { id: hook.id, export: hook.exportCommand };
+  if (hook.importCommand !== undefined) h["import"] = hook.importCommand;
+  return h;
+}
+
 /**
  * Pod-aware RigSpec codec. Canonical contract for the AgentSpec reboot.
  */
@@ -43,6 +104,7 @@ export class RigSpecCodec {
     if (spec.permissionPolicy) doc["permission_policy"] = spec.permissionPolicy;
     if (spec.docs && spec.docs.length > 0) doc["docs"] = spec.docs.map((d) => ({ path: d.path }));
     if (spec.startup) doc["startup"] = serializeStartupBlock(spec.startup);
+    if (spec.services) doc["services"] = serializeServices(spec.services);
     // PL-007: optional rig-level workspace block. Repos round-trip with
     // their normalized absolute path; the codec does not strip back to
     // workspace-relative since it has no signal that the original author
