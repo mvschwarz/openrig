@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import Database from "better-sqlite3";
 import { describe, expect, it, vi } from "vitest";
 import {
+  ContinuityPolicyMaterializer,
   armContinuityPolicy,
   createContinuityCutoverBaton,
   materializeContinuityPolicy,
@@ -164,6 +165,42 @@ describe("continuity policy materializer (S20 P4)", () => {
         jobs = new WatchdogJobsRepository(db);
         expect(armContinuityPolicy(zeroJobInput, jobs)).toEqual([]);
         expect(jobs.listActive()).toEqual([]);
+      }
+    } finally {
+      db.close();
+    }
+  });
+
+  it("reconciles zero-job transitions through the product materializer across restart", () => {
+    const db = new Database(":memory:");
+    const { watchedFilePath, ...claudeSeat } = CLAUDE_SEAT;
+    try {
+      migrate(db, ALL_MIGRATIONS);
+      for (const next of [
+        { compactionStrategy: "default-compaction" as const, runtime: "claude-code" },
+        { compactionStrategy: "handover" as const, runtime: "claude-code" },
+        { compactionStrategy: "managed-compaction" as const, runtime: "codex" },
+      ]) {
+        let jobs = new WatchdogJobsRepository(db);
+        const original = new ContinuityPolicyMaterializer(jobs, () => watchedFilePath).arm({
+          ...claudeSeat,
+          sessionId: "original-session",
+        });
+        expect(original).toHaveLength(2);
+
+        jobs = new WatchdogJobsRepository(db);
+        const resolveWatchedFilePath = vi.fn(() => watchedFilePath);
+        expect(new ContinuityPolicyMaterializer(jobs, resolveWatchedFilePath).arm({
+          ...claudeSeat,
+          ...next,
+          sessionId: "replacement-session",
+        })).toEqual([]);
+        expect(resolveWatchedFilePath).not.toHaveBeenCalled();
+        expect(jobs.listActive()).toEqual([]);
+        expect(original.map((job) => jobs.getByIdOrThrow(job.jobId))).toEqual([
+          expect.objectContaining({ state: "terminal", terminalReason: "continuity_policy_reconciled" }),
+          expect.objectContaining({ state: "terminal", terminalReason: "continuity_policy_reconciled" }),
+        ]);
       }
     } finally {
       db.close();
