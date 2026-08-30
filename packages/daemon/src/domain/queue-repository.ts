@@ -2887,11 +2887,13 @@ export class QueueRepository {
     }
   }
 
-  private currentDeliveryEpisode(item: QueueItem): { notificationKey: string; startedAt: string } | null {
+  /** Null means legacy/no OWNER history; inactive means OWNER history exists
+   *  but the row no longer projects a current human-notification episode. */
+  private currentDeliveryEpisode(item: QueueItem): { notificationKey: string; startedAt: string } | "inactive" | null {
     const transition = this.transitionLog.latestOwnerNotificationForQitem(item.qitemId);
     if (!transition) return null;
     const registry = this.loadHumanRegistryFn();
-    if (!registry.ok) return null;
+    if (!registry.ok) return "inactive";
     const humanAddress = transition.ownerNotificationKind === "human-decision-resolved"
       ? resolveRegisteredHumanAddress(transition.actorSession, registry.entities)
       : item.state === "blocked"
@@ -2899,7 +2901,7 @@ export class QueueRepository {
         : resolveRegisteredHumanAddress(item.destinationSession, registry.entities);
     return humanAddress
       ? { notificationKey: `${item.qitemId}:${transition.transitionId}`, startedAt: transition.ts }
-      : null;
+      : "inactive";
   }
 
   /** OPR.0.5.6.14 — derive the current episode's delivery ledger. Receipt
@@ -2915,7 +2917,9 @@ export class QueueRepository {
       .get(qitemId) as QueueItemRow | undefined;
     if (!row) return null;
     const item = this.rowToItem(row);
-    const episode = this.currentDeliveryEpisode(item);
+    const episodeState = this.currentDeliveryEpisode(item);
+    if (episodeState === "inactive") return null;
+    const episode = episodeState;
     const notes = this.db.prepare(
       `SELECT transition_note FROM queue_transitions
         WHERE qitem_id = ? AND (transition_note LIKE 'slack-owner-notification-posted %'
