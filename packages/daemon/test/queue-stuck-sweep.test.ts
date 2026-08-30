@@ -691,8 +691,12 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     await runSweep();
     const findings = await findingsFor(row.qitemId);
     expect(findings).toHaveLength(1);
-    expect(findings[0]!.body).toContain(missing);
-    expect(findings[0]!.body).not.toContain(verified);
+    // The verification-targets checklist renders each member as "- <target>"; the
+    // verified member must be absent THERE. (The body's last-transition line echoes
+    // the custody-verified note verbatim, so a bare not-contains on the id would
+    // fail on the disposition's own honest echo.)
+    expect(findings[0]!.body).toContain(`- ${missing}`);
+    expect(findings[0]!.body).not.toContain(`- ${verified}`);
   });
 
   it("DISPOSITION IS EXACT: a custody-verified note naming a DIFFERENT target silences nothing", async () => {
