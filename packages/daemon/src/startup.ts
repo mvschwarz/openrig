@@ -1724,14 +1724,22 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       historyLog: watchdogHistoryLogInstance,
       eventBus,
       deliver: async ({ targetSession, message, continuityAction }) => {
+        let continuityActionCompleted = false;
         try {
           if (continuityAction) {
             await createContinuityCutoverBaton(continuityAction, queueRepoInstance);
+            continuityActionCompleted = true;
           }
           const result = await sessionTransport.send(targetSession, message);
-          return result.ok ? { status: "ok" } : { status: "failed", error: result.error };
+          return result.ok
+            ? { status: "ok", continuityActionCompleted }
+            : { status: "failed", error: result.error, continuityActionCompleted };
         } catch (err) {
-          return { status: "failed", error: err instanceof Error ? err.message : String(err) };
+          return {
+            status: "failed",
+            error: err instanceof Error ? err.message : String(err),
+            continuityActionCompleted,
+          };
         }
       },
       // (i-c) fire-time target-generation gate: resolve the target's LIVE occupant-generation (P12

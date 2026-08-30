@@ -52,16 +52,30 @@ export interface ContinuityPolicyPlan {
   docText: string;
 }
 
+type StoredContinuityJob = Pick<
+  WatchdogJob,
+  "jobId" | "state" | "specYaml" | "requiresJobId"
+> & Partial<Pick<
+  WatchdogJob,
+  | "watchedFilePath"
+  | "thresholdBytes"
+  | "intervalSeconds"
+  | "activeWakeIntervalSeconds"
+  | "scanIntervalSeconds"
+  | "registeredBySession"
+  | "terminalReason"
+  | "watchedFileGeneration"
+  | "lastFiredGeneration"
+>>;
+
 export interface ContinuityJobsRegistrar {
   register(input: RegisterWatchdogJobInput): Pick<WatchdogJob, "jobId">;
+  markTerminal?(jobId: string, reason: string): void;
   listExactTuple?(
     policy: string,
     targetSession: string,
     targetGenerationUuid: string | null,
-  ): Array<
-    Pick<WatchdogJob, "jobId" | "state" | "specYaml" | "requiresJobId"> &
-    Partial<Pick<WatchdogJob, "watchedFileGeneration" | "lastFiredGeneration">>
-  >;
+  ): StoredContinuityJob[];
 }
 
 export interface ContinuityCutoverAction {
@@ -237,7 +251,6 @@ export function armContinuityPolicy(
   registrar: ContinuityJobsRegistrar,
 ): Array<Pick<WatchdogJob, "jobId">> {
   const plan = materializeContinuityPolicy(input);
-  if (plan.jobs.length === 0) return [];
   const existing = (registrar.listExactTuple?.(
     "context-usage-threshold",
     input.targetSession,
@@ -245,30 +258,71 @@ export function armContinuityPolicy(
   ) ?? []).filter(
     (job) =>
       job.state !== "terminal" &&
-      job.specYaml.includes("generated_by: continuity-policy-materializer") &&
-      (job.specYaml.includes(`continuity_mode: ${input.compactionStrategy}`) ||
-        (input.compactionStrategy === "apprentice-handover" && !job.specYaml.includes("continuity_mode:"))),
+      job.specYaml.includes("generated_by: continuity-policy-materializer"),
   );
-  if (existing.length > 0) {
-    if (plan.jobs.length === 1) {
-      if (existing.length !== 1 || existing[0]!.requiresJobId !== null) {
-        throw new Error(
-          `continuity_policy_registration_ambiguous: expected one managed prepare job for ${input.targetSession}`,
-        );
-      }
-      return [existing[0]!];
+
+  const retireUnexpected = (keep: Set<string>): void => {
+    const stale = existing.filter((job) => !keep.has(job.jobId));
+    if (stale.length > 0 && !registrar.markTerminal) {
+      throw new Error(`continuity_policy_reconciliation_unsupported: ${input.targetSession}`);
     }
-    const prepare = existing.find((job) => job.requiresJobId === null);
-    const cutover = prepare
-      ? existing.find((job) => job.requiresJobId === prepare.jobId)
-      : undefined;
-    if (existing.length !== 2 || !prepare || !cutover) {
-      throw new Error(
-        `continuity_policy_registration_ambiguous: expected one prepare/cutover pair for ${input.targetSession}`,
-      );
+    for (const job of stale) {
+      registrar.markTerminal!(job.jobId, "continuity_policy_reconciled");
     }
-    return [prepare, cutover];
+  };
+  const matches = (
+    job: StoredContinuityJob,
+    desired: ContinuityWatchdogPlan,
+    requiresJobId: string | null,
+  ): boolean =>
+    job.specYaml === desired.specYaml &&
+    job.requiresJobId === requiresJobId &&
+    job.watchedFilePath === (desired.watchedFilePath ?? null) &&
+    job.thresholdBytes === (desired.thresholdBytes ?? null) &&
+    job.intervalSeconds === desired.intervalSeconds &&
+    job.activeWakeIntervalSeconds === (desired.activeWakeIntervalSeconds ?? null) &&
+    job.scanIntervalSeconds === (desired.scanIntervalSeconds ?? null) &&
+    job.registeredBySession === desired.registeredBySession;
+  const isCurrentShapeCandidate = (job: StoredContinuityJob): boolean =>
+    job.state === "active" ||
+    (job.state === "stopped" &&
+      job.terminalReason !== "continuity_policy_reconciled" &&
+      job.terminalReason !== "registering generation retired (seat handover)");
+
+  if (plan.jobs.length === 0) {
+    retireUnexpected(new Set());
+    return [];
   }
+
+  if (plan.jobs.length === 1) {
+    const exact = existing
+      .filter((job) => isCurrentShapeCandidate(job) && matches(job, plan.jobs[0]!, null))
+      .sort((a, b) => Number(b.state === "stopped") - Number(a.state === "stopped"))[0];
+    if (exact) {
+      retireUnexpected(new Set([exact.jobId]));
+      return [exact];
+    }
+  } else {
+    const exactPairs = existing
+      .filter((job) => isCurrentShapeCandidate(job) && matches(job, plan.jobs[0]!, null))
+      .flatMap((prepare) => {
+        const cutover = existing.find((job) =>
+          isCurrentShapeCandidate(job) && matches(job, plan.jobs[1]!, prepare.jobId)
+        );
+        return cutover ? [{ prepare, cutover }] : [];
+      })
+      .sort((a, b) =>
+        Number(b.prepare.state === "stopped" || b.cutover.state === "stopped") -
+        Number(a.prepare.state === "stopped" || a.cutover.state === "stopped")
+      );
+    const exact = exactPairs[0];
+    if (exact) {
+      retireUnexpected(new Set([exact.prepare.jobId, exact.cutover.jobId]));
+      return [exact.prepare, exact.cutover];
+    }
+  }
+
+  retireUnexpected(new Set());
   const registered = new Map<string, Pick<WatchdogJob, "jobId">>();
   for (const job of plan.jobs) {
     const requiresJobId = job.requiresKey

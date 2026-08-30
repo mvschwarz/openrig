@@ -65,6 +65,7 @@ describe("continuity policy materializer (S20 P4)", () => {
       {
         jobId: "prepare-job",
         state: "active" as const,
+        terminalReason: null,
         specYaml: plan.jobs[0]!.specYaml,
         requiresJobId: null,
         watchedFilePath: plan.jobs[0]!.watchedFilePath ?? null,
@@ -72,10 +73,12 @@ describe("continuity policy materializer (S20 P4)", () => {
         intervalSeconds: plan.jobs[0]!.intervalSeconds,
         activeWakeIntervalSeconds: plan.jobs[0]!.activeWakeIntervalSeconds ?? null,
         scanIntervalSeconds: plan.jobs[0]!.scanIntervalSeconds ?? null,
+        registeredBySession: plan.jobs[0]!.registeredBySession,
       },
       {
         jobId: "cutover-job",
         state: "stopped" as const,
+        terminalReason: "operator_stopped",
         specYaml: plan.jobs[1]!.specYaml,
         requiresJobId: "prepare-job",
         watchedFilePath: plan.jobs[1]!.watchedFilePath ?? null,
@@ -83,6 +86,7 @@ describe("continuity policy materializer (S20 P4)", () => {
         intervalSeconds: plan.jobs[1]!.intervalSeconds,
         activeWakeIntervalSeconds: plan.jobs[1]!.activeWakeIntervalSeconds ?? null,
         scanIntervalSeconds: plan.jobs[1]!.scanIntervalSeconds ?? null,
+        registeredBySession: plan.jobs[1]!.registeredBySession,
       },
     ];
 
@@ -114,6 +118,10 @@ describe("continuity policy materializer (S20 P4)", () => {
       expect(changedRows.map((job) => job.thresholdBytes)).toEqual([5_309_734, 7_964_601]);
       expect(jobs.listActive()).toHaveLength(2);
       expect(jobs.listActive().map((job) => job.specYaml).join("\n")).not.toContain("operator-agent@kernel");
+      expect(original.map((job) => jobs.getByIdOrThrow(job.jobId))).toEqual([
+        expect.objectContaining({ state: "terminal", terminalReason: "continuity_policy_reconciled" }),
+        expect.objectContaining({ state: "terminal", terminalReason: "continuity_policy_reconciled" }),
+      ]);
 
       const stoppedCutover = changedRows.find((job) => job.requiresJobId !== null)!;
       jobs.stop(stoppedCutover.jobId, "operator_stopped");
@@ -142,6 +150,21 @@ describe("continuity policy materializer (S20 P4)", () => {
         compactionStrategy: "default-compaction",
       }, jobs)).toEqual([]);
       expect(jobs.listActive()).toEqual([]);
+
+      for (const zeroJobInput of [
+        { ...CLAUDE_SEAT, compactionStrategy: "handover" as const },
+        { ...CLAUDE_SEAT, runtime: "codex" },
+      ]) {
+        jobs = new WatchdogJobsRepository(db);
+        expect(armContinuityPolicy({
+          ...CLAUDE_SEAT,
+          compactionStrategy: "managed-compaction",
+          mechanic: undefined,
+        }, jobs)).toHaveLength(1);
+        jobs = new WatchdogJobsRepository(db);
+        expect(armContinuityPolicy(zeroJobInput, jobs)).toEqual([]);
+        expect(jobs.listActive()).toEqual([]);
+      }
     } finally {
       db.close();
     }

@@ -15,6 +15,7 @@ import { watchdogHistorySchema } from "../src/db/migrations/032_watchdog_history
 import { occupantTenuresSchema } from "../src/db/migrations/060_occupant_tenures.js";
 import { contextUsageWatchdogSchema } from "../src/db/migrations/074_context_usage_watchdog.js";
 import { contextUsageWatchdogGenerationSchema } from "../src/db/migrations/075_context_usage_watchdog_generation.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { createContinuityCutoverBaton } from "../src/domain/continuity-policy-materializer.js";
@@ -233,10 +234,11 @@ describe("context-usage-threshold watchdog", () => {
   });
 
   it("retries a refused structured cutover until one durable baton exists, then stamps the generation", async () => {
+    migrate(db, ALL_MIGRATIONS);
     writeFileSync(transcript, "1234567890");
     let destinationExists = false;
     const queue = new QueueRepository(db, bus, {
-      validateRig: (rigName) => rigName === "rig" || (rigName === "missing-rig" && destinationExists),
+      validateRig: (sessionRef) => sessionRef === "mechanic@missing-rig" && destinationExists,
     });
     const job = repo.register({
       policy: "context-usage-threshold",

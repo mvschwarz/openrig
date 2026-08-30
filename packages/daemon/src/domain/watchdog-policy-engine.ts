@@ -51,6 +51,8 @@ export interface DeliveryRequest {
 export interface DeliveryOutcome {
   status: "ok" | "failed";
   error?: string;
+  /** Structured continuity custody was durably created or identified. */
+  continuityActionCompleted?: boolean;
 }
 
 export type DeliveryFn = (req: DeliveryRequest) => Promise<DeliveryOutcome>;
@@ -427,10 +429,10 @@ export class WatchdogPolicyEngine {
       occupantGeneration,
     );
 
-    // Match the proven hook's at-most-once ordering: persist the durable
-    // generation receipt before crossing the external delivery boundary.
-    // A daemon restart after delivery must never repeat the threshold action.
-    if (isContextUsageThreshold && occupantGeneration) {
+    // Plain wakes retain the proven at-most-once ordering. Structured
+    // continuity custody is retry-safe by deterministic qitem id, so its
+    // receipt waits until the durable action has completed.
+    if (isContextUsageThreshold && occupantGeneration && !continuityAction) {
       this.jobsRepo.recordThresholdFire(job.jobId, occupantGeneration, evaluatedAt);
     }
     const delivery = await this.deliver({
@@ -438,6 +440,14 @@ export class WatchdogPolicyEngine {
       message: outcome.message,
       ...(continuityAction ? { continuityAction } : {}),
     });
+    if (
+      isContextUsageThreshold &&
+      occupantGeneration &&
+      continuityAction &&
+      delivery.continuityActionCompleted === true
+    ) {
+      this.jobsRepo.recordThresholdFire(job.jobId, occupantGeneration, evaluatedAt);
+    }
     const history = this.historyLog.record({
       jobId: job.jobId,
       evaluatedAt,
