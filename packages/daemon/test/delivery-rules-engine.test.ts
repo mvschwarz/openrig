@@ -25,6 +25,7 @@ import { buildSlackGatewayWire } from "../src/domain/gateway/slack/slack-subsyst
 import { OUTBOUND_OP } from "../src/domain/gateway/slack/outbound-driver.js";
 import { resolveSlackHandle, validateHumanFragment } from "../src/domain/gateway/human-registry.js";
 import { WatchdogJobsRepository, PHASE_D_POLICIES } from "../src/domain/watchdog-jobs-repository.js";
+import { DispatchBuffer } from "../src/domain/gateway/dispatch-buffer.js";
 import { runWakeLadderTick } from "../src/domain/queue-wake-ladder.js";
 
 // The engine is imported dynamically so each section carries its own RED
@@ -591,6 +592,73 @@ describe("OPR.0.5.6.1 §4 — the C/D digest flush (v3: transport truth first, r
       expect(after.members).toBe(0);
       await new Promise((resolve) => setTimeout(resolve, 30));
       expect(posts.length).toBe(1);
+    } finally {
+      healthy.stop();
+    }
+  });
+
+  it("MEMBERSHIP EXCLUSIVITY (R1 HOLD c7818ceb required discriminator): with A+B pending receiptless, adding C mints a NON-OVERLAPPING digest — pending decisions never share a member, and after healing every member posts exactly once (RED at candidate: the set-hash mints an overlapping A/B/C decision)", async () => {
+    const mod = await digestFlushModule();
+    expect(mod).not.toBeNull();
+    // A + B recorded, transport DOWN: their digest decision goes pending, zero receipts
+    const firstRows = await nParks(2);
+    const registry = registryWith({ deliveryClass: "C", availability: "available" });
+    const ports = makeQueuePorts(repo, { loadHumanRegistry: () => registry } as never);
+    for (const alert of await ports.listHumanAlerts({ minimumLevel: "NOTICE" })) {
+      recordDigestDecision(alert.qitemId, alert.notificationKey ?? alert.qitemId, "4h");
+    }
+    const posts: Array<Record<string, unknown>> = [];
+    const failing = digestWire(posts, { failFetch: true });
+    try {
+      failing.startServices?.();
+      const first = await flushViaWire(mod!, failing);
+      expect(first.members).toBe(2);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      // C arrives while A+B are pending receiptless
+      const [cRow] = await nParks(1);
+      for (const alert of await ports.listHumanAlerts({ minimumLevel: "NOTICE" })) {
+        if (alert.qitemId === cRow!.qitemId) {
+          recordDigestDecision(alert.qitemId, alert.notificationKey ?? alert.qitemId, "4h");
+        }
+      }
+      const second = await flushViaWire(mod!, failing);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      // pending decisions must be member-exclusive: no key in more than one
+      const pending = new DispatchBuffer(home).pending().filter((d) => d.decisionId.startsWith("digest:"));
+      const seen = new Map<string, number>();
+      for (const d of pending) {
+        for (const m of ((d.payload as { memberReceipts?: Array<{ notificationKey: string }> }).memberReceipts ?? [])) {
+          seen.set(m.notificationKey, (seen.get(m.notificationKey) ?? 0) + 1);
+        }
+      }
+      for (const [key, count] of seen) {
+        expect(count, `member ${key} rides exactly one pending decision — overlap is the double-delivery`).toBe(1);
+      }
+      expect(second.members, "the second mint covers ONLY the new member").toBe(1);
+    } finally {
+      failing.stop();
+    }
+    // transport heals: reconstruction replays BOTH exclusive decisions —
+    // one human-visible post per member episode, each receipted exactly once
+    const healthy = digestWire(posts);
+    try {
+      healthy.startServices?.();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      const memberAppearances = new Map<string, number>();
+      for (const post of posts) {
+        const text = JSON.stringify(post);
+        for (const row of [...firstRows]) {
+          if (text.includes(row.qitemId)) memberAppearances.set(row.qitemId, (memberAppearances.get(row.qitemId) ?? 0) + 1);
+        }
+      }
+      for (const row of firstRows) {
+        expect(memberAppearances.get(row.qitemId) ?? 0, `${row.qitemId} appears in exactly one posted digest`).toBe(1);
+      }
+      const allRows = await (async () => repo.list({ limit: 100 }))();
+      for (const row of allRows.filter((r) => r.destinationSession === "orch-lead@v-openrig-build")) {
+        const receipts = repo.listTransitions(row.qitemId).filter((t) => t.transitionNote?.startsWith("slack-owner-notification-posted "));
+        expect(receipts.length, `one receipt per member episode on ${row.qitemId}`).toBeLessThanOrEqual(1);
+      }
     } finally {
       healthy.stop();
     }
