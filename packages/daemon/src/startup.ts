@@ -1719,6 +1719,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
   const sessionTransport = deps.sessionTransport;
   if (sessionTransport) {
+    // OPR.0.5.6.1 — late-bound gateway dispatch for the delivery policies (the
+    // gateway subsystem is constructed after the watchdog engine; the ref fills
+    // at activation below). Registry loads through the shipped loader.
+    const lateGatewayDispatch: { fn?: (op: string, ref: string, payload: unknown) => { ok: boolean; error?: string } } = {};
+    const { loadHumanRegistry: loadHumanRegistryForDelivery } = await import("./domain/gateway/human-registry.js");
     const watchdogPolicyEngine = new WatchdogPolicyEngine({
       jobsRepo: watchdogJobsRepoInstance,
       historyLog: watchdogHistoryLogInstance,
@@ -1835,6 +1840,54 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
                 .map((r) => r.qitemId),
           },
         }),
+        // OPR.0.5.6.1 AM-F1 — the delivery engine's two timing legs on THIS
+        // substrate. The gateway dispatch binds late (the subsystem is built
+        // after this engine): the ref below is populated at gateway activation.
+        (await import("./domain/policies/delivery-deferral.js")).makeDeliveryDeferralPolicy({
+          jobsRepo: watchdogJobsRepoInstance,
+          queueRepo: queueRepoInstance,
+          deliverInterrupt: async (qitemId: string) => {
+            const dispatch = lateGatewayDispatch.fn;
+            const row = queueRepoInstance.getById(qitemId);
+            if (!dispatch || !row) return { ok: false };
+            const res = dispatch("outbound_post", row.destinationSession ?? "", {
+              qitemId: row.qitemId,
+              summary: row.summary ?? null,
+              body: row.body ?? null,
+              destinationSession: row.destinationSession ?? null,
+              sourceSession: row.sourceSession ?? null,
+              ownerNotificationLevel: "ALERT",
+              ownerNotificationKind: "human-required",
+              tags: row.tags ?? null,
+              // The already-made decision executing at T+30 — the consult is bypassed
+              // so the fire can never re-defer (AM-F3).
+              deliveryDeferralFire: true,
+            });
+            return { ok: res.ok };
+          },
+        }),
+        (await import("./domain/policies/delivery-digest-flush.js")).makeDeliveryDigestFlushPolicy({
+          queueRepo: queueRepoInstance,
+          registry: { loadHumanRegistry: (home: string) => loadHumanRegistryForDelivery(home) },
+          home: OPENRIG_HOME,
+          post: async (payload: Record<string, unknown>) => {
+            const { loadConfig } = await import("./domain/gateway/slack/config.js");
+            const { resolveSecret } = await import("./domain/gateway/slack/secrets.js");
+            const { callWebApi } = await import("./domain/gateway/slack/slack-api.js");
+            const cfg = loadConfig(OPENRIG_HOME);
+            const token = resolveSecret("SLACK_BOT_TOKEN", { envFile: cfg.secretsEnvFile ?? undefined });
+            if (!cfg.enabled || !token || !cfg.channel) return { ok: false };
+            const items = (payload.items as Array<{ qitemId: string; summary: string | null }>) ?? [];
+            const text = [
+              `Delivery digest (${String(payload.window)}) — ${items.length} item(s):`,
+              ...items.map((i) => `• ${i.summary ?? i.qitemId} [${i.qitemId}]`),
+            ].join("\n");
+            const res = await callWebApi("chat.postMessage", token, { channel: cfg.channel, text });
+            const body = (res as { ok?: boolean; body?: { ok?: boolean; ts?: string } });
+            const ok = body.ok === true && body.body?.ok === true;
+            return { ok, ts: body.body?.ts };
+          },
+        }),
       ],
     });
     const watchdogScheduler = new WatchdogScheduler({
@@ -1871,6 +1924,25 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // its supervisor job in the same act that creates it, never at the next
       // daemon restart.
       rigRepo.onRigCreated = (rig) => ensureParkedOwnerJob(rig.name);
+    }
+
+    // OPR.0.5.6.1 — the two digest windows as idempotent watchdog jobs (AM-F1:
+    // the flush rides the same named substrate; restart-durable by the same
+    // SQLite schedule; a daemon down across a window flushes on the next tick).
+    {
+      const ensureDigestJob = (window: "4h" | "daily", intervalSeconds: number) => {
+        watchdogJobsRepoInstance.ensureAutoRegistration({
+          policy: "delivery-digest-flush",
+          targetSession: `delivery-digest-${window}@kernel`,
+          registeredBySession: "daemon@kernel",
+          intervalSeconds,
+          activeWakeIntervalSeconds: null,
+          scanIntervalSeconds: null,
+          specYaml: `policy: delivery-digest-flush\ntarget:\n  session: delivery-digest-${window}@kernel\ncontext:\n  window: ${window}\n`,
+        });
+      };
+      ensureDigestJob("4h", 4 * 60 * 60);
+      ensureDigestJob("daily", 24 * 60 * 60);
     }
 
     // B8 / slice-07 A3 — the MODEL-DIVERGENCE MONITOR: cause-agnostic effective-vs-pinned
@@ -2171,6 +2243,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   });
   gatewaySubsystem.start();
   deps.gatewaySubsystem = gatewaySubsystem;
+  // OPR.0.5.6.1 — bind the delivery policies' late gateway ref.
+  lateGatewayDispatch.fn = (op, ref, payload) => gatewaySubsystem.dispatch(op, ref, payload);
 
   const { app, injectWebSocket } = createAppWithWebSocket(deps);
 

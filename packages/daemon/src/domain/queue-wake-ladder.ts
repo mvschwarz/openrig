@@ -31,9 +31,13 @@
 //
 // AM-P3-F4 + AM-R25: rungs DELIVER, not just record. The orchestrator rung attempts a real
 // wake on the aggregate escalation row; a rung whose own wake fails advances after one
-// bounded cycle. The operator rung's delivery floor here is the escalation view + the
-// daemon-health surface, stated honestly in its marker — the human-layer connector attempt
-// is S11 territory (0.5.6), cited, not built; the rung gains that leg when S11 lands.
+// bounded cycle. OPR.0.5.6.1 (A1.2/AM-F3): the operator rung's delivery leg IS the
+// delivery rules engine — the rung dispatches through the injected engine port, records
+// dispatched-to-engine with the decision, and the ladder does NOT advance past the rung
+// until the engine's outcome resolves (a posted receipt or a delivery-termination record);
+// exactly one delivery per episode, never immediate-plus-deferred. When no engine port is
+// wired (fixtures, pre-wire boot), the rung keeps the pre-engine floor honestly
+// (escalation view + daemon-health) and exhausts as before.
 
 import type Database from "better-sqlite3";
 import type { QueueItem, QueueRepository } from "./queue-repository.js";
@@ -178,6 +182,12 @@ export interface WakeLadderDeps {
   usageLimitJitterSeconds?: number;
   now?: Date;
   log?: (line: string) => void;
+  /** OPR.0.5.6.1 — the operator rung's delivery leg. dispatchEscalation delivers
+   *  (or defers) through the rules engine and reports whether the outcome
+   *  resolved synchronously; absent = pre-engine floor behavior. */
+  deliveryEngine?: {
+    dispatchEscalation: (row: QueueItem, reason: string) => Promise<{ decision: string; resolved: boolean }>;
+  };
 }
 
 export interface WakeLadderAction {
@@ -203,6 +213,8 @@ interface LadderView {
   orchRung: boolean;
   orchRungFailed: boolean;
   opRung: boolean;
+  opEngineDispatched: boolean;
+  opOutcomeResolved: boolean;
   exhausted: boolean;
   suspendEpisodeOpen: boolean;
   firstMarkerTs: number | null;
@@ -218,6 +230,8 @@ function readLadder(db: Database.Database, qitemId: string): LadderView {
     orchRung: false,
     orchRungFailed: false,
     opRung: false,
+    opEngineDispatched: false,
+    opOutcomeResolved: false,
     exhausted: false,
     suspendEpisodeOpen: false,
     firstMarkerTs: null,
@@ -234,6 +248,12 @@ function readLadder(db: Database.Database, qitemId: string): LadderView {
       view.orchRungFailed = /outcome=failed:/.test(note);
     }
     if (isRung && /^escalation-rung:\s*operator/.test(note)) view.opRung = true;
+    if (isRung && /^escalation-rung:\s*operator dispatched-to-engine/.test(note)) view.opEngineDispatched = true;
+    // Outcome resolution (AM-F3): the S14 posted receipt or the engine's
+    // termination record closes the episode the rung is waiting on.
+    if (note.startsWith("slack-owner-notification-posted ") || note.startsWith("delivery-termination:")) {
+      view.opOutcomeResolved = true;
+    }
     if (note.startsWith(LADDER_EXHAUSTED_PREFIX)) view.exhausted = true;
     if (note.startsWith(LADDER_SUSPEND_PREFIX)) suspends += 1;
     if (note.startsWith(LADDER_RESUME_PREFIX)) resumes += 1;
@@ -268,7 +288,13 @@ function hasPickupEvidence(db: Database.Database, row: QueueItem): boolean {
       note.startsWith(LADDER_RUNG_PREFIX) ||
       note.startsWith(LADDER_EXHAUSTED_PREFIX) ||
       note.startsWith(LADDER_SUSPEND_PREFIX) ||
-      note.startsWith(LADDER_RESUME_PREFIX)
+      note.startsWith(LADDER_RESUME_PREFIX) ||
+      // OPR.0.5.6.1: delivery-leg records are ladder machinery, not pickup —
+      // a receipt/termination/deferral stamp must not pull the row out of the
+      // ladder before the resolution pass reads it.
+      note.startsWith("slack-owner-notification-") ||
+      note.startsWith("delivery-termination:") ||
+      note.startsWith("delivery-deferral-")
     )
       continue;
     return true;
@@ -619,9 +645,10 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
               m.row,
               `${LADDER_RUNG_PREFIX} orchestrator self-skip (resolves to ${orch === null ? "no orchestrator" : "destination"}) reason=${m.reason}`,
             );
-            operatorRung(deps.queueRepo, m.row, m.reason, actions);
-            appendExhausted(deps.queueRepo, m.row, "operator rung reached");
-            exhaustedThisTick += 1;
+            if (await operatorRung(deps, m.row, m.reason, actions, m.view)) {
+              appendExhausted(deps.queueRepo, m.row, "operator rung resolved");
+              exhaustedThisTick += 1;
+            }
           }
         } else {
           const escRow = await ensureEscalationRow(deps, dest, orch, members, reason);
@@ -651,8 +678,19 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       // Orchestrator rung recorded and failed → advance to the operator rung.
       for (const m of actionable) {
         if (m.view.orchRung && m.view.orchRungFailed && !m.view.opRung) {
-          operatorRung(deps.queueRepo, m.row, m.reason, actions);
-          appendExhausted(deps.queueRepo, m.row, "operator rung reached");
+          if (await operatorRung(deps, m.row, m.reason, actions, m.view)) {
+            appendExhausted(deps.queueRepo, m.row, "operator rung resolved");
+            exhaustedThisTick += 1;
+          }
+        }
+      }
+
+      // AM-F3 resolution pass: a rung whose engine outcome was pending exhausts
+      // once the row carries its resolution (posted receipt or termination) —
+      // never before, never silently.
+      for (const m of members) {
+        if (m.view.opEngineDispatched && !m.view.exhausted && m.view.opOutcomeResolved) {
+          appendExhausted(deps.queueRepo, m.row, "engine outcome resolved");
           exhaustedThisTick += 1;
         }
       }
@@ -677,21 +715,41 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
   }
 }
 
-/** The operator rung: records and advances (AM-R25 trim). Its delivery floor here is the
- *  escalation view + the daemon-health surface, stated honestly on the marker; the
- *  human-layer connector attempt is S11 territory (0.5.6) and rides in when S11 lands. */
-function operatorRung(
-  repo: QueueRepository,
+/** The operator rung (OPR.0.5.6.1 A1.2/AM-F3): the delivery rules engine IS the rung's
+ *  delivery leg. With an engine port wired, the rung dispatches exactly once per episode,
+ *  records the decision, and exhausts ONLY when the outcome resolves (synchronously, or
+ *  later via the posted receipt / termination record the resolution pass reads). Without
+ *  a port the pre-engine floor stands honestly and exhausts as before.
+ *  Returns true when the ladder may append its exhausted marker now. */
+async function operatorRung(
+  deps: WakeLadderDeps,
   row: QueueItem,
   reason: string,
   actions: WakeLadderAction[],
-): void {
+  view: LadderView,
+): Promise<boolean> {
+  const repo = deps.queueRepo;
+  if (!deps.deliveryEngine) {
+    appendMarker(
+      repo,
+      row,
+      `${LADDER_RUNG_PREFIX} operator floor=escalation view + daemon-health (delivery engine not wired) reason=${reason}`,
+    );
+    actions.push({ qitemId: row.qitemId, action: "escalate-operator" });
+    return true;
+  }
+  if (view.opEngineDispatched) {
+    // Exactly-once per episode: never re-dispatch; the resolution pass decides advance.
+    return view.opOutcomeResolved;
+  }
+  const outcome = await deps.deliveryEngine.dispatchEscalation(row, reason);
   appendMarker(
     repo,
     row,
-    `${LADDER_RUNG_PREFIX} operator floor=escalation view + daemon-health (human-layer connector = S11/0.5.6, cited not built) reason=${reason}`,
+    `${LADDER_RUNG_PREFIX} operator dispatched-to-engine decision=${outcome.decision} resolved=${outcome.resolved} reason=${reason}`,
   );
   actions.push({ qitemId: row.qitemId, action: "escalate-operator" });
+  return outcome.resolved;
 }
 
 function appendExhausted(repo: QueueRepository, row: QueueItem, why: string): void {

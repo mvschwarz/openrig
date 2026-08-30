@@ -35,6 +35,12 @@ export const PHASE_D_POLICIES = [
   // open obligations with the ARBITRATED idle verdict into one wake per park
   // episode. Injected via additionalPolicies like idle-gate-qitem.
   "parked-owner-consumer",
+  // OPR.0.5.6.1 AM-F1 — the delivery rules engine's two timing legs, on THIS
+  // substrate by ruling (no third timer engine): the one-shot away-escalation
+  // deferral and the repeating C/D digest window flush. Injected via
+  // additionalPolicies like parked-owner-consumer.
+  "delivery-deferral",
+  "delivery-digest-flush",
 ] as const;
 
 /** @deprecated since Phase D — use PHASE_D_POLICIES. */

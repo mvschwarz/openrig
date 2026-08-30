@@ -14,7 +14,7 @@
 
 import path from "node:path";
 import fs from "node:fs";
-import { buildInProcessWire, type GatewayWire } from "../gateway-subsystem.js";
+import { buildInProcessWire, type GatewayWire, type SubsystemDeliverFn } from "../gateway-subsystem.js";
 import { downloadPrivateFile } from "./slack-api.js";
 import { loadConfig } from "./config.js";
 import { resolveSecret } from "./secrets.js";
@@ -31,6 +31,20 @@ import { loadHumanRegistry, resolveSlackHandle } from "../human-registry.js";
 import type { QueueRepository } from "../../queue-repository.js";
 import type { FetchImpl } from "./slack-api.js";
 import { ownerNotificationLevelAtLeast } from "../../queue-transition-log.js";
+// OPR.0.5.6.1 — the delivery rules engine: ONE decision per message replaces
+// the two dial-reads (the S14 default-decision stub). The legacy dial path
+// survives ONLY as the stated degrade when the destination is not a
+// registered human (no prefs -> no engine input).
+import {
+  decideDelivery,
+  resolveAvailability,
+  isEscalationClass,
+  formatDeliveryTermination,
+  DELIVERY_TERMINATION_PREFIX,
+  type DeliveryDecision,
+} from "../delivery-rules-engine.js";
+import { armDeliveryDeferral } from "../../policies/delivery-deferral.js";
+import { WatchdogJobsRepository } from "../../watchdog-jobs-repository.js";
 
 const SECRET_BOT = "SLACK_BOT_TOKEN";
 const SECRET_APP = "SLACK_APP_TOKEN";
@@ -155,6 +169,30 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   const ports = makeQueuePorts(opts.queueRepo, {
     loadHumanRegistry: () => registrySurface.loadHumanRegistry(opts.home),
   });
+  // OPR.0.5.6.1 — the one engine consult (AM-F5: the gateway consults the
+  // engine BEFORE dispatch). Null = destination is not a registered human;
+  // the caller keeps the pre-engine dial behavior (stated degrade).
+  const decideForPayload = (p: OutboundPostPayload): DeliveryDecision | null => {
+    const local = (p.destinationSession ?? "").split("@")[0] ?? "";
+    if (!local) return null;
+    const reg = registrySurface.loadHumanRegistry(opts.home);
+    if (!reg.ok) return null;
+    const human = reg.entities.find((e) => e.entityId === local);
+    if (!human) return null;
+    return decideDelivery({
+      level: p.ownerNotificationLevel ?? null,
+      escalation: isEscalationClass(p.tags),
+      human: {
+        entityId: human.entityId,
+        deliveryClass: human.prefs.deliveryClass,
+        availability: resolveAvailability(human.prefs),
+      },
+      dials: {
+        minimumLevelThatPosts: cfg.minimumLevelThatPosts,
+        minimumLevelThatInterrupts: cfg.minimumLevelThatInterrupts,
+      },
+    });
+  };
   const outboundSeen = new SeenStore(path.join(stateDir(opts.home), "slack-outbound-seen.jsonl"));
   const delivered = new SeenStore(path.join(stateDir(opts.home), "slack-delivered-decisions.jsonl"));
   const attempted = new SeenStore(path.join(stateDir(opts.home), "slack-attempted-decisions.jsonl"));
@@ -181,7 +219,16 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
           threadMap.resolveOpenForPair(p.destinationSession ?? "", p.sourceSession ?? "")?.threadTs,
         // S14: posting and interruption are separate threshold dials over one vocabulary.
         resolveMentionUserId: (p) => {
-          if (!p.ownerNotificationLevel || !ownerNotificationLevelAtLeast(p.ownerNotificationLevel, cfg.minimumLevelThatInterrupts)) return undefined;
+          // OPR.0.5.6.1: the engine's decided loudness is the mention rule for
+          // registered humans; the dial pair remains only for the null degrade.
+          const fire = (p as { deliveryDeferralFire?: boolean }).deliveryDeferralFire === true;
+          const decision = fire ? null : decideForPayload(p);
+          const eligible = fire
+            ? true // the deferred interrupt mentions at fire time — that IS the deferral's promise
+            : decision
+              ? decision.mention
+              : Boolean(p.ownerNotificationLevel && ownerNotificationLevelAtLeast(p.ownerNotificationLevel, cfg.minimumLevelThatInterrupts));
+          if (!eligible) return undefined;
           const local = (p.destinationSession ?? "").split("@")[0] ?? "";
           if (!local) return undefined;
           const reg = registrySurface.loadHumanRegistry(opts.home);
@@ -251,10 +298,71 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       })
     : async () => ({ ok: false as const, class: "slack-outbound-not-configured", detail: "bot token or channel missing" });
 
+  // OPR.0.5.6.1 — decision containment ahead of the transport: log-class and
+  // digest-class produce ZERO post attempts (AM-F5 tooth); an away-escalation
+  // deferral arms the watchdog substrate and posts nothing now (AM-F1); an
+  // away/off escalation records the single-human termination exactly once per
+  // episode (A1.1, F-7). interrupt/notify fall through to the S14 delivery
+  // path unchanged.
+  const recordTerminationOnce = (p: OutboundPostPayload, decision: DeliveryDecision): void => {
+    if (!decision.termination || !p.qitemId) return;
+    const key = p.notificationKey ?? p.qitemId;
+    const already = opts.queueRepo.transitionLog.listForQitem(p.qitemId).some((t) =>
+      t.transitionNote?.startsWith(DELIVERY_TERMINATION_PREFIX)
+        && t.transitionNote.split(/\s+/).includes(`notification_key=${key}`));
+    if (already) return;
+    opts.queueRepo.update({
+      qitemId: p.qitemId,
+      actorSession: "daemon@kernel",
+      transitionNote: formatDeliveryTermination(decision.termination, key),
+    });
+  };
+  const engineDeliver: SubsystemDeliverFn = async (decision) => {
+    const p = ((decision as { payload?: unknown }).payload ?? {}) as OutboundPostPayload & { deliveryDeferralFire?: boolean };
+    // The T+30 deferral FIRE executes an already-made decision — never re-consult
+    // (a re-consult would re-defer: the immediate-plus-deferred shape AM-F3 forbids).
+    if (p.deliveryDeferralFire) return deliver(decision);
+    const ruled = p.qitemId ? decideForPayload(p) : null;
+    if (ruled) {
+      recordTerminationOnce(p, ruled);
+      const episodeKey = p.notificationKey ?? p.qitemId;
+      if (ruled.outcome === "log") {
+        outboundSeen.mark(episodeKey, "log-class-contained");
+        releaseRef(p.qitemId);
+        return { ok: true as const };
+      }
+      if (ruled.outcome === "digest") {
+        // Accumulates on the row record; the flush policy posts ONE digest.
+        outboundSeen.mark(episodeKey, `digest-deferred-${ruled.digestWindow ?? "4h"}`);
+        releaseRef(p.qitemId);
+        return { ok: true as const };
+      }
+      if (ruled.deferMinutes !== undefined) {
+        try {
+          armDeliveryDeferral({
+            jobsRepo: new WatchdogJobsRepository(opts.queueRepo.db),
+            queueRepo: opts.queueRepo,
+            qitemId: p.qitemId,
+            entityId: (p.destinationSession ?? "").split("@")[0] ?? "unknown",
+            minutes: ruled.deferMinutes,
+            notificationKey: episodeKey,
+          });
+        } catch (e) {
+          log(`deferral arm failed for ${p.qitemId}: ${(e as Error).message} — falling through to immediate notify-class delivery (fail-loud beats silent loss)`);
+          return deliver(decision);
+        }
+        outboundSeen.mark(episodeKey, "interrupt-deferred");
+        releaseRef(p.qitemId);
+        return { ok: true as const };
+      }
+    }
+    return deliver(decision);
+  };
+
   const wire = buildInProcessWire({
     home: opts.home,
     ops: outboundReady ? [OUTBOUND_OP] : [],
-    deliver,
+    deliver: outboundReady ? engineDeliver : deliver,
     log,
   });
 

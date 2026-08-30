@@ -41,7 +41,12 @@ const ALLOWED_BINDING_KEYS = new Set(["kind", "connectorRef", "secretsRef", "rol
 // connector (e.g. a Slack user id). Constrained so it can never forge a session ref (no ':' / '@'
 // / whitespace) — it is compared to an inbound sender id and spliced into teaching text.
 export const HANDLE_PATTERN = /^[A-Za-z0-9._-]+$/;
-const ALLOWED_PREFS_KEYS = new Set(["deliveryClass", "away"]);
+const ALLOWED_PREFS_KEYS = new Set(["deliveryClass", "away", "availability"]);
+// OPR.0.5.6.1 — the availability enum the delivery rules engine consumes.
+// Legacy `away: true` reads as availability=away ONLY when availability is
+// whole-field-absent (the D1 convention); a present-but-conflicting pair is
+// refused at validation, never silently resolved.
+export const HUMAN_AVAILABILITY_MODES = new Set(["available", "focus", "away", "off"]);
 function unknownKey(obj: Record<string, unknown>, allowed: Set<string>): string | undefined {
   for (const k of Object.keys(obj)) if (!allowed.has(k)) return k;
   return undefined;
@@ -66,8 +71,12 @@ export interface HumanPrefs {
   /** Per-ENTITY loudness — a SELECTION from the notifications register (spec §6);
    *  A3 carries it, never redefines it. Forward-compatible if the register grows. */
   deliveryClass: "A" | "B" | "C" | "D";
-  /** The AWAY preset (optional). */
+  /** The AWAY preset (optional; LEGACY spelling — availability=away supersedes).
+   *  Read via the engine's resolveAvailability: consulted only when
+   *  `availability` is whole-field-absent. */
   away?: boolean;
+  /** OPR.0.5.6.1 — availability mode (available | focus | away | off). */
+  availability?: "available" | "focus" | "away" | "off";
 }
 
 export interface HumanFragment {
@@ -175,8 +184,17 @@ export function validateHumanFragment(raw: unknown): ValidateResult {
   if (prefs.away !== undefined && typeof prefs.away !== "boolean") {
     return { ok: false, error: "prefs.away must be a boolean when present" };
   }
+  if (prefs.availability !== undefined && !HUMAN_AVAILABILITY_MODES.has(String(prefs.availability))) {
+    return { ok: false, error: `prefs.availability "${String(prefs.availability)}" must be one of available|focus|away|off` };
+  }
+  // Two spellings of one truth are refused: a present availability is the
+  // authority; legacy away may only AGREE with it (away:true + availability=away).
+  if (prefs.availability !== undefined && prefs.away === true && prefs.availability !== "away") {
+    return { ok: false, error: `prefs.away=true conflicts with prefs.availability "${String(prefs.availability)}" — set availability alone (away is the legacy spelling)` };
+  }
   const validatedPrefs: HumanPrefs = { deliveryClass: prefs.deliveryClass as HumanPrefs["deliveryClass"] };
   if (prefs.away !== undefined) validatedPrefs.away = prefs.away;
+  if (prefs.availability !== undefined) validatedPrefs.availability = prefs.availability as HumanPrefs["availability"];
 
   return {
     ok: true,
