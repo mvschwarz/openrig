@@ -50,7 +50,7 @@ const FOUNDER_FRAGMENT = {
 
 const EVIDENCE = "shared-docs/rigs/v-openrig-build/state/evidence-s14.md";
 
-function makeHarness() {
+function makeHarness(opts?: { registryReadable?: () => boolean }) {
   const db = createDb();
   migrate(db, [
     coreSchema, bindingsSessionsSchema, externalCliAttachmentSchema, eventsSchema, queueItemsSchema,
@@ -69,7 +69,9 @@ function makeHarness() {
           : { ok: false, error: `Session '${sessionName}' not found: tmux reports no session with this name. No text was sent. Check available sessions with: rig ps --nodes` };
       },
     },
-    loadHumanRegistry: () => ({ ok: true as const, entities: [FOUNDER_FRAGMENT] }),
+    loadHumanRegistry: () => opts?.registryReadable?.() === false
+      ? { ok: false as const, error: "fixture registry unreadable" }
+      : { ok: true as const, entities: [FOUNDER_FRAGMENT] },
   });
   repo.attachOutbox(new OutboxHandler(db));
   // Topology fixture: exactly one known pane-bound seat, dev-a@rig1.
@@ -228,15 +230,18 @@ describe("OPR.0.5.6.14 — the delivery ledger is universal and consulted", () =
 
   function deliverHarness(opts?: {
     postStatus?: number;
+    postStatuses?: number[];
     onPostedImpl?: (p: unknown, ts: string) => void;
     onTransportFailed?: (p: unknown, cls: string, detail: string) => void;
   }) {
     const posts: string[] = [];
     const postedTexts: Array<{ text: string; ts: string }> = [];
+    const postStatuses = [...(opts?.postStatuses ?? [])];
     const fetchImpl = async (url: string, init?: RequestInit): Promise<Response> => {
       if (url.includes("chat.postMessage")) {
         posts.push(url);
-        if (opts?.postStatus && opts.postStatus !== 200) return new Response("err", { status: opts.postStatus });
+        const postStatus = postStatuses.shift() ?? opts?.postStatus ?? 200;
+        if (postStatus !== 200) return new Response("err", { status: postStatus });
         // Slack truthfulness: a 200-posted message EXISTS in the channel and
         // must appear in later reconcile scans (that is the whole repair story).
         try {
@@ -288,6 +293,27 @@ describe("OPR.0.5.6.14 — the delivery ledger is universal and consulted", () =
     expect(out.ok).toBe(false);
     expect(failures, "the row ledger learns about the transport failure").toHaveLength(1);
     expect(failures[0]!.cls).toMatch(/http-500|transport/);
+  });
+
+  it("TRANSPORT FAILURE RECEIPT REPAIRS: a throwing ledger write is restored before a later successful post", async () => {
+    let failureReceiptCalls = 0;
+    let throwOnce = true;
+    const ledger: string[] = [];
+    const { deliver, posts } = deliverHarness({
+      postStatuses: [500, 200],
+      onTransportFailed: (_p, cls) => {
+        failureReceiptCalls++;
+        if (throwOnce) { throwOnce = false; throw new Error("SQLITE_BUSY: failure receipt write failed"); }
+        ledger.push(`failed:${cls}`);
+      },
+      onPostedImpl: () => ledger.push("posted"),
+    });
+
+    expect((await deliver(DECISION("q-tf-repair") as never)).ok).toBe(false);
+    expect((await deliver(DECISION("q-tf-repair") as never)).ok).toBe(true);
+    expect(ledger, "the failed outcome is durable before the later successful outcome").toEqual(["failed:http-500", "posted"]);
+    expect(posts).toHaveLength(2);
+    expect(failureReceiptCalls).toBe(2);
   });
 
   it("THE 8f291c37 SHAPE DIES BY REPAIR: a receipt write that throws after a successful post is retained cleanly, then repaired on the next tick with exactly one post", async () => {
@@ -347,6 +373,24 @@ describe("OPR.0.5.6.14 — the delivery ledger is universal and consulted", () =
       | { deliveryFailureDetail?: string }
       | undefined;
     expect(failed?.deliveryFailureDetail, "the consumer preserves the gateway's actual error evidence").toContain("episode-b-needle");
+  });
+
+  it("REGISTRY UNREADABLE IS INDETERMINATE: it cannot revive episode A posted over episode B failed", async () => {
+    let registryReadable = true;
+    h = makeHarness({ registryReadable: () => registryReadable });
+    const row = await h.repo.create({ sourceSession: "s@r", destinationSession: "orch-lead@v-openrig-build", body: "ask", nudge: false });
+    await humanPark(row.qitemId, "episode A");
+    receipt(row.qitemId, "posted", "message_ts=300.1 thread_ts=300.1");
+    h.repo.update({ qitemId: row.qitemId, actorSession: "orch-lead@v-openrig-build", state: "in-progress", transitionNote: "episode A consumed" });
+    await humanPark(row.qitemId, "episode B");
+    receipt(row.qitemId, "transport-failed", "class=http-500 error=episode-b-registry-needle");
+    registryReadable = false;
+
+    const surfaced = h.repo.findUndelivered({}).some((item) => item.qitemId === row.qitemId);
+    expect({ outcome: h.repo.deliveryOutcomeFor(row.qitemId)?.outcome ?? null, surfaced }).toEqual({
+      outcome: null,
+      surfaced: false,
+    });
   });
 
   it("CONSUMED EPISODE CLEARS: a resumed nonhuman row cannot inherit its old failed human-park receipt", async () => {
