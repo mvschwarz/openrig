@@ -16,6 +16,8 @@ import { occupantTenuresSchema } from "../src/db/migrations/060_occupant_tenures
 import { contextUsageWatchdogSchema } from "../src/db/migrations/074_context_usage_watchdog.js";
 import { contextUsageWatchdogGenerationSchema } from "../src/db/migrations/075_context_usage_watchdog_generation.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
+import { createContinuityCutoverBaton } from "../src/domain/continuity-policy-materializer.js";
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { WatchdogPolicyEngine } from "../src/domain/watchdog-policy-engine.js";
@@ -228,6 +230,73 @@ describe("context-usage-threshold watchdog", () => {
         body: expect.stringContaining("one-active-walker"),
       },
     })]);
+  });
+
+  it("retries a refused structured cutover until one durable baton exists, then stamps the generation", async () => {
+    writeFileSync(transcript, "1234567890");
+    let destinationExists = false;
+    const queue = new QueueRepository(db, bus, {
+      validateRig: (rigName) => rigName === "rig" || (rigName === "missing-rig" && destinationExists),
+    });
+    const job = repo.register({
+      policy: "context-usage-threshold",
+      specYaml:
+        "policy: context-usage-threshold\n" +
+        "generated_by: continuity-policy-materializer\n" +
+        "continuity_mode: apprentice-handover\n" +
+        "target:\n  session: target@rig\n" +
+        "message: Cut over now.\n" +
+        "context:\n" +
+        "  continuity_action:\n" +
+        "    type: create-cutover-baton\n" +
+        "    destination: mechanic@missing-rig\n" +
+        "    body: Owned cutover baton with one-active-walker and authority-effective-at-effect-receipt.\n",
+      targetSession: "target@rig",
+      intervalSeconds: 60,
+      registeredBySession: "daemon@kernel",
+      watchedFilePath: transcript,
+      thresholdBytes: 8,
+    });
+    const retryEngine = new WatchdogPolicyEngine({
+      jobsRepo: repo,
+      historyLog: history,
+      eventBus: bus,
+      deliver: async (request) => {
+        let continuityActionCompleted = false;
+        try {
+          if (request.continuityAction) {
+            await createContinuityCutoverBaton(request.continuityAction, queue);
+            continuityActionCompleted = true;
+          }
+          return { status: "ok" as const, continuityActionCompleted };
+        } catch (error) {
+          return {
+            status: "failed" as const,
+            error: error instanceof Error ? error.message : String(error),
+            continuityActionCompleted,
+          };
+        }
+      },
+      resolveTargetGeneration: () => generation,
+    });
+
+    const first = await retryEngine.evaluate(job);
+    expect(first.delivery).toMatchObject({
+      status: "failed",
+      continuityActionCompleted: false,
+    });
+    expect(repo.getByIdOrThrow(job.jobId).lastFiredGeneration).toBeNull();
+    expect((db.prepare("SELECT COUNT(*) AS n FROM queue_items").get() as { n: number }).n).toBe(0);
+
+    destinationExists = true;
+    const second = await retryEngine.evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(second.delivery).toMatchObject({ status: "ok", continuityActionCompleted: true });
+    expect(repo.getByIdOrThrow(job.jobId).lastFiredGeneration).toBe("gen-1");
+    expect((db.prepare("SELECT COUNT(*) AS n FROM queue_items").get() as { n: number }).n).toBe(1);
+
+    const third = await retryEngine.evaluate(repo.getByIdOrThrow(job.jobId));
+    expect(third.outcome).toMatchObject({ action: "skip", reason: "threshold_already_fired" });
+    expect((db.prepare("SELECT COUNT(*) AS n FROM queue_items").get() as { n: number }).n).toBe(1);
   });
 
   it("rebinds a new occupant to its own transcript and preserves that receipt through restart", async () => {

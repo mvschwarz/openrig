@@ -60,18 +60,29 @@ describe("continuity policy materializer (S20 P4)", () => {
 
   it("reuses one complete nonterminal materialized pair instead of duplicating it on relaunch", () => {
     const register = vi.fn();
+    const plan = materializeContinuityPolicy(CLAUDE_SEAT);
     const existing = [
       {
         jobId: "prepare-job",
         state: "active" as const,
-        specYaml: "generated_by: continuity-policy-materializer",
+        specYaml: plan.jobs[0]!.specYaml,
         requiresJobId: null,
+        watchedFilePath: plan.jobs[0]!.watchedFilePath ?? null,
+        thresholdBytes: plan.jobs[0]!.thresholdBytes ?? null,
+        intervalSeconds: plan.jobs[0]!.intervalSeconds,
+        activeWakeIntervalSeconds: plan.jobs[0]!.activeWakeIntervalSeconds ?? null,
+        scanIntervalSeconds: plan.jobs[0]!.scanIntervalSeconds ?? null,
       },
       {
         jobId: "cutover-job",
         state: "stopped" as const,
-        specYaml: "generated_by: continuity-policy-materializer",
+        specYaml: plan.jobs[1]!.specYaml,
         requiresJobId: "prepare-job",
+        watchedFilePath: plan.jobs[1]!.watchedFilePath ?? null,
+        thresholdBytes: plan.jobs[1]!.thresholdBytes ?? null,
+        intervalSeconds: plan.jobs[1]!.intervalSeconds,
+        activeWakeIntervalSeconds: plan.jobs[1]!.activeWakeIntervalSeconds ?? null,
+        scanIntervalSeconds: plan.jobs[1]!.scanIntervalSeconds ?? null,
       },
     ];
 
@@ -80,6 +91,60 @@ describe("continuity policy materializer (S20 P4)", () => {
       listExactTuple: () => existing,
     }).map((job) => job.jobId)).toEqual(["prepare-job", "cutover-job"]);
     expect(register).not.toHaveBeenCalled();
+  });
+
+  it("reconciles durable generated jobs to the current policy without reactivating an exact stopped shape", () => {
+    const db = new Database(":memory:");
+    try {
+      migrate(db, ALL_MIGRATIONS);
+      let jobs = new WatchdogJobsRepository(db);
+      const original = armContinuityPolicy(CLAUDE_SEAT, jobs);
+      expect(original).toHaveLength(2);
+
+      jobs = new WatchdogJobsRepository(db);
+      const changedInput = {
+        ...CLAUDE_SEAT,
+        mechanic: "new-mechanic@kernel",
+        tokensPerMegabyte: 113_000,
+      };
+      const changed = armContinuityPolicy(changedInput, jobs);
+      const changedRows = changed.map((job) => jobs.getByIdOrThrow(job.jobId));
+      expect(changedRows).toHaveLength(2);
+      expect(changedRows.map((job) => job.specYaml).join("\n")).toContain("new-mechanic@kernel");
+      expect(changedRows.map((job) => job.thresholdBytes)).toEqual([5_309_734, 7_964_601]);
+      expect(jobs.listActive()).toHaveLength(2);
+      expect(jobs.listActive().map((job) => job.specYaml).join("\n")).not.toContain("operator-agent@kernel");
+
+      const stoppedCutover = changedRows.find((job) => job.requiresJobId !== null)!;
+      jobs.stop(stoppedCutover.jobId, "operator_stopped");
+      jobs = new WatchdogJobsRepository(db);
+      expect(armContinuityPolicy(changedInput, jobs).map((job) => job.jobId)).toEqual(
+        changed.map((job) => job.jobId),
+      );
+      expect(jobs.getByIdOrThrow(stoppedCutover.jobId)).toMatchObject({
+        state: "stopped",
+        terminalReason: "operator_stopped",
+      });
+
+      jobs = new WatchdogJobsRepository(db);
+      const managed = armContinuityPolicy({
+        ...CLAUDE_SEAT,
+        compactionStrategy: "managed-compaction",
+        mechanic: undefined,
+      }, jobs);
+      expect(managed).toHaveLength(1);
+      expect(jobs.listActive()).toHaveLength(1);
+      expect(jobs.listActive()[0]!.specYaml).toContain("continuity_mode: managed-compaction");
+
+      jobs = new WatchdogJobsRepository(db);
+      expect(armContinuityPolicy({
+        ...CLAUDE_SEAT,
+        compactionStrategy: "default-compaction",
+      }, jobs)).toEqual([]);
+      expect(jobs.listActive()).toEqual([]);
+    } finally {
+      db.close();
+    }
   });
 
   it("serializes both fire notices through the watchdog engine's actual spec parser", () => {
