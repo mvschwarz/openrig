@@ -93,7 +93,9 @@ import { WatchdogPolicyEngine } from "./domain/watchdog-policy-engine.js";
 import { WatchdogScheduler } from "./domain/watchdog-scheduler.js";
 import {
   ContinuityPolicyMaterializer,
+  createContinuityCutoverBaton,
   findClaudeTranscriptByToken,
+  recordManagedWidthReceipt,
 } from "./domain/continuity-policy-materializer.js";
 import { WorkflowRuntime } from "./domain/workflow-runtime.js";
 import { makeWorkflowKeepalivePolicy } from "./domain/policies/workflow-keepalive.js";
@@ -1721,8 +1723,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       jobsRepo: watchdogJobsRepoInstance,
       historyLog: watchdogHistoryLogInstance,
       eventBus,
-      deliver: async ({ targetSession, message }) => {
+      deliver: async ({ targetSession, message, continuityAction }) => {
         try {
+          if (continuityAction) {
+            await createContinuityCutoverBaton(continuityAction, queueRepoInstance);
+          }
           const result = await sessionTransport.send(targetSession, message);
           return result.ok ? { status: "ok" } : { status: "failed", error: result.error };
         } catch (err) {
@@ -2058,7 +2063,17 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         // GHOST-STAGE (b): resolve the LIVE occupant generation (atom-B tenure ledger) for a session
         // so a stage minted by a retired generation is refused for the successor. null = UNKNOWN → the
         // gate is inert (never compares a stale generation as if live).
-        { resolveOccupantGeneration: (sessionName) => sessionRegistry.currentOccupantGenerationForSession(sessionName) },
+        {
+          resolveOccupantGeneration: (sessionName) =>
+            sessionRegistry.currentOccupantGenerationForSession(sessionName),
+          onPostRestoreComplete: (receipt) => {
+            recordManagedWidthReceipt(
+              receipt,
+              watchdogJobsRepoInstance,
+              watchdogHistoryLogInstance,
+            );
+          },
+        },
       )
     : undefined;
   // 51-08 A1 — the over-time series rides the SAME 30s tick (PM decision 1):

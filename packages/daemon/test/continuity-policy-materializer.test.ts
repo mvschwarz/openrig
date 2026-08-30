@@ -1,10 +1,19 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import Database from "better-sqlite3";
 import { describe, expect, it, vi } from "vitest";
 import {
   armContinuityPolicy,
+  createContinuityCutoverBaton,
   materializeContinuityPolicy,
+  recordManagedWidthReceipt,
 } from "../src/domain/continuity-policy-materializer.js";
+import { migrate } from "../src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
+import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
+import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { parseWatchdogSpec } from "../src/domain/watchdog-policy-engine.js";
 
 const CLAUDE_SEAT = {
@@ -126,6 +135,103 @@ describe("continuity policy materializer (S20 P4)", () => {
     expect(apprentice.jobs).toHaveLength(2);
     expect(managed.jobs).toHaveLength(1);
     expect([...apprentice.jobs, ...managed.jobs].every((job) => job.watchedFilePath === null)).toBe(true);
+  });
+
+  it("creates one generation-keyed QueueRepository baton across a delivery retry", async () => {
+    const db = new Database(":memory:");
+    try {
+      migrate(db, ALL_MIGRATIONS);
+      const queue = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+      const action = {
+        type: "create-cutover-baton" as const,
+        jobId: "cutover-job",
+        occupantGeneration: "target-generation-7",
+        sourceSession: "target@rig",
+        destination: "mechanic@kernel",
+        body: "Owned cutover baton; one-active-walker; authority-effective-at-effect-receipt.",
+      };
+
+      const first = await createContinuityCutoverBaton(action, queue);
+      const retry = await createContinuityCutoverBaton(action, queue);
+
+      expect(retry.qitemId).toBe(first.qitemId);
+      expect(queue.getById(first.qitemId)).toMatchObject({
+        sourceSession: "target@rig",
+        destinationSession: "mechanic@kernel",
+        body: expect.stringContaining("authority-effective-at-effect-receipt"),
+      });
+      expect((db.prepare("SELECT COUNT(*) AS n FROM queue_items WHERE qitem_id = ?")
+        .get(first.qitemId) as { n: number }).n).toBe(1);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("writes a saturation-honest managed width receipt on its S06 job and target generation", () => {
+    const db = new Database(":memory:");
+    try {
+      migrate(db, ALL_MIGRATIONS);
+      const jobs = new WatchdogJobsRepository(db, undefined, () => "target-generation-7");
+      const history = new WatchdogHistoryLog(db);
+      const job = jobs.register({
+        policy: "context-usage-threshold",
+        specYaml:
+          "policy: context-usage-threshold\n" +
+          "generated_by: continuity-policy-materializer\n" +
+          "continuity_mode: managed-compaction\n" +
+          "target:\n  session: target@rig\n" +
+          "message: Deposit continuity context before managed compaction.\n",
+        targetSession: "target@rig",
+        intervalSeconds: 60,
+        registeredBySession: "daemon@kernel",
+        watchedFilePath: "/tmp/target.jsonl",
+        thresholdBytes: 8,
+      });
+
+      const result = recordManagedWidthReceipt({
+        sessionName: "target@rig",
+        occupantGeneration: "target-generation-7",
+        postRestoreUsedPercentage: 93,
+        saturationBoundPercentage: 80,
+        evaluatedAt: "2026-08-30T02:00:00.000Z",
+      }, jobs, history);
+
+      expect(result).toMatchObject({
+        jobId: job.jobId,
+        receipt: {
+          postRestoreUsableWidthPercentage: 7,
+          widthRecovered: false,
+          reason: "restore_replayed_past_saturation_bound",
+        },
+      });
+      expect(history.listForJob(job.jobId)).toEqual([
+        expect.objectContaining({
+          outcome: "skipped",
+          skipReason: "post_restore_width_receipt",
+          evaluationNotes: expect.objectContaining({
+            occupantGeneration: "target-generation-7",
+            widthRecovered: false,
+            reason: "restore_replayed_past_saturation_bound",
+          }),
+        }),
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("leaves non-managed compaction alone when no S06 receipt key exists", () => {
+    const record = vi.fn();
+    expect(recordManagedWidthReceipt({
+      sessionName: "default-seat@rig",
+      occupantGeneration: "generation-1",
+      postRestoreUsedPercentage: 20,
+      saturationBoundPercentage: 80,
+    }, {
+      register: vi.fn(),
+      listExactTuple: () => [],
+    }, { record })).toBeNull();
+    expect(record).not.toHaveBeenCalled();
   });
 
   it("refuses apprentice arming without a declared mechanic and teaches the exact repair", () => {

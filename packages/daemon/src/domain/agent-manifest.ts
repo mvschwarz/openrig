@@ -10,6 +10,7 @@ import {
   validateStartupBlock as sharedValidateStartupBlock,
   normalizeStartupBlock as sharedNormalizeStartupBlock,
 } from "./startup-validation.js";
+import { parseSessionName, validateSessionName } from "./session-name.js";
 
 // -- Constants --
 const VALID_EXECUTION_MODES = new Set(["interactive_resident"]);
@@ -28,6 +29,12 @@ const DEPRECATED_COMPACTION_ALIASES: Record<string, string> = {
 export function canonicalCompactionStrategy(value: string): string | null {
   if (VALID_COMPACTION_STRATEGIES.has(value)) return value;
   return DEPRECATED_COMPACTION_ALIASES[value] ?? null;
+}
+
+/** One ingestion authority for the continuity mechanic address. */
+export function canonicalContinuityMechanic(value: unknown): string | null {
+  if (typeof value !== "string" || !validateSessionName(value)) return null;
+  return parseSessionName(value).kind === "canonical" ? value : null;
 }
 const VALID_RESTORE_POLICIES = new Set(["resume_if_possible", "relaunch_fresh", "checkpoint_only"]);
 const VALID_IMPORT_PREFIXES = ["local:", "path:"];
@@ -88,6 +95,12 @@ function validateLifecycle(raw: unknown, prefix: string): { errors: string[]; ad
     } else if (!VALID_COMPACTION_STRATEGIES.has(strategyValue)) {
       errors.push(`${prefix}.compaction_strategy: must be one of ${[...VALID_COMPACTION_STRATEGIES].join(", ")} (got "${strategyValue}")`);
     }
+  }
+  if (
+    obj["mechanic"] !== undefined &&
+    canonicalContinuityMechanic(obj["mechanic"]) === null
+  ) {
+    errors.push(`${prefix}.mechanic: must be a canonical seat@rig session address`);
   }
   if (obj["restore_policy"] !== undefined && !VALID_RESTORE_POLICIES.has(obj["restore_policy"] as string)) {
     errors.push(`${prefix}.restore_policy: must be one of ${[...VALID_RESTORE_POLICIES].join(", ")} (got "${obj["restore_policy"]}")`);
@@ -370,6 +383,9 @@ function normalizeLifecycle(raw: Record<string, unknown>): LifecycleDefaults {
     executionMode: (raw["execution_mode"] as LifecycleDefaults["executionMode"]) ?? "interactive_resident",
     compactionStrategy: rawStrategy !== undefined
       ? ((canonicalCompactionStrategy(rawStrategy) ?? "default-compaction") as LifecycleDefaults["compactionStrategy"])
+      : undefined,
+    mechanic: raw["mechanic"] !== undefined
+      ? (canonicalContinuityMechanic(raw["mechanic"]) ?? undefined)
       : undefined,
     restorePolicy: raw["restore_policy"] !== undefined
       ? (raw["restore_policy"] as LifecycleDefaults["restorePolicy"])

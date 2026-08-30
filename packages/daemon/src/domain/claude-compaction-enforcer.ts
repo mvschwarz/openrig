@@ -312,11 +312,30 @@ export class ClaudeCompactionEnforcer {
   // retired-generation stage → refuse. Injected resolver (atom-B's currentOccupantTenure by session).
   private readonly pendingStageGeneration = new Map<string, string | null>();
   private readonly resolveOccupantGeneration?: (sessionName: string) => string | null;
+  private readonly onPostRestoreComplete?: (receipt: {
+    sessionName: string;
+    occupantGeneration: string | null;
+    postRestoreUsedPercentage: number;
+    saturationBoundPercentage: number;
+  }) => Promise<void> | void;
 
   constructor(
     settingsStore: SettingsStore,
     sessionTransport: SessionTransport,
-    opts?: { dedupWindowMs?: number; openrigHome?: string; postCompactRestoreCooldownMs?: number; manualPrepWaitMs?: number; postCompactSendWaitMs?: number; resolveOccupantGeneration?: (sessionName: string) => string | null },
+    opts?: {
+      dedupWindowMs?: number;
+      openrigHome?: string;
+      postCompactRestoreCooldownMs?: number;
+      manualPrepWaitMs?: number;
+      postCompactSendWaitMs?: number;
+      resolveOccupantGeneration?: (sessionName: string) => string | null;
+      onPostRestoreComplete?: (receipt: {
+        sessionName: string;
+        occupantGeneration: string | null;
+        postRestoreUsedPercentage: number;
+        saturationBoundPercentage: number;
+      }) => Promise<void> | void;
+    },
   ) {
     this.settingsStore = settingsStore;
     this.sessionTransport = sessionTransport;
@@ -326,6 +345,7 @@ export class ClaudeCompactionEnforcer {
     this.manualPrepWaitMs = opts?.manualPrepWaitMs ?? MANUAL_PREP_WAIT_MS_DEFAULT;
     this.postCompactSendWaitMs = opts?.postCompactSendWaitMs ?? POST_COMPACT_SEND_WAIT_MS_DEFAULT;
     this.resolveOccupantGeneration = opts?.resolveOccupantGeneration;
+    this.onPostRestoreComplete = opts?.onPostRestoreComplete;
   }
 
   /**
@@ -439,6 +459,15 @@ export class ClaudeCompactionEnforcer {
           // idle and this send delivers; a busy tick retries the SAME stage.
           return { triggered: false, reason: "send_failed" };
         }
+        await this.onPostRestoreComplete?.({
+          sessionName: input.sessionName,
+          occupantGeneration:
+            this.pendingStageGeneration.get(input.sessionName) ??
+            this.resolveOccupantGeneration?.(input.sessionName) ??
+            null,
+          postRestoreUsedPercentage: input.usedPercentage,
+          saturationBoundPercentage: policy.thresholdPercent,
+        });
         this.pendingPostCompactRestore.delete(input.sessionName);
         this.pendingStageGeneration.delete(input.sessionName); // GHOST-STAGE (b): stage completed → drop its gen
         this.postCompactRestoreCooldownUntil.set(

@@ -14,7 +14,7 @@ import type {
 } from "./types.js";
 import { WORKSPACE_KINDS } from "./types.js";
 import { validateSafePath } from "./path-safety.js";
-import { canonicalCompactionStrategy } from "./agent-manifest.js";
+import { canonicalCompactionStrategy, canonicalContinuityMechanic } from "./agent-manifest.js";
 import { aliasModelPinAdvisory } from "./spec-validation-advisory.js";
 import { validatePermissionPolicyRef } from "./permission-policy/policy-ref.js";
 import { validateStartupBlock, normalizeStartupBlock } from "./startup-validation.js";
@@ -373,6 +373,12 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
     } else if (canonical !== strategyValue) {
       advisories.push(`${prefix}.compaction_strategy: "${strategyValue}" is deprecated and now normalizes to "${canonical}" — update to the current vocabulary`);
     }
+  }
+  if (
+    member["mechanic"] !== undefined &&
+    canonicalContinuityMechanic(member["mechanic"]) === null
+  ) {
+    errors.push(`${prefix}.mechanic: must be a canonical seat@rig session address`);
   }
 
   if (!member["id"] || typeof member["id"] !== "string") {
@@ -1057,6 +1063,9 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     // resolver's F-6 default remains the one authority for absence.
     compactionStrategy: m["compaction_strategy"] !== undefined
       ? (canonicalCompactionStrategy(m["compaction_strategy"] as string) ?? undefined)
+      : undefined,
+    mechanic: m["mechanic"] !== undefined
+      ? (canonicalContinuityMechanic(m["mechanic"]) ?? undefined)
       : undefined,
     startup: m["startup"] ? normalizeStartupBlock(m["startup"]) : undefined,
     sessionSource: normalizeSessionSource(m["session_source"]),

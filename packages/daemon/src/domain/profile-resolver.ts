@@ -1,5 +1,5 @@
 import nodePath from "node:path";
-import { canonicalCompactionStrategy } from "./agent-manifest.js";
+import { canonicalCompactionStrategy, canonicalContinuityMechanic } from "./agent-manifest.js";
 import { homedir as osHomedir } from "node:os";
 import type {
   AgentSpec, AgentResources, ProfileSpec, LifecycleDefaults,
@@ -34,6 +34,8 @@ export interface ResolvedNodeConfig {
   restorePolicy: string;
   /** OPR.0.5.6.20 — resolved continuity mode (canonical vocabulary; most-specific-wins). */
   compactionStrategy: string;
+  /** Resolved continuity mechanic; absent unless explicitly declared. */
+  mechanic: string | undefined;
   lifecycle: LifecycleDefaults | undefined;
   selectedResources: ResolvedResources;
   startup: StartupBlock;
@@ -196,6 +198,10 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
   if (!compactionResult.ok) {
     return { ok: false, errors: [compactionResult.error] };
   }
+  const mechanicResult = resolveContinuityMechanic(spec, profile, member);
+  if (!mechanicResult.ok) {
+    return { ok: false, errors: [mechanicResult.error] };
+  }
 
   // 8. Resolve lifecycle
   const lifecycle = profile.lifecycle ?? spec.defaults?.lifecycle;
@@ -219,6 +225,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
       cwd,
       restorePolicy: restorePolicyResult.policy,
       compactionStrategy: compactionResult.strategy,
+      mechanic: mechanicResult.mechanic,
       lifecycle,
       selectedResources: selectedResult!,
       startup,
@@ -376,6 +383,28 @@ function resolveCompactionStrategy(
     current = canonical;
   }
   return { ok: true, strategy: current };
+}
+
+/** S20 A8: mechanic follows the exact shipped strategy path: spec default < profile < member. */
+function resolveContinuityMechanic(
+  spec: AgentSpec,
+  profile: ProfileSpec,
+  member: RigSpecPodMember,
+): { ok: true; mechanic: string | undefined } | { ok: false; error: string } {
+  let current: string | undefined;
+  for (const [level, value] of [
+    ["spec defaults", spec.defaults?.lifecycle?.mechanic],
+    ["profile", profile.lifecycle?.mechanic],
+    ["member", member.mechanic],
+  ] as const) {
+    if (value === undefined) continue;
+    const canonical = canonicalContinuityMechanic(value);
+    if (canonical === null) {
+      return { ok: false, error: `Invalid mechanic in ${level}: "${String(value)}"` };
+    }
+    current = canonical;
+  }
+  return { ok: true, mechanic: current };
 }
 
 function resolveRestorePolicy(

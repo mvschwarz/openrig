@@ -1964,6 +1964,7 @@ export class PodRigInstantiator {
       try {
         this.deps.continuityPolicyMaterializer.arm({
           compactionStrategy: configResult.config.compactionStrategy as CompactionStrategy,
+          mechanic: configResult.config.mechanic,
           runtime: input.member.runtime,
           targetSession: canonicalSessionName,
           sessionId: launchResult.session.id,

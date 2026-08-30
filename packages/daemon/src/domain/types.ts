@@ -815,6 +815,9 @@ export interface LifecycleDefaults {
   // participate in precedence. The defaults level materializes the defaults
   // (default-compaction per F-6; resume_if_possible for restore).
   compactionStrategy?: "default-compaction" | "managed-compaction" | "handover" | "apprentice-handover";
+  /** Canonical seat@rig address that executes an apprentice cutover. No default: absence
+   *  is a materialization-time refusal for apprentice-handover. */
+  mechanic?: string;
   restorePolicy?: "resume_if_possible" | "relaunch_fresh" | "checkpoint_only";
 }
 
@@ -1017,6 +1020,8 @@ export interface RigSpecPodMember {
   /** OPR.0.5.6.20 — per-member continuity override (most-specific-wins; canonical or
    *  deprecated-alias spelling, normalized at resolution). Absent = inherit. */
   compactionStrategy?: string;
+  /** Per-member continuity mechanic override; resolves beside compactionStrategy. */
+  mechanic?: string;
   startup?: StartupBlock;
   /**
    * Optional fork source declaration. v1 MVP: mode="fork" with

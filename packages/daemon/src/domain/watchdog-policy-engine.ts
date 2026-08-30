@@ -38,6 +38,14 @@ import type { WatchdogHistoryEntry, WatchdogHistoryLog } from "./watchdog-histor
 export interface DeliveryRequest {
   targetSession: string;
   message: string;
+  continuityAction?: {
+    type: "create-cutover-baton";
+    jobId: string;
+    occupantGeneration: string;
+    sourceSession: string;
+    destination: string;
+    body: string;
+  };
 }
 
 export interface DeliveryOutcome {
@@ -221,6 +229,17 @@ export class WatchdogPolicyEngine {
       watchedFilePath = this.jobsRepo.findTranscriptPath(job.targetSession, occupantGeneration);
       if (watchedFilePath) {
         this.jobsRepo.recordWatchedFileBinding(job.jobId, watchedFilePath, occupantGeneration);
+        this.historyLog.record({
+          jobId: job.jobId,
+          evaluatedAt,
+          outcome: "skipped",
+          skipReason: "watched_file_bound",
+          evaluationNotes: {
+            boundAt: evaluatedAt,
+            occupantGeneration,
+            watchedFilePath,
+          },
+        });
       } else {
         currentGenerationTranscriptPending = true;
       }
@@ -402,6 +421,12 @@ export class WatchdogPolicyEngine {
       }
     }
 
+    const continuityAction = parseContinuityAction(
+      parsed.context["continuity_action"],
+      job,
+      occupantGeneration,
+    );
+
     // Match the proven hook's at-most-once ordering: persist the durable
     // generation receipt before crossing the external delivery boundary.
     // A daemon restart after delivery must never repeat the threshold action.
@@ -411,6 +436,7 @@ export class WatchdogPolicyEngine {
     const delivery = await this.deliver({
       targetSession: outcome.target.session,
       message: outcome.message,
+      ...(continuityAction ? { continuityAction } : {}),
     });
     const history = this.historyLog.record({
       jobId: job.jobId,
@@ -447,6 +473,31 @@ export class WatchdogPolicyEngine {
       meaningful: true,
     };
   }
+}
+
+function parseContinuityAction(
+  raw: unknown,
+  job: WatchdogJob,
+  occupantGeneration: string | null,
+): DeliveryRequest["continuityAction"] | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const value = raw as Record<string, unknown>;
+  if (value["type"] !== "create-cutover-baton") return undefined;
+  if (
+    !occupantGeneration ||
+    typeof value["destination"] !== "string" ||
+    typeof value["body"] !== "string"
+  ) {
+    throw new Error(`continuity_action_invalid: ${job.jobId}`);
+  }
+  return {
+    type: "create-cutover-baton",
+    jobId: job.jobId,
+    occupantGeneration,
+    sourceSession: job.targetSession,
+    destination: value["destination"],
+    body: value["body"],
+  };
 }
 
 /**

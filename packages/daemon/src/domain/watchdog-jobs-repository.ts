@@ -69,6 +69,8 @@ export interface WatchdogJob {
   watchedFilePath: string | null;
   /** Occupant generation that qualified watchedFilePath. */
   watchedFileGeneration: string | null;
+  /** Visible lifecycle of the generated transcript binding. */
+  bindingState: "pending-binding" | "bound" | null;
   thresholdBytes: number | null;
   requiresJobId: string | null;
   /** The latest occupant generation for which this threshold fired. */
@@ -197,7 +199,11 @@ export class WatchdogJobsRepository {
         `threshold_bytes must be a positive integer (got ${String(input.thresholdBytes)})`,
       );
     }
-    if (isContextUsageThreshold && !input.watchedFilePath) {
+    const generatedContinuityJob =
+      input.registeredBySession === "daemon@kernel" &&
+      input.specYaml.includes("generated_by: continuity-policy-materializer") &&
+      /continuity_mode: (managed-compaction|apprentice-handover)/.test(input.specYaml);
+    if (isContextUsageThreshold && !input.watchedFilePath && !generatedContinuityJob) {
       throw new WatchdogJobsError(
         "watched_file_unresolved",
         `no transcript file could be resolved for ${input.targetSession}`,
@@ -221,7 +227,7 @@ export class WatchdogJobsRepository {
     // (i-c) opt-in TARGET generation: caller-supplied (NULL = role-bound). Stored only when the 066
     // column exists; pre-066 dbs silently degrade the opt-in to role-bound. 066 ⟹ 063 (additive order).
     const targetGenerationUuid = this.hasTargetGenColumn ? (input.targetGenerationUuid ?? null) : null;
-    const watchedFileGeneration = isContextUsageThreshold
+    const watchedFileGeneration = isContextUsageThreshold && input.watchedFilePath
       ? (this.resolveOccupantGeneration?.(input.targetSession) ?? null)
       : null;
     const columns = [
@@ -596,6 +602,9 @@ function rowToJob(row: JobRow): WatchdogJob {
     targetGeneration: row.target_generation_uuid ?? null,
     watchedFilePath: row.watched_file_path ?? null,
     watchedFileGeneration: row.watched_file_generation_uuid ?? null,
+    bindingState: row.policy === "context-usage-threshold"
+      ? (row.watched_file_path && row.watched_file_generation_uuid ? "bound" : "pending-binding")
+      : null,
     thresholdBytes: row.threshold_bytes ?? null,
     requiresJobId: row.requires_job_id ?? null,
     lastFiredGeneration: row.last_fired_generation_uuid ?? null,
