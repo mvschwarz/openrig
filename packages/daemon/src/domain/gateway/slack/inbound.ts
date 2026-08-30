@@ -31,28 +31,43 @@ export interface SlackEvent {
 }
 
 /**
- * Loop-safety + non-text ignore. Ingest ONLY genuine human text messages:
- * reject bot posts (our own loop), message subtypes (edits/joins/file_share),
- * and — T1076 — anything carrying files/images. v1 ignores non-text CLEANLY:
- * a false return is a clean skip, never a crash or partial ingestion.
+ * Loop-safety + non-ingestible ignore. Ingest genuine human messages — text,
+ * and (OPR.0.5.6.2, replacing the T1076 v1 ignore) file-bearing drops: a
+ * `file_share` subtype with files[] is THE shape a human upload arrives as,
+ * and a pure drop legitimately has no caption, so empty text is admissible
+ * when files are present. Loop safety is untouched: bot posts and every other
+ * subtype (edits/joins) stay rejected, and a false return remains a clean
+ * skip, never a crash or partial ingestion.
  */
 /** P28 — the rejection BRANCH, as data. The ignore path used to log type/subtype/files, which
  *  are precisely the fields that have all PASSED when a message dies on bot_id or on
  *  missing-user/empty-text — so a silent discard could not be explained, and with `channels:read`
  *  ungranted there was no read that could even name the source conversation. This is the SINGLE
  *  definition of the ingest decision; `shouldIngest` is a thin wrapper over it so the branch logic
- *  has one origin and the log can never drift from the behaviour it describes. */
-export type IngestReason = "type" | "bot_id" | "subtype" | "files" | "no-user" | "empty-text";
+ *  has one origin and the log can never drift from the behaviour it describes.
+ *  ("files" left the union at OPR.0.5.6.2: file-bearing events are now work, not noise.) */
+export type IngestReason = "type" | "bot_id" | "subtype" | "no-user" | "empty-text";
 
 export function ingestDecision(ev: SlackEvent): { ingest: true } | { ingest: false; reason: IngestReason } {
+  const hasFiles = Array.isArray(ev.files) && ev.files.length > 0;
   if (ev.type !== "message" && ev.type !== "app_mention") return { ingest: false, reason: "type" };
   if (ev.bot_id) return { ingest: false, reason: "bot_id" }; // never ingest our own / any bot post
-  if (ev.subtype) return { ingest: false, reason: "subtype" }; // edits, joins, file_share, etc.
-  if (ev.files && ev.files.length > 0) return { ingest: false, reason: "files" }; // T1076 (Slice-12)
+  // OPR.0.5.6.2: `file_share` WITH files is the human-upload shape and is admitted;
+  // every other subtype (edits, joins, …) stays rejected exactly as before.
+  if (ev.subtype && !(ev.subtype === "file_share" && hasFiles)) return { ingest: false, reason: "subtype" };
   if (!ev.user) return { ingest: false, reason: "no-user" };
-  if (!ev.text || !ev.text.trim()) return { ingest: false, reason: "empty-text" };
+  // A pure file drop has no caption: empty text is admissible iff files ride along.
+  if ((!ev.text || !ev.text.trim()) && !hasFiles) return { ingest: false, reason: "empty-text" };
   return { ingest: true };
 }
+
+/** OPR.0.5.6.2 — the inbound file-transfer PORT: injected so this core stays
+ *  pure/testable; the subsystem wires the real download+store implementation
+ *  (see makeInboundFilePort). Results are per-file and NAMED both ways. */
+export interface StoredInboundFile { name: string; localPath: string; mimetype?: string; bytes: number }
+export interface FailedInboundFile { name: string; error: string }
+export interface InboundFileResult { stored: StoredInboundFile[]; failed: FailedInboundFile[] }
+export interface InboundFilePort { transfer(files: unknown[], eventTs: string): Promise<InboundFileResult> }
 
 export function shouldIngest(ev: SlackEvent): boolean {
   return ingestDecision(ev).ingest;
@@ -78,6 +93,10 @@ export interface InboundDeps {
    *  admitted event. Absent → every event lands on the static `destination` (the pre-routing
    *  shape, and the fallback the tests pin). */
   resolveRoute?: (ev: SlackEvent) => { destination: string; tags?: string[] };
+  /** OPR.0.5.6.2 — inbound file transfer. Absent with a file-bearing event →
+   *  every file is a NAMED failure on the row ("transfer unavailable"), never
+   *  a silent drop of message or file. */
+  files?: InboundFilePort;
   sourceLabel?: string;
   log?: (msg: string) => void;
 }
@@ -86,12 +105,31 @@ export class InboundRouter {
   private readonly inflight = new Set<string>(); // same-ts double-dispatch guard (item 8)
   constructor(private readonly deps: InboundDeps) {}
 
-  private summaryOf(ev: SlackEvent): { summary: string; body: string } {
+  private summaryOf(ev: SlackEvent, transfer?: InboundFileResult | null): { summary: string; body: string } {
     const text = String(ev.text ?? "").slice(0, 1800);
     const meta = `slack channel=${ev.channel} user=${ev.user} ts=${ev.ts}`;
+    // OPR.0.5.6.2 — attachments ride the row BODY by LOCAL path (Slack owns
+    // nothing; the media file is OUR copy). Failures are per-file and named:
+    // the message always survives a failed transfer.
+    const sections: string[] = [text];
+    if (transfer && (transfer.stored.length > 0 || transfer.failed.length > 0)) {
+      const lines: string[] = [];
+      if (transfer.stored.length > 0) {
+        lines.push("Attachments (workspace-local copies):");
+        for (const f of transfer.stored) {
+          lines.push(`- ${f.localPath} (${f.name}${f.mimetype ? `, ${f.mimetype}` : ""}, ${f.bytes} bytes)`);
+        }
+      }
+      for (const f of transfer.failed) {
+        lines.push(`FILE TRANSFER FAILED: ${f.name} — ${f.error}`);
+      }
+      sections.push(lines.join("\n"));
+    }
+    const firstFileName = transfer?.stored[0]?.name ?? transfer?.failed[0]?.name;
+    const headline = text.trim() ? text : firstFileName ? `[file] ${firstFileName}` : text;
     return {
-      summary: `Founder via Slack: ${text.slice(0, 90)}`,
-      body: `${text}\n\n---\nSource: ${meta}\nRouted by openrig slack-inbound. Default destination per config; re-route via queue as needed.`,
+      summary: `Founder via Slack: ${headline.slice(0, 90)}`,
+      body: `${sections.filter((s) => s.length > 0).join("\n\n")}\n\n---\nSource: ${meta}\nRouted by openrig slack-inbound. Default destination per config; re-route via queue as needed.`,
     };
   }
 
@@ -114,7 +152,23 @@ export class InboundRouter {
     }
     this.inflight.add(ts);
     try {
-      const { summary, body } = this.summaryOf(ev);
+      // OPR.0.5.6.2 — transfer the human's files BEFORE composing the row so the
+      // row carries local paths (or named failures). A missing port is itself a
+      // named per-file failure, never a silent drop.
+      const fileMetas = Array.isArray(ev.files) ? ev.files : [];
+      let transfer: InboundFileResult | null = null;
+      if (fileMetas.length > 0) {
+        transfer = this.deps.files
+          ? await this.deps.files.transfer(fileMetas, ts)
+          : {
+              stored: [],
+              failed: fileMetas.map((f, i) => {
+                const m = (f ?? {}) as { name?: string; id?: string };
+                return { name: String(m.name ?? m.id ?? `file-${i + 1}`), error: "file transfer unavailable (no file port wired)" };
+              }),
+            };
+      }
+      const { summary, body } = this.summaryOf(ev, transfer);
       // S10 — deterministic route (thread map) when wired; static destination otherwise.
       const route = this.deps.resolveRoute?.(ev) ?? { destination: this.deps.destination };
       let qitemId: string;

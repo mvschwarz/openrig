@@ -201,8 +201,8 @@ describe("Slice-11 INBOUND shouldIngest — loop-safety + T1076 non-text ignore 
   it("ingests a genuine human message", () => expect(shouldIngest(base)).toBe(true));
   it("ingests app_mention", () => expect(shouldIngest({ ...base, type: "app_mention" })).toBe(true));
   it("rejects bot posts (loop guard)", () => expect(shouldIngest({ ...base, bot_id: "B1" })).toBe(false));
-  it("rejects subtypes (edits/joins/file_share)", () => expect(shouldIngest({ ...base, subtype: "message_changed" })).toBe(false));
-  it("T1076: rejects file/image events cleanly", () => expect(shouldIngest({ ...base, files: [{ id: "F1" }] })).toBe(false));
+  it("rejects subtypes (edits/joins; file_share is admitted with files since OPR.0.5.6.2)", () => expect(shouldIngest({ ...base, subtype: "message_changed" })).toBe(false));
+  it("OPR.0.5.6.2 (T1076 replaced): file-bearing messages are ADMITTED — files are work, not noise", () => expect(shouldIngest({ ...base, files: [{ id: "F1" }] })).toBe(true));
   it("rejects empty/absent text and userless", () => {
     expect(shouldIngest({ ...base, text: "   " })).toBe(false);
     expect(shouldIngest({ ...base, user: undefined })).toBe(false);

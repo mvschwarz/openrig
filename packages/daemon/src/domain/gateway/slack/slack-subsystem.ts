@@ -22,7 +22,7 @@ import { SeenStore, DeadLetterStore } from "./state-store.js";
 import { makeQueuePorts } from "./queue-access.js";
 import { SlackOutboundDriver, OUTBOUND_OP } from "./outbound-driver.js";
 import { subsystemSlackDeliver } from "./slack-delivery.js";
-import { InboundRouter, type SlackEvent } from "./inbound.js";
+import { InboundRouter, type SlackEvent, type InboundFilePort, type InboundFileResult, type StoredInboundFile, type FailedInboundFile } from "./inbound.js";
 import { makeInboundSenderResolver, type RegistrySurface } from "./inbound-admission.js";
 import { ThreadSeatMap, formatPostedStamp } from "./thread-seat-map.js";
 import { makeThreadRouteResolver } from "./thread-routing.js";
@@ -60,11 +60,6 @@ export interface SlackWireOpts {
  * prefixed with the event ts + index (unique per event), and the resolved path
  * is verified to stay inside `mediaDir` before any write.
  */
-export interface StoredInboundFile { name: string; localPath: string; mimetype?: string; bytes: number }
-export interface FailedInboundFile { name: string; error: string }
-export interface InboundFileResult { stored: StoredInboundFile[]; failed: FailedInboundFile[] }
-export interface InboundFilePort { transfer(files: unknown[], eventTs: string): Promise<InboundFileResult> }
-
 export function makeInboundFilePort(opts: {
   token: string;
   mediaDir: string;
@@ -265,6 +260,18 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       // S10 — deterministic thread routing: mapped thread → exactly the mapped seat; unmapped
       // or human-initiated → the configured orchestrator slot as an unrouted-signal row.
       resolveRoute: makeThreadRouteResolver({ map: threadMap, unroutedDestination: cfg.inboundDestination, log }),
+      // OPR.0.5.6.2 — inbound file transfer: wired only when the bot token exists
+      // (downloads need `files:read`); absent → the router's own named-failure
+      // arm keeps failure honest. Media lives beside the gateway's other durable
+      // state, under the same home convention.
+      ...(bot ? {
+        files: makeInboundFilePort({
+          token: bot,
+          mediaDir: path.join(stateDir(opts.home), "slack-inbound-media"),
+          fetchImpl: opts.fetchImpl,
+          log,
+        }),
+      } : {}),
       log,
     });
     let handle: SocketInboundHandle | undefined;
