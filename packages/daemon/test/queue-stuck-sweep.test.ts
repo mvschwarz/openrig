@@ -79,6 +79,9 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
       resolveOrchestrator: () => null,
       unclaimedAgeMinutes: 60,
       log: () => {},
+      // Hermetic default: no registered hosts. Tests that exercise the
+      // proof-at-write trust arm inject their own registry view.
+      isRegisteredHost: () => false,
       ...overrides,
     });
     return { mod, status, result };
@@ -520,6 +523,135 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(findings).toHaveLength(1);
     // The parent's CURRENT canonical session binding — never a synthesized logical_id@rig.
     expect(findings[0]!.destinationSession).toBe("orch-lead@r");
+  });
+
+  // ——— S02 detector-family continuation (row c2172d32): a host-qualified target written by
+  // the cross-host close is proof-at-write (routes/queue.ts creates the successor on the
+  // registered host FIRST and closes second), and a manual registered-host read earns a
+  // durable custody-verified disposition. Both silence the eternal verification-required
+  // refresh; unregistered hosts and unverified local misses stay the honest indeterminate
+  // class, and true local dangling detection plus auto-close are preserved.
+
+  it("TRUSTED HOST-QUALIFIED: a successor key naming a REGISTERED host is custody evidence at write time — no finding", async () => {
+    const row = await mkRow();
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      state: "handed-off",
+      closureReason: "handed_off_to",
+      closureTarget: "qitem-xh-0123456789abcdef@mm2-parent",
+    });
+    await runSweep({ isRegisteredHost: (h: string) => h === "mm2-parent" });
+    expect(await findingsFor(row.qitemId)).toHaveLength(0);
+  });
+
+  it("UNREGISTERED HOST STAYS INDETERMINATE: an unknown host qualifier still earns a verification-required finding with honest wording", async () => {
+    const row = await mkRow();
+    const foreign = "qitem-xh-fedcba9876543210@vps-unknown";
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      state: "done",
+      closureReason: "handed_off_to",
+      closureTarget: foreign,
+    });
+    await runSweep({ isRegisteredHost: (h: string) => h === "mm2-parent" });
+    const findings = await findingsFor(row.qitemId);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.body).toContain(foreign);
+    expect(findings[0]!.body).toMatch(/verification.required|indeterminate/i);
+    expect(findings[0]!.body).not.toMatch(/does not exist|dangling/i);
+  });
+
+  it("CUSTODY-VERIFIED DISPOSITION: a durable custody-verified note on the closed row silences the bare-id local miss", async () => {
+    const row = await mkRow();
+    const missing = "qitem-20990101000000-precon01";
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      state: "done",
+      closureReason: "handed_off_to",
+      closureTarget: missing,
+    });
+    await repo.update({
+      qitemId: row.qitemId,
+      actorSession: "verifier@r",
+      transitionNote: `custody-verified: ${missing} confirmed on the parent host via OPENRIG_URL read`,
+    });
+    await runSweep();
+    expect(await findingsFor(row.qitemId)).toHaveLength(0);
+  });
+
+  it("DISPOSITION CLOSES THE OPEN FINDING: verification landing after the finding minted auto-closes it on the next sweep, and the finding taught the recipe", async () => {
+    const row = await mkRow();
+    const missing = "qitem-20990101000000-precon02";
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      state: "done",
+      closureReason: "handed_off_to",
+      closureTarget: missing,
+    });
+    await runSweep();
+    const open = (await findingsFor(row.qitemId))[0]!;
+    expect(open.state).toBe("pending");
+    // The finding body teaches how to record the verification durably.
+    expect(open.body).toContain("custody-verified:");
+
+    await repo.update({
+      qitemId: row.qitemId,
+      actorSession: "verifier@r",
+      transitionNote: `custody-verified: ${missing} confirmed on the parent host`,
+    });
+    const next = await runSweep();
+    expect(next.result.findings).toContainEqual(expect.objectContaining({
+      kind: "dangling-closure",
+      qitemId: row.qitemId,
+      action: "closed",
+    }));
+    expect((await findingsFor(row.qitemId))[0]).toMatchObject({
+      state: "done",
+      closureReason: "no-follow-on",
+    });
+  });
+
+  it("MIXED COMMA MEMBER TRUST: a fan-out with one trusted host-qualified member and one local miss names only the unresolved member", async () => {
+    const row = await mkRow();
+    const missing = "qitem-local-missing2";
+    const trusted = "qitem-xh-aaaa000011112222@mm2-parent";
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      state: "done",
+      closureReason: "handed_off_to",
+      closureTarget: `${missing},${trusted}`,
+    });
+    await runSweep({ isRegisteredHost: (h: string) => h === "mm2-parent" });
+    const findings = await findingsFor(row.qitemId);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.body).toContain(missing);
+    expect(findings[0]!.body).not.toContain(trusted);
+  });
+
+  it("DISPOSITION IS EXACT: a custody-verified note naming a DIFFERENT target silences nothing", async () => {
+    const row = await mkRow();
+    const missing = "qitem-20990101000000-precon03";
+    repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      state: "done",
+      closureReason: "handed_off_to",
+      closureTarget: missing,
+    });
+    await repo.update({
+      qitemId: row.qitemId,
+      actorSession: "verifier@r",
+      transitionNote: "custody-verified: qitem-20990101000000-otherrow confirmed elsewhere",
+    });
+    await runSweep();
+    const findings = await findingsFor(row.qitemId);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.body).toContain(missing);
   });
 
   it("FOUNDER DEFAULTS: cadence 300s and unclaimed age 60min on the daemon config surface, twinned in the module constants", async () => {
