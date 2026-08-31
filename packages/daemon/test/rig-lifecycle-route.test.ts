@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
 
 describe("Rig lifecycle routes", () => {
   let db: Database.Database;
@@ -157,6 +158,52 @@ describe("Rig lifecycle routes", () => {
 
     const events = db.prepare("SELECT type FROM events WHERE type = 'node.removed'").all() as Array<{ type: string }>;
     expect(events).toHaveLength(1);
+  });
+
+  it("DELETE /api/rigs/:rigId/nodes/:nodeRef refuses removal while active qitems target the session", async () => {
+    const rig = setup.rigRepo.createRig("remove-active-qitem-rig");
+    const expanded = await setup.rigExpansionService.expand({
+      rigId: rig.id,
+      pod: {
+        id: "infra",
+        label: "Infrastructure",
+        members: [{ id: "server", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" }],
+        edges: [],
+      },
+    });
+    expect(expanded.ok).toBe(true);
+    if (!expanded.ok) return;
+
+    const sessionName = expanded.nodes[0]?.sessionName;
+    expect(sessionName).toBeTruthy();
+    if (!sessionName) return;
+
+    const queueRepo = new QueueRepository(db, setup.eventBus);
+    const qitem = await queueRepo.create({
+      sourceSession: "source@remove-active-qitem-rig",
+      destinationSession: sessionName,
+      body: "must survive seat removal",
+      nudge: false,
+    });
+    const killSession = setup.tmuxAdapter.killSession as ReturnType<typeof import("vitest").vi.fn>;
+    killSession.mockClear();
+
+    const res = await setup.app.request(`/api/rigs/${rig.id}/nodes/infra.server`, {
+      method: "DELETE",
+    });
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("active_qitems");
+    expect(body.activeQitemIds).toEqual([qitem.qitemId]);
+    expect(body.error).toContain(`rig queue fallback ${qitem.qitemId} --destination <live-seat>`);
+    expect(killSession).not.toHaveBeenCalled();
+    expect(setup.rigRepo.getRig(rig.id)?.nodes.find((candidate) => candidate.logicalId === "infra.server")).toBeDefined();
+    expect(db.prepare("SELECT destination_session, state FROM queue_items WHERE qitem_id = ?").get(qitem.qitemId)).toEqual({
+      destination_session: sessionName,
+      state: "pending",
+    });
   });
 
   it("DELETE /api/rigs/:rigId/nodes/:nodeRef preserves a previously detached claimed session while removing the node", async () => {

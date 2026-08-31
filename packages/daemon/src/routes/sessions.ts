@@ -440,6 +440,7 @@ nodesRoutes.delete("/:logicalId", async (c) => {
   if (!result.ok) {
     const status = result.code === "rig_not_found" ? 404
       : result.code === "node_not_found" ? 404
+      : result.code === "active_qitems" ? 409
       : result.code === "kill_failed" ? 409
       : 500;
     return c.json(result, status);

@@ -59,8 +59,9 @@ export type RemoveNodeResult =
     }
   | {
       ok: false;
-      code: "rig_not_found" | "node_not_found" | "kill_failed";
+      code: "rig_not_found" | "node_not_found" | "active_qitems" | "kill_failed";
       error: string;
+      activeQitemIds?: string[];
     };
 
 export type ReleaseRigResult =
@@ -348,6 +349,27 @@ export class RigLifecycleService {
     const node = this.resolveNodeRef(rigId, nodeRef);
     if (!node) {
       return { ok: false, code: "node_not_found", error: `Node '${nodeRef}' not found in rig '${rigId}'.` };
+    }
+
+    const activeQitemIds = node.latest_session_name
+      ? (this.db.prepare(`
+          SELECT qitem_id
+          FROM queue_items
+          WHERE destination_session = ?
+            AND state IN ('pending', 'in-progress', 'blocked')
+          ORDER BY qitem_id
+        `).all(node.latest_session_name) as Array<{ qitem_id: string }>).map((row) => row.qitem_id)
+      : [];
+    if (activeQitemIds.length > 0) {
+      const fallbackCommands = activeQitemIds
+        .map((qitemId) => `rig queue fallback ${qitemId} --destination <live-seat>`)
+        .join("\n");
+      return {
+        ok: false,
+        code: "active_qitems",
+        activeQitemIds,
+        error: `Node '${node.logical_id}' still has active queue work addressed to '${node.latest_session_name}'. Reroute each qitem before removing the node:\n${fallbackCommands}`,
+      };
     }
 
     const preserveDetachedClaimedSession = node.latest_session_origin === "claimed" && node.latest_session_status === "detached";
