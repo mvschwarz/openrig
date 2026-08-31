@@ -9,7 +9,7 @@
 // lost the same dimensions, so they compose different profiles from the SAME graph);
 // each piece resolves through the Atom-1 address machinery and carries a per-piece
 // SOURCE LABEL (Q2-Amendment 1: composition is multi-source by contract — library /
-// seat tree / mission tree — and every assembled piece names its source; the caller's
+// project tree / seat tree / mission tree — and every assembled piece names its source; the caller's
 // resolver decides the kind, this module labels). Budgets are evaluated AT COMPOSE
 // and on overage REPORT the amount and the priority-ordered drop candidates —
 // composition never silently truncates (mini-req 9; D2: budgets flag for review,
@@ -17,7 +17,7 @@
 //
 // PURE by contract, like the manifest parser: file text arrives through the caller's
 // readFile so the same algebra serves library packs today and configured tree roots
-// (seat/mission sources) when the wiring atom lands. Every failure is LOUD and names
+// (project/seat/mission sources) when the wiring atom lands. Every failure is LOUD and names
 // the atom — a compose stops rather than thinning the walk (the Q1 rationale).
 
 import type { ContextPackAtom } from "./context-pack-types.js";
@@ -33,7 +33,7 @@ export class ProfileComposeError extends Error {
 
 export type ComposeSituation = "fresh" | "handover" | "post-compaction";
 export type ComposeRuntime = "claude" | "codex";
-export type SourceKind = "library" | "seat" | "mission";
+export type SourceKind = "library" | "project" | "seat" | "mission";
 
 export interface ComposeInput {
   /** The one atom graph (possibly gathered across sources by the caller). */

@@ -256,7 +256,7 @@ function parseAtoms(raw: unknown, files: ContextPackManifestFile[], sourcePath: 
     }
     // Atom 4a — the pre-'#' ref carries its resolver kind (Q2-Amendment 1's
     // one-grammar-two-resolvers ruling): a bare LIBRARY ref must be a declared
-    // pack file; a seat:/mission: TREE ref lives outside the pack by design
+    // pack file; a project:/seat:/mission: TREE ref lives outside the pack by design
     // (nothing must be library-homed to be composable), so it validates
     // structurally here (unknown prefix / traversal reject loud) and resolves
     // from configured roots at compose.
@@ -268,7 +268,7 @@ function parseAtoms(raw: unknown, files: ContextPackManifestFile[], sourcePath: 
       throw err;
     }
     if (sourceRef.kind === "library" && !declaredFiles.has(parsedAddr.ref)) {
-      throw atomError(sourcePath, i, `'address' references '${parsedAddr.ref}', which is not a declared pack file — a library atom addresses INTO the pack's own files (tree sources use the seat:/mission: prefix)`);
+      throw atomError(sourcePath, i, `'address' references '${parsedAddr.ref}', which is not a declared pack file — a library atom addresses INTO the pack's own files (tree sources use the project:/seat:/mission: prefix)`);
     }
     if (parsedAddr.headerPath.length > 0 && !MARKDOWN_SUFFIXES.some((s) => sourceRef.rel.endsWith(s))) {
       throw atomError(sourcePath, i, `'address' uses a header path on '${parsedAddr.ref}' — header addressing only applies to markdown files (${MARKDOWN_SUFFIXES.join(", ")})`);

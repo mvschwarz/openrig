@@ -72,7 +72,7 @@ describe("composeProfile — the situation algebra over ONE atom graph (mini-req
     const aff = pc.pieces.find((p) => p.atomId === "affordances")!;
     expect(aff.text).toContain("what you can do");
     expect(aff.text).toContain("### Verbs"); // full span: children included (Q1)
-    expect(aff.sourceKind).toBe("library"); // default; seat/mission label via sourceKindFor
+    expect(aff.sourceKind).toBe("library"); // default; project/seat/mission label via sourceKindFor
     const labelled = composeProfile({
       atoms: GRAPH, situation: "post-compaction", runtime: "claude", readFile,
       sourceKindFor: (a) => (a.taxonomy === "lore" ? "seat" : "library"),

@@ -8,6 +8,7 @@
 // addressing convention. The kind prefix is the entire pre-`#` dialect:
 //
 //   walk.md#welcome              -> library (the pack's declared files)
+//   project:SPEC.md              -> the configured project tree
 //   seat:RECAP.md#decisions      -> the seat tree (recap + lore live beside LEARNED)
 //   mission:NOTES.md#watch-items -> the mission tree
 //
@@ -15,7 +16,7 @@
 // addressing verb resolves tree paths from config, never literals — this module
 // holds no path literal and refuses to guess a missing root). Composability comes
 // from ADDRESSING, not homing: nothing must be copied into the library to compose
-// (a profile that copies seat or mission content into the library is a defect —
+// (a profile that copies project, seat or mission content into the library is a defect —
 // Q2-Amendment 1(c)).
 
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
@@ -30,7 +31,7 @@ export class SourceResolutionError extends Error {
   }
 }
 
-const TREE_KINDS = ["seat", "mission"] as const;
+const TREE_KINDS = ["project", "seat", "mission"] as const;
 export type TreeKind = (typeof TREE_KINDS)[number];
 
 export interface ParsedSourceRef {
@@ -71,6 +72,8 @@ export function parseSourceRef(ref: string): ParsedSourceRef {
 }
 
 export interface ProfileSourceRoots {
+  /** The selected project's tree directory — from config. */
+  project?: string;
   /** The seat's tree directory (recap + lore beside LEARNED) — from config. */
   seat?: string;
   /** The mission's tree directory — from config. */

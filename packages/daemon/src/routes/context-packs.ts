@@ -15,10 +15,10 @@
 import { Hono } from "hono";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { ContextPackLibraryService } from "../domain/context-packs/context-pack-library-service.js";
 import { assembleBundle, assemblePlainFiles } from "../domain/context-packs/bundle-assembler.js";
-import { ContextPackError, type ContextPackEntry } from "../domain/context-packs/context-pack-types.js";
+import { ContextPackError, type ContextPackAtom, type ContextPackEntry } from "../domain/context-packs/context-pack-types.js";
 import { parseManifest } from "../domain/context-packs/manifest-parser.js";
 import { composeProfile, ProfileComposeError, type ComposeRuntime, type ComposeSituation } from "../domain/context-packs/profile-composer.js";
 import { makeProfileReadFile, sourceKindForAddress, SourceResolutionError, type ProfileSourceRoots, type SourceReadRecord } from "../domain/context-packs/profile-source-resolver.js";
@@ -355,6 +355,8 @@ export function contextPacksRoutes(): Hono {
     // (URL-installed) pack's seat: atoms can neither read a root the caller
     // did not grant nor deliver bytes whose origin is hidden.
     const roots: ProfileSourceRoots = {};
+    let atoms: ContextPackAtom[] = manifest.atoms;
+    const defaultWorkMeta = new Map<string, { altitude: "project" | "mission" | "slice"; source: "default" }>();
     const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
     const rig = c.req.query("rig");
     const seat = c.req.query("seat");
@@ -371,12 +373,92 @@ export function contextPacksRoutes(): Hono {
     // semantics — naming the mission grants this compose read access to that
     // mission directory subtree.
     const mission = c.req.query("mission");
+    const slice = c.req.query("slice");
+    if (slice !== undefined && mission === undefined) {
+      return c.json({ error: "mission_required", message: "slice requires an exact mission selection; the legacy work hierarchy is project -> mission -> slice" }, 400);
+    }
+    if (slice !== undefined && !SEGMENT.test(slice)) {
+      return c.json({ error: "invalid_slice_param", message: "slice must be a single bounded segment ([A-Za-z0-9][A-Za-z0-9._-]{0,63})" }, 400);
+    }
     if (mission !== undefined) {
       if (!SEGMENT.test(mission)) {
         return c.json({ error: "invalid_mission_param", message: "mission must be a single bounded segment ([A-Za-z0-9][A-Za-z0-9._-]{0,63})" }, 400);
       }
-      const slicesRoot = String(new SettingsStore().resolveOne("workspace.slices_root").value);
+      const settings = new SettingsStore();
+      const slicesRoot = String(settings.resolveOne("workspace.slices_root").value);
       roots.mission = join(slicesRoot, mission);
+
+      const hasAuthoredWorkAtom = manifest.atoms.some((atom) => {
+        const kind = sourceKindForAddress(atom.address);
+        return kind === "project" || kind === "mission";
+      });
+      if (slice === undefined && !hasAuthoredWorkAtom) {
+        return c.json({
+          error: "slice_required",
+          message: `pack '${entry.relativePath}' declares no project: or mission: atoms, so --mission alone would be a no-op; pass the exact --slice to request the legacy default work walk`,
+        }, 400);
+      }
+
+      // Story 1's bounded compatibility seam. Supplying BOTH mission and slice
+      // asks for the existing single-project hierarchy's conventional Markdown
+      // walk. It is deliberately limited to the unambiguous legacy layout;
+      // multi-project/catalog resolution belongs to its later story.
+      if (slice !== undefined) {
+        if (situation !== "fresh") {
+          return c.json({ error: "legacy_default_fresh_only", message: "the bounded legacy default work walk is available only for a fresh profile" }, 400);
+        }
+        const workspaceRoot = String(settings.resolveOne("workspace.root").value);
+        if (resolve(slicesRoot) !== resolve(workspaceRoot, "missions")) {
+          return c.json({
+            error: "legacy_workspace_required",
+            message: `legacy default composition requires workspace.slices_root to be <workspace.root>/missions; got ${slicesRoot}`,
+          }, 422);
+        }
+        roots.project = workspaceRoot;
+        const maxOrder = atoms.reduce((max, atom) => Math.max(max, atom.order), Number.MIN_SAFE_INTEGER);
+        const defaultAtoms: ContextPackAtom[] = [
+          {
+            id: "legacy-default-project-spec",
+            address: "project:SPEC.md",
+            taxonomy: "mission",
+            situations: ["fresh"],
+            purpose: "depth",
+            runtime: "any",
+            order: maxOrder + 1,
+            priority: "core",
+          },
+          {
+            id: "legacy-default-mission-spec",
+            address: "mission:SPEC.md",
+            taxonomy: "mission",
+            situations: ["fresh"],
+            purpose: "depth",
+            runtime: "any",
+            order: maxOrder + 2,
+            requires: ["legacy-default-project-spec"],
+            priority: "core",
+          },
+          {
+            id: "legacy-default-slice-spec",
+            address: `mission:slices/${slice}/SPEC.md`,
+            taxonomy: "mission",
+            situations: ["fresh"],
+            purpose: "depth",
+            runtime: "any",
+            order: maxOrder + 3,
+            requires: ["legacy-default-mission-spec"],
+            priority: "core",
+          },
+        ];
+        const collision = defaultAtoms.find((atom) => atoms.some((existing) => existing.id === atom.id));
+        if (collision) {
+          return c.json({ error: "default_atom_conflict", message: `pack '${entry.relativePath}' already declares reserved atom id '${collision.id}'` }, 422);
+        }
+        atoms = [...atoms, ...defaultAtoms];
+        defaultWorkMeta.set("legacy-default-project-spec", { altitude: "project", source: "default" });
+        defaultWorkMeta.set("legacy-default-mission-spec", { altitude: "mission", source: "default" });
+        defaultWorkMeta.set("legacy-default-slice-spec", { altitude: "slice", source: "default" });
+      }
     }
 
     try {
@@ -384,7 +466,7 @@ export function contextPacksRoutes(): Hono {
       // CHECKABLE. Keyed by ref — every piece with that ref shares the read.
       const readsByRef = new Map<string, SourceReadRecord>();
       const profile = composeProfile({
-        atoms: manifest.atoms,
+        atoms,
         situation: situation as ComposeSituation,
         runtime: runtime as ComposeRuntime,
         ...(budgetTokens !== undefined ? { budgetTokens } : {}),
@@ -399,7 +481,8 @@ export function contextPacksRoutes(): Hono {
         const record = readsByRef.get(parseAddress(p.address).ref);
         // Per-piece sha256: the Test-A door compares the profile's selected
         // pieces to the walk's delivered pieces hash-exactly, not by count.
-        const hashed = { ...p, sha256: createHash("sha256").update(p.text, "utf8").digest("hex") };
+        const workMeta = defaultWorkMeta.get(p.atomId);
+        const hashed = { ...p, ...(workMeta ?? {}), sha256: createHash("sha256").update(p.text, "utf8").digest("hex") };
         return record
           ? { ...hashed, provenance: { nominalPath: record.nominalPath, realPath: record.realPath, escapesRoot: record.escapesRoot } }
           : hashed;

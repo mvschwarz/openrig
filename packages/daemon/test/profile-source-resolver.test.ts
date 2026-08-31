@@ -1,7 +1,7 @@
 // OPR.0.5.3.5 Atom 4a — the two pre-`#` resolvers behind ONE grammar
 // (Q2-Amendment 1, the desk's grammar ruling): non-library sources use the SAME
 // `#H2-slug/H3-slug` grammar; only the pre-`#` resolver differs — a library ref
-// resolves against the pack, a tree ref (`seat:` / `mission:` prefix) resolves
+// resolves against the pack, a tree ref (`project:` / `seat:` / `mission:` prefix) resolves
 // from CONFIGURED roots (CE-v2 03-tree-addressability: from config, never
 // literals) — and both resolve FAIL-LOUD. No second addressing convention.
 
@@ -18,16 +18,19 @@ import {
 
 let root: string;
 let packDir: string;
+let projectRoot: string;
 let seatRoot: string;
 let missionRoot: string;
 
 beforeAll(() => {
   root = mkdtempSync(join(tmpdir(), "s05-sources-"));
   packDir = join(root, "pack");
+  projectRoot = join(root, "project-tree");
   seatRoot = join(root, "seat-tree");
   missionRoot = join(root, "mission-tree");
-  for (const d of [packDir, seatRoot, missionRoot]) mkdirSync(d, { recursive: true });
+  for (const d of [packDir, projectRoot, seatRoot, missionRoot]) mkdirSync(d, { recursive: true });
   writeFileSync(join(packDir, "walk.md"), "## Welcome\nhello");
+  writeFileSync(join(projectRoot, "SPEC.md"), "# Project\nproject intent");
   writeFileSync(join(seatRoot, "RECAP.md"), "## Recent Decisions\nwe chose X because Y");
   writeFileSync(join(missionRoot, "NOTES.md"), "## Watch Items\nW-1");
 });
@@ -35,8 +38,9 @@ beforeAll(() => {
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 describe("parseSourceRef — one grammar, the pre-# kind prefix", () => {
-  it("bare refs are library; seat:/mission: prefixes name the tree resolvers", () => {
+  it("bare refs are library; project:/seat:/mission: prefixes name the tree resolvers", () => {
     expect(parseSourceRef("walk.md")).toEqual({ kind: "library", rel: "walk.md" });
+    expect(parseSourceRef("project:SPEC.md")).toEqual({ kind: "project", rel: "SPEC.md" });
     expect(parseSourceRef("seat:RECAP.md")).toEqual({ kind: "seat", rel: "RECAP.md" });
     expect(parseSourceRef("mission:notes/NOTES.md")).toEqual({ kind: "mission", rel: "notes/NOTES.md" });
   });
@@ -50,8 +54,9 @@ describe("parseSourceRef — one grammar, the pre-# kind prefix", () => {
 
 describe("makeProfileReadFile — config-resolved roots, fail-loud reads", () => {
   it("dispatches library refs to the pack dir and tree refs to their configured roots", () => {
-    const read = makeProfileReadFile({ packDir, roots: { seat: seatRoot, mission: missionRoot } });
+    const read = makeProfileReadFile({ packDir, roots: { project: projectRoot, seat: seatRoot, mission: missionRoot } });
     expect(read("walk.md")).toContain("hello");
+    expect(read("project:SPEC.md")).toContain("project intent");
     expect(read("seat:RECAP.md")).toContain("we chose X because Y");
     expect(read("mission:NOTES.md")).toContain("W-1");
   });
@@ -77,6 +82,7 @@ describe("makeProfileReadFile — config-resolved roots, fail-loud reads", () =>
 describe("sourceKindForAddress — the per-piece label feed (Q2-Amendment 1 binding)", () => {
   it("derives the composer's source label from the atom's address prefix", () => {
     expect(sourceKindForAddress("walk.md#welcome")).toBe("library");
+    expect(sourceKindForAddress("project:SPEC.md")).toBe("project");
     expect(sourceKindForAddress("seat:RECAP.md#recent-decisions")).toBe("seat");
     expect(sourceKindForAddress("mission:NOTES.md")).toBe("mission");
   });

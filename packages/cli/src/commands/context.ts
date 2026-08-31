@@ -592,8 +592,9 @@ Examples:
     .option("--rig <rig>", "With --seat: grant read access to that seat's tree (seat: atoms)")
     .option("--seat <seat>", "With --rig: the seat whose tree seat: atoms may read")
     .option("--mission <mission>", "Grant read access to that mission's tree (mission: atoms)")
+    .option("--slice <slice>", "With --mission: compose the legacy default project/mission/slice SPEC walk")
     .option("--json", "JSON output (the full composed profile)")
-    .action(async (nameOrRef: string, opts: { situation: string; runtime?: string; budget?: string; rig?: string; seat?: string; mission?: string; json?: boolean }) => {
+    .action(async (nameOrRef: string, opts: { situation: string; runtime?: string; budget?: string; rig?: string; seat?: string; mission?: string; slice?: string; json?: boolean }) => {
       try {
         const client = await getClient();
         const entry = await resolvePack(client, nameOrRef);
@@ -617,6 +618,7 @@ Examples:
         if (opts.rig !== undefined) params.set("rig", opts.rig);
         if (opts.seat !== undefined) params.set("seat", opts.seat);
         if (opts.mission !== undefined) params.set("mission", opts.mission);
+        if (opts.slice !== undefined) params.set("slice", opts.slice);
         const res = await client.get<{
           pieces?: Array<{ atomId: string; address: string; sourceKind: string; text: string; estimatedTokens: number }>;
           totalEstimatedTokens?: number;

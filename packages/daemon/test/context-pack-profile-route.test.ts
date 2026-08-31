@@ -244,6 +244,78 @@ describe("GET /library/by-ref/profile — situation-composed delivery (Atom 4b)"
     }
   });
 
+  it("Story 1: an explicit legacy mission/slice adds the conventional project -> mission -> slice SPEC walk with default provenance", async () => {
+    const savedWorkspace = process.env["OPENRIG_WORKSPACE_ROOT"];
+    const savedSlices = process.env["OPENRIG_WORKSPACE_SLICES_ROOT"];
+    try {
+      const workspace = join(tmp, "workspace");
+      const missionDir = join(workspace, "missions", "release-x");
+      const sliceDir = join(missionDir, "slices", "10-work-install");
+      mkdirSync(sliceDir, { recursive: true });
+      writeFileSync(join(workspace, "SPEC.md"), "# Project\nProject intent sentinel");
+      writeFileSync(join(missionDir, "SPEC.md"), "# Mission\nMission change sentinel");
+      writeFileSync(join(sliceDir, "SPEC.md"), "# Slice\nExact outcome sentinel");
+      process.env["OPENRIG_WORKSPACE_ROOT"] = workspace;
+      process.env["OPENRIG_WORKSPACE_SLICES_ROOT"] = join(workspace, "missions");
+
+      const res = await app.request(url("situation=fresh&runtime=codex&mission=release-x&slice=10-work-install"));
+      expect(res.status).toBe(200);
+      const body = await res.json() as {
+        pieces: Array<{
+          atomId: string;
+          address: string;
+          sourceKind: string;
+          altitude?: string;
+          source?: string;
+          text: string;
+          provenance: { nominalPath: string };
+        }>;
+      };
+      const work = body.pieces.filter((piece) => piece.source === "default");
+      expect(work.map(({ altitude, address, sourceKind }) => ({ altitude, address, sourceKind }))).toEqual([
+        { altitude: "project", address: "project:SPEC.md", sourceKind: "project" },
+        { altitude: "mission", address: "mission:SPEC.md", sourceKind: "mission" },
+        { altitude: "slice", address: "mission:slices/10-work-install/SPEC.md", sourceKind: "mission" },
+      ]);
+      expect(work.map((piece) => piece.text)).toEqual([
+        "# Project\nProject intent sentinel",
+        "# Mission\nMission change sentinel",
+        "# Slice\nExact outcome sentinel",
+      ]);
+      expect(work.map((piece) => piece.provenance.nominalPath)).toEqual([
+        join(workspace, "SPEC.md"),
+        join(missionDir, "SPEC.md"),
+        join(sliceDir, "SPEC.md"),
+      ]);
+      expect(body.pieces.at(-3)?.altitude).toBe("project");
+    } finally {
+      if (savedWorkspace === undefined) delete process.env["OPENRIG_WORKSPACE_ROOT"];
+      else process.env["OPENRIG_WORKSPACE_ROOT"] = savedWorkspace;
+      if (savedSlices === undefined) delete process.env["OPENRIG_WORKSPACE_SLICES_ROOT"];
+      else process.env["OPENRIG_WORKSPACE_SLICES_ROOT"] = savedSlices;
+    }
+  });
+
+  it("Story 1: a legacy-default request without an exact slice refuses loudly instead of accepting a no-op mission grant", async () => {
+    const savedWorkspace = process.env["OPENRIG_WORKSPACE_ROOT"];
+    const savedSlices = process.env["OPENRIG_WORKSPACE_SLICES_ROOT"];
+    try {
+      const workspace = join(tmp, "workspace");
+      mkdirSync(join(workspace, "missions", "release-x"), { recursive: true });
+      process.env["OPENRIG_WORKSPACE_ROOT"] = workspace;
+      process.env["OPENRIG_WORKSPACE_SLICES_ROOT"] = join(workspace, "missions");
+
+      const res = await app.request(url("situation=fresh&runtime=codex&mission=release-x"));
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: "slice_required" });
+    } finally {
+      if (savedWorkspace === undefined) delete process.env["OPENRIG_WORKSPACE_ROOT"];
+      else process.env["OPENRIG_WORKSPACE_ROOT"] = savedWorkspace;
+      if (savedSlices === undefined) delete process.env["OPENRIG_WORKSPACE_SLICES_ROOT"];
+      else process.env["OPENRIG_WORKSPACE_SLICES_ROOT"] = savedSlices;
+    }
+  });
+
   it("bad inputs are NAMED 4xx errors: unknown situation, a pack without atoms, an unknown ref", async () => {
     const badSituation = await app.request(url("situation=someday&runtime=claude"));
     expect(badSituation.status).toBe(400);

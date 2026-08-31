@@ -176,12 +176,19 @@ ${over}`);
 `), "m.yaml")).toThrow(/cycle/i);
   });
 
-  it("Atom 4a: a TREE-prefixed address (seat:/mission:) is legal at ingest — declared-file applies to library refs only", () => {
+  it("Atom 4a: a TREE-prefixed address (project:/seat:/mission:) is legal at ingest — declared-file applies to library refs only", () => {
     // Q2-Amendment 1(c): nothing must be library-homed to be composable. A
     // seat-homed recap atom declares a seat: address; the file exists on the
     // SEAT TREE, not in the pack, so the declared-file check must not fire.
     // Structural rules still hold: traversal rejects, header paths need markdown.
     const m = parseManifest(withAtoms(`
+  - id: project-intent
+    address: "project:SPEC.md"
+    taxonomy: mission
+    situations: [fresh]
+    purpose: depth
+    order: 1
+    priority: core
   - id: recap
     address: "seat:RECAP.md#recent-decisions"
     taxonomy: lore
@@ -190,7 +197,7 @@ ${over}`);
     order: 90
     priority: core
 `), "m.yaml");
-    expect(m.atoms![0]!.address).toBe("seat:RECAP.md#recent-decisions");
+    expect(m.atoms!.map((atom) => atom.address)).toEqual(["project:SPEC.md", "seat:RECAP.md#recent-decisions"]);
     expect(() => parseManifest(withAtoms(`
   - id: sneaky
     address: "seat:../LEARNED.md"

@@ -148,10 +148,10 @@ describe("rig context — address fork + profile verb (Atom 4d)", () => {
 
   it("PROFILE VERB: composes by situation with the grant params threaded, pieces labeled on stdout, budget + provenance warnings on stderr", async () => {
     hits.length = 0;
-    const out = await run(port, ["profile", "packs/smoke", "--situation", "handover", "--runtime", "claude", "--rig", "r1", "--seat", "s1", "--budget", "4"]);
+    const out = await run(port, ["profile", "packs/smoke", "--situation", "handover", "--runtime", "claude", "--rig", "r1", "--seat", "s1", "--mission", "release-x", "--slice", "slice-y", "--budget", "4"]);
     const profileHit = hits.find((h) => h.startsWith("/api/context-packs/library/by-ref/profile"))!;
     expect(profileHit).toBeDefined();
-    for (const frag of ["situation=handover", "runtime=claude", "rig=r1", "seat=s1", "budget=4"]) {
+    for (const frag of ["situation=handover", "runtime=claude", "rig=r1", "seat=s1", "mission=release-x", "slice=slice-y", "budget=4"]) {
       expect(profileHit).toContain(frag);
     }
     const stdout = out.logs.join("\n");
