@@ -1280,6 +1280,7 @@ export class PodRigInstantiator {
             // site (see the role wire note above) — same member-ref persistence as
             // createMemberNode or `rig up <spec>` seats lose their policy ref.
             permissionPolicy: member.permissionPolicy,
+            sessionSource: member.sessionSource,
             cwd: configResult.config.cwd,
             restorePolicy: configResult.config.restorePolicy,
             podId,
@@ -1599,6 +1600,7 @@ export class PodRigInstantiator {
       // OPR.0.4.8.3 Seam B: the member's OWN raw ref persists on the node (like role);
       // rig-level lives on the rig row; precedence applies at RESOLUTION, not storage.
       permissionPolicy: input.member.permissionPolicy,
+      sessionSource: input.member.sessionSource,
       cwd: effectiveCwd,
       restorePolicy: input.member.restorePolicy,
       podId: input.podId,

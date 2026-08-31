@@ -164,6 +164,7 @@ export class RigSpecExporter {
         // OPR.0.4.8.3 Seam B: the seat's RAW permission_policy ref round-trips
         // (export truth = the ref, never the resolved provenance).
         if (node.permissionPolicy) member.permissionPolicy = node.permissionPolicy;
+        if (node.sessionSource) member.sessionSource = node.sessionSource;
         const rp = getRestorePolicy(node.id);
         if (rp) member.restorePolicy = rp;
         return member;

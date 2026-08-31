@@ -14,6 +14,7 @@ import type {
   RigServicesRecordInput,
   Snapshot,
   SnapshotData,
+  SessionSourceSpec,
 } from "./types.js";
 
 /**
@@ -131,6 +132,7 @@ interface NodeOptions {
   agentRef?: string;
   profile?: string;
   label?: string;
+  sessionSource?: SessionSourceSpec;
   resolvedSpecName?: string;
   resolvedSpecVersion?: string;
   resolvedSpecHash?: string;
@@ -407,6 +409,11 @@ export class RigRepository {
         );
     }
 
+    if (opts?.sessionSource && this.hasNodeColumn("session_source_json")) {
+      this.db.prepare("UPDATE nodes SET session_source_json = ? WHERE id = ?")
+        .run(JSON.stringify(opts.sessionSource), id);
+    }
+
     return this.rowToNode(
       this.db.prepare("SELECT * FROM nodes WHERE id = ?").get(id) as NodeRow
     );
@@ -645,6 +652,9 @@ export class RigRepository {
       agentRef: row.agent_ref ?? null,
       profile: row.profile ?? null,
       label: row.label ?? null,
+      sessionSource: row.session_source_json
+        ? JSON.parse(row.session_source_json) as SessionSourceSpec
+        : null,
       resolvedSpecName: row.resolved_spec_name ?? null,
       resolvedSpecVersion: row.resolved_spec_version ?? null,
       resolvedSpecHash: row.resolved_spec_hash ?? null,
@@ -730,6 +740,7 @@ interface NodeRow {
   agent_ref: string | null;
   profile: string | null;
   label: string | null;
+  session_source_json?: string | null;
   resolved_spec_name: string | null;
   resolved_spec_version: string | null;
   resolved_spec_hash: string | null;

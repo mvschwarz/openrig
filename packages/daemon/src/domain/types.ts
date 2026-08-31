@@ -44,6 +44,8 @@ export interface Node {
   agentRef: string | null;
   profile: string | null;
   label: string | null;
+  /** Exact validated RigSpec declaration retained for export/recreate fidelity. */
+  sessionSource?: SessionSourceSpec | null;
   resolvedSpecName: string | null;
   resolvedSpecVersion: string | null;
   resolvedSpecHash: string | null;
