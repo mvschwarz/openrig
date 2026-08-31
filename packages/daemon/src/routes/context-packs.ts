@@ -14,8 +14,9 @@
 
 import { Hono } from "hono";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { parse as parseYaml } from "yaml";
 import type { ContextPackLibraryService } from "../domain/context-packs/context-pack-library-service.js";
 import { assembleBundle, assemblePlainFiles } from "../domain/context-packs/bundle-assembler.js";
 import { ContextPackError, type ContextPackAtom, type ContextPackEntry } from "../domain/context-packs/context-pack-types.js";
@@ -356,7 +357,7 @@ export function contextPacksRoutes(): Hono {
     // did not grant nor deliver bytes whose origin is hidden.
     const roots: ProfileSourceRoots = {};
     let atoms: ContextPackAtom[] = manifest.atoms;
-    const defaultWorkMeta = new Map<string, { altitude: "project" | "mission" | "slice"; source: "default" }>();
+    const workMeta = new Map<string, { altitude: "project" | "mission" | "slice"; source: "default" | "manifest" }>();
     const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
     const rig = c.req.query("rig");
     const seat = c.req.query("seat");
@@ -416,10 +417,26 @@ export function contextPacksRoutes(): Hono {
         }
         roots.project = workspaceRoot;
         const maxOrder = atoms.reduce((max, atom) => Math.max(max, atom.order), Number.MIN_SAFE_INTEGER);
-        const defaultAtoms: ContextPackAtom[] = [
+        let projectIntent = "SPEC.md";
+        let projectIntentSource: "default" | "manifest" = "default";
+        let projectContext: string[] = [];
+        const projectManifestPath = join(workspaceRoot, "project.yaml");
+        if (existsSync(projectManifestPath)) {
+          const projectManifest = parseYaml(readFileSync(projectManifestPath, "utf-8")) as {
+            install?: { intent?: unknown; context?: unknown };
+          } | null;
+          if (typeof projectManifest?.install?.intent === "string") {
+            projectIntent = projectManifest.install.intent;
+            projectIntentSource = "manifest";
+          }
+          if (Array.isArray(projectManifest?.install?.context)) {
+            projectContext = projectManifest.install.context.filter((address): address is string => typeof address === "string");
+          }
+        }
+        const projectAtoms: ContextPackAtom[] = [
           {
             id: "legacy-default-project-spec",
-            address: "project:SPEC.md",
+            address: `project:${projectIntent}`,
             taxonomy: "mission",
             situations: ["fresh"],
             purpose: "depth",
@@ -427,6 +444,21 @@ export function contextPacksRoutes(): Hono {
             order: maxOrder + 1,
             priority: "core",
           },
+          ...projectContext.map((address, index): ContextPackAtom => ({
+            id: `legacy-manifest-project-context-${index + 1}`,
+            address: `project:${address}`,
+            taxonomy: "mission",
+            situations: ["fresh"],
+            purpose: "depth",
+            runtime: "any",
+            order: maxOrder + index + 2,
+            requires: [index === 0 ? "legacy-default-project-spec" : `legacy-manifest-project-context-${index}`],
+            priority: "core",
+          })),
+        ];
+        const finalProjectAtom = projectAtoms.at(-1)!;
+        const defaultAtoms: ContextPackAtom[] = [
+          ...projectAtoms,
           {
             id: "legacy-default-mission-spec",
             address: "mission:SPEC.md",
@@ -434,8 +466,8 @@ export function contextPacksRoutes(): Hono {
             situations: ["fresh"],
             purpose: "depth",
             runtime: "any",
-            order: maxOrder + 2,
-            requires: ["legacy-default-project-spec"],
+            order: finalProjectAtom.order + 1,
+            requires: [finalProjectAtom.id],
             priority: "core",
           },
           {
@@ -445,7 +477,7 @@ export function contextPacksRoutes(): Hono {
             situations: ["fresh"],
             purpose: "depth",
             runtime: "any",
-            order: maxOrder + 3,
+            order: finalProjectAtom.order + 2,
             requires: ["legacy-default-mission-spec"],
             priority: "core",
           },
@@ -455,9 +487,12 @@ export function contextPacksRoutes(): Hono {
           return c.json({ error: "default_atom_conflict", message: `pack '${entry.relativePath}' already declares reserved atom id '${collision.id}'` }, 422);
         }
         atoms = [...atoms, ...defaultAtoms];
-        defaultWorkMeta.set("legacy-default-project-spec", { altitude: "project", source: "default" });
-        defaultWorkMeta.set("legacy-default-mission-spec", { altitude: "mission", source: "default" });
-        defaultWorkMeta.set("legacy-default-slice-spec", { altitude: "slice", source: "default" });
+        workMeta.set("legacy-default-project-spec", { altitude: "project", source: projectIntentSource });
+        projectContext.forEach((_, index) => {
+          workMeta.set(`legacy-manifest-project-context-${index + 1}`, { altitude: "project", source: "manifest" });
+        });
+        workMeta.set("legacy-default-mission-spec", { altitude: "mission", source: "default" });
+        workMeta.set("legacy-default-slice-spec", { altitude: "slice", source: "default" });
       }
     }
 
@@ -481,8 +516,8 @@ export function contextPacksRoutes(): Hono {
         const record = readsByRef.get(parseAddress(p.address).ref);
         // Per-piece sha256: the Test-A door compares the profile's selected
         // pieces to the walk's delivered pieces hash-exactly, not by count.
-        const workMeta = defaultWorkMeta.get(p.atomId);
-        const hashed = { ...p, ...(workMeta ?? {}), sha256: createHash("sha256").update(p.text, "utf8").digest("hex") };
+        const pieceWorkMeta = workMeta.get(p.atomId);
+        const hashed = { ...p, ...(pieceWorkMeta ?? {}), sha256: createHash("sha256").update(p.text, "utf8").digest("hex") };
         return record
           ? { ...hashed, provenance: { nominalPath: record.nominalPath, realPath: record.realPath, escapesRoot: record.escapesRoot } }
           : hashed;

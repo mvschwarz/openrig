@@ -296,6 +296,117 @@ describe("GET /library/by-ref/profile — situation-composed delivery (Atom 4b)"
     }
   });
 
+  it("Story 2: a valid project manifest relabels the conventional intent and appends project context in declared order", async () => {
+    const savedWorkspace = process.env["OPENRIG_WORKSPACE_ROOT"];
+    const savedSlices = process.env["OPENRIG_WORKSPACE_SLICES_ROOT"];
+    try {
+      const workspace = join(tmp, "workspace");
+      const missionDir = join(workspace, "missions", "release-x");
+      const sliceDir = join(missionDir, "slices", "10-work-install");
+      mkdirSync(join(workspace, "context"), { recursive: true });
+      mkdirSync(sliceDir, { recursive: true });
+      writeFileSync(join(workspace, "SPEC.md"), "# Project\nProject intent sentinel");
+      writeFileSync(join(workspace, "context", "first.md"), "# First\nFirst authored context");
+      writeFileSync(join(workspace, "context", "second.md"), "# Second\nSecond authored context");
+      writeFileSync(join(workspace, "project.yaml"), `schema: openrig.project/v0alpha1
+kind: project
+install:
+  intent: SPEC.md
+  context:
+    - context/first.md
+    - context/second.md
+missions:
+  root: missions
+`);
+      writeFileSync(join(missionDir, "SPEC.md"), "# Mission\nMission change sentinel");
+      writeFileSync(join(sliceDir, "SPEC.md"), "# Slice\nExact outcome sentinel");
+      process.env["OPENRIG_WORKSPACE_ROOT"] = workspace;
+      process.env["OPENRIG_WORKSPACE_SLICES_ROOT"] = join(workspace, "missions");
+
+      const res = await app.request(url("situation=fresh&runtime=codex&mission=release-x&slice=10-work-install"));
+      expect(res.status).toBe(200);
+      const body = await res.json() as {
+        pieces: Array<{
+          address: string;
+          altitude?: string;
+          source?: string;
+          text: string;
+          provenance: { nominalPath: string };
+        }>;
+      };
+      const projectPieces = body.pieces.filter((piece) => piece.altitude === "project");
+      expect(projectPieces.map(({ address, source }) => ({ address, source }))).toEqual([
+        { address: "project:SPEC.md", source: "manifest" },
+        { address: "project:context/first.md", source: "manifest" },
+        { address: "project:context/second.md", source: "manifest" },
+      ]);
+      expect(body.pieces.filter((piece) => piece.altitude !== undefined).map((piece) => piece.address)).toEqual([
+        "project:SPEC.md",
+        "project:context/first.md",
+        "project:context/second.md",
+        "mission:SPEC.md",
+        "mission:slices/10-work-install/SPEC.md",
+      ]);
+      expect(projectPieces.map((piece) => piece.text)).toEqual([
+        "# Project\nProject intent sentinel",
+        "# First\nFirst authored context",
+        "# Second\nSecond authored context",
+      ]);
+      expect(body.pieces.filter((piece) => piece.address === "project:SPEC.md")).toHaveLength(1);
+      expect(projectPieces.map((piece) => piece.provenance.nominalPath)).toEqual([
+        join(workspace, "SPEC.md"),
+        join(workspace, "context", "first.md"),
+        join(workspace, "context", "second.md"),
+      ]);
+    } finally {
+      if (savedWorkspace === undefined) delete process.env["OPENRIG_WORKSPACE_ROOT"];
+      else process.env["OPENRIG_WORKSPACE_ROOT"] = savedWorkspace;
+      if (savedSlices === undefined) delete process.env["OPENRIG_WORKSPACE_SLICES_ROOT"];
+      else process.env["OPENRIG_WORKSPACE_SLICES_ROOT"] = savedSlices;
+    }
+  });
+
+  it("Story 2: a valid project manifest replaces the conventional intent address", async () => {
+    const savedWorkspace = process.env["OPENRIG_WORKSPACE_ROOT"];
+    const savedSlices = process.env["OPENRIG_WORKSPACE_SLICES_ROOT"];
+    try {
+      const workspace = join(tmp, "workspace");
+      const missionDir = join(workspace, "missions", "release-x");
+      const sliceDir = join(missionDir, "slices", "10-work-install");
+      mkdirSync(join(workspace, "context"), { recursive: true });
+      mkdirSync(sliceDir, { recursive: true });
+      writeFileSync(join(workspace, "SPEC.md"), "# Project\nConventional intent must not compose");
+      writeFileSync(join(workspace, "context", "project-intent.md"), "# Project\nAuthored project intent");
+      writeFileSync(join(workspace, "project.yaml"), `schema: openrig.project/v0alpha1
+kind: project
+install:
+  intent: context/project-intent.md
+missions:
+  root: missions
+`);
+      writeFileSync(join(missionDir, "SPEC.md"), "# Mission\nMission change sentinel");
+      writeFileSync(join(sliceDir, "SPEC.md"), "# Slice\nExact outcome sentinel");
+      process.env["OPENRIG_WORKSPACE_ROOT"] = workspace;
+      process.env["OPENRIG_WORKSPACE_SLICES_ROOT"] = join(workspace, "missions");
+
+      const res = await app.request(url("situation=fresh&runtime=codex&mission=release-x&slice=10-work-install"));
+      expect(res.status).toBe(200);
+      const body = await res.json() as {
+        pieces: Array<{ address: string; altitude?: string; source?: string; text: string }>;
+      };
+      const projectPieces = body.pieces.filter((piece) => piece.altitude === "project");
+      expect(projectPieces).toMatchObject([
+        { address: "project:context/project-intent.md", source: "manifest", text: "# Project\nAuthored project intent" },
+      ]);
+      expect(body.pieces.some((piece) => piece.address === "project:SPEC.md")).toBe(false);
+    } finally {
+      if (savedWorkspace === undefined) delete process.env["OPENRIG_WORKSPACE_ROOT"];
+      else process.env["OPENRIG_WORKSPACE_ROOT"] = savedWorkspace;
+      if (savedSlices === undefined) delete process.env["OPENRIG_WORKSPACE_SLICES_ROOT"];
+      else process.env["OPENRIG_WORKSPACE_SLICES_ROOT"] = savedSlices;
+    }
+  });
+
   it("Story 1: a legacy-default request without an exact slice refuses loudly instead of accepting a no-op mission grant", async () => {
     const savedWorkspace = process.env["OPENRIG_WORKSPACE_ROOT"];
     const savedSlices = process.env["OPENRIG_WORKSPACE_SLICES_ROOT"];
