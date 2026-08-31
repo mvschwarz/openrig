@@ -426,9 +426,12 @@ export function contextPacksRoutes(): Hono {
           const projectManifest = parseYaml(readFileSync(projectManifestPath, "utf-8")) as {
             install?: { intent?: unknown; context?: unknown };
           } | null;
-          if (typeof projectManifest?.install?.intent === "string") {
-            projectIntent = projectManifest.install.intent;
+          const manifestIntent = projectManifest?.install?.intent;
+          if (typeof manifestIntent === "string") {
+            projectIntent = manifestIntent;
             projectIntentSource = "manifest";
+          } else if (manifestIntent !== undefined) {
+            warnings.push("project.yaml: optional install.intent must be a relative Markdown address; ignored the invalid value and kept the baseline work install.");
           }
           const manifestContext = projectManifest?.install?.context;
           if (Array.isArray(manifestContext)) {

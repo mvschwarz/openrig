@@ -407,6 +407,61 @@ missions:
     }
   });
 
+  it("Story 2: wrong-type optional project intent warns and preserves the baseline install", async () => {
+    const savedWorkspace = process.env["OPENRIG_WORKSPACE_ROOT"];
+    const savedSlices = process.env["OPENRIG_WORKSPACE_SLICES_ROOT"];
+    try {
+      const workspace = join(tmp, "workspace");
+      const missionDir = join(workspace, "missions", "release-x");
+      const sliceDir = join(missionDir, "slices", "10-work-install");
+      mkdirSync(sliceDir, { recursive: true });
+      writeFileSync(join(workspace, "SPEC.md"), "# Project\nProject intent sentinel");
+      writeFileSync(join(missionDir, "SPEC.md"), "# Mission\nMission change sentinel");
+      writeFileSync(join(sliceDir, "SPEC.md"), "# Slice\nExact outcome sentinel");
+      process.env["OPENRIG_WORKSPACE_ROOT"] = workspace;
+      process.env["OPENRIG_WORKSPACE_SLICES_ROOT"] = join(workspace, "missions");
+
+      writeFileSync(join(workspace, "project.yaml"), `schema: openrig.project/v0alpha1
+kind: project
+missions:
+  root: missions
+`);
+      const baselineRes = await app.request(url("situation=fresh&runtime=codex&mission=release-x&slice=10-work-install"));
+      expect(baselineRes.status).toBe(200);
+      const baseline = await baselineRes.json() as {
+        pieces: Array<{ atomId: string; address: string; altitude?: string; source?: string; text: string; sha256: string }>;
+      };
+
+      writeFileSync(join(workspace, "project.yaml"), `schema: openrig.project/v0alpha1
+kind: project
+install:
+  intent: 42
+missions:
+  root: missions
+`);
+      const invalidRes = await app.request(url("situation=fresh&runtime=codex&mission=release-x&slice=10-work-install"));
+      expect(invalidRes.status).toBe(200);
+      const invalid = await invalidRes.json() as {
+        pieces: Array<{ atomId: string; address: string; altitude?: string; source?: string; text: string; sha256: string }>;
+        warnings?: string[];
+        provenanceWarnings: string[];
+      };
+      const workShape = (pieces: typeof invalid.pieces) => pieces
+        .filter((piece) => piece.altitude !== undefined)
+        .map(({ atomId, address, altitude, source, text, sha256 }) => ({ atomId, address, altitude, source, text, sha256 }));
+      expect(workShape(invalid.pieces)).toEqual(workShape(baseline.pieces));
+      expect(invalid.warnings).toEqual([
+        "project.yaml: optional install.intent must be a relative Markdown address; ignored the invalid value and kept the baseline work install.",
+      ]);
+      expect(invalid.provenanceWarnings).toEqual([]);
+    } finally {
+      if (savedWorkspace === undefined) delete process.env["OPENRIG_WORKSPACE_ROOT"];
+      else process.env["OPENRIG_WORKSPACE_ROOT"] = savedWorkspace;
+      if (savedSlices === undefined) delete process.env["OPENRIG_WORKSPACE_SLICES_ROOT"];
+      else process.env["OPENRIG_WORKSPACE_SLICES_ROOT"] = savedSlices;
+    }
+  });
+
   it("Story 2: wrong-type optional project context warns and preserves the baseline install", async () => {
     const savedWorkspace = process.env["OPENRIG_WORKSPACE_ROOT"];
     const savedSlices = process.env["OPENRIG_WORKSPACE_SLICES_ROOT"];
