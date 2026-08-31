@@ -74,7 +74,7 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
 
   it("defines one ordered OWNER vocabulary, archive parity, and the ordinary/direct-human matrix", async () => {
     expect(levels()).toEqual(["RECORD", "NOTICE", "ALERT"]);
-    expect(ALL_MIGRATIONS.at(-1)?.name).toBe("076_owner_notification_levels.sql");
+    expect(ALL_MIGRATIONS.at(-1)?.name).toBe("077_node_session_source.sql");
     for (const table of ["queue_transitions", "queue_transitions_archive"]) {
       const columns = (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((r) => r.name);
       expect(columns).toContain("owner_notification_kind");
