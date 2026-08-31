@@ -29,6 +29,15 @@ function findContent(
 }
 
 describe("getting-started narrative parity — slice 21", () => {
+  it("CLI and daemon emit a byte-identical project-root SPEC.md", () => {
+    const cliContent = findContent(cliScaffold(), "SPEC.md");
+    const daemonContent = findContent(daemonScaffold(), "SPEC.md");
+    expect(cliContent, "CLI scaffold missing project-root SPEC.md").toBeDefined();
+    expect(daemonContent, "daemon scaffold missing project-root SPEC.md").toBeDefined();
+    expect(daemonContent).toBe(cliContent);
+    expect(daemonContent).toContain("intent:");
+  });
+
   for (const sliceId of ["first-conveyor-run", "inspect-project-evidence"] as const) {
     describe(`slice ${sliceId}`, () => {
       it("daemon scaffold emits SPEC.md with the canonical narrative body", () => {

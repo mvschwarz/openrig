@@ -852,7 +852,7 @@ describe("init-workspace runner", () => {
     expect(parsed.subdirs.map((s) => s.name)).toContain("missions/getting-started/slices/inspect-project-evidence");
   });
 
-  it("creates mission-aware workspace files + STEERING placeholder", () => {
+  it("creates project + mission-aware workspace files + STEERING placeholder", () => {
     const result = runInitWorkspace({ root: workspaceRoot, configPath });
     expect(result.dryRun).toBe(false);
     expect(existsSync(workspaceRoot)).toBe(true);
@@ -862,6 +862,9 @@ describe("init-workspace runner", () => {
     }
     expect(existsSync(join(workspaceRoot, "missions", "getting-started", "slices", "first-conveyor-run", "SPEC.md"))).toBe(true);
     expect(existsSync(join(workspaceRoot, "missions", "getting-started", "slices", "inspect-project-evidence", "SPEC.md"))).toBe(true);
+    const projectSpec = readFileSync(join(workspaceRoot, "SPEC.md"), "utf-8");
+    expect(projectSpec).toContain("intent:");
+    expect(projectSpec).toContain("# Project");
     const steeringMd = readFileSync(join(workspaceRoot, "STEERING.md"), "utf-8");
     expect(steeringMd).toContain("OpenRig Priority Stack");
   });
@@ -916,13 +919,13 @@ describe("init-workspace runner", () => {
 
   it("is idempotent: running twice without --force is a no-op for existing files", () => {
     runInitWorkspace({ root: workspaceRoot, configPath });
-    const sliceSpec = join(workspaceRoot, "missions", "getting-started", "slices", "first-conveyor-run", "SPEC.md");
-    writeFileSync(sliceSpec, "operator-edited content", "utf-8");
+    const projectSpec = join(workspaceRoot, "SPEC.md");
+    writeFileSync(projectSpec, "operator-edited content", "utf-8");
 
     const second = runInitWorkspace({ root: workspaceRoot, configPath });
-    const sliceFile = second.files.find((f) => f.relPath === "missions/getting-started/slices/first-conveyor-run/SPEC.md");
-    expect(sliceFile?.skipped).toBe("exists");
-    expect(readFileSync(sliceSpec, "utf-8")).toBe("operator-edited content");
+    const projectFile = second.files.find((f) => f.relPath === "SPEC.md");
+    expect(projectFile?.skipped).toBe("exists");
+    expect(readFileSync(projectSpec, "utf-8")).toBe("operator-edited content");
   });
 
   it("--force overwrites existing files but never deletes operator content under directories", () => {

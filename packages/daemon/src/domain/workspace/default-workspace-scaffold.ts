@@ -113,6 +113,17 @@ This workspace is file-backed. The OpenRig TUI mirrors this structure:
 Use stable kebab-case names for mission and slice folders. Every mission/slice \`SPEC.md\` carries authored \`intent:\`, advisory sibling build-order \`depends_on:\`, and a stable dot-ID (\`id: OPR.<ver>[.<n>]\`). Mint conformant artifacts via \`rig scope mission create <name>\` and \`rig scope slice create <mission> <slug>\`. Folder names are operator-facing slugs; \`id:\` is the rename-proof handle.
 `;
 
+const PROJECT_SPEC = `---
+intent: Organize this project's durable work as missions and slices, then move it through queue-backed agent collaboration.
+---
+
+# Project
+
+This is the project-level context for the default OpenRig workspace. It gives
+agents a stable project intent before they descend into the active mission and
+slice. Edit it to describe what your project is for and who benefits from it.
+`;
+
 const STEERING_PLACEHOLDER = `---
 title: Priority Stack
 status: placeholder
@@ -345,6 +356,7 @@ export function renderDaemonNotes(opts: NotesOpts): string {
 export function workspaceScaffoldFiles(): Array<{ relPath: string; content: string }> {
   const files: Array<{ relPath: string; content: string }> = [
     { relPath: "README.md", content: WORKSPACE_README },
+    { relPath: "SPEC.md", content: PROJECT_SPEC },
     { relPath: "STEERING.md", content: STEERING_PLACEHOLDER },
     { relPath: "missions/README.md", content: subdirReadmeContent("missions") },
     { relPath: "artifacts/README.md", content: subdirReadmeContent("artifacts") },
