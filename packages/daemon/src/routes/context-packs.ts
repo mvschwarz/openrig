@@ -358,6 +358,7 @@ export function contextPacksRoutes(): Hono {
     const roots: ProfileSourceRoots = {};
     let atoms: ContextPackAtom[] = manifest.atoms;
     const workMeta = new Map<string, { altitude: "project" | "mission" | "slice"; source: "default" | "manifest" }>();
+    const warnings: string[] = [];
     const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
     const rig = c.req.query("rig");
     const seat = c.req.query("seat");
@@ -429,8 +430,11 @@ export function contextPacksRoutes(): Hono {
             projectIntent = projectManifest.install.intent;
             projectIntentSource = "manifest";
           }
-          if (Array.isArray(projectManifest?.install?.context)) {
-            projectContext = projectManifest.install.context.filter((address): address is string => typeof address === "string");
+          const manifestContext = projectManifest?.install?.context;
+          if (Array.isArray(manifestContext)) {
+            projectContext = manifestContext.filter((address): address is string => typeof address === "string");
+          } else if (manifestContext !== undefined) {
+            warnings.push("project.yaml: optional install.context must be a list of relative Markdown addresses; ignored the invalid value and kept the baseline work install.");
           }
         }
         const projectAtoms: ContextPackAtom[] = [
@@ -531,7 +535,7 @@ export function contextPacksRoutes(): Hono {
           const prov = (p as { provenance: { realPath: string } }).provenance;
           return `piece '${p.atomId}' (${p.address}): bytes came from OUTSIDE its ${p.sourceKind} root — real path ${prov.realPath}`;
         });
-      return c.json({ ref: entry.relativePath, ...profile, pieces, provenanceWarnings });
+      return c.json({ ref: entry.relativePath, ...profile, pieces, warnings, provenanceWarnings });
     } catch (err) {
       if (err instanceof ProfileComposeError || err instanceof SourceResolutionError) {
         return c.json({ error: "profile_compose_failed", message: err.message }, 422);
