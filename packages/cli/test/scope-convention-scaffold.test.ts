@@ -12,6 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { Command } from "commander";
+import { parse as parseYaml } from "yaml";
 
 import { scopeCommand } from "../src/commands/scope.js";
 import { readFrontmatter } from "../src/lib/scope/scope-fs.js";
@@ -183,7 +184,7 @@ describe("scope create — the mode-neutral SPEC/NOTES convention lands on disk"
       expect(r.exitCode, `slice create failed for kind "${kind}"`).toBe(0);
       const slicePath = JSON.parse(r.stdout).slice.path as string;
 
-      expect(fs.readdirSync(slicePath).sort()).toEqual(["PROGRESS.md", "PROOF.md", "SPEC.md", "proof"]);
+      expect(fs.readdirSync(slicePath).sort()).toEqual(["PROGRESS.md", "PROOF.md", "SPEC.md", "proof", "slice.yaml"]);
 
       const specPath = path.join(slicePath, "SPEC.md");
       const readme = fs.readFileSync(specPath, "utf8");
@@ -196,6 +197,14 @@ describe("scope create — the mode-neutral SPEC/NOTES convention lands on disk"
       expect(fs.existsSync(path.join(slicePath, "PROOF.md")), `kind "${kind}" did not scaffold PROOF.md`).toBe(true);
       expect(fs.readFileSync(path.join(slicePath, "PROGRESS.md"), "utf8")).toContain("## Acceptance");
       expect(fs.readFileSync(path.join(slicePath, "PROOF.md"), "utf8")).toContain("SPEC.md");
+      expect(parseYaml(fs.readFileSync(path.join(slicePath, "slice.yaml"), "utf8"))).toEqual({
+        schema: "openrig.slice/v0alpha1",
+        kind: "slice",
+        composition: {
+          mission: "../../mission.yaml",
+          slice_markdown: { spec: "SPEC.md", progress: "PROGRESS.md", proof: "PROOF.md" },
+        },
+      });
     }
   });
 
@@ -208,10 +217,15 @@ describe("scope create — the mode-neutral SPEC/NOTES convention lands on disk"
       );
       expect(r.exitCode, `mission create failed for kind "${kind}"`).toBe(0);
       const missionPath = JSON.parse(r.stdout).mission.path as string;
-      expect(fs.readdirSync(missionPath).sort()).toEqual(["NOTES.md", "PROGRESS.md", "SPEC.md", "slices"]);
+      expect(fs.readdirSync(missionPath).sort()).toEqual(["NOTES.md", "PROGRESS.md", "SPEC.md", "mission.yaml", "slices"]);
       expect(readFrontmatter(path.join(missionPath, "SPEC.md"))).toMatchObject({
         intent: `Intent for ${kind}`,
         depends_on: [],
+      });
+      expect(parseYaml(fs.readFileSync(path.join(missionPath, "mission.yaml"), "utf8"))).toEqual({
+        schema: "openrig.mission/v0alpha1",
+        kind: "mission",
+        composition: { mission_markdown: { spec: "SPEC.md" } },
       });
     }
   });

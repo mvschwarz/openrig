@@ -11,6 +11,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
+import { parse as parseYaml } from "yaml";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -865,6 +866,24 @@ describe("init-workspace runner", () => {
     const projectSpec = readFileSync(join(workspaceRoot, "SPEC.md"), "utf-8");
     expect(projectSpec).toContain("intent:");
     expect(projectSpec).toContain("# Project");
+    expect(parseYaml(readFileSync(join(workspaceRoot, "project.yaml"), "utf-8"))).toEqual({
+      schema: "openrig.project/v0alpha1",
+      kind: "project",
+      missions: { root: "missions" },
+    });
+    expect(parseYaml(readFileSync(join(workspaceRoot, "missions", "getting-started", "mission.yaml"), "utf-8"))).toEqual({
+      schema: "openrig.mission/v0alpha1",
+      kind: "mission",
+      composition: { mission_markdown: { spec: "SPEC.md" } },
+    });
+    expect(parseYaml(readFileSync(join(workspaceRoot, "missions", "getting-started", "slices", "first-conveyor-run", "slice.yaml"), "utf-8"))).toEqual({
+      schema: "openrig.slice/v0alpha1",
+      kind: "slice",
+      composition: {
+        mission: "../../mission.yaml",
+        slice_markdown: { spec: "SPEC.md", progress: "PROGRESS.md", proof: "PROOF.md" },
+      },
+    });
     const steeringMd = readFileSync(join(workspaceRoot, "STEERING.md"), "utf-8");
     expect(steeringMd).toContain("OpenRig Priority Stack");
   });
@@ -919,13 +938,21 @@ describe("init-workspace runner", () => {
 
   it("is idempotent: running twice without --force is a no-op for existing files", () => {
     runInitWorkspace({ root: workspaceRoot, configPath });
-    const projectSpec = join(workspaceRoot, "SPEC.md");
-    writeFileSync(projectSpec, "operator-edited content", "utf-8");
+    const authoredFiles = new Map([
+      ["SPEC.md", "operator-edited project spec"],
+      ["project.yaml", "operator-edited project manifest"],
+      ["missions/getting-started/mission.yaml", "operator-edited mission manifest"],
+      ["missions/getting-started/slices/first-conveyor-run/slice.yaml", "operator-edited slice manifest"],
+    ]);
+    for (const [relPath, content] of authoredFiles) {
+      writeFileSync(join(workspaceRoot, relPath), content, "utf-8");
+    }
 
     const second = runInitWorkspace({ root: workspaceRoot, configPath });
-    const projectFile = second.files.find((f) => f.relPath === "SPEC.md");
-    expect(projectFile?.skipped).toBe("exists");
-    expect(readFileSync(projectSpec, "utf-8")).toBe("operator-edited content");
+    for (const [relPath, content] of authoredFiles) {
+      expect(second.files.find((f) => f.relPath === relPath)?.skipped).toBe("exists");
+      expect(readFileSync(join(workspaceRoot, relPath), "utf-8")).toBe(content);
+    }
   });
 
   it("--force overwrites existing files but never deletes operator content under directories", () => {

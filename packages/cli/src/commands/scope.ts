@@ -88,6 +88,25 @@ function makeStdout(): Stdout {
   return { write: (text: string) => process.stdout.write(text) };
 }
 
+const MISSION_MANIFEST = `schema: openrig.mission/v0alpha1
+kind: mission
+composition:
+  mission_markdown:
+    spec: SPEC.md
+# Optional team and SDLC sections are added here.
+`;
+
+const SLICE_MANIFEST = `schema: openrig.slice/v0alpha1
+kind: slice
+composition:
+  mission: ../../mission.yaml
+  slice_markdown:
+    spec: SPEC.md
+    progress: PROGRESS.md
+    proof: PROOF.md
+# Optional assignment, SDLC, and evidence sections are added here.
+`;
+
 function emit(out: Stdout, payload: unknown, json: boolean, lines?: string[]): void {
   if (json) {
     out.write(JSON.stringify(payload, null, 2) + "\n");
@@ -264,7 +283,7 @@ function buildSliceShowCommand(): Command {
 
 function buildSliceCreateCommand(): Command {
   return new Command("create")
-    .description("Create a new slice with SPEC.md, PROGRESS.md, PROOF.md, and proof/. Conventions SSOT: docs/reference/sdlc-conventions.md (installed: $OPENRIG_HOME/reference/sdlc-conventions.md).")
+    .description("Create a new slice with SPEC.md, slice.yaml, PROGRESS.md, PROOF.md, and proof/. Conventions SSOT: docs/reference/sdlc-conventions.md (installed: $OPENRIG_HOME/reference/sdlc-conventions.md).")
     .argument("<mission>", "Mission name")
     .argument("<slug>", "Short slug (becomes the folder name's suffix)")
     .option("--template <kind>", `Template: ${SLICE_TEMPLATE_KINDS.join(" | ")}`, "placeholder")
@@ -351,6 +370,7 @@ function buildSliceCreateCommand(): Command {
           const progressPath = path.join(sliceAbs, "PROGRESS.md");
           fs.writeFileSync(progressPath, renderSliceProgressTemplate(title), "utf8");
         }
+        fs.writeFileSync(path.join(sliceAbs, "slice.yaml"), SLICE_MANIFEST, "utf8");
         fs.writeFileSync(path.join(sliceAbs, "PROOF.md"), proofBody, "utf8");
         const payload = {
           ok: true,
@@ -633,7 +653,7 @@ function buildMissionShowCommand(): Command {
 
 function buildMissionCreateCommand(): Command {
   return new Command("create")
-    .description("Create a new mission (mints a stable dot-ID into frontmatter)")
+    .description("Create a new mission with SPEC.md and mission.yaml (mints a stable dot-ID into frontmatter)")
     .argument("<name>", "Mission folder name (e.g., release-0.4.0, backlog-foo)")
     .option("--template <kind>", `Template: ${MISSION_TEMPLATE_KINDS.join(" | ")} (auto when name matches release-X.Y.Z)`, "")
     .option("--id <dot-id>", "Explicit dot-ID. Overrides name-pattern inference.")
@@ -752,6 +772,7 @@ function buildMissionCreateCommand(): Command {
         // New scaffolds author SPEC.md; existing README-backed nodes are never rewritten.
         const readmePath = path.join(absPath, "SPEC.md");
         fs.writeFileSync(readmePath, readmeBody, "utf8");
+        fs.writeFileSync(path.join(absPath, "mission.yaml"), MISSION_MANIFEST, "utf8");
         const progressPath = path.join(absPath, "PROGRESS.md");
         fs.writeFileSync(progressPath, progressBody, "utf8");
         const capabilityDeltaPath = capabilityDeltaBody

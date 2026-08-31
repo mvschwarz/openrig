@@ -11,6 +11,7 @@
 // two getting-started slices. If either drifts, this test fails.
 
 import { describe, it, expect } from "vitest";
+import { parse as parseYaml } from "yaml";
 import { GETTING_STARTED_NARRATIVE } from "../src/domain/workspace/getting-started-narrative.js";
 import { workspaceScaffoldFiles as cliScaffold } from "../../cli/src/commands/config-init-workspace.js";
 import {
@@ -29,6 +30,25 @@ function findContent(
 }
 
 describe("getting-started narrative parity — slice 21", () => {
+  it("CLI and daemon emit byte-identical parseable default work manifests", () => {
+    const manifests = [
+      ["project.yaml", "openrig.project/v0alpha1", "project"],
+      ["missions/getting-started/mission.yaml", "openrig.mission/v0alpha1", "mission"],
+      ["missions/getting-started/slices/first-conveyor-run/slice.yaml", "openrig.slice/v0alpha1", "slice"],
+      ["missions/getting-started/slices/inspect-project-evidence/slice.yaml", "openrig.slice/v0alpha1", "slice"],
+    ] as const;
+    const cliFiles = cliScaffold();
+    const daemonFiles = daemonScaffold();
+    for (const [relPath, schema, kind] of manifests) {
+      const cliContent = findContent(cliFiles, relPath);
+      const daemonContent = findContent(daemonFiles, relPath);
+      expect(cliContent, `CLI scaffold missing ${relPath}`).toBeDefined();
+      expect(daemonContent, `daemon scaffold missing ${relPath}`).toBeDefined();
+      expect(daemonContent).toBe(cliContent);
+      expect(parseYaml(daemonContent!)).toMatchObject({ schema, kind });
+    }
+  });
+
   it("CLI and daemon emit a byte-identical project-root SPEC.md", () => {
     const cliContent = findContent(cliScaffold(), "SPEC.md");
     const daemonContent = findContent(daemonScaffold(), "SPEC.md");

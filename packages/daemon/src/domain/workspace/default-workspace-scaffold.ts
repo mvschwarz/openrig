@@ -124,6 +124,32 @@ agents a stable project intent before they descend into the active mission and
 slice. Edit it to describe what your project is for and who benefits from it.
 `;
 
+const PROJECT_MANIFEST = `schema: openrig.project/v0alpha1
+kind: project
+missions:
+  root: missions
+# Optional enrichment is added here; absence inherits defaults.
+`;
+
+const MISSION_MANIFEST = `schema: openrig.mission/v0alpha1
+kind: mission
+composition:
+  mission_markdown:
+    spec: SPEC.md
+# Optional team and SDLC sections are added here.
+`;
+
+const SLICE_MANIFEST = `schema: openrig.slice/v0alpha1
+kind: slice
+composition:
+  mission: ../../mission.yaml
+  slice_markdown:
+    spec: SPEC.md
+    progress: PROGRESS.md
+    proof: PROOF.md
+# Optional assignment, SDLC, and evidence sections are added here.
+`;
+
 const STEERING_PLACEHOLDER = `---
 title: Priority Stack
 status: placeholder
@@ -357,6 +383,7 @@ export function workspaceScaffoldFiles(): Array<{ relPath: string; content: stri
   const files: Array<{ relPath: string; content: string }> = [
     { relPath: "README.md", content: WORKSPACE_README },
     { relPath: "SPEC.md", content: PROJECT_SPEC },
+    { relPath: "project.yaml", content: PROJECT_MANIFEST },
     { relPath: "STEERING.md", content: STEERING_PLACEHOLDER },
     { relPath: "missions/README.md", content: subdirReadmeContent("missions") },
     { relPath: "artifacts/README.md", content: subdirReadmeContent("artifacts") },
@@ -369,6 +396,7 @@ export function workspaceScaffoldFiles(): Array<{ relPath: string; content: stri
   for (const mission of DEFAULT_MISSIONS) {
     files.push(
       { relPath: `missions/${mission.id}/SPEC.md`, content: missionReadme(mission) },
+      { relPath: `missions/${mission.id}/mission.yaml`, content: MISSION_MANIFEST },
       { relPath: `missions/${mission.id}/PROGRESS.md`, content: missionProgress(mission) },
       {
         relPath: `missions/${mission.id}/NOTES.md`,
@@ -382,6 +410,7 @@ export function workspaceScaffoldFiles(): Array<{ relPath: string; content: stri
     for (const slice of mission.slices) {
       files.push(
         { relPath: `missions/${mission.id}/slices/${slice.id}/SPEC.md`, content: sliceReadme(mission, slice) },
+        { relPath: `missions/${mission.id}/slices/${slice.id}/slice.yaml`, content: SLICE_MANIFEST },
         { relPath: `missions/${mission.id}/slices/${slice.id}/PROGRESS.md`, content: sliceProgress(mission, slice) },
         { relPath: `missions/${mission.id}/slices/${slice.id}/PROOF.md`, content: sliceProof(slice) },
       );
